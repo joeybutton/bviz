@@ -12,8 +12,15 @@ Interactive visualization and inspection tool for Bazel builds.
 - Commit only verified work: build and run/test it first. For toolchain changes,
   confirm with `--toolchain_resolution_debug`. Report outcomes honestly; flag
   side effects.
-- Comments are terse and only earn their place by adding what the code can't say.
-  No restating code, no time-dependent or conversation-specific context.
+- Code, comments, and commit messages must be self-contained: a reader who has
+  no access to the chat or task that produced them must fully understand them.
+  Never reference the development process — no step/phase numbers, no "as
+  discussed", no "next we will", no TODOs that only make sense mid-thread.
+- Comments are terse and only earn their place by adding what the code can't
+  say. Don't restate the code (a comment that names what the next line already
+  names is noise), and don't re-explain what a rule's or tool's own
+  documentation already covers. Citing an external source (paper, spec, issue)
+  is fine.
 
 ## Hermeticity
 
