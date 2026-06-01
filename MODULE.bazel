@@ -16,6 +16,9 @@ use_repo(rs_toolchains, "default_rust_toolchains")
 
 register_toolchains("@default_rust_toolchains//:all")
 
+# Link Rust binaries with llvm/lld rather than the autodetected system cc.
+register_toolchains("@llvm//toolchain:all")
+
 PLATFORM_TRIPLES = [
     "x86_64-unknown-linux-gnu",
 ]
