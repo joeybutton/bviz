@@ -7,7 +7,11 @@ bazel_env(
     toolchains = {
     },
     tools = {
+        "cargo": "@rules_rs_rules_rust//tools/upstream_wrapper:cargo",
         "multitool": MULTITOOL_TOOLS["multitool"],
+        "rust-analyzer": MULTITOOL_TOOLS["rust-analyzer"],
+        "rustc": "@rules_rs_rules_rust//tools/upstream_wrapper:rustc",
+        "rustfmt": "@rules_rs_rules_rust//tools/upstream_wrapper:rustfmt",
     },
     watch_files = {
         "_common": [
