@@ -4,4 +4,7 @@ common:linux --host_platform=//platforms:local_gnu
 # Provide a libgcc_s stub for Rust's `-lgcc_s` link arg (hermetic-llvm "Usage with Rust").
 build --@llvm//config:experimental_stub_libgcc_s=True
 
+# Resolve protoc via the registered proto toolchain rather than the legacy hardcoded path.
+common --incompatible_enable_proto_toolchain_resolution
+
 try-import %workspace%/user.bazelrc
