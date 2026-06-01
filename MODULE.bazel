@@ -38,6 +38,22 @@ use_repo(crate, "crates")
 rules_rust = use_extension("@rules_rs//rs/experimental:rules_rust.bzl", "rules_rust")
 use_repo(rules_rust, rules_rs_rules_rust = "rules_rust")
 
+new_git_repository = use_repo_rule("@bazel_tools//tools/build_defs/repo:git.bzl", "new_git_repository")
+
+# query (build.proto), cquery + aquery (analysis_v2.proto) and their transitive
+# stardoc_output.proto, for parsing `--output=streamed_proto`.
+new_git_repository(
+    name = "bazel_query_proto",
+    build_file = "//3rd-party:bazel_query_proto.BUILD",
+    commit = "43f23b4349195333b97bef77cc62c2ea4ffd8e91",  # 9.0.1
+    remote = "https://github.com/bazelbuild/bazel.git",
+    sparse_checkout_patterns = [
+        "src/main/protobuf/analysis_v2.proto",
+        "src/main/protobuf/build.proto",
+        "src/main/protobuf/stardoc_output.proto",
+    ],
+)
+
 bazel_dep(name = "bazel_env.bzl", version = "0.7.2", dev_dependency = True)
 bazel_dep(name = "rules_multitool", version = "1.11.1", dev_dependency = True)
 
