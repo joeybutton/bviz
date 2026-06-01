@@ -1,0 +1,12 @@
+load("@rules_rs//rs:rust_binary.bzl", "rust_binary")
+
+rust_binary(
+    name = "bazel_viz",
+    srcs = ["src/main.rs"],
+    crate_name = "bazel_viz",
+    visibility = ["//:__pkg__"],
+    deps = [
+        "//greeting",
+        "@crates//:clap",
+    ],
+)

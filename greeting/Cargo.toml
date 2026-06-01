@@ -1,0 +1,4 @@
+[package]
+name = "bazel_viz_greeting"
+version = "0.1.0"
+edition = "2024"
