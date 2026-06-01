@@ -1,0 +1,20 @@
+load("@bazel_env.bzl", "bazel_env")
+load("@multitool//:tools.bzl", MULTITOOL_TOOLS = "TOOLS")
+
+# `bazel run //tools:bazel_env` to update / install the direnv environment.
+bazel_env(
+    name = "bazel_env",
+    toolchains = {
+    },
+    tools = {
+        "multitool": MULTITOOL_TOOLS["multitool"],
+    },
+    watch_files = {
+        "_common": [
+            "MODULE.bazel",
+            "MODULE.bazel.lock",
+            "multitool.lock.json",
+            "tools/BUILD.bazel",
+        ],
+    },
+)

@@ -2,3 +2,10 @@ module(
     name = "bazel_viz",
     version = "0.0.0",
 )
+
+bazel_dep(name = "bazel_env.bzl", version = "0.7.2", dev_dependency = True)
+bazel_dep(name = "rules_multitool", version = "1.11.1", dev_dependency = True)
+
+multitool = use_extension("@rules_multitool//multitool:extension.bzl", "multitool")
+multitool.hub(lockfile = "//:multitool.lock.json")
+use_repo(multitool, "multitool")
