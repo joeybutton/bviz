@@ -9,6 +9,8 @@ Interactive visualization and inspection tool for Bazel builds.
   one giant commit nor a commit per file. Imperative subject; body explains why.
   A single request may bundle unrelated concerns; split them into separate
   commits anyway — being asked for them together does not make them one concern.
+  If the subject needs an "and" to join two unrelated changes, that is two
+  commits.
 - Commit only verified work: build and run/test it first. For toolchain changes,
   confirm with `--toolchain_resolution_debug`. Report outcomes honestly; flag
   side effects.
