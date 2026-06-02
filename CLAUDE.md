@@ -17,10 +17,12 @@ Interactive visualization and inspection tool for Bazel builds.
   Never reference the development process — no step/phase numbers, no "as
   discussed", no "next we will", no TODOs that only make sense mid-thread.
 - Comments are terse and only earn their place by adding what the code can't
-  say. Don't restate the code (a comment that names what the next line already
-  names is noise), and don't re-explain what a rule's or tool's own
-  documentation already covers. Citing an external source (paper, spec, issue)
-  is fine.
+  say — a sentence, not a paragraph. Don't restate the code (a comment that
+  names what the next line already names is noise), don't re-explain what a
+  rule's or tool's own documentation already covers, and don't write comments
+  that drift as nearby code changes (e.g. describing which of several things a
+  wildcard or shared target covers). Citing an external source (paper, spec,
+  issue) is fine.
 
 ## Hermeticity
 
