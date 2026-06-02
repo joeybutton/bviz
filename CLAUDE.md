@@ -7,6 +7,8 @@ Interactive visualization and inspection tool for Bazel builds.
 - Incremental: small steps, one concern at a time.
 - Commit frequently, one concern per commit. Group by shared concern — neither
   one giant commit nor a commit per file. Imperative subject; body explains why.
+  A single request may bundle unrelated concerns; split them into separate
+  commits anyway — being asked for them together does not make them one concern.
 - Commit only verified work: build and run/test it first. For toolchain changes,
   confirm with `--toolchain_resolution_debug`. Report outcomes honestly; flag
   side effects.
