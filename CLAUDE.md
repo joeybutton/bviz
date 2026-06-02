@@ -15,7 +15,8 @@ Interactive visualization and inspection tool for Bazel builds.
 - Code, comments, and commit messages must be self-contained: a reader who has
   no access to the chat or task that produced them must fully understand them.
   Never reference the development process — no step/phase numbers, no "as
-  discussed", no "next we will", no TODOs that only make sense mid-thread.
+  discussed", no "next we will", no roadmap of future work ("X comes later"),
+  no TODOs that only make sense mid-thread.
 - Comments are terse and only earn their place by adding what the code can't
   say — a sentence, not a paragraph. Don't restate the code (a comment that
   names what the next line already names is noise), don't re-explain what a
