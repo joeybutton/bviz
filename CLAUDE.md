@@ -26,8 +26,11 @@ Interactive visualization and inspection tool for Bazel builds.
   names what the next line already names is noise), don't re-explain what a
   rule's or tool's own documentation already covers, and don't write comments
   that drift as nearby code changes (e.g. describing which of several things a
-  wildcard or shared target covers). Citing an external source (paper, spec,
-  issue) is fine.
+  wildcard or shared target covers). Don't narrate the design: a block comment
+  restating a module's model, data flow, or algorithm only duplicates the code
+  and is the first thing a later refactor deletes — if a comment is not
+  load-bearing, leave it out. Citing an external source (paper, spec, issue) is
+  fine.
 
 ## Hermeticity
 
