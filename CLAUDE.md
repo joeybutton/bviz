@@ -57,8 +57,12 @@ Everything is pinned and Bazel-managed. No system toolchains, no system tools.
   direnv; other binaries via multitool, sha256-pinned for all four supported dev
   platforms (linux/macos × x86_64/arm64).
 - Pin versions in `MODULE.bazel`; commit all lockfiles (`MODULE.bazel.lock`,
-  `Cargo.lock`, `multitool.lock.json`). Repin `Cargo.lock` with the
-  Bazel-provided cargo, never system cargo.
+  `Cargo.lock`, `pnpm-lock.yaml`, `multitool.lock.json`). Repin `Cargo.lock` with
+  the Bazel-provided cargo, never system cargo.
+- JavaScript is built with aspect_rules_js (Node via rules_nodejs); build/test/
+  run through Bazel targets, never a bare `node`/`npm`/`pnpm`. Manage npm deps
+  with pnpm — repin via `bazel run -- @pnpm --dir $PWD install --lockfile-only`
+  and commit `pnpm-lock.yaml`. Generate protobuf bindings with protobuf-es.
 
 ## Bazel conventions
 
