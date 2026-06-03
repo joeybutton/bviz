@@ -26,9 +26,9 @@ Interactive visualization and inspection tool for Bazel builds.
   alluding to other commits or the work in progress ("the X commit", "when we
   restructured Y"); state the change and its rationale on their own terms, and
   if you must cite a prior commit, identify it by hash or subject. Name any
-  external reference in full —
-  its title or identifier (a paper's name and arXiv id, a ticket number) — never
-  a bare "the paper"/"the reference"/"the spec" that assumes shared context.
+  external reference in full — its title or identifier (a paper's name and arXiv
+  id, a ticket number) — never a bare "the paper"/"the reference"/"the spec"
+  that assumes shared context.
 - Comments are terse and only earn their place by adding what the code can't
   say — a sentence, not a paragraph. Don't restate the code (a comment that
   names what the next line already names is noise), don't re-explain what a
