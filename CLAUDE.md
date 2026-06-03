@@ -39,6 +39,13 @@ Interactive visualization and inspection tool for Bazel builds.
   and is the first thing a later refactor deletes — if a comment is not
   load-bearing, leave it out. Citing an external source (paper, spec, issue) is
   fine.
+- Only rewrite history that has not been pushed to a remote, and avoid
+  rewriting the main branch even then. When you do reshape history (reword,
+  squash, drop, reorder), use rebase or cherry-pick and resolve conflicts through
+  git rather than rebuilding commits by hand; squash a commit that only undoes or
+  replaces an earlier one instead of leaving the churn; and do it on a scratch
+  branch, confirming the rewritten tree is unchanged (or changed only as
+  intended, via `git diff`) before moving the real branch.
 
 ## Hermeticity
 
