@@ -18,7 +18,9 @@ Interactive visualization and inspection tool for Bazel builds.
   no access to the chat or task that produced them must fully understand them.
   Never reference the development process — no step/phase numbers, no "as
   discussed", no "next we will", no roadmap of future work ("X comes later"),
-  no TODOs that only make sense mid-thread.
+  no TODOs that only make sense mid-thread. Name any external reference in full —
+  its title or identifier (a paper's name and arXiv id, a ticket number) — never
+  a bare "the paper"/"the reference"/"the spec" that assumes shared context.
 - Comments are terse and only earn their place by adding what the code can't
   say — a sentence, not a paragraph. Don't restate the code (a comment that
   names what the next line already names is noise), don't re-explain what a
