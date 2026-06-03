@@ -14,6 +14,10 @@ Interactive visualization and inspection tool for Bazel builds.
 - Commit only verified work: build and run/test it first. For toolchain changes,
   confirm with `--toolchain_resolution_debug`. Report outcomes honestly; flag
   side effects.
+- A change to visual output is verified by viewing the rendered result on real
+  input, not just by checking that the output is structurally well-formed —
+  visual faults (overlaps, mis-routed or detached connectors, clipping) do not
+  show up in a structural check.
 - Code, comments, and commit messages must be self-contained: a reader who has
   no access to the chat or task that produced them must fully understand them.
   Never reference the development process — no step/phase numbers, no "as
