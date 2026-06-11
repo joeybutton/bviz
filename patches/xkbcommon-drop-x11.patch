@@ -1,0 +1,14 @@
+diff --git a/src/xkb/mod.rs b/src/xkb/mod.rs
+index ddc88e9..815d06e 100644
+--- a/src/xkb/mod.rs
++++ b/src/xkb/mod.rs
+@@ -9,9 +9,6 @@ pub mod compose;
+ pub mod ffi;
+ pub mod keysyms;
+ 
+-#[cfg(feature = "x11")]
+-pub mod x11;
+-
+ pub use self::compose::*;
+ use crate::xkb::ffi::*;
+ 

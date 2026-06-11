@@ -1,0 +1,22 @@
+# rules_rs's generated crate repositories can't resolve the root module's bazel_dep
+# apparent names, and canonical repo names must not be hardcoded. Alias the BCR
+# system libraries here so MODULE.bazel crate annotations can reference them as
+# main-repo labels (@@//third_party:...).
+
+alias(
+    name = "xkbcommon",
+    actual = "@xkbcommon//:xkbcommon",
+    visibility = ["//visibility:public"],
+)
+
+alias(
+    name = "wayland_client",
+    actual = "@wayland//:wayland_client",
+    visibility = ["//visibility:public"],
+)
+
+alias(
+    name = "wayland_cursor",
+    actual = "@wayland//:wayland_cursor",
+    visibility = ["//visibility:public"],
+)

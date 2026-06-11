@@ -9,10 +9,14 @@ bazel_dep(name = "protobuf", version = "35.0", repo_name = "com_google_protobuf"
 bazel_dep(name = "rules_proto", version = "7.1.0")
 bazel_dep(name = "rules_rs", version = "0.0.53")
 
+# System libraries for gpui's Wayland backend, provided via the BCR.
+bazel_dep(name = "wayland", version = "1.24.0.bcr.1")
+bazel_dep(name = "xkbcommon", version = "1.9.2.bcr.beta.1")
+
 rs_toolchains = use_extension("@rules_rs//rs/experimental/toolchains:module_extension.bzl", "toolchains")
 rs_toolchains.toolchain(
     edition = "2024",
-    version = "1.94.0",
+    version = "1.95.0",
 )
 use_repo(rs_toolchains, "default_rust_toolchains")
 
@@ -32,6 +36,54 @@ crate.from_cargo(
     cargo_toml = "//:Cargo.toml",
     platform_triples = PLATFORM_TRIPLES,
     use_experimental_platforms = True,
+)
+
+# Load libfontconfig at runtime (dlopen) instead of linking it via pkg-config.
+crate.annotation(
+    crate = "zed-font-kit",
+    crate_features = ["source-fontconfig-dlopen"],
+)
+
+# Link the BCR system libraries (aliased under //third_party) into the -sys crates
+# that bind them.
+#
+# The patch removes xkbcommon's X11 FFI, which links the unavailable
+# libxkbcommon-x11; gpui uses only Wayland, so it is dead code. Disabling the x11
+# feature instead would not work: it comes from gpui_linux's dependency spec, and
+# rules_rs resolves features from unpatched metadata.
+crate.annotation(
+    crate = "xkbcommon",
+    patches = ["@@//patches:xkbcommon-drop-x11.patch"],
+    patch_args = ["-p1"],
+    deps = ["@@//third_party:xkbcommon"],
+)
+crate.annotation(
+    crate = "wayland-sys",
+    gen_build_script = "off",  # otherwise it pkg-config-probes libwayland
+    deps = [
+        "@@//third_party:wayland_client",
+        "@@//third_party:wayland_cursor",
+    ],
+)
+
+# freetype-sys compiles in C++ mode, so the cc crate would link GNU libstdc++.
+# The hermetic toolchain ships libc++ instead, so emit no explicit C++ stdlib and
+# let freetype's symbols resolve against the toolchain's libc++.
+crate.annotation(
+    crate = "freetype-sys",
+    build_script_env = {"CXXSTDLIB": ""},
+)
+
+# wgpu's `vulkan` feature does not propagate to wgpu-core/wgpu-hal through wgpu's
+# platform shim under rules_rs resolution, so no GPU backend gets compiled and
+# surface creation fails. Enable the Vulkan backend on the crates that gate it.
+crate.annotation(
+    crate = "wgpu-core",
+    crate_features = ["vulkan"],
+)
+crate.annotation(
+    crate = "wgpu-hal",
+    crate_features = ["vulkan"],
 )
 use_repo(crate, "crates")
 
