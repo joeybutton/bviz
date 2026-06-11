@@ -67,6 +67,12 @@ Everything is pinned and Bazel-managed. No system toolchains, no system tools.
   `Cargo.lock`, `pnpm-lock.yaml`, `multitool.lock.json`). Repin `Cargo.lock` with
   the Bazel-provided cargo, never system cargo. Repinning with cargo writes a
   `target/` tree (cargo's, not Bazel's); it is gitignored — never commit it.
+- When a build needs a native/system C library (e.g. a Rust `*-sys` crate or a
+  `#[link]`/pkg-config dependency on the host), do not link the host's copy or
+  vendor sources by hand. First check the Bazel Central Registry
+  (https://registry.bazel.build) for a module that builds it, and if one exists
+  add it as a `bazel_dep` and link the Bazel-built library. This keeps the system
+  dependency pinned and hermetic like everything else.
 - JavaScript is built with aspect_rules_js (Node via rules_nodejs); build/test/
   run through Bazel targets, never a bare `node`/`npm`/`pnpm`. Manage npm deps
   with pnpm — repin via `bazel run -- @pnpm --dir $PWD install --lockfile-only`
