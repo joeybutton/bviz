@@ -105,8 +105,28 @@ the fluent methods. The vocabulary is Tailwind-like (defined in `gpui/src/styled
 - Text: `.text_xl()`, `.text_sm()`
 - Children: `.child(x)` for one, `.children(iter)` for many; `x` can be a string, another element, or any `impl IntoElement`.
 
-Colors for a simple app: `rgb(0xRRGGBB)`, or named helpers `gpui::white()`, `gpui::red()`,
-etc. (Zed's theme system via `cx.theme()` exists but is not needed to start.)
+## Colors and dark/light
+
+Prefer gpui's built-in palette over hardcoded `rgb(0x…)`, so the UI follows the system
+appearance for free. `gpui::colors::Colors` has fields like `background`, `text`, `border`,
+`container`, `selected`; `Colors::for_appearance(window)` returns the light or dark set from
+`window.appearance()` (on Linux, the xdg-desktop-portal color scheme). Use it in `render`:
+
+```rust
+let colors = gpui::colors::Colors::for_appearance(window);
+div().bg(colors.background).text_color(colors.text)
+```
+
+To follow live OS theme switches, re-render on appearance change (once, at window setup):
+
+```rust
+window.observe_window_appearance(|window, _cx| window.refresh()).detach();
+```
+
+For many views, set `GlobalColors` from the appearance once and read `cx.default_colors()`
+instead of threading `window` everywhere — but note the registered global defaults to light
+until you set it. Zed's full `theme` crate (`cx.theme()`, named themes, registry) is much
+heavier and not needed here. Raw `rgb(0x…)` / `gpui::white()` are still fine for one-off accents.
 
 ## Interactivity
 
