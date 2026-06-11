@@ -28,7 +28,12 @@ Interactive visualization and inspection tool for Bazel builds.
   if you must cite a prior commit, identify it by hash or subject. Name any
   external reference in full — its title or identifier (a paper's name and arXiv
   id, a ticket number) — never a bare "the paper"/"the reference"/"the spec"
-  that assumes shared context.
+  that assumes shared context. References must also be portable: never hard-code a
+  machine-local absolute path (`/home/<user>/...`, a personal checkout location) in
+  a checked-in file — it resolves only on the machine that wrote it. Point at a
+  repo-relative path, or for external source pin a stable identifier (a release tag
+  or permalink URL, not a moving branch); a local checkout may be named as a
+  preferred-if-present convenience, never as the sole locator.
 - Comments are terse and only earn their place by adding what the code can't
   say — a sentence, not a paragraph. Don't restate the code (a comment that
   names what the next line already names is noise), don't say the same thing
