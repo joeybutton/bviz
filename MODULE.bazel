@@ -44,6 +44,15 @@ crate.annotation(
     crate_features = ["source-fontconfig-dlopen"],
 )
 
+# Restore the floating window size when a tiling compositor untiles the window.
+# gpui's Wayland backend only restores on un-maximize, not un-tile, leaving the
+# window stuck at the tiled size; the patch preserves window_bounds while tiled.
+crate.annotation(
+    crate = "gpui_linux",
+    patches = ["@@//patches:gpui_linux-untile-restore.patch"],
+    patch_args = ["-p1"],
+)
+
 # Link the BCR system libraries (aliased under //third_party) into the -sys crates
 # that bind them.
 #

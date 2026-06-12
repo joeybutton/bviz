@@ -1,0 +1,49 @@
+diff --git a/src/linux/wayland/window.rs b/src/linux/wayland/window.rs
+index 9d5c85b..db50a6c 100644
+--- a/src/linux/wayland/window.rs
++++ b/src/linux/wayland/window.rs
+@@ -620,6 +620,8 @@ impl WaylandWindowStatePtr {
+ 
+                 if let Some(mut configure) = state.in_progress_configure.take() {
+                     let got_unmaximized = state.maximized && !configure.maximized;
++                    let got_untiled =
++                        state.tiling.is_tiled() && !configure.tiling.is_tiled();
+                     state.fullscreen = configure.fullscreen;
+                     state.maximized = configure.maximized;
+                     state.tiling = configure.tiling;
+@@ -631,16 +633,27 @@ impl WaylandWindowStatePtr {
+                         state.resize_throttle = true;
+                     }
+                     if !configure.fullscreen && !configure.maximized {
+-                        configure.size = if got_unmaximized {
+-                            Some(state.window_bounds.size)
++                        if configure.tiling.is_tiled() {
++                            // Tiled (snapped by the compositor): take the requested
++                            // size but keep window_bounds so it can be restored when
++                            // the window is untiled.
++                            configure.size = compute_outer_size(
++                                state.inset(),
++                                configure.size,
++                                configure.tiling,
++                            );
+                         } else {
+-                            compute_outer_size(state.inset(), configure.size, state.tiling)
+-                        };
+-                        if let Some(size) = configure.size {
+-                            state.window_bounds = Bounds {
+-                                origin: Point::default(),
+-                                size,
++                            configure.size = if got_unmaximized || got_untiled {
++                                Some(state.window_bounds.size)
++                            } else {
++                                compute_outer_size(state.inset(), configure.size, configure.tiling)
+                             };
++                            if let Some(size) = configure.size {
++                                state.window_bounds = Bounds {
++                                    origin: Point::default(),
++                                    size,
++                                };
++                            }
+                         }
+                     }
+                     drop(state);
