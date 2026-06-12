@@ -1,20 +1,21 @@
-//! A small focusable text field, enough to exercise focus, key bindings, and the
-//! platform input handler. It is intentionally minimal (no clipboard, no IME
-//! marking beyond what the handler needs); a fuller editor belongs in a dedicated
-//! component later.
+//! The application's text field: a focusable editor with cursor and selection
+//! movement, mouse selection, and clipboard, built on gpui's platform input handler.
 
 use gpui::{
-    App, Bounds, Context, CursorStyle, Element, ElementInputHandler, Entity, EntityInputHandler,
-    FocusHandle, Focusable, GlobalElementId, InspectorElementId, IntoElement, KeyBinding, LayoutId,
-    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point, Render,
-    ShapedLine, SharedString, Style, TextRun, UTF16Selection, Window, div, fill,
-    point, prelude::*, px, relative, size,
+    App, Bounds, ClipboardItem, Context, CursorStyle, Element, ElementInputHandler, Entity,
+    EntityInputHandler, FocusHandle, Focusable, GlobalElementId, InspectorElementId, IntoElement,
+    KeyBinding, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad,
+    Pixels, Point, Render, ShapedLine, SharedString, Style, TextRun, UTF16Selection, Window, div,
+    fill, point, prelude::*, px, relative, size,
 };
 use std::ops::Range;
 
 gpui::actions!(
     text_input,
-    [Backspace, Delete, Left, Right, SelectLeft, SelectRight, SelectAll, Home, End, SelectHome, SelectEnd]
+    [
+        Backspace, Delete, Left, Right, SelectLeft, SelectRight, SelectAll, Home, End, SelectHome,
+        SelectEnd, Copy, Cut, Paste
+    ]
 );
 
 /// Register the text field's key bindings; only active inside the `TextInput` context.
@@ -32,6 +33,9 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("end", End, ctx),
         KeyBinding::new("shift-home", SelectHome, ctx),
         KeyBinding::new("shift-end", SelectEnd, ctx),
+        KeyBinding::new("secondary-c", Copy, ctx),
+        KeyBinding::new("secondary-x", Cut, ctx),
+        KeyBinding::new("secondary-v", Paste, ctx),
     ]);
 }
 
@@ -125,6 +129,30 @@ impl TextInput {
             self.select_to(self.next_boundary(self.cursor_offset()), cx);
         }
         self.replace_text_in_range(None, "", window, cx);
+    }
+
+    fn copy(&mut self, _: &Copy, _: &mut Window, cx: &mut Context<Self>) {
+        if !self.selected_range.is_empty() {
+            cx.write_to_clipboard(ClipboardItem::new_string(
+                self.content[self.selected_range.clone()].to_string(),
+            ));
+        }
+    }
+
+    fn cut(&mut self, _: &Cut, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.selected_range.is_empty() {
+            cx.write_to_clipboard(ClipboardItem::new_string(
+                self.content[self.selected_range.clone()].to_string(),
+            ));
+            self.replace_text_in_range(None, "", window, cx);
+        }
+    }
+
+    fn paste(&mut self, _: &Paste, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
+            // Single-line field: flatten any newlines.
+            self.replace_text_in_range(None, &text.replace('\n', " "), window, cx);
+        }
     }
 
     fn on_mouse_down(&mut self, event: &MouseDownEvent, _: &mut Window, cx: &mut Context<Self>) {
@@ -513,6 +541,9 @@ impl Render for TextInput {
             .on_action(cx.listener(Self::end))
             .on_action(cx.listener(Self::select_home))
             .on_action(cx.listener(Self::select_end))
+            .on_action(cx.listener(Self::copy))
+            .on_action(cx.listener(Self::cut))
+            .on_action(cx.listener(Self::paste))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_move(cx.listener(Self::on_mouse_move))
