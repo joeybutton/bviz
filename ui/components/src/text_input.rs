@@ -167,13 +167,49 @@ impl TextInput {
     }
 
     fn on_mouse_down(&mut self, event: &MouseDownEvent, _: &mut Window, cx: &mut Context<Self>) {
-        self.is_selecting = true;
         let ix = self.index_for_mouse_position(event.position);
-        if event.modifiers.shift {
-            self.select_to(ix, cx);
-        } else {
-            self.move_to(ix, cx);
+        match event.click_count {
+            // Double-click selects the word, triple-click the whole (single) line.
+            2 => self.select_range(self.word_range(ix), cx),
+            n if n >= 3 => self.select_range(0..self.content.len(), cx),
+            _ => {
+                self.is_selecting = true;
+                if event.modifiers.shift {
+                    self.select_to(ix, cx);
+                } else {
+                    self.move_to(ix, cx);
+                }
+            }
         }
+    }
+
+    fn select_range(&mut self, range: Range<usize>, cx: &mut Context<Self>) {
+        self.is_selecting = false;
+        self.selection_reversed = false;
+        self.selected_range = range;
+        cx.notify();
+    }
+
+    /// The word (run of alphanumeric/underscore characters) around `ix`.
+    fn word_range(&self, ix: usize) -> Range<usize> {
+        let is_word = |c: char| c.is_alphanumeric() || c == '_';
+        let mut start = ix;
+        for (i, c) in self.content[..ix].char_indices().rev() {
+            if is_word(c) {
+                start = i;
+            } else {
+                break;
+            }
+        }
+        let mut end = ix;
+        for (i, c) in self.content[ix..].char_indices() {
+            if is_word(c) {
+                end = ix + i + c.len_utf8();
+            } else {
+                break;
+            }
+        }
+        start..end
     }
 
     fn on_mouse_up(&mut self, _: &MouseUpEvent, _: &mut Window, _: &mut Context<Self>) {
