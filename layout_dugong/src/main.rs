@@ -6,6 +6,7 @@
 
 mod aquery;
 mod graph;
+mod layout;
 mod streamed_proto;
 
 use std::process::ExitCode;
@@ -33,17 +34,24 @@ fn main() -> ExitCode {
     };
 
     let graph = aquery::build(&containers, false);
+    let laid_out = layout::layout(&graph);
 
-    println!("{} nodes, {} edges", graph.nodes.len(), graph.edges.len());
-    for node in &graph.nodes {
-        let parent = node.parent.as_deref().unwrap_or("-");
+    println!(
+        "{} boxes, {} connectors, {:.0}x{:.0}",
+        laid_out.boxes.len(),
+        laid_out.connectors.len(),
+        laid_out.width,
+        laid_out.height
+    );
+    for b in &laid_out.boxes {
+        let kind = if b.compound { "container" } else { &b.kind };
         println!(
-            "  [{}] {} ({}) parent={parent}",
-            node.kind, node.id, node.label
+            "  [{kind}] {} @ ({:.0},{:.0}) {:.0}x{:.0}",
+            b.label, b.x, b.y, b.width, b.height
         );
     }
-    for edge in &graph.edges {
-        println!("  {} -> {}", edge.from, edge.to);
+    for c in &laid_out.connectors {
+        println!("  edge {:?}", c.points);
     }
 
     ExitCode::SUCCESS
