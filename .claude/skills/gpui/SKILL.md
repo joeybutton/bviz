@@ -170,6 +170,12 @@ two-layer structure, which `//gpui_hello` implements in full:
 
 `examples/window_shadow.rs` in the gpui repo is the upstream reference for the same pattern.
 
+For client-side chrome, reflect focus: read `window.is_window_active()` in `render` (gpui
+re-renders automatically when activation changes) and dim the title bar / soften the shadow
+when it returns false. Defer the title-bar move to the first mouse-move after the press (a flag
+set on `on_mouse_down`, acted on in `on_mouse_move`) so a press near a corner that the
+compositor takes for an edge resize doesn't also become a window move.
+
 ## Interactivity
 
 To handle input, an element needs an `.id(..)` (this makes it a `Stateful` element).

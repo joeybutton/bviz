@@ -1,8 +1,8 @@
 use gpui::{
     App, Bounds, BoxShadow, Context, CursorStyle, Decorations, HitboxBehavior, Hsla, IntoElement,
-    MouseButton, Pixels, Point, ResizeEdge, Render, SharedString, Size, Tiling, TitlebarOptions,
-    Window, WindowBounds, WindowDecorations, WindowOptions, canvas, colors::Colors, div, point,
-    prelude::*, px, size, transparent_black,
+    MouseButton, Pixels, Point, ResizeEdge, Render, Rgba, SharedString, Size, Tiling,
+    TitlebarOptions, Window, WindowBounds, WindowDecorations, WindowOptions, canvas, colors::Colors,
+    div, point, prelude::*, px, size, transparent_black,
 };
 use gpui_platform::application;
 use std::cell::Cell;
@@ -23,7 +23,7 @@ struct HelloWorld {
 impl HelloWorld {
     /// A client-side title bar: draggable, with minimize/maximize/close controls.
     /// Only drawn when the compositor doesn't provide server-side decorations.
-    fn title_bar(&self, colors: &Colors, radius: Pixels) -> impl IntoElement {
+    fn title_bar(&self, colors: &Colors, radius: Pixels, bar_bg: Rgba) -> impl IntoElement {
         let text = colors.text;
         let hover_bg = colors.selected;
         let button = move |id: &'static str, glyph: &'static str| {
@@ -47,7 +47,7 @@ impl HelloWorld {
             .px_2()
             .rounded_tl(radius)
             .rounded_tr(radius)
-            .bg(colors.container)
+            .bg(bar_bg)
             .border_b_1()
             .border_color(colors.border)
             .on_mouse_down(MouseButton::Left, {
@@ -80,7 +80,7 @@ impl HelloWorld {
             )
     }
 
-    fn status_bar(&self, colors: &Colors, radius: Pixels) -> impl IntoElement {
+    fn status_bar(&self, colors: &Colors, radius: Pixels, bar_bg: Rgba) -> impl IntoElement {
         div()
             .flex()
             .flex_row()
@@ -89,7 +89,7 @@ impl HelloWorld {
             .px_2()
             .rounded_bl(radius)
             .rounded_br(radius)
-            .bg(colors.container)
+            .bg(bar_bg)
             .border_t_1()
             .border_color(colors.border)
             .text_color(colors.disabled)
@@ -116,6 +116,15 @@ impl Render for HelloWorld {
             px(0.)
         };
 
+        // Dim the chrome and soften the shadow when the window isn't focused.
+        let active = window.is_window_active();
+        let bar_bg = if active {
+            colors.container
+        } else {
+            mix(colors.container, colors.background, 0.6)
+        };
+        let shadow_alpha = if active { 0.45 } else { 0.18 };
+
         // The window contents: title bar (client only), body, status bar.
         let inner = div()
             .flex()
@@ -139,7 +148,7 @@ impl Render for HelloWorld {
                                 h: 0.,
                                 s: 0.,
                                 l: 0.,
-                                a: 0.4,
+                                a: shadow_alpha,
                             },
                             blur_radius: SHADOW / 2.,
                             spread_radius: px(0.),
@@ -148,7 +157,9 @@ impl Render for HelloWorld {
                         }])
                     })
             })
-            .when(client, |this| this.child(self.title_bar(&colors, radius)))
+            .when(client, |this| {
+                this.child(self.title_bar(&colors, radius, bar_bg))
+            })
             .child(
                 div()
                     .flex_1()
@@ -159,7 +170,7 @@ impl Render for HelloWorld {
                     .text_xl()
                     .child(format!("Hello, {}!", self.text)),
             )
-            .child(self.status_bar(&colors, radius));
+            .child(self.status_bar(&colors, radius, bar_bg));
 
         div()
             .id("window-backdrop")
@@ -220,6 +231,16 @@ impl Render for HelloWorld {
                     )
             })
             .child(inner)
+    }
+}
+
+/// Linearly blend `a` toward `b` by `t` in [0, 1].
+fn mix(a: Rgba, b: Rgba, t: f32) -> Rgba {
+    Rgba {
+        r: a.r + (b.r - a.r) * t,
+        g: a.g + (b.g - a.g) * t,
+        b: a.b + (b.b - a.b) * t,
+        a: a.a + (b.a - a.a) * t,
     }
 }
 
