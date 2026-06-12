@@ -150,6 +150,7 @@ fn title_bar(
     should_move: Entity<bool>,
 ) -> impl IntoElement {
     div()
+        .id("title-bar")
         .flex()
         .flex_row()
         .items_center()
@@ -173,6 +174,14 @@ fn title_bar(
         .on_mouse_move(move |_, window, cx| {
             if should_move.update(cx, |m, _| std::mem::replace(m, false)) {
                 window.start_window_move();
+            }
+        })
+        // Double-clicking the title bar maximizes/restores the window (like the
+        // maximize control) — it fills the work area without covering the panel,
+        // unlike true fullscreen.
+        .on_click(|e, window, _| {
+            if e.click_count() == 2 {
+                window.zoom_window();
             }
         })
         .child(div().px_1().child(title))
