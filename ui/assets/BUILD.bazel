@@ -19,10 +19,14 @@ cargo_build_script(
 )
 
 rust_library(
-    name = "app_assets",
+    name = "assets",
     srcs = ["src/lib.rs"],
-    crate_name = "app_assets",
-    visibility = ["//gpui_hello:__pkg__"],
+    crate_name = "bviz_ui_assets",
+    visibility = [
+        "//gpui_hello:__pkg__",
+        "//ui/components:__pkg__",
+        "//ui/shell:__pkg__",
+    ],
     deps = [
         ":build_script",
         "@crates//:gpui",

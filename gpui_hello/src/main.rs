@@ -103,7 +103,7 @@ impl HelloWorld {
                 .text_color(text)
                 .hover(move |s| s.bg(hover_bg))
                 .active(|s| s.opacity(0.6))
-                .child(app_assets::icon(icon_name).size(px(16.)).text_color(text))
+                .child(bviz_ui_assets::icon(icon_name).size(px(16.)).text_color(text))
         };
         div()
             .flex()
@@ -169,7 +169,7 @@ impl HelloWorld {
             .border_color(colors.border)
             .text_color(colors.disabled)
             .text_sm()
-            .font_family(app_assets::MONO)
+            .font_family(bviz_ui_assets::MONO)
             .child("Ready")
     }
 }
@@ -261,7 +261,7 @@ impl Render for HelloWorld {
 
         div()
             .id("window-backdrop")
-            .font_family(app_assets::UI)
+            .font_family(bviz_ui_assets::UI)
             .track_focus(&self.focus_handle)
             .on_action(|_: &Quit, _, cx| cx.quit())
             .on_action(|_: &CloseWindow, window, _| window.remove_window())
@@ -385,8 +385,8 @@ fn resize_edge(
 }
 
 fn main() {
-    application().with_assets(app_assets::Assets).run(|cx: &mut App| {
-        app_assets::load_fonts(cx);
+    application().with_assets(bviz_ui_assets::Assets).run(|cx: &mut App| {
+        bviz_ui_assets::load_fonts(cx);
         cx.bind_keys([
             KeyBinding::new("secondary-q", Quit, None),
             KeyBinding::new("secondary-w", CloseWindow, None),
