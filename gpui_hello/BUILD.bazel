@@ -7,6 +7,7 @@ rust_binary(
     visibility = ["//:__pkg__"],
     deps = [
         "//app_assets",
+        "//ui/theme",
         "@crates//:gpui",
         "@crates//:gpui_platform",
     ],

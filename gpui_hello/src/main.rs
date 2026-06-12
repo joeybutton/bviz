@@ -197,7 +197,7 @@ impl Render for HelloWorld {
         let bar_bg = if active {
             colors.container
         } else {
-            mix(colors.container, colors.background, 0.6)
+            bviz_ui_theme::mix(colors.container, colors.background, 0.6)
         };
         let shadow_alpha = if active { 0.45 } else { 0.18 };
 
@@ -330,16 +330,6 @@ impl Render for HelloWorld {
 /// Whether a key activates a focused button (enter or space).
 fn is_activate(key: &str) -> bool {
     key == "enter" || key == "space"
-}
-
-/// Linearly blend `a` toward `b` by `t` in [0, 1].
-fn mix(a: Rgba, b: Rgba, t: f32) -> Rgba {
-    Rgba {
-        r: a.r + (b.r - a.r) * t,
-        g: a.g + (b.g - a.g) * t,
-        b: a.b + (b.b - a.b) * t,
-        a: a.a + (b.a - a.a) * t,
-    }
 }
 
 /// Which resize edge or corner the position is on, within `shadow_size` of the window border.

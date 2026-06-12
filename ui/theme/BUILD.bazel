@@ -1,0 +1,13 @@
+load("@rules_rs//rs:rust_library.bzl", "rust_library")
+
+rust_library(
+    name = "theme",
+    srcs = ["src/lib.rs"],
+    crate_name = "bviz_ui_theme",
+    visibility = [
+        "//gpui_hello:__pkg__",
+        "//ui/components:__pkg__",
+        "//ui/shell:__pkg__",
+    ],
+    deps = ["@crates//:gpui"],
+)
