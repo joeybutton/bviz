@@ -1,12 +1,13 @@
 //! The application's text field: a focusable editor with cursor and selection
-//! movement, mouse selection, and clipboard, built on gpui's platform input handler.
+//! movement, mouse selection, clipboard, and IME composition, built on gpui's
+//! platform input handler.
 
 use gpui::{
     App, Bounds, ClipboardItem, Context, CursorStyle, Element, ElementInputHandler, Entity,
     EntityInputHandler, FocusHandle, Focusable, GlobalElementId, InspectorElementId, IntoElement,
     KeyBinding, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad,
-    Pixels, Point, Render, ShapedLine, SharedString, Style, TextRun, UTF16Selection, Window, div,
-    fill, point, prelude::*, px, relative, size,
+    Pixels, Point, Render, ShapedLine, SharedString, Style, TextRun, UTF16Selection, UnderlineStyle,
+    Window, div, fill, point, prelude::*, px, relative, size,
 };
 use std::ops::Range;
 
@@ -14,7 +15,7 @@ gpui::actions!(
     text_input,
     [
         Backspace, Delete, Left, Right, SelectLeft, SelectRight, SelectAll, Home, End, SelectHome,
-        SelectEnd, Copy, Cut, Paste
+        SelectEnd, Copy, Cut, Paste, ShowCharacterPalette
     ]
 );
 
@@ -36,6 +37,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("secondary-c", Copy, ctx),
         KeyBinding::new("secondary-x", Cut, ctx),
         KeyBinding::new("secondary-v", Paste, ctx),
+        KeyBinding::new("ctrl-cmd-space", ShowCharacterPalette, ctx),
     ]);
 }
 
@@ -153,6 +155,15 @@ impl TextInput {
             // Single-line field: flatten any newlines.
             self.replace_text_in_range(None, &text.replace('\n', " "), window, cx);
         }
+    }
+
+    fn show_character_palette(
+        &mut self,
+        _: &ShowCharacterPalette,
+        window: &mut Window,
+        _: &mut Context<Self>,
+    ) {
+        window.show_character_palette();
     }
 
     fn on_mouse_down(&mut self, event: &MouseDownEvent, _: &mut Window, cx: &mut Context<Self>) {
@@ -452,10 +463,34 @@ impl Element for TextElement {
             underline: None,
             strikethrough: None,
         };
+        // Underline the in-progress IME composition (the marked range).
+        let runs = match input.marked_range.as_ref() {
+            Some(marked) => vec![
+                TextRun {
+                    len: marked.start,
+                    ..run.clone()
+                },
+                TextRun {
+                    len: marked.end - marked.start,
+                    underline: Some(UnderlineStyle {
+                        color: Some(run.color),
+                        thickness: px(1.0),
+                        wavy: false,
+                    }),
+                    ..run.clone()
+                },
+                TextRun {
+                    len: text.len() - marked.end,
+                    ..run
+                },
+            ]
+            .into_iter()
+            .filter(|run| run.len > 0)
+            .collect(),
+            None => vec![run],
+        };
         let font_size = style.font_size.to_pixels(window.rem_size());
-        let line = window
-            .text_system()
-            .shape_line(text, font_size, &[run], None);
+        let line = window.text_system().shape_line(text, font_size, &runs, None);
 
         let (cursor_quad, selection_quad) = if selected.is_empty() {
             let x = line.x_for_index(cursor);
@@ -544,6 +579,7 @@ impl Render for TextInput {
             .on_action(cx.listener(Self::copy))
             .on_action(cx.listener(Self::cut))
             .on_action(cx.listener(Self::paste))
+            .on_action(cx.listener(Self::show_character_palette))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_move(cx.listener(Self::on_mouse_move))
