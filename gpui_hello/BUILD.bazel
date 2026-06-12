@@ -6,10 +6,9 @@ rust_binary(
     crate_name = "gpui_hello",
     visibility = ["//:__pkg__"],
     deps = [
-        "//ui/assets",
         "//ui/components",
+        "//ui/shell",
         "//ui/theme",
         "@crates//:gpui",
-        "@crates//:gpui_platform",
     ],
 )

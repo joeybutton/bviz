@@ -1,0 +1,18 @@
+load("@rules_rs//rs:rust_library.bzl", "rust_library")
+
+rust_library(
+    name = "shell",
+    srcs = glob(["src/**/*.rs"]),
+    crate_name = "bviz_ui_shell",
+    visibility = [
+        "//bazel_viz:__pkg__",
+        "//gpui_hello:__pkg__",
+    ],
+    deps = [
+        "//ui/assets",
+        "//ui/components",
+        "//ui/theme",
+        "@crates//:gpui",
+        "@crates//:gpui_platform",
+    ],
+)

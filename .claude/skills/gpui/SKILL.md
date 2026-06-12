@@ -167,10 +167,10 @@ A title bar is just a `div`: drag it with `window.start_window_move()` on mouse-
 control buttons to `window.minimize_window()`, `window.zoom_window()` (maximize), and
 `window.remove_window()` (close). Put `cx.stop_propagation()` on the controls' `on_mouse_down`
 so pressing a button doesn't also start a window move. A status bar is likewise just a `div` of
-app content — gpui has no dedicated widget for it. `//gpui_hello` shows the full pattern.
+app content — gpui has no dedicated widget for it. the `//ui/shell` `Chrome` wraps app content with it.
 
 Resize, rounded corners, and a drop shadow (the rest of client-side decorations) need a
-two-layer structure, which `//gpui_hello` implements in full:
+two-layer structure, which `//ui/shell`'s `Chrome` implements in full:
 
 - An outer **backdrop** `div` reserves room for the shadow with padding and calls
   `window.set_client_inset(shadow)`. On mouse-down near an edge it calls
