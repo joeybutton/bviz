@@ -1,0 +1,9 @@
+load("@rules_rs//rs:rust_binary.bzl", "rust_binary")
+
+rust_binary(
+    name = "layout_dugong",
+    srcs = glob(["src/**/*.rs"]),
+    crate_name = "layout_dugong",
+    visibility = ["//:__pkg__"],
+    deps = ["@crates//:dugong"],
+)

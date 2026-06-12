@@ -3,10 +3,12 @@ members = [
     "bazel_viz",
     "greeting",
     "gpui_hello",
+    "layout_dugong",
 ]
 resolver = "2"
 
 [workspace.dependencies]
 clap = { version = "4", features = ["derive"] }
+dugong = "0.7.0"
 gpui = { git = "https://github.com/zed-industries/zed", tag = "v1.6.3" }
 gpui_platform = { git = "https://github.com/zed-industries/zed", tag = "v1.6.3" }

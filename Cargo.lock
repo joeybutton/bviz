@@ -1555,6 +1555,31 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "75b325c5dbd37f80359721ad39aca5a29fb04c89279657cffdda8736d0c0b9d2"
 
 [[package]]
+name = "dugong"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8182775cd5c441f69e5be06b29f1452503568c4270168cef67a557cd8fbcaba0"
+dependencies = [
+ "dugong-graphlib",
+ "rustc-hash 2.1.2",
+ "serde",
+ "serde_json",
+ "web-time",
+]
+
+[[package]]
+name = "dugong-graphlib"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "faffb9e2480ff1c6901e6376f143614df5331052e60e0dd5086f12399a18c61d"
+dependencies = [
+ "hashbrown 0.16.1",
+ "rustc-hash 2.1.2",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "dunce"
 version = "1.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3095,6 +3120,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0de8b303297635ad57c9f5059fd9cee7a47f8e8daa09df0fcd07dd39fb22977f"
 dependencies = [
  "log",
+]
+
+[[package]]
+name = "layout_dugong"
+version = "0.1.0"
+dependencies = [
+ "dugong",
 ]
 
 [[package]]

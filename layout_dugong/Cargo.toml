@@ -1,0 +1,11 @@
+[package]
+name = "layout_dugong"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "layout_dugong"
+path = "src/main.rs"
+
+[dependencies]
+dugong = { workspace = true }
