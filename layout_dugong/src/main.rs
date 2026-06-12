@@ -1,26 +1,30 @@
-//! Renders a Bazel `aquery --output=streamed_proto` file as a compound graph.
+//! Renders a Bazel `aquery --output=streamed_proto` file as an SVG compound
+//! graph.
 //!
-//! Usage: `layout_dugong <aquery.streamed_proto>`. The action graph is read into
-//! the target -> configured-target -> action/artifact hierarchy; layout and SVG
-//! emission build on top of it.
+//! Usage: `layout_dugong <aquery.streamed_proto> [out.svg]`. The action graph is
+//! read into the target -> configured-target -> action/artifact hierarchy, laid
+//! out with dugong, and emitted as SVG (to the output file, or stdout).
 
 mod aquery;
 mod graph;
 mod layout;
 mod streamed_proto;
+mod svg;
 
 use std::process::ExitCode;
 
 fn main() -> ExitCode {
-    let Some(path) = std::env::args().nth(1) else {
-        eprintln!("usage: layout_dugong <aquery.streamed_proto>");
+    let mut args = std::env::args().skip(1);
+    let Some(input) = args.next() else {
+        eprintln!("usage: layout_dugong <aquery.streamed_proto> [out.svg]");
         return ExitCode::from(2);
     };
+    let output = args.next();
 
-    let bytes = match std::fs::read(&path) {
+    let bytes = match std::fs::read(&input) {
         Ok(bytes) => bytes,
         Err(err) => {
-            eprintln!("error reading {path}: {err}");
+            eprintln!("error reading {input}: {err}");
             return ExitCode::FAILURE;
         }
     };
@@ -35,23 +39,16 @@ fn main() -> ExitCode {
 
     let graph = aquery::build(&containers, false);
     let laid_out = layout::layout(&graph);
+    let document = svg::emit(&laid_out);
 
-    println!(
-        "{} boxes, {} connectors, {:.0}x{:.0}",
-        laid_out.boxes.len(),
-        laid_out.connectors.len(),
-        laid_out.width,
-        laid_out.height
-    );
-    for b in &laid_out.boxes {
-        let kind = if b.compound { "container" } else { &b.kind };
-        println!(
-            "  [{kind}] {} @ ({:.0},{:.0}) {:.0}x{:.0}",
-            b.label, b.x, b.y, b.width, b.height
-        );
-    }
-    for c in &laid_out.connectors {
-        println!("  edge {:?}", c.points);
+    match output {
+        Some(path) => {
+            if let Err(err) = std::fs::write(&path, document) {
+                eprintln!("error writing {path}: {err}");
+                return ExitCode::FAILURE;
+            }
+        }
+        None => print!("{document}"),
     }
 
     ExitCode::SUCCESS
