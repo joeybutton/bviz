@@ -41,7 +41,15 @@ Interactive visualization and inspection tool for Bazel builds.
   where the symbol is used), don't re-explain what a rule's or tool's own
   documentation already covers, and don't write comments that drift as nearby
   code changes (e.g. describing which of several things a wildcard or shared
-  target covers). Don't narrate the design: a block comment
+  target covers). This applies equally to BUILD and `.bzl`/`MODULE.bazel`
+  files: a declarative rule and its attributes already state what they do, so a
+  comment that names a rule's effect (`# expose the binary` over a
+  `gen_binaries` attribute) or restates an attribute is noise; when one
+  rationale spans several files (a toolchain and the target that consumes it),
+  state it once at the definition or in the commit message rather than echoing
+  it in every file that participates, and avoid cross-file pointers
+  (`# registered in MODULE.bazel as X`) that drift when either side moves.
+  Don't narrate the design: a block comment
   restating a module's model, data flow, or algorithm only duplicates the code
   and is the first thing a later refactor deletes — if a comment is not
   load-bearing, leave it out. Citing an external source (paper, spec, issue) is
