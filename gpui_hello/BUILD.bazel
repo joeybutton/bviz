@@ -2,7 +2,7 @@ load("@rules_rs//rs:rust_binary.bzl", "rust_binary")
 
 rust_binary(
     name = "gpui_hello",
-    srcs = ["src/main.rs"],
+    srcs = glob(["src/**/*.rs"]),
     crate_name = "gpui_hello",
     visibility = ["//:__pkg__"],
     deps = [

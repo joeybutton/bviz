@@ -190,6 +190,27 @@ handler signature gpui expects. Other handlers (same pattern): `.on_mouse_down(b
 `.on_key_down(..)`, `.hover(|style| style.bg(..))`, `.on_scroll_wheel(..)`. For focus, add
 `.focusable()` / `.track_focus(&handle)`. See `examples/a11y.rs` for a focusable counter.
 
+## Actions, keybindings, and focus
+
+Keyboard interaction goes through actions, not raw key handling. Declare unit actions with
+`actions!(namespace, [Quit, CloseWindow])`, bind keys with `cx.bind_keys([KeyBinding::new(
+"secondary-w", CloseWindow, Some("Context"))])` (the `secondary-` modifier is cmd on macOS and
+ctrl elsewhere; the optional context scopes the binding to a `key_context`), and handle them
+with `.on_action(|_: &CloseWindow, window, cx| …)` on an element in the focus path. Actions
+dispatch up from the focused element, so a view needs `.track_focus(&handle)` (with
+`focus_handle: FocusHandle` created via `cx.focus_handle()`) to receive them.
+
+Focus and tab order: configure a handle with `.tab_index(n).tab_stop(true)`, bind `tab` /
+`shift-tab` to actions that call `window.focus_next(cx)` / `window.focus_prev(cx)`, and style
+the focused state with `.focus(|s| …)`. App lifecycle: closing a window does not quit — wire
+`cx.on_window_closed(|cx, _| if cx.windows().is_empty() { cx.quit() })`.
+
+Text fields aren't a built-in widget: a focusable view implements `EntityInputHandler` (the
+platform routes typed text and IME through it) and a custom `Element` shapes the line and
+paints the cursor, registering itself via `window.handle_input(&focus_handle,
+ElementInputHandler::new(bounds, entity), cx)`. `//gpui_hello`'s `text_input` module is a
+minimal one; `examples/input.rs` is the full version with selection and clipboard.
+
 ## Stateful views vs stateless components
 
 - **`impl Render for Foo`** — a stateful view (`fn render(&mut self, ..)`), held as an

@@ -1,14 +1,18 @@
+mod text_input;
+
 use gpui::{
-    App, Bounds, BoxShadow, Context, CursorStyle, Decorations, FocusHandle, HitboxBehavior, Hsla,
-    IntoElement, KeyBinding, MouseButton, Pixels, Point, ResizeEdge, Render, Rgba, SharedString,
-    Size, Tiling, TitlebarOptions, Window, WindowBounds, WindowDecorations, WindowOptions, actions,
-    canvas, colors::Colors, div, point, prelude::*, px, size, transparent_black,
+    App, Bounds, BoxShadow, Context, CursorStyle, Decorations, Entity, FocusHandle, HitboxBehavior,
+    Hsla, IntoElement, KeyBinding, MouseButton, Pixels, Point, ResizeEdge, Render, Rgba,
+    SharedString, Size, Tiling, TitlebarOptions, Window, WindowBounds, WindowDecorations,
+    WindowOptions, actions, canvas, colors::Colors, div, point, prelude::*, px, size,
+    transparent_black,
 };
 use gpui_platform::application;
 use std::cell::Cell;
 use std::rc::Rc;
+use text_input::TextInput;
 
-actions!(gpui_hello, [Quit, CloseWindow]);
+actions!(gpui_hello, [Quit, CloseWindow, Tab, TabPrev, Greet]);
 
 /// Room left around the window for the drop shadow, and the resize-edge hit zone.
 const SHADOW: Pixels = px(10.0);
@@ -18,9 +22,48 @@ const BORDER: Pixels = px(1.0);
 struct HelloWorld {
     text: SharedString,
     focus_handle: FocusHandle,
+    input: Entity<TextInput>,
+    button_focus: FocusHandle,
     /// Set when the title bar is pressed; the move starts on the first drag so a
     /// press that the compositor claims for an edge resize never turns into a move.
     should_move: Rc<Cell<bool>>,
+}
+
+impl HelloWorld {
+    /// Set the greeting from the text field (or a default when it's empty).
+    fn greet(&mut self, cx: &mut Context<Self>) {
+        let name = self.input.read(cx).content();
+        self.text = if name.is_empty() {
+            "bazel_viz".into()
+        } else {
+            name
+        };
+        cx.notify();
+    }
+
+    /// A focusable button that reads the field and updates the greeting.
+    fn greet_button(&self, colors: &Colors, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let focused = self.button_focus.is_focused(window);
+        let ring = if focused { colors.text } else { colors.selected };
+        div()
+            .id("greet")
+            .key_context("GreetButton")
+            .track_focus(&self.button_focus)
+            .on_action(cx.listener(|this, _: &Greet, _, cx| this.greet(cx)))
+            .on_click(cx.listener(|this, _, _, cx| this.greet(cx)))
+            .flex()
+            .items_center()
+            .justify_center()
+            .px_4()
+            .py_2()
+            .rounded_md()
+            .cursor_pointer()
+            .bg(colors.selected)
+            .text_color(colors.selected_text)
+            .border_2()
+            .border_color(ring)
+            .child("Greet")
+    }
 }
 
 impl HelloWorld {
@@ -102,7 +145,7 @@ impl HelloWorld {
 }
 
 impl Render for HelloWorld {
-    fn render(&mut self, window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // gpui's built-in palette, light or dark per the system appearance.
         let colors = Colors::for_appearance(window);
         let decorations = window.window_decorations();
@@ -170,8 +213,19 @@ impl Render for HelloWorld {
                     .flex_col()
                     .justify_center()
                     .items_center()
-                    .text_xl()
-                    .child(format!("Hello, {}!", self.text)),
+                    .gap_4()
+                    .p_4()
+                    .child(div().text_xl().child(format!("Hello, {}!", self.text)))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .w(px(260.))
+                            .child(div().text_sm().text_color(colors.disabled).child("Name"))
+                            .child(self.input.clone()),
+                    )
+                    .child(self.greet_button(&colors, window, cx)),
             )
             .child(self.status_bar(&colors, radius, bar_bg));
 
@@ -180,6 +234,8 @@ impl Render for HelloWorld {
             .track_focus(&self.focus_handle)
             .on_action(|_: &Quit, _, cx| cx.quit())
             .on_action(|_: &CloseWindow, window, _| window.remove_window())
+            .on_action(|_: &Tab, window, cx| window.focus_next(cx))
+            .on_action(|_: &TabPrev, window, cx| window.focus_prev(cx))
             .size_full()
             .bg(transparent_black())
             .when(client, |this| {
@@ -307,7 +363,12 @@ fn main() {
         cx.bind_keys([
             KeyBinding::new("secondary-q", Quit, None),
             KeyBinding::new("secondary-w", CloseWindow, None),
+            KeyBinding::new("tab", Tab, None),
+            KeyBinding::new("shift-tab", TabPrev, None),
+            KeyBinding::new("enter", Greet, Some("GreetButton")),
+            KeyBinding::new("space", Greet, Some("GreetButton")),
         ]);
+        text_input::bind_keys(cx);
         // Quit once the last window is gone (closing a window doesn't quit by default).
         cx.on_window_closed(|cx, _| {
             if cx.windows().is_empty() {
@@ -338,9 +399,12 @@ fn main() {
                 cx.new(|cx| {
                     let focus_handle = cx.focus_handle();
                     focus_handle.focus(window, cx);
+                    let input = cx.new(|cx| TextInput::new(cx, "Type a name…", 1));
                     HelloWorld {
                         text: "bazel_viz".into(),
                         focus_handle,
+                        input,
+                        button_focus: cx.focus_handle().tab_index(2).tab_stop(true),
                         should_move: Rc::new(Cell::new(false)),
                     }
                 })
