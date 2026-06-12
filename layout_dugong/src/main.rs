@@ -1,52 +1,50 @@
-//! Compound-graph layout via dugong (a Rust port of dagre).
+//! Renders a Bazel `aquery --output=streamed_proto` file as a compound graph.
 //!
-//! This entry point lays out a small nested graph and prints the resulting
-//! geometry, confirming the layout engine is wired up. Bazel-graph ingest and
-//! SVG emission build on top of it.
+//! Usage: `layout_dugong <aquery.streamed_proto>`. The action graph is read into
+//! the target -> configured-target -> action/artifact hierarchy; layout and SVG
+//! emission build on top of it.
 
-use dugong::graphlib::{Graph, GraphOptions};
-use dugong::{EdgeLabel, GraphLabel, NodeLabel, layout_dagreish};
+mod aquery;
+mod graph;
+mod streamed_proto;
 
-fn main() {
-    let mut graph: Graph<NodeLabel, EdgeLabel, GraphLabel> = Graph::new(GraphOptions {
-        compound: true,
-        ..GraphOptions::default()
-    });
-    graph.set_graph(GraphLabel::default());
+use std::process::ExitCode;
 
-    // A container "parent" holding two leaves, plus a leaf at the root, wired
-    // parent.a -> parent.b -> root.
-    graph.set_node("parent", NodeLabel::default());
-    for id in ["a", "b", "c"] {
-        graph.set_node(
-            id,
-            NodeLabel {
-                width: 60.0,
-                height: 30.0,
-                ..NodeLabel::default()
-            },
-        );
-    }
-    graph.set_parent("a", "parent");
-    graph.set_parent("b", "parent");
-    graph.set_edge("a", "b");
-    graph.set_edge("b", "c");
+fn main() -> ExitCode {
+    let Some(path) = std::env::args().nth(1) else {
+        eprintln!("usage: layout_dugong <aquery.streamed_proto>");
+        return ExitCode::from(2);
+    };
 
-    layout_dagreish(&mut graph);
+    let bytes = match std::fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            eprintln!("error reading {path}: {err}");
+            return ExitCode::FAILURE;
+        }
+    };
 
-    for id in ["parent", "a", "b", "c"] {
-        let node = graph.node(id).expect("node present after layout");
+    let containers = match streamed_proto::read_action_graph_containers(&bytes) {
+        Ok(containers) => containers,
+        Err(err) => {
+            eprintln!("error decoding aquery proto: {err}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let graph = aquery::build(&containers, false);
+
+    println!("{} nodes, {} edges", graph.nodes.len(), graph.edges.len());
+    for node in &graph.nodes {
+        let parent = node.parent.as_deref().unwrap_or("-");
         println!(
-            "{id}: x={:?} y={:?} w={} h={}",
-            node.x, node.y, node.width, node.height
+            "  [{}] {} ({}) parent={parent}",
+            node.kind, node.id, node.label
         );
     }
-    let edge_keys: Vec<_> = graph.edges().cloned().collect();
-    for key in edge_keys {
-        let edge = graph
-            .edge(&key.v, &key.w, key.name.as_deref())
-            .expect("edge present after layout");
-        let points: Vec<(f64, f64)> = edge.points.iter().map(|p| (p.x, p.y)).collect();
-        println!("{} -> {}: {:?}", key.v, key.w, points);
+    for edge in &graph.edges {
+        println!("  {} -> {}", edge.from, edge.to);
     }
+
+    ExitCode::SUCCESS
 }

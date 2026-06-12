@@ -5,5 +5,8 @@ rust_binary(
     srcs = glob(["src/**/*.rs"]),
     crate_name = "layout_dugong",
     visibility = ["//:__pkg__"],
-    deps = ["@crates//:dugong"],
+    deps = [
+        "@bazel_query_proto//:bazel_query_rust_proto",
+        "@crates//:prost",
+    ],
 )
