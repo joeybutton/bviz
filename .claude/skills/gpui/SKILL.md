@@ -155,8 +155,20 @@ control buttons to `window.minimize_window()`, `window.zoom_window()` (maximize)
 so pressing a button doesn't also start a window move. A status bar is likewise just a `div` of
 app content — gpui has no dedicated widget for it. `//gpui_hello` shows the full pattern.
 
-Full CSD (resize edges, rounded corners, drop shadow) is more involved — see
-`examples/window_shadow.rs` (`start_window_resize`, `set_client_inset`, the `tiling` flags).
+Resize, rounded corners, and a drop shadow (the rest of client-side decorations) need a
+two-layer structure, which `//gpui_hello` implements in full:
+
+- An outer **backdrop** `div` reserves room for the shadow with padding and calls
+  `window.set_client_inset(shadow)`. On mouse-down near an edge it calls
+  `window.start_window_resize(edge)` (compute the edge from the cursor vs. window bounds);
+  a behind-the-content `canvas` sets the resize cursor as the mouse nears an edge.
+- An inner `div` draws the border, rounded corners, and the `BoxShadow`.
+- gpui's content mask is **rectangular**, so rounding a parent does not clip children — give
+  the title bar and status bar matching rounded corners rather than relying on `overflow_hidden`.
+- Respect `Decorations::Client { tiling }`: skip the border/rounding/shadow on any tiled edge
+  (e.g. when a tiling WM snaps the window), and skip them entirely for `Decorations::Server`.
+
+`examples/window_shadow.rs` in the gpui repo is the upstream reference for the same pattern.
 
 ## Interactivity
 
