@@ -94,10 +94,23 @@ crate.annotation(
     crate = "wgpu-hal",
     crate_features = ["vulkan"],
 )
+
+crate.annotation(
+    crate = "protoc-gen-prost",
+    gen_binaries = ["protoc-gen-prost"],
+)
 use_repo(crate, "crates")
 
 rules_rust = use_extension("@rules_rs//rs/experimental:rules_rust.bzl", "rules_rust")
 use_repo(rules_rust, rules_rs_rules_rust = "rules_rust")
+
+rules_rust_prost = use_extension("@rules_rs//rs/experimental:rules_rust_prost.bzl", "rules_rust_prost")
+use_repo(rules_rust_prost, "rules_rust_prost")
+
+register_toolchains(
+    "@//proto_toolchain:prost_toolchain",
+    "@//proto_toolchain:proto_toolchain",
+)
 
 http_archive = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
 

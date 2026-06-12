@@ -10,5 +10,8 @@ resolver = "2"
 [workspace.dependencies]
 clap = { version = "4", features = ["derive"] }
 dugong = "0.7.0"
+prost = "0.13"
+prost-types = "0.13"
+protoc-gen-prost = "0.4"
 gpui = { git = "https://github.com/zed-industries/zed", tag = "v1.6.3" }
 gpui_platform = { git = "https://github.com/zed-industries/zed", tag = "v1.6.3" }

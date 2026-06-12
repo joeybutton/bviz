@@ -9,3 +9,8 @@ path = "src/main.rs"
 
 [dependencies]
 dugong = { workspace = true }
+prost = { workspace = true }
+# Locked for the prost toolchain (@crates//:prost-types,
+# @crates//:protoc-gen-prost__protoc-gen-prost), not used by this crate's code.
+prost-types = { workspace = true }
+protoc-gen-prost = { workspace = true }
