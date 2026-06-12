@@ -135,6 +135,12 @@ automatically. In this repo the font files are downloaded by a Bazel `http_archi
 `data` on the target, and read from runfiles (the `runfiles` crate's `rlocation!`) — see
 `gpui_hello`'s `fonts` module and the `inter` / `jetbrains_mono` archives in `MODULE.bazel`.
 
+Icons: gpui renders SVGs with `svg().path("…").size(px(16.)).text_color(…)`, loading the path
+through the app's `AssetSource` (`application().with_assets(MyAssets)`) and tinting the result
+with the text color (so single-color icon sets like Phosphor just work). In this repo the
+Phosphor SVGs come from an `http_archive` and the `AssetSource` reads them from runfiles — see
+`gpui_hello`'s `assets` module and the `phosphor` archive.
+
 ## Window chrome: title, decorations, controls, status bar
 
 Set the OS title and grouping id in `WindowOptions` (the title shows in the taskbar and in

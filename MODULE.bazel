@@ -116,6 +116,15 @@ http_archive(
     url = "https://github.com/JetBrains/JetBrainsMono/releases/download/v2.304/JetBrainsMono-2.304.zip",
 )
 
+# Phosphor icon set (regular weight), rendered as SVGs through gpui's asset source.
+http_archive(
+    name = "phosphor",
+    build_file = "//3rd-party:phosphor.BUILD",
+    sha256 = "8b4dd9afb96b50c92a613f5786af6a7dcff6e416442c42c12ed831cea050a698",
+    strip_prefix = "core-2.0.8",
+    url = "https://github.com/phosphor-icons/core/archive/refs/tags/v2.0.8.tar.gz",
+)
+
 new_git_repository = use_repo_rule("@bazel_tools//tools/build_defs/repo:git.bzl", "new_git_repository")
 
 # query (build.proto), cquery + aquery (analysis_v2.proto) and their transitive

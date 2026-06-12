@@ -1,3 +1,4 @@
+mod assets;
 mod fonts;
 mod text_input;
 
@@ -73,7 +74,7 @@ impl HelloWorld {
     fn title_bar(&self, colors: &Colors, radius: Pixels, bar_bg: Rgba) -> impl IntoElement {
         let text = colors.text;
         let hover_bg = colors.selected;
-        let button = move |id: &'static str, glyph: &'static str| {
+        let button = move |id: &'static str, icon_name: &'static str| {
             div()
                 .id(id)
                 .flex()
@@ -83,7 +84,7 @@ impl HelloWorld {
                 .rounded_md()
                 .text_color(text)
                 .hover(move |s| s.bg(hover_bg))
-                .child(glyph)
+                .child(assets::icon(icon_name).size(px(16.)).text_color(text))
         };
         div()
             .flex()
@@ -121,9 +122,17 @@ impl HelloWorld {
                     .gap_1()
                     // Don't let a button press also start a window move.
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    .child(button("minimize", "—").on_click(|_, window, _| window.minimize_window()))
-                    .child(button("maximize", "▢").on_click(|_, window, _| window.zoom_window()))
-                    .child(button("close", "✕").on_click(|_, window, _| window.remove_window())),
+                    .child(
+                        button("minimize", "minus")
+                            .on_click(|_, window, _| window.minimize_window()),
+                    )
+                    .child(
+                        button("maximize", "square")
+                            .on_click(|_, window, _| window.zoom_window()),
+                    )
+                    .child(
+                        button("close", "x").on_click(|_, window, _| window.remove_window()),
+                    ),
             )
     }
 
@@ -362,7 +371,7 @@ fn resize_edge(
 }
 
 fn main() {
-    application().run(|cx: &mut App| {
+    application().with_assets(assets::Assets).run(|cx: &mut App| {
         fonts::load(cx);
         cx.bind_keys([
             KeyBinding::new("secondary-q", Quit, None),
