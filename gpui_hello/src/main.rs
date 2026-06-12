@@ -2,17 +2,17 @@ mod text_input;
 
 use gpui::{
     App, Bounds, BoxShadow, Context, CursorStyle, Decorations, Entity, FocusHandle, HitboxBehavior,
-    Hsla, IntoElement, KeyBinding, MouseButton, Pixels, Point, ResizeEdge, Render, Rgba,
-    SharedString, Size, Tiling, TitlebarOptions, Window, WindowBounds, WindowDecorations,
-    WindowOptions, actions, canvas, colors::Colors, div, point, prelude::*, px, size,
-    transparent_black,
+    Hsla, IntoElement, KeyBinding, KeyDownEvent, KeyUpEvent, MouseButton, Pixels, Point, ResizeEdge,
+    Render, Rgba, SharedString, Size, Tiling, TitlebarOptions, Window, WindowBounds,
+    WindowDecorations, WindowOptions, actions, canvas, colors::Colors, div, point, prelude::*, px,
+    size, transparent_black,
 };
 use gpui_platform::application;
 use std::cell::Cell;
 use std::rc::Rc;
 use text_input::TextInput;
 
-actions!(gpui_hello, [Quit, CloseWindow, Tab, TabPrev, Greet]);
+actions!(gpui_hello, [Quit, CloseWindow, Tab, TabPrev]);
 
 /// Room left around the window for the drop shadow, and the resize-edge hit zone.
 const SHADOW: Pixels = px(10.0);
@@ -24,6 +24,8 @@ struct HelloWorld {
     focus_handle: FocusHandle,
     input: Entity<TextInput>,
     button_focus: FocusHandle,
+    /// Whether the Greet button is held down via the keyboard (enter/space).
+    button_pressed: bool,
     /// Set when the title bar is pressed; the move starts on the first drag so a
     /// press that the compositor claims for an edge resize never turns into a move.
     should_move: Rc<Cell<bool>>,
@@ -47,10 +49,25 @@ impl HelloWorld {
         let ring = if focused { colors.text } else { colors.selected };
         div()
             .id("greet")
-            .key_context("GreetButton")
             .track_focus(&self.button_focus)
-            .on_action(cx.listener(|this, _: &Greet, _, cx| this.greet(cx)))
-            .on_click(cx.listener(|this, _, _, cx| this.greet(cx)))
+            // Enter/space on a focused element already fire on_click; track the key
+            // hold so the press shows the same way a held mouse button does.
+            .on_key_down(cx.listener(|this, e: &KeyDownEvent, _, cx| {
+                if is_activate(&e.keystroke.key) {
+                    this.button_pressed = true;
+                    cx.notify();
+                }
+            }))
+            .on_key_up(cx.listener(|this, e: &KeyUpEvent, _, cx| {
+                if is_activate(&e.keystroke.key) {
+                    this.button_pressed = false;
+                    cx.notify();
+                }
+            }))
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.button_pressed = false;
+                this.greet(cx);
+            }))
             .flex()
             .items_center()
             .justify_center()
@@ -64,6 +81,7 @@ impl HelloWorld {
             .border_color(ring)
             .hover(|s| s.opacity(0.92))
             .active(|s| s.opacity(0.8))
+            .when(self.button_pressed, |this| this.opacity(0.8))
             .child("Greet")
     }
 }
@@ -309,6 +327,11 @@ impl Render for HelloWorld {
     }
 }
 
+/// Whether a key activates a focused button (enter or space).
+fn is_activate(key: &str) -> bool {
+    key == "enter" || key == "space"
+}
+
 /// Linearly blend `a` toward `b` by `t` in [0, 1].
 fn mix(a: Rgba, b: Rgba, t: f32) -> Rgba {
     Rgba {
@@ -379,8 +402,6 @@ fn main() {
             KeyBinding::new("secondary-w", CloseWindow, None),
             KeyBinding::new("tab", Tab, None),
             KeyBinding::new("shift-tab", TabPrev, None),
-            KeyBinding::new("enter", Greet, Some("GreetButton")),
-            KeyBinding::new("space", Greet, Some("GreetButton")),
         ]);
         text_input::bind_keys(cx);
         // Quit once the last window is gone (closing a window doesn't quit by default).
@@ -419,6 +440,7 @@ fn main() {
                         focus_handle,
                         input,
                         button_focus: cx.focus_handle().tab_index(2).tab_stop(true),
+                        button_pressed: false,
                         should_move: Rc::new(Cell::new(false)),
                     }
                 })
