@@ -10,7 +10,23 @@
 use std::collections::{HashMap, HashSet};
 
 use dugong::graphlib::{Graph as DugongGraph, GraphOptions};
-use dugong::{EdgeLabel, GraphLabel, NodeLabel, layout_dagreish};
+use dugong::{EdgeLabel, GraphLabel, NodeLabel, RankDir, layout_dagreish};
+
+// Lay the dependency flow out left-to-right: each action chain reads along the
+// rank direction, so a node sits next to the inputs it consumes, and the
+// independent per-target subgraphs stack down the cross axis rather than
+// spreading the whole graph horizontally. The separations are tightened from
+// dagre's defaults to keep the cross-target edges that bundle between subgraphs
+// readable without inflating the empty space around them.
+fn graph_label() -> GraphLabel {
+    GraphLabel {
+        rankdir: RankDir::LR,
+        ranksep: 60.0,
+        nodesep: 24.0,
+        edgesep: 12.0,
+        ..GraphLabel::default()
+    }
+}
 
 use crate::graph::Graph;
 
@@ -55,7 +71,7 @@ pub fn layout(graph: &Graph) -> LaidOut {
             compound: true,
             ..GraphOptions::default()
         });
-    dugong.set_graph(GraphLabel::default());
+    dugong.set_graph(graph_label());
 
     for node in &graph.nodes {
         let label = if containers.contains(node.id.as_str()) {
