@@ -1,3 +1,4 @@
+mod fonts;
 mod text_input;
 
 use gpui::{
@@ -140,6 +141,7 @@ impl HelloWorld {
             .border_color(colors.border)
             .text_color(colors.disabled)
             .text_sm()
+            .font_family(fonts::MONO)
             .child("Ready")
     }
 }
@@ -231,6 +233,7 @@ impl Render for HelloWorld {
 
         div()
             .id("window-backdrop")
+            .font_family(fonts::UI)
             .track_focus(&self.focus_handle)
             .on_action(|_: &Quit, _, cx| cx.quit())
             .on_action(|_: &CloseWindow, window, _| window.remove_window())
@@ -360,6 +363,7 @@ fn resize_edge(
 
 fn main() {
     application().run(|cx: &mut App| {
+        fonts::load(cx);
         cx.bind_keys([
             KeyBinding::new("secondary-q", Quit, None),
             KeyBinding::new("secondary-w", CloseWindow, None),

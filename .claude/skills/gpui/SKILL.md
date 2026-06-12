@@ -128,6 +128,13 @@ instead of threading `window` everywhere — but note the registered global defa
 until you set it. Zed's full `theme` crate (`cx.theme()`, named themes, registry) is much
 heavier and not needed here. Raw `rgb(0x…)` / `gpui::white()` are still fine for one-off accents.
 
+Fonts: register font bytes with `cx.text_system().add_fonts(vec![bytes…])` at startup, then
+select them with `.font_family("Inter")` (UI) / `.font_family("JetBrains Mono")` (mono), which
+cascade to children; glyphs missing from the chosen family fall back to system fonts
+automatically. In this repo the font files are downloaded by a Bazel `http_archive`, listed as
+`data` on the target, and read from runfiles (the `runfiles` crate's `rlocation!`) — see
+`gpui_hello`'s `fonts` module and the `inter` / `jetbrains_mono` archives in `MODULE.bazel`.
+
 ## Window chrome: title, decorations, controls, status bar
 
 Set the OS title and grouping id in `WindowOptions` (the title shows in the taskbar and in

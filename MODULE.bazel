@@ -99,6 +99,23 @@ use_repo(crate, "crates")
 rules_rust = use_extension("@rules_rs//rs/experimental:rules_rust.bzl", "rules_rust")
 use_repo(rules_rust, rules_rs_rules_rust = "rules_rust")
 
+http_archive = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
+
+# Application fonts: Inter for UI text, JetBrains Mono for monospace.
+http_archive(
+    name = "inter",
+    build_file = "//3rd-party:inter.BUILD",
+    sha256 = "9883fdd4a49d4fb66bd8177ba6625ef9a64aa45899767dde3d36aa425756b11e",
+    url = "https://github.com/rsms/inter/releases/download/v4.1/Inter-4.1.zip",
+)
+
+http_archive(
+    name = "jetbrains_mono",
+    build_file = "//3rd-party:jetbrains_mono.BUILD",
+    sha256 = "6f6376c6ed2960ea8a963cd7387ec9d76e3f629125bc33d1fdcd7eb7012f7bbf",
+    url = "https://github.com/JetBrains/JetBrainsMono/releases/download/v2.304/JetBrainsMono-2.304.zip",
+)
+
 new_git_repository = use_repo_rule("@bazel_tools//tools/build_defs/repo:git.bzl", "new_git_repository")
 
 # query (build.proto), cquery + aquery (analysis_v2.proto) and their transitive
