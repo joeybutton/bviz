@@ -132,14 +132,15 @@ Fonts: register font bytes with `cx.text_system().add_fonts(vec![bytes…])` at 
 select them with `.font_family("Inter")` (UI) / `.font_family("JetBrains Mono")` (mono), which
 cascade to children; glyphs missing from the chosen family fall back to system fonts
 automatically. In this repo the font files are downloaded by a Bazel `http_archive`, listed as
-`data` on the target, and read from runfiles (the `runfiles` crate's `rlocation!`) — see
-`gpui_hello`'s `fonts` module and the `inter` / `jetbrains_mono` archives in `MODULE.bazel`.
+`data`, and **embedded into the binary** at build time — the `app_assets` library's build
+script copies them into `OUT_DIR` so `include_bytes!` can bake them in — so there are no runtime
+file dependencies. See `app_assets` and the `inter` / `jetbrains_mono` archives in `MODULE.bazel`.
 
 Icons: gpui renders SVGs with `svg().path("…").size(px(16.)).text_color(…)`, loading the path
 through the app's `AssetSource` (`application().with_assets(MyAssets)`) and tinting the result
 with the text color (so single-color icon sets like Phosphor just work). In this repo the
-Phosphor SVGs come from an `http_archive` and the `AssetSource` reads them from runfiles — see
-`gpui_hello`'s `assets` module and the `phosphor` archive.
+Phosphor SVGs come from an `http_archive` and are embedded the same way; the `AssetSource`
+serves them from the baked-in bytes — see the `app_assets` library and the `phosphor` archive.
 
 ## Window chrome: title, decorations, controls, status bar
 

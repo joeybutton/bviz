@@ -1,0 +1,30 @@
+load("@rules_rs//rs:cargo_build_script.bzl", "cargo_build_script")
+load("@rules_rs//rs:rust_library.bzl", "rust_library")
+
+# The font/icon files come from Bazel http_archives; build.rs copies them into
+# OUT_DIR so lib.rs can embed them with include_bytes!.
+cargo_build_script(
+    name = "build_script",
+    srcs = ["build.rs"],
+    build_script_env = {
+        "EXEC_ROOT": "$${pwd}",
+        "FONT_FILES": "$(execpaths @inter//:fonts) $(execpaths @jetbrains_mono//:fonts)",
+        "ICON_FILES": "$(execpaths @phosphor//:icons)",
+    },
+    data = [
+        "@inter//:fonts",
+        "@jetbrains_mono//:fonts",
+        "@phosphor//:icons",
+    ],
+)
+
+rust_library(
+    name = "app_assets",
+    srcs = ["src/lib.rs"],
+    crate_name = "app_assets",
+    visibility = ["//gpui_hello:__pkg__"],
+    deps = [
+        ":build_script",
+        "@crates//:gpui",
+    ],
+)

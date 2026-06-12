@@ -4,15 +4,10 @@ rust_binary(
     name = "gpui_hello",
     srcs = glob(["src/**/*.rs"]),
     crate_name = "gpui_hello",
-    data = [
-        "@inter//:fonts",
-        "@jetbrains_mono//:fonts",
-        "@phosphor//:icons",
-    ],
     visibility = ["//:__pkg__"],
     deps = [
+        "//app_assets",
         "@crates//:gpui",
         "@crates//:gpui_platform",
-        "@rules_rs_rules_rust//tools/runfiles",
     ],
 )
