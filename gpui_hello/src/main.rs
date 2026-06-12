@@ -64,6 +64,8 @@ impl HelloWorld {
             .text_color(colors.selected_text)
             .border_2()
             .border_color(ring)
+            .hover(|s| s.opacity(0.92))
+            .active(|s| s.opacity(0.8))
             .child("Greet")
     }
 }
@@ -84,6 +86,7 @@ impl HelloWorld {
                 .rounded_md()
                 .text_color(text)
                 .hover(move |s| s.bg(hover_bg))
+                .active(|s| s.opacity(0.6))
                 .child(assets::icon(icon_name).size(px(16.)).text_color(text))
         };
         div()
