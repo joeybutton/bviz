@@ -128,6 +128,36 @@ instead of threading `window` everywhere — but note the registered global defa
 until you set it. Zed's full `theme` crate (`cx.theme()`, named themes, registry) is much
 heavier and not needed here. Raw `rgb(0x…)` / `gpui::white()` are still fine for one-off accents.
 
+## Window chrome: title, decorations, controls, status bar
+
+Set the OS title and grouping id in `WindowOptions` (the title shows in the taskbar and in
+any server-drawn title bar):
+
+```rust
+WindowOptions {
+    titlebar: Some(TitlebarOptions { title: Some("bazel_viz".into()), ..Default::default() }),
+    app_id: Some("bazel_viz".into()),
+    window_decorations: Some(WindowDecorations::Server), // prefer the compositor's chrome
+    ..Default::default()
+}
+```
+
+Decorations on Linux are negotiated: some compositors draw server-side decorations (SSD),
+others (notably GNOME) only support client-side (CSD), where **the app must draw its own
+title bar**. Query `window.window_decorations()` each render and adapt:
+
+- `Decorations::Server` — the compositor drew the title bar; draw only your content.
+- `Decorations::Client { tiling }` — draw your own title bar (and ideally a border).
+
+A title bar is just a `div`: drag it with `window.start_window_move()` on mouse-down, and wire
+control buttons to `window.minimize_window()`, `window.zoom_window()` (maximize), and
+`window.remove_window()` (close). Put `cx.stop_propagation()` on the controls' `on_mouse_down`
+so pressing a button doesn't also start a window move. A status bar is likewise just a `div` of
+app content — gpui has no dedicated widget for it. `//gpui_hello` shows the full pattern.
+
+Full CSD (resize edges, rounded corners, drop shadow) is more involved — see
+`examples/window_shadow.rs` (`start_window_resize`, `set_client_inset`, the `tiling` flags).
+
 ## Interactivity
 
 To handle input, an element needs an `.id(..)` (this makes it a `Stateful` element).
