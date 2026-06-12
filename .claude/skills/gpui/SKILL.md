@@ -222,8 +222,8 @@ the focused state with `.focus(|s| …)`. App lifecycle: closing a window does n
 Text fields aren't a built-in widget: a focusable view implements `EntityInputHandler` (the
 platform routes typed text and IME through it) and a custom `Element` shapes the line and
 paints the cursor, registering itself via `window.handle_input(&focus_handle,
-ElementInputHandler::new(bounds, entity), cx)`. `//gpui_hello`'s `text_input` module is a
-minimal one; `examples/input.rs` is the full version with selection and clipboard.
+ElementInputHandler::new(bounds, entity), cx)`. `//ui/components`'s `TextInput` is a minimal
+one (and a `Button` lives alongside it); `examples/input.rs` is the full version with clipboard.
 
 ## Stateful views vs stateless components
 

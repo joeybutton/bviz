@@ -1,16 +1,14 @@
-mod text_input;
-
+use bviz_ui_components::{Button, TextInput};
 use gpui::{
     App, Bounds, BoxShadow, Context, CursorStyle, Decorations, Entity, FocusHandle, HitboxBehavior,
-    Hsla, IntoElement, KeyBinding, KeyDownEvent, KeyUpEvent, MouseButton, Pixels, Point, ResizeEdge,
-    Render, Rgba, SharedString, Size, Tiling, TitlebarOptions, Window, WindowBounds,
-    WindowDecorations, WindowOptions, actions, canvas, colors::Colors, div, point, prelude::*, px,
-    size, transparent_black,
+    Hsla, IntoElement, KeyBinding, MouseButton, Pixels, Point, ResizeEdge, Render, Rgba,
+    SharedString, Size, Tiling, TitlebarOptions, Window, WindowBounds, WindowDecorations,
+    WindowOptions, actions, canvas, colors::Colors, div, point, prelude::*, px, size,
+    transparent_black,
 };
 use gpui_platform::application;
 use std::cell::Cell;
 use std::rc::Rc;
-use text_input::TextInput;
 
 actions!(gpui_hello, [Quit, CloseWindow, Tab, TabPrev]);
 
@@ -24,8 +22,6 @@ struct HelloWorld {
     focus_handle: FocusHandle,
     input: Entity<TextInput>,
     button_focus: FocusHandle,
-    /// Whether the Greet button is held down via the keyboard (enter/space).
-    button_pressed: bool,
     /// Set when the title bar is pressed; the move starts on the first drag so a
     /// press that the compositor claims for an edge resize never turns into a move.
     should_move: Rc<Cell<bool>>,
@@ -44,45 +40,10 @@ impl HelloWorld {
     }
 
     /// A focusable button that reads the field and updates the greeting.
-    fn greet_button(&self, colors: &Colors, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let focused = self.button_focus.is_focused(window);
-        let ring = if focused { colors.text } else { colors.selected };
-        div()
-            .id("greet")
+    fn greet_button(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        Button::new("greet", cx.listener(|this, _, _, cx| this.greet(cx)))
+            .label("Greet")
             .track_focus(&self.button_focus)
-            // Enter/space on a focused element already fire on_click; track the key
-            // hold so the press shows the same way a held mouse button does.
-            .on_key_down(cx.listener(|this, e: &KeyDownEvent, _, cx| {
-                if is_activate(&e.keystroke.key) {
-                    this.button_pressed = true;
-                    cx.notify();
-                }
-            }))
-            .on_key_up(cx.listener(|this, e: &KeyUpEvent, _, cx| {
-                if is_activate(&e.keystroke.key) {
-                    this.button_pressed = false;
-                    cx.notify();
-                }
-            }))
-            .on_click(cx.listener(|this, _, _, cx| {
-                this.button_pressed = false;
-                this.greet(cx);
-            }))
-            .flex()
-            .items_center()
-            .justify_center()
-            .px_4()
-            .py_2()
-            .rounded_md()
-            .cursor_pointer()
-            .bg(colors.selected)
-            .text_color(colors.selected_text)
-            .border_2()
-            .border_color(ring)
-            .hover(|s| s.opacity(0.92))
-            .active(|s| s.opacity(0.8))
-            .when(self.button_pressed, |this| this.opacity(0.8))
-            .child("Greet")
     }
 }
 
@@ -90,21 +51,6 @@ impl HelloWorld {
     /// A client-side title bar: draggable, with minimize/maximize/close controls.
     /// Only drawn when the compositor doesn't provide server-side decorations.
     fn title_bar(&self, colors: &Colors, radius: Pixels, bar_bg: Rgba) -> impl IntoElement {
-        let text = colors.text;
-        let hover_bg = colors.selected;
-        let button = move |id: &'static str, icon_name: &'static str| {
-            div()
-                .id(id)
-                .flex()
-                .items_center()
-                .justify_center()
-                .size(px(28.))
-                .rounded_md()
-                .text_color(text)
-                .hover(move |s| s.bg(hover_bg))
-                .active(|s| s.opacity(0.6))
-                .child(bviz_ui_assets::icon(icon_name).size(px(16.)).text_color(text))
-        };
         div()
             .flex()
             .flex_row()
@@ -142,15 +88,19 @@ impl HelloWorld {
                     // Don't let a button press also start a window move.
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .child(
-                        button("minimize", "minus")
-                            .on_click(|_, window, _| window.minimize_window()),
+                        Button::new("minimize", |_, window, _| window.minimize_window())
+                            .ghost()
+                            .icon("minus"),
                     )
                     .child(
-                        button("maximize", "square")
-                            .on_click(|_, window, _| window.zoom_window()),
+                        Button::new("maximize", |_, window, _| window.zoom_window())
+                            .ghost()
+                            .icon("square"),
                     )
                     .child(
-                        button("close", "x").on_click(|_, window, _| window.remove_window()),
+                        Button::new("close", |_, window, _| window.remove_window())
+                            .ghost()
+                            .icon("x"),
                     ),
             )
     }
@@ -255,7 +205,7 @@ impl Render for HelloWorld {
                             .child(div().text_sm().text_color(colors.disabled).child("Name"))
                             .child(self.input.clone()),
                     )
-                    .child(self.greet_button(&colors, window, cx)),
+                    .child(self.greet_button(cx)),
             )
             .child(self.status_bar(&colors, radius, bar_bg));
 
@@ -327,11 +277,6 @@ impl Render for HelloWorld {
     }
 }
 
-/// Whether a key activates a focused button (enter or space).
-fn is_activate(key: &str) -> bool {
-    key == "enter" || key == "space"
-}
-
 /// Which resize edge or corner the position is on, within `shadow_size` of the window border.
 fn resize_edge(
     pos: Point<Pixels>,
@@ -393,7 +338,7 @@ fn main() {
             KeyBinding::new("tab", Tab, None),
             KeyBinding::new("shift-tab", TabPrev, None),
         ]);
-        text_input::bind_keys(cx);
+        bviz_ui_components::register_keys(cx);
         // Quit once the last window is gone (closing a window doesn't quit by default).
         cx.on_window_closed(|cx, _| {
             if cx.windows().is_empty() {
@@ -430,7 +375,6 @@ fn main() {
                         focus_handle,
                         input,
                         button_focus: cx.focus_handle().tab_index(2).tab_stop(true),
-                        button_pressed: false,
                         should_move: Rc::new(Cell::new(false)),
                     }
                 })

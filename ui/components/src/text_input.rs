@@ -7,7 +7,7 @@ use gpui::{
     App, Bounds, Context, CursorStyle, Element, ElementInputHandler, Entity, EntityInputHandler,
     FocusHandle, Focusable, GlobalElementId, InspectorElementId, IntoElement, KeyBinding, LayoutId,
     MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point, Render,
-    ShapedLine, SharedString, Style, TextRun, UTF16Selection, Window, colors::Colors, div, fill,
+    ShapedLine, SharedString, Style, TextRun, UTF16Selection, Window, div, fill,
     point, prelude::*, px, relative, size,
 };
 use std::ops::Range;
@@ -405,7 +405,7 @@ impl Element for TextElement {
         window: &mut Window,
         cx: &mut App,
     ) -> TextPrepaint {
-        let colors = Colors::for_appearance(window);
+        let colors = bviz_ui_theme::colors(window);
         let input = self.input.read(cx);
         let selected = input.selected_range.clone();
         let cursor = input.cursor_offset();
@@ -496,7 +496,7 @@ impl Element for TextElement {
 
 impl Render for TextInput {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let colors = Colors::for_appearance(window);
+        let colors = bviz_ui_theme::colors(window);
         let focused = self.focus_handle.is_focused(window);
         div()
             .key_context("TextInput")
