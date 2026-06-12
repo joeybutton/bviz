@@ -1,12 +1,14 @@
 use gpui::{
-    App, Bounds, BoxShadow, Context, CursorStyle, Decorations, HitboxBehavior, Hsla, IntoElement,
-    MouseButton, Pixels, Point, ResizeEdge, Render, Rgba, SharedString, Size, Tiling,
-    TitlebarOptions, Window, WindowBounds, WindowDecorations, WindowOptions, canvas, colors::Colors,
-    div, point, prelude::*, px, size, transparent_black,
+    App, Bounds, BoxShadow, Context, CursorStyle, Decorations, FocusHandle, HitboxBehavior, Hsla,
+    IntoElement, KeyBinding, MouseButton, Pixels, Point, ResizeEdge, Render, Rgba, SharedString,
+    Size, Tiling, TitlebarOptions, Window, WindowBounds, WindowDecorations, WindowOptions, actions,
+    canvas, colors::Colors, div, point, prelude::*, px, size, transparent_black,
 };
 use gpui_platform::application;
 use std::cell::Cell;
 use std::rc::Rc;
+
+actions!(gpui_hello, [Quit, CloseWindow]);
 
 /// Room left around the window for the drop shadow, and the resize-edge hit zone.
 const SHADOW: Pixels = px(10.0);
@@ -15,6 +17,7 @@ const BORDER: Pixels = px(1.0);
 
 struct HelloWorld {
     text: SharedString,
+    focus_handle: FocusHandle,
     /// Set when the title bar is pressed; the move starts on the first drag so a
     /// press that the compositor claims for an edge resize never turns into a move.
     should_move: Rc<Cell<bool>>,
@@ -174,6 +177,9 @@ impl Render for HelloWorld {
 
         div()
             .id("window-backdrop")
+            .track_focus(&self.focus_handle)
+            .on_action(|_: &Quit, _, cx| cx.quit())
+            .on_action(|_: &CloseWindow, window, _| window.remove_window())
             .size_full()
             .bg(transparent_black())
             .when(client, |this| {
@@ -298,6 +304,18 @@ fn resize_edge(
 
 fn main() {
     application().run(|cx: &mut App| {
+        cx.bind_keys([
+            KeyBinding::new("secondary-q", Quit, None),
+            KeyBinding::new("secondary-w", CloseWindow, None),
+        ]);
+        // Quit once the last window is gone (closing a window doesn't quit by default).
+        cx.on_window_closed(|cx, _| {
+            if cx.windows().is_empty() {
+                cx.quit();
+            }
+        })
+        .detach();
+
         let bounds = Bounds::centered(None, size(px(500.), px(360.)), cx);
         cx.open_window(
             WindowOptions {
@@ -317,9 +335,14 @@ fn main() {
                 window
                     .observe_window_appearance(|window, _cx| window.refresh())
                     .detach();
-                cx.new(|_cx| HelloWorld {
-                    text: "bazel_viz".into(),
-                    should_move: Rc::new(Cell::new(false)),
+                cx.new(|cx| {
+                    let focus_handle = cx.focus_handle();
+                    focus_handle.focus(window, cx);
+                    HelloWorld {
+                        text: "bazel_viz".into(),
+                        focus_handle,
+                        should_move: Rc::new(Cell::new(false)),
+                    }
                 })
             },
         )
