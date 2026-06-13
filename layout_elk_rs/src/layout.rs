@@ -1,18 +1,32 @@
 //! Lays out the compound graph with elk-rs (a pure-Rust port of the Eclipse
 //! Layout Kernel) and collects absolute geometry ready to render.
 //!
-//! The graph is serialized to ELK's JSON format: nested `children` arrays mirror
-//! the containment forest, and every edge is declared on the root, where the
-//! layered algorithm's `INCLUDE_CHILDREN` hierarchy handling routes it across
-//! nesting levels. Leaf nodes are sized from their label length; container nodes
-//! are sized by ELK to fit their children, with extra top padding reserved for
-//! the title band. Shape and edge coordinates are requested in the root frame,
-//! so positions and edge bend points come back already absolute.
+//! The graph is built straight into ELK's in-memory model: nested `ElkNode`s
+//! mirror the containment forest and edges connect the leaf nodes. The layered
+//! algorithm runs as one hierarchy-spanning pass (`INCLUDE_CHILDREN`), routing
+//! cross-container edges orthogonally. Leaf nodes are sized from their label
+//! length; container nodes are sized by ELK to fit their children, with extra
+//! top padding reserved for the title band.
+//!
+//! ELK reports a node's position relative to its parent and an edge's points
+//! relative to the edge's containing node, so both are accumulated up the
+//! containment chain into the absolute, top-left frame the renderer expects.
 
 use std::collections::HashMap;
 
-use org_eclipse_elk_graph_json::org::eclipse::elk::graph::json::layout_api::layout_json;
-use serde_json::{Map, Value, json};
+use org_eclipse_elk_alg_layered::org::eclipse::elk::alg::layered::options::LayeredOptions;
+use org_eclipse_elk_alg_layered::org::eclipse::elk::alg::layered::plain_java_initialization::initialize_plain_java_layout;
+use org_eclipse_elk_core::org::eclipse::elk::core::math::ElkPadding;
+use org_eclipse_elk_core::org::eclipse::elk::core::options::{
+    CoreOptions, Direction, HierarchyHandling,
+};
+use org_eclipse_elk_core::org::eclipse::elk::core::util::BasicProgressMonitor;
+use org_eclipse_elk_core::org::eclipse::elk::core::{IGraphLayoutEngine, RecursiveGraphLayoutEngine};
+use org_eclipse_elk_graph::org::eclipse::elk::graph::properties::Property;
+use org_eclipse_elk_graph::org::eclipse::elk::graph::util::ElkGraphUtil;
+use org_eclipse_elk_graph::org::eclipse::elk::graph::{
+    ElkConnectableShapeRef, ElkEdgeRef, ElkNodeRef,
+};
 
 use crate::graph::{Graph, Node};
 
@@ -50,48 +64,53 @@ pub struct LaidOut {
 }
 
 pub fn layout(graph: &Graph) -> LaidOut {
+    initialize_plain_java_layout();
+
     // Children indexed by parent id; a node that appears as a key is a container.
     let mut children_of: HashMap<&str, Vec<&Node>> = HashMap::new();
-    let mut roots: Vec<&Node> = Vec::new();
     for node in &graph.nodes {
-        match node.parent.as_deref() {
-            Some(parent) => children_of.entry(parent).or_default().push(node),
-            None => roots.push(node),
+        if let Some(parent) = node.parent.as_deref() {
+            children_of.entry(parent).or_default().push(node);
         }
     }
-
-    let children: Vec<Value> = roots.iter().map(|n| node_json(n, &children_of)).collect();
-    let edges: Vec<Value> = graph
-        .edges
-        .iter()
-        .enumerate()
-        .map(|(i, e)| json!({"id": format!("e{i}"), "sources": [e.from], "targets": [e.to]}))
-        .collect();
-    let graph_json = json!({"id": "root", "children": children, "edges": edges});
 
     // Lay the dependency flow out top-to-bottom and route every edge through the
     // single hierarchy-spanning layered pass, so a node sits below the inputs it
     // consumes and cross-container edges run orthogonally between subgraphs.
-    // Coordinates come back in the root frame, hence already absolute.
-    let options = json!({
-        "org.eclipse.elk.algorithm": "org.eclipse.elk.layered",
-        "org.eclipse.elk.direction": "DOWN",
-        "org.eclipse.elk.hierarchyHandling": "INCLUDE_CHILDREN",
-        "org.eclipse.elk.spacing.nodeNode": "24",
-        "org.eclipse.elk.layered.spacing.nodeNodeBetweenLayers": "50",
-        "org.eclipse.elk.json.shapeCoords": "ROOT",
-        "org.eclipse.elk.json.edgeCoords": "ROOT",
-    });
+    let root = ElkGraphUtil::create_graph();
+    set_property(&root, CoreOptions::ALGORITHM, "org.eclipse.elk.layered".to_string());
+    set_property(&root, CoreOptions::DIRECTION, Direction::Down);
+    set_property(&root, CoreOptions::HIERARCHY_HANDLING, HierarchyHandling::IncludeChildren);
+    set_property(&root, CoreOptions::SPACING_NODE_NODE, 24.0);
+    set_property(&root, LayeredOptions::SPACING_NODE_NODE_BETWEEN_LAYERS, 50.0);
 
-    let result = layout_json(&graph_json.to_string(), &options.to_string())
-        .unwrap_or_else(|err| panic!("elk layout failed: {err}"));
-    let laid: Value =
-        serde_json::from_str(&result).expect("elk returned well-formed JSON it just produced");
+    // Build the ELK node tree, remembering each graph node's ELK node by id.
+    let mut elk_of: HashMap<&str, ElkNodeRef> = HashMap::new();
+    for node in &graph.nodes {
+        if node.parent.is_none() {
+            build_node(node, &root, &children_of, &mut elk_of);
+        }
+    }
 
-    let mut geometry: HashMap<String, Rect> = HashMap::new();
-    collect_nodes(&laid, &mut geometry);
-    let mut connectors = Vec::new();
-    collect_edges(&laid, &mut connectors);
+    // create_simple_edge places each edge in the common container of its
+    // endpoints, which is where ELK then routes and reports it.
+    let mut edges: Vec<ElkEdgeRef> = Vec::with_capacity(graph.edges.len());
+    for edge in &graph.edges {
+        let (Some(from), Some(to)) = (
+            elk_of.get(edge.from.as_str()),
+            elk_of.get(edge.to.as_str()),
+        ) else {
+            continue;
+        };
+        edges.push(ElkGraphUtil::create_simple_edge(
+            ElkConnectableShapeRef::Node(from.clone()),
+            ElkConnectableShapeRef::Node(to.clone()),
+        ));
+    }
+
+    let mut engine = RecursiveGraphLayoutEngine::new();
+    let mut monitor = BasicProgressMonitor::new();
+    engine.layout(&root, &mut monitor);
 
     // Containment depth per node, used only to draw parents before children.
     let parent_of: HashMap<&str, &str> = graph
@@ -112,19 +131,18 @@ pub fn layout(graph: &Graph) -> LaidOut {
 
     let mut boxes: Vec<(usize, Box)> = Vec::with_capacity(graph.nodes.len());
     for node in &graph.nodes {
-        let rect = geometry
-            .get(&node.id)
-            .copied()
-            .expect("every node is positioned after layout");
+        let elk = &elk_of[node.id.as_str()];
+        let (x, y) = absolute_origin(elk);
+        let (width, height) = dimensions(elk);
         boxes.push((
             depth_of[node.id.as_str()],
             Box {
                 label: node.label.clone(),
                 kind: node.kind.clone(),
-                x: rect.x,
-                y: rect.y,
-                width: rect.width,
-                height: rect.height,
+                x,
+                y,
+                width,
+                height,
                 compound: children_of.contains_key(node.id.as_str()),
             },
         ));
@@ -132,6 +150,8 @@ pub fn layout(graph: &Graph) -> LaidOut {
     // Parent-before-child so a renderer can draw containers under their children.
     boxes.sort_by_key(|(depth, _)| *depth);
     let boxes: Vec<Box> = boxes.into_iter().map(|(_, b)| b).collect();
+
+    let connectors = edges.iter().filter_map(connector).collect();
 
     let width = boxes.iter().map(|b| b.x + b.width).fold(0.0, f64::max);
     let height = boxes.iter().map(|b| b.y + b.height).fold(0.0, f64::max);
@@ -144,98 +164,95 @@ pub fn layout(graph: &Graph) -> LaidOut {
     }
 }
 
-/// Serializes a node and, recursively, its subtree as an ELK JSON node. Leaves
-/// carry an explicit size; containers are left unsized for ELK to fit around
-/// their children and get extra top padding to clear the title band.
-fn node_json(node: &Node, children_of: &HashMap<&str, Vec<&Node>>) -> Value {
-    let mut obj = Map::new();
-    obj.insert("id".into(), json!(node.id));
+/// Creates the ELK node for `node` under `parent` and recurses into its subtree,
+/// recording the node by id. Leaves carry an explicit size; containers are left
+/// unsized for ELK to fit around their children and get extra top padding to
+/// clear the title band.
+fn build_node<'g>(
+    node: &'g Node,
+    parent: &ElkNodeRef,
+    children_of: &HashMap<&'g str, Vec<&'g Node>>,
+    elk_of: &mut HashMap<&'g str, ElkNodeRef>,
+) {
+    let elk = ElkGraphUtil::create_node(Some(parent.clone()));
     match children_of.get(node.id.as_str()) {
         Some(kids) => {
-            obj.insert(
-                "layoutOptions".into(),
-                json!({"org.eclipse.elk.padding":
-                    format!("[top={LABEL_BAND},left={BORDER},bottom={BORDER},right={BORDER}]")}),
+            set_property(
+                &elk,
+                CoreOptions::PADDING,
+                ElkPadding::with_values(LABEL_BAND, BORDER, BORDER, BORDER),
             );
-            let children: Vec<Value> = kids.iter().map(|n| node_json(n, children_of)).collect();
-            obj.insert("children".into(), Value::Array(children));
-        }
-        None => {
-            obj.insert(
-                "width".into(),
-                json!(node.label.chars().count() as f64 * CHAR_WIDTH + LABEL_PADDING),
-            );
-            obj.insert("height".into(), json!(LEAF_HEIGHT));
-        }
-    }
-    Value::Object(obj)
-}
-
-#[derive(Clone, Copy)]
-struct Rect {
-    x: f64,
-    y: f64,
-    width: f64,
-    height: f64,
-}
-
-/// Records each node's laid-out rectangle, descending through `children`.
-fn collect_nodes(node: &Value, out: &mut HashMap<String, Rect>) {
-    if let (Some(id), Some(width), Some(height)) = (
-        node.get("id").and_then(Value::as_str),
-        node.get("width").and_then(Value::as_f64),
-        node.get("height").and_then(Value::as_f64),
-    ) {
-        out.insert(
-            id.to_string(),
-            Rect {
-                x: node.get("x").and_then(Value::as_f64).unwrap_or(0.0),
-                y: node.get("y").and_then(Value::as_f64).unwrap_or(0.0),
-                width,
-                height,
-            },
-        );
-    }
-    if let Some(children) = node.get("children").and_then(Value::as_array) {
-        for child in children {
-            collect_nodes(child, out);
-        }
-    }
-}
-
-/// Collects every edge's routing polyline, descending through `children`. An
-/// ELK edge carries one or more sections, each a start point, optional bend
-/// points, and an end point.
-fn collect_edges(node: &Value, out: &mut Vec<Connector>) {
-    if let Some(edges) = node.get("edges").and_then(Value::as_array) {
-        for edge in edges {
-            let Some(sections) = edge.get("sections").and_then(Value::as_array) else {
-                continue;
-            };
-            for section in sections {
-                let mut points = Vec::new();
-                points.extend(point(section.get("startPoint")));
-                if let Some(bends) = section.get("bendPoints").and_then(Value::as_array) {
-                    points.extend(bends.iter().filter_map(|b| point(Some(b))));
-                }
-                points.extend(point(section.get("endPoint")));
-                if points.len() >= 2 {
-                    out.push(Connector { points });
-                }
+            for kid in kids {
+                build_node(kid, &elk, children_of, elk_of);
             }
         }
-    }
-    if let Some(children) = node.get("children").and_then(Value::as_array) {
-        for child in children {
-            collect_edges(child, out);
+        None => {
+            let width = node.label.chars().count() as f64 * CHAR_WIDTH + LABEL_PADDING;
+            elk.borrow_mut()
+                .connectable()
+                .shape()
+                .set_dimensions(width, LEAF_HEIGHT);
         }
+    }
+    elk_of.insert(node.id.as_str(), elk);
+}
+
+fn set_property<T: Clone + Send + Sync + 'static>(
+    node: &ElkNodeRef,
+    property: &Property<T>,
+    value: T,
+) {
+    node.borrow_mut()
+        .connectable()
+        .shape()
+        .graph_element()
+        .properties_mut()
+        .set_property(property, Some(value));
+}
+
+fn dimensions(node: &ElkNodeRef) -> (f64, f64) {
+    let mut node = node.borrow_mut();
+    let shape = node.connectable().shape();
+    (shape.width(), shape.height())
+}
+
+/// A node's absolute top-left: its parent-relative position plus the absolute
+/// origin of its parent, accumulated up to the root.
+fn absolute_origin(node: &ElkNodeRef) -> (f64, f64) {
+    let (x, y) = {
+        let mut node = node.borrow_mut();
+        let shape = node.connectable().shape();
+        (shape.x(), shape.y())
+    };
+    match node.borrow().parent() {
+        Some(parent) => {
+            let (px, py) = absolute_origin(&parent);
+            (x + px, y + py)
+        }
+        None => (x, y),
     }
 }
 
-fn point(value: Option<&Value>) -> Option<(f64, f64)> {
-    let value = value?;
-    Some((
-        value.get("x").and_then(Value::as_f64)?,
-        value.get("y").and_then(Value::as_f64)?,
-    ))
+/// An edge's routing polyline in absolute coordinates: ELK reports each section's
+/// points relative to the edge's containing node, so they are shifted by that
+/// node's absolute origin.
+fn connector(edge: &ElkEdgeRef) -> Option<Connector> {
+    let (ox, oy) = edge
+        .borrow()
+        .containing_node()
+        .map(|node| absolute_origin(&node))
+        .unwrap_or((0.0, 0.0));
+
+    let mut points = Vec::new();
+    let mut edge = edge.borrow_mut();
+    for section in edge.sections().iter() {
+        let mut section = section.borrow_mut();
+        points.push((section.start_x() + ox, section.start_y() + oy));
+        for bend in section.bend_points().iter() {
+            let bend = bend.borrow();
+            points.push((bend.x() + ox, bend.y() + oy));
+        }
+        points.push((section.end_x() + ox, section.end_y() + oy));
+    }
+    (points.len() >= 2).then_some(Connector { points })
 }

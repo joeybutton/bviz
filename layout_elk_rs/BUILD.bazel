@@ -7,8 +7,9 @@ rust_binary(
     visibility = ["//:__pkg__"],
     deps = [
         "@bazel_query_proto//:bazel_query_rust_proto",
-        "@crates//:org-eclipse-elk-graph-json",
+        "@crates//:org-eclipse-elk-alg-layered",
+        "@crates//:org-eclipse-elk-core",
+        "@crates//:org-eclipse-elk-graph",
         "@crates//:prost",
-        "@crates//:serde_json",
     ],
 )

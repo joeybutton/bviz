@@ -9,9 +9,10 @@ resolver = "2"
 
 [workspace.dependencies]
 clap = { version = "4", features = ["derive"] }
-org-eclipse-elk-graph-json = { git = "https://github.com/openedges/elk-rs", tag = "v0.11.0+rs.2" }
+org-eclipse-elk-alg-layered = { git = "https://github.com/openedges/elk-rs", tag = "v0.11.0+rs.2" }
+org-eclipse-elk-core = { git = "https://github.com/openedges/elk-rs", tag = "v0.11.0+rs.2" }
+org-eclipse-elk-graph = { git = "https://github.com/openedges/elk-rs", tag = "v0.11.0+rs.2" }
 prost = "0.13"
-serde_json = "1"
 prost-types = "0.13"
 protoc-gen-prost = "0.4"
 gpui = { git = "https://github.com/zed-industries/zed", tag = "v1.6.3" }
