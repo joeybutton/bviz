@@ -255,6 +255,21 @@ the consuming crate's `Cargo.toml`, repin with the Bazel-provided cargo (never s
 cargo), commit `Cargo.lock`, then list it in the target's `deps` (e.g. `@crates//:gpui`).
 Run with `bazel run //bazel_viz`.
 
+## Screenshots (visual verification)
+
+gpui windows are Wayland surfaces. Under GNOME, both the `org.gnome.Shell.Screenshot`
+D-Bus API and the XDG screenshot portal refuse non-interactive callers, so they cannot
+capture a window unattended. Instead use `screenshot.sh` (next to this file), which runs
+the app inside a nested wlroots compositor (`cage`) and captures it with `grim` — both
+fetched on demand from nixpkgs:
+
+```
+.claude/skills/gpui/screenshot.sh <out.png> <app-binary> [args...]
+```
+
+Resolve the binary with `bazel cquery --output=files //path:target` after building it.
+`SCREENSHOT_DELAY` (default 5s) sets how long to wait for the first frame.
+
 ## Gotchas
 
 - No `.id()` → no interactivity. `on_click`/focus/state need a `Stateful` element.
