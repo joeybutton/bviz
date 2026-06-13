@@ -89,6 +89,8 @@ Everything is pinned and Bazel-managed. No system toolchains, no system tools.
 ## Bazel conventions
 
 - Prefer specific visibility (`//pkg:__pkg__`) over `//visibility:public`.
+- Give every crate a project-namespaced `crate_name` carrying the `bviz_` prefix,
+  matching its Cargo package name (e.g. `bviz_graph_svg`, not a bare `graph_svg`).
 - Prefer symbolic macros over legacy macros.
 - Never compute runfiles paths by hand; use the language's `rlocation` helper and
   `$(rlocationpath LABEL)` in BUILD files.
