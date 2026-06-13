@@ -89,6 +89,10 @@ Everything is pinned and Bazel-managed. No system toolchains, no system tools.
 ## Bazel conventions
 
 - Prefer specific visibility (`//pkg:__pkg__`) over `//visibility:public`.
+- Set `visibility` only on targets other packages depend on. A leaf target such as
+  a `rust_binary` nothing depends on needs none — omit it (default private) rather
+  than writing `//:__pkg__`. The exception is a target referenced by an `alias` in
+  another package, which must be visible to that package.
 - Give every crate a project-namespaced `crate_name` carrying the `bviz_` prefix,
   matching its Cargo package name (e.g. `bviz_graph_svg`, not a bare `graph_svg`).
 - Prefer symbolic macros over legacy macros.
