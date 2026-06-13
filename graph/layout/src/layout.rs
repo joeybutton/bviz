@@ -16,9 +16,9 @@ use std::collections::HashMap;
 
 use org_eclipse_elk_alg_layered::org::eclipse::elk::alg::layered::options::LayeredOptions;
 use org_eclipse_elk_alg_layered::org::eclipse::elk::alg::layered::plain_java_initialization::initialize_plain_java_layout;
-use org_eclipse_elk_core::org::eclipse::elk::core::math::ElkPadding;
+use org_eclipse_elk_core::org::eclipse::elk::core::math::{ElkPadding, KVector};
 use org_eclipse_elk_core::org::eclipse::elk::core::options::{
-    CoreOptions, Direction, HierarchyHandling,
+    CoreOptions, Direction, HierarchyHandling, SizeConstraint,
 };
 use org_eclipse_elk_core::org::eclipse::elk::core::util::BasicProgressMonitor;
 use org_eclipse_elk_core::org::eclipse::elk::core::{IGraphLayoutEngine, RecursiveGraphLayoutEngine};
@@ -181,6 +181,28 @@ fn build_node<'g>(
                 &elk,
                 CoreOptions::PADDING,
                 ElkPadding::with_values(LABEL_BAND, BORDER, BORDER, BORDER),
+            );
+            // ELK sizes a container to its children; widen the floor to the
+            // bold, centered title so a title wider than the children does not
+            // overflow the box. The extra 2*BORDER keeps it clear of the
+            // rounded corners and border.
+            //
+            // The layered algorithm always lays out left-to-right internally and
+            // rotates the result into DIRECTION; for the Down direction used here
+            // the container's minimum size is consumed in that pre-rotation frame
+            // and never transposed back, so the title width goes in y to land on
+            // the box's output width.
+            let title_width =
+                node.label.chars().count() as f64 * CHAR_WIDTH + LABEL_PADDING + 2.0 * BORDER;
+            set_property(
+                &elk,
+                CoreOptions::NODE_SIZE_CONSTRAINTS,
+                SizeConstraint::minimum_size(),
+            );
+            set_property(
+                &elk,
+                CoreOptions::NODE_SIZE_MINIMUM,
+                KVector { x: 0.0, y: title_width },
             );
             for kid in kids {
                 build_node(kid, &elk, children_of, elk_of);
