@@ -33,6 +33,9 @@ use crate::graph::Graph;
 const LEAF_HEIGHT: f64 = 30.0;
 const CHAR_WIDTH: f64 = 7.0;
 const LABEL_PADDING: f64 = 16.0;
+/// Vertical space reserved at the top of each container for its label. dugong
+/// packs children flush to the container top, so this is added per nesting level.
+const LABEL_BAND: f64 = 22.0;
 
 /// A laid-out box in absolute coordinates, top-left origin.
 pub struct Box {
@@ -108,22 +111,58 @@ pub fn layout(graph: &Graph) -> LaidOut {
 
     layout_dagreish(&mut dugong);
 
-    let depth_of = depths(graph);
+    // Containment depth per node, used only to draw parents before children.
+    let parent_of: HashMap<&str, &str> = graph
+        .nodes
+        .iter()
+        .filter_map(|node| node.parent.as_deref().map(|p| (node.id.as_str(), p)))
+        .collect();
+    let mut depth_of: HashMap<&str, usize> = HashMap::with_capacity(graph.nodes.len());
+    for node in &graph.nodes {
+        let mut depth = 0;
+        let mut id = node.id.as_str();
+        while let Some(&parent) = parent_of.get(id) {
+            depth += 1;
+            id = parent;
+        }
+        depth_of.insert(node.id.as_str(), depth);
+    }
+
+    // Reserve a label band at the top of every container: insert a band's worth
+    // of vertical space just below each container's top edge. dugong packs
+    // children flush to that edge, so without this a container's label is covered
+    // by its topmost child. The insertion is a pure function of the y coordinate
+    // — everything below a container top sinks by one band — so nodes and the
+    // edge points between them shift together and stay attached, and stacked or
+    // nested containers never overlap.
+    let mut container_tops: Vec<f64> = graph
+        .nodes
+        .iter()
+        .filter(|node| containers.contains(node.id.as_str()))
+        .map(|node| {
+            let laid = dugong.node(&node.id).expect("node present after layout");
+            laid.y.unwrap_or(0.0) - laid.height / 2.0
+        })
+        .collect();
+    container_tops.sort_by(f64::total_cmp);
+    let sink =
+        |y: f64| -> f64 { y + LABEL_BAND * container_tops.partition_point(|&top| top < y) as f64 };
+
     let mut boxes: Vec<(usize, Box)> = Vec::with_capacity(graph.nodes.len());
     for node in &graph.nodes {
         let laid = dugong.node(&node.id).expect("node present after layout");
         let (width, height) = (laid.width, laid.height);
-        let cx = laid.x.unwrap_or(0.0);
-        let cy = laid.y.unwrap_or(0.0);
+        let x = laid.x.unwrap_or(0.0) - width / 2.0;
+        let top = laid.y.unwrap_or(0.0) - height / 2.0;
         boxes.push((
             depth_of[node.id.as_str()],
             Box {
                 label: node.label.clone(),
                 kind: node.kind.clone(),
-                x: cx - width / 2.0,
-                y: cy - height / 2.0,
+                x,
+                y: sink(top),
                 width,
-                height,
+                height: sink(top + height) - sink(top),
                 compound: containers.contains(node.id.as_str()),
             },
         ));
@@ -139,7 +178,7 @@ pub fn layout(graph: &Graph) -> LaidOut {
             .edge(&key.v, &key.w, key.name.as_deref())
             .expect("edge present after layout");
         connectors.push(Connector {
-            points: edge.points.iter().map(|p| (p.x, p.y)).collect(),
+            points: edge.points.iter().map(|p| (p.x, sink(p.y))).collect(),
         });
     }
 
@@ -152,24 +191,4 @@ pub fn layout(graph: &Graph) -> LaidOut {
         width,
         height,
     }
-}
-
-/// Containment depth of each node id (a root is 0).
-fn depths(graph: &Graph) -> HashMap<&str, usize> {
-    let parent_of: HashMap<&str, &str> = graph
-        .nodes
-        .iter()
-        .filter_map(|node| node.parent.as_deref().map(|p| (node.id.as_str(), p)))
-        .collect();
-    let mut depth_of = HashMap::with_capacity(graph.nodes.len());
-    for node in &graph.nodes {
-        let mut depth = 0;
-        let mut id = node.id.as_str();
-        while let Some(&parent) = parent_of.get(id) {
-            depth += 1;
-            id = parent;
-        }
-        depth_of.insert(node.id.as_str(), depth);
-    }
-    depth_of
 }
