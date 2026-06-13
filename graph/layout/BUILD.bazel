@@ -1,10 +1,13 @@
-load("@rules_rs//rs:rust_binary.bzl", "rust_binary")
+load("@rules_rs//rs:rust_library.bzl", "rust_library")
 
-rust_binary(
-    name = "layout_elk_rs",
+rust_library(
+    name = "layout",
     srcs = glob(["src/**/*.rs"]),
-    crate_name = "layout_elk_rs",
-    visibility = ["//:__pkg__"],
+    crate_name = "bviz_graph_layout",
+    visibility = [
+        "//graph/svg:__pkg__",
+        "//ui/graph:__pkg__",
+    ],
     deps = [
         "@bazel_query_proto//:bazel_query_rust_proto",
         "@crates//:org-eclipse-elk-alg-layered",

@@ -1,22 +1,20 @@
 //! Renders a Bazel `aquery --output=streamed_proto` file as an SVG compound
 //! graph.
 //!
-//! Usage: `layout_elk_rs <aquery.streamed_proto> [out.svg]`. The action graph is
-//! read into the target -> configured-target -> action/artifact hierarchy, laid
-//! out with elk-rs, and emitted as SVG (to the output file, or stdout).
+//! Usage: `svg <aquery.streamed_proto> [out.svg]`. The action graph is read into
+//! the target -> configured-target -> action/artifact hierarchy, laid out with
+//! elk-rs, and emitted as SVG (to the output file, or stdout).
 
-mod aquery;
-mod graph;
-mod layout;
-mod streamed_proto;
 mod svg;
 
 use std::process::ExitCode;
 
+use bviz_graph_layout::{aquery, layout, streamed_proto};
+
 fn main() -> ExitCode {
     let mut args = std::env::args().skip(1);
     let Some(input) = args.next() else {
-        eprintln!("usage: layout_elk_rs <aquery.streamed_proto> [out.svg]");
+        eprintln!("usage: svg <aquery.streamed_proto> [out.svg]");
         return ExitCode::from(2);
     };
     let output = args.next();

@@ -1,18 +1,17 @@
 [package]
-name = "layout_elk_rs"
+name = "bviz_graph_layout"
 version = "0.1.0"
 edition = "2024"
 
-[[bin]]
-name = "layout_elk_rs"
-path = "src/main.rs"
+[lib]
+name = "bviz_graph_layout"
+path = "src/lib.rs"
 
 [dependencies]
 org-eclipse-elk-alg-layered = { workspace = true }
 org-eclipse-elk-core = { workspace = true }
 org-eclipse-elk-graph = { workspace = true }
 prost = { workspace = true }
-# Locked for the prost toolchain (@crates//:prost-types,
-# @crates//:protoc-gen-prost__protoc-gen-prost), not used by this crate's code.
+# Locked for the prost toolchain (@crates//:prost-types, @crates//:protoc-gen-prost__protoc-gen-prost), not used by this crate's code.
 prost-types = { workspace = true }
 protoc-gen-prost = { workspace = true }

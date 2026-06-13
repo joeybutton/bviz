@@ -1,0 +1,11 @@
+[package]
+name = "bviz_graph_svg"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "svg"
+path = "src/main.rs"
+
+[dependencies]
+bviz_graph_layout = { path = "../layout" }

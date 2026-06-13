@@ -2,7 +2,7 @@
 
 use std::fmt::Write;
 
-use crate::layout::LaidOut;
+use bviz_graph_layout::LaidOut;
 
 const MARGIN: f64 = 16.0;
 
