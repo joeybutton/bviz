@@ -1,13 +1,14 @@
 load("@rules_rs//rs:rust_binary.bzl", "rust_binary")
 
 rust_binary(
-    name = "layout_dugong",
+    name = "layout_elk_rs",
     srcs = glob(["src/**/*.rs"]),
-    crate_name = "layout_dugong",
+    crate_name = "layout_elk_rs",
     visibility = ["//:__pkg__"],
     deps = [
         "@bazel_query_proto//:bazel_query_rust_proto",
-        "@crates//:dugong",
+        "@crates//:org-eclipse-elk-graph-json",
         "@crates//:prost",
+        "@crates//:serde_json",
     ],
 )

@@ -1,9 +1,9 @@
 //! Renders a Bazel `aquery --output=streamed_proto` file as an SVG compound
 //! graph.
 //!
-//! Usage: `layout_dugong <aquery.streamed_proto> [out.svg]`. The action graph is
+//! Usage: `layout_elk_rs <aquery.streamed_proto> [out.svg]`. The action graph is
 //! read into the target -> configured-target -> action/artifact hierarchy, laid
-//! out with dugong, and emitted as SVG (to the output file, or stdout).
+//! out with elk-rs, and emitted as SVG (to the output file, or stdout).
 
 mod aquery;
 mod graph;
@@ -16,7 +16,7 @@ use std::process::ExitCode;
 fn main() -> ExitCode {
     let mut args = std::env::args().skip(1);
     let Some(input) = args.next() else {
-        eprintln!("usage: layout_dugong <aquery.streamed_proto> [out.svg]");
+        eprintln!("usage: layout_elk_rs <aquery.streamed_proto> [out.svg]");
         return ExitCode::from(2);
     };
     let output = args.next();

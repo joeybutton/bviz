@@ -1,14 +1,15 @@
 [package]
-name = "layout_dugong"
+name = "layout_elk_rs"
 version = "0.1.0"
 edition = "2024"
 
 [[bin]]
-name = "layout_dugong"
+name = "layout_elk_rs"
 path = "src/main.rs"
 
 [dependencies]
-dugong = { workspace = true }
+org-eclipse-elk-graph-json = { workspace = true }
+serde_json = { workspace = true }
 prost = { workspace = true }
 # Locked for the prost toolchain (@crates//:prost-types,
 # @crates//:protoc-gen-prost__protoc-gen-prost), not used by this crate's code.
