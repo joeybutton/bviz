@@ -69,13 +69,13 @@ pub fn layout(graph: &Graph) -> LaidOut {
         .collect();
     let graph_json = json!({"id": "root", "children": children, "edges": edges});
 
-    // Lay the dependency flow out left-to-right and route every edge through the
-    // single hierarchy-spanning layered pass, so a node sits next to the inputs
-    // it consumes and cross-container edges run orthogonally between subgraphs.
+    // Lay the dependency flow out top-to-bottom and route every edge through the
+    // single hierarchy-spanning layered pass, so a node sits below the inputs it
+    // consumes and cross-container edges run orthogonally between subgraphs.
     // Coordinates come back in the root frame, hence already absolute.
     let options = json!({
         "org.eclipse.elk.algorithm": "org.eclipse.elk.layered",
-        "org.eclipse.elk.direction": "RIGHT",
+        "org.eclipse.elk.direction": "DOWN",
         "org.eclipse.elk.hierarchyHandling": "INCLUDE_CHILDREN",
         "org.eclipse.elk.spacing.nodeNode": "24",
         "org.eclipse.elk.layered.spacing.nodeNodeBetweenLayers": "50",
