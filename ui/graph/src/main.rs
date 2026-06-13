@@ -6,23 +6,12 @@ use bviz_graph_layout::{aquery, layout, streamed_proto, LaidOut};
 use bviz_ui_shell::Chrome;
 use gpui::{
     App, BorderStyle, Bounds, Context, Div, FocusHandle, IntoElement, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, PathBuilder, Pixels, Point, Render, ScrollDelta, ScrollWheelEvent,
-    Stateful, TextAlign, TextRun, Window, canvas, div, font, point, prelude::*, px, quad, rgb, size,
+    Hsla, MouseMoveEvent, MouseUpEvent, PathBuilder, Pixels, Point, Render, Rgba, ScrollDelta,
+    ScrollWheelEvent, Stateful, TextAlign, TextRun, Window, canvas, div, font, point, prelude::*,
+    px, quad, rgb, size,
 };
 use std::cell::Cell;
 use std::rc::Rc;
-
-/// Stroke color shared by connector polylines and their arrowheads.
-const CONNECTOR_COLOR: u32 = 0x5a5a5a;
-
-/// Fill of a container box.
-const CONTAINER_FILL: u32 = 0xdde6f2;
-
-/// Border color shared by every box.
-const BOX_BORDER: u32 = 0x3a5a8c;
-
-/// Label text color shared by every box.
-const LABEL_COLOR: u32 = 0x1f3354;
 
 /// Height of the top band a container reserves for its title.
 const LABEL_BAND: f64 = 26.0;
@@ -33,14 +22,31 @@ const LABEL_SIZE: f64 = 13.0;
 /// Padding around the graph, matching the SVG renderer's margin.
 const MARGIN: f64 = 16.0;
 
-/// Fill color for a leaf box, keyed by its node kind, matching the SVG palette.
-fn leaf_fill(kind: &str) -> u32 {
+/// Fraction by which a kind accent is blended toward the themed background; the
+/// result is the leaf fill, so kinds stay recognizable yet read on light or dark.
+const KIND_BLEND: f32 = 0.68;
+
+/// Accent hue for a leaf box, keyed by its node kind. These are mid-saturation
+/// and recognizable against either a light or dark background.
+fn kind_accent(kind: &str) -> Rgba {
     match kind {
-        "action" => 0xfde8c8,
-        "artifact" => 0xd6efd6,
-        "source" => 0xe8e0f4,
-        _ => 0xeef3fb,
+        "action" => rgb(0xe69a3c),   // orange
+        "artifact" => rgb(0x57b85a), // green
+        "source" => rgb(0x9b7fd0),   // purple
+        _ => rgb(0x5b8fd0),          // blue
     }
+}
+
+/// Theme-resolved colors the canvas paints with, owned so the `'static` paint
+/// closure can capture them.
+#[derive(Clone, Copy)]
+struct Palette {
+    border: Rgba,
+    label: Rgba,
+    container_fill: Rgba,
+    /// Background the kind accents are blended toward to form leaf fills.
+    background: Rgba,
+    connector: Rgba,
 }
 
 /// The loaded graph, or a message explaining why none is shown.
@@ -56,7 +62,8 @@ struct PaintBox {
     w: f64,
     h: f64,
     compound: bool,
-    fill: u32,
+    /// Fill resolved from the active theme when the box vec is built.
+    fill: Rgba,
     label: String,
 }
 
@@ -98,6 +105,7 @@ impl GraphView {
         g: &LaidOut,
         zoom: f32,
         pan: (f32, f32),
+        palette: Palette,
         viewport_origin: Rc<Cell<Point<Pixels>>>,
     ) -> Stateful<Div> {
         let boxes: Vec<PaintBox> = g
@@ -110,9 +118,9 @@ impl GraphView {
                 h: b.height,
                 compound: b.compound,
                 fill: if b.compound {
-                    CONTAINER_FILL
+                    palette.container_fill
                 } else {
-                    leaf_fill(&b.kind)
+                    bviz_ui_theme::mix(kind_accent(&b.kind), palette.background, KIND_BLEND)
                 },
                 label: b.label.clone(),
             })
@@ -132,10 +140,10 @@ impl GraphView {
                         // Boxes parent-before-child so children paint over their
                         // containers; connectors last so edges sit over the fills.
                         for b in &boxes {
-                            paint_box(b, bounds, zoom, pan, window, cx);
+                            paint_box(b, bounds, zoom, pan, &palette, window, cx);
                         }
                         for points in &connectors {
-                            paint_connector(points, bounds, zoom, pan, window);
+                            paint_connector(points, bounds, zoom, pan, &palette, window);
                         }
                     },
                 )
@@ -163,13 +171,20 @@ impl GraphView {
 impl Render for GraphView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = bviz_ui_theme::colors(window);
+        let palette = Palette {
+            border: colors.border,
+            label: colors.text,
+            container_fill: colors.container,
+            background: colors.background,
+            connector: bviz_ui_theme::mix(colors.text, colors.background, 0.45),
+        };
         let body = match &self.source {
             Source::Loaded(g) => div()
                 .flex_1()
                 .flex()
                 .overflow_hidden()
                 .child(
-                    Self::graph(g, self.zoom, self.pan, self.viewport_origin.clone())
+                    Self::graph(g, self.zoom, self.pan, palette, self.viewport_origin.clone())
                         .on_mouse_down(
                             MouseButton::Left,
                             cx.listener(|this, e: &MouseDownEvent, _, _| {
@@ -252,6 +267,7 @@ fn paint_box(
     bounds: Bounds<Pixels>,
     zoom: f32,
     pan: (f32, f32),
+    palette: &Palette,
     window: &mut Window,
     cx: &mut App,
 ) {
@@ -264,9 +280,9 @@ fn paint_box(
     window.paint_quad(quad(
         rect,
         px(6. * zoom),
-        rgb(b.fill),
+        b.fill,
         px(1.),
-        rgb(BOX_BORDER),
+        Hsla::from(palette.border),
         BorderStyle::Solid,
     ));
 
@@ -278,7 +294,7 @@ fn paint_box(
     let run = TextRun {
         len: b.label.len(),
         font,
-        color: rgb(LABEL_COLOR).into(),
+        color: palette.label.into(),
         background_color: None,
         underline: None,
         strikethrough: None,
@@ -304,6 +320,7 @@ fn paint_connector(
     bounds: Bounds<Pixels>,
     zoom: f32,
     pan: (f32, f32),
+    palette: &Palette,
     window: &mut Window,
 ) {
     if points.len() < 2 {
@@ -323,15 +340,15 @@ fn paint_connector(
         }
     }
     if let Ok(path) = line.build() {
-        window.paint_path(path, rgb(CONNECTOR_COLOR));
+        window.paint_path(path, palette.connector);
     }
 
-    paint_arrowhead(&pts, zoom, window);
+    paint_arrowhead(&pts, zoom, palette.connector, window);
 }
 
 /// Paints a filled triangle at the polyline's last point, aimed along the
 /// direction of its final segment.
-fn paint_arrowhead(pts: &[Point<Pixels>], zoom: f32, window: &mut Window) {
+fn paint_arrowhead(pts: &[Point<Pixels>], zoom: f32, color: Rgba, window: &mut Window) {
     let length = 9.0 * zoom;
     let half_width = 4.0 * zoom;
 
@@ -350,7 +367,7 @@ fn paint_arrowhead(pts: &[Point<Pixels>], zoom: f32, window: &mut Window) {
     let mut head = PathBuilder::fill();
     head.add_polygon(&[tip, left, right], true);
     if let Ok(path) = head.build() {
-        window.paint_path(path, rgb(CONNECTOR_COLOR));
+        window.paint_path(path, color);
     }
 }
 
