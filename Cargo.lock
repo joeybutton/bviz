@@ -851,6 +851,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "bviz_ui_graph"
+version = "0.1.0"
+dependencies = [
+ "bviz_graph_layout",
+ "gpui",
+ "gpui_platform",
+]
+
+[[package]]
 name = "bytemuck"
 version = "1.25.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

@@ -1,0 +1,13 @@
+[package]
+name = "bviz_ui_graph"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "graph"
+path = "src/main.rs"
+
+[dependencies]
+gpui = { workspace = true, features = ["inspector"] }
+gpui_platform = { workspace = true, features = ["wayland"] }
+bviz_graph_layout = { path = "../../graph/layout" }
