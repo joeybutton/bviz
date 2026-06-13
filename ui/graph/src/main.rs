@@ -5,16 +5,30 @@
 use bviz_graph_layout::{aquery, layout, streamed_proto, LaidOut};
 use bviz_ui_shell::Chrome;
 use gpui::{
-    Bounds, Context, Div, FontWeight, FocusHandle, IntoElement, MouseButton, MouseDownEvent,
+    App, BorderStyle, Bounds, Context, Div, FocusHandle, IntoElement, MouseButton, MouseDownEvent,
     MouseMoveEvent, MouseUpEvent, PathBuilder, Pixels, Point, Render, ScrollDelta, ScrollWheelEvent,
-    Stateful,
-    Window, canvas, div, point, prelude::*, px, rgb,
+    Stateful, TextAlign, TextRun, Window, canvas, div, font, point, prelude::*, px, quad, rgb, size,
 };
 use std::cell::Cell;
 use std::rc::Rc;
 
 /// Stroke color shared by connector polylines and their arrowheads.
 const CONNECTOR_COLOR: u32 = 0x5a5a5a;
+
+/// Fill of a container box.
+const CONTAINER_FILL: u32 = 0xdde6f2;
+
+/// Border color shared by every box.
+const BOX_BORDER: u32 = 0x3a5a8c;
+
+/// Label text color shared by every box.
+const LABEL_COLOR: u32 = 0x1f3354;
+
+/// Height of the top band a container reserves for its title.
+const LABEL_BAND: f64 = 26.0;
+
+/// Box label font size in layout pixels.
+const LABEL_SIZE: f64 = 13.0;
 
 /// Padding around the graph, matching the SVG renderer's margin.
 const MARGIN: f64 = 16.0;
@@ -33,6 +47,17 @@ fn leaf_fill(kind: &str) -> u32 {
 enum Source {
     Loaded(LaidOut),
     Message(String),
+}
+
+/// A box flattened to what the canvas needs to paint it, in layout pixels.
+struct PaintBox {
+    x: f64,
+    y: f64,
+    w: f64,
+    h: f64,
+    compound: bool,
+    fill: u32,
+    label: String,
 }
 
 /// Loads, lays out, and summarizes an aquery action graph.
@@ -65,75 +90,60 @@ impl GraphView {
         }
     }
 
-    /// Builds the box elements at their layout coordinates with pan and zoom
-    /// baked in: containers carry a top label band, leaves are filled by kind.
-    /// Boxes are emitted parent-before-child so children paint over the
-    /// containers that enclose them; the connectors canvas spans the whole
-    /// viewport and is added last so it paints over the boxes.
+    /// Builds the single-canvas viewport: every box and connector is painted in
+    /// one `canvas`, with pan and zoom applied in the paint transform. The
+    /// closure is `'static`, so it captures owned snapshots of the boxes and
+    /// connectors rather than borrowing the graph.
     fn graph(
         g: &LaidOut,
         zoom: f32,
         pan: (f32, f32),
         viewport_origin: Rc<Cell<Point<Pixels>>>,
     ) -> Stateful<Div> {
-        let mut container = div()
+        let boxes: Vec<PaintBox> = g
+            .boxes
+            .iter()
+            .map(|b| PaintBox {
+                x: b.x,
+                y: b.y,
+                w: b.width,
+                h: b.height,
+                compound: b.compound,
+                fill: if b.compound {
+                    CONTAINER_FILL
+                } else {
+                    leaf_fill(&b.kind)
+                },
+                label: b.label.clone(),
+            })
+            .collect();
+        let connectors: Vec<Vec<(f64, f64)>> =
+            g.connectors.iter().map(|c| c.points.clone()).collect();
+        div()
             .id("graph-viewport")
             .relative()
             .size_full()
-            .overflow_hidden();
-        for b in &g.boxes {
-            let frame = div()
-                .absolute()
-                .left(px((b.x as f32 + MARGIN as f32) * zoom + pan.0))
-                .top(px((b.y as f32 + MARGIN as f32) * zoom + pan.1))
-                .w(px(b.width as f32 * zoom))
-                .h(px(b.height as f32 * zoom))
-                .rounded(px(6. * zoom))
-                .border_1()
-                .border_color(rgb(0x3a5a8c));
-            let frame = if b.compound {
-                frame.bg(rgb(0xdde6f2)).flex().flex_col().items_center().child(
-                    div()
-                        .h(px(26. * zoom))
-                        .flex()
-                        .items_center()
-                        .text_size(px(13. * zoom))
-                        .font_weight(FontWeight::BOLD)
-                        .text_color(rgb(0x1f3354))
-                        .child(b.label.clone()),
+            .overflow_hidden()
+            .child(
+                canvas(
+                    |_, _, _| {},
+                    move |bounds, _, window, cx| {
+                        viewport_origin.set(bounds.origin);
+                        // Boxes parent-before-child so children paint over their
+                        // containers; connectors last so edges sit over the fills.
+                        for b in &boxes {
+                            paint_box(b, bounds, zoom, pan, window, cx);
+                        }
+                        for points in &connectors {
+                            paint_connector(points, bounds, zoom, pan, window);
+                        }
+                    },
                 )
-            } else {
-                frame
-                    .bg(rgb(leaf_fill(&b.kind)))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .text_size(px(13. * zoom))
-                    .text_color(rgb(0x1f3354))
-                    .child(b.label.clone())
-            };
-            container = container.child(frame);
-        }
-        let connectors: Vec<Vec<(f64, f64)>> = g
-            .connectors
-            .iter()
-            .map(|c| c.points.clone())
-            .collect();
-        container.child(
-            canvas(
-                |_, _, _| {},
-                move |bounds, _, window, _| {
-                    viewport_origin.set(bounds.origin);
-                    for points in &connectors {
-                        paint_connector(points, bounds, zoom, pan, window);
-                    }
-                },
+                .absolute()
+                .left_0()
+                .top_0()
+                .size_full(),
             )
-            .absolute()
-            .left_0()
-            .top_0()
-            .size_full(),
-        )
     }
 
     fn status(&self) -> String {
@@ -232,6 +242,59 @@ fn to_screen(x: f64, y: f64, bounds: Bounds<Pixels>, zoom: f32, pan: (f32, f32))
         bounds.origin.x + px((x as f32 + MARGIN as f32) * zoom + pan.0),
         bounds.origin.y + px((y as f32 + MARGIN as f32) * zoom + pan.1),
     )
+}
+
+/// Paints a box's quad and its centered label. A container's label sits in its
+/// top band; a leaf's label is centered in the whole box. Off-screen boxes are
+/// culled.
+fn paint_box(
+    b: &PaintBox,
+    bounds: Bounds<Pixels>,
+    zoom: f32,
+    pan: (f32, f32),
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let origin = to_screen(b.x, b.y, bounds, zoom, pan);
+    let size = size(px(b.w as f32 * zoom), px(b.h as f32 * zoom));
+    let rect = Bounds::new(origin, size);
+    if !rect.intersects(&bounds) {
+        return;
+    }
+    window.paint_quad(quad(
+        rect,
+        px(6. * zoom),
+        rgb(b.fill),
+        px(1.),
+        rgb(BOX_BORDER),
+        BorderStyle::Solid,
+    ));
+
+    let font = if b.compound {
+        font("Inter").bold()
+    } else {
+        font("Inter")
+    };
+    let run = TextRun {
+        len: b.label.len(),
+        font,
+        color: rgb(LABEL_COLOR).into(),
+        background_color: None,
+        underline: None,
+        strikethrough: None,
+    };
+    let fs = px(LABEL_SIZE as f32 * zoom);
+    let line = window
+        .text_system()
+        .shape_line(b.label.clone().into(), fs, &[run], None);
+    let tx = rect.origin.x + (rect.size.width - line.width()) / 2.;
+    let ty = if b.compound {
+        let band = px(LABEL_BAND as f32 * zoom);
+        rect.origin.y + (band - fs) / 2.
+    } else {
+        rect.origin.y + (rect.size.height - fs) / 2.
+    };
+    let _ = line.paint(point(tx, ty), fs, TextAlign::Left, None, window, cx);
 }
 
 /// Strokes a connector polyline and caps its end with a filled arrowhead
