@@ -73,6 +73,17 @@ pub fn layout(graph: &Graph) -> LaidOut {
         });
     dugong.set_graph(graph_label());
 
+    // Give every edge dagre's default weight of 1 so it actually pulls its
+    // endpoints together; dugong's EdgeLabel::default weight is 0, which leaves
+    // connected nodes (notably the root source files and the actions consuming
+    // them) unanchored during ordering and positioning. This default factory
+    // applies only to the edges we add below; dugong's internal nesting, border,
+    // and dummy-chain edges set their own weights explicitly.
+    dugong.set_default_edge_label(|| EdgeLabel {
+        weight: 1.0,
+        ..EdgeLabel::default()
+    });
+
     for node in &graph.nodes {
         let label = if containers.contains(node.id.as_str()) {
             // Sized by dugong to fit its children.
