@@ -5,9 +5,13 @@
 use bviz_graph_layout::{aquery, layout, streamed_proto, LaidOut};
 use bviz_ui_shell::Chrome;
 use gpui::{
-    Bounds, Context, FontWeight, FocusHandle, IntoElement, PathBuilder, Pixels, Point, Render,
+    Bounds, Context, Div, FontWeight, FocusHandle, IntoElement, MouseButton, MouseDownEvent,
+    MouseMoveEvent, MouseUpEvent, PathBuilder, Pixels, Point, Render, ScrollDelta, ScrollWheelEvent,
+    Stateful,
     Window, canvas, div, point, prelude::*, px, rgb,
 };
+use std::cell::Cell;
+use std::rc::Rc;
 
 /// Stroke color shared by connector polylines and their arrowheads.
 const CONNECTOR_COLOR: u32 = 0x5a5a5a;
@@ -35,6 +39,15 @@ enum Source {
 struct GraphView {
     focus_handle: FocusHandle,
     source: Source,
+    /// Zoom scale baked into every coordinate (1.0 = layout pixels).
+    zoom: f32,
+    /// Pixel translation applied after scaling.
+    pan: (f32, f32),
+    dragging: bool,
+    last_mouse: Point<Pixels>,
+    /// Screen origin of the viewport, captured during canvas paint so the
+    /// scroll handler can map a window cursor position to viewport-local space.
+    viewport_origin: Rc<Cell<Point<Pixels>>>,
 }
 
 impl GraphView {
@@ -44,35 +57,47 @@ impl GraphView {
         Self {
             focus_handle,
             source,
+            zoom: 1.0,
+            pan: (0.0, 0.0),
+            dragging: false,
+            last_mouse: Point::default(),
+            viewport_origin: Rc::new(Cell::new(Point::default())),
         }
     }
 
-    /// Builds the absolutely-positioned box elements at their layout
-    /// coordinates: containers carry a top label band, leaves are filled by
-    /// kind. Boxes are emitted parent-before-child so children paint over the
-    /// containers that enclose them.
-    fn graph(g: &LaidOut) -> impl IntoElement {
+    /// Builds the box elements at their layout coordinates with pan and zoom
+    /// baked in: containers carry a top label band, leaves are filled by kind.
+    /// Boxes are emitted parent-before-child so children paint over the
+    /// containers that enclose them; the connectors canvas spans the whole
+    /// viewport and is added last so it paints over the boxes.
+    fn graph(
+        g: &LaidOut,
+        zoom: f32,
+        pan: (f32, f32),
+        viewport_origin: Rc<Cell<Point<Pixels>>>,
+    ) -> Stateful<Div> {
         let mut container = div()
+            .id("graph-viewport")
             .relative()
-            .w(px((g.width + 2.0 * MARGIN) as f32))
-            .h(px((g.height + 2.0 * MARGIN) as f32));
+            .size_full()
+            .overflow_hidden();
         for b in &g.boxes {
             let frame = div()
                 .absolute()
-                .left(px((b.x + MARGIN) as f32))
-                .top(px((b.y + MARGIN) as f32))
-                .w(px(b.width as f32))
-                .h(px(b.height as f32))
-                .rounded(px(6.))
+                .left(px((b.x as f32 + MARGIN as f32) * zoom + pan.0))
+                .top(px((b.y as f32 + MARGIN as f32) * zoom + pan.1))
+                .w(px(b.width as f32 * zoom))
+                .h(px(b.height as f32 * zoom))
+                .rounded(px(6. * zoom))
                 .border_1()
                 .border_color(rgb(0x3a5a8c));
             let frame = if b.compound {
                 frame.bg(rgb(0xdde6f2)).flex().flex_col().items_center().child(
                     div()
-                        .h(px(26.))
+                        .h(px(26. * zoom))
                         .flex()
                         .items_center()
-                        .text_size(px(13.))
+                        .text_size(px(13. * zoom))
                         .font_weight(FontWeight::BOLD)
                         .text_color(rgb(0x1f3354))
                         .child(b.label.clone()),
@@ -83,15 +108,12 @@ impl GraphView {
                     .flex()
                     .items_center()
                     .justify_center()
-                    .text_size(px(13.))
+                    .text_size(px(13. * zoom))
                     .text_color(rgb(0x1f3354))
                     .child(b.label.clone())
             };
             container = container.child(frame);
         }
-        // Connectors paint last, in an overlay covering the whole container, so
-        // edges descending into nested boxes stay visible over the opaque fills
-        // they cross.
         let connectors: Vec<Vec<(f64, f64)>> = g
             .connectors
             .iter()
@@ -101,16 +123,16 @@ impl GraphView {
             canvas(
                 |_, _, _| {},
                 move |bounds, _, window, _| {
+                    viewport_origin.set(bounds.origin);
                     for points in &connectors {
-                        paint_connector(points, bounds, window);
+                        paint_connector(points, bounds, zoom, pan, window);
                     }
                 },
             )
             .absolute()
             .left_0()
             .top_0()
-            .w(px((g.width + 2.0 * MARGIN) as f32))
-            .h(px((g.height + 2.0 * MARGIN) as f32)),
+            .size_full(),
         )
     }
 
@@ -129,16 +151,56 @@ impl GraphView {
 }
 
 impl Render for GraphView {
-    fn render(&mut self, window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = bviz_ui_theme::colors(window);
         let body = match &self.source {
             Source::Loaded(g) => div()
                 .flex_1()
                 .flex()
-                .justify_center()
-                .items_center()
                 .overflow_hidden()
-                .child(Self::graph(g)),
+                .child(
+                    Self::graph(g, self.zoom, self.pan, self.viewport_origin.clone())
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, e: &MouseDownEvent, _, _| {
+                                this.dragging = true;
+                                this.last_mouse = e.position;
+                            }),
+                        )
+                        .on_mouse_up(
+                            MouseButton::Left,
+                            cx.listener(|this, _e: &MouseUpEvent, _, _| {
+                                this.dragging = false;
+                            }),
+                        )
+                        .on_mouse_move(cx.listener(|this, e: &MouseMoveEvent, _, cx| {
+                            if this.dragging {
+                                this.pan.0 += f32::from(e.position.x) - f32::from(this.last_mouse.x);
+                                this.pan.1 += f32::from(e.position.y) - f32::from(this.last_mouse.y);
+                                this.last_mouse = e.position;
+                                cx.notify();
+                            }
+                        }))
+                        .on_scroll_wheel(cx.listener(|this, e: &ScrollWheelEvent, _, cx| {
+                            // Anchor the zoom at the cursor: keep the content
+                            // point under the cursor fixed as the scale changes.
+                            let vp = this.viewport_origin.get();
+                            let lx = f32::from(e.position.x) - f32::from(vp.x);
+                            let ly = f32::from(e.position.y) - f32::from(vp.y);
+                            let dy = match e.delta {
+                                ScrollDelta::Lines(p) => p.y,
+                                ScrollDelta::Pixels(p) => f32::from(p.y) / 120.0,
+                            };
+                            let old = this.zoom;
+                            let new = (old * 1.1_f32.powf(dy)).clamp(0.2, 4.0);
+                            let content_x = (lx - this.pan.0) / old;
+                            let content_y = (ly - this.pan.1) / old;
+                            this.pan.0 = lx - content_x * new;
+                            this.pan.1 = ly - content_y * new;
+                            this.zoom = new;
+                            cx.notify();
+                        })),
+                ),
             Source::Message(msg) => div()
                 .flex_1()
                 .flex()
@@ -162,24 +224,34 @@ impl Render for GraphView {
     }
 }
 
-/// Maps a layout-space point to window space, applying the same margin offset
-/// the boxes use and the canvas's origin within the window.
-fn to_screen(x: f64, y: f64, bounds: Bounds<Pixels>) -> Point<Pixels> {
+/// Maps a layout-space point to window space with pan and zoom baked in, atop
+/// the same margin offset the boxes use and the canvas's origin within the
+/// window.
+fn to_screen(x: f64, y: f64, bounds: Bounds<Pixels>, zoom: f32, pan: (f32, f32)) -> Point<Pixels> {
     point(
-        bounds.origin.x + px((x + MARGIN) as f32),
-        bounds.origin.y + px((y + MARGIN) as f32),
+        bounds.origin.x + px((x as f32 + MARGIN as f32) * zoom + pan.0),
+        bounds.origin.y + px((y as f32 + MARGIN as f32) * zoom + pan.1),
     )
 }
 
 /// Strokes a connector polyline and caps its end with a filled arrowhead
 /// pointing along the final segment.
-fn paint_connector(points: &[(f64, f64)], bounds: Bounds<Pixels>, window: &mut Window) {
+fn paint_connector(
+    points: &[(f64, f64)],
+    bounds: Bounds<Pixels>,
+    zoom: f32,
+    pan: (f32, f32),
+    window: &mut Window,
+) {
     if points.len() < 2 {
         return;
     }
-    let pts: Vec<Point<Pixels>> = points.iter().map(|(x, y)| to_screen(*x, *y, bounds)).collect();
+    let pts: Vec<Point<Pixels>> = points
+        .iter()
+        .map(|(x, y)| to_screen(*x, *y, bounds, zoom, pan))
+        .collect();
 
-    let mut line = PathBuilder::stroke(px(1.5));
+    let mut line = PathBuilder::stroke(px(1.5 * zoom));
     for (i, p) in pts.iter().enumerate() {
         if i == 0 {
             line.move_to(*p);
@@ -191,14 +263,14 @@ fn paint_connector(points: &[(f64, f64)], bounds: Bounds<Pixels>, window: &mut W
         window.paint_path(path, rgb(CONNECTOR_COLOR));
     }
 
-    paint_arrowhead(&pts, window);
+    paint_arrowhead(&pts, zoom, window);
 }
 
 /// Paints a filled triangle at the polyline's last point, aimed along the
 /// direction of its final segment.
-fn paint_arrowhead(pts: &[Point<Pixels>], window: &mut Window) {
-    const LENGTH: f32 = 9.0;
-    const HALF_WIDTH: f32 = 4.0;
+fn paint_arrowhead(pts: &[Point<Pixels>], zoom: f32, window: &mut Window) {
+    let length = 9.0 * zoom;
+    let half_width = 4.0 * zoom;
 
     let n = pts.len();
     let tip = pts[n - 1];
@@ -208,9 +280,9 @@ fn paint_arrowhead(pts: &[Point<Pixels>], window: &mut Window) {
     let (ux, uy) = (dx / len, dy / len); // forward unit vector
     let (perp_x, perp_y) = (-uy, ux); // left-perpendicular unit vector
 
-    let base = point(tip.x - px(ux * LENGTH), tip.y - px(uy * LENGTH));
-    let left = point(base.x + px(perp_x * HALF_WIDTH), base.y + px(perp_y * HALF_WIDTH));
-    let right = point(base.x - px(perp_x * HALF_WIDTH), base.y - px(perp_y * HALF_WIDTH));
+    let base = point(tip.x - px(ux * length), tip.y - px(uy * length));
+    let left = point(base.x + px(perp_x * half_width), base.y + px(perp_y * half_width));
+    let right = point(base.x - px(perp_x * half_width), base.y - px(perp_y * half_width));
 
     let mut head = PathBuilder::fill();
     head.add_polygon(&[tip, left, right], true);
