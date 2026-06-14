@@ -2,3 +2,7 @@
 //! emulating a terminal to reproduce the final rendered state of a build.
 
 pub use bazel_build_event_proto as bep;
+
+mod output;
+
+pub use output::{BuildOutput, parse};
