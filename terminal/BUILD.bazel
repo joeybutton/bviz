@@ -8,6 +8,7 @@ rust_library(
     visibility = ["//ui/terminal:__pkg__"],
     deps = [
         "@bazel_build_event_proto//:bazel_build_event_rust_proto",
+        "@crates//:alacritty_terminal",
         "@crates//:prost",
     ],
 )

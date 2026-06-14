@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+alacritty_terminal = { workspace = true }
 prost = { workspace = true }
 # Locked for the prost toolchain (@crates//:prost-types,
 # @crates//:protoc-gen-prost__protoc-gen-prost); not used by this crate's code.
