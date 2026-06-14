@@ -5,13 +5,14 @@
 use bviz_graph_layout::{aquery, layout, streamed_proto, LaidOut};
 use bviz_ui_shell::Chrome;
 use gpui::{
-    App, BorderStyle, Bounds, Context, Div, FocusHandle, IntoElement, MouseButton, MouseDownEvent,
-    Hsla, MouseMoveEvent, MouseUpEvent, PathBuilder, Pixels, Point, Render, Rgba, ScrollDelta,
-    ScrollWheelEvent, Stateful, TextAlign, TextRun, Window, canvas, div, font, point, prelude::*,
-    px, quad, rgb, size,
+    Animation, AnimationExt, App, AsyncApp, BorderStyle, Bounds, Context, Div, FocusHandle,
+    IntoElement, MouseButton, MouseDownEvent, Hsla, MouseMoveEvent, MouseUpEvent, PathBuilder,
+    Pixels, Point, Render, Rgba, ScrollDelta, ScrollWheelEvent, Stateful, Task, TextAlign, TextRun,
+    WeakEntity, Window, canvas, div, font, point, prelude::*, px, quad, rgb, size,
 };
 use std::cell::Cell;
 use std::rc::Rc;
+use std::time::Duration;
 
 /// Height of the top band a container reserves for its title.
 const LABEL_BAND: f64 = 26.0;
@@ -56,8 +57,10 @@ struct Palette {
     connector: Rgba,
 }
 
-/// The loaded graph, or a message explaining why none is shown.
+/// The loaded graph, a load in progress, or a message explaining why none is
+/// shown.
 enum Source {
+    Loading,
     Loaded(LaidOut),
     Message(String),
 }
@@ -87,12 +90,36 @@ struct GraphView {
     /// Screen origin of the viewport, captured during canvas paint so the
     /// scroll handler can map a window cursor position to viewport-local space.
     viewport_origin: Rc<Cell<Point<Pixels>>>,
+    /// Holds the background load+layout task so it isn't cancelled on drop.
+    _load_task: Task<()>,
 }
 
 impl GraphView {
-    fn new(source: Source, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    fn new(path: Option<String>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let focus_handle = cx.focus_handle();
         focus_handle.focus(window, cx);
+        let (source, load_task) = match path {
+            // Read and lay out the graph on the background executor so window
+            // appearance and interactivity are never blocked; swap the view to
+            // the result when it completes.
+            Some(path) => {
+                let task = cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+                    let result = cx.background_executor().spawn(async move { load(&path) }).await;
+                    let _ = this.update(cx, |view, cx| {
+                        view.source = match result {
+                            Ok(laid_out) => Source::Loaded(laid_out),
+                            Err(err) => Source::Message(err),
+                        };
+                        cx.notify();
+                    });
+                });
+                (Source::Loading, task)
+            }
+            None => (
+                Source::Message("Usage: graph <aquery.streamed_proto>".into()),
+                Task::ready(()),
+            ),
+        };
         Self {
             focus_handle,
             source,
@@ -101,6 +128,7 @@ impl GraphView {
             dragging: false,
             last_mouse: Point::default(),
             viewport_origin: Rc::new(Cell::new(Point::default())),
+            _load_task: load_task,
         }
     }
 
@@ -170,6 +198,7 @@ impl GraphView {
                 g.width.round() as i64,
                 g.height.round() as i64,
             ),
+            Source::Loading => "Loading…".into(),
             Source::Message(_) => "No graph".into(),
         }
     }
@@ -233,6 +262,46 @@ impl Render for GraphView {
                             cx.notify();
                         })),
                 ),
+            Source::Loading => {
+                let spinner_color = colors.text;
+                div()
+                    .flex_1()
+                    .flex()
+                    .flex_col()
+                    .justify_center()
+                    .items_center()
+                    .gap_3()
+                    .child(
+                        canvas(
+                            |_, _, _| {},
+                            move |bounds, _, window, _| {
+                                paint_spinner(bounds, 0.0, spinner_color, window)
+                            },
+                        )
+                        .size(px(36.))
+                        // `with_animation` re-renders each frame; rebuild the
+                        // canvas so the arc is swept by the animation delta.
+                        .with_animation(
+                            "spinner",
+                            Animation::new(Duration::from_millis(900)).repeat(),
+                            move |_canvas, delta| {
+                                canvas(
+                                    |_, _, _| {},
+                                    move |bounds, _, window, _| {
+                                        paint_spinner(bounds, delta, spinner_color, window)
+                                    },
+                                )
+                                .size(px(36.))
+                            },
+                        ),
+                    )
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(colors.disabled)
+                            .child("Loading…"),
+                    )
+            }
             Source::Message(msg) => div()
                 .flex_1()
                 .flex()
@@ -253,6 +322,30 @@ impl Render for GraphView {
             .title("bazel_viz graph")
             .status(self.status())
             .child(body)
+    }
+}
+
+/// Paints a rotating arc loading spinner centered in `bounds`. `turn` is the
+/// 0..1 fraction of a full revolution the arc's start is rotated by.
+fn paint_spinner(bounds: Bounds<Pixels>, turn: f32, color: Rgba, window: &mut Window) {
+    let cx = f32::from(bounds.origin.x) + f32::from(bounds.size.width) / 2.;
+    let cy = f32::from(bounds.origin.y) + f32::from(bounds.size.height) / 2.;
+    let radius = f32::from(bounds.size.width).min(f32::from(bounds.size.height)) / 2. - 3.;
+    let start = turn * std::f32::consts::TAU;
+    let sweep = 0.75 * std::f32::consts::TAU;
+    const STEPS: usize = 32;
+    let mut arc = PathBuilder::stroke(px(3.));
+    for i in 0..=STEPS {
+        let a = start + sweep * (i as f32 / STEPS as f32);
+        let p = point(px(cx + a.cos() * radius), px(cy + a.sin() * radius));
+        if i == 0 {
+            arc.move_to(p);
+        } else {
+            arc.line_to(p);
+        }
+    }
+    if let Ok(path) = arc.build() {
+        window.paint_path(path, color);
     }
 }
 
@@ -398,14 +491,8 @@ fn load(path: &str) -> Result<LaidOut, String> {
 }
 
 fn main() {
-    let source = match std::env::args().nth(1) {
-        Some(path) => match load(&path) {
-            Ok(laid_out) => Source::Loaded(laid_out),
-            Err(err) => Source::Message(err),
-        },
-        None => Source::Message("Usage: graph <aquery.streamed_proto>".into()),
-    };
+    let path = std::env::args().nth(1);
     bviz_ui_shell::run("bazel_viz graph", move |window, cx| {
-        cx.new(|cx| GraphView::new(source, window, cx))
+        cx.new(|cx| GraphView::new(path, window, cx))
     });
 }
