@@ -25,7 +25,11 @@ Interactive visualization and inspection tool for Bazel builds.
   no TODOs that only make sense mid-thread, and no justifying a change by
   alluding to other commits or the work in progress ("the X commit", "when we
   restructured Y"); state the change and its rationale on their own terms, and
-  if you must cite a prior commit, identify it by hash or subject. Name any
+  if you must cite a prior commit, identify it by hash or subject. Describe the
+  change in absolute terms, not against transient state — not what another branch
+  has, nor what the tree "already"/"now"/"yet" contains or was "missing" before;
+  such claims hold only at the instant of writing and rot as the repo and other
+  branches move on. Name any
   external reference in full — its title or identifier (a paper's name and arXiv
   id, a ticket number) — never a bare "the paper"/"the reference"/"the spec"
   that assumes shared context. References must also be portable: never hard-code a
