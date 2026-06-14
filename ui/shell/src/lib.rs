@@ -46,10 +46,14 @@ where
     let app_id = app_id.into();
     application().run(move |cx: &mut App| {
         setup(cx);
-        let bounds = Bounds::centered(None, size(px(500.), px(360.)), cx);
+        // Open maximized so the window fills the active monitor regardless of
+        // resolution. The compositor picks the monitor (correct on multi-head
+        // and on Wayland, where the display list isn't populated yet at startup);
+        // the bounds are only the size to restore to when un-maximized.
+        let restore = Bounds::centered(None, size(px(1100.), px(760.)), cx);
         cx.open_window(
             WindowOptions {
-                window_bounds: Some(WindowBounds::Windowed(bounds)),
+                window_bounds: Some(WindowBounds::Maximized(restore)),
                 titlebar: Some(TitlebarOptions {
                     title: Some(app_id.clone().into()),
                     ..Default::default()
