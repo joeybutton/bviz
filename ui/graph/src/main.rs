@@ -38,6 +38,10 @@ const KIND_BLEND: f32 = 0.68;
 /// always fits the viewport.
 const MAX_ZOOM: f32 = 4.0;
 
+/// Fraction of the viewport the fitted graph spans, leaving a margin so the whole
+/// graph sits within the inner part of the window rather than edge to edge.
+const FIT_MARGIN: f32 = 2.0 / 3.0;
+
 /// Accent hue for a leaf box, keyed by its node kind. These are mid-saturation
 /// and recognizable against either a light or dark background.
 fn kind_accent(kind: &str) -> Rgba {
@@ -382,7 +386,7 @@ fn fit_zoom(viewport: Size<Pixels>, content: (f32, f32)) -> f32 {
     if gw <= 0. || gh <= 0. || vw <= 1. || vh <= 1. {
         return 1.0;
     }
-    (vw / gw).min(vh / gh).min(1.0)
+    ((vw / gw).min(vh / gh) * FIT_MARGIN).min(1.0)
 }
 
 /// The zoom and pan that fit `content` centered in `viewport`.
