@@ -8,7 +8,8 @@ use gpui::{
     Animation, AnimationExt, App, AsyncApp, BorderStyle, Bounds, Context, Div, FocusHandle,
     IntoElement, MouseButton, MouseDownEvent, Hsla, MouseMoveEvent, MouseUpEvent, PathBuilder,
     Pixels, Point, Render, Rgba, ScrollDelta, ScrollWheelEvent, Stateful, Task, TextAlign, TextRun,
-    Size, WeakEntity, Window, canvas, div, font, point, prelude::*, px, quad, rgb, size,
+    Size, Transformation, WeakEntity, Window, canvas, div, font, percentage, point, prelude::*, px,
+    quad, rgb, size,
 };
 use std::cell::Cell;
 use std::rc::Rc;
@@ -332,46 +333,32 @@ impl Render for GraphView {
                         cx.notify();
                     })),
                 ),
-            Source::Loading => {
-                let spinner_color = colors.text;
-                div()
-                    .flex_1()
-                    .flex()
-                    .flex_col()
-                    .justify_center()
-                    .items_center()
-                    .gap_3()
-                    .child(
-                        canvas(
-                            |_, _, _| {},
-                            move |bounds, _, window, _| {
-                                paint_spinner(bounds, 0.0, spinner_color, window)
-                            },
-                        )
+            Source::Loading => div()
+                .flex_1()
+                .flex()
+                .flex_col()
+                .justify_center()
+                .items_center()
+                .gap_3()
+                .child(
+                    // `with_animation` re-renders each frame, spinning the icon.
+                    bviz_ui_assets::icon("circle-notch")
                         .size(px(36.))
-                        // `with_animation` re-renders each frame; rebuild the
-                        // canvas so the arc is swept by the animation delta.
+                        .text_color(colors.text)
                         .with_animation(
                             "spinner",
                             Animation::new(Duration::from_millis(900)).repeat(),
-                            move |_canvas, delta| {
-                                canvas(
-                                    |_, _, _| {},
-                                    move |bounds, _, window, _| {
-                                        paint_spinner(bounds, delta, spinner_color, window)
-                                    },
-                                )
-                                .size(px(36.))
+                            |icon, delta| {
+                                icon.with_transformation(Transformation::rotate(percentage(delta)))
                             },
                         ),
-                    )
-                    .child(
-                        div()
-                            .text_sm()
-                            .text_color(colors.disabled)
-                            .child("Loading…"),
-                    )
-            }
+                )
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(colors.disabled)
+                        .child("Loading…"),
+                ),
             Source::Message(msg) => div()
                 .flex_1()
                 .flex()
@@ -414,30 +401,6 @@ fn fit_view(viewport: Size<Pixels>, content: (f32, f32)) -> (f32, (f32, f32)) {
     let (vw, vh) = (f32::from(viewport.width), f32::from(viewport.height));
     let (gw, gh) = content;
     (zoom, ((vw - gw * zoom) / 2., (vh - gh * zoom) / 2.))
-}
-
-/// Paints a rotating arc loading spinner centered in `bounds`. `turn` is the
-/// 0..1 fraction of a full revolution the arc's start is rotated by.
-fn paint_spinner(bounds: Bounds<Pixels>, turn: f32, color: Rgba, window: &mut Window) {
-    let cx = f32::from(bounds.origin.x) + f32::from(bounds.size.width) / 2.;
-    let cy = f32::from(bounds.origin.y) + f32::from(bounds.size.height) / 2.;
-    let radius = f32::from(bounds.size.width).min(f32::from(bounds.size.height)) / 2. - 3.;
-    let start = turn * std::f32::consts::TAU;
-    let sweep = 0.75 * std::f32::consts::TAU;
-    const STEPS: usize = 32;
-    let mut arc = PathBuilder::stroke(px(3.));
-    for i in 0..=STEPS {
-        let a = start + sweep * (i as f32 / STEPS as f32);
-        let p = point(px(cx + a.cos() * radius), px(cy + a.sin() * radius));
-        if i == 0 {
-            arc.move_to(p);
-        } else {
-            arc.line_to(p);
-        }
-    }
-    if let Ok(path) = arc.build() {
-        window.paint_path(path, color);
-    }
 }
 
 /// Maps a layout-space point to window space with pan and zoom baked in, atop

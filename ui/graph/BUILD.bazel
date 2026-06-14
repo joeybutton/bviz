@@ -6,6 +6,7 @@ rust_binary(
     crate_name = "bviz_ui_graph",
     deps = [
         "//graph/layout",
+        "//ui/assets",
         "//ui/shell",
         "//ui/theme",
         "@crates//:gpui",

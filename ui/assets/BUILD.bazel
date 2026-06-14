@@ -25,6 +25,7 @@ rust_library(
     visibility = [
         "//gpui_hello:__pkg__",
         "//ui/components:__pkg__",
+        "//ui/graph:__pkg__",
         "//ui/shell:__pkg__",
     ],
     deps = [
