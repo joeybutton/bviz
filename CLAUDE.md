@@ -37,7 +37,11 @@ Interactive visualization and inspection tool for Bazel builds.
   a checked-in file — it resolves only on the machine that wrote it. Point at a
   repo-relative path, or for external source pin a stable identifier (a release tag
   or permalink URL, not a moving branch); a local checkout may be named as a
-  preferred-if-present convenience, never as the sole locator.
+  preferred-if-present convenience, never as the sole locator. Likewise,
+  checked-in test fixtures and generated data must not embed machine- or
+  user-identifying values (usernames, home paths, hostnames); generate them in a
+  neutral location — e.g. a `/tmp` workspace with `HOME`/`USER` overridden — and
+  normalize any residue with a length-preserving substitution before committing.
 - Comments are terse and only earn their place by adding what the code can't
   say — a sentence, not a paragraph. Don't restate the code (a comment that
   names what the next line already names is noise — including one that restates
