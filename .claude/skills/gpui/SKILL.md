@@ -141,6 +141,11 @@ through the app's `AssetSource` (`application().with_assets(MyAssets)`) and tint
 with the text color (so single-color icon sets like Phosphor just work). In this repo the
 Phosphor SVGs come from an `http_archive` and are embedded the same way; the `AssetSource`
 serves them from the baked-in bytes — see the `//ui/assets` library and the `phosphor` archive.
+Reach for a Phosphor icon (`bviz_ui_assets::icon("name")`) before drawing a shape by hand:
+the set is large and consistent, and an icon rotated/animated (e.g. `circle-notch` for a
+spinner) beats a bespoke `canvas` path. To add one not yet embedded, list its
+`assets/regular/<name>.svg` in the `phosphor` filegroup and the `icon_svg` match in
+`//ui/assets`. Only fall back to hand-drawn `canvas`/`PathBuilder` graphics when no icon fits.
 
 ## Window chrome: title, decorations, controls, status bar
 
