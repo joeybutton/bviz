@@ -8,7 +8,7 @@ use gpui::{
     Animation, AnimationExt, App, AsyncApp, BorderStyle, Bounds, Context, Div, FocusHandle,
     IntoElement, MouseButton, MouseDownEvent, Hsla, MouseMoveEvent, MouseUpEvent, PathBuilder,
     Pixels, Point, Render, Rgba, ScrollDelta, ScrollWheelEvent, Stateful, Task, TextAlign, TextRun,
-    WeakEntity, Window, canvas, div, font, point, prelude::*, px, quad, rgb, size,
+    Size, WeakEntity, Window, canvas, div, font, point, prelude::*, px, quad, rgb, size,
 };
 use std::cell::Cell;
 use std::rc::Rc;
@@ -33,6 +33,10 @@ const ARROW_OVERDRAW: f64 = 1.0;
 /// Fraction by which a kind accent is blended toward the themed background; the
 /// result is the leaf fill, so kinds stay recognizable yet read on light or dark.
 const KIND_BLEND: f32 = 0.68;
+
+/// Largest zoom-in factor. The smallest is computed per graph so the whole graph
+/// always fits the viewport.
+const MAX_ZOOM: f32 = 4.0;
 
 /// Accent hue for a leaf box, keyed by its node kind. These are mid-saturation
 /// and recognizable against either a light or dark background.
@@ -78,18 +82,24 @@ struct PaintBox {
 }
 
 /// Loads, lays out, and summarizes an aquery action graph.
+///
+/// Zoom, pan, and the captured viewport bounds are shared cells so the canvas
+/// can both read them while painting and, on the first frame, set the initial
+/// fit-to-window view (which needs the viewport size, known only at paint time).
 struct GraphView {
     focus_handle: FocusHandle,
     source: Source,
     /// Zoom scale baked into every coordinate (1.0 = layout pixels).
-    zoom: f32,
+    zoom: Rc<Cell<f32>>,
     /// Pixel translation applied after scaling.
-    pan: (f32, f32),
+    pan: Rc<Cell<(f32, f32)>>,
+    /// Whether the initial fit-to-window view has been applied.
+    fitted: Rc<Cell<bool>>,
     dragging: bool,
     last_mouse: Point<Pixels>,
-    /// Screen origin of the viewport, captured during canvas paint so the
-    /// scroll handler can map a window cursor position to viewport-local space.
-    viewport_origin: Rc<Cell<Point<Pixels>>>,
+    /// Viewport bounds captured during canvas paint, so the scroll handler can
+    /// map a window cursor to viewport space and bound the zoom to a fit.
+    viewport: Rc<Cell<Bounds<Pixels>>>,
     /// Holds the background load+layout task so it isn't cancelled on drop.
     _load_task: Task<()>,
 }
@@ -123,11 +133,12 @@ impl GraphView {
         Self {
             focus_handle,
             source,
-            zoom: 1.0,
-            pan: (0.0, 0.0),
+            zoom: Rc::new(Cell::new(1.0)),
+            pan: Rc::new(Cell::new((0.0, 0.0))),
+            fitted: Rc::new(Cell::new(false)),
             dragging: false,
             last_mouse: Point::default(),
-            viewport_origin: Rc::new(Cell::new(Point::default())),
+            viewport: Rc::new(Cell::new(Bounds::default())),
             _load_task: load_task,
         }
     }
@@ -138,10 +149,11 @@ impl GraphView {
     /// connectors rather than borrowing the graph.
     fn graph(
         g: &LaidOut,
-        zoom: f32,
-        pan: (f32, f32),
+        zoom: Rc<Cell<f32>>,
+        pan: Rc<Cell<(f32, f32)>>,
+        fitted: Rc<Cell<bool>>,
+        viewport: Rc<Cell<Bounds<Pixels>>>,
         palette: Palette,
-        viewport_origin: Rc<Cell<Point<Pixels>>>,
     ) -> Stateful<Div> {
         let boxes: Vec<PaintBox> = g
             .boxes
@@ -162,26 +174,43 @@ impl GraphView {
             .collect();
         let connectors: Vec<Vec<(f64, f64)>> =
             g.connectors.iter().map(|c| c.points.clone()).collect();
+        let content = (
+            g.width as f32 + 2. * MARGIN as f32,
+            g.height as f32 + 2. * MARGIN as f32,
+        );
+        // Capture the viewport bounds and, on the first frame, fit the graph to
+        // it (the fit needs the viewport size, known only once laid out).
+        let prepaint = {
+            let (zoom, pan, fitted, viewport) =
+                (zoom.clone(), pan.clone(), fitted.clone(), viewport.clone());
+            move |bounds: Bounds<Pixels>, _: &mut Window, _: &mut App| {
+                viewport.set(bounds);
+                if !fitted.get() {
+                    let (z, p) = fit_view(bounds.size, content);
+                    zoom.set(z);
+                    pan.set(p);
+                    fitted.set(true);
+                }
+            }
+        };
         div()
             .id("graph-viewport")
             .relative()
             .size_full()
             .overflow_hidden()
             .child(
-                canvas(
-                    |_, _, _| {},
-                    move |bounds, _, window, cx| {
-                        viewport_origin.set(bounds.origin);
-                        // Boxes parent-before-child so children paint over their
-                        // containers; connectors last so edges sit over the fills.
-                        for b in &boxes {
-                            paint_box(b, bounds, zoom, pan, &palette, window, cx);
-                        }
-                        for points in &connectors {
-                            paint_connector(points, bounds, zoom, pan, &palette, window);
-                        }
-                    },
-                )
+                canvas(prepaint, move |bounds, _, window, cx| {
+                    let zoom = zoom.get();
+                    let pan = pan.get();
+                    // Boxes parent-before-child so children paint over their
+                    // containers; connectors last so edges sit over the fills.
+                    for b in &boxes {
+                        paint_box(b, bounds, zoom, pan, &palette, window, cx);
+                    }
+                    for points in &connectors {
+                        paint_connector(points, bounds, zoom, pan, &palette, window);
+                    }
+                })
                 .absolute()
                 .left_0()
                 .top_0()
@@ -220,47 +249,65 @@ impl Render for GraphView {
                 .flex()
                 .overflow_hidden()
                 .child(
-                    Self::graph(g, self.zoom, self.pan, palette, self.viewport_origin.clone())
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(|this, e: &MouseDownEvent, _, _| {
-                                this.dragging = true;
-                                this.last_mouse = e.position;
-                            }),
-                        )
-                        .on_mouse_up(
-                            MouseButton::Left,
-                            cx.listener(|this, _e: &MouseUpEvent, _, _| {
-                                this.dragging = false;
-                            }),
-                        )
-                        .on_mouse_move(cx.listener(|this, e: &MouseMoveEvent, _, cx| {
-                            if this.dragging {
-                                this.pan.0 += f32::from(e.position.x) - f32::from(this.last_mouse.x);
-                                this.pan.1 += f32::from(e.position.y) - f32::from(this.last_mouse.y);
-                                this.last_mouse = e.position;
-                                cx.notify();
-                            }
-                        }))
-                        .on_scroll_wheel(cx.listener(|this, e: &ScrollWheelEvent, _, cx| {
-                            // Anchor the zoom at the cursor: keep the content
-                            // point under the cursor fixed as the scale changes.
-                            let vp = this.viewport_origin.get();
-                            let lx = f32::from(e.position.x) - f32::from(vp.x);
-                            let ly = f32::from(e.position.y) - f32::from(vp.y);
-                            let dy = match e.delta {
-                                ScrollDelta::Lines(p) => p.y,
-                                ScrollDelta::Pixels(p) => f32::from(p.y) / 120.0,
-                            };
-                            let old = this.zoom;
-                            let new = (old * 1.1_f32.powf(dy)).clamp(0.2, 4.0);
-                            let content_x = (lx - this.pan.0) / old;
-                            let content_y = (ly - this.pan.1) / old;
-                            this.pan.0 = lx - content_x * new;
-                            this.pan.1 = ly - content_y * new;
-                            this.zoom = new;
+                    Self::graph(
+                        g,
+                        self.zoom.clone(),
+                        self.pan.clone(),
+                        self.fitted.clone(),
+                        self.viewport.clone(),
+                        palette,
+                    )
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, e: &MouseDownEvent, _, _| {
+                            this.dragging = true;
+                            this.last_mouse = e.position;
+                        }),
+                    )
+                    .on_mouse_up(
+                        MouseButton::Left,
+                        cx.listener(|this, _e: &MouseUpEvent, _, _| {
+                            this.dragging = false;
+                        }),
+                    )
+                    .on_mouse_move(cx.listener(|this, e: &MouseMoveEvent, _, cx| {
+                        if this.dragging {
+                            let (px, py) = this.pan.get();
+                            let dx = f32::from(e.position.x) - f32::from(this.last_mouse.x);
+                            let dy = f32::from(e.position.y) - f32::from(this.last_mouse.y);
+                            this.pan.set((px + dx, py + dy));
+                            this.last_mouse = e.position;
                             cx.notify();
-                        })),
+                        }
+                    }))
+                    .on_scroll_wheel(cx.listener(|this, e: &ScrollWheelEvent, _, cx| {
+                        // Anchor the zoom at the cursor: keep the content point
+                        // under the cursor fixed as the scale changes. The minimum
+                        // zoom is the fit, so the graph can't be zoomed out of view.
+                        let content = match &this.source {
+                            Source::Loaded(g) => (
+                                g.width as f32 + 2. * MARGIN as f32,
+                                g.height as f32 + 2. * MARGIN as f32,
+                            ),
+                            _ => return,
+                        };
+                        let vp = this.viewport.get();
+                        let lx = f32::from(e.position.x) - f32::from(vp.origin.x);
+                        let ly = f32::from(e.position.y) - f32::from(vp.origin.y);
+                        let dy = match e.delta {
+                            ScrollDelta::Lines(p) => p.y,
+                            ScrollDelta::Pixels(p) => f32::from(p.y) / 120.0,
+                        };
+                        let old = this.zoom.get();
+                        let new = (old * 1.1_f32.powf(dy))
+                            .clamp(fit_zoom(vp.size, content), MAX_ZOOM);
+                        let (px, py) = this.pan.get();
+                        let content_x = (lx - px) / old;
+                        let content_y = (ly - py) / old;
+                        this.pan.set((lx - content_x * new, ly - content_y * new));
+                        this.zoom.set(new);
+                        cx.notify();
+                    })),
                 ),
             Source::Loading => {
                 let spinner_color = colors.text;
@@ -323,6 +370,27 @@ impl Render for GraphView {
             .status(self.status())
             .child(body)
     }
+}
+
+/// The largest zoom at which `content` (its full width×height in layout pixels)
+/// still fits `viewport`, capped at 1:1 so a small graph is never blown up. This
+/// is both the initial zoom and the minimum the scroll handler allows, so the
+/// whole graph always fits.
+fn fit_zoom(viewport: Size<Pixels>, content: (f32, f32)) -> f32 {
+    let (vw, vh) = (f32::from(viewport.width), f32::from(viewport.height));
+    let (gw, gh) = content;
+    if gw <= 0. || gh <= 0. || vw <= 1. || vh <= 1. {
+        return 1.0;
+    }
+    (vw / gw).min(vh / gh).min(1.0)
+}
+
+/// The zoom and pan that fit `content` centered in `viewport`.
+fn fit_view(viewport: Size<Pixels>, content: (f32, f32)) -> (f32, (f32, f32)) {
+    let zoom = fit_zoom(viewport, content);
+    let (vw, vh) = (f32::from(viewport.width), f32::from(viewport.height));
+    let (gw, gh) = content;
+    (zoom, ((vw - gw * zoom) / 2., (vh - gh * zoom) / 2.))
 }
 
 /// Paints a rotating arc loading spinner centered in `bounds`. `turn` is the
