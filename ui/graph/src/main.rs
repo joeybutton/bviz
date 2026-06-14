@@ -182,18 +182,37 @@ impl GraphView {
             g.width as f32 + 2. * MARGIN as f32,
             g.height as f32 + 2. * MARGIN as f32,
         );
-        // Capture the viewport bounds and, on the first frame, fit the graph to
-        // it (the fit needs the viewport size, known only once laid out).
+        // Capture the viewport bounds and fit the graph to them. The fit needs
+        // the viewport size, known only once laid out, so it happens here.
         let prepaint = {
             let (zoom, pan, fitted, viewport) =
                 (zoom.clone(), pan.clone(), fitted.clone(), viewport.clone());
             move |bounds: Bounds<Pixels>, _: &mut Window, _: &mut App| {
+                let prev = viewport.get();
                 viewport.set(bounds);
                 if !fitted.get() {
                     let (z, p) = fit_view(bounds.size, content);
                     zoom.set(z);
                     pan.set(p);
                     fitted.set(true);
+                } else if prev.size != bounds.size {
+                    // Keep the view stable across a resize at any zoom level: hold
+                    // the graph point under the viewport center fixed and scale the
+                    // zoom with the fit, so the same section stays framed at the
+                    // same zoom relative to the window rather than snapping to the
+                    // fully fitted view.
+                    let old_fit = fit_zoom(prev.size, content);
+                    let new_fit = fit_zoom(bounds.size, content);
+                    let z_old = zoom.get();
+                    let (pan_x, pan_y) = pan.get();
+                    let center_x = (f32::from(prev.size.width) / 2. - pan_x) / z_old;
+                    let center_y = (f32::from(prev.size.height) / 2. - pan_y) / z_old;
+                    let z = (z_old * new_fit / old_fit).clamp(new_fit, MAX_ZOOM);
+                    zoom.set(z);
+                    pan.set((
+                        f32::from(bounds.size.width) / 2. - center_x * z,
+                        f32::from(bounds.size.height) / 2. - center_y * z,
+                    ));
                 }
             }
         };
