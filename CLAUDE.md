@@ -40,7 +40,10 @@ Interactive visualization and inspection tool for Bazel builds.
   preferred-if-present convenience, never as the sole locator.
 - Comments are terse and only earn their place by adding what the code can't
   say — a sentence, not a paragraph. Don't restate the code (a comment that
-  names what the next line already names is noise), don't say the same thing
+  names what the next line already names is noise — including one that restates
+  an identifier the declaration already gives, like a repo or target name, or
+  re-derives in one file what another already encodes, like spelling out in a
+  BUILD overlay the import layout the MODULE sparse-checkout already fixes), don't say the same thing
   twice (a rationale belongs in one place — usually a definition — not repeated
   where the symbol is used), don't re-explain what a rule's or tool's own
   documentation already covers, and don't write comments that drift as nearby
