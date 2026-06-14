@@ -22,6 +22,13 @@ const LABEL_SIZE: f64 = 13.0;
 /// Padding around the graph, matching the SVG renderer's margin.
 const MARGIN: f64 = 16.0;
 
+/// Arrowhead size along and across the edge direction, in layout pixels.
+const ARROW_LENGTH: f64 = 9.0;
+const ARROW_HALF_WIDTH: f64 = 4.0;
+/// How far the stroke runs past the arrowhead base into the head, closing the
+/// seam without letting the line broaden the visible tip.
+const ARROW_OVERDRAW: f64 = 1.0;
+
 /// Fraction by which a kind accent is blended toward the themed background; the
 /// result is the leaf fill, so kinds stay recognizable yet read on light or dark.
 const KIND_BLEND: f32 = 0.68;
@@ -331,14 +338,24 @@ fn paint_connector(
         .map(|(x, y)| to_screen(*x, *y, bounds, zoom, pan))
         .collect();
 
+    // Stop the stroke at the arrowhead's base (less a slight overdraw) so the
+    // line doesn't paint through the head and broaden the visible tip.
+    let n = pts.len();
+    let tip = pts[n - 1];
+    let prev = pts[n - 2];
+    let dx = f32::from(tip.x - prev.x);
+    let dy = f32::from(tip.y - prev.y);
+    let seg = (dx * dx + dy * dy).sqrt().max(1e-3);
+    let (ux, uy) = (dx / seg, dy / seg);
+    let trim = ((ARROW_LENGTH as f32 - ARROW_OVERDRAW as f32) * zoom).min(seg);
+    let line_end = point(tip.x - px(ux * trim), tip.y - px(uy * trim));
+
     let mut line = PathBuilder::stroke(px(1.5 * zoom));
-    for (i, p) in pts.iter().enumerate() {
-        if i == 0 {
-            line.move_to(*p);
-        } else {
-            line.line_to(*p);
-        }
+    line.move_to(pts[0]);
+    for p in &pts[1..n - 1] {
+        line.line_to(*p);
     }
+    line.line_to(line_end);
     if let Ok(path) = line.build() {
         window.paint_path(path, palette.connector);
     }
@@ -349,8 +366,8 @@ fn paint_connector(
 /// Paints a filled triangle at the polyline's last point, aimed along the
 /// direction of its final segment.
 fn paint_arrowhead(pts: &[Point<Pixels>], zoom: f32, color: Rgba, window: &mut Window) {
-    let length = 9.0 * zoom;
-    let half_width = 4.0 * zoom;
+    let length = ARROW_LENGTH as f32 * zoom;
+    let half_width = ARROW_HALF_WIDTH as f32 * zoom;
 
     let n = pts.len();
     let tip = pts[n - 1];
