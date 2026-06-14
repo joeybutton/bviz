@@ -1,0 +1,15 @@
+load("@rules_rs//rs:rust_binary.bzl", "rust_binary")
+
+rust_binary(
+    name = "terminal",
+    srcs = glob(["src/**/*.rs"]),
+    crate_name = "bviz_ui_terminal",
+    visibility = ["//:__pkg__"],
+    deps = [
+        "//terminal",
+        "//ui/assets",
+        "//ui/shell",
+        "//ui/theme",
+        "@crates//:gpui",
+    ],
+)

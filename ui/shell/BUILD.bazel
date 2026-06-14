@@ -8,6 +8,7 @@ rust_library(
         "//bazel_viz:__pkg__",
         "//gpui_hello:__pkg__",
         "//ui/graph:__pkg__",
+        "//ui/terminal:__pkg__",
     ],
     deps = [
         "//ui/assets",
