@@ -53,7 +53,6 @@ fn kind_accent(kind: &str) -> Rgba {
         "action" => rgb(0xe69a3c),   // orange
         "artifact" => rgb(0x57b85a), // green
         "source" => rgb(0x9b7fd0),   // purple
-        "depset" => rgb(0x8a8f99),   // muted gray
         _ => rgb(0x5b8fd0),          // blue
     }
 }
@@ -109,9 +108,6 @@ struct PaintBox {
     w: f64,
     h: f64,
     compound: bool,
-    /// Node kind, distinguishing an expanded group container (`group`) from a
-    /// collapsed group leaf, and marking depset junctions, for the caret.
-    kind: String,
     /// Whether this box's id is in the expansion set, which points its
     /// disclosure caret down rather than right.
     expanded: bool,
@@ -255,7 +251,6 @@ impl GraphView {
                 w: b.width,
                 h: b.height,
                 compound: b.compound,
-                kind: b.kind.clone(),
                 expanded: expanded.contains(&b.id),
                 fill: if b.compound {
                     container_fill(&b.kind, &palette)
@@ -397,7 +392,7 @@ impl Render for GraphView {
                             let Some(hit) = hit_box(&g.boxes, gx, gy) else {
                                 return;
                             };
-                            if !(hit.id.starts_with("group:") || hit.kind == "depset") {
+                            if !hit.id.starts_with("group:") {
                                 return;
                             }
                             let id = hit.id.clone();
@@ -577,11 +572,11 @@ fn paint_box(
     let line = window
         .text_system()
         .shape_line(b.label.clone().into(), fs, &[run], None);
-    // Collapsible boxes (groups and depset junctions) carry a disclosure caret
-    // left of the label, occupying the reserved width the layout sized the box to
-    // hold; the label and caret are centered together as one unit. Other boxes
-    // center the label alone.
-    let caret = b.id.starts_with("group:") || b.kind == "depset";
+    // A collapsed group leaf carries a disclosure caret left of the label,
+    // occupying the reserved width the layout sized the box to hold; the label
+    // and caret are centered together as one unit. Other boxes center the label
+    // alone.
+    let caret = b.id.starts_with("group:");
     let footprint = px(CARET_RESERVE as f32 * zoom);
     let unit_width = if caret {
         footprint + line.width()
@@ -739,7 +734,7 @@ fn build_graph(path: &str) -> Result<Graph, String> {
 
 /// Builds the display graph with the given ids expanded and lays it out.
 fn relayout(graph: &Graph, expanded: &HashSet<String>) -> LaidOut {
-    layout::layout(&quotient::display(graph, expanded))
+    layout::layout(&quotient::quotient(graph, expanded))
 }
 
 /// Inverse of [`to_screen`]: maps a window-space point back to layout space.

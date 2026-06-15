@@ -14,15 +14,9 @@
 //! node and are skipped.
 //!
 //! Bazel groups an action's inputs into nested `DepSetOfFiles` that it shares
-//! across actions. A depset is materialized as a single `depset` node at the
-//! root only when it is referenced by two or more consumers (actions or
-//! enclosing depsets) and has two or more surviving members, turning a
-//! K-member, M-consumer fan from K*M file->action edges into K member edges in
-//! plus M consumer edges out. A depset with fewer than two surviving members,
-//! or referenced only once, is flattened into its consumers, since a group node
-//! that wraps a single file or sees a single use is a useless hop. Empty
-//! depsets (no surviving members after the `external_sources` filter) are
-//! skipped.
+//! across actions. These are flattened: every direct artifact and every
+//! transitive member is wired straight to the consuming action as a
+//! `member -> consumer` edge.
 
 use std::collections::{HashMap, HashSet};
 
@@ -103,12 +97,8 @@ pub fn build(containers: &[ActionGraphContainer], external_sources: bool) -> Gra
         }
     }
 
-    // Pass 2: wire each action's inputs, materializing shared depsets as nodes.
-    let ref_counts = depset_ref_counts(&actions, &dep_sets);
+    // Pass 2: wire each action's inputs, flattening its depsets into direct edges.
     let mut wiring = Wiring {
-        ref_counts,
-        live_counts: HashMap::new(),
-        depset_nodes: HashSet::new(),
         seen_edge: HashSet::new(),
         source_nodes,
         package_boxes,
@@ -121,38 +111,17 @@ pub fn build(containers: &[ActionGraphContainer], external_sources: bool) -> Gra
     };
     for (i, action) in actions.iter().enumerate() {
         let action_id = format!("action{i}");
+        let mut visited: HashSet<u32> = HashSet::new();
         for &dep_set_id in &action.input_dep_set_ids {
-            wiring.wire(dep_set_id, &action_id, &mut graph);
+            wiring.wire(dep_set_id, &action_id, &mut visited, &mut graph);
         }
     }
 
     graph
 }
 
-/// Per-depset reference count: how many actions and enclosing depsets name it.
-/// A count of 2 or more makes the depset shared and worth its own node.
-fn depset_ref_counts(actions: &[&Action], dep_sets: &[&DepSetOfFiles]) -> HashMap<u32, usize> {
-    let mut counts: HashMap<u32, usize> = HashMap::new();
-    for action in actions {
-        for &id in &action.input_dep_set_ids {
-            *counts.entry(id).or_default() += 1;
-        }
-    }
-    for dep_set in dep_sets {
-        for &id in &dep_set.transitive_dep_set_ids {
-            *counts.entry(id).or_default() += 1;
-        }
-    }
-    counts
-}
-
 /// Mutable state threaded through the recursive input wiring.
 struct Wiring<'a> {
-    ref_counts: HashMap<u32, usize>,
-    /// Memoized count of distinct transitive members surviving the source filter.
-    live_counts: HashMap<u32, usize>,
-    /// Shared depset ids already materialized as nodes (members wired once).
-    depset_nodes: HashSet<u32>,
     seen_edge: HashSet<(String, String)>,
     source_nodes: HashSet<u32>,
     /// Package container ids already created, deduped across both passes.
@@ -168,41 +137,31 @@ struct Wiring<'a> {
 }
 
 impl Wiring<'_> {
-    /// Connects the inputs reachable from `dep_set_id` to `consumer_id`. A depset
-    /// shared by two or more consumers and holding two or more surviving members
-    /// becomes a node wired to its members once and linked to each consumer; one
-    /// that is unshared or holds a single member is flattened straight into its
-    /// consumer.
-    fn wire(&mut self, dep_set_id: u32, consumer_id: &str, graph: &mut Graph) {
-        if self.live_count(dep_set_id) == 0 {
+    /// Flattens the inputs reachable from `dep_set_id` onto `consumer_id`: each
+    /// direct artifact is wired straight to the consumer and each transitive
+    /// depset is recursed into. `visited` holds the dep-set ids already walked
+    /// for this consumer, so a depset reachable by several paths within one
+    /// action's input tree is traversed once.
+    fn wire(
+        &mut self,
+        dep_set_id: u32,
+        consumer_id: &str,
+        visited: &mut HashSet<u32>,
+        graph: &mut Graph,
+    ) {
+        if !visited.insert(dep_set_id) {
             return;
         }
-        let shared = self.ref_counts.get(&dep_set_id).copied().unwrap_or(0) >= 2;
-        if shared && self.live_count(dep_set_id) >= 2 {
-            let node_id = format!("depset{dep_set_id}");
-            if self.depset_nodes.insert(dep_set_id) {
-                let count = self.live_count(dep_set_id);
-                graph.add_node(node_id.clone(), files_label(count), "depset", None);
-                let dep_set = self.depset_by_id[&dep_set_id];
-                let directs: Vec<u32> = dep_set.direct_artifact_ids.clone();
-                let transitives: Vec<u32> = dep_set.transitive_dep_set_ids.clone();
-                for artifact_id in directs {
-                    self.emit_member(artifact_id, &node_id, graph);
-                }
-                for transitive in transitives {
-                    self.wire(transitive, &node_id, graph);
-                }
-            }
-            self.add_edge(&node_id, consumer_id, graph);
-        } else if let Some(dep_set) = self.depset_by_id.get(&dep_set_id).copied() {
-            let directs: Vec<u32> = dep_set.direct_artifact_ids.clone();
-            let transitives: Vec<u32> = dep_set.transitive_dep_set_ids.clone();
-            for artifact_id in directs {
-                self.emit_member(artifact_id, consumer_id, graph);
-            }
-            for transitive in transitives {
-                self.wire(transitive, consumer_id, graph);
-            }
+        let Some(dep_set) = self.depset_by_id.get(&dep_set_id).copied() else {
+            return;
+        };
+        let directs: Vec<u32> = dep_set.direct_artifact_ids.clone();
+        let transitives: Vec<u32> = dep_set.transitive_dep_set_ids.clone();
+        for artifact_id in directs {
+            self.emit_member(artifact_id, consumer_id, graph);
+        }
+        for transitive in transitives {
+            self.wire(transitive, consumer_id, visited, graph);
         }
     }
 
@@ -240,58 +199,6 @@ impl Wiring<'_> {
             graph.add_edge(from.to_string(), to.to_string());
         }
     }
-
-    /// Distinct transitive members of `dep_set_id` surviving the source filter,
-    /// memoized. Drives both the node label and the empty-depset skip.
-    fn live_count(&mut self, dep_set_id: u32) -> usize {
-        if let Some(&count) = self.live_counts.get(&dep_set_id) {
-            return count;
-        }
-        let count = self.collect_live(dep_set_id, &mut HashSet::new()).len();
-        self.live_counts.insert(dep_set_id, count);
-        count
-    }
-
-    /// Gathers the distinct surviving member artifact ids reachable from
-    /// `dep_set_id`, counting only members `emit_member` would actually wire;
-    /// `seen` guards against cycles in the depset graph.
-    fn collect_live(&self, dep_set_id: u32, seen: &mut HashSet<u32>) -> HashSet<u32> {
-        let mut members: HashSet<u32> = HashSet::new();
-        if !seen.insert(dep_set_id) {
-            return members;
-        }
-        let Some(dep_set) = self.depset_by_id.get(&dep_set_id) else {
-            return members;
-        };
-        for &artifact_id in &dep_set.direct_artifact_ids {
-            if self.is_wired_member(artifact_id) {
-                members.insert(artifact_id);
-            }
-        }
-        for &transitive in &dep_set.transitive_dep_set_ids {
-            members.extend(self.collect_live(transitive, seen));
-        }
-        members
-    }
-
-    /// Whether `emit_member` would draw an edge for this member: a source kept by
-    /// the external filter, or a generated artifact with a producer node in scope.
-    fn is_wired_member(&self, artifact_id: u32) -> bool {
-        let path = full_path(artifact_id, &self.artifact_by_id, &self.fragment_by_id);
-        if !self.external_sources && is_external(&path) {
-            return false;
-        }
-        if is_generated(&path) {
-            return self.producer_node_id.contains_key(&artifact_id);
-        }
-        true
-    }
-}
-
-/// Depset node label. A materialized depset always holds two or more members,
-/// so the label is always plural.
-fn files_label(count: usize) -> String {
-    format!("{count} files")
 }
 
 fn configured_target_box(
@@ -592,14 +499,11 @@ mod tests {
             .collect()
     }
 
-    fn depset_nodes(graph: &Graph) -> Vec<&Node> {
-        graph.nodes.iter().filter(|n| n.kind == "depset").collect()
-    }
-
     #[test]
-    fn shared_depset_becomes_one_node() {
+    fn shared_input_flattens_to_each_consumer() {
         let (a1, f1) = source_artifact(1, "one.c");
         let (a2, f2) = source_artifact(2, "two.c");
+        // A depset shared by two actions flattens straight onto each consumer.
         let container = ActionGraphContainer {
             artifacts: vec![a1, a2],
             path_fragments: vec![f1, f2],
@@ -610,48 +514,18 @@ mod tests {
 
         let graph = build(&[container], false);
 
-        let depsets = depset_nodes(&graph);
-        assert_eq!(depsets.len(), 1);
-        assert_eq!(depsets[0].id, "depset10");
-        assert_eq!(depsets[0].label, "2 files");
-        assert_eq!(depsets[0].parent, None);
-
-        let edges = edges(&graph);
-        assert!(edges.contains(&("source1", "depset10")));
-        assert!(edges.contains(&("source2", "depset10")));
-        assert!(edges.contains(&("depset10", "action0")));
-        assert!(edges.contains(&("depset10", "action1")));
-        // No flattened file->action edges bypass the shared node.
-        assert!(!edges.contains(&("source1", "action0")));
-        assert!(!edges.contains(&("source1", "action1")));
-    }
-
-    #[test]
-    fn shared_single_member_depset_is_flattened_to_each_consumer() {
-        let (a1, f1) = source_artifact(1, "only.c");
-        // Shared by two actions but holding a single member, so no node.
-        let container = ActionGraphContainer {
-            artifacts: vec![a1],
-            path_fragments: vec![f1],
-            dep_set_of_files: vec![dep_set(10, &[1], &[])],
-            actions: vec![action(1, "Compile", &[10]), action(2, "Link", &[10])],
-            ..Default::default()
-        };
-
-        let graph = build(&[container], false);
-
-        assert!(depset_nodes(&graph).is_empty());
         let edges = edges(&graph);
         assert!(edges.contains(&("source1", "action0")));
+        assert!(edges.contains(&("source2", "action0")));
         assert!(edges.contains(&("source1", "action1")));
+        assert!(edges.contains(&("source2", "action1")));
     }
 
     #[test]
-    fn shared_depset_with_one_live_member_in_nested_transitive_is_flattened() {
+    fn nested_transitive_members_flatten_onto_the_consumer() {
         let (a1, f1) = source_artifact(1, "leaf.c");
-        // Outer depset 10 is shared by two actions; its only surviving member
-        // sits in the nested transitive depset 20, so the flatten branch must
-        // recurse to reach it.
+        // The only member sits in the nested transitive depset 20, so wiring
+        // must recurse to reach it.
         let container = ActionGraphContainer {
             artifacts: vec![a1],
             path_fragments: vec![f1],
@@ -662,103 +536,60 @@ mod tests {
 
         let graph = build(&[container], false);
 
-        assert!(depset_nodes(&graph).is_empty());
         let edges = edges(&graph);
         assert!(edges.contains(&("source1", "action0")));
         assert!(edges.contains(&("source1", "action1")));
     }
 
     #[test]
-    fn single_use_depset_is_flattened() {
-        let (a1, f1) = source_artifact(1, "one.c");
-        let (a2, f2) = source_artifact(2, "two.c");
+    fn shared_transitive_depset_is_walked_once_per_consumer() {
+        let (a1, f1) = source_artifact(1, "leaf.c");
+        // Depset 20 is reachable through both 10 and 11, which the one action
+        // names; the per-action visited guard wires its member just once.
+        let container = ActionGraphContainer {
+            artifacts: vec![a1],
+            path_fragments: vec![f1],
+            dep_set_of_files: vec![
+                dep_set(10, &[], &[20]),
+                dep_set(11, &[], &[20]),
+                dep_set(20, &[1], &[]),
+            ],
+            actions: vec![action(1, "Compile", &[10, 11])],
+            ..Default::default()
+        };
+
+        let graph = build(&[container], false);
+
+        let edges = edges(&graph);
+        assert!(edges.contains(&("source1", "action0")));
+        // Edge dedup plus the visited guard leave exactly one input edge.
+        assert_eq!(edges.iter().filter(|(_, to)| *to == "action0").count(), 1);
+    }
+
+    #[test]
+    fn external_members_are_dropped() {
+        let (a1, f1) = source_artifact(1, "local.c");
+        let (a2, f2) = source_artifact(2, "external/repo/dep.c");
         let container = ActionGraphContainer {
             artifacts: vec![a1, a2],
             path_fragments: vec![f1, f2],
             dep_set_of_files: vec![dep_set(10, &[1, 2], &[])],
-            actions: vec![action(1, "Compile", &[10])],
+            actions: vec![action(1, "A", &[10]), action(2, "B", &[10])],
             ..Default::default()
         };
 
         let graph = build(&[container], false);
 
-        assert!(depset_nodes(&graph).is_empty());
         let edges = edges(&graph);
-        assert!(edges.contains(&("source1", "action0")));
-        assert!(edges.contains(&("source2", "action0")));
-    }
-
-    #[test]
-    fn nested_sharing_produces_depset_to_depset_edges() {
-        let (a1, f1) = source_artifact(1, "leaf.c");
-        let (a2, f2) = source_artifact(2, "outer.c");
-        let (a3, f3) = source_artifact(3, "leaf2.c");
-        // Inner depset 20 holds two members and is shared by the two outer
-        // depsets 10 and 11; each outer depset is shared by two actions. All
-        // three materialize, so the inner one links to each outer by an edge.
-        let container = ActionGraphContainer {
-            artifacts: vec![a1, a2, a3],
-            path_fragments: vec![f1, f2, f3],
-            dep_set_of_files: vec![
-                dep_set(20, &[1, 3], &[]),
-                dep_set(10, &[2], &[20]),
-                dep_set(11, &[2], &[20]),
-            ],
-            actions: vec![
-                action(1, "A", &[10]),
-                action(2, "B", &[10]),
-                action(3, "C", &[11]),
-                action(4, "D", &[11]),
-            ],
-            ..Default::default()
-        };
-
-        let graph = build(&[container], false);
-
-        let mut ids: Vec<&str> = depset_nodes(&graph).iter().map(|n| n.id.as_str()).collect();
-        ids.sort_unstable();
-        assert_eq!(ids, vec!["depset10", "depset11", "depset20"]);
-
-        let edges = edges(&graph);
-        assert!(edges.contains(&("depset20", "depset10")));
-        assert!(edges.contains(&("depset20", "depset11")));
-        assert!(edges.contains(&("source1", "depset20")));
-    }
-
-    #[test]
-    fn external_members_are_dropped_without_empty_depsets() {
-        let (a1, f1) = source_artifact(1, "local.c");
-        let (a2, f2) = source_artifact(2, "external/repo/dep.c");
-        let (a3, f3) = source_artifact(3, "external/repo/only.c");
-        let container = ActionGraphContainer {
-            artifacts: vec![a1, a2, a3],
-            path_fragments: vec![f1, f2, f3],
-            dep_set_of_files: vec![
-                // Shared, mixed: one surviving member, so it flattens.
-                dep_set(10, &[1, 2], &[]),
-                // Shared, all external: empty after filtering, so no node.
-                dep_set(11, &[3], &[]),
-            ],
-            actions: vec![action(1, "A", &[10, 11]), action(2, "B", &[10, 11])],
-            ..Default::default()
-        };
-
-        let graph = build(&[container], false);
-
-        // Neither depset materializes: 10 has a single surviving member, 11 none.
-        assert!(depset_nodes(&graph).is_empty());
-
-        let edges = edges(&graph);
-        // The single surviving member flattens directly onto both consumers.
+        // The local member flattens onto both consumers.
         assert!(edges.contains(&("source1", "action0")));
         assert!(edges.contains(&("source1", "action1")));
-        // The external members never become nodes or edges.
+        // The external member never becomes a node or edge.
         assert!(!graph.nodes.iter().any(|n| n.id == "source2"));
-        assert!(!graph.nodes.iter().any(|n| n.id == "source3"));
     }
 
     #[test]
-    fn shared_depset_of_one_generated_member_flattens_through_producer() {
+    fn generated_member_flattens_through_its_producer() {
         let (artifact, gen_frags) = generated_artifact(1, 100, "gen.o");
         let producer = Action {
             target_id: 9,
@@ -781,9 +612,6 @@ mod tests {
 
         let graph = build(&[container], false);
 
-        // A shared depset with a single surviving member flattens, so no node.
-        assert!(depset_nodes(&graph).is_empty());
-
         let edges = edges(&graph);
         // The producing action feeds its artifact node, which flattens directly
         // onto both consumers. Producer is action0; consumers action1/2.
@@ -793,7 +621,7 @@ mod tests {
     }
 
     #[test]
-    fn shared_depset_of_generated_member_without_producer_is_empty() {
+    fn generated_member_without_producer_is_skipped() {
         let (artifact, gen_frags) = generated_artifact(1, 100, "gen.o");
         // No action produces artifact 1, so it has no producer node in scope.
         let container = ActionGraphContainer {
@@ -806,12 +634,9 @@ mod tests {
 
         let graph = build(&[container], false);
 
-        // The depset's only member cannot be wired, so it is treated as empty:
-        // no node, no dangling edges.
-        assert!(depset_nodes(&graph).is_empty());
-        let edges = edges(&graph);
-        assert!(!edges.iter().any(|(from, _)| *from == "depset10"));
-        assert!(!edges.iter().any(|(_, to)| *to == "depset10"));
+        // The member cannot be wired, so it produces no node and no edge.
+        assert!(!graph.nodes.iter().any(|n| n.id == "artifact1"));
+        assert!(edges(&graph).is_empty());
     }
 
     #[test]
@@ -875,27 +700,6 @@ mod tests {
         let graph = build(&[container], false);
 
         assert_eq!(parent_of(&graph, "source1"), None);
-    }
-
-    #[test]
-    fn depset_stays_at_root_though_members_belong_to_packages() {
-        let (a1, f1) = source_artifact(1, "foo/one.c");
-        let (a2, f2) = source_artifact(2, "foo/two.c");
-        let container = ActionGraphContainer {
-            artifacts: vec![a1, a2],
-            path_fragments: vec![f1, f2],
-            targets: vec![target(1, "//foo:app")],
-            // Shared by two actions, so it materializes as a node.
-            dep_set_of_files: vec![dep_set(10, &[1, 2], &[])],
-            actions: vec![action(1, "Compile", &[10]), action(1, "Link", &[10])],
-            ..Default::default()
-        };
-
-        let graph = build(&[container], false);
-
-        assert_eq!(parent_of(&graph, "depset10"), None);
-        assert_eq!(parent_of(&graph, "source1"), Some("pkg:foo"));
-        assert_eq!(parent_of(&graph, "source2"), Some("pkg:foo"));
     }
 
     #[test]

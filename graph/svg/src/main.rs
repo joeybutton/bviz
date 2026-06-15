@@ -35,7 +35,7 @@ fn main() -> ExitCode {
         }
     };
 
-    let graph = quotient::display(
+    let graph = quotient::quotient(
         &aquery::build(&containers, false),
         &std::collections::HashSet::new(),
     );
