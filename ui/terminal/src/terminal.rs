@@ -7,15 +7,15 @@ use std::time::Duration;
 use bviz_terminal::{
     BuildOutput, Cell, Color, Flags, NamedColor, Rgb, Scroll, SelectionType, Side, Terminal, Url,
 };
+use bviz_ui_components::{Button, TextInput};
 use bviz_ui_shell::Chrome;
 use gpui::{
-    App, Bounds, ClipboardItem, Context, DispatchPhase, Element, Entity, FocusHandle, Font,
-    FontStyle, FontWeight,
-    GlobalElementId, InspectorElementId, IntoElement, KeyBinding, LayoutId, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point, Render, Rgba,
-    ScrollWheelEvent, ShapedLine, SharedString, StrikethroughStyle, Style, TextRun, UnderlineStyle,
-    Window,
-    WindowAppearance, actions, div, fill, point, prelude::*, px, relative, rgb, size,
+    App, Bounds, ClipboardItem, Context, DispatchPhase, Element, Entity, FocusHandle, Focusable,
+    Font, FontStyle, FontWeight, GlobalElementId, InspectorElementId, IntoElement, KeyBinding,
+    LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point,
+    Render, Rgba, ScrollWheelEvent, ShapedLine, SharedString, StrikethroughStyle, Style,
+    Subscription, TextRun, UnderlineStyle, Window, WindowAppearance, actions, div, fill, point,
+    prelude::*, px, relative, rgb, size,
 };
 
 actions!(
@@ -27,7 +27,11 @@ actions!(
         ScrollPageDown,
         ScrollToTop,
         ScrollToBottom,
-        Copy
+        Copy,
+        Find,
+        FindNext,
+        FindPrev,
+        FindClose
     ]
 );
 
@@ -92,6 +96,12 @@ pub struct TerminalView {
     focus_handle: FocusHandle,
     /// The terminal body's handle, focused so its scroll keys dispatch.
     body_focus: FocusHandle,
+    /// Whether the find box is open.
+    find_active: bool,
+    /// The find box's text field, created on first open and reused.
+    find_input: Option<Entity<TextInput>>,
+    /// Keeps the subscription that re-runs the search on every find-field edit.
+    find_observation: Option<Subscription>,
 }
 
 impl TerminalView {
@@ -105,6 +115,13 @@ impl TerminalView {
             KeyBinding::new("end", ScrollToBottom, Some("Terminal")),
             KeyBinding::new("cmd-c", Copy, Some("Terminal")),
             KeyBinding::new("ctrl-c", Copy, Some("Terminal")),
+            KeyBinding::new("cmd-f", Find, Some("Terminal")),
+            KeyBinding::new("ctrl-f", Find, Some("Terminal")),
+            KeyBinding::new("cmd-f", Find, Some("Find")),
+            KeyBinding::new("ctrl-f", Find, Some("Find")),
+            KeyBinding::new("enter", FindNext, Some("Find")),
+            KeyBinding::new("shift-enter", FindPrev, Some("Find")),
+            KeyBinding::new("escape", FindClose, Some("Find")),
         ]);
         let body_focus = cx.focus_handle();
         body_focus.focus(window, cx);
@@ -121,6 +138,9 @@ impl TerminalView {
             reveal_seq: 0,
             focus_handle: cx.focus_handle(),
             body_focus,
+            find_active: false,
+            find_input: None,
+            find_observation: None,
         };
         // Show the bar briefly on launch so the scrollable extent is visible,
         // then let it auto-hide.
@@ -292,6 +312,63 @@ impl TerminalView {
         }
     }
 
+    /// Open the find box, creating and focusing its text field on first use.
+    fn find(&mut self, _: &Find, window: &mut Window, cx: &mut Context<Self>) {
+        self.find_active = true;
+        if self.find_input.is_none() {
+            let input = cx.new(|cx| TextInput::new(cx, "Find", 0));
+            self.find_observation =
+                Some(cx.observe(&input, |this, _input, cx| this.run_search(cx)));
+            self.find_input = Some(input);
+        }
+        if let Some(input) = self.find_input.as_ref() {
+            input.read(cx).focus_handle(cx).focus(window, cx);
+        }
+        self.run_search(cx);
+        cx.notify();
+    }
+
+    /// Apply the find field's text as the terminal's search query.
+    fn run_search(&mut self, cx: &mut Context<Self>) {
+        if !self.find_active {
+            return;
+        }
+        let query = match self.find_input.as_ref() {
+            Some(input) => input.read(cx).content().to_string(),
+            None => return,
+        };
+        if let Some(terminal) = self.terminal.as_mut() {
+            terminal.set_search(&query);
+        }
+        // The hovered URL's highlight is in viewport coordinates, which scrolling
+        // to a match invalidates; the next pointer move recomputes it.
+        self.hovered_url = None;
+        cx.notify();
+    }
+
+    fn find_next(&mut self, _: &FindNext, _: &mut Window, cx: &mut Context<Self>) {
+        if let Some(terminal) = self.terminal.as_mut() {
+            terminal.search_next();
+        }
+        cx.notify();
+    }
+
+    fn find_prev(&mut self, _: &FindPrev, _: &mut Window, cx: &mut Context<Self>) {
+        if let Some(terminal) = self.terminal.as_mut() {
+            terminal.search_prev();
+        }
+        cx.notify();
+    }
+
+    fn find_close(&mut self, _: &FindClose, window: &mut Window, cx: &mut Context<Self>) {
+        self.find_active = false;
+        if let Some(terminal) = self.terminal.as_mut() {
+            terminal.clear_search();
+        }
+        self.body_focus.focus(window, cx);
+        cx.notify();
+    }
+
     fn on_scroll_wheel(
         &mut self,
         event: &ScrollWheelEvent,
@@ -310,6 +387,11 @@ impl TerminalView {
 impl Render for TerminalView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = bviz_ui_theme::colors(window);
+        let find_box = if self.find_active {
+            self.render_find_box(&colors, cx)
+        } else {
+            None
+        };
         Chrome::new(&self.focus_handle).title("bazel_term").child(
             div()
                 .key_context("Terminal")
@@ -321,17 +403,108 @@ impl Render for TerminalView {
                 .on_action(cx.listener(Self::scroll_to_top))
                 .on_action(cx.listener(Self::scroll_to_bottom))
                 .on_action(cx.listener(Self::copy))
+                .on_action(cx.listener(Self::find))
                 .on_scroll_wheel(cx.listener(Self::on_scroll_wheel))
                 .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
                 .on_mouse_move(cx.listener(Self::on_mouse_move))
                 .when(self.hovered_url.is_some(), |body| body.cursor_pointer())
+                .relative()
                 .size_full()
                 .overflow_hidden()
                 .bg(colors.background)
                 .font_family(bviz_ui_assets::MONO)
                 .text_size(px(13.))
                 .text_color(colors.text)
-                .child(TerminalElement { view: cx.entity() }),
+                .child(TerminalElement { view: cx.entity() })
+                .children(find_box),
+        )
+    }
+}
+
+impl TerminalView {
+    /// The find box overlaid at the top-right of the terminal: the query field,
+    /// a match counter, and previous/next/close controls. `None` before the field
+    /// has been created (i.e. the box has never been opened).
+    fn render_find_box(
+        &self,
+        colors: &bviz_ui_theme::Colors,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui::AnyElement> {
+        let input = self.find_input.as_ref()?.clone();
+        let query_empty = input.read(cx).content().is_empty();
+        let (cur, total) = self
+            .terminal
+            .as_ref()
+            .map_or((None, 0), |t| (t.current_match(), t.search_count()));
+        let count = if query_empty {
+            String::new()
+        } else if total == 0 {
+            "No results".to_string()
+        } else {
+            format!("{} / {}", cur.unwrap_or(0), total)
+        };
+
+        let view = cx.entity();
+        let prev_view = view.clone();
+        let next_view = view.clone();
+        let close_view = view;
+        Some(
+            div()
+                .key_context("Find")
+                .occlude()
+                .absolute()
+                .top_2()
+                .right_4()
+                .flex()
+                .items_center()
+                .gap_2()
+                .p_1()
+                .rounded_md()
+                .bg(colors.container)
+                .border_1()
+                .border_color(colors.border)
+                .on_action(cx.listener(Self::find_next))
+                .on_action(cx.listener(Self::find_prev))
+                .on_action(cx.listener(Self::find_close))
+                .child(div().w_48().child(input))
+                .child(
+                    div()
+                        .text_size(px(12.))
+                        .text_color(colors.text)
+                        .child(SharedString::from(count)),
+                )
+                .child(
+                    Button::new("find-prev", move |_, _, cx| {
+                        prev_view.update(cx, |this, cx| {
+                            if let Some(terminal) = this.terminal.as_mut() {
+                                terminal.search_prev();
+                            }
+                            cx.notify();
+                        })
+                    })
+                    .ghost()
+                    .label("↑"),
+                )
+                .child(
+                    Button::new("find-next", move |_, _, cx| {
+                        next_view.update(cx, |this, cx| {
+                            if let Some(terminal) = this.terminal.as_mut() {
+                                terminal.search_next();
+                            }
+                            cx.notify();
+                        })
+                    })
+                    .ghost()
+                    .label("↓"),
+                )
+                .child(
+                    Button::new("find-close", move |_, window, cx| {
+                        close_view.update(cx, |this, cx| this.find_close(&FindClose, window, cx))
+                    })
+                    .ghost()
+                    .icon("x"),
+                )
+                .into_any_element(),
         )
     }
 }
@@ -456,15 +629,17 @@ impl Element for TerminalElement {
                 Some(terminal) => terminal.resize(cols, rows),
                 None => view.terminal = Some(Terminal::new(&view.output, cols, rows)),
             });
-        let (viewport, history, offset, selection) = match self.view.read(cx).terminal.as_ref() {
-            Some(terminal) => (
-                terminal.viewport(),
-                terminal.history_size(),
-                terminal.display_offset(),
-                terminal.selection_spans(),
-            ),
-            None => (Vec::new(), 0, 0, Vec::new()),
-        };
+        let (viewport, history, offset, selection, search) =
+            match self.view.read(cx).terminal.as_ref() {
+                Some(terminal) => (
+                    terminal.viewport(),
+                    terminal.history_size(),
+                    terminal.display_offset(),
+                    terminal.selection_spans(),
+                    terminal.search_spans(),
+                ),
+                None => (Vec::new(), 0, 0, Vec::new(), Vec::new()),
+            };
         self.view.update(cx, |view, _| {
             view.content = Some(ContentLayout {
                 left: f32::from(bounds.left()),
@@ -580,6 +755,34 @@ impl Element for TerminalElement {
                 Bounds::new(point(x, y), size(width, metrics.line_height)),
                 selection_color,
             ));
+        }
+
+        // Highlight search matches in yellow, the focused match more strongly.
+        for (r, spans) in search.iter().enumerate() {
+            let y = bounds.top() + metrics.line_height * r as f32;
+            for &(first, last, focused) in spans {
+                let x = bounds.left() + metrics.cell_width * first as f32;
+                let width = metrics.cell_width * (last - first + 1) as f32;
+                let color = if focused {
+                    Rgba {
+                        r: 0.85,
+                        g: 0.72,
+                        b: 0.18,
+                        a: 0.60,
+                    }
+                } else {
+                    Rgba {
+                        r: 0.85,
+                        g: 0.72,
+                        b: 0.18,
+                        a: 0.30,
+                    }
+                };
+                backgrounds.push(fill(
+                    Bounds::new(point(x, y), size(width, metrics.line_height)),
+                    color,
+                ));
+            }
         }
 
         // Underline the hovered URL in the accent color to mark it as a link.

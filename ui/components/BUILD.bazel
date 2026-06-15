@@ -7,6 +7,7 @@ rust_library(
     visibility = [
         "//gpui_hello:__pkg__",
         "//ui/shell:__pkg__",
+        "//ui/terminal:__pkg__",
     ],
     deps = [
         "//ui/assets",
