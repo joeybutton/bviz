@@ -55,6 +55,21 @@ fn kind_accent(kind: &str) -> Rgba {
     }
 }
 
+/// Fraction by which the package container fill is pulled toward the border
+/// color, deepening it so the outer package box reads as containing the lighter
+/// target and configured-target boxes.
+const PACKAGE_DEEPEN: f32 = 0.18;
+
+/// Fill for a container box. The outer package box is deepened toward the border
+/// so nesting reads package > target > configured-target; inner containers use
+/// the plain themed container fill.
+fn container_fill(kind: &str, palette: &Palette) -> Rgba {
+    match kind {
+        "package" => bviz_ui_theme::mix(palette.container_fill, palette.border, PACKAGE_DEEPEN),
+        _ => palette.container_fill,
+    }
+}
+
 /// Theme-resolved colors the canvas paints with, owned so the `'static` paint
 /// closure can capture them.
 #[derive(Clone, Copy)]
@@ -171,7 +186,7 @@ impl GraphView {
                 h: b.height,
                 compound: b.compound,
                 fill: if b.compound {
-                    palette.container_fill
+                    container_fill(&b.kind, &palette)
                 } else {
                     bviz_ui_theme::mix(kind_accent(&b.kind), palette.background, KIND_BLEND)
                 },

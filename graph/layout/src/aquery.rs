@@ -1,10 +1,14 @@
 //! Builds a compound graph from `bazel aquery` output: the
-//! target -> configured-target -> {action, output artifact} hierarchy. Edges run
-//! between leaf nodes only (action -> its outputs; producing artifact or source
-//! -> consuming action), and the layout engine routes them across nesting levels
-//! by placing each in the lowest common ancestor of its endpoints.
+//! package -> target -> configured-target -> {action, output artifact}
+//! hierarchy. A package container groups the targets and source files of one
+//! Bazel package. Edges run between leaf nodes only (action -> its outputs;
+//! producing artifact or source -> consuming action), and the layout engine
+//! routes them across nesting levels by placing each in the lowest common
+//! ancestor of its endpoints.
 //!
-//! Source artifacts consumed by an action appear as leaf nodes at the root.
+//! Source artifacts consumed by an action nest under the package container of
+//! their longest-enclosing package, or sit at the root when no known package
+//! encloses them.
 //! External sources are dropped unless `external_sources` is set. Generated
 //! inputs whose producing action is outside the queried scope have no producer
 //! node and are skipped.
@@ -50,7 +54,16 @@ pub fn build(containers: &[ActionGraphContainer], external_sources: bool) -> Gra
         configurations.iter().map(|c| (c.id, *c)).collect();
     let depset_by_id: HashMap<u32, &DepSetOfFiles> = dep_sets.iter().map(|d| (d.id, *d)).collect();
 
+    // Main-repo package paths known from target labels, used to resolve each
+    // source to its longest-enclosing package. External targets contribute no
+    // path here: only `//`-prefixed labels name a main-repo source directory.
+    let known_packages: HashSet<String> = targets
+        .iter()
+        .filter_map(|t| main_repo_package_path(&t.label))
+        .collect();
+
     let mut graph = Graph::new();
+    let mut package_boxes: HashSet<String> = HashSet::new();
     let mut target_boxes: HashSet<u32> = HashSet::new();
     let mut ct_boxes: HashSet<String> = HashSet::new();
     let source_nodes: HashSet<u32> = HashSet::new();
@@ -62,6 +75,7 @@ pub fn build(containers: &[ActionGraphContainer], external_sources: bool) -> Gra
         let ct_id = configured_target_box(
             action,
             &mut graph,
+            &mut package_boxes,
             &mut target_boxes,
             &mut ct_boxes,
             &target_by_id,
@@ -95,6 +109,8 @@ pub fn build(containers: &[ActionGraphContainer], external_sources: bool) -> Gra
         depset_nodes: HashSet::new(),
         seen_edge: HashSet::new(),
         source_nodes,
+        package_boxes,
+        known_packages,
         producer_node_id,
         depset_by_id,
         artifact_by_id,
@@ -137,6 +153,11 @@ struct Wiring<'a> {
     depset_nodes: HashSet<u32>,
     seen_edge: HashSet<(String, String)>,
     source_nodes: HashSet<u32>,
+    /// Package container ids already created, deduped across both passes.
+    package_boxes: HashSet<String>,
+    /// Main-repo package paths derived from target labels; a source nests under
+    /// the longest of these that encloses its directory.
+    known_packages: HashSet<String>,
     producer_node_id: HashMap<u32, String>,
     depset_by_id: HashMap<u32, &'a DepSetOfFiles>,
     artifact_by_id: HashMap<u32, &'a Artifact>,
@@ -195,8 +216,11 @@ impl Wiring<'_> {
                 None => return,
             }
         } else {
+            let parent =
+                source_package_box(&path, &self.known_packages, &mut self.package_boxes, graph);
             source_node(
                 artifact_id,
+                parent,
                 graph,
                 &mut self.source_nodes,
                 &self.artifact_by_id,
@@ -271,6 +295,7 @@ fn files_label(count: usize) -> String {
 fn configured_target_box(
     action: &Action,
     graph: &mut Graph,
+    package_boxes: &mut HashSet<String>,
     target_boxes: &mut HashSet<u32>,
     ct_boxes: &mut HashSet<String>,
     target_by_id: &HashMap<u32, &Target>,
@@ -290,7 +315,11 @@ fn configured_target_box(
             .get(&target_id)
             .map(|t| t.label.clone())
             .unwrap_or_else(|| format!("target {target_id}"));
-        graph.add_node(target_node_id.clone(), label, "target", None);
+        let package = target_by_id
+            .get(&target_id)
+            .and_then(|t| package_of(&t.label))
+            .map(|pkg| package_box(pkg, package_boxes, graph));
+        graph.add_node(target_node_id.clone(), label, "target", package);
     }
 
     let label = config_by_id
@@ -309,6 +338,7 @@ fn configured_target_box(
 
 fn source_node(
     artifact_id: u32,
+    parent: Option<String>,
     graph: &mut Graph,
     source_nodes: &mut HashSet<u32>,
     artifact_by_id: &HashMap<u32, &Artifact>,
@@ -320,10 +350,102 @@ fn source_node(
             node_id.clone(),
             basename(artifact_id, artifact_by_id, fragment_by_id),
             "source",
-            None,
+            parent,
         );
     }
     node_id
+}
+
+/// The package a label names, split into the id of its container node and the
+/// label shown on it. The repository prefix is preserved so that an external
+/// `@repo//pkg:name` and a main-repo `//pkg:name` never collide:
+///   - main-repo `//path/to:name` -> id `pkg:path/to`, label `//path/to`
+///     (root `//:name` -> id `pkg:`, label `//`),
+///   - external `@repo//pkg:name` -> id `pkg:@repo//pkg`, label `@repo//pkg`.
+struct Package {
+    id: String,
+    label: String,
+}
+
+/// Parses a label into its package container. Labels not in `[@repo]//pkg:name`
+/// form (no `//`) have no package.
+fn package_of(label: &str) -> Option<Package> {
+    let (repo, after) = label.split_once("//")?;
+    let path = after.split_once(':').map(|(p, _)| p).unwrap_or(after);
+    if repo.is_empty() {
+        // Main-repo: id `pkg:{path}`, label `//{path}` (root: `pkg:`, `//`).
+        Some(main_repo_package(path))
+    } else {
+        // External: the `@repo//` prefix keeps id and label distinct from any
+        // same-named main-repo package.
+        let qualified = format!("{repo}//{path}");
+        Some(Package {
+            id: format!("pkg:{qualified}"),
+            label: qualified,
+        })
+    }
+}
+
+/// The main-repo package path of a label `//path/to:name` (`path/to`; root is
+/// `""`), or `None` for external labels, which contribute no path that a
+/// main-repo source directory could be nested under.
+fn main_repo_package_path(label: &str) -> Option<String> {
+    let path = label.strip_prefix("//")?;
+    let path = path.split_once(':').map(|(p, _)| p).unwrap_or(path);
+    Some(path.to_string())
+}
+
+/// Container id for a main-repo package path: `pkg:` plus the path (root is
+/// `pkg:`).
+fn package_box_id(path: &str) -> String {
+    format!("pkg:{path}")
+}
+
+/// The container for a main-repo package path, matching `package_of`'s main-repo
+/// scheme.
+fn main_repo_package(path: &str) -> Package {
+    Package {
+        id: package_box_id(path),
+        label: format!("//{path}"),
+    }
+}
+
+/// Creates the package container `package` once and returns its id.
+fn package_box(package: Package, package_boxes: &mut HashSet<String>, graph: &mut Graph) -> String {
+    if package_boxes.insert(package.id.clone()) {
+        graph.add_node(package.id.clone(), package.label, "package", None);
+    }
+    package.id
+}
+
+/// The package container a source belongs to: the longest known main-repo
+/// package whose path equals the source's directory or is a parent of it.
+/// Returns `None` when no known package encloses the source, leaving it at the
+/// root. External sources never match, since their dirs (`external/...`) are not
+/// main-repo package paths.
+fn source_package_box(
+    path: &str,
+    known_packages: &HashSet<String>,
+    package_boxes: &mut HashSet<String>,
+    graph: &mut Graph,
+) -> Option<String> {
+    let dir = path.rsplit_once('/').map(|(d, _)| d).unwrap_or("");
+    let best = known_packages
+        .iter()
+        .filter(|p| encloses(p, dir))
+        .max_by_key(|p| (p.len(), p.as_str()))?;
+    Some(package_box(main_repo_package(best), package_boxes, graph))
+}
+
+/// Whether package path `pkg` encloses directory `dir`: they are equal, or `dir`
+/// lies under `pkg` at a path-segment boundary. The root package `""` encloses
+/// every directory.
+fn encloses(pkg: &str, dir: &str) -> bool {
+    pkg.is_empty()
+        || dir == pkg
+        || dir
+            .strip_prefix(pkg)
+            .is_some_and(|rest| rest.starts_with('/'))
 }
 
 fn basename(
@@ -442,6 +564,22 @@ mod tests {
             input_dep_set_ids: dep_set_ids.to_vec(),
             ..Default::default()
         }
+    }
+
+    fn target(id: u32, label: &str) -> Target {
+        Target {
+            id,
+            label: label.to_string(),
+            ..Default::default()
+        }
+    }
+
+    fn find<'a>(graph: &'a Graph, id: &str) -> &'a Node {
+        graph.nodes.iter().find(|n| n.id == id).unwrap()
+    }
+
+    fn parent_of<'a>(graph: &'a Graph, id: &str) -> Option<&'a str> {
+        find(graph, id).parent.as_deref()
     }
 
     fn edges(graph: &Graph) -> HashSet<(&str, &str)> {
@@ -633,5 +771,185 @@ mod tests {
         let edges = edges(&graph);
         assert!(!edges.iter().any(|(from, _)| *from == "depset10"));
         assert!(!edges.iter().any(|(_, to)| *to == "depset10"));
+    }
+
+    #[test]
+    fn targets_and_sources_nest_in_their_package_containers() {
+        let (a1, f1) = source_artifact(1, "foo/main.c");
+        let (a2, f2) = source_artifact(2, "bar/lib.c");
+        // Each target consumes its own source through a single-use depset.
+        let container = ActionGraphContainer {
+            artifacts: vec![a1, a2],
+            path_fragments: vec![f1, f2],
+            targets: vec![target(1, "//foo:app"), target(2, "//bar:lib")],
+            dep_set_of_files: vec![dep_set(10, &[1], &[]), dep_set(11, &[2], &[])],
+            actions: vec![action(1, "Compile", &[10]), action(2, "Compile", &[11])],
+            ..Default::default()
+        };
+
+        let graph = build(&[container], false);
+
+        assert_eq!(find(&graph, "pkg:foo").kind, "package");
+        assert_eq!(find(&graph, "pkg:foo").label, "//foo");
+        assert_eq!(find(&graph, "pkg:bar").label, "//bar");
+
+        assert_eq!(parent_of(&graph, "target1"), Some("pkg:foo"));
+        assert_eq!(parent_of(&graph, "target2"), Some("pkg:bar"));
+        assert_eq!(parent_of(&graph, "source1"), Some("pkg:foo"));
+        assert_eq!(parent_of(&graph, "source2"), Some("pkg:bar"));
+    }
+
+    #[test]
+    fn source_below_package_dir_nests_in_longest_package() {
+        // Both `//foo` and `//foo/bar` are packages; a source in `foo/bar/sub`
+        // belongs to the longer, enclosing `//foo/bar`, not `//foo`.
+        let (a1, f1) = source_artifact(1, "foo/bar/sub/deep.c");
+        let container = ActionGraphContainer {
+            artifacts: vec![a1],
+            path_fragments: vec![f1],
+            targets: vec![target(1, "//foo:app"), target(2, "//foo/bar:lib")],
+            dep_set_of_files: vec![dep_set(10, &[1], &[])],
+            // Action belongs to the inner target so the source feeds it.
+            actions: vec![action(2, "Compile", &[10])],
+            ..Default::default()
+        };
+
+        let graph = build(&[container], false);
+
+        assert_eq!(parent_of(&graph, "source1"), Some("pkg:foo/bar"));
+    }
+
+    #[test]
+    fn source_in_no_known_package_stays_at_root() {
+        let (a1, f1) = source_artifact(1, "elsewhere/orphan.c");
+        let container = ActionGraphContainer {
+            artifacts: vec![a1],
+            path_fragments: vec![f1],
+            targets: vec![target(1, "//foo:app")],
+            dep_set_of_files: vec![dep_set(10, &[1], &[])],
+            actions: vec![action(1, "Compile", &[10])],
+            ..Default::default()
+        };
+
+        let graph = build(&[container], false);
+
+        assert_eq!(parent_of(&graph, "source1"), None);
+    }
+
+    #[test]
+    fn depset_stays_at_root_though_members_belong_to_packages() {
+        let (a1, f1) = source_artifact(1, "foo/one.c");
+        let (a2, f2) = source_artifact(2, "foo/two.c");
+        let container = ActionGraphContainer {
+            artifacts: vec![a1, a2],
+            path_fragments: vec![f1, f2],
+            targets: vec![target(1, "//foo:app")],
+            // Shared by two actions, so it materializes as a node.
+            dep_set_of_files: vec![dep_set(10, &[1, 2], &[])],
+            actions: vec![action(1, "Compile", &[10]), action(1, "Link", &[10])],
+            ..Default::default()
+        };
+
+        let graph = build(&[container], false);
+
+        assert_eq!(parent_of(&graph, "depset10"), None);
+        assert_eq!(parent_of(&graph, "source1"), Some("pkg:foo"));
+        assert_eq!(parent_of(&graph, "source2"), Some("pkg:foo"));
+    }
+
+    #[test]
+    fn root_package_target_uses_empty_package_box() {
+        let (a1, f1) = source_artifact(1, "top.c");
+        let container = ActionGraphContainer {
+            artifacts: vec![a1],
+            path_fragments: vec![f1],
+            targets: vec![target(1, "//:root")],
+            dep_set_of_files: vec![dep_set(10, &[1], &[])],
+            actions: vec![action(1, "Compile", &[10])],
+            ..Default::default()
+        };
+
+        let graph = build(&[container], false);
+
+        assert_eq!(find(&graph, "pkg:").label, "//");
+        assert_eq!(parent_of(&graph, "target1"), Some("pkg:"));
+        assert_eq!(parent_of(&graph, "source1"), Some("pkg:"));
+    }
+
+    /// Two sources with the same single consumer but in different packages keep
+    /// distinct package parents, so the quotient pass (which groups only nodes
+    /// sharing kind, parent, and neighbors) cannot merge them; two in the same
+    /// package can.
+    #[test]
+    fn package_parent_separates_otherwise_mergeable_sources() {
+        let (a1, f1) = source_artifact(1, "foo/a.c");
+        let (a2, f2) = source_artifact(2, "bar/b.c");
+        let (a3, f3) = source_artifact(3, "foo/c.c");
+        let container = ActionGraphContainer {
+            artifacts: vec![a1, a2, a3],
+            path_fragments: vec![f1, f2, f3],
+            targets: vec![target(1, "//foo:app"), target(2, "//bar:lib")],
+            // One depset feeds one action, so all three are that action's inputs.
+            dep_set_of_files: vec![dep_set(10, &[1, 2, 3], &[])],
+            actions: vec![action(1, "Compile", &[10])],
+            ..Default::default()
+        };
+
+        let graph = build(&[container], false);
+        let quotiented = crate::quotient::quotient(&graph);
+
+        // foo/a.c and foo/c.c share package, consumer, and (no) producer: merged.
+        let merged: Vec<&Node> = quotiented
+            .nodes
+            .iter()
+            .filter(|n| n.kind == "source")
+            .collect();
+        let foo_group = merged
+            .iter()
+            .find(|n| n.parent.as_deref() == Some("pkg:foo"))
+            .expect("a foo-package source node");
+        assert_eq!(foo_group.label, "2 sources");
+        // bar/b.c is alone in its package, so it stays an unmerged singleton.
+        let bar_sources: Vec<&&Node> = merged
+            .iter()
+            .filter(|n| n.parent.as_deref() == Some("pkg:bar"))
+            .collect();
+        assert_eq!(bar_sources.len(), 1);
+        assert!(!bar_sources[0].label.ends_with("sources"));
+    }
+
+    #[test]
+    fn external_target_nests_in_repo_qualified_package() {
+        let container = ActionGraphContainer {
+            targets: vec![target(1, "@somerepo//foo:bar")],
+            actions: vec![action(1, "Compile", &[])],
+            ..Default::default()
+        };
+
+        let graph = build(&[container], false);
+
+        let pkg = parent_of(&graph, "target1").unwrap();
+        assert_ne!(pkg, "pkg:foo");
+        assert_eq!(find(&graph, pkg).label, "@somerepo//foo");
+    }
+
+    #[test]
+    fn external_and_main_repo_same_path_keep_separate_packages() {
+        let container = ActionGraphContainer {
+            targets: vec![target(1, "//foo:x"), target(2, "@somerepo//foo:y")],
+            actions: vec![action(1, "Compile", &[]), action(2, "Compile", &[])],
+            ..Default::default()
+        };
+
+        let graph = build(&[container], false);
+
+        // Main-repo package keeps its historical id and label.
+        assert_eq!(parent_of(&graph, "target1"), Some("pkg:foo"));
+        assert_eq!(find(&graph, "pkg:foo").label, "//foo");
+
+        // The external package is a distinct container.
+        let external = parent_of(&graph, "target2").unwrap();
+        assert_ne!(external, "pkg:foo");
+        assert_eq!(find(&graph, external).label, "@somerepo//foo");
     }
 }

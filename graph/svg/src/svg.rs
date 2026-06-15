@@ -36,11 +36,12 @@ pub fn emit(layout: &LaidOut) -> String {
             let _ = write!(
                 svg,
                 "<rect x=\"{x}\" y=\"{y}\" width=\"{w}\" height=\"{h}\" rx=\"6\" \
-                 fill=\"#dde6f2\" stroke=\"#3a5a8c\" stroke-width=\"1.5\"/>\n",
+                 fill=\"{fill}\" stroke=\"#3a5a8c\" stroke-width=\"1.5\"/>\n",
                 x = num(b.x),
                 y = num(b.y),
                 w = num(b.width),
                 h = num(b.height),
+                fill = container_fill(&b.kind),
             );
             let _ = write!(
                 svg,
@@ -89,6 +90,15 @@ pub fn emit(layout: &LaidOut) -> String {
 
     svg.push_str("</g></svg>\n");
     svg
+}
+
+// Container fills nest visually: the outer package box is a deeper slate so the
+// lighter target and configured-target boxes read as sitting inside it.
+fn container_fill(kind: &str) -> &'static str {
+    match kind {
+        "package" => "#c4d2e8",
+        _ => "#dde6f2",
+    }
 }
 
 // Distinct fills make actions, their outputs, and sources easy to tell apart.

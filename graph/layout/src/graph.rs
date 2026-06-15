@@ -10,8 +10,8 @@
 pub struct Node {
     pub id: String,
     pub label: String,
-    /// A coarse category (`target`, `configured-target`, `action`, `artifact`,
-    /// `source`) used to pick a fill when rendering.
+    /// A coarse category (`package`, `target`, `configured-target`, `action`,
+    /// `artifact`, `source`, `depset`) used to pick a fill when rendering.
     pub kind: String,
     pub parent: Option<String>,
 }
