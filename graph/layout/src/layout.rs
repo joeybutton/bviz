@@ -55,10 +55,10 @@ pub struct Box {
     pub compound: bool,
 }
 
-/// Whether `b` is a collapsed group: a leaf box whose id marks a group, which
+/// Whether `b` is a collapsible leaf: a group leaf or a depset junction, which
 /// gets a disclosure caret and the [`CARET_RESERVE`] width for it.
 pub fn caret_leaf(b: &Box) -> bool {
-    !b.compound && b.id.starts_with("group:")
+    !b.compound && (b.id.starts_with("group:") || b.kind == "depset")
 }
 
 /// An edge polyline: start, bend points, end, in order.
@@ -221,9 +221,10 @@ fn build_node<'g>(
             }
         }
         None => {
-            // A collapsed group leaf reserves room for its disclosure caret left
-            // of the label, matching the renderer's caret footprint.
-            let caret = if node.id.starts_with("group:") {
+            // A collapsible leaf (a group or a depset junction) reserves room for
+            // its disclosure caret left of the label, matching the renderer's
+            // caret footprint.
+            let caret = if node.id.starts_with("group:") || node.kind == "depset" {
                 CARET_RESERVE
             } else {
                 0.0

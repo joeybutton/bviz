@@ -110,8 +110,11 @@ struct PaintBox {
     h: f64,
     compound: bool,
     /// Node kind, distinguishing an expanded group container (`group`) from a
-    /// collapsed group leaf for the disclosure caret.
+    /// collapsed group leaf, and marking depset junctions, for the caret.
     kind: String,
+    /// Whether this box's id is in the expansion set, which points its
+    /// disclosure caret down rather than right.
+    expanded: bool,
     /// Fill resolved from the active theme when the box vec is built.
     fill: Rgba,
     label: String,
@@ -235,6 +238,7 @@ impl GraphView {
     /// connectors rather than borrowing the graph.
     fn graph(
         g: &LaidOut,
+        expanded: &HashSet<String>,
         zoom: Rc<Cell<f32>>,
         pan: Rc<Cell<(f32, f32)>>,
         fitted: Rc<Cell<bool>>,
@@ -252,6 +256,7 @@ impl GraphView {
                 h: b.height,
                 compound: b.compound,
                 kind: b.kind.clone(),
+                expanded: expanded.contains(&b.id),
                 fill: if b.compound {
                     container_fill(&b.kind, &palette)
                 } else {
@@ -358,6 +363,7 @@ impl Render for GraphView {
                 .child(
                     Self::graph(
                         g,
+                        &self.expanded.borrow(),
                         self.zoom.clone(),
                         self.pan.clone(),
                         self.fitted.clone(),
@@ -391,7 +397,7 @@ impl Render for GraphView {
                             let Some(hit) = hit_box(&g.boxes, gx, gy) else {
                                 return;
                             };
-                            if !hit.id.starts_with("group:") {
+                            if !(hit.id.starts_with("group:") || hit.kind == "depset") {
                                 return;
                             }
                             let id = hit.id.clone();
@@ -571,10 +577,11 @@ fn paint_box(
     let line = window
         .text_system()
         .shape_line(b.label.clone().into(), fs, &[run], None);
-    // Group boxes carry a disclosure caret left of the label, occupying the
-    // reserved width the layout sized the box to hold; the label and caret are
-    // centered together as one unit. Other boxes center the label alone.
-    let caret = b.id.starts_with("group:");
+    // Collapsible boxes (groups and depset junctions) carry a disclosure caret
+    // left of the label, occupying the reserved width the layout sized the box to
+    // hold; the label and caret are centered together as one unit. Other boxes
+    // center the label alone.
+    let caret = b.id.starts_with("group:") || b.kind == "depset";
     let footprint = px(CARET_RESERVE as f32 * zoom);
     let unit_width = if caret {
         footprint + line.width()
@@ -595,17 +602,17 @@ fn paint_box(
     };
     let _ = line.paint(point(tx, ty), fs, TextAlign::Left, None, window, cx);
 
-    // A collapsed group (the box is a leaf, kind != "group") points the caret
-    // right, an expanded group (kind == "group" container) points it down.
-    // Phosphor icons render as `svg()` elements and cannot be painted inside this
-    // canvas, so the caret is a small filled triangle.
+    // A collapsed box points the caret right, an expanded one (its id in the
+    // expansion set) points it down. Phosphor icons render as `svg()` elements
+    // and cannot be painted inside this canvas, so the caret is a small filled
+    // triangle.
     if caret {
         let cy = ty + fs / 2.;
         paint_caret(
             point(unit_left, cy),
             footprint,
             fs,
-            b.kind == "group",
+            b.expanded,
             palette.label,
             window,
         );
@@ -730,9 +737,9 @@ fn build_graph(path: &str) -> Result<Graph, String> {
     Ok(aquery::build(&containers, false))
 }
 
-/// Quotients `graph` with the given groups expanded and lays the result out.
+/// Builds the display graph with the given ids expanded and lays it out.
 fn relayout(graph: &Graph, expanded: &HashSet<String>) -> LaidOut {
-    layout::layout(&quotient::quotient(graph, expanded))
+    layout::layout(&quotient::display(graph, expanded))
 }
 
 /// Inverse of [`to_screen`]: maps a window-space point back to layout space.
