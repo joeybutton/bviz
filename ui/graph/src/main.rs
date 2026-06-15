@@ -2,7 +2,7 @@
 //! `bviz_graph_layout`, lays the action graph out, and opens a window
 //! summarizing the result.
 
-use bviz_graph_layout::{aquery, layout, streamed_proto, LaidOut};
+use bviz_graph_layout::{aquery, layout, quotient, streamed_proto, LaidOut};
 use bviz_ui_shell::Chrome;
 use gpui::{
     Animation, AnimationExt, App, AsyncApp, BorderStyle, Bounds, Context, Div, FocusHandle,
@@ -541,7 +541,7 @@ fn load(path: &str) -> Result<LaidOut, String> {
     let bytes = std::fs::read(path).map_err(|e| format!("{path}: {e}"))?;
     let containers =
         streamed_proto::read_action_graph_containers(&bytes).map_err(|e| e.to_string())?;
-    let graph = aquery::build(&containers, false);
+    let graph = quotient::quotient(&aquery::build(&containers, false));
     Ok(layout::layout(&graph))
 }
 

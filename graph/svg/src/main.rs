@@ -9,7 +9,7 @@ mod svg;
 
 use std::process::ExitCode;
 
-use bviz_graph_layout::{aquery, layout, streamed_proto};
+use bviz_graph_layout::{aquery, layout, quotient, streamed_proto};
 
 fn main() -> ExitCode {
     let mut args = std::env::args().skip(1);
@@ -35,7 +35,7 @@ fn main() -> ExitCode {
         }
     };
 
-    let graph = aquery::build(&containers, false);
+    let graph = quotient::quotient(&aquery::build(&containers, false));
     let laid_out = layout::layout(&graph);
     let document = svg::emit(&laid_out);
 

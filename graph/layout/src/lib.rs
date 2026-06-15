@@ -6,6 +6,7 @@
 pub mod aquery;
 pub mod graph;
 pub mod layout;
+pub mod quotient;
 pub mod streamed_proto;
 
 pub use graph::Graph;

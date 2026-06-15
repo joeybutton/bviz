@@ -1,0 +1,346 @@
+//! Losslessly merges leaf data nodes that are topologically interchangeable.
+//!
+//! Two leaf nodes of kind `source` or `artifact` are interchangeable when they
+//! share the same kind, the same parent, the same set of producers (in-edges),
+//! and the same set of consumers (out-edges). Such nodes have identical neighbor
+//! sets, so collapsing them into one group node preserves all reachability and
+//! edge routing. This folds the dominant Bazel pattern in which a target's whole
+//! source list feeds a single compile action: each source's only consumer is
+//! that one action, so they all merge into one node with one edge.
+//!
+//! Leaf data nodes never neighbor each other (consumption flows
+//! source/artifact -> {depset, action} and action -> artifact), so a candidate's
+//! neighbors are never themselves candidates. The merge is therefore exact in a
+//! single pass over the original graph: remapping candidate ids cannot perturb
+//! the signatures it groups by.
+
+use std::collections::BTreeMap;
+
+use crate::graph::{Edge, Graph, Node};
+
+/// Returns a graph in which interchangeable `source`/`artifact` leaves are
+/// merged. Nodes and edges of the result are sorted by id for an output that is
+/// independent of the input order.
+pub fn quotient(graph: &Graph) -> Graph {
+    let producers = neighbor_lists(graph, |e| (&e.to, &e.from));
+    let consumers = neighbor_lists(graph, |e| (&e.from, &e.to));
+
+    // Group candidate ids by signature; non-candidates are passed through.
+    let mut groups: BTreeMap<Signature, Vec<&str>> = BTreeMap::new();
+    for node in &graph.nodes {
+        if !is_candidate(&node.kind) {
+            continue;
+        }
+        let signature = Signature {
+            kind: node.kind.clone(),
+            parent: node.parent.clone(),
+            producers: sorted_neighbors(&producers, &node.id),
+            consumers: sorted_neighbors(&consumers, &node.id),
+        };
+        groups.entry(signature).or_default().push(&node.id);
+    }
+
+    // Map each candidate id to the id it collapses into (itself when alone).
+    let mut remap: BTreeMap<&str, String> = BTreeMap::new();
+    // Group id (when size >= 2) -> member count, for labeling.
+    let mut group_sizes: BTreeMap<String, usize> = BTreeMap::new();
+    for members in groups.values() {
+        let target = group_id(members);
+        if members.len() >= 2 {
+            group_sizes.insert(target.clone(), members.len());
+        }
+        for &member in members {
+            remap.insert(member, target.clone());
+        }
+    }
+
+    let mut out = Graph::new();
+
+    // Non-candidates unchanged; one node per group (or the original singleton).
+    let mut emitted: BTreeMap<String, ()> = BTreeMap::new();
+    for node in &graph.nodes {
+        if !is_candidate(&node.kind) {
+            out.nodes.push(clone_node(node));
+            continue;
+        }
+        let id = &remap[node.id.as_str()];
+        if emitted.insert(id.clone(), ()).is_some() {
+            continue;
+        }
+        let label = match group_sizes.get(id) {
+            Some(&count) => group_label(&node.kind, count),
+            None => node.label.clone(),
+        };
+        out.nodes.push(Node {
+            id: id.clone(),
+            label,
+            kind: node.kind.clone(),
+            parent: node.parent.clone(),
+        });
+    }
+
+    // Remap edge endpoints, drop self-loops, and dedup.
+    let mut seen_edge: BTreeMap<(String, String), ()> = BTreeMap::new();
+    for edge in &graph.edges {
+        let from = remap
+            .get(edge.from.as_str())
+            .cloned()
+            .unwrap_or_else(|| edge.from.clone());
+        let to = remap
+            .get(edge.to.as_str())
+            .cloned()
+            .unwrap_or_else(|| edge.to.clone());
+        if from == to {
+            continue;
+        }
+        if seen_edge.insert((from.clone(), to.clone()), ()).is_some() {
+            continue;
+        }
+        out.edges.push(Edge { from, to });
+    }
+
+    out.nodes.sort_by(|a, b| a.id.cmp(&b.id));
+    out.edges
+        .sort_by(|a, b| (&a.from, &a.to).cmp(&(&b.from, &b.to)));
+    out
+}
+
+/// The neighborhood key two candidates must share to merge.
+#[derive(PartialEq, Eq, PartialOrd, Ord)]
+struct Signature {
+    kind: String,
+    parent: Option<String>,
+    producers: Vec<String>,
+    consumers: Vec<String>,
+}
+
+fn is_candidate(kind: &str) -> bool {
+    kind == "source" || kind == "artifact"
+}
+
+/// Group node id: a stable prefix over the lexicographically smallest member id.
+/// Each original id belongs to exactly one group, so this is unique. A singleton
+/// keeps its own id.
+fn group_id(members: &[&str]) -> String {
+    let smallest = members.iter().min().copied().unwrap_or_default();
+    if members.len() >= 2 {
+        format!("group:{smallest}")
+    } else {
+        smallest.to_string()
+    }
+}
+
+/// Group node label, matching the count-of-files phrasing used for depsets.
+fn group_label(kind: &str, count: usize) -> String {
+    match kind {
+        "source" => format!("{count} sources"),
+        _ => format!("{count} files"),
+    }
+}
+
+/// For each node id, the sorted list of distinct neighbor ids selected by
+/// `pick`, which maps an edge to its (anchor, neighbor) pair.
+fn neighbor_lists<'a>(
+    graph: &'a Graph,
+    pick: impl Fn(&'a Edge) -> (&'a String, &'a String),
+) -> BTreeMap<&'a str, Vec<&'a str>> {
+    let mut map: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+    for edge in &graph.edges {
+        let (anchor, neighbor) = pick(edge);
+        map.entry(anchor.as_str())
+            .or_default()
+            .push(neighbor.as_str());
+    }
+    map
+}
+
+fn sorted_neighbors(lists: &BTreeMap<&str, Vec<&str>>, id: &str) -> Vec<String> {
+    let mut ids: Vec<String> = lists
+        .get(id)
+        .map(|v| v.iter().map(|s| s.to_string()).collect())
+        .unwrap_or_default();
+    ids.sort_unstable();
+    ids.dedup();
+    ids
+}
+
+fn clone_node(node: &Node) -> Node {
+    Node {
+        id: node.id.clone(),
+        label: node.label.clone(),
+        kind: node.kind.clone(),
+        parent: node.parent.clone(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn leaf(graph: &mut Graph, id: &str, kind: &str, parent: Option<&str>) {
+        graph.add_node(id, id, kind, parent.map(str::to_string));
+    }
+
+    fn node_ids(graph: &Graph) -> Vec<&str> {
+        graph.nodes.iter().map(|n| n.id.as_str()).collect()
+    }
+
+    fn edges(graph: &Graph) -> Vec<(&str, &str)> {
+        graph
+            .edges
+            .iter()
+            .map(|e| (e.from.as_str(), e.to.as_str()))
+            .collect()
+    }
+
+    fn find<'a>(graph: &'a Graph, id: &str) -> &'a Node {
+        graph.nodes.iter().find(|n| n.id == id).unwrap()
+    }
+
+    #[test]
+    fn sources_with_one_shared_consumer_merge() {
+        let mut graph = Graph::new();
+        graph.add_node("action0", "Compile", "action", None);
+        for id in ["source1", "source2", "source3"] {
+            leaf(&mut graph, id, "source", None);
+            graph.add_edge(id, "action0");
+        }
+
+        let out = quotient(&graph);
+
+        // action0 plus the single group node.
+        assert_eq!(out.nodes.len(), 2);
+        let group = find(&out, "group:source1");
+        assert_eq!(group.label, "3 sources");
+        assert_eq!(group.kind, "source");
+        assert_eq!(edges(&out), vec![("group:source1", "action0")]);
+    }
+
+    #[test]
+    fn sources_with_different_consumers_do_not_merge() {
+        let mut graph = Graph::new();
+        graph.add_node("action0", "A", "action", None);
+        graph.add_node("action1", "B", "action", None);
+        leaf(&mut graph, "source1", "source", None);
+        leaf(&mut graph, "source2", "source", None);
+        graph.add_edge("source1", "action0");
+        graph.add_edge("source2", "action1");
+
+        let out = quotient(&graph);
+
+        assert!(node_ids(&out).contains(&"source1"));
+        assert!(node_ids(&out).contains(&"source2"));
+        assert!(!node_ids(&out).iter().any(|id| id.starts_with("group:")));
+    }
+
+    #[test]
+    fn artifacts_sharing_producer_and_consumers_merge() {
+        let mut graph = Graph::new();
+        graph.add_node("action0", "Produce", "action", None);
+        graph.add_node("action1", "Link", "action", None);
+        leaf(&mut graph, "artifact1", "artifact", Some("ct"));
+        leaf(&mut graph, "artifact2", "artifact", Some("ct"));
+        graph.add_node("ct", "cfg", "configured-target", None);
+        for id in ["artifact1", "artifact2"] {
+            graph.add_edge("action0", id);
+            graph.add_edge(id, "action1");
+        }
+
+        let out = quotient(&graph);
+
+        let group = find(&out, "group:artifact1");
+        assert_eq!(group.label, "2 files");
+        assert_eq!(group.parent.as_deref(), Some("ct"));
+        // Producer edge dedups to one action -> group.
+        assert_eq!(
+            edges(&out),
+            vec![
+                ("action0", "group:artifact1"),
+                ("group:artifact1", "action1"),
+            ]
+        );
+    }
+
+    #[test]
+    fn artifacts_with_different_producers_do_not_merge() {
+        let mut graph = Graph::new();
+        graph.add_node("action0", "P0", "action", None);
+        graph.add_node("action1", "P1", "action", None);
+        graph.add_node("action2", "Consume", "action", None);
+        leaf(&mut graph, "artifact1", "artifact", None);
+        leaf(&mut graph, "artifact2", "artifact", None);
+        graph.add_edge("action0", "artifact1");
+        graph.add_edge("action1", "artifact2");
+        graph.add_edge("artifact1", "action2");
+        graph.add_edge("artifact2", "action2");
+
+        let out = quotient(&graph);
+
+        assert!(node_ids(&out).contains(&"artifact1"));
+        assert!(node_ids(&out).contains(&"artifact2"));
+        assert!(!node_ids(&out).iter().any(|id| id.starts_with("group:")));
+    }
+
+    #[test]
+    fn source_and_artifact_never_merge() {
+        let mut graph = Graph::new();
+        graph.add_node("action0", "Consume", "action", None);
+        leaf(&mut graph, "source1", "source", None);
+        leaf(&mut graph, "artifact1", "artifact", None);
+        graph.add_edge("source1", "action0");
+        graph.add_edge("artifact1", "action0");
+
+        let out = quotient(&graph);
+
+        assert!(node_ids(&out).contains(&"source1"));
+        assert!(node_ids(&out).contains(&"artifact1"));
+        assert!(!node_ids(&out).iter().any(|id| id.starts_with("group:")));
+    }
+
+    #[test]
+    fn output_is_independent_of_insertion_order() {
+        let mut a = Graph::new();
+        a.add_node("action0", "Compile", "action", None);
+        for id in ["source1", "source2", "source3"] {
+            leaf(&mut a, id, "source", None);
+            a.add_edge(id, "action0");
+        }
+
+        let mut b = Graph::new();
+        for id in ["source3", "source1", "source2"] {
+            leaf(&mut b, id, "source", None);
+        }
+        b.add_node("action0", "Compile", "action", None);
+        b.add_edge("source2", "action0");
+        b.add_edge("source3", "action0");
+        b.add_edge("source1", "action0");
+
+        let qa = quotient(&a);
+        let qb = quotient(&b);
+
+        assert_eq!(node_ids(&qa), node_ids(&qb));
+        assert_eq!(edges(&qa), edges(&qb));
+    }
+
+    #[test]
+    fn containers_actions_and_depsets_pass_through() {
+        let mut graph = Graph::new();
+        graph.add_node("target1", "//:t", "target", None);
+        graph.add_node(
+            "ct",
+            "cfg",
+            "configured-target",
+            Some("target1".to_string()),
+        );
+        graph.add_node("action0", "Compile", "action", Some("ct".to_string()));
+        graph.add_node("depset10", "2 files", "depset", None);
+        graph.add_edge("depset10", "action0");
+
+        let out = quotient(&graph);
+
+        for id in ["target1", "ct", "action0", "depset10"] {
+            assert!(node_ids(&out).contains(&id), "{id} missing");
+        }
+        assert_eq!(edges(&out), vec![("depset10", "action0")]);
+    }
+}
