@@ -2,7 +2,7 @@
 //! text: the visible viewport, reflowed to the window, one shaped line per row
 //! with per-cell colors and background fills.
 
-use bviz_terminal::{Cell, Color, Flags, NamedColor, Rgb, Scroll, Terminal};
+use bviz_terminal::{BuildOutput, Cell, Color, Flags, NamedColor, Rgb, Scroll, Terminal};
 use bviz_ui_shell::Chrome;
 use gpui::{
     App, Bounds, Context, Element, Entity, FocusHandle, Font, FontStyle, FontWeight,
@@ -28,7 +28,9 @@ const SCROLL_STEP: i32 = 3;
 
 /// The root view: the rendered build terminal inside the window chrome.
 pub struct TerminalView {
-    terminal: Terminal,
+    output: BuildOutput,
+    /// The display terminal, created at the window size on first layout.
+    terminal: Option<Terminal>,
     /// The chrome's handle, for the window controls and tab navigation.
     focus_handle: FocusHandle,
     /// The terminal body's handle, focused so its scroll keys dispatch.
@@ -36,7 +38,7 @@ pub struct TerminalView {
 }
 
 impl TerminalView {
-    pub fn new(terminal: Terminal, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(output: BuildOutput, window: &mut Window, cx: &mut Context<Self>) -> Self {
         cx.bind_keys([
             KeyBinding::new("up", ScrollLineUp, Some("Terminal")),
             KeyBinding::new("down", ScrollLineDown, Some("Terminal")),
@@ -48,15 +50,18 @@ impl TerminalView {
         let body_focus = cx.focus_handle();
         body_focus.focus(window, cx);
         Self {
-            terminal,
+            output,
+            terminal: None,
             focus_handle: cx.focus_handle(),
             body_focus,
         }
     }
 
     fn scroll(&mut self, scroll: Scroll, cx: &mut Context<Self>) {
-        self.terminal.scroll(scroll);
-        cx.notify();
+        if let Some(terminal) = self.terminal.as_mut() {
+            terminal.scroll(scroll);
+            cx.notify();
+        }
     }
 
     fn scroll_line_up(&mut self, _: &ScrollLineUp, _: &mut Window, cx: &mut Context<Self>) {
@@ -217,8 +222,8 @@ impl Element for TerminalElement {
         let bg = colors.background;
         let ansi = ansi_palette(window);
 
-        // Size the terminal to the bounds so alacritty wraps to the window, then
-        // read the rows it would currently show.
+        // Create the terminal at the bounds, or resize it to them, so alacritty
+        // wraps to the window; then read the rows it would currently show.
         let cols = (f32::from(bounds.size.width) / f32::from(metrics.cell_width))
             .floor()
             .max(1.0) as usize;
@@ -226,8 +231,17 @@ impl Element for TerminalElement {
             .floor()
             .max(1.0) as usize;
         self.view
-            .update(cx, |view, _| view.terminal.resize(cols, rows));
-        let viewport = self.view.read(cx).terminal.viewport();
+            .update(cx, |view, _| match view.terminal.as_mut() {
+                Some(terminal) => terminal.resize(cols, rows),
+                None => view.terminal = Some(Terminal::new(&view.output, cols, rows)),
+            });
+        let viewport = self
+            .view
+            .read(cx)
+            .terminal
+            .as_ref()
+            .map(Terminal::viewport)
+            .unwrap_or_default();
 
         let mut lines = Vec::with_capacity(viewport.len());
         let mut backgrounds = Vec::new();

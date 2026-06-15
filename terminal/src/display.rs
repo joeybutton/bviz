@@ -46,12 +46,12 @@ impl Dimensions for Size {
 }
 
 impl Terminal {
-    /// Reconstruct the build's final screen and replay it into a display terminal.
-    /// The size is a placeholder until the first [`resize`](Terminal::resize) to
-    /// the real window dimensions.
-    pub fn new(output: &BuildOutput) -> Terminal {
-        let columns = 80;
-        let rows = 24;
+    /// Reconstruct the build's final screen (at the width Bazel used) and replay
+    /// it into a display terminal of `columns` by `rows`, which wraps it to that
+    /// width. The viewport starts at the first line of the build.
+    pub fn new(output: &BuildOutput, columns: usize, rows: usize) -> Terminal {
+        let columns = columns.max(1);
+        let rows = rows.max(1);
         let config = Config {
             scrolling_history: SCROLLBACK,
             ..Config::default()
@@ -69,7 +69,8 @@ impl Terminal {
         }
     }
 
-    /// Resize the terminal, re-wrapping its content to the new width.
+    /// Resize the terminal, re-wrapping its content to the new width while keeping
+    /// the current scroll position (alacritty clamps it to the new history).
     pub fn resize(&mut self, columns: usize, rows: usize) {
         let columns = columns.max(1);
         let rows = rows.max(1);
@@ -77,7 +78,6 @@ impl Terminal {
             return;
         }
         self.term.resize(Size { columns, rows });
-        self.term.scroll_display(Scroll::Top);
         self.columns = columns;
         self.rows = rows;
     }
@@ -133,8 +133,7 @@ mod tests {
             columns: 40,
             bytes: b"abcdefghijkl\n".to_vec(),
         };
-        let mut terminal = Terminal::new(&output);
-        terminal.resize(6, 10);
+        let terminal = Terminal::new(&output, 6, 10);
         assert_eq!(viewport_text(&terminal), "abcdef\nghijkl");
     }
 
@@ -144,8 +143,7 @@ mod tests {
             columns: 40,
             bytes: b"abcdefghijkl\n".to_vec(),
         };
-        let mut terminal = Terminal::new(&output);
-        terminal.resize(6, 10);
+        let mut terminal = Terminal::new(&output, 6, 10);
         assert_eq!(viewport_text(&terminal), "abcdef\nghijkl");
 
         // Widening rejoins the wrapped halves onto one line.
@@ -160,8 +158,7 @@ mod tests {
             bytes.extend_from_slice(format!("line{i:02}\n").as_bytes());
         }
         let output = BuildOutput { columns: 40, bytes };
-        let mut terminal = Terminal::new(&output);
-        terminal.resize(40, 5);
+        let mut terminal = Terminal::new(&output, 40, 5);
 
         // The viewport starts at the top of the output.
         assert!(viewport_text(&terminal).starts_with("line00"));
@@ -181,8 +178,7 @@ mod tests {
             columns: 40,
             bytes: b"alpha\nbeta\ngamma\n".to_vec(),
         };
-        let mut terminal = Terminal::new(&output);
-        terminal.resize(40, 10);
+        let terminal = Terminal::new(&output, 40, 10);
         assert_eq!(viewport_text(&terminal), "alpha\nbeta\ngamma");
     }
 }
