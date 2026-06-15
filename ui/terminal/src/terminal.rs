@@ -7,7 +7,7 @@ use bviz_ui_shell::Chrome;
 use gpui::{
     App, Bounds, Context, DispatchPhase, Element, Entity, FocusHandle, Font, FontStyle, FontWeight,
     GlobalElementId, InspectorElementId, IntoElement, KeyBinding, LayoutId, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Render, Rgba,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point, Render, Rgba,
     ScrollWheelEvent, ShapedLine, SharedString, StrikethroughStyle, Style, TextRun, UnderlineStyle,
     Window,
     WindowAppearance, actions, div, fill, point, prelude::*, px, relative, rgb, size,
@@ -203,8 +203,16 @@ struct Metrics {
     font: Font,
 }
 
+/// A shaped run of text and the origin it paints at. Runs are positioned per
+/// grid column rather than as one line per row, so wide glyphs and the cells
+/// after them stay column-aligned instead of drifting by the shaped advances.
+struct PositionedLine {
+    origin: Point<Pixels>,
+    line: ShapedLine,
+}
+
 struct Prepaint {
-    lines: Vec<ShapedLine>,
+    lines: Vec<PositionedLine>,
     backgrounds: Vec<PaintQuad>,
     scrollbar: Option<PaintQuad>,
 }
@@ -342,22 +350,24 @@ impl Element for TerminalElement {
 
         for (r, row) in viewport.iter().enumerate() {
             let y = bounds.top() + metrics.line_height * r as f32;
-            let text: SharedString = row.iter().map(|cell| cell.c).collect::<String>().into();
-            let mut runs = Vec::new();
 
             let mut col = 0;
             while col < row.len() {
                 let start = col;
                 let key = style_key(&row[col]);
-                let mut byte_len = 0;
+                // A wide character occupies two columns: its glyph cell carries
+                // the character, the following spacer cell carries none.
+                let mut run_text = String::new();
                 while col < row.len() && style_key(&row[col]) == key {
-                    byte_len += row[col].c.len_utf8();
+                    if !row[col].flags.contains(Flags::WIDE_CHAR_SPACER) {
+                        run_text.push(row[col].c);
+                    }
                     col += 1;
                 }
                 let style = CellStyle::resolve(&row[start], fg, bg, ansi);
+                let x = bounds.left() + metrics.cell_width * start as f32;
 
                 if style.background != bg {
-                    let x = bounds.left() + metrics.cell_width * start as f32;
                     let width = metrics.cell_width * (col - start) as f32;
                     backgrounds.push(fill(
                         Bounds::new(point(x, y), size(width, metrics.line_height)),
@@ -365,24 +375,30 @@ impl Element for TerminalElement {
                     ));
                 }
 
+                if run_text.is_empty() {
+                    continue;
+                }
                 let mut font = metrics.font.clone();
                 font.weight = style.weight;
                 font.style = style.font_style;
-                runs.push(TextRun {
-                    len: byte_len,
+                let run = TextRun {
+                    len: run_text.len(),
                     font,
                     color: style.foreground.into(),
                     background_color: None,
                     underline: style.underline,
                     strikethrough: style.strikethrough,
+                };
+                lines.push(PositionedLine {
+                    origin: point(x, y),
+                    line: window.text_system().shape_line(
+                        run_text.into(),
+                        metrics.font_size,
+                        std::slice::from_ref(&run),
+                        None,
+                    ),
                 });
             }
-
-            lines.push(
-                window
-                    .text_system()
-                    .shape_line(text, metrics.font_size, &runs, None),
-            );
         }
 
         Prepaint {
@@ -396,7 +412,7 @@ impl Element for TerminalElement {
         &mut self,
         _: Option<&GlobalElementId>,
         _: Option<&InspectorElementId>,
-        bounds: Bounds<Pixels>,
+        _bounds: Bounds<Pixels>,
         metrics: &mut Metrics,
         prepaint: &mut Prepaint,
         window: &mut Window,
@@ -405,17 +421,18 @@ impl Element for TerminalElement {
         for quad in prepaint.backgrounds.drain(..) {
             window.paint_quad(quad);
         }
-        for (i, line) in prepaint.lines.iter().enumerate() {
-            let origin = point(bounds.left(), bounds.top() + metrics.line_height * i as f32);
-            line.paint(
-                origin,
-                metrics.line_height,
-                gpui::TextAlign::Left,
-                None,
-                window,
-                cx,
-            )
-            .unwrap();
+        for positioned in prepaint.lines.iter() {
+            positioned
+                .line
+                .paint(
+                    positioned.origin,
+                    metrics.line_height,
+                    gpui::TextAlign::Left,
+                    None,
+                    window,
+                    cx,
+                )
+                .unwrap();
         }
         if let Some(scrollbar) = prepaint.scrollbar.take() {
             window.paint_quad(scrollbar);

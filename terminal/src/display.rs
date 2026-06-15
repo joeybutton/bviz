@@ -207,6 +207,22 @@ mod tests {
     }
 
     #[test]
+    fn wide_characters_occupy_two_columns() {
+        // A wide character takes two columns; the cell after it is a spacer, so
+        // the following character lands one column further right rather than
+        // being shifted by a stray space.
+        let output = BuildOutput {
+            columns: 40,
+            bytes: "a中b\n".as_bytes().to_vec(),
+        };
+        let terminal = Terminal::new(&output, 40, 10);
+        let row = &terminal.viewport()[0];
+        assert_eq!(row[0].c, 'a');
+        assert_eq!(row[1].c, '中');
+        assert_eq!(row[3].c, 'b');
+    }
+
+    #[test]
     fn lines_start_at_column_zero() {
         // Each logical line must begin at the left edge, not where the previous
         // one ended.

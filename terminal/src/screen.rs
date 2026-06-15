@@ -114,6 +114,11 @@ impl Screen {
                 }
                 emit_sgr(&mut out, key.0, key.1, key.2);
                 for cell in &row[start..col] {
+                    // A wide character's trailing spacer carries no character of
+                    // its own; replaying the wide character recreates the spacer.
+                    if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
+                        continue;
+                    }
                     let mut buf = [0u8; 4];
                     out.extend_from_slice(cell.c.encode_utf8(&mut buf).as_bytes());
                 }
