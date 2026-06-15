@@ -27,10 +27,10 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let screen = bviz_terminal::Screen::from_output(&output);
+    let terminal = bviz_terminal::Terminal::new(&output);
 
     bviz_ui_shell::run("bazel_term", move |window, cx| {
-        cx.new(|cx| TerminalView::new(screen, window, cx))
+        cx.new(|cx| TerminalView::new(terminal, window, cx))
     });
     ExitCode::SUCCESS
 }

@@ -1,33 +1,33 @@
-//! A gpui view that renders a captured terminal [`Screen`] as styled monospace
-//! text: one shaped line per row, with per-cell colors and background fills.
+//! A gpui view that renders a build's display [`Terminal`] as styled monospace
+//! text: the visible viewport, reflowed to the window, one shaped line per row
+//! with per-cell colors and background fills.
 
-use bviz_terminal::{Cell, Color, Flags, NamedColor, Rgb, Screen};
+use bviz_terminal::{Cell, Color, Flags, NamedColor, Rgb, Terminal};
 use bviz_ui_shell::Chrome;
 use gpui::{
-    App, Bounds, Context, Element, FocusHandle, Font, FontStyle, FontWeight, GlobalElementId,
-    InspectorElementId, IntoElement, LayoutId, PaintQuad, Pixels, Render, Rgba, ShapedLine,
-    SharedString, Style, TextRun, UnderlineStyle, Window, WindowAppearance, div, fill, point,
-    prelude::*, px, rgb, size,
+    App, Bounds, Context, Element, Entity, FocusHandle, Font, FontStyle, FontWeight,
+    GlobalElementId, InspectorElementId, IntoElement, LayoutId, PaintQuad, Pixels, Render, Rgba,
+    ShapedLine, SharedString, Style, TextRun, UnderlineStyle, Window, WindowAppearance, div, fill,
+    point, prelude::*, px, relative, rgb, size,
 };
-use std::rc::Rc;
 
 /// The root view: the rendered build terminal inside the window chrome.
 pub struct TerminalView {
-    screen: Rc<Screen>,
+    terminal: Terminal,
     focus_handle: FocusHandle,
 }
 
 impl TerminalView {
-    pub fn new(screen: Screen, _window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(terminal: Terminal, _window: &mut Window, cx: &mut Context<Self>) -> Self {
         Self {
-            screen: Rc::new(screen),
+            terminal,
             focus_handle: cx.focus_handle(),
         }
     }
 }
 
 impl Render for TerminalView {
-    fn render(&mut self, window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = bviz_ui_theme::colors(window);
         Chrome::new(&self.focus_handle).title("bazel_term").child(
             div()
@@ -37,17 +37,15 @@ impl Render for TerminalView {
                 .font_family(bviz_ui_assets::MONO)
                 .text_size(px(13.))
                 .text_color(colors.text)
-                .child(TerminalElement {
-                    screen: self.screen.clone(),
-                }),
+                .child(TerminalElement { view: cx.entity() }),
         )
     }
 }
 
-/// Custom element that measures the monospace cell, shapes each grid row, and
-/// paints background fills and glyphs.
+/// Custom element that sizes the terminal to its bounds, then shapes the visible
+/// viewport and paints background fills and glyphs.
 struct TerminalElement {
-    screen: Rc<Screen>,
+    view: Entity<TerminalView>,
 }
 
 /// Font metrics resolved once per layout from the inherited monospace text style.
@@ -109,11 +107,9 @@ impl Element for TerminalElement {
             .shape_line(SharedString::from("M"), font_size, &[probe], None)
             .width;
 
-        let cols = self.screen.columns.max(1) as f32;
-        let rows = self.screen.rows.len().max(1) as f32;
         let mut style = Style::default();
-        style.size.width = (cell_width * cols).into();
-        style.size.height = (line_height * rows).into();
+        style.size.width = relative(1.).into();
+        style.size.height = relative(1.).into();
 
         (
             window.request_layout(style, [], cx),
@@ -133,17 +129,29 @@ impl Element for TerminalElement {
         bounds: Bounds<Pixels>,
         metrics: &mut Metrics,
         window: &mut Window,
-        _: &mut App,
+        cx: &mut App,
     ) -> Prepaint {
         let colors = bviz_ui_theme::colors(window);
         let fg = colors.text;
         let bg = colors.background;
         let ansi = ansi_palette(window);
 
-        let mut lines = Vec::with_capacity(self.screen.rows.len());
+        // Size the terminal to the bounds so alacritty wraps to the window, then
+        // read the rows it would currently show.
+        let cols = (f32::from(bounds.size.width) / f32::from(metrics.cell_width))
+            .floor()
+            .max(1.0) as usize;
+        let rows = (f32::from(bounds.size.height) / f32::from(metrics.line_height))
+            .floor()
+            .max(1.0) as usize;
+        self.view
+            .update(cx, |view, _| view.terminal.resize(cols, rows));
+        let viewport = self.view.read(cx).terminal.viewport();
+
+        let mut lines = Vec::with_capacity(viewport.len());
         let mut backgrounds = Vec::new();
 
-        for (r, row) in self.screen.rows.iter().enumerate() {
+        for (r, row) in viewport.iter().enumerate() {
             let y = bounds.top() + metrics.line_height * r as f32;
             let text: SharedString = row.iter().map(|cell| cell.c).collect::<String>().into();
             let mut runs = Vec::new();
