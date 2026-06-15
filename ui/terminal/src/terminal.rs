@@ -8,7 +8,8 @@ use gpui::{
     App, Bounds, Context, DispatchPhase, Element, Entity, FocusHandle, Font, FontStyle, FontWeight,
     GlobalElementId, InspectorElementId, IntoElement, KeyBinding, LayoutId, MouseButton,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Render, Rgba,
-    ScrollWheelEvent, ShapedLine, SharedString, Style, TextRun, UnderlineStyle, Window,
+    ScrollWheelEvent, ShapedLine, SharedString, StrikethroughStyle, Style, TextRun, UnderlineStyle,
+    Window,
     WindowAppearance, actions, div, fill, point, prelude::*, px, relative, rgb, size,
 };
 
@@ -373,7 +374,7 @@ impl Element for TerminalElement {
                     color: style.foreground.into(),
                     background_color: None,
                     underline: style.underline,
-                    strikethrough: None,
+                    strikethrough: style.strikethrough,
                 });
             }
 
@@ -456,6 +457,7 @@ struct CellStyle {
     weight: FontWeight,
     font_style: FontStyle,
     underline: Option<UnderlineStyle>,
+    strikethrough: Option<StrikethroughStyle>,
 }
 
 impl CellStyle {
@@ -471,14 +473,23 @@ impl CellStyle {
         if cell.flags.contains(Flags::HIDDEN) {
             foreground = background;
         }
+        // gpui can render solid and wavy underlines; map undercurl to wavy and
+        // the other variants (double, dotted, dashed) to a plain underline.
         let underline = cell
             .flags
             .intersects(Flags::ALL_UNDERLINES)
             .then_some(UnderlineStyle {
                 color: Some(foreground.into()),
                 thickness: px(1.0),
-                wavy: false,
+                wavy: cell.flags.contains(Flags::UNDERCURL),
             });
+        let strikethrough =
+            cell.flags
+                .contains(Flags::STRIKEOUT)
+                .then_some(StrikethroughStyle {
+                    color: Some(foreground.into()),
+                    thickness: px(1.0),
+                });
         CellStyle {
             foreground,
             background,
@@ -493,6 +504,7 @@ impl CellStyle {
                 FontStyle::Normal
             },
             underline,
+            strikethrough,
         }
     }
 }
