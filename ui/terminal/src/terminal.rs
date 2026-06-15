@@ -2,6 +2,8 @@
 //! text: the visible viewport, reflowed to the window, one shaped line per row
 //! with per-cell colors and background fills.
 
+use std::time::Duration;
+
 use bviz_terminal::{
     BuildOutput, Cell, Color, Flags, NamedColor, Rgb, Scroll, SelectionType, Side, Terminal, Url,
 };
@@ -34,6 +36,9 @@ const SCROLL_STEP: i32 = 3;
 
 /// Width of the scroll bar gutter reserved on the right edge.
 const SCROLLBAR_WIDTH: f32 = 8.0;
+
+/// How long the scroll bar stays visible after the last scroll interaction.
+const SCROLLBAR_HIDE: Duration = Duration::from_millis(1200);
 
 /// Smallest the scroll bar thumb may shrink to.
 const MIN_THUMB: f32 = 24.0;
@@ -79,6 +84,10 @@ pub struct TerminalView {
     pressed_url: Option<String>,
     /// While dragging the thumb, the cursor's offset from the thumb's top.
     drag_grab: Option<f32>,
+    /// Whether the scroll bar is currently shown; it auto-hides after a scroll.
+    scrollbar_visible: bool,
+    /// Bumped on each reveal so a stale hide timer does not hide a re-revealed bar.
+    reveal_seq: u64,
     /// The chrome's handle, for the window controls and tab navigation.
     focus_handle: FocusHandle,
     /// The terminal body's handle, focused so its scroll keys dispatch.
@@ -99,7 +108,7 @@ impl TerminalView {
         ]);
         let body_focus = cx.focus_handle();
         body_focus.focus(window, cx);
-        Self {
+        let mut view = Self {
             output,
             terminal: None,
             scrollbar: None,
@@ -108,9 +117,35 @@ impl TerminalView {
             hovered_url: None,
             pressed_url: None,
             drag_grab: None,
+            scrollbar_visible: false,
+            reveal_seq: 0,
             focus_handle: cx.focus_handle(),
             body_focus,
-        }
+        };
+        // Show the bar briefly on launch so the scrollable extent is visible,
+        // then let it auto-hide.
+        view.reveal_scrollbar(cx);
+        view
+    }
+
+    /// Show the scroll bar and schedule it to hide after a period of no further
+    /// scroll interaction.
+    fn reveal_scrollbar(&mut self, cx: &mut Context<Self>) {
+        self.scrollbar_visible = true;
+        self.reveal_seq = self.reveal_seq.wrapping_add(1);
+        let seq = self.reveal_seq;
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(SCROLLBAR_HIDE).await;
+            let _ = this.update(cx, |this, cx| {
+                // Skip if a newer reveal happened or the thumb is being dragged.
+                if this.reveal_seq == seq && this.drag_grab.is_none() {
+                    this.scrollbar_visible = false;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
     }
 
     fn scroll(&mut self, scroll: Scroll, cx: &mut Context<Self>) {
@@ -119,7 +154,7 @@ impl TerminalView {
             // The hovered URL's highlight is in viewport coordinates, which
             // scrolling invalidates; the next pointer move recomputes it.
             self.hovered_url = None;
-            cx.notify();
+            self.reveal_scrollbar(cx);
         }
     }
 
@@ -198,6 +233,12 @@ impl TerminalView {
     fn on_mouse_move(&mut self, event: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
         if self.selecting {
             return;
+        }
+        // Moving the pointer onto the gutter reveals the hidden scroll bar.
+        if let Some(layout) = self.scrollbar {
+            if f32::from(event.position.x) >= layout.gutter_left && !self.scrollbar_visible {
+                self.reveal_scrollbar(cx);
+            }
         }
         let cell = self.cell_at(event.position);
         let url = match (cell, self.terminal.as_mut()) {
@@ -454,7 +495,11 @@ impl Element for TerminalElement {
         });
         self.view
             .update(cx, |view, _| view.scrollbar = scrollbar_layout);
-        let scrollbar = scrollbar_layout.map(|layout| {
+        // The geometry is kept for hit-testing even while hidden; the thumb is
+        // painted only while the bar is revealed or being dragged.
+        let view = self.view.read(cx);
+        let show_scrollbar = view.scrollbar_visible || view.drag_grab.is_some();
+        let scrollbar = scrollbar_layout.filter(|_| show_scrollbar).map(|layout| {
             fill(
                 Bounds::new(
                     point(px(layout.gutter_left), px(layout.thumb_top)),
@@ -608,7 +653,8 @@ impl Element for TerminalElement {
                 if phase == DispatchPhase::Bubble {
                     view.update(cx, |view, cx| {
                         if view.drag_grab.take().is_some() {
-                            cx.notify();
+                            // Keep the bar up briefly after the drag, then hide.
+                            view.reveal_scrollbar(cx);
                         }
                     });
                 }
