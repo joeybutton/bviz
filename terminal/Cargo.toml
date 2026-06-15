@@ -2,3 +2,10 @@
 name = "bviz_terminal"
 version = "0.1.0"
 edition = "2024"
+
+[dependencies]
+prost = { workspace = true }
+# Locked for the prost toolchain (@crates//:prost-types,
+# @crates//:protoc-gen-prost__protoc-gen-prost); not used by this crate's code.
+prost-types = { workspace = true }
+protoc-gen-prost = { workspace = true }
