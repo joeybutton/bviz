@@ -154,6 +154,26 @@ mod tests {
     }
 
     #[test]
+    fn scrolls_over_history() {
+        let mut bytes = Vec::new();
+        for i in 0..20 {
+            bytes.extend_from_slice(format!("line{i:02}\n").as_bytes());
+        }
+        let output = BuildOutput { columns: 40, bytes };
+        let mut terminal = Terminal::new(&output);
+        terminal.resize(40, 5);
+
+        // The viewport starts at the top of the output.
+        assert!(viewport_text(&terminal).starts_with("line00"));
+        // Scrolling to the bottom reveals the last lines.
+        terminal.scroll(Scroll::Bottom);
+        assert!(viewport_text(&terminal).contains("line19"));
+        // And back to the top.
+        terminal.scroll(Scroll::Top);
+        assert!(viewport_text(&terminal).starts_with("line00"));
+    }
+
+    #[test]
     fn lines_start_at_column_zero() {
         // Each logical line must begin at the left edge, not where the previous
         // one ended.

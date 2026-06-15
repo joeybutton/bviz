@@ -7,6 +7,7 @@ mod display;
 mod output;
 mod screen;
 
+pub use alacritty_terminal::grid::Scroll;
 pub use display::Terminal;
 pub use output::{BuildOutput, parse};
 pub use screen::Screen;

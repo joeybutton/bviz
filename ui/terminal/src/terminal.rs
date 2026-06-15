@@ -2,26 +2,98 @@
 //! text: the visible viewport, reflowed to the window, one shaped line per row
 //! with per-cell colors and background fills.
 
-use bviz_terminal::{Cell, Color, Flags, NamedColor, Rgb, Terminal};
+use bviz_terminal::{Cell, Color, Flags, NamedColor, Rgb, Scroll, Terminal};
 use bviz_ui_shell::Chrome;
 use gpui::{
     App, Bounds, Context, Element, Entity, FocusHandle, Font, FontStyle, FontWeight,
-    GlobalElementId, InspectorElementId, IntoElement, LayoutId, PaintQuad, Pixels, Render, Rgba,
-    ShapedLine, SharedString, Style, TextRun, UnderlineStyle, Window, WindowAppearance, div, fill,
-    point, prelude::*, px, relative, rgb, size,
+    GlobalElementId, InspectorElementId, IntoElement, KeyBinding, LayoutId, PaintQuad, Pixels,
+    Render, Rgba, ScrollWheelEvent, ShapedLine, SharedString, Style, TextRun, UnderlineStyle,
+    Window, WindowAppearance, actions, div, fill, point, prelude::*, px, relative, rgb, size,
 };
+
+actions!(
+    bazel_terminal,
+    [
+        ScrollLineUp,
+        ScrollLineDown,
+        ScrollPageUp,
+        ScrollPageDown,
+        ScrollToTop,
+        ScrollToBottom
+    ]
+);
+
+/// Lines moved per arrow-key press.
+const SCROLL_STEP: i32 = 3;
 
 /// The root view: the rendered build terminal inside the window chrome.
 pub struct TerminalView {
     terminal: Terminal,
+    /// The chrome's handle, for the window controls and tab navigation.
     focus_handle: FocusHandle,
+    /// The terminal body's handle, focused so its scroll keys dispatch.
+    body_focus: FocusHandle,
 }
 
 impl TerminalView {
-    pub fn new(terminal: Terminal, _window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(terminal: Terminal, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        cx.bind_keys([
+            KeyBinding::new("up", ScrollLineUp, Some("Terminal")),
+            KeyBinding::new("down", ScrollLineDown, Some("Terminal")),
+            KeyBinding::new("pageup", ScrollPageUp, Some("Terminal")),
+            KeyBinding::new("pagedown", ScrollPageDown, Some("Terminal")),
+            KeyBinding::new("home", ScrollToTop, Some("Terminal")),
+            KeyBinding::new("end", ScrollToBottom, Some("Terminal")),
+        ]);
+        let body_focus = cx.focus_handle();
+        body_focus.focus(window, cx);
         Self {
             terminal,
             focus_handle: cx.focus_handle(),
+            body_focus,
+        }
+    }
+
+    fn scroll(&mut self, scroll: Scroll, cx: &mut Context<Self>) {
+        self.terminal.scroll(scroll);
+        cx.notify();
+    }
+
+    fn scroll_line_up(&mut self, _: &ScrollLineUp, _: &mut Window, cx: &mut Context<Self>) {
+        self.scroll(Scroll::Delta(SCROLL_STEP), cx);
+    }
+
+    fn scroll_line_down(&mut self, _: &ScrollLineDown, _: &mut Window, cx: &mut Context<Self>) {
+        self.scroll(Scroll::Delta(-SCROLL_STEP), cx);
+    }
+
+    fn scroll_page_up(&mut self, _: &ScrollPageUp, _: &mut Window, cx: &mut Context<Self>) {
+        self.scroll(Scroll::PageUp, cx);
+    }
+
+    fn scroll_page_down(&mut self, _: &ScrollPageDown, _: &mut Window, cx: &mut Context<Self>) {
+        self.scroll(Scroll::PageDown, cx);
+    }
+
+    fn scroll_to_top(&mut self, _: &ScrollToTop, _: &mut Window, cx: &mut Context<Self>) {
+        self.scroll(Scroll::Top, cx);
+    }
+
+    fn scroll_to_bottom(&mut self, _: &ScrollToBottom, _: &mut Window, cx: &mut Context<Self>) {
+        self.scroll(Scroll::Bottom, cx);
+    }
+
+    fn on_scroll_wheel(
+        &mut self,
+        event: &ScrollWheelEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let line_height = window.line_height();
+        let lines = (f32::from(event.delta.pixel_delta(line_height).y) / f32::from(line_height))
+            .round() as i32;
+        if lines != 0 {
+            self.scroll(Scroll::Delta(lines), cx);
         }
     }
 }
@@ -31,6 +103,15 @@ impl Render for TerminalView {
         let colors = bviz_ui_theme::colors(window);
         Chrome::new(&self.focus_handle).title("bazel_term").child(
             div()
+                .key_context("Terminal")
+                .track_focus(&self.body_focus)
+                .on_action(cx.listener(Self::scroll_line_up))
+                .on_action(cx.listener(Self::scroll_line_down))
+                .on_action(cx.listener(Self::scroll_page_up))
+                .on_action(cx.listener(Self::scroll_page_down))
+                .on_action(cx.listener(Self::scroll_to_top))
+                .on_action(cx.listener(Self::scroll_to_bottom))
+                .on_scroll_wheel(cx.listener(Self::on_scroll_wheel))
                 .size_full()
                 .overflow_hidden()
                 .bg(colors.background)
