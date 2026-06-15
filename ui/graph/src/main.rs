@@ -50,6 +50,7 @@ fn kind_accent(kind: &str) -> Rgba {
         "action" => rgb(0xe69a3c),   // orange
         "artifact" => rgb(0x57b85a), // green
         "source" => rgb(0x9b7fd0),   // purple
+        "depset" => rgb(0x8a8f99),   // muted gray
         _ => rgb(0x5b8fd0),          // blue
     }
 }

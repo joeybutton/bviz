@@ -1,4 +1,5 @@
 load("@rules_rs//rs:rust_library.bzl", "rust_library")
+load("@rules_rs//rs:rust_test.bzl", "rust_test")
 
 rust_library(
     name = "layout",
@@ -15,4 +16,9 @@ rust_library(
         "@crates//:org-eclipse-elk-graph",
         "@crates//:prost",
     ],
+)
+
+rust_test(
+    name = "layout_test",
+    crate = ":layout",
 )

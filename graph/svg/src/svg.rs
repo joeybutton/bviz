@@ -97,6 +97,7 @@ fn leaf_fill(kind: &str) -> &'static str {
         "action" => "#fde8c8",
         "artifact" => "#d6efd6",
         "source" => "#e8e0f4",
+        "depset" => "#dcdcdc",
         _ => "#eef3fb",
     }
 }
