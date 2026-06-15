@@ -1,0 +1,25 @@
+--- a/src/linux/wayland/client.rs
++++ b/src/linux/wayland/client.rs
+@@ -1810,6 +1810,14 @@
+             }
+             wl_pointer::Event::Leave { .. } => {
+                 if let Some(focused_window) = state.mouse_focused_window.clone() {
++                    // gpui recomputes hover only on mouse-move, so a bare Leave would
++                    // leave whatever was under the cursor still hovered. Move the
++                    // cursor off-screen first to clear hover and hit-test state.
++                    let moved_off = PlatformInput::MouseMove(MouseMoveEvent {
++                        position: point(px(-1.), px(-1.)),
++                        pressed_button: state.button_pressed,
++                        modifiers: state.modifiers,
++                    });
+                     let input = PlatformInput::MouseExited(MouseExitEvent {
+                         position: state.mouse_location.unwrap(),
+                         pressed_button: state.button_pressed,
+@@ -1821,6 +1829,7 @@
+                     state.cursor_hidden_window = None;
+ 
+                     drop(state);
++                    focused_window.handle_input(moved_off);
+                     focused_window.handle_input(input);
+                     focused_window.set_hovered(false);
+                 }

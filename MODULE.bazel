@@ -44,12 +44,19 @@ crate.annotation(
     crate_features = ["source-fontconfig-dlopen"],
 )
 
-# Restore the floating window size when a tiling compositor untiles the window.
-# gpui's Wayland backend only restores on un-maximize, not un-tile, leaving the
-# window stuck at the tiled size; the patch preserves window_bounds while tiled.
+# Two fixes to gpui's Wayland backend:
+# - untile-restore: gpui restores the floating window size on un-maximize but not
+#   un-tile, leaving the window stuck at the tiled size; preserve window_bounds
+#   while tiled so it restores on untile.
+# - clear-hover-on-leave: gpui recomputes hover only on mouse-move, so a pointer
+#   leaving the window leaves the last element hovered; synthesize an off-screen
+#   move on wl_pointer.leave to clear it.
 crate.annotation(
     crate = "gpui_linux",
-    patches = ["@@//patches:gpui_linux-untile-restore.patch"],
+    patches = [
+        "@@//patches:gpui_linux-untile-restore.patch",
+        "@@//patches:gpui_linux-clear-hover-on-leave.patch",
+    ],
     patch_args = ["-p1"],
 )
 
