@@ -7,7 +7,8 @@ use bviz_terminal::{
 };
 use bviz_ui_shell::Chrome;
 use gpui::{
-    App, Bounds, Context, DispatchPhase, Element, Entity, FocusHandle, Font, FontStyle, FontWeight,
+    App, Bounds, ClipboardItem, Context, DispatchPhase, Element, Entity, FocusHandle, Font,
+    FontStyle, FontWeight,
     GlobalElementId, InspectorElementId, IntoElement, KeyBinding, LayoutId, MouseButton,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point, Render, Rgba,
     ScrollWheelEvent, ShapedLine, SharedString, StrikethroughStyle, Style, TextRun, UnderlineStyle,
@@ -23,7 +24,8 @@ actions!(
         ScrollPageUp,
         ScrollPageDown,
         ScrollToTop,
-        ScrollToBottom
+        ScrollToBottom,
+        Copy
     ]
 );
 
@@ -88,6 +90,8 @@ impl TerminalView {
             KeyBinding::new("pagedown", ScrollPageDown, Some("Terminal")),
             KeyBinding::new("home", ScrollToTop, Some("Terminal")),
             KeyBinding::new("end", ScrollToBottom, Some("Terminal")),
+            KeyBinding::new("cmd-c", Copy, Some("Terminal")),
+            KeyBinding::new("ctrl-c", Copy, Some("Terminal")),
         ]);
         let body_focus = cx.focus_handle();
         body_focus.focus(window, cx);
@@ -213,6 +217,12 @@ impl TerminalView {
         self.scroll(Scroll::Bottom, cx);
     }
 
+    fn copy(&mut self, _: &Copy, _: &mut Window, cx: &mut Context<Self>) {
+        if let Some(text) = self.terminal.as_ref().and_then(Terminal::selection_text) {
+            cx.write_to_clipboard(ClipboardItem::new_string(text));
+        }
+    }
+
     fn on_scroll_wheel(
         &mut self,
         event: &ScrollWheelEvent,
@@ -241,6 +251,7 @@ impl Render for TerminalView {
                 .on_action(cx.listener(Self::scroll_page_down))
                 .on_action(cx.listener(Self::scroll_to_top))
                 .on_action(cx.listener(Self::scroll_to_bottom))
+                .on_action(cx.listener(Self::copy))
                 .on_scroll_wheel(cx.listener(Self::on_scroll_wheel))
                 .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
                 .size_full()
