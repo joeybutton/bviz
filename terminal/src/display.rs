@@ -5,7 +5,8 @@
 
 use alacritty_terminal::event::VoidListener;
 use alacritty_terminal::grid::{Dimensions, Scroll};
-use alacritty_terminal::index::{Column, Line};
+use alacritty_terminal::index::{Column, Line, Point, Side};
+use alacritty_terminal::selection::{Selection, SelectionType};
 use alacritty_terminal::term::cell::Cell;
 use alacritty_terminal::term::{Config, Term};
 use alacritty_terminal::vte::ansi::Processor;
@@ -116,6 +117,64 @@ impl Terminal {
         self.term.grid().display_offset()
     }
 
+    /// Grid point for a viewport cell, given by its column and its row from the
+    /// top of the viewport. Columns and rows are clamped to the grid.
+    fn grid_point(&self, column: usize, row: usize) -> Point {
+        let column = column.min(self.columns.saturating_sub(1));
+        let row = row.min(self.rows.saturating_sub(1));
+        Point::new(Line(row as i32 - self.display_offset() as i32), Column(column))
+    }
+
+    /// Begin a selection of the given type anchored at a viewport cell.
+    pub fn begin_selection(&mut self, ty: SelectionType, column: usize, row: usize, side: Side) {
+        let point = self.grid_point(column, row);
+        self.term.selection = Some(Selection::new(ty, point, side));
+    }
+
+    /// Extend the in-progress selection to a viewport cell.
+    pub fn extend_selection(&mut self, column: usize, row: usize, side: Side) {
+        let point = self.grid_point(column, row);
+        if let Some(selection) = self.term.selection.as_mut() {
+            selection.update(point, side);
+        }
+    }
+
+    pub fn clear_selection(&mut self) {
+        self.term.selection = None;
+    }
+
+    /// The selected text, joined across wrapped lines with trailing blanks
+    /// trimmed, or `None` when nothing is selected.
+    pub fn selection_text(&self) -> Option<String> {
+        self.term.selection_to_string()
+    }
+
+    /// For each visible row, top to bottom, the inclusive column span selected on
+    /// that row, if any. Used to paint the selection highlight.
+    pub fn selection_spans(&self) -> Vec<Option<(usize, usize)>> {
+        let Some(range) = self
+            .term
+            .selection
+            .as_ref()
+            .and_then(|selection| selection.to_range(&self.term))
+        else {
+            return vec![None; self.rows];
+        };
+        let offset = self.display_offset() as i32;
+        (0..self.rows)
+            .map(|v| {
+                let line = Line(v as i32 - offset);
+                let mut span: Option<(usize, usize)> = None;
+                for col in 0..self.columns {
+                    if range.contains(Point::new(line, Column(col))) {
+                        span = Some(span.map_or((col, col), |(s, _)| (s, col)));
+                    }
+                }
+                span
+            })
+            .collect()
+    }
+
     /// The currently visible rows, top to bottom, at the current scroll position.
     pub fn viewport(&self) -> Vec<Vec<Cell>> {
         let grid = self.term.grid();
@@ -204,6 +263,26 @@ mod tests {
         assert!(viewport_text(&terminal).contains("line19"));
         terminal.scroll_to_fraction(0.0);
         assert!(viewport_text(&terminal).starts_with("line00"));
+    }
+
+    #[test]
+    fn selection_yields_text_and_spans() {
+        let output = BuildOutput {
+            columns: 40,
+            bytes: b"alpha\nbeta\ngamma\n".to_vec(),
+        };
+        let mut terminal = Terminal::new(&output, 40, 10);
+        // Select "lph": from the left of column 1 to the right of column 3.
+        terminal.begin_selection(SelectionType::Simple, 1, 0, Side::Left);
+        terminal.extend_selection(3, 0, Side::Right);
+        assert_eq!(terminal.selection_text().as_deref(), Some("lph"));
+        let spans = terminal.selection_spans();
+        assert_eq!(spans[0], Some((1, 3)));
+        assert_eq!(spans[1], None);
+
+        terminal.clear_selection();
+        assert_eq!(terminal.selection_text(), None);
+        assert!(terminal.selection_spans().iter().all(Option::is_none));
     }
 
     #[test]

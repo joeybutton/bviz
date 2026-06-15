@@ -2,7 +2,9 @@
 //! text: the visible viewport, reflowed to the window, one shaped line per row
 //! with per-cell colors and background fills.
 
-use bviz_terminal::{BuildOutput, Cell, Color, Flags, NamedColor, Rgb, Scroll, Terminal};
+use bviz_terminal::{
+    BuildOutput, Cell, Color, Flags, NamedColor, Rgb, Scroll, SelectionType, Side, Terminal,
+};
 use bviz_ui_shell::Chrome;
 use gpui::{
     App, Bounds, Context, DispatchPhase, Element, Entity, FocusHandle, Font, FontStyle, FontWeight,
@@ -46,6 +48,18 @@ struct ScrollbarLayout {
     thumb_height: f32,
 }
 
+/// Geometry of the painted terminal content, in window pixels, kept so mouse
+/// positions can be mapped to grid cells for selection.
+#[derive(Clone, Copy)]
+struct ContentLayout {
+    left: f32,
+    top: f32,
+    cell_width: f32,
+    line_height: f32,
+    columns: usize,
+    rows: usize,
+}
+
 /// The root view: the rendered build terminal inside the window chrome.
 pub struct TerminalView {
     output: BuildOutput,
@@ -53,6 +67,10 @@ pub struct TerminalView {
     terminal: Option<Terminal>,
     /// The painted scroll bar geometry, set each layout for hit-testing.
     scrollbar: Option<ScrollbarLayout>,
+    /// The painted content geometry, set each layout for mapping clicks to cells.
+    content: Option<ContentLayout>,
+    /// Whether a click-drag text selection is in progress.
+    selecting: bool,
     /// While dragging the thumb, the cursor's offset from the thumb's top.
     drag_grab: Option<f32>,
     /// The chrome's handle, for the window controls and tab navigation.
@@ -77,6 +95,8 @@ impl TerminalView {
             output,
             terminal: None,
             scrollbar: None,
+            content: None,
+            selecting: false,
             drag_grab: None,
             focus_handle: cx.focus_handle(),
             body_focus,
@@ -106,22 +126,60 @@ impl TerminalView {
         }
     }
 
-    fn on_mouse_down(&mut self, event: &MouseDownEvent, _: &mut Window, cx: &mut Context<Self>) {
-        let Some(layout) = self.scrollbar else { return };
-        let x = f32::from(event.position.x);
-        let y = f32::from(event.position.y);
-        if x < layout.gutter_left {
-            return;
-        }
-        let on_thumb = y >= layout.thumb_top && y <= layout.thumb_top + layout.thumb_height;
-        // Grabbing the thumb keeps the cursor at the same spot on it; clicking the
-        // track jumps the thumb's center to the cursor.
-        self.drag_grab = Some(if on_thumb {
-            y - layout.thumb_top
+    /// The grid cell (column, row from the top) and the side of it under a window
+    /// position, or `None` before the first layout.
+    fn cell_at(&self, position: Point<Pixels>) -> Option<(usize, usize, Side)> {
+        let c = self.content?;
+        let x = (f32::from(position.x) - c.left).max(0.0);
+        let y = (f32::from(position.y) - c.top).max(0.0);
+        let column = ((x / c.cell_width) as usize).min(c.columns.saturating_sub(1));
+        let row = ((y / c.line_height) as usize).min(c.rows.saturating_sub(1));
+        let side = if x % c.cell_width > c.cell_width / 2.0 {
+            Side::Right
         } else {
-            layout.thumb_height / 2.0
-        });
-        self.drag_to(y, cx);
+            Side::Left
+        };
+        Some((column, row, side))
+    }
+
+    fn on_mouse_down(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let y = f32::from(event.position.y);
+        // A click on the scroll-bar gutter drives the thumb; grabbing the thumb
+        // keeps the cursor at the same spot on it, while clicking the track jumps
+        // the thumb's center to the cursor.
+        if let Some(layout) = self.scrollbar {
+            if f32::from(event.position.x) >= layout.gutter_left {
+                let on_thumb = y >= layout.thumb_top && y <= layout.thumb_top + layout.thumb_height;
+                self.drag_grab = Some(if on_thumb {
+                    y - layout.thumb_top
+                } else {
+                    layout.thumb_height / 2.0
+                });
+                self.drag_to(y, cx);
+                return;
+            }
+        }
+        // A click on the content begins a text selection.
+        self.body_focus.focus(window, cx);
+        let Some((column, row, side)) = self.cell_at(event.position) else {
+            return;
+        };
+        if let Some(terminal) = self.terminal.as_mut() {
+            terminal.begin_selection(SelectionType::Simple, column, row, side);
+            self.selecting = true;
+            cx.notify();
+        }
+    }
+
+    /// Extend the in-progress selection to a window position.
+    fn selection_drag_to(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
+        let Some((column, row, side)) = self.cell_at(position) else {
+            return;
+        };
+        if let Some(terminal) = self.terminal.as_mut() {
+            terminal.extend_selection(column, row, side);
+            cx.notify();
+        }
     }
 
     fn scroll_line_up(&mut self, _: &ScrollLineUp, _: &mut Window, cx: &mut Context<Self>) {
@@ -307,14 +365,25 @@ impl Element for TerminalElement {
                 Some(terminal) => terminal.resize(cols, rows),
                 None => view.terminal = Some(Terminal::new(&view.output, cols, rows)),
             });
-        let (viewport, history, offset) = match self.view.read(cx).terminal.as_ref() {
+        let (viewport, history, offset, selection) = match self.view.read(cx).terminal.as_ref() {
             Some(terminal) => (
                 terminal.viewport(),
                 terminal.history_size(),
                 terminal.display_offset(),
+                terminal.selection_spans(),
             ),
-            None => (Vec::new(), 0, 0),
+            None => (Vec::new(), 0, 0, Vec::new()),
         };
+        self.view.update(cx, |view, _| {
+            view.content = Some(ContentLayout {
+                left: f32::from(bounds.left()),
+                top: f32::from(bounds.top()),
+                cell_width: f32::from(metrics.cell_width),
+                line_height: f32::from(metrics.line_height),
+                columns: cols,
+                rows,
+            });
+        });
 
         // The scroll bar thumb, sized and placed by how much is off-screen and how
         // far the viewport is scrolled. Its geometry is kept on the view so mouse
@@ -401,6 +470,23 @@ impl Element for TerminalElement {
             }
         }
 
+        // The selection highlight tints the selected cells; a translucent fill
+        // over the cell backgrounds keeps the text on top legible.
+        let selection_color = Rgba {
+            a: 0.4,
+            ..colors.selected
+        };
+        for (r, span) in selection.iter().enumerate() {
+            let Some((first, last)) = span else { continue };
+            let x = bounds.left() + metrics.cell_width * *first as f32;
+            let y = bounds.top() + metrics.line_height * r as f32;
+            let width = metrics.cell_width * (*last - *first + 1) as f32;
+            backgrounds.push(fill(
+                Bounds::new(point(x, y), size(width, metrics.line_height)),
+                selection_color,
+            ));
+        }
+
         Prepaint {
             lines,
             backgrounds,
@@ -453,6 +539,29 @@ impl Element for TerminalElement {
                 if phase == DispatchPhase::Bubble {
                     view.update(cx, |view, cx| {
                         if view.drag_grab.take().is_some() {
+                            cx.notify();
+                        }
+                    });
+                }
+            });
+        }
+
+        // Likewise follow and end a text-selection drag with window-global
+        // handlers, so dragging past the window edge keeps extending the
+        // selection and a release outside still ends it.
+        if self.view.read(cx).selecting {
+            let view = self.view.clone();
+            window.on_mouse_event(move |event: &MouseMoveEvent, phase, _, cx| {
+                if phase == DispatchPhase::Bubble {
+                    view.update(cx, |view, cx| view.selection_drag_to(event.position, cx));
+                }
+            });
+            let view = self.view.clone();
+            window.on_mouse_event(move |_: &MouseUpEvent, phase, _, cx| {
+                if phase == DispatchPhase::Bubble {
+                    view.update(cx, |view, cx| {
+                        if view.selecting {
+                            view.selecting = false;
                             cx.notify();
                         }
                     });
