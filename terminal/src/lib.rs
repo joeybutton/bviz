@@ -3,9 +3,11 @@
 
 pub use bazel_build_event_proto as bep;
 
+mod display;
 mod output;
 mod screen;
 
+pub use display::Terminal;
 pub use output::{BuildOutput, parse};
 pub use screen::Screen;
 

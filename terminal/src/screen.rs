@@ -8,9 +8,9 @@
 use alacritty_terminal::event::VoidListener;
 use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::index::{Column, Line};
-use alacritty_terminal::term::cell::Cell;
+use alacritty_terminal::term::cell::{Cell, Flags};
 use alacritty_terminal::term::{Config, Term};
-use alacritty_terminal::vte::ansi::{Color, NamedColor, Processor};
+use alacritty_terminal::vte::ansi::{Color, NamedColor, Processor, Rgb};
 
 use crate::output::BuildOutput;
 
@@ -87,6 +87,98 @@ impl Screen {
             .collect::<Vec<_>>()
             .join("\n")
     }
+
+    /// Serialize the screen to a clean ANSI byte stream: one logical line per row
+    /// (rows alacritty wrapped are rejoined), trailing blanks trimmed, with SGR
+    /// codes for each cell's color and style. Replaying this into a terminal of
+    /// any width re-wraps it to that width, free of the original curses control.
+    pub(crate) fn to_ansi(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        for (i, row) in self.rows.iter().enumerate() {
+            let wrapped = row
+                .last()
+                .is_some_and(|cell| cell.flags.contains(Flags::WRAPLINE));
+            let end = if wrapped {
+                row.len()
+            } else {
+                row.iter()
+                    .rposition(|cell| !is_blank_cell(cell))
+                    .map_or(0, |i| i + 1)
+            };
+            let mut col = 0;
+            while col < end {
+                let start = col;
+                let key = (row[col].fg, row[col].bg, row[col].flags);
+                while col < end && (row[col].fg, row[col].bg, row[col].flags) == key {
+                    col += 1;
+                }
+                emit_sgr(&mut out, key.0, key.1, key.2);
+                for cell in &row[start..col] {
+                    let mut buf = [0u8; 4];
+                    out.extend_from_slice(cell.c.encode_utf8(&mut buf).as_bytes());
+                }
+            }
+            // A non-wrapped row ends its logical line with a reset and CRLF (the
+            // carriage return returns the cursor to column zero); a wrapped row
+            // flows into the next without a break. The final line gets no trailing
+            // newline, so the cursor stays on the last row of content rather than
+            // scrolling it into history.
+            if !wrapped && i + 1 < self.rows.len() {
+                out.extend_from_slice(b"\x1b[0m\r\n");
+            }
+        }
+        out
+    }
+}
+
+/// Append the SGR escape that reproduces a cell's color and style, resetting
+/// first so runs do not bleed.
+fn emit_sgr(out: &mut Vec<u8>, fg: Color, bg: Color, flags: Flags) {
+    let mut codes: Vec<String> = vec!["0".into()];
+    color_codes(&mut codes, fg, 3);
+    color_codes(&mut codes, bg, 4);
+    if flags.contains(Flags::BOLD) {
+        codes.push("1".into());
+    }
+    if flags.contains(Flags::DIM) {
+        codes.push("2".into());
+    }
+    if flags.contains(Flags::ITALIC) {
+        codes.push("3".into());
+    }
+    if flags.intersects(Flags::ALL_UNDERLINES) {
+        codes.push("4".into());
+    }
+    if flags.contains(Flags::INVERSE) {
+        codes.push("7".into());
+    }
+    if flags.contains(Flags::HIDDEN) {
+        codes.push("8".into());
+    }
+    if flags.contains(Flags::STRIKEOUT) {
+        codes.push("9".into());
+    }
+    out.extend_from_slice(b"\x1b[");
+    out.extend_from_slice(codes.join(";").as_bytes());
+    out.push(b'm');
+}
+
+/// Append the SGR parameter for a color on the given layer (3 = foreground,
+/// 4 = background). Default colors emit nothing, relying on the leading reset.
+fn color_codes(codes: &mut Vec<String>, color: Color, layer: u8) {
+    match color {
+        Color::Named(named) => {
+            let idx = named as usize;
+            if idx < 8 {
+                codes.push(format!("{}{}", layer, idx));
+            } else if idx < 16 {
+                let base = if layer == 3 { 90 } else { 100 };
+                codes.push((base + idx - 8).to_string());
+            }
+        }
+        Color::Indexed(i) => codes.push(format!("{}8;5;{}", layer, i)),
+        Color::Spec(Rgb { r, g, b }) => codes.push(format!("{}8;2;{};{};{}", layer, r, g, b)),
+    }
 }
 
 /// Translate bare line feeds to CRLF.
@@ -109,10 +201,14 @@ fn lf_to_crlf(bytes: &[u8]) -> Vec<u8> {
     out
 }
 
-/// A row is blank if every cell is an unstyled space on the default background.
+/// A cell is blank if it is a space on the default background.
+fn is_blank_cell(cell: &Cell) -> bool {
+    cell.c == ' ' && cell.bg == Color::Named(NamedColor::Background)
+}
+
+/// A row is blank if every cell is blank.
 fn is_blank(row: &[Cell]) -> bool {
-    row.iter()
-        .all(|cell| cell.c == ' ' && cell.bg == Color::Named(NamedColor::Background))
+    row.iter().all(is_blank_cell)
 }
 
 #[cfg(test)]
