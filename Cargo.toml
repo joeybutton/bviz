@@ -5,6 +5,7 @@ members = [
     "graph/svg",
     "greeting",
     "gpui_hello",
+    "terminal",
     "ui/graph",
 ]
 resolver = "2"
