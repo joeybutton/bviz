@@ -36,6 +36,8 @@ pub fn load_fonts(cx: &App) {
 
 fn icon_svg(file: &str) -> Option<&'static [u8]> {
     Some(match file {
+        "caret-down.svg" => embedded!("caret-down.svg"),
+        "caret-up.svg" => embedded!("caret-up.svg"),
         "circle-notch.svg" => embedded!("circle-notch.svg"),
         "minus.svg" => embedded!("minus.svg"),
         "square.svg" => embedded!("square.svg"),

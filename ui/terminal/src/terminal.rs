@@ -483,7 +483,7 @@ impl TerminalView {
                         })
                     })
                     .ghost()
-                    .label("↑"),
+                    .icon("caret-up"),
                 )
                 .child(
                     Button::new("find-next", move |_, _, cx| {
@@ -495,7 +495,7 @@ impl TerminalView {
                         })
                     })
                     .ghost()
-                    .label("↓"),
+                    .icon("caret-down"),
                 )
                 .child(
                     Button::new("find-close", move |_, window, cx| {
