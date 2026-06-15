@@ -5,11 +5,37 @@
 
 use alacritty_terminal::event::VoidListener;
 use alacritty_terminal::grid::{Dimensions, Scroll};
-use alacritty_terminal::index::{Column, Line, Point, Side};
+use alacritty_terminal::index::{Column, Direction, Line, Point, Side};
 use alacritty_terminal::selection::{Selection, SelectionType};
 use alacritty_terminal::term::cell::Cell;
+use alacritty_terminal::term::search::{RegexIter, RegexSearch};
 use alacritty_terminal::term::{Config, Term};
 use alacritty_terminal::vte::ansi::Processor;
+
+/// URLs to detect in the terminal text, by scheme. Mirrors the set Zed's
+/// terminal recognizes; the body excludes control characters, whitespace, and
+/// delimiters that cannot appear unescaped in a URL.
+const URL_REGEX: &str = "(ipfs:|ipns:|magnet:|mailto:|gemini://|gopher://|https://|http://|news:|file:|git://|ssh:|ftp://)\
+    [^\u{0000}-\u{001F}\u{007F}-\u{009F}<>\"\\s{-}\\^⟨⟩`']+";
+
+/// A URL found in the terminal: its text and, per visible row, the inclusive
+/// column span it covers for highlighting.
+#[derive(Clone)]
+pub struct Url {
+    text: String,
+    spans: Vec<Option<(usize, usize)>>,
+}
+
+impl Url {
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+
+    /// Per visible row, top to bottom, the inclusive column span the URL covers.
+    pub fn spans(&self) -> &[Option<(usize, usize)>] {
+        &self.spans
+    }
+}
 
 use crate::output::BuildOutput;
 use crate::screen::Screen;
@@ -24,6 +50,7 @@ pub struct Terminal {
     term: Term<VoidListener>,
     columns: usize,
     rows: usize,
+    url_regex: RegexSearch,
 }
 
 /// Terminal dimensions for the display emulator.
@@ -67,6 +94,7 @@ impl Terminal {
             term,
             columns,
             rows,
+            url_regex: RegexSearch::new(URL_REGEX).expect("valid URL regex"),
         }
     }
 
@@ -171,6 +199,73 @@ impl Terminal {
                     }
                 }
                 span
+            })
+            .collect()
+    }
+
+    /// The URL under a viewport cell, if the cell falls within one. Detection is
+    /// by scheme over the logical line containing the cell.
+    pub fn url_at(&mut self, column: usize, row: usize) -> Option<Url> {
+        let point = self.grid_point(column, row);
+        let line_start = self.term.line_search_left(point);
+        let line_end = self.term.line_search_right(point);
+        let mut bounds = None;
+        for m in RegexIter::new(
+            line_start,
+            line_end,
+            Direction::Right,
+            &self.term,
+            &mut self.url_regex,
+        ) {
+            if m.contains(&point) {
+                bounds = Some((*m.start(), *m.end()));
+                break;
+            }
+            if *m.start() > point {
+                break;
+            }
+        }
+        let (start, mut end) = bounds?;
+
+        // Trailing sentence punctuation usually belongs to the prose, not the
+        // URL; drop it from both the opened text and the highlighted span.
+        let full = self.term.bounds_to_string(start, end);
+        let kept = full
+            .trim_end_matches(['.', ',', ';', ':', '!', '?', ')'])
+            .chars()
+            .count();
+        let removed = full.chars().count() - kept;
+        if removed > 0 && removed <= end.column.0 {
+            end = Point::new(end.line, Column(end.column.0 - removed));
+        }
+        let text: String = full.chars().take(kept).collect();
+        if text.is_empty() {
+            return None;
+        }
+        Some(Url {
+            text,
+            spans: self.point_range_spans(start, end),
+        })
+    }
+
+    /// Per visible row, the inclusive column span covered by the linear grid
+    /// range `start..=end` (reading order).
+    fn point_range_spans(&self, start: Point, end: Point) -> Vec<Option<(usize, usize)>> {
+        let offset = self.display_offset() as i32;
+        let last_column = self.columns.saturating_sub(1);
+        (0..self.rows)
+            .map(|v| {
+                let line = v as i32 - offset;
+                if line < start.line.0 || line > end.line.0 {
+                    return None;
+                }
+                let first = if line == start.line.0 { start.column.0 } else { 0 };
+                let last = if line == end.line.0 {
+                    end.column.0
+                } else {
+                    last_column
+                };
+                (first <= last).then_some((first.min(last_column), last.min(last_column)))
             })
             .collect()
     }
@@ -283,6 +378,33 @@ mod tests {
         terminal.clear_selection();
         assert_eq!(terminal.selection_text(), None);
         assert!(terminal.selection_spans().iter().all(Option::is_none));
+    }
+
+    #[test]
+    fn detects_url_under_cell() {
+        let output = BuildOutput {
+            columns: 80,
+            bytes: b"see https://example.com/path for details.\n".to_vec(),
+        };
+        let mut terminal = Terminal::new(&output, 80, 10);
+        // "see " is four columns, so the URL starts at column 4.
+        let url = terminal.url_at(10, 0).expect("url under the link");
+        assert_eq!(url.text(), "https://example.com/path");
+        assert_eq!(url.spans()[0], Some((4, 27)));
+
+        // No URL over the leading prose.
+        assert!(terminal.url_at(1, 0).is_none());
+    }
+
+    #[test]
+    fn trims_trailing_punctuation_from_url() {
+        let output = BuildOutput {
+            columns: 80,
+            bytes: b"go to http://example.com.\n".to_vec(),
+        };
+        let mut terminal = Terminal::new(&output, 80, 10);
+        let url = terminal.url_at(8, 0).expect("url under the link");
+        assert_eq!(url.text(), "http://example.com");
     }
 
     #[test]

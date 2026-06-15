@@ -10,7 +10,7 @@ mod screen;
 pub use alacritty_terminal::grid::Scroll;
 pub use alacritty_terminal::index::Side;
 pub use alacritty_terminal::selection::SelectionType;
-pub use display::Terminal;
+pub use display::{Terminal, Url};
 pub use output::{BuildOutput, parse};
 pub use screen::Screen;
 

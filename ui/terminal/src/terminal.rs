@@ -3,7 +3,7 @@
 //! with per-cell colors and background fills.
 
 use bviz_terminal::{
-    BuildOutput, Cell, Color, Flags, NamedColor, Rgb, Scroll, SelectionType, Side, Terminal,
+    BuildOutput, Cell, Color, Flags, NamedColor, Rgb, Scroll, SelectionType, Side, Terminal, Url,
 };
 use bviz_ui_shell::Chrome;
 use gpui::{
@@ -73,6 +73,8 @@ pub struct TerminalView {
     content: Option<ContentLayout>,
     /// Whether a click-drag text selection is in progress.
     selecting: bool,
+    /// The URL under the cursor, highlighted and openable while hovered.
+    hovered_url: Option<Url>,
     /// While dragging the thumb, the cursor's offset from the thumb's top.
     drag_grab: Option<f32>,
     /// The chrome's handle, for the window controls and tab navigation.
@@ -101,6 +103,7 @@ impl TerminalView {
             scrollbar: None,
             content: None,
             selecting: false,
+            hovered_url: None,
             drag_grab: None,
             focus_handle: cx.focus_handle(),
             body_focus,
@@ -110,6 +113,9 @@ impl TerminalView {
     fn scroll(&mut self, scroll: Scroll, cx: &mut Context<Self>) {
         if let Some(terminal) = self.terminal.as_mut() {
             terminal.scroll(scroll);
+            // The hovered URL's highlight is in viewport coordinates, which
+            // scrolling invalidates; the next pointer move recomputes it.
+            self.hovered_url = None;
             cx.notify();
         }
     }
@@ -178,6 +184,22 @@ impl TerminalView {
         if let Some(terminal) = self.terminal.as_mut() {
             terminal.begin_selection(selection, column, row, side);
             self.selecting = true;
+            cx.notify();
+        }
+    }
+
+    /// Track the URL under the cursor so it can be highlighted and opened.
+    fn on_mouse_move(&mut self, event: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
+        if self.selecting {
+            return;
+        }
+        let cell = self.cell_at(event.position);
+        let url = match (cell, self.terminal.as_mut()) {
+            (Some((column, row, _)), Some(terminal)) => terminal.url_at(column, row),
+            _ => None,
+        };
+        if url.as_ref().map(Url::text) != self.hovered_url.as_ref().map(Url::text) {
+            self.hovered_url = url;
             cx.notify();
         }
     }
@@ -254,6 +276,8 @@ impl Render for TerminalView {
                 .on_action(cx.listener(Self::copy))
                 .on_scroll_wheel(cx.listener(Self::on_scroll_wheel))
                 .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
+                .on_mouse_move(cx.listener(Self::on_mouse_move))
+                .when(self.hovered_url.is_some(), |body| body.cursor_pointer())
                 .size_full()
                 .overflow_hidden()
                 .bg(colors.background)
@@ -290,6 +314,8 @@ struct PositionedLine {
 struct Prepaint {
     lines: Vec<PositionedLine>,
     backgrounds: Vec<PaintQuad>,
+    /// Quads painted over the text, such as the hovered URL's underline.
+    overlays: Vec<PaintQuad>,
     scrollbar: Option<PaintQuad>,
 }
 
@@ -505,9 +531,25 @@ impl Element for TerminalElement {
             ));
         }
 
+        // Underline the hovered URL in the accent color to mark it as a link.
+        let mut overlays = Vec::new();
+        if let Some(url) = self.view.read(cx).hovered_url.as_ref() {
+            for (r, span) in url.spans().iter().enumerate() {
+                let Some((first, last)) = span else { continue };
+                let x = bounds.left() + metrics.cell_width * *first as f32;
+                let y = bounds.top() + metrics.line_height * (r as f32 + 1.0) - px(2.0);
+                let width = metrics.cell_width * (*last - *first + 1) as f32;
+                overlays.push(fill(
+                    Bounds::new(point(x, y), size(width, px(1.5))),
+                    colors.selected,
+                ));
+            }
+        }
+
         Prepaint {
             lines,
             backgrounds,
+            overlays,
             scrollbar,
         }
     }
@@ -537,6 +579,9 @@ impl Element for TerminalElement {
                     cx,
                 )
                 .unwrap();
+        }
+        for quad in prepaint.overlays.drain(..) {
+            window.paint_quad(quad);
         }
         if let Some(scrollbar) = prepaint.scrollbar.take() {
             window.paint_quad(scrollbar);
