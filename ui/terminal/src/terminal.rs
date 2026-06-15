@@ -6,8 +6,8 @@ use bviz_ui_shell::Chrome;
 use gpui::{
     App, Bounds, Context, Element, FocusHandle, Font, FontStyle, FontWeight, GlobalElementId,
     InspectorElementId, IntoElement, LayoutId, PaintQuad, Pixels, Render, Rgba, ShapedLine,
-    SharedString, Style, TextRun, UnderlineStyle, Window, div, fill, point, prelude::*, px, rgb,
-    size,
+    SharedString, Style, TextRun, UnderlineStyle, Window, WindowAppearance, div, fill, point,
+    prelude::*, px, rgb, size,
 };
 use std::rc::Rc;
 
@@ -138,6 +138,7 @@ impl Element for TerminalElement {
         let colors = bviz_ui_theme::colors(window);
         let fg = colors.text;
         let bg = colors.background;
+        let ansi = ansi_palette(window);
 
         let mut lines = Vec::with_capacity(self.screen.rows.len());
         let mut backgrounds = Vec::new();
@@ -156,7 +157,7 @@ impl Element for TerminalElement {
                     byte_len += row[col].c.len_utf8();
                     col += 1;
                 }
-                let style = CellStyle::resolve(&row[start], fg, bg);
+                let style = CellStyle::resolve(&row[start], fg, bg, ansi);
 
                 if style.background != bg {
                     let x = bounds.left() + metrics.cell_width * start as f32;
@@ -233,9 +234,9 @@ struct CellStyle {
 }
 
 impl CellStyle {
-    fn resolve(cell: &Cell, fg: Rgba, bg: Rgba) -> CellStyle {
-        let mut foreground = to_rgba(cell.fg, fg, bg);
-        let mut background = to_rgba(cell.bg, fg, bg);
+    fn resolve(cell: &Cell, fg: Rgba, bg: Rgba, ansi: &[u32; 16]) -> CellStyle {
+        let mut foreground = to_rgba(cell.fg, fg, bg, ansi);
+        let mut background = to_rgba(cell.bg, fg, bg, ansi);
         if cell.flags.contains(Flags::INVERSE) {
             std::mem::swap(&mut foreground, &mut background);
         }
@@ -271,13 +272,26 @@ impl CellStyle {
     }
 }
 
-/// The 16 standard ANSI colors. The default foreground and background follow the
-/// theme's light/dark appearance (see [`to_rgba`]), but gpui's base palette has no
-/// ANSI colors, so these absolute values stand in for the named palette.
-const ANSI: [u32; 16] = [
-    0x000000, 0xcd0000, 0x00cd00, 0xcdcd00, 0x0000ee, 0xcd00cd, 0x00cdcd, 0xe5e5e5, 0x7f7f7f,
-    0xff0000, 0x00ff00, 0xffff00, 0x5c5cff, 0xff00ff, 0x00ffff, 0xffffff,
+// gpui's base palette has no ANSI colors, so the 16 named colors come from an
+// established terminal theme — Zed's One — chosen to stay legible on gpui's
+// default dark and light backgrounds. The default foreground and background
+// still follow the gpui theme (see [`to_rgba`]).
+const ONE_DARK: [u32; 16] = [
+    0x282c34, 0xe06c75, 0x98c379, 0xe5c07b, 0x61afef, 0xc678dd, 0x56b6c2, 0xabb2bf, 0x636d83,
+    0xea858b, 0xaad581, 0xffd885, 0x85c1ff, 0xd398eb, 0x6ed5de, 0xfafafa,
 ];
+const ONE_LIGHT: [u32; 16] = [
+    0x000000, 0xde3e35, 0x3f953a, 0xd2b67c, 0x2f5af3, 0x950095, 0x0997b3, 0xbbbbbb, 0x000000,
+    0xde3e35, 0x3f953a, 0xd2b67c, 0x2f5af3, 0xa00095, 0x0bbcd6, 0xffffff,
+];
+
+/// The ANSI palette for the window's current light/dark appearance.
+fn ansi_palette(window: &Window) -> &'static [u32; 16] {
+    match window.appearance() {
+        WindowAppearance::Light | WindowAppearance::VibrantLight => &ONE_LIGHT,
+        WindowAppearance::Dark | WindowAppearance::VibrantDark => &ONE_DARK,
+    }
+}
 
 fn rgb_to_rgba(c: Rgb) -> Rgba {
     Rgba {
@@ -288,11 +302,12 @@ fn rgb_to_rgba(c: Rgb) -> Rgba {
     }
 }
 
-/// Resolve an alacritty [`Color`] against the terminal's default fore/background.
-fn to_rgba(color: Color, fg: Rgba, bg: Rgba) -> Rgba {
+/// Resolve an alacritty [`Color`] against the terminal's default fore/background
+/// and the appearance-selected ANSI palette.
+fn to_rgba(color: Color, fg: Rgba, bg: Rgba, ansi: &[u32; 16]) -> Rgba {
     match color {
         Color::Spec(c) => rgb_to_rgba(c),
-        Color::Indexed(i) => indexed(i),
+        Color::Indexed(i) => indexed(i, ansi),
         Color::Named(named) => match named {
             NamedColor::Foreground
             | NamedColor::BrightForeground
@@ -302,10 +317,10 @@ fn to_rgba(color: Color, fg: Rgba, bg: Rgba) -> Rgba {
             other => {
                 let idx = other as usize;
                 if idx < 16 {
-                    rgb(ANSI[idx])
+                    rgb(ansi[idx])
                 } else if (259..=266).contains(&idx) {
                     // The dim ANSI block (DimBlack..DimWhite) maps to colors 0..7.
-                    rgb(ANSI[idx - 259])
+                    rgb(ansi[idx - 259])
                 } else {
                     fg
                 }
@@ -315,9 +330,9 @@ fn to_rgba(color: Color, fg: Rgba, bg: Rgba) -> Rgba {
 }
 
 /// Map a 256-color palette index to RGB: 0..15 ANSI, 16..231 cube, 232..255 gray.
-fn indexed(i: u8) -> Rgba {
+fn indexed(i: u8, ansi: &[u32; 16]) -> Rgba {
     match i {
-        0..=15 => rgb(ANSI[i as usize]),
+        0..=15 => rgb(ansi[i as usize]),
         16..=231 => {
             let j = i - 16;
             let level = |v: u8| -> f32 {
