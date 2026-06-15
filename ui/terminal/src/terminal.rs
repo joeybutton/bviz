@@ -75,6 +75,8 @@ pub struct TerminalView {
     selecting: bool,
     /// The URL under the cursor, highlighted and openable while hovered.
     hovered_url: Option<Url>,
+    /// The URL pressed on, opened on release if the press was a click, not a drag.
+    pressed_url: Option<String>,
     /// While dragging the thumb, the cursor's offset from the thumb's top.
     drag_grab: Option<f32>,
     /// The chrome's handle, for the window controls and tab navigation.
@@ -104,6 +106,7 @@ impl TerminalView {
             content: None,
             selecting: false,
             hovered_url: None,
+            pressed_url: None,
             drag_grab: None,
             focus_handle: cx.focus_handle(),
             body_focus,
@@ -181,6 +184,9 @@ impl TerminalView {
             3 => SelectionType::Lines,
             _ => SelectionType::Simple,
         };
+        // A press on a URL opens it on release, unless the press turns into a
+        // drag (a selection), so dragging from a link still selects its text.
+        self.pressed_url = self.hovered_url.as_ref().map(|url| url.text().to_string());
         if let Some(terminal) = self.terminal.as_mut() {
             terminal.begin_selection(selection, column, row, side);
             self.selecting = true;
@@ -625,6 +631,18 @@ impl Element for TerminalElement {
                     view.update(cx, |view, cx| {
                         if view.selecting {
                             view.selecting = false;
+                            // A press that did not drag (no selection text) and
+                            // landed on a URL opens it.
+                            if let Some(url) = view.pressed_url.take() {
+                                let dragged = view
+                                    .terminal
+                                    .as_ref()
+                                    .and_then(Terminal::selection_text)
+                                    .is_some();
+                                if !dragged {
+                                    cx.open_url(&url);
+                                }
+                            }
                             cx.notify();
                         }
                     });
