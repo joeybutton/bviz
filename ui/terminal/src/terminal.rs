@@ -164,8 +164,15 @@ impl TerminalView {
         let Some((column, row, side)) = self.cell_at(event.position) else {
             return;
         };
+        // A double click selects the word under the cursor, a triple click the
+        // whole line; either can then be dragged to extend by words or lines.
+        let selection = match event.click_count {
+            2 => SelectionType::Semantic,
+            3 => SelectionType::Lines,
+            _ => SelectionType::Simple,
+        };
         if let Some(terminal) = self.terminal.as_mut() {
-            terminal.begin_selection(SelectionType::Simple, column, row, side);
+            terminal.begin_selection(selection, column, row, side);
             self.selecting = true;
             cx.notify();
         }

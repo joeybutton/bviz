@@ -286,6 +286,26 @@ mod tests {
     }
 
     #[test]
+    fn semantic_and_line_selection_expand() {
+        let output = BuildOutput {
+            columns: 40,
+            bytes: b"alpha beta\n".to_vec(),
+        };
+        let mut terminal = Terminal::new(&output, 40, 10);
+
+        // A word selection anchored inside "beta" expands to the whole word.
+        terminal.begin_selection(SelectionType::Semantic, 7, 0, Side::Left);
+        assert_eq!(terminal.selection_text().as_deref(), Some("beta"));
+
+        // A line selection takes the whole line regardless of the column.
+        terminal.begin_selection(SelectionType::Lines, 2, 0, Side::Left);
+        assert_eq!(
+            terminal.selection_text().as_deref().map(str::trim_end),
+            Some("alpha beta")
+        );
+    }
+
+    #[test]
     fn wide_characters_occupy_two_columns() {
         // A wide character takes two columns; the cell after it is a spacer, so
         // the following character lands one column further right rather than
