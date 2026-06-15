@@ -5,7 +5,7 @@
 use bviz_terminal::{BuildOutput, Cell, Color, Flags, NamedColor, Rgb, Scroll, Terminal};
 use bviz_ui_shell::Chrome;
 use gpui::{
-    App, Bounds, Context, Element, Entity, FocusHandle, Font, FontStyle, FontWeight,
+    App, Bounds, Context, DispatchPhase, Element, Entity, FocusHandle, Font, FontStyle, FontWeight,
     GlobalElementId, InspectorElementId, IntoElement, KeyBinding, LayoutId, MouseButton,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Render, Rgba,
     ScrollWheelEvent, ShapedLine, SharedString, Style, TextRun, UnderlineStyle, Window,
@@ -123,16 +123,6 @@ impl TerminalView {
         self.drag_to(y, cx);
     }
 
-    fn on_mouse_move(&mut self, event: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
-        if self.drag_grab.is_some() {
-            self.drag_to(f32::from(event.position.y), cx);
-        }
-    }
-
-    fn on_mouse_up(&mut self, _: &MouseUpEvent, _: &mut Window, _: &mut Context<Self>) {
-        self.drag_grab = None;
-    }
-
     fn scroll_line_up(&mut self, _: &ScrollLineUp, _: &mut Window, cx: &mut Context<Self>) {
         self.scroll(Scroll::Delta(SCROLL_STEP), cx);
     }
@@ -187,8 +177,6 @@ impl Render for TerminalView {
                 .on_action(cx.listener(Self::scroll_to_bottom))
                 .on_scroll_wheel(cx.listener(Self::on_scroll_wheel))
                 .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
-                .on_mouse_move(cx.listener(Self::on_mouse_move))
-                .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
                 .size_full()
                 .overflow_hidden()
                 .bg(colors.background)
@@ -430,6 +418,28 @@ impl Element for TerminalElement {
         }
         if let Some(scrollbar) = prepaint.scrollbar.take() {
             window.paint_quad(scrollbar);
+        }
+
+        // While dragging the thumb, follow and end the drag with window-global
+        // handlers so it keeps working when the cursor leaves the window (Wayland
+        // grabs the pointer for the held button and still delivers move/up here).
+        if self.view.read(cx).drag_grab.is_some() {
+            let view = self.view.clone();
+            window.on_mouse_event(move |event: &MouseMoveEvent, phase, _, cx| {
+                if phase == DispatchPhase::Bubble {
+                    view.update(cx, |view, cx| view.drag_to(f32::from(event.position.y), cx));
+                }
+            });
+            let view = self.view.clone();
+            window.on_mouse_event(move |_: &MouseUpEvent, phase, _, cx| {
+                if phase == DispatchPhase::Bubble {
+                    view.update(cx, |view, cx| {
+                        if view.drag_grab.take().is_some() {
+                            cx.notify();
+                        }
+                    });
+                }
+            });
         }
     }
 }
