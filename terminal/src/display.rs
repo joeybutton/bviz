@@ -87,6 +87,17 @@ impl Terminal {
         self.term.scroll_display(scroll);
     }
 
+    /// Scroll to a position given as a fraction of the scrollback: 0.0 is the
+    /// first line, 1.0 is the last. Used to map a scroll-bar drag to a line.
+    pub fn scroll_to_fraction(&mut self, fraction: f32) {
+        let history = self.history_size() as f32;
+        let target = ((1.0 - fraction.clamp(0.0, 1.0)) * history).round() as i32;
+        let delta = target - self.display_offset() as i32;
+        if delta != 0 {
+            self.term.scroll_display(Scroll::Delta(delta));
+        }
+    }
+
     pub fn columns(&self) -> usize {
         self.columns
     }
@@ -177,6 +188,21 @@ mod tests {
         assert!(viewport_text(&terminal).contains("line19"));
         // And back to the top.
         terminal.scroll(Scroll::Top);
+        assert!(viewport_text(&terminal).starts_with("line00"));
+    }
+
+    #[test]
+    fn scroll_to_fraction_maps_to_lines() {
+        let mut bytes = Vec::new();
+        for i in 0..20 {
+            bytes.extend_from_slice(format!("line{i:02}\n").as_bytes());
+        }
+        let output = BuildOutput { columns: 40, bytes };
+        let mut terminal = Terminal::new(&output, 40, 5);
+
+        terminal.scroll_to_fraction(1.0);
+        assert!(viewport_text(&terminal).contains("line19"));
+        terminal.scroll_to_fraction(0.0);
         assert!(viewport_text(&terminal).starts_with("line00"));
     }
 

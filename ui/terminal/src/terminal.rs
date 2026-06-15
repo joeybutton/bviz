@@ -6,9 +6,10 @@ use bviz_terminal::{BuildOutput, Cell, Color, Flags, NamedColor, Rgb, Scroll, Te
 use bviz_ui_shell::Chrome;
 use gpui::{
     App, Bounds, Context, Element, Entity, FocusHandle, Font, FontStyle, FontWeight,
-    GlobalElementId, InspectorElementId, IntoElement, KeyBinding, LayoutId, PaintQuad, Pixels,
-    Render, Rgba, ScrollWheelEvent, ShapedLine, SharedString, Style, TextRun, UnderlineStyle,
-    Window, WindowAppearance, actions, div, fill, point, prelude::*, px, relative, rgb, size,
+    GlobalElementId, InspectorElementId, IntoElement, KeyBinding, LayoutId, MouseButton,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Render, Rgba,
+    ScrollWheelEvent, ShapedLine, SharedString, Style, TextRun, UnderlineStyle, Window,
+    WindowAppearance, actions, div, fill, point, prelude::*, px, relative, rgb, size,
 };
 
 actions!(
@@ -32,11 +33,27 @@ const SCROLLBAR_WIDTH: f32 = 8.0;
 /// Smallest the scroll bar thumb may shrink to.
 const MIN_THUMB: f32 = 24.0;
 
+/// Geometry of the painted scroll bar, in window pixels, kept so mouse events can
+/// hit-test the thumb and map a drag back to a scroll position.
+#[derive(Clone, Copy)]
+struct ScrollbarLayout {
+    /// Left edge of the gutter; clicks left of this are terminal content.
+    gutter_left: f32,
+    track_top: f32,
+    track_height: f32,
+    thumb_top: f32,
+    thumb_height: f32,
+}
+
 /// The root view: the rendered build terminal inside the window chrome.
 pub struct TerminalView {
     output: BuildOutput,
     /// The display terminal, created at the window size on first layout.
     terminal: Option<Terminal>,
+    /// The painted scroll bar geometry, set each layout for hit-testing.
+    scrollbar: Option<ScrollbarLayout>,
+    /// While dragging the thumb, the cursor's offset from the thumb's top.
+    drag_grab: Option<f32>,
     /// The chrome's handle, for the window controls and tab navigation.
     focus_handle: FocusHandle,
     /// The terminal body's handle, focused so its scroll keys dispatch.
@@ -58,6 +75,8 @@ impl TerminalView {
         Self {
             output,
             terminal: None,
+            scrollbar: None,
+            drag_grab: None,
             focus_handle: cx.focus_handle(),
             body_focus,
         }
@@ -68,6 +87,50 @@ impl TerminalView {
             terminal.scroll(scroll);
             cx.notify();
         }
+    }
+
+    /// Scroll so the thumb's top sits under the cursor, accounting for the grab
+    /// offset, and translate that to a line via the terminal.
+    fn drag_to(&mut self, mouse_y: f32, cx: &mut Context<Self>) {
+        let (Some(layout), Some(grab)) = (self.scrollbar, self.drag_grab) else {
+            return;
+        };
+        let span = (layout.track_height - layout.thumb_height).max(1.0);
+        let thumb_top = (mouse_y - grab).clamp(layout.track_top, layout.track_top + span);
+        // Fraction down the track: 0 is the first line, 1 is the last.
+        let fraction = (thumb_top - layout.track_top) / span;
+        if let Some(terminal) = self.terminal.as_mut() {
+            terminal.scroll_to_fraction(fraction);
+            cx.notify();
+        }
+    }
+
+    fn on_mouse_down(&mut self, event: &MouseDownEvent, _: &mut Window, cx: &mut Context<Self>) {
+        let Some(layout) = self.scrollbar else { return };
+        let x = f32::from(event.position.x);
+        let y = f32::from(event.position.y);
+        if x < layout.gutter_left {
+            return;
+        }
+        let on_thumb = y >= layout.thumb_top && y <= layout.thumb_top + layout.thumb_height;
+        // Grabbing the thumb keeps the cursor at the same spot on it; clicking the
+        // track jumps the thumb's center to the cursor.
+        self.drag_grab = Some(if on_thumb {
+            y - layout.thumb_top
+        } else {
+            layout.thumb_height / 2.0
+        });
+        self.drag_to(y, cx);
+    }
+
+    fn on_mouse_move(&mut self, event: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
+        if self.drag_grab.is_some() {
+            self.drag_to(f32::from(event.position.y), cx);
+        }
+    }
+
+    fn on_mouse_up(&mut self, _: &MouseUpEvent, _: &mut Window, _: &mut Context<Self>) {
+        self.drag_grab = None;
     }
 
     fn scroll_line_up(&mut self, _: &ScrollLineUp, _: &mut Window, cx: &mut Context<Self>) {
@@ -123,6 +186,9 @@ impl Render for TerminalView {
                 .on_action(cx.listener(Self::scroll_to_top))
                 .on_action(cx.listener(Self::scroll_to_bottom))
                 .on_scroll_wheel(cx.listener(Self::on_scroll_wheel))
+                .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
+                .on_mouse_move(cx.listener(Self::on_mouse_move))
+                .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
                 .size_full()
                 .overflow_hidden()
                 .bg(colors.background)
@@ -253,18 +319,30 @@ impl Element for TerminalElement {
             None => (Vec::new(), 0, 0),
         };
 
-        // A scroll bar thumb, sized and placed by how much is off-screen and how
-        // far the viewport is scrolled, drawn only when there is scrollback.
-        let scrollbar = (history > 0).then(|| {
+        // The scroll bar thumb, sized and placed by how much is off-screen and how
+        // far the viewport is scrolled. Its geometry is kept on the view so mouse
+        // events can hit-test and drag it.
+        let scrollbar_layout = (history > 0).then(|| {
             let total = (history + rows) as f32;
             let height = f32::from(bounds.size.height);
             let thumb_height = (height * rows as f32 / total).max(MIN_THUMB);
             let thumb_top = (f32::from(bounds.top()) + height * (history - offset) as f32 / total)
                 .min(f32::from(bounds.bottom()) - thumb_height);
+            ScrollbarLayout {
+                gutter_left: f32::from(bounds.right()) - SCROLLBAR_WIDTH,
+                track_top: f32::from(bounds.top()),
+                track_height: height,
+                thumb_top,
+                thumb_height,
+            }
+        });
+        self.view
+            .update(cx, |view, _| view.scrollbar = scrollbar_layout);
+        let scrollbar = scrollbar_layout.map(|layout| {
             fill(
                 Bounds::new(
-                    point(bounds.right() - px(SCROLLBAR_WIDTH), px(thumb_top)),
-                    size(px(SCROLLBAR_WIDTH), px(thumb_height)),
+                    point(px(layout.gutter_left), px(layout.thumb_top)),
+                    size(px(SCROLLBAR_WIDTH), px(layout.thumb_height)),
                 ),
                 bviz_ui_theme::mix(colors.text, colors.background, 0.6),
             )
