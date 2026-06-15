@@ -26,6 +26,12 @@ actions!(
 /// Lines moved per arrow-key press.
 const SCROLL_STEP: i32 = 3;
 
+/// Width of the scroll bar gutter reserved on the right edge.
+const SCROLLBAR_WIDTH: f32 = 8.0;
+
+/// Smallest the scroll bar thumb may shrink to.
+const MIN_THUMB: f32 = 24.0;
+
 /// The root view: the rendered build terminal inside the window chrome.
 pub struct TerminalView {
     output: BuildOutput,
@@ -145,6 +151,7 @@ struct Metrics {
 struct Prepaint {
     lines: Vec<ShapedLine>,
     backgrounds: Vec<PaintQuad>,
+    scrollbar: Option<PaintQuad>,
 }
 
 impl IntoElement for TerminalElement {
@@ -222,11 +229,13 @@ impl Element for TerminalElement {
         let bg = colors.background;
         let ansi = ansi_palette(window);
 
-        // Create the terminal at the bounds, or resize it to them, so alacritty
-        // wraps to the window; then read the rows it would currently show.
-        let cols = (f32::from(bounds.size.width) / f32::from(metrics.cell_width))
-            .floor()
-            .max(1.0) as usize;
+        // Create the terminal at the bounds (minus the scroll bar gutter), or
+        // resize it to them, so alacritty wraps to the window; then read the rows
+        // it would currently show and its scroll position.
+        let cols = ((f32::from(bounds.size.width) - SCROLLBAR_WIDTH)
+            / f32::from(metrics.cell_width))
+        .floor()
+        .max(1.0) as usize;
         let rows = (f32::from(bounds.size.height) / f32::from(metrics.line_height))
             .floor()
             .max(1.0) as usize;
@@ -235,13 +244,31 @@ impl Element for TerminalElement {
                 Some(terminal) => terminal.resize(cols, rows),
                 None => view.terminal = Some(Terminal::new(&view.output, cols, rows)),
             });
-        let viewport = self
-            .view
-            .read(cx)
-            .terminal
-            .as_ref()
-            .map(Terminal::viewport)
-            .unwrap_or_default();
+        let (viewport, history, offset) = match self.view.read(cx).terminal.as_ref() {
+            Some(terminal) => (
+                terminal.viewport(),
+                terminal.history_size(),
+                terminal.display_offset(),
+            ),
+            None => (Vec::new(), 0, 0),
+        };
+
+        // A scroll bar thumb, sized and placed by how much is off-screen and how
+        // far the viewport is scrolled, drawn only when there is scrollback.
+        let scrollbar = (history > 0).then(|| {
+            let total = (history + rows) as f32;
+            let height = f32::from(bounds.size.height);
+            let thumb_height = (height * rows as f32 / total).max(MIN_THUMB);
+            let thumb_top = (f32::from(bounds.top()) + height * (history - offset) as f32 / total)
+                .min(f32::from(bounds.bottom()) - thumb_height);
+            fill(
+                Bounds::new(
+                    point(bounds.right() - px(SCROLLBAR_WIDTH), px(thumb_top)),
+                    size(px(SCROLLBAR_WIDTH), px(thumb_height)),
+                ),
+                bviz_ui_theme::mix(colors.text, colors.background, 0.6),
+            )
+        });
 
         let mut lines = Vec::with_capacity(viewport.len());
         let mut backgrounds = Vec::new();
@@ -291,7 +318,11 @@ impl Element for TerminalElement {
             );
         }
 
-        Prepaint { lines, backgrounds }
+        Prepaint {
+            lines,
+            backgrounds,
+            scrollbar,
+        }
     }
 
     fn paint(
@@ -318,6 +349,9 @@ impl Element for TerminalElement {
                 cx,
             )
             .unwrap();
+        }
+        if let Some(scrollbar) = prepaint.scrollbar.take() {
+            window.paint_quad(scrollbar);
         }
     }
 }

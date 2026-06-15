@@ -95,6 +95,16 @@ impl Terminal {
         self.rows
     }
 
+    /// Lines of scrollback above the viewport.
+    pub fn history_size(&self) -> usize {
+        self.term.grid().history_size()
+    }
+
+    /// How many lines the viewport is scrolled up from the bottom.
+    pub fn display_offset(&self) -> usize {
+        self.term.grid().display_offset()
+    }
+
     /// The currently visible rows, top to bottom, at the current scroll position.
     pub fn viewport(&self) -> Vec<Vec<Cell>> {
         let grid = self.term.grid();
