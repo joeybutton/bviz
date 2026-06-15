@@ -41,7 +41,12 @@ Interactive visualization and inspection tool for Bazel builds.
   where the symbol is used), don't re-explain what a rule's or tool's own
   documentation already covers, and don't write comments that drift as nearby
   code changes (e.g. describing which of several things a wildcard or shared
-  target covers). This applies equally to BUILD and `.bzl`/`MODULE.bazel`
+  target covers, or restating the concrete value of something defined elsewhere
+  — a color, dimension, or default — which goes stale the moment that definition
+  changes; name it by its role or source of truth, e.g. "the file-leaf accent",
+  not "(green)"). Annotating a literal at its own definition is fine — the
+  comment and the value live together — but a reference to it from afar must not
+  pin the value. This applies equally to BUILD and `.bzl`/`MODULE.bazel`
   files: a declarative rule and its attributes already state what they do, so a
   comment that names a rule's effect (`# expose the binary` over a
   `gen_binaries` attribute) or restates an attribute is noise; when one
