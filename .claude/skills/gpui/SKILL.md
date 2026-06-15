@@ -143,9 +143,16 @@ Phosphor SVGs come from an `http_archive` and are embedded the same way; the `As
 serves them from the baked-in bytes — see the `//ui/assets` library and the `phosphor` archive.
 Reach for a Phosphor icon (`bviz_ui_assets::icon("name")`) before drawing a shape by hand:
 the set is large and consistent, and an icon rotated/animated (e.g. `circle-notch` for a
-spinner) beats a bespoke `canvas` path. To add one not yet embedded, list its
-`assets/regular/<name>.svg` in the `phosphor` filegroup and the `icon_svg` match in
-`//ui/assets`. Only fall back to hand-drawn `canvas`/`PathBuilder` graphics when no icon fits.
+spinner) beats a bespoke `canvas` path. Only fall back to hand-drawn
+`canvas`/`PathBuilder` graphics when no icon fits.
+
+Only an explicit allowlist of icons is embedded, not the whole Phosphor set (which is
+thousands of files). To use a new icon, add it to the allowlist — that is the right move, not
+a reason to avoid icons. It lives in **two places** that must stay in sync: the `icons`
+filegroup in `3rd-party/phosphor.BUILD` (so the SVG is checked out and provided as `data`), and
+the `icon_svg` match in `ui/assets/src/lib.rs` (so it is `include_bytes!`-embedded). An icon
+missing from either resolves to no bytes and renders as an empty button. Reference it by bare
+name (`Button::new(..).icon("caret-up")`); the helper expands it to `assets/regular/<name>.svg`.
 
 ## Window chrome: title, decorations, controls, status bar
 
