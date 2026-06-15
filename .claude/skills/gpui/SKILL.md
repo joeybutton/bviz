@@ -230,6 +230,23 @@ paints the cursor, registering itself via `window.handle_input(&focus_handle,
 ElementInputHandler::new(bounds, entity), cx)`. `//ui/components`'s `TextInput` is a minimal
 one (and a `Button` lives alongside it); `examples/input.rs` is the full version with clipboard.
 
+## Scrolling and scroll bars
+
+gpui gives you scroll *state* and clipping, not a scroll bar. `ScrollHandle` with
+`.overflow_y_scroll()` / `.track_scroll(handle)`, and `uniform_list` /
+`UniformListScrollHandle`, move and clip content but draw no bar. The reusable
+`Scrollbar` component lives in Zed's `ui` crate (`crates/ui/src/components/scrollbar.rs`),
+which is heavy (pulls `theme`, `editor`, …) and not a dependency here. So render the bar
+yourself, and make it interactive — a scroll bar drags and its track clicks, not just a
+drawn thumb:
+
+- Paint a thumb sized to the visible fraction and positioned by the scroll offset.
+- Keep its track/thumb geometry on the view; on a left mouse-down hit-test it, grab the
+  thumb (or center it on a track click), then follow `on_mouse_move` / `on_mouse_up`.
+- Map the pixel drag to your scroll model. For a line-based terminal, bridge the track
+  fraction to alacritty's `display_offset` — Zed does this with a `ScrollableHandle`
+  adapter in `crates/terminal_view/src/terminal_scrollbar.rs`.
+
 ## Stateful views vs stateless components
 
 - **`impl Render for Foo`** — a stateful view (`fn render(&mut self, ..)`), held as an
