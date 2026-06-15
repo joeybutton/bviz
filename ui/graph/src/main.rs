@@ -60,12 +60,19 @@ fn kind_accent(kind: &str) -> Rgba {
 /// target and configured-target boxes.
 const PACKAGE_DEEPEN: f32 = 0.18;
 
+/// Fraction by which an expanded group's fill is pulled toward the file-leaf
+/// accent, tinting the box so it reads as a grouping of files and stays distinct
+/// from the neutral package/target containers.
+const GROUP_TINT: f32 = 0.30;
+
 /// Fill for a container box. The outer package box is deepened toward the border
-/// so nesting reads package > target > configured-target; inner containers use
-/// the plain themed container fill.
+/// so nesting reads package > target > configured-target; an expanded group of
+/// files is tinted toward the file leaves it holds; other inner
+/// containers use the plain themed container fill.
 fn container_fill(kind: &str, palette: &Palette) -> Rgba {
     match kind {
         "package" => bviz_ui_theme::mix(palette.container_fill, palette.border, PACKAGE_DEEPEN),
+        "group" => bviz_ui_theme::mix(palette.container_fill, kind_accent("artifact"), GROUP_TINT),
         _ => palette.container_fill,
     }
 }
@@ -556,7 +563,10 @@ fn load(path: &str) -> Result<LaidOut, String> {
     let bytes = std::fs::read(path).map_err(|e| format!("{path}: {e}"))?;
     let containers =
         streamed_proto::read_action_graph_containers(&bytes).map_err(|e| e.to_string())?;
-    let graph = quotient::quotient(&aquery::build(&containers, false));
+    let graph = quotient::quotient(
+        &aquery::build(&containers, false),
+        &std::collections::HashSet::new(),
+    );
     Ok(layout::layout(&graph))
 }
 

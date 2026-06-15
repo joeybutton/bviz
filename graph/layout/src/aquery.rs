@@ -896,7 +896,7 @@ mod tests {
         };
 
         let graph = build(&[container], false);
-        let quotiented = crate::quotient::quotient(&graph);
+        let quotiented = crate::quotient::quotient(&graph, &std::collections::HashSet::new());
 
         // foo/a.c and foo/c.c share package, consumer, and (no) producer: merged.
         let merged: Vec<&Node> = quotiented

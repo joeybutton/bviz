@@ -35,7 +35,10 @@ fn main() -> ExitCode {
         }
     };
 
-    let graph = quotient::quotient(&aquery::build(&containers, false));
+    let graph = quotient::quotient(
+        &aquery::build(&containers, false),
+        &std::collections::HashSet::new(),
+    );
     let laid_out = layout::layout(&graph);
     let document = svg::emit(&laid_out);
 

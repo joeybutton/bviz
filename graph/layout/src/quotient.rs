@@ -14,14 +14,18 @@
 //! single pass over the original graph: remapping candidate ids cannot perturb
 //! the signatures it groups by.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 
 use crate::graph::{Edge, Graph, Node};
 
 /// Returns a graph in which interchangeable `source`/`artifact` leaves are
-/// merged. Nodes and edges of the result are sorted by id for an output that is
-/// independent of the input order.
-pub fn quotient(graph: &Graph) -> Graph {
+/// merged. A multi-member group whose id is in `expanded` is emitted as a
+/// `group` container holding its members unchanged (reparented to the group)
+/// rather than collapsed into one leaf, so the caller can reveal the files
+/// behind a group while leaving every other group collapsed. Nodes and edges of
+/// the result are sorted by id for an output that is independent of the input
+/// order; passing an empty `expanded` set yields the fully collapsed result.
+pub fn quotient(graph: &Graph, expanded: &HashSet<String>) -> Graph {
     let producers = neighbor_lists(graph, |e| (&e.to, &e.from));
     let consumers = neighbor_lists(graph, |e| (&e.from, &e.to));
 
@@ -40,14 +44,27 @@ pub fn quotient(graph: &Graph) -> Graph {
         groups.entry(signature).or_default().push(&node.id);
     }
 
-    // Map each candidate id to the id it collapses into (itself when alone).
+    // Collapsed multi-member groups remap their members to the group id; an
+    // expanded multi-member group instead becomes a container holding its
+    // members, which keep their own ids.
     let mut remap: BTreeMap<&str, String> = BTreeMap::new();
-    // Group id (when size >= 2) -> member count, for labeling.
+    // Group id -> member count, for labeling, recorded only for multi-member
+    // groups (both collapsed and expanded).
     let mut group_sizes: BTreeMap<String, usize> = BTreeMap::new();
+    // Member id -> container group id, for members of expanded groups only.
+    let mut member_container: BTreeMap<&str, String> = BTreeMap::new();
     for members in groups.values() {
         let target = group_id(members);
-        if members.len() >= 2 {
-            group_sizes.insert(target.clone(), members.len());
+        if members.len() < 2 {
+            remap.insert(members[0], target);
+            continue;
+        }
+        group_sizes.insert(target.clone(), members.len());
+        if expanded.contains(&target) {
+            for &member in members {
+                member_container.insert(member, target.clone());
+            }
+            continue;
         }
         for &member in members {
             remap.insert(member, target.clone());
@@ -56,11 +73,31 @@ pub fn quotient(graph: &Graph) -> Graph {
 
     let mut out = Graph::new();
 
-    // Non-candidates unchanged; one node per group (or the original singleton).
+    // Non-candidates unchanged; collapsed groups emit one leaf; expanded groups
+    // emit a container followed by their members reparented to it.
     let mut emitted: BTreeMap<String, ()> = BTreeMap::new();
     for node in &graph.nodes {
         if !is_candidate(&node.kind) {
             out.nodes.push(clone_node(node));
+            continue;
+        }
+        // A member of an expanded group: emit the container once, then the
+        // member with its id intact and parent set to the group.
+        if let Some(gid) = member_container.get(node.id.as_str()).cloned() {
+            if emitted.insert(gid.clone(), ()).is_none() {
+                out.nodes.push(Node {
+                    id: gid.clone(),
+                    label: group_label(&node.kind, group_sizes[&gid]),
+                    kind: "group".to_string(),
+                    parent: node.parent.clone(),
+                });
+            }
+            out.nodes.push(Node {
+                id: node.id.clone(),
+                label: node.label.clone(),
+                kind: node.kind.clone(),
+                parent: Some(gid),
+            });
             continue;
         }
         let id = &remap[node.id.as_str()];
@@ -79,7 +116,8 @@ pub fn quotient(graph: &Graph) -> Graph {
         });
     }
 
-    // Remap edge endpoints, drop self-loops, and dedup.
+    // Remap edge endpoints (collapsed-group members only; expanded-group
+    // members and singletons keep their ids), drop self-loops, and dedup.
     let mut seen_edge: BTreeMap<(String, String), ()> = BTreeMap::new();
     for edge in &graph.edges {
         let from = remap
@@ -197,6 +235,15 @@ mod tests {
         graph.nodes.iter().find(|n| n.id == id).unwrap()
     }
 
+    /// Collapse every group (the empty-`expanded` default).
+    fn collapsed(graph: &Graph) -> Graph {
+        quotient(graph, &HashSet::new())
+    }
+
+    fn expanded(ids: &[&str]) -> HashSet<String> {
+        ids.iter().map(|s| s.to_string()).collect()
+    }
+
     #[test]
     fn sources_with_one_shared_consumer_merge() {
         let mut graph = Graph::new();
@@ -206,7 +253,7 @@ mod tests {
             graph.add_edge(id, "action0");
         }
 
-        let out = quotient(&graph);
+        let out = collapsed(&graph);
 
         // action0 plus the single group node.
         assert_eq!(out.nodes.len(), 2);
@@ -226,7 +273,7 @@ mod tests {
         graph.add_edge("source1", "action0");
         graph.add_edge("source2", "action1");
 
-        let out = quotient(&graph);
+        let out = collapsed(&graph);
 
         assert!(node_ids(&out).contains(&"source1"));
         assert!(node_ids(&out).contains(&"source2"));
@@ -246,7 +293,7 @@ mod tests {
             graph.add_edge(id, "action1");
         }
 
-        let out = quotient(&graph);
+        let out = collapsed(&graph);
 
         let group = find(&out, "group:artifact1");
         assert_eq!(group.label, "2 files");
@@ -274,7 +321,7 @@ mod tests {
         graph.add_edge("artifact1", "action2");
         graph.add_edge("artifact2", "action2");
 
-        let out = quotient(&graph);
+        let out = collapsed(&graph);
 
         assert!(node_ids(&out).contains(&"artifact1"));
         assert!(node_ids(&out).contains(&"artifact2"));
@@ -290,7 +337,7 @@ mod tests {
         graph.add_edge("source1", "action0");
         graph.add_edge("artifact1", "action0");
 
-        let out = quotient(&graph);
+        let out = collapsed(&graph);
 
         assert!(node_ids(&out).contains(&"source1"));
         assert!(node_ids(&out).contains(&"artifact1"));
@@ -315,8 +362,8 @@ mod tests {
         b.add_edge("source3", "action0");
         b.add_edge("source1", "action0");
 
-        let qa = quotient(&a);
-        let qb = quotient(&b);
+        let qa = collapsed(&a);
+        let qb = collapsed(&b);
 
         assert_eq!(node_ids(&qa), node_ids(&qb));
         assert_eq!(edges(&qa), edges(&qb));
@@ -336,11 +383,129 @@ mod tests {
         graph.add_node("depset10", "2 files", "depset", None);
         graph.add_edge("depset10", "action0");
 
-        let out = quotient(&graph);
+        let out = collapsed(&graph);
 
         for id in ["target1", "ct", "action0", "depset10"] {
             assert!(node_ids(&out).contains(&id), "{id} missing");
         }
         assert_eq!(edges(&out), vec![("depset10", "action0")]);
+    }
+
+    #[test]
+    fn expanded_group_becomes_container_holding_its_members() {
+        let mut graph = Graph::new();
+        graph.add_node("action0", "Compile", "action", None);
+        for id in ["source1", "source2", "source3"] {
+            leaf(&mut graph, id, "source", None);
+            graph.add_edge(id, "action0");
+        }
+
+        let out = quotient(&graph, &expanded(&["group:source1"]));
+
+        // The group is a container; the collapsed leaf is gone.
+        let group = find(&out, "group:source1");
+        assert_eq!(group.kind, "group");
+        assert_eq!(group.label, "3 sources");
+        assert_eq!(group.parent, None);
+        // Each member survives with its own id, reparented to the group.
+        for id in ["source1", "source2", "source3"] {
+            let member = find(&out, id);
+            assert_eq!(member.kind, "source");
+            assert_eq!(member.parent.as_deref(), Some("group:source1"));
+        }
+        // Member edges keep their original endpoints (no group: remap).
+        assert_eq!(
+            edges(&out),
+            vec![
+                ("source1", "action0"),
+                ("source2", "action0"),
+                ("source3", "action0"),
+            ]
+        );
+    }
+
+    #[test]
+    fn expanded_set_naming_a_non_group_leaves_collapse_unchanged() {
+        let mut graph = Graph::new();
+        graph.add_node("action0", "Compile", "action", None);
+        for id in ["source1", "source2", "source3"] {
+            leaf(&mut graph, id, "source", None);
+            graph.add_edge(id, "action0");
+        }
+
+        // Expanding an id that is not a multi-member group collapses as usual.
+        let out = quotient(&graph, &expanded(&["group:other"]));
+
+        assert_eq!(out.nodes.len(), 2);
+        assert_eq!(find(&out, "group:source1").kind, "source");
+        assert_eq!(edges(&out), vec![("group:source1", "action0")]);
+    }
+
+    #[test]
+    fn one_group_expands_while_another_collapses() {
+        let mut graph = Graph::new();
+        graph.add_node("action0", "A", "action", None);
+        graph.add_node("action1", "B", "action", None);
+        // Group on action0 (will be expanded).
+        for id in ["source1", "source2"] {
+            leaf(&mut graph, id, "source", None);
+            graph.add_edge(id, "action0");
+        }
+        // Group on action1 (will stay collapsed).
+        for id in ["source3", "source4"] {
+            leaf(&mut graph, id, "source", None);
+            graph.add_edge(id, "action1");
+        }
+
+        let out = quotient(&graph, &expanded(&["group:source1"]));
+
+        // First group is a container with its members.
+        assert_eq!(find(&out, "group:source1").kind, "group");
+        assert_eq!(
+            find(&out, "source1").parent.as_deref(),
+            Some("group:source1")
+        );
+        assert_eq!(
+            find(&out, "source2").parent.as_deref(),
+            Some("group:source1")
+        );
+        // Second group collapses to a single source leaf.
+        assert_eq!(find(&out, "group:source3").kind, "source");
+        assert_eq!(find(&out, "group:source3").label, "2 sources");
+        assert!(!node_ids(&out).contains(&"source3"));
+        assert_eq!(
+            edges(&out),
+            vec![
+                ("group:source3", "action1"),
+                ("source1", "action0"),
+                ("source2", "action0"),
+            ]
+        );
+    }
+
+    #[test]
+    fn expanded_output_is_independent_of_insertion_order() {
+        let mut a = Graph::new();
+        a.add_node("action0", "Compile", "action", None);
+        for id in ["source1", "source2", "source3"] {
+            leaf(&mut a, id, "source", None);
+            a.add_edge(id, "action0");
+        }
+
+        let mut b = Graph::new();
+        for id in ["source3", "source1", "source2"] {
+            leaf(&mut b, id, "source", None);
+        }
+        b.add_node("action0", "Compile", "action", None);
+        b.add_edge("source2", "action0");
+        b.add_edge("source3", "action0");
+        b.add_edge("source1", "action0");
+
+        let set = expanded(&["group:source1"]);
+        let qa = quotient(&a, &set);
+        let qb = quotient(&b, &set);
+
+        assert_eq!(node_ids(&qa), node_ids(&qb));
+        assert_eq!(edges(&qa), edges(&qb));
     }
 }

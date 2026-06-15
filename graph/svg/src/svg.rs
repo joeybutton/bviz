@@ -93,10 +93,13 @@ pub fn emit(layout: &LaidOut) -> String {
 }
 
 // Container fills nest visually: the outer package box is a deeper slate so the
-// lighter target and configured-target boxes read as sitting inside it.
+// lighter target and configured-target boxes read as sitting inside it. An
+// expanded group of files gets a green-tinted box, coherent with the file leaf
+// fills it holds and distinct from the blue package/target containers.
 fn container_fill(kind: &str) -> &'static str {
     match kind {
         "package" => "#c4d2e8",
+        "group" => "#cfe8d8",
         _ => "#dde6f2",
     }
 }
