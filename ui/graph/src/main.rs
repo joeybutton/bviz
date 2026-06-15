@@ -3,6 +3,7 @@
 //! summarizing the result.
 
 use bviz_graph_layout::graph::Graph;
+use bviz_graph_layout::layout::CARET_RESERVE;
 use bviz_graph_layout::{aquery, layout, quotient, streamed_proto, LaidOut};
 use bviz_ui_shell::Chrome;
 use gpui::{
@@ -570,7 +571,22 @@ fn paint_box(
     let line = window
         .text_system()
         .shape_line(b.label.clone().into(), fs, &[run], None);
-    let tx = rect.origin.x + (rect.size.width - line.width()) / 2.;
+    // Group boxes carry a disclosure caret left of the label, occupying the
+    // reserved width the layout sized the box to hold; the label and caret are
+    // centered together as one unit. Other boxes center the label alone.
+    let caret = b.id.starts_with("group:");
+    let footprint = px(CARET_RESERVE as f32 * zoom);
+    let unit_width = if caret {
+        footprint + line.width()
+    } else {
+        line.width()
+    };
+    let unit_left = rect.origin.x + (rect.size.width - unit_width) / 2.;
+    let tx = if caret {
+        unit_left + footprint
+    } else {
+        unit_left
+    };
     let ty = if b.compound {
         let band = px(LABEL_BAND as f32 * zoom);
         rect.origin.y + (band - fs) / 2.
@@ -579,26 +595,41 @@ fn paint_box(
     };
     let _ = line.paint(point(tx, ty), fs, TextAlign::Left, None, window, cx);
 
-    // Group boxes carry a disclosure caret just left of the label: a collapsed
-    // group (the box is a leaf, kind != "group") points right, an expanded group
-    // (kind == "group" container) points down. Phosphor icons render as `svg()`
-    // elements and cannot be painted inside this canvas, so the caret is a small
-    // filled triangle.
-    if b.id.starts_with("group:") {
+    // A collapsed group (the box is a leaf, kind != "group") points the caret
+    // right, an expanded group (kind == "group" container) points it down.
+    // Phosphor icons render as `svg()` elements and cannot be painted inside this
+    // canvas, so the caret is a small filled triangle.
+    if caret {
         let cy = ty + fs / 2.;
-        paint_caret(point(tx, cy), fs, b.kind == "group", palette.label, window);
+        paint_caret(
+            point(unit_left, cy),
+            footprint,
+            fs,
+            b.kind == "group",
+            palette.label,
+            window,
+        );
     }
 }
 
-/// Paints a small filled-triangle disclosure caret centered vertically at `at.y`
-/// and ending its gap just left of `at.x`. `down` points it downward (expanded),
+/// Paints a small filled-triangle disclosure caret inside the reserved
+/// `footprint` whose left edge is `at.x`, centered vertically at `at.y`. The
+/// triangle width fills the footprint less a trailing gap before the label; its
+/// height scales with the font size `fs`. `down` points it downward (expanded),
 /// otherwise rightward (collapsed).
-fn paint_caret(at: Point<Pixels>, fs: Pixels, down: bool, color: Rgba, window: &mut Window) {
-    let s = f32::from(fs) * 0.5; // caret extent, scaling with the label
-    let gap = f32::from(fs) * 0.35; // space between caret and label
-    let right = at.x - px(gap);
-    let left = right - px(s);
-    let (top, bottom) = (at.y - px(s / 2.), at.y + px(s / 2.));
+fn paint_caret(
+    at: Point<Pixels>,
+    footprint: Pixels,
+    fs: Pixels,
+    down: bool,
+    color: Rgba,
+    window: &mut Window,
+) {
+    let s = f32::from(footprint) * 0.6; // triangle width within the footprint
+    let height = f32::from(fs) * 0.5; // triangle height, scaling with the label
+    let left = at.x;
+    let right = left + px(s);
+    let (top, bottom) = (at.y - px(height / 2.), at.y + px(height / 2.));
     let mut tri = PathBuilder::fill();
     if down {
         // Apex down, base along the top.

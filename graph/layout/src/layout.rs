@@ -33,6 +33,9 @@ use crate::graph::{Graph, Node};
 const LEAF_HEIGHT: f64 = 30.0;
 const CHAR_WIDTH: f64 = 7.0;
 const LABEL_PADDING: f64 = 16.0;
+/// Horizontal space (in layout pixels, pre-zoom) reserved on an expandable leaf
+/// box for its disclosure caret, left of the label.
+pub const CARET_RESERVE: f64 = 12.0;
 /// Inset reserved at the top of each container for its title; the other three
 /// sides keep a uniform border.
 const LABEL_BAND: f64 = 26.0;
@@ -50,6 +53,12 @@ pub struct Box {
     pub height: f64,
     /// A container holds child boxes; its label sits in the top band.
     pub compound: bool,
+}
+
+/// Whether `b` is a collapsed group: a leaf box whose id marks a group, which
+/// gets a disclosure caret and the [`CARET_RESERVE`] width for it.
+pub fn caret_leaf(b: &Box) -> bool {
+    !b.compound && b.id.starts_with("group:")
 }
 
 /// An edge polyline: start, bend points, end, in order.
@@ -212,7 +221,14 @@ fn build_node<'g>(
             }
         }
         None => {
-            let width = node.label.chars().count() as f64 * CHAR_WIDTH + LABEL_PADDING;
+            // A collapsed group leaf reserves room for its disclosure caret left
+            // of the label, matching the renderer's caret footprint.
+            let caret = if node.id.starts_with("group:") {
+                CARET_RESERVE
+            } else {
+                0.0
+            };
+            let width = node.label.chars().count() as f64 * CHAR_WIDTH + LABEL_PADDING + caret;
             elk.borrow_mut()
                 .connectable()
                 .shape()
