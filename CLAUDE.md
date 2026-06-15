@@ -18,6 +18,12 @@ Interactive visualization and inspection tool for Bazel builds.
   input, not just by checking that the output is structurally well-formed —
   visual faults (overlaps, mis-routed or detached connectors, clipping) do not
   show up in a structural check.
+- Before hand-rolling a widget or other capability, check whether the framework
+  or its component library already provides one, and reuse it unless it brings
+  unacceptable dependencies; framework-specific facts (what the framework does and
+  doesn't offer) belong in its skill, not rediscovered each time. An interactive
+  control must work end to end — a scroll bar drags and its track clicks, not just
+  a drawn indicator.
 - Code, comments, and commit messages must be self-contained: a reader who has
   no access to the chat or task that produced them must fully understand them.
   Never reference the development process — no step/phase numbers, no "as
