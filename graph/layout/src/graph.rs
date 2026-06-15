@@ -7,6 +7,7 @@
 
 /// A box in the graph. A node is a container if any other node names it as
 /// parent, and a leaf otherwise.
+#[derive(Clone)]
 pub struct Node {
     pub id: String,
     pub label: String,
@@ -17,12 +18,13 @@ pub struct Node {
 }
 
 /// A directed dependency from one node to another, both by id.
+#[derive(Clone)]
 pub struct Edge {
     pub from: String,
     pub to: String,
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct Graph {
     pub nodes: Vec<Node>,
     pub edges: Vec<Edge>,

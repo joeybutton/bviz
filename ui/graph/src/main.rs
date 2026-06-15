@@ -2,6 +2,7 @@
 //! `bviz_graph_layout`, lays the action graph out, and opens a window
 //! summarizing the result.
 
+use bviz_graph_layout::graph::Graph;
 use bviz_graph_layout::{aquery, layout, quotient, streamed_proto, LaidOut};
 use bviz_ui_shell::Chrome;
 use gpui::{
@@ -11,7 +12,8 @@ use gpui::{
     Size, Transformation, WeakEntity, Window, canvas, div, font, percentage, point, prelude::*, px,
     quad, rgb, size,
 };
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
+use std::collections::HashSet;
 use std::rc::Rc;
 use std::time::Duration;
 
@@ -99,11 +101,16 @@ enum Source {
 
 /// A box flattened to what the canvas needs to paint it, in layout pixels.
 struct PaintBox {
+    /// The graph node id, so a click can be mapped back to its node.
+    id: String,
     x: f64,
     y: f64,
     w: f64,
     h: f64,
     compound: bool,
+    /// Node kind, distinguishing an expanded group container (`group`) from a
+    /// collapsed group leaf for the disclosure caret.
+    kind: String,
     /// Fill resolved from the active theme when the box vec is built.
     fill: Rgba,
     label: String,
@@ -124,28 +131,54 @@ struct GraphView {
     /// Whether the initial fit-to-window view has been applied.
     fitted: Rc<Cell<bool>>,
     dragging: bool,
+    /// Whether the cursor moved past the click threshold since the press, which
+    /// distinguishes a drag (pan) from a click (toggle).
+    moved: bool,
     last_mouse: Point<Pixels>,
+    /// Cursor position at the most recent left press, the click/drag origin.
+    press: Point<Pixels>,
     /// Viewport bounds captured during canvas paint, so the scroll handler can
     /// map a window cursor to viewport space and bound the zoom to a fit.
     viewport: Rc<Cell<Bounds<Pixels>>>,
-    /// Holds the background load+layout task so it isn't cancelled on drop.
+    /// The built (pre-quotient) graph, cached so toggling a group re-lays-out
+    /// without re-reading or re-parsing the proto. `None` until the load lands.
+    base: Rc<RefCell<Option<Graph>>>,
+    /// Group ids currently expanded into their member files.
+    expanded: Rc<RefCell<HashSet<String>>>,
+    /// Holds the background load/relayout task so it isn't cancelled on drop.
     _load_task: Task<()>,
 }
+
+/// A cursor must travel at least this far from the press before the gesture
+/// counts as a drag rather than a click.
+const CLICK_SLOP: f32 = 4.0;
 
 impl GraphView {
     fn new(path: Option<String>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let focus_handle = cx.focus_handle();
         focus_handle.focus(window, cx);
+        let base: Rc<RefCell<Option<Graph>>> = Rc::new(RefCell::new(None));
         let (source, load_task) = match path {
-            // Read and lay out the graph on the background executor so window
+            // Build and lay out the graph on the background executor so window
             // appearance and interactivity are never blocked; swap the view to
-            // the result when it completes.
+            // the result and cache the base graph when it completes.
             Some(path) => {
+                let base = base.clone();
                 let task = cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
-                    let result = cx.background_executor().spawn(async move { load(&path) }).await;
+                    let result = cx
+                        .background_executor()
+                        .spawn(async move {
+                            let graph = build_graph(&path)?;
+                            let laid_out = relayout(&graph, &HashSet::new());
+                            Ok::<_, String>((graph, laid_out))
+                        })
+                        .await;
                     let _ = this.update(cx, |view, cx| {
                         view.source = match result {
-                            Ok(laid_out) => Source::Loaded(laid_out),
+                            Ok((graph, laid_out)) => {
+                                *base.borrow_mut() = Some(graph);
+                                Source::Loaded(laid_out)
+                            }
                             Err(err) => Source::Message(err),
                         };
                         cx.notify();
@@ -165,10 +198,34 @@ impl GraphView {
             pan: Rc::new(Cell::new((0.0, 0.0))),
             fitted: Rc::new(Cell::new(false)),
             dragging: false,
+            moved: false,
             last_mouse: Point::default(),
+            press: Point::default(),
             viewport: Rc::new(Cell::new(Bounds::default())),
+            base,
+            expanded: Rc::new(RefCell::new(HashSet::new())),
             _load_task: load_task,
         }
+    }
+
+    /// Re-lays-out the cached base graph with the current expansion set off the
+    /// UI thread and swaps in the result, leaving zoom, pan, and the fit flag
+    /// untouched so the view stays put across a toggle.
+    fn retoggle(&mut self, cx: &mut Context<Self>) {
+        let Some(graph) = self.base.borrow().clone() else {
+            return;
+        };
+        let expanded = self.expanded.borrow().clone();
+        self._load_task = cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+            let laid_out = cx
+                .background_executor()
+                .spawn(async move { relayout(&graph, &expanded) })
+                .await;
+            let _ = this.update(cx, |view, cx| {
+                view.source = Source::Loaded(laid_out);
+                cx.notify();
+            });
+        });
     }
 
     /// Builds the single-canvas viewport: every box and connector is painted in
@@ -187,11 +244,13 @@ impl GraphView {
             .boxes
             .iter()
             .map(|b| PaintBox {
+                id: b.id.clone(),
                 x: b.x,
                 y: b.y,
                 w: b.width,
                 h: b.height,
                 compound: b.compound,
+                kind: b.kind.clone(),
                 fill: if b.compound {
                     container_fill(&b.kind, &palette)
                 } else {
@@ -308,17 +367,48 @@ impl Render for GraphView {
                         MouseButton::Left,
                         cx.listener(|this, e: &MouseDownEvent, _, _| {
                             this.dragging = true;
+                            this.moved = false;
+                            this.press = e.position;
                             this.last_mouse = e.position;
                         }),
                     )
                     .on_mouse_up(
                         MouseButton::Left,
-                        cx.listener(|this, _e: &MouseUpEvent, _, _| {
+                        cx.listener(|this, e: &MouseUpEvent, _, cx| {
                             this.dragging = false;
+                            if this.moved {
+                                return;
+                            }
+                            // A click (no appreciable drag): hit-test the laid-out
+                            // boxes and toggle the group under the cursor.
+                            let Source::Loaded(g) = &this.source else {
+                                return;
+                            };
+                            let vp = this.viewport.get();
+                            let (gx, gy) =
+                                from_screen(e.position, vp.origin, this.zoom.get(), this.pan.get());
+                            let Some(hit) = hit_box(&g.boxes, gx, gy) else {
+                                return;
+                            };
+                            if !hit.id.starts_with("group:") {
+                                return;
+                            }
+                            let id = hit.id.clone();
+                            let mut expanded = this.expanded.borrow_mut();
+                            if !expanded.remove(&id) {
+                                expanded.insert(id);
+                            }
+                            drop(expanded);
+                            this.retoggle(cx);
                         }),
                     )
                     .on_mouse_move(cx.listener(|this, e: &MouseMoveEvent, _, cx| {
                         if this.dragging {
+                            let dpx = f32::from(e.position.x) - f32::from(this.press.x);
+                            let dpy = f32::from(e.position.y) - f32::from(this.press.y);
+                            if dpx.hypot(dpy) > CLICK_SLOP {
+                                this.moved = true;
+                            }
                             let (px, py) = this.pan.get();
                             let dx = f32::from(e.position.x) - f32::from(this.last_mouse.x);
                             let dy = f32::from(e.position.y) - f32::from(this.last_mouse.y);
@@ -488,6 +578,48 @@ fn paint_box(
         rect.origin.y + (rect.size.height - fs) / 2.
     };
     let _ = line.paint(point(tx, ty), fs, TextAlign::Left, None, window, cx);
+
+    // Group boxes carry a disclosure caret just left of the label: a collapsed
+    // group (the box is a leaf, kind != "group") points right, an expanded group
+    // (kind == "group" container) points down. Phosphor icons render as `svg()`
+    // elements and cannot be painted inside this canvas, so the caret is a small
+    // filled triangle.
+    if b.id.starts_with("group:") {
+        let cy = ty + fs / 2.;
+        paint_caret(point(tx, cy), fs, b.kind == "group", palette.label, window);
+    }
+}
+
+/// Paints a small filled-triangle disclosure caret centered vertically at `at.y`
+/// and ending its gap just left of `at.x`. `down` points it downward (expanded),
+/// otherwise rightward (collapsed).
+fn paint_caret(at: Point<Pixels>, fs: Pixels, down: bool, color: Rgba, window: &mut Window) {
+    let s = f32::from(fs) * 0.5; // caret extent, scaling with the label
+    let gap = f32::from(fs) * 0.35; // space between caret and label
+    let right = at.x - px(gap);
+    let left = right - px(s);
+    let (top, bottom) = (at.y - px(s / 2.), at.y + px(s / 2.));
+    let mut tri = PathBuilder::fill();
+    if down {
+        // Apex down, base along the top.
+        tri.add_polygon(
+            &[
+                point(left, top),
+                point(right, top),
+                point(left + px(s / 2.), bottom),
+            ],
+            true,
+        );
+    } else {
+        // Apex right, base along the left.
+        tri.add_polygon(
+            &[point(left, top), point(right, at.y), point(left, bottom)],
+            true,
+        );
+    }
+    if let Ok(path) = tri.build() {
+        window.paint_path(path, color);
+    }
 }
 
 /// Strokes a connector polyline and caps its end with a filled arrowhead
@@ -558,16 +690,43 @@ fn paint_arrowhead(pts: &[Point<Pixels>], zoom: f32, color: Rgba, window: &mut W
     }
 }
 
-/// Reads the aquery proto at `path` and lays out its action graph.
-fn load(path: &str) -> Result<LaidOut, String> {
+/// Reads the aquery proto at `path` and builds its action graph, before any
+/// group quotienting. Cached so toggling a group needn't re-read or re-parse.
+fn build_graph(path: &str) -> Result<Graph, String> {
     let bytes = std::fs::read(path).map_err(|e| format!("{path}: {e}"))?;
     let containers =
         streamed_proto::read_action_graph_containers(&bytes).map_err(|e| e.to_string())?;
-    let graph = quotient::quotient(
-        &aquery::build(&containers, false),
-        &std::collections::HashSet::new(),
-    );
-    Ok(layout::layout(&graph))
+    Ok(aquery::build(&containers, false))
+}
+
+/// Quotients `graph` with the given groups expanded and lays the result out.
+fn relayout(graph: &Graph, expanded: &HashSet<String>) -> LaidOut {
+    layout::layout(&quotient::quotient(graph, expanded))
+}
+
+/// Inverse of [`to_screen`]: maps a window-space point back to layout space.
+fn from_screen(
+    screen: Point<Pixels>,
+    origin: Point<Pixels>,
+    zoom: f32,
+    pan: (f32, f32),
+) -> (f32, f32) {
+    (
+        (f32::from(screen.x) - f32::from(origin.x) - pan.0) / zoom - MARGIN as f32,
+        (f32::from(screen.y) - f32::from(origin.y) - pan.1) / zoom - MARGIN as f32,
+    )
+}
+
+/// The smallest-area box (in layout space) containing `(gx, gy)`, so an inner
+/// member or header wins over its enclosing container; `None` if outside all.
+fn hit_box(boxes: &[bviz_graph_layout::Box], gx: f32, gy: f32) -> Option<&bviz_graph_layout::Box> {
+    boxes
+        .iter()
+        .filter(|b| {
+            let (x, y) = (b.x as f32, b.y as f32);
+            gx >= x && gx <= x + b.width as f32 && gy >= y && gy <= y + b.height as f32
+        })
+        .min_by(|a, b| (a.width * a.height).total_cmp(&(b.width * b.height)))
 }
 
 fn main() {
@@ -575,4 +734,52 @@ fn main() {
     bviz_ui_shell::run("bazel_viz graph", move |window, cx| {
         cx.new(|cx| GraphView::new(path, window, cx))
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bviz_graph_layout::Box;
+
+    fn lbox(id: &str, x: f64, y: f64, w: f64, h: f64) -> Box {
+        Box {
+            id: id.into(),
+            label: id.into(),
+            kind: "source".into(),
+            x,
+            y,
+            width: w,
+            height: h,
+            compound: false,
+        }
+    }
+
+    #[test]
+    fn from_screen_inverts_to_screen() {
+        let bounds = Bounds::new(point(px(10.), px(20.)), size(px(800.), px(600.)));
+        let zoom = 1.7_f32;
+        let pan = (33.0_f32, -12.0_f32);
+        for &(x, y) in &[(0.0_f64, 0.0_f64), (42.5, 7.25), (123.0, 456.0)] {
+            let screen = to_screen(x, y, bounds, zoom, pan);
+            let (gx, gy) = from_screen(screen, bounds.origin, zoom, pan);
+            assert!((gx as f64 - x).abs() < 1e-3, "x: {gx} vs {x}");
+            assert!((gy as f64 - y).abs() < 1e-3, "y: {gy} vs {y}");
+        }
+    }
+
+    #[test]
+    fn hit_box_picks_innermost_and_none_outside() {
+        // An outer container with a small inner box nested inside it.
+        let boxes = vec![
+            lbox("group:source1", 0.0, 0.0, 100.0, 100.0),
+            lbox("source1", 20.0, 20.0, 30.0, 30.0),
+        ];
+        // Inside both rects: the smaller (inner) wins.
+        assert_eq!(hit_box(&boxes, 30.0, 30.0).unwrap().id, "source1");
+        // Inside only the container.
+        assert_eq!(hit_box(&boxes, 5.0, 5.0).unwrap().id, "group:source1");
+        // Outside everything.
+        assert!(hit_box(&boxes, 200.0, 200.0).is_none());
+        assert!(hit_box(&boxes, -1.0, 50.0).is_none());
+    }
 }

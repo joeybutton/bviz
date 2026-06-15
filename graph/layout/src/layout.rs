@@ -40,6 +40,8 @@ const BORDER: f64 = 12.0;
 
 /// A laid-out box in absolute coordinates, top-left origin.
 pub struct Box {
+    /// The graph node id this box renders, for hit-testing back to the node.
+    pub id: String,
     pub label: String,
     pub kind: String,
     pub x: f64,
@@ -137,6 +139,7 @@ pub fn layout(graph: &Graph) -> LaidOut {
         boxes.push((
             depth_of[node.id.as_str()],
             Box {
+                id: node.id.clone(),
                 label: node.label.clone(),
                 kind: node.kind.clone(),
                 x,

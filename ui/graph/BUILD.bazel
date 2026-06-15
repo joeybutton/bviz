@@ -1,4 +1,5 @@
 load("@rules_rs//rs:rust_binary.bzl", "rust_binary")
+load("@rules_rs//rs:rust_test.bzl", "rust_test")
 
 rust_binary(
     name = "graph",
@@ -11,4 +12,9 @@ rust_binary(
         "//ui/theme",
         "@crates//:gpui",
     ],
+)
+
+rust_test(
+    name = "graph_test",
+    crate = ":graph",
 )
