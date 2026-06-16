@@ -55,14 +55,21 @@ impl Screen {
     /// Replay a build's captured output through a terminal emulator and snapshot
     /// the resulting grid.
     pub fn from_output(output: &BuildOutput) -> Screen {
-        let columns = output.columns as usize;
+        Screen::from_bytes(&output.bytes, output.columns)
+    }
+
+    /// Replay a prefix of a build's captured output through a terminal emulator and
+    /// snapshot the resulting grid: the terminal as it stood after those bytes. A
+    /// playback frame is such a prefix.
+    pub(crate) fn from_bytes(bytes: &[u8], columns: u16) -> Screen {
+        let columns = columns as usize;
         let config = Config {
             scrolling_history: SCROLLBACK,
             ..Config::default()
         };
         let mut term = Term::new(config, &Size { columns }, VoidListener);
         let mut processor: Processor = Processor::new();
-        processor.advance(&mut term, &lf_to_crlf(&output.bytes));
+        processor.advance(&mut term, &lf_to_crlf(bytes));
 
         let grid = term.grid();
         let mut rows: Vec<Vec<Cell>> = (grid.topmost_line().0..=grid.bottommost_line().0)
@@ -249,10 +256,10 @@ mod tests {
     fn collapses_in_place_repaints() {
         // Bazel's repaint idiom: a line, a line feed, then CR + cursor-up +
         // clear-line before the next. These must overwrite onto one row.
-        let output = BuildOutput {
-            columns: 20,
-            bytes: b"first\n\r\x1b[1A\x1b[Ksecond\n\r\x1b[1A\x1b[Kthird\n".to_vec(),
-        };
+        let output = BuildOutput::from_bytes(
+            20,
+            b"first\n\r\x1b[1A\x1b[Ksecond\n\r\x1b[1A\x1b[Kthird\n".to_vec(),
+        );
         let screen = Screen::from_output(&output);
         assert_eq!(screen.text(), "third");
     }
@@ -269,7 +276,7 @@ mod tests {
         bytes.extend_from_slice(b"Running 2/2\n   done\n");
         bytes.extend_from_slice(b"\r\x1b[1A\x1b[K\r\x1b[1A\x1b[K");
         bytes.extend_from_slice(b"\x1b[32mPASS\x1b[0m all\n");
-        let screen = Screen::from_output(&BuildOutput { columns: 40, bytes });
+        let screen = Screen::from_output(&BuildOutput::from_bytes(40, bytes));
 
         // Shape: the indents survive and the progress block collapses to PASS.
         assert_eq!(screen.text(), "Build:\n  //app:bin\n  //app:test\nPASS all");

@@ -52,7 +52,17 @@ pub struct DisplaySource {
 
 impl DisplaySource {
     pub fn from_output(output: &BuildOutput) -> DisplaySource {
-        DisplaySource { ansi: Screen::from_output(output).to_ansi() }
+        DisplaySource {
+            ansi: Screen::from_output(output).to_ansi(),
+        }
+    }
+
+    /// The display source for a prefix of a build's output, at the width Bazel
+    /// used: one playback frame's reconstructed screen.
+    pub(crate) fn from_bytes(bytes: &[u8], columns: u16) -> DisplaySource {
+        DisplaySource {
+            ansi: Screen::from_bytes(bytes, columns).to_ansi(),
+        }
     }
 }
 
@@ -177,7 +187,10 @@ impl Terminal {
     fn grid_point(&self, column: usize, row: usize) -> Point {
         let column = column.min(self.columns.saturating_sub(1));
         let row = row.min(self.rows.saturating_sub(1));
-        Point::new(Line(row as i32 - self.display_offset() as i32), Column(column))
+        Point::new(
+            Line(row as i32 - self.display_offset() as i32),
+            Column(column),
+        )
     }
 
     /// Begin a selection of the given type anchored at a viewport cell.
@@ -286,7 +299,11 @@ impl Terminal {
                 if line < start.line.0 || line > end.line.0 {
                     return None;
                 }
-                let first = if line == start.line.0 { start.column.0 } else { 0 };
+                let first = if line == start.line.0 {
+                    start.column.0
+                } else {
+                    0
+                };
                 let last = if line == end.line.0 {
                     end.column.0
                 } else {
@@ -330,7 +347,9 @@ impl Terminal {
         if self.search_matches.is_empty() {
             return;
         }
-        let next = self.current_match.map_or(0, |i| (i + 1) % self.search_matches.len());
+        let next = self
+            .current_match
+            .map_or(0, |i| (i + 1) % self.search_matches.len());
         self.current_match = Some(next);
         self.scroll_to_match(next);
     }
@@ -374,7 +393,11 @@ impl Terminal {
                 if line < start.line.0 || line > end.line.0 {
                     continue;
                 }
-                let first = if line == start.line.0 { start.column.0 } else { 0 };
+                let first = if line == start.line.0 {
+                    start.column.0
+                } else {
+                    0
+                };
                 let last = if line == end.line.0 {
                     end.column.0
                 } else {
@@ -434,20 +457,14 @@ mod tests {
     #[test]
     fn wraps_to_width() {
         // A 12-character logical line wraps to two visual rows at width 6.
-        let output = BuildOutput {
-            columns: 40,
-            bytes: b"abcdefghijkl\n".to_vec(),
-        };
+        let output = BuildOutput::from_bytes(40, b"abcdefghijkl\n".to_vec());
         let terminal = Terminal::new(&output, 6, 10);
         assert_eq!(viewport_text(&terminal), "abcdef\nghijkl");
     }
 
     #[test]
     fn reflows_on_resize() {
-        let output = BuildOutput {
-            columns: 40,
-            bytes: b"abcdefghijkl\n".to_vec(),
-        };
+        let output = BuildOutput::from_bytes(40, b"abcdefghijkl\n".to_vec());
         let mut terminal = Terminal::new(&output, 6, 10);
         assert_eq!(viewport_text(&terminal), "abcdef\nghijkl");
 
@@ -462,7 +479,7 @@ mod tests {
         for i in 0..20 {
             bytes.extend_from_slice(format!("line{i:02}\n").as_bytes());
         }
-        let output = BuildOutput { columns: 40, bytes };
+        let output = BuildOutput::from_bytes(40, bytes);
         let mut terminal = Terminal::new(&output, 40, 5);
 
         // The viewport starts at the top of the output.
@@ -481,7 +498,7 @@ mod tests {
         for i in 0..20 {
             bytes.extend_from_slice(format!("line{i:02}\n").as_bytes());
         }
-        let output = BuildOutput { columns: 40, bytes };
+        let output = BuildOutput::from_bytes(40, bytes);
         let mut terminal = Terminal::new(&output, 40, 5);
 
         terminal.scroll_to_fraction(1.0);
@@ -492,10 +509,7 @@ mod tests {
 
     #[test]
     fn selection_yields_text_and_spans() {
-        let output = BuildOutput {
-            columns: 40,
-            bytes: b"alpha\nbeta\ngamma\n".to_vec(),
-        };
+        let output = BuildOutput::from_bytes(40, b"alpha\nbeta\ngamma\n".to_vec());
         let mut terminal = Terminal::new(&output, 40, 10);
         // Select "lph": from the left of column 1 to the right of column 3.
         terminal.begin_selection(SelectionType::Simple, 1, 0, Side::Left);
@@ -516,7 +530,7 @@ mod tests {
         for i in 0..20 {
             bytes.extend_from_slice(format!("item {i:02} needle\n").as_bytes());
         }
-        let output = BuildOutput { columns: 40, bytes };
+        let output = BuildOutput::from_bytes(40, bytes);
         let mut terminal = Terminal::new(&output, 40, 5);
 
         // Every line carries one match; the first is focused and scrolled to.
@@ -543,10 +557,7 @@ mod tests {
 
     #[test]
     fn search_query_is_literal() {
-        let output = BuildOutput {
-            columns: 40,
-            bytes: b"a.b axb a.b\n".to_vec(),
-        };
+        let output = BuildOutput::from_bytes(40, b"a.b axb a.b\n".to_vec());
         let mut terminal = Terminal::new(&output, 40, 5);
         // "a.b" matches literally (twice), not as the regex a-any-b (which would
         // also match "axb").
@@ -555,10 +566,8 @@ mod tests {
 
     #[test]
     fn detects_url_under_cell() {
-        let output = BuildOutput {
-            columns: 80,
-            bytes: b"see https://example.com/path for details.\n".to_vec(),
-        };
+        let output =
+            BuildOutput::from_bytes(80, b"see https://example.com/path for details.\n".to_vec());
         let mut terminal = Terminal::new(&output, 80, 10);
         // "see " is four columns, so the URL starts at column 4.
         let url = terminal.url_at(10, 0).expect("url under the link");
@@ -571,10 +580,7 @@ mod tests {
 
     #[test]
     fn trims_trailing_punctuation_from_url() {
-        let output = BuildOutput {
-            columns: 80,
-            bytes: b"go to http://example.com.\n".to_vec(),
-        };
+        let output = BuildOutput::from_bytes(80, b"go to http://example.com.\n".to_vec());
         let mut terminal = Terminal::new(&output, 80, 10);
         let url = terminal.url_at(8, 0).expect("url under the link");
         assert_eq!(url.text(), "http://example.com");
@@ -582,10 +588,7 @@ mod tests {
 
     #[test]
     fn semantic_and_line_selection_expand() {
-        let output = BuildOutput {
-            columns: 40,
-            bytes: b"alpha beta\n".to_vec(),
-        };
+        let output = BuildOutput::from_bytes(40, b"alpha beta\n".to_vec());
         let mut terminal = Terminal::new(&output, 40, 10);
 
         // A word selection anchored inside "beta" expands to the whole word.
@@ -605,10 +608,7 @@ mod tests {
         // A wide character takes two columns; the cell after it is a spacer, so
         // the following character lands one column further right rather than
         // being shifted by a stray space.
-        let output = BuildOutput {
-            columns: 40,
-            bytes: "a中b\n".as_bytes().to_vec(),
-        };
+        let output = BuildOutput::from_bytes(40, "a中b\n".as_bytes().to_vec());
         let terminal = Terminal::new(&output, 40, 10);
         let row = &terminal.viewport()[0];
         assert_eq!(row[0].c, 'a');
@@ -620,10 +620,7 @@ mod tests {
     fn lines_start_at_column_zero() {
         // Each logical line must begin at the left edge, not where the previous
         // one ended.
-        let output = BuildOutput {
-            columns: 40,
-            bytes: b"alpha\nbeta\ngamma\n".to_vec(),
-        };
+        let output = BuildOutput::from_bytes(40, b"alpha\nbeta\ngamma\n".to_vec());
         let terminal = Terminal::new(&output, 40, 10);
         assert_eq!(viewport_text(&terminal), "alpha\nbeta\ngamma");
     }
