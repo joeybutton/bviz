@@ -28,8 +28,12 @@ actions!(
         SeekEnd,
         SpeedUp,
         SpeedDown,
+        ScrollLineUp,
+        ScrollLineDown,
         ScrollPageUp,
         ScrollPageDown,
+        ScrollToTop,
+        ScrollToBottom,
         Copy,
         Find,
         FindNext,
@@ -37,6 +41,9 @@ actions!(
         FindClose
     ]
 );
+
+/// Lines moved per arrow-key press while the terminal is focused.
+const SCROLL_STEP: i32 = 3;
 
 /// Width of the scroll bar gutter reserved on the right edge.
 const SCROLLBAR_WIDTH: f32 = 8.0;
@@ -142,6 +149,9 @@ pub struct TerminalView {
     focus_handle: FocusHandle,
     /// The terminal body's handle, focused so its scroll keys dispatch.
     body_focus: FocusHandle,
+    /// The playback bar's handle; when it holds focus the shared arrow and
+    /// home/end keys drive playback rather than scroll the terminal.
+    playback_focus: FocusHandle,
     /// Whether the find box is open.
     find_active: bool,
     /// The find box's text field, created on first open and reused.
@@ -153,31 +163,38 @@ pub struct TerminalView {
 impl TerminalView {
     pub fn new(path: String, window: &mut Window, cx: &mut Context<Self>) -> Self {
         cx.bind_keys([
-            // Playback keys are inert while the find field has focus, so they don't
-            // hijack typing and cursor movement there.
-            KeyBinding::new("space", PlayPause, Some("Terminal && !Find")),
-            KeyBinding::new("left", StepBack, Some("Terminal && !Find")),
-            KeyBinding::new("right", StepForward, Some("Terminal && !Find")),
-            KeyBinding::new("home", SeekStart, Some("Terminal && !Find")),
-            KeyBinding::new("end", SeekEnd, Some("Terminal && !Find")),
-            KeyBinding::new("up", SpeedUp, Some("Terminal && !Find")),
-            KeyBinding::new("down", SpeedDown, Some("Terminal && !Find")),
-            KeyBinding::new("]", SpeedUp, Some("Terminal && !Find")),
-            KeyBinding::new("[", SpeedDown, Some("Terminal && !Find")),
-            KeyBinding::new("pageup", ScrollPageUp, Some("Terminal")),
-            KeyBinding::new("pagedown", ScrollPageDown, Some("Terminal")),
-            KeyBinding::new("cmd-c", Copy, Some("Terminal")),
-            KeyBinding::new("ctrl-c", Copy, Some("Terminal")),
-            KeyBinding::new("cmd-f", Find, Some("Terminal")),
-            KeyBinding::new("ctrl-f", Find, Some("Terminal")),
-            KeyBinding::new("cmd-f", Find, Some("Find")),
-            KeyBinding::new("ctrl-f", Find, Some("Find")),
+            // Keys that don't collide with terminal scrolling work in either region,
+            // but stay inert while the find field has focus so they don't hijack
+            // typing and cursor movement there.
+            KeyBinding::new("space", PlayPause, Some("BazelTerm && !Find")),
+            KeyBinding::new("left", StepBack, Some("BazelTerm && !Find")),
+            KeyBinding::new("right", StepForward, Some("BazelTerm && !Find")),
+            KeyBinding::new("]", SpeedUp, Some("BazelTerm && !Find")),
+            KeyBinding::new("[", SpeedDown, Some("BazelTerm && !Find")),
+            // The arrows and home/end collide: they scroll the focused terminal but
+            // drive playback when the playback bar holds focus.
+            KeyBinding::new("up", ScrollLineUp, Some("Terminal && !Find")),
+            KeyBinding::new("down", ScrollLineDown, Some("Terminal && !Find")),
+            KeyBinding::new("home", ScrollToTop, Some("Terminal && !Find")),
+            KeyBinding::new("end", ScrollToBottom, Some("Terminal && !Find")),
+            KeyBinding::new("up", SpeedUp, Some("Playback")),
+            KeyBinding::new("down", SpeedDown, Some("Playback")),
+            KeyBinding::new("home", SeekStart, Some("Playback")),
+            KeyBinding::new("end", SeekEnd, Some("Playback")),
+            // Paging and the commands work regardless of which region has focus.
+            KeyBinding::new("pageup", ScrollPageUp, Some("BazelTerm")),
+            KeyBinding::new("pagedown", ScrollPageDown, Some("BazelTerm")),
+            KeyBinding::new("cmd-c", Copy, Some("BazelTerm")),
+            KeyBinding::new("ctrl-c", Copy, Some("BazelTerm")),
+            KeyBinding::new("cmd-f", Find, Some("BazelTerm")),
+            KeyBinding::new("ctrl-f", Find, Some("BazelTerm")),
             KeyBinding::new("enter", FindNext, Some("Find")),
             KeyBinding::new("shift-enter", FindPrev, Some("Find")),
             KeyBinding::new("escape", FindClose, Some("Find")),
         ]);
         let body_focus = cx.focus_handle();
         body_focus.focus(window, cx);
+        let playback_focus = cx.focus_handle();
         // The speed dropdown is the source of truth for the speed index; applying
         // its selection keeps the numeric multiplier and the playback clock in sync.
         let labels = SPEEDS.iter().map(|speed| format!("{}×", *speed as i32));
@@ -213,6 +230,7 @@ impl TerminalView {
             reveal_seq: 0,
             focus_handle: cx.focus_handle(),
             body_focus,
+            playback_focus,
             find_active: false,
             find_input: None,
             find_observation: None,
@@ -385,12 +403,28 @@ impl TerminalView {
         }
     }
 
+    fn scroll_line_up(&mut self, _: &ScrollLineUp, _: &mut Window, cx: &mut Context<Self>) {
+        self.scroll(Scroll::Delta(SCROLL_STEP), cx);
+    }
+
+    fn scroll_line_down(&mut self, _: &ScrollLineDown, _: &mut Window, cx: &mut Context<Self>) {
+        self.scroll(Scroll::Delta(-SCROLL_STEP), cx);
+    }
+
     fn scroll_page_up(&mut self, _: &ScrollPageUp, _: &mut Window, cx: &mut Context<Self>) {
         self.scroll(Scroll::PageUp, cx);
     }
 
     fn scroll_page_down(&mut self, _: &ScrollPageDown, _: &mut Window, cx: &mut Context<Self>) {
         self.scroll(Scroll::PageDown, cx);
+    }
+
+    fn scroll_to_top(&mut self, _: &ScrollToTop, _: &mut Window, cx: &mut Context<Self>) {
+        self.scroll(Scroll::Top, cx);
+    }
+
+    fn scroll_to_bottom(&mut self, _: &ScrollToBottom, _: &mut Window, cx: &mut Context<Self>) {
+        self.scroll(Scroll::Bottom, cx);
     }
 
     fn on_play_pause(&mut self, _: &PlayPause, _: &mut Window, cx: &mut Context<Self>) {
@@ -655,10 +689,18 @@ impl Render for TerminalView {
                 } else {
                     None
                 };
-                let controls = self.render_controls(&colors, cx);
+                // The terminal and the playback bar are separately focusable; the
+                // focused one gets the shared arrow/home/end keys and a left accent.
+                let terminal_focused = self.body_focus.is_focused(window);
+                let playback_focused = self.playback_focus.is_focused(window);
+                let controls = self.render_controls(&colors, playback_focused, cx);
+                let terminal_accent = if terminal_focused {
+                    colors.selected
+                } else {
+                    colors.background
+                };
                 div()
-                    .key_context("Terminal")
-                    .track_focus(&self.body_focus)
+                    .key_context("BazelTerm")
                     .on_action(cx.listener(Self::on_play_pause))
                     .on_action(cx.listener(Self::on_step_back))
                     .on_action(cx.listener(Self::on_step_forward))
@@ -666,8 +708,12 @@ impl Render for TerminalView {
                     .on_action(cx.listener(Self::on_seek_end))
                     .on_action(cx.listener(Self::on_speed_up))
                     .on_action(cx.listener(Self::on_speed_down))
+                    .on_action(cx.listener(Self::scroll_line_up))
+                    .on_action(cx.listener(Self::scroll_line_down))
                     .on_action(cx.listener(Self::scroll_page_up))
                     .on_action(cx.listener(Self::scroll_page_down))
+                    .on_action(cx.listener(Self::scroll_to_top))
+                    .on_action(cx.listener(Self::scroll_to_bottom))
                     .on_action(cx.listener(Self::copy))
                     .on_action(cx.listener(Self::find))
                     .flex()
@@ -677,9 +723,13 @@ impl Render for TerminalView {
                     .child(controls)
                     .child(
                         div()
+                            .key_context("Terminal")
+                            .track_focus(&self.body_focus)
                             .relative()
                             .flex_1()
                             .overflow_hidden()
+                            .border_l_2()
+                            .border_color(terminal_accent)
                             .on_scroll_wheel(cx.listener(Self::on_scroll_wheel))
                             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
                             .on_mouse_move(cx.listener(Self::on_mouse_move))
@@ -828,12 +878,14 @@ impl TerminalView {
         )
     }
 
-    /// The playback control bar below the terminal: jump-to-start, play/pause, and
+    /// The playback control bar above the terminal: jump-to-start, play/pause, and
     /// jump-to-end buttons, a draggable timeline scrubber, an elapsed/total
-    /// readout, and a speed control.
+    /// readout, and a speed control. `focused` shows the focus accent and selects
+    /// which region the shared arrow/home/end keys drive.
     fn render_controls(
         &self,
         colors: &bviz_ui_theme::Colors,
+        focused: bool,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let (duration, real_time) = match &self.source {
@@ -871,6 +923,9 @@ impl TerminalView {
         };
 
         div()
+            .key_context("Playback")
+            .track_focus(&self.playback_focus)
+            .relative()
             .flex()
             .flex_row()
             .items_center()
@@ -882,6 +937,27 @@ impl TerminalView {
             .border_color(colors.border)
             .font_family(bviz_ui_assets::UI)
             .text_color(colors.text)
+            // A click anywhere on the bar gives it focus, so the shared keys drive
+            // playback.
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _: &MouseDownEvent, window, cx| {
+                    this.playback_focus.focus(window, cx);
+                    cx.notify();
+                }),
+            )
+            // A left accent marks the bar as the focused region.
+            .when(focused, |bar| {
+                bar.child(
+                    div()
+                        .absolute()
+                        .left_0()
+                        .top_0()
+                        .bottom_0()
+                        .w(px(2.))
+                        .bg(colors.selected),
+                )
+            })
             .child(
                 Button::new("seek-start", move |_, _, cx| {
                     start_view.update(cx, |this, cx| this.seek_start(cx))
