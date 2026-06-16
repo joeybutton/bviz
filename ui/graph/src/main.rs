@@ -10,9 +10,8 @@ use bviz_ui_shell::Chrome;
 use gpui::{
     Animation, AnimationExt, App, BorderStyle, Bounds, Context, Div, Entity, FocusHandle,
     IntoElement, MouseButton, MouseDownEvent, Hsla, MouseMoveEvent, MouseUpEvent, PathBuilder,
-    Pixels, Point, Render, Rgba, ScrollDelta, ScrollWheelEvent, Stateful, Task, TextAlign, TextRun,
-    Size, Transformation, Window, canvas, div, font, percentage, point, prelude::*, px, quad, rgb,
-    size,
+    Pixels, Point, Render, Rgba, ScrollDelta, ScrollWheelEvent, Stateful, Task, TextAlign, Size,
+    Transformation, Window, canvas, div, font, percentage, point, prelude::*, px, quad, rgb, size,
 };
 use std::cell::{Cell, RefCell};
 use std::collections::HashSet;
@@ -520,18 +519,8 @@ fn paint_box(
     } else {
         font("Inter")
     };
-    let run = TextRun {
-        len: b.label.len(),
-        font,
-        color: palette.label.into(),
-        background_color: None,
-        underline: None,
-        strikethrough: None,
-    };
     let fs = px(LABEL_SIZE as f32 * zoom);
-    let line = window
-        .text_system()
-        .shape_line(b.label.clone().into(), fs, &[run], None);
+    let line = bviz_ui_assets::shape_line(window, b.label.clone(), font, fs, palette.label.into());
     // A collapsed group leaf carries a disclosure caret left of the label,
     // occupying the reserved width the layout sized the box to hold; the label
     // and caret are centered together as one unit. Other boxes center the label

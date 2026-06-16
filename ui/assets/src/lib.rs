@@ -1,15 +1,59 @@
 //! Application assets — the Inter and JetBrains Mono fonts and the Phosphor icon
 //! set — embedded into the binary at build time. The files are downloaded by
 //! Bazel `http_archive`s and copied into `OUT_DIR` by `build.rs`, then baked in
-//! with `include_bytes!`, so there is nothing to load from disk at runtime.
+//! with `include_bytes!`, so there is nothing to load from disk at runtime. It
+//! also resolves text metrics and shapes single-run lines from those fonts.
 
-use gpui::{App, AssetSource, Result, SharedString, Svg, svg};
+use gpui::{
+    App, AssetSource, Font, Hsla, Pixels, Result, ShapedLine, SharedString, Svg, TextRun, Window,
+    svg,
+};
 use std::borrow::Cow;
 
 /// UI font family.
 pub const UI: &str = "Inter";
 /// Monospace font family.
 pub const MONO: &str = "JetBrains Mono";
+
+/// The font, size, and line height of the window's current text style.
+pub struct TextMetrics {
+    pub font: Font,
+    pub font_size: Pixels,
+    pub line_height: Pixels,
+}
+
+/// Resolve [`TextMetrics`] from the window's inherited text style, so a custom
+/// element renders in the family/size cascaded to it.
+pub fn text_metrics(window: &Window) -> TextMetrics {
+    let style = window.text_style();
+    TextMetrics {
+        font: style.font(),
+        font_size: style.font_size.to_pixels(window.rem_size()),
+        line_height: window.line_height(),
+    }
+}
+
+/// Shape one run of `text` in a single font, size, and color, with no
+/// decorations, for measuring (e.g. a monospace cell width) or painting (e.g. a
+/// box label).
+pub fn shape_line(
+    window: &mut Window,
+    text: impl Into<SharedString>,
+    font: Font,
+    font_size: Pixels,
+    color: Hsla,
+) -> ShapedLine {
+    let text = text.into();
+    let run = TextRun {
+        len: text.len(),
+        font,
+        color,
+        background_color: None,
+        underline: None,
+        strikethrough: None,
+    };
+    window.text_system().shape_line(text, font_size, &[run], None)
+}
 
 macro_rules! embedded {
     ($name:literal) => {

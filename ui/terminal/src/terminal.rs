@@ -639,24 +639,12 @@ impl Element for TerminalElement {
         window: &mut Window,
         cx: &mut App,
     ) -> (LayoutId, Metrics) {
-        let text_style = window.text_style();
-        let font = text_style.font();
-        let font_size = text_style.font_size.to_pixels(window.rem_size());
-        let line_height = window.line_height();
-
+        let metrics = bviz_ui_assets::text_metrics(window);
         // A monospace advance width, measured from a single glyph.
-        let probe = TextRun {
-            len: 1,
-            font: font.clone(),
-            color: text_style.color,
-            background_color: None,
-            underline: None,
-            strikethrough: None,
-        };
-        let cell_width = window
-            .text_system()
-            .shape_line(SharedString::from("M"), font_size, &[probe], None)
-            .width;
+        let color = window.text_style().color;
+        let cell_width =
+            bviz_ui_assets::shape_line(window, "M", metrics.font.clone(), metrics.font_size, color)
+                .width;
 
         let mut style = Style::default();
         style.size.width = relative(1.).into();
@@ -666,9 +654,9 @@ impl Element for TerminalElement {
             window.request_layout(style, [], cx),
             Metrics {
                 cell_width,
-                line_height,
-                font_size,
-                font,
+                line_height: metrics.line_height,
+                font_size: metrics.font_size,
+                font: metrics.font,
             },
         )
     }
