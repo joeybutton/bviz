@@ -17,11 +17,34 @@ pub struct Node {
     pub parent: Option<String>,
 }
 
-/// A directed dependency from one node to another, both by id.
+/// Which Bazel query an edge came from, so the renderer can style the static
+/// (query), configured (cquery), and execution-phase (aquery) dependencies
+/// distinctly when several are drawn in one joint graph.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum EdgeKind {
+    Query,
+    Cquery,
+    Aquery,
+}
+
+impl EdgeKind {
+    /// The provenance name shown in the renderer's legend.
+    pub fn label(self) -> &'static str {
+        match self {
+            EdgeKind::Query => "query",
+            EdgeKind::Cquery => "cquery",
+            EdgeKind::Aquery => "aquery",
+        }
+    }
+}
+
+/// A directed dependency from one node to another, both by id, tagged with the
+/// query it came from.
 #[derive(Clone)]
 pub struct Edge {
     pub from: String,
     pub to: String,
+    pub kind: EdgeKind,
 }
 
 #[derive(Clone, Default)]
@@ -50,10 +73,11 @@ impl Graph {
         });
     }
 
-    pub fn add_edge(&mut self, from: impl Into<String>, to: impl Into<String>) {
+    pub fn add_edge(&mut self, from: impl Into<String>, to: impl Into<String>, kind: EdgeKind) {
         self.edges.push(Edge {
             from: from.into(),
             to: to.into(),
+            kind,
         });
     }
 }

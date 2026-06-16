@@ -4,7 +4,9 @@
 
 use bviz_graph_layout::graph::Graph;
 use bviz_graph_layout::layout::CARET_RESERVE;
-use bviz_graph_layout::{aquery, cquery, layout, query, quotient, streamed_proto, LaidOut};
+use bviz_graph_layout::{
+    aquery, cquery, layout, query, quotient, streamed_proto, EdgeKind, LaidOut,
+};
 use bviz_ui_components::{load_in_background, track_drag};
 use bviz_ui_shell::Chrome;
 use clap::Parser;
@@ -59,6 +61,17 @@ fn kind_accent(kind: &str) -> Rgba {
     }
 }
 
+/// Connector color, keyed by the query an edge came from, so static (query),
+/// configured (cquery), and execution-phase (aquery) dependencies read
+/// distinctly. These are mid-tone hues legible on light or dark backgrounds.
+fn edge_color(kind: EdgeKind) -> Rgba {
+    match kind {
+        EdgeKind::Query => rgb(0x4f7fbf),  // blue
+        EdgeKind::Cquery => rgb(0x3fa07a), // green-teal
+        EdgeKind::Aquery => rgb(0xc77b3c), // orange
+    }
+}
+
 /// Fraction by which the package container fill is pulled toward the border
 /// color, deepening it so the outer package box reads as containing the lighter
 /// target and configured-target boxes.
@@ -90,7 +103,6 @@ struct Palette {
     container_fill: Rgba,
     /// Background the kind accents are blended toward to form leaf fills.
     background: Rgba,
-    connector: Rgba,
 }
 
 /// The loaded graph, a load in progress, or a message explaining why none is
@@ -245,8 +257,42 @@ impl GraphView {
                 label: b.label.clone(),
             })
             .collect();
-        let connectors: Vec<Vec<(f64, f64)>> =
-            g.connectors.iter().map(|c| c.points.clone()).collect();
+        let connectors: Vec<(Vec<(f64, f64)>, EdgeKind)> = g
+            .connectors
+            .iter()
+            .map(|c| (c.points.clone(), c.kind))
+            .collect();
+        // Edge kinds actually drawn, in enum order, so the legend explains only
+        // the provenances present in this graph.
+        let present: Vec<EdgeKind> = [EdgeKind::Query, EdgeKind::Cquery, EdgeKind::Aquery]
+            .into_iter()
+            .filter(|k| g.connectors.iter().any(|c| c.kind == *k))
+            .collect();
+        let legend = (!present.is_empty()).then(|| {
+            div()
+                .absolute()
+                .left_2()
+                .bottom_2()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .p_2()
+                .rounded_md()
+                .bg(palette.container_fill)
+                .children(present.into_iter().map(|k| {
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .child(div().w(px(16.)).h(px(2.)).bg(edge_color(k)))
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(palette.label)
+                                .child(k.label()),
+                        )
+                }))
+        });
         let content = (
             g.width as f32 + 2. * MARGIN as f32,
             g.height as f32 + 2. * MARGIN as f32,
@@ -299,8 +345,8 @@ impl GraphView {
                     for b in &boxes {
                         paint_box(b, bounds, z, p, &palette, window, cx);
                     }
-                    for points in &connectors {
-                        paint_connector(points, bounds, z, p, &palette, window);
+                    for (points, kind) in &connectors {
+                        paint_connector(points, *kind, bounds, z, p, window);
                     }
                     // While a drag is in progress, pan through window-global
                     // handlers so it keeps working when the cursor leaves the
@@ -315,6 +361,7 @@ impl GraphView {
                 .top_0()
                 .size_full(),
             )
+            .children(legend)
     }
 
     fn status(&self) -> String {
@@ -340,7 +387,6 @@ impl Render for GraphView {
             label: colors.text,
             container_fill: colors.container,
             background: colors.background,
-            connector: bviz_ui_theme::mix(colors.text, colors.background, 0.45),
         };
         let body = match &self.source {
             Source::Loaded(g) => div()
@@ -602,15 +648,16 @@ fn paint_caret(
 /// pointing along the final segment.
 fn paint_connector(
     points: &[(f64, f64)],
+    kind: EdgeKind,
     bounds: Bounds<Pixels>,
     zoom: f32,
     pan: (f32, f32),
-    palette: &Palette,
     window: &mut Window,
 ) {
     if points.len() < 2 {
         return;
     }
+    let color = edge_color(kind);
     let pts: Vec<Point<Pixels>> = points
         .iter()
         .map(|(x, y)| to_screen(*x, *y, bounds, zoom, pan))
@@ -635,10 +682,10 @@ fn paint_connector(
     }
     line.line_to(line_end);
     if let Ok(path) = line.build() {
-        window.paint_path(path, palette.connector);
+        window.paint_path(path, color);
     }
 
-    paint_arrowhead(&pts, zoom, palette.connector, window);
+    paint_arrowhead(&pts, zoom, color, window);
 }
 
 /// Paints a filled triangle at the polyline's last point, aimed along the

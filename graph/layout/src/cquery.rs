@@ -17,7 +17,7 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use bazel_query_proto::analysis::{ConfiguredTarget, CqueryResult};
 use bazel_query_proto::blaze_query::target::Discriminator;
 
-use crate::graph::Graph;
+use crate::graph::{EdgeKind, Graph};
 use crate::label::{self, PackageHierarchy};
 use crate::query::label_and_kind;
 
@@ -182,7 +182,7 @@ fn add_edge(graph: &mut Graph, seen: &mut HashSet<(String, String)>, from: &str,
         return;
     }
     if seen.insert((from.to_string(), to.to_string())) {
-        graph.add_edge(from.to_string(), to.to_string());
+        graph.add_edge(from.to_string(), to.to_string(), EdgeKind::Cquery);
     }
 }
 

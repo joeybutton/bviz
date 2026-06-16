@@ -28,7 +28,7 @@ use org_eclipse_elk_graph::org::eclipse::elk::graph::{
     ElkConnectableShapeRef, ElkEdgeRef, ElkNodeRef,
 };
 
-use crate::graph::{Graph, Node};
+use crate::graph::{EdgeKind, Graph, Node};
 
 const LEAF_HEIGHT: f64 = 30.0;
 const CHAR_WIDTH: f64 = 7.0;
@@ -58,6 +58,7 @@ pub struct Box {
 /// An edge polyline: start, bend points, end, in order.
 pub struct Connector {
     pub points: Vec<(f64, f64)>,
+    pub kind: EdgeKind,
 }
 
 #[derive(Default)]
@@ -99,7 +100,7 @@ pub fn layout(graph: &Graph) -> LaidOut {
 
     // create_simple_edge places each edge in the common container of its
     // endpoints, which is where ELK then routes and reports it.
-    let mut edges: Vec<ElkEdgeRef> = Vec::with_capacity(graph.edges.len());
+    let mut edges: Vec<(ElkEdgeRef, EdgeKind)> = Vec::with_capacity(graph.edges.len());
     for edge in &graph.edges {
         let (Some(from), Some(to)) = (
             elk_of.get(edge.from.as_str()),
@@ -107,9 +108,12 @@ pub fn layout(graph: &Graph) -> LaidOut {
         ) else {
             continue;
         };
-        edges.push(ElkGraphUtil::create_simple_edge(
-            ElkConnectableShapeRef::Node(from.clone()),
-            ElkConnectableShapeRef::Node(to.clone()),
+        edges.push((
+            ElkGraphUtil::create_simple_edge(
+                ElkConnectableShapeRef::Node(from.clone()),
+                ElkConnectableShapeRef::Node(to.clone()),
+            ),
+            edge.kind,
         ));
     }
 
@@ -157,7 +161,10 @@ pub fn layout(graph: &Graph) -> LaidOut {
     boxes.sort_by_key(|(depth, _)| *depth);
     let boxes: Vec<Box> = boxes.into_iter().map(|(_, b)| b).collect();
 
-    let connectors = edges.iter().filter_map(connector).collect();
+    let connectors = edges
+        .iter()
+        .filter_map(|(edge, kind)| connector(edge).map(|points| Connector { points, kind: *kind }))
+        .collect();
 
     let width = boxes.iter().map(|b| b.x + b.width).fold(0.0, f64::max);
     let height = boxes.iter().map(|b| b.y + b.height).fold(0.0, f64::max);
@@ -272,7 +279,7 @@ fn absolute_origin(node: &ElkNodeRef) -> (f64, f64) {
 /// An edge's routing polyline in absolute coordinates: ELK reports each section's
 /// points relative to the edge's containing node, so they are shifted by that
 /// node's absolute origin.
-fn connector(edge: &ElkEdgeRef) -> Option<Connector> {
+fn connector(edge: &ElkEdgeRef) -> Option<Vec<(f64, f64)>> {
     let (ox, oy) = edge
         .borrow()
         .containing_node()
@@ -290,5 +297,5 @@ fn connector(edge: &ElkEdgeRef) -> Option<Connector> {
         }
         points.push((section.end_x() + ox, section.end_y() + oy));
     }
-    (points.len() >= 2).then_some(Connector { points })
+    (points.len() >= 2).then_some(points)
 }

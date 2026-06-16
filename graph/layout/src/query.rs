@@ -7,7 +7,7 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 
 use bazel_query_proto::blaze_query::{target::Discriminator, Target};
 
-use crate::graph::Graph;
+use crate::graph::{EdgeKind, Graph};
 use crate::label::{self, PackageHierarchy};
 
 pub fn build(targets: &[Target]) -> Graph {
@@ -68,7 +68,7 @@ pub(crate) fn build_targets(targets: &[&Target]) -> Graph {
                 continue;
             };
             if seen_edge.insert((from.clone(), to.clone())) {
-                graph.add_edge(from.clone(), to.clone());
+                graph.add_edge(from.clone(), to.clone(), EdgeKind::Query);
             }
         }
     }

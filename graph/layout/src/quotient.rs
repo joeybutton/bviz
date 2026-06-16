@@ -16,7 +16,7 @@
 
 use std::collections::{BTreeMap, HashSet};
 
-use crate::graph::{Edge, Graph, Node};
+use crate::graph::{Edge, EdgeKind, Graph, Node};
 
 /// Returns a graph in which interchangeable `source`/`artifact` leaves are
 /// merged. A multi-member group whose id is in `expanded` is emitted as a
@@ -118,7 +118,7 @@ pub fn quotient(graph: &Graph, expanded: &HashSet<String>) -> Graph {
 
     // Remap edge endpoints (collapsed-group members only; expanded-group
     // members and singletons keep their ids), drop self-loops, and dedup.
-    let mut seen_edge: BTreeMap<(String, String), ()> = BTreeMap::new();
+    let mut seen_edge: BTreeMap<(String, String, EdgeKind), ()> = BTreeMap::new();
     for edge in &graph.edges {
         let from = remap
             .get(edge.from.as_str())
@@ -131,15 +131,22 @@ pub fn quotient(graph: &Graph, expanded: &HashSet<String>) -> Graph {
         if from == to {
             continue;
         }
-        if seen_edge.insert((from.clone(), to.clone()), ()).is_some() {
+        if seen_edge
+            .insert((from.clone(), to.clone(), edge.kind), ())
+            .is_some()
+        {
             continue;
         }
-        out.edges.push(Edge { from, to });
+        out.edges.push(Edge {
+            from,
+            to,
+            kind: edge.kind,
+        });
     }
 
     out.nodes.sort_by(|a, b| a.id.cmp(&b.id));
     out.edges
-        .sort_by(|a, b| (&a.from, &a.to).cmp(&(&b.from, &b.to)));
+        .sort_by(|a, b| (&a.from, &a.to, a.kind).cmp(&(&b.from, &b.to, b.kind)));
     out
 }
 
@@ -250,7 +257,7 @@ mod tests {
         graph.add_node("action0", "Compile", "action", None);
         for id in ["source1", "source2", "source3"] {
             leaf(&mut graph, id, "source", None);
-            graph.add_edge(id, "action0");
+            graph.add_edge(id, "action0", EdgeKind::Aquery);
         }
 
         let out = collapsed(&graph);
@@ -270,8 +277,8 @@ mod tests {
         graph.add_node("action1", "B", "action", None);
         leaf(&mut graph, "source1", "source", None);
         leaf(&mut graph, "source2", "source", None);
-        graph.add_edge("source1", "action0");
-        graph.add_edge("source2", "action1");
+        graph.add_edge("source1", "action0", EdgeKind::Aquery);
+        graph.add_edge("source2", "action1", EdgeKind::Aquery);
 
         let out = collapsed(&graph);
 
@@ -289,8 +296,8 @@ mod tests {
         leaf(&mut graph, "artifact2", "artifact", Some("ct"));
         graph.add_node("ct", "cfg", "configured-target", None);
         for id in ["artifact1", "artifact2"] {
-            graph.add_edge("action0", id);
-            graph.add_edge(id, "action1");
+            graph.add_edge("action0", id, EdgeKind::Aquery);
+            graph.add_edge(id, "action1", EdgeKind::Aquery);
         }
 
         let out = collapsed(&graph);
@@ -316,10 +323,10 @@ mod tests {
         graph.add_node("action2", "Consume", "action", None);
         leaf(&mut graph, "artifact1", "artifact", None);
         leaf(&mut graph, "artifact2", "artifact", None);
-        graph.add_edge("action0", "artifact1");
-        graph.add_edge("action1", "artifact2");
-        graph.add_edge("artifact1", "action2");
-        graph.add_edge("artifact2", "action2");
+        graph.add_edge("action0", "artifact1", EdgeKind::Aquery);
+        graph.add_edge("action1", "artifact2", EdgeKind::Aquery);
+        graph.add_edge("artifact1", "action2", EdgeKind::Aquery);
+        graph.add_edge("artifact2", "action2", EdgeKind::Aquery);
 
         let out = collapsed(&graph);
 
@@ -334,8 +341,8 @@ mod tests {
         graph.add_node("action0", "Consume", "action", None);
         leaf(&mut graph, "source1", "source", None);
         leaf(&mut graph, "artifact1", "artifact", None);
-        graph.add_edge("source1", "action0");
-        graph.add_edge("artifact1", "action0");
+        graph.add_edge("source1", "action0", EdgeKind::Aquery);
+        graph.add_edge("artifact1", "action0", EdgeKind::Aquery);
 
         let out = collapsed(&graph);
 
@@ -350,7 +357,7 @@ mod tests {
         a.add_node("action0", "Compile", "action", None);
         for id in ["source1", "source2", "source3"] {
             leaf(&mut a, id, "source", None);
-            a.add_edge(id, "action0");
+            a.add_edge(id, "action0", EdgeKind::Aquery);
         }
 
         let mut b = Graph::new();
@@ -358,9 +365,9 @@ mod tests {
             leaf(&mut b, id, "source", None);
         }
         b.add_node("action0", "Compile", "action", None);
-        b.add_edge("source2", "action0");
-        b.add_edge("source3", "action0");
-        b.add_edge("source1", "action0");
+        b.add_edge("source2", "action0", EdgeKind::Aquery);
+        b.add_edge("source3", "action0", EdgeKind::Aquery);
+        b.add_edge("source1", "action0", EdgeKind::Aquery);
 
         let qa = collapsed(&a);
         let qb = collapsed(&b);
@@ -381,7 +388,7 @@ mod tests {
         );
         graph.add_node("action0", "Compile", "action", Some("ct".to_string()));
         leaf(&mut graph, "source1", "source", None);
-        graph.add_edge("source1", "action0");
+        graph.add_edge("source1", "action0", EdgeKind::Aquery);
 
         let out = collapsed(&graph);
 
@@ -397,7 +404,7 @@ mod tests {
         graph.add_node("action0", "Compile", "action", None);
         for id in ["source1", "source2", "source3"] {
             leaf(&mut graph, id, "source", None);
-            graph.add_edge(id, "action0");
+            graph.add_edge(id, "action0", EdgeKind::Aquery);
         }
 
         let out = quotient(&graph, &expanded(&["group:source1"]));
@@ -430,7 +437,7 @@ mod tests {
         graph.add_node("action0", "Compile", "action", None);
         for id in ["source1", "source2", "source3"] {
             leaf(&mut graph, id, "source", None);
-            graph.add_edge(id, "action0");
+            graph.add_edge(id, "action0", EdgeKind::Aquery);
         }
 
         // Expanding an id that is not a multi-member group collapses as usual.
@@ -449,12 +456,12 @@ mod tests {
         // Group on action0 (will be expanded).
         for id in ["source1", "source2"] {
             leaf(&mut graph, id, "source", None);
-            graph.add_edge(id, "action0");
+            graph.add_edge(id, "action0", EdgeKind::Aquery);
         }
         // Group on action1 (will stay collapsed).
         for id in ["source3", "source4"] {
             leaf(&mut graph, id, "source", None);
-            graph.add_edge(id, "action1");
+            graph.add_edge(id, "action1", EdgeKind::Aquery);
         }
 
         let out = quotient(&graph, &expanded(&["group:source1"]));
@@ -489,7 +496,7 @@ mod tests {
         a.add_node("action0", "Compile", "action", None);
         for id in ["source1", "source2", "source3"] {
             leaf(&mut a, id, "source", None);
-            a.add_edge(id, "action0");
+            a.add_edge(id, "action0", EdgeKind::Aquery);
         }
 
         let mut b = Graph::new();
@@ -497,9 +504,9 @@ mod tests {
             leaf(&mut b, id, "source", None);
         }
         b.add_node("action0", "Compile", "action", None);
-        b.add_edge("source2", "action0");
-        b.add_edge("source3", "action0");
-        b.add_edge("source1", "action0");
+        b.add_edge("source2", "action0", EdgeKind::Aquery);
+        b.add_edge("source3", "action0", EdgeKind::Aquery);
+        b.add_edge("source1", "action0", EdgeKind::Aquery);
 
         let set = expanded(&["group:source1"]);
         let qa = quotient(&a, &set);

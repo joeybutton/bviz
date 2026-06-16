@@ -24,7 +24,7 @@ use bazel_query_proto::analysis::{
     Action, ActionGraphContainer, Artifact, Configuration, DepSetOfFiles, PathFragment, Target,
 };
 
-use crate::graph::Graph;
+use crate::graph::{EdgeKind, Graph};
 use crate::label::{self, PackageHierarchy};
 
 pub fn build(containers: &[ActionGraphContainer], external_sources: bool) -> Graph {
@@ -89,7 +89,7 @@ pub fn build(containers: &[ActionGraphContainer], external_sources: bool) -> Gra
                 Some(ct_id.clone()),
             );
             producer_node_id.insert(out, art_id.clone());
-            graph.add_edge(action_id.clone(), art_id);
+            graph.add_edge(action_id.clone(), art_id, EdgeKind::Aquery);
         }
     }
 
@@ -187,7 +187,7 @@ impl Wiring<'_> {
 
     fn add_edge(&mut self, from: &str, to: &str, graph: &mut Graph) {
         if self.seen_edge.insert((from.to_string(), to.to_string())) {
-            graph.add_edge(from.to_string(), to.to_string());
+            graph.add_edge(from.to_string(), to.to_string(), EdgeKind::Aquery);
         }
     }
 }
