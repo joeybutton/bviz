@@ -1062,11 +1062,24 @@ impl Element for TerminalElement {
             // Before the source loads there is nothing to build and the viewport
             // read below sees `None` and renders empty.
             if view.terminal.is_none() || view.terminal_frame != Some(frame) {
+                // Follow the newest output only when the viewport is already at the
+                // bottom; otherwise hold the line the user scrolled to. The line is
+                // counted from the top so it stays put as output appends below.
+                let follow = view
+                    .terminal
+                    .as_ref()
+                    .map_or(true, |terminal| terminal.display_offset() == 0);
+                let top_line = view
+                    .terminal
+                    .as_ref()
+                    .map(|terminal| terminal.history_size() - terminal.display_offset());
                 if let TermSource::Loaded(replay) = &view.source {
                     let source = replay.display_at(frame);
                     let mut terminal = Terminal::from_display(&source, cols, rows);
-                    // Follow the newest output, as the build's terminal did.
-                    terminal.scroll(Scroll::Bottom);
+                    match top_line {
+                        Some(line) if !follow => terminal.scroll_to_top_line(line),
+                        _ => terminal.scroll(Scroll::Bottom),
+                    }
                     view.terminal = Some(terminal);
                     view.terminal_frame = Some(frame);
                 }

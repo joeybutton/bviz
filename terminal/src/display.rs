@@ -153,6 +153,19 @@ impl Terminal {
         self.term.scroll_display(scroll);
     }
 
+    /// Scroll so that the line `line` rows from the top of the scrollback sits at
+    /// the top of the viewport, clamped to the available history. Used to hold a
+    /// scroll position across a rebuild as content grows below it.
+    pub fn scroll_to_top_line(&mut self, line: usize) {
+        // The viewport top is `history_size - display_offset` lines from the top,
+        // so the offset that puts `line` there is `history_size - line`.
+        let target = self.history_size().saturating_sub(line) as i32;
+        let delta = target - self.display_offset() as i32;
+        if delta != 0 {
+            self.term.scroll_display(Scroll::Delta(delta));
+        }
+    }
+
     /// Scroll to a position given as a fraction of the scrollback: 0.0 is the
     /// first line, 1.0 is the last. Used to map a scroll-bar drag to a line.
     pub fn scroll_to_fraction(&mut self, fraction: f32) {
@@ -489,6 +502,23 @@ mod tests {
         assert!(viewport_text(&terminal).contains("line19"));
         // And back to the top.
         terminal.scroll(Scroll::Top);
+        assert!(viewport_text(&terminal).starts_with("line00"));
+    }
+
+    #[test]
+    fn scroll_to_top_line_holds_a_line_at_the_viewport_top() {
+        let mut bytes = Vec::new();
+        for i in 0..20 {
+            bytes.extend_from_slice(format!("line{i:02}\n").as_bytes());
+        }
+        let output = BuildOutput::from_bytes(40, bytes);
+        let mut terminal = Terminal::new(&output, 40, 5);
+
+        // The named line is brought to the top of the viewport.
+        terminal.scroll_to_top_line(10);
+        assert!(viewport_text(&terminal).starts_with("line10"));
+        // Line zero is the top of the scrollback.
+        terminal.scroll_to_top_line(0);
         assert!(viewport_text(&terminal).starts_with("line00"));
     }
 
