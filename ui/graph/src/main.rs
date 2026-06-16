@@ -11,7 +11,7 @@ use gpui::{
     Animation, AnimationExt, App, BorderStyle, Bounds, Context, Div, Entity, FocusHandle,
     IntoElement, MouseButton, MouseDownEvent, Hsla, MouseMoveEvent, MouseUpEvent, PathBuilder,
     Pixels, Point, Render, Rgba, ScrollDelta, ScrollWheelEvent, Stateful, Task, TextAlign, Size,
-    Transformation, Window, canvas, div, font, percentage, point, prelude::*, px, quad, rgb, size,
+    Transformation, Window, canvas, div, percentage, point, prelude::*, px, quad, rgb, size,
 };
 use std::cell::{Cell, RefCell};
 use std::collections::HashSet;
@@ -514,11 +514,12 @@ fn paint_box(
         BorderStyle::Solid,
     ));
 
-    let font = if b.compound {
-        font("Inter").bold()
-    } else {
-        font("Inter")
-    };
+    // The label font comes from the window's inherited UI text style (the same
+    // one the chrome and the other views use), so the views stay visually
+    // coherent; a container's title is bold. The size is the layout's own, kept
+    // in step with the width the layout reserved for the label.
+    let base = bviz_ui_assets::text_metrics(window).font;
+    let font = if b.compound { base.bold() } else { base };
     let fs = px(LABEL_SIZE as f32 * zoom);
     let line = bviz_ui_assets::shape_line(window, b.label.clone(), font, fs, palette.label.into());
     // A collapsed group leaf carries a disclosure caret left of the label,
