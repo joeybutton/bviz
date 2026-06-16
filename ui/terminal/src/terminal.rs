@@ -21,12 +21,15 @@ use gpui::{
 actions!(
     bazel_terminal,
     [
-        ScrollLineUp,
-        ScrollLineDown,
+        PlayPause,
+        StepBack,
+        StepForward,
+        SeekStart,
+        SeekEnd,
+        SpeedUp,
+        SpeedDown,
         ScrollPageUp,
         ScrollPageDown,
-        ScrollToTop,
-        ScrollToBottom,
         Copy,
         Find,
         FindNext,
@@ -34,9 +37,6 @@ actions!(
         FindClose
     ]
 );
-
-/// Lines moved per arrow-key press.
-const SCROLL_STEP: i32 = 3;
 
 /// Width of the scroll bar gutter reserved on the right edge.
 const SCROLLBAR_WIDTH: f32 = 8.0;
@@ -149,12 +149,19 @@ pub struct TerminalView {
 impl TerminalView {
     pub fn new(path: String, window: &mut Window, cx: &mut Context<Self>) -> Self {
         cx.bind_keys([
-            KeyBinding::new("up", ScrollLineUp, Some("Terminal")),
-            KeyBinding::new("down", ScrollLineDown, Some("Terminal")),
+            // Playback keys are inert while the find field has focus, so they don't
+            // hijack typing and cursor movement there.
+            KeyBinding::new("space", PlayPause, Some("Terminal && !Find")),
+            KeyBinding::new("left", StepBack, Some("Terminal && !Find")),
+            KeyBinding::new("right", StepForward, Some("Terminal && !Find")),
+            KeyBinding::new("home", SeekStart, Some("Terminal && !Find")),
+            KeyBinding::new("end", SeekEnd, Some("Terminal && !Find")),
+            KeyBinding::new("up", SpeedUp, Some("Terminal && !Find")),
+            KeyBinding::new("down", SpeedDown, Some("Terminal && !Find")),
+            KeyBinding::new("]", SpeedUp, Some("Terminal && !Find")),
+            KeyBinding::new("[", SpeedDown, Some("Terminal && !Find")),
             KeyBinding::new("pageup", ScrollPageUp, Some("Terminal")),
             KeyBinding::new("pagedown", ScrollPageDown, Some("Terminal")),
-            KeyBinding::new("home", ScrollToTop, Some("Terminal")),
-            KeyBinding::new("end", ScrollToBottom, Some("Terminal")),
             KeyBinding::new("cmd-c", Copy, Some("Terminal")),
             KeyBinding::new("ctrl-c", Copy, Some("Terminal")),
             KeyBinding::new("cmd-f", Find, Some("Terminal")),
@@ -361,14 +368,6 @@ impl TerminalView {
         }
     }
 
-    fn scroll_line_up(&mut self, _: &ScrollLineUp, _: &mut Window, cx: &mut Context<Self>) {
-        self.scroll(Scroll::Delta(SCROLL_STEP), cx);
-    }
-
-    fn scroll_line_down(&mut self, _: &ScrollLineDown, _: &mut Window, cx: &mut Context<Self>) {
-        self.scroll(Scroll::Delta(-SCROLL_STEP), cx);
-    }
-
     fn scroll_page_up(&mut self, _: &ScrollPageUp, _: &mut Window, cx: &mut Context<Self>) {
         self.scroll(Scroll::PageUp, cx);
     }
@@ -377,12 +376,32 @@ impl TerminalView {
         self.scroll(Scroll::PageDown, cx);
     }
 
-    fn scroll_to_top(&mut self, _: &ScrollToTop, _: &mut Window, cx: &mut Context<Self>) {
-        self.scroll(Scroll::Top, cx);
+    fn on_play_pause(&mut self, _: &PlayPause, _: &mut Window, cx: &mut Context<Self>) {
+        self.play_pause(cx);
     }
 
-    fn scroll_to_bottom(&mut self, _: &ScrollToBottom, _: &mut Window, cx: &mut Context<Self>) {
-        self.scroll(Scroll::Bottom, cx);
+    fn on_step_back(&mut self, _: &StepBack, _: &mut Window, cx: &mut Context<Self>) {
+        self.step(-1, cx);
+    }
+
+    fn on_step_forward(&mut self, _: &StepForward, _: &mut Window, cx: &mut Context<Self>) {
+        self.step(1, cx);
+    }
+
+    fn on_seek_start(&mut self, _: &SeekStart, _: &mut Window, cx: &mut Context<Self>) {
+        self.seek_start(cx);
+    }
+
+    fn on_seek_end(&mut self, _: &SeekEnd, _: &mut Window, cx: &mut Context<Self>) {
+        self.seek_end(cx);
+    }
+
+    fn on_speed_up(&mut self, _: &SpeedUp, _: &mut Window, cx: &mut Context<Self>) {
+        self.shift_speed(1, cx);
+    }
+
+    fn on_speed_down(&mut self, _: &SpeedDown, _: &mut Window, cx: &mut Context<Self>) {
+        self.shift_speed(-1, cx);
     }
 
     fn copy(&mut self, _: &Copy, _: &mut Window, cx: &mut Context<Self>) {
@@ -564,12 +583,17 @@ impl TerminalView {
         self.seek_frame(usize::MAX, cx);
     }
 
-    /// Advance to the next playback speed, wrapping around.
-    fn cycle_speed(&mut self, cx: &mut Context<Self>) {
-        let next = SPEEDS
-            .iter()
-            .position(|&s| s == self.speed)
-            .map_or(0, |i| (i + 1) % SPEEDS.len());
+    /// Step the shown frame by `delta`, clamped to the timeline.
+    fn step(&mut self, delta: isize, cx: &mut Context<Self>) {
+        let frame = (self.current_frame as isize + delta).max(0) as usize;
+        self.seek_frame(frame, cx);
+    }
+
+    /// Move `delta` steps through the playback speeds, wrapping around.
+    fn shift_speed(&mut self, delta: isize, cx: &mut Context<Self>) {
+        let count = SPEEDS.len() as isize;
+        let current = SPEEDS.iter().position(|&s| s == self.speed).unwrap_or(0) as isize;
+        let next = (current + delta).rem_euclid(count) as usize;
         self.speed = SPEEDS[next];
         if self.playing {
             self.anchor_clock();
@@ -620,12 +644,15 @@ impl Render for TerminalView {
                 div()
                     .key_context("Terminal")
                     .track_focus(&self.body_focus)
-                    .on_action(cx.listener(Self::scroll_line_up))
-                    .on_action(cx.listener(Self::scroll_line_down))
+                    .on_action(cx.listener(Self::on_play_pause))
+                    .on_action(cx.listener(Self::on_step_back))
+                    .on_action(cx.listener(Self::on_step_forward))
+                    .on_action(cx.listener(Self::on_seek_start))
+                    .on_action(cx.listener(Self::on_seek_end))
+                    .on_action(cx.listener(Self::on_speed_up))
+                    .on_action(cx.listener(Self::on_speed_down))
                     .on_action(cx.listener(Self::scroll_page_up))
                     .on_action(cx.listener(Self::scroll_page_down))
-                    .on_action(cx.listener(Self::scroll_to_top))
-                    .on_action(cx.listener(Self::scroll_to_bottom))
                     .on_action(cx.listener(Self::copy))
                     .on_action(cx.listener(Self::find))
                     .flex()
@@ -915,7 +942,7 @@ impl TerminalView {
             )
             .child(
                 Button::new("speed", move |_, _, cx| {
-                    speed_view.update(cx, |this, cx| this.cycle_speed(cx))
+                    speed_view.update(cx, |this, cx| this.shift_speed(1, cx))
                 })
                 .ghost()
                 .label(format!("{}×", self.speed as i32)),
