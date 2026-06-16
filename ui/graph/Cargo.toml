@@ -8,6 +8,7 @@ name = "graph"
 path = "src/main.rs"
 
 [dependencies]
+clap = { workspace = true }
 gpui = { workspace = true, features = ["inspector"] }
 gpui_platform = { workspace = true, features = ["wayland"] }
 bviz_graph_layout = { path = "../../graph/layout" }

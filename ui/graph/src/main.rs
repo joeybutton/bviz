@@ -1,12 +1,13 @@
-//! Loads a Bazel `aquery --output=streamed_proto` file through
-//! `bviz_graph_layout`, lays the action graph out, and opens a window
-//! summarizing the result.
+//! Loads a Bazel `aquery`, `cquery`, or `query` `--output=streamed_proto` file
+//! through `bviz_graph_layout`, lays the graph out, and opens a window
+//! rendering the result.
 
 use bviz_graph_layout::graph::Graph;
 use bviz_graph_layout::layout::CARET_RESERVE;
-use bviz_graph_layout::{aquery, layout, quotient, streamed_proto, LaidOut};
+use bviz_graph_layout::{aquery, cquery, layout, query, quotient, streamed_proto, LaidOut};
 use bviz_ui_components::{load_in_background, track_drag};
 use bviz_ui_shell::Chrome;
+use clap::Parser;
 use gpui::{
     Animation, AnimationExt, App, BorderStyle, Bounds, Context, Div, Entity, FocusHandle,
     IntoElement, MouseButton, MouseDownEvent, Hsla, MouseMoveEvent, MouseUpEvent, PathBuilder,
@@ -15,6 +16,7 @@ use gpui::{
 };
 use std::cell::{Cell, RefCell};
 use std::collections::HashSet;
+use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::Duration;
 
@@ -24,7 +26,7 @@ const LABEL_BAND: f64 = 26.0;
 /// Box label font size in layout pixels.
 const LABEL_SIZE: f64 = 13.0;
 
-/// Padding around the graph, matching the SVG renderer's margin.
+/// Padding around the graph, in layout pixels.
 const MARGIN: f64 = 16.0;
 
 /// Arrowhead size along and across the edge direction, in layout pixels.
@@ -116,7 +118,7 @@ struct PaintBox {
     label: String,
 }
 
-/// Loads, lays out, and summarizes an aquery action graph.
+/// Loads, lays out, and renders a Bazel build graph.
 ///
 /// Zoom, pan, and the captured viewport bounds are shared cells so the canvas
 /// can both read them while painting and, on the first frame, set the initial
@@ -154,42 +156,33 @@ struct GraphView {
 const CLICK_SLOP: f32 = 4.0;
 
 impl GraphView {
-    fn new(path: Option<String>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    fn new(input: Input, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let focus_handle = cx.focus_handle();
         focus_handle.focus(window, cx);
         let base: Rc<RefCell<Option<Graph>>> = Rc::new(RefCell::new(None));
-        let (source, load_task) = match path {
-            // Build and lay out the graph on the background executor so window
-            // appearance and interactivity are never blocked; swap the view to
-            // the result and cache the base graph when it completes.
-            Some(path) => {
-                let task = load_in_background(
-                    cx,
-                    move || {
-                        let graph = build_graph(&path)?;
-                        let laid_out = relayout(&graph, &HashSet::new());
-                        Ok::<_, String>((graph, laid_out))
-                    },
-                    |view, result, _| {
-                        view.source = match result {
-                            Ok((graph, laid_out)) => {
-                                *view.base.borrow_mut() = Some(graph);
-                                Source::Loaded(laid_out)
-                            }
-                            Err(err) => Source::Message(err),
-                        };
-                    },
-                );
-                (Source::Loading, task)
-            }
-            None => (
-                Source::Message("Usage: graph <aquery.streamed_proto>".into()),
-                Task::ready(()),
-            ),
-        };
+        // Build and lay out the graph on the background executor so window
+        // appearance and interactivity are never blocked; swap the view to the
+        // result and cache the base graph when it completes.
+        let load_task = load_in_background(
+            cx,
+            move || {
+                let graph = build_graph(&input)?;
+                let laid_out = relayout(&graph, &HashSet::new());
+                Ok::<_, String>((graph, laid_out))
+            },
+            |view, result, _| {
+                view.source = match result {
+                    Ok((graph, laid_out)) => {
+                        *view.base.borrow_mut() = Some(graph);
+                        Source::Loaded(laid_out)
+                    }
+                    Err(err) => Source::Message(err),
+                };
+            },
+        );
         Self {
             focus_handle,
-            source,
+            source: Source::Loading,
             zoom: Rc::new(Cell::new(1.0)),
             pan: Rc::new(Cell::new((0.0, 0.0))),
             fitted: Rc::new(Cell::new(false)),
@@ -673,13 +666,25 @@ fn paint_arrowhead(pts: &[Point<Pixels>], zoom: f32, color: Rgba, window: &mut W
     }
 }
 
-/// Reads the aquery proto at `path` and builds its action graph, before any
+/// Reads the streamed_proto file at `input` and builds its graph, before any
 /// group quotienting. Cached so toggling a group needn't re-read or re-parse.
-fn build_graph(path: &str) -> Result<Graph, String> {
-    let bytes = std::fs::read(path).map_err(|e| format!("{path}: {e}"))?;
-    let containers =
-        streamed_proto::read_action_graph_containers(&bytes).map_err(|e| e.to_string())?;
-    Ok(aquery::build(&containers, false))
+fn build_graph(input: &Input) -> Result<Graph, String> {
+    let bytes = std::fs::read(&input.path).map_err(|e| format!("{}: {e}", input.path.display()))?;
+    Ok(match input.kind {
+        InputKind::Aquery => {
+            let containers =
+                streamed_proto::read_action_graph_containers(&bytes).map_err(|e| e.to_string())?;
+            aquery::build(&containers, false)
+        }
+        InputKind::Cquery => {
+            let results = streamed_proto::read_cquery_results(&bytes).map_err(|e| e.to_string())?;
+            cquery::build(&results)
+        }
+        InputKind::Query => {
+            let targets = streamed_proto::read_query_targets(&bytes).map_err(|e| e.to_string())?;
+            query::build(&targets)
+        }
+    })
 }
 
 /// Builds the display graph with the given ids expanded and lays it out.
@@ -755,12 +760,61 @@ fn hit_box(boxes: &[bviz_graph_layout::Box], gx: f32, gy: f32) -> Option<&bviz_g
         .min_by(|a, b| (a.width * a.height).total_cmp(&(b.width * b.height)))
 }
 
+/// Which Bazel query produced a `--output=streamed_proto` file, selecting the
+/// reader and builder used to turn it into a graph.
+#[derive(Clone, Copy)]
+enum InputKind {
+    Aquery,
+    Cquery,
+    Query,
+}
+
+/// A graph input: a streamed_proto file and the query kind that produced it.
+#[derive(Clone)]
+struct Input {
+    kind: InputKind,
+    path: PathBuf,
+}
+
+/// Renders a Bazel build graph from one `--output=streamed_proto` file. Exactly
+/// one of the flags selects the file and the query that produced it.
+#[derive(Parser)]
+#[command(group(
+    clap::ArgGroup::new("input").required(true).args(["aquery", "cquery", "query"])
+))]
+struct Cli {
+    /// `bazel aquery --output=streamed_proto` file.
+    #[arg(long, value_name = "FILE")]
+    aquery: Option<PathBuf>,
+    /// `bazel cquery --output=streamed_proto` file.
+    #[arg(long, value_name = "FILE")]
+    cquery: Option<PathBuf>,
+    /// `bazel query --output=streamed_proto` file.
+    #[arg(long, value_name = "FILE")]
+    query: Option<PathBuf>,
+}
+
+impl Cli {
+    fn input(self) -> Input {
+        let (kind, path) = if let Some(path) = self.aquery {
+            (InputKind::Aquery, path)
+        } else if let Some(path) = self.cquery {
+            (InputKind::Cquery, path)
+        } else if let Some(path) = self.query {
+            (InputKind::Query, path)
+        } else {
+            unreachable!("the arg group requires exactly one input flag")
+        };
+        Input { kind, path }
+    }
+}
+
 fn main() {
-    let path = std::env::args().nth(1);
+    let input = Cli::parse().input();
     bviz_ui_shell::run(
         "bazel_viz graph",
         size(px(1280.), px(820.)),
-        move |window, cx| cx.new(|cx| GraphView::new(path, window, cx)),
+        move |window, cx| cx.new(|cx| GraphView::new(input, window, cx)),
     );
 }
 

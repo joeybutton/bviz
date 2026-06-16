@@ -886,6 +886,7 @@ name = "bviz_ui_graph"
 version = "0.1.0"
 dependencies = [
  "bviz_graph_layout",
+ "clap",
  "gpui",
  "gpui_platform",
 ]

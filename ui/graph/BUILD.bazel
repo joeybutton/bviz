@@ -11,6 +11,7 @@ rust_binary(
         "//ui/components",
         "//ui/shell",
         "//ui/theme",
+        "@crates//:clap",
         "@crates//:gpui",
     ],
 )
