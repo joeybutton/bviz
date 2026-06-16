@@ -2,7 +2,6 @@
 members = [
     "bazel_viz",
     "graph/layout",
-    "graph/svg",
     "greeting",
     "gpui_hello",
     "terminal",

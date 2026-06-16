@@ -1,8 +1,0 @@
-load("@rules_rs//rs:rust_binary.bzl", "rust_binary")
-
-rust_binary(
-    name = "svg",
-    srcs = glob(["src/**/*.rs"]),
-    crate_name = "bviz_graph_svg",
-    deps = ["//graph/layout"],
-)

@@ -872,13 +872,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "bviz_graph_svg"
-version = "0.1.0"
-dependencies = [
- "bviz_graph_layout",
-]
-
-[[package]]
 name = "bviz_terminal"
 version = "0.1.0"
 dependencies = [
