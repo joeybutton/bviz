@@ -1166,7 +1166,7 @@ impl Element for TerminalElement {
         let rows = (f32::from(bounds.size.height) / f32::from(metrics.line_height))
             .floor()
             .max(1.0) as usize;
-        self.view.update(cx, |view, _| {
+        self.view.update(cx, |view, cx| {
             let frame = view.current_frame;
             // Rebuild the terminal when the played frame changes, reconstructing the
             // build's output up to that point; otherwise just reflow to the bounds.
@@ -1183,6 +1183,18 @@ impl Element for TerminalElement {
                         terminal.scroll(Scroll::Bottom);
                     } else {
                         terminal.scroll_to_top_line(view.scroll_top);
+                    }
+                    // Carry an active search onto the rebuilt content, keeping the
+                    // focused match rather than resetting it to the first.
+                    if view.find_active {
+                        if let Some(input) = view.find_input.as_ref() {
+                            let query = input.read(cx).content().to_string();
+                            let current = view
+                                .terminal
+                                .as_ref()
+                                .and_then(Terminal::current_match_index);
+                            terminal.restore_search(&query, current);
+                        }
                     }
                     view.terminal = Some(terminal);
                     view.terminal_frame = Some(frame);

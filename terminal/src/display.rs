@@ -330,24 +330,37 @@ impl Terminal {
     /// Find every literal occurrence of `query`, focus the first, and scroll it
     /// into view. Returns the number of matches. An empty query clears the search.
     pub fn set_search(&mut self, query: &str) -> usize {
-        self.search_matches.clear();
-        self.current_match = None;
-        if query.is_empty() {
-            return 0;
-        }
-        let Ok(mut regex) = RegexSearch::new(&regex_escape(query)) else {
-            return 0;
-        };
-        let grid = self.term.grid();
-        let start = Point::new(grid.topmost_line(), Column(0));
-        let end = Point::new(grid.bottommost_line(), grid.last_column());
-        self.search_matches =
-            RegexIter::new(start, end, Direction::Right, &self.term, &mut regex).collect();
+        self.search_matches = self.find_matches(query);
         self.current_match = (!self.search_matches.is_empty()).then_some(0);
         if let Some(index) = self.current_match {
             self.scroll_to_match(index);
         }
         self.search_matches.len()
+    }
+
+    /// Re-run `query` against the current (reflowed or replayed) content, keeping
+    /// the focused match at `current` clamped to the new match count and leaving
+    /// the viewport as is. Used to carry a search across a playback frame change
+    /// without snapping back to the first match or scrolling.
+    pub fn restore_search(&mut self, query: &str, current: Option<usize>) {
+        self.search_matches = self.find_matches(query);
+        self.current_match = (!self.search_matches.is_empty())
+            .then(|| current.unwrap_or(0).min(self.search_matches.len() - 1));
+    }
+
+    /// All matches of a literal `query` in reading order; empty for an empty or
+    /// invalid query.
+    fn find_matches(&self, query: &str) -> Vec<Match> {
+        if query.is_empty() {
+            return Vec::new();
+        }
+        let Ok(mut regex) = RegexSearch::new(&regex_escape(query)) else {
+            return Vec::new();
+        };
+        let grid = self.term.grid();
+        let start = Point::new(grid.topmost_line(), Column(0));
+        let end = Point::new(grid.bottommost_line(), grid.last_column());
+        RegexIter::new(start, end, Direction::Right, &self.term, &mut regex).collect()
     }
 
     pub fn clear_search(&mut self) {
@@ -390,6 +403,12 @@ impl Terminal {
     /// The focused match's position among the matches, one-based for display.
     pub fn current_match(&self) -> Option<usize> {
         self.current_match.map(|i| i + 1)
+    }
+
+    /// The focused match's zero-based index, for carrying the selection across a
+    /// rebuild via [`restore_search`](Self::restore_search).
+    pub fn current_match_index(&self) -> Option<usize> {
+        self.current_match
     }
 
     /// For each visible row, the match spans on it as `(first, last, focused)`,
@@ -583,6 +602,36 @@ mod tests {
 
         terminal.clear_search();
         assert_eq!(terminal.search_count(), 0);
+    }
+
+    #[test]
+    fn restore_search_keeps_the_focused_match() {
+        let mut bytes = Vec::new();
+        for i in 0..20 {
+            bytes.extend_from_slice(format!("item {i:02} needle\n").as_bytes());
+        }
+        let output = BuildOutput::from_bytes(40, bytes);
+        let mut terminal = Terminal::new(&output, 40, 5);
+
+        terminal.set_search("needle");
+        terminal.search_next();
+        assert_eq!(terminal.current_match(), Some(2));
+
+        // Re-applying the search (as a playback rebuild does) keeps the focused
+        // match rather than resetting to the first.
+        let current = terminal.current_match_index();
+        terminal.restore_search("needle", current);
+        assert_eq!(terminal.search_count(), 20);
+        assert_eq!(terminal.current_match(), Some(2));
+
+        // A focused index beyond the new match count clamps to the last match.
+        terminal.restore_search("needle", Some(999));
+        assert_eq!(terminal.current_match(), Some(20));
+
+        // An empty query clears the search.
+        terminal.restore_search("", Some(0));
+        assert_eq!(terminal.search_count(), 0);
+        assert_eq!(terminal.current_match(), None);
     }
 
     #[test]
