@@ -14,9 +14,11 @@ use crate::bep::command_line::{command_line_section::SectionType, CommandLine};
 pub struct BuildOutput {
     /// Terminal width in columns Bazel rendered for (`--terminal_columns`).
     pub columns: u16,
-    /// stdout and stderr concatenated in stream order; within one progress event
-    /// stderr precedes stdout, matching Bazel's emission order, so the bytes replay
-    /// into a terminal as the build wrote them.
+    /// stdout and stderr concatenated in stream order. `bazel build` writes
+    /// everything — progress, messages, forwarded action output — to stderr and
+    /// leaves stdout empty; the query-family commands (`query`/`cquery`/`aquery`/
+    /// `info`) emit their results on stdout instead. Within one progress event
+    /// stderr is appended before stdout, keeping progress ahead of any such results.
     pub bytes: Vec<u8>,
     /// The end offset into [`bytes`](Self::bytes) of each progress event, in stream
     /// order: replaying `bytes[..frames[i]]` reproduces the terminal as it stood
