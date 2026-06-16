@@ -34,9 +34,19 @@ pub fn build_joint(
         union.extend(query::package_keys(q));
     }
 
+    // Labels of generated files that query or cquery knows as targets, so aquery
+    // promotes the matching output artifacts to merge with those target nodes.
+    let mut labeled_outputs: HashSet<String> = HashSet::new();
+    if let Some(c) = cquery {
+        labeled_outputs.extend(cquery::generated_labels(c));
+    }
+    if let Some(q) = query {
+        labeled_outputs.extend(query::generated_labels(q));
+    }
+
     let mut graphs: Vec<Graph> = Vec::new();
     if let Some(a) = aquery {
-        graphs.push(aquery::build_with_packages(a, external_sources, &union));
+        graphs.push(aquery::build_with_packages(a, external_sources, &union, &labeled_outputs));
     }
     if let Some(c) = cquery {
         graphs.push(cquery::build_with_packages(c, &union));
@@ -78,7 +88,8 @@ mod tests {
     use bazel_query_proto::analysis::{
         Action, Artifact, DepSetOfFiles, PathFragment, Target as ActionTarget,
     };
-    use bazel_query_proto::blaze_query::{target::Discriminator, Rule, SourceFile};
+    use bazel_query_proto::analysis::Configuration;
+    use bazel_query_proto::blaze_query::{target::Discriminator, GeneratedFile, Rule, SourceFile};
 
     fn rule(name: &str, inputs: &[&str]) -> Target {
         Target {
@@ -175,6 +186,81 @@ mod tests {
             .any(|(_, _, k)| *k == EdgeKind::Aquery));
         // The package box appears once.
         assert_eq!(graph.nodes.iter().filter(|n| n.id == "pkg:foo").count(), 1);
+    }
+
+    #[test]
+    fn labeled_generated_output_merges_across_query_and_aquery() {
+        // query knows //pkg:gen.out as a generated-file target; aquery produces
+        // it as the genrule //pkg:gen's output. The output is promoted to the
+        // shared target node and merges with the query target.
+        let query_targets = vec![Target {
+            r#type: Discriminator::GeneratedFile as i32,
+            generated_file: Some(GeneratedFile {
+                name: "//pkg:gen.out".into(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }];
+
+        let aquery_container = ActionGraphContainer {
+            artifacts: vec![Artifact {
+                id: 1,
+                path_fragment_id: 103,
+                is_tree_artifact: false,
+            }],
+            path_fragments: vec![
+                PathFragment {
+                    id: 100,
+                    label: "bazel-out".into(),
+                    parent_id: 0,
+                },
+                PathFragment {
+                    id: 101,
+                    label: "k8-fastbuild".into(),
+                    parent_id: 100,
+                },
+                PathFragment {
+                    id: 102,
+                    label: "bin".into(),
+                    parent_id: 101,
+                },
+                PathFragment {
+                    id: 103,
+                    label: "pkg/gen.out".into(),
+                    parent_id: 102,
+                },
+            ],
+            targets: vec![ActionTarget {
+                id: 9,
+                label: "//pkg:gen".into(),
+                ..Default::default()
+            }],
+            configuration: vec![Configuration {
+                id: 1,
+                mnemonic: "k8".into(),
+                checksum: "ck1".into(),
+                ..Default::default()
+            }],
+            actions: vec![Action {
+                target_id: 9,
+                mnemonic: "Genrule".into(),
+                configuration_id: 1,
+                output_ids: vec![1],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        let graph = build_joint(Some(&[aquery_container]), None, Some(&query_targets), false);
+
+        // The promoted target node is shared by query and aquery: it appears once.
+        assert_eq!(
+            graph.nodes.iter().filter(|n| n.id == "target://pkg:gen.out").count(),
+            1
+        );
+        // aquery's promotion contributes the per-config box and concrete artifact.
+        assert!(graph.nodes.iter().any(|n| n.id == "ct://pkg:gen.out#ck1"));
+        assert!(graph.nodes.iter().any(|n| n.id == "artifact://pkg:gen.out#ck1"));
     }
 
     #[test]

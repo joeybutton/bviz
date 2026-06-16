@@ -29,10 +29,16 @@ pub fn quotient(graph: &Graph, expanded: &HashSet<String>) -> Graph {
     let producers = neighbor_lists(graph, |e| (&e.to, &e.from));
     let consumers = neighbor_lists(graph, |e| (&e.from, &e.to));
 
+    // Nodes that hold children: only leaf data nodes merge, so a container of
+    // kind `artifact` (a labeled generated output holding its configured
+    // targets) is never collapsed into a group.
+    let containers: HashSet<&str> = graph.nodes.iter().filter_map(|n| n.parent.as_deref()).collect();
+    let mergeable = |node: &Node| is_candidate(&node.kind) && !containers.contains(node.id.as_str());
+
     // Group candidate ids by signature; non-candidates are passed through.
     let mut groups: BTreeMap<Signature, Vec<&str>> = BTreeMap::new();
     for node in &graph.nodes {
-        if !is_candidate(&node.kind) {
+        if !mergeable(node) {
             continue;
         }
         let signature = Signature {
@@ -77,7 +83,7 @@ pub fn quotient(graph: &Graph, expanded: &HashSet<String>) -> Graph {
     // emit a container followed by their members reparented to it.
     let mut emitted: BTreeMap<String, ()> = BTreeMap::new();
     for node in &graph.nodes {
-        if !is_candidate(&node.kind) {
+        if !mergeable(node) {
             out.nodes.push(clone_node(node));
             continue;
         }
@@ -333,6 +339,27 @@ mod tests {
         assert!(node_ids(&out).contains(&"artifact1"));
         assert!(node_ids(&out).contains(&"artifact2"));
         assert!(!node_ids(&out).iter().any(|id| id.starts_with("group:")));
+    }
+
+    #[test]
+    fn artifact_container_is_not_merged() {
+        let mut graph = Graph::new();
+        graph.add_node("action0", "Produce", "action", None);
+        // Two artifact leaves with identical neighbors would normally merge,
+        // but artifact2 is a container (a promoted labeled output holds a
+        // configured-target child), which blocks the merge.
+        leaf(&mut graph, "artifact1", "artifact", None);
+        leaf(&mut graph, "artifact2", "artifact", None);
+        graph.add_edge("artifact1", "action0", EdgeKind::Aquery);
+        graph.add_edge("artifact2", "action0", EdgeKind::Aquery);
+        graph.add_node("ct1", "cfg", "configured-target", Some("artifact2".to_string()));
+
+        let out = collapsed(&graph);
+
+        assert!(!node_ids(&out).iter().any(|id| id.starts_with("group:")));
+        for id in ["artifact1", "artifact2", "ct1"] {
+            assert!(node_ids(&out).contains(&id), "{id} missing");
+        }
     }
 
     #[test]

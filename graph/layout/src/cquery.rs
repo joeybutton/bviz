@@ -45,6 +45,19 @@ pub(crate) fn package_keys(results: &[CqueryResult]) -> BTreeSet<(String, String
         .collect()
 }
 
+/// The labels of generated-file targets in this cquery, which a joint graph uses
+/// to recognize aquery output artifacts that are also targets.
+pub(crate) fn generated_labels(results: &[CqueryResult]) -> HashSet<String> {
+    results
+        .iter()
+        .flat_map(|r| r.results.iter())
+        .filter_map(|ct| ct.target.as_ref())
+        .filter_map(label_and_kind)
+        .filter(|(_, kind)| *kind == "artifact")
+        .map(|(label, _)| label.to_string())
+        .collect()
+}
+
 /// Builds the cquery graph attaching its boxes to the `packages` hierarchy,
 /// which a joint graph passes as the union of every input's packages so shared
 /// package boxes carry one label and parent.

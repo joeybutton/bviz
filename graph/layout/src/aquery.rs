@@ -30,7 +30,7 @@ use crate::label::{self, PackageHierarchy};
 
 pub fn build(containers: &[ActionGraphContainer], external_sources: bool) -> Graph {
     let packages = package_keys(containers);
-    build_with_packages(containers, external_sources, &packages)
+    build_with_packages(containers, external_sources, &packages, &HashSet::new())
 }
 
 /// The (repository, package path) keys of every target this aquery names, for
@@ -45,11 +45,16 @@ pub(crate) fn package_keys(containers: &[ActionGraphContainer]) -> BTreeSet<(Str
 
 /// Builds the aquery graph attaching its boxes to the `packages` hierarchy,
 /// which a joint graph passes as the union of every input's packages so shared
-/// package boxes carry one label and parent.
+/// package boxes carry one label and parent. `labeled_outputs` holds the labels
+/// of generated files that some other input knows as targets; an output artifact
+/// whose label is among them is promoted to its own `target -> configured-target`
+/// box (the concrete file nesting inside) so it merges with that target, rather
+/// than sitting as a bare artifact under its producing rule.
 pub(crate) fn build_with_packages(
     containers: &[ActionGraphContainer],
     external_sources: bool,
     packages: &BTreeSet<(String, String)>,
+    labeled_outputs: &HashSet<String>,
 ) -> Graph {
     let mut artifacts: Vec<&Artifact> = Vec::new();
     let mut actions: Vec<&Action> = Vec::new();
@@ -85,13 +90,19 @@ pub(crate) fn build_with_packages(
 
     // Pass 1: actions and the output artifacts they produce.
     for (i, action) in actions.iter().enumerate() {
-        let ct_id = configured_target_box(
-            action,
+        let config_id = action.configuration_id;
+        let rule_label = target_by_id
+            .get(&action.target_id)
+            .map(|t| t.label.clone())
+            .unwrap_or_else(|| format!("target {}", action.target_id));
+        let ct_id = target_ct_box(
+            &rule_label,
+            "target",
+            config_id,
             &mut graph,
             &hierarchy,
             &mut target_boxes,
             &mut ct_boxes,
-            &target_by_id,
             &config_by_id,
         );
         let action_id = format!("action{i}");
@@ -102,13 +113,43 @@ pub(crate) fn build_with_packages(
             Some(ct_id.clone()),
         );
         for &out in &action.output_ids {
-            let art_id = format!("artifact{out}");
-            graph.add_node(
-                art_id.clone(),
-                basename(out, &artifact_by_id, &fragment_by_id),
-                "artifact",
-                Some(ct_id.clone()),
-            );
+            let path = full_path(out, &artifact_by_id, &fragment_by_id);
+            // A labeled generated output nests under its own target's per-config
+            // box; an unlabeled one sits directly under the producing rule's box.
+            let art_id = match generated_label(&hierarchy, &path)
+                .filter(|label| labeled_outputs.contains(label))
+            {
+                Some(out_label) => {
+                    let out_ct = target_ct_box(
+                        &out_label,
+                        "artifact",
+                        config_id,
+                        &mut graph,
+                        &hierarchy,
+                        &mut target_boxes,
+                        &mut ct_boxes,
+                        &config_by_id,
+                    );
+                    let id = format!("artifact:{out_label}#{}", config_key(config_id, &config_by_id));
+                    graph.add_node(
+                        id.clone(),
+                        basename(out, &artifact_by_id, &fragment_by_id),
+                        "artifact",
+                        Some(out_ct),
+                    );
+                    id
+                }
+                None => {
+                    let id = format!("artifact{out}");
+                    graph.add_node(
+                        id.clone(),
+                        basename(out, &artifact_by_id, &fragment_by_id),
+                        "artifact",
+                        Some(ct_id.clone()),
+                    );
+                    id
+                }
+            };
             producer_node_id.insert(out, art_id.clone());
             graph.add_edge(action_id.clone(), art_id, EdgeKind::Aquery);
         }
@@ -227,52 +268,77 @@ impl Wiring<'_> {
     }
 }
 
-fn configured_target_box(
-    action: &Action,
+/// The configured-target box `ct:{full_label}#{checksum}` for a target in one
+/// configuration, creating the `target:{full_label}` box (of kind `target_kind`)
+/// above it on first use and returning the configured-target id. Used both for a
+/// rule (a `target` box holding actions) and for a labeled generated output (an
+/// `artifact` box holding the concrete file).
+#[allow(clippy::too_many_arguments)]
+fn target_ct_box(
+    full_label: &str,
+    target_kind: &str,
+    config_id: u32,
     graph: &mut Graph,
     hierarchy: &PackageHierarchy,
     target_boxes: &mut HashSet<String>,
     ct_boxes: &mut HashSet<String>,
-    target_by_id: &HashMap<u32, &Target>,
     config_by_id: &HashMap<u32, &Configuration>,
 ) -> String {
-    let target_id = action.target_id;
-    let config_id = action.configuration_id;
-    let full = target_by_id
-        .get(&target_id)
-        .map(|t| t.label.clone())
-        .unwrap_or_else(|| format!("target {target_id}"));
-    let target_node_id = match target_by_id.get(&target_id) {
-        Some(_) => format!("target:{full}"),
-        None => format!("target:{target_id}"),
-    };
-    let config_key = config_by_id
-        .get(&config_id)
-        .map(|c| c.checksum.clone())
-        .filter(|c| !c.is_empty())
-        .unwrap_or_else(|| format!("cfg{config_id}"));
-    let ct_node_id = format!("ct:{full}#{config_key}");
+    let ct_node_id = format!("ct:{full_label}#{}", config_key(config_id, config_by_id));
     if !ct_boxes.insert(ct_node_id.clone()) {
         return ct_node_id;
     }
 
+    let target_node_id = format!("target:{full_label}");
     if target_boxes.insert(target_node_id.clone()) {
-        let package = hierarchy.package_box(&full).map(str::to_string);
-        graph.add_node(target_node_id.clone(), label::target_label(&full), "target", package);
+        let package = hierarchy.package_box(full_label).map(str::to_string);
+        graph.add_node(
+            target_node_id.clone(),
+            label::target_label(full_label),
+            target_kind,
+            package,
+        );
     }
 
-    let label = config_by_id
+    let mnemonic = config_by_id
         .get(&config_id)
         .map(|c| c.mnemonic.clone())
         .filter(|m| !m.is_empty())
         .unwrap_or_else(|| format!("config {config_id}"));
     graph.add_node(
         ct_node_id.clone(),
-        label,
+        mnemonic,
         "configured-target",
         Some(target_node_id),
     );
     ct_node_id
+}
+
+/// The query-independent key of a configuration: its checksum, or `cfg{id}` when
+/// none is recorded. The checksum is stable across aquery and cquery dumps.
+fn config_key(config_id: u32, config_by_id: &HashMap<u32, &Configuration>) -> String {
+    config_by_id
+        .get(&config_id)
+        .map(|c| c.checksum.clone())
+        .filter(|c| !c.is_empty())
+        .unwrap_or_else(|| format!("cfg{config_id}"))
+}
+
+/// The label of a generated output at exec path `path`: its `bazel-out/<cfg>/bin`
+/// prefix stripped, then the rest split into the enclosing package and a
+/// package-relative remainder (`bazel-out/k8/bin/src/main/native/jni.h` ->
+/// `//src/main/native:jni.h`; a subdir output keeps the subdir in the name).
+/// `None` when the path is not a `bin` output or no known package encloses it.
+fn generated_label(hierarchy: &PackageHierarchy, path: &str) -> Option<String> {
+    let suffix = generated_suffix(path)?;
+    let dir = suffix.rsplit_once('/').map(|(d, _)| d).unwrap_or("");
+    let pkg = hierarchy.enclosing_package(dir)?;
+    let rel = if pkg.is_empty() {
+        suffix
+    } else {
+        suffix.strip_prefix(&format!("{pkg}/")).unwrap_or(suffix)
+    };
+    Some(format!("//{pkg}:{rel}"))
 }
 
 /// A source artifact that no known package encloses: a root-level node keyed by
@@ -700,6 +766,76 @@ mod tests {
             .collect();
         assert_eq!(bar_sources.len(), 1);
         assert!(!bar_sources[0].label.ends_with("sources"));
+    }
+
+    #[test]
+    fn labeled_output_is_promoted_to_its_own_target() {
+        let (artifact, gen_frags) = generated_artifact(1, 100, "pkg/gen.out");
+        let container = ActionGraphContainer {
+            artifacts: vec![artifact],
+            path_fragments: gen_frags,
+            targets: vec![target(9, "//pkg:gen")],
+            configuration: vec![Configuration {
+                id: 1,
+                mnemonic: "k8".into(),
+                checksum: "ck1".into(),
+                ..Default::default()
+            }],
+            actions: vec![Action {
+                target_id: 9,
+                mnemonic: "Genrule".to_string(),
+                configuration_id: 1,
+                output_ids: vec![1],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        let containers = vec![container];
+        let labeled = HashSet::from(["//pkg:gen.out".to_string()]);
+        let graph = build_with_packages(&containers, false, &package_keys(&containers), &labeled);
+
+        // The output is promoted to its own target box, nesting its per-config
+        // box and the concrete artifact, instead of sitting under the rule.
+        assert_eq!(find(&graph, "target://pkg:gen.out").kind, "artifact");
+        assert_eq!(parent_of(&graph, "ct://pkg:gen.out#ck1"), Some("target://pkg:gen.out"));
+        let concrete = find(&graph, "artifact://pkg:gen.out#ck1");
+        assert_eq!(concrete.kind, "artifact");
+        assert_eq!(concrete.parent.as_deref(), Some("ct://pkg:gen.out#ck1"));
+        // The producing action feeds the promoted concrete artifact.
+        assert!(edges(&graph).contains(&("action0", "artifact://pkg:gen.out#ck1")));
+    }
+
+    #[test]
+    fn unlabeled_output_stays_under_its_rule() {
+        let (artifact, gen_frags) = generated_artifact(1, 100, "pkg/gen.out");
+        let container = ActionGraphContainer {
+            artifacts: vec![artifact],
+            path_fragments: gen_frags,
+            targets: vec![target(9, "//pkg:gen")],
+            configuration: vec![Configuration {
+                id: 1,
+                mnemonic: "k8".into(),
+                checksum: "ck1".into(),
+                ..Default::default()
+            }],
+            actions: vec![Action {
+                target_id: 9,
+                mnemonic: "Genrule".to_string(),
+                configuration_id: 1,
+                output_ids: vec![1],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        let containers = vec![container];
+        let labeled = HashSet::new();
+        let graph = build_with_packages(&containers, false, &package_keys(&containers), &labeled);
+
+        // No promotion: the output is a bare artifact under the genrule's box.
+        assert!(!graph.nodes.iter().any(|n| n.id == "target://pkg:gen.out"));
+        assert_eq!(parent_of(&graph, "artifact1"), Some("ct://pkg:gen#ck1"));
     }
 
     #[test]

@@ -40,6 +40,17 @@ pub(crate) fn label_and_kind(target: &Target) -> Option<(&str, &'static str)> {
     }
 }
 
+/// The labels of generated-file targets in this query, which a joint graph uses
+/// to recognize aquery output artifacts that are also targets.
+pub(crate) fn generated_labels(targets: &[Target]) -> HashSet<String> {
+    targets
+        .iter()
+        .filter_map(label_and_kind)
+        .filter(|(_, kind)| *kind == "artifact")
+        .map(|(label, _)| label.to_string())
+        .collect()
+}
+
 /// Builds the query graph attaching its boxes to the `packages` hierarchy,
 /// which a joint graph passes as the union of every input's packages so shared
 /// package boxes carry one label and parent.
