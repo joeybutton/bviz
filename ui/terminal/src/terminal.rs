@@ -45,6 +45,9 @@ actions!(
 /// Lines moved per arrow-key press while the terminal is focused.
 const SCROLL_STEP: i32 = 3;
 
+/// Lines scrolled per frame while a selection drag is held outside the content.
+const SELECTION_AUTOSCROLL_STEP: i32 = 1;
+
 /// Width of the scroll bar gutter reserved on the right edge.
 const SCROLLBAR_WIDTH: f32 = 8.0;
 
@@ -143,6 +146,9 @@ pub struct TerminalView {
     content: Option<ContentLayout>,
     /// Whether a click-drag text selection is in progress.
     selecting: bool,
+    /// The latest cursor position during a selection drag, kept so the selection
+    /// can keep auto-scrolling while the cursor is held still outside the view.
+    selection_drag: Option<Point<Pixels>>,
     /// The URL under the cursor, highlighted and openable while hovered.
     hovered_url: Option<Url>,
     /// The URL pressed on, opened on release if the press was a click, not a drag.
@@ -236,6 +242,7 @@ impl TerminalView {
             scrollbar: None,
             content: None,
             selecting: false,
+            selection_drag: None,
             hovered_url: None,
             pressed_url: None,
             drag_grab: None,
@@ -392,6 +399,7 @@ impl TerminalView {
         if let Some(terminal) = self.terminal.as_mut() {
             terminal.begin_selection(selection, column, row, side);
             self.selecting = true;
+            self.selection_drag = Some(event.position);
             cx.notify();
         }
     }
@@ -420,12 +428,55 @@ impl TerminalView {
 
     /// Extend the in-progress selection to a window position.
     fn selection_drag_to(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
+        self.selection_drag = Some(position);
         let Some((column, row, side)) = self.cell_at(position) else {
             return;
         };
         if let Some(terminal) = self.terminal.as_mut() {
             terminal.extend_selection(column, row, side);
             cx.notify();
+        }
+    }
+
+    /// While a selection drag is held above or below the content, scroll that way
+    /// and grow the selection to the revealed edge, repeating each frame so it
+    /// continues even when the cursor is still. Inside the content it does nothing,
+    /// so the selection simply follows the cursor.
+    fn autoscroll_selection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let (Some(content), Some(position)) = (self.content, self.selection_drag) else {
+            return;
+        };
+        if !self.selecting {
+            return;
+        }
+        let top = content.top;
+        let bottom = content.top + content.line_height * content.rows as f32;
+        let y = f32::from(position.y);
+        // Positive scrolls toward earlier output (up); the cursor above the content
+        // reveals earlier lines, below it reveals later ones.
+        let lines = if y < top {
+            SELECTION_AUTOSCROLL_STEP
+        } else if y > bottom {
+            -SELECTION_AUTOSCROLL_STEP
+        } else {
+            return;
+        };
+        let moved = match self.terminal.as_mut() {
+            Some(terminal) => {
+                let before = terminal.display_offset();
+                terminal.scroll(Scroll::Delta(lines));
+                terminal.display_offset() != before
+            }
+            None => return,
+        };
+        self.remember_scroll();
+        // Extend to the cell under the cursor, which `cell_at` clamps to the edge
+        // row now showing the revealed content.
+        self.selection_drag_to(position, cx);
+        // Keep going next frame while the cursor stays outside, cursor still or not;
+        // stop once the scroll has bottomed out, to not spin at the limit.
+        if moved {
+            window.request_animation_frame();
         }
     }
 
@@ -723,6 +774,7 @@ impl Render for TerminalView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // Advance the timeline if playing, pacing playback by the frame loop.
         self.advance_playback(window);
+        self.autoscroll_selection(window, cx);
         let colors = bviz_ui_theme::colors(window);
         let body = match &self.source {
             TermSource::Loaded(_) => {
@@ -1447,6 +1499,7 @@ impl Element for TerminalElement {
                 |view, _, cx| {
                     if view.selecting {
                         view.selecting = false;
+                        view.selection_drag = None;
                         // A press that did not drag (no selection text) and
                         // landed on a URL opens it.
                         if let Some(url) = view.pressed_url.take() {
