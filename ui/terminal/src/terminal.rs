@@ -200,9 +200,12 @@ impl TerminalView {
             KeyBinding::new("shift-enter", FindPrev, Some("Find")),
             KeyBinding::new("escape", FindClose, Some("Find")),
         ]);
-        let body_focus = cx.focus_handle();
+        // Tab cycles focus through the regions (handled by the shell's tab action
+        // via window.focus_next), in this order: playback bar, terminal, then the
+        // find field when it is open (its tab index is set on creation).
+        let body_focus = cx.focus_handle().tab_index(1).tab_stop(true);
         body_focus.focus(window, cx);
-        let playback_focus = cx.focus_handle();
+        let playback_focus = cx.focus_handle().tab_index(0).tab_stop(true);
         // The speed dropdown is the source of truth for the speed index; applying
         // its selection keeps the numeric multiplier and the playback clock in sync.
         let labels = SPEEDS.iter().map(|speed| format!("{}×", *speed as i32));
@@ -488,7 +491,8 @@ impl TerminalView {
     fn find(&mut self, _: &Find, window: &mut Window, cx: &mut Context<Self>) {
         self.find_active = true;
         if self.find_input.is_none() {
-            let input = cx.new(|cx| TextInput::new(cx, "Find", 0));
+            // Tab index 2: after the playback bar (0) and terminal (1) in the cycle.
+            let input = cx.new(|cx| TextInput::new(cx, "Find", 2));
             self.find_observation =
                 Some(cx.observe(&input, |this, _input, cx| this.run_search(cx)));
             self.find_input = Some(input);
