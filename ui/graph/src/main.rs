@@ -786,7 +786,8 @@ struct Cli {
     /// `bazel aquery --output=streamed_proto` file.
     #[arg(long, value_name = "FILE")]
     aquery: Option<PathBuf>,
-    /// `bazel cquery --output=streamed_proto` file.
+    /// `bazel cquery --output=streamed_proto` file (run cquery with
+    /// `--transitions=lite` for configuration-resolved edges).
     #[arg(long, value_name = "FILE")]
     cquery: Option<PathBuf>,
     /// `bazel query --output=streamed_proto` file.

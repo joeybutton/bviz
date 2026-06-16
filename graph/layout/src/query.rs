@@ -16,7 +16,7 @@ pub fn build(targets: &[Target]) -> Graph {
 
 /// The label and node kind a target carries, by its populated variant, or `None`
 /// when the variant message is absent.
-fn label_and_kind(target: &Target) -> Option<(&str, &'static str)> {
+pub(crate) fn label_and_kind(target: &Target) -> Option<(&str, &'static str)> {
     match Discriminator::try_from(target.r#type).ok()? {
         Discriminator::Rule => Some((&target.rule.as_ref()?.name, "target")),
         Discriminator::SourceFile => Some((&target.source_file.as_ref()?.name, "source")),
@@ -31,8 +31,7 @@ fn label_and_kind(target: &Target) -> Option<(&str, &'static str)> {
 pub(crate) fn build_targets(targets: &[&Target]) -> Graph {
     let mut graph = Graph::new();
     let mut package_boxes: HashSet<String> = HashSet::new();
-    // Node id per label, deduping a label that appears more than once (as the
-    // same target under several configurations does in cquery output).
+    // Node id per label, so a label seen more than once maps to one node.
     let mut node_by_label: HashMap<String, String> = HashMap::new();
 
     // Pass 1: one leaf node per target under its package container.
