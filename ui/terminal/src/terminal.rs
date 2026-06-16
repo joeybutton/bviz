@@ -516,24 +516,39 @@ impl TerminalView {
         if let Some(terminal) = self.terminal.as_mut() {
             terminal.set_search(&query);
         }
+        // Jumping to a match counts as leaving auto-scroll, so the next frame holds
+        // this position rather than snapping back to the bottom.
+        self.remember_scroll();
         // The hovered URL's highlight is in viewport coordinates, which scrolling
         // to a match invalidates; the next pointer move recomputes it.
         self.hovered_url = None;
         cx.notify();
     }
 
-    fn find_next(&mut self, _: &FindNext, _: &mut Window, cx: &mut Context<Self>) {
+    /// Focus the next/previous match, holding the scroll there so playback does not
+    /// snap the view back to the bottom.
+    fn select_next_match(&mut self, cx: &mut Context<Self>) {
         if let Some(terminal) = self.terminal.as_mut() {
             terminal.search_next();
         }
+        self.remember_scroll();
         cx.notify();
     }
 
-    fn find_prev(&mut self, _: &FindPrev, _: &mut Window, cx: &mut Context<Self>) {
+    fn select_prev_match(&mut self, cx: &mut Context<Self>) {
         if let Some(terminal) = self.terminal.as_mut() {
             terminal.search_prev();
         }
+        self.remember_scroll();
         cx.notify();
+    }
+
+    fn find_next(&mut self, _: &FindNext, _: &mut Window, cx: &mut Context<Self>) {
+        self.select_next_match(cx);
+    }
+
+    fn find_prev(&mut self, _: &FindPrev, _: &mut Window, cx: &mut Context<Self>) {
+        self.select_prev_match(cx);
     }
 
     fn find_close(&mut self, _: &FindClose, window: &mut Window, cx: &mut Context<Self>) {
@@ -872,24 +887,14 @@ impl TerminalView {
                 )
                 .child(
                     Button::new("find-prev", move |_, _, cx| {
-                        prev_view.update(cx, |this, cx| {
-                            if let Some(terminal) = this.terminal.as_mut() {
-                                terminal.search_prev();
-                            }
-                            cx.notify();
-                        })
+                        prev_view.update(cx, |this, cx| this.select_prev_match(cx))
                     })
                     .ghost()
                     .icon("caret-up"),
                 )
                 .child(
                     Button::new("find-next", move |_, _, cx| {
-                        next_view.update(cx, |this, cx| {
-                            if let Some(terminal) = this.terminal.as_mut() {
-                                terminal.search_next();
-                            }
-                            cx.notify();
-                        })
+                        next_view.update(cx, |this, cx| this.select_next_match(cx))
                     })
                     .ghost()
                     .icon("caret-down"),
