@@ -5,17 +5,17 @@
 use std::time::Duration;
 
 use bviz_terminal::{
-    BuildOutput, Cell, Color, Flags, NamedColor, Rgb, Scroll, SelectionType, Side, Terminal, Url,
+    Cell, Color, DisplaySource, Flags, NamedColor, Rgb, Scroll, SelectionType, Side, Terminal, Url,
 };
-use bviz_ui_components::{Button, TextInput, track_drag};
+use bviz_ui_components::{Button, TextInput, load_in_background, track_drag};
 use bviz_ui_shell::Chrome;
 use gpui::{
-    App, Bounds, ClipboardItem, Context, Element, Entity, FocusHandle, Focusable, Font, FontStyle,
-    FontWeight, GlobalElementId, InspectorElementId, IntoElement, KeyBinding, LayoutId, MouseButton,
-    MouseDownEvent, MouseMoveEvent, PaintQuad, Pixels, Point, Render, Rgba, ScrollWheelEvent,
-    ShapedLine, SharedString, StrikethroughStyle, Style,
-    Subscription, TextRun, UnderlineStyle, Window, WindowAppearance, actions, div, fill, point,
-    prelude::*, px, relative, rgb, size,
+    Animation, AnimationExt, App, Bounds, ClipboardItem, Context, Element, Entity, FocusHandle,
+    Focusable, Font, FontStyle, FontWeight, GlobalElementId, InspectorElementId, IntoElement,
+    KeyBinding, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, PaintQuad, Pixels, Point,
+    Render, Rgba, ScrollWheelEvent, ShapedLine, SharedString, StrikethroughStyle, Style,
+    Subscription, Task, TextRun, Transformation, UnderlineStyle, Window, WindowAppearance, actions,
+    div, fill, percentage, point, prelude::*, px, relative, rgb, size,
 };
 
 actions!(
@@ -71,10 +71,22 @@ struct ContentLayout {
     rows: usize,
 }
 
+/// The build's reconstructed display, a load in progress, or the error that
+/// stopped it.
+enum TermSource {
+    Loading,
+    Loaded(DisplaySource),
+    Error(String),
+}
+
 /// The root view: the rendered build terminal inside the window chrome.
 pub struct TerminalView {
-    output: BuildOutput,
-    /// The display terminal, created at the window size on first layout.
+    /// The reconstructed display, loaded off the UI thread.
+    source: TermSource,
+    /// Holds the background load task so it isn't cancelled on drop.
+    _load_task: Task<()>,
+    /// The display terminal, created at the window size on first layout once the
+    /// source is loaded.
     terminal: Option<Terminal>,
     /// The painted scroll bar geometry, set each layout for hit-testing.
     scrollbar: Option<ScrollbarLayout>,
@@ -105,7 +117,7 @@ pub struct TerminalView {
 }
 
 impl TerminalView {
-    pub fn new(output: BuildOutput, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(path: String, window: &mut Window, cx: &mut Context<Self>) -> Self {
         cx.bind_keys([
             KeyBinding::new("up", ScrollLineUp, Some("Terminal")),
             KeyBinding::new("down", ScrollLineDown, Some("Terminal")),
@@ -126,7 +138,8 @@ impl TerminalView {
         let body_focus = cx.focus_handle();
         body_focus.focus(window, cx);
         let mut view = Self {
-            output,
+            source: TermSource::Loading,
+            _load_task: Task::ready(()),
             terminal: None,
             scrollbar: None,
             content: None,
@@ -145,6 +158,23 @@ impl TerminalView {
         // Show the bar briefly on launch so the scrollable extent is visible,
         // then let it auto-hide.
         view.reveal_scrollbar(cx);
+        // Read and reconstruct the build off the UI thread so a large log never
+        // blocks startup or the first frame.
+        view._load_task = load_in_background(
+            cx,
+            move || {
+                let bytes = std::fs::read(&path).map_err(|e| format!("cannot read {path}: {e}"))?;
+                let output = bviz_terminal::parse(&bytes)
+                    .map_err(|e| format!("cannot parse build event stream: {e}"))?;
+                Ok::<_, String>(bviz_terminal::DisplaySource::from_output(&output))
+            },
+            |view, result, _| {
+                view.source = match result {
+                    Ok(source) => TermSource::Loaded(source),
+                    Err(err) => TermSource::Error(err),
+                };
+            },
+        );
         view
     }
 
@@ -387,37 +417,80 @@ impl TerminalView {
 impl Render for TerminalView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = bviz_ui_theme::colors(window);
-        let find_box = if self.find_active {
-            self.render_find_box(&colors, cx)
-        } else {
-            None
+        let body = match &self.source {
+            TermSource::Loaded(_) => {
+                let find_box = if self.find_active {
+                    self.render_find_box(&colors, cx)
+                } else {
+                    None
+                };
+                div()
+                    .key_context("Terminal")
+                    .track_focus(&self.body_focus)
+                    .on_action(cx.listener(Self::scroll_line_up))
+                    .on_action(cx.listener(Self::scroll_line_down))
+                    .on_action(cx.listener(Self::scroll_page_up))
+                    .on_action(cx.listener(Self::scroll_page_down))
+                    .on_action(cx.listener(Self::scroll_to_top))
+                    .on_action(cx.listener(Self::scroll_to_bottom))
+                    .on_action(cx.listener(Self::copy))
+                    .on_action(cx.listener(Self::find))
+                    .on_scroll_wheel(cx.listener(Self::on_scroll_wheel))
+                    .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
+                    .on_mouse_move(cx.listener(Self::on_mouse_move))
+                    .when(self.hovered_url.is_some(), |body| body.cursor_pointer())
+                    .relative()
+                    .size_full()
+                    .overflow_hidden()
+                    .bg(colors.background)
+                    .font_family(bviz_ui_assets::MONO)
+                    .text_size(px(13.))
+                    .text_color(colors.text)
+                    .child(TerminalElement { view: cx.entity() })
+                    .children(find_box)
+                    .into_any_element()
+            }
+            TermSource::Loading => div()
+                .flex_1()
+                .flex()
+                .flex_col()
+                .justify_center()
+                .items_center()
+                .gap_3()
+                .child(
+                    bviz_ui_assets::icon("circle-notch")
+                        .size(px(36.))
+                        .text_color(colors.text)
+                        .with_animation(
+                            "spinner",
+                            Animation::new(Duration::from_millis(900)).repeat(),
+                            |icon, delta| {
+                                icon.with_transformation(Transformation::rotate(percentage(delta)))
+                            },
+                        ),
+                )
+                .child(div().text_sm().text_color(colors.disabled).child("Loading…"))
+                .into_any_element(),
+            TermSource::Error(msg) => div()
+                .flex_1()
+                .flex()
+                .flex_col()
+                .justify_center()
+                .items_center()
+                .gap_4()
+                .p_4()
+                .child(
+                    div()
+                        .max_w(px(400.))
+                        .text_sm()
+                        .text_color(colors.disabled)
+                        .child(msg.clone()),
+                )
+                .into_any_element(),
         };
-        Chrome::new(&self.focus_handle).title("bazel_term").child(
-            div()
-                .key_context("Terminal")
-                .track_focus(&self.body_focus)
-                .on_action(cx.listener(Self::scroll_line_up))
-                .on_action(cx.listener(Self::scroll_line_down))
-                .on_action(cx.listener(Self::scroll_page_up))
-                .on_action(cx.listener(Self::scroll_page_down))
-                .on_action(cx.listener(Self::scroll_to_top))
-                .on_action(cx.listener(Self::scroll_to_bottom))
-                .on_action(cx.listener(Self::copy))
-                .on_action(cx.listener(Self::find))
-                .on_scroll_wheel(cx.listener(Self::on_scroll_wheel))
-                .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
-                .on_mouse_move(cx.listener(Self::on_mouse_move))
-                .when(self.hovered_url.is_some(), |body| body.cursor_pointer())
-                .relative()
-                .size_full()
-                .overflow_hidden()
-                .bg(colors.background)
-                .font_family(bviz_ui_assets::MONO)
-                .text_size(px(13.))
-                .text_color(colors.text)
-                .child(TerminalElement { view: cx.entity() })
-                .children(find_box),
-        )
+        Chrome::new(&self.focus_handle)
+            .title("bazel_term")
+            .child(body)
     }
 }
 
@@ -624,11 +697,16 @@ impl Element for TerminalElement {
         let rows = (f32::from(bounds.size.height) / f32::from(metrics.line_height))
             .floor()
             .max(1.0) as usize;
-        self.view
-            .update(cx, |view, _| match view.terminal.as_mut() {
-                Some(terminal) => terminal.resize(cols, rows),
-                None => view.terminal = Some(Terminal::new(&view.output, cols, rows)),
-            });
+        self.view.update(cx, |view, _| match view.terminal.as_mut() {
+            Some(terminal) => terminal.resize(cols, rows),
+            // Build the terminal only once the source has loaded; before that the
+            // viewport read below sees `None` and renders empty.
+            None => {
+                if let TermSource::Loaded(source) = &view.source {
+                    view.terminal = Some(Terminal::from_display(source, cols, rows));
+                }
+            }
+        });
         let (viewport, history, offset, selection, search) =
             match self.view.read(cx).terminal.as_ref() {
                 Some(terminal) => (

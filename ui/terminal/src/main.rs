@@ -13,24 +13,10 @@ fn main() -> ExitCode {
         eprintln!("usage: terminal <build_event_binary_file>");
         return ExitCode::FAILURE;
     };
-    let bytes = match std::fs::read(&path) {
-        Ok(bytes) => bytes,
-        Err(err) => {
-            eprintln!("cannot read {path}: {err}");
-            return ExitCode::FAILURE;
-        }
-    };
-    let output = match bviz_terminal::parse(&bytes) {
-        Ok(output) => output,
-        Err(err) => {
-            eprintln!("cannot parse build event stream: {err}");
-            return ExitCode::FAILURE;
-        }
-    };
     bviz_ui_shell::run(
         "bazel_term",
         size(px(1100.), px(720.)),
-        move |window, cx| cx.new(|cx| TerminalView::new(output, window, cx)),
+        move |window, cx| cx.new(|cx| TerminalView::new(path, window, cx)),
     );
     ExitCode::SUCCESS
 }

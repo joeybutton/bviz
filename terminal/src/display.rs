@@ -43,6 +43,19 @@ use crate::screen::Screen;
 /// History depth; large enough to retain every line of a build's output.
 const SCROLLBACK: usize = 100_000;
 
+/// A build's reconstructed output, serialized to a clean ANSI stream ready to
+/// replay into a window-sized terminal. The reconstruction is window
+/// independent, so it can be prepared off the UI thread.
+pub struct DisplaySource {
+    ansi: Vec<u8>,
+}
+
+impl DisplaySource {
+    pub fn from_output(output: &BuildOutput) -> DisplaySource {
+        DisplaySource { ansi: Screen::from_output(output).to_ansi() }
+    }
+}
+
 /// The reconstructed build output, replayed into a terminal that wraps it to the
 /// window size. [`resize`](Terminal::resize) re-wraps; [`scroll`](Terminal::scroll)
 /// moves the viewport over the scrollback.
@@ -79,9 +92,17 @@ impl Dimensions for Size {
 
 impl Terminal {
     /// Reconstruct the build's final screen (at the width Bazel used) and replay
-    /// it into a display terminal of `columns` by `rows`, which wraps it to that
-    /// width. The viewport starts at the first line of the build.
+    /// it into a display terminal of `columns` by `rows`. Reconstruction happens
+    /// inline; [`from_display`](Terminal::from_display) takes a prepared
+    /// [`DisplaySource`] so the heavy step can run off the UI thread.
     pub fn new(output: &BuildOutput, columns: usize, rows: usize) -> Terminal {
+        Terminal::from_display(&DisplaySource::from_output(output), columns, rows)
+    }
+
+    /// Replay an already-reconstructed [`DisplaySource`] into a display terminal
+    /// of `columns` by `rows`, which wraps it to that width. The viewport starts
+    /// at the first line of the build.
+    pub fn from_display(source: &DisplaySource, columns: usize, rows: usize) -> Terminal {
         let columns = columns.max(1);
         let rows = rows.max(1);
         let config = Config {
@@ -90,7 +111,7 @@ impl Terminal {
         };
         let mut term = Term::new(config, &Size { columns, rows }, VoidListener);
         let mut processor: Processor = Processor::new();
-        processor.advance(&mut term, &Screen::from_output(output).to_ansi());
+        processor.advance(&mut term, &source.ansi);
         // Reflow can leave content the cursor scrolled past in history; show the
         // build from its first line, leaving the rest to scrollback.
         term.scroll_display(Scroll::Top);
