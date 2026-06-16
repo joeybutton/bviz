@@ -17,6 +17,24 @@ it over fetching online; confirm its tag matches the version this repo targets.
 
 See `references/examples.md` for which example demonstrates what.
 
+## Shared crates in this repo — reach for these first
+
+Common gpui mechanics are factored into shared `//ui` crates. Before re-deriving raw
+gpui for one of these, use the wrapper, so every view stays visually coherent and
+behaves consistently:
+
+- `bviz_ui_shell::{run, Chrome}` — window bootstrap + client-side decorations.
+- `bviz_ui_components::{Button, TextInput}` — a button and a focusable text field.
+- `bviz_ui_components::track_drag` — a drag that keeps running outside the window.
+- `bviz_ui_components::load_in_background` — run work off the UI thread, then apply it.
+- `bviz_ui_assets::{text_metrics, shape_line, icon, UI, MONO, load_fonts}` — fonts,
+  text metrics, single-run line shaping, Phosphor icons.
+- `bviz_ui_theme::{colors, mix}` — appearance-aware palette and a blend helper.
+
+The sections below cover each in context. `ui/terminal/src/terminal.rs` and
+`ui/graph/src/main.rs` are the worked examples for everything here; read them rather
+than reinventing a pattern they already show.
+
 ## Mental model: retained state, immediate element tree
 
 This is the one thing to internalize; everything else follows from it.
@@ -135,6 +153,11 @@ automatically. In this repo the font files are downloaded by a Bazel `http_archi
 `data`, and **embedded into the binary** at build time — the `//ui/assets` library's build
 script copies them into `OUT_DIR` so `include_bytes!` can bake them in — so there are no runtime
 file dependencies. See `//ui/assets` and the `inter` / `jetbrains_mono` archives in `MODULE.bazel`.
+A custom element that measures or paints text should resolve its font, size, and line
+height from the *inherited* text style with `bviz_ui_assets::text_metrics(window)` (so it
+renders in the family cascaded to it — overriding to `MONO` only where it must, like
+terminal cells), and shape one styled run with `bviz_ui_assets::shape_line(window, text,
+font, size, color)` instead of hand-building a `TextRun`.
 
 Icons: gpui renders SVGs with `svg().path("…").size(px(16.)).text_color(…)`, loading the path
 through the app's `AssetSource` (`application().with_assets(MyAssets)`) and tinting the result
@@ -216,6 +239,16 @@ handler signature gpui expects. Other handlers (same pattern): `.on_mouse_down(b
 `.on_key_down(..)`, `.hover(|style| style.bg(..))`, `.on_scroll_wheel(..)`. For focus, add
 `.focusable()` / `.track_focus(&handle)`. See `examples/a11y.rs` for a focusable counter.
 
+**Dragging past the window edge.** An element's own `on_mouse_move` is bounds-gated,
+so a drag (a scroll thumb, a text selection, a canvas pan) freezes the moment the
+cursor leaves the window. To keep it live, register *window-global* handlers each
+frame while a drag is in progress — on Wayland the compositor's implicit grab keeps
+delivering the held button's move/up to the focused window. `bviz_ui_components::
+track_drag(window, &view, on_move, on_up)` wraps this; call it from your element's (or
+`canvas`'s) paint while a drag flag is set, so it re-registers each frame — the
+handlers last only the current frame. The terminal uses it for the scroll thumb and
+selection, the graph for panning.
+
 ## Actions, keybindings, and focus
 
 Keyboard interaction goes through actions, not raw key handling. Declare unit actions with
@@ -249,10 +282,16 @@ drawn thumb:
 
 - Paint a thumb sized to the visible fraction and positioned by the scroll offset.
 - Keep its track/thumb geometry on the view; on a left mouse-down hit-test it, grab the
-  thumb (or center it on a track click), then follow `on_mouse_move` / `on_mouse_up`.
-- Map the pixel drag to your scroll model. For a line-based terminal, bridge the track
-  fraction to alacritty's `display_offset` — Zed does this with a `ScrollableHandle`
-  adapter in `crates/terminal_view/src/terminal_scrollbar.rs`.
+  thumb (or center it on a track click). Drive the drag with `bviz_ui_components::
+  track_drag` (see Interactivity) so it keeps following the cursor past the window edge
+  and ends on a release anywhere.
+- Map the pixel drag to your scroll model (a 0..1 track fraction → a target offset). For
+  a line-based terminal, bridge the fraction to alacritty's `display_offset`.
+- To auto-hide: reveal the bar on scroll / drag / gutter-hover, and hide it after an idle
+  delay with `cx.spawn` + `cx.background_executor().timer(..)`; guard the hide with a
+  reveal counter so a later reveal isn't undone by an earlier timer firing.
+
+The terminal's scroll bar (`ui/terminal/src/terminal.rs`) implements all of this.
 
 ## Stateful views vs stateless components
 
@@ -272,6 +311,59 @@ Compose larger UIs from child entities rather than one giant view:
 - Create: `let child = cx.new(|cx| Child::new(cx));` (store the `Entity<Child>` in a field).
 - Render it: add the entity (cloned) as a `.child(self.child.clone())`.
 - Update from outside: `self.child.update(cx, |child, cx| { child.foo = 1; cx.notify(); })`.
+
+## Custom rendering: `canvas` and `Element`
+
+`div()` trees cover most UI, but per-glyph or per-shape rendering — a terminal grid, a
+node graph — needs to paint directly. There are two levels; reach for the lighter one
+first.
+
+**A `canvas`** hands you the laid-out `bounds` and lets you paint into them:
+`canvas(prepaint_fn, paint_fn)`. The prepaint closure captures `bounds` (e.g. to fit
+content to the viewport on the first frame); the paint closure draws with
+`window.paint_quad(quad(..))`, `window.paint_path(..)`, and a shaped line's
+`.paint(origin, ..)`. Both closures are `'static`, so capture **owned snapshots** of what
+you paint — a `Vec` of boxes, a `Palette` of theme-resolved colors — not borrows of the
+view. The graph viewer (`ui/graph/src/main.rs`: `GraphView::graph`, `paint_box`,
+`paint_connector`) is the worked example.
+
+**A custom `Element`** is heavier, for when you also need a typed layout → prepaint →
+paint pipeline. Implement `Element` (plus a trivial `IntoElement`) with two associated
+state types and three methods:
+
+- `request_layout(.., window, cx) -> (LayoutId, RequestLayoutState)` — resolve metrics
+  (see `text_metrics` above), return a `Style` via `window.request_layout(style, [], cx)`,
+  and stash the measured metrics in the layout state.
+- `prepaint(.., bounds, &mut RequestLayoutState, ..) -> PrepaintState` — compute what to
+  paint (shaped lines, background quads) and collect it into the prepaint state.
+- `paint(.., bounds, &mut RequestLayoutState, &mut PrepaintState, ..)` — drain those
+  quads and lines onto the window.
+
+`id()` / `source_location()` return `None`. The terminal (`ui/terminal/src/terminal.rs`:
+`TerminalElement`) is the worked example; the text field's `TextElement` is another.
+
+**Hit-testing.** A `canvas`/`Element` paints one surface, so gpui's per-`div`
+`on_click`/`hover` don't reach what's inside it — hit-test by hand. Store the painted
+geometry on the view each layout (the terminal keeps a `ContentLayout` / `ScrollbarLayout`;
+the graph keeps the viewport `bounds` in an `Rc<Cell<…>>`), then in the mouse handler
+invert the same transform the paint used: the terminal's `cell_at` maps a pixel to a grid
+cell, the graph's `from_screen` + `hit_box` map a pixel to the innermost box.
+
+## Background work: loading off the UI thread
+
+Heavy work — reading and parsing a file, laying out a graph, reconstructing a terminal —
+must not run on the UI thread, or the window won't appear and the first frame freezes.
+Run it on the background executor and apply the result back on the UI thread.
+`bviz_ui_components::load_in_background(cx, work, apply)` wraps the idiom: `work: FnOnce()
+-> T + Send` runs in the background; `apply(&mut View, T, &mut Context)` runs on the UI
+thread, and the helper calls `cx.notify()` for you. It returns a `Task<()>` — **store it
+in a view field**, or dropping it cancels the work.
+
+Pair it with a load-state enum (`Loading` / `Loaded(T)` / `Error(String)`) the view matches
+on in `render`, showing a spinner while loading (`bviz_ui_assets::icon("circle-notch")`
+with `.with_animation(..)`). `GraphView` and `TerminalView` both follow this shape. For
+a one-shot *delay* rather than background work (e.g. an auto-hiding scroll bar), use
+`cx.spawn` + `cx.background_executor().timer(..)` directly instead.
 
 ## Building and running in this repo
 
@@ -307,3 +399,6 @@ Resolve the binary with `bazel cquery --output=files //path:target` after buildi
 - `.flex_col()`/`.flex_row()` do nothing without `.flex()` first.
 - Unsized content collapses; set an explicit size or `size_full()`/`flex_1()` in a flex parent.
 - The element tree is rebuilt every render — hold `Entity<_>` references, never element ones.
+- A `canvas`/`Element` paint closure is `'static` — capture owned snapshots, not view borrows.
+- A background `Task` you don't store is cancelled on drop — keep it in a view field.
+- An element's mouse handlers stop at the window edge — use `track_drag` for a drag that must continue outside.
