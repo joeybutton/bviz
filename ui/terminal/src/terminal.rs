@@ -847,12 +847,13 @@ impl TerminalView {
         let played_color = colors.text;
         let knob_color = colors.text;
 
-        // An interpolated timeline (captured without --show_timestamps) is marked
-        // approximate.
+        // Without --show_timestamps the playhead time is interpolated, so mark the
+        // current time approximate; the total is still bracketed by the build's
+        // start and finish events and needs no mark.
         let readout = if real_time {
             format!("{} / {}", fmt_time(current), fmt_time(duration))
         } else {
-            format!("{} / ~{}", fmt_time(current), fmt_time(duration))
+            format!("~{} / {}", fmt_time(current), fmt_time(duration))
         };
 
         div()
