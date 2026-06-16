@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use bviz_terminal::{
     Cell, Color, Flags, NamedColor, Replay, Rgb, Scroll, SelectionType, Side, Terminal, Url,
 };
-use bviz_ui_components::{load_in_background, track_drag, Button, TextInput};
+use bviz_ui_components::{load_in_background, track_drag, Button, Dropdown, TextInput};
 use bviz_ui_shell::Chrome;
 use gpui::{
     actions, canvas, div, fill, percentage, point, prelude::*, px, relative, rgb, size, Animation,
@@ -102,6 +102,10 @@ pub struct TerminalView {
     playing: bool,
     /// Playback speed multiplier (see [`SPEEDS`]).
     speed: f32,
+    /// The speed selector; its chosen index drives [`speed`](Self::speed).
+    speed_dropdown: Entity<Dropdown>,
+    /// Keeps the subscription that applies the speed dropdown's selection.
+    _speed_observer: Subscription,
     /// While playing, the wall-clock instant playback was last (re)started and the
     /// build time it was at then, so the clock can map elapsed real time to a frame.
     play_anchor: Option<(Instant, f64)>,
@@ -174,12 +178,25 @@ impl TerminalView {
         ]);
         let body_focus = cx.focus_handle();
         body_focus.focus(window, cx);
+        // The speed dropdown is the source of truth for the speed index; applying
+        // its selection keeps the numeric multiplier and the playback clock in sync.
+        let labels = SPEEDS.iter().map(|speed| format!("{}×", *speed as i32));
+        let speed_dropdown = cx.new(|cx| Dropdown::new("speed", labels, 0, cx));
+        let speed_observer = cx.observe(&speed_dropdown, |view, dropdown, cx| {
+            view.speed = SPEEDS[dropdown.read(cx).selected().min(SPEEDS.len() - 1)];
+            if view.playing {
+                view.anchor_clock();
+            }
+            cx.notify();
+        });
         let mut view = Self {
             source: TermSource::Loading,
             _load_task: Task::ready(()),
             current_frame: 0,
             playing: false,
             speed: SPEEDS[0],
+            speed_dropdown,
+            _speed_observer: speed_observer,
             play_anchor: None,
             position: 0.0,
             scrubbing: false,
@@ -589,16 +606,14 @@ impl TerminalView {
         self.seek_frame(frame, cx);
     }
 
-    /// Move `delta` steps through the playback speeds, wrapping around.
+    /// Move `delta` steps through the playback speeds, wrapping around. Drives the
+    /// dropdown, whose observer applies the new speed.
     fn shift_speed(&mut self, delta: isize, cx: &mut Context<Self>) {
         let count = SPEEDS.len() as isize;
-        let current = SPEEDS.iter().position(|&s| s == self.speed).unwrap_or(0) as isize;
+        let current = self.speed_dropdown.read(cx).selected() as isize;
         let next = (current + delta).rem_euclid(count) as usize;
-        self.speed = SPEEDS[next];
-        if self.playing {
-            self.anchor_clock();
-        }
-        cx.notify();
+        self.speed_dropdown
+            .update(cx, |dropdown, cx| dropdown.set_selected(next, cx));
     }
 
     /// Begin a scrubber drag: pause and jump to the pressed position.
@@ -839,7 +854,6 @@ impl TerminalView {
         let start_view = view.clone();
         let play_view = view.clone();
         let end_view = view.clone();
-        let speed_view = view.clone();
         let bounds_view = view.clone();
         let drag_view = view;
 
@@ -941,13 +955,7 @@ impl TerminalView {
                     .text_size(px(12.))
                     .child(SharedString::from(readout)),
             )
-            .child(
-                Button::new("speed", move |_, _, cx| {
-                    speed_view.update(cx, |this, cx| this.shift_speed(1, cx))
-                })
-                .ghost()
-                .label(format!("{}×", self.speed as i32)),
-            )
+            .child(self.speed_dropdown.clone())
             .into_any_element()
     }
 }
