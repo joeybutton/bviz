@@ -3,12 +3,12 @@
 //! from each rule's inputs to the rule. An input naming a target absent from the
 //! stream is left unwired rather than synthesizing a phantom node.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use bazel_query_proto::blaze_query::{target::Discriminator, Target};
 
 use crate::graph::Graph;
-use crate::label::{package_box, package_of};
+use crate::label::{self, PackageHierarchy};
 
 pub fn build(targets: &[Target]) -> Graph {
     build_targets(&targets.iter().collect::<Vec<_>>())
@@ -30,9 +30,15 @@ pub(crate) fn label_and_kind(target: &Target) -> Option<(&str, &'static str)> {
 
 pub(crate) fn build_targets(targets: &[&Target]) -> Graph {
     let mut graph = Graph::new();
-    let mut package_boxes: HashSet<String> = HashSet::new();
     // Node id per label, so a label seen more than once maps to one node.
     let mut node_by_label: HashMap<String, String> = HashMap::new();
+
+    let packages: BTreeSet<(String, String)> = targets
+        .iter()
+        .filter_map(|t| label_and_kind(t))
+        .filter_map(|(label, _)| label::package_key(label))
+        .collect();
+    let hierarchy = PackageHierarchy::build(&packages, &mut graph);
 
     // Pass 1: one leaf node per target under its package container.
     for target in targets {
@@ -43,8 +49,8 @@ pub(crate) fn build_targets(targets: &[&Target]) -> Graph {
             continue;
         }
         let node_id = format!("q:{label}");
-        let parent = package_of(label).map(|pkg| package_box(pkg, &mut package_boxes, &mut graph));
-        graph.add_node(node_id.clone(), label, kind, parent);
+        let parent = hierarchy.package_box(label).map(str::to_string);
+        graph.add_node(node_id.clone(), label::target_label(label), kind, parent);
         node_by_label.insert(label.to_string(), node_id);
     }
 
@@ -134,7 +140,7 @@ mod tests {
         assert_eq!(find(&graph, "pkg:foo").label, "//foo");
         let node = find(&graph, "q://foo:app");
         assert_eq!(node.kind, "target");
-        assert_eq!(node.label, "//foo:app");
+        assert_eq!(node.label, ":app");
         assert_eq!(parent_of(&graph, "q://foo:app"), Some("pkg:foo"));
     }
 

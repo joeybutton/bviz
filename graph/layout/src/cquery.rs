@@ -12,13 +12,13 @@
 //! label-only `rule_input` and lands on the dependency's target container, since
 //! the configuration of each dependency is then unknown.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use bazel_query_proto::analysis::{ConfiguredTarget, CqueryResult};
-use bazel_query_proto::blaze_query::{target::Discriminator, Target};
+use bazel_query_proto::blaze_query::target::Discriminator;
 
 use crate::graph::Graph;
-use crate::label::{package_box, package_of};
+use crate::label::{self, PackageHierarchy};
 use crate::query::label_and_kind;
 
 pub fn build(results: &[CqueryResult]) -> Graph {
@@ -31,13 +31,26 @@ pub fn build(results: &[CqueryResult]) -> Graph {
     let cts: Vec<&ConfiguredTarget> = results.iter().flat_map(|r| r.results.iter()).collect();
 
     let mut graph = Graph::new();
-    let mut package_boxes: HashSet<String> = HashSet::new();
     // Rule label -> its target container id.
     let mut target_box: HashMap<String, String> = HashMap::new();
     // Non-rule leaf label -> its node id.
     let mut leaf_id: HashMap<String, String> = HashMap::new();
     // The (label, configuration id) pairs that have a configured-target node.
     let mut ct_ids: HashSet<(String, u32)> = HashSet::new();
+
+    let packages: BTreeSet<(String, String)> = cts
+        .iter()
+        .filter_map(|ct| ct.target.as_ref())
+        .filter_map(|target| {
+            if let Ok(Discriminator::Rule) = Discriminator::try_from(target.r#type) {
+                Some(target.rule.as_ref()?.name.as_str())
+            } else {
+                label_and_kind(target).map(|(label, _)| label)
+            }
+        })
+        .filter_map(label::package_key)
+        .collect();
+    let hierarchy = PackageHierarchy::build(&packages, &mut graph);
 
     // Pass 1: a rule becomes a target container plus a configured-target leaf
     // per configuration; any other target becomes one leaf per label.
@@ -51,10 +64,9 @@ pub fn build(results: &[CqueryResult]) -> Graph {
             };
             let label = rule.name.as_str();
             if !target_box.contains_key(label) {
-                let parent =
-                    package_of(label).map(|p| package_box(p, &mut package_boxes, &mut graph));
+                let parent = hierarchy.package_box(label).map(str::to_string);
                 let id = format!("q:target:{label}");
-                graph.add_node(id.clone(), label, "target", parent);
+                graph.add_node(id.clone(), label::target_label(label), "target", parent);
                 target_box.insert(label.to_string(), id);
             }
             let config_id = ct.configuration_id;
@@ -72,10 +84,9 @@ pub fn build(results: &[CqueryResult]) -> Graph {
             }
         } else if let Some((label, kind)) = label_and_kind(target) {
             if !leaf_id.contains_key(label) {
-                let parent =
-                    package_of(label).map(|p| package_box(p, &mut package_boxes, &mut graph));
+                let parent = hierarchy.package_box(label).map(str::to_string);
                 let id = format!("q:{label}");
-                graph.add_node(id.clone(), label, kind, parent);
+                graph.add_node(id.clone(), label::target_label(label), kind, parent);
                 leaf_id.insert(label.to_string(), id);
             }
         }
@@ -180,7 +191,7 @@ mod tests {
     use super::*;
     use crate::graph::Node;
     use bazel_query_proto::analysis::Configuration;
-    use bazel_query_proto::blaze_query::{ConfiguredRuleInput, Rule, SourceFile};
+    use bazel_query_proto::blaze_query::{ConfiguredRuleInput, Rule, SourceFile, Target};
 
     fn rule_ct(name: &str, config_id: u32) -> ConfiguredTarget {
         ConfiguredTarget {
@@ -267,7 +278,7 @@ mod tests {
 
         let container = find(&graph, "q:target://foo:app");
         assert_eq!(container.kind, "target");
-        assert_eq!(container.label, "//foo:app");
+        assert_eq!(container.label, ":app");
         assert_eq!(container.parent.as_deref(), Some("pkg:foo"));
 
         let ct1 = find(&graph, "q:ct://foo:app#1");

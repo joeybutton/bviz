@@ -18,14 +18,14 @@
 //! transitive member is wired straight to the consuming action as a
 //! `member -> consumer` edge.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use bazel_query_proto::analysis::{
     Action, ActionGraphContainer, Artifact, Configuration, DepSetOfFiles, PathFragment, Target,
 };
 
 use crate::graph::Graph;
-use crate::label::{main_repo_package, main_repo_package_path, package_box, package_of};
+use crate::label::{self, PackageHierarchy};
 
 pub fn build(containers: &[ActionGraphContainer], external_sources: bool) -> Graph {
     let mut artifacts: Vec<&Artifact> = Vec::new();
@@ -51,16 +51,11 @@ pub fn build(containers: &[ActionGraphContainer], external_sources: bool) -> Gra
         configurations.iter().map(|c| (c.id, *c)).collect();
     let depset_by_id: HashMap<u32, &DepSetOfFiles> = dep_sets.iter().map(|d| (d.id, *d)).collect();
 
-    // Main-repo package paths known from target labels, used to resolve each
-    // source to its longest-enclosing package. External targets contribute no
-    // path here: only `//`-prefixed labels name a main-repo source directory.
-    let known_packages: HashSet<String> = targets
-        .iter()
-        .filter_map(|t| main_repo_package_path(&t.label))
-        .collect();
-
     let mut graph = Graph::new();
-    let mut package_boxes: HashSet<String> = HashSet::new();
+    let packages: BTreeSet<(String, String)> =
+        targets.iter().filter_map(|t| label::package_key(&t.label)).collect();
+    let hierarchy = PackageHierarchy::build(&packages, &mut graph);
+
     let mut target_boxes: HashSet<u32> = HashSet::new();
     let mut ct_boxes: HashSet<String> = HashSet::new();
     let source_nodes: HashSet<u32> = HashSet::new();
@@ -72,7 +67,7 @@ pub fn build(containers: &[ActionGraphContainer], external_sources: bool) -> Gra
         let ct_id = configured_target_box(
             action,
             &mut graph,
-            &mut package_boxes,
+            &hierarchy,
             &mut target_boxes,
             &mut ct_boxes,
             &target_by_id,
@@ -102,8 +97,7 @@ pub fn build(containers: &[ActionGraphContainer], external_sources: bool) -> Gra
     let mut wiring = Wiring {
         seen_edge: HashSet::new(),
         source_nodes,
-        package_boxes,
-        known_packages,
+        hierarchy: &hierarchy,
         producer_node_id,
         depset_by_id,
         artifact_by_id,
@@ -125,11 +119,7 @@ pub fn build(containers: &[ActionGraphContainer], external_sources: bool) -> Gra
 struct Wiring<'a> {
     seen_edge: HashSet<(String, String)>,
     source_nodes: HashSet<u32>,
-    /// Package container ids already created, deduped across both passes.
-    package_boxes: HashSet<String>,
-    /// Main-repo package paths derived from target labels; a source nests under
-    /// the longest of these that encloses its directory.
-    known_packages: HashSet<String>,
+    hierarchy: &'a PackageHierarchy,
     producer_node_id: HashMap<u32, String>,
     depset_by_id: HashMap<u32, &'a DepSetOfFiles>,
     artifact_by_id: HashMap<u32, &'a Artifact>,
@@ -181,8 +171,8 @@ impl Wiring<'_> {
                 None => return,
             }
         } else {
-            let parent =
-                source_package_box(&path, &self.known_packages, &mut self.package_boxes, graph);
+            let dir = path.rsplit_once('/').map(|(d, _)| d).unwrap_or("");
+            let parent = self.hierarchy.enclosing_box(dir).map(str::to_string);
             source_node(
                 artifact_id,
                 parent,
@@ -205,7 +195,7 @@ impl Wiring<'_> {
 fn configured_target_box(
     action: &Action,
     graph: &mut Graph,
-    package_boxes: &mut HashSet<String>,
+    hierarchy: &PackageHierarchy,
     target_boxes: &mut HashSet<u32>,
     ct_boxes: &mut HashSet<String>,
     target_by_id: &HashMap<u32, &Target>,
@@ -221,15 +211,12 @@ fn configured_target_box(
 
     let target_node_id = format!("target{target_id}");
     if target_boxes.insert(target_id) {
-        let label = target_by_id
+        let full = target_by_id
             .get(&target_id)
             .map(|t| t.label.clone())
             .unwrap_or_else(|| format!("target {target_id}"));
-        let package = target_by_id
-            .get(&target_id)
-            .and_then(|t| package_of(&t.label))
-            .map(|pkg| package_box(pkg, package_boxes, graph));
-        graph.add_node(target_node_id.clone(), label, "target", package);
+        let package = hierarchy.package_box(&full).map(str::to_string);
+        graph.add_node(target_node_id.clone(), label::target_label(&full), "target", package);
     }
 
     let label = config_by_id
@@ -264,36 +251,6 @@ fn source_node(
         );
     }
     node_id
-}
-
-/// The package container a source belongs to: the longest known main-repo
-/// package whose path equals the source's directory or is a parent of it.
-/// Returns `None` when no known package encloses the source, leaving it at the
-/// root. External sources never match, since their dirs (`external/...`) are not
-/// main-repo package paths.
-fn source_package_box(
-    path: &str,
-    known_packages: &HashSet<String>,
-    package_boxes: &mut HashSet<String>,
-    graph: &mut Graph,
-) -> Option<String> {
-    let dir = path.rsplit_once('/').map(|(d, _)| d).unwrap_or("");
-    let best = known_packages
-        .iter()
-        .filter(|p| encloses(p, dir))
-        .max_by_key(|p| (p.len(), p.as_str()))?;
-    Some(package_box(main_repo_package(best), package_boxes, graph))
-}
-
-/// Whether package path `pkg` encloses directory `dir`: they are equal, or `dir`
-/// lies under `pkg` at a path-segment boundary. The root package `""` encloses
-/// every directory.
-fn encloses(pkg: &str, dir: &str) -> bool {
-    pkg.is_empty()
-        || dir == pkg
-        || dir
-            .strip_prefix(pkg)
-            .is_some_and(|rest| rest.starts_with('/'))
 }
 
 fn basename(
