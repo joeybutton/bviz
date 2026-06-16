@@ -149,6 +149,8 @@ fn parse_marker(window: &[u8]) -> Option<u32> {
     Some((h * 3600 + m * 60 + s) as u32)
 }
 
+const SECONDS_PER_DAY: f64 = 24.0 * 3600.0;
+
 /// Just before midnight and just after, for telling a real day rollover from a
 /// stray out-of-order marker.
 const LATE_NIGHT: u32 = 23 * 3600;
@@ -173,7 +175,7 @@ fn marker_points(markers: &[Marker], ends: &[usize]) -> Vec<(usize, f64)> {
                 }
             }
         }
-        let abs = day as f64 * 86_400.0 + marker.secs_of_day as f64;
+        let abs = day as f64 * SECONDS_PER_DAY + marker.secs_of_day as f64;
         if abs < last_abs {
             continue;
         }

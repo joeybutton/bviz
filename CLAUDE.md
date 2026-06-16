@@ -81,6 +81,12 @@ Interactive visualization and inspection tool for Bazel builds.
   and is the first thing a later refactor deletes — if a comment is not
   load-bearing, leave it out. Citing an external source (paper, spec, issue) is
   fine.
+- Avoid unnamed magic numbers: bind a non-obvious literal to a named constant
+  (or a `let` with a descriptive name) at its definition, so its meaning is
+  stated once where the value lives. A self-evident literal in context (an index
+  `0`, a `* 2`, a percentage `0.5` whose role is clear from the expression) needs
+  no name; a bare `86_400`, `4096`, or `0.85` does. This pairs with the comment
+  rule above — name the value rather than annotating the literal from afar.
 - Only rewrite history that has not been pushed to a remote, and avoid
   rewriting the main branch even then. When you do reshape history (reword,
   squash, drop, reorder), use rebase or cherry-pick and resolve conflicts through
