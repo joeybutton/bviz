@@ -7,13 +7,13 @@ use std::time::Duration;
 use bviz_terminal::{
     BuildOutput, Cell, Color, Flags, NamedColor, Rgb, Scroll, SelectionType, Side, Terminal, Url,
 };
-use bviz_ui_components::{Button, TextInput};
+use bviz_ui_components::{Button, TextInput, track_drag};
 use bviz_ui_shell::Chrome;
 use gpui::{
-    App, Bounds, ClipboardItem, Context, DispatchPhase, Element, Entity, FocusHandle, Focusable,
-    Font, FontStyle, FontWeight, GlobalElementId, InspectorElementId, IntoElement, KeyBinding,
-    LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point,
-    Render, Rgba, ScrollWheelEvent, ShapedLine, SharedString, StrikethroughStyle, Style,
+    App, Bounds, ClipboardItem, Context, Element, Entity, FocusHandle, Focusable, Font, FontStyle,
+    FontWeight, GlobalElementId, InspectorElementId, IntoElement, KeyBinding, LayoutId, MouseButton,
+    MouseDownEvent, MouseMoveEvent, PaintQuad, Pixels, Point, Render, Rgba, ScrollWheelEvent,
+    ShapedLine, SharedString, StrikethroughStyle, Style,
     Subscription, TextRun, UnderlineStyle, Window, WindowAppearance, actions, div, fill, point,
     prelude::*, px, relative, rgb, size,
 };
@@ -842,61 +842,48 @@ impl Element for TerminalElement {
         }
 
         // While dragging the thumb, follow and end the drag with window-global
-        // handlers so it keeps working when the cursor leaves the window (Wayland
-        // grabs the pointer for the held button and still delivers move/up here).
+        // handlers so it keeps working when the cursor leaves the window.
         if self.view.read(cx).drag_grab.is_some() {
-            let view = self.view.clone();
-            window.on_mouse_event(move |event: &MouseMoveEvent, phase, _, cx| {
-                if phase == DispatchPhase::Bubble {
-                    view.update(cx, |view, cx| view.drag_to(f32::from(event.position.y), cx));
-                }
-            });
-            let view = self.view.clone();
-            window.on_mouse_event(move |_: &MouseUpEvent, phase, _, cx| {
-                if phase == DispatchPhase::Bubble {
-                    view.update(cx, |view, cx| {
-                        if view.drag_grab.take().is_some() {
-                            // Keep the bar up briefly after the drag, then hide.
-                            view.reveal_scrollbar(cx);
-                        }
-                    });
-                }
-            });
+            track_drag(
+                window,
+                &self.view,
+                |view, event, cx| view.drag_to(f32::from(event.position.y), cx),
+                |view, _, cx| {
+                    if view.drag_grab.take().is_some() {
+                        // Keep the bar up briefly after the drag, then hide.
+                        view.reveal_scrollbar(cx);
+                    }
+                },
+            );
         }
 
-        // Likewise follow and end a text-selection drag with window-global
-        // handlers, so dragging past the window edge keeps extending the
-        // selection and a release outside still ends it.
+        // Likewise follow and end a text-selection drag, so dragging past the
+        // window edge keeps extending the selection and a release outside still
+        // ends it.
         if self.view.read(cx).selecting {
-            let view = self.view.clone();
-            window.on_mouse_event(move |event: &MouseMoveEvent, phase, _, cx| {
-                if phase == DispatchPhase::Bubble {
-                    view.update(cx, |view, cx| view.selection_drag_to(event.position, cx));
-                }
-            });
-            let view = self.view.clone();
-            window.on_mouse_event(move |_: &MouseUpEvent, phase, _, cx| {
-                if phase == DispatchPhase::Bubble {
-                    view.update(cx, |view, cx| {
-                        if view.selecting {
-                            view.selecting = false;
-                            // A press that did not drag (no selection text) and
-                            // landed on a URL opens it.
-                            if let Some(url) = view.pressed_url.take() {
-                                let dragged = view
-                                    .terminal
-                                    .as_ref()
-                                    .and_then(Terminal::selection_text)
-                                    .is_some();
-                                if !dragged {
-                                    cx.open_url(&url);
-                                }
+            track_drag(
+                window,
+                &self.view,
+                |view, event, cx| view.selection_drag_to(event.position, cx),
+                |view, _, cx| {
+                    if view.selecting {
+                        view.selecting = false;
+                        // A press that did not drag (no selection text) and
+                        // landed on a URL opens it.
+                        if let Some(url) = view.pressed_url.take() {
+                            let dragged = view
+                                .terminal
+                                .as_ref()
+                                .and_then(Terminal::selection_text)
+                                .is_some();
+                            if !dragged {
+                                cx.open_url(&url);
                             }
-                            cx.notify();
                         }
-                    });
-                }
-            });
+                        cx.notify();
+                    }
+                },
+            );
         }
     }
 }
