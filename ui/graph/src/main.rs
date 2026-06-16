@@ -764,9 +764,11 @@ fn hit_box(boxes: &[bviz_graph_layout::Box], gx: f32, gy: f32) -> Option<&bviz_g
 
 fn main() {
     let path = std::env::args().nth(1);
-    bviz_ui_shell::run("bazel_viz graph", move |window, cx| {
-        cx.new(|cx| GraphView::new(path, window, cx))
-    });
+    bviz_ui_shell::run(
+        "bazel_viz graph",
+        size(px(1280.), px(820.)),
+        move |window, cx| cx.new(|cx| GraphView::new(path, window, cx)),
+    );
 }
 
 #[cfg(test)]

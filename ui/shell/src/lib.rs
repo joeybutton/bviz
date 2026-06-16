@@ -5,8 +5,8 @@ mod chrome;
 pub use chrome::Chrome;
 
 use gpui::{
-    App, Application, Bounds, KeyBinding, Render, TitlebarOptions, WindowBounds, WindowDecorations,
-    WindowOptions, actions, px, size,
+    App, Application, Bounds, KeyBinding, Pixels, Render, Size, TitlebarOptions, WindowBounds,
+    WindowDecorations, WindowOptions, actions,
 };
 
 actions!(ui_shell, [Quit, CloseWindow, Tab, TabPrev]);
@@ -36,9 +36,9 @@ pub fn setup(cx: &mut App) {
 }
 
 /// Run an app: install the asset source, run `setup`, and open a single decorated
-/// window whose root view comes from `build_root`. Wrap the view's body in
-/// [`Chrome`] to get the decorations.
-pub fn run<V, F>(app_id: impl Into<String>, build_root: F)
+/// floating window of `window_size` whose root view comes from `build_root`. Wrap
+/// the view's body in [`Chrome`] to get the decorations.
+pub fn run<V, F>(app_id: impl Into<String>, window_size: Size<Pixels>, build_root: F)
 where
     V: 'static + Render,
     F: 'static + FnOnce(&mut gpui::Window, &mut App) -> gpui::Entity<V>,
@@ -46,14 +46,13 @@ where
     let app_id = app_id.into();
     application().run(move |cx: &mut App| {
         setup(cx);
-        // Open maximized so the window fills the active monitor regardless of
-        // resolution. The compositor picks the monitor (correct on multi-head
-        // and on Wayland, where the display list isn't populated yet at startup);
-        // the bounds are only the size to restore to when un-maximized.
-        let restore = Bounds::centered(None, size(px(1100.), px(760.)), cx);
+        // A floating window of the requested size, centered on the active display.
+        // The size is absolute rather than a fraction of the resolution, so it
+        // works even on Wayland, where the display list is still empty at startup.
+        let bounds = Bounds::centered(None, window_size, cx);
         cx.open_window(
             WindowOptions {
-                window_bounds: Some(WindowBounds::Maximized(restore)),
+                window_bounds: Some(WindowBounds::Windowed(bounds)),
                 titlebar: Some(TitlebarOptions {
                     title: Some(app_id.clone().into()),
                     ..Default::default()

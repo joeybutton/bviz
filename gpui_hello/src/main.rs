@@ -2,6 +2,7 @@ use bviz_ui_components::{Button, TextInput};
 use bviz_ui_shell::Chrome;
 use gpui::{
     Context, Entity, FocusHandle, IntoElement, Render, SharedString, Window, div, prelude::*, px,
+    size,
 };
 
 /// A small demo view: a greeting driven by a text field and a button, wrapped in
@@ -75,7 +76,7 @@ impl Render for HelloWorld {
 }
 
 fn main() {
-    bviz_ui_shell::run("bazel_viz", |window, cx| {
+    bviz_ui_shell::run("bazel_viz", size(px(720.), px(540.)), |window, cx| {
         cx.new(|cx| HelloWorld::new(window, cx))
     });
 }

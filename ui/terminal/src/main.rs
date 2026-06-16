@@ -5,7 +5,7 @@ mod terminal;
 
 use std::process::ExitCode;
 
-use gpui::prelude::*;
+use gpui::{prelude::*, px, size};
 use terminal::TerminalView;
 
 fn main() -> ExitCode {
@@ -27,8 +27,10 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    bviz_ui_shell::run("bazel_term", move |window, cx| {
-        cx.new(|cx| TerminalView::new(output, window, cx))
-    });
+    bviz_ui_shell::run(
+        "bazel_term",
+        size(px(1100.), px(720.)),
+        move |window, cx| cx.new(|cx| TerminalView::new(output, window, cx)),
+    );
     ExitCode::SUCCESS
 }
