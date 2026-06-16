@@ -28,6 +28,11 @@ pub fn build(results: &[CqueryResult]) -> Graph {
         .filter(|c| !c.mnemonic.is_empty())
         .map(|c| (c.id, c.mnemonic.clone()))
         .collect();
+    let config_checksum: HashMap<u32, String> = results
+        .iter()
+        .flat_map(|r| r.configurations.iter())
+        .map(|c| (c.id, c.checksum.clone()))
+        .collect();
     let cts: Vec<&ConfiguredTarget> = results.iter().flat_map(|r| r.results.iter()).collect();
 
     let mut graph = Graph::new();
@@ -35,8 +40,8 @@ pub fn build(results: &[CqueryResult]) -> Graph {
     let mut target_box: HashMap<String, String> = HashMap::new();
     // Non-rule leaf label -> its node id.
     let mut leaf_id: HashMap<String, String> = HashMap::new();
-    // The (label, configuration id) pairs that have a configured-target node.
-    let mut ct_ids: HashSet<(String, u32)> = HashSet::new();
+    // The (label, configuration key) pairs that have a configured-target node.
+    let mut ct_ids: HashSet<(String, String)> = HashSet::new();
 
     let packages: BTreeSet<(String, String)> = cts
         .iter()
@@ -65,18 +70,19 @@ pub fn build(results: &[CqueryResult]) -> Graph {
             let label = rule.name.as_str();
             if !target_box.contains_key(label) {
                 let parent = hierarchy.package_box(label).map(str::to_string);
-                let id = format!("q:target:{label}");
+                let id = format!("target:{label}");
                 graph.add_node(id.clone(), label::target_label(label), "target", parent);
                 target_box.insert(label.to_string(), id);
             }
             let config_id = ct.configuration_id;
-            if ct_ids.insert((label.to_string(), config_id)) {
+            let key = config_key(config_id, &config_checksum);
+            if ct_ids.insert((label.to_string(), key.clone())) {
                 let mnemonic = config_mnemonic
                     .get(&config_id)
                     .cloned()
                     .unwrap_or_else(|| format!("config {config_id}"));
                 graph.add_node(
-                    ct_node_id(label, config_id),
+                    ct_node_id(label, &key),
                     mnemonic,
                     "configured-target",
                     Some(target_box[label].clone()),
@@ -85,7 +91,7 @@ pub fn build(results: &[CqueryResult]) -> Graph {
         } else if let Some((label, kind)) = label_and_kind(target) {
             if !leaf_id.contains_key(label) {
                 let parent = hierarchy.package_box(label).map(str::to_string);
-                let id = format!("q:{label}");
+                let id = format!("target:{label}");
                 graph.add_node(id.clone(), label::target_label(label), kind, parent);
                 leaf_id.insert(label.to_string(), id);
             }
@@ -105,7 +111,7 @@ pub fn build(results: &[CqueryResult]) -> Graph {
         let Some(rule) = target.rule.as_ref() else {
             continue;
         };
-        let consumer = ct_node_id(&rule.name, ct.configuration_id);
+        let consumer = ct_node_id(&rule.name, &config_key(ct.configuration_id, &config_checksum));
         if rule.configured_rule_input.is_empty() {
             for dep_label in &rule.rule_input {
                 if let Some(dep) = resolve_label_dep(dep_label, &target_box, &leaf_id) {
@@ -120,6 +126,7 @@ pub fn build(results: &[CqueryResult]) -> Graph {
                 if let Some(dep) = resolve_configured_dep(
                     dep_label,
                     input.configuration_id,
+                    &config_checksum,
                     &ct_ids,
                     &target_box,
                     &leaf_id,
@@ -133,8 +140,17 @@ pub fn build(results: &[CqueryResult]) -> Graph {
     graph
 }
 
-fn ct_node_id(label: &str, config_id: u32) -> String {
-    format!("q:ct:{label}#{config_id}")
+fn ct_node_id(label: &str, config_key: &str) -> String {
+    format!("ct:{label}#{config_key}")
+}
+
+/// The query-independent key of a configuration: its checksum, or `cfg{id}` when
+/// no checksum is recorded for it.
+fn config_key(config_id: u32, config_checksum: &HashMap<u32, String>) -> String {
+    match config_checksum.get(&config_id) {
+        Some(checksum) if !checksum.is_empty() => checksum.clone(),
+        _ => format!("cfg{config_id}"),
+    }
 }
 
 /// The node a configuration-resolved dependency lands on: the dependency's
@@ -145,14 +161,16 @@ fn ct_node_id(label: &str, config_id: u32) -> String {
 fn resolve_configured_dep(
     dep_label: &str,
     dep_config: Option<u32>,
-    ct_ids: &HashSet<(String, u32)>,
+    config_checksum: &HashMap<u32, String>,
+    ct_ids: &HashSet<(String, String)>,
     target_box: &HashMap<String, String>,
     leaf_id: &HashMap<String, String>,
 ) -> Option<String> {
     match dep_config {
         Some(config_id) if config_id != 0 => {
-            if ct_ids.contains(&(dep_label.to_string(), config_id)) {
-                Some(ct_node_id(dep_label, config_id))
+            let key = config_key(config_id, config_checksum);
+            if ct_ids.contains(&(dep_label.to_string(), key.clone())) {
+                Some(ct_node_id(dep_label, &key))
             } else {
                 target_box.get(dep_label).cloned()
             }
@@ -246,6 +264,7 @@ mod tests {
         Configuration {
             id,
             mnemonic: mnemonic.to_string(),
+            checksum: format!("ck{id}"),
             ..Default::default()
         }
     }
@@ -276,23 +295,23 @@ mod tests {
             vec![config(1, "k8-fastbuild"), config(2, "local_gnu-opt-exec")],
         )]);
 
-        let container = find(&graph, "q:target://foo:app");
+        let container = find(&graph, "target://foo:app");
         assert_eq!(container.kind, "target");
         assert_eq!(container.label, ":app");
         assert_eq!(container.parent.as_deref(), Some("pkg:foo"));
 
-        let ct1 = find(&graph, "q:ct://foo:app#1");
+        let ct1 = find(&graph, "ct://foo:app#ck1");
         assert_eq!(ct1.kind, "configured-target");
         assert_eq!(ct1.label, "k8-fastbuild");
-        assert_eq!(ct1.parent.as_deref(), Some("q:target://foo:app"));
-        assert_eq!(find(&graph, "q:ct://foo:app#2").label, "local_gnu-opt-exec");
+        assert_eq!(ct1.parent.as_deref(), Some("target://foo:app"));
+        assert_eq!(find(&graph, "ct://foo:app#ck2").label, "local_gnu-opt-exec");
     }
 
     #[test]
     fn configuration_without_a_mnemonic_falls_back_to_its_id() {
         let graph = build(&[result(vec![rule_ct("//foo:app", 7)], vec![])]);
 
-        assert_eq!(find(&graph, "q:ct://foo:app#7").label, "config 7");
+        assert_eq!(find(&graph, "ct://foo:app#cfg7").label, "config 7");
     }
 
     #[test]
@@ -313,8 +332,8 @@ mod tests {
 
         // Edges run dependency -> dependent, as in the query and aquery builders.
         let edges = edges(&graph);
-        assert!(edges.contains(&("q:ct://foo:lib#2", "q:ct://foo:app#1")));
-        assert!(edges.contains(&("q:ct://foo:lib#1", "q:ct://foo:app#1")));
+        assert!(edges.contains(&("ct://foo:lib#ck2", "ct://foo:app#ck1")));
+        assert!(edges.contains(&("ct://foo:lib#ck1", "ct://foo:app#ck1")));
     }
 
     #[test]
@@ -329,7 +348,7 @@ mod tests {
             vec![config(1, "target")],
         )]);
 
-        assert!(edges(&graph).contains(&("q:target://foo:lib", "q:ct://foo:app#1")));
+        assert!(edges(&graph).contains(&("target://foo:lib", "ct://foo:app#ck1")));
     }
 
     #[test]
@@ -344,8 +363,8 @@ mod tests {
             vec![config(1, "target")],
         )]);
 
-        assert!(!graph.nodes.iter().any(|n| n.id == "q:ct://foo:lib#2"));
-        assert!(edges(&graph).contains(&("q:target://foo:lib", "q:ct://foo:app#1")));
+        assert!(!graph.nodes.iter().any(|n| n.id == "ct://foo:lib#cfg2"));
+        assert!(edges(&graph).contains(&("target://foo:lib", "ct://foo:app#ck1")));
     }
 
     #[test]
@@ -358,9 +377,9 @@ mod tests {
             vec![config(1, "target")],
         )]);
 
-        let leaf = find(&graph, "q://foo:in.c");
+        let leaf = find(&graph, "target://foo:in.c");
         assert_eq!(leaf.kind, "source");
-        assert!(edges(&graph).contains(&("q://foo:in.c", "q:ct://foo:app#1")));
+        assert!(edges(&graph).contains(&("target://foo:in.c", "ct://foo:app#ck1")));
     }
 
     #[test]
@@ -375,7 +394,7 @@ mod tests {
             vec![config(1, "target")],
         )]);
 
-        assert!(edges(&graph).contains(&("q://foo:in.c", "q:ct://foo:app#1")));
+        assert!(edges(&graph).contains(&("target://foo:in.c", "ct://foo:app#ck1")));
     }
 
     #[test]

@@ -48,7 +48,7 @@ pub(crate) fn build_targets(targets: &[&Target]) -> Graph {
         if node_by_label.contains_key(label) {
             continue;
         }
-        let node_id = format!("q:{label}");
+        let node_id = format!("target:{label}");
         let parent = hierarchy.package_box(label).map(str::to_string);
         graph.add_node(node_id.clone(), label::target_label(label), kind, parent);
         node_by_label.insert(label.to_string(), node_id);
@@ -138,18 +138,18 @@ mod tests {
 
         assert_eq!(find(&graph, "pkg:foo").kind, "package");
         assert_eq!(find(&graph, "pkg:foo").label, "//foo");
-        let node = find(&graph, "q://foo:app");
+        let node = find(&graph, "target://foo:app");
         assert_eq!(node.kind, "target");
         assert_eq!(node.label, ":app");
-        assert_eq!(parent_of(&graph, "q://foo:app"), Some("pkg:foo"));
+        assert_eq!(parent_of(&graph, "target://foo:app"), Some("pkg:foo"));
     }
 
     #[test]
     fn source_and_generated_files_get_their_kinds() {
         let graph = build(&[source("//foo:in.c"), generated("//foo:out.o")]);
 
-        assert_eq!(find(&graph, "q://foo:in.c").kind, "source");
-        assert_eq!(find(&graph, "q://foo:out.o").kind, "artifact");
+        assert_eq!(find(&graph, "target://foo:in.c").kind, "source");
+        assert_eq!(find(&graph, "target://foo:out.o").kind, "artifact");
     }
 
     #[test]
@@ -157,14 +157,14 @@ mod tests {
         // Input -> dependent: the producer is `from`, the consuming rule is `to`.
         let graph = build(&[source("//foo:in.c"), rule("//foo:app", &["//foo:in.c"])]);
 
-        assert!(edges(&graph).contains(&("q://foo:in.c", "q://foo:app")));
+        assert!(edges(&graph).contains(&("target://foo:in.c", "target://foo:app")));
     }
 
     #[test]
     fn rule_input_to_absent_label_is_dropped() {
         let graph = build(&[rule("//foo:app", &["//bar:missing"])]);
 
-        assert!(!graph.nodes.iter().any(|n| n.id == "q://bar:missing"));
+        assert!(!graph.nodes.iter().any(|n| n.id == "target://bar:missing"));
         assert!(edges(&graph).is_empty());
     }
 
@@ -172,10 +172,10 @@ mod tests {
     fn external_target_nests_in_repo_qualified_package() {
         let graph = build(&[rule("//foo:x", &[]), rule("@somerepo//foo:y", &[])]);
 
-        assert_eq!(parent_of(&graph, "q://foo:x"), Some("pkg:foo"));
+        assert_eq!(parent_of(&graph, "target://foo:x"), Some("pkg:foo"));
         assert_eq!(find(&graph, "pkg:foo").label, "//foo");
 
-        let external = parent_of(&graph, "q:@somerepo//foo:y").unwrap();
+        let external = parent_of(&graph, "target:@somerepo//foo:y").unwrap();
         assert_ne!(external, "pkg:foo");
         assert_eq!(find(&graph, external).label, "@somerepo//foo");
     }

@@ -56,9 +56,9 @@ pub fn build(containers: &[ActionGraphContainer], external_sources: bool) -> Gra
         targets.iter().filter_map(|t| label::package_key(&t.label)).collect();
     let hierarchy = PackageHierarchy::build(&packages, &mut graph);
 
-    let mut target_boxes: HashSet<u32> = HashSet::new();
+    let mut target_boxes: HashSet<String> = HashSet::new();
     let mut ct_boxes: HashSet<String> = HashSet::new();
-    let source_nodes: HashSet<u32> = HashSet::new();
+    let source_nodes: HashSet<String> = HashSet::new();
     // Per produced artifact, the leaf node that represents it.
     let mut producer_node_id: HashMap<u32, String> = HashMap::new();
 
@@ -118,7 +118,7 @@ pub fn build(containers: &[ActionGraphContainer], external_sources: bool) -> Gra
 /// Mutable state threaded through the recursive input wiring.
 struct Wiring<'a> {
     seen_edge: HashSet<(String, String)>,
-    source_nodes: HashSet<u32>,
+    source_nodes: HashSet<String>,
     hierarchy: &'a PackageHierarchy,
     producer_node_id: HashMap<u32, String>,
     depset_by_id: HashMap<u32, &'a DepSetOfFiles>,
@@ -172,15 +172,29 @@ impl Wiring<'_> {
             }
         } else {
             let dir = path.rsplit_once('/').map(|(d, _)| d).unwrap_or("");
-            let parent = self.hierarchy.enclosing_box(dir).map(str::to_string);
-            source_node(
-                artifact_id,
-                parent,
-                graph,
-                &mut self.source_nodes,
-                &self.artifact_by_id,
-                &self.fragment_by_id,
-            )
+            match self.hierarchy.enclosing_package(dir) {
+                Some(pkg) => {
+                    let rel = if pkg.is_empty() {
+                        path.as_str()
+                    } else {
+                        path.strip_prefix(&format!("{pkg}/")).unwrap_or(&path)
+                    };
+                    let label = format!("//{pkg}:{rel}");
+                    let node_id = format!("target:{label}");
+                    if self.source_nodes.insert(node_id.clone()) {
+                        let parent = self.hierarchy.package_box(&label).map(str::to_string);
+                        graph.add_node(node_id.clone(), label::target_label(&label), "source", parent);
+                    }
+                    node_id
+                }
+                None => root_source_node(
+                    artifact_id,
+                    graph,
+                    &mut self.source_nodes,
+                    &self.artifact_by_id,
+                    &self.fragment_by_id,
+                ),
+            }
         };
         self.add_edge(&from, consumer_id, graph);
     }
@@ -196,25 +210,32 @@ fn configured_target_box(
     action: &Action,
     graph: &mut Graph,
     hierarchy: &PackageHierarchy,
-    target_boxes: &mut HashSet<u32>,
+    target_boxes: &mut HashSet<String>,
     ct_boxes: &mut HashSet<String>,
     target_by_id: &HashMap<u32, &Target>,
     config_by_id: &HashMap<u32, &Configuration>,
 ) -> String {
     let target_id = action.target_id;
     let config_id = action.configuration_id;
-    let key = format!("{target_id}#{config_id}");
-    let ct_node_id = format!("ct:{key}");
-    if !ct_boxes.insert(key) {
+    let full = target_by_id
+        .get(&target_id)
+        .map(|t| t.label.clone())
+        .unwrap_or_else(|| format!("target {target_id}"));
+    let target_node_id = match target_by_id.get(&target_id) {
+        Some(_) => format!("target:{full}"),
+        None => format!("target:{target_id}"),
+    };
+    let config_key = config_by_id
+        .get(&config_id)
+        .map(|c| c.checksum.clone())
+        .filter(|c| !c.is_empty())
+        .unwrap_or_else(|| format!("cfg{config_id}"));
+    let ct_node_id = format!("ct:{full}#{config_key}");
+    if !ct_boxes.insert(ct_node_id.clone()) {
         return ct_node_id;
     }
 
-    let target_node_id = format!("target{target_id}");
-    if target_boxes.insert(target_id) {
-        let full = target_by_id
-            .get(&target_id)
-            .map(|t| t.label.clone())
-            .unwrap_or_else(|| format!("target {target_id}"));
+    if target_boxes.insert(target_node_id.clone()) {
         let package = hierarchy.package_box(&full).map(str::to_string);
         graph.add_node(target_node_id.clone(), label::target_label(&full), "target", package);
     }
@@ -233,21 +254,22 @@ fn configured_target_box(
     ct_node_id
 }
 
-fn source_node(
+/// A source artifact that no known package encloses: a root-level node keyed by
+/// its artifact id, since it has no package-relative label to identify it.
+fn root_source_node(
     artifact_id: u32,
-    parent: Option<String>,
     graph: &mut Graph,
-    source_nodes: &mut HashSet<u32>,
+    source_nodes: &mut HashSet<String>,
     artifact_by_id: &HashMap<u32, &Artifact>,
     fragment_by_id: &HashMap<u32, &PathFragment>,
 ) -> String {
     let node_id = format!("source{artifact_id}");
-    if source_nodes.insert(artifact_id) {
+    if source_nodes.insert(node_id.clone()) {
         graph.add_node(
             node_id.clone(),
             basename(artifact_id, artifact_by_id, fragment_by_id),
             "source",
-            parent,
+            None,
         );
     }
     node_id
@@ -555,10 +577,10 @@ mod tests {
         assert_eq!(find(&graph, "pkg:foo").label, "//foo");
         assert_eq!(find(&graph, "pkg:bar").label, "//bar");
 
-        assert_eq!(parent_of(&graph, "target1"), Some("pkg:foo"));
-        assert_eq!(parent_of(&graph, "target2"), Some("pkg:bar"));
-        assert_eq!(parent_of(&graph, "source1"), Some("pkg:foo"));
-        assert_eq!(parent_of(&graph, "source2"), Some("pkg:bar"));
+        assert_eq!(parent_of(&graph, "target://foo:app"), Some("pkg:foo"));
+        assert_eq!(parent_of(&graph, "target://bar:lib"), Some("pkg:bar"));
+        assert_eq!(parent_of(&graph, "target://foo:main.c"), Some("pkg:foo"));
+        assert_eq!(parent_of(&graph, "target://bar:lib.c"), Some("pkg:bar"));
     }
 
     #[test]
@@ -578,7 +600,7 @@ mod tests {
 
         let graph = build(&[container], false);
 
-        assert_eq!(parent_of(&graph, "source1"), Some("pkg:foo/bar"));
+        assert_eq!(parent_of(&graph, "target://foo/bar:sub/deep.c"), Some("pkg:foo/bar"));
     }
 
     #[test]
@@ -613,8 +635,8 @@ mod tests {
         let graph = build(&[container], false);
 
         assert_eq!(find(&graph, "pkg:").label, "//");
-        assert_eq!(parent_of(&graph, "target1"), Some("pkg:"));
-        assert_eq!(parent_of(&graph, "source1"), Some("pkg:"));
+        assert_eq!(parent_of(&graph, "target://:root"), Some("pkg:"));
+        assert_eq!(parent_of(&graph, "target://:top.c"), Some("pkg:"));
     }
 
     /// Two sources with the same single consumer but in different packages keep
@@ -669,7 +691,7 @@ mod tests {
 
         let graph = build(&[container], false);
 
-        let pkg = parent_of(&graph, "target1").unwrap();
+        let pkg = parent_of(&graph, "target:@somerepo//foo:bar").unwrap();
         assert_ne!(pkg, "pkg:foo");
         assert_eq!(find(&graph, pkg).label, "@somerepo//foo");
     }
@@ -685,11 +707,11 @@ mod tests {
         let graph = build(&[container], false);
 
         // Main-repo package keeps its historical id and label.
-        assert_eq!(parent_of(&graph, "target1"), Some("pkg:foo"));
+        assert_eq!(parent_of(&graph, "target://foo:x"), Some("pkg:foo"));
         assert_eq!(find(&graph, "pkg:foo").label, "//foo");
 
         // The external package is a distinct container.
-        let external = parent_of(&graph, "target2").unwrap();
+        let external = parent_of(&graph, "target:@somerepo//foo:y").unwrap();
         assert_ne!(external, "pkg:foo");
         assert_eq!(find(&graph, external).label, "@somerepo//foo");
     }

@@ -149,16 +149,13 @@ impl PackageHierarchy {
             .map(String::as_str)
     }
 
-    /// The box a main-repo source file in directory `dir` nests under: the
-    /// deepest real package whose path encloses `dir`, or `None` when none does.
-    pub(crate) fn enclosing_box(&self, dir: &str) -> Option<&str> {
-        let best = self
-            .main_paths
+    /// The path of the deepest real main-repo package enclosing directory `dir`,
+    /// or `None` when none does.
+    pub(crate) fn enclosing_package(&self, dir: &str) -> Option<&str> {
+        self.main_paths
             .iter()
             .filter(|pkg| encloses(pkg, dir))
-            .max_by_key(|pkg| pkg.len())?;
-        self.box_id
-            .get(&(String::new(), best.clone()))
+            .max_by_key(|pkg| pkg.len())
             .map(String::as_str)
     }
 }
@@ -293,13 +290,13 @@ mod tests {
     }
 
     #[test]
-    fn enclosing_box_picks_the_deepest_real_package() {
+    fn enclosing_package_picks_the_deepest_real_package() {
         let (_graph, hierarchy) = build(&[("", "foo"), ("", "foo/bar")]);
 
         // A source under foo/bar/sub belongs to the deeper foo/bar.
-        assert_eq!(hierarchy.enclosing_box("foo/bar/sub"), Some("pkg:foo/bar"));
-        assert_eq!(hierarchy.enclosing_box("foo/other"), Some("pkg:foo"));
-        assert_eq!(hierarchy.enclosing_box("elsewhere"), None);
+        assert_eq!(hierarchy.enclosing_package("foo/bar/sub"), Some("foo/bar"));
+        assert_eq!(hierarchy.enclosing_package("foo/other"), Some("foo"));
+        assert_eq!(hierarchy.enclosing_package("elsewhere"), None);
     }
 
     #[test]
