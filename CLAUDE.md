@@ -56,7 +56,12 @@ Interactive visualization and inspection tool for Bazel builds.
   BUILD overlay the import layout the MODULE sparse-checkout already fixes), don't say the same thing
   twice (a rationale belongs in one place — usually a definition — not repeated
   where the symbol is used), don't re-explain what a rule's or tool's own
-  documentation already covers, and don't write comments that drift as nearby
+  documentation already covers — and likewise don't narrate what a framework or
+  library call does: its behavior is the API's contract, plain from the call, so
+  a comment that a UI helper "re-renders each frame", that a lock "blocks until
+  acquired", or that a builder method "sets the title" restates the call and is
+  noise; comment only the non-obvious reason the call is used here, if any. Don't
+  write comments that drift as nearby
   code changes (e.g. describing which of several things a wildcard or shared
   target covers, or restating the concrete value of something defined elsewhere
   — a color, dimension, or default — which goes stale the moment that definition
