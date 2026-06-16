@@ -149,6 +149,10 @@ pub struct TerminalView {
     /// The latest cursor position during a selection drag, kept so the selection
     /// can keep auto-scrolling while the cursor is held still outside the view.
     selection_drag: Option<Point<Pixels>>,
+    /// The drag's fixed anchor in content coordinates — a line counted from the top
+    /// of the scrollback, a column, and a side — so a rebuild can re-anchor it on
+    /// the same text while its far end follows the cursor as the view scrolls.
+    selection_anchor: Option<(i32, usize, Side)>,
     /// The URL under the cursor, highlighted and openable while hovered.
     hovered_url: Option<Url>,
     /// The URL pressed on, opened on release if the press was a click, not a drag.
@@ -243,6 +247,7 @@ impl TerminalView {
             content: None,
             selecting: false,
             selection_drag: None,
+            selection_anchor: None,
             hovered_url: None,
             pressed_url: None,
             drag_grab: None,
@@ -398,8 +403,13 @@ impl TerminalView {
         self.pressed_url = self.hovered_url.as_ref().map(|url| url.text().to_string());
         if let Some(terminal) = self.terminal.as_mut() {
             terminal.begin_selection(selection, column, row, side);
+            // The anchor's line counted from the top of the scrollback, fixed to its
+            // text so it survives rebuilds and scrolling under the drag.
+            let anchor_line =
+                row as i32 + terminal.history_size() as i32 - terminal.display_offset() as i32;
             self.selecting = true;
             self.selection_drag = Some(event.position);
+            self.selection_anchor = Some((anchor_line, column, side));
             cx.notify();
         }
     }
@@ -1253,9 +1263,19 @@ impl Element for TerminalElement {
                             terminal.restore_search(&query, current);
                         }
                     }
-                    // Carry the text selection onto the rebuilt content so it
-                    // survives frame changes during playback.
-                    if let Some(span) = view.terminal.as_ref().and_then(Terminal::selection_span) {
+                    // Carry the text selection onto the rebuilt content. A live drag
+                    // keeps its anchor on its text but lets the far end follow the
+                    // cursor's cell, so it grows as playback scrolls under a held
+                    // cursor; a settled selection just re-applies its range.
+                    if let (true, Some(anchor), Some(cursor)) =
+                        (view.selecting, view.selection_anchor, view.selection_drag)
+                    {
+                        if let Some(end) = view.cell_at(cursor) {
+                            terminal.drag_select(anchor, end);
+                        }
+                    } else if let Some(span) =
+                        view.terminal.as_ref().and_then(Terminal::selection_span)
+                    {
                         terminal.restore_selection(span);
                     }
                     view.terminal = Some(terminal);
@@ -1505,6 +1525,7 @@ impl Element for TerminalElement {
                     if view.selecting {
                         view.selecting = false;
                         view.selection_drag = None;
+                        view.selection_anchor = None;
                         // A press that did not drag (no selection text) and
                         // landed on a URL opens it.
                         if let Some(url) = view.pressed_url.take() {

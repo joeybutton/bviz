@@ -250,6 +250,25 @@ impl Terminal {
         })
     }
 
+    /// Set an in-progress drag selection: the anchor in content coordinates (a
+    /// line counted from the top of the scrollback, a column, and a side) and the
+    /// far end at a viewport cell. The anchor stays on its text across rebuilds
+    /// while the end follows the cursor's cell, so the selection grows as the view
+    /// scrolls under a held cursor.
+    pub fn drag_select(&mut self, anchor: (i32, usize, Side), end: (usize, usize, Side)) {
+        let (anchor_line, anchor_column, anchor_side) = anchor;
+        let (end_column, end_row, end_side) = end;
+        let grid = self.term.grid();
+        let (top, bottom) = (grid.topmost_line().0, grid.bottommost_line().0);
+        let anchor_point = Point::new(
+            Line((anchor_line - self.history_size() as i32).clamp(top, bottom)),
+            Column(anchor_column.min(self.columns.saturating_sub(1))),
+        );
+        let mut selection = Selection::new(SelectionType::Simple, anchor_point, anchor_side);
+        selection.update(self.grid_point(end_column, end_row), end_side);
+        self.term.selection = Some(selection);
+    }
+
     /// Re-create a captured selection on the current grid, mapping its content
     /// lines back to grid lines (and clamping to the grid). Used to keep a
     /// selection across a playback frame change. Re-created as a simple range,
@@ -636,6 +655,18 @@ mod tests {
         assert_eq!(rebuilt.selection_text(), None);
         rebuilt.restore_selection(span);
         assert_eq!(rebuilt.selection_text().as_deref(), Some("beta"));
+    }
+
+    #[test]
+    fn drag_select_spans_from_content_anchor_to_end_cell() {
+        let output = BuildOutput::from_bytes(40, b"alpha\nbeta\ngamma\n".to_vec());
+        let mut terminal = Terminal::new(&output, 40, 10);
+        // Anchor at the start of the top line, far end inside the third line.
+        terminal.drag_select((0, 0, Side::Left), (2, 2, Side::Right));
+        assert_eq!(
+            terminal.selection_text().as_deref(),
+            Some("alpha\nbeta\ngam")
+        );
     }
 
     #[test]
