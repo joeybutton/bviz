@@ -129,6 +129,14 @@ pub struct TerminalView {
     terminal: Option<Terminal>,
     /// The frame [`terminal`] was built for, to detect when it must be rebuilt.
     terminal_frame: Option<usize>,
+    /// Whether to keep the viewport pinned to the newest output. Set by an active
+    /// scroll to the bottom; cleared by scrolling up.
+    follow_bottom: bool,
+    /// The remembered scroll target when not following: the line, counted from the
+    /// top of the output, held at the viewport top. Only an active user scroll
+    /// changes it, so it survives scrubbing past where that line exists yet — the
+    /// view clamps to the bottom meanwhile and returns to it when the line is back.
+    scroll_top: usize,
     /// The painted scroll bar geometry, set each layout for hit-testing.
     scrollbar: Option<ScrollbarLayout>,
     /// The painted content geometry, set each layout for mapping clicks to cells.
@@ -220,6 +228,8 @@ impl TerminalView {
             scrubber: None,
             terminal: None,
             terminal_frame: None,
+            follow_bottom: true,
+            scroll_top: 0,
             scrollbar: None,
             content: None,
             selecting: false,
@@ -285,12 +295,23 @@ impl TerminalView {
     }
 
     fn scroll(&mut self, scroll: Scroll, cx: &mut Context<Self>) {
-        if let Some(terminal) = self.terminal.as_mut() {
-            terminal.scroll(scroll);
-            // The hovered URL's highlight is in viewport coordinates, which
-            // scrolling invalidates; the next pointer move recomputes it.
-            self.hovered_url = None;
-            self.reveal_scrollbar(cx);
+        let Some(terminal) = self.terminal.as_mut() else {
+            return;
+        };
+        terminal.scroll(scroll);
+        // The hovered URL's highlight is in viewport coordinates, which scrolling
+        // invalidates; the next pointer move recomputes it.
+        self.hovered_url = None;
+        self.remember_scroll();
+        self.reveal_scrollbar(cx);
+    }
+
+    /// Record where the user scrolled to: follow the bottom when there, else the
+    /// absolute top line, so a rebuild for a new frame restores that position.
+    fn remember_scroll(&mut self) {
+        if let Some(terminal) = self.terminal.as_ref() {
+            self.follow_bottom = terminal.display_offset() == 0;
+            self.scroll_top = terminal.history_size() - terminal.display_offset();
         }
     }
 
@@ -304,10 +325,12 @@ impl TerminalView {
         let thumb_top = (mouse_y - grab).clamp(layout.track_top, layout.track_top + span);
         // Fraction down the track: 0 is the first line, 1 is the last.
         let fraction = (thumb_top - layout.track_top) / span;
-        if let Some(terminal) = self.terminal.as_mut() {
-            terminal.scroll_to_fraction(fraction);
-            cx.notify();
-        }
+        let Some(terminal) = self.terminal.as_mut() else {
+            return;
+        };
+        terminal.scroll_to_fraction(fraction);
+        self.remember_scroll();
+        cx.notify();
     }
 
     /// The grid cell (column, row from the top) and the side of it under a window
@@ -1146,23 +1169,16 @@ impl Element for TerminalElement {
             // Before the source loads there is nothing to build and the viewport
             // read below sees `None` and renders empty.
             if view.terminal.is_none() || view.terminal_frame != Some(frame) {
-                // Follow the newest output only when the viewport is already at the
-                // bottom; otherwise hold the line the user scrolled to. The line is
-                // counted from the top so it stays put as output appends below.
-                let follow = view
-                    .terminal
-                    .as_ref()
-                    .map_or(true, |terminal| terminal.display_offset() == 0);
-                let top_line = view
-                    .terminal
-                    .as_ref()
-                    .map(|terminal| terminal.history_size() - terminal.display_offset());
                 if let TermSource::Loaded(replay) = &view.source {
                     let source = replay.display_at(frame);
                     let mut terminal = Terminal::from_display(&source, cols, rows);
-                    match top_line {
-                        Some(line) if !follow => terminal.scroll_to_top_line(line),
-                        _ => terminal.scroll(Scroll::Bottom),
+                    // Restore the user's remembered scroll. If the held line lies
+                    // beyond the output at this frame, scroll_to_top_line clamps to
+                    // the bottom without forgetting it, so scrubbing forward returns.
+                    if view.follow_bottom {
+                        terminal.scroll(Scroll::Bottom);
+                    } else {
+                        terminal.scroll_to_top_line(view.scroll_top);
                     }
                     view.terminal = Some(terminal);
                     view.terminal_frame = Some(frame);
