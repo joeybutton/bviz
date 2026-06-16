@@ -26,11 +26,6 @@ pub struct Replay {
     real_time: bool,
 }
 
-/// Fewer markers than this in the output is treated as coincidental text rather
-/// than a `--show_timestamps` capture, and the timeline falls back to event
-/// anchors. A real capture stamps every progress repaint, yielding many.
-const MIN_MARKERS: usize = 3;
-
 impl Replay {
     /// Lay out a parsed build's output for playback, choosing real timestamps when
     /// the capture carries them and interpolating otherwise.
@@ -40,6 +35,7 @@ impl Replay {
             bytes,
             frames,
             anchors,
+            show_timestamps,
         } = output;
         // A build with no progress events still plays as a single frame holding
         // whatever output there is.
@@ -50,11 +46,18 @@ impl Replay {
         };
         let count = ends.len();
 
-        let markers = parse_markers(&bytes);
-        let (points, real_time) = if markers.len() >= MIN_MARKERS {
-            (marker_points(&markers, &ends), true)
+        // Read the real `(HH:MM:SS)` markers only when the build was run with
+        // --show_timestamps, so a stray time-shaped token in ordinary output never
+        // masquerades as a timeline; otherwise interpolate from event timestamps.
+        let markers = if show_timestamps {
+            parse_markers(&bytes)
         } else {
+            Vec::new()
+        };
+        let (points, real_time) = if markers.is_empty() {
             (event_points(&anchors, count), false)
+        } else {
+            (marker_points(&markers, &ends), true)
         };
 
         let times = interpolate(points, count);
@@ -338,6 +341,7 @@ mod tests {
             bytes: b"alpha\nbeta\n".to_vec(),
             frames: vec![6, 11],
             anchors: Vec::new(),
+            show_timestamps: false,
         };
         let replay = Replay::from_output(output);
         assert_eq!(replay.frame_count(), 2);
@@ -371,5 +375,33 @@ mod tests {
         for f in 1..replay.frame_count() {
             assert!(replay.time_of(f) >= replay.time_of(f - 1));
         }
+    }
+
+    #[test]
+    fn real_markers_used_only_with_the_flag() {
+        // Three timestamped lines, one per frame, two seconds apart.
+        let bytes = b"(00:00:01) a\n(00:00:03) b\n(00:00:05) c\n".to_vec();
+        let frames = vec![13, 26, bytes.len()];
+        let with = Replay::from_output(BuildOutput {
+            columns: 40,
+            bytes: bytes.clone(),
+            frames: frames.clone(),
+            anchors: Vec::new(),
+            show_timestamps: true,
+        });
+        assert!(with.real_time());
+        assert_eq!(with.duration(), 4.0);
+
+        // The same bytes without the flag: the markers are not a timeline, so it
+        // falls back (here to nothing, as there are no event anchors).
+        let without = Replay::from_output(BuildOutput {
+            columns: 40,
+            bytes,
+            frames,
+            anchors: Vec::new(),
+            show_timestamps: false,
+        });
+        assert!(!without.real_time());
+        assert_eq!(without.duration(), 0.0);
     }
 }

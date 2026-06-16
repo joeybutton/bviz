@@ -29,6 +29,10 @@ pub struct BuildOutput {
     /// an interpolated timeline when the output carries no `--show_timestamps`
     /// markers; see [`crate::Replay`].
     pub(crate) anchors: Vec<Anchor>,
+    /// Whether the build was run with `--show_timestamps`, read from its structured
+    /// command line. When set, the output carries `(HH:MM:SS)` markers that give a
+    /// real timeline; otherwise the timeline is interpolated from [`anchors`].
+    pub(crate) show_timestamps: bool,
 }
 
 /// A wall-clock time tied to a position in the progress-frame sequence.
@@ -50,6 +54,7 @@ impl BuildOutput {
             frames: vec![bytes.len()],
             bytes,
             anchors: Vec::new(),
+            show_timestamps: false,
         }
     }
 }
@@ -64,6 +69,7 @@ pub fn parse(mut stream: &[u8]) -> Result<BuildOutput, prost::DecodeError> {
     let mut frames = Vec::new();
     let mut anchors = Vec::new();
     let mut columns = None;
+    let mut show_timestamps = false;
     while !stream.is_empty() {
         let event = BuildEvent::decode_length_delimited(&mut stream)?;
         // An anchoring event ties its time to the frame boundary it falls on: the
@@ -97,6 +103,7 @@ pub fn parse(mut stream: &[u8]) -> Result<BuildOutput, prost::DecodeError> {
             ),
             Some(Payload::StructuredCommandLine(command_line)) => {
                 columns = columns.or_else(|| terminal_columns(&command_line));
+                show_timestamps |= show_timestamps_set(&command_line);
             }
             _ => {}
         }
@@ -106,6 +113,7 @@ pub fn parse(mut stream: &[u8]) -> Result<BuildOutput, prost::DecodeError> {
         bytes,
         frames,
         anchors,
+        show_timestamps,
     })
 }
 
@@ -123,7 +131,8 @@ fn epoch(seconds: i64, nanos: i32) -> f64 {
 }
 
 /// Find the `terminal_columns` option in a structured command line.
-fn terminal_columns(command_line: &CommandLine) -> Option<u16> {
+/// The value of a named option in a structured command line, if present.
+fn option_value<'a>(command_line: &'a CommandLine, name: &str) -> Option<&'a str> {
     command_line
         .sections
         .iter()
@@ -132,8 +141,19 @@ fn terminal_columns(command_line: &CommandLine) -> Option<u16> {
             _ => None,
         })
         .flat_map(|options| &options.option)
-        .find(|option| option.option_name == "terminal_columns")
-        .and_then(|option| option.option_value.parse().ok())
+        .find(|option| option.option_name == name)
+        .map(|option| option.option_value.as_str())
+}
+
+fn terminal_columns(command_line: &CommandLine) -> Option<u16> {
+    option_value(command_line, "terminal_columns").and_then(|value| value.parse().ok())
+}
+
+/// Whether `--show_timestamps` is enabled, as a boolean option Bazel canonicalizes
+/// to `1`/`true`.
+fn show_timestamps_set(command_line: &CommandLine) -> bool {
+    option_value(command_line, "show_timestamps")
+        .is_some_and(|value| value == "1" || value.eq_ignore_ascii_case("true"))
 }
 
 #[cfg(test)]
@@ -162,6 +182,13 @@ mod tests {
         assert!(!output.frames.is_empty());
         assert!(output.frames.windows(2).all(|w| w[0] <= w[1]));
         assert_eq!(output.frames.last().copied(), Some(output.bytes.len()));
+    }
+
+    #[test]
+    fn detects_show_timestamps_off() {
+        // The sample was captured without --show_timestamps.
+        let output = parse(SAMPLE).expect("parse sample stream");
+        assert!(!output.show_timestamps);
     }
 
     #[test]
