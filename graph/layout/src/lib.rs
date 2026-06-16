@@ -9,6 +9,7 @@
 pub mod aquery;
 pub mod cquery;
 pub mod graph;
+pub mod joint;
 mod label;
 pub mod layout;
 pub mod query;
@@ -16,4 +17,5 @@ pub mod quotient;
 pub mod streamed_proto;
 
 pub use graph::{EdgeKind, Graph};
+pub use joint::build_joint;
 pub use layout::{layout, Box, Connector, LaidOut};

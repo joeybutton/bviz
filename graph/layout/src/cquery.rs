@@ -22,6 +22,36 @@ use crate::label::{self, PackageHierarchy};
 use crate::query::label_and_kind;
 
 pub fn build(results: &[CqueryResult]) -> Graph {
+    let packages = package_keys(results);
+    build_with_packages(results, &packages)
+}
+
+/// The (repository, package path) keys of every configured target this cquery
+/// names, for the package hierarchy. A rule contributes its rule name's package,
+/// any other target the package of its `label_and_kind` label.
+pub(crate) fn package_keys(results: &[CqueryResult]) -> BTreeSet<(String, String)> {
+    results
+        .iter()
+        .flat_map(|r| r.results.iter())
+        .filter_map(|ct| ct.target.as_ref())
+        .filter_map(|target| {
+            if let Ok(Discriminator::Rule) = Discriminator::try_from(target.r#type) {
+                Some(target.rule.as_ref()?.name.as_str())
+            } else {
+                label_and_kind(target).map(|(label, _)| label)
+            }
+        })
+        .filter_map(label::package_key)
+        .collect()
+}
+
+/// Builds the cquery graph attaching its boxes to the `packages` hierarchy,
+/// which a joint graph passes as the union of every input's packages so shared
+/// package boxes carry one label and parent.
+pub(crate) fn build_with_packages(
+    results: &[CqueryResult],
+    packages: &BTreeSet<(String, String)>,
+) -> Graph {
     let config_mnemonic: HashMap<u32, String> = results
         .iter()
         .flat_map(|r| r.configurations.iter())
@@ -43,19 +73,7 @@ pub fn build(results: &[CqueryResult]) -> Graph {
     // The (label, configuration key) pairs that have a configured-target node.
     let mut ct_ids: HashSet<(String, String)> = HashSet::new();
 
-    let packages: BTreeSet<(String, String)> = cts
-        .iter()
-        .filter_map(|ct| ct.target.as_ref())
-        .filter_map(|target| {
-            if let Ok(Discriminator::Rule) = Discriminator::try_from(target.r#type) {
-                Some(target.rule.as_ref()?.name.as_str())
-            } else {
-                label_and_kind(target).map(|(label, _)| label)
-            }
-        })
-        .filter_map(label::package_key)
-        .collect();
-    let hierarchy = PackageHierarchy::build(&packages, &mut graph);
+    let hierarchy = PackageHierarchy::build(packages, &mut graph);
 
     // Pass 1: a rule becomes a target container plus a configured-target leaf
     // per configuration; any other target becomes one leaf per label.

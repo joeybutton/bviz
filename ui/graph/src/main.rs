@@ -4,9 +4,7 @@
 
 use bviz_graph_layout::graph::Graph;
 use bviz_graph_layout::layout::CARET_RESERVE;
-use bviz_graph_layout::{
-    aquery, cquery, layout, query, quotient, streamed_proto, EdgeKind, LaidOut,
-};
+use bviz_graph_layout::{layout, quotient, streamed_proto, EdgeKind, LaidOut};
 use bviz_ui_components::{load_in_background, track_drag};
 use bviz_ui_shell::Chrome;
 use clap::Parser;
@@ -168,7 +166,7 @@ struct GraphView {
 const CLICK_SLOP: f32 = 4.0;
 
 impl GraphView {
-    fn new(input: Input, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    fn new(inputs: Vec<Input>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let focus_handle = cx.focus_handle();
         focus_handle.focus(window, cx);
         let base: Rc<RefCell<Option<Graph>>> = Rc::new(RefCell::new(None));
@@ -178,7 +176,7 @@ impl GraphView {
         let load_task = load_in_background(
             cx,
             move || {
-                let graph = build_graph(&input)?;
+                let graph = build_graph(&inputs)?;
                 let laid_out = relayout(&graph, &HashSet::new());
                 Ok::<_, String>((graph, laid_out))
             },
@@ -713,25 +711,43 @@ fn paint_arrowhead(pts: &[Point<Pixels>], zoom: f32, color: Rgba, window: &mut W
     }
 }
 
-/// Reads the streamed_proto file at `input` and builds its graph, before any
-/// group quotienting. Cached so toggling a group needn't re-read or re-parse.
-fn build_graph(input: &Input) -> Result<Graph, String> {
-    let bytes = std::fs::read(&input.path).map_err(|e| format!("{}: {e}", input.path.display()))?;
-    Ok(match input.kind {
-        InputKind::Aquery => {
-            let containers =
-                streamed_proto::read_action_graph_containers(&bytes).map_err(|e| e.to_string())?;
-            aquery::build(&containers, false)
+/// Reads every input's streamed_proto file and merges them into one joint graph,
+/// before any group quotienting. Cached so toggling a group needn't re-read or
+/// re-parse.
+fn build_graph(inputs: &[Input]) -> Result<Graph, String> {
+    let mut aq = None;
+    let mut cq = None;
+    let mut q = None;
+    for input in inputs {
+        let path = input.path.display();
+        let bytes = std::fs::read(&input.path).map_err(|e| format!("{path}: {e}"))?;
+        match input.kind {
+            InputKind::Aquery => {
+                aq = Some(
+                    streamed_proto::read_action_graph_containers(&bytes)
+                        .map_err(|e| format!("{path}: {e}"))?,
+                );
+            }
+            InputKind::Cquery => {
+                cq = Some(
+                    streamed_proto::read_cquery_results(&bytes)
+                        .map_err(|e| format!("{path}: {e}"))?,
+                );
+            }
+            InputKind::Query => {
+                q = Some(
+                    streamed_proto::read_query_targets(&bytes)
+                        .map_err(|e| format!("{path}: {e}"))?,
+                );
+            }
         }
-        InputKind::Cquery => {
-            let results = streamed_proto::read_cquery_results(&bytes).map_err(|e| e.to_string())?;
-            cquery::build(&results)
-        }
-        InputKind::Query => {
-            let targets = streamed_proto::read_query_targets(&bytes).map_err(|e| e.to_string())?;
-            query::build(&targets)
-        }
-    })
+    }
+    Ok(bviz_graph_layout::build_joint(
+        aq.as_deref(),
+        cq.as_deref(),
+        q.as_deref(),
+        false,
+    ))
 }
 
 /// Builds the display graph with the given ids expanded and lays it out.
@@ -823,11 +839,12 @@ struct Input {
     path: PathBuf,
 }
 
-/// Renders a Bazel build graph from one `--output=streamed_proto` file. Exactly
-/// one of the flags selects the file and the query that produced it.
+/// Renders a Bazel build graph from one or more `--output=streamed_proto`
+/// files. Each flag selects a file and the query that produced it; passing
+/// several merges them into one joint graph, with shared entities collapsed.
 #[derive(Parser)]
 #[command(group(
-    clap::ArgGroup::new("input").required(true).args(["aquery", "cquery", "query"])
+    clap::ArgGroup::new("input").required(true).multiple(true).args(["aquery", "cquery", "query"])
 ))]
 struct Cli {
     /// `bazel aquery --output=streamed_proto` file.
@@ -843,26 +860,28 @@ struct Cli {
 }
 
 impl Cli {
-    fn input(self) -> Input {
-        let (kind, path) = if let Some(path) = self.aquery {
-            (InputKind::Aquery, path)
-        } else if let Some(path) = self.cquery {
-            (InputKind::Cquery, path)
-        } else if let Some(path) = self.query {
-            (InputKind::Query, path)
-        } else {
-            unreachable!("the arg group requires exactly one input flag")
-        };
-        Input { kind, path }
+    /// Every provided input flag, in a stable order: aquery, cquery, query.
+    fn inputs(self) -> Vec<Input> {
+        let mut inputs = Vec::new();
+        if let Some(path) = self.aquery {
+            inputs.push(Input { kind: InputKind::Aquery, path });
+        }
+        if let Some(path) = self.cquery {
+            inputs.push(Input { kind: InputKind::Cquery, path });
+        }
+        if let Some(path) = self.query {
+            inputs.push(Input { kind: InputKind::Query, path });
+        }
+        inputs
     }
 }
 
 fn main() {
-    let input = Cli::parse().input();
+    let inputs = Cli::parse().inputs();
     bviz_ui_shell::run(
         "bazel_viz graph",
         size(px(1280.), px(820.)),
-        move |window, cx| cx.new(|cx| GraphView::new(input, window, cx)),
+        move |window, cx| cx.new(|cx| GraphView::new(inputs, window, cx)),
     );
 }
 

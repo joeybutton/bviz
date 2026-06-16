@@ -1,7 +1,8 @@
 //! Builds a compound graph from `bazel aquery` output: the
 //! package -> target -> configured-target -> {action, output artifact}
-//! hierarchy. A package container groups the targets and source files of one
-//! Bazel package. Edges run between leaf nodes only (action -> its outputs;
+//! hierarchy. Package containers nest by path and hold each target's box and
+//! source files; content-less single-child package chains fold into one box
+//! (see the `label` module). Edges run between leaf nodes only (action -> its outputs;
 //! producing artifact or source -> consuming action), and the layout engine
 //! routes them across nesting levels by placing each in the lowest common
 //! ancestor of its endpoints.
@@ -28,6 +29,28 @@ use crate::graph::{EdgeKind, Graph};
 use crate::label::{self, PackageHierarchy};
 
 pub fn build(containers: &[ActionGraphContainer], external_sources: bool) -> Graph {
+    let packages = package_keys(containers);
+    build_with_packages(containers, external_sources, &packages)
+}
+
+/// The (repository, package path) keys of every target this aquery names, for
+/// the package hierarchy.
+pub(crate) fn package_keys(containers: &[ActionGraphContainer]) -> BTreeSet<(String, String)> {
+    containers
+        .iter()
+        .flat_map(|c| c.targets.iter())
+        .filter_map(|t| label::package_key(&t.label))
+        .collect()
+}
+
+/// Builds the aquery graph attaching its boxes to the `packages` hierarchy,
+/// which a joint graph passes as the union of every input's packages so shared
+/// package boxes carry one label and parent.
+pub(crate) fn build_with_packages(
+    containers: &[ActionGraphContainer],
+    external_sources: bool,
+    packages: &BTreeSet<(String, String)>,
+) -> Graph {
     let mut artifacts: Vec<&Artifact> = Vec::new();
     let mut actions: Vec<&Action> = Vec::new();
     let mut targets: Vec<&Target> = Vec::new();
@@ -52,9 +75,7 @@ pub fn build(containers: &[ActionGraphContainer], external_sources: bool) -> Gra
     let depset_by_id: HashMap<u32, &DepSetOfFiles> = dep_sets.iter().map(|d| (d.id, *d)).collect();
 
     let mut graph = Graph::new();
-    let packages: BTreeSet<(String, String)> =
-        targets.iter().filter_map(|t| label::package_key(&t.label)).collect();
-    let hierarchy = PackageHierarchy::build(&packages, &mut graph);
+    let hierarchy = PackageHierarchy::build(packages, &mut graph);
 
     let mut target_boxes: HashSet<String> = HashSet::new();
     let mut ct_boxes: HashSet<String> = HashSet::new();

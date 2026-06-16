@@ -11,7 +11,19 @@ use crate::graph::{EdgeKind, Graph};
 use crate::label::{self, PackageHierarchy};
 
 pub fn build(targets: &[Target]) -> Graph {
-    build_targets(&targets.iter().collect::<Vec<_>>())
+    let refs: Vec<&Target> = targets.iter().collect();
+    let packages = package_keys(targets);
+    build_with_packages(&refs, &packages)
+}
+
+/// The (repository, package path) keys of every target this query names, for the
+/// package hierarchy.
+pub(crate) fn package_keys(targets: &[Target]) -> BTreeSet<(String, String)> {
+    targets
+        .iter()
+        .filter_map(label_and_kind)
+        .filter_map(|(label, _)| label::package_key(label))
+        .collect()
 }
 
 /// The label and node kind a target carries, by its populated variant, or `None`
@@ -28,17 +40,18 @@ pub(crate) fn label_and_kind(target: &Target) -> Option<(&str, &'static str)> {
     }
 }
 
-pub(crate) fn build_targets(targets: &[&Target]) -> Graph {
+/// Builds the query graph attaching its boxes to the `packages` hierarchy,
+/// which a joint graph passes as the union of every input's packages so shared
+/// package boxes carry one label and parent.
+pub(crate) fn build_with_packages(
+    targets: &[&Target],
+    packages: &BTreeSet<(String, String)>,
+) -> Graph {
     let mut graph = Graph::new();
     // Node id per label, so a label seen more than once maps to one node.
     let mut node_by_label: HashMap<String, String> = HashMap::new();
 
-    let packages: BTreeSet<(String, String)> = targets
-        .iter()
-        .filter_map(|t| label_and_kind(t))
-        .filter_map(|(label, _)| label::package_key(label))
-        .collect();
-    let hierarchy = PackageHierarchy::build(&packages, &mut graph);
+    let hierarchy = PackageHierarchy::build(packages, &mut graph);
 
     // Pass 1: one leaf node per target under its package container.
     for target in targets {
