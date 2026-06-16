@@ -1253,6 +1253,11 @@ impl Element for TerminalElement {
                             terminal.restore_search(&query, current);
                         }
                     }
+                    // Carry the text selection onto the rebuilt content so it
+                    // survives frame changes during playback.
+                    if let Some(span) = view.terminal.as_ref().and_then(Terminal::selection_span) {
+                        terminal.restore_selection(span);
+                    }
                     view.terminal = Some(terminal);
                     view.terminal_frame = Some(frame);
                 }

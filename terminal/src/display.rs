@@ -66,6 +66,16 @@ impl DisplaySource {
     }
 }
 
+/// A selection captured in content coordinates (each endpoint a line counted from
+/// the top of the scrollback, and a column), so it survives a rebuild whose grid
+/// has more history. Opaque: produced by [`Terminal::selection_span`] and consumed
+/// by [`Terminal::restore_selection`].
+#[derive(Clone, Copy)]
+pub struct SelectionSpan {
+    start: (i32, usize),
+    end: (i32, usize),
+}
+
 /// The reconstructed build output, replayed into a terminal that wraps it to the
 /// window size. [`resize`](Terminal::resize) re-wraps; [`scroll`](Terminal::scroll)
 /// moves the viewport over the scrollback.
@@ -222,6 +232,42 @@ impl Terminal {
 
     pub fn clear_selection(&mut self) {
         self.term.selection = None;
+    }
+
+    /// Capture the current selection in content coordinates — lines counted from
+    /// the top of the scrollback — so it can be re-created on a rebuilt grid whose
+    /// history has grown. `None` when nothing is selected.
+    pub fn selection_span(&self) -> Option<SelectionSpan> {
+        let range = self
+            .term
+            .selection
+            .as_ref()
+            .and_then(|selection| selection.to_range(&self.term))?;
+        let from_top = |point: Point| (point.line.0 + self.history_size() as i32, point.column.0);
+        Some(SelectionSpan {
+            start: from_top(range.start),
+            end: from_top(range.end),
+        })
+    }
+
+    /// Re-create a captured selection on the current grid, mapping its content
+    /// lines back to grid lines (and clamping to the grid). Used to keep a
+    /// selection across a playback frame change. Re-created as a simple range,
+    /// which reproduces the selected cells for the selection kinds made here.
+    pub fn restore_selection(&mut self, span: SelectionSpan) {
+        let history = self.history_size() as i32;
+        let grid = self.term.grid();
+        let (top, bottom) = (grid.topmost_line().0, grid.bottommost_line().0);
+        let last_column = self.columns.saturating_sub(1);
+        let to_point = |(from_top, column): (i32, usize)| {
+            Point::new(
+                Line((from_top - history).clamp(top, bottom)),
+                Column(column.min(last_column)),
+            )
+        };
+        let mut selection = Selection::new(SelectionType::Simple, to_point(span.start), Side::Left);
+        selection.update(to_point(span.end), Side::Right);
+        self.term.selection = Some(selection);
     }
 
     /// The selected text, joined across wrapped lines with trailing blanks
@@ -571,6 +617,25 @@ mod tests {
         terminal.clear_selection();
         assert_eq!(terminal.selection_text(), None);
         assert!(terminal.selection_spans().iter().all(Option::is_none));
+    }
+
+    #[test]
+    fn selection_survives_a_rebuild_with_more_output() {
+        // Select "beta" on the second line of an early frame.
+        let early = BuildOutput::from_bytes(40, b"alpha\nbeta\ngamma\n".to_vec());
+        let mut terminal = Terminal::new(&early, 40, 10);
+        terminal.begin_selection(SelectionType::Simple, 0, 1, Side::Left);
+        terminal.extend_selection(3, 1, Side::Right);
+        assert_eq!(terminal.selection_text().as_deref(), Some("beta"));
+        let span = terminal.selection_span().expect("a captured selection");
+
+        // A later frame appends more output; the selection re-applies to the same
+        // text, which keeps its position counted from the top.
+        let later = BuildOutput::from_bytes(40, b"alpha\nbeta\ngamma\ndelta\nepsilon\n".to_vec());
+        let mut rebuilt = Terminal::new(&later, 40, 10);
+        assert_eq!(rebuilt.selection_text(), None);
+        rebuilt.restore_selection(span);
+        assert_eq!(rebuilt.selection_text().as_deref(), Some("beta"));
     }
 
     #[test]

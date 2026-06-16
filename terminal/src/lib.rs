@@ -11,7 +11,7 @@ mod screen;
 pub use alacritty_terminal::grid::Scroll;
 pub use alacritty_terminal::index::Side;
 pub use alacritty_terminal::selection::SelectionType;
-pub use display::{DisplaySource, Terminal, Url};
+pub use display::{DisplaySource, SelectionSpan, Terminal, Url};
 pub use output::{parse, BuildOutput};
 pub use replay::Replay;
 pub use screen::Screen;
