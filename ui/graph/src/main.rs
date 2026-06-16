@@ -5,14 +5,14 @@
 use bviz_graph_layout::graph::Graph;
 use bviz_graph_layout::layout::CARET_RESERVE;
 use bviz_graph_layout::{aquery, layout, quotient, streamed_proto, LaidOut};
-use bviz_ui_components::track_drag;
+use bviz_ui_components::{load_in_background, track_drag};
 use bviz_ui_shell::Chrome;
 use gpui::{
-    Animation, AnimationExt, App, AsyncApp, BorderStyle, Bounds, Context, Div, Entity, FocusHandle,
+    Animation, AnimationExt, App, BorderStyle, Bounds, Context, Div, Entity, FocusHandle,
     IntoElement, MouseButton, MouseDownEvent, Hsla, MouseMoveEvent, MouseUpEvent, PathBuilder,
     Pixels, Point, Render, Rgba, ScrollDelta, ScrollWheelEvent, Stateful, Task, TextAlign, TextRun,
-    Size, Transformation, WeakEntity, Window, canvas, div, font, percentage, point, prelude::*, px,
-    quad, rgb, size,
+    Size, Transformation, Window, canvas, div, font, percentage, point, prelude::*, px, quad, rgb,
+    size,
 };
 use std::cell::{Cell, RefCell};
 use std::collections::HashSet;
@@ -164,27 +164,23 @@ impl GraphView {
             // appearance and interactivity are never blocked; swap the view to
             // the result and cache the base graph when it completes.
             Some(path) => {
-                let base = base.clone();
-                let task = cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
-                    let result = cx
-                        .background_executor()
-                        .spawn(async move {
-                            let graph = build_graph(&path)?;
-                            let laid_out = relayout(&graph, &HashSet::new());
-                            Ok::<_, String>((graph, laid_out))
-                        })
-                        .await;
-                    let _ = this.update(cx, |view, cx| {
+                let task = load_in_background(
+                    cx,
+                    move || {
+                        let graph = build_graph(&path)?;
+                        let laid_out = relayout(&graph, &HashSet::new());
+                        Ok::<_, String>((graph, laid_out))
+                    },
+                    |view, result, _| {
                         view.source = match result {
                             Ok((graph, laid_out)) => {
-                                *base.borrow_mut() = Some(graph);
+                                *view.base.borrow_mut() = Some(graph);
                                 Source::Loaded(laid_out)
                             }
                             Err(err) => Source::Message(err),
                         };
-                        cx.notify();
-                    });
-                });
+                    },
+                );
                 (Source::Loading, task)
             }
             None => (
@@ -217,16 +213,11 @@ impl GraphView {
             return;
         };
         let expanded = self.expanded.borrow().clone();
-        self._load_task = cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
-            let laid_out = cx
-                .background_executor()
-                .spawn(async move { relayout(&graph, &expanded) })
-                .await;
-            let _ = this.update(cx, |view, cx| {
-                view.source = Source::Loaded(laid_out);
-                cx.notify();
-            });
-        });
+        self._load_task = load_in_background(
+            cx,
+            move || relayout(&graph, &expanded),
+            |view, laid_out, _| view.source = Source::Loaded(laid_out),
+        );
     }
 
     /// Builds the single-canvas viewport: every box and connector is painted in

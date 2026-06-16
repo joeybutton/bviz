@@ -1,10 +1,12 @@
 //! Reusable, window-agnostic widgets (a text field and a button) and gpui
 //! interaction helpers.
 
+mod background;
 mod button;
 mod drag;
 pub mod text_input;
 
+pub use background::load_in_background;
 pub use button::Button;
 pub use drag::track_drag;
 pub use text_input::TextInput;
