@@ -5,8 +5,8 @@
 //! also resolves text metrics and shapes single-run lines from those fonts.
 
 use gpui::{
-    App, AssetSource, Font, Hsla, Pixels, Result, ShapedLine, SharedString, Svg, TextRun, Window,
-    svg,
+    svg, App, AssetSource, Font, Hsla, Pixels, Result, ShapedLine, SharedString, Svg, TextRun,
+    Window,
 };
 use std::borrow::Cow;
 
@@ -52,7 +52,9 @@ pub fn shape_line(
         underline: None,
         strikethrough: None,
     };
-    window.text_system().shape_line(text, font_size, &[run], None)
+    window
+        .text_system()
+        .shape_line(text, font_size, &[run], None)
 }
 
 macro_rules! embedded {
@@ -84,6 +86,10 @@ fn icon_svg(file: &str) -> Option<&'static [u8]> {
         "caret-up.svg" => embedded!("caret-up.svg"),
         "circle-notch.svg" => embedded!("circle-notch.svg"),
         "minus.svg" => embedded!("minus.svg"),
+        "pause.svg" => embedded!("pause.svg"),
+        "play.svg" => embedded!("play.svg"),
+        "skip-back.svg" => embedded!("skip-back.svg"),
+        "skip-forward.svg" => embedded!("skip-forward.svg"),
         "square.svg" => embedded!("square.svg"),
         "x.svg" => embedded!("x.svg"),
         _ => return None,

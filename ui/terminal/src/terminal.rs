@@ -2,20 +2,20 @@
 //! text: the visible viewport, reflowed to the window, one shaped line per row
 //! with per-cell colors and background fills.
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use bviz_terminal::{
-    Cell, Color, DisplaySource, Flags, NamedColor, Rgb, Scroll, SelectionType, Side, Terminal, Url,
+    Cell, Color, Flags, NamedColor, Replay, Rgb, Scroll, SelectionType, Side, Terminal, Url,
 };
-use bviz_ui_components::{Button, TextInput, load_in_background, track_drag};
+use bviz_ui_components::{load_in_background, track_drag, Button, TextInput};
 use bviz_ui_shell::Chrome;
 use gpui::{
-    Animation, AnimationExt, App, Bounds, ClipboardItem, Context, Element, Entity, FocusHandle,
-    Focusable, Font, FontStyle, FontWeight, GlobalElementId, InspectorElementId, IntoElement,
-    KeyBinding, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, PaintQuad, Pixels, Point,
-    Render, Rgba, ScrollWheelEvent, ShapedLine, SharedString, StrikethroughStyle, Style,
-    Subscription, Task, TextRun, Transformation, UnderlineStyle, Window, WindowAppearance, actions,
-    div, fill, percentage, point, prelude::*, px, relative, rgb, size,
+    actions, canvas, div, fill, percentage, point, prelude::*, px, relative, rgb, size, Animation,
+    AnimationExt, App, Bounds, ClipboardItem, Context, Element, Entity, FocusHandle, Focusable,
+    Font, FontStyle, FontWeight, GlobalElementId, InspectorElementId, IntoElement, KeyBinding,
+    LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, PaintQuad, Pixels, Point, Render, Rgba,
+    ScrollWheelEvent, ShapedLine, SharedString, StrikethroughStyle, Style, Subscription, Task,
+    TextRun, Transformation, UnderlineStyle, Window, WindowAppearance,
 };
 
 actions!(
@@ -47,6 +47,9 @@ const SCROLLBAR_HIDE: Duration = Duration::from_millis(1200);
 /// Smallest the scroll bar thumb may shrink to.
 const MIN_THUMB: f32 = 24.0;
 
+/// Playback speed multipliers the speed control cycles through.
+const SPEEDS: [f32; 4] = [1.0, 2.0, 4.0, 8.0];
+
 /// Geometry of the painted scroll bar, in window pixels, kept so mouse events can
 /// hit-test the thumb and map a drag back to a scroll position.
 #[derive(Clone, Copy)]
@@ -57,6 +60,14 @@ struct ScrollbarLayout {
     track_height: f32,
     thumb_top: f32,
     thumb_height: f32,
+}
+
+/// Geometry of the painted playback scrubber track, in window pixels, kept so a
+/// click or drag on it maps to a position in the timeline.
+#[derive(Clone, Copy)]
+struct ScrubberLayout {
+    left: f32,
+    width: f32,
 }
 
 /// Geometry of the painted terminal content, in window pixels, kept so mouse
@@ -71,23 +82,42 @@ struct ContentLayout {
     rows: usize,
 }
 
-/// The build's reconstructed display, a load in progress, or the error that
-/// stopped it.
+/// The build's playback timeline, a load in progress, or the error that stopped
+/// it.
 enum TermSource {
     Loading,
-    Loaded(DisplaySource),
+    Loaded(Replay),
     Error(String),
 }
 
 /// The root view: the rendered build terminal inside the window chrome.
 pub struct TerminalView {
-    /// The reconstructed display, loaded off the UI thread.
+    /// The playback timeline, loaded off the UI thread.
     source: TermSource,
     /// Holds the background load task so it isn't cancelled on drop.
     _load_task: Task<()>,
-    /// The display terminal, created at the window size on first layout once the
-    /// source is loaded.
+    /// The frame currently shown; an index into the loaded [`Replay`]'s frames.
+    current_frame: usize,
+    /// Whether the timeline is advancing on its own.
+    playing: bool,
+    /// Playback speed multiplier (see [`SPEEDS`]).
+    speed: f32,
+    /// While playing, the wall-clock instant playback was last (re)started and the
+    /// build time it was at then, so the clock can map elapsed real time to a frame.
+    play_anchor: Option<(Instant, f64)>,
+    /// The playhead's time in seconds, shown on the scrubber and readout. It tracks
+    /// the playback clock continuously, so the playhead glides even when the shown
+    /// frame (a coarse build may have few) only changes in steps.
+    position: f64,
+    /// Whether the scrubber thumb is being dragged.
+    scrubbing: bool,
+    /// The painted scrubber track geometry, set each layout for hit-testing.
+    scrubber: Option<ScrubberLayout>,
+    /// The display terminal, built at the window size for [`current_frame`] and
+    /// rebuilt when the frame changes.
     terminal: Option<Terminal>,
+    /// The frame [`terminal`] was built for, to detect when it must be rebuilt.
+    terminal_frame: Option<usize>,
     /// The painted scroll bar geometry, set each layout for hit-testing.
     scrollbar: Option<ScrollbarLayout>,
     /// The painted content geometry, set each layout for mapping clicks to cells.
@@ -140,7 +170,15 @@ impl TerminalView {
         let mut view = Self {
             source: TermSource::Loading,
             _load_task: Task::ready(()),
+            current_frame: 0,
+            playing: false,
+            speed: SPEEDS[0],
+            play_anchor: None,
+            position: 0.0,
+            scrubbing: false,
+            scrubber: None,
             terminal: None,
+            terminal_frame: None,
             scrollbar: None,
             content: None,
             selecting: false,
@@ -166,11 +204,17 @@ impl TerminalView {
                 let bytes = std::fs::read(&path).map_err(|e| format!("cannot read {path}: {e}"))?;
                 let output = bviz_terminal::parse(&bytes)
                     .map_err(|e| format!("cannot parse build event stream: {e}"))?;
-                Ok::<_, String>(bviz_terminal::DisplaySource::from_output(&output))
+                Ok::<_, String>(bviz_terminal::Replay::from_output(output))
             },
             |view, result, _| {
                 view.source = match result {
-                    Ok(source) => TermSource::Loaded(source),
+                    Ok(replay) => {
+                        // Open on the completed build, the playhead at its end, ready
+                        // to replay from the start.
+                        view.current_frame = replay.frame_count().saturating_sub(1);
+                        view.position = replay.duration();
+                        TermSource::Loaded(replay)
+                    }
                     Err(err) => TermSource::Error(err),
                 };
             },
@@ -240,7 +284,12 @@ impl TerminalView {
         Some((column, row, side))
     }
 
-    fn on_mouse_down(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+    fn on_mouse_down(
+        &mut self,
+        event: &MouseDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let y = f32::from(event.position.y);
         // A click on the scroll-bar gutter drives the thumb; grabbing the thumb
         // keeps the cursor at the same spot on it, while clicking the track jumps
@@ -412,10 +461,153 @@ impl TerminalView {
             self.scroll(Scroll::Delta(lines), cx);
         }
     }
+
+    /// Toggle between playing and paused.
+    fn play_pause(&mut self, cx: &mut Context<Self>) {
+        if self.playing {
+            self.pause(cx);
+        } else {
+            self.play(cx);
+        }
+    }
+
+    /// Start advancing the timeline from the current frame, restarting from the
+    /// beginning if it sits at the end. Playback is driven from rendering: while
+    /// playing, each frame maps the elapsed real time to a timeline position and
+    /// requests the next frame (see [`advance_playback`](Self::advance_playback)).
+    fn play(&mut self, cx: &mut Context<Self>) {
+        let last = match &self.source {
+            TermSource::Loaded(replay) => replay.frame_count().saturating_sub(1),
+            _ => return,
+        };
+        if last == 0 {
+            return;
+        }
+        if self.current_frame >= last {
+            self.current_frame = 0;
+            self.position = 0.0;
+        }
+        self.playing = true;
+        self.anchor_clock();
+        cx.notify();
+    }
+
+    fn pause(&mut self, cx: &mut Context<Self>) {
+        self.playing = false;
+        self.play_anchor = None;
+        cx.notify();
+    }
+
+    /// Anchor the playback clock at the playhead: real time elapsed from now,
+    /// scaled by the speed, is added to the current position to find the frame to
+    /// show. Anchoring on the playhead rather than the shown frame's time keeps
+    /// playback continuous across a coarse timeline's large frame gaps.
+    fn anchor_clock(&mut self) {
+        self.play_anchor = Some((Instant::now(), self.position));
+    }
+
+    /// While playing, show the frame the clock has reached and request another
+    /// frame so playback keeps running; stop at the end. Called each render so
+    /// playback is paced by the window's frame loop rather than a detached timer,
+    /// which a quiescent window stops pumping.
+    fn advance_playback(&mut self, window: &mut Window) {
+        if !self.playing {
+            return;
+        }
+        let Some((started, base)) = self.play_anchor else {
+            return;
+        };
+        let target = base + started.elapsed().as_secs_f64() * self.speed as f64;
+        let (frame, last, duration) = match &self.source {
+            TermSource::Loaded(replay) => (
+                replay.frame_at(target),
+                replay.frame_count().saturating_sub(1),
+                replay.duration(),
+            ),
+            _ => return,
+        };
+        if frame >= last {
+            self.current_frame = last;
+            self.position = duration;
+            self.playing = false;
+            self.play_anchor = None;
+        } else {
+            self.current_frame = frame;
+            self.position = target.clamp(0.0, duration);
+            window.request_animation_frame();
+        }
+    }
+
+    /// Show a frame, clamped to the timeline, moving the playhead to its time and
+    /// keeping playback running from there.
+    fn seek_frame(&mut self, frame: usize, cx: &mut Context<Self>) {
+        let (frame, time) = match &self.source {
+            TermSource::Loaded(replay) => {
+                let frame = frame.min(replay.frame_count().saturating_sub(1));
+                (frame, replay.time_of(frame))
+            }
+            _ => return,
+        };
+        self.current_frame = frame;
+        self.position = time;
+        if self.playing {
+            self.anchor_clock();
+        }
+        cx.notify();
+    }
+
+    fn seek_start(&mut self, cx: &mut Context<Self>) {
+        self.seek_frame(0, cx);
+    }
+
+    fn seek_end(&mut self, cx: &mut Context<Self>) {
+        self.seek_frame(usize::MAX, cx);
+    }
+
+    /// Advance to the next playback speed, wrapping around.
+    fn cycle_speed(&mut self, cx: &mut Context<Self>) {
+        let next = SPEEDS
+            .iter()
+            .position(|&s| s == self.speed)
+            .map_or(0, |i| (i + 1) % SPEEDS.len());
+        self.speed = SPEEDS[next];
+        if self.playing {
+            self.anchor_clock();
+        }
+        cx.notify();
+    }
+
+    /// Begin a scrubber drag: pause and jump to the pressed position.
+    fn scrub_begin(&mut self, event: &MouseDownEvent, _: &mut Window, cx: &mut Context<Self>) {
+        self.scrubbing = true;
+        self.playing = false;
+        self.play_anchor = None;
+        self.scrub_to_x(f32::from(event.position.x), cx);
+    }
+
+    /// Seek to the timeline position under a window x-coordinate on the scrubber.
+    fn scrub_to_x(&mut self, x: f32, cx: &mut Context<Self>) {
+        let Some(layout) = self.scrubber else {
+            return;
+        };
+        let fraction = ((x - layout.left) / layout.width.max(1.0)).clamp(0.0, 1.0);
+        let (frame, position) = match &self.source {
+            TermSource::Loaded(replay) => {
+                let position = fraction as f64 * replay.duration();
+                (replay.frame_at(position), position)
+            }
+            _ => return,
+        };
+        self.current_frame = frame;
+        self.position = position;
+        cx.notify();
+    }
 }
 
 impl Render for TerminalView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Advance the timeline if playing, pacing playback by the frame loop.
+        self.advance_playback(window);
         let colors = bviz_ui_theme::colors(window);
         let body = match &self.source {
             TermSource::Loaded(_) => {
@@ -424,6 +616,7 @@ impl Render for TerminalView {
                 } else {
                     None
                 };
+                let controls = self.render_controls(&colors, cx);
                 div()
                     .key_context("Terminal")
                     .track_focus(&self.body_focus)
@@ -435,19 +628,26 @@ impl Render for TerminalView {
                     .on_action(cx.listener(Self::scroll_to_bottom))
                     .on_action(cx.listener(Self::copy))
                     .on_action(cx.listener(Self::find))
-                    .on_scroll_wheel(cx.listener(Self::on_scroll_wheel))
-                    .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
-                    .on_mouse_move(cx.listener(Self::on_mouse_move))
-                    .when(self.hovered_url.is_some(), |body| body.cursor_pointer())
-                    .relative()
+                    .flex()
+                    .flex_col()
                     .size_full()
-                    .overflow_hidden()
                     .bg(colors.background)
-                    .font_family(bviz_ui_assets::MONO)
-                    .text_size(px(13.))
-                    .text_color(colors.text)
-                    .child(TerminalElement { view: cx.entity() })
-                    .children(find_box)
+                    .child(
+                        div()
+                            .relative()
+                            .flex_1()
+                            .overflow_hidden()
+                            .on_scroll_wheel(cx.listener(Self::on_scroll_wheel))
+                            .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
+                            .on_mouse_move(cx.listener(Self::on_mouse_move))
+                            .when(self.hovered_url.is_some(), |body| body.cursor_pointer())
+                            .font_family(bviz_ui_assets::MONO)
+                            .text_size(px(13.))
+                            .text_color(colors.text)
+                            .child(TerminalElement { view: cx.entity() })
+                            .children(find_box),
+                    )
+                    .child(controls)
                     .into_any_element()
             }
             TermSource::Loading => div()
@@ -469,7 +669,12 @@ impl Render for TerminalView {
                             },
                         ),
                 )
-                .child(div().text_sm().text_color(colors.disabled).child("Loading…"))
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(colors.disabled)
+                        .child("Loading…"),
+                )
                 .into_any_element(),
             TermSource::Error(msg) => div()
                 .flex_1()
@@ -580,6 +785,143 @@ impl TerminalView {
                 .into_any_element(),
         )
     }
+
+    /// The playback control bar below the terminal: jump-to-start, play/pause, and
+    /// jump-to-end buttons, a draggable timeline scrubber, an elapsed/total
+    /// readout, and a speed control.
+    fn render_controls(
+        &self,
+        colors: &bviz_ui_theme::Colors,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let (duration, real_time) = match &self.source {
+            TermSource::Loaded(replay) => (replay.duration(), replay.real_time()),
+            _ => (0.0, true),
+        };
+        // The playhead tracks the playback clock, so it glides smoothly even when
+        // the shown frame jumps across a coarse timeline's large gaps.
+        let current = self.position;
+        let fraction = if duration > 0.0 {
+            (current / duration).clamp(0.0, 1.0) as f32
+        } else {
+            0.0
+        };
+        let playing = self.playing;
+
+        let view = cx.entity();
+        let start_view = view.clone();
+        let play_view = view.clone();
+        let end_view = view.clone();
+        let speed_view = view.clone();
+        let bounds_view = view.clone();
+        let drag_view = view;
+
+        let track_color = bviz_ui_theme::mix(colors.text, colors.background, 0.6);
+        let played_color = colors.text;
+        let knob_color = colors.text;
+
+        // An interpolated timeline (captured without --show_timestamps) is marked
+        // approximate.
+        let readout = if real_time {
+            format!("{} / {}", fmt_time(current), fmt_time(duration))
+        } else {
+            format!("{} / ~{}", fmt_time(current), fmt_time(duration))
+        };
+
+        div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_2()
+            .px_3()
+            .h(px(40.))
+            .bg(colors.container)
+            .border_t_1()
+            .border_color(colors.border)
+            .font_family(bviz_ui_assets::UI)
+            .text_color(colors.text)
+            .child(
+                Button::new("seek-start", move |_, _, cx| {
+                    start_view.update(cx, |this, cx| this.seek_start(cx))
+                })
+                .ghost()
+                .icon("skip-back"),
+            )
+            .child(
+                Button::new("play-pause", move |_, _, cx| {
+                    play_view.update(cx, |this, cx| this.play_pause(cx))
+                })
+                .ghost()
+                .icon(if playing { "pause" } else { "play" }),
+            )
+            .child(
+                Button::new("seek-end", move |_, _, cx| {
+                    end_view.update(cx, |this, cx| this.seek_end(cx))
+                })
+                .ghost()
+                .icon("skip-forward"),
+            )
+            .child(
+                div()
+                    .id("scrubber")
+                    .flex_1()
+                    .h_full()
+                    .on_mouse_down(MouseButton::Left, cx.listener(Self::scrub_begin))
+                    .child(
+                        canvas(
+                            move |bounds, _, cx| {
+                                bounds_view.update(cx, |this, _| {
+                                    this.scrubber = Some(ScrubberLayout {
+                                        left: f32::from(bounds.origin.x),
+                                        width: f32::from(bounds.size.width),
+                                    });
+                                });
+                            },
+                            move |bounds, _, window, cx| {
+                                paint_scrubber(
+                                    bounds,
+                                    fraction,
+                                    track_color,
+                                    played_color,
+                                    knob_color,
+                                    window,
+                                );
+                                // Keep a scrub drag live past the window edge.
+                                if drag_view.read(cx).scrubbing {
+                                    track_drag(
+                                        window,
+                                        &drag_view,
+                                        |this, event, cx| {
+                                            this.scrub_to_x(f32::from(event.position.x), cx)
+                                        },
+                                        |this, _, cx| {
+                                            if this.scrubbing {
+                                                this.scrubbing = false;
+                                                cx.notify();
+                                            }
+                                        },
+                                    );
+                                }
+                            },
+                        )
+                        .size_full(),
+                    ),
+            )
+            .child(
+                div()
+                    .w(px(128.))
+                    .text_size(px(12.))
+                    .child(SharedString::from(readout)),
+            )
+            .child(
+                Button::new("speed", move |_, _, cx| {
+                    speed_view.update(cx, |this, cx| this.cycle_speed(cx))
+                })
+                .ghost()
+                .label(format!("{}×", self.speed as i32)),
+            )
+            .into_any_element()
+    }
 }
 
 /// Custom element that sizes the terminal to its bounds, then shapes the visible
@@ -685,14 +1027,23 @@ impl Element for TerminalElement {
         let rows = (f32::from(bounds.size.height) / f32::from(metrics.line_height))
             .floor()
             .max(1.0) as usize;
-        self.view.update(cx, |view, _| match view.terminal.as_mut() {
-            Some(terminal) => terminal.resize(cols, rows),
-            // Build the terminal only once the source has loaded; before that the
-            // viewport read below sees `None` and renders empty.
-            None => {
-                if let TermSource::Loaded(source) = &view.source {
-                    view.terminal = Some(Terminal::from_display(source, cols, rows));
+        self.view.update(cx, |view, _| {
+            let frame = view.current_frame;
+            // Rebuild the terminal when the played frame changes, reconstructing the
+            // build's output up to that point; otherwise just reflow to the bounds.
+            // Before the source loads there is nothing to build and the viewport
+            // read below sees `None` and renders empty.
+            if view.terminal.is_none() || view.terminal_frame != Some(frame) {
+                if let TermSource::Loaded(replay) = &view.source {
+                    let source = replay.display_at(frame);
+                    let mut terminal = Terminal::from_display(&source, cols, rows);
+                    // Follow the newest output, as the build's terminal did.
+                    terminal.scroll(Scroll::Bottom);
+                    view.terminal = Some(terminal);
+                    view.terminal_frame = Some(frame);
                 }
+            } else if let Some(terminal) = view.terminal.as_mut() {
+                terminal.resize(cols, rows);
             }
         });
         let (viewport, history, offset, selection, search) =
@@ -992,13 +1343,13 @@ impl CellStyle {
                 thickness: px(1.0),
                 wavy: cell.flags.contains(Flags::UNDERCURL),
             });
-        let strikethrough =
-            cell.flags
-                .contains(Flags::STRIKEOUT)
-                .then_some(StrikethroughStyle {
-                    color: Some(foreground.into()),
-                    thickness: px(1.0),
-                });
+        let strikethrough = cell
+            .flags
+            .contains(Flags::STRIKEOUT)
+            .then_some(StrikethroughStyle {
+                color: Some(foreground.into()),
+                thickness: px(1.0),
+            });
         CellStyle {
             foreground,
             background,
@@ -1102,4 +1453,48 @@ fn indexed(i: u8, ansi: &[u32; 16]) -> Rgba {
             }
         }
     }
+}
+
+/// Format a number of seconds as `M:SS`.
+fn fmt_time(seconds: f64) -> String {
+    let whole = seconds.max(0.0).round() as u64;
+    format!("{}:{:02}", whole / 60, whole % 60)
+}
+
+/// Paint the scrubber into its bounds: a dim full-width track, a brighter played
+/// portion up to `fraction`, and a knob marking the current position.
+fn paint_scrubber(
+    bounds: Bounds<Pixels>,
+    fraction: f32,
+    track: Rgba,
+    played: Rgba,
+    knob: Rgba,
+    window: &mut Window,
+) {
+    let left = f32::from(bounds.left());
+    let width = f32::from(bounds.size.width);
+    let mid = f32::from(bounds.top()) + f32::from(bounds.size.height) / 2.0;
+    let track_h = 4.0;
+    let knob_size = 12.0;
+    let played_w = width * fraction.clamp(0.0, 1.0);
+    let knob_x = (left + played_w - knob_size / 2.0).clamp(left, left + width - knob_size);
+
+    let bar = |x: f32, w: f32, color: Rgba| {
+        fill(
+            Bounds::new(
+                point(px(x), px(mid - track_h / 2.0)),
+                size(px(w), px(track_h)),
+            ),
+            color,
+        )
+    };
+    window.paint_quad(bar(left, width, track));
+    window.paint_quad(bar(left, played_w, played));
+    window.paint_quad(fill(
+        Bounds::new(
+            point(px(knob_x), px(mid - knob_size / 2.0)),
+            size(px(knob_size), px(knob_size)),
+        ),
+        knob,
+    ));
 }
