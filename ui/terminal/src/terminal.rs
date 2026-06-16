@@ -659,6 +659,7 @@ impl Render for TerminalView {
                     .flex_col()
                     .size_full()
                     .bg(colors.background)
+                    .child(controls)
                     .child(
                         div()
                             .relative()
@@ -674,7 +675,6 @@ impl Render for TerminalView {
                             .child(TerminalElement { view: cx.entity() })
                             .children(find_box),
                     )
-                    .child(controls)
                     .into_any_element()
             }
             TermSource::Loading => div()
@@ -863,7 +863,7 @@ impl TerminalView {
             .px_3()
             .h(px(40.))
             .bg(colors.container)
-            .border_t_1()
+            .border_b_1()
             .border_color(colors.border)
             .font_family(bviz_ui_assets::UI)
             .text_color(colors.text)
