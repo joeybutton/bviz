@@ -8,6 +8,7 @@ rust_binary(
     deps = [
         "//graph/layout",
         "//ui/assets",
+        "//ui/components",
         "//ui/shell",
         "//ui/theme",
         "@crates//:gpui",

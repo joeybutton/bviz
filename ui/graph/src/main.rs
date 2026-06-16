@@ -5,9 +5,10 @@
 use bviz_graph_layout::graph::Graph;
 use bviz_graph_layout::layout::CARET_RESERVE;
 use bviz_graph_layout::{aquery, layout, quotient, streamed_proto, LaidOut};
+use bviz_ui_components::track_drag;
 use bviz_ui_shell::Chrome;
 use gpui::{
-    Animation, AnimationExt, App, AsyncApp, BorderStyle, Bounds, Context, Div, FocusHandle,
+    Animation, AnimationExt, App, AsyncApp, BorderStyle, Bounds, Context, Div, Entity, FocusHandle,
     IntoElement, MouseButton, MouseDownEvent, Hsla, MouseMoveEvent, MouseUpEvent, PathBuilder,
     Pixels, Point, Render, Rgba, ScrollDelta, ScrollWheelEvent, Stateful, Task, TextAlign, TextRun,
     Size, Transformation, WeakEntity, Window, canvas, div, font, percentage, point, prelude::*, px,
@@ -235,6 +236,7 @@ impl GraphView {
     fn graph(
         g: &LaidOut,
         expanded: &HashSet<String>,
+        entity: Entity<GraphView>,
         zoom: Rc<Cell<f32>>,
         pan: Rc<Cell<(f32, f32)>>,
         fitted: Rc<Cell<bool>>,
@@ -307,15 +309,22 @@ impl GraphView {
             .overflow_hidden()
             .child(
                 canvas(prepaint, move |bounds, _, window, cx| {
-                    let zoom = zoom.get();
-                    let pan = pan.get();
+                    let z = zoom.get();
+                    let p = pan.get();
                     // Boxes parent-before-child so children paint over their
                     // containers; connectors last so edges sit over the fills.
                     for b in &boxes {
-                        paint_box(b, bounds, zoom, pan, &palette, window, cx);
+                        paint_box(b, bounds, z, p, &palette, window, cx);
                     }
                     for points in &connectors {
-                        paint_connector(points, bounds, zoom, pan, &palette, window);
+                        paint_connector(points, bounds, z, p, &palette, window);
+                    }
+                    // While a drag is in progress, pan through window-global
+                    // handlers so it keeps working when the cursor leaves the
+                    // window; a release anywhere ends the drag and, if it was a
+                    // click rather than a drag, toggles the group under it.
+                    if entity.read(cx).dragging {
+                        track_drag(window, &entity, drag_pan, end_drag);
                     }
                 })
                 .absolute()
@@ -359,6 +368,7 @@ impl Render for GraphView {
                     Self::graph(
                         g,
                         &self.expanded.borrow(),
+                        cx.entity(),
                         self.zoom.clone(),
                         self.pan.clone(),
                         self.fitted.clone(),
@@ -367,58 +377,17 @@ impl Render for GraphView {
                     )
                     .on_mouse_down(
                         MouseButton::Left,
-                        cx.listener(|this, e: &MouseDownEvent, _, _| {
+                        cx.listener(|this, e: &MouseDownEvent, _, cx| {
+                            // Start a drag; the window-global handlers that follow
+                            // and end it are installed from the canvas paint while
+                            // `dragging` is set, so request a repaint now.
                             this.dragging = true;
                             this.moved = false;
                             this.press = e.position;
                             this.last_mouse = e.position;
-                        }),
-                    )
-                    .on_mouse_up(
-                        MouseButton::Left,
-                        cx.listener(|this, e: &MouseUpEvent, _, cx| {
-                            this.dragging = false;
-                            if this.moved {
-                                return;
-                            }
-                            // A click (no appreciable drag): hit-test the laid-out
-                            // boxes and toggle the group under the cursor.
-                            let Source::Loaded(g) = &this.source else {
-                                return;
-                            };
-                            let vp = this.viewport.get();
-                            let (gx, gy) =
-                                from_screen(e.position, vp.origin, this.zoom.get(), this.pan.get());
-                            let Some(hit) = hit_box(&g.boxes, gx, gy) else {
-                                return;
-                            };
-                            if !hit.id.starts_with("group:") {
-                                return;
-                            }
-                            let id = hit.id.clone();
-                            let mut expanded = this.expanded.borrow_mut();
-                            if !expanded.remove(&id) {
-                                expanded.insert(id);
-                            }
-                            drop(expanded);
-                            this.retoggle(cx);
-                        }),
-                    )
-                    .on_mouse_move(cx.listener(|this, e: &MouseMoveEvent, _, cx| {
-                        if this.dragging {
-                            let dpx = f32::from(e.position.x) - f32::from(this.press.x);
-                            let dpy = f32::from(e.position.y) - f32::from(this.press.y);
-                            if dpx.hypot(dpy) > CLICK_SLOP {
-                                this.moved = true;
-                            }
-                            let (px, py) = this.pan.get();
-                            let dx = f32::from(e.position.x) - f32::from(this.last_mouse.x);
-                            let dy = f32::from(e.position.y) - f32::from(this.last_mouse.y);
-                            this.pan.set((px + dx, py + dy));
-                            this.last_mouse = e.position;
                             cx.notify();
-                        }
-                    }))
+                        }),
+                    )
                     .on_scroll_wheel(cx.listener(|this, e: &ScrollWheelEvent, _, cx| {
                         // Anchor the zoom at the cursor: keep the content point
                         // under the cursor fixed as the scale changes. The minimum
@@ -748,6 +717,49 @@ fn from_screen(
         (f32::from(screen.x) - f32::from(origin.x) - pan.0) / zoom - MARGIN as f32,
         (f32::from(screen.y) - f32::from(origin.y) - pan.1) / zoom - MARGIN as f32,
     )
+}
+
+/// Pan the graph by the cursor delta during a drag, latching `moved` once the
+/// cursor has travelled past the click threshold.
+fn drag_pan(view: &mut GraphView, event: &MouseMoveEvent, cx: &mut Context<GraphView>) {
+    let traveled = (f32::from(event.position.x) - f32::from(view.press.x))
+        .hypot(f32::from(event.position.y) - f32::from(view.press.y));
+    if traveled > CLICK_SLOP {
+        view.moved = true;
+    }
+    let (px, py) = view.pan.get();
+    let dx = f32::from(event.position.x) - f32::from(view.last_mouse.x);
+    let dy = f32::from(event.position.y) - f32::from(view.last_mouse.y);
+    view.pan.set((px + dx, py + dy));
+    view.last_mouse = event.position;
+    cx.notify();
+}
+
+/// End a drag. A release that never travelled is a click: toggle the group box
+/// under the cursor.
+fn end_drag(view: &mut GraphView, event: &MouseUpEvent, cx: &mut Context<GraphView>) {
+    view.dragging = false;
+    if view.moved {
+        return;
+    }
+    let Source::Loaded(g) = &view.source else {
+        return;
+    };
+    let vp = view.viewport.get();
+    let (gx, gy) = from_screen(event.position, vp.origin, view.zoom.get(), view.pan.get());
+    let Some(hit) = hit_box(&g.boxes, gx, gy) else {
+        return;
+    };
+    if !hit.id.starts_with("group:") {
+        return;
+    }
+    let id = hit.id.clone();
+    let mut expanded = view.expanded.borrow_mut();
+    if !expanded.remove(&id) {
+        expanded.insert(id);
+    }
+    drop(expanded);
+    view.retoggle(cx);
 }
 
 /// The smallest-area box (in layout space) containing `(gx, gy)`, so an inner
