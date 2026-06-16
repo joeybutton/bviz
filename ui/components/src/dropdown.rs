@@ -3,7 +3,7 @@
 
 use gpui::{
     deferred, div, prelude::*, px, ClickEvent, Context, ElementId, FocusHandle, IntoElement,
-    Render, SharedString, Subscription, Window,
+    MouseButton, Render, SharedString, Subscription, Window,
 };
 
 /// A dropdown over a fixed list of options. The chosen index is read with
@@ -104,6 +104,10 @@ impl Render for Dropdown {
             .cursor_pointer()
             .text_color(colors.text)
             .hover(move |style| style.bg(hover))
+            // Keep the press from reaching an ancestor that focuses on mouse-down
+            // (e.g. a toolbar); that would blur the menu and, via the dismiss-on-
+            // blur below, close it just before this click reopens it.
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                 this.open = !this.open;
                 // Hold focus while open so an outside click dismisses the menu.
