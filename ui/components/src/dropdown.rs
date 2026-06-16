@@ -75,6 +75,23 @@ impl Render for Dropdown {
         let hover = colors.selected;
         let label = self.options.get(self.selected).cloned().unwrap_or_default();
 
+        // Size the label area to the widest option so the trigger keeps a fixed
+        // width as the selection changes (the options font is proportional).
+        let metrics = bviz_ui_assets::text_metrics(window);
+        let measure_color = window.text_style().color;
+        let mut option_width = px(0.);
+        for option in &self.options {
+            let width = bviz_ui_assets::shape_line(
+                window,
+                option.clone(),
+                metrics.font.clone(),
+                metrics.font_size,
+                measure_color,
+            )
+            .width;
+            option_width = option_width.max(width);
+        }
+
         let trigger = div()
             .id(self.id.clone())
             .flex()
@@ -95,7 +112,7 @@ impl Render for Dropdown {
                 }
                 cx.notify();
             }))
-            .child(label)
+            .child(div().w(option_width).child(label))
             .child(
                 bviz_ui_assets::icon("caret-down")
                     .size(px(12.))
@@ -125,7 +142,9 @@ impl Render for Dropdown {
                     .absolute()
                     .top(px(26.))
                     .left_0()
-                    .w(px(72.))
+                    // No explicit width: the menu shrinks to fit its options, so a
+                    // row never wraps. A fixed width would have to budget for the row
+                    // padding and border, which is error-prone.
                     .flex()
                     .flex_col()
                     .bg(colors.container)
