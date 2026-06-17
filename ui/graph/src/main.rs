@@ -163,9 +163,10 @@ struct GraphView {
     /// Container and group ids currently expanded; every other container folds
     /// its subtree away so the layout only processes the visible view.
     expanded: Rc<RefCell<HashSet<String>>>,
-    /// Container ids of the base graph (each a node that is some node's parent),
-    /// so a click can tell an expandable box from a plain leaf.
-    containers: Rc<RefCell<HashSet<String>>>,
+    /// Multi-child container ids of the base graph; only these carry an
+    /// expand/collapse handle (a leaf can't open, a singleton auto-expands), so a
+    /// click or caret can tell an expandable box from a plain one.
+    expandable: Rc<RefCell<HashSet<String>>>,
     /// Holds the background load/relayout task so it isn't cancelled on drop.
     _load_task: Task<()>,
 }
@@ -198,7 +199,8 @@ impl GraphView {
             |view, result, _| {
                 view.source = match result {
                     Ok((graph, expanded, laid_out)) => {
-                        *view.containers.borrow_mut() = bviz_graph_layout::lod::containers(&graph);
+                        *view.expandable.borrow_mut() =
+                            bviz_graph_layout::lod::expandable_containers(&graph);
                         *view.expanded.borrow_mut() = expanded;
                         *view.base.borrow_mut() = Some(graph);
                         Source::Loaded(laid_out)
@@ -220,7 +222,7 @@ impl GraphView {
             viewport: Rc::new(Cell::new(Bounds::default())),
             base,
             expanded: Rc::new(RefCell::new(HashSet::new())),
-            containers: Rc::new(RefCell::new(HashSet::new())),
+            expandable: Rc::new(RefCell::new(HashSet::new())),
             _load_task: load_task,
         }
     }
@@ -246,7 +248,7 @@ impl GraphView {
     /// connectors rather than borrowing the graph.
     fn graph(
         g: &LaidOut,
-        containers: &HashSet<String>,
+        expandable: &HashSet<String>,
         entity: Entity<GraphView>,
         zoom: Rc<Cell<f32>>,
         pan: Rc<Cell<(f32, f32)>>,
@@ -263,7 +265,7 @@ impl GraphView {
                 w: b.width,
                 h: b.height,
                 compound: b.compound,
-                expandable: containers.contains(&b.id) || b.id.starts_with("group:"),
+                expandable: expandable.contains(&b.id) || b.id.starts_with("group:"),
                 fill: if b.compound {
                     container_fill(&b.kind, &palette)
                 } else {
@@ -411,7 +413,7 @@ impl Render for GraphView {
                 .child(
                     Self::graph(
                         g,
-                        &self.containers.borrow(),
+                        &self.expandable.borrow(),
                         cx.entity(),
                         self.zoom.clone(),
                         self.pan.clone(),
@@ -818,8 +820,9 @@ fn end_drag(view: &mut GraphView, event: &MouseUpEvent, cx: &mut Context<GraphVi
     let Some(hit) = hit_box(&g.boxes, gx, gy) else {
         return;
     };
-    // A container or a collapsed group can be opened/closed; a plain leaf can't.
-    if !hit.id.starts_with("group:") && !view.containers.borrow().contains(&hit.id) {
+    // A multi-child container or a collapsed group can be opened/closed; a leaf
+    // or singleton can't.
+    if !hit.id.starts_with("group:") && !view.expandable.borrow().contains(&hit.id) {
         return;
     }
     let id = hit.id.clone();

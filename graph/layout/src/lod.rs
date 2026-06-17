@@ -2,8 +2,10 @@
 //!
 //! Only the descendants of *expanded* containers are shown; every other subtree
 //! folds into its shallowest collapsed ancestor, which then renders as a leaf.
-//! Running this before quotient and layout shrinks a graph of tens of thousands
-//! of nodes to a view whose size the caller caps.
+//! A singleton container (exactly one child) is always shown expanded, so it
+//! never acts as a fold boundary or an expand/collapse handle. Running this
+//! before quotient and layout shrinks a graph of tens of thousands of nodes to
+//! a view whose size the caller caps.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
@@ -18,14 +20,38 @@ pub fn containers(graph: &Graph) -> HashSet<String> {
         .collect()
 }
 
-/// Collapses `graph` to the view in which only the descendants of `expanded`
-/// containers are shown. Every node folds to its "representative": the
-/// shallowest node on its root->node path that is not in `expanded` (or the node
-/// itself when its whole ancestor chain is expanded). Each distinct
-/// representative becomes one node (keeping that node's label/kind/parent), so a
-/// collapsed container renders as a leaf. Edges are remapped to their endpoints'
-/// representatives, self-loops (both endpoints in the same collapsed subtree)
-/// dropped, and duplicates merged keeping their `EdgeKind`.
+/// The ids of multi-child containers (two or more children). Only these get an
+/// expand/collapse handle: leaves can't expand and singletons auto-expand.
+pub fn expandable_containers(graph: &Graph) -> HashSet<String> {
+    child_counts(graph)
+        .into_iter()
+        .filter(|(_, count)| *count >= 2)
+        .map(|(id, _)| id.to_string())
+        .collect()
+}
+
+/// Number of nodes naming each container as their `parent`.
+fn child_counts(graph: &Graph) -> HashMap<&str, usize> {
+    let mut counts: HashMap<&str, usize> = HashMap::new();
+    for node in &graph.nodes {
+        if let Some(parent) = node.parent.as_deref() {
+            *counts.entry(parent).or_default() += 1;
+        }
+    }
+    counts
+}
+
+/// Collapses `graph` to the view in which only the descendants of *effectively
+/// expanded* containers are shown — a container is effectively expanded when it
+/// is in `expanded` or is a singleton (exactly one child), so single-child
+/// chains always reveal their descendants. Every node folds to its
+/// "representative": the shallowest node on its root->node path that is neither
+/// in `expanded` nor a singleton (or the node itself when its whole ancestor
+/// chain is effectively expanded). Each distinct representative becomes one node
+/// (keeping that node's label/kind/parent), so a collapsed container renders as
+/// a leaf. Edges are remapped to their endpoints' representatives, self-loops
+/// (both endpoints in the same collapsed subtree) dropped, and duplicates merged
+/// keeping their `EdgeKind`.
 pub fn collapse(graph: &Graph, expanded: &HashSet<String>) -> Graph {
     let mut reps = Representatives::new(graph, expanded);
 
@@ -55,11 +81,12 @@ pub fn collapse(graph: &Graph, expanded: &HashSet<String>) -> Graph {
     out
 }
 
-/// A startup expansion set: opens containers breadth-first from the roots,
-/// taking each whose direct children still fit `max_nodes`, so the visible node
-/// budget is filled rather than stopping at the first level that overflows.
-/// Then it drops the deepest expansions until the collapsed view also fits
-/// `max_edges`. The result is a bounded but non-trivial overview.
+/// A startup expansion set: the largest breadth-first prefix of the reachable
+/// multi-child containers whose collapsed view fits both `max_nodes` and
+/// `max_edges`. Singletons auto-expand in `collapse` and leaves can't expand, so
+/// only multi-child containers are candidates; their direct children's nearest
+/// multi-child descendants become reachable as each is expanded. The result is a
+/// bounded but non-trivial overview.
 pub fn default_expansion(graph: &Graph, max_nodes: usize, max_edges: usize) -> HashSet<String> {
     let mut children: HashMap<&str, Vec<&str>> = HashMap::new();
     let mut roots: Vec<&str> = Vec::new();
@@ -70,54 +97,61 @@ pub fn default_expansion(graph: &Graph, max_nodes: usize, max_edges: usize) -> H
         }
     }
 
-    // Greedy breadth-first fill: a root is always shown, and expanding a
-    // container reveals its direct children, so accept one while its children
-    // fit the node budget. `order` records the expansions shallowest-first.
-    let mut expanded: HashSet<String> = HashSet::new();
-    let mut order: Vec<&str> = Vec::new();
-    let mut shown = roots.len();
-    let mut queue: VecDeque<&str> =
-        roots.iter().copied().filter(|r| children.contains_key(r)).collect();
-    while let Some(c) = queue.pop_front() {
-        let kids = &children[c];
-        if shown + kids.len() > max_nodes {
-            continue;
-        }
-        expanded.insert(c.to_string());
-        order.push(c);
-        shown += kids.len();
-        for &k in kids {
-            if children.contains_key(k) {
-                queue.push_back(k);
+    // Nearest multi-child container at or below `n`, walking through single-child
+    // nodes (which auto-expand) until a node with two or more or zero children.
+    fn descend<'a>(children: &HashMap<&'a str, Vec<&'a str>>, mut n: &'a str) -> Option<&'a str> {
+        loop {
+            match children.get(n).map(Vec::as_slice) {
+                Some([only]) => n = only,
+                Some(_) => return Some(n),
+                None => return None,
             }
         }
     }
 
-    // Expanding a container only de-aggregates edges, so the collapsed edge count
-    // rises monotonically with the shallowest-first prefix of `order`. Keep the
-    // largest prefix whose view fits `max_edges`.
-    if collapse(graph, &expanded).edges.len() > max_edges {
-        let fits = |k: usize| {
-            let prefix: HashSet<String> = order[..k].iter().map(|s| s.to_string()).collect();
-            collapse(graph, &prefix).edges.len() <= max_edges
-        };
-        let (mut lo, mut hi) = (0usize, order.len());
-        while lo < hi {
-            let mid = lo + (hi - lo + 1) / 2;
-            if fits(mid) {
-                lo = mid;
-            } else {
-                hi = mid - 1;
+    // BFS over reachable multi-child containers, shallowest-first. Expanding one
+    // reveals its direct children, each contributing its nearest multi-child
+    // descendant. Every container's nearest multi-child ancestor precedes it, so
+    // the order is ancestor-closed and its prefixes nest.
+    let mut order: Vec<&str> = Vec::new();
+    let mut seen: HashSet<&str> = HashSet::new();
+    let mut queue: VecDeque<&str> = roots.iter().filter_map(|r| descend(&children, r)).collect();
+    while let Some(c) = queue.pop_front() {
+        if !seen.insert(c) {
+            continue;
+        }
+        order.push(c);
+        for &k in &children[c] {
+            if let Some(d) = descend(&children, k) {
+                queue.push_back(d);
             }
         }
-        expanded = order[..lo].iter().map(|s| s.to_string()).collect();
     }
-    expanded
+
+    // Both counts rise monotonically with the prefix length (more expansion only
+    // reveals nodes and de-aggregates edges), so binary-search the largest prefix
+    // whose collapsed view fits both caps.
+    let fits = |k: usize| {
+        let prefix: HashSet<String> = order[..k].iter().map(|s| s.to_string()).collect();
+        let view = collapse(graph, &prefix);
+        view.nodes.len() <= max_nodes && view.edges.len() <= max_edges
+    };
+    let (mut lo, mut hi) = (0usize, order.len());
+    while lo < hi {
+        let mid = lo + (hi - lo + 1) / 2;
+        if fits(mid) {
+            lo = mid;
+        } else {
+            hi = mid - 1;
+        }
+    }
+    order[..lo].iter().map(|s| s.to_string()).collect()
 }
 
 /// Memoized representative lookup over ids borrowed from the graph.
 struct Representatives<'a> {
     parent: HashMap<&'a str, &'a str>,
+    child_counts: HashMap<&'a str, usize>,
     expanded: &'a HashSet<String>,
     memo: HashMap<&'a str, &'a str>,
 }
@@ -126,13 +160,20 @@ impl<'a> Representatives<'a> {
     fn new(graph: &'a Graph, expanded: &'a HashSet<String>) -> Self {
         Self {
             parent: parent_map(graph),
+            child_counts: child_counts(graph),
             expanded,
             memo: HashMap::new(),
         }
     }
 
-    /// The shallowest node on `id`'s root->id path not in `expanded`, falling
-    /// back to `id` when the whole chain is expanded.
+    /// A container is effectively expanded when listed in `expanded` or a
+    /// singleton; its descendants are then shown rather than folded into it.
+    fn is_expanded(&self, id: &str) -> bool {
+        self.expanded.contains(id) || self.child_counts.get(id) == Some(&1)
+    }
+
+    /// The shallowest node on `id`'s root->id path that is not effectively
+    /// expanded, falling back to `id` when the whole chain is.
     fn of(&mut self, id: &'a str) -> &'a str {
         if let Some(&rep) = self.memo.get(id) {
             return rep;
@@ -148,7 +189,7 @@ impl<'a> Representatives<'a> {
             .iter()
             .rev()
             .copied()
-            .find(|n| !self.expanded.contains(*n))
+            .find(|n| !self.is_expanded(n))
             .unwrap_or(id);
         self.memo.insert(id, rep);
         rep
@@ -191,30 +232,52 @@ mod tests {
         graph.nodes.iter().find(|n| n.id == id).unwrap()
     }
 
-    /// root -> child -> leaf under each of two roots A and B.
+    /// Two roots A and B, each a multi-child container holding `x`/`y`
+    /// grandchild leaves, so each is a fold boundary.
     fn two_towers() -> Graph {
         let mut g = Graph::new();
         for root in ["A", "B"] {
             g.add_node(root, root, "package", None);
-            let child = format!("{root}.child");
-            let leaf = format!("{root}.leaf");
-            g.add_node(child.clone(), &child, "target", Some(root.to_string()));
-            g.add_node(leaf, "leaf", "action", Some(child));
+            for kid in ["x", "y"] {
+                let child = format!("{root}.{kid}");
+                g.add_node(child, "leaf", "action", Some(root.to_string()));
+            }
         }
+        g
+    }
+
+    /// A single-child chain `A -> b -> c -> leaf`: every node but the leaf is a
+    /// singleton container.
+    fn singleton_chain() -> Graph {
+        let mut g = Graph::new();
+        g.add_node("A", "A", "package", None);
+        g.add_node("b", "b", "target", Some("A".to_string()));
+        g.add_node("c", "c", "target", Some("b".to_string()));
+        g.add_node("leaf", "leaf", "action", Some("c".to_string()));
         g
     }
 
     #[test]
     fn containers_are_the_parent_referenced_ids() {
         let g = two_towers();
-        assert_eq!(containers(&g), expanded(&["A", "A.child", "B", "B.child"]));
+        assert_eq!(containers(&g), expanded(&["A", "B"]));
+    }
+
+    #[test]
+    fn expandable_containers_are_only_multi_child() {
+        let mut g = singleton_chain();
+        // Make `b` a two-child container; its other child is a leaf.
+        g.add_node("b.extra", "leaf", "action", Some("b".to_string()));
+
+        // The singleton-only ancestors (A) and leaves never qualify; `b` does.
+        assert_eq!(expandable_containers(&g), expanded(&["b"]));
     }
 
     #[test]
     fn empty_expanded_folds_each_tower_to_its_root() {
         let mut g = two_towers();
-        // Cross-tower edge between the deepest leaves.
-        g.add_edge("A.leaf", "B.leaf", EdgeKind::Aquery);
+        // Cross-tower edge between leaves of the two folded roots.
+        g.add_edge("A.x", "B.y", EdgeKind::Aquery);
 
         let out = collapse(&g, &HashSet::new());
 
@@ -225,22 +288,55 @@ mod tests {
     }
 
     #[test]
-    fn expanding_a_root_reveals_its_children_only() {
-        let mut g = two_towers();
-        // Internal to A's still-collapsed child: a self-loop once folded.
-        g.add_edge("A.leaf", "A.child", EdgeKind::Aquery);
-        // Crosses from A's subtree into B's still-folded tower.
-        g.add_edge("A.leaf", "B.leaf", EdgeKind::Aquery);
+    fn singleton_chain_auto_expands_whole_chain() {
+        let g = singleton_chain();
+        // No container in the chain is expandable, and yet, with nothing
+        // expanded, every singleton auto-expands down to the leaf.
+        assert!(expandable_containers(&g).is_empty());
 
-        let out = collapse(&g, &expanded(&["A"]));
+        let out = collapse(&g, &HashSet::new());
 
-        // The expanded root and its direct child are shown (the child's parent
-        // chain is fully expanded, so the child is its own representative); the
-        // grandchild folds into the child. B stays folded to its root.
-        assert_eq!(node_ids(&out), set(&["A", "A.child", "B"]));
-        // The internal A.leaf -> A.child edge is a self-loop (both fold to
-        // A.child) and dropped; the cross-tower edge remaps to A.child -> B.
-        assert_eq!(edges(&out), [("A.child", "B")].into_iter().collect());
+        assert_eq!(node_ids(&out), set(&["A", "b", "c", "leaf"]));
+    }
+
+    #[test]
+    fn multi_child_container_is_a_collapse_boundary() {
+        let mut g = Graph::new();
+        g.add_node("R", "R", "package", None);
+        g.add_node("x", "leaf", "action", Some("R".to_string()));
+        g.add_node("y", "leaf", "action", Some("R".to_string()));
+
+        // R is multi-child, so it is the only expand handle and a fold boundary.
+        assert_eq!(expandable_containers(&g), expanded(&["R"]));
+        let out = collapse(&g, &HashSet::new());
+        assert_eq!(node_ids(&out), set(&["R"]));
+    }
+
+    #[test]
+    fn multi_child_root_over_singleton_chains() {
+        let mut g = Graph::new();
+        g.add_node("R", "R", "package", None);
+        // Each of R's two children is the head of a singleton chain to a leaf.
+        for c in ["p", "q"] {
+            g.add_node(c, c, "target", Some("R".to_string()));
+            let mid = format!("{c}.mid");
+            let leaf = format!("{c}.leaf");
+            g.add_node(mid.clone(), "mid", "target", Some(c.to_string()));
+            g.add_node(leaf, "leaf", "action", Some(mid));
+        }
+
+        // R is the sole expand handle; its singleton descendants are transparent.
+        assert_eq!(expandable_containers(&g), expanded(&["R"]));
+
+        // Folded: R alone (its children are singletons but R is the boundary).
+        assert_eq!(node_ids(&collapse(&g, &HashSet::new())), set(&["R"]));
+
+        // Expanded: R, both children, and each child's auto-expanded chain.
+        let out = collapse(&g, &expanded(&["R"]));
+        assert_eq!(
+            node_ids(&out),
+            set(&["R", "p", "p.mid", "p.leaf", "q", "q.mid", "q.leaf"]),
+        );
     }
 
     #[test]
@@ -249,20 +345,23 @@ mod tests {
         g.add_node("R", "R", "package", None);
         for c in ["c1", "c2"] {
             g.add_node(c, c, "target", Some("R".to_string()));
-            let leaf = format!("{c}.leaf");
-            g.add_node(leaf, "leaf", "action", Some(c.to_string()));
+            // Two leaves keep each child a multi-child fold boundary.
+            for leaf in ["a", "b"] {
+                let id = format!("{c}.{leaf}");
+                g.add_node(id, "leaf", "action", Some(c.to_string()));
+            }
         }
-        // Internal to c1 (self-loop), and cross-child c1 -> c2.
-        g.add_edge("c1.leaf", "c1", EdgeKind::Aquery);
-        g.add_edge("c1.leaf", "c2.leaf", EdgeKind::Aquery);
+        // Internal to c1 (self-loop once folded), and cross-child c1 -> c2.
+        g.add_edge("c1.a", "c1.b", EdgeKind::Aquery);
+        g.add_edge("c1.a", "c2.a", EdgeKind::Aquery);
 
         let out = collapse(&g, &expanded(&["R"]));
 
         // The expanded root and its two children are shown; grandchildren fold
         // into their child.
         assert_eq!(node_ids(&out), set(&["R", "c1", "c2"]));
-        // c1.leaf -> c1 is a self-loop (both fold to c1) and dropped; the
-        // cross-child c1.leaf -> c2.leaf remaps to c1 -> c2.
+        // c1.a -> c1.b is a self-loop (both fold to c1) and dropped; the
+        // cross-child c1.a -> c2.a remaps to c1 -> c2.
         assert_eq!(edges(&out), [("c1", "c2")].into_iter().collect());
     }
 
@@ -270,10 +369,10 @@ mod tests {
     fn duplicate_edges_dedup_distinct_kinds_kept() {
         let mut g = two_towers();
         // Two A-subtree -> B-subtree edges of the same kind fold to one A -> B.
-        g.add_edge("A.leaf", "B.leaf", EdgeKind::Aquery);
-        g.add_edge("A.child", "B.child", EdgeKind::Aquery);
+        g.add_edge("A.x", "B.x", EdgeKind::Aquery);
+        g.add_edge("A.y", "B.y", EdgeKind::Aquery);
         // A different kind between the same folded pair survives separately.
-        g.add_edge("A.leaf", "B.child", EdgeKind::Query);
+        g.add_edge("A.x", "B.y", EdgeKind::Query);
 
         let out = collapse(&g, &HashSet::new());
 
@@ -290,20 +389,51 @@ mod tests {
     #[test]
     fn default_expansion_honors_caps() {
         let mut g = two_towers();
-        g.add_edge("A.leaf", "B.leaf", EdgeKind::Aquery);
+        g.add_edge("A.x", "B.y", EdgeKind::Aquery);
 
-        // Caps that only the root view (2 nodes, 1 edge) fits: no level expands.
+        // Caps that only the root view (2 nodes, 1 edge) fits: no root expands.
         let tiny = default_expansion(&g, 2, 1);
         assert!(tiny.is_empty());
         let v = collapse(&g, &tiny);
         assert!(v.nodes.len() <= 2 && v.edges.len() <= 1);
 
-        // Generous caps expand every level: the full graph is shown.
+        // Generous caps expand every multi-child container: the full graph shows.
         let all = default_expansion(&g, 100, 100);
         let v = collapse(&g, &all);
         assert_eq!(v.nodes.len(), g.nodes.len());
         assert!(v.nodes.len() <= 100 && v.edges.len() <= 100);
-        assert_eq!(all, containers(&g));
+        assert_eq!(all, expandable_containers(&g));
+    }
+
+    #[test]
+    fn default_expansion_view_fits_both_caps() {
+        let mut g = two_towers();
+        // A single folded edge between the towers, so the minimal (root) view of
+        // 2 nodes and 1 edge always fits these caps.
+        g.add_edge("A.x", "B.y", EdgeKind::Aquery);
+
+        for (max_nodes, max_edges) in [(2, 1), (4, 1), (4, 2), (6, 2), (100, 100)] {
+            let view = collapse(&g, &default_expansion(&g, max_nodes, max_edges));
+            assert!(view.nodes.len() <= max_nodes);
+            assert!(view.edges.len() <= max_edges);
+        }
+    }
+
+    #[test]
+    fn default_expansion_sees_through_singleton_chains() {
+        // A singleton-chain root whose chain ends in a multi-child container.
+        let mut g = Graph::new();
+        g.add_node("A", "A", "package", None);
+        g.add_node("b", "b", "target", Some("A".to_string()));
+        for leaf in ["x", "y"] {
+            g.add_node(leaf, "leaf", "action", Some("b".to_string()));
+        }
+
+        // `b` is the reachable multi-child container; A is a transparent
+        // singleton, so generous caps expand `b` alone.
+        let all = default_expansion(&g, 100, 100);
+        assert_eq!(all, expanded(&["b"]));
+        assert_eq!(node_ids(&collapse(&g, &all)), set(&["A", "b", "x", "y"]));
     }
 
     #[test]
