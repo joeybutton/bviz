@@ -18,7 +18,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::rc::Rc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Height of the top band a container reserves for its title.
 const LABEL_BAND: f64 = 26.0;
@@ -131,8 +131,9 @@ struct PaintBox {
     /// Fill resolved from the active theme when the box vec is built.
     fill: Rgba,
     label: String,
-    /// The just-toggled box, drawn with an emphasis border and inset glow.
-    highlight: bool,
+    /// Highlight alpha for the just-toggled box (0.0 = none), scaling the
+    /// emphasis border and inset glow as it fades.
+    highlight: f32,
     /// Outside the hovered node's neighborhood, drawn faded to recede.
     dim: bool,
 }
@@ -174,8 +175,11 @@ struct GraphView {
     /// The most-recently toggled node id, briefly emphasized so the eye can find
     /// the box that just opened or closed after the relayout shifts everything.
     recent: Option<String>,
-    /// Guards the highlight-clearing timer: a later toggle bumps this, so an
-    /// earlier timer firing won't clear a fresher highlight.
+    /// When `recent` was set, so the highlight emphasis fades over
+    /// `HIGHLIGHT_LINGER`.
+    recent_at: Instant,
+    /// Guards the highlight-fade timer: a later toggle bumps this, so an earlier
+    /// fade loop won't clear a fresher highlight.
     highlight_seq: u64,
     /// Set after a toggle so the next relayout's first paint pans `recent` into
     /// view if the relayout pushed it off-screen.
@@ -258,6 +262,7 @@ impl GraphView {
             expanded: Rc::new(RefCell::new(HashSet::new())),
             expandable: Rc::new(RefCell::new(HashSet::new())),
             recent: None,
+            recent_at: Instant::now(),
             highlight_seq: 0,
             recenter: Rc::new(Cell::new(false)),
             relaying: false,
@@ -299,6 +304,7 @@ impl GraphView {
         fitted: Rc<Cell<bool>>,
         viewport: Rc<Cell<Bounds<Pixels>>>,
         recent: Option<&str>,
+        recent_at: Instant,
         recenter: Rc<Cell<bool>>,
         relaying: bool,
         hovered: Option<&str>,
@@ -320,6 +326,9 @@ impl GraphView {
                 set
             })
             .unwrap_or_default();
+        // The highlight fades linearly to nothing over the linger window.
+        let highlight_alpha =
+            (1.0 - recent_at.elapsed().as_secs_f32() / HIGHLIGHT_LINGER.as_secs_f32()).clamp(0.0, 1.0);
         let boxes: Vec<PaintBox> = g
             .boxes
             .iter()
@@ -336,7 +345,7 @@ impl GraphView {
                     bviz_ui_theme::mix(kind_accent(&b.kind), palette.background, KIND_BLEND)
                 },
                 label: b.label.clone(),
-                highlight: recent == Some(b.id.as_str()),
+                highlight: if recent == Some(b.id.as_str()) { highlight_alpha } else { 0.0 },
                 dim: hovered.is_some() && !active.contains(b.id.as_str()),
             })
             .collect();
@@ -554,6 +563,7 @@ impl Render for GraphView {
                         self.fitted.clone(),
                         self.viewport.clone(),
                         self.recent.as_deref(),
+                        self.recent_at,
                         self.recenter.clone(),
                         self.relaying,
                         self.hovered.as_deref(),
@@ -727,19 +737,28 @@ fn paint_box(
     } else {
         palette.label
     };
-    let (border_w, border_c) = if b.highlight {
-        (px((2. * zoom).max(2.)), Hsla::from(HIGHLIGHT_ACCENT))
+    let (border_w, border_c) = if b.highlight > 0.0 {
+        // Fade from the themed border to the amber accent, and from a normal to a
+        // thick stroke, by the highlight alpha.
+        let normal = px(1.);
+        let thick = px((2. * zoom).max(2.));
+        let mut accent = HIGHLIGHT_ACCENT;
+        accent.a = b.highlight;
+        (
+            normal + (thick - normal) * b.highlight,
+            Hsla::from(accent),
+        )
     } else if b.dim {
         (px(1.), Hsla::from(bviz_ui_theme::mix(palette.border, palette.background, DIM_FADE)))
     } else {
         (px(1.), Hsla::from(palette.border))
     };
     window.paint_quad(quad(rect, corner, fill, border_w, border_c, BorderStyle::Solid));
-    if b.highlight {
+    if b.highlight > 0.0 {
         // A faint accent wash over the fill so the emphasis reads as a glow, not
         // just a brighter outline.
         let mut wash = HIGHLIGHT_ACCENT;
-        wash.a = 0.15;
+        wash.a = 0.15 * b.highlight;
         window.paint_quad(quad(
             rect,
             corner,
@@ -1019,17 +1038,30 @@ fn end_drag(view: &mut GraphView, event: &MouseUpEvent, cx: &mut Context<GraphVi
     // otherwise leave the whole graph dimmed until the next mouse move.
     view.hovered = None;
     view.recent = Some(id);
+    view.recent_at = Instant::now();
     view.highlight_seq = view.highlight_seq.wrapping_add(1);
     let seq = view.highlight_seq;
+    // Repaint periodically so the highlight fades smoothly, then clear it once
+    // the linger window has elapsed; bail if a newer toggle took over.
     cx.spawn(async move |this, cx| {
-        cx.background_executor().timer(HIGHLIGHT_LINGER).await;
-        let _ = this.update(cx, |this, cx| {
-            // Skip if a newer toggle has taken over the highlight.
-            if this.highlight_seq == seq {
-                this.recent = None;
+        loop {
+            cx.background_executor().timer(Duration::from_millis(33)).await;
+            let done = this.update(cx, |this, cx| {
+                if this.highlight_seq != seq {
+                    return true;
+                }
+                if this.recent_at.elapsed() >= HIGHLIGHT_LINGER {
+                    this.recent = None;
+                    cx.notify();
+                    return true;
+                }
                 cx.notify();
+                false
+            });
+            if done.unwrap_or(true) {
+                break;
             }
-        });
+        }
     })
     .detach();
     view.retoggle(cx);
