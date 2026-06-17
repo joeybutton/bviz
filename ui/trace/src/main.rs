@@ -4,17 +4,18 @@
 //! with horizontal zoom/pan and vertical scroll.
 
 use bviz_trace_layout::{
-    CounterPos, Lane, LaneMetrics, TimeView, Viewport, lay_out_lanes, visible_slices,
+    LaneLayout, LaneMetrics, TimeView, Viewport, lay_out_lanes, visible_slices,
 };
 use bviz_trace_profile::{CounterLane, PhaseMarker, Profile, TimeSpan};
 use bviz_ui_components::{load_in_background, track_drag};
 use bviz_ui_shell::Chrome;
 use clap::Parser;
 use gpui::{
-    Animation, AnimationExt, App, BorderStyle, Bounds, Context, Div, Entity, FocusHandle, Hsla,
-    IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PathBuilder, Pixels,
-    Point, Render, Rgba, ScrollDelta, ScrollWheelEvent, Stateful, Task, TextAlign, Transformation,
-    Window, canvas, div, hsla, percentage, point, prelude::*, px, quad, size,
+    Animation, AnimationExt, App, BorderStyle, Bounds, ContentMask, Context, Div, Entity,
+    FocusHandle, Hsla, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
+    PathBuilder, Pixels, Point, Render, Rgba, ScrollDelta, ScrollWheelEvent, Stateful, Task,
+    TextAlign, Transformation, Window, canvas, div, hsla, percentage, point, prelude::*, px, quad,
+    size,
 };
 use std::cell::Cell;
 use std::collections::BTreeMap;
@@ -56,6 +57,19 @@ const LINE_SCROLL_PX: f32 = 24.0;
 /// Corner radius and border width of a painted slice quad.
 const SLICE_RADIUS: f32 = 2.0;
 const SLICE_BORDER: f32 = 0.5;
+
+/// Width of the left label gutter, holding lane and counter names clear of the
+/// time content so phase-marker lines never cross them.
+const GUTTER_WIDTH: f32 = 170.0;
+
+/// Smallest height the flame section keeps when the splitter is dragged down.
+const FLAME_MIN_HEIGHT: f32 = 60.0;
+
+/// Initial height of the bottom graph section before the splitter is dragged.
+const DEFAULT_GRAPH_HEIGHT: f32 = 280.0;
+
+/// Thickness of the painted splitter divider.
+const SPLITTER_THICKNESS: f32 = 4.0;
 
 /// Height of the time ruler band at the top of the timeline.
 const RULER_HEIGHT: f32 = 20.0;
@@ -128,6 +142,8 @@ enum Drag {
     /// leading edge.
     VThumb(f32),
     HThumb(f32),
+    /// A press on the splitter resizes the graph section.
+    Splitter,
 }
 
 /// The slice under the cursor and where the cursor was when it was picked, so a
@@ -137,6 +153,102 @@ struct Hover {
     track: usize,
     slice: usize,
     at: Point<Pixels>,
+}
+
+/// The window split into its time-content column and stacked vertical bands,
+/// derived once per frame from the viewport bounds, the counter count, and the
+/// splitter's `graph_height`. Both paint and the mouse handlers compute the same
+/// regions so hit-testing matches what was drawn.
+#[derive(Clone, Copy)]
+struct Regions {
+    /// Left edge of the time content, past the gutter.
+    content_left: f32,
+    /// Width of the time content column.
+    content_w: f32,
+    /// Right edge of the content column (where the vertical bar/gutter end).
+    content_right: f32,
+    /// Top of the flame section (ruler bottom).
+    flame_top: f32,
+    /// Boundary between flame and graph sections; the splitter sits here.
+    graph_top: f32,
+    /// Bottom of the graph section (horizontal-bar top).
+    body_bottom: f32,
+    /// Whether a graph section is present (the profile has counters).
+    has_graph: bool,
+}
+
+impl Regions {
+    /// Splits `bounds` given the counter count and the splitter's stored height.
+    fn new(bounds: Bounds<Pixels>, n_counters: usize, graph_height: f32) -> Self {
+        let ox = f32::from(bounds.origin.x);
+        let oy = f32::from(bounds.origin.y);
+        let w = f32::from(bounds.size.width);
+        let vh = f32::from(bounds.size.height);
+        let flame_top = oy + RULER_HEIGHT;
+        let body_bottom = oy + vh - BAR_WIDTH;
+        let has_graph = n_counters > 0;
+        let graph_h = if has_graph {
+            clamp_graph_height(graph_height, n_counters, vh)
+        } else {
+            0.0
+        };
+        Regions {
+            content_left: ox + GUTTER_WIDTH,
+            content_w: (w - GUTTER_WIDTH).max(0.0),
+            content_right: ox + w,
+            flame_top,
+            graph_top: (body_bottom - graph_h).max(flame_top),
+            body_bottom,
+            has_graph,
+        }
+    }
+
+    /// Height the flame section's lanes scroll within.
+    fn flame_h(&self) -> f32 {
+        (self.graph_top - self.flame_top).max(0.0)
+    }
+}
+
+/// The graph section's height bounded to leave the flame section at least
+/// `FLAME_MIN_HEIGHT` and never shrink the counter charts below their label-only
+/// minimum (`n` header bands).
+fn clamp_graph_height(graph_height: f32, n_counters: usize, vh: f32) -> f32 {
+    let min = n_counters as f32 * METRICS.header_height;
+    let max = (vh - RULER_HEIGHT - BAR_WIDTH - FLAME_MIN_HEIGHT).max(min);
+    graph_height.clamp(min, max)
+}
+
+/// Total height the flame section's thread lanes occupy, ignoring the layout's
+/// counter lanes (the graph section places those itself).
+fn flame_total_height(layout: &LaneLayout) -> f32 {
+    layout.lanes.last().map(|l| l.top + l.height).unwrap_or(0.0)
+}
+
+/// One fitted counter lane in the graph section: its top (window y) and the
+/// height of its chart area below the header band.
+#[derive(Clone, Copy)]
+struct GraphLane {
+    lane: usize,
+    top: f32,
+    chart_h: f32,
+}
+
+/// Distributes the graph section's height evenly across its `n` counter lanes:
+/// each lane is a header band plus a chart area that shrinks to zero as the
+/// section collapses toward the label-only minimum.
+fn graph_lanes(n: usize, graph_top: f32, graph_h: f32) -> Vec<GraphLane> {
+    if n == 0 {
+        return Vec::new();
+    }
+    let chart_h = ((graph_h - n as f32 * METRICS.header_height) / n as f32).max(0.0);
+    let lane_h = METRICS.header_height + chart_h;
+    (0..n)
+        .map(|lane| GraphLane {
+            lane,
+            top: graph_top + lane as f32 * lane_h,
+            chart_h,
+        })
+        .collect()
 }
 
 /// The loaded profile, a load in progress, or a message explaining why none is
@@ -171,6 +283,8 @@ struct TraceView {
     hbar: Rc<Cell<Option<BarLayout>>>,
     drag: Drag,
     last_mouse: Point<Pixels>,
+    /// Height of the bottom graph section, set by the splitter; clamped on use.
+    graph_height: f32,
     /// The slice under the cursor, if any, drawn as a tooltip.
     hover: Option<Hover>,
     /// Holds the background load task so it isn't cancelled on drop.
@@ -205,6 +319,7 @@ impl TraceView {
             hbar: Rc::new(Cell::new(None)),
             drag: Drag::None,
             last_mouse: Point::default(),
+            graph_height: DEFAULT_GRAPH_HEIGHT,
             hover: None,
             _load_task: load_task,
         }
@@ -223,6 +338,7 @@ impl TraceView {
         vbar: Rc<Cell<Option<BarLayout>>>,
         hbar: Rc<Cell<Option<BarLayout>>>,
         entity: Entity<TraceView>,
+        graph_height: f32,
         palette: Palette,
     ) -> Stateful<Div> {
         let prepaint = {
@@ -234,21 +350,49 @@ impl TraceView {
             );
             move |bounds: Bounds<Pixels>, _: &mut Window, _: &mut App| {
                 viewport.set(bounds);
-                let width = f32::from(bounds.size.width);
+                // The time axis maps to the content column, past the left gutter.
+                let content_w = f32::from(bounds.size.width) - GUTTER_WIDTH;
                 if !fitted.get() {
-                    view.set(TimeView::fit(profile.span, width, EDGE_MARGIN_PX));
+                    view.set(TimeView::fit(profile.span, content_w, EDGE_MARGIN_PX));
                     fitted.set(true);
                 }
                 // Hold the bounds across a resize: keep the fit as the zoom floor
                 // and the pan within the span for the current width.
                 let mut v = view.get();
-                v.px_per_us = v
-                    .px_per_us
-                    .max(fit_px_per_us(profile.span, width, EDGE_MARGIN_PX));
-                v.clamp_to(profile.span, width, EDGE_MARGIN_PX);
+                v.px_per_us =
+                    v.px_per_us
+                        .max(fit_px_per_us(profile.span, content_w, EDGE_MARGIN_PX));
+                v.clamp_to(profile.span, content_w, EDGE_MARGIN_PX);
                 view.set(v);
             }
         };
+        // A thin overlay strip at the splitter that begins a resize drag, placed
+        // from the last painted bounds and the stored graph height. The canvas
+        // recomputes the same regions when it paints.
+        let splitter = (profile.counters.len() > 0).then(|| {
+            let regions = Regions::new(viewport.get(), profile.counters.len(), graph_height);
+            let y = regions.graph_top - BAR_WIDTH / 2.0;
+            let origin = viewport.get().origin;
+            let drag_entity = entity.clone();
+            div()
+                .id("trace-splitter")
+                .absolute()
+                .left(px(regions.content_left - f32::from(origin.x)))
+                .top(px(y - f32::from(origin.y)))
+                .w(px(regions.content_w))
+                .h(px(BAR_WIDTH))
+                .cursor_row_resize()
+                .on_mouse_down(
+                    MouseButton::Left,
+                    move |_: &MouseDownEvent, _: &mut Window, cx: &mut App| {
+                        drag_entity.update(cx, |this, cx| {
+                            this.drag = Drag::Splitter;
+                            cx.notify();
+                        });
+                        cx.stop_propagation();
+                    },
+                )
+        });
         div()
             .id("trace-viewport")
             .relative()
@@ -258,68 +402,80 @@ impl TraceView {
                 canvas(prepaint, move |bounds, _, window, cx| {
                     let layout = lay_out_lanes(&profile, &METRICS);
                     let tv = view.get();
-                    let vw = f32::from(bounds.size.width);
-                    // The ruler band occupies the top; the lanes scroll below it.
+                    let n_counters = profile.counters.len();
+                    let graph_height = entity.read(cx).graph_height;
+                    let regions = Regions::new(bounds, n_counters, graph_height);
+                    let scroll = scroll_y.get();
+                    // Thread lanes only; the graph section places counters itself.
+                    let flame_total = flame_total_height(&layout);
                     let vp = Viewport {
-                        width: vw,
-                        height: f32::from(bounds.size.height) - RULER_HEIGHT,
-                        scroll_y: scroll_y.get(),
+                        width: regions.content_w,
+                        height: regions.flame_h(),
+                        scroll_y: scroll,
                     };
 
-                    let ticks = ruler_ticks(tv, vw);
-                    paint_gridlines(&ticks, bounds, &palette, window);
-                    for vs in visible_slices(&profile, &layout, &tv, &vp, &METRICS, MIN_SLICE_PX) {
-                        let slice = &profile.threads[vs.track].slices[vs.slice];
-                        paint_slice(
-                            slice,
-                            vs.x,
-                            vs.y + RULER_HEIGHT,
-                            vs.w,
-                            vs.h,
-                            bounds,
-                            &palette,
-                            window,
-                            cx,
-                        );
-                    }
-                    // Headers sit at the left edge so the thread name survives any
-                    // pan; they paint over the slices for legibility.
-                    for lane in &layout.lanes {
-                        paint_header(
-                            &profile.threads[lane.track].name,
-                            lane,
-                            vp.scroll_y,
-                            bounds,
-                            &palette,
-                            window,
-                            cx,
-                        );
-                    }
-                    paint_counters(
-                        &profile.counters,
-                        &layout.counters,
-                        tv,
-                        vp.scroll_y,
-                        bounds,
+                    let ticks = ruler_ticks(tv, regions.content_w);
+                    // Gridlines and phase-marker lines span both sections.
+                    paint_gridlines(
+                        &ticks,
+                        regions.content_left,
+                        regions.flame_top,
+                        regions.body_bottom,
                         &palette,
                         window,
-                        cx,
                     );
-                    paint_markers(&profile.phase_markers, tv, bounds, &palette, window, cx);
+
+                    // The flame section clips its scrolled lanes to its band so
+                    // rows panned past the splitter don't bleed into the graph.
+                    let flame_mask = ContentMask {
+                        bounds: Bounds::new(
+                            point(px(regions.content_left), px(regions.flame_top)),
+                            size(px(regions.content_w), px(regions.flame_h())),
+                        ),
+                    };
+                    window.with_content_mask(Some(flame_mask), |window| {
+                        for vs in
+                            visible_slices(&profile, &layout, &tv, &vp, &METRICS, MIN_SLICE_PX)
+                        {
+                            let slice = &profile.threads[vs.track].slices[vs.slice];
+                            paint_slice(
+                                slice,
+                                vs.x,
+                                vs.y + regions.flame_top,
+                                vs.w,
+                                vs.h,
+                                regions.content_left,
+                                &palette,
+                                window,
+                                cx,
+                            );
+                        }
+                    });
+
+                    paint_graph(&profile.counters, tv, regions, &palette, window);
+                    if regions.has_graph {
+                        paint_splitter(regions, &palette, window);
+                    }
+                    paint_markers(&profile.phase_markers, tv, regions, &palette, window, cx);
                     paint_scrollbars(
                         profile.span,
                         tv,
-                        layout.total_height,
-                        bounds,
-                        vp.scroll_y,
+                        flame_total,
+                        regions,
+                        scroll,
                         &palette,
                         &vbar,
                         &hbar,
                         window,
                     );
+
+                    // The opaque gutter covers any lane content that panned under
+                    // it, then carries the lane and counter names.
+                    paint_gutter(&profile, &layout, regions, scroll, &palette, window, cx);
+
                     // The ruler paints over scrolled-up rows; the tooltip paints
                     // over everything.
-                    paint_ruler(&ticks, bounds, &palette, window, cx);
+                    paint_ruler(&ticks, regions, bounds, &palette, window, cx);
                     if let Some(h) = entity.read(cx).hover {
                         let slice = &profile.threads[h.track].slices[h.slice];
                         paint_tooltip(slice, h.at, bounds, &palette, window, cx);
@@ -333,6 +489,7 @@ impl TraceView {
                 .top_0()
                 .size_full(),
             )
+            .children(splitter)
     }
 
     fn status(&self) -> String {
@@ -351,15 +508,15 @@ impl TraceView {
         }
     }
 
-    /// The pixel ceiling for an upward (toward zero) scroll, given the laid-out
-    /// total height and the current viewport height.
+    /// The pixel ceiling for an upward (toward zero) scroll: the flame section's
+    /// thread-lane height past its on-screen height.
     fn max_scroll(&self) -> f32 {
         let Source::Loaded(p) = &self.source else {
             return 0.0;
         };
-        let total = lay_out_lanes(p, &METRICS).total_height;
-        let lane_area = f32::from(self.viewport.get().size.height) - RULER_HEIGHT;
-        (total - lane_area).max(0.0)
+        let total = flame_total_height(&lay_out_lanes(p, &METRICS));
+        let regions = Regions::new(self.viewport.get(), p.counters.len(), self.graph_height);
+        (total - regions.flame_h()).max(0.0)
     }
 }
 
@@ -389,6 +546,7 @@ impl Render for TraceView {
                     self.vbar.clone(),
                     self.hbar.clone(),
                     cx.entity(),
+                    self.graph_height,
                     palette,
                 )
                 .on_mouse_down(
@@ -459,7 +617,8 @@ impl TraceView {
         };
         let span = profile.span;
         let vp = self.viewport.get();
-        let width = f32::from(vp.size.width);
+        let content_w = f32::from(vp.size.width) - GUTTER_WIDTH;
+        let content_left = f32::from(vp.origin.x) + GUTTER_WIDTH;
         let (dx, dy) = match e.delta {
             ScrollDelta::Lines(p) => (p.x * LINE_SCROLL_PX, p.y * LINE_SCROLL_PX),
             ScrollDelta::Pixels(p) => (f32::from(p.x), f32::from(p.y)),
@@ -467,21 +626,22 @@ impl TraceView {
         if e.modifiers.control || e.modifiers.platform {
             // Horizontal zoom anchored at the cursor, floored at the fit so the
             // whole span can't be zoomed out of view.
-            let rel_x = f32::from(e.position.x) - f32::from(vp.origin.x);
+            let rel_x = f32::from(e.position.x) - content_left;
             let dy_lines = dy / LINE_SCROLL_PX;
             let mut v = self.view.get();
             v.zoom_at(rel_x, 1.1_f64.powf(dy_lines as f64));
-            v.px_per_us = v
-                .px_per_us
-                .clamp(fit_px_per_us(span, width, EDGE_MARGIN_PX), MAX_PX_PER_US);
-            v.clamp_to(span, width, EDGE_MARGIN_PX);
+            v.px_per_us = v.px_per_us.clamp(
+                fit_px_per_us(span, content_w, EDGE_MARGIN_PX),
+                MAX_PX_PER_US,
+            );
+            v.clamp_to(span, content_w, EDGE_MARGIN_PX);
             self.view.set(v);
         } else {
             let scrolled = (self.scroll_y.get() - dy).clamp(0.0, self.max_scroll());
             self.scroll_y.set(scrolled);
             let mut v = self.view.get();
             v.pan_px(dx);
-            v.clamp_to(span, width, EDGE_MARGIN_PX);
+            v.clamp_to(span, content_w, EDGE_MARGIN_PX);
             self.view.set(v);
         }
         cx.notify();
@@ -511,17 +671,24 @@ impl TraceView {
     }
 
     /// The slice under a window-space cursor, inverting the paint transform:
-    /// window → lane area → (lane, depth row) and time. `None` over a header, the
-    /// ruler, a counter lane, or empty space.
+    /// window → flame section → (lane, depth row) and time. `None` over the
+    /// gutter, the ruler, the graph section, a lane header, or empty space.
     fn slice_at(&self, pos: Point<Pixels>) -> Option<(usize, usize)> {
         let Source::Loaded(profile) = &self.source else {
             return None;
         };
-        let origin = self.viewport.get().origin;
-        let content_y = f32::from(pos.y) - f32::from(origin.y) - RULER_HEIGHT + self.scroll_y.get();
-        if content_y < 0.0 {
+        let regions = Regions::new(
+            self.viewport.get(),
+            profile.counters.len(),
+            self.graph_height,
+        );
+        let x = f32::from(pos.x);
+        let y = f32::from(pos.y);
+        // The flame band, past the gutter and clear of the graph section.
+        if x < regions.content_left || y < regions.flame_top || y >= regions.graph_top {
             return None;
         }
+        let content_y = y - regions.flame_top + self.scroll_y.get();
         let layout = lay_out_lanes(profile, &METRICS);
         let lane = layout
             .lanes
@@ -532,7 +699,7 @@ impl TraceView {
             return None;
         }
         let depth = ((content_y - rows_top) / METRICS.row_height) as u32;
-        let t = self.view.get().t_of(f32::from(pos.x) - f32::from(origin.x));
+        let t = self.view.get().t_of(x - regions.content_left);
         profile.threads[lane.track]
             .slices
             .iter()
@@ -576,12 +743,12 @@ fn on_drag(view: &mut TraceView, event: &MouseMoveEvent, cx: &mut Context<TraceV
                 return;
             };
             let span = profile.span;
-            let width = f32::from(view.viewport.get().size.width);
+            let content_w = f32::from(view.viewport.get().size.width) - GUTTER_WIDTH;
             let dx = f32::from(event.position.x) - f32::from(view.last_mouse.x);
             let dy = f32::from(event.position.y) - f32::from(view.last_mouse.y);
             let mut v = view.view.get();
             v.pan_px(dx);
-            v.clamp_to(span, width, EDGE_MARGIN_PX);
+            v.clamp_to(span, content_w, EDGE_MARGIN_PX);
             view.view.set(v);
             let scrolled = (view.scroll_y.get() - dy).clamp(0.0, view.max_scroll());
             view.scroll_y.set(scrolled);
@@ -589,6 +756,20 @@ fn on_drag(view: &mut TraceView, event: &MouseMoveEvent, cx: &mut Context<TraceV
         }
         Drag::VThumb(grab) => scroll_thumb_to(view, f32::from(event.position.y), grab),
         Drag::HThumb(grab) => pan_thumb_to(view, f32::from(event.position.x), grab),
+        Drag::Splitter => {
+            let Source::Loaded(profile) = &view.source else {
+                return;
+            };
+            let vp = view.viewport.get();
+            let body_bottom = f32::from(vp.origin.y) + f32::from(vp.size.height) - BAR_WIDTH;
+            // The splitter follows the cursor: the graph spans from it down to the
+            // horizontal-bar top. Clamped to keep both sections usable.
+            view.graph_height = clamp_graph_height(
+                body_bottom - f32::from(event.position.y),
+                profile.counters.len(),
+                f32::from(vp.size.height),
+            );
+        }
         Drag::None => {}
     }
     cx.notify();
@@ -630,33 +811,33 @@ fn pan_thumb_to(view: &mut TraceView, mouse_along: f32, grab: f32) {
         return;
     };
     let span = profile.span;
-    let width = f32::from(view.viewport.get().size.width);
+    let content_w = f32::from(view.viewport.get().size.width) - GUTTER_WIDTH;
     let Some(bar) = view.hbar.get() else {
         return;
     };
     let mut v = view.view.get();
-    let visible_us = width as f64 / v.px_per_us;
+    let visible_us = content_w as f64 / v.px_per_us;
     let range = ((span.end_us - span.start_us) as f64 - visible_us).max(0.0);
     let travel = (bar.track_len - bar.thumb_len).max(1.0);
     let thumb_start = (mouse_along - grab - bar.track_start).clamp(0.0, travel);
     v.start_us = span.start_us as f64 + (thumb_start / travel) as f64 * range;
-    v.clamp_to(span, width, EDGE_MARGIN_PX);
+    v.clamp_to(span, content_w, EDGE_MARGIN_PX);
     view.view.set(v);
 }
 
-/// Draws each build-phase boundary as a vertical line across the lanes with its
-/// name at the top, skipping any off-screen.
+/// Draws each build-phase boundary as a vertical line spanning both sections
+/// with its name at the top, confined to the content column and skipping any
+/// off-screen.
 fn paint_markers(
     markers: &[PhaseMarker],
     tv: TimeView,
-    bounds: Bounds<Pixels>,
+    regions: Regions,
     palette: &Palette,
     window: &mut Window,
     cx: &mut App,
 ) {
-    let vw = f32::from(bounds.size.width);
-    let top = f32::from(bounds.origin.y) + RULER_HEIGHT;
-    let height = f32::from(bounds.size.height) - RULER_HEIGHT;
+    let top = regions.flame_top;
+    let height = regions.body_bottom - regions.flame_top;
     let font = bviz_ui_assets::text_metrics(window).font;
     let fs = px(MARKER_LABEL_SIZE);
     // Where the previous label ended, so clustered markers (the build's early
@@ -664,10 +845,10 @@ fn paint_markers(
     let mut label_right = f32::MIN;
     for marker in markers {
         let x = tv.x_of(marker.start_us);
-        if x < 0.0 || x > vw {
+        if x < 0.0 || x > regions.content_w {
             continue;
         }
-        let lx = f32::from(bounds.origin.x) + x;
+        let lx = regions.content_left + x;
         window.paint_quad(quad(
             Bounds::new(point(px(lx), px(top)), size(px(1.), px(height))),
             px(0.),
@@ -756,17 +937,19 @@ fn format_time(us: f64, step: f64) -> String {
     format!("{:.*}{}", decimals, value, unit)
 }
 
-/// Drops a faint vertical line from each ruler tick down through the lanes.
+/// Drops a faint vertical line from each ruler tick down through both sections,
+/// confined to the content column.
 fn paint_gridlines(
     ticks: &[(f32, String)],
-    bounds: Bounds<Pixels>,
+    content_left: f32,
+    top: f32,
+    bottom: f32,
     palette: &Palette,
     window: &mut Window,
 ) {
-    let top = bounds.origin.y + px(RULER_HEIGHT);
-    let height = px(f32::from(bounds.size.height) - RULER_HEIGHT);
+    let height = px(bottom - top);
     for (x, _) in ticks {
-        let rect = Bounds::new(point(bounds.origin.x + px(*x), top), size(px(1.), height));
+        let rect = Bounds::new(point(px(content_left + *x), px(top)), size(px(1.), height));
         window.paint_quad(quad(
             rect,
             px(0.),
@@ -778,10 +961,11 @@ fn paint_gridlines(
     }
 }
 
-/// Paints the ruler band along the top edge with a tick mark and label at each
-/// tick.
+/// Paints the ruler band along the top edge spanning the full width, with a tick
+/// mark and label in the content column at each tick.
 fn paint_ruler(
     ticks: &[(f32, String)],
+    regions: Regions,
     bounds: Bounds<Pixels>,
     palette: &Palette,
     window: &mut Window,
@@ -800,7 +984,7 @@ fn paint_ruler(
     let fs = px(RULER_HEIGHT - 2. * SLICE_TEXT_PAD);
     let ty = bounds.origin.y + px((RULER_HEIGHT - f32::from(fs)) / 2.);
     for (x, label) in ticks {
-        let tx = bounds.origin.x + px(*x);
+        let tx = px(regions.content_left + *x);
         let tick = Bounds::new(
             point(tx, bounds.origin.y + px(RULER_HEIGHT - 4.)),
             size(px(1.), px(4.)),
@@ -831,55 +1015,73 @@ fn paint_ruler(
     }
 }
 
-/// Paints a vertical and/or horizontal scroll bar for whichever axes overflow,
-/// storing each bar's geometry in its cell for hit-testing; an axis that fits
-/// gets no bar and a cleared cell. The vertical thumb is sized by the visible
-/// fraction of the laid-out height; the horizontal by the visible fraction of
-/// the profile span.
+/// Paints the flame section's vertical bar and/or the content column's
+/// horizontal bar for whichever axis overflows, storing each bar's geometry in
+/// its cell for hit-testing; an axis that fits gets no bar and a cleared cell.
+/// The vertical thumb is sized by the visible fraction of the flame lanes; the
+/// horizontal by the visible fraction of the profile span.
+/// Paints the visible divider between the flame and graph sections, centered on
+/// the boundary the overlay drag strip covers.
+fn paint_splitter(regions: Regions, palette: &Palette, window: &mut Window) {
+    let bar = Bounds::new(
+        point(
+            px(regions.content_left),
+            px(regions.graph_top - SPLITTER_THICKNESS / 2.0),
+        ),
+        size(px(regions.content_w), px(SPLITTER_THICKNESS)),
+    );
+    window.paint_quad(quad(
+        bar,
+        px(0.),
+        palette.scroll_thumb,
+        px(0.),
+        Hsla::from(palette.border),
+        BorderStyle::Solid,
+    ));
+}
+
 fn paint_scrollbars(
     span: TimeSpan,
     tv: TimeView,
-    total_height: f32,
-    bounds: Bounds<Pixels>,
+    flame_total: f32,
+    regions: Regions,
     scroll_y: f32,
     palette: &Palette,
     vbar: &Rc<Cell<Option<BarLayout>>>,
     hbar: &Rc<Cell<Option<BarLayout>>>,
     window: &mut Window,
 ) {
-    let left = f32::from(bounds.origin.x);
-    let top = f32::from(bounds.origin.y);
-    let vw = f32::from(bounds.size.width);
-    let vh = f32::from(bounds.size.height);
-    // The vertical bar spans only the lane area below the ruler.
-    let lane_top = top + RULER_HEIGHT;
-    let lane_h = vh - RULER_HEIGHT;
+    let flame_top = regions.flame_top;
+    let flame_h = regions.flame_h();
+    let content_left = regions.content_left;
+    let content_w = regions.content_w;
 
     let span_us = (span.end_us - span.start_us) as f64;
-    let visible_us = vw as f64 / tv.px_per_us;
-    let v_overflow = total_height > lane_h;
+    let visible_us = content_w as f64 / tv.px_per_us;
+    let v_overflow = flame_total > flame_h;
     let h_overflow = visible_us < span_us;
-    // Each bar shortens at the shared corner when the other is present.
-    let v_track_len = lane_h - if h_overflow { BAR_WIDTH } else { 0.0 };
-    let h_track_len = vw - if v_overflow { BAR_WIDTH } else { 0.0 };
+    // The vertical bar shortens to clear the content-column right edge so it
+    // never overlaps the horizontal bar's far end.
+    let v_track_len = flame_h;
+    let h_track_len = content_w - if v_overflow { BAR_WIDTH } else { 0.0 };
 
     let vlayout = v_overflow.then(|| {
-        let thumb_len = (v_track_len * lane_h / total_height)
+        let thumb_len = (v_track_len * flame_h / flame_total)
             .max(MIN_THUMB)
             .min(v_track_len);
-        let frac = (scroll_y / (total_height - lane_h).max(1.0)).clamp(0.0, 1.0);
-        let thumb_start = lane_top + frac * (v_track_len - thumb_len);
-        let x = left + vw - BAR_WIDTH;
+        let frac = (scroll_y / (flame_total - flame_h).max(1.0)).clamp(0.0, 1.0);
+        let thumb_start = flame_top + frac * (v_track_len - thumb_len);
+        let x = regions.content_right - BAR_WIDTH;
         BarLayout {
             track: Bounds::new(
-                point(px(x), px(lane_top)),
+                point(px(x), px(flame_top)),
                 size(px(BAR_WIDTH), px(v_track_len)),
             ),
             thumb: Bounds::new(
                 point(px(x), px(thumb_start)),
                 size(px(BAR_WIDTH), px(thumb_len)),
             ),
-            track_start: lane_top,
+            track_start: flame_top,
             track_len: v_track_len,
             thumb_start,
             thumb_len,
@@ -893,15 +1095,18 @@ fn paint_scrollbars(
         let frac = (((tv.start_us - span.start_us as f64) / (span_us - visible_us).max(1.0))
             as f32)
             .clamp(0.0, 1.0);
-        let thumb_start = left + frac * (h_track_len - thumb_len);
-        let y = top + vh - BAR_WIDTH;
+        let thumb_start = content_left + frac * (h_track_len - thumb_len);
+        let y = regions.body_bottom;
         BarLayout {
-            track: Bounds::new(point(px(left), px(y)), size(px(h_track_len), px(BAR_WIDTH))),
+            track: Bounds::new(
+                point(px(content_left), px(y)),
+                size(px(h_track_len), px(BAR_WIDTH)),
+            ),
             thumb: Bounds::new(
                 point(px(thumb_start), px(y)),
                 size(px(thumb_len), px(BAR_WIDTH)),
             ),
-            track_start: left,
+            track_start: content_left,
             track_len: h_track_len,
             thumb_start,
             thumb_len,
@@ -930,47 +1135,107 @@ fn paint_scrollbars(
     hbar.set(hlayout);
 }
 
-/// Paints a sticky lane header: a band spanning the viewport width with the
-/// thread name at its left edge. Culled when fully off-screen.
-fn paint_header(
-    name: &str,
-    lane: &Lane,
+/// Paints the opaque left gutter over any content that panned or scrolled under
+/// it, then the thread-lane and counter names left-aligned within it: thread
+/// names track the flame section's vertical scroll (clipped to its band), and
+/// counter names sit at their fitted graph lanes.
+fn paint_gutter(
+    profile: &Profile,
+    layout: &LaneLayout,
+    regions: Regions,
     scroll_y: f32,
-    bounds: Bounds<Pixels>,
     palette: &Palette,
     window: &mut Window,
     cx: &mut App,
 ) {
-    let y = f32::from(bounds.origin.y) + RULER_HEIGHT + lane.top - scroll_y;
-    if y + METRICS.header_height < f32::from(bounds.origin.y)
-        || y > f32::from(bounds.origin.y) + f32::from(bounds.size.height)
-    {
-        return;
-    }
-    let rect = Bounds::new(
-        point(bounds.origin.x, px(y)),
-        size(bounds.size.width, px(METRICS.header_height)),
+    let gutter_left = regions.content_left - GUTTER_WIDTH;
+    let strip = Bounds::new(
+        point(px(gutter_left), px(regions.flame_top)),
+        size(
+            px(GUTTER_WIDTH),
+            px(regions.body_bottom - regions.flame_top),
+        ),
     );
     window.paint_quad(quad(
-        rect,
+        strip,
         px(0.),
         palette.header_band,
         px(0.),
         Hsla::from(palette.border),
         BorderStyle::Solid,
     ));
+
     let font = bviz_ui_assets::text_metrics(window).font;
     let fs = px(METRICS.header_height - 2. * SLICE_TEXT_PAD);
-    let line = bviz_ui_assets::shape_line(window, name.to_string(), font, fs, palette.label.into());
-    let ty = px(y + (METRICS.header_height - f32::from(fs)) / 2.);
-    let _ = line.paint(
-        point(bounds.origin.x + px(SLICE_TEXT_PAD), ty),
-        fs,
-        TextAlign::Left,
-        None,
-        window,
-        cx,
-    );
+    let avail = GUTTER_WIDTH - 2.0 * SLICE_TEXT_PAD;
+    let label = |name: &str, y: f32, window: &mut Window, cx: &mut App| {
+        let line = shape_truncated(name, avail, font.clone(), fs, palette.label.into(), window);
+        let ty = px(y + (METRICS.header_height - f32::from(fs)) / 2.);
+        let _ = line.paint(
+            point(px(gutter_left + SLICE_TEXT_PAD), ty),
+            fs,
+            TextAlign::Left,
+            None,
+            window,
+            cx,
+        );
+    };
+
+    // Thread names scroll with the flame lanes, clipped to the flame band.
+    let flame_mask = ContentMask {
+        bounds: Bounds::new(
+            point(px(gutter_left), px(regions.flame_top)),
+            size(px(GUTTER_WIDTH), px(regions.flame_h())),
+        ),
+    };
+    window.with_content_mask(Some(flame_mask), |window| {
+        for lane in &layout.lanes {
+            let y = regions.flame_top + lane.top - scroll_y;
+            if y + METRICS.header_height < regions.flame_top || y > regions.graph_top {
+                continue;
+            }
+            label(&profile.threads[lane.track].name, y, window, cx);
+        }
+    });
+
+    for gl in graph_lanes(
+        profile.counters.len(),
+        regions.graph_top,
+        graph_height_of(regions),
+    ) {
+        label(&profile.counters[gl.lane].name, gl.top, window, cx);
+    }
+}
+
+/// The graph section's height between the splitter and the horizontal bar.
+fn graph_height_of(regions: Regions) -> f32 {
+    if regions.has_graph {
+        (regions.body_bottom - regions.graph_top).max(0.0)
+    } else {
+        0.0
+    }
+}
+
+/// Shapes `text` at `fs`, truncating with an ellipsis to fit `avail` pixels by
+/// the same proportional estimate slices and gutter labels share.
+fn shape_truncated(
+    text: &str,
+    avail: f32,
+    font: gpui::Font,
+    fs: Pixels,
+    color: Hsla,
+    window: &mut Window,
+) -> gpui::ShapedLine {
+    let line = bviz_ui_assets::shape_line(window, text.to_string(), font.clone(), fs, color);
+    if f32::from(line.width()) <= avail {
+        return line;
+    }
+    let chars = text.chars().count();
+    let keep =
+        ((chars as f32 * avail / f32::from(line.width())).floor() as usize).saturating_sub(1);
+    let mut truncated: String = text.chars().take(keep).collect();
+    truncated.push('…');
+    bviz_ui_assets::shape_line(window, truncated, font, fs, color)
 }
 
 /// Paints a slice quad and, if wide enough, its truncated name.
@@ -980,12 +1245,12 @@ fn paint_slice(
     y: f32,
     w: f32,
     h: f32,
-    bounds: Bounds<Pixels>,
+    content_left: f32,
     palette: &Palette,
     window: &mut Window,
     cx: &mut App,
 ) {
-    let origin = point(bounds.origin.x + px(x), bounds.origin.y + px(y));
+    let origin = point(px(content_left + x), px(y));
     let rect = Bounds::new(origin, size(px(w), px(h)));
     let fill = category_color(&slice.category, palette);
     window.paint_quad(quad(
@@ -1003,15 +1268,7 @@ fn paint_slice(
     let font = bviz_ui_assets::text_metrics(window).font;
     let fs = px(h - 2. * SLICE_TEXT_PAD);
     let color = label_on(fill);
-    let mut line = bviz_ui_assets::shape_line(window, slice.name.clone(), font.clone(), fs, color);
-    if f32::from(line.width()) > avail {
-        let chars = slice.name.chars().count();
-        let keep =
-            ((chars as f32 * avail / f32::from(line.width())).floor() as usize).saturating_sub(1);
-        let mut truncated: String = slice.name.chars().take(keep).collect();
-        truncated.push('…');
-        line = bviz_ui_assets::shape_line(window, truncated, font, fs, color);
-    }
+    let line = shape_truncated(&slice.name, avail, font, fs, color, window);
     let ty = origin.y + px((h - f32::from(fs)) / 2.);
     let _ = line.paint(
         point(origin.x + px(SLICE_TEXT_PAD), ty),
@@ -1145,33 +1402,35 @@ fn counter_color(series: &str) -> Hsla {
     )
 }
 
-/// Paints the counter lanes below the threads: a header band with the lane name,
-/// then the lane's series as stacked filled areas scaled to the lane's peak
-/// stacked total. Off-screen lanes are skipped.
-fn paint_counters(
+/// Paints the bottom graph section: every counter lane fitted to the section
+/// height. Each lane is a header band over a chart area that holds the lane's
+/// series as stacked filled areas scaled to the chart height and the lane's peak
+/// stacked total. Charts are confined to the content column.
+fn paint_graph(
     counters: &[CounterLane],
-    positions: &[CounterPos],
     tv: TimeView,
-    scroll_y: f32,
-    bounds: Bounds<Pixels>,
+    regions: Regions,
     palette: &Palette,
     window: &mut Window,
-    cx: &mut App,
 ) {
-    let origin_y = f32::from(bounds.origin.y);
-    let visible_top = origin_y + RULER_HEIGHT;
-    let visible_bottom = origin_y + f32::from(bounds.size.height);
-    let font = bviz_ui_assets::text_metrics(window).font;
-    let fs = px(METRICS.header_height - 2. * SLICE_TEXT_PAD);
-    for pos in positions {
-        let lane_y = visible_top + pos.top - scroll_y;
-        if lane_y + pos.height < visible_top || lane_y > visible_bottom {
-            continue;
-        }
-        let counter = &counters[pos.lane];
+    if !regions.has_graph {
+        return;
+    }
+    let lanes = graph_lanes(counters.len(), regions.graph_top, graph_height_of(regions));
+    let content_mask = ContentMask {
+        bounds: Bounds::new(
+            point(px(regions.content_left), px(regions.graph_top)),
+            size(
+                px(regions.content_w),
+                px(regions.body_bottom - regions.graph_top),
+            ),
+        ),
+    };
+    for gl in lanes {
+        let counter = &counters[gl.lane];
         let band = Bounds::new(
-            point(bounds.origin.x, px(lane_y)),
-            size(bounds.size.width, px(METRICS.header_height)),
+            point(px(regions.content_left), px(gl.top)),
+            size(px(regions.content_w), px(METRICS.header_height)),
         );
         window.paint_quad(quad(
             band,
@@ -1181,27 +1440,14 @@ fn paint_counters(
             Hsla::from(palette.border),
             BorderStyle::Solid,
         ));
-        let name = bviz_ui_assets::shape_line(
-            window,
-            counter.name.clone(),
-            font.clone(),
-            fs,
-            palette.label.into(),
-        );
-        let ty = px(lane_y + (METRICS.header_height - f32::from(fs)) / 2.);
-        let _ = name.paint(
-            point(bounds.origin.x + px(SLICE_TEXT_PAD), ty),
-            fs,
-            TextAlign::Left,
-            None,
-            window,
-            cx,
-        );
+        if gl.chart_h <= 0.0 {
+            continue;
+        }
 
         // Series in a lane stack (per the Chrome counter-event model): the peak
         // is the largest stacked total over time, and each series is drawn as a
         // band between the running baseline and baseline + value.
-        let chart_bottom = lane_y + pos.height;
+        let chart_bottom = gl.top + METRICS.header_height + gl.chart_h;
         let mut totals: BTreeMap<i64, f64> = BTreeMap::new();
         for series in &counter.series {
             for p in &series.points {
@@ -1212,37 +1458,39 @@ fn paint_counters(
         if peak <= 0.0 {
             continue;
         }
-        let scale = METRICS.counter_height / peak as f32;
-        let x_of = |ts| bounds.origin.x + px(tv.x_of(ts));
-        let mut baseline: BTreeMap<i64, f64> = BTreeMap::new();
-        for series in &counter.series {
-            if series.points.len() < 2 {
-                continue;
-            }
-            let mut area = PathBuilder::fill();
-            let mut first = true;
-            for p in &series.points {
-                let base = *baseline.get(&p.ts_us).unwrap_or(&0.0);
-                let top = px(chart_bottom - (base + p.value) as f32 * scale);
-                let at = point(x_of(p.ts_us), top);
-                if first {
-                    area.move_to(at);
-                    first = false;
-                } else {
-                    area.line_to(at);
+        let scale = gl.chart_h / peak as f32;
+        let x_of = |ts| px(regions.content_left + tv.x_of(ts));
+        window.with_content_mask(Some(content_mask), |window| {
+            let mut baseline: BTreeMap<i64, f64> = BTreeMap::new();
+            for series in &counter.series {
+                if series.points.len() < 2 {
+                    continue;
+                }
+                let mut area = PathBuilder::fill();
+                let mut first = true;
+                for p in &series.points {
+                    let base = *baseline.get(&p.ts_us).unwrap_or(&0.0);
+                    let top = px(chart_bottom - (base + p.value) as f32 * scale);
+                    let at = point(x_of(p.ts_us), top);
+                    if first {
+                        area.move_to(at);
+                        first = false;
+                    } else {
+                        area.line_to(at);
+                    }
+                }
+                for p in series.points.iter().rev() {
+                    let base = *baseline.get(&p.ts_us).unwrap_or(&0.0);
+                    area.line_to(point(x_of(p.ts_us), px(chart_bottom - base as f32 * scale)));
+                }
+                if let Ok(path) = area.build() {
+                    window.paint_path(path, counter_color(&series.name));
+                }
+                for p in &series.points {
+                    *baseline.entry(p.ts_us).or_default() += p.value;
                 }
             }
-            for p in series.points.iter().rev() {
-                let base = *baseline.get(&p.ts_us).unwrap_or(&0.0);
-                area.line_to(point(x_of(p.ts_us), px(chart_bottom - base as f32 * scale)));
-            }
-            if let Ok(path) = area.build() {
-                window.paint_path(path, counter_color(&series.name));
-            }
-            for p in &series.points {
-                *baseline.entry(p.ts_us).or_default() += p.value;
-            }
-        }
+        });
     }
 }
 
@@ -1363,5 +1611,42 @@ mod tests {
         assert_eq!(format_duration(500), "500µs");
         assert_eq!(format_duration(4_200), "4.20ms");
         assert_eq!(format_duration(2_500_000), "2.50s");
+    }
+
+    #[test]
+    fn clamp_graph_height_bounds_both_sections() {
+        // A tall window: clamps to the requested height, untouched.
+        assert_eq!(clamp_graph_height(220.0, 3, 800.0), 220.0);
+        // The label-only floor: never below n header bands.
+        let min = 3.0 * METRICS.header_height;
+        assert_eq!(clamp_graph_height(0.0, 3, 800.0), min);
+        // The flame-section ceiling: leaves FLAME_MIN_HEIGHT for the flame band.
+        let vh = 200.0;
+        let max = vh - RULER_HEIGHT - BAR_WIDTH - FLAME_MIN_HEIGHT;
+        assert_eq!(clamp_graph_height(1000.0, 1, vh), max);
+    }
+
+    #[test]
+    fn graph_lanes_split_height_evenly() {
+        let n = 2;
+        let graph_top = 100.0;
+        let graph_h = 2.0 * METRICS.header_height + 80.0;
+        let lanes = graph_lanes(n, graph_top, graph_h);
+        assert_eq!(lanes.len(), n);
+        // Each chart gets an even share of the height past the header bands.
+        assert_eq!(lanes[0].chart_h, 40.0);
+        assert_eq!(lanes[1].chart_h, 40.0);
+        // Lanes stack from graph_top, header band plus chart tall.
+        assert_eq!(lanes[0].top, graph_top);
+        assert_eq!(lanes[1].top, graph_top + METRICS.header_height + 40.0);
+    }
+
+    #[test]
+    fn graph_lanes_collapse_to_labels() {
+        // At the label-only minimum the charts squish to zero, leaving headers.
+        let lanes = graph_lanes(2, 0.0, 2.0 * METRICS.header_height);
+        assert_eq!(lanes[0].chart_h, 0.0);
+        assert_eq!(lanes[1].chart_h, 0.0);
+        assert!(graph_lanes(0, 0.0, 0.0).is_empty());
     }
 }
