@@ -67,6 +67,13 @@ const MIN_THUMB: f32 = 24.0;
 /// Font size of a phase-marker label.
 const MARKER_LABEL_SIZE: f32 = 11.0;
 
+/// Hover-tooltip text size, inner padding, gap between lines, and offset from the
+/// cursor.
+const TOOLTIP_TEXT_SIZE: f32 = 12.0;
+const TOOLTIP_PAD: f32 = 6.0;
+const TOOLTIP_LINE_GAP: f32 = 4.0;
+const TOOLTIP_OFFSET: f32 = 12.0;
+
 /// Saturation of every category color.
 const CATEGORY_SATURATION: f32 = 0.5;
 /// Slice-fill lightness on a dark vs. a light background.
@@ -89,6 +96,8 @@ struct Palette {
     /// Scroll-bar track and thumb fills.
     scroll_track: Rgba,
     scroll_thumb: Rgba,
+    /// Opaque fill of the hover tooltip panel.
+    panel: Rgba,
 }
 
 /// A painted scroll bar's geometry in window coordinates, kept so mouse events
@@ -114,6 +123,15 @@ enum Drag {
     /// leading edge.
     VThumb(f32),
     HThumb(f32),
+}
+
+/// The slice under the cursor and where the cursor was when it was picked, so a
+/// tooltip can be drawn for it.
+#[derive(Clone, Copy)]
+struct Hover {
+    track: usize,
+    slice: usize,
+    at: Point<Pixels>,
 }
 
 /// The loaded profile, a load in progress, or a message explaining why none is
@@ -148,6 +166,8 @@ struct TraceView {
     hbar: Rc<Cell<Option<BarLayout>>>,
     drag: Drag,
     last_mouse: Point<Pixels>,
+    /// The slice under the cursor, if any, drawn as a tooltip.
+    hover: Option<Hover>,
     /// Holds the background load task so it isn't cancelled on drop.
     _load_task: Task<()>,
 }
@@ -180,6 +200,7 @@ impl TraceView {
             hbar: Rc::new(Cell::new(None)),
             drag: Drag::None,
             last_mouse: Point::default(),
+            hover: None,
             _load_task: load_task,
         }
     }
@@ -289,9 +310,13 @@ impl TraceView {
                         &hbar,
                         window,
                     );
-                    // The ruler paints last so anything scrolled up under it is
-                    // covered by its opaque band.
+                    // The ruler paints over scrolled-up rows; the tooltip paints
+                    // over everything.
                     paint_ruler(&ticks, bounds, &palette, window, cx);
+                    if let Some(h) = entity.read(cx).hover {
+                        let slice = &profile.threads[h.track].slices[h.slice];
+                        paint_tooltip(slice, h.at, bounds, &palette, window, cx);
+                    }
                     if !matches!(entity.read(cx).drag, Drag::None) {
                         track_drag(window, &entity, on_drag, end_drag);
                     }
@@ -344,6 +369,7 @@ impl Render for TraceView {
             marker: Rgba::from(hsla(0.09, 0.6, 0.55, 1.0)),
             scroll_track: bviz_ui_theme::mix(colors.container, colors.background, 0.3),
             scroll_thumb: bviz_ui_theme::mix(colors.text, colors.background, 0.55),
+            panel: colors.container,
         };
         let body = match &self.source {
             Source::Loaded(profile) => div().flex_1().flex().overflow_hidden().child(
@@ -368,7 +394,8 @@ impl Render for TraceView {
                         cx.notify();
                     }),
                 )
-                .on_scroll_wheel(cx.listener(Self::on_scroll_wheel)),
+                .on_scroll_wheel(cx.listener(Self::on_scroll_wheel))
+                .on_mouse_move(cx.listener(Self::on_mouse_move)),
             ),
             Source::Loading => div()
                 .flex_1()
@@ -449,6 +476,61 @@ impl TraceView {
             self.view.set(v);
         }
         cx.notify();
+    }
+
+    /// Tracks the slice under the cursor while not dragging, repainting only when
+    /// the hovered slice changes.
+    fn on_mouse_move(&mut self, e: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
+        if !matches!(self.drag, Drag::None) {
+            return;
+        }
+        let hit = self.slice_at(e.position);
+        let unchanged = match (self.hover, hit) {
+            (Some(h), Some((track, slice))) => h.track == track && h.slice == slice,
+            (None, None) => true,
+            _ => false,
+        };
+        if unchanged {
+            return;
+        }
+        self.hover = hit.map(|(track, slice)| Hover {
+            track,
+            slice,
+            at: e.position,
+        });
+        cx.notify();
+    }
+
+    /// The slice under a window-space cursor, inverting the paint transform:
+    /// window → lane area → (lane, depth row) and time. `None` over a header, the
+    /// ruler, a counter lane, or empty space.
+    fn slice_at(&self, pos: Point<Pixels>) -> Option<(usize, usize)> {
+        let Source::Loaded(profile) = &self.source else {
+            return None;
+        };
+        let origin = self.viewport.get().origin;
+        let content_y = f32::from(pos.y) - f32::from(origin.y) - RULER_HEIGHT + self.scroll_y.get();
+        if content_y < 0.0 {
+            return None;
+        }
+        let layout = lay_out_lanes(profile, &METRICS);
+        let lane = layout
+            .lanes
+            .iter()
+            .find(|l| content_y >= l.top && content_y < l.top + l.height)?;
+        let rows_top = lane.top + METRICS.header_height;
+        if content_y < rows_top {
+            return None;
+        }
+        let depth = ((content_y - rows_top) / METRICS.row_height) as u32;
+        let t = self.view.get().t_of(f32::from(pos.x) - f32::from(origin.x));
+        profile.threads[lane.track]
+            .slices
+            .iter()
+            .position(|s| {
+                s.depth == depth && t >= s.start_us as f64 && t <= (s.start_us + s.dur_us) as f64
+            })
+            .map(|slice| (lane.track, slice))
     }
 
     /// Begins a drag at `pos`: a scroll thumb or track if the press hit one (the
@@ -932,6 +1014,95 @@ fn paint_slice(
     );
 }
 
+/// A compact duration label (e.g. `4.20ms`) for a microsecond span.
+fn format_duration(us: i64) -> String {
+    let a = (us as f64).abs();
+    if a < 1_000.0 {
+        format!("{us}µs")
+    } else if a < 1_000_000.0 {
+        format!("{:.2}ms", us as f64 / 1_000.0)
+    } else {
+        format!("{:.2}s", us as f64 / 1_000_000.0)
+    }
+}
+
+/// Paints a tooltip panel near `at` with the slice's name, its category and
+/// duration, and its args, one per line. Kept inside the viewport.
+fn paint_tooltip(
+    slice: &bviz_trace_profile::Slice,
+    at: Point<Pixels>,
+    bounds: Bounds<Pixels>,
+    palette: &Palette,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let mut lines = vec![
+        slice.name.clone(),
+        format!("{} · {}", slice.category, format_duration(slice.dur_us)),
+    ];
+    if let Some(target) = &slice.args.target {
+        lines.push(format!("target: {target}"));
+    }
+    if let Some(mnemonic) = &slice.args.mnemonic {
+        lines.push(format!("mnemonic: {mnemonic}"));
+    }
+    if let Some(configuration) = &slice.args.configuration {
+        lines.push(format!("configuration: {configuration}"));
+    }
+    for (key, value) in &slice.args.others {
+        lines.push(format!("{key}: {value}"));
+    }
+
+    let font = bviz_ui_assets::text_metrics(window).font;
+    let fs = px(TOOLTIP_TEXT_SIZE);
+    let shaped: Vec<_> = lines
+        .iter()
+        .map(|line| {
+            bviz_ui_assets::shape_line(window, line.clone(), font.clone(), fs, palette.label.into())
+        })
+        .collect();
+    let text_w = shaped
+        .iter()
+        .map(|l| f32::from(l.width()))
+        .fold(0.0_f32, f32::max);
+    let line_h = TOOLTIP_TEXT_SIZE + TOOLTIP_LINE_GAP;
+    let box_w = text_w + 2.0 * TOOLTIP_PAD;
+    let box_h = shaped.len() as f32 * line_h + 2.0 * TOOLTIP_PAD;
+
+    let left = f32::from(bounds.origin.x);
+    let top = f32::from(bounds.origin.y);
+    let right = left + f32::from(bounds.size.width);
+    let bottom = top + f32::from(bounds.size.height);
+    let mut x = f32::from(at.x) + TOOLTIP_OFFSET;
+    let mut y = f32::from(at.y) + TOOLTIP_OFFSET;
+    if x + box_w > right {
+        x = (right - box_w).max(left);
+    }
+    if y + box_h > bottom {
+        y = (bottom - box_h).max(top);
+    }
+
+    window.paint_quad(quad(
+        Bounds::new(point(px(x), px(y)), size(px(box_w), px(box_h))),
+        px(4.),
+        palette.panel,
+        px(1.),
+        Hsla::from(palette.border),
+        BorderStyle::Solid,
+    ));
+    for (i, line) in shaped.into_iter().enumerate() {
+        let ly = y + TOOLTIP_PAD + i as f32 * line_h;
+        let _ = line.paint(
+            point(px(x + TOOLTIP_PAD), px(ly)),
+            fs,
+            TextAlign::Left,
+            None,
+            window,
+            cx,
+        );
+    }
+}
+
 /// A stable hue in [0, 1) for `s`: FNV-1a over the bytes folded onto the wheel.
 /// The same string always maps to the same hue.
 fn hue_of(s: &str) -> f32 {
@@ -1114,6 +1285,7 @@ mod tests {
             marker: dark,
             scroll_track: dark,
             scroll_thumb: dark,
+            panel: dark,
         }
     }
 
@@ -1157,5 +1329,12 @@ mod tests {
         assert_eq!(format_time(5_000_000.0, 5_000_000.0), "5s");
         assert_eq!(format_time(-2_000_000.0, 1_000_000.0), "-2s");
         assert_eq!(format_time(-0.0, 5_000_000.0), "0s");
+    }
+
+    #[test]
+    fn format_duration_is_compact() {
+        assert_eq!(format_duration(500), "500µs");
+        assert_eq!(format_duration(4_200), "4.20ms");
+        assert_eq!(format_duration(2_500_000), "2.50s");
     }
 }
