@@ -50,7 +50,15 @@ Interactive visualization and inspection tool for Bazel builds.
   qualitative result ("about half the time", "roughly 2x faster", "a noticeable
   share of load") or a property that holds regardless of the sample; if a concrete
   number genuinely earns its place, state the reproducible conditions behind it
-  rather than pinning it to a one-off measurement. Name any
+  rather than pinning it to a one-off measurement. A comment must describe the
+  code as it stands — a value's role, an invariant it upholds, the non-obvious
+  reason it is what it is — never narrate the edit that produced it or contrast
+  against an alternative the code no longer holds. Phrasings that only parse for a
+  reader who knows the prior version are the tell: "leave/keep X set", "don't
+  clear Y", "now uses", "instead of Z", "X is also Y so we don't bother". They
+  read as a note on the change rather than the code; state the standing fact
+  directly — say what X is and why it must be that, not that you refrained from
+  changing it. Name any
   external reference in full — its title or identifier (a paper's name and arXiv
   id, a ticket number) — never a bare "the paper"/"the reference"/"the spec"
   that assumes shared context. References must also be portable: never hard-code a
