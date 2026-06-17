@@ -56,16 +56,19 @@ mod tests {
 
     #[test]
     fn fit_maps_span_to_width() {
-        let view = TimeView::fit(
-            TimeSpan {
-                start_us: 0,
-                end_us: 1000,
-            },
-            100.0,
-        );
+        let span = TimeSpan {
+            start_us: 0,
+            end_us: 1000,
+        };
+        // No margin: the span fills the width exactly.
+        let view = TimeView::fit(span, 100.0, 0.0);
         assert_eq!(view.px_per_us, 0.1);
         assert_eq!(view.x_of(500), 50.0);
         assert_eq!(view.t_of(50.0), 500.0);
+        // A 10px margin insets the span: it spans pixels [10, 90].
+        let inset = TimeView::fit(span, 100.0, 10.0);
+        assert_eq!(inset.x_of(0), 10.0);
+        assert_eq!(inset.x_of(1000), 90.0);
     }
 
     #[test]
@@ -76,6 +79,7 @@ mod tests {
                 end_us: 1000,
             },
             100.0,
+            0.0,
         );
         let anchor_t = view.t_of(50.0);
         view.zoom_at(50.0, 2.0);
@@ -104,17 +108,17 @@ mod tests {
             start_us: 900.0,
             px_per_us: 0.2,
         };
-        zoomed.clamp_to(span, 100.0);
+        zoomed.clamp_to(span, 100.0, 0.0);
         assert_eq!(zoomed.start_us, 500.0);
         zoomed.start_us = -300.0;
-        zoomed.clamp_to(span, 100.0);
+        zoomed.clamp_to(span, 100.0, 0.0);
         assert_eq!(zoomed.start_us, 0.0);
         // Zoomed out so the whole span fits: it is pinned to the left.
         let mut wide = TimeView {
             start_us: 400.0,
             px_per_us: 0.05,
         };
-        wide.clamp_to(span, 100.0);
+        wide.clamp_to(span, 100.0, 0.0);
         assert_eq!(wide.start_us, 0.0);
     }
 

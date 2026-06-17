@@ -45,6 +45,10 @@ const SLICE_TEXT_PAD: f32 = 3.0;
 /// Deepest horizontal zoom, in pixels per microsecond.
 const MAX_PX_PER_US: f64 = 50.0;
 
+/// Empty space kept reachable past each end of the timeline so its start and end
+/// stand clear of the window edges.
+const EDGE_MARGIN_PX: f32 = 24.0;
+
 /// Pixels scrolled per wheel line.
 const LINE_SCROLL_PX: f32 = 24.0;
 
@@ -231,14 +235,16 @@ impl TraceView {
                 viewport.set(bounds);
                 let width = f32::from(bounds.size.width);
                 if !fitted.get() {
-                    view.set(TimeView::fit(profile.span, width));
+                    view.set(TimeView::fit(profile.span, width, EDGE_MARGIN_PX));
                     fitted.set(true);
                 }
                 // Hold the bounds across a resize: keep the fit as the zoom floor
                 // and the pan within the span for the current width.
                 let mut v = view.get();
-                v.px_per_us = v.px_per_us.max(fit_px_per_us(profile.span, width));
-                v.clamp_to(profile.span, width);
+                v.px_per_us = v
+                    .px_per_us
+                    .max(fit_px_per_us(profile.span, width, EDGE_MARGIN_PX));
+                v.clamp_to(profile.span, width, EDGE_MARGIN_PX);
                 view.set(v);
             }
         };
@@ -464,15 +470,17 @@ impl TraceView {
             let dy_lines = dy / LINE_SCROLL_PX;
             let mut v = self.view.get();
             v.zoom_at(rel_x, 1.1_f64.powf(dy_lines as f64));
-            v.px_per_us = v.px_per_us.clamp(fit_px_per_us(span, width), MAX_PX_PER_US);
-            v.clamp_to(span, width);
+            v.px_per_us = v
+                .px_per_us
+                .clamp(fit_px_per_us(span, width, EDGE_MARGIN_PX), MAX_PX_PER_US);
+            v.clamp_to(span, width, EDGE_MARGIN_PX);
             self.view.set(v);
         } else {
             let scrolled = (self.scroll_y.get() - dy).clamp(0.0, self.max_scroll());
             self.scroll_y.set(scrolled);
             let mut v = self.view.get();
             v.pan_px(dx);
-            v.clamp_to(span, width);
+            v.clamp_to(span, width, EDGE_MARGIN_PX);
             self.view.set(v);
         }
         cx.notify();
@@ -572,7 +580,7 @@ fn on_drag(view: &mut TraceView, event: &MouseMoveEvent, cx: &mut Context<TraceV
             let dy = f32::from(event.position.y) - f32::from(view.last_mouse.y);
             let mut v = view.view.get();
             v.pan_px(dx);
-            v.clamp_to(span, width);
+            v.clamp_to(span, width, EDGE_MARGIN_PX);
             view.view.set(v);
             let scrolled = (view.scroll_y.get() - dy).clamp(0.0, view.max_scroll());
             view.scroll_y.set(scrolled);
@@ -631,7 +639,7 @@ fn pan_thumb_to(view: &mut TraceView, mouse_along: f32, grab: f32) {
     let travel = (bar.track_len - bar.thumb_len).max(1.0);
     let thumb_start = (mouse_along - grab - bar.track_start).clamp(0.0, travel);
     v.start_us = span.start_us as f64 + (thumb_start / travel) as f64 * range;
-    v.clamp_to(span, width);
+    v.clamp_to(span, width, EDGE_MARGIN_PX);
     view.view.set(v);
 }
 
@@ -1237,11 +1245,11 @@ fn label_on(fill: Hsla) -> Hsla {
     }
 }
 
-/// The pixels-per-microsecond at which the whole `span` fits `width_px`; the
-/// zoom-out floor.
-fn fit_px_per_us(span: TimeSpan, width_px: f32) -> f64 {
-    let width = (span.end_us - span.start_us).max(1) as f64;
-    width_px as f64 / width
+/// The pixels-per-microsecond at which `span` fits `width_px` less `margin_px` of
+/// empty space at each end; the zoom-out floor, matching [`TimeView::fit`].
+fn fit_px_per_us(span: TimeSpan, width_px: f32, margin_px: f32) -> f64 {
+    let span_us = (span.end_us - span.start_us).max(1) as f64;
+    (width_px - 2.0 * margin_px).max(1.0) as f64 / span_us
 }
 
 fn span_seconds(span: TimeSpan) -> f64 {
@@ -1305,13 +1313,15 @@ mod tests {
             start_us: 0,
             end_us: 1000,
         };
-        assert_eq!(fit_px_per_us(span, 100.0), 0.1);
+        assert_eq!(fit_px_per_us(span, 100.0, 0.0), 0.1);
+        // A 10px margin each side leaves 80px for the span.
+        assert_eq!(fit_px_per_us(span, 100.0, 10.0), 0.08);
         // An empty span clamps the divisor to 1 rather than dividing by zero.
         let empty = TimeSpan {
             start_us: 5,
             end_us: 5,
         };
-        assert_eq!(fit_px_per_us(empty, 100.0), 100.0);
+        assert_eq!(fit_px_per_us(empty, 100.0, 0.0), 100.0);
     }
 
     #[test]

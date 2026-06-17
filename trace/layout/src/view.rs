@@ -9,13 +9,16 @@ pub struct TimeView {
 }
 
 impl TimeView {
-    /// Scale the whole span to `width_px`, leaving the view unzoomable-flat for an
-    /// empty span.
-    pub fn fit(span: TimeSpan, width_px: f32) -> TimeView {
-        let width = (span.end_us - span.start_us).max(1) as f64;
+    /// Scale the whole span to `width_px` less `margin_px` of empty space at each
+    /// end, so the timeline's start and end stand clear of the edges. An empty
+    /// span stays unzoomable-flat.
+    pub fn fit(span: TimeSpan, width_px: f32, margin_px: f32) -> TimeView {
+        let span_us = (span.end_us - span.start_us).max(1) as f64;
+        let content_px = (width_px - 2.0 * margin_px).max(1.0) as f64;
+        let px_per_us = content_px / span_us;
         TimeView {
-            start_us: span.start_us as f64,
-            px_per_us: width_px as f64 / width,
+            start_us: span.start_us as f64 - margin_px as f64 / px_per_us,
+            px_per_us,
         }
     }
 
@@ -39,13 +42,14 @@ impl TimeView {
         self.start_us -= dx_px as f64 / self.px_per_us;
     }
 
-    /// Bound the pan so `span` can never be scrolled off either edge of a
-    /// `width_px`-wide viewport. When the span is wider than the view, the left
-    /// edge stays within `[span.start, span.end - visible]`; when it all fits, the
-    /// span is pinned to the left.
-    pub fn clamp_to(&mut self, span: TimeSpan, width_px: f32) {
+    /// Bound the pan so `span` can never be scrolled off either edge, while
+    /// leaving `margin_px` of empty space reachable past each end so the
+    /// timeline's start and end can be brought clear of the edges.
+    pub fn clamp_to(&mut self, span: TimeSpan, width_px: f32, margin_px: f32) {
         let visible_us = width_px as f64 / self.px_per_us;
-        let max_start = (span.end_us as f64 - visible_us).max(span.start_us as f64);
-        self.start_us = self.start_us.clamp(span.start_us as f64, max_start);
+        let margin_us = margin_px as f64 / self.px_per_us;
+        let low = span.start_us as f64 - margin_us;
+        let high = (span.end_us as f64 - visible_us + margin_us).max(low);
+        self.start_us = self.start_us.clamp(low, high);
     }
 }
