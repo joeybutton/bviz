@@ -178,6 +178,9 @@ struct GraphView {
     /// Set after a toggle so the next relayout's first paint pans `recent` into
     /// view if the relayout pushed it off-screen.
     recenter: Rc<Cell<bool>>,
+    /// Whether a relayout is running, so the view shows a progress indicator
+    /// while the prior layout stays interactive.
+    relaying: bool,
     /// Holds the background load/relayout task so it isn't cancelled on drop.
     _load_task: Task<()>,
 }
@@ -244,6 +247,7 @@ impl GraphView {
             recent: None,
             highlight_seq: 0,
             recenter: Rc::new(Cell::new(false)),
+            relaying: false,
             _load_task: load_task,
         }
     }
@@ -256,12 +260,14 @@ impl GraphView {
             return;
         };
         let expanded = self.expanded.borrow().clone();
+        self.relaying = true;
         self._load_task = load_in_background(
             cx,
             move || relayout(&graph, &expanded),
             |view, laid_out, _| {
                 view.source = Source::Loaded(laid_out);
                 view.recenter.set(true);
+                view.relaying = false;
             },
         );
     }
@@ -280,6 +286,7 @@ impl GraphView {
         viewport: Rc<Cell<Bounds<Pixels>>>,
         recent: Option<&str>,
         recenter: Rc<Cell<bool>>,
+        relaying: bool,
         palette: Palette,
     ) -> Stateful<Div> {
         let boxes: Vec<PaintBox> = g
@@ -343,6 +350,37 @@ impl GraphView {
                                 .child(k.label()),
                         )
                 }))
+        });
+        let relaying_indicator = relaying.then(|| {
+            div()
+                .absolute()
+                .right_2()
+                .top_2()
+                .flex()
+                .items_center()
+                .gap_2()
+                .px_2()
+                .py_1()
+                .rounded_md()
+                .bg(palette.container_fill)
+                .child(
+                    bviz_ui_assets::icon("circle-notch")
+                        .size(px(14.))
+                        .text_color(palette.label)
+                        .with_animation(
+                            "relaying-spinner",
+                            Animation::new(Duration::from_millis(900)).repeat(),
+                            |icon, delta| {
+                                icon.with_transformation(Transformation::rotate(percentage(delta)))
+                            },
+                        ),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(palette.label)
+                        .child("laying out…"),
+                )
         });
         let content = (
             g.width as f32 + 2. * MARGIN as f32,
@@ -439,6 +477,7 @@ impl GraphView {
                 .size_full(),
             )
             .children(legend)
+            .children(relaying_indicator)
     }
 
     fn status(&self) -> String {
@@ -481,6 +520,7 @@ impl Render for GraphView {
                         self.viewport.clone(),
                         self.recent.as_deref(),
                         self.recenter.clone(),
+                        self.relaying,
                         palette,
                     )
                     .on_mouse_down(
