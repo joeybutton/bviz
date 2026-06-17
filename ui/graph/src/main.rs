@@ -44,6 +44,12 @@ const KIND_BLEND: f32 = 0.68;
 /// always fits the viewport.
 const MAX_ZOOM: f32 = 4.0;
 
+/// Startup expands containment levels outward from the roots until the visible
+/// view would exceed either cap, so a large graph opens to a bounded but
+/// non-trivial overview rather than a single collapsed box.
+const MAX_VISIBLE_NODES: usize = 400;
+const MAX_VISIBLE_EDGES: usize = 600;
+
 /// Fraction of the viewport the fitted graph spans, leaving a margin so the whole
 /// graph sits within the inner part of the window rather than edge to edge.
 const FIT_MARGIN: f32 = 2.0 / 3.0;
@@ -113,16 +119,15 @@ enum Source {
 
 /// A box flattened to what the canvas needs to paint it, in layout pixels.
 struct PaintBox {
-    /// The graph node id, so a click can be mapped back to its node.
-    id: String,
     x: f64,
     y: f64,
     w: f64,
     h: f64,
     compound: bool,
-    /// Whether this box's id is in the expansion set, which points its
-    /// disclosure caret down rather than right.
-    expanded: bool,
+    /// Whether this box can be opened or closed (a container or a collapsed
+    /// group), so the renderer draws a disclosure caret: down when open
+    /// (compound), right when collapsed.
+    expandable: bool,
     /// Fill resolved from the active theme when the box vec is built.
     fill: Rgba,
     label: String,
@@ -155,8 +160,12 @@ struct GraphView {
     /// The built (pre-quotient) graph, cached so toggling a group re-lays-out
     /// without re-reading or re-parsing the proto. `None` until the load lands.
     base: Rc<RefCell<Option<Graph>>>,
-    /// Group ids currently expanded into their member files.
+    /// Container and group ids currently expanded; every other container folds
+    /// its subtree away so the layout only processes the visible view.
     expanded: Rc<RefCell<HashSet<String>>>,
+    /// Container ids of the base graph (each a node that is some node's parent),
+    /// so a click can tell an expandable box from a plain leaf.
+    containers: Rc<RefCell<HashSet<String>>>,
     /// Holds the background load/relayout task so it isn't cancelled on drop.
     _load_task: Task<()>,
 }
@@ -177,12 +186,20 @@ impl GraphView {
             cx,
             move || {
                 let graph = build_graph(&inputs)?;
-                let laid_out = relayout(&graph, &HashSet::new());
-                Ok::<_, String>((graph, laid_out))
+                // Open to a bounded overview instead of laying out the whole graph.
+                let expanded = bviz_graph_layout::lod::default_expansion(
+                    &graph,
+                    MAX_VISIBLE_NODES,
+                    MAX_VISIBLE_EDGES,
+                );
+                let laid_out = relayout(&graph, &expanded);
+                Ok::<_, String>((graph, expanded, laid_out))
             },
             |view, result, _| {
                 view.source = match result {
-                    Ok((graph, laid_out)) => {
+                    Ok((graph, expanded, laid_out)) => {
+                        *view.containers.borrow_mut() = bviz_graph_layout::lod::containers(&graph);
+                        *view.expanded.borrow_mut() = expanded;
                         *view.base.borrow_mut() = Some(graph);
                         Source::Loaded(laid_out)
                     }
@@ -203,6 +220,7 @@ impl GraphView {
             viewport: Rc::new(Cell::new(Bounds::default())),
             base,
             expanded: Rc::new(RefCell::new(HashSet::new())),
+            containers: Rc::new(RefCell::new(HashSet::new())),
             _load_task: load_task,
         }
     }
@@ -228,7 +246,7 @@ impl GraphView {
     /// connectors rather than borrowing the graph.
     fn graph(
         g: &LaidOut,
-        expanded: &HashSet<String>,
+        containers: &HashSet<String>,
         entity: Entity<GraphView>,
         zoom: Rc<Cell<f32>>,
         pan: Rc<Cell<(f32, f32)>>,
@@ -240,13 +258,12 @@ impl GraphView {
             .boxes
             .iter()
             .map(|b| PaintBox {
-                id: b.id.clone(),
                 x: b.x,
                 y: b.y,
                 w: b.width,
                 h: b.height,
                 compound: b.compound,
-                expanded: expanded.contains(&b.id),
+                expandable: containers.contains(&b.id) || b.id.starts_with("group:"),
                 fill: if b.compound {
                     container_fill(&b.kind, &palette)
                 } else {
@@ -394,7 +411,7 @@ impl Render for GraphView {
                 .child(
                     Self::graph(
                         g,
-                        &self.expanded.borrow(),
+                        &self.containers.borrow(),
                         cx.entity(),
                         self.zoom.clone(),
                         self.pan.clone(),
@@ -563,7 +580,7 @@ fn paint_box(
     // occupying the reserved width the layout sized the box to hold; the label
     // and caret are centered together as one unit. Other boxes center the label
     // alone.
-    let caret = b.id.starts_with("group:");
+    let caret = b.expandable;
     let footprint = px(CARET_RESERVE as f32 * zoom);
     let unit_width = if caret {
         footprint + line.width()
@@ -584,17 +601,16 @@ fn paint_box(
     };
     let _ = line.paint(point(tx, ty), fs, TextAlign::Left, None, window, cx);
 
-    // A collapsed box points the caret right, an expanded one (its id in the
-    // expansion set) points it down. Phosphor icons render as `svg()` elements
-    // and cannot be painted inside this canvas, so the caret is a small filled
-    // triangle.
+    // An open container (compound) points the caret down; a collapsed box points
+    // it right. Phosphor icons render as `svg()` elements and cannot be painted
+    // inside this canvas, so the caret is a small filled triangle.
     if caret {
         let cy = ty + fs / 2.;
         paint_caret(
             point(unit_left, cy),
             footprint,
             fs,
-            b.expanded,
+            b.compound,
             palette.label,
             window,
         );
@@ -750,9 +766,12 @@ fn build_graph(inputs: &[Input]) -> Result<Graph, String> {
     ))
 }
 
-/// Builds the display graph with the given ids expanded and lays it out.
+/// Builds the display graph with the given ids expanded and lays it out: fold
+/// every unexpanded container away, merge interchangeable leaves, then lay out
+/// only the resulting visible view.
 fn relayout(graph: &Graph, expanded: &HashSet<String>) -> LaidOut {
-    layout::layout(&quotient::quotient(graph, expanded))
+    let visible = bviz_graph_layout::lod::collapse(graph, expanded);
+    layout::layout(&quotient::quotient(&visible, expanded))
 }
 
 /// Inverse of [`to_screen`]: maps a window-space point back to layout space.
@@ -784,8 +803,8 @@ fn drag_pan(view: &mut GraphView, event: &MouseMoveEvent, cx: &mut Context<Graph
     cx.notify();
 }
 
-/// End a drag. A release that never travelled is a click: toggle the group box
-/// under the cursor.
+/// End a drag. A release that never travelled is a click: open or close the
+/// container (or group) box under the cursor.
 fn end_drag(view: &mut GraphView, event: &MouseUpEvent, cx: &mut Context<GraphView>) {
     view.dragging = false;
     if view.moved {
@@ -799,7 +818,8 @@ fn end_drag(view: &mut GraphView, event: &MouseUpEvent, cx: &mut Context<GraphVi
     let Some(hit) = hit_box(&g.boxes, gx, gy) else {
         return;
     };
-    if !hit.id.starts_with("group:") {
+    // A container or a collapsed group can be opened/closed; a plain leaf can't.
+    if !hit.id.starts_with("group:") && !view.containers.borrow().contains(&hit.id) {
         return;
     }
     let id = hit.id.clone();

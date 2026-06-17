@@ -12,6 +12,7 @@ pub mod graph;
 pub mod joint;
 mod label;
 pub mod layout;
+pub mod lod;
 pub mod query;
 pub mod quotient;
 pub mod streamed_proto;
