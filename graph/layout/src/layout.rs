@@ -32,7 +32,7 @@ use crate::graph::{EdgeKind, Graph, Node};
 
 const LEAF_HEIGHT: f64 = 30.0;
 const CHAR_WIDTH: f64 = 7.0;
-const LABEL_PADDING: f64 = 16.0;
+const LABEL_PADDING: f64 = 22.0;
 /// Horizontal space (in layout pixels, pre-zoom) reserved on an expandable leaf
 /// box for its disclosure caret, left of the label.
 pub const CARET_RESERVE: f64 = 12.0;
@@ -235,15 +235,12 @@ fn build_node<'g>(
             }
         }
         None => {
-            // A collapsible leaf (a collapsed group) reserves room for its
-            // disclosure caret left of the label, matching the renderer's caret
-            // footprint.
-            let caret = if node.id.starts_with("group:") {
-                CARET_RESERVE
-            } else {
-                0.0
-            };
-            let width = node.label.chars().count() as f64 * CHAR_WIDTH + LABEL_PADDING + caret;
+            // Every leaf reserves room for a disclosure caret left of the label:
+            // the renderer draws one on any expandable box (a collapsed container
+            // or group), and the uniform reserve also keeps plain leaves from
+            // crowding their labels.
+            let width =
+                node.label.chars().count() as f64 * CHAR_WIDTH + LABEL_PADDING + CARET_RESERVE;
             elk.borrow_mut()
                 .connectable()
                 .shape()
