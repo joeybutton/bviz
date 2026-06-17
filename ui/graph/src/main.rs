@@ -133,6 +133,8 @@ struct PaintBox {
     label: String,
     /// The just-toggled box, drawn with an emphasis border and inset glow.
     highlight: bool,
+    /// Outside the hovered node's neighborhood, drawn faded to recede.
+    dim: bool,
 }
 
 /// Loads, lays out, and renders a Bazel build graph.
@@ -181,6 +183,9 @@ struct GraphView {
     /// Whether a relayout is running, so the view shows a progress indicator
     /// while the prior layout stays interactive.
     relaying: bool,
+    /// Node under the cursor, whose neighborhood stays lit while everything else
+    /// dims; `None` when the cursor is over no node.
+    hovered: Option<String>,
     /// Holds the background load/relayout task so it isn't cancelled on drop.
     _load_task: Task<()>,
 }
@@ -195,6 +200,14 @@ const HIGHLIGHT_LINGER: Duration = Duration::from_millis(1100);
 /// Accent for the just-toggled box's emphasis border and inset glow, bright
 /// enough to catch the eye on either a light or dark background.
 const HIGHLIGHT_ACCENT: Rgba = Rgba { r: 1.0, g: 0.819, b: 0.4, a: 1.0 };
+
+/// Fraction a dimmed box's fill and border are pulled toward the background, so
+/// the hovered node's neighborhood stands out against the receded rest.
+const DIM_FADE: f32 = 0.6;
+
+/// Alpha a dimmed connector keeps, fading edges outside the hovered node's
+/// neighborhood without erasing them.
+const DIM_EDGE_ALPHA: f32 = 0.2;
 
 impl GraphView {
     fn new(inputs: Vec<Input>, window: &mut Window, cx: &mut Context<Self>) -> Self {
@@ -248,6 +261,7 @@ impl GraphView {
             highlight_seq: 0,
             recenter: Rc::new(Cell::new(false)),
             relaying: false,
+            hovered: None,
             _load_task: load_task,
         }
     }
@@ -287,8 +301,25 @@ impl GraphView {
         recent: Option<&str>,
         recenter: Rc<Cell<bool>>,
         relaying: bool,
+        hovered: Option<&str>,
         palette: Palette,
     ) -> Stateful<Div> {
+        // The hovered node plus the node at the other end of each of its edges;
+        // everything outside this set dims while a node is hovered.
+        let active: HashSet<&str> = hovered
+            .map(|h| {
+                let mut set = HashSet::from([h]);
+                for c in &g.connectors {
+                    if c.from == h {
+                        set.insert(c.to.as_str());
+                    }
+                    if c.to == h {
+                        set.insert(c.from.as_str());
+                    }
+                }
+                set
+            })
+            .unwrap_or_default();
         let boxes: Vec<PaintBox> = g
             .boxes
             .iter()
@@ -306,6 +337,7 @@ impl GraphView {
                 },
                 label: b.label.clone(),
                 highlight: recent == Some(b.id.as_str()),
+                dim: hovered.is_some() && !active.contains(b.id.as_str()),
             })
             .collect();
         // Center of the just-toggled box, to pan into view on the next paint.
@@ -315,10 +347,13 @@ impl GraphView {
                 .find(|b| b.id == id)
                 .map(|b| (b.x + b.width / 2.0, b.y + b.height / 2.0))
         });
-        let connectors: Vec<(Vec<(f64, f64)>, EdgeKind)> = g
+        let connectors: Vec<(Vec<(f64, f64)>, EdgeKind, bool)> = g
             .connectors
             .iter()
-            .map(|c| (c.points.clone(), c.kind))
+            .map(|c| {
+                let dim = hovered.is_some_and(|h| c.from != h && c.to != h);
+                (c.points.clone(), c.kind, dim)
+            })
             .collect();
         // Edge kinds actually drawn, in enum order, so the legend explains only
         // the provenances present in this graph.
@@ -460,8 +495,8 @@ impl GraphView {
                     for b in &boxes {
                         paint_box(b, bounds, z, p, &palette, window, cx);
                     }
-                    for (points, kind) in &connectors {
-                        paint_connector(points, *kind, bounds, z, p, window);
+                    for (points, kind, dim) in &connectors {
+                        paint_connector(points, *kind, *dim, bounds, z, p, window);
                     }
                     // While a drag is in progress, pan through window-global
                     // handlers so it keeps working when the cursor leaves the
@@ -521,6 +556,7 @@ impl Render for GraphView {
                         self.recent.as_deref(),
                         self.recenter.clone(),
                         self.relaying,
+                        self.hovered.as_deref(),
                         palette,
                     )
                     .on_mouse_down(
@@ -536,6 +572,23 @@ impl Render for GraphView {
                             cx.notify();
                         }),
                     )
+                    .on_mouse_move(cx.listener(|this, e: &MouseMoveEvent, _, cx| {
+                        // A drag pans rather than hovers; leave the lit set alone.
+                        if this.dragging {
+                            return;
+                        }
+                        let Source::Loaded(g) = &this.source else {
+                            return;
+                        };
+                        let vp = this.viewport.get();
+                        let (gx, gy) =
+                            from_screen(e.position, vp.origin, this.zoom.get(), this.pan.get());
+                        let hit = hit_box(&g.boxes, gx, gy).map(|b| b.id.clone());
+                        if hit != this.hovered {
+                            this.hovered = hit;
+                            cx.notify();
+                        }
+                    }))
                     .on_scroll_wheel(cx.listener(|this, e: &ScrollWheelEvent, _, cx| {
                         // Anchor the zoom at the cursor: keep the content point
                         // under the cursor fixed as the scale changes. The minimum
@@ -664,12 +717,24 @@ fn paint_box(
         return;
     }
     let corner = px(6. * zoom);
+    let fill = if b.dim {
+        bviz_ui_theme::mix(b.fill, palette.background, DIM_FADE)
+    } else {
+        b.fill
+    };
+    let label_color = if b.dim {
+        bviz_ui_theme::mix(palette.label, palette.background, DIM_FADE)
+    } else {
+        palette.label
+    };
     let (border_w, border_c) = if b.highlight {
         (px((2. * zoom).max(2.)), Hsla::from(HIGHLIGHT_ACCENT))
+    } else if b.dim {
+        (px(1.), Hsla::from(bviz_ui_theme::mix(palette.border, palette.background, DIM_FADE)))
     } else {
         (px(1.), Hsla::from(palette.border))
     };
-    window.paint_quad(quad(rect, corner, b.fill, border_w, border_c, BorderStyle::Solid));
+    window.paint_quad(quad(rect, corner, fill, border_w, border_c, BorderStyle::Solid));
     if b.highlight {
         // A faint accent wash over the fill so the emphasis reads as a glow, not
         // just a brighter outline.
@@ -692,7 +757,7 @@ fn paint_box(
     let base = bviz_ui_assets::text_metrics(window).font;
     let font = if b.compound { base.bold() } else { base };
     let fs = px(LABEL_SIZE as f32 * zoom);
-    let line = bviz_ui_assets::shape_line(window, b.label.clone(), font, fs, palette.label.into());
+    let line = bviz_ui_assets::shape_line(window, b.label.clone(), font, fs, label_color.into());
     // A collapsed group leaf carries a disclosure caret left of the label,
     // occupying the reserved width the layout sized the box to hold; the label
     // and caret are centered together as one unit. Other boxes center the label
@@ -728,7 +793,7 @@ fn paint_box(
             footprint,
             fs,
             b.compound,
-            palette.label,
+            label_color,
             window,
         );
     }
@@ -780,6 +845,7 @@ fn paint_caret(
 fn paint_connector(
     points: &[(f64, f64)],
     kind: EdgeKind,
+    dim: bool,
     bounds: Bounds<Pixels>,
     zoom: f32,
     pan: (f32, f32),
@@ -788,7 +854,10 @@ fn paint_connector(
     if points.len() < 2 {
         return;
     }
-    let color = edge_color(kind);
+    let mut color = edge_color(kind);
+    if dim {
+        color.a = DIM_EDGE_ALPHA;
+    }
     let pts: Vec<Point<Pixels>> = points
         .iter()
         .map(|(x, y)| to_screen(*x, *y, bounds, zoom, pan))
@@ -946,6 +1015,9 @@ fn end_drag(view: &mut GraphView, event: &MouseUpEvent, cx: &mut Context<GraphVi
         expanded.insert(id.clone());
     }
     drop(expanded);
+    // The relayout may drop the hovered node (it was collapsed away), which would
+    // otherwise leave the whole graph dimmed until the next mouse move.
+    view.hovered = None;
     view.recent = Some(id);
     view.highlight_seq = view.highlight_seq.wrapping_add(1);
     let seq = view.highlight_seq;

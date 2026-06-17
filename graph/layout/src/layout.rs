@@ -59,6 +59,9 @@ pub struct Box {
 pub struct Connector {
     pub points: Vec<(f64, f64)>,
     pub kind: EdgeKind,
+    /// Node ids the edge runs between, for hit-testing a node's connections.
+    pub from: String,
+    pub to: String,
 }
 
 #[derive(Default)]
@@ -100,7 +103,8 @@ pub fn layout(graph: &Graph) -> LaidOut {
 
     // create_simple_edge places each edge in the common container of its
     // endpoints, which is where ELK then routes and reports it.
-    let mut edges: Vec<(ElkEdgeRef, EdgeKind)> = Vec::with_capacity(graph.edges.len());
+    let mut edges: Vec<(ElkEdgeRef, EdgeKind, String, String)> =
+        Vec::with_capacity(graph.edges.len());
     for edge in &graph.edges {
         let (Some(from), Some(to)) = (
             elk_of.get(edge.from.as_str()),
@@ -114,6 +118,8 @@ pub fn layout(graph: &Graph) -> LaidOut {
                 ElkConnectableShapeRef::Node(to.clone()),
             ),
             edge.kind,
+            edge.from.clone(),
+            edge.to.clone(),
         ));
     }
 
@@ -163,7 +169,14 @@ pub fn layout(graph: &Graph) -> LaidOut {
 
     let connectors = edges
         .iter()
-        .filter_map(|(edge, kind)| connector(edge).map(|points| Connector { points, kind: *kind }))
+        .filter_map(|(edge, kind, from, to)| {
+            connector(edge).map(|points| Connector {
+                points,
+                kind: *kind,
+                from: from.clone(),
+                to: to.clone(),
+            })
+        })
         .collect();
 
     let width = boxes.iter().map(|b| b.x + b.width).fold(0.0, f64::max);
