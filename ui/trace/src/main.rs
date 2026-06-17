@@ -136,6 +136,9 @@ struct Palette {
     /// Scroll-bar track and thumb fills.
     scroll_track: Rgba,
     scroll_thumb: Rgba,
+    /// The section-splitter and gutter-edge divider lines, subtler than the
+    /// scroll thumb so they don't dominate a dark background.
+    divider: Rgba,
     /// Opaque fill of the hover tooltip panel.
     panel: Rgba,
     /// The hover crosshair line, unobtrusive against the background.
@@ -683,6 +686,7 @@ impl Render for TraceView {
             marker: Rgba::from(hsla(0.09, 0.6, 0.55, 1.0)),
             scroll_track: bviz_ui_theme::mix(colors.container, colors.background, 0.3),
             scroll_thumb: bviz_ui_theme::mix(colors.text, colors.background, 0.55),
+            divider: bviz_ui_theme::mix(colors.border, colors.background, 0.4),
             panel: colors.container,
             crosshair: bviz_ui_theme::mix(colors.text, colors.background, 0.35),
         };
@@ -1251,12 +1255,12 @@ fn paint_splitter(regions: Regions, palette: &Palette, window: &mut Window) {
             px(regions.content_left),
             px(regions.graph_top - SPLITTER_THICKNESS / 2.0),
         ),
-        size(px(regions.content_w), px(SPLITTER_THICKNESS)),
+        size(px(regions.time_w), px(SPLITTER_THICKNESS)),
     );
     window.paint_quad(quad(
         bar,
         px(0.),
-        palette.scroll_thumb,
+        palette.divider,
         px(0.),
         Hsla::from(palette.border),
         BorderStyle::Solid,
@@ -1346,6 +1350,18 @@ fn paint_gutter(
         strip,
         px(0.),
         palette.header_band,
+        px(0.),
+        Hsla::from(palette.border),
+        BorderStyle::Solid,
+    ));
+    // A subtle line at the gutter's right edge, under the drag handle.
+    window.paint_quad(quad(
+        Bounds::new(
+            point(px(regions.content_left - 1.0), px(regions.flame_top)),
+            size(px(1.0), px(regions.body_bottom - regions.flame_top)),
+        ),
+        px(0.),
+        palette.divider,
         px(0.),
         Hsla::from(palette.border),
         BorderStyle::Solid,
@@ -1993,6 +2009,7 @@ mod tests {
             marker: dark,
             scroll_track: dark,
             scroll_thumb: dark,
+            divider: dark,
             panel: dark,
             crosshair: dark,
         }
