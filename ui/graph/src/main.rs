@@ -181,9 +181,12 @@ struct GraphView {
     /// Guards the highlight-fade timer: a later toggle bumps this, so an earlier
     /// fade loop won't clear a fresher highlight.
     highlight_seq: u64,
-    /// Set after a toggle so the next relayout's first paint pans `recent` into
-    /// view if the relayout pushed it off-screen.
+    /// Set after a toggle so the next relayout's first paint frames or recenters
+    /// `recent`.
     recenter: Rc<Cell<bool>>,
+    /// Whether the most recent toggle was an expand (vs a collapse), so the
+    /// recenter frames the opened box but only keeps a closed one in view.
+    recent_expand: bool,
     /// Whether a relayout is running, so the view shows a progress indicator
     /// while the prior layout stays interactive.
     relaying: bool,
@@ -269,6 +272,7 @@ impl GraphView {
             recent_at: Instant::now(),
             highlight_seq: 0,
             recenter: Rc::new(Cell::new(false)),
+            recent_expand: false,
             relaying: false,
             hovered: None,
             dim_enabled: true,
@@ -311,6 +315,7 @@ impl GraphView {
         recent: Option<&str>,
         recent_at: Instant,
         recenter: Rc<Cell<bool>>,
+        recent_expand: bool,
         relaying: bool,
         hovered: Option<&str>,
         dim_enabled: bool,
@@ -534,38 +539,39 @@ impl GraphView {
                         f32::from(bounds.size.height) / 2. - center_y * z,
                     ));
                 }
-                // Frame the just-toggled box on the next paint. If it no longer
-                // fits the viewport at the current zoom, zoom out far enough for
-                // the whole box to fit with margin (never below the whole-graph
-                // fit) and center it; if it fits but the relayout pushed it
-                // off-screen, pan its center to the middle; if it fits and is
-                // already on-screen, leave the view put.
+                // Take the view to the just-toggled box on the next paint. An
+                // expand frames the box — zoom to fit it with margin (out for a
+                // big box, in for a small one, never below the whole-graph fit nor
+                // above MAX_ZOOM) and center it — so the user lands on what they
+                // opened. A collapse only keeps it in view: pan its center on
+                // screen if the relayout pushed it off, else leave the view put.
                 if recenter.get() {
                     if let Some((bx, by, bw, bh)) = recenter_target {
                         let vw = f32::from(bounds.size.width);
                         let vh = f32::from(bounds.size.height);
                         let (bw, bh) = (bw as f32, bh as f32);
-                        let mut z = zoom.get();
-                        let oversize = bw * z > vw || bh * z > vh;
-                        if oversize {
-                            let zb = (vw / bw).min(vh / bh) * FIT_MARGIN;
-                            z = zb.clamp(fit_zoom(bounds.size, content), MAX_ZOOM);
-                            zoom.set(z);
-                        }
                         let cx = bx as f32 + bw / 2.;
                         let cy = by as f32 + bh / 2.;
-                        let (panx, pany) = pan.get();
-                        let sx = (cx + MARGIN as f32) * z + panx;
-                        let sy = (cy + MARGIN as f32) * z + pany;
-                        let inside = sx >= 0. && sx <= vw && sy >= 0. && sy <= vh;
-                        // Center when the box was bigger than the view (now zoomed
-                        // out) or when it fit but the relayout pushed it off-screen;
-                        // otherwise leave the view put.
-                        if oversize || !inside {
+                        if recent_expand {
+                            let z = ((vw / bw).min(vh / bh) * FIT_MARGIN)
+                                .clamp(fit_zoom(bounds.size, content), MAX_ZOOM);
+                            zoom.set(z);
                             pan.set((
                                 vw / 2. - (cx + MARGIN as f32) * z,
                                 vh / 2. - (cy + MARGIN as f32) * z,
                             ));
+                        } else {
+                            let z = zoom.get();
+                            let (panx, pany) = pan.get();
+                            let sx = (cx + MARGIN as f32) * z + panx;
+                            let sy = (cy + MARGIN as f32) * z + pany;
+                            let inside = sx >= 0. && sx <= vw && sy >= 0. && sy <= vh;
+                            if !inside {
+                                pan.set((
+                                    vw / 2. - (cx + MARGIN as f32) * z,
+                                    vh / 2. - (cy + MARGIN as f32) * z,
+                                ));
+                            }
                         }
                     }
                     recenter.set(false);
@@ -648,6 +654,7 @@ impl Render for GraphView {
                         self.recent.as_deref(),
                         self.recent_at,
                         self.recenter.clone(),
+                        self.recent_expand,
                         self.relaying,
                         self.hovered.as_deref(),
                         self.dim_enabled,
@@ -1125,10 +1132,12 @@ fn end_drag(view: &mut GraphView, event: &MouseUpEvent, cx: &mut Context<GraphVi
     }
     let id = hit.id.clone();
     let mut expanded = view.expanded.borrow_mut();
-    if !expanded.remove(&id) {
+    let removed = expanded.remove(&id);
+    if !removed {
         expanded.insert(id.clone());
     }
     drop(expanded);
+    view.recent_expand = !removed;
     // The relayout may drop the hovered node (it was collapsed away), which would
     // otherwise leave the whole graph dimmed until the next mouse move.
     view.hovered = None;
