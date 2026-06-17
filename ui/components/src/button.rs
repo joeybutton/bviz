@@ -109,8 +109,14 @@ impl RenderOnce for Button {
         }
 
         let el = if self.ghost {
-            el.size(px(28.))
-                .rounded_md()
+            // An icon-only ghost is a square hit target; a labeled one is padded
+            // to its text like the filled variant so the label isn't clipped.
+            let el = if self.label.is_some() {
+                el.px_4().py_2()
+            } else {
+                el.size(px(28.))
+            };
+            el.rounded_md()
                 .text_color(colors.text)
                 .hover(move |s| s.bg(hover_bg))
                 .active(|s| s.opacity(0.6))
