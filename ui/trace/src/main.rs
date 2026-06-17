@@ -3,28 +3,34 @@
 //! flame-chart timeline: time on the x axis, stacked call depth on the y axis,
 //! with horizontal zoom/pan and vertical scroll.
 
-use bviz_trace_layout::{Lane, LaneMetrics, TimeView, Viewport, lay_out_lanes, visible_slices};
-use bviz_trace_profile::{PhaseMarker, Profile, TimeSpan};
+use bviz_trace_layout::{
+    CounterPos, Lane, LaneMetrics, TimeView, Viewport, lay_out_lanes, visible_slices,
+};
+use bviz_trace_profile::{CounterLane, PhaseMarker, Profile, TimeSpan};
 use bviz_ui_components::{load_in_background, track_drag};
 use bviz_ui_shell::Chrome;
 use clap::Parser;
 use gpui::{
     Animation, AnimationExt, App, BorderStyle, Bounds, Context, Div, Entity, FocusHandle, Hsla,
-    IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Render,
-    Rgba, ScrollDelta, ScrollWheelEvent, Stateful, Task, TextAlign, Transformation, Window, canvas,
-    div, hsla, percentage, point, prelude::*, px, quad, size,
+    IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PathBuilder, Pixels,
+    Point, Render, Rgba, ScrollDelta, ScrollWheelEvent, Stateful, Task, TextAlign, Transformation,
+    Window, canvas, div, hsla, percentage, point, prelude::*, px, quad, size,
 };
 use std::cell::Cell;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::Duration;
 
-/// Vertical sizing of the stacked thread lanes, in pixels.
+/// Vertical sizing of the stacked thread and counter lanes, in pixels.
 const METRICS: LaneMetrics = LaneMetrics {
     header_height: 16.0,
     row_height: 18.0,
     lane_gap: 6.0,
+    counter_height: 36.0,
 };
+
+/// Alpha of a counter series' filled area.
+const COUNTER_AREA_ALPHA: f32 = 0.5;
 
 /// Slices rendering narrower than this are culled — too thin to see or label.
 const MIN_SLICE_PX: f32 = 1.0;
@@ -261,6 +267,16 @@ impl TraceView {
                             cx,
                         );
                     }
+                    paint_counters(
+                        &profile.counters,
+                        &layout.counters,
+                        tv,
+                        vp.scroll_y,
+                        bounds,
+                        &palette,
+                        window,
+                        cx,
+                    );
                     paint_markers(&profile.phase_markers, tv, bounds, &palette, window, cx);
                     paint_scrollbars(
                         profile.span,
@@ -916,23 +932,122 @@ fn paint_slice(
     );
 }
 
-/// A deterministic per-category fill: the category name hashes to a hue, with
-/// saturation and lightness fixed for the theme so every category is
-/// distinguishable yet legible. Same category → same color across the profile.
-fn category_color(cat: &str, palette: &Palette) -> Hsla {
-    // FNV-1a over the bytes, folded to a hue in [0, 1).
+/// A stable hue in [0, 1) for `s`: FNV-1a over the bytes folded onto the wheel.
+/// The same string always maps to the same hue.
+fn hue_of(s: &str) -> f32 {
     let mut hash: u64 = 0xcbf29ce484222325;
-    for b in cat.bytes() {
+    for b in s.bytes() {
         hash ^= b as u64;
         hash = hash.wrapping_mul(0x100000001b3);
     }
-    let hue = (hash % 360) as f32 / 360.0;
+    (hash % 360) as f32 / 360.0
+}
+
+/// A deterministic per-category fill: the category hashes to a hue, with
+/// saturation and lightness fixed for the theme so every category is
+/// distinguishable yet legible. Same category → same color across the profile.
+fn category_color(cat: &str, palette: &Palette) -> Hsla {
     let lightness = if luminance(palette.background) < 0.5 {
         CATEGORY_LIGHTNESS_DARK
     } else {
         CATEGORY_LIGHTNESS_LIGHT
     };
-    hsla(hue, CATEGORY_SATURATION, lightness, 1.0)
+    hsla(hue_of(cat), CATEGORY_SATURATION, lightness, 1.0)
+}
+
+/// A translucent fill for a counter series, keyed by its name like a category.
+fn counter_color(series: &str) -> Hsla {
+    hsla(
+        hue_of(series),
+        CATEGORY_SATURATION,
+        0.55,
+        COUNTER_AREA_ALPHA,
+    )
+}
+
+/// Paints the counter lanes below the threads: a header band with the lane name,
+/// then each series as a filled area scaled to the lane's peak value. Off-screen
+/// lanes are skipped.
+fn paint_counters(
+    counters: &[CounterLane],
+    positions: &[CounterPos],
+    tv: TimeView,
+    scroll_y: f32,
+    bounds: Bounds<Pixels>,
+    palette: &Palette,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let origin_y = f32::from(bounds.origin.y);
+    let visible_top = origin_y + RULER_HEIGHT;
+    let visible_bottom = origin_y + f32::from(bounds.size.height);
+    let font = bviz_ui_assets::text_metrics(window).font;
+    let fs = px(METRICS.header_height - 2. * SLICE_TEXT_PAD);
+    for pos in positions {
+        let lane_y = visible_top + pos.top - scroll_y;
+        if lane_y + pos.height < visible_top || lane_y > visible_bottom {
+            continue;
+        }
+        let counter = &counters[pos.lane];
+        let band = Bounds::new(
+            point(bounds.origin.x, px(lane_y)),
+            size(bounds.size.width, px(METRICS.header_height)),
+        );
+        window.paint_quad(quad(
+            band,
+            px(0.),
+            palette.header_band,
+            px(0.),
+            Hsla::from(palette.border),
+            BorderStyle::Solid,
+        ));
+        let name = bviz_ui_assets::shape_line(
+            window,
+            counter.name.clone(),
+            font.clone(),
+            fs,
+            palette.label.into(),
+        );
+        let ty = px(lane_y + (METRICS.header_height - f32::from(fs)) / 2.);
+        let _ = name.paint(
+            point(bounds.origin.x + px(SLICE_TEXT_PAD), ty),
+            fs,
+            TextAlign::Left,
+            None,
+            window,
+            cx,
+        );
+
+        let chart_bottom = lane_y + pos.height;
+        let peak = counter
+            .series
+            .iter()
+            .flat_map(|s| &s.points)
+            .map(|p| p.value)
+            .fold(0.0_f64, f64::max);
+        if peak <= 0.0 {
+            continue;
+        }
+        for series in &counter.series {
+            if series.points.len() < 2 {
+                continue;
+            }
+            let mut area = PathBuilder::fill();
+            let x_of = |ts| bounds.origin.x + px(tv.x_of(ts));
+            area.move_to(point(x_of(series.points[0].ts_us), px(chart_bottom)));
+            for p in &series.points {
+                let y = chart_bottom - (p.value / peak) as f32 * METRICS.counter_height;
+                area.line_to(point(x_of(p.ts_us), px(y)));
+            }
+            area.line_to(point(
+                x_of(series.points.last().unwrap().ts_us),
+                px(chart_bottom),
+            ));
+            if let Ok(path) = area.build() {
+                window.paint_path(path, counter_color(&series.name));
+            }
+        }
+    }
 }
 
 /// Perceptual luminance of `c`, used to choose contrasting text and theme-fitting

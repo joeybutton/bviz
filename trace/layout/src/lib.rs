@@ -3,13 +3,15 @@ mod lanes;
 mod view;
 
 pub use cull::{Viewport, VisibleSlice, visible_slices};
-pub use lanes::{Lane, LaneLayout, LaneMetrics, lay_out_lanes};
+pub use lanes::{CounterPos, Lane, LaneLayout, LaneMetrics, lay_out_lanes};
 pub use view::TimeView;
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bviz_trace_profile::{Metadata, Profile, Slice, SliceArgs, ThreadTrack, TimeSpan};
+    use bviz_trace_profile::{
+        CounterLane, Metadata, Profile, Slice, SliceArgs, ThreadTrack, TimeSpan,
+    };
 
     fn slice(start_us: i64, dur_us: i64, depth: u32) -> Slice {
         Slice {
@@ -49,6 +51,7 @@ mod tests {
         header_height: 10.0,
         row_height: 5.0,
         lane_gap: 4.0,
+        counter_height: 20.0,
     };
 
     #[test]
@@ -127,6 +130,22 @@ mod tests {
         assert_eq!(layout.lanes[1].top, 19.0);
         assert_eq!(layout.lanes[1].height, 20.0);
         assert_eq!(layout.total_height, 39.0);
+    }
+
+    #[test]
+    fn counter_lanes_stack_below_threads() {
+        let mut p = profile(vec![track(1, 0, 1, vec![slice(0, 10, 0)])]);
+        p.counters = vec![CounterLane {
+            name: "cpu".into(),
+            series: Vec::new(),
+        }];
+        let layout = lay_out_lanes(&p, &METRICS);
+        // Thread lane: top 0, height 10 + 5 = 15; then a 4px gap.
+        assert_eq!(layout.lanes[0].height, 15.0);
+        assert_eq!(layout.counters.len(), 1);
+        assert_eq!(layout.counters[0].top, 19.0);
+        assert_eq!(layout.counters[0].height, 30.0);
+        assert_eq!(layout.total_height, 49.0);
     }
 
     #[test]
