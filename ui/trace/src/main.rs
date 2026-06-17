@@ -4,7 +4,7 @@
 //! with horizontal zoom/pan and vertical scroll.
 
 use bviz_trace_layout::{Lane, LaneMetrics, TimeView, Viewport, lay_out_lanes, visible_slices};
-use bviz_trace_profile::{Profile, TimeSpan};
+use bviz_trace_profile::{PhaseMarker, Profile, TimeSpan};
 use bviz_ui_components::{load_in_background, track_drag};
 use bviz_ui_shell::Chrome;
 use clap::Parser;
@@ -58,6 +58,9 @@ const BAR_WIDTH: f32 = 10.0;
 /// fraction is tiny.
 const MIN_THUMB: f32 = 24.0;
 
+/// Font size of a phase-marker label.
+const MARKER_LABEL_SIZE: f32 = 11.0;
+
 /// Saturation of every category color.
 const CATEGORY_SATURATION: f32 = 0.5;
 /// Slice-fill lightness on a dark vs. a light background.
@@ -75,6 +78,8 @@ struct Palette {
     header_band: Rgba,
     /// Faint vertical line dropped from each ruler tick through the lanes.
     gridline: Rgba,
+    /// Accent for the build-phase boundary lines and their labels.
+    marker: Rgba,
     /// Scroll-bar track and thumb fills.
     scroll_track: Rgba,
     scroll_thumb: Rgba,
@@ -256,6 +261,7 @@ impl TraceView {
                             cx,
                         );
                     }
+                    paint_markers(&profile.phase_markers, tv, bounds, &palette, window, cx);
                     paint_scrollbars(
                         profile.span,
                         tv,
@@ -318,6 +324,8 @@ impl Render for TraceView {
             background: colors.background,
             header_band: bviz_ui_theme::mix(colors.container, colors.background, 0.5),
             gridline: bviz_ui_theme::mix(colors.border, colors.background, 0.55),
+            // A mid-tone amber, legible against a light or dark background.
+            marker: Rgba::from(hsla(0.09, 0.6, 0.55, 1.0)),
             scroll_track: bviz_ui_theme::mix(colors.container, colors.background, 0.3),
             scroll_thumb: bviz_ui_theme::mix(colors.text, colors.background, 0.55),
         };
@@ -527,6 +535,61 @@ fn pan_thumb_to(view: &mut TraceView, mouse_along: f32, grab: f32) {
     v.start_us = span.start_us as f64 + (thumb_start / travel) as f64 * range;
     v.clamp_to(span, width);
     view.view.set(v);
+}
+
+/// Draws each build-phase boundary as a vertical line across the lanes with its
+/// name at the top, skipping any off-screen.
+fn paint_markers(
+    markers: &[PhaseMarker],
+    tv: TimeView,
+    bounds: Bounds<Pixels>,
+    palette: &Palette,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let vw = f32::from(bounds.size.width);
+    let top = f32::from(bounds.origin.y) + RULER_HEIGHT;
+    let height = f32::from(bounds.size.height) - RULER_HEIGHT;
+    let font = bviz_ui_assets::text_metrics(window).font;
+    let fs = px(MARKER_LABEL_SIZE);
+    // Where the previous label ended, so clustered markers (the build's early
+    // phases all fall near t=0) keep their lines without overprinting labels.
+    let mut label_right = f32::MIN;
+    for marker in markers {
+        let x = tv.x_of(marker.start_us);
+        if x < 0.0 || x > vw {
+            continue;
+        }
+        let lx = f32::from(bounds.origin.x) + x;
+        window.paint_quad(quad(
+            Bounds::new(point(px(lx), px(top)), size(px(1.), px(height))),
+            px(0.),
+            palette.marker,
+            px(0.),
+            Hsla::from(palette.border),
+            BorderStyle::Solid,
+        ));
+        if lx < label_right {
+            continue;
+        }
+        let line = bviz_ui_assets::shape_line(
+            window,
+            marker.name.clone(),
+            font.clone(),
+            fs,
+            palette.marker.into(),
+        );
+        let tx = lx + SLICE_TEXT_PAD;
+        let _ = line.paint(
+            point(px(tx), px(top + 2.)),
+            fs,
+            TextAlign::Left,
+            None,
+            window,
+            cx,
+        );
+        label_right = tx + f32::from(line.width()) + SLICE_TEXT_PAD;
+    }
 }
 
 /// Tick positions (viewport x) and labels across the visible span, spaced near
@@ -933,6 +996,7 @@ mod tests {
             background: dark,
             header_band: dark,
             gridline: dark,
+            marker: dark,
             scroll_track: dark,
             scroll_thumb: dark,
         }
