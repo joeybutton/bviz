@@ -908,6 +908,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "bviz_ui_trace"
+version = "0.1.0"
+dependencies = [
+ "bviz_trace_layout",
+ "bviz_trace_profile",
+ "clap",
+ "gpui",
+ "gpui_platform",
+]
+
+[[package]]
 name = "bytemuck"
 version = "1.25.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

@@ -8,6 +8,7 @@ members = [
     "trace/layout",
     "trace/profile",
     "ui/graph",
+    "ui/trace",
 ]
 resolver = "2"
 

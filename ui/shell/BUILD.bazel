@@ -9,6 +9,7 @@ rust_library(
         "//gpui_hello:__pkg__",
         "//ui/graph:__pkg__",
         "//ui/terminal:__pkg__",
+        "//ui/trace:__pkg__",
     ],
     deps = [
         "//ui/assets",
