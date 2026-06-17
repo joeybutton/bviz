@@ -172,14 +172,18 @@ struct GraphView {
     /// expand/collapse handle (a leaf can't open, a singleton auto-expands), so a
     /// click or caret can tell an expandable box from a plain one.
     expandable: Rc<RefCell<HashSet<String>>>,
-    /// The most-recently toggled node id, briefly emphasized so the eye can find
-    /// the box that just opened or closed after the relayout shifts everything.
+    /// The most-recently toggled node id: the box its relayout frames or
+    /// recenters, and the box emphasized briefly afterward so the eye can find
+    /// what opened or closed. Cleared when the highlight fades.
     recent: Option<String>,
-    /// When `recent` was set, so the highlight emphasis fades over
-    /// `HIGHLIGHT_LINGER`.
+    /// When the highlight began — set as the relayout lands, so the emphasis
+    /// fades over `HIGHLIGHT_LINGER` measured from when the box becomes visible.
+    /// A relayout slower than the linger would otherwise outlast a fade timed
+    /// from the click, surfacing the box already un-highlighted.
     recent_at: Instant,
-    /// Guards the highlight-fade timer: a later toggle bumps this, so an earlier
-    /// fade loop won't clear a fresher highlight.
+    /// Guards the highlight-fade timer: a toggle bumps this so any in-flight fade
+    /// retires at once, leaving `recent` for the new toggle rather than clearing
+    /// it or repainting a stale highlight.
     highlight_seq: u64,
     /// Set after a toggle so the next relayout's first paint frames or recenters
     /// `recent`.
@@ -292,12 +296,44 @@ impl GraphView {
         self._load_task = load_in_background(
             cx,
             move || relayout(&graph, &expanded),
-            |view, laid_out, _| {
+            |view, laid_out, cx| {
                 view.source = Source::Loaded(laid_out);
                 view.recenter.set(true);
                 view.relaying = false;
+                view.highlight_recent(cx);
             },
         );
+    }
+
+    /// Emphasizes `recent` (the just-toggled box) for `HIGHLIGHT_LINGER`,
+    /// repainting so the emphasis fades smoothly, then clears it. Begun once the
+    /// relayout lands so the highlight appears on the new layout: a relayout
+    /// slower than the linger would outlast a fade begun at click time, so the
+    /// box would surface with no highlight at all.
+    fn highlight_recent(&mut self, cx: &mut Context<Self>) {
+        self.recent_at = Instant::now();
+        let seq = self.highlight_seq;
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(Duration::from_millis(33)).await;
+                let done = this.update(cx, |this, cx| {
+                    if this.highlight_seq != seq {
+                        return true;
+                    }
+                    if this.recent_at.elapsed() >= HIGHLIGHT_LINGER {
+                        this.recent = None;
+                        cx.notify();
+                        return true;
+                    }
+                    cx.notify();
+                    false
+                });
+                if done.unwrap_or(true) {
+                    break;
+                }
+            }
+        })
+        .detach();
     }
 
     /// Builds the single-canvas viewport: every box and connector is painted in
@@ -1142,32 +1178,9 @@ fn end_drag(view: &mut GraphView, event: &MouseUpEvent, cx: &mut Context<GraphVi
     // otherwise leave the whole graph dimmed until the next mouse move.
     view.hovered = None;
     view.recent = Some(id);
-    view.recent_at = Instant::now();
+    // Retire any in-flight fade so it can't clear this fresh `recent`; the new
+    // highlight starts when the relayout lands.
     view.highlight_seq = view.highlight_seq.wrapping_add(1);
-    let seq = view.highlight_seq;
-    // Repaint periodically so the highlight fades smoothly, then clear it once
-    // the linger window has elapsed; bail if a newer toggle took over.
-    cx.spawn(async move |this, cx| {
-        loop {
-            cx.background_executor().timer(Duration::from_millis(33)).await;
-            let done = this.update(cx, |this, cx| {
-                if this.highlight_seq != seq {
-                    return true;
-                }
-                if this.recent_at.elapsed() >= HIGHLIGHT_LINGER {
-                    this.recent = None;
-                    cx.notify();
-                    return true;
-                }
-                cx.notify();
-                false
-            });
-            if done.unwrap_or(true) {
-                break;
-            }
-        }
-    })
-    .detach();
     view.retoggle(cx);
 }
 
