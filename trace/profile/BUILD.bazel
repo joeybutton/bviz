@@ -1,0 +1,19 @@
+load("@rules_rs//rs:rust_library.bzl", "rust_library")
+load("@rules_rs//rs:rust_test.bzl", "rust_test")
+
+rust_library(
+    name = "profile",
+    srcs = glob(["src/**/*.rs"]),
+    crate_name = "bviz_trace_profile",
+    visibility = ["//trace/layout:__pkg__", "//ui/trace:__pkg__"],
+    deps = [
+        "@crates//:flate2",
+        "@crates//:serde",
+        "@crates//:serde_json",
+    ],
+)
+
+rust_test(
+    name = "profile_test",
+    crate = ":profile",
+)

@@ -1,0 +1,13 @@
+[package]
+name = "bviz_trace_profile"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "bviz_trace_profile"
+path = "src/lib.rs"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+flate2 = { workspace = true }
