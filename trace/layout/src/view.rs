@@ -38,4 +38,14 @@ impl TimeView {
     pub fn pan_px(&mut self, dx_px: f32) {
         self.start_us -= dx_px as f64 / self.px_per_us;
     }
+
+    /// Bound the pan so `span` can never be scrolled off either edge of a
+    /// `width_px`-wide viewport. When the span is wider than the view, the left
+    /// edge stays within `[span.start, span.end - visible]`; when it all fits, the
+    /// span is pinned to the left.
+    pub fn clamp_to(&mut self, span: TimeSpan, width_px: f32) {
+        let visible_us = width_px as f64 / self.px_per_us;
+        let max_start = (span.end_us as f64 - visible_us).max(span.start_us as f64);
+        self.start_us = self.start_us.clamp(span.start_us as f64, max_start);
+    }
 }

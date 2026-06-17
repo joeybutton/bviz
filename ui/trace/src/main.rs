@@ -147,10 +147,17 @@ impl TraceView {
             );
             move |bounds: Bounds<Pixels>, _: &mut Window, _: &mut App| {
                 viewport.set(bounds);
+                let width = f32::from(bounds.size.width);
                 if !fitted.get() {
-                    view.set(TimeView::fit(profile.span, bounds.size.width.into()));
+                    view.set(TimeView::fit(profile.span, width));
                     fitted.set(true);
                 }
+                // Hold the bounds across a resize: keep the fit as the zoom floor
+                // and the pan within the span for the current width.
+                let mut v = view.get();
+                v.px_per_us = v.px_per_us.max(fit_px_per_us(profile.span, width));
+                v.clamp_to(profile.span, width);
+                view.set(v);
             }
         };
         div()
@@ -324,24 +331,33 @@ impl TraceView {
             let mut v = self.view.get();
             v.zoom_at(rel_x, 1.1_f64.powf(dy_lines as f64));
             v.px_per_us = v.px_per_us.clamp(fit_px_per_us(span, width), MAX_PX_PER_US);
+            v.clamp_to(span, width);
             self.view.set(v);
         } else {
             let scrolled = (self.scroll_y.get() - dy).clamp(0.0, self.max_scroll());
             self.scroll_y.set(scrolled);
             let mut v = self.view.get();
             v.pan_px(dx);
+            v.clamp_to(span, width);
             self.view.set(v);
         }
         cx.notify();
     }
 }
 
-/// Pan horizontally and scroll vertically by the cursor delta during a drag.
+/// Pan horizontally and scroll vertically by the cursor delta during a drag,
+/// bounded so the profile can't be dragged out of view.
 fn drag_pan(view: &mut TraceView, event: &MouseMoveEvent, cx: &mut Context<TraceView>) {
+    let Source::Loaded(profile) = &view.source else {
+        return;
+    };
+    let span = profile.span;
+    let width = f32::from(view.viewport.get().size.width);
     let dx = f32::from(event.position.x) - f32::from(view.last_mouse.x);
     let dy = f32::from(event.position.y) - f32::from(view.last_mouse.y);
     let mut v = view.view.get();
     v.pan_px(dx);
+    v.clamp_to(span, width);
     view.view.set(v);
     let scrolled = (view.scroll_y.get() - dy).clamp(0.0, view.max_scroll());
     view.scroll_y.set(scrolled);

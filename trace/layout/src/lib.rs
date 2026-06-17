@@ -91,6 +91,31 @@ mod tests {
     }
 
     #[test]
+    fn clamp_bounds_pan_to_span() {
+        let span = TimeSpan {
+            start_us: 0,
+            end_us: 1000,
+        };
+        // Zoomed in (100px shows 500us): the left edge stays in [0, 500].
+        let mut zoomed = TimeView {
+            start_us: 900.0,
+            px_per_us: 0.2,
+        };
+        zoomed.clamp_to(span, 100.0);
+        assert_eq!(zoomed.start_us, 500.0);
+        zoomed.start_us = -300.0;
+        zoomed.clamp_to(span, 100.0);
+        assert_eq!(zoomed.start_us, 0.0);
+        // Zoomed out so the whole span fits: it is pinned to the left.
+        let mut wide = TimeView {
+            start_us: 400.0,
+            px_per_us: 0.05,
+        };
+        wide.clamp_to(span, 100.0);
+        assert_eq!(wide.start_us, 0.0);
+    }
+
+    #[test]
     fn lanes_stack_with_gaps() {
         let p = profile(vec![
             track(1, 0, 1, vec![slice(0, 10, 0)]),
