@@ -1,0 +1,11 @@
+[package]
+name = "bviz_trace_layout"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "bviz_trace_layout"
+path = "src/lib.rs"
+
+[dependencies]
+bviz_trace_profile = { path = "../profile" }

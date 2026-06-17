@@ -5,6 +5,7 @@ members = [
     "greeting",
     "gpui_hello",
     "terminal",
+    "trace/layout",
     "trace/profile",
     "ui/graph",
 ]

@@ -1,0 +1,41 @@
+use bviz_trace_profile::TimeSpan;
+
+/// Horizontal mapping between profile time (microseconds) and screen x (pixels).
+/// `start_us` is the time at the left edge; `px_per_us` is the zoom factor.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TimeView {
+    pub start_us: f64,
+    pub px_per_us: f64,
+}
+
+impl TimeView {
+    /// Scale the whole span to `width_px`, leaving the view unzoomable-flat for an
+    /// empty span.
+    pub fn fit(span: TimeSpan, width_px: f32) -> TimeView {
+        let width = (span.end_us - span.start_us).max(1) as f64;
+        TimeView {
+            start_us: span.start_us as f64,
+            px_per_us: width_px as f64 / width,
+        }
+    }
+
+    pub fn x_of(&self, t_us: i64) -> f32 {
+        ((t_us as f64 - self.start_us) * self.px_per_us) as f32
+    }
+
+    pub fn t_of(&self, x_px: f32) -> f64 {
+        self.start_us + x_px as f64 / self.px_per_us
+    }
+
+    /// Zoom by `factor` (>1 zooms in) while keeping the time under `x_px` fixed.
+    pub fn zoom_at(&mut self, x_px: f32, factor: f64) {
+        let anchor = self.t_of(x_px);
+        self.px_per_us *= factor;
+        self.start_us = anchor - x_px as f64 / self.px_per_us;
+    }
+
+    /// Shift the view by a pixel delta; a positive `dx_px` moves content rightward.
+    pub fn pan_px(&mut self, dx_px: f32) {
+        self.start_us -= dx_px as f64 / self.px_per_us;
+    }
+}
