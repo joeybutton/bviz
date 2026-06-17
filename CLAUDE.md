@@ -9,8 +9,15 @@ Interactive visualization and inspection tool for Bazel builds.
   one giant commit nor a commit per file. Imperative subject; body explains why.
   A single request may bundle unrelated concerns; split them into separate
   commits anyway — being asked for them together does not make them one concern.
-  If the subject needs an "and" to join two unrelated changes, that is two
-  commits.
+  What makes changes one concern is addressing the same problem, NOT sharing a
+  file, a function, a feature area, an editing session, or a single round of
+  review feedback — distinct problems are distinct commits even when all touch
+  one function or all came from one list of comments. Two bug fixes, or a fix
+  plus a behavior change plus a tweak, are that many commits. Two tells that you
+  are about to under-split: the subject needs an "and" to join unrelated changes,
+  or the body is a bulleted list of independent changes — in either case, split
+  it, one commit per bullet. When unsure whether two changes are one concern,
+  default to splitting; over-splitting is cheap to read, under-splitting is not.
 - Commit only verified work: build and run/test it first. For toolchain changes,
   confirm with `--toolchain_resolution_debug`. Report outcomes honestly; flag
   side effects.
