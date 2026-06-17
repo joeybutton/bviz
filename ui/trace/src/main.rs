@@ -716,7 +716,17 @@ impl Render for TraceView {
                     }),
                 )
                 .on_scroll_wheel(cx.listener(Self::on_scroll_wheel))
-                .on_mouse_move(cx.listener(Self::on_mouse_move)),
+                .on_mouse_move(cx.listener(Self::on_mouse_move))
+                .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+                    // Drop the crosshair and slice hover when the cursor leaves.
+                    if !*hovered {
+                        let cleared = this.crosshair.take().is_some();
+                        let cleared = this.hover.take().is_some() || cleared;
+                        if cleared {
+                            cx.notify();
+                        }
+                    }
+                })),
             ),
             Source::Loading => div()
                 .flex_1()
