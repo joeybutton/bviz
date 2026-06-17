@@ -17,6 +17,7 @@ use gpui::{
     Window, canvas, div, hsla, percentage, point, prelude::*, px, quad, size,
 };
 use std::cell::Cell;
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::Duration;
@@ -1145,8 +1146,8 @@ fn counter_color(series: &str) -> Hsla {
 }
 
 /// Paints the counter lanes below the threads: a header band with the lane name,
-/// then each series as a filled area scaled to the lane's peak value. Off-screen
-/// lanes are skipped.
+/// then the lane's series as stacked filled areas scaled to the lane's peak
+/// stacked total. Off-screen lanes are skipped.
 fn paint_counters(
     counters: &[CounterLane],
     positions: &[CounterPos],
@@ -1197,33 +1198,49 @@ fn paint_counters(
             cx,
         );
 
+        // Series in a lane stack (per the Chrome counter-event model): the peak
+        // is the largest stacked total over time, and each series is drawn as a
+        // band between the running baseline and baseline + value.
         let chart_bottom = lane_y + pos.height;
-        let peak = counter
-            .series
-            .iter()
-            .flat_map(|s| &s.points)
-            .map(|p| p.value)
-            .fold(0.0_f64, f64::max);
+        let mut totals: BTreeMap<i64, f64> = BTreeMap::new();
+        for series in &counter.series {
+            for p in &series.points {
+                *totals.entry(p.ts_us).or_default() += p.value;
+            }
+        }
+        let peak = totals.values().copied().fold(0.0_f64, f64::max);
         if peak <= 0.0 {
             continue;
         }
+        let scale = METRICS.counter_height / peak as f32;
+        let x_of = |ts| bounds.origin.x + px(tv.x_of(ts));
+        let mut baseline: BTreeMap<i64, f64> = BTreeMap::new();
         for series in &counter.series {
             if series.points.len() < 2 {
                 continue;
             }
             let mut area = PathBuilder::fill();
-            let x_of = |ts| bounds.origin.x + px(tv.x_of(ts));
-            area.move_to(point(x_of(series.points[0].ts_us), px(chart_bottom)));
+            let mut first = true;
             for p in &series.points {
-                let y = chart_bottom - (p.value / peak) as f32 * METRICS.counter_height;
-                area.line_to(point(x_of(p.ts_us), px(y)));
+                let base = *baseline.get(&p.ts_us).unwrap_or(&0.0);
+                let top = px(chart_bottom - (base + p.value) as f32 * scale);
+                let at = point(x_of(p.ts_us), top);
+                if first {
+                    area.move_to(at);
+                    first = false;
+                } else {
+                    area.line_to(at);
+                }
             }
-            area.line_to(point(
-                x_of(series.points.last().unwrap().ts_us),
-                px(chart_bottom),
-            ));
+            for p in series.points.iter().rev() {
+                let base = *baseline.get(&p.ts_us).unwrap_or(&0.0);
+                area.line_to(point(x_of(p.ts_us), px(chart_bottom - base as f32 * scale)));
+            }
             if let Ok(path) = area.build() {
                 window.paint_path(path, counter_color(&series.name));
+            }
+            for p in &series.points {
+                *baseline.entry(p.ts_us).or_default() += p.value;
             }
         }
     }
