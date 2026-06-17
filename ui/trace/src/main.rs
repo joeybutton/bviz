@@ -85,6 +85,9 @@ const MIN_THUMB: f32 = 24.0;
 
 /// Font size of a phase-marker label.
 const MARKER_LABEL_SIZE: f32 = 11.0;
+/// Number of stacked rows phase-marker labels cycle through so a label near an
+/// earlier one drops to a lower row rather than being suppressed.
+const MARKER_LABEL_ROWS: usize = 3;
 
 /// Hover-tooltip text size, inner padding, gap between lines, and offset from the
 /// cursor.
@@ -928,9 +931,21 @@ fn pan_thumb_to(view: &mut TraceView, pos: Point<Pixels>, grab: f32) {
     view.view.set(v);
 }
 
+/// Picks the lowest of `rows` whose last occupied right-extent leaves room for a
+/// label spanning `[left, right]`, falling back to row 0 when none is clear, and
+/// records the label's extent in the chosen row. Keeps clustered labels visible
+/// by staggering them down instead of dropping any.
+fn assign_marker_row(rows: &mut [f32], left: f32, right: f32) -> usize {
+    let row = (0..rows.len()).find(|&r| left >= rows[r]).unwrap_or(0);
+    rows[row] = right;
+    row
+}
+
 /// Draws each build-phase boundary as a vertical line spanning both sections
-/// with its name at the top, confined to the content column and skipping any
-/// off-screen.
+/// with its name labeled near the top, confined to the time axis and skipping
+/// any off-screen. A label that would run past the right edge is flipped to the
+/// left of its line; clustered labels stagger across a few stacked rows so none
+/// is dropped.
 fn paint_markers(
     markers: &[PhaseMarker],
     tv: TimeView,
@@ -943,9 +958,10 @@ fn paint_markers(
     let height = regions.body_bottom - regions.flame_top;
     let font = bviz_ui_assets::text_metrics(window).font;
     let fs = px(MARKER_LABEL_SIZE);
-    // Where the previous label ended, so clustered markers (the build's early
-    // phases all fall near t=0) keep their lines without overprinting labels.
-    let mut label_right = f32::MIN;
+    let row_h = MARKER_LABEL_SIZE + 2.0;
+    // Each row's last occupied right-extent, so a label drops to the lowest row
+    // that clears the previous label there.
+    let mut rows = [f32::MIN; MARKER_LABEL_ROWS];
     for marker in markers {
         let x = tv.x_of(marker.start_us);
         if x < 0.0 || x > regions.time_w {
@@ -960,9 +976,6 @@ fn paint_markers(
             Hsla::from(palette.border),
             BorderStyle::Solid,
         ));
-        if lx < label_right {
-            continue;
-        }
         let line = bviz_ui_assets::shape_line(
             window,
             marker.name.clone(),
@@ -970,16 +983,25 @@ fn paint_markers(
             fs,
             palette.marker.into(),
         );
-        let tx = lx + SLICE_TEXT_PAD;
+        let label_w = f32::from(line.width());
+        // Place the label to the right of the line, flipping it left of the line
+        // when it would otherwise spill past the right edge.
+        let (left, tx) = if lx + SLICE_TEXT_PAD + label_w > regions.time_right {
+            let left = lx - SLICE_TEXT_PAD - label_w;
+            (left, left)
+        } else {
+            let tx = lx + SLICE_TEXT_PAD;
+            (tx, tx)
+        };
+        let row = assign_marker_row(&mut rows, left, left + label_w + SLICE_TEXT_PAD);
         let _ = line.paint(
-            point(px(tx), px(top + 2.)),
+            point(px(tx), px(top + 2.0 + row as f32 * row_h)),
             fs,
             TextAlign::Left,
             None,
             window,
             cx,
         );
-        label_right = tx + f32::from(line.width()) + SLICE_TEXT_PAD;
     }
 }
 
@@ -1938,6 +1960,21 @@ mod tests {
         assert_eq!(format_counter(12.5, "Mbps"), "12.50 Mbps");
         assert_eq!(format_counter(80.0, "%"), "80%");
         assert_eq!(format_counter(42.0, ""), "42.0");
+    }
+
+    #[test]
+    fn assign_marker_row_staggers_overlaps() {
+        let mut rows = [f32::MIN; MARKER_LABEL_ROWS];
+        // The first label takes row 0.
+        assert_eq!(assign_marker_row(&mut rows, 0.0, 50.0), 0);
+        // An overlapping label drops to the next free row.
+        assert_eq!(assign_marker_row(&mut rows, 10.0, 60.0), 1);
+        assert_eq!(assign_marker_row(&mut rows, 20.0, 70.0), 2);
+        // A label clear of row 0's extent reuses it.
+        assert_eq!(assign_marker_row(&mut rows, 60.0, 100.0), 0);
+        // With every row occupied past the label's left, it falls back to row 0.
+        let mut full = [100.0; MARKER_LABEL_ROWS];
+        assert_eq!(assign_marker_row(&mut full, 0.0, 40.0), 0);
     }
 
     #[test]
