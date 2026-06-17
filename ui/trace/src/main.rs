@@ -80,6 +80,10 @@ const FLAME_MIN_HEIGHT: f32 = 60.0;
 /// Initial height of the bottom graph section before the splitter is dragged.
 const DEFAULT_GRAPH_HEIGHT: f32 = 280.0;
 
+/// Smallest chart area kept below a counter lane's header, so dragging the
+/// splitter down squishes the graphs to a readable sliver rather than to nothing.
+const MIN_CHART_HEIGHT: f32 = 12.0;
+
 /// Thickness of the painted splitter divider.
 const SPLITTER_THICKNESS: f32 = 4.0;
 
@@ -246,10 +250,10 @@ impl Regions {
 }
 
 /// The graph section's height bounded to leave the flame section at least
-/// `FLAME_MIN_HEIGHT` and never shrink the counter charts below their label-only
-/// minimum (`n` header bands).
+/// `FLAME_MIN_HEIGHT` and keep every counter lane at least a header band plus
+/// `MIN_CHART_HEIGHT` of chart, so the graphs never squish away entirely.
 fn clamp_graph_height(graph_height: f32, n_counters: usize, vh: f32) -> f32 {
-    let min = n_counters as f32 * METRICS.header_height;
+    let min = n_counters as f32 * (METRICS.header_height + MIN_CHART_HEIGHT);
     let max = (vh - RULER_HEIGHT - BAR_WIDTH - FLAME_MIN_HEIGHT).max(min);
     graph_height.clamp(min, max)
 }
@@ -2083,8 +2087,8 @@ mod tests {
     fn clamp_graph_height_bounds_both_sections() {
         // A tall window: clamps to the requested height, untouched.
         assert_eq!(clamp_graph_height(220.0, 3, 800.0), 220.0);
-        // The label-only floor: never below n header bands.
-        let min = 3.0 * METRICS.header_height;
+        // The floor: never below n lanes of header band plus minimum chart.
+        let min = 3.0 * (METRICS.header_height + MIN_CHART_HEIGHT);
         assert_eq!(clamp_graph_height(0.0, 3, 800.0), min);
         // The flame-section ceiling: leaves FLAME_MIN_HEIGHT for the flame band.
         let vh = 200.0;
