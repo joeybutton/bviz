@@ -4,10 +4,11 @@
 //! with horizontal zoom/pan and vertical scroll.
 
 use bviz_trace_layout::{
-    LaneLayout, LaneMetrics, TimeView, Viewport, lay_out_lanes, visible_slices,
+    FlameBox, FlameMetrics, FlameNode, LaneLayout, LaneMetrics, TimeView, Viewport,
+    build_flame_graph, flame_height, lay_out_flame, lay_out_lanes, visible_slices,
 };
 use bviz_trace_profile::{CounterLane, CounterPoint, PhaseMarker, Profile, TimeSpan};
-use bviz_ui_components::{Axis, Scrollbar, load_in_background, track_drag};
+use bviz_ui_components::{Axis, Button, Scrollbar, load_in_background, track_drag};
 use bviz_ui_shell::Chrome;
 use clap::Parser;
 use gpui::{
@@ -17,7 +18,7 @@ use gpui::{
     TextAlign, Transformation, Window, canvas, div, hsla, percentage, point, prelude::*, px, quad,
     size,
 };
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -102,6 +103,14 @@ const MIN_THUMB: f32 = 24.0;
 /// Font size of a phase-marker label.
 const MARKER_LABEL_SIZE: f32 = 11.0;
 
+/// Height of the view-mode toolbar above the timeline.
+const TOOLBAR_HEIGHT: f32 = 36.0;
+
+/// Neutral fill for the aggregated flame graph's synthetic root, whose empty
+/// category would otherwise hash to an arbitrary hue.
+const FLAME_ROOT_LIGHTNESS_DARK: f32 = 0.30;
+const FLAME_ROOT_LIGHTNESS_LIGHT: f32 = 0.78;
+
 /// Hover-tooltip text size, inner padding, gap between lines, and offset from the
 /// cursor.
 const TOOLTIP_TEXT_SIZE: f32 = 12.0;
@@ -146,6 +155,14 @@ struct Palette {
     crosshair: Rgba,
 }
 
+/// Which view the timeline paints: the time-ordered flame chart or the
+/// aggregated flame graph (box width proportional to summed duration).
+#[derive(Clone, Copy, PartialEq)]
+enum ViewMode {
+    FlameChart,
+    FlameGraph,
+}
+
 /// What a left-button drag is currently moving.
 #[derive(Clone, Copy)]
 enum Drag {
@@ -168,6 +185,14 @@ enum Drag {
 struct Hover {
     track: usize,
     slice: usize,
+    at: Point<Pixels>,
+}
+
+/// A flame-graph box under the cursor in graph mode: the laid-out box and where
+/// the cursor was, so a tooltip can be drawn for it.
+#[derive(Clone)]
+struct FlameHover {
+    boxed: FlameBox,
     at: Point<Pixels>,
 }
 
@@ -271,6 +296,33 @@ fn flame_total_height(layout: &LaneLayout) -> f32 {
     layout.lanes.last().map(|l| l.top + l.height).unwrap_or(0.0)
 }
 
+/// The flame metrics matching the chart's lane row height, so the graph's rows
+/// align with the rest of the view.
+fn flame_metrics() -> FlameMetrics {
+    FlameMetrics {
+        row_height: METRICS.row_height,
+    }
+}
+
+/// The flame graph's content rectangle: the full body width from the left inner
+/// edge to the right edge less a reserved vertical-bar column (reserved when the
+/// graph overflows the visible height), and the full body height. Merging the
+/// threads drops the gutter, so the graph reclaims that width. Returned as
+/// `(left, top, width, height)`.
+fn flame_graph_rect(bounds: Bounds<Pixels>, flame_total: f32) -> (f32, f32, f32, f32) {
+    let left = f32::from(bounds.origin.x);
+    let top = f32::from(bounds.origin.y);
+    let width_full = f32::from(bounds.size.width);
+    let height = f32::from(bounds.size.height);
+    let vbar_reserve = if flame_total > height.max(0.0) {
+        BAR_WIDTH
+    } else {
+        0.0
+    };
+    let width = (width_full - vbar_reserve).max(0.0);
+    (left, top, width, height)
+}
+
 /// One fitted counter lane in the graph section: its top (window y) and the
 /// height of its chart area below the header band.
 #[derive(Clone, Copy)]
@@ -334,8 +386,16 @@ struct TraceView {
     graph_height: f32,
     /// Width of the left label gutter, set by its drag handle; clamped on use.
     gutter_width: f32,
+    /// Which view the timeline paints.
+    view_mode: ViewMode,
+    /// The aggregated flame graph, built lazily on first use in graph mode and
+    /// cleared when a new profile loads. Walking every slice is too costly to
+    /// repeat each paint.
+    flame: Rc<RefCell<Option<Rc<FlameNode>>>>,
     /// The slice under the cursor, if any, drawn as a tooltip.
     hover: Option<Hover>,
+    /// The flame-graph box under the cursor in graph mode, drawn as a tooltip.
+    flame_hover: Option<FlameHover>,
     /// The cursor position while it hovers the time-content column and no drag is
     /// in progress, drawn as a crosshair; `None` otherwise.
     crosshair: Option<Point<Pixels>>,
@@ -351,6 +411,7 @@ impl TraceView {
             cx,
             move || Profile::from_path(&path).map_err(|e| e.to_string()),
             |view, result, _| {
+                view.flame.borrow_mut().take();
                 view.source = match result {
                     Ok(profile) => Source::Loaded(Rc::new(profile)),
                     Err(err) => Source::Message(err),
@@ -373,7 +434,10 @@ impl TraceView {
             last_mouse: Point::default(),
             graph_height: DEFAULT_GRAPH_HEIGHT,
             gutter_width: DEFAULT_GUTTER_WIDTH,
+            view_mode: ViewMode::FlameChart,
+            flame: Rc::new(RefCell::new(None)),
             hover: None,
+            flame_hover: None,
             crosshair: None,
             _load_task: load_task,
         }
@@ -394,6 +458,8 @@ impl TraceView {
         entity: Entity<TraceView>,
         graph_height: f32,
         gutter_width: f32,
+        view_mode: ViewMode,
+        flame: Rc<FlameNode>,
         palette: Palette,
     ) -> Stateful<Div> {
         let prepaint = {
@@ -443,7 +509,8 @@ impl TraceView {
         // from the last painted bounds and the stored graph height. The canvas
         // recomputes the same regions when it paints. A double-click resets the
         // graph height to its default.
-        let splitter = (profile.counters.len() > 0).then(|| {
+        let chart_mode = view_mode == ViewMode::FlameChart;
+        let splitter = (chart_mode && profile.counters.len() > 0).then(|| {
             let y = regions.graph_top - BAR_WIDTH / 2.0;
             let drag_entity = entity.clone();
             div()
@@ -470,8 +537,9 @@ impl TraceView {
                 )
         });
         // A thin overlay strip at the gutter's right edge that begins a width
-        // drag; a double-click resets the gutter to its default width.
-        let gutter_handle = {
+        // drag; a double-click resets the gutter to its default width. The graph
+        // view has no gutter, so it carries no handle.
+        let gutter_handle = chart_mode.then(|| {
             let drag_entity = entity.clone();
             div()
                 .id("trace-gutter-handle")
@@ -497,7 +565,7 @@ impl TraceView {
                         cx.stop_propagation();
                     },
                 )
-        };
+        });
         div()
             .id("trace-viewport")
             .relative()
@@ -505,6 +573,27 @@ impl TraceView {
             .overflow_hidden()
             .child(
                 canvas(prepaint, move |bounds, _, window, cx| {
+                    if view_mode == ViewMode::FlameGraph {
+                        let flame_hover = entity.read(cx).flame_hover.clone();
+                        let dragging = !matches!(entity.read(cx).drag, Drag::None);
+                        paint_flame_graph(
+                            &flame,
+                            scroll_y.get(),
+                            &palette,
+                            &vbar,
+                            flame_hover,
+                            bounds,
+                            window,
+                            cx,
+                        );
+                        // The horizontal axis has no meaning here, so its bar is
+                        // cleared and never hit-tested.
+                        hbar.set(None);
+                        if dragging {
+                            track_drag(window, &entity, on_drag, end_drag);
+                        }
+                        return;
+                    }
                     let layout = lay_out_lanes(&profile, &METRICS);
                     let tv = view.get();
                     let n_counters = profile.counters.len();
@@ -635,7 +724,7 @@ impl TraceView {
                 .size_full(),
             )
             .children(splitter)
-            .child(gutter_handle)
+            .children(gutter_handle)
     }
 
     fn status(&self) -> String {
@@ -660,6 +749,14 @@ impl TraceView {
         let Source::Loaded(p) = &self.source else {
             return 0.0;
         };
+        if self.view_mode == ViewMode::FlameGraph {
+            let Some(root) = self.flame.borrow().clone() else {
+                return 0.0;
+            };
+            let total = flame_height(&root, &flame_metrics());
+            let visible = f32::from(self.viewport.get().size.height);
+            return (total - visible).max(0.0);
+        }
         let total = flame_total_height(&lay_out_lanes(p, &METRICS));
         let regions = Regions::new(
             self.viewport.get(),
@@ -670,6 +767,50 @@ impl TraceView {
         );
         (total - regions.flame_h()).max(0.0)
     }
+
+    /// The aggregated flame graph for the loaded profile, built on first use and
+    /// reused across paints. `None` until a profile is loaded.
+    fn flame_node(&self) -> Option<Rc<FlameNode>> {
+        let Source::Loaded(profile) = &self.source else {
+            return None;
+        };
+        if self.flame.borrow().is_none() {
+            *self.flame.borrow_mut() = Some(Rc::new(build_flame_graph(profile)));
+        }
+        self.flame.borrow().clone()
+    }
+
+    /// Switches the view mode, resetting the vertical scroll since the two modes
+    /// have different content heights.
+    fn set_view_mode(&mut self, mode: ViewMode) {
+        if self.view_mode == mode {
+            return;
+        }
+        self.view_mode = mode;
+        self.scroll_y.set(0.0);
+        self.hover = None;
+        self.flame_hover = None;
+    }
+}
+
+/// A toolbar button selecting a view mode: filled when it is the active mode,
+/// ghosted otherwise. Clicking it switches the view.
+fn mode_button(
+    id: &'static str,
+    label: &'static str,
+    active: bool,
+    mode: ViewMode,
+    cx: &mut Context<TraceView>,
+) -> Button {
+    let button = Button::new(
+        id,
+        cx.listener(move |this, _, _, cx| {
+            this.set_view_mode(mode);
+            cx.notify();
+        }),
+    )
+    .label(label);
+    if active { button } else { button.ghost() }
 }
 
 impl Render for TraceView {
@@ -690,8 +831,33 @@ impl Render for TraceView {
             crosshair: bviz_ui_theme::mix(colors.text, colors.background, 0.35),
         };
         let body = match &self.source {
-            Source::Loaded(profile) => div().flex_1().flex().overflow_hidden().child(
-                Self::timeline(
+            Source::Loaded(profile) => {
+                let flame = self.flame_node().expect("a loaded profile has a flame graph");
+                let toolbar = div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .h(px(TOOLBAR_HEIGHT))
+                    .px_2()
+                    .bg(bviz_ui_theme::mix(colors.container, colors.background, 0.5))
+                    .border_b_1()
+                    .border_color(colors.border)
+                    .child(mode_button(
+                        "flame-chart",
+                        "Flame Chart",
+                        self.view_mode == ViewMode::FlameChart,
+                        ViewMode::FlameChart,
+                        cx,
+                    ))
+                    .child(mode_button(
+                        "flame-graph",
+                        "Flame Graph",
+                        self.view_mode == ViewMode::FlameGraph,
+                        ViewMode::FlameGraph,
+                        cx,
+                    ));
+                let timeline = Self::timeline(
                     profile.clone(),
                     self.view.clone(),
                     self.scroll_y.clone(),
@@ -702,6 +868,8 @@ impl Render for TraceView {
                     cx.entity(),
                     self.graph_height,
                     self.gutter_width,
+                    self.view_mode,
+                    flame,
                     palette,
                 )
                 .on_mouse_down(
@@ -717,16 +885,24 @@ impl Render for TraceView {
                 .on_scroll_wheel(cx.listener(Self::on_scroll_wheel))
                 .on_mouse_move(cx.listener(Self::on_mouse_move))
                 .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
-                    // Drop the crosshair and slice hover when the cursor leaves.
+                    // Drop the crosshair and hover tooltips when the cursor leaves.
                     if !*hovered {
-                        let cleared = this.crosshair.take().is_some();
-                        let cleared = this.hover.take().is_some() || cleared;
+                        let cleared = this.crosshair.take().is_some()
+                            | this.hover.take().is_some()
+                            | this.flame_hover.take().is_some();
                         if cleared {
                             cx.notify();
                         }
                     }
-                })),
-            ),
+                }));
+                div()
+                    .flex_1()
+                    .flex()
+                    .flex_col()
+                    .overflow_hidden()
+                    .child(toolbar)
+                    .child(div().flex_1().flex().overflow_hidden().child(timeline))
+            }
             Source::Loading => div()
                 .flex_1()
                 .flex()
@@ -796,6 +972,14 @@ impl TraceView {
             ScrollDelta::Lines(p) => (p.x * LINE_SCROLL_PX, p.y * LINE_SCROLL_PX),
             ScrollDelta::Pixels(p) => (f32::from(p.x), f32::from(p.y)),
         };
+        // The graph view has no time axis: only plain vertical wheel scrolling
+        // applies; zoom and pan do nothing.
+        if self.view_mode == ViewMode::FlameGraph {
+            let scrolled = (self.scroll_y.get() - dy).clamp(0.0, self.max_scroll());
+            self.scroll_y.set(scrolled);
+            cx.notify();
+            return;
+        }
         if e.modifiers.control || e.modifiers.platform {
             // Horizontal zoom anchored at the cursor, floored at the fit so the
             // whole span can't be zoomed out of view.
@@ -836,6 +1020,10 @@ impl TraceView {
             if self.crosshair.take().is_some() {
                 cx.notify();
             }
+            return;
+        }
+        if self.view_mode == ViewMode::FlameGraph {
+            self.update_flame_hover(e.position, cx);
             return;
         }
         // The crosshair shows anywhere in the time-content column.
@@ -927,6 +1115,48 @@ impl TraceView {
             .map(|slice| (lane.track, slice))
     }
 
+    /// Updates the graph-mode hover to the flame box under `pos`, repainting when
+    /// it changes (so the tooltip follows the cursor and disappears off a box).
+    fn update_flame_hover(&mut self, pos: Point<Pixels>, cx: &mut Context<Self>) {
+        let hit = self.flame_box_at(pos);
+        let changed = match (&self.flame_hover, &hit) {
+            (Some(h), Some(b)) => h.boxed != *b,
+            (None, None) => false,
+            _ => true,
+        };
+        // The tooltip is anchored at the cursor, so a move within the same box
+        // still repaints to keep it following.
+        self.flame_hover = hit.map(|boxed| FlameHover { boxed, at: pos });
+        if changed || self.flame_hover.is_some() {
+            cx.notify();
+        }
+    }
+
+    /// The flame-graph box under a window-space cursor, inverting the paint
+    /// transform: map the cursor to a depth row via the scroll offset, then find
+    /// the box at that depth whose x-range contains the cursor.
+    fn flame_box_at(&self, pos: Point<Pixels>) -> Option<FlameBox> {
+        let root = self.flame.borrow().clone()?;
+        let metrics = flame_metrics();
+        let total = flame_height(&root, &metrics);
+        let bounds = self.viewport.get();
+        let (left, top, width, height) = flame_graph_rect(bounds, total);
+        let x = f32::from(pos.x);
+        let y = f32::from(pos.y);
+        if x < left || x >= left + width || y < top || y >= top + height {
+            return None;
+        }
+        let content_y = y - top + self.scroll_y.get();
+        let depth = (content_y / metrics.row_height) as u32;
+        lay_out_flame(&root, width, &metrics, MIN_SLICE_PX)
+            .into_iter()
+            .find(|b| {
+                b.depth == depth
+                    && x - left >= b.x
+                    && x - left < b.x + b.w
+            })
+    }
+
     /// Begins a drag at `pos`: a scroll thumb or track if the press hit one (the
     /// thumb is grabbed where pressed, a track click centers the thumb there),
     /// otherwise a canvas pan.
@@ -946,6 +1176,11 @@ impl TraceView {
                 pan_thumb_to(self, pos, grab);
                 return;
             }
+        }
+        // The graph view has no timeline to pan; a press off the scroll bar does
+        // nothing.
+        if self.view_mode == ViewMode::FlameGraph {
+            return;
         }
         self.drag = Drag::Pan;
         self.last_mouse = pos;
@@ -1499,6 +1734,183 @@ fn paint_slice(
         window,
         cx,
     );
+}
+
+/// Fill for a flame-graph box: the chart's per-category color, except the
+/// synthetic root (empty category) gets a neutral header tone rather than an
+/// arbitrary hashed hue.
+fn flame_box_color(category: &str, palette: &Palette) -> Hsla {
+    if category.is_empty() {
+        let lightness = if luminance(palette.background) < 0.5 {
+            FLAME_ROOT_LIGHTNESS_DARK
+        } else {
+            FLAME_ROOT_LIGHTNESS_LIGHT
+        };
+        return hsla(0.0, 0.0, lightness, 1.0);
+    }
+    category_color(category, palette)
+}
+
+/// Paints the aggregated flame graph filling the body: each box a category-colored
+/// quad with a truncated label, clipped to the content rect and scrolled by
+/// `scroll_y`, with a vertical scroll bar when the tree overflows and a tooltip
+/// for the hovered box. No time-axis chrome (ruler, gridlines, gutter, markers)
+/// applies, so none is drawn.
+#[allow(clippy::too_many_arguments)]
+fn paint_flame_graph(
+    root: &FlameNode,
+    scroll_y: f32,
+    palette: &Palette,
+    vbar: &Rc<Cell<Option<Scrollbar>>>,
+    hover: Option<FlameHover>,
+    bounds: Bounds<Pixels>,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let metrics = flame_metrics();
+    let total = flame_height(root, &metrics);
+    let (left, top, width, height) = flame_graph_rect(bounds, total);
+
+    let mask = ContentMask {
+        bounds: Bounds::new(point(px(left), px(top)), size(px(width), px(height))),
+    };
+    let font = bviz_ui_assets::text_metrics(window).font;
+    window.with_content_mask(Some(mask), |window| {
+        for b in lay_out_flame(root, width, &metrics, MIN_SLICE_PX) {
+            let y = top + b.y - scroll_y;
+            if y + b.h < top || y > top + height {
+                continue;
+            }
+            let fill = flame_box_color(&b.category, palette);
+            window.paint_quad(quad(
+                Bounds::new(point(px(left + b.x), px(y)), size(px(b.w), px(b.h))),
+                px(SLICE_RADIUS),
+                fill,
+                px(SLICE_BORDER),
+                Hsla::from(palette.border),
+                BorderStyle::Solid,
+            ));
+            if b.w < LABEL_MIN_PX {
+                continue;
+            }
+            let avail = b.w - 2. * SLICE_TEXT_PAD;
+            let fs = px(b.h - 2. * SLICE_TEXT_PAD);
+            let line = shape_truncated(&b.name, avail, font.clone(), fs, label_on(fill), window);
+            let ty = y + (b.h - f32::from(fs)) / 2.;
+            let _ = line.paint(
+                point(px(left + b.x + SLICE_TEXT_PAD), px(ty)),
+                fs,
+                TextAlign::Left,
+                None,
+                window,
+                cx,
+            );
+        }
+    });
+
+    let vlayout = Scrollbar::new(
+        Axis::Vertical,
+        Bounds::new(
+            point(px(left + width), px(top)),
+            size(px(BAR_WIDTH), px(height)),
+        ),
+        total,
+        height,
+        scroll_y,
+        MIN_THUMB,
+    );
+    if let Some(bar) = vlayout {
+        bar.paint(palette.scroll_track, palette.scroll_thumb, window);
+    }
+    vbar.set(vlayout);
+
+    if let Some(h) = hover {
+        paint_flame_tooltip(&h.boxed, root.total_us, h.at, bounds, palette, window, cx);
+    }
+}
+
+/// Paints a tooltip near `at` with the flame node's name, its category, formatted
+/// total duration, occurrence count, and share of the whole trace.
+fn paint_flame_tooltip(
+    boxed: &FlameBox,
+    root_total_us: i64,
+    at: Point<Pixels>,
+    bounds: Bounds<Pixels>,
+    palette: &Palette,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let pct = if root_total_us > 0 {
+        100.0 * boxed.total_us as f64 / root_total_us as f64
+    } else {
+        0.0
+    };
+    let detail = if boxed.category.is_empty() {
+        format!(
+            "{} · {} · {:.1}%",
+            format_duration(boxed.total_us),
+            boxed.count,
+            pct,
+        )
+    } else {
+        format!(
+            "{} · {} · {} · {:.1}%",
+            boxed.category,
+            format_duration(boxed.total_us),
+            boxed.count,
+            pct,
+        )
+    };
+    let lines = [boxed.name.clone(), detail];
+
+    let font = bviz_ui_assets::text_metrics(window).font;
+    let fs = px(TOOLTIP_TEXT_SIZE);
+    let shaped: Vec<_> = lines
+        .iter()
+        .map(|line| {
+            bviz_ui_assets::shape_line(window, line.clone(), font.clone(), fs, palette.label.into())
+        })
+        .collect();
+    let text_w = shaped
+        .iter()
+        .map(|l| f32::from(l.width()))
+        .fold(0.0_f32, f32::max);
+    let line_h = TOOLTIP_TEXT_SIZE + TOOLTIP_LINE_GAP;
+    let box_w = text_w + 2.0 * TOOLTIP_PAD;
+    let box_h = shaped.len() as f32 * line_h + 2.0 * TOOLTIP_PAD;
+
+    let left = f32::from(bounds.origin.x);
+    let top = f32::from(bounds.origin.y);
+    let right = left + f32::from(bounds.size.width);
+    let bottom = top + f32::from(bounds.size.height);
+    let mut x = f32::from(at.x) + TOOLTIP_OFFSET;
+    let mut y = f32::from(at.y) + TOOLTIP_OFFSET;
+    if x + box_w > right {
+        x = (right - box_w).max(left);
+    }
+    if y + box_h > bottom {
+        y = (bottom - box_h).max(top);
+    }
+
+    window.paint_quad(quad(
+        Bounds::new(point(px(x), px(y)), size(px(box_w), px(box_h))),
+        px(4.),
+        palette.panel,
+        px(1.),
+        Hsla::from(palette.border),
+        BorderStyle::Solid,
+    ));
+    for (i, line) in shaped.into_iter().enumerate() {
+        let ly = y + TOOLTIP_PAD + i as f32 * line_h;
+        let _ = line.paint(
+            point(px(x + TOOLTIP_PAD), px(ly)),
+            fs,
+            TextAlign::Left,
+            None,
+            window,
+            cx,
+        );
+    }
 }
 
 /// A compact duration label (e.g. `4.20ms`) for a microsecond span.
