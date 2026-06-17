@@ -23,13 +23,20 @@ use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::Duration;
 
-/// Vertical sizing of the stacked thread and counter lanes, in pixels.
+/// Vertical sizing of the stacked thread and counter lanes, in pixels. The lane
+/// header is a thin top margin above the depth rows — the names live in the
+/// gutter — and adjacent lanes are parted by a hairline rule rather than a wide
+/// gap.
 const METRICS: LaneMetrics = LaneMetrics {
-    header_height: 16.0,
+    header_height: 10.0,
     row_height: 18.0,
-    lane_gap: 6.0,
+    lane_gap: 2.0,
     counter_height: 36.0,
 };
+
+/// Font size of a gutter lane or counter name, fixed rather than derived from the
+/// thin lane header so the names stay legible.
+const GUTTER_LABEL_SIZE: f32 = 11.0;
 
 /// Alpha of a counter series' filled area.
 const COUNTER_AREA_ALPHA: f32 = 0.5;
@@ -532,6 +539,22 @@ impl TraceView {
                         ),
                     };
                     window.with_content_mask(Some(flame_mask), |window| {
+                        // A hairline parts adjacent lanes, drawn first so slices
+                        // paint over it and it shows only in the gaps.
+                        for lane in layout.lanes.iter().skip(1) {
+                            let ry = regions.flame_top + lane.top - METRICS.lane_gap / 2.0 - scroll;
+                            window.paint_quad(quad(
+                                Bounds::new(
+                                    point(px(regions.content_left), px(ry)),
+                                    size(px(regions.time_w), px(1.0)),
+                                ),
+                                px(0.),
+                                palette.gridline,
+                                px(0.),
+                                Hsla::from(palette.border),
+                                BorderStyle::Solid,
+                            ));
+                        }
                         for vs in
                             visible_slices(&profile, &layout, &tv, &vp, &METRICS, MIN_SLICE_PX)
                         {
@@ -1329,13 +1352,12 @@ fn paint_gutter(
     ));
 
     let font = bviz_ui_assets::text_metrics(window).font;
-    let fs = px(METRICS.header_height - 2. * SLICE_TEXT_PAD);
+    let fs = px(GUTTER_LABEL_SIZE);
     let avail = gutter_width - 2.0 * SLICE_TEXT_PAD;
-    let label = |name: &str, y: f32, window: &mut Window, cx: &mut App| {
+    let label = |name: &str, ty: f32, window: &mut Window, cx: &mut App| {
         let line = shape_truncated(name, avail, font.clone(), fs, palette.label.into(), window);
-        let ty = px(y + (METRICS.header_height - f32::from(fs)) / 2.);
         let _ = line.paint(
-            point(px(gutter_left + SLICE_TEXT_PAD), ty),
+            point(px(gutter_left + SLICE_TEXT_PAD), px(ty)),
             fs,
             TextAlign::Left,
             None,
@@ -1344,7 +1366,8 @@ fn paint_gutter(
         );
     };
 
-    // Thread names scroll with the flame lanes, clipped to the flame band.
+    // Thread names scroll with the flame lanes, clipped to the flame band, each
+    // centered against its lane's full height.
     let flame_mask = ContentMask {
         bounds: Bounds::new(
             point(px(gutter_left), px(regions.flame_top)),
@@ -1353,20 +1376,25 @@ fn paint_gutter(
     };
     window.with_content_mask(Some(flame_mask), |window| {
         for lane in &layout.lanes {
-            let y = regions.flame_top + lane.top - scroll_y;
-            if y + METRICS.header_height < regions.flame_top || y > regions.graph_top {
+            let top = regions.flame_top + lane.top - scroll_y;
+            if top + lane.height < regions.flame_top || top > regions.graph_top {
                 continue;
             }
-            label(&profile.threads[lane.track].name, y, window, cx);
+            let ty = top + (lane.height - GUTTER_LABEL_SIZE) / 2.0;
+            label(&profile.threads[lane.track].name, ty, window, cx);
         }
     });
 
+    // Counter names sit at the chart baseline of their lane, so they associate
+    // with low values rather than floating at the lane top.
     for gl in graph_lanes(
         profile.counters.len(),
         regions.graph_top,
         graph_height_of(regions),
     ) {
-        label(&profile.counters[gl.lane].name, gl.top, window, cx);
+        let lane_bottom = gl.top + METRICS.header_height + gl.chart_h;
+        let ty = lane_bottom - GUTTER_LABEL_SIZE - SLICE_TEXT_PAD;
+        label(&profile.counters[gl.lane].name, ty, window, cx);
     }
 }
 
