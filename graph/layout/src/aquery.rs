@@ -165,6 +165,7 @@ pub(crate) fn build_with_packages(
         artifact_by_id,
         fragment_by_id,
         external_sources,
+        resolved: HashMap::new(),
     };
     for (i, action) in actions.iter().enumerate() {
         let action_id = format!("action{i}");
@@ -187,6 +188,10 @@ struct Wiring<'a> {
     artifact_by_id: HashMap<u32, &'a Artifact>,
     fragment_by_id: HashMap<u32, &'a PathFragment>,
     external_sources: bool,
+    /// The leaf node each input artifact wires from, or `None` when it is
+    /// dropped. Resolution scans the package set and rebuilds the artifact's
+    /// path, so it is cached: an artifact in many actions' inputs resolves once.
+    resolved: HashMap<u32, Option<String>>,
 }
 
 impl Wiring<'_> {
@@ -218,47 +223,64 @@ impl Wiring<'_> {
         }
     }
 
-    /// Wires one member artifact to `consumer_id`: a generated input through its
-    /// producing artifact node, a source through a deduped source node, applying
-    /// the `external_sources` filter and skipping inputs with no producer node.
+    /// Wires one member artifact to `consumer_id` through the leaf node it
+    /// resolves to, creating that node on first sight and skipping a dropped
+    /// input.
     fn emit_member(&mut self, artifact_id: u32, consumer_id: &str, graph: &mut Graph) {
+        if let Some(from) = self.resolve_member(artifact_id, graph) {
+            self.add_edge(&from, consumer_id, graph);
+        }
+    }
+
+    /// The leaf node `artifact_id` wires from: a generated input through its
+    /// producing artifact node, a source through a deduped source node, applying
+    /// the `external_sources` filter. `None` for a dropped input (external when
+    /// `external_sources` is off, or generated outside the queried scope, which
+    /// has no producer node). The result depends only on the artifact, so it is
+    /// memoized across the many consumers a shared input feeds.
+    fn resolve_member(&mut self, artifact_id: u32, graph: &mut Graph) -> Option<String> {
+        if let Some(cached) = self.resolved.get(&artifact_id) {
+            return cached.clone();
+        }
+        let from = self.compute_member(artifact_id, graph);
+        self.resolved.insert(artifact_id, from.clone());
+        from
+    }
+
+    fn compute_member(&mut self, artifact_id: u32, graph: &mut Graph) -> Option<String> {
         let path = full_path(artifact_id, &self.artifact_by_id, &self.fragment_by_id);
         if !self.external_sources && is_external(&path) {
-            return;
+            return None;
         }
-        let from = if is_generated(&path) {
-            match self.producer_node_id.get(&artifact_id) {
-                Some(id) => id.clone(),
-                // Produced outside the queried scope: no node to connect from.
-                None => return,
-            }
-        } else {
-            let dir = path.rsplit_once('/').map(|(d, _)| d).unwrap_or("");
-            match self.hierarchy.enclosing_package(dir) {
-                Some(pkg) => {
-                    let rel = if pkg.is_empty() {
-                        path.as_str()
-                    } else {
-                        path.strip_prefix(&format!("{pkg}/")).unwrap_or(&path)
-                    };
-                    let label = format!("//{pkg}:{rel}");
-                    let node_id = format!("target:{label}");
-                    if self.source_nodes.insert(node_id.clone()) {
-                        let parent = self.hierarchy.package_box(&label).map(str::to_string);
-                        graph.add_node(node_id.clone(), label::target_label(&label), "source", parent);
-                    }
-                    node_id
+        if is_generated(&path) {
+            // A generated input with no in-scope producer has no node to connect from.
+            return self.producer_node_id.get(&artifact_id).cloned();
+        }
+        let dir = path.rsplit_once('/').map(|(d, _)| d).unwrap_or("");
+        let from = match self.hierarchy.enclosing_package(dir) {
+            Some(pkg) => {
+                let rel = if pkg.is_empty() {
+                    path.as_str()
+                } else {
+                    path.strip_prefix(&format!("{pkg}/")).unwrap_or(&path)
+                };
+                let label = format!("//{pkg}:{rel}");
+                let node_id = format!("target:{label}");
+                if self.source_nodes.insert(node_id.clone()) {
+                    let parent = self.hierarchy.package_box(&label).map(str::to_string);
+                    graph.add_node(node_id.clone(), label::target_label(&label), "source", parent);
                 }
-                None => root_source_node(
-                    artifact_id,
-                    graph,
-                    &mut self.source_nodes,
-                    &self.artifact_by_id,
-                    &self.fragment_by_id,
-                ),
+                node_id
             }
+            None => root_source_node(
+                artifact_id,
+                graph,
+                &mut self.source_nodes,
+                &self.artifact_by_id,
+                &self.fragment_by_id,
+            ),
         };
-        self.add_edge(&from, consumer_id, graph);
+        Some(from)
     }
 
     fn add_edge(&mut self, from: &str, to: &str, graph: &mut Graph) {
