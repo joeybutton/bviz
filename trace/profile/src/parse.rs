@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::fmt;
-use std::io::Read;
+use std::fs::File;
+use std::io::{BufRead, BufReader, Read};
 use std::path::Path;
 
 use flate2::read::MultiGzDecoder;
@@ -76,9 +77,25 @@ fn round_us(v: Option<f64>) -> i64 {
 }
 
 impl Profile {
+    /// Streams the profile from disk, decompressing and transcoding to UTF-8 on
+    /// the fly so a large trace is never decoded into memory whole. A parse
+    /// failure — most often a profile truncated by an interrupted Bazel — falls
+    /// back to a full read and the best-effort [`recover`].
     pub fn from_path(path: &Path) -> Result<Profile, LoadError> {
-        let bytes = std::fs::read(path).map_err(LoadError::Io)?;
-        Profile::from_bytes(&bytes)
+        let mut buffered = BufReader::new(File::open(path).map_err(LoadError::Io)?);
+        let gzipped = buffered
+            .fill_buf()
+            .map_err(LoadError::Io)?
+            .starts_with(&GZIP_MAGIC);
+        let decompressed: Box<dyn Read> = if gzipped {
+            Box::new(MultiGzDecoder::new(buffered))
+        } else {
+            Box::new(buffered)
+        };
+        match serde_json::from_reader::<_, RawProfile>(Latin1Reader::new(decompressed)) {
+            Ok(raw) => Ok(build(raw.other_data, raw.trace_events)),
+            Err(_) => recover(&decode(&std::fs::read(path).map_err(LoadError::Io)?)?),
+        }
     }
 
     pub fn from_bytes(bytes: &[u8]) -> Result<Profile, LoadError> {
@@ -101,6 +118,52 @@ fn decode(bytes: &[u8]) -> Result<String, LoadError> {
         bytes.to_vec()
     };
     Ok(raw.iter().map(|&b| b as char).collect())
+}
+
+/// Transcodes an ISO-8859-1 (Latin-1) byte stream — how Bazel writes profile
+/// strings — to UTF-8 as it is read, so the JSON reader consumes valid UTF-8
+/// without the whole input being decoded up front. Each byte >= 0x80 expands to
+/// the two-byte UTF-8 encoding of the same code point.
+struct Latin1Reader<R> {
+    inner: R,
+    buf: Vec<u8>,
+    pos: usize,
+}
+
+impl<R: Read> Latin1Reader<R> {
+    fn new(inner: R) -> Latin1Reader<R> {
+        Latin1Reader {
+            inner,
+            buf: Vec::new(),
+            pos: 0,
+        }
+    }
+}
+
+impl<R: Read> Read for Latin1Reader<R> {
+    fn read(&mut self, dst: &mut [u8]) -> std::io::Result<usize> {
+        if self.pos >= self.buf.len() {
+            let mut chunk = [0u8; 8192];
+            let n = self.inner.read(&mut chunk)?;
+            if n == 0 {
+                return Ok(0);
+            }
+            self.buf.clear();
+            self.pos = 0;
+            for &b in &chunk[..n] {
+                if b < 0x80 {
+                    self.buf.push(b);
+                } else {
+                    self.buf.push(0xc0 | (b >> 6));
+                    self.buf.push(0x80 | (b & 0x3f));
+                }
+            }
+        }
+        let n = (self.buf.len() - self.pos).min(dst.len());
+        dst[..n].copy_from_slice(&self.buf[self.pos..self.pos + n]);
+        self.pos += n;
+        Ok(n)
+    }
 }
 
 /// Best-effort parse of a truncated profile: read otherData if present and pull
@@ -574,5 +637,35 @@ mod tests {
             .map(|s| s.name.as_str())
             .collect();
         assert_eq!(names, vec!["a", "b"]);
+    }
+
+    #[test]
+    fn latin1_reader_transcodes_to_utf8() {
+        // 0xe9 is Latin-1 'é', which is two bytes in UTF-8.
+        let input: &[u8] = &[b'A', 0xe9, b'z'];
+        let mut out = Vec::new();
+        Latin1Reader::new(input).read_to_end(&mut out).unwrap();
+        assert_eq!(out, "Aéz".as_bytes());
+    }
+
+    #[test]
+    fn from_path_streams_gzipped_profile() {
+        let json = r#"{
+            "otherData": {"bazel_version":"7.0.0"},
+            "traceEvents": [
+                {"name":"thread_name","ph":"M","tid":1,"args":{"name":"L"}},
+                {"cat":"c","name":"a","ph":"X","ts":0,"dur":1,"pid":1,"tid":1}
+            ]
+        }"#;
+        let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        enc.write_all(json.as_bytes()).unwrap();
+        let gz = enc.finish().unwrap();
+        let dir = std::env::var("TEST_TMPDIR").unwrap_or_else(|_| "/tmp".into());
+        let path = std::path::Path::new(&dir).join("from_path_streams.profile.gz");
+        std::fs::write(&path, &gz).unwrap();
+        assert_eq!(
+            Profile::from_path(&path).expect("stream"),
+            Profile::from_bytes(json.as_bytes()).expect("bytes"),
+        );
     }
 }
