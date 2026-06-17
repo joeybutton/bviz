@@ -10,7 +10,7 @@ use bviz_ui_shell::Chrome;
 use clap::Parser;
 use gpui::{
     Animation, AnimationExt, App, BorderStyle, Bounds, Context, Div, Entity, FocusHandle,
-    IntoElement, MouseButton, MouseDownEvent, Hsla, MouseMoveEvent, MouseUpEvent, PathBuilder,
+    IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, Hsla, MouseMoveEvent, MouseUpEvent, PathBuilder,
     Pixels, Point, Render, Rgba, ScrollDelta, ScrollWheelEvent, Stateful, Task, TextAlign, Size,
     Transformation, Window, canvas, div, percentage, point, prelude::*, px, quad, rgb, size,
 };
@@ -190,6 +190,9 @@ struct GraphView {
     /// Node under the cursor, whose neighborhood stays lit while everything else
     /// dims; `None` when the cursor is over no node.
     hovered: Option<String>,
+    /// Whether hovering a node dims the rest of the graph; toggled with `h` so
+    /// the dimming can be turned off when it is more noise than help.
+    dim_enabled: bool,
     /// Holds the background load/relayout task so it isn't cancelled on drop.
     _load_task: Task<()>,
 }
@@ -267,6 +270,7 @@ impl GraphView {
             recenter: Rc::new(Cell::new(false)),
             relaying: false,
             hovered: None,
+            dim_enabled: true,
             _load_task: load_task,
         }
     }
@@ -308,11 +312,21 @@ impl GraphView {
         recenter: Rc<Cell<bool>>,
         relaying: bool,
         hovered: Option<&str>,
+        dim_enabled: bool,
         palette: Palette,
     ) -> Stateful<Div> {
+        // Dimming traces the hovered node's neighborhood, which is only worth the
+        // visual cost when the node is a connected leaf: a compound container or a
+        // node with no incident edge would dim much of the graph for no signal, so
+        // those (and a disabled toggle) suppress dimming entirely.
+        let dim_for = hovered.filter(|h| {
+            dim_enabled
+                && !g.boxes.iter().any(|b| b.id == *h && b.compound)
+                && g.connectors.iter().any(|c| c.from == *h || c.to == *h)
+        });
         // The hovered node plus the node at the other end of each of its edges;
         // everything outside this set dims while a node is hovered.
-        let active: HashSet<&str> = hovered
+        let active: HashSet<&str> = dim_for
             .map(|h| {
                 let mut set = HashSet::from([h]);
                 for c in &g.connectors {
@@ -346,7 +360,7 @@ impl GraphView {
                 },
                 label: b.label.clone(),
                 highlight: if recent == Some(b.id.as_str()) { highlight_alpha } else { 0.0 },
-                dim: hovered.is_some() && !active.contains(b.id.as_str()),
+                dim: dim_for.is_some() && !active.contains(b.id.as_str()),
             })
             .collect();
         // The just-toggled box's full rect, to frame on the next paint.
@@ -360,7 +374,7 @@ impl GraphView {
             .connectors
             .iter()
             .map(|c| {
-                let dim = hovered.is_some_and(|h| c.from != h && c.to != h);
+                let dim = dim_for.is_some_and(|h| c.from != h && c.to != h);
                 (c.points.clone(), c.kind, dim)
             })
             .collect();
@@ -582,6 +596,7 @@ impl Render for GraphView {
                         self.recenter.clone(),
                         self.relaying,
                         self.hovered.as_deref(),
+                        self.dim_enabled,
                         palette,
                     )
                     .on_mouse_down(
@@ -641,6 +656,17 @@ impl Render for GraphView {
                         this.pan.set((lx - content_x * new, ly - content_y * new));
                         this.zoom.set(new);
                         cx.notify();
+                    }))
+                    // Track the shared focus handle here too (the chrome already
+                    // tracks it on an ancestor) so this deepest focused element
+                    // receives key events; `h` toggles hover-dim. Events still
+                    // bubble up to the chrome's own key bindings.
+                    .track_focus(&self.focus_handle)
+                    .on_key_down(cx.listener(|this, e: &KeyDownEvent, _, cx| {
+                        if e.keystroke.key == "h" {
+                            this.dim_enabled = !this.dim_enabled;
+                            cx.notify();
+                        }
                     })),
                 ),
             Source::Loading => div()
