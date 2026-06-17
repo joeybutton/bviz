@@ -46,6 +46,12 @@ const LINE_SCROLL_PX: f32 = 24.0;
 const SLICE_RADIUS: f32 = 2.0;
 const SLICE_BORDER: f32 = 0.5;
 
+/// Height of the time ruler band at the top of the timeline.
+const RULER_HEIGHT: f32 = 20.0;
+/// Rough pixel spacing aimed for between ruler ticks; the actual step is rounded
+/// to a 1/2/5 multiple near this.
+const RULER_TARGET_TICK_PX: f64 = 120.0;
+
 /// Thickness of a scroll bar across its short axis.
 const BAR_WIDTH: f32 = 10.0;
 /// Shortest a scroll thumb is drawn, so it stays grabbable when the visible
@@ -65,8 +71,10 @@ struct Palette {
     border: Rgba,
     label: Rgba,
     background: Rgba,
-    /// The sticky lane-header band fill.
+    /// The sticky lane-header band fill, shared by the ruler band.
     header_band: Rgba,
+    /// Faint vertical line dropped from each ruler tick through the lanes.
+    gridline: Rgba,
     /// Scroll-bar track and thumb fills.
     scroll_track: Rgba,
     scroll_thumb: Rgba,
@@ -211,18 +219,32 @@ impl TraceView {
                 canvas(prepaint, move |bounds, _, window, cx| {
                     let layout = lay_out_lanes(&profile, &METRICS);
                     let tv = view.get();
+                    let vw = f32::from(bounds.size.width);
+                    // The ruler band occupies the top; the lanes scroll below it.
                     let vp = Viewport {
-                        width: bounds.size.width.into(),
-                        height: bounds.size.height.into(),
+                        width: vw,
+                        height: f32::from(bounds.size.height) - RULER_HEIGHT,
                         scroll_y: scroll_y.get(),
                     };
 
+                    let ticks = ruler_ticks(tv, vw);
+                    paint_gridlines(&ticks, bounds, &palette, window);
                     for vs in visible_slices(&profile, &layout, &tv, &vp, &METRICS, MIN_SLICE_PX) {
                         let slice = &profile.threads[vs.track].slices[vs.slice];
-                        paint_slice(slice, vs.x, vs.y, vs.w, vs.h, bounds, &palette, window, cx);
+                        paint_slice(
+                            slice,
+                            vs.x,
+                            vs.y + RULER_HEIGHT,
+                            vs.w,
+                            vs.h,
+                            bounds,
+                            &palette,
+                            window,
+                            cx,
+                        );
                     }
-                    // Headers paint over the slices so the thread name stays
-                    // readable, and sit at the left edge so it survives any pan.
+                    // Headers sit at the left edge so the thread name survives any
+                    // pan; they paint over the slices for legibility.
                     for lane in &layout.lanes {
                         paint_header(
                             &profile.threads[lane.track].name,
@@ -245,6 +267,9 @@ impl TraceView {
                         &hbar,
                         window,
                     );
+                    // The ruler paints last so anything scrolled up under it is
+                    // covered by its opaque band.
+                    paint_ruler(&ticks, bounds, &palette, window, cx);
                     if !matches!(entity.read(cx).drag, Drag::None) {
                         track_drag(window, &entity, on_drag, end_drag);
                     }
@@ -279,7 +304,8 @@ impl TraceView {
             return 0.0;
         };
         let total = lay_out_lanes(p, &METRICS).total_height;
-        (total - f32::from(self.viewport.get().size.height)).max(0.0)
+        let lane_area = f32::from(self.viewport.get().size.height) - RULER_HEIGHT;
+        (total - lane_area).max(0.0)
     }
 }
 
@@ -291,6 +317,7 @@ impl Render for TraceView {
             label: colors.text,
             background: colors.background,
             header_band: bviz_ui_theme::mix(colors.container, colors.background, 0.5),
+            gridline: bviz_ui_theme::mix(colors.border, colors.background, 0.55),
             scroll_track: bviz_ui_theme::mix(colors.container, colors.background, 0.3),
             scroll_thumb: bviz_ui_theme::mix(colors.text, colors.background, 0.55),
         };
@@ -502,6 +529,138 @@ fn pan_thumb_to(view: &mut TraceView, mouse_along: f32, grab: f32) {
     view.view.set(v);
 }
 
+/// Tick positions (viewport x) and labels across the visible span, spaced near
+/// `RULER_TARGET_TICK_PX` at a 1/2/5 step.
+fn ruler_ticks(tv: TimeView, width: f32) -> Vec<(f32, String)> {
+    if tv.px_per_us <= 0.0 || width <= 0.0 {
+        return Vec::new();
+    }
+    let step = nice_step(RULER_TARGET_TICK_PX / tv.px_per_us);
+    let end_us = tv.start_us + width as f64 / tv.px_per_us;
+    let mut t = (tv.start_us / step).ceil() * step;
+    let mut ticks = Vec::new();
+    while t <= end_us {
+        ticks.push((
+            ((t - tv.start_us) * tv.px_per_us) as f32,
+            format_time(t, step),
+        ));
+        t += step;
+    }
+    ticks
+}
+
+/// The smallest 1/2/5 ×10ⁿ value that is at least `min`.
+fn nice_step(min: f64) -> f64 {
+    if min <= 0.0 {
+        return 1.0;
+    }
+    let pow = 10f64.powf(min.log10().floor());
+    [1.0, 2.0, 5.0, 10.0]
+        .into_iter()
+        .map(|m| m * pow)
+        .find(|&s| s >= min)
+        .unwrap_or(pow * 10.0)
+}
+
+/// Formats a profile-relative timestamp (microseconds) in the unit `step`
+/// warrants, with just enough decimals to tell adjacent ticks apart.
+fn format_time(us: f64, step: f64) -> String {
+    let (unit, scale) = if step < 1_000.0 {
+        ("µs", 1.0)
+    } else if step < 1_000_000.0 {
+        ("ms", 1_000.0)
+    } else {
+        ("s", 1_000_000.0)
+    };
+    let step_in_unit = step / scale;
+    let decimals = if step_in_unit >= 1.0 {
+        0
+    } else if step_in_unit >= 0.1 {
+        1
+    } else {
+        2
+    };
+    // Collapse a negative zero (from rounding a tick just below the origin) to 0.
+    let value = us / scale;
+    let value = if value == 0.0 { 0.0 } else { value };
+    format!("{:.*}{}", decimals, value, unit)
+}
+
+/// Drops a faint vertical line from each ruler tick down through the lanes.
+fn paint_gridlines(
+    ticks: &[(f32, String)],
+    bounds: Bounds<Pixels>,
+    palette: &Palette,
+    window: &mut Window,
+) {
+    let top = bounds.origin.y + px(RULER_HEIGHT);
+    let height = px(f32::from(bounds.size.height) - RULER_HEIGHT);
+    for (x, _) in ticks {
+        let rect = Bounds::new(point(bounds.origin.x + px(*x), top), size(px(1.), height));
+        window.paint_quad(quad(
+            rect,
+            px(0.),
+            palette.gridline,
+            px(0.),
+            Hsla::from(palette.border),
+            BorderStyle::Solid,
+        ));
+    }
+}
+
+/// Paints the ruler band along the top edge with a tick mark and label at each
+/// tick.
+fn paint_ruler(
+    ticks: &[(f32, String)],
+    bounds: Bounds<Pixels>,
+    palette: &Palette,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let band = Bounds::new(bounds.origin, size(bounds.size.width, px(RULER_HEIGHT)));
+    window.paint_quad(quad(
+        band,
+        px(0.),
+        palette.header_band,
+        px(0.),
+        Hsla::from(palette.border),
+        BorderStyle::Solid,
+    ));
+    let font = bviz_ui_assets::text_metrics(window).font;
+    let fs = px(RULER_HEIGHT - 2. * SLICE_TEXT_PAD);
+    let ty = bounds.origin.y + px((RULER_HEIGHT - f32::from(fs)) / 2.);
+    for (x, label) in ticks {
+        let tx = bounds.origin.x + px(*x);
+        let tick = Bounds::new(
+            point(tx, bounds.origin.y + px(RULER_HEIGHT - 4.)),
+            size(px(1.), px(4.)),
+        );
+        window.paint_quad(quad(
+            tick,
+            px(0.),
+            palette.label,
+            px(0.),
+            Hsla::from(palette.border),
+            BorderStyle::Solid,
+        ));
+        let line = bviz_ui_assets::shape_line(
+            window,
+            label.clone(),
+            font.clone(),
+            fs,
+            palette.label.into(),
+        );
+        let _ = line.paint(
+            point(tx + px(2.), ty),
+            fs,
+            TextAlign::Left,
+            None,
+            window,
+            cx,
+        );
+    }
+}
+
 /// Paints a vertical and/or horizontal scroll bar for whichever axes overflow,
 /// storing each bar's geometry in its cell for hit-testing; an axis that fits
 /// gets no bar and a cleared cell. The vertical thumb is sized by the visible
@@ -522,29 +681,35 @@ fn paint_scrollbars(
     let top = f32::from(bounds.origin.y);
     let vw = f32::from(bounds.size.width);
     let vh = f32::from(bounds.size.height);
+    // The vertical bar spans only the lane area below the ruler.
+    let lane_top = top + RULER_HEIGHT;
+    let lane_h = vh - RULER_HEIGHT;
 
     let span_us = (span.end_us - span.start_us) as f64;
     let visible_us = vw as f64 / tv.px_per_us;
-    let v_overflow = total_height > vh;
+    let v_overflow = total_height > lane_h;
     let h_overflow = visible_us < span_us;
     // Each bar shortens at the shared corner when the other is present.
-    let v_track_len = vh - if h_overflow { BAR_WIDTH } else { 0.0 };
+    let v_track_len = lane_h - if h_overflow { BAR_WIDTH } else { 0.0 };
     let h_track_len = vw - if v_overflow { BAR_WIDTH } else { 0.0 };
 
     let vlayout = v_overflow.then(|| {
-        let thumb_len = (v_track_len * vh / total_height)
+        let thumb_len = (v_track_len * lane_h / total_height)
             .max(MIN_THUMB)
             .min(v_track_len);
-        let frac = (scroll_y / (total_height - vh).max(1.0)).clamp(0.0, 1.0);
-        let thumb_start = top + frac * (v_track_len - thumb_len);
+        let frac = (scroll_y / (total_height - lane_h).max(1.0)).clamp(0.0, 1.0);
+        let thumb_start = lane_top + frac * (v_track_len - thumb_len);
         let x = left + vw - BAR_WIDTH;
         BarLayout {
-            track: Bounds::new(point(px(x), px(top)), size(px(BAR_WIDTH), px(v_track_len))),
+            track: Bounds::new(
+                point(px(x), px(lane_top)),
+                size(px(BAR_WIDTH), px(v_track_len)),
+            ),
             thumb: Bounds::new(
                 point(px(x), px(thumb_start)),
                 size(px(BAR_WIDTH), px(thumb_len)),
             ),
-            track_start: top,
+            track_start: lane_top,
             track_len: v_track_len,
             thumb_start,
             thumb_len,
@@ -606,7 +771,7 @@ fn paint_header(
     window: &mut Window,
     cx: &mut App,
 ) {
-    let y = f32::from(bounds.origin.y) + lane.top - scroll_y;
+    let y = f32::from(bounds.origin.y) + RULER_HEIGHT + lane.top - scroll_y;
     if y + METRICS.header_height < f32::from(bounds.origin.y)
         || y > f32::from(bounds.origin.y) + f32::from(bounds.size.height)
     {
@@ -767,6 +932,7 @@ mod tests {
             label: dark,
             background: dark,
             header_band: dark,
+            gridline: dark,
             scroll_track: dark,
             scroll_thumb: dark,
         }
@@ -795,5 +961,22 @@ mod tests {
             end_us: 5,
         };
         assert_eq!(fit_px_per_us(empty, 100.0), 100.0);
+    }
+
+    #[test]
+    fn nice_step_rounds_to_1_2_5() {
+        assert_eq!(nice_step(1.0), 1.0);
+        assert_eq!(nice_step(3.0), 5.0);
+        assert_eq!(nice_step(7.0), 10.0);
+        assert_eq!(nice_step(150.0), 200.0);
+    }
+
+    #[test]
+    fn format_time_picks_unit_and_decimals() {
+        assert_eq!(format_time(500.0, 100.0), "500µs");
+        assert_eq!(format_time(200_000.0, 100_000.0), "200ms");
+        assert_eq!(format_time(5_000_000.0, 5_000_000.0), "5s");
+        assert_eq!(format_time(-2_000_000.0, 1_000_000.0), "-2s");
+        assert_eq!(format_time(-0.0, 5_000_000.0), "0s");
     }
 }
