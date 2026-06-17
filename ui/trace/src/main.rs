@@ -709,10 +709,18 @@ impl TraceView {
             v.clamp_to(span, time_w, EDGE_MARGIN_PX);
             self.view.set(v);
         } else {
-            let scrolled = (self.scroll_y.get() - dy).clamp(0.0, self.max_scroll());
+            // Shift folds the vertical wheel into horizontal panning, so
+            // shift+wheel pans the timeline regardless of focus (the platform
+            // turns shift+wheel into dx only while focused, leaving dy otherwise).
+            let (pan_dx, scroll_dy) = if e.modifiers.shift {
+                (dx + dy, 0.0)
+            } else {
+                (dx, dy)
+            };
+            let scrolled = (self.scroll_y.get() - scroll_dy).clamp(0.0, self.max_scroll());
             self.scroll_y.set(scrolled);
             let mut v = self.view.get();
-            v.pan_px(dx);
+            v.pan_px(pan_dx);
             v.clamp_to(span, time_w, EDGE_MARGIN_PX);
             self.view.set(v);
         }
@@ -924,9 +932,10 @@ fn pan_thumb_to(view: &mut TraceView, pos: Point<Pixels>, grab: f32) {
         return;
     };
     let mut v = view.view.get();
-    // The horizontal bar runs in microseconds within the span, so its offset is a
-    // start time relative to the span start.
-    v.start_us = span.start_us as f64 + bar.offset_at(pos, grab) as f64;
+    // The bar's offset is measured from the span start less the reachable margin,
+    // so map it back through the same shift before clamping.
+    let margin_us = EDGE_MARGIN_PX / v.px_per_us as f32;
+    v.start_us = (span.start_us as f32 - margin_us) as f64 + bar.offset_at(pos, grab) as f64;
     v.clamp_to(span, regions.time_w, EDGE_MARGIN_PX);
     view.view.set(v);
 }
@@ -1180,6 +1189,10 @@ fn paint_scrollbars(
 
     let span_us = (span.end_us - span.start_us) as f32;
     let visible_us = regions.time_w / tv.px_per_us as f32;
+    // Pan and the wheel reach EDGE_MARGIN_PX of empty space past each span end,
+    // so the bar spans that padded range and its offset is measured from the
+    // padded start, letting the thumb reach the same margins.
+    let margin_us = EDGE_MARGIN_PX / tv.px_per_us as f32;
 
     let vlayout = Scrollbar::new(
         Axis::Vertical,
@@ -1200,9 +1213,9 @@ fn paint_scrollbars(
             point(px(regions.content_left), px(regions.body_bottom)),
             size(px(regions.time_w), px(BAR_WIDTH)),
         ),
-        span_us,
+        span_us + 2.0 * margin_us,
         visible_us,
-        tv.start_us as f32 - span.start_us as f32,
+        tv.start_us as f32 - (span.start_us as f32 - margin_us),
         MIN_THUMB,
     );
 
