@@ -1703,21 +1703,24 @@ fn paint_crosshair(
             continue;
         }
         let scale = gl.chart_h / peak as f32;
-        let chart_bottom = gl.top + METRICS.header_height + gl.chart_h;
+        let chart_top = gl.top + METRICS.header_height;
+        let chart_bottom = chart_top + gl.chart_h;
 
-        // Walk the series in draw order, accumulating each one's value at `t`
-        // onto the running baseline so the dot lands on the stacked line.
+        // Walk the series in draw order, accumulating each one's value at `t` onto
+        // the running baseline so its dot lands on the stacked line. Each label
+        // sits at its own dot, so its value and dot never get out of order.
         let unit = unit_for(&counter.name);
         let mut base = 0.0_f64;
-        let mut label_y = gl.top + METRICS.header_height + 1.0;
+        let mut dots: Vec<(f32, f64, Hsla)> = Vec::new();
         for series in &counter.series {
             let Some(value) = sample_at(&series.points, t) else {
                 continue;
             };
-            let stacked = base + value;
-            base = stacked;
-            let dot_y = chart_bottom - stacked as f32 * scale;
-            let color = counter_color(&series.name);
+            base += value;
+            let dot_y = chart_bottom - base as f32 * scale;
+            dots.push((dot_y, value, counter_color(&series.name)));
+        }
+        for &(dot_y, _, color) in &dots {
             window.paint_quad(quad(
                 Bounds::new(
                     point(
@@ -1735,7 +1738,23 @@ fn paint_crosshair(
                 Hsla::from(palette.border),
                 BorderStyle::Solid,
             ));
+        }
 
+        // Each label's top sits at its dot, clamped into the chart and pushed
+        // apart from its neighbours so stacked values stay legible. The series
+        // stack bottom-up, so the dots are already sorted descending by y.
+        let max_label_y = (chart_bottom - CROSSHAIR_VALUE_SIZE).max(chart_top);
+        let mut label_ys: Vec<f32> = dots
+            .iter()
+            .map(|&(dot_y, ..)| dot_y.clamp(chart_top, max_label_y))
+            .collect();
+        declutter_labels(
+            &mut label_ys,
+            CROSSHAIR_VALUE_SIZE + 1.0,
+            chart_top,
+            max_label_y,
+        );
+        for (&label_y, &(_, value, color)) in label_ys.iter().zip(&dots) {
             let value_line = bviz_ui_assets::shape_line(
                 window,
                 format_counter(value, unit),
@@ -1757,7 +1776,37 @@ fn paint_crosshair(
                 window,
                 cx,
             );
-            label_y += CROSSHAIR_VALUE_SIZE + 1.0;
+        }
+    }
+}
+
+/// Spreads label tops apart so consecutive ones (by y) keep at least `min_gap`,
+/// in place and preserving each entry's index, bounded to `[top, bottom]`. Works
+/// in whatever order the entries arrive: sorts a view of them by y, sweeps down
+/// enforcing the gap, then sweeps back up to pull any run that overran `bottom`
+/// back under it.
+fn declutter_labels(ys: &mut [f32], min_gap: f32, top: f32, bottom: f32) {
+    let mut order: Vec<usize> = (0..ys.len()).collect();
+    order.sort_by(|&a, &b| ys[a].total_cmp(&ys[b]));
+    // Push each label down to clear the one above it.
+    for w in 1..order.len() {
+        let (prev, cur) = (order[w - 1], order[w]);
+        ys[cur] = ys[cur].max(ys[prev] + min_gap);
+    }
+    // If the run overran the bottom, pull the whole cluster back up by the same
+    // gap from the bottom-most upward, then hold the top edge no higher than
+    // `top`.
+    if let Some(&last) = order.last() {
+        ys[last] = ys[last].min(bottom);
+        for w in (0..order.len() - 1).rev() {
+            let (cur, next) = (order[w], order[w + 1]);
+            ys[cur] = ys[cur].min(ys[next] - min_gap);
+        }
+        if let Some(&first) = order.first() {
+            let shift = (top - ys[first]).max(0.0);
+            for &i in &order {
+                ys[i] += shift;
+            }
         }
     }
 }
@@ -1960,6 +2009,30 @@ mod tests {
         assert_eq!(format_counter(12.5, "Mbps"), "12.50 Mbps");
         assert_eq!(format_counter(80.0, "%"), "80%");
         assert_eq!(format_counter(42.0, ""), "42.0");
+    }
+
+    #[test]
+    fn declutter_labels_spreads_and_bounds() {
+        // Three labels crammed together spread to the min gap, in y order.
+        let mut ys = [100.0, 102.0, 101.0];
+        declutter_labels(&mut ys, 10.0, 0.0, 1000.0);
+        let mut sorted = ys;
+        sorted.sort_by(f32::total_cmp);
+        assert!(sorted[1] - sorted[0] >= 10.0 - f32::EPSILON);
+        assert!(sorted[2] - sorted[1] >= 10.0 - f32::EPSILON);
+        // The pairing is preserved: the originally largest stays largest.
+        assert_eq!(ys[1], sorted[2]);
+
+        // Already-separated labels are left alone.
+        let mut clear = [0.0, 20.0, 40.0];
+        declutter_labels(&mut clear, 10.0, 0.0, 1000.0);
+        assert_eq!(clear, [0.0, 20.0, 40.0]);
+
+        // A run that would overrun the bottom is pulled back under it.
+        let mut tight = [95.0, 98.0];
+        declutter_labels(&mut tight, 10.0, 0.0, 100.0);
+        assert!(tight.iter().all(|&y| y <= 100.0));
+        assert!((tight[1] - tight[0]).abs() >= 10.0 - f32::EPSILON);
     }
 
     #[test]
