@@ -58,9 +58,14 @@ const LINE_SCROLL_PX: f32 = 24.0;
 const SLICE_RADIUS: f32 = 2.0;
 const SLICE_BORDER: f32 = 0.5;
 
-/// Width of the left label gutter, holding lane and counter names clear of the
-/// time content so phase-marker lines never cross them.
-const GUTTER_WIDTH: f32 = 170.0;
+/// Initial width of the left label gutter, holding lane and counter names clear
+/// of the time content so phase-marker lines never cross them; resizable by its
+/// drag handle.
+const DEFAULT_GUTTER_WIDTH: f32 = 170.0;
+/// Narrowest the gutter drags to, keeping room for a truncated name.
+const MIN_GUTTER: f32 = 80.0;
+/// Width of the vertical drag handle at the gutter's right edge.
+const GUTTER_HANDLE_WIDTH: f32 = 6.0;
 
 /// Smallest height the flame section keeps when the splitter is dragged down.
 const FLAME_MIN_HEIGHT: f32 = 60.0;
@@ -142,6 +147,8 @@ enum Drag {
     HThumb(f32),
     /// A press on the splitter resizes the graph section.
     Splitter,
+    /// A press on the gutter handle resizes the gutter.
+    Gutter,
 }
 
 /// The slice under the cursor and where the cursor was when it was picked, so a
@@ -242,6 +249,13 @@ fn clamp_graph_height(graph_height: f32, n_counters: usize, vh: f32) -> f32 {
     graph_height.clamp(min, max)
 }
 
+/// The gutter width bounded to stay legible yet never claim more than half the
+/// window, so the time axis keeps the larger share.
+fn clamp_gutter_width(gutter_width: f32, window_w: f32) -> f32 {
+    let max = (window_w * 0.5).max(MIN_GUTTER);
+    gutter_width.clamp(MIN_GUTTER, max)
+}
+
 /// Total height the flame section's thread lanes occupy, ignoring the layout's
 /// counter lanes (the graph section places those itself).
 fn flame_total_height(layout: &LaneLayout) -> f32 {
@@ -309,6 +323,8 @@ struct TraceView {
     last_mouse: Point<Pixels>,
     /// Height of the bottom graph section, set by the splitter; clamped on use.
     graph_height: f32,
+    /// Width of the left label gutter, set by its drag handle; clamped on use.
+    gutter_width: f32,
     /// The slice under the cursor, if any, drawn as a tooltip.
     hover: Option<Hover>,
     /// The cursor position while it hovers the time-content column and no drag is
@@ -347,6 +363,7 @@ impl TraceView {
             drag: Drag::None,
             last_mouse: Point::default(),
             graph_height: DEFAULT_GRAPH_HEIGHT,
+            gutter_width: DEFAULT_GUTTER_WIDTH,
             hover: None,
             crosshair: None,
             _load_task: load_task,
@@ -367,6 +384,7 @@ impl TraceView {
         hbar: Rc<Cell<Option<Scrollbar>>>,
         entity: Entity<TraceView>,
         graph_height: f32,
+        gutter_width: f32,
         palette: Palette,
     ) -> Stateful<Div> {
         let prepaint = {
@@ -385,7 +403,7 @@ impl TraceView {
                     bounds,
                     profile.counters.len(),
                     graph_height,
-                    GUTTER_WIDTH,
+                    gutter_width,
                     flame_total,
                 );
                 let time_w = regions.time_w;
@@ -403,20 +421,21 @@ impl TraceView {
                 view.set(v);
             }
         };
+        let flame_total = flame_total_height(&lay_out_lanes(&profile, &METRICS));
+        let regions = Regions::new(
+            viewport.get(),
+            profile.counters.len(),
+            graph_height,
+            gutter_width,
+            flame_total,
+        );
+        let origin = viewport.get().origin;
         // A thin overlay strip at the splitter that begins a resize drag, placed
         // from the last painted bounds and the stored graph height. The canvas
-        // recomputes the same regions when it paints.
+        // recomputes the same regions when it paints. A double-click resets the
+        // graph height to its default.
         let splitter = (profile.counters.len() > 0).then(|| {
-            let flame_total = flame_total_height(&lay_out_lanes(&profile, &METRICS));
-            let regions = Regions::new(
-                viewport.get(),
-                profile.counters.len(),
-                graph_height,
-                GUTTER_WIDTH,
-                flame_total,
-            );
             let y = regions.graph_top - BAR_WIDTH / 2.0;
-            let origin = viewport.get().origin;
             let drag_entity = entity.clone();
             div()
                 .id("trace-splitter")
@@ -428,15 +447,48 @@ impl TraceView {
                 .cursor_row_resize()
                 .on_mouse_down(
                     MouseButton::Left,
-                    move |_: &MouseDownEvent, _: &mut Window, cx: &mut App| {
+                    move |e: &MouseDownEvent, _: &mut Window, cx: &mut App| {
                         drag_entity.update(cx, |this, cx| {
-                            this.drag = Drag::Splitter;
+                            if e.click_count == 2 {
+                                this.graph_height = DEFAULT_GRAPH_HEIGHT;
+                            } else {
+                                this.drag = Drag::Splitter;
+                            }
                             cx.notify();
                         });
                         cx.stop_propagation();
                     },
                 )
         });
+        // A thin overlay strip at the gutter's right edge that begins a width
+        // drag; a double-click resets the gutter to its default width.
+        let gutter_handle = {
+            let drag_entity = entity.clone();
+            div()
+                .id("trace-gutter-handle")
+                .absolute()
+                .left(px(regions.content_left
+                    - f32::from(origin.x)
+                    - GUTTER_HANDLE_WIDTH / 2.0))
+                .top_0()
+                .w(px(GUTTER_HANDLE_WIDTH))
+                .h_full()
+                .cursor_col_resize()
+                .on_mouse_down(
+                    MouseButton::Left,
+                    move |e: &MouseDownEvent, _: &mut Window, cx: &mut App| {
+                        drag_entity.update(cx, |this, cx| {
+                            if e.click_count == 2 {
+                                this.gutter_width = DEFAULT_GUTTER_WIDTH;
+                            } else {
+                                this.drag = Drag::Gutter;
+                            }
+                            cx.notify();
+                        });
+                        cx.stop_propagation();
+                    },
+                )
+        };
         div()
             .id("trace-viewport")
             .relative()
@@ -448,10 +500,11 @@ impl TraceView {
                     let tv = view.get();
                     let n_counters = profile.counters.len();
                     let graph_height = entity.read(cx).graph_height;
+                    let gutter_width = entity.read(cx).gutter_width;
                     // Thread lanes only; the graph section places counters itself.
                     let flame_total = flame_total_height(&layout);
                     let regions =
-                        Regions::new(bounds, n_counters, graph_height, GUTTER_WIDTH, flame_total);
+                        Regions::new(bounds, n_counters, graph_height, gutter_width, flame_total);
                     let scroll = scroll_y.get();
                     let vp = Viewport {
                         width: regions.time_w,
@@ -516,7 +569,16 @@ impl TraceView {
 
                     // The opaque gutter covers any lane content that panned under
                     // it, then carries the lane and counter names.
-                    paint_gutter(&profile, &layout, regions, scroll, &palette, window, cx);
+                    paint_gutter(
+                        &profile,
+                        &layout,
+                        regions,
+                        gutter_width,
+                        scroll,
+                        &palette,
+                        window,
+                        cx,
+                    );
 
                     // The ruler paints over scrolled-up rows; the tooltip paints
                     // over everything.
@@ -548,6 +610,7 @@ impl TraceView {
                 .size_full(),
             )
             .children(splitter)
+            .child(gutter_handle)
     }
 
     fn status(&self) -> String {
@@ -577,7 +640,7 @@ impl TraceView {
             self.viewport.get(),
             p.counters.len(),
             self.graph_height,
-            GUTTER_WIDTH,
+            self.gutter_width,
             total,
         );
         (total - regions.flame_h()).max(0.0)
@@ -612,6 +675,7 @@ impl Render for TraceView {
                     self.hbar.clone(),
                     cx.entity(),
                     self.graph_height,
+                    self.gutter_width,
                     palette,
                 )
                 .on_mouse_down(
@@ -687,7 +751,7 @@ impl TraceView {
             vp,
             profile.counters.len(),
             self.graph_height,
-            GUTTER_WIDTH,
+            self.gutter_width,
             flame_total,
         );
         let time_w = regions.time_w;
@@ -774,7 +838,7 @@ impl TraceView {
             self.viewport.get(),
             profile.counters.len(),
             self.graph_height,
-            GUTTER_WIDTH,
+            self.gutter_width,
             flame_total,
         );
         f32::from(pos.x) >= regions.content_left && f32::from(pos.x) < regions.time_right
@@ -793,7 +857,7 @@ impl TraceView {
             self.viewport.get(),
             profile.counters.len(),
             self.graph_height,
-            GUTTER_WIDTH,
+            self.gutter_width,
             flame_total,
         );
         let x = f32::from(pos.x);
@@ -866,7 +930,7 @@ fn on_drag(view: &mut TraceView, event: &MouseMoveEvent, cx: &mut Context<TraceV
                 view.viewport.get(),
                 profile.counters.len(),
                 view.graph_height,
-                GUTTER_WIDTH,
+                view.gutter_width,
                 flame_total,
             );
             let time_w = regions.time_w;
@@ -894,6 +958,13 @@ fn on_drag(view: &mut TraceView, event: &MouseMoveEvent, cx: &mut Context<TraceV
                 body_bottom - f32::from(event.position.y),
                 profile.counters.len(),
                 f32::from(vp.size.height),
+            );
+        }
+        Drag::Gutter => {
+            let vp = view.viewport.get();
+            view.gutter_width = clamp_gutter_width(
+                f32::from(event.position.x) - f32::from(vp.origin.x),
+                f32::from(vp.size.width),
             );
         }
         Drag::None => {}
@@ -925,7 +996,7 @@ fn pan_thumb_to(view: &mut TraceView, pos: Point<Pixels>, grab: f32) {
         view.viewport.get(),
         profile.counters.len(),
         view.graph_height,
-        GUTTER_WIDTH,
+        view.gutter_width,
         flame_total,
     );
     let Some(bar) = view.hbar.get() else {
@@ -1234,16 +1305,17 @@ fn paint_gutter(
     profile: &Profile,
     layout: &LaneLayout,
     regions: Regions,
+    gutter_width: f32,
     scroll_y: f32,
     palette: &Palette,
     window: &mut Window,
     cx: &mut App,
 ) {
-    let gutter_left = regions.content_left - GUTTER_WIDTH;
+    let gutter_left = regions.content_left - gutter_width;
     let strip = Bounds::new(
         point(px(gutter_left), px(regions.flame_top)),
         size(
-            px(GUTTER_WIDTH),
+            px(gutter_width),
             px(regions.body_bottom - regions.flame_top),
         ),
     );
@@ -1258,7 +1330,7 @@ fn paint_gutter(
 
     let font = bviz_ui_assets::text_metrics(window).font;
     let fs = px(METRICS.header_height - 2. * SLICE_TEXT_PAD);
-    let avail = GUTTER_WIDTH - 2.0 * SLICE_TEXT_PAD;
+    let avail = gutter_width - 2.0 * SLICE_TEXT_PAD;
     let label = |name: &str, y: f32, window: &mut Window, cx: &mut App| {
         let line = shape_truncated(name, avail, font.clone(), fs, palette.label.into(), window);
         let ty = px(y + (METRICS.header_height - f32::from(fs)) / 2.);
@@ -1276,7 +1348,7 @@ fn paint_gutter(
     let flame_mask = ContentMask {
         bounds: Bounds::new(
             point(px(gutter_left), px(regions.flame_top)),
-            size(px(GUTTER_WIDTH), px(regions.flame_h())),
+            size(px(gutter_width), px(regions.flame_h())),
         ),
     };
     window.with_content_mask(Some(flame_mask), |window| {
@@ -1960,6 +2032,18 @@ mod tests {
         let vh = 200.0;
         let max = vh - RULER_HEIGHT - BAR_WIDTH - FLAME_MIN_HEIGHT;
         assert_eq!(clamp_graph_height(1000.0, 1, vh), max);
+    }
+
+    #[test]
+    fn clamp_gutter_width_bounds_to_half_window() {
+        // A comfortable request in a wide window is left untouched.
+        assert_eq!(clamp_gutter_width(170.0, 1280.0), 170.0);
+        // Never narrower than the legibility floor.
+        assert_eq!(clamp_gutter_width(10.0, 1280.0), MIN_GUTTER);
+        // Never wider than half the window, so the time axis keeps the majority.
+        assert_eq!(clamp_gutter_width(900.0, 1000.0), 500.0);
+        // In a tiny window the floor wins over the half-window ceiling.
+        assert_eq!(clamp_gutter_width(120.0, 100.0), MIN_GUTTER);
     }
 
     #[test]
