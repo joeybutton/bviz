@@ -97,9 +97,6 @@ const MIN_THUMB: f32 = 24.0;
 
 /// Font size of a phase-marker label.
 const MARKER_LABEL_SIZE: f32 = 11.0;
-/// Number of stacked rows phase-marker labels cycle through so a label near an
-/// earlier one drops to a lower row rather than being suppressed.
-const MARKER_LABEL_ROWS: usize = 3;
 
 /// Hover-tooltip text size, inner padding, gap between lines, and offset from the
 /// cursor.
@@ -1049,11 +1046,16 @@ fn pan_thumb_to(view: &mut TraceView, pos: Point<Pixels>, grab: f32) {
 }
 
 /// Picks the lowest of `rows` whose last occupied right-extent leaves room for a
-/// label spanning `[left, right]`, falling back to row 0 when none is clear, and
+/// label spanning `[left, right]`, adding a new row when none is clear, and
 /// records the label's extent in the chosen row. Keeps clustered labels visible
-/// by staggering them down instead of dropping any.
-fn assign_marker_row(rows: &mut [f32], left: f32, right: f32) -> usize {
-    let row = (0..rows.len()).find(|&r| left >= rows[r]).unwrap_or(0);
+/// by staggering them down across as many rows as the cluster needs.
+fn assign_marker_row(rows: &mut Vec<f32>, left: f32, right: f32) -> usize {
+    let row = (0..rows.len())
+        .find(|&r| left >= rows[r])
+        .unwrap_or_else(|| {
+            rows.push(f32::MIN);
+            rows.len() - 1
+        });
     rows[row] = right;
     row
 }
@@ -1076,9 +1078,9 @@ fn paint_markers(
     let font = bviz_ui_assets::text_metrics(window).font;
     let fs = px(MARKER_LABEL_SIZE);
     let row_h = MARKER_LABEL_SIZE + 2.0;
-    // Each row's last occupied right-extent, so a label drops to the lowest row
-    // that clears the previous label there.
-    let mut rows = [f32::MIN; MARKER_LABEL_ROWS];
+    // Each row's last occupied right-extent, growing as a cluster needs more rows,
+    // so a label drops to the lowest row that clears the previous label there.
+    let mut rows: Vec<f32> = Vec::new();
     for marker in markers {
         let x = tv.x_of(marker.start_us);
         if x < 0.0 || x > regions.time_w {
@@ -2192,17 +2194,17 @@ mod tests {
 
     #[test]
     fn assign_marker_row_staggers_overlaps() {
-        let mut rows = [f32::MIN; MARKER_LABEL_ROWS];
+        let mut rows: Vec<f32> = Vec::new();
         // The first label takes row 0.
         assert_eq!(assign_marker_row(&mut rows, 0.0, 50.0), 0);
-        // An overlapping label drops to the next free row.
+        // Overlapping labels keep adding rows as the cluster needs them.
         assert_eq!(assign_marker_row(&mut rows, 10.0, 60.0), 1);
         assert_eq!(assign_marker_row(&mut rows, 20.0, 70.0), 2);
-        // A label clear of row 0's extent reuses it.
+        assert_eq!(assign_marker_row(&mut rows, 30.0, 80.0), 3);
+        assert_eq!(rows.len(), 4);
+        // A label clear of row 0's extent reuses it rather than adding a row.
         assert_eq!(assign_marker_row(&mut rows, 60.0, 100.0), 0);
-        // With every row occupied past the label's left, it falls back to row 0.
-        let mut full = [100.0; MARKER_LABEL_ROWS];
-        assert_eq!(assign_marker_row(&mut full, 0.0, 40.0), 0);
+        assert_eq!(rows.len(), 4);
     }
 
     #[test]
