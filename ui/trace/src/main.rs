@@ -162,6 +162,11 @@ struct Regions {
     content_w: f32,
     /// Right edge of the content column (where the vertical bar/gutter end).
     content_right: f32,
+    /// Right edge of the time axis, left of the reserved vertical-bar column.
+    /// Everything mapped to time ends here so nothing underlaps the bar.
+    time_right: f32,
+    /// Width of the time axis: `content_w` less the reserved vertical-bar column.
+    time_w: f32,
     /// Top of the flame section (ruler bottom).
     flame_top: f32,
     /// Boundary between flame and graph sections; the splitter sits here.
@@ -173,8 +178,16 @@ struct Regions {
 }
 
 impl Regions {
-    /// Splits `bounds` given the counter count and the splitter's stored height.
-    fn new(bounds: Bounds<Pixels>, n_counters: usize, graph_height: f32) -> Self {
+    /// Splits `bounds` given the counter count, the splitter's stored height, the
+    /// gutter width, and the flame section's total lane height (to decide whether
+    /// a vertical bar shows and so a column must be reserved for it).
+    fn new(
+        bounds: Bounds<Pixels>,
+        n_counters: usize,
+        graph_height: f32,
+        gutter_width: f32,
+        flame_total: f32,
+    ) -> Self {
         let ox = f32::from(bounds.origin.x);
         let oy = f32::from(bounds.origin.y);
         let w = f32::from(bounds.size.width);
@@ -187,10 +200,23 @@ impl Regions {
         } else {
             0.0
         };
+        let content_left = ox + gutter_width;
+        let content_w = (w - gutter_width).max(0.0);
+        let content_right = ox + w;
+        let flame_h = (body_bottom - graph_h).max(flame_top) - flame_top;
+        // Reserve a column for the vertical bar when the flame lanes overflow it,
+        // so slices and charts end left of the bar rather than under it.
+        let vbar_reserve = if flame_total > flame_h.max(0.0) {
+            BAR_WIDTH
+        } else {
+            0.0
+        };
         Regions {
-            content_left: ox + GUTTER_WIDTH,
-            content_w: (w - GUTTER_WIDTH).max(0.0),
-            content_right: ox + w,
+            content_left,
+            content_w,
+            content_right,
+            time_right: content_right - vbar_reserve,
+            time_w: (content_w - vbar_reserve).max(0.0),
             flame_top,
             graph_top: (body_bottom - graph_h).max(flame_top),
             body_bottom,
@@ -349,19 +375,28 @@ impl TraceView {
             );
             move |bounds: Bounds<Pixels>, _: &mut Window, _: &mut App| {
                 viewport.set(bounds);
-                // The time axis maps to the content column, past the left gutter.
-                let content_w = f32::from(bounds.size.width) - GUTTER_WIDTH;
+                // The time axis maps to the time column, past the gutter and clear
+                // of the reserved vertical-bar column.
+                let flame_total = flame_total_height(&lay_out_lanes(&profile, &METRICS));
+                let regions = Regions::new(
+                    bounds,
+                    profile.counters.len(),
+                    graph_height,
+                    GUTTER_WIDTH,
+                    flame_total,
+                );
+                let time_w = regions.time_w;
                 if !fitted.get() {
-                    view.set(TimeView::fit(profile.span, content_w, EDGE_MARGIN_PX));
+                    view.set(TimeView::fit(profile.span, time_w, EDGE_MARGIN_PX));
                     fitted.set(true);
                 }
                 // Hold the bounds across a resize: keep the fit as the zoom floor
                 // and the pan within the span for the current width.
                 let mut v = view.get();
-                v.px_per_us =
-                    v.px_per_us
-                        .max(fit_px_per_us(profile.span, content_w, EDGE_MARGIN_PX));
-                v.clamp_to(profile.span, content_w, EDGE_MARGIN_PX);
+                v.px_per_us = v
+                    .px_per_us
+                    .max(fit_px_per_us(profile.span, time_w, EDGE_MARGIN_PX));
+                v.clamp_to(profile.span, time_w, EDGE_MARGIN_PX);
                 view.set(v);
             }
         };
@@ -369,7 +404,14 @@ impl TraceView {
         // from the last painted bounds and the stored graph height. The canvas
         // recomputes the same regions when it paints.
         let splitter = (profile.counters.len() > 0).then(|| {
-            let regions = Regions::new(viewport.get(), profile.counters.len(), graph_height);
+            let flame_total = flame_total_height(&lay_out_lanes(&profile, &METRICS));
+            let regions = Regions::new(
+                viewport.get(),
+                profile.counters.len(),
+                graph_height,
+                GUTTER_WIDTH,
+                flame_total,
+            );
             let y = regions.graph_top - BAR_WIDTH / 2.0;
             let origin = viewport.get().origin;
             let drag_entity = entity.clone();
@@ -378,7 +420,7 @@ impl TraceView {
                 .absolute()
                 .left(px(regions.content_left - f32::from(origin.x)))
                 .top(px(y - f32::from(origin.y)))
-                .w(px(regions.content_w))
+                .w(px(regions.time_w))
                 .h(px(BAR_WIDTH))
                 .cursor_row_resize()
                 .on_mouse_down(
@@ -403,17 +445,18 @@ impl TraceView {
                     let tv = view.get();
                     let n_counters = profile.counters.len();
                     let graph_height = entity.read(cx).graph_height;
-                    let regions = Regions::new(bounds, n_counters, graph_height);
-                    let scroll = scroll_y.get();
                     // Thread lanes only; the graph section places counters itself.
                     let flame_total = flame_total_height(&layout);
+                    let regions =
+                        Regions::new(bounds, n_counters, graph_height, GUTTER_WIDTH, flame_total);
+                    let scroll = scroll_y.get();
                     let vp = Viewport {
-                        width: regions.content_w,
+                        width: regions.time_w,
                         height: regions.flame_h(),
                         scroll_y: scroll,
                     };
 
-                    let ticks = ruler_ticks(tv, regions.content_w);
+                    let ticks = ruler_ticks(tv, regions.time_w);
                     // Gridlines and phase-marker lines span both sections.
                     paint_gridlines(
                         &ticks,
@@ -429,7 +472,7 @@ impl TraceView {
                     let flame_mask = ContentMask {
                         bounds: Bounds::new(
                             point(px(regions.content_left), px(regions.flame_top)),
-                            size(px(regions.content_w), px(regions.flame_h())),
+                            size(px(regions.time_w), px(regions.flame_h())),
                         ),
                     };
                     window.with_content_mask(Some(flame_mask), |window| {
@@ -527,7 +570,13 @@ impl TraceView {
             return 0.0;
         };
         let total = flame_total_height(&lay_out_lanes(p, &METRICS));
-        let regions = Regions::new(self.viewport.get(), p.counters.len(), self.graph_height);
+        let regions = Regions::new(
+            self.viewport.get(),
+            p.counters.len(),
+            self.graph_height,
+            GUTTER_WIDTH,
+            total,
+        );
         (total - regions.flame_h()).max(0.0)
     }
 }
@@ -630,8 +679,16 @@ impl TraceView {
         };
         let span = profile.span;
         let vp = self.viewport.get();
-        let content_w = f32::from(vp.size.width) - GUTTER_WIDTH;
-        let content_left = f32::from(vp.origin.x) + GUTTER_WIDTH;
+        let flame_total = flame_total_height(&lay_out_lanes(profile, &METRICS));
+        let regions = Regions::new(
+            vp,
+            profile.counters.len(),
+            self.graph_height,
+            GUTTER_WIDTH,
+            flame_total,
+        );
+        let time_w = regions.time_w;
+        let content_left = regions.content_left;
         let (dx, dy) = match e.delta {
             ScrollDelta::Lines(p) => (p.x * LINE_SCROLL_PX, p.y * LINE_SCROLL_PX),
             ScrollDelta::Pixels(p) => (f32::from(p.x), f32::from(p.y)),
@@ -643,18 +700,17 @@ impl TraceView {
             let dy_lines = dy / LINE_SCROLL_PX;
             let mut v = self.view.get();
             v.zoom_at(rel_x, 1.1_f64.powf(dy_lines as f64));
-            v.px_per_us = v.px_per_us.clamp(
-                fit_px_per_us(span, content_w, EDGE_MARGIN_PX),
-                MAX_PX_PER_US,
-            );
-            v.clamp_to(span, content_w, EDGE_MARGIN_PX);
+            v.px_per_us = v
+                .px_per_us
+                .clamp(fit_px_per_us(span, time_w, EDGE_MARGIN_PX), MAX_PX_PER_US);
+            v.clamp_to(span, time_w, EDGE_MARGIN_PX);
             self.view.set(v);
         } else {
             let scrolled = (self.scroll_y.get() - dy).clamp(0.0, self.max_scroll());
             self.scroll_y.set(scrolled);
             let mut v = self.view.get();
             v.pan_px(dx);
-            v.clamp_to(span, content_w, EDGE_MARGIN_PX);
+            v.clamp_to(span, time_w, EDGE_MARGIN_PX);
             self.view.set(v);
         }
         cx.notify();
@@ -702,12 +758,15 @@ impl TraceView {
         let Source::Loaded(profile) = &self.source else {
             return false;
         };
+        let flame_total = flame_total_height(&lay_out_lanes(profile, &METRICS));
         let regions = Regions::new(
             self.viewport.get(),
             profile.counters.len(),
             self.graph_height,
+            GUTTER_WIDTH,
+            flame_total,
         );
-        f32::from(pos.x) >= regions.content_left
+        f32::from(pos.x) >= regions.content_left && f32::from(pos.x) < regions.time_right
     }
 
     /// The slice under a window-space cursor, inverting the paint transform:
@@ -717,19 +776,27 @@ impl TraceView {
         let Source::Loaded(profile) = &self.source else {
             return None;
         };
+        let layout = lay_out_lanes(profile, &METRICS);
+        let flame_total = flame_total_height(&layout);
         let regions = Regions::new(
             self.viewport.get(),
             profile.counters.len(),
             self.graph_height,
+            GUTTER_WIDTH,
+            flame_total,
         );
         let x = f32::from(pos.x);
         let y = f32::from(pos.y);
-        // The flame band, past the gutter and clear of the graph section.
-        if x < regions.content_left || y < regions.flame_top || y >= regions.graph_top {
+        // The flame band, past the gutter, clear of the reserved vertical-bar
+        // column and the graph section.
+        if x < regions.content_left
+            || x >= regions.time_right
+            || y < regions.flame_top
+            || y >= regions.graph_top
+        {
             return None;
         }
         let content_y = y - regions.flame_top + self.scroll_y.get();
-        let layout = lay_out_lanes(profile, &METRICS);
         let lane = layout
             .lanes
             .iter()
@@ -783,12 +850,20 @@ fn on_drag(view: &mut TraceView, event: &MouseMoveEvent, cx: &mut Context<TraceV
                 return;
             };
             let span = profile.span;
-            let content_w = f32::from(view.viewport.get().size.width) - GUTTER_WIDTH;
+            let flame_total = flame_total_height(&lay_out_lanes(profile, &METRICS));
+            let regions = Regions::new(
+                view.viewport.get(),
+                profile.counters.len(),
+                view.graph_height,
+                GUTTER_WIDTH,
+                flame_total,
+            );
+            let time_w = regions.time_w;
             let dx = f32::from(event.position.x) - f32::from(view.last_mouse.x);
             let dy = f32::from(event.position.y) - f32::from(view.last_mouse.y);
             let mut v = view.view.get();
             v.pan_px(dx);
-            v.clamp_to(span, content_w, EDGE_MARGIN_PX);
+            v.clamp_to(span, time_w, EDGE_MARGIN_PX);
             view.view.set(v);
             let scrolled = (view.scroll_y.get() - dy).clamp(0.0, view.max_scroll());
             view.scroll_y.set(scrolled);
@@ -834,7 +909,14 @@ fn pan_thumb_to(view: &mut TraceView, pos: Point<Pixels>, grab: f32) {
         return;
     };
     let span = profile.span;
-    let content_w = f32::from(view.viewport.get().size.width) - GUTTER_WIDTH;
+    let flame_total = flame_total_height(&lay_out_lanes(profile, &METRICS));
+    let regions = Regions::new(
+        view.viewport.get(),
+        profile.counters.len(),
+        view.graph_height,
+        GUTTER_WIDTH,
+        flame_total,
+    );
     let Some(bar) = view.hbar.get() else {
         return;
     };
@@ -842,7 +924,7 @@ fn pan_thumb_to(view: &mut TraceView, pos: Point<Pixels>, grab: f32) {
     // The horizontal bar runs in microseconds within the span, so its offset is a
     // start time relative to the span start.
     v.start_us = span.start_us as f64 + bar.offset_at(pos, grab) as f64;
-    v.clamp_to(span, content_w, EDGE_MARGIN_PX);
+    v.clamp_to(span, regions.time_w, EDGE_MARGIN_PX);
     view.view.set(v);
 }
 
@@ -866,7 +948,7 @@ fn paint_markers(
     let mut label_right = f32::MIN;
     for marker in markers {
         let x = tv.x_of(marker.start_us);
-        if x < 0.0 || x > regions.content_w {
+        if x < 0.0 || x > regions.time_w {
             continue;
         }
         let lx = regions.content_left + x;
@@ -1073,14 +1155,9 @@ fn paint_scrollbars(
     window: &mut Window,
 ) {
     let flame_h = regions.flame_h();
-    let content_w = regions.content_w;
 
     let span_us = (span.end_us - span.start_us) as f32;
-    let visible_us = content_w / tv.px_per_us as f32;
-    let v_overflow = flame_total > flame_h;
-    // The vertical bar shortens to clear the content-column right edge so it
-    // never overlaps the horizontal bar's far end.
-    let h_track_len = content_w - if v_overflow { BAR_WIDTH } else { 0.0 };
+    let visible_us = regions.time_w / tv.px_per_us as f32;
 
     let vlayout = Scrollbar::new(
         Axis::Vertical,
@@ -1093,11 +1170,13 @@ fn paint_scrollbars(
         scroll_y,
         MIN_THUMB,
     );
+    // The horizontal track runs the full time axis, ending left of the reserved
+    // vertical-bar column.
     let hlayout = Scrollbar::new(
         Axis::Horizontal,
         Bounds::new(
             point(px(regions.content_left), px(regions.body_bottom)),
-            size(px(h_track_len), px(BAR_WIDTH)),
+            size(px(regions.time_w), px(BAR_WIDTH)),
         ),
         span_us,
         visible_us,
@@ -1398,7 +1477,7 @@ fn paint_graph(
         bounds: Bounds::new(
             point(px(regions.content_left), px(regions.graph_top)),
             size(
-                px(regions.content_w),
+                px(regions.time_w),
                 px(regions.body_bottom - regions.graph_top),
             ),
         ),
@@ -1407,7 +1486,7 @@ fn paint_graph(
         let counter = &counters[gl.lane];
         let band = Bounds::new(
             point(px(regions.content_left), px(gl.top)),
-            size(px(regions.content_w), px(METRICS.header_height)),
+            size(px(regions.time_w), px(METRICS.header_height)),
         );
         window.paint_quad(quad(
             band,
@@ -1542,7 +1621,7 @@ fn paint_crosshair(
     window: &mut Window,
     cx: &mut App,
 ) {
-    let cx_px = f32::from(at.x).min(regions.content_right);
+    let cx_px = f32::from(at.x).min(regions.time_right);
     let t = tv.t_of(cx_px - regions.content_left);
 
     let line = Bounds::new(
@@ -1570,7 +1649,7 @@ fn paint_crosshair(
         palette.label.into(),
     );
     let time_w = f32::from(time_line.width());
-    let time_x = (cx_px + CROSSHAIR_LABEL_GAP).min(regions.content_right - time_w);
+    let time_x = (cx_px + CROSSHAIR_LABEL_GAP).min(regions.time_right - time_w);
     let _ = time_line.paint(
         point(px(time_x), px(regions.flame_top + 1.)),
         px(CROSSHAIR_VALUE_SIZE),
@@ -1645,7 +1724,7 @@ fn paint_crosshair(
             let value_w = f32::from(value_line.width());
             // Default to the right of the line; flip to the left near the edge.
             let mut value_x = cx_px + CROSSHAIR_LABEL_GAP;
-            if value_x + value_w > regions.content_right {
+            if value_x + value_w > regions.time_right {
                 value_x = cx_px - CROSSHAIR_LABEL_GAP - value_w;
             }
             let _ = value_line.paint(
