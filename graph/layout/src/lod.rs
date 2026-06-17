@@ -7,7 +7,8 @@
 //! before quotient and layout shrinks a graph of tens of thousands of nodes to
 //! a view whose size the caller caps.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::cmp::Reverse;
+use std::collections::{BinaryHeap, HashMap, HashSet};
 
 use crate::graph::{EdgeKind, Graph};
 
@@ -81,12 +82,14 @@ pub fn collapse(graph: &Graph, expanded: &HashSet<String>) -> Graph {
     out
 }
 
-/// A startup expansion set: the largest breadth-first prefix of the reachable
-/// multi-child containers whose collapsed view fits both `max_nodes` and
-/// `max_edges`. Singletons auto-expand in `collapse` and leaves can't expand, so
-/// only multi-child containers are candidates; their direct children's nearest
-/// multi-child descendants become reachable as each is expanded. The result is a
-/// bounded but non-trivial overview.
+/// A startup expansion set: the largest prefix of the reachable multi-child
+/// containers — ordered cheapest-first, by the number of nodes each reveals —
+/// whose collapsed view fits both `max_nodes` and `max_edges`. Singletons
+/// auto-expand in `collapse` and leaves can't expand, so only multi-child
+/// containers are candidates; their direct children's nearest multi-child
+/// descendants become reachable as each is expanded. Visiting the cheapest
+/// container next keeps each prefix step small, so the search settles close to
+/// the caps rather than overshooting a whole level and falling far short.
 pub fn default_expansion(graph: &Graph, max_nodes: usize, max_edges: usize) -> HashSet<String> {
     let mut children: HashMap<&str, Vec<&str>> = HashMap::new();
     let mut roots: Vec<&str> = Vec::new();
@@ -109,21 +112,50 @@ pub fn default_expansion(graph: &Graph, max_nodes: usize, max_edges: usize) -> H
         }
     }
 
-    // BFS over reachable multi-child containers, shallowest-first. Expanding one
-    // reveals its direct children, each contributing its nearest multi-child
-    // descendant. Every container's nearest multi-child ancestor precedes it, so
-    // the order is ancestor-closed and its prefixes nest.
+    // Nodes revealed by expanding a container: its direct children plus the
+    // singleton descendants that auto-expand beneath each.
+    fn visible_subtree<'a>(
+        children: &HashMap<&'a str, Vec<&'a str>>,
+        n: &'a str,
+        memo: &mut HashMap<&'a str, usize>,
+    ) -> usize {
+        if let Some(&v) = memo.get(n) {
+            return v;
+        }
+        let v = 1 + match children.get(n).map(Vec::as_slice) {
+            Some([only]) => visible_subtree(children, only, memo),
+            _ => 0,
+        };
+        memo.insert(n, v);
+        v
+    }
+
+    // Best-first over reachable multi-child containers, cheapest reveal first
+    // (ties by id for a stable order). A container is reached only after its
+    // nearest multi-child ancestor is taken, so `order` is ancestor-closed and
+    // its prefixes nest.
     let mut order: Vec<&str> = Vec::new();
     let mut seen: HashSet<&str> = HashSet::new();
-    let mut queue: VecDeque<&str> = roots.iter().filter_map(|r| descend(&children, r)).collect();
-    while let Some(c) = queue.pop_front() {
+    let mut memo: HashMap<&str, usize> = HashMap::new();
+    let mut heap: BinaryHeap<Reverse<(usize, &str)>> = BinaryHeap::new();
+    for r in &roots {
+        if let Some(d) = descend(&children, r) {
+            let reveal = children[d].iter().map(|c| visible_subtree(&children, c, &mut memo)).sum();
+            heap.push(Reverse((reveal, d)));
+        }
+    }
+    while let Some(Reverse((_, c))) = heap.pop() {
         if !seen.insert(c) {
             continue;
         }
         order.push(c);
         for &k in &children[c] {
             if let Some(d) = descend(&children, k) {
-                queue.push_back(d);
+                if !seen.contains(d) {
+                    let reveal =
+                        children[d].iter().map(|c| visible_subtree(&children, c, &mut memo)).sum();
+                    heap.push(Reverse((reveal, d)));
+                }
             }
         }
     }
