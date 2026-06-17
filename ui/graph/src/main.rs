@@ -349,12 +349,12 @@ impl GraphView {
                 dim: hovered.is_some() && !active.contains(b.id.as_str()),
             })
             .collect();
-        // Center of the just-toggled box, to pan into view on the next paint.
+        // The just-toggled box's full rect, to frame on the next paint.
         let recenter_target = recent.and_then(|id| {
             g.boxes
                 .iter()
                 .find(|b| b.id == id)
-                .map(|b| (b.x + b.width / 2.0, b.y + b.height / 2.0))
+                .map(|b| (b.x, b.y, b.width, b.height))
         });
         let connectors: Vec<(Vec<(f64, f64)>, EdgeKind, bool)> = g
             .connectors
@@ -467,22 +467,37 @@ impl GraphView {
                         f32::from(bounds.size.height) / 2. - center_y * z,
                     ));
                 }
-                // Bring the just-toggled box into view if the relayout pushed it
-                // off-screen, holding zoom and panning its center to the middle.
+                // Frame the just-toggled box on the next paint. If it no longer
+                // fits the viewport at the current zoom, zoom out far enough for
+                // the whole box to fit with margin (never below the whole-graph
+                // fit) and center it; if it fits but the relayout pushed it
+                // off-screen, pan its center to the middle; if it fits and is
+                // already on-screen, leave the view put.
                 if recenter.get() {
-                    if let Some((tx, ty)) = recenter_target {
-                        let z = zoom.get();
-                        let (px, py) = pan.get();
-                        let sx = f32::from(bounds.origin.x) + (tx as f32 + MARGIN as f32) * z + px;
-                        let sy = f32::from(bounds.origin.y) + (ty as f32 + MARGIN as f32) * z + py;
-                        let inside = sx >= f32::from(bounds.origin.x)
-                            && sx <= f32::from(bounds.origin.x + bounds.size.width)
-                            && sy >= f32::from(bounds.origin.y)
-                            && sy <= f32::from(bounds.origin.y + bounds.size.height);
-                        if !inside {
+                    if let Some((bx, by, bw, bh)) = recenter_target {
+                        let vw = f32::from(bounds.size.width);
+                        let vh = f32::from(bounds.size.height);
+                        let (bw, bh) = (bw as f32, bh as f32);
+                        let mut z = zoom.get();
+                        let oversize = bw * z > vw || bh * z > vh;
+                        if oversize {
+                            let zb = (vw / bw).min(vh / bh) * FIT_MARGIN;
+                            z = zb.clamp(fit_zoom(bounds.size, content), MAX_ZOOM);
+                            zoom.set(z);
+                        }
+                        let cx = bx as f32 + bw / 2.;
+                        let cy = by as f32 + bh / 2.;
+                        let (panx, pany) = pan.get();
+                        let sx = (cx + MARGIN as f32) * z + panx;
+                        let sy = (cy + MARGIN as f32) * z + pany;
+                        let inside = sx >= 0. && sx <= vw && sy >= 0. && sy <= vh;
+                        // Center when the box was bigger than the view (now zoomed
+                        // out) or when it fit but the relayout pushed it off-screen;
+                        // otherwise leave the view put.
+                        if oversize || !inside {
                             pan.set((
-                                f32::from(bounds.size.width) / 2. - (tx as f32 + MARGIN as f32) * z,
-                                f32::from(bounds.size.height) / 2. - (ty as f32 + MARGIN as f32) * z,
+                                vw / 2. - (cx + MARGIN as f32) * z,
+                                vh / 2. - (cy + MARGIN as f32) * z,
                             ));
                         }
                     }
