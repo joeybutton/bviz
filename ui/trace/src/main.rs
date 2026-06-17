@@ -1694,6 +1694,45 @@ fn shape_truncated(
     bviz_ui_assets::shape_line(window, truncated, font, fs, color)
 }
 
+/// Paints a filled box and, if it is wide enough, its name truncated to fit and
+/// centered vertically — the shared shape behind a flame-chart slice and a
+/// flame-graph node.
+fn paint_labeled_box(
+    rect: Bounds<Pixels>,
+    fill: Hsla,
+    name: &str,
+    palette: &Palette,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    window.paint_quad(quad(
+        rect,
+        px(SLICE_RADIUS),
+        fill,
+        px(SLICE_BORDER),
+        Hsla::from(palette.border),
+        BorderStyle::Solid,
+    ));
+    let w = f32::from(rect.size.width);
+    let h = f32::from(rect.size.height);
+    if w < LABEL_MIN_PX {
+        return;
+    }
+    let avail = w - 2. * SLICE_TEXT_PAD;
+    let font = bviz_ui_assets::text_metrics(window).font;
+    let fs = px(h - 2. * SLICE_TEXT_PAD);
+    let line = shape_truncated(name, avail, font, fs, label_on(fill), window);
+    let ty = rect.origin.y + px((h - f32::from(fs)) / 2.);
+    let _ = line.paint(
+        point(rect.origin.x + px(SLICE_TEXT_PAD), ty),
+        fs,
+        TextAlign::Left,
+        None,
+        window,
+        cx,
+    );
+}
+
 /// Paints a slice quad and, if wide enough, its truncated name.
 fn paint_slice(
     slice: &bviz_trace_profile::Slice,
@@ -1706,34 +1745,9 @@ fn paint_slice(
     window: &mut Window,
     cx: &mut App,
 ) {
-    let origin = point(px(content_left + x), px(y));
-    let rect = Bounds::new(origin, size(px(w), px(h)));
+    let rect = Bounds::new(point(px(content_left + x), px(y)), size(px(w), px(h)));
     let fill = category_color(&slice.category, palette);
-    window.paint_quad(quad(
-        rect,
-        px(SLICE_RADIUS),
-        fill,
-        px(SLICE_BORDER),
-        Hsla::from(palette.border),
-        BorderStyle::Solid,
-    ));
-    if w < LABEL_MIN_PX {
-        return;
-    }
-    let avail = w - 2. * SLICE_TEXT_PAD;
-    let font = bviz_ui_assets::text_metrics(window).font;
-    let fs = px(h - 2. * SLICE_TEXT_PAD);
-    let color = label_on(fill);
-    let line = shape_truncated(&slice.name, avail, font, fs, color, window);
-    let ty = origin.y + px((h - f32::from(fs)) / 2.);
-    let _ = line.paint(
-        point(origin.x + px(SLICE_TEXT_PAD), ty),
-        fs,
-        TextAlign::Left,
-        None,
-        window,
-        cx,
-    );
+    paint_labeled_box(rect, fill, &slice.name, palette, window, cx);
 }
 
 /// Fill for a flame-graph box: the chart's per-category color, except the
@@ -1774,37 +1788,15 @@ fn paint_flame_graph(
     let mask = ContentMask {
         bounds: Bounds::new(point(px(left), px(top)), size(px(width), px(height))),
     };
-    let font = bviz_ui_assets::text_metrics(window).font;
     window.with_content_mask(Some(mask), |window| {
         for b in lay_out_flame(root, width, &metrics, MIN_SLICE_PX) {
             let y = top + b.y - scroll_y;
             if y + b.h < top || y > top + height {
                 continue;
             }
+            let rect = Bounds::new(point(px(left + b.x), px(y)), size(px(b.w), px(b.h)));
             let fill = flame_box_color(&b.category, palette);
-            window.paint_quad(quad(
-                Bounds::new(point(px(left + b.x), px(y)), size(px(b.w), px(b.h))),
-                px(SLICE_RADIUS),
-                fill,
-                px(SLICE_BORDER),
-                Hsla::from(palette.border),
-                BorderStyle::Solid,
-            ));
-            if b.w < LABEL_MIN_PX {
-                continue;
-            }
-            let avail = b.w - 2. * SLICE_TEXT_PAD;
-            let fs = px(b.h - 2. * SLICE_TEXT_PAD);
-            let line = shape_truncated(&b.name, avail, font.clone(), fs, label_on(fill), window);
-            let ty = y + (b.h - f32::from(fs)) / 2.;
-            let _ = line.paint(
-                point(px(left + b.x + SLICE_TEXT_PAD), px(ty)),
-                fs,
-                TextAlign::Left,
-                None,
-                window,
-                cx,
-            );
+            paint_labeled_box(rect, fill, &b.name, palette, window, cx);
         }
     });
 
