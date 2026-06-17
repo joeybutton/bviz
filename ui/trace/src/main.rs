@@ -1880,10 +1880,13 @@ fn paint_crosshair(
         }
 
         // Each label's top sits at its dot, clamped into the chart and pushed
-        // apart from its neighbours so stacked values stay legible. The series
-        // stack bottom-up, so the dots are already sorted descending by y.
+        // apart from its neighbours so stacked values stay legible. Order them
+        // top-of-stack first, so when dots coincide (a series at value 0) the
+        // declutter keeps the upper series' label on top rather than flipping it
+        // below on the tie.
         let max_label_y = (chart_bottom - CROSSHAIR_VALUE_SIZE).max(chart_top);
-        let mut label_ys: Vec<f32> = dots
+        let labeled: Vec<(f32, f64, Hsla)> = dots.iter().rev().copied().collect();
+        let mut label_ys: Vec<f32> = labeled
             .iter()
             .map(|&(dot_y, ..)| dot_y.clamp(chart_top, max_label_y))
             .collect();
@@ -1893,7 +1896,7 @@ fn paint_crosshair(
             chart_top,
             max_label_y,
         );
-        for (&label_y, &(_, value, color)) in label_ys.iter().zip(&dots) {
+        for (&label_y, &(_, value, color)) in label_ys.iter().zip(&labeled) {
             let value_line = bviz_ui_assets::shape_line(
                 window,
                 format_counter(value, unit),
