@@ -1,4 +1,5 @@
 load("@rules_rs//rs:rust_library.bzl", "rust_library")
+load("@rules_rs//rs:rust_test.bzl", "rust_test")
 
 rust_library(
     name = "components",
@@ -16,4 +17,9 @@ rust_library(
         "//ui/theme",
         "@crates//:gpui",
     ],
+)
+
+rust_test(
+    name = "components_test",
+    crate = ":components",
 )

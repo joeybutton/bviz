@@ -7,15 +7,17 @@ use std::time::{Duration, Instant};
 use bviz_terminal::{
     Cell, Color, Flags, NamedColor, Replay, Rgb, Scroll, SelectionType, Side, Terminal, Url,
 };
-use bviz_ui_components::{load_in_background, track_drag, Button, Dropdown, TextInput};
+use bviz_ui_components::{
+    Axis, Button, Dropdown, Scrollbar, TextInput, load_in_background, track_drag,
+};
 use bviz_ui_shell::Chrome;
 use gpui::{
-    actions, canvas, div, fill, percentage, point, prelude::*, px, relative, rgb, size, Animation,
-    AnimationExt, App, Bounds, ClipboardItem, Context, Element, Entity, FocusHandle, Focusable,
-    Font, FontStyle, FontWeight, GlobalElementId, InspectorElementId, IntoElement, KeyBinding,
-    LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, PaintQuad, Pixels, Point, Render, Rgba,
-    ScrollWheelEvent, ShapedLine, SharedString, StrikethroughStyle, Style, Subscription, Task,
-    TextRun, Transformation, UnderlineStyle, Window, WindowAppearance,
+    Animation, AnimationExt, App, Bounds, ClipboardItem, Context, Element, Entity, FocusHandle,
+    Focusable, Font, FontStyle, FontWeight, GlobalElementId, InspectorElementId, IntoElement,
+    KeyBinding, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, PaintQuad, Pixels, Point,
+    Render, Rgba, ScrollWheelEvent, ShapedLine, SharedString, StrikethroughStyle, Style,
+    Subscription, Task, TextRun, Transformation, UnderlineStyle, Window, WindowAppearance, actions,
+    canvas, div, fill, percentage, point, prelude::*, px, relative, rgb, size,
 };
 
 actions!(
@@ -59,18 +61,6 @@ const MIN_THUMB: f32 = 24.0;
 
 /// Playback speed multipliers the speed control cycles through.
 const SPEEDS: [f32; 4] = [1.0, 2.0, 4.0, 8.0];
-
-/// Geometry of the painted scroll bar, in window pixels, kept so mouse events can
-/// hit-test the thumb and map a drag back to a scroll position.
-#[derive(Clone, Copy)]
-struct ScrollbarLayout {
-    /// Left edge of the gutter; clicks left of this are terminal content.
-    gutter_left: f32,
-    track_top: f32,
-    track_height: f32,
-    thumb_top: f32,
-    thumb_height: f32,
-}
 
 /// Geometry of the painted playback scrubber track, in window pixels, kept so a
 /// click or drag on it maps to a position in the timeline.
@@ -141,7 +131,7 @@ pub struct TerminalView {
     /// view clamps to the bottom meanwhile and returns to it when the line is back.
     scroll_top: usize,
     /// The painted scroll bar geometry, set each layout for hit-testing.
-    scrollbar: Option<ScrollbarLayout>,
+    scrollbar: Option<Scrollbar>,
     /// The painted content geometry, set each layout for mapping clicks to cells.
     content: Option<ContentLayout>,
     /// Whether a click-drag text selection is in progress.
@@ -332,17 +322,17 @@ impl TerminalView {
 
     /// Scroll so the thumb's top sits under the cursor, accounting for the grab
     /// offset, and translate that to a line via the terminal.
-    fn drag_to(&mut self, mouse_y: f32, cx: &mut Context<Self>) {
-        let (Some(layout), Some(grab)) = (self.scrollbar, self.drag_grab) else {
+    fn drag_to(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
+        let (Some(bar), Some(grab)) = (self.scrollbar, self.drag_grab) else {
             return;
         };
-        let span = (layout.track_height - layout.thumb_height).max(1.0);
-        let thumb_top = (mouse_y - grab).clamp(layout.track_top, layout.track_top + span);
-        // Fraction down the track: 0 is the first line, 1 is the last.
-        let fraction = (thumb_top - layout.track_top) / span;
         let Some(terminal) = self.terminal.as_mut() else {
             return;
         };
+        // The bar's offset runs from 0 (the bottom, no scrollback above) to the
+        // history size (the top); a fraction of that history maps to a line.
+        let history = terminal.history_size().max(1) as f32;
+        let fraction = bar.offset_at(position, grab) / history;
         terminal.scroll_to_fraction(fraction);
         self.remember_scroll();
         cx.notify();
@@ -370,19 +360,13 @@ impl TerminalView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let y = f32::from(event.position.y);
         // A click on the scroll-bar gutter drives the thumb; grabbing the thumb
         // keeps the cursor at the same spot on it, while clicking the track jumps
         // the thumb's center to the cursor.
-        if let Some(layout) = self.scrollbar {
-            if f32::from(event.position.x) >= layout.gutter_left {
-                let on_thumb = y >= layout.thumb_top && y <= layout.thumb_top + layout.thumb_height;
-                self.drag_grab = Some(if on_thumb {
-                    y - layout.thumb_top
-                } else {
-                    layout.thumb_height / 2.0
-                });
-                self.drag_to(y, cx);
+        if let Some(bar) = self.scrollbar {
+            if bar.track_hit(event.position) {
+                self.drag_grab = Some(bar.grab(event.position));
+                self.drag_to(event.position, cx);
                 return;
             }
         }
@@ -420,8 +404,8 @@ impl TerminalView {
             return;
         }
         // Moving the pointer onto the gutter reveals the hidden scroll bar.
-        if let Some(layout) = self.scrollbar {
-            if f32::from(event.position.x) >= layout.gutter_left && !self.scrollbar_visible {
+        if let Some(bar) = self.scrollbar {
+            if bar.track_hit(event.position) && !self.scrollbar_visible {
                 self.reveal_scrollbar(cx);
             }
         }
@@ -1307,35 +1291,35 @@ impl Element for TerminalElement {
             });
         });
 
-        // The scroll bar thumb, sized and placed by how much is off-screen and how
-        // far the viewport is scrolled. Its geometry is kept on the view so mouse
+        // The scroll bar, sized and placed by how much is off-screen and how far
+        // the viewport is scrolled: the content is the whole scrollback plus the
+        // visible rows, and the offset is how far below the top the viewport sits
+        // (`history - display_offset`). Its geometry is kept on the view so mouse
         // events can hit-test and drag it.
-        let scrollbar_layout = (history > 0).then(|| {
-            let total = (history + rows) as f32;
-            let height = f32::from(bounds.size.height);
-            let thumb_height = (height * rows as f32 / total).max(MIN_THUMB);
-            let thumb_top = (f32::from(bounds.top()) + height * (history - offset) as f32 / total)
-                .min(f32::from(bounds.bottom()) - thumb_height);
-            ScrollbarLayout {
-                gutter_left: f32::from(bounds.right()) - SCROLLBAR_WIDTH,
-                track_top: f32::from(bounds.top()),
-                track_height: height,
-                thumb_top,
-                thumb_height,
-            }
-        });
+        let scrollbar_layout = Scrollbar::new(
+            Axis::Vertical,
+            Bounds::new(
+                point(
+                    px(f32::from(bounds.right()) - SCROLLBAR_WIDTH),
+                    bounds.top(),
+                ),
+                size(px(SCROLLBAR_WIDTH), bounds.size.height),
+            ),
+            (history + rows) as f32,
+            rows as f32,
+            (history - offset) as f32,
+            MIN_THUMB,
+        );
         self.view
             .update(cx, |view, _| view.scrollbar = scrollbar_layout);
         // The geometry is kept for hit-testing even while hidden; the thumb is
-        // painted only while the bar is revealed or being dragged.
+        // painted only while the bar is revealed or being dragged. The terminal
+        // draws just the thumb, with no track, so it is filled directly here.
         let view = self.view.read(cx);
         let show_scrollbar = view.scrollbar_visible || view.drag_grab.is_some();
-        let scrollbar = scrollbar_layout.filter(|_| show_scrollbar).map(|layout| {
+        let scrollbar = scrollbar_layout.filter(|_| show_scrollbar).map(|bar| {
             fill(
-                Bounds::new(
-                    point(px(layout.gutter_left), px(layout.thumb_top)),
-                    size(px(SCROLLBAR_WIDTH), px(layout.thumb_height)),
-                ),
+                bar.thumb(),
                 bviz_ui_theme::mix(colors.text, colors.background, 0.6),
             )
         });
@@ -1503,7 +1487,7 @@ impl Element for TerminalElement {
             track_drag(
                 window,
                 &self.view,
-                |view, event, cx| view.drag_to(f32::from(event.position.y), cx),
+                |view, event, cx| view.drag_to(event.position, cx),
                 |view, _, cx| {
                     if view.drag_grab.take().is_some() {
                         // Keep the bar up briefly after the drag, then hide.

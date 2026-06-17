@@ -5,12 +5,14 @@ mod background;
 mod button;
 mod drag;
 mod dropdown;
+mod scrollbar;
 pub mod text_input;
 
 pub use background::load_in_background;
 pub use button::Button;
 pub use drag::track_drag;
 pub use dropdown::Dropdown;
+pub use scrollbar::{Axis, Scrollbar};
 pub use text_input::TextInput;
 
 use gpui::App;

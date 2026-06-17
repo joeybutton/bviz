@@ -7,7 +7,7 @@ use bviz_trace_layout::{
     LaneLayout, LaneMetrics, TimeView, Viewport, lay_out_lanes, visible_slices,
 };
 use bviz_trace_profile::{CounterLane, CounterPoint, PhaseMarker, Profile, TimeSpan};
-use bviz_ui_components::{load_in_background, track_drag};
+use bviz_ui_components::{Axis, Scrollbar, load_in_background, track_drag};
 use bviz_ui_shell::Chrome;
 use clap::Parser;
 use gpui::{
@@ -125,19 +125,6 @@ struct Palette {
     panel: Rgba,
     /// The hover crosshair line, unobtrusive against the background.
     crosshair: Rgba,
-}
-
-/// A painted scroll bar's geometry in window coordinates, kept so mouse events
-/// can hit-test and drag it. The scalars run along the bar's long axis (y for
-/// the vertical bar, x for the horizontal).
-#[derive(Clone, Copy)]
-struct BarLayout {
-    track: Bounds<Pixels>,
-    thumb: Bounds<Pixels>,
-    track_start: f32,
-    track_len: f32,
-    thumb_start: f32,
-    thumb_len: f32,
 }
 
 /// What a left-button drag is currently moving.
@@ -287,8 +274,8 @@ struct TraceView {
     viewport: Rc<Cell<Bounds<Pixels>>>,
     /// Scroll-bar geometry set during paint, read by mouse handlers; `None` when
     /// that axis doesn't overflow and so shows no bar.
-    vbar: Rc<Cell<Option<BarLayout>>>,
-    hbar: Rc<Cell<Option<BarLayout>>>,
+    vbar: Rc<Cell<Option<Scrollbar>>>,
+    hbar: Rc<Cell<Option<Scrollbar>>>,
     drag: Drag,
     last_mouse: Point<Pixels>,
     /// Height of the bottom graph section, set by the splitter; clamped on use.
@@ -347,8 +334,8 @@ impl TraceView {
         scroll_y: Rc<Cell<f32>>,
         fitted: Rc<Cell<bool>>,
         viewport: Rc<Cell<Bounds<Pixels>>>,
-        vbar: Rc<Cell<Option<BarLayout>>>,
-        hbar: Rc<Cell<Option<BarLayout>>>,
+        vbar: Rc<Cell<Option<Scrollbar>>>,
+        hbar: Rc<Cell<Option<Scrollbar>>>,
         entity: Entity<TraceView>,
         graph_height: f32,
         palette: Palette,
@@ -767,18 +754,18 @@ impl TraceView {
     /// otherwise a canvas pan.
     fn press(&mut self, pos: Point<Pixels>) {
         if let Some(bar) = self.vbar.get() {
-            if bar.track.contains(&pos) {
-                let grab = grab_offset(f32::from(pos.y), &bar);
+            if bar.track_hit(pos) {
+                let grab = bar.grab(pos);
                 self.drag = Drag::VThumb(grab);
-                scroll_thumb_to(self, f32::from(pos.y), grab);
+                scroll_thumb_to(self, pos, grab);
                 return;
             }
         }
         if let Some(bar) = self.hbar.get() {
-            if bar.track.contains(&pos) {
-                let grab = grab_offset(f32::from(pos.x), &bar);
+            if bar.track_hit(pos) {
+                let grab = bar.grab(pos);
                 self.drag = Drag::HThumb(grab);
-                pan_thumb_to(self, f32::from(pos.x), grab);
+                pan_thumb_to(self, pos, grab);
                 return;
             }
         }
@@ -807,8 +794,8 @@ fn on_drag(view: &mut TraceView, event: &MouseMoveEvent, cx: &mut Context<TraceV
             view.scroll_y.set(scrolled);
             view.last_mouse = event.position;
         }
-        Drag::VThumb(grab) => scroll_thumb_to(view, f32::from(event.position.y), grab),
-        Drag::HThumb(grab) => pan_thumb_to(view, f32::from(event.position.x), grab),
+        Drag::VThumb(grab) => scroll_thumb_to(view, event.position, grab),
+        Drag::HThumb(grab) => pan_thumb_to(view, event.position, grab),
         Drag::Splitter => {
             let Source::Loaded(profile) = &view.source else {
                 return;
@@ -833,33 +820,16 @@ fn end_drag(view: &mut TraceView, _: &MouseUpEvent, cx: &mut Context<TraceView>)
     cx.notify();
 }
 
-/// The grab offset for a press at `along` (the cursor on the bar's long axis):
-/// the distance into the thumb when the press is on it, else half the thumb so a
-/// track click centers it on the cursor.
-fn grab_offset(along: f32, bar: &BarLayout) -> f32 {
-    if along >= bar.thumb_start && along <= bar.thumb_start + bar.thumb_len {
-        along - bar.thumb_start
-    } else {
-        bar.thumb_len / 2.0
-    }
-}
-
-/// Maps a vertical thumb position back to a scroll offset (inverse of the paint
-/// math).
-fn scroll_thumb_to(view: &mut TraceView, mouse_along: f32, grab: f32) {
+/// Maps a vertical thumb drag back to a scroll offset.
+fn scroll_thumb_to(view: &mut TraceView, pos: Point<Pixels>, grab: f32) {
     let Some(bar) = view.vbar.get() else {
         return;
     };
-    let travel = (bar.track_len - bar.thumb_len).max(1.0);
-    let thumb_start = (mouse_along - grab - bar.track_start).clamp(0.0, travel);
-    let max_scroll = view.max_scroll();
-    view.scroll_y
-        .set((thumb_start / travel * max_scroll).clamp(0.0, max_scroll));
+    view.scroll_y.set(bar.offset_at(pos, grab));
 }
 
-/// Maps a horizontal thumb position back to a pan start time (inverse of the
-/// paint math).
-fn pan_thumb_to(view: &mut TraceView, mouse_along: f32, grab: f32) {
+/// Maps a horizontal thumb drag back to a pan start time, then clamps the view.
+fn pan_thumb_to(view: &mut TraceView, pos: Point<Pixels>, grab: f32) {
     let Source::Loaded(profile) = &view.source else {
         return;
     };
@@ -869,11 +839,9 @@ fn pan_thumb_to(view: &mut TraceView, mouse_along: f32, grab: f32) {
         return;
     };
     let mut v = view.view.get();
-    let visible_us = content_w as f64 / v.px_per_us;
-    let range = ((span.end_us - span.start_us) as f64 - visible_us).max(0.0);
-    let travel = (bar.track_len - bar.thumb_len).max(1.0);
-    let thumb_start = (mouse_along - grab - bar.track_start).clamp(0.0, travel);
-    v.start_us = span.start_us as f64 + (thumb_start / travel) as f64 * range;
+    // The horizontal bar runs in microseconds within the span, so its offset is a
+    // start time relative to the span start.
+    v.start_us = span.start_us as f64 + bar.offset_at(pos, grab) as f64;
     v.clamp_to(span, content_w, EDGE_MARGIN_PX);
     view.view.set(v);
 }
@@ -1068,11 +1036,6 @@ fn paint_ruler(
     }
 }
 
-/// Paints the flame section's vertical bar and/or the content column's
-/// horizontal bar for whichever axis overflows, storing each bar's geometry in
-/// its cell for hit-testing; an axis that fits gets no bar and a cleared cell.
-/// The vertical thumb is sized by the visible fraction of the flame lanes; the
-/// horizontal by the visible fraction of the profile span.
 /// Paints the visible divider between the flame and graph sections, centered on
 /// the boundary the overlay drag strip covers.
 fn paint_splitter(regions: Regions, palette: &Palette, window: &mut Window) {
@@ -1093,6 +1056,11 @@ fn paint_splitter(regions: Regions, palette: &Palette, window: &mut Window) {
     ));
 }
 
+/// Paints the flame section's vertical bar and/or the content column's
+/// horizontal bar for whichever axis overflows, storing each bar's geometry in
+/// its cell for hit-testing; an axis that fits gets no bar and a cleared cell.
+/// The vertical bar maps to the flame lanes' pixel scroll; the horizontal to the
+/// view's start time within the profile span.
 fn paint_scrollbars(
     span: TimeSpan,
     tv: TimeView,
@@ -1100,89 +1068,45 @@ fn paint_scrollbars(
     regions: Regions,
     scroll_y: f32,
     palette: &Palette,
-    vbar: &Rc<Cell<Option<BarLayout>>>,
-    hbar: &Rc<Cell<Option<BarLayout>>>,
+    vbar: &Rc<Cell<Option<Scrollbar>>>,
+    hbar: &Rc<Cell<Option<Scrollbar>>>,
     window: &mut Window,
 ) {
-    let flame_top = regions.flame_top;
     let flame_h = regions.flame_h();
-    let content_left = regions.content_left;
     let content_w = regions.content_w;
 
-    let span_us = (span.end_us - span.start_us) as f64;
-    let visible_us = content_w as f64 / tv.px_per_us;
+    let span_us = (span.end_us - span.start_us) as f32;
+    let visible_us = content_w / tv.px_per_us as f32;
     let v_overflow = flame_total > flame_h;
-    let h_overflow = visible_us < span_us;
     // The vertical bar shortens to clear the content-column right edge so it
     // never overlaps the horizontal bar's far end.
-    let v_track_len = flame_h;
     let h_track_len = content_w - if v_overflow { BAR_WIDTH } else { 0.0 };
 
-    let vlayout = v_overflow.then(|| {
-        let thumb_len = (v_track_len * flame_h / flame_total)
-            .max(MIN_THUMB)
-            .min(v_track_len);
-        let frac = (scroll_y / (flame_total - flame_h).max(1.0)).clamp(0.0, 1.0);
-        let thumb_start = flame_top + frac * (v_track_len - thumb_len);
-        let x = regions.content_right - BAR_WIDTH;
-        BarLayout {
-            track: Bounds::new(
-                point(px(x), px(flame_top)),
-                size(px(BAR_WIDTH), px(v_track_len)),
-            ),
-            thumb: Bounds::new(
-                point(px(x), px(thumb_start)),
-                size(px(BAR_WIDTH), px(thumb_len)),
-            ),
-            track_start: flame_top,
-            track_len: v_track_len,
-            thumb_start,
-            thumb_len,
-        }
-    });
-
-    let hlayout = h_overflow.then(|| {
-        let thumb_len = (h_track_len * (visible_us / span_us) as f32)
-            .max(MIN_THUMB)
-            .min(h_track_len);
-        let frac = (((tv.start_us - span.start_us as f64) / (span_us - visible_us).max(1.0))
-            as f32)
-            .clamp(0.0, 1.0);
-        let thumb_start = content_left + frac * (h_track_len - thumb_len);
-        let y = regions.body_bottom;
-        BarLayout {
-            track: Bounds::new(
-                point(px(content_left), px(y)),
-                size(px(h_track_len), px(BAR_WIDTH)),
-            ),
-            thumb: Bounds::new(
-                point(px(thumb_start), px(y)),
-                size(px(thumb_len), px(BAR_WIDTH)),
-            ),
-            track_start: content_left,
-            track_len: h_track_len,
-            thumb_start,
-            thumb_len,
-        }
-    });
+    let vlayout = Scrollbar::new(
+        Axis::Vertical,
+        Bounds::new(
+            point(px(regions.content_right - BAR_WIDTH), px(regions.flame_top)),
+            size(px(BAR_WIDTH), px(flame_h)),
+        ),
+        flame_total,
+        flame_h,
+        scroll_y,
+        MIN_THUMB,
+    );
+    let hlayout = Scrollbar::new(
+        Axis::Horizontal,
+        Bounds::new(
+            point(px(regions.content_left), px(regions.body_bottom)),
+            size(px(h_track_len), px(BAR_WIDTH)),
+        ),
+        span_us,
+        visible_us,
+        tv.start_us as f32 - span.start_us as f32,
+        MIN_THUMB,
+    );
 
     for bar in [vlayout, hlayout].into_iter().flatten() {
-        window.paint_quad(quad(
-            bar.track,
-            px(0.),
-            palette.scroll_track,
-            px(0.),
-            Hsla::from(palette.border),
-            BorderStyle::Solid,
-        ));
-        window.paint_quad(quad(
-            bar.thumb,
-            px(BAR_WIDTH / 2.),
-            palette.scroll_thumb,
-            px(0.),
-            Hsla::from(palette.border),
-            BorderStyle::Solid,
-        ));
+        bar.paint(palette.scroll_track, palette.scroll_thumb, window);
     }
     vbar.set(vlayout);
     hbar.set(hlayout);
