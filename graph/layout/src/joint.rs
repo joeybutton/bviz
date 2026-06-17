@@ -59,24 +59,22 @@ pub fn build_joint(
     merge(graphs)
 }
 
-/// Unions the graphs into one: nodes deduped by id (same-id nodes carry an
-/// identical kind, label, and parent by construction, so the first wins) and
-/// edges deduped by `(from, to, kind)`.
+/// Unions the graphs into one. Nodes are deduped by id: a package, target,
+/// configured target, or source that several inputs name appears in each input's
+/// graph with an identical kind, label, and parent, so the first wins. Edges are
+/// concatenated without deduping: every builder already drops its own duplicate
+/// edges, and each tags its edges with its own [`EdgeKind`], so no edge from one
+/// input can equal one from another.
 fn merge(graphs: Vec<Graph>) -> Graph {
     let mut merged = Graph::new();
     let mut seen_node: HashSet<String> = HashSet::new();
-    let mut seen_edge: HashSet<(String, String, crate::graph::EdgeKind)> = HashSet::new();
     for graph in graphs {
         for node in graph.nodes {
             if seen_node.insert(node.id.clone()) {
                 merged.nodes.push(node);
             }
         }
-        for edge in graph.edges {
-            if seen_edge.insert((edge.from.clone(), edge.to.clone(), edge.kind)) {
-                merged.edges.push(edge);
-            }
-        }
+        merged.edges.extend(graph.edges);
     }
     merged
 }
