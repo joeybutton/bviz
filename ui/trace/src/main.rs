@@ -175,14 +175,13 @@ struct Hover {
 struct Regions {
     /// Left edge of the time content, past the gutter.
     content_left: f32,
-    /// Width of the time content column.
-    content_w: f32,
     /// Right edge of the content column (where the vertical bar/gutter end).
     content_right: f32,
     /// Right edge of the time axis, left of the reserved vertical-bar column.
     /// Everything mapped to time ends here so nothing underlaps the bar.
     time_right: f32,
-    /// Width of the time axis: `content_w` less the reserved vertical-bar column.
+    /// Width of the time axis: the content column less the reserved vertical-bar
+    /// column.
     time_w: f32,
     /// Top of the flame section (ruler bottom).
     flame_top: f32,
@@ -230,7 +229,6 @@ impl Regions {
         };
         Regions {
             content_left,
-            content_w,
             content_right,
             time_right: content_right - vbar_reserve,
             time_w: (content_w - vbar_reserve).max(0.0),
