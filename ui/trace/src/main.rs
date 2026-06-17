@@ -6,7 +6,7 @@
 use bviz_trace_layout::{
     LaneLayout, LaneMetrics, TimeView, Viewport, lay_out_lanes, visible_slices,
 };
-use bviz_trace_profile::{CounterLane, PhaseMarker, Profile, TimeSpan};
+use bviz_trace_profile::{CounterLane, CounterPoint, PhaseMarker, Profile, TimeSpan};
 use bviz_ui_components::{load_in_background, track_drag};
 use bviz_ui_shell::Chrome;
 use clap::Parser;
@@ -93,6 +93,12 @@ const TOOLTIP_PAD: f32 = 6.0;
 const TOOLTIP_LINE_GAP: f32 = 4.0;
 const TOOLTIP_OFFSET: f32 = 12.0;
 
+/// Radius of a crosshair value dot, font size of its value labels, and the gap
+/// between the crosshair line and a value label.
+const CROSSHAIR_DOT_RADIUS: f32 = 3.0;
+const CROSSHAIR_VALUE_SIZE: f32 = 11.0;
+const CROSSHAIR_LABEL_GAP: f32 = 5.0;
+
 /// Saturation of every category color.
 const CATEGORY_SATURATION: f32 = 0.5;
 /// Slice-fill lightness on a dark vs. a light background.
@@ -117,6 +123,8 @@ struct Palette {
     scroll_thumb: Rgba,
     /// Opaque fill of the hover tooltip panel.
     panel: Rgba,
+    /// The hover crosshair line, unobtrusive against the background.
+    crosshair: Rgba,
 }
 
 /// A painted scroll bar's geometry in window coordinates, kept so mouse events
@@ -287,6 +295,9 @@ struct TraceView {
     graph_height: f32,
     /// The slice under the cursor, if any, drawn as a tooltip.
     hover: Option<Hover>,
+    /// The cursor position while it hovers the time-content column and no drag is
+    /// in progress, drawn as a crosshair; `None` otherwise.
+    crosshair: Option<Point<Pixels>>,
     /// Holds the background load task so it isn't cancelled on drop.
     _load_task: Task<()>,
 }
@@ -321,6 +332,7 @@ impl TraceView {
             last_mouse: Point::default(),
             graph_height: DEFAULT_GRAPH_HEIGHT,
             hover: None,
+            crosshair: None,
             _load_task: load_task,
         }
     }
@@ -476,6 +488,19 @@ impl TraceView {
                     // The ruler paints over scrolled-up rows; the tooltip paints
                     // over everything.
                     paint_ruler(&ticks, regions, bounds, &palette, window, cx);
+                    if let Some(at) = entity.read(cx).crosshair {
+                        if f32::from(at.x) >= regions.content_left {
+                            paint_crosshair(
+                                &profile.counters,
+                                tv,
+                                regions,
+                                at,
+                                &palette,
+                                window,
+                                cx,
+                            );
+                        }
+                    }
                     if let Some(h) = entity.read(cx).hover {
                         let slice = &profile.threads[h.track].slices[h.slice];
                         paint_tooltip(slice, h.at, bounds, &palette, window, cx);
@@ -534,6 +559,7 @@ impl Render for TraceView {
             scroll_track: bviz_ui_theme::mix(colors.container, colors.background, 0.3),
             scroll_thumb: bviz_ui_theme::mix(colors.text, colors.background, 0.55),
             panel: colors.container,
+            crosshair: bviz_ui_theme::mix(colors.text, colors.background, 0.35),
         };
         let body = match &self.source {
             Source::Loaded(profile) => div().flex_1().flex().overflow_hidden().child(
@@ -647,27 +673,54 @@ impl TraceView {
         cx.notify();
     }
 
-    /// Tracks the slice under the cursor while not dragging, repainting only when
-    /// the hovered slice changes.
+    /// Tracks the slice under the cursor and the crosshair position while not
+    /// dragging. The crosshair follows the cursor, so any in-content move
+    /// repaints; the slice tooltip repaints only when the hovered slice changes.
     fn on_mouse_move(&mut self, e: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
         if !matches!(self.drag, Drag::None) {
+            // A drag clears the crosshair; notify only if it was showing.
+            if self.crosshair.take().is_some() {
+                cx.notify();
+            }
             return;
         }
+        // The crosshair shows anywhere in the time-content column.
+        let in_content = self.in_content(e.position);
+        self.crosshair = in_content.then_some(e.position);
+
         let hit = self.slice_at(e.position);
-        let unchanged = match (self.hover, hit) {
+        let slice_unchanged = match (self.hover, hit) {
             (Some(h), Some((track, slice))) => h.track == track && h.slice == slice,
             (None, None) => true,
             _ => false,
         };
-        if unchanged {
-            return;
+        if !slice_unchanged {
+            self.hover = hit.map(|(track, slice)| Hover {
+                track,
+                slice,
+                at: e.position,
+            });
         }
-        self.hover = hit.map(|(track, slice)| Hover {
-            track,
-            slice,
-            at: e.position,
-        });
-        cx.notify();
+        // Repaint on every in-content move (the crosshair tracks the cursor) and
+        // whenever the hovered slice changes (including the move out of content
+        // that clears the crosshair).
+        if in_content || !slice_unchanged {
+            cx.notify();
+        }
+    }
+
+    /// Whether `pos` lies in the time-content column (right of the gutter), the
+    /// region the crosshair shows over.
+    fn in_content(&self, pos: Point<Pixels>) -> bool {
+        let Source::Loaded(profile) = &self.source else {
+            return false;
+        };
+        let regions = Regions::new(
+            self.viewport.get(),
+            profile.counters.len(),
+            self.graph_height,
+        );
+        f32::from(pos.x) >= regions.content_left
     }
 
     /// The slice under a window-space cursor, inverting the paint transform:
@@ -1494,6 +1547,201 @@ fn paint_graph(
     }
 }
 
+/// The series' value at time `t` (microseconds), linearly interpolated between
+/// the two bracketing points. `None` when `t` lies outside the series' covered
+/// `[first.ts, last.ts]` range. Points are assumed sorted by `ts_us` ascending.
+fn sample_at(points: &[CounterPoint], t: f64) -> Option<f64> {
+    let first = points.first()?;
+    let last = points.last()?;
+    if t < first.ts_us as f64 || t > last.ts_us as f64 {
+        return None;
+    }
+    let hi = points.iter().position(|p| p.ts_us as f64 >= t)?;
+    if hi == 0 {
+        return Some(points[0].value);
+    }
+    let a = &points[hi - 1];
+    let b = &points[hi];
+    let span = (b.ts_us - a.ts_us) as f64;
+    if span <= 0.0 {
+        return Some(b.value);
+    }
+    let frac = (t - a.ts_us as f64) / span;
+    Some(a.value + (b.value - a.value) * frac)
+}
+
+/// The unit a counter lane's values carry, inferred from its name since the
+/// trace format stores none. Empty for unitless counts (action counts,
+/// SkyFunctions, RPCs, load averages).
+fn unit_for(lane: &str) -> &'static str {
+    let lane = lane.to_lowercase();
+    if lane.contains("cpu usage") {
+        "cores"
+    } else if lane.contains("memory") {
+        "MB"
+    } else if lane.contains("network") {
+        "Mbps"
+    } else if lane.contains("pressure") {
+        "%"
+    } else {
+        ""
+    }
+}
+
+/// A compact `"<value> <unit>"` label, rescaling memory past 1 GB.
+fn format_counter(value: f64, unit: &str) -> String {
+    match unit {
+        "cores" => format!("{value:.2} cores"),
+        "MB" => {
+            if value >= 1024.0 {
+                format!("{:.2} GB", value / 1024.0)
+            } else {
+                format!("{value:.0} MB")
+            }
+        }
+        "Mbps" => format!("{value:.2} Mbps"),
+        "%" => format!("{value:.0}%"),
+        _ => format!("{value:.1}"),
+    }
+}
+
+/// Paints the hover crosshair: a vertical line at the cursor x spanning both
+/// sections, the hovered absolute time near the ruler, and — for each counter
+/// series whose range covers the time — a dot where the crosshair meets its
+/// stacked line plus a value label. Stacking matches [`paint_graph`].
+fn paint_crosshair(
+    counters: &[CounterLane],
+    tv: TimeView,
+    regions: Regions,
+    at: Point<Pixels>,
+    palette: &Palette,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let cx_px = f32::from(at.x).min(regions.content_right);
+    let t = tv.t_of(cx_px - regions.content_left);
+
+    let line = Bounds::new(
+        point(px(cx_px), px(regions.flame_top)),
+        size(px(1.), px(regions.body_bottom - regions.flame_top)),
+    );
+    window.paint_quad(quad(
+        line,
+        px(0.),
+        palette.crosshair,
+        px(0.),
+        Hsla::from(palette.border),
+        BorderStyle::Solid,
+    ));
+
+    let font = bviz_ui_assets::text_metrics(window).font;
+
+    // The hovered time, formatted like the ruler labels, just under the ruler.
+    let step = nice_step(RULER_TARGET_TICK_PX / tv.px_per_us);
+    let time_line = bviz_ui_assets::shape_line(
+        window,
+        format_time(t, step),
+        font.clone(),
+        px(CROSSHAIR_VALUE_SIZE),
+        palette.label.into(),
+    );
+    let time_w = f32::from(time_line.width());
+    let time_x = (cx_px + CROSSHAIR_LABEL_GAP).min(regions.content_right - time_w);
+    let _ = time_line.paint(
+        point(px(time_x), px(regions.flame_top + 1.)),
+        px(CROSSHAIR_VALUE_SIZE),
+        TextAlign::Left,
+        None,
+        window,
+        cx,
+    );
+
+    if !regions.has_graph {
+        return;
+    }
+    let lanes = graph_lanes(counters.len(), regions.graph_top, graph_height_of(regions));
+    for gl in lanes {
+        if gl.chart_h <= 0.0 {
+            continue;
+        }
+        let counter = &counters[gl.lane];
+        // The lane peak — the largest stacked total over time — scales the chart,
+        // exactly as paint_graph derives it.
+        let mut totals: BTreeMap<i64, f64> = BTreeMap::new();
+        for series in &counter.series {
+            for p in &series.points {
+                *totals.entry(p.ts_us).or_default() += p.value;
+            }
+        }
+        let peak = totals.values().copied().fold(0.0_f64, f64::max);
+        if peak <= 0.0 {
+            continue;
+        }
+        let scale = gl.chart_h / peak as f32;
+        let chart_bottom = gl.top + METRICS.header_height + gl.chart_h;
+
+        // Walk the series in draw order, accumulating each one's value at `t`
+        // onto the running baseline so the dot lands on the stacked line.
+        let unit = unit_for(&counter.name);
+        let mut base = 0.0_f64;
+        let mut label_y = gl.top + METRICS.header_height + 1.0;
+        for series in &counter.series {
+            let Some(value) = sample_at(&series.points, t) else {
+                continue;
+            };
+            let stacked = base + value;
+            base = stacked;
+            let dot_y = chart_bottom - stacked as f32 * scale;
+            let color = counter_color(&series.name);
+            window.paint_quad(quad(
+                Bounds::new(
+                    point(
+                        px(cx_px - CROSSHAIR_DOT_RADIUS),
+                        px(dot_y - CROSSHAIR_DOT_RADIUS),
+                    ),
+                    size(
+                        px(2.0 * CROSSHAIR_DOT_RADIUS),
+                        px(2.0 * CROSSHAIR_DOT_RADIUS),
+                    ),
+                ),
+                px(CROSSHAIR_DOT_RADIUS),
+                color,
+                px(0.),
+                Hsla::from(palette.border),
+                BorderStyle::Solid,
+            ));
+
+            let value_line = bviz_ui_assets::shape_line(
+                window,
+                format_counter(value, unit),
+                font.clone(),
+                px(CROSSHAIR_VALUE_SIZE),
+                opaque(color).into(),
+            );
+            let value_w = f32::from(value_line.width());
+            // Default to the right of the line; flip to the left near the edge.
+            let mut value_x = cx_px + CROSSHAIR_LABEL_GAP;
+            if value_x + value_w > regions.content_right {
+                value_x = cx_px - CROSSHAIR_LABEL_GAP - value_w;
+            }
+            let _ = value_line.paint(
+                point(px(value_x), px(label_y)),
+                px(CROSSHAIR_VALUE_SIZE),
+                TextAlign::Left,
+                None,
+                window,
+                cx,
+            );
+            label_y += CROSSHAIR_VALUE_SIZE + 1.0;
+        }
+    }
+}
+
+/// `color` at full opacity, for legible text tinted like its translucent dot.
+fn opaque(color: Hsla) -> Hsla {
+    Hsla { a: 1.0, ..color }
+}
+
 /// Perceptual luminance of `c`, used to choose contrasting text and theme-fitting
 /// lightness.
 fn luminance(c: Rgba) -> f32 {
@@ -1559,6 +1807,7 @@ mod tests {
             scroll_track: dark,
             scroll_thumb: dark,
             panel: dark,
+            crosshair: dark,
         }
     }
 
@@ -1639,6 +1888,53 @@ mod tests {
         // Lanes stack from graph_top, header band plus chart tall.
         assert_eq!(lanes[0].top, graph_top);
         assert_eq!(lanes[1].top, graph_top + METRICS.header_height + 40.0);
+    }
+
+    #[test]
+    fn sample_at_interpolates_within_range() {
+        let points = vec![
+            CounterPoint {
+                ts_us: 100,
+                value: 10.0,
+            },
+            CounterPoint {
+                ts_us: 200,
+                value: 30.0,
+            },
+        ];
+        // Exact hit on a point.
+        assert_eq!(sample_at(&points, 100.0), Some(10.0));
+        assert_eq!(sample_at(&points, 200.0), Some(30.0));
+        // Midpoint linear interpolation.
+        assert_eq!(sample_at(&points, 150.0), Some(20.0));
+        // Out of range on either side yields no value.
+        assert_eq!(sample_at(&points, 50.0), None);
+        assert_eq!(sample_at(&points, 250.0), None);
+        assert_eq!(sample_at(&[], 100.0), None);
+    }
+
+    #[test]
+    fn unit_for_infers_from_lane_name() {
+        assert_eq!(unit_for("CPU usage (Bazel)"), "cores");
+        assert_eq!(unit_for("System memory usage"), "MB");
+        assert_eq!(unit_for("Network Up (system)"), "Mbps");
+        // "memory" wins over "pressure" by the inference order, so a pressure
+        // lane reads as "%" only when it does not also mention memory.
+        assert_eq!(unit_for("CPU pressure"), "%");
+        assert_eq!(unit_for("Action count"), "");
+        assert_eq!(unit_for("System load average"), "");
+    }
+
+    #[test]
+    fn format_counter_uses_unit_and_thresholds() {
+        assert_eq!(format_counter(3.5, "cores"), "3.50 cores");
+        assert_eq!(format_counter(512.0, "MB"), "512 MB");
+        // At and past 1024 MB, rescale to GB.
+        assert_eq!(format_counter(1024.0, "MB"), "1.00 GB");
+        assert_eq!(format_counter(2048.0, "MB"), "2.00 GB");
+        assert_eq!(format_counter(12.5, "Mbps"), "12.50 Mbps");
+        assert_eq!(format_counter(80.0, "%"), "80%");
+        assert_eq!(format_counter(42.0, ""), "42.0");
     }
 
     #[test]
