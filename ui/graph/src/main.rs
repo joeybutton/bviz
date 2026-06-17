@@ -131,6 +131,8 @@ struct PaintBox {
     /// Fill resolved from the active theme when the box vec is built.
     fill: Rgba,
     label: String,
+    /// The just-toggled box, drawn with an emphasis border and inset glow.
+    highlight: bool,
 }
 
 /// Loads, lays out, and renders a Bazel build graph.
@@ -167,6 +169,15 @@ struct GraphView {
     /// expand/collapse handle (a leaf can't open, a singleton auto-expands), so a
     /// click or caret can tell an expandable box from a plain one.
     expandable: Rc<RefCell<HashSet<String>>>,
+    /// The most-recently toggled node id, briefly emphasized so the eye can find
+    /// the box that just opened or closed after the relayout shifts everything.
+    recent: Option<String>,
+    /// Guards the highlight-clearing timer: a later toggle bumps this, so an
+    /// earlier timer firing won't clear a fresher highlight.
+    highlight_seq: u64,
+    /// Set after a toggle so the next relayout's first paint pans `recent` into
+    /// view if the relayout pushed it off-screen.
+    recenter: Rc<Cell<bool>>,
     /// Holds the background load/relayout task so it isn't cancelled on drop.
     _load_task: Task<()>,
 }
@@ -174,6 +185,13 @@ struct GraphView {
 /// A cursor must travel at least this far from the press before the gesture
 /// counts as a drag rather than a click.
 const CLICK_SLOP: f32 = 4.0;
+
+/// How long the just-toggled box stays emphasized before the highlight fades.
+const HIGHLIGHT_LINGER: Duration = Duration::from_millis(1100);
+
+/// Accent for the just-toggled box's emphasis border and inset glow, bright
+/// enough to catch the eye on either a light or dark background.
+const HIGHLIGHT_ACCENT: Rgba = Rgba { r: 1.0, g: 0.819, b: 0.4, a: 1.0 };
 
 impl GraphView {
     fn new(inputs: Vec<Input>, window: &mut Window, cx: &mut Context<Self>) -> Self {
@@ -223,6 +241,9 @@ impl GraphView {
             base,
             expanded: Rc::new(RefCell::new(HashSet::new())),
             expandable: Rc::new(RefCell::new(HashSet::new())),
+            recent: None,
+            highlight_seq: 0,
+            recenter: Rc::new(Cell::new(false)),
             _load_task: load_task,
         }
     }
@@ -238,7 +259,10 @@ impl GraphView {
         self._load_task = load_in_background(
             cx,
             move || relayout(&graph, &expanded),
-            |view, laid_out, _| view.source = Source::Loaded(laid_out),
+            |view, laid_out, _| {
+                view.source = Source::Loaded(laid_out);
+                view.recenter.set(true);
+            },
         );
     }
 
@@ -254,6 +278,8 @@ impl GraphView {
         pan: Rc<Cell<(f32, f32)>>,
         fitted: Rc<Cell<bool>>,
         viewport: Rc<Cell<Bounds<Pixels>>>,
+        recent: Option<&str>,
+        recenter: Rc<Cell<bool>>,
         palette: Palette,
     ) -> Stateful<Div> {
         let boxes: Vec<PaintBox> = g
@@ -272,8 +298,16 @@ impl GraphView {
                     bviz_ui_theme::mix(kind_accent(&b.kind), palette.background, KIND_BLEND)
                 },
                 label: b.label.clone(),
+                highlight: recent == Some(b.id.as_str()),
             })
             .collect();
+        // Center of the just-toggled box, to pan into view on the next paint.
+        let recenter_target = recent.and_then(|id| {
+            g.boxes
+                .iter()
+                .find(|b| b.id == id)
+                .map(|b| (b.x + b.width / 2.0, b.y + b.height / 2.0))
+        });
         let connectors: Vec<(Vec<(f64, f64)>, EdgeKind)> = g
             .connectors
             .iter()
@@ -317,8 +351,13 @@ impl GraphView {
         // Capture the viewport bounds and fit the graph to them. The fit needs
         // the viewport size, known only once laid out, so it happens here.
         let prepaint = {
-            let (zoom, pan, fitted, viewport) =
-                (zoom.clone(), pan.clone(), fitted.clone(), viewport.clone());
+            let (zoom, pan, fitted, viewport, recenter) = (
+                zoom.clone(),
+                pan.clone(),
+                fitted.clone(),
+                viewport.clone(),
+                recenter.clone(),
+            );
             move |bounds: Bounds<Pixels>, _: &mut Window, _: &mut App| {
                 let prev = viewport.get();
                 viewport.set(bounds);
@@ -345,6 +384,27 @@ impl GraphView {
                         f32::from(bounds.size.width) / 2. - center_x * z,
                         f32::from(bounds.size.height) / 2. - center_y * z,
                     ));
+                }
+                // Bring the just-toggled box into view if the relayout pushed it
+                // off-screen, holding zoom and panning its center to the middle.
+                if recenter.get() {
+                    if let Some((tx, ty)) = recenter_target {
+                        let z = zoom.get();
+                        let (px, py) = pan.get();
+                        let sx = f32::from(bounds.origin.x) + (tx as f32 + MARGIN as f32) * z + px;
+                        let sy = f32::from(bounds.origin.y) + (ty as f32 + MARGIN as f32) * z + py;
+                        let inside = sx >= f32::from(bounds.origin.x)
+                            && sx <= f32::from(bounds.origin.x + bounds.size.width)
+                            && sy >= f32::from(bounds.origin.y)
+                            && sy <= f32::from(bounds.origin.y + bounds.size.height);
+                        if !inside {
+                            pan.set((
+                                f32::from(bounds.size.width) / 2. - (tx as f32 + MARGIN as f32) * z,
+                                f32::from(bounds.size.height) / 2. - (ty as f32 + MARGIN as f32) * z,
+                            ));
+                        }
+                    }
+                    recenter.set(false);
                 }
             }
         };
@@ -419,6 +479,8 @@ impl Render for GraphView {
                         self.pan.clone(),
                         self.fitted.clone(),
                         self.viewport.clone(),
+                        self.recent.as_deref(),
+                        self.recenter.clone(),
                         palette,
                     )
                     .on_mouse_down(
@@ -561,14 +623,27 @@ fn paint_box(
     if !rect.intersects(&bounds) {
         return;
     }
-    window.paint_quad(quad(
-        rect,
-        px(6. * zoom),
-        b.fill,
-        px(1.),
-        Hsla::from(palette.border),
-        BorderStyle::Solid,
-    ));
+    let corner = px(6. * zoom);
+    let (border_w, border_c) = if b.highlight {
+        (px((2. * zoom).max(2.)), Hsla::from(HIGHLIGHT_ACCENT))
+    } else {
+        (px(1.), Hsla::from(palette.border))
+    };
+    window.paint_quad(quad(rect, corner, b.fill, border_w, border_c, BorderStyle::Solid));
+    if b.highlight {
+        // A faint accent wash over the fill so the emphasis reads as a glow, not
+        // just a brighter outline.
+        let mut wash = HIGHLIGHT_ACCENT;
+        wash.a = 0.15;
+        window.paint_quad(quad(
+            rect,
+            corner,
+            wash,
+            px(0.),
+            Hsla::transparent_black(),
+            BorderStyle::Solid,
+        ));
+    }
 
     // The label font comes from the window's inherited UI text style (the same
     // one the chrome and the other views use), so the views stay visually
@@ -828,9 +903,23 @@ fn end_drag(view: &mut GraphView, event: &MouseUpEvent, cx: &mut Context<GraphVi
     let id = hit.id.clone();
     let mut expanded = view.expanded.borrow_mut();
     if !expanded.remove(&id) {
-        expanded.insert(id);
+        expanded.insert(id.clone());
     }
     drop(expanded);
+    view.recent = Some(id);
+    view.highlight_seq = view.highlight_seq.wrapping_add(1);
+    let seq = view.highlight_seq;
+    cx.spawn(async move |this, cx| {
+        cx.background_executor().timer(HIGHLIGHT_LINGER).await;
+        let _ = this.update(cx, |this, cx| {
+            // Skip if a newer toggle has taken over the highlight.
+            if this.highlight_seq == seq {
+                this.recent = None;
+                cx.notify();
+            }
+        });
+    })
+    .detach();
     view.retoggle(cx);
 }
 
