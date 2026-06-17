@@ -190,8 +190,9 @@ struct GraphView {
     /// Node under the cursor, whose neighborhood stays lit while everything else
     /// dims; `None` when the cursor is over no node.
     hovered: Option<String>,
-    /// Whether hovering a node dims the rest of the graph; toggled with `h` so
-    /// the dimming can be turned off when it is more noise than help.
+    /// Whether hovering a node dims the rest of the graph; flipped by the `h` key
+    /// or the on-screen toggle so the dimming can be turned off when it is more
+    /// noise than help.
     dim_enabled: bool,
     /// Holds the background load/relayout task so it isn't cancelled on drop.
     _load_task: Task<()>,
@@ -315,31 +316,45 @@ impl GraphView {
         dim_enabled: bool,
         palette: Palette,
     ) -> Stateful<Div> {
-        // Dimming traces the hovered node's neighborhood, which is only worth the
-        // visual cost when the node is a connected leaf: a compound container or a
-        // node with no incident edge would dim much of the graph for no signal, so
-        // those (and a disabled toggle) suppress dimming entirely.
-        let dim_for = hovered.filter(|h| {
-            dim_enabled
-                && !g.boxes.iter().any(|b| b.id == *h && b.compound)
-                && g.connectors.iter().any(|c| c.from == *h || c.to == *h)
-        });
-        // The hovered node plus the node at the other end of each of its edges;
-        // everything outside this set dims while a node is hovered.
-        let active: HashSet<&str> = dim_for
+        // Dimming traces the hovered node's whole subtree neighborhood: the boxes
+        // geometrically nested inside the hovered box (it and its descendants,
+        // since the layout nests children within their parent's rect) plus the far
+        // endpoint of every edge incident to that subtree. The subtree's incident
+        // edges stay lit and everything else dims, but only when there is at least
+        // one such edge to reveal — an edgeless subtree (or a disabled toggle)
+        // would fade the graph for no signal, so those suppress dimming entirely.
+        let hovered_box = hovered.and_then(|h| g.boxes.iter().find(|b| b.id == h));
+        let subtree: HashSet<&str> = hovered_box
+            .filter(|_| dim_enabled)
             .map(|h| {
-                let mut set = HashSet::from([h]);
-                for c in &g.connectors {
-                    if c.from == h {
-                        set.insert(c.to.as_str());
-                    }
-                    if c.to == h {
-                        set.insert(c.from.as_str());
-                    }
-                }
-                set
+                g.boxes
+                    .iter()
+                    .filter(|b| {
+                        b.x >= h.x
+                            && b.y >= h.y
+                            && b.x + b.width <= h.x + h.width
+                            && b.y + b.height <= h.y + h.height
+                    })
+                    .map(|b| b.id.as_str())
+                    .collect()
             })
             .unwrap_or_default();
+        // The subtree plus the far endpoint of each edge incident to it; an empty
+        // active set means no incident edges, so dimming stays off.
+        let mut active: HashSet<&str> = subtree.clone();
+        let mut has_edge = false;
+        for c in &g.connectors {
+            let (from_in, to_in) = (subtree.contains(c.from.as_str()), subtree.contains(c.to.as_str()));
+            if from_in || to_in {
+                has_edge = true;
+                active.insert(c.from.as_str());
+                active.insert(c.to.as_str());
+            }
+        }
+        if !has_edge {
+            active.clear();
+        }
+        let dim_active = has_edge;
         // The highlight fades linearly to nothing over the linger window.
         let highlight_alpha =
             (1.0 - recent_at.elapsed().as_secs_f32() / HIGHLIGHT_LINGER.as_secs_f32()).clamp(0.0, 1.0);
@@ -360,7 +375,7 @@ impl GraphView {
                 },
                 label: b.label.clone(),
                 highlight: if recent == Some(b.id.as_str()) { highlight_alpha } else { 0.0 },
-                dim: dim_for.is_some() && !active.contains(b.id.as_str()),
+                dim: dim_active && !active.contains(b.id.as_str()),
             })
             .collect();
         // The just-toggled box's full rect, to frame on the next paint.
@@ -374,7 +389,9 @@ impl GraphView {
             .connectors
             .iter()
             .map(|c| {
-                let dim = dim_for.is_some_and(|h| c.from != h && c.to != h);
+                let active_edge =
+                    subtree.contains(c.from.as_str()) || subtree.contains(c.to.as_str());
+                let dim = dim_active && !active_edge;
                 (c.points.clone(), c.kind, dim)
             })
             .collect();
@@ -440,6 +457,42 @@ impl GraphView {
                         .child("laying out…"),
                 )
         });
+        // A pill that shows and toggles hover-dim, kept in sync with the `h` key
+        // since both flip the same field. On reads in the file-leaf accent with a
+        // filled dot; off reads muted with a hollow dot.
+        let dim_toggle = {
+            let entity = entity.clone();
+            let accent = kind_accent("artifact");
+            let (dot, label_color, border_color) = if dim_enabled {
+                ('\u{25CF}', accent, accent)
+            } else {
+                ('\u{25CB}', palette.label, palette.border)
+            };
+            div()
+                .id("dim-toggle")
+                .absolute()
+                .left_2()
+                .top_2()
+                .flex()
+                .items_center()
+                .gap_1()
+                .px_2()
+                .py_1()
+                .rounded_md()
+                .bg(palette.container_fill)
+                .border_1()
+                .border_color(border_color)
+                .text_xs()
+                .text_color(label_color)
+                .cursor_pointer()
+                .child(format!("{dot} dim"))
+                .on_click(move |_, _, cx| {
+                    entity.update(cx, |this, cx| {
+                        this.dim_enabled = !this.dim_enabled;
+                        cx.notify();
+                    });
+                })
+        };
         let content = (
             g.width as f32 + 2. * MARGIN as f32,
             g.height as f32 + 2. * MARGIN as f32,
@@ -551,6 +604,7 @@ impl GraphView {
             )
             .children(legend)
             .children(relaying_indicator)
+            .child(dim_toggle)
     }
 
     fn status(&self) -> String {
