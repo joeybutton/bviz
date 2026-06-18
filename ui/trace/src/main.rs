@@ -470,6 +470,7 @@ impl TraceView {
                 viewport.clone(),
             );
             move |bounds: Bounds<Pixels>, _: &mut Window, _: &mut App| {
+                let old_bounds = viewport.get();
                 viewport.set(bounds);
                 // The time axis maps to the time column, past the gutter and clear
                 // of the reserved vertical-bar column.
@@ -485,9 +486,27 @@ impl TraceView {
                 if !fitted.get() {
                     view.set(TimeView::fit(profile.span, time_w, EDGE_MARGIN_PX));
                     fitted.set(true);
+                } else {
+                    // On a width change, keep the zoom relative to the window so a
+                    // resize stays invertible — without this the view spills over
+                    // (and a scroll bar appears) after a grow-then-shrink cycle.
+                    let old_time_w = Regions::new(
+                        old_bounds,
+                        profile.counters.len(),
+                        graph_height,
+                        gutter_width,
+                        flame_total,
+                    )
+                    .time_w;
+                    if old_bounds.size.width > px(0.) && (old_time_w - time_w).abs() > f32::EPSILON
+                    {
+                        let mut v = view.get();
+                        v.rescale_to_width(profile.span, old_time_w, time_w, EDGE_MARGIN_PX);
+                        view.set(v);
+                    }
                 }
-                // Hold the bounds across a resize: keep the fit as the zoom floor
-                // and the pan within the span for the current width.
+                // Keep the fit as the zoom floor and the pan within the span for
+                // the current width.
                 let mut v = view.get();
                 v.px_per_us = v
                     .px_per_us
