@@ -271,6 +271,8 @@ enum Drag {
     /// leading edge.
     VThumb(f32),
     HThumb(f32),
+    /// A press on the stats-table scroll thumb/track, holding that grab offset.
+    StatsThumb(f32),
     /// A press on the splitter resizes the graph section.
     Splitter,
     /// A press on the gutter handle resizes the gutter.
@@ -559,6 +561,9 @@ struct TraceView {
     stats_cache: RefCell<Option<StatsCache>>,
     /// Scroll position of the virtualized stats table body.
     stats_scroll: UniformListScrollHandle,
+    /// Stats-table scroll-bar geometry set during paint, read by mouse handlers;
+    /// `None` when the body fits and so shows no bar.
+    stats_bar: Rc<Cell<Option<Scrollbar>>>,
     /// The slice under the cursor, if any, drawn as a tooltip.
     hover: Option<Hover>,
     /// The flame-graph box under the cursor in graph mode, drawn as a tooltip.
@@ -637,6 +642,7 @@ impl TraceView {
             stats_desc: true,
             stats_cache: RefCell::new(None),
             stats_scroll: UniformListScrollHandle::new(),
+            stats_bar: Rc::new(Cell::new(None)),
             hover: None,
             flame_hover: None,
             crosshair: None,
@@ -1212,10 +1218,11 @@ impl TraceView {
                     }))
             }));
 
+        let row_count = cells.len();
         let scroll_track = palette.scroll_track;
         let body = uniform_list(
             "stats-body",
-            cells.len(),
+            row_count,
             move |range, _window, _cx| {
                 range
                     .map(|i| {
@@ -1241,6 +1248,43 @@ impl TraceView {
         )
         .track_scroll(&self.stats_scroll);
 
+        // A scroll bar painted over the body's right edge: a canvas reads the
+        // list's scroll offset and content/visible extents to place the thumb,
+        // stashes the geometry for hit-testing, and re-installs the drag handlers
+        // each frame while a thumb drag is in progress.
+        let scroll = self.stats_scroll.clone();
+        let stats_bar = self.stats_bar.clone();
+        let entity = cx.entity();
+        let dragging = matches!(self.drag, Drag::StatsThumb(_));
+        let track = palette.scroll_track;
+        let thumb = palette.scroll_thumb;
+        let bar = canvas(
+            move |_, _, _| {},
+            move |bounds, _, window: &mut Window, _| {
+                let content = row_count as f32 * STATS_ROW_HEIGHT;
+                let visible = f32::from(bounds.size.height);
+                let offset = -f32::from(scroll.0.borrow().base_handle.offset().y);
+                let layout = Scrollbar::new(
+                    Axis::Vertical,
+                    Bounds::new(
+                        point(bounds.origin.x + bounds.size.width - px(BAR_WIDTH), bounds.origin.y),
+                        size(px(BAR_WIDTH), bounds.size.height),
+                    ),
+                    content,
+                    visible,
+                    offset,
+                    MIN_THUMB,
+                );
+                if let Some(bar) = layout {
+                    bar.paint(track, thumb, window);
+                }
+                stats_bar.set(layout);
+                if dragging {
+                    track_drag(window, &entity, on_drag, end_drag);
+                }
+            },
+        );
+
         div()
             .flex()
             .flex_col()
@@ -1249,7 +1293,14 @@ impl TraceView {
             .text_color(palette.label)
             .text_size(px(STATS_TEXT_SIZE))
             .child(header)
-            .child(body.flex_1().w_full())
+            .child(
+                div()
+                    .relative()
+                    .flex_1()
+                    .w_full()
+                    .child(body.size_full())
+                    .child(bar.absolute().inset_0()),
+            )
     }
 
     /// Switches the view mode, resetting the vertical scroll since the two modes
@@ -1412,9 +1463,17 @@ impl Render for TraceView {
                         .h(px(self.graph_height.max(STATS_HEADER_HEIGHT + STATS_ROW_HEIGHT)))
                         .w_full()
                         .overflow_hidden()
-                        .on_mouse_down(MouseButton::Left, |_, _, cx: &mut App| {
-                            cx.stop_propagation();
-                        })
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, e: &MouseDownEvent, _, cx| {
+                                // A press on the scroll thumb/track drives the bar;
+                                // the canvas paint re-installs the drag handlers
+                                // while the drag is set, so repaint now.
+                                this.press_stats(e.position);
+                                cx.stop_propagation();
+                                cx.notify();
+                            }),
+                        )
                         .on_scroll_wheel(|_, _, cx: &mut App| cx.stop_propagation())
                         .child(self.stats_table(&palette, cx));
                     (splitter, table)
@@ -1737,6 +1796,19 @@ impl TraceView {
         self.last_mouse = pos;
     }
 
+    /// Begins a stats-table scroll drag if `pos` hit its bar (grabbing the thumb
+    /// where pressed, a track click centering the thumb there); otherwise leaves
+    /// the press to fall through to a row.
+    fn press_stats(&mut self, pos: Point<Pixels>) {
+        if let Some(bar) = self.stats_bar.get() {
+            if bar.track_hit(pos) {
+                let grab = bar.grab(pos);
+                self.drag = Drag::StatsThumb(grab);
+                stats_thumb_to(self, pos, grab);
+            }
+        }
+    }
+
     /// Maps a horizontal thumb drag to a scroll offset for whichever mode owns the
     /// h-bar: the chart's time axis or the graph's normalized width.
     fn hthumb_to(&mut self, pos: Point<Pixels>, grab: f32) {
@@ -1790,6 +1862,7 @@ fn on_drag(view: &mut TraceView, event: &MouseMoveEvent, cx: &mut Context<TraceV
         }
         Drag::VThumb(grab) => scroll_thumb_to(view, event.position, grab),
         Drag::HThumb(grab) => view.hthumb_to(event.position, grab),
+        Drag::StatsThumb(grab) => stats_thumb_to(view, event.position, grab),
         Drag::Splitter => {
             let Source::Loaded(profile) = &view.source else {
                 return;
@@ -1840,6 +1913,18 @@ fn scroll_thumb_to(view: &mut TraceView, pos: Point<Pixels>, grab: f32) {
         return;
     };
     view.scroll_y.set(bar.offset_at(pos, grab));
+}
+
+/// Maps a stats-table thumb drag back to the list's scroll offset (negative y as
+/// the body scrolls down).
+fn stats_thumb_to(view: &mut TraceView, pos: Point<Pixels>, grab: f32) {
+    let Some(bar) = view.stats_bar.get() else {
+        return;
+    };
+    let handle = view.stats_scroll.0.borrow();
+    let mut offset = handle.base_handle.offset();
+    offset.y = px(-bar.offset_at(pos, grab));
+    handle.base_handle.set_offset(offset);
 }
 
 /// Maps a horizontal thumb drag back to a pan start time, then clamps the view.
