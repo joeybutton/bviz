@@ -12,7 +12,7 @@
 //! relative to the edge's containing node, so both are accumulated up the
 //! containment chain into the absolute, top-left frame the renderer expects.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use org_eclipse_elk_alg_layered::org::eclipse::elk::alg::layered::options::LayeredOptions;
 use org_eclipse_elk_alg_layered::org::eclipse::elk::alg::layered::plain_java_initialization::initialize_plain_java_layout;
@@ -59,10 +59,13 @@ pub struct Box {
     pub group: bool,
 }
 
-/// An edge polyline: start, bend points, end, in order.
+/// An edge polyline: start, bend points, end, in order. One connector carries
+/// every provenance that runs between the same node pair, since ELK routes the
+/// pair once and the renderer draws those kinds along the shared route.
 pub struct Connector {
     pub points: Vec<(f64, f64)>,
-    pub kind: EdgeKind,
+    /// The distinct [`EdgeKind`]s on this pair, in enum order.
+    pub kinds: Vec<EdgeKind>,
     /// Node ids the edge runs between, for hit-testing a node's connections.
     pub from: Id,
     pub to: Id,
@@ -105,21 +108,35 @@ pub fn layout(graph: &Graph) -> LaidOut {
         }
     }
 
+    // Route one edge per ordered node pair, not one per provenance: the parallel
+    // query/cquery/aquery edges between the same two boxes would each cost ELK a
+    // full route, and that edge count is what dominates layout time on a dense
+    // view. Collect the distinct kinds per pair (keyed in canonical id order) so
+    // the renderer can still draw each along the shared route.
+    let mut kinds_of: BTreeMap<(Id, Id), Vec<EdgeKind>> = BTreeMap::new();
+    for edge in &graph.edges {
+        if !elk_of.contains_key(&edge.from) || !elk_of.contains_key(&edge.to) {
+            continue;
+        }
+        let kinds = kinds_of.entry((edge.from, edge.to)).or_default();
+        if !kinds.contains(&edge.kind) {
+            kinds.push(edge.kind);
+        }
+    }
     // create_simple_edge places each edge in the common container of its
     // endpoints, which is where ELK then routes and reports it.
-    let mut edges: Vec<(ElkEdgeRef, EdgeKind, Id, Id)> = Vec::with_capacity(graph.edges.len());
-    for edge in &graph.edges {
-        let (Some(from), Some(to)) = (elk_of.get(&edge.from), elk_of.get(&edge.to)) else {
-            continue;
-        };
+    let mut edges: Vec<(ElkEdgeRef, Vec<EdgeKind>, Id, Id)> = Vec::with_capacity(kinds_of.len());
+    for ((from_id, to_id), mut kinds) in kinds_of {
+        kinds.sort_unstable();
+        let (from, to) = (&elk_of[&from_id], &elk_of[&to_id]);
         edges.push((
             ElkGraphUtil::create_simple_edge(
                 ElkConnectableShapeRef::Node(from.clone()),
                 ElkConnectableShapeRef::Node(to.clone()),
             ),
-            edge.kind,
-            edge.from,
-            edge.to,
+            kinds,
+            from_id,
+            to_id,
         ));
     }
 
@@ -169,13 +186,13 @@ pub fn layout(graph: &Graph) -> LaidOut {
     let boxes: Vec<Box> = boxes.into_iter().map(|(_, b)| b).collect();
 
     let connectors = edges
-        .iter()
-        .filter_map(|(edge, kind, from, to)| {
-            connector(edge).map(|points| Connector {
+        .into_iter()
+        .filter_map(|(edge, kinds, from, to)| {
+            connector(&edge).map(|points| Connector {
                 points,
-                kind: *kind,
-                from: *from,
-                to: *to,
+                kinds,
+                from,
+                to,
             })
         })
         .collect();

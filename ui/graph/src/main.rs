@@ -35,6 +35,9 @@ const ARROW_HALF_WIDTH: f64 = 4.0;
 /// How far the stroke runs past the arrowhead base into the head, closing the
 /// seam without letting the line broaden the visible tip.
 const ARROW_OVERDRAW: f64 = 1.0;
+/// Perpendicular gap (pre-zoom px) between the parallel provenance lines drawn
+/// along a node pair that several queries connect.
+const PARALLEL_SPACING: f32 = 3.0;
 
 /// Fraction by which a kind accent is blended toward the themed background; the
 /// result is the leaf fill, so kinds stay recognizable yet read on light or dark.
@@ -447,20 +450,20 @@ impl GraphView {
                 .find(|b| b.id == id)
                 .map(|b| (b.x, b.y, b.width, b.height))
         });
-        let connectors: Vec<(Vec<(f64, f64)>, EdgeKind, bool)> = g
+        let connectors: Vec<(Vec<(f64, f64)>, Vec<EdgeKind>, bool)> = g
             .connectors
             .iter()
             .map(|c| {
                 let active_edge = subtree.contains(&c.from) || subtree.contains(&c.to);
                 let dim = dim_active && !active_edge;
-                (c.points.clone(), c.kind, dim)
+                (c.points.clone(), c.kinds.clone(), dim)
             })
             .collect();
         // Edge kinds actually drawn, in enum order, so the legend explains only
         // the provenances present in this graph.
         let present: Vec<EdgeKind> = [EdgeKind::Query, EdgeKind::Cquery, EdgeKind::Aquery]
             .into_iter()
-            .filter(|k| g.connectors.iter().any(|c| c.kind == *k))
+            .filter(|k| g.connectors.iter().any(|c| c.kinds.contains(k)))
             .collect();
         let legend = (!present.is_empty()).then(|| {
             div()
@@ -648,8 +651,24 @@ impl GraphView {
                     for b in &boxes {
                         paint_box(b, bounds, z, p, &palette, window, cx);
                     }
-                    for (points, kind, dim) in &connectors {
-                        paint_connector(points, *kind, *dim, bounds, z, p, window);
+                    for (points, kinds, dim) in &connectors {
+                        // ELK routes a node pair once; fan its provenances out into
+                        // nested lanes centered on that route — each anchored at the
+                        // nodes like a lone edge — so a pair several queries connect
+                        // still shows each.
+                        let screen: Vec<(f32, f32)> = points
+                            .iter()
+                            .map(|(x, y)| {
+                                let s = to_screen(*x, *y, bounds, z, p);
+                                (f32::from(s.x), f32::from(s.y))
+                            })
+                            .collect();
+                        let n = kinds.len() as f32;
+                        for (i, kind) in kinds.iter().enumerate() {
+                            let slot = i as f32 - (n - 1.0) / 2.0;
+                            let lane = lane_polyline(&screen, slot * PARALLEL_SPACING * z);
+                            paint_connector(&lane, *kind, *dim, z, window);
+                        }
                     }
                     // While a drag is in progress, pan through window-global
                     // handlers so it keeps working when the cursor leaves the
@@ -1017,17 +1036,59 @@ fn paint_caret(
     }
 }
 
-/// Strokes a connector polyline and caps its end with a filled arrowhead
-/// pointing along the final segment.
-fn paint_connector(
-    points: &[(f64, f64)],
-    kind: EdgeKind,
-    dim: bool,
-    bounds: Bounds<Pixels>,
-    zoom: f32,
-    pan: (f32, f32),
-    window: &mut Window,
-) {
+/// A polyline parallel to `pts` at signed perpendicular distance `d` (screen px),
+/// for drawing a node pair's several provenances as evenly spaced parallel lanes.
+/// Every vertex is pushed off its segments' normals — the endpoints perpendicular
+/// to their one segment, the interior mitered at the corners — so a lane stays
+/// parallel to the route along its whole length and meets each node offset
+/// alongside its siblings rather than converging to a single point.
+fn lane_polyline(pts: &[(f32, f32)], d: f32) -> Vec<(f32, f32)> {
+    if d == 0.0 || pts.len() < 2 {
+        return pts.to_vec();
+    }
+    let left_normal = |from: (f32, f32), to: (f32, f32)| {
+        let (dx, dy) = (to.0 - from.0, to.1 - from.1);
+        let l = (dx * dx + dy * dy).sqrt().max(1e-3);
+        (-dy / l, dx / l)
+    };
+    let n = pts.len();
+    let mut out = Vec::with_capacity(n);
+    let ns = left_normal(pts[0], pts[1]);
+    out.push((pts[0].0 + ns.0 * d, pts[0].1 + ns.1 * d));
+    for i in 1..n - 1 {
+        out.push(miter_vertex(pts[i - 1], pts[i], pts[i + 1], d));
+    }
+    let ne = left_normal(pts[n - 2], pts[n - 1]);
+    out.push((pts[n - 1].0 + ne.0 * d, pts[n - 1].1 + ne.1 * d));
+    out
+}
+
+/// Offsets the corner `b` (between segments `a->b` and `b->c`) by `d` along the
+/// miter direction, keeping it distance `d` from both segments. A near-reversal,
+/// or a miter that would shoot far past a sharp corner, falls back to one
+/// segment's normal.
+fn miter_vertex(a: (f32, f32), b: (f32, f32), c: (f32, f32), d: f32) -> (f32, f32) {
+    let unit = |(x, y): (f32, f32)| {
+        let l = (x * x + y * y).sqrt().max(1e-3);
+        (x / l, y / l)
+    };
+    let d1 = unit((b.0 - a.0, b.1 - a.1));
+    let d2 = unit((c.0 - b.0, c.1 - b.1));
+    let (n1, n2) = ((-d1.1, d1.0), (-d2.1, d2.0)); // left normals
+    let m = (n1.0 + n2.0, n1.1 + n2.1);
+    let ml = (m.0 * m.0 + m.1 * m.1).sqrt();
+    if ml < 1e-3 {
+        return (b.0 + n1.0 * d, b.1 + n1.1 * d);
+    }
+    let mdir = (m.0 / ml, m.1 / ml);
+    let cos_half = (mdir.0 * n1.0 + mdir.1 * n1.1).max(0.35); // miter limit
+    let scale = d / cos_half;
+    (b.0 + mdir.0 * scale, b.1 + mdir.1 * scale)
+}
+
+/// Strokes a connector polyline (screen coordinates) and caps its end with a
+/// filled arrowhead pointing along the final segment.
+fn paint_connector(points: &[(f32, f32)], kind: EdgeKind, dim: bool, zoom: f32, window: &mut Window) {
     if points.len() < 2 {
         return;
     }
@@ -1035,10 +1096,7 @@ fn paint_connector(
     if dim {
         color.a = DIM_EDGE_ALPHA;
     }
-    let pts: Vec<Point<Pixels>> = points
-        .iter()
-        .map(|(x, y)| to_screen(*x, *y, bounds, zoom, pan))
-        .collect();
+    let pts: Vec<Point<Pixels>> = points.iter().map(|(x, y)| point(px(*x), px(*y))).collect();
 
     // Stop the stroke at the arrowhead's base (less a slight overdraw) so the
     // line doesn't paint through the head and broaden the visible tip.
@@ -1321,5 +1379,43 @@ mod tests {
         // Outside everything.
         assert!(hit_box(&boxes, 200.0, 200.0).is_none());
         assert!(hit_box(&boxes, -1.0, 50.0).is_none());
+    }
+
+    #[test]
+    fn lane_polyline_offsets_every_vertex_in_parallel() {
+        // An L route: right to (100,0), then down to (100,100).
+        let lane = lane_polyline(&[(0.0, 0.0), (100.0, 0.0), (100.0, 100.0)], 4.0);
+        // Endpoints are pushed perpendicular too (not anchored), so the first and
+        // last segments stay parallel to the route and meet the node offset.
+        assert!((lane[0].0).abs() < 0.01 && (lane[0].1 - 4.0).abs() < 0.5, "start {:?}", lane[0]);
+        assert!((lane[2].0 - 96.0).abs() < 0.5 && (lane[2].1 - 100.0).abs() < 0.01, "end {:?}", lane[2]);
+        // First segment horizontal like the route's (no fanning in at the node).
+        assert!((lane[0].1 - lane[1].1).abs() < 0.01, "first seg not parallel: {lane:?}");
+        // Last segment vertical like the route's.
+        assert!((lane[1].0 - lane[2].0).abs() < 0.01, "last seg not parallel: {lane:?}");
+    }
+
+    #[test]
+    fn lane_polyline_zero_offset_is_identity() {
+        let route = vec![(0.0, 0.0), (10.0, 0.0), (10.0, 10.0)];
+        assert_eq!(lane_polyline(&route, 0.0), route);
+    }
+
+    #[test]
+    fn lane_polyline_opposite_signs_nest_on_opposite_sides() {
+        let route = vec![(0.0, 0.0), (100.0, 0.0), (100.0, 100.0)];
+        let plus = lane_polyline(&route, 4.0)[1];
+        let minus = lane_polyline(&route, -4.0)[1];
+        // The two lanes never cross: their corners fall on opposite sides.
+        assert_ne!(plus.1.signum(), minus.1.signum(), "{plus:?} {minus:?}");
+    }
+
+    #[test]
+    fn lane_polyline_parallel_shifts_a_straight_run() {
+        // A straight two-point edge shifts whole, both ends offset perpendicular.
+        let lane = lane_polyline(&[(0.0, 0.0), (100.0, 0.0)], 4.0);
+        assert_eq!(lane.len(), 2);
+        assert!((lane[0].0).abs() < 0.01 && (lane[0].1 - 4.0).abs() < 0.5, "{lane:?}");
+        assert!((lane[1].0 - 100.0).abs() < 0.01 && (lane[1].1 - 4.0).abs() < 0.5, "{lane:?}");
     }
 }
