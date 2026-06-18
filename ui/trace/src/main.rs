@@ -550,6 +550,10 @@ struct TraceView {
     /// The thread index each `scope_dropdown` option past "All threads" maps to,
     /// in menu order, so the observer can recover the scope from the selection.
     scope_threads: Vec<usize>,
+    /// The thread/counter lane layout for the loaded profile, built on first use
+    /// and reused across paints and mouse handlers. It depends only on the
+    /// immutable profile, so it is cleared only when a new profile loads.
+    lanes: Rc<RefCell<Option<Rc<LaneLayout>>>>,
     /// The aggregated flame graph, built lazily on first use in graph mode and
     /// cleared when a new profile loads or the merge key changes. Walking every
     /// slice is too costly to repeat each paint.
@@ -597,6 +601,9 @@ impl TraceView {
             move || Profile::from_path(&path).map_err(|e| e.to_string()),
             |view, result, cx| {
                 view.invalidate_aggregates();
+                // The lane layout depends only on the profile, so it survives a
+                // key/scope change but must be dropped when a new profile loads.
+                view.lanes.borrow_mut().take();
                 view.flame_view.set(FlameView::FIT);
                 view.source = match result {
                     Ok(profile) => Source::Loaded(Rc::new(profile)),
@@ -640,6 +647,7 @@ impl TraceView {
             scope_dropdown,
             _scope_observer: scope_observer,
             scope_threads,
+            lanes: Rc::new(RefCell::new(None)),
             flame: Rc::new(RefCell::new(None)),
             stats: Rc::new(RefCell::new(None)),
             stats_sort: StatsColumn::Total,
@@ -696,10 +704,11 @@ impl TraceView {
 
     /// Builds the single-canvas timeline. The closure is `'static`, so it captures
     /// owned snapshots (`Rc`s and the const metrics) rather than borrowing the
-    /// view. The lane layout is recomputed inside the closure — it is cheap and
-    /// depends only on the profile, which the closure already owns.
+    /// view. The cached lane layout is passed in as an `Rc` the closure owns.
+    #[allow(clippy::too_many_arguments)]
     fn timeline(
         profile: Rc<Profile>,
+        lanes: Rc<LaneLayout>,
         view: Rc<Cell<TimeView>>,
         scroll_y: Rc<Cell<f32>>,
         flame_view: Rc<Cell<FlameView>>,
@@ -715,8 +724,9 @@ impl TraceView {
         palette: Palette,
     ) -> Stateful<Div> {
         let prepaint = {
-            let (profile, view, fitted, viewport) = (
+            let (profile, lanes, view, fitted, viewport) = (
                 profile.clone(),
+                lanes.clone(),
                 view.clone(),
                 fitted.clone(),
                 viewport.clone(),
@@ -726,7 +736,7 @@ impl TraceView {
                 viewport.set(bounds);
                 // The time axis maps to the time column, past the gutter and clear
                 // of the reserved vertical-bar column.
-                let flame_total = flame_total_height(&lay_out_lanes(&profile, &METRICS));
+                let flame_total = flame_total_height(&lanes);
                 let regions = Regions::new(
                     bounds,
                     profile.counters.len(),
@@ -767,7 +777,7 @@ impl TraceView {
                 view.set(v);
             }
         };
-        let flame_total = flame_total_height(&lay_out_lanes(&profile, &METRICS));
+        let flame_total = flame_total_height(&lanes);
         let regions = Regions::new(
             viewport.get(),
             profile.counters.len(),
@@ -868,13 +878,13 @@ impl TraceView {
                         }
                         return;
                     }
-                    let layout = lay_out_lanes(&profile, &METRICS);
+                    let layout = &*lanes;
                     let tv = view.get();
                     let n_counters = profile.counters.len();
                     let graph_height = entity.read(cx).graph_height;
                     let gutter_width = entity.read(cx).gutter_width;
                     // Thread lanes only; the graph section places counters itself.
-                    let flame_total = flame_total_height(&layout);
+                    let flame_total = flame_total_height(layout);
                     let regions =
                         Regions::new(bounds, n_counters, graph_height, gutter_width, flame_total);
                     let scroll = scroll_y.get();
@@ -921,7 +931,7 @@ impl TraceView {
                             ));
                         }
                         for vs in
-                            visible_slices(&profile, &layout, &tv, &vp, &METRICS, MIN_SLICE_PX)
+                            visible_slices(&profile, layout, &tv, &vp, &METRICS, MIN_SLICE_PX)
                         {
                             let slice = &profile.threads[vs.track].slices[vs.slice];
                             paint_slice(
@@ -959,7 +969,7 @@ impl TraceView {
                     // it, then carries the lane and counter names.
                     paint_gutter(
                         &profile,
-                        &layout,
+                        layout,
                         regions,
                         gutter_width,
                         scroll,
@@ -1031,7 +1041,10 @@ impl TraceView {
             // reserved horizontal-bar strip, so the last row clears that bar.
             return (fl.total_h - fl.height).max(0.0);
         }
-        let total = flame_total_height(&lay_out_lanes(p, &METRICS));
+        let total = self
+            .lane_layout()
+            .map(|l| flame_total_height(&l))
+            .unwrap_or(0.0);
         let regions = Regions::new(
             self.viewport.get(),
             p.counters.len(),
@@ -1040,6 +1053,18 @@ impl TraceView {
             total,
         );
         (total - regions.flame_h()).max(0.0)
+    }
+
+    /// The lane layout for the loaded profile, built on first use and reused
+    /// across paints and mouse handlers. `None` until a profile is loaded.
+    fn lane_layout(&self) -> Option<Rc<LaneLayout>> {
+        let Source::Loaded(profile) = &self.source else {
+            return None;
+        };
+        if self.lanes.borrow().is_none() {
+            *self.lanes.borrow_mut() = Some(Rc::new(lay_out_lanes(profile, &METRICS)));
+        }
+        self.lanes.borrow().clone()
     }
 
     /// The aggregated flame graph for the loaded profile, built on first use and
@@ -1360,6 +1385,7 @@ impl Render for TraceView {
         let body = match &self.source {
             Source::Loaded(profile) => {
                 let flame = self.flame_node().expect("a loaded profile has a flame graph");
+                let lanes = self.lane_layout().expect("a loaded profile has a lane layout");
                 let toolbar = div()
                     .flex()
                     .flex_row()
@@ -1401,6 +1427,7 @@ impl Render for TraceView {
                     }));
                 let timeline = Self::timeline(
                     profile.clone(),
+                    lanes,
                     self.view.clone(),
                     self.scroll_y.clone(),
                     self.flame_view.clone(),
@@ -1557,12 +1584,15 @@ impl Render for TraceView {
 
 impl TraceView {
     fn on_scroll_wheel(&mut self, e: &ScrollWheelEvent, _: &mut Window, cx: &mut Context<Self>) {
+        let Some(lanes) = self.lane_layout() else {
+            return;
+        };
         let Source::Loaded(profile) = &self.source else {
             return;
         };
         let span = profile.span;
         let vp = self.viewport.get();
-        let flame_total = flame_total_height(&lay_out_lanes(profile, &METRICS));
+        let flame_total = flame_total_height(&lanes);
         let regions = Regions::new(
             vp,
             profile.counters.len(),
@@ -1676,10 +1706,13 @@ impl TraceView {
     /// Whether `pos` lies in the time-content column (right of the gutter), the
     /// region the crosshair shows over.
     fn in_content(&self, pos: Point<Pixels>) -> bool {
+        let Some(lanes) = self.lane_layout() else {
+            return false;
+        };
         let Source::Loaded(profile) = &self.source else {
             return false;
         };
-        let flame_total = flame_total_height(&lay_out_lanes(profile, &METRICS));
+        let flame_total = flame_total_height(&lanes);
         let regions = Regions::new(
             self.viewport.get(),
             profile.counters.len(),
@@ -1694,10 +1727,10 @@ impl TraceView {
     /// window → flame section → (lane, depth row) and time. `None` over the
     /// gutter, the ruler, the graph section, a lane header, or empty space.
     fn slice_at(&self, pos: Point<Pixels>) -> Option<(usize, usize)> {
+        let layout = self.lane_layout()?;
         let Source::Loaded(profile) = &self.source else {
             return None;
         };
-        let layout = lay_out_lanes(profile, &METRICS);
         let flame_total = flame_total_height(&layout);
         let regions = Regions::new(
             self.viewport.get(),
@@ -1843,11 +1876,14 @@ fn on_drag(view: &mut TraceView, event: &MouseMoveEvent, cx: &mut Context<TraceV
                     view.flame_view.set(fv);
                 }
             } else {
+                let Some(lanes) = view.lane_layout() else {
+                    return;
+                };
                 let Source::Loaded(profile) = &view.source else {
                     return;
                 };
                 let span = profile.span;
-                let flame_total = flame_total_height(&lay_out_lanes(profile, &METRICS));
+                let flame_total = flame_total_height(&lanes);
                 let regions = Regions::new(
                     view.viewport.get(),
                     profile.counters.len(),
@@ -1933,11 +1969,14 @@ fn stats_thumb_to(view: &mut TraceView, pos: Point<Pixels>, grab: f32) {
 
 /// Maps a horizontal thumb drag back to a pan start time, then clamps the view.
 fn pan_thumb_to(view: &mut TraceView, pos: Point<Pixels>, grab: f32) {
+    let Some(lanes) = view.lane_layout() else {
+        return;
+    };
     let Source::Loaded(profile) = &view.source else {
         return;
     };
     let span = profile.span;
-    let flame_total = flame_total_height(&lay_out_lanes(profile, &METRICS));
+    let flame_total = flame_total_height(&lanes);
     let regions = Regions::new(
         view.viewport.get(),
         profile.counters.len(),
