@@ -17,6 +17,7 @@
 use std::collections::{BTreeMap, HashSet};
 
 use crate::graph::{Edge, EdgeKind, Graph, Kind, Node};
+use crate::intern::{Id, Names};
 
 /// Returns a graph in which interchangeable `source`/`artifact` leaves are
 /// merged. A multi-member group whose id is in `expanded` is emitted as a
@@ -25,55 +26,55 @@ use crate::graph::{Edge, EdgeKind, Graph, Kind, Node};
 /// behind a group while leaving every other group collapsed. Nodes and edges of
 /// the result are sorted by id for an output that is independent of the input
 /// order; passing an empty `expanded` set yields the fully collapsed result.
-pub fn quotient(graph: &Graph, expanded: &HashSet<String>) -> Graph {
-    let producers = neighbor_lists(graph, |e| (&e.to, &e.from));
-    let consumers = neighbor_lists(graph, |e| (&e.from, &e.to));
+pub fn quotient(graph: &Graph, expanded: &HashSet<Id>, names: &mut Names) -> Graph {
+    let producers = neighbor_lists(graph, |e| (e.to, e.from));
+    let consumers = neighbor_lists(graph, |e| (e.from, e.to));
 
     // Nodes that hold children: only leaf data nodes merge, so a container of
     // kind `artifact` (a labeled generated output holding its configured
     // targets) is never collapsed into a group.
-    let containers: HashSet<&str> = graph.nodes.iter().filter_map(|n| n.parent.as_deref()).collect();
-    let mergeable = |node: &Node| is_candidate(node.kind) && !containers.contains(node.id.as_str());
+    let containers: HashSet<Id> = graph.nodes.iter().filter_map(|n| n.parent).collect();
+    let mergeable = |node: &Node| is_candidate(node.kind) && !containers.contains(&node.id);
 
     // Group candidate ids by signature; non-candidates are passed through.
-    let mut groups: BTreeMap<Signature, Vec<&str>> = BTreeMap::new();
+    let mut groups: BTreeMap<Signature, Vec<Id>> = BTreeMap::new();
     for node in &graph.nodes {
         if !mergeable(node) {
             continue;
         }
         let signature = Signature {
             kind: node.kind,
-            parent: node.parent.clone(),
-            producers: sorted_neighbors(&producers, &node.id),
-            consumers: sorted_neighbors(&consumers, &node.id),
+            parent: node.parent,
+            producers: sorted_neighbors(&producers, node.id),
+            consumers: sorted_neighbors(&consumers, node.id),
         };
-        groups.entry(signature).or_default().push(&node.id);
+        groups.entry(signature).or_default().push(node.id);
     }
 
     // Collapsed multi-member groups remap their members to the group id; an
     // expanded multi-member group instead becomes a container holding its
     // members, which keep their own ids.
-    let mut remap: BTreeMap<&str, String> = BTreeMap::new();
+    let mut remap: BTreeMap<Id, Id> = BTreeMap::new();
     // Group id -> member count, for labeling, recorded only for multi-member
     // groups (both collapsed and expanded).
-    let mut group_sizes: BTreeMap<String, usize> = BTreeMap::new();
+    let mut group_sizes: BTreeMap<Id, usize> = BTreeMap::new();
     // Member id -> container group id, for members of expanded groups only.
-    let mut member_container: BTreeMap<&str, String> = BTreeMap::new();
+    let mut member_container: BTreeMap<Id, Id> = BTreeMap::new();
     for members in groups.values() {
-        let target = group_id(members);
+        let target = group_id(members, names);
         if members.len() < 2 {
             remap.insert(members[0], target);
             continue;
         }
-        group_sizes.insert(target.clone(), members.len());
+        group_sizes.insert(target, members.len());
         if expanded.contains(&target) {
             for &member in members {
-                member_container.insert(member, target.clone());
+                member_container.insert(member, target);
             }
             continue;
         }
         for &member in members {
-            remap.insert(member, target.clone());
+            remap.insert(member, target);
         }
     }
 
@@ -81,7 +82,7 @@ pub fn quotient(graph: &Graph, expanded: &HashSet<String>) -> Graph {
 
     // Non-candidates unchanged; collapsed groups emit one leaf; expanded groups
     // emit a container followed by their members reparented to it.
-    let mut emitted: BTreeMap<String, ()> = BTreeMap::new();
+    let mut emitted: BTreeMap<Id, ()> = BTreeMap::new();
     for node in &graph.nodes {
         if !mergeable(node) {
             out.nodes.push(clone_node(node));
@@ -89,18 +90,18 @@ pub fn quotient(graph: &Graph, expanded: &HashSet<String>) -> Graph {
         }
         // A member of an expanded group: emit the container once, then the
         // member with its id intact and parent set to the group.
-        if let Some(gid) = member_container.get(node.id.as_str()).cloned() {
-            if emitted.insert(gid.clone(), ()).is_none() {
+        if let Some(&gid) = member_container.get(&node.id) {
+            if emitted.insert(gid, ()).is_none() {
                 out.nodes.push(Node {
-                    id: gid.clone(),
+                    id: gid,
                     label: group_label(node.kind, group_sizes[&gid]),
                     kind: Kind::Group,
                     group: true,
-                    parent: node.parent.clone(),
+                    parent: node.parent,
                 });
             }
             out.nodes.push(Node {
-                id: node.id.clone(),
+                id: node.id,
                 label: node.label.clone(),
                 kind: node.kind,
                 group: false,
@@ -108,42 +109,33 @@ pub fn quotient(graph: &Graph, expanded: &HashSet<String>) -> Graph {
             });
             continue;
         }
-        let id = &remap[node.id.as_str()];
-        if emitted.insert(id.clone(), ()).is_some() {
+        let id = remap[&node.id];
+        if emitted.insert(id, ()).is_some() {
             continue;
         }
-        let label = match group_sizes.get(id) {
+        let label = match group_sizes.get(&id) {
             Some(&count) => group_label(node.kind, count),
             None => node.label.clone(),
         };
         out.nodes.push(Node {
-            id: id.clone(),
+            id,
             label,
             kind: node.kind,
-            group: group_sizes.contains_key(id),
-            parent: node.parent.clone(),
+            group: group_sizes.contains_key(&id),
+            parent: node.parent,
         });
     }
 
     // Remap edge endpoints (collapsed-group members only; expanded-group
     // members and singletons keep their ids), drop self-loops, and dedup.
-    let mut seen_edge: BTreeMap<(String, String, EdgeKind), ()> = BTreeMap::new();
+    let mut seen_edge: BTreeMap<(Id, Id, EdgeKind), ()> = BTreeMap::new();
     for edge in &graph.edges {
-        let from = remap
-            .get(edge.from.as_str())
-            .cloned()
-            .unwrap_or_else(|| edge.from.clone());
-        let to = remap
-            .get(edge.to.as_str())
-            .cloned()
-            .unwrap_or_else(|| edge.to.clone());
+        let from = remap.get(&edge.from).copied().unwrap_or(edge.from);
+        let to = remap.get(&edge.to).copied().unwrap_or(edge.to);
         if from == to {
             continue;
         }
-        if seen_edge
-            .insert((from.clone(), to.clone(), edge.kind), ())
-            .is_some()
-        {
+        if seen_edge.insert((from, to, edge.kind), ()).is_some() {
             continue;
         }
         out.edges.push(Edge {
@@ -153,9 +145,17 @@ pub fn quotient(graph: &Graph, expanded: &HashSet<String>) -> Graph {
         });
     }
 
-    out.nodes.sort_by(|a, b| a.id.cmp(&b.id));
-    out.edges
-        .sort_by(|a, b| (&a.from, &a.to, a.kind).cmp(&(&b.from, &b.to, b.kind)));
+    // Sort by resolved name, not interned id: the integer id depends on the
+    // order names were interned, so name-keyed sorting is what makes the output
+    // independent of the input order.
+    out.nodes.sort_by(|a, b| names.resolve(a.id).cmp(names.resolve(b.id)));
+    out.edges.sort_by(|a, b| {
+        (names.resolve(a.from), names.resolve(a.to), a.kind).cmp(&(
+            names.resolve(b.from),
+            names.resolve(b.to),
+            b.kind,
+        ))
+    });
     out
 }
 
@@ -163,24 +163,26 @@ pub fn quotient(graph: &Graph, expanded: &HashSet<String>) -> Graph {
 #[derive(PartialEq, Eq, PartialOrd, Ord)]
 struct Signature {
     kind: Kind,
-    parent: Option<String>,
-    producers: Vec<String>,
-    consumers: Vec<String>,
+    parent: Option<Id>,
+    producers: Vec<Id>,
+    consumers: Vec<Id>,
 }
 
 fn is_candidate(kind: Kind) -> bool {
     matches!(kind, Kind::Source | Kind::Artifact)
 }
 
-/// Group node id: a stable prefix over the lexicographically smallest member id.
-/// Each original id belongs to exactly one group, so this is unique. A singleton
-/// keeps its own id.
-fn group_id(members: &[&str]) -> String {
-    let smallest = members.iter().min().copied().unwrap_or_default();
+/// Group node id: a stable id minted over the member whose name sorts first.
+/// Each original id belongs to exactly one group, so this is unique. Keying on
+/// the name rather than the interned integer keeps the id independent of the
+/// order members were interned in. A singleton keeps its own id.
+fn group_id(members: &[Id], names: &mut Names) -> Id {
+    let smallest = *members.iter().min_by_key(|&&id| names.resolve(id)).unwrap();
     if members.len() >= 2 {
-        format!("group:{smallest}")
+        let s = format!("group:{}", names.resolve(smallest));
+        names.intern(&s)
     } else {
-        smallest.to_string()
+        smallest
     }
 }
 
@@ -194,25 +196,17 @@ fn group_label(kind: Kind, count: usize) -> String {
 
 /// For each node id, the sorted list of distinct neighbor ids selected by
 /// `pick`, which maps an edge to its (anchor, neighbor) pair.
-fn neighbor_lists<'a>(
-    graph: &'a Graph,
-    pick: impl Fn(&'a Edge) -> (&'a String, &'a String),
-) -> BTreeMap<&'a str, Vec<&'a str>> {
-    let mut map: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+fn neighbor_lists(graph: &Graph, pick: impl Fn(&Edge) -> (Id, Id)) -> BTreeMap<Id, Vec<Id>> {
+    let mut map: BTreeMap<Id, Vec<Id>> = BTreeMap::new();
     for edge in &graph.edges {
         let (anchor, neighbor) = pick(edge);
-        map.entry(anchor.as_str())
-            .or_default()
-            .push(neighbor.as_str());
+        map.entry(anchor).or_default().push(neighbor);
     }
     map
 }
 
-fn sorted_neighbors(lists: &BTreeMap<&str, Vec<&str>>, id: &str) -> Vec<String> {
-    let mut ids: Vec<String> = lists
-        .get(id)
-        .map(|v| v.iter().map(|s| s.to_string()).collect())
-        .unwrap_or_default();
+fn sorted_neighbors(lists: &BTreeMap<Id, Vec<Id>>, id: Id) -> Vec<Id> {
+    let mut ids: Vec<Id> = lists.get(&id).cloned().unwrap_or_default();
     ids.sort_unstable();
     ids.dedup();
     ids
@@ -232,92 +226,116 @@ fn clone_node(node: &Node) -> Node {
 mod tests {
     use super::*;
 
-    fn leaf(graph: &mut Graph, id: &str, kind: Kind, parent: Option<&str>) {
-        graph.add_node(id, id, kind, parent.map(str::to_string));
+    fn leaf(graph: &mut Graph, names: &mut Names, id: &str, kind: Kind, parent: Option<&str>) {
+        node(graph, names, id, id, kind, parent);
     }
 
-    fn node_ids(graph: &Graph) -> Vec<&str> {
-        graph.nodes.iter().map(|n| n.id.as_str()).collect()
+    fn node(
+        graph: &mut Graph,
+        names: &mut Names,
+        id: &str,
+        label: &str,
+        kind: Kind,
+        parent: Option<&str>,
+    ) {
+        let parent = parent.map(|p| names.intern(p));
+        let id = names.intern(id);
+        graph.add_node(id, label, kind, parent);
     }
 
-    fn edges(graph: &Graph) -> Vec<(&str, &str)> {
+    fn edge(graph: &mut Graph, names: &mut Names, from: &str, to: &str, kind: EdgeKind) {
+        let from = names.intern(from);
+        let to = names.intern(to);
+        graph.add_edge(from, to, kind);
+    }
+
+    fn node_ids<'a>(graph: &Graph, names: &'a Names) -> Vec<&'a str> {
+        graph.nodes.iter().map(|n| names.resolve(n.id)).collect()
+    }
+
+    fn edges<'a>(graph: &Graph, names: &'a Names) -> Vec<(&'a str, &'a str)> {
         graph
             .edges
             .iter()
-            .map(|e| (e.from.as_str(), e.to.as_str()))
+            .map(|e| (names.resolve(e.from), names.resolve(e.to)))
             .collect()
     }
 
-    fn find<'a>(graph: &'a Graph, id: &str) -> &'a Node {
-        graph.nodes.iter().find(|n| n.id == id).unwrap()
+    fn find<'a>(graph: &'a Graph, names: &Names, id: &str) -> &'a Node {
+        graph.nodes.iter().find(|n| names.resolve(n.id) == id).unwrap()
     }
 
     /// Collapse every group (the empty-`expanded` default).
-    fn collapsed(graph: &Graph) -> Graph {
-        quotient(graph, &HashSet::new())
+    fn collapsed(graph: &Graph, names: &mut Names) -> Graph {
+        quotient(graph, &HashSet::new(), names)
     }
 
-    fn expanded(ids: &[&str]) -> HashSet<String> {
-        ids.iter().map(|s| s.to_string()).collect()
+    /// The interned ids of `ids`, interned into `names` so that a group id minted
+    /// by `quotient` (e.g. `group:source1`) resolves to this same id.
+    fn expanded(names: &mut Names, ids: &[&str]) -> HashSet<Id> {
+        ids.iter().map(|s| names.intern(s)).collect()
     }
 
     #[test]
     fn sources_with_one_shared_consumer_merge() {
         let mut graph = Graph::new();
-        graph.add_node("action0", "Compile", Kind::Action, None);
+        let mut names = Names::default();
+        node(&mut graph, &mut names, "action0", "Compile", Kind::Action, None);
         for id in ["source1", "source2", "source3"] {
-            leaf(&mut graph, id, Kind::Source, None);
-            graph.add_edge(id, "action0", EdgeKind::Aquery);
+            leaf(&mut graph, &mut names, id, Kind::Source, None);
+            edge(&mut graph, &mut names, id, "action0", EdgeKind::Aquery);
         }
 
-        let out = collapsed(&graph);
+        let out = collapsed(&graph, &mut names);
 
         // action0 plus the single group node.
         assert_eq!(out.nodes.len(), 2);
-        let group = find(&out, "group:source1");
+        let group = find(&out, &names, "group:source1");
         assert_eq!(group.label, "3 sources");
         assert_eq!(group.kind, Kind::Source);
-        assert_eq!(edges(&out), vec![("group:source1", "action0")]);
+        assert_eq!(edges(&out, &names), vec![("group:source1", "action0")]);
     }
 
     #[test]
     fn sources_with_different_consumers_do_not_merge() {
         let mut graph = Graph::new();
-        graph.add_node("action0", "A", Kind::Action, None);
-        graph.add_node("action1", "B", Kind::Action, None);
-        leaf(&mut graph, "source1", Kind::Source, None);
-        leaf(&mut graph, "source2", Kind::Source, None);
-        graph.add_edge("source1", "action0", EdgeKind::Aquery);
-        graph.add_edge("source2", "action1", EdgeKind::Aquery);
+        let mut names = Names::default();
+        node(&mut graph, &mut names, "action0", "A", Kind::Action, None);
+        node(&mut graph, &mut names, "action1", "B", Kind::Action, None);
+        leaf(&mut graph, &mut names, "source1", Kind::Source, None);
+        leaf(&mut graph, &mut names, "source2", Kind::Source, None);
+        edge(&mut graph, &mut names, "source1", "action0", EdgeKind::Aquery);
+        edge(&mut graph, &mut names, "source2", "action1", EdgeKind::Aquery);
 
-        let out = collapsed(&graph);
+        let out = collapsed(&graph, &mut names);
 
-        assert!(node_ids(&out).contains(&"source1"));
-        assert!(node_ids(&out).contains(&"source2"));
-        assert!(!node_ids(&out).iter().any(|id| id.starts_with("group:")));
+        assert!(node_ids(&out, &names).contains(&"source1"));
+        assert!(node_ids(&out, &names).contains(&"source2"));
+        assert!(!node_ids(&out, &names).iter().any(|id| id.starts_with("group:")));
     }
 
     #[test]
     fn artifacts_sharing_producer_and_consumers_merge() {
         let mut graph = Graph::new();
-        graph.add_node("action0", "Produce", Kind::Action, None);
-        graph.add_node("action1", "Link", Kind::Action, None);
-        leaf(&mut graph, "artifact1", Kind::Artifact, Some("ct"));
-        leaf(&mut graph, "artifact2", Kind::Artifact, Some("ct"));
-        graph.add_node("ct", "cfg", Kind::ConfiguredTarget, None);
+        let mut names = Names::default();
+        node(&mut graph, &mut names, "action0", "Produce", Kind::Action, None);
+        node(&mut graph, &mut names, "action1", "Link", Kind::Action, None);
+        leaf(&mut graph, &mut names, "artifact1", Kind::Artifact, Some("ct"));
+        leaf(&mut graph, &mut names, "artifact2", Kind::Artifact, Some("ct"));
+        node(&mut graph, &mut names, "ct", "cfg", Kind::ConfiguredTarget, None);
         for id in ["artifact1", "artifact2"] {
-            graph.add_edge("action0", id, EdgeKind::Aquery);
-            graph.add_edge(id, "action1", EdgeKind::Aquery);
+            edge(&mut graph, &mut names, "action0", id, EdgeKind::Aquery);
+            edge(&mut graph, &mut names, id, "action1", EdgeKind::Aquery);
         }
 
-        let out = collapsed(&graph);
+        let out = collapsed(&graph, &mut names);
 
-        let group = find(&out, "group:artifact1");
+        let group = find(&out, &names, "group:artifact1");
         assert_eq!(group.label, "2 files");
-        assert_eq!(group.parent.as_deref(), Some("ct"));
+        assert_eq!(group.parent.map(|p| names.resolve(p)), Some("ct"));
         // Producer edge dedups to one action -> group.
         assert_eq!(
-            edges(&out),
+            edges(&out, &names),
             vec![
                 ("action0", "group:artifact1"),
                 ("group:artifact1", "action1"),
@@ -328,132 +346,135 @@ mod tests {
     #[test]
     fn artifacts_with_different_producers_do_not_merge() {
         let mut graph = Graph::new();
-        graph.add_node("action0", "P0", Kind::Action, None);
-        graph.add_node("action1", "P1", Kind::Action, None);
-        graph.add_node("action2", "Consume", Kind::Action, None);
-        leaf(&mut graph, "artifact1", Kind::Artifact, None);
-        leaf(&mut graph, "artifact2", Kind::Artifact, None);
-        graph.add_edge("action0", "artifact1", EdgeKind::Aquery);
-        graph.add_edge("action1", "artifact2", EdgeKind::Aquery);
-        graph.add_edge("artifact1", "action2", EdgeKind::Aquery);
-        graph.add_edge("artifact2", "action2", EdgeKind::Aquery);
+        let mut names = Names::default();
+        node(&mut graph, &mut names, "action0", "P0", Kind::Action, None);
+        node(&mut graph, &mut names, "action1", "P1", Kind::Action, None);
+        node(&mut graph, &mut names, "action2", "Consume", Kind::Action, None);
+        leaf(&mut graph, &mut names, "artifact1", Kind::Artifact, None);
+        leaf(&mut graph, &mut names, "artifact2", Kind::Artifact, None);
+        edge(&mut graph, &mut names, "action0", "artifact1", EdgeKind::Aquery);
+        edge(&mut graph, &mut names, "action1", "artifact2", EdgeKind::Aquery);
+        edge(&mut graph, &mut names, "artifact1", "action2", EdgeKind::Aquery);
+        edge(&mut graph, &mut names, "artifact2", "action2", EdgeKind::Aquery);
 
-        let out = collapsed(&graph);
+        let out = collapsed(&graph, &mut names);
 
-        assert!(node_ids(&out).contains(&"artifact1"));
-        assert!(node_ids(&out).contains(&"artifact2"));
-        assert!(!node_ids(&out).iter().any(|id| id.starts_with("group:")));
+        assert!(node_ids(&out, &names).contains(&"artifact1"));
+        assert!(node_ids(&out, &names).contains(&"artifact2"));
+        assert!(!node_ids(&out, &names).iter().any(|id| id.starts_with("group:")));
     }
 
     #[test]
     fn artifact_container_is_not_merged() {
         let mut graph = Graph::new();
-        graph.add_node("action0", "Produce", Kind::Action, None);
+        let mut names = Names::default();
+        node(&mut graph, &mut names, "action0", "Produce", Kind::Action, None);
         // Two artifact leaves with identical neighbors would normally merge,
         // but artifact2 is a container (a promoted labeled output holds a
         // configured-target child), which blocks the merge.
-        leaf(&mut graph, "artifact1", Kind::Artifact, None);
-        leaf(&mut graph, "artifact2", Kind::Artifact, None);
-        graph.add_edge("artifact1", "action0", EdgeKind::Aquery);
-        graph.add_edge("artifact2", "action0", EdgeKind::Aquery);
-        graph.add_node("ct1", "cfg", Kind::ConfiguredTarget, Some("artifact2".to_string()));
+        leaf(&mut graph, &mut names, "artifact1", Kind::Artifact, None);
+        leaf(&mut graph, &mut names, "artifact2", Kind::Artifact, None);
+        edge(&mut graph, &mut names, "artifact1", "action0", EdgeKind::Aquery);
+        edge(&mut graph, &mut names, "artifact2", "action0", EdgeKind::Aquery);
+        node(&mut graph, &mut names, "ct1", "cfg", Kind::ConfiguredTarget, Some("artifact2"));
 
-        let out = collapsed(&graph);
+        let out = collapsed(&graph, &mut names);
 
-        assert!(!node_ids(&out).iter().any(|id| id.starts_with("group:")));
+        assert!(!node_ids(&out, &names).iter().any(|id| id.starts_with("group:")));
         for id in ["artifact1", "artifact2", "ct1"] {
-            assert!(node_ids(&out).contains(&id), "{id} missing");
+            assert!(node_ids(&out, &names).contains(&id), "{id} missing");
         }
     }
 
     #[test]
     fn source_and_artifact_never_merge() {
         let mut graph = Graph::new();
-        graph.add_node("action0", "Consume", Kind::Action, None);
-        leaf(&mut graph, "source1", Kind::Source, None);
-        leaf(&mut graph, "artifact1", Kind::Artifact, None);
-        graph.add_edge("source1", "action0", EdgeKind::Aquery);
-        graph.add_edge("artifact1", "action0", EdgeKind::Aquery);
+        let mut names = Names::default();
+        node(&mut graph, &mut names, "action0", "Consume", Kind::Action, None);
+        leaf(&mut graph, &mut names, "source1", Kind::Source, None);
+        leaf(&mut graph, &mut names, "artifact1", Kind::Artifact, None);
+        edge(&mut graph, &mut names, "source1", "action0", EdgeKind::Aquery);
+        edge(&mut graph, &mut names, "artifact1", "action0", EdgeKind::Aquery);
 
-        let out = collapsed(&graph);
+        let out = collapsed(&graph, &mut names);
 
-        assert!(node_ids(&out).contains(&"source1"));
-        assert!(node_ids(&out).contains(&"artifact1"));
-        assert!(!node_ids(&out).iter().any(|id| id.starts_with("group:")));
+        assert!(node_ids(&out, &names).contains(&"source1"));
+        assert!(node_ids(&out, &names).contains(&"artifact1"));
+        assert!(!node_ids(&out, &names).iter().any(|id| id.starts_with("group:")));
     }
 
     #[test]
     fn output_is_independent_of_insertion_order() {
         let mut a = Graph::new();
-        a.add_node("action0", "Compile", Kind::Action, None);
+        let mut names_a = Names::default();
+        node(&mut a, &mut names_a, "action0", "Compile", Kind::Action, None);
         for id in ["source1", "source2", "source3"] {
-            leaf(&mut a, id, Kind::Source, None);
-            a.add_edge(id, "action0", EdgeKind::Aquery);
+            leaf(&mut a, &mut names_a, id, Kind::Source, None);
+            edge(&mut a, &mut names_a, id, "action0", EdgeKind::Aquery);
         }
 
         let mut b = Graph::new();
+        let mut names_b = Names::default();
         for id in ["source3", "source1", "source2"] {
-            leaf(&mut b, id, Kind::Source, None);
+            leaf(&mut b, &mut names_b, id, Kind::Source, None);
         }
-        b.add_node("action0", "Compile", Kind::Action, None);
-        b.add_edge("source2", "action0", EdgeKind::Aquery);
-        b.add_edge("source3", "action0", EdgeKind::Aquery);
-        b.add_edge("source1", "action0", EdgeKind::Aquery);
+        node(&mut b, &mut names_b, "action0", "Compile", Kind::Action, None);
+        edge(&mut b, &mut names_b, "source2", "action0", EdgeKind::Aquery);
+        edge(&mut b, &mut names_b, "source3", "action0", EdgeKind::Aquery);
+        edge(&mut b, &mut names_b, "source1", "action0", EdgeKind::Aquery);
 
-        let qa = collapsed(&a);
-        let qb = collapsed(&b);
+        let qa = quotient(&a, &HashSet::new(), &mut names_a);
+        let qb = quotient(&b, &HashSet::new(), &mut names_b);
 
-        assert_eq!(node_ids(&qa), node_ids(&qb));
-        assert_eq!(edges(&qa), edges(&qb));
+        assert_eq!(node_ids(&qa, &names_a), node_ids(&qb, &names_b));
+        assert_eq!(edges(&qa, &names_a), edges(&qb, &names_b));
     }
 
     #[test]
     fn containers_and_actions_pass_through() {
         let mut graph = Graph::new();
-        graph.add_node("target1", "//:t", Kind::Target, None);
-        graph.add_node(
-            "ct",
-            "cfg",
-            Kind::ConfiguredTarget,
-            Some("target1".to_string()),
-        );
-        graph.add_node("action0", "Compile", Kind::Action, Some("ct".to_string()));
-        leaf(&mut graph, "source1", Kind::Source, None);
-        graph.add_edge("source1", "action0", EdgeKind::Aquery);
+        let mut names = Names::default();
+        node(&mut graph, &mut names, "target1", "//:t", Kind::Target, None);
+        node(&mut graph, &mut names, "ct", "cfg", Kind::ConfiguredTarget, Some("target1"));
+        node(&mut graph, &mut names, "action0", "Compile", Kind::Action, Some("ct"));
+        leaf(&mut graph, &mut names, "source1", Kind::Source, None);
+        edge(&mut graph, &mut names, "source1", "action0", EdgeKind::Aquery);
 
-        let out = collapsed(&graph);
+        let out = collapsed(&graph, &mut names);
 
         for id in ["target1", "ct", "action0", "source1"] {
-            assert!(node_ids(&out).contains(&id), "{id} missing");
+            assert!(node_ids(&out, &names).contains(&id), "{id} missing");
         }
-        assert_eq!(edges(&out), vec![("source1", "action0")]);
+        assert_eq!(edges(&out, &names), vec![("source1", "action0")]);
     }
 
     #[test]
     fn expanded_group_becomes_container_holding_its_members() {
         let mut graph = Graph::new();
-        graph.add_node("action0", "Compile", Kind::Action, None);
+        let mut names = Names::default();
+        node(&mut graph, &mut names, "action0", "Compile", Kind::Action, None);
         for id in ["source1", "source2", "source3"] {
-            leaf(&mut graph, id, Kind::Source, None);
-            graph.add_edge(id, "action0", EdgeKind::Aquery);
+            leaf(&mut graph, &mut names, id, Kind::Source, None);
+            edge(&mut graph, &mut names, id, "action0", EdgeKind::Aquery);
         }
 
-        let out = quotient(&graph, &expanded(&["group:source1"]));
+        let set = expanded(&mut names, &["group:source1"]);
+        let out = quotient(&graph, &set, &mut names);
 
         // The group is a container; the collapsed leaf is gone.
-        let group = find(&out, "group:source1");
+        let group = find(&out, &names, "group:source1");
         assert_eq!(group.kind, Kind::Group);
         assert_eq!(group.label, "3 sources");
         assert_eq!(group.parent, None);
         // Each member survives with its own id, reparented to the group.
         for id in ["source1", "source2", "source3"] {
-            let member = find(&out, id);
+            let member = find(&out, &names, id);
             assert_eq!(member.kind, Kind::Source);
-            assert_eq!(member.parent.as_deref(), Some("group:source1"));
+            assert_eq!(member.parent.map(|p| names.resolve(p)), Some("group:source1"));
         }
         // Member edges keep their original endpoints (no group: remap).
         assert_eq!(
-            edges(&out),
+            edges(&out, &names),
             vec![
                 ("source1", "action0"),
                 ("source2", "action0"),
@@ -465,54 +486,58 @@ mod tests {
     #[test]
     fn expanded_set_naming_a_non_group_leaves_collapse_unchanged() {
         let mut graph = Graph::new();
-        graph.add_node("action0", "Compile", Kind::Action, None);
+        let mut names = Names::default();
+        node(&mut graph, &mut names, "action0", "Compile", Kind::Action, None);
         for id in ["source1", "source2", "source3"] {
-            leaf(&mut graph, id, Kind::Source, None);
-            graph.add_edge(id, "action0", EdgeKind::Aquery);
+            leaf(&mut graph, &mut names, id, Kind::Source, None);
+            edge(&mut graph, &mut names, id, "action0", EdgeKind::Aquery);
         }
 
         // Expanding an id that is not a multi-member group collapses as usual.
-        let out = quotient(&graph, &expanded(&["group:other"]));
+        let set = expanded(&mut names, &["group:other"]);
+        let out = quotient(&graph, &set, &mut names);
 
         assert_eq!(out.nodes.len(), 2);
-        assert_eq!(find(&out, "group:source1").kind, Kind::Source);
-        assert_eq!(edges(&out), vec![("group:source1", "action0")]);
+        assert_eq!(find(&out, &names, "group:source1").kind, Kind::Source);
+        assert_eq!(edges(&out, &names), vec![("group:source1", "action0")]);
     }
 
     #[test]
     fn one_group_expands_while_another_collapses() {
         let mut graph = Graph::new();
-        graph.add_node("action0", "A", Kind::Action, None);
-        graph.add_node("action1", "B", Kind::Action, None);
+        let mut names = Names::default();
+        node(&mut graph, &mut names, "action0", "A", Kind::Action, None);
+        node(&mut graph, &mut names, "action1", "B", Kind::Action, None);
         // Group on action0 (will be expanded).
         for id in ["source1", "source2"] {
-            leaf(&mut graph, id, Kind::Source, None);
-            graph.add_edge(id, "action0", EdgeKind::Aquery);
+            leaf(&mut graph, &mut names, id, Kind::Source, None);
+            edge(&mut graph, &mut names, id, "action0", EdgeKind::Aquery);
         }
         // Group on action1 (will stay collapsed).
         for id in ["source3", "source4"] {
-            leaf(&mut graph, id, Kind::Source, None);
-            graph.add_edge(id, "action1", EdgeKind::Aquery);
+            leaf(&mut graph, &mut names, id, Kind::Source, None);
+            edge(&mut graph, &mut names, id, "action1", EdgeKind::Aquery);
         }
 
-        let out = quotient(&graph, &expanded(&["group:source1"]));
+        let set = expanded(&mut names, &["group:source1"]);
+        let out = quotient(&graph, &set, &mut names);
 
         // First group is a container with its members.
-        assert_eq!(find(&out, "group:source1").kind, Kind::Group);
+        assert_eq!(find(&out, &names, "group:source1").kind, Kind::Group);
         assert_eq!(
-            find(&out, "source1").parent.as_deref(),
+            find(&out, &names, "source1").parent.map(|p| names.resolve(p)),
             Some("group:source1")
         );
         assert_eq!(
-            find(&out, "source2").parent.as_deref(),
+            find(&out, &names, "source2").parent.map(|p| names.resolve(p)),
             Some("group:source1")
         );
         // Second group collapses to a single source leaf.
-        assert_eq!(find(&out, "group:source3").kind, Kind::Source);
-        assert_eq!(find(&out, "group:source3").label, "2 sources");
-        assert!(!node_ids(&out).contains(&"source3"));
+        assert_eq!(find(&out, &names, "group:source3").kind, Kind::Source);
+        assert_eq!(find(&out, &names, "group:source3").label, "2 sources");
+        assert!(!node_ids(&out, &names).contains(&"source3"));
         assert_eq!(
-            edges(&out),
+            edges(&out, &names),
             vec![
                 ("group:source3", "action1"),
                 ("source1", "action0"),
@@ -524,26 +549,29 @@ mod tests {
     #[test]
     fn expanded_output_is_independent_of_insertion_order() {
         let mut a = Graph::new();
-        a.add_node("action0", "Compile", Kind::Action, None);
+        let mut names_a = Names::default();
+        node(&mut a, &mut names_a, "action0", "Compile", Kind::Action, None);
         for id in ["source1", "source2", "source3"] {
-            leaf(&mut a, id, Kind::Source, None);
-            a.add_edge(id, "action0", EdgeKind::Aquery);
+            leaf(&mut a, &mut names_a, id, Kind::Source, None);
+            edge(&mut a, &mut names_a, id, "action0", EdgeKind::Aquery);
         }
 
         let mut b = Graph::new();
+        let mut names_b = Names::default();
         for id in ["source3", "source1", "source2"] {
-            leaf(&mut b, id, Kind::Source, None);
+            leaf(&mut b, &mut names_b, id, Kind::Source, None);
         }
-        b.add_node("action0", "Compile", Kind::Action, None);
-        b.add_edge("source2", "action0", EdgeKind::Aquery);
-        b.add_edge("source3", "action0", EdgeKind::Aquery);
-        b.add_edge("source1", "action0", EdgeKind::Aquery);
+        node(&mut b, &mut names_b, "action0", "Compile", Kind::Action, None);
+        edge(&mut b, &mut names_b, "source2", "action0", EdgeKind::Aquery);
+        edge(&mut b, &mut names_b, "source3", "action0", EdgeKind::Aquery);
+        edge(&mut b, &mut names_b, "source1", "action0", EdgeKind::Aquery);
 
-        let set = expanded(&["group:source1"]);
-        let qa = quotient(&a, &set);
-        let qb = quotient(&b, &set);
+        let set_a = expanded(&mut names_a, &["group:source1"]);
+        let set_b = expanded(&mut names_b, &["group:source1"]);
+        let qa = quotient(&a, &set_a, &mut names_a);
+        let qb = quotient(&b, &set_b, &mut names_b);
 
-        assert_eq!(node_ids(&qa), node_ids(&qb));
-        assert_eq!(edges(&qa), edges(&qb));
+        assert_eq!(node_ids(&qa, &names_a), node_ids(&qb, &names_b));
+        assert_eq!(edges(&qa, &names_a), edges(&qb, &names_b));
     }
 }

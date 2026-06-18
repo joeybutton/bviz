@@ -8,12 +8,15 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use bazel_query_proto::blaze_query::{target::Discriminator, Target};
 
 use crate::graph::{EdgeKind, Graph, Kind};
+use crate::intern::{Id, Names};
 use crate::label::{self, PackageHierarchy};
 
-pub fn build(targets: &[Target]) -> Graph {
+pub fn build(targets: &[Target]) -> (Graph, Names) {
     let refs: Vec<&Target> = targets.iter().collect();
     let packages = package_keys(targets);
-    build_with_packages(&refs, &packages)
+    let mut names = Names::default();
+    let graph = build_with_packages(&refs, &packages, &mut names);
+    (graph, names)
 }
 
 /// The (repository, package path) keys of every target this query names, for the
@@ -59,12 +62,13 @@ pub(crate) fn generated_labels(targets: &[Target]) -> HashSet<String> {
 pub(crate) fn build_with_packages(
     targets: &[&Target],
     packages: &BTreeSet<(String, String)>,
+    names: &mut Names,
 ) -> Graph {
     let mut graph = Graph::new();
     // Node id per label, so a label seen more than once maps to one node.
-    let mut node_by_label: HashMap<String, String> = HashMap::new();
+    let mut node_by_label: HashMap<String, Id> = HashMap::new();
 
-    let hierarchy = PackageHierarchy::build(packages, &mut graph);
+    let hierarchy = PackageHierarchy::build(packages, &mut graph, names);
 
     // Pass 1: one leaf node per target under its package container.
     for target in targets {
@@ -74,27 +78,27 @@ pub(crate) fn build_with_packages(
         if node_by_label.contains_key(label) {
             continue;
         }
-        let node_id = format!("target:{label}");
-        let parent = hierarchy.package_box(label).map(str::to_string);
-        graph.add_node(node_id.clone(), label::target_label(label), kind, parent);
+        let node_id = names.intern(&format!("target:{label}"));
+        let parent = hierarchy.package_box(label);
+        graph.add_node(node_id, label::target_label(label), kind, parent);
         node_by_label.insert(label.to_string(), node_id);
     }
 
     // Pass 2: edges from each rule's inputs (dependency -> dependent).
-    let mut seen_edge: HashSet<(String, String)> = HashSet::new();
+    let mut seen_edge: HashSet<(Id, Id)> = HashSet::new();
     for target in targets {
         let Some(rule) = target.rule.as_ref() else {
             continue;
         };
-        let Some(to) = node_by_label.get(&rule.name) else {
+        let Some(&to) = node_by_label.get(&rule.name) else {
             continue;
         };
         for input_label in &rule.rule_input {
-            let Some(from) = node_by_label.get(input_label) else {
+            let Some(&from) = node_by_label.get(input_label) else {
                 continue;
             };
-            if seen_edge.insert((from.clone(), to.clone())) {
-                graph.add_edge(from.clone(), to.clone(), EdgeKind::Query);
+            if seen_edge.insert((from, to)) {
+                graph.add_edge(from, to, EdgeKind::Query);
             }
         }
     }
@@ -142,67 +146,67 @@ mod tests {
         }
     }
 
-    fn find<'a>(graph: &'a Graph, id: &str) -> &'a Node {
-        graph.nodes.iter().find(|n| n.id == id).unwrap()
+    fn find<'a>(graph: &'a Graph, names: &Names, id: &str) -> &'a Node {
+        graph.nodes.iter().find(|n| names.resolve(n.id) == id).unwrap()
     }
 
-    fn parent_of<'a>(graph: &'a Graph, id: &str) -> Option<&'a str> {
-        find(graph, id).parent.as_deref()
+    fn parent_of<'a>(graph: &Graph, names: &'a Names, id: &str) -> Option<&'a str> {
+        find(graph, names, id).parent.map(|p| names.resolve(p))
     }
 
-    fn edges(graph: &Graph) -> HashSet<(&str, &str)> {
+    fn edges<'a>(graph: &Graph, names: &'a Names) -> HashSet<(&'a str, &'a str)> {
         graph
             .edges
             .iter()
-            .map(|e| (e.from.as_str(), e.to.as_str()))
+            .map(|e| (names.resolve(e.from), names.resolve(e.to)))
             .collect()
     }
 
     #[test]
     fn rule_nests_in_its_package_container() {
-        let graph = build(&[rule("//foo:app", &[])]);
+        let (graph, names) = build(&[rule("//foo:app", &[])]);
 
-        assert_eq!(find(&graph, "pkg:foo").kind, Kind::Package);
-        assert_eq!(find(&graph, "pkg:foo").label, "//foo");
-        let node = find(&graph, "target://foo:app");
+        assert_eq!(find(&graph, &names, "pkg:foo").kind, Kind::Package);
+        assert_eq!(find(&graph, &names, "pkg:foo").label, "//foo");
+        let node = find(&graph, &names, "target://foo:app");
         assert_eq!(node.kind, Kind::Target);
         assert_eq!(node.label, ":app");
-        assert_eq!(parent_of(&graph, "target://foo:app"), Some("pkg:foo"));
+        assert_eq!(parent_of(&graph, &names, "target://foo:app"), Some("pkg:foo"));
     }
 
     #[test]
     fn source_and_generated_files_get_their_kinds() {
-        let graph = build(&[source("//foo:in.c"), generated("//foo:out.o")]);
+        let (graph, names) = build(&[source("//foo:in.c"), generated("//foo:out.o")]);
 
-        assert_eq!(find(&graph, "target://foo:in.c").kind, Kind::Source);
-        assert_eq!(find(&graph, "target://foo:out.o").kind, Kind::Artifact);
+        assert_eq!(find(&graph, &names, "target://foo:in.c").kind, Kind::Source);
+        assert_eq!(find(&graph, &names, "target://foo:out.o").kind, Kind::Artifact);
     }
 
     #[test]
     fn rule_input_to_present_target_is_an_edge() {
         // Input -> dependent: the producer is `from`, the consuming rule is `to`.
-        let graph = build(&[source("//foo:in.c"), rule("//foo:app", &["//foo:in.c"])]);
+        let (graph, names) = build(&[source("//foo:in.c"), rule("//foo:app", &["//foo:in.c"])]);
 
-        assert!(edges(&graph).contains(&("target://foo:in.c", "target://foo:app")));
+        assert!(edges(&graph, &names).contains(&("target://foo:in.c", "target://foo:app")));
     }
 
     #[test]
     fn rule_input_to_absent_label_is_dropped() {
-        let graph = build(&[rule("//foo:app", &["//bar:missing"])]);
+        let (graph, names) = build(&[rule("//foo:app", &["//bar:missing"])]);
 
-        assert!(!graph.nodes.iter().any(|n| n.id == "target://bar:missing"));
-        assert!(edges(&graph).is_empty());
+        assert!(!graph.nodes.iter().any(|n| names.resolve(n.id) == "target://bar:missing"));
+        assert!(edges(&graph, &names).is_empty());
     }
 
     #[test]
     fn external_target_nests_in_repo_qualified_package() {
-        let graph = build(&[rule("//foo:x", &[]), rule("@somerepo//foo:y", &[])]);
+        let (graph, names) = build(&[rule("//foo:x", &[]), rule("@somerepo//foo:y", &[])]);
 
-        assert_eq!(parent_of(&graph, "target://foo:x"), Some("pkg:foo"));
-        assert_eq!(find(&graph, "pkg:foo").label, "//foo");
+        assert_eq!(parent_of(&graph, &names, "target://foo:x"), Some("pkg:foo"));
+        assert_eq!(find(&graph, &names, "pkg:foo").label, "//foo");
 
-        let external = parent_of(&graph, "target:@somerepo//foo:y").unwrap();
+        let external = parent_of(&graph, &names, "target:@somerepo//foo:y").unwrap();
         assert_ne!(external, "pkg:foo");
-        assert_eq!(find(&graph, external).label, "@somerepo//foo");
+        assert_eq!(find(&graph, &names, external).label, "@somerepo//foo");
     }
 }

@@ -18,12 +18,15 @@ use bazel_query_proto::analysis::{ConfiguredTarget, CqueryResult};
 use bazel_query_proto::blaze_query::target::Discriminator;
 
 use crate::graph::{EdgeKind, Graph, Kind};
+use crate::intern::{Id, Names};
 use crate::label::{self, PackageHierarchy};
 use crate::query::label_and_kind;
 
-pub fn build(results: &[CqueryResult]) -> Graph {
+pub fn build(results: &[CqueryResult]) -> (Graph, Names) {
     let packages = package_keys(results);
-    build_with_packages(results, &packages)
+    let mut names = Names::default();
+    let graph = build_with_packages(results, &packages, &mut names);
+    (graph, names)
 }
 
 /// The (repository, package path) keys of every configured target this cquery
@@ -64,6 +67,7 @@ pub(crate) fn generated_labels(results: &[CqueryResult]) -> HashSet<String> {
 pub(crate) fn build_with_packages(
     results: &[CqueryResult],
     packages: &BTreeSet<(String, String)>,
+    names: &mut Names,
 ) -> Graph {
     let config_mnemonic: HashMap<u32, String> = results
         .iter()
@@ -80,13 +84,13 @@ pub(crate) fn build_with_packages(
 
     let mut graph = Graph::new();
     // Rule label -> its target container id.
-    let mut target_box: HashMap<String, String> = HashMap::new();
+    let mut target_box: HashMap<String, Id> = HashMap::new();
     // Non-rule leaf label -> its node id.
-    let mut leaf_id: HashMap<String, String> = HashMap::new();
+    let mut leaf_id: HashMap<String, Id> = HashMap::new();
     // The (label, configuration key) pairs that have a configured-target node.
     let mut ct_ids: HashSet<(String, String)> = HashSet::new();
 
-    let hierarchy = PackageHierarchy::build(packages, &mut graph);
+    let hierarchy = PackageHierarchy::build(packages, &mut graph, names);
 
     // Pass 1: a rule becomes a target container plus a configured-target leaf
     // per configuration; any other target becomes one leaf per label.
@@ -100,9 +104,9 @@ pub(crate) fn build_with_packages(
             };
             let label = rule.name.as_str();
             if !target_box.contains_key(label) {
-                let parent = hierarchy.package_box(label).map(str::to_string);
-                let id = format!("target:{label}");
-                graph.add_node(id.clone(), label::target_label(label), Kind::Target, parent);
+                let parent = hierarchy.package_box(label);
+                let id = names.intern(&format!("target:{label}"));
+                graph.add_node(id, label::target_label(label), Kind::Target, parent);
                 target_box.insert(label.to_string(), id);
             }
             let config_id = ct.configuration_id;
@@ -112,18 +116,19 @@ pub(crate) fn build_with_packages(
                     .get(&config_id)
                     .cloned()
                     .unwrap_or_else(|| format!("config {config_id}"));
+                let id = names.intern(&ct_node_id(label, &key));
                 graph.add_node(
-                    ct_node_id(label, &key),
+                    id,
                     mnemonic,
                     Kind::ConfiguredTarget,
-                    Some(target_box[label].clone()),
+                    Some(target_box[label]),
                 );
             }
         } else if let Some((label, kind)) = label_and_kind(target) {
             if !leaf_id.contains_key(label) {
-                let parent = hierarchy.package_box(label).map(str::to_string);
-                let id = format!("target:{label}");
-                graph.add_node(id.clone(), label::target_label(label), kind, parent);
+                let parent = hierarchy.package_box(label);
+                let id = names.intern(&format!("target:{label}"));
+                graph.add_node(id, label::target_label(label), kind, parent);
                 leaf_id.insert(label.to_string(), id);
             }
         }
@@ -131,7 +136,7 @@ pub(crate) fn build_with_packages(
 
     // Pass 2: an edge from each dependency to the configured target that
     // consumes it.
-    let mut seen_edge: HashSet<(String, String)> = HashSet::new();
+    let mut seen_edge: HashSet<(Id, Id)> = HashSet::new();
     for ct in &cts {
         let Some(target) = ct.target.as_ref() else {
             continue;
@@ -142,11 +147,12 @@ pub(crate) fn build_with_packages(
         let Some(rule) = target.rule.as_ref() else {
             continue;
         };
-        let consumer = ct_node_id(&rule.name, &config_key(ct.configuration_id, &config_checksum));
+        let consumer =
+            names.intern(&ct_node_id(&rule.name, &config_key(ct.configuration_id, &config_checksum)));
         if rule.configured_rule_input.is_empty() {
             for dep_label in &rule.rule_input {
                 if let Some(dep) = resolve_label_dep(dep_label, &target_box, &leaf_id) {
-                    add_edge(&mut graph, &mut seen_edge, &dep, &consumer);
+                    add_edge(&mut graph, &mut seen_edge, dep, consumer);
                 }
             }
         } else {
@@ -161,8 +167,9 @@ pub(crate) fn build_with_packages(
                     &ct_ids,
                     &target_box,
                     &leaf_id,
+                    names,
                 ) {
-                    add_edge(&mut graph, &mut seen_edge, &dep, &consumer);
+                    add_edge(&mut graph, &mut seen_edge, dep, consumer);
                 }
             }
         }
@@ -194,22 +201,23 @@ fn resolve_configured_dep(
     dep_config: Option<u32>,
     config_checksum: &HashMap<u32, String>,
     ct_ids: &HashSet<(String, String)>,
-    target_box: &HashMap<String, String>,
-    leaf_id: &HashMap<String, String>,
-) -> Option<String> {
+    target_box: &HashMap<String, Id>,
+    leaf_id: &HashMap<String, Id>,
+    names: &mut Names,
+) -> Option<Id> {
     match dep_config {
         Some(config_id) if config_id != 0 => {
             let key = config_key(config_id, config_checksum);
             if ct_ids.contains(&(dep_label.to_string(), key.clone())) {
-                Some(ct_node_id(dep_label, &key))
+                Some(names.intern(&ct_node_id(dep_label, &key)))
             } else {
-                target_box.get(dep_label).cloned()
+                target_box.get(dep_label).copied()
             }
         }
         _ => leaf_id
             .get(dep_label)
             .or_else(|| target_box.get(dep_label))
-            .cloned(),
+            .copied(),
     }
 }
 
@@ -217,21 +225,21 @@ fn resolve_configured_dep(
 /// or its leaf when it is not a rule. `None` when outside the queried set.
 fn resolve_label_dep(
     dep_label: &str,
-    target_box: &HashMap<String, String>,
-    leaf_id: &HashMap<String, String>,
-) -> Option<String> {
+    target_box: &HashMap<String, Id>,
+    leaf_id: &HashMap<String, Id>,
+) -> Option<Id> {
     target_box
         .get(dep_label)
         .or_else(|| leaf_id.get(dep_label))
-        .cloned()
+        .copied()
 }
 
-fn add_edge(graph: &mut Graph, seen: &mut HashSet<(String, String)>, from: &str, to: &str) {
+fn add_edge(graph: &mut Graph, seen: &mut HashSet<(Id, Id)>, from: Id, to: Id) {
     if from == to {
         return;
     }
-    if seen.insert((from.to_string(), to.to_string())) {
-        graph.add_edge(from.to_string(), to.to_string(), EdgeKind::Cquery);
+    if seen.insert((from, to)) {
+        graph.add_edge(from, to, EdgeKind::Cquery);
     }
 }
 
@@ -307,48 +315,48 @@ mod tests {
         }
     }
 
-    fn find<'a>(graph: &'a Graph, id: &str) -> &'a Node {
-        graph.nodes.iter().find(|n| n.id == id).unwrap()
+    fn find<'a>(graph: &'a Graph, names: &Names, id: &str) -> &'a Node {
+        graph.nodes.iter().find(|n| names.resolve(n.id) == id).unwrap()
     }
 
-    fn edges(graph: &Graph) -> HashSet<(&str, &str)> {
+    fn edges<'a>(graph: &Graph, names: &'a Names) -> HashSet<(&'a str, &'a str)> {
         graph
             .edges
             .iter()
-            .map(|e| (e.from.as_str(), e.to.as_str()))
+            .map(|e| (names.resolve(e.from), names.resolve(e.to)))
             .collect()
     }
 
     #[test]
     fn rule_in_two_configs_nests_a_ct_leaf_per_configuration() {
-        let graph = build(&[result(
+        let (graph, names) = build(&[result(
             vec![rule_ct("//foo:app", 1), rule_ct("//foo:app", 2)],
             vec![config(1, "k8-fastbuild"), config(2, "local_gnu-opt-exec")],
         )]);
 
-        let container = find(&graph, "target://foo:app");
+        let container = find(&graph, &names, "target://foo:app");
         assert_eq!(container.kind, Kind::Target);
         assert_eq!(container.label, ":app");
-        assert_eq!(container.parent.as_deref(), Some("pkg:foo"));
+        assert_eq!(container.parent.map(|p| names.resolve(p)), Some("pkg:foo"));
 
-        let ct1 = find(&graph, "ct://foo:app#ck1");
+        let ct1 = find(&graph, &names, "ct://foo:app#ck1");
         assert_eq!(ct1.kind, Kind::ConfiguredTarget);
         assert_eq!(ct1.label, "k8-fastbuild");
-        assert_eq!(ct1.parent.as_deref(), Some("target://foo:app"));
-        assert_eq!(find(&graph, "ct://foo:app#ck2").label, "local_gnu-opt-exec");
+        assert_eq!(ct1.parent.map(|p| names.resolve(p)), Some("target://foo:app"));
+        assert_eq!(find(&graph, &names, "ct://foo:app#ck2").label, "local_gnu-opt-exec");
     }
 
     #[test]
     fn configuration_without_a_mnemonic_falls_back_to_its_id() {
-        let graph = build(&[result(vec![rule_ct("//foo:app", 7)], vec![])]);
+        let (graph, names) = build(&[result(vec![rule_ct("//foo:app", 7)], vec![])]);
 
-        assert_eq!(find(&graph, "ct://foo:app#cfg7").label, "config 7");
+        assert_eq!(find(&graph, &names, "ct://foo:app#cfg7").label, "config 7");
     }
 
     #[test]
     fn configured_rule_input_edges_match_dependency_configurations() {
         // app#1 depends on lib in config 2 (an exec dep) and config 1.
-        let graph = build(&[result(
+        let (graph, names) = build(&[result(
             vec![
                 with_inputs(
                     rule_ct("//foo:app", 1),
@@ -362,7 +370,7 @@ mod tests {
         )]);
 
         // Edges run dependency -> dependent, as in the query and aquery builders.
-        let edges = edges(&graph);
+        let edges = edges(&graph, &names);
         assert!(edges.contains(&("ct://foo:lib#ck2", "ct://foo:app#ck1")));
         assert!(edges.contains(&("ct://foo:lib#ck1", "ct://foo:app#ck1")));
     }
@@ -371,7 +379,7 @@ mod tests {
     fn rule_input_falls_back_to_the_dependency_target_container() {
         // No configured_rule_input, so the label-only rule_input lands on lib's
         // target container rather than a specific configured target.
-        let graph = build(&[result(
+        let (graph, names) = build(&[result(
             vec![
                 with_inputs(rule_ct("//foo:app", 1), &["//foo:lib"], &[]),
                 rule_ct("//foo:lib", 1),
@@ -379,14 +387,14 @@ mod tests {
             vec![config(1, "target")],
         )]);
 
-        assert!(edges(&graph).contains(&("target://foo:lib", "ct://foo:app#ck1")));
+        assert!(edges(&graph, &names).contains(&("target://foo:lib", "ct://foo:app#ck1")));
     }
 
     #[test]
     fn configured_dependency_in_an_absent_configuration_lands_on_the_container() {
         // app depends on lib in config 2, but only lib's config-1 configured
         // target is present, so the edge lands on lib's target container.
-        let graph = build(&[result(
+        let (graph, names) = build(&[result(
             vec![
                 with_inputs(rule_ct("//foo:app", 1), &[], &[("//foo:lib", Some(2))]),
                 rule_ct("//foo:lib", 1),
@@ -394,13 +402,13 @@ mod tests {
             vec![config(1, "target")],
         )]);
 
-        assert!(!graph.nodes.iter().any(|n| n.id == "ct://foo:lib#cfg2"));
-        assert!(edges(&graph).contains(&("target://foo:lib", "ct://foo:app#ck1")));
+        assert!(!graph.nodes.iter().any(|n| names.resolve(n.id) == "ct://foo:lib#cfg2"));
+        assert!(edges(&graph, &names).contains(&("target://foo:lib", "ct://foo:app#ck1")));
     }
 
     #[test]
     fn dependency_without_a_configuration_lands_on_its_source_leaf() {
-        let graph = build(&[result(
+        let (graph, names) = build(&[result(
             vec![
                 with_inputs(rule_ct("//foo:app", 1), &[], &[("//foo:in.c", None)]),
                 source_ct("//foo:in.c"),
@@ -408,16 +416,16 @@ mod tests {
             vec![config(1, "target")],
         )]);
 
-        let leaf = find(&graph, "target://foo:in.c");
+        let leaf = find(&graph, &names, "target://foo:in.c");
         assert_eq!(leaf.kind, Kind::Source);
-        assert!(edges(&graph).contains(&("target://foo:in.c", "ct://foo:app#ck1")));
+        assert!(edges(&graph, &names).contains(&("target://foo:in.c", "ct://foo:app#ck1")));
     }
 
     #[test]
     fn label_only_rule_input_naming_a_source_lands_on_its_leaf() {
         // rule_input (no configured_rule_input) naming a source file resolves to
         // that source leaf, not a target container.
-        let graph = build(&[result(
+        let (graph, names) = build(&[result(
             vec![
                 with_inputs(rule_ct("//foo:app", 1), &["//foo:in.c"], &[]),
                 source_ct("//foo:in.c"),
@@ -425,12 +433,12 @@ mod tests {
             vec![config(1, "target")],
         )]);
 
-        assert!(edges(&graph).contains(&("target://foo:in.c", "ct://foo:app#ck1")));
+        assert!(edges(&graph, &names).contains(&("target://foo:in.c", "ct://foo:app#ck1")));
     }
 
     #[test]
     fn dependency_outside_the_queried_set_is_dropped() {
-        let graph = build(&[result(
+        let (graph, names) = build(&[result(
             vec![with_inputs(
                 rule_ct("//foo:app", 1),
                 &[],
@@ -440,6 +448,6 @@ mod tests {
         )]);
 
         assert!(!graph.nodes.iter().any(|n| n.label == "@external//:dep"));
-        assert!(edges(&graph).is_empty());
+        assert!(edges(&graph, &names).is_empty());
     }
 }

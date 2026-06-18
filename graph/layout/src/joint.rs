@@ -15,6 +15,7 @@ use bazel_query_proto::analysis::{ActionGraphContainer, CqueryResult};
 use bazel_query_proto::blaze_query::Target;
 
 use crate::graph::Graph;
+use crate::intern::{Id, Names};
 use crate::{aquery, cquery, query};
 
 pub fn build_joint(
@@ -22,7 +23,7 @@ pub fn build_joint(
     cquery: Option<&[CqueryResult]>,
     query: Option<&[Target]>,
     external_sources: bool,
-) -> Graph {
+) -> (Graph, Names) {
     let mut union: BTreeSet<(String, String)> = BTreeSet::new();
     if let Some(a) = aquery {
         union.extend(aquery::package_keys(a));
@@ -44,19 +45,57 @@ pub fn build_joint(
         labeled_outputs.extend(query::generated_labels(q));
     }
 
+    let mut names = Names::default();
     let mut graphs: Vec<Graph> = Vec::new();
     if let Some(a) = aquery {
-        graphs.push(aquery::build_with_packages(a, external_sources, &union, &labeled_outputs));
+        graphs.push(aquery::build_with_packages(
+            a,
+            external_sources,
+            &union,
+            &labeled_outputs,
+            &mut names,
+        ));
     }
     if let Some(c) = cquery {
-        graphs.push(cquery::build_with_packages(c, &union));
+        graphs.push(cquery::build_with_packages(c, &union, &mut names));
     }
     if let Some(q) = query {
         let refs: Vec<&Target> = q.iter().collect();
-        graphs.push(query::build_with_packages(&refs, &union));
+        graphs.push(query::build_with_packages(&refs, &union, &mut names));
     }
 
-    merge(graphs)
+    canonicalize(merge(graphs), &names)
+}
+
+/// Re-numbers a graph's ids into lexicographic order of their names, so a graph
+/// built from differently ordered inputs gets identical ids. Bazel's aquery proto
+/// output is not order-stable, and the level-of-detail pass breaks reveal-count
+/// ties between candidate containers by id, so without a name-ordered id the
+/// startup view would vary run to run. Each node also then sits at the position of
+/// its own id (`nodes[i].id == Id(i)`), the dense indexing that pass relies on.
+fn canonicalize(graph: Graph, names: &Names) -> (Graph, Names) {
+    let mut order: Vec<u32> = (0..names.len() as u32).collect();
+    order.sort_by(|&a, &b| names.resolve(Id(a)).cmp(names.resolve(Id(b))));
+    let mut remap = vec![Id(0); names.len()];
+    let mut canon = Names::default();
+    for &old in &order {
+        remap[old as usize] = canon.intern(names.resolve(Id(old)));
+    }
+    let map = |id: Id| remap[id.0 as usize];
+
+    let mut by_id: Vec<Option<&crate::graph::Node>> = vec![None; names.len()];
+    for node in &graph.nodes {
+        by_id[node.id.0 as usize] = Some(node);
+    }
+    let mut out = Graph::new();
+    for &old in &order {
+        let node = by_id[old as usize].expect("every id names a node");
+        out.add_node(map(node.id), node.label.clone(), node.kind, node.parent.map(map));
+    }
+    for edge in &graph.edges {
+        out.add_edge(map(edge.from), map(edge.to), edge.kind);
+    }
+    (out, canon)
 }
 
 /// Unions the graphs into one. Nodes are deduped by id: a package, target,
@@ -67,10 +106,10 @@ pub fn build_joint(
 /// input can equal one from another.
 fn merge(graphs: Vec<Graph>) -> Graph {
     let mut merged = Graph::new();
-    let mut seen_node: HashSet<String> = HashSet::new();
+    let mut seen_node: HashSet<Id> = HashSet::new();
     for graph in graphs {
         for node in graph.nodes {
-            if seen_node.insert(node.id.clone()) {
+            if seen_node.insert(node.id) {
                 merged.nodes.push(node);
             }
         }
@@ -112,15 +151,15 @@ mod tests {
         }
     }
 
-    fn find<'a>(graph: &'a Graph, id: &str) -> &'a Node {
-        graph.nodes.iter().find(|n| n.id == id).unwrap()
+    fn find<'a>(graph: &'a Graph, names: &Names, id: &str) -> &'a Node {
+        graph.nodes.iter().find(|n| names.resolve(n.id) == id).unwrap()
     }
 
-    fn edges(graph: &Graph) -> HashSet<(&str, &str, EdgeKind)> {
+    fn edges<'a>(graph: &Graph, names: &'a Names) -> HashSet<(&'a str, &'a str, EdgeKind)> {
         graph
             .edges
             .iter()
-            .map(|e| (e.from.as_str(), e.to.as_str(), e.kind))
+            .map(|e| (names.resolve(e.from), names.resolve(e.to), e.kind))
             .collect()
     }
 
@@ -162,7 +201,7 @@ mod tests {
             ..Default::default()
         };
 
-        let graph = build_joint(
+        let (graph, names) = build_joint(
             Some(&[aquery_container]),
             None,
             Some(&query_targets),
@@ -171,11 +210,11 @@ mod tests {
 
         // The target //foo:lib appears once though both inputs name it.
         assert_eq!(
-            graph.nodes.iter().filter(|n| n.id == "target://foo:lib").count(),
+            graph.nodes.iter().filter(|n| names.resolve(n.id) == "target://foo:lib").count(),
             1
         );
         // The query dependency edge and an aquery input edge both survive.
-        let edges = edges(&graph);
+        let edges = edges(&graph, &names);
         assert!(edges
             .iter()
             .any(|(_, _, k)| *k == EdgeKind::Query));
@@ -183,7 +222,7 @@ mod tests {
             .iter()
             .any(|(_, _, k)| *k == EdgeKind::Aquery));
         // The package box appears once.
-        assert_eq!(graph.nodes.iter().filter(|n| n.id == "pkg:foo").count(), 1);
+        assert_eq!(graph.nodes.iter().filter(|n| names.resolve(n.id) == "pkg:foo").count(), 1);
     }
 
     #[test]
@@ -249,16 +288,16 @@ mod tests {
             ..Default::default()
         };
 
-        let graph = build_joint(Some(&[aquery_container]), None, Some(&query_targets), false);
+        let (graph, names) = build_joint(Some(&[aquery_container]), None, Some(&query_targets), false);
 
         // The promoted target node is shared by query and aquery: it appears once.
         assert_eq!(
-            graph.nodes.iter().filter(|n| n.id == "target://pkg:gen.out").count(),
+            graph.nodes.iter().filter(|n| names.resolve(n.id) == "target://pkg:gen.out").count(),
             1
         );
         // aquery's promotion contributes the per-config box and concrete artifact.
-        assert!(graph.nodes.iter().any(|n| n.id == "ct://pkg:gen.out#ck1"));
-        assert!(graph.nodes.iter().any(|n| n.id == "artifact://pkg:gen.out#ck1"));
+        assert!(graph.nodes.iter().any(|n| names.resolve(n.id) == "ct://pkg:gen.out#ck1"));
+        assert!(graph.nodes.iter().any(|n| names.resolve(n.id) == "artifact://pkg:gen.out#ck1"));
     }
 
     #[test]
@@ -282,16 +321,16 @@ mod tests {
             ..Default::default()
         };
 
-        let graph = build_joint(
+        let (graph, names) = build_joint(
             Some(&[aquery_container]),
             None,
             Some(&query_targets),
             false,
         );
 
-        assert_eq!(find(&graph, "pkg:a").label, "//a");
-        let nested = find(&graph, "pkg:a/b");
+        assert_eq!(find(&graph, &names, "pkg:a").label, "//a");
+        let nested = find(&graph, &names, "pkg:a/b");
         assert_eq!(nested.label, "b");
-        assert_eq!(nested.parent.as_deref(), Some("pkg:a"));
+        assert_eq!(nested.parent.map(|p| names.resolve(p)), Some("pkg:a"));
     }
 }

@@ -10,6 +10,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use crate::graph::{Graph, Kind};
+use crate::intern::{Id, Names};
 
 /// The repository and package path a label names: `//a/b:c` -> `("", "a/b")`,
 /// `//:c` -> `("", "")`, `@r//a:c` -> `("@r", "a")`. A label with no `//` names
@@ -58,7 +59,7 @@ impl Trie {
 /// chains folded together. Maps each real package to the box that holds its
 /// targets, and resolves the box a source file nests under.
 pub(crate) struct PackageHierarchy {
-    box_id: HashMap<(String, String), String>,
+    box_id: HashMap<(String, String), Id>,
     /// Real main-repo package paths, sorted, for the source-enclosing lookup.
     main_paths: Vec<String>,
 }
@@ -66,7 +67,11 @@ pub(crate) struct PackageHierarchy {
 impl PackageHierarchy {
     /// Builds the boxes for every real package and the folded ancestors that
     /// reach them, emitting one `package` container node per box into `graph`.
-    pub(crate) fn build(packages: &BTreeSet<(String, String)>, graph: &mut Graph) -> Self {
+    pub(crate) fn build(
+        packages: &BTreeSet<(String, String)>,
+        graph: &mut Graph,
+        names: &mut Names,
+    ) -> Self {
         let mut tries: BTreeMap<&str, Trie> = BTreeMap::new();
         for (repo, path) in packages {
             tries.entry(repo.as_str()).or_default().insert(path);
@@ -76,7 +81,7 @@ impl PackageHierarchy {
             main_paths: Vec::new(),
         };
         for (repo, trie) in &tries {
-            hierarchy.emit_root(trie, repo, graph);
+            hierarchy.emit_root(trie, repo, graph, names);
         }
         hierarchy.main_paths = packages
             .iter()
@@ -90,17 +95,17 @@ impl PackageHierarchy {
     /// Emits a repository's boxes. The repository root becomes a `//` (or
     /// `@repo//`) box only when it is itself a package; otherwise each top-level
     /// subtree is its own outermost box.
-    fn emit_root(&mut self, root: &Trie, repo: &str, graph: &mut Graph) {
+    fn emit_root(&mut self, root: &Trie, repo: &str, graph: &mut Graph, names: &mut Names) {
         let parent = if root.real {
-            let id = box_node_id(repo, "");
-            graph.add_node(id.clone(), repo_prefix(repo), Kind::Package, None);
-            self.box_id.insert((repo.to_string(), String::new()), id.clone());
+            let id = names.intern(&box_node_id(repo, ""));
+            graph.add_node(id, repo_prefix(repo), Kind::Package, None);
+            self.box_id.insert((repo.to_string(), String::new()), id);
             Some(id)
         } else {
             None
         };
         for (component, child) in &root.children {
-            self.emit(child, repo, component, &[component.clone()], parent.as_deref(), graph);
+            self.emit(child, repo, component, &[component.clone()], parent, graph, names);
         }
     }
 
@@ -110,8 +115,9 @@ impl PackageHierarchy {
         repo: &str,
         full_path: &str,
         pending: &[String],
-        parent_box: Option<&str>,
+        parent_box: Option<Id>,
         graph: &mut Graph,
+        names: &mut Names,
     ) {
         // Fold a single-child intermediate into its child; a package with
         // content or a branch point anchors its own box.
@@ -120,7 +126,7 @@ impl PackageHierarchy {
             let child_path = format!("{full_path}/{component}");
             let mut chain = pending.to_vec();
             chain.push(component.clone());
-            self.emit(child, repo, &child_path, &chain, parent_box, graph);
+            self.emit(child, repo, &child_path, &chain, parent_box, graph, names);
             return;
         }
 
@@ -128,25 +134,25 @@ impl PackageHierarchy {
             None => format!("{}{}", repo_prefix(repo), pending.join("/")),
             Some(_) => pending.join("/"),
         };
-        let id = box_node_id(repo, full_path);
-        graph.add_node(id.clone(), label, Kind::Package, parent_box.map(str::to_string));
+        let id = names.intern(&box_node_id(repo, full_path));
+        graph.add_node(id, label, Kind::Package, parent_box);
         if node.real {
             self.box_id
-                .insert((repo.to_string(), full_path.to_string()), id.clone());
+                .insert((repo.to_string(), full_path.to_string()), id);
         }
         for (component, child) in &node.children {
             let child_path = format!("{full_path}/{component}");
-            self.emit(child, repo, &child_path, &[component.clone()], Some(&id), graph);
+            self.emit(child, repo, &child_path, &[component.clone()], Some(id), graph, names);
         }
     }
 
     /// The box that holds a label's own package, or `None` when the label names
     /// no package.
-    pub(crate) fn package_box(&self, label: &str) -> Option<&str> {
+    pub(crate) fn package_box(&self, label: &str) -> Option<Id> {
         let (repo, path) = parse_package(label)?;
         self.box_id
             .get(&(repo.to_string(), path.to_string()))
-            .map(String::as_str)
+            .copied()
     }
 
     /// The path of the deepest real main-repo package enclosing directory `dir`,
@@ -195,24 +201,25 @@ fn encloses(pkg: &str, dir: &str) -> bool {
 mod tests {
     use super::*;
 
-    fn build(packages: &[(&str, &str)]) -> (Graph, PackageHierarchy) {
+    fn build(packages: &[(&str, &str)]) -> (Graph, PackageHierarchy, Names) {
         let set: BTreeSet<(String, String)> = packages
             .iter()
             .map(|(repo, path)| (repo.to_string(), path.to_string()))
             .collect();
         let mut graph = Graph::new();
-        let hierarchy = PackageHierarchy::build(&set, &mut graph);
-        (graph, hierarchy)
+        let mut names = Names::default();
+        let hierarchy = PackageHierarchy::build(&set, &mut graph, &mut names);
+        (graph, hierarchy, names)
     }
 
-    fn node<'a>(graph: &'a Graph, id: &str) -> &'a crate::graph::Node {
-        graph.nodes.iter().find(|n| n.id == id).unwrap()
+    fn node<'a>(graph: &'a Graph, names: &Names, id: &str) -> &'a crate::graph::Node {
+        graph.nodes.iter().find(|n| names.resolve(n.id) == id).unwrap()
     }
 
     #[test]
     fn single_child_chain_folds_into_the_branch_box() {
         let base = "src/main/java/com/google/devtools/common/options";
-        let (graph, _) = build(&[
+        let (graph, _, names) = build(&[
             ("", base),
             ("", &format!("{base}/processor")),
             ("", &format!("{base}/testing")),
@@ -221,77 +228,77 @@ mod tests {
         // The target-less chain down to options folds into one outermost box
         // labeled with the full path; processor and testing nest with only their
         // own component.
-        let outer = node(&graph, &format!("pkg:{base}"));
+        let outer = node(&graph, &names, &format!("pkg:{base}"));
         assert_eq!(outer.label, format!("//{base}"));
         assert_eq!(outer.parent, None);
-        assert_eq!(node(&graph, &format!("pkg:{base}/processor")).label, "processor");
+        assert_eq!(node(&graph, &names, &format!("pkg:{base}/processor")).label, "processor");
         assert_eq!(
-            node(&graph, &format!("pkg:{base}/processor")).parent.as_deref(),
+            node(&graph, &names, &format!("pkg:{base}/processor")).parent.map(|p| names.resolve(p)),
             Some(format!("pkg:{base}").as_str())
         );
-        assert_eq!(node(&graph, &format!("pkg:{base}/testing")).label, "testing");
+        assert_eq!(node(&graph, &names, &format!("pkg:{base}/testing")).label, "testing");
         // No box was emitted for the folded intermediate segments.
-        assert!(!graph.nodes.iter().any(|n| n.id == "pkg:src"));
+        assert!(!graph.nodes.iter().any(|n| names.resolve(n.id) == "pkg:src"));
     }
 
     #[test]
     fn nested_single_child_below_a_branch_folds_too() {
         // foo branches (bar, baz); under bar a single-child chain bar/x/y folds.
-        let (graph, _) = build(&[("", "foo/bar/x/y"), ("", "foo/baz")]);
+        let (graph, _, names) = build(&[("", "foo/bar/x/y"), ("", "foo/baz")]);
 
-        assert_eq!(node(&graph, "pkg:foo").label, "//foo");
-        assert_eq!(node(&graph, "pkg:foo/baz").label, "baz");
-        let folded = node(&graph, "pkg:foo/bar/x/y");
+        assert_eq!(node(&graph, &names, "pkg:foo").label, "//foo");
+        assert_eq!(node(&graph, &names, "pkg:foo/baz").label, "baz");
+        let folded = node(&graph, &names, "pkg:foo/bar/x/y");
         assert_eq!(folded.label, "bar/x/y");
-        assert_eq!(folded.parent.as_deref(), Some("pkg:foo"));
+        assert_eq!(folded.parent.map(|p| names.resolve(p)), Some("pkg:foo"));
     }
 
     #[test]
     fn a_package_with_content_anchors_even_with_a_single_child() {
         // foo holds content and has one sub-package foo/bar, so foo keeps its own
         // box rather than folding into bar.
-        let (graph, _) = build(&[("", "foo"), ("", "foo/bar")]);
+        let (graph, _, names) = build(&[("", "foo"), ("", "foo/bar")]);
 
-        assert_eq!(node(&graph, "pkg:foo").label, "//foo");
-        assert_eq!(node(&graph, "pkg:foo/bar").label, "bar");
-        assert_eq!(node(&graph, "pkg:foo/bar").parent.as_deref(), Some("pkg:foo"));
+        assert_eq!(node(&graph, &names, "pkg:foo").label, "//foo");
+        assert_eq!(node(&graph, &names, "pkg:foo/bar").label, "bar");
+        assert_eq!(node(&graph, &names, "pkg:foo/bar").parent.map(|p| names.resolve(p)), Some("pkg:foo"));
     }
 
     #[test]
     fn separate_top_level_packages_are_separate_outermost_boxes() {
-        let (graph, _) = build(&[("", "foo"), ("", "bar")]);
+        let (graph, _, names) = build(&[("", "foo"), ("", "bar")]);
 
-        assert_eq!(node(&graph, "pkg:foo").label, "//foo");
-        assert_eq!(node(&graph, "pkg:foo").parent, None);
-        assert_eq!(node(&graph, "pkg:bar").label, "//bar");
-        assert_eq!(node(&graph, "pkg:bar").parent, None);
+        assert_eq!(node(&graph, &names, "pkg:foo").label, "//foo");
+        assert_eq!(node(&graph, &names, "pkg:foo").parent, None);
+        assert_eq!(node(&graph, &names, "pkg:bar").label, "//bar");
+        assert_eq!(node(&graph, &names, "pkg:bar").parent, None);
     }
 
     #[test]
     fn root_package_wraps_its_sub_packages() {
         // A `//:x` target makes the root a real package, so it becomes a `//`
         // box that holds the nested sub-package.
-        let (graph, _) = build(&[("", ""), ("", "a")]);
+        let (graph, _, names) = build(&[("", ""), ("", "a")]);
 
-        assert_eq!(node(&graph, "pkg:").label, "//");
-        assert_eq!(node(&graph, "pkg:").parent, None);
-        assert_eq!(node(&graph, "pkg:a").label, "a");
-        assert_eq!(node(&graph, "pkg:a").parent.as_deref(), Some("pkg:"));
+        assert_eq!(node(&graph, &names, "pkg:").label, "//");
+        assert_eq!(node(&graph, &names, "pkg:").parent, None);
+        assert_eq!(node(&graph, &names, "pkg:a").label, "a");
+        assert_eq!(node(&graph, &names, "pkg:a").parent.map(|p| names.resolve(p)), Some("pkg:"));
     }
 
     #[test]
     fn external_repo_packages_carry_their_repo_prefix() {
-        let (graph, hierarchy) = build(&[("@r", "a/b"), ("", "a/b")]);
+        let (graph, hierarchy, names) = build(&[("@r", "a/b"), ("", "a/b")]);
 
-        assert_eq!(node(&graph, "pkg:@r//a/b").label, "@r//a/b");
-        assert_eq!(node(&graph, "pkg:a/b").label, "//a/b");
-        assert_eq!(hierarchy.package_box("@r//a/b:t"), Some("pkg:@r//a/b"));
-        assert_eq!(hierarchy.package_box("//a/b:t"), Some("pkg:a/b"));
+        assert_eq!(node(&graph, &names, "pkg:@r//a/b").label, "@r//a/b");
+        assert_eq!(node(&graph, &names, "pkg:a/b").label, "//a/b");
+        assert_eq!(hierarchy.package_box("@r//a/b:t"), names.get("pkg:@r//a/b"));
+        assert_eq!(hierarchy.package_box("//a/b:t"), names.get("pkg:a/b"));
     }
 
     #[test]
     fn enclosing_package_picks_the_deepest_real_package() {
-        let (_graph, hierarchy) = build(&[("", "foo"), ("", "foo/bar")]);
+        let (_graph, hierarchy, _names) = build(&[("", "foo"), ("", "foo/bar")]);
 
         // A source under foo/bar/sub belongs to the deeper foo/bar.
         assert_eq!(hierarchy.enclosing_package("foo/bar/sub"), Some("foo/bar"));

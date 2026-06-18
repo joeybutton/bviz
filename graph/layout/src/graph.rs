@@ -5,6 +5,8 @@
 //! between node ids and may cross containment levels; the layout engine places
 //! each edge in the lowest common ancestor of its endpoints.
 
+use crate::intern::Id;
+
 /// A coarse node category, used to pick a fill when rendering and to decide
 /// which leaves may merge. `Group` is a Bazel `package_group`/`environment_group`
 /// target and also the kind of the container an expanded merge-group renders as.
@@ -23,7 +25,7 @@ pub enum Kind {
 /// parent, and a leaf otherwise.
 #[derive(Clone)]
 pub struct Node {
-    pub id: String,
+    pub id: Id,
     pub label: String,
     pub kind: Kind,
     /// A synthetic node a quotient pass folds interchangeable `Source`/`Artifact`
@@ -31,7 +33,7 @@ pub struct Node {
     /// like them), so this — not the kind — marks the boxes that can expand or
     /// collapse a group.
     pub group: bool,
-    pub parent: Option<String>,
+    pub parent: Option<Id>,
 }
 
 /// Which Bazel query an edge came from, so the renderer can style the static
@@ -59,8 +61,8 @@ impl EdgeKind {
 /// query it came from.
 #[derive(Clone)]
 pub struct Edge {
-    pub from: String,
-    pub to: String,
+    pub from: Id,
+    pub to: Id,
     pub kind: EdgeKind,
 }
 
@@ -75,15 +77,9 @@ impl Graph {
         Self::default()
     }
 
-    pub fn add_node(
-        &mut self,
-        id: impl Into<String>,
-        label: impl Into<String>,
-        kind: Kind,
-        parent: Option<String>,
-    ) {
+    pub fn add_node(&mut self, id: Id, label: impl Into<String>, kind: Kind, parent: Option<Id>) {
         self.nodes.push(Node {
-            id: id.into(),
+            id,
             label: label.into(),
             kind,
             group: false,
@@ -91,11 +87,7 @@ impl Graph {
         });
     }
 
-    pub fn add_edge(&mut self, from: impl Into<String>, to: impl Into<String>, kind: EdgeKind) {
-        self.edges.push(Edge {
-            from: from.into(),
-            to: to.into(),
-            kind,
-        });
+    pub fn add_edge(&mut self, from: Id, to: Id, kind: EdgeKind) {
+        self.edges.push(Edge { from, to, kind });
     }
 }

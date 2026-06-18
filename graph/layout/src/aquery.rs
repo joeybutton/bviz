@@ -26,11 +26,20 @@ use bazel_query_proto::analysis::{
 };
 
 use crate::graph::{EdgeKind, Graph, Kind};
+use crate::intern::{Id, Names};
 use crate::label::{self, PackageHierarchy};
 
-pub fn build(containers: &[ActionGraphContainer], external_sources: bool) -> Graph {
+pub fn build(containers: &[ActionGraphContainer], external_sources: bool) -> (Graph, Names) {
     let packages = package_keys(containers);
-    build_with_packages(containers, external_sources, &packages, &HashSet::new())
+    let mut names = Names::default();
+    let graph = build_with_packages(
+        containers,
+        external_sources,
+        &packages,
+        &HashSet::new(),
+        &mut names,
+    );
+    (graph, names)
 }
 
 /// The (repository, package path) keys of every target this aquery names, for
@@ -55,6 +64,7 @@ pub(crate) fn build_with_packages(
     external_sources: bool,
     packages: &BTreeSet<(String, String)>,
     labeled_outputs: &HashSet<String>,
+    names: &mut Names,
 ) -> Graph {
     let mut artifacts: Vec<&Artifact> = Vec::new();
     let mut actions: Vec<&Action> = Vec::new();
@@ -80,13 +90,13 @@ pub(crate) fn build_with_packages(
     let depset_by_id: HashMap<u32, &DepSetOfFiles> = dep_sets.iter().map(|d| (d.id, *d)).collect();
 
     let mut graph = Graph::new();
-    let hierarchy = PackageHierarchy::build(packages, &mut graph);
+    let hierarchy = PackageHierarchy::build(packages, &mut graph, names);
 
-    let mut target_boxes: HashSet<String> = HashSet::new();
-    let mut ct_boxes: HashSet<String> = HashSet::new();
-    let source_nodes: HashSet<String> = HashSet::new();
+    let mut target_boxes: HashSet<Id> = HashSet::new();
+    let mut ct_boxes: HashSet<Id> = HashSet::new();
+    let source_nodes: HashSet<Id> = HashSet::new();
     // Per produced artifact, the leaf node that represents it.
-    let mut producer_node_id: HashMap<u32, String> = HashMap::new();
+    let mut producer_node_id: HashMap<u32, Id> = HashMap::new();
 
     // Pass 1: actions and the output artifacts they produce.
     for (i, action) in actions.iter().enumerate() {
@@ -104,14 +114,10 @@ pub(crate) fn build_with_packages(
             &mut target_boxes,
             &mut ct_boxes,
             &config_by_id,
+            names,
         );
-        let action_id = format!("action{i}");
-        graph.add_node(
-            action_id.clone(),
-            action.mnemonic.clone(),
-            Kind::Action,
-            Some(ct_id.clone()),
-        );
+        let action_id = names.intern(&format!("action{i}"));
+        graph.add_node(action_id, action.mnemonic.clone(), Kind::Action, Some(ct_id));
         for &out in &action.output_ids {
             let path = full_path(out, &artifact_by_id, &fragment_by_id);
             // A labeled generated output nests under its own target's per-config
@@ -129,10 +135,14 @@ pub(crate) fn build_with_packages(
                         &mut target_boxes,
                         &mut ct_boxes,
                         &config_by_id,
+                        names,
                     );
-                    let id = format!("artifact:{out_label}#{}", config_key(config_id, &config_by_id));
+                    let id = names.intern(&format!(
+                        "artifact:{out_label}#{}",
+                        config_key(config_id, &config_by_id)
+                    ));
                     graph.add_node(
-                        id.clone(),
+                        id,
                         basename(out, &artifact_by_id, &fragment_by_id),
                         Kind::Artifact,
                         Some(out_ct),
@@ -140,26 +150,24 @@ pub(crate) fn build_with_packages(
                     id
                 }
                 None => {
-                    let id = format!("artifact{out}");
+                    let id = names.intern(&format!("artifact{out}"));
                     graph.add_node(
-                        id.clone(),
+                        id,
                         basename(out, &artifact_by_id, &fragment_by_id),
                         Kind::Artifact,
-                        Some(ct_id.clone()),
+                        Some(ct_id),
                     );
                     id
                 }
             };
-            producer_node_id.insert(out, art_id.clone());
-            graph.add_edge(action_id.clone(), art_id, EdgeKind::Aquery);
+            producer_node_id.insert(out, art_id);
+            graph.add_edge(action_id, art_id, EdgeKind::Aquery);
         }
     }
 
     // Pass 2: wire each action's inputs, flattening its depsets into direct edges.
     let mut wiring = Wiring {
         seen_edge: HashSet::new(),
-        id_sym: HashMap::new(),
-        id_str: Vec::new(),
         source_nodes,
         hierarchy: &hierarchy,
         producer_node_id,
@@ -170,10 +178,10 @@ pub(crate) fn build_with_packages(
         resolved: HashMap::new(),
     };
     for (i, action) in actions.iter().enumerate() {
-        let action_id = wiring.intern(&format!("action{i}"));
+        let action_id = names.intern(&format!("action{i}"));
         let mut visited: HashSet<u32> = HashSet::new();
         for &dep_set_id in &action.input_dep_set_ids {
-            wiring.wire(dep_set_id, action_id, &mut visited, &mut graph);
+            wiring.wire(dep_set_id, action_id, &mut visited, &mut graph, names);
         }
     }
 
@@ -182,26 +190,21 @@ pub(crate) fn build_with_packages(
 
 /// Mutable state threaded through the recursive input wiring.
 struct Wiring<'a> {
-    /// Input edges already wired, deduped by their endpoints' interned ids. An
-    /// artifact reachable through several of one action's depsets, or the same
-    /// source feeding an action twice, is wired once.
-    seen_edge: HashSet<(u32, u32)>,
-    /// Interned node ids: a node's string id maps to a small integer, so the
-    /// per-edge dedup and the resolution cache key on integers and clone the
-    /// endpoint strings only when a surviving edge is finally recorded.
-    id_sym: HashMap<String, u32>,
-    id_str: Vec<String>,
-    source_nodes: HashSet<String>,
+    /// Input edges already wired, deduped by their endpoints' ids. An artifact
+    /// reachable through several of one action's depsets, or the same source
+    /// feeding an action twice, is wired once.
+    seen_edge: HashSet<(Id, Id)>,
+    source_nodes: HashSet<Id>,
     hierarchy: &'a PackageHierarchy,
-    producer_node_id: HashMap<u32, String>,
+    producer_node_id: HashMap<u32, Id>,
     depset_by_id: HashMap<u32, &'a DepSetOfFiles>,
     artifact_by_id: HashMap<u32, &'a Artifact>,
     fragment_by_id: HashMap<u32, &'a PathFragment>,
     external_sources: bool,
-    /// The interned leaf node each input artifact wires from, or `None` when it
-    /// is dropped. Resolution scans the package set and rebuilds the artifact's
+    /// The leaf node each input artifact wires from, or `None` when it is
+    /// dropped. Resolution scans the package set and rebuilds the artifact's
     /// path, so it is cached: an artifact in many actions' inputs resolves once.
-    resolved: HashMap<u32, Option<u32>>,
+    resolved: HashMap<u32, Option<Id>>,
 }
 
 impl Wiring<'_> {
@@ -213,9 +216,10 @@ impl Wiring<'_> {
     fn wire(
         &mut self,
         dep_set_id: u32,
-        consumer: u32,
+        consumer: Id,
         visited: &mut HashSet<u32>,
         graph: &mut Graph,
+        names: &mut Names,
     ) {
         if !visited.insert(dep_set_id) {
             return;
@@ -226,29 +230,17 @@ impl Wiring<'_> {
         let directs: Vec<u32> = dep_set.direct_artifact_ids.clone();
         let transitives: Vec<u32> = dep_set.transitive_dep_set_ids.clone();
         for artifact_id in directs {
-            self.emit_member(artifact_id, consumer, graph);
+            self.emit_member(artifact_id, consumer, graph, names);
         }
         for transitive in transitives {
-            self.wire(transitive, consumer, visited, graph);
+            self.wire(transitive, consumer, visited, graph, names);
         }
-    }
-
-    /// Interns a node id string, returning its small-integer id and recording the
-    /// string so a recorded edge can recover its endpoints.
-    fn intern(&mut self, id: &str) -> u32 {
-        if let Some(&sym) = self.id_sym.get(id) {
-            return sym;
-        }
-        let sym = self.id_str.len() as u32;
-        self.id_str.push(id.to_string());
-        self.id_sym.insert(id.to_string(), sym);
-        sym
     }
 
     /// Wires one member artifact to `consumer` through the leaf node it resolves
     /// to, creating that node on first sight and skipping a dropped input.
-    fn emit_member(&mut self, artifact_id: u32, consumer: u32, graph: &mut Graph) {
-        if let Some(from) = self.resolve_member(artifact_id, graph) {
+    fn emit_member(&mut self, artifact_id: u32, consumer: Id, graph: &mut Graph, names: &mut Names) {
+        if let Some(from) = self.resolve_member(artifact_id, graph, names) {
             self.add_edge(from, consumer, graph);
         }
     }
@@ -259,24 +251,23 @@ impl Wiring<'_> {
     /// `external_sources` is off, or generated outside the queried scope, which
     /// has no producer node). The result depends only on the artifact, so it is
     /// memoized across the many consumers a shared input feeds.
-    fn resolve_member(&mut self, artifact_id: u32, graph: &mut Graph) -> Option<u32> {
+    fn resolve_member(&mut self, artifact_id: u32, graph: &mut Graph, names: &mut Names) -> Option<Id> {
         if let Some(&cached) = self.resolved.get(&artifact_id) {
             return cached;
         }
-        let from = self.compute_member(artifact_id, graph);
+        let from = self.compute_member(artifact_id, graph, names);
         self.resolved.insert(artifact_id, from);
         from
     }
 
-    fn compute_member(&mut self, artifact_id: u32, graph: &mut Graph) -> Option<u32> {
+    fn compute_member(&mut self, artifact_id: u32, graph: &mut Graph, names: &mut Names) -> Option<Id> {
         let path = full_path(artifact_id, &self.artifact_by_id, &self.fragment_by_id);
         if !self.external_sources && is_external(&path) {
             return None;
         }
         if is_generated(&path) {
             // A generated input with no in-scope producer has no node to connect from.
-            let producer = self.producer_node_id.get(&artifact_id).cloned()?;
-            return Some(self.intern(&producer));
+            return self.producer_node_id.get(&artifact_id).copied();
         }
         let dir = path.rsplit_once('/').map(|(d, _)| d).unwrap_or("");
         let node_id = match self.hierarchy.enclosing_package(dir) {
@@ -287,10 +278,10 @@ impl Wiring<'_> {
                     path.strip_prefix(&format!("{pkg}/")).unwrap_or(&path)
                 };
                 let label = format!("//{pkg}:{rel}");
-                let node_id = format!("target:{label}");
-                if self.source_nodes.insert(node_id.clone()) {
-                    let parent = self.hierarchy.package_box(&label).map(str::to_string);
-                    graph.add_node(node_id.clone(), label::target_label(&label), Kind::Source, parent);
+                let node_id = names.intern(&format!("target:{label}"));
+                if self.source_nodes.insert(node_id) {
+                    let parent = self.hierarchy.package_box(&label);
+                    graph.add_node(node_id, label::target_label(&label), Kind::Source, parent);
                 }
                 node_id
             }
@@ -300,18 +291,15 @@ impl Wiring<'_> {
                 &mut self.source_nodes,
                 &self.artifact_by_id,
                 &self.fragment_by_id,
+                names,
             ),
         };
-        Some(self.intern(&node_id))
+        Some(node_id)
     }
 
-    fn add_edge(&mut self, from: u32, to: u32, graph: &mut Graph) {
+    fn add_edge(&mut self, from: Id, to: Id, graph: &mut Graph) {
         if self.seen_edge.insert((from, to)) {
-            graph.add_edge(
-                self.id_str[from as usize].clone(),
-                self.id_str[to as usize].clone(),
-                EdgeKind::Aquery,
-            );
+            graph.add_edge(from, to, EdgeKind::Aquery);
         }
     }
 }
@@ -328,20 +316,21 @@ fn target_ct_box(
     config_id: u32,
     graph: &mut Graph,
     hierarchy: &PackageHierarchy,
-    target_boxes: &mut HashSet<String>,
-    ct_boxes: &mut HashSet<String>,
+    target_boxes: &mut HashSet<Id>,
+    ct_boxes: &mut HashSet<Id>,
     config_by_id: &HashMap<u32, &Configuration>,
-) -> String {
-    let ct_node_id = format!("ct:{full_label}#{}", config_key(config_id, config_by_id));
-    if !ct_boxes.insert(ct_node_id.clone()) {
+    names: &mut Names,
+) -> Id {
+    let ct_node_id = names.intern(&format!("ct:{full_label}#{}", config_key(config_id, config_by_id)));
+    if !ct_boxes.insert(ct_node_id) {
         return ct_node_id;
     }
 
-    let target_node_id = format!("target:{full_label}");
-    if target_boxes.insert(target_node_id.clone()) {
-        let package = hierarchy.package_box(full_label).map(str::to_string);
+    let target_node_id = names.intern(&format!("target:{full_label}"));
+    if target_boxes.insert(target_node_id) {
+        let package = hierarchy.package_box(full_label);
         graph.add_node(
-            target_node_id.clone(),
+            target_node_id,
             label::target_label(full_label),
             target_kind,
             package,
@@ -354,7 +343,7 @@ fn target_ct_box(
         .filter(|m| !m.is_empty())
         .unwrap_or_else(|| format!("config {config_id}"));
     graph.add_node(
-        ct_node_id.clone(),
+        ct_node_id,
         mnemonic,
         Kind::ConfiguredTarget,
         Some(target_node_id),
@@ -394,14 +383,15 @@ fn generated_label(hierarchy: &PackageHierarchy, path: &str) -> Option<String> {
 fn root_source_node(
     artifact_id: u32,
     graph: &mut Graph,
-    source_nodes: &mut HashSet<String>,
+    source_nodes: &mut HashSet<Id>,
     artifact_by_id: &HashMap<u32, &Artifact>,
     fragment_by_id: &HashMap<u32, &PathFragment>,
-) -> String {
-    let node_id = format!("source{artifact_id}");
-    if source_nodes.insert(node_id.clone()) {
+    names: &mut Names,
+) -> Id {
+    let node_id = names.intern(&format!("source{artifact_id}"));
+    if source_nodes.insert(node_id) {
         graph.add_node(
-            node_id.clone(),
+            node_id,
             basename(artifact_id, artifact_by_id, fragment_by_id),
             Kind::Source,
             None,
@@ -536,19 +526,19 @@ mod tests {
         }
     }
 
-    fn find<'a>(graph: &'a Graph, id: &str) -> &'a Node {
-        graph.nodes.iter().find(|n| n.id == id).unwrap()
+    fn find<'a>(graph: &'a Graph, names: &Names, id: &str) -> &'a Node {
+        graph.nodes.iter().find(|n| names.resolve(n.id) == id).unwrap()
     }
 
-    fn parent_of<'a>(graph: &'a Graph, id: &str) -> Option<&'a str> {
-        find(graph, id).parent.as_deref()
+    fn parent_of<'a>(graph: &Graph, names: &'a Names, id: &str) -> Option<&'a str> {
+        find(graph, names, id).parent.map(|p| names.resolve(p))
     }
 
-    fn edges(graph: &Graph) -> HashSet<(&str, &str)> {
+    fn edges<'a>(graph: &Graph, names: &'a Names) -> HashSet<(&'a str, &'a str)> {
         graph
             .edges
             .iter()
-            .map(|e| (e.from.as_str(), e.to.as_str()))
+            .map(|e| (names.resolve(e.from), names.resolve(e.to)))
             .collect()
     }
 
@@ -565,9 +555,9 @@ mod tests {
             ..Default::default()
         };
 
-        let graph = build(&[container], false);
+        let (graph, names) = build(&[container], false);
 
-        let edges = edges(&graph);
+        let edges = edges(&graph, &names);
         assert!(edges.contains(&("source1", "action0")));
         assert!(edges.contains(&("source2", "action0")));
         assert!(edges.contains(&("source1", "action1")));
@@ -587,9 +577,9 @@ mod tests {
             ..Default::default()
         };
 
-        let graph = build(&[container], false);
+        let (graph, names) = build(&[container], false);
 
-        let edges = edges(&graph);
+        let edges = edges(&graph, &names);
         assert!(edges.contains(&("source1", "action0")));
         assert!(edges.contains(&("source1", "action1")));
     }
@@ -611,9 +601,9 @@ mod tests {
             ..Default::default()
         };
 
-        let graph = build(&[container], false);
+        let (graph, names) = build(&[container], false);
 
-        let edges = edges(&graph);
+        let edges = edges(&graph, &names);
         assert!(edges.contains(&("source1", "action0")));
         // Edge dedup plus the visited guard leave exactly one input edge.
         assert_eq!(edges.iter().filter(|(_, to)| *to == "action0").count(), 1);
@@ -631,14 +621,14 @@ mod tests {
             ..Default::default()
         };
 
-        let graph = build(&[container], false);
+        let (graph, names) = build(&[container], false);
 
-        let edges = edges(&graph);
+        let edges = edges(&graph, &names);
         // The local member flattens onto both consumers.
         assert!(edges.contains(&("source1", "action0")));
         assert!(edges.contains(&("source1", "action1")));
         // The external member never becomes a node or edge.
-        assert!(!graph.nodes.iter().any(|n| n.id == "source2"));
+        assert!(!graph.nodes.iter().any(|n| names.resolve(n.id) == "source2"));
     }
 
     #[test]
@@ -663,9 +653,9 @@ mod tests {
             ..Default::default()
         };
 
-        let graph = build(&[container], false);
+        let (graph, names) = build(&[container], false);
 
-        let edges = edges(&graph);
+        let edges = edges(&graph, &names);
         // The producing action feeds its artifact node, which flattens directly
         // onto both consumers. Producer is action0; consumers action1/2.
         assert!(edges.contains(&("action0", "artifact1")));
@@ -685,11 +675,11 @@ mod tests {
             ..Default::default()
         };
 
-        let graph = build(&[container], false);
+        let (graph, names) = build(&[container], false);
 
         // The member cannot be wired, so it produces no node and no edge.
-        assert!(!graph.nodes.iter().any(|n| n.id == "artifact1"));
-        assert!(edges(&graph).is_empty());
+        assert!(!graph.nodes.iter().any(|n| names.resolve(n.id) == "artifact1"));
+        assert!(edges(&graph, &names).is_empty());
     }
 
     #[test]
@@ -706,16 +696,16 @@ mod tests {
             ..Default::default()
         };
 
-        let graph = build(&[container], false);
+        let (graph, names) = build(&[container], false);
 
-        assert_eq!(find(&graph, "pkg:foo").kind, Kind::Package);
-        assert_eq!(find(&graph, "pkg:foo").label, "//foo");
-        assert_eq!(find(&graph, "pkg:bar").label, "//bar");
+        assert_eq!(find(&graph, &names, "pkg:foo").kind, Kind::Package);
+        assert_eq!(find(&graph, &names, "pkg:foo").label, "//foo");
+        assert_eq!(find(&graph, &names, "pkg:bar").label, "//bar");
 
-        assert_eq!(parent_of(&graph, "target://foo:app"), Some("pkg:foo"));
-        assert_eq!(parent_of(&graph, "target://bar:lib"), Some("pkg:bar"));
-        assert_eq!(parent_of(&graph, "target://foo:main.c"), Some("pkg:foo"));
-        assert_eq!(parent_of(&graph, "target://bar:lib.c"), Some("pkg:bar"));
+        assert_eq!(parent_of(&graph, &names, "target://foo:app"), Some("pkg:foo"));
+        assert_eq!(parent_of(&graph, &names, "target://bar:lib"), Some("pkg:bar"));
+        assert_eq!(parent_of(&graph, &names, "target://foo:main.c"), Some("pkg:foo"));
+        assert_eq!(parent_of(&graph, &names, "target://bar:lib.c"), Some("pkg:bar"));
     }
 
     #[test]
@@ -733,9 +723,9 @@ mod tests {
             ..Default::default()
         };
 
-        let graph = build(&[container], false);
+        let (graph, names) = build(&[container], false);
 
-        assert_eq!(parent_of(&graph, "target://foo/bar:sub/deep.c"), Some("pkg:foo/bar"));
+        assert_eq!(parent_of(&graph, &names, "target://foo/bar:sub/deep.c"), Some("pkg:foo/bar"));
     }
 
     #[test]
@@ -750,9 +740,9 @@ mod tests {
             ..Default::default()
         };
 
-        let graph = build(&[container], false);
+        let (graph, names) = build(&[container], false);
 
-        assert_eq!(parent_of(&graph, "source1"), None);
+        assert_eq!(parent_of(&graph, &names, "source1"), None);
     }
 
     #[test]
@@ -767,11 +757,11 @@ mod tests {
             ..Default::default()
         };
 
-        let graph = build(&[container], false);
+        let (graph, names) = build(&[container], false);
 
-        assert_eq!(find(&graph, "pkg:").label, "//");
-        assert_eq!(parent_of(&graph, "target://:root"), Some("pkg:"));
-        assert_eq!(parent_of(&graph, "target://:top.c"), Some("pkg:"));
+        assert_eq!(find(&graph, &names, "pkg:").label, "//");
+        assert_eq!(parent_of(&graph, &names, "target://:root"), Some("pkg:"));
+        assert_eq!(parent_of(&graph, &names, "target://:top.c"), Some("pkg:"));
     }
 
     /// Two sources with the same single consumer but in different packages keep
@@ -793,8 +783,9 @@ mod tests {
             ..Default::default()
         };
 
-        let graph = build(&[container], false);
-        let quotiented = crate::quotient::quotient(&graph, &std::collections::HashSet::new());
+        let (graph, mut names) = build(&[container], false);
+        let quotiented =
+            crate::quotient::quotient(&graph, &std::collections::HashSet::new(), &mut names);
 
         // foo/a.c and foo/c.c share package, consumer, and (no) producer: merged.
         let merged: Vec<&Node> = quotiented
@@ -804,13 +795,13 @@ mod tests {
             .collect();
         let foo_group = merged
             .iter()
-            .find(|n| n.parent.as_deref() == Some("pkg:foo"))
+            .find(|n| n.parent.map(|p| names.resolve(p)) == Some("pkg:foo"))
             .expect("a foo-package source node");
         assert_eq!(foo_group.label, "2 sources");
         // bar/b.c is alone in its package, so it stays an unmerged singleton.
         let bar_sources: Vec<&&Node> = merged
             .iter()
-            .filter(|n| n.parent.as_deref() == Some("pkg:bar"))
+            .filter(|n| n.parent.map(|p| names.resolve(p)) == Some("pkg:bar"))
             .collect();
         assert_eq!(bar_sources.len(), 1);
         assert!(!bar_sources[0].label.ends_with("sources"));
@@ -841,17 +832,19 @@ mod tests {
 
         let containers = vec![container];
         let labeled = HashSet::from(["//pkg:gen.out".to_string()]);
-        let graph = build_with_packages(&containers, false, &package_keys(&containers), &labeled);
+        let mut names = Names::default();
+        let graph =
+            build_with_packages(&containers, false, &package_keys(&containers), &labeled, &mut names);
 
         // The output is promoted to its own target box, nesting its per-config
         // box and the concrete artifact, instead of sitting under the rule.
-        assert_eq!(find(&graph, "target://pkg:gen.out").kind, Kind::Artifact);
-        assert_eq!(parent_of(&graph, "ct://pkg:gen.out#ck1"), Some("target://pkg:gen.out"));
-        let concrete = find(&graph, "artifact://pkg:gen.out#ck1");
+        assert_eq!(find(&graph, &names, "target://pkg:gen.out").kind, Kind::Artifact);
+        assert_eq!(parent_of(&graph, &names, "ct://pkg:gen.out#ck1"), Some("target://pkg:gen.out"));
+        let concrete = find(&graph, &names, "artifact://pkg:gen.out#ck1");
         assert_eq!(concrete.kind, Kind::Artifact);
-        assert_eq!(concrete.parent.as_deref(), Some("ct://pkg:gen.out#ck1"));
+        assert_eq!(concrete.parent.map(|p| names.resolve(p)), Some("ct://pkg:gen.out#ck1"));
         // The producing action feeds the promoted concrete artifact.
-        assert!(edges(&graph).contains(&("action0", "artifact://pkg:gen.out#ck1")));
+        assert!(edges(&graph, &names).contains(&("action0", "artifact://pkg:gen.out#ck1")));
     }
 
     #[test]
@@ -879,11 +872,13 @@ mod tests {
 
         let containers = vec![container];
         let labeled = HashSet::new();
-        let graph = build_with_packages(&containers, false, &package_keys(&containers), &labeled);
+        let mut names = Names::default();
+        let graph =
+            build_with_packages(&containers, false, &package_keys(&containers), &labeled, &mut names);
 
         // No promotion: the output is a bare artifact under the genrule's box.
-        assert!(!graph.nodes.iter().any(|n| n.id == "target://pkg:gen.out"));
-        assert_eq!(parent_of(&graph, "artifact1"), Some("ct://pkg:gen#ck1"));
+        assert!(!graph.nodes.iter().any(|n| names.resolve(n.id) == "target://pkg:gen.out"));
+        assert_eq!(parent_of(&graph, &names, "artifact1"), Some("ct://pkg:gen#ck1"));
     }
 
     #[test]
@@ -894,11 +889,11 @@ mod tests {
             ..Default::default()
         };
 
-        let graph = build(&[container], false);
+        let (graph, names) = build(&[container], false);
 
-        let pkg = parent_of(&graph, "target:@somerepo//foo:bar").unwrap();
+        let pkg = parent_of(&graph, &names, "target:@somerepo//foo:bar").unwrap();
         assert_ne!(pkg, "pkg:foo");
-        assert_eq!(find(&graph, pkg).label, "@somerepo//foo");
+        assert_eq!(find(&graph, &names, pkg).label, "@somerepo//foo");
     }
 
     #[test]
@@ -909,15 +904,15 @@ mod tests {
             ..Default::default()
         };
 
-        let graph = build(&[container], false);
+        let (graph, names) = build(&[container], false);
 
         // Main-repo package keeps its historical id and label.
-        assert_eq!(parent_of(&graph, "target://foo:x"), Some("pkg:foo"));
-        assert_eq!(find(&graph, "pkg:foo").label, "//foo");
+        assert_eq!(parent_of(&graph, &names, "target://foo:x"), Some("pkg:foo"));
+        assert_eq!(find(&graph, &names, "pkg:foo").label, "//foo");
 
         // The external package is a distinct container.
-        let external = parent_of(&graph, "target:@somerepo//foo:y").unwrap();
+        let external = parent_of(&graph, &names, "target:@somerepo//foo:y").unwrap();
         assert_ne!(external, "pkg:foo");
-        assert_eq!(find(&graph, external).label, "@somerepo//foo");
+        assert_eq!(find(&graph, &names, external).label, "@somerepo//foo");
     }
 }

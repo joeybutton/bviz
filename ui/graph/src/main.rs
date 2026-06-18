@@ -4,7 +4,7 @@
 
 use bviz_graph_layout::graph::Graph;
 use bviz_graph_layout::layout::CARET_RESERVE;
-use bviz_graph_layout::{layout, quotient, streamed_proto, EdgeKind, Kind, LaidOut};
+use bviz_graph_layout::{layout, quotient, streamed_proto, EdgeKind, Id, Kind, LaidOut, Names};
 use bviz_ui_components::{load_in_background, track_drag};
 use bviz_ui_shell::Chrome;
 use clap::Parser;
@@ -167,17 +167,21 @@ struct GraphView {
     /// The built (pre-quotient) graph, cached so toggling a group re-lays-out
     /// without re-reading or re-parsing the proto. `None` until the load lands.
     base: Rc<RefCell<Option<Graph>>>,
+    /// The interned node-id table the base graph keys on, threaded into each
+    /// relayout so the quotient pass can mint group ids. `None` until the load
+    /// lands.
+    names: Rc<RefCell<Option<Names>>>,
     /// Container and group ids currently expanded; every other container folds
     /// its subtree away so the layout only processes the visible view.
-    expanded: Rc<RefCell<HashSet<String>>>,
+    expanded: Rc<RefCell<HashSet<Id>>>,
     /// Multi-child container ids of the base graph; only these carry an
     /// expand/collapse handle (a leaf can't open, a singleton auto-expands), so a
     /// click or caret can tell an expandable box from a plain one.
-    expandable: Rc<RefCell<HashSet<String>>>,
+    expandable: Rc<RefCell<HashSet<Id>>>,
     /// The most-recently toggled node id: the box its relayout frames or
     /// recenters, and the box emphasized briefly afterward so the eye can find
     /// what opened or closed. Cleared when the highlight fades.
-    recent: Option<String>,
+    recent: Option<Id>,
     /// When the highlight began — set as the relayout lands, so the emphasis
     /// fades over `HIGHLIGHT_LINGER` measured from when the box becomes visible.
     /// A relayout slower than the linger would otherwise outlast a fade timed
@@ -198,7 +202,7 @@ struct GraphView {
     relaying: bool,
     /// Node under the cursor, whose neighborhood stays lit while everything else
     /// dims; `None` when the cursor is over no node.
-    hovered: Option<String>,
+    hovered: Option<Id>,
     /// Whether hovering a node dims the rest of the graph; flipped by the `h` key
     /// or the on-screen toggle so the dimming can be turned off when it is more
     /// noise than help.
@@ -231,29 +235,31 @@ impl GraphView {
         let focus_handle = cx.focus_handle();
         focus_handle.focus(window, cx);
         let base: Rc<RefCell<Option<Graph>>> = Rc::new(RefCell::new(None));
+        let names: Rc<RefCell<Option<Names>>> = Rc::new(RefCell::new(None));
         // Build and lay out the graph on the background executor so window
         // appearance and interactivity are never blocked; swap the view to the
         // result and cache the base graph when it completes.
         let load_task = load_in_background(
             cx,
             move || {
-                let graph = build_graph(&inputs)?;
+                let (graph, mut names) = build_graph(&inputs)?;
                 // Open to a bounded overview instead of laying out the whole graph.
                 let expanded = bviz_graph_layout::lod::default_expansion(
                     &graph,
                     MAX_VISIBLE_NODES,
                     MAX_VISIBLE_EDGES,
                 );
-                let laid_out = relayout(&graph, &expanded);
-                Ok::<_, String>((graph, expanded, laid_out))
+                let laid_out = relayout(&graph, &expanded, &mut names);
+                Ok::<_, String>((graph, names, expanded, laid_out))
             },
             |view, result, _| {
                 view.source = match result {
-                    Ok((graph, expanded, laid_out)) => {
+                    Ok((graph, names, expanded, laid_out)) => {
                         *view.expandable.borrow_mut() =
                             bviz_graph_layout::lod::expandable_containers(&graph);
                         *view.expanded.borrow_mut() = expanded;
                         *view.base.borrow_mut() = Some(graph);
+                        *view.names.borrow_mut() = Some(names);
                         Source::Loaded(laid_out)
                     }
                     Err(err) => Source::Message(err),
@@ -272,6 +278,7 @@ impl GraphView {
             press: Point::default(),
             viewport: Rc::new(Cell::new(Bounds::default())),
             base,
+            names,
             expanded: Rc::new(RefCell::new(HashSet::new())),
             expandable: Rc::new(RefCell::new(HashSet::new())),
             recent: None,
@@ -293,12 +300,24 @@ impl GraphView {
         let Some(graph) = self.base.borrow().clone() else {
             return;
         };
+        // The background relayout mints group ids against the interned-name table,
+        // so it gets a clone to extend and returns it; the view adopts that
+        // accumulated table when the task lands. Cloning (rather than moving the
+        // table out) keeps a superseded toggle's table from stranding the slot, so
+        // a fresh toggle can still cancel and replace an in-flight relayout.
+        let Some(mut names) = self.names.borrow().clone() else {
+            return;
+        };
         let expanded = self.expanded.borrow().clone();
         self.relaying = true;
         self._load_task = load_in_background(
             cx,
-            move || relayout(&graph, &expanded),
-            |view, laid_out, cx| {
+            move || {
+                let laid_out = relayout(&graph, &expanded, &mut names);
+                (laid_out, names)
+            },
+            |view, (laid_out, names), cx| {
+                *view.names.borrow_mut() = Some(names);
                 view.source = Source::Loaded(laid_out);
                 view.recenter.set(true);
                 view.relaying = false;
@@ -344,18 +363,18 @@ impl GraphView {
     /// connectors rather than borrowing the graph.
     fn graph(
         g: &LaidOut,
-        expandable: &HashSet<String>,
+        expandable: &HashSet<Id>,
         entity: Entity<GraphView>,
         zoom: Rc<Cell<f32>>,
         pan: Rc<Cell<(f32, f32)>>,
         fitted: Rc<Cell<bool>>,
         viewport: Rc<Cell<Bounds<Pixels>>>,
-        recent: Option<&str>,
+        recent: Option<Id>,
         recent_at: Instant,
         recenter: Rc<Cell<bool>>,
         recent_expand: bool,
         relaying: bool,
-        hovered: Option<&str>,
+        hovered: Option<Id>,
         dim_enabled: bool,
         palette: Palette,
     ) -> Stateful<Div> {
@@ -367,7 +386,7 @@ impl GraphView {
         // one such edge to reveal — an edgeless subtree (or a disabled toggle)
         // would fade the graph for no signal, so those suppress dimming entirely.
         let hovered_box = hovered.and_then(|h| g.boxes.iter().find(|b| b.id == h));
-        let subtree: HashSet<&str> = hovered_box
+        let subtree: HashSet<Id> = hovered_box
             .filter(|_| dim_enabled)
             .map(|h| {
                 g.boxes
@@ -378,20 +397,20 @@ impl GraphView {
                             && b.x + b.width <= h.x + h.width
                             && b.y + b.height <= h.y + h.height
                     })
-                    .map(|b| b.id.as_str())
+                    .map(|b| b.id)
                     .collect()
             })
             .unwrap_or_default();
         // The subtree plus the far endpoint of each edge incident to it; an empty
         // active set means no incident edges, so dimming stays off.
-        let mut active: HashSet<&str> = subtree.clone();
+        let mut active: HashSet<Id> = subtree.clone();
         let mut has_edge = false;
         for c in &g.connectors {
-            let (from_in, to_in) = (subtree.contains(c.from.as_str()), subtree.contains(c.to.as_str()));
+            let (from_in, to_in) = (subtree.contains(&c.from), subtree.contains(&c.to));
             if from_in || to_in {
                 has_edge = true;
-                active.insert(c.from.as_str());
-                active.insert(c.to.as_str());
+                active.insert(c.from);
+                active.insert(c.to);
             }
         }
         if !has_edge {
@@ -417,8 +436,8 @@ impl GraphView {
                     bviz_ui_theme::mix(kind_accent(b.kind), palette.background, KIND_BLEND)
                 },
                 label: b.label.clone(),
-                highlight: if recent == Some(b.id.as_str()) { highlight_alpha } else { 0.0 },
-                dim: dim_active && !active.contains(b.id.as_str()),
+                highlight: if recent == Some(b.id) { highlight_alpha } else { 0.0 },
+                dim: dim_active && !active.contains(&b.id),
             })
             .collect();
         // The just-toggled box's full rect, to frame on the next paint.
@@ -432,8 +451,7 @@ impl GraphView {
             .connectors
             .iter()
             .map(|c| {
-                let active_edge =
-                    subtree.contains(c.from.as_str()) || subtree.contains(c.to.as_str());
+                let active_edge = subtree.contains(&c.from) || subtree.contains(&c.to);
                 let dim = dim_active && !active_edge;
                 (c.points.clone(), c.kind, dim)
             })
@@ -689,12 +707,12 @@ impl Render for GraphView {
                         self.pan.clone(),
                         self.fitted.clone(),
                         self.viewport.clone(),
-                        self.recent.as_deref(),
+                        self.recent,
                         self.recent_at,
                         self.recenter.clone(),
                         self.recent_expand,
                         self.relaying,
-                        self.hovered.as_deref(),
+                        self.hovered,
                         self.dim_enabled,
                         palette,
                     )
@@ -722,7 +740,7 @@ impl Render for GraphView {
                         let vp = this.viewport.get();
                         let (gx, gy) =
                             from_screen(e.position, vp.origin, this.zoom.get(), this.pan.get());
-                        let hit = hit_box(&g.boxes, gx, gy).map(|b| b.id.clone());
+                        let hit = hit_box(&g.boxes, gx, gy).map(|b| b.id);
                         if hit != this.hovered {
                             this.hovered = hit;
                             cx.notify();
@@ -1075,7 +1093,7 @@ fn paint_arrowhead(pts: &[Point<Pixels>], zoom: f32, color: Rgba, window: &mut W
 /// Reads every input's streamed_proto file and merges them into one joint graph,
 /// before any group quotienting. Cached so toggling a group needn't re-read or
 /// re-parse.
-fn build_graph(inputs: &[Input]) -> Result<Graph, String> {
+fn build_graph(inputs: &[Input]) -> Result<(Graph, Names), String> {
     let mut aq = None;
     let mut cq = None;
     let mut q = None;
@@ -1114,9 +1132,9 @@ fn build_graph(inputs: &[Input]) -> Result<Graph, String> {
 /// Builds the display graph with the given ids expanded and lays it out: fold
 /// every unexpanded container away, merge interchangeable leaves, then lay out
 /// only the resulting visible view.
-fn relayout(graph: &Graph, expanded: &HashSet<String>) -> LaidOut {
+fn relayout(graph: &Graph, expanded: &HashSet<Id>, names: &mut Names) -> LaidOut {
     let visible = bviz_graph_layout::lod::collapse(graph, expanded);
-    layout::layout(&quotient::quotient(&visible, expanded))
+    layout::layout(&quotient::quotient(&visible, expanded, names))
 }
 
 /// Inverse of [`to_screen`]: maps a window-space point back to layout space.
@@ -1168,11 +1186,11 @@ fn end_drag(view: &mut GraphView, event: &MouseUpEvent, cx: &mut Context<GraphVi
     if !hit.group && !view.expandable.borrow().contains(&hit.id) {
         return;
     }
-    let id = hit.id.clone();
+    let id = hit.id;
     let mut expanded = view.expanded.borrow_mut();
     let removed = expanded.remove(&id);
     if !removed {
-        expanded.insert(id.clone());
+        expanded.insert(id);
     }
     drop(expanded);
     view.recent_expand = !removed;
@@ -1265,10 +1283,10 @@ mod tests {
     use super::*;
     use bviz_graph_layout::Box;
 
-    fn lbox(id: &str, x: f64, y: f64, w: f64, h: f64) -> Box {
+    fn lbox(id: u32, x: f64, y: f64, w: f64, h: f64) -> Box {
         Box {
-            id: id.into(),
-            label: id.into(),
+            id: bviz_graph_layout::Id(id),
+            label: String::new(),
             kind: Kind::Source,
             x,
             y,
@@ -1294,15 +1312,12 @@ mod tests {
 
     #[test]
     fn hit_box_picks_innermost_and_none_outside() {
-        // An outer container with a small inner box nested inside it.
-        let boxes = vec![
-            lbox("group:source1", 0.0, 0.0, 100.0, 100.0),
-            lbox("source1", 20.0, 20.0, 30.0, 30.0),
-        ];
+        // An outer container (id 0) with a small inner box (id 1) nested in it.
+        let boxes = vec![lbox(0, 0.0, 0.0, 100.0, 100.0), lbox(1, 20.0, 20.0, 30.0, 30.0)];
         // Inside both rects: the smaller (inner) wins.
-        assert_eq!(hit_box(&boxes, 30.0, 30.0).unwrap().id, "source1");
+        assert_eq!(hit_box(&boxes, 30.0, 30.0).unwrap().id, bviz_graph_layout::Id(1));
         // Inside only the container.
-        assert_eq!(hit_box(&boxes, 5.0, 5.0).unwrap().id, "group:source1");
+        assert_eq!(hit_box(&boxes, 5.0, 5.0).unwrap().id, bviz_graph_layout::Id(0));
         // Outside everything.
         assert!(hit_box(&boxes, 200.0, 200.0).is_none());
         assert!(hit_box(&boxes, -1.0, 50.0).is_none());

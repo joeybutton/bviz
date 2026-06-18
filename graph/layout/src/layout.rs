@@ -29,6 +29,7 @@ use org_eclipse_elk_graph::org::eclipse::elk::graph::{
 };
 
 use crate::graph::{EdgeKind, Graph, Kind, Node};
+use crate::intern::Id;
 
 const LEAF_HEIGHT: f64 = 30.0;
 const CHAR_WIDTH: f64 = 7.0;
@@ -44,7 +45,7 @@ const BORDER: f64 = 12.0;
 /// A laid-out box in absolute coordinates, top-left origin.
 pub struct Box {
     /// The graph node id this box renders, for hit-testing back to the node.
-    pub id: String,
+    pub id: Id,
     pub label: String,
     pub kind: Kind,
     pub x: f64,
@@ -63,8 +64,8 @@ pub struct Connector {
     pub points: Vec<(f64, f64)>,
     pub kind: EdgeKind,
     /// Node ids the edge runs between, for hit-testing a node's connections.
-    pub from: String,
-    pub to: String,
+    pub from: Id,
+    pub to: Id,
 }
 
 #[derive(Default)]
@@ -79,9 +80,9 @@ pub fn layout(graph: &Graph) -> LaidOut {
     initialize_plain_java_layout();
 
     // Children indexed by parent id; a node that appears as a key is a container.
-    let mut children_of: HashMap<&str, Vec<&Node>> = HashMap::new();
+    let mut children_of: HashMap<Id, Vec<&Node>> = HashMap::new();
     for node in &graph.nodes {
-        if let Some(parent) = node.parent.as_deref() {
+        if let Some(parent) = node.parent {
             children_of.entry(parent).or_default().push(node);
         }
     }
@@ -97,7 +98,7 @@ pub fn layout(graph: &Graph) -> LaidOut {
     set_property(&root, LayeredOptions::SPACING_NODE_NODE_BETWEEN_LAYERS, 50.0);
 
     // Build the ELK node tree, remembering each graph node's ELK node by id.
-    let mut elk_of: HashMap<&str, ElkNodeRef> = HashMap::new();
+    let mut elk_of: HashMap<Id, ElkNodeRef> = HashMap::new();
     for node in &graph.nodes {
         if node.parent.is_none() {
             build_node(node, &root, &children_of, &mut elk_of);
@@ -106,13 +107,9 @@ pub fn layout(graph: &Graph) -> LaidOut {
 
     // create_simple_edge places each edge in the common container of its
     // endpoints, which is where ELK then routes and reports it.
-    let mut edges: Vec<(ElkEdgeRef, EdgeKind, String, String)> =
-        Vec::with_capacity(graph.edges.len());
+    let mut edges: Vec<(ElkEdgeRef, EdgeKind, Id, Id)> = Vec::with_capacity(graph.edges.len());
     for edge in &graph.edges {
-        let (Some(from), Some(to)) = (
-            elk_of.get(edge.from.as_str()),
-            elk_of.get(edge.to.as_str()),
-        ) else {
+        let (Some(from), Some(to)) = (elk_of.get(&edge.from), elk_of.get(&edge.to)) else {
             continue;
         };
         edges.push((
@@ -121,8 +118,8 @@ pub fn layout(graph: &Graph) -> LaidOut {
                 ElkConnectableShapeRef::Node(to.clone()),
             ),
             edge.kind,
-            edge.from.clone(),
-            edge.to.clone(),
+            edge.from,
+            edge.to,
         ));
     }
 
@@ -131,38 +128,38 @@ pub fn layout(graph: &Graph) -> LaidOut {
     engine.layout(&root, &mut monitor);
 
     // Containment depth per node, used only to draw parents before children.
-    let parent_of: HashMap<&str, &str> = graph
+    let parent_of: HashMap<Id, Id> = graph
         .nodes
         .iter()
-        .filter_map(|node| node.parent.as_deref().map(|p| (node.id.as_str(), p)))
+        .filter_map(|node| node.parent.map(|p| (node.id, p)))
         .collect();
-    let mut depth_of: HashMap<&str, usize> = HashMap::with_capacity(graph.nodes.len());
+    let mut depth_of: HashMap<Id, usize> = HashMap::with_capacity(graph.nodes.len());
     for node in &graph.nodes {
         let mut depth = 0;
-        let mut id = node.id.as_str();
-        while let Some(&parent) = parent_of.get(id) {
+        let mut id = node.id;
+        while let Some(&parent) = parent_of.get(&id) {
             depth += 1;
             id = parent;
         }
-        depth_of.insert(node.id.as_str(), depth);
+        depth_of.insert(node.id, depth);
     }
 
     let mut boxes: Vec<(usize, Box)> = Vec::with_capacity(graph.nodes.len());
     for node in &graph.nodes {
-        let elk = &elk_of[node.id.as_str()];
+        let elk = &elk_of[&node.id];
         let (x, y) = absolute_origin(elk);
         let (width, height) = dimensions(elk);
         boxes.push((
-            depth_of[node.id.as_str()],
+            depth_of[&node.id],
             Box {
-                id: node.id.clone(),
+                id: node.id,
                 label: node.label.clone(),
                 kind: node.kind,
                 x,
                 y,
                 width,
                 height,
-                compound: children_of.contains_key(node.id.as_str()),
+                compound: children_of.contains_key(&node.id),
                 group: node.group,
             },
         ));
@@ -177,8 +174,8 @@ pub fn layout(graph: &Graph) -> LaidOut {
             connector(edge).map(|points| Connector {
                 points,
                 kind: *kind,
-                from: from.clone(),
-                to: to.clone(),
+                from: *from,
+                to: *to,
             })
         })
         .collect();
@@ -201,11 +198,11 @@ pub fn layout(graph: &Graph) -> LaidOut {
 fn build_node<'g>(
     node: &'g Node,
     parent: &ElkNodeRef,
-    children_of: &HashMap<&'g str, Vec<&'g Node>>,
-    elk_of: &mut HashMap<&'g str, ElkNodeRef>,
+    children_of: &HashMap<Id, Vec<&'g Node>>,
+    elk_of: &mut HashMap<Id, ElkNodeRef>,
 ) {
     let elk = ElkGraphUtil::create_node(Some(parent.clone()));
-    match children_of.get(node.id.as_str()) {
+    match children_of.get(&node.id) {
         Some(kids) => {
             set_property(
                 &elk,
@@ -251,7 +248,7 @@ fn build_node<'g>(
                 .set_dimensions(width, LEAF_HEIGHT);
         }
     }
-    elk_of.insert(node.id.as_str(), elk);
+    elk_of.insert(node.id, elk);
 }
 
 fn set_property<T: Clone + Send + Sync + 'static>(
