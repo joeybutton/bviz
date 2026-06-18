@@ -170,6 +170,9 @@ struct GraphView {
     /// The built (pre-quotient) graph, cached so toggling a group re-lays-out
     /// without re-reading or re-parsing the proto. `None` until the load lands.
     base: Rc<RefCell<Option<Graph>>>,
+    /// The base with its transitively-redundant edges removed, cached so the
+    /// reduced view's edges are a stable projection of one fixed skeleton.
+    reduced_base: Rc<RefCell<Option<Graph>>>,
     /// The interned node-id table the base graph keys on, threaded into each
     /// relayout so the quotient pass can mint group ids. `None` until the load
     /// lands.
@@ -242,6 +245,7 @@ impl GraphView {
         let focus_handle = cx.focus_handle();
         focus_handle.focus(window, cx);
         let base: Rc<RefCell<Option<Graph>>> = Rc::new(RefCell::new(None));
+        let reduced_base: Rc<RefCell<Option<Graph>>> = Rc::new(RefCell::new(None));
         let names: Rc<RefCell<Option<Names>>> = Rc::new(RefCell::new(None));
         // Build and lay out the graph on the background executor so window
         // appearance and interactivity are never blocked; swap the view to the
@@ -249,7 +253,7 @@ impl GraphView {
         let load_task = load_in_background(
             cx,
             move || {
-                let (graph, mut names) = build_graph(&inputs)?;
+                let (graph, reduced, mut names) = build_graph(&inputs)?;
                 // Open to a bounded overview instead of laying out the whole graph.
                 let expanded = bviz_graph_layout::lod::default_expansion(
                     &graph,
@@ -257,16 +261,17 @@ impl GraphView {
                     MAX_VISIBLE_EDGES,
                 );
                 // Open showing the transitive reduction (the `reduced` default).
-                let laid_out = relayout(&graph, &expanded, &mut names, true);
-                Ok::<_, String>((graph, names, expanded, laid_out))
+                let laid_out = relayout(&graph, &reduced, &expanded, &mut names, true);
+                Ok::<_, String>((graph, reduced, names, expanded, laid_out))
             },
             |view, result, _| {
                 view.source = match result {
-                    Ok((graph, names, expanded, laid_out)) => {
+                    Ok((graph, reduced, names, expanded, laid_out)) => {
                         *view.expandable.borrow_mut() =
                             bviz_graph_layout::lod::expandable_containers(&graph);
                         *view.expanded.borrow_mut() = expanded;
                         *view.base.borrow_mut() = Some(graph);
+                        *view.reduced_base.borrow_mut() = Some(reduced);
                         *view.names.borrow_mut() = Some(names);
                         Source::Loaded(laid_out)
                     }
@@ -286,6 +291,7 @@ impl GraphView {
             press: Point::default(),
             viewport: Rc::new(Cell::new(Bounds::default())),
             base,
+            reduced_base,
             names,
             expanded: Rc::new(RefCell::new(HashSet::new())),
             expandable: Rc::new(RefCell::new(HashSet::new())),
@@ -309,6 +315,9 @@ impl GraphView {
         let Some(graph) = self.base.borrow().clone() else {
             return;
         };
+        let Some(reduced_base) = self.reduced_base.borrow().clone() else {
+            return;
+        };
         // The background relayout mints group ids against the interned-name table,
         // so it gets a clone to extend and returns it; the view adopts that
         // accumulated table when the task lands. Cloning (rather than moving the
@@ -323,7 +332,7 @@ impl GraphView {
         self._load_task = load_in_background(
             cx,
             move || {
-                let laid_out = relayout(&graph, &expanded, &mut names, reduced);
+                let laid_out = relayout(&graph, &reduced_base, &expanded, &mut names, reduced);
                 (laid_out, names)
             },
             |view, (laid_out, names), cx| {
@@ -1206,7 +1215,7 @@ fn paint_arrowhead(pts: &[Point<Pixels>], zoom: f32, color: Rgba, window: &mut W
 /// Reads every input's streamed_proto file and merges them into one joint graph,
 /// before any group quotienting. Cached so toggling a group needn't re-read or
 /// re-parse.
-fn build_graph(inputs: &[Input]) -> Result<(Graph, Names), String> {
+fn build_graph(inputs: &[Input]) -> Result<(Graph, Graph, Names), String> {
     let mut aq = None;
     let mut cq = None;
     let mut q = None;
@@ -1234,29 +1243,48 @@ fn build_graph(inputs: &[Input]) -> Result<(Graph, Names), String> {
             }
         }
     }
-    Ok(bviz_graph_layout::build_joint(
-        aq.as_deref(),
-        cq.as_deref(),
-        q.as_deref(),
-        false,
-    ))
+    let (base, names) =
+        bviz_graph_layout::build_joint(aq.as_deref(), cq.as_deref(), q.as_deref(), false);
+    // Transitively reduce the whole base once: a collapsed box then draws the
+    // reduction of its hidden subtree's edges, so its edge count is stable under
+    // expansion rather than re-derived (differently) from each view.
+    let reduced = bviz_graph_layout::reduce::transitive_reduction(&base);
+    Ok((base, reduced, names))
 }
 
 /// Builds the display graph with the given ids expanded and lays it out: fold
 /// every unexpanded container away, merge interchangeable leaves, then lay out
-/// only the resulting visible view.
-fn relayout(graph: &Graph, expanded: &HashSet<Id>, names: &mut Names, reduced: bool) -> LaidOut {
-    let visible = bviz_graph_layout::lod::collapse(graph, expanded);
-    let view = quotient::quotient(&visible, expanded, names);
-    // The full connectivity, kept for hover even when reduction drops edges.
+/// only the resulting visible view. When `reduced`, the view draws the base's
+/// transitive reduction rather than every edge: the full base and the
+/// already-reduced base collapse to the same boxes, so the reduced edges project
+/// onto the boxes the full view grouped, giving a stable, locally-consistent
+/// skeleton. `full_edges` keeps the unreduced connectivity for hover.
+fn relayout(
+    base: &Graph,
+    reduced_base: &Graph,
+    expanded: &HashSet<Id>,
+    names: &mut Names,
+    reduced: bool,
+) -> LaidOut {
+    let visible = bviz_graph_layout::lod::collapse(base, expanded);
+    let (mut view, remap) = quotient::quotient(&visible, expanded, names);
     let full_edges: Vec<(Id, Id)> =
         view.edges.iter().map(|e| (e.from, e.to)).collect::<HashSet<_>>().into_iter().collect();
-    let drawn = if reduced {
-        bviz_graph_layout::reduce::transitive_reduction(&view)
-    } else {
-        view
-    };
-    let mut laid = layout::layout(&drawn);
+    if reduced {
+        // Project the reduced base's edges onto the same boxes (a collapsed group's
+        // members map through `remap`, everything else keeps its id), and keep only
+        // those of the view's edges.
+        let skeleton = bviz_graph_layout::lod::collapse(reduced_base, expanded);
+        let box_of = |id: Id| remap.get(&id).copied().unwrap_or(id);
+        let kept: HashSet<(Id, Id)> = skeleton
+            .edges
+            .iter()
+            .map(|e| (box_of(e.from), box_of(e.to)))
+            .filter(|(a, b)| a != b)
+            .collect();
+        view.edges.retain(|e| kept.contains(&(e.from, e.to)));
+    }
+    let mut laid = layout::layout(&view);
     laid.full_edges = full_edges;
     laid
 }

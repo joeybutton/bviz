@@ -20,13 +20,22 @@ use crate::graph::{Edge, EdgeKind, Graph, Kind, Node};
 use crate::intern::{Id, Names};
 
 /// Returns a graph in which interchangeable `source`/`artifact` leaves are
-/// merged. A multi-member group whose id is in `expanded` is emitted as a
-/// `group` container holding its members unchanged (reparented to the group)
-/// rather than collapsed into one leaf, so the caller can reveal the files
-/// behind a group while leaving every other group collapsed. Nodes and edges of
-/// the result are sorted by id for an output that is independent of the input
-/// order; passing an empty `expanded` set yields the fully collapsed result.
-pub fn quotient(graph: &Graph, expanded: &HashSet<Id>, names: &mut Names) -> Graph {
+/// merged, together with the box each input node became: a collapsed group's
+/// members map to the group id, everything else is absent (it kept its own id).
+/// Projecting another edge set over the same nodes through this map lands it on
+/// the same boxes, which a caller uses to draw a reduced edge subset.
+///
+/// A multi-member group whose id is in `expanded` is emitted as a `group`
+/// container holding its members unchanged (reparented to the group) rather than
+/// collapsed into one leaf, so the caller can reveal the files behind a group
+/// while leaving every other group collapsed. Nodes and edges of the result are
+/// sorted by id for an output that is independent of the input order; passing an
+/// empty `expanded` set yields the fully collapsed result.
+pub fn quotient(
+    graph: &Graph,
+    expanded: &HashSet<Id>,
+    names: &mut Names,
+) -> (Graph, BTreeMap<Id, Id>) {
     let producers = neighbor_lists(graph, |e| (e.to, e.from));
     let consumers = neighbor_lists(graph, |e| (e.from, e.to));
 
@@ -156,7 +165,7 @@ pub fn quotient(graph: &Graph, expanded: &HashSet<Id>, names: &mut Names) -> Gra
             b.kind,
         ))
     });
-    out
+    (out, remap)
 }
 
 /// The neighborhood key two candidates must share to merge.
@@ -267,7 +276,7 @@ mod tests {
 
     /// Collapse every group (the empty-`expanded` default).
     fn collapsed(graph: &Graph, names: &mut Names) -> Graph {
-        quotient(graph, &HashSet::new(), names)
+        quotient(graph, &HashSet::new(), names).0
     }
 
     /// The interned ids of `ids`, interned into `names` so that a group id minted
@@ -423,8 +432,8 @@ mod tests {
         edge(&mut b, &mut names_b, "source3", "action0", EdgeKind::Aquery);
         edge(&mut b, &mut names_b, "source1", "action0", EdgeKind::Aquery);
 
-        let qa = quotient(&a, &HashSet::new(), &mut names_a);
-        let qb = quotient(&b, &HashSet::new(), &mut names_b);
+        let qa = quotient(&a, &HashSet::new(), &mut names_a).0;
+        let qb = quotient(&b, &HashSet::new(), &mut names_b).0;
 
         assert_eq!(node_ids(&qa, &names_a), node_ids(&qb, &names_b));
         assert_eq!(edges(&qa, &names_a), edges(&qb, &names_b));
@@ -459,7 +468,7 @@ mod tests {
         }
 
         let set = expanded(&mut names, &["group:source1"]);
-        let out = quotient(&graph, &set, &mut names);
+        let out = quotient(&graph, &set, &mut names).0;
 
         // The group is a container; the collapsed leaf is gone.
         let group = find(&out, &names, "group:source1");
@@ -495,7 +504,7 @@ mod tests {
 
         // Expanding an id that is not a multi-member group collapses as usual.
         let set = expanded(&mut names, &["group:other"]);
-        let out = quotient(&graph, &set, &mut names);
+        let out = quotient(&graph, &set, &mut names).0;
 
         assert_eq!(out.nodes.len(), 2);
         assert_eq!(find(&out, &names, "group:source1").kind, Kind::Source);
@@ -520,7 +529,7 @@ mod tests {
         }
 
         let set = expanded(&mut names, &["group:source1"]);
-        let out = quotient(&graph, &set, &mut names);
+        let out = quotient(&graph, &set, &mut names).0;
 
         // First group is a container with its members.
         assert_eq!(find(&out, &names, "group:source1").kind, Kind::Group);
@@ -568,8 +577,8 @@ mod tests {
 
         let set_a = expanded(&mut names_a, &["group:source1"]);
         let set_b = expanded(&mut names_b, &["group:source1"]);
-        let qa = quotient(&a, &set_a, &mut names_a);
-        let qb = quotient(&b, &set_b, &mut names_b);
+        let qa = quotient(&a, &set_a, &mut names_a).0;
+        let qb = quotient(&b, &set_b, &mut names_b).0;
 
         assert_eq!(node_ids(&qa, &names_a), node_ids(&qb, &names_b));
         assert_eq!(edges(&qa, &names_a), edges(&qb, &names_b));

@@ -785,7 +785,7 @@ mod tests {
 
         let (graph, mut names) = build(&[container], false);
         let quotiented =
-            crate::quotient::quotient(&graph, &std::collections::HashSet::new(), &mut names);
+            crate::quotient::quotient(&graph, &std::collections::HashSet::new(), &mut names).0;
 
         // foo/a.c and foo/c.c share package, consumer, and (no) producer: merged.
         let merged: Vec<&Node> = quotiented
