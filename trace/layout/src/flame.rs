@@ -422,21 +422,85 @@ fn merge_span(
 /// A parent span's Bazel duration already includes its children's, so counting
 /// each span once at its own node avoids the double-count of summing a span and
 /// its sub-spans as siblings.
+///
+/// For [`Scope::CriticalPath`] the critical-path lane holds only bare components
+/// with no sub-spans, so each component is associated with its originating action
+/// (by name) and that action's whole worker-lane subtree is grafted under the
+/// root, giving the critical action its internal breakdown.
 pub fn build_flame_graph(profile: &Profile, mode: GroupMode, scope: Scope) -> FlameNode {
     let idx = mnemonic_index(profile);
     let mut root = Builder::new("All".to_owned(), WorkClass::Meta);
 
-    for thread in &profile.threads {
-        if !scope.includes(thread.lane_class) {
-            continue;
-        }
-        let forest = containment_forest(&thread.slices);
-        for &r in &forest.roots {
-            root.total_us += thread.slices[r].dur_us;
-            merge_span(&mut root, &thread.slices, &forest, r, &idx, mode);
+    if scope == Scope::CriticalPath {
+        build_critical_path(profile, &idx, mode, &mut root);
+    } else {
+        for thread in &profile.threads {
+            if !scope.includes(thread.lane_class) {
+                continue;
+            }
+            let forest = containment_forest(&thread.slices);
+            for &r in &forest.roots {
+                root.total_us += thread.slices[r].dur_us;
+                merge_span(&mut root, &thread.slices, &forest, r, &idx, mode);
+            }
         }
     }
     root.finish(0)
+}
+
+/// Where an action-processing span lives: its lane and its index within that
+/// lane's slices, keyed by the span name (the action description).
+struct ActionLoc {
+    lane: usize,
+    slice: usize,
+}
+
+/// Graft the critical path's components into `root`. Each component on a
+/// `LaneClass::CriticalPath` lane names an action (`action '<desc>'`); when that
+/// action's worker span is found by name, its whole subtree is merged under the
+/// root so the critical action shows its internal breakdown. Components with no
+/// matching action (e.g. "Writing file …") merge as a bare leaf.
+fn build_critical_path(
+    profile: &Profile,
+    idx: &HashMap<&str, &str>,
+    mode: GroupMode,
+    root: &mut Builder,
+) {
+    let mut actions: HashMap<&str, ActionLoc> = HashMap::new();
+    for (lane, thread) in profile.threads.iter().enumerate() {
+        for (slice, s) in thread.slices.iter().enumerate() {
+            if s.args.mnemonic.is_some() {
+                actions
+                    .entry(s.name.as_str())
+                    .or_insert(ActionLoc { lane, slice });
+            }
+        }
+    }
+
+    for thread in &profile.threads {
+        if thread.lane_class != LaneClass::CriticalPath {
+            continue;
+        }
+        for cp in &thread.slices {
+            let inner = action_inner(&cp.name);
+            let loc = actions.get(inner).or_else(|| actions.get(cp.name.as_str()));
+            match loc {
+                Some(loc) => {
+                    let lane_slices = &profile.threads[loc.lane].slices;
+                    let forest = containment_forest(lane_slices);
+                    root.total_us += lane_slices[loc.slice].dur_us;
+                    merge_span(root, lane_slices, &forest, loc.slice, idx, mode);
+                }
+                None => {
+                    root.total_us += cp.dur_us;
+                    let seg = span_label(cp, idx, mode);
+                    let node = root.child(&seg);
+                    node.total_us += cp.dur_us;
+                    node.count += 1;
+                }
+            }
+        }
+    }
 }
 
 /// Lay the tree into a content rectangle of the given width. The root spans the
@@ -626,6 +690,19 @@ mod tests {
 
     const METRICS: FlameMetrics = FlameMetrics { row_height: 10.0 };
 
+    /// An action-processing span: the name carries the action description and the
+    /// mnemonic rides in args, mirroring Bazel's "action processing" slices the
+    /// mnemonic index reads.
+    fn action_named(name: &str, mnemonic: &str, start_us: i64, dur_us: i64) -> Slice {
+        Slice {
+            args: SliceArgs {
+                mnemonic: Some(mnemonic.to_owned()),
+                ..SliceArgs::default()
+            },
+            ..slice(name, "action processing", start_us, dur_us, 0)
+        }
+    }
+
     #[test]
     fn nested_spans_form_a_call_stack_without_double_counting() {
         // A lane with Rustc(0..100) containing Action.execute(0..90) containing
@@ -734,6 +811,40 @@ mod tests {
         // All: every real lane.
         let all = build_flame_graph(&p, GroupMode::Mnemonic, Scope::All);
         assert_eq!(all.total_us, 65);
+    }
+
+    #[test]
+    fn critical_path_grafts_the_originating_action_subtree() {
+        // A critical-path component names an action but carries no sub-spans; its
+        // worker action (mnemonic Rustc) contains a subprocess.run child. Under
+        // CriticalPath the worker's whole subtree grafts under the root, so the
+        // critical action shows its sub-detail rather than a bare leaf.
+        let worker = vec![
+            action_named("Compiling foo", "Rustc", 0, 100),
+            slice("subprocess.run", "subprocess run", 0, 80, 0),
+        ];
+        let cp = slice("action 'Compiling foo'", "critical path component", 500, 50, 0);
+        let p = profile(vec![
+            track(8, LaneClass::Execution, worker),
+            track(0, LaneClass::CriticalPath, vec![cp]),
+        ]);
+        let root = build_flame_graph(&p, GroupMode::Mnemonic, Scope::CriticalPath);
+        assert_eq!(root.children.len(), 1);
+        let rustc = child(&root, "Rustc");
+        // Grafted from the worker lane: total is the worker action's 100, not the
+        // critical component's 50, and the sub-span is present.
+        assert_eq!(rustc.total_us, 100);
+        assert_eq!(child(rustc, "subprocess.run").total_us, 80);
+    }
+
+    #[test]
+    fn critical_path_unmatched_component_is_a_leaf() {
+        // A critical component with no matching action merges as a bare leaf.
+        let cp = slice("Writing file out", "critical path component", 0, 40, 0);
+        let p = profile(vec![track(0, LaneClass::CriticalPath, vec![cp])]);
+        let root = build_flame_graph(&p, GroupMode::Mnemonic, Scope::CriticalPath);
+        assert_eq!(root.total_us, 40);
+        assert_eq!(child(&root, "Writing file out").total_us, 40);
     }
 
     #[test]
