@@ -51,12 +51,16 @@ struct Segment {
     work_class: WorkClass,
 }
 
-/// The mnemonic-or-bucket label for a slice: its action mnemonic if present,
-/// else a parenthesized work-class bucket so non-action frames (phases,
-/// evaluator, locks) collapse by class rather than scattering by name.
-fn mnemonic_or_bucket(slice: &Slice) -> Segment {
+/// The mnemonic-or-bucket label for a slice on a lane of `lane` class: its action
+/// mnemonic if present, else a parenthesized work-class bucket so non-action
+/// frames (phases, evaluator, locks) collapse by class rather than scattering by
+/// name. Critical-path components carry no mnemonic but their name is the action
+/// itself, and the path is a short chain of distinct entries, so they group by
+/// name — the individual longest critical-path steps are exactly what to inspect.
+fn mnemonic_or_bucket(slice: &Slice, lane: LaneClass) -> Segment {
     let label = match &slice.args.mnemonic {
         Some(m) => m.clone(),
+        None if lane == LaneClass::CriticalPath => slice.name.clone(),
         None => match slice.work_class {
             WorkClass::Cpu => "(cpu)",
             WorkClass::Remote => "(remote)",
@@ -263,24 +267,29 @@ impl Builder {
 
 /// The semantic-path segments a slice contributes under `mode`. `phase_of`
 /// resolves the slice's start to a phase name (only consulted by phase modes).
-fn segments(slice: &Slice, mode: GroupMode, phase_of: impl Fn(i64) -> String) -> Vec<Segment> {
+fn segments(
+    slice: &Slice,
+    lane: LaneClass,
+    mode: GroupMode,
+    phase_of: impl Fn(i64) -> String,
+) -> Vec<Segment> {
     let class = Segment {
         label: work_class_label(slice.work_class).to_owned(),
         work_class: slice.work_class,
     };
     match mode {
-        GroupMode::Mnemonic => vec![mnemonic_or_bucket(slice)],
+        GroupMode::Mnemonic => vec![mnemonic_or_bucket(slice, lane)],
         GroupMode::PhaseMnemonic => vec![
             Segment {
                 label: phase_of(slice.start_us),
                 work_class: WorkClass::Meta,
             },
-            mnemonic_or_bucket(slice),
+            mnemonic_or_bucket(slice, lane),
         ],
         GroupMode::WorkClass => vec![class],
-        GroupMode::ClassMnemonic => vec![class, mnemonic_or_bucket(slice)],
+        GroupMode::ClassMnemonic => vec![class, mnemonic_or_bucket(slice, lane)],
         GroupMode::Target => vec![
-            mnemonic_or_bucket(slice),
+            mnemonic_or_bucket(slice, lane),
             Segment {
                 label: slice
                     .args
@@ -297,7 +306,7 @@ fn segments(slice: &Slice, mode: GroupMode, phase_of: impl Fn(i64) -> String) ->
 /// groups it under, with the work class to color the row. Phase modes never
 /// reach this (the table groups by the action leaf), so phase resolution is
 /// unneeded here.
-pub(crate) fn leaf_label(slice: &Slice, mode: GroupMode) -> (String, WorkClass) {
+pub(crate) fn leaf_label(slice: &Slice, lane: LaneClass, mode: GroupMode) -> (String, WorkClass) {
     let seg = match mode {
         GroupMode::WorkClass => Segment {
             label: work_class_label(slice.work_class).to_owned(),
@@ -312,7 +321,7 @@ pub(crate) fn leaf_label(slice: &Slice, mode: GroupMode) -> (String, WorkClass) 
             work_class: slice.work_class,
         },
         GroupMode::Mnemonic | GroupMode::PhaseMnemonic | GroupMode::ClassMnemonic => {
-            mnemonic_or_bucket(slice)
+            mnemonic_or_bucket(slice, lane)
         }
     };
     (seg.label, seg.work_class)
@@ -343,7 +352,7 @@ pub fn build_flame_graph(profile: &Profile, mode: GroupMode, scope: Scope) -> Fl
         for s in &thread.slices {
             root.total_us += s.dur_us;
             let mut node = &mut root;
-            let segs = segments(s, mode, phase_of);
+            let segs = segments(s, thread.lane_class, mode, phase_of);
             for seg in &segs {
                 node = node.child(seg);
                 node.total_us += s.dur_us;
@@ -646,6 +655,26 @@ mod tests {
         // All: every real lane but the critical path (10 omitted).
         let all = build_flame_graph(&p, GroupMode::Mnemonic, Scope::All);
         assert_eq!(all.total_us, 60);
+    }
+
+    #[test]
+    fn critical_path_components_group_by_action_name() {
+        // Critical-path components carry no mnemonic and a "critical path
+        // component" category (work class Meta); they must group by their action
+        // name, not collapse into one "(meta)" bucket.
+        let p = profile(vec![track(
+            0,
+            LaneClass::CriticalPath,
+            vec![
+                slice("action 'Compiling a'", "critical path component", 0, 30, 0),
+                slice("action 'Linking b'", "critical path component", 30, 20, 0),
+            ],
+        )]);
+        let root = build_flame_graph(&p, GroupMode::Mnemonic, Scope::CriticalPath);
+        assert_eq!(root.children.len(), 2);
+        assert!(root.children.iter().any(|c| c.name == "action 'Compiling a'"));
+        assert!(root.children.iter().any(|c| c.name == "action 'Linking b'"));
+        assert!(!root.children.iter().any(|c| c.name == "(meta)"));
     }
 
     #[test]

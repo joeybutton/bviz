@@ -41,7 +41,7 @@ pub fn aggregate_stats(profile: &Profile, mode: GroupMode, scope: Scope) -> Vec<
             continue;
         }
         for s in &thread.slices {
-            let (label, work_class) = leaf_label(s, mode);
+            let (label, work_class) = leaf_label(s, thread.lane_class, mode);
             let row = groups.entry(label.clone()).or_insert_with(|| StatRow {
                 key: label,
                 work_class,
