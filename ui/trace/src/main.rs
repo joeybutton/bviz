@@ -1352,15 +1352,23 @@ impl TraceView {
             .text_color(palette.label)
             .children(STATS_COLUMNS.iter().map(|spec| {
                 let column = spec.column;
-                let caret = if self.stats_sort != column {
-                    ""
+                let glyph = if self.stats_sort != column {
+                    None
                 } else if self.stats_desc {
-                    " ▾"
+                    Some('▾')
                 } else {
-                    " ▴"
+                    Some('▴')
                 };
                 let label = if column == StatsColumn::Key { key_label } else { spec.label };
-                stats_cell(spec, format!("{label}{caret}"))
+                // Place the caret on the side away from the text's anchor so the
+                // label can't shift as the sort indicator moves: left of a
+                // right-aligned numeric value, right of the left-aligned key.
+                let text = match (glyph, spec.width.is_some()) {
+                    (Some(g), true) => format!("{g} {label}"),
+                    (Some(g), false) => format!("{label} {g}"),
+                    (None, _) => label.to_string(),
+                };
+                stats_cell(spec, text)
                     .id(SharedString::from(format!("stats-h-{}", spec.label)))
                     .cursor_pointer()
                     .hover(|s| s.bg(palette.scroll_track))
