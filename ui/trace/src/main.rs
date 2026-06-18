@@ -15,9 +15,9 @@ use clap::Parser;
 use gpui::{
     Animation, AnimationExt, App, BorderStyle, Bounds, ContentMask, Context, Div, Entity,
     FocusHandle, Hsla, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
-    PathBuilder, Pixels, Point, Render, Rgba, ScrollDelta, ScrollHandle, ScrollWheelEvent,
-    SharedString, Stateful, Subscription, Task, TextAlign, Transformation, Window, canvas, div,
-    hsla, percentage, point, prelude::*, px, quad, size,
+    PathBuilder, Pixels, Point, Render, Rgba, ScrollDelta, ScrollWheelEvent,
+    SharedString, Stateful, Subscription, Task, TextAlign, Transformation, UniformListScrollHandle,
+    Window, canvas, div, hsla, percentage, point, prelude::*, px, quad, size, uniform_list,
 };
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
@@ -187,6 +187,66 @@ enum StatsColumn {
     Avg,
     Max,
     Percent,
+}
+
+/// One column of the stats table: which value it sorts by, its header label, and
+/// its fixed width (`None` for the one flexible column that takes the remainder).
+/// The header and every body cell are laid out from this single spec so their
+/// widths cannot disagree. The `Key` column's label is overridden at render with
+/// the active group-by name.
+struct StatsColumnSpec {
+    column: StatsColumn,
+    label: &'static str,
+    width: Option<f32>,
+}
+
+const STATS_COLUMNS: [StatsColumnSpec; 6] = [
+    StatsColumnSpec { column: StatsColumn::Key, label: "Key", width: None },
+    StatsColumnSpec { column: StatsColumn::Count, label: "Count", width: Some(STATS_NUM_COL_WIDTH) },
+    StatsColumnSpec { column: StatsColumn::Total, label: "Total", width: Some(STATS_NUM_COL_WIDTH) },
+    StatsColumnSpec { column: StatsColumn::Avg, label: "Avg", width: Some(STATS_NUM_COL_WIDTH) },
+    StatsColumnSpec { column: StatsColumn::Max, label: "Max", width: Some(STATS_NUM_COL_WIDTH) },
+    StatsColumnSpec { column: StatsColumn::Percent, label: "%", width: Some(STATS_NUM_COL_WIDTH) },
+];
+
+/// A stats row with every cell pre-formatted to a display string, in
+/// [`STATS_COLUMNS`] order past the key, cached so the strings aren't rebuilt and
+/// the rows aren't re-sorted on every paint.
+struct StatsCells {
+    key: SharedString,
+    /// The numeric columns' text, in `STATS_COLUMNS` order after the key.
+    values: [SharedString; 5],
+}
+
+/// The sorted, formatted stats rows together with the inputs they were built
+/// from, so a paint can reuse them unless the source rows or sort changed.
+struct StatsCache {
+    rows_ptr: *const Vec<StatRow>,
+    sort: StatsColumn,
+    desc: bool,
+    rows: Rc<Vec<StatsCells>>,
+}
+
+/// One stats-table cell, header or body, laid out per its column spec. A fixed
+/// column reserves its width and never shrinks (a bare `w(px)` is only a flex
+/// basis and gets shrunk unevenly between header and body when a row overflows,
+/// drifting the columns out of alignment); the flexible column takes the
+/// remainder. Both clip and ellipsize so over-long text can't widen a cell.
+fn stats_cell(spec: &StatsColumnSpec, text: impl Into<SharedString>) -> Div {
+    let cell = div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .h_full()
+        .px(px(STATS_CELL_PAD))
+        .overflow_hidden()
+        .whitespace_nowrap()
+        .text_ellipsis()
+        .child(text.into());
+    match spec.width {
+        Some(w) => cell.w(px(w)).flex_shrink_0().justify_end(),
+        None => cell.flex_1().min_w_0(),
+    }
 }
 
 /// The flame-graph merge keys offered in the toolbar dropdown, in menu order:
@@ -494,8 +554,11 @@ struct TraceView {
     /// Which column the stats table sorts by, and whether descending.
     stats_sort: StatsColumn,
     stats_desc: bool,
-    /// Scroll position of the stats table body.
-    stats_scroll: ScrollHandle,
+    /// The sorted, formatted stats rows, rebuilt only when `stats`, `stats_sort`,
+    /// or `stats_desc` changes rather than on every paint.
+    stats_cache: RefCell<Option<StatsCache>>,
+    /// Scroll position of the virtualized stats table body.
+    stats_scroll: UniformListScrollHandle,
     /// The slice under the cursor, if any, drawn as a tooltip.
     hover: Option<Hover>,
     /// The flame-graph box under the cursor in graph mode, drawn as a tooltip.
@@ -572,7 +635,8 @@ impl TraceView {
             stats: Rc::new(RefCell::new(None)),
             stats_sort: StatsColumn::Total,
             stats_desc: true,
-            stats_scroll: ScrollHandle::new(),
+            stats_cache: RefCell::new(None),
+            stats_scroll: UniformListScrollHandle::new(),
             hover: None,
             flame_hover: None,
             crosshair: None,
@@ -1005,6 +1069,7 @@ impl TraceView {
     fn invalidate_aggregates(&mut self) {
         self.flame.borrow_mut().take();
         self.stats.borrow_mut().take();
+        self.stats_cache.borrow_mut().take();
     }
 
     /// The per-group stats rows for the loaded profile, aggregated by the current
@@ -1041,19 +1106,25 @@ impl TraceView {
         }
     }
 
-    /// The graph-mode stats table: a header band of clickable, sortable columns
-    /// over a scrollable body of one row per group, themed like the rest of the
-    /// view. The rows are aggregated by the same key and scope as the flame graph
-    /// and sorted by the active column; the percent column is each group's share
-    /// of the summed group durations (so it totals 100%).
-    fn stats_table(&self, palette: &Palette, cx: &mut Context<Self>) -> Div {
-        let Some(rows) = self.stats_rows() else {
-            return div();
-        };
-        let mut rows: Vec<StatRow> = (*rows).clone();
+    /// The sorted, formatted stats rows for the current key/scope and sort,
+    /// reusing the cache unless the source rows, sort column, or direction
+    /// changed. `None` until a profile is loaded.
+    fn stats_cells(&self) -> Option<Rc<Vec<StatsCells>>> {
+        let rows = self.stats_rows()?;
+        let rows_ptr = Rc::as_ptr(&rows);
+        if let Some(cache) = self.stats_cache.borrow().as_ref() {
+            if cache.rows_ptr == rows_ptr
+                && cache.sort == self.stats_sort
+                && cache.desc == self.stats_desc
+            {
+                return Some(cache.rows.clone());
+            }
+        }
+
         let column = self.stats_sort;
         let desc = self.stats_desc;
-        rows.sort_by(|a, b| {
+        let mut order: Vec<&StatRow> = rows.iter().collect();
+        order.sort_by(|a, b| {
             let ord = match column {
                 StatsColumn::Key => b.key.cmp(&a.key),
                 StatsColumn::Count => a.count.cmp(&b.count),
@@ -1065,38 +1136,53 @@ impl TraceView {
             // Break ties by key so the order is stable regardless of input order.
             ord.then_with(|| a.key.cmp(&b.key))
         });
-        let grand_total: i64 = rows.iter().map(|r| r.total_us).sum();
+        let grand_total: i64 = order.iter().map(|r| r.total_us).sum();
+        let cells: Vec<StatsCells> = order
+            .into_iter()
+            .map(|r| {
+                let pct = if grand_total > 0 {
+                    100.0 * r.total_us as f64 / grand_total as f64
+                } else {
+                    0.0
+                };
+                StatsCells {
+                    key: r.key.clone().into(),
+                    values: [
+                        r.count.to_string().into(),
+                        format_duration(r.total_us).into(),
+                        format_duration(r.avg_us()).into(),
+                        format_duration(r.max_us).into(),
+                        format!("{pct:.1}%").into(),
+                    ],
+                }
+            })
+            .collect();
+        let cells = Rc::new(cells);
+        *self.stats_cache.borrow_mut() = Some(StatsCache {
+            rows_ptr,
+            sort: column,
+            desc,
+            rows: cells.clone(),
+        });
+        Some(cells)
+    }
 
-        let header_cell = |label: String, column: StatsColumn, numeric: bool| {
-            let caret = if self.stats_sort != column {
-                ""
-            } else if self.stats_desc {
-                " ▾"
-            } else {
-                " ▴"
-            };
-            let mut cell = div()
-                .id(SharedString::from(format!("stats-h-{label}")))
-                .flex()
-                .flex_row()
-                .items_center()
-                .h_full()
-                .px(px(STATS_CELL_PAD))
-                .cursor_pointer()
-                .hover(|s| s.bg(palette.scroll_track))
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.sort_by(column);
-                    cx.notify();
-                }))
-                .child(format!("{label}{caret}"));
-            if numeric {
-                cell = cell.w(px(STATS_NUM_COL_WIDTH)).justify_end();
-            } else {
-                cell = cell.flex_1().min_w_0();
-            }
-            cell
+    /// The graph-mode stats table: a header band of clickable, sortable columns
+    /// over a scrollable, virtualized body of one row per group, themed like the
+    /// rest of the view. The rows are aggregated by the same key and scope as the
+    /// flame graph and sorted by the active column; the percent column is each
+    /// group's share of the summed group durations (so it totals 100%).
+    ///
+    /// Header and body cells are laid out from the one [`STATS_COLUMNS`] spec
+    /// through [`stats_cell`], so their widths cannot disagree at any window
+    /// width: each fixed column reserves its pixel width without shrinking, and
+    /// the one flexible column takes the remainder.
+    fn stats_table(&self, palette: &Palette, cx: &mut Context<Self>) -> Div {
+        let Some(cells) = self.stats_cells() else {
+            return div();
         };
 
+        let key_label = self.key_column_label();
         let header = div()
             .flex()
             .flex_row()
@@ -1106,54 +1192,54 @@ impl TraceView {
             .border_b_1()
             .border_color(palette.border)
             .text_color(palette.label)
-            .child(header_cell(self.key_column_label().to_owned(), StatsColumn::Key, false))
-            .child(header_cell("Count".to_owned(), StatsColumn::Count, true))
-            .child(header_cell("Total".to_owned(), StatsColumn::Total, true))
-            .child(header_cell("Avg".to_owned(), StatsColumn::Avg, true))
-            .child(header_cell("Max".to_owned(), StatsColumn::Max, true))
-            .child(header_cell("%".to_owned(), StatsColumn::Percent, true));
+            .children(STATS_COLUMNS.iter().map(|spec| {
+                let column = spec.column;
+                let caret = if self.stats_sort != column {
+                    ""
+                } else if self.stats_desc {
+                    " ▾"
+                } else {
+                    " ▴"
+                };
+                let label = if column == StatsColumn::Key { key_label } else { spec.label };
+                stats_cell(spec, format!("{label}{caret}"))
+                    .id(SharedString::from(format!("stats-h-{}", spec.label)))
+                    .cursor_pointer()
+                    .hover(|s| s.bg(palette.scroll_track))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.sort_by(column);
+                        cx.notify();
+                    }))
+            }));
 
-        let num_cell = |text: String| {
-            div()
-                .w(px(STATS_NUM_COL_WIDTH))
-                .px(px(STATS_CELL_PAD))
-                .flex()
-                .justify_end()
-                .child(text)
-        };
         let scroll_track = palette.scroll_track;
-        let body_rows = rows.into_iter().map(move |r| {
-            let pct = if grand_total > 0 {
-                100.0 * r.total_us as f64 / grand_total as f64
-            } else {
-                0.0
-            };
-            let cells = [
-                num_cell(r.count.to_string()),
-                num_cell(format_duration(r.total_us)),
-                num_cell(format_duration(r.avg_us())),
-                num_cell(format_duration(r.max_us)),
-                num_cell(format!("{pct:.1}%")),
-            ];
-            div()
-                .flex()
-                .flex_row()
-                .items_center()
-                .h(px(STATS_ROW_HEIGHT))
-                .w_full()
-                .hover(move |s| s.bg(scroll_track))
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .px(px(STATS_CELL_PAD))
-                        .whitespace_nowrap()
-                        .overflow_hidden()
-                        .text_ellipsis()
-                        .child(r.key),
-                )
-                .children(cells)
-        });
+        let body = uniform_list(
+            "stats-body",
+            cells.len(),
+            move |range, _window, _cx| {
+                range
+                    .map(|i| {
+                        let row = &cells[i];
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .h(px(STATS_ROW_HEIGHT))
+                            .w_full()
+                            .hover(move |s| s.bg(scroll_track))
+                            .children(STATS_COLUMNS.iter().enumerate().map(|(c, spec)| {
+                                let text = if spec.column == StatsColumn::Key {
+                                    row.key.clone()
+                                } else {
+                                    row.values[c - 1].clone()
+                                };
+                                stats_cell(spec, text)
+                            }))
+                    })
+                    .collect()
+            },
+        )
+        .track_scroll(&self.stats_scroll);
 
         div()
             .flex()
@@ -1163,15 +1249,7 @@ impl TraceView {
             .text_color(palette.label)
             .text_size(px(STATS_TEXT_SIZE))
             .child(header)
-            .child(
-                div()
-                    .id("stats-body")
-                    .flex_1()
-                    .w_full()
-                    .overflow_y_scroll()
-                    .track_scroll(&self.stats_scroll)
-                    .children(body_rows),
-            )
+            .child(body.flex_1().w_full())
     }
 
     /// Switches the view mode, resetting the vertical scroll since the two modes
