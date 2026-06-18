@@ -1589,7 +1589,13 @@ impl Render for TraceView {
                     ))
                     .children((self.view_mode == ViewMode::FlameGraph).then(|| {
                         let caption = |text: &'static str| {
-                            div().text_sm().text_color(colors.disabled).child(text)
+                            // A muted but readable label tone: `disabled` is too dim
+                            // to read on the dark toolbar, so blend the text color
+                            // toward the background instead (legible in either mode).
+                            div()
+                                .text_sm()
+                                .text_color(bviz_ui_theme::mix(colors.text, colors.background, 0.4))
+                                .child(text)
                         };
                         div()
                             .flex()
