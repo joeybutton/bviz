@@ -229,6 +229,17 @@ struct StatsCache {
     rows: Rc<Vec<StatsCells>>,
 }
 
+/// The flame graph's laid-out boxes together with the inputs that determine
+/// them, so a paint reuses them unless the tree, the laid-out width, or the
+/// horizontal view changed. `scroll_y` is not a key: it only offsets each box's
+/// y at paint, so a vertical scroll keeps the cache.
+struct FlameBoxCache {
+    root_ptr: *const FlameNode,
+    content_w: f32,
+    view: FlameView,
+    boxes: Rc<Vec<FlameBox>>,
+}
+
 /// One stats-table cell, header or body, laid out per its column spec. A fixed
 /// column reserves its width and never shrinks (a bare `w(px)` is only a flex
 /// basis and gets shrunk unevenly between header and body when a row overflows,
@@ -558,6 +569,8 @@ struct TraceView {
     /// cleared when a new profile loads or the merge key changes. Walking every
     /// slice is too costly to repeat each paint.
     flame: Rc<RefCell<Option<Rc<FlameNode>>>>,
+    /// The flame graph's memoized box layout; see [`FlameBoxCache`].
+    flame_boxes: Rc<RefCell<Option<FlameBoxCache>>>,
     /// The per-group stats rows, aggregated by the same key and scope as the
     /// flame graph. Built and invalidated alongside `flame`; sorted on display.
     stats: Rc<RefCell<Option<Rc<Vec<StatRow>>>>>,
@@ -649,6 +662,7 @@ impl TraceView {
             scope_threads,
             lanes: Rc::new(RefCell::new(None)),
             flame: Rc::new(RefCell::new(None)),
+            flame_boxes: Rc::new(RefCell::new(None)),
             stats: Rc::new(RefCell::new(None)),
             stats_sort: StatsColumn::Total,
             stats_desc: true,
@@ -721,6 +735,7 @@ impl TraceView {
         gutter_width: f32,
         view_mode: ViewMode,
         flame: Rc<FlameNode>,
+        flame_boxes: Rc<RefCell<Option<FlameBoxCache>>>,
         palette: Palette,
     ) -> Stateful<Div> {
         let prepaint = {
@@ -863,6 +878,7 @@ impl TraceView {
                         // are the flame graph's.
                         paint_flame_graph(
                             &flame,
+                            &flame_boxes,
                             scroll_y.get(),
                             flame_view.get(),
                             &palette,
@@ -1103,6 +1119,7 @@ impl TraceView {
     /// rebuilds it; called when the profile, merge key, or scope changes.
     fn invalidate_aggregates(&mut self) {
         self.flame.borrow_mut().take();
+        self.flame_boxes.borrow_mut().take();
         self.stats.borrow_mut().take();
         self.stats_cache.borrow_mut().take();
     }
@@ -1440,6 +1457,7 @@ impl Render for TraceView {
                     self.gutter_width,
                     self.view_mode,
                     flame,
+                    self.flame_boxes.clone(),
                     palette,
                 )
                 .on_mouse_down(
@@ -2498,6 +2516,7 @@ fn flame_box_color(category: &str, palette: &Palette) -> Hsla {
 #[allow(clippy::too_many_arguments)]
 fn paint_flame_graph(
     root: &FlameNode,
+    cache: &Rc<RefCell<Option<FlameBoxCache>>>,
     scroll_y: f32,
     flame_view: FlameView,
     palette: &Palette,
@@ -2515,12 +2534,13 @@ fn paint_flame_graph(
     // then offset every box left by the horizontal scroll.
     let content_w = flame_view.content_px(width);
     let scroll_x = flame_view.scroll_px(width);
+    let boxes = flame_boxes(cache, root, content_w, flame_view, &metrics);
 
     let mask = ContentMask {
         bounds: Bounds::new(point(px(left), px(top)), size(px(width), px(height))),
     };
     window.with_content_mask(Some(mask), |window| {
-        for b in lay_out_flame(root, content_w, &metrics, MIN_SLICE_PX) {
+        for b in boxes.iter() {
             let y = top + b.y - scroll_y;
             if y + b.h < top || y > top + height {
                 continue;
@@ -2571,6 +2591,31 @@ fn paint_flame_graph(
     if let Some(h) = hover {
         paint_flame_tooltip(&h.boxed, root.total_us, h.at, bounds, palette, window, cx);
     }
+}
+
+/// Lays out `root` at `content_w` and `view`, reusing the [`FlameBoxCache`] in
+/// `cache` unless one of its keys changed.
+fn flame_boxes(
+    cache: &Rc<RefCell<Option<FlameBoxCache>>>,
+    root: &FlameNode,
+    content_w: f32,
+    view: FlameView,
+    metrics: &FlameMetrics,
+) -> Rc<Vec<FlameBox>> {
+    let root_ptr = root as *const FlameNode;
+    if let Some(c) = cache.borrow().as_ref() {
+        if c.root_ptr == root_ptr && c.content_w == content_w && c.view == view {
+            return c.boxes.clone();
+        }
+    }
+    let boxes = Rc::new(lay_out_flame(root, content_w, metrics, MIN_SLICE_PX));
+    *cache.borrow_mut() = Some(FlameBoxCache {
+        root_ptr,
+        content_w,
+        view,
+        boxes: boxes.clone(),
+    });
+    boxes
 }
 
 /// Paints a tooltip near `at` with the flame node's name, its category, formatted
