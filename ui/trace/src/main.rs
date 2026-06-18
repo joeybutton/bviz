@@ -1388,11 +1388,15 @@ impl TraceView {
         };
 
         let key_label = self.key_column_label();
+        // Reserve the scroll bar's width on the right of the header and every row
+        // (the bar is painted as an overlay there), so the last column's values
+        // don't run under or up against the bar.
         let header = div()
             .flex()
             .flex_row()
             .h(px(STATS_HEADER_HEIGHT))
             .w_full()
+            .pr(px(BAR_WIDTH))
             .bg(palette.header_band)
             .border_b_1()
             .border_color(palette.border)
@@ -1440,6 +1444,7 @@ impl TraceView {
                             .items_center()
                             .h(px(STATS_ROW_HEIGHT))
                             .w_full()
+                            .pr(px(BAR_WIDTH))
                             .hover(move |s| s.bg(scroll_track))
                             .children(STATS_COLUMNS.iter().enumerate().map(|(c, spec)| {
                                 let text = if spec.column == StatsColumn::Key {
