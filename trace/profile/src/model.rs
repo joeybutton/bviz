@@ -167,31 +167,76 @@ pub struct PhaseMarker {
     pub start_us: i64,
 }
 
-/// Coarse kind of thread a track represents, derived from its tid and readable
-/// name ([`lane_class`]). Lets the UI scope to e.g. the critical path or
-/// skyframe evaluators.
+/// Coarse role a thread plays in the build, derived from its tid and readable
+/// name ([`lane_class`]). Lets the UI scope to e.g. the critical path or to the
+/// loading/analysis/execution role a lane carries — which under Skymeld is the
+/// only way to separate analysis from execution, since the two phases merge into
+/// one `ANALYZE_AND_EXECUTE` phase marker.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LaneClass {
     CriticalPath,
     Main,
-    GarbageCollector,
-    SkyframeEvaluator,
-    Worker,
+    Gc,
+    /// Repository-rule fetching (a loading-phase activity).
+    RepoFetch,
+    /// Configured-target/aspect analysis.
+    Analysis,
+    /// Action execution and its support threads.
+    Execution,
+    Other,
 }
 
-/// tid 0 is Bazel's synthetic critical-path thread; the rest are matched by the
+/// Skyframe evaluator pools whose names carry the execution role. Bazel's
+/// `QuiescingExecutorsImpl` routes actions to the `-execution` and `-memoizing`
+/// pools (via `NodeEntryVisitor`), so these run execution work.
+const EXECUTION_SKYFRAME_INFIXES: [&str; 2] =
+    ["skyframe-evaluator-execution", "skyframe-evaluator-memoizing"];
+
+/// Thread-name prefixes for execution support (action processing and its
+/// machinery), distinct from the skyframe evaluator pools.
+const EXECUTION_PREFIXES: [&str; 9] = [
+    "dynamic-execution",
+    "Include scanner",
+    "remote-execution",
+    "remote-executor",
+    "lease-extension",
+    "combined-cache-",
+    "merkle-tree-",
+    "virtual-action-input-pipe-",
+    "jdeps-reader-",
+];
+
+/// tid 0 is Bazel's synthetic critical-path thread; the rest are matched on the
 /// readable thread name Bazel emits.
+///
+/// The skyframe-evaluator tests run longest-match-first: the `-execution`/
+/// `-memoizing` pools run actions, the `-cpu-heavy` and plain pools run analysis
+/// (configured targets/aspects, plus loading and light analysis), so the plain
+/// `skyframe-evaluator` substring must be tested only after the execution
+/// infixes are ruled out.
 pub fn lane_class(tid: i64, name: &str) -> LaneClass {
-    if tid == 0 {
+    if tid == 0 || name == "Critical Path" {
         LaneClass::CriticalPath
     } else if name == "Main Thread" {
         LaneClass::Main
     } else if name == "Garbage Collector" {
-        LaneClass::GarbageCollector
-    } else if name.starts_with("skyframe-evaluator") {
-        LaneClass::SkyframeEvaluator
+        LaneClass::Gc
+    } else if EXECUTION_SKYFRAME_INFIXES
+        .iter()
+        .any(|infix| name.contains(infix))
+    {
+        LaneClass::Execution
+    } else if name.contains("skyframe-evaluator") {
+        LaneClass::Analysis
+    } else if name.starts_with("starlark-repository") || name.starts_with("downloads[") {
+        LaneClass::RepoFetch
+    } else if EXECUTION_PREFIXES.iter().any(|p| name.starts_with(p))
+        || (name.starts_with("disk-cache-") && !name.starts_with("disk-cache-gc"))
+        || name.starts_with("sandbox-")
+    {
+        LaneClass::Execution
     } else {
-        LaneClass::Worker
+        LaneClass::Other
     }
 }
 
@@ -242,15 +287,22 @@ mod tests {
     fn lane_class_derivation() {
         assert_eq!(lane_class(0, "Critical Path"), LaneClass::CriticalPath);
         assert_eq!(lane_class(7, "Main Thread"), LaneClass::Main);
+        assert_eq!(lane_class(8, "Garbage Collector"), LaneClass::Gc);
+        // The execution pools must win over the plain skyframe substring.
         assert_eq!(
-            lane_class(8, "Garbage Collector"),
-            LaneClass::GarbageCollector
+            lane_class(12, "skyframe-evaluator-execution-3"),
+            LaneClass::Execution
         );
         assert_eq!(
-            lane_class(12, "skyframe-evaluator-3"),
-            LaneClass::SkyframeEvaluator
+            lane_class(13, "skyframe-evaluator-cpu-heavy-2"),
+            LaneClass::Analysis
         );
-        assert_eq!(lane_class(99, "some-worker"), LaneClass::Worker);
+        assert_eq!(lane_class(14, "skyframe-evaluator-5"), LaneClass::Analysis);
+        assert_eq!(
+            lane_class(15, "starlark-repository-foo (Virtual)"),
+            LaneClass::RepoFetch
+        );
+        assert_eq!(lane_class(99, "collect-local-resources"), LaneClass::Other);
     }
 
     fn profile_with(markers: Vec<(&str, i64)>, span_end: i64) -> Profile {
@@ -305,7 +357,7 @@ mod tests {
             lane_class,
         };
         let mut p = profile_with(vec![], 0);
-        p.threads.push(track(5, LaneClass::Worker));
+        p.threads.push(track(5, LaneClass::Execution));
         assert!(!p.has_critical_path());
         p.threads.push(track(0, LaneClass::CriticalPath));
         assert!(p.has_critical_path());
