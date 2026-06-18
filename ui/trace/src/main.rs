@@ -1021,13 +1021,13 @@ impl TraceView {
         self.stats.borrow().clone()
     }
 
-    /// The group-by label of the key column, matching the toolbar dropdown.
+    /// The group-by label of the key column, from the same table that labels the
+    /// toolbar dropdown.
     fn key_column_label(&self) -> &'static str {
-        match self.flame_key {
-            FlameKey::Name => "Name",
-            FlameKey::Mnemonic => "Mnemonic",
-            FlameKey::Category => "Category",
-        }
+        FLAME_KEYS
+            .iter()
+            .find(|(_, key)| *key == self.flame_key)
+            .map_or("", |(label, _)| *label)
     }
 
     /// Sets the stats sort to `column`, toggling the direction when it is already
