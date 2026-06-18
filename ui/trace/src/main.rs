@@ -4,8 +4,9 @@
 //! with horizontal zoom/pan and vertical scroll.
 
 use bviz_trace_layout::{
-    FlameBox, FlameKey, FlameMetrics, FlameNode, FlameView, LaneLayout, LaneMetrics, TimeView,
-    Viewport, build_flame_graph, flame_height, lay_out_flame, lay_out_lanes, visible_slices,
+    FlameBox, FlameKey, FlameMetrics, FlameNode, FlameView, LaneLayout, LaneMetrics, StatRow,
+    TimeView, Viewport, aggregate_stats, build_flame_graph, flame_height, lay_out_flame,
+    lay_out_lanes, visible_slices,
 };
 use bviz_trace_profile::{CounterLane, CounterPoint, PhaseMarker, Profile, TimeSpan};
 use bviz_ui_components::{Axis, Button, Dropdown, Scrollbar, load_in_background, track_drag};
@@ -14,9 +15,9 @@ use clap::Parser;
 use gpui::{
     Animation, AnimationExt, App, BorderStyle, Bounds, ContentMask, Context, Div, Entity,
     FocusHandle, Hsla, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
-    PathBuilder, Pixels, Point, Render, Rgba, ScrollDelta, ScrollWheelEvent, Stateful, Subscription,
-    Task, TextAlign, Transformation, Window, canvas, div, hsla, percentage, point, prelude::*, px,
-    quad, size,
+    PathBuilder, Pixels, Point, Render, Rgba, ScrollDelta, ScrollHandle, ScrollWheelEvent,
+    SharedString, Stateful, Subscription, Task, TextAlign, Transformation, Window, canvas, div,
+    hsla, percentage, point, prelude::*, px, quad, size,
 };
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
@@ -110,6 +111,16 @@ const MARKER_LABEL_SIZE: f32 = 11.0;
 /// Height of the view-mode toolbar above the timeline.
 const TOOLBAR_HEIGHT: f32 = 36.0;
 
+/// Heights of a stats-table header row and a body row.
+const STATS_HEADER_HEIGHT: f32 = 24.0;
+const STATS_ROW_HEIGHT: f32 = 22.0;
+/// Font size of stats-table cells and headers.
+const STATS_TEXT_SIZE: f32 = 12.0;
+/// Width of each numeric stats column; the key column takes the remainder.
+const STATS_NUM_COL_WIDTH: f32 = 88.0;
+/// Horizontal padding inside a stats cell.
+const STATS_CELL_PAD: f32 = 8.0;
+
 /// Neutral fill for the aggregated flame graph's synthetic root, whose empty
 /// category would otherwise hash to an arbitrary hue.
 const FLAME_ROOT_LIGHTNESS_DARK: f32 = 0.30;
@@ -165,6 +176,17 @@ struct Palette {
 enum ViewMode {
     FlameChart,
     FlameGraph,
+}
+
+/// A sortable column of the graph-mode stats table.
+#[derive(Clone, Copy, PartialEq)]
+enum StatsColumn {
+    Key,
+    Count,
+    Total,
+    Avg,
+    Max,
+    Percent,
 }
 
 /// The flame-graph merge keys offered in the toolbar dropdown, in menu order:
@@ -354,6 +376,15 @@ fn flame_graph_rect(
     (left, top, width, height)
 }
 
+/// The bottom stats-table height bounded to leave the flame graph at least
+/// `FLAME_MIN_HEIGHT` and keep at least a header band plus one row of table, so
+/// the splitter can't squeeze either section to nothing.
+fn clamp_table_height(table_height: f32, vh: f32) -> f32 {
+    let min = STATS_HEADER_HEIGHT + STATS_ROW_HEIGHT;
+    let max = (vh - FLAME_MIN_HEIGHT).max(min);
+    table_height.clamp(min, max)
+}
+
 /// One fitted counter lane in the graph section: its top (window y) and the
 /// height of its chart area below the header band.
 #[derive(Clone, Copy)]
@@ -443,6 +474,14 @@ struct TraceView {
     /// cleared when a new profile loads or the merge key changes. Walking every
     /// slice is too costly to repeat each paint.
     flame: Rc<RefCell<Option<Rc<FlameNode>>>>,
+    /// The per-group stats rows, aggregated by the same key and scope as the
+    /// flame graph. Built and invalidated alongside `flame`; sorted on display.
+    stats: Rc<RefCell<Option<Rc<Vec<StatRow>>>>>,
+    /// Which column the stats table sorts by, and whether descending.
+    stats_sort: StatsColumn,
+    stats_desc: bool,
+    /// Scroll position of the stats table body.
+    stats_scroll: ScrollHandle,
     /// The slice under the cursor, if any, drawn as a tooltip.
     hover: Option<Hover>,
     /// The flame-graph box under the cursor in graph mode, drawn as a tooltip.
@@ -463,7 +502,7 @@ impl TraceView {
         });
         let key_observer = cx.observe(&key_dropdown, |view, dropdown, cx| {
             view.flame_key = FLAME_KEYS[dropdown.read(cx).selected()].1;
-            view.flame.borrow_mut().take();
+            view.invalidate_aggregates();
             cx.notify();
         });
         let (scope_dropdown, scope_observer, scope_threads) = Self::scope_dropdown(None, cx);
@@ -471,7 +510,7 @@ impl TraceView {
             cx,
             move || Profile::from_path(&path).map_err(|e| e.to_string()),
             |view, result, cx| {
-                view.flame.borrow_mut().take();
+                view.invalidate_aggregates();
                 view.flame_view.set(FlameView::FIT);
                 view.source = match result {
                     Ok(profile) => Source::Loaded(Rc::new(profile)),
@@ -516,6 +555,10 @@ impl TraceView {
             _scope_observer: scope_observer,
             scope_threads,
             flame: Rc::new(RefCell::new(None)),
+            stats: Rc::new(RefCell::new(None)),
+            stats_sort: StatsColumn::Total,
+            stats_desc: true,
+            stats_scroll: ScrollHandle::new(),
             hover: None,
             flame_hover: None,
             crosshair: None,
@@ -557,7 +600,7 @@ impl TraceView {
         let observer = cx.observe(&dropdown, |view, dropdown, cx| {
             let idx = dropdown.read(cx).selected();
             view.flame_scope = idx.checked_sub(1).map(|k| view.scope_threads[k]);
-            view.flame.borrow_mut().take();
+            view.invalidate_aggregates();
             cx.notify();
         });
         (dropdown, observer, threads)
@@ -645,11 +688,12 @@ impl TraceView {
             flame_total,
         );
         let origin = viewport.get().origin;
+        let chart_mode = view_mode == ViewMode::FlameChart;
         // A thin overlay strip at the splitter that begins a resize drag, placed
         // from the last painted bounds and the stored graph height. The canvas
         // recomputes the same regions when it paints. A double-click resets the
-        // graph height to its default.
-        let chart_mode = view_mode == ViewMode::FlameChart;
+        // graph height to its default. Graph mode lays its table out as a flex
+        // sibling with its own splitter, so this overlay is chart-mode only.
         let splitter = (chart_mode && profile.counters.len() > 0).then(|| {
             let y = regions.graph_top - BAR_WIDTH / 2.0;
             let drag_entity = entity.clone();
@@ -716,6 +760,9 @@ impl TraceView {
                     if view_mode == ViewMode::FlameGraph {
                         let flame_hover = entity.read(cx).flame_hover.clone();
                         let dragging = !matches!(entity.read(cx).drag, Drag::None);
+                        // The canvas fills only the flame section; the stats table
+                        // is a sibling below the splitter, so the full canvas bounds
+                        // are the flame graph's.
                         paint_flame_graph(
                             &flame,
                             scroll_y.get(),
@@ -923,6 +970,180 @@ impl TraceView {
         self.flame.borrow().clone()
     }
 
+    /// Drops the cached flame graph and stats rows so the next use of either
+    /// rebuilds it; called when the profile, merge key, or scope changes.
+    fn invalidate_aggregates(&mut self) {
+        self.flame.borrow_mut().take();
+        self.stats.borrow_mut().take();
+    }
+
+    /// The per-group stats rows for the loaded profile, aggregated by the current
+    /// key and scope on first use and reused across paints. `None` until a profile
+    /// is loaded.
+    fn stats_rows(&self) -> Option<Rc<Vec<StatRow>>> {
+        let Source::Loaded(profile) = &self.source else {
+            return None;
+        };
+        if self.stats.borrow().is_none() {
+            let rows = aggregate_stats(profile, self.flame_key, self.flame_scope);
+            *self.stats.borrow_mut() = Some(Rc::new(rows));
+        }
+        self.stats.borrow().clone()
+    }
+
+    /// The group-by label of the key column, matching the toolbar dropdown.
+    fn key_column_label(&self) -> &'static str {
+        match self.flame_key {
+            FlameKey::Name => "Name",
+            FlameKey::Mnemonic => "Mnemonic",
+            FlameKey::Category => "Category",
+        }
+    }
+
+    /// Sets the stats sort to `column`, toggling the direction when it is already
+    /// the active column.
+    fn sort_by(&mut self, column: StatsColumn) {
+        if self.stats_sort == column {
+            self.stats_desc = !self.stats_desc;
+        } else {
+            self.stats_sort = column;
+            self.stats_desc = true;
+        }
+    }
+
+    /// The graph-mode stats table: a header band of clickable, sortable columns
+    /// over a scrollable body of one row per group, themed like the rest of the
+    /// view. The rows are aggregated by the same key and scope as the flame graph
+    /// and sorted by the active column; the percent column is each group's share
+    /// of the summed group durations (so it totals 100%).
+    fn stats_table(&self, palette: &Palette, cx: &mut Context<Self>) -> Div {
+        let Some(rows) = self.stats_rows() else {
+            return div();
+        };
+        let mut rows: Vec<StatRow> = (*rows).clone();
+        let column = self.stats_sort;
+        let desc = self.stats_desc;
+        rows.sort_by(|a, b| {
+            let ord = match column {
+                StatsColumn::Key => b.key.cmp(&a.key),
+                StatsColumn::Count => a.count.cmp(&b.count),
+                StatsColumn::Total | StatsColumn::Percent => a.total_us.cmp(&b.total_us),
+                StatsColumn::Avg => a.avg_us().cmp(&b.avg_us()),
+                StatsColumn::Max => a.max_us.cmp(&b.max_us),
+            };
+            let ord = if desc { ord.reverse() } else { ord };
+            // Break ties by key so the order is stable regardless of input order.
+            ord.then_with(|| a.key.cmp(&b.key))
+        });
+        let grand_total: i64 = rows.iter().map(|r| r.total_us).sum();
+
+        let header_cell = |label: String, column: StatsColumn, numeric: bool| {
+            let caret = if self.stats_sort != column {
+                ""
+            } else if self.stats_desc {
+                " ▾"
+            } else {
+                " ▴"
+            };
+            let mut cell = div()
+                .id(SharedString::from(format!("stats-h-{label}")))
+                .flex()
+                .flex_row()
+                .items_center()
+                .h_full()
+                .px(px(STATS_CELL_PAD))
+                .cursor_pointer()
+                .hover(|s| s.bg(palette.scroll_track))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.sort_by(column);
+                    cx.notify();
+                }))
+                .child(format!("{label}{caret}"));
+            if numeric {
+                cell = cell.w(px(STATS_NUM_COL_WIDTH)).justify_end();
+            } else {
+                cell = cell.flex_1().min_w_0();
+            }
+            cell
+        };
+
+        let header = div()
+            .flex()
+            .flex_row()
+            .h(px(STATS_HEADER_HEIGHT))
+            .w_full()
+            .bg(palette.header_band)
+            .border_b_1()
+            .border_color(palette.border)
+            .text_color(palette.label)
+            .child(header_cell(self.key_column_label().to_owned(), StatsColumn::Key, false))
+            .child(header_cell("Count".to_owned(), StatsColumn::Count, true))
+            .child(header_cell("Total".to_owned(), StatsColumn::Total, true))
+            .child(header_cell("Avg".to_owned(), StatsColumn::Avg, true))
+            .child(header_cell("Max".to_owned(), StatsColumn::Max, true))
+            .child(header_cell("%".to_owned(), StatsColumn::Percent, true));
+
+        let num_cell = |text: String| {
+            div()
+                .w(px(STATS_NUM_COL_WIDTH))
+                .px(px(STATS_CELL_PAD))
+                .flex()
+                .justify_end()
+                .child(text)
+        };
+        let scroll_track = palette.scroll_track;
+        let body_rows = rows.into_iter().map(move |r| {
+            let pct = if grand_total > 0 {
+                100.0 * r.total_us as f64 / grand_total as f64
+            } else {
+                0.0
+            };
+            let cells = [
+                num_cell(r.count.to_string()),
+                num_cell(format_duration(r.total_us)),
+                num_cell(format_duration(r.avg_us())),
+                num_cell(format_duration(r.max_us)),
+                num_cell(format!("{pct:.1}%")),
+            ];
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .h(px(STATS_ROW_HEIGHT))
+                .w_full()
+                .hover(move |s| s.bg(scroll_track))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .px(px(STATS_CELL_PAD))
+                        .whitespace_nowrap()
+                        .overflow_hidden()
+                        .text_ellipsis()
+                        .child(r.key),
+                )
+                .children(cells)
+        });
+
+        div()
+            .flex()
+            .flex_col()
+            .size_full()
+            .bg(palette.background)
+            .text_color(palette.label)
+            .text_size(px(STATS_TEXT_SIZE))
+            .child(header)
+            .child(
+                div()
+                    .id("stats-body")
+                    .flex_1()
+                    .w_full()
+                    .overflow_y_scroll()
+                    .track_scroll(&self.stats_scroll)
+                    .children(body_rows),
+            )
+    }
+
     /// Switches the view mode, resetting the vertical scroll since the two modes
     /// have different content heights.
     fn set_view_mode(&mut self, mode: ViewMode) {
@@ -1054,13 +1275,66 @@ impl Render for TraceView {
                         }
                     }
                 }));
+                // In graph mode a splitter and the stats table sit below the flame
+                // graph as flex siblings: the flame graph's canvas fills the
+                // remaining space above, so the two never overlap. The table stops
+                // mouse and scroll events from reaching the timeline's pan/scroll
+                // handlers underneath.
+                let bottom = (self.view_mode == ViewMode::FlameGraph).then(|| {
+                    let splitter = div()
+                        .id("stats-splitter")
+                        .w_full()
+                        .h(px(SPLITTER_THICKNESS))
+                        .bg(palette.divider)
+                        .cursor_row_resize()
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, e: &MouseDownEvent, _, cx| {
+                                if e.click_count == 2 {
+                                    this.graph_height = DEFAULT_GRAPH_HEIGHT;
+                                } else {
+                                    this.drag = Drag::Splitter;
+                                    this.last_mouse = e.position;
+                                }
+                                cx.stop_propagation();
+                                cx.notify();
+                            }),
+                        );
+                    let table = div()
+                        .h(px(self.graph_height.max(STATS_HEADER_HEIGHT + STATS_ROW_HEIGHT)))
+                        .w_full()
+                        .overflow_hidden()
+                        .on_mouse_down(MouseButton::Left, |_, _, cx: &mut App| {
+                            cx.stop_propagation();
+                        })
+                        .on_scroll_wheel(|_, _, cx: &mut App| cx.stop_propagation())
+                        .child(self.stats_table(&palette, cx));
+                    (splitter, table)
+                });
+                let content = match bottom {
+                    Some((splitter, table)) => div()
+                        .flex_1()
+                        .flex()
+                        .flex_col()
+                        .overflow_hidden()
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_h(px(FLAME_MIN_HEIGHT))
+                                .overflow_hidden()
+                                .child(timeline),
+                        )
+                        .child(splitter)
+                        .child(table),
+                    None => div().flex_1().overflow_hidden().child(timeline),
+                };
                 div()
                     .flex_1()
                     .flex()
                     .flex_col()
                     .overflow_hidden()
                     .child(toolbar)
-                    .child(div().flex_1().flex().overflow_hidden().child(timeline))
+                    .child(content)
             }
             Source::Loading => div()
                 .flex_1()
@@ -1142,7 +1416,7 @@ impl TraceView {
                 .map(|r| flame_height(r, &flame_metrics()))
                 .unwrap_or(0.0);
             let mut fv = self.flame_view.get();
-            let (left, _, width, _) = flame_graph_rect(vp, total_h, fv);
+            let (left, _, width, _) = flame_graph_rect(self.viewport.get(), total_h, fv);
             if e.modifiers.control || e.modifiers.platform {
                 let dy_lines = dy / LINE_SCROLL_PX;
                 fv.zoom_at(
@@ -1433,14 +1707,27 @@ fn on_drag(view: &mut TraceView, event: &MouseMoveEvent, cx: &mut Context<TraceV
                 return;
             };
             let vp = view.viewport.get();
-            let body_bottom = f32::from(vp.origin.y) + f32::from(vp.size.height) - BAR_WIDTH;
-            // The splitter follows the cursor: the graph spans from it down to the
-            // horizontal-bar top. Clamped to keep both sections usable.
-            view.graph_height = clamp_graph_height(
-                body_bottom - f32::from(event.position.y),
-                profile.counters.len(),
-                f32::from(vp.size.height),
-            );
+            let vh = f32::from(vp.size.height);
+            if view.view_mode == ViewMode::FlameGraph {
+                // The flame graph fills its own flex region above the splitter, so
+                // the table height isn't a slice of a known content rect — grow it
+                // by however far the cursor moves up since the last move. The total
+                // height bounds it loosely; the flame region's flex floor keeps it
+                // usable.
+                let dy = f32::from(view.last_mouse.y) - f32::from(event.position.y);
+                view.graph_height = clamp_table_height(view.graph_height + dy, vh + view.graph_height);
+                view.last_mouse = event.position;
+            } else {
+                // The splitter follows the cursor: the counter graphs span from it
+                // down to the horizontal-bar top. Clamped to keep both sections
+                // usable.
+                let body_bottom = f32::from(vp.origin.y) + vh - BAR_WIDTH;
+                view.graph_height = clamp_graph_height(
+                    body_bottom - f32::from(event.position.y),
+                    profile.counters.len(),
+                    vh,
+                );
+            }
         }
         Drag::Gutter => {
             let vp = view.viewport.get();
@@ -1726,6 +2013,7 @@ fn paint_splitter(regions: Regions, palette: &Palette, window: &mut Window) {
         BorderStyle::Solid,
     ));
 }
+
 
 /// Paints the flame section's vertical bar and/or the content column's
 /// horizontal bar for whichever axis overflows, storing each bar's geometry in
