@@ -2743,8 +2743,8 @@ fn flame_boxes(
     boxes
 }
 
-/// Paints a tooltip near `at` with the flame node's name, formatted total
-/// duration, occurrence count, and share of the view's aggregated total.
+/// Paints a tooltip near `at` with the flame node's name and, below it, its total
+/// and self time, occurrence count, and share of the view's aggregated total.
 fn paint_flame_tooltip(
     boxed: &FlameBox,
     root_total_us: i64,
@@ -2760,8 +2760,9 @@ fn paint_flame_tooltip(
         0.0
     };
     let detail = format!(
-        "{} · {} · {:.1}%",
+        "total {}, self {}, {}×, {:.1}% of view",
         format_duration(boxed.total_us),
+        format_duration(boxed.self_us),
         boxed.count,
         pct,
     );
