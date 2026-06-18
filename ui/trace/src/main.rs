@@ -5,8 +5,8 @@
 
 use bviz_trace_layout::{
     FlameBox, FlameKey, FlameMetrics, FlameNode, FlameView, LaneLayout, LaneMetrics, StatRow,
-    TimeView, Viewport, aggregate_stats, build_flame_graph, flame_height, lay_out_flame,
-    lay_out_lanes, visible_slices,
+    TimeView, Viewport, aggregate_stats, build_flame_graph, flame_box_at, flame_height,
+    lay_out_flame, lay_out_lanes, visible_slices,
 };
 use bviz_trace_profile::{CounterLane, CounterPoint, PhaseMarker, Profile, TimeSpan};
 use bviz_ui_components::{Axis, Button, Dropdown, Scrollbar, load_in_background, track_drag};
@@ -1804,9 +1804,7 @@ impl TraceView {
         let depth = (content_y / metrics.row_height) as u32;
         let content_w = fl.view.content_px(fl.width);
         let content_x = (x - fl.left) + fl.view.scroll_px(fl.width);
-        lay_out_flame(&root, content_w, &metrics, MIN_SLICE_PX)
-            .into_iter()
-            .find(|b| b.depth == depth && content_x >= b.x && content_x < b.x + b.w)
+        flame_box_at(&root, content_x, depth, content_w, &metrics, MIN_SLICE_PX)
     }
 
     /// Begins a drag at `pos`: a scroll thumb or track if the press hit one (the

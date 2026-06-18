@@ -293,6 +293,66 @@ fn place(
     }
 }
 
+/// The box at `(target_depth, x_px)` in a layout of `root` into `width` pixels,
+/// found by descending the tree the same way [`lay_out_flame`] places boxes —
+/// children left-to-right proportional to `width_us` in their stored order — so
+/// the result agrees with the corresponding `lay_out_flame` box without building
+/// the full box vector. Returns `None` when `x_px` is outside `[0, width)`, no
+/// node sits at that depth under it, or the matching box is narrower than
+/// `min_px` (and so `lay_out_flame` would omit it).
+pub fn flame_box_at(
+    root: &FlameNode,
+    x_px: f32,
+    target_depth: u32,
+    width: f32,
+    metrics: &FlameMetrics,
+    min_px: f32,
+) -> Option<FlameBox> {
+    if x_px < 0.0 || x_px >= width {
+        return None;
+    }
+    let mut node = root;
+    let mut x = 0.0_f32;
+    let mut w = width;
+    loop {
+        if node.depth == target_depth {
+            if w < min_px {
+                return None;
+            }
+            return Some(FlameBox {
+                x,
+                y: node.depth as f32 * metrics.row_height,
+                w,
+                h: metrics.row_height,
+                depth: node.depth,
+                name: node.name.clone(),
+                category: node.category.clone(),
+                total_us: node.total_us,
+                count: node.count,
+            });
+        }
+        if node.width_us == 0 {
+            return None;
+        }
+        // Descend into the child whose proportional x-extent contains x_px,
+        // accumulating its origin and width exactly as `place` does.
+        let mut cursor = x;
+        let mut next = None;
+        for child in &node.children {
+            let cw = w * child.width_us as f32 / node.width_us as f32;
+            if x_px >= cursor && x_px < cursor + cw {
+                next = Some((child, cursor, cw));
+                break;
+            }
+            cursor += cw;
+        }
+        let (child, cx, cw) = next?;
+        node = child;
+        x = cx;
+        w = cw;
+    }
+}
+
 /// Total painted height: one row per depth level the tree reaches.
 pub fn flame_height(root: &FlameNode, metrics: &FlameMetrics) -> f32 {
     (max_depth(root) + 1) as f32 * metrics.row_height
@@ -603,6 +663,63 @@ mod tests {
         let root = build_flame_graph(&p, FlameKey::Name, None);
         // root depth 0, a depth 1, b depth 2 -> 3 rows.
         assert_eq!(flame_height(&root, &METRICS), 30.0);
+    }
+
+    #[test]
+    fn flame_box_at_agrees_with_lay_out_flame() {
+        // A two-level tree with a nested child and an overflowing one, so the
+        // descent is exercised across depths and the width-clamp case.
+        let p = profile(vec![track(
+            1,
+            vec![
+                slice("a", 0, 100, 0),
+                slice("b", 0, 40, 1),
+                slice("c", 40, 50, 1),
+                slice("p", 100, 100, 0),
+                slice("over", 150, 150, 1),
+                slice("z", 300, 90, 0),
+            ],
+        )]);
+        let root = build_flame_graph(&p, FlameKey::Name, None);
+        let width = 600.0;
+        let min_px = 1.0;
+        let boxes = lay_out_flame(&root, width, &METRICS, min_px);
+        // For every laid-out box, a probe at its center maps back to it.
+        for b in &boxes {
+            let probe_x = b.x + b.w / 2.0;
+            let hit = flame_box_at(&root, probe_x, b.depth, width, &METRICS, min_px);
+            assert_eq!(hit.as_ref(), Some(b), "probe at depth {} x {probe_x}", b.depth);
+        }
+        // Outside the content width yields nothing.
+        assert_eq!(flame_box_at(&root, -1.0, 0, width, &METRICS, min_px), None);
+        assert_eq!(flame_box_at(&root, width, 0, width, &METRICS, min_px), None);
+        // A depth past the tree under a real x yields nothing.
+        let deep = max_depth(&root) + 1;
+        assert_eq!(flame_box_at(&root, 1.0, deep, width, &METRICS, min_px), None);
+    }
+
+    #[test]
+    fn flame_box_at_omits_sub_min_boxes() {
+        // 1000us over 100px: thin is 1px wide, below a 5px floor — both
+        // lay_out_flame and the descent omit it at thin's depth and x.
+        let p = profile(vec![track(
+            1,
+            vec![slice("wide", 0, 990, 0), slice("thin", 990, 10, 0)],
+        )]);
+        let root = build_flame_graph(&p, FlameKey::Name, None);
+        let width = 100.0;
+        let min_px = 5.0;
+        // thin sits at depth 1, x in [99, 100); probe its center.
+        assert_eq!(flame_box_at(&root, 99.5, 1, width, &METRICS, min_px), None);
+        // Its wide sibling at the same depth is found.
+        let wide = lay_out_flame(&root, width, &METRICS, min_px)
+            .into_iter()
+            .find(|b| b.name == "wide")
+            .unwrap();
+        assert_eq!(
+            flame_box_at(&root, 1.0, 1, width, &METRICS, min_px),
+            Some(wide)
+        );
     }
 
     #[test]

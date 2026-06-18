@@ -6,8 +6,8 @@ mod view;
 
 pub use cull::{Viewport, VisibleSlice, visible_slices};
 pub use flame::{
-    FlameBox, FlameKey, FlameMetrics, FlameNode, FlameView, build_flame_graph, flame_height,
-    lay_out_flame,
+    FlameBox, FlameKey, FlameMetrics, FlameNode, FlameView, build_flame_graph, flame_box_at,
+    flame_height, lay_out_flame,
 };
 pub use lanes::{CounterPos, Lane, LaneLayout, LaneMetrics, lay_out_lanes};
 pub use stats::{StatRow, aggregate_stats};
