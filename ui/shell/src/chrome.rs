@@ -128,7 +128,20 @@ impl RenderOnce for Chrome {
                     .when(!tiling.bottom, |d| d.pb(SHADOW))
                     .when(!tiling.left, |d| d.pl(SHADOW))
                     .when(!tiling.right, |d| d.pr(SHADOW))
-                    .on_mouse_move(|_, window, _| window.refresh())
+                    // The resize-edge cursor (set by the canvas below) only
+                    // changes within the border band, so repaint to update it
+                    // only there. Refreshing on every move would repaint the
+                    // whole window — including a heavy content canvas — on each
+                    // motion, pinning a core while the cursor merely crosses the
+                    // content. The band is wider than the resize hit zone so the
+                    // cursor still resets once on the way out.
+                    .on_mouse_move(|e, window, _| {
+                        let size = window.window_bounds().get_bounds().size;
+                        let inner = Bounds::new(Point::default(), size).inset(SHADOW * 2.0);
+                        if !inner.contains(&e.position) {
+                            window.refresh();
+                        }
+                    })
                     .on_mouse_down(MouseButton::Left, move |e, window, _| {
                         let size = window.window_bounds().get_bounds().size;
                         if let Some(edge) = resize_edge(e.position, SHADOW, size, tiling) {
