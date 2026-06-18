@@ -297,11 +297,14 @@ The terminal's scroll bar (`ui/terminal/src/terminal.rs`) implements all of this
 
 Build the header and every body cell through **one shared cell builder** sharing a single
 column spec, so their widths can never disagree. A fixed column needs
-`w(px).flex_shrink_0().overflow_hidden().whitespace_nowrap().text_ellipsis()`: a bare
-`w(px)` is only a flex *basis*, and since `flex_shrink` defaults to 1.0 it gets shrunk —
-by different amounts in the header versus each body row when a row overflows — so columns
-"float left" and drift out of alignment at some widths. The one flexible column is
-`flex_1().min_w_0()`. Virtualize many fixed-height rows with `uniform_list(id, count, |range,
+`w(px).flex_shrink_0().overflow_hidden().whitespace_nowrap()`: a bare `w(px)` is only a flex
+*basis*, and since `flex_shrink` defaults to 1.0 it gets shrunk — by different amounts in
+the header versus each body row when a row overflows — so columns "float left" and drift out
+of alignment at some widths. The one flexible column is `flex_1().min_w_0()` and takes
+`text_ellipsis()` to cut a long value. Do NOT put `text_ellipsis()` on a fixed, right-aligned
+(`justify_end`) numeric column: the ellipsis measurement misjudges a justify-end cell and
+truncates values that fit (you'll see `467…` next to a wider value rendered in full). Size
+such a column to its longest value and let it clip only on true overflow. Virtualize many fixed-height rows with `uniform_list(id, count, |range,
 window, cx| -> Vec<_>)` + a `UniformListScrollHandle` (renders only visible rows; requires
 uniform row height), keeping the header a separate non-scrolling row above it; drive a scroll
 bar from the handle's `base_handle` offset/extents as above. Zed's
