@@ -6,10 +6,17 @@ pub use chrome::Chrome;
 
 use gpui::{
     App, Application, Bounds, KeyBinding, Pixels, Render, Size, TitlebarOptions, WindowBounds,
-    WindowDecorations, WindowOptions, actions,
+    WindowDecorations, WindowOptions, actions, px, size,
 };
 
 actions!(ui_shell, [Quit, CloseWindow, Tab, TabPrev]);
+
+/// The smallest the window may be resized to, so its chrome and content can't be
+/// crushed to nothing. Smaller than every app's opening size.
+const MIN_WINDOW_SIZE: Size<Pixels> = Size {
+    width: px(480.0),
+    height: px(360.0),
+};
 
 /// The application builder with the bundled asset source installed.
 pub fn application() -> Application {
@@ -58,6 +65,7 @@ where
                     ..Default::default()
                 }),
                 app_id: Some(app_id.clone()),
+                window_min_size: Some(MIN_WINDOW_SIZE),
                 // Prefer the compositor's decorations; Chrome draws our own when
                 // only client-side is supported (e.g. GNOME).
                 window_decorations: Some(WindowDecorations::Server),
