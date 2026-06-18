@@ -17,6 +17,6 @@ pub mod query;
 pub mod quotient;
 pub mod streamed_proto;
 
-pub use graph::{EdgeKind, Graph};
+pub use graph::{EdgeKind, Graph, Kind};
 pub use joint::build_joint;
 pub use layout::{layout, Box, Connector, LaidOut};

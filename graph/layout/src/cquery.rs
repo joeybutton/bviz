@@ -17,7 +17,7 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use bazel_query_proto::analysis::{ConfiguredTarget, CqueryResult};
 use bazel_query_proto::blaze_query::target::Discriminator;
 
-use crate::graph::{EdgeKind, Graph};
+use crate::graph::{EdgeKind, Graph, Kind};
 use crate::label::{self, PackageHierarchy};
 use crate::query::label_and_kind;
 
@@ -53,7 +53,7 @@ pub(crate) fn generated_labels(results: &[CqueryResult]) -> HashSet<String> {
         .flat_map(|r| r.results.iter())
         .filter_map(|ct| ct.target.as_ref())
         .filter_map(label_and_kind)
-        .filter(|(_, kind)| *kind == "artifact")
+        .filter(|(_, kind)| *kind == Kind::Artifact)
         .map(|(label, _)| label.to_string())
         .collect()
 }
@@ -102,7 +102,7 @@ pub(crate) fn build_with_packages(
             if !target_box.contains_key(label) {
                 let parent = hierarchy.package_box(label).map(str::to_string);
                 let id = format!("target:{label}");
-                graph.add_node(id.clone(), label::target_label(label), "target", parent);
+                graph.add_node(id.clone(), label::target_label(label), Kind::Target, parent);
                 target_box.insert(label.to_string(), id);
             }
             let config_id = ct.configuration_id;
@@ -115,7 +115,7 @@ pub(crate) fn build_with_packages(
                 graph.add_node(
                     ct_node_id(label, &key),
                     mnemonic,
-                    "configured-target",
+                    Kind::ConfiguredTarget,
                     Some(target_box[label].clone()),
                 );
             }
@@ -327,12 +327,12 @@ mod tests {
         )]);
 
         let container = find(&graph, "target://foo:app");
-        assert_eq!(container.kind, "target");
+        assert_eq!(container.kind, Kind::Target);
         assert_eq!(container.label, ":app");
         assert_eq!(container.parent.as_deref(), Some("pkg:foo"));
 
         let ct1 = find(&graph, "ct://foo:app#ck1");
-        assert_eq!(ct1.kind, "configured-target");
+        assert_eq!(ct1.kind, Kind::ConfiguredTarget);
         assert_eq!(ct1.label, "k8-fastbuild");
         assert_eq!(ct1.parent.as_deref(), Some("target://foo:app"));
         assert_eq!(find(&graph, "ct://foo:app#ck2").label, "local_gnu-opt-exec");
@@ -409,7 +409,7 @@ mod tests {
         )]);
 
         let leaf = find(&graph, "target://foo:in.c");
-        assert_eq!(leaf.kind, "source");
+        assert_eq!(leaf.kind, Kind::Source);
         assert!(edges(&graph).contains(&("target://foo:in.c", "ct://foo:app#ck1")));
     }
 

@@ -7,7 +7,7 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 
 use bazel_query_proto::blaze_query::{target::Discriminator, Target};
 
-use crate::graph::{EdgeKind, Graph};
+use crate::graph::{EdgeKind, Graph, Kind};
 use crate::label::{self, PackageHierarchy};
 
 pub fn build(targets: &[Target]) -> Graph {
@@ -28,14 +28,16 @@ pub(crate) fn package_keys(targets: &[Target]) -> BTreeSet<(String, String)> {
 
 /// The label and node kind a target carries, by its populated variant, or `None`
 /// when the variant message is absent.
-pub(crate) fn label_and_kind(target: &Target) -> Option<(&str, &'static str)> {
+pub(crate) fn label_and_kind(target: &Target) -> Option<(&str, Kind)> {
     match Discriminator::try_from(target.r#type).ok()? {
-        Discriminator::Rule => Some((&target.rule.as_ref()?.name, "target")),
-        Discriminator::SourceFile => Some((&target.source_file.as_ref()?.name, "source")),
-        Discriminator::GeneratedFile => Some((&target.generated_file.as_ref()?.name, "artifact")),
-        Discriminator::PackageGroup => Some((&target.package_group.as_ref()?.name, "group")),
+        Discriminator::Rule => Some((&target.rule.as_ref()?.name, Kind::Target)),
+        Discriminator::SourceFile => Some((&target.source_file.as_ref()?.name, Kind::Source)),
+        Discriminator::GeneratedFile => {
+            Some((&target.generated_file.as_ref()?.name, Kind::Artifact))
+        }
+        Discriminator::PackageGroup => Some((&target.package_group.as_ref()?.name, Kind::Group)),
         Discriminator::EnvironmentGroup => {
-            Some((&target.environment_group.as_ref()?.name, "group"))
+            Some((&target.environment_group.as_ref()?.name, Kind::Group))
         }
     }
 }
@@ -46,7 +48,7 @@ pub(crate) fn generated_labels(targets: &[Target]) -> HashSet<String> {
     targets
         .iter()
         .filter_map(label_and_kind)
-        .filter(|(_, kind)| *kind == "artifact")
+        .filter(|(_, kind)| *kind == Kind::Artifact)
         .map(|(label, _)| label.to_string())
         .collect()
 }
@@ -160,10 +162,10 @@ mod tests {
     fn rule_nests_in_its_package_container() {
         let graph = build(&[rule("//foo:app", &[])]);
 
-        assert_eq!(find(&graph, "pkg:foo").kind, "package");
+        assert_eq!(find(&graph, "pkg:foo").kind, Kind::Package);
         assert_eq!(find(&graph, "pkg:foo").label, "//foo");
         let node = find(&graph, "target://foo:app");
-        assert_eq!(node.kind, "target");
+        assert_eq!(node.kind, Kind::Target);
         assert_eq!(node.label, ":app");
         assert_eq!(parent_of(&graph, "target://foo:app"), Some("pkg:foo"));
     }
@@ -172,8 +174,8 @@ mod tests {
     fn source_and_generated_files_get_their_kinds() {
         let graph = build(&[source("//foo:in.c"), generated("//foo:out.o")]);
 
-        assert_eq!(find(&graph, "target://foo:in.c").kind, "source");
-        assert_eq!(find(&graph, "target://foo:out.o").kind, "artifact");
+        assert_eq!(find(&graph, "target://foo:in.c").kind, Kind::Source);
+        assert_eq!(find(&graph, "target://foo:out.o").kind, Kind::Artifact);
     }
 
     #[test]

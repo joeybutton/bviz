@@ -4,7 +4,7 @@
 
 use bviz_graph_layout::graph::Graph;
 use bviz_graph_layout::layout::CARET_RESERVE;
-use bviz_graph_layout::{layout, quotient, streamed_proto, EdgeKind, LaidOut};
+use bviz_graph_layout::{layout, quotient, streamed_proto, EdgeKind, Kind, LaidOut};
 use bviz_ui_components::{load_in_background, track_drag};
 use bviz_ui_shell::Chrome;
 use clap::Parser;
@@ -56,12 +56,12 @@ const FIT_MARGIN: f32 = 2.0 / 3.0;
 
 /// Accent hue for a leaf box, keyed by its node kind. These are mid-saturation
 /// and recognizable against either a light or dark background.
-fn kind_accent(kind: &str) -> Rgba {
+fn kind_accent(kind: Kind) -> Rgba {
     match kind {
-        "action" => rgb(0xe69a3c),   // orange
-        "artifact" => rgb(0x57b85a), // green
-        "source" => rgb(0x9b7fd0),   // purple
-        _ => rgb(0x5b8fd0),          // blue
+        Kind::Action => rgb(0xe69a3c),   // orange
+        Kind::Artifact => rgb(0x57b85a), // green
+        Kind::Source => rgb(0x9b7fd0),   // purple
+        _ => rgb(0x5b8fd0),              // blue
     }
 }
 
@@ -90,10 +90,12 @@ const GROUP_TINT: f32 = 0.30;
 /// so nesting reads package > target > configured-target; an expanded group of
 /// files is tinted toward the file leaves it holds; other inner
 /// containers use the plain themed container fill.
-fn container_fill(kind: &str, palette: &Palette) -> Rgba {
+fn container_fill(kind: Kind, palette: &Palette) -> Rgba {
     match kind {
-        "package" => bviz_ui_theme::mix(palette.container_fill, palette.border, PACKAGE_DEEPEN),
-        "group" => bviz_ui_theme::mix(palette.container_fill, kind_accent("artifact"), GROUP_TINT),
+        Kind::Package => bviz_ui_theme::mix(palette.container_fill, palette.border, PACKAGE_DEEPEN),
+        Kind::Group => {
+            bviz_ui_theme::mix(palette.container_fill, kind_accent(Kind::Artifact), GROUP_TINT)
+        }
         _ => palette.container_fill,
     }
 }
@@ -408,11 +410,11 @@ impl GraphView {
                 w: b.width,
                 h: b.height,
                 compound: b.compound,
-                expandable: expandable.contains(&b.id) || b.id.starts_with("group:"),
+                expandable: expandable.contains(&b.id) || b.group,
                 fill: if b.compound {
-                    container_fill(&b.kind, &palette)
+                    container_fill(b.kind, &palette)
                 } else {
-                    bviz_ui_theme::mix(kind_accent(&b.kind), palette.background, KIND_BLEND)
+                    bviz_ui_theme::mix(kind_accent(b.kind), palette.background, KIND_BLEND)
                 },
                 label: b.label.clone(),
                 highlight: if recent == Some(b.id.as_str()) { highlight_alpha } else { 0.0 },
@@ -503,7 +505,7 @@ impl GraphView {
         // filled dot; off reads muted with a hollow dot.
         let dim_toggle = {
             let entity = entity.clone();
-            let accent = kind_accent("artifact");
+            let accent = kind_accent(Kind::Artifact);
             let (dot, label_color, border_color) = if dim_enabled {
                 ('\u{25CF}', accent, accent)
             } else {
@@ -1163,7 +1165,7 @@ fn end_drag(view: &mut GraphView, event: &MouseUpEvent, cx: &mut Context<GraphVi
     };
     // A multi-child container or a collapsed group can be opened/closed; a leaf
     // or singleton can't.
-    if !hit.id.starts_with("group:") && !view.expandable.borrow().contains(&hit.id) {
+    if !hit.group && !view.expandable.borrow().contains(&hit.id) {
         return;
     }
     let id = hit.id.clone();
@@ -1267,12 +1269,13 @@ mod tests {
         Box {
             id: id.into(),
             label: id.into(),
-            kind: "source".into(),
+            kind: Kind::Source,
             x,
             y,
             width: w,
             height: h,
             compound: false,
+            group: false,
         }
     }
 

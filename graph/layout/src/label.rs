@@ -9,7 +9,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-use crate::graph::Graph;
+use crate::graph::{Graph, Kind};
 
 /// The repository and package path a label names: `//a/b:c` -> `("", "a/b")`,
 /// `//:c` -> `("", "")`, `@r//a:c` -> `("@r", "a")`. A label with no `//` names
@@ -93,7 +93,7 @@ impl PackageHierarchy {
     fn emit_root(&mut self, root: &Trie, repo: &str, graph: &mut Graph) {
         let parent = if root.real {
             let id = box_node_id(repo, "");
-            graph.add_node(id.clone(), repo_prefix(repo), "package", None);
+            graph.add_node(id.clone(), repo_prefix(repo), Kind::Package, None);
             self.box_id.insert((repo.to_string(), String::new()), id.clone());
             Some(id)
         } else {
@@ -129,7 +129,7 @@ impl PackageHierarchy {
             Some(_) => pending.join("/"),
         };
         let id = box_node_id(repo, full_path);
-        graph.add_node(id.clone(), label, "package", parent_box.map(str::to_string));
+        graph.add_node(id.clone(), label, Kind::Package, parent_box.map(str::to_string));
         if node.real {
             self.box_id
                 .insert((repo.to_string(), full_path.to_string()), id.clone());

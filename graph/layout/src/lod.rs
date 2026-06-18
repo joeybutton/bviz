@@ -295,6 +295,7 @@ impl<'a> IndexedGraph<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::graph::Kind;
 
     fn expanded(ids: &[&str]) -> HashSet<String> {
         ids.iter().map(|s| s.to_string()).collect()
@@ -325,10 +326,10 @@ mod tests {
     fn two_towers() -> Graph {
         let mut g = Graph::new();
         for root in ["A", "B"] {
-            g.add_node(root, root, "package", None);
+            g.add_node(root, root, Kind::Package, None);
             for kid in ["x", "y"] {
                 let child = format!("{root}.{kid}");
-                g.add_node(child, "leaf", "action", Some(root.to_string()));
+                g.add_node(child, "leaf", Kind::Action, Some(root.to_string()));
             }
         }
         g
@@ -338,10 +339,10 @@ mod tests {
     /// singleton container.
     fn singleton_chain() -> Graph {
         let mut g = Graph::new();
-        g.add_node("A", "A", "package", None);
-        g.add_node("b", "b", "target", Some("A".to_string()));
-        g.add_node("c", "c", "target", Some("b".to_string()));
-        g.add_node("leaf", "leaf", "action", Some("c".to_string()));
+        g.add_node("A", "A", Kind::Package, None);
+        g.add_node("b", "b", Kind::Target, Some("A".to_string()));
+        g.add_node("c", "c", Kind::Target, Some("b".to_string()));
+        g.add_node("leaf", "leaf", Kind::Action, Some("c".to_string()));
         g
     }
 
@@ -355,7 +356,7 @@ mod tests {
     fn expandable_containers_are_only_multi_child() {
         let mut g = singleton_chain();
         // Make `b` a two-child container; its other child is a leaf.
-        g.add_node("b.extra", "leaf", "action", Some("b".to_string()));
+        g.add_node("b.extra", "leaf", Kind::Action, Some("b".to_string()));
 
         // The singleton-only ancestors (A) and leaves never qualify; `b` does.
         assert_eq!(expandable_containers(&g), expanded(&["b"]));
@@ -372,7 +373,7 @@ mod tests {
         assert_eq!(node_ids(&out), set(&["A", "B"]));
         assert_eq!(edges(&out), [("A", "B")].into_iter().collect());
         // The folded root keeps its own kind and renders as a leaf (below).
-        assert_eq!(find(&out, "A").kind, "package");
+        assert_eq!(find(&out, "A").kind, Kind::Package);
     }
 
     #[test]
@@ -390,9 +391,9 @@ mod tests {
     #[test]
     fn multi_child_container_is_a_collapse_boundary() {
         let mut g = Graph::new();
-        g.add_node("R", "R", "package", None);
-        g.add_node("x", "leaf", "action", Some("R".to_string()));
-        g.add_node("y", "leaf", "action", Some("R".to_string()));
+        g.add_node("R", "R", Kind::Package, None);
+        g.add_node("x", "leaf", Kind::Action, Some("R".to_string()));
+        g.add_node("y", "leaf", Kind::Action, Some("R".to_string()));
 
         // R is multi-child, so it is the only expand handle and a fold boundary.
         assert_eq!(expandable_containers(&g), expanded(&["R"]));
@@ -403,14 +404,14 @@ mod tests {
     #[test]
     fn multi_child_root_over_singleton_chains() {
         let mut g = Graph::new();
-        g.add_node("R", "R", "package", None);
+        g.add_node("R", "R", Kind::Package, None);
         // Each of R's two children is the head of a singleton chain to a leaf.
         for c in ["p", "q"] {
-            g.add_node(c, c, "target", Some("R".to_string()));
+            g.add_node(c, c, Kind::Target, Some("R".to_string()));
             let mid = format!("{c}.mid");
             let leaf = format!("{c}.leaf");
-            g.add_node(mid.clone(), "mid", "target", Some(c.to_string()));
-            g.add_node(leaf, "leaf", "action", Some(mid));
+            g.add_node(mid.clone(), "mid", Kind::Target, Some(c.to_string()));
+            g.add_node(leaf, "leaf", Kind::Action, Some(mid));
         }
 
         // R is the sole expand handle; its singleton descendants are transparent.
@@ -430,13 +431,13 @@ mod tests {
     #[test]
     fn cross_child_edge_under_one_expanded_root() {
         let mut g = Graph::new();
-        g.add_node("R", "R", "package", None);
+        g.add_node("R", "R", Kind::Package, None);
         for c in ["c1", "c2"] {
-            g.add_node(c, c, "target", Some("R".to_string()));
+            g.add_node(c, c, Kind::Target, Some("R".to_string()));
             // Two leaves keep each child a multi-child fold boundary.
             for leaf in ["a", "b"] {
                 let id = format!("{c}.{leaf}");
-                g.add_node(id, "leaf", "action", Some(c.to_string()));
+                g.add_node(id, "leaf", Kind::Action, Some(c.to_string()));
             }
         }
         // Internal to c1 (self-loop once folded), and cross-child c1 -> c2.
@@ -511,10 +512,10 @@ mod tests {
     fn default_expansion_sees_through_singleton_chains() {
         // A singleton-chain root whose chain ends in a multi-child container.
         let mut g = Graph::new();
-        g.add_node("A", "A", "package", None);
-        g.add_node("b", "b", "target", Some("A".to_string()));
+        g.add_node("A", "A", Kind::Package, None);
+        g.add_node("b", "b", Kind::Target, Some("A".to_string()));
         for leaf in ["x", "y"] {
-            g.add_node(leaf, "leaf", "action", Some("b".to_string()));
+            g.add_node(leaf, "leaf", Kind::Action, Some("b".to_string()));
         }
 
         // `b` is the reachable multi-child container; A is a transparent

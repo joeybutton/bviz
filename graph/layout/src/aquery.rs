@@ -25,7 +25,7 @@ use bazel_query_proto::analysis::{
     Action, ActionGraphContainer, Artifact, Configuration, DepSetOfFiles, PathFragment, Target,
 };
 
-use crate::graph::{EdgeKind, Graph};
+use crate::graph::{EdgeKind, Graph, Kind};
 use crate::label::{self, PackageHierarchy};
 
 pub fn build(containers: &[ActionGraphContainer], external_sources: bool) -> Graph {
@@ -97,7 +97,7 @@ pub(crate) fn build_with_packages(
             .unwrap_or_else(|| format!("target {}", action.target_id));
         let ct_id = target_ct_box(
             &rule_label,
-            "target",
+            Kind::Target,
             config_id,
             &mut graph,
             &hierarchy,
@@ -109,7 +109,7 @@ pub(crate) fn build_with_packages(
         graph.add_node(
             action_id.clone(),
             action.mnemonic.clone(),
-            "action",
+            Kind::Action,
             Some(ct_id.clone()),
         );
         for &out in &action.output_ids {
@@ -122,7 +122,7 @@ pub(crate) fn build_with_packages(
                 Some(out_label) => {
                     let out_ct = target_ct_box(
                         &out_label,
-                        "artifact",
+                        Kind::Artifact,
                         config_id,
                         &mut graph,
                         &hierarchy,
@@ -134,7 +134,7 @@ pub(crate) fn build_with_packages(
                     graph.add_node(
                         id.clone(),
                         basename(out, &artifact_by_id, &fragment_by_id),
-                        "artifact",
+                        Kind::Artifact,
                         Some(out_ct),
                     );
                     id
@@ -144,7 +144,7 @@ pub(crate) fn build_with_packages(
                     graph.add_node(
                         id.clone(),
                         basename(out, &artifact_by_id, &fragment_by_id),
-                        "artifact",
+                        Kind::Artifact,
                         Some(ct_id.clone()),
                     );
                     id
@@ -290,7 +290,7 @@ impl Wiring<'_> {
                 let node_id = format!("target:{label}");
                 if self.source_nodes.insert(node_id.clone()) {
                     let parent = self.hierarchy.package_box(&label).map(str::to_string);
-                    graph.add_node(node_id.clone(), label::target_label(&label), "source", parent);
+                    graph.add_node(node_id.clone(), label::target_label(&label), Kind::Source, parent);
                 }
                 node_id
             }
@@ -324,7 +324,7 @@ impl Wiring<'_> {
 #[allow(clippy::too_many_arguments)]
 fn target_ct_box(
     full_label: &str,
-    target_kind: &str,
+    target_kind: Kind,
     config_id: u32,
     graph: &mut Graph,
     hierarchy: &PackageHierarchy,
@@ -356,7 +356,7 @@ fn target_ct_box(
     graph.add_node(
         ct_node_id.clone(),
         mnemonic,
-        "configured-target",
+        Kind::ConfiguredTarget,
         Some(target_node_id),
     );
     ct_node_id
@@ -403,7 +403,7 @@ fn root_source_node(
         graph.add_node(
             node_id.clone(),
             basename(artifact_id, artifact_by_id, fragment_by_id),
-            "source",
+            Kind::Source,
             None,
         );
     }
@@ -708,7 +708,7 @@ mod tests {
 
         let graph = build(&[container], false);
 
-        assert_eq!(find(&graph, "pkg:foo").kind, "package");
+        assert_eq!(find(&graph, "pkg:foo").kind, Kind::Package);
         assert_eq!(find(&graph, "pkg:foo").label, "//foo");
         assert_eq!(find(&graph, "pkg:bar").label, "//bar");
 
@@ -800,7 +800,7 @@ mod tests {
         let merged: Vec<&Node> = quotiented
             .nodes
             .iter()
-            .filter(|n| n.kind == "source")
+            .filter(|n| n.kind == Kind::Source)
             .collect();
         let foo_group = merged
             .iter()
@@ -845,10 +845,10 @@ mod tests {
 
         // The output is promoted to its own target box, nesting its per-config
         // box and the concrete artifact, instead of sitting under the rule.
-        assert_eq!(find(&graph, "target://pkg:gen.out").kind, "artifact");
+        assert_eq!(find(&graph, "target://pkg:gen.out").kind, Kind::Artifact);
         assert_eq!(parent_of(&graph, "ct://pkg:gen.out#ck1"), Some("target://pkg:gen.out"));
         let concrete = find(&graph, "artifact://pkg:gen.out#ck1");
-        assert_eq!(concrete.kind, "artifact");
+        assert_eq!(concrete.kind, Kind::Artifact);
         assert_eq!(concrete.parent.as_deref(), Some("ct://pkg:gen.out#ck1"));
         // The producing action feeds the promoted concrete artifact.
         assert!(edges(&graph).contains(&("action0", "artifact://pkg:gen.out#ck1")));

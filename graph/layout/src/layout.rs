@@ -28,7 +28,7 @@ use org_eclipse_elk_graph::org::eclipse::elk::graph::{
     ElkConnectableShapeRef, ElkEdgeRef, ElkNodeRef,
 };
 
-use crate::graph::{EdgeKind, Graph, Node};
+use crate::graph::{EdgeKind, Graph, Kind, Node};
 
 const LEAF_HEIGHT: f64 = 30.0;
 const CHAR_WIDTH: f64 = 7.0;
@@ -46,13 +46,16 @@ pub struct Box {
     /// The graph node id this box renders, for hit-testing back to the node.
     pub id: String,
     pub label: String,
-    pub kind: String,
+    pub kind: Kind,
     pub x: f64,
     pub y: f64,
     pub width: f64,
     pub height: f64,
     /// A container holds child boxes; its label sits in the top band.
     pub compound: bool,
+    /// A synthetic group container or collapsed group leaf, the boxes the
+    /// renderer lets the user expand or collapse.
+    pub group: bool,
 }
 
 /// An edge polyline: start, bend points, end, in order.
@@ -154,12 +157,13 @@ pub fn layout(graph: &Graph) -> LaidOut {
             Box {
                 id: node.id.clone(),
                 label: node.label.clone(),
-                kind: node.kind.clone(),
+                kind: node.kind,
                 x,
                 y,
                 width,
                 height,
                 compound: children_of.contains_key(node.id.as_str()),
+                group: node.group,
             },
         ));
     }
