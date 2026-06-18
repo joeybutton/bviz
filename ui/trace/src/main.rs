@@ -117,7 +117,9 @@ const STATS_ROW_HEIGHT: f32 = 22.0;
 /// Font size of stats-table cells and headers.
 const STATS_TEXT_SIZE: f32 = 12.0;
 /// Width of each numeric stats column; the key column takes the remainder.
-const STATS_NUM_COL_WIDTH: f32 = 88.0;
+/// Wide enough for the longest formatted value (e.g. "3155.54s", "871.64ms")
+/// plus padding, since cells clip rather than grow.
+const STATS_NUM_COL_WIDTH: f32 = 104.0;
 /// Horizontal padding inside a stats cell.
 const STATS_CELL_PAD: f32 = 8.0;
 
@@ -230,8 +232,11 @@ struct StatsCache {
 /// One stats-table cell, header or body, laid out per its column spec. A fixed
 /// column reserves its width and never shrinks (a bare `w(px)` is only a flex
 /// basis and gets shrunk unevenly between header and body when a row overflows,
-/// drifting the columns out of alignment); the flexible column takes the
-/// remainder. Both clip and ellipsize so over-long text can't widen a cell.
+/// drifting the columns out of alignment) and right-aligns its value; the
+/// flexible key column takes the remainder and ellipsizes a long name. Only the
+/// key column ellipsizes: a right-aligned numeric cell with `text_ellipsis`
+/// truncates values that already fit, so its fixed width is just sized to hold
+/// the longest value instead.
 fn stats_cell(spec: &StatsColumnSpec, text: impl Into<SharedString>) -> Div {
     let cell = div()
         .flex()
@@ -241,11 +246,10 @@ fn stats_cell(spec: &StatsColumnSpec, text: impl Into<SharedString>) -> Div {
         .px(px(STATS_CELL_PAD))
         .overflow_hidden()
         .whitespace_nowrap()
-        .text_ellipsis()
         .child(text.into());
     match spec.width {
         Some(w) => cell.w(px(w)).flex_shrink_0().justify_end(),
-        None => cell.flex_1().min_w_0(),
+        None => cell.flex_1().min_w_0().text_ellipsis(),
     }
 }
 
