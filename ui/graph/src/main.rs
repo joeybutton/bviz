@@ -210,6 +210,10 @@ struct GraphView {
     /// or the on-screen toggle so the dimming can be turned off when it is more
     /// noise than help.
     dim_enabled: bool,
+    /// Whether the view draws the transitive reduction of the edges (the default)
+    /// rather than every edge; flipped by the `r` key or the on-screen toggle,
+    /// which relays out. Hover lights up a node's full neighbors either way.
+    reduced: bool,
     /// Holds the background load/relayout task so it isn't cancelled on drop.
     _load_task: Task<()>,
 }
@@ -252,7 +256,8 @@ impl GraphView {
                     MAX_VISIBLE_NODES,
                     MAX_VISIBLE_EDGES,
                 );
-                let laid_out = relayout(&graph, &expanded, &mut names);
+                // Open showing the transitive reduction (the `reduced` default).
+                let laid_out = relayout(&graph, &expanded, &mut names, true);
                 Ok::<_, String>((graph, names, expanded, laid_out))
             },
             |view, result, _| {
@@ -292,6 +297,7 @@ impl GraphView {
             relaying: false,
             hovered: None,
             dim_enabled: true,
+            reduced: true,
             _load_task: load_task,
         }
     }
@@ -312,11 +318,12 @@ impl GraphView {
             return;
         };
         let expanded = self.expanded.borrow().clone();
+        let reduced = self.reduced;
         self.relaying = true;
         self._load_task = load_in_background(
             cx,
             move || {
-                let laid_out = relayout(&graph, &expanded, &mut names);
+                let laid_out = relayout(&graph, &expanded, &mut names, reduced);
                 (laid_out, names)
             },
             |view, (laid_out, names), cx| {
@@ -379,6 +386,7 @@ impl GraphView {
         relaying: bool,
         hovered: Option<Id>,
         dim_enabled: bool,
+        reduced: bool,
         palette: Palette,
     ) -> Stateful<Div> {
         // Dimming traces the hovered node's whole subtree neighborhood: the boxes
@@ -405,15 +413,16 @@ impl GraphView {
             })
             .unwrap_or_default();
         // The subtree plus the far endpoint of each edge incident to it; an empty
-        // active set means no incident edges, so dimming stays off.
+        // active set means no incident edges, so dimming stays off. This walks the
+        // full connectivity, not the drawn connectors, so a neighbor still lights
+        // up when reduction dropped the edge that would reach it.
         let mut active: HashSet<Id> = subtree.clone();
         let mut has_edge = false;
-        for c in &g.connectors {
-            let (from_in, to_in) = (subtree.contains(&c.from), subtree.contains(&c.to));
-            if from_in || to_in {
+        for &(from, to) in &g.full_edges {
+            if subtree.contains(&from) || subtree.contains(&to) {
                 has_edge = true;
-                active.insert(c.from);
-                active.insert(c.to);
+                active.insert(from);
+                active.insert(to);
             }
         }
         if !has_edge {
@@ -454,7 +463,10 @@ impl GraphView {
             .connectors
             .iter()
             .map(|c| {
-                let active_edge = subtree.contains(&c.from) || subtree.contains(&c.to);
+                // Light an edge whose both endpoints are in the neighborhood, so a
+                // reduced path's kept edges (each between two active nodes) all
+                // stay lit, not only the ones touching the hovered subtree.
+                let active_edge = active.contains(&c.from) && active.contains(&c.to);
                 let dim = dim_active && !active_edge;
                 (c.points.clone(), c.kinds.clone(), dim)
             })
@@ -553,6 +565,42 @@ impl GraphView {
                 .on_click(move |_, _, cx| {
                     entity.update(cx, |this, cx| {
                         this.dim_enabled = !this.dim_enabled;
+                        cx.notify();
+                    });
+                })
+        };
+        // Sits below the dim pill; flipping it relays out the view with or without
+        // transitive reduction. On reads in the file-leaf accent, off muted.
+        let reduce_toggle = {
+            let entity = entity.clone();
+            let accent = kind_accent(Kind::Artifact);
+            let (dot, label_color, border_color) = if reduced {
+                ('\u{25CF}', accent, accent)
+            } else {
+                ('\u{25CB}', palette.label, palette.border)
+            };
+            div()
+                .id("reduce-toggle")
+                .absolute()
+                .left_2()
+                .top(px(40.))
+                .flex()
+                .items_center()
+                .gap_1()
+                .px_2()
+                .py_1()
+                .rounded_md()
+                .bg(palette.container_fill)
+                .border_1()
+                .border_color(border_color)
+                .text_xs()
+                .text_color(label_color)
+                .cursor_pointer()
+                .child(format!("{dot} reduce"))
+                .on_click(move |_, _, cx| {
+                    entity.update(cx, |this, cx| {
+                        this.reduced = !this.reduced;
+                        this.retoggle(cx);
                         cx.notify();
                     });
                 })
@@ -686,6 +734,7 @@ impl GraphView {
             .children(legend)
             .children(relaying_indicator)
             .child(dim_toggle)
+            .child(reduce_toggle)
     }
 
     fn status(&self) -> String {
@@ -733,6 +782,7 @@ impl Render for GraphView {
                         self.relaying,
                         self.hovered,
                         self.dim_enabled,
+                        self.reduced,
                         palette,
                     )
                     .on_mouse_down(
@@ -795,12 +845,17 @@ impl Render for GraphView {
                     }))
                     // Track the shared focus handle here too (the chrome already
                     // tracks it on an ancestor) so this deepest focused element
-                    // receives key events; `h` toggles hover-dim. Events still
-                    // bubble up to the chrome's own key bindings.
+                    // receives key events; `h` toggles hover-dim, `r` toggles
+                    // edge reduction. Events still bubble up to the chrome's own
+                    // key bindings.
                     .track_focus(&self.focus_handle)
                     .on_key_down(cx.listener(|this, e: &KeyDownEvent, _, cx| {
                         if e.keystroke.key == "h" {
                             this.dim_enabled = !this.dim_enabled;
+                            cx.notify();
+                        } else if e.keystroke.key == "r" {
+                            this.reduced = !this.reduced;
+                            this.retoggle(cx);
                             cx.notify();
                         }
                     })),
@@ -1190,9 +1245,20 @@ fn build_graph(inputs: &[Input]) -> Result<(Graph, Names), String> {
 /// Builds the display graph with the given ids expanded and lays it out: fold
 /// every unexpanded container away, merge interchangeable leaves, then lay out
 /// only the resulting visible view.
-fn relayout(graph: &Graph, expanded: &HashSet<Id>, names: &mut Names) -> LaidOut {
+fn relayout(graph: &Graph, expanded: &HashSet<Id>, names: &mut Names, reduced: bool) -> LaidOut {
     let visible = bviz_graph_layout::lod::collapse(graph, expanded);
-    layout::layout(&quotient::quotient(&visible, expanded, names))
+    let view = quotient::quotient(&visible, expanded, names);
+    // The full connectivity, kept for hover even when reduction drops edges.
+    let full_edges: Vec<(Id, Id)> =
+        view.edges.iter().map(|e| (e.from, e.to)).collect::<HashSet<_>>().into_iter().collect();
+    let drawn = if reduced {
+        bviz_graph_layout::reduce::transitive_reduction(&view)
+    } else {
+        view
+    };
+    let mut laid = layout::layout(&drawn);
+    laid.full_edges = full_edges;
+    laid
 }
 
 /// Inverse of [`to_screen`]: maps a window-space point back to layout space.

@@ -82,6 +82,10 @@ pub struct Connector {
 pub struct LaidOut {
     pub boxes: Vec<Box>,
     pub connectors: Vec<Connector>,
+    /// Every connected node pair in the view before any edges were dropped for
+    /// drawing (e.g. by transitive reduction), so hovering can still light up a
+    /// node's full set of neighbors even where no connector is drawn to them.
+    pub full_edges: Vec<(Id, Id)>,
     pub width: f64,
     pub height: f64,
 }
@@ -216,6 +220,7 @@ pub fn layout(graph: &Graph) -> LaidOut {
     LaidOut {
         boxes,
         connectors,
+        full_edges: Vec::new(),
         width,
         height,
     }
