@@ -158,6 +158,8 @@ pub(crate) fn build_with_packages(
     // Pass 2: wire each action's inputs, flattening its depsets into direct edges.
     let mut wiring = Wiring {
         seen_edge: HashSet::new(),
+        id_sym: HashMap::new(),
+        id_str: Vec::new(),
         source_nodes,
         hierarchy: &hierarchy,
         producer_node_id,
@@ -168,10 +170,10 @@ pub(crate) fn build_with_packages(
         resolved: HashMap::new(),
     };
     for (i, action) in actions.iter().enumerate() {
-        let action_id = format!("action{i}");
+        let action_id = wiring.intern(&format!("action{i}"));
         let mut visited: HashSet<u32> = HashSet::new();
         for &dep_set_id in &action.input_dep_set_ids {
-            wiring.wire(dep_set_id, &action_id, &mut visited, &mut graph);
+            wiring.wire(dep_set_id, action_id, &mut visited, &mut graph);
         }
     }
 
@@ -180,7 +182,15 @@ pub(crate) fn build_with_packages(
 
 /// Mutable state threaded through the recursive input wiring.
 struct Wiring<'a> {
-    seen_edge: HashSet<(String, String)>,
+    /// Input edges already wired, deduped by their endpoints' interned ids. An
+    /// artifact reachable through several of one action's depsets, or the same
+    /// source feeding an action twice, is wired once.
+    seen_edge: HashSet<(u32, u32)>,
+    /// Interned node ids: a node's string id maps to a small integer, so the
+    /// per-edge dedup and the resolution cache key on integers and clone the
+    /// endpoint strings only when a surviving edge is finally recorded.
+    id_sym: HashMap<String, u32>,
+    id_str: Vec<String>,
     source_nodes: HashSet<String>,
     hierarchy: &'a PackageHierarchy,
     producer_node_id: HashMap<u32, String>,
@@ -188,10 +198,10 @@ struct Wiring<'a> {
     artifact_by_id: HashMap<u32, &'a Artifact>,
     fragment_by_id: HashMap<u32, &'a PathFragment>,
     external_sources: bool,
-    /// The leaf node each input artifact wires from, or `None` when it is
-    /// dropped. Resolution scans the package set and rebuilds the artifact's
+    /// The interned leaf node each input artifact wires from, or `None` when it
+    /// is dropped. Resolution scans the package set and rebuilds the artifact's
     /// path, so it is cached: an artifact in many actions' inputs resolves once.
-    resolved: HashMap<u32, Option<String>>,
+    resolved: HashMap<u32, Option<u32>>,
 }
 
 impl Wiring<'_> {
@@ -203,7 +213,7 @@ impl Wiring<'_> {
     fn wire(
         &mut self,
         dep_set_id: u32,
-        consumer_id: &str,
+        consumer: u32,
         visited: &mut HashSet<u32>,
         graph: &mut Graph,
     ) {
@@ -216,19 +226,30 @@ impl Wiring<'_> {
         let directs: Vec<u32> = dep_set.direct_artifact_ids.clone();
         let transitives: Vec<u32> = dep_set.transitive_dep_set_ids.clone();
         for artifact_id in directs {
-            self.emit_member(artifact_id, consumer_id, graph);
+            self.emit_member(artifact_id, consumer, graph);
         }
         for transitive in transitives {
-            self.wire(transitive, consumer_id, visited, graph);
+            self.wire(transitive, consumer, visited, graph);
         }
     }
 
-    /// Wires one member artifact to `consumer_id` through the leaf node it
-    /// resolves to, creating that node on first sight and skipping a dropped
-    /// input.
-    fn emit_member(&mut self, artifact_id: u32, consumer_id: &str, graph: &mut Graph) {
+    /// Interns a node id string, returning its small-integer id and recording the
+    /// string so a recorded edge can recover its endpoints.
+    fn intern(&mut self, id: &str) -> u32 {
+        if let Some(&sym) = self.id_sym.get(id) {
+            return sym;
+        }
+        let sym = self.id_str.len() as u32;
+        self.id_str.push(id.to_string());
+        self.id_sym.insert(id.to_string(), sym);
+        sym
+    }
+
+    /// Wires one member artifact to `consumer` through the leaf node it resolves
+    /// to, creating that node on first sight and skipping a dropped input.
+    fn emit_member(&mut self, artifact_id: u32, consumer: u32, graph: &mut Graph) {
         if let Some(from) = self.resolve_member(artifact_id, graph) {
-            self.add_edge(&from, consumer_id, graph);
+            self.add_edge(from, consumer, graph);
         }
     }
 
@@ -238,26 +259,27 @@ impl Wiring<'_> {
     /// `external_sources` is off, or generated outside the queried scope, which
     /// has no producer node). The result depends only on the artifact, so it is
     /// memoized across the many consumers a shared input feeds.
-    fn resolve_member(&mut self, artifact_id: u32, graph: &mut Graph) -> Option<String> {
-        if let Some(cached) = self.resolved.get(&artifact_id) {
-            return cached.clone();
+    fn resolve_member(&mut self, artifact_id: u32, graph: &mut Graph) -> Option<u32> {
+        if let Some(&cached) = self.resolved.get(&artifact_id) {
+            return cached;
         }
         let from = self.compute_member(artifact_id, graph);
-        self.resolved.insert(artifact_id, from.clone());
+        self.resolved.insert(artifact_id, from);
         from
     }
 
-    fn compute_member(&mut self, artifact_id: u32, graph: &mut Graph) -> Option<String> {
+    fn compute_member(&mut self, artifact_id: u32, graph: &mut Graph) -> Option<u32> {
         let path = full_path(artifact_id, &self.artifact_by_id, &self.fragment_by_id);
         if !self.external_sources && is_external(&path) {
             return None;
         }
         if is_generated(&path) {
             // A generated input with no in-scope producer has no node to connect from.
-            return self.producer_node_id.get(&artifact_id).cloned();
+            let producer = self.producer_node_id.get(&artifact_id).cloned()?;
+            return Some(self.intern(&producer));
         }
         let dir = path.rsplit_once('/').map(|(d, _)| d).unwrap_or("");
-        let from = match self.hierarchy.enclosing_package(dir) {
+        let node_id = match self.hierarchy.enclosing_package(dir) {
             Some(pkg) => {
                 let rel = if pkg.is_empty() {
                     path.as_str()
@@ -280,12 +302,16 @@ impl Wiring<'_> {
                 &self.fragment_by_id,
             ),
         };
-        Some(from)
+        Some(self.intern(&node_id))
     }
 
-    fn add_edge(&mut self, from: &str, to: &str, graph: &mut Graph) {
-        if self.seen_edge.insert((from.to_string(), to.to_string())) {
-            graph.add_edge(from.to_string(), to.to_string(), EdgeKind::Aquery);
+    fn add_edge(&mut self, from: u32, to: u32, graph: &mut Graph) {
+        if self.seen_edge.insert((from, to)) {
+            graph.add_edge(
+                self.id_str[from as usize].clone(),
+                self.id_str[to as usize].clone(),
+                EdgeKind::Aquery,
+            );
         }
     }
 }
