@@ -4,9 +4,9 @@
 //! with horizontal zoom/pan and vertical scroll.
 
 use bviz_trace_layout::{
-    FlameBox, FlameKey, FlameMetrics, FlameNode, FlameView, LaneLayout, LaneMetrics, StatRow,
-    TimeView, Viewport, aggregate_stats, build_flame_graph, flame_box_at, flame_height,
-    lay_out_flame, lay_out_lanes, visible_slices,
+    FlameBox, FlameMetrics, FlameNode, FlameView, GroupMode, LaneLayout, LaneMetrics, Scope,
+    StatRow, TimeView, Viewport, WorkClass, aggregate_stats, build_flame_graph, flame_box_at,
+    flame_height, lay_out_flame, lay_out_lanes, visible_slices,
 };
 use bviz_trace_profile::{CounterLane, CounterPoint, PhaseMarker, Profile, TimeSpan};
 use bviz_ui_components::{Axis, Button, Dropdown, Scrollbar, load_in_background, track_drag};
@@ -123,8 +123,8 @@ const STATS_NUM_COL_WIDTH: f32 = 104.0;
 /// Horizontal padding inside a stats cell.
 const STATS_CELL_PAD: f32 = 8.0;
 
-/// Neutral fill for the aggregated flame graph's synthetic root, whose empty
-/// category would otherwise hash to an arbitrary hue.
+/// Lightness of a neutral meta fill (the flame graph's synthetic root and any
+/// meta-class frame), on a dark vs. a light background.
 const FLAME_ROOT_LIGHTNESS_DARK: f32 = 0.30;
 const FLAME_ROOT_LIGHTNESS_LIGHT: f32 = 0.78;
 
@@ -146,6 +146,21 @@ const CATEGORY_SATURATION: f32 = 0.5;
 /// Slice-fill lightness on a dark vs. a light background.
 const CATEGORY_LIGHTNESS_DARK: f32 = 0.62;
 const CATEGORY_LIGHTNESS_LIGHT: f32 = 0.50;
+
+/// Hue (fraction of the wheel) of each work class's flame-box fill, chosen so the
+/// six classes read as distinct against either theme background: cpu blue, remote
+/// magenta, io teal, wait amber, gc red; meta is drawn without saturation as a
+/// neutral grey, so it carries no hue.
+const HUE_CPU: f32 = 0.60;
+const HUE_REMOTE: f32 = 0.83;
+const HUE_IO: f32 = 0.47;
+const HUE_WAIT: f32 = 0.09;
+const HUE_GC: f32 = 0.99;
+/// Saturation and lightness of a work-class fill, matched to the category palette
+/// so the two coloring schemes sit at the same weight.
+const WORK_CLASS_SATURATION: f32 = 0.55;
+const WORK_CLASS_LIGHTNESS_DARK: f32 = 0.62;
+const WORK_CLASS_LIGHTNESS_LIGHT: f32 = 0.50;
 
 /// Theme-resolved colors the canvas paints with, owned so the `'static` paint
 /// closure can capture them.
@@ -264,17 +279,36 @@ fn stats_cell(spec: &StatsColumnSpec, text: impl Into<SharedString>) -> Div {
     }
 }
 
-/// The flame-graph merge keys offered in the toolbar dropdown, in menu order:
-/// each entry pairs the option label with the key the selection maps to.
-const FLAME_KEYS: [(&str, FlameKey); 3] = [
-    ("Name", FlameKey::Name),
-    ("Mnemonic", FlameKey::Mnemonic),
-    ("Category", FlameKey::Category),
+/// The group-by modes offered in the toolbar dropdown, in menu order: each entry
+/// pairs the option label with the mode the selection maps to.
+const GROUP_MODES: [(&str, GroupMode); 5] = [
+    ("Mnemonic", GroupMode::Mnemonic),
+    ("Phase → Mnemonic", GroupMode::PhaseMnemonic),
+    ("Work class", GroupMode::WorkClass),
+    ("Class → Mnemonic", GroupMode::ClassMnemonic),
+    ("Target", GroupMode::Target),
 ];
 
-/// How many threads the scope dropdown offers below "All threads". The menu does
-/// not scroll, so the list is capped to the busiest threads by slice duration.
-const MAX_SCOPE_THREADS: usize = 12;
+/// The view scopes and their menu labels, in menu order. The first entry's scope
+/// is the synthetic critical path, offered only when the loaded profile has one;
+/// when absent it is dropped from the menu (see [`TraceView::view_options`]) so
+/// the visible index maps through the surviving entries.
+const VIEW_SCOPES: [(&str, Scope); 4] = [
+    ("Critical path", Scope::CriticalPath),
+    ("Execution", Scope::Execution),
+    ("Analysis", Scope::Analysis),
+    ("All work", Scope::All),
+];
+
+/// The group-by mode a freshly chosen view defaults to, picked to surface the
+/// question that view answers: a flat ranking for the critical path and analysis,
+/// a phase breakdown for execution and all-work.
+fn default_mode_for(scope: Scope) -> GroupMode {
+    match scope {
+        Scope::CriticalPath | Scope::Analysis => GroupMode::Mnemonic,
+        Scope::Execution | Scope::All => GroupMode::PhaseMnemonic,
+    }
+}
 
 /// What a left-button drag is currently moving.
 #[derive(Clone, Copy)]
@@ -544,22 +578,21 @@ struct TraceView {
     gutter_width: f32,
     /// Which view the timeline paints.
     view_mode: ViewMode,
-    /// Which slice attribute the flame graph merges frames by.
-    flame_key: FlameKey,
-    /// Toolbar control choosing `flame_key`; its observer rebuilds the cache.
-    key_dropdown: Entity<Dropdown>,
-    _key_observer: Subscription,
-    /// Which thread the flame graph is scoped to, or `None` for all threads. Only
-    /// the busiest threads are offered; arbitrary-thread and time-range scoping are
-    /// driven by range selection, which this view does not have.
-    flame_scope: Option<usize>,
-    /// Toolbar control choosing `flame_scope`; rebuilt on profile load since its
-    /// options depend on the loaded threads.
-    scope_dropdown: Entity<Dropdown>,
-    _scope_observer: Subscription,
-    /// The thread index each `scope_dropdown` option past "All threads" maps to,
-    /// in menu order, so the observer can recover the scope from the selection.
-    scope_threads: Vec<usize>,
+    /// How the flame graph splits each slice into a path of frames.
+    mode: GroupMode,
+    /// Toolbar control choosing `mode`; its observer rebuilds the cache.
+    mode_dropdown: Entity<Dropdown>,
+    _mode_observer: Subscription,
+    /// Which lanes the flame graph and stats aggregate over.
+    scope: Scope,
+    /// Toolbar control choosing `scope`; rebuilt on profile load since whether the
+    /// critical-path option is offered depends on the loaded profile.
+    view_dropdown: Entity<Dropdown>,
+    _view_observer: Subscription,
+    /// The scope each `view_dropdown` option maps to, in menu order, so the
+    /// observer can recover the scope from the selection (the critical-path entry
+    /// is absent when the profile has no critical path).
+    view_scopes: Vec<Scope>,
     /// The thread/counter lane layout for the loaded profile, built on first use
     /// and reused across paints and mouse handlers. It depends only on the
     /// immutable profile, so it is cleared only when a new profile loads.
@@ -599,38 +632,47 @@ impl TraceView {
     fn new(path: PathBuf, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let focus_handle = cx.focus_handle();
         focus_handle.focus(window, cx);
-        let key_dropdown = cx.new(|cx| {
-            Dropdown::new("flame-key", FLAME_KEYS.map(|(label, _)| label), 0, cx)
+        let mode_dropdown = cx.new(|cx| {
+            Dropdown::new("group-by", GROUP_MODES.map(|(label, _)| label), 0, cx)
         });
-        let key_observer = cx.observe(&key_dropdown, |view, dropdown, cx| {
-            view.flame_key = FLAME_KEYS[dropdown.read(cx).selected()].1;
+        let mode_observer = cx.observe(&mode_dropdown, |view, dropdown, cx| {
+            view.mode = GROUP_MODES[dropdown.read(cx).selected()].1;
             view.invalidate_aggregates();
             cx.notify();
         });
-        let (scope_dropdown, scope_observer, scope_threads) = Self::scope_dropdown(None, cx);
+        let (view_dropdown, view_observer, view_scopes) = Self::view_dropdown(None, cx);
         let load_task = load_in_background(
             cx,
             move || Profile::from_path(&path).map_err(|e| e.to_string()),
             |view, result, cx| {
                 view.invalidate_aggregates();
                 // The lane layout depends only on the profile, so it survives a
-                // key/scope change but must be dropped when a new profile loads.
+                // mode/scope change but must be dropped when a new profile loads.
                 view.lanes.borrow_mut().take();
                 view.flame_view.set(FlameView::FIT);
                 view.source = match result {
                     Ok(profile) => Source::Loaded(Rc::new(profile)),
                     Err(err) => Source::Message(err),
                 };
-                // The scope options depend on the loaded threads, so rebuild the
-                // dropdown (the menu can't grow options after creation), and reset
-                // the scope to all threads.
-                view.flame_scope = None;
+                // The default scope depends on the loaded profile: the critical
+                // path when it has one, else all work. The view options likewise
+                // omit the critical-path entry when absent, so rebuild the dropdown
+                // (its menu can't grow options after creation).
                 if let Source::Loaded(profile) = &view.source {
-                    let (dropdown, observer, threads) =
-                        Self::scope_dropdown(Some(profile), cx);
-                    view.scope_dropdown = dropdown;
-                    view._scope_observer = observer;
-                    view.scope_threads = threads;
+                    view.scope = if profile.has_critical_path() {
+                        Scope::CriticalPath
+                    } else {
+                        Scope::All
+                    };
+                    view.mode = default_mode_for(view.scope);
+                    let (dropdown, observer, scopes) = Self::view_dropdown(Some(profile), cx);
+                    view.view_dropdown = dropdown;
+                    view._view_observer = observer;
+                    view.view_scopes = scopes;
+                    let mode_idx = GROUP_MODES.iter().position(|(_, m)| *m == view.mode);
+                    if let Some(idx) = mode_idx {
+                        view.mode_dropdown.update(cx, |d, cx| d.set_selected(idx, cx));
+                    }
                 }
             },
         );
@@ -652,13 +694,13 @@ impl TraceView {
             graph_height: DEFAULT_GRAPH_HEIGHT,
             gutter_width: DEFAULT_GUTTER_WIDTH,
             view_mode: ViewMode::FlameChart,
-            flame_key: FlameKey::Name,
-            key_dropdown,
-            _key_observer: key_observer,
-            flame_scope: None,
-            scope_dropdown,
-            _scope_observer: scope_observer,
-            scope_threads,
+            mode: GroupMode::Mnemonic,
+            mode_dropdown,
+            _mode_observer: mode_observer,
+            scope: Scope::All,
+            view_dropdown,
+            _view_observer: view_observer,
+            view_scopes,
             lanes: Rc::new(RefCell::new(None)),
             flame: Rc::new(RefCell::new(None)),
             flame_boxes: Rc::new(RefCell::new(None)),
@@ -675,44 +717,40 @@ impl TraceView {
         }
     }
 
-    /// Builds the thread-scope dropdown and its observer for a loaded profile (or
-    /// just "All threads" when none is loaded yet). The options past "All threads"
-    /// are the `MAX_SCOPE_THREADS` busiest threads by summed slice duration; the
-    /// returned vec maps each such option back to its thread index in menu order.
-    fn scope_dropdown(
+    /// The view-scope options for a profile: every [`VIEW_SCOPES`] entry, with the
+    /// critical-path entry dropped unless the profile reports a critical path (it
+    /// is the only scope that would aggregate an empty set otherwise). Returns the
+    /// labels and the scope each visible option maps to, in menu order.
+    fn view_options(profile: Option<&Profile>) -> (Vec<&'static str>, Vec<Scope>) {
+        let has_crit = profile.is_some_and(Profile::has_critical_path);
+        VIEW_SCOPES
+            .iter()
+            .filter(|(_, scope)| has_crit || *scope != Scope::CriticalPath)
+            .map(|(label, scope)| (*label, *scope))
+            .unzip()
+    }
+
+    /// Builds the view-scope dropdown and its observer for a loaded profile (or
+    /// the no-critical-path option set when none is loaded yet). Choosing a view
+    /// switches the scope and resets the group-by to that view's sensible default,
+    /// syncing the group-by dropdown's selection to match.
+    fn view_dropdown(
         profile: Option<&Profile>,
         cx: &mut Context<Self>,
-    ) -> (Entity<Dropdown>, Subscription, Vec<usize>) {
-        let mut threads: Vec<usize> = Vec::new();
-        if let Some(profile) = profile {
-            let mut by_busyness: Vec<(usize, i64)> = profile
-                .threads
-                .iter()
-                .enumerate()
-                .map(|(i, t)| (i, t.slices.iter().map(|s| s.dur_us).sum()))
-                .collect();
-            by_busyness.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
-            threads = by_busyness
-                .into_iter()
-                .take(MAX_SCOPE_THREADS)
-                .map(|(i, _)| i)
-                .collect();
-        }
-        let labels: Vec<String> = std::iter::once("All threads".to_owned())
-            .chain(threads.iter().map(|&i| {
-                profile
-                    .map(|p| p.threads[i].name.clone())
-                    .unwrap_or_default()
-            }))
-            .collect();
-        let dropdown = cx.new(|cx| Dropdown::new("flame-scope", labels, 0, cx));
+    ) -> (Entity<Dropdown>, Subscription, Vec<Scope>) {
+        let (labels, scopes) = Self::view_options(profile);
+        let dropdown = cx.new(|cx| Dropdown::new("view", labels, 0, cx));
         let observer = cx.observe(&dropdown, |view, dropdown, cx| {
-            let idx = dropdown.read(cx).selected();
-            view.flame_scope = idx.checked_sub(1).map(|k| view.scope_threads[k]);
+            let scope = view.view_scopes[dropdown.read(cx).selected()];
+            view.scope = scope;
+            view.mode = default_mode_for(scope);
+            if let Some(idx) = GROUP_MODES.iter().position(|(_, m)| *m == view.mode) {
+                view.mode_dropdown.update(cx, |d, cx| d.set_selected(idx, cx));
+            }
             view.invalidate_aggregates();
             cx.notify();
         });
-        (dropdown, observer, threads)
+        (dropdown, observer, scopes)
     }
 
     /// The shared mouse/scroll/hover wiring both bodies attach to their root: a
@@ -1196,11 +1234,8 @@ impl TraceView {
             return None;
         };
         if self.flame.borrow().is_none() {
-            *self.flame.borrow_mut() = Some(Rc::new(build_flame_graph(
-                profile,
-                self.flame_key,
-                self.flame_scope,
-            )));
+            *self.flame.borrow_mut() =
+                Some(Rc::new(build_flame_graph(profile, self.mode, self.scope)));
         }
         self.flame.borrow().clone()
     }
@@ -1238,7 +1273,7 @@ impl TraceView {
             return None;
         };
         if self.stats.borrow().is_none() {
-            let rows = aggregate_stats(profile, self.flame_key, self.flame_scope);
+            let rows = aggregate_stats(profile, self.mode, self.scope);
             *self.stats.borrow_mut() = Some(Rc::new(rows));
         }
         self.stats.borrow().clone()
@@ -1247,9 +1282,9 @@ impl TraceView {
     /// The group-by label of the key column, from the same table that labels the
     /// toolbar dropdown.
     fn key_column_label(&self) -> &'static str {
-        FLAME_KEYS
+        GROUP_MODES
             .iter()
-            .find(|(_, key)| *key == self.flame_key)
+            .find(|(_, mode)| *mode == self.mode)
             .map_or("", |(label, _)| *label)
     }
 
@@ -1542,19 +1577,19 @@ impl Render for TraceView {
                         cx,
                     ))
                     .children((self.view_mode == ViewMode::FlameGraph).then(|| {
+                        let caption = |text: &'static str| {
+                            div().text_sm().text_color(colors.disabled).child(text)
+                        };
                         div()
                             .flex()
                             .flex_row()
                             .items_center()
-                            .gap_1()
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .text_color(colors.disabled)
-                                    .child("Group by"),
-                            )
-                            .child(self.key_dropdown.clone())
-                            .child(self.scope_dropdown.clone())
+                            .flex_1()
+                            .gap_2()
+                            .child(caption("View"))
+                            .child(self.view_dropdown.clone())
+                            .child(caption("Group by"))
+                            .child(self.mode_dropdown.clone())
                     }));
                 // The flame chart and the flame graph are two independent views of
                 // the same trace, selected here; each builds its own canvas, paint,
@@ -2519,19 +2554,40 @@ fn paint_slice(
     paint_labeled_box(rect, fill, &slice.name, palette, window, cx);
 }
 
-/// Fill for a flame-graph box: the chart's per-category color, except the
-/// synthetic root (empty category) gets a neutral header tone rather than an
-/// arbitrary hashed hue.
-fn flame_box_color(category: &str, palette: &Palette) -> Hsla {
-    if category.is_empty() {
-        let lightness = if luminance(palette.background) < 0.5 {
+/// Fill for a flame-graph box, keyed by its work class so a frame reads as cpu,
+/// remote, io, wait, gc, or meta at a glance. The synthetic root is `Meta`, so it
+/// lands on the same neutral grey as other meta frames.
+fn flame_box_color(work_class: WorkClass, palette: &Palette) -> Hsla {
+    work_class_color(work_class, palette)
+}
+
+/// A legible per-work-class fill: a fixed hue per class (meta is hueless grey) at
+/// a theme-fitting lightness, so the same class is the same color everywhere and
+/// the six are mutually distinct on either background.
+fn work_class_color(work_class: WorkClass, palette: &Palette) -> Hsla {
+    let dark = luminance(palette.background) < 0.5;
+    if work_class == WorkClass::Meta {
+        let lightness = if dark {
             FLAME_ROOT_LIGHTNESS_DARK
         } else {
             FLAME_ROOT_LIGHTNESS_LIGHT
         };
         return hsla(0.0, 0.0, lightness, 1.0);
     }
-    category_color(category, palette)
+    let hue = match work_class {
+        WorkClass::Cpu => HUE_CPU,
+        WorkClass::Remote => HUE_REMOTE,
+        WorkClass::Io => HUE_IO,
+        WorkClass::Wait => HUE_WAIT,
+        WorkClass::Gc => HUE_GC,
+        WorkClass::Meta => unreachable!("meta handled above"),
+    };
+    let lightness = if dark {
+        WORK_CLASS_LIGHTNESS_DARK
+    } else {
+        WORK_CLASS_LIGHTNESS_LIGHT
+    };
+    hsla(hue, WORK_CLASS_SATURATION, lightness, 1.0)
 }
 
 /// Paints the aggregated flame graph filling the body: each box a category-colored
@@ -2578,7 +2634,7 @@ fn paint_flame_graph(
                 continue;
             }
             let rect = Bounds::new(point(px(x), px(y)), size(px(b.w), px(b.h)));
-            let fill = flame_box_color(&b.category, palette);
+            let fill = flame_box_color(b.work_class, palette);
             paint_labeled_box(rect, fill, &b.name, palette, window, cx);
         }
     });
@@ -2646,8 +2702,8 @@ fn flame_boxes(
     boxes
 }
 
-/// Paints a tooltip near `at` with the flame node's name, its category, formatted
-/// total duration, occurrence count, and share of the whole trace.
+/// Paints a tooltip near `at` with the flame node's name, formatted total
+/// duration, occurrence count, and share of the view's aggregated total.
 fn paint_flame_tooltip(
     boxed: &FlameBox,
     root_total_us: i64,
@@ -2662,22 +2718,12 @@ fn paint_flame_tooltip(
     } else {
         0.0
     };
-    let detail = if boxed.category.is_empty() {
-        format!(
-            "{} · {} · {:.1}%",
-            format_duration(boxed.total_us),
-            boxed.count,
-            pct,
-        )
-    } else {
-        format!(
-            "{} · {} · {} · {:.1}%",
-            boxed.category,
-            format_duration(boxed.total_us),
-            boxed.count,
-            pct,
-        )
-    };
+    let detail = format!(
+        "{} · {} · {:.1}%",
+        format_duration(boxed.total_us),
+        boxed.count,
+        pct,
+    );
     let lines = [boxed.name.clone(), detail];
 
     let font = bviz_ui_assets::text_metrics(window).font;
