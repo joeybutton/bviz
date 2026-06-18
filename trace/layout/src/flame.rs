@@ -75,9 +75,15 @@ impl FlameView {
         (self.left * width_px as f64 * self.zoom) as f32
     }
 
+    /// Laid-out width in pixels, floored at one so a collapsed column can't make
+    /// the fraction conversions divide by zero.
+    fn span_px(&self, width_px: f32) -> f64 {
+        (self.zoom * width_px as f64).max(1.0)
+    }
+
     /// Graph fraction at a content-relative pixel.
     pub fn frac_of(&self, x_px: f32, width_px: f32) -> f64 {
-        self.left + x_px as f64 / (self.zoom * width_px as f64)
+        self.left + x_px as f64 / self.span_px(width_px)
     }
 
     /// Zoom by `factor` (>1 zooms in) holding the graph fraction under the
@@ -85,19 +91,19 @@ impl FlameView {
     pub fn zoom_at(&mut self, x_px: f32, width_px: f32, factor: f64) {
         let anchor = self.frac_of(x_px, width_px);
         self.zoom = (self.zoom * factor).max(1.0);
-        self.left = anchor - x_px as f64 / (self.zoom * width_px as f64);
+        self.left = anchor - x_px as f64 / self.span_px(width_px);
         self.clamp();
     }
 
     /// Pan by a pixel delta; a positive `dx_px` moves content rightward.
     pub fn pan_px(&mut self, dx_px: f32, width_px: f32) {
-        self.left -= dx_px as f64 / (self.zoom * width_px as f64);
+        self.left -= dx_px as f64 / self.span_px(width_px);
         self.clamp();
     }
 
     /// Set the scroll position from a pixel offset into the laid-out width.
     pub fn set_scroll_px(&mut self, offset_px: f32, width_px: f32) {
-        self.left = offset_px as f64 / (self.zoom * width_px as f64).max(1.0);
+        self.left = offset_px as f64 / self.span_px(width_px);
         self.clamp();
     }
 
