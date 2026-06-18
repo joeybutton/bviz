@@ -1779,12 +1779,15 @@ impl TraceView {
         }
         let depth = ((content_y - rows_top) / METRICS.row_height) as u32;
         let t = self.view.get().t_of(x - regions.content_left);
-        profile.threads[lane.track]
-            .slices
+        // Slices are sorted by start, so only those starting at or before t can
+        // contain it; binary-search that prefix rather than scanning the whole
+        // thread. Among it the first slice at the cursor's depth whose
+        // [start, start + dur] covers t is the hit (at most one per depth).
+        let slices = &profile.threads[lane.track].slices;
+        let upper = slices.partition_point(|s| s.start_us as f64 <= t);
+        slices[..upper]
             .iter()
-            .position(|s| {
-                s.depth == depth && t >= s.start_us as f64 && t <= (s.start_us + s.dur_us) as f64
-            })
+            .position(|s| s.depth == depth && t <= (s.start_us + s.dur_us) as f64)
             .map(|slice| (lane.track, slice))
     }
 
