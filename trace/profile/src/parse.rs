@@ -9,8 +9,8 @@ use serde::Deserialize;
 use serde_json::{Map, Value};
 
 use crate::model::{
-    CounterLane, CounterPoint, CounterSeries, Metadata, PhaseMarker, Profile, Slice, SliceArgs,
-    ThreadTrack, TimeSpan,
+    lane_class, work_class, CounterLane, CounterPoint, CounterSeries, Metadata, PhaseMarker,
+    Profile, Slice, SliceArgs, ThreadTrack, TimeSpan,
 };
 
 const GZIP_MAGIC: [u8; 2] = [0x1f, 0x8b];
@@ -278,13 +278,16 @@ fn build(other_data: Option<Map<String, Value>>, events: Vec<RawEvent>) -> Profi
                     });
                 } else {
                     let tid = ev.tid.unwrap_or(0);
+                    let category = ev.cat.clone().unwrap_or_default();
+                    let work_class = work_class(&category);
                     slices.entry(tid).or_default().push(Slice {
                         name: ev.name.clone().unwrap_or_default(),
-                        category: ev.cat.clone().unwrap_or_default(),
+                        category,
                         start_us: ts,
                         dur_us: round_us(ev.dur),
                         depth: 0,
                         args: build_slice_args(ev.args.as_ref()),
+                        work_class,
                     });
                 }
             }
@@ -304,12 +307,14 @@ fn build(other_data: Option<Map<String, Value>>, events: Vec<RawEvent>) -> Profi
                 Some((None, s)) => (format!("thread {tid}"), *s),
                 None => (format!("thread {tid}"), MAX_SORT_INDEX),
             };
+            let lane_class = lane_class(tid, &name);
             ThreadTrack {
                 tid,
                 name,
                 sort_index,
                 slices: tslices,
                 max_depth,
+                lane_class,
             }
         })
         .collect();

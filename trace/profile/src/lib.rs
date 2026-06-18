@@ -2,7 +2,7 @@ mod model;
 mod parse;
 
 pub use model::{
-    CounterLane, CounterPoint, CounterSeries, Metadata, PhaseMarker, Profile, Slice, SliceArgs,
-    ThreadTrack, TimeSpan,
+    lane_class, phase_intervals, work_class, CounterLane, CounterPoint, CounterSeries, LaneClass,
+    Metadata, PhaseMarker, Profile, Slice, SliceArgs, ThreadTrack, TimeSpan, WorkClass,
 };
 pub use parse::LoadError;
