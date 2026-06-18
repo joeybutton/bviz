@@ -671,6 +671,12 @@ impl TraceView {
                     let (dropdown, observer, scopes) = Self::view_dropdown(Some(profile), cx);
                     view.view_dropdown = dropdown;
                     view._view_observer = observer;
+                    // Select the default scope in the freshly built dropdown, so its
+                    // label matches the active scope (the entries shift when the
+                    // critical-path option is absent).
+                    if let Some(idx) = scopes.iter().position(|s| *s == view.scope) {
+                        view.view_dropdown.update(cx, |d, cx| d.set_selected(idx, cx));
+                    }
                     view.view_scopes = scopes;
                     let mode_idx = GROUP_MODES.iter().position(|(_, m)| *m == view.mode);
                     if let Some(idx) = mode_idx {
@@ -2631,7 +2637,7 @@ fn work_class_legend(palette: Palette) -> impl IntoElement {
         }))
 }
 
-/// Paints the aggregated flame graph filling the body: each box a category-colored
+/// Paints the aggregated flame graph filling the body: each box a work-class-colored
 /// quad with a truncated label, clipped to the content rect, scrolled vertically
 /// by `scroll_y` and zoomed/panned horizontally by `flame_view`. A vertical
 /// scroll bar shows when the tree's rows overflow the height and a horizontal one
