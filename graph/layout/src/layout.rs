@@ -31,6 +31,13 @@ use org_eclipse_elk_graph::org::eclipse::elk::graph::{
 use crate::graph::{EdgeKind, Graph, Kind, Node};
 use crate::intern::Id;
 
+/// Above this many routed node pairs the view is a dense tangle whose crossings
+/// ELK's default thoroughness spends most of the layout time refining for little
+/// readable gain, so the layout drops to a single crossing-minimization sweep.
+/// Every capped startup view and ordinary expansion stays below this, keeping the
+/// default thoroughness, so their layouts are unaffected.
+const DENSE_ROUTED_EDGES: usize = 1000;
+
 const LEAF_HEIGHT: f64 = 30.0;
 const CHAR_WIDTH: f64 = 7.0;
 const LABEL_PADDING: f64 = 22.0;
@@ -122,6 +129,12 @@ pub fn layout(graph: &Graph) -> LaidOut {
         if !kinds.contains(&edge.kind) {
             kinds.push(edge.kind);
         }
+    }
+    // A dense tangle's crossing minimization is the bulk of its layout time and a
+    // single sweep reads about as well, so spend the default effort only on views
+    // sparse enough for it to matter and finish quickly.
+    if kinds_of.len() > DENSE_ROUTED_EDGES {
+        set_property(&root, LayeredOptions::THOROUGHNESS, 1);
     }
     // create_simple_edge places each edge in the common container of its
     // endpoints, which is where ELK then routes and reports it.
