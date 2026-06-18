@@ -1,15 +1,16 @@
-//! Transitive reduction of a visible graph's edges: drops a connection whose
-//! endpoints a longer path already links, leaving the minimal edge set with the
-//! same reachability. On a dense view this both declutters the drawing and cuts
-//! the edge count that dominates layout time.
+//! Transitive reduction of a graph's edges: drops a connection whose endpoints a
+//! longer path already links, leaving the minimal edge set with the same
+//! reachability.
 //!
 //! Edges are reduced on their `(from, to)` pair, ignoring provenance, so a pair
-//! is kept or dropped as a whole and a kept pair keeps all its edges. A
-//! connection is removed only when its endpoints stay connected through the
-//! *other* kept connections, checked one removal at a time, so reachability is
-//! preserved even when collapsing has left the view with a cycle (where a
-//! reduction is not unique); on the acyclic common case this is the unique
-//! transitive reduction.
+//! is kept or dropped as a whole and a kept pair keeps all its edges.
+//!
+//! A dependency graph is acyclic, so the fast path reduces it in one pass over an
+//! integer-indexed reachability bitset (the only feasible way on the whole base
+//! graph). A graph left cyclic by node merging falls back to removing a
+//! connection only when its endpoints stay linked through the others — checked
+//! one removal at a time, so reachability survives a cycle (where the reduction
+//! is not unique).
 
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 
@@ -19,14 +20,100 @@ use crate::intern::Id;
 /// Returns `graph` with the same nodes but only the edges of a transitive
 /// reduction.
 pub fn transitive_reduction(graph: &Graph) -> Graph {
+    match dag_reduction(graph) {
+        Some(reduced) => reduced,
+        None => iterative_reduction(graph),
+    }
+}
+
+/// Transitive reduction of a DAG: the redundant pairs are those whose target is
+/// reachable from another of the source's successors. `None` if a cycle is found
+/// (no topological order), so the caller can fall back. Reachability is held in
+/// per-node bitsets over a compact node index, built in reverse topological order
+/// so a node's successors are already resolved.
+fn dag_reduction(graph: &Graph) -> Option<Graph> {
+    let mut index: HashMap<Id, u32> = HashMap::with_capacity(graph.nodes.len());
+    for node in &graph.nodes {
+        let next = index.len() as u32;
+        index.entry(node.id).or_insert(next);
+    }
+    let n = index.len();
+    let pairs: HashSet<(u32, u32)> = graph
+        .edges
+        .iter()
+        .filter(|e| e.from != e.to)
+        .filter_map(|e| Some((*index.get(&e.from)?, *index.get(&e.to)?)))
+        .collect();
+    let mut succ: Vec<Vec<u32>> = vec![Vec::new(); n];
+    let mut indeg: Vec<u32> = vec![0; n];
+    for &(u, v) in &pairs {
+        succ[u as usize].push(v);
+        indeg[v as usize] += 1;
+    }
+
+    // Kahn's algorithm; a leftover node means a cycle.
+    let mut order: Vec<u32> = Vec::with_capacity(n);
+    let mut ready: Vec<u32> = (0..n as u32).filter(|&i| indeg[i as usize] == 0).collect();
+    while let Some(u) = ready.pop() {
+        order.push(u);
+        for &w in &succ[u as usize] {
+            indeg[w as usize] -= 1;
+            if indeg[w as usize] == 0 {
+                ready.push(w);
+            }
+        }
+    }
+    if order.len() != n {
+        return None;
+    }
+
+    let words = n.div_ceil(64);
+    let mut reach = vec![0u64; n * words]; // reach[u]: every node reachable from u
+    let mut redundant: HashSet<(u32, u32)> = HashSet::new();
+    for &u in order.iter().rev() {
+        let ui = u as usize;
+        // The union of the successors' reach: a target found here is reachable by
+        // a path of length >= 2, so the direct edge to it is redundant.
+        let mut via = vec![0u64; words];
+        for &w in &succ[ui] {
+            let wb = w as usize * words;
+            for k in 0..words {
+                via[k] |= reach[wb + k];
+            }
+        }
+        for &v in &succ[ui] {
+            if via[v as usize / 64] >> (v % 64) & 1 == 1 {
+                redundant.insert((u, v));
+            }
+        }
+        let ub = ui * words;
+        reach[ub..ub + words].copy_from_slice(&via);
+        for &w in &succ[ui] {
+            reach[ub + w as usize / 64] |= 1u64 << (w % 64);
+        }
+    }
+
+    let mut out = graph.clone();
+    out.edges.retain(|e| {
+        e.from == e.to
+            || match (index.get(&e.from), index.get(&e.to)) {
+                (Some(&u), Some(&v)) => !redundant.contains(&(u, v)),
+                _ => true,
+            }
+    });
+    Some(out)
+}
+
+/// Cycle-tolerant reduction: drop a pair only while its endpoints stay linked
+/// through the pairs kept so far, visiting pairs in a fixed order for a
+/// deterministic result.
+fn iterative_reduction(graph: &Graph) -> Graph {
     let mut pairs: BTreeSet<(Id, Id)> =
         graph.edges.iter().filter(|e| e.from != e.to).map(|e| (e.from, e.to)).collect();
     let mut succ: HashMap<Id, HashSet<Id>> = HashMap::new();
     for &(u, v) in &pairs {
         succ.entry(u).or_default().insert(v);
     }
-
-    // Visit pairs in a fixed order so the kept set is deterministic.
     for (u, v) in pairs.iter().copied().collect::<Vec<_>>() {
         succ.get_mut(&u).unwrap().remove(&v);
         if reachable(&succ, u, v) {
@@ -35,9 +122,8 @@ pub fn transitive_reduction(graph: &Graph) -> Graph {
             succ.get_mut(&u).unwrap().insert(v);
         }
     }
-
     let mut out = graph.clone();
-    out.edges.retain(|e| pairs.contains(&(e.from, e.to)));
+    out.edges.retain(|e| e.from == e.to || pairs.contains(&(e.from, e.to)));
     out
 }
 
