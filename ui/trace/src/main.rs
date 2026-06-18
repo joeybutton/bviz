@@ -744,8 +744,7 @@ impl TraceView {
 
     /// Builds the view-scope dropdown and its observer for a loaded profile (or
     /// the no-critical-path option set when none is loaded yet). Choosing a view
-    /// switches the scope and resets the group-by to that view's sensible default,
-    /// syncing the group-by dropdown's selection to match.
+    /// switches the scope only; the group-by is set independently.
     fn view_dropdown(
         profile: Option<&Profile>,
         cx: &mut Context<Self>,
@@ -753,12 +752,7 @@ impl TraceView {
         let (labels, scopes) = Self::view_options(profile);
         let dropdown = cx.new(|cx| Dropdown::new("view", labels, 0, cx));
         let observer = cx.subscribe(&dropdown, |view, dropdown, _: &DropdownEvent, cx| {
-            let scope = view.view_scopes[dropdown.read(cx).selected()];
-            view.scope = scope;
-            view.mode = default_mode_for(scope);
-            if let Some(idx) = GROUP_MODES.iter().position(|(_, m)| *m == view.mode) {
-                view.mode_dropdown.update(cx, |d, cx| d.set_selected(idx, cx));
-            }
+            view.scope = view.view_scopes[dropdown.read(cx).selected()];
             view.invalidate_aggregates();
             cx.notify();
         });
