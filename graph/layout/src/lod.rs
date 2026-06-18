@@ -162,11 +162,14 @@ pub fn default_expansion(graph: &Graph, max_nodes: usize, max_edges: usize) -> H
 
     // Both counts rise monotonically with the prefix length (more expansion only
     // reveals nodes and de-aggregates edges), so binary-search the largest prefix
-    // whose collapsed view fits both caps.
+    // whose collapsed view fits both caps. The binary search probes many
+    // candidate prefixes, so it counts each view over an integer-indexed copy of
+    // the graph rather than materializing the collapsed graph every time.
+    let counter = ViewCounter::new(graph);
+    let order_idx: Vec<u32> = order.iter().map(|id| counter.idx[id]).collect();
     let fits = |k: usize| {
-        let prefix: HashSet<String> = order[..k].iter().map(|s| s.to_string()).collect();
-        let view = collapse(graph, &prefix);
-        view.nodes.len() <= max_nodes && view.edges.len() <= max_edges
+        let (nodes, edges) = counter.counts(&order_idx[..k]);
+        nodes <= max_nodes && edges <= max_edges
     };
     let (mut lo, mut hi) = (0usize, order.len());
     while lo < hi {
@@ -178,6 +181,98 @@ pub fn default_expansion(graph: &Graph, max_nodes: usize, max_edges: usize) -> H
         }
     }
     order[..lo].iter().map(|s| s.to_string()).collect()
+}
+
+/// An integer-indexed copy of a graph's containment forest and edges, for
+/// counting a collapsed view's nodes and edges without building the view. Every
+/// node id is interned to an index; edge endpoints that are not nodes intern to
+/// their own indices past `node_count`, so they fold to themselves exactly as
+/// [`collapse`] leaves them.
+struct ViewCounter<'a> {
+    idx: HashMap<&'a str, u32>,
+    /// Containment parent of each index, or `None` for a root.
+    parent: Vec<Option<u32>>,
+    /// Whether each index is a singleton container, which always auto-expands.
+    singleton: Vec<bool>,
+    edges: Vec<(u32, u32, EdgeKind)>,
+    /// Indices `0..node_count` are the graph's own nodes; higher indices are
+    /// non-node edge endpoints and never count as collapsed-view nodes.
+    node_count: usize,
+}
+
+impl<'a> ViewCounter<'a> {
+    fn new(graph: &'a Graph) -> Self {
+        let child_counts = child_counts(graph);
+        let mut idx: HashMap<&str, u32> = HashMap::with_capacity(graph.nodes.len());
+        for node in &graph.nodes {
+            idx.insert(node.id.as_str(), idx.len() as u32);
+        }
+        let node_count = graph.nodes.len();
+        let mut parent: Vec<Option<u32>> = graph
+            .nodes
+            .iter()
+            .map(|n| n.parent.as_deref().map(|p| idx[p]))
+            .collect();
+        let mut singleton: Vec<bool> = graph
+            .nodes
+            .iter()
+            .map(|n| child_counts.get(n.id.as_str()) == Some(&1))
+            .collect();
+        let mut intern = |id: &'a str, idx: &mut HashMap<&'a str, u32>| -> u32 {
+            *idx.entry(id).or_insert_with(|| {
+                parent.push(None);
+                singleton.push(false);
+                (parent.len() - 1) as u32
+            })
+        };
+        let edges = graph
+            .edges
+            .iter()
+            .map(|e| {
+                let from = intern(e.from.as_str(), &mut idx);
+                let to = intern(e.to.as_str(), &mut idx);
+                (from, to, e.kind)
+            })
+            .collect();
+        Self { idx, parent, singleton, edges, node_count }
+    }
+
+    /// The (node, edge) counts of the view collapsing every container outside
+    /// `expanded` (given as indices), mirroring [`collapse`]: each node folds to
+    /// the shallowest ancestor that is neither expanded nor a singleton, edges
+    /// remap to their endpoints' representatives, self-loops drop, and remaining
+    /// edges dedup by `(from, to, kind)`.
+    fn counts(&self, expanded: &[u32]) -> (usize, usize) {
+        let n = self.parent.len();
+        // Effectively expanded: in `expanded` or a singleton (always auto-expands).
+        let mut eff = self.singleton.clone();
+        for &i in expanded {
+            eff[i as usize] = true;
+        }
+        // Representative of each index: the shallowest non-effectively-expanded
+        // node on its root->node chain, else the node itself.
+        let mut rep = vec![0u32; n];
+        for i in 0..n {
+            let mut best = if eff[i] { None } else { Some(i as u32) };
+            let mut cur = i as u32;
+            while let Some(p) = self.parent[cur as usize] {
+                if !eff[p as usize] {
+                    best = Some(p);
+                }
+                cur = p;
+            }
+            rep[i] = best.unwrap_or(i as u32);
+        }
+        let nodes = (0..self.node_count).filter(|&i| rep[i] == i as u32).count();
+        let mut seen: HashSet<(u32, u32, EdgeKind)> = HashSet::new();
+        for &(from, to, kind) in &self.edges {
+            let (from, to) = (rep[from as usize], rep[to as usize]);
+            if from != to {
+                seen.insert((from, to, kind));
+            }
+        }
+        (nodes, seen.len())
+    }
 }
 
 /// Memoized representative lookup over ids borrowed from the graph.
