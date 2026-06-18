@@ -346,6 +346,13 @@ Compose larger UIs from child entities rather than one giant view:
 - Create: `let child = cx.new(|cx| Child::new(cx));` (store the `Entity<Child>` in a field).
 - Render it: add the entity (cloned) as a `.child(self.child.clone())`.
 - Update from outside: `self.child.update(cx, |child, cx| { child.foo = 1; cx.notify(); })`.
+- React to a child: `cx.observe(&child, ..)` fires on **every** `cx.notify()` the child
+  makes — every repaint reason (open/close, hover, focus), not just the state change you
+  care about — and the subscription must be stored in a field (it's dropped otherwise). To
+  react to ONE specific change, don't observe: have the child `impl EventEmitter<MyEvent>`,
+  `cx.emit(MyEvent::..)` only when that change happens, and `cx.subscribe(&child, ..)`. (A
+  dropdown that reset a sibling control on every hover was the bug from observing instead of
+  subscribing — see `bviz_ui_components::Dropdown`/`DropdownEvent`.)
 
 ## Custom rendering: `canvas` and `Element`
 
