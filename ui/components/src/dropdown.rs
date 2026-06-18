@@ -100,6 +100,9 @@ impl Render for Dropdown {
             .gap_1()
             .px_2()
             .h(px(24.))
+            // Hold the trigger's measured width in a flex parent (e.g. a toolbar);
+            // without this it shrinks and the label wraps to a second line.
+            .flex_none()
             .rounded_md()
             .cursor_pointer()
             .text_color(colors.text)
@@ -116,7 +119,7 @@ impl Render for Dropdown {
                 }
                 cx.notify();
             }))
-            .child(div().w(option_width).child(label))
+            .child(div().w(option_width).whitespace_nowrap().child(label))
             .child(
                 bviz_ui_assets::icon("caret-down")
                     .size(px(12.))
