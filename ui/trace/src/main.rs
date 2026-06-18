@@ -2195,12 +2195,21 @@ fn shape_truncated(
     if f32::from(line.width()) <= avail {
         return line;
     }
-    let chars = text.chars().count();
-    let keep =
-        ((chars as f32 * avail / f32::from(line.width())).floor() as usize).saturating_sub(1);
-    let mut truncated: String = text.chars().take(keep).collect();
-    truncated.push('…');
-    bviz_ui_assets::shape_line(window, truncated, font, fs, color)
+    // The proportional estimate can overshoot in a variable-width font, leaving
+    // the ellipsized line wider than the box, so drop characters until it fits.
+    let chars: Vec<char> = text.chars().collect();
+    let mut keep = ((chars.len() as f32 * avail / f32::from(line.width())).floor() as usize)
+        .min(chars.len())
+        .saturating_sub(1);
+    loop {
+        let mut truncated: String = chars[..keep].iter().collect();
+        truncated.push('…');
+        let shaped = bviz_ui_assets::shape_line(window, truncated, font.clone(), fs, color);
+        if keep == 0 || f32::from(shaped.width()) <= avail {
+            return shaped;
+        }
+        keep -= 1;
+    }
 }
 
 /// Paints a filled box and, if it is wide enough, its name truncated to fit and
