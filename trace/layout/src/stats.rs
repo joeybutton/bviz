@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 
-use bviz_trace_profile::Profile;
+use bviz_trace_profile::{Profile, WorkClass};
 
-use crate::flame::FlameKey;
+use crate::flame::{leaf_label, GroupMode, Scope};
 
 /// One aggregated group of slices, summed across the scope. `total_us` and
 /// `max_us` sum/peak the durations of every slice (at any depth) sharing this
@@ -13,6 +13,7 @@ use crate::flame::FlameKey;
 #[derive(Debug, Clone, PartialEq)]
 pub struct StatRow {
     pub key: String,
+    pub work_class: WorkClass,
     pub count: u32,
     pub total_us: i64,
     pub max_us: i64,
@@ -29,21 +30,21 @@ impl StatRow {
     }
 }
 
-/// Aggregate the profile's slices by `key`, over `scope` (`Some(thread_index)` =
-/// only that thread; `None` = all threads), into one row per distinct key value
-/// (count, summed and max duration). Every slice in scope counts, at all depths.
-/// Order is unspecified; the caller sorts.
-pub fn aggregate_stats(profile: &Profile, key: FlameKey, scope: Option<usize>) -> Vec<StatRow> {
-    let threads = match scope {
-        Some(i) => &profile.threads[i..=i],
-        None => &profile.threads[..],
-    };
-    let mut groups: HashMap<&str, StatRow> = HashMap::new();
-    for thread in threads {
+/// Aggregate the profile's in-scope slices into one row per distinct leaf label
+/// of `mode`'s path (count, summed and max duration, work class). Every slice in
+/// the lanes `scope` selects counts, at all depths. Order is unspecified; the
+/// caller sorts.
+pub fn aggregate_stats(profile: &Profile, mode: GroupMode, scope: Scope) -> Vec<StatRow> {
+    let mut groups: HashMap<String, StatRow> = HashMap::new();
+    for thread in &profile.threads {
+        if !scope.includes(thread.lane_class) {
+            continue;
+        }
         for s in &thread.slices {
-            let k = key.of(s);
-            let row = groups.entry(k).or_insert_with(|| StatRow {
-                key: k.to_owned(),
+            let (label, work_class) = leaf_label(s, mode);
+            let row = groups.entry(label.clone()).or_insert_with(|| StatRow {
+                key: label,
+                work_class,
                 count: 0,
                 total_us: 0,
                 max_us: 0,
@@ -59,36 +60,38 @@ pub fn aggregate_stats(profile: &Profile, key: FlameKey, scope: Option<usize>) -
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bviz_trace_profile::{Metadata, Slice, SliceArgs, ThreadTrack, TimeSpan};
+    use bviz_trace_profile::{LaneClass, Metadata, Slice, SliceArgs, ThreadTrack, TimeSpan};
 
-    fn slice(name: &str, start_us: i64, dur_us: i64) -> Slice {
+    fn slice(name: &str, category: &str, start_us: i64, dur_us: i64) -> Slice {
         Slice {
             name: name.to_owned(),
-            category: "cat".to_owned(),
+            category: category.to_owned(),
             start_us,
             dur_us,
             depth: 0,
             args: SliceArgs::default(),
+            work_class: bviz_trace_profile::work_class(category),
         }
     }
 
-    fn action(name: &str, mnemonic: &str, start_us: i64, dur_us: i64) -> Slice {
+    fn action(mnemonic: &str, start_us: i64, dur_us: i64) -> Slice {
         Slice {
             args: SliceArgs {
                 mnemonic: Some(mnemonic.to_owned()),
                 ..SliceArgs::default()
             },
-            ..slice(name, start_us, dur_us)
+            ..slice(mnemonic, "local action execution", start_us, dur_us)
         }
     }
 
-    fn track(tid: i64, slices: Vec<Slice>) -> ThreadTrack {
+    fn track(tid: i64, lane_class: LaneClass, slices: Vec<Slice>) -> ThreadTrack {
         ThreadTrack {
             tid,
             name: format!("t{tid}"),
             sort_index: tid,
             slices,
             max_depth: 0,
+            lane_class,
         }
     }
 
@@ -115,66 +118,94 @@ mod tests {
     fn mnemonic_grouping_sums_count_total_and_max() {
         let p = profile(vec![track(
             1,
+            LaneClass::Worker,
             vec![
-                action("compile foo.cc", "CppCompile", 0, 100),
-                action("compile bar.cc", "CppCompile", 100, 50),
-                action("link a", "CppLink", 200, 30),
+                action("CppCompile", 0, 100),
+                action("CppCompile", 100, 50),
+                action("CppLink", 200, 30),
             ],
         )]);
-        let rows = aggregate_stats(&p, FlameKey::Mnemonic, None);
+        let rows = aggregate_stats(&p, GroupMode::Mnemonic, Scope::All);
         assert_eq!(rows.len(), 2);
         let c = row(&rows, "CppCompile");
         assert_eq!(c.count, 2);
         assert_eq!(c.total_us, 150);
         assert_eq!(c.max_us, 100);
         assert_eq!(c.avg_us(), 75);
+        assert_eq!(c.work_class, WorkClass::Cpu);
         assert_eq!(row(&rows, "CppLink").total_us, 30);
     }
 
     #[test]
-    fn scope_excludes_other_threads() {
+    fn scope_excludes_other_lanes() {
         let p = profile(vec![
-            track(1, vec![slice("a", 0, 100)]),
-            track(2, vec![slice("b", 0, 50)]),
+            track(7, LaneClass::Main, vec![action("CppCompile", 0, 100)]),
+            track(8, LaneClass::Worker, vec![action("Rustc", 0, 50)]),
         ]);
-        let rows = aggregate_stats(&p, FlameKey::Name, Some(1));
+        let rows = aggregate_stats(&p, GroupMode::Mnemonic, Scope::Execution);
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].key, "b");
+        assert_eq!(rows[0].key, "Rustc");
         assert_eq!(rows[0].total_us, 50);
     }
 
     #[test]
-    fn mnemonic_less_slice_falls_back_to_name() {
-        // A slice with no mnemonic keys by its name under Mnemonic grouping,
-        // matching FlameKey::of.
+    fn mnemonicless_slice_buckets_by_work_class() {
+        // A slice with no mnemonic buckets under its work class, not its name.
         let p = profile(vec![track(
             1,
+            LaneClass::Worker,
             vec![
-                action("compile foo.cc", "CppCompile", 0, 100),
-                slice("evaluate", 200, 30),
+                action("CppCompile", 0, 100),
+                slice("wait", "thread wait", 200, 30),
             ],
         )]);
-        let rows = aggregate_stats(&p, FlameKey::Mnemonic, None);
+        let rows = aggregate_stats(&p, GroupMode::Mnemonic, Scope::All);
         assert_eq!(rows.len(), 2);
-        assert_eq!(row(&rows, "evaluate").total_us, 30);
+        let wait = row(&rows, "(wait)");
+        assert_eq!(wait.total_us, 30);
+        assert_eq!(wait.work_class, WorkClass::Wait);
         assert_eq!(row(&rows, "CppCompile").count, 1);
+    }
+
+    #[test]
+    fn work_class_mode_sums_per_class() {
+        let p = profile(vec![track(
+            1,
+            LaneClass::Worker,
+            vec![
+                action("CppCompile", 0, 100),
+                action("Rustc", 100, 50),
+                slice("remote", "remote action execution", 200, 30),
+            ],
+        )]);
+        let rows = aggregate_stats(&p, GroupMode::WorkClass, Scope::All);
+        assert_eq!(row(&rows, "cpu").total_us, 150);
+        assert_eq!(row(&rows, "remote").total_us, 30);
     }
 
     #[test]
     fn aggregation_is_order_independent() {
         let ordered = vec![
-            slice("a", 0, 100),
-            slice("b", 0, 40),
-            slice("a", 200, 60),
+            action("CppCompile", 0, 100),
+            action("Rustc", 0, 40),
+            action("CppCompile", 200, 60),
         ];
         let mut reversed = ordered.clone();
         reversed.reverse();
-        let mut ra = aggregate_stats(&profile(vec![track(1, ordered)]), FlameKey::Name, None);
-        let mut rb = aggregate_stats(&profile(vec![track(1, reversed)]), FlameKey::Name, None);
+        let mut ra = aggregate_stats(
+            &profile(vec![track(1, LaneClass::Worker, ordered)]),
+            GroupMode::Mnemonic,
+            Scope::All,
+        );
+        let mut rb = aggregate_stats(
+            &profile(vec![track(1, LaneClass::Worker, reversed)]),
+            GroupMode::Mnemonic,
+            Scope::All,
+        );
         ra.sort_by(|x, y| x.key.cmp(&y.key));
         rb.sort_by(|x, y| x.key.cmp(&y.key));
         assert_eq!(ra, rb);
-        let a = row(&ra, "a");
+        let a = row(&ra, "CppCompile");
         assert_eq!(a.count, 2);
         assert_eq!(a.total_us, 160);
         assert_eq!(a.max_us, 100);
