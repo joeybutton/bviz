@@ -336,18 +336,6 @@ fn span_label(slice: &Slice, idx: &HashMap<&str, &str>, mode: GroupMode) -> Segm
     }
 }
 
-/// The single key a flat per-mode stats row groups a slice under — the mode's
-/// primary dimension: detail for `Mnemonic`, the category for `Category`, the
-/// work class for `WorkClass`.
-pub(crate) fn leaf_label(
-    slice: &Slice,
-    idx: &HashMap<&str, &str>,
-    mode: GroupMode,
-) -> (String, WorkClass) {
-    let seg = span_label(slice, idx, mode);
-    (seg.label, seg.work_class)
-}
-
 /// End time of a slice.
 fn end_us(slice: &Slice) -> i64 {
     slice.start_us + slice.dur_us

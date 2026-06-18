@@ -2,14 +2,13 @@ use std::collections::HashMap;
 
 use bviz_trace_profile::{Profile, WorkClass};
 
-use crate::flame::{leaf_label, mnemonic_index, GroupMode, Scope};
+use crate::flame::{build_flame_graph, FlameNode, GroupMode, Scope};
 
-/// One aggregated group of slices, summed across the scope. `total_us` and
-/// `max_us` sum/peak the durations of every slice (at any depth) sharing this
-/// key. A group's share of the total is `total_us / sum(all groups' total_us)`,
-/// which sums to 100% across groups — share of aggregated time, not wall-clock:
-/// nested slices overlap in time, so the summed durations exceed the elapsed
-/// wall time.
+/// One aggregated group of frames, summed across the flame tree. `total_us` is
+/// the summed self time of every frame keyed here, so the rows partition the
+/// root's total and a group's share `total_us / Σ(all groups' total_us)` sums to
+/// 100% without double-counting nested time. `max_us` is the peak single-frame
+/// self time, `count` the number of merged span occurrences.
 #[derive(Debug, Clone, PartialEq)]
 pub struct StatRow {
     pub key: String,
@@ -20,7 +19,7 @@ pub struct StatRow {
 }
 
 impl StatRow {
-    /// Mean duration of the group's slices.
+    /// Mean self time per merged span occurrence in the group.
     pub fn avg_us(&self) -> i64 {
         if self.count > 0 {
             self.total_us / self.count as i64
@@ -30,32 +29,35 @@ impl StatRow {
     }
 }
 
-/// Aggregate the profile's in-scope slices into one row per distinct leaf label
-/// of `mode`'s path (count, summed and max duration, work class). Every slice in
-/// the lanes `scope` selects counts, at all depths. Order is unspecified; the
-/// caller sorts.
+/// Aggregate the profile into one row per distinct frame name of the flame tree
+/// built under `mode` and `scope`, summing each frame's self time. Self time
+/// sums to the root's total, so the rows partition the aggregated time without
+/// the double-count of summing a span and its sub-spans. Order is unspecified;
+/// the caller sorts.
 pub fn aggregate_stats(profile: &Profile, mode: GroupMode, scope: Scope) -> Vec<StatRow> {
-    let idx = mnemonic_index(profile);
+    let root = build_flame_graph(profile, mode, scope);
     let mut groups: HashMap<String, StatRow> = HashMap::new();
-    for thread in &profile.threads {
-        if !scope.includes(thread.lane_class) {
-            continue;
-        }
-        for s in &thread.slices {
-            let (label, work_class) = leaf_label(s, &idx, mode);
-            let row = groups.entry(label.clone()).or_insert_with(|| StatRow {
-                key: label,
-                work_class,
-                count: 0,
-                total_us: 0,
-                max_us: 0,
-            });
-            row.count += 1;
-            row.total_us += s.dur_us;
-            row.max_us = row.max_us.max(s.dur_us);
-        }
-    }
+    accumulate(&root, &mut groups);
+    // The synthetic root carries no slices of its own; drop its zero-self frame.
+    groups.remove(&root.name);
     groups.into_values().collect()
+}
+
+/// Fold every frame's self time into its name's row, recursing into children.
+fn accumulate(node: &FlameNode, groups: &mut HashMap<String, StatRow>) {
+    let row = groups.entry(node.name.clone()).or_insert_with(|| StatRow {
+        key: node.name.clone(),
+        work_class: node.work_class,
+        count: 0,
+        total_us: 0,
+        max_us: 0,
+    });
+    row.count += node.count;
+    row.total_us += node.self_us;
+    row.max_us = row.max_us.max(node.self_us);
+    for c in &node.children {
+        accumulate(c, groups);
+    }
 }
 
 #[cfg(test)]
@@ -83,6 +85,11 @@ mod tests {
             },
             ..slice(mnemonic, "local action execution", start_us, dur_us)
         }
+    }
+
+    /// Sum of every row's self-time total — must equal the root's total.
+    fn total(rows: &[StatRow]) -> i64 {
+        rows.iter().map(|r| r.total_us).sum()
     }
 
     fn track(tid: i64, lane_class: LaneClass, slices: Vec<Slice>) -> ThreadTrack {
@@ -117,6 +124,8 @@ mod tests {
 
     #[test]
     fn mnemonic_grouping_sums_count_total_and_max() {
+        // Two disjoint CppCompile actions merge into one frame (no nesting), so
+        // its self time sums both durations and the row counts both occurrences.
         let p = profile(vec![track(
             1,
             LaneClass::Execution,
@@ -131,10 +140,31 @@ mod tests {
         let c = row(&rows, "CppCompile");
         assert_eq!(c.count, 2);
         assert_eq!(c.total_us, 150);
-        assert_eq!(c.max_us, 100);
-        assert_eq!(c.avg_us(), 75);
+        // One merged frame; its peak self time is the merged total.
+        assert_eq!(c.max_us, 150);
         assert_eq!(c.work_class, WorkClass::Cpu);
         assert_eq!(row(&rows, "CppLink").total_us, 30);
+        // Self time partitions the root total (180), no double-count.
+        assert_eq!(total(&rows), 180);
+    }
+
+    #[test]
+    fn nested_spans_count_self_time_not_inclusive() {
+        // Rustc(0..100) contains subprocess.run(0..80): the table credits Rustc
+        // with its self time (20) and subprocess.run with its own (80), summing to
+        // the action's 100 rather than the double-counted 180.
+        let p = profile(vec![track(
+            1,
+            LaneClass::Execution,
+            vec![
+                action("Rustc", 0, 100),
+                slice("subprocess.run", "subprocess run", 0, 80),
+            ],
+        )]);
+        let rows = aggregate_stats(&p, GroupMode::Mnemonic, Scope::All);
+        assert_eq!(row(&rows, "Rustc").total_us, 20);
+        assert_eq!(row(&rows, "subprocess.run").total_us, 80);
+        assert_eq!(total(&rows), 100);
     }
 
     #[test]
@@ -186,7 +216,7 @@ mod tests {
     fn aggregation_is_order_independent() {
         let ordered = vec![
             action("CppCompile", 0, 100),
-            action("Rustc", 0, 40),
+            action("Rustc", 100, 40),
             action("CppCompile", 200, 60),
         ];
         let mut reversed = ordered.clone();
@@ -206,7 +236,8 @@ mod tests {
         assert_eq!(ra, rb);
         let a = row(&ra, "CppCompile");
         assert_eq!(a.count, 2);
+        // Both disjoint CppCompile spans merge into one frame: self time 160.
         assert_eq!(a.total_us, 160);
-        assert_eq!(a.max_us, 100);
+        assert_eq!(a.max_us, 160);
     }
 }
