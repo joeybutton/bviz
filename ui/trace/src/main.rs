@@ -433,13 +433,12 @@ struct FlameLayout {
     height: f32,
 }
 
-/// The flame graph's content rectangle: the full body width from the left inner
-/// edge to the right edge less a reserved vertical-bar column (when the tree's
-/// rows overflow the visible height) and the full body height less a reserved
-/// horizontal-bar strip (when the zoomed width overflows the visible width).
-/// Merging the threads drops the gutter, so the graph reclaims that width. Both
-/// reserves may apply at once, leaving the bottom-right corner to neither bar.
-/// Returned as `(left, top, width, height)`.
+/// The flame graph's content rectangle: it spans the full body with no gutter
+/// and no time axis, less a reserved vertical-bar column (when the tree's rows
+/// overflow the visible height) and a reserved horizontal-bar strip (when the
+/// zoomed width overflows the visible width). Both reserves may apply at once,
+/// leaving the bottom-right corner to neither bar. Returned as
+/// `(left, top, width, height)`.
 fn flame_graph_rect(
     bounds: Bounds<Pixels>,
     flame_total: f32,
@@ -716,28 +715,57 @@ impl TraceView {
         (dropdown, observer, threads)
     }
 
-    /// Builds the single-canvas timeline. The closure is `'static`, so it captures
-    /// owned snapshots (`Rc`s and the const metrics) rather than borrowing the
-    /// view. The cached lane layout is passed in as an `Rc` the closure owns.
-    #[allow(clippy::too_many_arguments)]
-    fn timeline(
+    /// The shared mouse/scroll/hover wiring both bodies attach to their root: a
+    /// press drives a scroll bar or pans, the wheel zooms/pans/scrolls, and a move
+    /// updates the hover (clearing it when the cursor leaves).
+    fn body_handlers(&self, root: Stateful<Div>, cx: &mut Context<Self>) -> Stateful<Div> {
+        root.on_mouse_down(
+            MouseButton::Left,
+            cx.listener(|this, e: &MouseDownEvent, _, cx| {
+                // A press on a scroll thumb/track drives that bar; anywhere else
+                // pans. The window-global drag handlers are installed from the
+                // canvas paint while a drag is set, so repaint now.
+                this.press(e.position);
+                cx.notify();
+            }),
+        )
+        .on_scroll_wheel(cx.listener(Self::on_scroll_wheel))
+        .on_mouse_move(cx.listener(Self::on_mouse_move))
+        .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+            // Drop the crosshair and hover tooltips when the cursor leaves.
+            if !*hovered {
+                let cleared = this.crosshair.take().is_some()
+                    | this.hover.take().is_some()
+                    | this.flame_hover.take().is_some();
+                if cleared {
+                    cx.notify();
+                }
+            }
+        }))
+    }
+
+    /// The flame-chart body: a time-axis canvas (its prepaint fits/rescales the
+    /// time view to the viewport; its paint draws the ruler, gridlines, lanes,
+    /// slices, counter graph, splitter, phase markers, gutter, crosshair, and
+    /// scroll bars) with the splitter and gutter-handle drag overlays and the
+    /// shared handlers. The canvas closures are `'static`, so they capture owned
+    /// snapshots (`Rc`s and the const metrics) rather than borrowing the view.
+    fn chart_body(
+        &self,
         profile: Rc<Profile>,
         lanes: Rc<LaneLayout>,
-        view: Rc<Cell<TimeView>>,
-        scroll_y: Rc<Cell<f32>>,
-        flame_view: Rc<Cell<FlameView>>,
-        fitted: Rc<Cell<bool>>,
-        viewport: Rc<Cell<Bounds<Pixels>>>,
-        vbar: Rc<Cell<Option<Scrollbar>>>,
-        hbar: Rc<Cell<Option<Scrollbar>>>,
-        entity: Entity<TraceView>,
-        graph_height: f32,
-        gutter_width: f32,
-        view_mode: ViewMode,
-        flame: Rc<FlameNode>,
-        flame_boxes: Rc<RefCell<Option<FlameBoxCache>>>,
         palette: Palette,
-    ) -> Stateful<Div> {
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let view = self.view.clone();
+        let scroll_y = self.scroll_y.clone();
+        let fitted = self.fitted.clone();
+        let viewport = self.viewport.clone();
+        let vbar = self.vbar.clone();
+        let hbar = self.hbar.clone();
+        let entity = cx.entity();
+        let graph_height = self.graph_height;
+        let gutter_width = self.gutter_width;
         let prepaint = {
             let (profile, lanes, view, fitted, viewport) = (
                 profile.clone(),
@@ -801,13 +829,11 @@ impl TraceView {
             flame_total,
         );
         let origin = viewport.get().origin;
-        let chart_mode = view_mode == ViewMode::FlameChart;
         // A thin overlay strip at the splitter that begins a resize drag, placed
         // from the last painted bounds and the stored graph height. The canvas
         // recomputes the same regions when it paints. A double-click resets the
-        // graph height to its default. Graph mode lays its table out as a flex
-        // sibling with its own splitter, so this overlay is chart-mode only.
-        let splitter = (chart_mode && profile.counters.len() > 0).then(|| {
+        // graph height to its default.
+        let splitter = (profile.counters.len() > 0).then(|| {
             let y = regions.graph_top - BAR_WIDTH / 2.0;
             let drag_entity = entity.clone();
             div()
@@ -834,9 +860,8 @@ impl TraceView {
                 )
         });
         // A thin overlay strip at the gutter's right edge that begins a width
-        // drag; a double-click resets the gutter to its default width. The graph
-        // view has no gutter, so it carries no handle.
-        let gutter_handle = chart_mode.then(|| {
+        // drag; a double-click resets the gutter to its default width.
+        let gutter_handle = {
             let drag_entity = entity.clone();
             div()
                 .id("trace-gutter-handle")
@@ -862,169 +887,250 @@ impl TraceView {
                         cx.stop_propagation();
                     },
                 )
-        });
-        div()
-            .id("trace-viewport")
-            .relative()
-            .size_full()
-            .overflow_hidden()
-            .child(
-                canvas(prepaint, move |bounds, _, window, cx| {
-                    if view_mode == ViewMode::FlameGraph {
-                        let flame_hover = entity.read(cx).flame_hover.clone();
-                        let dragging = !matches!(entity.read(cx).drag, Drag::None);
-                        // The canvas fills only the flame section; the stats table
-                        // is a sibling below the splitter, so the full canvas bounds
-                        // are the flame graph's.
-                        paint_flame_graph(
-                            &flame,
-                            &flame_boxes,
-                            scroll_y.get(),
-                            flame_view.get(),
-                            &palette,
-                            &vbar,
-                            &hbar,
-                            flame_hover,
-                            bounds,
-                            window,
-                            cx,
-                        );
-                        if dragging {
-                            track_drag(window, &entity, on_drag, end_drag);
-                        }
-                        return;
-                    }
-                    let layout = &*lanes;
-                    let tv = view.get();
-                    let n_counters = profile.counters.len();
-                    let graph_height = entity.read(cx).graph_height;
-                    let gutter_width = entity.read(cx).gutter_width;
-                    // Thread lanes only; the graph section places counters itself.
-                    let flame_total = flame_total_height(layout);
-                    let regions =
-                        Regions::new(bounds, n_counters, graph_height, gutter_width, flame_total);
-                    let scroll = scroll_y.get();
-                    let vp = Viewport {
-                        width: regions.time_w,
-                        height: regions.flame_h(),
-                        scroll_y: scroll,
-                    };
+        };
+        let canvas = canvas(prepaint, move |bounds, _, window, cx| {
+            let layout = &*lanes;
+            let tv = view.get();
+            let n_counters = profile.counters.len();
+            let graph_height = entity.read(cx).graph_height;
+            let gutter_width = entity.read(cx).gutter_width;
+            // Thread lanes only; the graph section places counters itself.
+            let flame_total = flame_total_height(layout);
+            let regions =
+                Regions::new(bounds, n_counters, graph_height, gutter_width, flame_total);
+            let scroll = scroll_y.get();
+            let vp = Viewport {
+                width: regions.time_w,
+                height: regions.flame_h(),
+                scroll_y: scroll,
+            };
 
-                    let ticks = ruler_ticks(tv, regions.time_w);
-                    // Gridlines and phase-marker lines span both sections.
-                    paint_gridlines(
-                        &ticks,
-                        regions.content_left,
-                        regions.flame_top,
-                        regions.body_bottom,
-                        &palette,
-                        window,
-                    );
+            let ticks = ruler_ticks(tv, regions.time_w);
+            // Gridlines and phase-marker lines span both sections.
+            paint_gridlines(
+                &ticks,
+                regions.content_left,
+                regions.flame_top,
+                regions.body_bottom,
+                &palette,
+                window,
+            );
 
-                    // The flame section clips its scrolled lanes to its band so
-                    // rows panned past the splitter don't bleed into the graph.
-                    let flame_mask = ContentMask {
-                        bounds: Bounds::new(
-                            point(px(regions.content_left), px(regions.flame_top)),
-                            size(px(regions.time_w), px(regions.flame_h())),
+            // The flame section clips its scrolled lanes to its band so
+            // rows panned past the splitter don't bleed into the graph.
+            let flame_mask = ContentMask {
+                bounds: Bounds::new(
+                    point(px(regions.content_left), px(regions.flame_top)),
+                    size(px(regions.time_w), px(regions.flame_h())),
+                ),
+            };
+            window.with_content_mask(Some(flame_mask), |window| {
+                // A hairline parts adjacent lanes, drawn first so slices
+                // paint over it and it shows only in the gaps.
+                for lane in layout.lanes.iter().skip(1) {
+                    let ry = regions.flame_top + lane.top - METRICS.lane_gap / 2.0 - scroll;
+                    window.paint_quad(quad(
+                        Bounds::new(
+                            point(px(regions.content_left), px(ry)),
+                            size(px(regions.time_w), px(1.0)),
                         ),
-                    };
-                    window.with_content_mask(Some(flame_mask), |window| {
-                        // A hairline parts adjacent lanes, drawn first so slices
-                        // paint over it and it shows only in the gaps.
-                        for lane in layout.lanes.iter().skip(1) {
-                            let ry = regions.flame_top + lane.top - METRICS.lane_gap / 2.0 - scroll;
-                            window.paint_quad(quad(
-                                Bounds::new(
-                                    point(px(regions.content_left), px(ry)),
-                                    size(px(regions.time_w), px(1.0)),
-                                ),
-                                px(0.),
-                                palette.gridline,
-                                px(0.),
-                                Hsla::from(palette.border),
-                                BorderStyle::Solid,
-                            ));
-                        }
-                        for vs in
-                            visible_slices(&profile, layout, &tv, &vp, &METRICS, MIN_SLICE_PX)
-                        {
-                            let slice = &profile.threads[vs.track].slices[vs.slice];
-                            paint_slice(
-                                slice,
-                                vs.x,
-                                vs.y + regions.flame_top,
-                                vs.w,
-                                vs.h,
-                                regions.content_left,
-                                &palette,
-                                window,
-                                cx,
-                            );
-                        }
-                    });
-
-                    paint_graph(&profile.counters, tv, regions, &palette, window);
-                    if regions.has_graph {
-                        paint_splitter(regions, &palette, window);
-                    }
-                    paint_markers(&profile.phase_markers, tv, regions, &palette, window, cx);
-                    paint_scrollbars(
-                        profile.span,
-                        tv,
-                        flame_total,
-                        regions,
-                        scroll,
-                        &palette,
-                        &vbar,
-                        &hbar,
-                        window,
-                    );
-
-                    // The opaque gutter covers any lane content that panned under
-                    // it, then carries the lane and counter names.
-                    paint_gutter(
-                        &profile,
-                        layout,
-                        regions,
-                        gutter_width,
-                        scroll,
+                        px(0.),
+                        palette.gridline,
+                        px(0.),
+                        Hsla::from(palette.border),
+                        BorderStyle::Solid,
+                    ));
+                }
+                for vs in visible_slices(&profile, layout, &tv, &vp, &METRICS, MIN_SLICE_PX) {
+                    let slice = &profile.threads[vs.track].slices[vs.slice];
+                    paint_slice(
+                        slice,
+                        vs.x,
+                        vs.y + regions.flame_top,
+                        vs.w,
+                        vs.h,
+                        regions.content_left,
                         &palette,
                         window,
                         cx,
                     );
+                }
+            });
 
-                    // The ruler paints over scrolled-up rows; the tooltip paints
-                    // over everything.
-                    paint_ruler(&ticks, regions, bounds, &palette, window, cx);
-                    if let Some(at) = entity.read(cx).crosshair {
-                        if f32::from(at.x) >= regions.content_left {
-                            paint_crosshair(
-                                &profile.counters,
-                                tv,
-                                regions,
-                                at,
-                                &palette,
-                                window,
-                                cx,
-                            );
-                        }
-                    }
-                    if let Some(h) = entity.read(cx).hover {
-                        let slice = &profile.threads[h.track].slices[h.slice];
-                        paint_tooltip(slice, h.at, bounds, &palette, window, cx);
-                    }
-                    if !matches!(entity.read(cx).drag, Drag::None) {
-                        track_drag(window, &entity, on_drag, end_drag);
-                    }
-                })
-                .absolute()
-                .left_0()
-                .top_0()
-                .size_full(),
-            )
+            paint_graph(&profile.counters, tv, regions, &palette, window);
+            if regions.has_graph {
+                paint_splitter(regions, &palette, window);
+            }
+            paint_markers(&profile.phase_markers, tv, regions, &palette, window, cx);
+            paint_scrollbars(
+                profile.span,
+                tv,
+                flame_total,
+                regions,
+                scroll,
+                &palette,
+                &vbar,
+                &hbar,
+                window,
+            );
+
+            // The opaque gutter covers any lane content that panned under
+            // it, then carries the lane and counter names.
+            paint_gutter(
+                &profile,
+                layout,
+                regions,
+                gutter_width,
+                scroll,
+                &palette,
+                window,
+                cx,
+            );
+
+            // The ruler paints over scrolled-up rows; the tooltip paints
+            // over everything.
+            paint_ruler(&ticks, regions, bounds, &palette, window, cx);
+            if let Some(at) = entity.read(cx).crosshair {
+                if f32::from(at.x) >= regions.content_left {
+                    paint_crosshair(&profile.counters, tv, regions, at, &palette, window, cx);
+                }
+            }
+            if let Some(h) = entity.read(cx).hover {
+                let slice = &profile.threads[h.track].slices[h.slice];
+                paint_tooltip(slice, h.at, bounds, &palette, window, cx);
+            }
+            if !matches!(entity.read(cx).drag, Drag::None) {
+                track_drag(window, &entity, on_drag, end_drag);
+            }
+        })
+        .absolute()
+        .left_0()
+        .top_0()
+        .size_full();
+        let viewport = div()
+            .id("trace-viewport")
+            .relative()
+            .size_full()
+            .overflow_hidden()
+            .child(canvas)
             .children(splitter)
-            .children(gutter_handle)
+            .child(gutter_handle);
+        self.body_handlers(viewport, cx)
+    }
+
+    /// The flame-graph body: a full-width view of the aggregated tree with no
+    /// gutter and no time axis. Its own canvas paints the merged boxes and the
+    /// horizontal/vertical scroll bars; below a splitter sits the stats table.
+    /// The canvas closures are `'static`, so they capture owned snapshots (`Rc`s
+    /// and the const metrics) rather than borrowing the view.
+    fn graph_body(
+        &self,
+        flame: Rc<FlameNode>,
+        palette: Palette,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let scroll_y = self.scroll_y.clone();
+        let flame_view = self.flame_view.clone();
+        let viewport = self.viewport.clone();
+        let vbar = self.vbar.clone();
+        let hbar = self.hbar.clone();
+        let flame_boxes = self.flame_boxes.clone();
+        let entity = cx.entity();
+        let prepaint = {
+            let viewport = viewport.clone();
+            move |bounds: Bounds<Pixels>, _: &mut Window, _: &mut App| {
+                viewport.set(bounds);
+            }
+        };
+        let canvas = canvas(prepaint, move |bounds, _, window, cx| {
+            let flame_hover = entity.read(cx).flame_hover.clone();
+            let dragging = !matches!(entity.read(cx).drag, Drag::None);
+            // The canvas fills only the flame section; the stats table is a
+            // sibling below the splitter, so the full canvas bounds are the
+            // flame graph's.
+            paint_flame_graph(
+                &flame,
+                &flame_boxes,
+                scroll_y.get(),
+                flame_view.get(),
+                &palette,
+                &vbar,
+                &hbar,
+                flame_hover,
+                bounds,
+                window,
+                cx,
+            );
+            if dragging {
+                track_drag(window, &entity, on_drag, end_drag);
+            }
+        })
+        .absolute()
+        .left_0()
+        .top_0()
+        .size_full();
+        let viewport = self.body_handlers(
+            div()
+                .id("trace-viewport")
+                .relative()
+                .size_full()
+                .overflow_hidden()
+                .child(canvas),
+            cx,
+        );
+        let graph = div()
+            .flex_1()
+            .min_h(px(FLAME_MIN_HEIGHT))
+            .overflow_hidden()
+            .child(viewport);
+        // A splitter and the stats table sit below the flame graph as flex
+        // siblings: the flame graph's canvas fills the remaining space above, so
+        // the two never overlap. The table stops mouse and scroll events from
+        // reaching the graph's pan/scroll handlers underneath.
+        let splitter = div()
+            .id("stats-splitter")
+            .w_full()
+            .h(px(SPLITTER_THICKNESS))
+            .bg(palette.divider)
+            .cursor_row_resize()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, e: &MouseDownEvent, _, cx| {
+                    if e.click_count == 2 {
+                        this.graph_height = DEFAULT_GRAPH_HEIGHT;
+                    } else {
+                        this.drag = Drag::Splitter;
+                        this.last_mouse = e.position;
+                    }
+                    cx.stop_propagation();
+                    cx.notify();
+                }),
+            );
+        let table = div()
+            .h(px(self.graph_height.max(STATS_HEADER_HEIGHT + STATS_ROW_HEIGHT)))
+            .w_full()
+            .overflow_hidden()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, e: &MouseDownEvent, _, cx| {
+                    // A press on the scroll thumb/track drives the bar; the canvas
+                    // paint re-installs the drag handlers while the drag is set, so
+                    // repaint now.
+                    this.press_stats(e.position);
+                    cx.stop_propagation();
+                    cx.notify();
+                }),
+            )
+            .on_scroll_wheel(|_, _, cx: &mut App| cx.stop_propagation())
+            .child(self.stats_table(&palette, cx));
+        div()
+            .flex_1()
+            .flex()
+            .flex_col()
+            .overflow_hidden()
+            .child(graph)
+            .child(splitter)
+            .child(table)
     }
 
     fn status(&self) -> String {
@@ -1442,107 +1548,18 @@ impl Render for TraceView {
                             .child(self.key_dropdown.clone())
                             .child(self.scope_dropdown.clone())
                     }));
-                let timeline = Self::timeline(
-                    profile.clone(),
-                    lanes,
-                    self.view.clone(),
-                    self.scroll_y.clone(),
-                    self.flame_view.clone(),
-                    self.fitted.clone(),
-                    self.viewport.clone(),
-                    self.vbar.clone(),
-                    self.hbar.clone(),
-                    cx.entity(),
-                    self.graph_height,
-                    self.gutter_width,
-                    self.view_mode,
-                    flame,
-                    self.flame_boxes.clone(),
-                    palette,
-                )
-                .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(|this, e: &MouseDownEvent, _, cx| {
-                        // A press on a scroll thumb/track drives that bar; anywhere
-                        // else pans. The window-global drag handlers are installed
-                        // from the canvas paint while a drag is set, so repaint now.
-                        this.press(e.position);
-                        cx.notify();
-                    }),
-                )
-                .on_scroll_wheel(cx.listener(Self::on_scroll_wheel))
-                .on_mouse_move(cx.listener(Self::on_mouse_move))
-                .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
-                    // Drop the crosshair and hover tooltips when the cursor leaves.
-                    if !*hovered {
-                        let cleared = this.crosshair.take().is_some()
-                            | this.hover.take().is_some()
-                            | this.flame_hover.take().is_some();
-                        if cleared {
-                            cx.notify();
-                        }
-                    }
-                }));
-                // In graph mode a splitter and the stats table sit below the flame
-                // graph as flex siblings: the flame graph's canvas fills the
-                // remaining space above, so the two never overlap. The table stops
-                // mouse and scroll events from reaching the timeline's pan/scroll
-                // handlers underneath.
-                let bottom = (self.view_mode == ViewMode::FlameGraph).then(|| {
-                    let splitter = div()
-                        .id("stats-splitter")
-                        .w_full()
-                        .h(px(SPLITTER_THICKNESS))
-                        .bg(palette.divider)
-                        .cursor_row_resize()
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(|this, e: &MouseDownEvent, _, cx| {
-                                if e.click_count == 2 {
-                                    this.graph_height = DEFAULT_GRAPH_HEIGHT;
-                                } else {
-                                    this.drag = Drag::Splitter;
-                                    this.last_mouse = e.position;
-                                }
-                                cx.stop_propagation();
-                                cx.notify();
-                            }),
-                        );
-                    let table = div()
-                        .h(px(self.graph_height.max(STATS_HEADER_HEIGHT + STATS_ROW_HEIGHT)))
-                        .w_full()
-                        .overflow_hidden()
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(|this, e: &MouseDownEvent, _, cx| {
-                                // A press on the scroll thumb/track drives the bar;
-                                // the canvas paint re-installs the drag handlers
-                                // while the drag is set, so repaint now.
-                                this.press_stats(e.position);
-                                cx.stop_propagation();
-                                cx.notify();
-                            }),
-                        )
-                        .on_scroll_wheel(|_, _, cx: &mut App| cx.stop_propagation())
-                        .child(self.stats_table(&palette, cx));
-                    (splitter, table)
-                });
-                let content = match bottom {
-                    Some((splitter, table)) => div()
+                // The flame chart and the flame graph are two independent views of
+                // the same trace, selected here; each builds its own canvas, paint,
+                // and overlays.
+                let content = match self.view_mode {
+                    ViewMode::FlameChart => div()
                         .flex_1()
-                        .flex()
-                        .flex_col()
                         .overflow_hidden()
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_h(px(FLAME_MIN_HEIGHT))
-                                .overflow_hidden()
-                                .child(timeline),
-                        )
-                        .child(splitter)
-                        .child(table),
-                    None => div().flex_1().overflow_hidden().child(timeline),
+                        .child(self.chart_body(profile.clone(), lanes, palette, cx))
+                        .into_any_element(),
+                    ViewMode::FlameGraph => {
+                        self.graph_body(flame, palette, cx).into_any_element()
+                    }
                 };
                 div()
                     .flex_1()
