@@ -4,19 +4,19 @@
 //! with horizontal zoom/pan and vertical scroll.
 
 use bviz_trace_layout::{
-    FlameBox, FlameMetrics, FlameNode, FlameView, LaneLayout, LaneMetrics, TimeView, Viewport,
-    build_flame_graph, flame_height, lay_out_flame, lay_out_lanes, visible_slices,
+    FlameBox, FlameKey, FlameMetrics, FlameNode, FlameView, LaneLayout, LaneMetrics, TimeView,
+    Viewport, build_flame_graph, flame_height, lay_out_flame, lay_out_lanes, visible_slices,
 };
 use bviz_trace_profile::{CounterLane, CounterPoint, PhaseMarker, Profile, TimeSpan};
-use bviz_ui_components::{Axis, Button, Scrollbar, load_in_background, track_drag};
+use bviz_ui_components::{Axis, Button, Dropdown, Scrollbar, load_in_background, track_drag};
 use bviz_ui_shell::Chrome;
 use clap::Parser;
 use gpui::{
     Animation, AnimationExt, App, BorderStyle, Bounds, ContentMask, Context, Div, Entity,
     FocusHandle, Hsla, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
-    PathBuilder, Pixels, Point, Render, Rgba, ScrollDelta, ScrollWheelEvent, Stateful, Task,
-    TextAlign, Transformation, Window, canvas, div, hsla, percentage, point, prelude::*, px, quad,
-    size,
+    PathBuilder, Pixels, Point, Render, Rgba, ScrollDelta, ScrollWheelEvent, Stateful, Subscription,
+    Task, TextAlign, Transformation, Window, canvas, div, hsla, percentage, point, prelude::*, px,
+    quad, size,
 };
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
@@ -166,6 +166,14 @@ enum ViewMode {
     FlameChart,
     FlameGraph,
 }
+
+/// The flame-graph merge keys offered in the toolbar dropdown, in menu order:
+/// each entry pairs the option label with the key the selection maps to.
+const FLAME_KEYS: [(&str, FlameKey); 3] = [
+    ("Name", FlameKey::Name),
+    ("Mnemonic", FlameKey::Mnemonic),
+    ("Category", FlameKey::Category),
+];
 
 /// What a left-button drag is currently moving.
 #[derive(Clone, Copy)]
@@ -411,9 +419,14 @@ struct TraceView {
     gutter_width: f32,
     /// Which view the timeline paints.
     view_mode: ViewMode,
+    /// Which slice attribute the flame graph merges frames by.
+    flame_key: FlameKey,
+    /// Toolbar control choosing `flame_key`; its observer rebuilds the cache.
+    key_dropdown: Entity<Dropdown>,
+    _key_observer: Subscription,
     /// The aggregated flame graph, built lazily on first use in graph mode and
-    /// cleared when a new profile loads. Walking every slice is too costly to
-    /// repeat each paint.
+    /// cleared when a new profile loads or the merge key changes. Walking every
+    /// slice is too costly to repeat each paint.
     flame: Rc<RefCell<Option<Rc<FlameNode>>>>,
     /// The slice under the cursor, if any, drawn as a tooltip.
     hover: Option<Hover>,
@@ -430,6 +443,14 @@ impl TraceView {
     fn new(path: PathBuf, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let focus_handle = cx.focus_handle();
         focus_handle.focus(window, cx);
+        let key_dropdown = cx.new(|cx| {
+            Dropdown::new("flame-key", FLAME_KEYS.map(|(label, _)| label), 0, cx)
+        });
+        let key_observer = cx.observe(&key_dropdown, |view, dropdown, cx| {
+            view.flame_key = FLAME_KEYS[dropdown.read(cx).selected()].1;
+            view.flame.borrow_mut().take();
+            cx.notify();
+        });
         let load_task = load_in_background(
             cx,
             move || Profile::from_path(&path).map_err(|e| e.to_string()),
@@ -460,6 +481,9 @@ impl TraceView {
             graph_height: DEFAULT_GRAPH_HEIGHT,
             gutter_width: DEFAULT_GUTTER_WIDTH,
             view_mode: ViewMode::FlameChart,
+            flame_key: FlameKey::Name,
+            key_dropdown,
+            _key_observer: key_observer,
             flame: Rc::new(RefCell::new(None)),
             hover: None,
             flame_hover: None,
@@ -819,7 +843,7 @@ impl TraceView {
             return None;
         };
         if self.flame.borrow().is_none() {
-            *self.flame.borrow_mut() = Some(Rc::new(build_flame_graph(profile)));
+            *self.flame.borrow_mut() = Some(Rc::new(build_flame_graph(profile, self.flame_key)));
         }
         self.flame.borrow().clone()
     }
@@ -900,7 +924,21 @@ impl Render for TraceView {
                         self.view_mode == ViewMode::FlameGraph,
                         ViewMode::FlameGraph,
                         cx,
-                    ));
+                    ))
+                    .children((self.view_mode == ViewMode::FlameGraph).then(|| {
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap_1()
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .text_color(colors.disabled)
+                                    .child("Group by"),
+                            )
+                            .child(self.key_dropdown.clone())
+                    }));
                 let timeline = Self::timeline(
                     profile.clone(),
                     self.view.clone(),

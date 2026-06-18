@@ -1,5 +1,29 @@
 use bviz_trace_profile::{Profile, Slice};
 
+/// What slice attribute frames are merged by when aggregating the flame graph.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FlameKey {
+    /// The slice name (each distinct frame stays separate).
+    Name,
+    /// The action mnemonic, collapsing all actions of a kind together.
+    Mnemonic,
+    /// The slice category.
+    Category,
+}
+
+impl FlameKey {
+    /// The merge key for a slice: the attribute selected by `self`. A slice with
+    /// no mnemonic (phases, evaluator frames) falls back to its name so it stays
+    /// visible under `Mnemonic` keying rather than collapsing into one bucket.
+    fn of<'a>(self, slice: &'a Slice) -> &'a str {
+        match self {
+            FlameKey::Name => &slice.name,
+            FlameKey::Mnemonic => slice.args.mnemonic.as_deref().unwrap_or(&slice.name),
+            FlameKey::Category => &slice.category,
+        }
+    }
+}
+
 /// One node of the aggregated flame graph: a frame merged across every place it
 /// appears in the trace. `total_us` sums the merged occurrences' durations;
 /// `count` is how many occurrences merged here. Children are merged by name and
@@ -161,9 +185,9 @@ impl Builder {
 /// Merge a thread's slices into `root` as a call tree. Slices arrive sorted by
 /// start then longest-duration-first (the parser's nesting order), so a slice's
 /// parent is the deepest still-open ancestor on the stack.
-fn merge_thread(root: &mut Builder, slices: &[Slice]) {
-    // Stack of (frame name, occurrence end-time) for each open ancestor, indexed
-    // by depth; the builder for an open frame is reached by name from the root.
+fn merge_thread(root: &mut Builder, slices: &[Slice], key: FlameKey) {
+    // Stack of (merge key, occurrence end-time) for each open ancestor, indexed
+    // by depth; the builder for an open frame is reached by its key from the root.
     let mut stack: Vec<(String, i64)> = Vec::new();
     for s in slices {
         while stack.last().is_some_and(|&(_, end)| end <= s.start_us) {
@@ -171,11 +195,12 @@ fn merge_thread(root: &mut Builder, slices: &[Slice]) {
         }
         let parent = stack
             .iter()
-            .fold(&mut *root, |node, (name, _)| node.child(name, ""));
-        let node = parent.child(&s.name, &s.category);
+            .fold(&mut *root, |node, (k, _)| node.child(k, ""));
+        let k = key.of(s);
+        let node = parent.child(k, &s.category);
         node.total_us += s.dur_us;
         node.count += 1;
-        stack.push((s.name.clone(), s.start_us + s.dur_us));
+        stack.push((k.to_owned(), s.start_us + s.dur_us));
     }
 }
 
@@ -183,10 +208,10 @@ fn merge_thread(root: &mut Builder, slices: &[Slice]) {
 /// children are the merged top-level frames of every thread. The root's
 /// `total_us` sums all top-level slice durations and its `count` is the number
 /// of top-level occurrences across all threads.
-pub fn build_flame_graph(profile: &Profile) -> FlameNode {
+pub fn build_flame_graph(profile: &Profile, key: FlameKey) -> FlameNode {
     let mut root = Builder::new("All".to_owned(), String::new());
     for thread in &profile.threads {
-        merge_thread(&mut root, &thread.slices);
+        merge_thread(&mut root, &thread.slices, key);
     }
     root.total_us = root.children.iter().map(|c| c.total_us).sum();
     root.count = root.children.iter().map(|c| c.count).sum();
@@ -271,6 +296,25 @@ mod tests {
         }
     }
 
+    /// A slice in category `cat` carrying an action mnemonic.
+    fn action(name: &str, mnemonic: &str, start_us: i64, dur_us: i64, depth: u32) -> Slice {
+        Slice {
+            args: SliceArgs {
+                mnemonic: Some(mnemonic.to_owned()),
+                ..SliceArgs::default()
+            },
+            ..slice(name, start_us, dur_us, depth)
+        }
+    }
+
+    /// A slice in an explicit category, so category keying can be exercised.
+    fn categorized(name: &str, category: &str, start_us: i64, dur_us: i64, depth: u32) -> Slice {
+        Slice {
+            category: category.to_owned(),
+            ..slice(name, start_us, dur_us, depth)
+        }
+    }
+
     fn track(tid: i64, slices: Vec<Slice>) -> ThreadTrack {
         ThreadTrack {
             tid,
@@ -309,7 +353,7 @@ mod tests {
             track(1, vec![slice("a", 0, 100, 0)]),
             track(2, vec![slice("a", 0, 50, 0)]),
         ]);
-        let root = build_flame_graph(&p);
+        let root = build_flame_graph(&p, FlameKey::Name);
         assert_eq!(root.name, "All");
         assert_eq!(root.children.len(), 1);
         let a = &root.children[0];
@@ -326,13 +370,56 @@ mod tests {
             1,
             vec![slice("a", 0, 100, 0), slice("b", 100, 40, 0)],
         )]);
-        let root = build_flame_graph(&p);
+        let root = build_flame_graph(&p, FlameKey::Name);
         assert_eq!(root.children.len(), 2);
         // Widest first: a (100) before b (40).
         assert_eq!(root.children[0].name, "a");
         assert_eq!(root.children[1].name, "b");
         assert_eq!(root.total_us, 140);
         assert_eq!(root.count, 2);
+    }
+
+    #[test]
+    fn mnemonic_keying_merges_actions_of_a_kind() {
+        // Two differently-named CppCompile actions and one slice with no
+        // mnemonic; by mnemonic the two actions merge and the bare slice keys by
+        // its name.
+        let p = profile(vec![track(
+            1,
+            vec![
+                action("compile foo.cc", "CppCompile", 0, 100, 0),
+                action("compile bar.cc", "CppCompile", 100, 50, 0),
+                slice("evaluate", 200, 30, 0),
+            ],
+        )]);
+        let root = build_flame_graph(&p, FlameKey::Mnemonic);
+        assert_eq!(root.children.len(), 2);
+        let compile = child(&root, "CppCompile");
+        assert_eq!(compile.total_us, 150);
+        assert_eq!(compile.count, 2);
+        let evaluate = child(&root, "evaluate");
+        assert_eq!(evaluate.total_us, 30);
+        assert_eq!(evaluate.count, 1);
+    }
+
+    #[test]
+    fn category_keying_merges_by_category() {
+        // Distinct names in shared categories merge by category.
+        let p = profile(vec![track(
+            1,
+            vec![
+                categorized("a", "action", 0, 100, 0),
+                categorized("b", "action", 100, 40, 0),
+                categorized("c", "skyframe", 200, 60, 0),
+            ],
+        )]);
+        let root = build_flame_graph(&p, FlameKey::Category);
+        assert_eq!(root.children.len(), 2);
+        let action = child(&root, "action");
+        assert_eq!(action.total_us, 140);
+        assert_eq!(action.count, 2);
+        assert_eq!(action.category, "action");
+        assert_eq!(child(&root, "skyframe").total_us, 60);
     }
 
     #[test]
@@ -347,7 +434,7 @@ mod tests {
                 slice("c", 40, 50, 1),
             ],
         )]);
-        let root = build_flame_graph(&p);
+        let root = build_flame_graph(&p, FlameKey::Name);
         let a = child(&root, "a");
         assert_eq!(a.depth, 1);
         assert_eq!(a.children.len(), 2);
@@ -373,7 +460,7 @@ mod tests {
                 slice("b", 100, 30, 1),
             ],
         )]);
-        let root = build_flame_graph(&p);
+        let root = build_flame_graph(&p, FlameKey::Name);
         let a = child(&root, "a");
         assert_eq!(a.count, 2);
         assert_eq!(a.total_us, 200);
@@ -398,8 +485,8 @@ mod tests {
         let mut b_slices = shuffled;
         a_slices.sort_by(|x, y| x.start_us.cmp(&y.start_us).then(y.dur_us.cmp(&x.dur_us)));
         b_slices.sort_by(|x, y| x.start_us.cmp(&y.start_us).then(y.dur_us.cmp(&x.dur_us)));
-        let ra = build_flame_graph(&profile(vec![track(1, a_slices)]));
-        let rb = build_flame_graph(&profile(vec![track(1, b_slices)]));
+        let ra = build_flame_graph(&profile(vec![track(1, a_slices)]), FlameKey::Name);
+        let rb = build_flame_graph(&profile(vec![track(1, b_slices)]), FlameKey::Name);
         assert_eq!(ra, rb);
     }
 
@@ -410,7 +497,7 @@ mod tests {
             1,
             vec![slice("a", 0, 100, 0), slice("b", 100, 50, 0)],
         )]);
-        let root = build_flame_graph(&p);
+        let root = build_flame_graph(&p, FlameKey::Name);
         let boxes = lay_out_flame(&root, 300.0, &METRICS, 0.0);
         let root_box = &boxes[0];
         assert_eq!(root_box.w, 300.0);
@@ -432,7 +519,7 @@ mod tests {
             1,
             vec![slice("wide", 0, 990, 0), slice("thin", 990, 10, 0)],
         )]);
-        let root = build_flame_graph(&p);
+        let root = build_flame_graph(&p, FlameKey::Name);
         // 1000us over 100px: thin is 1px wide, below a 5px floor.
         let boxes = lay_out_flame(&root, 100.0, &METRICS, 5.0);
         assert!(boxes.iter().any(|b| b.name == "wide"));
@@ -449,7 +536,7 @@ mod tests {
             1,
             vec![slice("a", 0, 100, 0), slice("b", 0, 40, 1)],
         )]);
-        let root = build_flame_graph(&p);
+        let root = build_flame_graph(&p, FlameKey::Name);
         // root depth 0, a depth 1, b depth 2 -> 3 rows.
         assert_eq!(flame_height(&root, &METRICS), 30.0);
     }
