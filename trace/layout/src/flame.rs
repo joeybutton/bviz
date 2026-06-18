@@ -1,45 +1,102 @@
-use bviz_trace_profile::{Profile, Slice};
+use bviz_trace_profile::{phase_intervals, LaneClass, Profile, Slice, WorkClass};
 
-/// What slice attribute frames are merged by when aggregating the flame graph.
+/// How a slice's contribution is split into a path of frames when aggregating
+/// the flame graph. Multi-segment modes nest the second key under the first
+/// (root→leaf).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FlameKey {
-    /// The slice name (each distinct frame stays separate).
-    Name,
-    /// The action mnemonic, collapsing all actions of a kind together.
+pub enum GroupMode {
+    /// Mnemonic-or-bucket only.
     Mnemonic,
-    /// The slice category.
-    Category,
+    /// Phase → mnemonic-or-bucket.
+    PhaseMnemonic,
+    /// Work class only.
+    WorkClass,
+    /// Work class → mnemonic-or-bucket.
+    ClassMnemonic,
+    /// Mnemonic-or-bucket → target.
+    Target,
 }
 
-impl FlameKey {
-    /// The merge key for a slice: the attribute selected by `self`. A slice with
-    /// no mnemonic (phases, evaluator frames) falls back to its name so it stays
-    /// visible under `Mnemonic` keying rather than collapsing into one bucket.
-    pub(crate) fn of<'a>(self, slice: &'a Slice) -> &'a str {
+/// Which thread lanes an aggregation draws from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Scope {
+    /// Only the synthetic critical-path lane (tid 0).
+    CriticalPath,
+    /// Worker lanes — the actions actually executed.
+    Execution,
+    /// The main thread and skyframe evaluators — analysis-phase work.
+    Analysis,
+    /// Every real lane. Excludes the critical-path lane, whose slices are
+    /// redirected copies of worker time; counting both would double-count.
+    All,
+}
+
+impl Scope {
+    /// Whether a thread of this lane class is included in the aggregation.
+    pub fn includes(self, lane: LaneClass) -> bool {
         match self {
-            FlameKey::Name => &slice.name,
-            FlameKey::Mnemonic => slice.args.mnemonic.as_deref().unwrap_or(&slice.name),
-            FlameKey::Category => &slice.category,
+            Scope::CriticalPath => lane == LaneClass::CriticalPath,
+            Scope::Execution => lane == LaneClass::Worker,
+            Scope::Analysis => matches!(lane, LaneClass::Main | LaneClass::SkyframeEvaluator),
+            Scope::All => lane != LaneClass::CriticalPath,
         }
     }
 }
 
+/// One key segment of a slice's aggregation path: a frame label and the work
+/// class it carries (for coloring and class-keyed merging).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Segment {
+    label: String,
+    work_class: WorkClass,
+}
+
+/// The mnemonic-or-bucket label for a slice: its action mnemonic if present,
+/// else a parenthesized work-class bucket so non-action frames (phases,
+/// evaluator, locks) collapse by class rather than scattering by name.
+fn mnemonic_or_bucket(slice: &Slice) -> Segment {
+    let label = match &slice.args.mnemonic {
+        Some(m) => m.clone(),
+        None => match slice.work_class {
+            WorkClass::Cpu => "(cpu)",
+            WorkClass::Remote => "(remote)",
+            WorkClass::Io => "(io)",
+            WorkClass::Wait => "(wait)",
+            WorkClass::Gc => "(gc)",
+            WorkClass::Meta => "(meta)",
+        }
+        .to_owned(),
+    };
+    Segment {
+        label,
+        work_class: slice.work_class,
+    }
+}
+
+/// The work-class label for a slice (no parens; the class itself, not a bucket).
+fn work_class_label(class: WorkClass) -> &'static str {
+    match class {
+        WorkClass::Cpu => "cpu",
+        WorkClass::Remote => "remote",
+        WorkClass::Io => "io",
+        WorkClass::Wait => "wait",
+        WorkClass::Gc => "gc",
+        WorkClass::Meta => "meta",
+    }
+}
+
 /// One node of the aggregated flame graph: a frame merged across every place it
-/// appears in the trace. `total_us` sums the merged occurrences' durations;
-/// `count` is how many occurrences merged here. Children are merged by name and
-/// sorted widest-first.
+/// appears in the trace by semantic-path identity. `total_us` is inclusive (own
+/// time plus all descendants'); `self_us` is the own time
+/// (`total_us − Σ children.total_us`); `count` is how many slice occurrences
+/// merged at this node. Children are merged by `(label, work_class)` and sorted
+/// widest-first.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FlameNode {
     pub name: String,
-    pub category: String,
     pub total_us: i64,
-    /// The duration this node's box width represents: at least its own
-    /// `total_us`, but widened to its children's combined width when they
-    /// overflow it. Source slices that start inside a parent but end after it
-    /// (Bazel's catch-all "various events"/"unknown event" frames do this) would
-    /// otherwise sum to more than the parent's own duration and render wider than
-    /// it; clamping the parent up keeps every child within its parent.
-    pub width_us: i64,
+    pub self_us: i64,
+    pub work_class: WorkClass,
     pub count: u32,
     pub depth: u32,
     pub children: Vec<FlameNode>,
@@ -132,39 +189,45 @@ pub struct FlameBox {
     pub h: f32,
     pub depth: u32,
     pub name: String,
-    pub category: String,
     pub total_us: i64,
+    pub self_us: i64,
+    pub work_class: WorkClass,
     pub count: u32,
 }
 
-/// A node still under construction: children keyed by frame name for merging.
+/// A node still under construction: children keyed by `(label, work_class)` for
+/// merging by semantic-path identity.
 struct Builder {
     name: String,
-    category: String,
+    work_class: WorkClass,
     total_us: i64,
     count: u32,
     children: Vec<Builder>,
 }
 
 impl Builder {
-    fn new(name: String, category: String) -> Self {
+    fn new(name: String, work_class: WorkClass) -> Self {
         Builder {
             name,
-            category,
+            work_class,
             total_us: 0,
             count: 0,
             children: Vec::new(),
         }
     }
 
-    /// Find the child with this name, or append a fresh one. Category travels
-    /// with the name; the first occurrence wins.
-    fn child(&mut self, name: &str, category: &str) -> &mut Builder {
-        let idx = match self.children.iter().position(|c| c.name == name) {
+    /// Find the child matching this segment, or append a fresh one. The work
+    /// class travels with the label; the first occurrence wins.
+    fn child(&mut self, seg: &Segment) -> &mut Builder {
+        let idx = match self
+            .children
+            .iter()
+            .position(|c| c.name == seg.label && c.work_class == seg.work_class)
+        {
             Some(i) => i,
             None => {
                 self.children
-                    .push(Builder::new(name.to_owned(), category.to_owned()));
+                    .push(Builder::new(seg.label.clone(), seg.work_class));
                 self.children.len() - 1
             }
         };
@@ -172,7 +235,8 @@ impl Builder {
     }
 
     /// Sort children widest-first, breaking ties by name so the layout is
-    /// independent of the non-deterministic input order, then freeze to a node.
+    /// independent of the non-deterministic input order, then freeze to a node,
+    /// computing self time as the own total minus the children's totals.
     fn finish(mut self, depth: u32) -> FlameNode {
         self.children.sort_by(|a, b| {
             b.total_us
@@ -184,12 +248,12 @@ impl Builder {
             .into_iter()
             .map(|c| c.finish(depth + 1))
             .collect();
-        let children_us: i64 = children.iter().map(|c| c.width_us).sum();
+        let children_us: i64 = children.iter().map(|c| c.total_us).sum();
         FlameNode {
             name: self.name,
-            category: self.category,
             total_us: self.total_us,
-            width_us: self.total_us.max(children_us),
+            self_us: self.total_us - children_us,
+            work_class: self.work_class,
             count: self.count,
             depth,
             children,
@@ -197,55 +261,102 @@ impl Builder {
     }
 }
 
-/// Merge a thread's slices into `root` as a call tree. Slices arrive sorted by
-/// start then longest-duration-first (the parser's nesting order), so a slice's
-/// parent is the deepest still-open ancestor on the stack.
-fn merge_thread(root: &mut Builder, slices: &[Slice], key: FlameKey) {
-    // Stack of (merge key, occurrence end-time) for each open ancestor, indexed
-    // by depth; the builder for an open frame is reached by its key from the root.
-    let mut stack: Vec<(String, i64)> = Vec::new();
-    for s in slices {
-        while stack.last().is_some_and(|&(_, end)| end <= s.start_us) {
-            stack.pop();
-        }
-        let parent = stack
-            .iter()
-            .fold(&mut *root, |node, (k, _)| node.child(k, ""));
-        let k = key.of(s);
-        let node = parent.child(k, &s.category);
-        node.total_us += s.dur_us;
-        node.count += 1;
-        stack.push((k.to_owned(), s.start_us + s.dur_us));
+/// The semantic-path segments a slice contributes under `mode`. `phase_of`
+/// resolves the slice's start to a phase name (only consulted by phase modes).
+fn segments(slice: &Slice, mode: GroupMode, phase_of: impl Fn(i64) -> String) -> Vec<Segment> {
+    let class = Segment {
+        label: work_class_label(slice.work_class).to_owned(),
+        work_class: slice.work_class,
+    };
+    match mode {
+        GroupMode::Mnemonic => vec![mnemonic_or_bucket(slice)],
+        GroupMode::PhaseMnemonic => vec![
+            Segment {
+                label: phase_of(slice.start_us),
+                work_class: WorkClass::Meta,
+            },
+            mnemonic_or_bucket(slice),
+        ],
+        GroupMode::WorkClass => vec![class],
+        GroupMode::ClassMnemonic => vec![class, mnemonic_or_bucket(slice)],
+        GroupMode::Target => vec![
+            mnemonic_or_bucket(slice),
+            Segment {
+                label: slice
+                    .args
+                    .target
+                    .clone()
+                    .unwrap_or_else(|| "(no target)".to_owned()),
+                work_class: slice.work_class,
+            },
+        ],
     }
 }
 
-/// Build the aggregated flame graph for a profile: a synthetic root whose
-/// children are the merged top-level frames. `scope` of `Some(i)` aggregates
-/// only `profile.threads[i]` (the root is labeled by that thread); `None`
-/// aggregates every thread (the root is labeled "All"). The root's `total_us`
-/// sums all top-level slice durations and its `count` is the number of
-/// top-level occurrences across the included threads.
-pub fn build_flame_graph(profile: &Profile, key: FlameKey, scope: Option<usize>) -> FlameNode {
-    let root_name = match scope {
-        Some(i) => profile.threads[i].name.clone(),
-        None => "All".to_owned(),
+/// The leaf segment of a slice's `mode` path — the label a flat per-leaf table
+/// groups it under, with the work class to color the row. Phase modes never
+/// reach this (the table groups by the action leaf), so phase resolution is
+/// unneeded here.
+pub(crate) fn leaf_label(slice: &Slice, mode: GroupMode) -> (String, WorkClass) {
+    let seg = match mode {
+        GroupMode::WorkClass => Segment {
+            label: work_class_label(slice.work_class).to_owned(),
+            work_class: slice.work_class,
+        },
+        GroupMode::Target => Segment {
+            label: slice
+                .args
+                .target
+                .clone()
+                .unwrap_or_else(|| "(no target)".to_owned()),
+            work_class: slice.work_class,
+        },
+        GroupMode::Mnemonic | GroupMode::PhaseMnemonic | GroupMode::ClassMnemonic => {
+            mnemonic_or_bucket(slice)
+        }
     };
-    let mut root = Builder::new(root_name, String::new());
-    let threads = match scope {
-        Some(i) => &profile.threads[i..=i],
-        None => &profile.threads[..],
+    (seg.label, seg.work_class)
+}
+
+/// Build the aggregated flame graph for a profile by semantic-stack identity:
+/// each in-scope slice contributes its duration along a path of `mode` key
+/// segments, and identical paths merge into one frame. The synthetic root "All"
+/// accumulates the duration of every in-scope slice, so children always sum to
+/// at most their parent and self time is non-negative by construction.
+pub fn build_flame_graph(profile: &Profile, mode: GroupMode, scope: Scope) -> FlameNode {
+    let intervals = match mode {
+        GroupMode::PhaseMnemonic => phase_intervals(profile),
+        _ => Vec::new(),
     };
-    for thread in threads {
-        merge_thread(&mut root, &thread.slices, key);
+    let phase_of = |start_us: i64| -> String {
+        intervals
+            .iter()
+            .find(|&&(_, s, e)| start_us >= s && start_us < e)
+            .map_or_else(|| "(no phase)".to_owned(), |(name, _, _)| name.clone())
+    };
+
+    let mut root = Builder::new("All".to_owned(), WorkClass::Meta);
+    for thread in &profile.threads {
+        if !scope.includes(thread.lane_class) {
+            continue;
+        }
+        for s in &thread.slices {
+            root.total_us += s.dur_us;
+            let mut node = &mut root;
+            let segs = segments(s, mode, phase_of);
+            for seg in &segs {
+                node = node.child(seg);
+                node.total_us += s.dur_us;
+            }
+            node.count += 1;
+        }
     }
-    root.total_us = root.children.iter().map(|c| c.total_us).sum();
-    root.count = root.children.iter().map(|c| c.count).sum();
     root.finish(0)
 }
 
 /// Lay the tree into a content rectangle of the given width. The root spans the
 /// full width; each node's children are placed left-to-right with width
-/// proportional to `width_us`, so the right-hand remainder is the parent's self
+/// proportional to `total_us`, so the right-hand remainder is the parent's self
 /// time (zero when children fill the parent). Depth maps to y via `row_height`.
 /// Boxes narrower than `min_px` are omitted but still consume their horizontal
 /// share so siblings stay placed. Boxes come back in paint order, parents before
@@ -277,17 +388,18 @@ fn place(
             h: metrics.row_height,
             depth: node.depth,
             name: node.name.clone(),
-            category: node.category.clone(),
             total_us: node.total_us,
+            self_us: node.self_us,
+            work_class: node.work_class,
             count: node.count,
         });
     }
-    if node.width_us == 0 {
+    if node.total_us == 0 {
         return;
     }
     let mut cursor = x;
     for child in &node.children {
-        let cw = w * child.width_us as f32 / node.width_us as f32;
+        let cw = w * child.total_us as f32 / node.total_us as f32;
         place(child, cursor, cw, metrics, min_px, out);
         cursor += cw;
     }
@@ -295,7 +407,7 @@ fn place(
 
 /// The box at `(target_depth, x_px)` in a layout of `root` into `width` pixels,
 /// found by descending the tree the same way [`lay_out_flame`] places boxes —
-/// children left-to-right proportional to `width_us` in their stored order — so
+/// children left-to-right proportional to `total_us` in their stored order — so
 /// the result agrees with the corresponding `lay_out_flame` box without building
 /// the full box vector. Returns `None` when `x_px` is outside `[0, width)`, no
 /// node sits at that depth under it, or the matching box is narrower than
@@ -326,12 +438,13 @@ pub fn flame_box_at(
                 h: metrics.row_height,
                 depth: node.depth,
                 name: node.name.clone(),
-                category: node.category.clone(),
                 total_us: node.total_us,
+                self_us: node.self_us,
+                work_class: node.work_class,
                 count: node.count,
             });
         }
-        if node.width_us == 0 {
+        if node.total_us == 0 {
             return None;
         }
         // Descend into the child whose proportional x-extent contains x_px,
@@ -339,7 +452,7 @@ pub fn flame_box_at(
         let mut cursor = x;
         let mut next = None;
         for child in &node.children {
-            let cw = w * child.width_us as f32 / node.width_us as f32;
+            let cw = w * child.total_us as f32 / node.total_us as f32;
             if x_px >= cursor && x_px < cursor + cw {
                 next = Some((child, cursor, cw));
                 break;
@@ -369,45 +482,40 @@ fn max_depth(node: &FlameNode) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bviz_trace_profile::{Metadata, SliceArgs, ThreadTrack, TimeSpan};
+    use bviz_trace_profile::{Metadata, PhaseMarker, SliceArgs, ThreadTrack, TimeSpan};
 
-    fn slice(name: &str, start_us: i64, dur_us: i64, depth: u32) -> Slice {
+    /// A slice whose work class is taken from its `category` via `work_class`.
+    fn slice(name: &str, category: &str, start_us: i64, dur_us: i64, depth: u32) -> Slice {
         Slice {
             name: name.to_owned(),
-            category: "cat".to_owned(),
+            category: category.to_owned(),
             start_us,
             dur_us,
             depth,
             args: SliceArgs::default(),
+            work_class: bviz_trace_profile::work_class(category),
         }
     }
 
-    /// A slice in category `cat` carrying an action mnemonic.
-    fn action(name: &str, mnemonic: &str, start_us: i64, dur_us: i64, depth: u32) -> Slice {
+    /// A CPU-class slice carrying an action mnemonic.
+    fn action(mnemonic: &str, start_us: i64, dur_us: i64) -> Slice {
         Slice {
             args: SliceArgs {
                 mnemonic: Some(mnemonic.to_owned()),
                 ..SliceArgs::default()
             },
-            ..slice(name, start_us, dur_us, depth)
+            ..slice(mnemonic, "local action execution", start_us, dur_us, 0)
         }
     }
 
-    /// A slice in an explicit category, so category keying can be exercised.
-    fn categorized(name: &str, category: &str, start_us: i64, dur_us: i64, depth: u32) -> Slice {
-        Slice {
-            category: category.to_owned(),
-            ..slice(name, start_us, dur_us, depth)
-        }
-    }
-
-    fn track(tid: i64, slices: Vec<Slice>) -> ThreadTrack {
+    fn track(tid: i64, lane_class: LaneClass, slices: Vec<Slice>) -> ThreadTrack {
         ThreadTrack {
             tid,
             name: format!("t{tid}"),
             sort_index: tid,
             slices,
             max_depth: 0,
+            lane_class,
         }
     }
 
@@ -434,176 +542,169 @@ mod tests {
     const METRICS: FlameMetrics = FlameMetrics { row_height: 10.0 };
 
     #[test]
-    fn merges_identical_frames_across_threads() {
+    fn rustc_merges_into_one_node_regardless_of_position() {
+        // Identical "Rustc" actions scattered across threads, depths, and
+        // overlapping times all collapse into a single frame under the root —
+        // the headline fix over time-containment, which split them apart.
         let p = profile(vec![
-            track(1, vec![slice("a", 0, 100, 0)]),
-            track(2, vec![slice("a", 0, 50, 0)]),
+            track(
+                7,
+                LaneClass::Worker,
+                vec![action("Rustc", 0, 100), action("Rustc", 50, 80)],
+            ),
+            track(8, LaneClass::Worker, vec![action("Rustc", 0, 60)]),
         ]);
-        let root = build_flame_graph(&p, FlameKey::Name, None);
+        let root = build_flame_graph(&p, GroupMode::Mnemonic, Scope::All);
         assert_eq!(root.name, "All");
         assert_eq!(root.children.len(), 1);
-        let a = &root.children[0];
-        assert_eq!(a.name, "a");
-        assert_eq!(a.total_us, 150);
-        assert_eq!(a.count, 2);
-        assert_eq!(root.total_us, 150);
-        assert_eq!(root.count, 2);
+        let rustc = &root.children[0];
+        assert_eq!(rustc.name, "Rustc");
+        assert_eq!(rustc.total_us, 240);
+        assert_eq!(rustc.count, 3);
+        assert_eq!(rustc.work_class, WorkClass::Cpu);
+        assert_eq!(root.total_us, 240);
     }
 
     #[test]
-    fn scoping_to_one_thread_excludes_the_others() {
+    fn mnemonicless_slice_buckets_by_work_class() {
+        // A slice with no mnemonic buckets under its work class, not its name.
+        let p = profile(vec![track(
+            1,
+            LaneClass::Worker,
+            vec![
+                action("CppCompile", 0, 100),
+                slice("borrowing a worker", "borrowing a worker", 100, 30, 0),
+            ],
+        )]);
+        let root = build_flame_graph(&p, GroupMode::Mnemonic, Scope::All);
+        assert_eq!(child(&root, "CppCompile").total_us, 100);
+        let wait = child(&root, "(wait)");
+        assert_eq!(wait.total_us, 30);
+        assert_eq!(wait.work_class, WorkClass::Wait);
+    }
+
+    #[test]
+    fn phase_mnemonic_nests_mnemonic_under_its_phase() {
+        let mut p = profile(vec![track(
+            1,
+            LaneClass::Worker,
+            vec![action("CppCompile", 10, 50), action("Rustc", 120, 40)],
+        )]);
+        p.phase_markers = vec![
+            PhaseMarker {
+                name: "analyze".to_owned(),
+                start_us: 0,
+            },
+            PhaseMarker {
+                name: "execute".to_owned(),
+                start_us: 100,
+            },
+        ];
+        let root = build_flame_graph(&p, GroupMode::PhaseMnemonic, Scope::All);
+        let analyze = child(&root, "analyze");
+        assert_eq!(analyze.work_class, WorkClass::Meta);
+        assert_eq!(child(analyze, "CppCompile").total_us, 50);
+        let execute = child(&root, "execute");
+        assert_eq!(child(execute, "Rustc").total_us, 40);
+    }
+
+    #[test]
+    fn work_class_mode_sums_per_class_and_class_mnemonic_nests() {
+        let p = profile(vec![track(
+            1,
+            LaneClass::Worker,
+            vec![
+                action("CppCompile", 0, 100),
+                action("Rustc", 100, 50),
+                slice("remote", "remote action execution", 200, 30, 0),
+            ],
+        )]);
+        let by_class = build_flame_graph(&p, GroupMode::WorkClass, Scope::All);
+        assert_eq!(child(&by_class, "cpu").total_us, 150);
+        assert_eq!(child(&by_class, "remote").total_us, 30);
+        let nested = build_flame_graph(&p, GroupMode::ClassMnemonic, Scope::All);
+        let cpu = child(&nested, "cpu");
+        assert_eq!(cpu.total_us, 150);
+        assert_eq!(child(cpu, "CppCompile").total_us, 100);
+        assert_eq!(child(cpu, "Rustc").total_us, 50);
+    }
+
+    #[test]
+    fn scope_selects_lanes() {
         let p = profile(vec![
-            track(1, vec![slice("a", 0, 100, 0)]),
-            track(2, vec![slice("b", 0, 50, 0)]),
+            track(0, LaneClass::CriticalPath, vec![action("Rustc", 0, 10)]),
+            track(7, LaneClass::Main, vec![action("CppCompile", 0, 20)]),
+            track(8, LaneClass::Worker, vec![action("Rustc", 0, 40)]),
         ]);
-        let root = build_flame_graph(&p, FlameKey::Name, Some(1));
-        // Scoped to thread index 1: only its slice "b", root labeled by it.
-        assert_eq!(root.name, "t2");
-        assert_eq!(root.children.len(), 1);
-        assert_eq!(root.children[0].name, "b");
-        assert_eq!(root.total_us, 50);
+        // CriticalPath: only the tid:0 lane.
+        let crit = build_flame_graph(&p, GroupMode::Mnemonic, Scope::CriticalPath);
+        assert_eq!(crit.total_us, 10);
+        // Execution: only workers, excluding Main.
+        let exec = build_flame_graph(&p, GroupMode::Mnemonic, Scope::Execution);
+        assert_eq!(exec.total_us, 40);
+        assert!(exec.children.iter().all(|c| c.name == "Rustc"));
+        // All: every real lane but the critical path (10 omitted).
+        let all = build_flame_graph(&p, GroupMode::Mnemonic, Scope::All);
+        assert_eq!(all.total_us, 60);
     }
 
     #[test]
-    fn distinct_top_level_frames_stay_separate() {
+    fn self_us_is_total_minus_children_and_children_fit() {
+        // ClassMnemonic: cpu (150) holds CppCompile (100) + Rustc (50), so the
+        // cpu node's self time is zero and the root's self time is its own.
         let p = profile(vec![track(
             1,
-            vec![slice("a", 0, 100, 0), slice("b", 100, 40, 0)],
+            LaneClass::Worker,
+            vec![action("CppCompile", 0, 100), action("Rustc", 100, 50)],
         )]);
-        let root = build_flame_graph(&p, FlameKey::Name, None);
-        assert_eq!(root.children.len(), 2);
-        // Widest first: a (100) before b (40).
-        assert_eq!(root.children[0].name, "a");
-        assert_eq!(root.children[1].name, "b");
-        assert_eq!(root.total_us, 140);
-        assert_eq!(root.count, 2);
-    }
-
-    #[test]
-    fn mnemonic_keying_merges_actions_of_a_kind() {
-        // Two differently-named CppCompile actions and one slice with no
-        // mnemonic; by mnemonic the two actions merge and the bare slice keys by
-        // its name.
-        let p = profile(vec![track(
-            1,
-            vec![
-                action("compile foo.cc", "CppCompile", 0, 100, 0),
-                action("compile bar.cc", "CppCompile", 100, 50, 0),
-                slice("evaluate", 200, 30, 0),
-            ],
-        )]);
-        let root = build_flame_graph(&p, FlameKey::Mnemonic, None);
-        assert_eq!(root.children.len(), 2);
-        let compile = child(&root, "CppCompile");
-        assert_eq!(compile.total_us, 150);
-        assert_eq!(compile.count, 2);
-        let evaluate = child(&root, "evaluate");
-        assert_eq!(evaluate.total_us, 30);
-        assert_eq!(evaluate.count, 1);
-    }
-
-    #[test]
-    fn category_keying_merges_by_category() {
-        // Distinct names in shared categories merge by category.
-        let p = profile(vec![track(
-            1,
-            vec![
-                categorized("a", "action", 0, 100, 0),
-                categorized("b", "action", 100, 40, 0),
-                categorized("c", "skyframe", 200, 60, 0),
-            ],
-        )]);
-        let root = build_flame_graph(&p, FlameKey::Category, None);
-        assert_eq!(root.children.len(), 2);
-        let action = child(&root, "action");
-        assert_eq!(action.total_us, 140);
-        assert_eq!(action.count, 2);
-        assert_eq!(action.category, "action");
-        assert_eq!(child(&root, "skyframe").total_us, 60);
-    }
-
-    #[test]
-    fn reconstructs_nesting_by_time_containment() {
-        // a [0,100) contains b [0,40) and c [40,90); b contains d [0,20).
-        let p = profile(vec![track(
-            1,
-            vec![
-                slice("a", 0, 100, 0),
-                slice("b", 0, 40, 1),
-                slice("d", 0, 20, 2),
-                slice("c", 40, 50, 1),
-            ],
-        )]);
-        let root = build_flame_graph(&p, FlameKey::Name, None);
-        let a = child(&root, "a");
-        assert_eq!(a.depth, 1);
-        assert_eq!(a.children.len(), 2);
-        let b = child(a, "b");
-        let c = child(a, "c");
-        assert_eq!(b.depth, 2);
-        assert_eq!(c.depth, 2);
-        let d = child(b, "d");
-        assert_eq!(d.depth, 3);
-        assert_eq!(d.total_us, 20);
-        assert!(c.children.is_empty());
-    }
-
-    #[test]
-    fn sibling_occurrences_merge_under_their_parent() {
-        // Two calls to a, each calling b once: a.count=2, a's b.count=2.
-        let p = profile(vec![track(
-            1,
-            vec![
-                slice("a", 0, 100, 0),
-                slice("b", 0, 30, 1),
-                slice("a", 100, 100, 0),
-                slice("b", 100, 30, 1),
-            ],
-        )]);
-        let root = build_flame_graph(&p, FlameKey::Name, None);
-        let a = child(&root, "a");
-        assert_eq!(a.count, 2);
-        assert_eq!(a.total_us, 200);
-        let b = child(a, "b");
-        assert_eq!(b.count, 2);
-        assert_eq!(b.total_us, 60);
+        let root = build_flame_graph(&p, GroupMode::ClassMnemonic, Scope::All);
+        let cpu = child(&root, "cpu");
+        let children_sum: i64 = cpu.children.iter().map(|c| c.total_us).sum();
+        assert_eq!(cpu.self_us, cpu.total_us - children_sum);
+        assert_eq!(cpu.self_us, 0);
+        assert!(children_sum <= cpu.total_us);
+        assert_eq!(root.self_us, root.total_us - cpu.total_us);
+        assert_eq!(root.self_us, 0);
     }
 
     #[test]
     fn build_is_independent_of_slice_order() {
         let ordered = vec![
-            slice("a", 0, 100, 0),
-            slice("b", 0, 40, 1),
-            slice("c", 40, 50, 1),
-            slice("z", 200, 90, 0),
+            action("CppCompile", 0, 100),
+            action("Rustc", 100, 40),
+            action("CppCompile", 200, 50),
+            slice("wait", "thread wait", 300, 90, 0),
         ];
-        let mut shuffled = ordered.clone();
-        shuffled.reverse();
-        // The parser sorts each thread's slices; mirror that before building so
-        // nesting is reconstructed, then check the merged tree matches.
-        let mut a_slices = ordered.clone();
-        let mut b_slices = shuffled;
-        a_slices.sort_by(|x, y| x.start_us.cmp(&y.start_us).then(y.dur_us.cmp(&x.dur_us)));
-        b_slices.sort_by(|x, y| x.start_us.cmp(&y.start_us).then(y.dur_us.cmp(&x.dur_us)));
-        let ra = build_flame_graph(&profile(vec![track(1, a_slices)]), FlameKey::Name, None);
-        let rb = build_flame_graph(&profile(vec![track(1, b_slices)]), FlameKey::Name, None);
+        let mut reversed = ordered.clone();
+        reversed.reverse();
+        let ra = build_flame_graph(
+            &profile(vec![track(1, LaneClass::Worker, ordered)]),
+            GroupMode::ClassMnemonic,
+            Scope::All,
+        );
+        let rb = build_flame_graph(
+            &profile(vec![track(1, LaneClass::Worker, reversed)]),
+            GroupMode::ClassMnemonic,
+            Scope::All,
+        );
         assert_eq!(ra, rb);
     }
 
     #[test]
     fn layout_widths_are_proportional_and_bounded() {
-        // root total 150: a=100, b=50 -> widths 200, 100 of a 300px span.
+        // root total 150: CppCompile=100, Rustc=50 -> widths 200, 100 of 300px.
         let p = profile(vec![track(
             1,
-            vec![slice("a", 0, 100, 0), slice("b", 100, 50, 0)],
+            LaneClass::Worker,
+            vec![action("CppCompile", 0, 100), action("Rustc", 100, 50)],
         )]);
-        let root = build_flame_graph(&p, FlameKey::Name, None);
+        let root = build_flame_graph(&p, GroupMode::Mnemonic, Scope::All);
         let boxes = lay_out_flame(&root, 300.0, &METRICS, 0.0);
         let root_box = &boxes[0];
         assert_eq!(root_box.w, 300.0);
         assert_eq!(root_box.y, 0.0);
-        let a = boxes.iter().find(|b| b.name == "a").unwrap();
-        let b = boxes.iter().find(|b| b.name == "b").unwrap();
+        let a = boxes.iter().find(|b| b.name == "CppCompile").unwrap();
+        let b = boxes.iter().find(|b| b.name == "Rustc").unwrap();
         assert_eq!(a.w, 200.0);
         assert_eq!(b.w, 100.0);
         assert_eq!(a.x, 0.0);
@@ -617,70 +718,72 @@ mod tests {
     fn sub_min_boxes_are_dropped_without_shifting_siblings() {
         let p = profile(vec![track(
             1,
-            vec![slice("wide", 0, 990, 0), slice("thin", 990, 10, 0)],
+            LaneClass::Worker,
+            vec![action("Wide", 0, 990), action("Thin", 990, 10)],
         )]);
-        let root = build_flame_graph(&p, FlameKey::Name, None);
-        // 1000us over 100px: thin is 1px wide, below a 5px floor.
+        let root = build_flame_graph(&p, GroupMode::Mnemonic, Scope::All);
+        // 1000us over 100px: Thin is 1px wide, below a 5px floor.
         let boxes = lay_out_flame(&root, 100.0, &METRICS, 5.0);
-        assert!(boxes.iter().any(|b| b.name == "wide"));
-        assert!(!boxes.iter().any(|b| b.name == "thin"));
-        let wide = boxes.iter().find(|b| b.name == "wide").unwrap();
-        // Wide keeps its proportional slot; thin's omission does not move it.
+        assert!(boxes.iter().any(|b| b.name == "Wide"));
+        assert!(!boxes.iter().any(|b| b.name == "Thin"));
+        let wide = boxes.iter().find(|b| b.name == "Wide").unwrap();
+        // Wide keeps its proportional slot; Thin's omission does not move it.
         assert_eq!(wide.x, 0.0);
         assert!((wide.w - 99.0).abs() < 1e-3);
     }
 
     #[test]
-    fn child_overflowing_its_parent_never_renders_wider() {
-        // c starts inside p but runs past its end (the catch-all "various events"
-        // pattern): its 150us exceeds p's own 100us. width_us widens p to hold it.
+    fn children_never_exceed_their_parent() {
+        // Semantic-path aggregation can't produce a child wider than its parent:
+        // each slice adds the same duration to the leaf and every ancestor, so a
+        // node's total is at least the sum of its children's totals.
         let p = profile(vec![track(
             1,
-            vec![slice("p", 0, 100, 0), slice("c", 50, 150, 1)],
+            LaneClass::Worker,
+            vec![action("CppCompile", 0, 100), action("Rustc", 100, 50)],
         )]);
-        let root = build_flame_graph(&p, FlameKey::Name, None);
-        let pn = child(&root, "p");
-        let cn = child(pn, "c");
-        assert_eq!(pn.total_us, 100);
-        assert_eq!(cn.total_us, 150);
-        assert_eq!(pn.width_us, 150);
-        assert_eq!(cn.width_us, 150);
+        let root = build_flame_graph(&p, GroupMode::ClassMnemonic, Scope::All);
+        let cpu = child(&root, "cpu");
+        let children_sum: i64 = cpu.children.iter().map(|c| c.total_us).sum();
+        assert!(children_sum <= cpu.total_us);
         let boxes = lay_out_flame(&root, 300.0, &METRICS, 0.0);
-        let pb = boxes.iter().find(|b| b.name == "p").unwrap();
-        let cb = boxes.iter().find(|b| b.name == "c").unwrap();
-        // The child never exceeds its parent and stays within its bounds.
-        assert!(cb.w <= pb.w + f32::EPSILON);
-        assert!(cb.x >= pb.x - f32::EPSILON);
-        assert!(cb.x + cb.w <= pb.x + pb.w + 1e-3);
+        let cpu_box = boxes.iter().find(|b| b.name == "cpu").unwrap();
+        for c in &cpu.children {
+            let cb = boxes.iter().find(|b| b.name == c.name).unwrap();
+            assert!(cb.w <= cpu_box.w + f32::EPSILON);
+            assert!(cb.x >= cpu_box.x - f32::EPSILON);
+            assert!(cb.x + cb.w <= cpu_box.x + cpu_box.w + 1e-3);
+        }
     }
 
     #[test]
     fn height_counts_one_row_per_depth() {
         let p = profile(vec![track(
             1,
-            vec![slice("a", 0, 100, 0), slice("b", 0, 40, 1)],
+            LaneClass::Worker,
+            vec![action("CppCompile", 0, 100)],
         )]);
-        let root = build_flame_graph(&p, FlameKey::Name, None);
-        // root depth 0, a depth 1, b depth 2 -> 3 rows.
+        // ClassMnemonic: root depth 0, cpu depth 1, CppCompile depth 2 -> 3 rows.
+        let root = build_flame_graph(&p, GroupMode::ClassMnemonic, Scope::All);
         assert_eq!(flame_height(&root, &METRICS), 30.0);
     }
 
     #[test]
     fn flame_box_at_agrees_with_lay_out_flame() {
-        // A two-level tree with a nested child and an overflowing one, so the
-        // descent is exercised across depths and the width-clamp case.
+        // A two-level tree (ClassMnemonic) so the descent is exercised across
+        // depths and several classes.
         let p = profile(vec![track(
             1,
+            LaneClass::Worker,
             vec![
-                slice("a", 0, 100, 0),
-                slice("b", 0, 40, 1),
-                slice("c", 40, 50, 1),
-                slice("p", 100, 100, 0),
-                slice("over", 150, 150, 1),
-                slice("z", 300, 90, 0),
+                action("CppCompile", 0, 100),
+                action("Rustc", 100, 40),
+                action("CppCompile", 200, 50),
+                slice("remote", "remote action execution", 300, 90, 0),
+                slice("wait", "thread wait", 400, 30, 0),
             ],
         )]);
-        let root = build_flame_graph(&p, FlameKey::Name, None);
+        let root = build_flame_graph(&p, GroupMode::ClassMnemonic, Scope::All);
         let width = 600.0;
         let min_px = 1.0;
         let boxes = lay_out_flame(&root, width, &METRICS, min_px);
@@ -700,21 +803,22 @@ mod tests {
 
     #[test]
     fn flame_box_at_omits_sub_min_boxes() {
-        // 1000us over 100px: thin is 1px wide, below a 5px floor — both
-        // lay_out_flame and the descent omit it at thin's depth and x.
+        // 1000us over 100px: Thin is 1px wide, below a 5px floor — both
+        // lay_out_flame and the descent omit it at Thin's depth and x.
         let p = profile(vec![track(
             1,
-            vec![slice("wide", 0, 990, 0), slice("thin", 990, 10, 0)],
+            LaneClass::Worker,
+            vec![action("Wide", 0, 990), action("Thin", 990, 10)],
         )]);
-        let root = build_flame_graph(&p, FlameKey::Name, None);
+        let root = build_flame_graph(&p, GroupMode::Mnemonic, Scope::All);
         let width = 100.0;
         let min_px = 5.0;
-        // thin sits at depth 1, x in [99, 100); probe its center.
+        // Thin sits at depth 1, x in [99, 100); probe its center.
         assert_eq!(flame_box_at(&root, 99.5, 1, width, &METRICS, min_px), None);
-        // Its wide sibling at the same depth is found.
+        // Its Wide sibling at the same depth is found.
         let wide = lay_out_flame(&root, width, &METRICS, min_px)
             .into_iter()
-            .find(|b| b.name == "wide")
+            .find(|b| b.name == "Wide")
             .unwrap();
         assert_eq!(
             flame_box_at(&root, 1.0, 1, width, &METRICS, min_px),

@@ -4,10 +4,11 @@ mod lanes;
 mod stats;
 mod view;
 
+pub use bviz_trace_profile::{LaneClass, WorkClass};
 pub use cull::{Viewport, VisibleSlice, visible_slices};
 pub use flame::{
-    FlameBox, FlameKey, FlameMetrics, FlameNode, FlameView, build_flame_graph, flame_box_at,
-    flame_height, lay_out_flame,
+    FlameBox, FlameMetrics, FlameNode, FlameView, GroupMode, Scope, build_flame_graph,
+    flame_box_at, flame_height, lay_out_flame,
 };
 pub use lanes::{CounterPos, Lane, LaneLayout, LaneMetrics, lay_out_lanes};
 pub use stats::{StatRow, aggregate_stats};
@@ -17,7 +18,7 @@ pub use view::TimeView;
 mod tests {
     use super::*;
     use bviz_trace_profile::{
-        CounterLane, Metadata, Profile, Slice, SliceArgs, ThreadTrack, TimeSpan,
+        CounterLane, LaneClass, Metadata, Profile, Slice, SliceArgs, ThreadTrack, TimeSpan,
     };
 
     fn slice(start_us: i64, dur_us: i64, depth: u32) -> Slice {
@@ -28,6 +29,7 @@ mod tests {
             dur_us,
             depth,
             args: SliceArgs::default(),
+            work_class: WorkClass::Meta,
         }
     }
 
@@ -38,6 +40,7 @@ mod tests {
             sort_index,
             slices,
             max_depth,
+            lane_class: LaneClass::Worker,
         }
     }
 
