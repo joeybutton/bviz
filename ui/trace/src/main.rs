@@ -342,6 +342,20 @@ fn flame_metrics() -> FlameMetrics {
     }
 }
 
+/// The flame graph's current geometry, shared by hit-testing and the
+/// scroll/zoom/pan handlers so they map the cursor the same way the paint does:
+/// the horizontal view, the full laid-out height, and the flame section's
+/// content rect after the scroll-bar reserves.
+#[derive(Clone, Copy)]
+struct FlameLayout {
+    view: FlameView,
+    total_h: f32,
+    left: f32,
+    top: f32,
+    width: f32,
+    height: f32,
+}
+
 /// The flame graph's content rectangle: the full body width from the left inner
 /// edge to the right edge less a reserved vertical-bar column (when the tree's
 /// rows overflow the visible height) and the full body height less a reserved
@@ -936,12 +950,12 @@ impl TraceView {
             return 0.0;
         };
         if self.view_mode == ViewMode::FlameGraph {
-            let Some(root) = self.flame.borrow().clone() else {
+            let Some(fl) = self.flame_layout() else {
                 return 0.0;
             };
-            let total = flame_height(&root, &flame_metrics());
-            let visible = f32::from(self.viewport.get().size.height);
-            return (total - visible).max(0.0);
+            // Against the flame section's height, which already excludes any
+            // reserved horizontal-bar strip, so the last row clears that bar.
+            return (fl.total_h - fl.height).max(0.0);
         }
         let total = flame_total_height(&lay_out_lanes(p, &METRICS));
         let regions = Regions::new(
@@ -968,6 +982,22 @@ impl TraceView {
             )));
         }
         self.flame.borrow().clone()
+    }
+
+    /// The current flame-graph geometry, or `None` until the tree exists.
+    fn flame_layout(&self) -> Option<FlameLayout> {
+        let root = self.flame.borrow().clone()?;
+        let view = self.flame_view.get();
+        let total_h = flame_height(&root, &flame_metrics());
+        let (left, top, width, height) = flame_graph_rect(self.viewport.get(), total_h, view);
+        Some(FlameLayout {
+            view,
+            total_h,
+            left,
+            top,
+            width,
+            height,
+        })
     }
 
     /// Drops the cached flame graph and stats rows so the next use of either
@@ -1409,14 +1439,10 @@ impl TraceView {
         // about the cursor, Shift+wheel pans horizontally, plain wheel scrolls
         // vertically.
         if self.view_mode == ViewMode::FlameGraph {
-            let total_h = self
-                .flame
-                .borrow()
-                .as_ref()
-                .map(|r| flame_height(r, &flame_metrics()))
-                .unwrap_or(0.0);
-            let mut fv = self.flame_view.get();
-            let (left, _, width, _) = flame_graph_rect(self.viewport.get(), total_h, fv);
+            let Some(fl) = self.flame_layout() else {
+                return;
+            };
+            let (mut fv, left, width) = (fl.view, fl.left, fl.width);
             if e.modifiers.control || e.modifiers.platform {
                 let dy_lines = dy / LINE_SCROLL_PX;
                 fv.zoom_at(
@@ -1592,21 +1618,18 @@ impl TraceView {
     /// content x via the horizontal zoom/scroll, then find the box at that depth
     /// whose x-range contains it.
     fn flame_box_at(&self, pos: Point<Pixels>) -> Option<FlameBox> {
+        let fl = self.flame_layout()?;
         let root = self.flame.borrow().clone()?;
         let metrics = flame_metrics();
-        let total_h = flame_height(&root, &metrics);
-        let bounds = self.viewport.get();
-        let flame_view = self.flame_view.get();
-        let (left, top, width, height) = flame_graph_rect(bounds, total_h, flame_view);
         let x = f32::from(pos.x);
         let y = f32::from(pos.y);
-        if x < left || x >= left + width || y < top || y >= top + height {
+        if x < fl.left || x >= fl.left + fl.width || y < fl.top || y >= fl.top + fl.height {
             return None;
         }
-        let content_y = y - top + self.scroll_y.get();
+        let content_y = y - fl.top + self.scroll_y.get();
         let depth = (content_y / metrics.row_height) as u32;
-        let content_w = flame_view.content_px(width);
-        let content_x = (x - left) + flame_view.scroll_px(width);
+        let content_w = fl.view.content_px(fl.width);
+        let content_x = (x - fl.left) + fl.view.scroll_px(fl.width);
         lay_out_flame(&root, content_w, &metrics, MIN_SLICE_PX)
             .into_iter()
             .find(|b| b.depth == depth && content_x >= b.x && content_x < b.x + b.w)
@@ -1640,19 +1663,11 @@ impl TraceView {
     /// h-bar: the chart's time axis or the graph's normalized width.
     fn hthumb_to(&mut self, pos: Point<Pixels>, grab: f32) {
         if self.view_mode == ViewMode::FlameGraph {
-            let Some(bar) = self.hbar.get() else {
+            let (Some(bar), Some(fl)) = (self.hbar.get(), self.flame_layout()) else {
                 return;
             };
-            let total_h = self
-                .flame
-                .borrow()
-                .as_ref()
-                .map(|r| flame_height(r, &flame_metrics()))
-                .unwrap_or(0.0);
-            let fv = self.flame_view.get();
-            let (_, _, width, _) = flame_graph_rect(self.viewport.get(), total_h, fv);
-            let mut fv = fv;
-            fv.set_scroll_px(bar.offset_at(pos, grab), width);
+            let mut fv = fl.view;
+            fv.set_scroll_px(bar.offset_at(pos, grab), fl.width);
             self.flame_view.set(fv);
         } else {
             pan_thumb_to(self, pos, grab);
@@ -1668,16 +1683,11 @@ fn on_drag(view: &mut TraceView, event: &MouseMoveEvent, cx: &mut Context<TraceV
             let dx = f32::from(event.position.x) - f32::from(view.last_mouse.x);
             let dy = f32::from(event.position.y) - f32::from(view.last_mouse.y);
             if view.view_mode == ViewMode::FlameGraph {
-                let total_h = view
-                    .flame
-                    .borrow()
-                    .as_ref()
-                    .map(|r| flame_height(r, &flame_metrics()))
-                    .unwrap_or(0.0);
-                let mut fv = view.flame_view.get();
-                let (_, _, width, _) = flame_graph_rect(view.viewport.get(), total_h, fv);
-                fv.pan_px(dx, width);
-                view.flame_view.set(fv);
+                if let Some(fl) = view.flame_layout() {
+                    let mut fv = fl.view;
+                    fv.pan_px(dx, fl.width);
+                    view.flame_view.set(fv);
+                }
             } else {
                 let Source::Loaded(profile) = &view.source else {
                     return;
