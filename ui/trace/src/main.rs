@@ -161,6 +161,9 @@ const HUE_GC: f32 = 0.99;
 const WORK_CLASS_SATURATION: f32 = 0.55;
 const WORK_CLASS_LIGHTNESS_DARK: f32 = 0.62;
 const WORK_CLASS_LIGHTNESS_LIGHT: f32 = 0.50;
+/// Side of a legend swatch and the gap between a swatch and its label.
+const LEGEND_SWATCH: f32 = 10.0;
+const LEGEND_LABEL_GAP: f32 = 4.0;
 
 /// Theme-resolved colors the canvas paints with, owned so the `'static` paint
 /// closure can capture them.
@@ -1590,6 +1593,10 @@ impl Render for TraceView {
                             .child(self.view_dropdown.clone())
                             .child(caption("Group by"))
                             .child(self.mode_dropdown.clone())
+                            // A trailing flexible spacer pushes the legend to the
+                            // toolbar's right edge.
+                            .child(div().flex_1())
+                            .child(work_class_legend(palette))
                     }));
                 // The flame chart and the flame graph are two independent views of
                 // the same trace, selected here; each builds its own canvas, paint,
@@ -2588,6 +2595,40 @@ fn work_class_color(work_class: WorkClass, palette: &Palette) -> Hsla {
         WORK_CLASS_LIGHTNESS_LIGHT
     };
     hsla(hue, WORK_CLASS_SATURATION, lightness, 1.0)
+}
+
+/// A compact legend of the work-class colors: a swatch and class name per class,
+/// in a row, matching the fills the flame boxes use.
+fn work_class_legend(palette: Palette) -> impl IntoElement {
+    const CLASSES: [(WorkClass, &str); 6] = [
+        (WorkClass::Cpu, "cpu"),
+        (WorkClass::Remote, "remote"),
+        (WorkClass::Io, "io"),
+        (WorkClass::Wait, "wait"),
+        (WorkClass::Gc, "gc"),
+        (WorkClass::Meta, "meta"),
+    ];
+    div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap_3()
+        .text_color(palette.label)
+        .text_size(px(STATS_TEXT_SIZE))
+        .children(CLASSES.map(|(wc, name)| {
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(LEGEND_LABEL_GAP))
+                .child(
+                    div()
+                        .size(px(LEGEND_SWATCH))
+                        .rounded_sm()
+                        .bg(work_class_color(wc, &palette)),
+                )
+                .child(name)
+        }))
 }
 
 /// Paints the aggregated flame graph filling the body: each box a category-colored
