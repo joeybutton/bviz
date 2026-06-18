@@ -14,7 +14,11 @@ pub struct Names {
 impl Names {
     pub fn intern(&mut self, name: &str) -> Id {
         if let Some(&id) = self.lookup.get(name) { return id; }
-        let id = Id(self.strings.len() as u32);
+        // A 4-byte id keeps `Node`/`Edge` and the level-of-detail arrays compact;
+        // a graph approaching u32::MAX nodes is wildly past anything Bazel emits,
+        // so cap it with a panic rather than let the cast silently wrap an id onto
+        // an existing one.
+        let id = Id(u32::try_from(self.strings.len()).expect("more than u32::MAX node ids"));
         self.strings.push(name.to_string());
         self.lookup.insert(name.to_string(), id);
         id
