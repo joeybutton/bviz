@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use bviz_trace_profile::{Profile, WorkClass};
 
-use crate::flame::{leaf_label, GroupMode, Scope};
+use crate::flame::{leaf_label, mnemonic_index, phase_resolver, GroupMode, Scope};
 
 /// One aggregated group of slices, summed across the scope. `total_us` and
 /// `max_us` sum/peak the durations of every slice (at any depth) sharing this
@@ -35,13 +35,15 @@ impl StatRow {
 /// the lanes `scope` selects counts, at all depths. Order is unspecified; the
 /// caller sorts.
 pub fn aggregate_stats(profile: &Profile, mode: GroupMode, scope: Scope) -> Vec<StatRow> {
+    let idx = mnemonic_index(profile);
+    let phase_of = phase_resolver(profile);
     let mut groups: HashMap<String, StatRow> = HashMap::new();
     for thread in &profile.threads {
         if !scope.includes(thread.lane_class) {
             continue;
         }
         for s in &thread.slices {
-            let (label, work_class) = leaf_label(s, thread.lane_class, mode);
+            let (label, work_class) = leaf_label(s, &idx, &phase_of, mode);
             let row = groups.entry(label.clone()).or_insert_with(|| StatRow {
                 key: label,
                 work_class,
@@ -149,21 +151,19 @@ mod tests {
     }
 
     #[test]
-    fn mnemonicless_slice_buckets_by_work_class() {
-        // A slice with no mnemonic buckets under its work class, not its name.
+    fn mnemonicless_slice_keeps_its_name() {
+        // Under Mnemonic grouping a slice with no mnemonic keys by its own name.
         let p = profile(vec![track(
             1,
             LaneClass::Worker,
             vec![
                 action("CppCompile", 0, 100),
-                slice("wait", "thread wait", 200, 30),
+                slice("checkOutputs", "general information", 200, 30),
             ],
         )]);
         let rows = aggregate_stats(&p, GroupMode::Mnemonic, Scope::All);
         assert_eq!(rows.len(), 2);
-        let wait = row(&rows, "(wait)");
-        assert_eq!(wait.total_us, 30);
-        assert_eq!(wait.work_class, WorkClass::Wait);
+        assert_eq!(row(&rows, "checkOutputs").total_us, 30);
         assert_eq!(row(&rows, "CppCompile").count, 1);
     }
 

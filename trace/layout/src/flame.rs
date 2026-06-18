@@ -1,20 +1,21 @@
+use std::collections::HashMap;
+
 use bviz_trace_profile::{phase_intervals, LaneClass, Profile, Slice, WorkClass};
 
 /// How a slice's contribution is split into a path of frames when aggregating
-/// the flame graph. Multi-segment modes nest the second key under the first
+/// the flame graph. Multi-segment modes nest later keys under earlier ones
 /// (root→leaf).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GroupMode {
-    /// Mnemonic-or-bucket only.
+    /// Detail only: action mnemonic (recovered from the name index for slices
+    /// that name an action) or, for everything else, the slice name itself.
     Mnemonic,
-    /// Phase → mnemonic-or-bucket.
-    PhaseMnemonic,
-    /// Work class only.
+    /// Category → detail.
+    Category,
+    /// Phase → category → detail.
+    Phase,
+    /// Work class → category → detail.
     WorkClass,
-    /// Work class → mnemonic-or-bucket.
-    ClassMnemonic,
-    /// Mnemonic-or-bucket → target.
-    Target,
 }
 
 /// Which thread lanes an aggregation draws from.
@@ -51,28 +52,76 @@ struct Segment {
     work_class: WorkClass,
 }
 
-/// The mnemonic-or-bucket label for a slice on a lane of `lane` class: its action
-/// mnemonic if present, else a parenthesized work-class bucket so non-action
-/// frames (phases, evaluator, locks) collapse by class rather than scattering by
-/// name. Critical-path components carry no mnemonic but their name is the action
-/// itself, and the path is a short chain of distinct entries, so they group by
-/// name — the individual longest critical-path steps are exactly what to inspect.
-fn mnemonic_or_bucket(slice: &Slice, lane: LaneClass) -> Segment {
-    let label = match &slice.args.mnemonic {
-        Some(m) => m.clone(),
-        None if lane == LaneClass::CriticalPath => slice.name.clone(),
-        None => match slice.work_class {
-            WorkClass::Cpu => "(cpu)",
-            WorkClass::Remote => "(remote)",
-            WorkClass::Io => "(io)",
-            WorkClass::Wait => "(wait)",
-            WorkClass::Gc => "(gc)",
-            WorkClass::Meta => "(meta)",
+/// A map from a mnemonic-bearing slice's name to its mnemonic, over the whole
+/// profile. The "action processing" slices carry both the action description as
+/// their name and the mnemonic in their args, so this recovers the mnemonic for
+/// any other slice that names the same action — notably critical-path
+/// components, whose name is `action '<desc>'` and which carry no mnemonic of
+/// their own.
+pub(crate) fn mnemonic_index(profile: &Profile) -> HashMap<&str, &str> {
+    let mut idx = HashMap::new();
+    for thread in &profile.threads {
+        for s in &thread.slices {
+            if let Some(m) = &s.args.mnemonic {
+                idx.insert(s.name.as_str(), m.as_str());
+            }
         }
-        .to_owned(),
-    };
+    }
+    idx
+}
+
+/// The inner of an `action '…'` name, else the name unchanged. A critical-path
+/// component is named `action '<desc>'` where `<desc>` is the action processing
+/// slice's name elsewhere; stripping the wrapper lets the name index recover its
+/// mnemonic.
+fn action_inner(name: &str) -> &str {
+    name.strip_prefix("action '")
+        .and_then(|s| s.strip_suffix('\''))
+        .unwrap_or(name)
+}
+
+/// The slice's action mnemonic, taken from its own args if present, else
+/// recovered from the name index by the slice's name or — for a critical-path
+/// component — by its unwrapped action description. `None` when the slice names
+/// no known action.
+fn resolve_mnemonic<'a>(slice: &'a Slice, idx: &HashMap<&'a str, &'a str>) -> Option<&'a str> {
+    if let Some(m) = &slice.args.mnemonic {
+        return Some(m);
+    }
+    idx.get(slice.name.as_str())
+        .copied()
+        .or_else(|| idx.get(action_inner(&slice.name)).copied())
+}
+
+/// The finest detail label for a slice: its resolved action mnemonic if it names
+/// an action (so all Rustc collapse together), else its own name (the
+/// informative label for non-action slices — "checkOutputs", "subprocess.run",
+/// a repo target, …).
+fn detail(slice: &Slice, idx: &HashMap<&str, &str>) -> Segment {
+    let label = resolve_mnemonic(slice, idx)
+        .map(str::to_owned)
+        .unwrap_or_else(|| slice.name.clone());
     Segment {
         label,
+        work_class: slice.work_class,
+    }
+}
+
+/// The activity-type label for a slice: its Bazel `ProfilerTask` category (the
+/// `cat` description — "Fetching repository", "package creation", "general
+/// information", "action processing", …).
+fn category_seg(slice: &Slice) -> Segment {
+    Segment {
+        label: slice.category.clone(),
+        work_class: slice.work_class,
+    }
+}
+
+/// The work-class segment for a slice (the class itself, not a parenthesized
+/// bucket).
+fn class_seg(slice: &Slice) -> Segment {
+    Segment {
+        label: work_class_label(slice.work_class).to_owned(),
         work_class: slice.work_class,
     }
 }
@@ -265,64 +314,52 @@ impl Builder {
     }
 }
 
-/// The semantic-path segments a slice contributes under `mode`. `phase_of`
-/// resolves the slice's start to a phase name (only consulted by phase modes).
-fn segments(
-    slice: &Slice,
-    lane: LaneClass,
-    mode: GroupMode,
-    phase_of: impl Fn(i64) -> String,
-) -> Vec<Segment> {
-    let class = Segment {
-        label: work_class_label(slice.work_class).to_owned(),
-        work_class: slice.work_class,
-    };
-    match mode {
-        GroupMode::Mnemonic => vec![mnemonic_or_bucket(slice, lane)],
-        GroupMode::PhaseMnemonic => vec![
-            Segment {
-                label: phase_of(slice.start_us),
-                work_class: WorkClass::Meta,
-            },
-            mnemonic_or_bucket(slice, lane),
-        ],
-        GroupMode::WorkClass => vec![class],
-        GroupMode::ClassMnemonic => vec![class, mnemonic_or_bucket(slice, lane)],
-        GroupMode::Target => vec![
-            mnemonic_or_bucket(slice, lane),
-            Segment {
-                label: slice
-                    .args
-                    .target
-                    .clone()
-                    .unwrap_or_else(|| "(no target)".to_owned()),
-                work_class: slice.work_class,
-            },
-        ],
+/// The phase segment of a slice (the build phase its start falls in), carried as
+/// `Meta` since a phase isn't itself work.
+fn phase_seg(slice: &Slice, phase_of: &impl Fn(i64) -> String) -> Segment {
+    Segment {
+        label: phase_of(slice.start_us),
+        work_class: WorkClass::Meta,
     }
 }
 
-/// The leaf segment of a slice's `mode` path — the label a flat per-leaf table
-/// groups it under, with the work class to color the row. Phase modes never
-/// reach this (the table groups by the action leaf), so phase resolution is
-/// unneeded here.
-pub(crate) fn leaf_label(slice: &Slice, lane: LaneClass, mode: GroupMode) -> (String, WorkClass) {
+/// The semantic-path segments a slice contributes under `mode`, root→leaf, using
+/// the name index to recover action mnemonics and `phase_of` to place a slice in
+/// its build phase. Every mode ends in `detail`; the leading segments add the
+/// grouping dimension (category / phase→category / class→category).
+fn segments(
+    slice: &Slice,
+    idx: &HashMap<&str, &str>,
+    mode: GroupMode,
+    phase_of: &impl Fn(i64) -> String,
+) -> Vec<Segment> {
+    match mode {
+        GroupMode::Mnemonic => vec![detail(slice, idx)],
+        GroupMode::Category => vec![category_seg(slice), detail(slice, idx)],
+        GroupMode::Phase => vec![
+            phase_seg(slice, phase_of),
+            category_seg(slice),
+            detail(slice, idx),
+        ],
+        GroupMode::WorkClass => vec![class_seg(slice), category_seg(slice), detail(slice, idx)],
+    }
+}
+
+/// The single key a flat per-mode stats row groups a slice under — the mode's
+/// primary dimension, so the table reflects the chosen grouping: detail for
+/// `Mnemonic`, the category for `Category`, the build phase for `Phase` (giving
+/// per-phase totals), the work class for `WorkClass`.
+pub(crate) fn leaf_label(
+    slice: &Slice,
+    idx: &HashMap<&str, &str>,
+    phase_of: &impl Fn(i64) -> String,
+    mode: GroupMode,
+) -> (String, WorkClass) {
     let seg = match mode {
-        GroupMode::WorkClass => Segment {
-            label: work_class_label(slice.work_class).to_owned(),
-            work_class: slice.work_class,
-        },
-        GroupMode::Target => Segment {
-            label: slice
-                .args
-                .target
-                .clone()
-                .unwrap_or_else(|| "(no target)".to_owned()),
-            work_class: slice.work_class,
-        },
-        GroupMode::Mnemonic | GroupMode::PhaseMnemonic | GroupMode::ClassMnemonic => {
-            mnemonic_or_bucket(slice, lane)
-        }
+        GroupMode::Mnemonic => detail(slice, idx),
+        GroupMode::Category => category_seg(slice),
+        GroupMode::Phase => phase_seg(slice, phase_of),
+        GroupMode::WorkClass => class_seg(slice),
     };
     (seg.label, seg.work_class)
 }
@@ -333,16 +370,8 @@ pub(crate) fn leaf_label(slice: &Slice, lane: LaneClass, mode: GroupMode) -> (St
 /// accumulates the duration of every in-scope slice, so children always sum to
 /// at most their parent and self time is non-negative by construction.
 pub fn build_flame_graph(profile: &Profile, mode: GroupMode, scope: Scope) -> FlameNode {
-    let intervals = match mode {
-        GroupMode::PhaseMnemonic => phase_intervals(profile),
-        _ => Vec::new(),
-    };
-    let phase_of = |start_us: i64| -> String {
-        intervals
-            .iter()
-            .find(|&&(_, s, e)| start_us >= s && start_us < e)
-            .map_or_else(|| "(no phase)".to_owned(), |(name, _, _)| name.clone())
-    };
+    let idx = mnemonic_index(profile);
+    let phase_of = phase_resolver(profile);
 
     let mut root = Builder::new("All".to_owned(), WorkClass::Meta);
     for thread in &profile.threads {
@@ -352,8 +381,7 @@ pub fn build_flame_graph(profile: &Profile, mode: GroupMode, scope: Scope) -> Fl
         for s in &thread.slices {
             root.total_us += s.dur_us;
             let mut node = &mut root;
-            let segs = segments(s, thread.lane_class, mode, phase_of);
-            for seg in &segs {
+            for seg in &segments(s, &idx, mode, &phase_of) {
                 node = node.child(seg);
                 node.total_us += s.dur_us;
             }
@@ -361,6 +389,18 @@ pub fn build_flame_graph(profile: &Profile, mode: GroupMode, scope: Scope) -> Fl
         }
     }
     root.finish(0)
+}
+
+/// A closure mapping a slice's start time to its build-phase name (or
+/// "(no phase)"), reconstructing phase intervals from the profile's markers.
+pub(crate) fn phase_resolver(profile: &Profile) -> impl Fn(i64) -> String {
+    let intervals = phase_intervals(profile);
+    move |start_us: i64| {
+        intervals
+            .iter()
+            .find(|&&(_, s, e)| start_us >= s && start_us < e)
+            .map_or_else(|| "(no phase)".to_owned(), |(name, _, _)| name.clone())
+    }
 }
 
 /// Lay the tree into a content rectangle of the given width. The root spans the
@@ -575,25 +615,24 @@ mod tests {
     }
 
     #[test]
-    fn mnemonicless_slice_buckets_by_work_class() {
-        // A slice with no mnemonic buckets under its work class, not its name.
+    fn mnemonicless_slice_keeps_its_name() {
+        // A slice with no mnemonic keeps its own informative name, not a coarse
+        // work-class bucket — so distinct operations stay distinct.
         let p = profile(vec![track(
             1,
             LaneClass::Worker,
             vec![
                 action("CppCompile", 0, 100),
-                slice("borrowing a worker", "borrowing a worker", 100, 30, 0),
+                slice("checkOutputs", "general information", 100, 30, 0),
             ],
         )]);
         let root = build_flame_graph(&p, GroupMode::Mnemonic, Scope::All);
         assert_eq!(child(&root, "CppCompile").total_us, 100);
-        let wait = child(&root, "(wait)");
-        assert_eq!(wait.total_us, 30);
-        assert_eq!(wait.work_class, WorkClass::Wait);
+        assert_eq!(child(&root, "checkOutputs").total_us, 30);
     }
 
     #[test]
-    fn phase_mnemonic_nests_mnemonic_under_its_phase() {
+    fn phase_mode_nests_category_and_detail_under_the_phase() {
         let mut p = profile(vec![track(
             1,
             LaneClass::Worker,
@@ -609,33 +648,34 @@ mod tests {
                 start_us: 100,
             },
         ];
-        let root = build_flame_graph(&p, GroupMode::PhaseMnemonic, Scope::All);
+        let root = build_flame_graph(&p, GroupMode::Phase, Scope::All);
         let analyze = child(&root, "analyze");
         assert_eq!(analyze.work_class, WorkClass::Meta);
-        assert_eq!(child(analyze, "CppCompile").total_us, 50);
+        // phase -> category -> detail
+        assert_eq!(child(child(analyze, "local action execution"), "CppCompile").total_us, 50);
         let execute = child(&root, "execute");
-        assert_eq!(child(execute, "Rustc").total_us, 40);
+        assert_eq!(child(child(execute, "local action execution"), "Rustc").total_us, 40);
     }
 
     #[test]
-    fn work_class_mode_sums_per_class_and_class_mnemonic_nests() {
+    fn work_class_mode_nests_category_and_detail() {
         let p = profile(vec![track(
             1,
             LaneClass::Worker,
             vec![
                 action("CppCompile", 0, 100),
                 action("Rustc", 100, 50),
-                slice("remote", "remote action execution", 200, 30, 0),
+                slice("fetch", "remote action execution", 200, 30, 0),
             ],
         )]);
-        let by_class = build_flame_graph(&p, GroupMode::WorkClass, Scope::All);
-        assert_eq!(child(&by_class, "cpu").total_us, 150);
-        assert_eq!(child(&by_class, "remote").total_us, 30);
-        let nested = build_flame_graph(&p, GroupMode::ClassMnemonic, Scope::All);
-        let cpu = child(&nested, "cpu");
+        let root = build_flame_graph(&p, GroupMode::WorkClass, Scope::All);
+        let cpu = child(&root, "cpu");
         assert_eq!(cpu.total_us, 150);
-        assert_eq!(child(cpu, "CppCompile").total_us, 100);
-        assert_eq!(child(cpu, "Rustc").total_us, 50);
+        // class -> category -> detail
+        let cat = child(cpu, "local action execution");
+        assert_eq!(child(cat, "CppCompile").total_us, 100);
+        assert_eq!(child(cat, "Rustc").total_us, 50);
+        assert_eq!(child(&root, "remote").total_us, 30);
     }
 
     #[test]
@@ -658,41 +698,43 @@ mod tests {
     }
 
     #[test]
-    fn critical_path_components_group_by_action_name() {
-        // Critical-path components carry no mnemonic and a "critical path
-        // component" category (work class Meta); they must group by their action
-        // name, not collapse into one "(meta)" bucket.
-        let p = profile(vec![track(
-            0,
-            LaneClass::CriticalPath,
-            vec![
-                slice("action 'Compiling a'", "critical path component", 0, 30, 0),
-                slice("action 'Linking b'", "critical path component", 30, 20, 0),
-            ],
-        )]);
+    fn critical_path_components_recover_their_mnemonic() {
+        // A critical-path component names an action ("action '<desc>'") but carries
+        // no mnemonic; the name index recovers it from the worker's action slice,
+        // so it groups as "Rustc" rather than the raw action name.
+        let worker_action = Slice {
+            args: SliceArgs {
+                mnemonic: Some("Rustc".to_owned()),
+                ..SliceArgs::default()
+            },
+            ..slice("Compiling foo", "action processing", 0, 100, 0)
+        };
+        let cp = slice("action 'Compiling foo'", "critical path component", 500, 50, 0);
+        let p = profile(vec![
+            track(8, LaneClass::Worker, vec![worker_action]),
+            track(0, LaneClass::CriticalPath, vec![cp]),
+        ]);
         let root = build_flame_graph(&p, GroupMode::Mnemonic, Scope::CriticalPath);
-        assert_eq!(root.children.len(), 2);
-        assert!(root.children.iter().any(|c| c.name == "action 'Compiling a'"));
-        assert!(root.children.iter().any(|c| c.name == "action 'Linking b'"));
-        assert!(!root.children.iter().any(|c| c.name == "(meta)"));
+        assert_eq!(root.children.len(), 1);
+        assert_eq!(root.children[0].name, "Rustc");
     }
 
     #[test]
     fn self_us_is_total_minus_children_and_children_fit() {
-        // ClassMnemonic: cpu (150) holds CppCompile (100) + Rustc (50), so the
-        // cpu node's self time is zero and the root's self time is its own.
+        // Category: "local action execution" (150) holds CppCompile (100) + Rustc
+        // (50), so the category's self time is zero and the root's is its own.
         let p = profile(vec![track(
             1,
             LaneClass::Worker,
             vec![action("CppCompile", 0, 100), action("Rustc", 100, 50)],
         )]);
-        let root = build_flame_graph(&p, GroupMode::ClassMnemonic, Scope::All);
-        let cpu = child(&root, "cpu");
-        let children_sum: i64 = cpu.children.iter().map(|c| c.total_us).sum();
-        assert_eq!(cpu.self_us, cpu.total_us - children_sum);
-        assert_eq!(cpu.self_us, 0);
-        assert!(children_sum <= cpu.total_us);
-        assert_eq!(root.self_us, root.total_us - cpu.total_us);
+        let root = build_flame_graph(&p, GroupMode::Category, Scope::All);
+        let cat = child(&root, "local action execution");
+        let children_sum: i64 = cat.children.iter().map(|c| c.total_us).sum();
+        assert_eq!(cat.self_us, cat.total_us - children_sum);
+        assert_eq!(cat.self_us, 0);
+        assert!(children_sum <= cat.total_us);
+        assert_eq!(root.self_us, root.total_us - cat.total_us);
         assert_eq!(root.self_us, 0);
     }
 
@@ -708,12 +750,12 @@ mod tests {
         reversed.reverse();
         let ra = build_flame_graph(
             &profile(vec![track(1, LaneClass::Worker, ordered)]),
-            GroupMode::ClassMnemonic,
+            GroupMode::Category,
             Scope::All,
         );
         let rb = build_flame_graph(
             &profile(vec![track(1, LaneClass::Worker, reversed)]),
-            GroupMode::ClassMnemonic,
+            GroupMode::Category,
             Scope::All,
         );
         assert_eq!(ra, rb);
@@ -771,12 +813,12 @@ mod tests {
             LaneClass::Worker,
             vec![action("CppCompile", 0, 100), action("Rustc", 100, 50)],
         )]);
-        let root = build_flame_graph(&p, GroupMode::ClassMnemonic, Scope::All);
-        let cpu = child(&root, "cpu");
+        let root = build_flame_graph(&p, GroupMode::Category, Scope::All);
+        let cpu = child(&root, "local action execution");
         let children_sum: i64 = cpu.children.iter().map(|c| c.total_us).sum();
         assert!(children_sum <= cpu.total_us);
         let boxes = lay_out_flame(&root, 300.0, &METRICS, 0.0);
-        let cpu_box = boxes.iter().find(|b| b.name == "cpu").unwrap();
+        let cpu_box = boxes.iter().find(|b| b.name == "local action execution").unwrap();
         for c in &cpu.children {
             let cb = boxes.iter().find(|b| b.name == c.name).unwrap();
             assert!(cb.w <= cpu_box.w + f32::EPSILON);
@@ -792,15 +834,16 @@ mod tests {
             LaneClass::Worker,
             vec![action("CppCompile", 0, 100)],
         )]);
-        // ClassMnemonic: root depth 0, cpu depth 1, CppCompile depth 2 -> 3 rows.
-        let root = build_flame_graph(&p, GroupMode::ClassMnemonic, Scope::All);
+        // Category: root depth 0, "local action execution" depth 1, CppCompile
+        // depth 2 -> 3 rows.
+        let root = build_flame_graph(&p, GroupMode::Category, Scope::All);
         assert_eq!(flame_height(&root, &METRICS), 30.0);
     }
 
     #[test]
     fn flame_box_at_agrees_with_lay_out_flame() {
-        // A two-level tree (ClassMnemonic) so the descent is exercised across
-        // depths and several classes.
+        // A three-level tree (WorkClass: class -> category -> detail) so the
+        // descent is exercised across depths and several classes.
         let p = profile(vec![track(
             1,
             LaneClass::Worker,
@@ -812,7 +855,7 @@ mod tests {
                 slice("wait", "thread wait", 400, 30, 0),
             ],
         )]);
-        let root = build_flame_graph(&p, GroupMode::ClassMnemonic, Scope::All);
+        let root = build_flame_graph(&p, GroupMode::WorkClass, Scope::All);
         let width = 600.0;
         let min_px = 1.0;
         let boxes = lay_out_flame(&root, width, &METRICS, min_px);
