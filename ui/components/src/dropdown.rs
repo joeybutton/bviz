@@ -2,12 +2,21 @@
 //! opens beneath it.
 
 use gpui::{
-    deferred, div, prelude::*, px, ClickEvent, Context, ElementId, FocusHandle, IntoElement,
-    MouseButton, Render, SharedString, Subscription, Window,
+    deferred, div, prelude::*, px, ClickEvent, Context, ElementId, EventEmitter, FocusHandle,
+    IntoElement, MouseButton, Render, SharedString, Subscription, Window,
 };
 
+/// Emitted when the user picks a different option. Programmatic
+/// [`set_selected`](Dropdown::set_selected) does NOT emit — only a user choice —
+/// so a subscriber reacts to selections, not to the entity's other repaints
+/// (opening, closing, hover) that a plain `observe` would also deliver.
+pub enum DropdownEvent {
+    Changed(usize),
+}
+
 /// A dropdown over a fixed list of options. The chosen index is read with
-/// [`selected`](Self::selected); observe the entity to react to changes.
+/// [`selected`](Self::selected); subscribe to [`DropdownEvent`] to react to a
+/// user's selection change.
 pub struct Dropdown {
     id: ElementId,
     options: Vec<SharedString>,
@@ -51,10 +60,15 @@ impl Dropdown {
 
     fn choose(&mut self, index: usize, cx: &mut Context<Self>) {
         self.open = false;
-        self.set_selected(index, cx);
+        if index < self.options.len() && index != self.selected {
+            self.selected = index;
+            cx.emit(DropdownEvent::Changed(index));
+        }
         cx.notify();
     }
 }
+
+impl EventEmitter<DropdownEvent> for Dropdown {}
 
 impl Render for Dropdown {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {

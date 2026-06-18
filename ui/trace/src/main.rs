@@ -9,7 +9,9 @@ use bviz_trace_layout::{
     flame_height, lay_out_flame, lay_out_lanes, visible_slices,
 };
 use bviz_trace_profile::{CounterLane, CounterPoint, PhaseMarker, Profile, TimeSpan};
-use bviz_ui_components::{Axis, Button, Dropdown, Scrollbar, load_in_background, track_drag};
+use bviz_ui_components::{
+    Axis, Button, Dropdown, DropdownEvent, Scrollbar, load_in_background, track_drag,
+};
 use bviz_ui_shell::Chrome;
 use clap::Parser;
 use gpui::{
@@ -638,11 +640,12 @@ impl TraceView {
         let mode_dropdown = cx.new(|cx| {
             Dropdown::new("group-by", GROUP_MODES.map(|(label, _)| label), 0, cx)
         });
-        let mode_observer = cx.observe(&mode_dropdown, |view, dropdown, cx| {
-            view.mode = GROUP_MODES[dropdown.read(cx).selected()].1;
-            view.invalidate_aggregates();
-            cx.notify();
-        });
+        let mode_observer =
+            cx.subscribe(&mode_dropdown, |view, dropdown, _: &DropdownEvent, cx| {
+                view.mode = GROUP_MODES[dropdown.read(cx).selected()].1;
+                view.invalidate_aggregates();
+                cx.notify();
+            });
         let (view_dropdown, view_observer, view_scopes) = Self::view_dropdown(None, cx);
         let load_task = load_in_background(
             cx,
@@ -749,7 +752,7 @@ impl TraceView {
     ) -> (Entity<Dropdown>, Subscription, Vec<Scope>) {
         let (labels, scopes) = Self::view_options(profile);
         let dropdown = cx.new(|cx| Dropdown::new("view", labels, 0, cx));
-        let observer = cx.observe(&dropdown, |view, dropdown, cx| {
+        let observer = cx.subscribe(&dropdown, |view, dropdown, _: &DropdownEvent, cx| {
             let scope = view.view_scopes[dropdown.read(cx).selected()];
             view.scope = scope;
             view.mode = default_mode_for(scope);
