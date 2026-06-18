@@ -286,10 +286,9 @@ fn stats_cell(spec: &StatsColumnSpec, text: impl Into<SharedString>) -> Div {
 
 /// The group-by modes offered in the toolbar dropdown, in menu order: each entry
 /// pairs the option label with the mode the selection maps to.
-const GROUP_MODES: [(&str, GroupMode); 4] = [
+const GROUP_MODES: [(&str, GroupMode); 3] = [
     ("Mnemonic", GroupMode::Mnemonic),
     ("Category", GroupMode::Category),
-    ("Phase", GroupMode::Phase),
     ("Work class", GroupMode::WorkClass),
 ];
 
@@ -297,10 +296,11 @@ const GROUP_MODES: [(&str, GroupMode); 4] = [
 /// is the synthetic critical path, offered only when the loaded profile has one;
 /// when absent it is dropped from the menu (see [`TraceView::view_options`]) so
 /// the visible index maps through the surviving entries.
-const VIEW_SCOPES: [(&str, Scope); 4] = [
+const VIEW_SCOPES: [(&str, Scope); 5] = [
     ("Critical path", Scope::CriticalPath),
-    ("Execution", Scope::Execution),
+    ("Loading", Scope::Loading),
     ("Analysis", Scope::Analysis),
+    ("Execution", Scope::Execution),
     ("All work", Scope::All),
 ];
 
@@ -310,7 +310,7 @@ const VIEW_SCOPES: [(&str, Scope); 4] = [
 fn default_mode_for(scope: Scope) -> GroupMode {
     match scope {
         Scope::CriticalPath => GroupMode::Mnemonic,
-        Scope::Execution | Scope::Analysis | Scope::All => GroupMode::Category,
+        Scope::Loading | Scope::Analysis | Scope::Execution | Scope::All => GroupMode::Category,
     }
 }
 
