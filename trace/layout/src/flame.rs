@@ -204,13 +204,23 @@ fn merge_thread(root: &mut Builder, slices: &[Slice], key: FlameKey) {
     }
 }
 
-/// Build the aggregated flame graph for a whole profile: a synthetic root whose
-/// children are the merged top-level frames of every thread. The root's
-/// `total_us` sums all top-level slice durations and its `count` is the number
-/// of top-level occurrences across all threads.
-pub fn build_flame_graph(profile: &Profile, key: FlameKey) -> FlameNode {
-    let mut root = Builder::new("All".to_owned(), String::new());
-    for thread in &profile.threads {
+/// Build the aggregated flame graph for a profile: a synthetic root whose
+/// children are the merged top-level frames. `scope` of `Some(i)` aggregates
+/// only `profile.threads[i]` (the root is labeled by that thread); `None`
+/// aggregates every thread (the root is labeled "All"). The root's `total_us`
+/// sums all top-level slice durations and its `count` is the number of
+/// top-level occurrences across the included threads.
+pub fn build_flame_graph(profile: &Profile, key: FlameKey, scope: Option<usize>) -> FlameNode {
+    let root_name = match scope {
+        Some(i) => profile.threads[i].name.clone(),
+        None => "All".to_owned(),
+    };
+    let mut root = Builder::new(root_name, String::new());
+    let threads = match scope {
+        Some(i) => &profile.threads[i..=i],
+        None => &profile.threads[..],
+    };
+    for thread in threads {
         merge_thread(&mut root, &thread.slices, key);
     }
     root.total_us = root.children.iter().map(|c| c.total_us).sum();
@@ -353,7 +363,7 @@ mod tests {
             track(1, vec![slice("a", 0, 100, 0)]),
             track(2, vec![slice("a", 0, 50, 0)]),
         ]);
-        let root = build_flame_graph(&p, FlameKey::Name);
+        let root = build_flame_graph(&p, FlameKey::Name, None);
         assert_eq!(root.name, "All");
         assert_eq!(root.children.len(), 1);
         let a = &root.children[0];
@@ -365,12 +375,26 @@ mod tests {
     }
 
     #[test]
+    fn scoping_to_one_thread_excludes_the_others() {
+        let p = profile(vec![
+            track(1, vec![slice("a", 0, 100, 0)]),
+            track(2, vec![slice("b", 0, 50, 0)]),
+        ]);
+        let root = build_flame_graph(&p, FlameKey::Name, Some(1));
+        // Scoped to thread index 1: only its slice "b", root labeled by it.
+        assert_eq!(root.name, "t2");
+        assert_eq!(root.children.len(), 1);
+        assert_eq!(root.children[0].name, "b");
+        assert_eq!(root.total_us, 50);
+    }
+
+    #[test]
     fn distinct_top_level_frames_stay_separate() {
         let p = profile(vec![track(
             1,
             vec![slice("a", 0, 100, 0), slice("b", 100, 40, 0)],
         )]);
-        let root = build_flame_graph(&p, FlameKey::Name);
+        let root = build_flame_graph(&p, FlameKey::Name, None);
         assert_eq!(root.children.len(), 2);
         // Widest first: a (100) before b (40).
         assert_eq!(root.children[0].name, "a");
@@ -392,7 +416,7 @@ mod tests {
                 slice("evaluate", 200, 30, 0),
             ],
         )]);
-        let root = build_flame_graph(&p, FlameKey::Mnemonic);
+        let root = build_flame_graph(&p, FlameKey::Mnemonic, None);
         assert_eq!(root.children.len(), 2);
         let compile = child(&root, "CppCompile");
         assert_eq!(compile.total_us, 150);
@@ -413,7 +437,7 @@ mod tests {
                 categorized("c", "skyframe", 200, 60, 0),
             ],
         )]);
-        let root = build_flame_graph(&p, FlameKey::Category);
+        let root = build_flame_graph(&p, FlameKey::Category, None);
         assert_eq!(root.children.len(), 2);
         let action = child(&root, "action");
         assert_eq!(action.total_us, 140);
@@ -434,7 +458,7 @@ mod tests {
                 slice("c", 40, 50, 1),
             ],
         )]);
-        let root = build_flame_graph(&p, FlameKey::Name);
+        let root = build_flame_graph(&p, FlameKey::Name, None);
         let a = child(&root, "a");
         assert_eq!(a.depth, 1);
         assert_eq!(a.children.len(), 2);
@@ -460,7 +484,7 @@ mod tests {
                 slice("b", 100, 30, 1),
             ],
         )]);
-        let root = build_flame_graph(&p, FlameKey::Name);
+        let root = build_flame_graph(&p, FlameKey::Name, None);
         let a = child(&root, "a");
         assert_eq!(a.count, 2);
         assert_eq!(a.total_us, 200);
@@ -485,8 +509,8 @@ mod tests {
         let mut b_slices = shuffled;
         a_slices.sort_by(|x, y| x.start_us.cmp(&y.start_us).then(y.dur_us.cmp(&x.dur_us)));
         b_slices.sort_by(|x, y| x.start_us.cmp(&y.start_us).then(y.dur_us.cmp(&x.dur_us)));
-        let ra = build_flame_graph(&profile(vec![track(1, a_slices)]), FlameKey::Name);
-        let rb = build_flame_graph(&profile(vec![track(1, b_slices)]), FlameKey::Name);
+        let ra = build_flame_graph(&profile(vec![track(1, a_slices)]), FlameKey::Name, None);
+        let rb = build_flame_graph(&profile(vec![track(1, b_slices)]), FlameKey::Name, None);
         assert_eq!(ra, rb);
     }
 
@@ -497,7 +521,7 @@ mod tests {
             1,
             vec![slice("a", 0, 100, 0), slice("b", 100, 50, 0)],
         )]);
-        let root = build_flame_graph(&p, FlameKey::Name);
+        let root = build_flame_graph(&p, FlameKey::Name, None);
         let boxes = lay_out_flame(&root, 300.0, &METRICS, 0.0);
         let root_box = &boxes[0];
         assert_eq!(root_box.w, 300.0);
@@ -519,7 +543,7 @@ mod tests {
             1,
             vec![slice("wide", 0, 990, 0), slice("thin", 990, 10, 0)],
         )]);
-        let root = build_flame_graph(&p, FlameKey::Name);
+        let root = build_flame_graph(&p, FlameKey::Name, None);
         // 1000us over 100px: thin is 1px wide, below a 5px floor.
         let boxes = lay_out_flame(&root, 100.0, &METRICS, 5.0);
         assert!(boxes.iter().any(|b| b.name == "wide"));
@@ -536,7 +560,7 @@ mod tests {
             1,
             vec![slice("a", 0, 100, 0), slice("b", 0, 40, 1)],
         )]);
-        let root = build_flame_graph(&p, FlameKey::Name);
+        let root = build_flame_graph(&p, FlameKey::Name, None);
         // root depth 0, a depth 1, b depth 2 -> 3 rows.
         assert_eq!(flame_height(&root, &METRICS), 30.0);
     }

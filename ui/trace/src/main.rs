@@ -175,6 +175,10 @@ const FLAME_KEYS: [(&str, FlameKey); 3] = [
     ("Category", FlameKey::Category),
 ];
 
+/// How many threads the scope dropdown offers below "All threads". The menu does
+/// not scroll, so the list is capped to the busiest threads by slice duration.
+const MAX_SCOPE_THREADS: usize = 12;
+
 /// What a left-button drag is currently moving.
 #[derive(Clone, Copy)]
 enum Drag {
@@ -424,6 +428,17 @@ struct TraceView {
     /// Toolbar control choosing `flame_key`; its observer rebuilds the cache.
     key_dropdown: Entity<Dropdown>,
     _key_observer: Subscription,
+    /// Which thread the flame graph is scoped to, or `None` for all threads. Only
+    /// the busiest threads are offered; arbitrary-thread and time-range scoping are
+    /// driven by range selection, which this view does not have.
+    flame_scope: Option<usize>,
+    /// Toolbar control choosing `flame_scope`; rebuilt on profile load since its
+    /// options depend on the loaded threads.
+    scope_dropdown: Entity<Dropdown>,
+    _scope_observer: Subscription,
+    /// The thread index each `scope_dropdown` option past "All threads" maps to,
+    /// in menu order, so the observer can recover the scope from the selection.
+    scope_threads: Vec<usize>,
     /// The aggregated flame graph, built lazily on first use in graph mode and
     /// cleared when a new profile loads or the merge key changes. Walking every
     /// slice is too costly to repeat each paint.
@@ -451,16 +466,28 @@ impl TraceView {
             view.flame.borrow_mut().take();
             cx.notify();
         });
+        let (scope_dropdown, scope_observer, scope_threads) = Self::scope_dropdown(None, cx);
         let load_task = load_in_background(
             cx,
             move || Profile::from_path(&path).map_err(|e| e.to_string()),
-            |view, result, _| {
+            |view, result, cx| {
                 view.flame.borrow_mut().take();
                 view.flame_view.set(FlameView::FIT);
                 view.source = match result {
                     Ok(profile) => Source::Loaded(Rc::new(profile)),
                     Err(err) => Source::Message(err),
                 };
+                // The scope options depend on the loaded threads, so rebuild the
+                // dropdown (the menu can't grow options after creation), and reset
+                // the scope to all threads.
+                view.flame_scope = None;
+                if let Source::Loaded(profile) = &view.source {
+                    let (dropdown, observer, threads) =
+                        Self::scope_dropdown(Some(profile), cx);
+                    view.scope_dropdown = dropdown;
+                    view._scope_observer = observer;
+                    view.scope_threads = threads;
+                }
             },
         );
         Self {
@@ -484,12 +511,56 @@ impl TraceView {
             flame_key: FlameKey::Name,
             key_dropdown,
             _key_observer: key_observer,
+            flame_scope: None,
+            scope_dropdown,
+            _scope_observer: scope_observer,
+            scope_threads,
             flame: Rc::new(RefCell::new(None)),
             hover: None,
             flame_hover: None,
             crosshair: None,
             _load_task: load_task,
         }
+    }
+
+    /// Builds the thread-scope dropdown and its observer for a loaded profile (or
+    /// just "All threads" when none is loaded yet). The options past "All threads"
+    /// are the `MAX_SCOPE_THREADS` busiest threads by summed slice duration; the
+    /// returned vec maps each such option back to its thread index in menu order.
+    fn scope_dropdown(
+        profile: Option<&Profile>,
+        cx: &mut Context<Self>,
+    ) -> (Entity<Dropdown>, Subscription, Vec<usize>) {
+        let mut threads: Vec<usize> = Vec::new();
+        if let Some(profile) = profile {
+            let mut by_busyness: Vec<(usize, i64)> = profile
+                .threads
+                .iter()
+                .enumerate()
+                .map(|(i, t)| (i, t.slices.iter().map(|s| s.dur_us).sum()))
+                .collect();
+            by_busyness.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+            threads = by_busyness
+                .into_iter()
+                .take(MAX_SCOPE_THREADS)
+                .map(|(i, _)| i)
+                .collect();
+        }
+        let labels: Vec<String> = std::iter::once("All threads".to_owned())
+            .chain(threads.iter().map(|&i| {
+                profile
+                    .map(|p| p.threads[i].name.clone())
+                    .unwrap_or_default()
+            }))
+            .collect();
+        let dropdown = cx.new(|cx| Dropdown::new("flame-scope", labels, 0, cx));
+        let observer = cx.observe(&dropdown, |view, dropdown, cx| {
+            let idx = dropdown.read(cx).selected();
+            view.flame_scope = idx.checked_sub(1).map(|k| view.scope_threads[k]);
+            view.flame.borrow_mut().take();
+            cx.notify();
+        });
+        (dropdown, observer, threads)
     }
 
     /// Builds the single-canvas timeline. The closure is `'static`, so it captures
@@ -843,7 +914,11 @@ impl TraceView {
             return None;
         };
         if self.flame.borrow().is_none() {
-            *self.flame.borrow_mut() = Some(Rc::new(build_flame_graph(profile, self.flame_key)));
+            *self.flame.borrow_mut() = Some(Rc::new(build_flame_graph(
+                profile,
+                self.flame_key,
+                self.flame_scope,
+            )));
         }
         self.flame.borrow().clone()
     }
@@ -938,6 +1013,7 @@ impl Render for TraceView {
                                     .child("Group by"),
                             )
                             .child(self.key_dropdown.clone())
+                            .child(self.scope_dropdown.clone())
                     }));
                 let timeline = Self::timeline(
                     profile.clone(),
