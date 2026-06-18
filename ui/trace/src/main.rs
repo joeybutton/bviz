@@ -286,12 +286,11 @@ fn stats_cell(spec: &StatsColumnSpec, text: impl Into<SharedString>) -> Div {
 
 /// The group-by modes offered in the toolbar dropdown, in menu order: each entry
 /// pairs the option label with the mode the selection maps to.
-const GROUP_MODES: [(&str, GroupMode); 5] = [
+const GROUP_MODES: [(&str, GroupMode); 4] = [
     ("Mnemonic", GroupMode::Mnemonic),
-    ("Phase → Mnemonic", GroupMode::PhaseMnemonic),
+    ("Category", GroupMode::Category),
+    ("Phase", GroupMode::Phase),
     ("Work class", GroupMode::WorkClass),
-    ("Class → Mnemonic", GroupMode::ClassMnemonic),
-    ("Target", GroupMode::Target),
 ];
 
 /// The view scopes and their menu labels, in menu order. The first entry's scope
@@ -306,12 +305,12 @@ const VIEW_SCOPES: [(&str, Scope); 4] = [
 ];
 
 /// The group-by mode a freshly chosen view defaults to, picked to surface the
-/// question that view answers: a flat ranking for the critical path and analysis,
-/// a phase breakdown for execution and all-work.
+/// question that view answers: a flat ranking of the critical-path actions, and
+/// a category breakdown of the work elsewhere.
 fn default_mode_for(scope: Scope) -> GroupMode {
     match scope {
-        Scope::CriticalPath | Scope::Analysis => GroupMode::Mnemonic,
-        Scope::Execution | Scope::All => GroupMode::PhaseMnemonic,
+        Scope::CriticalPath => GroupMode::Mnemonic,
+        Scope::Execution | Scope::Analysis | Scope::All => GroupMode::Category,
     }
 }
 
