@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use bviz_trace_profile::{Profile, WorkClass};
 
-use crate::flame::{leaf_label, mnemonic_index, phase_resolver, GroupMode, Scope};
+use crate::flame::{leaf_label, mnemonic_index, GroupMode, Scope};
 
 /// One aggregated group of slices, summed across the scope. `total_us` and
 /// `max_us` sum/peak the durations of every slice (at any depth) sharing this
@@ -36,14 +36,13 @@ impl StatRow {
 /// caller sorts.
 pub fn aggregate_stats(profile: &Profile, mode: GroupMode, scope: Scope) -> Vec<StatRow> {
     let idx = mnemonic_index(profile);
-    let phase_of = phase_resolver(profile);
     let mut groups: HashMap<String, StatRow> = HashMap::new();
     for thread in &profile.threads {
         if !scope.includes(thread.lane_class) {
             continue;
         }
         for s in &thread.slices {
-            let (label, work_class) = leaf_label(s, &idx, &phase_of, mode);
+            let (label, work_class) = leaf_label(s, &idx, mode);
             let row = groups.entry(label.clone()).or_insert_with(|| StatRow {
                 key: label,
                 work_class,
@@ -120,7 +119,7 @@ mod tests {
     fn mnemonic_grouping_sums_count_total_and_max() {
         let p = profile(vec![track(
             1,
-            LaneClass::Worker,
+            LaneClass::Execution,
             vec![
                 action("CppCompile", 0, 100),
                 action("CppCompile", 100, 50),
@@ -141,8 +140,8 @@ mod tests {
     #[test]
     fn scope_excludes_other_lanes() {
         let p = profile(vec![
-            track(7, LaneClass::Main, vec![action("CppCompile", 0, 100)]),
-            track(8, LaneClass::Worker, vec![action("Rustc", 0, 50)]),
+            track(7, LaneClass::Analysis, vec![action("CppCompile", 0, 100)]),
+            track(8, LaneClass::Execution, vec![action("Rustc", 0, 50)]),
         ]);
         let rows = aggregate_stats(&p, GroupMode::Mnemonic, Scope::Execution);
         assert_eq!(rows.len(), 1);
@@ -155,7 +154,7 @@ mod tests {
         // Under Mnemonic grouping a slice with no mnemonic keys by its own name.
         let p = profile(vec![track(
             1,
-            LaneClass::Worker,
+            LaneClass::Execution,
             vec![
                 action("CppCompile", 0, 100),
                 slice("checkOutputs", "general information", 200, 30),
@@ -171,7 +170,7 @@ mod tests {
     fn work_class_mode_sums_per_class() {
         let p = profile(vec![track(
             1,
-            LaneClass::Worker,
+            LaneClass::Execution,
             vec![
                 action("CppCompile", 0, 100),
                 action("Rustc", 100, 50),
@@ -193,12 +192,12 @@ mod tests {
         let mut reversed = ordered.clone();
         reversed.reverse();
         let mut ra = aggregate_stats(
-            &profile(vec![track(1, LaneClass::Worker, ordered)]),
+            &profile(vec![track(1, LaneClass::Execution, ordered)]),
             GroupMode::Mnemonic,
             Scope::All,
         );
         let mut rb = aggregate_stats(
-            &profile(vec![track(1, LaneClass::Worker, reversed)]),
+            &profile(vec![track(1, LaneClass::Execution, reversed)]),
             GroupMode::Mnemonic,
             Scope::All,
         );

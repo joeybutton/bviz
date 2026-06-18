@@ -40,7 +40,7 @@ mod tests {
             sort_index,
             slices,
             max_depth,
-            lane_class: LaneClass::Worker,
+            lane_class: LaneClass::Execution,
         }
     }
 
