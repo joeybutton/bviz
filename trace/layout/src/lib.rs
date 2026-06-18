@@ -1,6 +1,7 @@
 mod cull;
 mod flame;
 mod lanes;
+mod stats;
 mod view;
 
 pub use cull::{Viewport, VisibleSlice, visible_slices};
@@ -9,6 +10,7 @@ pub use flame::{
     lay_out_flame,
 };
 pub use lanes::{CounterPos, Lane, LaneLayout, LaneMetrics, lay_out_lanes};
+pub use stats::{StatRow, aggregate_stats};
 pub use view::TimeView;
 
 #[cfg(test)]

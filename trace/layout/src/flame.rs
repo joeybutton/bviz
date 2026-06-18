@@ -15,7 +15,7 @@ impl FlameKey {
     /// The merge key for a slice: the attribute selected by `self`. A slice with
     /// no mnemonic (phases, evaluator frames) falls back to its name so it stays
     /// visible under `Mnemonic` keying rather than collapsing into one bucket.
-    fn of<'a>(self, slice: &'a Slice) -> &'a str {
+    pub(crate) fn of<'a>(self, slice: &'a Slice) -> &'a str {
         match self {
             FlameKey::Name => &slice.name,
             FlameKey::Mnemonic => slice.args.mnemonic.as_deref().unwrap_or(&slice.name),
