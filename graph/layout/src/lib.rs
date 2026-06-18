@@ -16,6 +16,7 @@ pub mod layout;
 pub mod lod;
 pub mod query;
 pub mod quotient;
+pub mod reduce;
 pub mod streamed_proto;
 
 pub use graph::{EdgeKind, Graph, Kind};
