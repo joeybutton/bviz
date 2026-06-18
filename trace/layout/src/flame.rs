@@ -33,6 +33,13 @@ pub struct FlameNode {
     pub name: String,
     pub category: String,
     pub total_us: i64,
+    /// The duration this node's box width represents: at least its own
+    /// `total_us`, but widened to its children's combined width when they
+    /// overflow it. Source slices that start inside a parent but end after it
+    /// (Bazel's catch-all "various events"/"unknown event" frames do this) would
+    /// otherwise sum to more than the parent's own duration and render wider than
+    /// it; clamping the parent up keeps every child within its parent.
+    pub width_us: i64,
     pub count: u32,
     pub depth: u32,
     pub children: Vec<FlameNode>,
@@ -172,15 +179,17 @@ impl Builder {
                 .cmp(&a.total_us)
                 .then_with(|| a.name.cmp(&b.name))
         });
-        let children = self
+        let children: Vec<FlameNode> = self
             .children
             .into_iter()
             .map(|c| c.finish(depth + 1))
             .collect();
+        let children_us: i64 = children.iter().map(|c| c.width_us).sum();
         FlameNode {
             name: self.name,
             category: self.category,
             total_us: self.total_us,
+            width_us: self.total_us.max(children_us),
             count: self.count,
             depth,
             children,
@@ -236,10 +245,11 @@ pub fn build_flame_graph(profile: &Profile, key: FlameKey, scope: Option<usize>)
 
 /// Lay the tree into a content rectangle of the given width. The root spans the
 /// full width; each node's children are placed left-to-right with width
-/// proportional to `total_us`, so the right-hand remainder is the parent's self
-/// time. Depth maps to y via `row_height`. Boxes narrower than `min_px` are
-/// omitted but still consume their horizontal share so siblings stay placed.
-/// Boxes come back in paint order, parents before children.
+/// proportional to `width_us`, so the right-hand remainder is the parent's self
+/// time (zero when children fill the parent). Depth maps to y via `row_height`.
+/// Boxes narrower than `min_px` are omitted but still consume their horizontal
+/// share so siblings stay placed. Boxes come back in paint order, parents before
+/// children.
 pub fn lay_out_flame(
     root: &FlameNode,
     width: f32,
@@ -272,12 +282,12 @@ fn place(
             count: node.count,
         });
     }
-    if node.total_us == 0 {
+    if node.width_us == 0 {
         return;
     }
     let mut cursor = x;
     for child in &node.children {
-        let cw = w * child.total_us as f32 / node.total_us as f32;
+        let cw = w * child.width_us as f32 / node.width_us as f32;
         place(child, cursor, cw, metrics, min_px, out);
         cursor += cw;
     }
@@ -558,6 +568,30 @@ mod tests {
         // Wide keeps its proportional slot; thin's omission does not move it.
         assert_eq!(wide.x, 0.0);
         assert!((wide.w - 99.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn child_overflowing_its_parent_never_renders_wider() {
+        // c starts inside p but runs past its end (the catch-all "various events"
+        // pattern): its 150us exceeds p's own 100us. width_us widens p to hold it.
+        let p = profile(vec![track(
+            1,
+            vec![slice("p", 0, 100, 0), slice("c", 50, 150, 1)],
+        )]);
+        let root = build_flame_graph(&p, FlameKey::Name, None);
+        let pn = child(&root, "p");
+        let cn = child(pn, "c");
+        assert_eq!(pn.total_us, 100);
+        assert_eq!(cn.total_us, 150);
+        assert_eq!(pn.width_us, 150);
+        assert_eq!(cn.width_us, 150);
+        let boxes = lay_out_flame(&root, 300.0, &METRICS, 0.0);
+        let pb = boxes.iter().find(|b| b.name == "p").unwrap();
+        let cb = boxes.iter().find(|b| b.name == "c").unwrap();
+        // The child never exceeds its parent and stays within its bounds.
+        assert!(cb.w <= pb.w + f32::EPSILON);
+        assert!(cb.x >= pb.x - f32::EPSILON);
+        assert!(cb.x + cb.w <= pb.x + pb.w + 1e-3);
     }
 
     #[test]
