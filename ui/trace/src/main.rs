@@ -1770,8 +1770,10 @@ impl TraceView {
             .map(|slice| (lane.track, slice))
     }
 
-    /// Updates the graph-mode hover to the flame box under `pos`, repainting when
-    /// it changes (so the tooltip follows the cursor and disappears off a box).
+    /// Updates the graph-mode hover to the flame box under `pos`, repainting only
+    /// when the hovered box changes. The tooltip anchors at the cursor position on
+    /// entry into a box and stays there while the cursor moves within it, so a
+    /// move that stays in one box costs no repaint.
     fn update_flame_hover(&mut self, pos: Point<Pixels>, cx: &mut Context<Self>) {
         let hit = self.flame_box_at(pos);
         let changed = match (&self.flame_hover, &hit) {
@@ -1779,12 +1781,11 @@ impl TraceView {
             (None, None) => false,
             _ => true,
         };
-        // The tooltip is anchored at the cursor, so a move within the same box
-        // still repaints to keep it following.
-        self.flame_hover = hit.map(|boxed| FlameHover { boxed, at: pos });
-        if changed || self.flame_hover.is_some() {
-            cx.notify();
+        if !changed {
+            return;
         }
+        self.flame_hover = hit.map(|boxed| FlameHover { boxed, at: pos });
+        cx.notify();
     }
 
     /// The flame-graph box under a window-space cursor, inverting the paint
