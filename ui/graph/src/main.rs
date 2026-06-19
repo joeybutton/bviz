@@ -1254,11 +1254,15 @@ fn build_graph(inputs: &[Input]) -> Result<(Graph, Graph, Names), String> {
 
 /// Builds the display graph with the given ids expanded and lays it out: fold
 /// every unexpanded container away, merge interchangeable leaves, then lay out
-/// only the resulting visible view. When `reduced`, the view draws the base's
-/// transitive reduction rather than every edge: the full base and the
-/// already-reduced base collapse to the same boxes, so the reduced edges project
-/// onto the boxes the full view grouped, giving a stable, locally-consistent
-/// skeleton. `full_edges` keeps the unreduced connectivity for hover.
+/// only the resulting visible view. When `reduced`, the view is transitively
+/// reduced in two steps. First the base's reduction projects onto the view's
+/// boxes — the full base and the already-reduced base collapse to the same
+/// boxes, so a collapsed box stands in for its hidden subtree's reduced edges,
+/// keeping its edge count stable under expansion. Then the projected box graph
+/// is reduced again, because merging a subtree into one box creates box-level
+/// shortcuts that no longer hold at node granularity (a box A->B edge implied by
+/// a drawn A->M->B path through other visible boxes); the second pass drops them.
+/// `full_edges` keeps the unreduced connectivity for hover.
 fn relayout(
     base: &Graph,
     reduced_base: &Graph,
@@ -1283,6 +1287,7 @@ fn relayout(
             .filter(|(a, b)| a != b)
             .collect();
         view.edges.retain(|e| kept.contains(&(e.from, e.to)));
+        view = bviz_graph_layout::reduce::transitive_reduction(&view);
     }
     let mut laid = layout::layout(&view);
     laid.full_edges = full_edges;
