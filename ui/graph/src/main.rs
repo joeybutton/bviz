@@ -15,7 +15,7 @@ use gpui::{
     Transformation, Window, canvas, div, percentage, point, prelude::*, px, quad, rgb, size,
 };
 use std::cell::{Cell, RefCell};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
@@ -421,23 +421,63 @@ impl GraphView {
                     .collect()
             })
             .unwrap_or_default();
-        // The subtree plus the far endpoint of each edge incident to it; an empty
-        // active set means no incident edges, so dimming stays off. This walks the
-        // full connectivity, not the drawn connectors, so a neighbor still lights
-        // up when reduction dropped the edge that would reach it.
+        // The subtree plus the far endpoint of each full-connectivity edge incident
+        // to it: the direct neighbors, the only nodes a hover lights. This walks the
+        // full connectivity, not the drawn connectors, so a neighbor still lights up
+        // when reduction dropped the edge to it. The far endpoints are split by
+        // direction so the path tracing below follows dependency edges the right way.
+        // An empty active set (no incident edge) leaves dimming off.
         let mut active: HashSet<Id> = subtree.clone();
+        let mut out_targets: HashSet<Id> = HashSet::new();
+        let mut in_targets: HashSet<Id> = HashSet::new();
         let mut has_edge = false;
         for &(from, to) in &g.full_edges {
-            if subtree.contains(&from) || subtree.contains(&to) {
+            let (f_in, t_in) = (subtree.contains(&from), subtree.contains(&to));
+            if f_in || t_in {
                 has_edge = true;
-                active.insert(from);
+            }
+            if f_in && !t_in {
                 active.insert(to);
+                out_targets.insert(to);
+            } else if t_in && !f_in {
+                active.insert(from);
+                in_targets.insert(from);
             }
         }
         if !has_edge {
             active.clear();
         }
         let dim_active = has_edge;
+        // Edges to light. Every drawn edge incident to the subtree is a surviving
+        // direct-neighbor edge — the drawn graph is a subset of the full
+        // connectivity — so light them all; a compound box thus lights every
+        // member's neighbor edge at once, not one at a time. A neighbor whose direct
+        // edge reduction dropped is reached by no such edge; for it alone, trace the
+        // shortest drawn path so it is not left floating. A path's interior nodes are
+        // conduits, not neighbors, so they stay out of `active` (the undimmed boxes
+        // remain just the direct neighbors).
+        let mut lit_edges: HashSet<(Id, Id)> = HashSet::new();
+        if has_edge {
+            let mut out_adj: HashMap<Id, Vec<Id>> = HashMap::new();
+            let mut in_adj: HashMap<Id, Vec<Id>> = HashMap::new();
+            for c in &g.connectors {
+                out_adj.entry(c.from).or_default().push(c.to);
+                in_adj.entry(c.to).or_default().push(c.from);
+                if subtree.contains(&c.from) || subtree.contains(&c.to) {
+                    lit_edges.insert((c.from, c.to));
+                }
+            }
+            // Neighbors a drawn edge already reaches need no path.
+            let reached: HashSet<Id> = lit_edges
+                .iter()
+                .flat_map(|&(f, t)| [f, t])
+                .filter(|n| !subtree.contains(n))
+                .collect();
+            let out_missing: HashSet<Id> = out_targets.difference(&reached).copied().collect();
+            let in_missing: HashSet<Id> = in_targets.difference(&reached).copied().collect();
+            trace_paths(&subtree, &out_missing, &out_adj, true, &mut lit_edges);
+            trace_paths(&subtree, &in_missing, &in_adj, false, &mut lit_edges);
+        }
         // The highlight fades linearly to nothing over the linger window.
         let highlight_alpha =
             (1.0 - recent_at.elapsed().as_secs_f32() / HIGHLIGHT_LINGER.as_secs_f32()).clamp(0.0, 1.0);
@@ -472,11 +512,7 @@ impl GraphView {
             .connectors
             .iter()
             .map(|c| {
-                // Light an edge whose both endpoints are in the neighborhood, so a
-                // reduced path's kept edges (each between two active nodes) all
-                // stay lit, not only the ones touching the hovered subtree.
-                let active_edge = active.contains(&c.from) && active.contains(&c.to);
-                let dim = dim_active && !active_edge;
+                let dim = dim_active && !lit_edges.contains(&(c.from, c.to));
                 (c.points.clone(), c.kinds.clone(), dim)
             })
             .collect();
@@ -1250,6 +1286,43 @@ fn build_graph(inputs: &[Input]) -> Result<(Graph, Graph, Names), String> {
     // expansion rather than re-derived (differently) from each view.
     let reduced = bviz_graph_layout::reduce::transitive_reduction(&base);
     Ok((base, reduced, names))
+}
+
+/// Lights the shortest drawn path from `subtree` to each target. A breadth-first
+/// walk over `adj` records each node's predecessor; reconstructing from a target
+/// back to the subtree yields the path's edges. With `forward`, `adj` is the
+/// out-adjacency and a predecessor edge `p->cur` is itself a drawn edge; otherwise
+/// `adj` is the in-adjacency and the drawn edge runs the other way, `cur->p`. The
+/// walk seeds the subtree in id order so a tie between equal-length paths resolves
+/// the same way every paint, rather than flickering with hash iteration order.
+fn trace_paths(
+    subtree: &HashSet<Id>,
+    targets: &HashSet<Id>,
+    adj: &HashMap<Id, Vec<Id>>,
+    forward: bool,
+    lit: &mut HashSet<(Id, Id)>,
+) {
+    let mut came: HashMap<Id, Id> = HashMap::new();
+    let mut seen: HashSet<Id> = subtree.clone();
+    let mut seeds: Vec<Id> = subtree.iter().copied().collect();
+    seeds.sort_unstable_by_key(|id| id.0);
+    let mut queue: VecDeque<Id> = seeds.into();
+    while let Some(u) = queue.pop_front() {
+        for &w in adj.get(&u).into_iter().flatten() {
+            if seen.insert(w) {
+                came.insert(w, u);
+                queue.push_back(w);
+            }
+        }
+    }
+    for &target in targets {
+        let mut cur = target;
+        while !subtree.contains(&cur) {
+            let Some(&prev) = came.get(&cur) else { break };
+            lit.insert(if forward { (prev, cur) } else { (cur, prev) });
+            cur = prev;
+        }
+    }
 }
 
 /// Builds the display graph with the given ids expanded and lays it out: fold
