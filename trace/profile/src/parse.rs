@@ -439,18 +439,24 @@ fn apply_counter_event(
 }
 
 /// Implicit nesting from a flat per-thread slice list: sort by start then by
-/// longest duration, then track ancestor end-times on a stack.
+/// longest duration, then assign each slice the depth of its nearest ENCLOSING
+/// ancestor on a stack of ancestor end-times. A slice is nested only in a span
+/// that contains it, so pop while the stack top ends before the slice does
+/// (`end < slice_end`); popping on end-before-start alone would keep merely
+/// overlapping spans stacked — a span that starts inside another but ends after
+/// it is a sibling, not a child — building a runaway staircase of false depth.
 fn assign_depths(slices: &mut [Slice]) -> u32 {
     slices.sort_by(|a, b| a.start_us.cmp(&b.start_us).then(b.dur_us.cmp(&a.dur_us)));
     let mut stack: Vec<i64> = Vec::new();
     let mut max_depth = 0u32;
     for slice in slices.iter_mut() {
-        while stack.last().is_some_and(|&end| end <= slice.start_us) {
+        let slice_end = slice.start_us + slice.dur_us;
+        while stack.last().is_some_and(|&end| end < slice_end) {
             stack.pop();
         }
         slice.depth = stack.len() as u32;
         max_depth = max_depth.max(slice.depth);
-        stack.push(slice.start_us + slice.dur_us);
+        stack.push(slice_end);
     }
     if slices.is_empty() { 0 } else { max_depth + 1 }
 }

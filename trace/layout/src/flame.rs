@@ -342,14 +342,14 @@ fn end_us(slice: &Slice) -> i64 {
 }
 
 /// The time-containment forest of a lane's slices. `order` lists the slice
-/// indices sorted by start then longest-duration-first (the parser's nesting
-/// order, recomputed so the result is independent of the input vector's order);
-/// `children[i]` lists the slices directly nested in slice `i`; `roots` lists the
-/// top-level slices (no container). Built with a depth-stack over `order`: for
-/// each slice, pop while the stack top ends at or before its start, the remaining
-/// top (if any) is its parent, then push it. A slice that starts inside its
-/// parent but ends after it stays a child — the overflow case handled by
-/// `width_us`.
+/// indices sorted by start then longest-duration-first (recomputed so the result
+/// is independent of the input vector's order); `children[i]` lists the slices
+/// directly nested in slice `i`; `roots` lists the top-level slices (no
+/// container). Built with a depth-stack over `order`: a slice's parent is the
+/// nearest ENCLOSING span, so pop while the stack top doesn't enclose the slice
+/// (`top.end < slice.end`). Popping on end-before-start alone would wrongly nest
+/// spans that merely overlap — one that starts inside another but ends after it
+/// is a sibling, not a child — which otherwise builds a runaway staircase.
 struct Forest {
     children: Vec<Vec<usize>>,
     roots: Vec<usize>,
@@ -367,9 +367,10 @@ fn containment_forest(slices: &[Slice]) -> Forest {
     let mut roots = Vec::new();
     let mut stack: Vec<usize> = Vec::new();
     for &i in &order {
+        let slice_end = end_us(&slices[i]);
         while stack
             .last()
-            .is_some_and(|&top| end_us(&slices[top]) <= slices[i].start_us)
+            .is_some_and(|&top| end_us(&slices[top]) < slice_end)
         {
             stack.pop();
         }
@@ -836,10 +837,10 @@ mod tests {
     }
 
     #[test]
-    fn overflowing_child_still_fits_in_layout() {
-        // A child that starts inside its parent but ends after it (Bazel's
-        // catch-all frames): width_us is the max, self_us floors at zero, and the
-        // child stays within the parent's box.
+    fn overflowing_span_is_a_sibling_not_a_child() {
+        // A span that starts inside another but ends AFTER it isn't enclosed, so
+        // it is a sibling, not a child. Nesting it (popping only on
+        // end-before-start) is what built the runaway false-depth staircase.
         let p = profile(vec![track(
             1,
             LaneClass::Execution,
@@ -850,19 +851,9 @@ mod tests {
         )]);
         let root = build_flame_graph(&p, GroupMode::Mnemonic, Scope::All);
         let outer = child(&root, "Outer");
-        let inner = child(outer, "inner");
         assert_eq!(outer.total_us, 50);
-        assert_eq!(inner.total_us, 100);
-        // Child total exceeds parent total; width and self time stay sane.
-        assert_eq!(outer.width_us, 100);
-        assert_eq!(outer.self_us, 0);
-        assert!(inner.self_us >= 0);
-        let boxes = lay_out_flame(&root, 300.0, &METRICS, 0.0);
-        let ob = boxes.iter().find(|b| b.name == "Outer").unwrap();
-        let ib = boxes.iter().find(|b| b.name == "inner").unwrap();
-        assert!(ib.w <= ob.w + f32::EPSILON);
-        assert!(ib.x >= ob.x - f32::EPSILON);
-        assert!(ib.x + ib.w <= ob.x + ob.w + 1e-3);
+        assert!(outer.children.is_empty(), "inner must not nest under Outer");
+        assert_eq!(child(&root, "inner").total_us, 100);
     }
 
     #[test]
