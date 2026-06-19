@@ -212,4 +212,70 @@ mod tests {
         let e = kept(&r, &n);
         assert!(e.contains(&("a".into(), "b".into())) || e.contains(&("a".into(), "c".into())));
     }
+
+    #[test]
+    fn diamond_keeps_both_branches_drops_the_shortcut() {
+        // a->b->d and a->c->d: both branches stay (neither implies the other),
+        // only the direct a->d is redundant.
+        let (g, n) = build(&[("a", "b"), ("a", "c"), ("b", "d"), ("c", "d"), ("a", "d")]);
+        let e = kept(&transitive_reduction(&g), &n);
+        assert_eq!(e.len(), 4);
+        assert!(!e.contains(&("a".into(), "d".into())));
+    }
+
+    #[test]
+    fn a_chain_drops_every_skip_edge() {
+        // a->b->c->d with all forward skips; only the three chain steps remain.
+        let (g, n) = build(&[
+            ("a", "b"),
+            ("b", "c"),
+            ("c", "d"),
+            ("a", "c"),
+            ("a", "d"),
+            ("b", "d"),
+        ]);
+        let e = kept(&transitive_reduction(&g), &n);
+        assert_eq!(
+            e,
+            [("a", "b"), ("b", "c"), ("c", "d")]
+                .iter()
+                .map(|(a, b)| (a.to_string(), b.to_string()))
+                .collect()
+        );
+    }
+
+    /// A path `n0 -> n1 -> ... -> n{len-1}` plus, from `n0`, a redundant skip to
+    /// every later node, named so the reachability bitset must span several
+    /// 64-bit words.
+    fn long_chain_with_skips(len: usize) -> Vec<(String, String)> {
+        let name = |i: usize| format!("n{i:03}");
+        let mut edges: Vec<(String, String)> = (0..len - 1).map(|i| (name(i), name(i + 1))).collect();
+        edges.extend((2..len).map(|j| (name(0), name(j))));
+        edges
+    }
+
+    #[test]
+    fn the_bitset_path_spans_multiple_words() {
+        // 100 nodes > 64, so reach[] uses two words and the v/64 indexing matters.
+        let len = 100;
+        let owned = long_chain_with_skips(len);
+        let refs: Vec<(&str, &str)> = owned.iter().map(|(a, b)| (a.as_str(), b.as_str())).collect();
+        let (g, n) = build(&refs);
+        // The fast path must apply (the graph is acyclic).
+        assert!(dag_reduction(&g).is_some());
+        let e = kept(&transitive_reduction(&g), &n);
+        let chain: HashSet<(String, String)> =
+            (0..len - 1).map(|i| (format!("n{i:03}"), format!("n{:03}", i + 1))).collect();
+        assert_eq!(e, chain);
+    }
+
+    #[test]
+    fn the_two_reductions_agree_on_a_dag() {
+        // On a DAG the reduction is unique, so the fast bitset path and the
+        // per-edge fallback must yield the same edges.
+        let owned = long_chain_with_skips(70);
+        let refs: Vec<(&str, &str)> = owned.iter().map(|(a, b)| (a.as_str(), b.as_str())).collect();
+        let (g, n) = build(&refs);
+        assert_eq!(kept(&dag_reduction(&g).unwrap(), &n), kept(&iterative_reduction(&g), &n));
+    }
 }
