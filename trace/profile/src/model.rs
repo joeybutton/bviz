@@ -50,7 +50,7 @@ pub struct Slice {
 /// is both CPU- and I/O-bound — classified [`WorkClass::Io`] alongside the rest
 /// of VFS; "action dependency checking" sits between compute and waiting on the
 /// action cache — classified [`WorkClass::Wait`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum WorkClass {
     Cpu,
     Remote,

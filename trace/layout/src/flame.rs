@@ -255,14 +255,18 @@ pub struct FlameBox {
     pub count: u32,
 }
 
-/// A node still under construction: children keyed by `(label, work_class)` for
-/// merging by semantic-path identity.
+/// A node still under construction. Children are kept in insertion order in
+/// `children` and located by their `(label, work_class)` merge key through
+/// `index`, so merging a span into an existing child is O(1): under a fine
+/// grouping (mnemonic) a single frame can gather thousands of distinct children,
+/// where a linear scan per insert would be quadratic.
 struct Builder {
     name: String,
     work_class: WorkClass,
     total_us: i64,
     count: u32,
     children: Vec<Builder>,
+    index: HashMap<(String, WorkClass), usize>,
 }
 
 impl Builder {
@@ -273,22 +277,22 @@ impl Builder {
             total_us: 0,
             count: 0,
             children: Vec::new(),
+            index: HashMap::new(),
         }
     }
 
     /// Find the child matching this segment, or append a fresh one. The work
     /// class travels with the label; the first occurrence wins.
     fn child(&mut self, seg: &Segment) -> &mut Builder {
-        let idx = match self
-            .children
-            .iter()
-            .position(|c| c.name == seg.label && c.work_class == seg.work_class)
-        {
-            Some(i) => i,
+        let key = (seg.label.clone(), seg.work_class);
+        let idx = match self.index.get(&key) {
+            Some(&i) => i,
             None => {
+                let i = self.children.len();
                 self.children
                     .push(Builder::new(seg.label.clone(), seg.work_class));
-                self.children.len() - 1
+                self.index.insert(key, i);
+                i
             }
         };
         &mut self.children[idx]
