@@ -61,6 +61,28 @@ const FIT_MARGIN: f32 = 2.0 / 3.0;
 /// relayout settles the view, so a kept box never sits flush against the border.
 const RECENTER_PAD: f32 = 24.0;
 
+/// How long the view eases to its settled position after a toggle: short enough
+/// to stay responsive, long enough that the eye can follow the shift instead of
+/// the view jumping there in a single frame.
+const SETTLE_DURATION: Duration = Duration::from_millis(220);
+
+/// Below these per-axis deltas a settle is a no-op and is not animated, so a
+/// toggle that leaves the view already framed does not twitch.
+const SETTLE_MIN_ZOOM_STEP: f32 = 0.002;
+const SETTLE_MIN_PAN_STEP: f32 = 0.5;
+
+/// An in-flight ease of the view from one zoom/pan to another, so a toggle's
+/// settle shifts over a few frames instead of jumping. Driven from the canvas
+/// prepaint, which re-requests a frame until the ease lands.
+#[derive(Clone, Copy)]
+struct Settle {
+    from_zoom: f32,
+    from_pan: (f32, f32),
+    to_zoom: f32,
+    to_pan: (f32, f32),
+    start: Instant,
+}
+
 /// Accent hue for a leaf box, keyed by its node kind. These are mid-saturation
 /// and recognizable against either a light or dark background.
 fn kind_accent(kind: Kind) -> Rgba {
@@ -209,6 +231,10 @@ struct GraphView {
     /// view tracks what the user was looking at rather than snapping to the
     /// toggled box alone.
     prev_visible: Vec<Id>,
+    /// The in-flight ease toward the settled view, or `None` when the view is at
+    /// rest. The canvas paint advances it; a manual pan or zoom clears it so the
+    /// animation never fights the cursor.
+    anim: Rc<Cell<Option<Settle>>>,
     /// Whether a relayout is running, so the view shows a progress indicator
     /// while the prior layout stays interactive.
     relaying: bool,
@@ -306,6 +332,7 @@ impl GraphView {
             highlight_seq: 0,
             recenter: Rc::new(Cell::new(false)),
             prev_visible: Vec::new(),
+            anim: Rc::new(Cell::new(None)),
             relaying: false,
             hovered: None,
             dim_enabled: true,
@@ -397,6 +424,7 @@ impl GraphView {
         recent: Option<Id>,
         recent_at: Instant,
         recenter: Rc<Cell<bool>>,
+        anim: Rc<Cell<Option<Settle>>>,
         prev_visible: &[Id],
         relaying: bool,
         hovered: Option<Id>,
@@ -676,14 +704,15 @@ impl GraphView {
         // Capture the viewport bounds and fit the graph to them. The fit needs
         // the viewport size, known only once laid out, so it happens here.
         let prepaint = {
-            let (zoom, pan, fitted, viewport, recenter) = (
+            let (zoom, pan, fitted, viewport, recenter, anim) = (
                 zoom.clone(),
                 pan.clone(),
                 fitted.clone(),
                 viewport.clone(),
                 recenter.clone(),
+                anim.clone(),
             );
-            move |bounds: Bounds<Pixels>, _: &mut Window, _: &mut App| {
+            move |bounds: Bounds<Pixels>, window: &mut Window, _: &mut App| {
                 let prev = viewport.get();
                 viewport.set(bounds);
                 if !fitted.get() {
@@ -696,7 +725,9 @@ impl GraphView {
                     // the graph point under the viewport center fixed and scale the
                     // zoom with the fit, so the same section stays framed at the
                     // same zoom relative to the window rather than snapping to the
-                    // fully fitted view.
+                    // fully fitted view. A settle in flight targeted the old size,
+                    // so drop it rather than ease toward a stale destination.
+                    anim.set(None);
                     let old_fit = fit_zoom(prev.size, content);
                     let new_fit = fit_zoom(bounds.size, content);
                     let z_old = zoom.get();
@@ -716,14 +747,45 @@ impl GraphView {
                 // fill the view, the disorienting case this avoids. Hold the
                 // rect's center fixed across the zoom change so the content does
                 // not lurch, then pan the minimum needed to seat the rect fully
-                // inside — leaving the view put when it already fits.
+                // inside — leaving the view put when it already fits. The move is
+                // eased over a few frames (the driver below) rather than jumped.
                 if recenter.get() {
                     if let Some(target) = recenter_target {
-                        let (z, p) = settle_view(target, bounds.size, content, zoom.get(), pan.get());
-                        zoom.set(z);
-                        pan.set(p);
+                        let (tz, (tpx, tpy)) =
+                            settle_view(target, bounds.size, content, zoom.get(), pan.get());
+                        let (z, (px, py)) = (zoom.get(), pan.get());
+                        let moves = (tz - z).abs() > SETTLE_MIN_ZOOM_STEP
+                            || (tpx - px).abs() > SETTLE_MIN_PAN_STEP
+                            || (tpy - py).abs() > SETTLE_MIN_PAN_STEP;
+                        if moves {
+                            anim.set(Some(Settle {
+                                from_zoom: z,
+                                from_pan: (px, py),
+                                to_zoom: tz,
+                                to_pan: (tpx, tpy),
+                                start: Instant::now(),
+                            }));
+                        }
                     }
                     recenter.set(false);
+                }
+                // Advance an in-flight settle and ask for the next frame until it
+                // lands, then snap to the target and stop, so the window returns to
+                // idle. request_animation_frame redraws even with no other change.
+                if let Some(a) = anim.get() {
+                    let t =
+                        (a.start.elapsed().as_secs_f32() / SETTLE_DURATION.as_secs_f32()).clamp(0.0, 1.0);
+                    let e = ease_out_cubic(t);
+                    zoom.set(a.from_zoom + (a.to_zoom - a.from_zoom) * e);
+                    pan.set((
+                        a.from_pan.0 + (a.to_pan.0 - a.from_pan.0) * e,
+                        a.from_pan.1 + (a.to_pan.1 - a.from_pan.1) * e,
+                    ));
+                    if t >= 1.0 {
+                        anim.set(None);
+                    } else {
+                        window.request_animation_frame();
+                    }
                 }
             }
         };
@@ -820,6 +882,7 @@ impl Render for GraphView {
                         self.recent,
                         self.recent_at,
                         self.recenter.clone(),
+                        self.anim.clone(),
                         &self.prev_visible,
                         self.relaying,
                         self.hovered,
@@ -883,6 +946,8 @@ impl Render for GraphView {
                         let content_y = (ly - py) / old;
                         this.pan.set((lx - content_x * new, ly - content_y * new));
                         this.zoom.set(new);
+                        // A manual zoom overrides any settle still easing.
+                        this.anim.set(None);
                         cx.notify();
                     }))
                     // Track the shared focus handle here too (the chrome already
@@ -986,6 +1051,13 @@ fn enclosed_boxes(
         })
         .map(|b| b.id)
         .collect()
+}
+
+/// Ease-out cubic over `t` in `0..=1`: quick to start, decelerating into place,
+/// so a settle arrives gently rather than stopping abruptly.
+fn ease_out_cubic(t: f32) -> f32 {
+    let u = 1.0 - t;
+    1.0 - u * u * u
 }
 
 /// The zoom and pan that keep `target` (a layout-space rect `(x, y, w, h)`) fully
@@ -1454,6 +1526,8 @@ fn drag_pan(view: &mut GraphView, event: &MouseMoveEvent, cx: &mut Context<Graph
     let dy = f32::from(event.position.y) - f32::from(view.last_mouse.y);
     view.pan.set((px + dx, py + dy));
     view.last_mouse = event.position;
+    // A manual pan overrides any settle still easing.
+    view.anim.set(None);
     cx.notify();
 }
 
@@ -1714,6 +1788,21 @@ mod tests {
         assert!((z - 1.0).abs() < 1e-4, "zoom moved: {z}");
         assert!(p.0 < 0.0, "expected a leftward pan, got {p:?}");
         assert_enclosed(target, 800., 600., z, p);
+    }
+
+    #[test]
+    fn ease_out_cubic_endpoints_and_deceleration() {
+        assert!(ease_out_cubic(0.0).abs() < 1e-6, "{}", ease_out_cubic(0.0));
+        assert!((ease_out_cubic(1.0) - 1.0).abs() < 1e-6, "{}", ease_out_cubic(1.0));
+        // Ease-out: past the halfway mark in eased progress before halfway in time.
+        assert!(ease_out_cubic(0.5) > 0.5, "{}", ease_out_cubic(0.5));
+        // Monotonically increasing.
+        let mut prev = ease_out_cubic(0.0);
+        for i in 1..=10 {
+            let e = ease_out_cubic(i as f32 / 10.0);
+            assert!(e >= prev, "not monotonic at {i}: {e} < {prev}");
+            prev = e;
+        }
     }
 
     #[test]
