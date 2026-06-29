@@ -1,7 +1,6 @@
 use std::collections::BTreeMap;
 use std::fmt;
-use std::fs::File;
-use std::io::{BufRead, BufReader, Read};
+use std::io::Read;
 use std::path::Path;
 
 use flate2::read::MultiGzDecoder;
@@ -77,27 +76,17 @@ fn round_us(v: Option<f64>) -> i64 {
 }
 
 impl Profile {
-    /// Streams the profile from disk, decompressing and transcoding to UTF-8 on
-    /// the fly so a large trace is never decoded into memory whole. A parse
-    /// failure — most often a profile truncated by an interrupted Bazel — falls
-    /// back to a full read and the best-effort [`recover`].
     pub fn from_path(path: &Path) -> Result<Profile, LoadError> {
-        let mut buffered = BufReader::new(File::open(path).map_err(LoadError::Io)?);
-        let gzipped = buffered
-            .fill_buf()
-            .map_err(LoadError::Io)?
-            .starts_with(&GZIP_MAGIC);
-        let decompressed: Box<dyn Read> = if gzipped {
-            Box::new(MultiGzDecoder::new(buffered))
-        } else {
-            Box::new(buffered)
-        };
-        match serde_json::from_reader::<_, RawProfile>(Latin1Reader::new(decompressed)) {
-            Ok(raw) => Ok(build(raw.other_data, raw.trace_events)),
-            Err(_) => recover(&decode(&std::fs::read(path).map_err(LoadError::Io)?)?),
-        }
+        Profile::from_bytes(&std::fs::read(path).map_err(LoadError::Io)?)
     }
 
+    /// Decompresses (if gzipped) and transcodes the profile to UTF-8, then parses
+    /// it with `serde_json::from_str`. The whole text is decoded into memory
+    /// rather than streamed: `from_str` works over a slice (`SliceRead`), far
+    /// faster than the byte-at-a-time `from_reader` (`IoRead`) on a trace of
+    /// millions of events, and a profile compresses small enough that the decoded
+    /// text fits comfortably. A parse failure — most often a profile truncated by
+    /// an interrupted Bazel — falls back to the best-effort [`recover`].
     pub fn from_bytes(bytes: &[u8]) -> Result<Profile, LoadError> {
         let decoded = decode(bytes)?;
         match serde_json::from_str::<RawProfile>(&decoded) {
@@ -117,53 +106,33 @@ fn decode(bytes: &[u8]) -> Result<String, LoadError> {
     } else {
         bytes.to_vec()
     };
-    Ok(raw.iter().map(|&b| b as char).collect())
+    Ok(latin1_to_utf8(raw))
 }
 
-/// Transcodes an ISO-8859-1 (Latin-1) byte stream — how Bazel writes profile
-/// strings — to UTF-8 as it is read, so the JSON reader consumes valid UTF-8
-/// without the whole input being decoded up front. Each byte >= 0x80 expands to
+/// Transcodes an ISO-8859-1 (Latin-1) byte buffer — how Bazel writes profile
+/// strings — to UTF-8. A Bazel profile is overwhelmingly ASCII, so the all-ASCII
+/// case (already valid UTF-8) reuses the buffer with no per-byte work; otherwise
+/// each leading ASCII run is copied wholesale and only a byte >= 0x80 expands to
 /// the two-byte UTF-8 encoding of the same code point.
-struct Latin1Reader<R> {
-    inner: R,
-    buf: Vec<u8>,
-    pos: usize,
-}
-
-impl<R: Read> Latin1Reader<R> {
-    fn new(inner: R) -> Latin1Reader<R> {
-        Latin1Reader {
-            inner,
-            buf: Vec::new(),
-            pos: 0,
+fn latin1_to_utf8(raw: Vec<u8>) -> String {
+    if raw.is_ascii() {
+        return String::from_utf8(raw).expect("ascii is valid utf-8");
+    }
+    // High bytes each grow by one; reserve a little slack so a profile with few
+    // of them doesn't reallocate.
+    let mut out = String::with_capacity(raw.len() + raw.len() / 16 + 16);
+    let mut rest = &raw[..];
+    while !rest.is_empty() {
+        let split = rest.iter().position(|&b| b >= 0x80).unwrap_or(rest.len());
+        // SAFETY: the prefix up to the first high byte is ASCII, hence valid UTF-8.
+        out.push_str(unsafe { std::str::from_utf8_unchecked(&rest[..split]) });
+        rest = &rest[split..];
+        if let Some((&b, tail)) = rest.split_first() {
+            out.push(b as char);
+            rest = tail;
         }
     }
-}
-
-impl<R: Read> Read for Latin1Reader<R> {
-    fn read(&mut self, dst: &mut [u8]) -> std::io::Result<usize> {
-        if self.pos >= self.buf.len() {
-            let mut chunk = [0u8; 8192];
-            let n = self.inner.read(&mut chunk)?;
-            if n == 0 {
-                return Ok(0);
-            }
-            self.buf.clear();
-            self.pos = 0;
-            for &b in &chunk[..n] {
-                if b < 0x80 {
-                    self.buf.push(b);
-                } else {
-                    self.buf.push(0xc0 | (b >> 6));
-                    self.buf.push(0x80 | (b & 0x3f));
-                }
-            }
-        }
-        let n = (self.buf.len() - self.pos).min(dst.len());
-        dst[..n].copy_from_slice(&self.buf[self.pos..self.pos + n]);
-        self.pos += n;
-        Ok(n)
-    }
+    out
 }
 
 /// Best-effort parse of a truncated profile: read otherData if present and pull
@@ -651,16 +620,19 @@ mod tests {
     }
 
     #[test]
-    fn latin1_reader_transcodes_to_utf8() {
-        // 0xe9 is Latin-1 'é', which is two bytes in UTF-8.
-        let input: &[u8] = &[b'A', 0xe9, b'z'];
-        let mut out = Vec::new();
-        Latin1Reader::new(input).read_to_end(&mut out).unwrap();
-        assert_eq!(out, "Aéz".as_bytes());
+    fn latin1_to_utf8_transcodes_high_bytes() {
+        // Pure ASCII passes through unchanged (the moved-buffer fast path).
+        assert_eq!(latin1_to_utf8(b"Az0".to_vec()), "Az0");
+        // 0xe9 is Latin-1 'é', two bytes in UTF-8; surrounding ASCII runs are kept.
+        assert_eq!(latin1_to_utf8(vec![b'A', 0xe9, b'z']), "Aéz");
+        // Consecutive leading high bytes (0xe9='é', 0xe8='è') then ASCII, and a
+        // trailing high byte (0xff='ÿ').
+        assert_eq!(latin1_to_utf8(vec![0xe9, 0xe8, b'x']), "éèx");
+        assert_eq!(latin1_to_utf8(vec![b'x', 0xff]), "xÿ");
     }
 
     #[test]
-    fn from_path_streams_gzipped_profile() {
+    fn from_path_reads_gzipped_profile() {
         let json = r#"{
             "otherData": {"bazel_version":"7.0.0"},
             "traceEvents": [
