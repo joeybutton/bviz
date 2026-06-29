@@ -83,10 +83,11 @@ enum ArgVal {
 
 impl ArgVal {
     /// The value as the display string the profile's `others` list carries,
-    /// matching how a JSON scalar formats.
-    fn to_display(&self) -> String {
+    /// matching how a JSON scalar formats; consumes the value so a string moves
+    /// rather than copies.
+    fn into_display(self) -> String {
         match self {
-            ArgVal::Str(s) => s.clone(),
+            ArgVal::Str(s) => s,
             ArgVal::Int(n) => n.to_string(),
             ArgVal::Float(n) => n.to_string(),
         }
@@ -386,33 +387,33 @@ fn build(other_data: Option<Map<String, Value>>, events: Vec<RawEvent>) -> Profi
     let mut counter_order: Vec<String> = Vec::new();
     let mut counters: BTreeMap<String, CounterLane> = BTreeMap::new();
 
-    for ev in &events {
+    for ev in events {
         let ph = ev.ph.as_deref().unwrap_or("");
         match ph {
-            "M" => apply_metadata_event(ev, &mut thread_meta),
+            "M" => apply_metadata_event(&ev, &mut thread_meta),
             "X" | "i" => {
                 let ts = round_us(ev.ts);
                 if ev.cat.as_deref() == Some(PHASE_MARKER_CATEGORY) {
                     phase_markers.push(PhaseMarker {
-                        name: ev.name.clone().unwrap_or_default(),
+                        name: ev.name.unwrap_or_default(),
                         start_us: ts,
                     });
                 } else {
                     let tid = ev.tid.unwrap_or(0);
-                    let category = ev.cat.clone().unwrap_or_default();
+                    let category = ev.cat.unwrap_or_default();
                     let work_class = work_class(&category);
                     slices.entry(tid).or_default().push(Slice {
-                        name: ev.name.clone().unwrap_or_default(),
+                        name: ev.name.unwrap_or_default(),
                         category,
                         start_us: ts,
                         dur_us: round_us(ev.dur),
                         depth: 0,
-                        args: build_slice_args(ev.args.as_ref()),
+                        args: build_slice_args(ev.args),
                         work_class,
                     });
                 }
             }
-            "C" => apply_counter_event(ev, &mut counter_order, &mut counters),
+            "C" => apply_counter_event(&ev, &mut counter_order, &mut counters),
             _ => {}
         }
     }
@@ -491,20 +492,31 @@ fn apply_metadata_event(ev: &RawEvent, thread_meta: &mut BTreeMap<i64, (Option<S
     }
 }
 
-fn build_slice_args(args: Option<&RawArgs>) -> SliceArgs {
+fn build_slice_args(args: Option<RawArgs>) -> SliceArgs {
     let mut out = SliceArgs::default();
     let Some(args) = args else {
         return out;
     };
-    for (k, v) in &args.entries {
-        match (k.as_str(), v) {
-            ("target", ArgVal::Str(s)) => out.target = Some(s.clone()),
-            ("mnemonic", ArgVal::Str(s)) => out.mnemonic = Some(s.clone()),
-            ("configuration", ArgVal::Str(s)) => out.configuration = Some(s.clone()),
-            // A non-string value under a recognized key is dropped, as the typed
-            // fields are strings; everything else is kept for display.
-            ("target" | "mnemonic" | "configuration", _) => {}
-            _ => out.others.push((k.clone(), v.to_display())),
+    for (k, v) in args.entries {
+        // The typed fields are strings; a non-string value under one of those
+        // keys is dropped, everything else is kept for display.
+        match k.as_str() {
+            "target" => {
+                if let ArgVal::Str(s) = v {
+                    out.target = Some(s);
+                }
+            }
+            "mnemonic" => {
+                if let ArgVal::Str(s) = v {
+                    out.mnemonic = Some(s);
+                }
+            }
+            "configuration" => {
+                if let ArgVal::Str(s) = v {
+                    out.configuration = Some(s);
+                }
+            }
+            _ => out.others.push((k, v.into_display())),
         }
     }
     out
