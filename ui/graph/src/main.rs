@@ -57,6 +57,10 @@ const MAX_VISIBLE_EDGES: usize = 600;
 /// graph sits within the inner part of the window rather than edge to edge.
 const FIT_MARGIN: f32 = 2.0 / 3.0;
 
+/// Breathing room held between the reframed content and the viewport edge when a
+/// relayout settles the view, so a kept box never sits flush against the border.
+const RECENTER_PAD: f32 = 24.0;
+
 /// Accent hue for a leaf box, keyed by its node kind. These are mid-saturation
 /// and recognizable against either a light or dark background.
 fn kind_accent(kind: Kind) -> Rgba {
@@ -197,12 +201,14 @@ struct GraphView {
     /// retires at once, leaving `recent` for the new toggle rather than clearing
     /// it or repainting a stale highlight.
     highlight_seq: u64,
-    /// Set after a toggle so the next relayout's first paint frames or recenters
-    /// `recent`.
+    /// Set after a toggle so the next relayout's first paint settles the view on
+    /// `recent` together with the boxes that were on screen when it was toggled.
     recenter: Rc<Cell<bool>>,
-    /// Whether the most recent toggle was an expand (vs a collapse), so the
-    /// recenter frames the opened box but only keeps a closed one in view.
-    recent_expand: bool,
+    /// Ids of the boxes the viewport fully enclosed when the recent toggle fired.
+    /// The settling relayout keeps these — and the toggled box — in view, so the
+    /// view tracks what the user was looking at rather than snapping to the
+    /// toggled box alone.
+    prev_visible: Vec<Id>,
     /// Whether a relayout is running, so the view shows a progress indicator
     /// while the prior layout stays interactive.
     relaying: bool,
@@ -299,7 +305,7 @@ impl GraphView {
             recent_at: Instant::now(),
             highlight_seq: 0,
             recenter: Rc::new(Cell::new(false)),
-            recent_expand: false,
+            prev_visible: Vec::new(),
             relaying: false,
             hovered: None,
             dim_enabled: true,
@@ -391,7 +397,7 @@ impl GraphView {
         recent: Option<Id>,
         recent_at: Instant,
         recenter: Rc<Cell<bool>>,
-        recent_expand: bool,
+        prev_visible: &[Id],
         relaying: bool,
         hovered: Option<Id>,
         dim_enabled: bool,
@@ -501,12 +507,25 @@ impl GraphView {
                 dim: dim_active && !active.contains(&b.id),
             })
             .collect();
-        // The just-toggled box's full rect, to frame on the next paint.
+        // The rect to settle the view on once the relayout lands: the smallest
+        // layout rect covering the just-toggled box and every box that was fully
+        // on screen when it was toggled (those that survived the relayout), so
+        // the user keeps sight of what they were looking at. As (x, y, w, h).
         let recenter_target = recent.and_then(|id| {
-            g.boxes
-                .iter()
-                .find(|b| b.id == id)
-                .map(|b| (b.x, b.y, b.width, b.height))
+            let mut rect: Option<(f64, f64, f64, f64)> = None;
+            for &bid in std::iter::once(&id).chain(prev_visible) {
+                let Some(b) = g.boxes.iter().find(|b| b.id == bid) else {
+                    continue;
+                };
+                let (x0, y0, x1, y1) = (b.x, b.y, b.x + b.width, b.y + b.height);
+                rect = Some(match rect {
+                    None => (x0, y0, x1, y1),
+                    Some((ax0, ay0, ax1, ay1)) => {
+                        (ax0.min(x0), ay0.min(y0), ax1.max(x1), ay1.max(y1))
+                    }
+                });
+            }
+            rect.map(|(x0, y0, x1, y1)| (x0, y0, x1 - x0, y1 - y0))
         });
         let connectors: Vec<(Vec<(f64, f64)>, Vec<EdgeKind>, bool)> = g
             .connectors
@@ -691,40 +710,18 @@ impl GraphView {
                         f32::from(bounds.size.height) / 2. - center_y * z,
                     ));
                 }
-                // Take the view to the just-toggled box on the next paint. An
-                // expand frames the box — zoom to fit it with margin (out for a
-                // big box, in for a small one, never below the whole-graph fit nor
-                // above MAX_ZOOM) and center it — so the user lands on what they
-                // opened. A collapse only keeps it in view: pan its center on
-                // screen if the relayout pushed it off, else leave the view put.
+                // Settle the view on the toggled box and the boxes that shared
+                // the screen with it. Fit that rect, but only ever zoom out: a
+                // node opening smaller than the current zoom must not blow up to
+                // fill the view, the disorienting case this avoids. Hold the
+                // rect's center fixed across the zoom change so the content does
+                // not lurch, then pan the minimum needed to seat the rect fully
+                // inside — leaving the view put when it already fits.
                 if recenter.get() {
-                    if let Some((bx, by, bw, bh)) = recenter_target {
-                        let vw = f32::from(bounds.size.width);
-                        let vh = f32::from(bounds.size.height);
-                        let (bw, bh) = (bw as f32, bh as f32);
-                        let cx = bx as f32 + bw / 2.;
-                        let cy = by as f32 + bh / 2.;
-                        if recent_expand {
-                            let z = ((vw / bw).min(vh / bh) * FIT_MARGIN)
-                                .clamp(fit_zoom(bounds.size, content), MAX_ZOOM);
-                            zoom.set(z);
-                            pan.set((
-                                vw / 2. - (cx + MARGIN as f32) * z,
-                                vh / 2. - (cy + MARGIN as f32) * z,
-                            ));
-                        } else {
-                            let z = zoom.get();
-                            let (panx, pany) = pan.get();
-                            let sx = (cx + MARGIN as f32) * z + panx;
-                            let sy = (cy + MARGIN as f32) * z + pany;
-                            let inside = sx >= 0. && sx <= vw && sy >= 0. && sy <= vh;
-                            if !inside {
-                                pan.set((
-                                    vw / 2. - (cx + MARGIN as f32) * z,
-                                    vh / 2. - (cy + MARGIN as f32) * z,
-                                ));
-                            }
-                        }
+                    if let Some(target) = recenter_target {
+                        let (z, p) = settle_view(target, bounds.size, content, zoom.get(), pan.get());
+                        zoom.set(z);
+                        pan.set(p);
                     }
                     recenter.set(false);
                 }
@@ -823,7 +820,7 @@ impl Render for GraphView {
                         self.recent,
                         self.recent_at,
                         self.recenter.clone(),
-                        self.recent_expand,
+                        &self.prev_visible,
                         self.relaying,
                         self.hovered,
                         self.dim_enabled,
@@ -965,6 +962,70 @@ fn fit_zoom(viewport: Size<Pixels>, content: (f32, f32)) -> f32 {
         return 1.0;
     }
     ((vw / gw).min(vh / gh) * FIT_MARGIN).min(1.0)
+}
+
+/// Ids of the boxes the viewport fully encloses at the given zoom and pan. The
+/// view-settling that follows a toggle keeps these in frame; a partly-clipped
+/// box (or one larger than the viewport) is left out, so a big container the
+/// user only saw part of does not force the whole graph back into view.
+fn enclosed_boxes(
+    boxes: &[bviz_graph_layout::Box],
+    viewport: Size<Pixels>,
+    zoom: f32,
+    pan: (f32, f32),
+) -> Vec<Id> {
+    let (vw, vh) = (f32::from(viewport.width), f32::from(viewport.height));
+    boxes
+        .iter()
+        .filter(|b| {
+            let x0 = (b.x as f32 + MARGIN as f32) * zoom + pan.0;
+            let y0 = (b.y as f32 + MARGIN as f32) * zoom + pan.1;
+            let x1 = ((b.x + b.width) as f32 + MARGIN as f32) * zoom + pan.0;
+            let y1 = ((b.y + b.height) as f32 + MARGIN as f32) * zoom + pan.1;
+            x0 >= 0. && y0 >= 0. && x1 <= vw && y1 <= vh
+        })
+        .map(|b| b.id)
+        .collect()
+}
+
+/// The zoom and pan that keep `target` (a layout-space rect `(x, y, w, h)`) fully
+/// in view after a toggle, disturbing the view as little as that allows. The zoom
+/// only ever drops: it stays put when `target` already fits, and falls just far
+/// enough to enclose it otherwise — never zooming in to fill the view with one
+/// box, nor below the whole-graph fit. The rect's center is held on screen across
+/// any zoom change so the content does not lurch, then the pan shifts the minimum
+/// needed to seat the rect inside with `RECENTER_PAD` of breathing room.
+fn settle_view(
+    target: (f64, f64, f64, f64),
+    viewport: Size<Pixels>,
+    content: (f32, f32),
+    zoom: f32,
+    pan: (f32, f32),
+) -> (f32, (f32, f32)) {
+    let (vw, vh) = (f32::from(viewport.width), f32::from(viewport.height));
+    let (bx, by, bw, bh) = (target.0 as f32, target.1 as f32, target.2 as f32, target.3 as f32);
+    let z_fit = if bw > 0. && bh > 0. {
+        (vw / bw).min(vh / bh) * FIT_MARGIN
+    } else {
+        zoom
+    };
+    let z = zoom.min(z_fit).clamp(fit_zoom(viewport, content), MAX_ZOOM);
+    let (cx, cy) = (bx + bw / 2. + MARGIN as f32, by + bh / 2. + MARGIN as f32);
+    let mut panx = cx * zoom + pan.0 - cx * z;
+    let mut pany = cy * zoom + pan.1 - cy * z;
+    let (sx0, sx1) = ((bx + MARGIN as f32) * z + panx, (bx + bw + MARGIN as f32) * z + panx);
+    let (sy0, sy1) = ((by + MARGIN as f32) * z + pany, (by + bh + MARGIN as f32) * z + pany);
+    if sx0 < RECENTER_PAD {
+        panx += RECENTER_PAD - sx0;
+    } else if sx1 > vw - RECENTER_PAD {
+        panx -= sx1 - (vw - RECENTER_PAD);
+    }
+    if sy0 < RECENTER_PAD {
+        pany += RECENTER_PAD - sy0;
+    } else if sy1 > vh - RECENTER_PAD {
+        pany -= sy1 - (vh - RECENTER_PAD);
+    }
+    (z, (panx, pany))
 }
 
 /// The zoom and pan that fit `content` centered in `viewport`.
@@ -1423,7 +1484,9 @@ fn end_drag(view: &mut GraphView, event: &MouseUpEvent, cx: &mut Context<GraphVi
         expanded.insert(id);
     }
     drop(expanded);
-    view.recent_expand = !removed;
+    // The boxes fully on screen now, so the relayout settles the view to keep
+    // them — and the toggled box — in frame.
+    view.prev_visible = enclosed_boxes(&g.boxes, vp.size, view.zoom.get(), view.pan.get());
     // The relayout may drop the hovered node (it was collapsed away), which would
     // otherwise leave the whole graph dimmed until the next mouse move.
     view.hovered = None;
@@ -1589,5 +1652,80 @@ mod tests {
         assert_eq!(lane.len(), 2);
         assert!((lane[0].0).abs() < 0.01 && (lane[0].1 - 4.0).abs() < 0.5, "{lane:?}");
         assert!((lane[1].0 - 100.0).abs() < 0.01 && (lane[1].1 - 4.0).abs() < 0.5, "{lane:?}");
+    }
+
+    // The whole graph, large enough that fit_zoom's floor stays well below 1.0 and
+    // never bites in these cases.
+    const CONTENT: (f32, f32) = (4000.0, 3000.0);
+
+    fn vp(w: f32, h: f32) -> Size<Pixels> {
+        size(px(w), px(h))
+    }
+
+    /// Asserts `target`'s screen rect under `(zoom, pan)` lies fully within the
+    /// viewport, inset by the breathing-room pad (with a small tolerance).
+    fn assert_enclosed(target: (f64, f64, f64, f64), vw: f32, vh: f32, zoom: f32, pan: (f32, f32)) {
+        let (bx, by, bw, bh) = (target.0 as f32, target.1 as f32, target.2 as f32, target.3 as f32);
+        let x0 = (bx + MARGIN as f32) * zoom + pan.0;
+        let y0 = (by + MARGIN as f32) * zoom + pan.1;
+        let x1 = (bx + bw + MARGIN as f32) * zoom + pan.0;
+        let y1 = (by + bh + MARGIN as f32) * zoom + pan.1;
+        let eps = 0.5;
+        let (lo, hix, hiy) = (RECENTER_PAD - eps, vw - RECENTER_PAD + eps, vh - RECENTER_PAD + eps);
+        assert!(x0 >= lo && x1 <= hix, "x out of view: {x0}..{x1} in 0..{vw}");
+        assert!(y0 >= lo && y1 <= hiy, "y out of view: {y0}..{y1} in 0..{vh}");
+    }
+
+    #[test]
+    fn settle_view_leaves_a_fitting_centered_target_put() {
+        // A small rect already comfortably inside: neither zoom nor pan moves.
+        let target = (375.0, 280.0, 50.0, 40.0);
+        let (z, p) = settle_view(target, vp(800., 600.), CONTENT, 1.0, (0.0, 0.0));
+        assert!((z - 1.0).abs() < 1e-4, "zoom moved: {z}");
+        assert!(p.0.abs() < 1e-3 && p.1.abs() < 1e-3, "pan moved: {p:?}");
+    }
+
+    #[test]
+    fn settle_view_only_zooms_out_to_enclose_a_big_target() {
+        // A rect larger than the viewport at the current zoom forces a zoom-out,
+        // never below the whole-graph fit, and ends up fully framed.
+        let target = (0.0, 0.0, 2000.0, 1500.0);
+        let (z, p) = settle_view(target, vp(800., 600.), CONTENT, 1.0, (0.0, 0.0));
+        assert!(z < 1.0, "expected zoom-out, got {z}");
+        assert!(z >= fit_zoom(vp(800., 600.), CONTENT) - 1e-4, "below whole-graph fit: {z}");
+        assert_enclosed(target, 800., 600., z, p);
+    }
+
+    #[test]
+    fn settle_view_never_zooms_in_on_a_small_target() {
+        // A node opening smaller than the current zoom keeps the zoom — the
+        // disorienting blow-up-to-fill case is gone.
+        let target = (100.0, 100.0, 30.0, 20.0);
+        let (z, _) = settle_view(target, vp(800., 600.), CONTENT, 0.5, (0.0, 0.0));
+        assert!(z <= 0.5 + 1e-4, "zoomed in: {z}");
+    }
+
+    #[test]
+    fn settle_view_pans_an_offscreen_target_into_view_without_rezoom() {
+        // A small rect off to the right fits at the current zoom, so the zoom
+        // holds and only the pan shifts it back into frame.
+        let target = (1000.0, 100.0, 50.0, 40.0);
+        let (z, p) = settle_view(target, vp(800., 600.), CONTENT, 1.0, (0.0, 0.0));
+        assert!((z - 1.0).abs() < 1e-4, "zoom moved: {z}");
+        assert!(p.0 < 0.0, "expected a leftward pan, got {p:?}");
+        assert_enclosed(target, 800., 600., z, p);
+    }
+
+    #[test]
+    fn enclosed_boxes_keeps_only_fully_visible() {
+        let boxes = vec![
+            lbox(0, 100.0, 100.0, 50.0, 40.0),  // fully inside
+            lbox(1, 760.0, 100.0, 100.0, 40.0), // spills past the right edge
+            lbox(2, 100.0, 580.0, 50.0, 40.0),  // spills past the bottom edge
+            lbox(3, 200.0, 200.0, 30.0, 30.0),  // fully inside
+        ];
+        let mut ids = enclosed_boxes(&boxes, vp(800., 600.), 1.0, (0.0, 0.0));
+        ids.sort_by_key(|id| id.0);
+        assert_eq!(ids, vec![bviz_graph_layout::Id(0), bviz_graph_layout::Id(3)]);
     }
 }
