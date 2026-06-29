@@ -35,9 +35,15 @@ impl StatRow {
 /// the double-count of summing a span and its sub-spans. Order is unspecified;
 /// the caller sorts.
 pub fn aggregate_stats(profile: &Profile, mode: GroupMode, scope: Scope) -> Vec<StatRow> {
-    let root = build_flame_graph(profile, mode, scope);
+    stats_from_flame(&build_flame_graph(profile, mode, scope))
+}
+
+/// Aggregate an already-built flame tree into its stats rows, summing each
+/// frame's self time. Lets a caller that already holds the tree derive the table
+/// without rebuilding the tree (which [`aggregate_stats`] would do).
+pub fn stats_from_flame(root: &FlameNode) -> Vec<StatRow> {
     let mut groups: HashMap<String, StatRow> = HashMap::new();
-    accumulate(&root, &mut groups);
+    accumulate(root, &mut groups);
     // The synthetic root carries no slices of its own; drop its zero-self frame.
     groups.remove(&root.name);
     groups.into_values().collect()

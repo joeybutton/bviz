@@ -11,7 +11,7 @@ pub use flame::{
     flame_box_at, flame_height, lay_out_flame,
 };
 pub use lanes::{CounterPos, Lane, LaneLayout, LaneMetrics, lay_out_lanes};
-pub use stats::{StatRow, aggregate_stats};
+pub use stats::{StatRow, aggregate_stats, stats_from_flame};
 pub use view::TimeView;
 
 #[cfg(test)]
