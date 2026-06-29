@@ -5,8 +5,8 @@
 
 use bviz_trace_layout::{
     FlameBox, FlameMetrics, FlameNode, FlameView, GroupMode, LaneLayout, LaneMetrics, Scope,
-    StatRow, TimeView, Viewport, WorkClass, aggregate_stats, build_flame_graph, flame_box_at,
-    flame_height, lay_out_flame, lay_out_lanes, visible_slices,
+    StatRow, TimeView, Viewport, WorkClass, build_flame_graph, flame_box_at, flame_height,
+    lay_out_flame, lay_out_lanes, stats_from_flame, visible_slices,
 };
 use bviz_trace_profile::{CounterLane, CounterPoint, PhaseMarker, Profile, TimeSpan};
 use bviz_ui_components::{
@@ -25,6 +25,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::rc::Rc;
+use std::sync::Arc;
 use std::time::Duration;
 
 /// Vertical sizing of the stacked thread and counter lanes, in pixels. The lane
@@ -544,7 +545,7 @@ fn graph_lanes(n: usize, graph_top: f32, graph_h: f32) -> Vec<GraphLane> {
 /// shown.
 enum Source {
     Loading,
-    Loaded(Rc<Profile>),
+    Loaded(Arc<Profile>),
     Message(String),
 }
 
@@ -601,15 +602,25 @@ struct TraceView {
     /// and reused across paints and mouse handlers. It depends only on the
     /// immutable profile, so it is cleared only when a new profile loads.
     lanes: Rc<RefCell<Option<Rc<LaneLayout>>>>,
-    /// The aggregated flame graph, built lazily on first use in graph mode and
-    /// cleared when a new profile loads or the merge key changes. Walking every
-    /// slice is too costly to repeat each paint.
+    /// The aggregated flame graph for the active `(mode, scope)`, built off the UI
+    /// thread (walking every slice would freeze a paint) and swapped in when ready.
+    /// The previous graph stays shown while a rebuild runs, so a group-by or scope
+    /// change doesn't blank the view.
     flame: Rc<RefCell<Option<Rc<FlameNode>>>>,
     /// The flame graph's memoized box layout; see [`FlameBoxCache`].
     flame_boxes: Rc<RefCell<Option<FlameBoxCache>>>,
-    /// The per-group stats rows, aggregated by the same key and scope as the
-    /// flame graph. Built and invalidated alongside `flame`; sorted on display.
+    /// The per-group stats rows, derived from `flame` in the same background build;
+    /// sorted on display.
     stats: Rc<RefCell<Option<Rc<Vec<StatRow>>>>>,
+    /// The `(mode, scope)` the ready `flame`/`stats` reflect, if any.
+    agg_ready: Option<(GroupMode, Scope)>,
+    /// The `(mode, scope)` a background flame/stats build is running for, if any.
+    agg_inflight: Option<(GroupMode, Scope)>,
+    /// Bumped on every (re)spawn so a superseded build's result is discarded when
+    /// it lands after the inputs have moved on.
+    agg_gen: u64,
+    /// Holds the background flame/stats build task so it isn't cancelled on drop.
+    _agg_task: Task<()>,
     /// Which column the stats table sorts by, and whether descending.
     stats_sort: StatsColumn,
     stats_desc: bool,
@@ -642,7 +653,8 @@ impl TraceView {
         let mode_observer =
             cx.subscribe(&mode_dropdown, |view, dropdown, _: &DropdownEvent, cx| {
                 view.mode = GROUP_MODES[dropdown.read(cx).selected()].1;
-                view.invalidate_aggregates();
+                // Keep the current graph until the rebuild for the new key lands;
+                // `ensure_aggregates` spawns it on the next frame.
                 cx.notify();
             });
         let (view_dropdown, view_observer, view_scopes) = Self::view_dropdown(None, cx);
@@ -656,7 +668,7 @@ impl TraceView {
                 view.lanes.borrow_mut().take();
                 view.flame_view.set(FlameView::FIT);
                 view.source = match result {
-                    Ok(profile) => Source::Loaded(Rc::new(profile)),
+                    Ok(profile) => Source::Loaded(Arc::new(profile)),
                     Err(err) => Source::Message(err),
                 };
                 // The default scope depends on the loaded profile: the critical
@@ -716,6 +728,10 @@ impl TraceView {
             flame: Rc::new(RefCell::new(None)),
             flame_boxes: Rc::new(RefCell::new(None)),
             stats: Rc::new(RefCell::new(None)),
+            agg_ready: None,
+            agg_inflight: None,
+            agg_gen: 0,
+            _agg_task: Task::ready(()),
             stats_sort: StatsColumn::Total,
             stats_desc: true,
             stats_cache: RefCell::new(None),
@@ -752,7 +768,7 @@ impl TraceView {
         let dropdown = cx.new(|cx| Dropdown::new("view", labels, 0, cx));
         let observer = cx.subscribe(&dropdown, |view, dropdown, _: &DropdownEvent, cx| {
             view.scope = view.view_scopes[dropdown.read(cx).selected()];
-            view.invalidate_aggregates();
+            // Keep the current graph until the rebuild for the new scope lands.
             cx.notify();
         });
         (dropdown, observer, scopes)
@@ -795,7 +811,7 @@ impl TraceView {
     /// snapshots (`Rc`s and the const metrics) rather than borrowing the view.
     fn chart_body(
         &self,
-        profile: Rc<Profile>,
+        profile: Arc<Profile>,
         lanes: Rc<LaneLayout>,
         palette: Palette,
         cx: &mut Context<Self>,
@@ -1232,17 +1248,64 @@ impl TraceView {
         self.lanes.borrow().clone()
     }
 
-    /// The aggregated flame graph for the loaded profile, built on first use and
-    /// reused across paints. `None` until a profile is loaded.
+    /// The aggregated flame graph for the active `(mode, scope)`, or `None` until
+    /// the first background build for the loaded profile completes. Reflects the
+    /// previous key while a rebuild is still running; [`Self::ensure_aggregates`]
+    /// owns the (re)build.
     fn flame_node(&self) -> Option<Rc<FlameNode>> {
-        let Source::Loaded(profile) = &self.source else {
-            return None;
-        };
-        if self.flame.borrow().is_none() {
-            *self.flame.borrow_mut() =
-                Some(Rc::new(build_flame_graph(profile, self.mode, self.scope)));
-        }
         self.flame.borrow().clone()
+    }
+
+    /// Spawns a background build of the flame graph and its stats rows for the
+    /// current `(mode, scope)` when neither the ready value nor an in-flight build
+    /// already matches, and abandons a build whose key the inputs have moved past.
+    /// Walking every slice is far too costly to run on the UI thread, so the build
+    /// runs on the background executor and the result is swapped in on completion;
+    /// the previously built graph stays shown until then. Idempotent — a no-op once
+    /// the right value is ready or being computed — so it is safe to call each
+    /// frame.
+    fn ensure_aggregates(&mut self, cx: &mut Context<Self>) {
+        let Source::Loaded(profile) = &self.source else {
+            return;
+        };
+        let key = (self.mode, self.scope);
+        if self.agg_ready == Some(key) {
+            // The shown value is already current; cancel a build for a key the
+            // inputs have since left so its late result can't clobber it.
+            if self.agg_inflight.take().is_some() {
+                self.agg_gen += 1;
+                self._agg_task = Task::ready(());
+            }
+            return;
+        }
+        if self.agg_inflight == Some(key) {
+            return;
+        }
+        self.agg_inflight = Some(key);
+        self.agg_gen += 1;
+        let generation = self.agg_gen;
+        let profile = profile.clone();
+        let (mode, scope) = key;
+        self._agg_task = load_in_background(
+            cx,
+            move || {
+                let root = build_flame_graph(&profile, mode, scope);
+                let rows = stats_from_flame(&root);
+                (root, rows)
+            },
+            move |view, (root, rows), _cx| {
+                // Discard a result the inputs have moved past since this spawn.
+                if view.agg_gen != generation {
+                    return;
+                }
+                *view.flame.borrow_mut() = Some(Rc::new(root));
+                *view.stats.borrow_mut() = Some(Rc::new(rows));
+                view.flame_boxes.borrow_mut().take();
+                view.stats_cache.borrow_mut().take();
+                view.agg_ready = Some(key);
+                view.agg_inflight = None;
+            },
+        );
     }
 
     /// The current flame-graph geometry, or `None` until the tree exists.
@@ -1261,26 +1324,24 @@ impl TraceView {
         })
     }
 
-    /// Drops the cached flame graph and stats rows so the next use of either
-    /// rebuilds it; called when the profile, merge key, or scope changes.
+    /// Drops the cached flame graph and stats rows and abandons any in-flight
+    /// build, so the next [`Self::ensure_aggregates`] rebuilds from scratch. Called
+    /// when a new profile loads — unlike a mere `(mode, scope)` change, the old
+    /// graph is no longer a valid thing to keep showing.
     fn invalidate_aggregates(&mut self) {
         self.flame.borrow_mut().take();
         self.flame_boxes.borrow_mut().take();
         self.stats.borrow_mut().take();
         self.stats_cache.borrow_mut().take();
+        self.agg_ready = None;
+        self.agg_inflight = None;
+        // Supersede any build still running for the previous profile.
+        self.agg_gen += 1;
     }
 
-    /// The per-group stats rows for the loaded profile, aggregated by the current
-    /// key and scope on first use and reused across paints. `None` until a profile
-    /// is loaded.
+    /// The per-group stats rows for the active `(mode, scope)`, or `None` until the
+    /// background build completes; reflects the previous key while a rebuild runs.
     fn stats_rows(&self) -> Option<Rc<Vec<StatRow>>> {
-        let Source::Loaded(profile) = &self.source else {
-            return None;
-        };
-        if self.stats.borrow().is_none() {
-            let rows = aggregate_stats(profile, self.mode, self.scope);
-            *self.stats.borrow_mut() = Some(Rc::new(rows));
-        }
         self.stats.borrow().clone()
     }
 
@@ -1541,6 +1602,31 @@ fn mode_button(
     if active { button } else { button.ghost() }
 }
 
+/// A centered spinner over a caption, shown while a profile loads or its flame
+/// graph and stats are (re)built off the UI thread.
+fn loading_indicator(label: impl Into<SharedString>, colors: &bviz_ui_theme::Colors) -> Div {
+    div()
+        .flex_1()
+        .flex()
+        .flex_col()
+        .justify_center()
+        .items_center()
+        .gap_3()
+        .child(
+            bviz_ui_assets::icon("circle-notch")
+                .size(px(36.))
+                .text_color(colors.text)
+                .with_animation(
+                    "spinner",
+                    Animation::new(Duration::from_millis(900)).repeat(),
+                    |icon, delta| {
+                        icon.with_transformation(Transformation::rotate(percentage(delta)))
+                    },
+                ),
+        )
+        .child(div().text_sm().text_color(colors.disabled).child(label.into()))
+}
+
 impl Render for TraceView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = bviz_ui_theme::colors(window);
@@ -1560,7 +1646,13 @@ impl Render for TraceView {
         };
         let body = match &self.source {
             Source::Loaded(profile) => {
-                let flame = self.flame_node().expect("a loaded profile has a flame graph");
+                // Own the handle so the borrow of `self.source` ends before the
+                // `&mut self` build call below.
+                let profile = profile.clone();
+                // Build (or rebuild) the flame graph and stats off the UI thread
+                // for the active view; pre-warming in chart mode too keeps the
+                // first switch to the graph instant.
+                self.ensure_aggregates(cx);
                 let lanes = self.lane_layout().expect("a loaded profile has a lane layout");
                 let toolbar = div()
                     .flex()
@@ -1620,9 +1712,14 @@ impl Render for TraceView {
                         .overflow_hidden()
                         .child(self.chart_body(profile.clone(), lanes, palette, cx))
                         .into_any_element(),
-                    ViewMode::FlameGraph => {
-                        self.graph_body(flame, palette, cx).into_any_element()
-                    }
+                    // The graph needs the aggregated tree; show a spinner until the
+                    // first background build for this profile completes (a later
+                    // group-by/scope change keeps the prior tree, so no spinner).
+                    ViewMode::FlameGraph => match self.flame_node() {
+                        Some(flame) => self.graph_body(flame, palette, cx).into_any_element(),
+                        None => loading_indicator("Building flame graph…", &colors)
+                            .into_any_element(),
+                    },
                 };
                 div()
                     .flex_1()
@@ -1632,31 +1729,7 @@ impl Render for TraceView {
                     .child(toolbar)
                     .child(content)
             }
-            Source::Loading => div()
-                .flex_1()
-                .flex()
-                .flex_col()
-                .justify_center()
-                .items_center()
-                .gap_3()
-                .child(
-                    bviz_ui_assets::icon("circle-notch")
-                        .size(px(36.))
-                        .text_color(colors.text)
-                        .with_animation(
-                            "spinner",
-                            Animation::new(Duration::from_millis(900)).repeat(),
-                            |icon, delta| {
-                                icon.with_transformation(Transformation::rotate(percentage(delta)))
-                            },
-                        ),
-                )
-                .child(
-                    div()
-                        .text_sm()
-                        .text_color(colors.disabled)
-                        .child("Loading…"),
-                ),
+            Source::Loading => loading_indicator("Loading…", &colors),
             Source::Message(msg) => div()
                 .flex_1()
                 .flex()
