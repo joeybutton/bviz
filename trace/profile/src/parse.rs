@@ -4,7 +4,8 @@ use std::io::Read;
 use std::path::Path;
 
 use flate2::read::MultiGzDecoder;
-use serde::Deserialize;
+use serde::de::{IgnoredAny, MapAccess, SeqAccess, Visitor};
+use serde::{Deserialize, Deserializer};
 use serde_json::{Map, Value};
 
 use crate::model::{
@@ -68,7 +69,158 @@ struct RawEvent {
     #[serde(default)]
     tid: Option<i64>,
     #[serde(default)]
-    args: Option<Map<String, Value>>,
+    args: Option<RawArgs>,
+}
+
+/// One kept argument value: a string or a number. Other JSON shapes (array,
+/// object, null) are dropped, matching what every `args` consumer reads — they
+/// only ever look at string or numeric fields.
+enum ArgVal {
+    Str(String),
+    Int(i64),
+    Float(f64),
+}
+
+impl ArgVal {
+    /// The value as the display string the profile's `others` list carries,
+    /// matching how a JSON scalar formats.
+    fn to_display(&self) -> String {
+        match self {
+            ArgVal::Str(s) => s.clone(),
+            ArgVal::Int(n) => n.to_string(),
+            ArgVal::Float(n) => n.to_string(),
+        }
+    }
+
+    /// The value as an `f64` for counter series, or `None` for a non-numeric.
+    fn as_f64(&self) -> Option<f64> {
+        match self {
+            ArgVal::Int(n) => Some(*n as f64),
+            ArgVal::Float(n) => Some(*n),
+            ArgVal::Str(_) => None,
+        }
+    }
+}
+
+/// An event's `args` object, deserialized as a flat key/value list rather than
+/// the `serde_json::Map<String, Value>` the generic path would build. Over the
+/// millions of slice events in a large profile the saved per-arg `Value`/`Map`
+/// allocations are a large share of parse time, and every consumer (slice args,
+/// thread metadata, counters) reads this list directly.
+struct RawArgs {
+    entries: Vec<(String, ArgVal)>,
+}
+
+impl RawArgs {
+    /// The string value for `key`, if present and a string.
+    fn get_str(&self, key: &str) -> Option<&str> {
+        self.entries.iter().find(|(k, _)| k == key).and_then(|(_, v)| match v {
+            ArgVal::Str(s) => Some(s.as_str()),
+            _ => None,
+        })
+    }
+
+    /// The integer value for `key`, if present and an integer.
+    fn get_i64(&self, key: &str) -> Option<i64> {
+        self.entries.iter().find(|(k, _)| k == key).and_then(|(_, v)| match v {
+            ArgVal::Int(n) => Some(*n),
+            _ => None,
+        })
+    }
+}
+
+impl<'de> Deserialize<'de> for RawArgs {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        deserializer.deserialize_map(RawArgsVisitor)
+    }
+}
+
+struct RawArgsVisitor;
+
+impl<'de> Visitor<'de> for RawArgsVisitor {
+    type Value = RawArgs;
+
+    fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.write_str("an args object")
+    }
+
+    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<RawArgs, A::Error> {
+        let mut entries = Vec::new();
+        while let Some(key) = map.next_key::<String>()? {
+            if let MaybeArg(Some(v)) = map.next_value()? {
+                entries.push((key, v));
+            }
+        }
+        Ok(RawArgs { entries })
+    }
+}
+
+/// An arg value that keeps a scalar and discards a composite, deserialized by
+/// dispatching on the JSON token so no intermediate `Value` is built.
+struct MaybeArg(Option<ArgVal>);
+
+impl<'de> Deserialize<'de> for MaybeArg {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        deserializer.deserialize_any(MaybeArgVisitor)
+    }
+}
+
+struct MaybeArgVisitor;
+
+impl<'de> Visitor<'de> for MaybeArgVisitor {
+    type Value = MaybeArg;
+
+    fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.write_str("a JSON value")
+    }
+
+    fn visit_str<E>(self, v: &str) -> Result<MaybeArg, E> {
+        Ok(MaybeArg(Some(ArgVal::Str(v.to_owned()))))
+    }
+
+    fn visit_string<E>(self, v: String) -> Result<MaybeArg, E> {
+        Ok(MaybeArg(Some(ArgVal::Str(v))))
+    }
+
+    fn visit_i64<E>(self, v: i64) -> Result<MaybeArg, E> {
+        Ok(MaybeArg(Some(ArgVal::Int(v))))
+    }
+
+    fn visit_u64<E>(self, v: u64) -> Result<MaybeArg, E> {
+        Ok(MaybeArg(Some(
+            i64::try_from(v).map(ArgVal::Int).unwrap_or(ArgVal::Float(v as f64)),
+        )))
+    }
+
+    fn visit_f64<E>(self, v: f64) -> Result<MaybeArg, E> {
+        Ok(MaybeArg(Some(ArgVal::Float(v))))
+    }
+
+    fn visit_bool<E>(self, v: bool) -> Result<MaybeArg, E> {
+        Ok(MaybeArg(Some(ArgVal::Str(v.to_string()))))
+    }
+
+    fn visit_unit<E>(self) -> Result<MaybeArg, E> {
+        Ok(MaybeArg(None))
+    }
+
+    fn visit_none<E>(self) -> Result<MaybeArg, E> {
+        Ok(MaybeArg(None))
+    }
+
+    fn visit_some<D: Deserializer<'de>>(self, d: D) -> Result<MaybeArg, D::Error> {
+        d.deserialize_any(self)
+    }
+
+    fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<MaybeArg, A::Error> {
+        while seq.next_element::<IgnoredAny>()?.is_some() {}
+        Ok(MaybeArg(None))
+    }
+
+    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<MaybeArg, A::Error> {
+        while map.next_entry::<IgnoredAny, IgnoredAny>()?.is_some() {}
+        Ok(MaybeArg(None))
+    }
 }
 
 fn round_us(v: Option<f64>) -> i64 {
@@ -326,15 +478,12 @@ fn apply_metadata_event(ev: &RawEvent, thread_meta: &mut BTreeMap<i64, (Option<S
     let entry = thread_meta.entry(tid).or_insert((None, MAX_SORT_INDEX));
     match ev.name.as_deref() {
         Some("thread_name") => {
-            if let Some(name) = args.and_then(|a| a.get("name")).and_then(Value::as_str) {
+            if let Some(name) = args.and_then(|a| a.get_str("name")) {
                 entry.0 = Some(name.to_owned());
             }
         }
         Some("thread_sort_index") => {
-            if let Some(idx) = args
-                .and_then(|a| a.get("sort_index"))
-                .and_then(Value::as_i64)
-            {
+            if let Some(idx) = args.and_then(|a| a.get_i64("sort_index")) {
                 entry.1 = idx;
             }
         }
@@ -342,34 +491,23 @@ fn apply_metadata_event(ev: &RawEvent, thread_meta: &mut BTreeMap<i64, (Option<S
     }
 }
 
-fn build_slice_args(args: Option<&Map<String, Value>>) -> SliceArgs {
+fn build_slice_args(args: Option<&RawArgs>) -> SliceArgs {
     let mut out = SliceArgs::default();
     let Some(args) = args else {
         return out;
     };
-    let take_str = |v: &Value| v.as_str().map(str::to_owned);
-    for (k, v) in args {
-        match k.as_str() {
-            "target" => out.target = take_str(v),
-            "mnemonic" => out.mnemonic = take_str(v),
-            "configuration" => out.configuration = take_str(v),
-            _ => {
-                if let Some(s) = scalar_to_string(v) {
-                    out.others.push((k.clone(), s));
-                }
-            }
+    for (k, v) in &args.entries {
+        match (k.as_str(), v) {
+            ("target", ArgVal::Str(s)) => out.target = Some(s.clone()),
+            ("mnemonic", ArgVal::Str(s)) => out.mnemonic = Some(s.clone()),
+            ("configuration", ArgVal::Str(s)) => out.configuration = Some(s.clone()),
+            // A non-string value under a recognized key is dropped, as the typed
+            // fields are strings; everything else is kept for display.
+            ("target" | "mnemonic" | "configuration", _) => {}
+            _ => out.others.push((k.clone(), v.to_display())),
         }
     }
     out
-}
-
-fn scalar_to_string(v: &Value) -> Option<String> {
-    match v {
-        Value::String(s) => Some(s.clone()),
-        Value::Number(n) => Some(n.to_string()),
-        Value::Bool(b) => Some(b.to_string()),
-        _ => None,
-    }
 }
 
 fn apply_counter_event(
@@ -389,7 +527,7 @@ fn apply_counter_event(
             series: Vec::new(),
         }
     });
-    for (key, value) in args {
+    for (key, value) in &args.entries {
         let Some(value) = value.as_f64() else {
             continue;
         };
