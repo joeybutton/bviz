@@ -1,14 +1,26 @@
-/// An interned-string handle: a byte slice into a [`Profile`]'s text pool.
-/// `Copy` and lifetime-free; resolve to `&str` with [`Profile::str`]. Equality
-/// is by `(off, len)` and so is only meaningful within a single profile.
+/// An interned-string handle: a byte slice into a text pool. `Copy` and
+/// lifetime-free; resolve to `&str` with [`Profile::str`] or by indexing the
+/// owning pool with [`Str::range`]. Equality is by `(off, len)` and so is only
+/// meaningful within the single pool that produced it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct Str {
     off: u32,
     len: u32,
 }
 
-/// A half-open `[off, off + len)` index range into one of a [`Profile`]'s flat
-/// pools. Which pool depends on the field that holds it.
+impl Str {
+    pub fn new(off: u32, len: u32) -> Str {
+        Str { off, len }
+    }
+
+    /// The byte range into the owning text pool: `&pool[s.range()]`.
+    pub fn range(self) -> std::ops::Range<usize> {
+        self.off as usize..(self.off + self.len) as usize
+    }
+}
+
+/// A half-open `[off, off + len)` index range into a flat pool. Which pool it
+/// indexes depends on the field that holds it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Span32 {
     off: u32,
@@ -16,11 +28,12 @@ pub struct Span32 {
 }
 
 impl Span32 {
-    pub(crate) fn new(off: u32, len: u32) -> Span32 {
+    pub fn new(off: u32, len: u32) -> Span32 {
         Span32 { off, len }
     }
 
-    fn range(self) -> std::ops::Range<usize> {
+    /// The element range into the owning pool: `&pool[span.range()]`.
+    pub fn range(self) -> std::ops::Range<usize> {
         self.off as usize..(self.off + self.len) as usize
     }
 
@@ -314,7 +327,7 @@ impl Profile {
 
     /// Resolves an interned handle to its text.
     pub fn str(&self, s: Str) -> &str {
-        &self.text[s.off as usize..(s.off + s.len) as usize]
+        &self.text[s.range()]
     }
 
     /// Resolves an optional interned handle to its text, if present.
@@ -417,8 +430,12 @@ pub(crate) struct ProfileParts {
 /// map from content to handle so a repeated string returns the existing [`Str`]
 /// instead of appending a copy. Bazel traces repeat names (mnemonics, target
 /// labels, categories) heavily, so dedup is a large memory win. The map is a
-/// parse-time temporary; only the [`String`] pool survives into the profile.
-pub(crate) struct Interner {
+/// build-time temporary; only the [`String`] pool survives, sealed into the
+/// owner that resolves its handles. Any consumer that needs its own interned
+/// text pool (e.g. a derived flame graph) reuses this rather than duplicating
+/// it; the produced [`Str`] handles index that consumer's [`Interner::into_text`]
+/// pool.
+pub struct Interner {
     text: String,
     seen: std::collections::HashMap<Box<str>, Str>,
 }
