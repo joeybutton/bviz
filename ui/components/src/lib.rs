@@ -6,7 +6,6 @@ mod button;
 mod drag;
 mod dropdown;
 mod scrollbar;
-mod slider;
 pub mod text_input;
 
 pub use background::load_in_background;
@@ -14,7 +13,6 @@ pub use button::Button;
 pub use drag::track_drag;
 pub use dropdown::{Dropdown, DropdownEvent};
 pub use scrollbar::{Axis, Scrollbar};
-pub use slider::Slider;
 pub use text_input::TextInput;
 
 use gpui::App;

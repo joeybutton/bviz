@@ -20,7 +20,7 @@ use org_eclipse_elk_alg_layered::org::eclipse::elk::alg::layered::options::{
 use org_eclipse_elk_alg_layered::org::eclipse::elk::alg::layered::plain_java_initialization::initialize_plain_java_layout;
 use org_eclipse_elk_core::org::eclipse::elk::core::math::{ElkPadding, KVector};
 use org_eclipse_elk_core::org::eclipse::elk::core::options::{
-    CoreOptions, Direction, EdgeRouting as ElkEdgeRouting, HierarchyHandling, SizeConstraint,
+    CoreOptions, Direction, EdgeRouting, HierarchyHandling, SizeConstraint,
 };
 use org_eclipse_elk_core::org::eclipse::elk::core::util::BasicProgressMonitor;
 use org_eclipse_elk_core::org::eclipse::elk::core::{IGraphLayoutEngine, RecursiveGraphLayoutEngine};
@@ -50,167 +50,6 @@ pub const CARET_RESERVE: f64 = 12.0;
 /// sides keep a uniform border.
 const LABEL_BAND: f64 = 26.0;
 const BORDER: f64 = 12.0;
-
-/// How the layered algorithm draws edges between nodes.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum EdgeRouting {
-    Orthogonal,
-    Polyline,
-    Splines,
-}
-
-/// How the layered algorithm positions nodes within their layer.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum NodePlacement {
-    BrandesKoepf,
-    NetworkSimplex,
-    LinearSegments,
-    Simple,
-}
-
-/// The post-layout horizontal compaction pass, if any.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum PostCompaction {
-    None,
-    Left,
-    Right,
-    EdgeLength,
-}
-
-/// The ELK layout options the layout exposes for tuning how tightly edges and
-/// nodes pack. [`Tuning::default`] holds the values the layout otherwise bakes
-/// in; the `SCALARS`/`CHOICES` specs describe each field for a control panel,
-/// including the stock ELK default to mark against.
-///
-/// In the top-to-bottom layout the between-layers edge spacings act along the
-/// flow (vertically), spacing edges where they share an inter-layer channel,
-/// while `edge_node` is the in-layer edge-to-node clearance, which spaces edges
-/// across the flow (horizontally) from the nodes they run past. There is no
-/// across-flow edge-to-edge field: `spacing.edgeEdge` is inert in elk-rs's
-/// layered placement (under every node-placement strategy), and the across-flow
-/// spacing between parallel edge lanes is governed by `spacing_node_node`, which
-/// spaces the long-edge dummies in a layer the same as it spaces the nodes.
-#[derive(Clone)]
-pub struct Tuning {
-    pub spacing_node_node: f64,
-    pub node_node_between_layers: f64,
-    pub edge_edge_between_layers: f64,
-    pub edge_node_between_layers: f64,
-    pub edge_node: f64,
-    pub edge_routing: EdgeRouting,
-    pub node_placement: NodePlacement,
-    pub post_compaction: PostCompaction,
-}
-
-impl Default for Tuning {
-    fn default() -> Self {
-        Self {
-            spacing_node_node: 10.0,
-            node_node_between_layers: 10.0,
-            edge_edge_between_layers: 2.0,
-            edge_node_between_layers: 10.0,
-            edge_node: 2.0,
-            edge_routing: EdgeRouting::Orthogonal,
-            node_placement: NodePlacement::NetworkSimplex,
-            post_compaction: PostCompaction::EdgeLength,
-        }
-    }
-}
-
-/// A continuous [`Tuning`] field, described for a slider.
-pub struct ScalarSpec {
-    pub label: &'static str,
-    pub min: f64,
-    pub max: f64,
-    /// ELK's own default for this option, to mark on the slider.
-    pub elk_default: f64,
-}
-
-/// A discrete [`Tuning`] field, described for a dropdown.
-pub struct ChoiceSpec {
-    pub label: &'static str,
-    pub options: &'static [&'static str],
-    /// Index into `options` of ELK's own default, to mark in the menu.
-    pub elk_default: usize,
-}
-
-impl Tuning {
-    /// The scalar fields, ordered to match [`Tuning::scalar`]/[`Tuning::set_scalar`].
-    pub const SCALARS: &'static [ScalarSpec] = &[
-        ScalarSpec { label: "node spacing", min: 0.0, max: 80.0, elk_default: 20.0 },
-        ScalarSpec { label: "layer spacing", min: 0.0, max: 120.0, elk_default: 20.0 },
-        ScalarSpec { label: "edge–edge ↕", min: 2.0, max: 30.0, elk_default: 10.0 },
-        ScalarSpec { label: "edge–node ↕", min: 2.0, max: 30.0, elk_default: 10.0 },
-        ScalarSpec { label: "edge–node ↔", min: 2.0, max: 40.0, elk_default: 10.0 },
-    ];
-
-    /// The discrete fields, ordered to match [`Tuning::choice`]/[`Tuning::set_choice`].
-    pub const CHOICES: &'static [ChoiceSpec] = &[
-        ChoiceSpec {
-            label: "routing",
-            options: &["orthogonal", "polyline", "splines"],
-            elk_default: 0,
-        },
-        ChoiceSpec {
-            label: "placement",
-            options: &["brandes-köpf", "network-simplex", "linear-segments", "simple"],
-            elk_default: 0,
-        },
-        ChoiceSpec {
-            label: "compaction",
-            options: &["none", "left", "right", "edge-length"],
-            elk_default: 0,
-        },
-    ];
-
-    pub fn scalar(&self, i: usize) -> f64 {
-        match i {
-            0 => self.spacing_node_node,
-            1 => self.node_node_between_layers,
-            2 => self.edge_edge_between_layers,
-            3 => self.edge_node_between_layers,
-            4 => self.edge_node,
-            _ => unreachable!(),
-        }
-    }
-
-    pub fn set_scalar(&mut self, i: usize, v: f64) {
-        match i {
-            0 => self.spacing_node_node = v,
-            1 => self.node_node_between_layers = v,
-            2 => self.edge_edge_between_layers = v,
-            3 => self.edge_node_between_layers = v,
-            4 => self.edge_node = v,
-            _ => unreachable!(),
-        }
-    }
-
-    pub fn choice(&self, i: usize) -> usize {
-        match i {
-            0 => self.edge_routing as usize,
-            1 => self.node_placement as usize,
-            2 => self.post_compaction as usize,
-            _ => unreachable!(),
-        }
-    }
-
-    pub fn set_choice(&mut self, i: usize, v: usize) {
-        match (i, v) {
-            (0, 0) => self.edge_routing = EdgeRouting::Orthogonal,
-            (0, 1) => self.edge_routing = EdgeRouting::Polyline,
-            (0, 2) => self.edge_routing = EdgeRouting::Splines,
-            (1, 0) => self.node_placement = NodePlacement::BrandesKoepf,
-            (1, 1) => self.node_placement = NodePlacement::NetworkSimplex,
-            (1, 2) => self.node_placement = NodePlacement::LinearSegments,
-            (1, 3) => self.node_placement = NodePlacement::Simple,
-            (2, 0) => self.post_compaction = PostCompaction::None,
-            (2, 1) => self.post_compaction = PostCompaction::Left,
-            (2, 2) => self.post_compaction = PostCompaction::Right,
-            (2, 3) => self.post_compaction = PostCompaction::EdgeLength,
-            _ => unreachable!(),
-        }
-    }
-}
 
 /// A laid-out box in absolute coordinates, top-left origin.
 pub struct Box {
@@ -253,7 +92,7 @@ pub struct LaidOut {
     pub height: f64,
 }
 
-pub fn layout(graph: &Graph, tuning: &Tuning) -> LaidOut {
+pub fn layout(graph: &Graph) -> LaidOut {
     initialize_plain_java_layout();
 
     // Children indexed by parent id; a node that appears as a key is a container.
@@ -271,7 +110,7 @@ pub fn layout(graph: &Graph, tuning: &Tuning) -> LaidOut {
     set_property(&root, CoreOptions::ALGORITHM, "org.eclipse.elk.layered".to_string());
     set_property(&root, CoreOptions::DIRECTION, Direction::Down);
     set_property(&root, CoreOptions::HIERARCHY_HANDLING, HierarchyHandling::IncludeChildren);
-    apply_tuning(&root, tuning);
+    apply_options(&root);
 
     // Build the ELK node tree, remembering each graph node's ELK node by id.
     let mut elk_of: HashMap<Id, ElkNodeRef> = HashMap::new();
@@ -280,12 +119,9 @@ pub fn layout(graph: &Graph, tuning: &Tuning) -> LaidOut {
             build_node(node, &root, &children_of, &mut elk_of);
         }
     }
-    // INCLUDE_CHILDREN lays each container out as its own nested graph that reads
-    // spacing and edge routing from that container's own properties, so the tuning
-    // is set on every container, not only the root, to reach the leaves inside it.
     for node in &graph.nodes {
         if children_of.contains_key(&node.id) {
-            apply_tuning(&elk_of[&node.id], tuning);
+            apply_options(&elk_of[&node.id]);
         }
     }
 
@@ -456,52 +292,29 @@ fn build_node<'g>(
     elk_of.insert(node.id, elk);
 }
 
-fn apply_tuning(root: &ElkNodeRef, t: &Tuning) {
-    set_property(root, CoreOptions::SPACING_NODE_NODE, t.spacing_node_node);
+/// Sets the layout options on `node`. INCLUDE_CHILDREN lays each container out as
+/// its own nested graph that reads spacing and routing from its own properties,
+/// so this runs on every container, not only the root, to reach the leaves inside
+/// it.
+///
+/// The spacings pack tight to keep a dense view compact and its labels legible;
+/// the exception is the in-flow edge-to-node clearance (between layers), kept
+/// higher so edges clear the boxes they pass rather than reading as overlap.
+/// Across-flow edge-to-edge spacing is not set: `spacing.edgeEdge` is inert in
+/// elk-rs's layered placement, and `spacing.nodeNode` already spaces the parallel
+/// edge lanes within a layer.
+fn apply_options(node: &ElkNodeRef) {
+    set_property(node, CoreOptions::SPACING_NODE_NODE, 10.0);
+    set_property(node, LayeredOptions::SPACING_NODE_NODE_BETWEEN_LAYERS, 10.0);
+    set_property(node, LayeredOptions::SPACING_EDGE_EDGE_BETWEEN_LAYERS, 2.0);
+    set_property(node, LayeredOptions::SPACING_EDGE_NODE_BETWEEN_LAYERS, 10.0);
+    set_property(node, CoreOptions::SPACING_EDGE_NODE, 2.0);
+    set_property(node, CoreOptions::EDGE_ROUTING, EdgeRouting::Orthogonal);
+    set_property(node, LayeredOptions::NODE_PLACEMENT_STRATEGY, NodePlacementStrategy::NetworkSimplex);
     set_property(
-        root,
-        LayeredOptions::SPACING_NODE_NODE_BETWEEN_LAYERS,
-        t.node_node_between_layers,
-    );
-    set_property(
-        root,
-        LayeredOptions::SPACING_EDGE_EDGE_BETWEEN_LAYERS,
-        t.edge_edge_between_layers,
-    );
-    set_property(
-        root,
-        LayeredOptions::SPACING_EDGE_NODE_BETWEEN_LAYERS,
-        t.edge_node_between_layers,
-    );
-    set_property(root, CoreOptions::SPACING_EDGE_NODE, t.edge_node);
-    set_property(
-        root,
-        CoreOptions::EDGE_ROUTING,
-        match t.edge_routing {
-            EdgeRouting::Orthogonal => ElkEdgeRouting::Orthogonal,
-            EdgeRouting::Polyline => ElkEdgeRouting::Polyline,
-            EdgeRouting::Splines => ElkEdgeRouting::Splines,
-        },
-    );
-    set_property(
-        root,
-        LayeredOptions::NODE_PLACEMENT_STRATEGY,
-        match t.node_placement {
-            NodePlacement::BrandesKoepf => NodePlacementStrategy::BrandesKoepf,
-            NodePlacement::NetworkSimplex => NodePlacementStrategy::NetworkSimplex,
-            NodePlacement::LinearSegments => NodePlacementStrategy::LinearSegments,
-            NodePlacement::Simple => NodePlacementStrategy::Simple,
-        },
-    );
-    set_property(
-        root,
+        node,
         LayeredOptions::COMPACTION_POST_COMPACTION_STRATEGY,
-        match t.post_compaction {
-            PostCompaction::None => GraphCompactionStrategy::None,
-            PostCompaction::Left => GraphCompactionStrategy::Left,
-            PostCompaction::Right => GraphCompactionStrategy::Right,
-            PostCompaction::EdgeLength => GraphCompactionStrategy::EdgeLength,
-        },
+        GraphCompactionStrategy::EdgeLength,
     );
 }
 

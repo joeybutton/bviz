@@ -4,14 +4,14 @@
 
 use bviz_graph_layout::graph::Graph;
 use bviz_graph_layout::layout::CARET_RESERVE;
-use bviz_graph_layout::{layout, quotient, streamed_proto, EdgeKind, Id, Kind, LaidOut, Names, Tuning};
-use bviz_ui_components::{load_in_background, track_drag, Dropdown, Slider};
+use bviz_graph_layout::{layout, quotient, streamed_proto, EdgeKind, Id, Kind, LaidOut, Names};
+use bviz_ui_components::{load_in_background, track_drag};
 use bviz_ui_shell::Chrome;
 use clap::Parser;
 use gpui::{
     Animation, AnimationExt, App, BorderStyle, Bounds, Context, Div, Entity, FocusHandle,
     IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, Hsla, MouseMoveEvent, MouseUpEvent, PathBuilder,
-    Pixels, Point, Render, Rgba, ScrollDelta, ScrollWheelEvent, Stateful, Subscription, Task, TextAlign, Size,
+    Pixels, Point, Render, Rgba, ScrollDelta, ScrollWheelEvent, Stateful, Task, TextAlign, Size,
     Transformation, Window, canvas, div, percentage, point, prelude::*, px, quad, rgb, size,
 };
 use std::cell::{Cell, RefCell};
@@ -249,26 +249,9 @@ struct GraphView {
     /// rather than every edge; flipped by the `r` key or the on-screen toggle,
     /// which relays out. Hover lights up a node's full neighbors either way.
     reduced: bool,
-    /// The ELK options the next relayout uses, driven by the tuning panel.
-    tuning: Tuning,
-    /// The panel's sliders and dropdowns, one per [`Tuning::SCALARS`] /
-    /// [`Tuning::CHOICES`] entry, in that order.
-    sliders: Vec<Entity<Slider>>,
-    choices: Vec<Entity<Dropdown>>,
-    /// Bumped on every tuning edit; the debounced relayout it schedules runs only
-    /// if still current when its timer fires, so a burst of edits relays out once.
-    tune_seq: u64,
-    /// Keeps the panel-control observations alive.
-    _tune_subs: Vec<Subscription>,
-    /// Holds the pending debounced relayout so a newer edit cancels it.
-    _tune_task: Task<()>,
     /// Holds the background load/relayout task so it isn't cancelled on drop.
     _load_task: Task<()>,
 }
-
-/// A tuning edit waits this long for further edits before relaying out, so
-/// dragging a slider collapses to one layout of the value it settles on.
-const TUNE_DEBOUNCE: Duration = Duration::from_millis(140);
 
 /// A cursor must travel at least this far from the press before the gesture
 /// counts as a drag rather than a click.
@@ -310,8 +293,7 @@ impl GraphView {
                     MAX_VISIBLE_EDGES,
                 );
                 // Open showing the transitive reduction (the `reduced` default).
-                let laid_out =
-                    relayout(&graph, &reduced, &expanded, &mut names, true, &Tuning::default());
+                let laid_out = relayout(&graph, &reduced, &expanded, &mut names, true);
                 Ok::<_, String>((graph, reduced, names, expanded, laid_out))
             },
             |view, result, _| {
@@ -329,40 +311,6 @@ impl GraphView {
                 };
             },
         );
-        // Build the tuning panel's controls, initialized to the values the layout
-        // otherwise bakes in, and update `tuning` and relayout when any changes.
-        let mut sliders = Vec::new();
-        let mut choices = Vec::new();
-        let mut tune_subs = Vec::new();
-        let defaults = Tuning::default();
-        for (i, spec) in Tuning::SCALARS.iter().enumerate() {
-            let slider = cx.new(|cx| {
-                Slider::new(
-                    ("tune-scalar", i),
-                    defaults.scalar(i) as f32,
-                    spec.min as f32,
-                    spec.max as f32,
-                    1.0,
-                    Some(spec.elk_default as f32),
-                    cx,
-                )
-            });
-            tune_subs.push(cx.observe(&slider, move |this, slider, cx| {
-                this.tuning.set_scalar(i, slider.read(cx).value() as f64);
-                this.schedule_relayout(cx);
-            }));
-            sliders.push(slider);
-        }
-        for (i, spec) in Tuning::CHOICES.iter().enumerate() {
-            let dropdown = cx.new(|cx| {
-                Dropdown::new(("tune-choice", i), spec.options.iter().copied(), defaults.choice(i), cx)
-            });
-            tune_subs.push(cx.observe(&dropdown, move |this, dropdown, cx| {
-                this.tuning.set_choice(i, dropdown.read(cx).selected());
-                this.schedule_relayout(cx);
-            }));
-            choices.push(dropdown);
-        }
         Self {
             focus_handle,
             source: Source::Loading,
@@ -389,30 +337,8 @@ impl GraphView {
             hovered: None,
             dim_enabled: true,
             reduced: true,
-            tuning: Tuning::default(),
-            sliders,
-            choices,
-            tune_seq: 0,
-            _tune_subs: tune_subs,
-            _tune_task: Task::ready(()),
             _load_task: load_task,
         }
-    }
-
-    /// Relays out with the current tuning after [`TUNE_DEBOUNCE`] of no further
-    /// edits. Replacing the held task drops any pending one, so a rapid burst of
-    /// edits lays out once, for the value they settle on.
-    fn schedule_relayout(&mut self, cx: &mut Context<Self>) {
-        self.tune_seq += 1;
-        let seq = self.tune_seq;
-        self._tune_task = cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(TUNE_DEBOUNCE).await;
-            let _ = this.update(cx, |this, cx| {
-                if this.tune_seq == seq {
-                    this.retoggle(cx);
-                }
-            });
-        });
     }
 
     /// Re-lays-out the cached base graph with the current expansion set off the
@@ -435,13 +361,11 @@ impl GraphView {
         };
         let expanded = self.expanded.borrow().clone();
         let reduced = self.reduced;
-        let tuning = self.tuning.clone();
         self.relaying = true;
         self._load_task = load_in_background(
             cx,
             move || {
-                let laid_out =
-                    relayout(&graph, &reduced_base, &expanded, &mut names, reduced, &tuning);
+                let laid_out = relayout(&graph, &reduced_base, &expanded, &mut names, reduced);
                 (laid_out, names)
             },
             |view, (laid_out, names), cx| {
@@ -674,7 +598,7 @@ impl GraphView {
             div()
                 .absolute()
                 .right_2()
-                .bottom_2()
+                .top_2()
                 .flex()
                 .items_center()
                 .gap_2()
@@ -917,72 +841,6 @@ impl GraphView {
             .child(reduce_toggle)
     }
 
-    /// The ELK tuning panel: a slider per scalar option and a dropdown per
-    /// discrete one, each showing its current value beside ELK's own default. The
-    /// container swallows mouse presses and the wheel so adjusting a control never
-    /// pans or zooms the graph beneath it.
-    fn tuning_panel(&self, window: &Window) -> impl IntoElement {
-        let colors = bviz_ui_theme::colors(window);
-        let label_w = px(108.);
-        let scalar_rows = Tuning::SCALARS.iter().enumerate().map(|(i, spec)| {
-            div()
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap_2()
-                .child(div().w(label_w).text_xs().text_color(colors.text).child(spec.label))
-                .child(self.sliders[i].clone())
-                .child(
-                    div()
-                        .w(px(24.))
-                        .text_xs()
-                        .text_color(colors.text)
-                        .child(format!("{:.0}", self.tuning.scalar(i))),
-                )
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(colors.disabled)
-                        .child(format!("ELK {:.0}", spec.elk_default)),
-                )
-        });
-        let choice_rows = Tuning::CHOICES.iter().enumerate().map(|(i, spec)| {
-            div()
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap_2()
-                .child(div().w(label_w).text_xs().text_color(colors.text).child(spec.label))
-                .child(self.choices[i].clone())
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(colors.disabled)
-                        .child(format!("ELK {}", spec.options[spec.elk_default])),
-                )
-        });
-        div()
-            .id("tuning-panel")
-            // Swallow mouse and wheel events so adjusting a control never reaches
-            // the graph beneath to pan, hover, or zoom it.
-            .occlude()
-            .absolute()
-            .right_2()
-            .top_2()
-            .flex()
-            .flex_col()
-            .gap_1()
-            .p_2()
-            .rounded_md()
-            .bg(colors.container)
-            .border_1()
-            .border_color(colors.border)
-            .child(div().text_xs().text_color(colors.text).child("ELK tuning"))
-            .children(scalar_rows)
-            .child(div().h(px(2.)))
-            .children(choice_rows)
-    }
-
     fn status(&self) -> String {
         match &self.source {
             Source::Loaded(g) => format!(
@@ -1009,7 +867,6 @@ impl Render for GraphView {
         };
         let body = match &self.source {
             Source::Loaded(g) => div()
-                .relative()
                 .flex_1()
                 .flex()
                 .overflow_hidden()
@@ -1109,8 +966,7 @@ impl Render for GraphView {
                             cx.notify();
                         }
                     })),
-                )
-                .child(self.tuning_panel(window)),
+                ),
             Source::Loading => div()
                 .flex_1()
                 .flex()
@@ -1619,7 +1475,6 @@ fn relayout(
     expanded: &HashSet<Id>,
     names: &mut Names,
     reduced: bool,
-    tuning: &Tuning,
 ) -> LaidOut {
     let visible = bviz_graph_layout::lod::collapse(base, expanded);
     let (mut view, remap) = quotient::quotient(&visible, expanded, names);
@@ -1640,7 +1495,7 @@ fn relayout(
         view.edges.retain(|e| kept.contains(&(e.from, e.to)));
         view = bviz_graph_layout::reduce::transitive_reduction(&view);
     }
-    let mut laid = layout::layout(&view, tuning);
+    let mut laid = layout::layout(&view);
     laid.full_edges = full_edges;
     laid
 }
