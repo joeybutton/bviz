@@ -271,6 +271,14 @@ pub fn layout(graph: &Graph, tuning: &Tuning) -> LaidOut {
             build_node(node, &root, &children_of, &mut elk_of);
         }
     }
+    // INCLUDE_CHILDREN lays each container out as its own nested graph that reads
+    // spacing and edge routing from that container's own properties, so the tuning
+    // is set on every container, not only the root, to reach the leaves inside it.
+    for node in &graph.nodes {
+        if children_of.contains_key(&node.id) {
+            apply_tuning(&elk_of[&node.id], tuning);
+        }
+    }
 
     // Route one edge per ordered node pair, not one per provenance: the parallel
     // query/cquery/aquery edges between the same two boxes would each cost ELK a
