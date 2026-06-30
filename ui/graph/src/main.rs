@@ -898,15 +898,27 @@ impl Render for GraphView {
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(|this, e: &MouseDownEvent, _, cx| {
-                            // Start a drag; the window-global handlers that follow
-                            // and end it are installed from the canvas paint while
-                            // `dragging` is set, so request a repaint now.
+                            // Start a drag. The window-global move handler that pans
+                            // it is installed from the canvas paint while `dragging`
+                            // is set (so it keeps working past the window edge), hence
+                            // the repaint request. The release is caught both there and
+                            // by the element handler below.
                             this.dragging = true;
                             this.moved = false;
                             this.press = e.position;
                             this.last_mouse = e.position;
                             cx.notify();
                         }),
+                    )
+                    // End the drag on the release the element receives directly. The
+                    // canvas-paint handler also ends it (and catches releases outside
+                    // the window), but it is only installed once a frame paints with
+                    // `dragging` set; a press-move-release quick enough to finish
+                    // before that paint would otherwise never clear `dragging`,
+                    // leaving every later move panning the view.
+                    .on_mouse_up(
+                        MouseButton::Left,
+                        cx.listener(|this, e: &MouseUpEvent, _, cx| end_drag(this, e, cx)),
                     )
                     .on_mouse_move(cx.listener(|this, e: &MouseMoveEvent, _, cx| {
                         // A drag pans rather than hovers; leave the lit set alone.
@@ -1560,6 +1572,12 @@ fn drag_pan(view: &mut GraphView, event: &MouseMoveEvent, cx: &mut Context<Graph
 /// End a drag. A release that never travelled is a click: open or close the
 /// container (or group) box under the cursor.
 fn end_drag(view: &mut GraphView, event: &MouseUpEvent, cx: &mut Context<GraphView>) {
+    // Both the element-level release handler and the window-global one installed
+    // during a drag can fire for the same release; guard so the toggle below runs
+    // once. The guard also makes a stray release (no drag in progress) a no-op.
+    if !view.dragging {
+        return;
+    }
     view.dragging = false;
     if view.moved {
         return;
