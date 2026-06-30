@@ -4,11 +4,11 @@
 //! with horizontal zoom/pan and vertical scroll.
 
 use bviz_trace_layout::{
-    FlameBox, FlameMetrics, FlameNode, FlameView, GroupMode, LaneLayout, LaneMetrics, Scope,
-    StatRow, TimeView, Viewport, WorkClass, build_flame_graph, flame_box_at, flame_height,
-    lay_out_flame, lay_out_lanes, stats_from_flame, visible_slices,
+    FlameBox, FlameGraph, FlameMetrics, FlameView, GroupMode, LaneLayout, LaneMetrics, Scope,
+    StatRow, TimeView, Viewport, WorkClass, aggregate_stats, flame_box_at, flame_height,
+    lay_out_flame, lay_out_lanes, visible_slices,
 };
-use bviz_trace_profile::{CounterLane, CounterPoint, PhaseMarker, Profile, TimeSpan};
+use bviz_trace_profile::{CounterPoint, Profile, Slice, TimeSpan};
 use bviz_ui_components::{
     Axis, Button, Dropdown, DropdownEvent, Scrollbar, load_in_background, track_drag,
 };
@@ -242,20 +242,33 @@ struct StatsCells {
 }
 
 /// The sorted, formatted stats rows together with the inputs they were built
-/// from, so a paint can reuse them unless the source rows or sort changed.
+/// from, so a paint can reuse them unless the source aggregates or sort changed.
+/// The retained `Aggregates` keys the cache by identity (a rebuild hands back a
+/// fresh `Rc`) and keeps alive the graph the keys were resolved against.
 struct StatsCache {
-    rows_ptr: *const Vec<StatRow>,
+    aggregates: Rc<Aggregates>,
     sort: StatsColumn,
     desc: bool,
     rows: Rc<Vec<StatsCells>>,
 }
 
+/// The flame graph for the active `(mode, scope)` and the stats rows derived from
+/// it in the same background build, owned together so a held box, node, or row
+/// can always resolve its name `Str` against the graph that produced it.
+struct Aggregates {
+    flame: FlameGraph,
+    stats: Vec<StatRow>,
+}
+
 /// The flame graph's laid-out boxes together with the inputs that determine
-/// them, so a paint reuses them unless the tree, the laid-out width, or the
-/// horizontal view changed. `scroll_y` is not a key: it only offsets each box's
-/// y at paint, so a vertical scroll keeps the cache.
+/// them, so a paint reuses them unless the graph, the laid-out width, or the
+/// horizontal view changed. The retained `Aggregates` both keeps the graph alive
+/// for the boxes' name handles and serves as the cache key: a new background
+/// build hands back a fresh `Rc`, so `Rc::ptr_eq` detects a stale layout.
+/// `scroll_y` is not a key: it only offsets each box's y at paint, so a vertical
+/// scroll keeps the cache.
 struct FlameBoxCache {
-    root_ptr: *const FlameNode,
+    aggregates: Rc<Aggregates>,
     content_w: f32,
     view: FlameView,
     boxes: Rc<Vec<FlameBox>>,
@@ -602,16 +615,15 @@ struct TraceView {
     /// and reused across paints and mouse handlers. It depends only on the
     /// immutable profile, so it is cleared only when a new profile loads.
     lanes: Rc<RefCell<Option<Rc<LaneLayout>>>>,
-    /// The aggregated flame graph for the active `(mode, scope)`, built off the UI
-    /// thread (walking every slice would freeze a paint) and swapped in when ready.
-    /// The previous graph stays shown while a rebuild runs, so a group-by or scope
-    /// change doesn't blank the view.
-    flame: Rc<RefCell<Option<Rc<FlameNode>>>>,
+    /// The aggregated flame graph and its stats rows for the active `(mode, scope)`,
+    /// built off the UI thread (walking every slice would freeze a paint) and
+    /// swapped in when ready. Held together so the rows' and laid-out boxes' name
+    /// handles resolve against the graph that produced them. The previous value
+    /// stays shown while a rebuild runs, so a group-by or scope change doesn't blank
+    /// the view.
+    aggregates: Rc<RefCell<Option<Rc<Aggregates>>>>,
     /// The flame graph's memoized box layout; see [`FlameBoxCache`].
     flame_boxes: Rc<RefCell<Option<FlameBoxCache>>>,
-    /// The per-group stats rows, derived from `flame` in the same background build;
-    /// sorted on display.
-    stats: Rc<RefCell<Option<Rc<Vec<StatRow>>>>>,
     /// The `(mode, scope)` the ready `flame`/`stats` reflect, if any.
     agg_ready: Option<(GroupMode, Scope)>,
     /// The `(mode, scope)` a background flame/stats build is running for, if any.
@@ -624,8 +636,8 @@ struct TraceView {
     /// Which column the stats table sorts by, and whether descending.
     stats_sort: StatsColumn,
     stats_desc: bool,
-    /// The sorted, formatted stats rows, rebuilt only when `stats`, `stats_sort`,
-    /// or `stats_desc` changes rather than on every paint.
+    /// The sorted, formatted stats rows, rebuilt only when the aggregates,
+    /// `stats_sort`, or `stats_desc` change rather than on every paint.
     stats_cache: RefCell<Option<StatsCache>>,
     /// Scroll position of the virtualized stats table body.
     stats_scroll: UniformListScrollHandle,
@@ -725,9 +737,8 @@ impl TraceView {
             _view_observer: view_observer,
             view_scopes,
             lanes: Rc::new(RefCell::new(None)),
-            flame: Rc::new(RefCell::new(None)),
+            aggregates: Rc::new(RefCell::new(None)),
             flame_boxes: Rc::new(RefCell::new(None)),
-            stats: Rc::new(RefCell::new(None)),
             agg_ready: None,
             agg_inflight: None,
             agg_gen: 0,
@@ -841,14 +852,15 @@ impl TraceView {
                 let flame_total = flame_total_height(&lanes);
                 let regions = Regions::new(
                     bounds,
-                    profile.counters.len(),
+                    profile.counters().len(),
                     graph_height,
                     gutter_width,
                     flame_total,
                 );
                 let time_w = regions.time_w;
+                let span = profile.span();
                 if !fitted.get() {
-                    view.set(TimeView::fit(profile.span, time_w, EDGE_MARGIN_PX));
+                    view.set(TimeView::fit(span, time_w, EDGE_MARGIN_PX));
                     fitted.set(true);
                 } else {
                     // On a width change, keep the zoom relative to the window so a
@@ -856,7 +868,7 @@ impl TraceView {
                     // (and a scroll bar appears) after a grow-then-shrink cycle.
                     let old_time_w = Regions::new(
                         old_bounds,
-                        profile.counters.len(),
+                        profile.counters().len(),
                         graph_height,
                         gutter_width,
                         flame_total,
@@ -865,7 +877,7 @@ impl TraceView {
                     if old_bounds.size.width > px(0.) && (old_time_w - time_w).abs() > f32::EPSILON
                     {
                         let mut v = view.get();
-                        v.rescale_to_width(profile.span, old_time_w, time_w, EDGE_MARGIN_PX);
+                        v.rescale_to_width(span, old_time_w, time_w, EDGE_MARGIN_PX);
                         view.set(v);
                     }
                 }
@@ -874,15 +886,15 @@ impl TraceView {
                 let mut v = view.get();
                 v.px_per_us = v
                     .px_per_us
-                    .max(fit_px_per_us(profile.span, time_w, EDGE_MARGIN_PX));
-                v.clamp_to(profile.span, time_w, EDGE_MARGIN_PX);
+                    .max(fit_px_per_us(span, time_w, EDGE_MARGIN_PX));
+                v.clamp_to(span, time_w, EDGE_MARGIN_PX);
                 view.set(v);
             }
         };
         let flame_total = flame_total_height(&lanes);
         let regions = Regions::new(
             viewport.get(),
-            profile.counters.len(),
+            profile.counters().len(),
             graph_height,
             gutter_width,
             flame_total,
@@ -892,7 +904,7 @@ impl TraceView {
         // from the last painted bounds and the stored graph height. The canvas
         // recomputes the same regions when it paints. A double-click resets the
         // graph height to its default.
-        let splitter = (profile.counters.len() > 0).then(|| {
+        let splitter = (profile.counters().len() > 0).then(|| {
             let y = regions.graph_top - BAR_WIDTH / 2.0;
             let drag_entity = entity.clone();
             div()
@@ -950,7 +962,7 @@ impl TraceView {
         let canvas = canvas(prepaint, move |bounds, _, window, cx| {
             let layout = &*lanes;
             let tv = view.get();
-            let n_counters = profile.counters.len();
+            let n_counters = profile.counters().len();
             let graph_height = entity.read(cx).graph_height;
             let gutter_width = entity.read(cx).gutter_width;
             // Thread lanes only; the graph section places counters itself.
@@ -1001,9 +1013,10 @@ impl TraceView {
                     ));
                 }
                 for vs in visible_slices(&profile, layout, &tv, &vp, &METRICS, MIN_SLICE_PX) {
-                    let slice = &profile.threads[vs.track].slices[vs.slice];
+                    let slice = profile.slices(&profile.threads()[vs.track])[vs.slice];
                     paint_slice(
-                        slice,
+                        &profile,
+                        &slice,
                         vs.x,
                         vs.y + regions.flame_top,
                         vs.w,
@@ -1016,13 +1029,13 @@ impl TraceView {
                 }
             });
 
-            paint_graph(&profile.counters, tv, regions, &palette, window);
+            paint_graph(&profile, tv, regions, &palette, window);
             if regions.has_graph {
                 paint_splitter(regions, &palette, window);
             }
-            paint_markers(&profile.phase_markers, tv, regions, &palette, window, cx);
+            paint_markers(&profile, tv, regions, &palette, window, cx);
             paint_scrollbars(
-                profile.span,
+                profile.span(),
                 tv,
                 flame_total,
                 regions,
@@ -1051,12 +1064,12 @@ impl TraceView {
             paint_ruler(&ticks, regions, bounds, &palette, window, cx);
             if let Some(at) = entity.read(cx).crosshair {
                 if f32::from(at.x) >= regions.content_left {
-                    paint_crosshair(&profile.counters, tv, regions, at, &palette, window, cx);
+                    paint_crosshair(&profile, tv, regions, at, &palette, window, cx);
                 }
             }
             if let Some(h) = entity.read(cx).hover {
-                let slice = &profile.threads[h.track].slices[h.slice];
-                paint_tooltip(slice, h.at, bounds, &palette, window, cx);
+                let slice = profile.slices(&profile.threads()[h.track])[h.slice];
+                paint_tooltip(&profile, &slice, h.at, bounds, &palette, window, cx);
             }
             if !matches!(entity.read(cx).drag, Drag::None) {
                 track_drag(window, &entity, on_drag, end_drag);
@@ -1084,7 +1097,7 @@ impl TraceView {
     /// and the const metrics) rather than borrowing the view.
     fn graph_body(
         &self,
-        flame: Rc<FlameNode>,
+        aggregates: Rc<Aggregates>,
         palette: Palette,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
@@ -1108,7 +1121,7 @@ impl TraceView {
             // sibling below the splitter, so the full canvas bounds are the
             // flame graph's.
             paint_flame_graph(
-                &flame,
+                &aggregates,
                 &flame_boxes,
                 scroll_y.get(),
                 flame_view.get(),
@@ -1195,12 +1208,12 @@ impl TraceView {
     fn status(&self) -> String {
         match &self.source {
             Source::Loaded(p) => {
-                let slices: usize = p.threads.iter().map(|t| t.slices.len()).sum();
+                let slices: usize = p.threads().iter().map(|t| t.slices.len()).sum();
                 format!(
                     "{} threads · {} slices · {:.3}s",
-                    p.threads.len(),
+                    p.threads().len(),
                     slices,
-                    span_seconds(p.span),
+                    span_seconds(p.span()),
                 )
             }
             Source::Loading => "Loading…".into(),
@@ -1228,7 +1241,7 @@ impl TraceView {
             .unwrap_or(0.0);
         let regions = Regions::new(
             self.viewport.get(),
-            p.counters.len(),
+            p.counters().len(),
             self.graph_height,
             self.gutter_width,
             total,
@@ -1248,12 +1261,12 @@ impl TraceView {
         self.lanes.borrow().clone()
     }
 
-    /// The aggregated flame graph for the active `(mode, scope)`, or `None` until
-    /// the first background build for the loaded profile completes. Reflects the
-    /// previous key while a rebuild is still running; [`Self::ensure_aggregates`]
-    /// owns the (re)build.
-    fn flame_node(&self) -> Option<Rc<FlameNode>> {
-        self.flame.borrow().clone()
+    /// The aggregated flame graph and stats for the active `(mode, scope)`, or
+    /// `None` until the first background build for the loaded profile completes.
+    /// Reflects the previous key while a rebuild is still running;
+    /// [`Self::ensure_aggregates`] owns the (re)build.
+    fn aggregates(&self) -> Option<Rc<Aggregates>> {
+        self.aggregates.borrow().clone()
     }
 
     /// Spawns a background build of the flame graph and its stats rows for the
@@ -1289,17 +1302,15 @@ impl TraceView {
         self._agg_task = load_in_background(
             cx,
             move || {
-                let root = build_flame_graph(&profile, mode, scope);
-                let rows = stats_from_flame(&root);
-                (root, rows)
+                let (flame, stats) = aggregate_stats(&profile, mode, scope);
+                Aggregates { flame, stats }
             },
-            move |view, (root, rows), _cx| {
+            move |view, aggregates, _cx| {
                 // Discard a result the inputs have moved past since this spawn.
                 if view.agg_gen != generation {
                     return;
                 }
-                *view.flame.borrow_mut() = Some(Rc::new(root));
-                *view.stats.borrow_mut() = Some(Rc::new(rows));
+                *view.aggregates.borrow_mut() = Some(Rc::new(aggregates));
                 view.flame_boxes.borrow_mut().take();
                 view.stats_cache.borrow_mut().take();
                 view.agg_ready = Some(key);
@@ -1308,11 +1319,11 @@ impl TraceView {
         );
     }
 
-    /// The current flame-graph geometry, or `None` until the tree exists.
+    /// The current flame-graph geometry, or `None` until the graph exists.
     fn flame_layout(&self) -> Option<FlameLayout> {
-        let root = self.flame.borrow().clone()?;
+        let aggregates = self.aggregates.borrow().clone()?;
         let view = self.flame_view.get();
-        let total_h = flame_height(&root, &flame_metrics());
+        let total_h = flame_height(&aggregates.flame, &flame_metrics());
         let (left, top, width, height) = flame_graph_rect(self.viewport.get(), total_h, view);
         Some(FlameLayout {
             view,
@@ -1329,20 +1340,13 @@ impl TraceView {
     /// when a new profile loads — unlike a mere `(mode, scope)` change, the old
     /// graph is no longer a valid thing to keep showing.
     fn invalidate_aggregates(&mut self) {
-        self.flame.borrow_mut().take();
+        self.aggregates.borrow_mut().take();
         self.flame_boxes.borrow_mut().take();
-        self.stats.borrow_mut().take();
         self.stats_cache.borrow_mut().take();
         self.agg_ready = None;
         self.agg_inflight = None;
         // Supersede any build still running for the previous profile.
         self.agg_gen += 1;
-    }
-
-    /// The per-group stats rows for the active `(mode, scope)`, or `None` until the
-    /// background build completes; reflects the previous key while a rebuild runs.
-    fn stats_rows(&self) -> Option<Rc<Vec<StatRow>>> {
-        self.stats.borrow().clone()
     }
 
     /// The group-by label of the key column, from the same table that labels the
@@ -1366,13 +1370,14 @@ impl TraceView {
     }
 
     /// The sorted, formatted stats rows for the current key/scope and sort,
-    /// reusing the cache unless the source rows, sort column, or direction
-    /// changed. `None` until a profile is loaded.
+    /// reusing the cache unless the source aggregates, sort column, or direction
+    /// changed. `None` until the background build completes. Row keys are resolved
+    /// against the flame graph the rows were derived from.
     fn stats_cells(&self) -> Option<Rc<Vec<StatsCells>>> {
-        let rows = self.stats_rows()?;
-        let rows_ptr = Rc::as_ptr(&rows);
+        let aggregates = self.aggregates()?;
+        let graph = &aggregates.flame;
         if let Some(cache) = self.stats_cache.borrow().as_ref() {
-            if cache.rows_ptr == rows_ptr
+            if Rc::ptr_eq(&cache.aggregates, &aggregates)
                 && cache.sort == self.stats_sort
                 && cache.desc == self.stats_desc
             {
@@ -1382,10 +1387,10 @@ impl TraceView {
 
         let column = self.stats_sort;
         let desc = self.stats_desc;
-        let mut order: Vec<&StatRow> = rows.iter().collect();
+        let mut order: Vec<&StatRow> = aggregates.stats.iter().collect();
         order.sort_by(|a, b| {
             let ord = match column {
-                StatsColumn::Key => b.key.cmp(&a.key),
+                StatsColumn::Key => graph.str(b.key).cmp(graph.str(a.key)),
                 StatsColumn::Count => a.count.cmp(&b.count),
                 StatsColumn::Total | StatsColumn::Percent => a.total_us.cmp(&b.total_us),
                 StatsColumn::Avg => a.avg_us().cmp(&b.avg_us()),
@@ -1393,7 +1398,7 @@ impl TraceView {
             };
             let ord = if desc { ord.reverse() } else { ord };
             // Break ties by key so the order is stable regardless of input order.
-            ord.then_with(|| a.key.cmp(&b.key))
+            ord.then_with(|| graph.str(a.key).cmp(graph.str(b.key)))
         });
         let grand_total: i64 = order.iter().map(|r| r.total_us).sum();
         let cells: Vec<StatsCells> = order
@@ -1405,7 +1410,7 @@ impl TraceView {
                     0.0
                 };
                 StatsCells {
-                    key: r.key.clone().into(),
+                    key: graph.str(r.key).to_string().into(),
                     values: [
                         r.count.to_string().into(),
                         format_duration(r.total_us).into(),
@@ -1418,7 +1423,7 @@ impl TraceView {
             .collect();
         let cells = Rc::new(cells);
         *self.stats_cache.borrow_mut() = Some(StatsCache {
-            rows_ptr,
+            aggregates: aggregates.clone(),
             sort: column,
             desc,
             rows: cells.clone(),
@@ -1715,8 +1720,10 @@ impl Render for TraceView {
                     // The graph needs the aggregated tree; show a spinner until the
                     // first background build for this profile completes (a later
                     // group-by/scope change keeps the prior tree, so no spinner).
-                    ViewMode::FlameGraph => match self.flame_node() {
-                        Some(flame) => self.graph_body(flame, palette, cx).into_any_element(),
+                    ViewMode::FlameGraph => match self.aggregates() {
+                        Some(aggregates) => {
+                            self.graph_body(aggregates, palette, cx).into_any_element()
+                        }
                         None => loading_indicator("Building flame graph…", &colors)
                             .into_any_element(),
                     },
@@ -1761,12 +1768,12 @@ impl TraceView {
         let Source::Loaded(profile) = &self.source else {
             return;
         };
-        let span = profile.span;
+        let span = profile.span();
         let vp = self.viewport.get();
         let flame_total = flame_total_height(&lanes);
         let regions = Regions::new(
             vp,
-            profile.counters.len(),
+            profile.counters().len(),
             self.graph_height,
             self.gutter_width,
             flame_total,
@@ -1886,7 +1893,7 @@ impl TraceView {
         let flame_total = flame_total_height(&lanes);
         let regions = Regions::new(
             self.viewport.get(),
-            profile.counters.len(),
+            profile.counters().len(),
             self.graph_height,
             self.gutter_width,
             flame_total,
@@ -1905,7 +1912,7 @@ impl TraceView {
         let flame_total = flame_total_height(&layout);
         let regions = Regions::new(
             self.viewport.get(),
-            profile.counters.len(),
+            profile.counters().len(),
             self.graph_height,
             self.gutter_width,
             flame_total,
@@ -1936,7 +1943,7 @@ impl TraceView {
         // contain it; binary-search that prefix rather than scanning the whole
         // thread. Among it the first slice at the cursor's depth whose
         // [start, start + dur] covers t is the hit (at most one per depth).
-        let slices = &profile.threads[lane.track].slices;
+        let slices = profile.slices(&profile.threads()[lane.track]);
         let upper = slices.partition_point(|s| s.start_us as f64 <= t);
         slices[..upper]
             .iter()
@@ -1968,7 +1975,7 @@ impl TraceView {
     /// whose x-range contains it.
     fn flame_box_at(&self, pos: Point<Pixels>) -> Option<FlameBox> {
         let fl = self.flame_layout()?;
-        let root = self.flame.borrow().clone()?;
+        let aggregates = self.aggregates.borrow().clone()?;
         let metrics = flame_metrics();
         let x = f32::from(pos.x);
         let y = f32::from(pos.y);
@@ -1979,7 +1986,7 @@ impl TraceView {
         let depth = (content_y / metrics.row_height) as u32;
         let content_w = fl.view.content_px(fl.width);
         let content_x = (x - fl.left) + fl.view.scroll_px(fl.width);
-        flame_box_at(&root, content_x, depth, content_w, &metrics, MIN_SLICE_PX)
+        flame_box_at(&aggregates.flame, content_x, depth, content_w, &metrics, MIN_SLICE_PX)
     }
 
     /// Begins a drag at `pos`: a scroll thumb or track if the press hit one (the
@@ -2055,11 +2062,11 @@ fn on_drag(view: &mut TraceView, event: &MouseMoveEvent, cx: &mut Context<TraceV
                 let Source::Loaded(profile) = &view.source else {
                     return;
                 };
-                let span = profile.span;
+                let span = profile.span();
                 let flame_total = flame_total_height(&lanes);
                 let regions = Regions::new(
                     view.viewport.get(),
-                    profile.counters.len(),
+                    profile.counters().len(),
                     view.graph_height,
                     view.gutter_width,
                     flame_total,
@@ -2098,7 +2105,7 @@ fn on_drag(view: &mut TraceView, event: &MouseMoveEvent, cx: &mut Context<TraceV
                 let body_bottom = f32::from(vp.origin.y) + vh - BAR_WIDTH;
                 view.graph_height = clamp_graph_height(
                     body_bottom - f32::from(event.position.y),
-                    profile.counters.len(),
+                    profile.counters().len(),
                     vh,
                 );
             }
@@ -2148,11 +2155,11 @@ fn pan_thumb_to(view: &mut TraceView, pos: Point<Pixels>, grab: f32) {
     let Source::Loaded(profile) = &view.source else {
         return;
     };
-    let span = profile.span;
+    let span = profile.span();
     let flame_total = flame_total_height(&lanes);
     let regions = Regions::new(
         view.viewport.get(),
-        profile.counters.len(),
+        profile.counters().len(),
         view.graph_height,
         view.gutter_width,
         flame_total,
@@ -2190,7 +2197,7 @@ fn assign_marker_row(rows: &mut Vec<f32>, left: f32, right: f32) -> usize {
 /// left of its line; clustered labels stagger across a few stacked rows so none
 /// is dropped.
 fn paint_markers(
-    markers: &[PhaseMarker],
+    profile: &Profile,
     tv: TimeView,
     regions: Regions,
     palette: &Palette,
@@ -2205,7 +2212,7 @@ fn paint_markers(
     // Each row's last occupied right-extent, growing as a cluster needs more rows,
     // so a label drops to the lowest row that clears the previous label there.
     let mut rows: Vec<f32> = Vec::new();
-    for marker in markers {
+    for marker in profile.phase_markers() {
         let x = tv.x_of(marker.start_us);
         if x < 0.0 || x > regions.time_w {
             continue;
@@ -2221,7 +2228,7 @@ fn paint_markers(
         ));
         let line = bviz_ui_assets::shape_line(
             window,
-            marker.name.clone(),
+            profile.str(marker.name).to_string(),
             font.clone(),
             fs,
             palette.marker.into(),
@@ -2534,20 +2541,20 @@ fn paint_gutter(
                 continue;
             }
             let ty = top + (lane.height - GUTTER_LABEL_SIZE) / 2.0;
-            label(&profile.threads[lane.track].name, ty, window, cx);
+            label(profile.str(profile.threads()[lane.track].name), ty, window, cx);
         }
     });
 
     // Counter names sit at the chart baseline of their lane, so they associate
     // with low values rather than floating at the lane top.
     for gl in graph_lanes(
-        profile.counters.len(),
+        profile.counters().len(),
         regions.graph_top,
         graph_height_of(regions),
     ) {
         let lane_bottom = gl.top + METRICS.header_height + gl.chart_h;
         let ty = lane_bottom - GUTTER_LABEL_SIZE - SLICE_TEXT_PAD;
-        label(&profile.counters[gl.lane].name, ty, window, cx);
+        label(profile.str(profile.counters()[gl.lane].name), ty, window, cx);
     }
 }
 
@@ -2631,8 +2638,10 @@ fn paint_labeled_box(
 }
 
 /// Paints a slice quad and, if wide enough, its truncated name.
+#[allow(clippy::too_many_arguments)]
 fn paint_slice(
-    slice: &bviz_trace_profile::Slice,
+    profile: &Profile,
+    slice: &Slice,
     x: f32,
     y: f32,
     w: f32,
@@ -2643,8 +2652,8 @@ fn paint_slice(
     cx: &mut App,
 ) {
     let rect = Bounds::new(point(px(content_left + x), px(y)), size(px(w), px(h)));
-    let fill = category_color(&slice.category, palette);
-    paint_labeled_box(rect, fill, &slice.name, palette, window, cx);
+    let fill = category_color(profile.str(slice.category), palette);
+    paint_labeled_box(rect, fill, profile.str(slice.name), palette, window, cx);
 }
 
 /// Fill for a flame-graph box, keyed by its work class so a frame reads as cpu,
@@ -2726,7 +2735,7 @@ fn work_class_legend(palette: Palette) -> impl IntoElement {
 /// is drawn.
 #[allow(clippy::too_many_arguments)]
 fn paint_flame_graph(
-    root: &FlameNode,
+    aggregates: &Rc<Aggregates>,
     cache: &Rc<RefCell<Option<FlameBoxCache>>>,
     scroll_y: f32,
     flame_view: FlameView,
@@ -2738,14 +2747,15 @@ fn paint_flame_graph(
     window: &mut Window,
     cx: &mut App,
 ) {
+    let graph = &aggregates.flame;
     let metrics = flame_metrics();
-    let total_h = flame_height(root, &metrics);
+    let total_h = flame_height(graph, &metrics);
     let (left, top, width, height) = flame_graph_rect(bounds, total_h, flame_view);
     // Lay the tree out at the zoomed width so sub-pixel culling tracks the zoom,
     // then offset every box left by the horizontal scroll.
     let content_w = flame_view.content_px(width);
     let scroll_x = flame_view.scroll_px(width);
-    let boxes = flame_boxes(cache, root, content_w, flame_view, &metrics);
+    let boxes = flame_boxes(cache, aggregates, content_w, flame_view, &metrics);
 
     let mask = ContentMask {
         bounds: Bounds::new(point(px(left), px(top)), size(px(width), px(height))),
@@ -2762,7 +2772,7 @@ fn paint_flame_graph(
             }
             let rect = Bounds::new(point(px(x), px(y)), size(px(b.w), px(b.h)));
             let fill = flame_box_color(b.work_class, palette);
-            paint_labeled_box(rect, fill, &b.name, palette, window, cx);
+            paint_labeled_box(rect, fill, graph.str(b.name), palette, window, cx);
         }
     });
 
@@ -2800,28 +2810,28 @@ fn paint_flame_graph(
     hbar.set(hlayout);
 
     if let Some(h) = hover {
-        paint_flame_tooltip(&h.boxed, root.total_us, h.at, bounds, palette, window, cx);
+        paint_flame_tooltip(graph, &h.boxed, graph.root().total_us, h.at, bounds, palette, window, cx);
     }
 }
 
-/// Lays out `root` at `content_w` and `view`, reusing the [`FlameBoxCache`] in
-/// `cache` unless one of its keys changed.
+/// Lays out the graph at `content_w` and `view`, reusing the [`FlameBoxCache`] in
+/// `cache` unless one of its keys changed. The retained `aggregates` keeps the
+/// graph alive for the boxes' name handles and keys the cache by identity.
 fn flame_boxes(
     cache: &Rc<RefCell<Option<FlameBoxCache>>>,
-    root: &FlameNode,
+    aggregates: &Rc<Aggregates>,
     content_w: f32,
     view: FlameView,
     metrics: &FlameMetrics,
 ) -> Rc<Vec<FlameBox>> {
-    let root_ptr = root as *const FlameNode;
     if let Some(c) = cache.borrow().as_ref() {
-        if c.root_ptr == root_ptr && c.content_w == content_w && c.view == view {
+        if Rc::ptr_eq(&c.aggregates, aggregates) && c.content_w == content_w && c.view == view {
             return c.boxes.clone();
         }
     }
-    let boxes = Rc::new(lay_out_flame(root, content_w, metrics, MIN_SLICE_PX));
+    let boxes = Rc::new(lay_out_flame(&aggregates.flame, content_w, metrics, MIN_SLICE_PX));
     *cache.borrow_mut() = Some(FlameBoxCache {
-        root_ptr,
+        aggregates: aggregates.clone(),
         content_w,
         view,
         boxes: boxes.clone(),
@@ -2831,7 +2841,9 @@ fn flame_boxes(
 
 /// Paints a tooltip near `at` with the flame node's name and, below it, its total
 /// and self time, occurrence count, and share of the view's aggregated total.
+#[allow(clippy::too_many_arguments)]
 fn paint_flame_tooltip(
+    graph: &FlameGraph,
     boxed: &FlameBox,
     root_total_us: i64,
     at: Point<Pixels>,
@@ -2852,7 +2864,7 @@ fn paint_flame_tooltip(
         boxed.count,
         pct,
     );
-    let lines = [boxed.name.clone(), detail];
+    let lines = [graph.str(boxed.name).to_string(), detail];
 
     let font = bviz_ui_assets::text_metrics(window).font;
     let fs = px(TOOLTIP_TEXT_SIZE);
@@ -2919,7 +2931,8 @@ fn format_duration(us: i64) -> String {
 /// Paints a tooltip panel near `at` with the slice's name, its category and
 /// duration, and its args, one per line. Kept inside the viewport.
 fn paint_tooltip(
-    slice: &bviz_trace_profile::Slice,
+    profile: &Profile,
+    slice: &Slice,
     at: Point<Pixels>,
     bounds: Bounds<Pixels>,
     palette: &Palette,
@@ -2927,20 +2940,20 @@ fn paint_tooltip(
     cx: &mut App,
 ) {
     let mut lines = vec![
-        slice.name.clone(),
-        format!("{} · {}", slice.category, format_duration(slice.dur_us)),
+        profile.str(slice.name).to_string(),
+        format!("{} · {}", profile.str(slice.category), format_duration(slice.dur_us)),
     ];
-    if let Some(target) = &slice.args.target {
+    if let Some(target) = profile.opt_str(slice.args.target) {
         lines.push(format!("target: {target}"));
     }
-    if let Some(mnemonic) = &slice.args.mnemonic {
+    if let Some(mnemonic) = profile.opt_str(slice.args.mnemonic) {
         lines.push(format!("mnemonic: {mnemonic}"));
     }
-    if let Some(configuration) = &slice.args.configuration {
+    if let Some(configuration) = profile.opt_str(slice.args.configuration) {
         lines.push(format!("configuration: {configuration}"));
     }
-    for (key, value) in &slice.args.others {
-        lines.push(format!("{key}: {value}"));
+    for (key, value) in profile.slice_others(slice) {
+        lines.push(format!("{}: {}", profile.str(*key), profile.str(*value)));
     }
 
     let font = bviz_ui_assets::text_metrics(window).font;
@@ -3031,7 +3044,7 @@ fn counter_color(series: &str) -> Hsla {
 /// series as stacked filled areas scaled to the chart height and the lane's peak
 /// stacked total. Charts are confined to the content column.
 fn paint_graph(
-    counters: &[CounterLane],
+    profile: &Profile,
     tv: TimeView,
     regions: Regions,
     palette: &Palette,
@@ -3040,6 +3053,7 @@ fn paint_graph(
     if !regions.has_graph {
         return;
     }
+    let counters = profile.counters();
     let lanes = graph_lanes(counters.len(), regions.graph_top, graph_height_of(regions));
     let content_mask = ContentMask {
         bounds: Bounds::new(
@@ -3073,8 +3087,8 @@ fn paint_graph(
         // band between the running baseline and baseline + value.
         let chart_bottom = gl.top + METRICS.header_height + gl.chart_h;
         let mut totals: BTreeMap<i64, f64> = BTreeMap::new();
-        for series in &counter.series {
-            for p in &series.points {
+        for series in profile.series(counter) {
+            for p in profile.points(series) {
                 *totals.entry(p.ts_us).or_default() += p.value;
             }
         }
@@ -3086,13 +3100,14 @@ fn paint_graph(
         let x_of = |ts| px(regions.content_left + tv.x_of(ts));
         window.with_content_mask(Some(content_mask), |window| {
             let mut baseline: BTreeMap<i64, f64> = BTreeMap::new();
-            for series in &counter.series {
-                if series.points.len() < 2 {
+            for series in profile.series(counter) {
+                let points = profile.points(series);
+                if points.len() < 2 {
                     continue;
                 }
                 let mut area = PathBuilder::fill();
                 let mut first = true;
-                for p in &series.points {
+                for p in points {
                     let base = *baseline.get(&p.ts_us).unwrap_or(&0.0);
                     let top = px(chart_bottom - (base + p.value) as f32 * scale);
                     let at = point(x_of(p.ts_us), top);
@@ -3103,14 +3118,14 @@ fn paint_graph(
                         area.line_to(at);
                     }
                 }
-                for p in series.points.iter().rev() {
+                for p in points.iter().rev() {
                     let base = *baseline.get(&p.ts_us).unwrap_or(&0.0);
                     area.line_to(point(x_of(p.ts_us), px(chart_bottom - base as f32 * scale)));
                 }
                 if let Ok(path) = area.build() {
-                    window.paint_path(path, counter_color(&series.name));
+                    window.paint_path(path, counter_color(profile.str(series.name)));
                 }
-                for p in &series.points {
+                for p in points {
                     *baseline.entry(p.ts_us).or_default() += p.value;
                 }
             }
@@ -3181,7 +3196,7 @@ fn format_counter(value: f64, unit: &str) -> String {
 /// series whose range covers the time — a dot where the crosshair meets its
 /// stacked line plus a value label. Stacking matches [`paint_graph`].
 fn paint_crosshair(
-    counters: &[CounterLane],
+    profile: &Profile,
     tv: TimeView,
     regions: Regions,
     at: Point<Pixels>,
@@ -3230,6 +3245,7 @@ fn paint_crosshair(
     if !regions.has_graph {
         return;
     }
+    let counters = profile.counters();
     let lanes = graph_lanes(counters.len(), regions.graph_top, graph_height_of(regions));
     for gl in lanes {
         if gl.chart_h <= 0.0 {
@@ -3239,8 +3255,8 @@ fn paint_crosshair(
         // The lane peak — the largest stacked total over time — scales the chart,
         // exactly as paint_graph derives it.
         let mut totals: BTreeMap<i64, f64> = BTreeMap::new();
-        for series in &counter.series {
-            for p in &series.points {
+        for series in profile.series(counter) {
+            for p in profile.points(series) {
                 *totals.entry(p.ts_us).or_default() += p.value;
             }
         }
@@ -3255,16 +3271,16 @@ fn paint_crosshair(
         // Walk the series in draw order, accumulating each one's value at `t` onto
         // the running baseline so its dot lands on the stacked line. Each label
         // sits at its own dot, so its value and dot never get out of order.
-        let unit = unit_for(&counter.name);
+        let unit = unit_for(profile.str(counter.name));
         let mut base = 0.0_f64;
         let mut dots: Vec<(f32, f64, Hsla)> = Vec::new();
-        for series in &counter.series {
-            let Some(value) = sample_at(&series.points, t) else {
+        for series in profile.series(counter) {
+            let Some(value) = sample_at(profile.points(series), t) else {
                 continue;
             };
             base += value;
             let dot_y = chart_bottom - base as f32 * scale;
-            dots.push((dot_y, value, counter_color(&series.name)));
+            dots.push((dot_y, value, counter_color(profile.str(series.name))));
         }
         for &(dot_y, _, color) in &dots {
             window.paint_quad(quad(
