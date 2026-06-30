@@ -736,9 +736,14 @@ impl GraphView {
                     let center_y = (f32::from(prev.size.height) / 2. - pan_y) / z_old;
                     let z = (z_old * new_fit / old_fit).clamp(new_fit, MAX_ZOOM);
                     zoom.set(z);
-                    pan.set((
-                        f32::from(bounds.size.width) / 2. - center_x * z,
-                        f32::from(bounds.size.height) / 2. - center_y * z,
+                    pan.set(clamp_pan(
+                        (
+                            f32::from(bounds.size.width) / 2. - center_x * z,
+                            f32::from(bounds.size.height) / 2. - center_y * z,
+                        ),
+                        z,
+                        bounds.size,
+                        content,
                     ));
                 }
                 // Settle the view on the toggled box and the boxes that shared
@@ -944,7 +949,8 @@ impl Render for GraphView {
                         let (px, py) = this.pan.get();
                         let content_x = (lx - px) / old;
                         let content_y = (ly - py) / old;
-                        this.pan.set((lx - content_x * new, ly - content_y * new));
+                        let pan = (lx - content_x * new, ly - content_y * new);
+                        this.pan.set(clamp_pan(pan, new, vp.size, content));
                         this.zoom.set(new);
                         // A manual zoom overrides any settle still easing.
                         this.anim.set(None);
@@ -1027,6 +1033,19 @@ fn fit_zoom(viewport: Size<Pixels>, content: (f32, f32)) -> f32 {
         return 1.0;
     }
     ((vw / gw).min(vh / gh) * FIT_MARGIN).min(1.0)
+}
+
+/// Clamp the pan so the graph can never be moved out of view, the panning
+/// counterpart to the fit-zoom floor that bounds zoom-out. Per axis: when the
+/// content (its full extent times `zoom`) is smaller than the viewport it stays
+/// fully inside; when larger, the viewport stays within it so no empty gutter
+/// opens past an edge.
+fn clamp_pan(pan: (f32, f32), zoom: f32, viewport: Size<Pixels>, content: (f32, f32)) -> (f32, f32) {
+    let axis = |p: f32, vp: f32, extent: f32| p.clamp((vp - extent).min(0.0), (vp - extent).max(0.0));
+    (
+        axis(pan.0, f32::from(viewport.width), content.0 * zoom),
+        axis(pan.1, f32::from(viewport.height), content.1 * zoom),
+    )
 }
 
 /// Ids of the boxes the viewport fully encloses at the given zoom and pan. The
@@ -1524,7 +1543,14 @@ fn drag_pan(view: &mut GraphView, event: &MouseMoveEvent, cx: &mut Context<Graph
     let (px, py) = view.pan.get();
     let dx = f32::from(event.position.x) - f32::from(view.last_mouse.x);
     let dy = f32::from(event.position.y) - f32::from(view.last_mouse.y);
-    view.pan.set((px + dx, py + dy));
+    let pan = (px + dx, py + dy);
+    view.pan.set(match &view.source {
+        Source::Loaded(g) => {
+            let content = (g.width as f32 + 2. * MARGIN as f32, g.height as f32 + 2. * MARGIN as f32);
+            clamp_pan(pan, view.zoom.get(), view.viewport.get().size, content)
+        }
+        _ => pan,
+    });
     view.last_mouse = event.position;
     // A manual pan overrides any settle still easing.
     view.anim.set(None);
