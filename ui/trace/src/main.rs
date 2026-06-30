@@ -261,16 +261,15 @@ struct Aggregates {
 }
 
 /// The flame graph's laid-out boxes together with the inputs that determine
-/// them, so a paint reuses them unless the graph, the laid-out width, or the
-/// horizontal view changed. The retained `Aggregates` both keeps the graph alive
-/// for the boxes' name handles and serves as the cache key: a new background
-/// build hands back a fresh `Rc`, so `Rc::ptr_eq` detects a stale layout.
-/// `scroll_y` is not a key: it only offsets each box's y at paint, so a vertical
-/// scroll keeps the cache.
+/// them, so a paint reuses them unless the graph or the laid-out width changed.
+/// The retained `Aggregates` both keeps the graph alive for the boxes' name
+/// handles and serves as the cache key: a new background build hands back a fresh
+/// `Rc`, so `Rc::ptr_eq` detects a stale layout. Neither the horizontal pan nor
+/// `scroll_y` is a key: each only offsets a box's position at paint, so panning
+/// or scrolling keeps the cache. The zoom is already captured by `content_w`.
 struct FlameBoxCache {
     aggregates: Rc<Aggregates>,
     content_w: f32,
-    view: FlameView,
     boxes: Rc<Vec<FlameBox>>,
 }
 
@@ -2755,7 +2754,7 @@ fn paint_flame_graph(
     // then offset every box left by the horizontal scroll.
     let content_w = flame_view.content_px(width);
     let scroll_x = flame_view.scroll_px(width);
-    let boxes = flame_boxes(cache, aggregates, content_w, flame_view, &metrics);
+    let boxes = flame_boxes(cache, aggregates, content_w, &metrics);
 
     let mask = ContentMask {
         bounds: Bounds::new(point(px(left), px(top)), size(px(width), px(height))),
@@ -2821,11 +2820,10 @@ fn flame_boxes(
     cache: &Rc<RefCell<Option<FlameBoxCache>>>,
     aggregates: &Rc<Aggregates>,
     content_w: f32,
-    view: FlameView,
     metrics: &FlameMetrics,
 ) -> Rc<Vec<FlameBox>> {
     if let Some(c) = cache.borrow().as_ref() {
-        if Rc::ptr_eq(&c.aggregates, aggregates) && c.content_w == content_w && c.view == view {
+        if Rc::ptr_eq(&c.aggregates, aggregates) && c.content_w == content_w {
             return c.boxes.clone();
         }
     }
@@ -2833,7 +2831,6 @@ fn flame_boxes(
     *cache.borrow_mut() = Some(FlameBoxCache {
         aggregates: aggregates.clone(),
         content_w,
-        view,
         boxes: boxes.clone(),
     });
     boxes
