@@ -37,9 +37,9 @@ pub struct LaneLayout {
 }
 
 pub fn lay_out_lanes(profile: &Profile, metrics: &LaneMetrics) -> LaneLayout {
-    let mut lanes = Vec::with_capacity(profile.threads.len());
+    let mut lanes = Vec::with_capacity(profile.threads().len());
     let mut top = 0.0;
-    for (track, thread) in profile.threads.iter().enumerate() {
+    for (track, thread) in profile.threads().iter().enumerate() {
         let depth_rows = thread.max_depth.max(1);
         let height = metrics.header_height + depth_rows as f32 * metrics.row_height;
         lanes.push(Lane {
@@ -51,7 +51,7 @@ pub fn lay_out_lanes(profile: &Profile, metrics: &LaneMetrics) -> LaneLayout {
         top += height + metrics.lane_gap;
     }
     let counter_height = metrics.header_height + metrics.counter_height;
-    let counters = (0..profile.counters.len())
+    let counters = (0..profile.counters().len())
         .map(|lane| {
             let pos = CounterPos {
                 lane,

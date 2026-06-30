@@ -2,12 +2,14 @@ mod cull;
 mod flame;
 mod lanes;
 mod stats;
+#[cfg(test)]
+mod test_profile;
 mod view;
 
 pub use bviz_trace_profile::{LaneClass, WorkClass};
 pub use cull::{Viewport, VisibleSlice, visible_slices};
 pub use flame::{
-    FlameBox, FlameMetrics, FlameNode, FlameView, GroupMode, Scope, build_flame_graph,
+    FlameBox, FlameGraph, FlameMetrics, FlameNode, FlameView, GroupMode, Scope, build_flame_graph,
     flame_box_at, flame_height, lay_out_flame,
 };
 pub use lanes::{CounterPos, Lane, LaneLayout, LaneMetrics, lay_out_lanes};
@@ -17,44 +19,20 @@ pub use view::TimeView;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bviz_trace_profile::{
-        CounterLane, LaneClass, Metadata, Profile, Slice, SliceArgs, ThreadTrack, TimeSpan,
-    };
+    use crate::test_profile::{counter, profile, profile_with_counters, slice, track};
+    use bviz_trace_profile::{LaneClass, TimeSpan};
 
-    fn slice(start_us: i64, dur_us: i64, depth: u32) -> Slice {
-        Slice {
-            name: String::new(),
-            category: String::new(),
-            start_us,
-            dur_us,
-            depth,
-            args: SliceArgs::default(),
-            work_class: WorkClass::Meta,
+    /// A track whose slices' nesting yields `depth_rows` slice rows (max_depth).
+    /// One slice gives one row; an outer span containing `depth_rows - 1` nested
+    /// spans gives that many rows.
+    fn track_rows(tid: i64, depth_rows: u32) -> crate::test_profile::TestTrack {
+        let mut slices = vec![slice("s0", "general information", 0, 10)];
+        for d in 1..depth_rows {
+            // Each deeper span is strictly contained in the one above it.
+            let dur = 10 - d as i64;
+            slices.push(slice(&format!("s{d}"), "general information", 0, dur.max(1)));
         }
-    }
-
-    fn track(tid: i64, sort_index: i64, max_depth: u32, slices: Vec<Slice>) -> ThreadTrack {
-        ThreadTrack {
-            tid,
-            name: format!("t{tid}"),
-            sort_index,
-            slices,
-            max_depth,
-            lane_class: LaneClass::Execution,
-        }
-    }
-
-    fn profile(threads: Vec<ThreadTrack>) -> Profile {
-        Profile {
-            metadata: Metadata::default(),
-            threads,
-            counters: Vec::new(),
-            phase_markers: Vec::new(),
-            span: TimeSpan {
-                start_us: 0,
-                end_us: 1000,
-            },
-        }
+        track(tid, LaneClass::Execution, slices)
     }
 
     const METRICS: LaneMetrics = LaneMetrics {
@@ -134,10 +112,9 @@ mod tests {
 
     #[test]
     fn lanes_stack_with_gaps() {
-        let p = profile(vec![
-            track(1, 0, 1, vec![slice(0, 10, 0)]),
-            track(2, 1, 2, vec![slice(0, 10, 0)]),
-        ]);
+        // tid 1 (one slice row) stacks above tid 2 (two nested rows); both default
+        // to the same sort index, so they order by tid.
+        let p = profile(vec![track_rows(1, 1), track_rows(2, 2)]);
         let layout = lay_out_lanes(&p, &METRICS);
         assert_eq!(layout.lanes[0].top, 0.0);
         assert_eq!(layout.lanes[0].height, 15.0);
@@ -148,11 +125,7 @@ mod tests {
 
     #[test]
     fn counter_lanes_stack_below_threads() {
-        let mut p = profile(vec![track(1, 0, 1, vec![slice(0, 10, 0)])]);
-        p.counters = vec![CounterLane {
-            name: "cpu".into(),
-            series: Vec::new(),
-        }];
+        let p = profile_with_counters(vec![track_rows(1, 1)], &[counter("cpu", vec![(0, 1.0)])]);
         let layout = lay_out_lanes(&p, &METRICS);
         // Thread lane: top 0, height 10 + 5 = 15; then a 4px gap.
         assert_eq!(layout.lanes[0].height, 15.0);
@@ -164,15 +137,16 @@ mod tests {
 
     #[test]
     fn culls_off_time_and_subpixel_slices() {
+        // Four disjoint top-level slices: one on-screen, one on-screen, one
+        // zero-width, one far off-time. All sit at depth 0 (no nesting).
         let p = profile(vec![track(
             1,
-            0,
-            1,
+            LaneClass::Execution,
             vec![
-                slice(0, 100, 0),
-                slice(200, 50, 0),
-                slice(250, 0, 0),
-                slice(10_000, 50, 0),
+                slice("a", "general information", 0, 100),
+                slice("b", "general information", 200, 50),
+                slice("c", "general information", 250, 0),
+                slice("d", "general information", 10_000, 50),
             ],
         )]);
         let layout = lay_out_lanes(&p, &METRICS);
@@ -194,7 +168,11 @@ mod tests {
 
     #[test]
     fn culls_scrolled_off_lane() {
-        let p = profile(vec![track(1, 0, 1, vec![slice(0, 100, 0)])]);
+        let p = profile(vec![track(
+            1,
+            LaneClass::Execution,
+            vec![slice("a", "general information", 0, 100)],
+        )]);
         let layout = lay_out_lanes(&p, &METRICS);
         let view = TimeView {
             start_us: 0.0,

@@ -41,7 +41,7 @@ pub fn visible_slices(
             continue;
         }
         let rows_top = lane.top + metrics.header_height - viewport.scroll_y;
-        let slices = &profile.threads[lane.track].slices;
+        let slices = profile.slices(&profile.threads()[lane.track]);
         // Slices are sorted by start, so none past the right edge can be visible.
         let upper = slices.partition_point(|s| s.start_us as f64 <= view_end_us);
         for (slice, s) in slices[..upper].iter().enumerate() {
