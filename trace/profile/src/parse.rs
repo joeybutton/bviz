@@ -1,10 +1,12 @@
+use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::io::Read;
+use std::marker::PhantomData;
 use std::path::Path;
 
 use flate2::read::MultiGzDecoder;
-use serde::de::{IgnoredAny, MapAccess, SeqAccess, Visitor};
+use serde::de::{DeserializeSeed, IgnoredAny, MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer};
 use serde_json::{Map, Value};
 
@@ -46,53 +48,110 @@ impl std::error::Error for LoadError {
     }
 }
 
-#[derive(Deserialize)]
-struct RawProfile {
-    #[serde(rename = "otherData")]
-    other_data: Option<Map<String, Value>>,
-    #[serde(rename = "traceEvents")]
-    trace_events: Vec<RawEvent>,
+/// Streams the top-level profile object straight into a [`Builder`]: each
+/// `traceEvents` element is interned into the arena as it is parsed, so no
+/// intermediate `Vec<RawEvent>` is materialized and each event's strings are
+/// visited once rather than allocated by the parser and re-interned by a second
+/// pass. `otherData` may appear before or after the array; it is independent of
+/// the events, so it is folded in whenever it is seen.
+fn parse_streaming(text: &str) -> Result<Profile, serde_json::Error> {
+    let mut de = serde_json::Deserializer::from_str(text);
+    let profile = serde::Deserializer::deserialize_map(&mut de, ProfileVisitor)?;
+    de.end()?;
+    Ok(profile)
+}
+
+struct ProfileVisitor;
+
+impl<'de> Visitor<'de> for ProfileVisitor {
+    type Value = Profile;
+
+    fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.write_str("a trace profile object")
+    }
+
+    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Profile, A::Error> {
+        let mut builder = Builder::new();
+        let mut other_data = None;
+        while let Some(key) = map.next_key::<Cow<str>>()? {
+            match key.as_ref() {
+                "otherData" => other_data = map.next_value::<Option<Map<String, Value>>>()?,
+                "traceEvents" => map.next_value_seed(EventsSeed(&mut builder))?,
+                _ => {
+                    map.next_value::<IgnoredAny>()?;
+                }
+            }
+        }
+        Ok(builder.finish(other_data))
+    }
+}
+
+/// Deserializes the `traceEvents` array element by element into the borrowed
+/// [`Builder`], discarding each event once consumed.
+struct EventsSeed<'a>(&'a mut Builder);
+
+impl<'de, 'a> DeserializeSeed<'de> for EventsSeed<'a> {
+    type Value = ();
+
+    fn deserialize<D: Deserializer<'de>>(self, d: D) -> Result<(), D::Error> {
+        d.deserialize_seq(EventsVisitor(self.0))
+    }
+}
+
+struct EventsVisitor<'a>(&'a mut Builder);
+
+impl<'de, 'a> Visitor<'de> for EventsVisitor<'a> {
+    type Value = ();
+
+    fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.write_str("a traceEvents array")
+    }
+
+    fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<(), A::Error> {
+        while seq.next_element_seed(EventSeed(self.0))?.is_some() {}
+        Ok(())
+    }
+}
+
+struct EventSeed<'a>(&'a mut Builder);
+
+impl<'de, 'a> DeserializeSeed<'de> for EventSeed<'a> {
+    type Value = ();
+
+    fn deserialize<D: Deserializer<'de>>(self, d: D) -> Result<(), D::Error> {
+        self.0.event(RawEvent::deserialize(d)?);
+        Ok(())
+    }
 }
 
 #[derive(Deserialize)]
-struct RawEvent {
-    #[serde(default)]
-    ph: Option<String>,
-    #[serde(default)]
-    cat: Option<String>,
-    #[serde(default)]
-    name: Option<String>,
+struct RawEvent<'a> {
+    #[serde(default, borrow)]
+    ph: Option<Cow<'a, str>>,
+    #[serde(default, borrow)]
+    cat: Option<Cow<'a, str>>,
+    #[serde(default, borrow)]
+    name: Option<Cow<'a, str>>,
     #[serde(default)]
     ts: Option<f64>,
     #[serde(default)]
     dur: Option<f64>,
     #[serde(default)]
     tid: Option<i64>,
-    #[serde(default)]
-    args: Option<RawArgs>,
+    #[serde(default, borrow)]
+    args: Option<RawArgs<'a>>,
 }
 
 /// One kept argument value: a string or a number. Other JSON shapes (array,
 /// object, null) are dropped, matching what every `args` consumer reads — they
 /// only ever look at string or numeric fields.
-enum ArgVal {
-    Str(String),
+enum ArgVal<'a> {
+    Str(Cow<'a, str>),
     Int(i64),
     Float(f64),
 }
 
-impl ArgVal {
-    /// The value as the display string the profile's `others` list carries,
-    /// matching how a JSON scalar formats; consumes the value so a string moves
-    /// rather than copies.
-    fn into_display(self) -> String {
-        match self {
-            ArgVal::Str(s) => s,
-            ArgVal::Int(n) => n.to_string(),
-            ArgVal::Float(n) => n.to_string(),
-        }
-    }
-
+impl ArgVal<'_> {
     /// The value as an `f64` for counter series, or `None` for a non-numeric.
     fn as_f64(&self) -> Option<f64> {
         match self {
@@ -108,15 +167,15 @@ impl ArgVal {
 /// millions of slice events in a large profile the saved per-arg `Value`/`Map`
 /// allocations are a large share of parse time, and every consumer (slice args,
 /// thread metadata, counters) reads this list directly.
-struct RawArgs {
-    entries: Vec<(String, ArgVal)>,
+struct RawArgs<'a> {
+    entries: Vec<(Cow<'a, str>, ArgVal<'a>)>,
 }
 
-impl RawArgs {
+impl<'a> RawArgs<'a> {
     /// The string value for `key`, if present and a string.
     fn get_str(&self, key: &str) -> Option<&str> {
         self.entries.iter().find(|(k, _)| k == key).and_then(|(_, v)| match v {
-            ArgVal::Str(s) => Some(s.as_str()),
+            ArgVal::Str(s) => Some(s.as_ref()),
             _ => None,
         })
     }
@@ -130,25 +189,25 @@ impl RawArgs {
     }
 }
 
-impl<'de> Deserialize<'de> for RawArgs {
+impl<'de: 'a, 'a> Deserialize<'de> for RawArgs<'a> {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        deserializer.deserialize_map(RawArgsVisitor)
+        deserializer.deserialize_map(RawArgsVisitor(PhantomData))
     }
 }
 
-struct RawArgsVisitor;
+struct RawArgsVisitor<'a>(PhantomData<&'a ()>);
 
-impl<'de> Visitor<'de> for RawArgsVisitor {
-    type Value = RawArgs;
+impl<'de: 'a, 'a> Visitor<'de> for RawArgsVisitor<'a> {
+    type Value = RawArgs<'a>;
 
     fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
         f.write_str("an args object")
     }
 
-    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<RawArgs, A::Error> {
+    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<RawArgs<'a>, A::Error> {
         let mut entries = Vec::new();
-        while let Some(key) = map.next_key::<String>()? {
-            if let MaybeArg(Some(v)) = map.next_value()? {
+        while let Some(key) = map.next_key::<Cow<'a, str>>()? {
+            if let MaybeArg(Some(v)) = map.next_value::<MaybeArg<'a>>()? {
                 entries.push((key, v));
             }
         }
@@ -158,67 +217,73 @@ impl<'de> Visitor<'de> for RawArgsVisitor {
 
 /// An arg value that keeps a scalar and discards a composite, deserialized by
 /// dispatching on the JSON token so no intermediate `Value` is built.
-struct MaybeArg(Option<ArgVal>);
+struct MaybeArg<'a>(Option<ArgVal<'a>>);
 
-impl<'de> Deserialize<'de> for MaybeArg {
+impl<'de: 'a, 'a> Deserialize<'de> for MaybeArg<'a> {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        deserializer.deserialize_any(MaybeArgVisitor)
+        deserializer.deserialize_any(MaybeArgVisitor(PhantomData))
     }
 }
 
-struct MaybeArgVisitor;
+struct MaybeArgVisitor<'a>(PhantomData<&'a ()>);
 
-impl<'de> Visitor<'de> for MaybeArgVisitor {
-    type Value = MaybeArg;
+impl<'de: 'a, 'a> Visitor<'de> for MaybeArgVisitor<'a> {
+    type Value = MaybeArg<'a>;
 
     fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
         f.write_str("a JSON value")
     }
 
-    fn visit_str<E>(self, v: &str) -> Result<MaybeArg, E> {
-        Ok(MaybeArg(Some(ArgVal::Str(v.to_owned()))))
+    /// A string the parser can point straight into the input (no escapes) is
+    /// borrowed; an escaped one arrives through [`Self::visit_str`] owned.
+    fn visit_borrowed_str<E>(self, v: &'de str) -> Result<MaybeArg<'a>, E> {
+        Ok(MaybeArg(Some(ArgVal::Str(Cow::Borrowed(v)))))
     }
 
-    fn visit_string<E>(self, v: String) -> Result<MaybeArg, E> {
-        Ok(MaybeArg(Some(ArgVal::Str(v))))
+    fn visit_str<E>(self, v: &str) -> Result<MaybeArg<'a>, E> {
+        Ok(MaybeArg(Some(ArgVal::Str(Cow::Owned(v.to_owned())))))
     }
 
-    fn visit_i64<E>(self, v: i64) -> Result<MaybeArg, E> {
+    fn visit_string<E>(self, v: String) -> Result<MaybeArg<'a>, E> {
+        Ok(MaybeArg(Some(ArgVal::Str(Cow::Owned(v)))))
+    }
+
+    fn visit_i64<E>(self, v: i64) -> Result<MaybeArg<'a>, E> {
         Ok(MaybeArg(Some(ArgVal::Int(v))))
     }
 
-    fn visit_u64<E>(self, v: u64) -> Result<MaybeArg, E> {
+    fn visit_u64<E>(self, v: u64) -> Result<MaybeArg<'a>, E> {
         Ok(MaybeArg(Some(
             i64::try_from(v).map(ArgVal::Int).unwrap_or(ArgVal::Float(v as f64)),
         )))
     }
 
-    fn visit_f64<E>(self, v: f64) -> Result<MaybeArg, E> {
+    fn visit_f64<E>(self, v: f64) -> Result<MaybeArg<'a>, E> {
         Ok(MaybeArg(Some(ArgVal::Float(v))))
     }
 
-    fn visit_bool<E>(self, v: bool) -> Result<MaybeArg, E> {
-        Ok(MaybeArg(Some(ArgVal::Str(v.to_string()))))
+    fn visit_bool<E>(self, v: bool) -> Result<MaybeArg<'a>, E> {
+        Ok(MaybeArg(Some(ArgVal::Str(Cow::Owned(v.to_string())))))
     }
 
-    fn visit_unit<E>(self) -> Result<MaybeArg, E> {
+    fn visit_unit<E>(self) -> Result<MaybeArg<'a>, E> {
         Ok(MaybeArg(None))
     }
 
-    fn visit_none<E>(self) -> Result<MaybeArg, E> {
+    fn visit_none<E>(self) -> Result<MaybeArg<'a>, E> {
         Ok(MaybeArg(None))
     }
 
-    fn visit_some<D: Deserializer<'de>>(self, d: D) -> Result<MaybeArg, D::Error> {
+    fn visit_some<D: Deserializer<'de>>(self, d: D) -> Result<MaybeArg<'a>, D::Error> {
         d.deserialize_any(self)
     }
 
-    fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<MaybeArg, A::Error> {
+    fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<MaybeArg<'a>, A::Error> {
         while seq.next_element::<IgnoredAny>()?.is_some() {}
         Ok(MaybeArg(None))
     }
 
-    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<MaybeArg, A::Error> {
+    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<MaybeArg<'a>, A::Error> {
         while map.next_entry::<IgnoredAny, IgnoredAny>()?.is_some() {}
         Ok(MaybeArg(None))
     }
@@ -234,16 +299,17 @@ impl Profile {
     }
 
     /// Decompresses (if gzipped) and transcodes the profile to UTF-8, then parses
-    /// it with `serde_json::from_str`. The whole text is decoded into memory
-    /// rather than streamed: `from_str` works over a slice (`SliceRead`), far
-    /// faster than the byte-at-a-time `from_reader` (`IoRead`) on a trace of
-    /// millions of events, and a profile compresses small enough that the decoded
-    /// text fits comfortably. A parse failure — most often a profile truncated by
-    /// an interrupted Bazel — falls back to the best-effort [`recover`].
+    /// it in a single streaming pass over the decoded text (see
+    /// [`parse_streaming`]). The whole text is decoded into memory rather than
+    /// streamed off disk: the parser works over a slice (`SliceRead`), far faster
+    /// than the byte-at-a-time `from_reader` (`IoRead`) on a trace of millions of
+    /// events, and a profile compresses small enough that the decoded text fits
+    /// comfortably. A parse failure — most often a profile truncated by an
+    /// interrupted Bazel — falls back to the best-effort [`recover`].
     pub fn from_bytes(bytes: &[u8]) -> Result<Profile, LoadError> {
         let decoded = decode(bytes)?;
-        match serde_json::from_str::<RawProfile>(&decoded) {
-            Ok(raw) => Ok(build(raw.other_data, raw.trace_events)),
+        match parse_streaming(&decoded) {
+            Ok(profile) => Ok(profile),
             Err(_) => recover(&decoded),
         }
     }
@@ -390,39 +456,54 @@ struct RawSeries {
     points: Vec<CounterPoint>,
 }
 
-fn build(other_data: Option<Map<String, Value>>, events: Vec<RawEvent>) -> Profile {
-    let mut interner = Interner::new();
-    let mut args_pool: Vec<(Str, Str)> = Vec::new();
-
-    let metadata = build_metadata(&mut interner, other_data.as_ref());
-
-    let mut thread_meta: BTreeMap<i64, (Option<String>, i64)> = BTreeMap::new();
+/// Accumulates the arena pools as `traceEvents` stream in, so each event's
+/// strings are interned in the one parse pass rather than collected into a
+/// `Vec<RawEvent>` and re-walked. [`Self::finish`] folds in `otherData` and
+/// flattens the per-thread and per-counter scratch into the profile's flat pools.
+struct Builder {
+    interner: Interner,
+    args_pool: Vec<(Str, Str)>,
+    thread_meta: BTreeMap<i64, (Option<String>, i64)>,
     // Slices accumulate per thread (depth assignment sorts each list) before
     // being concatenated into the flat slice pool.
-    let mut slices: BTreeMap<i64, Vec<Slice>> = BTreeMap::new();
-    let mut phase_markers: Vec<PhaseMarker> = Vec::new();
-    let mut counter_order: Vec<Str> = Vec::new();
-    let mut counters: HashMap<Str, RawLane> = HashMap::new();
+    slices: BTreeMap<i64, Vec<Slice>>,
+    phase_markers: Vec<PhaseMarker>,
+    counter_order: Vec<Str>,
+    counters: HashMap<Str, RawLane>,
+}
 
-    for ev in events {
+impl Builder {
+    fn new() -> Builder {
+        Builder {
+            interner: Interner::new(),
+            args_pool: Vec::new(),
+            thread_meta: BTreeMap::new(),
+            slices: BTreeMap::new(),
+            phase_markers: Vec::new(),
+            counter_order: Vec::new(),
+            counters: HashMap::new(),
+        }
+    }
+
+    fn event(&mut self, ev: RawEvent) {
         let ph = ev.ph.as_deref().unwrap_or("");
         match ph {
-            "M" => apply_metadata_event(&ev, &mut thread_meta),
+            "M" => apply_metadata_event(&ev, &mut self.thread_meta),
             "X" | "i" => {
                 let ts = round_us(ev.ts);
                 if ev.cat.as_deref() == Some(PHASE_MARKER_CATEGORY) {
-                    phase_markers.push(PhaseMarker {
-                        name: interner.intern(ev.name.as_deref().unwrap_or("")),
+                    self.phase_markers.push(PhaseMarker {
+                        name: self.interner.intern(ev.name.as_deref().unwrap_or("")),
                         start_us: ts,
                     });
                 } else {
                     let tid = ev.tid.unwrap_or(0);
                     let category = ev.cat.as_deref().unwrap_or("");
                     let work_class = work_class(category);
-                    let args = build_slice_args(&mut interner, &mut args_pool, ev.args);
-                    slices.entry(tid).or_default().push(Slice {
-                        name: interner.intern(ev.name.as_deref().unwrap_or("")),
-                        category: interner.intern(category),
+                    let args = build_slice_args(&mut self.interner, &mut self.args_pool, ev.args);
+                    self.slices.entry(tid).or_default().push(Slice {
+                        name: self.interner.intern(ev.name.as_deref().unwrap_or("")),
+                        category: self.interner.intern(category),
                         start_us: ts,
                         dur_us: round_us(ev.dur),
                         depth: 0,
@@ -431,79 +512,99 @@ fn build(other_data: Option<Map<String, Value>>, events: Vec<RawEvent>) -> Profi
                     });
                 }
             }
-            "C" => apply_counter_event(&mut interner, &ev, &mut counter_order, &mut counters),
+            "C" => apply_counter_event(
+                &mut self.interner,
+                &ev,
+                &mut self.counter_order,
+                &mut self.counters,
+            ),
             _ => {}
         }
     }
 
-    let span = compute_span(&slices, &counters, &phase_markers);
+    fn finish(mut self, other_data: Option<Map<String, Value>>) -> Profile {
+        let metadata = build_metadata(&mut self.interner, other_data.as_ref());
+        let span = compute_span(&self.slices, &self.counters, &self.phase_markers);
 
-    // Flatten per-thread slice lists into one pool, recording each thread's range.
-    let mut slice_pool: Vec<Slice> = Vec::new();
-    let mut threads: Vec<ThreadTrack> = slices
-        .into_iter()
-        .map(|(tid, mut tslices)| {
-            let max_depth = assign_depths(&mut tslices);
-            let off = slice_pool.len() as u32;
-            let len = tslices.len() as u32;
-            slice_pool.extend(tslices);
-            let (name, sort_index) = match thread_meta.get(&tid) {
-                Some((Some(n), s)) => (n.clone(), *s),
-                Some((None, s)) => (format!("thread {tid}"), *s),
-                None => (format!("thread {tid}"), MAX_SORT_INDEX),
-            };
-            let lane_class = lane_class(tid, &name);
-            ThreadTrack {
-                tid,
-                name: interner.intern(&name),
-                sort_index,
-                slices: Span32::new(off, len),
-                max_depth,
-                lane_class,
-            }
+        // Flatten per-thread slice lists into one pool, recording each thread's range.
+        let mut slice_pool: Vec<Slice> = Vec::new();
+        let mut threads: Vec<ThreadTrack> = self
+            .slices
+            .into_iter()
+            .map(|(tid, mut tslices)| {
+                let max_depth = assign_depths(&mut tslices);
+                let off = slice_pool.len() as u32;
+                let len = tslices.len() as u32;
+                slice_pool.extend(tslices);
+                let (name, sort_index) = match self.thread_meta.get(&tid) {
+                    Some((Some(n), s)) => (n.clone(), *s),
+                    Some((None, s)) => (format!("thread {tid}"), *s),
+                    None => (format!("thread {tid}"), MAX_SORT_INDEX),
+                };
+                let lane_class = lane_class(tid, &name);
+                ThreadTrack {
+                    tid,
+                    name: self.interner.intern(&name),
+                    sort_index,
+                    slices: Span32::new(off, len),
+                    max_depth,
+                    lane_class,
+                }
+            })
+            .collect();
+        threads.sort_by_key(|t| (t.sort_index, t.tid));
+
+        self.phase_markers.sort_by_key(|m| m.start_us);
+
+        // Flatten counters in first-seen order into series and point pools.
+        let mut series_pool: Vec<CounterSeries> = Vec::new();
+        let mut point_pool: Vec<CounterPoint> = Vec::new();
+        let counters: Vec<CounterLane> = self
+            .counter_order
+            .into_iter()
+            .filter_map(|n| self.counters.remove(&n))
+            .map(|lane| {
+                let series_off = series_pool.len() as u32;
+                for s in lane.series {
+                    let points_off = point_pool.len() as u32;
+                    let points_len = s.points.len() as u32;
+                    point_pool.extend(s.points);
+                    series_pool.push(CounterSeries {
+                        name: s.name,
+                        points: Span32::new(points_off, points_len),
+                    });
+                }
+                let series_len = series_pool.len() as u32 - series_off;
+                CounterLane {
+                    name: lane.name,
+                    series: Span32::new(series_off, series_len),
+                }
+            })
+            .collect();
+
+        Profile::from_parts(ProfileParts {
+            text: self.interner.into_text(),
+            slice_pool,
+            args_pool: self.args_pool,
+            series_pool,
+            point_pool,
+            metadata,
+            threads,
+            counters,
+            phase_markers: self.phase_markers,
+            span,
         })
-        .collect();
-    threads.sort_by_key(|t| (t.sort_index, t.tid));
+    }
+}
 
-    phase_markers.sort_by_key(|m| m.start_us);
-
-    // Flatten counters in first-seen order into series and point pools.
-    let mut series_pool: Vec<CounterSeries> = Vec::new();
-    let mut point_pool: Vec<CounterPoint> = Vec::new();
-    let counters: Vec<CounterLane> = counter_order
-        .into_iter()
-        .filter_map(|n| counters.remove(&n))
-        .map(|lane| {
-            let series_off = series_pool.len() as u32;
-            for s in lane.series {
-                let points_off = point_pool.len() as u32;
-                let points_len = s.points.len() as u32;
-                point_pool.extend(s.points);
-                series_pool.push(CounterSeries {
-                    name: s.name,
-                    points: Span32::new(points_off, points_len),
-                });
-            }
-            let series_len = series_pool.len() as u32 - series_off;
-            CounterLane {
-                name: lane.name,
-                series: Span32::new(series_off, series_len),
-            }
-        })
-        .collect();
-
-    Profile::from_parts(ProfileParts {
-        text: interner.into_text(),
-        slice_pool,
-        args_pool,
-        series_pool,
-        point_pool,
-        metadata,
-        threads,
-        counters,
-        phase_markers,
-        span,
-    })
+/// Builds a profile from already-collected events, for the [`recover`] path that
+/// pulls whole events out of a truncated array before parsing them.
+fn build(other_data: Option<Map<String, Value>>, events: Vec<RawEvent>) -> Profile {
+    let mut builder = Builder::new();
+    for ev in events {
+        builder.event(ev);
+    }
+    builder.finish(other_data)
 }
 
 fn build_metadata(interner: &mut Interner, other: Option<&Map<String, Value>>) -> Metadata {
@@ -551,7 +652,7 @@ fn build_slice_args(
     for (k, v) in args.entries {
         // The typed fields are strings; a non-string value under one of those
         // keys is dropped, everything else is kept for display.
-        match k.as_str() {
+        match k.as_ref() {
             "target" => {
                 if let ArgVal::Str(s) = v {
                     out.target = Some(interner.intern(&s));
@@ -569,7 +670,13 @@ fn build_slice_args(
             }
             _ => {
                 let key = interner.intern(&k);
-                let val = interner.intern(&v.into_display());
+                // A string value interns straight from the borrowed input; a
+                // numeric one formats to its display string first.
+                let val = match v {
+                    ArgVal::Str(s) => interner.intern(&s),
+                    ArgVal::Int(n) => interner.intern(&n.to_string()),
+                    ArgVal::Float(n) => interner.intern(&n.to_string()),
+                };
                 args_pool.push((key, val));
             }
         }
