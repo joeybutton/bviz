@@ -1091,12 +1091,17 @@ fn fit_zoom(viewport: Size<Pixels>, content: (f32, f32)) -> f32 {
 }
 
 /// Clamp the pan so the graph can never be moved out of view, the panning
-/// counterpart to the fit-zoom floor that bounds zoom-out. Per axis: when the
-/// content (its full extent times `zoom`) is smaller than the viewport it stays
-/// fully inside; when larger, the viewport stays within it so no empty gutter
-/// opens past an edge.
+/// counterpart to the fit-zoom floor that bounds zoom-out. Per axis the content
+/// (its full extent times `zoom`) reaches the viewport edge — fully inside when
+/// smaller, fully covering when larger — plus the same breathing room the fit zoom
+/// leaves: `FIT_MARGIN` holds a zoomed-out graph off the edges, so the pan bound
+/// permits an equal clearance rather than snapping the content flush. Without it a
+/// settle that frames a node with room to spare jumps the first time the user pans.
 fn clamp_pan(pan: (f32, f32), zoom: f32, viewport: Size<Pixels>, content: (f32, f32)) -> (f32, f32) {
-    let axis = |p: f32, vp: f32, extent: f32| p.clamp((vp - extent).min(0.0), (vp - extent).max(0.0));
+    let axis = |p: f32, vp: f32, extent: f32| {
+        let clearance = vp * (1.0 - FIT_MARGIN) / 2.0;
+        p.clamp((vp - extent).min(0.0) - clearance, (vp - extent).max(0.0) + clearance)
+    };
     (
         axis(pan.0, f32::from(viewport.width), content.0 * zoom),
         axis(pan.1, f32::from(viewport.height), content.1 * zoom),
@@ -2015,29 +2020,45 @@ mod tests {
         assert_eq!(ids, vec![bviz_graph_layout::Id(0), bviz_graph_layout::Id(3)]);
     }
 
+    /// The breathing room `clamp_pan` allows past the flush edge on an axis, matching
+    /// the fit zoom's margin.
+    fn clearance(vp_axis: f32) -> f32 {
+        vp_axis * (1.0 - FIT_MARGIN) / 2.0
+    }
+
     #[test]
     fn clamp_pan_keeps_smaller_content_within_the_viewport() {
-        // Content smaller than the viewport (zoom 0.1) may move within the slack but
-        // not off either edge, so the pan stays in 0..=(viewport - content).
+        // Content smaller than the viewport (zoom 0.1) stays inside, give or take the
+        // edge clearance, so the pan stays in -clearance..=(viewport - content + clearance).
         let viewport = vp(800., 600.);
         let zoom = 0.1;
         let (cw, ch) = (CONTENT.0 * zoom, CONTENT.1 * zoom);
-        assert_eq!(clamp_pan((-50.0, -50.0), zoom, viewport, CONTENT), (0.0, 0.0));
-        assert_eq!(clamp_pan((9999.0, 9999.0), zoom, viewport, CONTENT), (800.0 - cw, 600.0 - ch));
-        // A pan already inside the slack is left untouched.
+        let (mx, my) = (clearance(800.), clearance(600.));
+        assert_eq!(clamp_pan((-9999.0, -9999.0), zoom, viewport, CONTENT), (-mx, -my));
+        assert_eq!(
+            clamp_pan((9999.0, 9999.0), zoom, viewport, CONTENT),
+            (800.0 - cw + mx, 600.0 - ch + my)
+        );
+        // A pan within the bound is left untouched, including a small overscroll into
+        // the clearance the strict edge would have snapped away.
+        assert_eq!(clamp_pan((-50.0, -50.0), zoom, viewport, CONTENT), (-50.0, -50.0));
         assert_eq!(clamp_pan((100.0, 80.0), zoom, viewport, CONTENT), (100.0, 80.0));
     }
 
     #[test]
     fn clamp_pan_keeps_larger_content_covering_the_viewport() {
-        // Content larger than the viewport (zoom 1.0) may not expose an empty gutter,
-        // so the pan stays in (viewport - content)..=0.
+        // Content larger than the viewport (zoom 1.0) may pull a clearance-sized gutter
+        // past an edge but no further, so the pan stays in
+        // (viewport - content - clearance)..=clearance.
         let viewport = vp(800., 600.);
         let (cw, ch) = (CONTENT.0, CONTENT.1);
-        assert_eq!(clamp_pan((50.0, 50.0), 1.0, viewport, CONTENT), (0.0, 0.0));
+        let (mx, my) = (clearance(800.), clearance(600.));
+        assert_eq!(clamp_pan((9999.0, 9999.0), 1.0, viewport, CONTENT), (mx, my));
         assert_eq!(
             clamp_pan((-9999.0, -9999.0), 1.0, viewport, CONTENT),
-            (800.0 - cw, 600.0 - ch)
+            (800.0 - cw - mx, 600.0 - ch - my)
         );
+        // The flush-cover position the strict bound enforced is still permitted.
+        assert_eq!(clamp_pan((0.0, 0.0), 1.0, viewport, CONTENT), (0.0, 0.0));
     }
 }
