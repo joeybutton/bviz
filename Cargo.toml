@@ -16,6 +16,7 @@ resolver = "2"
 alacritty_terminal = "0.26"
 clap = { version = "4", features = ["derive"] }
 flate2 = "1"
+rustc-hash = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 org-eclipse-elk-alg-layered = { git = "https://github.com/openedges/elk-rs", tag = "v0.11.0+rs.2" }

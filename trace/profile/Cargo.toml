@@ -8,6 +8,7 @@ name = "bviz_trace_profile"
 path = "src/lib.rs"
 
 [dependencies]
+rustc-hash = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 flate2 = { workspace = true }

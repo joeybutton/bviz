@@ -437,14 +437,17 @@ pub(crate) struct ProfileParts {
 /// pool.
 pub struct Interner {
     text: String,
-    seen: std::collections::HashMap<Box<str>, Str>,
+    // A non-cryptographic hasher: the keys are short, non-adversarial profile
+    // strings interned tens of millions of times, where the default SipHash is
+    // the dominant lookup cost.
+    seen: std::collections::HashMap<Box<str>, Str, rustc_hash::FxBuildHasher>,
 }
 
 impl Interner {
     pub fn new() -> Interner {
         Interner {
             text: String::new(),
-            seen: std::collections::HashMap::new(),
+            seen: std::collections::HashMap::default(),
         }
     }
 
