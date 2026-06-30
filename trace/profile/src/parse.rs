@@ -293,9 +293,22 @@ fn round_us(v: Option<f64>) -> i64 {
     v.map(|x| x.round() as i64).unwrap_or(0)
 }
 
+/// Wall-clock timing of a load stage, printed to stderr when `BVIZ_TRACE_TIMING`
+/// is set. Returns the closure's value so a stage can be wrapped inline.
+fn timed<T>(label: &str, f: impl FnOnce() -> T) -> T {
+    if std::env::var_os("BVIZ_TRACE_TIMING").is_none() {
+        return f();
+    }
+    let start = std::time::Instant::now();
+    let out = f();
+    eprintln!("[timing] {label}: {:.3}s", start.elapsed().as_secs_f64());
+    out
+}
+
 impl Profile {
     pub fn from_path(path: &Path) -> Result<Profile, LoadError> {
-        Profile::from_bytes(&std::fs::read(path).map_err(LoadError::Io)?)
+        let bytes = timed("read file", || std::fs::read(path).map_err(LoadError::Io))?;
+        Profile::from_bytes(&bytes)
     }
 
     /// Decompresses (if gzipped) and transcodes the profile to UTF-8, then parses
@@ -307,8 +320,8 @@ impl Profile {
     /// comfortably. A parse failure — most often a profile truncated by an
     /// interrupted Bazel — falls back to the best-effort [`recover`].
     pub fn from_bytes(bytes: &[u8]) -> Result<Profile, LoadError> {
-        let decoded = decode(bytes)?;
-        match parse_streaming(&decoded) {
+        let decoded = timed("decode (decompress+transcode)", || decode(bytes))?;
+        match timed("parse+build (streaming)", || parse_streaming(&decoded)) {
             Ok(profile) => Ok(profile),
             Err(_) => recover(&decoded),
         }
@@ -318,14 +331,16 @@ impl Profile {
 fn decode(bytes: &[u8]) -> Result<String, LoadError> {
     let raw = if bytes.starts_with(&GZIP_MAGIC) {
         let mut out = Vec::new();
-        MultiGzDecoder::new(bytes)
-            .read_to_end(&mut out)
-            .map_err(LoadError::Decompress)?;
+        timed("  decompress", || {
+            MultiGzDecoder::new(bytes)
+                .read_to_end(&mut out)
+                .map_err(LoadError::Decompress)
+        })?;
         out
     } else {
         bytes.to_vec()
     };
-    Ok(latin1_to_utf8(raw))
+    Ok(timed("  latin1->utf8", || latin1_to_utf8(raw)))
 }
 
 /// Transcodes an ISO-8859-1 (Latin-1) byte buffer — how Bazel writes profile

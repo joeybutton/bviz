@@ -1264,7 +1264,12 @@ impl TraceView {
             return None;
         };
         if self.lanes.borrow().is_none() {
-            *self.lanes.borrow_mut() = Some(Rc::new(lay_out_lanes(profile, &METRICS)));
+            let t = std::time::Instant::now();
+            let layout = lay_out_lanes(profile, &METRICS);
+            if std::env::var_os("BVIZ_TRACE_TIMING").is_some() {
+                eprintln!("[timing] lay_out_lanes: {:.3}s", t.elapsed().as_secs_f64());
+            }
+            *self.lanes.borrow_mut() = Some(Rc::new(layout));
         }
         self.lanes.borrow().clone()
     }
@@ -1310,7 +1315,11 @@ impl TraceView {
         self._agg_task = load_in_background(
             cx,
             move || {
+                let t = std::time::Instant::now();
                 let (flame, stats) = aggregate_stats(&profile, mode, scope);
+                if std::env::var_os("BVIZ_TRACE_TIMING").is_some() {
+                    eprintln!("[timing] aggregate_stats: {:.3}s", t.elapsed().as_secs_f64());
+                }
                 Aggregates { flame, stats }
             },
             move |view, aggregates, _cx| {
