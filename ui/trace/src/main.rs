@@ -1702,6 +1702,34 @@ impl Render for TraceView {
                             .child(self.view_dropdown.clone())
                             .child(caption("Group by"))
                             .child(self.mode_dropdown.clone())
+                            // While a new layout builds off-thread, the prior graph
+                            // stays shown and interactive; this signals the rebuild.
+                            .children(self.agg_inflight.is_some().then(|| {
+                                div()
+                                    .flex()
+                                    .flex_row()
+                                    .items_center()
+                                    .gap_1()
+                                    .child(
+                                        bviz_ui_assets::icon("circle-notch")
+                                            .size(px(14.))
+                                            .text_color(bviz_ui_theme::mix(
+                                                colors.text,
+                                                colors.background,
+                                                0.4,
+                                            ))
+                                            .with_animation(
+                                                "agg-spinner",
+                                                Animation::new(Duration::from_millis(900)).repeat(),
+                                                |icon, delta| {
+                                                    icon.with_transformation(Transformation::rotate(
+                                                        percentage(delta),
+                                                    ))
+                                                },
+                                            ),
+                                    )
+                                    .child(caption("Updating…"))
+                            }))
                             // A trailing flexible spacer pushes the legend to the
                             // toolbar's right edge.
                             .child(div().flex_1())
@@ -1716,9 +1744,10 @@ impl Render for TraceView {
                         .overflow_hidden()
                         .child(self.chart_body(profile.clone(), lanes, palette, cx))
                         .into_any_element(),
-                    // The graph needs the aggregated tree; show a spinner until the
-                    // first background build for this profile completes (a later
-                    // group-by/scope change keeps the prior tree, so no spinner).
+                    // The graph needs the aggregated tree; show the centered spinner
+                    // until the first background build for this profile completes. A
+                    // later group-by/scope change keeps the prior tree shown and
+                    // signals its rebuild with the inline toolbar spinner above.
                     ViewMode::FlameGraph => match self.aggregates() {
                         Some(aggregates) => {
                             self.graph_body(aggregates, palette, cx).into_any_element()
