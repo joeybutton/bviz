@@ -232,29 +232,22 @@ const STATS_COLUMNS: [StatsColumnSpec; 6] = [
     StatsColumnSpec { column: StatsColumn::Percent, label: "%", width: Some(STATS_NUM_COL_WIDTH) },
 ];
 
-/// A stats row with every cell pre-formatted to a display string, in
-/// [`STATS_COLUMNS`] order past the key, cached so the strings aren't rebuilt and
-/// the rows aren't re-sorted on every paint.
-struct StatsCells {
-    key: SharedString,
-    /// The numeric columns' text, in `STATS_COLUMNS` order after the key.
-    values: [SharedString; 5],
-}
-
-/// The sorted, formatted stats rows together with the inputs they were built
-/// from, so a paint can reuse them unless the source aggregates or sort changed.
-/// The retained `Aggregates` keys the cache by identity (a rebuild hands back a
-/// fresh `Rc`) and keeps alive the graph the keys were resolved against.
-struct StatsCache {
-    aggregates: Rc<Aggregates>,
-    sort: StatsColumn,
-    desc: bool,
-    rows: Rc<Vec<StatsCells>>,
+/// The stats rows in sorted display order, as indices into `aggregates.stats`,
+/// built off the UI thread for a given sort: sorting ~2M rows on the paint thread
+/// freezes it for seconds. Holds its own `Arc<Aggregates>` so the table renders
+/// consistent rows even mid-reswap, and `grand_total` (the summed `total_us`) so
+/// the percent column needn't re-sum every frame. Only the visible rows are
+/// formatted, lazily during paint, so no per-row strings are retained.
+struct StatsOrder {
+    aggregates: Arc<Aggregates>,
+    order: Vec<u32>,
+    grand_total: i64,
 }
 
 /// The flame graph for the active `(mode, scope)` and the stats rows derived from
 /// it in the same background build, owned together so a held box, node, or row
-/// can always resolve its name `Str` against the graph that produced it.
+/// can always resolve its name `Str` against the graph that produced it. Shared as
+/// an `Arc` so a background stats sort can hold its own clone across threads.
 struct Aggregates {
     flame: FlameGraph,
     stats: Vec<StatRow>,
@@ -264,11 +257,11 @@ struct Aggregates {
 /// them, so a paint reuses them unless the graph or the laid-out width changed.
 /// The retained `Aggregates` both keeps the graph alive for the boxes' name
 /// handles and serves as the cache key: a new background build hands back a fresh
-/// `Rc`, so `Rc::ptr_eq` detects a stale layout. Neither the horizontal pan nor
+/// `Arc`, so `Arc::ptr_eq` detects a stale layout. Neither the horizontal pan nor
 /// `scroll_y` is a key: each only offsets a box's position at paint, so panning
 /// or scrolling keeps the cache. The zoom is already captured by `content_w`.
 struct FlameBoxCache {
-    aggregates: Rc<Aggregates>,
+    aggregates: Arc<Aggregates>,
     content_w: f32,
     boxes: Rc<Vec<FlameBox>>,
 }
@@ -620,7 +613,7 @@ struct TraceView {
     /// handles resolve against the graph that produced them. The previous value
     /// stays shown while a rebuild runs, so a group-by or scope change doesn't blank
     /// the view.
-    aggregates: Rc<RefCell<Option<Rc<Aggregates>>>>,
+    aggregates: Rc<RefCell<Option<Arc<Aggregates>>>>,
     /// The flame graph's memoized box layout; see [`FlameBoxCache`].
     flame_boxes: Rc<RefCell<Option<FlameBoxCache>>>,
     /// The `(mode, scope)` the ready `flame`/`stats` reflect, if any.
@@ -635,9 +628,20 @@ struct TraceView {
     /// Which column the stats table sorts by, and whether descending.
     stats_sort: StatsColumn,
     stats_desc: bool,
-    /// The sorted, formatted stats rows, rebuilt only when the aggregates,
-    /// `stats_sort`, or `stats_desc` change rather than on every paint.
-    stats_cache: RefCell<Option<StatsCache>>,
+    /// The stats rows in sorted display order for the active key and sort, built
+    /// off the UI thread (sorting ~2M rows would freeze a paint) and swapped in
+    /// when ready. The previous order stays shown while a re-sort runs, so a
+    /// header click doesn't blank the table.
+    stats_order: Rc<RefCell<Option<Rc<StatsOrder>>>>,
+    /// The `(mode, scope, sort, desc)` the ready `stats_order` reflects, if any.
+    stats_order_ready: Option<(GroupMode, Scope, StatsColumn, bool)>,
+    /// The `(mode, scope, sort, desc)` a background sort is running for, if any.
+    stats_order_inflight: Option<(GroupMode, Scope, StatsColumn, bool)>,
+    /// Bumped on every (re)spawn so a superseded sort's result is discarded when
+    /// it lands after the inputs have moved on.
+    stats_order_gen: u64,
+    /// Holds the background sort task so it isn't cancelled on drop.
+    _stats_order_task: Task<()>,
     /// Scroll position of the virtualized stats table body.
     stats_scroll: UniformListScrollHandle,
     /// Stats-table scroll-bar geometry set during paint, read by mouse handlers;
@@ -744,7 +748,11 @@ impl TraceView {
             _agg_task: Task::ready(()),
             stats_sort: StatsColumn::Total,
             stats_desc: true,
-            stats_cache: RefCell::new(None),
+            stats_order: Rc::new(RefCell::new(None)),
+            stats_order_ready: None,
+            stats_order_inflight: None,
+            stats_order_gen: 0,
+            _stats_order_task: Task::ready(()),
             stats_scroll: UniformListScrollHandle::new(),
             stats_bar: Rc::new(Cell::new(None)),
             hover: None,
@@ -1096,8 +1104,9 @@ impl TraceView {
     /// and the const metrics) rather than borrowing the view.
     fn graph_body(
         &self,
-        aggregates: Rc<Aggregates>,
+        aggregates: Arc<Aggregates>,
         palette: Palette,
+        colors: &bviz_ui_theme::Colors,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let scroll_y = self.scroll_y.clone();
@@ -1193,7 +1202,7 @@ impl TraceView {
                 }),
             )
             .on_scroll_wheel(|_, _, cx: &mut App| cx.stop_propagation())
-            .child(self.stats_table(&palette, cx));
+            .child(self.stats_table(&palette, colors, cx));
         div()
             .flex_1()
             .flex()
@@ -1264,7 +1273,7 @@ impl TraceView {
     /// `None` until the first background build for the loaded profile completes.
     /// Reflects the previous key while a rebuild is still running;
     /// [`Self::ensure_aggregates`] owns the (re)build.
-    fn aggregates(&self) -> Option<Rc<Aggregates>> {
+    fn aggregates(&self) -> Option<Arc<Aggregates>> {
         self.aggregates.borrow().clone()
     }
 
@@ -1309,11 +1318,14 @@ impl TraceView {
                 if view.agg_gen != generation {
                     return;
                 }
-                *view.aggregates.borrow_mut() = Some(Rc::new(aggregates));
+                *view.aggregates.borrow_mut() = Some(Arc::new(aggregates));
                 view.flame_boxes.borrow_mut().take();
-                view.stats_cache.borrow_mut().take();
                 view.agg_ready = Some(key);
                 view.agg_inflight = None;
+                // The sorted order is keyed on the new aggregates; let
+                // `ensure_stats_order` re-sort against them (the old order keeps
+                // showing until it lands).
+                view.stats_order_ready = None;
             },
         );
     }
@@ -1341,11 +1353,14 @@ impl TraceView {
     fn invalidate_aggregates(&mut self) {
         self.aggregates.borrow_mut().take();
         self.flame_boxes.borrow_mut().take();
-        self.stats_cache.borrow_mut().take();
+        self.stats_order.borrow_mut().take();
         self.agg_ready = None;
         self.agg_inflight = None;
-        // Supersede any build still running for the previous profile.
+        self.stats_order_ready = None;
+        self.stats_order_inflight = None;
+        // Supersede any build/sort still running for the previous profile.
         self.agg_gen += 1;
+        self.stats_order_gen += 1;
     }
 
     /// The group-by label of the key column, from the same table that labels the
@@ -1368,66 +1383,71 @@ impl TraceView {
         }
     }
 
-    /// The sorted, formatted stats rows for the current key/scope and sort,
-    /// reusing the cache unless the source aggregates, sort column, or direction
-    /// changed. `None` until the background build completes. Row keys are resolved
-    /// against the flame graph the rows were derived from.
-    fn stats_cells(&self) -> Option<Rc<Vec<StatsCells>>> {
-        let aggregates = self.aggregates()?;
-        let graph = &aggregates.flame;
-        if let Some(cache) = self.stats_cache.borrow().as_ref() {
-            if Rc::ptr_eq(&cache.aggregates, &aggregates)
-                && cache.sort == self.stats_sort
-                && cache.desc == self.stats_desc
-            {
-                return Some(cache.rows.clone());
+    /// Spawns a background sort of the stats rows for the current key/scope and
+    /// sort when neither the ready order nor an in-flight sort already matches, and
+    /// abandons a sort whose key the inputs have moved past. Sorting ~2M rows is
+    /// far too costly to run on the UI thread, so the sort runs on the background
+    /// executor and only the row indices come back; the visible rows are formatted
+    /// lazily at paint. The previous order stays shown until the new one lands.
+    /// Idempotent — safe to call each frame.
+    fn ensure_stats_order(&mut self, cx: &mut Context<Self>) {
+        let Some(aggregates) = self.aggregates() else {
+            return;
+        };
+        let Some((mode, scope)) = self.agg_ready else {
+            return;
+        };
+        let key = (mode, scope, self.stats_sort, self.stats_desc);
+        if self.stats_order_ready == Some(key) {
+            // The shown order is already current; cancel a sort for a key the
+            // inputs have since left so its late result can't clobber it.
+            if self.stats_order_inflight.take().is_some() {
+                self.stats_order_gen += 1;
+                self._stats_order_task = Task::ready(());
             }
+            return;
         }
-
+        if self.stats_order_inflight == Some(key) {
+            return;
+        }
+        self.stats_order_inflight = Some(key);
+        self.stats_order_gen += 1;
+        let generation = self.stats_order_gen;
         let column = self.stats_sort;
         let desc = self.stats_desc;
-        let mut order: Vec<&StatRow> = aggregates.stats.iter().collect();
-        order.sort_by(|a, b| {
-            let ord = match column {
-                StatsColumn::Key => graph.str(b.key).cmp(graph.str(a.key)),
-                StatsColumn::Count => a.count.cmp(&b.count),
-                StatsColumn::Total | StatsColumn::Percent => a.total_us.cmp(&b.total_us),
-                StatsColumn::Avg => a.avg_us().cmp(&b.avg_us()),
-                StatsColumn::Max => a.max_us.cmp(&b.max_us),
-            };
-            let ord = if desc { ord.reverse() } else { ord };
-            // Break ties by key so the order is stable regardless of input order.
-            ord.then_with(|| graph.str(a.key).cmp(graph.str(b.key)))
-        });
-        let grand_total: i64 = order.iter().map(|r| r.total_us).sum();
-        let cells: Vec<StatsCells> = order
-            .into_iter()
-            .map(|r| {
-                let pct = if grand_total > 0 {
-                    100.0 * r.total_us as f64 / grand_total as f64
-                } else {
-                    0.0
-                };
-                StatsCells {
-                    key: graph.str(r.key).to_string().into(),
-                    values: [
-                        r.count.to_string().into(),
-                        format_duration(r.total_us).into(),
-                        format_duration(r.avg_us()).into(),
-                        format_duration(r.max_us).into(),
-                        format!("{pct:.1}%").into(),
-                    ],
+        self._stats_order_task = load_in_background(
+            cx,
+            move || {
+                let graph = &aggregates.flame;
+                let stats = &aggregates.stats;
+                let mut order: Vec<u32> = (0..stats.len() as u32).collect();
+                order.sort_by(|&ai, &bi| {
+                    let a = &stats[ai as usize];
+                    let b = &stats[bi as usize];
+                    let ord = match column {
+                        StatsColumn::Key => graph.str(b.key).cmp(graph.str(a.key)),
+                        StatsColumn::Count => a.count.cmp(&b.count),
+                        StatsColumn::Total | StatsColumn::Percent => a.total_us.cmp(&b.total_us),
+                        StatsColumn::Avg => a.avg_us().cmp(&b.avg_us()),
+                        StatsColumn::Max => a.max_us.cmp(&b.max_us),
+                    };
+                    let ord = if desc { ord.reverse() } else { ord };
+                    // Break ties by key so the order is stable regardless of input order.
+                    ord.then_with(|| graph.str(a.key).cmp(graph.str(b.key)))
+                });
+                let grand_total: i64 = stats.iter().map(|r| r.total_us).sum();
+                StatsOrder { aggregates, order, grand_total }
+            },
+            move |view, stats_order, _cx| {
+                // Discard a result the inputs have moved past since this spawn.
+                if view.stats_order_gen != generation {
+                    return;
                 }
-            })
-            .collect();
-        let cells = Rc::new(cells);
-        *self.stats_cache.borrow_mut() = Some(StatsCache {
-            aggregates: aggregates.clone(),
-            sort: column,
-            desc,
-            rows: cells.clone(),
-        });
-        Some(cells)
+                *view.stats_order.borrow_mut() = Some(Rc::new(stats_order));
+                view.stats_order_ready = Some(key);
+                view.stats_order_inflight = None;
+            },
+        );
     }
 
     /// The graph-mode stats table: a header band of clickable, sortable columns
@@ -1440,11 +1460,12 @@ impl TraceView {
     /// through [`stats_cell`], so their widths cannot disagree at any window
     /// width: each fixed column reserves its pixel width without shrinking, and
     /// the one flexible column takes the remainder.
-    fn stats_table(&self, palette: &Palette, cx: &mut Context<Self>) -> Div {
-        let Some(cells) = self.stats_cells() else {
-            return div();
-        };
-
+    fn stats_table(
+        &self,
+        palette: &Palette,
+        colors: &bviz_ui_theme::Colors,
+        cx: &mut Context<Self>,
+    ) -> Div {
         let key_label = self.key_column_label();
         // Reserve the scroll bar's width on the right of the header and every row
         // (the bar is painted as an overlay there), so the last column's values
@@ -1487,15 +1508,36 @@ impl TraceView {
                     }))
             }));
 
-        let row_count = cells.len();
+        let table = div()
+            .flex()
+            .flex_col()
+            .size_full()
+            .bg(palette.background)
+            .text_color(palette.label)
+            .text_size(px(STATS_TEXT_SIZE))
+            .child(header);
+
+        // Until the off-thread sort lands, keep the header but show a spinner in
+        // place of the body rather than an empty band.
+        let Some(order) = self.stats_order.borrow().clone() else {
+            return table.child(loading_indicator("Sorting…", colors));
+        };
+
+        let row_count = order.order.len();
         let scroll_track = palette.scroll_track;
         let body = uniform_list(
             "stats-body",
             row_count,
             move |range, _window, _cx| {
+                let graph = &order.aggregates.flame;
                 range
                     .map(|i| {
-                        let row = &cells[i];
+                        // Format only the visible rows here: formatting all ~2M up
+                        // front froze the UI thread for seconds and retained a huge
+                        // string structure that was slow to drop.
+                        let row = order.aggregates.stats[order.order[i] as usize];
+                        let key = graph.str(row.key);
+                        let pct = 100.0 * row.total_us as f64 / order.grand_total.max(1) as f64;
                         div()
                             .flex()
                             .flex_row()
@@ -1504,11 +1546,14 @@ impl TraceView {
                             .w_full()
                             .pr(px(BAR_WIDTH))
                             .hover(move |s| s.bg(scroll_track))
-                            .children(STATS_COLUMNS.iter().enumerate().map(|(c, spec)| {
-                                let text = if spec.column == StatsColumn::Key {
-                                    row.key.clone()
-                                } else {
-                                    row.values[c - 1].clone()
+                            .children(STATS_COLUMNS.iter().map(|spec| {
+                                let text: SharedString = match spec.column {
+                                    StatsColumn::Key => key.to_string().into(),
+                                    StatsColumn::Count => row.count.to_string().into(),
+                                    StatsColumn::Total => format_duration(row.total_us).into(),
+                                    StatsColumn::Avg => format_duration(row.avg_us()).into(),
+                                    StatsColumn::Max => format_duration(row.max_us).into(),
+                                    StatsColumn::Percent => format!("{pct:.1}%").into(),
                                 };
                                 stats_cell(spec, text)
                             }))
@@ -1555,22 +1600,14 @@ impl TraceView {
             },
         );
 
-        div()
-            .flex()
-            .flex_col()
-            .size_full()
-            .bg(palette.background)
-            .text_color(palette.label)
-            .text_size(px(STATS_TEXT_SIZE))
-            .child(header)
-            .child(
-                div()
-                    .relative()
-                    .flex_1()
-                    .w_full()
-                    .child(body.size_full())
-                    .child(bar.absolute().inset_0()),
-            )
+        table.child(
+            div()
+                .relative()
+                .flex_1()
+                .w_full()
+                .child(body.size_full())
+                .child(bar.absolute().inset_0()),
+        )
     }
 
     /// Switches the view mode, resetting the vertical scroll since the two modes
@@ -1657,6 +1694,9 @@ impl Render for TraceView {
                 // for the active view; pre-warming in chart mode too keeps the
                 // first switch to the graph instant.
                 self.ensure_aggregates(cx);
+                // Re-sort the stats off the UI thread when the aggregates or sort
+                // change; sorting ~2M rows on the paint thread would freeze it.
+                self.ensure_stats_order(cx);
                 let lanes = self.lane_layout().expect("a loaded profile has a lane layout");
                 let toolbar = div()
                     .flex()
@@ -1702,9 +1742,12 @@ impl Render for TraceView {
                             .child(self.view_dropdown.clone())
                             .child(caption("Group by"))
                             .child(self.mode_dropdown.clone())
-                            // While a new layout builds off-thread, the prior graph
-                            // stays shown and interactive; this signals the rebuild.
-                            .children(self.agg_inflight.is_some().then(|| {
+                            // While a new layout builds or the stats re-sort off
+                            // the thread, the prior graph stays shown and
+                            // interactive; this signals the work in progress.
+                            .children((self.agg_inflight.is_some()
+                                || self.stats_order_inflight.is_some())
+                            .then(|| {
                                 div()
                                     .flex()
                                     .flex_row()
@@ -1750,7 +1793,7 @@ impl Render for TraceView {
                     // signals its rebuild with the inline toolbar spinner above.
                     ViewMode::FlameGraph => match self.aggregates() {
                         Some(aggregates) => {
-                            self.graph_body(aggregates, palette, cx).into_any_element()
+                            self.graph_body(aggregates, palette, &colors, cx).into_any_element()
                         }
                         None => loading_indicator("Building flame graph…", &colors)
                             .into_any_element(),
@@ -2763,7 +2806,7 @@ fn work_class_legend(palette: Palette) -> impl IntoElement {
 /// is drawn.
 #[allow(clippy::too_many_arguments)]
 fn paint_flame_graph(
-    aggregates: &Rc<Aggregates>,
+    aggregates: &Arc<Aggregates>,
     cache: &Rc<RefCell<Option<FlameBoxCache>>>,
     scroll_y: f32,
     flame_view: FlameView,
@@ -2847,12 +2890,12 @@ fn paint_flame_graph(
 /// graph alive for the boxes' name handles and keys the cache by identity.
 fn flame_boxes(
     cache: &Rc<RefCell<Option<FlameBoxCache>>>,
-    aggregates: &Rc<Aggregates>,
+    aggregates: &Arc<Aggregates>,
     content_w: f32,
     metrics: &FlameMetrics,
 ) -> Rc<Vec<FlameBox>> {
     if let Some(c) = cache.borrow().as_ref() {
-        if Rc::ptr_eq(&c.aggregates, aggregates) && c.content_w == content_w {
+        if Arc::ptr_eq(&c.aggregates, aggregates) && c.content_w == content_w {
             return c.boxes.clone();
         }
     }
