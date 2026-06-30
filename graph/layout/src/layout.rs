@@ -82,16 +82,19 @@ pub enum PostCompaction {
 /// in; the `SCALARS`/`CHOICES` specs describe each field for a control panel,
 /// including the stock ELK default to mark against.
 ///
-/// The edge-spacing fields are the layered algorithm's between-layers spacings,
-/// which govern the routing channels between adjacent layers — the space dense
-/// edges consume. The generic `spacing.edgeEdge`/`spacing.edgeNode` options have
-/// no effect on a layered layout in elk-rs, so they are not exposed.
+/// In the top-to-bottom layout the between-layers edge spacings act along the
+/// flow (vertically), spacing edges where they share an inter-layer channel,
+/// while `edge_node` is the in-layer edge-to-node clearance, which spaces edges
+/// across the flow (horizontally) from the nodes they run past. The generic
+/// `spacing.edgeEdge` has no effect on a layered layout in elk-rs, so there is no
+/// across-flow edge-to-edge spacing to expose.
 #[derive(Clone)]
 pub struct Tuning {
     pub spacing_node_node: f64,
     pub node_node_between_layers: f64,
     pub edge_edge_between_layers: f64,
     pub edge_node_between_layers: f64,
+    pub edge_node: f64,
     pub edge_routing: EdgeRouting,
     pub node_placement: NodePlacement,
     pub post_compaction: PostCompaction,
@@ -104,6 +107,7 @@ impl Default for Tuning {
             node_node_between_layers: 50.0,
             edge_edge_between_layers: 10.0,
             edge_node_between_layers: 10.0,
+            edge_node: 10.0,
             edge_routing: EdgeRouting::Orthogonal,
             node_placement: NodePlacement::BrandesKoepf,
             post_compaction: PostCompaction::None,
@@ -133,8 +137,9 @@ impl Tuning {
     pub const SCALARS: &'static [ScalarSpec] = &[
         ScalarSpec { label: "node spacing", min: 0.0, max: 80.0, elk_default: 20.0 },
         ScalarSpec { label: "layer spacing", min: 0.0, max: 120.0, elk_default: 20.0 },
-        ScalarSpec { label: "edge–edge", min: 2.0, max: 30.0, elk_default: 10.0 },
-        ScalarSpec { label: "edge–node", min: 2.0, max: 30.0, elk_default: 10.0 },
+        ScalarSpec { label: "edge–edge ↕", min: 2.0, max: 30.0, elk_default: 10.0 },
+        ScalarSpec { label: "edge–node ↕", min: 2.0, max: 30.0, elk_default: 10.0 },
+        ScalarSpec { label: "edge–node ↔", min: 2.0, max: 40.0, elk_default: 10.0 },
     ];
 
     /// The discrete fields, ordered to match [`Tuning::choice`]/[`Tuning::set_choice`].
@@ -162,6 +167,7 @@ impl Tuning {
             1 => self.node_node_between_layers,
             2 => self.edge_edge_between_layers,
             3 => self.edge_node_between_layers,
+            4 => self.edge_node,
             _ => unreachable!(),
         }
     }
@@ -172,6 +178,7 @@ impl Tuning {
             1 => self.node_node_between_layers = v,
             2 => self.edge_edge_between_layers = v,
             3 => self.edge_node_between_layers = v,
+            4 => self.edge_node = v,
             _ => unreachable!(),
         }
     }
@@ -464,6 +471,7 @@ fn apply_tuning(root: &ElkNodeRef, t: &Tuning) {
         LayeredOptions::SPACING_EDGE_NODE_BETWEEN_LAYERS,
         t.edge_node_between_layers,
     );
+    set_property(root, CoreOptions::SPACING_EDGE_NODE, t.edge_node);
     set_property(
         root,
         CoreOptions::EDGE_ROUTING,
