@@ -1861,4 +1861,30 @@ mod tests {
         ids.sort_by_key(|id| id.0);
         assert_eq!(ids, vec![bviz_graph_layout::Id(0), bviz_graph_layout::Id(3)]);
     }
+
+    #[test]
+    fn clamp_pan_keeps_smaller_content_within_the_viewport() {
+        // Content smaller than the viewport (zoom 0.1) may move within the slack but
+        // not off either edge, so the pan stays in 0..=(viewport - content).
+        let viewport = vp(800., 600.);
+        let zoom = 0.1;
+        let (cw, ch) = (CONTENT.0 * zoom, CONTENT.1 * zoom);
+        assert_eq!(clamp_pan((-50.0, -50.0), zoom, viewport, CONTENT), (0.0, 0.0));
+        assert_eq!(clamp_pan((9999.0, 9999.0), zoom, viewport, CONTENT), (800.0 - cw, 600.0 - ch));
+        // A pan already inside the slack is left untouched.
+        assert_eq!(clamp_pan((100.0, 80.0), zoom, viewport, CONTENT), (100.0, 80.0));
+    }
+
+    #[test]
+    fn clamp_pan_keeps_larger_content_covering_the_viewport() {
+        // Content larger than the viewport (zoom 1.0) may not expose an empty gutter,
+        // so the pan stays in (viewport - content)..=0.
+        let viewport = vp(800., 600.);
+        let (cw, ch) = (CONTENT.0, CONTENT.1);
+        assert_eq!(clamp_pan((50.0, 50.0), 1.0, viewport, CONTENT), (0.0, 0.0));
+        assert_eq!(
+            clamp_pan((-9999.0, -9999.0), 1.0, viewport, CONTENT),
+            (800.0 - cw, 600.0 - ch)
+        );
+    }
 }
