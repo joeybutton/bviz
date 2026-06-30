@@ -1,3 +1,4 @@
+load("@rules_rs//rs:rust_binary.bzl", "rust_binary")
 load("@rules_rs//rs:rust_library.bzl", "rust_library")
 load("@rules_rs//rs:rust_test.bzl", "rust_test")
 
@@ -18,4 +19,11 @@ rust_library(
 rust_test(
     name = "profile_test",
     crate = ":profile",
+)
+
+rust_binary(
+    name = "bench_load",
+    srcs = ["bench/load.rs"],
+    crate_name = "bench_load",
+    deps = [":profile"],
 )
