@@ -5,7 +5,7 @@
 use bviz_graph_layout::graph::Graph;
 use bviz_graph_layout::layout::CARET_RESERVE;
 use bviz_graph_layout::{layout, quotient, streamed_proto, EdgeKind, Id, Kind, LaidOut, Names};
-use bviz_ui_components::{load_in_background, track_drag};
+use bviz_ui_components::{load_in_background, track_drag, Axis, Scrollbar};
 use bviz_ui_shell::Chrome;
 use clap::Parser;
 use gpui::{
@@ -61,6 +61,12 @@ const FIT_MARGIN: f32 = 2.0 / 3.0;
 /// relayout settles the view, so a kept box never sits flush against the border.
 const RECENTER_PAD: f32 = 24.0;
 
+/// Thickness of a scroll-bar track and thumb, in px.
+const SCROLLBAR_THICKNESS: f32 = 10.0;
+
+/// Smallest a scroll thumb may shrink to, so it stays grabbable on a long track.
+const MIN_THUMB: f32 = 28.0;
+
 /// How long the view eases to its settled position after a toggle: short enough
 /// to stay responsive, long enough that the eye can follow the shift instead of
 /// the view jumping there in a single frame.
@@ -81,6 +87,14 @@ struct Settle {
     to_zoom: f32,
     to_pan: (f32, f32),
     start: Instant,
+}
+
+/// An in-progress scroll-bar drag: which bar holds it and the grab offset down the
+/// thumb at the press, so the thumb tracks the cursor from the point it was grabbed.
+#[derive(Clone, Copy)]
+struct ScrollDrag {
+    axis: Axis,
+    grab: f32,
 }
 
 /// Accent hue for a leaf box, keyed by its node kind. These are mid-saturation
@@ -190,6 +204,8 @@ struct GraphView {
     last_mouse: Point<Pixels>,
     /// Cursor position at the most recent left press, the click/drag origin.
     press: Point<Pixels>,
+    /// The scroll-bar drag in progress, or `None` when no thumb is held.
+    scroll_drag: Option<ScrollDrag>,
     /// Viewport bounds captured during canvas paint, so the scroll handler can
     /// map a window cursor to viewport space and bound the zoom to a fit.
     viewport: Rc<Cell<Bounds<Pixels>>>,
@@ -321,6 +337,7 @@ impl GraphView {
             moved: false,
             last_mouse: Point::default(),
             press: Point::default(),
+            scroll_drag: None,
             viewport: Rc::new(Cell::new(Bounds::default())),
             base,
             reduced_base,
@@ -827,12 +844,29 @@ impl GraphView {
                             paint_connector(&lane, *kind, *dim, z, window);
                         }
                     }
-                    // While a drag is in progress, pan through window-global
-                    // handlers so it keeps working when the cursor leaves the
-                    // window; a release anywhere ends the drag and, if it was a
-                    // click rather than a drag, toggles the group under it.
-                    if entity.read(cx).dragging {
+                    // Scroll bars along the edges of whichever axes overflow the
+                    // viewport, an alternative to drag-panning.
+                    let track = Hsla::from(bviz_ui_theme::mix(palette.border, palette.background, 0.5));
+                    let thumb = Hsla::from(bviz_ui_theme::mix(palette.label, palette.background, 0.45));
+                    for axis in [Axis::Vertical, Axis::Horizontal] {
+                        if let Some(bar) = scrollbar_geom(axis, bounds, content, z, p) {
+                            bar.paint(track, thumb, window);
+                        }
+                    }
+                    // While a pan or a scroll-bar drag is in progress, run it
+                    // through window-global handlers so it keeps working when the
+                    // cursor leaves the window. A pan release also toggles the group
+                    // under it when it was a click rather than a drag.
+                    let (dragging, scroll_dragging) = {
+                        let v = entity.read(cx);
+                        (v.dragging, v.scroll_drag.is_some())
+                    };
+                    if dragging {
                         track_drag(window, &entity, drag_pan, end_drag);
+                    } else if scroll_dragging {
+                        track_drag(window, &entity, scroll_drag_move, |view, _, cx| {
+                            end_scroll_drag(view, cx)
+                        });
                     }
                 })
                 .absolute()
@@ -898,11 +932,17 @@ impl Render for GraphView {
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(|this, e: &MouseDownEvent, _, cx| {
-                            // Start a drag. The window-global move handler that pans
-                            // it is installed from the canvas paint while `dragging`
-                            // is set (so it keeps working past the window edge), hence
-                            // the repaint request. The release is caught both there and
-                            // by the element handler below.
+                            // A press on a scroll-bar gutter drives the thumb instead
+                            // of panning the content under it.
+                            if let Some(axis) = scrollbar_hit(this, e.position) {
+                                start_scroll_drag(this, axis, e.position, cx);
+                                return;
+                            }
+                            // Start a pan drag. The window-global move handler that
+                            // pans it is installed from the canvas paint while
+                            // `dragging` is set (so it keeps working past the window
+                            // edge), hence the repaint request. The release is caught
+                            // both there and by the element handler below.
                             this.dragging = true;
                             this.moved = false;
                             this.press = e.position;
@@ -918,7 +958,10 @@ impl Render for GraphView {
                     // leaving every later move panning the view.
                     .on_mouse_up(
                         MouseButton::Left,
-                        cx.listener(|this, e: &MouseUpEvent, _, cx| end_drag(this, e, cx)),
+                        cx.listener(|this, e: &MouseUpEvent, _, cx| {
+                            end_drag(this, e, cx);
+                            end_scroll_drag(this, cx);
+                        }),
                     )
                     .on_mouse_move(cx.listener(|this, e: &MouseMoveEvent, _, cx| {
                         // A drag pans rather than hovers; leave the lit set alone.
@@ -1613,6 +1656,116 @@ fn end_drag(view: &mut GraphView, event: &MouseUpEvent, cx: &mut Context<GraphVi
     // highlight starts when the relayout lands.
     view.highlight_seq = view.highlight_seq.wrapping_add(1);
     view.retoggle(cx);
+}
+
+/// The scroll bar for `axis` given the view's current zoom, pan, and `viewport`
+/// (window px), or `None` when that axis fits and needs none. The bar's track,
+/// content, visible extent, and offset are the axis length in window px, so a
+/// press maps straight through in window coordinates.
+fn scrollbar_geom(
+    axis: Axis,
+    viewport: Bounds<Pixels>,
+    content: (f32, f32),
+    zoom: f32,
+    pan: (f32, f32),
+) -> Option<Scrollbar> {
+    let (vw, vh) = (f32::from(viewport.size.width), f32::from(viewport.size.height));
+    let (cw, ch) = (content.0 * zoom, content.1 * zoom);
+    let (vlen, clen, panc, other_overflows) = match axis {
+        Axis::Vertical => (vh, ch, pan.1, cw > vw),
+        Axis::Horizontal => (vw, cw, pan.0, ch > vh),
+    };
+    // Pan is the screen offset of the content's near edge: 0 at the start, down to
+    // `viewport - content` at the far edge, so the distance scrolled past the near
+    // edge is `-pan`, in `[0, content - viewport]`.
+    let offset = (-panc).clamp(0.0, (clen - vlen).max(0.0));
+    // Where the crossing axis overflows too, stop the track short of its bar so the
+    // two don't overlap in the corner.
+    let track_len = vlen - if other_overflows { SCROLLBAR_THICKNESS } else { 0.0 };
+    let thickness = px(SCROLLBAR_THICKNESS);
+    let track = match axis {
+        Axis::Vertical => Bounds::new(
+            point(viewport.right() - thickness, viewport.top()),
+            size(thickness, px(track_len)),
+        ),
+        Axis::Horizontal => Bounds::new(
+            point(viewport.left(), viewport.bottom() - thickness),
+            size(px(track_len), thickness),
+        ),
+    };
+    Scrollbar::new(axis, track, clen, vlen, offset, MIN_THUMB)
+}
+
+/// The scroll bar for `axis` built from the loaded graph's current view state.
+fn current_scrollbar(view: &GraphView, axis: Axis) -> Option<Scrollbar> {
+    let Source::Loaded(g) = &view.source else {
+        return None;
+    };
+    let content = (g.width as f32 + 2. * MARGIN as f32, g.height as f32 + 2. * MARGIN as f32);
+    scrollbar_geom(axis, view.viewport.get(), content, view.zoom.get(), view.pan.get())
+}
+
+/// The axis of the scroll bar whose track a press at `position` (window px) landed
+/// on, or `None` when the press is over the content.
+fn scrollbar_hit(view: &GraphView, position: Point<Pixels>) -> Option<Axis> {
+    [Axis::Vertical, Axis::Horizontal].into_iter().find(|&axis| {
+        current_scrollbar(view, axis).is_some_and(|bar| bar.track_hit(position))
+    })
+}
+
+/// Scroll `axis` so `offset` window px of content sit past the near edge, panning
+/// the content's near edge to `-offset`.
+fn scroll_to(view: &mut GraphView, axis: Axis, offset: f32, cx: &mut Context<GraphView>) {
+    let Source::Loaded(g) = &view.source else {
+        return;
+    };
+    let content = (g.width as f32 + 2. * MARGIN as f32, g.height as f32 + 2. * MARGIN as f32);
+    let zoom = view.zoom.get();
+    let vp = view.viewport.get().size;
+    let (px, py) = view.pan.get();
+    let pan = match axis {
+        Axis::Vertical => (px, -offset),
+        Axis::Horizontal => (-offset, py),
+    };
+    view.pan.set(clamp_pan(pan, zoom, vp, content));
+    // A manual scroll overrides any settle still easing.
+    view.anim.set(None);
+    cx.notify();
+}
+
+/// Begin a scroll-bar drag: record the grabbed thumb and the grab offset, then
+/// scroll to the press so a track click jumps the view at once.
+fn start_scroll_drag(
+    view: &mut GraphView,
+    axis: Axis,
+    position: Point<Pixels>,
+    cx: &mut Context<GraphView>,
+) {
+    let Some(bar) = current_scrollbar(view, axis) else {
+        return;
+    };
+    let grab = bar.grab(position);
+    view.scroll_drag = Some(ScrollDrag { axis, grab });
+    scroll_to(view, axis, bar.offset_at(position, grab), cx);
+}
+
+/// Track a held scroll thumb to the cursor.
+fn scroll_drag_move(view: &mut GraphView, event: &MouseMoveEvent, cx: &mut Context<GraphView>) {
+    let Some(drag) = view.scroll_drag else {
+        return;
+    };
+    let Some(bar) = current_scrollbar(view, drag.axis) else {
+        return;
+    };
+    scroll_to(view, drag.axis, bar.offset_at(event.position, drag.grab), cx);
+}
+
+/// End a scroll-bar drag. Called both from the element release handler and the
+/// window-global one, so it is a no-op when no drag is in progress.
+fn end_scroll_drag(view: &mut GraphView, cx: &mut Context<GraphView>) {
+    if view.scroll_drag.take().is_some() {
+        cx.notify();
+    }
 }
 
 /// The smallest-area box (in layout space) containing `(gx, gy)`, so an inner
