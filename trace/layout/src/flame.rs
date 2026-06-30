@@ -145,6 +145,9 @@ pub struct FlameNode {
 pub struct FlameGraph {
     text: String,
     nodes: Vec<FlameNode>,
+    /// Deepest node depth, found once at build so [`flame_height`] need not scan
+    /// every node on each paint.
+    max_depth: u32,
 }
 
 impl FlameGraph {
@@ -471,7 +474,12 @@ pub fn build_flame_graph(profile: &Profile, mode: GroupMode, scope: Scope) -> Fl
 
     let text = flamer.interner.into_text();
     let nodes = flatten(root, &text);
-    FlameGraph { text, nodes }
+    let max_depth = nodes.iter().map(|n| n.depth).max().unwrap_or(0);
+    FlameGraph {
+        text,
+        nodes,
+        max_depth,
+    }
 }
 
 /// Where an action-processing span lives: its lane (a thread index) and its index
@@ -697,8 +705,7 @@ pub fn flame_box_at(
 
 /// Total painted height: one row per depth level the graph reaches.
 pub fn flame_height(graph: &FlameGraph, metrics: &FlameMetrics) -> f32 {
-    let max = graph.nodes().iter().map(|n| n.depth).max().unwrap_or(0);
-    (max + 1) as f32 * metrics.row_height
+    (graph.max_depth + 1) as f32 * metrics.row_height
 }
 
 #[cfg(test)]
