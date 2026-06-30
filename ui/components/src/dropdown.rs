@@ -93,7 +93,7 @@ impl Render for Dropdown {
         // width as the selection changes (the options font is proportional).
         let metrics = bviz_ui_assets::text_metrics(window);
         let measure_color = window.text_style().color;
-        let mut option_width = px(0.);
+        let mut measured = px(0.);
         for option in &self.options {
             let width = bviz_ui_assets::shape_line(
                 window,
@@ -103,8 +103,12 @@ impl Render for Dropdown {
                 measure_color,
             )
             .width;
-            option_width = option_width.max(width);
+            measured = measured.max(width);
         }
+        // Round up and add slack so the chosen label sits on one line: at the exact
+        // measured width, sub-pixel rounding between measuring and laying out the
+        // glyph run can push the longest option onto a second line.
+        let option_width = px(f32::from(measured).ceil() + 6.);
 
         let trigger = div()
             .id(self.id.clone())
@@ -133,7 +137,9 @@ impl Render for Dropdown {
                 }
                 cx.notify();
             }))
-            .child(div().w(option_width).whitespace_nowrap().child(label))
+            // flex_none + nowrap so the flex row never shrinks the label below the
+            // widest option, which would wrap the text and overflow the trigger.
+            .child(div().w(option_width).flex_none().whitespace_nowrap().child(label))
             .child(
                 bviz_ui_assets::icon("caret-down")
                     .size(px(12.))
@@ -153,7 +159,7 @@ impl Render for Dropdown {
                     .on_click(
                         cx.listener(move |this, _: &ClickEvent, _, cx| this.choose(index, cx)),
                     )
-                    .child(option.clone())
+                    .child(div().whitespace_nowrap().child(option.clone()))
             });
             // Defer the menu so it paints over the content below the trigger; its
             // layout stays in place, anchored just under the trigger.
