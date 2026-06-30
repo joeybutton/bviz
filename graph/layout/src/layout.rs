@@ -85,9 +85,11 @@ pub enum PostCompaction {
 /// In the top-to-bottom layout the between-layers edge spacings act along the
 /// flow (vertically), spacing edges where they share an inter-layer channel,
 /// while `edge_node` is the in-layer edge-to-node clearance, which spaces edges
-/// across the flow (horizontally) from the nodes they run past. The generic
-/// `spacing.edgeEdge` has no effect on a layered layout in elk-rs, so there is no
-/// across-flow edge-to-edge spacing to expose.
+/// across the flow (horizontally) from the nodes they run past. There is no
+/// across-flow edge-to-edge field: `spacing.edgeEdge` is inert in elk-rs's
+/// layered placement (under every node-placement strategy), and the across-flow
+/// spacing between parallel edge lanes is governed by `spacing_node_node`, which
+/// spaces the long-edge dummies in a layer the same as it spaces the nodes.
 #[derive(Clone)]
 pub struct Tuning {
     pub spacing_node_node: f64,
