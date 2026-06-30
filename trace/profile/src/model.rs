@@ -1,18 +1,63 @@
-#[derive(Debug, Clone, PartialEq)]
-pub struct Profile {
-    pub metadata: Metadata,
-    pub threads: Vec<ThreadTrack>,
-    pub counters: Vec<CounterLane>,
-    pub phase_markers: Vec<PhaseMarker>,
-    pub span: TimeSpan,
+/// An interned-string handle: a byte slice into a [`Profile`]'s text pool.
+/// `Copy` and lifetime-free; resolve to `&str` with [`Profile::str`]. Equality
+/// is by `(off, len)` and so is only meaningful within a single profile.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct Str {
+    off: u32,
+    len: u32,
 }
 
-#[derive(Debug, Clone, PartialEq, Default)]
+/// A half-open `[off, off + len)` index range into one of a [`Profile`]'s flat
+/// pools. Which pool depends on the field that holds it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Span32 {
+    off: u32,
+    len: u32,
+}
+
+impl Span32 {
+    pub(crate) fn new(off: u32, len: u32) -> Span32 {
+        Span32 { off, len }
+    }
+
+    fn range(self) -> std::ops::Range<usize> {
+        self.off as usize..(self.off + self.len) as usize
+    }
+
+    pub fn len(self) -> usize {
+        self.len as usize
+    }
+
+    pub fn is_empty(self) -> bool {
+        self.len == 0
+    }
+}
+
+/// A parsed Bazel profile as flat, string-interned arenas. Every model type
+/// holds only `Copy` handles ([`Str`], [`Span32`]) and scalars, so all owned
+/// heap lives in the pools below — dropping a `Profile` frees a handful of large
+/// allocations rather than millions of tiny ones, and the type is `Send + Sync`
+/// with no lifetime parameters.
+#[derive(Debug, PartialEq)]
+pub struct Profile {
+    pub(crate) text: String,
+    pub(crate) slice_pool: Vec<Slice>,
+    pub(crate) args_pool: Vec<(Str, Str)>,
+    pub(crate) series_pool: Vec<CounterSeries>,
+    pub(crate) point_pool: Vec<CounterPoint>,
+    metadata: Metadata,
+    threads: Vec<ThreadTrack>,
+    counters: Vec<CounterLane>,
+    phase_markers: Vec<PhaseMarker>,
+    span: TimeSpan,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Metadata {
-    pub bazel_version: Option<String>,
-    pub build_id: Option<String>,
-    pub output_base: Option<String>,
-    pub date: Option<String>,
+    pub bazel_version: Option<Str>,
+    pub build_id: Option<Str>,
+    pub output_base: Option<Str>,
+    pub date: Option<Str>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -21,20 +66,21 @@ pub struct TimeSpan {
     pub end_us: i64,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ThreadTrack {
     pub tid: i64,
-    pub name: String,
+    pub name: Str,
     pub sort_index: i64,
-    pub slices: Vec<Slice>,
+    /// Range into the profile's slice pool; resolve with [`Profile::slices`].
+    pub slices: Span32,
     pub max_depth: u32,
     pub lane_class: LaneClass,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Slice {
-    pub name: String,
-    pub category: String,
+    pub name: Str,
+    pub category: Str,
     pub start_us: i64,
     pub dur_us: i64,
     pub depth: u32,
@@ -135,24 +181,29 @@ pub fn work_class(category: &str) -> WorkClass {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Default)]
+/// A slice's `args`. The three typed fields carry the Bazel keys callers query
+/// directly; `others` is a range into the profile's args pool of the remaining
+/// key/value pairs, resolved with [`Profile::slice_others`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct SliceArgs {
-    pub target: Option<String>,
-    pub mnemonic: Option<String>,
-    pub configuration: Option<String>,
-    pub others: Vec<(String, String)>,
+    pub target: Option<Str>,
+    pub mnemonic: Option<Str>,
+    pub configuration: Option<Str>,
+    pub others: Span32,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CounterLane {
-    pub name: String,
-    pub series: Vec<CounterSeries>,
+    pub name: Str,
+    /// Range into the profile's series pool; resolve with [`Profile::series`].
+    pub series: Span32,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct CounterSeries {
-    pub name: String,
-    pub points: Vec<CounterPoint>,
+    pub name: Str,
+    /// Range into the profile's point pool; resolve with [`Profile::points`].
+    pub points: Span32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -161,9 +212,9 @@ pub struct CounterPoint {
     pub value: f64,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PhaseMarker {
-    pub name: String,
+    pub name: Str,
     pub start_us: i64,
 }
 
@@ -241,6 +292,56 @@ pub fn lane_class(tid: i64, name: &str) -> LaneClass {
 }
 
 impl Profile {
+    pub fn metadata(&self) -> &Metadata {
+        &self.metadata
+    }
+
+    pub fn threads(&self) -> &[ThreadTrack] {
+        &self.threads
+    }
+
+    pub fn counters(&self) -> &[CounterLane] {
+        &self.counters
+    }
+
+    pub fn phase_markers(&self) -> &[PhaseMarker] {
+        &self.phase_markers
+    }
+
+    pub fn span(&self) -> TimeSpan {
+        self.span
+    }
+
+    /// Resolves an interned handle to its text.
+    pub fn str(&self, s: Str) -> &str {
+        &self.text[s.off as usize..(s.off + s.len) as usize]
+    }
+
+    /// Resolves an optional interned handle to its text, if present.
+    pub fn opt_str(&self, s: Option<Str>) -> Option<&str> {
+        s.map(|s| self.str(s))
+    }
+
+    /// The slices of a thread track, in start order.
+    pub fn slices(&self, track: &ThreadTrack) -> &[Slice] {
+        &self.slice_pool[track.slices.range()]
+    }
+
+    /// The extra (non-typed) args of a slice, as interned key/value pairs.
+    pub fn slice_others(&self, slice: &Slice) -> &[(Str, Str)] {
+        &self.args_pool[slice.args.others.range()]
+    }
+
+    /// The series of a counter lane.
+    pub fn series(&self, lane: &CounterLane) -> &[CounterSeries] {
+        &self.series_pool[lane.series.range()]
+    }
+
+    /// The points of a counter series.
+    pub fn points(&self, series: &CounterSeries) -> &[CounterPoint] {
+        &self.point_pool[series.points.range()]
+    }
+
     /// Whether the profile has a critical-path lane; the UI disables the
     /// critical-path view when absent (e.g. `--noexperimental_collect_*`).
     pub fn has_critical_path(&self) -> bool {
@@ -248,27 +349,117 @@ impl Profile {
             .iter()
             .any(|t| t.lane_class == LaneClass::CriticalPath)
     }
+
+    /// Phase markers as half-open `[start, end)` intervals: each runs to the next
+    /// marker's start, the last to `span.end_us`. Mirrors Bazel's `JsonProfile`
+    /// phase-summary reconstruction from consecutive markers. Each name is an
+    /// interned handle; resolve with [`Profile::str`].
+    pub fn phase_intervals(&self) -> Vec<(Str, i64, i64)> {
+        let mut markers = self.phase_markers.clone();
+        markers.sort_by_key(|m| m.start_us);
+        let mut intervals = Vec::with_capacity(markers.len());
+        for (i, marker) in markers.iter().enumerate() {
+            let end = markers
+                .get(i + 1)
+                .map_or(self.span.end_us, |next| next.start_us);
+            intervals.push((marker.name, marker.start_us, end));
+        }
+        intervals
+    }
 }
 
-/// Converts phase markers into half-open `[start, end)` intervals: each runs to
-/// the next marker's start, the last to `profile.span.end_us`. Mirrors Bazel's
-/// `JsonProfile` phase-summary reconstruction from consecutive markers.
-pub fn phase_intervals(profile: &Profile) -> Vec<(String, i64, i64)> {
-    let mut markers = profile.phase_markers.clone();
-    markers.sort_by_key(|m| m.start_us);
-    let mut intervals = Vec::with_capacity(markers.len());
-    for (i, marker) in markers.iter().enumerate() {
-        let end = markers
-            .get(i + 1)
-            .map_or(profile.span.end_us, |next| next.start_us);
-        intervals.push((marker.name.clone(), marker.start_us, end));
+impl Profile {
+    /// Assembles a profile from filled pools and resolved top-level vectors. The
+    /// flat-pool fields are crate-internal; the parser builds them.
+    pub(crate) fn from_parts(parts: ProfileParts) -> Profile {
+        let ProfileParts {
+            text,
+            slice_pool,
+            args_pool,
+            series_pool,
+            point_pool,
+            metadata,
+            threads,
+            counters,
+            phase_markers,
+            span,
+        } = parts;
+        Profile {
+            text,
+            slice_pool,
+            args_pool,
+            series_pool,
+            point_pool,
+            metadata,
+            threads,
+            counters,
+            phase_markers,
+            span,
+        }
     }
-    intervals
+}
+
+/// The owned components the parser fills before sealing them into a [`Profile`].
+pub(crate) struct ProfileParts {
+    pub text: String,
+    pub slice_pool: Vec<Slice>,
+    pub args_pool: Vec<(Str, Str)>,
+    pub series_pool: Vec<CounterSeries>,
+    pub point_pool: Vec<CounterPoint>,
+    pub metadata: Metadata,
+    pub threads: Vec<ThreadTrack>,
+    pub counters: Vec<CounterLane>,
+    pub phase_markers: Vec<PhaseMarker>,
+    pub span: TimeSpan,
+}
+
+/// Deduplicating string interner: owns the growing text pool and an auxiliary
+/// map from content to handle so a repeated string returns the existing [`Str`]
+/// instead of appending a copy. Bazel traces repeat names (mnemonics, target
+/// labels, categories) heavily, so dedup is a large memory win. The map is a
+/// parse-time temporary; only the [`String`] pool survives into the profile.
+pub(crate) struct Interner {
+    text: String,
+    seen: std::collections::HashMap<Box<str>, Str>,
+}
+
+impl Interner {
+    pub fn new() -> Interner {
+        Interner {
+            text: String::new(),
+            seen: std::collections::HashMap::new(),
+        }
+    }
+
+    pub fn intern(&mut self, s: &str) -> Str {
+        if let Some(&handle) = self.seen.get(s) {
+            return handle;
+        }
+        let off = self.text.len() as u32;
+        self.text.push_str(s);
+        let handle = Str {
+            off,
+            len: s.len() as u32,
+        };
+        self.seen.insert(s.into(), handle);
+        handle
+    }
+
+    pub fn intern_opt(&mut self, s: Option<&str>) -> Option<Str> {
+        s.map(|s| self.intern(s))
+    }
+
+    /// Consumes the interner, yielding the retained text pool and dropping the
+    /// auxiliary map.
+    pub fn into_text(self) -> String {
+        self.text
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::parse::build_for_test;
 
     #[test]
     fn work_class_covers_each_class_and_defaults_to_meta() {
@@ -305,30 +496,38 @@ mod tests {
         assert_eq!(lane_class(99, "collect-local-resources"), LaneClass::Other);
     }
 
+    /// Builds a profile from phase markers and a span end via the parser's flat
+    /// pools, so tests inspect the real public model rather than a hand-rolled one.
     fn profile_with(markers: Vec<(&str, i64)>, span_end: i64) -> Profile {
-        Profile {
-            metadata: Metadata::default(),
-            threads: Vec::new(),
-            counters: Vec::new(),
-            phase_markers: markers
-                .into_iter()
-                .map(|(name, start_us)| PhaseMarker {
-                    name: name.to_owned(),
-                    start_us,
-                })
-                .collect(),
-            span: TimeSpan {
+        let mut interner = Interner::new();
+        let phase_markers = markers
+            .into_iter()
+            .map(|(name, start_us)| PhaseMarker {
+                name: interner.intern(name),
+                start_us,
+            })
+            .collect();
+        build_for_test(
+            interner,
+            phase_markers,
+            TimeSpan {
                 start_us: 0,
                 end_us: span_end,
             },
-        }
+            Vec::new(),
+        )
     }
 
     #[test]
     fn phase_intervals_abut_and_last_runs_to_span_end() {
         let p = profile_with(vec![("Loading", 30), ("Launch", 0), ("Execute", 100)], 250);
+        let resolved: Vec<_> = p
+            .phase_intervals()
+            .into_iter()
+            .map(|(name, start, end)| (p.str(name).to_owned(), start, end))
+            .collect();
         assert_eq!(
-            phase_intervals(&p),
+            resolved,
             vec![
                 ("Launch".to_owned(), 0, 30),
                 ("Loading".to_owned(), 30, 100),
@@ -339,27 +538,43 @@ mod tests {
 
     #[test]
     fn phase_intervals_handles_empty_and_single() {
-        assert!(phase_intervals(&profile_with(vec![], 250)).is_empty());
-        assert_eq!(
-            phase_intervals(&profile_with(vec![("only", 10)], 250)),
-            vec![("only".to_owned(), 10, 250)],
-        );
+        assert!(profile_with(vec![], 250).phase_intervals().is_empty());
+        let p = profile_with(vec![("only", 10)], 250);
+        let resolved: Vec<_> = p
+            .phase_intervals()
+            .into_iter()
+            .map(|(name, start, end)| (p.str(name).to_owned(), start, end))
+            .collect();
+        assert_eq!(resolved, vec![("only".to_owned(), 10, 250)]);
     }
 
     #[test]
     fn has_critical_path_reflects_lane_presence() {
         let track = |tid, lane_class| ThreadTrack {
             tid,
-            name: String::new(),
+            name: Str::default(),
             sort_index: 0,
-            slices: Vec::new(),
+            slices: Span32::default(),
             max_depth: 0,
             lane_class,
         };
-        let mut p = profile_with(vec![], 0);
-        p.threads.push(track(5, LaneClass::Execution));
-        assert!(!p.has_critical_path());
-        p.threads.push(track(0, LaneClass::CriticalPath));
-        assert!(p.has_critical_path());
+        let p = profile_with(vec![], 0);
+        assert!(!build_for_test(
+            Interner::new(),
+            Vec::new(),
+            p.span(),
+            vec![track(5, LaneClass::Execution)],
+        )
+        .has_critical_path());
+        assert!(build_for_test(
+            Interner::new(),
+            Vec::new(),
+            p.span(),
+            vec![
+                track(5, LaneClass::Execution),
+                track(0, LaneClass::CriticalPath),
+            ],
+        )
+        .has_critical_path());
     }
 }

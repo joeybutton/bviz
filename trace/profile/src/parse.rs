@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::io::Read;
 use std::path::Path;
@@ -9,8 +9,8 @@ use serde::{Deserialize, Deserializer};
 use serde_json::{Map, Value};
 
 use crate::model::{
-    lane_class, work_class, CounterLane, CounterPoint, CounterSeries, Metadata, PhaseMarker,
-    Profile, Slice, SliceArgs, ThreadTrack, TimeSpan,
+    lane_class, work_class, CounterLane, CounterPoint, CounterSeries, Interner, Metadata,
+    PhaseMarker, Profile, ProfileParts, Slice, SliceArgs, Span32, Str, ThreadTrack, TimeSpan,
 };
 
 const GZIP_MAGIC: [u8; 2] = [0x1f, 0x8b];
@@ -378,14 +378,31 @@ fn recover_other_data(prefix: &str) -> Option<Map<String, Value>> {
     None
 }
 
+/// A counter lane during build: owned series with owned point lists, before
+/// flattening into the profile's series/point pools.
+struct RawLane {
+    name: Str,
+    series: Vec<RawSeries>,
+}
+
+struct RawSeries {
+    name: Str,
+    points: Vec<CounterPoint>,
+}
+
 fn build(other_data: Option<Map<String, Value>>, events: Vec<RawEvent>) -> Profile {
-    let metadata = build_metadata(other_data.as_ref());
+    let mut interner = Interner::new();
+    let mut args_pool: Vec<(Str, Str)> = Vec::new();
+
+    let metadata = build_metadata(&mut interner, other_data.as_ref());
 
     let mut thread_meta: BTreeMap<i64, (Option<String>, i64)> = BTreeMap::new();
+    // Slices accumulate per thread (depth assignment sorts each list) before
+    // being concatenated into the flat slice pool.
     let mut slices: BTreeMap<i64, Vec<Slice>> = BTreeMap::new();
     let mut phase_markers: Vec<PhaseMarker> = Vec::new();
-    let mut counter_order: Vec<String> = Vec::new();
-    let mut counters: BTreeMap<String, CounterLane> = BTreeMap::new();
+    let mut counter_order: Vec<Str> = Vec::new();
+    let mut counters: HashMap<Str, RawLane> = HashMap::new();
 
     for ev in events {
         let ph = ev.ph.as_deref().unwrap_or("");
@@ -395,35 +412,41 @@ fn build(other_data: Option<Map<String, Value>>, events: Vec<RawEvent>) -> Profi
                 let ts = round_us(ev.ts);
                 if ev.cat.as_deref() == Some(PHASE_MARKER_CATEGORY) {
                     phase_markers.push(PhaseMarker {
-                        name: ev.name.unwrap_or_default(),
+                        name: interner.intern(ev.name.as_deref().unwrap_or("")),
                         start_us: ts,
                     });
                 } else {
                     let tid = ev.tid.unwrap_or(0);
-                    let category = ev.cat.unwrap_or_default();
-                    let work_class = work_class(&category);
+                    let category = ev.cat.as_deref().unwrap_or("");
+                    let work_class = work_class(category);
+                    let args = build_slice_args(&mut interner, &mut args_pool, ev.args);
                     slices.entry(tid).or_default().push(Slice {
-                        name: ev.name.unwrap_or_default(),
-                        category,
+                        name: interner.intern(ev.name.as_deref().unwrap_or("")),
+                        category: interner.intern(category),
                         start_us: ts,
                         dur_us: round_us(ev.dur),
                         depth: 0,
-                        args: build_slice_args(ev.args),
+                        args,
                         work_class,
                     });
                 }
             }
-            "C" => apply_counter_event(&ev, &mut counter_order, &mut counters),
+            "C" => apply_counter_event(&mut interner, &ev, &mut counter_order, &mut counters),
             _ => {}
         }
     }
 
     let span = compute_span(&slices, &counters, &phase_markers);
 
+    // Flatten per-thread slice lists into one pool, recording each thread's range.
+    let mut slice_pool: Vec<Slice> = Vec::new();
     let mut threads: Vec<ThreadTrack> = slices
         .into_iter()
         .map(|(tid, mut tslices)| {
             let max_depth = assign_depths(&mut tslices);
+            let off = slice_pool.len() as u32;
+            let len = tslices.len() as u32;
+            slice_pool.extend(tslices);
             let (name, sort_index) = match thread_meta.get(&tid) {
                 Some((Some(n), s)) => (n.clone(), *s),
                 Some((None, s)) => (format!("thread {tid}"), *s),
@@ -432,9 +455,9 @@ fn build(other_data: Option<Map<String, Value>>, events: Vec<RawEvent>) -> Profi
             let lane_class = lane_class(tid, &name);
             ThreadTrack {
                 tid,
-                name,
+                name: interner.intern(&name),
                 sort_index,
-                slices: tslices,
+                slices: Span32::new(off, len),
                 max_depth,
                 lane_class,
             }
@@ -444,26 +467,49 @@ fn build(other_data: Option<Map<String, Value>>, events: Vec<RawEvent>) -> Profi
 
     phase_markers.sort_by_key(|m| m.start_us);
 
-    let counters = counter_order
+    // Flatten counters in first-seen order into series and point pools.
+    let mut series_pool: Vec<CounterSeries> = Vec::new();
+    let mut point_pool: Vec<CounterPoint> = Vec::new();
+    let counters: Vec<CounterLane> = counter_order
         .into_iter()
         .filter_map(|n| counters.remove(&n))
+        .map(|lane| {
+            let series_off = series_pool.len() as u32;
+            for s in lane.series {
+                let points_off = point_pool.len() as u32;
+                let points_len = s.points.len() as u32;
+                point_pool.extend(s.points);
+                series_pool.push(CounterSeries {
+                    name: s.name,
+                    points: Span32::new(points_off, points_len),
+                });
+            }
+            let series_len = series_pool.len() as u32 - series_off;
+            CounterLane {
+                name: lane.name,
+                series: Span32::new(series_off, series_len),
+            }
+        })
         .collect();
 
-    Profile {
+    Profile::from_parts(ProfileParts {
+        text: interner.into_text(),
+        slice_pool,
+        args_pool,
+        series_pool,
+        point_pool,
         metadata,
         threads,
         counters,
         phase_markers,
         span,
-    }
+    })
 }
 
-fn build_metadata(other: Option<&Map<String, Value>>) -> Metadata {
-    let get = |k: &str| {
-        other
-            .and_then(|m| m.get(k))
-            .and_then(Value::as_str)
-            .map(str::to_owned)
+fn build_metadata(interner: &mut Interner, other: Option<&Map<String, Value>>) -> Metadata {
+    let mut get = |k: &str| {
+        let v = other.and_then(|m| m.get(k)).and_then(Value::as_str);
+        interner.intern_opt(v)
     };
     Metadata {
         bazel_version: get("bazel_version"),
@@ -492,50 +538,61 @@ fn apply_metadata_event(ev: &RawEvent, thread_meta: &mut BTreeMap<i64, (Option<S
     }
 }
 
-fn build_slice_args(args: Option<RawArgs>) -> SliceArgs {
+fn build_slice_args(
+    interner: &mut Interner,
+    args_pool: &mut Vec<(Str, Str)>,
+    args: Option<RawArgs>,
+) -> SliceArgs {
     let mut out = SliceArgs::default();
     let Some(args) = args else {
         return out;
     };
+    let others_off = args_pool.len() as u32;
     for (k, v) in args.entries {
         // The typed fields are strings; a non-string value under one of those
         // keys is dropped, everything else is kept for display.
         match k.as_str() {
             "target" => {
                 if let ArgVal::Str(s) = v {
-                    out.target = Some(s);
+                    out.target = Some(interner.intern(&s));
                 }
             }
             "mnemonic" => {
                 if let ArgVal::Str(s) = v {
-                    out.mnemonic = Some(s);
+                    out.mnemonic = Some(interner.intern(&s));
                 }
             }
             "configuration" => {
                 if let ArgVal::Str(s) = v {
-                    out.configuration = Some(s);
+                    out.configuration = Some(interner.intern(&s));
                 }
             }
-            _ => out.others.push((k, v.into_display())),
+            _ => {
+                let key = interner.intern(&k);
+                let val = interner.intern(&v.into_display());
+                args_pool.push((key, val));
+            }
         }
     }
+    out.others = Span32::new(others_off, args_pool.len() as u32 - others_off);
     out
 }
 
 fn apply_counter_event(
+    interner: &mut Interner,
     ev: &RawEvent,
-    order: &mut Vec<String>,
-    counters: &mut BTreeMap<String, CounterLane>,
+    order: &mut Vec<Str>,
+    counters: &mut HashMap<Str, RawLane>,
 ) {
-    let lane_name = ev.name.clone().unwrap_or_default();
+    let lane_name = interner.intern(ev.name.as_deref().unwrap_or(""));
     let ts = round_us(ev.ts);
     let Some(args) = ev.args.as_ref() else {
         return;
     };
-    let lane = counters.entry(lane_name.clone()).or_insert_with(|| {
-        order.push(lane_name.clone());
-        CounterLane {
-            name: lane_name.clone(),
+    let lane = counters.entry(lane_name).or_insert_with(|| {
+        order.push(lane_name);
+        RawLane {
+            name: lane_name,
             series: Vec::new(),
         }
     });
@@ -543,11 +600,12 @@ fn apply_counter_event(
         let Some(value) = value.as_f64() else {
             continue;
         };
-        let series = match lane.series.iter_mut().find(|s| &s.name == key) {
+        let key = interner.intern(key);
+        let series = match lane.series.iter_mut().find(|s| s.name == key) {
             Some(s) => s,
             None => {
-                lane.series.push(CounterSeries {
-                    name: key.clone(),
+                lane.series.push(RawSeries {
+                    name: key,
                     points: Vec::new(),
                 });
                 lane.series.last_mut().unwrap()
@@ -582,7 +640,7 @@ fn assign_depths(slices: &mut [Slice]) -> u32 {
 
 fn compute_span(
     slices: &BTreeMap<i64, Vec<Slice>>,
-    counters: &BTreeMap<String, CounterLane>,
+    counters: &HashMap<Str, RawLane>,
     markers: &[PhaseMarker],
 ) -> TimeSpan {
     let mut start: Option<i64> = None;
@@ -612,6 +670,29 @@ fn compute_span(
     }
 }
 
+/// Seals an interner and the given top-level vectors into a profile with empty
+/// slice/counter pools, for model tests that need only phase markers and threads.
+#[cfg(test)]
+pub(crate) fn build_for_test(
+    interner: Interner,
+    phase_markers: Vec<PhaseMarker>,
+    span: TimeSpan,
+    threads: Vec<ThreadTrack>,
+) -> Profile {
+    Profile::from_parts(ProfileParts {
+        text: interner.into_text(),
+        slice_pool: Vec::new(),
+        args_pool: Vec::new(),
+        series_pool: Vec::new(),
+        point_pool: Vec::new(),
+        metadata: Metadata::default(),
+        threads,
+        counters: Vec::new(),
+        phase_markers,
+        span,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -635,11 +716,11 @@ mod tests {
             ]
         }"#;
         let p = parse(json);
-        assert_eq!(p.metadata.bazel_version.as_deref(), Some("7.0.0"));
-        assert_eq!(p.metadata.build_id.as_deref(), Some("abc"));
-        assert_eq!(p.metadata.output_base.as_deref(), Some("/ob"));
-        assert_eq!(p.metadata.date.as_deref(), Some("today"));
-        let names: Vec<_> = p.threads.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(p.opt_str(p.metadata().bazel_version), Some("7.0.0"));
+        assert_eq!(p.opt_str(p.metadata().build_id), Some("abc"));
+        assert_eq!(p.opt_str(p.metadata().output_base), Some("/ob"));
+        assert_eq!(p.opt_str(p.metadata().date), Some("today"));
+        let names: Vec<_> = p.threads().iter().map(|t| p.str(t.name)).collect();
         assert_eq!(names, vec!["Lane A", "Lane B"]);
     }
 
@@ -654,8 +735,9 @@ mod tests {
             ]
         }"#;
         let p = parse(json);
-        let t = &p.threads[0];
-        let depth = |name: &str| t.slices.iter().find(|s| s.name == name).unwrap().depth;
+        let t = &p.threads()[0];
+        let depth =
+            |name: &str| p.slices(t).iter().find(|s| p.str(s.name) == name).unwrap().depth;
         assert_eq!(depth("parent"), 0);
         assert_eq!(depth("child1"), 1);
         assert_eq!(depth("child2"), 1);
@@ -673,13 +755,13 @@ mod tests {
             ]
         }"#;
         let p = parse(json);
-        let marker_names: Vec<_> = p.phase_markers.iter().map(|m| m.name.as_str()).collect();
+        let marker_names: Vec<_> = p.phase_markers().iter().map(|m| p.str(m.name)).collect();
         assert_eq!(marker_names, vec!["Launch Blaze", "Loading"]);
-        assert_eq!(p.phase_markers[0].start_us, -2463000);
-        let slice_names: Vec<_> = p.threads[0]
-            .slices
+        assert_eq!(p.phase_markers()[0].start_us, -2463000);
+        let slice_names: Vec<_> = p
+            .slices(&p.threads()[0])
             .iter()
-            .map(|s| s.name.as_str())
+            .map(|s| p.str(s.name))
             .collect();
         assert_eq!(slice_names, vec!["real"]);
     }
@@ -693,10 +775,10 @@ mod tests {
             ]
         }"#;
         let p = parse(json);
-        let crit = p.threads.iter().find(|t| t.tid == 0).expect("tid 0 lane");
-        assert_eq!(crit.name, "Critical Path");
-        assert_eq!(crit.slices.len(), 1);
-        assert!(!p.threads.iter().any(|t| t.tid == 7));
+        let crit = p.threads().iter().find(|t| t.tid == 0).expect("tid 0 lane");
+        assert_eq!(p.str(crit.name), "Critical Path");
+        assert_eq!(p.slices(crit).len(), 1);
+        assert!(!p.threads().iter().any(|t| t.tid == 7));
     }
 
     #[test]
@@ -708,15 +790,17 @@ mod tests {
             ]
         }"#;
         let p = parse(json);
-        assert_eq!(p.counters.len(), 1);
-        let lane = &p.counters[0];
-        assert_eq!(lane.name, "Usage");
-        let cpu = lane.series.iter().find(|s| s.name == "cpu").unwrap();
-        assert_eq!(cpu.points.len(), 2);
-        let mem = lane.series.iter().find(|s| s.name == "mem").unwrap();
-        assert_eq!(mem.points.len(), 1);
-        assert_eq!(mem.points[0].ts_us, 10);
-        assert_eq!(mem.points[0].value, 5.0);
+        assert_eq!(p.counters().len(), 1);
+        let lane = &p.counters()[0];
+        assert_eq!(p.str(lane.name), "Usage");
+        let series = p.series(lane);
+        let cpu = series.iter().find(|s| p.str(s.name) == "cpu").unwrap();
+        assert_eq!(p.points(cpu).len(), 2);
+        let mem = series.iter().find(|s| p.str(s.name) == "mem").unwrap();
+        let mem_points = p.points(mem);
+        assert_eq!(mem_points.len(), 1);
+        assert_eq!(mem_points[0].ts_us, 10);
+        assert_eq!(mem_points[0].value, 5.0);
     }
 
     #[test]
@@ -729,8 +813,8 @@ mod tests {
             ]
         }"#;
         let p = parse(json);
-        assert_eq!(p.span.start_us, -2463000);
-        assert_eq!(p.span.end_us, 2000);
+        assert_eq!(p.span().start_us, -2463000);
+        assert_eq!(p.span().end_us, 2000);
     }
 
     #[test]
@@ -760,11 +844,11 @@ mod tests {
                 {"cat":"c","name":"b","ph":"X","ts":2,"dur":1,"pid":1,"tid":1},
                 {"cat":"c","name":"trunca"#;
         let p = Profile::from_bytes(json.as_bytes()).expect("recover");
-        assert_eq!(p.metadata.bazel_version.as_deref(), Some("7.0.0"));
-        let names: Vec<_> = p.threads[0]
-            .slices
+        assert_eq!(p.opt_str(p.metadata().bazel_version), Some("7.0.0"));
+        let names: Vec<_> = p
+            .slices(&p.threads()[0])
             .iter()
-            .map(|s| s.name.as_str())
+            .map(|s| p.str(s.name))
             .collect();
         assert_eq!(names, vec!["a", "b"]);
     }
