@@ -105,14 +105,14 @@ pub struct Tuning {
 impl Default for Tuning {
     fn default() -> Self {
         Self {
-            spacing_node_node: 24.0,
-            node_node_between_layers: 50.0,
-            edge_edge_between_layers: 10.0,
-            edge_node_between_layers: 10.0,
-            edge_node: 10.0,
+            spacing_node_node: 10.0,
+            node_node_between_layers: 10.0,
+            edge_edge_between_layers: 2.0,
+            edge_node_between_layers: 2.0,
+            edge_node: 2.0,
             edge_routing: EdgeRouting::Orthogonal,
-            node_placement: NodePlacement::BrandesKoepf,
-            post_compaction: PostCompaction::None,
+            node_placement: NodePlacement::NetworkSimplex,
+            post_compaction: PostCompaction::EdgeLength,
         }
     }
 }
