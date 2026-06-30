@@ -108,7 +108,7 @@ impl Default for Tuning {
             spacing_node_node: 10.0,
             node_node_between_layers: 10.0,
             edge_edge_between_layers: 2.0,
-            edge_node_between_layers: 2.0,
+            edge_node_between_layers: 10.0,
             edge_node: 2.0,
             edge_routing: EdgeRouting::Orthogonal,
             node_placement: NodePlacement::NetworkSimplex,
