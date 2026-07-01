@@ -792,24 +792,25 @@ fn build(other_data: Option<Map<String, Value>>, events: Vec<RawEvent>) -> Profi
 /// overhead outweighs the gain, so [`parse_parallel`] declines and the serial
 /// path runs.
 const MIN_PARALLEL_BYTES: usize = 8 << 20;
-/// Upper bound on parse worker threads. Parsing is memory-bandwidth bound, so
-/// beyond a handful of threads wall time flattens while total CPU keeps climbing
-/// (extra threads mostly stall on memory) — measured on a 16-hardware-thread
-/// host, 8→16 threads bought ~4% wall for ~50% more CPU. Cap where the wall gain
-/// has flattened to spend cores, not waste them.
-const MAX_PARALLEL_CHUNKS: usize = 8;
 
 /// Parses the `traceEvents` array across several threads when the profile is
 /// large enough to repay it, returning `None` so the caller runs the serial
 /// [`parse_streaming`] for a small input, a single core, or any input whose
 /// shape the chunker can't navigate (no array, no usable split points, a chunk
 /// that fails to parse).
+///
+/// Worker count is the machine's physical core count rather than its logical
+/// (SMT) thread count: parsing is memory-bandwidth bound, so threads past the
+/// cores that own the memory channels mostly stall on bandwidth, burning CPU for
+/// a wall-time gain that has flattened. It is further clamped to the parallelism
+/// the process is actually granted, so a CPU quota or affinity mask is honored.
 fn parse_parallel(text: &str) -> Option<Profile> {
-    let cores = std::thread::available_parallelism().map_or(1, |n| n.get());
-    if cores < 2 {
+    let granted = std::thread::available_parallelism().map_or(1, |n| n.get());
+    if granted < 2 {
         return None;
     }
-    parse_chunks(text, cores.min(MAX_PARALLEL_CHUNKS), MIN_PARALLEL_BYTES)
+    let workers = num_cpus::get_physical().min(granted);
+    parse_chunks(text, workers, MIN_PARALLEL_BYTES)
 }
 
 /// Splits the `traceEvents` array into up to `n` byte chunks at newline
