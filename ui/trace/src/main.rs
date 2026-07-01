@@ -70,9 +70,8 @@ const EDGE_MARGIN_PX: f32 = 24.0;
 /// Pixels scrolled per wheel line.
 const LINE_SCROLL_PX: f32 = 24.0;
 
-/// Corner radius and border width of a painted slice quad.
+/// Corner radius of a painted slice quad.
 const SLICE_RADIUS: f32 = 2.0;
-const SLICE_BORDER: f32 = 0.5;
 
 /// Initial width of the left label gutter, holding lane and counter names clear
 /// of the time content so phase-marker lines never cross them; resizable by its
@@ -2702,12 +2701,14 @@ fn paint_labeled_box(
     window: &mut Window,
     cx: &mut App,
 ) {
+    // No border: a box carries only its fill, so a marker shrunk to a pixel
+    // still reads as its color rather than collapsing to an edge line.
     window.paint_quad(quad(
         rect,
         px(SLICE_RADIUS),
         fill,
-        px(SLICE_BORDER),
-        Hsla::from(palette.border),
+        px(0.),
+        fill,
         BorderStyle::Solid,
     ));
     let w = f32::from(rect.size.width);
