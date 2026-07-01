@@ -136,7 +136,7 @@ mod tests {
     }
 
     #[test]
-    fn culls_off_time_and_subpixel_slices() {
+    fn culls_off_time_and_widens_subpixel_slices() {
         // Four disjoint top-level slices: one on-screen, one on-screen, one
         // zero-width, one far off-time. All sit at depth 0 (no nesting).
         let p = profile(vec![track(
@@ -160,10 +160,52 @@ mod tests {
             scroll_y: 0.0,
         };
         let vis = visible_slices(&p, &layout, &view, &viewport, &METRICS, 0.5);
-        let xs: Vec<f32> = vis.iter().map(|v| v.x).collect();
-        assert_eq!(xs, vec![0.0, 200.0]);
-        assert_eq!(vis[0].w, 100.0);
+        let placed: Vec<(f32, f32)> = vis.iter().map(|v| (v.x, v.w)).collect();
+        // "d" is off-time and dropped; the zero-width "c" survives as a
+        // min-width marker in its own pixel column past "b".
+        assert_eq!(placed, vec![(0.0, 100.0), (200.0, 50.0), (250.0, 0.5)]);
         assert_eq!(vis[0].y, METRICS.header_height);
+    }
+
+    #[test]
+    fn subpixel_slices_coalesce_into_one_marker_per_column() {
+        // At 0.1px/us, ten microseconds share a pixel column. An outer span
+        // holds three zero-width children: two land in the same column, one a
+        // column over. Coalescing keeps one marker per column, and the wide
+        // outer span covering those columns at depth 0 does not suppress the
+        // depth-1 markers.
+        let p = profile(vec![track(
+            1,
+            LaneClass::Execution,
+            vec![
+                slice("outer", "general information", 100, 200),
+                slice("a", "general information", 110, 0),
+                slice("b", "general information", 112, 0),
+                slice("c", "general information", 130, 0),
+            ],
+        )]);
+        let layout = lay_out_lanes(&p, &METRICS);
+        let view = TimeView {
+            start_us: 0.0,
+            px_per_us: 0.1,
+        };
+        let viewport = Viewport {
+            width: 300.0,
+            height: 100.0,
+            scroll_y: 0.0,
+        };
+        let vis = visible_slices(&p, &layout, &view, &viewport, &METRICS, 1.0);
+        let placed: Vec<(f32, f32, f32)> = vis.iter().map(|v| (v.x, v.w, v.y)).collect();
+        let row0 = METRICS.header_height;
+        let row1 = METRICS.header_height + METRICS.row_height;
+        assert_eq!(
+            placed,
+            vec![
+                (10.0, 20.0, row0), // depth-0 "outer" spans columns 10..30
+                (11.0, 1.0, row1),  // depth-1: "a"; "b" coalesces into its column
+                (13.0, 1.0, row1),  // depth-1: "c" opens a fresh column
+            ]
+        );
     }
 
     #[test]
