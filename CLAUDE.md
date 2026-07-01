@@ -42,7 +42,15 @@ Interactive visualization and inspection tool for Bazel builds.
   change in absolute terms, not against transient state — not what another branch
   has, nor what the tree "already"/"now"/"yet" contains or was "missing" before;
   such claims hold only at the instant of writing and rot as the repo and other
-  branches move on. Name any
+  branches move on. Just as corrosive is grounding a claim in a specific external
+  input the reader has no access to, or in one run's raw figures — "the ~1.4GB
+  profile", "the 8M-event trace", "takes 4s here" name a data artifact and a
+  machine that live outside the repo and mean nothing to a later reader. Describe
+  the input by its general character ("a large profile") and prefer a relative or
+  qualitative result ("about half the time", "roughly 2x faster", "a noticeable
+  share of load") or a property that holds regardless of the sample; if a concrete
+  number genuinely earns its place, state the reproducible conditions behind it
+  rather than pinning it to a one-off measurement. Name any
   external reference in full — its title or identifier (a paper's name and arXiv
   id, a ticket number) — never a bare "the paper"/"the reference"/"the spec"
   that assumes shared context. References must also be portable: never hard-code a
