@@ -3131,6 +3131,52 @@ fn counter_color(series: &str) -> Hsla {
     )
 }
 
+/// The y of the segment `(x0, y0)`–`(x1, y1)` at `x`; `x0` must differ from `x1`.
+fn lerp_y(x0: f32, y0: f32, x1: f32, y1: f32, x: f32) -> f32 {
+    y0 + (y1 - y0) * (x - x0) / (x1 - x0)
+}
+
+/// Clips a polyline whose x is non-decreasing to the vertical strip `[lo, hi]`,
+/// interpolating y where a segment crosses an edge so the on-screen shape is
+/// exact. At high zoom a series' off-screen vertices otherwise carry pixel x far
+/// outside the window, where the renderer loses precision and the filled area
+/// bleeds past its content mask.
+fn clip_polyline_x(verts: &[(f32, f32)], lo: f32, hi: f32) -> Vec<(f32, f32)> {
+    let mut out: Vec<(f32, f32)> = Vec::new();
+    let mut push = |p: (f32, f32)| {
+        if out.last() != Some(&p) {
+            out.push(p);
+        }
+    };
+    for seg in verts.windows(2) {
+        let (x0, y0) = seg[0];
+        let (x1, y1) = seg[1];
+        if x1 < lo || x0 > hi {
+            continue;
+        }
+        if x0 >= x1 {
+            if (lo..=hi).contains(&x0) {
+                push((x0, y0));
+                push((x1, y1));
+            }
+            continue;
+        }
+        let a = if x0 < lo {
+            (lo, lerp_y(x0, y0, x1, y1, lo))
+        } else {
+            (x0, y0)
+        };
+        let b = if x1 > hi {
+            (hi, lerp_y(x0, y0, x1, y1, hi))
+        } else {
+            (x1, y1)
+        };
+        push(a);
+        push(b);
+    }
+    out
+}
+
 /// Paints the bottom graph section: every counter lane fitted to the section
 /// height. Each lane is a header band over a chart area that holds the lane's
 /// series as stacked filled areas scaled to the chart height and the lane's peak
@@ -3189,7 +3235,13 @@ fn paint_graph(
             continue;
         }
         let scale = gl.chart_h / peak as f32;
-        let x_of = |ts| px(regions.content_left + tv.x_of(ts));
+        let x_of = |ts| regions.content_left + tv.x_of(ts);
+        // Clip series to a margin around the content column so off-screen
+        // vertices at high zoom stay near the window and the renderer keeps the
+        // filled area's precision; the margin exceeds the window, so the visible
+        // plot is unchanged.
+        let clip_lo = regions.content_left - regions.time_w;
+        let clip_hi = regions.content_left + 2.0 * regions.time_w;
         window.with_content_mask(Some(content_mask), |window| {
             let mut baseline: BTreeMap<i64, f64> = BTreeMap::new();
             for series in profile.series(counter) {
@@ -3197,25 +3249,31 @@ fn paint_graph(
                 if points.len() < 2 {
                     continue;
                 }
-                let mut area = PathBuilder::fill();
-                let mut first = true;
-                for p in points {
-                    let base = *baseline.get(&p.ts_us).unwrap_or(&0.0);
-                    let top = px(chart_bottom - (base + p.value) as f32 * scale);
-                    let at = point(x_of(p.ts_us), top);
-                    if first {
-                        area.move_to(at);
-                        first = false;
-                    } else {
-                        area.line_to(at);
+                let vert = |p: &CounterPoint, stacked: f64| {
+                    (x_of(p.ts_us), chart_bottom - stacked as f32 * scale)
+                };
+                let top: Vec<(f32, f32)> = points
+                    .iter()
+                    .map(|p| vert(p, baseline.get(&p.ts_us).copied().unwrap_or(0.0) + p.value))
+                    .collect();
+                let base: Vec<(f32, f32)> = points
+                    .iter()
+                    .map(|p| vert(p, baseline.get(&p.ts_us).copied().unwrap_or(0.0)))
+                    .collect();
+                let top = clip_polyline_x(&top, clip_lo, clip_hi);
+                if top.len() >= 2 {
+                    let base = clip_polyline_x(&base, clip_lo, clip_hi);
+                    let mut area = PathBuilder::fill();
+                    area.move_to(point(px(top[0].0), px(top[0].1)));
+                    for &(x, y) in &top[1..] {
+                        area.line_to(point(px(x), px(y)));
                     }
-                }
-                for p in points.iter().rev() {
-                    let base = *baseline.get(&p.ts_us).unwrap_or(&0.0);
-                    area.line_to(point(x_of(p.ts_us), px(chart_bottom - base as f32 * scale)));
-                }
-                if let Ok(path) = area.build() {
-                    window.paint_path(path, counter_color(profile.str(series.name)));
+                    for &(x, y) in base.iter().rev() {
+                        area.line_to(point(px(x), px(y)));
+                    }
+                    if let Ok(path) = area.build() {
+                        window.paint_path(path, counter_color(profile.str(series.name)));
+                    }
                 }
                 for p in points {
                     *baseline.entry(p.ts_us).or_default() += p.value;
