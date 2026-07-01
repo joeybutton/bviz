@@ -2864,7 +2864,15 @@ fn paint_flame_graph(
             if x + b.w < left || x > left + width {
                 continue;
             }
-            let rect = Bounds::new(point(px(x), px(y)), size(px(b.w), px(b.h)));
+            // Bound the painted box to a margin around the content column. At
+            // extreme zoom the laid-out width dwarfs the window, so an
+            // off-screen box's coordinates grow large enough that the renderer's
+            // rounded-rect distance field loses precision and its clipped edge
+            // lands wrong, bleeding past the content mask; the margin exceeds the
+            // window so the visible portion is unchanged.
+            let bx = x.max(left - width);
+            let bw = (x + b.w).min(left + 2.0 * width) - bx;
+            let rect = Bounds::new(point(px(bx), px(y)), size(px(bw), px(b.h)));
             let fill = flame_box_color(b.work_class, palette);
             paint_labeled_box(rect, fill, graph.str(b.name), palette, window, cx);
         }
