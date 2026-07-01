@@ -739,12 +739,16 @@ impl Builder {
 
         // Split each counter into one lane per numeric series: overlaid series
         // are hard to read, so each becomes its own graph, labelled with its arg
-        // key when a counter carries more than one. A counter that carried no
-        // numeric series (e.g. worker memory on a build with no persistent
-        // workers) keeps an empty lane so its absence stays visible rather than
-        // being silently dropped.
+        // key when a counter carries more than one. Lanes are ordered by kind
+        // (action, system load, CPU, memory, network) with each cluster's
+        // aggregate ahead of its Bazel-only breakdown; a series this ordering
+        // does not recognise keeps its first-seen position via the stable sort. A
+        // counter that carried no numeric series (e.g. worker memory on a build
+        // with no persistent workers) keeps an empty lane so its absence stays
+        // visible rather than being silently dropped.
         struct SplitLane {
             label: String,
+            rank: (u8, u8),
             series: Option<RawSeries>,
         }
         let mut split: Vec<SplitLane> = Vec::new();
@@ -754,26 +758,31 @@ impl Builder {
             };
             let counter_name = self.interner.resolve(lane.name).to_string();
             if lane.series.is_empty() {
+                let rank = counter_rank(&counter_name, "");
                 split.push(SplitLane {
                     label: counter_name,
+                    rank,
                     series: None,
                 });
                 continue;
             }
             let multi = lane.series.len() > 1;
             for s in lane.series {
+                let key = self.interner.resolve(s.name).to_string();
+                let rank = counter_rank(&counter_name, &key);
                 let label = if multi {
-                    let key = self.interner.resolve(s.name);
                     format!("{counter_name} · {key}")
                 } else {
                     counter_name.clone()
                 };
                 split.push(SplitLane {
                     label,
+                    rank,
                     series: Some(s),
                 });
             }
         }
+        split.sort_by_key(|l| l.rank);
 
         let mut series_pool: Vec<CounterSeries> = Vec::new();
         let mut point_pool: Vec<CounterPoint> = Vec::new();
@@ -1052,6 +1061,46 @@ fn apply_counter_event(
     }
 }
 
+/// Preferred display order for a Bazel profile counter series, as
+/// `(cluster, within)`: group by kind — action counts, system load, CPU,
+/// memory, network — and within a cluster place the aggregate ("total") ahead
+/// of the Bazel-only breakdown. A series whose counter this does not recognise
+/// lands in a trailing cluster and, via a stable sort, keeps its first-seen
+/// order. `name` is the counter event's name, `series` its arg key.
+fn counter_rank(name: &str, series: &str) -> (u8, u8) {
+    let name = name.to_lowercase();
+    let series = series.to_lowercase();
+    if name.contains("action count") {
+        // Total actions, then local execution, then local cache.
+        let within = if series == "action" {
+            0
+        } else if series.contains("cache") {
+            2
+        } else {
+            1
+        };
+        (0, within)
+    } else if name.contains("load average") {
+        (1, 0)
+    } else if name.contains("cpu usage") {
+        (2, if name.contains("total") { 0 } else { 1 })
+    } else if name.contains("memory") {
+        // System total, then Bazel, then worker memory.
+        let within = if name.contains("worker") {
+            2
+        } else if name.contains("total") {
+            0
+        } else {
+            1
+        };
+        (3, within)
+    } else if name.contains("network") {
+        (4, if name.contains("down") { 0 } else { 1 })
+    } else {
+        (5, 0)
+    }
+}
+
 /// Implicit nesting from a flat per-thread slice list: sort by start then by
 /// longest duration, then assign each slice the depth of its nearest ENCLOSING
 /// ancestor on a stack of ancestor end-times. A slice is nested only in a span
@@ -1323,19 +1372,36 @@ mod tests {
     }
 
     #[test]
-    fn counters_keep_empty_lanes() {
-        // A worker-memory counter that (as on a build with no persistent workers)
-        // carries only empty args keeps a lane, empty rather than dropped.
+    fn counters_cluster_by_kind_and_keep_empty_lanes() {
+        // Emitted out of cluster order, with a worker-memory counter that (as on a
+        // build with no persistent workers) carries only empty args.
         let json = r#"{
             "traceEvents": [
+                {"name":"Memory usage (Bazel)","ph":"C","ts":0,"pid":1,"tid":1,"args":{"memory":100.0}},
+                {"name":"CPU usage (total)","ph":"C","ts":0,"pid":1,"tid":1,"args":{"system cpu":2.0}},
+                {"name":"action count","ph":"C","ts":0,"pid":1,"tid":1,"args":{"action":3.0,"local action cache":0.1}},
+                {"name":"Total worker memory usage","ph":"C","ts":0,"pid":1,"tid":1,"args":{}},
                 {"name":"CPU usage (Bazel)","ph":"C","ts":0,"pid":1,"tid":1,"args":{"cpu":1.0}},
-                {"name":"Total worker memory usage","ph":"C","ts":0,"pid":1,"tid":1,"args":{}}
+                {"name":"action count (local)","ph":"C","ts":0,"pid":1,"tid":1,"args":{"local action":1.0}},
+                {"name":"Memory usage (total)","ph":"C","ts":0,"pid":1,"tid":1,"args":{"system memory":500.0}}
             ]
         }"#;
         let p = parse(json);
         let labels: Vec<_> = p.counters().iter().map(|l| p.str(l.name)).collect();
-        assert_eq!(labels, ["CPU usage (Bazel)", "Total worker memory usage"]);
-        let worker = &p.counters()[1];
+        assert_eq!(
+            labels,
+            [
+                "action count · action",
+                "action count (local)",
+                "action count · local action cache",
+                "CPU usage (total)",
+                "CPU usage (Bazel)",
+                "Memory usage (total)",
+                "Memory usage (Bazel)",
+                "Total worker memory usage",
+            ]
+        );
+        let worker = p.counters().last().unwrap();
         assert!(p.series(worker).is_empty());
     }
 
