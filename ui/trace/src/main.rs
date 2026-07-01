@@ -2020,16 +2020,27 @@ impl TraceView {
             return None;
         }
         let depth = ((content_y - rows_top) / METRICS.row_height) as u32;
-        let t = self.view.get().t_of(x - regions.content_left);
-        // Slices are sorted by start, so only those starting at or before t can
-        // contain it; binary-search that prefix rather than scanning the whole
-        // thread. Among it the first slice at the cursor's depth whose
-        // [start, start + dur] covers t is the hit (at most one per depth).
+        let view = self.view.get();
+        let cursor_px = x - regions.content_left;
+        // Hit-test against a slice's painted span, not its raw time span: a
+        // sub-pixel slice paints a marker widened to MIN_SLICE_PX (see
+        // visible_slices), so a cursor over that marker sits past the slice's
+        // brief duration. Slices are sorted by start and x_of is monotonic, so
+        // only those painting from at or left of the cursor can reach it;
+        // binary-search that prefix. The first at the cursor's depth whose
+        // widened span still covers the cursor is the hit (at most one per depth).
         let slices = profile.slices(&profile.threads()[lane.track]);
-        let upper = slices.partition_point(|s| s.start_us as f64 <= t);
+        let upper = slices.partition_point(|s| view.x_of(s.start_us) <= cursor_px);
         slices[..upper]
             .iter()
-            .position(|s| s.depth == depth && t <= (s.start_us + s.dur_us) as f64)
+            .position(|s| {
+                if s.depth != depth {
+                    return false;
+                }
+                let sx = view.x_of(s.start_us);
+                let sw = (view.x_of(s.start_us + s.dur_us) - sx).max(MIN_SLICE_PX);
+                cursor_px < sx + sw
+            })
             .map(|slice| (lane.track, slice))
     }
 
