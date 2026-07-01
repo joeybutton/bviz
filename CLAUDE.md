@@ -63,6 +63,21 @@ Interactive visualization and inspection tool for Bazel builds.
   user-identifying values (usernames, home paths, hostnames); generate them in a
   neutral location — e.g. a `/tmp` workspace with `HOME`/`USER` overridden — and
   normalize any residue with a length-preserving substitution before committing.
+- The same generality applies to the running code, not just the prose around it:
+  behavior and semantics must not be wired to the specifics of the machine that
+  happened to write them. Never hard-code a value that is really a property of one
+  host — a core or thread count, a page or cache-line size, a memory ceiling, a
+  screen resolution or DPI, a device path, an environment particular to your box.
+  A constant chosen because it matched the current machine (say a parallelism cap
+  set to this host's core count) silently mis-sizes every other machine — too low
+  wastes capacity, too high oversubscribes. Query the property at runtime through
+  the portable, cross-OS API for it (physical cores via `num_cpus::get_physical()`
+  clamped to the process's granted parallelism, not a literal; a path via the
+  platform's dirs/temp API, not `/home/...`) and derive the value from that. When
+  a bound is genuinely intrinsic to the workload rather than the host — a
+  memory-bandwidth-bound stage saturating at the physical-core count regardless of
+  SMT — express it as that structural property, not the number it happens to equal
+  on one machine.
 - Comments are terse and only earn their place by adding what the code can't
   say — a sentence, not a paragraph. Don't restate the code (a comment that
   names what the next line already names is noise — including one that restates
