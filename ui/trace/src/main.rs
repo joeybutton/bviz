@@ -1037,10 +1037,12 @@ impl TraceView {
             });
 
             paint_graph(&profile, tv, regions, &palette, window);
+            // Markers before the splitter so its horizontal divider covers the
+            // vertical phase lines where they cross the flame/graph boundary.
+            paint_markers(&profile, tv, regions, &palette, window, cx);
             if regions.has_graph {
                 paint_splitter(regions, &palette, window);
             }
-            paint_markers(&profile, tv, regions, &palette, window, cx);
             paint_scrollbars(
                 profile.span(),
                 tv,
