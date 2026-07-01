@@ -10,6 +10,7 @@ rust_library(
         "@crates//:flate2",
         "@crates//:serde",
         "@crates//:serde_json",
+        "@libdeflate//:libdeflate",
     ],
 )
 
