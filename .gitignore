@@ -2,6 +2,7 @@ bazel-*
 bazel_env.lock
 user.bazelrc
 .envrc.user
+.workspaces/
 
 # cargo's build tree, created when repinning Cargo.lock; Bazel never produces it
 /target/
