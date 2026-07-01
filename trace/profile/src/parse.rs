@@ -737,16 +737,52 @@ impl Builder {
 
         self.phase_markers.sort_by_key(|m| m.start_us);
 
-        // Flatten counters in first-seen order into series and point pools.
+        // Split each counter into one lane per numeric series: overlaid series
+        // are hard to read, so each becomes its own graph, labelled with its arg
+        // key when a counter carries more than one. A counter that carried no
+        // numeric series (e.g. worker memory on a build with no persistent
+        // workers) keeps an empty lane so its absence stays visible rather than
+        // being silently dropped.
+        struct SplitLane {
+            label: String,
+            series: Option<RawSeries>,
+        }
+        let mut split: Vec<SplitLane> = Vec::new();
+        for name in std::mem::take(&mut self.counter_order) {
+            let Some(lane) = self.counters.remove(&name) else {
+                continue;
+            };
+            let counter_name = self.interner.resolve(lane.name).to_string();
+            if lane.series.is_empty() {
+                split.push(SplitLane {
+                    label: counter_name,
+                    series: None,
+                });
+                continue;
+            }
+            let multi = lane.series.len() > 1;
+            for s in lane.series {
+                let label = if multi {
+                    let key = self.interner.resolve(s.name);
+                    format!("{counter_name} · {key}")
+                } else {
+                    counter_name.clone()
+                };
+                split.push(SplitLane {
+                    label,
+                    series: Some(s),
+                });
+            }
+        }
+
         let mut series_pool: Vec<CounterSeries> = Vec::new();
         let mut point_pool: Vec<CounterPoint> = Vec::new();
-        let counters: Vec<CounterLane> = self
-            .counter_order
+        let counters: Vec<CounterLane> = split
             .into_iter()
-            .filter_map(|n| self.counters.remove(&n))
-            .map(|lane| {
+            .map(|l| {
+                let name = self.interner.intern(&l.label);
                 let series_off = series_pool.len() as u32;
-                for s in lane.series {
+                if let Some(s) = l.series {
                     let points_off = point_pool.len() as u32;
                     let points_len = s.points.len() as u32;
                     point_pool.extend(s.points);
@@ -757,7 +793,7 @@ impl Builder {
                 }
                 let series_len = series_pool.len() as u32 - series_off;
                 CounterLane {
-                    name: lane.name,
+                    name,
                     series: Span32::new(series_off, series_len),
                 }
             })
@@ -1264,25 +1300,43 @@ mod tests {
     }
 
     #[test]
-    fn counters_lanes_and_skipped_keys() {
+    fn counters_split_per_series_skipping_non_numeric_keys() {
         let json = r#"{
             "traceEvents": [
                 {"name":"Usage","ph":"C","ts":0,"pid":1,"tid":1,"args":{"cpu":1.0}},
-                {"name":"Usage","ph":"C","ts":10,"pid":1,"tid":1,"args":{"cpu":2.0,"mem":5.0}}
+                {"name":"Usage","ph":"C","ts":10,"pid":1,"tid":1,"args":{"cpu":2.0,"mem":5.0,"tag":"x"}}
             ]
         }"#;
         let p = parse(json);
-        assert_eq!(p.counters().len(), 1);
-        let lane = &p.counters()[0];
-        assert_eq!(p.str(lane.name), "Usage");
-        let series = p.series(lane);
-        let cpu = series.iter().find(|s| p.str(s.name) == "cpu").unwrap();
-        assert_eq!(p.points(cpu).len(), 2);
-        let mem = series.iter().find(|s| p.str(s.name) == "mem").unwrap();
-        let mem_points = p.points(mem);
+        // One lane per numeric series; the non-numeric "tag" arg is dropped. A
+        // multi-series counter labels each lane with its arg key.
+        let labels: Vec<_> = p.counters().iter().map(|l| p.str(l.name)).collect();
+        assert_eq!(labels, ["Usage · cpu", "Usage · mem"]);
+        let cpu = &p.counters()[0];
+        assert_eq!(p.series(cpu).len(), 1);
+        assert_eq!(p.points(&p.series(cpu)[0]).len(), 2);
+        let mem = &p.counters()[1];
+        let mem_points = p.points(&p.series(mem)[0]);
         assert_eq!(mem_points.len(), 1);
         assert_eq!(mem_points[0].ts_us, 10);
         assert_eq!(mem_points[0].value, 5.0);
+    }
+
+    #[test]
+    fn counters_keep_empty_lanes() {
+        // A worker-memory counter that (as on a build with no persistent workers)
+        // carries only empty args keeps a lane, empty rather than dropped.
+        let json = r#"{
+            "traceEvents": [
+                {"name":"CPU usage (Bazel)","ph":"C","ts":0,"pid":1,"tid":1,"args":{"cpu":1.0}},
+                {"name":"Total worker memory usage","ph":"C","ts":0,"pid":1,"tid":1,"args":{}}
+            ]
+        }"#;
+        let p = parse(json);
+        let labels: Vec<_> = p.counters().iter().map(|l| p.str(l.name)).collect();
+        assert_eq!(labels, ["CPU usage (Bazel)", "Total worker memory usage"]);
+        let worker = &p.counters()[1];
+        assert!(p.series(worker).is_empty());
     }
 
     #[test]
