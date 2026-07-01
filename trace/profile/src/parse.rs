@@ -321,7 +321,10 @@ impl Profile {
     /// interrupted Bazel — falls back to the best-effort [`recover`].
     pub fn from_bytes(bytes: &[u8]) -> Result<Profile, LoadError> {
         let decoded = timed("decode (decompress+transcode)", || decode(bytes))?;
-        match timed("parse+build (streaming)", || parse_streaming(&decoded)) {
+        if let Some(profile) = timed("parse+build (parallel)", || parse_parallel(&decoded)) {
+            return Ok(profile);
+        }
+        match timed("parse+build (serial)", || parse_streaming(&decoded)) {
             Ok(profile) => Ok(profile),
             Err(_) => recover(&decoded),
         }
@@ -618,6 +621,88 @@ impl Builder {
         }
     }
 
+    /// Folds another builder's accumulated events (parsed from a later chunk of
+    /// the same array) into this one. The other's text pool is concatenated and
+    /// its slice/arg/marker handles rebased onto the joined pools; counter lanes
+    /// re-intern by name so a lane sampled across chunks merges into one; thread
+    /// metadata unions per tid. Depth assignment is deferred to [`Self::finish`]
+    /// because a thread's slices can land in several chunks.
+    fn merge(&mut self, other: Builder) {
+        let Builder {
+            interner,
+            args_pool,
+            thread_meta,
+            slices,
+            phase_markers,
+            counter_order,
+            counters,
+        } = other;
+        let text_base = self.interner.push_pool(interner.text());
+        let args_base = self.args_pool.len() as u32;
+
+        self.args_pool.extend(
+            args_pool
+                .into_iter()
+                .map(|(k, v)| (k.shifted(text_base), v.shifted(text_base))),
+        );
+
+        for (tid, mut tslices) in slices {
+            for s in &mut tslices {
+                s.name = s.name.shifted(text_base);
+                s.category = s.category.shifted(text_base);
+                if let Some(t) = &mut s.args.target {
+                    *t = t.shifted(text_base);
+                }
+                if let Some(m) = &mut s.args.mnemonic {
+                    *m = m.shifted(text_base);
+                }
+                if let Some(c) = &mut s.args.configuration {
+                    *c = c.shifted(text_base);
+                }
+                s.args.others = s.args.others.shifted(args_base);
+            }
+            self.slices.entry(tid).or_default().append(&mut tslices);
+        }
+
+        for mut m in phase_markers {
+            m.name = m.name.shifted(text_base);
+            self.phase_markers.push(m);
+        }
+
+        for (tid, (name, sort_index)) in thread_meta {
+            let entry = self.thread_meta.entry(tid).or_insert((None, MAX_SORT_INDEX));
+            if entry.0.is_none() {
+                entry.0 = name;
+            }
+            if sort_index != MAX_SORT_INDEX {
+                entry.1 = sort_index;
+            }
+        }
+
+        for lane_key in counter_order {
+            let lane = &counters[&lane_key];
+            let lane_name = self.interner.intern(&interner.resolve(lane.name).to_owned());
+            if !self.counters.contains_key(&lane_name) {
+                self.counter_order.push(lane_name);
+                self.counters.insert(
+                    lane_name,
+                    RawLane { name: lane_name, series: Vec::new() },
+                );
+            }
+            for series in &lane.series {
+                let series_name = self.interner.intern(&interner.resolve(series.name).to_owned());
+                let dst = self.counters.get_mut(&lane_name).unwrap();
+                match dst.series.iter_mut().find(|s| s.name == series_name) {
+                    Some(s) => s.points.extend_from_slice(&series.points),
+                    None => dst.series.push(RawSeries {
+                        name: series_name,
+                        points: series.points.clone(),
+                    }),
+                }
+            }
+        }
+    }
+
     fn finish(mut self, other_data: Option<Map<String, Value>>) -> Profile {
         let metadata = build_metadata(&mut self.interner, other_data.as_ref());
         let span = compute_span(&self.slices, &self.counters, &self.phase_markers);
@@ -701,6 +786,118 @@ fn build(other_data: Option<Map<String, Value>>, events: Vec<RawEvent>) -> Profi
         builder.event(ev);
     }
     builder.finish(other_data)
+}
+
+/// Below this many bytes of `traceEvents` the parallel parser's thread and merge
+/// overhead outweighs the gain, so [`parse_parallel`] declines and the serial
+/// path runs.
+const MIN_PARALLEL_BYTES: usize = 8 << 20;
+/// Upper bound on parse worker threads. Parsing is memory-bandwidth bound, so
+/// beyond a handful of threads wall time flattens while total CPU keeps climbing
+/// (extra threads mostly stall on memory) — measured on a 16-hardware-thread
+/// host, 8→16 threads bought ~4% wall for ~50% more CPU. Cap where the wall gain
+/// has flattened to spend cores, not waste them.
+const MAX_PARALLEL_CHUNKS: usize = 8;
+
+/// Parses the `traceEvents` array across several threads when the profile is
+/// large enough to repay it, returning `None` so the caller runs the serial
+/// [`parse_streaming`] for a small input, a single core, or any input whose
+/// shape the chunker can't navigate (no array, no usable split points, a chunk
+/// that fails to parse).
+fn parse_parallel(text: &str) -> Option<Profile> {
+    let cores = std::thread::available_parallelism().map_or(1, |n| n.get());
+    if cores < 2 {
+        return None;
+    }
+    parse_chunks(text, cores.min(MAX_PARALLEL_CHUNKS), MIN_PARALLEL_BYTES)
+}
+
+/// Splits the `traceEvents` array into up to `n` byte chunks at newline
+/// boundaries — a literal newline never falls inside a JSON string, so it always
+/// lies between events — parses each chunk into its own [`Builder`] on a worker
+/// thread, then folds the builders together and finishes. `min_bytes` gates the
+/// array size below which it declines. Returns `None` if the array can't be
+/// located, no split yields more than one chunk, or any chunk fails to parse.
+fn parse_chunks(text: &str, n: usize, min_bytes: usize) -> Option<Profile> {
+    let events_key = text.find("\"traceEvents\"")?;
+    let array_start = text[events_key..].find('[')? + events_key + 1;
+    // Bound the region to the array's closing bracket (the last `]`, since only
+    // the outer object's `}` follows it) so a chunk never picks up the trailing
+    // `]}` as event content. `traceEvents` is the profile's last key.
+    let array_end = text.rfind(']')?;
+    if array_end <= array_start {
+        return None;
+    }
+    let region = &text[array_start..array_end];
+    if region.len() < min_bytes {
+        return None;
+    }
+    // Cut at the first newline at or after each evenly spaced target; each cut
+    // sits between two events, so a chunk holds only whole events.
+    let mut bounds = vec![0usize];
+    for k in 1..n {
+        let target = region.len() * k / n;
+        if let Some(off) = region[target..].find('\n') {
+            let cut = target + off + 1;
+            if cut > *bounds.last().unwrap() {
+                bounds.push(cut);
+            }
+        }
+    }
+    bounds.push(region.len());
+    if bounds.len() < 3 {
+        // Only one chunk — nothing to parallelize, let the serial path handle it.
+        return None;
+    }
+    let chunks: Vec<&str> = bounds.windows(2).map(|w| &region[w[0]..w[1]]).collect();
+
+    let other_data = recover_other_data(text);
+    let builders: Vec<Option<Builder>> = std::thread::scope(|scope| {
+        let handles: Vec<_> = chunks
+            .iter()
+            .map(|&chunk| {
+                scope.spawn(move || {
+                    let mut builder = Builder::new();
+                    parse_range_into(&mut builder, chunk).then_some(builder)
+                })
+            })
+            .collect();
+        handles.into_iter().map(|h| h.join().ok().flatten()).collect()
+    });
+
+    let mut merged = Builder::new();
+    let mut any = false;
+    for builder in builders {
+        merged.merge(builder?);
+        any = true;
+    }
+    if !any {
+        return None;
+    }
+    Some(merged.finish(other_data))
+}
+
+/// Parses every `{...}` event object in one chunk of the `traceEvents` array
+/// into `builder` by wrapping the chunk's `{event},...,{event}` span in array
+/// brackets and streaming it through the same seq visitor the serial path uses,
+/// so each event is parsed once with no separate boundary scan. Returns `false`
+/// on malformed content so the caller falls back to the serial parser rather
+/// than silently dropping events.
+fn parse_range_into(builder: &mut Builder, chunk: &str) -> bool {
+    let bytes = chunk.as_bytes();
+    // Trim to the first object open and last object close so the wrapped array
+    // has neither the separator comma before the first event nor a trailing
+    // comma / the outer `]` after the last.
+    let Some(start) = bytes.iter().position(|&b| b == b'{') else {
+        return true; // a chunk of only whitespace/commas contributes no events
+    };
+    let end = bytes.iter().rposition(|&b| b == b'}').expect("a '{' implies a '}'");
+    let mut wrapped = String::with_capacity(end - start + 3);
+    wrapped.push('[');
+    wrapped.push_str(&chunk[start..=end]);
+    wrapped.push(']');
+    let mut de = serde_json::Deserializer::from_str(&wrapped);
+    de.deserialize_seq(EventsVisitor(builder)).is_ok() && de.end().is_ok()
 }
 
 fn build_metadata(interner: &mut Interner, other: Option<&Map<String, Value>>) -> Metadata {
@@ -903,6 +1100,87 @@ mod tests {
 
     fn parse(json: &str) -> Profile {
         Profile::from_bytes(json.as_bytes()).expect("parse")
+    }
+
+    /// A canonical, interning-order-independent dump of everything a profile
+    /// carries, so two profiles built by different paths can be compared by
+    /// meaning rather than by `Str` offsets (which depend on intern order).
+    fn semantic(p: &Profile) -> String {
+        use std::fmt::Write;
+        let mut out = String::new();
+        let m = p.metadata();
+        writeln!(
+            out,
+            "meta {:?} {:?} {:?} {:?}",
+            p.opt_str(m.bazel_version),
+            p.opt_str(m.build_id),
+            p.opt_str(m.output_base),
+            p.opt_str(m.date)
+        )
+        .unwrap();
+        writeln!(out, "span {} {}", p.span().start_us, p.span().end_us).unwrap();
+        for t in p.threads() {
+            writeln!(
+                out,
+                "thread tid={} name={:?} sort={} depth={} class={:?}",
+                t.tid,
+                p.str(t.name),
+                t.sort_index,
+                t.max_depth,
+                t.lane_class
+            )
+            .unwrap();
+            for s in p.slices(t) {
+                writeln!(
+                    out,
+                    "  slice {:?} cat={:?} ts={} dur={} depth={} wc={:?} tgt={:?} mn={:?} cfg={:?}",
+                    p.str(s.name),
+                    p.str(s.category),
+                    s.start_us,
+                    s.dur_us,
+                    s.depth,
+                    s.work_class,
+                    p.opt_str(s.args.target),
+                    p.opt_str(s.args.mnemonic),
+                    p.opt_str(s.args.configuration),
+                )
+                .unwrap();
+            }
+        }
+        for marker in p.phase_markers() {
+            writeln!(out, "marker {:?} {}", p.str(marker.name), marker.start_us).unwrap();
+        }
+        for lane in p.counters() {
+            writeln!(out, "counter {:?}", p.str(lane.name)).unwrap();
+            for series in p.series(lane) {
+                let pts: Vec<_> = p.points(series).iter().map(|pt| (pt.ts_us, pt.value)).collect();
+                writeln!(out, "  series {:?} {:?}", p.str(series.name), pts).unwrap();
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn parallel_matches_serial() {
+        // One event per line, several threads, nested slices, a phase marker, and
+        // a counter sampled at two times — so chunking at newlines splits a
+        // thread's slices and a counter's points across chunks, exercising merge.
+        let json = "{\"otherData\":{\"bazel_version\":\"9.0.0\"},\"traceEvents\":[\n".to_string()
+            + "{\"name\":\"thread_name\",\"ph\":\"M\",\"tid\":1,\"args\":{\"name\":\"Lane A\"}},\n"
+            + "{\"name\":\"thread_sort_index\",\"ph\":\"M\",\"tid\":1,\"args\":{\"sort_index\":10}},\n"
+            + "{\"cat\":\"skyframe evaluator\",\"name\":\"parent\",\"ph\":\"X\",\"ts\":0,\"dur\":100,\"tid\":1,\"args\":{\"mnemonic\":\"CppCompile\",\"target\":\"//a:b\"}},\n"
+            + "{\"cat\":\"skyframe evaluator\",\"name\":\"child\",\"ph\":\"X\",\"ts\":0,\"dur\":40,\"tid\":1},\n"
+            + "{\"name\":\"Usage\",\"ph\":\"C\",\"ts\":0,\"tid\":1,\"args\":{\"cpu\":1.0}},\n"
+            + "{\"cat\":\"build phase marker\",\"name\":\"Analyzing\",\"ph\":\"i\",\"ts\":5,\"tid\":1},\n"
+            + "{\"name\":\"thread_name\",\"ph\":\"M\",\"tid\":2,\"args\":{\"name\":\"Lane B\"}},\n"
+            + "{\"cat\":\"remote action execution\",\"name\":\"work\",\"ph\":\"X\",\"ts\":10,\"dur\":80,\"tid\":2},\n"
+            + "{\"name\":\"Usage\",\"ph\":\"C\",\"ts\":20,\"tid\":1,\"args\":{\"cpu\":2.0}},\n"
+            + "{\"cat\":\"local action execution\",\"name\":\"more\",\"ph\":\"X\",\"ts\":30,\"dur\":10,\"tid\":2}\n"
+            + "]}";
+        let serial = parse_streaming(&json).expect("serial");
+        // Force four chunks regardless of size so the merge path is exercised.
+        let parallel = parse_chunks(&json, 4, 0).expect("parallel");
+        assert_eq!(semantic(&serial), semantic(&parallel));
     }
 
     #[test]

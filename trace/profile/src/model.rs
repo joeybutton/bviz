@@ -17,6 +17,12 @@ impl Str {
     pub fn range(self) -> std::ops::Range<usize> {
         self.off as usize..(self.off + self.len) as usize
     }
+
+    /// The same span relocated by `by` bytes, for rebasing a handle onto a text
+    /// pool that has been concatenated after another.
+    pub fn shifted(self, by: u32) -> Str {
+        Str { off: self.off + by, len: self.len }
+    }
 }
 
 /// A half-open `[off, off + len)` index range into a flat pool. Which pool it
@@ -35,6 +41,12 @@ impl Span32 {
     /// The element range into the owning pool: `&pool[span.range()]`.
     pub fn range(self) -> std::ops::Range<usize> {
         self.off as usize..(self.off + self.len) as usize
+    }
+
+    /// The same span relocated by `by` elements, for rebasing onto a pool that
+    /// has been concatenated after another.
+    pub fn shifted(self, by: u32) -> Span32 {
+        Span32 { off: self.off + by, len: self.len }
     }
 
     pub fn len(self) -> usize {
@@ -467,6 +479,28 @@ impl Interner {
 
     pub fn intern_opt(&mut self, s: Option<&str>) -> Option<Str> {
         s.map(|s| self.intern(s))
+    }
+
+    /// The interned bytes for a handle this interner produced.
+    pub fn resolve(&self, s: Str) -> &str {
+        &self.text[s.range()]
+    }
+
+    /// The whole text pool, for appending to another with [`Self::push_pool`].
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+
+    /// Appends another interner's text pool to this one and returns the base
+    /// offset it was placed at, so handles into that pool can be rebased with
+    /// [`Str::shifted`]. The appended strings are not added to the dedup map (the
+    /// caller is merging already-deduplicated pools), so two pools that both
+    /// interned a string keep both copies; the duplication is a handful of bytes
+    /// per distinct string and avoids re-hashing every handle.
+    pub fn push_pool(&mut self, other: &str) -> u32 {
+        let base = self.text.len() as u32;
+        self.text.push_str(other);
+        base
     }
 
     /// Consumes the interner, yielding the retained text pool and dropping the
