@@ -209,6 +209,37 @@ mod tests {
     }
 
     #[test]
+    fn far_off_screen_span_is_clamped_to_a_viewport_margin() {
+        // A span far wider than the view: at high zoom its raw pixel extent is
+        // enormous. It is kept (it covers the whole viewport) but its painted
+        // rect is bounded to one viewport width past each edge, leaving the
+        // on-screen portion [0, width] fully covered.
+        let p = profile(vec![track(
+            1,
+            LaneClass::Execution,
+            vec![slice("wide", "general information", 0, 1_000_000)],
+        )]);
+        let layout = lay_out_lanes(&p, &METRICS);
+        // Center the view deep inside the span so it spills far off both edges.
+        let view = TimeView {
+            start_us: 500_000.0,
+            px_per_us: 10.0,
+        };
+        let viewport = Viewport {
+            width: 300.0,
+            height: 100.0,
+            scroll_y: 0.0,
+        };
+        let vis = visible_slices(&p, &layout, &view, &viewport, &METRICS, 1.0);
+        assert_eq!(vis.len(), 1);
+        let s = vis[0];
+        assert_eq!(s.x, -viewport.width);
+        assert_eq!(s.x + s.w, 2.0 * viewport.width);
+        // The whole visible width still lies within the painted rect.
+        assert!(s.x <= 0.0 && s.x + s.w >= viewport.width);
+    }
+
+    #[test]
     fn culls_scrolled_off_lane() {
         let p = profile(vec![track(
             1,

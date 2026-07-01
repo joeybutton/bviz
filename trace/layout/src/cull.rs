@@ -68,12 +68,20 @@ pub fn visible_slices(
                 continue;
             }
             next_free_col[depth] = ((x + w).floor() as i32).max(start_col + 1);
+            // Bound the painted span to a margin around the viewport. At extreme
+            // zoom a span reaching far off-screen otherwise carries coordinates
+            // large enough that the renderer's rounded-rect distance field loses
+            // precision and places the clipped edge wrong, bleeding past the
+            // content mask; the visible portion is unchanged since the margin
+            // exceeds the viewport.
+            let paint_x = x.max(-viewport.width);
+            let paint_w = (x + w).min(2.0 * viewport.width) - paint_x;
             out.push(VisibleSlice {
                 track: lane.track,
                 slice,
-                x,
+                x: paint_x,
                 y: rows_top + s.depth as f32 * metrics.row_height,
-                w,
+                w: paint_w,
                 h: metrics.row_height,
             });
         }
