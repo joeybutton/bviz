@@ -952,26 +952,32 @@ fn parse_chunks(text: &str, n: usize, min_bytes: usize) -> Option<Profile> {
 }
 
 /// Parses every `{...}` event object in one chunk of the `traceEvents` array
-/// into `builder` by wrapping the chunk's `{event},...,{event}` span in array
-/// brackets and streaming it through the same seq visitor the serial path uses,
-/// so each event is parsed once with no separate boundary scan. Returns `false`
-/// on malformed content so the caller falls back to the serial parser rather
-/// than silently dropping events.
+/// into `builder`, in place: each event is deserialized from its own offset
+/// with a `StreamDeserializer` (which reports the bytes it consumed), and the
+/// comma/whitespace separators between events are skipped by hand. Returns
+/// `false` on malformed content so the caller falls back to the serial parser
+/// rather than silently dropping events.
 fn parse_range_into(builder: &mut Builder, chunk: &str) -> bool {
     let bytes = chunk.as_bytes();
-    // Trim to the first object open and last object close so the wrapped array
-    // has neither the separator comma before the first event nor a trailing
-    // comma / the outer `]` after the last.
-    let Some(start) = bytes.iter().position(|&b| b == b'{') else {
-        return true; // a chunk of only whitespace/commas contributes no events
-    };
-    let end = bytes.iter().rposition(|&b| b == b'}').expect("a '{' implies a '}'");
-    let mut wrapped = String::with_capacity(end - start + 3);
-    wrapped.push('[');
-    wrapped.push_str(&chunk[start..=end]);
-    wrapped.push(']');
-    let mut de = serde_json::Deserializer::from_str(&wrapped);
-    de.deserialize_seq(EventsVisitor(builder)).is_ok() && de.end().is_ok()
+    let mut pos = 0;
+    while pos < bytes.len() {
+        match bytes[pos] {
+            b' ' | b'\t' | b'\n' | b'\r' | b',' => pos += 1,
+            b'{' => {
+                let mut stream =
+                    serde_json::Deserializer::from_str(&chunk[pos..]).into_iter::<RawEvent>();
+                match stream.next() {
+                    Some(Ok(ev)) => {
+                        builder.event(ev);
+                        pos += stream.byte_offset();
+                    }
+                    _ => return false,
+                }
+            }
+            _ => return false,
+        }
+    }
+    true
 }
 
 fn build_metadata(interner: &mut Interner, other: Option<&Map<String, Value>>) -> Metadata {
