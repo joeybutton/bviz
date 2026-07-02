@@ -621,6 +621,26 @@ impl Builder {
         }
     }
 
+    /// Reserves the pools for the contents of `others`, so the subsequent
+    /// [`Self::merge`] calls copy each pool into place once instead of growing
+    /// it through repeated doublings.
+    fn reserve_for(&mut self, others: &[Builder]) {
+        self.interner
+            .reserve(others.iter().map(|b| b.interner.text().len()).sum());
+        self.args_pool.reserve(others.iter().map(|b| b.args_pool.len()).sum());
+        self.phase_markers
+            .reserve(others.iter().map(|b| b.phase_markers.len()).sum());
+        let mut per_tid: BTreeMap<i64, usize> = BTreeMap::new();
+        for b in others {
+            for (&tid, tslices) in &b.slices {
+                *per_tid.entry(tid).or_default() += tslices.len();
+            }
+        }
+        for (tid, n) in per_tid {
+            self.slices.entry(tid).or_default().reserve(n);
+        }
+    }
+
     /// Folds another builder's accumulated events (parsed from a later chunk of
     /// the same array) into this one. The other's text pool is concatenated and
     /// its slice/arg/marker handles rebased onto the joined pools; counter lanes
@@ -708,7 +728,8 @@ impl Builder {
         let span = compute_span(&self.slices, &self.counters, &self.phase_markers);
 
         // Flatten per-thread slice lists into one pool, recording each thread's range.
-        let mut slice_pool: Vec<Slice> = Vec::new();
+        let mut slice_pool: Vec<Slice> =
+            Vec::with_capacity(self.slices.values().map(Vec::len).sum());
         let mut threads: Vec<ThreadTrack> = self
             .slices
             .into_iter()
@@ -784,8 +805,10 @@ impl Builder {
         }
         split.sort_by_key(|l| l.rank);
 
-        let mut series_pool: Vec<CounterSeries> = Vec::new();
-        let mut point_pool: Vec<CounterPoint> = Vec::new();
+        let split_series = || split.iter().filter_map(|l| l.series.as_ref());
+        let mut series_pool: Vec<CounterSeries> = Vec::with_capacity(split_series().count());
+        let mut point_pool: Vec<CounterPoint> =
+            Vec::with_capacity(split_series().map(|s| s.points.len()).sum());
         let counters: Vec<CounterLane> = split
             .into_iter()
             .map(|l| {
@@ -914,13 +937,16 @@ fn parse_chunks(text: &str, n: usize, min_bytes: usize) -> Option<Profile> {
     });
 
     let merged = timed("  merge builders", || {
-        let mut merged = Builder::new();
-        let mut any = false;
-        for builder in builders {
-            merged.merge(builder?);
-            any = true;
+        let builders: Vec<Builder> = builders.into_iter().collect::<Option<_>>()?;
+        if builders.is_empty() {
+            return None;
         }
-        any.then_some(merged)
+        let mut merged = Builder::new();
+        merged.reserve_for(&builders);
+        for builder in builders {
+            merged.merge(builder);
+        }
+        Some(merged)
     })?;
     Some(timed("  finish", || merged.finish(other_data)))
 }

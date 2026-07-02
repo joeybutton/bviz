@@ -491,6 +491,11 @@ impl Interner {
         &self.text
     }
 
+    /// Reserves room for `additional` more bytes of text pool.
+    pub fn reserve(&mut self, additional: usize) {
+        self.text.reserve(additional);
+    }
+
     /// Appends another interner's text pool to this one and returns the base
     /// offset it was placed at, so handles into that pool can be rebased with
     /// [`Str::shifted`]. The appended strings are not added to the dedup map (the
