@@ -7,4 +7,9 @@ build --@llvm//config:experimental_stub_libgcc_s=True
 # Resolve protoc via the registered proto toolchain rather than the legacy hardcoded path.
 common --incompatible_enable_proto_toolchain_resolution
 
+build:profile -c opt
+build:profile --@rules_rs_rules_rust//rust/settings:extra_rustc_flag=-Cdebuginfo=2
+build:profile --@rules_rs_rules_rust//rust/settings:extra_rustc_flag=-Cforce-frame-pointers=yes
+build:profile --@rules_rs_rules_rust//rust/settings:extra_rustc_flag=-Cstrip=none
+
 try-import %workspace%/user.bazelrc
