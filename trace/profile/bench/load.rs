@@ -1,7 +1,12 @@
 //! Headless load benchmark: parses a profile and prints the wall time, with no
 //! UI so the parse can be measured in isolation and repeatedly. Set
 //! `BVIZ_TRACE_TIMING=1` for the per-stage breakdown.
+
+#[global_allocator]
+static GLOBAL: bviz_alloc::MiMalloc = bviz_alloc::MiMalloc;
+
 fn main() {
+    bviz_alloc::retain_freed_memory_across_load();
     let path = std::env::args().nth(1).expect("usage: bench_load <profile>");
     let start = std::time::Instant::now();
     let profile = bviz_trace_profile::Profile::from_path(std::path::Path::new(&path))

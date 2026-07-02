@@ -1,0 +1,9 @@
+load("@rules_rs//rs:rust_library.bzl", "rust_library")
+
+rust_library(
+    name = "alloc",
+    srcs = glob(["src/**/*.rs"]),
+    crate_name = "bviz_alloc",
+    visibility = ["//trace/profile:__pkg__", "//ui/trace:__pkg__"],
+    deps = ["@crates//:mimalloc"],
+)

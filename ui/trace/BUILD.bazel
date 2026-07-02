@@ -6,6 +6,7 @@ rust_binary(
     srcs = glob(["src/**/*.rs"]),
     crate_name = "bviz_ui_trace",
     deps = [
+        "//alloc",
         "//trace/layout",
         "//trace/profile",
         "//ui/assets",

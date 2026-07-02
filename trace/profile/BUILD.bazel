@@ -26,5 +26,8 @@ rust_binary(
     name = "bench_load",
     srcs = ["bench/load.rs"],
     crate_name = "bench_load",
-    deps = [":profile"],
+    deps = [
+        ":profile",
+        "//alloc",
+    ],
 )

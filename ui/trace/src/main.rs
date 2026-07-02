@@ -3,6 +3,9 @@
 //! flame-chart timeline: time on the x axis, stacked call depth on the y axis,
 //! with horizontal zoom/pan and vertical scroll.
 
+#[global_allocator]
+static GLOBAL: bviz_alloc::MiMalloc = bviz_alloc::MiMalloc;
+
 use bviz_trace_layout::{
     FlameBox, FlameGraph, FlameMetrics, FlameView, GroupMode, LaneLayout, LaneMetrics, Scope,
     StatRow, TimeView, Viewport, WorkClass, aggregate_stats, flame_box_at, flame_height,
@@ -3575,6 +3578,7 @@ struct Cli {
 }
 
 fn main() {
+    bviz_alloc::retain_freed_memory_across_load();
     let path = Cli::parse().profile;
     bviz_ui_shell::run(
         "bazel_viz trace",

@@ -1,0 +1,11 @@
+[package]
+name = "bviz_alloc"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "bviz_alloc"
+path = "src/lib.rs"
+
+[dependencies]
+mimalloc = { workspace = true }

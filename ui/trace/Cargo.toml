@@ -11,5 +11,6 @@ path = "src/main.rs"
 clap = { workspace = true }
 gpui = { workspace = true, features = ["inspector"] }
 gpui_platform = { workspace = true, features = ["wayland"] }
+bviz_alloc = { path = "../../alloc" }
 bviz_trace_profile = { path = "../../trace/profile" }
 bviz_trace_layout = { path = "../../trace/layout" }

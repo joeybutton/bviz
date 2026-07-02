@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "alloc",
     "bazel_viz",
     "graph/layout",
     "greeting",
@@ -16,6 +17,7 @@ resolver = "2"
 alacritty_terminal = "0.26"
 clap = { version = "4", features = ["derive"] }
 flate2 = "1"
+mimalloc = "0.1"
 num_cpus = "1"
 rustc-hash = "2"
 serde = { version = "1", features = ["derive"] }
