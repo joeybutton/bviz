@@ -898,29 +898,31 @@ fn parse_chunks(text: &str, n: usize, min_bytes: usize) -> Option<Profile> {
     let chunks: Vec<&str> = bounds.windows(2).map(|w| &region[w[0]..w[1]]).collect();
 
     let other_data = recover_other_data(text);
-    let builders: Vec<Option<Builder>> = std::thread::scope(|scope| {
-        let handles: Vec<_> = chunks
-            .iter()
-            .map(|&chunk| {
-                scope.spawn(move || {
-                    let mut builder = Builder::new();
-                    parse_range_into(&mut builder, chunk).then_some(builder)
+    let builders: Vec<Option<Builder>> = timed("  parse chunks", || {
+        std::thread::scope(|scope| {
+            let handles: Vec<_> = chunks
+                .iter()
+                .map(|&chunk| {
+                    scope.spawn(move || {
+                        let mut builder = Builder::new();
+                        parse_range_into(&mut builder, chunk).then_some(builder)
+                    })
                 })
-            })
-            .collect();
-        handles.into_iter().map(|h| h.join().ok().flatten()).collect()
+                .collect();
+            handles.into_iter().map(|h| h.join().ok().flatten()).collect()
+        })
     });
 
-    let mut merged = Builder::new();
-    let mut any = false;
-    for builder in builders {
-        merged.merge(builder?);
-        any = true;
-    }
-    if !any {
-        return None;
-    }
-    Some(merged.finish(other_data))
+    let merged = timed("  merge builders", || {
+        let mut merged = Builder::new();
+        let mut any = false;
+        for builder in builders {
+            merged.merge(builder?);
+            any = true;
+        }
+        any.then_some(merged)
+    })?;
+    Some(timed("  finish", || merged.finish(other_data)))
 }
 
 /// Parses every `{...}` event object in one chunk of the `traceEvents` array
