@@ -1222,6 +1222,31 @@ mod tests {
         Profile::from_bytes(json.as_bytes()).expect("parse")
     }
 
+    #[test]
+    fn escaped_strings_resolve_correctly() {
+        // Escaped JSON strings reach the parser as owned values rather than
+        // slices borrowed from the input, exercising a distinct interning
+        // path. The \u escape keeps the raw bytes ASCII, which the Latin-1
+        // transcode passes through untouched.
+        let json = r#"{
+            "traceEvents": [
+                {"name":"thread_name","ph":"M","tid":1,"args":{"name":"L"}},
+                {"cat":"c","name":"quote \" caf\u00e9","ph":"X","ts":0,"dur":1,"tid":1,"args":{"target":"//a:b\"c","note":"tab\there"}}
+            ]
+        }"#;
+        let p = parse(json);
+        let t = &p.threads()[0];
+        let s = &p.slices(t)[0];
+        assert_eq!(p.str(s.name), "quote \" café");
+        assert_eq!(p.opt_str(s.args.target), Some("//a:b\"c"));
+        let others: Vec<_> = p
+            .slice_others(s)
+            .iter()
+            .map(|&(k, v)| (p.str(k), p.str(v)))
+            .collect();
+        assert_eq!(others, vec![("note", "tab\there")]);
+    }
+
     /// A canonical, interning-order-independent dump of everything a profile
     /// carries, so two profiles built by different paths can be compared by
     /// meaning rather than by `Str` offsets (which depend on intern order).
