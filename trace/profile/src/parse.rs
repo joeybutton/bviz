@@ -727,14 +727,33 @@ impl Builder {
         let metadata = build_metadata(&mut self.interner, other_data.as_ref());
         let span = compute_span(&self.slices, &self.counters, &self.phase_markers);
 
+        // Depth assignment sorts each track's slices independently, so spread
+        // the tracks over the parse worker count, stealing work track by track
+        // since sizes are heavily skewed toward a few big evaluator lanes.
+        let mut tracks: Vec<(i64, Vec<Slice>, u32)> = std::mem::take(&mut self.slices)
+            .into_iter()
+            .map(|(tid, tslices)| (tid, tslices, 0))
+            .collect();
+        let workers = worker_count().min(tracks.len());
+        let stealer = std::sync::Mutex::new(tracks.iter_mut());
+        std::thread::scope(|scope| {
+            for _ in 0..workers {
+                scope.spawn(|| loop {
+                    let Some((_, tslices, max_depth)) = stealer.lock().unwrap().next() else {
+                        break;
+                    };
+                    *max_depth = assign_depths(tslices);
+                });
+            }
+        });
+        drop(stealer);
+
         // Flatten per-thread slice lists into one pool, recording each thread's range.
         let mut slice_pool: Vec<Slice> =
-            Vec::with_capacity(self.slices.values().map(Vec::len).sum());
-        let mut threads: Vec<ThreadTrack> = self
-            .slices
+            Vec::with_capacity(tracks.iter().map(|(_, s, _)| s.len()).sum());
+        let mut threads: Vec<ThreadTrack> = tracks
             .into_iter()
-            .map(|(tid, mut tslices)| {
-                let max_depth = assign_depths(&mut tslices);
+            .map(|(tid, tslices, max_depth)| {
                 let off = slice_pool.len() as u32;
                 let len = tslices.len() as u32;
                 slice_pool.extend(tslices);
@@ -861,23 +880,27 @@ fn build(other_data: Option<Map<String, Value>>, events: Vec<RawEvent>) -> Profi
 /// path runs.
 const MIN_PARALLEL_BYTES: usize = 8 << 20;
 
+/// Worker count for the parallel passes over profile data: the machine's
+/// physical core count rather than its logical (SMT) thread count, because the
+/// passes are memory-bandwidth bound, so threads past the cores that own the
+/// memory channels mostly stall on bandwidth, burning CPU for a wall-time gain
+/// that has flattened. Clamped to the parallelism the process is actually
+/// granted, so a CPU quota or affinity mask is honored.
+fn worker_count() -> usize {
+    let granted = std::thread::available_parallelism().map_or(1, |n| n.get());
+    num_cpus::get_physical().min(granted)
+}
+
 /// Parses the `traceEvents` array across several threads when the profile is
 /// large enough to repay it, returning `None` so the caller runs the serial
 /// [`parse_streaming`] for a small input, a single core, or any input whose
 /// shape the chunker can't navigate (no array, no usable split points, a chunk
 /// that fails to parse).
-///
-/// Worker count is the machine's physical core count rather than its logical
-/// (SMT) thread count: parsing is memory-bandwidth bound, so threads past the
-/// cores that own the memory channels mostly stall on bandwidth, burning CPU for
-/// a wall-time gain that has flattened. It is further clamped to the parallelism
-/// the process is actually granted, so a CPU quota or affinity mask is honored.
 fn parse_parallel(text: &str) -> Option<Profile> {
-    let granted = std::thread::available_parallelism().map_or(1, |n| n.get());
-    if granted < 2 {
+    let workers = worker_count();
+    if workers < 2 {
         return None;
     }
-    let workers = num_cpus::get_physical().min(granted);
     parse_chunks(text, workers, MIN_PARALLEL_BYTES)
 }
 
