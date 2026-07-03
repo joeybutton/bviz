@@ -71,7 +71,7 @@ impl<'de> Visitor<'de> for ProfileVisitor {
     }
 
     fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Profile, A::Error> {
-        let mut builder = Builder::new();
+        let mut builder = Builder::new(0);
         let mut other_data = None;
         while let Some(key) = map.next_key::<Cow<str>>()? {
             match key.as_ref() {
@@ -572,9 +572,14 @@ struct Builder {
 }
 
 impl Builder {
-    fn new() -> Builder {
+    /// `bytes_hint` is the length of the JSON this builder will consume; the
+    /// interner is pre-sized from it with distinct-string and text densities
+    /// that bound what large Bazel profiles exhibit per chunk (about one
+    /// distinct string per 700 bytes and one text byte per 4.4), so bulk
+    /// interning avoids rehash and regrow copies without gross over-reservation.
+    fn new(bytes_hint: usize) -> Builder {
         Builder {
-            interner: Interner::new(),
+            interner: Interner::with_capacity(bytes_hint / 512, bytes_hint / 8),
             args_pool: Vec::new(),
             thread_meta: BTreeMap::new(),
             slices: BTreeMap::new(),
@@ -868,7 +873,7 @@ impl Builder {
 /// Builds a profile from already-collected events, for the [`recover`] path that
 /// pulls whole events out of a truncated array before parsing them.
 fn build(other_data: Option<Map<String, Value>>, events: Vec<RawEvent>) -> Profile {
-    let mut builder = Builder::new();
+    let mut builder = Builder::new(0);
     for ev in events {
         builder.event(ev);
     }
@@ -965,7 +970,7 @@ fn parse_chunks(text: &str, n: usize, min_bytes: usize) -> Option<Profile> {
                         loop {
                             let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                             let Some(&chunk) = chunks.get(i) else { break };
-                            let mut builder = Builder::new();
+                            let mut builder = Builder::new(chunk.len());
                             let ok = parse_range_into(&mut builder, chunk);
                             parsed.push((i, ok.then_some(builder)));
                         }
@@ -989,7 +994,7 @@ fn parse_chunks(text: &str, n: usize, min_bytes: usize) -> Option<Profile> {
         if builders.is_empty() {
             return None;
         }
-        let mut merged = Builder::new();
+        let mut merged = Builder::new(0);
         merged.reserve_for(&builders);
         for builder in builders {
             merged.merge(builder);

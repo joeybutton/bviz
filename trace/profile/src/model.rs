@@ -463,6 +463,19 @@ impl Interner {
         }
     }
 
+    /// An interner pre-sized for roughly `distinct` strings totalling
+    /// `text_bytes` of pool, so bulk interning grows neither the map nor the
+    /// pool through repeated doublings.
+    pub fn with_capacity(distinct: usize, text_bytes: usize) -> Interner {
+        Interner {
+            text: String::with_capacity(text_bytes),
+            seen: std::collections::HashMap::with_capacity_and_hasher(
+                distinct,
+                rustc_hash::FxBuildHasher,
+            ),
+        }
+    }
+
     pub fn intern(&mut self, s: &str) -> Str {
         if let Some(&handle) = self.seen.get(s) {
             return handle;
