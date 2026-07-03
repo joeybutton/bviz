@@ -13,6 +13,7 @@ use serde_json::{Map, Value};
 use crate::model::{
     lane_class, work_class, CounterLane, CounterPoint, CounterSeries, Interner, Metadata,
     PhaseMarker, Profile, ProfileParts, Slice, SliceArgs, Span32, Str, ThreadTrack, TimeSpan,
+    WorkClass,
 };
 
 const GZIP_MAGIC: [u8; 2] = [0x1f, 0x8b];
@@ -82,7 +83,7 @@ impl<'de> Visitor<'de> for ProfileVisitor {
                 }
             }
         }
-        Ok(builder.finish(other_data))
+        Ok(assemble(vec![builder], other_data))
     }
 }
 
@@ -557,8 +558,8 @@ struct RawSeries {
 
 /// Accumulates the arena pools as `traceEvents` stream in, so each event's
 /// strings are interned in the one parse pass rather than collected into a
-/// `Vec<RawEvent>` and re-walked. [`Self::finish`] folds in `otherData` and
-/// flattens the per-thread and per-counter scratch into the profile's flat pools.
+/// `Vec<RawEvent>` and re-walked. [`assemble`] folds one or more builders and
+/// `otherData` into the profile's flat pools.
 struct Builder {
     interner: Interner,
     args_pool: Vec<(Str, Str)>,
@@ -626,161 +627,247 @@ impl Builder {
         }
     }
 
-    /// Reserves the pools for the contents of `others`, so the subsequent
-    /// [`Self::merge`] calls copy each pool into place once instead of growing
-    /// it through repeated doublings.
-    fn reserve_for(&mut self, others: &[Builder]) {
-        self.interner
-            .reserve(others.iter().map(|b| b.interner.text().len()).sum());
-        self.args_pool.reserve(others.iter().map(|b| b.args_pool.len()).sum());
-        self.phase_markers
-            .reserve(others.iter().map(|b| b.phase_markers.len()).sum());
-        let mut per_tid: BTreeMap<i64, usize> = BTreeMap::new();
-        for b in others {
-            for (&tid, tslices) in &b.slices {
-                *per_tid.entry(tid).or_default() += tslices.len();
-            }
-        }
-        for (tid, n) in per_tid {
-            self.slices.entry(tid).or_default().reserve(n);
-        }
-    }
+}
 
-    /// Folds another builder's accumulated events (parsed from a later chunk of
-    /// the same array) into this one. The other's text pool is concatenated and
-    /// its slice/arg/marker handles rebased onto the joined pools; counter lanes
-    /// re-intern by name so a lane sampled across chunks merges into one; thread
-    /// metadata unions per tid. Depth assignment is deferred to [`Self::finish`]
-    /// because a thread's slices can land in several chunks.
-    fn merge(&mut self, other: Builder) {
-        let Builder {
-            interner,
-            args_pool,
-            thread_meta,
-            slices,
-            phase_markers,
-            counter_order,
-            counters,
-        } = other;
-        let text_base = self.interner.push_pool(interner.text());
-        let args_base = self.args_pool.len() as u32;
-
-        self.args_pool.extend(
-            args_pool
-                .into_iter()
-                .map(|(k, v)| (k.shifted(text_base), v.shifted(text_base))),
-        );
-
-        for (tid, mut tslices) in slices {
-            for s in &mut tslices {
-                s.name = s.name.shifted(text_base);
-                s.category = s.category.shifted(text_base);
-                if let Some(t) = &mut s.args.target {
-                    *t = t.shifted(text_base);
-                }
-                if let Some(m) = &mut s.args.mnemonic {
-                    *m = m.shifted(text_base);
-                }
-                if let Some(c) = &mut s.args.configuration {
-                    *c = c.shifted(text_base);
-                }
-                s.args.others = s.args.others.shifted(args_base);
-            }
-            self.slices.entry(tid).or_default().append(&mut tslices);
-        }
-
-        for mut m in phase_markers {
-            m.name = m.name.shifted(text_base);
-            self.phase_markers.push(m);
-        }
-
-        for (tid, (name, sort_index)) in thread_meta {
-            let entry = self.thread_meta.entry(tid).or_insert((None, MAX_SORT_INDEX));
-            if entry.0.is_none() {
-                entry.0 = name;
-            }
-            if sort_index != MAX_SORT_INDEX {
-                entry.1 = sort_index;
-            }
-        }
-
-        for lane_key in counter_order {
-            let lane = &counters[&lane_key];
-            let lane_name = self.interner.intern(&interner.resolve(lane.name).to_owned());
-            if !self.counters.contains_key(&lane_name) {
-                self.counter_order.push(lane_name);
-                self.counters.insert(
-                    lane_name,
-                    RawLane { name: lane_name, series: Vec::new() },
-                );
-            }
-            for series in &lane.series {
-                let series_name = self.interner.intern(&interner.resolve(series.name).to_owned());
-                let dst = self.counters.get_mut(&lane_name).unwrap();
-                match dst.series.iter_mut().find(|s| s.name == series_name) {
-                    Some(s) => s.points.extend_from_slice(&series.points),
-                    None => dst.series.push(RawSeries {
-                        name: series_name,
-                        points: series.points.clone(),
-                    }),
-                }
-            }
-        }
-    }
-
-    fn finish(mut self, other_data: Option<Map<String, Value>>) -> Profile {
-        let metadata = build_metadata(&mut self.interner, other_data.as_ref());
-        let span = compute_span(&self.slices, &self.counters, &self.phase_markers);
-
-        // Depth assignment sorts each track's slices independently, so spread
-        // the tracks over the parse worker count, stealing work track by track
-        // since sizes are heavily skewed toward a few big evaluator lanes.
-        let mut tracks: Vec<(i64, Vec<Slice>, u32)> = std::mem::take(&mut self.slices)
-            .into_iter()
-            .map(|(tid, tslices)| (tid, tslices, 0))
+/// Folds one or more builders — the ordered chunk builders of a parallel parse,
+/// or a single serial builder — into a [`Profile`]. Each builder's text pool is
+/// concatenated onto a joined interner and every slice is copied exactly once,
+/// straight into its final `slice_pool` position, with its handles rebased
+/// during that copy; the per-thread copy + depth pass runs across worker
+/// threads. Counter lanes re-intern by name so a lane sampled across chunks
+/// unifies into one; thread metadata unions per tid.
+fn assemble(builders: Vec<Builder>, other_data: Option<Map<String, Value>>) -> Profile {
+    let (mut interner, text_bases, args_bases) = timed("    layout", || {
+        let mut interner = Interner::new();
+        interner.reserve(builders.iter().map(|b| b.interner.text().len()).sum());
+        let text_bases: Vec<u32> = builders
+            .iter()
+            .map(|b| interner.push_pool(b.interner.text()))
             .collect();
-        let workers = worker_count().min(tracks.len());
-        let stealer = std::sync::Mutex::new(tracks.iter_mut());
+        let mut args_bases = Vec::with_capacity(builders.len());
+        let mut args_len = 0u32;
+        for b in &builders {
+            args_bases.push(args_len);
+            args_len += b.args_pool.len() as u32;
+        }
+        (interner, text_bases, args_bases)
+    });
+    // The pool is handed to the copy phase as uninitialized capacity rather
+    // than pre-filled: a fill pass would touch every page serially just to be
+    // overwritten, so the first (and only) write of each slot happens on the
+    // worker that copies it.
+    let slice_total: usize = builders.iter().flat_map(|b| b.slices.values()).map(Vec::len).sum();
+    let mut slice_pool: Vec<Slice> = Vec::with_capacity(slice_total);
+
+    // One source run per (thread, builder): that builder's slices for the
+    // thread, with the bases its handles rebase by.
+    struct Run<'a> {
+        src: &'a [Slice],
+        text_base: u32,
+        args_base: u32,
+    }
+    // A thread's contiguous destination segment, its runs in builder order, and
+    // the copy phase's per-thread results. The segment starts uninitialized;
+    // the runs' lengths sum to exactly its length, so the copy phase writes
+    // every slot exactly once.
+    struct TidTask<'a> {
+        dest: &'a mut [std::mem::MaybeUninit<Slice>],
+        runs: Vec<Run<'a>>,
+        max_depth: u32,
+        min_start_us: i64,
+        max_end_us: i64,
+    }
+    let mut tid_runs: BTreeMap<i64, Vec<Run>> = BTreeMap::new();
+    for (i, b) in builders.iter().enumerate() {
+        for (&tid, tslices) in &b.slices {
+            tid_runs.entry(tid).or_default().push(Run {
+                src: tslices,
+                text_base: text_bases[i],
+                args_base: args_bases[i],
+            });
+        }
+    }
+    let mut segments: Vec<(i64, Span32)> = Vec::with_capacity(tid_runs.len());
+    let mut tasks: Vec<TidTask> = Vec::with_capacity(tid_runs.len());
+    let mut rest = slice_pool.spare_capacity_mut();
+    let mut off = 0u32;
+    for (tid, runs) in tid_runs {
+        let len: usize = runs.iter().map(|r| r.src.len()).sum();
+        let (dest, tail) = std::mem::take(&mut rest).split_at_mut(len);
+        rest = tail;
+        segments.push((tid, Span32::new(off, len as u32)));
+        off += len as u32;
+        tasks.push(TidTask {
+            dest,
+            runs,
+            max_depth: 0,
+            min_start_us: i64::MAX,
+            max_end_us: i64::MIN,
+        });
+    }
+    debug_assert_eq!(off as usize, slice_total);
+
+    timed("    slices", || {
+        // Thread sizes are heavily skewed toward a few big evaluator lanes, so
+        // workers steal tasks one thread at a time.
+        let workers = worker_count().min(tasks.len());
+        let stealer = std::sync::Mutex::new(tasks.iter_mut());
         std::thread::scope(|scope| {
             for _ in 0..workers {
                 scope.spawn(|| loop {
-                    let Some((_, tslices, max_depth)) = stealer.lock().unwrap().next() else {
+                    let Some(task) = stealer.lock().unwrap().next() else {
                         break;
                     };
-                    *max_depth = assign_depths(tslices);
+                    let mut cursor = 0usize;
+                    for run in &task.runs {
+                        let dest = &mut task.dest[cursor..cursor + run.src.len()];
+                        for (dst, src) in dest.iter_mut().zip(run.src) {
+                            let mut s = *src;
+                            s.name = s.name.shifted(run.text_base);
+                            s.category = s.category.shifted(run.text_base);
+                            if let Some(t) = &mut s.args.target {
+                                *t = t.shifted(run.text_base);
+                            }
+                            if let Some(m) = &mut s.args.mnemonic {
+                                *m = m.shifted(run.text_base);
+                            }
+                            if let Some(c) = &mut s.args.configuration {
+                                *c = c.shifted(run.text_base);
+                            }
+                            s.args.others = s.args.others.shifted(run.args_base);
+                            dst.write(s);
+                        }
+                        cursor += run.src.len();
+                    }
+                    // SAFETY: the runs' lengths sum to the segment length, so
+                    // every slot was just written.
+                    let dest: &mut [Slice] = unsafe {
+                        &mut *((&mut *task.dest) as *mut [std::mem::MaybeUninit<Slice>] as *mut [Slice])
+                    };
+                    task.max_depth = assign_depths(dest);
+                    for s in dest.iter() {
+                        task.min_start_us = task.min_start_us.min(s.start_us);
+                        task.max_end_us = task.max_end_us.max(s.start_us + s.dur_us);
+                    }
                 });
             }
         });
-        drop(stealer);
+    });
+    let results: Vec<(u32, i64, i64)> = tasks
+        .into_iter()
+        .map(|t| (t.max_depth, t.min_start_us, t.max_end_us))
+        .collect();
+    // SAFETY: the segments partition the first `slice_total` slots of the
+    // pool's spare capacity, and the copy scope joined all their writers.
+    unsafe { slice_pool.set_len(slice_total) };
 
-        // Flatten per-thread slice lists into one pool, recording each thread's range.
-        let mut slice_pool: Vec<Slice> =
-            Vec::with_capacity(tracks.iter().map(|(_, s, _)| s.len()).sum());
-        let mut threads: Vec<ThreadTrack> = tracks
-            .into_iter()
-            .map(|(tid, tslices, max_depth)| {
-                let off = slice_pool.len() as u32;
-                let len = tslices.len() as u32;
-                slice_pool.extend(tslices);
-                let (name, sort_index) = match self.thread_meta.get(&tid) {
-                    Some((Some(n), s)) => (n.clone(), *s),
+    let builders_ref = &builders;
+    let profile = timed("    tail", move || {
+        let mut args_pool: Vec<(Str, Str)> =
+            Vec::with_capacity(builders_ref.iter().map(|b| b.args_pool.len()).sum());
+        for (i, b) in builders_ref.iter().enumerate() {
+            let base = text_bases[i];
+            args_pool
+                .extend(b.args_pool.iter().map(|&(k, v)| (k.shifted(base), v.shifted(base))));
+        }
+
+        let mut phase_markers: Vec<PhaseMarker> =
+            Vec::with_capacity(builders_ref.iter().map(|b| b.phase_markers.len()).sum());
+        for (i, b) in builders_ref.iter().enumerate() {
+            phase_markers.extend(b.phase_markers.iter().map(|m| PhaseMarker {
+                name: m.name.shifted(text_bases[i]),
+                start_us: m.start_us,
+            }));
+        }
+        phase_markers.sort_by_key(|m| m.start_us);
+
+        // Per thread: first builder's name wins, last explicit sort index wins.
+        let mut thread_meta: BTreeMap<i64, (Option<&str>, i64)> = BTreeMap::new();
+        for b in builders_ref {
+            for (&tid, (name, sort_index)) in &b.thread_meta {
+                let entry = thread_meta.entry(tid).or_insert((None, MAX_SORT_INDEX));
+                if entry.0.is_none() {
+                    entry.0 = name.as_deref();
+                }
+                if *sort_index != MAX_SORT_INDEX {
+                    entry.1 = *sort_index;
+                }
+            }
+        }
+
+        let mut counter_order: Vec<Str> = Vec::new();
+        let mut counters: HashMap<Str, RawLane> = HashMap::new();
+        for b in builders_ref {
+            for &lane_key in &b.counter_order {
+                let lane = &b.counters[&lane_key];
+                let lane_name = interner.intern(b.interner.resolve(lane.name));
+                if !counters.contains_key(&lane_name) {
+                    counter_order.push(lane_name);
+                    counters.insert(lane_name, RawLane { name: lane_name, series: Vec::new() });
+                }
+                for series in &lane.series {
+                    let series_name = interner.intern(b.interner.resolve(series.name));
+                    let dst = counters.get_mut(&lane_name).unwrap();
+                    match dst.series.iter_mut().find(|s| s.name == series_name) {
+                        Some(s) => s.points.extend_from_slice(&series.points),
+                        None => dst.series.push(RawSeries {
+                            name: series_name,
+                            points: series.points.clone(),
+                        }),
+                    }
+                }
+            }
+        }
+
+        let metadata = build_metadata(&mut interner, other_data.as_ref());
+
+        let mut start: Option<i64> = None;
+        let mut end: Option<i64> = None;
+        let mut note = |s: i64, e: i64| {
+            start = Some(start.map_or(s, |cur| cur.min(s)));
+            end = Some(end.map_or(e, |cur| cur.max(e)));
+        };
+        for (&(_, span), &(_, min_start, max_end)) in segments.iter().zip(&results) {
+            if !span.is_empty() {
+                note(min_start, max_end);
+            }
+        }
+        for lane in counters.values() {
+            for series in &lane.series {
+                for p in &series.points {
+                    note(p.ts_us, p.ts_us);
+                }
+            }
+        }
+        for m in &phase_markers {
+            note(m.start_us, m.start_us);
+        }
+        let span = TimeSpan {
+            start_us: start.unwrap_or(0),
+            end_us: end.unwrap_or(0),
+        };
+
+        let mut threads: Vec<ThreadTrack> = segments
+            .iter()
+            .zip(&results)
+            .map(|(&(tid, slices), &(max_depth, ..))| {
+                let (name, sort_index) = match thread_meta.get(&tid) {
+                    Some((Some(n), s)) => ((*n).to_owned(), *s),
                     Some((None, s)) => (format!("thread {tid}"), *s),
                     None => (format!("thread {tid}"), MAX_SORT_INDEX),
                 };
                 let lane_class = lane_class(tid, &name);
                 ThreadTrack {
                     tid,
-                    name: self.interner.intern(&name),
+                    name: interner.intern(&name),
                     sort_index,
-                    slices: Span32::new(off, len),
+                    slices,
                     max_depth,
                     lane_class,
                 }
             })
             .collect();
         threads.sort_by_key(|t| (t.sort_index, t.tid));
-
-        self.phase_markers.sort_by_key(|m| m.start_us);
 
         // Split each counter into one lane per numeric series: overlaid series
         // are hard to read, so each becomes its own graph, labelled with its arg
@@ -797,11 +884,11 @@ impl Builder {
             series: Option<RawSeries>,
         }
         let mut split: Vec<SplitLane> = Vec::new();
-        for name in std::mem::take(&mut self.counter_order) {
-            let Some(lane) = self.counters.remove(&name) else {
+        for name in counter_order {
+            let Some(lane) = counters.remove(&name) else {
                 continue;
             };
-            let counter_name = self.interner.resolve(lane.name).to_string();
+            let counter_name = interner.resolve(lane.name).to_string();
             if lane.series.is_empty() {
                 let rank = counter_rank(&counter_name, "");
                 split.push(SplitLane {
@@ -813,7 +900,7 @@ impl Builder {
             }
             let multi = lane.series.len() > 1;
             for s in lane.series {
-                let key = self.interner.resolve(s.name).to_string();
+                let key = interner.resolve(s.name).to_string();
                 let rank = counter_rank(&counter_name, &key);
                 let label = if multi {
                     format!("{counter_name} · {key}")
@@ -836,7 +923,7 @@ impl Builder {
         let counters: Vec<CounterLane> = split
             .into_iter()
             .map(|l| {
-                let name = self.interner.intern(&l.label);
+                let name = interner.intern(&l.label);
                 let series_off = series_pool.len() as u32;
                 if let Some(s) = l.series {
                     let points_off = point_pool.len() as u32;
@@ -856,18 +943,23 @@ impl Builder {
             .collect();
 
         Profile::from_parts(ProfileParts {
-            text: self.interner.into_text(),
+            text: interner.into_text(),
             slice_pool,
-            args_pool: self.args_pool,
+            args_pool,
             series_pool,
             point_pool,
             metadata,
             threads,
             counters,
-            phase_markers: self.phase_markers,
+            phase_markers,
             span,
         })
-    }
+    });
+
+    // The builders' teardown (per-thread maps, dedup maps, pools) is pure
+    // page-return work; detached so the load doesn't wait on it.
+    std::thread::spawn(move || drop(builders));
+    profile
 }
 
 /// Builds a profile from already-collected events, for the [`recover`] path that
@@ -877,7 +969,7 @@ fn build(other_data: Option<Map<String, Value>>, events: Vec<RawEvent>) -> Profi
     for ev in events {
         builder.event(ev);
     }
-    builder.finish(other_data)
+    assemble(vec![builder], other_data)
 }
 
 /// Below this many bytes of `traceEvents` the parallel parser's thread and merge
@@ -921,8 +1013,8 @@ const MIN_CHUNK_BYTES: usize = 4 << 20;
 /// Splits the `traceEvents` array into byte chunks at newline boundaries — a
 /// literal newline never falls inside a JSON string, so it always lies between
 /// events — parses each chunk into its own [`Builder`] on a pool of `n` worker
-/// threads pulling chunks from a shared queue, then folds the builders together
-/// in array order and finishes. `min_bytes` gates the array size below which it
+/// threads pulling chunks from a shared queue, then assembles the builders in
+/// array order. `min_bytes` gates the array size below which it
 /// declines. Returns `None` if the array can't be located, no split yields more
 /// than one chunk, or any chunk fails to parse.
 fn parse_chunks(text: &str, n: usize, min_bytes: usize) -> Option<Profile> {
@@ -989,19 +1081,11 @@ fn parse_chunks(text: &str, n: usize, min_bytes: usize) -> Option<Profile> {
         builders
     });
 
-    let merged = timed("  merge builders", || {
-        let builders: Vec<Builder> = builders.into_iter().collect::<Option<_>>()?;
-        if builders.is_empty() {
-            return None;
-        }
-        let mut merged = Builder::new(0);
-        merged.reserve_for(&builders);
-        for builder in builders {
-            merged.merge(builder);
-        }
-        Some(merged)
-    })?;
-    Some(timed("  finish", || merged.finish(other_data)))
+    let builders: Vec<Builder> = builders.into_iter().collect::<Option<_>>()?;
+    if builders.is_empty() {
+        return None;
+    }
+    Some(timed("  assemble", || assemble(builders, other_data)))
 }
 
 /// Parses every `{...}` event object in one chunk of the `traceEvents` array
@@ -1209,38 +1293,6 @@ fn assign_depths(slices: &mut [Slice]) -> u32 {
         stack.push(slice_end);
     }
     if slices.is_empty() { 0 } else { max_depth + 1 }
-}
-
-fn compute_span(
-    slices: &BTreeMap<i64, Vec<Slice>>,
-    counters: &HashMap<Str, RawLane>,
-    markers: &[PhaseMarker],
-) -> TimeSpan {
-    let mut start: Option<i64> = None;
-    let mut end: Option<i64> = None;
-    let mut note = |s: i64, e: i64| {
-        start = Some(start.map_or(s, |cur| cur.min(s)));
-        end = Some(end.map_or(e, |cur| cur.max(e)));
-    };
-    for tslices in slices.values() {
-        for sl in tslices {
-            note(sl.start_us, sl.start_us + sl.dur_us);
-        }
-    }
-    for lane in counters.values() {
-        for series in &lane.series {
-            for p in &series.points {
-                note(p.ts_us, p.ts_us);
-            }
-        }
-    }
-    for m in markers {
-        note(m.start_us, m.start_us);
-    }
-    TimeSpan {
-        start_us: start.unwrap_or(0),
-        end_us: end.unwrap_or(0),
-    }
 }
 
 /// Seals an interner and the given top-level vectors into a profile with empty
