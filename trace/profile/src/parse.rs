@@ -575,34 +575,132 @@ impl Builder {
 
 }
 
-/// Folds one or more builders — the ordered chunk builders of a parallel parse,
-/// or a single serial builder — into a [`Profile`]. Each builder's text pool is
-/// concatenated onto a joined interner and every slice is copied exactly once,
-/// straight into its final `slice_pool` position, with its handles rebased
-/// during that copy; the per-thread copy + depth pass runs across worker
-/// threads. Counter lanes re-intern by name so a lane sampled across chunks
-/// unifies into one; thread metadata unions per tid.
-fn assemble(builders: Vec<Builder>, other_data: Option<Map<String, Value>>) -> Profile {
-    let (mut interner, text_bases, args_bases) = timed("    layout", || {
-        let mut interner = Interner::new();
-        interner.reserve(builders.iter().map(|b| b.interner.text().len()).sum());
-        let text_bases: Vec<u32> = builders
-            .iter()
-            .map(|b| interner.push_pool(b.interner.text()))
-            .collect();
-        let mut args_bases = Vec::with_capacity(builders.len());
-        let mut args_len = 0u32;
-        for b in &builders {
-            args_bases.push(args_len);
-            args_len += b.args_pool.len() as u32;
+/// The incremental builder merge: [`Merge::fold`] absorbs one builder at a
+/// time — in array order — so everything except the final slice copy happens
+/// as builders arrive, and the pipelined parse hides that work under the
+/// decode∥parse phase. A fold concatenates the builder's text pool onto the
+/// joined interner and rebases its args and phase markers; counter lanes
+/// re-intern by name so a lane sampled across chunks unifies into one; thread
+/// metadata unions per tid. Only the builder's slices survive a fold (as a
+/// [`FoldedRun`] with the pool bases its handles rebase by): their copy into
+/// the flat pool needs every thread's total, so it waits for [`finish_merge`].
+struct Merge {
+    interner: Interner,
+    args_pool: Vec<(Str, Str)>,
+    phase_markers: Vec<PhaseMarker>,
+    thread_meta: BTreeMap<i64, (Option<String>, i64)>,
+    counter_order: Vec<Str>,
+    counters: HashMap<Str, RawLane>,
+    runs: Vec<FoldedRun>,
+}
+
+struct FoldedRun {
+    text_base: u32,
+    args_base: u32,
+    slices: BTreeMap<i64, Vec<Slice>>,
+}
+
+impl Merge {
+    fn new() -> Merge {
+        Merge {
+            interner: Interner::new(),
+            args_pool: Vec::new(),
+            phase_markers: Vec::new(),
+            thread_meta: BTreeMap::new(),
+            counter_order: Vec::new(),
+            counters: HashMap::new(),
+            runs: Vec::new(),
         }
-        (interner, text_bases, args_bases)
+    }
+
+    fn fold(&mut self, builder: Builder) {
+        let Builder {
+            interner: b_interner,
+            args_pool,
+            thread_meta,
+            slices,
+            phase_markers,
+            counter_order,
+            mut counters,
+        } = builder;
+        let text_base = self.interner.push_pool(b_interner.text());
+        let args_base = self.args_pool.len() as u32;
+        self.args_pool.extend(
+            args_pool.iter().map(|&(k, v)| (k.shifted(text_base), v.shifted(text_base))),
+        );
+        self.phase_markers.extend(phase_markers.iter().map(|m| PhaseMarker {
+            name: m.name.shifted(text_base),
+            start_us: m.start_us,
+        }));
+        // Per thread: the first folded name wins, the last explicit sort index wins.
+        for (tid, (name, sort_index)) in thread_meta {
+            let entry = self.thread_meta.entry(tid).or_insert((None, MAX_SORT_INDEX));
+            if entry.0.is_none() {
+                entry.0 = name;
+            }
+            if sort_index != MAX_SORT_INDEX {
+                entry.1 = sort_index;
+            }
+        }
+        for lane_key in counter_order {
+            let lane = counters.remove(&lane_key).expect("ordered lane exists");
+            let lane_name = self.interner.intern(b_interner.resolve(lane.name));
+            let dst = match self.counters.entry(lane_name) {
+                std::collections::hash_map::Entry::Occupied(e) => e.into_mut(),
+                std::collections::hash_map::Entry::Vacant(e) => {
+                    self.counter_order.push(lane_name);
+                    e.insert(RawLane { name: lane_name, series: Vec::new() })
+                }
+            };
+            for series in lane.series {
+                let series_name = self.interner.intern(b_interner.resolve(series.name));
+                match dst.series.iter_mut().find(|s| s.name == series_name) {
+                    Some(s) => s.points.extend(series.points),
+                    None => dst.series.push(RawSeries {
+                        name: series_name,
+                        points: series.points,
+                    }),
+                }
+            }
+        }
+        self.runs.push(FoldedRun { text_base, args_base, slices });
+    }
+}
+
+/// Folds one or more builders — the ordered chunk builders of a parallel parse,
+/// or a single serial builder — into a [`Profile`], for the paths that hold all
+/// builders at once; the pipelined parse folds incrementally instead and calls
+/// [`finish_merge`] directly.
+fn assemble(builders: Vec<Builder>, other_data: Option<Map<String, Value>>) -> Profile {
+    let mut merge = Merge::new();
+    merge.interner.reserve(builders.iter().map(|b| b.interner.text().len()).sum());
+    timed("    fold", || {
+        for builder in builders {
+            merge.fold(builder);
+        }
     });
+    finish_merge(merge, other_data)
+}
+
+/// Copies every folded slice exactly once, straight into its final
+/// `slice_pool` position with its handles rebased during the copy — the
+/// per-thread copy + depth pass runs across worker threads — then seals the
+/// merged pools into a [`Profile`].
+fn finish_merge(merge: Merge, other_data: Option<Map<String, Value>>) -> Profile {
+    let Merge {
+        mut interner,
+        args_pool,
+        mut phase_markers,
+        thread_meta,
+        counter_order,
+        mut counters,
+        runs,
+    } = merge;
     // The pool is handed to the copy phase as uninitialized capacity rather
     // than pre-filled: a fill pass would touch every page serially just to be
     // overwritten, so the first (and only) write of each slot happens on the
     // worker that copies it.
-    let slice_total: usize = builders.iter().flat_map(|b| b.slices.values()).map(Vec::len).sum();
+    let slice_total: usize = runs.iter().flat_map(|r| r.slices.values()).map(Vec::len).sum();
     let mut slice_pool: Vec<Slice> = Vec::with_capacity(slice_total);
 
     // One source run per (thread, builder): that builder's slices for the
@@ -624,12 +722,12 @@ fn assemble(builders: Vec<Builder>, other_data: Option<Map<String, Value>>) -> P
         max_end_us: i64,
     }
     let mut tid_runs: BTreeMap<i64, Vec<Run>> = BTreeMap::new();
-    for (i, b) in builders.iter().enumerate() {
-        for (&tid, tslices) in &b.slices {
+    for folded in &runs {
+        for (&tid, tslices) in &folded.slices {
             tid_runs.entry(tid).or_default().push(Run {
                 src: tslices,
-                text_base: text_bases[i],
-                args_base: args_bases[i],
+                text_base: folded.text_base,
+                args_base: folded.args_base,
             });
         }
     }
@@ -707,63 +805,8 @@ fn assemble(builders: Vec<Builder>, other_data: Option<Map<String, Value>>) -> P
     // pool's spare capacity, and the copy scope joined all their writers.
     unsafe { slice_pool.set_len(slice_total) };
 
-    let builders_ref = &builders;
-    let profile = timed("    tail", move || {
-        let mut args_pool: Vec<(Str, Str)> =
-            Vec::with_capacity(builders_ref.iter().map(|b| b.args_pool.len()).sum());
-        for (i, b) in builders_ref.iter().enumerate() {
-            let base = text_bases[i];
-            args_pool
-                .extend(b.args_pool.iter().map(|&(k, v)| (k.shifted(base), v.shifted(base))));
-        }
-
-        let mut phase_markers: Vec<PhaseMarker> =
-            Vec::with_capacity(builders_ref.iter().map(|b| b.phase_markers.len()).sum());
-        for (i, b) in builders_ref.iter().enumerate() {
-            phase_markers.extend(b.phase_markers.iter().map(|m| PhaseMarker {
-                name: m.name.shifted(text_bases[i]),
-                start_us: m.start_us,
-            }));
-        }
+    let profile = timed("    tail", || {
         phase_markers.sort_by_key(|m| m.start_us);
-
-        // Per thread: first builder's name wins, last explicit sort index wins.
-        let mut thread_meta: BTreeMap<i64, (Option<&str>, i64)> = BTreeMap::new();
-        for b in builders_ref {
-            for (&tid, (name, sort_index)) in &b.thread_meta {
-                let entry = thread_meta.entry(tid).or_insert((None, MAX_SORT_INDEX));
-                if entry.0.is_none() {
-                    entry.0 = name.as_deref();
-                }
-                if *sort_index != MAX_SORT_INDEX {
-                    entry.1 = *sort_index;
-                }
-            }
-        }
-
-        let mut counter_order: Vec<Str> = Vec::new();
-        let mut counters: HashMap<Str, RawLane> = HashMap::new();
-        for b in builders_ref {
-            for &lane_key in &b.counter_order {
-                let lane = &b.counters[&lane_key];
-                let lane_name = interner.intern(b.interner.resolve(lane.name));
-                if !counters.contains_key(&lane_name) {
-                    counter_order.push(lane_name);
-                    counters.insert(lane_name, RawLane { name: lane_name, series: Vec::new() });
-                }
-                for series in &lane.series {
-                    let series_name = interner.intern(b.interner.resolve(series.name));
-                    let dst = counters.get_mut(&lane_name).unwrap();
-                    match dst.series.iter_mut().find(|s| s.name == series_name) {
-                        Some(s) => s.points.extend_from_slice(&series.points),
-                        None => dst.series.push(RawSeries {
-                            name: series_name,
-                            points: series.points.clone(),
-                        }),
-                    }
-                }
-            }
-        }
 
         let metadata = build_metadata(&mut interner, other_data.as_ref());
 
@@ -902,9 +945,9 @@ fn assemble(builders: Vec<Builder>, other_data: Option<Map<String, Value>>) -> P
         })
     });
 
-    // The builders' teardown (per-thread maps, dedup maps, pools) is pure
+    // The folded runs' teardown (per-thread slice vectors) is pure
     // page-return work; detached so the load doesn't wait on it.
-    std::thread::spawn(move || drop(builders));
+    std::thread::spawn(move || drop(runs));
     profile
 }
 
@@ -1170,55 +1213,75 @@ fn stream_pieces(
     }
 }
 
-/// Runs the decode producer and `workers` chunk parsers over a bounded queue,
-/// then assembles the builders in array order. The queue bound keeps at most
-/// about two chunks per worker decoded-but-unparsed, so peak memory scales
-/// with the worker count, not the profile. Transcoding runs per chunk on the
-/// workers, off the decode leg.
+/// Runs the decode producer, `workers` chunk parsers, and a merger over
+/// bounded queues. The piece-queue bound keeps at most about two chunks per
+/// worker decoded-but-unparsed, so peak memory scales with the worker count,
+/// not the profile; transcoding runs per chunk on the workers, off the decode
+/// leg. The merger reorders finished builders back into array order and folds
+/// each into the running [`Merge`] while later chunks are still decoding and
+/// parsing, so after the last chunk only [`finish_merge`] remains.
 fn parse_gz_stream(bytes: &[u8], workers: usize, chunk_bytes: usize) -> Option<Profile> {
     let (tx, rx) = std::sync::mpsc::sync_channel::<Piece>(workers);
     let rx = std::sync::Mutex::new(rx);
-    let (ends, worker_out) = timed("  decode+parse chunks", || {
+    let (builder_tx, builder_rx) = std::sync::mpsc::channel::<(usize, Option<Builder>)>();
+    let (ends, merged) = timed("  decode+parse+fold chunks", || {
         std::thread::scope(|scope| {
             let producer = scope.spawn(|| stream_pieces(bytes, chunk_bytes, tx));
-            let handles: Vec<_> = (0..workers)
-                .map(|_| {
-                    scope.spawn(|| {
-                        let mut parsed: Vec<(usize, Option<Builder>)> = Vec::new();
-                        loop {
-                            let piece = match rx.lock().unwrap().recv() {
-                                Ok(piece) => piece,
-                                Err(_) => break,
-                            };
-                            let text = latin1_to_utf8(piece.bytes);
-                            let mut builder = Builder::new(text.len());
-                            let ok = parse_range_into(&mut builder, &text);
-                            parsed.push((piece.idx, ok.then_some(builder)));
+            for _ in 0..workers {
+                let builder_tx = builder_tx.clone();
+                let rx = &rx;
+                scope.spawn(move || loop {
+                    let piece = match rx.lock().unwrap().recv() {
+                        Ok(piece) => piece,
+                        Err(_) => break,
+                    };
+                    let text = latin1_to_utf8(piece.bytes);
+                    let mut builder = Builder::new(text.len());
+                    let ok = parse_range_into(&mut builder, &text);
+                    if builder_tx.send((piece.idx, ok.then_some(builder))).is_err() {
+                        break;
+                    }
+                });
+            }
+            // The workers hold the only remaining senders, so the merger's
+            // channel closes when the last of them finishes.
+            drop(builder_tx);
+            let merger = scope.spawn(move || {
+                let mut merge = Merge::new();
+                let mut pending: BTreeMap<usize, Builder> = BTreeMap::new();
+                let mut next = 0usize;
+                let mut failed = false;
+                while let Ok((idx, builder)) = builder_rx.recv() {
+                    match builder {
+                        Some(builder) if !failed => {
+                            pending.insert(idx, builder);
                         }
-                        parsed
-                    })
-                })
-                .collect();
+                        Some(_) => {}
+                        None => {
+                            failed = true;
+                            pending.clear();
+                        }
+                    }
+                    while let Some(builder) = pending.remove(&next) {
+                        merge.fold(builder);
+                        next += 1;
+                    }
+                }
+                (!failed).then_some((merge, next))
+            });
             let ends = producer.join().unwrap();
-            let worker_out: Vec<_> =
-                handles.into_iter().flat_map(|h| h.join().unwrap()).collect();
-            (ends, worker_out)
+            (ends, merger.join().unwrap())
         })
     });
     let ends = ends?;
-    let mut builders: Vec<Option<Builder>> = Vec::new();
-    builders.resize_with(ends.pieces, || None);
-    for (idx, builder) in worker_out {
-        builders[idx] = builder;
-    }
-    let builders: Vec<Builder> = builders.into_iter().collect::<Option<_>>()?;
-    if builders.is_empty() {
+    let (merge, folded) = merged?;
+    if folded != ends.pieces || folded == 0 {
         return None;
     }
     let head = latin1_to_utf8(ends.head);
     let tail = latin1_to_utf8(ends.tail);
     let other_data = recover_other_data(&head).or_else(|| recover_other_data(&tail));
-    Some(timed("  assemble", || assemble(builders, other_data)))
+    Some(timed("  finish", || finish_merge(merge, other_data)))
 }
 
 /// Parses every `{...}` event object in one chunk of the `traceEvents` array
