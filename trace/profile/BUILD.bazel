@@ -23,6 +23,17 @@ rust_test(
 )
 
 rust_binary(
+    name = "bench_inflate",
+    srcs = ["bench/inflate.rs"],
+    crate_name = "bench_inflate",
+    deps = [
+        ":profile",
+        "//alloc",
+        "@crates//:flate2",
+    ],
+)
+
+rust_binary(
     name = "bench_load",
     srcs = ["bench/load.rs"],
     crate_name = "bench_load",

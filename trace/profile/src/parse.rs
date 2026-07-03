@@ -388,7 +388,7 @@ mod libdeflate {
 /// the streaming decoder — when the input is too short to frame, the trailer
 /// size is zero, libdeflate reports an error (e.g. a truncated stream), or the
 /// stream is multi-member (the first member leaves input unconsumed).
-fn gzip_decompress_oneshot(bytes: &[u8]) -> Option<Vec<u8>> {
+pub fn gzip_decompress_oneshot(bytes: &[u8]) -> Option<Vec<u8>> {
     const GZIP_FRAMING_MIN: usize = 18; // 10-byte header + 8-byte trailer
     if bytes.len() < GZIP_FRAMING_MIN {
         return None;
