@@ -13,7 +13,6 @@ use serde_json::{Map, Value};
 use crate::model::{
     lane_class, work_class, CounterLane, CounterPoint, CounterSeries, Interner, Metadata,
     PhaseMarker, Profile, ProfileParts, Slice, SliceArgs, Span32, Str, ThreadTrack, TimeSpan,
-    WorkClass,
 };
 
 const GZIP_MAGIC: [u8; 2] = [0x1f, 0x8b];
