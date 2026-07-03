@@ -312,15 +312,22 @@ impl Profile {
         Profile::from_bytes(&bytes)
     }
 
-    /// Decompresses (if gzipped) and transcodes the profile to UTF-8, then parses
-    /// it in a single streaming pass over the decoded text (see
-    /// [`parse_streaming`]). The whole text is decoded into memory rather than
-    /// streamed off disk: the parser works over a slice (`SliceRead`), far faster
+    /// Parses a profile, preferring the pipelined gzip path (see
+    /// [`parse_gz_pipelined`]) that overlaps decompression with the parallel
+    /// parse. Anything the pipeline declines — plain JSON, a small or oddly
+    /// shaped stream, a decode or parse failure — decodes whole into memory and
+    /// parses that text: the parser works over a slice (`SliceRead`), far faster
     /// than the byte-at-a-time `from_reader` (`IoRead`) on a trace of millions of
     /// events, and a profile compresses small enough that the decoded text fits
     /// comfortably. A parse failure — most often a profile truncated by an
     /// interrupted Bazel — falls back to the best-effort [`recover`].
     pub fn from_bytes(bytes: &[u8]) -> Result<Profile, LoadError> {
+        if bytes.starts_with(&GZIP_MAGIC) {
+            if let Some(profile) = timed("decode+parse (pipelined)", || parse_gz_pipelined(bytes))
+            {
+                return Ok(profile);
+            }
+        }
         let decoded = timed("decode (decompress+transcode)", || decode(bytes))?;
         if let Some(profile) = timed("parse+build (parallel)", || parse_parallel(&decoded)) {
             return Ok(profile);
@@ -389,15 +396,7 @@ mod libdeflate {
 /// size is zero, libdeflate reports an error (e.g. a truncated stream), or the
 /// stream is multi-member (the first member leaves input unconsumed).
 pub fn gzip_decompress_oneshot(bytes: &[u8]) -> Option<Vec<u8>> {
-    const GZIP_FRAMING_MIN: usize = 18; // 10-byte header + 8-byte trailer
-    if bytes.len() < GZIP_FRAMING_MIN {
-        return None;
-    }
-    let isize_trailer =
-        u32::from_le_bytes(bytes[bytes.len() - 4..].try_into().ok()?) as usize;
-    if isize_trailer == 0 {
-        return None;
-    }
+    let isize_trailer = gzip_isize(bytes)?;
     let decompressor = unsafe { libdeflate::libdeflate_alloc_decompressor() };
     if decompressor.is_null() {
         return None;
@@ -426,6 +425,21 @@ pub fn gzip_decompress_oneshot(bytes: &[u8]) -> Option<Vec<u8>> {
         return None;
     }
     Some(out)
+}
+
+/// The uncompressed length a gzip stream declares in its ISIZE trailer (the
+/// length mod 2^32, exact under 4 GiB). `None` for input too short to frame or
+/// a zero trailer — both leave nothing for a trailer-sized decode to do.
+fn gzip_isize(bytes: &[u8]) -> Option<usize> {
+    const GZIP_FRAMING_MIN: usize = 18; // 10-byte header + 8-byte trailer
+    if bytes.len() < GZIP_FRAMING_MIN {
+        return None;
+    }
+    let isize_trailer = u32::from_le_bytes(bytes[bytes.len() - 4..].try_into().ok()?) as usize;
+    if isize_trailer == 0 {
+        return None;
+    }
+    Some(isize_trailer)
 }
 
 /// Transcodes an ISO-8859-1 (Latin-1) byte buffer — how Bazel writes profile
@@ -1088,6 +1102,193 @@ fn parse_chunks(text: &str, n: usize, min_bytes: usize) -> Option<Profile> {
     Some(timed("  assemble", || assemble(builders, other_data)))
 }
 
+/// Ceiling on a pipelined chunk buffer, bounding the memory the bounded queue
+/// plus in-flight worker chunks can hold on an arbitrarily large profile.
+const PIPELINE_MAX_CHUNK_BYTES: usize = 32 << 20;
+
+/// A run of decoded bytes without a newline longer than this aborts the
+/// pipelined decode: chunks are cut at newlines, so a profile that is not
+/// one-event-per-line would otherwise grow one chunk without bound. The
+/// whole-buffer fallback parses such input instead.
+const PIPELINE_MAX_EVENT_BYTES: usize = 64 << 20;
+
+/// Decompresses a gzipped profile and parses it concurrently: a producer
+/// thread streams the inflate, cuts the decoded bytes into newline-aligned
+/// chunks, and feeds them through a bounded queue to workers running the same
+/// per-chunk builders as [`parse_chunks`], so the decode leg hides under the
+/// parse leg. Each chunk buffer is dropped right after its parse — everything
+/// a builder keeps is interned — so the whole decoded text never exists in
+/// memory at once. Returns `None` — leaving the input to the whole-buffer path
+/// — for a single core, a stream whose ISIZE trailer is missing, zero, or
+/// under the parallel threshold, or any decode or parse failure.
+fn parse_gz_pipelined(bytes: &[u8]) -> Option<Profile> {
+    let workers = worker_count();
+    if workers < 2 {
+        return None;
+    }
+    let decoded_size = gzip_isize(bytes)?;
+    if decoded_size < MIN_PARALLEL_BYTES {
+        return None;
+    }
+    let chunk_bytes = (decoded_size / (workers * CHUNKS_PER_WORKER))
+        .clamp(MIN_CHUNK_BYTES, PIPELINE_MAX_CHUNK_BYTES);
+    parse_gz_stream(bytes, workers, chunk_bytes)
+}
+
+/// One newline-aligned run of decoded profile bytes, numbered so builders can
+/// be reassembled in array order after out-of-order parsing.
+struct Piece {
+    idx: usize,
+    bytes: Vec<u8>,
+}
+
+/// What the producer keeps besides the event chunks: the text before the
+/// `traceEvents` array and from its closing bracket to the end of the stream —
+/// one of which carries `otherData` — and how many pieces it sent.
+struct StreamEnds {
+    head: Vec<u8>,
+    tail: Vec<u8>,
+    pieces: usize,
+}
+
+/// Reads until `buf` is full or the stream ends; returns the filled length
+/// (short of `buf.len()` exactly at end of stream).
+fn fill(dec: &mut impl Read, buf: &mut [u8], mut filled: usize) -> std::io::Result<usize> {
+    while filled < buf.len() {
+        match dec.read(&mut buf[filled..]) {
+            Ok(0) => break,
+            Ok(n) => filled += n,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(filled)
+}
+
+fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack.windows(needle.len()).position(|w| w == needle)
+}
+
+/// The producer side of the pipelined decode: streams the inflate and sends
+/// newline-aligned pieces of the `traceEvents` array, blocking on the bounded
+/// queue when the workers are behind. `None` on a decode error, an input the
+/// chunker can't navigate (no array, no closing bracket, an over-long line),
+/// or a closed queue.
+fn stream_pieces(
+    bytes: &[u8],
+    chunk_bytes: usize,
+    tx: std::sync::mpsc::SyncSender<Piece>,
+) -> Option<StreamEnds> {
+    let mut dec = MultiGzDecoder::new(bytes);
+
+    // Grow the first buffer until the traceEvents array opens inside it; the
+    // bytes before the bracket become `head`, the rest seed the chunk loop.
+    let mut buf = vec![0u8; chunk_bytes];
+    let mut filled = fill(&mut dec, &mut buf, 0).ok()?;
+    let array_start = loop {
+        if let Some(key) = find_bytes(&buf[..filled], b"\"traceEvents\"") {
+            let after_key = key + "\"traceEvents\"".len();
+            if let Some(bracket) = buf[after_key..filled].iter().position(|&b| b == b'[') {
+                break after_key + bracket + 1;
+            }
+        }
+        if filled < buf.len() || buf.len() >= PIPELINE_MAX_EVENT_BYTES {
+            return None;
+        }
+        buf.resize(buf.len() * 2, 0);
+        filled = fill(&mut dec, &mut buf, filled).ok()?;
+    };
+    let head = buf[..array_start].to_vec();
+    let mut carry = buf[array_start..filled].to_vec();
+
+    let mut pieces = 0usize;
+    loop {
+        // Sizing from the carry lets a chunk double when no newline fit in it.
+        let mut buf = vec![0u8; chunk_bytes.max(carry.len() * 2)];
+        buf[..carry.len()].copy_from_slice(&carry);
+        let filled = fill(&mut dec, &mut buf, carry.len()).ok()?;
+        if filled < buf.len() {
+            // End of stream: everything before the last `]` is event content,
+            // the bracket onward may carry a trailing otherData.
+            buf.truncate(filled);
+            let close = buf.iter().rposition(|&b| b == b']')?;
+            let tail = buf[close..].to_vec();
+            buf.truncate(close);
+            if !buf.is_empty() {
+                tx.send(Piece { idx: pieces, bytes: buf }).ok()?;
+                pieces += 1;
+            }
+            return Some(StreamEnds { head, tail, pieces });
+        }
+        match buf[..filled].iter().rposition(|&b| b == b'\n') {
+            Some(newline) => {
+                let cut = newline + 1;
+                carry.clear();
+                carry.extend_from_slice(&buf[cut..filled]);
+                buf.truncate(cut);
+                tx.send(Piece { idx: pieces, bytes: buf }).ok()?;
+                pieces += 1;
+            }
+            None if filled >= PIPELINE_MAX_EVENT_BYTES => return None,
+            None => {
+                buf.truncate(filled);
+                carry = buf;
+            }
+        }
+    }
+}
+
+/// Runs the decode producer and `workers` chunk parsers over a bounded queue,
+/// then assembles the builders in array order. The queue bound keeps at most
+/// about two chunks per worker decoded-but-unparsed, so peak memory scales
+/// with the worker count, not the profile. Transcoding runs per chunk on the
+/// workers, off the decode leg.
+fn parse_gz_stream(bytes: &[u8], workers: usize, chunk_bytes: usize) -> Option<Profile> {
+    let (tx, rx) = std::sync::mpsc::sync_channel::<Piece>(workers);
+    let rx = std::sync::Mutex::new(rx);
+    let (ends, worker_out) = timed("  decode+parse chunks", || {
+        std::thread::scope(|scope| {
+            let producer = scope.spawn(|| stream_pieces(bytes, chunk_bytes, tx));
+            let handles: Vec<_> = (0..workers)
+                .map(|_| {
+                    scope.spawn(|| {
+                        let mut parsed: Vec<(usize, Option<Builder>)> = Vec::new();
+                        loop {
+                            let piece = match rx.lock().unwrap().recv() {
+                                Ok(piece) => piece,
+                                Err(_) => break,
+                            };
+                            let text = latin1_to_utf8(piece.bytes);
+                            let mut builder = Builder::new(text.len());
+                            let ok = parse_range_into(&mut builder, &text);
+                            parsed.push((piece.idx, ok.then_some(builder)));
+                        }
+                        parsed
+                    })
+                })
+                .collect();
+            let ends = producer.join().unwrap();
+            let worker_out: Vec<_> =
+                handles.into_iter().flat_map(|h| h.join().unwrap()).collect();
+            (ends, worker_out)
+        })
+    });
+    let ends = ends?;
+    let mut builders: Vec<Option<Builder>> = Vec::new();
+    builders.resize_with(ends.pieces, || None);
+    for (idx, builder) in worker_out {
+        builders[idx] = builder;
+    }
+    let builders: Vec<Builder> = builders.into_iter().collect::<Option<_>>()?;
+    if builders.is_empty() {
+        return None;
+    }
+    let head = latin1_to_utf8(ends.head);
+    let tail = latin1_to_utf8(ends.tail);
+    let other_data = recover_other_data(&head).or_else(|| recover_other_data(&tail));
+    Some(timed("  assemble", || assemble(builders, other_data)))
+}
+
 /// Parses every `{...}` event object in one chunk of the `traceEvents` array
 /// into `builder`, in place: each event is deserialized from its own offset
 /// with a `StreamDeserializer` (which reports the bytes it consumed), and the
@@ -1410,12 +1611,11 @@ mod tests {
         out
     }
 
-    #[test]
-    fn parallel_matches_serial() {
-        // One event per line, several threads, nested slices, a phase marker, and
-        // a counter sampled at two times — so chunking at newlines splits a
-        // thread's slices and a counter's points across chunks, exercising merge.
-        let json = "{\"otherData\":{\"bazel_version\":\"9.0.0\"},\"traceEvents\":[\n".to_string()
+    /// One event per line, several threads, nested slices, a phase marker, and
+    /// a counter sampled at two times — so chunking at newlines splits a
+    /// thread's slices and a counter's points across chunks, exercising merge.
+    fn chunkable_profile_json() -> String {
+        "{\"otherData\":{\"bazel_version\":\"9.0.0\"},\"traceEvents\":[\n".to_string()
             + "{\"name\":\"thread_name\",\"ph\":\"M\",\"tid\":1,\"args\":{\"name\":\"Lane A\"}},\n"
             + "{\"name\":\"thread_sort_index\",\"ph\":\"M\",\"tid\":1,\"args\":{\"sort_index\":10}},\n"
             + "{\"cat\":\"skyframe evaluator\",\"name\":\"parent\",\"ph\":\"X\",\"ts\":0,\"dur\":100,\"tid\":1,\"args\":{\"mnemonic\":\"CppCompile\",\"target\":\"//a:b\"}},\n"
@@ -1426,11 +1626,42 @@ mod tests {
             + "{\"cat\":\"remote action execution\",\"name\":\"work\",\"ph\":\"X\",\"ts\":10,\"dur\":80,\"tid\":2},\n"
             + "{\"name\":\"Usage\",\"ph\":\"C\",\"ts\":20,\"tid\":1,\"args\":{\"cpu\":2.0}},\n"
             + "{\"cat\":\"local action execution\",\"name\":\"more\",\"ph\":\"X\",\"ts\":30,\"dur\":10,\"tid\":2}\n"
-            + "]}";
+            + "]}"
+    }
+
+    #[test]
+    fn parallel_matches_serial() {
+        let json = chunkable_profile_json();
         let serial = parse_streaming(&json).expect("serial");
         // Force four chunks regardless of size so the merge path is exercised.
         let parallel = parse_chunks(&json, 4, 0).expect("parallel");
         assert_eq!(semantic(&serial), semantic(&parallel));
+    }
+
+    #[test]
+    fn pipelined_matches_serial() {
+        let json = chunkable_profile_json();
+        let serial = parse_streaming(&json).expect("serial");
+        let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        enc.write_all(json.as_bytes()).unwrap();
+        let gz = enc.finish().unwrap();
+        // Chunks far smaller than an event line force many pieces, boundary
+        // carries, and the no-newline buffer doubling.
+        let pipelined = parse_gz_stream(&gz, 4, 64).expect("pipelined");
+        assert_eq!(semantic(&serial), semantic(&pipelined));
+    }
+
+    #[test]
+    fn pipelined_reads_trailing_other_data() {
+        let json = "{\"traceEvents\":[\n".to_string()
+            + "{\"name\":\"thread_name\",\"ph\":\"M\",\"tid\":1,\"args\":{\"name\":\"L\"}},\n"
+            + "{\"cat\":\"c\",\"name\":\"a\",\"ph\":\"X\",\"ts\":0,\"dur\":1,\"tid\":1}\n"
+            + "],\"otherData\":{\"bazel_version\":\"9.0.0\"}}";
+        let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        enc.write_all(json.as_bytes()).unwrap();
+        let gz = enc.finish().unwrap();
+        let p = parse_gz_stream(&gz, 2, 64).expect("pipelined");
+        assert_eq!(p.opt_str(p.metadata().bazel_version), Some("9.0.0"));
     }
 
     #[test]
