@@ -13,7 +13,6 @@ rust_library(
         "@crates//:rustc-hash",
         "@crates//:serde",
         "@crates//:serde_json",
-        "@libdeflate//:libdeflate",
     ],
 )
 
@@ -27,7 +26,6 @@ rust_binary(
     srcs = ["bench/inflate.rs"],
     crate_name = "bench_inflate",
     deps = [
-        ":profile",
         "//alloc",
         "@crates//:flate2",
     ],

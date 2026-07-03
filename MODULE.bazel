@@ -3,16 +3,6 @@ module(
     version = "0.0.0",
 )
 
-bazel_dep(name = "libdeflate", version = "1.25")
-
-# The libdeflate BCR overlay's cc_library omits the gzip and CRC-32 units, so its
-# libdeflate_gzip_* entry points are unlinkable; patch them into the sources.
-single_version_override(
-    module_name = "libdeflate",
-    patch_strip = 1,
-    patches = ["//patches:libdeflate-add-gzip.patch"],
-    version = "1.25",
-)
 bazel_dep(name = "llvm", version = "0.7.0")
 bazel_dep(name = "platforms", version = "1.0.0")
 bazel_dep(name = "protobuf", version = "35.0", repo_name = "com_google_protobuf")

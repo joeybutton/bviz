@@ -348,88 +348,20 @@ fn decode(bytes: &[u8]) -> Result<String, LoadError> {
     Ok(timed("  latin1->utf8", || latin1_to_utf8(raw)))
 }
 
-/// Inflates a gzip stream, using libdeflate for the common single-member case
-/// (several times faster than the streaming miniz_oxide inflate) and falling
-/// back to flate2's `MultiGzDecoder` for anything libdeflate can't one-shot —
-/// multi-member streams, a missing/implausible size trailer, or a truncated
-/// stream (left for [`recover`] to salvage from the parse error).
+/// Inflates a gzip stream into one buffer, reserved from the ISIZE trailer so
+/// the common single-member case decodes without growth reallocations (a
+/// multi-member stream merely grows past the reservation).
 fn gunzip(bytes: &[u8]) -> Result<Vec<u8>, LoadError> {
-    if let Some(out) = gzip_decompress_oneshot(bytes) {
-        return Ok(out);
-    }
-    let mut out = Vec::new();
+    let mut out = Vec::with_capacity(gzip_isize(bytes).unwrap_or(0));
     MultiGzDecoder::new(bytes)
         .read_to_end(&mut out)
         .map_err(LoadError::Decompress)?;
     Ok(out)
 }
 
-mod libdeflate {
-    use std::os::raw::c_void;
-
-    #[repr(C)]
-    pub struct Decompressor {
-        _opaque: [u8; 0],
-    }
-
-    pub const LIBDEFLATE_SUCCESS: i32 = 0;
-
-    unsafe extern "C" {
-        pub fn libdeflate_alloc_decompressor() -> *mut Decompressor;
-        pub fn libdeflate_free_decompressor(d: *mut Decompressor);
-        pub fn libdeflate_gzip_decompress_ex(
-            d: *mut Decompressor,
-            in_: *const c_void,
-            in_nbytes: usize,
-            out: *mut c_void,
-            out_nbytes_avail: usize,
-            actual_in_nbytes_ret: *mut usize,
-            actual_out_nbytes_ret: *mut usize,
-        ) -> i32;
-    }
-}
-
-/// Decompresses a single-member gzip stream in one shot with libdeflate, sizing
-/// the output from the gzip ISIZE trailer (the uncompressed length mod 2^32,
-/// exact for a stream under 4 GiB). Returns `None` — so the caller falls back to
-/// the streaming decoder — when the input is too short to frame, the trailer
-/// size is zero, libdeflate reports an error (e.g. a truncated stream), or the
-/// stream is multi-member (the first member leaves input unconsumed).
-pub fn gzip_decompress_oneshot(bytes: &[u8]) -> Option<Vec<u8>> {
-    let isize_trailer = gzip_isize(bytes)?;
-    let decompressor = unsafe { libdeflate::libdeflate_alloc_decompressor() };
-    if decompressor.is_null() {
-        return None;
-    }
-    let mut out = vec![0u8; isize_trailer];
-    let mut in_used = 0usize;
-    let mut out_used = 0usize;
-    let result = unsafe {
-        libdeflate::libdeflate_gzip_decompress_ex(
-            decompressor,
-            bytes.as_ptr().cast(),
-            bytes.len(),
-            out.as_mut_ptr().cast(),
-            out.len(),
-            &mut in_used,
-            &mut out_used,
-        )
-    };
-    unsafe { libdeflate::libdeflate_free_decompressor(decompressor) };
-    // Require a clean decode of the whole input into exactly the trailer-sized
-    // buffer; unconsumed input means more gzip members remain.
-    if result != libdeflate::LIBDEFLATE_SUCCESS
-        || in_used != bytes.len()
-        || out_used != out.len()
-    {
-        return None;
-    }
-    Some(out)
-}
-
 /// The uncompressed length a gzip stream declares in its ISIZE trailer (the
 /// length mod 2^32, exact under 4 GiB). `None` for input too short to frame or
-/// a zero trailer — both leave nothing for a trailer-sized decode to do.
+/// a zero trailer.
 fn gzip_isize(bytes: &[u8]) -> Option<usize> {
     const GZIP_FRAMING_MIN: usize = 18; // 10-byte header + 8-byte trailer
     if bytes.len() < GZIP_FRAMING_MIN {

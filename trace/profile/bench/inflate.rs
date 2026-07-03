@@ -1,9 +1,11 @@
-//! Interleaved A/B benchmark of gzip inflate strategies on a profile file:
-//! libdeflate one-shot against streaming flate2, printing per-round wall time
-//! and output throughput. Alternating the strategies within one process keeps
-//! background-load drift out of the comparison. The streaming side inflates
-//! into one reused buffer — the throughput a chunked decode-and-drop pipeline
-//! sees, without accumulating the whole output.
+//! Interleaved A/B benchmark of the two gzip decode shapes the loader uses:
+//! inflating into one whole-profile buffer (the fallback path) against
+//! streaming into a reused chunk-sized buffer (what the pipelined parse
+//! consumes), printing per-round wall time and output throughput. Alternating
+//! the shapes within one process keeps background-load drift out of the
+//! comparison. The whole-buffer side pays the first touch of a full-size
+//! output allocation each round; the streaming side never holds more than one
+//! chunk.
 
 #[global_allocator]
 static GLOBAL: bviz_alloc::MiMalloc = bviz_alloc::MiMalloc;
@@ -21,15 +23,26 @@ fn report(label: &str, round: usize, start: std::time::Instant, out_bytes: usize
     );
 }
 
+/// The gzip ISIZE trailer, from which the whole-buffer side reserves its
+/// output like the loader's fallback decode does.
+fn isize_trailer(bytes: &[u8]) -> usize {
+    if bytes.len() < 4 {
+        return 0;
+    }
+    u32::from_le_bytes(bytes[bytes.len() - 4..].try_into().unwrap()) as usize
+}
+
 fn main() {
     let path = std::env::args().nth(1).expect("usage: bench_inflate <profile.gz>");
     let bytes = std::fs::read(&path).expect("read input");
     let mut buf = vec![0u8; STREAM_BUF_BYTES];
     for round in 0..ROUNDS {
         let start = std::time::Instant::now();
-        let out = bviz_trace_profile::gzip_decompress_oneshot(&bytes)
-            .expect("one-shot gzip decode");
-        report("libdeflate one-shot", round, start, out.len());
+        let mut out = Vec::with_capacity(isize_trailer(&bytes));
+        flate2::read::MultiGzDecoder::new(&bytes[..])
+            .read_to_end(&mut out)
+            .expect("whole-buffer inflate");
+        report("whole-buffer", round, start, out.len());
         drop(out);
 
         let start = std::time::Instant::now();
@@ -42,6 +55,6 @@ fn main() {
             }
             n += k;
         }
-        report("flate2 streaming", round, start, n);
+        report("chunked streaming", round, start, n);
     }
 }

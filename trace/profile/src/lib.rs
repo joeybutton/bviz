@@ -7,7 +7,3 @@ pub use model::{
     WorkClass,
 };
 pub use parse::LoadError;
-
-/// Exposed for the inflate benchmark, not part of the crate's API.
-#[doc(hidden)]
-pub use parse::gzip_decompress_oneshot;
