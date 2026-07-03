@@ -904,12 +904,22 @@ fn parse_parallel(text: &str) -> Option<Profile> {
     parse_chunks(text, workers, MIN_PARALLEL_BYTES)
 }
 
-/// Splits the `traceEvents` array into up to `n` byte chunks at newline
-/// boundaries — a literal newline never falls inside a JSON string, so it always
-/// lies between events — parses each chunk into its own [`Builder`] on a worker
-/// thread, then folds the builders together and finishes. `min_bytes` gates the
-/// array size below which it declines. Returns `None` if the array can't be
-/// located, no split yields more than one chunk, or any chunk fails to parse.
+/// How many chunks each worker gets on average. Event density varies across a
+/// profile, so equal-byte chunks parse in unequal time; finer chunks pulled
+/// from a shared queue bound the idle tail at roughly one chunk's parse time.
+const CHUNKS_PER_WORKER: usize = 8;
+
+/// Floor on chunk size: below this, per-chunk builder overhead (maps, pools)
+/// outweighs the balancing gain from finer chunks.
+const MIN_CHUNK_BYTES: usize = 4 << 20;
+
+/// Splits the `traceEvents` array into byte chunks at newline boundaries — a
+/// literal newline never falls inside a JSON string, so it always lies between
+/// events — parses each chunk into its own [`Builder`] on a pool of `n` worker
+/// threads pulling chunks from a shared queue, then folds the builders together
+/// in array order and finishes. `min_bytes` gates the array size below which it
+/// declines. Returns `None` if the array can't be located, no split yields more
+/// than one chunk, or any chunk fails to parse.
 fn parse_chunks(text: &str, n: usize, min_bytes: usize) -> Option<Profile> {
     let events_key = text.find("\"traceEvents\"")?;
     let array_start = text[events_key..].find('[')? + events_key + 1;
@@ -924,11 +934,12 @@ fn parse_chunks(text: &str, n: usize, min_bytes: usize) -> Option<Profile> {
     if region.len() < min_bytes {
         return None;
     }
+    let target_chunks = (n * CHUNKS_PER_WORKER).min(region.len() / MIN_CHUNK_BYTES).max(n);
     // Cut at the first newline at or after each evenly spaced target; each cut
     // sits between two events, so a chunk holds only whole events.
     let mut bounds = vec![0usize];
-    for k in 1..n {
-        let target = region.len() * k / n;
+    for k in 1..target_chunks {
+        let target = region.len() * k / target_chunks;
         if let Some(off) = region[target..].find('\n') {
             let cut = target + off + 1;
             if cut > *bounds.last().unwrap() {
@@ -945,18 +956,32 @@ fn parse_chunks(text: &str, n: usize, min_bytes: usize) -> Option<Profile> {
 
     let other_data = recover_other_data(text);
     let builders: Vec<Option<Builder>> = timed("  parse chunks", || {
-        std::thread::scope(|scope| {
-            let handles: Vec<_> = chunks
-                .iter()
-                .map(|&chunk| {
-                    scope.spawn(move || {
-                        let mut builder = Builder::new();
-                        parse_range_into(&mut builder, chunk).then_some(builder)
+        let next = std::sync::atomic::AtomicUsize::new(0);
+        let parsed: Vec<(usize, Option<Builder>)> = std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..n.min(chunks.len()))
+                .map(|_| {
+                    scope.spawn(|| {
+                        let mut parsed = Vec::new();
+                        loop {
+                            let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            let Some(&chunk) = chunks.get(i) else { break };
+                            let mut builder = Builder::new();
+                            let ok = parse_range_into(&mut builder, chunk);
+                            parsed.push((i, ok.then_some(builder)));
+                        }
+                        parsed
                     })
                 })
                 .collect();
-            handles.into_iter().map(|h| h.join().ok().flatten()).collect()
-        })
+            handles.into_iter().flat_map(|h| h.join().unwrap()).collect()
+        });
+        // Chunks were stolen out of order; restore array order for the merge.
+        let mut builders: Vec<Option<Builder>> = Vec::new();
+        builders.resize_with(chunks.len(), || None);
+        for (i, b) in parsed {
+            builders[i] = b;
+        }
+        builders
     });
 
     let merged = timed("  merge builders", || {
