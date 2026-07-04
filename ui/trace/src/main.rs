@@ -661,7 +661,11 @@ struct TraceView {
 }
 
 impl TraceView {
-    fn new(path: PathBuf, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    fn new(
+        load: std::thread::JoinHandle<Result<Profile, String>>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let focus_handle = cx.focus_handle();
         focus_handle.focus(window, cx);
         let mode_dropdown = cx.new(|cx| {
@@ -677,7 +681,7 @@ impl TraceView {
         let (view_dropdown, view_observer, view_scopes) = Self::view_dropdown(None, cx);
         let load_task = load_in_background(
             cx,
-            move || Profile::from_path(&path).map_err(|e| e.to_string()),
+            move || load.join().unwrap_or_else(|_| Err("profile loader thread panicked".into())),
             |view, result, cx| {
                 view.invalidate_aggregates();
                 // The lane layout depends only on the profile, so it survives a
@@ -3580,10 +3584,14 @@ struct Cli {
 fn main() {
     bviz_alloc::retain_freed_memory_across_load();
     let path = Cli::parse().profile;
+    // Loading from process entry overlaps the decode and parse with the app
+    // shell's startup (font-database scan, window and GPU-surface setup); the
+    // view joins this thread from its background task.
+    let load = std::thread::spawn(move || Profile::from_path(&path).map_err(|e| e.to_string()));
     bviz_ui_shell::run(
         "bazel_viz trace",
         size(px(1280.), px(820.)),
-        move |window, cx| cx.new(|cx| TraceView::new(path, window, cx)),
+        move |window, cx| cx.new(|cx| TraceView::new(load, window, cx)),
     );
 }
 
