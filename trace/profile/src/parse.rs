@@ -1265,8 +1265,14 @@ fn parse_gz_stream(bytes: &[u8], workers: usize, chunk_bytes: usize) -> Option<P
             // The workers hold the only remaining senders, so the merger's
             // channel closes when the last of them finishes.
             drop(builder_tx);
+            // Sized at the worst-case text density of a Bazel profile (about
+            // one distinct-string byte per four of decoded input), so folding
+            // never regrows the pool — a regrowth re-copies everything folded
+            // so far. Over-reservation costs only untouched address space.
+            let text_reserve = gzip_isize(bytes).unwrap_or(0) / 4;
             let merger = scope.spawn(move || {
                 let mut merge = Merge::new();
+                merge.interner.reserve(text_reserve);
                 let mut pending: BTreeMap<usize, Builder> = BTreeMap::new();
                 let mut next = 0usize;
                 let mut failed = false;
