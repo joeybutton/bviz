@@ -1143,6 +1143,19 @@ fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack.windows(needle.len()).position(|w| w == needle)
 }
 
+/// A buffer of `len` writable bytes for the next chunk: a recycled one from
+/// the pool when available, else a fresh allocation. Chunk buffers are large
+/// enough to take the allocator's huge-object path, which retains no freed
+/// pages, so recycling keeps their pages warm instead of paying a zero-fill
+/// and first-touch faults per chunk; on reuse only the length delta is
+/// zero-filled. Bytes past what [`fill`] reports are never read, so a
+/// recycled buffer's stale content is harmless.
+fn take_buf(pool: &std::sync::mpsc::Receiver<Vec<u8>>, len: usize) -> Vec<u8> {
+    let mut buf = pool.try_recv().unwrap_or_default();
+    buf.resize(len, 0);
+    buf
+}
+
 /// The producer side of the pipelined decode: streams the inflate and sends
 /// newline-aligned pieces of the `traceEvents` array, blocking on the bounded
 /// queue when the workers are behind. `None` on a decode error, an input the
@@ -1152,6 +1165,7 @@ fn stream_pieces(
     bytes: &[u8],
     chunk_bytes: usize,
     tx: std::sync::mpsc::SyncSender<Piece>,
+    pool: std::sync::mpsc::Receiver<Vec<u8>>,
 ) -> Option<StreamEnds> {
     let mut dec = MultiGzDecoder::new(bytes);
 
@@ -1178,7 +1192,7 @@ fn stream_pieces(
     let mut pieces = 0usize;
     loop {
         // Sizing from the carry lets a chunk double when no newline fit in it.
-        let mut buf = vec![0u8; chunk_bytes.max(carry.len() * 2)];
+        let mut buf = take_buf(&pool, chunk_bytes.max(carry.len() * 2));
         buf[..carry.len()].copy_from_slice(&carry);
         let filled = fill(&mut dec, &mut buf, carry.len()).ok()?;
         if filled < buf.len() {
@@ -1223,11 +1237,13 @@ fn parse_gz_stream(bytes: &[u8], workers: usize, chunk_bytes: usize) -> Option<P
     let (tx, rx) = std::sync::mpsc::sync_channel::<Piece>(workers);
     let rx = std::sync::Mutex::new(rx);
     let (builder_tx, builder_rx) = std::sync::mpsc::channel::<(usize, Option<Builder>)>();
+    let (pool_tx, pool_rx) = std::sync::mpsc::channel::<Vec<u8>>();
     let (ends, merged) = timed("  decode+parse+fold chunks", || {
         std::thread::scope(|scope| {
-            let producer = scope.spawn(|| stream_pieces(bytes, chunk_bytes, tx));
+            let producer = scope.spawn(move || stream_pieces(bytes, chunk_bytes, tx, pool_rx));
             for _ in 0..workers {
                 let builder_tx = builder_tx.clone();
+                let pool_tx = pool_tx.clone();
                 let rx = &rx;
                 scope.spawn(move || loop {
                     let piece = match rx.lock().unwrap().recv() {
@@ -1237,11 +1253,15 @@ fn parse_gz_stream(bytes: &[u8], workers: usize, chunk_bytes: usize) -> Option<P
                     let text = latin1_to_utf8(piece.bytes);
                     let mut builder = Builder::new(text.len());
                     let ok = parse_range_into(&mut builder, &text);
+                    // Hand the chunk's buffer back to the producer; everything
+                    // the builder keeps was interned during the parse.
+                    let _ = pool_tx.send(text.into_bytes());
                     if builder_tx.send((piece.idx, ok.then_some(builder))).is_err() {
                         break;
                     }
                 });
             }
+            drop(pool_tx);
             // The workers hold the only remaining senders, so the merger's
             // channel closes when the last of them finishes.
             drop(builder_tx);
