@@ -1178,17 +1178,18 @@ fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack.windows(needle.len()).position(|w| w == needle)
 }
 
-/// A buffer of `len` writable bytes for the next chunk: a recycled one from
-/// the pool when available, else a fresh allocation. Chunk buffers are large
-/// enough to take the allocator's huge-object path, which retains no freed
-/// pages, so recycling keeps their pages warm instead of paying a zero-fill
-/// and first-touch faults per chunk; on reuse only the length delta is
+/// A buffer of `len` writable bytes for the next chunk, recycled from the
+/// ring the pool channel carries — blocking until a worker returns one, and
+/// `None` only if every worker is gone. Chunk buffers are large enough to
+/// take the allocator's huge-object path, which retains no freed pages, so
+/// reusing the ring keeps their pages warm instead of paying a zero-fill and
+/// first-touch faults per chunk; on reuse only the length delta is
 /// zero-filled. Bytes past what [`fill`] reports are never read, so a
 /// recycled buffer's stale content is harmless.
-fn take_buf(pool: &std::sync::mpsc::Receiver<Vec<u8>>, len: usize) -> Vec<u8> {
-    let mut buf = pool.try_recv().unwrap_or_default();
+fn take_buf(pool: &std::sync::mpsc::Receiver<Vec<u8>>, len: usize) -> Option<Vec<u8>> {
+    let mut buf = pool.recv().ok()?;
     buf.resize(len, 0);
-    buf
+    Some(buf)
 }
 
 /// The producer side of the pipelined decode: streams the inflate and sends
@@ -1227,7 +1228,7 @@ fn stream_pieces(
     let mut pieces = 0usize;
     loop {
         // Sizing from the carry lets a chunk double when no newline fit in it.
-        let mut buf = take_buf(&pool, chunk_bytes.max(carry.len() * 2));
+        let mut buf = take_buf(&pool, chunk_bytes.max(carry.len() * 2))?;
         buf[..carry.len()].copy_from_slice(&carry);
         let filled = fill(&mut dec, &mut buf, carry.len()).ok()?;
         if filled < buf.len() {
@@ -1273,6 +1274,12 @@ fn parse_gz_stream(bytes: &[u8], workers: usize, chunk_bytes: usize) -> Option<P
     let rx = std::sync::Mutex::new(rx);
     let (builder_tx, builder_rx) = std::sync::mpsc::channel::<(usize, Option<Builder>)>();
     let (pool_tx, pool_rx) = std::sync::mpsc::channel::<Vec<u8>>();
+    // The ring holds one buffer more than the piece queue and the workers can
+    // have in flight together, so whenever the producer blocks on the pool a
+    // return is already on its way; the buffers allocate lazily on first use.
+    for _ in 0..(2 * workers + 1) {
+        let _ = pool_tx.send(Vec::new());
+    }
     let (ends, merged) = timed("  decode+parse+fold chunks", || {
         std::thread::scope(|scope| {
             let producer = scope.spawn(move || stream_pieces(bytes, chunk_bytes, tx, pool_rx));
