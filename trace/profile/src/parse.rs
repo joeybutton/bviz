@@ -409,16 +409,32 @@ fn gzip_isize(bytes: &[u8]) -> Option<usize> {
 /// Transcodes an ISO-8859-1 (Latin-1) byte buffer — how Bazel writes profile
 /// strings — to UTF-8. A Bazel profile is overwhelmingly ASCII, so the all-ASCII
 /// case (already valid UTF-8) reuses the buffer with no per-byte work; otherwise
-/// each leading ASCII run is copied wholesale and only a byte >= 0x80 expands to
-/// the two-byte UTF-8 encoding of the same code point.
+/// [`latin1_expand`] rewrites it.
 fn latin1_to_utf8(raw: Vec<u8>) -> String {
     if raw.is_ascii() {
         return String::from_utf8(raw).expect("ascii is valid utf-8");
     }
+    latin1_expand(&raw)
+}
+
+/// [`latin1_to_utf8`] over a borrowed buffer: the all-ASCII case borrows it
+/// outright.
+fn latin1_cow(raw: &[u8]) -> Cow<'_, str> {
+    if raw.is_ascii() {
+        // SAFETY: ASCII is valid UTF-8.
+        return Cow::Borrowed(unsafe { std::str::from_utf8_unchecked(raw) });
+    }
+    Cow::Owned(latin1_expand(raw))
+}
+
+/// Rewrites Latin-1 bytes as UTF-8: each leading ASCII run is copied wholesale
+/// and only a byte >= 0x80 expands to the two-byte UTF-8 encoding of the same
+/// code point.
+fn latin1_expand(raw: &[u8]) -> String {
     // High bytes each grow by one; reserve a little slack so a profile with few
     // of them doesn't reallocate.
     let mut out = String::with_capacity(raw.len() + raw.len() / 16 + 16);
-    let mut rest = &raw[..];
+    let mut rest = raw;
     while !rest.is_empty() {
         let split = rest.iter().position(|&b| b >= 0x80).unwrap_or(rest.len());
         // SAFETY: the prefix up to the first high byte is ASCII, hence valid UTF-8.
@@ -1146,9 +1162,43 @@ fn parse_gz_pipelined(bytes: &[u8]) -> Option<Profile> {
 
 /// One newline-aligned run of decoded profile bytes, numbered so builders can
 /// be reassembled in array order after out-of-order parsing.
-struct Piece {
+struct Piece<'a> {
     idx: usize,
-    bytes: Vec<u8>,
+    buf: PieceBuf<'a>,
+}
+
+/// The bytes behind a piece: normally a fixed-size part of the shared slab,
+/// carrying its filled length; a run too long for a part (an event line
+/// longer than a chunk) rides in a one-off owned buffer instead, dropped
+/// after its parse rather than returned to the ring.
+enum PieceBuf<'a> {
+    Slab { data: &'a mut [u8], len: usize },
+    Owned(Vec<u8>),
+}
+
+impl PieceBuf<'_> {
+    /// The whole writable region, independent of the filled length.
+    fn region(&mut self) -> &mut [u8] {
+        match self {
+            PieceBuf::Slab { data, .. } => data,
+            PieceBuf::Owned(v) => v,
+        }
+    }
+
+    /// The filled prefix a consumer may read.
+    fn bytes(&self) -> &[u8] {
+        match self {
+            PieceBuf::Slab { data, len } => &data[..*len],
+            PieceBuf::Owned(v) => v,
+        }
+    }
+
+    fn set_len(&mut self, n: usize) {
+        match self {
+            PieceBuf::Slab { len, .. } => *len = n,
+            PieceBuf::Owned(v) => v.truncate(n),
+        }
+    }
 }
 
 /// What the producer keeps besides the event chunks: the text before the
@@ -1178,30 +1228,18 @@ fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack.windows(needle.len()).position(|w| w == needle)
 }
 
-/// A buffer of `len` writable bytes for the next chunk, recycled from the
-/// ring the pool channel carries — blocking until a worker returns one, and
-/// `None` only if every worker is gone. Chunk buffers are large enough to
-/// take the allocator's huge-object path, which retains no freed pages, so
-/// reusing the ring keeps their pages warm instead of paying a zero-fill and
-/// first-touch faults per chunk; on reuse only the length delta is
-/// zero-filled. Bytes past what [`fill`] reports are never read, so a
-/// recycled buffer's stale content is harmless.
-fn take_buf(pool: &std::sync::mpsc::Receiver<Vec<u8>>, len: usize) -> Option<Vec<u8>> {
-    let mut buf = pool.recv().ok()?;
-    buf.resize(len, 0);
-    Some(buf)
-}
-
 /// The producer side of the pipelined decode: streams the inflate and sends
 /// newline-aligned pieces of the `traceEvents` array, blocking on the bounded
-/// queue when the workers are behind. `None` on a decode error, an input the
-/// chunker can't navigate (no array, no closing bracket, an over-long line),
-/// or a closed queue.
-fn stream_pieces(
+/// queue when the workers are behind and on the buffer ring when every part
+/// is in flight (a return is then already on its way; see [`parse_gz_stream`]
+/// on the ring size). `None` on a decode error, an input the chunker can't
+/// navigate (no array, no closing bracket, an over-long line), or a closed
+/// queue.
+fn stream_pieces<'a>(
     bytes: &[u8],
     chunk_bytes: usize,
-    tx: std::sync::mpsc::SyncSender<Piece>,
-    pool: std::sync::mpsc::Receiver<Vec<u8>>,
+    tx: std::sync::mpsc::SyncSender<Piece<'a>>,
+    pool: std::sync::mpsc::Receiver<&'a mut [u8]>,
 ) -> Option<StreamEnds> {
     let mut dec = MultiGzDecoder::new(bytes);
 
@@ -1226,37 +1264,56 @@ fn stream_pieces(
     let mut carry = buf[array_start..filled].to_vec();
 
     let mut pieces = 0usize;
+    // A slab part put aside when its chunk held no newline (the run moved to
+    // `carry` for the owned-buffer path), reused ahead of the pool.
+    let mut stash: Vec<&'a mut [u8]> = Vec::new();
     loop {
-        // Sizing from the carry lets a chunk double when no newline fit in it.
-        let mut buf = take_buf(&pool, chunk_bytes.max(carry.len() * 2))?;
-        buf[..carry.len()].copy_from_slice(&carry);
-        let filled = fill(&mut dec, &mut buf, carry.len()).ok()?;
-        if filled < buf.len() {
+        // A carry too long for a slab part means the previous chunk held no
+        // newline; doubling the owned buffer lets the run keep growing.
+        let mut buf = if carry.len() * 2 > chunk_bytes {
+            PieceBuf::Owned(vec![0u8; carry.len() * 2])
+        } else {
+            let data = match stash.pop() {
+                Some(data) => data,
+                None => pool.recv().ok()?,
+            };
+            PieceBuf::Slab { data, len: 0 }
+        };
+        let (filled, end_of_stream) = {
+            let region = buf.region();
+            region[..carry.len()].copy_from_slice(&carry);
+            let filled = fill(&mut dec, region, carry.len()).ok()?;
+            (filled, filled < region.len())
+        };
+        buf.set_len(filled);
+        if end_of_stream {
             // End of stream: everything before the last `]` is event content,
             // the bracket onward may carry a trailing otherData.
-            buf.truncate(filled);
-            let close = buf.iter().rposition(|&b| b == b']')?;
-            let tail = buf[close..].to_vec();
-            buf.truncate(close);
-            if !buf.is_empty() {
-                tx.send(Piece { idx: pieces, bytes: buf }).ok()?;
+            let close = buf.bytes().iter().rposition(|&b| b == b']')?;
+            let tail = buf.bytes()[close..].to_vec();
+            buf.set_len(close);
+            if close > 0 {
+                tx.send(Piece { idx: pieces, buf }).ok()?;
                 pieces += 1;
             }
             return Some(StreamEnds { head, tail, pieces });
         }
-        match buf[..filled].iter().rposition(|&b| b == b'\n') {
+        match buf.bytes().iter().rposition(|&b| b == b'\n') {
             Some(newline) => {
                 let cut = newline + 1;
                 carry.clear();
-                carry.extend_from_slice(&buf[cut..filled]);
-                buf.truncate(cut);
-                tx.send(Piece { idx: pieces, bytes: buf }).ok()?;
+                carry.extend_from_slice(&buf.bytes()[cut..]);
+                buf.set_len(cut);
+                tx.send(Piece { idx: pieces, buf }).ok()?;
                 pieces += 1;
             }
             None if filled >= PIPELINE_MAX_EVENT_BYTES => return None,
             None => {
-                buf.truncate(filled);
-                carry = buf;
+                carry.clear();
+                carry.extend_from_slice(buf.bytes());
+                if let PieceBuf::Slab { data, .. } = buf {
+                    stash.push(data);
+                }
             }
         }
     }
@@ -1270,15 +1327,19 @@ fn stream_pieces(
 /// each into the running [`Merge`] while later chunks are still decoding and
 /// parsing, so after the last chunk only [`finish_merge`] remains.
 fn parse_gz_stream(bytes: &[u8], workers: usize, chunk_bytes: usize) -> Option<Profile> {
+    // The buffer ring is one slab split into fixed-size parts — a single
+    // zeroed allocation whose pages are first touched by the inflate's own
+    // writes — holding one part more than the piece queue and the workers can
+    // have in flight together, so whenever the producer blocks on the pool a
+    // return is already on its way.
+    let ring = 2 * workers + 1;
+    let mut slab: Vec<u8> = vec![0u8; ring * chunk_bytes];
     let (tx, rx) = std::sync::mpsc::sync_channel::<Piece>(workers);
     let rx = std::sync::Mutex::new(rx);
     let (builder_tx, builder_rx) = std::sync::mpsc::channel::<(usize, Option<Builder>)>();
-    let (pool_tx, pool_rx) = std::sync::mpsc::channel::<Vec<u8>>();
-    // The ring holds one buffer more than the piece queue and the workers can
-    // have in flight together, so whenever the producer blocks on the pool a
-    // return is already on its way; the buffers allocate lazily on first use.
-    for _ in 0..(2 * workers + 1) {
-        let _ = pool_tx.send(Vec::new());
+    let (pool_tx, pool_rx) = std::sync::mpsc::channel::<&mut [u8]>();
+    for part in slab.chunks_mut(chunk_bytes) {
+        let _ = pool_tx.send(part);
     }
     let (ends, merged) = timed("  decode+parse+fold chunks", || {
         std::thread::scope(|scope| {
@@ -1292,12 +1353,15 @@ fn parse_gz_stream(bytes: &[u8], workers: usize, chunk_bytes: usize) -> Option<P
                         Ok(piece) => piece,
                         Err(_) => break,
                     };
-                    let text = latin1_to_utf8(piece.bytes);
+                    let text = latin1_cow(piece.buf.bytes());
                     let mut builder = Builder::new(text.len());
                     let ok = parse_range_into(&mut builder, &text);
-                    // Hand the chunk's buffer back to the producer; everything
-                    // the builder keeps was interned during the parse.
-                    let _ = pool_tx.send(text.into_bytes());
+                    drop(text);
+                    // Hand a slab part back to the producer; everything the
+                    // builder keeps was interned during the parse.
+                    if let PieceBuf::Slab { data, .. } = piece.buf {
+                        let _ = pool_tx.send(data);
+                    }
                     if builder_tx.send((piece.idx, ok.then_some(builder))).is_err() {
                         break;
                     }
