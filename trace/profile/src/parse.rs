@@ -1,5 +1,6 @@
 use std::borrow::Cow;
-use std::collections::{BTreeMap, HashMap};
+use std::cmp::{Ordering, Reverse};
+use std::collections::{BTreeMap, BinaryHeap, HashMap};
 use std::fmt;
 use std::io::Read;
 use std::marker::PhantomData;
@@ -82,6 +83,7 @@ impl<'de> Visitor<'de> for ProfileVisitor {
                 }
             }
         }
+        builder.sort_slices();
         Ok(assemble(vec![builder], other_data))
     }
 }
@@ -558,8 +560,8 @@ struct Builder {
     interner: Interner,
     args_pool: Vec<(Str, Str)>,
     thread_meta: BTreeMap<i64, (Option<String>, i64)>,
-    // Slices accumulate per thread (depth assignment sorts each list) before
-    // being concatenated into the flat slice pool.
+    // Slices accumulate per thread in event order; [`Builder::sort_slices`]
+    // puts each list into lane order before the builder is folded.
     slices: BTreeMap<i64, Vec<Slice>>,
     phase_markers: Vec<PhaseMarker>,
     counter_order: Vec<Str>,
@@ -623,6 +625,23 @@ impl Builder {
         }
     }
 
+    /// Sorts each thread's slices into lane order — the order [`Merge::fold`]
+    /// requires of a folded run. On the parallel paths this runs on the parse
+    /// workers, so the per-chunk sorts hide under the decode∥parse phase
+    /// instead of adding to the final merge.
+    fn sort_slices(&mut self) {
+        for slices in self.slices.values_mut() {
+            slices.sort_by(slice_order);
+        }
+    }
+}
+
+/// Lane order for a thread's slices: by start ascending, then longer duration
+/// first, so an enclosing span sorts before the spans it contains. Equal keys
+/// keep their relative order under a stable sort, which the merge's run-index
+/// tie-break preserves across builders.
+fn slice_order(a: &Slice, b: &Slice) -> Ordering {
+    a.start_us.cmp(&b.start_us).then(b.dur_us.cmp(&a.dur_us))
 }
 
 /// The incremental builder merge: [`Merge::fold`] absorbs one builder at a
@@ -663,6 +682,9 @@ impl Merge {
         }
     }
 
+    /// Absorbs one builder. The builder's per-thread slice lists must already
+    /// be in lane order ([`Builder::sort_slices`]): [`finish_merge`] k-way
+    /// merges the folded runs rather than re-sorting whole lanes.
     fn fold(&mut self, builder: Builder) {
         let Builder {
             interner: b_interner,
@@ -732,10 +754,11 @@ fn assemble(builders: Vec<Builder>, other_data: Option<Map<String, Value>>) -> P
     finish_merge(merge, other_data)
 }
 
-/// Copies every folded slice exactly once, straight into its final
-/// `slice_pool` position with its handles rebased during the copy — the
-/// per-thread copy + depth pass runs across worker threads — then seals the
-/// merged pools into a [`Profile`].
+/// Writes every folded slice exactly once, straight into its final
+/// `slice_pool` position: each thread's sorted runs are k-way merged into lane
+/// order, with handle rebasing, depth assignment, and span tracking fused into
+/// that single write pass, which runs per thread across worker threads. Then
+/// seals the merged pools into a [`Profile`].
 fn finish_merge(merge: Merge, other_data: Option<Map<String, Value>>) -> Profile {
     let Merge {
         mut interner,
@@ -746,23 +769,23 @@ fn finish_merge(merge: Merge, other_data: Option<Map<String, Value>>) -> Profile
         mut counters,
         runs,
     } = merge;
-    // The pool is handed to the copy phase as uninitialized capacity rather
+    // The pool is handed to the merge phase as uninitialized capacity rather
     // than pre-filled: a fill pass would touch every page serially just to be
     // overwritten, so the first (and only) write of each slot happens on the
-    // worker that copies it.
+    // worker that merges it.
     let slice_total: usize = runs.iter().flat_map(|r| r.slices.values()).map(Vec::len).sum();
     let mut slice_pool: Vec<Slice> = Vec::with_capacity(slice_total);
 
     // One source run per (thread, builder): that builder's slices for the
-    // thread, with the bases its handles rebase by.
+    // thread, in lane order, with the bases its handles rebase by.
     struct Run<'a> {
         src: &'a [Slice],
         text_base: u32,
         args_base: u32,
     }
     // A thread's contiguous destination segment, its runs in builder order, and
-    // the copy phase's per-thread results. The segment starts uninitialized;
-    // the runs' lengths sum to exactly its length, so the copy phase writes
+    // the merge phase's per-thread results. The segment starts uninitialized;
+    // the runs' lengths sum to exactly its length, so the merge phase writes
     // every slot exactly once.
     struct TidTask<'a> {
         dest: &'a mut [std::mem::MaybeUninit<Slice>],
@@ -770,6 +793,71 @@ fn finish_merge(merge: Merge, other_data: Option<Map<String, Value>>) -> Profile
         max_depth: u32,
         min_start_us: i64,
         max_end_us: i64,
+    }
+    /// K-way merges a thread's runs into its destination segment, in whole-lane
+    /// [`slice_order`] — on an equal key the lowest run index goes first, which
+    /// reproduces a stable whole-lane sort of the runs concatenated in fold
+    /// order. Each slot is written exactly once, and that one write also
+    /// rebases the slice's handles by its run's bases, assigns its depth from
+    /// the ancestor stack, and accumulates the lane's time span.
+    fn merge_lane(task: &mut TidTask) {
+        let TidTask { dest, runs, max_depth, min_start_us, max_end_us } = task;
+        let mut slots = dest.iter_mut();
+        // Ancestor end-times. A slice is nested only in a span that contains
+        // it, so pop while the stack top ends before the slice does
+        // (`end < slice_end`); popping on end-before-start alone would keep
+        // merely overlapping spans stacked — a span that starts inside another
+        // but ends after it is a sibling, not a child — building a runaway
+        // staircase of false depth.
+        let mut stack: Vec<i64> = Vec::new();
+        let mut emit = |run: &Run, src: &Slice| {
+            let mut s = *src;
+            s.name = s.name.shifted(run.text_base);
+            s.category = s.category.shifted(run.text_base);
+            if let Some(t) = &mut s.args.target {
+                *t = t.shifted(run.text_base);
+            }
+            if let Some(m) = &mut s.args.mnemonic {
+                *m = m.shifted(run.text_base);
+            }
+            if let Some(c) = &mut s.args.configuration {
+                *c = c.shifted(run.text_base);
+            }
+            s.args.others = s.args.others.shifted(run.args_base);
+            let end = s.start_us + s.dur_us;
+            while stack.last().is_some_and(|&e| e < end) {
+                stack.pop();
+            }
+            s.depth = stack.len() as u32;
+            *max_depth = (*max_depth).max(s.depth + 1);
+            stack.push(end);
+            *min_start_us = (*min_start_us).min(s.start_us);
+            *max_end_us = (*max_end_us).max(end);
+            slots.next().expect("segment sized to the runs' total").write(s);
+        };
+        if let [run] = &runs[..] {
+            for src in run.src {
+                emit(run, src);
+            }
+        } else {
+            let mut cursors = vec![0usize; runs.len()];
+            let mut heap: BinaryHeap<Reverse<(i64, Reverse<i64>, usize)>> =
+                BinaryHeap::with_capacity(runs.len());
+            for (i, run) in runs.iter().enumerate() {
+                if let Some(s) = run.src.first() {
+                    heap.push(Reverse((s.start_us, Reverse(s.dur_us), i)));
+                }
+            }
+            while let Some(Reverse((.., i))) = heap.pop() {
+                let run = &runs[i];
+                let src = &run.src[cursors[i]];
+                cursors[i] += 1;
+                emit(run, src);
+                if let Some(next) = run.src.get(cursors[i]) {
+                    heap.push(Reverse((next.start_us, Reverse(next.dur_us), i)));
+                }
+            }
+        }
     }
     let mut tid_runs: BTreeMap<i64, Vec<Run>> = BTreeMap::new();
     for folded in &runs {
@@ -812,37 +900,7 @@ fn finish_merge(merge: Merge, other_data: Option<Map<String, Value>>) -> Profile
                     let Some(task) = stealer.lock().unwrap().next() else {
                         break;
                     };
-                    let mut cursor = 0usize;
-                    for run in &task.runs {
-                        let dest = &mut task.dest[cursor..cursor + run.src.len()];
-                        for (dst, src) in dest.iter_mut().zip(run.src) {
-                            let mut s = *src;
-                            s.name = s.name.shifted(run.text_base);
-                            s.category = s.category.shifted(run.text_base);
-                            if let Some(t) = &mut s.args.target {
-                                *t = t.shifted(run.text_base);
-                            }
-                            if let Some(m) = &mut s.args.mnemonic {
-                                *m = m.shifted(run.text_base);
-                            }
-                            if let Some(c) = &mut s.args.configuration {
-                                *c = c.shifted(run.text_base);
-                            }
-                            s.args.others = s.args.others.shifted(run.args_base);
-                            dst.write(s);
-                        }
-                        cursor += run.src.len();
-                    }
-                    // SAFETY: the runs' lengths sum to the segment length, so
-                    // every slot was just written.
-                    let dest: &mut [Slice] = unsafe {
-                        &mut *((&mut *task.dest) as *mut [std::mem::MaybeUninit<Slice>] as *mut [Slice])
-                    };
-                    task.max_depth = assign_depths(dest);
-                    for s in dest.iter() {
-                        task.min_start_us = task.min_start_us.min(s.start_us);
-                        task.max_end_us = task.max_end_us.max(s.start_us + s.dur_us);
-                    }
+                    merge_lane(task);
                 });
             }
         });
@@ -852,7 +910,9 @@ fn finish_merge(merge: Merge, other_data: Option<Map<String, Value>>) -> Profile
         .map(|t| (t.max_depth, t.min_start_us, t.max_end_us))
         .collect();
     // SAFETY: the segments partition the first `slice_total` slots of the
-    // pool's spare capacity, and the copy scope joined all their writers.
+    // pool's spare capacity, each merge wrote its whole segment (the runs'
+    // lengths sum to the segment length), and the merge scope joined all
+    // their writers.
     unsafe { slice_pool.set_len(slice_total) };
 
     let profile = timed("    tail", || {
@@ -1008,6 +1068,7 @@ fn build(other_data: Option<Map<String, Value>>, events: Vec<RawEvent>) -> Profi
     for ev in events {
         builder.event(ev);
     }
+    builder.sort_slices();
     assemble(vec![builder], other_data)
 }
 
@@ -1103,6 +1164,9 @@ fn parse_chunks(text: &str, n: usize, min_bytes: usize) -> Option<Profile> {
                             let Some(&chunk) = chunks.get(i) else { break };
                             let mut builder = Builder::new(chunk.len());
                             let ok = parse_range_into(&mut builder, chunk);
+                            if ok {
+                                builder.sort_slices();
+                            }
                             parsed.push((i, ok.then_some(builder)));
                         }
                         parsed
@@ -1357,10 +1421,14 @@ fn parse_gz_stream(bytes: &[u8], workers: usize, chunk_bytes: usize) -> Option<P
                     let mut builder = Builder::new(text.len());
                     let ok = parse_range_into(&mut builder, &text);
                     drop(text);
-                    // Hand a slab part back to the producer; everything the
-                    // builder keeps was interned during the parse.
+                    // Hand a slab part back to the producer before sorting;
+                    // everything the builder keeps was interned during the
+                    // parse, and the inflate must not wait out the sort.
                     if let PieceBuf::Slab { data, .. } = piece.buf {
                         let _ = pool_tx.send(data);
+                    }
+                    if ok {
+                        builder.sort_slices();
                     }
                     if builder_tx.send((piece.idx, ok.then_some(builder))).is_err() {
                         break;
@@ -1601,29 +1669,6 @@ fn counter_rank(name: &str, series: &str) -> (u8, u8) {
     }
 }
 
-/// Implicit nesting from a flat per-thread slice list: sort by start then by
-/// longest duration, then assign each slice the depth of its nearest ENCLOSING
-/// ancestor on a stack of ancestor end-times. A slice is nested only in a span
-/// that contains it, so pop while the stack top ends before the slice does
-/// (`end < slice_end`); popping on end-before-start alone would keep merely
-/// overlapping spans stacked — a span that starts inside another but ends after
-/// it is a sibling, not a child — building a runaway staircase of false depth.
-fn assign_depths(slices: &mut [Slice]) -> u32 {
-    slices.sort_by(|a, b| a.start_us.cmp(&b.start_us).then(b.dur_us.cmp(&a.dur_us)));
-    let mut stack: Vec<i64> = Vec::new();
-    let mut max_depth = 0u32;
-    for slice in slices.iter_mut() {
-        let slice_end = slice.start_us + slice.dur_us;
-        while stack.last().is_some_and(|&end| end < slice_end) {
-            stack.pop();
-        }
-        slice.depth = stack.len() as u32;
-        max_depth = max_depth.max(slice.depth);
-        stack.push(slice_end);
-    }
-    if slices.is_empty() { 0 } else { max_depth + 1 }
-}
-
 /// Seals an interner and the given top-level vectors into a profile with empty
 /// slice/counter pools, for model tests that need only phase markers and threads.
 #[cfg(test)]
@@ -1776,6 +1821,37 @@ mod tests {
         let gz = enc.finish().unwrap();
         // Chunks far smaller than an event line force many pieces, boundary
         // carries, and the no-newline buffer doubling.
+        let pipelined = parse_gz_stream(&gz, 4, 64).expect("pipelined");
+        assert_eq!(semantic(&serial), semantic(&pipelined));
+    }
+
+    #[test]
+    fn merge_keeps_event_order_for_equal_keys() {
+        // One thread with several slices sharing an identical (ts, dur) key,
+        // interleaved with distinct ones and spread across chunks. Slices with
+        // equal keys keep event order in the lane, so every parse path must
+        // produce the serial path's order.
+        let json = "{\"traceEvents\":[\n".to_string()
+            + "{\"name\":\"thread_name\",\"ph\":\"M\",\"tid\":1,\"args\":{\"name\":\"L\"}},\n"
+            + "{\"cat\":\"c\",\"name\":\"outer\",\"ph\":\"X\",\"ts\":0,\"dur\":100,\"tid\":1},\n"
+            + "{\"cat\":\"c\",\"name\":\"tie1\",\"ph\":\"X\",\"ts\":10,\"dur\":5,\"tid\":1},\n"
+            + "{\"cat\":\"c\",\"name\":\"tie2\",\"ph\":\"X\",\"ts\":10,\"dur\":5,\"tid\":1},\n"
+            + "{\"cat\":\"c\",\"name\":\"mid\",\"ph\":\"X\",\"ts\":12,\"dur\":2,\"tid\":1},\n"
+            + "{\"cat\":\"c\",\"name\":\"tie3\",\"ph\":\"X\",\"ts\":10,\"dur\":5,\"tid\":1},\n"
+            + "{\"cat\":\"c\",\"name\":\"tie4\",\"ph\":\"X\",\"ts\":10,\"dur\":5,\"tid\":1},\n"
+            + "{\"cat\":\"c\",\"name\":\"tie5\",\"ph\":\"X\",\"ts\":10,\"dur\":5,\"tid\":1},\n"
+            + "{\"cat\":\"c\",\"name\":\"last\",\"ph\":\"X\",\"ts\":60,\"dur\":10,\"tid\":1}\n"
+            + "]}";
+        let serial = parse_streaming(&json).expect("serial");
+        let lane = &serial.threads()[0];
+        let names: Vec<_> = serial.slices(lane).iter().map(|s| serial.str(s.name)).collect();
+        assert_eq!(names, ["outer", "tie1", "tie2", "tie3", "tie4", "tie5", "mid", "last"]);
+        // Chunking at newlines splits the ties across several builders.
+        let parallel = parse_chunks(&json, 4, 0).expect("parallel");
+        assert_eq!(semantic(&serial), semantic(&parallel));
+        let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        enc.write_all(json.as_bytes()).unwrap();
+        let gz = enc.finish().unwrap();
         let pipelined = parse_gz_stream(&gz, 4, 64).expect("pipelined");
         assert_eq!(semantic(&serial), semantic(&pipelined));
     }
