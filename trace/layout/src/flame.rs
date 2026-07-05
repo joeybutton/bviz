@@ -512,6 +512,8 @@ fn build_critical_path(profile: &Profile, flamer: &mut Flamer, root: &mut Builde
         }
     }
 
+    // Components cluster on few worker lanes; build each lane's forest once.
+    let mut forests: HashMap<usize, Forest> = HashMap::new();
     for thread in threads {
         if thread.lane_class != LaneClass::CriticalPath {
             continue;
@@ -524,9 +526,11 @@ fn build_critical_path(profile: &Profile, flamer: &mut Flamer, root: &mut Builde
                 Some(&ActionLoc { lane, slice }) => {
                     let lane_slices = profile.slices(&threads[lane]);
                     let lane_details = profile.details(&threads[lane]);
-                    let forest = containment_forest(lane_slices);
+                    let forest = forests
+                        .entry(lane)
+                        .or_insert_with(|| containment_forest(lane_slices));
                     root.total_us += lane_slices[slice].dur_us;
-                    flamer.merge_span(root, lane_slices, lane_details, &forest, slice);
+                    flamer.merge_span(root, lane_slices, lane_details, forest, slice);
                 }
                 None => {
                     root.total_us += cp.dur_us;
@@ -878,6 +882,38 @@ mod tests {
         // critical component's 50, and the sub-span is present.
         assert_eq!(rustc.total_us, 100);
         assert_eq!(child(&g, rustc, "subprocess.run").total_us, 80);
+    }
+
+    #[test]
+    fn critical_path_reuses_a_lane_forest_across_components() {
+        // Two critical components match actions on the same worker lane, so the
+        // second graft runs against the lane's cached forest; both actions must
+        // still graft with their own subtrees.
+        let worker = vec![
+            action_named("Compiling foo", "Rustc", 0, 100),
+            slice("subprocess.run", "subprocess run", 0, 80),
+            action_named("Linking foo", "Link", 200, 60),
+            slice("subprocess.run", "subprocess run", 200, 40),
+        ];
+        let p = profile(vec![
+            track(8, LaneClass::Execution, worker),
+            track(
+                0,
+                LaneClass::CriticalPath,
+                vec![
+                    slice("action 'Compiling foo'", "critical path component", 500, 50),
+                    slice("action 'Linking foo'", "critical path component", 560, 30),
+                ],
+            ),
+        ]);
+        let g = build_flame_graph(&p, GroupMode::Mnemonic, Scope::CriticalPath);
+        assert_eq!(g.children(g.root()).len(), 2);
+        let rustc = child(&g, g.root(), "Rustc");
+        assert_eq!(rustc.total_us, 100);
+        assert_eq!(child(&g, rustc, "subprocess.run").total_us, 80);
+        let link = child(&g, g.root(), "Link");
+        assert_eq!(link.total_us, 60);
+        assert_eq!(child(&g, link, "subprocess.run").total_us, 40);
     }
 
     #[test]
