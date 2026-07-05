@@ -796,7 +796,11 @@ impl Builder {
                         Slice {
                             name: self.interner.intern(ev.name.as_deref().unwrap_or("")),
                             start_us: ts,
-                            dur_us: round_us(ev.dur),
+                            // A malformed dur must not make the slice end
+                            // before it starts: every consumer — the end-max
+                            // cull bound, the depth stack, the containment
+                            // walk — assumes end >= start.
+                            dur_us: round_us(ev.dur).max(0),
                             depth: 0,
                             work_class,
                         },
@@ -1949,6 +1953,19 @@ mod tests {
             .collect();
         // The second key arrives escaped, exercising the owned-key path.
         assert_eq!(others, vec![("note", "tab\there"), ("key 2", "v")]);
+    }
+
+    #[test]
+    fn negative_duration_clamps_to_zero() {
+        let json = r#"{
+            "traceEvents": [
+                {"ph":"X","cat":"c","name":"broken","ts":100,"dur":-40,"tid":1}
+            ]
+        }"#;
+        let p = parse(json);
+        let t = &p.threads()[0];
+        assert_eq!(p.slices(t)[0].dur_us, 0);
+        assert_eq!(p.end_maxes(t), [100]);
     }
 
     #[test]
