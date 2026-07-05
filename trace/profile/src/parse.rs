@@ -785,6 +785,7 @@ fn finish_merge(merge: Merge, other_data: Option<Map<String, Value>>) -> Profile
     let slice_total: usize = runs.iter().flat_map(|r| r.slices.values()).map(Vec::len).sum();
     let mut slice_pool: Vec<Slice> = Vec::with_capacity(slice_total);
     let mut detail_pool: Vec<SliceDetail> = Vec::with_capacity(slice_total);
+    let mut end_max_pool: Vec<i64> = Vec::with_capacity(slice_total);
 
     // One source run per (thread, builder): that builder's slices for the
     // thread, in lane order, with the bases its handles rebase by.
@@ -797,10 +798,11 @@ fn finish_merge(merge: Merge, other_data: Option<Map<String, Value>>) -> Profile
     // index range — its runs in builder order, and the merge phase's
     // per-thread results. The segments start uninitialized; the runs' lengths
     // sum to exactly their length, so the merge phase writes every slot of
-    // both exactly once.
+    // each exactly once.
     struct TidTask<'a> {
         dest: &'a mut [std::mem::MaybeUninit<Slice>],
         dest_detail: &'a mut [std::mem::MaybeUninit<SliceDetail>],
+        dest_end_max: &'a mut [std::mem::MaybeUninit<i64>],
         runs: Vec<Run<'a>>,
         max_depth: u32,
         min_start_us: i64,
@@ -812,12 +814,16 @@ fn finish_merge(merge: Merge, other_data: Option<Map<String, Value>>) -> Profile
     /// concatenated in fold order. Each slot is written exactly once, and that
     /// one write also rebases the slice's and detail's handles by its run's
     /// bases, assigns the slice's depth from the ancestor stack, and
-    /// accumulates the lane's time span. Slice and detail travel as one pair,
-    /// so the two pools stay index-parallel by construction.
+    /// accumulates the lane's time span — whose running end also fills the
+    /// slice's end-max slot, giving [`Profile::end_maxes`] its segment-local
+    /// prefix maximum. Slice, detail, and end max travel as one triple, so the
+    /// three pools stay index-parallel by construction.
     fn merge_lane(task: &mut TidTask) {
-        let TidTask { dest, dest_detail, runs, max_depth, min_start_us, max_end_us } = task;
+        let TidTask { dest, dest_detail, dest_end_max, runs, max_depth, min_start_us, max_end_us } =
+            task;
         let mut slots = dest.iter_mut();
         let mut detail_slots = dest_detail.iter_mut();
+        let mut end_max_slots = dest_end_max.iter_mut();
         // Ancestor end-times. A slice is nested only in a span that contains
         // it, so pop while the stack top ends before the slice does
         // (`end < slice_end`); popping on end-before-start alone would keep
@@ -844,6 +850,7 @@ fn finish_merge(merge: Merge, other_data: Option<Map<String, Value>>) -> Profile
             *max_end_us = (*max_end_us).max(end);
             slots.next().expect("segment sized to the runs' total").write(s);
             detail_slots.next().expect("segment sized to the runs' total").write(d);
+            end_max_slots.next().expect("segment sized to the runs' total").write(*max_end_us);
         };
         if let [run] = &runs[..] {
             for src in run.src {
@@ -883,6 +890,7 @@ fn finish_merge(merge: Merge, other_data: Option<Map<String, Value>>) -> Profile
     let mut tasks: Vec<TidTask> = Vec::with_capacity(tid_runs.len());
     let mut rest = slice_pool.spare_capacity_mut();
     let mut rest_detail = detail_pool.spare_capacity_mut();
+    let mut rest_end_max = end_max_pool.spare_capacity_mut();
     let mut off = 0u32;
     for (tid, runs) in tid_runs {
         let len: usize = runs.iter().map(|r| r.src.len()).sum();
@@ -890,11 +898,14 @@ fn finish_merge(merge: Merge, other_data: Option<Map<String, Value>>) -> Profile
         rest = tail;
         let (dest_detail, tail) = std::mem::take(&mut rest_detail).split_at_mut(len);
         rest_detail = tail;
+        let (dest_end_max, tail) = std::mem::take(&mut rest_end_max).split_at_mut(len);
+        rest_end_max = tail;
         segments.push((tid, Span32::new(off, len as u32)));
         off += len as u32;
         tasks.push(TidTask {
             dest,
             dest_detail,
+            dest_end_max,
             runs,
             max_depth: 0,
             min_start_us: i64::MAX,
@@ -924,11 +935,12 @@ fn finish_merge(merge: Merge, other_data: Option<Map<String, Value>>) -> Profile
         .map(|t| (t.max_depth, t.min_start_us, t.max_end_us))
         .collect();
     // SAFETY: the segments partition the first `slice_total` slots of each
-    // pool's spare capacity, each merge wrote its whole segment in both pools
-    // (the runs' lengths sum to the segment length, and every emit writes one
-    // slot of each), and the merge scope joined all their writers.
+    // pool's spare capacity, each merge wrote its whole segment in all three
+    // pools (the runs' lengths sum to the segment length, and every emit
+    // writes one slot of each), and the merge scope joined all their writers.
     unsafe { slice_pool.set_len(slice_total) };
     unsafe { detail_pool.set_len(slice_total) };
+    unsafe { end_max_pool.set_len(slice_total) };
 
     let profile = timed("    tail", || {
         phase_markers.sort_by_key(|m| m.start_us);
@@ -1060,6 +1072,7 @@ fn finish_merge(merge: Merge, other_data: Option<Map<String, Value>>) -> Profile
             text: interner.into_text(),
             slice_pool,
             detail_pool,
+            end_max_pool,
             args_pool,
             series_pool,
             point_pool,
@@ -1702,6 +1715,7 @@ pub(crate) fn build_for_test(
         text: interner.into_text(),
         slice_pool: Vec::new(),
         detail_pool: Vec::new(),
+        end_max_pool: Vec::new(),
         args_pool: Vec::new(),
         series_pool: Vec::new(),
         point_pool: Vec::new(),
@@ -1931,6 +1945,38 @@ mod tests {
         assert_eq!(depth("child1"), 1);
         assert_eq!(depth("child2"), 1);
         assert_eq!(t.max_depth, 2);
+    }
+
+    #[test]
+    fn end_maxes_hold_running_max_and_reset_per_thread() {
+        // tid 1: "outer" outlasts the short slices nested after it, so the
+        // running max stays flat at outer's end until "late" passes it; tid 2
+        // is its own segment, whose max restarts at its first slice's end.
+        // One event per line so the chunked paths split the lanes across
+        // builders and exercise the k-way merge's end-max accumulation.
+        let json = "{\"traceEvents\":[\n".to_string()
+            + "{\"cat\":\"c\",\"name\":\"outer\",\"ph\":\"X\",\"ts\":0,\"dur\":100,\"tid\":1},\n"
+            + "{\"cat\":\"c\",\"name\":\"a\",\"ph\":\"X\",\"ts\":10,\"dur\":5,\"tid\":1},\n"
+            + "{\"cat\":\"c\",\"name\":\"b\",\"ph\":\"X\",\"ts\":30,\"dur\":5,\"tid\":1},\n"
+            + "{\"cat\":\"c\",\"name\":\"c\",\"ph\":\"X\",\"ts\":60,\"dur\":10,\"tid\":1},\n"
+            + "{\"cat\":\"c\",\"name\":\"late\",\"ph\":\"X\",\"ts\":150,\"dur\":30,\"tid\":1},\n"
+            + "{\"cat\":\"c\",\"name\":\"w\",\"ph\":\"X\",\"ts\":5,\"dur\":10,\"tid\":2},\n"
+            + "{\"cat\":\"c\",\"name\":\"z\",\"ph\":\"X\",\"ts\":50,\"dur\":5,\"tid\":2}\n"
+            + "]}";
+        let check = |p: &Profile| {
+            let maxes: Vec<Vec<i64>> =
+                p.threads().iter().map(|t| p.end_maxes(t).to_vec()).collect();
+            assert_eq!(maxes, [vec![100, 100, 100, 100, 180], vec![15, 55]]);
+            for t in p.threads() {
+                assert_eq!(p.end_maxes(t).len(), p.slices(t).len());
+            }
+        };
+        check(&parse_streaming(&json).expect("serial"));
+        check(&parse_chunks(&json, 4, 0).expect("parallel"));
+        let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        enc.write_all(json.as_bytes()).unwrap();
+        let gz = enc.finish().unwrap();
+        check(&parse_gz_stream(&gz, 4, 64).expect("pipelined"));
     }
 
     #[test]

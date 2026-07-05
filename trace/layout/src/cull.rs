@@ -49,10 +49,22 @@ pub fn visible_slices(
         }
         next_free_col.clear();
         let rows_top = lane.top + metrics.header_height - viewport.scroll_y;
-        let slices = profile.slices(&profile.threads()[lane.track]);
+        let track = &profile.threads()[lane.track];
+        let slices = profile.slices(track);
         // Slices are sorted by start, so none past the right edge can be visible.
         let upper = slices.partition_point(|s| s.start_us as f64 <= view_end_us);
-        for (slice, s) in slices[..upper].iter().enumerate() {
+        // A slice is emitted only if its widened right edge reaches the left
+        // viewport edge: either its end is at or past t_of(0), or (widened to
+        // min_px) its start is at or past t_of(-min_px). Its end — and hence
+        // the monotone prefix max of ends — is at least t_of(-min_px) in both
+        // cases, so binary-searching the end maxes for that backed-off bound
+        // skips no slice with visible extent (only edge cases within a float
+        // rounding step of the boundary, whose painted width is sub-pixel).
+        let view_start_us = view.t_of(-min_px);
+        let end_maxes = profile.end_maxes(track);
+        let lower = end_maxes[..upper].partition_point(|&e| (e as f64) < view_start_us);
+        for (i, s) in slices[lower..upper].iter().enumerate() {
+            let slice = lower + i;
             let x = view.x_of(s.start_us);
             let natural = view.x_of(s.start_us + s.dur_us) - x;
             let w = natural.max(min_px);

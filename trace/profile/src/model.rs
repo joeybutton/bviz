@@ -111,6 +111,7 @@ pub struct Profile {
     pub(crate) text: String,
     pub(crate) slice_pool: Vec<Slice>,
     pub(crate) detail_pool: Vec<SliceDetail>,
+    pub(crate) end_max_pool: Vec<i64>,
     pub(crate) args_pool: Vec<(Str, Str)>,
     pub(crate) series_pool: Vec<CounterSeries>,
     pub(crate) point_pool: Vec<CounterPoint>,
@@ -411,6 +412,16 @@ impl Profile {
         &self.detail_pool[track.slices.range()]
     }
 
+    /// The running maximum end time (`start_us + dur_us`) of a thread track's
+    /// slices: element `i` is the max over the track's slices `0..=i`, reset at
+    /// each track. Index-parallel to [`Profile::slices`] and monotone
+    /// nondecreasing within a track, so the leftmost slice that can still
+    /// overlap a view is a binary search (`partition_point`) for the first
+    /// element reaching the view's left cull bound, instead of a scan from 0.
+    pub fn end_maxes(&self, track: &ThreadTrack) -> &[i64] {
+        &self.end_max_pool[track.slices.range()]
+    }
+
     /// The extra (non-typed) args of a slice, as interned key/value pairs.
     pub fn slice_others(&self, detail: &SliceDetail) -> &[(Str, Str)] {
         &self.args_pool[detail.others.range()]
@@ -460,6 +471,7 @@ impl Profile {
             text,
             slice_pool,
             detail_pool,
+            end_max_pool,
             args_pool,
             series_pool,
             point_pool,
@@ -473,6 +485,7 @@ impl Profile {
             text,
             slice_pool,
             detail_pool,
+            end_max_pool,
             args_pool,
             series_pool,
             point_pool,
@@ -490,6 +503,7 @@ pub(crate) struct ProfileParts {
     pub text: String,
     pub slice_pool: Vec<Slice>,
     pub detail_pool: Vec<SliceDetail>,
+    pub end_max_pool: Vec<i64>,
     pub args_pool: Vec<(Str, Str)>,
     pub series_pool: Vec<CounterSeries>,
     pub point_pool: Vec<CounterPoint>,

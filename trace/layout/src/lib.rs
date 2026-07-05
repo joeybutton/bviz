@@ -239,6 +239,128 @@ mod tests {
         assert!(s.x <= 0.0 && s.x + s.w >= viewport.width);
     }
 
+    /// The full left-to-right scan `visible_slices` is checked against: every
+    /// slice up to the right cull bound is tested, with no end-max lower bound.
+    fn visible_slices_full_scan(
+        profile: &bviz_trace_profile::Profile,
+        layout: &LaneLayout,
+        view: &TimeView,
+        viewport: &Viewport,
+        metrics: &LaneMetrics,
+        min_px: f32,
+    ) -> Vec<VisibleSlice> {
+        let view_end_us = view.t_of(viewport.width);
+        let mut out = Vec::new();
+        let mut next_free_col: Vec<i32> = Vec::new();
+        for lane in &layout.lanes {
+            let lane_top = lane.top - viewport.scroll_y;
+            if lane_top + lane.height < 0.0 || lane_top > viewport.height {
+                continue;
+            }
+            next_free_col.clear();
+            let rows_top = lane.top + metrics.header_height - viewport.scroll_y;
+            let slices = profile.slices(&profile.threads()[lane.track]);
+            let upper = slices.partition_point(|s| s.start_us as f64 <= view_end_us);
+            for (slice, s) in slices[..upper].iter().enumerate() {
+                let x = view.x_of(s.start_us);
+                let natural = view.x_of(s.start_us + s.dur_us) - x;
+                let w = natural.max(min_px);
+                if x + w < 0.0 || x > viewport.width {
+                    continue;
+                }
+                let depth = s.depth as usize;
+                if depth >= next_free_col.len() {
+                    next_free_col.resize(depth + 1, i32::MIN);
+                }
+                let start_col = x.floor() as i32;
+                if natural < min_px && start_col < next_free_col[depth] {
+                    continue;
+                }
+                next_free_col[depth] = ((x + w).floor() as i32).max(start_col + 1);
+                let paint_x = x.max(-viewport.width);
+                let paint_w = (x + w).min(2.0 * viewport.width) - paint_x;
+                out.push(VisibleSlice {
+                    track: lane.track,
+                    slice,
+                    x: paint_x,
+                    y: rows_top + s.depth as f32 * metrics.row_height,
+                    w: paint_w,
+                    h: metrics.row_height,
+                });
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn indexed_cull_matches_full_scan() {
+        const MIN_PX: f32 = 4.0;
+        let p = profile(vec![
+            track(
+                1,
+                LaneClass::Execution,
+                vec![
+                    // A span covering the whole timeline: crosses every view.
+                    slice("span", "general information", 0, 1_000_000),
+                    // Short slices far left of the mid/tail views.
+                    slice("left1", "general information", 1_000, 10),
+                    slice("left2", "general information", 5_000, 10),
+                    // A tiny slice too far left to be saved by widening, and
+                    // one just left of the mid view's start that appears only
+                    // via min-px widening.
+                    slice("tiny_far", "general information", 499_990, 2),
+                    slice("tiny_kept", "general information", 499_998, 1),
+                    // Slices inside the mid view, one wide and one a marker.
+                    slice("in1", "general information", 500_010, 100),
+                    slice("in2", "general information", 500_150, 2),
+                    slice("tail", "general information", 999_900, 50),
+                ],
+            ),
+            // A lane where the mid view's left bound lands strictly inside the
+            // slice list — early slices culled by the end-max bound, later ones
+            // emitted — so an emitted index not offset by that bound would name
+            // the wrong slice.
+            track(
+                2,
+                LaneClass::Analysis,
+                vec![
+                    slice("b1", "general information", 1_000, 50),
+                    slice("b2", "general information", 2_000, 5),
+                    slice("b4", "general information", 499_997, 1),
+                    slice("b3", "general information", 500_100, 80),
+                ],
+            ),
+        ]);
+        let layout = lay_out_lanes(&p, &METRICS);
+        let viewport = Viewport {
+            width: 300.0,
+            height: 200.0,
+            scroll_y: 0.0,
+        };
+        let views = [
+            ("fitted", TimeView::fit(p.span(), viewport.width, 24.0)),
+            ("mid", TimeView { start_us: 500_000.0, px_per_us: 1.0 }),
+            ("mid coarse", TimeView { start_us: 490_000.0, px_per_us: 0.01 }),
+            ("mid deep", TimeView { start_us: 500_000.0, px_per_us: 50.0 }),
+            ("tail", TimeView { start_us: 999_800.0, px_per_us: 1.0 }),
+            ("before content", TimeView { start_us: -50_000.0, px_per_us: 1.0 }),
+        ];
+        for (label, view) in views {
+            let indexed = visible_slices(&p, &layout, &view, &viewport, &METRICS, MIN_PX);
+            let full = visible_slices_full_scan(&p, &layout, &view, &viewport, &METRICS, MIN_PX);
+            assert_eq!(indexed, full, "view {label}");
+        }
+        // The mid view exercises every class: the crossing span, the widened
+        // tiny slice, and the interior slices survive; everything ending left
+        // of the widening margin is culled.
+        let (_, mid) = views[1];
+        let names: Vec<&str> = visible_slices(&p, &layout, &mid, &viewport, &METRICS, MIN_PX)
+            .iter()
+            .map(|v| p.str(p.slices(&p.threads()[v.track])[v.slice].name))
+            .collect();
+        assert_eq!(names, ["span", "tiny_kept", "in1", "in2", "b4", "b3"]);
+    }
+
     #[test]
     fn culls_scrolled_off_lane() {
         let p = profile(vec![track(
