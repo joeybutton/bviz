@@ -554,11 +554,13 @@ impl Builder {
     /// `bytes_hint` is the length of the JSON this builder will consume; the
     /// interner is pre-sized from it with distinct-string and text densities
     /// that bound what large Bazel profiles exhibit per chunk (about one
-    /// distinct string per 700 bytes and one text byte per 4.4), so bulk
-    /// interning avoids rehash and regrow copies without gross over-reservation.
+    /// distinct string per 300 bytes and one text byte per 3.3 — denser than
+    /// the whole-profile figures, because strings shared across chunks
+    /// re-intern in each), so bulk interning avoids rehash and regrow copies
+    /// without gross over-reservation.
     fn new(bytes_hint: usize) -> Builder {
         Builder {
-            interner: Interner::with_capacity(bytes_hint / 512, bytes_hint / 8),
+            interner: Interner::with_capacity(bytes_hint / 256, bytes_hint / 3),
             args_pool: Vec::new(),
             thread_meta: BTreeMap::new(),
             slices: BTreeMap::new(),
@@ -1298,11 +1300,13 @@ fn parse_gz_stream(bytes: &[u8], workers: usize, chunk_bytes: usize) -> Option<P
             // The workers hold the only remaining senders, so the merger's
             // channel closes when the last of them finishes.
             drop(builder_tx);
-            // Sized at the worst-case text density of a Bazel profile (about
-            // one distinct-string byte per four of decoded input), so folding
-            // never regrows the pool — a regrowth re-copies everything folded
-            // so far. Over-reservation costs only untouched address space.
-            let text_reserve = gzip_isize(bytes).unwrap_or(0) / 4;
+            // Sized at the summed per-chunk text density of a Bazel profile
+            // (about one distinct-string byte per 3.3 of decoded input;
+            // strings shared across chunks appear in each chunk's pool), so
+            // folding never regrows the pool — a regrowth re-copies everything
+            // folded so far. Over-reservation costs only untouched address
+            // space.
+            let text_reserve = gzip_isize(bytes).unwrap_or(0) / 3;
             let merger = scope.spawn(move || {
                 let mut merge = Merge::new();
                 merge.interner.reserve(text_reserve);
