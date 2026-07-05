@@ -9,6 +9,7 @@ rust_library(
     visibility = ["//trace/layout:__pkg__", "//ui/trace:__pkg__"],
     deps = [
         "@crates//:flate2",
+        "@crates//:hashbrown",
         "@crates//:num_cpus",
         "@crates//:rustc-hash",
         "@crates//:serde",

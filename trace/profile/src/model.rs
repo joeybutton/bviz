@@ -449,17 +449,25 @@ pub(crate) struct ProfileParts {
 /// pool.
 pub struct Interner {
     text: String,
-    // A non-cryptographic hasher: the keys are short, non-adversarial profile
-    // strings interned tens of millions of times, where the default SipHash is
-    // the dominant lookup cost.
-    seen: std::collections::HashMap<Box<str>, Str, rustc_hash::FxBuildHasher>,
+    // The map entries are bare handles, hashed and compared through the text
+    // pool, so each distinct string is stored once — in the pool — rather than
+    // duplicated as a boxed key, and dropping the map frees a single table.
+    seen: hashbrown::HashTable<Str>,
+}
+
+/// Hashes an interner key. Non-cryptographic: the keys are short,
+/// non-adversarial profile strings interned tens of millions of times, where
+/// the default SipHash is the dominant lookup cost.
+fn intern_hash(s: &str) -> u64 {
+    use std::hash::BuildHasher;
+    rustc_hash::FxBuildHasher.hash_one(s)
 }
 
 impl Interner {
     pub fn new() -> Interner {
         Interner {
             text: String::new(),
-            seen: std::collections::HashMap::default(),
+            seen: hashbrown::HashTable::new(),
         }
     }
 
@@ -469,24 +477,23 @@ impl Interner {
     pub fn with_capacity(distinct: usize, text_bytes: usize) -> Interner {
         Interner {
             text: String::with_capacity(text_bytes),
-            seen: std::collections::HashMap::with_capacity_and_hasher(
-                distinct,
-                rustc_hash::FxBuildHasher,
-            ),
+            seen: hashbrown::HashTable::with_capacity(distinct),
         }
     }
 
     pub fn intern(&mut self, s: &str) -> Str {
-        if let Some(&handle) = self.seen.get(s) {
+        let hash = intern_hash(s);
+        let Interner { text, seen } = self;
+        if let Some(&handle) = seen.find(hash, |&h| &text[h.range()] == s) {
             return handle;
         }
-        let off = self.text.len() as u32;
-        self.text.push_str(s);
+        let off = text.len() as u32;
+        text.push_str(s);
         let handle = Str {
             off,
             len: s.len() as u32,
         };
-        self.seen.insert(s.into(), handle);
+        seen.insert_unique(hash, handle, |&h| intern_hash(&text[h.range()]));
         handle
     }
 
