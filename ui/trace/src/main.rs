@@ -25,7 +25,6 @@ use gpui::{
     Window, canvas, div, hsla, percentage, point, prelude::*, px, quad, size, uniform_list,
 };
 use std::cell::{Cell, RefCell};
-use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -3201,8 +3200,10 @@ fn clip_polyline_x(verts: &[(f32, f32)], lo: f32, hi: f32) -> Vec<(f32, f32)> {
 
 /// Paints the bottom graph section: every counter lane fitted to the section
 /// height. Each lane is a header band over a chart area that holds the lane's
-/// series as stacked filled areas scaled to the chart height and the lane's peak
-/// stacked total. Charts are confined to the content column.
+/// series as a filled area scaled to the chart height and the series' peak.
+/// Charts are confined to the content column. Work per lane is bounded by the
+/// viewport: the visible points are found by binary search and dense runs are
+/// collapsed to per-pixel-column extremes before tessellation.
 fn paint_graph(
     profile: &Profile,
     tv: TimeView,
@@ -3242,67 +3243,126 @@ fn paint_graph(
             continue;
         }
 
-        // Series in a lane stack (per the Chrome counter-event model): the peak
-        // is the largest stacked total over time, and each series is drawn as a
-        // band between the running baseline and baseline + value.
-        let chart_bottom = gl.top + METRICS.header_height + gl.chart_h;
-        let mut totals: BTreeMap<i64, f64> = BTreeMap::new();
-        for series in profile.series(counter) {
-            for p in profile.points(series) {
-                *totals.entry(p.ts_us).or_default() += p.value;
-            }
-        }
-        let peak = totals.values().copied().fold(0.0_f64, f64::max);
-        if peak <= 0.0 {
+        let Some(series) = profile.series(counter).first() else {
+            continue;
+        };
+        if series.max_value <= 0.0 {
             continue;
         }
-        let scale = gl.chart_h / peak as f32;
+        let points = profile.points(series);
+        if points.len() < 2 {
+            continue;
+        }
+        let chart_bottom = gl.top + METRICS.header_height + gl.chart_h;
+        let scale = gl.chart_h / series.max_value as f32;
         let x_of = |ts| regions.content_left + tv.x_of(ts);
-        // Clip series to a margin around the content column so off-screen
+        // Clip the series to a margin around the content column so off-screen
         // vertices at high zoom stay near the window and the renderer keeps the
         // filled area's precision; the margin exceeds the window, so the visible
         // plot is unchanged.
         let clip_lo = regions.content_left - regions.time_w;
         let clip_hi = regions.content_left + 2.0 * regions.time_w;
+        // The points that can reach the clip strip: from the last point at or
+        // before its left edge to the first at or after its right edge.
+        let t_lo = tv.t_of(clip_lo - regions.content_left);
+        let t_hi = tv.t_of(clip_hi - regions.content_left);
+        let start = points
+            .partition_point(|p| (p.ts_us as f64) < t_lo)
+            .saturating_sub(1);
+        let end = (points.partition_point(|p| (p.ts_us as f64) < t_hi) + 1).min(points.len());
+        let visible = &points[start..end];
+        if visible.len() < 2 {
+            continue;
+        }
+        let boundary = downsample_columns(
+            visible
+                .iter()
+                .map(|p| (x_of(p.ts_us), chart_bottom - p.value as f32 * scale)),
+        );
+        let top = clip_polyline_x(&boundary, clip_lo, clip_hi);
+        if top.len() < 2 {
+            continue;
+        }
         window.with_content_mask(Some(content_mask), |window| {
-            let mut baseline: BTreeMap<i64, f64> = BTreeMap::new();
-            for series in profile.series(counter) {
-                let points = profile.points(series);
-                if points.len() < 2 {
-                    continue;
-                }
-                let vert = |p: &CounterPoint, stacked: f64| {
-                    (x_of(p.ts_us), chart_bottom - stacked as f32 * scale)
-                };
-                let top: Vec<(f32, f32)> = points
-                    .iter()
-                    .map(|p| vert(p, baseline.get(&p.ts_us).copied().unwrap_or(0.0) + p.value))
-                    .collect();
-                let base: Vec<(f32, f32)> = points
-                    .iter()
-                    .map(|p| vert(p, baseline.get(&p.ts_us).copied().unwrap_or(0.0)))
-                    .collect();
-                let top = clip_polyline_x(&top, clip_lo, clip_hi);
-                if top.len() >= 2 {
-                    let base = clip_polyline_x(&base, clip_lo, clip_hi);
-                    let mut area = PathBuilder::fill();
-                    area.move_to(point(px(top[0].0), px(top[0].1)));
-                    for &(x, y) in &top[1..] {
-                        area.line_to(point(px(x), px(y)));
-                    }
-                    for &(x, y) in base.iter().rev() {
-                        area.line_to(point(px(x), px(y)));
-                    }
-                    if let Ok(path) = area.build() {
-                        window.paint_path(path, counter_color(profile.str(series.name)));
-                    }
-                }
-                for p in points {
-                    *baseline.entry(p.ts_us).or_default() += p.value;
-                }
+            let mut area = PathBuilder::fill();
+            area.move_to(point(px(top[0].0), px(top[0].1)));
+            for &(x, y) in &top[1..] {
+                area.line_to(point(px(x), px(y)));
+            }
+            // The area sits on the chart floor, so the base is two corners.
+            area.line_to(point(px(top[top.len() - 1].0), px(chart_bottom)));
+            area.line_to(point(px(top[0].0), px(chart_bottom)));
+            if let Ok(path) = area.build() {
+                window.paint_path(path, counter_color(profile.str(series.name)));
             }
         });
     }
+}
+
+/// Collapses a boundary polyline (x non-decreasing) to at most two vertices per
+/// whole-pixel column: a column crowded with points keeps only its extreme-y
+/// pair, in encounter order, preserving the filled area's per-pixel envelope; a
+/// column with at most two points passes through unchanged, so sparse runs keep
+/// their exact linear slopes at high zoom. Streams its input, so the caller
+/// need not materialize the projected vertices.
+fn downsample_columns(verts: impl IntoIterator<Item = (f32, f32)>) -> Vec<(f32, f32)> {
+    struct Col {
+        x: f32,
+        n: usize,
+        head: [(f32, f32); 2],
+        lo_i: usize,
+        lo: (f32, f32),
+        hi_i: usize,
+        hi: (f32, f32),
+    }
+    fn flush(c: &Col, out: &mut Vec<(f32, f32)>) {
+        if c.n <= 2 {
+            out.extend_from_slice(&c.head[..c.n]);
+        } else if c.lo_i == c.hi_i {
+            out.push(c.lo);
+        } else if c.lo_i < c.hi_i {
+            out.extend_from_slice(&[c.lo, c.hi]);
+        } else {
+            out.extend_from_slice(&[c.hi, c.lo]);
+        }
+    }
+    let mut out: Vec<(f32, f32)> = Vec::new();
+    let mut cur: Option<Col> = None;
+    for v in verts {
+        let x = v.0.floor();
+        match &mut cur {
+            Some(c) if c.x == x => {
+                if c.n < 2 {
+                    c.head[c.n] = v;
+                }
+                if v.1 < c.lo.1 {
+                    (c.lo_i, c.lo) = (c.n, v);
+                }
+                if v.1 > c.hi.1 {
+                    (c.hi_i, c.hi) = (c.n, v);
+                }
+                c.n += 1;
+            }
+            _ => {
+                if let Some(c) = &cur {
+                    flush(c, &mut out);
+                }
+                cur = Some(Col {
+                    x,
+                    n: 1,
+                    head: [v, v],
+                    lo_i: 0,
+                    lo: v,
+                    hi_i: 0,
+                    hi: v,
+                });
+            }
+        }
+    }
+    if let Some(c) = &cur {
+        flush(c, &mut out);
+    }
+    out
 }
 
 /// The series' value at time `t` (microseconds), linearly interpolated between
@@ -3314,7 +3374,7 @@ fn sample_at(points: &[CounterPoint], t: f64) -> Option<f64> {
     if t < first.ts_us as f64 || t > last.ts_us as f64 {
         return None;
     }
-    let hi = points.iter().position(|p| p.ts_us as f64 >= t)?;
+    let hi = points.partition_point(|p| (p.ts_us as f64) < t);
     if hi == 0 {
         return Some(points[0].value);
     }
@@ -3365,8 +3425,8 @@ fn format_counter(value: f64, unit: &str) -> String {
 
 /// Paints the hover crosshair: a vertical line at the cursor x spanning both
 /// sections, the hovered absolute time near the ruler, and — for each counter
-/// series whose range covers the time — a dot where the crosshair meets its
-/// stacked line plus a value label. Stacking matches [`paint_graph`].
+/// lane whose series covers the time — a dot where the crosshair meets its
+/// line plus a value label. Scaling matches [`paint_graph`].
 fn paint_crosshair(
     profile: &Profile,
     tv: TimeView,
@@ -3424,127 +3484,63 @@ fn paint_crosshair(
             continue;
         }
         let counter = &counters[gl.lane];
-        // The lane peak — the largest stacked total over time — scales the chart,
-        // exactly as paint_graph derives it.
-        let mut totals: BTreeMap<i64, f64> = BTreeMap::new();
-        for series in profile.series(counter) {
-            for p in profile.points(series) {
-                *totals.entry(p.ts_us).or_default() += p.value;
-            }
-        }
-        let peak = totals.values().copied().fold(0.0_f64, f64::max);
-        if peak <= 0.0 {
+        let Some(series) = profile.series(counter).first() else {
+            continue;
+        };
+        if series.max_value <= 0.0 {
             continue;
         }
-        let scale = gl.chart_h / peak as f32;
+        let Some(value) = sample_at(profile.points(series), t) else {
+            continue;
+        };
+        let scale = gl.chart_h / series.max_value as f32;
         let chart_top = gl.top + METRICS.header_height;
         let chart_bottom = chart_top + gl.chart_h;
-
-        // Walk the series in draw order, accumulating each one's value at `t` onto
-        // the running baseline so its dot lands on the stacked line. Each label
-        // sits at its own dot, so its value and dot never get out of order.
-        let unit = unit_for(profile.str(counter.name));
-        let mut base = 0.0_f64;
-        let mut dots: Vec<(f32, f64, Hsla)> = Vec::new();
-        for series in profile.series(counter) {
-            let Some(value) = sample_at(profile.points(series), t) else {
-                continue;
-            };
-            base += value;
-            let dot_y = chart_bottom - base as f32 * scale;
-            dots.push((dot_y, value, counter_color(profile.str(series.name))));
-        }
-        for &(dot_y, _, color) in &dots {
-            window.paint_quad(quad(
-                Bounds::new(
-                    point(
-                        px(cx_px - CROSSHAIR_DOT_RADIUS),
-                        px(dot_y - CROSSHAIR_DOT_RADIUS),
-                    ),
-                    size(
-                        px(2.0 * CROSSHAIR_DOT_RADIUS),
-                        px(2.0 * CROSSHAIR_DOT_RADIUS),
-                    ),
+        let dot_y = chart_bottom - value as f32 * scale;
+        let color = counter_color(profile.str(series.name));
+        window.paint_quad(quad(
+            Bounds::new(
+                point(
+                    px(cx_px - CROSSHAIR_DOT_RADIUS),
+                    px(dot_y - CROSSHAIR_DOT_RADIUS),
                 ),
-                px(CROSSHAIR_DOT_RADIUS),
-                color,
-                px(0.),
-                Hsla::from(palette.border),
-                BorderStyle::Solid,
-            ));
-        }
+                size(
+                    px(2.0 * CROSSHAIR_DOT_RADIUS),
+                    px(2.0 * CROSSHAIR_DOT_RADIUS),
+                ),
+            ),
+            px(CROSSHAIR_DOT_RADIUS),
+            color,
+            px(0.),
+            Hsla::from(palette.border),
+            BorderStyle::Solid,
+        ));
 
-        // Each label's top sits at its dot, clamped into the chart and pushed
-        // apart from its neighbours so stacked values stay legible. Order them
-        // top-of-stack first, so when dots coincide (a series at value 0) the
-        // declutter keeps the upper series' label on top rather than flipping it
-        // below on the tie.
+        // The label's top sits at its dot, clamped into the chart.
         let max_label_y = (chart_bottom - CROSSHAIR_VALUE_SIZE).max(chart_top);
-        let labeled: Vec<(f32, f64, Hsla)> = dots.iter().rev().copied().collect();
-        let mut label_ys: Vec<f32> = labeled
-            .iter()
-            .map(|&(dot_y, ..)| dot_y.clamp(chart_top, max_label_y))
-            .collect();
-        declutter_labels(
-            &mut label_ys,
-            CROSSHAIR_VALUE_SIZE + 1.0,
-            chart_top,
-            max_label_y,
+        let label_y = dot_y.clamp(chart_top, max_label_y);
+        let unit = unit_for(profile.str(counter.name));
+        let value_line = bviz_ui_assets::shape_line(
+            window,
+            format_counter(value, unit),
+            font.clone(),
+            px(CROSSHAIR_VALUE_SIZE),
+            opaque(color).into(),
         );
-        for (&label_y, &(_, value, color)) in label_ys.iter().zip(&labeled) {
-            let value_line = bviz_ui_assets::shape_line(
-                window,
-                format_counter(value, unit),
-                font.clone(),
-                px(CROSSHAIR_VALUE_SIZE),
-                opaque(color).into(),
-            );
-            let value_w = f32::from(value_line.width());
-            // Default to the right of the line; flip to the left near the edge.
-            let mut value_x = cx_px + CROSSHAIR_LABEL_GAP;
-            if value_x + value_w > regions.time_right {
-                value_x = cx_px - CROSSHAIR_LABEL_GAP - value_w;
-            }
-            let _ = value_line.paint(
-                point(px(value_x), px(label_y)),
-                px(CROSSHAIR_VALUE_SIZE),
-                TextAlign::Left,
-                None,
-                window,
-                cx,
-            );
+        let value_w = f32::from(value_line.width());
+        // Default to the right of the line; flip to the left near the edge.
+        let mut value_x = cx_px + CROSSHAIR_LABEL_GAP;
+        if value_x + value_w > regions.time_right {
+            value_x = cx_px - CROSSHAIR_LABEL_GAP - value_w;
         }
-    }
-}
-
-/// Spreads label tops apart so consecutive ones (by y) keep at least `min_gap`,
-/// in place and preserving each entry's index, bounded to `[top, bottom]`. Works
-/// in whatever order the entries arrive: sorts a view of them by y, sweeps down
-/// enforcing the gap, then sweeps back up to pull any run that overran `bottom`
-/// back under it.
-fn declutter_labels(ys: &mut [f32], min_gap: f32, top: f32, bottom: f32) {
-    let mut order: Vec<usize> = (0..ys.len()).collect();
-    order.sort_by(|&a, &b| ys[a].total_cmp(&ys[b]));
-    // Push each label down to clear the one above it.
-    for w in 1..order.len() {
-        let (prev, cur) = (order[w - 1], order[w]);
-        ys[cur] = ys[cur].max(ys[prev] + min_gap);
-    }
-    // If the run overran the bottom, pull the whole cluster back up by the same
-    // gap from the bottom-most upward, then hold the top edge no higher than
-    // `top`.
-    if let Some(&last) = order.last() {
-        ys[last] = ys[last].min(bottom);
-        for w in (0..order.len() - 1).rev() {
-            let (cur, next) = (order[w], order[w + 1]);
-            ys[cur] = ys[cur].min(ys[next] - min_gap);
-        }
-        if let Some(&first) = order.first() {
-            let shift = (top - ys[first]).max(0.0);
-            for &i in &order {
-                ys[i] += shift;
-            }
-        }
+        let _ = value_line.paint(
+            point(px(value_x), px(label_y)),
+            px(CROSSHAIR_VALUE_SIZE),
+            TextAlign::Left,
+            None,
+            window,
+            cx,
+        );
     }
 }
 
@@ -3740,6 +3736,55 @@ mod tests {
         assert_eq!(sample_at(&points, 50.0), None);
         assert_eq!(sample_at(&points, 250.0), None);
         assert_eq!(sample_at(&[], 100.0), None);
+        // Coincident timestamps resolve to the first, without dividing by 0.
+        let dup = vec![
+            CounterPoint {
+                ts_us: 100,
+                value: 10.0,
+            },
+            CounterPoint {
+                ts_us: 100,
+                value: 30.0,
+            },
+        ];
+        assert_eq!(sample_at(&dup, 100.0), Some(10.0));
+    }
+
+    #[test]
+    fn downsample_columns_keeps_sparse_runs_and_column_extremes() {
+        // At most two points per whole-pixel column: passthrough.
+        let sparse = vec![(0.2, 5.0), (0.8, 7.0), (3.0, 1.0), (10.5, 4.0)];
+        assert_eq!(downsample_columns(sparse.iter().copied()), sparse);
+
+        // A dense oscillation collapses to each column's extremes, in encounter
+        // order, with x monotone and the global extremes preserved.
+        let dense: Vec<(f32, f32)> = (0..1000)
+            .map(|i| {
+                let x = i as f32 / 100.0; // 100 points per column
+                (x, (i as f32 * 0.71).sin() * 50.0)
+            })
+            .collect();
+        let out = downsample_columns(dense.iter().copied());
+        let columns = 10.0_f32;
+        assert!(out.len() as f32 <= 2.0 * columns);
+        let max = |v: &[(f32, f32)]| v.iter().map(|p| p.1).fold(f32::MIN, f32::max);
+        let min = |v: &[(f32, f32)]| v.iter().map(|p| p.1).fold(f32::MAX, f32::min);
+        assert_eq!(max(&out), max(&dense));
+        assert_eq!(min(&out), min(&dense));
+        assert!(out.windows(2).all(|w| w[0].0 <= w[1].0));
+        // Per column both extremes survive.
+        for col in 0..10 {
+            let in_col = |v: &[(f32, f32)]| -> Vec<(f32, f32)> {
+                v.iter().filter(|p| p.0.floor() == col as f32).copied().collect()
+            };
+            let (all, kept) = (in_col(&dense), in_col(&out));
+            assert_eq!(max(&kept), max(&all));
+            assert_eq!(min(&kept), min(&all));
+        }
+
+        // A flat dense column (min == max) collapses to a single vertex.
+        let flat = (0..10).map(|i| (i as f32 / 100.0, 3.0));
+        assert_eq!(downsample_columns(flat), vec![(0.0, 3.0)]);
     }
 
     #[test]
@@ -3764,30 +3809,6 @@ mod tests {
         assert_eq!(format_counter(12.5, "Mbps"), "12.50 Mbps");
         assert_eq!(format_counter(80.0, "%"), "80%");
         assert_eq!(format_counter(42.0, ""), "42.0");
-    }
-
-    #[test]
-    fn declutter_labels_spreads_and_bounds() {
-        // Three labels crammed together spread to the min gap, in y order.
-        let mut ys = [100.0, 102.0, 101.0];
-        declutter_labels(&mut ys, 10.0, 0.0, 1000.0);
-        let mut sorted = ys;
-        sorted.sort_by(f32::total_cmp);
-        assert!(sorted[1] - sorted[0] >= 10.0 - f32::EPSILON);
-        assert!(sorted[2] - sorted[1] >= 10.0 - f32::EPSILON);
-        // The pairing is preserved: the originally largest stays largest.
-        assert_eq!(ys[1], sorted[2]);
-
-        // Already-separated labels are left alone.
-        let mut clear = [0.0, 20.0, 40.0];
-        declutter_labels(&mut clear, 10.0, 0.0, 1000.0);
-        assert_eq!(clear, [0.0, 20.0, 40.0]);
-
-        // A run that would overrun the bottom is pulled back under it.
-        let mut tight = [95.0, 98.0];
-        declutter_labels(&mut tight, 10.0, 0.0, 100.0);
-        assert!(tight.iter().all(|&y| y <= 100.0));
-        assert!((tight[1] - tight[0]).abs() >= 10.0 - f32::EPSILON);
     }
 
     #[test]

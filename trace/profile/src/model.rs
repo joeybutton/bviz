@@ -271,6 +271,9 @@ pub fn work_class(category: &str) -> WorkClass {
     }
 }
 
+/// A counter graph. The parser splits every counter into one lane per numeric
+/// series, so `series` spans at most one entry (zero for a counter that
+/// carried no numeric points).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CounterLane {
     pub name: Str,
@@ -283,6 +286,9 @@ pub struct CounterSeries {
     pub name: Str,
     /// Range into the profile's point pool; resolve with [`Profile::points`].
     pub points: Span32,
+    /// Largest point value, precomputed so a painter scales the lane without
+    /// walking the points.
+    pub max_value: f64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -432,7 +438,8 @@ impl Profile {
         &self.series_pool[lane.series.range()]
     }
 
-    /// The points of a counter series.
+    /// The points of a counter series, sorted by `ts_us` ascending so callers
+    /// can binary-search by time.
     pub fn points(&self, series: &CounterSeries) -> &[CounterPoint] {
         &self.point_pool[series.points.range()]
     }

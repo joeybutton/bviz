@@ -1051,13 +1051,25 @@ fn finish_merge(merge: Merge, other_data: Option<Map<String, Value>>) -> Profile
             .map(|l| {
                 let name = interner.intern(&l.label);
                 let series_off = series_pool.len() as u32;
-                if let Some(s) = l.series {
+                if let Some(mut s) = l.series {
                     let points_off = point_pool.len() as u32;
                     let points_len = s.points.len() as u32;
+                    // Consumers binary-search points by time, so the sealed
+                    // series must be sorted; the trace format does not promise
+                    // that counter samples arrive in time order.
+                    if !s.points.is_sorted_by_key(|p| p.ts_us) {
+                        s.points.sort_by_key(|p| p.ts_us);
+                    }
+                    let max_value = s
+                        .points
+                        .iter()
+                        .map(|p| p.value)
+                        .fold(f64::NEG_INFINITY, f64::max);
                     point_pool.extend(s.points);
                     series_pool.push(CounterSeries {
                         name: s.name,
                         points: Span32::new(points_off, points_len),
+                        max_value,
                     });
                 }
                 let series_len = series_pool.len() as u32 - series_off;
@@ -2032,11 +2044,29 @@ mod tests {
         let cpu = &p.counters()[0];
         assert_eq!(p.series(cpu).len(), 1);
         assert_eq!(p.points(&p.series(cpu)[0]).len(), 2);
+        assert_eq!(p.series(cpu)[0].max_value, 2.0);
         let mem = &p.counters()[1];
         let mem_points = p.points(&p.series(mem)[0]);
         assert_eq!(mem_points.len(), 1);
         assert_eq!(mem_points[0].ts_us, 10);
         assert_eq!(mem_points[0].value, 5.0);
+        assert_eq!(p.series(mem)[0].max_value, 5.0);
+    }
+
+    #[test]
+    fn counter_points_are_sorted_by_time() {
+        let json = r#"{
+            "traceEvents": [
+                {"name":"Usage","ph":"C","ts":20,"pid":1,"tid":1,"args":{"cpu":3.0}},
+                {"name":"Usage","ph":"C","ts":0,"pid":1,"tid":1,"args":{"cpu":1.0}},
+                {"name":"Usage","ph":"C","ts":10,"pid":1,"tid":1,"args":{"cpu":2.0}}
+            ]
+        }"#;
+        let p = parse(json);
+        let series = &p.series(&p.counters()[0])[0];
+        let times: Vec<_> = p.points(series).iter().map(|pt| pt.ts_us).collect();
+        assert_eq!(times, [0, 10, 20]);
+        assert_eq!(series.max_value, 3.0);
     }
 
     #[test]
