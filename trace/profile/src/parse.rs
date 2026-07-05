@@ -206,12 +206,45 @@ impl<'de: 'a, 'a> Visitor<'de> for RawArgsVisitor<'a> {
 
     fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<RawArgs<'a>, A::Error> {
         let mut entries = Vec::new();
-        while let Some(key) = map.next_key::<Cow<'a, str>>()? {
+        while let Some(CowKey(key)) = map.next_key::<CowKey<'a>>()? {
             if let MaybeArg(Some(v)) = map.next_value::<MaybeArg<'a>>()? {
                 entries.push((key, v));
             }
         }
         Ok(RawArgs { entries })
+    }
+}
+
+/// A map key that borrows from the input where the parser can. serde's
+/// blanket `Cow<str>` impl always deserializes through an owned `String`;
+/// this seed's visitor takes the zero-copy path for an unescaped key.
+struct CowKey<'a>(Cow<'a, str>);
+
+impl<'de: 'a, 'a> Deserialize<'de> for CowKey<'a> {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        deserializer.deserialize_str(CowKeyVisitor(PhantomData))
+    }
+}
+
+struct CowKeyVisitor<'a>(PhantomData<&'a ()>);
+
+impl<'de: 'a, 'a> Visitor<'de> for CowKeyVisitor<'a> {
+    type Value = CowKey<'a>;
+
+    fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.write_str("a string key")
+    }
+
+    fn visit_borrowed_str<E>(self, v: &'de str) -> Result<CowKey<'a>, E> {
+        Ok(CowKey(Cow::Borrowed(v)))
+    }
+
+    fn visit_str<E>(self, v: &str) -> Result<CowKey<'a>, E> {
+        Ok(CowKey(Cow::Owned(v.to_owned())))
+    }
+
+    fn visit_string<E>(self, v: String) -> Result<CowKey<'a>, E> {
+        Ok(CowKey(Cow::Owned(v)))
     }
 }
 
@@ -1557,7 +1590,7 @@ mod tests {
         let json = r#"{
             "traceEvents": [
                 {"name":"thread_name","ph":"M","tid":1,"args":{"name":"L"}},
-                {"cat":"c","name":"quote \" caf\u00e9","ph":"X","ts":0,"dur":1,"tid":1,"args":{"target":"//a:b\"c","note":"tab\there"}}
+                {"cat":"c","name":"quote \" caf\u00e9","ph":"X","ts":0,"dur":1,"tid":1,"args":{"target":"//a:b\"c","note":"tab\there","ke\u0079 2":"v"}}
             ]
         }"#;
         let p = parse(json);
@@ -1570,7 +1603,8 @@ mod tests {
             .iter()
             .map(|&(k, v)| (p.str(k), p.str(v)))
             .collect();
-        assert_eq!(others, vec![("note", "tab\there")]);
+        // The second key arrives escaped, exercising the owned-key path.
+        assert_eq!(others, vec![("note", "tab\there"), ("key 2", "v")]);
     }
 
     /// A canonical, interning-order-independent dump of everything a profile
