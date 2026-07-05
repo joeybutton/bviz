@@ -110,38 +110,35 @@ impl<'de, 'a> Visitor<'de> for EventsVisitor<'a> {
     }
 
     fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<(), A::Error> {
-        while seq.next_element_seed(EventSeed(self.0))?.is_some() {}
+        let mut scratch = Vec::new();
+        while seq.next_element_seed(EventSeed(&mut *self.0, &mut scratch))?.is_some() {}
         Ok(())
     }
 }
 
-struct EventSeed<'a>(&'a mut Builder);
+struct EventSeed<'b, 'de>(&'b mut Builder, &'b mut Vec<ArgEntry<'de>>);
 
-impl<'de, 'a> DeserializeSeed<'de> for EventSeed<'a> {
+impl<'de> DeserializeSeed<'de> for EventSeed<'_, 'de> {
     type Value = ();
 
     fn deserialize<D: Deserializer<'de>>(self, d: D) -> Result<(), D::Error> {
-        self.0.event(RawEvent::deserialize(d)?);
+        let ev = RawEventSeed(&mut *self.1).deserialize(d)?;
+        self.0.event(ev, self.1);
         Ok(())
     }
 }
 
-#[derive(Deserialize)]
 struct RawEvent<'a> {
-    #[serde(default, borrow)]
     ph: Option<Cow<'a, str>>,
-    #[serde(default, borrow)]
     cat: Option<Cow<'a, str>>,
-    #[serde(default, borrow)]
     name: Option<Cow<'a, str>>,
-    #[serde(default)]
     ts: Option<f64>,
-    #[serde(default)]
     dur: Option<f64>,
-    #[serde(default)]
     tid: Option<i64>,
-    #[serde(default, borrow)]
-    args: Option<RawArgs<'a>>,
+    /// Whether the event carried an `args` object (even an empty one — a
+    /// counter keeps an empty lane for it); the entries themselves live in the
+    /// caller's scratch buffer.
+    has_args: bool,
 }
 
 /// One kept argument value: a string or a number. Other JSON shapes (array,
@@ -164,56 +161,227 @@ impl ArgVal<'_> {
     }
 }
 
-/// An event's `args` object, deserialized as a flat key/value list rather than
-/// the `serde_json::Map<String, Value>` the generic path would build. Over the
+/// One kept entry of an event's `args` object: a scalar keyed by its arg name,
+/// deserialized as a flat key/value list rather than the
+/// `serde_json::Map<String, Value>` the generic path would build. Over the
 /// millions of slice events in a large profile the saved per-arg `Value`/`Map`
 /// allocations are a large share of parse time, and every consumer (slice args,
-/// thread metadata, counters) reads this list directly.
-struct RawArgs<'a> {
-    entries: Vec<(Cow<'a, str>, ArgVal<'a>)>,
+/// thread metadata, counters) reads this list directly. Entries accumulate into
+/// a caller-owned scratch vector reused across events, so an event's args cost
+/// no per-event allocation either.
+type ArgEntry<'a> = (Cow<'a, str>, ArgVal<'a>);
+
+/// The string value for `key` among an event's arg entries, if present and a
+/// string.
+fn arg_str<'e>(entries: &'e [ArgEntry], key: &str) -> Option<&'e str> {
+    entries.iter().find(|(k, _)| k == key).and_then(|(_, v)| match v {
+        ArgVal::Str(s) => Some(s.as_ref()),
+        _ => None,
+    })
 }
 
-impl<'a> RawArgs<'a> {
-    /// The string value for `key`, if present and a string.
-    fn get_str(&self, key: &str) -> Option<&str> {
-        self.entries.iter().find(|(k, _)| k == key).and_then(|(_, v)| match v {
-            ArgVal::Str(s) => Some(s.as_ref()),
-            _ => None,
-        })
-    }
+/// The integer value for `key` among an event's arg entries, if present and an
+/// integer.
+fn arg_i64(entries: &[ArgEntry], key: &str) -> Option<i64> {
+    entries.iter().find(|(k, _)| k == key).and_then(|(_, v)| match v {
+        ArgVal::Int(n) => Some(*n),
+        _ => None,
+    })
+}
 
-    /// The integer value for `key`, if present and an integer.
-    fn get_i64(&self, key: &str) -> Option<i64> {
-        self.entries.iter().find(|(k, _)| k == key).and_then(|(_, v)| match v {
-            ArgVal::Int(n) => Some(*n),
-            _ => None,
-        })
+/// Deserializes one event object; its `args` entries land in the borrowed
+/// scratch (cleared first), so the scratch holds exactly this event's entries
+/// when `has_args` is set.
+struct RawEventSeed<'s, 'a>(&'s mut Vec<ArgEntry<'a>>);
+
+impl<'de: 'a, 'a> DeserializeSeed<'de> for RawEventSeed<'_, 'a> {
+    type Value = RawEvent<'a>;
+
+    fn deserialize<D: Deserializer<'de>>(self, d: D) -> Result<RawEvent<'a>, D::Error> {
+        d.deserialize_map(RawEventVisitor(self.0))
     }
 }
 
-impl<'de: 'a, 'a> Deserialize<'de> for RawArgs<'a> {
-    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        deserializer.deserialize_map(RawArgsVisitor(PhantomData))
-    }
-}
+struct RawEventVisitor<'s, 'a>(&'s mut Vec<ArgEntry<'a>>);
 
-struct RawArgsVisitor<'a>(PhantomData<&'a ()>);
-
-impl<'de: 'a, 'a> Visitor<'de> for RawArgsVisitor<'a> {
-    type Value = RawArgs<'a>;
+impl<'de: 'a, 'a> Visitor<'de> for RawEventVisitor<'_, 'a> {
+    type Value = RawEvent<'a>;
 
     fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        f.write_str("an args object")
+        f.write_str("an event object")
     }
 
-    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<RawArgs<'a>, A::Error> {
-        let mut entries = Vec::new();
-        while let Some(CowKey(key)) = map.next_key::<CowKey<'a>>()? {
-            if let MaybeArg(Some(v)) = map.next_value::<MaybeArg<'a>>()? {
-                entries.push((key, v));
+    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<RawEvent<'a>, A::Error> {
+        let mut ev = RawEvent {
+            ph: None,
+            cat: None,
+            name: None,
+            ts: None,
+            dur: None,
+            tid: None,
+            has_args: false,
+        };
+        while let Some(CowKey(key)) = map.next_key::<CowKey>()? {
+            match key.as_ref() {
+                "ph" => ev.ph = map.next_value::<MaybeCowStr>()?.0,
+                "cat" => ev.cat = map.next_value::<MaybeCowStr>()?.0,
+                "name" => ev.name = map.next_value::<MaybeCowStr>()?.0,
+                "ts" => ev.ts = map.next_value::<MaybeF64>()?.0,
+                "dur" => ev.dur = map.next_value::<MaybeF64>()?.0,
+                "tid" => ev.tid = map.next_value::<MaybeI64>()?.0,
+                "args" => {
+                    self.0.clear();
+                    ev.has_args = map.next_value_seed(ArgsSeed(&mut *self.0))?;
+                }
+                _ => {
+                    map.next_value::<IgnoredAny>()?;
+                }
             }
         }
-        Ok(RawArgs { entries })
+        Ok(ev)
+    }
+}
+
+/// Fills the borrowed scratch with an args object's kept entries; `true` when
+/// an object was present, `false` for JSON `null` (matching the absent case).
+struct ArgsSeed<'s, 'a>(&'s mut Vec<ArgEntry<'a>>);
+
+impl<'de: 'a, 'a> DeserializeSeed<'de> for ArgsSeed<'_, 'a> {
+    type Value = bool;
+
+    fn deserialize<D: Deserializer<'de>>(self, d: D) -> Result<bool, D::Error> {
+        d.deserialize_any(ArgsVisitor(self.0))
+    }
+}
+
+struct ArgsVisitor<'s, 'a>(&'s mut Vec<ArgEntry<'a>>);
+
+impl<'de: 'a, 'a> Visitor<'de> for ArgsVisitor<'_, 'a> {
+    type Value = bool;
+
+    fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.write_str("an args object or null")
+    }
+
+    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<bool, A::Error> {
+        while let Some(CowKey(key)) = map.next_key::<CowKey<'a>>()? {
+            if let MaybeArg(Some(v)) = map.next_value::<MaybeArg<'a>>()? {
+                self.0.push((key, v));
+            }
+        }
+        Ok(true)
+    }
+
+    fn visit_unit<E>(self) -> Result<bool, E> {
+        Ok(false)
+    }
+}
+
+/// An optional string field that borrows from the input where the parser can
+/// (like [`CowKey`]); JSON `null` reads as `None`.
+struct MaybeCowStr<'a>(Option<Cow<'a, str>>);
+
+impl<'de: 'a, 'a> Deserialize<'de> for MaybeCowStr<'a> {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        // deserialize_any, not deserialize_str: serde_json rejects null in
+        // deserialize_str before reaching the visitor, and null must read as
+        // None here. The any-path string arms borrow exactly like the str path.
+        deserializer.deserialize_any(MaybeCowStrVisitor(PhantomData))
+    }
+}
+
+struct MaybeCowStrVisitor<'a>(PhantomData<&'a ()>);
+
+impl<'de: 'a, 'a> Visitor<'de> for MaybeCowStrVisitor<'a> {
+    type Value = MaybeCowStr<'a>;
+
+    fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.write_str("a string or null")
+    }
+
+    fn visit_borrowed_str<E>(self, v: &'de str) -> Result<MaybeCowStr<'a>, E> {
+        Ok(MaybeCowStr(Some(Cow::Borrowed(v))))
+    }
+
+    fn visit_str<E>(self, v: &str) -> Result<MaybeCowStr<'a>, E> {
+        Ok(MaybeCowStr(Some(Cow::Owned(v.to_owned()))))
+    }
+
+    fn visit_string<E>(self, v: String) -> Result<MaybeCowStr<'a>, E> {
+        Ok(MaybeCowStr(Some(Cow::Owned(v))))
+    }
+
+    fn visit_unit<E>(self) -> Result<MaybeCowStr<'a>, E> {
+        Ok(MaybeCowStr(None))
+    }
+}
+
+/// An optional numeric field read as `f64` (an integer token casts); JSON
+/// `null` reads as `None`.
+struct MaybeF64(Option<f64>);
+
+impl<'de> Deserialize<'de> for MaybeF64 {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        deserializer.deserialize_any(MaybeF64Visitor)
+    }
+}
+
+struct MaybeF64Visitor;
+
+impl Visitor<'_> for MaybeF64Visitor {
+    type Value = MaybeF64;
+
+    fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.write_str("a number or null")
+    }
+
+    fn visit_i64<E>(self, v: i64) -> Result<MaybeF64, E> {
+        Ok(MaybeF64(Some(v as f64)))
+    }
+
+    fn visit_u64<E>(self, v: u64) -> Result<MaybeF64, E> {
+        Ok(MaybeF64(Some(v as f64)))
+    }
+
+    fn visit_f64<E>(self, v: f64) -> Result<MaybeF64, E> {
+        Ok(MaybeF64(Some(v)))
+    }
+
+    fn visit_unit<E>(self) -> Result<MaybeF64, E> {
+        Ok(MaybeF64(None))
+    }
+}
+
+/// An optional integer field; JSON `null` reads as `None`.
+struct MaybeI64(Option<i64>);
+
+impl<'de> Deserialize<'de> for MaybeI64 {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        deserializer.deserialize_any(MaybeI64Visitor)
+    }
+}
+
+struct MaybeI64Visitor;
+
+impl Visitor<'_> for MaybeI64Visitor {
+    type Value = MaybeI64;
+
+    fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.write_str("an integer or null")
+    }
+
+    fn visit_i64<E>(self, v: i64) -> Result<MaybeI64, E> {
+        Ok(MaybeI64(Some(v)))
+    }
+
+    fn visit_u64<E: serde::de::Error>(self, v: u64) -> Result<MaybeI64, E> {
+        i64::try_from(v)
+            .map(|n| MaybeI64(Some(n)))
+            .map_err(|_| E::custom(format!("integer out of range: {v}")))
+    }
+
+    fn visit_unit<E>(self) -> Result<MaybeI64, E> {
+        Ok(MaybeI64(None))
     }
 }
 
@@ -463,7 +631,9 @@ fn recover(text: &str) -> Result<Profile, LoadError> {
 
     let other_data = recover_other_data(&text[..events_at]);
 
-    let mut events = Vec::new();
+    let mut builder = Builder::new(0);
+    let mut scratch: Vec<ArgEntry> = Vec::new();
+    let mut recovered = false;
     let bytes = text.as_bytes();
     let mut i = array_start;
     while i < bytes.len() {
@@ -508,16 +678,22 @@ fn recover(text: &str) -> Result<Profile, LoadError> {
             }
         }
         let Some(end) = end else { break };
-        if let Ok(event) = serde_json::from_str::<RawEvent>(&text[start..=end]) {
-            events.push(event);
+        let mut de = serde_json::Deserializer::from_str(&text[start..=end]);
+        if let Ok(ev) = RawEventSeed(&mut scratch)
+            .deserialize(&mut de)
+            .and_then(|ev| de.end().map(|()| ev))
+        {
+            builder.event(ev, &scratch);
+            recovered = true;
         }
         i = end + 1;
     }
 
-    if events.is_empty() {
+    if !recovered {
         return Err(LoadError::Corrupted("no complete events recovered".into()));
     }
-    Ok(build(other_data, events))
+    builder.sort_slices();
+    Ok(assemble(vec![builder], other_data))
 }
 
 fn recover_other_data(prefix: &str) -> Option<Map<String, Value>> {
@@ -590,10 +766,14 @@ impl Builder {
         }
     }
 
-    fn event(&mut self, ev: RawEvent) {
+    /// Folds one event in. `scratch` holds the event's args entries when
+    /// `ev.has_args` is set; they are consumed here, and deserializing the
+    /// next event reuses the buffer.
+    fn event(&mut self, ev: RawEvent, scratch: &[ArgEntry]) {
+        let args = ev.has_args.then_some(scratch);
         let ph = ev.ph.as_deref().unwrap_or("");
         match ph {
-            "M" => apply_metadata_event(&ev, &mut self.thread_meta),
+            "M" => apply_metadata_event(&ev, args, &mut self.thread_meta),
             "X" | "i" => {
                 let ts = round_us(ev.ts);
                 if ev.cat.as_deref() == Some(PHASE_MARKER_CATEGORY) {
@@ -610,7 +790,7 @@ impl Builder {
                         &mut self.interner,
                         &mut self.args_pool,
                         category,
-                        ev.args,
+                        args,
                     );
                     self.slices.entry(tid).or_default().push((
                         Slice {
@@ -627,6 +807,7 @@ impl Builder {
             "C" => apply_counter_event(
                 &mut self.interner,
                 &ev,
+                args,
                 &mut self.counter_order,
                 &mut self.counters,
             ),
@@ -1102,17 +1283,6 @@ fn finish_merge(merge: Merge, other_data: Option<Map<String, Value>>) -> Profile
     profile
 }
 
-/// Builds a profile from already-collected events, for the [`recover`] path that
-/// pulls whole events out of a truncated array before parsing them.
-fn build(other_data: Option<Map<String, Value>>, events: Vec<RawEvent>) -> Profile {
-    let mut builder = Builder::new(0);
-    for ev in events {
-        builder.event(ev);
-    }
-    builder.sort_slices();
-    assemble(vec![builder], other_data)
-}
-
 /// Below this many bytes of `traceEvents` the parallel parser's thread and merge
 /// overhead outweighs the gain, so [`parse_parallel`] declines and the serial
 /// path runs.
@@ -1527,26 +1697,28 @@ fn parse_gz_stream(bytes: &[u8], workers: usize, chunk_bytes: usize) -> Option<P
 }
 
 /// Parses every `{...}` event object in one chunk of the `traceEvents` array
-/// into `builder`, in place: each event is deserialized from its own offset
-/// with a `StreamDeserializer` (which reports the bytes it consumed), and the
-/// comma/whitespace separators between events are skipped by hand. Returns
-/// `false` on malformed content so the caller falls back to the serial parser
-/// rather than silently dropping events.
+/// into `builder`, in place: each event is deserialized from its own offset,
+/// and the comma/whitespace separators between events are skipped by hand.
+/// Returns `false` on malformed content so the caller falls back to the serial
+/// parser rather than silently dropping events.
 fn parse_range_into(builder: &mut Builder, chunk: &str) -> bool {
     let bytes = chunk.as_bytes();
+    let mut scratch: Vec<ArgEntry> = Vec::new();
     let mut pos = 0;
     while pos < bytes.len() {
         match bytes[pos] {
             b' ' | b'\t' | b'\n' | b'\r' | b',' => pos += 1,
             b'{' => {
-                let mut stream =
-                    serde_json::Deserializer::from_str(&chunk[pos..]).into_iter::<RawEvent>();
-                match stream.next() {
-                    Some(Ok(ev)) => {
-                        builder.event(ev);
-                        pos += stream.byte_offset();
+                let mut de = serde_json::Deserializer::from_str(&chunk[pos..]);
+                match RawEventSeed(&mut scratch).deserialize(&mut de) {
+                    Ok(ev) => {
+                        builder.event(ev, &scratch);
+                        // The deserializer doesn't expose its consumed-byte
+                        // count directly, but converting it into a stream
+                        // iterator carries the count over to `byte_offset`.
+                        pos += de.into_iter::<IgnoredAny>().byte_offset();
                     }
-                    _ => return false,
+                    Err(_) => return false,
                 }
             }
             _ => return false,
@@ -1568,18 +1740,21 @@ fn build_metadata(interner: &mut Interner, other: Option<&Map<String, Value>>) -
     }
 }
 
-fn apply_metadata_event(ev: &RawEvent, thread_meta: &mut BTreeMap<i64, (Option<String>, i64)>) {
+fn apply_metadata_event(
+    ev: &RawEvent,
+    args: Option<&[ArgEntry]>,
+    thread_meta: &mut BTreeMap<i64, (Option<String>, i64)>,
+) {
     let tid = ev.tid.unwrap_or(0);
-    let args = ev.args.as_ref();
     let entry = thread_meta.entry(tid).or_insert((None, MAX_SORT_INDEX));
     match ev.name.as_deref() {
         Some("thread_name") => {
-            if let Some(name) = args.and_then(|a| a.get_str("name")) {
+            if let Some(name) = args.and_then(|a| arg_str(a, "name")) {
                 entry.0 = Some(name.to_owned());
             }
         }
         Some("thread_sort_index") => {
-            if let Some(idx) = args.and_then(|a| a.get_i64("sort_index")) {
+            if let Some(idx) = args.and_then(|a| arg_i64(a, "sort_index")) {
                 entry.1 = idx;
             }
         }
@@ -1591,7 +1766,7 @@ fn build_slice_detail(
     interner: &mut Interner,
     args_pool: &mut Vec<(Str, Str)>,
     category: Str,
-    args: Option<RawArgs>,
+    args: Option<&[ArgEntry]>,
 ) -> SliceDetail {
     let mut out = SliceDetail {
         category,
@@ -1601,31 +1776,31 @@ fn build_slice_detail(
         return out;
     };
     let others_off = args_pool.len() as u32;
-    for (k, v) in args.entries {
+    for (k, v) in args {
         // The typed fields are strings; a non-string value under one of those
         // keys is dropped, everything else is kept for display.
         match k.as_ref() {
             "target" => {
                 if let ArgVal::Str(s) = v {
-                    out.target = Some(interner.intern(&s)).into();
+                    out.target = Some(interner.intern(s)).into();
                 }
             }
             "mnemonic" => {
                 if let ArgVal::Str(s) = v {
-                    out.mnemonic = Some(interner.intern(&s)).into();
+                    out.mnemonic = Some(interner.intern(s)).into();
                 }
             }
             "configuration" => {
                 if let ArgVal::Str(s) = v {
-                    out.configuration = Some(interner.intern(&s)).into();
+                    out.configuration = Some(interner.intern(s)).into();
                 }
             }
             _ => {
-                let key = interner.intern(&k);
+                let key = interner.intern(k);
                 // A string value interns straight from the borrowed input; a
                 // numeric one formats to its display string first.
                 let val = match v {
-                    ArgVal::Str(s) => interner.intern(&s),
+                    ArgVal::Str(s) => interner.intern(s),
                     ArgVal::Int(n) => interner.intern(&n.to_string()),
                     ArgVal::Float(n) => interner.intern(&n.to_string()),
                 };
@@ -1640,12 +1815,13 @@ fn build_slice_detail(
 fn apply_counter_event(
     interner: &mut Interner,
     ev: &RawEvent,
+    args: Option<&[ArgEntry]>,
     order: &mut Vec<Str>,
     counters: &mut HashMap<Str, RawLane>,
 ) {
     let lane_name = interner.intern(ev.name.as_deref().unwrap_or(""));
     let ts = round_us(ev.ts);
-    let Some(args) = ev.args.as_ref() else {
+    let Some(args) = args else {
         return;
     };
     let lane = counters.entry(lane_name).or_insert_with(|| {
@@ -1655,7 +1831,7 @@ fn apply_counter_event(
             series: Vec::new(),
         }
     });
-    for (key, value) in &args.entries {
+    for (key, value) in args {
         let Some(value) = value.as_f64() else {
             continue;
         };
@@ -1773,6 +1949,22 @@ mod tests {
             .collect();
         // The second key arrives escaped, exercising the owned-key path.
         assert_eq!(others, vec![("note", "tab\there"), ("key 2", "v")]);
+    }
+
+    #[test]
+    fn null_fields_read_as_absent() {
+        let json = r#"{
+            "traceEvents": [
+                {"ph":"X","cat":null,"name":null,"ts":0,"dur":1,"tid":1,"args":null}
+            ]
+        }"#;
+        let p = parse(json);
+        let t = &p.threads()[0];
+        assert_eq!(p.slices(t).len(), 1);
+        let s = &p.slices(t)[0];
+        assert_eq!(p.str(s.name), "");
+        assert_eq!(p.str(p.details(t)[0].category), "");
+        assert!(p.slice_others(&p.details(t)[0]).is_empty());
     }
 
     /// A canonical, interning-order-independent dump of everything a profile
