@@ -398,30 +398,30 @@ fn end_us(slice: &Slice) -> i64 {
 
 /// The time-containment forest of a lane's slices. `children[i]` lists the
 /// slices directly nested in slice `i`; `roots` lists the top-level slices (no
-/// container). Built with a depth-stack over the slices sorted by start then
-/// longest-duration-first (recomputed so the result is independent of the input
-/// vector's order): a slice's parent is the nearest ENCLOSING span, so pop while
-/// the stack top doesn't enclose the slice (`top.end < slice.end`). Popping on
-/// end-before-start alone would wrongly nest spans that merely overlap — one that
-/// starts inside another but ends after it is a sibling, not a child — which
-/// otherwise builds a runaway staircase.
+/// container). Slices must be in lane order — start ascending, ties
+/// longest-first, the order [`Profile::slices`] guarantees — so a depth-stack
+/// walk visits every container before its contents: a slice's parent is the
+/// nearest ENCLOSING span, so pop while the stack top doesn't enclose the slice
+/// (`top.end < slice.end`). Popping on end-before-start alone would wrongly nest
+/// spans that merely overlap — one that starts inside another but ends after it
+/// is a sibling, not a child — which otherwise builds a runaway staircase.
 struct Forest {
     children: Vec<Vec<usize>>,
     roots: Vec<usize>,
 }
 
 fn containment_forest(slices: &[Slice]) -> Forest {
-    let mut order: Vec<usize> = (0..slices.len()).collect();
-    order.sort_by(|&a, &b| {
-        slices[a]
-            .start_us
-            .cmp(&slices[b].start_us)
-            .then_with(|| slices[b].dur_us.cmp(&slices[a].dur_us))
-    });
+    debug_assert!(
+        slices.windows(2).all(|w| {
+            w[0].start_us < w[1].start_us
+                || (w[0].start_us == w[1].start_us && w[0].dur_us >= w[1].dur_us)
+        }),
+        "slices must be in lane order: start ascending, ties longest-first"
+    );
     let mut children = vec![Vec::new(); slices.len()];
     let mut roots = Vec::new();
     let mut stack: Vec<usize> = Vec::new();
-    for &i in &order {
+    for i in 0..slices.len() {
         let slice_end = end_us(&slices[i]);
         while stack
             .last()
@@ -915,8 +915,9 @@ mod tests {
 
     #[test]
     fn build_is_independent_of_slice_order() {
-        // Disjoint top-level spans, so order only affects the input vector; the
-        // forest sorts internally and the merge is commutative.
+        // Disjoint top-level spans, so order only affects the emitted event
+        // stream; the parser sorts each lane into lane order and the merge is
+        // commutative.
         let ordered = vec![
             action("CppCompile", 0, 100),
             action("Rustc", 100, 40),

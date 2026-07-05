@@ -407,7 +407,9 @@ impl Profile {
         s.into().map(|s| self.str(s))
     }
 
-    /// The slices of a thread track, in start order.
+    /// The slices of a thread track, in lane order: start ascending, ties
+    /// longest-duration-first, so an enclosing span precedes the spans it
+    /// contains.
     pub fn slices(&self, track: &ThreadTrack) -> &[Slice] {
         &self.slice_pool[track.slices.range()]
     }
