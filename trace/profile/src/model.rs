@@ -25,6 +25,49 @@ impl Str {
     }
 }
 
+/// An optional interned-string handle in the size of a bare [`Str`]: offset 0
+/// encodes absence. The [`Interner`] seeds its pool with a placeholder byte, so
+/// no live handle ever has offset 0 — and the property survives pool
+/// concatenation, since every [`Interner::push_pool`] base is at least 1.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[repr(transparent)]
+pub struct OptStr(Str);
+
+impl OptStr {
+    pub const NONE: OptStr = OptStr(Str { off: 0, len: 0 });
+
+    pub fn get(self) -> Option<Str> {
+        (self.0.off != 0).then_some(self.0)
+    }
+
+    /// The same handle relocated by `by` bytes ([`Str::shifted`]); absence is
+    /// preserved, never turned into a live handle.
+    pub fn shifted(self, by: u32) -> OptStr {
+        match self.get() {
+            Some(s) => OptStr(s.shifted(by)),
+            None => OptStr::NONE,
+        }
+    }
+}
+
+impl From<Option<Str>> for OptStr {
+    fn from(s: Option<Str>) -> OptStr {
+        match s {
+            Some(s) => {
+                debug_assert!(s.off != 0, "offset 0 is the absence encoding");
+                OptStr(s)
+            }
+            None => OptStr::NONE,
+        }
+    }
+}
+
+impl From<OptStr> for Option<Str> {
+    fn from(s: OptStr) -> Option<Str> {
+        s.get()
+    }
+}
+
 /// A half-open `[off, off + len)` index range into a flat pool. Which pool it
 /// indexes depends on the field that holds it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -67,6 +110,7 @@ impl Span32 {
 pub struct Profile {
     pub(crate) text: String,
     pub(crate) slice_pool: Vec<Slice>,
+    pub(crate) detail_pool: Vec<SliceDetail>,
     pub(crate) args_pool: Vec<(Str, Str)>,
     pub(crate) series_pool: Vec<CounterSeries>,
     pub(crate) point_pool: Vec<CounterPoint>,
@@ -102,16 +146,36 @@ pub struct ThreadTrack {
     pub lane_class: LaneClass,
 }
 
+/// The hot per-slice record: only what culling, hit-testing, and painting read
+/// per frame, sized to fit two slices per cache line. The cold companion fields
+/// live in the parallel [`SliceDetail`] at the same index.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Slice {
     pub name: Str,
-    pub category: Str,
     pub start_us: i64,
     pub dur_us: i64,
     pub depth: u32,
-    pub args: SliceArgs,
     pub work_class: WorkClass,
 }
+
+const _: () = assert!(std::mem::size_of::<Slice>() == 32);
+
+/// The cold companion of a [`Slice`], read only on demand (tooltips, grouping):
+/// the profile's detail pool is exactly parallel to its slice pool, so a
+/// thread's `slices` span resolves both. The three typed args carry the Bazel
+/// keys callers query directly; `others` is a range into the profile's args
+/// pool of the remaining key/value pairs, resolved with
+/// [`Profile::slice_others`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct SliceDetail {
+    pub category: Str,
+    pub target: OptStr,
+    pub mnemonic: OptStr,
+    pub configuration: OptStr,
+    pub others: Span32,
+}
+
+const _: () = assert!(std::mem::size_of::<SliceDetail>() == 40);
 
 /// Coarse kind of work a slice represents, derived from its Bazel `cat`
 /// description string ([`work_class`]). Lets a flame graph group/scope by the
@@ -204,17 +268,6 @@ pub fn work_class(category: &str) -> WorkClass {
 
         _ => WorkClass::Meta,
     }
-}
-
-/// A slice's `args`. The three typed fields carry the Bazel keys callers query
-/// directly; `others` is a range into the profile's args pool of the remaining
-/// key/value pairs, resolved with [`Profile::slice_others`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct SliceArgs {
-    pub target: Option<Str>,
-    pub mnemonic: Option<Str>,
-    pub configuration: Option<Str>,
-    pub others: Span32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -343,8 +396,8 @@ impl Profile {
     }
 
     /// Resolves an optional interned handle to its text, if present.
-    pub fn opt_str(&self, s: Option<Str>) -> Option<&str> {
-        s.map(|s| self.str(s))
+    pub fn opt_str(&self, s: impl Into<Option<Str>>) -> Option<&str> {
+        s.into().map(|s| self.str(s))
     }
 
     /// The slices of a thread track, in start order.
@@ -352,9 +405,15 @@ impl Profile {
         &self.slice_pool[track.slices.range()]
     }
 
+    /// The details of a thread track's slices, index-parallel to
+    /// [`Profile::slices`].
+    pub fn details(&self, track: &ThreadTrack) -> &[SliceDetail] {
+        &self.detail_pool[track.slices.range()]
+    }
+
     /// The extra (non-typed) args of a slice, as interned key/value pairs.
-    pub fn slice_others(&self, slice: &Slice) -> &[(Str, Str)] {
-        &self.args_pool[slice.args.others.range()]
+    pub fn slice_others(&self, detail: &SliceDetail) -> &[(Str, Str)] {
+        &self.args_pool[detail.others.range()]
     }
 
     /// The series of a counter lane.
@@ -400,6 +459,7 @@ impl Profile {
         let ProfileParts {
             text,
             slice_pool,
+            detail_pool,
             args_pool,
             series_pool,
             point_pool,
@@ -412,6 +472,7 @@ impl Profile {
         Profile {
             text,
             slice_pool,
+            detail_pool,
             args_pool,
             series_pool,
             point_pool,
@@ -428,6 +489,7 @@ impl Profile {
 pub(crate) struct ProfileParts {
     pub text: String,
     pub slice_pool: Vec<Slice>,
+    pub detail_pool: Vec<SliceDetail>,
     pub args_pool: Vec<(Str, Str)>,
     pub series_pool: Vec<CounterSeries>,
     pub point_pool: Vec<CounterPoint>,
@@ -463,10 +525,16 @@ fn intern_hash(s: &str) -> u64 {
     rustc_hash::FxBuildHasher.hash_one(s)
 }
 
+/// The byte every interner pool starts with, keeping offset 0 free so it can
+/// encode absence in [`OptStr`].
+const POOL_PLACEHOLDER: char = '\0';
+
 impl Interner {
     pub fn new() -> Interner {
+        let mut text = String::new();
+        text.push(POOL_PLACEHOLDER);
         Interner {
-            text: String::new(),
+            text,
             seen: hashbrown::HashTable::new(),
         }
     }
@@ -475,8 +543,10 @@ impl Interner {
     /// `text_bytes` of pool, so bulk interning grows neither the map nor the
     /// pool through repeated doublings.
     pub fn with_capacity(distinct: usize, text_bytes: usize) -> Interner {
+        let mut text = String::with_capacity(text_bytes.max(1));
+        text.push(POOL_PLACEHOLDER);
         Interner {
-            text: String::with_capacity(text_bytes),
+            text,
             seen: hashbrown::HashTable::with_capacity(distinct),
         }
     }

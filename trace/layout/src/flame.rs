@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use bviz_trace_profile::{Interner, LaneClass, Profile, Slice, Span32, Str, WorkClass};
+use bviz_trace_profile::{Interner, LaneClass, Profile, Slice, SliceDetail, Span32, Str, WorkClass};
 
 /// Which label a span carries in the flame graph. The tree shape comes from
 /// time-containment within a lane; the mode only chooses how each span is named,
@@ -65,8 +65,8 @@ struct Segment {
 pub(crate) fn mnemonic_index(profile: &Profile) -> HashMap<&str, &str> {
     let mut idx = HashMap::new();
     for thread in profile.threads() {
-        for s in profile.slices(thread) {
-            if let Some(m) = s.args.mnemonic {
+        for (s, d) in profile.slices(thread).iter().zip(profile.details(thread)) {
+            if let Some(m) = d.mnemonic.get() {
                 idx.insert(profile.str(s.name), profile.str(m));
             }
         }
@@ -91,9 +91,10 @@ fn action_inner(name: &str) -> &str {
 fn resolve_mnemonic<'a>(
     profile: &'a Profile,
     slice: &Slice,
+    detail: &SliceDetail,
     idx: &HashMap<&'a str, &'a str>,
 ) -> Option<&'a str> {
-    if let Some(m) = slice.args.mnemonic {
+    if let Some(m) = detail.mnemonic.get() {
         return Some(profile.str(m));
     }
     let name = profile.str(slice.name);
@@ -329,8 +330,8 @@ impl<'p> Flamer<'p> {
     /// names an action (so all Rustc collapse together), else its own name (the
     /// informative label for non-action slices — "checkOutputs", "subprocess.run",
     /// a repo target, …).
-    fn detail(&mut self, slice: &Slice) -> Segment {
-        let label = match resolve_mnemonic(self.profile, slice, &self.idx) {
+    fn detail(&mut self, slice: &Slice, detail: &SliceDetail) -> Segment {
+        let label = match resolve_mnemonic(self.profile, slice, detail, &self.idx) {
             Some(m) => self.interner.intern(m),
             None => self.interner.intern(self.profile.str(slice.name)),
         };
@@ -344,11 +345,11 @@ impl<'p> Flamer<'p> {
     /// recover action mnemonics. The tree shape comes from time-containment, not
     /// from this label; the mode only names each span so identical-named spans
     /// merge into one frame.
-    fn span_label(&mut self, slice: &Slice) -> Segment {
+    fn span_label(&mut self, slice: &Slice, detail: &SliceDetail) -> Segment {
         match self.mode {
-            GroupMode::Mnemonic => self.detail(slice),
+            GroupMode::Mnemonic => self.detail(slice, detail),
             GroupMode::Category => Segment {
-                label: self.interner.intern(self.profile.str(slice.category)),
+                label: self.interner.intern(self.profile.str(detail.category)),
                 work_class: slice.work_class,
             },
             GroupMode::WorkClass => Segment {
@@ -362,14 +363,16 @@ impl<'p> Flamer<'p> {
     /// the span's duration lands once at its own labelled node, then each child
     /// recurses under that node. So a node merging N spans sums their durations,
     /// and a child's duration is counted at the child, not again at the parent.
+    /// `lane_details` is the lane's parallel detail slice.
     fn merge_span(
         &mut self,
         parent: &mut Builder,
         lane_slices: &[Slice],
+        lane_details: &[SliceDetail],
         forest: &Forest,
         span_idx: usize,
     ) {
-        let seg = self.span_label(&lane_slices[span_idx]);
+        let seg = self.span_label(&lane_slices[span_idx], &lane_details[span_idx]);
         let node = parent.child(seg);
         node.total_us += lane_slices[span_idx].dur_us;
         node.count += 1;
@@ -383,7 +386,7 @@ impl<'p> Flamer<'p> {
                 let i = parent.index[&key];
                 &mut parent.children[i]
             };
-            self.merge_span(node, lane_slices, forest, c);
+            self.merge_span(node, lane_slices, lane_details, forest, c);
         }
     }
 }
@@ -463,11 +466,12 @@ pub fn build_flame_graph(profile: &Profile, mode: GroupMode, scope: Scope) -> Fl
                 continue;
             }
             let slices = profile.slices(thread);
+            let details = profile.details(thread);
             let forest = containment_forest(slices);
             for ri in 0..forest.roots.len() {
                 let r = forest.roots[ri];
                 root.total_us += slices[r].dur_us;
-                flamer.merge_span(&mut root, slices, &forest, r);
+                flamer.merge_span(&mut root, slices, details, &forest, r);
             }
         }
     }
@@ -498,8 +502,9 @@ fn build_critical_path(profile: &Profile, flamer: &mut Flamer, root: &mut Builde
     let threads = profile.threads();
     let mut actions: HashMap<&str, ActionLoc> = HashMap::new();
     for (lane, thread) in threads.iter().enumerate() {
+        let details = profile.details(thread);
         for (slice, s) in profile.slices(thread).iter().enumerate() {
-            if s.args.mnemonic.is_some() {
+            if details[slice].mnemonic.get().is_some() {
                 actions
                     .entry(profile.str(s.name))
                     .or_insert(ActionLoc { lane, slice });
@@ -511,20 +516,21 @@ fn build_critical_path(profile: &Profile, flamer: &mut Flamer, root: &mut Builde
         if thread.lane_class != LaneClass::CriticalPath {
             continue;
         }
-        for cp in profile.slices(thread) {
+        for (cp, cp_detail) in profile.slices(thread).iter().zip(profile.details(thread)) {
             let name = profile.str(cp.name);
             let inner = action_inner(name);
             let loc = actions.get(inner).or_else(|| actions.get(name));
             match loc {
                 Some(&ActionLoc { lane, slice }) => {
                     let lane_slices = profile.slices(&threads[lane]);
+                    let lane_details = profile.details(&threads[lane]);
                     let forest = containment_forest(lane_slices);
                     root.total_us += lane_slices[slice].dur_us;
-                    flamer.merge_span(root, lane_slices, &forest, slice);
+                    flamer.merge_span(root, lane_slices, lane_details, &forest, slice);
                 }
                 None => {
                     root.total_us += cp.dur_us;
-                    let seg = flamer.span_label(cp);
+                    let seg = flamer.span_label(cp, cp_detail);
                     let node = root.child(seg);
                     node.total_us += cp.dur_us;
                     node.count += 1;

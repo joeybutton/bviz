@@ -13,7 +13,7 @@ use serde_json::{Map, Value};
 
 use crate::model::{
     lane_class, work_class, CounterLane, CounterPoint, CounterSeries, Interner, Metadata,
-    PhaseMarker, Profile, ProfileParts, Slice, SliceArgs, Span32, Str, ThreadTrack, TimeSpan,
+    PhaseMarker, Profile, ProfileParts, Slice, SliceDetail, Span32, Str, ThreadTrack, TimeSpan,
 };
 
 const GZIP_MAGIC: [u8; 2] = [0x1f, 0x8b];
@@ -560,9 +560,11 @@ struct Builder {
     interner: Interner,
     args_pool: Vec<(Str, Str)>,
     thread_meta: BTreeMap<i64, (Option<String>, i64)>,
-    // Slices accumulate per thread in event order; [`Builder::sort_slices`]
-    // puts each list into lane order before the builder is folded.
-    slices: BTreeMap<i64, Vec<Slice>>,
+    // Slices accumulate per thread in event order, each paired with its detail
+    // so the two stay in lockstep through sorting and merging;
+    // [`Builder::sort_slices`] puts each list into lane order before the
+    // builder is folded.
+    slices: BTreeMap<i64, Vec<(Slice, SliceDetail)>>,
     phase_markers: Vec<PhaseMarker>,
     counter_order: Vec<Str>,
     counters: HashMap<Str, RawLane>,
@@ -603,16 +605,23 @@ impl Builder {
                     let tid = ev.tid.unwrap_or(0);
                     let category = ev.cat.as_deref().unwrap_or("");
                     let work_class = work_class(category);
-                    let args = build_slice_args(&mut self.interner, &mut self.args_pool, ev.args);
-                    self.slices.entry(tid).or_default().push(Slice {
-                        name: self.interner.intern(ev.name.as_deref().unwrap_or("")),
-                        category: self.interner.intern(category),
-                        start_us: ts,
-                        dur_us: round_us(ev.dur),
-                        depth: 0,
-                        args,
-                        work_class,
-                    });
+                    let category = self.interner.intern(category);
+                    let detail = build_slice_detail(
+                        &mut self.interner,
+                        &mut self.args_pool,
+                        category,
+                        ev.args,
+                    );
+                    self.slices.entry(tid).or_default().push((
+                        Slice {
+                            name: self.interner.intern(ev.name.as_deref().unwrap_or("")),
+                            start_us: ts,
+                            dur_us: round_us(ev.dur),
+                            depth: 0,
+                            work_class,
+                        },
+                        detail,
+                    ));
                 }
             }
             "C" => apply_counter_event(
@@ -631,7 +640,7 @@ impl Builder {
     /// instead of adding to the final merge.
     fn sort_slices(&mut self) {
         for slices in self.slices.values_mut() {
-            slices.sort_by(slice_order);
+            slices.sort_by(|a, b| slice_order(&a.0, &b.0));
         }
     }
 }
@@ -666,7 +675,7 @@ struct Merge {
 struct FoldedRun {
     text_base: u32,
     args_base: u32,
-    slices: BTreeMap<i64, Vec<Slice>>,
+    slices: BTreeMap<i64, Vec<(Slice, SliceDetail)>>,
 }
 
 impl Merge {
@@ -769,40 +778,46 @@ fn finish_merge(merge: Merge, other_data: Option<Map<String, Value>>) -> Profile
         mut counters,
         runs,
     } = merge;
-    // The pool is handed to the merge phase as uninitialized capacity rather
+    // The pools are handed to the merge phase as uninitialized capacity rather
     // than pre-filled: a fill pass would touch every page serially just to be
     // overwritten, so the first (and only) write of each slot happens on the
     // worker that merges it.
     let slice_total: usize = runs.iter().flat_map(|r| r.slices.values()).map(Vec::len).sum();
     let mut slice_pool: Vec<Slice> = Vec::with_capacity(slice_total);
+    let mut detail_pool: Vec<SliceDetail> = Vec::with_capacity(slice_total);
 
     // One source run per (thread, builder): that builder's slices for the
     // thread, in lane order, with the bases its handles rebase by.
     struct Run<'a> {
-        src: &'a [Slice],
+        src: &'a [(Slice, SliceDetail)],
         text_base: u32,
         args_base: u32,
     }
-    // A thread's contiguous destination segment, its runs in builder order, and
-    // the merge phase's per-thread results. The segment starts uninitialized;
-    // the runs' lengths sum to exactly its length, so the merge phase writes
-    // every slot exactly once.
+    // A thread's contiguous destination segments — one per pool, the same
+    // index range — its runs in builder order, and the merge phase's
+    // per-thread results. The segments start uninitialized; the runs' lengths
+    // sum to exactly their length, so the merge phase writes every slot of
+    // both exactly once.
     struct TidTask<'a> {
         dest: &'a mut [std::mem::MaybeUninit<Slice>],
+        dest_detail: &'a mut [std::mem::MaybeUninit<SliceDetail>],
         runs: Vec<Run<'a>>,
         max_depth: u32,
         min_start_us: i64,
         max_end_us: i64,
     }
-    /// K-way merges a thread's runs into its destination segment, in whole-lane
-    /// [`slice_order`] — on an equal key the lowest run index goes first, which
-    /// reproduces a stable whole-lane sort of the runs concatenated in fold
-    /// order. Each slot is written exactly once, and that one write also
-    /// rebases the slice's handles by its run's bases, assigns its depth from
-    /// the ancestor stack, and accumulates the lane's time span.
+    /// K-way merges a thread's runs into its destination segments, in
+    /// whole-lane [`slice_order`] — on an equal key the lowest run index goes
+    /// first, which reproduces a stable whole-lane sort of the runs
+    /// concatenated in fold order. Each slot is written exactly once, and that
+    /// one write also rebases the slice's and detail's handles by its run's
+    /// bases, assigns the slice's depth from the ancestor stack, and
+    /// accumulates the lane's time span. Slice and detail travel as one pair,
+    /// so the two pools stay index-parallel by construction.
     fn merge_lane(task: &mut TidTask) {
-        let TidTask { dest, runs, max_depth, min_start_us, max_end_us } = task;
+        let TidTask { dest, dest_detail, runs, max_depth, min_start_us, max_end_us } = task;
         let mut slots = dest.iter_mut();
+        let mut detail_slots = dest_detail.iter_mut();
         // Ancestor end-times. A slice is nested only in a span that contains
         // it, so pop while the stack top ends before the slice does
         // (`end < slice_end`); popping on end-before-start alone would keep
@@ -810,20 +825,14 @@ fn finish_merge(merge: Merge, other_data: Option<Map<String, Value>>) -> Profile
         // but ends after it is a sibling, not a child — building a runaway
         // staircase of false depth.
         let mut stack: Vec<i64> = Vec::new();
-        let mut emit = |run: &Run, src: &Slice| {
-            let mut s = *src;
+        let mut emit = |run: &Run, src: &(Slice, SliceDetail)| {
+            let (mut s, mut d) = *src;
             s.name = s.name.shifted(run.text_base);
-            s.category = s.category.shifted(run.text_base);
-            if let Some(t) = &mut s.args.target {
-                *t = t.shifted(run.text_base);
-            }
-            if let Some(m) = &mut s.args.mnemonic {
-                *m = m.shifted(run.text_base);
-            }
-            if let Some(c) = &mut s.args.configuration {
-                *c = c.shifted(run.text_base);
-            }
-            s.args.others = s.args.others.shifted(run.args_base);
+            d.category = d.category.shifted(run.text_base);
+            d.target = d.target.shifted(run.text_base);
+            d.mnemonic = d.mnemonic.shifted(run.text_base);
+            d.configuration = d.configuration.shifted(run.text_base);
+            d.others = d.others.shifted(run.args_base);
             let end = s.start_us + s.dur_us;
             while stack.last().is_some_and(|&e| e < end) {
                 stack.pop();
@@ -834,6 +843,7 @@ fn finish_merge(merge: Merge, other_data: Option<Map<String, Value>>) -> Profile
             *min_start_us = (*min_start_us).min(s.start_us);
             *max_end_us = (*max_end_us).max(end);
             slots.next().expect("segment sized to the runs' total").write(s);
+            detail_slots.next().expect("segment sized to the runs' total").write(d);
         };
         if let [run] = &runs[..] {
             for src in run.src {
@@ -844,7 +854,7 @@ fn finish_merge(merge: Merge, other_data: Option<Map<String, Value>>) -> Profile
             let mut heap: BinaryHeap<Reverse<(i64, Reverse<i64>, usize)>> =
                 BinaryHeap::with_capacity(runs.len());
             for (i, run) in runs.iter().enumerate() {
-                if let Some(s) = run.src.first() {
+                if let Some((s, _)) = run.src.first() {
                     heap.push(Reverse((s.start_us, Reverse(s.dur_us), i)));
                 }
             }
@@ -853,7 +863,7 @@ fn finish_merge(merge: Merge, other_data: Option<Map<String, Value>>) -> Profile
                 let src = &run.src[cursors[i]];
                 cursors[i] += 1;
                 emit(run, src);
-                if let Some(next) = run.src.get(cursors[i]) {
+                if let Some((next, _)) = run.src.get(cursors[i]) {
                     heap.push(Reverse((next.start_us, Reverse(next.dur_us), i)));
                 }
             }
@@ -872,15 +882,19 @@ fn finish_merge(merge: Merge, other_data: Option<Map<String, Value>>) -> Profile
     let mut segments: Vec<(i64, Span32)> = Vec::with_capacity(tid_runs.len());
     let mut tasks: Vec<TidTask> = Vec::with_capacity(tid_runs.len());
     let mut rest = slice_pool.spare_capacity_mut();
+    let mut rest_detail = detail_pool.spare_capacity_mut();
     let mut off = 0u32;
     for (tid, runs) in tid_runs {
         let len: usize = runs.iter().map(|r| r.src.len()).sum();
         let (dest, tail) = std::mem::take(&mut rest).split_at_mut(len);
         rest = tail;
+        let (dest_detail, tail) = std::mem::take(&mut rest_detail).split_at_mut(len);
+        rest_detail = tail;
         segments.push((tid, Span32::new(off, len as u32)));
         off += len as u32;
         tasks.push(TidTask {
             dest,
+            dest_detail,
             runs,
             max_depth: 0,
             min_start_us: i64::MAX,
@@ -909,11 +923,12 @@ fn finish_merge(merge: Merge, other_data: Option<Map<String, Value>>) -> Profile
         .into_iter()
         .map(|t| (t.max_depth, t.min_start_us, t.max_end_us))
         .collect();
-    // SAFETY: the segments partition the first `slice_total` slots of the
-    // pool's spare capacity, each merge wrote its whole segment (the runs'
-    // lengths sum to the segment length), and the merge scope joined all
-    // their writers.
+    // SAFETY: the segments partition the first `slice_total` slots of each
+    // pool's spare capacity, each merge wrote its whole segment in both pools
+    // (the runs' lengths sum to the segment length, and every emit writes one
+    // slot of each), and the merge scope joined all their writers.
     unsafe { slice_pool.set_len(slice_total) };
+    unsafe { detail_pool.set_len(slice_total) };
 
     let profile = timed("    tail", || {
         phase_markers.sort_by_key(|m| m.start_us);
@@ -1044,6 +1059,7 @@ fn finish_merge(merge: Merge, other_data: Option<Map<String, Value>>) -> Profile
         Profile::from_parts(ProfileParts {
             text: interner.into_text(),
             slice_pool,
+            detail_pool,
             args_pool,
             series_pool,
             point_pool,
@@ -1546,12 +1562,16 @@ fn apply_metadata_event(ev: &RawEvent, thread_meta: &mut BTreeMap<i64, (Option<S
     }
 }
 
-fn build_slice_args(
+fn build_slice_detail(
     interner: &mut Interner,
     args_pool: &mut Vec<(Str, Str)>,
+    category: Str,
     args: Option<RawArgs>,
-) -> SliceArgs {
-    let mut out = SliceArgs::default();
+) -> SliceDetail {
+    let mut out = SliceDetail {
+        category,
+        ..SliceDetail::default()
+    };
     let Some(args) = args else {
         return out;
     };
@@ -1562,17 +1582,17 @@ fn build_slice_args(
         match k.as_ref() {
             "target" => {
                 if let ArgVal::Str(s) = v {
-                    out.target = Some(interner.intern(&s));
+                    out.target = Some(interner.intern(&s)).into();
                 }
             }
             "mnemonic" => {
                 if let ArgVal::Str(s) = v {
-                    out.mnemonic = Some(interner.intern(&s));
+                    out.mnemonic = Some(interner.intern(&s)).into();
                 }
             }
             "configuration" => {
                 if let ArgVal::Str(s) = v {
-                    out.configuration = Some(interner.intern(&s));
+                    out.configuration = Some(interner.intern(&s)).into();
                 }
             }
             _ => {
@@ -1681,6 +1701,7 @@ pub(crate) fn build_for_test(
     Profile::from_parts(ProfileParts {
         text: interner.into_text(),
         slice_pool: Vec::new(),
+        detail_pool: Vec::new(),
         args_pool: Vec::new(),
         series_pool: Vec::new(),
         point_pool: Vec::new(),
@@ -1716,10 +1737,11 @@ mod tests {
         let p = parse(json);
         let t = &p.threads()[0];
         let s = &p.slices(t)[0];
+        let d = &p.details(t)[0];
         assert_eq!(p.str(s.name), "quote \" café");
-        assert_eq!(p.opt_str(s.args.target), Some("//a:b\"c"));
+        assert_eq!(p.opt_str(d.target), Some("//a:b\"c"));
         let others: Vec<_> = p
-            .slice_others(s)
+            .slice_others(d)
             .iter()
             .map(|&(k, v)| (p.str(k), p.str(v)))
             .collect();
@@ -1755,19 +1777,19 @@ mod tests {
                 t.lane_class
             )
             .unwrap();
-            for s in p.slices(t) {
+            for (s, d) in p.slices(t).iter().zip(p.details(t)) {
                 writeln!(
                     out,
                     "  slice {:?} cat={:?} ts={} dur={} depth={} wc={:?} tgt={:?} mn={:?} cfg={:?}",
                     p.str(s.name),
-                    p.str(s.category),
+                    p.str(d.category),
                     s.start_us,
                     s.dur_us,
                     s.depth,
                     s.work_class,
-                    p.opt_str(s.args.target),
-                    p.opt_str(s.args.mnemonic),
-                    p.opt_str(s.args.configuration),
+                    p.opt_str(d.target),
+                    p.opt_str(d.mnemonic),
+                    p.opt_str(d.configuration),
                 )
                 .unwrap();
             }

@@ -11,7 +11,7 @@ use bviz_trace_layout::{
     StatRow, TimeView, Viewport, WorkClass, aggregate_stats, flame_box_at, flame_height,
     lay_out_flame, lay_out_lanes, visible_slices,
 };
-use bviz_trace_profile::{CounterPoint, Profile, Slice, TimeSpan};
+use bviz_trace_profile::{CounterPoint, Profile, Slice, SliceDetail, TimeSpan};
 use bviz_ui_components::{
     Axis, Button, Dropdown, DropdownEvent, Scrollbar, load_in_background, track_drag,
 };
@@ -1026,10 +1026,13 @@ impl TraceView {
                     ));
                 }
                 for vs in visible_slices(&profile, layout, &tv, &vp, &METRICS, MIN_SLICE_PX) {
-                    let slice = profile.slices(&profile.threads()[vs.track])[vs.slice];
+                    let track = &profile.threads()[vs.track];
+                    let slice = profile.slices(track)[vs.slice];
+                    let detail = profile.details(track)[vs.slice];
                     paint_slice(
                         &profile,
                         &slice,
+                        &detail,
                         vs.x,
                         vs.y + regions.flame_top,
                         vs.w,
@@ -1083,8 +1086,10 @@ impl TraceView {
                 }
             }
             if let Some(h) = entity.read(cx).hover {
-                let slice = profile.slices(&profile.threads()[h.track])[h.slice];
-                paint_tooltip(&profile, &slice, h.at, bounds, &palette, window, cx);
+                let track = &profile.threads()[h.track];
+                let slice = profile.slices(track)[h.slice];
+                let detail = profile.details(track)[h.slice];
+                paint_tooltip(&profile, &slice, &detail, h.at, bounds, &palette, window, cx);
             }
             if !matches!(entity.read(cx).drag, Drag::None) {
                 track_drag(window, &entity, on_drag, end_drag);
@@ -2743,6 +2748,7 @@ fn paint_labeled_box(
 fn paint_slice(
     profile: &Profile,
     slice: &Slice,
+    detail: &SliceDetail,
     x: f32,
     y: f32,
     w: f32,
@@ -2753,7 +2759,7 @@ fn paint_slice(
     cx: &mut App,
 ) {
     let rect = Bounds::new(point(px(content_left + x), px(y)), size(px(w), px(h)));
-    let fill = category_color(profile.str(slice.category), palette);
+    let fill = category_color(profile.str(detail.category), palette);
     paint_labeled_box(rect, fill, profile.str(slice.name), palette, window, cx);
 }
 
@@ -3040,6 +3046,7 @@ fn format_duration(us: i64) -> String {
 fn paint_tooltip(
     profile: &Profile,
     slice: &Slice,
+    detail: &SliceDetail,
     at: Point<Pixels>,
     bounds: Bounds<Pixels>,
     palette: &Palette,
@@ -3048,18 +3055,18 @@ fn paint_tooltip(
 ) {
     let mut lines = vec![
         profile.str(slice.name).to_string(),
-        format!("{} · {}", profile.str(slice.category), format_duration(slice.dur_us)),
+        format!("{} · {}", profile.str(detail.category), format_duration(slice.dur_us)),
     ];
-    if let Some(target) = profile.opt_str(slice.args.target) {
+    if let Some(target) = profile.opt_str(detail.target) {
         lines.push(format!("target: {target}"));
     }
-    if let Some(mnemonic) = profile.opt_str(slice.args.mnemonic) {
+    if let Some(mnemonic) = profile.opt_str(detail.mnemonic) {
         lines.push(format!("mnemonic: {mnemonic}"));
     }
-    if let Some(configuration) = profile.opt_str(slice.args.configuration) {
+    if let Some(configuration) = profile.opt_str(detail.configuration) {
         lines.push(format!("configuration: {configuration}"));
     }
-    for (key, value) in profile.slice_others(slice) {
+    for (key, value) in profile.slice_others(detail) {
         lines.push(format!("{}: {}", profile.str(*key), profile.str(*value)));
     }
 
