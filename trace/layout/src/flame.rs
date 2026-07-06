@@ -286,8 +286,9 @@ pub struct FlameBox {
 /// where a linear scan per insert would be quadratic. Labels are interned
 /// profile handles, so the key is a `Copy` `(Str, WorkClass)` — small and
 /// fixed-size, which FxHash hashes in a few cycles where SipHash would dominate
-/// the per-span lookup.
-struct Builder {
+/// the per-span lookup. Sorting for [`flatten`] reorders `children` without
+/// updating `index`, so no merge may follow a sort.
+pub(crate) struct Builder {
     name: Str,
     work_class: WorkClass,
     total_us: i64,
@@ -297,6 +298,10 @@ struct Builder {
 }
 
 impl Builder {
+    pub(crate) fn new_root() -> Self {
+        Builder::new(ROOT_LABEL, WorkClass::Meta)
+    }
+
     fn new(name: Str, work_class: WorkClass) -> Self {
         Builder {
             name,
@@ -325,14 +330,14 @@ impl Builder {
 /// interned handle of the source profile — a span's mnemonic and name already
 /// live in its text — so merge keys compare and hash as plain integers with no
 /// per-span string work.
-struct Flamer<'p> {
+pub(crate) struct Flamer<'p> {
     profile: &'p Profile,
     idx: MnemonicIndex<'p>,
     canon: Canonicalizer<'p>,
 }
 
 impl<'p> Flamer<'p> {
-    fn new(profile: &'p Profile) -> Self {
+    pub(crate) fn new(profile: &'p Profile) -> Self {
         let mut canon = Canonicalizer::new(profile);
         Flamer {
             profile,
@@ -463,28 +468,110 @@ fn containment_forest(slices: &[Slice]) -> Forest {
 ///
 /// The returned [`FlameGraph`] keeps a clone of `profile`, whose interned text
 /// its node names index, so it is `Send` with no lifetime parameters.
+///
+/// [`FlameScopes`](crate::FlameScopes) derives every scope from one aggregation
+/// pass; this composes the same pieces for a single scope.
 pub fn build_flame_graph(profile: &Arc<Profile>, scope: Scope) -> FlameGraph {
     let mut flamer = Flamer::new(profile);
-    let mut root = Builder::new(ROOT_LABEL, WorkClass::Meta);
-
-    if scope == Scope::CriticalPath {
+    let mut root = if scope == Scope::CriticalPath {
+        let mut root = Builder::new_root();
         build_critical_path(profile, &mut flamer, &mut root);
+        root
     } else {
-        for thread in profile.threads() {
-            if !scope.includes(thread.lane_class) {
-                continue;
+        fold_all(
+            class_trees(profile, &mut flamer, |class| scope.includes(class))
+                .into_iter()
+                .map(|(_, tree)| tree)
+                .collect(),
+        )
+    };
+    seal(&mut root, profile)
+}
+
+/// One aggregation tree per lane class over the lanes `include` admits, keyed in
+/// [`LaneClass`] declaration order; classes with no admitted lane get no entry.
+/// Each lane's containment forest merges into its class's tree, so any scope —
+/// a single class or a union — derives from these without re-walking a lane.
+/// The critical-path lane is never walked: its slices are redirected copies of
+/// worker time, aggregated only by the [`build_critical_path`] graft.
+pub(crate) fn class_trees<'p>(
+    profile: &'p Profile,
+    flamer: &mut Flamer<'p>,
+    include: impl Fn(LaneClass) -> bool,
+) -> Vec<(LaneClass, Builder)> {
+    let mut trees: Vec<(LaneClass, Builder)> = Vec::new();
+    for thread in profile.threads() {
+        let class = thread.lane_class;
+        if class == LaneClass::CriticalPath || !include(class) {
+            continue;
+        }
+        let root = match trees.iter().position(|(c, _)| *c == class) {
+            Some(i) => &mut trees[i].1,
+            None => {
+                let at = trees.partition_point(|(c, _)| (*c as usize) < class as usize);
+                trees.insert(at, (class, Builder::new_root()));
+                &mut trees[at].1
             }
-            let slices = profile.slices(thread);
-            let details = profile.details(thread);
-            let forest = containment_forest(slices);
-            for ri in 0..forest.roots.len() {
-                let r = forest.roots[ri];
-                root.total_us += slices[r].dur_us;
-                flamer.merge_span(&mut root, slices, details, &forest, r);
+        };
+        let slices = profile.slices(thread);
+        let details = profile.details(thread);
+        let forest = containment_forest(slices);
+        for ri in 0..forest.roots.len() {
+            let r = forest.roots[ri];
+            root.total_us += slices[r].dur_us;
+            flamer.merge_span(root, slices, details, &forest, r);
+        }
+    }
+    trees
+}
+
+/// Merge `src`'s subtree into `dst`, matching children by the `(label, work
+/// class)` merge key and summing totals and counts; a subtree `dst` has no
+/// match for is moved over wholesale.
+pub(crate) fn fold_into(dst: &mut Builder, src: Builder) {
+    dst.total_us += src.total_us;
+    dst.count += src.count;
+    for child in src.children {
+        match dst.index.entry((child.name, child.work_class)) {
+            std::collections::hash_map::Entry::Occupied(e) => {
+                let i = *e.get();
+                fold_into(&mut dst.children[i], child);
+            }
+            std::collections::hash_map::Entry::Vacant(e) => {
+                e.insert(dst.children.len());
+                dst.children.push(child);
             }
         }
     }
+}
 
+/// Merge a copy of `src`'s subtree into `dst`, leaving `src` intact — for
+/// folding a tree that must also seal into a graph of its own.
+pub(crate) fn fold_ref(dst: &mut Builder, src: &Builder) {
+    dst.total_us += src.total_us;
+    dst.count += src.count;
+    for child in &src.children {
+        let d = dst.child(Segment {
+            label: child.name,
+            work_class: child.work_class,
+        });
+        fold_ref(d, child);
+    }
+}
+
+/// Fold a set of trees into one, in the given order; empty input yields a bare
+/// root.
+pub(crate) fn fold_all(trees: Vec<Builder>) -> Builder {
+    let mut iter = trees.into_iter();
+    let mut acc = iter.next().unwrap_or_else(Builder::new_root);
+    for tree in iter {
+        fold_into(&mut acc, tree);
+    }
+    acc
+}
+
+/// Sort and freeze a finished builder tree into a [`FlameGraph`] over `profile`.
+pub(crate) fn seal(root: &mut Builder, profile: &Arc<Profile>) -> FlameGraph {
     let nodes = flatten(root, profile);
     let max_depth = nodes.iter().map(|n| n.depth).max().unwrap_or(0);
     FlameGraph {
@@ -506,7 +593,7 @@ struct ActionLoc {
 /// action's worker span is found by name, its whole subtree is merged under the
 /// root so the critical action shows its internal breakdown. Components with no
 /// matching action (e.g. "Writing file …") merge as a bare leaf.
-fn build_critical_path(profile: &Profile, flamer: &mut Flamer, root: &mut Builder) {
+pub(crate) fn build_critical_path(profile: &Profile, flamer: &mut Flamer, root: &mut Builder) {
     let threads = profile.threads();
     let mut actions: FxHashMap<&str, ActionLoc> = FxHashMap::default();
     for (lane, thread) in threads.iter().enumerate() {
@@ -585,8 +672,9 @@ fn freeze(builder: &Builder, depth: u32) -> FlameNode {
 /// block, recorded as the parent's `children` range; the children are sorted
 /// widest-first, breaking ties by name text (resolved through `profile`, whose
 /// handles the labels are) so the layout is independent of the
-/// non-deterministic input order. Consumes the temporary builder tree.
-fn flatten(mut root: Builder, profile: &Profile) -> Vec<FlameNode> {
+/// non-deterministic input order. Sorts the tree in place, leaving its merge
+/// indexes stale.
+fn flatten(root: &mut Builder, profile: &Profile) -> Vec<FlameNode> {
     fn sort_tree(builder: &mut Builder, profile: &Profile) {
         builder.children.sort_by(|a, b| {
             b.total_us
@@ -597,12 +685,12 @@ fn flatten(mut root: Builder, profile: &Profile) -> Vec<FlameNode> {
             sort_tree(c, profile);
         }
     }
-    sort_tree(&mut root, profile);
+    sort_tree(root, profile);
 
-    let mut nodes = vec![freeze(&root, 0)];
+    let mut nodes = vec![freeze(root, 0)];
     let mut queue: std::collections::VecDeque<(&Builder, usize, u32)> =
         std::collections::VecDeque::new();
-    queue.push_back((&root, 0, 0));
+    queue.push_back((root, 0, 0));
     while let Some((builder, idx, depth)) = queue.pop_front() {
         let off = nodes.len() as u32;
         for c in &builder.children {

@@ -1,6 +1,7 @@
 mod cull;
 mod flame;
 mod lanes;
+mod scopes;
 mod stats;
 #[cfg(test)]
 mod test_profile;
@@ -13,6 +14,7 @@ pub use flame::{
     flame_box_at, flame_height, lay_out_flame,
 };
 pub use lanes::{CounterPos, Lane, LaneLayout, LaneMetrics, lay_out_lanes};
+pub use scopes::{FlameScopes, ScopeAggregate};
 pub use stats::{StatRow, aggregate_stats, stats_from_flame};
 pub use view::TimeView;
 
