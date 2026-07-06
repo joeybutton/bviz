@@ -1,6 +1,5 @@
-use std::collections::HashMap;
-
 use bviz_trace_profile::{Profile, Str, WorkClass};
+use rustc_hash::FxHashMap;
 
 use crate::flame::{build_flame_graph, FlameGraph, FlameNode, Scope};
 
@@ -47,7 +46,7 @@ pub fn aggregate_stats(profile: &Profile, scope: Scope) -> (FlameGraph, Vec<Stat
 /// frame's self time. Lets a caller that already holds the graph derive the table
 /// without rebuilding it. Keys are [`Str`] into `graph`.
 pub fn stats_from_flame(graph: &FlameGraph) -> Vec<StatRow> {
-    let mut groups: HashMap<Str, StatRow> = HashMap::new();
+    let mut groups: FxHashMap<Str, StatRow> = FxHashMap::default();
     for node in graph.nodes() {
         accumulate(node, &mut groups);
     }
@@ -57,7 +56,7 @@ pub fn stats_from_flame(graph: &FlameGraph) -> Vec<StatRow> {
 }
 
 /// Fold a frame's self time into its name's row.
-fn accumulate(node: &FlameNode, groups: &mut HashMap<Str, StatRow>) {
+fn accumulate(node: &FlameNode, groups: &mut FxHashMap<Str, StatRow>) {
     let row = groups.entry(node.name).or_insert_with(|| StatRow {
         key: node.name,
         work_class: node.work_class,

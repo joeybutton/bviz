@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
 use bviz_trace_profile::{Interner, LaneClass, Profile, Slice, SliceDetail, Span32, Str, WorkClass};
+use rustc_hash::FxHashMap;
 
 /// Which thread lanes an aggregation draws from, by the role their lane carries.
 /// Under Skymeld analysis and execution share one phase marker, so the role
@@ -242,17 +243,19 @@ pub struct FlameBox {
 
 /// A node still under construction. Children are kept in insertion order in
 /// `children` and located by their `(label, work_class)` merge key through
-/// `index`, so merging a span into an existing child is O(1): under a fine
-/// grouping (mnemonic) a single frame can gather thousands of distinct children,
+/// `index`, so merging a span into an existing child is O(1): labels are
+/// per-mnemonic, so a single frame can gather thousands of distinct children,
 /// where a linear scan per insert would be quadratic. Labels are already interned
-/// into the flame's text pool, so the key is a `Copy` `(Str, WorkClass)`.
+/// into the flame's text pool, so the key is a `Copy` `(Str, WorkClass)` — small
+/// and fixed-size, which FxHash hashes in a few cycles where SipHash would
+/// dominate the per-span lookup.
 struct Builder {
     name: Str,
     work_class: WorkClass,
     total_us: i64,
     count: u32,
     children: Vec<Builder>,
-    index: HashMap<(Str, WorkClass), usize>,
+    index: FxHashMap<(Str, WorkClass), usize>,
 }
 
 impl Builder {
@@ -263,7 +266,7 @@ impl Builder {
             total_us: 0,
             count: 0,
             children: Vec::new(),
-            index: HashMap::new(),
+            index: FxHashMap::default(),
         }
     }
 

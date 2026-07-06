@@ -8,6 +8,7 @@ rust_library(
     visibility = ["//ui/trace:__pkg__"],
     deps = [
         "//trace/profile",
+        "@crates//:rustc-hash",
     ],
 )
 
