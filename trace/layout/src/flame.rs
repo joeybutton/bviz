@@ -1,6 +1,7 @@
 use std::collections::HashMap;
+use std::sync::Arc;
 
-use bviz_trace_profile::{Interner, LaneClass, Profile, Slice, SliceDetail, Span32, Str, WorkClass};
+use bviz_trace_profile::{LaneClass, Profile, Slice, SliceDetail, Span32, Str, WorkClass};
 use rustc_hash::FxHashMap;
 
 /// Which thread lanes an aggregation draws from, by the role their lane carries.
@@ -34,60 +35,87 @@ impl Scope {
     }
 }
 
-/// One key segment of a slice's aggregation path: a frame label interned into
-/// the flame's own text pool, and the work class it carries (for coloring and
-/// class-keyed merging).
+/// One key segment of a slice's aggregation path: a frame label — a [`Str`]
+/// handle into the source profile's text — and the work class it carries (for
+/// coloring and class-keyed merging).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Segment {
     label: Str,
     work_class: WorkClass,
 }
 
+/// Maps a [`Str`] handle to the one canonical handle carrying the same text —
+/// the first handle seen with it. A parallel parse assembles a profile by
+/// concatenating its chunks' interned pools without cross-chunk dedup (see
+/// [`Interner::push_pool`](bviz_trace_profile::Interner::push_pool)), so equal
+/// strings can be carried by several handles, and frames must merge by text.
+/// `memo` caches raw handle → canonical handle, so a span's text is hashed once
+/// per distinct raw handle — bounded by distinct strings times parse chunks,
+/// vanishing next to the span count — and the per-span path hashes only the
+/// small `Copy` handle.
+struct Canonicalizer<'p> {
+    profile: &'p Profile,
+    memo: FxHashMap<Str, Str>,
+    by_text: FxHashMap<&'p str, Str>,
+}
+
+impl<'p> Canonicalizer<'p> {
+    fn new(profile: &'p Profile) -> Self {
+        Canonicalizer {
+            profile,
+            memo: FxHashMap::default(),
+            by_text: FxHashMap::default(),
+        }
+    }
+
+    fn canon(&mut self, s: Str) -> Str {
+        let Canonicalizer {
+            profile,
+            memo,
+            by_text,
+        } = self;
+        *memo
+            .entry(s)
+            .or_insert_with(|| *by_text.entry(profile.str(s)).or_insert(s))
+    }
+}
+
 /// A map from a mnemonic-bearing slice's name to its mnemonic, over the whole
-/// profile, by interned profile handle. The "action processing" slices carry
-/// both the action description as their name and the mnemonic in their args, so
-/// this recovers the mnemonic for any other slice that names the same action —
-/// notably critical-path components, whose name is `action '<desc>'` and which
-/// carry no mnemonic of their own.
-pub(crate) fn mnemonic_index(profile: &Profile) -> HashMap<&str, &str> {
-    let mut idx = HashMap::new();
+/// profile. The "action processing" slices carry both the action description as
+/// their name and the mnemonic in their args, so this recovers the mnemonic for
+/// any other slice that names the same action — notably critical-path
+/// components, whose name is `action '<desc>'` and which carry no mnemonic of
+/// their own. `by_name` is keyed by the name's canonical [`Str`] handle, so the
+/// per-span lookup hashes a small `Copy` key rather than the full string;
+/// `by_text` holds the same entries keyed by name text, for the critical-path
+/// components whose stripped `action '…'` inner has no handle of its own. Values
+/// are canonical mnemonic handles.
+struct MnemonicIndex<'p> {
+    by_name: FxHashMap<Str, Str>,
+    by_text: FxHashMap<&'p str, Str>,
+}
+
+fn mnemonic_index<'p>(profile: &'p Profile, canon: &mut Canonicalizer<'p>) -> MnemonicIndex<'p> {
+    let mut by_name = FxHashMap::default();
+    let mut by_text = FxHashMap::default();
     for thread in profile.threads() {
         for (s, d) in profile.slices(thread).iter().zip(profile.details(thread)) {
             if let Some(m) = d.mnemonic.get() {
-                idx.insert(profile.str(s.name), profile.str(m));
+                let m = canon.canon(m);
+                by_name.insert(canon.canon(s.name), m);
+                by_text.insert(profile.str(s.name), m);
             }
         }
     }
-    idx
+    MnemonicIndex { by_name, by_text }
 }
 
-/// The inner of an `action '…'` name, else the name unchanged. A critical-path
-/// component is named `action '<desc>'` where `<desc>` is the action processing
-/// slice's name elsewhere; stripping the wrapper lets the name index recover its
-/// mnemonic.
-fn action_inner(name: &str) -> &str {
-    name.strip_prefix("action '")
-        .and_then(|s| s.strip_suffix('\''))
-        .unwrap_or(name)
-}
-
-/// The slice's action mnemonic, taken from its own args if present, else
-/// recovered from the name index by the slice's name or — for a critical-path
-/// component — by its unwrapped action description. `None` when the slice names
-/// no known action.
-fn resolve_mnemonic<'a>(
-    profile: &'a Profile,
-    slice: &Slice,
-    detail: &SliceDetail,
-    idx: &HashMap<&'a str, &'a str>,
-) -> Option<&'a str> {
-    if let Some(m) = detail.mnemonic.get() {
-        return Some(profile.str(m));
-    }
-    let name = profile.str(slice.name);
-    idx.get(name)
-        .copied()
-        .or_else(|| idx.get(action_inner(name)).copied())
+/// The inner of an `action '…'` name, `None` for any other shape. A
+/// critical-path component is named `action '<desc>'` where `<desc>` is the
+/// action processing slice's name elsewhere; stripping the wrapper lets the
+/// name index recover its mnemonic.
+fn action_inner(name: &str) -> Option<&str> {
+    name.strip_prefix("action '")?.strip_suffix('\'')
 }
 
 /// One node of the aggregated flame graph: a frame merged across every span that
@@ -111,20 +139,26 @@ pub struct FlameNode {
     pub children: Span32,
 }
 
-/// An aggregated flame graph as a flat, self-contained arena: node 0 is the
-/// synthetic root, every other node is reached through a parent's `children`
-/// range, and all node names are interned into `text` (copied out of the source
-/// profile, so the graph borrows nothing). The flat layout makes the whole graph
-/// a couple of allocations to drop and lets it cross threads — it is built off
-/// the UI thread and handed back with no lifetime parameters.
+/// An aggregated flame graph as a flat arena: node 0 is the synthetic root,
+/// every other node is reached through a parent's `children` range, and all node
+/// names are [`Str`] handles into the text of the [`Profile`] the graph holds —
+/// every label is already a profile string, so the graph carries no text of its
+/// own. Holding the profile by `Arc` keeps the graph free of lifetime
+/// parameters, so it is built off the UI thread and handed back across threads.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FlameGraph {
-    text: String,
+    profile: Arc<Profile>,
     nodes: Vec<FlameNode>,
     /// Deepest node depth, found once at build so [`flame_height`] need not scan
     /// every node on each paint.
     max_depth: u32,
 }
+
+/// The synthetic root's name. Its label ("All") is the one frame name not in the
+/// profile, so it is encoded as the offset-0 handle: the profile's interner
+/// reserves text offset 0 (the `OptStr` absence encoding), so no profile string
+/// ever carries it and the sentinel cannot collide with a real name.
+const ROOT_LABEL: Str = Str::new(0, 0);
 
 impl FlameGraph {
     /// The synthetic root frame (node 0), under which every lane's forest merges.
@@ -141,9 +175,13 @@ impl FlameGraph {
         &self.nodes[node.children.range()]
     }
 
-    /// Resolves a node name (or a [`StatRow`](crate::StatRow) key) to its text.
+    /// Resolves a node name (or a [`StatRow`](crate::StatRow) key) to its text,
+    /// through the profile the graph was built from.
     pub fn str(&self, s: Str) -> &str {
-        &self.text[s.range()]
+        if s == ROOT_LABEL {
+            return "All";
+        }
+        self.profile.str(s)
     }
 }
 
@@ -225,8 +263,8 @@ impl FlameView {
 }
 
 /// A flame-graph node laid out for painting. The field copies identify the node
-/// for hit-testing and tooltips; `name` is a [`Str`] into the producing
-/// [`FlameGraph`]'s text pool, resolved with [`FlameGraph::str`].
+/// for hit-testing and tooltips; `name` is resolved with the producing
+/// [`FlameGraph`]'s [`str`](FlameGraph::str).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct FlameBox {
     pub x: f32,
@@ -245,10 +283,10 @@ pub struct FlameBox {
 /// `children` and located by their `(label, work_class)` merge key through
 /// `index`, so merging a span into an existing child is O(1): labels are
 /// per-mnemonic, so a single frame can gather thousands of distinct children,
-/// where a linear scan per insert would be quadratic. Labels are already interned
-/// into the flame's text pool, so the key is a `Copy` `(Str, WorkClass)` — small
-/// and fixed-size, which FxHash hashes in a few cycles where SipHash would
-/// dominate the per-span lookup.
+/// where a linear scan per insert would be quadratic. Labels are interned
+/// profile handles, so the key is a `Copy` `(Str, WorkClass)` — small and
+/// fixed-size, which FxHash hashes in a few cycles where SipHash would dominate
+/// the per-span lookup.
 struct Builder {
     name: Str,
     work_class: WorkClass,
@@ -283,34 +321,47 @@ impl Builder {
     }
 }
 
-/// Assembles the flame's text pool and node array. Holds the [`Interner`] that
-/// every label is interned through, so the produced [`Str`] handles index the
-/// graph's own text — making the graph self-contained and `Send`.
+/// Merges spans into the builder tree. Every frame label is a canonical
+/// interned handle of the source profile — a span's mnemonic and name already
+/// live in its text — so merge keys compare and hash as plain integers with no
+/// per-span string work.
 struct Flamer<'p> {
     profile: &'p Profile,
-    idx: HashMap<&'p str, &'p str>,
-    interner: Interner,
+    idx: MnemonicIndex<'p>,
+    canon: Canonicalizer<'p>,
 }
 
 impl<'p> Flamer<'p> {
     fn new(profile: &'p Profile) -> Self {
+        let mut canon = Canonicalizer::new(profile);
         Flamer {
             profile,
-            idx: mnemonic_index(profile),
-            interner: Interner::new(),
+            idx: mnemonic_index(profile, &mut canon),
+            canon,
         }
     }
 
-    /// The label a span carries: its resolved action mnemonic if it names an
-    /// action (so all Rustc collapse together), else its own name (the
-    /// informative label for non-action slices — "checkOutputs",
-    /// "subprocess.run", a repo target, …). The tree shape comes from
-    /// time-containment, not from this label; the label only decides which
-    /// spans at the same place merge into one frame.
+    /// The label a span carries: its action mnemonic — from its own args if
+    /// present, else recovered from the name index by the slice's name or, for
+    /// a critical-path component, by its unwrapped `action '…'` description —
+    /// so all Rustc collapse together; else its own name (the informative label
+    /// for non-action slices — "checkOutputs", "subprocess.run", a repo
+    /// target, …). The tree shape comes from time-containment, not from this
+    /// label; the label only decides which spans at the same place merge into
+    /// one frame. Only the critical-path unwrapping consults the text-keyed
+    /// index, so the hot per-span path never hashes a full string.
     fn span_label(&mut self, slice: &Slice, detail: &SliceDetail) -> Segment {
-        let label = match resolve_mnemonic(self.profile, slice, detail, &self.idx) {
-            Some(m) => self.interner.intern(m),
-            None => self.interner.intern(self.profile.str(slice.name)),
+        let label = match detail.mnemonic.get() {
+            Some(m) => self.canon.canon(m),
+            None => {
+                let name = self.canon.canon(slice.name);
+                match self.idx.by_name.get(&name) {
+                    Some(&m) => m,
+                    None => action_inner(self.profile.str(slice.name))
+                        .and_then(|inner| self.idx.by_text.get(inner).copied())
+                        .unwrap_or(name),
+                }
+            }
         };
         Segment {
             label,
@@ -410,12 +461,11 @@ fn containment_forest(slices: &[Slice]) -> Forest {
 /// (by name) and that action's whole worker-lane subtree is grafted under the
 /// root, giving the critical action its internal breakdown.
 ///
-/// The returned [`FlameGraph`] owns its text pool and flat node array, copying
-/// every name out of `profile`, so it borrows nothing and is `Send`.
-pub fn build_flame_graph(profile: &Profile, scope: Scope) -> FlameGraph {
+/// The returned [`FlameGraph`] keeps a clone of `profile`, whose interned text
+/// its node names index, so it is `Send` with no lifetime parameters.
+pub fn build_flame_graph(profile: &Arc<Profile>, scope: Scope) -> FlameGraph {
     let mut flamer = Flamer::new(profile);
-    let root_name = flamer.interner.intern("All");
-    let mut root = Builder::new(root_name, WorkClass::Meta);
+    let mut root = Builder::new(ROOT_LABEL, WorkClass::Meta);
 
     if scope == Scope::CriticalPath {
         build_critical_path(profile, &mut flamer, &mut root);
@@ -435,11 +485,10 @@ pub fn build_flame_graph(profile: &Profile, scope: Scope) -> FlameGraph {
         }
     }
 
-    let text = flamer.interner.into_text();
-    let nodes = flatten(root, &text);
+    let nodes = flatten(root, profile);
     let max_depth = nodes.iter().map(|n| n.depth).max().unwrap_or(0);
     FlameGraph {
-        text,
+        profile: Arc::clone(profile),
         nodes,
         max_depth,
     }
@@ -459,7 +508,7 @@ struct ActionLoc {
 /// matching action (e.g. "Writing file …") merge as a bare leaf.
 fn build_critical_path(profile: &Profile, flamer: &mut Flamer, root: &mut Builder) {
     let threads = profile.threads();
-    let mut actions: HashMap<&str, ActionLoc> = HashMap::new();
+    let mut actions: FxHashMap<&str, ActionLoc> = FxHashMap::default();
     for (lane, thread) in threads.iter().enumerate() {
         let details = profile.details(thread);
         for (slice, s) in profile.slices(thread).iter().enumerate() {
@@ -479,8 +528,9 @@ fn build_critical_path(profile: &Profile, flamer: &mut Flamer, root: &mut Builde
         }
         for (cp, cp_detail) in profile.slices(thread).iter().zip(profile.details(thread)) {
             let name = profile.str(cp.name);
-            let inner = action_inner(name);
-            let loc = actions.get(inner).or_else(|| actions.get(name));
+            let loc = action_inner(name)
+                .and_then(|inner| actions.get(inner))
+                .or_else(|| actions.get(name));
             match loc {
                 Some(&ActionLoc { lane, slice }) => {
                     let lane_slices = profile.slices(&threads[lane]);
@@ -533,22 +583,21 @@ fn freeze(builder: &Builder, depth: u32) -> FlameNode {
 /// Flatten the builder forest into a flat node array with node 0 the root. A
 /// breadth-first walk lays each node's direct children down as one contiguous
 /// block, recorded as the parent's `children` range; the children are sorted
-/// widest-first, breaking ties by name handle so the layout is independent of the
-/// non-deterministic input order. The walk interns no text — labels are already
-/// handles into `text`, the flame's pool — and consumes the temporary builder
-/// tree.
-fn flatten(mut root: Builder, text: &str) -> Vec<FlameNode> {
-    fn sort_tree(builder: &mut Builder, text: &str) {
+/// widest-first, breaking ties by name text (resolved through `profile`, whose
+/// handles the labels are) so the layout is independent of the
+/// non-deterministic input order. Consumes the temporary builder tree.
+fn flatten(mut root: Builder, profile: &Profile) -> Vec<FlameNode> {
+    fn sort_tree(builder: &mut Builder, profile: &Profile) {
         builder.children.sort_by(|a, b| {
             b.total_us
                 .cmp(&a.total_us)
-                .then_with(|| text[a.name.range()].cmp(&text[b.name.range()]))
+                .then_with(|| profile.str(a.name).cmp(profile.str(b.name)))
         });
         for c in &mut builder.children {
-            sort_tree(c, text);
+            sort_tree(c, profile);
         }
     }
-    sort_tree(&mut root, text);
+    sort_tree(&mut root, profile);
 
     let mut nodes = vec![freeze(&root, 0)];
     let mut queue: std::collections::VecDeque<(&Builder, usize, u32)> =
@@ -756,6 +805,28 @@ mod tests {
     }
 
     #[test]
+    fn equal_text_merges_across_distinct_handles() {
+        // A profile assembled from parallel parse chunks carries equal strings
+        // under distinct handles (the chunk pools concatenate without
+        // cross-chunk dedup), so frames must merge by text, not raw handle.
+        let mut p = profile(vec![track(
+            1,
+            LaneClass::Execution,
+            vec![action("Rustc", 0, 100), action("Rustc", 200, 50)],
+        )]);
+        Arc::get_mut(&mut p).unwrap().duplicate_str_for_test("Rustc");
+        // The fixture really carries two handles for the one text.
+        let slices = p.slices(&p.threads()[0]);
+        assert_ne!(slices[0].name, slices[1].name);
+        assert_eq!(p.str(slices[0].name), p.str(slices[1].name));
+        let g = build_flame_graph(&p, Scope::All);
+        assert_eq!(g.children(g.root()).len(), 1);
+        let rustc = child(&g, g.root(), "Rustc");
+        assert_eq!(rustc.total_us, 150);
+        assert_eq!(rustc.count, 2);
+    }
+
+    #[test]
     fn mnemonicless_slice_keeps_its_name() {
         // A top-level slice with no mnemonic keeps its own informative name, not a
         // coarse work-class bucket — so distinct operations stay distinct.
@@ -905,9 +976,27 @@ mod tests {
         reversed.reverse();
         let ga = build_flame_graph(&profile(vec![track(1, LaneClass::Execution, ordered)]), Scope::All);
         let gb = build_flame_graph(&profile(vec![track(1, LaneClass::Execution, reversed)]), Scope::All);
-        // The two graphs intern the same labels in the same merge order, so they
-        // are byte-for-byte identical.
-        assert_eq!(ga, gb);
+        // Compare every node field with the name resolved: the graphs hold two
+        // independently interned profiles, so equal names need not share a
+        // handle across them, but the flattened structure must be identical.
+        let resolved = |g: &FlameGraph| -> Vec<_> {
+            g.nodes()
+                .iter()
+                .map(|n| {
+                    (
+                        g.str(n.name).to_owned(),
+                        n.total_us,
+                        n.self_us,
+                        n.width_us,
+                        n.work_class,
+                        n.count,
+                        n.depth,
+                        n.children,
+                    )
+                })
+                .collect()
+        };
+        assert_eq!(resolved(&ga), resolved(&gb));
     }
 
     #[test]

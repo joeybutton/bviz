@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use bviz_trace_profile::{Profile, Str, WorkClass};
 use rustc_hash::FxHashMap;
 
@@ -8,8 +10,8 @@ use crate::flame::{build_flame_graph, FlameGraph, FlameNode, Scope};
 /// root's total and a group's share `total_us / Σ(all groups' total_us)` sums to
 /// 100% without double-counting nested time. `max_us` is the peak single-frame
 /// self time, `count` the number of merged span occurrences. `key` is a [`Str`]
-/// into the [`FlameGraph`] the row was derived from; resolve it with
-/// [`FlameGraph::str`].
+/// handle into the profile held by the [`FlameGraph`] the row was derived from;
+/// resolve it with that graph's [`str`](FlameGraph::str).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StatRow {
     pub key: Str,
@@ -34,9 +36,9 @@ impl StatRow {
 /// built under `scope`, summing each frame's self time. Self time sums
 /// to the root's total, so the rows partition the aggregated time without the
 /// double-count of summing a span and its sub-spans. Order is unspecified; the
-/// caller sorts. The returned [`FlameGraph`] owns the text the rows' keys index;
-/// it must be kept to resolve them.
-pub fn aggregate_stats(profile: &Profile, scope: Scope) -> (FlameGraph, Vec<StatRow>) {
+/// caller sorts. The returned [`FlameGraph`] resolves the rows' keys — it holds
+/// the profile whose text they index — so it must be kept alongside them.
+pub fn aggregate_stats(profile: &Arc<Profile>, scope: Scope) -> (FlameGraph, Vec<StatRow>) {
     let graph = build_flame_graph(profile, scope);
     let rows = stats_from_flame(&graph);
     (graph, rows)
@@ -44,7 +46,7 @@ pub fn aggregate_stats(profile: &Profile, scope: Scope) -> (FlameGraph, Vec<Stat
 
 /// Aggregate an already-built flame graph into its stats rows, summing each
 /// frame's self time. Lets a caller that already holds the graph derive the table
-/// without rebuilding it. Keys are [`Str`] into `graph`.
+/// without rebuilding it. Keys resolve with `graph`'s [`str`](FlameGraph::str).
 pub fn stats_from_flame(graph: &FlameGraph) -> Vec<StatRow> {
     let mut groups: FxHashMap<Str, StatRow> = FxHashMap::default();
     for node in graph.nodes() {
@@ -132,6 +134,25 @@ mod tests {
     }
 
     #[test]
+    fn equal_text_shares_a_row_across_distinct_handles() {
+        // A profile assembled from parallel parse chunks carries equal strings
+        // under distinct handles (the chunk pools concatenate without
+        // cross-chunk dedup); rows must group by text, not raw handle.
+        let mut p = profile(vec![track(
+            1,
+            LaneClass::Execution,
+            vec![action("Rustc", 0, 100), action("Rustc", 200, 50)],
+        )]);
+        Arc::get_mut(&mut p).unwrap().duplicate_str_for_test("Rustc");
+        let (g, rows) = aggregate_stats(&p, Scope::All);
+        assert_eq!(rows.len(), 1);
+        let r = row(&g, &rows, "Rustc");
+        assert_eq!(r.count, 2);
+        assert_eq!(r.total_us, 150);
+        assert_eq!(r.max_us, 150);
+    }
+
+    #[test]
     fn scope_excludes_other_lanes() {
         let p = profile(vec![
             track(7, LaneClass::Analysis, vec![action("CppCompile", 0, 100)]),
@@ -173,9 +194,10 @@ mod tests {
             aggregate_stats(&profile(vec![track(1, LaneClass::Execution, ordered)]), Scope::All);
         let (gb, mut rb) =
             aggregate_stats(&profile(vec![track(1, LaneClass::Execution, reversed)]), Scope::All);
-        ra.sort_by(|x, y| ga.str(x.key).cmp(gb.str(y.key)));
+        ra.sort_by(|x, y| ga.str(x.key).cmp(ga.str(y.key)));
         rb.sort_by(|x, y| gb.str(x.key).cmp(gb.str(y.key)));
-        // Compare by resolved key, since the two graphs are independent text pools.
+        // Compare by resolved key: the graphs hold two independently interned
+        // profiles, so equal names need not share a handle across them.
         let resolved = |g: &FlameGraph, rows: &[StatRow]| -> Vec<(String, u32, i64, i64)> {
             rows.iter()
                 .map(|r| (g.str(r.key).to_owned(), r.count, r.total_us, r.max_us))

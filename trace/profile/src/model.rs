@@ -9,7 +9,7 @@ pub struct Str {
 }
 
 impl Str {
-    pub fn new(off: u32, len: u32) -> Str {
+    pub const fn new(off: u32, len: u32) -> Str {
         Str { off, len }
     }
 
@@ -454,6 +454,39 @@ impl Profile {
             .any(|t| t.lane_class == LaneClass::CriticalPath)
     }
 
+    /// Rebinds every second slice carrying `text` (as its name or mnemonic, in
+    /// pool order) to a fresh handle over an appended copy of the text: equal
+    /// strings under distinct handles, the shape of a profile assembled from
+    /// parallel parse chunks, whose pools concatenate without cross-chunk dedup
+    /// ([`Interner::push_pool`]). A single-chunk parse dedups every string into
+    /// one handle, so tests of by-text merging build the duplicated shape with
+    /// this.
+    #[doc(hidden)]
+    pub fn duplicate_str_for_test(&mut self, text: &str) {
+        let dup = Str::new(self.text.len() as u32, text.len() as u32);
+        self.text.push_str(text);
+        let mut nth = 0usize;
+        for (s, d) in self.slice_pool.iter_mut().zip(self.detail_pool.iter_mut()) {
+            let name_hit = &self.text[s.name.range()] == text;
+            let mnemonic_hit = d
+                .mnemonic
+                .get()
+                .is_some_and(|m| &self.text[m.range()] == text);
+            if !name_hit && !mnemonic_hit {
+                continue;
+            }
+            if nth % 2 == 1 {
+                if name_hit {
+                    s.name = dup;
+                }
+                if mnemonic_hit {
+                    d.mnemonic = Some(dup).into();
+                }
+            }
+            nth += 1;
+        }
+    }
+
     /// Phase markers as half-open `[start, end)` intervals: each runs to the next
     /// marker's start, the last to `span.end_us`. Mirrors Bazel's `JsonProfile`
     /// phase-summary reconstruction from consecutive markers. Each name is an
@@ -528,10 +561,7 @@ pub(crate) struct ProfileParts {
 /// instead of appending a copy. Bazel traces repeat names (mnemonics, target
 /// labels, categories) heavily, so dedup is a large memory win. The map is a
 /// build-time temporary; only the [`String`] pool survives, sealed into the
-/// owner that resolves its handles. Any consumer that needs its own interned
-/// text pool (e.g. a derived flame graph) reuses this rather than duplicating
-/// it; the produced [`Str`] handles index that consumer's [`Interner::into_text`]
-/// pool.
+/// owner that resolves its handles.
 pub struct Interner {
     text: String,
     // The map entries are bare handles, hashed and compared through the text

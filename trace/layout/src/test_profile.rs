@@ -4,6 +4,8 @@
 //! trace event, and parsed back; the parser owns interning, depth assignment, and
 //! lane classification.
 
+use std::sync::Arc;
+
 use bviz_trace_profile::{LaneClass, Profile};
 
 /// A slice to emit as a `ph:"X"` trace event. `mnemonic` rides in `args` when set,
@@ -83,9 +85,10 @@ fn escape(s: &str) -> String {
 }
 
 /// Assemble the tracks into a profile by emitting a Chrome-trace JSON and parsing
-/// it.
-pub fn profile(tracks: Vec<TestTrack>) -> Profile {
-    profile_with_counters(tracks, &[])
+/// it. Returned as an `Arc`, the form flame-graph construction takes (the graph
+/// retains the profile it aggregates); borrowing consumers coerce through it.
+pub fn profile(tracks: Vec<TestTrack>) -> Arc<Profile> {
+    Arc::new(profile_with_counters(tracks, &[]))
 }
 
 /// A counter `ph:"C"` series: a lane name and its `(ts_us, value)` points under a
