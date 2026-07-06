@@ -7,8 +7,8 @@
 static GLOBAL: bviz_alloc::MiMalloc = bviz_alloc::MiMalloc;
 
 use bviz_trace_layout::{
-    FlameBox, FlameGraph, FlameMetrics, FlameView, LaneLayout, LaneMetrics, Scope,
-    StatRow, TimeView, Viewport, WorkClass, aggregate_stats, flame_box_at, flame_height,
+    FlameBox, FlameGraph, FlameMetrics, FlameScopes, FlameView, LaneLayout, LaneMetrics, Scope,
+    ScopeAggregate, StatRow, TimeView, Viewport, WorkClass, flame_box_at, flame_height,
     lay_out_flame, lay_out_lanes, visible_slices,
 };
 use bviz_trace_profile::{CounterPoint, Profile, Slice, SliceDetail, TimeSpan};
@@ -232,36 +232,38 @@ const STATS_COLUMNS: [StatsColumnSpec; 6] = [
     StatsColumnSpec { column: StatsColumn::Percent, label: "%", width: Some(STATS_NUM_COL_WIDTH) },
 ];
 
-/// The stats rows in sorted display order, as indices into `aggregates.stats`,
-/// built off the UI thread for a given sort: sorting ~2M rows costs far more
-/// than a frame budget. Holds its own `Arc<Aggregates>` so the table renders
-/// consistent rows even mid-reswap, and `grand_total` (the summed `total_us`) so
-/// the percent column needn't re-sum every frame. Only the visible rows are
-/// formatted, lazily during paint, so no per-row strings are retained.
+/// The sort the stats table opens with. Every aggregate ships this order
+/// precomputed ([`ScopeAggregate::default_order`]), so serving it costs no sort.
+const DEFAULT_STATS_SORT: (StatsColumn, bool) = (StatsColumn::Total, true);
+
+/// The stats rows in sorted display order, as indices into `aggregates.stats`.
+/// Holds its own `Arc<ScopeAggregate>` so the table renders consistent rows even
+/// mid-reswap; the percent denominator is the aggregate's `grand_total`. Only the
+/// visible rows are formatted, lazily during paint, so no per-row strings are
+/// retained.
 struct StatsOrder {
-    aggregates: Arc<Aggregates>,
-    order: Vec<u32>,
-    grand_total: i64,
+    aggregates: Arc<ScopeAggregate>,
+    /// Row order for a non-default sort, built off the UI thread: sorting ~2M
+    /// rows costs far more than a frame budget. `None` for the default sort,
+    /// whose order ships precomputed inside `aggregates`.
+    sorted: Option<Vec<u32>>,
 }
 
-/// The flame graph for the active scope and the stats rows derived from
-/// it in the same background build, owned together so a held box, node, or row
-/// can always resolve its name `Str` against the graph that produced it. Shared as
-/// an `Arc` so a background stats sort can hold its own clone across threads.
-struct Aggregates {
-    flame: FlameGraph,
-    stats: Vec<StatRow>,
+impl StatsOrder {
+    fn order(&self) -> &[u32] {
+        self.sorted.as_deref().unwrap_or(&self.aggregates.default_order)
+    }
 }
 
 /// The flame graph's laid-out boxes together with the inputs that determine
 /// them, so a paint reuses them unless the graph or the laid-out width changed.
-/// The retained `Aggregates` both keeps the graph alive for the boxes' name
-/// handles and serves as the cache key: a new background build hands back a fresh
-/// `Arc`, so `Arc::ptr_eq` detects a stale layout. Neither the horizontal pan nor
+/// The retained `ScopeAggregate` both keeps the graph alive for the boxes' name
+/// handles and serves as the cache key: swapping in another scope's aggregate
+/// changes the `Arc`, so `Arc::ptr_eq` detects a stale layout. Neither the horizontal pan nor
 /// `scroll_y` is a key: each only offsets a box's position at paint, so panning
 /// or scrolling keeps the cache. The zoom is already captured by `content_w`.
 struct FlameBoxCache {
-    aggregates: Arc<Aggregates>,
+    aggregates: Arc<ScopeAggregate>,
     content_w: f32,
     boxes: Rc<Vec<FlameBox>>,
 }
@@ -584,15 +586,28 @@ struct TraceView {
     /// and reused across paints and mouse handlers. It depends only on the
     /// immutable profile, so it is cleared only when a new profile loads.
     lanes: Rc<RefCell<Option<Rc<LaneLayout>>>>,
-    /// The aggregated flame graph and its stats rows for the active scope,
-    /// built off the UI thread (walking every slice would freeze a paint) and
-    /// swapped in when ready. Held together so the rows' and laid-out boxes' name
-    /// handles resolve against the graph that produced them. The previous value
-    /// stays shown while a rebuild runs, so a scope change doesn't blank
-    /// the view.
-    aggregates: Rc<RefCell<Option<Arc<Aggregates>>>>,
+    /// The active scope's aggregate — its flame graph and stats rows, held
+    /// together so the rows' and laid-out boxes' name handles resolve against
+    /// the graph that produced them. Served from `flame_scopes` once the set
+    /// lands, else built on demand off the UI thread (walking every slice
+    /// would freeze a paint) and swapped in when ready; the previous value
+    /// stays shown while an on-demand build runs, so a scope change doesn't
+    /// blank the view.
+    aggregates: Rc<RefCell<Option<Arc<ScopeAggregate>>>>,
     /// The flame graph's memoized box layout; see [`FlameBoxCache`].
     flame_boxes: Rc<RefCell<Option<FlameBoxCache>>>,
+    /// Every scope's aggregate, built in one parallel background pass behind
+    /// the first shown view, so a scope switch serves precomputed results
+    /// instead of aggregating on demand; `None` until that pass lands. A scope
+    /// requested before then falls back to the on-demand single-scope build.
+    flame_scopes: Option<Arc<FlameScopes>>,
+    /// Whether the set pass is running, so it is spawned only once per profile.
+    scopes_inflight: bool,
+    /// Bumped when a loaded profile is superseded so a stale set build's result
+    /// is discarded when it lands.
+    scopes_gen: u64,
+    /// Holds the background set build task so it isn't cancelled on drop.
+    _scopes_task: Task<()>,
     /// The scope the ready `flame`/`stats` reflect, if any.
     agg_ready: Option<Scope>,
     /// The scope a background flame/stats build is running for, if any.
@@ -705,12 +720,16 @@ impl TraceView {
             lanes: Rc::new(RefCell::new(None)),
             aggregates: Rc::new(RefCell::new(None)),
             flame_boxes: Rc::new(RefCell::new(None)),
+            flame_scopes: None,
+            scopes_inflight: false,
+            scopes_gen: 0,
+            _scopes_task: Task::ready(()),
             agg_ready: None,
             agg_inflight: None,
             agg_gen: 0,
             _agg_task: Task::ready(()),
-            stats_sort: StatsColumn::Total,
-            stats_desc: true,
+            stats_sort: DEFAULT_STATS_SORT.0,
+            stats_desc: DEFAULT_STATS_SORT.1,
             stats_order: Rc::new(RefCell::new(None)),
             stats_order_ready: None,
             stats_order_inflight: None,
@@ -1073,7 +1092,7 @@ impl TraceView {
     /// and the const metrics) rather than borrowing the view.
     fn graph_body(
         &self,
-        aggregates: Arc<Aggregates>,
+        aggregates: Arc<ScopeAggregate>,
         palette: Palette,
         colors: &bviz_ui_theme::Colors,
         cx: &mut Context<Self>,
@@ -1247,18 +1266,56 @@ impl TraceView {
     /// `None` until the first background build for the loaded profile completes.
     /// Reflects the previous scope while a rebuild is still running;
     /// [`Self::ensure_aggregates`] owns the (re)build.
-    fn aggregates(&self) -> Option<Arc<Aggregates>> {
+    fn aggregates(&self) -> Option<Arc<ScopeAggregate>> {
         self.aggregates.borrow().clone()
     }
 
-    /// Spawns a background build of the flame graph and its stats rows for the
-    /// current scope when neither the ready value nor an in-flight build
-    /// already matches, and abandons a build whose scope the inputs have moved past.
-    /// Walking every slice is far too costly to run on the UI thread, so the build
-    /// runs on the background executor and the result is swapped in on completion;
-    /// the previously built graph stays shown until then. Idempotent — a no-op once
-    /// the right value is ready or being computed — so it is safe to call each
-    /// frame.
+    /// Spawns the one background pass that aggregates every scope of the loaded
+    /// profile, so a later scope switch is served from precomputed results.
+    /// The pass runs behind whatever the view currently shows and signals
+    /// nothing; [`Self::ensure_aggregates`] picks the set up once it lands.
+    /// Deferred until the first scope's on-demand build has landed: the pass
+    /// saturates every core for its whole run, and overlapping the two builds
+    /// slows the one the user is waiting on, delaying the initial view.
+    fn spawn_flame_scopes(&mut self, cx: &mut Context<Self>) {
+        if self.flame_scopes.is_some() || self.scopes_inflight {
+            return;
+        }
+        let Source::Loaded(profile) = &self.source else {
+            return;
+        };
+        let profile = profile.clone();
+        self.scopes_inflight = true;
+        self.scopes_gen += 1;
+        let generation = self.scopes_gen;
+        self._scopes_task = load_in_background(
+            cx,
+            move || {
+                let t = std::time::Instant::now();
+                let scopes = FlameScopes::build(&profile);
+                if std::env::var_os("BVIZ_TRACE_TIMING").is_some() {
+                    eprintln!("[timing] flame_scopes: {:.3}s", t.elapsed().as_secs_f64());
+                }
+                scopes
+            },
+            move |view, scopes, _cx| {
+                // Discard a result whose profile has been superseded.
+                if view.scopes_gen != generation {
+                    return;
+                }
+                view.flame_scopes = Some(Arc::new(scopes));
+                view.scopes_inflight = false;
+            },
+        );
+    }
+
+    /// Makes the current scope's aggregate the shown one: served instantly from
+    /// the precomputed set when that has landed, otherwise built on demand off
+    /// the UI thread (walking every slice is far too costly for a paint) and
+    /// swapped in on completion, the previously built graph staying shown until
+    /// then. An in-flight build whose scope the inputs have moved past is
+    /// abandoned. Idempotent — a no-op once the right value is ready or being
+    /// computed — so it is safe to call each frame.
     fn ensure_aggregates(&mut self, cx: &mut Context<Self>) {
         let Source::Loaded(profile) = &self.source else {
             return;
@@ -1267,6 +1324,18 @@ impl TraceView {
         if self.agg_ready == Some(key) {
             // The shown value is already current; cancel a build for a key the
             // inputs have since left so its late result can't clobber it.
+            if self.agg_inflight.take().is_some() {
+                self.agg_gen += 1;
+                self._agg_task = Task::ready(());
+            }
+            return;
+        }
+        if let Some(aggregate) = self.flame_scopes.as_ref().and_then(|s| s.get(key)) {
+            *self.aggregates.borrow_mut() = Some(aggregate.clone());
+            self.flame_boxes.borrow_mut().take();
+            self.agg_ready = Some(key);
+            self.stats_order_ready = None;
+            // The swap supersedes any on-demand build still running.
             if self.agg_inflight.take().is_some() {
                 self.agg_gen += 1;
                 self._agg_task = Task::ready(());
@@ -1285,13 +1354,13 @@ impl TraceView {
             cx,
             move || {
                 let t = std::time::Instant::now();
-                let (flame, stats) = aggregate_stats(&profile, scope);
+                let aggregate = ScopeAggregate::build(&profile, scope);
                 if std::env::var_os("BVIZ_TRACE_TIMING").is_some() {
-                    eprintln!("[timing] aggregate_stats: {:.3}s", t.elapsed().as_secs_f64());
+                    eprintln!("[timing] scope_aggregate: {:.3}s", t.elapsed().as_secs_f64());
                 }
-                Aggregates { flame, stats }
+                aggregate
             },
-            move |view, aggregates, _cx| {
+            move |view, aggregates, cx| {
                 // Discard a result the inputs have moved past since this spawn.
                 if view.agg_gen != generation {
                     return;
@@ -1301,9 +1370,11 @@ impl TraceView {
                 view.agg_ready = Some(key);
                 view.agg_inflight = None;
                 // The sorted order is keyed on the new aggregates; let
-                // `ensure_stats_order` re-sort against them (the old order keeps
+                // `ensure_stats_order` re-derive it (the old order keeps
                 // showing until it lands).
                 view.stats_order_ready = None;
+                // With a scope on screen, aggregate the rest.
+                view.spawn_flame_scopes(cx);
             },
         );
     }
@@ -1324,21 +1395,25 @@ impl TraceView {
         })
     }
 
-    /// Drops the cached flame graph and stats rows and abandons any in-flight
-    /// build, so the next [`Self::ensure_aggregates`] rebuilds from scratch. Called
-    /// when a new profile loads — unlike a mere scope change, the old
-    /// graph is no longer a valid thing to keep showing.
+    /// Drops the cached flame graph, stats rows, and scope set and abandons any
+    /// in-flight build, so the next [`Self::ensure_aggregates`] rebuilds from
+    /// scratch. Called when a new profile loads — unlike a mere scope change,
+    /// the old graph is no longer a valid thing to keep showing.
     fn invalidate_aggregates(&mut self) {
         self.aggregates.borrow_mut().take();
         self.flame_boxes.borrow_mut().take();
         self.stats_order.borrow_mut().take();
+        self.flame_scopes = None;
+        self.scopes_inflight = false;
         self.agg_ready = None;
         self.agg_inflight = None;
         self.stats_order_ready = None;
         self.stats_order_inflight = None;
-        // Supersede any build/sort still running for the previous profile.
+        // Supersede any build/sort/set pass still running for the previous
+        // profile.
         self.agg_gen += 1;
         self.stats_order_gen += 1;
+        self.scopes_gen += 1;
     }
 
     /// Sets the stats sort to `column`, toggling the direction when it is already
@@ -1352,13 +1427,14 @@ impl TraceView {
         }
     }
 
-    /// Spawns a background sort of the stats rows for the current scope and
-    /// sort when neither the ready order nor an in-flight sort already matches, and
-    /// abandons a sort whose key the inputs have moved past. Sorting ~2M rows is
-    /// far too costly to run on the UI thread, so the sort runs on the background
-    /// executor and only the row indices come back; the visible rows are formatted
-    /// lazily at paint. The previous order stays shown until the new one lands.
-    /// Idempotent — safe to call each frame.
+    /// Makes the current `(scope, sort)`'s row order the shown one. The default
+    /// sort's order ships precomputed inside the aggregate, so it is served
+    /// with no sort at all; any other sort runs on the background executor
+    /// (sorting ~2M rows is far too costly for the UI thread) and only the row
+    /// indices come back, the previous order staying shown until the new one
+    /// lands. An in-flight sort whose key the inputs have moved past is
+    /// abandoned. The visible rows are formatted lazily at paint. Idempotent —
+    /// safe to call each frame.
     fn ensure_stats_order(&mut self, cx: &mut Context<Self>) {
         let Some(aggregates) = self.aggregates() else {
             return;
@@ -1370,6 +1446,17 @@ impl TraceView {
         if self.stats_order_ready == Some(key) {
             // The shown order is already current; cancel a sort for a key the
             // inputs have since left so its late result can't clobber it.
+            if self.stats_order_inflight.take().is_some() {
+                self.stats_order_gen += 1;
+                self._stats_order_task = Task::ready(());
+            }
+            return;
+        }
+        if (self.stats_sort, self.stats_desc) == DEFAULT_STATS_SORT {
+            *self.stats_order.borrow_mut() =
+                Some(Rc::new(StatsOrder { aggregates, sorted: None }));
+            self.stats_order_ready = Some(key);
+            // The swap supersedes any background sort still running.
             if self.stats_order_inflight.take().is_some() {
                 self.stats_order_gen += 1;
                 self._stats_order_task = Task::ready(());
@@ -1419,8 +1506,7 @@ impl TraceView {
                     .collect();
                 keyed.sort_unstable();
                 let order: Vec<u32> = keyed.into_iter().map(|k| k as u32).collect();
-                let grand_total: i64 = stats.iter().map(|r| r.total_us).sum();
-                StatsOrder { aggregates, order, grand_total }
+                StatsOrder { aggregates, sorted: Some(order) }
             },
             move |view, stats_order, _cx| {
                 // Discard a result the inputs have moved past since this spawn.
@@ -1506,7 +1592,7 @@ impl TraceView {
             return table.child(loading_indicator("Sorting…", colors));
         };
 
-        let row_count = order.order.len();
+        let row_count = order.order().len();
         let scroll_track = palette.scroll_track;
         let body = uniform_list(
             "stats-body",
@@ -1518,9 +1604,10 @@ impl TraceView {
                         // Format only the visible rows here: formatting all ~2M up
                         // front froze the UI thread for seconds and retained a huge
                         // string structure that was slow to drop.
-                        let row = order.aggregates.stats[order.order[i] as usize];
+                        let row = order.aggregates.stats[order.order()[i] as usize];
                         let key = graph.str(row.key);
-                        let pct = 100.0 * row.total_us as f64 / order.grand_total.max(1) as f64;
+                        let pct = 100.0 * row.total_us as f64
+                            / order.aggregates.grand_total.max(1) as f64;
                         div()
                             .flex()
                             .flex_row()
@@ -2801,7 +2888,7 @@ fn work_class_legend(palette: Palette) -> impl IntoElement {
 /// is drawn.
 #[allow(clippy::too_many_arguments)]
 fn paint_flame_graph(
-    aggregates: &Arc<Aggregates>,
+    aggregates: &Arc<ScopeAggregate>,
     cache: &Rc<RefCell<Option<FlameBoxCache>>>,
     scroll_y: f32,
     flame_view: FlameView,
@@ -2893,7 +2980,7 @@ fn paint_flame_graph(
 /// graph alive for the boxes' name handles and keys the cache by identity.
 fn flame_boxes(
     cache: &Rc<RefCell<Option<FlameBoxCache>>>,
-    aggregates: &Arc<Aggregates>,
+    aggregates: &Arc<ScopeAggregate>,
     content_w: f32,
     metrics: &FlameMetrics,
 ) -> Rc<Vec<FlameBox>> {

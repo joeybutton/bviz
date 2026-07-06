@@ -3,8 +3,8 @@ use std::sync::Arc;
 use bviz_trace_profile::{LaneClass, Profile};
 
 use crate::flame::{
-    Builder, FlameGraph, Flamer, Scope, build_critical_path, class_trees, fold_all, fold_ref, seal,
-    worker_count,
+    Builder, FlameGraph, Flamer, Scope, build_critical_path, build_flame_graph, class_trees,
+    fold_all, fold_ref, seal, worker_count,
 };
 use crate::stats::{StatRow, stats_from_flame};
 
@@ -23,6 +23,12 @@ pub struct ScopeAggregate {
 }
 
 impl ScopeAggregate {
+    /// Builds the one scope's aggregate on its own, for a caller that needs a
+    /// single scope before (or without) the full [`FlameScopes`] pass.
+    pub fn build(profile: &Arc<Profile>, scope: Scope) -> ScopeAggregate {
+        ScopeAggregate::from_graph(build_flame_graph(profile, scope))
+    }
+
     fn from_graph(flame: FlameGraph) -> ScopeAggregate {
         let stats = stats_from_flame(&flame);
         // Decorate-sort on one packed integer key per row — total descending
@@ -55,12 +61,14 @@ impl ScopeAggregate {
 /// and each lane is walked once into its lane class's tree, from which the
 /// class-scoped graphs and their union `All` all derive. The critical-path
 /// aggregate exists only when the profile has a critical-path lane.
+/// Each aggregate is held as its own [`Arc`] so a caller can serve one scope's
+/// handle on its own, keyed by identity, without cloning the aggregate.
 pub struct FlameScopes {
-    critical_path: Option<ScopeAggregate>,
-    loading: ScopeAggregate,
-    analysis: ScopeAggregate,
-    execution: ScopeAggregate,
-    all: ScopeAggregate,
+    critical_path: Option<Arc<ScopeAggregate>>,
+    loading: Arc<ScopeAggregate>,
+    analysis: Arc<ScopeAggregate>,
+    execution: Arc<ScopeAggregate>,
+    all: Arc<ScopeAggregate>,
 }
 
 impl FlameScopes {
@@ -118,17 +126,17 @@ impl FlameScopes {
             scope.spawn(|| all_slot = Some(aggregate(Some(all))));
         });
         FlameScopes {
-            critical_path: cp_slot,
-            loading: loading_slot.unwrap(),
-            analysis: analysis_slot.unwrap(),
-            execution: execution_slot.unwrap(),
-            all: all_slot.unwrap(),
+            critical_path: cp_slot.map(Arc::new),
+            loading: Arc::new(loading_slot.unwrap()),
+            analysis: Arc::new(analysis_slot.unwrap()),
+            execution: Arc::new(execution_slot.unwrap()),
+            all: Arc::new(all_slot.unwrap()),
         }
     }
 
     /// The aggregate presented under `scope`; `None` only for
     /// [`Scope::CriticalPath`] on a profile without a critical-path lane.
-    pub fn get(&self, scope: Scope) -> Option<&ScopeAggregate> {
+    pub fn get(&self, scope: Scope) -> Option<&Arc<ScopeAggregate>> {
         match scope {
             Scope::CriticalPath => self.critical_path.as_ref(),
             Scope::Loading => Some(&self.loading),
