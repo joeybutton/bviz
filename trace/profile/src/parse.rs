@@ -1497,7 +1497,7 @@ fn finish_merge(merge: Merge, other_data: Option<Map<String, Value>>) -> Profile
             d.mnemonic = d.mnemonic.shifted(run.text_base);
             d.configuration = d.configuration.shifted(run.text_base);
             d.others = d.others.shifted(run.args_base);
-            let end = s.start_us + s.dur_us;
+            let end = s.start_us.saturating_add(s.dur_us);
             while stack.last().is_some_and(|&e| e < end) {
                 stack.pop();
             }
@@ -2576,9 +2576,9 @@ mod tests {
             + "{\"pid\":7,\"weird\":[1,{\"q\":\"]\"},\"s\\\"t\"],\"other\":{\"deep\":[true,null]},\"name\":\"u1\",\"ph\":\"X\",\"ts\":4,\"dur\":1,\"tid\":2},\n"
             + "{\"name\":\"argsy\",\"ph\":\"X\",\"ts\":5,\"dur\":1,\"tid\":2,\"args\":{\"s\":\"v\",\"i\":-3,\"big\":9223372036854775808,\"b\":true,\"nb\":false,\"z\":null,\"arr\":[1,2],\"obj\":{\"k\":\"v\"},\"esc\":\"a\\tb\"}},\n"
             + "{\"name\":\"floatarg\",\"ph\":\"X\",\"ts\":5,\"dur\":1,\"tid\":2,\"args\":{\"f\":2.75}},\n"
-            // dur 0: the saturated i64::MAX start must not overflow the depth
-            // pass's end computation.
-            + "{\"name\":\"big\",\"ph\":\"X\",\"ts\":92233720368547758070,\"dur\":0,\"tid\":2},\n"
+            // The saturated i64::MAX start plus a positive dur exercises the
+            // depth pass's saturating end computation.
+            + "{\"name\":\"big\",\"ph\":\"X\",\"ts\":92233720368547758070,\"dur\":1,\"tid\":2},\n"
             + "{\"name\":\"neg\",\"ph\":\"X\",\"ts\":6,\"dur\":1,\"tid\":-2},\n"
             + "{ \"name\" : \"ws\" , \"ph\" : \"X\" , \"ts\" : 7 , \"dur\" : 1 , \"tid\" : 2 },\n"
             + "{\"name\":\"Empty\",\"ph\":\"C\",\"ts\":8,\"tid\":1,\"args\":{}},\n"
