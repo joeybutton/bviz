@@ -71,8 +71,7 @@ impl FlameScopes {
     /// Parallelism override, so the sharded build can be asserted equal to the
     /// single-worker one; [`FlameScopes::build`] derives the count from the
     /// parallelism granted to the process.
-    #[doc(hidden)]
-    pub fn build_with_workers(profile: &Arc<Profile>, workers: usize) -> FlameScopes {
+    fn build_with_workers(profile: &Arc<Profile>, workers: usize) -> FlameScopes {
         let flamer = Flamer::new(profile, workers);
 
         let mut loading = None;
