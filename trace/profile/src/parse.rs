@@ -1163,16 +1163,22 @@ struct Builder {
 }
 
 impl Builder {
-    /// `bytes_hint` is the length of the JSON this builder will consume; the
-    /// interner is pre-sized from it with distinct-string and text densities
-    /// that bound what large Bazel profiles exhibit per chunk (about one
-    /// distinct string per 300 bytes and one text byte per 3.3 — denser than
-    /// the whole-profile figures, because strings shared across chunks
-    /// re-intern in each), so bulk interning avoids rehash and regrow copies
-    /// without gross over-reservation.
+    /// `bytes_hint` is the length of the JSON this builder will consume. The
+    /// text pool is reserved at that full length — in practice its upper
+    /// bound: interned strings are disjoint tokens of the input or shorter
+    /// (unescaping shrinks), except numeric args, which intern in formatted
+    /// form and can outgrow an exponent-notation token; the structural bytes
+    /// the pool never stores (quotes, keys, punctuation) leave headroom far
+    /// past that. A pool that regrows reallocates and copies itself whole,
+    /// and chunks range from mostly-repeated strings to nearly all-distinct,
+    /// where a density guess loses; the reservation's untouched tail costs
+    /// only address space. The dedup map stays sized at the distinct-string
+    /// density typical of Bazel profiles (about one per 300 bytes): entries
+    /// are small, so a rehash on a denser chunk is cheap, where matching the
+    /// pool's worst-case bound would waste real memory on every chunk.
     fn new(bytes_hint: usize) -> Builder {
         Builder {
-            interner: Interner::with_capacity(bytes_hint / 256, bytes_hint / 3),
+            interner: Interner::with_capacity(bytes_hint / 256, bytes_hint),
             args_pool: Vec::new(),
             thread_meta: BTreeMap::new(),
             staging: Vec::new(),
