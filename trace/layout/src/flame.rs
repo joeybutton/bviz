@@ -1118,6 +1118,43 @@ mod tests {
     }
 
     #[test]
+    fn conflicting_mnemonics_resolve_to_the_smallest_text() {
+        // Two lanes carry the same action name under different mnemonics; a
+        // third slice shares the name but has no mnemonic of its own, so its
+        // label comes from the index — which must pick the byte-wise smallest
+        // mnemonic regardless of lane visit order.
+        let p = profile(vec![
+            track(
+                1,
+                LaneClass::Execution,
+                vec![action_named("Compiling foo", "Rustc", 0, 100)],
+            ),
+            track(
+                2,
+                LaneClass::Execution,
+                vec![action_named("Compiling foo", "Javac", 200, 50)],
+            ),
+            track(
+                3,
+                LaneClass::Execution,
+                vec![slice("Compiling foo", "action processing", 400, 30)],
+            ),
+        ]);
+        let g = build_flame_graph(&p, Scope::All);
+        // A slice's own mnemonic always wins; only the mnemonic-less slice
+        // resolves through the index and joins the smallest-text frame.
+        assert_eq!(child(&g, g.root(), "Rustc").total_us, 100);
+        let javac = child(&g, g.root(), "Javac");
+        assert_eq!(javac.total_us, 80);
+        assert_eq!(javac.count, 2);
+        assert!(
+            g.children(g.root())
+                .iter()
+                .all(|c| g.str(c.name) != "Compiling foo")
+        );
+    }
+
+    #[test]
     fn nested_spans_form_a_call_stack_without_double_counting() {
         // A lane with Rustc(0..100) containing Action.execute(0..90) containing
         // subprocess.run(0..80): the tree nests by time, each span's duration

@@ -331,6 +331,19 @@ mod tests {
                 vec![slice("idle", "generic", base, 5)],
             ));
         }
+        // One name under two mnemonics plus a mnemonic-less carrier: the
+        // smallest-text resolution must not depend on which shard scans which
+        // lane.
+        tracks.push(track(
+            50,
+            LaneClass::Execution,
+            vec![action_named("Compiling foo", "Javac", 5000, 60)],
+        ));
+        tracks.push(track(
+            51,
+            LaneClass::Execution,
+            vec![slice("Compiling foo", "action processing", 5100, 30)],
+        ));
         let mut p = profile(tracks);
         let p_mut = Arc::get_mut(&mut p).unwrap();
         p_mut.duplicate_str_for_test("Rustc");
