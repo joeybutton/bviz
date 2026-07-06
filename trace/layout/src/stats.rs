@@ -15,6 +15,10 @@ use crate::flame::{build_flame_graph, FlameGraph, FlameNode, Scope};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StatRow {
     pub key: Str,
+    /// Lexicographic rank of `key`'s text among the profile's distinct frame
+    /// names ([`FlameNode::rank`]); rank order equals byte-wise text order, so
+    /// sorting rows by key compares integers without resolving text.
+    pub rank: u32,
     pub work_class: WorkClass,
     pub count: u32,
     pub total_us: i64,
@@ -61,6 +65,7 @@ pub fn stats_from_flame(graph: &FlameGraph) -> Vec<StatRow> {
 fn accumulate(node: &FlameNode, groups: &mut FxHashMap<Str, StatRow>) {
     let row = groups.entry(node.name).or_insert_with(|| StatRow {
         key: node.name,
+        rank: node.rank,
         work_class: node.work_class,
         count: 0,
         total_us: 0,

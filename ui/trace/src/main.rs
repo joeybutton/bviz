@@ -233,8 +233,8 @@ const STATS_COLUMNS: [StatsColumnSpec; 6] = [
 ];
 
 /// The stats rows in sorted display order, as indices into `aggregates.stats`,
-/// built off the UI thread for a given sort: sorting ~2M rows on the paint thread
-/// freezes it for seconds. Holds its own `Arc<Aggregates>` so the table renders
+/// built off the UI thread for a given sort: sorting ~2M rows costs far more
+/// than a frame budget. Holds its own `Arc<Aggregates>` so the table renders
 /// consistent rows even mid-reswap, and `grand_total` (the summed `total_us`) so
 /// the percent column needn't re-sum every frame. Only the visible rows are
 /// formatted, lazily during paint, so no per-row strings are retained.
@@ -1387,23 +1387,38 @@ impl TraceView {
         self._stats_order_task = load_in_background(
             cx,
             move || {
-                let graph = &aggregates.flame;
                 let stats = &aggregates.stats;
-                let mut order: Vec<u32> = (0..stats.len() as u32).collect();
-                order.sort_by(|&ai, &bi| {
-                    let a = &stats[ai as usize];
-                    let b = &stats[bi as usize];
-                    let ord = match column {
-                        StatsColumn::Key => graph.str(b.key).cmp(graph.str(a.key)),
-                        StatsColumn::Count => a.count.cmp(&b.count),
-                        StatsColumn::Total | StatsColumn::Percent => a.total_us.cmp(&b.total_us),
-                        StatsColumn::Avg => a.avg_us().cmp(&b.avg_us()),
-                        StatsColumn::Max => a.max_us.cmp(&b.max_us),
-                    };
-                    let ord = if desc { ord.reverse() } else { ord };
-                    // Break ties by key so the order is stable regardless of input order.
-                    ord.then_with(|| graph.str(a.key).cmp(graph.str(b.key)))
-                });
+                // Every comparison is integer-only: a row's key rank orders
+                // exactly as its key text does (byte-wise), so the Key column
+                // sorts by rank and every other column tie-breaks by rank —
+                // ties by key keep the order stable regardless of input order.
+                // Order-preserving bias from i64 to u64, so a signed value
+                // packs into the unsigned key.
+                let bias = |v: i64| (v as u64) ^ (1 << 63);
+                let primary = |r: &StatRow| match column {
+                    StatsColumn::Key => r.rank as u64,
+                    StatsColumn::Count => r.count as u64,
+                    StatsColumn::Total | StatsColumn::Percent => bias(r.total_us),
+                    StatsColumn::Avg => bias(r.avg_us()),
+                    StatsColumn::Max => bias(r.max_us),
+                };
+                // A descending numeric sort inverts its primary; for the Key
+                // column the primary IS the tie-break key, whose descending
+                // header state shows ascending text.
+                let invert = if column == StatsColumn::Key { !desc } else { desc };
+                // Decorate-sort on one packed key per row: primary above the
+                // always-ascending rank above the row index (never reached —
+                // ranks are distinct), so no comparison chases a row pointer.
+                let mut keyed: Vec<u128> = stats
+                    .iter()
+                    .enumerate()
+                    .map(|(i, r)| {
+                        let p = if invert { !primary(r) } else { primary(r) };
+                        ((p as u128) << 64) | ((r.rank as u128) << 32) | i as u128
+                    })
+                    .collect();
+                keyed.sort_unstable();
+                let order: Vec<u32> = keyed.into_iter().map(|k| k as u32).collect();
                 let grand_total: i64 = stats.iter().map(|r| r.total_us).sum();
                 StatsOrder { aggregates, order, grand_total }
             },

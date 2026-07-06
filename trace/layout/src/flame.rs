@@ -58,6 +58,11 @@ struct Segment {
 /// with no locking.
 struct Canon {
     memo: FxHashMap<Str, Str>,
+    /// Lexicographic rank of each canonical handle: dense `u32`s assigned by
+    /// one byte-wise sort of the distinct texts. Canonical handles biject with
+    /// texts, so rank order equals text order and every later ordering
+    /// comparison is integer-only.
+    rank: FxHashMap<Str, u32>,
 }
 
 impl Canon {
@@ -65,6 +70,11 @@ impl Canon {
     /// handle with no entry is its own canonical.
     fn canon(&self, s: Str) -> Str {
         self.memo.get(&s).copied().unwrap_or(s)
+    }
+
+    /// The lexicographic rank of a canonical handle's text.
+    fn rank_of(&self, s: Str) -> u32 {
+        self.rank[&s]
     }
 }
 
@@ -186,11 +196,20 @@ fn scan(profile: &Profile, workers: usize) -> (Canon, MnemonicIndex<'_>) {
         }
     }
 
+    // Rank the distinct texts by one sort under `&str`'s byte-wise `Ord`, so
+    // comparing two ranks is exactly comparing the texts.
+    let ordered = sort_pairs_by_text(by_text.iter().map(|(&t, &h)| (t, h)).collect(), workers);
+    let rank: FxHashMap<Str, u32> = ordered
+        .iter()
+        .enumerate()
+        .map(|(i, &(_, h))| (h, i as u32))
+        .collect();
+
     let idx_by_text: FxHashMap<&str, Str> =
         mnemonics.iter().map(|(&n, &m)| (n, by_text[m])).collect();
     let by_name = idx_by_text.iter().map(|(&n, &m)| (by_text[n], m)).collect();
     (
-        Canon { memo },
+        Canon { memo, rank },
         MnemonicIndex {
             by_name,
             by_text: idx_by_text,
@@ -235,6 +254,60 @@ fn run_sharded<S: Default + Send>(
     })
 }
 
+/// Sort `(text, handle)` pairs into byte-wise text order, sharding across
+/// `workers` by sampled pivots: each worker classifies a chunk of the input
+/// into pivot-bounded buckets, each bucket sorts on its own worker, and the
+/// buckets concatenate in pivot order. The texts must be distinct, so the
+/// result is the one total order whatever the sampled partition. Small inputs
+/// sort serially — the partition overhead only pays off at scale.
+fn sort_pairs_by_text<'p>(mut pairs: Vec<(&'p str, Str)>, workers: usize) -> Vec<(&'p str, Str)> {
+    /// Input size below which the serial sort wins over partitioning.
+    const PARALLEL_MIN: usize = 1 << 13;
+    if workers <= 1 || pairs.len() < PARALLEL_MIN {
+        pairs.sort_unstable_by_key(|&(t, _)| t);
+        return pairs;
+    }
+    // Evenly spaced cuts of a sorted sparse sample balance the buckets even
+    // when the keys cluster under shared prefixes.
+    const OVERSAMPLE: usize = 32;
+    let step = (pairs.len() / (workers * OVERSAMPLE)).max(1);
+    let mut sample: Vec<&str> = pairs.iter().step_by(step).map(|&(t, _)| t).collect();
+    sample.sort_unstable();
+    let pivots: Vec<&str> = (1..workers)
+        .map(|i| sample[i * sample.len() / workers])
+        .collect();
+
+    // Bucket `b` holds the texts with exactly `b` pivots at or below them.
+    let chunk = pairs.len().div_ceil(workers);
+    let mut buckets: Vec<Vec<(&str, Str)>> = vec![Vec::new(); workers];
+    std::thread::scope(|scope| {
+        let handles: Vec<_> = pairs
+            .chunks(chunk)
+            .map(|part| {
+                let pivots = &pivots;
+                scope.spawn(move || {
+                    let mut local: Vec<Vec<(&str, Str)>> = vec![Vec::new(); workers];
+                    for &(t, h) in part {
+                        local[pivots.partition_point(|&p| p <= t)].push((t, h));
+                    }
+                    local
+                })
+            })
+            .collect();
+        for handle in handles {
+            for (b, mut part) in handle.join().unwrap().into_iter().enumerate() {
+                buckets[b].append(&mut part);
+            }
+        }
+    });
+    std::thread::scope(|scope| {
+        for bucket in &mut buckets {
+            scope.spawn(move || bucket.sort_unstable_by_key(|&(t, _)| t));
+        }
+    });
+    buckets.into_iter().flatten().collect()
+}
+
 /// The inner of an `action '…'` name, `None` for any other shape. A
 /// critical-path component is named `action '<desc>'` where `<desc>` is the
 /// action processing slice's name elsewhere; stripping the wrapper lets the
@@ -255,6 +328,10 @@ fn action_inner(name: &str) -> Option<&str> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FlameNode {
     pub name: Str,
+    /// Lexicographic rank of `name`'s text among the profile's distinct frame
+    /// names — rank order equals byte-wise text order — so name ordering
+    /// compares integers without resolving text.
+    pub rank: u32,
     pub total_us: i64,
     pub self_us: i64,
     pub width_us: i64,
@@ -415,6 +492,9 @@ pub struct FlameBox {
 /// updating `index`, so no merge may follow a sort.
 pub(crate) struct Builder {
     name: Str,
+    /// Lexicographic rank of `name`'s text (see [`FlameNode::rank`]); the
+    /// root's is unused — a root is never ordered against a sibling.
+    rank: u32,
     work_class: WorkClass,
     total_us: i64,
     count: u32,
@@ -424,12 +504,13 @@ pub(crate) struct Builder {
 
 impl Builder {
     pub(crate) fn new_root() -> Self {
-        Builder::new(ROOT_LABEL, WorkClass::Meta)
+        Builder::new(ROOT_LABEL, 0, WorkClass::Meta)
     }
 
-    fn new(name: Str, work_class: WorkClass) -> Self {
+    fn new(name: Str, rank: u32, work_class: WorkClass) -> Self {
         Builder {
             name,
+            rank,
             work_class,
             total_us: 0,
             count: 0,
@@ -438,13 +519,15 @@ impl Builder {
         }
     }
 
-    /// Find the child matching this segment, or append a fresh one. The work
-    /// class travels with the label; the first occurrence wins.
-    fn child(&mut self, seg: Segment) -> &mut Builder {
+    /// Find the child matching this segment, or append a fresh one built with
+    /// `rank()`. The work class travels with the label; the first occurrence
+    /// wins. Ranks are lazy so a merge into an existing child costs no lookup.
+    fn child(&mut self, seg: Segment, rank: impl FnOnce() -> u32) -> &mut Builder {
         let key = (seg.label, seg.work_class);
         let idx = *self.index.entry(key).or_insert_with(|| {
             let i = self.children.len();
-            self.children.push(Builder::new(seg.label, seg.work_class));
+            self.children
+                .push(Builder::new(seg.label, rank(), seg.work_class));
             i
         });
         &mut self.children[idx]
@@ -513,7 +596,7 @@ impl<'p> Flamer<'p> {
         span_idx: usize,
     ) {
         let seg = self.span_label(&lane_slices[span_idx], &lane_details[span_idx]);
-        let node = parent.child(seg);
+        let node = parent.child(seg, || self.canon.rank_of(seg.label));
         node.total_us += lane_slices[span_idx].dur_us;
         node.count += 1;
         // Reborrow `node` per child: `child()` borrows `parent` mutably, so the
@@ -716,10 +799,11 @@ pub(crate) fn fold_ref(dst: &mut Builder, src: &Builder) {
     dst.total_us += src.total_us;
     dst.count += src.count;
     for child in &src.children {
-        let d = dst.child(Segment {
+        let seg = Segment {
             label: child.name,
             work_class: child.work_class,
-        });
+        };
+        let d = dst.child(seg, || child.rank);
         fold_ref(d, child);
     }
 }
@@ -737,7 +821,7 @@ pub(crate) fn fold_all(trees: Vec<Builder>) -> Builder {
 
 /// Sort and freeze a finished builder tree into a [`FlameGraph`] over `profile`.
 pub(crate) fn seal(root: &mut Builder, profile: &Arc<Profile>) -> FlameGraph {
-    let nodes = flatten(root, profile);
+    let nodes = flatten(root);
     let max_depth = nodes.iter().map(|n| n.depth).max().unwrap_or(0);
     FlameGraph {
         profile: Arc::clone(profile),
@@ -796,7 +880,7 @@ pub(crate) fn build_critical_path(profile: &Profile, flamer: &Flamer, root: &mut
                 None => {
                     root.total_us += cp.dur_us;
                     let seg = flamer.span_label(cp, cp_detail);
-                    let node = root.child(seg);
+                    let node = root.child(seg, || flamer.canon.rank_of(seg.label));
                     node.total_us += cp.dur_us;
                     node.count += 1;
                 }
@@ -822,6 +906,7 @@ fn freeze(builder: &Builder, depth: u32) -> FlameNode {
     let children_width: i64 = builder.children.iter().map(width_us).sum();
     FlameNode {
         name: builder.name,
+        rank: builder.rank,
         total_us: builder.total_us,
         self_us: (builder.total_us - children_total).max(0),
         width_us: builder.total_us.max(children_width),
@@ -835,26 +920,22 @@ fn freeze(builder: &Builder, depth: u32) -> FlameNode {
 /// Flatten the builder forest into a flat node array with node 0 the root. A
 /// breadth-first walk lays each node's direct children down as one contiguous
 /// block, recorded as the parent's `children` range; the children are sorted
-/// widest-first, breaking ties by name text (resolved through `profile`, whose
-/// handles the labels are) so the layout is independent of the
-/// non-deterministic input order. Sorts the tree in place, leaving its merge
-/// indexes stale.
-fn flatten(root: &mut Builder, profile: &Profile) -> Vec<FlameNode> {
-    fn sort_tree(builder: &mut Builder, profile: &Profile) {
-        builder.children.sort_by(|a, b| {
-            b.total_us
-                .cmp(&a.total_us)
-                .then_with(|| profile.str(a.name).cmp(profile.str(b.name)))
-                // Labels are canonical, so same-text children differ only by
-                // work class — the last tie-break makes the order total and
-                // hence independent of merge order.
-                .then_with(|| a.work_class.cmp(&b.work_class))
-        });
+/// widest-first, breaking ties by name — via the precomputed rank, whose order
+/// equals text order — so the layout is independent of the non-deterministic
+/// input order. Sorts the tree in place, leaving its merge indexes stale.
+fn flatten(root: &mut Builder) -> Vec<FlameNode> {
+    fn sort_tree(builder: &mut Builder) {
+        builder
+            .children
+            // Labels are canonical, so same-text children differ only by work
+            // class — the last tie-break makes the order total and hence
+            // independent of merge order.
+            .sort_unstable_by_key(|c| (std::cmp::Reverse(c.total_us), c.rank, c.work_class));
         for c in &mut builder.children {
-            sort_tree(c, profile);
+            sort_tree(c);
         }
     }
-    sort_tree(root, profile);
+    sort_tree(root);
 
     let mut nodes = vec![freeze(root, 0)];
     let mut queue: std::collections::VecDeque<(&Builder, usize, u32)> =
@@ -1007,6 +1088,33 @@ mod tests {
         _assert_thread_safe::<FlameNode>();
         _assert_thread_safe::<FlameBox>();
         _assert_thread_safe::<crate::StatRow>();
+    }
+
+    #[test]
+    fn parallel_text_sort_matches_serial() {
+        // Enough pairs to cross the parallel threshold, with heavy shared
+        // prefixes, case splits, and non-ASCII segments, so the sampled pivot
+        // partition is exercised on clustered keys.
+        let texts: Vec<String> = (0..20_000)
+            .map(|i| format!("prefix/{}/x{:05}", ["a", "A", "é", ""][i % 4], i))
+            .collect();
+        let pairs: Vec<(&str, Str)> = texts
+            .iter()
+            .enumerate()
+            .map(|(i, t)| (t.as_str(), Str::new(i as u32 + 1, t.len() as u32)))
+            .collect();
+        let serial = {
+            let mut p = pairs.clone();
+            p.sort_unstable_by_key(|&(t, _)| t);
+            p
+        };
+        for workers in [2, 3, 8, 16] {
+            assert_eq!(
+                sort_pairs_by_text(pairs.clone(), workers),
+                serial,
+                "x{workers}"
+            );
+        }
     }
 
     #[test]

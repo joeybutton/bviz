@@ -25,14 +25,21 @@ pub struct ScopeAggregate {
 impl ScopeAggregate {
     fn from_graph(flame: FlameGraph) -> ScopeAggregate {
         let stats = stats_from_flame(&flame);
-        let mut default_order: Vec<u32> = (0..stats.len() as u32).collect();
-        default_order.sort_by(|&ai, &bi| {
-            let a = &stats[ai as usize];
-            let b = &stats[bi as usize];
-            b.total_us
-                .cmp(&a.total_us)
-                .then_with(|| flame.str(a.key).cmp(flame.str(b.key)))
-        });
+        // Decorate-sort on one packed integer key per row — total descending
+        // (an order-preserving i64→u64 bias, inverted) above the key rank,
+        // which orders exactly as the key text does, above the row index. No
+        // two rows share a rank, so the order is total, and no comparison
+        // resolves a string or chases a row pointer.
+        let mut keyed: Vec<u128> = stats
+            .iter()
+            .enumerate()
+            .map(|(i, r)| {
+                let total_desc = !((r.total_us as u64) ^ (1 << 63));
+                ((total_desc as u128) << 64) | ((r.rank as u128) << 32) | i as u128
+            })
+            .collect();
+        keyed.sort_unstable();
+        let default_order: Vec<u32> = keyed.into_iter().map(|k| k as u32).collect();
         let grand_total = stats.iter().map(|r| r.total_us).sum();
         ScopeAggregate {
             flame,
@@ -345,6 +352,47 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn ranks_mirror_byte_wise_text_order() {
+        // Tricky keys: empty, shared prefixes, case splits, and non-ASCII.
+        // `&str` ordering is byte-wise, so "é" (0xC3 0xA9) sorts after "z"
+        // rather than near "e"; ranks must reproduce exactly that order.
+        let keys = [
+            "", "A", "Z", "a", "a!", "aB", "aa", "ab", "b", "e", "z", "\u{7f}", "é", "😀",
+        ];
+        let slices = keys
+            .iter()
+            .enumerate()
+            .map(|(i, k)| slice(k, "generic", i as i64 * 10, 5))
+            .collect();
+        let p = profile(vec![track(1, LaneClass::Execution, slices)]);
+        let set = FlameScopes::build(&p);
+        let agg = set.get(Scope::All).unwrap();
+        assert_eq!(agg.stats.len(), keys.len());
+        let text_of = |r: &StatRow| agg.flame.str(r.key).to_owned();
+        let mut by_rank: Vec<String> = {
+            let mut rows: Vec<&StatRow> = agg.stats.iter().collect();
+            rows.sort_by_key(|r| r.rank);
+            rows.into_iter().map(text_of).collect()
+        };
+        let by_text = {
+            let mut texts = by_rank.clone();
+            texts.sort_unstable();
+            texts
+        };
+        assert_eq!(by_rank, by_text);
+        // All rows tie on total, so the default order is pure key order:
+        // strictly ascending by text.
+        let ordered: Vec<String> = agg
+            .default_order
+            .iter()
+            .map(|&i| text_of(&agg.stats[i as usize]))
+            .collect();
+        assert_eq!(ordered, by_text);
+        by_rank.dedup();
+        assert_eq!(by_rank.len(), keys.len(), "keys must be distinct");
     }
 
     #[test]
