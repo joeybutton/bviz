@@ -15,9 +15,11 @@ use crate::flame::{build_flame_graph, FlameGraph, FlameNode, Scope};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StatRow {
     pub key: Str,
-    /// Lexicographic rank of `key`'s text among the profile's distinct frame
-    /// names ([`FlameNode::rank`]); rank order equals byte-wise text order, so
-    /// sorting rows by key compares integers without resolving text.
+    /// Lexicographic rank of `key`'s text among the names scanned for the
+    /// producing graph's build ([`FlameNode::rank`]); rank order equals
+    /// byte-wise text order, so sorting rows by key compares integers without
+    /// resolving text. Ranks only order rows within one aggregate, never
+    /// across aggregates.
     pub rank: u32,
     pub work_class: WorkClass,
     pub count: u32,

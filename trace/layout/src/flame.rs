@@ -58,23 +58,29 @@ struct Segment {
 /// with no locking.
 struct Canon {
     memo: FxHashMap<Str, Str>,
-    /// Lexicographic rank of each canonical handle: dense `u32`s assigned by
-    /// one byte-wise sort of the distinct texts. Canonical handles biject with
-    /// texts, so rank order equals text order and every later ordering
-    /// comparison is integer-only.
+    /// Lexicographic rank of each scanned canonical handle: dense `u32`s
+    /// assigned by one byte-wise sort of the scanned distinct texts. Canonical
+    /// handles biject with texts, so rank order equals text order and every
+    /// later ordering comparison is integer-only. Ranks are dense per scan and
+    /// never compare across builds.
     rank: FxHashMap<Str, u32>,
 }
 
 impl Canon {
     /// The canonical handle for `s`: aliases resolve through the memo, and a
-    /// handle with no entry is its own canonical.
+    /// handle with no entry is its own canonical. An unscanned handle silently
+    /// resolves to itself — the coverage invariant of [`scan`] is what keeps
+    /// text-dedup sound.
     fn canon(&self, s: Str) -> Str {
         self.memo.get(&s).copied().unwrap_or(s)
     }
 
     /// The lexicographic rank of a canonical handle's text.
     fn rank_of(&self, s: Str) -> u32 {
-        self.rank[&s]
+        match self.rank.get(&s) {
+            Some(&r) => r,
+            None => panic!("unscanned label handle: the scan must cover every lane a build walks"),
+        }
     }
 }
 
@@ -126,14 +132,29 @@ impl<'p> ScanShard<'p> {
     }
 }
 
-/// Scan every lane's slice names and mnemonics into the canonical map and the
-/// mnemonic index, sharding the lanes across `workers`.
-fn scan(profile: &Profile, workers: usize) -> (Canon, MnemonicIndex<'_>) {
+/// Scan slice names and mnemonics into the canonical map and the mnemonic
+/// index, sharding the lanes across `workers`. Names are noted — entered into
+/// the canonical map and the rank table — only on the lanes `note_lane` admits
+/// (by thread index), and the scan must admit every lane whose slices a build
+/// subsequently walks: an unseen handle degrades [`Canon::canon`] to identity,
+/// breaking text-dedup, and has no rank. Mnemonic handles and the mnemonic
+/// index cover every lane regardless — hashing only the mnemonic-bearing
+/// slices, a small fraction of the profile — because a mnemonic-less slice's
+/// label can resolve to a mnemonic carried on a lane outside the scan, and
+/// that label needs a canonical handle and a rank like any other.
+fn scan<'p>(
+    profile: &'p Profile,
+    workers: usize,
+    note_lane: impl Fn(usize) -> bool + Sync,
+) -> (Canon, MnemonicIndex<'p>) {
     let threads = profile.threads();
     let mut shards = run_sharded(workers, threads.len(), |shard: &mut ScanShard, i| {
         let thread = &threads[i];
+        let noted = note_lane(i);
         for (s, d) in profile.slices(thread).iter().zip(profile.details(thread)) {
-            shard.note(profile, s.name);
+            if noted {
+                shard.note(profile, s.name);
+            }
             if let Some(m) = d.mnemonic.get() {
                 shard.note(profile, m);
                 let mn = profile.str(m);
@@ -207,7 +228,13 @@ fn scan(profile: &Profile, workers: usize) -> (Canon, MnemonicIndex<'_>) {
 
     let idx_by_text: FxHashMap<&str, Str> =
         mnemonics.iter().map(|(&n, &m)| (n, by_text[m])).collect();
-    let by_name = idx_by_text.iter().map(|(&n, &m)| (by_text[n], m)).collect();
+    // A name seen only on unadmitted lanes has no noted handle and needs no
+    // handle-keyed entry: only a walked — hence noted — slice's name is ever
+    // looked up by handle, while text-keyed lookups cover every name.
+    let by_name = idx_by_text
+        .iter()
+        .filter_map(|(&n, &m)| by_text.get(n).map(|&h| (h, m)))
+        .collect();
     (
         Canon { memo, rank },
         MnemonicIndex {
@@ -328,9 +355,10 @@ fn action_inner(name: &str) -> Option<&str> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FlameNode {
     pub name: Str,
-    /// Lexicographic rank of `name`'s text among the profile's distinct frame
-    /// names — rank order equals byte-wise text order — so name ordering
-    /// compares integers without resolving text.
+    /// Lexicographic rank of `name`'s text among the distinct names scanned
+    /// for this graph's build — rank order equals byte-wise text order — so
+    /// name ordering compares integers without resolving text. Ranks are dense
+    /// per build and only order names within one graph, never across graphs.
     pub rank: u32,
     pub total_us: i64,
     pub self_us: i64,
@@ -545,8 +573,22 @@ pub(crate) struct Flamer<'p> {
 }
 
 impl<'p> Flamer<'p> {
+    /// A flamer whose name scan covers every lane, for a build that may walk
+    /// any of them.
     pub(crate) fn new(profile: &'p Profile, workers: usize) -> Self {
-        let (canon, idx) = scan(profile, workers);
+        Flamer::scoped(profile, workers, |_| true)
+    }
+
+    /// A flamer whose name scan covers only the lanes `note_lane` admits —
+    /// which must include every lane the build walks (see [`scan`]). The scan
+    /// is the dominant cost of a single-scope build, so a build that walks few
+    /// lanes scans only those.
+    pub(crate) fn scoped(
+        profile: &'p Profile,
+        workers: usize,
+        note_lane: impl Fn(usize) -> bool + Sync,
+    ) -> Self {
+        let (canon, idx) = scan(profile, workers, note_lane);
         Flamer {
             profile,
             idx,
@@ -677,16 +719,30 @@ fn containment_forest(slices: &[Slice]) -> Forest {
 /// The returned [`FlameGraph`] keeps a clone of `profile`, whose interned text
 /// its node names index, so it is `Send` with no lifetime parameters.
 ///
+/// The name scan — the dominant cost — covers only the lanes the scope's build
+/// walks: [`Scope::All`] scans the whole profile, a class scope its own lanes,
+/// and the critical path the lanes [`critical_lanes`] selects.
+///
 /// [`FlameScopes`](crate::FlameScopes) derives every scope from one aggregation
 /// pass; this composes the same pieces for a single scope.
 pub fn build_flame_graph(profile: &Arc<Profile>, scope: Scope) -> FlameGraph {
     let workers = worker_count();
-    let flamer = Flamer::new(profile, workers);
     let mut root = if scope == Scope::CriticalPath {
+        // Locate the actions before the scan: the index hashes only the
+        // mnemonic-bearing slices, so it is cheap, and it bounds the lanes the
+        // graft walks — and hence the lanes the scan must cover.
+        let actions = action_locations(profile);
+        let lanes = critical_lanes(profile, &actions);
+        let flamer = Flamer::scoped(profile, workers, |i| lanes.contains(&i));
         let mut root = Builder::new_root();
-        build_critical_path(profile, &flamer, &mut root);
+        build_critical_path(profile, &flamer, &actions, &mut root);
         root
     } else {
+        let threads = profile.threads();
+        let flamer = match scope {
+            Scope::All => Flamer::new(profile, workers),
+            _ => Flamer::scoped(profile, workers, |i| scope.includes(threads[i].lane_class)),
+        };
         fold_all(
             class_trees(profile, &flamer, |class| scope.includes(class), workers)
                 .into_iter()
@@ -832,17 +888,17 @@ pub(crate) fn seal(root: &mut Builder, profile: &Arc<Profile>) -> FlameGraph {
 
 /// Where an action-processing span lives: its lane (a thread index) and its index
 /// within that lane's slices, keyed by the span name (the action description).
-struct ActionLoc {
+pub(crate) struct ActionLoc {
     lane: usize,
     slice: usize,
 }
 
-/// Graft the critical path's components into `root`. Each component on a
-/// `LaneClass::CriticalPath` lane names an action (`action '<desc>'`); when that
-/// action's worker span is found by name, its whole subtree is merged under the
-/// root so the critical action shows its internal breakdown. Components with no
-/// matching action (e.g. "Writing file …") merge as a bare leaf.
-pub(crate) fn build_critical_path(profile: &Profile, flamer: &Flamer, root: &mut Builder) {
+/// Index every mnemonic-bearing span by its name — the action description — so
+/// a critical-path component resolves to the worker span it copies. Hashes only
+/// the mnemonic-bearing slices, a small fraction of the profile; the first lane
+/// hosting a name wins, and lanes are visited in profile order, so the index is
+/// deterministic.
+pub(crate) fn action_locations(profile: &Profile) -> FxHashMap<&str, ActionLoc> {
     let threads = profile.threads();
     let mut actions: FxHashMap<&str, ActionLoc> = FxHashMap::default();
     for (lane, thread) in threads.iter().enumerate() {
@@ -855,7 +911,48 @@ pub(crate) fn build_critical_path(profile: &Profile, flamer: &Flamer, root: &mut
             }
         }
     }
+    actions
+}
 
+/// The lanes a critical-path build walks: every critical-path lane plus the
+/// lane of every action a component resolves to. Selecting them needs only the
+/// component names and the action index — both cheap — so the expensive name
+/// scan can be restricted to this set.
+fn critical_lanes(profile: &Profile, actions: &FxHashMap<&str, ActionLoc>) -> FxHashSet<usize> {
+    let threads = profile.threads();
+    let mut lanes = FxHashSet::default();
+    for (i, thread) in threads.iter().enumerate() {
+        if thread.lane_class != LaneClass::CriticalPath {
+            continue;
+        }
+        lanes.insert(i);
+        for cp in profile.slices(thread) {
+            let name = profile.str(cp.name);
+            let loc = action_inner(name)
+                .and_then(|inner| actions.get(inner))
+                .or_else(|| actions.get(name));
+            if let Some(loc) = loc {
+                lanes.insert(loc.lane);
+            }
+        }
+    }
+    lanes
+}
+
+/// Graft the critical path's components into `root`. Each component on a
+/// `LaneClass::CriticalPath` lane names an action (`action '<desc>'`); when that
+/// action's worker span is found in `actions` (an [`action_locations`] index),
+/// its whole subtree is merged under the root so the critical action shows its
+/// internal breakdown. Components with no matching action (e.g. "Writing file
+/// …") merge as a bare leaf. `flamer`'s scan must cover the lanes
+/// [`critical_lanes`] selects from the same index.
+pub(crate) fn build_critical_path(
+    profile: &Profile,
+    flamer: &Flamer,
+    actions: &FxHashMap<&str, ActionLoc>,
+    root: &mut Builder,
+) {
+    let threads = profile.threads();
     // Components cluster on few worker lanes; build each lane's forest once.
     let mut forests: HashMap<usize, Forest> = HashMap::new();
     for thread in threads {

@@ -3,8 +3,8 @@ use std::sync::Arc;
 use bviz_trace_profile::{LaneClass, Profile};
 
 use crate::flame::{
-    Builder, FlameGraph, Flamer, Scope, build_critical_path, build_flame_graph, class_trees,
-    fold_all, fold_ref, seal, worker_count,
+    Builder, FlameGraph, Flamer, Scope, action_locations, build_critical_path, build_flame_graph,
+    class_trees, fold_all, fold_ref, seal, worker_count,
 };
 use crate::stats::{StatRow, stats_from_flame};
 
@@ -115,8 +115,9 @@ impl FlameScopes {
         std::thread::scope(|scope| {
             if profile.has_critical_path() {
                 scope.spawn(|| {
+                    let actions = action_locations(profile);
                     let mut root = Builder::new_root();
-                    build_critical_path(profile, &flamer, &mut root);
+                    build_critical_path(profile, &flamer, &actions, &mut root);
                     cp_slot = Some(ScopeAggregate::from_graph(seal(&mut root, profile)));
                 });
             }
@@ -372,6 +373,92 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn restricted_single_scope_matches_the_set() {
+        // The single-scope path scans only the lanes its build walks, while the
+        // set pass scans the whole profile; both must produce the same graphs,
+        // rows, and default order. The fixture stresses the restricted scan's
+        // coverage: duplicated handles force text-dedup through the canonical
+        // map, and the mnemonic-less "Compiling foo" carriers on the analysis
+        // and repo-fetch lanes resolve their labels to mnemonics carried only
+        // on execution lanes — lanes outside those scopes' scans.
+        let tracks = vec![
+            track(
+                0,
+                LaneClass::CriticalPath,
+                vec![
+                    slice("action 'Compiling foo'", "critical path component", 500, 100),
+                    slice("Writing file out", "critical path component", 620, 10),
+                ],
+            ),
+            track(
+                1,
+                LaneClass::Execution,
+                vec![
+                    action_named("Compiling foo", "Rustc", 0, 100),
+                    slice("subprocess.run", "subprocess run", 0, 80),
+                ],
+            ),
+            track(
+                2,
+                LaneClass::Execution,
+                vec![action_named("Compiling foo", "Javac", 0, 60)],
+            ),
+            track(
+                3,
+                LaneClass::Analysis,
+                vec![
+                    action("CppCompile", 0, 40),
+                    slice("Compiling foo", "action processing", 50, 20),
+                ],
+            ),
+            track(
+                4,
+                LaneClass::RepoFetch,
+                vec![
+                    slice("@rules_rs//:fetch", "generic", 0, 80),
+                    slice("Compiling foo", "generic", 90, 5),
+                ],
+            ),
+        ];
+        let mut p = profile(tracks);
+        let p_mut = Arc::get_mut(&mut p).unwrap();
+        p_mut.duplicate_str_for_test("Rustc");
+        p_mut.duplicate_str_for_test("Compiling foo");
+        let set = FlameScopes::build(&p);
+        // Row keys in default display order, resolved: ranks differ between a
+        // restricted and a full scan (each is dense over its own scanned
+        // texts), so the order must be compared through the resolved keys.
+        let order = |a: &ScopeAggregate| -> Vec<String> {
+            a.default_order
+                .iter()
+                .map(|&i| a.flame.str(a.stats[i as usize].key).to_owned())
+                .collect()
+        };
+        for scope in ALL_SCOPES {
+            let single = ScopeAggregate::build(&p, scope);
+            let agg = set.get(scope).expect("scope present");
+            assert_eq!(resolved(&agg.flame), resolved(&single.flame), "{scope:?}");
+            assert_eq!(
+                resolved_rows(&agg.flame, &agg.stats),
+                resolved_rows(&single.flame, &single.stats),
+                "{scope:?}"
+            );
+            assert_eq!(order(agg), order(&single), "{scope:?}");
+            assert_eq!(agg.grand_total, single.grand_total, "{scope:?}");
+        }
+        // The cross-lane resolution really happened: the analysis scope's rows
+        // label the mnemonic-less carrier by the smallest foreign mnemonic.
+        let analysis = ScopeAggregate::build(&p, Scope::Analysis);
+        assert!(
+            analysis
+                .stats
+                .iter()
+                .any(|r| analysis.flame.str(r.key) == "Javac"),
+            "the foreign-lane mnemonic must label the analysis carrier"
+        );
     }
 
     #[test]
