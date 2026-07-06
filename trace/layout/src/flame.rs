@@ -1,8 +1,9 @@
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use bviz_trace_profile::{LaneClass, Profile, Slice, SliceDetail, Span32, Str, WorkClass};
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 /// Which thread lanes an aggregation draws from, by the role their lane carries.
 /// Under Skymeld analysis and execution share one phase marker, so the role
@@ -45,38 +46,34 @@ struct Segment {
 }
 
 /// Maps a [`Str`] handle to the one canonical handle carrying the same text —
-/// the first handle seen with it. A parallel parse assembles a profile by
-/// concatenating its chunks' interned pools without cross-chunk dedup (see
-/// [`Interner::push_pool`](bviz_trace_profile::Interner::push_pool)), so equal
-/// strings can be carried by several handles, and frames must merge by text.
-/// `memo` caches raw handle → canonical handle, so a span's text is hashed once
-/// per distinct raw handle — bounded by distinct strings times parse chunks,
-/// vanishing next to the span count — and the per-span path hashes only the
-/// small `Copy` handle.
-struct Canonicalizer<'p> {
-    profile: &'p Profile,
+/// the lowest-offset handle in the profile with it. A parallel parse assembles
+/// a profile by concatenating its chunks' interned pools without cross-chunk
+/// dedup (see [`Interner::push_pool`](bviz_trace_profile::Interner::push_pool)),
+/// so equal strings can be carried by several handles, and frames must merge by
+/// text. The lowest offset is a property of the profile, not of visit order, so
+/// shards that scan the lanes in any partition agree on every canonical handle.
+/// `memo` holds only the aliased handles — nearly every handle is its own
+/// canonical, so it stays far smaller than the distinct-string count — and the
+/// per-span path is one read-only small-key lookup, shared across merge workers
+/// with no locking.
+struct Canon {
     memo: FxHashMap<Str, Str>,
-    by_text: FxHashMap<&'p str, Str>,
 }
 
-impl<'p> Canonicalizer<'p> {
-    fn new(profile: &'p Profile) -> Self {
-        Canonicalizer {
-            profile,
-            memo: FxHashMap::default(),
-            by_text: FxHashMap::default(),
-        }
+impl Canon {
+    /// The canonical handle for `s`: aliases resolve through the memo, and a
+    /// handle with no entry is its own canonical.
+    fn canon(&self, s: Str) -> Str {
+        self.memo.get(&s).copied().unwrap_or(s)
     }
+}
 
-    fn canon(&mut self, s: Str) -> Str {
-        let Canonicalizer {
-            profile,
-            memo,
-            by_text,
-        } = self;
-        *memo
-            .entry(s)
-            .or_insert_with(|| *by_text.entry(profile.str(s)).or_insert(s))
+/// The lower-offset of two handles carrying equal text.
+fn min_handle(a: Str, b: Str) -> Str {
+    if a.range().start <= b.range().start {
+        a
+    } else {
+        b
     }
 }
 
@@ -95,19 +92,147 @@ struct MnemonicIndex<'p> {
     by_text: FxHashMap<&'p str, Str>,
 }
 
-fn mnemonic_index<'p>(profile: &'p Profile, canon: &mut Canonicalizer<'p>) -> MnemonicIndex<'p> {
-    let mut by_name = FxHashMap::default();
-    let mut by_text = FxHashMap::default();
-    for thread in profile.threads() {
+/// One worker's share of the name scan.
+#[derive(Default)]
+struct ScanShard<'p> {
+    /// Text → its lowest-offset handle among this shard's lanes.
+    by_text: FxHashMap<&'p str, Str>,
+    /// Every distinct raw name/mnemonic handle this shard saw.
+    handles: FxHashSet<Str>,
+    /// Mnemonic-bearing slice name text → its smallest mnemonic text. A name
+    /// carrying several mnemonics resolves to the smallest, so the index is
+    /// independent of visit order.
+    mnemonics: FxHashMap<&'p str, &'p str>,
+}
+
+impl<'p> ScanShard<'p> {
+    fn note(&mut self, profile: &'p Profile, s: Str) {
+        if self.handles.insert(s) {
+            self.by_text
+                .entry(profile.str(s))
+                .and_modify(|cur| *cur = min_handle(*cur, s))
+                .or_insert(s);
+        }
+    }
+}
+
+/// Scan every lane's slice names and mnemonics into the canonical map and the
+/// mnemonic index, sharding the lanes across `workers`.
+fn scan(profile: &Profile, workers: usize) -> (Canon, MnemonicIndex<'_>) {
+    let threads = profile.threads();
+    let mut shards = run_sharded(workers, threads.len(), |shard: &mut ScanShard, i| {
+        let thread = &threads[i];
         for (s, d) in profile.slices(thread).iter().zip(profile.details(thread)) {
+            shard.note(profile, s.name);
             if let Some(m) = d.mnemonic.get() {
-                let m = canon.canon(m);
-                by_name.insert(canon.canon(s.name), m);
-                by_text.insert(profile.str(s.name), m);
+                shard.note(profile, m);
+                let mn = profile.str(m);
+                shard
+                    .mnemonics
+                    .entry(profile.str(s.name))
+                    .and_modify(|cur| {
+                        if mn < *cur {
+                            *cur = mn;
+                        }
+                    })
+                    .or_insert(mn);
+            }
+        }
+    });
+
+    // Seed the merged maps by moving the first shard's — a single-worker scan
+    // merges for free — and size them for the rest up front, so the merge never
+    // regrows (a regrow re-hashes every string key).
+    let (mut by_text, mut mnemonics) = {
+        let first = &mut shards[0];
+        (
+            std::mem::take(&mut first.by_text),
+            std::mem::take(&mut first.mnemonics),
+        )
+    };
+    by_text.reserve(shards.iter().skip(1).map(|s| s.by_text.len()).sum());
+    mnemonics.reserve(shards.iter().skip(1).map(|s| s.mnemonics.len()).sum());
+    for shard in shards.iter().skip(1) {
+        for (&text, &handle) in &shard.by_text {
+            by_text
+                .entry(text)
+                .and_modify(|cur| *cur = min_handle(*cur, handle))
+                .or_insert(handle);
+        }
+        for (&name, &mn) in &shard.mnemonics {
+            mnemonics
+                .entry(name)
+                .and_modify(|cur| {
+                    if mn < *cur {
+                        *cur = mn;
+                    }
+                })
+                .or_insert(mn);
+        }
+    }
+
+    // Memoize only the aliases: a handle some text elected as canonical needs
+    // no entry, and skipping it skips the text hash of the memo insert, leaving
+    // per-alias string work only for the handful of parse-chunk duplicates.
+    let mut canonical: FxHashSet<Str> =
+        FxHashSet::with_capacity_and_hasher(by_text.len(), Default::default());
+    canonical.extend(by_text.values().copied());
+    let mut memo = FxHashMap::default();
+    for shard in &shards {
+        for &h in &shard.handles {
+            if !canonical.contains(&h) {
+                memo.insert(h, by_text[profile.str(h)]);
             }
         }
     }
-    MnemonicIndex { by_name, by_text }
+
+    let idx_by_text: FxHashMap<&str, Str> =
+        mnemonics.iter().map(|(&n, &m)| (n, by_text[m])).collect();
+    let by_name = idx_by_text.iter().map(|(&n, &m)| (by_text[n], m)).collect();
+    (
+        Canon { memo },
+        MnemonicIndex {
+            by_name,
+            by_text: idx_by_text,
+        },
+    )
+}
+
+/// Worker count for the aggregation passes: the parallelism granted to the
+/// process, queried at runtime.
+pub(crate) fn worker_count() -> usize {
+    std::thread::available_parallelism().map_or(1, |n| n.get())
+}
+
+/// Run `task` over the indexes `0..n`, each worker folding into its own `S`;
+/// returns the per-worker shards. Workers steal indexes one at a time through a
+/// shared cursor, since per-index work is heavily skewed (a few big evaluator
+/// lanes). A single worker runs inline.
+fn run_sharded<S: Default + Send>(
+    workers: usize,
+    n: usize,
+    task: impl Fn(&mut S, usize) + Sync,
+) -> Vec<S> {
+    let workers = workers.clamp(1, n.max(1));
+    let next = AtomicUsize::new(0);
+    let run_one = || {
+        let mut shard = S::default();
+        loop {
+            let i = next.fetch_add(1, Ordering::Relaxed);
+            if i >= n {
+                break;
+            }
+            task(&mut shard, i);
+        }
+        shard
+    };
+    if workers == 1 {
+        return vec![run_one()];
+    }
+    std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..workers).map(|_| scope.spawn(&run_one)).collect();
+        handles.into_iter().map(|h| h.join().unwrap()).collect()
+    })
 }
 
 /// The inner of an `action '…'` name, `None` for any other shape. A
@@ -329,19 +454,19 @@ impl Builder {
 /// Merges spans into the builder tree. Every frame label is a canonical
 /// interned handle of the source profile — a span's mnemonic and name already
 /// live in its text — so merge keys compare and hash as plain integers with no
-/// per-span string work.
+/// per-span string work. Read-only once built, so merge workers share one.
 pub(crate) struct Flamer<'p> {
     profile: &'p Profile,
     idx: MnemonicIndex<'p>,
-    canon: Canonicalizer<'p>,
+    canon: Canon,
 }
 
 impl<'p> Flamer<'p> {
-    pub(crate) fn new(profile: &'p Profile) -> Self {
-        let mut canon = Canonicalizer::new(profile);
+    pub(crate) fn new(profile: &'p Profile, workers: usize) -> Self {
+        let (canon, idx) = scan(profile, workers);
         Flamer {
             profile,
-            idx: mnemonic_index(profile, &mut canon),
+            idx,
             canon,
         }
     }
@@ -355,7 +480,7 @@ impl<'p> Flamer<'p> {
     /// label; the label only decides which spans at the same place merge into
     /// one frame. Only the critical-path unwrapping consults the text-keyed
     /// index, so the hot per-span path never hashes a full string.
-    fn span_label(&mut self, slice: &Slice, detail: &SliceDetail) -> Segment {
+    fn span_label(&self, slice: &Slice, detail: &SliceDetail) -> Segment {
         let label = match detail.mnemonic.get() {
             Some(m) => self.canon.canon(m),
             None => {
@@ -380,7 +505,7 @@ impl<'p> Flamer<'p> {
     /// and a child's duration is counted at the child, not again at the parent.
     /// `lane_details` is the lane's parallel detail slice.
     fn merge_span(
-        &mut self,
+        &self,
         parent: &mut Builder,
         lane_slices: &[Slice],
         lane_details: &[SliceDetail],
@@ -472,14 +597,15 @@ fn containment_forest(slices: &[Slice]) -> Forest {
 /// [`FlameScopes`](crate::FlameScopes) derives every scope from one aggregation
 /// pass; this composes the same pieces for a single scope.
 pub fn build_flame_graph(profile: &Arc<Profile>, scope: Scope) -> FlameGraph {
-    let mut flamer = Flamer::new(profile);
+    let workers = worker_count();
+    let flamer = Flamer::new(profile, workers);
     let mut root = if scope == Scope::CriticalPath {
         let mut root = Builder::new_root();
-        build_critical_path(profile, &mut flamer, &mut root);
+        build_critical_path(profile, &flamer, &mut root);
         root
     } else {
         fold_all(
-            class_trees(profile, &mut flamer, |class| scope.includes(class))
+            class_trees(profile, &flamer, |class| scope.includes(class), workers)
                 .into_iter()
                 .map(|(_, tree)| tree)
                 .collect(),
@@ -488,31 +614,43 @@ pub fn build_flame_graph(profile: &Arc<Profile>, scope: Scope) -> FlameGraph {
     seal(&mut root, profile)
 }
 
+/// The tree for `class` in a class-keyed list, inserted at its slot ([`LaneClass`]
+/// declaration order) when absent.
+fn class_slot(trees: &mut Vec<(LaneClass, Builder)>, class: LaneClass) -> &mut Builder {
+    match trees.iter().position(|(c, _)| *c == class) {
+        Some(i) => &mut trees[i].1,
+        None => {
+            let at = trees.partition_point(|(c, _)| (*c as usize) < class as usize);
+            trees.insert(at, (class, Builder::new_root()));
+            &mut trees[at].1
+        }
+    }
+}
+
 /// One aggregation tree per lane class over the lanes `include` admits, keyed in
 /// [`LaneClass`] declaration order; classes with no admitted lane get no entry.
 /// Each lane's containment forest merges into its class's tree, so any scope —
 /// a single class or a union — derives from these without re-walking a lane.
 /// The critical-path lane is never walked: its slices are redirected copies of
 /// worker time, aggregated only by the [`build_critical_path`] graft.
+///
+/// The lanes shard across `workers` into per-worker partial trees; which lanes
+/// a worker steals cannot change the result, because the partial-tree fold sums
+/// and the flatten sort is total.
 pub(crate) fn class_trees<'p>(
     profile: &'p Profile,
-    flamer: &mut Flamer<'p>,
-    include: impl Fn(LaneClass) -> bool,
+    flamer: &Flamer<'p>,
+    include: impl Fn(LaneClass) -> bool + Sync,
+    workers: usize,
 ) -> Vec<(LaneClass, Builder)> {
-    let mut trees: Vec<(LaneClass, Builder)> = Vec::new();
-    for thread in profile.threads() {
+    let threads = profile.threads();
+    let shards: Vec<Vec<(LaneClass, Builder)>> = run_sharded(workers, threads.len(), |trees, i| {
+        let thread = &threads[i];
         let class = thread.lane_class;
         if class == LaneClass::CriticalPath || !include(class) {
-            continue;
+            return;
         }
-        let root = match trees.iter().position(|(c, _)| *c == class) {
-            Some(i) => &mut trees[i].1,
-            None => {
-                let at = trees.partition_point(|(c, _)| (*c as usize) < class as usize);
-                trees.insert(at, (class, Builder::new_root()));
-                &mut trees[at].1
-            }
-        };
+        let root = class_slot(trees, class);
         let slices = profile.slices(thread);
         let details = profile.details(thread);
         let forest = containment_forest(slices);
@@ -521,8 +659,35 @@ pub(crate) fn class_trees<'p>(
             root.total_us += slices[r].dur_us;
             flamer.merge_span(root, slices, details, &forest, r);
         }
+    });
+
+    let mut buckets: Vec<(LaneClass, Vec<Builder>)> = Vec::new();
+    for shard in shards {
+        for (class, tree) in shard {
+            match buckets.iter_mut().find(|(c, _)| *c == class) {
+                Some((_, parts)) => parts.push(tree),
+                None => {
+                    let at = buckets.partition_point(|(c, _)| (*c as usize) < class as usize);
+                    buckets.insert(at, (class, vec![tree]));
+                }
+            }
+        }
     }
-    trees
+    // The classes' partial trees merge independently of one another.
+    if buckets.len() > 1 && workers > 1 {
+        std::thread::scope(|scope| {
+            let handles: Vec<_> = buckets
+                .into_iter()
+                .map(|(class, parts)| scope.spawn(move || (class, fold_all(parts))))
+                .collect();
+            handles.into_iter().map(|h| h.join().unwrap()).collect()
+        })
+    } else {
+        buckets
+            .into_iter()
+            .map(|(class, parts)| (class, fold_all(parts)))
+            .collect()
+    }
 }
 
 /// Merge `src`'s subtree into `dst`, matching children by the `(label, work
@@ -593,7 +758,7 @@ struct ActionLoc {
 /// action's worker span is found by name, its whole subtree is merged under the
 /// root so the critical action shows its internal breakdown. Components with no
 /// matching action (e.g. "Writing file …") merge as a bare leaf.
-pub(crate) fn build_critical_path(profile: &Profile, flamer: &mut Flamer, root: &mut Builder) {
+pub(crate) fn build_critical_path(profile: &Profile, flamer: &Flamer, root: &mut Builder) {
     let threads = profile.threads();
     let mut actions: FxHashMap<&str, ActionLoc> = FxHashMap::default();
     for (lane, thread) in threads.iter().enumerate() {
@@ -680,6 +845,10 @@ fn flatten(root: &mut Builder, profile: &Profile) -> Vec<FlameNode> {
             b.total_us
                 .cmp(&a.total_us)
                 .then_with(|| profile.str(a.name).cmp(profile.str(b.name)))
+                // Labels are canonical, so same-text children differ only by
+                // work class — the last tie-break makes the order total and
+                // hence independent of merge order.
+                .then_with(|| a.work_class.cmp(&b.work_class))
         });
         for c in &mut builder.children {
             sort_tree(c, profile);
@@ -1085,6 +1254,36 @@ mod tests {
                 .collect()
         };
         assert_eq!(resolved(&ga), resolved(&gb));
+    }
+
+    #[test]
+    fn tied_same_text_children_order_by_work_class() {
+        // Two same-named, same-duration top-level slices of different work
+        // classes tie on (total, text); the work-class tie-break keeps the
+        // flattened order independent of which lane merges first.
+        let build = |cats: [&str; 2]| {
+            let p = profile(vec![
+                track(1, LaneClass::Execution, vec![slice("x", cats[0], 0, 50)]),
+                track(2, LaneClass::Execution, vec![slice("x", cats[1], 0, 50)]),
+            ]);
+            build_flame_graph(&p, Scope::All)
+        };
+        let ga = build(["local action execution", "thread wait"]);
+        let gb = build(["thread wait", "local action execution"]);
+        let resolved = |g: &FlameGraph| -> Vec<(String, WorkClass, i64)> {
+            g.nodes()
+                .iter()
+                .map(|n| (g.str(n.name).to_owned(), n.work_class, n.total_us))
+                .collect()
+        };
+        assert_eq!(resolved(&ga), resolved(&gb));
+        assert_eq!(
+            resolved(&ga)[1..],
+            [
+                ("x".to_owned(), WorkClass::Cpu, 50),
+                ("x".to_owned(), WorkClass::Wait, 50)
+            ]
+        );
     }
 
     #[test]

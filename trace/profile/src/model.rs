@@ -186,7 +186,7 @@ const _: () = assert!(std::mem::size_of::<SliceDetail>() == 40);
 /// is both CPU- and I/O-bound — classified [`WorkClass::Io`] alongside the rest
 /// of VFS; "action dependency checking" sits between compute and waiting on the
 /// action cache — classified [`WorkClass::Wait`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum WorkClass {
     Cpu,
     Remote,

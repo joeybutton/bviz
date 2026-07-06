@@ -4,6 +4,7 @@ use bviz_trace_profile::{LaneClass, Profile};
 
 use crate::flame::{
     Builder, FlameGraph, Flamer, Scope, build_critical_path, class_trees, fold_all, fold_ref, seal,
+    worker_count,
 };
 use crate::stats::{StatRow, stats_from_flame};
 
@@ -57,18 +58,21 @@ pub struct FlameScopes {
 
 impl FlameScopes {
     pub fn build(profile: &Arc<Profile>) -> FlameScopes {
-        let mut flamer = Flamer::new(profile);
-        let critical_path = profile.has_critical_path().then(|| {
-            let mut root = Builder::new_root();
-            build_critical_path(profile, &mut flamer, &mut root);
-            ScopeAggregate::from_graph(seal(&mut root, profile))
-        });
+        FlameScopes::build_with_workers(profile, worker_count())
+    }
+
+    /// Parallelism override, so the sharded build can be asserted equal to the
+    /// single-worker one; [`FlameScopes::build`] derives the count from the
+    /// parallelism granted to the process.
+    #[doc(hidden)]
+    pub fn build_with_workers(profile: &Arc<Profile>, workers: usize) -> FlameScopes {
+        let flamer = Flamer::new(profile, workers);
 
         let mut loading = None;
         let mut analysis = None;
         let mut execution = None;
         let mut rest = Vec::new();
-        for (class, tree) in class_trees(profile, &mut flamer, |_| true) {
+        for (class, tree) in class_trees(profile, &flamer, |_| true, workers) {
             match class {
                 LaneClass::RepoFetch => loading = Some(tree),
                 LaneClass::Analysis => analysis = Some(tree),
@@ -87,12 +91,32 @@ impl FlameScopes {
             let mut root = tree.unwrap_or_else(Builder::new_root);
             ScopeAggregate::from_graph(seal(&mut root, profile))
         };
+        // The five scopes now own disjoint trees, so they seal, aggregate, and
+        // sort concurrently.
+        let mut cp_slot = None;
+        let mut loading_slot = None;
+        let mut analysis_slot = None;
+        let mut execution_slot = None;
+        let mut all_slot = None;
+        std::thread::scope(|scope| {
+            if profile.has_critical_path() {
+                scope.spawn(|| {
+                    let mut root = Builder::new_root();
+                    build_critical_path(profile, &flamer, &mut root);
+                    cp_slot = Some(ScopeAggregate::from_graph(seal(&mut root, profile)));
+                });
+            }
+            scope.spawn(|| loading_slot = Some(aggregate(loading)));
+            scope.spawn(|| analysis_slot = Some(aggregate(analysis)));
+            scope.spawn(|| execution_slot = Some(aggregate(execution)));
+            scope.spawn(|| all_slot = Some(aggregate(Some(all))));
+        });
         FlameScopes {
-            critical_path,
-            loading: aggregate(loading),
-            analysis: aggregate(analysis),
-            execution: aggregate(execution),
-            all: aggregate(Some(all)),
+            critical_path: cp_slot,
+            loading: loading_slot.unwrap(),
+            analysis: analysis_slot.unwrap(),
+            execution: execution_slot.unwrap(),
+            all: all_slot.unwrap(),
         }
     }
 
@@ -256,6 +280,71 @@ mod tests {
             resolved(&cp.flame),
             resolved(&build_flame_graph(&p, Scope::CriticalPath))
         );
+    }
+
+    #[test]
+    fn sharded_build_matches_serial() {
+        // Enough lanes that several workers really shard, spread over the
+        // classes, with duplicated handles so the shards must agree on the
+        // canonical handle of a text they see under different raw handles.
+        let mut tracks = vec![track(
+            0,
+            LaneClass::CriticalPath,
+            vec![slice(
+                "action 'Compiling foo'",
+                "critical path component",
+                900,
+                40,
+            )],
+        )];
+        for i in 0..4i64 {
+            let base = i * 1000;
+            tracks.push(track(
+                10 + i,
+                LaneClass::Execution,
+                vec![
+                    action_named("Compiling foo", "Rustc", base, 100),
+                    slice("subprocess.run", "subprocess run", base, 80),
+                    action("CppCompile", base + 200, 50),
+                ],
+            ));
+            tracks.push(track(
+                20 + i,
+                LaneClass::Analysis,
+                vec![action("CppCompile", base, 30)],
+            ));
+            tracks.push(track(
+                30 + i,
+                LaneClass::RepoFetch,
+                vec![slice("fetch", "generic", base, 10)],
+            ));
+            tracks.push(track(
+                40 + i,
+                LaneClass::Other,
+                vec![slice("idle", "generic", base, 5)],
+            ));
+        }
+        let mut p = profile(tracks);
+        let p_mut = Arc::get_mut(&mut p).unwrap();
+        p_mut.duplicate_str_for_test("Rustc");
+        p_mut.duplicate_str_for_test("CppCompile");
+
+        let serial = FlameScopes::build_with_workers(&p, 1);
+        for workers in [2, 5, 16] {
+            let sharded = FlameScopes::build_with_workers(&p, workers);
+            for scope in ALL_SCOPES {
+                match (serial.get(scope), sharded.get(scope)) {
+                    (Some(a), Some(b)) => {
+                        assert_eq!(a.flame.nodes(), b.flame.nodes(), "{scope:?} x{workers}");
+                        assert_eq!(a.stats, b.stats, "{scope:?} x{workers}");
+                        assert_eq!(a.default_order, b.default_order, "{scope:?} x{workers}");
+                        assert_eq!(a.grand_total, b.grand_total, "{scope:?} x{workers}");
+                    }
+                    (None, None) => {}
+                    _ => panic!("critical-path presence differs at {workers} workers"),
+                }
+            }
+        }
     }
 
     #[test]
