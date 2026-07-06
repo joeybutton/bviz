@@ -2,20 +2,6 @@ use std::collections::HashMap;
 
 use bviz_trace_profile::{Interner, LaneClass, Profile, Slice, SliceDetail, Span32, Str, WorkClass};
 
-/// Which label a span carries in the flame graph. The tree shape comes from
-/// time-containment within a lane; the mode only chooses how each span is named,
-/// so identical-named spans merge into one frame.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum GroupMode {
-    /// Action mnemonic (recovered from the name index for slices that name an
-    /// action) or, for everything else, the slice name itself.
-    Mnemonic,
-    /// The slice's Bazel category.
-    Category,
-    /// The slice's work class.
-    WorkClass,
-}
-
 /// Which thread lanes an aggregation draws from, by the role their lane carries.
 /// Under Skymeld analysis and execution share one phase marker, so the role
 /// comes from the lane class, not the build phase.
@@ -101,18 +87,6 @@ fn resolve_mnemonic<'a>(
     idx.get(name)
         .copied()
         .or_else(|| idx.get(action_inner(name)).copied())
-}
-
-/// The work-class label for a slice (no parens; the class itself, not a bucket).
-fn work_class_label(class: WorkClass) -> &'static str {
-    match class {
-        WorkClass::Cpu => "cpu",
-        WorkClass::Remote => "remote",
-        WorkClass::Io => "io",
-        WorkClass::Wait => "wait",
-        WorkClass::Gc => "gc",
-        WorkClass::Meta => "meta",
-    }
 }
 
 /// One node of the aggregated flame graph: a frame merged across every span that
@@ -312,25 +286,25 @@ impl Builder {
 struct Flamer<'p> {
     profile: &'p Profile,
     idx: HashMap<&'p str, &'p str>,
-    mode: GroupMode,
     interner: Interner,
 }
 
 impl<'p> Flamer<'p> {
-    fn new(profile: &'p Profile, mode: GroupMode) -> Self {
+    fn new(profile: &'p Profile) -> Self {
         Flamer {
             profile,
             idx: mnemonic_index(profile),
-            mode,
             interner: Interner::new(),
         }
     }
 
-    /// The finest detail label for a slice: its resolved action mnemonic if it
-    /// names an action (so all Rustc collapse together), else its own name (the
-    /// informative label for non-action slices — "checkOutputs", "subprocess.run",
-    /// a repo target, …).
-    fn detail(&mut self, slice: &Slice, detail: &SliceDetail) -> Segment {
+    /// The label a span carries: its resolved action mnemonic if it names an
+    /// action (so all Rustc collapse together), else its own name (the
+    /// informative label for non-action slices — "checkOutputs",
+    /// "subprocess.run", a repo target, …). The tree shape comes from
+    /// time-containment, not from this label; the label only decides which
+    /// spans at the same place merge into one frame.
+    fn span_label(&mut self, slice: &Slice, detail: &SliceDetail) -> Segment {
         let label = match resolve_mnemonic(self.profile, slice, detail, &self.idx) {
             Some(m) => self.interner.intern(m),
             None => self.interner.intern(self.profile.str(slice.name)),
@@ -338,24 +312,6 @@ impl<'p> Flamer<'p> {
         Segment {
             label,
             work_class: slice.work_class,
-        }
-    }
-
-    /// The label a span carries under the grouping mode, using the name index to
-    /// recover action mnemonics. The tree shape comes from time-containment, not
-    /// from this label; the mode only names each span so identical-named spans
-    /// merge into one frame.
-    fn span_label(&mut self, slice: &Slice, detail: &SliceDetail) -> Segment {
-        match self.mode {
-            GroupMode::Mnemonic => self.detail(slice, detail),
-            GroupMode::Category => Segment {
-                label: self.interner.intern(self.profile.str(detail.category)),
-                work_class: slice.work_class,
-            },
-            GroupMode::WorkClass => Segment {
-                label: self.interner.intern(work_class_label(slice.work_class)),
-                work_class: slice.work_class,
-            },
         }
     }
 
@@ -440,7 +396,7 @@ fn containment_forest(slices: &[Slice]) -> Forest {
 
 /// Build the aggregated flame graph for a profile by time-containment plus
 /// semantic merge: within each in-scope lane every span nests under the span that
-/// time-contains it, and identical-`mode`-labelled spans at the same place merge
+/// time-contains it, and identically labelled spans at the same place merge
 /// into one frame whose duration is the sum of the merged spans' own durations.
 /// A parent span's Bazel duration already includes its children's, so counting
 /// each span once at its own node avoids the double-count of summing a span and
@@ -453,8 +409,8 @@ fn containment_forest(slices: &[Slice]) -> Forest {
 ///
 /// The returned [`FlameGraph`] owns its text pool and flat node array, copying
 /// every name out of `profile`, so it borrows nothing and is `Send`.
-pub fn build_flame_graph(profile: &Profile, mode: GroupMode, scope: Scope) -> FlameGraph {
-    let mut flamer = Flamer::new(profile, mode);
+pub fn build_flame_graph(profile: &Profile, scope: Scope) -> FlameGraph {
+    let mut flamer = Flamer::new(profile);
     let root_name = flamer.interner.intern("All");
     let mut root = Builder::new(root_name, WorkClass::Meta);
 
@@ -759,7 +715,7 @@ mod tests {
                 slice("subprocess.run", "subprocess run", 0, 80),
             ],
         )]);
-        let g = build_flame_graph(&p, GroupMode::Mnemonic, Scope::All);
+        let g = build_flame_graph(&p, Scope::All);
         assert_eq!(g.root().total_us, 100);
         let rustc = child(&g, g.root(), "Rustc");
         assert_eq!(rustc.total_us, 100);
@@ -786,7 +742,7 @@ mod tests {
             track(8, LaneClass::Execution, lane(0)),
             track(9, LaneClass::Execution, lane(0)),
         ]);
-        let g = build_flame_graph(&p, GroupMode::Mnemonic, Scope::All);
+        let g = build_flame_graph(&p, Scope::All);
         assert_eq!(g.children(g.root()).len(), 1);
         let rustc = child(&g, g.root(), "Rustc");
         assert_eq!(rustc.total_us, 200);
@@ -808,27 +764,9 @@ mod tests {
                 slice("checkOutputs", "general information", 100, 30),
             ],
         )]);
-        let g = build_flame_graph(&p, GroupMode::Mnemonic, Scope::All);
+        let g = build_flame_graph(&p, Scope::All);
         assert_eq!(child(&g, g.root(), "CppCompile").total_us, 100);
         assert_eq!(child(&g, g.root(), "checkOutputs").total_us, 30);
-    }
-
-    #[test]
-    fn work_class_mode_labels_each_span_by_class() {
-        // Three disjoint top-level spans labelled by their work class.
-        let p = profile(vec![track(
-            1,
-            LaneClass::Execution,
-            vec![
-                action("CppCompile", 0, 100),
-                action("Rustc", 100, 50),
-                slice("fetch", "remote action execution", 200, 30),
-            ],
-        )]);
-        let g = build_flame_graph(&p, GroupMode::WorkClass, Scope::All);
-        // Two CPU actions; one remote.
-        assert_eq!(child(&g, g.root(), "cpu").total_us, 150);
-        assert_eq!(child(&g, g.root(), "remote").total_us, 30);
     }
 
     #[test]
@@ -839,24 +777,24 @@ mod tests {
             track(9, LaneClass::RepoFetch, vec![action("Fetch", 0, 5)]),
         ]);
         // Analysis: only the analysis lane.
-        let analysis = build_flame_graph(&p, GroupMode::Mnemonic, Scope::Analysis);
+        let analysis = build_flame_graph(&p, Scope::Analysis);
         assert_eq!(analysis.root().total_us, 20);
         assert!(analysis
             .children(analysis.root())
             .iter()
             .all(|c| analysis.str(c.name) == "CppCompile"));
         // Execution: only the execution lane.
-        let exec = build_flame_graph(&p, GroupMode::Mnemonic, Scope::Execution);
+        let exec = build_flame_graph(&p, Scope::Execution);
         assert_eq!(exec.root().total_us, 40);
         assert!(exec
             .children(exec.root())
             .iter()
             .all(|c| exec.str(c.name) == "Rustc"));
         // Loading: only the repo-fetch lane.
-        let loading = build_flame_graph(&p, GroupMode::Mnemonic, Scope::Loading);
+        let loading = build_flame_graph(&p, Scope::Loading);
         assert_eq!(loading.root().total_us, 5);
         // All: every real lane.
-        let all = build_flame_graph(&p, GroupMode::Mnemonic, Scope::All);
+        let all = build_flame_graph(&p, Scope::All);
         assert_eq!(all.root().total_us, 65);
     }
 
@@ -875,7 +813,7 @@ mod tests {
             track(8, LaneClass::Execution, worker),
             track(0, LaneClass::CriticalPath, vec![cp]),
         ]);
-        let g = build_flame_graph(&p, GroupMode::Mnemonic, Scope::CriticalPath);
+        let g = build_flame_graph(&p, Scope::CriticalPath);
         assert_eq!(g.children(g.root()).len(), 1);
         let rustc = child(&g, g.root(), "Rustc");
         // Grafted from the worker lane: total is the worker action's 100, not the
@@ -906,7 +844,7 @@ mod tests {
                 ],
             ),
         ]);
-        let g = build_flame_graph(&p, GroupMode::Mnemonic, Scope::CriticalPath);
+        let g = build_flame_graph(&p, Scope::CriticalPath);
         assert_eq!(g.children(g.root()).len(), 2);
         let rustc = child(&g, g.root(), "Rustc");
         assert_eq!(rustc.total_us, 100);
@@ -921,7 +859,7 @@ mod tests {
         // A critical component with no matching action merges as a bare leaf.
         let cp = slice("Writing file out", "critical path component", 0, 40);
         let p = profile(vec![track(0, LaneClass::CriticalPath, vec![cp])]);
-        let g = build_flame_graph(&p, GroupMode::Mnemonic, Scope::CriticalPath);
+        let g = build_flame_graph(&p, Scope::CriticalPath);
         assert_eq!(g.root().total_us, 40);
         assert_eq!(child(&g, g.root(), "Writing file out").total_us, 40);
     }
@@ -939,7 +877,7 @@ mod tests {
                 slice("inner", "general information", 10, 100),
             ],
         )]);
-        let g = build_flame_graph(&p, GroupMode::Mnemonic, Scope::All);
+        let g = build_flame_graph(&p, Scope::All);
         let outer = child(&g, g.root(), "Outer");
         assert_eq!(outer.total_us, 50);
         assert!(
@@ -962,16 +900,8 @@ mod tests {
         ];
         let mut reversed = ordered.clone();
         reversed.reverse();
-        let ga = build_flame_graph(
-            &profile(vec![track(1, LaneClass::Execution, ordered)]),
-            GroupMode::Mnemonic,
-            Scope::All,
-        );
-        let gb = build_flame_graph(
-            &profile(vec![track(1, LaneClass::Execution, reversed)]),
-            GroupMode::Mnemonic,
-            Scope::All,
-        );
+        let ga = build_flame_graph(&profile(vec![track(1, LaneClass::Execution, ordered)]), Scope::All);
+        let gb = build_flame_graph(&profile(vec![track(1, LaneClass::Execution, reversed)]), Scope::All);
         // The two graphs intern the same labels in the same merge order, so they
         // are byte-for-byte identical.
         assert_eq!(ga, gb);
@@ -985,7 +915,7 @@ mod tests {
             LaneClass::Execution,
             vec![action("CppCompile", 0, 100), action("Rustc", 100, 50)],
         )]);
-        let g = build_flame_graph(&p, GroupMode::Mnemonic, Scope::All);
+        let g = build_flame_graph(&p, Scope::All);
         let boxes = lay_out_flame(&g, 300.0, &METRICS, 0.0);
         let root_box = &boxes[0];
         assert_eq!(root_box.w, 300.0);
@@ -1008,7 +938,7 @@ mod tests {
             LaneClass::Execution,
             vec![action("Wide", 0, 990), action("Thin", 990, 10)],
         )]);
-        let g = build_flame_graph(&p, GroupMode::Mnemonic, Scope::All);
+        let g = build_flame_graph(&p, Scope::All);
         // 1000us over 100px: Thin is 1px wide, below a 5px floor.
         let boxes = lay_out_flame(&g, 100.0, &METRICS, 5.0);
         assert!(boxes.iter().any(|b| g.str(b.name) == "Wide"));
@@ -1031,7 +961,7 @@ mod tests {
                 slice("Action.execute", "general information", 0, 90),
             ],
         )]);
-        let g = build_flame_graph(&p, GroupMode::Mnemonic, Scope::All);
+        let g = build_flame_graph(&p, Scope::All);
         assert_eq!(flame_height(&g, &METRICS), 30.0);
     }
 
@@ -1049,7 +979,7 @@ mod tests {
                 slice("subprocess.run", "subprocess run", 100, 60),
             ],
         )]);
-        let g = build_flame_graph(&p, GroupMode::Mnemonic, Scope::All);
+        let g = build_flame_graph(&p, Scope::All);
         let width = 600.0;
         let min_px = 1.0;
         let boxes = lay_out_flame(&g, width, &METRICS, min_px);
@@ -1076,7 +1006,7 @@ mod tests {
             LaneClass::Execution,
             vec![action("Wide", 0, 990), action("Thin", 990, 10)],
         )]);
-        let g = build_flame_graph(&p, GroupMode::Mnemonic, Scope::All);
+        let g = build_flame_graph(&p, Scope::All);
         let width = 100.0;
         let min_px = 5.0;
         // Thin sits at depth 1, x in [99, 100); probe its center.

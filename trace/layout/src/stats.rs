@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use bviz_trace_profile::{Profile, Str, WorkClass};
 
-use crate::flame::{build_flame_graph, FlameGraph, FlameNode, GroupMode, Scope};
+use crate::flame::{build_flame_graph, FlameGraph, FlameNode, Scope};
 
 /// One aggregated group of frames, summed across the flame graph. `total_us` is
 /// the summed self time of every frame keyed here, so the rows partition the
@@ -32,13 +32,13 @@ impl StatRow {
 }
 
 /// Aggregate the profile into one row per distinct frame name of the flame graph
-/// built under `mode` and `scope`, summing each frame's self time. Self time sums
+/// built under `scope`, summing each frame's self time. Self time sums
 /// to the root's total, so the rows partition the aggregated time without the
 /// double-count of summing a span and its sub-spans. Order is unspecified; the
 /// caller sorts. The returned [`FlameGraph`] owns the text the rows' keys index;
 /// it must be kept to resolve them.
-pub fn aggregate_stats(profile: &Profile, mode: GroupMode, scope: Scope) -> (FlameGraph, Vec<StatRow>) {
-    let graph = build_flame_graph(profile, mode, scope);
+pub fn aggregate_stats(profile: &Profile, scope: Scope) -> (FlameGraph, Vec<StatRow>) {
+    let graph = build_flame_graph(profile, scope);
     let rows = stats_from_flame(&graph);
     (graph, rows)
 }
@@ -100,7 +100,7 @@ mod tests {
                 action("CppLink", 200, 30),
             ],
         )]);
-        let (g, rows) = aggregate_stats(&p, GroupMode::Mnemonic, Scope::All);
+        let (g, rows) = aggregate_stats(&p, Scope::All);
         assert_eq!(rows.len(), 2);
         let c = row(&g, &rows, "CppCompile");
         assert_eq!(c.count, 2);
@@ -126,7 +126,7 @@ mod tests {
                 slice("subprocess.run", "subprocess run", 0, 80),
             ],
         )]);
-        let (g, rows) = aggregate_stats(&p, GroupMode::Mnemonic, Scope::All);
+        let (g, rows) = aggregate_stats(&p, Scope::All);
         assert_eq!(row(&g, &rows, "Rustc").total_us, 20);
         assert_eq!(row(&g, &rows, "subprocess.run").total_us, 80);
         assert_eq!(total(&rows), 100);
@@ -138,7 +138,7 @@ mod tests {
             track(7, LaneClass::Analysis, vec![action("CppCompile", 0, 100)]),
             track(8, LaneClass::Execution, vec![action("Rustc", 0, 50)]),
         ]);
-        let (g, rows) = aggregate_stats(&p, GroupMode::Mnemonic, Scope::Execution);
+        let (g, rows) = aggregate_stats(&p, Scope::Execution);
         assert_eq!(rows.len(), 1);
         assert_eq!(g.str(rows[0].key), "Rustc");
         assert_eq!(rows[0].total_us, 50);
@@ -146,7 +146,7 @@ mod tests {
 
     #[test]
     fn mnemonicless_slice_keeps_its_name() {
-        // Under Mnemonic grouping a slice with no mnemonic keys by its own name.
+        // A slice with no mnemonic keys by its own name.
         let p = profile(vec![track(
             1,
             LaneClass::Execution,
@@ -155,26 +155,10 @@ mod tests {
                 slice("checkOutputs", "general information", 200, 30),
             ],
         )]);
-        let (g, rows) = aggregate_stats(&p, GroupMode::Mnemonic, Scope::All);
+        let (g, rows) = aggregate_stats(&p, Scope::All);
         assert_eq!(rows.len(), 2);
         assert_eq!(row(&g, &rows, "checkOutputs").total_us, 30);
         assert_eq!(row(&g, &rows, "CppCompile").count, 1);
-    }
-
-    #[test]
-    fn work_class_mode_sums_per_class() {
-        let p = profile(vec![track(
-            1,
-            LaneClass::Execution,
-            vec![
-                action("CppCompile", 0, 100),
-                action("Rustc", 100, 50),
-                slice("remote", "remote action execution", 200, 30),
-            ],
-        )]);
-        let (g, rows) = aggregate_stats(&p, GroupMode::WorkClass, Scope::All);
-        assert_eq!(row(&g, &rows, "cpu").total_us, 150);
-        assert_eq!(row(&g, &rows, "remote").total_us, 30);
     }
 
     #[test]
@@ -186,16 +170,10 @@ mod tests {
         ];
         let mut reversed = ordered.clone();
         reversed.reverse();
-        let (ga, mut ra) = aggregate_stats(
-            &profile(vec![track(1, LaneClass::Execution, ordered)]),
-            GroupMode::Mnemonic,
-            Scope::All,
-        );
-        let (gb, mut rb) = aggregate_stats(
-            &profile(vec![track(1, LaneClass::Execution, reversed)]),
-            GroupMode::Mnemonic,
-            Scope::All,
-        );
+        let (ga, mut ra) =
+            aggregate_stats(&profile(vec![track(1, LaneClass::Execution, ordered)]), Scope::All);
+        let (gb, mut rb) =
+            aggregate_stats(&profile(vec![track(1, LaneClass::Execution, reversed)]), Scope::All);
         ra.sort_by(|x, y| ga.str(x.key).cmp(gb.str(y.key)));
         rb.sort_by(|x, y| gb.str(x.key).cmp(gb.str(y.key)));
         // Compare by resolved key, since the two graphs are independent text pools.

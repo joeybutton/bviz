@@ -7,7 +7,7 @@
 static GLOBAL: bviz_alloc::MiMalloc = bviz_alloc::MiMalloc;
 
 use bviz_trace_layout::{
-    FlameBox, FlameGraph, FlameMetrics, FlameView, GroupMode, LaneLayout, LaneMetrics, Scope,
+    FlameBox, FlameGraph, FlameMetrics, FlameView, LaneLayout, LaneMetrics, Scope,
     StatRow, TimeView, Viewport, WorkClass, aggregate_stats, flame_box_at, flame_height,
     lay_out_flame, lay_out_lanes, visible_slices,
 };
@@ -216,8 +216,7 @@ enum StatsColumn {
 /// One column of the stats table: which value it sorts by, its header label, and
 /// its fixed width (`None` for the one flexible column that takes the remainder).
 /// The header and every body cell are laid out from this single spec so their
-/// widths cannot disagree. The `Key` column's label is overridden at render with
-/// the active group-by name.
+/// widths cannot disagree.
 struct StatsColumnSpec {
     column: StatsColumn,
     label: &'static str,
@@ -225,7 +224,7 @@ struct StatsColumnSpec {
 }
 
 const STATS_COLUMNS: [StatsColumnSpec; 6] = [
-    StatsColumnSpec { column: StatsColumn::Key, label: "Key", width: None },
+    StatsColumnSpec { column: StatsColumn::Key, label: "Mnemonic", width: None },
     StatsColumnSpec { column: StatsColumn::Count, label: "Count", width: Some(STATS_NUM_COL_WIDTH) },
     StatsColumnSpec { column: StatsColumn::Total, label: "Total", width: Some(STATS_NUM_COL_WIDTH) },
     StatsColumnSpec { column: StatsColumn::Avg, label: "Avg", width: Some(STATS_NUM_COL_WIDTH) },
@@ -245,7 +244,7 @@ struct StatsOrder {
     grand_total: i64,
 }
 
-/// The flame graph for the active `(mode, scope)` and the stats rows derived from
+/// The flame graph for the active scope and the stats rows derived from
 /// it in the same background build, owned together so a held box, node, or row
 /// can always resolve its name `Str` against the graph that produced it. Shared as
 /// an `Arc` so a background stats sort can hold its own clone across threads.
@@ -291,14 +290,6 @@ fn stats_cell(spec: &StatsColumnSpec, text: impl Into<SharedString>) -> Div {
     }
 }
 
-/// The group-by modes offered in the toolbar dropdown, in menu order: each entry
-/// pairs the option label with the mode the selection maps to.
-const GROUP_MODES: [(&str, GroupMode); 3] = [
-    ("Mnemonic", GroupMode::Mnemonic),
-    ("Category", GroupMode::Category),
-    ("Work class", GroupMode::WorkClass),
-];
-
 /// The view scopes and their menu labels, in menu order. The first entry's scope
 /// is the synthetic critical path, offered only when the loaded profile has one;
 /// when absent it is dropped from the menu (see [`TraceView::view_options`]) so
@@ -310,16 +301,6 @@ const VIEW_SCOPES: [(&str, Scope); 5] = [
     ("Execution", Scope::Execution),
     ("All work", Scope::All),
 ];
-
-/// The group-by mode a freshly chosen view defaults to, picked to surface the
-/// question that view answers: a flat ranking of the critical-path actions, and
-/// a category breakdown of the work elsewhere.
-fn default_mode_for(scope: Scope) -> GroupMode {
-    match scope {
-        Scope::CriticalPath => GroupMode::Mnemonic,
-        Scope::Loading | Scope::Analysis | Scope::Execution | Scope::All => GroupMode::Category,
-    }
-}
 
 /// What a left-button drag is currently moving.
 #[derive(Clone, Copy)]
@@ -589,11 +570,6 @@ struct TraceView {
     gutter_width: f32,
     /// Which view the timeline paints.
     view_mode: ViewMode,
-    /// How the flame graph splits each slice into a path of frames.
-    mode: GroupMode,
-    /// Toolbar control choosing `mode`; its observer rebuilds the cache.
-    mode_dropdown: Entity<Dropdown>,
-    _mode_observer: Subscription,
     /// Which lanes the flame graph and stats aggregate over.
     scope: Scope,
     /// Toolbar control choosing `scope`; rebuilt on profile load since whether the
@@ -608,19 +584,19 @@ struct TraceView {
     /// and reused across paints and mouse handlers. It depends only on the
     /// immutable profile, so it is cleared only when a new profile loads.
     lanes: Rc<RefCell<Option<Rc<LaneLayout>>>>,
-    /// The aggregated flame graph and its stats rows for the active `(mode, scope)`,
+    /// The aggregated flame graph and its stats rows for the active scope,
     /// built off the UI thread (walking every slice would freeze a paint) and
     /// swapped in when ready. Held together so the rows' and laid-out boxes' name
     /// handles resolve against the graph that produced them. The previous value
-    /// stays shown while a rebuild runs, so a group-by or scope change doesn't blank
+    /// stays shown while a rebuild runs, so a scope change doesn't blank
     /// the view.
     aggregates: Rc<RefCell<Option<Arc<Aggregates>>>>,
     /// The flame graph's memoized box layout; see [`FlameBoxCache`].
     flame_boxes: Rc<RefCell<Option<FlameBoxCache>>>,
-    /// The `(mode, scope)` the ready `flame`/`stats` reflect, if any.
-    agg_ready: Option<(GroupMode, Scope)>,
-    /// The `(mode, scope)` a background flame/stats build is running for, if any.
-    agg_inflight: Option<(GroupMode, Scope)>,
+    /// The scope the ready `flame`/`stats` reflect, if any.
+    agg_ready: Option<Scope>,
+    /// The scope a background flame/stats build is running for, if any.
+    agg_inflight: Option<Scope>,
     /// Bumped on every (re)spawn so a superseded build's result is discarded when
     /// it lands after the inputs have moved on.
     agg_gen: u64,
@@ -634,10 +610,10 @@ struct TraceView {
     /// when ready. The previous order stays shown while a re-sort runs, so a
     /// header click doesn't blank the table.
     stats_order: Rc<RefCell<Option<Rc<StatsOrder>>>>,
-    /// The `(mode, scope, sort, desc)` the ready `stats_order` reflects, if any.
-    stats_order_ready: Option<(GroupMode, Scope, StatsColumn, bool)>,
-    /// The `(mode, scope, sort, desc)` a background sort is running for, if any.
-    stats_order_inflight: Option<(GroupMode, Scope, StatsColumn, bool)>,
+    /// The `(scope, sort, desc)` the ready `stats_order` reflects, if any.
+    stats_order_ready: Option<(Scope, StatsColumn, bool)>,
+    /// The `(scope, sort, desc)` a background sort is running for, if any.
+    stats_order_inflight: Option<(Scope, StatsColumn, bool)>,
     /// Bumped on every (re)spawn so a superseded sort's result is discarded when
     /// it lands after the inputs have moved on.
     stats_order_gen: u64,
@@ -667,16 +643,6 @@ impl TraceView {
     ) -> Self {
         let focus_handle = cx.focus_handle();
         focus_handle.focus(window, cx);
-        let mode_dropdown = cx.new(|cx| {
-            Dropdown::new("group-by", GROUP_MODES.map(|(label, _)| label), 0, cx)
-        });
-        let mode_observer =
-            cx.subscribe(&mode_dropdown, |view, dropdown, _: &DropdownEvent, cx| {
-                view.mode = GROUP_MODES[dropdown.read(cx).selected()].1;
-                // Keep the current graph until the rebuild for the new key lands;
-                // `ensure_aggregates` spawns it on the next frame.
-                cx.notify();
-            });
         let (view_dropdown, view_observer, view_scopes) = Self::view_dropdown(None, cx);
         let load_task = load_in_background(
             cx,
@@ -684,7 +650,7 @@ impl TraceView {
             |view, result, cx| {
                 view.invalidate_aggregates();
                 // The lane layout depends only on the profile, so it survives a
-                // mode/scope change but must be dropped when a new profile loads.
+                // scope change but must be dropped when a new profile loads.
                 view.lanes.borrow_mut().take();
                 view.flame_view.set(FlameView::FIT);
                 view.source = match result {
@@ -701,7 +667,6 @@ impl TraceView {
                     } else {
                         Scope::All
                     };
-                    view.mode = default_mode_for(view.scope);
                     let (dropdown, observer, scopes) = Self::view_dropdown(Some(profile), cx);
                     view.view_dropdown = dropdown;
                     view._view_observer = observer;
@@ -712,10 +677,6 @@ impl TraceView {
                         view.view_dropdown.update(cx, |d, cx| d.set_selected(idx, cx));
                     }
                     view.view_scopes = scopes;
-                    let mode_idx = GROUP_MODES.iter().position(|(_, m)| *m == view.mode);
-                    if let Some(idx) = mode_idx {
-                        view.mode_dropdown.update(cx, |d, cx| d.set_selected(idx, cx));
-                    }
                 }
             },
         );
@@ -737,9 +698,6 @@ impl TraceView {
             graph_height: DEFAULT_GRAPH_HEIGHT,
             gutter_width: DEFAULT_GUTTER_WIDTH,
             view_mode: ViewMode::FlameChart,
-            mode: GroupMode::Mnemonic,
-            mode_dropdown,
-            _mode_observer: mode_observer,
             scope: Scope::All,
             view_dropdown,
             _view_observer: view_observer,
@@ -781,8 +739,7 @@ impl TraceView {
     }
 
     /// Builds the view-scope dropdown and its observer for a loaded profile (or
-    /// the no-critical-path option set when none is loaded yet). Choosing a view
-    /// switches the scope only; the group-by is set independently.
+    /// the no-critical-path option set when none is loaded yet).
     fn view_dropdown(
         profile: Option<&Profile>,
         cx: &mut Context<Self>,
@@ -1286,17 +1243,17 @@ impl TraceView {
         self.lanes.borrow().clone()
     }
 
-    /// The aggregated flame graph and stats for the active `(mode, scope)`, or
+    /// The aggregated flame graph and stats for the active scope, or
     /// `None` until the first background build for the loaded profile completes.
-    /// Reflects the previous key while a rebuild is still running;
+    /// Reflects the previous scope while a rebuild is still running;
     /// [`Self::ensure_aggregates`] owns the (re)build.
     fn aggregates(&self) -> Option<Arc<Aggregates>> {
         self.aggregates.borrow().clone()
     }
 
     /// Spawns a background build of the flame graph and its stats rows for the
-    /// current `(mode, scope)` when neither the ready value nor an in-flight build
-    /// already matches, and abandons a build whose key the inputs have moved past.
+    /// current scope when neither the ready value nor an in-flight build
+    /// already matches, and abandons a build whose scope the inputs have moved past.
     /// Walking every slice is far too costly to run on the UI thread, so the build
     /// runs on the background executor and the result is swapped in on completion;
     /// the previously built graph stays shown until then. Idempotent — a no-op once
@@ -1306,7 +1263,7 @@ impl TraceView {
         let Source::Loaded(profile) = &self.source else {
             return;
         };
-        let key = (self.mode, self.scope);
+        let key = self.scope;
         if self.agg_ready == Some(key) {
             // The shown value is already current; cancel a build for a key the
             // inputs have since left so its late result can't clobber it.
@@ -1323,12 +1280,12 @@ impl TraceView {
         self.agg_gen += 1;
         let generation = self.agg_gen;
         let profile = profile.clone();
-        let (mode, scope) = key;
+        let scope = key;
         self._agg_task = load_in_background(
             cx,
             move || {
                 let t = std::time::Instant::now();
-                let (flame, stats) = aggregate_stats(&profile, mode, scope);
+                let (flame, stats) = aggregate_stats(&profile, scope);
                 if std::env::var_os("BVIZ_TRACE_TIMING").is_some() {
                     eprintln!("[timing] aggregate_stats: {:.3}s", t.elapsed().as_secs_f64());
                 }
@@ -1369,7 +1326,7 @@ impl TraceView {
 
     /// Drops the cached flame graph and stats rows and abandons any in-flight
     /// build, so the next [`Self::ensure_aggregates`] rebuilds from scratch. Called
-    /// when a new profile loads — unlike a mere `(mode, scope)` change, the old
+    /// when a new profile loads — unlike a mere scope change, the old
     /// graph is no longer a valid thing to keep showing.
     fn invalidate_aggregates(&mut self) {
         self.aggregates.borrow_mut().take();
@@ -1384,15 +1341,6 @@ impl TraceView {
         self.stats_order_gen += 1;
     }
 
-    /// The group-by label of the key column, from the same table that labels the
-    /// toolbar dropdown.
-    fn key_column_label(&self) -> &'static str {
-        GROUP_MODES
-            .iter()
-            .find(|(_, mode)| *mode == self.mode)
-            .map_or("", |(label, _)| *label)
-    }
-
     /// Sets the stats sort to `column`, toggling the direction when it is already
     /// the active column.
     fn sort_by(&mut self, column: StatsColumn) {
@@ -1404,7 +1352,7 @@ impl TraceView {
         }
     }
 
-    /// Spawns a background sort of the stats rows for the current key/scope and
+    /// Spawns a background sort of the stats rows for the current scope and
     /// sort when neither the ready order nor an in-flight sort already matches, and
     /// abandons a sort whose key the inputs have moved past. Sorting ~2M rows is
     /// far too costly to run on the UI thread, so the sort runs on the background
@@ -1415,10 +1363,10 @@ impl TraceView {
         let Some(aggregates) = self.aggregates() else {
             return;
         };
-        let Some((mode, scope)) = self.agg_ready else {
+        let Some(scope) = self.agg_ready else {
             return;
         };
-        let key = (mode, scope, self.stats_sort, self.stats_desc);
+        let key = (scope, self.stats_sort, self.stats_desc);
         if self.stats_order_ready == Some(key) {
             // The shown order is already current; cancel a sort for a key the
             // inputs have since left so its late result can't clobber it.
@@ -1473,7 +1421,7 @@ impl TraceView {
 
     /// The graph-mode stats table: a header band of clickable, sortable columns
     /// over a scrollable, virtualized body of one row per group, themed like the
-    /// rest of the view. The rows are aggregated by the same key and scope as the
+    /// rest of the view. The rows are aggregated over the same scope as the
     /// flame graph and sorted by the active column; the percent column is each
     /// group's share of the summed group durations (so it totals 100%).
     ///
@@ -1487,7 +1435,6 @@ impl TraceView {
         colors: &bviz_ui_theme::Colors,
         cx: &mut Context<Self>,
     ) -> Div {
-        let key_label = self.key_column_label();
         // Reserve the scroll bar's width on the right of the header and every row
         // (the bar is painted as an overlay there), so the last column's values
         // don't run under or up against the bar.
@@ -1510,7 +1457,7 @@ impl TraceView {
                 } else {
                     Some('▴')
                 };
-                let label = if column == StatsColumn::Key { key_label } else { spec.label };
+                let label = spec.label;
                 // Place the caret on the side away from the text's anchor so the
                 // label can't shift as the sort indicator moves: left of a
                 // right-aligned numeric value, right of the left-aligned key.
@@ -1761,8 +1708,6 @@ impl Render for TraceView {
                             .gap_2()
                             .child(caption("View"))
                             .child(self.view_dropdown.clone())
-                            .child(caption("Group by"))
-                            .child(self.mode_dropdown.clone())
                             // While a new layout builds or the stats re-sort off
                             // the thread, the prior graph stays shown and
                             // interactive; this signals the work in progress.
@@ -1810,7 +1755,7 @@ impl Render for TraceView {
                         .into_any_element(),
                     // The graph needs the aggregated tree; show the centered spinner
                     // until the first background build for this profile completes. A
-                    // later group-by/scope change keeps the prior tree shown and
+                    // later scope change keeps the prior tree shown and
                     // signals its rebuild with the inline toolbar spinner above.
                     ViewMode::FlameGraph => match self.aggregates() {
                         Some(aggregates) => {
