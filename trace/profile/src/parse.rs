@@ -2138,13 +2138,16 @@ fn parse_gz_stream(bytes: &[u8], workers: usize, chunk_bytes: usize) -> Option<P
             // The workers hold the only remaining senders, so the merger's
             // channel closes when the last of them finishes.
             drop(builder_tx);
-            // Sized at the summed per-chunk text density of a Bazel profile
-            // (about one distinct-string byte per 3.3 of decoded input;
-            // strings shared across chunks appear in each chunk's pool), so
-            // folding never regrows the pool — a regrowth re-copies everything
-            // folded so far. Over-reservation costs only untouched address
-            // space.
-            let text_reserve = gzip_isize(bytes).unwrap_or(0) / 3;
+            // The summed per-chunk pools stay below the decoded size — each
+            // holds disjoint tokens of its chunk or shorter, with formatted
+            // numeric args covered by the structural bytes pools never
+            // store — so with this bound folding never regrows the pool. A
+            // regrowth would re-copy everything folded so far, and a dense
+            // profile blows through any density-based guess. The reservation
+            // is touched only as folds append, so the tail costs only
+            // address space, including in the sealed profile that keeps the
+            // pool.
+            let text_reserve = gzip_isize(bytes).unwrap_or(0);
             let merger = scope.spawn(move || {
                 let mut merge = Merge::new();
                 merge.interner.reserve(text_reserve);
