@@ -83,7 +83,7 @@ impl<'de> Visitor<'de> for ProfileVisitor {
                 }
             }
         }
-        builder.sort_slices();
+        builder.seal_slices();
         Ok(assemble(vec![builder], other_data))
     }
 }
@@ -1101,7 +1101,7 @@ fn recover(text: &str) -> Result<Profile, LoadError> {
     if !recovered {
         return Err(LoadError::Corrupted("no complete events recovered".into()));
     }
-    builder.sort_slices();
+    builder.seal_slices();
     Ok(assemble(vec![builder], other_data))
 }
 
@@ -1145,11 +1145,18 @@ struct Builder {
     interner: Interner,
     args_pool: Vec<(Str, Str)>,
     thread_meta: BTreeMap<i64, (Option<String>, i64)>,
-    // Slices accumulate per thread in event order, each paired with its detail
-    // so the two stay in lockstep through sorting and merging;
-    // [`Builder::sort_slices`] puts each list into lane order before the
-    // builder is folded.
-    slices: BTreeMap<i64, Vec<(Slice, SliceDetail)>>,
+    /// Slices in event order, each tagged with its thread — one flat vector
+    /// whose allocation the chunk parse loops reuse across chunks, so
+    /// accumulating a slice is one push into pre-grown capacity.
+    /// [`Builder::seal_slices`] regroups it into `lane_pool` and `lanes`
+    /// before the builder is folded.
+    staging: Vec<(i64, Slice, SliceDetail)>,
+    /// After [`Builder::seal_slices`]: every staged slice, contiguous per
+    /// thread in lane order, sized exactly.
+    lane_pool: Vec<(Slice, SliceDetail)>,
+    /// After [`Builder::seal_slices`]: each thread's range of `lane_pool`, in
+    /// first-appearance order.
+    lanes: Vec<(i64, Span32)>,
     phase_markers: Vec<PhaseMarker>,
     counter_order: Vec<Str>,
     counters: HashMap<Str, RawLane>,
@@ -1168,7 +1175,9 @@ impl Builder {
             interner: Interner::with_capacity(bytes_hint / 256, bytes_hint / 3),
             args_pool: Vec::new(),
             thread_meta: BTreeMap::new(),
-            slices: BTreeMap::new(),
+            staging: Vec::new(),
+            lane_pool: Vec::new(),
+            lanes: Vec::new(),
             phase_markers: Vec::new(),
             counter_order: Vec::new(),
             counters: HashMap::new(),
@@ -1201,7 +1210,8 @@ impl Builder {
                         category,
                         args,
                     );
-                    self.slices.entry(tid).or_default().push((
+                    self.staging.push((
+                        tid,
                         Slice {
                             name: self.interner.intern(ev.name.as_deref().unwrap_or("")),
                             start_us: ts,
@@ -1228,14 +1238,59 @@ impl Builder {
         }
     }
 
-    /// Sorts each thread's slices into lane order — the order [`Merge::fold`]
-    /// requires of a folded run. On the parallel paths this runs on the parse
-    /// workers, so the per-chunk sorts hide under the decode∥parse phase
-    /// instead of adding to the final merge.
-    fn sort_slices(&mut self) {
-        for slices in self.slices.values_mut() {
-            slices.sort_by(|a, b| slice_order(&a.0, &b.0));
+    /// Regroups the staged slices into per-thread runs and sorts each run
+    /// into lane order — the form [`Merge::fold`] requires of a folded run.
+    /// The pool is allocated at its exact final size and filled through
+    /// per-thread cursors, preserving event order within a thread. On the
+    /// parallel paths this runs on the parse workers, so the per-chunk work
+    /// hides under the decode∥parse phase instead of adding to the final
+    /// merge.
+    fn seal_slices(&mut self) {
+        // The lane bookkeeping (counts, spans, cursors) is u32; wrapping it
+        // would break the exactly-once scatter argument below.
+        assert!(u32::try_from(self.staging.len()).is_ok(), "chunk slice count exceeds u32");
+        let mut lane_of: rustc_hash::FxHashMap<i64, usize> = Default::default();
+        // Per lane in first-appearance order: the slice count, becoming the
+        // scatter cursor once the spans are laid out.
+        let mut counts: Vec<u32> = Vec::new();
+        let mut tids: Vec<i64> = Vec::new();
+        for &(tid, ..) in &self.staging {
+            let lane = *lane_of.entry(tid).or_insert_with(|| {
+                tids.push(tid);
+                counts.push(0);
+                counts.len() - 1
+            });
+            counts[lane] += 1;
         }
+        let mut off = 0u32;
+        self.lanes = tids
+            .iter()
+            .zip(&counts)
+            .map(|(&tid, &count)| {
+                let span = Span32::new(off, count);
+                off += count;
+                (tid, span)
+            })
+            .collect();
+        let mut cursors: Vec<u32> =
+            self.lanes.iter().map(|&(_, s)| s.range().start as u32).collect();
+        let total = self.staging.len();
+        let mut pool: Vec<(Slice, SliceDetail)> = Vec::with_capacity(total);
+        let spare = pool.spare_capacity_mut();
+        for &(tid, s, d) in &self.staging {
+            let lane = lane_of[&tid];
+            spare[cursors[lane] as usize].write((s, d));
+            cursors[lane] += 1;
+        }
+        // Every slot in [0, total) was written exactly once: the cursors
+        // advance through disjoint per-lane ranges whose lengths sum to the
+        // staging count.
+        unsafe { pool.set_len(total) };
+        for &(_, span) in &self.lanes {
+            pool[span.range()].sort_by(|a, b| slice_order(&a.0, &b.0));
+        }
+        self.lane_pool = pool;
+        self.staging.clear();
     }
 }
 
@@ -1269,7 +1324,8 @@ struct Merge {
 struct FoldedRun {
     text_base: u32,
     args_base: u32,
-    slices: BTreeMap<i64, Vec<(Slice, SliceDetail)>>,
+    lane_pool: Vec<(Slice, SliceDetail)>,
+    lanes: Vec<(i64, Span32)>,
 }
 
 impl Merge {
@@ -1285,15 +1341,17 @@ impl Merge {
         }
     }
 
-    /// Absorbs one builder. The builder's per-thread slice lists must already
-    /// be in lane order ([`Builder::sort_slices`]): [`finish_merge`] k-way
-    /// merges the folded runs rather than re-sorting whole lanes.
+    /// Absorbs one builder. The builder's slices must already be sealed into
+    /// per-thread lane order ([`Builder::seal_slices`]): [`finish_merge`]
+    /// k-way merges the folded runs rather than re-sorting whole lanes.
     fn fold(&mut self, builder: Builder) {
         let Builder {
             interner: b_interner,
             args_pool,
             thread_meta,
-            slices,
+            staging: _,
+            lane_pool,
+            lanes,
             phase_markers,
             counter_order,
             mut counters,
@@ -1338,7 +1396,7 @@ impl Merge {
                 }
             }
         }
-        self.runs.push(FoldedRun { text_base, args_base, slices });
+        self.runs.push(FoldedRun { text_base, args_base, lane_pool, lanes });
     }
 }
 
@@ -1376,7 +1434,7 @@ fn finish_merge(merge: Merge, other_data: Option<Map<String, Value>>) -> Profile
     // than pre-filled: a fill pass would touch every page serially just to be
     // overwritten, so the first (and only) write of each slot happens on the
     // worker that merges it.
-    let slice_total: usize = runs.iter().flat_map(|r| r.slices.values()).map(Vec::len).sum();
+    let slice_total: usize = runs.iter().map(|r| r.lane_pool.len()).sum();
     let mut slice_pool: Vec<Slice> = Vec::with_capacity(slice_total);
     let mut detail_pool: Vec<SliceDetail> = Vec::with_capacity(slice_total);
     let mut end_max_pool: Vec<i64> = Vec::with_capacity(slice_total);
@@ -1472,9 +1530,9 @@ fn finish_merge(merge: Merge, other_data: Option<Map<String, Value>>) -> Profile
     }
     let mut tid_runs: BTreeMap<i64, Vec<Run>> = BTreeMap::new();
     for folded in &runs {
-        for (&tid, tslices) in &folded.slices {
+        for &(tid, span) in &folded.lanes {
             tid_runs.entry(tid).or_default().push(Run {
-                src: tslices,
+                src: &folded.lane_pool[span.range()],
                 text_base: folded.text_base,
                 args_base: folded.args_base,
             });
@@ -1690,7 +1748,7 @@ fn finish_merge(merge: Merge, other_data: Option<Map<String, Value>>) -> Profile
         })
     });
 
-    // The folded runs' teardown (per-thread slice vectors) is pure
+    // The folded runs' teardown (per-chunk lane pools) is pure
     // page-return work; detached so the load doesn't wait on it.
     std::thread::spawn(move || drop(runs));
     profile
@@ -1783,14 +1841,18 @@ fn parse_chunks(text: &str, n: usize, min_bytes: usize) -> Option<Profile> {
                 .map(|_| {
                     scope.spawn(|| {
                         let mut parsed = Vec::new();
+                        let mut staging = Vec::new();
                         loop {
                             let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                             let Some(&chunk) = chunks.get(i) else { break };
                             let mut builder = Builder::new(chunk.len());
+                            builder.staging = std::mem::take(&mut staging);
                             let ok = parse_range_into(&mut builder, chunk);
                             if ok {
-                                builder.sort_slices();
+                                builder.seal_slices();
                             }
+                            staging = std::mem::take(&mut builder.staging);
+                            staging.clear();
                             parsed.push((i, ok.then_some(builder)));
                         }
                         parsed
@@ -2036,26 +2098,33 @@ fn parse_gz_stream(bytes: &[u8], workers: usize, chunk_bytes: usize) -> Option<P
                 let builder_tx = builder_tx.clone();
                 let pool_tx = pool_tx.clone();
                 let rx = &rx;
-                scope.spawn(move || loop {
-                    let piece = match rx.lock().unwrap().recv() {
-                        Ok(piece) => piece,
-                        Err(_) => break,
-                    };
-                    let text = latin1_cow(piece.buf.bytes());
-                    let mut builder = Builder::new(text.len());
-                    let ok = parse_range_into(&mut builder, &text);
-                    drop(text);
-                    // Hand a slab part back to the producer before sorting;
-                    // everything the builder keeps was interned during the
-                    // parse, and the inflate must not wait out the sort.
-                    if let PieceBuf::Slab { data, .. } = piece.buf {
-                        let _ = pool_tx.send(data);
-                    }
-                    if ok {
-                        builder.sort_slices();
-                    }
-                    if builder_tx.send((piece.idx, ok.then_some(builder))).is_err() {
-                        break;
+                scope.spawn(move || {
+                    let mut staging = Vec::new();
+                    loop {
+                        let piece = match rx.lock().unwrap().recv() {
+                            Ok(piece) => piece,
+                            Err(_) => break,
+                        };
+                        let text = latin1_cow(piece.buf.bytes());
+                        let mut builder = Builder::new(text.len());
+                        builder.staging = std::mem::take(&mut staging);
+                        let ok = parse_range_into(&mut builder, &text);
+                        drop(text);
+                        // Hand a slab part back to the producer before
+                        // sealing; everything the builder keeps was interned
+                        // during the parse, and the inflate must not wait out
+                        // the per-lane sorts.
+                        if let PieceBuf::Slab { data, .. } = piece.buf {
+                            let _ = pool_tx.send(data);
+                        }
+                        if ok {
+                            builder.seal_slices();
+                        }
+                        staging = std::mem::take(&mut builder.staging);
+                        staging.clear();
+                        if builder_tx.send((piece.idx, ok.then_some(builder))).is_err() {
+                            break;
+                        }
                     }
                 });
             }
