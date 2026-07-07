@@ -573,7 +573,7 @@ pub struct Interner {
 /// Hashes an interner key. Non-cryptographic: the keys are short,
 /// non-adversarial profile strings interned tens of millions of times, where
 /// the default SipHash is the dominant lookup cost.
-fn intern_hash(s: &str) -> u64 {
+pub(crate) fn intern_hash(s: &str) -> u64 {
     use std::hash::BuildHasher;
     rustc_hash::FxBuildHasher.hash_one(s)
 }

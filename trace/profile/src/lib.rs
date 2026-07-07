@@ -1,3 +1,4 @@
+mod concurrent_interner;
 mod model;
 mod parse;
 
@@ -6,4 +7,4 @@ pub use model::{
     Metadata, OptStr, PhaseMarker, Profile, Slice, SliceDetail, Span32, Str, ThreadTrack,
     TimeSpan, WorkClass,
 };
-pub use parse::LoadError;
+pub use parse::{worker_count, LoadError};

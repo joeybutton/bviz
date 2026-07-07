@@ -1771,7 +1771,7 @@ const MIN_PARALLEL_BYTES: usize = 8 << 20;
 /// memory channels mostly stall on bandwidth, burning CPU for a wall-time gain
 /// that has flattened. Clamped to the parallelism the process is actually
 /// granted, so a CPU quota or affinity mask is honored.
-fn worker_count() -> usize {
+pub fn worker_count() -> usize {
     let granted = std::thread::available_parallelism().map_or(1, |n| n.get());
     num_cpus::get_physical().min(granted)
 }
