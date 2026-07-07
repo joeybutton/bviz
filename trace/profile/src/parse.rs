@@ -11,10 +11,80 @@ use serde::de::{DeserializeSeed, IgnoredAny, MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer};
 use serde_json::{Map, Value};
 
+use crate::concurrent_interner::{ConcurrentInterner, Writer};
 use crate::model::{
     lane_class, work_class, CounterLane, CounterPoint, CounterSeries, Interner, Metadata,
     PhaseMarker, Profile, ProfileParts, Slice, SliceDetail, Span32, Str, ThreadTrack, TimeSpan,
 };
+
+/// Interns a string into whatever pool a parse fills: the serial [`Interner`]
+/// on the single-threaded path, or a [`Writer`] into the shared
+/// [`ConcurrentInterner`] on the parallel paths. The event-folding code is
+/// written once against this so a chunk worker's handles are global from the
+/// first intern.
+trait Intern {
+    fn intern(&mut self, s: &str) -> Str;
+    fn intern_opt(&mut self, s: Option<&str>) -> Option<Str> {
+        s.map(|s| self.intern(s))
+    }
+}
+
+impl Intern for Interner {
+    fn intern(&mut self, s: &str) -> Str {
+        Interner::intern(self, s)
+    }
+    fn intern_opt(&mut self, s: Option<&str>) -> Option<Str> {
+        Interner::intern_opt(self, s)
+    }
+}
+
+impl Intern for Writer<'_> {
+    fn intern(&mut self, s: &str) -> Str {
+        Writer::intern(self, s)
+    }
+}
+
+/// The interner sealed into a profile's text pool: it interns the late strings
+/// [`finish_merge`] adds (thread names, counter labels, metadata) and resolves
+/// handles already in the pool. Behind a single writer on the concurrent path,
+/// so the late interning reuses one bump page rather than a page per string.
+trait Pool: Intern {
+    fn resolve(&self, h: Str) -> &str;
+}
+
+impl Pool for Interner {
+    fn resolve(&self, h: Str) -> &str {
+        Interner::resolve(self, h)
+    }
+}
+
+/// A [`Writer`] paired with the interner it writes into, so late interning and
+/// resolution share one writer while the owned interner is sealed by the
+/// caller after this is dropped.
+struct WriterPool<'a> {
+    writer: Writer<'a>,
+    interner: &'a ConcurrentInterner,
+}
+
+impl Intern for WriterPool<'_> {
+    fn intern(&mut self, s: &str) -> Str {
+        self.writer.intern(s)
+    }
+}
+
+impl Pool for WriterPool<'_> {
+    fn resolve(&self, h: Str) -> &str {
+        self.interner.resolve(h)
+    }
+}
+
+/// Estimated distinct-string density of a Bazel profile — about one interned
+/// string per this many decoded bytes — used to pre-size the shared interner's
+/// dedup index. Measured near one distinct string per 167 bytes on a large
+/// profile; rounding down errs toward a larger index, which only wastes a
+/// transient, freed-at-seal allocation, whereas over-counting the bytes
+/// under-sizes the shard tables and costs a rehash.
+const BYTES_PER_DISTINCT: usize = 160;
 
 const GZIP_MAGIC: [u8; 2] = [0x1f, 0x8b];
 const MAX_SORT_INDEX: i64 = 1_000_000;
@@ -72,35 +142,39 @@ impl<'de> Visitor<'de> for ProfileVisitor {
     }
 
     fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Profile, A::Error> {
-        let mut builder = Builder::new(0);
+        let mut interner = Interner::new();
+        let mut builder = Builder::new();
         let mut other_data = None;
         while let Some(key) = map.next_key::<Cow<str>>()? {
             match key.as_ref() {
                 "otherData" => other_data = map.next_value::<Option<Map<String, Value>>>()?,
-                "traceEvents" => map.next_value_seed(EventsSeed(&mut builder))?,
+                "traceEvents" => {
+                    map.next_value_seed(EventsSeed(&mut builder, &mut interner))?
+                }
                 _ => {
                     map.next_value::<IgnoredAny>()?;
                 }
             }
         }
         builder.seal_slices();
-        Ok(assemble(vec![builder], other_data))
+        Ok(seal_serial(interner, builder, other_data))
     }
 }
 
 /// Deserializes the `traceEvents` array element by element into the borrowed
-/// [`Builder`], discarding each event once consumed.
-struct EventsSeed<'a>(&'a mut Builder);
+/// [`Builder`], interning into the borrowed [`Interner`] and discarding each
+/// event once consumed.
+struct EventsSeed<'a>(&'a mut Builder, &'a mut Interner);
 
 impl<'de, 'a> DeserializeSeed<'de> for EventsSeed<'a> {
     type Value = ();
 
     fn deserialize<D: Deserializer<'de>>(self, d: D) -> Result<(), D::Error> {
-        d.deserialize_seq(EventsVisitor(self.0))
+        d.deserialize_seq(EventsVisitor(self.0, self.1))
     }
 }
 
-struct EventsVisitor<'a>(&'a mut Builder);
+struct EventsVisitor<'a>(&'a mut Builder, &'a mut Interner);
 
 impl<'de, 'a> Visitor<'de> for EventsVisitor<'a> {
     type Value = ();
@@ -111,19 +185,22 @@ impl<'de, 'a> Visitor<'de> for EventsVisitor<'a> {
 
     fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<(), A::Error> {
         let mut scratch = Vec::new();
-        while seq.next_element_seed(EventSeed(&mut *self.0, &mut scratch))?.is_some() {}
+        while seq
+            .next_element_seed(EventSeed(&mut *self.0, &mut *self.1, &mut scratch))?
+            .is_some()
+        {}
         Ok(())
     }
 }
 
-struct EventSeed<'b, 'de>(&'b mut Builder, &'b mut Vec<ArgEntry<'de>>);
+struct EventSeed<'b, 'de>(&'b mut Builder, &'b mut Interner, &'b mut Vec<ArgEntry<'de>>);
 
 impl<'de> DeserializeSeed<'de> for EventSeed<'_, 'de> {
     type Value = ();
 
     fn deserialize<D: Deserializer<'de>>(self, d: D) -> Result<(), D::Error> {
-        let ev = RawEventSeed(&mut *self.1).deserialize(d)?;
-        self.0.event(ev, self.1);
+        let ev = RawEventSeed(&mut *self.2).deserialize(d)?;
+        self.0.event(self.1, ev, self.2);
         Ok(())
     }
 }
@@ -1040,7 +1117,8 @@ fn recover(text: &str) -> Result<Profile, LoadError> {
 
     let other_data = recover_other_data(&text[..events_at]);
 
-    let mut builder = Builder::new(0);
+    let mut interner = Interner::new();
+    let mut builder = Builder::new();
     let mut scratch: Vec<ArgEntry> = Vec::new();
     let mut recovered = false;
     let bytes = text.as_bytes();
@@ -1092,7 +1170,7 @@ fn recover(text: &str) -> Result<Profile, LoadError> {
             .deserialize(&mut de)
             .and_then(|ev| de.end().map(|()| ev))
         {
-            builder.event(ev, &scratch);
+            builder.event(&mut interner, ev, &scratch);
             recovered = true;
         }
         i = end + 1;
@@ -1102,7 +1180,7 @@ fn recover(text: &str) -> Result<Profile, LoadError> {
         return Err(LoadError::Corrupted("no complete events recovered".into()));
     }
     builder.seal_slices();
-    Ok(assemble(vec![builder], other_data))
+    Ok(seal_serial(interner, builder, other_data))
 }
 
 fn recover_other_data(prefix: &str) -> Option<Map<String, Value>> {
@@ -1139,10 +1217,10 @@ struct RawSeries {
 
 /// Accumulates the arena pools as `traceEvents` stream in, so each event's
 /// strings are interned in the one parse pass rather than collected into a
-/// `Vec<RawEvent>` and re-walked. [`assemble`] folds one or more builders and
-/// `otherData` into the profile's flat pools.
+/// `Vec<RawEvent>` and re-walked. [`Merge::fold`] folds one or more builders,
+/// and [`finish_merge`] seals them and `otherData` into the profile's flat
+/// pools.
 struct Builder {
-    interner: Interner,
     args_pool: Vec<(Str, Str)>,
     thread_meta: BTreeMap<i64, (Option<String>, i64)>,
     /// Slices in event order, each tagged with its thread — one flat vector
@@ -1163,22 +1241,8 @@ struct Builder {
 }
 
 impl Builder {
-    /// `bytes_hint` is the length of the JSON this builder will consume. The
-    /// text pool is reserved at that full length — in practice its upper
-    /// bound: interned strings are disjoint tokens of the input or shorter
-    /// (unescaping shrinks), except numeric args, which intern in formatted
-    /// form and can outgrow an exponent-notation token; the structural bytes
-    /// the pool never stores (quotes, keys, punctuation) leave headroom far
-    /// past that. A pool that regrows reallocates and copies itself whole,
-    /// and chunks range from mostly-repeated strings to nearly all-distinct,
-    /// where a density guess loses; the reservation's untouched tail costs
-    /// only address space. The dedup map stays sized at the distinct-string
-    /// density typical of Bazel profiles (about one per 300 bytes): entries
-    /// are small, so a rehash on a denser chunk is cheap, where matching the
-    /// pool's worst-case bound would waste real memory on every chunk.
-    fn new(bytes_hint: usize) -> Builder {
+    fn new() -> Builder {
         Builder {
-            interner: Interner::with_capacity(bytes_hint / 256, bytes_hint),
             args_pool: Vec::new(),
             thread_meta: BTreeMap::new(),
             staging: Vec::new(),
@@ -1190,10 +1254,11 @@ impl Builder {
         }
     }
 
-    /// Folds one event in. `scratch` holds the event's args entries when
-    /// `ev.has_args` is set; they are consumed here, and deserializing the
-    /// next event reuses the buffer.
-    fn event(&mut self, ev: RawEvent, scratch: &[ArgEntry]) {
+    /// Folds one event in, interning its strings into `interner` — the shared
+    /// concurrent arena on the parallel paths, so the handles are global. When
+    /// `ev.has_args` is set `scratch` holds the event's args entries; they are
+    /// consumed here, and deserializing the next event reuses the buffer.
+    fn event(&mut self, interner: &mut impl Intern, ev: RawEvent, scratch: &[ArgEntry]) {
         let args = ev.has_args.then_some(scratch);
         let ph = ev.ph.as_deref().unwrap_or("");
         match ph {
@@ -1202,24 +1267,19 @@ impl Builder {
                 let ts = round_us(ev.ts);
                 if ev.cat.as_deref() == Some(PHASE_MARKER_CATEGORY) {
                     self.phase_markers.push(PhaseMarker {
-                        name: self.interner.intern(ev.name.as_deref().unwrap_or("")),
+                        name: interner.intern(ev.name.as_deref().unwrap_or("")),
                         start_us: ts,
                     });
                 } else {
                     let tid = ev.tid.unwrap_or(0);
                     let category = ev.cat.as_deref().unwrap_or("");
                     let work_class = work_class(category);
-                    let category = self.interner.intern(category);
-                    let detail = build_slice_detail(
-                        &mut self.interner,
-                        &mut self.args_pool,
-                        category,
-                        args,
-                    );
+                    let category = interner.intern(category);
+                    let detail = build_slice_detail(interner, &mut self.args_pool, category, args);
                     self.staging.push((
                         tid,
                         Slice {
-                            name: self.interner.intern(ev.name.as_deref().unwrap_or("")),
+                            name: interner.intern(ev.name.as_deref().unwrap_or("")),
                             start_us: ts,
                             // A malformed dur must not make the slice end
                             // before it starts: every consumer — the end-max
@@ -1234,7 +1294,7 @@ impl Builder {
                 }
             }
             "C" => apply_counter_event(
-                &mut self.interner,
+                interner,
                 &ev,
                 args,
                 &mut self.counter_order,
@@ -1311,14 +1371,16 @@ fn slice_order(a: &Slice, b: &Slice) -> Ordering {
 /// The incremental builder merge: [`Merge::fold`] absorbs one builder at a
 /// time — in array order — so everything except the final slice copy happens
 /// as builders arrive, and the pipelined parse hides that work under the
-/// decode∥parse phase. A fold concatenates the builder's text pool onto the
-/// joined interner and rebases its args and phase markers; counter lanes
-/// re-intern by name so a lane sampled across chunks unifies into one; thread
-/// metadata unions per tid. Only the builder's slices survive a fold (as a
-/// [`FoldedRun`] with the pool bases its handles rebase by): their copy into
-/// the flat pool needs every thread's total, so it waits for [`finish_merge`].
+/// decode∥parse phase. Every builder's handles are already global (all chunk
+/// workers interned into one shared arena), so a fold only concatenates the
+/// builder's per-worker args pool — rebasing the arg-pool indices its slice
+/// details carry — unions its counters by their (global) name handle, and
+/// unions thread metadata per tid; slice, phase-marker, and counter/series
+/// handles carry straight through. Only the builder's slices survive a fold
+/// (as a [`FoldedRun`] with the arg-pool base its detail indices rebase by):
+/// their copy into the flat pool needs every thread's total, so it waits for
+/// [`finish_merge`].
 struct Merge {
-    interner: Interner,
     args_pool: Vec<(Str, Str)>,
     phase_markers: Vec<PhaseMarker>,
     thread_meta: BTreeMap<i64, (Option<String>, i64)>,
@@ -1328,7 +1390,6 @@ struct Merge {
 }
 
 struct FoldedRun {
-    text_base: u32,
     args_base: u32,
     lane_pool: Vec<(Slice, SliceDetail)>,
     lanes: Vec<(i64, Span32)>,
@@ -1337,7 +1398,6 @@ struct FoldedRun {
 impl Merge {
     fn new() -> Merge {
         Merge {
-            interner: Interner::new(),
             args_pool: Vec::new(),
             phase_markers: Vec::new(),
             thread_meta: BTreeMap::new(),
@@ -1352,7 +1412,6 @@ impl Merge {
     /// k-way merges the folded runs rather than re-sorting whole lanes.
     fn fold(&mut self, builder: Builder) {
         let Builder {
-            interner: b_interner,
             args_pool,
             thread_meta,
             staging: _,
@@ -1362,15 +1421,12 @@ impl Merge {
             counter_order,
             mut counters,
         } = builder;
-        let text_base = self.interner.push_pool(b_interner.text());
+        // The args pool is per-worker, concatenated here; a detail's `others`
+        // span indexes it, so it rebases by the base this builder lands at. The
+        // entries themselves are global text handles, unchanged.
         let args_base = self.args_pool.len() as u32;
-        self.args_pool.extend(
-            args_pool.iter().map(|&(k, v)| (k.shifted(text_base), v.shifted(text_base))),
-        );
-        self.phase_markers.extend(phase_markers.iter().map(|m| PhaseMarker {
-            name: m.name.shifted(text_base),
-            start_us: m.start_us,
-        }));
+        self.args_pool.extend(args_pool);
+        self.phase_markers.extend(phase_markers);
         // Per thread: the first folded name wins, the last explicit sort index wins.
         for (tid, (name, sort_index)) in thread_meta {
             let entry = self.thread_meta.entry(tid).or_insert((None, MAX_SORT_INDEX));
@@ -1381,44 +1437,58 @@ impl Merge {
                 entry.1 = sort_index;
             }
         }
+        // A counter name is a global handle, so a lane sampled across chunks
+        // keys the same map entry in every builder and unifies without a
+        // re-intern.
         for lane_key in counter_order {
             let lane = counters.remove(&lane_key).expect("ordered lane exists");
-            let lane_name = self.interner.intern(b_interner.resolve(lane.name));
-            let dst = match self.counters.entry(lane_name) {
+            let dst = match self.counters.entry(lane.name) {
                 std::collections::hash_map::Entry::Occupied(e) => e.into_mut(),
                 std::collections::hash_map::Entry::Vacant(e) => {
-                    self.counter_order.push(lane_name);
-                    e.insert(RawLane { name: lane_name, series: Vec::new() })
+                    self.counter_order.push(lane.name);
+                    e.insert(RawLane { name: lane.name, series: Vec::new() })
                 }
             };
             for series in lane.series {
-                let series_name = self.interner.intern(b_interner.resolve(series.name));
-                match dst.series.iter_mut().find(|s| s.name == series_name) {
+                match dst.series.iter_mut().find(|s| s.name == series.name) {
                     Some(s) => s.points.extend(series.points),
-                    None => dst.series.push(RawSeries {
-                        name: series_name,
-                        points: series.points,
-                    }),
+                    None => dst.series.push(series),
                 }
             }
         }
-        self.runs.push(FoldedRun { text_base, args_base, lane_pool, lanes });
+        self.runs.push(FoldedRun { args_base, lane_pool, lanes });
     }
 }
 
-/// Folds one or more builders — the ordered chunk builders of a parallel parse,
-/// or a single serial builder — into a [`Profile`], for the paths that hold all
-/// builders at once; the pipelined parse folds incrementally instead and calls
-/// [`finish_merge`] directly.
-fn assemble(builders: Vec<Builder>, other_data: Option<Map<String, Value>>) -> Profile {
+/// Folds the ordered chunk builders of a whole-buffer parallel parse (or a
+/// single serial builder) and seals them, for the paths that hold all builders
+/// at once; the pipelined parse folds incrementally and seals directly.
+fn seal_serial(
+    mut interner: Interner,
+    builder: Builder,
+    other_data: Option<Map<String, Value>>,
+) -> Profile {
     let mut merge = Merge::new();
-    merge.interner.reserve(builders.iter().map(|b| b.interner.text().len()).sum());
-    timed("    fold", || {
-        for builder in builders {
-            merge.fold(builder);
-        }
-    });
-    finish_merge(merge, other_data)
+    merge.fold(builder);
+    let mut parts = finish_merge(merge, &mut interner, other_data);
+    parts.text = interner.into_text();
+    Profile::from_parts(parts)
+}
+
+/// Folds the chunk builders whose handles are global into the shared
+/// concurrent arena, interns the late strings through a writer into that same
+/// arena, then seals it into the profile's text pool.
+fn seal_concurrent(
+    interner: ConcurrentInterner,
+    merge: Merge,
+    other_data: Option<Map<String, Value>>,
+) -> Profile {
+    let mut parts = {
+        let mut pool = WriterPool { writer: interner.writer(), interner: &interner };
+        finish_merge(merge, &mut pool, other_data)
+    };
+    parts.text = interner.into_text();
+    Profile::from_parts(parts)
 }
 
 /// Writes every folded slice exactly once, straight into its final
@@ -1426,9 +1496,12 @@ fn assemble(builders: Vec<Builder>, other_data: Option<Map<String, Value>>) -> P
 /// order, with handle rebasing, depth assignment, and span tracking fused into
 /// that single write pass, which runs per thread across worker threads. Then
 /// seals the merged pools into a [`Profile`].
-fn finish_merge(merge: Merge, other_data: Option<Map<String, Value>>) -> Profile {
+fn finish_merge(
+    merge: Merge,
+    pool: &mut impl Pool,
+    other_data: Option<Map<String, Value>>,
+) -> ProfileParts {
     let Merge {
-        mut interner,
         args_pool,
         mut phase_markers,
         thread_meta,
@@ -1446,10 +1519,9 @@ fn finish_merge(merge: Merge, other_data: Option<Map<String, Value>>) -> Profile
     let mut end_max_pool: Vec<i64> = Vec::with_capacity(slice_total);
 
     // One source run per (thread, builder): that builder's slices for the
-    // thread, in lane order, with the bases its handles rebase by.
+    // thread, in lane order, with the arg-pool base its detail spans rebase by.
     struct Run<'a> {
         src: &'a [(Slice, SliceDetail)],
-        text_base: u32,
         args_base: u32,
     }
     // A thread's contiguous destination segments — one per pool, the same
@@ -1470,12 +1542,12 @@ fn finish_merge(merge: Merge, other_data: Option<Map<String, Value>>) -> Profile
     /// whole-lane [`slice_order`] — on an equal key the lowest run index goes
     /// first, which reproduces a stable whole-lane sort of the runs
     /// concatenated in fold order. Each slot is written exactly once, and that
-    /// one write also rebases the slice's and detail's handles by its run's
-    /// bases, assigns the slice's depth from the ancestor stack, and
-    /// accumulates the lane's time span — whose running end also fills the
-    /// slice's end-max slot, giving [`Profile::end_maxes`] its segment-local
-    /// prefix maximum. Slice, detail, and end max travel as one triple, so the
-    /// three pools stay index-parallel by construction.
+    /// one write also rebases the detail's arg-pool span by its run's base
+    /// (text handles are already global), assigns the slice's depth from the
+    /// ancestor stack, and accumulates the lane's time span — whose running end
+    /// also fills the slice's end-max slot, giving [`Profile::end_maxes`] its
+    /// segment-local prefix maximum. Slice, detail, and end max travel as one
+    /// triple, so the three pools stay index-parallel by construction.
     fn merge_lane(task: &mut TidTask) {
         let TidTask { dest, dest_detail, dest_end_max, runs, max_depth, min_start_us, max_end_us } =
             task;
@@ -1491,11 +1563,6 @@ fn finish_merge(merge: Merge, other_data: Option<Map<String, Value>>) -> Profile
         let mut stack: Vec<i64> = Vec::new();
         let mut emit = |run: &Run, src: &(Slice, SliceDetail)| {
             let (mut s, mut d) = *src;
-            s.name = s.name.shifted(run.text_base);
-            d.category = d.category.shifted(run.text_base);
-            d.target = d.target.shifted(run.text_base);
-            d.mnemonic = d.mnemonic.shifted(run.text_base);
-            d.configuration = d.configuration.shifted(run.text_base);
             d.others = d.others.shifted(run.args_base);
             let end = s.start_us.saturating_add(s.dur_us);
             while stack.last().is_some_and(|&e| e < end) {
@@ -1539,7 +1606,6 @@ fn finish_merge(merge: Merge, other_data: Option<Map<String, Value>>) -> Profile
         for &(tid, span) in &folded.lanes {
             tid_runs.entry(tid).or_default().push(Run {
                 src: &folded.lane_pool[span.range()],
-                text_base: folded.text_base,
                 args_base: folded.args_base,
             });
         }
@@ -1600,10 +1666,10 @@ fn finish_merge(merge: Merge, other_data: Option<Map<String, Value>>) -> Profile
     unsafe { detail_pool.set_len(slice_total) };
     unsafe { end_max_pool.set_len(slice_total) };
 
-    let profile = timed("    tail", || {
+    let parts = timed("    tail", || {
         phase_markers.sort_by_key(|m| m.start_us);
 
-        let metadata = build_metadata(&mut interner, other_data.as_ref());
+        let metadata = build_metadata(pool, other_data.as_ref());
 
         let mut start: Option<i64> = None;
         let mut end: Option<i64> = None;
@@ -1643,7 +1709,7 @@ fn finish_merge(merge: Merge, other_data: Option<Map<String, Value>>) -> Profile
                 let lane_class = lane_class(tid, &name);
                 ThreadTrack {
                     tid,
-                    name: interner.intern(&name),
+                    name: pool.intern(&name),
                     sort_index,
                     slices,
                     max_depth,
@@ -1672,7 +1738,7 @@ fn finish_merge(merge: Merge, other_data: Option<Map<String, Value>>) -> Profile
             let Some(lane) = counters.remove(&name) else {
                 continue;
             };
-            let counter_name = interner.resolve(lane.name).to_string();
+            let counter_name = pool.resolve(lane.name).to_string();
             if lane.series.is_empty() {
                 let rank = counter_rank(&counter_name, "");
                 split.push(SplitLane {
@@ -1684,7 +1750,7 @@ fn finish_merge(merge: Merge, other_data: Option<Map<String, Value>>) -> Profile
             }
             let multi = lane.series.len() > 1;
             for s in lane.series {
-                let key = interner.resolve(s.name).to_string();
+                let key = pool.resolve(s.name).to_string();
                 let rank = counter_rank(&counter_name, &key);
                 let label = if multi {
                     format!("{counter_name} · {key}")
@@ -1707,7 +1773,7 @@ fn finish_merge(merge: Merge, other_data: Option<Map<String, Value>>) -> Profile
         let counters: Vec<CounterLane> = split
             .into_iter()
             .map(|l| {
-                let name = interner.intern(&l.label);
+                let name = pool.intern(&l.label);
                 let series_off = series_pool.len() as u32;
                 if let Some(mut s) = l.series {
                     let points_off = point_pool.len() as u32;
@@ -1738,8 +1804,10 @@ fn finish_merge(merge: Merge, other_data: Option<Map<String, Value>>) -> Profile
             })
             .collect();
 
-        Profile::from_parts(ProfileParts {
-            text: interner.into_text(),
+        // The caller seals its owned interner into `text` once this returns and
+        // the late-interning writer is dropped.
+        ProfileParts {
+            text: String::new(),
             slice_pool,
             detail_pool,
             end_max_pool,
@@ -1751,13 +1819,13 @@ fn finish_merge(merge: Merge, other_data: Option<Map<String, Value>>) -> Profile
             counters,
             phase_markers,
             span,
-        })
+        }
     });
 
     // The folded runs' teardown (per-chunk lane pools) is pure
     // page-return work; detached so the load doesn't wait on it.
     std::thread::spawn(move || drop(runs));
-    profile
+    parts
 }
 
 /// Below this many bytes of `traceEvents` the parallel parser's thread and merge
@@ -1840,20 +1908,26 @@ fn parse_chunks(text: &str, n: usize, min_bytes: usize) -> Option<Profile> {
     let chunks: Vec<&str> = bounds.windows(2).map(|w| &region[w[0]..w[1]]).collect();
 
     let other_data = recover_other_data(text);
+    // Every worker interns into this one arena, so a builder's handles are
+    // global and merging never rebases them. The distinct pool is bounded by
+    // the region's byte length.
+    let interner = ConcurrentInterner::new(region.len(), region.len() / BYTES_PER_DISTINCT);
     let builders: Vec<Option<Builder>> = timed("  parse chunks", || {
         let next = std::sync::atomic::AtomicUsize::new(0);
+        let interner = &interner;
         let parsed: Vec<(usize, Option<Builder>)> = std::thread::scope(|scope| {
             let handles: Vec<_> = (0..n.min(chunks.len()))
                 .map(|_| {
                     scope.spawn(|| {
+                        let mut writer = interner.writer();
                         let mut parsed = Vec::new();
                         let mut staging = Vec::new();
                         loop {
                             let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                             let Some(&chunk) = chunks.get(i) else { break };
-                            let mut builder = Builder::new(chunk.len());
+                            let mut builder = Builder::new();
                             builder.staging = std::mem::take(&mut staging);
-                            let ok = parse_range_into(&mut builder, chunk);
+                            let ok = parse_range_into(&mut builder, &mut writer, chunk);
                             if ok {
                                 builder.seal_slices();
                             }
@@ -1880,7 +1954,13 @@ fn parse_chunks(text: &str, n: usize, min_bytes: usize) -> Option<Profile> {
     if builders.is_empty() {
         return None;
     }
-    Some(timed("  assemble", || assemble(builders, other_data)))
+    Some(timed("  assemble", || {
+        let mut merge = Merge::new();
+        for builder in builders {
+            merge.fold(builder);
+        }
+        seal_concurrent(interner, merge, other_data)
+    }))
 }
 
 /// Ceiling on a pipelined chunk buffer, bounding the memory the bounded queue
@@ -2097,7 +2177,13 @@ fn parse_gz_stream(bytes: &[u8], workers: usize, chunk_bytes: usize) -> Option<P
     for part in slab.chunks_mut(chunk_bytes) {
         let _ = pool_tx.send(part);
     }
+    // Every worker interns into this one arena, so a builder's handles are
+    // global and the merger never rebases them. The distinct pool is bounded by
+    // the decoded size the ISIZE trailer declares.
+    let decoded_size = gzip_isize(bytes).unwrap_or(0);
+    let interner = ConcurrentInterner::new(decoded_size, decoded_size / BYTES_PER_DISTINCT);
     let (ends, merged) = timed("  decode+parse+fold chunks", || {
+        let interner = &interner;
         std::thread::scope(|scope| {
             let producer = scope.spawn(move || stream_pieces(bytes, chunk_bytes, tx, pool_rx));
             for _ in 0..workers {
@@ -2105,6 +2191,7 @@ fn parse_gz_stream(bytes: &[u8], workers: usize, chunk_bytes: usize) -> Option<P
                 let pool_tx = pool_tx.clone();
                 let rx = &rx;
                 scope.spawn(move || {
+                    let mut writer = interner.writer();
                     let mut staging = Vec::new();
                     loop {
                         let piece = match rx.lock().unwrap().recv() {
@@ -2112,9 +2199,9 @@ fn parse_gz_stream(bytes: &[u8], workers: usize, chunk_bytes: usize) -> Option<P
                             Err(_) => break,
                         };
                         let text = latin1_cow(piece.buf.bytes());
-                        let mut builder = Builder::new(text.len());
+                        let mut builder = Builder::new();
                         builder.staging = std::mem::take(&mut staging);
-                        let ok = parse_range_into(&mut builder, &text);
+                        let ok = parse_range_into(&mut builder, &mut writer, &text);
                         drop(text);
                         // Hand a slab part back to the producer before
                         // sealing; everything the builder keeps was interned
@@ -2138,19 +2225,8 @@ fn parse_gz_stream(bytes: &[u8], workers: usize, chunk_bytes: usize) -> Option<P
             // The workers hold the only remaining senders, so the merger's
             // channel closes when the last of them finishes.
             drop(builder_tx);
-            // The summed per-chunk pools stay below the decoded size — each
-            // holds disjoint tokens of its chunk or shorter, with formatted
-            // numeric args covered by the structural bytes pools never
-            // store — so with this bound folding never regrows the pool. A
-            // regrowth would re-copy everything folded so far, and a dense
-            // profile blows through any density-based guess. The reservation
-            // is touched only as folds append, so the tail costs only
-            // address space, including in the sealed profile that keeps the
-            // pool.
-            let text_reserve = gzip_isize(bytes).unwrap_or(0);
             let merger = scope.spawn(move || {
                 let mut merge = Merge::new();
-                merge.interner.reserve(text_reserve);
                 let mut pending: BTreeMap<usize, Builder> = BTreeMap::new();
                 let mut next = 0usize;
                 let mut failed = false;
@@ -2184,7 +2260,7 @@ fn parse_gz_stream(bytes: &[u8], workers: usize, chunk_bytes: usize) -> Option<P
     let head = latin1_to_utf8(ends.head);
     let tail = latin1_to_utf8(ends.tail);
     let other_data = recover_other_data(&head).or_else(|| recover_other_data(&tail));
-    Some(timed("  finish", || finish_merge(merge, other_data)))
+    Some(timed("  finish", || seal_concurrent(interner, merge, other_data)))
 }
 
 /// Parses every `{...}` event object in one chunk of the `traceEvents` array
@@ -2193,7 +2269,7 @@ fn parse_gz_stream(bytes: &[u8], workers: usize, chunk_bytes: usize) -> Option<P
 /// the scanner defers, and the comma/whitespace separators between events are
 /// skipped by hand. Returns `false` on malformed content so the caller falls
 /// back to the serial parser rather than silently dropping events.
-fn parse_range_into(builder: &mut Builder, chunk: &str) -> bool {
+fn parse_range_into(builder: &mut Builder, interner: &mut impl Intern, chunk: &str) -> bool {
     let bytes = chunk.as_bytes();
     let mut scratch: Vec<ArgEntry> = Vec::new();
     let mut pos = 0;
@@ -2202,14 +2278,14 @@ fn parse_range_into(builder: &mut Builder, chunk: &str) -> bool {
             b' ' | b'\t' | b'\n' | b'\r' | b',' => pos += 1,
             b'{' => {
                 if let Some((ev, end)) = scan_event(chunk, pos, &mut scratch) {
-                    builder.event(ev, &scratch);
+                    builder.event(interner, ev, &scratch);
                     pos = end;
                     continue;
                 }
                 let mut de = serde_json::Deserializer::from_str(&chunk[pos..]);
                 match RawEventSeed(&mut scratch).deserialize(&mut de) {
                     Ok(ev) => {
-                        builder.event(ev, &scratch);
+                        builder.event(interner, ev, &scratch);
                         // The deserializer doesn't expose its consumed-byte
                         // count directly, but converting it into a stream
                         // iterator carries the count over to `byte_offset`.
@@ -2224,7 +2300,7 @@ fn parse_range_into(builder: &mut Builder, chunk: &str) -> bool {
     true
 }
 
-fn build_metadata(interner: &mut Interner, other: Option<&Map<String, Value>>) -> Metadata {
+fn build_metadata(interner: &mut impl Intern, other: Option<&Map<String, Value>>) -> Metadata {
     let mut get = |k: &str| {
         let v = other.and_then(|m| m.get(k)).and_then(Value::as_str);
         interner.intern_opt(v)
@@ -2260,7 +2336,7 @@ fn apply_metadata_event(
 }
 
 fn build_slice_detail(
-    interner: &mut Interner,
+    interner: &mut impl Intern,
     args_pool: &mut Vec<(Str, Str)>,
     category: Str,
     args: Option<&[ArgEntry]>,
@@ -2310,7 +2386,7 @@ fn build_slice_detail(
 }
 
 fn apply_counter_event(
-    interner: &mut Interner,
+    interner: &mut impl Intern,
     ev: &RawEvent,
     args: Option<&[ArgEntry]>,
     order: &mut Vec<Str>,

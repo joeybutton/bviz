@@ -17,18 +17,11 @@ impl Str {
     pub fn range(self) -> std::ops::Range<usize> {
         self.off as usize..(self.off + self.len) as usize
     }
-
-    /// The same span relocated by `by` bytes, for rebasing a handle onto a text
-    /// pool that has been concatenated after another.
-    pub fn shifted(self, by: u32) -> Str {
-        Str { off: self.off + by, len: self.len }
-    }
 }
 
 /// An optional interned-string handle in the size of a bare [`Str`]: offset 0
-/// encodes absence. The [`Interner`] seeds its pool with a placeholder byte, so
-/// no live handle ever has offset 0 — and the property survives pool
-/// concatenation, since every [`Interner::push_pool`] base is at least 1.
+/// encodes absence. Every interner seeds its pool with a placeholder byte, so
+/// no live handle ever has offset 0.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 #[repr(transparent)]
 pub struct OptStr(Str);
@@ -38,15 +31,6 @@ impl OptStr {
 
     pub fn get(self) -> Option<Str> {
         (self.0.off != 0).then_some(self.0)
-    }
-
-    /// The same handle relocated by `by` bytes ([`Str::shifted`]); absence is
-    /// preserved, never turned into a live handle.
-    pub fn shifted(self, by: u32) -> OptStr {
-        match self.get() {
-            Some(s) => OptStr(s.shifted(by)),
-            None => OptStr::NONE,
-        }
     }
 }
 
@@ -456,11 +440,9 @@ impl Profile {
 
     /// Rebinds every second slice carrying `text` (as its name or mnemonic, in
     /// pool order) to a fresh handle over an appended copy of the text: equal
-    /// strings under distinct handles, the shape of a profile assembled from
-    /// parallel parse chunks, whose pools concatenate without cross-chunk dedup
-    /// ([`Interner::push_pool`]). A single-chunk parse dedups every string into
-    /// one handle, so tests of by-text merging build the duplicated shape with
-    /// this.
+    /// strings under distinct handles. That is the shape a by-text merge or the
+    /// flame canonicalizer must collapse; the parser interns every string into
+    /// one handle, so a test builds the duplicated shape with this.
     #[doc(hidden)]
     pub fn duplicate_str_for_test(&mut self, text: &str) {
         let dup = Str::new(self.text.len() as u32, text.len() as u32);
@@ -629,26 +611,9 @@ impl Interner {
         &self.text[s.range()]
     }
 
-    /// The whole text pool, for appending to another with [`Self::push_pool`].
-    pub fn text(&self) -> &str {
-        &self.text
-    }
-
     /// Reserves room for `additional` more bytes of text pool.
     pub fn reserve(&mut self, additional: usize) {
         self.text.reserve(additional);
-    }
-
-    /// Appends another interner's text pool to this one and returns the base
-    /// offset it was placed at, so handles into that pool can be rebased with
-    /// [`Str::shifted`]. The appended strings are not added to the dedup map (the
-    /// caller is merging already-deduplicated pools), so two pools that both
-    /// interned a string keep both copies; the duplication is a handful of bytes
-    /// per distinct string and avoids re-hashing every handle.
-    pub fn push_pool(&mut self, other: &str) -> u32 {
-        let base = self.text.len() as u32;
-        self.text.push_str(other);
-        base
     }
 
     /// Consumes the interner, yielding the retained text pool and dropping the
