@@ -438,37 +438,6 @@ impl Profile {
             .any(|t| t.lane_class == LaneClass::CriticalPath)
     }
 
-    /// Rebinds every second slice carrying `text` (as its name or mnemonic, in
-    /// pool order) to a fresh handle over an appended copy of the text: equal
-    /// strings under distinct handles. That is the shape a by-text merge or the
-    /// flame canonicalizer must collapse; the parser interns every string into
-    /// one handle, so a test builds the duplicated shape with this.
-    #[doc(hidden)]
-    pub fn duplicate_str_for_test(&mut self, text: &str) {
-        let dup = Str::new(self.text.len() as u32, text.len() as u32);
-        self.text.push_str(text);
-        let mut nth = 0usize;
-        for (s, d) in self.slice_pool.iter_mut().zip(self.detail_pool.iter_mut()) {
-            let name_hit = &self.text[s.name.range()] == text;
-            let mnemonic_hit = d
-                .mnemonic
-                .get()
-                .is_some_and(|m| &self.text[m.range()] == text);
-            if !name_hit && !mnemonic_hit {
-                continue;
-            }
-            if nth % 2 == 1 {
-                if name_hit {
-                    s.name = dup;
-                }
-                if mnemonic_hit {
-                    d.mnemonic = Some(dup).into();
-                }
-            }
-            nth += 1;
-        }
-    }
-
     /// Phase markers as half-open `[start, end)` intervals: each runs to the next
     /// marker's start, the last to `span.end_us`. Mirrors Bazel's `JsonProfile`
     /// phase-summary reconstruction from consecutive markers. Each name is an

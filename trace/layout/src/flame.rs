@@ -45,37 +45,19 @@ struct Segment {
     work_class: WorkClass,
 }
 
-/// Maps a [`Str`] handle to the one canonical handle carrying the same text —
-/// the lowest-offset handle in the profile with it. A parallel parse assembles
-/// a profile by concatenating its chunks' interned pools without cross-chunk
-/// dedup (see [`Interner::push_pool`](bviz_trace_profile::Interner::push_pool)),
-/// so equal strings can be carried by several handles, and frames must merge by
-/// text. The lowest offset is a property of the profile, not of visit order, so
-/// shards that scan the lanes in any partition agree on every canonical handle.
-/// `memo` holds only the aliased handles — nearly every handle is its own
-/// canonical, so it stays far smaller than the distinct-string count — and the
-/// per-span path is one read-only small-key lookup, shared across merge workers
-/// with no locking.
-struct Canon {
-    memo: FxHashMap<Str, Str>,
-    /// Lexicographic rank of each scanned canonical handle: dense `u32`s
-    /// assigned by one byte-wise sort of the scanned distinct texts. Canonical
-    /// handles biject with texts, so rank order equals text order and every
-    /// later ordering comparison is integer-only. Ranks are dense per scan and
-    /// never compare across builds.
+/// Lexicographic rank of each distinct scanned label handle: dense `u32`s
+/// assigned by one byte-wise sort of the scanned distinct texts. The profile
+/// interns each distinct string to one handle, so the handles biject with
+/// texts and rank order equals byte-wise text order, making every later
+/// ordering comparison integer-only. Ranks are dense per scan and never
+/// compare across builds.
+struct Ranks {
     rank: FxHashMap<Str, u32>,
 }
 
-impl Canon {
-    /// The canonical handle for `s`: aliases resolve through the memo, and a
-    /// handle with no entry is its own canonical. An unscanned handle silently
-    /// resolves to itself — the coverage invariant of [`scan`] is what keeps
-    /// text-dedup sound.
-    fn canon(&self, s: Str) -> Str {
-        self.memo.get(&s).copied().unwrap_or(s)
-    }
-
-    /// The lexicographic rank of a canonical handle's text.
+impl Ranks {
+    /// The lexicographic rank of a label handle's text. An unscanned handle
+    /// panics — the coverage invariant of [`scan`] is what keeps ranking sound.
     fn rank_of(&self, s: Str) -> u32 {
         match self.rank.get(&s) {
             Some(&r) => r,
@@ -84,25 +66,16 @@ impl Canon {
     }
 }
 
-/// The lower-offset of two handles carrying equal text.
-fn min_handle(a: Str, b: Str) -> Str {
-    if a.range().start <= b.range().start {
-        a
-    } else {
-        b
-    }
-}
-
 /// A map from a mnemonic-bearing slice's name to its mnemonic, over the whole
 /// profile. The "action processing" slices carry both the action description as
 /// their name and the mnemonic in their args, so this recovers the mnemonic for
 /// any other slice that names the same action — notably critical-path
 /// components, whose name is `action '<desc>'` and which carry no mnemonic of
-/// their own. `by_name` is keyed by the name's canonical [`Str`] handle, so the
-/// per-span lookup hashes a small `Copy` key rather than the full string;
-/// `by_text` holds the same entries keyed by name text, for the critical-path
-/// components whose stripped `action '…'` inner has no handle of its own. Values
-/// are canonical mnemonic handles.
+/// their own. `by_name` is keyed by the name's [`Str`] handle, so the per-span
+/// lookup hashes a small `Copy` key rather than the full string; `by_text`
+/// holds the same entries keyed by name text, for the critical-path components
+/// whose stripped `action '…'` inner has no handle of its own. Values are
+/// mnemonic handles.
 struct MnemonicIndex<'p> {
     by_name: FxHashMap<Str, Str>,
     by_text: FxHashMap<&'p str, Str>,
@@ -111,9 +84,10 @@ struct MnemonicIndex<'p> {
 /// One worker's share of the name scan.
 #[derive(Default)]
 struct ScanShard<'p> {
-    /// Text → its lowest-offset handle among this shard's lanes.
+    /// Text → its handle. Each distinct text has one handle profile-wide.
     by_text: FxHashMap<&'p str, Str>,
-    /// Every distinct raw name/mnemonic handle this shard saw.
+    /// Distinct name/mnemonic handles seen, to skip the text hash of an
+    /// already-noted handle.
     handles: FxHashSet<Str>,
     /// Mnemonic-bearing slice name text → its smallest mnemonic text. A name
     /// carrying several mnemonics resolves to the smallest, so the index is
@@ -124,29 +98,25 @@ struct ScanShard<'p> {
 impl<'p> ScanShard<'p> {
     fn note(&mut self, profile: &'p Profile, s: Str) {
         if self.handles.insert(s) {
-            self.by_text
-                .entry(profile.str(s))
-                .and_modify(|cur| *cur = min_handle(*cur, s))
-                .or_insert(s);
+            self.by_text.entry(profile.str(s)).or_insert(s);
         }
     }
 }
 
-/// Scan slice names and mnemonics into the canonical map and the mnemonic
-/// index, sharding the lanes across `workers`. Names are noted — entered into
-/// the canonical map and the rank table — only on the lanes `note_lane` admits
-/// (by thread index), and the scan must admit every lane whose slices a build
-/// subsequently walks: an unseen handle degrades [`Canon::canon`] to identity,
-/// breaking text-dedup, and has no rank. Mnemonic handles and the mnemonic
-/// index cover every lane regardless — hashing only the mnemonic-bearing
-/// slices, a small fraction of the profile — because a mnemonic-less slice's
-/// label can resolve to a mnemonic carried on a lane outside the scan, and
-/// that label needs a canonical handle and a rank like any other.
+/// Scan slice names and mnemonics into the rank table and the mnemonic index,
+/// sharding the lanes across `workers`. Names are noted — entered into the rank
+/// table — only on the lanes `note_lane` admits (by thread index), and the scan
+/// must admit every lane whose slices a build subsequently walks: an unnoted
+/// handle has no rank, and [`Ranks::rank_of`] panics on it. Mnemonic handles
+/// and the mnemonic index cover every lane regardless — hashing only the
+/// mnemonic-bearing slices, a small fraction of the profile — because a
+/// mnemonic-less slice's label can resolve to a mnemonic carried on a lane
+/// outside the scan, and that label needs a rank like any other.
 fn scan<'p>(
     profile: &'p Profile,
     workers: usize,
     note_lane: impl Fn(usize) -> bool + Sync,
-) -> (Canon, MnemonicIndex<'p>) {
+) -> (Ranks, MnemonicIndex<'p>) {
     let threads = profile.threads();
     let mut shards = run_sharded(workers, threads.len(), |shard: &mut ScanShard, i| {
         let thread = &threads[i];
@@ -185,10 +155,7 @@ fn scan<'p>(
     mnemonics.reserve(shards.iter().skip(1).map(|s| s.mnemonics.len()).sum());
     for shard in shards.iter().skip(1) {
         for (&text, &handle) in &shard.by_text {
-            by_text
-                .entry(text)
-                .and_modify(|cur| *cur = min_handle(*cur, handle))
-                .or_insert(handle);
+            by_text.entry(text).or_insert(handle);
         }
         for (&name, &mn) in &shard.mnemonics {
             mnemonics
@@ -199,21 +166,6 @@ fn scan<'p>(
                     }
                 })
                 .or_insert(mn);
-        }
-    }
-
-    // Memoize only the aliases: a handle some text elected as canonical needs
-    // no entry, and skipping it skips the text hash of the memo insert, leaving
-    // per-alias string work only for the handful of parse-chunk duplicates.
-    let mut canonical: FxHashSet<Str> =
-        FxHashSet::with_capacity_and_hasher(by_text.len(), Default::default());
-    canonical.extend(by_text.values().copied());
-    let mut memo = FxHashMap::default();
-    for shard in &shards {
-        for &h in &shard.handles {
-            if !canonical.contains(&h) {
-                memo.insert(h, by_text[profile.str(h)]);
-            }
         }
     }
 
@@ -236,7 +188,7 @@ fn scan<'p>(
         .filter_map(|(&n, &m)| by_text.get(n).map(|&h| (h, m)))
         .collect();
     (
-        Canon { memo, rank },
+        Ranks { rank },
         MnemonicIndex {
             by_name,
             by_text: idx_by_text,
@@ -562,14 +514,16 @@ impl Builder {
     }
 }
 
-/// Merges spans into the builder tree. Every frame label is a canonical
-/// interned handle of the source profile — a span's mnemonic and name already
-/// live in its text — so merge keys compare and hash as plain integers with no
-/// per-span string work. Read-only once built, so merge workers share one.
+/// Merges spans into the builder tree. Every frame label is an interned handle
+/// of the source profile — a span's mnemonic and name already live in its text.
+/// The profile interns each distinct string to one handle, so equal text ⇒
+/// equal handle: frames key by handle directly, and merge keys compare and hash
+/// as plain integers with no per-span string work. Read-only once built, so
+/// merge workers share one.
 pub(crate) struct Flamer<'p> {
     profile: &'p Profile,
     idx: MnemonicIndex<'p>,
-    canon: Canon,
+    ranks: Ranks,
 }
 
 impl<'p> Flamer<'p> {
@@ -588,11 +542,11 @@ impl<'p> Flamer<'p> {
         workers: usize,
         note_lane: impl Fn(usize) -> bool + Sync,
     ) -> Self {
-        let (canon, idx) = scan(profile, workers, note_lane);
+        let (ranks, idx) = scan(profile, workers, note_lane);
         Flamer {
             profile,
             idx,
-            canon,
+            ranks,
         }
     }
 
@@ -607,9 +561,9 @@ impl<'p> Flamer<'p> {
     /// index, so the hot per-span path never hashes a full string.
     fn span_label(&self, slice: &Slice, detail: &SliceDetail) -> Segment {
         let label = match detail.mnemonic.get() {
-            Some(m) => self.canon.canon(m),
+            Some(m) => m,
             None => {
-                let name = self.canon.canon(slice.name);
+                let name = slice.name;
                 match self.idx.by_name.get(&name) {
                     Some(&m) => m,
                     None => action_inner(self.profile.str(slice.name))
@@ -638,7 +592,7 @@ impl<'p> Flamer<'p> {
         span_idx: usize,
     ) {
         let seg = self.span_label(&lane_slices[span_idx], &lane_details[span_idx]);
-        let node = parent.child(seg, || self.canon.rank_of(seg.label));
+        let node = parent.child(seg, || self.ranks.rank_of(seg.label));
         node.total_us += lane_slices[span_idx].dur_us;
         node.count += 1;
         // Reborrow `node` per child: `child()` borrows `parent` mutably, so the
@@ -977,7 +931,7 @@ pub(crate) fn build_critical_path(
                 None => {
                     root.total_us += cp.dur_us;
                     let seg = flamer.span_label(cp, cp_detail);
-                    let node = root.child(seg, || flamer.canon.rank_of(seg.label));
+                    let node = root.child(seg, || flamer.ranks.rank_of(seg.label));
                     node.total_us += cp.dur_us;
                     node.count += 1;
                 }
@@ -1024,9 +978,9 @@ fn flatten(root: &mut Builder) -> Vec<FlameNode> {
     fn sort_tree(builder: &mut Builder) {
         builder
             .children
-            // Labels are canonical, so same-text children differ only by work
-            // class — the last tie-break makes the order total and hence
-            // independent of merge order.
+            // Same-text children carry the same handle, so they differ only by
+            // work class — the work-class tie-break makes the order total and
+            // hence independent of merge order.
             .sort_unstable_by_key(|c| (std::cmp::Reverse(c.total_us), c.rank, c.work_class));
         for c in &mut builder.children {
             sort_tree(c);
@@ -1301,28 +1255,6 @@ mod tests {
         let exec = child(&g, rustc, "Action.execute");
         assert_eq!(exec.total_us, 160);
         assert_eq!(exec.count, 2);
-    }
-
-    #[test]
-    fn equal_text_merges_across_distinct_handles() {
-        // A profile assembled from parallel parse chunks carries equal strings
-        // under distinct handles (the chunk pools concatenate without
-        // cross-chunk dedup), so frames must merge by text, not raw handle.
-        let mut p = profile(vec![track(
-            1,
-            LaneClass::Execution,
-            vec![action("Rustc", 0, 100), action("Rustc", 200, 50)],
-        )]);
-        Arc::get_mut(&mut p).unwrap().duplicate_str_for_test("Rustc");
-        // The fixture really carries two handles for the one text.
-        let slices = p.slices(&p.threads()[0]);
-        assert_ne!(slices[0].name, slices[1].name);
-        assert_eq!(p.str(slices[0].name), p.str(slices[1].name));
-        let g = build_flame_graph(&p, Scope::All);
-        assert_eq!(g.children(g.root()).len(), 1);
-        let rustc = child(&g, g.root(), "Rustc");
-        assert_eq!(rustc.total_us, 150);
-        assert_eq!(rustc.count, 2);
     }
 
     #[test]

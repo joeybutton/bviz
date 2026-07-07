@@ -57,7 +57,7 @@ impl ScopeAggregate {
 }
 
 /// The aggregates of every flame scope, built from one pass over the profile:
-/// the canonical string map and mnemonic index are scope-independent and shared,
+/// the label rank table and mnemonic index are scope-independent and shared,
 /// and each lane is walked once into its lane class's tree, from which the
 /// class-scoped graphs and their union `All` all derive. The critical-path
 /// aggregate exists only when the profile has a critical-path lane.
@@ -300,8 +300,7 @@ mod tests {
     #[test]
     fn sharded_build_matches_serial() {
         // Enough lanes that several workers really shard, spread over the
-        // classes, with duplicated handles so the shards must agree on the
-        // canonical handle of a text they see under different raw handles.
+        // classes, so the sharded merge must reproduce the serial one.
         let mut tracks = vec![track(
             0,
             LaneClass::CriticalPath,
@@ -352,10 +351,7 @@ mod tests {
             LaneClass::Execution,
             vec![slice("Compiling foo", "action processing", 5100, 30)],
         ));
-        let mut p = profile(tracks);
-        let p_mut = Arc::get_mut(&mut p).unwrap();
-        p_mut.duplicate_str_for_test("Rustc");
-        p_mut.duplicate_str_for_test("CppCompile");
+        let p = profile(tracks);
 
         let serial = FlameScopes::build_with_workers(&p, 1);
         for workers in [2, 5, 16] {
@@ -380,8 +376,7 @@ mod tests {
         // The single-scope path scans only the lanes its build walks, while the
         // set pass scans the whole profile; both must produce the same graphs,
         // rows, and default order. The fixture stresses the restricted scan's
-        // coverage: duplicated handles force text-dedup through the canonical
-        // map, and the mnemonic-less "Compiling foo" carriers on the analysis
+        // coverage: the mnemonic-less "Compiling foo" carriers on the analysis
         // and repo-fetch lanes resolve their labels to mnemonics carried only
         // on execution lanes — lanes outside those scopes' scans.
         let tracks = vec![
@@ -423,10 +418,7 @@ mod tests {
                 ],
             ),
         ];
-        let mut p = profile(tracks);
-        let p_mut = Arc::get_mut(&mut p).unwrap();
-        p_mut.duplicate_str_for_test("Rustc");
-        p_mut.duplicate_str_for_test("Compiling foo");
+        let p = profile(tracks);
         let set = FlameScopes::build(&p);
         // Row keys in default display order, resolved: ranks differ between a
         // restricted and a full scan (each is dense over its own scanned

@@ -141,25 +141,6 @@ mod tests {
     }
 
     #[test]
-    fn equal_text_shares_a_row_across_distinct_handles() {
-        // A profile assembled from parallel parse chunks carries equal strings
-        // under distinct handles (the chunk pools concatenate without
-        // cross-chunk dedup); rows must group by text, not raw handle.
-        let mut p = profile(vec![track(
-            1,
-            LaneClass::Execution,
-            vec![action("Rustc", 0, 100), action("Rustc", 200, 50)],
-        )]);
-        Arc::get_mut(&mut p).unwrap().duplicate_str_for_test("Rustc");
-        let (g, rows) = aggregate_stats(&p, Scope::All);
-        assert_eq!(rows.len(), 1);
-        let r = row(&g, &rows, "Rustc");
-        assert_eq!(r.count, 2);
-        assert_eq!(r.total_us, 150);
-        assert_eq!(r.max_us, 150);
-    }
-
-    #[test]
     fn scope_excludes_other_lanes() {
         let p = profile(vec![
             track(7, LaneClass::Analysis, vec![action("CppCompile", 0, 100)]),
