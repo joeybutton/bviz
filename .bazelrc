@@ -12,4 +12,7 @@ build:profile --@rules_rs_rules_rust//rust/settings:extra_rustc_flag=-Cdebuginfo
 build:profile --@rules_rs_rules_rust//rust/settings:extra_rustc_flag=-Cforce-frame-pointers=yes
 build:profile --@rules_rs_rules_rust//rust/settings:extra_rustc_flag=-Cstrip=none
 
+# Remote cache configuration.
+import %workspace%/.bazelrc.remote
+
 try-import %workspace%/user.bazelrc
