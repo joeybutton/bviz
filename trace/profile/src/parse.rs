@@ -1874,12 +1874,20 @@ fn parse_chunks(text: &str, n: usize, min_bytes: usize) -> Option<Profile> {
                         let mut writer = interner.writer();
                         let mut parsed = Vec::new();
                         let mut staging = Vec::new();
+                        // The arg pool is live data the builder carries to the
+                        // merge, so it can't be reused like `staging`; sizing the
+                        // next builder's to the last chunk's final length — chunks
+                        // are near-equal in bytes, so in arg count — lets it fill
+                        // without regrowing from empty.
+                        let mut args_cap = 0;
                         loop {
                             let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                             let Some(&chunk) = chunks.get(i) else { break };
                             let mut builder = Builder::new();
                             builder.staging = std::mem::take(&mut staging);
+                            builder.args_pool.reserve(args_cap);
                             let ok = parse_range_into(&mut builder, &mut writer, chunk);
+                            args_cap = builder.args_pool.len();
                             if ok {
                                 builder.seal_slices();
                             }
@@ -2145,6 +2153,12 @@ fn parse_gz_stream(bytes: &[u8], workers: usize, chunk_bytes: usize) -> Option<P
                 scope.spawn(move || {
                     let mut writer = interner.writer();
                     let mut staging = Vec::new();
+                    // The arg pool is live data the builder carries to the merge,
+                    // so it can't be reused like `staging`; sizing the next
+                    // builder's to the last chunk's final length — chunks are
+                    // near-equal in bytes, so in arg count — lets it fill without
+                    // regrowing from empty.
+                    let mut args_cap = 0;
                     loop {
                         let piece = match rx.lock().unwrap().recv() {
                             Ok(piece) => piece,
@@ -2153,7 +2167,9 @@ fn parse_gz_stream(bytes: &[u8], workers: usize, chunk_bytes: usize) -> Option<P
                         let text = latin1_cow(piece.buf.bytes());
                         let mut builder = Builder::new();
                         builder.staging = std::mem::take(&mut staging);
+                        builder.args_pool.reserve(args_cap);
                         let ok = parse_range_into(&mut builder, &mut writer, &text);
+                        args_cap = builder.args_pool.len();
                         drop(text);
                         // Hand a slab part back to the producer before
                         // sealing; everything the builder keeps was interned
