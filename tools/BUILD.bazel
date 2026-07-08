@@ -1,5 +1,21 @@
 load("@bazel_env.bzl", "bazel_env")
 load("@multitool//:tools.bzl", MULTITOOL_TOOLS = "TOOLS")
+load(":bazel_env.bzl", "local_exec_tool")
+
+local_exec_tool(
+    name = "cargo",
+    actual = "@rules_rs_rules_rust//tools/upstream_wrapper:cargo",
+)
+
+local_exec_tool(
+    name = "rustc",
+    actual = "@rules_rs_rules_rust//tools/upstream_wrapper:rustc",
+)
+
+local_exec_tool(
+    name = "rustfmt",
+    actual = "@rules_rs_rules_rust//tools/upstream_wrapper:rustfmt",
+)
 
 # `bazel run //tools:bazel_env` to update / install the direnv environment.
 bazel_env(
@@ -7,11 +23,11 @@ bazel_env(
     toolchains = {
     },
     tools = {
-        "cargo": "@rules_rs_rules_rust//tools/upstream_wrapper:cargo",
+        "cargo": ":cargo",
         "multitool": MULTITOOL_TOOLS["multitool"],
         "rust-analyzer": MULTITOOL_TOOLS["rust-analyzer"],
-        "rustc": "@rules_rs_rules_rust//tools/upstream_wrapper:rustc",
-        "rustfmt": "@rules_rs_rules_rust//tools/upstream_wrapper:rustfmt",
+        "rustc": ":rustc",
+        "rustfmt": ":rustfmt",
     },
     watch_files = {
         "_common": [
