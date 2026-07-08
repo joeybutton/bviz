@@ -1436,6 +1436,7 @@ fn seal(
         let mut pool = WriterPool { writer: interner.writer(), interner: &interner };
         finish_merge(merge, &mut pool, other_data)
     };
+    parts.distinct_strings = interner.distinct();
     parts.text = interner.into_text();
     Profile::from_parts(parts)
 }
@@ -1768,6 +1769,8 @@ fn finish_merge(
             counters,
             phase_markers,
             span,
+            // Filled by `seal` from the interner before it is consumed.
+            distinct_strings: 0,
         }
     });
 
@@ -2421,6 +2424,7 @@ pub(crate) fn build_for_test(
     span: TimeSpan,
     threads: Vec<ThreadTrack>,
 ) -> Profile {
+    let distinct_strings = interner.distinct();
     Profile::from_parts(ProfileParts {
         text: interner.into_text(),
         slice_pool: Vec::new(),
@@ -2434,6 +2438,7 @@ pub(crate) fn build_for_test(
         counters: Vec::new(),
         phase_markers,
         span,
+        distinct_strings,
     })
 }
 

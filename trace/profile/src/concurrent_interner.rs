@@ -159,6 +159,14 @@ impl ConcurrentInterner {
         self.arena.str(h)
     }
 
+    /// The number of distinct strings interned so far — the summed occupancy of
+    /// the shard tables. Read at seal to size the downstream aggregations that
+    /// key on distinct text, so they reserve once instead of rehashing up from
+    /// empty.
+    pub(crate) fn distinct(&self) -> usize {
+        self.shards.iter().map(|s| s.read().unwrap().len()).sum()
+    }
+
     /// Consumes the interner and returns its text pool, dropping the shard
     /// index. Every byte below the page cursor is written or placeholder/slack
     /// NUL, all valid UTF-8, so the pool resolves the handles this interner

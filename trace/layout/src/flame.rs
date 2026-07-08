@@ -118,7 +118,20 @@ fn scan<'p>(
     note_lane: impl Fn(usize) -> bool + Sync,
 ) -> (Ranks, MnemonicIndex<'p>) {
     let threads = profile.threads();
+    // Each distinct name/mnemonic is noted once, keyed by its text, so a shard
+    // holds at most the profile's distinct strings; sharing them roughly evenly
+    // over the shards, `distinct / shards` sizes each map so the scan reserves
+    // once rather than rehashing every string key through a dozen doublings. A
+    // shard that steals more than its share rehashes from this already-large
+    // base, a couple of doublings at most.
+    let shard_count = workers.clamp(1, threads.len().max(1));
+    let per_shard = profile.distinct_strings().div_ceil(shard_count);
     let mut shards = run_sharded(workers, threads.len(), |shard: &mut ScanShard, i| {
+        if shard.by_text.capacity() == 0 {
+            shard.by_text.reserve(per_shard);
+            shard.handles.reserve(per_shard);
+            shard.mnemonics.reserve(per_shard);
+        }
         let thread = &threads[i];
         let noted = note_lane(i);
         for (s, d) in profile.slices(thread).iter().zip(profile.details(thread)) {

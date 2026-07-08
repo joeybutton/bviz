@@ -104,6 +104,10 @@ pub struct Profile {
     counters: Vec<CounterLane>,
     phase_markers: Vec<PhaseMarker>,
     span: TimeSpan,
+    /// Count of distinct interned strings — an upper bound on the distinct slice
+    /// names and mnemonics an aggregation keys on, so a scan or stats pass sizes
+    /// its per-text maps once instead of rehashing up from empty.
+    distinct_strings: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -381,6 +385,12 @@ impl Profile {
         self.span
     }
 
+    /// The number of distinct interned strings — an upper bound on the distinct
+    /// slice names and mnemonics, for sizing aggregation maps up front.
+    pub fn distinct_strings(&self) -> usize {
+        self.distinct_strings
+    }
+
     /// Resolves an interned handle to its text.
     pub fn str(&self, s: Str) -> &str {
         &self.text[s.range()]
@@ -473,6 +483,7 @@ impl Profile {
             counters,
             phase_markers,
             span,
+            distinct_strings,
         } = parts;
         Profile {
             text,
@@ -487,6 +498,7 @@ impl Profile {
             counters,
             phase_markers,
             span,
+            distinct_strings,
         }
     }
 }
@@ -505,6 +517,7 @@ pub(crate) struct ProfileParts {
     pub counters: Vec<CounterLane>,
     pub phase_markers: Vec<PhaseMarker>,
     pub span: TimeSpan,
+    pub distinct_strings: usize,
 }
 
 /// Hashes an interner key. Non-cryptographic: the keys are short,
