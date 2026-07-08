@@ -580,11 +580,6 @@ impl Interner {
         &self.text[s.range()]
     }
 
-    /// Reserves room for `additional` more bytes of text pool.
-    pub fn reserve(&mut self, additional: usize) {
-        self.text.reserve(additional);
-    }
-
     /// Consumes the interner, yielding the retained text pool and dropping the
     /// auxiliary map.
     pub fn into_text(self) -> String {

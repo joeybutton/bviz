@@ -86,6 +86,12 @@ Interactive visualization and inspection tool for Bazel builds.
   memory-bandwidth-bound stage saturating at the physical-core count regardless of
   SMT — express it as that structural property, not the number it happens to equal
   on one machine.
+- Size thread pools and per-core structures (shard fan-out, per-worker buffers)
+  by PHYSICAL cores via `worker_count()` (`num_cpus::get_physical()` clamped to
+  `available_parallelism()`), not logical/SMT threads: the heavy passes here
+  (parse, aggregation) are memory-bandwidth bound and saturate at the physical
+  cores that own the memory channels, so SMT oversubscription burns CPU for no
+  wall-time gain. Reach for the logical thread count only with a measured reason.
 - Comments are terse and only earn their place by adding what the code can't
   say — a sentence, not a paragraph. Don't restate the code (a comment that
   names what the next line already names is noise — including one that restates

@@ -196,12 +196,6 @@ fn scan<'p>(
     )
 }
 
-/// Worker count for the aggregation passes: the parallelism granted to the
-/// process, queried at runtime.
-pub(crate) fn worker_count() -> usize {
-    std::thread::available_parallelism().map_or(1, |n| n.get())
-}
-
 /// Run `task` over the indexes `0..n`, each worker folding into its own `S`;
 /// returns the per-worker shards. Workers steal indexes one at a time through a
 /// shared cursor, since per-index work is heavily skewed (a few big evaluator
@@ -680,7 +674,7 @@ fn containment_forest(slices: &[Slice]) -> Forest {
 /// [`FlameScopes`](crate::FlameScopes) derives every scope from one aggregation
 /// pass; this composes the same pieces for a single scope.
 pub fn build_flame_graph(profile: &Arc<Profile>, scope: Scope) -> FlameGraph {
-    let workers = worker_count();
+    let workers = bviz_trace_profile::worker_count();
     let mut root = if scope == Scope::CriticalPath {
         // Locate the actions before the scan: the index hashes only the
         // mnemonic-bearing slices, so it is cheap, and it bounds the lanes the

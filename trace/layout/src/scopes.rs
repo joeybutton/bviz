@@ -4,7 +4,7 @@ use bviz_trace_profile::{LaneClass, Profile};
 
 use crate::flame::{
     Builder, FlameGraph, Flamer, Scope, action_locations, build_critical_path, build_flame_graph,
-    class_trees, fold_all, fold_ref, seal, worker_count,
+    class_trees, fold_all, fold_ref, seal,
 };
 use crate::stats::{StatRow, stats_from_flame};
 
@@ -73,7 +73,7 @@ pub struct FlameScopes {
 
 impl FlameScopes {
     pub fn build(profile: &Arc<Profile>) -> FlameScopes {
-        FlameScopes::build_with_workers(profile, worker_count())
+        FlameScopes::build_with_workers(profile, bviz_trace_profile::worker_count())
     }
 
     /// Parallelism override, so the sharded build can be asserted equal to the
