@@ -54,7 +54,11 @@ pub fn aggregate_stats(profile: &Arc<Profile>, scope: Scope) -> (FlameGraph, Vec
 /// frame's self time. Lets a caller that already holds the graph derive the table
 /// without rebuilding it. Keys resolve with `graph`'s [`str`](FlameGraph::str).
 pub fn stats_from_flame(graph: &FlameGraph) -> Vec<StatRow> {
-    let mut groups: FxHashMap<Str, StatRow> = FxHashMap::default();
+    // One entry per distinct frame name, of which there are at most as many as
+    // nodes; reserving to the node count sizes the map so the fold inserts
+    // without rehashing up from empty (the graph runs to millions of nodes).
+    let mut groups: FxHashMap<Str, StatRow> =
+        FxHashMap::with_capacity_and_hasher(graph.nodes().len(), Default::default());
     for node in graph.nodes() {
         accumulate(node, &mut groups);
     }
