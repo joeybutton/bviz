@@ -13,28 +13,17 @@ use serde_json::{Map, Value};
 
 use crate::concurrent_interner::{ConcurrentInterner, Writer};
 use crate::model::{
-    lane_class, work_class, CounterLane, CounterPoint, CounterSeries, Interner, Metadata,
-    PhaseMarker, Profile, ProfileParts, Slice, SliceDetail, Span32, Str, ThreadTrack, TimeSpan,
+    lane_class, work_class, CounterLane, CounterPoint, CounterSeries, Metadata, PhaseMarker,
+    Profile, ProfileParts, Slice, SliceDetail, Span32, Str, ThreadTrack, TimeSpan,
 };
 
-/// Interns a string into whatever pool a parse fills: the serial [`Interner`]
-/// on the single-threaded path, or a [`Writer`] into the shared
-/// [`ConcurrentInterner`] on the parallel paths. The event-folding code is
-/// written once against this so a chunk worker's handles are global from the
-/// first intern.
+/// Interns a string into the parse's arena, through a [`Writer`] into the
+/// shared [`ConcurrentInterner`]. The event-folding code is written once
+/// against this so a chunk worker's handles are global from the first intern.
 trait Intern {
     fn intern(&mut self, s: &str) -> Str;
     fn intern_opt(&mut self, s: Option<&str>) -> Option<Str> {
         s.map(|s| self.intern(s))
-    }
-}
-
-impl Intern for Interner {
-    fn intern(&mut self, s: &str) -> Str {
-        Interner::intern(self, s)
-    }
-    fn intern_opt(&mut self, s: Option<&str>) -> Option<Str> {
-        Interner::intern_opt(self, s)
     }
 }
 
@@ -46,16 +35,10 @@ impl Intern for Writer<'_> {
 
 /// The interner sealed into a profile's text pool: it interns the late strings
 /// [`finish_merge`] adds (thread names, counter labels, metadata) and resolves
-/// handles already in the pool. Behind a single writer on the concurrent path,
-/// so the late interning reuses one bump page rather than a page per string.
+/// handles already in the pool. Behind a single writer, so the late interning
+/// reuses one bump page rather than a page per string.
 trait Pool: Intern {
     fn resolve(&self, h: Str) -> &str;
-}
-
-impl Pool for Interner {
-    fn resolve(&self, h: Str) -> &str {
-        Interner::resolve(self, h)
-    }
 }
 
 /// A [`Writer`] paired with the interner it writes into, so late interning and
@@ -127,12 +110,17 @@ impl std::error::Error for LoadError {
 /// the events, so it is folded in whenever it is seen.
 fn parse_streaming(text: &str) -> Result<Profile, serde_json::Error> {
     let mut de = serde_json::Deserializer::from_str(text);
-    let profile = serde::Deserializer::deserialize_map(&mut de, ProfileVisitor)?;
+    let profile =
+        serde::Deserializer::deserialize_map(&mut de, ProfileVisitor { text_len: text.len() })?;
     de.end()?;
     Ok(profile)
 }
 
-struct ProfileVisitor;
+/// Carries the decoded text's byte length so [`Self::visit_map`] can size the
+/// interner it fills, since the map visitor never sees the whole text.
+struct ProfileVisitor {
+    text_len: usize,
+}
 
 impl<'de> Visitor<'de> for ProfileVisitor {
     type Value = Profile;
@@ -142,31 +130,36 @@ impl<'de> Visitor<'de> for ProfileVisitor {
     }
 
     fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Profile, A::Error> {
-        let mut interner = Interner::new();
+        let interner = ConcurrentInterner::new(self.text_len, self.text_len / BYTES_PER_DISTINCT);
         let mut builder = Builder::new();
         let mut other_data = None;
-        while let Some(key) = map.next_key::<Cow<str>>()? {
-            match key.as_ref() {
-                "otherData" => other_data = map.next_value::<Option<Map<String, Value>>>()?,
-                "traceEvents" => {
-                    map.next_value_seed(EventsSeed(&mut builder, &mut interner))?
-                }
-                _ => {
-                    map.next_value::<IgnoredAny>()?;
+        {
+            let mut writer = interner.writer();
+            while let Some(key) = map.next_key::<Cow<str>>()? {
+                match key.as_ref() {
+                    "otherData" => other_data = map.next_value::<Option<Map<String, Value>>>()?,
+                    "traceEvents" => {
+                        map.next_value_seed(EventsSeed(&mut builder, &mut writer))?
+                    }
+                    _ => {
+                        map.next_value::<IgnoredAny>()?;
+                    }
                 }
             }
         }
         builder.seal_slices();
-        Ok(seal_serial(interner, builder, other_data))
+        let mut merge = Merge::new();
+        merge.fold(builder);
+        Ok(seal(interner, merge, other_data))
     }
 }
 
 /// Deserializes the `traceEvents` array element by element into the borrowed
-/// [`Builder`], interning into the borrowed [`Interner`] and discarding each
+/// [`Builder`], interning through the borrowed [`Writer`] and discarding each
 /// event once consumed.
-struct EventsSeed<'a>(&'a mut Builder, &'a mut Interner);
+struct EventsSeed<'a, 'w>(&'a mut Builder, &'a mut Writer<'w>);
 
-impl<'de, 'a> DeserializeSeed<'de> for EventsSeed<'a> {
+impl<'de, 'a, 'w> DeserializeSeed<'de> for EventsSeed<'a, 'w> {
     type Value = ();
 
     fn deserialize<D: Deserializer<'de>>(self, d: D) -> Result<(), D::Error> {
@@ -174,9 +167,9 @@ impl<'de, 'a> DeserializeSeed<'de> for EventsSeed<'a> {
     }
 }
 
-struct EventsVisitor<'a>(&'a mut Builder, &'a mut Interner);
+struct EventsVisitor<'a, 'w>(&'a mut Builder, &'a mut Writer<'w>);
 
-impl<'de, 'a> Visitor<'de> for EventsVisitor<'a> {
+impl<'de, 'a, 'w> Visitor<'de> for EventsVisitor<'a, 'w> {
     type Value = ();
 
     fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
@@ -193,9 +186,9 @@ impl<'de, 'a> Visitor<'de> for EventsVisitor<'a> {
     }
 }
 
-struct EventSeed<'b, 'de>(&'b mut Builder, &'b mut Interner, &'b mut Vec<ArgEntry<'de>>);
+struct EventSeed<'b, 'de, 'w>(&'b mut Builder, &'b mut Writer<'w>, &'b mut Vec<ArgEntry<'de>>);
 
-impl<'de> DeserializeSeed<'de> for EventSeed<'_, 'de> {
+impl<'de, 'w> DeserializeSeed<'de> for EventSeed<'_, 'de, 'w> {
     type Value = ();
 
     fn deserialize<D: Deserializer<'de>>(self, d: D) -> Result<(), D::Error> {
@@ -1117,70 +1110,76 @@ fn recover(text: &str) -> Result<Profile, LoadError> {
 
     let other_data = recover_other_data(&text[..events_at]);
 
-    let mut interner = Interner::new();
+    let interner = ConcurrentInterner::new(text.len(), text.len() / BYTES_PER_DISTINCT);
     let mut builder = Builder::new();
-    let mut scratch: Vec<ArgEntry> = Vec::new();
     let mut recovered = false;
-    let bytes = text.as_bytes();
-    let mut i = array_start;
-    while i < bytes.len() {
-        while i < bytes.len() && bytes[i] != b'{' {
-            if bytes[i] == b']' {
-                i = bytes.len();
+    {
+        let mut writer = interner.writer();
+        let mut scratch: Vec<ArgEntry> = Vec::new();
+        let bytes = text.as_bytes();
+        let mut i = array_start;
+        while i < bytes.len() {
+            while i < bytes.len() && bytes[i] != b'{' {
+                if bytes[i] == b']' {
+                    i = bytes.len();
+                    break;
+                }
+                i += 1;
+            }
+            if i >= bytes.len() {
                 break;
             }
-            i += 1;
-        }
-        if i >= bytes.len() {
-            break;
-        }
-        // Walk the object's braces, skipping any inside string literals, to find
-        // its close. A missing close means the array was cut mid-object: stop.
-        let start = i;
-        let mut depth = 0i32;
-        let mut in_str = false;
-        let mut escaped = false;
-        let mut end = None;
-        for (offset, &c) in bytes[start..].iter().enumerate() {
-            if in_str {
-                match c {
-                    _ if escaped => escaped = false,
-                    b'\\' => escaped = true,
-                    b'"' => in_str = false,
-                    _ => {}
-                }
-            } else {
-                match c {
-                    b'"' => in_str = true,
-                    b'{' => depth += 1,
-                    b'}' => {
-                        depth -= 1;
-                        if depth == 0 {
-                            end = Some(start + offset);
-                            break;
-                        }
+            // Walk the object's braces, skipping any inside string literals, to
+            // find its close. A missing close means the array was cut
+            // mid-object: stop.
+            let start = i;
+            let mut depth = 0i32;
+            let mut in_str = false;
+            let mut escaped = false;
+            let mut end = None;
+            for (offset, &c) in bytes[start..].iter().enumerate() {
+                if in_str {
+                    match c {
+                        _ if escaped => escaped = false,
+                        b'\\' => escaped = true,
+                        b'"' => in_str = false,
+                        _ => {}
                     }
-                    _ => {}
+                } else {
+                    match c {
+                        b'"' => in_str = true,
+                        b'{' => depth += 1,
+                        b'}' => {
+                            depth -= 1;
+                            if depth == 0 {
+                                end = Some(start + offset);
+                                break;
+                            }
+                        }
+                        _ => {}
+                    }
                 }
             }
+            let Some(end) = end else { break };
+            let mut de = serde_json::Deserializer::from_str(&text[start..=end]);
+            if let Ok(ev) = RawEventSeed(&mut scratch)
+                .deserialize(&mut de)
+                .and_then(|ev| de.end().map(|()| ev))
+            {
+                builder.event(&mut writer, ev, &scratch);
+                recovered = true;
+            }
+            i = end + 1;
         }
-        let Some(end) = end else { break };
-        let mut de = serde_json::Deserializer::from_str(&text[start..=end]);
-        if let Ok(ev) = RawEventSeed(&mut scratch)
-            .deserialize(&mut de)
-            .and_then(|ev| de.end().map(|()| ev))
-        {
-            builder.event(&mut interner, ev, &scratch);
-            recovered = true;
-        }
-        i = end + 1;
     }
 
     if !recovered {
         return Err(LoadError::Corrupted("no complete events recovered".into()));
     }
     builder.seal_slices();
-    Ok(seal_serial(interner, builder, other_data))
+    let mut merge = Merge::new();
+    merge.fold(builder);
+    Ok(seal(interner, merge, other_data))
 }
 
 fn recover_other_data(prefix: &str) -> Option<Map<String, Value>> {
@@ -1460,25 +1459,11 @@ impl Merge {
     }
 }
 
-/// Folds the ordered chunk builders of a whole-buffer parallel parse (or a
-/// single serial builder) and seals them, for the paths that hold all builders
-/// at once; the pipelined parse folds incrementally and seals directly.
-fn seal_serial(
-    mut interner: Interner,
-    builder: Builder,
-    other_data: Option<Map<String, Value>>,
-) -> Profile {
-    let mut merge = Merge::new();
-    merge.fold(builder);
-    let mut parts = finish_merge(merge, &mut interner, other_data);
-    parts.text = interner.into_text();
-    Profile::from_parts(parts)
-}
-
-/// Folds the chunk builders whose handles are global into the shared
-/// concurrent arena, interns the late strings through a writer into that same
-/// arena, then seals it into the profile's text pool.
-fn seal_concurrent(
+/// Seals a folded [`Merge`] whose handles are global into the shared interner:
+/// interns the late strings ([`finish_merge`]'s thread names, counter labels,
+/// and metadata) through one writer into that same arena, then consumes the
+/// interner into the profile's text pool.
+fn seal(
     interner: ConcurrentInterner,
     merge: Merge,
     other_data: Option<Map<String, Value>>,
@@ -1959,7 +1944,7 @@ fn parse_chunks(text: &str, n: usize, min_bytes: usize) -> Option<Profile> {
         for builder in builders {
             merge.fold(builder);
         }
-        seal_concurrent(interner, merge, other_data)
+        seal(interner, merge, other_data)
     }))
 }
 
@@ -2260,7 +2245,7 @@ fn parse_gz_stream(bytes: &[u8], workers: usize, chunk_bytes: usize) -> Option<P
     let head = latin1_to_utf8(ends.head);
     let tail = latin1_to_utf8(ends.tail);
     let other_data = recover_other_data(&head).or_else(|| recover_other_data(&tail));
-    Some(timed("  finish", || seal_concurrent(interner, merge, other_data)))
+    Some(timed("  finish", || seal(interner, merge, other_data)))
 }
 
 /// Parses every `{...}` event object in one chunk of the `traceEvents` array
@@ -2467,7 +2452,7 @@ fn counter_rank(name: &str, series: &str) -> (u8, u8) {
 /// slice/counter pools, for model tests that need only phase markers and threads.
 #[cfg(test)]
 pub(crate) fn build_for_test(
-    interner: Interner,
+    interner: ConcurrentInterner,
     phase_markers: Vec<PhaseMarker>,
     span: TimeSpan,
     threads: Vec<ThreadTrack>,

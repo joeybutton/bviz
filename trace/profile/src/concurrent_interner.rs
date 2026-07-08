@@ -1,10 +1,8 @@
-//! A deduplicating string interner interned concurrently from many threads,
-//! the counterpart to the single-thread [`crate::model::Interner`]. Its dedup
-//! index is global — a string interned on any thread resolves to one handle for
-//! every thread — so the [`Str`] handles it hands out have identity equal to
-//! text identity across the whole pool. The sealed text pool resolves those
-//! handles exactly as [`crate::model::Interner::into_text`]'s does, so
-//! [`crate::Profile::str`] indexes it unchanged.
+//! A deduplicating string interner interned concurrently from many threads. Its
+//! dedup index is global — a string interned on any thread resolves to one
+//! handle for every thread — so the [`Str`] handles it hands out have identity
+//! equal to text identity across the whole pool. Sealing yields a text pool
+//! that [`crate::Profile::str`] indexes directly.
 
 use std::cell::UnsafeCell;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -120,9 +118,9 @@ impl ConcurrentInterner {
         // One byte for the placeholder, the bound itself, a small fraction for
         // within-page slack, and a final page per worker (plus headroom).
         let cap = 1 + text_bytes + text_bytes / 16 + (par + 2) * PAGE_SIZE;
-        // The sealed pool indexes with u32 like the serial Interner, so every
-        // reserved offset must fit u32; guard once here so `off as u32` in
-        // `alloc` can never silently truncate a handle.
+        // The sealed pool indexes handles with u32, so every reserved offset
+        // must fit u32; guard once here so `off as u32` in `alloc` can never
+        // silently truncate a handle.
         assert!(cap <= u32::MAX as usize, "interner pool must index in u32");
         let buf: Box<[u8]> = vec![0u8; cap].into_boxed_slice();
         // SAFETY: `UnsafeCell<u8>` is `repr(transparent)` over `u8` — identical
@@ -164,7 +162,7 @@ impl ConcurrentInterner {
     /// Consumes the interner and returns its text pool, dropping the shard
     /// index. Every byte below the page cursor is written or placeholder/slack
     /// NUL, all valid UTF-8, so the pool resolves the handles this interner
-    /// produced exactly like a serial [`crate::model::Interner`]'s pool does.
+    /// produced.
     pub(crate) fn into_text(self) -> String {
         let ConcurrentInterner { arena, .. } = self;
         let len = arena.page_cursor.load(Ordering::Relaxed);
@@ -293,19 +291,14 @@ impl ConcurrentInterner {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::Interner;
     use std::collections::HashMap;
 
     #[test]
-    fn single_thread_matches_serial_interner() {
+    fn single_thread_interns_and_dedups() {
         let seq = [
             "CppCompile", "//src/foo:bar", "CppCompile", "Javac", "//src/foo:bar",
             "//a/b/c/d:e", "Javac", "CppCompile",
         ];
-        let mut serial = Interner::new();
-        let serial_handles: Vec<Str> = seq.iter().map(|s| serial.intern(s)).collect();
-        let expected: Vec<String> = serial_handles.iter().map(|&h| serial.resolve(h).to_owned()).collect();
-
         let interner = ConcurrentInterner::new(256, 8);
         let handles: Vec<Str> = {
             let mut w = interner.writer();
@@ -314,8 +307,8 @@ mod tests {
         let text = interner.into_text();
 
         assert_eq!(text.as_bytes()[0], 0, "offset 0 is the placeholder");
-        let resolved: Vec<String> = handles.iter().map(|&h| text[h.range()].to_owned()).collect();
-        assert_eq!(resolved, expected);
+        let resolved: Vec<&str> = handles.iter().map(|&h| &text[h.range()]).collect();
+        assert_eq!(resolved, seq);
         // Repeats collapse to one handle.
         assert_eq!(handles[0], handles[2]);
         assert_eq!(handles[0], handles[7]);

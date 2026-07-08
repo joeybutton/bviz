@@ -507,20 +507,6 @@ pub(crate) struct ProfileParts {
     pub span: TimeSpan,
 }
 
-/// Deduplicating string interner: owns the growing text pool and an auxiliary
-/// map from content to handle so a repeated string returns the existing [`Str`]
-/// instead of appending a copy. Bazel traces repeat names (mnemonics, target
-/// labels, categories) heavily, so dedup is a large memory win. The map is a
-/// build-time temporary; only the [`String`] pool survives, sealed into the
-/// owner that resolves its handles.
-pub struct Interner {
-    text: String,
-    // The map entries are bare handles, hashed and compared through the text
-    // pool, so each distinct string is stored once — in the pool — rather than
-    // duplicated as a boxed key, and dropping the map frees a single table.
-    seen: hashbrown::HashTable<Str>,
-}
-
 /// Hashes an interner key. Non-cryptographic: the keys are short,
 /// non-adversarial profile strings interned tens of millions of times, where
 /// the default SipHash is the dominant lookup cost.
@@ -529,67 +515,10 @@ pub(crate) fn intern_hash(s: &str) -> u64 {
     rustc_hash::FxBuildHasher.hash_one(s)
 }
 
-/// The byte every interner pool starts with, keeping offset 0 free so it can
-/// encode absence in [`OptStr`].
-const POOL_PLACEHOLDER: char = '\0';
-
-impl Interner {
-    pub fn new() -> Interner {
-        let mut text = String::new();
-        text.push(POOL_PLACEHOLDER);
-        Interner {
-            text,
-            seen: hashbrown::HashTable::new(),
-        }
-    }
-
-    /// An interner pre-sized for roughly `distinct` strings totalling
-    /// `text_bytes` of pool, so bulk interning grows neither the map nor the
-    /// pool through repeated doublings.
-    pub fn with_capacity(distinct: usize, text_bytes: usize) -> Interner {
-        let mut text = String::with_capacity(text_bytes.max(1));
-        text.push(POOL_PLACEHOLDER);
-        Interner {
-            text,
-            seen: hashbrown::HashTable::with_capacity(distinct),
-        }
-    }
-
-    pub fn intern(&mut self, s: &str) -> Str {
-        let hash = intern_hash(s);
-        let Interner { text, seen } = self;
-        if let Some(&handle) = seen.find(hash, |&h| &text[h.range()] == s) {
-            return handle;
-        }
-        let off = text.len() as u32;
-        text.push_str(s);
-        let handle = Str {
-            off,
-            len: s.len() as u32,
-        };
-        seen.insert_unique(hash, handle, |&h| intern_hash(&text[h.range()]));
-        handle
-    }
-
-    pub fn intern_opt(&mut self, s: Option<&str>) -> Option<Str> {
-        s.map(|s| self.intern(s))
-    }
-
-    /// The interned bytes for a handle this interner produced.
-    pub fn resolve(&self, s: Str) -> &str {
-        &self.text[s.range()]
-    }
-
-    /// Consumes the interner, yielding the retained text pool and dropping the
-    /// auxiliary map.
-    pub fn into_text(self) -> String {
-        self.text
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::concurrent_interner::ConcurrentInterner;
     use crate::parse::build_for_test;
 
     #[test]
@@ -630,14 +559,17 @@ mod tests {
     /// Builds a profile from phase markers and a span end via the parser's flat
     /// pools, so tests inspect the real public model rather than a hand-rolled one.
     fn profile_with(markers: Vec<(&str, i64)>, span_end: i64) -> Profile {
-        let mut interner = Interner::new();
-        let phase_markers = markers
-            .into_iter()
-            .map(|(name, start_us)| PhaseMarker {
-                name: interner.intern(name),
-                start_us,
-            })
-            .collect();
+        let interner = ConcurrentInterner::new(1024, 16);
+        let phase_markers = {
+            let mut writer = interner.writer();
+            markers
+                .into_iter()
+                .map(|(name, start_us)| PhaseMarker {
+                    name: writer.intern(name),
+                    start_us,
+                })
+                .collect()
+        };
         build_for_test(
             interner,
             phase_markers,
@@ -691,14 +623,14 @@ mod tests {
         };
         let p = profile_with(vec![], 0);
         assert!(!build_for_test(
-            Interner::new(),
+            ConcurrentInterner::new(1024, 16),
             Vec::new(),
             p.span(),
             vec![track(5, LaneClass::Execution)],
         )
         .has_critical_path());
         assert!(build_for_test(
-            Interner::new(),
+            ConcurrentInterner::new(1024, 16),
             Vec::new(),
             p.span(),
             vec![
