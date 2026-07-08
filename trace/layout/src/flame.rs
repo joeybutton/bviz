@@ -982,20 +982,26 @@ fn freeze(builder: &Builder, depth: u32) -> FlameNode {
 /// equals text order — so the layout is independent of the non-deterministic
 /// input order. Sorts the tree in place, leaving its merge indexes stale.
 fn flatten(root: &mut Builder) -> Vec<FlameNode> {
-    fn sort_tree(builder: &mut Builder) {
+    // Returns the node count of the subtree (itself plus its descendants), so
+    // the flat array reserves exactly once instead of doubling through millions
+    // of nodes.
+    fn sort_tree(builder: &mut Builder) -> usize {
         builder
             .children
             // Same-text children carry the same handle, so they differ only by
             // work class — the work-class tie-break makes the order total and
             // hence independent of merge order.
             .sort_unstable_by_key(|c| (std::cmp::Reverse(c.total_us), c.rank, c.work_class));
+        let mut count = 1;
         for c in &mut builder.children {
-            sort_tree(c);
+            count += sort_tree(c);
         }
+        count
     }
-    sort_tree(root);
+    let node_count = sort_tree(root);
 
-    let mut nodes = vec![freeze(root, 0)];
+    let mut nodes = Vec::with_capacity(node_count);
+    nodes.push(freeze(root, 0));
     let mut queue: std::collections::VecDeque<(&Builder, usize, u32)> =
         std::collections::VecDeque::new();
     queue.push_back((root, 0, 0));
