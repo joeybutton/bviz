@@ -17,48 +17,12 @@ use crate::model::{
     Profile, ProfileParts, Slice, SliceDetail, Span32, Str, ThreadTrack, TimeSpan,
 };
 
-/// Interns a string into the parse's arena, through a [`Writer`] into the
-/// shared [`ConcurrentInterner`]. The event-folding code is written once
-/// against this so a chunk worker's handles are global from the first intern.
-trait Intern {
-    fn intern(&mut self, s: &str) -> Str;
-    fn intern_opt(&mut self, s: Option<&str>) -> Option<Str> {
-        s.map(|s| self.intern(s))
-    }
-}
-
-impl Intern for Writer<'_> {
-    fn intern(&mut self, s: &str) -> Str {
-        Writer::intern(self, s)
-    }
-}
-
-/// The interner sealed into a profile's text pool: it interns the late strings
-/// [`finish_merge`] adds (thread names, counter labels, metadata) and resolves
-/// handles already in the pool. Behind a single writer, so the late interning
-/// reuses one bump page rather than a page per string.
-trait Pool: Intern {
-    fn resolve(&self, h: Str) -> &str;
-}
-
-/// A [`Writer`] paired with the interner it writes into, so late interning and
-/// resolution share one writer while the owned interner is sealed by the
-/// caller after this is dropped.
+/// A [`Writer`] paired with the interner it writes into, so [`finish_merge`]'s
+/// late interning and its resolution of existing handles share one writer while
+/// the owned interner is sealed by the caller after this is dropped.
 struct WriterPool<'a> {
     writer: Writer<'a>,
     interner: &'a ConcurrentInterner,
-}
-
-impl Intern for WriterPool<'_> {
-    fn intern(&mut self, s: &str) -> Str {
-        self.writer.intern(s)
-    }
-}
-
-impl Pool for WriterPool<'_> {
-    fn resolve(&self, h: Str) -> &str {
-        self.interner.resolve(h)
-    }
 }
 
 /// Estimated distinct-string density of a Bazel profile — about one interned
@@ -1257,7 +1221,7 @@ impl Builder {
     /// concurrent arena on the parallel paths, so the handles are global. When
     /// `ev.has_args` is set `scratch` holds the event's args entries; they are
     /// consumed here, and deserializing the next event reuses the buffer.
-    fn event(&mut self, interner: &mut impl Intern, ev: RawEvent, scratch: &[ArgEntry]) {
+    fn event(&mut self, interner: &mut Writer, ev: RawEvent, scratch: &[ArgEntry]) {
         let args = ev.has_args.then_some(scratch);
         let ph = ev.ph.as_deref().unwrap_or("");
         match ph {
@@ -1483,7 +1447,7 @@ fn seal(
 /// seals the merged pools into a [`Profile`].
 fn finish_merge(
     merge: Merge,
-    pool: &mut impl Pool,
+    pool: &mut WriterPool,
     other_data: Option<Map<String, Value>>,
 ) -> ProfileParts {
     let Merge {
@@ -1654,7 +1618,7 @@ fn finish_merge(
     let parts = timed("    tail", || {
         phase_markers.sort_by_key(|m| m.start_us);
 
-        let metadata = build_metadata(pool, other_data.as_ref());
+        let metadata = build_metadata(&mut pool.writer, other_data.as_ref());
 
         let mut start: Option<i64> = None;
         let mut end: Option<i64> = None;
@@ -1694,7 +1658,7 @@ fn finish_merge(
                 let lane_class = lane_class(tid, &name);
                 ThreadTrack {
                     tid,
-                    name: pool.intern(&name),
+                    name: pool.writer.intern(&name),
                     sort_index,
                     slices,
                     max_depth,
@@ -1723,7 +1687,7 @@ fn finish_merge(
             let Some(lane) = counters.remove(&name) else {
                 continue;
             };
-            let counter_name = pool.resolve(lane.name).to_string();
+            let counter_name = pool.interner.resolve(lane.name).to_string();
             if lane.series.is_empty() {
                 let rank = counter_rank(&counter_name, "");
                 split.push(SplitLane {
@@ -1735,7 +1699,7 @@ fn finish_merge(
             }
             let multi = lane.series.len() > 1;
             for s in lane.series {
-                let key = pool.resolve(s.name).to_string();
+                let key = pool.interner.resolve(s.name).to_string();
                 let rank = counter_rank(&counter_name, &key);
                 let label = if multi {
                     format!("{counter_name} · {key}")
@@ -1758,7 +1722,7 @@ fn finish_merge(
         let counters: Vec<CounterLane> = split
             .into_iter()
             .map(|l| {
-                let name = pool.intern(&l.label);
+                let name = pool.writer.intern(&l.label);
                 let series_off = series_pool.len() as u32;
                 if let Some(mut s) = l.series {
                     let points_off = point_pool.len() as u32;
@@ -2254,7 +2218,7 @@ fn parse_gz_stream(bytes: &[u8], workers: usize, chunk_bytes: usize) -> Option<P
 /// the scanner defers, and the comma/whitespace separators between events are
 /// skipped by hand. Returns `false` on malformed content so the caller falls
 /// back to the serial parser rather than silently dropping events.
-fn parse_range_into(builder: &mut Builder, interner: &mut impl Intern, chunk: &str) -> bool {
+fn parse_range_into(builder: &mut Builder, interner: &mut Writer, chunk: &str) -> bool {
     let bytes = chunk.as_bytes();
     let mut scratch: Vec<ArgEntry> = Vec::new();
     let mut pos = 0;
@@ -2285,10 +2249,10 @@ fn parse_range_into(builder: &mut Builder, interner: &mut impl Intern, chunk: &s
     true
 }
 
-fn build_metadata(interner: &mut impl Intern, other: Option<&Map<String, Value>>) -> Metadata {
+fn build_metadata(interner: &mut Writer, other: Option<&Map<String, Value>>) -> Metadata {
     let mut get = |k: &str| {
         let v = other.and_then(|m| m.get(k)).and_then(Value::as_str);
-        interner.intern_opt(v)
+        v.map(|v| interner.intern(v))
     };
     Metadata {
         bazel_version: get("bazel_version"),
@@ -2321,7 +2285,7 @@ fn apply_metadata_event(
 }
 
 fn build_slice_detail(
-    interner: &mut impl Intern,
+    interner: &mut Writer,
     args_pool: &mut Vec<(Str, Str)>,
     category: Str,
     args: Option<&[ArgEntry]>,
@@ -2371,7 +2335,7 @@ fn build_slice_detail(
 }
 
 fn apply_counter_event(
-    interner: &mut impl Intern,
+    interner: &mut Writer,
     ev: &RawEvent,
     args: Option<&[ArgEntry]>,
     order: &mut Vec<Str>,
