@@ -810,21 +810,6 @@ pub(crate) fn fold_into(dst: &mut Builder, src: Builder) {
     }
 }
 
-/// Merge a copy of `src`'s subtree into `dst`, leaving `src` intact — for
-/// folding a tree that must also seal into a graph of its own.
-pub(crate) fn fold_ref(dst: &mut Builder, src: &Builder) {
-    dst.total_us += src.total_us;
-    dst.count += src.count;
-    for child in &src.children {
-        let seg = Segment {
-            label: child.name,
-            work_class: child.work_class,
-        };
-        let d = dst.child(seg, || child.rank);
-        fold_ref(d, child);
-    }
-}
-
 /// Fold a set of trees into one, in the given order; empty input yields a bare
 /// root.
 pub(crate) fn fold_all(trees: Vec<Builder>) -> Builder {

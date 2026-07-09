@@ -4,7 +4,7 @@ use bviz_trace_profile::{LaneClass, Profile};
 
 use crate::flame::{
     Builder, FlameGraph, Flamer, Scope, action_locations, build_critical_path, build_flame_graph,
-    class_trees, fold_all, fold_ref, seal,
+    class_trees, fold_all, fold_into, seal,
 };
 use crate::stats::{StatRow, stats_from_flame};
 
@@ -132,28 +132,20 @@ impl FlameScopes {
             }
         }
 
-        // The union tree folds copies of the scoped trees (they still seal into
-        // graphs of their own) and consumes the rest — skipped when the caller
-        // supplies the already-sealed union.
-        let all_tree = (!reuse_all).then(|| {
-            let mut all = fold_all(rest);
-            for tree in [&loading, &analysis, &execution].into_iter().flatten() {
-                fold_ref(&mut all, tree);
-            }
-            all
-        });
-
-        let aggregate = |tree: Option<Builder>| {
+        // Seal each class scope, keeping its now-sorted tree: the union then
+        // folds each tree by move rather than deep-copying it (the sort only
+        // reorders children, which the union re-sorts, so the merge is
+        // unchanged). Sealing happens concurrently, the critical path alongside
+        // unless the caller supplied it.
+        let seal_scope = |tree: Option<Builder>| -> (ScopeAggregate, Builder) {
             let mut root = tree.unwrap_or_else(Builder::new_root);
-            ScopeAggregate::from_graph(seal(&mut root, profile))
+            let graph = seal(&mut root, profile);
+            (ScopeAggregate::from_graph(graph), root)
         };
-        // The scopes own disjoint trees, so they seal, aggregate, and sort
-        // concurrently; the critical path builds alongside unless supplied.
         let mut cp_slot = None;
         let mut loading_slot = None;
         let mut analysis_slot = None;
         let mut execution_slot = None;
-        let mut all_slot = None;
         std::thread::scope(|scope| {
             if prebuilt_cp.is_none() && profile.has_critical_path() {
                 scope.spawn(|| {
@@ -163,19 +155,29 @@ impl FlameScopes {
                     cp_slot = Some(ScopeAggregate::from_graph(seal(&mut root, profile)));
                 });
             }
-            scope.spawn(|| loading_slot = Some(aggregate(loading)));
-            scope.spawn(|| analysis_slot = Some(aggregate(analysis)));
-            scope.spawn(|| execution_slot = Some(aggregate(execution)));
-            if let Some(all) = all_tree {
-                scope.spawn(|| all_slot = Some(aggregate(Some(all))));
+            scope.spawn(|| loading_slot = Some(seal_scope(loading)));
+            scope.spawn(|| analysis_slot = Some(seal_scope(analysis)));
+            scope.spawn(|| execution_slot = Some(seal_scope(execution)));
+        });
+        let (loading, loading_tree) = loading_slot.unwrap();
+        let (analysis, analysis_tree) = analysis_slot.unwrap();
+        let (execution, execution_tree) = execution_slot.unwrap();
+
+        // The union folds the rest and the three sealed class trees — by move —
+        // then seals, unless the caller supplied the already-sealed union.
+        let all = prebuilt_all.unwrap_or_else(|| {
+            let mut all = fold_all(rest);
+            for tree in [loading_tree, analysis_tree, execution_tree] {
+                fold_into(&mut all, tree);
             }
+            Arc::new(ScopeAggregate::from_graph(seal(&mut all, profile)))
         });
         FlameScopes {
             critical_path: prebuilt_cp.or_else(|| cp_slot.map(Arc::new)),
-            loading: Arc::new(loading_slot.unwrap()),
-            analysis: Arc::new(analysis_slot.unwrap()),
-            execution: Arc::new(execution_slot.unwrap()),
-            all: prebuilt_all.unwrap_or_else(|| Arc::new(all_slot.unwrap())),
+            loading: Arc::new(loading),
+            analysis: Arc::new(analysis),
+            execution: Arc::new(execution),
+            all,
         }
     }
 
