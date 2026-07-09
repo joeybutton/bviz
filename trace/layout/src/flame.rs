@@ -521,6 +521,12 @@ impl Builder {
     }
 }
 
+impl Default for Builder {
+    fn default() -> Self {
+        Builder::new_root()
+    }
+}
+
 /// Merges spans into the builder tree. Every frame label is an interned handle
 /// of the source profile — a span's mnemonic and name already live in its text.
 /// The profile interns each distinct string to one handle, so equal text ⇒
@@ -711,6 +717,44 @@ pub fn build_flame_graph(profile: &Arc<Profile>, scope: Scope) -> FlameGraph {
                 .collect(),
         )
     };
+    seal(&mut root, profile)
+}
+
+/// Build the aggregated flame graph over exactly the thread tracks `selected`
+/// admits (by index into [`Profile::threads`]), by the same time-containment
+/// plus semantic merge as [`build_flame_graph`]: within each selected lane every
+/// span nests under the span that time-contains it, and identically labelled
+/// spans at the same place merge across the selected lanes into one frame.
+///
+/// The name scan covers exactly the selected lanes, so the rank-coverage
+/// invariant [`scan`] documents holds. A critical-path lane holds redirected
+/// copies of worker time, so selecting it alongside the worker lanes it copies
+/// sums both; membership is the caller's to choose.
+pub fn build_flame_graph_for_tracks(
+    profile: &Arc<Profile>,
+    selected: impl Fn(usize) -> bool + Sync,
+) -> FlameGraph {
+    let workers = bviz_trace_profile::worker_count();
+    let flamer = Flamer::scoped(profile, workers, &selected);
+    let threads = profile.threads();
+    // Each worker folds its stolen lanes into one root; the roots then fold
+    // together. Lane order within a worker can't change the sealed graph, since
+    // the flatten sort is total.
+    let shards = run_sharded(workers, threads.len(), |root: &mut Builder, i| {
+        if !selected(i) {
+            return;
+        }
+        let thread = &threads[i];
+        let slices = profile.slices(thread);
+        let details = profile.details(thread);
+        let forest = containment_forest(slices);
+        for ri in 0..forest.roots.len() {
+            let r = forest.roots[ri];
+            root.total_us += slices[r].dur_us;
+            flamer.merge_span(root, slices, details, &forest, r);
+        }
+    });
+    let mut root = fold_all(shards);
     seal(&mut root, profile)
 }
 

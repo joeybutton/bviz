@@ -4,7 +4,7 @@ use bviz_trace_profile::{LaneClass, Profile};
 
 use crate::flame::{
     Builder, FlameGraph, Flamer, Scope, action_locations, build_critical_path, build_flame_graph,
-    class_trees, fold_all, fold_into, seal,
+    build_flame_graph_for_tracks, class_trees, fold_all, fold_into, seal,
 };
 use crate::stats::{StatRow, stats_from_flame};
 
@@ -27,6 +27,16 @@ impl ScopeAggregate {
     /// single scope before (or without) the full [`FlameScopes`] pass.
     pub fn build(profile: &Arc<Profile>, scope: Scope) -> ScopeAggregate {
         ScopeAggregate::from_graph(build_flame_graph(profile, scope))
+    }
+
+    /// Builds the aggregate over exactly the thread tracks `selected` admits (by
+    /// index into [`Profile::threads`]), for a view driven by a lane selection
+    /// rather than a fixed scope.
+    pub fn build_for_tracks(
+        profile: &Arc<Profile>,
+        selected: impl Fn(usize) -> bool + Sync,
+    ) -> ScopeAggregate {
+        ScopeAggregate::from_graph(build_flame_graph_for_tracks(profile, selected))
     }
 
     fn from_graph(flame: FlameGraph) -> ScopeAggregate {
@@ -294,6 +304,33 @@ mod tests {
                 "{scope:?}"
             );
         }
+    }
+
+    #[test]
+    fn tracks_selection_matches_all_scope() {
+        // Selecting every non-critical-path lane is the same membership
+        // Scope::All uses, so both builds must yield the same graph and stats.
+        let p = full_profile();
+        let threads = p.threads();
+        let select = |i: usize| threads[i].lane_class != LaneClass::CriticalPath;
+        let by_tracks = ScopeAggregate::build_for_tracks(&p, select);
+        let all = ScopeAggregate::build(&p, Scope::All);
+        assert_eq!(resolved(&by_tracks.flame), resolved(&all.flame));
+        assert_eq!(
+            resolved_rows(&by_tracks.flame, &by_tracks.stats),
+            resolved_rows(&all.flame, &all.stats),
+        );
+        assert_eq!(by_tracks.grand_total, all.grand_total);
+    }
+
+    #[test]
+    fn empty_track_selection_yields_a_bare_root() {
+        let p = full_profile();
+        let agg = ScopeAggregate::build_for_tracks(&p, |_| false);
+        // Only the synthetic root, no frames and no rows.
+        assert_eq!(agg.flame.nodes().len(), 1);
+        assert!(agg.stats.is_empty());
+        assert_eq!(agg.grand_total, 0);
     }
 
     #[test]
