@@ -7,20 +7,20 @@
 static GLOBAL: bviz_alloc::MiMalloc = bviz_alloc::MiMalloc;
 
 use bviz_trace_layout::{
-    FlameBox, FlameGraph, FlameMetrics, FlameView, LaneLayout, LaneMetrics, ScopeAggregate, StatRow,
-    TimeView, Viewport, WorkClass, flame_box_at, flame_height, lay_out_flame, lay_out_lanes,
-    visible_slices,
+    FlameBox, FlameGraph, FlameMetrics, FlameView, Lane, LaneLayout, LaneMetrics, ScopeAggregate,
+    StatRow, TimeView, Viewport, WorkClass, flame_box_at, flame_height, lay_out_flame,
+    lay_out_lanes, visible_slices,
 };
 use bviz_trace_profile::{CounterPoint, LaneClass, Profile, Slice, SliceDetail, TimeSpan};
-use bviz_ui_components::{Axis, Scrollbar, load_in_background, track_drag};
+use bviz_ui_components::{Axis, Scrollbar, TextInput, load_in_background, track_drag};
 use bviz_ui_shell::Chrome;
 use clap::Parser;
 use gpui::{
     AnyElement, Animation, AnimationExt, App, BorderStyle, Bounds, ContentMask, Context, Div, Edges,
-    FocusHandle, Hsla, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
-    PathBuilder, Pixels, Point, Render, Rgba, ScrollDelta, ScrollWheelEvent, SharedString, Stateful,
-    Task, TextAlign, Transformation, UniformListScrollHandle, Window, canvas, div, hsla, percentage,
-    point, prelude::*, px, quad, size, uniform_list,
+    Entity, FocusHandle, Hsla, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent,
+    MouseUpEvent, PathBuilder, Pixels, Point, Render, Rgba, ScrollDelta, ScrollWheelEvent,
+    SharedString, Stateful, Subscription, Task, TextAlign, Transformation, UniformListScrollHandle,
+    Window, canvas, deferred, div, hsla, percentage, point, prelude::*, px, quad, size, uniform_list,
 };
 use std::cell::{Cell, RefCell};
 use std::path::PathBuf;
@@ -116,6 +116,11 @@ const MARKER_LABEL_SIZE: f32 = 11.0;
 /// Height of the tab bar between the flame chart and the bottom panel, which
 /// doubles as the resize splitter for the panel.
 const TAB_BAR_HEIGHT: f32 = 28.0;
+
+/// Width of the open tracks visibility menu and the tallest its track list grows
+/// before it scrolls.
+const TRACKS_MENU_WIDTH: f32 = 280.0;
+const TRACKS_MENU_MAX_LIST: f32 = 320.0;
 
 /// Heights of a stats-table header row and a body row.
 const STATS_HEADER_HEIGHT: f32 = 24.0;
@@ -465,6 +470,26 @@ fn flame_total_height(layout: &LaneLayout) -> f32 {
     layout.lanes.last().map(|l| l.top + l.height).unwrap_or(0.0)
 }
 
+/// The full layout restricted to the tracks `visible` admits, the kept lanes
+/// restacked from the top so hiding a lane closes its gap. A track absent from
+/// `visible` defaults to shown, so a layout never loses a lane to a stale set.
+fn filter_visible_lanes(full: &LaneLayout, visible: &[bool]) -> LaneLayout {
+    let mut lanes = Vec::with_capacity(full.lanes.len());
+    let mut top = 0.0;
+    for lane in &full.lanes {
+        if !visible.get(lane.track).copied().unwrap_or(true) {
+            continue;
+        }
+        lanes.push(Lane { top, ..*lane });
+        top += lane.height + METRICS.lane_gap;
+    }
+    LaneLayout {
+        lanes,
+        counters: full.counters.clone(),
+        total_height: full.total_height,
+    }
+}
+
 /// The flame metrics matching the chart's lane row height, so the graph's rows
 /// align with the rest of the view.
 fn flame_metrics() -> FlameMetrics {
@@ -597,16 +622,25 @@ struct TraceView {
     gutter_width: f32,
     /// Which panel the tab bar shows.
     bottom_tab: BottomTab,
-    /// Which tracks the flame graph and stats aggregate over, indexed by
-    /// `profile.threads()` order.
+    /// Which tracks the flame chart draws, indexed by `profile.threads()` order.
+    visible_tracks: Vec<bool>,
+    /// Which tracks the flame graph and stats aggregate over, indexed likewise.
     selected_tracks: Vec<bool>,
     /// Bumped whenever `selected_tracks` changes, keying the aggregate build so a
     /// stale build's result is discarded when the selection moves on.
     selection_version: u64,
-    /// The thread/counter lane layout for the loaded profile, built on first use
-    /// and reused across paints and mouse handlers. It depends only on the
-    /// immutable profile, so it is cleared only when a new profile loads.
+    /// Whether the tracks visibility menu is open.
+    tracks_menu_open: bool,
+    /// The tracks menu's filter field; its text narrows the listed tracks.
+    track_filter: Entity<TextInput>,
+    _filter_observer: Subscription,
+    /// The full thread/counter lane layout for the loaded profile, built on first
+    /// use. It depends only on the immutable profile, so it is cleared only when a
+    /// new profile loads.
     lanes: Rc<RefCell<Option<Rc<LaneLayout>>>>,
+    /// The lane layout restricted to the visible tracks and restacked, derived
+    /// from `lanes` and cleared whenever the visibility set changes.
+    visible_lanes: Rc<RefCell<Option<Rc<LaneLayout>>>>,
     /// The selected tracks' aggregate — its flame graph and stats rows, held
     /// together so the rows' and laid-out boxes' name handles resolve against
     /// the graph that produced them. Built on demand off the UI thread (walking
@@ -666,14 +700,19 @@ impl TraceView {
     ) -> Self {
         let focus_handle = cx.focus_handle();
         focus_handle.focus(window, cx);
+        let track_filter = cx.new(|cx| TextInput::new(cx, "Filter tracks…", 0));
+        // Re-render the menu list as the filter text changes; TextInput notifies
+        // on every edit.
+        let filter_observer = cx.observe(&track_filter, |_, _, cx| cx.notify());
         let load_task = load_in_background(
             cx,
             move || load.join().unwrap_or_else(|_| Err("profile loader thread panicked".into())),
             |view, result, cx| {
                 view.invalidate_aggregates();
-                // The lane layout depends only on the profile, so it must be
+                // The lane layouts depend only on the profile, so they must be
                 // dropped when a new profile loads.
                 view.lanes.borrow_mut().take();
+                view.visible_lanes.borrow_mut().take();
                 view.flame_view.set(FlameView::FIT);
                 view.source = match result {
                     Ok(profile) => Source::Loaded(Arc::new(profile)),
@@ -708,9 +747,14 @@ impl TraceView {
             panel_height: DEFAULT_PANEL_HEIGHT,
             gutter_width: DEFAULT_GUTTER_WIDTH,
             bottom_tab: BottomTab::Counters,
+            visible_tracks: Vec::new(),
             selected_tracks: Vec::new(),
             selection_version: 0,
+            tracks_menu_open: false,
+            track_filter,
+            _filter_observer: filter_observer,
             lanes: Rc::new(RefCell::new(None)),
+            visible_lanes: Rc::new(RefCell::new(None)),
             aggregates: Rc::new(RefCell::new(None)),
             flame_boxes: Rc::new(RefCell::new(None)),
             agg_ready: None,
@@ -738,6 +782,7 @@ impl TraceView {
     /// copies of worker time, so leaving it out of the default selection keeps
     /// the aggregate from double-counting that time.
     fn init_tracks(&mut self, profile: &Profile) {
+        self.visible_tracks = vec![true; profile.threads().len()];
         self.selected_tracks = profile
             .threads()
             .iter()
@@ -1054,6 +1099,7 @@ impl TraceView {
                     },
                 )
         };
+        let tracks_menu = self.tracks_menu(palette, colors, cx);
         let viewport = div()
             .id("trace-viewport")
             .relative()
@@ -1062,7 +1108,8 @@ impl TraceView {
             .child(canvas)
             .children(panel)
             .child(tab_bar)
-            .child(gutter_handle);
+            .child(gutter_handle)
+            .child(tracks_menu);
         self.body_handlers(viewport, cx)
     }
 
@@ -1145,6 +1192,193 @@ impl TraceView {
                     .pr_2()
                     .child(work_class_legend(palette))
             }))
+    }
+
+    /// The tracks visibility menu in the gutter corner where the ruler meets the
+    /// track-label column: a trigger showing how many tracks are visible, and,
+    /// when open, a filter field over a checklist of track names. A backdrop
+    /// behind the open menu dismisses it on an outside click.
+    fn tracks_menu(
+        &self,
+        palette: Palette,
+        colors: &bviz_ui_theme::Colors,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let (nvis, ntot) = self.visible_count();
+        let hover_bg = bviz_ui_theme::mix(colors.container, colors.background, 0.2);
+        let trigger = div()
+            .id("tracks-menu")
+            .size_full()
+            .flex()
+            .flex_row()
+            .items_center()
+            .justify_between()
+            .px_2()
+            .gap_1()
+            .cursor_pointer()
+            .text_size(px(GUTTER_LABEL_SIZE))
+            .text_color(palette.label)
+            .bg(palette.header_band)
+            .hover(move |s| s.bg(hover_bg))
+            // Keep the press off the chart handlers underneath.
+            .on_mouse_down(MouseButton::Left, |_, _, cx: &mut App| cx.stop_propagation())
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.tracks_menu_open = !this.tracks_menu_open;
+                cx.notify();
+            }))
+            .child(div().overflow_hidden().whitespace_nowrap().child(format!("{nvis}/{ntot} tracks")))
+            .child(
+                bviz_ui_assets::icon("caret-down")
+                    .size(px(12.))
+                    .text_color(palette.label),
+            );
+        // An anchor at the corner holds the trigger and, below it, the popover.
+        // The popover is an absolute child of this anchor (not a flex sibling of
+        // the trigger row), so it opens directly under the trigger and does not
+        // shift the trigger's own layout.
+        div()
+            .absolute()
+            .left_0()
+            .top_0()
+            .w(px(self.gutter_width))
+            .h(px(RULER_HEIGHT))
+            .child(trigger)
+            .children(self.tracks_menu_popover(palette, colors, cx))
+    }
+
+    /// The open tracks menu's deferred body: a filter field over the filtered
+    /// track checklist, with a full-viewport backdrop behind it that closes the
+    /// menu on an outside click. `None` when the menu is closed.
+    fn tracks_menu_popover(
+        &self,
+        palette: Palette,
+        colors: &bviz_ui_theme::Colors,
+        cx: &mut Context<Self>,
+    ) -> Option<impl IntoElement> {
+        if !self.tracks_menu_open {
+            return None;
+        }
+        let Source::Loaded(profile) = &self.source else {
+            return None;
+        };
+        let (selected, container, text) = (colors.selected, colors.container, colors.text);
+        let hover_bg = bviz_ui_theme::mix(colors.container, colors.background, 0.2);
+        let filter = self.track_filter.read(cx).content().to_lowercase();
+        let rows: Vec<_> = profile
+            .threads()
+            .iter()
+            .enumerate()
+            .filter_map(|(i, thread)| {
+                let name = profile.str(thread.name);
+                if !filter.is_empty() && !name.to_lowercase().contains(&filter) {
+                    return None;
+                }
+                let visible = self.visible_tracks.get(i).copied().unwrap_or(true);
+                let check = div()
+                    .size(px(13.))
+                    .flex_none()
+                    .rounded_sm()
+                    .border_1()
+                    .border_color(palette.label)
+                    .when(visible, |c| c.bg(selected).border_color(selected));
+                Some(
+                    div()
+                        .id(SharedString::from(format!("track-row-{i}")))
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap_2()
+                        .px_2()
+                        .py_1()
+                        .cursor_pointer()
+                        .rounded_sm()
+                        .hover(move |s| s.bg(selected))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.toggle_track(i);
+                            cx.notify();
+                        }))
+                        .child(check)
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .overflow_hidden()
+                                .whitespace_nowrap()
+                                .text_ellipsis()
+                                .child(name.to_string()),
+                        ),
+                )
+            })
+            .collect();
+
+        let viewport = self.viewport.get();
+        let menu = div()
+            .occlude()
+            .absolute()
+            .left_0()
+            .top(px(RULER_HEIGHT))
+            .w(px(TRACKS_MENU_WIDTH))
+            .flex()
+            .flex_col()
+            .bg(container)
+            .border_1()
+            .border_color(palette.border)
+            .rounded_md()
+            .shadow_lg()
+            .text_size(px(GUTTER_LABEL_SIZE))
+            .text_color(text)
+            // Clicks inside the menu must not reach the backdrop and close it.
+            .on_mouse_down(MouseButton::Left, |_, _, cx: &mut App| cx.stop_propagation())
+            .child(div().p_1().child(self.track_filter.clone()))
+            .child({
+                let (nvis, ntot) = self.visible_count();
+                let all_visible = ntot > 0 && nvis == ntot;
+                div()
+                    .id("tracks-toggle-all")
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .mx_1()
+                    .px_2()
+                    .py_1()
+                    .rounded_sm()
+                    .cursor_pointer()
+                    .border_b_1()
+                    .border_color(palette.border)
+                    .hover(move |s| s.bg(hover_bg))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.set_all_visible(!all_visible);
+                        cx.notify();
+                    }))
+                    .child(if all_visible { "Hide all" } else { "Show all" })
+            })
+            .child(
+                div()
+                    .id("tracks-menu-list")
+                    .flex()
+                    .flex_col()
+                    .p_1()
+                    .max_h(px(TRACKS_MENU_MAX_LIST))
+                    .overflow_y_scroll()
+                    .children(rows),
+            );
+        // A backdrop the size of the viewport catches an outside click; the menu
+        // paints over it.
+        let backdrop = div()
+            .absolute()
+            .left_0()
+            .top_0()
+            .w(viewport.size.width)
+            .h(viewport.size.height)
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _: &MouseDownEvent, _, cx| {
+                    this.tracks_menu_open = false;
+                    cx.stop_propagation();
+                    cx.notify();
+                }),
+            );
+        Some(deferred(div().child(backdrop).child(menu)))
     }
 
     /// The bottom-panel overlay for the active tab, positioned over the content
@@ -1347,9 +1581,9 @@ impl TraceView {
             .unwrap_or(0.0)
     }
 
-    /// The lane layout for the loaded profile, built on first use and reused
+    /// The full lane layout for the loaded profile, built on first use and reused
     /// across paints and mouse handlers. `None` until a profile is loaded.
-    fn lane_layout(&self) -> Option<Rc<LaneLayout>> {
+    fn full_lane_layout(&self) -> Option<Rc<LaneLayout>> {
         let Source::Loaded(profile) = &self.source else {
             return None;
         };
@@ -1362,6 +1596,51 @@ impl TraceView {
             *self.lanes.borrow_mut() = Some(Rc::new(layout));
         }
         self.lanes.borrow().clone()
+    }
+
+    /// The lane layout the flame chart draws: the full layout restricted to the
+    /// visible tracks and restacked to close the gaps, cached until the
+    /// visibility set changes. Every paint and hit-test works from this, so a
+    /// hidden lane is neither drawn nor selectable.
+    fn lane_layout(&self) -> Option<Rc<LaneLayout>> {
+        let full = self.full_lane_layout()?;
+        if self.visible_lanes.borrow().is_none() {
+            let filtered = filter_visible_lanes(&full, &self.visible_tracks);
+            *self.visible_lanes.borrow_mut() = Some(Rc::new(filtered));
+        }
+        self.visible_lanes.borrow().clone()
+    }
+
+    /// The number of visible tracks and the total.
+    fn visible_count(&self) -> (usize, usize) {
+        let visible = self.visible_tracks.iter().filter(|v| **v).count();
+        (visible, self.visible_tracks.len())
+    }
+
+    /// Toggles whether track `i` is drawn in the flame chart, dropping the cached
+    /// visible layout so it restacks, and clamping the lane scroll to the new
+    /// height.
+    fn toggle_track(&mut self, i: usize) {
+        if let Some(v) = self.visible_tracks.get_mut(i) {
+            *v = !*v;
+            self.invalidate_visible_lanes();
+        }
+    }
+
+    /// Shows or hides every track at once.
+    fn set_all_visible(&mut self, visible: bool) {
+        for v in &mut self.visible_tracks {
+            *v = visible;
+        }
+        self.invalidate_visible_lanes();
+    }
+
+    /// Drops the cached visible layout so it rebuilds and restacks, then clamps
+    /// the lane scroll to the new height.
+    fn invalidate_visible_lanes(&mut self) {
+        self.visible_lanes.borrow_mut().take();
+        let scrolled = self.scroll_y.get().min(self.max_scroll());
+        self.scroll_y.set(scrolled);
     }
 
     /// The aggregated flame graph and stats for the current track selection, or
