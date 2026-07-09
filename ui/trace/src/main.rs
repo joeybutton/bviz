@@ -18,7 +18,7 @@ use bviz_ui_components::{
 use bviz_ui_shell::Chrome;
 use clap::Parser;
 use gpui::{
-    Animation, AnimationExt, App, BorderStyle, Bounds, ContentMask, Context, Div, Entity,
+    Animation, AnimationExt, App, BorderStyle, Bounds, ContentMask, Context, Div, Edges, Entity,
     FocusHandle, Hsla, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
     PathBuilder, Pixels, Point, Render, Rgba, ScrollDelta, ScrollWheelEvent,
     SharedString, Stateful, Subscription, Task, TextAlign, Transformation, UniformListScrollHandle,
@@ -72,8 +72,14 @@ const EDGE_MARGIN_PX: f32 = 24.0;
 /// Pixels scrolled per wheel line.
 const LINE_SCROLL_PX: f32 = 24.0;
 
-/// Corner radius of a painted slice quad.
-const SLICE_RADIUS: f32 = 2.0;
+/// A box wider than this gets a 1px muted seam on its left edge to divide it
+/// from its neighbor; a narrower box keeps its whole fill so it still reads as
+/// its color rather than losing a column to the seam.
+const SLICE_SEAM_MIN_PX: f32 = 3.0;
+
+/// How far the left-edge seam is mixed from a box's fill toward the background:
+/// enough to read as a muted divider against any fill on either theme.
+const SLICE_SEAM_MIX: f32 = 0.35;
 
 /// Initial width of the left label gutter, holding lane and counter names clear
 /// of the time content so phase-marker lines never cross them; resizable by its
@@ -2771,18 +2777,20 @@ fn paint_labeled_box(
     window: &mut Window,
     cx: &mut App,
 ) {
-    // No border: a box carries only its fill, so a marker shrunk to a pixel
-    // still reads as its color rather than collapsing to an edge line.
-    window.paint_quad(quad(
-        rect,
-        px(SLICE_RADIUS),
-        fill,
-        px(0.),
-        fill,
-        BorderStyle::Solid,
-    ));
     let w = f32::from(rect.size.width);
     let h = f32::from(rect.size.height);
+    // Square corners: every column paints the box's full height, so a run of
+    // thin boxes reads as an even band rather than rounded humps that dip in
+    // height between them. A box wide enough to spare its first column carries a
+    // muted left-edge seam to divide it from its neighbor; a narrower one keeps
+    // its whole fill so it still reads as its color rather than an edge line.
+    let (border, seam) = if w > SLICE_SEAM_MIN_PX {
+        let seam = Hsla::from(bviz_ui_theme::mix(Rgba::from(fill), palette.background, SLICE_SEAM_MIX));
+        (Edges { left: px(1.), ..Default::default() }, seam)
+    } else {
+        (Edges::default(), fill)
+    };
+    window.paint_quad(quad(rect, px(0.), fill, border, seam, BorderStyle::Solid));
     if w < LABEL_MIN_PX {
         return;
     }
