@@ -73,20 +73,57 @@ pub struct FlameScopes {
 
 impl FlameScopes {
     pub fn build(profile: &Arc<Profile>) -> FlameScopes {
-        FlameScopes::build_with_workers(profile, bviz_trace_profile::worker_count())
+        FlameScopes::build_with_workers(profile, bviz_trace_profile::worker_count(), None, None)
+    }
+
+    /// Builds the set while reusing an already-computed aggregate for `scope` —
+    /// the scope a caller has just served on demand, which is always the profile
+    /// default ([`Scope::All`], or [`Scope::CriticalPath`] when the profile has a
+    /// critical path). Reusing `All` also lets the set pass skip building and
+    /// sealing the union entirely; reusing `CriticalPath` skips the graft. Any
+    /// other scope is rebuilt normally.
+    pub fn build_reusing(
+        profile: &Arc<Profile>,
+        scope: Scope,
+        aggregate: Arc<ScopeAggregate>,
+    ) -> FlameScopes {
+        let workers = bviz_trace_profile::worker_count();
+        match scope {
+            Scope::All => FlameScopes::build_with_workers(profile, workers, Some(aggregate), None),
+            Scope::CriticalPath => {
+                FlameScopes::build_with_workers(profile, workers, None, Some(aggregate))
+            }
+            _ => FlameScopes::build_with_workers(profile, workers, None, None),
+        }
     }
 
     /// Parallelism override, so the sharded build can be asserted equal to the
     /// single-worker one; [`FlameScopes::build`] derives the count from the
-    /// parallelism granted to the process.
-    fn build_with_workers(profile: &Arc<Profile>, workers: usize) -> FlameScopes {
+    /// parallelism granted to the process. `prebuilt_all` / `prebuilt_cp` supply
+    /// those scopes when the caller already holds them (see [`build_reusing`]).
+    fn build_with_workers(
+        profile: &Arc<Profile>,
+        workers: usize,
+        prebuilt_all: Option<Arc<ScopeAggregate>>,
+        prebuilt_cp: Option<Arc<ScopeAggregate>>,
+    ) -> FlameScopes {
         let flamer = Flamer::new(profile, workers);
+        let reuse_all = prebuilt_all.is_some();
 
         let mut loading = None;
         let mut analysis = None;
         let mut execution = None;
         let mut rest = Vec::new();
-        for (class, tree) in class_trees(profile, &flamer, |_| true, workers) {
+        // With the union already built, the other classes exist only to fold
+        // into it, so a reusing build walks just the three class scopes' lanes.
+        let include = |class: LaneClass| {
+            !reuse_all
+                || matches!(
+                    class,
+                    LaneClass::RepoFetch | LaneClass::Analysis | LaneClass::Execution
+                )
+        };
+        for (class, tree) in class_trees(profile, &flamer, include, workers) {
             match class {
                 LaneClass::RepoFetch => loading = Some(tree),
                 LaneClass::Analysis => analysis = Some(tree),
@@ -94,26 +131,31 @@ impl FlameScopes {
                 _ => rest.push(tree),
             }
         }
+
         // The union tree folds copies of the scoped trees (they still seal into
-        // graphs of their own) and consumes the rest.
-        let mut all = fold_all(rest);
-        for tree in [&loading, &analysis, &execution].into_iter().flatten() {
-            fold_ref(&mut all, tree);
-        }
+        // graphs of their own) and consumes the rest — skipped when the caller
+        // supplies the already-sealed union.
+        let all_tree = (!reuse_all).then(|| {
+            let mut all = fold_all(rest);
+            for tree in [&loading, &analysis, &execution].into_iter().flatten() {
+                fold_ref(&mut all, tree);
+            }
+            all
+        });
 
         let aggregate = |tree: Option<Builder>| {
             let mut root = tree.unwrap_or_else(Builder::new_root);
             ScopeAggregate::from_graph(seal(&mut root, profile))
         };
-        // The five scopes now own disjoint trees, so they seal, aggregate, and
-        // sort concurrently.
+        // The scopes own disjoint trees, so they seal, aggregate, and sort
+        // concurrently; the critical path builds alongside unless supplied.
         let mut cp_slot = None;
         let mut loading_slot = None;
         let mut analysis_slot = None;
         let mut execution_slot = None;
         let mut all_slot = None;
         std::thread::scope(|scope| {
-            if profile.has_critical_path() {
+            if prebuilt_cp.is_none() && profile.has_critical_path() {
                 scope.spawn(|| {
                     let actions = action_locations(profile);
                     let mut root = Builder::new_root();
@@ -124,14 +166,16 @@ impl FlameScopes {
             scope.spawn(|| loading_slot = Some(aggregate(loading)));
             scope.spawn(|| analysis_slot = Some(aggregate(analysis)));
             scope.spawn(|| execution_slot = Some(aggregate(execution)));
-            scope.spawn(|| all_slot = Some(aggregate(Some(all))));
+            if let Some(all) = all_tree {
+                scope.spawn(|| all_slot = Some(aggregate(Some(all))));
+            }
         });
         FlameScopes {
-            critical_path: cp_slot.map(Arc::new),
+            critical_path: prebuilt_cp.or_else(|| cp_slot.map(Arc::new)),
             loading: Arc::new(loading_slot.unwrap()),
             analysis: Arc::new(analysis_slot.unwrap()),
             execution: Arc::new(execution_slot.unwrap()),
-            all: Arc::new(all_slot.unwrap()),
+            all: prebuilt_all.unwrap_or_else(|| Arc::new(all_slot.unwrap())),
         }
     }
 
@@ -353,9 +397,9 @@ mod tests {
         ));
         let p = profile(tracks);
 
-        let serial = FlameScopes::build_with_workers(&p, 1);
+        let serial = FlameScopes::build_with_workers(&p, 1, None, None);
         for workers in [2, 5, 16] {
-            let sharded = FlameScopes::build_with_workers(&p, workers);
+            let sharded = FlameScopes::build_with_workers(&p, workers, None, None);
             for scope in ALL_SCOPES {
                 match (serial.get(scope), sharded.get(scope)) {
                     (Some(a), Some(b)) => {
@@ -368,6 +412,39 @@ mod tests {
                     _ => panic!("critical-path presence differs at {workers} workers"),
                 }
             }
+        }
+    }
+
+    #[test]
+    fn reusing_a_scope_matches_full_build() {
+        // Handing back an already-built default scope must reproduce a
+        // from-scratch set: every other scope is unchanged and the reused one is
+        // the very object passed in. Both possible initial scopes are covered.
+        let p = full_profile();
+        let full = FlameScopes::build(&p);
+        for reused_scope in [Scope::All, Scope::CriticalPath] {
+            let held = full.get(reused_scope).unwrap().clone();
+            let reused = FlameScopes::build_reusing(&p, reused_scope, held);
+            for scope in ALL_SCOPES {
+                match (full.get(scope), reused.get(scope)) {
+                    (Some(a), Some(b)) => {
+                        assert_eq!(resolved(&a.flame), resolved(&b.flame), "{scope:?}");
+                        assert_eq!(
+                            resolved_rows(&a.flame, &a.stats),
+                            resolved_rows(&b.flame, &b.stats),
+                            "{scope:?}"
+                        );
+                        assert_eq!(a.default_order, b.default_order, "{scope:?}");
+                        assert_eq!(a.grand_total, b.grand_total, "{scope:?}");
+                    }
+                    (None, None) => {}
+                    _ => panic!("critical-path presence differs for {scope:?}"),
+                }
+            }
+            assert!(Arc::ptr_eq(
+                full.get(reused_scope).unwrap(),
+                reused.get(reused_scope).unwrap()
+            ));
         }
     }
 

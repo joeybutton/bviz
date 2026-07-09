@@ -1285,6 +1285,15 @@ impl TraceView {
             return;
         };
         let profile = profile.clone();
+        // The scope just served on demand — always the profile default (All, or
+        // the critical path when present) — is handed to the set pass to reuse
+        // instead of recomputing; reusing All also spares the union's fold.
+        let prebuilt = match self.agg_ready {
+            Some(scope @ (Scope::All | Scope::CriticalPath)) => {
+                self.aggregates.borrow().clone().map(|agg| (scope, agg))
+            }
+            _ => None,
+        };
         self.scopes_inflight = true;
         self.scopes_gen += 1;
         let generation = self.scopes_gen;
@@ -1292,7 +1301,10 @@ impl TraceView {
             cx,
             move || {
                 let t = std::time::Instant::now();
-                let scopes = FlameScopes::build(&profile);
+                let scopes = match prebuilt {
+                    Some((scope, agg)) => FlameScopes::build_reusing(&profile, scope, agg),
+                    None => FlameScopes::build(&profile),
+                };
                 if std::env::var_os("BVIZ_TRACE_TIMING").is_some() {
                     eprintln!("[timing] flame_scopes: {:.3}s", t.elapsed().as_secs_f64());
                 }
