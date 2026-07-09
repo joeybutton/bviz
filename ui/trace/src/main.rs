@@ -28,6 +28,8 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
+gpui::actions!(bviz_trace, [SelectAllTracks]);
+
 /// Vertical sizing of the stacked thread and counter lanes, in pixels. The lane
 /// header is a thin top margin above the depth rows — the names live in the
 /// gutter — and adjacent lanes are parted by a hairline rule rather than a wide
@@ -199,6 +201,8 @@ struct Palette {
     panel: Rgba,
     /// The hover crosshair line, unobtrusive against the background.
     crosshair: Rgba,
+    /// Accent marking a selected track's gutter row.
+    selection: Rgba,
 }
 
 /// Which panel the tab bar below the flame chart shows. The counter plots share
@@ -588,6 +592,10 @@ enum Source {
 /// paint time).
 struct TraceView {
     focus_handle: FocusHandle,
+    /// Focus for the trace content, held by the timeline so Ctrl-A (select all
+    /// tracks) dispatches to it; a descendant of the window's focus, so the
+    /// window's own actions (quit, tab) still fire.
+    content_focus: FocusHandle,
     source: Source,
     /// Horizontal time-to-pixel mapping (pan and zoom).
     view: Rc<Cell<TimeView>>,
@@ -629,6 +637,8 @@ struct TraceView {
     /// Bumped whenever `selected_tracks` changes, keying the aggregate build so a
     /// stale build's result is discarded when the selection moves on.
     selection_version: u64,
+    /// The track a shift-click range-selection extends from, if any.
+    select_anchor: Option<usize>,
     /// Whether the tracks visibility menu is open.
     tracks_menu_open: bool,
     /// The tracks menu's filter field; its text narrows the listed tracks.
@@ -699,7 +709,15 @@ impl TraceView {
         cx: &mut Context<Self>,
     ) -> Self {
         let focus_handle = cx.focus_handle();
-        focus_handle.focus(window, cx);
+        // Focus the content so Ctrl-A reaches it; the window's actions still fire
+        // since the content focus is a descendant of the window focus.
+        let content_focus = cx.focus_handle();
+        content_focus.focus(window, cx);
+        cx.bind_keys([gpui::KeyBinding::new(
+            "ctrl-a",
+            SelectAllTracks,
+            Some("TraceContent"),
+        )]);
         let track_filter = cx.new(|cx| TextInput::new(cx, "Filter tracks…", 0));
         // Re-render the menu list as the filter text changes; TextInput notifies
         // on every edit.
@@ -727,6 +745,7 @@ impl TraceView {
         );
         Self {
             focus_handle,
+            content_focus,
             source: Source::Loading,
             view: Rc::new(Cell::new(TimeView {
                 start_us: 0.0,
@@ -750,6 +769,7 @@ impl TraceView {
             visible_tracks: Vec::new(),
             selected_tracks: Vec::new(),
             selection_version: 0,
+            select_anchor: None,
             tracks_menu_open: false,
             track_filter,
             _filter_observer: filter_observer,
@@ -788,26 +808,43 @@ impl TraceView {
             .iter()
             .map(|t| t.lane_class != LaneClass::CriticalPath)
             .collect();
+        self.select_anchor = None;
         self.selection_version += 1;
     }
 
-    /// The shared mouse/scroll/hover wiring both bodies attach to their root: a
-    /// press drives a scroll bar or pans, the wheel zooms/pans/scrolls, and a move
-    /// updates the hover (clearing it when the cursor leaves).
+    /// The flame chart's mouse/scroll/hover wiring: a press on a track label
+    /// selects that track, a press on a scroll thumb/track drives that bar,
+    /// anywhere else pans; the wheel zooms/pans/scrolls, and a move updates the
+    /// hover (clearing it when the cursor leaves). Holds the content focus and
+    /// the Ctrl-A action so a press here makes Ctrl-A select all visible tracks.
     fn body_handlers(&self, root: Stateful<Div>, cx: &mut Context<Self>) -> Stateful<Div> {
-        root.on_mouse_down(
-            MouseButton::Left,
-            cx.listener(|this, e: &MouseDownEvent, _, cx| {
-                // A press on a scroll thumb/track drives that bar; anywhere else
-                // pans. The window-global drag handlers are installed from the
-                // canvas paint while a drag is set, so repaint now.
-                this.press(e.position);
-                cx.notify();
-            }),
-        )
-        .on_scroll_wheel(cx.listener(Self::on_scroll_wheel))
-        .on_mouse_move(cx.listener(Self::on_mouse_move))
-        .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+        root.key_context("TraceContent")
+            .track_focus(&self.content_focus)
+            .on_action(cx.listener(Self::select_all_visible))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, e: &MouseDownEvent, window, cx| {
+                    // Take content focus so Ctrl-A selects tracks after a chart
+                    // interaction (a click may have moved focus to the filter).
+                    this.content_focus.focus(window, cx);
+                    // A press on a track label selects it rather than panning;
+                    // ctrl/cmd toggles it, shift extends a range.
+                    if let Some(track) = this.track_label_at(e.position) {
+                        let ctrl = e.modifiers.control || e.modifiers.platform;
+                        this.select_track(track, e.modifiers.shift, ctrl);
+                        cx.notify();
+                        return;
+                    }
+                    // A press on a scroll thumb/track drives that bar; anywhere
+                    // else pans. The window-global drag handlers are installed
+                    // from the canvas paint while a drag is set, so repaint now.
+                    this.press(e.position);
+                    cx.notify();
+                }),
+            )
+            .on_scroll_wheel(cx.listener(Self::on_scroll_wheel))
+            .on_mouse_move(cx.listener(Self::on_mouse_move))
+            .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
             // Drop the crosshair and hover tooltips when the cursor leaves.
             if !*hovered {
                 let cleared = this.crosshair.take().is_some()
@@ -913,12 +950,13 @@ impl TraceView {
                 let layout = &*lanes;
                 let tv = view.get();
                 let n_counters = profile.counters().len();
-                let (tab, panel_height, gutter_width, crosshair, hover, dragging) = {
+                let (tab, panel_height, gutter_width, selected, crosshair, hover, dragging) = {
                     let this = entity.read(cx);
                     (
                         this.bottom_tab,
                         this.panel_height,
                         this.gutter_width,
+                        this.selected_tracks.clone(),
                         this.crosshair,
                         this.hover,
                         !matches!(this.drag, Drag::None),
@@ -1028,6 +1066,7 @@ impl TraceView {
                     gutter_width,
                     scroll,
                     show_counters,
+                    &selected,
                     &palette,
                     window,
                     cx,
@@ -2060,6 +2099,7 @@ impl Render for TraceView {
             divider: bviz_ui_theme::mix(colors.border, colors.background, 0.4),
             panel: colors.container,
             crosshair: bviz_ui_theme::mix(colors.text, colors.background, 0.35),
+            selection: colors.selected,
         };
         let body = match &self.source {
             Source::Loaded(profile) => {
@@ -2285,6 +2325,124 @@ impl TraceView {
                 cursor_px < sx + sw
             })
             .map(|slice| (lane.track, slice))
+    }
+
+    /// The track whose gutter label lies under `pos`, if the press hit the flame
+    /// chart's track-label column (below the ruler, left of the content, above
+    /// the tab bar). `None` elsewhere or over a lane's empty tail.
+    fn track_label_at(&self, pos: Point<Pixels>) -> Option<usize> {
+        let layout = self.lane_layout()?;
+        let Source::Loaded(profile) = &self.source else {
+            return None;
+        };
+        let flame_total = flame_total_height(&layout);
+        let regions = Regions::new(
+            self.viewport.get(),
+            profile.counters().len(),
+            self.panel_height,
+            self.gutter_width,
+            flame_total,
+        );
+        let x = f32::from(pos.x);
+        let y = f32::from(pos.y);
+        let gutter_left = regions.content_left - self.gutter_width;
+        if x < gutter_left
+            || x >= regions.content_left
+            || y < regions.flame_top
+            || y >= regions.flame_bottom
+        {
+            return None;
+        }
+        let content_y = y - regions.flame_top + self.scroll_y.get();
+        layout
+            .lanes
+            .iter()
+            .find(|l| content_y >= l.top && content_y < l.top + l.height)
+            .map(|l| l.track)
+    }
+
+    /// Selects `track` for the flame graph and stats, with file-manager gesture
+    /// semantics. A plain click selects it alone; a `ctrl` (or cmd) click flips it
+    /// in the current set; a `shift` click replaces the selection with the run of
+    /// visible lanes from the anchor to `track`; a `shift`+`ctrl` click sets that
+    /// run to the anchor's own state, extending a just-added run or clearing a
+    /// just-removed one. A plain or ctrl click moves the anchor to `track`; a
+    /// shift click leaves it, so the run can be re-adjusted. Bumps the selection
+    /// version only when the set actually changes, so a repeat click is free.
+    fn select_track(&mut self, track: usize, shift: bool, ctrl: bool) {
+        let n = self.selected_tracks.len();
+        if track >= n {
+            return;
+        }
+        // The anchor run and the anchor's own selected state, read before any
+        // mutation so the range extends from the existing anchor.
+        let run = self.visible_run_to(track);
+        let anchor_state = self.select_anchor.and_then(|a| self.selected_tracks.get(a).copied());
+        let sel = match (shift, ctrl, run) {
+            // Plain click: select the one track and anchor there.
+            (false, false, _) => {
+                let mut sel = vec![false; n];
+                sel[track] = true;
+                self.select_anchor = Some(track);
+                sel
+            }
+            // Ctrl-click: flip the one track, keeping the rest, and re-anchor.
+            (false, true, _) => {
+                let mut sel = self.selected_tracks.clone();
+                sel[track] = !sel[track];
+                self.select_anchor = Some(track);
+                sel
+            }
+            // Shift-click: replace the selection with the anchor run.
+            (true, false, Some(run)) => {
+                let mut sel = vec![false; n];
+                for t in run {
+                    sel[t] = true;
+                }
+                sel
+            }
+            // Shift-Ctrl-click: set the anchor run to the anchor's state,
+            // extending a just-added run or clearing a just-removed one.
+            (true, true, Some(run)) => {
+                let state = anchor_state.unwrap_or(true);
+                let mut sel = self.selected_tracks.clone();
+                for t in run {
+                    sel[t] = state;
+                }
+                sel
+            }
+            // A shift click with no anchor (or an anchor no longer visible) falls
+            // back to selecting the one track.
+            (true, _, None) => {
+                let mut sel = vec![false; n];
+                sel[track] = true;
+                self.select_anchor = Some(track);
+                sel
+            }
+        };
+        if sel != self.selected_tracks {
+            self.selected_tracks = sel;
+            self.selection_version += 1;
+        }
+    }
+
+    /// The visible-lane tracks from the selection anchor to `track` inclusive, in
+    /// display order; `None` with no anchor or one no longer a visible lane.
+    fn visible_run_to(&self, track: usize) -> Option<Vec<usize>> {
+        let anchor = self.select_anchor?;
+        let order: Vec<usize> = self.lane_layout()?.lanes.iter().map(|l| l.track).collect();
+        let ai = order.iter().position(|&t| t == anchor)?;
+        let ti = order.iter().position(|&t| t == track)?;
+        Some(order[ai.min(ti)..=ai.max(ti)].to_vec())
+    }
+
+    /// Selects every currently visible track (the Ctrl-A gesture).
+    fn select_all_visible(&mut self, _: &SelectAllTracks, _: &mut Window, cx: &mut Context<Self>) {
+        if self.selected_tracks != self.visible_tracks {
+            self.selected_tracks = self.visible_tracks.clone();
+            self.selection_version += 1;
+            cx.notify();
+        }
     }
 
     /// Updates the flame-graph panel hover to the box under `pos`, repainting
@@ -2887,6 +3045,7 @@ fn paint_scrollbars(
 /// names left-aligned within it: thread names track the flame lanes' vertical
 /// scroll (clipped to their band), and, for the Counters tab, counter names sit
 /// at their fitted panel lanes. Other tabs leave the gutter empty.
+#[allow(clippy::too_many_arguments)]
 fn paint_gutter(
     profile: &Profile,
     layout: &LaneLayout,
@@ -2894,6 +3053,7 @@ fn paint_gutter(
     gutter_width: f32,
     scroll_y: f32,
     show_counters: bool,
+    selected: &[bool],
     palette: &Palette,
     window: &mut Window,
     cx: &mut App,
@@ -2950,11 +3110,32 @@ fn paint_gutter(
             size(px(gutter_width), px(regions.flame_h())),
         ),
     };
+    // A selected lane's gutter row carries a faint accent tint and a leading
+    // accent bar, so which tracks feed the flame graph reads at a glance.
+    let selection_tint = bviz_ui_theme::mix(palette.selection, palette.header_band, 0.8);
     window.with_content_mask(Some(flame_mask), |window| {
         for lane in &layout.lanes {
             let top = regions.flame_top + lane.top - scroll_y;
             if top + lane.height < regions.flame_top || top > regions.flame_bottom {
                 continue;
+            }
+            if selected.get(lane.track).copied().unwrap_or(false) {
+                window.paint_quad(quad(
+                    Bounds::new(point(px(gutter_left), px(top)), size(px(gutter_width), px(lane.height))),
+                    px(0.),
+                    selection_tint,
+                    px(0.),
+                    Hsla::from(palette.border),
+                    BorderStyle::Solid,
+                ));
+                window.paint_quad(quad(
+                    Bounds::new(point(px(gutter_left), px(top)), size(px(2.0), px(lane.height))),
+                    px(0.),
+                    palette.selection,
+                    px(0.),
+                    Hsla::from(palette.border),
+                    BorderStyle::Solid,
+                ));
             }
             let ty = top + (lane.height - GUTTER_LABEL_SIZE) / 2.0;
             label(profile.str(profile.threads()[lane.track].name), ty, window, cx);
@@ -3926,6 +4107,7 @@ mod tests {
             divider: dark,
             panel: dark,
             crosshair: dark,
+            selection: dark,
         }
     }
 
