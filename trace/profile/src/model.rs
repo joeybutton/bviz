@@ -317,8 +317,10 @@ const EXECUTION_SKYFRAME_INFIXES: [&str; 2] =
     ["skyframe-evaluator-execution", "skyframe-evaluator-memoizing"];
 
 /// Thread-name prefixes for execution support (action processing and its
-/// machinery), distinct from the skyframe evaluator pools.
-const EXECUTION_PREFIXES: [&str; 9] = [
+/// machinery), distinct from the skyframe evaluator pools. The tree-artifact
+/// visitor, symlink planter, and tree deleter materialize and clean up an
+/// action's outputs.
+const EXECUTION_PREFIXES: [&str; 12] = [
     "dynamic-execution",
     "Include scanner",
     "remote-execution",
@@ -328,6 +330,9 @@ const EXECUTION_PREFIXES: [&str; 9] = [
     "merkle-tree-",
     "virtual-action-input-pipe-",
     "jdeps-reader-",
+    "tree-artifact-visitor",
+    "Non-eager Symlink planter",
+    "tree-deleter",
 ];
 
 /// tid 0 is Bazel's synthetic critical-path thread; the rest are matched on the
@@ -338,6 +343,11 @@ const EXECUTION_PREFIXES: [&str; 9] = [
 /// (configured targets/aspects, plus loading and light analysis), so the plain
 /// `skyframe-evaluator` substring must be tested only after the execution
 /// infixes are ruled out.
+///
+/// Module-extension evaluation resolves external dependencies alongside
+/// repository fetching, so it is loading work; the `globbing pool` threads run
+/// glob I/O for package loading, which merges into analysis like the plain
+/// skyframe pools.
 pub fn lane_class(tid: i64, name: &str) -> LaneClass {
     if tid == 0 || name == "Critical Path" {
         LaneClass::CriticalPath
@@ -350,9 +360,12 @@ pub fn lane_class(tid: i64, name: &str) -> LaneClass {
         .any(|infix| name.contains(infix))
     {
         LaneClass::Execution
-    } else if name.contains("skyframe-evaluator") {
+    } else if name.contains("skyframe-evaluator") || name.starts_with("globbing pool") {
         LaneClass::Analysis
-    } else if name.starts_with("starlark-repository") || name.starts_with("downloads[") {
+    } else if name.starts_with("starlark-repository")
+        || name.starts_with("module-extension-")
+        || name.starts_with("downloads[")
+    {
         LaneClass::RepoFetch
     } else if EXECUTION_PREFIXES.iter().any(|p| name.starts_with(p))
         || (name.starts_with("disk-cache-") && !name.starts_with("disk-cache-gc"))
@@ -565,6 +578,16 @@ mod tests {
         assert_eq!(
             lane_class(15, "starlark-repository-foo (Virtual)"),
             LaneClass::RepoFetch
+        );
+        assert_eq!(
+            lane_class(16, "module-extension-@@rules_rs+//rs:extensions.bzl%crate-0 (Virtual)"),
+            LaneClass::RepoFetch
+        );
+        assert_eq!(lane_class(17, "globbing pool-3"), LaneClass::Analysis);
+        assert_eq!(lane_class(18, "tree-artifact-visitor-2"), LaneClass::Execution);
+        assert_eq!(
+            lane_class(19, "Non-eager Symlink planter 1"),
+            LaneClass::Execution
         );
         assert_eq!(lane_class(99, "collect-local-resources"), LaneClass::Other);
     }
