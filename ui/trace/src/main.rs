@@ -8,8 +8,8 @@ static GLOBAL: bviz_alloc::MiMalloc = bviz_alloc::MiMalloc;
 
 use bviz_trace_layout::{
     FlameBox, FlameGraph, FlameMetrics, FlameView, Lane, LaneLayout, LaneMetrics, ScopeAggregate,
-    StatRow, TimeView, Viewport, WorkClass, flame_box_at, flame_height, lay_out_flame,
-    lay_out_lanes, visible_slices,
+    StatRow, TimeView, Viewport, WorkClass, flame_height, lay_out_flame, lay_out_lanes,
+    visible_slices,
 };
 use bviz_trace_profile::{CounterPoint, LaneClass, Profile, Slice, SliceDetail, TimeSpan};
 use bviz_ui_components::{Axis, Scrollbar, TextInput, load_in_background, track_drag};
@@ -278,15 +278,18 @@ impl StatsOrder {
 }
 
 /// The flame graph's laid-out boxes together with the inputs that determine
-/// them, so a paint reuses them unless the graph or the laid-out width changed.
-/// The retained `ScopeAggregate` both keeps the graph alive for the boxes' name
-/// handles and serves as the cache key: swapping in another scope's aggregate
-/// changes the `Arc`, so `Arc::ptr_eq` detects a stale layout. Neither the horizontal pan nor
-/// `scroll_y` is a key: each only offsets a box's position at paint, so panning
-/// or scrolling keeps the cache. The zoom is already captured by `content_w`.
+/// them, so a paint reuses them unless one changed. The retained
+/// `ScopeAggregate` both keeps the graph alive for the boxes' name handles and
+/// serves as a cache key: swapping in another selection's aggregate changes the
+/// `Arc`, so `Arc::ptr_eq` detects a stale layout. The layout is viewport-
+/// relative — it depends on the zoomed width `content_w`, the horizontal scroll
+/// `scroll_x`, and the viewport width `view_w` — so all three are keys. The
+/// vertical `scroll_y` is not: it only offsets a box's y at paint.
 struct FlameBoxCache {
     aggregates: Arc<ScopeAggregate>,
-    content_w: f32,
+    content_w: f64,
+    scroll_x: f64,
+    view_w: f32,
     boxes: Rc<Vec<FlameBox>>,
 }
 
@@ -2463,10 +2466,11 @@ impl TraceView {
         cx.notify();
     }
 
-    /// The flame-graph box under a window-space cursor, inverting the paint
-    /// transform: map the cursor to a depth row via the vertical scroll and to a
-    /// content x via the horizontal zoom/scroll, then find the box at that depth
-    /// whose x-range contains it.
+    /// The flame-graph box under a window-space cursor: map the cursor to a depth
+    /// row via the vertical scroll and to a viewport x relative to the content
+    /// column, then find the laid-out box at that depth whose x-range contains it.
+    /// Searching the same viewport-relative box vector the paint uses (widened
+    /// and coalesced) makes the hover match what is drawn.
     fn flame_box_at(&self, pos: Point<Pixels>) -> Option<FlameBox> {
         let fl = self.flame_layout()?;
         let aggregates = self.aggregates.borrow().clone()?;
@@ -2478,9 +2482,14 @@ impl TraceView {
         }
         let content_y = y - fl.top + self.flame_scroll_y.get();
         let depth = (content_y / metrics.row_height) as u32;
-        let content_w = fl.view.content_px(fl.width);
-        let content_x = (x - fl.left) + fl.view.scroll_px(fl.width);
-        flame_box_at(&aggregates.flame, content_x, depth, content_w, &metrics, MIN_SLICE_PX)
+        let content_w = fl.width as f64 * fl.view.zoom;
+        let scroll_x = fl.view.left * content_w;
+        let vx = x - fl.left;
+        let boxes = flame_boxes(&self.flame_boxes, &aggregates, content_w, scroll_x, fl.width, &metrics);
+        boxes
+            .iter()
+            .find(|b| b.depth == depth && vx >= b.x && vx < b.x + b.w)
+            .copied()
     }
 
     /// Begins a flame-chart drag at `pos`: the lane vertical or time horizontal
@@ -3342,11 +3351,14 @@ fn paint_flame_graph(
     let metrics = flame_metrics();
     let total_h = flame_height(graph, &metrics);
     let (left, top, width, height) = flame_graph_rect(bounds, total_h, flame_view);
-    // Lay the tree out at the zoomed width so sub-pixel culling tracks the zoom,
-    // then offset every box left by the horizontal scroll.
-    let content_w = flame_view.content_px(width);
-    let scroll_x = flame_view.scroll_px(width);
-    let boxes = flame_boxes(cache, aggregates, content_w, &metrics);
+    // Lay out only the visible window, viewport-relative: the tree occupies
+    // `content_w` pixels at this zoom, scrolled `scroll_x` in, so a box's x is
+    // already relative to the content column's left edge. Off-screen boxes are
+    // culled and coalescing runs locally, matching the flame chart's slice
+    // layout. Coordinates are f64 so precision holds at deep zoom.
+    let content_w = width as f64 * flame_view.zoom;
+    let scroll_x = flame_view.left * content_w;
+    let boxes = flame_boxes(cache, aggregates, content_w, scroll_x, width, &metrics);
 
     let mask = ContentMask {
         bounds: Bounds::new(point(px(left), px(top)), size(px(width), px(height))),
@@ -3357,19 +3369,7 @@ fn paint_flame_graph(
             if y + b.h < top || y > top + height {
                 continue;
             }
-            let x = left + b.x - scroll_x;
-            if x + b.w < left || x > left + width {
-                continue;
-            }
-            // Bound the painted box to a margin around the content column. At
-            // extreme zoom the laid-out width dwarfs the window, so an
-            // off-screen box's coordinates grow large enough that the renderer's
-            // rounded-rect distance field loses precision and its clipped edge
-            // lands wrong, bleeding past the content mask; the margin exceeds the
-            // window so the visible portion is unchanged.
-            let bx = x.max(left - width);
-            let bw = (x + b.w).min(left + 2.0 * width) - bx;
-            let rect = Bounds::new(point(px(bx), px(y)), size(px(bw), px(b.h)));
+            let rect = Bounds::new(point(px(left + b.x), px(y)), size(px(b.w), px(b.h)));
             let fill = flame_box_color(b.work_class, palette);
             paint_labeled_box(rect, fill, graph.str(b.name), palette, window, cx);
         }
@@ -3398,9 +3398,9 @@ fn paint_flame_graph(
             point(px(left), px(top + height)),
             size(px(width), px(BAR_WIDTH)),
         ),
-        content_w,
+        content_w as f32,
         width,
-        scroll_x,
+        scroll_x as f32,
         MIN_THUMB,
     );
     if let Some(bar) = hlayout {
@@ -3413,24 +3413,40 @@ fn paint_flame_graph(
     }
 }
 
-/// Lays out the graph at `content_w` and `view`, reusing the [`FlameBoxCache`] in
-/// `cache` unless one of its keys changed. The retained `aggregates` keeps the
-/// graph alive for the boxes' name handles and keys the cache by identity.
+/// Lays out the graph's visible window, reusing the [`FlameBoxCache`] in `cache`
+/// unless a key changed. The retained `aggregates` keeps the graph alive for the
+/// boxes' name handles and keys the cache by identity; the layout is
+/// viewport-relative, so panning (a change in `scroll_x`) is a key too.
 fn flame_boxes(
     cache: &Rc<RefCell<Option<FlameBoxCache>>>,
     aggregates: &Arc<ScopeAggregate>,
-    content_w: f32,
+    content_w: f64,
+    scroll_x: f64,
+    view_w: f32,
     metrics: &FlameMetrics,
 ) -> Rc<Vec<FlameBox>> {
     if let Some(c) = cache.borrow().as_ref() {
-        if Arc::ptr_eq(&c.aggregates, aggregates) && c.content_w == content_w {
+        if Arc::ptr_eq(&c.aggregates, aggregates)
+            && c.content_w == content_w
+            && c.scroll_x == scroll_x
+            && c.view_w == view_w
+        {
             return c.boxes.clone();
         }
     }
-    let boxes = Rc::new(lay_out_flame(&aggregates.flame, content_w, metrics, MIN_SLICE_PX));
+    let boxes = Rc::new(lay_out_flame(
+        &aggregates.flame,
+        content_w,
+        scroll_x,
+        view_w,
+        metrics,
+        MIN_SLICE_PX,
+    ));
     *cache.borrow_mut() = Some(FlameBoxCache {
         aggregates: aggregates.clone(),
         content_w,
+        scroll_x,
+        view_w,
         boxes: boxes.clone(),
     });
     boxes

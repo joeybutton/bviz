@@ -325,6 +325,11 @@ pub struct FlameNode {
     pub work_class: WorkClass,
     pub count: u32,
     pub depth: u32,
+    /// The deepest node depth in this node's subtree (itself included). Layout
+    /// keeps, among sub-pixel siblings sharing a pixel column, the one reaching
+    /// deepest, so the depth drawn at a column is stable as the zoom shifts which
+    /// siblings fall in it.
+    pub subtree_max_depth: u32,
     pub children: Span32,
 }
 
@@ -1000,6 +1005,8 @@ fn freeze(builder: &Builder, depth: u32) -> FlameNode {
         work_class: builder.work_class,
         count: builder.count,
         depth,
+        // Filled by a bottom-up pass once the whole tree is flattened.
+        subtree_max_depth: depth,
         children: Span32::default(),
     }
 }
@@ -1043,47 +1050,127 @@ fn flatten(root: &mut Builder) -> Vec<FlameNode> {
         }
         nodes[idx].children = Span32::new(off, nodes.len() as u32 - off);
     }
+    // A child block always follows its parent, so a reverse pass sees every
+    // child's `subtree_max_depth` finalized before its parent's.
+    for i in (0..nodes.len()).rev() {
+        let mut m = nodes[i].depth;
+        for c in nodes[i].children.range() {
+            m = m.max(nodes[c].subtree_max_depth);
+        }
+        nodes[i].subtree_max_depth = m;
+    }
     nodes
 }
 
-/// Lay the graph into a content rectangle of the given width. The root spans the
-/// full width; each node's children are placed left-to-right with width
-/// proportional to `width_us`, so the right-hand remainder is the parent's self
-/// time (zero when children fill the parent). Dividing by `width_us` keeps an
-/// overflowing child inside its parent. Depth maps to y via `row_height`. Boxes
-/// narrower than `min_px` are omitted but still consume their horizontal share so
-/// siblings stay placed. Boxes come back in paint order, parents before children.
+/// Lay the visible window of the graph into pixels, mirroring the flame chart's
+/// [`visible_slices`](crate::visible_slices). The graph occupies `content_w`
+/// pixels at the current zoom; `scroll_x` is the content pixel at the left edge
+/// of a `view_w`-wide viewport. Each node's children are placed left-to-right
+/// with width proportional to `width_us` (the right-hand remainder being the
+/// parent's self time), so dividing by `width_us` keeps an overflowing child
+/// inside its parent. Depth maps to y via `row_height`.
+///
+/// Returned box positions are **viewport-relative** (x `0` is the left edge),
+/// and only boxes overlapping the viewport are laid out — an off-screen subtree
+/// is pruned — so the layout is local to what is on screen, not the whole graph.
+///
+/// A box narrower than `min_px` is widened to a one-pixel marker so it stays
+/// visible. Where several sub-pixel siblings fall in one pixel column, only the
+/// one reaching the **deepest** is kept (its subtree drawn, the rest dropped):
+/// keeping the leftmost instead would let its shallow subtree hide a deeper
+/// sibling's, so the depth drawn at a column would jump as the zoom shifted
+/// which sibling was leftmost. Keeping the deepest makes a column's depth stable.
+/// A box wide enough to render on its own is always kept. Coordinates are carried
+/// in `f64` so the proportional division holds precision at deep zoom, and each
+/// box is clamped to a viewport-sized margin so no huge value reaches its `f32`
+/// fields. Boxes come back in paint order, parents before children.
 pub fn lay_out_flame(
     graph: &FlameGraph,
-    width: f32,
+    content_w: f64,
+    scroll_x: f64,
+    view_w: f32,
     metrics: &FlameMetrics,
     min_px: f32,
 ) -> Vec<FlameBox> {
     let mut out = Vec::new();
-    place(graph, graph.root(), 0.0, width, metrics, min_px, &mut out);
+    place(
+        graph,
+        graph.root(),
+        0.0,
+        content_w,
+        scroll_x,
+        view_w,
+        metrics,
+        min_px,
+        &mut out,
+    );
     out
 }
 
+#[allow(clippy::too_many_arguments)]
 fn place(
     graph: &FlameGraph,
     node: &FlameNode,
-    x: f32,
-    w: f32,
+    cx: f64,
+    cw: f64,
+    scroll_x: f64,
+    view_w: f32,
     metrics: &FlameMetrics,
     min_px: f32,
     out: &mut Vec<FlameBox>,
 ) {
-    if w >= min_px {
-        out.push(box_of(node, x, w, metrics));
+    let min = min_px as f64;
+    // The node's left edge and widened right edge in viewport pixels.
+    let vx = cx - scroll_x;
+    let right = vx + cw.max(min);
+    // Prune a subtree that lies entirely off either edge; a sub-pixel node's
+    // widened edge is what must reach the viewport, so `right` uses `min`.
+    if right <= 0.0 || vx >= view_w as f64 {
+        return;
     }
+    // Clamp to a viewport-sized margin so a wide box spanning far off-screen
+    // never stores a huge coordinate; a visible marker's `vx` is already small.
+    let px = vx.max(-(view_w as f64));
+    let pr = right.min(2.0 * view_w as f64);
+    out.push(box_of(node, px as f32, (pr - px) as f32, metrics));
     if node.width_us == 0 {
         return;
     }
-    let mut cursor = x;
-    for child in graph.children(node) {
-        let cw = w * child.width_us as f32 / node.width_us as f32;
-        place(graph, child, cursor, cw, metrics, min_px, out);
-        cursor += cw;
+    // Place children left-to-right. A child wide enough to render recurses on its
+    // own; a run of sub-pixel children sharing one pixel column collapses to the
+    // one whose subtree reaches deepest, so the depth at that column is stable.
+    let children = graph.children(node);
+    let child_w = |c: &FlameNode| cw * c.width_us as f64 / node.width_us as f64;
+    let mut cursor = cx;
+    let mut i = 0;
+    while i < children.len() {
+        let ccw = child_w(&children[i]);
+        if ccw >= min {
+            place(graph, &children[i], cursor, ccw, scroll_x, view_w, metrics, min_px, out);
+            cursor += ccw;
+            i += 1;
+            continue;
+        }
+        // Sub-pixel run: scan consecutive sub-pixel children in this column,
+        // tracking the deepest, then recurse into it alone.
+        let col = (cursor - scroll_x).floor() as i32;
+        let (mut best, mut best_cx, mut best_cw) = (&children[i], cursor, ccw);
+        let mut run_cursor = cursor + ccw;
+        let mut j = i + 1;
+        while j < children.len() {
+            let cjw = child_w(&children[j]);
+            if cjw >= min || ((run_cursor - scroll_x).floor() as i32) != col {
+                break;
+            }
+            if children[j].subtree_max_depth > best.subtree_max_depth {
+                (best, best_cx, best_cw) = (&children[j], run_cursor, cjw);
+            }
+            run_cursor += cjw;
+            j += 1;
+        }
+        place(graph, best, best_cx, best_cw, scroll_x, view_w, metrics, min_px, out);
+        cursor = run_cursor;
+        i = j;
     }
 }
 
@@ -1099,56 +1186,6 @@ fn box_of(node: &FlameNode, x: f32, w: f32, metrics: &FlameMetrics) -> FlameBox 
         self_us: node.self_us,
         work_class: node.work_class,
         count: node.count,
-    }
-}
-
-/// The box at `(target_depth, x_px)` in a layout of `graph` into `width` pixels,
-/// found by descending the tree the same way [`lay_out_flame`] places boxes —
-/// children left-to-right proportional to `width_us` in their stored order — so
-/// the result agrees with the corresponding `lay_out_flame` box without building
-/// the full box vector. Returns `None` when `x_px` is outside `[0, width)`, no
-/// node sits at that depth under it, or the matching box is narrower than
-/// `min_px` (and so `lay_out_flame` would omit it).
-pub fn flame_box_at(
-    graph: &FlameGraph,
-    x_px: f32,
-    target_depth: u32,
-    width: f32,
-    metrics: &FlameMetrics,
-    min_px: f32,
-) -> Option<FlameBox> {
-    if x_px < 0.0 || x_px >= width {
-        return None;
-    }
-    let mut node = graph.root();
-    let mut x = 0.0_f32;
-    let mut w = width;
-    loop {
-        if node.depth == target_depth {
-            if w < min_px {
-                return None;
-            }
-            return Some(box_of(node, x, w, metrics));
-        }
-        if node.width_us == 0 {
-            return None;
-        }
-        // Descend into the child whose proportional x-extent contains x_px,
-        // accumulating its origin and width exactly as `place` does.
-        let mut cursor = x;
-        let mut next = None;
-        for child in graph.children(node) {
-            let cw = w * child.width_us as f32 / node.width_us as f32;
-            if x_px >= cursor && x_px < cursor + cw {
-                next = Some((child, cursor, cw));
-                break;
-            }
-            cursor += cw;
-        }
-        let (child, cx, cw) = next?;
-        node = child;
-        x = cx;
-        w = cw;
     }
 }
 
@@ -1511,7 +1548,7 @@ mod tests {
             vec![action("CppCompile", 0, 100), action("Rustc", 100, 50)],
         )]);
         let g = build_flame_graph(&p, Scope::All);
-        let boxes = lay_out_flame(&g, 300.0, &METRICS, 0.0);
+        let boxes = lay_out_flame(&g, 300.0, 0.0, 300.0, &METRICS, 0.0);
         let root_box = &boxes[0];
         assert_eq!(root_box.w, 300.0);
         assert_eq!(root_box.y, 0.0);
@@ -1527,21 +1564,77 @@ mod tests {
     }
 
     #[test]
-    fn sub_min_boxes_are_dropped_without_shifting_siblings() {
+    fn sub_pixel_boxes_widen_to_markers_and_coalesce() {
+        // Over 100px: "wide" fills most of the row; "aaa" and "bbb" are each
+        // sub-pixel and land in the same trailing column.
         let p = profile(vec![track(
             1,
             LaneClass::Execution,
-            vec![action("Wide", 0, 990), action("Thin", 990, 10)],
+            vec![
+                action("wide", 0, 500),
+                action("aaa", 500, 1),
+                action("bbb", 501, 1),
+            ],
         )]);
         let g = build_flame_graph(&p, Scope::All);
-        // 1000us over 100px: Thin is 1px wide, below a 5px floor.
-        let boxes = lay_out_flame(&g, 100.0, &METRICS, 5.0);
-        assert!(boxes.iter().any(|b| g.str(b.name) == "Wide"));
-        assert!(!boxes.iter().any(|b| g.str(b.name) == "Thin"));
-        let wide = boxes.iter().find(|b| g.str(b.name) == "Wide").unwrap();
-        // Wide keeps its proportional slot; Thin's omission does not move it.
+        // Fully visible: 100px wide graph, no scroll, 100px viewport.
+        let boxes = lay_out_flame(&g, 100.0, 0.0, 100.0, &METRICS, 1.0);
+        let wide = boxes.iter().find(|b| g.str(b.name) == "wide").unwrap();
+        // Wide keeps its proportional slot at the left.
         assert_eq!(wide.x, 0.0);
-        assert!((wide.w - 99.0).abs() < 1e-3);
+        assert!(wide.w > 1.0);
+        // The first sub-pixel box widens to a one-pixel marker rather than
+        // vanishing; the second coalesces into its column and is dropped.
+        let aaa = boxes.iter().find(|b| g.str(b.name) == "aaa").unwrap();
+        assert_eq!(aaa.w, 1.0);
+        assert!(!boxes.iter().any(|b| g.str(b.name) == "bbb"));
+    }
+
+    #[test]
+    fn deepest_sub_pixel_sibling_wins_its_column() {
+        // Two sub-pixel siblings in one column: "shallow" is a leaf and sorts
+        // first (wider), "deep" is narrower but nests "deepchild". The column
+        // must show "deep"'s spike, not the leftmost "shallow"'s, so its depth
+        // stays put as the zoom shifts which sibling leads.
+        let p = profile(vec![track(
+            1,
+            LaneClass::Execution,
+            vec![
+                slice("pad", "general information", 0, 990),
+                slice("shallow", "general information", 990, 6),
+                slice("deep", "general information", 996, 4),
+                slice("deepchild", "general information", 996, 1),
+            ],
+        )]);
+        let g = build_flame_graph(&p, Scope::All);
+        let boxes = lay_out_flame(&g, 100.0, 0.0, 100.0, &METRICS, 1.0);
+        assert!(boxes.iter().any(|b| g.str(b.name) == "pad"));
+        assert!(boxes.iter().any(|b| g.str(b.name) == "deep"));
+        assert!(boxes.iter().any(|b| g.str(b.name) == "deepchild"));
+        // The shallower leftmost sibling is dropped in favour of the deeper one.
+        assert!(!boxes.iter().any(|b| g.str(b.name) == "shallow"));
+    }
+
+    #[test]
+    fn lay_out_is_viewport_relative_and_culls_off_screen() {
+        // A wide graph scrolled so only its right half shows.
+        let p = profile(vec![track(
+            1,
+            LaneClass::Execution,
+            vec![action("left", 0, 100), action("right", 100, 100)],
+        )]);
+        let g = build_flame_graph(&p, Scope::All);
+        // 1000px content, scrolled 600px into a 400px viewport: the window covers
+        // content [600, 1000) — the right half. "left" (content [0, 500)) is fully
+        // off-screen; "right" (content [500, 1000)) shows from its middle.
+        let boxes = lay_out_flame(&g, 1000.0, 600.0, 400.0, &METRICS, 1.0);
+        assert!(!boxes.iter().any(|b| g.str(b.name) == "left"));
+        let right = boxes.iter().find(|b| g.str(b.name) == "right").unwrap();
+        // Its content x is 500; viewport-relative that is 500 - 600 = -100 (still
+        // within the -view_w margin, so unclamped).
+        assert_eq!(right.x, -100.0);
+        // The root spans the whole content from far left, clamped to the margin.
+        assert_eq!(boxes[0].x, -400.0);
     }
 
     #[test]
@@ -1558,60 +1651,6 @@ mod tests {
         )]);
         let g = build_flame_graph(&p, Scope::All);
         assert_eq!(flame_height(&g, &METRICS), 30.0);
-    }
-
-    #[test]
-    fn flame_box_at_agrees_with_lay_out_flame() {
-        // A multi-level time-contained tree so the descent is exercised across
-        // depths: two disjoint actions, each containing a sub-span.
-        let p = profile(vec![track(
-            1,
-            LaneClass::Execution,
-            vec![
-                action("CppCompile", 0, 100),
-                slice("Action.execute", "general information", 0, 90),
-                action("Rustc", 100, 80),
-                slice("subprocess.run", "subprocess run", 100, 60),
-            ],
-        )]);
-        let g = build_flame_graph(&p, Scope::All);
-        let width = 600.0;
-        let min_px = 1.0;
-        let boxes = lay_out_flame(&g, width, &METRICS, min_px);
-        // For every laid-out box, a probe at its center maps back to it.
-        for b in &boxes {
-            let probe_x = b.x + b.w / 2.0;
-            let hit = flame_box_at(&g, probe_x, b.depth, width, &METRICS, min_px);
-            assert_eq!(hit.as_ref(), Some(b), "probe at depth {} x {probe_x}", b.depth);
-        }
-        // Outside the content width yields nothing.
-        assert_eq!(flame_box_at(&g, -1.0, 0, width, &METRICS, min_px), None);
-        assert_eq!(flame_box_at(&g, width, 0, width, &METRICS, min_px), None);
-        // A depth past the tree under a real x yields nothing.
-        let deep = g.nodes().iter().map(|n| n.depth).max().unwrap() + 1;
-        assert_eq!(flame_box_at(&g, 1.0, deep, width, &METRICS, min_px), None);
-    }
-
-    #[test]
-    fn flame_box_at_omits_sub_min_boxes() {
-        // 1000us over 100px: Thin is 1px wide, below a 5px floor — both
-        // lay_out_flame and the descent omit it at Thin's depth and x.
-        let p = profile(vec![track(
-            1,
-            LaneClass::Execution,
-            vec![action("Wide", 0, 990), action("Thin", 990, 10)],
-        )]);
-        let g = build_flame_graph(&p, Scope::All);
-        let width = 100.0;
-        let min_px = 5.0;
-        // Thin sits at depth 1, x in [99, 100); probe its center.
-        assert_eq!(flame_box_at(&g, 99.5, 1, width, &METRICS, min_px), None);
-        // Its Wide sibling at the same depth is found.
-        let wide = lay_out_flame(&g, width, &METRICS, min_px)
-            .into_iter()
-            .find(|b| g.str(b.name) == "Wide")
-            .unwrap();
-        assert_eq!(flame_box_at(&g, 1.0, 1, width, &METRICS, min_px), Some(wide));
     }
 
     #[test]
