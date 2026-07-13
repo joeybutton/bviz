@@ -20,7 +20,7 @@ use gpui::{
     Entity, FocusHandle, Hsla, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent,
     MouseUpEvent, PathBuilder, Pixels, Point, Render, Rgba, ScrollDelta, ScrollWheelEvent,
     ScrollHandle, SharedString, Stateful, Subscription, Task, TextAlign, Transformation,
-    UniformListScrollHandle,
+    TransformationMatrix, UniformListScrollHandle,
     Window, canvas, deferred, div, hsla, percentage, point, prelude::*, px, quad, size, uniform_list,
 };
 use std::cell::{Cell, RefCell};
@@ -501,6 +501,8 @@ const GROUP_ORDER: [LaneClass; 7] = [
 
 /// Height of a group header band and of a group's "show more" row.
 const GROUP_BAND_HEIGHT: f32 = 18.0;
+/// Side of the show-all icon at a group band's gutter edge.
+const GROUP_ICON: f32 = 12.0;
 /// Lanes shown per group before the rest fold behind the band's show-all toggle.
 const TOP_N_PER_GROUP: usize = 12;
 
@@ -1194,11 +1196,8 @@ impl TraceView {
                         ));
                     }
                     // Group header bands read across the full width as section
-                    // dividers; their gutter labels paint later. A capped,
-                    // expanded group carries a show-all/show-busiest toggle in its
-                    // time half.
-                    let band_font = bviz_ui_assets::text_metrics(window).font;
-                    let band_fs = px(GUTTER_LABEL_SIZE);
+                    // dividers; their gutter labels and show-all icon paint later,
+                    // over the opaque gutter.
                     for band in &chrome.bands {
                         let y = regions.flame_top + band.top - scroll;
                         window.paint_quad(quad(
@@ -1212,30 +1211,6 @@ impl TraceView {
                             Hsla::from(palette.border),
                             BorderStyle::Solid,
                         ));
-                        if band.capped && !band.collapsed {
-                            let text = if band.show_all {
-                                format!("show busiest {TOP_N_PER_GROUP}")
-                            } else {
-                                format!("show all {}", band.total)
-                            };
-                            let ty = y + (GROUP_BAND_HEIGHT - GUTTER_LABEL_SIZE) / 2.0;
-                            let line = shape_truncated(
-                                &text,
-                                regions.time_w,
-                                band_font.clone(),
-                                band_fs,
-                                palette.marker.into(),
-                                window,
-                            );
-                            let _ = line.paint(
-                                point(px(regions.content_left + SLICE_TEXT_PAD), px(ty)),
-                                band_fs,
-                                TextAlign::Left,
-                                None,
-                                window,
-                                cx,
-                            );
-                        }
                     }
                     for vs in visible_slices(&profile, layout, &tv, &vp, &METRICS, MIN_SLICE_PX) {
                         let track = &profile.threads()[vs.track];
@@ -2762,9 +2737,10 @@ impl TraceView {
         let content_y = y - regions.flame_top + self.scroll_y.get();
         let hits = |top: f32| content_y >= top && content_y < top + GROUP_BAND_HEIGHT;
         let band = chrome.bands.iter().find(|b| hits(b.top))?;
-        // The time half of a capped, expanded group's band toggles show-all; the
-        // gutter half (and any other band) toggles collapse.
-        if band.capped && !band.collapsed && x >= regions.content_left {
+        // The show-all icon sits at the gutter's right edge on a capped, expanded
+        // group; a press there toggles show-all, anywhere else toggles collapse.
+        let icon_left = regions.content_left - GROUP_ICON - 2.0 * SLICE_TEXT_PAD;
+        if band.capped && !band.collapsed && x >= icon_left && x < regions.content_left {
             Some(GroupHit::ShowAll(band.group))
         } else {
             Some(GroupHit::Collapse(band.group))
@@ -3616,14 +3592,15 @@ fn paint_gutter(
             label(profile.str(profile.threads()[lane.track].name), ty, window, cx);
         }
         // Group header bands carry a chevron, the class name, and the shown/total
-        // lane count in the emphasis color; each capped group's show-more row sits
-        // below its lanes.
+        // lane count; a capped, expanded group shows a caret-double icon at the
+        // gutter's right edge — down to show every lane, up to show the busiest.
         let strong = palette.label.into();
         for band in &chrome.bands {
             let top = regions.flame_top + band.top - scroll_y;
             if top + GROUP_BAND_HEIGHT < regions.flame_top || top > regions.flame_bottom {
                 continue;
             }
+            let show_icon = band.capped && !band.collapsed;
             let chevron = if band.collapsed { "▸" } else { "▾" };
             let text = if band.collapsed {
                 format!("{chevron} {}  {}", group_label(band.class), band.total)
@@ -3631,7 +3608,9 @@ fn paint_gutter(
                 format!("{chevron} {}  {}/{}", group_label(band.class), band.shown, band.total)
             };
             let ty = top + (GROUP_BAND_HEIGHT - GUTTER_LABEL_SIZE) / 2.0;
-            let line = shape_truncated(&text, avail, font.clone(), fs, strong, window);
+            // Keep the label clear of the icon when one is drawn.
+            let label_avail = if show_icon { avail - GROUP_ICON - SLICE_TEXT_PAD } else { avail };
+            let line = shape_truncated(&text, label_avail, font.clone(), fs, strong, window);
             let _ = line.paint(
                 point(px(gutter_left + SLICE_TEXT_PAD), px(ty)),
                 fs,
@@ -3640,6 +3619,19 @@ fn paint_gutter(
                 window,
                 cx,
             );
+            if show_icon {
+                let name = if band.show_all { "caret-double-up" } else { "caret-double-down" };
+                let ix = gutter_left + gutter_width - GROUP_ICON - SLICE_TEXT_PAD;
+                let iy = top + (GROUP_BAND_HEIGHT - GROUP_ICON) / 2.0;
+                let _ = window.paint_svg(
+                    Bounds::new(point(px(ix), px(iy)), size(px(GROUP_ICON), px(GROUP_ICON))),
+                    SharedString::from(format!("assets/regular/{name}.svg")),
+                    None,
+                    TransformationMatrix::default(),
+                    palette.marker.into(),
+                    cx,
+                );
+            }
         }
     });
 

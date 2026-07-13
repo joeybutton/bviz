@@ -1,6 +1,8 @@
 filegroup(
     name = "icons",
     srcs = [
+        "assets/regular/caret-double-down.svg",
+        "assets/regular/caret-double-up.svg",
         "assets/regular/caret-down.svg",
         "assets/regular/caret-up.svg",
         "assets/regular/circle-notch.svg",
