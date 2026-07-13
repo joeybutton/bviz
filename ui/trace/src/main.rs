@@ -769,6 +769,10 @@ struct TraceView {
     /// [`GROUP_ORDER`]. Loading starts collapsed — it holds one lane per external
     /// repository, hundreds on a large build.
     collapsed_groups: [bool; GROUP_ORDER.len()],
+    /// Which lane-class groups are folded in the tracks menu, indexed likewise;
+    /// independent of the chart's collapse so the menu can manage a group's
+    /// visibility while its lanes are collapsed in the chart.
+    menu_collapsed_groups: [bool; GROUP_ORDER.len()],
     /// Which groups show every lane rather than the [`TOP_N_PER_GROUP`] busiest,
     /// indexed by [`GROUP_ORDER`].
     group_show_all: [bool; GROUP_ORDER.len()],
@@ -911,6 +915,7 @@ impl TraceView {
             visible_tracks: Vec::new(),
             selected_tracks: Vec::new(),
             collapsed_groups: default_collapsed_groups(),
+            menu_collapsed_groups: default_collapsed_groups(),
             group_show_all: [false; GROUP_ORDER.len()],
             selection_version: 0,
             select_anchor: None,
@@ -949,6 +954,7 @@ impl TraceView {
     fn init_tracks(&mut self, profile: &Profile) {
         self.visible_tracks = vec![true; profile.threads().len()];
         self.collapsed_groups = default_collapsed_groups();
+        self.menu_collapsed_groups = default_collapsed_groups();
         self.group_show_all = [false; GROUP_ORDER.len()];
         self.selected_tracks = profile
             .threads()
@@ -1525,9 +1531,13 @@ impl TraceView {
                     .cmp(&activity(a))
                     .then(threads[a].tid.cmp(&threads[b].tid))
             });
-            let group_all_visible = tracks
+            let n_visible = tracks
                 .iter()
-                .all(|&t| self.visible_tracks.get(t).copied().unwrap_or(true));
+                .filter(|&&t| self.visible_tracks.get(t).copied().unwrap_or(true))
+                .count();
+            let group_all_visible = n_visible == tracks.len();
+            let folded = self.menu_collapsed_groups.get(group).copied().unwrap_or(false);
+            let chevron = if folded { "▸" } else { "▾" };
             rows.push(
                 div()
                     .id(SharedString::from(format!("track-group-{group}")))
@@ -1541,14 +1551,36 @@ impl TraceView {
                     .cursor_pointer()
                     .text_color(palette.label)
                     .hover(move |s| s.bg(hover_bg))
+                    // The header folds the list; its trailing control toggles the
+                    // group's visibility without also folding.
                     .on_click(cx.listener(move |this, _, _, cx| {
-                        this.set_group_visible(group, !group_all_visible);
+                        this.toggle_menu_group_collapsed(group);
                         cx.notify();
                     }))
-                    .child(format!("{}  {}", group_label(class), tracks.len()))
-                    .child(if group_all_visible { "hide" } else { "show" })
+                    .child(format!(
+                        "{chevron} {}  {}/{}",
+                        group_label(class),
+                        n_visible,
+                        tracks.len()
+                    ))
+                    .child(
+                        div()
+                            .id(SharedString::from(format!("track-group-vis-{group}")))
+                            .px_1()
+                            .rounded_sm()
+                            .hover(move |s| s.bg(selected))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                cx.stop_propagation();
+                                this.set_group_visible(group, !group_all_visible);
+                                cx.notify();
+                            }))
+                            .child(if group_all_visible { "hide" } else { "show" }),
+                    )
                     .into_any_element(),
             );
+            if folded {
+                continue;
+            }
             for i in tracks {
                 let name = profile.str(threads[i].name);
                 let visible = self.visible_tracks.get(i).copied().unwrap_or(true);
@@ -1977,6 +2009,13 @@ impl TraceView {
             }
         }
         self.invalidate_visible_lanes();
+    }
+
+    /// Folds or unfolds a lane-class group's track list in the tracks menu.
+    fn toggle_menu_group_collapsed(&mut self, group: usize) {
+        if let Some(c) = self.menu_collapsed_groups.get_mut(group) {
+            *c = !*c;
+        }
     }
 
     /// Drops the cached visible layout so it rebuilds and restacks, then clamps
