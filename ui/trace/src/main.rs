@@ -483,23 +483,163 @@ fn flame_total_height(layout: &LaneLayout) -> f32 {
 }
 
 /// The full layout restricted to the tracks `visible` admits, the kept lanes
-/// restacked from the top so hiding a lane closes its gap. A track absent from
-/// `visible` defaults to shown, so a layout never loses a lane to a stale set.
-fn filter_visible_lanes(full: &LaneLayout, visible: &[bool]) -> LaneLayout {
-    let mut lanes = Vec::with_capacity(full.lanes.len());
+/// Lane classes in the order their groups stack in the flame chart: the critical
+/// path and main thread first, then the build phases (loading, analysis,
+/// execution), then gc and the leftovers.
+const GROUP_ORDER: [LaneClass; 7] = [
+    LaneClass::CriticalPath,
+    LaneClass::Main,
+    LaneClass::RepoFetch,
+    LaneClass::Analysis,
+    LaneClass::Execution,
+    LaneClass::Gc,
+    LaneClass::Other,
+];
+
+/// Height of a group header band and of a group's "show more" row.
+const GROUP_BAND_HEIGHT: f32 = 18.0;
+/// Lanes shown per group before the rest fold behind the group's show-more row.
+const TOP_N_PER_GROUP: usize = 12;
+/// Left indent of a show-more row's label, past its group header's chevron.
+const INDENT_MORE_ROW: f32 = 10.0;
+
+/// The initial collapse state: the loading group starts collapsed, the rest open.
+fn default_collapsed_groups() -> [bool; GROUP_ORDER.len()] {
+    let mut collapsed = [false; GROUP_ORDER.len()];
+    if let Some(i) = GROUP_ORDER.iter().position(|&g| g == LaneClass::RepoFetch) {
+        collapsed[i] = true;
+    }
+    collapsed
+}
+
+/// The readable name of a lane-class group's header band.
+fn group_label(class: LaneClass) -> &'static str {
+    match class {
+        LaneClass::CriticalPath => "Critical path",
+        LaneClass::Main => "Main",
+        LaneClass::RepoFetch => "Loading",
+        LaneClass::Analysis => "Analysis",
+        LaneClass::Execution => "Execution",
+        LaneClass::Gc => "Garbage collection",
+        LaneClass::Other => "Other",
+    }
+}
+
+/// A collapsible group header in the flame chart, one per non-empty lane class,
+/// placed at `top` above its group's lanes. `shown`/`total` count the group's
+/// lanes drawn versus visible; lanes past the cap fold behind the group's
+/// [`MoreRow`].
+#[derive(Debug, Clone, Copy)]
+struct GroupBand {
+    group: usize,
+    class: LaneClass,
+    top: f32,
+    collapsed: bool,
+    shown: usize,
+    total: usize,
+}
+
+/// A group's "+N more / show fewer" row, placed at `top` below the group's shown
+/// lanes when the group holds more than [`TOP_N_PER_GROUP`] lanes.
+#[derive(Debug, Clone, Copy)]
+struct MoreRow {
+    group: usize,
+    top: f32,
+    hidden: usize,
+    show_all: bool,
+}
+
+/// The group headers and show-more rows overlaid on a grouped lane layout.
+#[derive(Debug, Clone, Default)]
+struct GroupChrome {
+    bands: Vec<GroupBand>,
+    mores: Vec<MoreRow>,
+}
+
+/// What a press on the group chrome hit: a header band (toggles collapse) or a
+/// show-more row (toggles whether the group shows every lane).
+#[derive(Debug, Clone, Copy)]
+enum GroupHit {
+    Band(usize),
+    More(usize),
+}
+
+/// The lane layout the flame chart draws: visible tracks ordered into lane-class
+/// groups, each group behind a header band and sorted by descending activity, so
+/// the busiest lanes lead and a collapsed or capped group folds its lanes away.
+/// Returns the restacked [`LaneLayout`] (its `lanes` tops leave room for the
+/// bands) and the [`GroupChrome`] painted over it. A track absent from `visible`
+/// defaults to shown.
+fn build_grouped_layout(
+    profile: &Profile,
+    full: &LaneLayout,
+    visible: &[bool],
+    collapsed: &[bool; GROUP_ORDER.len()],
+    show_all: &[bool; GROUP_ORDER.len()],
+) -> (LaneLayout, GroupChrome) {
+    let threads = profile.threads();
+    let activity = |t: usize| profile.slices(&threads[t]).len();
+    let mut lanes = Vec::new();
+    let mut chrome = GroupChrome::default();
     let mut top = 0.0;
-    for lane in &full.lanes {
-        if !visible.get(lane.track).copied().unwrap_or(true) {
+    for (group, &class) in GROUP_ORDER.iter().enumerate() {
+        let mut tracks: Vec<usize> = (0..threads.len())
+            .filter(|&t| {
+                threads[t].lane_class == class && visible.get(t).copied().unwrap_or(true)
+            })
+            .collect();
+        if tracks.is_empty() {
             continue;
         }
-        lanes.push(Lane { top, ..*lane });
-        top += lane.height + METRICS.lane_gap;
+        let total = tracks.len();
+        // Busiest first; tie-break by tid so the order is stable frame to frame.
+        tracks.sort_by(|&a, &b| {
+            activity(b)
+                .cmp(&activity(a))
+                .then(threads[a].tid.cmp(&threads[b].tid))
+        });
+        let band_top = top;
+        top += GROUP_BAND_HEIGHT + METRICS.lane_gap;
+        let is_collapsed = collapsed[group];
+        let mut shown = 0;
+        if !is_collapsed {
+            let cap = if show_all[group] {
+                tracks.len()
+            } else {
+                TOP_N_PER_GROUP.min(tracks.len())
+            };
+            for &t in &tracks[..cap] {
+                let lane = full.lanes[t];
+                lanes.push(Lane { top, ..lane });
+                top += lane.height + METRICS.lane_gap;
+            }
+            shown = cap;
+            let hidden = tracks.len() - cap;
+            if hidden > 0 {
+                chrome.mores.push(MoreRow {
+                    group,
+                    top,
+                    hidden,
+                    show_all: show_all[group],
+                });
+                top += GROUP_BAND_HEIGHT + METRICS.lane_gap;
+            }
+        }
+        chrome.bands.push(GroupBand {
+            group,
+            class,
+            top: band_top,
+            collapsed: is_collapsed,
+            shown,
+            total,
+        });
     }
-    LaneLayout {
+    let layout = LaneLayout {
         lanes,
         counters: full.counters.clone(),
-        total_height: full.total_height,
-    }
+        total_height: top,
+    };
+    (layout, chrome)
 }
 
 /// The flame metrics matching the chart's lane row height, so the graph's rows
@@ -642,6 +782,13 @@ struct TraceView {
     visible_tracks: Vec<bool>,
     /// Which tracks the flame graph and stats aggregate over, indexed likewise.
     selected_tracks: Vec<bool>,
+    /// Which lane-class groups are collapsed in the chart, indexed by
+    /// [`GROUP_ORDER`]. Loading starts collapsed — it holds one lane per external
+    /// repository, hundreds on a large build.
+    collapsed_groups: [bool; GROUP_ORDER.len()],
+    /// Which groups show every lane rather than the [`TOP_N_PER_GROUP`] busiest,
+    /// indexed by [`GROUP_ORDER`].
+    group_show_all: [bool; GROUP_ORDER.len()],
     /// Bumped whenever `selected_tracks` changes, keying the aggregate build so a
     /// stale build's result is discarded when the selection moves on.
     selection_version: u64,
@@ -656,9 +803,13 @@ struct TraceView {
     /// use. It depends only on the immutable profile, so it is cleared only when a
     /// new profile loads.
     lanes: Rc<RefCell<Option<Rc<LaneLayout>>>>,
-    /// The lane layout restricted to the visible tracks and restacked, derived
-    /// from `lanes` and cleared whenever the visibility set changes.
+    /// The lane layout restricted to the visible tracks and restacked into
+    /// lane-class groups, derived from `lanes` and cleared whenever the
+    /// visibility, collapse, or show-all state changes.
     visible_lanes: Rc<RefCell<Option<Rc<LaneLayout>>>>,
+    /// The group headers and show-more rows over `visible_lanes`, built and
+    /// cleared alongside it.
+    group_chrome: Rc<RefCell<Option<Rc<GroupChrome>>>>,
     /// The selected tracks' aggregate — its flame graph and stats rows, held
     /// together so the rows' and laid-out boxes' name handles resolve against
     /// the graph that produced them. Built on demand off the UI thread (walking
@@ -776,6 +927,8 @@ impl TraceView {
             bottom_tab: BottomTab::Counters,
             visible_tracks: Vec::new(),
             selected_tracks: Vec::new(),
+            collapsed_groups: default_collapsed_groups(),
+            group_show_all: [false; GROUP_ORDER.len()],
             selection_version: 0,
             select_anchor: None,
             tracks_menu_open: false,
@@ -783,6 +936,7 @@ impl TraceView {
             _filter_observer: filter_observer,
             lanes: Rc::new(RefCell::new(None)),
             visible_lanes: Rc::new(RefCell::new(None)),
+            group_chrome: Rc::new(RefCell::new(None)),
             aggregates: Rc::new(RefCell::new(None)),
             flame_boxes: Rc::new(RefCell::new(None)),
             agg_ready: None,
@@ -811,6 +965,8 @@ impl TraceView {
     /// the aggregate from double-counting that time.
     fn init_tracks(&mut self, profile: &Profile) {
         self.visible_tracks = vec![true; profile.threads().len()];
+        self.collapsed_groups = default_collapsed_groups();
+        self.group_show_all = [false; GROUP_ORDER.len()];
         self.selected_tracks = profile
             .threads()
             .iter()
@@ -835,6 +991,16 @@ impl TraceView {
                     // Take content focus so Ctrl-A selects tracks after a chart
                     // interaction (a click may have moved focus to the filter).
                     this.content_focus.focus(window, cx);
+                    // A press on a group header collapses or expands it; on a
+                    // show-more row, toggles whether the group shows every lane.
+                    if let Some(hit) = this.group_row_at(e.position) {
+                        match hit {
+                            GroupHit::Band(g) => this.toggle_group_collapsed(g),
+                            GroupHit::More(g) => this.toggle_group_show_all(g),
+                        }
+                        cx.notify();
+                        return;
+                    }
                     // A press on a track label selects it rather than panning;
                     // ctrl/cmd toggles it, shift extends a range.
                     if let Some(track) = this.track_label_at(e.position) {
@@ -958,7 +1124,7 @@ impl TraceView {
                 let layout = &*lanes;
                 let tv = view.get();
                 let n_counters = profile.counters().len();
-                let (tab, panel_height, gutter_width, selected, crosshair, hover, dragging) = {
+                let (tab, panel_height, gutter_width, selected, crosshair, hover, dragging, chrome) = {
                     let this = entity.read(cx);
                     (
                         this.bottom_tab,
@@ -968,6 +1134,7 @@ impl TraceView {
                         this.crosshair,
                         this.hover,
                         !matches!(this.drag, Drag::None),
+                        this.group_chrome().unwrap_or_default(),
                     )
                 };
                 let flame_total = flame_total_height(layout);
@@ -1028,6 +1195,27 @@ impl TraceView {
                             BorderStyle::Solid,
                         ));
                     }
+                    // Group header and show-more rows read across the full width
+                    // as section dividers; their gutter labels paint later.
+                    for ry in chrome
+                        .bands
+                        .iter()
+                        .map(|b| b.top)
+                        .chain(chrome.mores.iter().map(|m| m.top))
+                    {
+                        let y = regions.flame_top + ry - scroll;
+                        window.paint_quad(quad(
+                            Bounds::new(
+                                point(px(regions.content_left), px(y)),
+                                size(px(regions.time_w), px(GROUP_BAND_HEIGHT)),
+                            ),
+                            px(0.),
+                            palette.header_band,
+                            px(0.),
+                            Hsla::from(palette.border),
+                            BorderStyle::Solid,
+                        ));
+                    }
                     for vs in visible_slices(&profile, layout, &tv, &vp, &METRICS, MIN_SLICE_PX) {
                         let track = &profile.threads()[vs.track];
                         let slice = profile.slices(track)[vs.slice];
@@ -1068,6 +1256,7 @@ impl TraceView {
                 paint_gutter(
                     &profile,
                     layout,
+                    &chrome,
                     regions,
                     gutter_width,
                     scroll,
@@ -1644,16 +1833,57 @@ impl TraceView {
     }
 
     /// The lane layout the flame chart draws: the full layout restricted to the
-    /// visible tracks and restacked to close the gaps, cached until the
-    /// visibility set changes. Every paint and hit-test works from this, so a
-    /// hidden lane is neither drawn nor selectable.
+    /// visible tracks and restacked into lane-class groups, cached until the
+    /// visibility, collapse, or show-all state changes. Every paint and hit-test
+    /// works from this, so a lane hidden by its group is neither drawn nor
+    /// selectable.
     fn lane_layout(&self) -> Option<Rc<LaneLayout>> {
-        let full = self.full_lane_layout()?;
-        if self.visible_lanes.borrow().is_none() {
-            let filtered = filter_visible_lanes(&full, &self.visible_tracks);
-            *self.visible_lanes.borrow_mut() = Some(Rc::new(filtered));
-        }
+        self.ensure_grouped();
         self.visible_lanes.borrow().clone()
+    }
+
+    /// The group headers and show-more rows over [`Self::lane_layout`].
+    fn group_chrome(&self) -> Option<Rc<GroupChrome>> {
+        self.ensure_grouped();
+        self.group_chrome.borrow().clone()
+    }
+
+    /// Builds and caches the grouped lane layout and its chrome if stale.
+    fn ensure_grouped(&self) {
+        if self.visible_lanes.borrow().is_some() {
+            return;
+        }
+        let Some(full) = self.full_lane_layout() else {
+            return;
+        };
+        let Source::Loaded(profile) = &self.source else {
+            return;
+        };
+        let (layout, chrome) = build_grouped_layout(
+            profile,
+            &full,
+            &self.visible_tracks,
+            &self.collapsed_groups,
+            &self.group_show_all,
+        );
+        *self.visible_lanes.borrow_mut() = Some(Rc::new(layout));
+        *self.group_chrome.borrow_mut() = Some(Rc::new(chrome));
+    }
+
+    /// Toggles a lane-class group's collapse and rebuilds the grouped layout.
+    fn toggle_group_collapsed(&mut self, group: usize) {
+        if let Some(c) = self.collapsed_groups.get_mut(group) {
+            *c = !*c;
+            self.invalidate_visible_lanes();
+        }
+    }
+
+    /// Toggles whether a group shows every lane or only the busiest.
+    fn toggle_group_show_all(&mut self, group: usize) {
+        if let Some(s) = self.group_show_all.get_mut(group) {
+            *s = !*s;
+            self.invalidate_visible_lanes();
+        }
     }
 
     /// The number of visible tracks and the total.
@@ -1684,6 +1914,7 @@ impl TraceView {
     /// the lane scroll to the new height.
     fn invalidate_visible_lanes(&mut self) {
         self.visible_lanes.borrow_mut().take();
+        self.group_chrome.borrow_mut().take();
         let scrolled = self.scroll_y.get().min(self.max_scroll());
         self.scroll_y.set(scrolled);
     }
@@ -2336,6 +2567,39 @@ impl TraceView {
     /// The track whose gutter label lies under `pos`, if the press hit the flame
     /// chart's track-label column (below the ruler, left of the content, above
     /// the tab bar). `None` elsewhere or over a lane's empty tail.
+    /// The group header band or show-more row at `pos`, if the press lands on one
+    /// (across the full chart width, gutter included).
+    fn group_row_at(&self, pos: Point<Pixels>) -> Option<GroupHit> {
+        let layout = self.lane_layout()?;
+        let chrome = self.group_chrome()?;
+        let Source::Loaded(profile) = &self.source else {
+            return None;
+        };
+        let flame_total = flame_total_height(&layout);
+        let regions = Regions::new(
+            self.viewport.get(),
+            profile.counters().len(),
+            self.panel_height,
+            self.gutter_width,
+            flame_total,
+        );
+        let x = f32::from(pos.x);
+        let y = f32::from(pos.y);
+        let gutter_left = regions.content_left - self.gutter_width;
+        if x < gutter_left || x >= regions.content_right || y < regions.flame_top || y >= regions.flame_bottom {
+            return None;
+        }
+        let content_y = y - regions.flame_top + self.scroll_y.get();
+        let hits = |top: f32| content_y >= top && content_y < top + GROUP_BAND_HEIGHT;
+        if let Some(b) = chrome.bands.iter().find(|b| hits(b.top)) {
+            return Some(GroupHit::Band(b.group));
+        }
+        if let Some(m) = chrome.mores.iter().find(|m| hits(m.top)) {
+            return Some(GroupHit::More(m.group));
+        }
+        None
+    }
+
     fn track_label_at(&self, pos: Point<Pixels>) -> Option<usize> {
         let layout = self.lane_layout()?;
         let Source::Loaded(profile) = &self.source else {
@@ -3061,6 +3325,7 @@ fn paint_scrollbars(
 fn paint_gutter(
     profile: &Profile,
     layout: &LaneLayout,
+    chrome: &GroupChrome,
     regions: Regions,
     gutter_width: f32,
     scroll_y: f32,
@@ -3151,6 +3416,53 @@ fn paint_gutter(
             }
             let ty = top + (lane.height - GUTTER_LABEL_SIZE) / 2.0;
             label(profile.str(profile.threads()[lane.track].name), ty, window, cx);
+        }
+        // Group header bands carry a chevron, the class name, and the shown/total
+        // lane count in the emphasis color; each capped group's show-more row sits
+        // below its lanes.
+        let strong = palette.label.into();
+        for band in &chrome.bands {
+            let top = regions.flame_top + band.top - scroll_y;
+            if top + GROUP_BAND_HEIGHT < regions.flame_top || top > regions.flame_bottom {
+                continue;
+            }
+            let chevron = if band.collapsed { "▸" } else { "▾" };
+            let text = if band.collapsed {
+                format!("{chevron} {}  {}", group_label(band.class), band.total)
+            } else {
+                format!("{chevron} {}  {}/{}", group_label(band.class), band.shown, band.total)
+            };
+            let ty = top + (GROUP_BAND_HEIGHT - GUTTER_LABEL_SIZE) / 2.0;
+            let line = shape_truncated(&text, avail, font.clone(), fs, strong, window);
+            let _ = line.paint(
+                point(px(gutter_left + SLICE_TEXT_PAD), px(ty)),
+                fs,
+                TextAlign::Left,
+                None,
+                window,
+                cx,
+            );
+        }
+        for more in &chrome.mores {
+            let top = regions.flame_top + more.top - scroll_y;
+            if top + GROUP_BAND_HEIGHT < regions.flame_top || top > regions.flame_bottom {
+                continue;
+            }
+            let text = if more.show_all {
+                "▴ show fewer".to_owned()
+            } else {
+                format!("+{} more", more.hidden)
+            };
+            let ty = top + (GROUP_BAND_HEIGHT - GUTTER_LABEL_SIZE) / 2.0;
+            let line = shape_truncated(&text, avail, font.clone(), fs, palette.label.into(), window);
+            let _ = line.paint(
+                point(px(gutter_left + SLICE_TEXT_PAD + INDENT_MORE_ROW), px(ty)),
+                fs,
+                TextAlign::Left,
+                None,
+                window,
+                cx,
+            );
         }
     });
 
