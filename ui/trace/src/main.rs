@@ -1596,7 +1596,7 @@ impl TraceView {
             .occlude()
             .absolute()
             .left_0()
-            .top(px(RULER_HEIGHT))
+            .top_0()
             .w(px(TRACKS_MENU_WIDTH))
             .flex()
             .flex_col()
