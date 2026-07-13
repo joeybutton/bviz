@@ -19,7 +19,8 @@ use gpui::{
     AnyElement, Animation, AnimationExt, App, BorderStyle, Bounds, ContentMask, Context, Div, Edges,
     Entity, FocusHandle, Hsla, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent,
     MouseUpEvent, PathBuilder, Pixels, Point, Render, Rgba, ScrollDelta, ScrollWheelEvent,
-    SharedString, Stateful, Subscription, Task, TextAlign, Transformation, UniformListScrollHandle,
+    ScrollHandle, SharedString, Stateful, Subscription, Task, TextAlign, Transformation,
+    UniformListScrollHandle,
     Window, canvas, deferred, div, hsla, percentage, point, prelude::*, px, quad, size, uniform_list,
 };
 use std::cell::{Cell, RefCell};
@@ -340,6 +341,8 @@ enum Drag {
     FlameHThumb(f32),
     /// A press on the stats-table scroll thumb/track, holding that grab offset.
     StatsThumb(f32),
+    /// A press on the tracks-menu scroll thumb/track, holding that grab offset.
+    MenuThumb(f32),
     /// A press on the tab bar resizes the bottom panel.
     Splitter,
     /// A press on the gutter handle resizes the gutter.
@@ -837,6 +840,10 @@ struct TraceView {
     /// Stats-table scroll-bar geometry set during paint, read by mouse handlers;
     /// `None` when the body fits and so shows no bar.
     stats_bar: Rc<Cell<Option<Scrollbar>>>,
+    /// The tracks menu's scroll handle and its scroll-bar geometry (stashed each
+    /// frame for hit-testing), mirroring the stats table's bar.
+    menu_scroll: ScrollHandle,
+    menu_bar: Rc<Cell<Option<Scrollbar>>>,
     /// The slice under the cursor, if any, drawn as a tooltip.
     hover: Option<Hover>,
     /// The flame-graph box under the cursor in graph mode, drawn as a tooltip.
@@ -940,6 +947,8 @@ impl TraceView {
             _stats_order_task: Task::ready(()),
             stats_scroll: UniformListScrollHandle::new(),
             stats_bar: Rc::new(Cell::new(None)),
+            menu_scroll: ScrollHandle::new(),
+            menu_bar: Rc::new(Cell::new(None)),
             hover: None,
             flame_hover: None,
             crosshair: None,
@@ -1639,8 +1648,15 @@ impl TraceView {
             .shadow_lg()
             .text_size(px(GUTTER_LABEL_SIZE))
             .text_color(text)
-            // Clicks inside the menu must not reach the backdrop and close it.
-            .on_mouse_down(MouseButton::Left, |_, _, cx: &mut App| cx.stop_propagation())
+            // Clicks inside the menu must not reach the backdrop and close it; a
+            // press on the scroll bar grabs its thumb.
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, e: &MouseDownEvent, _, cx| {
+                    this.press_menu(e.position);
+                    cx.stop_propagation();
+                }),
+            )
             .child(div().p_1().child(self.track_filter.clone()))
             .child({
                 let (nvis, ntot) = self.visible_count();
@@ -1664,16 +1680,62 @@ impl TraceView {
                     }))
                     .child(if all_visible { "Hide all" } else { "Show all" })
             })
-            .child(
-                div()
+            .child({
+                let list = div()
                     .id("tracks-menu-list")
                     .flex()
                     .flex_col()
+                    .w_full()
                     .p_1()
                     .max_h(px(TRACKS_MENU_MAX_LIST))
                     .overflow_y_scroll()
-                    .children(rows),
-            );
+                    .track_scroll(&self.menu_scroll)
+                    .children(rows);
+                // A scroll bar over the list's right edge reads the list's scroll
+                // handle to place the thumb and stashes the geometry for the
+                // menu's press hit-test.
+                let menu_scroll = self.menu_scroll.clone();
+                let menu_bar = self.menu_bar.clone();
+                let entity = cx.entity();
+                let dragging = matches!(self.drag, Drag::MenuThumb(_));
+                let (track, thumb) = (palette.scroll_track, palette.scroll_thumb);
+                let bar = canvas(
+                    move |_, _, _| {},
+                    move |bounds, _, window: &mut Window, _| {
+                        let visible = f32::from(bounds.size.height);
+                        let content = visible + f32::from(menu_scroll.max_offset().y);
+                        let offset = -f32::from(menu_scroll.offset().y);
+                        let layout = Scrollbar::new(
+                            Axis::Vertical,
+                            Bounds::new(
+                                point(
+                                    bounds.origin.x + bounds.size.width - px(BAR_WIDTH),
+                                    bounds.origin.y,
+                                ),
+                                size(px(BAR_WIDTH), bounds.size.height),
+                            ),
+                            content,
+                            visible,
+                            offset,
+                            MIN_THUMB,
+                        );
+                        if let Some(bar) = layout {
+                            bar.paint(track, thumb, window);
+                        }
+                        menu_bar.set(layout);
+                        if dragging {
+                            track_drag(window, &entity, on_drag, end_drag);
+                        }
+                    },
+                );
+                div()
+                    .relative()
+                    .w_full()
+                    .flex()
+                    .min_h_0()
+                    .child(list)
+                    .child(bar.absolute().inset_0())
+            });
         // A backdrop the size of the viewport catches an outside click; the menu
         // paints over it.
         let backdrop = div()
@@ -2928,6 +2990,21 @@ impl TraceView {
         }
     }
 
+    /// If `pos` hits the tracks-menu scroll bar, grabs its thumb (or jumps the
+    /// track to it). Returns whether the press was consumed by the bar.
+    fn press_menu(&mut self, pos: Point<Pixels>) -> bool {
+        let Some(bar) = self.menu_bar.get() else {
+            return false;
+        };
+        if !bar.track_hit(pos) {
+            return false;
+        }
+        let grab = bar.grab(pos);
+        self.drag = Drag::MenuThumb(grab);
+        menu_thumb_to(self, pos, grab);
+        true
+    }
+
     /// Maps a flame-graph panel horizontal thumb drag to its normalized scroll.
     fn flame_hthumb_to(&mut self, pos: Point<Pixels>, grab: f32) {
         let (Some(bar), Some(fl)) = (self.flame_hbar.get(), self.flame_layout()) else {
@@ -3048,6 +3125,7 @@ fn on_drag(view: &mut TraceView, event: &MouseMoveEvent, cx: &mut Context<TraceV
         Drag::FlameVThumb(grab) => flame_scroll_thumb_to(view, event.position, grab),
         Drag::FlameHThumb(grab) => view.flame_hthumb_to(event.position, grab),
         Drag::StatsThumb(grab) => stats_thumb_to(view, event.position, grab),
+        Drag::MenuThumb(grab) => menu_thumb_to(view, event.position, grab),
         Drag::Splitter => {
             let Source::Loaded(profile) = &view.source else {
                 return;
@@ -3107,6 +3185,17 @@ fn stats_thumb_to(view: &mut TraceView, pos: Point<Pixels>, grab: f32) {
     let mut offset = handle.base_handle.offset();
     offset.y = px(-bar.offset_at(pos, grab));
     handle.base_handle.set_offset(offset);
+}
+
+/// Maps a tracks-menu thumb drag back to the list's scroll offset (negative y as
+/// the list scrolls down).
+fn menu_thumb_to(view: &mut TraceView, pos: Point<Pixels>, grab: f32) {
+    let Some(bar) = view.menu_bar.get() else {
+        return;
+    };
+    let mut offset = view.menu_scroll.offset();
+    offset.y = px(-bar.offset_at(pos, grab));
+    view.menu_scroll.set_offset(offset);
 }
 
 /// Maps a horizontal thumb drag back to a pan start time, then clamps the view.
