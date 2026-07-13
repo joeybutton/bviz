@@ -498,10 +498,8 @@ const GROUP_ORDER: [LaneClass; 7] = [
 
 /// Height of a group header band and of a group's "show more" row.
 const GROUP_BAND_HEIGHT: f32 = 18.0;
-/// Lanes shown per group before the rest fold behind the group's show-more row.
+/// Lanes shown per group before the rest fold behind the band's show-all toggle.
 const TOP_N_PER_GROUP: usize = 12;
-/// Left indent of a show-more row's label, past its group header's chevron.
-const INDENT_MORE_ROW: f32 = 10.0;
 
 /// The initial collapse state: the loading group starts collapsed, the rest open.
 fn default_collapsed_groups() -> [bool; GROUP_ORDER.len()] {
@@ -527,8 +525,8 @@ fn group_label(class: LaneClass) -> &'static str {
 
 /// A collapsible group header in the flame chart, one per non-empty lane class,
 /// placed at `top` above its group's lanes. `shown`/`total` count the group's
-/// lanes drawn versus visible; lanes past the cap fold behind the group's
-/// [`MoreRow`].
+/// lanes drawn versus visible; a group with more than [`TOP_N_PER_GROUP`] visible
+/// lanes is `capped`, showing only the busiest until `show_all`.
 #[derive(Debug, Clone, Copy)]
 struct GroupBand {
     group: usize,
@@ -537,31 +535,23 @@ struct GroupBand {
     collapsed: bool,
     shown: usize,
     total: usize,
-}
-
-/// A group's "+N more / show fewer" row, placed at `top` below the group's shown
-/// lanes when the group holds more than [`TOP_N_PER_GROUP`] lanes.
-#[derive(Debug, Clone, Copy)]
-struct MoreRow {
-    group: usize,
-    top: f32,
-    hidden: usize,
+    capped: bool,
     show_all: bool,
 }
 
-/// The group headers and show-more rows overlaid on a grouped lane layout.
+/// The group headers overlaid on a grouped lane layout.
 #[derive(Debug, Clone, Default)]
 struct GroupChrome {
     bands: Vec<GroupBand>,
-    mores: Vec<MoreRow>,
 }
 
-/// What a press on the group chrome hit: a header band (toggles collapse) or a
-/// show-more row (toggles whether the group shows every lane).
+/// What a press on a group header band hit: its gutter half (toggles the group's
+/// collapse) or, for a capped expanded group, its time half (toggles whether the
+/// group shows every lane or only the busiest).
 #[derive(Debug, Clone, Copy)]
 enum GroupHit {
-    Band(usize),
-    More(usize),
+    Collapse(usize),
+    ShowAll(usize),
 }
 
 /// The lane layout the flame chart draws: visible tracks ordered into lane-class
@@ -601,6 +591,7 @@ fn build_grouped_layout(
         let band_top = top;
         top += GROUP_BAND_HEIGHT + METRICS.lane_gap;
         let is_collapsed = collapsed[group];
+        let capped = total > TOP_N_PER_GROUP;
         let mut shown = 0;
         if !is_collapsed {
             let cap = if show_all[group] {
@@ -614,16 +605,6 @@ fn build_grouped_layout(
                 top += lane.height + METRICS.lane_gap;
             }
             shown = cap;
-            let hidden = tracks.len() - cap;
-            if hidden > 0 {
-                chrome.mores.push(MoreRow {
-                    group,
-                    top,
-                    hidden,
-                    show_all: show_all[group],
-                });
-                top += GROUP_BAND_HEIGHT + METRICS.lane_gap;
-            }
         }
         chrome.bands.push(GroupBand {
             group,
@@ -632,6 +613,8 @@ fn build_grouped_layout(
             collapsed: is_collapsed,
             shown,
             total,
+            capped,
+            show_all: show_all[group],
         });
     }
     let layout = LaneLayout {
@@ -995,8 +978,8 @@ impl TraceView {
                     // show-more row, toggles whether the group shows every lane.
                     if let Some(hit) = this.group_row_at(e.position) {
                         match hit {
-                            GroupHit::Band(g) => this.toggle_group_collapsed(g),
-                            GroupHit::More(g) => this.toggle_group_show_all(g),
+                            GroupHit::Collapse(g) => this.toggle_group_collapsed(g),
+                            GroupHit::ShowAll(g) => this.toggle_group_show_all(g),
                         }
                         cx.notify();
                         return;
@@ -1195,15 +1178,14 @@ impl TraceView {
                             BorderStyle::Solid,
                         ));
                     }
-                    // Group header and show-more rows read across the full width
-                    // as section dividers; their gutter labels paint later.
-                    for ry in chrome
-                        .bands
-                        .iter()
-                        .map(|b| b.top)
-                        .chain(chrome.mores.iter().map(|m| m.top))
-                    {
-                        let y = regions.flame_top + ry - scroll;
+                    // Group header bands read across the full width as section
+                    // dividers; their gutter labels paint later. A capped,
+                    // expanded group carries a show-all/show-busiest toggle in its
+                    // time half.
+                    let band_font = bviz_ui_assets::text_metrics(window).font;
+                    let band_fs = px(GUTTER_LABEL_SIZE);
+                    for band in &chrome.bands {
+                        let y = regions.flame_top + band.top - scroll;
                         window.paint_quad(quad(
                             Bounds::new(
                                 point(px(regions.content_left), px(y)),
@@ -1215,6 +1197,30 @@ impl TraceView {
                             Hsla::from(palette.border),
                             BorderStyle::Solid,
                         ));
+                        if band.capped && !band.collapsed {
+                            let text = if band.show_all {
+                                format!("show busiest {TOP_N_PER_GROUP}")
+                            } else {
+                                format!("show all {}", band.total)
+                            };
+                            let ty = y + (GROUP_BAND_HEIGHT - GUTTER_LABEL_SIZE) / 2.0;
+                            let line = shape_truncated(
+                                &text,
+                                regions.time_w,
+                                band_font.clone(),
+                                band_fs,
+                                palette.marker.into(),
+                                window,
+                            );
+                            let _ = line.paint(
+                                point(px(regions.content_left + SLICE_TEXT_PAD), px(ty)),
+                                band_fs,
+                                TextAlign::Left,
+                                None,
+                                window,
+                                cx,
+                            );
+                        }
                     }
                     for vs in visible_slices(&profile, layout, &tv, &vp, &METRICS, MIN_SLICE_PX) {
                         let track = &profile.threads()[vs.track];
@@ -2654,13 +2660,14 @@ impl TraceView {
         }
         let content_y = y - regions.flame_top + self.scroll_y.get();
         let hits = |top: f32| content_y >= top && content_y < top + GROUP_BAND_HEIGHT;
-        if let Some(b) = chrome.bands.iter().find(|b| hits(b.top)) {
-            return Some(GroupHit::Band(b.group));
+        let band = chrome.bands.iter().find(|b| hits(b.top))?;
+        // The time half of a capped, expanded group's band toggles show-all; the
+        // gutter half (and any other band) toggles collapse.
+        if band.capped && !band.collapsed && x >= regions.content_left {
+            Some(GroupHit::ShowAll(band.group))
+        } else {
+            Some(GroupHit::Collapse(band.group))
         }
-        if let Some(m) = chrome.mores.iter().find(|m| hits(m.top)) {
-            return Some(GroupHit::More(m.group));
-        }
-        None
     }
 
     fn track_label_at(&self, pos: Point<Pixels>) -> Option<usize> {
@@ -3499,27 +3506,6 @@ fn paint_gutter(
             let line = shape_truncated(&text, avail, font.clone(), fs, strong, window);
             let _ = line.paint(
                 point(px(gutter_left + SLICE_TEXT_PAD), px(ty)),
-                fs,
-                TextAlign::Left,
-                None,
-                window,
-                cx,
-            );
-        }
-        for more in &chrome.mores {
-            let top = regions.flame_top + more.top - scroll_y;
-            if top + GROUP_BAND_HEIGHT < regions.flame_top || top > regions.flame_bottom {
-                continue;
-            }
-            let text = if more.show_all {
-                "▴ show fewer".to_owned()
-            } else {
-                format!("+{} more", more.hidden)
-            };
-            let ty = top + (GROUP_BAND_HEIGHT - GUTTER_LABEL_SIZE) / 2.0;
-            let line = shape_truncated(&text, avail, font.clone(), fs, palette.label.into(), window);
-            let _ = line.paint(
-                point(px(gutter_left + SLICE_TEXT_PAD + INDENT_MORE_ROW), px(ty)),
                 fs,
                 TextAlign::Left,
                 None,
