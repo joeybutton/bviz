@@ -1498,15 +1498,53 @@ impl TraceView {
         let (selected, container, text) = (colors.selected, colors.container, colors.text);
         let hover_bg = bviz_ui_theme::mix(colors.container, colors.background, 0.2);
         let filter = self.track_filter.read(cx).content().to_lowercase();
-        let rows: Vec<_> = profile
-            .threads()
-            .iter()
-            .enumerate()
-            .filter_map(|(i, thread)| {
-                let name = profile.str(thread.name);
-                if !filter.is_empty() && !name.to_lowercase().contains(&filter) {
-                    return None;
-                }
+        let threads = profile.threads();
+        let activity = |t: usize| profile.slices(&threads[t]).len();
+        // Tracks under their lane-class group headers, each group's tracks sorted
+        // busiest first — the same grouping and order the chart lays out.
+        let mut rows: Vec<gpui::AnyElement> = Vec::new();
+        for (group, &class) in GROUP_ORDER.iter().enumerate() {
+            let mut tracks: Vec<usize> = (0..threads.len())
+                .filter(|&t| threads[t].lane_class == class)
+                .filter(|&t| {
+                    filter.is_empty()
+                        || profile.str(threads[t].name).to_lowercase().contains(&filter)
+                })
+                .collect();
+            if tracks.is_empty() {
+                continue;
+            }
+            tracks.sort_by(|&a, &b| {
+                activity(b)
+                    .cmp(&activity(a))
+                    .then(threads[a].tid.cmp(&threads[b].tid))
+            });
+            let group_all_visible = tracks
+                .iter()
+                .all(|&t| self.visible_tracks.get(t).copied().unwrap_or(true));
+            rows.push(
+                div()
+                    .id(SharedString::from(format!("track-group-{group}")))
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .justify_between()
+                    .mt_1()
+                    .px_2()
+                    .py_1()
+                    .cursor_pointer()
+                    .text_color(palette.label)
+                    .hover(move |s| s.bg(hover_bg))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.set_group_visible(group, !group_all_visible);
+                        cx.notify();
+                    }))
+                    .child(format!("{}  {}", group_label(class), tracks.len()))
+                    .child(if group_all_visible { "hide" } else { "show" })
+                    .into_any_element(),
+            );
+            for i in tracks {
+                let name = profile.str(threads[i].name);
                 let visible = self.visible_tracks.get(i).copied().unwrap_or(true);
                 let check = div()
                     .size(px(13.))
@@ -1515,14 +1553,15 @@ impl TraceView {
                     .border_1()
                     .border_color(palette.label)
                     .when(visible, |c| c.bg(selected).border_color(selected));
-                Some(
+                rows.push(
                     div()
                         .id(SharedString::from(format!("track-row-{i}")))
                         .flex()
                         .flex_row()
                         .items_center()
                         .gap_2()
-                        .px_2()
+                        .pl_4()
+                        .pr_2()
                         .py_1()
                         .cursor_pointer()
                         .rounded_sm()
@@ -1540,10 +1579,11 @@ impl TraceView {
                                 .whitespace_nowrap()
                                 .text_ellipsis()
                                 .child(name.to_string()),
-                        ),
-                )
-            })
-            .collect();
+                        )
+                        .into_any_element(),
+                );
+            }
+        }
 
         let viewport = self.viewport.get();
         let menu = div()
@@ -1906,6 +1946,29 @@ impl TraceView {
     fn set_all_visible(&mut self, visible: bool) {
         for v in &mut self.visible_tracks {
             *v = visible;
+        }
+        self.invalidate_visible_lanes();
+    }
+
+    /// Shows or hides every track in one lane-class group at once.
+    fn set_group_visible(&mut self, group: usize, visible: bool) {
+        let class = GROUP_ORDER[group];
+        let targets: Vec<usize> = {
+            let Source::Loaded(profile) = &self.source else {
+                return;
+            };
+            profile
+                .threads()
+                .iter()
+                .enumerate()
+                .filter(|(_, t)| t.lane_class == class)
+                .map(|(i, _)| i)
+                .collect()
+        };
+        for i in targets {
+            if let Some(v) = self.visible_tracks.get_mut(i) {
+                *v = visible;
+            }
         }
         self.invalidate_visible_lanes();
     }
