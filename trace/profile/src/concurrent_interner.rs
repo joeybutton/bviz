@@ -333,7 +333,11 @@ mod tests {
     /// threads, one handle per distinct text and one text per distinct handle.
     #[test]
     fn multi_thread_yields_one_handle_per_text() {
-        const THREADS: usize = 8;
+        // The arena reserves final-page headroom for `worker_count()` writers
+        // (the parallel parse's writer count), so spawning more writers than that
+        // can overflow it once enough of them grab a page. Match that count, with
+        // a floor of two so this stays a concurrency test on a single core.
+        let threads = crate::worker_count().max(2);
         const DISTINCT: usize = 5000;
         let long = "z".repeat(1024);
         // A key each thread can reach, so the same strings recur across threads.
@@ -346,7 +350,7 @@ mod tests {
         };
         let interner = ConcurrentInterner::new(DISTINCT * 64, DISTINCT);
         let produced: Vec<Vec<(String, Str)>> = std::thread::scope(|scope| {
-            let handles: Vec<_> = (0..THREADS)
+            let handles: Vec<_> = (0..threads)
                 .map(|t| {
                     let interner = &interner;
                     let key = &key;
