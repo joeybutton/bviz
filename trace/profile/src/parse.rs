@@ -13,7 +13,7 @@ use serde_json::{Map, Value};
 
 use crate::concurrent_interner::{ConcurrentInterner, Writer};
 use crate::model::{
-    lane_class, work_class, CounterLane, CounterPoint, CounterSeries, Metadata, PhaseMarker,
+    lane_class, span_role, CounterLane, CounterPoint, CounterSeries, Metadata, PhaseMarker,
     Profile, ProfileParts, Slice, SliceDetail, Span32, Str, ThreadTrack, TimeSpan,
 };
 
@@ -1236,13 +1236,15 @@ impl Builder {
                 } else {
                     let tid = ev.tid.unwrap_or(0);
                     let category = ev.cat.as_deref().unwrap_or("");
-                    let work_class = work_class(category);
+                    let name = ev.name.as_deref().unwrap_or("");
+                    let role = span_role(category, name);
+                    let name = interner.intern(name);
                     let category = interner.intern(category);
                     let detail = build_slice_detail(interner, &mut self.args_pool, category, args);
                     self.staging.push((
                         tid,
                         Slice {
-                            name: interner.intern(ev.name.as_deref().unwrap_or("")),
+                            name,
                             start_us: ts,
                             // A malformed dur must not make the slice end
                             // before it starts: every consumer — the end-max
@@ -1250,7 +1252,7 @@ impl Builder {
                             // walk — assumes end >= start.
                             dur_us: round_us(ev.dur).max(0),
                             depth: 0,
-                            work_class,
+                            role,
                         },
                         detail,
                     ));
@@ -2554,13 +2556,13 @@ mod tests {
             for (s, d) in p.slices(t).iter().zip(p.details(t)) {
                 writeln!(
                     out,
-                    "  slice {:?} cat={:?} ts={} dur={} depth={} wc={:?} tgt={:?} mn={:?} cfg={:?}",
+                    "  slice {:?} cat={:?} ts={} dur={} depth={} role={:?} tgt={:?} mn={:?} cfg={:?}",
                     p.str(s.name),
                     p.str(d.category),
                     s.start_us,
                     s.dur_us,
                     s.depth,
-                    s.work_class,
+                    s.role,
                     p.opt_str(d.target),
                     p.opt_str(d.mnemonic),
                     p.opt_str(d.configuration),

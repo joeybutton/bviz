@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use bviz_trace_profile::{Profile, Str, WorkClass};
+use bviz_trace_profile::{Profile, SpanRole, Str};
 use rustc_hash::FxHashMap;
 
 use crate::flame::{build_flame_graph, FlameGraph, FlameNode, Scope};
@@ -21,7 +21,7 @@ pub struct StatRow {
     /// resolving text. Ranks only order rows within one aggregate, never
     /// across aggregates.
     pub rank: u32,
-    pub work_class: WorkClass,
+    pub role: SpanRole,
     pub count: u32,
     pub total_us: i64,
     pub max_us: i64,
@@ -72,7 +72,7 @@ fn accumulate(node: &FlameNode, groups: &mut FxHashMap<Str, StatRow>) {
     let row = groups.entry(node.name).or_insert_with(|| StatRow {
         key: node.name,
         rank: node.rank,
-        work_class: node.work_class,
+        role: node.role,
         count: 0,
         total_us: 0,
         max_us: 0,
@@ -86,7 +86,7 @@ fn accumulate(node: &FlameNode, groups: &mut FxHashMap<Str, StatRow>) {
 mod tests {
     use super::*;
     use crate::test_profile::{action, profile, slice, track};
-    use bviz_trace_profile::LaneClass;
+    use bviz_trace_profile::{LaneClass, Workload};
 
     /// Sum of every row's self-time total — must equal the root's total.
     fn total(rows: &[StatRow]) -> i64 {
@@ -119,7 +119,10 @@ mod tests {
         assert_eq!(c.total_us, 150);
         // One merged frame; its peak self time is the merged total.
         assert_eq!(c.max_us, 150);
-        assert_eq!(c.work_class, WorkClass::Cpu);
+        assert_eq!(
+            c.role,
+            SpanRole { workload: Workload::Subprocess, payload: true }
+        );
         assert_eq!(row(&g, &rows, "CppLink").total_us, 30);
         // Self time partitions the root total (180), no double-count.
         assert_eq!(total(&rows), 180);

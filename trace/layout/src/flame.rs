@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use bviz_trace_profile::{LaneClass, Profile, Slice, SliceDetail, Span32, Str, WorkClass};
+use bviz_trace_profile::{LaneClass, Profile, Slice, SliceDetail, Span32, SpanRole, Str, Workload};
 use rustc_hash::{FxHashMap, FxHashSet};
 
 /// Which thread lanes an aggregation draws from, by the role their lane carries.
@@ -42,7 +42,7 @@ impl Scope {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Segment {
     label: Str,
-    work_class: WorkClass,
+    role: SpanRole,
 }
 
 /// Lexicographic rank of each distinct scanned label handle: dense `u32`s
@@ -322,7 +322,7 @@ pub struct FlameNode {
     pub total_us: i64,
     pub self_us: i64,
     pub width_us: i64,
-    pub work_class: WorkClass,
+    pub role: SpanRole,
     pub count: u32,
     pub depth: u32,
     /// The deepest node depth in this node's subtree (itself included). Layout
@@ -469,16 +469,16 @@ pub struct FlameBox {
     pub name: Str,
     pub total_us: i64,
     pub self_us: i64,
-    pub work_class: WorkClass,
+    pub role: SpanRole,
     pub count: u32,
 }
 
 /// A node still under construction. Children are kept in insertion order in
-/// `children` and located by their `(label, work_class)` merge key through
+/// `children` and located by their `(label, role)` merge key through
 /// `index`, so merging a span into an existing child is O(1): labels are
 /// per-mnemonic, so a single frame can gather thousands of distinct children,
 /// where a linear scan per insert would be quadratic. Labels are interned
-/// profile handles, so the key is a `Copy` `(Str, WorkClass)` — small and
+/// profile handles, so the key is a `Copy` `(Str, SpanRole)` — small and
 /// fixed-size, which FxHash hashes in a few cycles where SipHash would dominate
 /// the per-span lookup. Sorting for [`flatten`] reorders `children` without
 /// updating `index`, so no merge may follow a sort.
@@ -487,23 +487,27 @@ pub(crate) struct Builder {
     /// Lexicographic rank of `name`'s text (see [`FlameNode::rank`]); the
     /// root's is unused — a root is never ordered against a sibling.
     rank: u32,
-    work_class: WorkClass,
+    role: SpanRole,
     total_us: i64,
     count: u32,
     children: Vec<Builder>,
-    index: FxHashMap<(Str, WorkClass), usize>,
+    index: FxHashMap<(Str, SpanRole), usize>,
 }
 
 impl Builder {
     pub(crate) fn new_root() -> Self {
-        Builder::new(ROOT_LABEL, 0, WorkClass::Meta)
+        Builder::new(
+            ROOT_LABEL,
+            0,
+            SpanRole { workload: Workload::Other, payload: false },
+        )
     }
 
-    fn new(name: Str, rank: u32, work_class: WorkClass) -> Self {
+    fn new(name: Str, rank: u32, role: SpanRole) -> Self {
         Builder {
             name,
             rank,
-            work_class,
+            role,
             total_us: 0,
             count: 0,
             children: Vec::new(),
@@ -512,14 +516,14 @@ impl Builder {
     }
 
     /// Find the child matching this segment, or append a fresh one built with
-    /// `rank()`. The work class travels with the label; the first occurrence
+    /// `rank()`. The span role travels with the label; the first occurrence
     /// wins. Ranks are lazy so a merge into an existing child costs no lookup.
     fn child(&mut self, seg: Segment, rank: impl FnOnce() -> u32) -> &mut Builder {
-        let key = (seg.label, seg.work_class);
+        let key = (seg.label, seg.role);
         let idx = *self.index.entry(key).or_insert_with(|| {
             let i = self.children.len();
             self.children
-                .push(Builder::new(seg.label, rank(), seg.work_class));
+                .push(Builder::new(seg.label, rank(), seg.role));
             i
         });
         &mut self.children[idx]
@@ -592,7 +596,7 @@ impl<'p> Flamer<'p> {
         };
         Segment {
             label,
-            work_class: slice.work_class,
+            role: slice.role,
         }
     }
 
@@ -616,7 +620,7 @@ impl<'p> Flamer<'p> {
         // Reborrow `node` per child: `child()` borrows `parent` mutably, so the
         // recursion can't hold a `&mut node` across calls; locate it by key each
         // time, which the index makes O(1).
-        let key = (seg.label, seg.work_class);
+        let key = (seg.label, seg.role);
         for ci in 0..forest.children[span_idx].len() {
             let c = forest.children[span_idx][ci];
             let node = {
@@ -846,7 +850,7 @@ pub(crate) fn fold_into(dst: &mut Builder, src: Builder) {
     dst.total_us += src.total_us;
     dst.count += src.count;
     for child in src.children {
-        match dst.index.entry((child.name, child.work_class)) {
+        match dst.index.entry((child.name, child.role)) {
             std::collections::hash_map::Entry::Occupied(e) => {
                 let i = *e.get();
                 fold_into(&mut dst.children[i], child);
@@ -1002,7 +1006,7 @@ fn freeze(builder: &Builder, depth: u32) -> FlameNode {
         total_us: builder.total_us,
         self_us: (builder.total_us - children_total).max(0),
         width_us: builder.total_us.max(children_width),
-        work_class: builder.work_class,
+        role: builder.role,
         count: builder.count,
         depth,
         // Filled by a bottom-up pass once the whole tree is flattened.
@@ -1025,9 +1029,9 @@ fn flatten(root: &mut Builder) -> Vec<FlameNode> {
         builder
             .children
             // Same-text children carry the same handle, so they differ only by
-            // work class — the work-class tie-break makes the order total and
-            // hence independent of merge order.
-            .sort_unstable_by_key(|c| (std::cmp::Reverse(c.total_us), c.rank, c.work_class));
+            // span role — the role tie-break makes the order total and hence
+            // independent of merge order.
+            .sort_unstable_by_key(|c| (std::cmp::Reverse(c.total_us), c.rank, c.role));
         let mut count = 1;
         for c in &mut builder.children {
             count += sort_tree(c);
@@ -1184,7 +1188,7 @@ fn box_of(node: &FlameNode, x: f32, w: f32, metrics: &FlameMetrics) -> FlameBox 
         name: node.name,
         total_us: node.total_us,
         self_us: node.self_us,
-        work_class: node.work_class,
+        role: node.role,
         count: node.count,
     }
 }
@@ -1498,7 +1502,7 @@ mod tests {
                         n.total_us,
                         n.self_us,
                         n.width_us,
-                        n.work_class,
+                        n.role,
                         n.count,
                         n.depth,
                         n.children,
@@ -1510,10 +1514,10 @@ mod tests {
     }
 
     #[test]
-    fn tied_same_text_children_order_by_work_class() {
-        // Two same-named, same-duration top-level slices of different work
-        // classes tie on (total, text); the work-class tie-break keeps the
-        // flattened order independent of which lane merges first.
+    fn tied_same_text_children_order_by_role() {
+        // Two same-named, same-duration top-level slices of different span roles
+        // tie on (total, text); the role tie-break keeps the flattened order
+        // independent of which lane merges first.
         let build = |cats: [&str; 2]| {
             let p = profile(vec![
                 track(1, LaneClass::Execution, vec![slice("x", cats[0], 0, 50)]),
@@ -1523,18 +1527,27 @@ mod tests {
         };
         let ga = build(["local action execution", "thread wait"]);
         let gb = build(["thread wait", "local action execution"]);
-        let resolved = |g: &FlameGraph| -> Vec<(String, WorkClass, i64)> {
+        let resolved = |g: &FlameGraph| -> Vec<(String, SpanRole, i64)> {
             g.nodes()
                 .iter()
-                .map(|n| (g.str(n.name).to_owned(), n.work_class, n.total_us))
+                .map(|n| (g.str(n.name).to_owned(), n.role, n.total_us))
                 .collect()
         };
         assert_eq!(resolved(&ga), resolved(&gb));
+        // Workload order (Subprocess before Scheduling) makes the tie-break total.
         assert_eq!(
             resolved(&ga)[1..],
             [
-                ("x".to_owned(), WorkClass::Cpu, 50),
-                ("x".to_owned(), WorkClass::Wait, 50)
+                (
+                    "x".to_owned(),
+                    SpanRole { workload: Workload::Subprocess, payload: true },
+                    50
+                ),
+                (
+                    "x".to_owned(),
+                    SpanRole { workload: Workload::Scheduling, payload: false },
+                    50
+                )
             ]
         );
     }

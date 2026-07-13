@@ -8,7 +8,7 @@ static GLOBAL: bviz_alloc::MiMalloc = bviz_alloc::MiMalloc;
 
 use bviz_trace_layout::{
     FlameBox, FlameGraph, FlameMetrics, FlameView, Lane, LaneLayout, LaneMetrics, ScopeAggregate,
-    StatRow, TimeView, Viewport, WorkClass, flame_height, lay_out_flame, lay_out_lanes,
+    SpanRole, StatRow, TimeView, Viewport, Workload, flame_height, lay_out_flame, lay_out_lanes,
     visible_slices,
 };
 use bviz_trace_profile::{CounterPoint, LaneClass, Profile, Slice, SliceDetail, TimeSpan};
@@ -154,26 +154,31 @@ const CROSSHAIR_DOT_RADIUS: f32 = 3.0;
 const CROSSHAIR_VALUE_SIZE: f32 = 11.0;
 const CROSSHAIR_LABEL_GAP: f32 = 5.0;
 
-/// Saturation of every category color.
+/// Saturation of a counter series' translucent fill.
 const CATEGORY_SATURATION: f32 = 0.5;
-/// Slice-fill lightness on a dark vs. a light background.
-const CATEGORY_LIGHTNESS_DARK: f32 = 0.62;
-const CATEGORY_LIGHTNESS_LIGHT: f32 = 0.50;
 
-/// Hue (fraction of the wheel) of each work class's flame-box fill, chosen so the
-/// six classes read as distinct against either theme background: cpu blue, remote
-/// magenta, io teal, wait amber, gc red; meta is drawn without saturation as a
-/// neutral grey, so it carries no hue.
-const HUE_CPU: f32 = 0.60;
-const HUE_REMOTE: f32 = 0.83;
-const HUE_IO: f32 = 0.47;
-const HUE_WAIT: f32 = 0.09;
+/// Hue (fraction of the wheel) per span workload, spread so the classes read as
+/// distinct on either theme: the two payload workloads are warm (action orange,
+/// starlark green) and the overhead workloads cool (filesystem cyan, remote/cache
+/// blue, skyframe indigo, scheduling magenta), with gc red set apart. The Other
+/// workload carries no hue — it is drawn as neutral grey.
+const HUE_SUBPROCESS: f32 = 0.07;
+const HUE_STARLARK: f32 = 0.34;
+const HUE_FILESYSTEM: f32 = 0.50;
+const HUE_REMOTE_CACHE: f32 = 0.60;
+const HUE_SKYFRAME: f32 = 0.70;
+const HUE_SCHEDULING: f32 = 0.83;
 const HUE_GC: f32 = 0.99;
-/// Saturation and lightness of a work-class fill, matched to the category palette
-/// so the two coloring schemes sit at the same weight.
-const WORK_CLASS_SATURATION: f32 = 0.55;
-const WORK_CLASS_LIGHTNESS_DARK: f32 = 0.62;
-const WORK_CLASS_LIGHTNESS_LIGHT: f32 = 0.50;
+
+/// Payload fills are vivid (saturated, mid lightness) so real work draws the eye;
+/// overhead fills are muted (desaturated, pulled toward the background) so Bazel
+/// machinery recedes. Lightness is chosen per background.
+const PAYLOAD_SATURATION: f32 = 0.72;
+const PAYLOAD_LIGHTNESS_DARK: f32 = 0.60;
+const PAYLOAD_LIGHTNESS_LIGHT: f32 = 0.46;
+const OVERHEAD_SATURATION: f32 = 0.30;
+const OVERHEAD_LIGHTNESS_DARK: f32 = 0.40;
+const OVERHEAD_LIGHTNESS_LIGHT: f32 = 0.72;
 /// Side of a legend swatch and the gap between a swatch and its label.
 const LEGEND_SWATCH: f32 = 10.0;
 const LEGEND_LABEL_GAP: f32 = 4.0;
@@ -1026,11 +1031,9 @@ impl TraceView {
                     for vs in visible_slices(&profile, layout, &tv, &vp, &METRICS, MIN_SLICE_PX) {
                         let track = &profile.threads()[vs.track];
                         let slice = profile.slices(track)[vs.slice];
-                        let detail = profile.details(track)[vs.slice];
                         paint_slice(
                             &profile,
                             &slice,
-                            &detail,
                             vs.x,
                             vs.y + regions.flame_top,
                             vs.w,
@@ -1232,7 +1235,7 @@ impl TraceView {
                     .flex()
                     .items_center()
                     .pr_2()
-                    .child(work_class_legend(palette))
+                    .child(role_legend(palette))
             }))
     }
 
@@ -3241,7 +3244,6 @@ fn paint_labeled_box(
 fn paint_slice(
     profile: &Profile,
     slice: &Slice,
-    detail: &SliceDetail,
     x: f32,
     y: f32,
     w: f32,
@@ -3252,23 +3254,19 @@ fn paint_slice(
     cx: &mut App,
 ) {
     let rect = Bounds::new(point(px(content_left + x), px(y)), size(px(w), px(h)));
-    let fill = category_color(profile.str(detail.category), palette);
+    let fill = span_role_color(slice.role, palette);
     paint_labeled_box(rect, fill, profile.str(slice.name), palette, window, cx);
 }
 
-/// Fill for a flame-graph box, keyed by its work class so a frame reads as cpu,
-/// remote, io, wait, gc, or meta at a glance. The synthetic root is `Meta`, so it
-/// lands on the same neutral grey as other meta frames.
-fn flame_box_color(work_class: WorkClass, palette: &Palette) -> Hsla {
-    work_class_color(work_class, palette)
-}
-
-/// A legible per-work-class fill: a fixed hue per class (meta is hueless grey) at
-/// a theme-fitting lightness, so the same class is the same color everywhere and
-/// the six are mutually distinct on either background.
-fn work_class_color(work_class: WorkClass, palette: &Palette) -> Hsla {
+/// Fill for a span, keyed by its [`SpanRole`]: the workload gives the base hue and
+/// the payload flag its weight, so the compiler and the Starlark that drives the
+/// build read vivid while Bazel's own overhead (scheduling, caching, graph
+/// bookkeeping, the sandbox) recedes. Both the flame chart and the flame graph
+/// paint with it, so a role is the same color in both. The Other workload —
+/// including the flame graph's synthetic root — is a neutral hueless grey.
+fn span_role_color(role: SpanRole, palette: &Palette) -> Hsla {
     let dark = luminance(palette.background) < 0.5;
-    if work_class == WorkClass::Meta {
+    if role.workload == Workload::Other {
         let lightness = if dark {
             FLAME_ROOT_LIGHTNESS_DARK
         } else {
@@ -3276,32 +3274,42 @@ fn work_class_color(work_class: WorkClass, palette: &Palette) -> Hsla {
         };
         return hsla(0.0, 0.0, lightness, 1.0);
     }
-    let hue = match work_class {
-        WorkClass::Cpu => HUE_CPU,
-        WorkClass::Remote => HUE_REMOTE,
-        WorkClass::Io => HUE_IO,
-        WorkClass::Wait => HUE_WAIT,
-        WorkClass::Gc => HUE_GC,
-        WorkClass::Meta => unreachable!("meta handled above"),
+    let hue = match role.workload {
+        Workload::Subprocess => HUE_SUBPROCESS,
+        Workload::Starlark => HUE_STARLARK,
+        Workload::Filesystem => HUE_FILESYSTEM,
+        Workload::RemoteCache => HUE_REMOTE_CACHE,
+        Workload::Skyframe => HUE_SKYFRAME,
+        Workload::Scheduling => HUE_SCHEDULING,
+        Workload::Gc => HUE_GC,
+        Workload::Other => unreachable!("other handled above"),
     };
-    let lightness = if dark {
-        WORK_CLASS_LIGHTNESS_DARK
+    let (saturation, lightness) = if role.payload {
+        (
+            PAYLOAD_SATURATION,
+            if dark { PAYLOAD_LIGHTNESS_DARK } else { PAYLOAD_LIGHTNESS_LIGHT },
+        )
     } else {
-        WORK_CLASS_LIGHTNESS_LIGHT
+        (
+            OVERHEAD_SATURATION,
+            if dark { OVERHEAD_LIGHTNESS_DARK } else { OVERHEAD_LIGHTNESS_LIGHT },
+        )
     };
-    hsla(hue, WORK_CLASS_SATURATION, lightness, 1.0)
+    hsla(hue, saturation, lightness, 1.0)
 }
 
-/// A compact legend of the work-class colors: a swatch and class name per class,
-/// in a row, matching the fills the flame boxes use.
-fn work_class_legend(palette: Palette) -> impl IntoElement {
-    const CLASSES: [(WorkClass, &str); 6] = [
-        (WorkClass::Cpu, "cpu"),
-        (WorkClass::Remote, "remote"),
-        (WorkClass::Io, "io"),
-        (WorkClass::Wait, "wait"),
-        (WorkClass::Gc, "gc"),
-        (WorkClass::Meta, "meta"),
+/// A legend of the span-role colors: a swatch and name per workload in a row,
+/// matching the fills the flame boxes use. Payload workloads lead, then overhead.
+fn role_legend(palette: Palette) -> impl IntoElement {
+    const ROLES: [(Workload, bool, &str); 8] = [
+        (Workload::Subprocess, true, "action"),
+        (Workload::Starlark, true, "starlark"),
+        (Workload::Filesystem, false, "filesystem"),
+        (Workload::RemoteCache, false, "remote/cache"),
+        (Workload::Scheduling, false, "scheduling"),
+        (Workload::Skyframe, false, "skyframe"),
+        (Workload::Gc, false, "gc"),
+        (Workload::Other, false, "other"),
     ];
     div()
         .flex()
@@ -3310,7 +3318,7 @@ fn work_class_legend(palette: Palette) -> impl IntoElement {
         .gap_3()
         .text_color(palette.label)
         .text_size(px(STATS_TEXT_SIZE))
-        .children(CLASSES.map(|(wc, name)| {
+        .children(ROLES.map(|(workload, payload, name)| {
             div()
                 .flex()
                 .flex_row()
@@ -3320,7 +3328,7 @@ fn work_class_legend(palette: Palette) -> impl IntoElement {
                     div()
                         .size(px(LEGEND_SWATCH))
                         .rounded_sm()
-                        .bg(work_class_color(wc, &palette)),
+                        .bg(span_role_color(SpanRole { workload, payload }, &palette)),
                 )
                 .child(name)
         }))
@@ -3370,7 +3378,7 @@ fn paint_flame_graph(
                 continue;
             }
             let rect = Bounds::new(point(px(left + b.x), px(y)), size(px(b.w), px(b.h)));
-            let fill = flame_box_color(b.work_class, palette);
+            let fill = span_role_color(b.role, palette);
             paint_labeled_box(rect, fill, graph.str(b.name), palette, window, cx);
         }
     });
@@ -3629,18 +3637,6 @@ fn hue_of(s: &str) -> f32 {
         hash = hash.wrapping_mul(0x100000001b3);
     }
     (hash % 360) as f32 / 360.0
-}
-
-/// A deterministic per-category fill: the category hashes to a hue, with
-/// saturation and lightness fixed for the theme so every category is
-/// distinguishable yet legible. Same category → same color across the profile.
-fn category_color(cat: &str, palette: &Palette) -> Hsla {
-    let lightness = if luminance(palette.background) < 0.5 {
-        CATEGORY_LIGHTNESS_DARK
-    } else {
-        CATEGORY_LIGHTNESS_LIGHT
-    };
-    hsla(hue_of(cat), CATEGORY_SATURATION, lightness, 1.0)
 }
 
 /// A translucent fill for a counter series, keyed by its name like a category.
@@ -4125,16 +4121,6 @@ mod tests {
             crosshair: dark,
             selection: dark,
         }
-    }
-
-    #[test]
-    fn category_color_is_deterministic() {
-        let p = palette();
-        assert_eq!(
-            category_color("skyframe", &p),
-            category_color("skyframe", &p)
-        );
-        assert_ne!(category_color("skyframe", &p), category_color("action", &p));
     }
 
     #[test]

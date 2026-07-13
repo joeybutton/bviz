@@ -7,7 +7,7 @@ mod stats;
 mod test_profile;
 mod view;
 
-pub use bviz_trace_profile::{LaneClass, WorkClass};
+pub use bviz_trace_profile::{LaneClass, SpanRole, Workload};
 pub use cull::{Viewport, VisibleSlice, visible_slices};
 pub use flame::{
     FlameBox, FlameGraph, FlameMetrics, FlameNode, FlameView, Scope, build_flame_graph,

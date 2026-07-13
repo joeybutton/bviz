@@ -144,7 +144,7 @@ pub struct Slice {
     pub start_us: i64,
     pub dur_us: i64,
     pub depth: u32,
-    pub work_class: WorkClass,
+    pub role: SpanRole,
 }
 
 const _: () = assert!(std::mem::size_of::<Slice>() == 32);
@@ -166,96 +166,136 @@ pub struct SliceDetail {
 
 const _: () = assert!(std::mem::size_of::<SliceDetail>() == 40);
 
-/// Coarse kind of work a slice represents, derived from its Bazel `cat`
-/// description string ([`work_class`]). Lets a flame graph group/scope by the
-/// nature of the work rather than the dozens of raw categories.
-///
-/// Two descriptions are judgment calls: "VFS md5" is a digest computation that
-/// is both CPU- and I/O-bound — classified [`WorkClass::Io`] alongside the rest
-/// of VFS; "action dependency checking" sits between compute and waiting on the
-/// action cache — classified [`WorkClass::Wait`].
+/// The kind of work a span represents, giving the base hue in the flame views.
+/// Derived from the Bazel `cat` plus the span name ([`span_role`]) because a
+/// single category can span several kinds: one "general information" `cat` holds
+/// the spawned process, the sandbox I/O around it, and the skyframe evaluation
+/// envelope.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum WorkClass {
-    Cpu,
-    Remote,
-    Io,
-    Wait,
+pub enum Workload {
+    /// The spawned action body: a local/remote/worker process and the
+    /// mnemonic-bearing action frame that owns it.
+    Subprocess,
+    /// Build logic run by the interpreter: Starlark calls, rule bodies, module
+    /// and repository evaluation.
+    Starlark,
+    /// Filesystem work: VFS operations, sandbox construction, globbing, input
+    /// and output staging, include scanning.
+    Filesystem,
+    /// Remote and cache transfer: action-cache checks, up/download, RPC, and
+    /// repository fetching.
+    RemoteCache,
+    /// Scheduling and contention: resource locks, semaphores, dependency
+    /// checking, queuing, and thread waits.
+    Scheduling,
+    /// Skyframe graph evaluation and its action-execution envelopes.
+    Skyframe,
+    /// Java garbage collection.
     Gc,
-    Meta,
+    /// Whole-build umbrellas, module lifecycle, and anything unrecognized.
+    Other,
 }
 
-/// Maps a Bazel `ProfilerTask` description string (the Chrome-trace `cat`) to a
-/// [`WorkClass`]. An unknown or future description falls through to
-/// [`WorkClass::Meta`].
-pub fn work_class(category: &str) -> WorkClass {
-    match category {
-        "local action execution"
+/// A span's coloring role: a [`Workload`] for the base hue, and whether the span
+/// is build payload — the user's own work (the compiler, the Starlark that
+/// defines the build), drawn vivid — rather than Bazel overhead (scheduling,
+/// caching, graph bookkeeping, the sandbox), drawn muted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct SpanRole {
+    pub workload: Workload,
+    pub payload: bool,
+}
+
+/// Classify a slice for coloring from its Bazel `cat` and name. The name
+/// disambiguates the heterogeneous "general information" category; every other
+/// category maps by `cat` alone. An unknown or future category falls through to
+/// [`Workload::Other`] overhead.
+///
+/// Two placements are judgment calls: skyfunction frames (including
+/// `CONFIGURED_TARGET`) are [`Workload::Skyframe`] overhead — the payload is the
+/// Starlark they nest, not the graph node itself; and include scanning and input
+/// discovery are [`Workload::Filesystem`] overhead rather than action body,
+/// since they compute an action's inputs rather than run it.
+pub fn span_role(category: &str, name: &str) -> SpanRole {
+    use Workload::*;
+    let (workload, payload) = match category {
+        "general information" => general_information_role(name),
+
+        "action processing"
+        | "local action execution"
         | "Local execution process wall time"
         | "local execution in worker"
         | "Local parse to prepare for remote execution"
-        | "include scanner"
-        | "discover inputs"
-        | "package creation"
-        | "bazel module processing"
-        | "Starlark Parser"
+        | "remote action execution"
+        | "Remote execution process wall time" => (Subprocess, true),
+
+        "Starlark Parser"
         | "Starlark user function call"
         | "Starlark builtin function call"
         | "Starlark compiled user function call"
         | "Starlark repository function call"
         | "Starlark thread context"
-        | "skyframe evaluator"
-        | "skyfunction"
-        | "action processing"
-        | "complete action execution"
-        | "update action information"
-        | "prepare action rewind plan"
-        | "Conflict checking"
+        | "bazel module processing"
         | "load WebAssembly module"
-        | "execute WebAssembly function" => WorkClass::Cpu,
+        | "execute WebAssembly function" => (Starlark, true),
 
-        "remote action execution"
-        | "Remote execution process wall time"
-        | "Remote execution upload time"
-        | "Remote execution file fetching"
-        | "remote output download"
-        | "remote action cache check"
-        | "Remote execution setup"
-        | "remote network"
-        | "RPC"
-        | "Fetching repository" => WorkClass::Remote,
-
-        "VFS stat"
-        | "VFS readdir"
-        | "VFS readlink"
-        | "VFS md5"
-        | "VFS xattr"
-        | "VFS delete"
-        | "VFS open"
-        | "VFS read"
-        | "VFS write"
-        | "globbing"
-        | "VMFS stat"
-        | "VMFS readdir"
-        | "VMFS read"
+        "VFS stat" | "VFS readdir" | "VFS readlink" | "VFS md5" | "VFS xattr"
+        | "VFS delete" | "VFS open" | "VFS read" | "VFS write"
+        | "VMFS stat" | "VMFS readdir" | "VMFS read"
+        | "globbing" | "filesystem traversal"
         | "Staging per-action file system"
-        | "setting up inputs for worker"
-        | "copying outputs from worker"
-        | "filesystem traversal"
-        | "Vendoring repository"
-        | "logging spawn" => WorkClass::Io,
+        | "setting up inputs for worker" | "copying outputs from worker"
+        | "include scanner" | "discover inputs"
+        | "Vendoring repository" | "logging spawn" => (Filesystem, false),
 
-        "Remote execution queuing time"
-        | "thread wait"
-        | "action resource lock"
-        | "Acquiring dynamic execution output lock"
-        | "action dependency checking"
-        | "borrowing a worker"
-        | "waiting for response from worker"
-        | "blocked on repo contents cache GC" => WorkClass::Wait,
+        "Remote execution upload time" | "Remote execution file fetching"
+        | "remote output download" | "remote action cache check"
+        | "Remote execution setup" | "remote network" | "RPC"
+        | "Fetching repository" => (RemoteCache, false),
 
-        "gc notification" => WorkClass::Gc,
+        "Remote execution queuing time" | "thread wait" | "action resource lock"
+        | "Acquiring dynamic execution output lock" | "action dependency checking"
+        | "borrowing a worker" | "waiting for response from worker"
+        | "blocked on repo contents cache GC"
+        | "action count (local)" => (Scheduling, false),
 
-        _ => WorkClass::Meta,
+        "skyfunction" | "skyframe evaluator" | "package creation"
+        | "complete action execution" | "update action information"
+        | "prepare action rewind plan" | "Conflict checking" => (Skyframe, false),
+
+        "gc notification" => (Gc, false),
+
+        _ => (Other, false),
+    };
+    SpanRole { workload, payload }
+}
+
+/// The role of a "general information" span, which alone spans several workloads:
+/// the real spawn (`subprocess.run`, the one payload here), the sandbox and I/O
+/// helpers around it, and the skyframe/action-execution envelopes. Whole-build
+/// umbrellas (`buildTargets`) and module lifecycle fall through to
+/// [`Workload::Other`].
+fn general_information_role(name: &str) -> (Workload, bool) {
+    use Workload::*;
+    if name == "subprocess.run" {
+        (Subprocess, true)
+    } else if name.starts_with("sandbox.")
+        || name.starts_with("trashPath")
+        || name == "context.prefetchInputs"
+        || name == "AbstractSpawnStrategy.getInputMapping"
+        || name == "checkOutputs"
+        || name == "action.prepare"
+        || name == "Create symlink tree"
+    {
+        (Filesystem, false)
+    } else if name == "Action.execute"
+        || name == "runAnalysisAndExecutionPhase"
+        || name == "ParallelEvaluator.eval"
+        || name.starts_with("skyframeExecutor")
+    {
+        (Skyframe, false)
+    } else {
+        (Other, false)
     }
 }
 
@@ -548,16 +588,52 @@ mod tests {
     use crate::parse::build_for_test;
 
     #[test]
-    fn work_class_covers_each_class_and_defaults_to_meta() {
-        assert_eq!(work_class("local action execution"), WorkClass::Cpu);
-        assert_eq!(work_class("remote action execution"), WorkClass::Remote);
-        assert_eq!(work_class("VFS stat"), WorkClass::Io);
-        assert_eq!(work_class("VFS md5"), WorkClass::Io);
-        assert_eq!(work_class("thread wait"), WorkClass::Wait);
-        assert_eq!(work_class("action dependency checking"), WorkClass::Wait);
-        assert_eq!(work_class("gc notification"), WorkClass::Gc);
-        assert_eq!(work_class("build phase marker"), WorkClass::Meta);
-        assert_eq!(work_class("some future task"), WorkClass::Meta);
+    fn span_role_maps_categories_and_names_to_workload_and_payload() {
+        let role = |cat, name| span_role(cat, name);
+        let payload = |w| SpanRole { workload: w, payload: true };
+        let overhead = |w| SpanRole { workload: w, payload: false };
+        // The action body and Starlark are payload.
+        assert_eq!(role("action processing", "Rustc"), payload(Workload::Subprocess));
+        assert_eq!(
+            role("remote action execution", ""),
+            payload(Workload::Subprocess)
+        );
+        assert_eq!(
+            role("Starlark user function call", "_cc_library_impl"),
+            payload(Workload::Starlark)
+        );
+        // Overhead workloads.
+        assert_eq!(role("VFS stat", ""), overhead(Workload::Filesystem));
+        assert_eq!(role("VFS md5", ""), overhead(Workload::Filesystem));
+        assert_eq!(role("include scanner", ""), overhead(Workload::Filesystem));
+        assert_eq!(role("RPC", ""), overhead(Workload::RemoteCache));
+        assert_eq!(
+            role("action dependency checking", ""),
+            overhead(Workload::Scheduling)
+        );
+        assert_eq!(role("action count (local)", "Resources acquired"), overhead(Workload::Scheduling));
+        // The skyfunction frame is overhead; its Starlark children carry the work.
+        assert_eq!(role("skyfunction", "CONFIGURED_TARGET"), overhead(Workload::Skyframe));
+        assert_eq!(role("gc notification", "minor GC"), overhead(Workload::Gc));
+        // "general information" splits by name.
+        assert_eq!(
+            role("general information", "subprocess.run"),
+            payload(Workload::Subprocess)
+        );
+        assert_eq!(
+            role("general information", "sandbox.createInputs"),
+            overhead(Workload::Filesystem)
+        );
+        assert_eq!(
+            role("general information", "Action.execute"),
+            overhead(Workload::Skyframe)
+        );
+        assert_eq!(
+            role("general information", "buildTargets"),
+            overhead(Workload::Other)
+        );
+        // An unknown category is Other overhead.
+        assert_eq!(role("some future task", ""), overhead(Workload::Other));
     }
 
     #[test]
