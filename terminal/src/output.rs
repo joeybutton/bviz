@@ -132,7 +132,6 @@ fn epoch(seconds: i64, nanos: i32) -> f64 {
     seconds as f64 + nanos as f64 / 1e9
 }
 
-/// Find the `terminal_columns` option in a structured command line.
 /// The value of a named option in a structured command line, if present.
 fn option_value<'a>(command_line: &'a CommandLine, name: &str) -> Option<&'a str> {
     command_line
