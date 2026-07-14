@@ -1116,8 +1116,8 @@ fn place(
         return;
     }
     // Place children left-to-right. A child wide enough to render recurses on its
-    // own; a run of sub-pixel children sharing one pixel column collapses to the
-    // one whose subtree reaches deepest, so the depth at that column is stable.
+    // own; a run of sub-pixel children sharing one pixel column collapses to a
+    // single kept sibling (see `deepest_in_column`).
     let children = graph.children(node);
     let child_w = |c: &FlameNode| cw * c.width_us as f64 / node.width_us as f64;
     let mut cursor = cx;
@@ -1130,27 +1130,45 @@ fn place(
             i += 1;
             continue;
         }
-        // Sub-pixel run: scan consecutive sub-pixel children in this column,
-        // tracking the deepest, then recurse into it alone.
-        let col = (cursor - scroll_x).floor() as i32;
-        let (mut best, mut best_cx, mut best_cw) = (&children[i], cursor, ccw);
-        let mut run_cursor = cursor + ccw;
-        let mut j = i + 1;
-        while j < children.len() {
-            let cjw = child_w(&children[j]);
-            if cjw >= min || ((run_cursor - scroll_x).floor() as i32) != col {
-                break;
-            }
-            if children[j].subtree_max_depth > best.subtree_max_depth {
-                (best, best_cx, best_cw) = (&children[j], run_cursor, cjw);
-            }
-            run_cursor += cjw;
-            j += 1;
-        }
+        let (best, best_cx, best_cw, run_cursor, next) =
+            deepest_in_column(children, i, ccw, cursor, scroll_x, min, &child_w);
         place(graph, best, best_cx, best_cw, scroll_x, view_w, metrics, min_px, out);
         cursor = run_cursor;
-        i = j;
+        i = next;
     }
+}
+
+/// Within a run of consecutive sub-pixel siblings sharing one pixel column, keep
+/// the one whose subtree reaches deepest — see `lay_out_flame` for why the
+/// deepest, not the leftmost, must win. `start`/`start_cw` are the first sibling
+/// and its width; `cursor` is its left edge. Returns the chosen child with its
+/// left edge and width, the cursor advanced past the whole run, and the index of
+/// the first sibling beyond it.
+fn deepest_in_column<'a>(
+    children: &'a [FlameNode],
+    start: usize,
+    start_cw: f64,
+    cursor: f64,
+    scroll_x: f64,
+    min: f64,
+    child_w: &impl Fn(&FlameNode) -> f64,
+) -> (&'a FlameNode, f64, f64, f64, usize) {
+    let col = (cursor - scroll_x).floor() as i32;
+    let (mut best, mut best_cx, mut best_cw) = (&children[start], cursor, start_cw);
+    let mut run_cursor = cursor + start_cw;
+    let mut j = start + 1;
+    while j < children.len() {
+        let cjw = child_w(&children[j]);
+        if cjw >= min || ((run_cursor - scroll_x).floor() as i32) != col {
+            break;
+        }
+        if children[j].subtree_max_depth > best.subtree_max_depth {
+            (best, best_cx, best_cw) = (&children[j], run_cursor, cjw);
+        }
+        run_cursor += cjw;
+        j += 1;
+    }
+    (best, best_cx, best_cw, run_cursor, j)
 }
 
 fn box_of(node: &FlameNode, x: f32, w: f32, metrics: &FlameMetrics) -> FlameBox {
