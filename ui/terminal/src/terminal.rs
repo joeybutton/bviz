@@ -169,36 +169,7 @@ pub struct TerminalView {
 
 impl TerminalView {
     pub fn new(path: String, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        cx.bind_keys([
-            // Keys that don't collide with terminal scrolling work in either region,
-            // but stay inert while the find field has focus so they don't hijack
-            // typing and cursor movement there.
-            KeyBinding::new("space", PlayPause, Some("BazelTerm && !Find")),
-            KeyBinding::new("left", StepBack, Some("BazelTerm && !Find")),
-            KeyBinding::new("right", StepForward, Some("BazelTerm && !Find")),
-            KeyBinding::new("]", SpeedUp, Some("BazelTerm && !Find")),
-            KeyBinding::new("[", SpeedDown, Some("BazelTerm && !Find")),
-            // The arrows and home/end collide: they scroll the focused terminal but
-            // drive playback when the playback bar holds focus.
-            KeyBinding::new("up", ScrollLineUp, Some("Terminal && !Find")),
-            KeyBinding::new("down", ScrollLineDown, Some("Terminal && !Find")),
-            KeyBinding::new("home", ScrollToTop, Some("Terminal && !Find")),
-            KeyBinding::new("end", ScrollToBottom, Some("Terminal && !Find")),
-            KeyBinding::new("up", SpeedUp, Some("Playback")),
-            KeyBinding::new("down", SpeedDown, Some("Playback")),
-            KeyBinding::new("home", SeekStart, Some("Playback")),
-            KeyBinding::new("end", SeekEnd, Some("Playback")),
-            // Paging and the commands work regardless of which region has focus.
-            KeyBinding::new("pageup", ScrollPageUp, Some("BazelTerm")),
-            KeyBinding::new("pagedown", ScrollPageDown, Some("BazelTerm")),
-            KeyBinding::new("cmd-c", Copy, Some("BazelTerm")),
-            KeyBinding::new("ctrl-c", Copy, Some("BazelTerm")),
-            KeyBinding::new("cmd-f", Find, Some("BazelTerm")),
-            KeyBinding::new("ctrl-f", Find, Some("BazelTerm")),
-            KeyBinding::new("enter", FindNext, Some("Find")),
-            KeyBinding::new("shift-enter", FindPrev, Some("Find")),
-            KeyBinding::new("escape", FindClose, Some("Find")),
-        ]);
+        Self::bind_keys(cx);
         // Tab cycles focus through the regions (handled by the shell's tab action
         // via window.focus_next), in this order: playback bar, terminal, then the
         // find field when it is open (its tab index is set on creation).
@@ -252,9 +223,47 @@ impl TerminalView {
         // Show the bar briefly on launch so the scrollable extent is visible,
         // then let it auto-hide.
         view.reveal_scrollbar(cx);
-        // Read and reconstruct the build off the UI thread so a large log never
-        // blocks startup or the first frame.
-        view._load_task = load_in_background(
+        view.spawn_load(path, cx);
+        view
+    }
+
+    fn bind_keys(cx: &mut Context<Self>) {
+        cx.bind_keys([
+            // Keys that don't collide with terminal scrolling work in either region,
+            // but stay inert while the find field has focus so they don't hijack
+            // typing and cursor movement there.
+            KeyBinding::new("space", PlayPause, Some("BazelTerm && !Find")),
+            KeyBinding::new("left", StepBack, Some("BazelTerm && !Find")),
+            KeyBinding::new("right", StepForward, Some("BazelTerm && !Find")),
+            KeyBinding::new("]", SpeedUp, Some("BazelTerm && !Find")),
+            KeyBinding::new("[", SpeedDown, Some("BazelTerm && !Find")),
+            // The arrows and home/end collide: they scroll the focused terminal but
+            // drive playback when the playback bar holds focus.
+            KeyBinding::new("up", ScrollLineUp, Some("Terminal && !Find")),
+            KeyBinding::new("down", ScrollLineDown, Some("Terminal && !Find")),
+            KeyBinding::new("home", ScrollToTop, Some("Terminal && !Find")),
+            KeyBinding::new("end", ScrollToBottom, Some("Terminal && !Find")),
+            KeyBinding::new("up", SpeedUp, Some("Playback")),
+            KeyBinding::new("down", SpeedDown, Some("Playback")),
+            KeyBinding::new("home", SeekStart, Some("Playback")),
+            KeyBinding::new("end", SeekEnd, Some("Playback")),
+            // Paging and the commands work regardless of which region has focus.
+            KeyBinding::new("pageup", ScrollPageUp, Some("BazelTerm")),
+            KeyBinding::new("pagedown", ScrollPageDown, Some("BazelTerm")),
+            KeyBinding::new("cmd-c", Copy, Some("BazelTerm")),
+            KeyBinding::new("ctrl-c", Copy, Some("BazelTerm")),
+            KeyBinding::new("cmd-f", Find, Some("BazelTerm")),
+            KeyBinding::new("ctrl-f", Find, Some("BazelTerm")),
+            KeyBinding::new("enter", FindNext, Some("Find")),
+            KeyBinding::new("shift-enter", FindPrev, Some("Find")),
+            KeyBinding::new("escape", FindClose, Some("Find")),
+        ]);
+    }
+
+    /// Read and reconstruct the build off the UI thread so a large log never
+    /// blocks startup or the first frame.
+    fn spawn_load(&mut self, path: String, cx: &mut Context<Self>) {
+        self._load_task = load_in_background(
             cx,
             move || {
                 let bytes = std::fs::read(&path).map_err(|e| format!("cannot read {path}: {e}"))?;
@@ -275,7 +284,6 @@ impl TerminalView {
                 };
             },
         );
-        view
     }
 
     /// Show the scroll bar and schedule it to hide after a period of no further
