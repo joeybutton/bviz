@@ -183,6 +183,17 @@ struct PaintBox {
     dim: bool,
 }
 
+/// The lit/dimmed partition induced by hovering a node.
+struct Dimming {
+    /// Boxes kept lit: the hovered node's subtree and its direct neighbors.
+    lit: HashSet<Id>,
+    /// Connectors kept lit.
+    lit_edges: HashSet<(Id, Id)>,
+    /// Whether any dimming is in effect; false when the hover reveals no
+    /// incident edge or dimming is off.
+    applies: bool,
+}
+
 /// Loads, lays out, and renders a Bazel build graph.
 ///
 /// Zoom, pan, and the captured viewport bounds are shared cells so the canvas
@@ -471,10 +482,9 @@ impl GraphView {
             })
     }
 
-    /// Builds the single-canvas viewport: every box and connector is painted in
-    /// one `canvas`, with pan and zoom applied in the paint transform. The
-    /// closure is `'static`, so it captures owned snapshots of the boxes and
-    /// connectors rather than borrowing the graph.
+    /// Assembles the single-canvas viewport: the painted boxes and connectors,
+    /// the overlay controls layered over them, and the prepaint/paint closures
+    /// that fit and draw the graph under the shared pan/zoom transform.
     fn graph(
         g: &LaidOut,
         expandable: &HashSet<Id>,
@@ -494,199 +504,11 @@ impl GraphView {
         reduced: bool,
         palette: Palette,
     ) -> Stateful<Div> {
-        // Dimming traces the hovered node's whole subtree neighborhood: the boxes
-        // geometrically nested inside the hovered box (it and its descendants,
-        // since the layout nests children within their parent's rect) plus the far
-        // endpoint of every edge incident to that subtree. The subtree's incident
-        // edges stay lit and everything else dims, but only when there is at least
-        // one such edge to reveal — an edgeless subtree (or a disabled toggle)
-        // would fade the graph for no signal, so those suppress dimming entirely.
-        let hovered_box = hovered.and_then(|h| g.boxes.iter().find(|b| b.id == h));
-        let subtree: HashSet<Id> = hovered_box
-            .filter(|_| dim_enabled)
-            .map(|h| {
-                g.boxes
-                    .iter()
-                    .filter(|b| {
-                        b.x >= h.x
-                            && b.y >= h.y
-                            && b.x + b.width <= h.x + h.width
-                            && b.y + b.height <= h.y + h.height
-                    })
-                    .map(|b| b.id)
-                    .collect()
-            })
-            .unwrap_or_default();
-        // The subtree plus the far endpoint of each full-connectivity edge incident
-        // to it: the direct neighbors, the only nodes a hover lights. This walks the
-        // full connectivity, not the drawn connectors, so a neighbor still lights up
-        // when reduction dropped the edge to it. The far endpoints are split by
-        // direction so the path tracing below follows dependency edges the right way.
-        // An empty active set (no incident edge) leaves dimming off.
-        let mut active: HashSet<Id> = subtree.clone();
-        let mut out_targets: HashSet<Id> = HashSet::new();
-        let mut in_targets: HashSet<Id> = HashSet::new();
-        let mut has_edge = false;
-        for &(from, to) in &g.full_edges {
-            let (f_in, t_in) = (subtree.contains(&from), subtree.contains(&to));
-            if f_in || t_in {
-                has_edge = true;
-            }
-            if f_in && !t_in {
-                active.insert(to);
-                out_targets.insert(to);
-            } else if t_in && !f_in {
-                active.insert(from);
-                in_targets.insert(from);
-            }
-        }
-        if !has_edge {
-            active.clear();
-        }
-        let dim_active = has_edge;
-        // Edges to light. Every drawn edge incident to the subtree is a surviving
-        // direct-neighbor edge — the drawn graph is a subset of the full
-        // connectivity — so light them all; a compound box thus lights every
-        // member's neighbor edge at once, not one at a time. A neighbor whose direct
-        // edge reduction dropped is reached by no such edge; for it alone, trace the
-        // shortest drawn path so it is not left floating. A path's interior nodes are
-        // conduits, not neighbors, so they stay out of `active` (the undimmed boxes
-        // remain just the direct neighbors).
-        let mut lit_edges: HashSet<(Id, Id)> = HashSet::new();
-        if has_edge {
-            let mut out_adj: HashMap<Id, Vec<Id>> = HashMap::new();
-            let mut in_adj: HashMap<Id, Vec<Id>> = HashMap::new();
-            for c in &g.connectors {
-                out_adj.entry(c.from).or_default().push(c.to);
-                in_adj.entry(c.to).or_default().push(c.from);
-                if subtree.contains(&c.from) || subtree.contains(&c.to) {
-                    lit_edges.insert((c.from, c.to));
-                }
-            }
-            // Neighbors a drawn edge already reaches need no path.
-            let reached: HashSet<Id> = lit_edges
-                .iter()
-                .flat_map(|&(f, t)| [f, t])
-                .filter(|n| !subtree.contains(n))
-                .collect();
-            let out_missing: HashSet<Id> = out_targets.difference(&reached).copied().collect();
-            let in_missing: HashSet<Id> = in_targets.difference(&reached).copied().collect();
-            trace_paths(&subtree, &out_missing, &out_adj, true, &mut lit_edges);
-            trace_paths(&subtree, &in_missing, &in_adj, false, &mut lit_edges);
-        }
-        // The highlight fades linearly to nothing over the linger window.
-        let highlight_alpha =
-            (1.0 - recent_at.elapsed().as_secs_f32() / HIGHLIGHT_LINGER.as_secs_f32()).clamp(0.0, 1.0);
-        let boxes: Vec<PaintBox> = g
-            .boxes
-            .iter()
-            .map(|b| PaintBox {
-                x: b.x,
-                y: b.y,
-                w: b.width,
-                h: b.height,
-                compound: b.compound,
-                expandable: expandable.contains(&b.id) || b.group,
-                fill: if b.compound {
-                    container_fill(b.kind, &palette)
-                } else {
-                    bviz_ui_theme::mix(kind_accent(b.kind), palette.background, KIND_BLEND)
-                },
-                label: b.label.clone(),
-                highlight: if recent == Some(b.id) { highlight_alpha } else { 0.0 },
-                dim: dim_active && !active.contains(&b.id),
-            })
-            .collect();
-        // The rect to settle the view on once the relayout lands: the smallest
-        // layout rect covering the just-toggled box and every box that was fully
-        // on screen when it was toggled (those that survived the relayout), so
-        // the user keeps sight of what they were looking at. As (x, y, w, h).
-        let recenter_target = recent.and_then(|id| {
-            let mut rect: Option<(f64, f64, f64, f64)> = None;
-            for &bid in std::iter::once(&id).chain(prev_visible) {
-                let Some(b) = g.boxes.iter().find(|b| b.id == bid) else {
-                    continue;
-                };
-                let (x0, y0, x1, y1) = (b.x, b.y, b.x + b.width, b.y + b.height);
-                rect = Some(match rect {
-                    None => (x0, y0, x1, y1),
-                    Some((ax0, ay0, ax1, ay1)) => {
-                        (ax0.min(x0), ay0.min(y0), ax1.max(x1), ay1.max(y1))
-                    }
-                });
-            }
-            rect.map(|(x0, y0, x1, y1)| (x0, y0, x1 - x0, y1 - y0))
-        });
-        let connectors: Vec<(Vec<(f64, f64)>, Vec<EdgeKind>, bool)> = g
-            .connectors
-            .iter()
-            .map(|c| {
-                let dim = dim_active && !lit_edges.contains(&(c.from, c.to));
-                (c.points.clone(), c.kinds.clone(), dim)
-            })
-            .collect();
-        // Edge kinds actually drawn, in enum order, so the legend explains only
-        // the provenances present in this graph.
-        let present: Vec<EdgeKind> = [EdgeKind::Query, EdgeKind::Cquery, EdgeKind::Aquery]
-            .into_iter()
-            .filter(|k| g.connectors.iter().any(|c| c.kinds.contains(k)))
-            .collect();
-        let legend = (!present.is_empty()).then(|| {
-            div()
-                .absolute()
-                .left_2()
-                .bottom_2()
-                .flex()
-                .flex_col()
-                .gap_1()
-                .p_2()
-                .rounded_md()
-                .bg(palette.container_fill)
-                .children(present.into_iter().map(|k| {
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap_2()
-                        .child(div().w(px(16.)).h(px(2.)).bg(edge_color(k)))
-                        .child(
-                            div()
-                                .text_xs()
-                                .text_color(palette.label)
-                                .child(k.label()),
-                        )
-                }))
-        });
-        let relaying_indicator = relaying.then(|| {
-            div()
-                .absolute()
-                .right_2()
-                .top_2()
-                .flex()
-                .items_center()
-                .gap_2()
-                .px_2()
-                .py_1()
-                .rounded_md()
-                .bg(palette.container_fill)
-                .child(
-                    bviz_ui_assets::icon("circle-notch")
-                        .size(px(14.))
-                        .text_color(palette.label)
-                        .with_animation(
-                            "relaying-spinner",
-                            Animation::new(Duration::from_millis(900)).repeat(),
-                            |icon, delta| {
-                                icon.with_transformation(Transformation::rotate(percentage(delta)))
-                            },
-                        ),
-                )
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(palette.label)
-                        .child("laying out…"),
-                )
-        });
+        let dimming = compute_dimming(g, hovered, dim_enabled);
+        let boxes = paint_boxes(g, expandable, recent, recent_at, &dimming, &palette);
+        let connectors = collect_connectors(g, &dimming);
+        let legend = legend(g, &palette);
+        let relaying_indicator = relaying_indicator(relaying, &palette);
         // Kept in sync with the `h` key, which flips the same field.
         let dim_toggle = Self::toggle_pill(
             "dim-toggle",
@@ -712,161 +534,29 @@ impl GraphView {
             },
         );
         let content = content_size(g);
-        // Capture the viewport bounds and fit the graph to them. The fit needs
-        // the viewport size, known only once laid out, so it happens here.
-        let prepaint = {
-            let (zoom, pan, fitted, viewport, recenter, anim) = (
-                zoom.clone(),
-                pan.clone(),
-                fitted.clone(),
-                viewport.clone(),
-                recenter.clone(),
-                anim.clone(),
-            );
-            move |bounds: Bounds<Pixels>, window: &mut Window, _: &mut App| {
-                let prev = viewport.get();
-                viewport.set(bounds);
-                if !fitted.get() {
-                    let (z, p) = fit_view(bounds.size, content);
-                    zoom.set(z);
-                    pan.set(p);
-                    fitted.set(true);
-                } else if prev.size != bounds.size {
-                    // Keep the view stable across a resize at any zoom level: hold
-                    // the graph point under the viewport center fixed and scale the
-                    // zoom with the fit, so the same section stays framed at the
-                    // same zoom relative to the window rather than snapping to the
-                    // fully fitted view. A settle in flight targeted the old size,
-                    // so drop it rather than ease toward a stale destination.
-                    anim.set(None);
-                    let old_fit = fit_zoom(prev.size, content);
-                    let new_fit = fit_zoom(bounds.size, content);
-                    let z_old = zoom.get();
-                    let (pan_x, pan_y) = pan.get();
-                    let center_x = (f32::from(prev.size.width) / 2. - pan_x) / z_old;
-                    let center_y = (f32::from(prev.size.height) / 2. - pan_y) / z_old;
-                    let z = (z_old * new_fit / old_fit).clamp(new_fit, MAX_ZOOM);
-                    zoom.set(z);
-                    pan.set(clamp_pan(
-                        (
-                            f32::from(bounds.size.width) / 2. - center_x * z,
-                            f32::from(bounds.size.height) / 2. - center_y * z,
-                        ),
-                        z,
-                        bounds.size,
-                        content,
-                    ));
-                }
-                // Settle the view on the toggled box and the boxes that shared
-                // the screen with it. Fit that rect, but only ever zoom out: a
-                // node opening smaller than the current zoom must not blow up to
-                // fill the view, the disorienting case this avoids. Hold the
-                // rect's center fixed across the zoom change so the content does
-                // not lurch, then pan the minimum needed to seat the rect fully
-                // inside — leaving the view put when it already fits. The move is
-                // eased over a few frames (the driver below) rather than jumped.
-                if recenter.get() {
-                    if let Some(target) = recenter_target {
-                        let (tz, (tpx, tpy)) =
-                            settle_view(target, bounds.size, content, zoom.get(), pan.get());
-                        let (z, (px, py)) = (zoom.get(), pan.get());
-                        let moves = (tz - z).abs() > SETTLE_MIN_ZOOM_STEP
-                            || (tpx - px).abs() > SETTLE_MIN_PAN_STEP
-                            || (tpy - py).abs() > SETTLE_MIN_PAN_STEP;
-                        if moves {
-                            anim.set(Some(Settle {
-                                from_zoom: z,
-                                from_pan: (px, py),
-                                to_zoom: tz,
-                                to_pan: (tpx, tpy),
-                                start: Instant::now(),
-                            }));
-                        }
-                    }
-                    recenter.set(false);
-                }
-                // Advance an in-flight settle and ask for the next frame until it
-                // lands, then snap to the target and stop, so the window returns to
-                // idle. request_animation_frame redraws even with no other change.
-                if let Some(a) = anim.get() {
-                    let t =
-                        (a.start.elapsed().as_secs_f32() / SETTLE_DURATION.as_secs_f32()).clamp(0.0, 1.0);
-                    let e = ease_out_cubic(t);
-                    zoom.set(a.from_zoom + (a.to_zoom - a.from_zoom) * e);
-                    pan.set((
-                        a.from_pan.0 + (a.to_pan.0 - a.from_pan.0) * e,
-                        a.from_pan.1 + (a.to_pan.1 - a.from_pan.1) * e,
-                    ));
-                    if t >= 1.0 {
-                        anim.set(None);
-                    } else {
-                        window.request_animation_frame();
-                    }
-                }
-            }
-        };
+        let recenter_target = recenter_rect(g, recent, prev_visible);
+        let prepaint = build_prepaint(
+            zoom.clone(),
+            pan.clone(),
+            fitted.clone(),
+            viewport.clone(),
+            recenter.clone(),
+            anim.clone(),
+            content,
+            recenter_target,
+        );
+        let paint = canvas_body(boxes, connectors, zoom, pan, palette, content, entity);
         div()
             .id("graph-viewport")
             .relative()
             .size_full()
             .overflow_hidden()
             .child(
-                canvas(prepaint, move |bounds, _, window, cx| {
-                    let z = zoom.get();
-                    let p = pan.get();
-                    // Boxes parent-before-child so children paint over their
-                    // containers; connectors last so edges sit over the fills.
-                    for b in &boxes {
-                        paint_box(b, bounds, z, p, &palette, window, cx);
-                    }
-                    for (points, kinds, dim) in &connectors {
-                        // ELK routes a node pair once; fan its provenances out into
-                        // nested lanes centered on that route — each anchored at the
-                        // nodes like a lone edge — so a pair several queries connect
-                        // still shows each.
-                        let screen: Vec<(f32, f32)> = points
-                            .iter()
-                            .map(|(x, y)| {
-                                let s = to_screen(*x, *y, bounds, z, p);
-                                (f32::from(s.x), f32::from(s.y))
-                            })
-                            .collect();
-                        let n = kinds.len() as f32;
-                        for (i, kind) in kinds.iter().enumerate() {
-                            let slot = i as f32 - (n - 1.0) / 2.0;
-                            let lane = lane_polyline(&screen, slot * PARALLEL_SPACING * z);
-                            paint_connector(&lane, *kind, *dim, z, window);
-                        }
-                    }
-                    // Scroll bars along the edges of whichever axes overflow the
-                    // viewport, an alternative to drag-panning.
-                    let track = Hsla::from(bviz_ui_theme::mix(palette.border, palette.background, 0.5));
-                    let thumb = Hsla::from(bviz_ui_theme::mix(palette.label, palette.background, 0.45));
-                    for axis in [Axis::Vertical, Axis::Horizontal] {
-                        if let Some(bar) = scrollbar_geom(axis, bounds, content, z, p) {
-                            bar.paint(track, thumb, window);
-                        }
-                    }
-                    // While a pan or a scroll-bar drag is in progress, run it
-                    // through window-global handlers so it keeps working when the
-                    // cursor leaves the window. A pan release also toggles the group
-                    // under it when it was a click rather than a drag.
-                    let (dragging, scroll_dragging) = {
-                        let v = entity.read(cx);
-                        (v.dragging, v.scroll_drag.is_some())
-                    };
-                    if dragging {
-                        track_drag(window, &entity, drag_pan, end_drag);
-                    } else if scroll_dragging {
-                        track_drag(window, &entity, scroll_drag_move, |view, _, cx| {
-                            end_scroll_drag(view, cx)
-                        });
-                    }
-                })
-                .absolute()
-                .left_0()
-                .top_0()
-                .size_full(),
+                canvas(prepaint, paint)
+                    .absolute()
+                    .left_0()
+                    .top_0()
+                    .size_full(),
             )
             .children(legend)
             .children(relaying_indicator)
@@ -1065,6 +755,390 @@ impl Render for GraphView {
             .title("bazel_viz graph")
             .status(self.status())
             .child(body)
+    }
+}
+
+/// The lit/dimmed partition for the hovered node. Dimming traces the hovered
+/// node's whole subtree neighborhood: the boxes geometrically nested inside the
+/// hovered box (it and its descendants, since the layout nests children within
+/// their parent's rect) plus the far endpoint of every edge incident to that
+/// subtree. The subtree's incident edges stay lit and everything else dims, but
+/// only when there is at least one such edge to reveal — an edgeless subtree (or
+/// a disabled toggle) would fade the graph for no signal, so those suppress
+/// dimming entirely.
+fn compute_dimming(g: &LaidOut, hovered: Option<Id>, dim_enabled: bool) -> Dimming {
+    let hovered_box = hovered.and_then(|h| g.boxes.iter().find(|b| b.id == h));
+    let subtree: HashSet<Id> = hovered_box
+        .filter(|_| dim_enabled)
+        .map(|h| {
+            g.boxes
+                .iter()
+                .filter(|b| {
+                    b.x >= h.x
+                        && b.y >= h.y
+                        && b.x + b.width <= h.x + h.width
+                        && b.y + b.height <= h.y + h.height
+                })
+                .map(|b| b.id)
+                .collect()
+        })
+        .unwrap_or_default();
+    // The subtree plus the far endpoint of each full-connectivity edge incident
+    // to it: the direct neighbors, the only nodes a hover lights. This walks the
+    // full connectivity, not the drawn connectors, so a neighbor still lights up
+    // when reduction dropped the edge to it. The far endpoints are split by
+    // direction so the path tracing below follows dependency edges the right way.
+    // An empty active set (no incident edge) leaves dimming off.
+    let mut active: HashSet<Id> = subtree.clone();
+    let mut out_targets: HashSet<Id> = HashSet::new();
+    let mut in_targets: HashSet<Id> = HashSet::new();
+    let mut has_edge = false;
+    for &(from, to) in &g.full_edges {
+        let (f_in, t_in) = (subtree.contains(&from), subtree.contains(&to));
+        if f_in || t_in {
+            has_edge = true;
+        }
+        if f_in && !t_in {
+            active.insert(to);
+            out_targets.insert(to);
+        } else if t_in && !f_in {
+            active.insert(from);
+            in_targets.insert(from);
+        }
+    }
+    if !has_edge {
+        active.clear();
+    }
+    // Edges to light. Every drawn edge incident to the subtree is a surviving
+    // direct-neighbor edge — the drawn graph is a subset of the full
+    // connectivity — so light them all; a compound box thus lights every
+    // member's neighbor edge at once, not one at a time. A neighbor whose direct
+    // edge reduction dropped is reached by no such edge; for it alone, trace the
+    // shortest drawn path so it is not left floating. A path's interior nodes are
+    // conduits, not neighbors, so they stay out of `lit` (the undimmed boxes
+    // remain just the direct neighbors).
+    let mut lit_edges: HashSet<(Id, Id)> = HashSet::new();
+    if has_edge {
+        let mut out_adj: HashMap<Id, Vec<Id>> = HashMap::new();
+        let mut in_adj: HashMap<Id, Vec<Id>> = HashMap::new();
+        for c in &g.connectors {
+            out_adj.entry(c.from).or_default().push(c.to);
+            in_adj.entry(c.to).or_default().push(c.from);
+            if subtree.contains(&c.from) || subtree.contains(&c.to) {
+                lit_edges.insert((c.from, c.to));
+            }
+        }
+        // Neighbors a drawn edge already reaches need no path.
+        let reached: HashSet<Id> = lit_edges
+            .iter()
+            .flat_map(|&(f, t)| [f, t])
+            .filter(|n| !subtree.contains(n))
+            .collect();
+        let out_missing: HashSet<Id> = out_targets.difference(&reached).copied().collect();
+        let in_missing: HashSet<Id> = in_targets.difference(&reached).copied().collect();
+        trace_paths(&subtree, &out_missing, &out_adj, true, &mut lit_edges);
+        trace_paths(&subtree, &in_missing, &in_adj, false, &mut lit_edges);
+    }
+    Dimming {
+        lit: active,
+        lit_edges,
+        applies: has_edge,
+    }
+}
+
+/// Flattens each laid-out box to what the canvas paints, resolving its themed
+/// fill and marking those the dimming fades.
+fn paint_boxes(
+    g: &LaidOut,
+    expandable: &HashSet<Id>,
+    recent: Option<Id>,
+    recent_at: Instant,
+    dimming: &Dimming,
+    palette: &Palette,
+) -> Vec<PaintBox> {
+    // The highlight fades linearly to nothing over the linger window.
+    let highlight_alpha =
+        (1.0 - recent_at.elapsed().as_secs_f32() / HIGHLIGHT_LINGER.as_secs_f32()).clamp(0.0, 1.0);
+    g.boxes
+        .iter()
+        .map(|b| PaintBox {
+            x: b.x,
+            y: b.y,
+            w: b.width,
+            h: b.height,
+            compound: b.compound,
+            expandable: expandable.contains(&b.id) || b.group,
+            fill: if b.compound {
+                container_fill(b.kind, palette)
+            } else {
+                bviz_ui_theme::mix(kind_accent(b.kind), palette.background, KIND_BLEND)
+            },
+            label: b.label.clone(),
+            highlight: if recent == Some(b.id) { highlight_alpha } else { 0.0 },
+            dim: dimming.applies && !dimming.lit.contains(&b.id),
+        })
+        .collect()
+}
+
+/// Snapshots each connector's polyline, provenance kinds, and whether the
+/// dimming fades it, owned so the `'static` paint closure needs no borrow of the
+/// graph.
+fn collect_connectors(
+    g: &LaidOut,
+    dimming: &Dimming,
+) -> Vec<(Vec<(f64, f64)>, Vec<EdgeKind>, bool)> {
+    g.connectors
+        .iter()
+        .map(|c| {
+            let dim = dimming.applies && !dimming.lit_edges.contains(&(c.from, c.to));
+            (c.points.clone(), c.kinds.clone(), dim)
+        })
+        .collect()
+}
+
+/// Smallest layout rect covering the just-toggled box and every box that was
+/// fully on screen when it was toggled (those that survived the relayout), as
+/// (x, y, w, h). The view settles onto this once the relayout lands, so the user
+/// keeps sight of what they were looking at.
+fn recenter_rect(
+    g: &LaidOut,
+    recent: Option<Id>,
+    prev_visible: &[Id],
+) -> Option<(f64, f64, f64, f64)> {
+    let id = recent?;
+    let mut rect: Option<(f64, f64, f64, f64)> = None;
+    for &bid in std::iter::once(&id).chain(prev_visible) {
+        let Some(b) = g.boxes.iter().find(|b| b.id == bid) else {
+            continue;
+        };
+        let (x0, y0, x1, y1) = (b.x, b.y, b.x + b.width, b.y + b.height);
+        rect = Some(match rect {
+            None => (x0, y0, x1, y1),
+            Some((ax0, ay0, ax1, ay1)) => (ax0.min(x0), ay0.min(y0), ax1.max(x1), ay1.max(y1)),
+        });
+    }
+    rect.map(|(x0, y0, x1, y1)| (x0, y0, x1 - x0, y1 - y0))
+}
+
+/// Overlay listing the edge provenances actually drawn, in enum order, so it
+/// explains only the kinds present in this graph. `None` when none are drawn.
+fn legend(g: &LaidOut, palette: &Palette) -> Option<Div> {
+    let present: Vec<EdgeKind> = [EdgeKind::Query, EdgeKind::Cquery, EdgeKind::Aquery]
+        .into_iter()
+        .filter(|k| g.connectors.iter().any(|c| c.kinds.contains(k)))
+        .collect();
+    (!present.is_empty()).then(|| {
+        div()
+            .absolute()
+            .left_2()
+            .bottom_2()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .p_2()
+            .rounded_md()
+            .bg(palette.container_fill)
+            .children(present.into_iter().map(|k| {
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(div().w(px(16.)).h(px(2.)).bg(edge_color(k)))
+                    .child(div().text_xs().text_color(palette.label).child(k.label()))
+            }))
+    })
+}
+
+/// Spinner shown while a relayout runs, so the prior layout stays interactive
+/// with a visible cue that a new one is in flight. `None` when not relaying.
+fn relaying_indicator(relaying: bool, palette: &Palette) -> Option<Div> {
+    relaying.then(|| {
+        div()
+            .absolute()
+            .right_2()
+            .top_2()
+            .flex()
+            .items_center()
+            .gap_2()
+            .px_2()
+            .py_1()
+            .rounded_md()
+            .bg(palette.container_fill)
+            .child(
+                bviz_ui_assets::icon("circle-notch")
+                    .size(px(14.))
+                    .text_color(palette.label)
+                    .with_animation(
+                        "relaying-spinner",
+                        Animation::new(Duration::from_millis(900)).repeat(),
+                        |icon, delta| {
+                            icon.with_transformation(Transformation::rotate(percentage(delta)))
+                        },
+                    ),
+            )
+            .child(div().text_xs().text_color(palette.label).child("laying out…"))
+    })
+}
+
+/// Fits the graph to the viewport on the first frame, holds the framing stable
+/// across a resize, and drives the settle animation toward `recenter_target`.
+/// Runs at canvas prepaint because the fit needs the viewport size, known only
+/// once laid out. Owns the shared cells so it can both read and update the view.
+fn build_prepaint(
+    zoom: Rc<Cell<f32>>,
+    pan: Rc<Cell<(f32, f32)>>,
+    fitted: Rc<Cell<bool>>,
+    viewport: Rc<Cell<Bounds<Pixels>>>,
+    recenter: Rc<Cell<bool>>,
+    anim: Rc<Cell<Option<Settle>>>,
+    content: (f32, f32),
+    recenter_target: Option<(f64, f64, f64, f64)>,
+) -> impl FnOnce(Bounds<Pixels>, &mut Window, &mut App) {
+    move |bounds: Bounds<Pixels>, window: &mut Window, _: &mut App| {
+        let prev = viewport.get();
+        viewport.set(bounds);
+        if !fitted.get() {
+            let (z, p) = fit_view(bounds.size, content);
+            zoom.set(z);
+            pan.set(p);
+            fitted.set(true);
+        } else if prev.size != bounds.size {
+            // Keep the view stable across a resize at any zoom level: hold the
+            // graph point under the viewport center fixed and scale the zoom with
+            // the fit, so the same section stays framed at the same zoom relative
+            // to the window rather than snapping to the fully fitted view. A
+            // settle in flight targeted the old size, so drop it rather than ease
+            // toward a stale destination.
+            anim.set(None);
+            let old_fit = fit_zoom(prev.size, content);
+            let new_fit = fit_zoom(bounds.size, content);
+            let z_old = zoom.get();
+            let (pan_x, pan_y) = pan.get();
+            let center_x = (f32::from(prev.size.width) / 2. - pan_x) / z_old;
+            let center_y = (f32::from(prev.size.height) / 2. - pan_y) / z_old;
+            let z = (z_old * new_fit / old_fit).clamp(new_fit, MAX_ZOOM);
+            zoom.set(z);
+            pan.set(clamp_pan(
+                (
+                    f32::from(bounds.size.width) / 2. - center_x * z,
+                    f32::from(bounds.size.height) / 2. - center_y * z,
+                ),
+                z,
+                bounds.size,
+                content,
+            ));
+        }
+        // Settle the view on the toggled box and the boxes that shared the screen
+        // with it. Fit that rect, but only ever zoom out: a node opening smaller
+        // than the current zoom must not blow up to fill the view, the
+        // disorienting case this avoids. Hold the rect's center fixed across the
+        // zoom change so the content does not lurch, then pan the minimum needed
+        // to seat the rect fully inside — leaving the view put when it already
+        // fits. The move is eased over a few frames (the driver below) rather than
+        // jumped.
+        if recenter.get() {
+            if let Some(target) = recenter_target {
+                let (tz, (tpx, tpy)) =
+                    settle_view(target, bounds.size, content, zoom.get(), pan.get());
+                let (z, (px, py)) = (zoom.get(), pan.get());
+                let moves = (tz - z).abs() > SETTLE_MIN_ZOOM_STEP
+                    || (tpx - px).abs() > SETTLE_MIN_PAN_STEP
+                    || (tpy - py).abs() > SETTLE_MIN_PAN_STEP;
+                if moves {
+                    anim.set(Some(Settle {
+                        from_zoom: z,
+                        from_pan: (px, py),
+                        to_zoom: tz,
+                        to_pan: (tpx, tpy),
+                        start: Instant::now(),
+                    }));
+                }
+            }
+            recenter.set(false);
+        }
+        // Advance an in-flight settle and ask for the next frame until it lands,
+        // then snap to the target and stop, so the window returns to idle.
+        // request_animation_frame redraws even with no other change.
+        if let Some(a) = anim.get() {
+            let t =
+                (a.start.elapsed().as_secs_f32() / SETTLE_DURATION.as_secs_f32()).clamp(0.0, 1.0);
+            let e = ease_out_cubic(t);
+            zoom.set(a.from_zoom + (a.to_zoom - a.from_zoom) * e);
+            pan.set((
+                a.from_pan.0 + (a.to_pan.0 - a.from_pan.0) * e,
+                a.from_pan.1 + (a.to_pan.1 - a.from_pan.1) * e,
+            ));
+            if t >= 1.0 {
+                anim.set(None);
+            } else {
+                window.request_animation_frame();
+            }
+        }
+    }
+}
+
+/// The canvas paint pass: draws every box parent-before-child so children sit
+/// over their containers, then the connectors over the fills (fanning each node
+/// pair's provenances into nested lanes), then the scroll bars, and installs the
+/// window-global drag handlers while a pan or scroll-bar drag is in progress.
+/// Owns snapshots of the boxes and connectors so it need not borrow the graph.
+fn canvas_body(
+    boxes: Vec<PaintBox>,
+    connectors: Vec<(Vec<(f64, f64)>, Vec<EdgeKind>, bool)>,
+    zoom: Rc<Cell<f32>>,
+    pan: Rc<Cell<(f32, f32)>>,
+    palette: Palette,
+    content: (f32, f32),
+    entity: Entity<GraphView>,
+) -> impl FnOnce(Bounds<Pixels>, (), &mut Window, &mut App) {
+    move |bounds, _, window, cx| {
+        let z = zoom.get();
+        let p = pan.get();
+        for b in &boxes {
+            paint_box(b, bounds, z, p, &palette, window, cx);
+        }
+        for (points, kinds, dim) in &connectors {
+            // ELK routes a node pair once; fan its provenances out into nested
+            // lanes centered on that route — each anchored at the nodes like a
+            // lone edge — so a pair several queries connect still shows each.
+            let screen: Vec<(f32, f32)> = points
+                .iter()
+                .map(|(x, y)| {
+                    let s = to_screen(*x, *y, bounds, z, p);
+                    (f32::from(s.x), f32::from(s.y))
+                })
+                .collect();
+            let n = kinds.len() as f32;
+            for (i, kind) in kinds.iter().enumerate() {
+                let slot = i as f32 - (n - 1.0) / 2.0;
+                let lane = lane_polyline(&screen, slot * PARALLEL_SPACING * z);
+                paint_connector(&lane, *kind, *dim, z, window);
+            }
+        }
+        // Scroll bars along the edges of whichever axes overflow the viewport, an
+        // alternative to drag-panning.
+        let track = Hsla::from(bviz_ui_theme::mix(palette.border, palette.background, 0.5));
+        let thumb = Hsla::from(bviz_ui_theme::mix(palette.label, palette.background, 0.45));
+        for axis in [Axis::Vertical, Axis::Horizontal] {
+            if let Some(bar) = scrollbar_geom(axis, bounds, content, z, p) {
+                bar.paint(track, thumb, window);
+            }
+        }
+        // While a pan or a scroll-bar drag is in progress, run it through
+        // window-global handlers so it keeps working when the cursor leaves the
+        // window. A pan release also toggles the group under it when it was a
+        // click rather than a drag.
+        let (dragging, scroll_dragging) = {
+            let v = entity.read(cx);
+            (v.dragging, v.scroll_drag.is_some())
+        };
+        if dragging {
+            track_drag(window, &entity, drag_pan, end_drag);
+        } else if scroll_dragging {
+            track_drag(window, &entity, scroll_drag_move, |view, _, cx| {
+                end_scroll_drag(view, cx)
+            });
+        }
     }
 }
 
