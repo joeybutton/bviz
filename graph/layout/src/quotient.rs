@@ -45,7 +45,35 @@ pub fn quotient(
     let containers: HashSet<Id> = graph.nodes.iter().filter_map(|n| n.parent).collect();
     let mergeable = |node: &Node| is_candidate(node.kind) && !containers.contains(&node.id);
 
-    // Group candidate ids by signature; non-candidates are passed through.
+    let groups = group_by_signature(graph, &mergeable, &producers, &consumers);
+    let partition = partition_groups(&groups, expanded, names);
+
+    let mut out = Graph::new();
+    emit_nodes(&mut out, graph, &mergeable, &partition);
+    emit_edges(&mut out, graph, &partition.remap);
+
+    // Sort by resolved name, not interned id: the integer id depends on the
+    // order names were interned, so name-keyed sorting is what makes the output
+    // independent of the input order.
+    out.nodes.sort_by(|a, b| names.resolve(a.id).cmp(names.resolve(b.id)));
+    out.edges.sort_by(|a, b| {
+        (names.resolve(a.from), names.resolve(a.to), a.kind).cmp(&(
+            names.resolve(b.from),
+            names.resolve(b.to),
+            b.kind,
+        ))
+    });
+    (out, partition.remap)
+}
+
+/// Groups mergeable candidate ids by signature; non-candidates are passed
+/// through.
+fn group_by_signature(
+    graph: &Graph,
+    mergeable: &impl Fn(&Node) -> bool,
+    producers: &BTreeMap<Id, Vec<Id>>,
+    consumers: &BTreeMap<Id, Vec<Id>>,
+) -> BTreeMap<Signature, Vec<Id>> {
     let mut groups: BTreeMap<Signature, Vec<Id>> = BTreeMap::new();
     for node in &graph.nodes {
         if !mergeable(node) {
@@ -54,20 +82,36 @@ pub fn quotient(
         let signature = Signature {
             kind: node.kind,
             parent: node.parent,
-            producers: sorted_neighbors(&producers, node.id),
-            consumers: sorted_neighbors(&consumers, node.id),
+            producers: sorted_neighbors(producers, node.id),
+            consumers: sorted_neighbors(consumers, node.id),
         };
         groups.entry(signature).or_default().push(node.id);
     }
+    groups
+}
 
-    // Collapsed multi-member groups remap their members to the group id; an
-    // expanded multi-member group instead becomes a container holding its
-    // members, which keep their own ids.
+/// How each signature group is realized in the output.
+struct Partition {
+    /// Member id -> group id for collapsed groups and singletons; expanded-group
+    /// members and non-candidates are absent (they keep their own ids).
+    remap: BTreeMap<Id, Id>,
+    /// Group id -> member count, for labeling, recorded only for multi-member
+    /// groups (both collapsed and expanded).
+    group_sizes: BTreeMap<Id, usize>,
+    /// Member id -> container group id, for members of expanded groups only.
+    member_container: BTreeMap<Id, Id>,
+}
+
+/// Collapsed multi-member groups remap their members to the group id; an
+/// expanded multi-member group instead becomes a container holding its members,
+/// which keep their own ids.
+fn partition_groups(
+    groups: &BTreeMap<Signature, Vec<Id>>,
+    expanded: &HashSet<Id>,
+    names: &mut Names,
+) -> Partition {
     let mut remap: BTreeMap<Id, Id> = BTreeMap::new();
-    // Group id -> member count, for labeling, recorded only for multi-member
-    // groups (both collapsed and expanded).
     let mut group_sizes: BTreeMap<Id, usize> = BTreeMap::new();
-    // Member id -> container group id, for members of expanded groups only.
     let mut member_container: BTreeMap<Id, Id> = BTreeMap::new();
     for members in groups.values() {
         let target = group_id(members, names);
@@ -86,11 +130,16 @@ pub fn quotient(
             remap.insert(member, target);
         }
     }
+    Partition {
+        remap,
+        group_sizes,
+        member_container,
+    }
+}
 
-    let mut out = Graph::new();
-
-    // Non-candidates unchanged; collapsed groups emit one leaf; expanded groups
-    // emit a container followed by their members reparented to it.
+/// Emits the quotient's nodes from the [`Partition`]: kept nodes, group leaves,
+/// and group containers with their reparented members.
+fn emit_nodes(out: &mut Graph, graph: &Graph, mergeable: &impl Fn(&Node) -> bool, part: &Partition) {
     let mut emitted: BTreeMap<Id, ()> = BTreeMap::new();
     for node in &graph.nodes {
         if !mergeable(node) {
@@ -99,11 +148,11 @@ pub fn quotient(
         }
         // A member of an expanded group: emit the container once, then the
         // member with its id intact and parent set to the group.
-        if let Some(&gid) = member_container.get(&node.id) {
+        if let Some(&gid) = part.member_container.get(&node.id) {
             if emitted.insert(gid, ()).is_none() {
                 out.nodes.push(Node {
                     id: gid,
-                    label: group_label(node.kind, group_sizes[&gid]),
+                    label: group_label(node.kind, part.group_sizes[&gid]),
                     kind: Kind::Group,
                     group: true,
                     parent: node.parent,
@@ -118,11 +167,11 @@ pub fn quotient(
             });
             continue;
         }
-        let id = remap[&node.id];
+        let id = part.remap[&node.id];
         if emitted.insert(id, ()).is_some() {
             continue;
         }
-        let label = match group_sizes.get(&id) {
+        let label = match part.group_sizes.get(&id) {
             Some(&count) => group_label(node.kind, count),
             None => node.label.clone(),
         };
@@ -130,13 +179,15 @@ pub fn quotient(
             id,
             label,
             kind: node.kind,
-            group: group_sizes.contains_key(&id),
+            group: part.group_sizes.contains_key(&id),
             parent: node.parent,
         });
     }
+}
 
-    // Remap edge endpoints (collapsed-group members only; expanded-group
-    // members and singletons keep their ids), drop self-loops, and dedup.
+/// Remap edge endpoints (collapsed-group members only; expanded-group members
+/// and singletons keep their ids), drop self-loops, and dedup.
+fn emit_edges(out: &mut Graph, graph: &Graph, remap: &BTreeMap<Id, Id>) {
     let mut seen_edge: BTreeMap<(Id, Id, EdgeKind), ()> = BTreeMap::new();
     for edge in &graph.edges {
         let from = remap.get(&edge.from).copied().unwrap_or(edge.from);
@@ -153,19 +204,6 @@ pub fn quotient(
             kind: edge.kind,
         });
     }
-
-    // Sort by resolved name, not interned id: the integer id depends on the
-    // order names were interned, so name-keyed sorting is what makes the output
-    // independent of the input order.
-    out.nodes.sort_by(|a, b| names.resolve(a.id).cmp(names.resolve(b.id)));
-    out.edges.sort_by(|a, b| {
-        (names.resolve(a.from), names.resolve(a.to), a.kind).cmp(&(
-            names.resolve(b.from),
-            names.resolve(b.to),
-            b.kind,
-        ))
-    });
-    (out, remap)
 }
 
 /// The neighborhood key two candidates must share to merge.
