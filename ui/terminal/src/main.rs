@@ -8,6 +8,7 @@
 //! build's sparse timestamped events (start, finish, action and test
 //! completions) and is approximate.
 
+mod color;
 mod terminal;
 
 use std::process::ExitCode;
