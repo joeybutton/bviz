@@ -359,17 +359,24 @@ impl TerminalView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        // A click on the scroll-bar gutter drives the thumb; grabbing the thumb
-        // keeps the cursor at the same spot on it, while clicking the track jumps
-        // the thumb's center to the cursor.
         if let Some(bar) = self.scrollbar {
             if bar.track_hit(event.position) {
-                self.drag_grab = Some(bar.grab(event.position));
-                self.drag_to(event.position, cx);
+                self.begin_scrollbar_drag(bar, event.position, cx);
                 return;
             }
         }
-        // A click on the content begins a text selection.
+        self.begin_selection(event, window, cx);
+    }
+
+    /// Grabbing the thumb keeps the cursor at the same spot on it, while
+    /// clicking the track jumps the thumb's center to the cursor.
+    fn begin_scrollbar_drag(&mut self, bar: Scrollbar, position: Point<Pixels>, cx: &mut Context<Self>) {
+        self.drag_grab = Some(bar.grab(position));
+        self.drag_to(position, cx);
+    }
+
+    /// A press on the content focuses it and begins a text selection.
+    fn begin_selection(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         self.body_focus.focus(window, cx);
         let Some((column, row, side)) = self.cell_at(event.position) else {
             return;
