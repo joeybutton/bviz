@@ -2,9 +2,10 @@ use crate::{CloseWindow, Quit, Tab, TabPrev};
 use bviz_ui_components::Button;
 use bviz_ui_theme::{Colors, colors, mix};
 use gpui::{
-    AnyElement, App, Bounds, BoxShadow, CursorStyle, Decorations, Entity, FocusHandle,
+    AnyElement, App, Bounds, BoxShadow, CursorStyle, Decorations, Div, Entity, FocusHandle,
     HitboxBehavior, Hsla, IntoElement, MouseButton, Pixels, Point, ResizeEdge, RenderOnce, Rgba,
-    SharedString, Size, Tiling, Window, canvas, div, point, prelude::*, px, size, transparent_black,
+    SharedString, Size, Stateful, Tiling, Window, canvas, div, point, prelude::*, px, size,
+    transparent_black,
 };
 
 /// Room left around the window for the drop shadow, and the resize-edge hit zone.
@@ -82,31 +83,7 @@ impl RenderOnce for Chrome {
             .size_full()
             .bg(colors.background)
             .text_color(colors.text)
-            .when(client, |this| {
-                this.border_color(colors.border)
-                    .when(!tiling.top, |d| d.border_t(BORDER))
-                    .when(!tiling.bottom, |d| d.border_b(BORDER))
-                    .when(!tiling.left, |d| d.border_l(BORDER))
-                    .when(!tiling.right, |d| d.border_r(BORDER))
-                    .when(!tiling.top && !tiling.left, |d| d.rounded_tl(ROUNDING))
-                    .when(!tiling.top && !tiling.right, |d| d.rounded_tr(ROUNDING))
-                    .when(!tiling.bottom && !tiling.left, |d| d.rounded_bl(ROUNDING))
-                    .when(!tiling.bottom && !tiling.right, |d| d.rounded_br(ROUNDING))
-                    .when(!tiling.is_tiled(), |d| {
-                        d.shadow(vec![BoxShadow {
-                            color: Hsla {
-                                h: 0.,
-                                s: 0.,
-                                l: 0.,
-                                a: shadow_alpha,
-                            },
-                            blur_radius: SHADOW / 2.,
-                            spread_radius: px(0.),
-                            offset: point(px(0.), px(0.)),
-                            inset: false,
-                        }])
-                    })
-            })
+            .when(client, |this| decorate(this, &colors, tiling, shadow_alpha))
             .when(client, |this| {
                 this.child(title_bar(&colors, radius, bar_bg, self.title, should_move))
             })
@@ -123,35 +100,67 @@ impl RenderOnce for Chrome {
             .on_action(|_: &TabPrev, window, cx| window.focus_prev(cx))
             .size_full()
             .bg(transparent_black())
-            .when(client, |this| {
-                this.when(!tiling.top, |d| d.pt(SHADOW))
-                    .when(!tiling.bottom, |d| d.pb(SHADOW))
-                    .when(!tiling.left, |d| d.pl(SHADOW))
-                    .when(!tiling.right, |d| d.pr(SHADOW))
-                    // The resize-edge cursor (set by the canvas below) only
-                    // changes within the border band, so repaint to update it
-                    // only there. Refreshing on every move would repaint the
-                    // whole window — including a heavy content canvas — on each
-                    // motion, pinning a core while the cursor merely crosses the
-                    // content. The band is wider than the resize hit zone so the
-                    // cursor still resets once on the way out.
-                    .on_mouse_move(|e, window, _| {
-                        let size = window.window_bounds().get_bounds().size;
-                        let inner = Bounds::new(Point::default(), size).inset(SHADOW * 2.0);
-                        if !inner.contains(&e.position) {
-                            window.refresh();
-                        }
-                    })
-                    .on_mouse_down(MouseButton::Left, move |e, window, _| {
-                        let size = window.window_bounds().get_bounds().size;
-                        if let Some(edge) = resize_edge(e.position, SHADOW, size, tiling) {
-                            window.start_window_resize(edge);
-                        }
-                    })
-                    .child(resize_cursor(tiling))
-            })
+            .when(client, |this| resize_backdrop(this, tiling))
             .child(inner)
     }
+}
+
+/// Per-tiling window decoration: a border and rounded corner on each non-tiled
+/// side, plus a drop shadow while the window floats free of the screen edges.
+fn decorate(this: Div, colors: &Colors, tiling: Tiling, shadow_alpha: f32) -> Div {
+    this.border_color(colors.border)
+        .when(!tiling.top, |d| d.border_t(BORDER))
+        .when(!tiling.bottom, |d| d.border_b(BORDER))
+        .when(!tiling.left, |d| d.border_l(BORDER))
+        .when(!tiling.right, |d| d.border_r(BORDER))
+        .when(!tiling.top && !tiling.left, |d| d.rounded_tl(ROUNDING))
+        .when(!tiling.top && !tiling.right, |d| d.rounded_tr(ROUNDING))
+        .when(!tiling.bottom && !tiling.left, |d| d.rounded_bl(ROUNDING))
+        .when(!tiling.bottom && !tiling.right, |d| d.rounded_br(ROUNDING))
+        .when(!tiling.is_tiled(), |d| {
+            d.shadow(vec![BoxShadow {
+                color: Hsla {
+                    h: 0.,
+                    s: 0.,
+                    l: 0.,
+                    a: shadow_alpha,
+                },
+                blur_radius: SHADOW / 2.,
+                spread_radius: px(0.),
+                offset: point(px(0.), px(0.)),
+                inset: false,
+            }])
+        })
+}
+
+/// The resize-interaction band around the content: shadow-width padding on each
+/// non-tiled side, dragging near an edge or corner starts a window resize, and a
+/// canvas child updates the resize cursor there.
+fn resize_backdrop(this: Stateful<Div>, tiling: Tiling) -> Stateful<Div> {
+    this.when(!tiling.top, |d| d.pt(SHADOW))
+        .when(!tiling.bottom, |d| d.pb(SHADOW))
+        .when(!tiling.left, |d| d.pl(SHADOW))
+        .when(!tiling.right, |d| d.pr(SHADOW))
+        // The resize-edge cursor (set by the canvas below) only changes within
+        // the border band, so repaint to update it only there. Refreshing on
+        // every move would repaint the whole window — including a heavy content
+        // canvas — on each motion, pinning a core while the cursor merely
+        // crosses the content. The band is wider than the resize hit zone so the
+        // cursor still resets once on the way out.
+        .on_mouse_move(|e, window, _| {
+            let size = window.window_bounds().get_bounds().size;
+            let inner = Bounds::new(Point::default(), size).inset(SHADOW * 2.0);
+            if !inner.contains(&e.position) {
+                window.refresh();
+            }
+        })
+        .on_mouse_down(MouseButton::Left, move |e, window, _| {
+            let size = window.window_bounds().get_bounds().size;
+            if let Some(edge) = resize_edge(e.position, SHADOW, size, tiling) {
+                window.start_window_resize(edge);
+            }
+        })
+        .child(resize_cursor(tiling))
 }
 
 /// A title bar: draggable to move the window, with minimize/maximize/close controls.
