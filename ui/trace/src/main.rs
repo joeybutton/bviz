@@ -8,7 +8,7 @@ static GLOBAL: bviz_alloc::MiMalloc = bviz_alloc::MiMalloc;
 
 use bviz_trace_layout::{
     FlameBox, FlameGraph, FlameMetrics, FlameView, Lane, LaneLayout, LaneMetrics, ScopeAggregate,
-    SpanRole, StatRow, TimeView, Viewport, Workload, flame_height, lay_out_flame, lay_out_lanes,
+    StatRow, TimeView, Viewport, flame_height, lay_out_flame, lay_out_lanes,
     visible_slices,
 };
 use bviz_trace_profile::{CounterPoint, LaneClass, Profile, Slice, SliceDetail, TimeSpan};
@@ -137,11 +137,6 @@ const STATS_NUM_COL_WIDTH: f32 = 104.0;
 /// Horizontal padding inside a stats cell.
 const STATS_CELL_PAD: f32 = 8.0;
 
-/// Lightness of a neutral meta fill (the flame graph's synthetic root and any
-/// meta-class frame), on a dark vs. a light background.
-const FLAME_ROOT_LIGHTNESS_DARK: f32 = 0.30;
-const FLAME_ROOT_LIGHTNESS_LIGHT: f32 = 0.78;
-
 /// Hover-tooltip text size, inner padding, gap between lines, and offset from the
 /// cursor.
 const TOOLTIP_TEXT_SIZE: f32 = 12.0;
@@ -157,32 +152,6 @@ const CROSSHAIR_LABEL_GAP: f32 = 5.0;
 
 /// Saturation of a counter series' translucent fill.
 const CATEGORY_SATURATION: f32 = 0.5;
-
-/// Hue (fraction of the wheel) per span workload, spread so the classes read as
-/// distinct on either theme: the two payload workloads are warm (action orange,
-/// starlark green) and the overhead workloads cool (filesystem cyan, remote/cache
-/// blue, skyframe indigo, scheduling magenta), with gc red set apart. The Other
-/// workload carries no hue — it is drawn as neutral grey.
-const HUE_SUBPROCESS: f32 = 0.07;
-const HUE_STARLARK: f32 = 0.34;
-const HUE_FILESYSTEM: f32 = 0.50;
-const HUE_REMOTE_CACHE: f32 = 0.60;
-const HUE_SKYFRAME: f32 = 0.70;
-const HUE_SCHEDULING: f32 = 0.83;
-const HUE_GC: f32 = 0.99;
-
-/// Payload fills are vivid (saturated, mid lightness) so real work draws the eye;
-/// overhead fills are muted (desaturated, pulled toward the background) so Bazel
-/// machinery recedes. Lightness is chosen per background.
-const PAYLOAD_SATURATION: f32 = 0.72;
-const PAYLOAD_LIGHTNESS_DARK: f32 = 0.60;
-const PAYLOAD_LIGHTNESS_LIGHT: f32 = 0.46;
-const OVERHEAD_SATURATION: f32 = 0.30;
-const OVERHEAD_LIGHTNESS_DARK: f32 = 0.40;
-const OVERHEAD_LIGHTNESS_LIGHT: f32 = 0.72;
-/// Side of a legend swatch and the gap between a swatch and its label.
-const LEGEND_SWATCH: f32 = 10.0;
-const LEGEND_LABEL_GAP: f32 = 4.0;
 
 /// Theme-resolved colors the canvas paints with, owned so the `'static` paint
 /// closure can capture them.
@@ -1524,7 +1493,11 @@ impl TraceView {
                     .flex()
                     .items_center()
                     .pr_2()
-                    .child(role_legend(palette))
+                    .child(bviz_ui_theme::role_legend(
+                        palette.label,
+                        palette.background,
+                        STATS_TEXT_SIZE,
+                    ))
             }))
     }
 
@@ -3904,84 +3877,8 @@ fn paint_slice(
     cx: &mut App,
 ) {
     let rect = Bounds::new(point(px(content_left + x), px(y)), size(px(w), px(h)));
-    let fill = span_role_color(slice.role, palette);
+    let fill = bviz_ui_theme::span_role_color(slice.role, palette.background);
     paint_labeled_box(rect, fill, profile.str(slice.name), palette, window, cx);
-}
-
-/// Fill for a span, keyed by its [`SpanRole`]: the workload gives the base hue and
-/// the payload flag its weight, so the compiler and the Starlark that drives the
-/// build read vivid while Bazel's own overhead (scheduling, caching, graph
-/// bookkeeping, the sandbox) recedes. Both the flame chart and the flame graph
-/// paint with it, so a role is the same color in both. The Other workload —
-/// including the flame graph's synthetic root — is a neutral hueless grey.
-fn span_role_color(role: SpanRole, palette: &Palette) -> Hsla {
-    let dark = luminance(palette.background) < 0.5;
-    if role.workload == Workload::Other {
-        let lightness = if dark {
-            FLAME_ROOT_LIGHTNESS_DARK
-        } else {
-            FLAME_ROOT_LIGHTNESS_LIGHT
-        };
-        return hsla(0.0, 0.0, lightness, 1.0);
-    }
-    let hue = match role.workload {
-        Workload::Subprocess => HUE_SUBPROCESS,
-        Workload::Starlark => HUE_STARLARK,
-        Workload::Filesystem => HUE_FILESYSTEM,
-        Workload::RemoteCache => HUE_REMOTE_CACHE,
-        Workload::Skyframe => HUE_SKYFRAME,
-        Workload::Scheduling => HUE_SCHEDULING,
-        Workload::Gc => HUE_GC,
-        Workload::Other => unreachable!("other handled above"),
-    };
-    let (saturation, lightness) = if role.payload {
-        (
-            PAYLOAD_SATURATION,
-            if dark { PAYLOAD_LIGHTNESS_DARK } else { PAYLOAD_LIGHTNESS_LIGHT },
-        )
-    } else {
-        (
-            OVERHEAD_SATURATION,
-            if dark { OVERHEAD_LIGHTNESS_DARK } else { OVERHEAD_LIGHTNESS_LIGHT },
-        )
-    };
-    hsla(hue, saturation, lightness, 1.0)
-}
-
-/// A legend of the span-role colors: a swatch and name per workload in a row,
-/// matching the fills the flame boxes use. Payload workloads lead, then overhead.
-fn role_legend(palette: Palette) -> impl IntoElement {
-    const ROLES: [(Workload, bool, &str); 8] = [
-        (Workload::Subprocess, true, "action"),
-        (Workload::Starlark, true, "starlark"),
-        (Workload::Filesystem, false, "filesystem"),
-        (Workload::RemoteCache, false, "remote/cache"),
-        (Workload::Scheduling, false, "scheduling"),
-        (Workload::Skyframe, false, "skyframe"),
-        (Workload::Gc, false, "gc"),
-        (Workload::Other, false, "other"),
-    ];
-    div()
-        .flex()
-        .flex_row()
-        .items_center()
-        .gap_3()
-        .text_color(palette.label)
-        .text_size(px(STATS_TEXT_SIZE))
-        .children(ROLES.map(|(workload, payload, name)| {
-            div()
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap(px(LEGEND_LABEL_GAP))
-                .child(
-                    div()
-                        .size(px(LEGEND_SWATCH))
-                        .rounded_sm()
-                        .bg(span_role_color(SpanRole { workload, payload }, &palette)),
-                )
-                .child(name)
-        }))
 }
 
 /// Paints the aggregated flame graph filling the body: each box a work-class-colored
@@ -4028,7 +3925,7 @@ fn paint_flame_graph(
                 continue;
             }
             let rect = Bounds::new(point(px(left + b.x), px(y)), size(px(b.w), px(b.h)));
-            let fill = span_role_color(b.role, palette);
+            let fill = bviz_ui_theme::span_role_color(b.role, palette.background);
             paint_labeled_box(rect, fill, graph.str(b.name), palette, window, cx);
         }
     });
@@ -4700,16 +4597,10 @@ fn opaque(color: Hsla) -> Hsla {
     Hsla { a: 1.0, ..color }
 }
 
-/// Perceptual luminance of `c`, used to choose contrasting text and theme-fitting
-/// lightness.
-fn luminance(c: Rgba) -> f32 {
-    0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b
-}
-
 /// Black or white, whichever reads on `fill`.
 fn label_on(fill: Hsla) -> Hsla {
     let rgba = Rgba::from(fill);
-    if luminance(rgba) < 0.5 {
+    if bviz_ui_theme::luminance(rgba) < 0.5 {
         hsla(0.0, 0.0, 1.0, 1.0)
     } else {
         hsla(0.0, 0.0, 0.0, 1.0)

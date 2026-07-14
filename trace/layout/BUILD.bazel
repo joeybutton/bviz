@@ -6,7 +6,10 @@ rust_library(
     name = "layout",
     srcs = glob(["src/**/*.rs"]),
     crate_name = "bviz_trace_layout",
-    visibility = ["//ui/trace:__pkg__"],
+    visibility = [
+        "//ui/theme:__pkg__",
+        "//ui/trace:__pkg__",
+    ],
     deps = [
         "//trace/profile",
         "@crates//:rustc-hash",
