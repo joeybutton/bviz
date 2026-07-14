@@ -211,6 +211,26 @@ struct Palette {
     selection: Rgba,
 }
 
+impl Palette {
+    fn from_colors(colors: &bviz_ui_theme::Colors) -> Palette {
+        Palette {
+            border: colors.border,
+            label: colors.text,
+            background: colors.background,
+            header_band: bviz_ui_theme::mix(colors.container, colors.background, 0.5),
+            gridline: bviz_ui_theme::mix(colors.border, colors.background, 0.55),
+            // A mid-tone amber, legible against a light or dark background.
+            marker: Rgba::from(hsla(0.09, 0.6, 0.55, 1.0)),
+            scroll_track: bviz_ui_theme::mix(colors.container, colors.background, 0.3),
+            scroll_thumb: bviz_ui_theme::mix(colors.text, colors.background, 0.55),
+            divider: bviz_ui_theme::mix(colors.border, colors.background, 0.4),
+            panel: colors.container,
+            crosshair: bviz_ui_theme::mix(colors.text, colors.background, 0.35),
+            selection: colors.selected,
+        }
+    }
+}
+
 /// Which panel the tab bar below the flame chart shows. The counter plots share
 /// the flame chart's time axis; the flame graph and stats aggregate the selected
 /// tracks.
@@ -2551,21 +2571,7 @@ fn loading_indicator(label: impl Into<SharedString>, colors: &bviz_ui_theme::Col
 impl Render for TraceView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = bviz_ui_theme::colors(window);
-        let palette = Palette {
-            border: colors.border,
-            label: colors.text,
-            background: colors.background,
-            header_band: bviz_ui_theme::mix(colors.container, colors.background, 0.5),
-            gridline: bviz_ui_theme::mix(colors.border, colors.background, 0.55),
-            // A mid-tone amber, legible against a light or dark background.
-            marker: Rgba::from(hsla(0.09, 0.6, 0.55, 1.0)),
-            scroll_track: bviz_ui_theme::mix(colors.container, colors.background, 0.3),
-            scroll_thumb: bviz_ui_theme::mix(colors.text, colors.background, 0.55),
-            divider: bviz_ui_theme::mix(colors.border, colors.background, 0.4),
-            panel: colors.container,
-            crosshair: bviz_ui_theme::mix(colors.text, colors.background, 0.35),
-            selection: colors.selected,
-        };
+        let palette = Palette::from_colors(&colors);
         let body = match &self.source {
             Source::Loaded(profile) => {
                 // Own the handle so the borrow of `self.source` ends before the
