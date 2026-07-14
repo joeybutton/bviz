@@ -1820,6 +1820,55 @@ const CHUNKS_PER_WORKER: usize = 8;
 /// outweighs the balancing gain from finer chunks.
 const MIN_CHUNK_BYTES: usize = 4 << 20;
 
+/// One chunk handed to a worker: its bytes as text, plus the cleanup owed once
+/// the parse has read them. The pre-split path borrows the shared buffer and
+/// owes nothing; the streamed path hands its slab part back to the producer to
+/// refill.
+trait Chunk {
+    fn text(&self) -> Cow<'_, str>;
+    fn release(self);
+}
+
+impl Chunk for &str {
+    fn text(&self) -> Cow<'_, str> {
+        Cow::Borrowed(self)
+    }
+    fn release(self) {}
+}
+
+/// Parses one chunk into a fresh [`Builder`] on a worker, reusing the worker's
+/// `staging` buffer across chunks and sizing the new arg pool from the previous
+/// chunk's. The arg pool is live data the builder carries to the merge, so
+/// unlike `staging` it cannot be reclaimed; chunks are near-equal in bytes and
+/// so in arg count, so `args_cap` lets the next builder fill without regrowing
+/// from empty. The chunk is released between the parse and the seal: everything the
+/// builder keeps was interned during the parse, so a streamed chunk's slab part
+/// returns to the producer without the inflate waiting out the per-lane sorts.
+/// Returns `None` on a parse failure.
+fn parse_chunk(
+    chunk: impl Chunk,
+    writer: &mut Writer,
+    staging: &mut Vec<(i64, Slice, SliceDetail)>,
+    args_cap: &mut usize,
+) -> Option<Builder> {
+    let mut builder = Builder::new();
+    builder.staging = std::mem::take(staging);
+    builder.args_pool.reserve(*args_cap);
+    let ok = {
+        let text = chunk.text();
+        let ok = parse_range_into(&mut builder, writer, &text);
+        *args_cap = builder.args_pool.len();
+        ok
+    };
+    chunk.release();
+    if ok {
+        builder.seal_slices();
+    }
+    *staging = std::mem::take(&mut builder.staging);
+    staging.clear();
+    ok.then_some(builder)
+}
+
 /// Splits the `traceEvents` array into byte chunks at newline boundaries — a
 /// literal newline never falls inside a JSON string, so it always lies between
 /// events — parses each chunk into its own [`Builder`] on a pool of `n` worker
@@ -1876,26 +1925,13 @@ fn parse_chunks(text: &str, n: usize, min_bytes: usize) -> Option<Profile> {
                         let mut writer = interner.writer();
                         let mut parsed = Vec::new();
                         let mut staging = Vec::new();
-                        // The arg pool is live data the builder carries to the
-                        // merge, so it can't be reused like `staging`; sizing the
-                        // next builder's to the last chunk's final length — chunks
-                        // are near-equal in bytes, so in arg count — lets it fill
-                        // without regrowing from empty.
                         let mut args_cap = 0;
                         loop {
                             let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                             let Some(&chunk) = chunks.get(i) else { break };
-                            let mut builder = Builder::new();
-                            builder.staging = std::mem::take(&mut staging);
-                            builder.args_pool.reserve(args_cap);
-                            let ok = parse_range_into(&mut builder, &mut writer, chunk);
-                            args_cap = builder.args_pool.len();
-                            if ok {
-                                builder.seal_slices();
-                            }
-                            staging = std::mem::take(&mut builder.staging);
-                            staging.clear();
-                            parsed.push((i, ok.then_some(builder)));
+                            let builder =
+                                parse_chunk(chunk, &mut writer, &mut staging, &mut args_cap);
+                            parsed.push((i, builder));
                         }
                         parsed
                     })
@@ -1995,6 +2031,26 @@ impl PieceBuf<'_> {
         match self {
             PieceBuf::Slab { len, .. } => *len = n,
             PieceBuf::Owned(v) => v.truncate(n),
+        }
+    }
+}
+
+/// A streamed chunk: its decoded bytes read as Latin-1, and a slab part that
+/// goes back to the producer's ring once parsed (an owned run keeps nothing to
+/// return).
+struct StreamChunk<'buf, 'pool> {
+    buf: PieceBuf<'buf>,
+    pool: &'pool std::sync::mpsc::Sender<&'buf mut [u8]>,
+}
+
+impl Chunk for StreamChunk<'_, '_> {
+    fn text(&self) -> Cow<'_, str> {
+        latin1_cow(self.buf.bytes())
+    }
+
+    fn release(self) {
+        if let PieceBuf::Slab { data, .. } = self.buf {
+            let _ = self.pool.send(data);
         }
     }
 }
@@ -2155,37 +2211,15 @@ fn parse_gz_stream(bytes: &[u8], workers: usize, chunk_bytes: usize) -> Option<P
                 scope.spawn(move || {
                     let mut writer = interner.writer();
                     let mut staging = Vec::new();
-                    // The arg pool is live data the builder carries to the merge,
-                    // so it can't be reused like `staging`; sizing the next
-                    // builder's to the last chunk's final length — chunks are
-                    // near-equal in bytes, so in arg count — lets it fill without
-                    // regrowing from empty.
                     let mut args_cap = 0;
                     loop {
                         let piece = match rx.lock().unwrap().recv() {
                             Ok(piece) => piece,
                             Err(_) => break,
                         };
-                        let text = latin1_cow(piece.buf.bytes());
-                        let mut builder = Builder::new();
-                        builder.staging = std::mem::take(&mut staging);
-                        builder.args_pool.reserve(args_cap);
-                        let ok = parse_range_into(&mut builder, &mut writer, &text);
-                        args_cap = builder.args_pool.len();
-                        drop(text);
-                        // Hand a slab part back to the producer before
-                        // sealing; everything the builder keeps was interned
-                        // during the parse, and the inflate must not wait out
-                        // the per-lane sorts.
-                        if let PieceBuf::Slab { data, .. } = piece.buf {
-                            let _ = pool_tx.send(data);
-                        }
-                        if ok {
-                            builder.seal_slices();
-                        }
-                        staging = std::mem::take(&mut builder.staging);
-                        staging.clear();
-                        if builder_tx.send((piece.idx, ok.then_some(builder))).is_err() {
+                        let chunk = StreamChunk { buf: piece.buf, pool: &pool_tx };
+                        let builder = parse_chunk(chunk, &mut writer, &mut staging, &mut args_cap);
+                        if builder_tx.send((piece.idx, builder)).is_err() {
                             break;
                         }
                     }
