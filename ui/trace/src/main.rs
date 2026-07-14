@@ -4581,29 +4581,6 @@ fn main() {
 mod tests {
     use super::*;
 
-    fn palette() -> Palette {
-        let dark = Rgba {
-            r: 0.1,
-            g: 0.1,
-            b: 0.1,
-            a: 1.0,
-        };
-        Palette {
-            border: dark,
-            label: dark,
-            background: dark,
-            header_band: dark,
-            gridline: dark,
-            marker: dark,
-            scroll_track: dark,
-            scroll_thumb: dark,
-            divider: dark,
-            panel: dark,
-            crosshair: dark,
-            selection: dark,
-        }
-    }
-
     #[test]
     fn fit_px_per_us_maps_span_to_width() {
         let span = TimeSpan {
