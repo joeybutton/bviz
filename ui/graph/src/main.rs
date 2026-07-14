@@ -10,9 +10,9 @@ use bviz_ui_shell::Chrome;
 use clap::Parser;
 use gpui::{
     Animation, AnimationExt, App, BorderStyle, Bounds, Context, Div, Entity, FocusHandle,
-    IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, Hsla, MouseMoveEvent, MouseUpEvent, PathBuilder,
+    IntoElement, KeyDownEvent, Length, MouseButton, MouseDownEvent, Hsla, MouseMoveEvent, MouseUpEvent, PathBuilder,
     Pixels, Point, Render, Rgba, ScrollDelta, ScrollWheelEvent, Stateful, Task, TextAlign, Size,
-    Transformation, Window, canvas, div, percentage, point, prelude::*, px, quad, rgb, size,
+    Transformation, Window, canvas, div, percentage, point, prelude::*, px, quad, rems, rgb, size,
 };
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -426,6 +426,51 @@ impl GraphView {
         .detach();
     }
 
+    // A rounded pill toggling one boolean field, pinned to the top-left corner.
+    // On reads in the file-leaf accent with a filled dot; off reads muted with a
+    // hollow dot. Clicking runs `mutate`, then redraws.
+    fn toggle_pill(
+        id: &'static str,
+        top: impl Into<Length>,
+        label: &str,
+        on: bool,
+        palette: &Palette,
+        entity: Entity<GraphView>,
+        mutate: impl Fn(&mut GraphView, &mut Context<GraphView>) + 'static,
+    ) -> Stateful<Div> {
+        let top = top.into();
+        let accent = kind_accent(Kind::Artifact);
+        let (dot, label_color, border_color) = if on {
+            ('\u{25CF}', accent, accent)
+        } else {
+            ('\u{25CB}', palette.label, palette.border)
+        };
+        div()
+            .id(id)
+            .absolute()
+            .left_2()
+            .top(top)
+            .flex()
+            .items_center()
+            .gap_1()
+            .px_2()
+            .py_1()
+            .rounded_md()
+            .bg(palette.container_fill)
+            .border_1()
+            .border_color(border_color)
+            .text_xs()
+            .text_color(label_color)
+            .cursor_pointer()
+            .child(format!("{dot} {label}"))
+            .on_click(move |_, _, cx| {
+                entity.update(cx, |this, cx| {
+                    mutate(this, cx);
+                    cx.notify();
+                });
+            })
+    }
+
     /// Builds the single-canvas viewport: every box and connector is painted in
     /// one `canvas`, with pan and zoom applied in the paint transform. The
     /// closure is `'static`, so it captures owned snapshots of the boxes and
@@ -642,78 +687,30 @@ impl GraphView {
                         .child("laying out…"),
                 )
         });
-        // A pill that shows and toggles hover-dim, kept in sync with the `h` key
-        // since both flip the same field. On reads in the file-leaf accent with a
-        // filled dot; off reads muted with a hollow dot.
-        let dim_toggle = {
-            let entity = entity.clone();
-            let accent = kind_accent(Kind::Artifact);
-            let (dot, label_color, border_color) = if dim_enabled {
-                ('\u{25CF}', accent, accent)
-            } else {
-                ('\u{25CB}', palette.label, palette.border)
-            };
-            div()
-                .id("dim-toggle")
-                .absolute()
-                .left_2()
-                .top_2()
-                .flex()
-                .items_center()
-                .gap_1()
-                .px_2()
-                .py_1()
-                .rounded_md()
-                .bg(palette.container_fill)
-                .border_1()
-                .border_color(border_color)
-                .text_xs()
-                .text_color(label_color)
-                .cursor_pointer()
-                .child(format!("{dot} dim"))
-                .on_click(move |_, _, cx| {
-                    entity.update(cx, |this, cx| {
-                        this.dim_enabled = !this.dim_enabled;
-                        cx.notify();
-                    });
-                })
-        };
+        // Kept in sync with the `h` key, which flips the same field.
+        let dim_toggle = Self::toggle_pill(
+            "dim-toggle",
+            rems(0.5),
+            "dim",
+            dim_enabled,
+            &palette,
+            entity.clone(),
+            |this, _| this.dim_enabled = !this.dim_enabled,
+        );
         // Sits below the dim pill; flipping it relays out the view with or without
-        // transitive reduction. On reads in the file-leaf accent, off muted.
-        let reduce_toggle = {
-            let entity = entity.clone();
-            let accent = kind_accent(Kind::Artifact);
-            let (dot, label_color, border_color) = if reduced {
-                ('\u{25CF}', accent, accent)
-            } else {
-                ('\u{25CB}', palette.label, palette.border)
-            };
-            div()
-                .id("reduce-toggle")
-                .absolute()
-                .left_2()
-                .top(px(40.))
-                .flex()
-                .items_center()
-                .gap_1()
-                .px_2()
-                .py_1()
-                .rounded_md()
-                .bg(palette.container_fill)
-                .border_1()
-                .border_color(border_color)
-                .text_xs()
-                .text_color(label_color)
-                .cursor_pointer()
-                .child(format!("{dot} reduce"))
-                .on_click(move |_, _, cx| {
-                    entity.update(cx, |this, cx| {
-                        this.reduced = !this.reduced;
-                        this.retoggle(cx);
-                        cx.notify();
-                    });
-                })
-        };
+        // transitive reduction.
+        let reduce_toggle = Self::toggle_pill(
+            "reduce-toggle",
+            px(40.),
+            "reduce",
+            reduced,
+            &palette,
+            entity.clone(),
+            |this, cx| {
+                this.reduced = !this.reduced;
+                this.retoggle(cx);
+            },
+        );
         let content = content_size(g);
         // Capture the viewport bounds and fit the graph to them. The fit needs
         // the viewport size, known only once laid out, so it happens here.
