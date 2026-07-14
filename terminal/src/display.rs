@@ -366,29 +366,40 @@ impl Terminal {
         })
     }
 
+    /// The inclusive column span of the linear grid range `start..=end` (reading
+    /// order) on visible row `v`, clamped to the grid, or `None` when the row
+    /// falls outside the range. `offset` is the current display offset.
+    fn row_column_span(
+        &self,
+        v: usize,
+        offset: i32,
+        start: Point,
+        end: Point,
+    ) -> Option<(usize, usize)> {
+        let line = v as i32 - offset;
+        if line < start.line.0 || line > end.line.0 {
+            return None;
+        }
+        let last_column = self.columns.saturating_sub(1);
+        let first = if line == start.line.0 {
+            start.column.0
+        } else {
+            0
+        };
+        let last = if line == end.line.0 {
+            end.column.0
+        } else {
+            last_column
+        };
+        (first <= last).then_some((first.min(last_column), last.min(last_column)))
+    }
+
     /// Per visible row, the inclusive column span covered by the linear grid
     /// range `start..=end` (reading order).
     fn point_range_spans(&self, start: Point, end: Point) -> Vec<Option<(usize, usize)>> {
         let offset = self.display_offset() as i32;
-        let last_column = self.columns.saturating_sub(1);
         (0..self.rows)
-            .map(|v| {
-                let line = v as i32 - offset;
-                if line < start.line.0 || line > end.line.0 {
-                    return None;
-                }
-                let first = if line == start.line.0 {
-                    start.column.0
-                } else {
-                    0
-                };
-                let last = if line == end.line.0 {
-                    end.column.0
-                } else {
-                    last_column
-                };
-                (first <= last).then_some((first.min(last_column), last.min(last_column)))
-            })
+            .map(|v| self.row_column_span(v, offset, start, end))
             .collect()
     }
 
@@ -480,28 +491,13 @@ impl Terminal {
     /// where `focused` marks the currently focused match.
     pub fn search_spans(&self) -> Vec<Vec<(usize, usize, bool)>> {
         let offset = self.display_offset() as i32;
-        let last_column = self.columns.saturating_sub(1);
         let mut rows = vec![Vec::new(); self.rows];
         for (index, m) in self.search_matches.iter().enumerate() {
             let focused = self.current_match == Some(index);
-            let (start, end) = (m.start(), m.end());
+            let (start, end) = (*m.start(), *m.end());
             for (v, row) in rows.iter_mut().enumerate() {
-                let line = v as i32 - offset;
-                if line < start.line.0 || line > end.line.0 {
-                    continue;
-                }
-                let first = if line == start.line.0 {
-                    start.column.0
-                } else {
-                    0
-                };
-                let last = if line == end.line.0 {
-                    end.column.0
-                } else {
-                    last_column
-                };
-                if first <= last {
-                    row.push((first.min(last_column), last.min(last_column), focused));
+                if let Some((first, last)) = self.row_column_span(v, offset, start, end) {
+                    row.push((first, last, focused));
                 }
             }
         }
