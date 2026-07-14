@@ -1482,7 +1482,7 @@ fn finish_merge(
         mut phase_markers,
         thread_meta,
         counter_order,
-        mut counters,
+        counters,
         runs,
     } = merge;
     // The pools are handed to the merge phase as uninitialized capacity rather
@@ -1644,141 +1644,11 @@ fn finish_merge(
 
     let parts = timed("    tail", || {
         phase_markers.sort_by_key(|m| m.start_us);
-
         let metadata = build_metadata(&mut pool.writer, other_data.as_ref());
-
-        let mut start: Option<i64> = None;
-        let mut end: Option<i64> = None;
-        let mut note = |s: i64, e: i64| {
-            start = Some(start.map_or(s, |cur| cur.min(s)));
-            end = Some(end.map_or(e, |cur| cur.max(e)));
-        };
-        for (&(_, span), &(_, min_start, max_end)) in segments.iter().zip(&results) {
-            if !span.is_empty() {
-                note(min_start, max_end);
-            }
-        }
-        for lane in counters.values() {
-            for series in &lane.series {
-                for p in &series.points {
-                    note(p.ts_us, p.ts_us);
-                }
-            }
-        }
-        for m in &phase_markers {
-            note(m.start_us, m.start_us);
-        }
-        let span = TimeSpan {
-            start_us: start.unwrap_or(0),
-            end_us: end.unwrap_or(0),
-        };
-
-        let mut threads: Vec<ThreadTrack> = segments
-            .iter()
-            .zip(&results)
-            .map(|(&(tid, slices), &(max_depth, ..))| {
-                let (name, sort_index) = match thread_meta.get(&tid) {
-                    Some((Some(n), s)) => ((*n).to_owned(), *s),
-                    Some((None, s)) => (format!("thread {tid}"), *s),
-                    None => (format!("thread {tid}"), MAX_SORT_INDEX),
-                };
-                let lane_class = lane_class(tid, &name);
-                ThreadTrack {
-                    tid,
-                    name: pool.writer.intern(&name),
-                    sort_index,
-                    slices,
-                    max_depth,
-                    lane_class,
-                }
-            })
-            .collect();
-        threads.sort_by_key(|t| (t.sort_index, t.tid));
-
-        // Split each counter into one lane per numeric series: overlaid series
-        // are hard to read, so each becomes its own graph, labelled with its arg
-        // key when a counter carries more than one. Lanes are ordered by kind
-        // (action, system load, CPU, memory, network) with each cluster's
-        // aggregate ahead of its Bazel-only breakdown; a series this ordering
-        // does not recognise keeps its first-seen position via the stable sort. A
-        // counter that carried no numeric series (e.g. worker memory on a build
-        // with no persistent workers) keeps an empty lane so its absence stays
-        // visible rather than being silently dropped.
-        struct SplitLane {
-            label: String,
-            rank: (u8, u8),
-            series: Option<RawSeries>,
-        }
-        let mut split: Vec<SplitLane> = Vec::new();
-        for name in counter_order {
-            let Some(lane) = counters.remove(&name) else {
-                continue;
-            };
-            let counter_name = pool.interner.resolve(lane.name).to_string();
-            if lane.series.is_empty() {
-                let rank = counter_rank(&counter_name, "");
-                split.push(SplitLane {
-                    label: counter_name,
-                    rank,
-                    series: None,
-                });
-                continue;
-            }
-            let multi = lane.series.len() > 1;
-            for s in lane.series {
-                let key = pool.interner.resolve(s.name).to_string();
-                let rank = counter_rank(&counter_name, &key);
-                let label = if multi {
-                    format!("{counter_name} · {key}")
-                } else {
-                    counter_name.clone()
-                };
-                split.push(SplitLane {
-                    label,
-                    rank,
-                    series: Some(s),
-                });
-            }
-        }
-        split.sort_by_key(|l| l.rank);
-
-        let split_series = || split.iter().filter_map(|l| l.series.as_ref());
-        let mut series_pool: Vec<CounterSeries> = Vec::with_capacity(split_series().count());
-        let mut point_pool: Vec<CounterPoint> =
-            Vec::with_capacity(split_series().map(|s| s.points.len()).sum());
-        let counters: Vec<CounterLane> = split
-            .into_iter()
-            .map(|l| {
-                let name = pool.writer.intern(&l.label);
-                let series_off = series_pool.len() as u32;
-                if let Some(mut s) = l.series {
-                    let points_off = point_pool.len() as u32;
-                    let points_len = s.points.len() as u32;
-                    // Consumers binary-search points by time, so the sealed
-                    // series must be sorted; the trace format does not promise
-                    // that counter samples arrive in time order.
-                    if !s.points.is_sorted_by_key(|p| p.ts_us) {
-                        s.points.sort_by_key(|p| p.ts_us);
-                    }
-                    let max_value = s
-                        .points
-                        .iter()
-                        .map(|p| p.value)
-                        .fold(f64::NEG_INFINITY, f64::max);
-                    point_pool.extend(s.points);
-                    series_pool.push(CounterSeries {
-                        name: s.name,
-                        points: Span32::new(points_off, points_len),
-                        max_value,
-                    });
-                }
-                let series_len = series_pool.len() as u32 - series_off;
-                CounterLane {
-                    name,
-                    series: Span32::new(series_off, series_len),
-                }
-            })
-            .collect();
+        let span = compute_span(&segments, &results, &counters, &phase_markers);
+        let threads = build_thread_tracks(&segments, &results, &thread_meta, &mut pool.writer);
+        let (series_pool, point_pool, counters) =
+            build_counter_lanes(counter_order, counters, pool);
 
         // The caller seals its owned interner into `text` once this returns and
         // the late-interning writer is dropped.
@@ -1804,6 +1674,170 @@ fn finish_merge(
     // page-return work; detached so the load doesn't wait on it.
     std::thread::spawn(move || drop(runs));
     parts
+}
+
+/// Overall time span of the merged profile: the extent of every non-empty
+/// thread segment (`segments` paired index-wise with the merge phase's
+/// `results`), every counter sample, and every phase marker. With no events at
+/// all the span collapses to zero.
+fn compute_span(
+    segments: &[(i64, Span32)],
+    results: &[(u32, i64, i64)],
+    counters: &HashMap<Str, RawLane>,
+    phase_markers: &[PhaseMarker],
+) -> TimeSpan {
+    let mut start: Option<i64> = None;
+    let mut end: Option<i64> = None;
+    let mut note = |s: i64, e: i64| {
+        start = Some(start.map_or(s, |cur| cur.min(s)));
+        end = Some(end.map_or(e, |cur| cur.max(e)));
+    };
+    for (&(_, span), &(_, min_start, max_end)) in segments.iter().zip(results) {
+        if !span.is_empty() {
+            note(min_start, max_end);
+        }
+    }
+    for lane in counters.values() {
+        for series in &lane.series {
+            for p in &series.points {
+                note(p.ts_us, p.ts_us);
+            }
+        }
+    }
+    for m in phase_markers {
+        note(m.start_us, m.start_us);
+    }
+    TimeSpan {
+        start_us: start.unwrap_or(0),
+        end_us: end.unwrap_or(0),
+    }
+}
+
+/// One [`ThreadTrack`] per merged thread segment (`segments` paired index-wise
+/// with the merge phase's `results`), named from `thread_meta` — falling back
+/// to `thread {tid}` when the trace named no thread — and ordered by
+/// `(sort_index, tid)`.
+fn build_thread_tracks(
+    segments: &[(i64, Span32)],
+    results: &[(u32, i64, i64)],
+    thread_meta: &BTreeMap<i64, (Option<String>, i64)>,
+    writer: &mut Writer,
+) -> Vec<ThreadTrack> {
+    let mut threads: Vec<ThreadTrack> = segments
+        .iter()
+        .zip(results)
+        .map(|(&(tid, slices), &(max_depth, ..))| {
+            let (name, sort_index) = match thread_meta.get(&tid) {
+                Some((Some(n), s)) => ((*n).to_owned(), *s),
+                Some((None, s)) => (format!("thread {tid}"), *s),
+                None => (format!("thread {tid}"), MAX_SORT_INDEX),
+            };
+            let lane_class = lane_class(tid, &name);
+            ThreadTrack {
+                tid,
+                name: writer.intern(&name),
+                sort_index,
+                slices,
+                max_depth,
+                lane_class,
+            }
+        })
+        .collect();
+    threads.sort_by_key(|t| (t.sort_index, t.tid));
+    threads
+}
+
+/// Splits each counter into one lane per numeric series: overlaid series are
+/// hard to read, so each becomes its own graph, labelled with its arg key when
+/// a counter carries more than one. Lanes are ordered by kind (action, system
+/// load, CPU, memory, network) with each cluster's aggregate ahead of its
+/// Bazel-only breakdown; a series this ordering does not recognise keeps its
+/// first-seen position via the stable sort. A counter that carried no numeric
+/// series (e.g. worker memory on a build with no persistent workers) keeps an
+/// empty lane so its absence stays visible rather than being silently dropped.
+/// Returns the flattened `(series_pool, point_pool, lanes)` pools that
+/// [`CounterLane`] and [`CounterSeries`] index into.
+fn build_counter_lanes(
+    counter_order: Vec<Str>,
+    mut counters: HashMap<Str, RawLane>,
+    pool: &mut WriterPool,
+) -> (Vec<CounterSeries>, Vec<CounterPoint>, Vec<CounterLane>) {
+    struct SplitLane {
+        label: String,
+        rank: (u8, u8),
+        series: Option<RawSeries>,
+    }
+    let mut split: Vec<SplitLane> = Vec::new();
+    for name in counter_order {
+        let Some(lane) = counters.remove(&name) else {
+            continue;
+        };
+        let counter_name = pool.interner.resolve(lane.name).to_string();
+        if lane.series.is_empty() {
+            let rank = counter_rank(&counter_name, "");
+            split.push(SplitLane {
+                label: counter_name,
+                rank,
+                series: None,
+            });
+            continue;
+        }
+        let multi = lane.series.len() > 1;
+        for s in lane.series {
+            let key = pool.interner.resolve(s.name).to_string();
+            let rank = counter_rank(&counter_name, &key);
+            let label = if multi {
+                format!("{counter_name} · {key}")
+            } else {
+                counter_name.clone()
+            };
+            split.push(SplitLane {
+                label,
+                rank,
+                series: Some(s),
+            });
+        }
+    }
+    split.sort_by_key(|l| l.rank);
+
+    let split_series = || split.iter().filter_map(|l| l.series.as_ref());
+    let mut series_pool: Vec<CounterSeries> = Vec::with_capacity(split_series().count());
+    let mut point_pool: Vec<CounterPoint> =
+        Vec::with_capacity(split_series().map(|s| s.points.len()).sum());
+    let counters: Vec<CounterLane> = split
+        .into_iter()
+        .map(|l| {
+            let name = pool.writer.intern(&l.label);
+            let series_off = series_pool.len() as u32;
+            if let Some(mut s) = l.series {
+                let points_off = point_pool.len() as u32;
+                let points_len = s.points.len() as u32;
+                // Consumers binary-search points by time, so the sealed series
+                // must be sorted; the trace format does not promise that counter
+                // samples arrive in time order.
+                if !s.points.is_sorted_by_key(|p| p.ts_us) {
+                    s.points.sort_by_key(|p| p.ts_us);
+                }
+                let max_value = s
+                    .points
+                    .iter()
+                    .map(|p| p.value)
+                    .fold(f64::NEG_INFINITY, f64::max);
+                point_pool.extend(s.points);
+                series_pool.push(CounterSeries {
+                    name: s.name,
+                    points: Span32::new(points_off, points_len),
+                    max_value,
+                });
+            }
+            let series_len = series_pool.len() as u32 - series_off;
+            CounterLane {
+                name,
+                series: Span32::new(series_off, series_len),
+            }
+        })
+        .collect();
+    (series_pool, point_pool, counters)
 }
 
 /// Below this many bytes of `traceEvents` the parallel parser's thread and merge
