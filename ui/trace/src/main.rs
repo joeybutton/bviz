@@ -4548,9 +4548,8 @@ fn format_counter(value: f64, unit: &str) -> String {
 }
 
 /// Paints the hover crosshair: a vertical line at the cursor x spanning both
-/// sections, the hovered absolute time near the ruler, and — for each counter
-/// lane whose series covers the time — a dot where the crosshair meets its
-/// line plus a value label. Scaling matches [`paint_graph`].
+/// sections and the hovered absolute time near the ruler, then the per-lane
+/// counter readouts.
 fn paint_crosshair(
     profile: &Profile,
     tv: TimeView,
@@ -4605,6 +4604,22 @@ fn paint_crosshair(
     if !show_counters {
         return;
     }
+    paint_counter_readouts(profile, regions, cx_px, t, &font, palette, window, cx);
+}
+
+/// For each counter lane whose series covers time `t` (microseconds), paints a
+/// dot where the crosshair at `cx_px` meets the lane's line plus a value label.
+/// Scaling matches [`paint_graph`].
+fn paint_counter_readouts(
+    profile: &Profile,
+    regions: Regions,
+    cx_px: f32,
+    t: f64,
+    font: &gpui::Font,
+    palette: &Palette,
+    window: &mut Window,
+    cx: &mut App,
+) {
     let counters = profile.counters();
     let lanes = graph_lanes(counters.len(), regions.panel_top, regions.panel_h());
     for gl in lanes {
