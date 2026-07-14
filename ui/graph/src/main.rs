@@ -714,10 +714,7 @@ impl GraphView {
                     });
                 })
         };
-        let content = (
-            g.width as f32 + 2. * MARGIN as f32,
-            g.height as f32 + 2. * MARGIN as f32,
-        );
+        let content = content_size(g);
         // Capture the viewport bounds and fit the graph to them. The fit needs
         // the viewport size, known only once laid out, so it happens here.
         let prepaint = {
@@ -985,10 +982,7 @@ impl Render for GraphView {
                         // under the cursor fixed as the scale changes. The minimum
                         // zoom is the fit, so the graph can't be zoomed out of view.
                         let content = match &this.source {
-                            Source::Loaded(g) => (
-                                g.width as f32 + 2. * MARGIN as f32,
-                                g.height as f32 + 2. * MARGIN as f32,
-                            ),
+                            Source::Loaded(g) => content_size(g),
                             _ => return,
                         };
                         let vp = this.viewport.get();
@@ -1075,6 +1069,15 @@ impl Render for GraphView {
             .status(self.status())
             .child(body)
     }
+}
+
+/// The graph's full extent in layout pixels: its laid-out size plus `MARGIN` on
+/// every side.
+fn content_size(g: &LaidOut) -> (f32, f32) {
+    (
+        g.width as f32 + 2. * MARGIN as f32,
+        g.height as f32 + 2. * MARGIN as f32,
+    )
 }
 
 /// The largest zoom at which `content` (its full width×height in layout pixels)
@@ -1606,7 +1609,7 @@ fn drag_pan(view: &mut GraphView, event: &MouseMoveEvent, cx: &mut Context<Graph
     let pan = (px + dx, py + dy);
     view.pan.set(match &view.source {
         Source::Loaded(g) => {
-            let content = (g.width as f32 + 2. * MARGIN as f32, g.height as f32 + 2. * MARGIN as f32);
+            let content = content_size(g);
             clamp_pan(pan, view.zoom.get(), view.viewport.get().size, content)
         }
         _ => pan,
@@ -1706,7 +1709,7 @@ fn current_scrollbar(view: &GraphView, axis: Axis) -> Option<Scrollbar> {
     let Source::Loaded(g) = &view.source else {
         return None;
     };
-    let content = (g.width as f32 + 2. * MARGIN as f32, g.height as f32 + 2. * MARGIN as f32);
+    let content = content_size(g);
     scrollbar_geom(axis, view.viewport.get(), content, view.zoom.get(), view.pan.get())
 }
 
@@ -1724,7 +1727,7 @@ fn scroll_to(view: &mut GraphView, axis: Axis, offset: f32, cx: &mut Context<Gra
     let Source::Loaded(g) = &view.source else {
         return;
     };
-    let content = (g.width as f32 + 2. * MARGIN as f32, g.height as f32 + 2. * MARGIN as f32);
+    let content = content_size(g);
     let zoom = view.zoom.get();
     let vp = view.viewport.get().size;
     let (px, py) = view.pan.get();
