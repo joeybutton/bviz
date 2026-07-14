@@ -1009,8 +1009,14 @@ fn flatten(root: &mut Builder) -> Vec<FlameNode> {
         }
         nodes[idx].children = Span32::new(off, nodes.len() as u32 - off);
     }
-    // A child block always follows its parent, so a reverse pass sees every
-    // child's `subtree_max_depth` finalized before its parent's.
+    set_subtree_max_depth(&mut nodes);
+    nodes
+}
+
+/// Fills each node's `subtree_max_depth` with the deepest `depth` reached in its
+/// subtree (itself or any descendant). A child block always follows its parent,
+/// so a reverse pass sees every child's value finalized before its parent's.
+fn set_subtree_max_depth(nodes: &mut [FlameNode]) {
     for i in (0..nodes.len()).rev() {
         let mut m = nodes[i].depth;
         for c in nodes[i].children.range() {
@@ -1018,7 +1024,6 @@ fn flatten(root: &mut Builder) -> Vec<FlameNode> {
         }
         nodes[i].subtree_max_depth = m;
     }
-    nodes
 }
 
 /// Lay the visible window of the graph into pixels, mirroring the flame chart's
