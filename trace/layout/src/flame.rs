@@ -763,6 +763,12 @@ pub(crate) fn class_trees<'p>(
         merge_lane(root, profile, flamer, thread);
     });
 
+    fold_buckets(bucket_by_class(shards), workers)
+}
+
+/// Regroup the per-worker shards' partial trees by lane class, keyed in
+/// [`LaneClass`] declaration order.
+fn bucket_by_class(shards: Vec<Vec<(LaneClass, Builder)>>) -> Vec<(LaneClass, Vec<Builder>)> {
     let mut buckets: Vec<(LaneClass, Vec<Builder>)> = Vec::new();
     for shard in shards {
         for (class, tree) in shard {
@@ -775,7 +781,16 @@ pub(crate) fn class_trees<'p>(
             }
         }
     }
-    // The classes' partial trees merge independently of one another.
+    buckets
+}
+
+/// Fold each class's partial trees into one tree per class. The classes merge
+/// independently of one another, so with more than one class and worker they
+/// fold on a thread apiece.
+fn fold_buckets(
+    buckets: Vec<(LaneClass, Vec<Builder>)>,
+    workers: usize,
+) -> Vec<(LaneClass, Builder)> {
     if buckets.len() > 1 && workers > 1 {
         std::thread::scope(|scope| {
             let handles: Vec<_> = buckets
