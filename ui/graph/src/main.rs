@@ -1716,8 +1716,8 @@ fn drag_pan(view: &mut GraphView, event: &MouseMoveEvent, cx: &mut Context<Graph
     cx.notify();
 }
 
-/// End a drag. A release that never travelled is a click: open or close the
-/// container (or group) box under the cursor.
+/// End a drag. A release that never travelled past the click threshold is a
+/// click rather than a pan.
 fn end_drag(view: &mut GraphView, event: &MouseUpEvent, cx: &mut Context<GraphView>) {
     // Both the element-level release handler and the window-global one installed
     // during a drag can fire for the same release; guard so the toggle below runs
@@ -1729,11 +1729,17 @@ fn end_drag(view: &mut GraphView, event: &MouseUpEvent, cx: &mut Context<GraphVi
     if view.moved {
         return;
     }
+    toggle_box_at(view, event.position, cx);
+}
+
+/// Open or close the container (or group) box under `pos` (window px) and settle
+/// the view to keep it in frame.
+fn toggle_box_at(view: &mut GraphView, pos: Point<Pixels>, cx: &mut Context<GraphView>) {
     let Source::Loaded(g) = &view.source else {
         return;
     };
     let vp = view.viewport.get();
-    let (gx, gy) = from_screen(event.position, vp.origin, view.zoom.get(), view.pan.get());
+    let (gx, gy) = from_screen(pos, vp.origin, view.zoom.get(), view.pan.get());
     let Some(hit) = hit_box(&g.boxes, gx, gy) else {
         return;
     };
