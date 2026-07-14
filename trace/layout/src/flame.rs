@@ -914,6 +914,18 @@ pub(crate) fn action_locations(profile: &Profile) -> FxHashMap<&str, ActionLoc> 
     actions
 }
 
+/// Resolve a critical-path component's name to the worker span it copies:
+/// prefer the action inside an `action '…'` wrapper, falling back to the bare
+/// name for components that name their span directly.
+fn resolve_action<'a>(
+    name: &str,
+    actions: &'a FxHashMap<&str, ActionLoc>,
+) -> Option<&'a ActionLoc> {
+    action_inner(name)
+        .and_then(|inner| actions.get(inner))
+        .or_else(|| actions.get(name))
+}
+
 /// The lanes a critical-path build walks: every critical-path lane plus the
 /// lane of every action a component resolves to. Selecting them needs only the
 /// component names and the action index — both cheap — so the expensive name
@@ -928,10 +940,7 @@ fn critical_lanes(profile: &Profile, actions: &FxHashMap<&str, ActionLoc>) -> Fx
         lanes.insert(i);
         for cp in profile.slices(thread) {
             let name = profile.str(cp.name);
-            let loc = action_inner(name)
-                .and_then(|inner| actions.get(inner))
-                .or_else(|| actions.get(name));
-            if let Some(loc) = loc {
+            if let Some(loc) = resolve_action(name, actions) {
                 lanes.insert(loc.lane);
             }
         }
@@ -961,10 +970,7 @@ pub(crate) fn build_critical_path(
         }
         for (cp, cp_detail) in profile.slices(thread).iter().zip(profile.details(thread)) {
             let name = profile.str(cp.name);
-            let loc = action_inner(name)
-                .and_then(|inner| actions.get(inner))
-                .or_else(|| actions.get(name));
-            match loc {
+            match resolve_action(name, actions) {
                 Some(&ActionLoc { lane, slice }) => {
                     let lane_slices = profile.slices(&threads[lane]);
                     let lane_details = profile.details(&threads[lane]);
