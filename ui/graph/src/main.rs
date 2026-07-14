@@ -577,6 +577,131 @@ impl GraphView {
             Source::Message(_) => "No graph".into(),
         }
     }
+
+    fn on_mouse_down(&mut self, e: &MouseDownEvent, _: &mut Window, cx: &mut Context<Self>) {
+        // A press on a scroll-bar gutter drives the thumb instead of panning the
+        // content under it.
+        if let Some(axis) = scrollbar_hit(self, e.position) {
+            start_scroll_drag(self, axis, e.position, cx);
+            return;
+        }
+        // Start a pan drag. The window-global move handler that pans it is
+        // installed from the canvas paint while `dragging` is set (so it keeps
+        // working past the window edge), hence the repaint request. The release is
+        // caught both there and by `on_mouse_up`.
+        self.dragging = true;
+        self.moved = false;
+        self.press = e.position;
+        self.last_mouse = e.position;
+        cx.notify();
+    }
+
+    /// Ends the drag on the release the element receives directly. The canvas-paint
+    /// handler also ends it (and catches releases outside the window), but it is
+    /// only installed once a frame paints with `dragging` set; a press-move-release
+    /// quick enough to finish before that paint would otherwise never clear
+    /// `dragging`, leaving every later move panning the view.
+    fn on_mouse_up(&mut self, e: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
+        end_drag(self, e, cx);
+        end_scroll_drag(self, cx);
+    }
+
+    fn on_mouse_move(&mut self, e: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
+        // A drag pans rather than hovers; leave the lit set alone.
+        if self.dragging {
+            return;
+        }
+        let Source::Loaded(g) = &self.source else {
+            return;
+        };
+        let vp = self.viewport.get();
+        let (gx, gy) = from_screen(e.position, vp.origin, self.zoom.get(), self.pan.get());
+        let hit = hit_box(&g.boxes, gx, gy).map(|b| b.id);
+        if hit != self.hovered {
+            self.hovered = hit;
+            cx.notify();
+        }
+    }
+
+    fn on_scroll_wheel(&mut self, e: &ScrollWheelEvent, _: &mut Window, cx: &mut Context<Self>) {
+        // Anchor the zoom at the cursor: keep the content point under the cursor
+        // fixed as the scale changes. The minimum zoom is the fit, so the graph
+        // can't be zoomed out of view.
+        let content = match &self.source {
+            Source::Loaded(g) => content_size(g),
+            _ => return,
+        };
+        let vp = self.viewport.get();
+        let lx = f32::from(e.position.x) - f32::from(vp.origin.x);
+        let ly = f32::from(e.position.y) - f32::from(vp.origin.y);
+        let dy = match e.delta {
+            ScrollDelta::Lines(p) => p.y,
+            ScrollDelta::Pixels(p) => f32::from(p.y) / 120.0,
+        };
+        let old = self.zoom.get();
+        let new = (old * 1.1_f32.powf(dy)).clamp(fit_zoom(vp.size, content), MAX_ZOOM);
+        let (px, py) = self.pan.get();
+        let content_x = (lx - px) / old;
+        let content_y = (ly - py) / old;
+        let pan = (lx - content_x * new, ly - content_y * new);
+        self.pan.set(clamp_pan(pan, new, vp.size, content));
+        self.zoom.set(new);
+        // A manual zoom overrides any settle still easing.
+        self.anim.set(None);
+        cx.notify();
+    }
+
+    fn on_key_down(&mut self, e: &KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
+        if e.keystroke.key == "h" {
+            self.dim_enabled = !self.dim_enabled;
+            cx.notify();
+        } else if e.keystroke.key == "r" {
+            self.reduced = !self.reduced;
+            self.retoggle(cx);
+            cx.notify();
+        }
+    }
+
+    fn loading_view(colors: &bviz_ui_theme::Colors) -> impl IntoElement {
+        div()
+            .flex_1()
+            .flex()
+            .flex_col()
+            .justify_center()
+            .items_center()
+            .gap_3()
+            .child(
+                bviz_ui_assets::icon("circle-notch")
+                    .size(px(36.))
+                    .text_color(colors.text)
+                    .with_animation(
+                        "spinner",
+                        Animation::new(Duration::from_millis(900)).repeat(),
+                        |icon, delta| {
+                            icon.with_transformation(Transformation::rotate(percentage(delta)))
+                        },
+                    ),
+            )
+            .child(div().text_sm().text_color(colors.disabled).child("Loading…"))
+    }
+
+    fn message_view(msg: &str, colors: &bviz_ui_theme::Colors) -> impl IntoElement {
+        div()
+            .flex_1()
+            .flex()
+            .flex_col()
+            .justify_center()
+            .items_center()
+            .gap_4()
+            .p_4()
+            .child(
+                div()
+                    .max_w(px(400.))
+                    .text_sm()
+                    .text_color(colors.disabled)
+                    .child(msg.to_owned()),
+            )
+    }
 }
 
 impl Render for GraphView {
@@ -613,143 +738,20 @@ impl Render for GraphView {
                         self.reduced,
                         palette,
                     )
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|this, e: &MouseDownEvent, _, cx| {
-                            // A press on a scroll-bar gutter drives the thumb instead
-                            // of panning the content under it.
-                            if let Some(axis) = scrollbar_hit(this, e.position) {
-                                start_scroll_drag(this, axis, e.position, cx);
-                                return;
-                            }
-                            // Start a pan drag. The window-global move handler that
-                            // pans it is installed from the canvas paint while
-                            // `dragging` is set (so it keeps working past the window
-                            // edge), hence the repaint request. The release is caught
-                            // both there and by the element handler below.
-                            this.dragging = true;
-                            this.moved = false;
-                            this.press = e.position;
-                            this.last_mouse = e.position;
-                            cx.notify();
-                        }),
-                    )
-                    // End the drag on the release the element receives directly. The
-                    // canvas-paint handler also ends it (and catches releases outside
-                    // the window), but it is only installed once a frame paints with
-                    // `dragging` set; a press-move-release quick enough to finish
-                    // before that paint would otherwise never clear `dragging`,
-                    // leaving every later move panning the view.
-                    .on_mouse_up(
-                        MouseButton::Left,
-                        cx.listener(|this, e: &MouseUpEvent, _, cx| {
-                            end_drag(this, e, cx);
-                            end_scroll_drag(this, cx);
-                        }),
-                    )
-                    .on_mouse_move(cx.listener(|this, e: &MouseMoveEvent, _, cx| {
-                        // A drag pans rather than hovers; leave the lit set alone.
-                        if this.dragging {
-                            return;
-                        }
-                        let Source::Loaded(g) = &this.source else {
-                            return;
-                        };
-                        let vp = this.viewport.get();
-                        let (gx, gy) =
-                            from_screen(e.position, vp.origin, this.zoom.get(), this.pan.get());
-                        let hit = hit_box(&g.boxes, gx, gy).map(|b| b.id);
-                        if hit != this.hovered {
-                            this.hovered = hit;
-                            cx.notify();
-                        }
-                    }))
-                    .on_scroll_wheel(cx.listener(|this, e: &ScrollWheelEvent, _, cx| {
-                        // Anchor the zoom at the cursor: keep the content point
-                        // under the cursor fixed as the scale changes. The minimum
-                        // zoom is the fit, so the graph can't be zoomed out of view.
-                        let content = match &this.source {
-                            Source::Loaded(g) => content_size(g),
-                            _ => return,
-                        };
-                        let vp = this.viewport.get();
-                        let lx = f32::from(e.position.x) - f32::from(vp.origin.x);
-                        let ly = f32::from(e.position.y) - f32::from(vp.origin.y);
-                        let dy = match e.delta {
-                            ScrollDelta::Lines(p) => p.y,
-                            ScrollDelta::Pixels(p) => f32::from(p.y) / 120.0,
-                        };
-                        let old = this.zoom.get();
-                        let new = (old * 1.1_f32.powf(dy))
-                            .clamp(fit_zoom(vp.size, content), MAX_ZOOM);
-                        let (px, py) = this.pan.get();
-                        let content_x = (lx - px) / old;
-                        let content_y = (ly - py) / old;
-                        let pan = (lx - content_x * new, ly - content_y * new);
-                        this.pan.set(clamp_pan(pan, new, vp.size, content));
-                        this.zoom.set(new);
-                        // A manual zoom overrides any settle still easing.
-                        this.anim.set(None);
-                        cx.notify();
-                    }))
+                    .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
+                    .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
+                    .on_mouse_move(cx.listener(Self::on_mouse_move))
+                    .on_scroll_wheel(cx.listener(Self::on_scroll_wheel))
                     // Track the shared focus handle here too (the chrome already
                     // tracks it on an ancestor) so this deepest focused element
-                    // receives key events; `h` toggles hover-dim, `r` toggles
-                    // edge reduction. Events still bubble up to the chrome's own
-                    // key bindings.
+                    // receives key events. Events still bubble up to the chrome's
+                    // own key bindings.
                     .track_focus(&self.focus_handle)
-                    .on_key_down(cx.listener(|this, e: &KeyDownEvent, _, cx| {
-                        if e.keystroke.key == "h" {
-                            this.dim_enabled = !this.dim_enabled;
-                            cx.notify();
-                        } else if e.keystroke.key == "r" {
-                            this.reduced = !this.reduced;
-                            this.retoggle(cx);
-                            cx.notify();
-                        }
-                    })),
-                ),
-            Source::Loading => div()
-                .flex_1()
-                .flex()
-                .flex_col()
-                .justify_center()
-                .items_center()
-                .gap_3()
-                .child(
-                    // `with_animation` re-renders each frame, spinning the icon.
-                    bviz_ui_assets::icon("circle-notch")
-                        .size(px(36.))
-                        .text_color(colors.text)
-                        .with_animation(
-                            "spinner",
-                            Animation::new(Duration::from_millis(900)).repeat(),
-                            |icon, delta| {
-                                icon.with_transformation(Transformation::rotate(percentage(delta)))
-                            },
-                        ),
+                    .on_key_down(cx.listener(Self::on_key_down)),
                 )
-                .child(
-                    div()
-                        .text_sm()
-                        .text_color(colors.disabled)
-                        .child("Loading…"),
-                ),
-            Source::Message(msg) => div()
-                .flex_1()
-                .flex()
-                .flex_col()
-                .justify_center()
-                .items_center()
-                .gap_4()
-                .p_4()
-                .child(
-                    div()
-                        .max_w(px(400.))
-                        .text_sm()
-                        .text_color(colors.disabled)
-                        .child(msg.clone()),
-                ),
+                .into_any_element(),
+            Source::Loading => Self::loading_view(&colors).into_any_element(),
+            Source::Message(msg) => Self::message_view(msg, &colors).into_any_element(),
         };
         Chrome::new(&self.focus_handle)
             .title("bazel_viz graph")
