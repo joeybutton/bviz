@@ -8,6 +8,7 @@ use prost::Message;
 
 use crate::bep::build_event_stream::{build_event::Payload, BuildEvent};
 use crate::bep::command_line::{command_line_section::SectionType, CommandLine};
+use crate::bep::timestamp_proto::google::protobuf::Timestamp;
 
 /// Console output captured from a build, with the terminal width Bazel used and
 /// the structure needed to replay it over time.
@@ -83,26 +84,12 @@ pub fn parse(mut stream: &[u8]) -> Result<BuildOutput, prost::DecodeError> {
                 bytes.extend_from_slice(progress.stdout.as_bytes());
                 frames.push(bytes.len());
             }
-            Some(Payload::Started(s)) => record(
-                &mut anchors,
-                frame,
-                s.start_time.map(|t| epoch(t.seconds, t.nanos)),
-            ),
-            Some(Payload::Finished(f)) => record(
-                &mut anchors,
-                frame,
-                f.finish_time.map(|t| epoch(t.seconds, t.nanos)),
-            ),
-            Some(Payload::Action(a)) => record(
-                &mut anchors,
-                frame,
-                a.end_time.map(|t| epoch(t.seconds, t.nanos)),
-            ),
-            Some(Payload::TestSummary(s)) => record(
-                &mut anchors,
-                frame,
-                s.last_stop_time.map(|t| epoch(t.seconds, t.nanos)),
-            ),
+            Some(Payload::Started(s)) => record(&mut anchors, frame, epoch_opt(s.start_time)),
+            Some(Payload::Finished(f)) => record(&mut anchors, frame, epoch_opt(f.finish_time)),
+            Some(Payload::Action(a)) => record(&mut anchors, frame, epoch_opt(a.end_time)),
+            Some(Payload::TestSummary(s)) => {
+                record(&mut anchors, frame, epoch_opt(s.last_stop_time))
+            }
             Some(Payload::StructuredCommandLine(command_line)) => {
                 columns = columns.or_else(|| terminal_columns(&command_line));
                 show_timestamps |= show_timestamps_set(&command_line);
@@ -130,6 +117,10 @@ fn record(anchors: &mut Vec<Anchor>, frame: usize, time: Option<f64>) {
 /// Seconds since the Unix epoch for a `google.protobuf.Timestamp`'s components.
 fn epoch(seconds: i64, nanos: i32) -> f64 {
     seconds as f64 + nanos as f64 / 1e9
+}
+
+fn epoch_opt(ts: Option<Timestamp>) -> Option<f64> {
+    ts.map(|t| epoch(t.seconds, t.nanos))
 }
 
 /// The value of a named option in a structured command line, if present.
