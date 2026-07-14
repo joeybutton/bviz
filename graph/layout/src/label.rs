@@ -35,6 +35,16 @@ pub(crate) fn target_label(label: &str) -> String {
     }
 }
 
+/// The query-independent key of a configuration: its `checksum`, or `cfg{id}`
+/// when none is recorded. The checksum is stable across aquery and cquery dumps,
+/// so configured targets keyed by it merge across builders.
+pub(crate) fn config_key(config_id: u32, checksum: Option<&str>) -> String {
+    match checksum {
+        Some(checksum) if !checksum.is_empty() => checksum.to_string(),
+        _ => format!("cfg{config_id}"),
+    }
+}
+
 #[derive(Default)]
 struct Trie {
     children: BTreeMap<String, Trie>,

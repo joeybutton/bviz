@@ -139,7 +139,10 @@ pub(crate) fn build_with_packages(
                     );
                     let id = names.intern(&format!(
                         "artifact:{out_label}#{}",
-                        config_key(config_id, &config_by_id)
+                        label::config_key(
+                            config_id,
+                            config_by_id.get(&config_id).map(|c| c.checksum.as_str())
+                        )
                     ));
                     graph.add_node(
                         id,
@@ -321,7 +324,10 @@ fn target_ct_box(
     config_by_id: &HashMap<u32, &Configuration>,
     names: &mut Names,
 ) -> Id {
-    let ct_node_id = names.intern(&format!("ct:{full_label}#{}", config_key(config_id, config_by_id)));
+    let ct_node_id = names.intern(&format!(
+        "ct:{full_label}#{}",
+        label::config_key(config_id, config_by_id.get(&config_id).map(|c| c.checksum.as_str()))
+    ));
     if !ct_boxes.insert(ct_node_id) {
         return ct_node_id;
     }
@@ -349,16 +355,6 @@ fn target_ct_box(
         Some(target_node_id),
     );
     ct_node_id
-}
-
-/// The query-independent key of a configuration: its checksum, or `cfg{id}` when
-/// none is recorded. The checksum is stable across aquery and cquery dumps.
-fn config_key(config_id: u32, config_by_id: &HashMap<u32, &Configuration>) -> String {
-    config_by_id
-        .get(&config_id)
-        .map(|c| c.checksum.clone())
-        .filter(|c| !c.is_empty())
-        .unwrap_or_else(|| format!("cfg{config_id}"))
 }
 
 /// The label of a generated output at exec path `path`: its `bazel-out/<cfg>/bin`

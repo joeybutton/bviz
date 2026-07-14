@@ -110,7 +110,7 @@ pub(crate) fn build_with_packages(
                 target_box.insert(label.to_string(), id);
             }
             let config_id = ct.configuration_id;
-            let key = config_key(config_id, &config_checksum);
+            let key = label::config_key(config_id, config_checksum.get(&config_id).map(String::as_str));
             if ct_ids.insert((label.to_string(), key.clone())) {
                 let mnemonic = config_mnemonic
                     .get(&config_id)
@@ -147,8 +147,13 @@ pub(crate) fn build_with_packages(
         let Some(rule) = target.rule.as_ref() else {
             continue;
         };
-        let consumer =
-            names.intern(&ct_node_id(&rule.name, &config_key(ct.configuration_id, &config_checksum)));
+        let consumer = names.intern(&ct_node_id(
+            &rule.name,
+            &label::config_key(
+                ct.configuration_id,
+                config_checksum.get(&ct.configuration_id).map(String::as_str),
+            ),
+        ));
         if rule.configured_rule_input.is_empty() {
             for dep_label in &rule.rule_input {
                 if let Some(dep) = resolve_label_dep(dep_label, &target_box, &leaf_id) {
@@ -182,15 +187,6 @@ fn ct_node_id(label: &str, config_key: &str) -> String {
     format!("ct:{label}#{config_key}")
 }
 
-/// The query-independent key of a configuration: its checksum, or `cfg{id}` when
-/// no checksum is recorded for it.
-fn config_key(config_id: u32, config_checksum: &HashMap<u32, String>) -> String {
-    match config_checksum.get(&config_id) {
-        Some(checksum) if !checksum.is_empty() => checksum.clone(),
-        _ => format!("cfg{config_id}"),
-    }
-}
-
 /// The node a configuration-resolved dependency lands on: the dependency's
 /// configured target when that configuration is present, its source/generated
 /// leaf when the dependency carries no configuration, and the dependency's
@@ -207,7 +203,7 @@ fn resolve_configured_dep(
 ) -> Option<Id> {
     match dep_config {
         Some(config_id) if config_id != 0 => {
-            let key = config_key(config_id, config_checksum);
+            let key = label::config_key(config_id, config_checksum.get(&config_id).map(String::as_str));
             if ct_ids.contains(&(dep_label.to_string(), key.clone())) {
                 Some(names.intern(&ct_node_id(dep_label, &key)))
             } else {
