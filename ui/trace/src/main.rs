@@ -3967,7 +3967,19 @@ fn paint_flame_tooltip(
         pct,
     );
     let lines = [graph.str(boxed.name).to_string(), detail];
+    paint_tooltip_box(&lines, at, bounds, palette, window, cx);
+}
 
+/// Measures `lines`, sizes a padded box, clamps it inside `bounds`, and paints
+/// the panel background, border, and each line near `at`.
+fn paint_tooltip_box(
+    lines: &[String],
+    at: Point<Pixels>,
+    bounds: Bounds<Pixels>,
+    palette: &Palette,
+    window: &mut Window,
+    cx: &mut App,
+) {
     let font = bviz_ui_assets::text_metrics(window).font;
     let fs = px(TOOLTIP_TEXT_SIZE);
     let shaped: Vec<_> = lines
@@ -4058,55 +4070,7 @@ fn paint_tooltip(
     for (key, value) in profile.slice_others(detail) {
         lines.push(format!("{}: {}", profile.str(*key), profile.str(*value)));
     }
-
-    let font = bviz_ui_assets::text_metrics(window).font;
-    let fs = px(TOOLTIP_TEXT_SIZE);
-    let shaped: Vec<_> = lines
-        .iter()
-        .map(|line| {
-            bviz_ui_assets::shape_line(window, line.clone(), font.clone(), fs, palette.label.into())
-        })
-        .collect();
-    let text_w = shaped
-        .iter()
-        .map(|l| f32::from(l.width()))
-        .fold(0.0_f32, f32::max);
-    let line_h = TOOLTIP_TEXT_SIZE + TOOLTIP_LINE_GAP;
-    let box_w = text_w + 2.0 * TOOLTIP_PAD;
-    let box_h = shaped.len() as f32 * line_h + 2.0 * TOOLTIP_PAD;
-
-    let left = f32::from(bounds.origin.x);
-    let top = f32::from(bounds.origin.y);
-    let right = left + f32::from(bounds.size.width);
-    let bottom = top + f32::from(bounds.size.height);
-    let mut x = f32::from(at.x) + TOOLTIP_OFFSET;
-    let mut y = f32::from(at.y) + TOOLTIP_OFFSET;
-    if x + box_w > right {
-        x = (right - box_w).max(left);
-    }
-    if y + box_h > bottom {
-        y = (bottom - box_h).max(top);
-    }
-
-    window.paint_quad(quad(
-        Bounds::new(point(px(x), px(y)), size(px(box_w), px(box_h))),
-        px(4.),
-        palette.panel,
-        px(1.),
-        Hsla::from(palette.border),
-        BorderStyle::Solid,
-    ));
-    for (i, line) in shaped.into_iter().enumerate() {
-        let ly = y + TOOLTIP_PAD + i as f32 * line_h;
-        let _ = line.paint(
-            point(px(x + TOOLTIP_PAD), px(ly)),
-            fs,
-            TextAlign::Left,
-            None,
-            window,
-            cx,
-        );
-    }
+    paint_tooltip_box(&lines, at, bounds, palette, window, cx);
 }
 
 /// A stable hue in [0, 1) for `s`: FNV-1a over the bytes folded onto the wheel.
