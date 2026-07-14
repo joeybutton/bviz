@@ -1541,14 +1541,28 @@ impl TraceView {
         let Source::Loaded(profile) = &self.source else {
             return None;
         };
-        let (selected, container, text) = (colors.selected, colors.container, colors.text);
+        let rows = self.menu_rows(profile, palette, colors, cx);
+
+        let menu = self.tracks_menu_chrome(rows, palette, colors, cx);
+        let backdrop = self.tracks_menu_backdrop(cx);
+        Some(deferred(div().child(backdrop).child(menu)))
+    }
+
+    /// Tracks under their lane-class group headers, each group's tracks sorted
+    /// busiest first — the same grouping and order the chart lays out.
+    fn menu_rows(
+        &self,
+        profile: &Profile,
+        palette: Palette,
+        colors: &bviz_ui_theme::Colors,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        let selected = colors.selected;
         let hover_bg = bviz_ui_theme::mix(colors.container, colors.background, 0.2);
         let filter = self.track_filter.read(cx).content().to_lowercase();
         let threads = profile.threads();
         let activity = |t: usize| profile.slices(&threads[t]).len();
-        // Tracks under their lane-class group headers, each group's tracks sorted
-        // busiest first — the same grouping and order the chart lays out.
-        let mut rows: Vec<gpui::AnyElement> = Vec::new();
+        let mut rows: Vec<AnyElement> = Vec::new();
         for (group, &class) in GROUP_ORDER.iter().enumerate() {
             let mut tracks: Vec<usize> = (0..threads.len())
                 .filter(|&t| threads[t].lane_class == class)
@@ -1565,51 +1579,9 @@ impl TraceView {
                     .cmp(&activity(a))
                     .then(threads[a].tid.cmp(&threads[b].tid))
             });
-            let n_visible = tracks
-                .iter()
-                .filter(|&&t| self.visible_tracks.get(t).copied().unwrap_or(true))
-                .count();
-            let group_all_visible = n_visible == tracks.len();
             let folded = self.menu_collapsed_groups.get(group).copied().unwrap_or(false);
-            let chevron = if folded { "▸" } else { "▾" };
             rows.push(
-                div()
-                    .id(SharedString::from(format!("track-group-{group}")))
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .justify_between()
-                    .mt_1()
-                    .px_2()
-                    .py_1()
-                    .cursor_pointer()
-                    .text_color(palette.label)
-                    .hover(move |s| s.bg(hover_bg))
-                    // The header folds the list; its trailing control toggles the
-                    // group's visibility without also folding.
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.toggle_menu_group_collapsed(group);
-                        cx.notify();
-                    }))
-                    .child(format!(
-                        "{chevron} {}  {}/{}",
-                        group_label(class),
-                        n_visible,
-                        tracks.len()
-                    ))
-                    .child(
-                        div()
-                            .id(SharedString::from(format!("track-group-vis-{group}")))
-                            .px_1()
-                            .rounded_sm()
-                            .hover(move |s| s.bg(selected))
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                cx.stop_propagation();
-                                this.set_group_visible(group, !group_all_visible);
-                                cx.notify();
-                            }))
-                            .child(if group_all_visible { "hide" } else { "show" }),
-                    )
+                self.group_row(group, class, &tracks, folded, palette, hover_bg, selected, cx)
                     .into_any_element(),
             );
             if folded {
@@ -1618,47 +1590,131 @@ impl TraceView {
             for i in tracks {
                 let name = profile.str(threads[i].name);
                 let visible = self.visible_tracks.get(i).copied().unwrap_or(true);
-                let check = div()
-                    .size(px(13.))
-                    .flex_none()
-                    .rounded_sm()
-                    .border_1()
-                    .border_color(palette.label)
-                    .when(visible, |c| c.bg(selected).border_color(selected));
                 rows.push(
-                    div()
-                        .id(SharedString::from(format!("track-row-{i}")))
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap_2()
-                        .pl_4()
-                        .pr_2()
-                        .py_1()
-                        .cursor_pointer()
-                        .rounded_sm()
-                        .hover(move |s| s.bg(selected))
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.toggle_track(i);
-                            cx.notify();
-                        }))
-                        .child(check)
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .overflow_hidden()
-                                .whitespace_nowrap()
-                                .text_ellipsis()
-                                .child(name.to_string()),
-                        )
-                        .into_any_element(),
+                    self.track_row(i, name, visible, palette, selected, cx).into_any_element(),
                 );
             }
         }
+        rows
+    }
 
-        let viewport = self.viewport.get();
-        let menu = div()
+    /// A group header: a chevron and the group's visible/total count, folding the
+    /// group's track list on click. Its trailing control toggles the whole
+    /// group's visibility without also folding.
+    fn group_row(
+        &self,
+        group: usize,
+        class: LaneClass,
+        tracks: &[usize],
+        folded: bool,
+        palette: Palette,
+        hover_bg: Rgba,
+        selected: Rgba,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let n_visible = tracks
+            .iter()
+            .filter(|&&t| self.visible_tracks.get(t).copied().unwrap_or(true))
+            .count();
+        let group_all_visible = n_visible == tracks.len();
+        let chevron = if folded { "▸" } else { "▾" };
+        div()
+            .id(SharedString::from(format!("track-group-{group}")))
+            .flex()
+            .flex_row()
+            .items_center()
+            .justify_between()
+            .mt_1()
+            .px_2()
+            .py_1()
+            .cursor_pointer()
+            .text_color(palette.label)
+            .hover(move |s| s.bg(hover_bg))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.toggle_menu_group_collapsed(group);
+                cx.notify();
+            }))
+            .child(format!(
+                "{chevron} {}  {}/{}",
+                group_label(class),
+                n_visible,
+                tracks.len()
+            ))
+            .child(
+                div()
+                    .id(SharedString::from(format!("track-group-vis-{group}")))
+                    .px_1()
+                    .rounded_sm()
+                    .hover(move |s| s.bg(selected))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        cx.stop_propagation();
+                        this.set_group_visible(group, !group_all_visible);
+                        cx.notify();
+                    }))
+                    .child(if group_all_visible { "hide" } else { "show" }),
+            )
+    }
+
+    /// A track row: a visibility checkbox and the track name, toggling the track
+    /// on click.
+    fn track_row(
+        &self,
+        i: usize,
+        name: &str,
+        visible: bool,
+        palette: Palette,
+        selected: Rgba,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let check = div()
+            .size(px(13.))
+            .flex_none()
+            .rounded_sm()
+            .border_1()
+            .border_color(palette.label)
+            .when(visible, |c| c.bg(selected).border_color(selected));
+        div()
+            .id(SharedString::from(format!("track-row-{i}")))
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_2()
+            .pl_4()
+            .pr_2()
+            .py_1()
+            .cursor_pointer()
+            .rounded_sm()
+            .hover(move |s| s.bg(selected))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.toggle_track(i);
+                cx.notify();
+            }))
+            .child(check)
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_ellipsis()
+                    .child(name.to_string()),
+            )
+    }
+
+    /// The menu container over the built rows: the filter field, a show/hide-all
+    /// toggle, and the scrollable track list with its scroll bar. Clicks inside
+    /// must not reach the backdrop and close it; a press on the scroll bar grabs
+    /// its thumb.
+    fn tracks_menu_chrome(
+        &self,
+        rows: Vec<AnyElement>,
+        palette: Palette,
+        colors: &bviz_ui_theme::Colors,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let (container, text) = (colors.container, colors.text);
+        let hover_bg = bviz_ui_theme::mix(colors.container, colors.background, 0.2);
+        div()
             .occlude()
             .absolute()
             .left_0()
@@ -1673,8 +1729,6 @@ impl TraceView {
             .shadow_lg()
             .text_size(px(GUTTER_LABEL_SIZE))
             .text_color(text)
-            // Clicks inside the menu must not reach the backdrop and close it; a
-            // press on the scroll bar grabs its thumb.
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, e: &MouseDownEvent, _, cx| {
@@ -1705,65 +1759,76 @@ impl TraceView {
                     }))
                     .child(if all_visible { "Hide all" } else { "Show all" })
             })
-            .child({
-                let list = div()
-                    .id("tracks-menu-list")
-                    .flex()
-                    .flex_col()
-                    .w_full()
-                    .p_1()
-                    .max_h(px(TRACKS_MENU_MAX_LIST))
-                    .overflow_y_scroll()
-                    .track_scroll(&self.menu_scroll)
-                    .children(rows);
-                // A scroll bar over the list's right edge reads the list's scroll
-                // handle to place the thumb and stashes the geometry for the
-                // menu's press hit-test.
-                let menu_scroll = self.menu_scroll.clone();
-                let menu_bar = self.menu_bar.clone();
-                let entity = cx.entity();
-                let dragging = matches!(self.drag, Drag::MenuThumb(_));
-                let (track, thumb) = (palette.scroll_track, palette.scroll_thumb);
-                let bar = canvas(
-                    move |_, _, _| {},
-                    move |bounds, _, window: &mut Window, _| {
-                        let visible = f32::from(bounds.size.height);
-                        let content = visible + f32::from(menu_scroll.max_offset().y);
-                        let offset = -f32::from(menu_scroll.offset().y);
-                        let layout = Scrollbar::new(
-                            Axis::Vertical,
-                            Bounds::new(
-                                point(
-                                    bounds.origin.x + bounds.size.width - px(BAR_WIDTH),
-                                    bounds.origin.y,
-                                ),
-                                size(px(BAR_WIDTH), bounds.size.height),
-                            ),
-                            content,
-                            visible,
-                            offset,
-                            MIN_THUMB,
-                        );
-                        if let Some(bar) = layout {
-                            bar.paint(track, thumb, window);
-                        }
-                        menu_bar.set(layout);
-                        if dragging {
-                            track_drag(window, &entity, on_drag, end_drag);
-                        }
-                    },
+            .child(self.menu_list(rows, palette, cx))
+    }
+
+    /// The scrollable track list with a scroll bar over its right edge; the bar
+    /// reads the list's scroll handle to place the thumb and stashes the geometry
+    /// for the menu's press hit-test.
+    fn menu_list(
+        &self,
+        rows: Vec<AnyElement>,
+        palette: Palette,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let list = div()
+            .id("tracks-menu-list")
+            .flex()
+            .flex_col()
+            .w_full()
+            .p_1()
+            .max_h(px(TRACKS_MENU_MAX_LIST))
+            .overflow_y_scroll()
+            .track_scroll(&self.menu_scroll)
+            .children(rows);
+        let menu_scroll = self.menu_scroll.clone();
+        let menu_bar = self.menu_bar.clone();
+        let entity = cx.entity();
+        let dragging = matches!(self.drag, Drag::MenuThumb(_));
+        let (track, thumb) = (palette.scroll_track, palette.scroll_thumb);
+        let bar = canvas(
+            move |_, _, _| {},
+            move |bounds, _, window: &mut Window, _| {
+                let visible = f32::from(bounds.size.height);
+                let content = visible + f32::from(menu_scroll.max_offset().y);
+                let offset = -f32::from(menu_scroll.offset().y);
+                let layout = Scrollbar::new(
+                    Axis::Vertical,
+                    Bounds::new(
+                        point(
+                            bounds.origin.x + bounds.size.width - px(BAR_WIDTH),
+                            bounds.origin.y,
+                        ),
+                        size(px(BAR_WIDTH), bounds.size.height),
+                    ),
+                    content,
+                    visible,
+                    offset,
+                    MIN_THUMB,
                 );
-                div()
-                    .relative()
-                    .w_full()
-                    .flex()
-                    .min_h_0()
-                    .child(list)
-                    .child(bar.absolute().inset_0())
-            });
-        // A backdrop the size of the viewport catches an outside click; the menu
-        // paints over it.
-        let backdrop = div()
+                if let Some(bar) = layout {
+                    bar.paint(track, thumb, window);
+                }
+                menu_bar.set(layout);
+                if dragging {
+                    track_drag(window, &entity, on_drag, end_drag);
+                }
+            },
+        );
+        div()
+            .relative()
+            .w_full()
+            .flex()
+            .min_h_0()
+            .child(list)
+            .child(bar.absolute().inset_0())
+    }
+
+    /// A backdrop the size of the viewport, behind the menu, closing it on an
+    /// outside click.
+    fn tracks_menu_backdrop(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let viewport = self.viewport.get();
+        div()
             .absolute()
             .left_0()
             .top_0()
@@ -1776,8 +1841,7 @@ impl TraceView {
                     cx.stop_propagation();
                     cx.notify();
                 }),
-            );
-        Some(deferred(div().child(backdrop).child(menu)))
+            )
     }
 
     /// The bottom-panel overlay for the active tab, positioned over the content
