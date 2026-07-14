@@ -14,6 +14,46 @@ pub enum Axis {
     Horizontal,
 }
 
+impl Axis {
+    /// Project a track rect onto this axis: its leading edge and length along the
+    /// long axis, and its thickness across the short axis.
+    fn project(self, track: Bounds<Pixels>) -> (f32, f32, f32) {
+        match self {
+            Axis::Vertical => (
+                f32::from(track.origin.y),
+                f32::from(track.size.height),
+                f32::from(track.size.width),
+            ),
+            Axis::Horizontal => (
+                f32::from(track.origin.x),
+                f32::from(track.size.width),
+                f32::from(track.size.height),
+            ),
+        }
+    }
+
+    /// A thumb rect from its along-axis start and length plus the cross-axis
+    /// thickness, positioned within `track`.
+    fn thumb_bounds(
+        self,
+        track: Bounds<Pixels>,
+        thumb_start: f32,
+        thumb_len: f32,
+        thickness: f32,
+    ) -> Bounds<Pixels> {
+        match self {
+            Axis::Vertical => Bounds::new(
+                point(track.origin.x, px(thumb_start)),
+                size(px(thickness), px(thumb_len)),
+            ),
+            Axis::Horizontal => Bounds::new(
+                point(px(thumb_start), track.origin.y),
+                size(px(thumb_len), px(thickness)),
+            ),
+        }
+    }
+}
+
 /// A scroll bar's geometry in window coordinates, derived from a track rect and
 /// the content/visible extents. Scalars run along the bar's long axis (y for
 /// [`Axis::Vertical`], x for [`Axis::Horizontal`]).
@@ -48,34 +88,14 @@ impl Scrollbar {
         if content <= visible {
             return None;
         }
-        let (track_start, track_len, thickness) = match axis {
-            Axis::Vertical => (
-                f32::from(track.origin.y),
-                f32::from(track.size.height),
-                f32::from(track.size.width),
-            ),
-            Axis::Horizontal => (
-                f32::from(track.origin.x),
-                f32::from(track.size.width),
-                f32::from(track.size.height),
-            ),
-        };
+        let (track_start, track_len, thickness) = axis.project(track);
         let thumb_len = (track_len * (visible / content))
             .max(min_thumb)
             .min(track_len);
         let max_offset = content - visible;
         let travel = track_len - thumb_len;
         let thumb_start = track_start + (offset / max_offset).clamp(0.0, 1.0) * travel;
-        let thumb = match axis {
-            Axis::Vertical => Bounds::new(
-                point(track.origin.x, px(thumb_start)),
-                size(px(thickness), px(thumb_len)),
-            ),
-            Axis::Horizontal => Bounds::new(
-                point(px(thumb_start), track.origin.y),
-                size(px(thumb_len), px(thickness)),
-            ),
-        };
+        let thumb = axis.thumb_bounds(track, thumb_start, thumb_len, thickness);
         Some(Scrollbar {
             axis,
             track,
