@@ -4140,6 +4140,30 @@ fn clip_polyline_x(verts: &[(f32, f32)], lo: f32, hi: f32) -> Vec<(f32, f32)> {
     out
 }
 
+/// Maps a counter lane's values to y-positions in its chart area, so the plotted
+/// line and the crosshair readout share one transform. The floor (value 0) sits
+/// at `chart_bottom`; `max_value` reaches `chart_top`.
+struct CounterYScale {
+    chart_top: f32,
+    chart_bottom: f32,
+    scale: f32,
+}
+
+impl CounterYScale {
+    fn new(lane_top: f32, chart_h: f32, max_value: f64) -> Self {
+        let chart_top = lane_top + METRICS.header_height;
+        Self {
+            chart_top,
+            chart_bottom: chart_top + chart_h,
+            scale: chart_h / max_value as f32,
+        }
+    }
+
+    fn value_to_y(&self, value: f64) -> f32 {
+        self.chart_bottom - value as f32 * self.scale
+    }
+}
+
 /// Paints the bottom graph section: every counter lane fitted to the section
 /// height. Each lane is a header band over a chart area that holds the lane's
 /// series as a filled area scaled to the chart height and the series' peak.
@@ -4192,8 +4216,8 @@ fn paint_graph(
         if points.len() < 2 {
             continue;
         }
-        let chart_bottom = gl.top + METRICS.header_height + gl.chart_h;
-        let scale = gl.chart_h / series.max_value as f32;
+        let y_scale = CounterYScale::new(gl.top, gl.chart_h, series.max_value as f64);
+        let chart_bottom = y_scale.chart_bottom;
         let x_of = |ts| regions.content_left + tv.x_of(ts);
         // Clip the series to a margin around the content column so off-screen
         // vertices at high zoom stay near the window and the renderer keeps the
@@ -4216,7 +4240,7 @@ fn paint_graph(
         let boundary = downsample_columns(
             visible
                 .iter()
-                .map(|p| (x_of(p.ts_us), chart_bottom - p.value as f32 * scale)),
+                .map(|p| (x_of(p.ts_us), y_scale.value_to_y(p.value))),
         );
         let top = clip_polyline_x(&boundary, clip_lo, clip_hi);
         if top.len() < 2 {
@@ -4436,10 +4460,10 @@ fn paint_crosshair(
         let Some(value) = sample_at(profile.points(series), t) else {
             continue;
         };
-        let scale = gl.chart_h / series.max_value as f32;
-        let chart_top = gl.top + METRICS.header_height;
-        let chart_bottom = chart_top + gl.chart_h;
-        let dot_y = chart_bottom - value as f32 * scale;
+        let y_scale = CounterYScale::new(gl.top, gl.chart_h, series.max_value as f64);
+        let chart_top = y_scale.chart_top;
+        let chart_bottom = y_scale.chart_bottom;
+        let dot_y = y_scale.value_to_y(value);
         let color = counter_color(profile.str(series.name));
         window.paint_quad(quad(
             Bounds::new(
