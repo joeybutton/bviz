@@ -5,11 +5,11 @@
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 
-use bazel_query_proto::blaze_query::{target::Discriminator, Target};
+use bazel_query_proto::blaze_query::Target;
 
 use crate::graph::{EdgeKind, Graph, Kind};
 use crate::intern::{Id, Names};
-use crate::label::{self, PackageHierarchy};
+use crate::label::{self, label_and_kind, PackageHierarchy};
 
 pub fn build(targets: &[Target]) -> (Graph, Names) {
     let refs: Vec<&Target> = targets.iter().collect();
@@ -27,22 +27,6 @@ pub(crate) fn package_keys(targets: &[Target]) -> BTreeSet<(String, String)> {
         .filter_map(label_and_kind)
         .filter_map(|(label, _)| label::package_key(label))
         .collect()
-}
-
-/// The label and node kind a target carries, by its populated variant, or `None`
-/// when the variant message is absent.
-pub(crate) fn label_and_kind(target: &Target) -> Option<(&str, Kind)> {
-    match Discriminator::try_from(target.r#type).ok()? {
-        Discriminator::Rule => Some((&target.rule.as_ref()?.name, Kind::Target)),
-        Discriminator::SourceFile => Some((&target.source_file.as_ref()?.name, Kind::Source)),
-        Discriminator::GeneratedFile => {
-            Some((&target.generated_file.as_ref()?.name, Kind::Artifact))
-        }
-        Discriminator::PackageGroup => Some((&target.package_group.as_ref()?.name, Kind::Group)),
-        Discriminator::EnvironmentGroup => {
-            Some((&target.environment_group.as_ref()?.name, Kind::Group))
-        }
-    }
 }
 
 /// The labels of generated-file targets among `targets`, which a joint graph
@@ -112,7 +96,7 @@ pub(crate) fn build_with_packages(
 mod tests {
     use super::*;
     use crate::graph::Node;
-    use bazel_query_proto::blaze_query::{GeneratedFile, Rule, SourceFile};
+    use bazel_query_proto::blaze_query::{target::Discriminator, GeneratedFile, Rule, SourceFile};
 
     fn rule(name: &str, inputs: &[&str]) -> Target {
         Target {

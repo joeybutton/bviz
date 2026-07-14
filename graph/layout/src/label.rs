@@ -9,6 +9,8 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
+use bazel_query_proto::blaze_query::{target::Discriminator, Target};
+
 use crate::graph::{Graph, Kind};
 use crate::intern::{Id, Names};
 
@@ -49,6 +51,22 @@ pub(crate) fn config_key(config_id: u32, checksum: Option<&str>) -> String {
 /// `config_key` so the aquery and cquery builders emit the same id and merge.
 pub(crate) fn ct_node_id(label: &str, config_key: &str) -> String {
     format!("ct:{label}#{config_key}")
+}
+
+/// The label and node kind a target carries, by its populated variant, or `None`
+/// when the variant message is absent.
+pub(crate) fn label_and_kind(target: &Target) -> Option<(&str, Kind)> {
+    match Discriminator::try_from(target.r#type).ok()? {
+        Discriminator::Rule => Some((&target.rule.as_ref()?.name, Kind::Target)),
+        Discriminator::SourceFile => Some((&target.source_file.as_ref()?.name, Kind::Source)),
+        Discriminator::GeneratedFile => {
+            Some((&target.generated_file.as_ref()?.name, Kind::Artifact))
+        }
+        Discriminator::PackageGroup => Some((&target.package_group.as_ref()?.name, Kind::Group)),
+        Discriminator::EnvironmentGroup => {
+            Some((&target.environment_group.as_ref()?.name, Kind::Group))
+        }
+    }
 }
 
 #[derive(Default)]

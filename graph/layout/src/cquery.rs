@@ -19,8 +19,8 @@ use bazel_query_proto::blaze_query::target::Discriminator;
 
 use crate::graph::{EdgeKind, Graph, Kind};
 use crate::intern::{Id, Names};
-use crate::label::{self, PackageHierarchy};
-use crate::query::{self, label_and_kind};
+use crate::label::{self, label_and_kind, PackageHierarchy};
+use crate::query;
 
 pub fn build(results: &[CqueryResult]) -> (Graph, Names) {
     let packages = package_keys(results);
