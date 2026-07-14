@@ -1061,16 +1061,46 @@ fn latin1_expand(raw: &[u8]) -> String {
     out
 }
 
+/// Outcome of locating the `traceEvents` array in a decoded profile buffer.
+enum TraceEventsArray {
+    /// No `"traceEvents"` key in the buffer.
+    NoKey,
+    /// The key is present but no `[` opens an array after it.
+    NoArray,
+    Found {
+        /// Byte index of the `"traceEvents"` key's opening quote.
+        key_at: usize,
+        /// Byte index just past the `[`, at the start of the array's contents.
+        content_start: usize,
+    },
+}
+
+/// Locates the `traceEvents` array: the `"traceEvents"` key, then the first `[`
+/// after it.
+fn find_trace_events_array(bytes: &[u8]) -> TraceEventsArray {
+    const KEY: &[u8] = b"\"traceEvents\"";
+    let Some(key_at) = find_bytes(bytes, KEY) else {
+        return TraceEventsArray::NoKey;
+    };
+    let after_key = key_at + KEY.len();
+    match bytes[after_key..].iter().position(|&b| b == b'[') {
+        Some(bracket) => TraceEventsArray::Found { key_at, content_start: after_key + bracket + 1 },
+        None => TraceEventsArray::NoArray,
+    }
+}
+
 /// Best-effort parse of a truncated profile: read otherData if present and pull
 /// whole events out of the traceEvents array until the first incomplete one.
 fn recover(text: &str) -> Result<Profile, LoadError> {
-    let events_at = text
-        .find("\"traceEvents\"")
-        .ok_or_else(|| LoadError::Corrupted("no traceEvents array".into()))?;
-    let array_start = text[events_at..]
-        .find('[')
-        .map(|i| events_at + i + 1)
-        .ok_or_else(|| LoadError::Corrupted("traceEvents not an array".into()))?;
+    let (events_at, array_start) = match find_trace_events_array(text.as_bytes()) {
+        TraceEventsArray::Found { key_at, content_start } => (key_at, content_start),
+        TraceEventsArray::NoKey => {
+            return Err(LoadError::Corrupted("no traceEvents array".into()))
+        }
+        TraceEventsArray::NoArray => {
+            return Err(LoadError::Corrupted("traceEvents not an array".into()))
+        }
+    };
 
     let other_data = recover_other_data(&text[..events_at]);
 
@@ -1877,8 +1907,11 @@ fn parse_chunk(
 /// declines. Returns `None` if the array can't be located, no split yields more
 /// than one chunk, or any chunk fails to parse.
 fn parse_chunks(text: &str, n: usize, min_bytes: usize) -> Option<Profile> {
-    let events_key = text.find("\"traceEvents\"")?;
-    let array_start = text[events_key..].find('[')? + events_key + 1;
+    let TraceEventsArray::Found { content_start: array_start, .. } =
+        find_trace_events_array(text.as_bytes())
+    else {
+        return None;
+    };
     // Bound the region to the array's closing bracket (the last `]`, since only
     // the outer object's `}` follows it) so a chunk never picks up the trailing
     // `]}` as event content. `traceEvents` is the profile's last key.
@@ -2102,11 +2135,10 @@ fn stream_pieces<'a>(
     let mut buf = vec![0u8; chunk_bytes];
     let mut filled = fill(&mut dec, &mut buf, 0).ok()?;
     let array_start = loop {
-        if let Some(key) = find_bytes(&buf[..filled], b"\"traceEvents\"") {
-            let after_key = key + "\"traceEvents\"".len();
-            if let Some(bracket) = buf[after_key..filled].iter().position(|&b| b == b'[') {
-                break after_key + bracket + 1;
-            }
+        if let TraceEventsArray::Found { content_start, .. } =
+            find_trace_events_array(&buf[..filled])
+        {
+            break content_start;
         }
         if filled < buf.len() || buf.len() >= PIPELINE_MAX_EVENT_BYTES {
             return None;
