@@ -90,34 +90,7 @@ impl Screen {
     pub(crate) fn to_ansi(&self) -> Vec<u8> {
         let mut out = Vec::new();
         for (i, row) in self.rows.iter().enumerate() {
-            let wrapped = row
-                .last()
-                .is_some_and(|cell| cell.flags.contains(Flags::WRAPLINE));
-            let end = if wrapped {
-                row.len()
-            } else {
-                row.iter()
-                    .rposition(|cell| !is_blank_cell(cell))
-                    .map_or(0, |i| i + 1)
-            };
-            let mut col = 0;
-            while col < end {
-                let start = col;
-                let key = (row[col].fg, row[col].bg, row[col].flags);
-                while col < end && (row[col].fg, row[col].bg, row[col].flags) == key {
-                    col += 1;
-                }
-                emit_sgr(&mut out, key.0, key.1, key.2);
-                for cell in &row[start..col] {
-                    // A wide character's trailing spacer carries no character of
-                    // its own; replaying the wide character recreates the spacer.
-                    if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
-                        continue;
-                    }
-                    let mut buf = [0u8; 4];
-                    out.extend_from_slice(cell.c.encode_utf8(&mut buf).as_bytes());
-                }
-            }
+            let wrapped = emit_row(&mut out, row);
             // A non-wrapped row ends its logical line with a reset and CRLF (the
             // carriage return returns the cursor to column zero); a wrapped row
             // flows into the next without a break. The final line gets no trailing
@@ -129,6 +102,41 @@ impl Screen {
         }
         out
     }
+}
+
+/// Emit one row as SGR-styled cells, returning whether it wraps into the next.
+/// A wrapped row emits every cell; a trimmed row stops after its last non-blank
+/// cell. Cells sharing fg/bg/flags form a run preceded by one SGR escape. A wide
+/// character's trailing spacer carries no character of its own and is skipped;
+/// replaying the wide character recreates it.
+fn emit_row(out: &mut Vec<u8>, row: &[Cell]) -> bool {
+    let wrapped = row
+        .last()
+        .is_some_and(|cell| cell.flags.contains(Flags::WRAPLINE));
+    let end = if wrapped {
+        row.len()
+    } else {
+        row.iter()
+            .rposition(|cell| !is_blank_cell(cell))
+            .map_or(0, |i| i + 1)
+    };
+    let mut col = 0;
+    while col < end {
+        let start = col;
+        let key = (row[col].fg, row[col].bg, row[col].flags);
+        while col < end && (row[col].fg, row[col].bg, row[col].flags) == key {
+            col += 1;
+        }
+        emit_sgr(out, key.0, key.1, key.2);
+        for cell in &row[start..col] {
+            if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
+                continue;
+            }
+            let mut buf = [0u8; 4];
+            out.extend_from_slice(cell.c.encode_utf8(&mut buf).as_bytes());
+        }
+    }
+    wrapped
 }
 
 /// Append the SGR escape that reproduces a cell's color and style, resetting
