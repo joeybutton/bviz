@@ -1142,37 +1142,10 @@ fn recover(text: &str) -> Result<Profile, LoadError> {
 
     let interner = ConcurrentInterner::new(text.len(), text.len() / BYTES_PER_DISTINCT);
     let mut builder = Builder::new();
-    let mut recovered = false;
-    {
+    let recovered = {
         let mut writer = interner.writer();
-        let mut scratch: Vec<ArgEntry> = Vec::new();
-        let bytes = text.as_bytes();
-        let mut i = array_start;
-        while i < bytes.len() {
-            while i < bytes.len() && bytes[i] != b'{' {
-                if bytes[i] == b']' {
-                    i = bytes.len();
-                    break;
-                }
-                i += 1;
-            }
-            if i >= bytes.len() {
-                break;
-            }
-            // A missing close means the array was cut mid-object: stop.
-            let start = i;
-            let Some(end) = object_end(bytes, start) else { break };
-            let mut de = serde_json::Deserializer::from_str(&text[start..=end]);
-            if let Ok(ev) = RawEventSeed(&mut scratch)
-                .deserialize(&mut de)
-                .and_then(|ev| de.end().map(|()| ev))
-            {
-                builder.event(&mut writer, ev, &scratch);
-                recovered = true;
-            }
-            i = end + 1;
-        }
-    }
+        recover_events(text, array_start, &mut builder, &mut writer)
+    };
 
     if !recovered {
         return Err(LoadError::Corrupted("no complete events recovered".into()));
@@ -1181,6 +1154,46 @@ fn recover(text: &str) -> Result<Profile, LoadError> {
     let mut merge = Merge::new();
     merge.fold(builder);
     Ok(seal(interner, merge, other_data))
+}
+
+/// Folds whole event objects from the traceEvents array into `builder`, starting
+/// at `array_start`, until the array closes or an object is cut off mid-way.
+/// Returns whether any complete event was recovered.
+fn recover_events(
+    text: &str,
+    array_start: usize,
+    builder: &mut Builder,
+    writer: &mut Writer,
+) -> bool {
+    let mut recovered = false;
+    let mut scratch: Vec<ArgEntry> = Vec::new();
+    let bytes = text.as_bytes();
+    let mut i = array_start;
+    while i < bytes.len() {
+        while i < bytes.len() && bytes[i] != b'{' {
+            if bytes[i] == b']' {
+                i = bytes.len();
+                break;
+            }
+            i += 1;
+        }
+        if i >= bytes.len() {
+            break;
+        }
+        // A missing close means the array was cut mid-object: stop.
+        let start = i;
+        let Some(end) = object_end(bytes, start) else { break };
+        let mut de = serde_json::Deserializer::from_str(&text[start..=end]);
+        if let Ok(ev) = RawEventSeed(&mut scratch)
+            .deserialize(&mut de)
+            .and_then(|ev| de.end().map(|()| ev))
+        {
+            builder.event(writer, ev, &scratch);
+            recovered = true;
+        }
+        i = end + 1;
+    }
+    recovered
 }
 
 fn recover_other_data(prefix: &str) -> Option<Map<String, Value>> {
