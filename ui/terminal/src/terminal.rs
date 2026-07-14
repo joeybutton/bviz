@@ -1152,77 +1152,14 @@ impl IntoElement for TerminalElement {
     }
 }
 
-impl Element for TerminalElement {
-    type RequestLayoutState = Metrics;
-    type PrepaintState = Prepaint;
-
-    fn id(&self) -> Option<gpui::ElementId> {
-        None
-    }
-
-    fn source_location(&self) -> Option<&'static core::panic::Location<'static>> {
-        None
-    }
-
-    fn request_layout(
-        &mut self,
-        _: Option<&GlobalElementId>,
-        _: Option<&InspectorElementId>,
-        window: &mut Window,
-        cx: &mut App,
-    ) -> (LayoutId, Metrics) {
-        let metrics = bviz_ui_assets::text_metrics(window);
-        // A monospace advance width, measured from a single glyph.
-        let color = window.text_style().color;
-        let cell_width =
-            bviz_ui_assets::shape_line(window, "M", metrics.font.clone(), metrics.font_size, color)
-                .width;
-
-        let mut style = Style::default();
-        style.size.width = relative(1.).into();
-        style.size.height = relative(1.).into();
-
-        (
-            window.request_layout(style, [], cx),
-            Metrics {
-                cell_width,
-                line_height: metrics.line_height,
-                font_size: metrics.font_size,
-                font: metrics.font,
-            },
-        )
-    }
-
-    fn prepaint(
-        &mut self,
-        _: Option<&GlobalElementId>,
-        _: Option<&InspectorElementId>,
-        bounds: Bounds<Pixels>,
-        metrics: &mut Metrics,
-        window: &mut Window,
-        cx: &mut App,
-    ) -> Prepaint {
-        let colors = bviz_ui_theme::colors(window);
-        let fg = colors.text;
-        let bg = colors.background;
-        let ansi = ansi_palette(window);
-
-        // Create the terminal at the bounds (minus the scroll bar gutter), or
-        // resize it to them, so alacritty wraps to the window; then read the rows
-        // it would currently show and its scroll position.
-        let cols = ((f32::from(bounds.size.width) - SCROLLBAR_WIDTH)
-            / f32::from(metrics.cell_width))
-        .floor()
-        .max(1.0) as usize;
-        let rows = (f32::from(bounds.size.height) / f32::from(metrics.line_height))
-            .floor()
-            .max(1.0) as usize;
+impl TerminalElement {
+    /// Build the terminal at `cols`x`rows` for the played frame so alacritty
+    /// wraps to the window, or reflow the existing one to that size. On rebuild,
+    /// restore scroll, search, and selection so scrubbing keeps them; before the
+    /// source loads there is nothing to build and the viewport reads empty.
+    fn sync_terminal(&self, cols: usize, rows: usize, cx: &mut App) {
         self.view.update(cx, |view, cx| {
             let frame = view.current_frame;
-            // Rebuild the terminal when the played frame changes, reconstructing the
-            // build's output up to that point; otherwise just reflow to the bounds.
-            // Before the source loads there is nothing to build and the viewport
-            // read below sees `None` and renders empty.
             if view.terminal.is_none() || view.terminal_frame != Some(frame) {
                 if let TermSource::Loaded(replay) = &view.source {
                     let source = replay.display_at(frame);
@@ -1269,33 +1206,23 @@ impl Element for TerminalElement {
                 terminal.resize(cols, rows);
             }
         });
-        let (viewport, history, offset, selection, search) =
-            match self.view.read(cx).terminal.as_ref() {
-                Some(terminal) => (
-                    terminal.viewport(),
-                    terminal.history_size(),
-                    terminal.display_offset(),
-                    terminal.selection_spans(),
-                    terminal.search_spans(),
-                ),
-                None => (Vec::new(), 0, 0, Vec::new(), Vec::new()),
-            };
-        self.view.update(cx, |view, _| {
-            view.content = Some(ContentLayout {
-                left: f32::from(bounds.left()),
-                top: f32::from(bounds.top()),
-                cell_width: f32::from(metrics.cell_width),
-                line_height: f32::from(metrics.line_height),
-                columns: cols,
-                rows,
-            });
-        });
+    }
 
-        // The scroll bar, sized and placed by how much is off-screen and how far
-        // the viewport is scrolled: the content is the whole scrollback plus the
-        // visible rows, and the offset is how far below the top the viewport sits
-        // (`history - display_offset`). Its geometry is kept on the view so mouse
-        // events can hit-test and drag it.
+    /// Size and place the scroll bar from how much is off-screen and how far the
+    /// viewport is scrolled: the content is the whole scrollback plus the visible
+    /// rows, and the offset is how far below the top the viewport sits
+    /// (`history - offset`). The geometry is kept on the view for hit-testing even
+    /// while hidden; the returned thumb quad is painted only while the bar is
+    /// revealed or being dragged, with no track.
+    fn scrollbar_quad(
+        &self,
+        bounds: Bounds<Pixels>,
+        history: usize,
+        offset: usize,
+        rows: usize,
+        colors: &bviz_ui_theme::Colors,
+        cx: &mut App,
+    ) -> Option<PaintQuad> {
         let scrollbar_layout = Scrollbar::new(
             Axis::Vertical,
             Bounds::new(
@@ -1312,18 +1239,27 @@ impl Element for TerminalElement {
         );
         self.view
             .update(cx, |view, _| view.scrollbar = scrollbar_layout);
-        // The geometry is kept for hit-testing even while hidden; the thumb is
-        // painted only while the bar is revealed or being dragged. The terminal
-        // draws just the thumb, with no track, so it is filled directly here.
         let view = self.view.read(cx);
         let show_scrollbar = view.scrollbar_visible || view.drag_grab.is_some();
-        let scrollbar = scrollbar_layout.filter(|_| show_scrollbar).map(|bar| {
+        scrollbar_layout.filter(|_| show_scrollbar).map(|bar| {
             fill(
                 bar.thumb(),
                 bviz_ui_theme::mix(colors.text, colors.background, 0.6),
             )
-        });
+        })
+    }
 
+    /// Shape the visible grid into one [`PositionedLine`] per contiguous
+    /// same-style span and collect the non-default cell background fills.
+    fn shape_viewport(
+        viewport: &[Vec<Cell>],
+        bounds: Bounds<Pixels>,
+        metrics: &Metrics,
+        fg: Rgba,
+        bg: Rgba,
+        ansi: &[u32; 16],
+        window: &mut Window,
+    ) -> (Vec<PositionedLine>, Vec<PaintQuad>) {
         let mut lines = Vec::with_capacity(viewport.len());
         let mut backgrounds = Vec::new();
 
@@ -1379,25 +1315,39 @@ impl Element for TerminalElement {
                 });
             }
         }
+        (lines, backgrounds)
+    }
 
-        // The selection highlight tints the selected cells; a translucent fill
-        // over the cell backgrounds keeps the text on top legible.
-        let selection_color = Rgba {
-            a: 0.4,
-            ..colors.selected
-        };
+    /// Translucent tint over the selected cells; painted under the text so it
+    /// stays legible.
+    fn selection_quads(
+        selection: &[Option<(usize, usize)>],
+        bounds: Bounds<Pixels>,
+        metrics: &Metrics,
+        selected: Rgba,
+    ) -> Vec<PaintQuad> {
+        let selection_color = Rgba { a: 0.4, ..selected };
+        let mut quads = Vec::new();
         for (r, span) in selection.iter().enumerate() {
             let Some((first, last)) = span else { continue };
             let x = bounds.left() + metrics.cell_width * *first as f32;
             let y = bounds.top() + metrics.line_height * r as f32;
             let width = metrics.cell_width * (*last - *first + 1) as f32;
-            backgrounds.push(fill(
+            quads.push(fill(
                 Bounds::new(point(x, y), size(width, metrics.line_height)),
                 selection_color,
             ));
         }
+        quads
+    }
 
-        // Highlight search matches in yellow, the focused match more strongly.
+    /// Yellow tint over search matches, the focused match more strongly.
+    fn search_quads(
+        search: &[Vec<(usize, usize, bool)>],
+        bounds: Bounds<Pixels>,
+        metrics: &Metrics,
+    ) -> Vec<PaintQuad> {
+        let mut quads = Vec::new();
         for (r, spans) in search.iter().enumerate() {
             let y = bounds.top() + metrics.line_height * r as f32;
             for &(first, last, focused) in spans {
@@ -1418,14 +1368,23 @@ impl Element for TerminalElement {
                         a: 0.30,
                     }
                 };
-                backgrounds.push(fill(
+                quads.push(fill(
                     Bounds::new(point(x, y), size(width, metrics.line_height)),
                     color,
                 ));
             }
         }
+        quads
+    }
 
-        // Underline the hovered URL in the accent color to mark it as a link.
+    /// Underline the hovered URL in the accent color to mark it as a link.
+    fn url_overlay(
+        &self,
+        bounds: Bounds<Pixels>,
+        metrics: &Metrics,
+        selected: Rgba,
+        cx: &App,
+    ) -> Vec<PaintQuad> {
         let mut overlays = Vec::new();
         if let Some(url) = self.view.read(cx).hovered_url.as_ref() {
             for (r, span) in url.spans().iter().enumerate() {
@@ -1435,10 +1394,108 @@ impl Element for TerminalElement {
                 let width = metrics.cell_width * (*last - *first + 1) as f32;
                 overlays.push(fill(
                     Bounds::new(point(x, y), size(width, px(1.5))),
-                    colors.selected,
+                    selected,
                 ));
             }
         }
+        overlays
+    }
+}
+
+impl Element for TerminalElement {
+    type RequestLayoutState = Metrics;
+    type PrepaintState = Prepaint;
+
+    fn id(&self) -> Option<gpui::ElementId> {
+        None
+    }
+
+    fn source_location(&self) -> Option<&'static core::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (LayoutId, Metrics) {
+        let metrics = bviz_ui_assets::text_metrics(window);
+        // A monospace advance width, measured from a single glyph.
+        let color = window.text_style().color;
+        let cell_width =
+            bviz_ui_assets::shape_line(window, "M", metrics.font.clone(), metrics.font_size, color)
+                .width;
+
+        let mut style = Style::default();
+        style.size.width = relative(1.).into();
+        style.size.height = relative(1.).into();
+
+        (
+            window.request_layout(style, [], cx),
+            Metrics {
+                cell_width,
+                line_height: metrics.line_height,
+                font_size: metrics.font_size,
+                font: metrics.font,
+            },
+        )
+    }
+
+    fn prepaint(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        metrics: &mut Metrics,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Prepaint {
+        let colors = bviz_ui_theme::colors(window);
+        let fg = colors.text;
+        let bg = colors.background;
+        let ansi = ansi_palette(window);
+
+        // Columns fit the width less the scroll bar gutter; rows fit the height.
+        let cols = ((f32::from(bounds.size.width) - SCROLLBAR_WIDTH)
+            / f32::from(metrics.cell_width))
+        .floor()
+        .max(1.0) as usize;
+        let rows = (f32::from(bounds.size.height) / f32::from(metrics.line_height))
+            .floor()
+            .max(1.0) as usize;
+        self.sync_terminal(cols, rows, cx);
+
+        let (viewport, history, offset, selection, search) =
+            match self.view.read(cx).terminal.as_ref() {
+                Some(terminal) => (
+                    terminal.viewport(),
+                    terminal.history_size(),
+                    terminal.display_offset(),
+                    terminal.selection_spans(),
+                    terminal.search_spans(),
+                ),
+                None => (Vec::new(), 0, 0, Vec::new(), Vec::new()),
+            };
+        self.view.update(cx, |view, _| {
+            view.content = Some(ContentLayout {
+                left: f32::from(bounds.left()),
+                top: f32::from(bounds.top()),
+                cell_width: f32::from(metrics.cell_width),
+                line_height: f32::from(metrics.line_height),
+                columns: cols,
+                rows,
+            });
+        });
+
+        let scrollbar = self.scrollbar_quad(bounds, history, offset, rows, &colors, cx);
+
+        let (lines, mut backgrounds) =
+            Self::shape_viewport(&viewport, bounds, metrics, fg, bg, ansi, window);
+        backgrounds.extend(Self::selection_quads(&selection, bounds, metrics, colors.selected));
+        backgrounds.extend(Self::search_quads(&search, bounds, metrics));
+        let overlays = self.url_overlay(bounds, metrics, colors.selected, cx);
 
         Prepaint {
             lines,
