@@ -3561,6 +3561,47 @@ fn paint_gutter(
 ) {
     let gutter_left = regions.content_left - gutter_width;
     let gutter_bottom = regions.panel_bottom;
+    paint_gutter_frame(regions, gutter_left, gutter_width, gutter_bottom, palette, window);
+
+    let font = bviz_ui_assets::text_metrics(window).font;
+    let fs = px(GUTTER_LABEL_SIZE);
+    let avail = gutter_width - 2.0 * SLICE_TEXT_PAD;
+
+    // Thread and group labels scroll with the lanes, so clip them to the flame
+    // region.
+    let flame_mask = ContentMask {
+        bounds: Bounds::new(
+            point(px(gutter_left), px(regions.flame_top)),
+            size(px(gutter_width), px(regions.flame_h())),
+        ),
+    };
+    window.with_content_mask(Some(flame_mask), |window| {
+        paint_thread_labels(
+            profile, layout, regions, gutter_left, gutter_width, scroll_y, selected, avail, &font,
+            fs, palette, window, cx,
+        );
+        paint_group_bands(
+            chrome, regions, gutter_left, gutter_width, scroll_y, avail, &font, fs, palette, window,
+            cx,
+        );
+    });
+
+    if show_counters {
+        paint_counter_labels(profile, regions, gutter_left, avail, &font, fs, palette, window, cx);
+    }
+}
+
+/// Fills the gutter's opaque background and draws a divider at its right edge,
+/// under the drag handle, spanning the full height so the resizable line reads as
+/// one across the flame chart, the tab bar, and the panel.
+fn paint_gutter_frame(
+    regions: Regions,
+    gutter_left: f32,
+    gutter_width: f32,
+    gutter_bottom: f32,
+    palette: &Palette,
+    window: &mut Window,
+) {
     let strip = Bounds::new(
         point(px(gutter_left), px(regions.flame_top)),
         size(px(gutter_width), px(gutter_bottom - regions.flame_top)),
@@ -3573,9 +3614,6 @@ fn paint_gutter(
         Hsla::from(palette.border),
         BorderStyle::Solid,
     ));
-    // A subtle divider at the gutter's right edge, under the drag handle,
-    // spanning the full height so the resizable line reads as one across the
-    // flame chart, the tab bar, and the panel.
     window.paint_quad(quad(
         Bounds::new(
             point(px(regions.content_left - 1.0), px(regions.flame_top)),
@@ -3587,12 +3625,126 @@ fn paint_gutter(
         Hsla::from(palette.border),
         BorderStyle::Solid,
     ));
+}
 
-    let font = bviz_ui_assets::text_metrics(window).font;
-    let fs = px(GUTTER_LABEL_SIZE);
-    let avail = gutter_width - 2.0 * SLICE_TEXT_PAD;
-    let label = |name: &str, ty: f32, window: &mut Window, cx: &mut App| {
-        let line = shape_truncated(name, avail, font.clone(), fs, palette.label.into(), window);
+/// Shapes `name` truncated to `avail` and paints it left-aligned at the gutter's
+/// text inset, vertically offset to `ty`.
+#[allow(clippy::too_many_arguments)]
+fn paint_gutter_label(
+    name: &str,
+    ty: f32,
+    gutter_left: f32,
+    avail: f32,
+    font: &gpui::Font,
+    fs: Pixels,
+    palette: &Palette,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let line = shape_truncated(name, avail, font.clone(), fs, palette.label.into(), window);
+    let _ = line.paint(
+        point(px(gutter_left + SLICE_TEXT_PAD), px(ty)),
+        fs,
+        TextAlign::Left,
+        None,
+        window,
+        cx,
+    );
+}
+
+/// Paints each thread's name at its flame lane, scrolled with the lanes and
+/// centered against the lane's full height. A selected lane's row carries a faint
+/// accent tint and a leading accent bar, so which tracks feed the flame graph
+/// reads at a glance.
+#[allow(clippy::too_many_arguments)]
+fn paint_thread_labels(
+    profile: &Profile,
+    layout: &LaneLayout,
+    regions: Regions,
+    gutter_left: f32,
+    gutter_width: f32,
+    scroll_y: f32,
+    selected: &[bool],
+    avail: f32,
+    font: &gpui::Font,
+    fs: Pixels,
+    palette: &Palette,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let selection_tint = bviz_ui_theme::mix(palette.selection, palette.header_band, 0.8);
+    for lane in &layout.lanes {
+        let top = regions.flame_top + lane.top - scroll_y;
+        if top + lane.height < regions.flame_top || top > regions.flame_bottom {
+            continue;
+        }
+        if selected.get(lane.track).copied().unwrap_or(false) {
+            window.paint_quad(quad(
+                Bounds::new(point(px(gutter_left), px(top)), size(px(gutter_width), px(lane.height))),
+                px(0.),
+                selection_tint,
+                px(0.),
+                Hsla::from(palette.border),
+                BorderStyle::Solid,
+            ));
+            window.paint_quad(quad(
+                Bounds::new(point(px(gutter_left), px(top)), size(px(2.0), px(lane.height))),
+                px(0.),
+                palette.selection,
+                px(0.),
+                Hsla::from(palette.border),
+                BorderStyle::Solid,
+            ));
+        }
+        let ty = top + (lane.height - GUTTER_LABEL_SIZE) / 2.0;
+        paint_gutter_label(
+            profile.str(profile.threads()[lane.track].name),
+            ty,
+            gutter_left,
+            avail,
+            font,
+            fs,
+            palette,
+            window,
+            cx,
+        );
+    }
+}
+
+/// Paints each group header band's chevron, class name, and shown/total lane
+/// count; a capped, expanded group shows a caret-double icon at the gutter's right
+/// edge — down to show every lane, up to show the busiest.
+#[allow(clippy::too_many_arguments)]
+fn paint_group_bands(
+    chrome: &GroupChrome,
+    regions: Regions,
+    gutter_left: f32,
+    gutter_width: f32,
+    scroll_y: f32,
+    avail: f32,
+    font: &gpui::Font,
+    fs: Pixels,
+    palette: &Palette,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let strong = palette.label.into();
+    for band in &chrome.bands {
+        let top = regions.flame_top + band.top - scroll_y;
+        if top + GROUP_BAND_HEIGHT < regions.flame_top || top > regions.flame_bottom {
+            continue;
+        }
+        let show_icon = band.capped && !band.collapsed;
+        let chevron = if band.collapsed { "▸" } else { "▾" };
+        let text = if band.collapsed {
+            format!("{chevron} {}  {}", group_label(band.class), band.total)
+        } else {
+            format!("{chevron} {}  {}/{}", group_label(band.class), band.shown, band.total)
+        };
+        let ty = top + (GROUP_BAND_HEIGHT - GUTTER_LABEL_SIZE) / 2.0;
+        // Keep the label clear of the icon when one is drawn.
+        let label_avail = if show_icon { avail - GROUP_ICON - SLICE_TEXT_PAD } else { avail };
+        let line = shape_truncated(&text, label_avail, font.clone(), fs, strong, window);
         let _ = line.paint(
             point(px(gutter_left + SLICE_TEXT_PAD), px(ty)),
             fs,
@@ -3601,98 +3753,50 @@ fn paint_gutter(
             window,
             cx,
         );
-    };
-
-    // Thread names scroll with the flame lanes, clipped to their band, each
-    // centered against its lane's full height.
-    let flame_mask = ContentMask {
-        bounds: Bounds::new(
-            point(px(gutter_left), px(regions.flame_top)),
-            size(px(gutter_width), px(regions.flame_h())),
-        ),
-    };
-    // A selected lane's gutter row carries a faint accent tint and a leading
-    // accent bar, so which tracks feed the flame graph reads at a glance.
-    let selection_tint = bviz_ui_theme::mix(palette.selection, palette.header_band, 0.8);
-    window.with_content_mask(Some(flame_mask), |window| {
-        for lane in &layout.lanes {
-            let top = regions.flame_top + lane.top - scroll_y;
-            if top + lane.height < regions.flame_top || top > regions.flame_bottom {
-                continue;
-            }
-            if selected.get(lane.track).copied().unwrap_or(false) {
-                window.paint_quad(quad(
-                    Bounds::new(point(px(gutter_left), px(top)), size(px(gutter_width), px(lane.height))),
-                    px(0.),
-                    selection_tint,
-                    px(0.),
-                    Hsla::from(palette.border),
-                    BorderStyle::Solid,
-                ));
-                window.paint_quad(quad(
-                    Bounds::new(point(px(gutter_left), px(top)), size(px(2.0), px(lane.height))),
-                    px(0.),
-                    palette.selection,
-                    px(0.),
-                    Hsla::from(palette.border),
-                    BorderStyle::Solid,
-                ));
-            }
-            let ty = top + (lane.height - GUTTER_LABEL_SIZE) / 2.0;
-            label(profile.str(profile.threads()[lane.track].name), ty, window, cx);
-        }
-        // Group header bands carry a chevron, the class name, and the shown/total
-        // lane count; a capped, expanded group shows a caret-double icon at the
-        // gutter's right edge — down to show every lane, up to show the busiest.
-        let strong = palette.label.into();
-        for band in &chrome.bands {
-            let top = regions.flame_top + band.top - scroll_y;
-            if top + GROUP_BAND_HEIGHT < regions.flame_top || top > regions.flame_bottom {
-                continue;
-            }
-            let show_icon = band.capped && !band.collapsed;
-            let chevron = if band.collapsed { "▸" } else { "▾" };
-            let text = if band.collapsed {
-                format!("{chevron} {}  {}", group_label(band.class), band.total)
-            } else {
-                format!("{chevron} {}  {}/{}", group_label(band.class), band.shown, band.total)
-            };
-            let ty = top + (GROUP_BAND_HEIGHT - GUTTER_LABEL_SIZE) / 2.0;
-            // Keep the label clear of the icon when one is drawn.
-            let label_avail = if show_icon { avail - GROUP_ICON - SLICE_TEXT_PAD } else { avail };
-            let line = shape_truncated(&text, label_avail, font.clone(), fs, strong, window);
-            let _ = line.paint(
-                point(px(gutter_left + SLICE_TEXT_PAD), px(ty)),
-                fs,
-                TextAlign::Left,
+        if show_icon {
+            let name = if band.show_all { "caret-double-up" } else { "caret-double-down" };
+            let ix = gutter_left + gutter_width - GROUP_ICON - SLICE_TEXT_PAD;
+            let iy = top + (GROUP_BAND_HEIGHT - GROUP_ICON) / 2.0;
+            let _ = window.paint_svg(
+                Bounds::new(point(px(ix), px(iy)), size(px(GROUP_ICON), px(GROUP_ICON))),
+                SharedString::from(format!("assets/regular/{name}.svg")),
                 None,
-                window,
+                TransformationMatrix::default(),
+                palette.marker.into(),
                 cx,
             );
-            if show_icon {
-                let name = if band.show_all { "caret-double-up" } else { "caret-double-down" };
-                let ix = gutter_left + gutter_width - GROUP_ICON - SLICE_TEXT_PAD;
-                let iy = top + (GROUP_BAND_HEIGHT - GROUP_ICON) / 2.0;
-                let _ = window.paint_svg(
-                    Bounds::new(point(px(ix), px(iy)), size(px(GROUP_ICON), px(GROUP_ICON))),
-                    SharedString::from(format!("assets/regular/{name}.svg")),
-                    None,
-                    TransformationMatrix::default(),
-                    palette.marker.into(),
-                    cx,
-                );
-            }
         }
-    });
+    }
+}
 
-    // For the Counters tab, counter names sit at the chart baseline of their
-    // lane, so they associate with low values rather than floating at the top.
-    if show_counters {
-        for gl in graph_lanes(profile.counters().len(), regions.panel_top, regions.panel_h()) {
-            let lane_bottom = gl.top + METRICS.header_height + gl.chart_h;
-            let ty = lane_bottom - GUTTER_LABEL_SIZE - SLICE_TEXT_PAD;
-            label(profile.str(profile.counters()[gl.lane].name), ty, window, cx);
-        }
+/// Paints each counter's name at its panel lane's chart baseline, so it associates
+/// with low values rather than floating at the top.
+#[allow(clippy::too_many_arguments)]
+fn paint_counter_labels(
+    profile: &Profile,
+    regions: Regions,
+    gutter_left: f32,
+    avail: f32,
+    font: &gpui::Font,
+    fs: Pixels,
+    palette: &Palette,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    for gl in graph_lanes(profile.counters().len(), regions.panel_top, regions.panel_h()) {
+        let lane_bottom = gl.top + METRICS.header_height + gl.chart_h;
+        let ty = lane_bottom - GUTTER_LABEL_SIZE - SLICE_TEXT_PAD;
+        paint_gutter_label(
+            profile.str(profile.counters()[gl.lane].name),
+            ty,
+            gutter_left,
+            avail,
+            font,
+            fs,
+            palette,
+            window,
+            cx,
+        );
     }
 }
 
