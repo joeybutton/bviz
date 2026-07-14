@@ -50,18 +50,25 @@ impl Dropdown {
         self.selected
     }
 
+    /// Set the chosen index if in range and different, reporting whether it changed.
+    fn select(&mut self, index: usize) -> bool {
+        let changed = index < self.options.len() && index != self.selected;
+        if changed {
+            self.selected = index;
+        }
+        changed
+    }
+
     /// Choose an option by index, leaving the menu and notifying observers.
     pub fn set_selected(&mut self, index: usize, cx: &mut Context<Self>) {
-        if index < self.options.len() && index != self.selected {
-            self.selected = index;
+        if self.select(index) {
             cx.notify();
         }
     }
 
     fn choose(&mut self, index: usize, cx: &mut Context<Self>) {
         self.open = false;
-        if index < self.options.len() && index != self.selected {
-            self.selected = index;
+        if self.select(index) {
             cx.emit(DropdownEvent::Changed(index));
         }
         cx.notify();
