@@ -27,6 +27,43 @@ pub fn luminance(c: Rgba) -> f32 {
     0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b
 }
 
+/// `color` at full opacity, for legible text tinted like its translucent dot.
+pub fn opaque(color: Hsla) -> Hsla {
+    Hsla { a: 1.0, ..color }
+}
+
+/// Black or white, whichever reads on `fill`.
+pub fn label_on(fill: Hsla) -> Hsla {
+    let rgba = Rgba::from(fill);
+    if luminance(rgba) < 0.5 {
+        hsla(0.0, 0.0, 1.0, 1.0)
+    } else {
+        hsla(0.0, 0.0, 0.0, 1.0)
+    }
+}
+
+/// A stable hue in [0, 1) for `s`: FNV-1a over the bytes folded onto the wheel.
+/// The same string always maps to the same hue.
+pub fn hue_of(s: &str) -> f32 {
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for b in s.bytes() {
+        hash ^= b as u64;
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    (hash % 360) as f32 / 360.0
+}
+
+/// Saturation of a counter series' translucent fill.
+const CATEGORY_SATURATION: f32 = 0.5;
+
+/// Alpha of a counter series' filled area.
+const COUNTER_AREA_ALPHA: f32 = 0.5;
+
+/// A translucent fill for a counter series, keyed by its name like a category.
+pub fn counter_color(series: &str) -> Hsla {
+    hsla(hue_of(series), CATEGORY_SATURATION, 0.55, COUNTER_AREA_ALPHA)
+}
+
 /// Hue (fraction of the wheel) per span workload, spread so the classes read as
 /// distinct on either theme: the two payload workloads are warm (action orange,
 /// starlark green) and the overhead workloads cool (filesystem cyan, remote/cache

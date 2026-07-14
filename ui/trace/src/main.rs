@@ -46,9 +46,6 @@ const METRICS: LaneMetrics = LaneMetrics {
 /// thin lane header so the names stay legible.
 const GUTTER_LABEL_SIZE: f32 = 11.0;
 
-/// Alpha of a counter series' filled area.
-const COUNTER_AREA_ALPHA: f32 = 0.5;
-
 /// Slices rendering narrower than this are culled — too thin to see or label.
 const MIN_SLICE_PX: f32 = 1.0;
 
@@ -149,9 +146,6 @@ const TOOLTIP_OFFSET: f32 = 12.0;
 const CROSSHAIR_DOT_RADIUS: f32 = 3.0;
 const CROSSHAIR_VALUE_SIZE: f32 = 11.0;
 const CROSSHAIR_LABEL_GAP: f32 = 5.0;
-
-/// Saturation of a counter series' translucent fill.
-const CATEGORY_SATURATION: f32 = 0.5;
 
 /// Theme-resolved colors the canvas paints with, owned so the `'static` paint
 /// closure can capture them.
@@ -3808,7 +3802,7 @@ fn paint_slice(
         rect,
         fill,
         profile.str(slice.name),
-        label_on(fill),
+        bviz_ui_theme::label_on(fill),
         palette.background,
         SLICE_SEAM_MIN_PX,
         SLICE_SEAM_MIX,
@@ -3868,7 +3862,7 @@ fn paint_flame_graph(
                 rect,
                 fill,
                 graph.str(b.name),
-                label_on(fill),
+                bviz_ui_theme::label_on(fill),
                 palette.background,
                 SLICE_SEAM_MIN_PX,
                 SLICE_SEAM_MIX,
@@ -4089,27 +4083,6 @@ fn paint_tooltip(
     paint_tooltip_box(&lines, at, bounds, palette, window, cx);
 }
 
-/// A stable hue in [0, 1) for `s`: FNV-1a over the bytes folded onto the wheel.
-/// The same string always maps to the same hue.
-fn hue_of(s: &str) -> f32 {
-    let mut hash: u64 = 0xcbf29ce484222325;
-    for b in s.bytes() {
-        hash ^= b as u64;
-        hash = hash.wrapping_mul(0x100000001b3);
-    }
-    (hash % 360) as f32 / 360.0
-}
-
-/// A translucent fill for a counter series, keyed by its name like a category.
-fn counter_color(series: &str) -> Hsla {
-    hsla(
-        hue_of(series),
-        CATEGORY_SATURATION,
-        0.55,
-        COUNTER_AREA_ALPHA,
-    )
-}
-
 /// The y of the segment `(x0, y0)`–`(x1, y1)` at `x`; `x0` must differ from `x1`.
 fn lerp_y(x0: f32, y0: f32, x1: f32, y1: f32, x: f32) -> f32 {
     y0 + (y1 - y0) * (x - x0) / (x1 - x0)
@@ -4272,7 +4245,7 @@ fn paint_graph(
             area.line_to(point(px(top[top.len() - 1].0), px(chart_bottom)));
             area.line_to(point(px(top[0].0), px(chart_bottom)));
             if let Ok(path) = area.build() {
-                window.paint_path(path, counter_color(profile.str(series.name)));
+                window.paint_path(path, bviz_ui_theme::counter_color(profile.str(series.name)));
             }
         });
     }
@@ -4495,7 +4468,7 @@ fn paint_counter_readouts(
         let chart_top = y_scale.chart_top;
         let chart_bottom = y_scale.chart_bottom;
         let dot_y = y_scale.value_to_y(value);
-        let color = counter_color(profile.str(series.name));
+        let color = bviz_ui_theme::counter_color(profile.str(series.name));
         window.paint_quad(quad(
             Bounds::new(
                 point(
@@ -4523,7 +4496,7 @@ fn paint_counter_readouts(
             format_counter(value, unit),
             font.clone(),
             px(CROSSHAIR_VALUE_SIZE),
-            opaque(color).into(),
+            bviz_ui_theme::opaque(color).into(),
         );
         let value_w = f32::from(value_line.width());
         // Default to the right of the line; flip to the left near the edge.
@@ -4539,21 +4512,6 @@ fn paint_counter_readouts(
             window,
             cx,
         );
-    }
-}
-
-/// `color` at full opacity, for legible text tinted like its translucent dot.
-fn opaque(color: Hsla) -> Hsla {
-    Hsla { a: 1.0, ..color }
-}
-
-/// Black or white, whichever reads on `fill`.
-fn label_on(fill: Hsla) -> Hsla {
-    let rgba = Rgba::from(fill);
-    if bviz_ui_theme::luminance(rgba) < 0.5 {
-        hsla(0.0, 0.0, 1.0, 1.0)
-    } else {
-        hsla(0.0, 0.0, 0.0, 1.0)
     }
 }
 
