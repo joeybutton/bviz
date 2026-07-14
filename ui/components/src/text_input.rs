@@ -312,6 +312,21 @@ impl TextInput {
     fn range_from_utf16(&self, range: &Range<usize>) -> Range<usize> {
         self.offset_from_utf16(range.start)..self.offset_from_utf16(range.end)
     }
+
+    /// The byte range an edit replaces: the explicit utf16 range if given, else
+    /// the marked (in-progress IME composition) range, else the selection.
+    fn replacement_range(&self, range_utf16: Option<Range<usize>>) -> Range<usize> {
+        range_utf16
+            .as_ref()
+            .map(|r| self.range_from_utf16(r))
+            .or(self.marked_range.clone())
+            .unwrap_or(self.selected_range.clone())
+    }
+
+    fn splice(&mut self, range: &Range<usize>, new_text: &str) {
+        self.content =
+            (self.content[0..range.start].to_owned() + new_text + &self.content[range.end..]).into();
+    }
 }
 
 impl Focusable for TextInput {
@@ -360,13 +375,8 @@ impl EntityInputHandler for TextInput {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let range = range_utf16
-            .as_ref()
-            .map(|r| self.range_from_utf16(r))
-            .or(self.marked_range.clone())
-            .unwrap_or(self.selected_range.clone());
-        self.content =
-            (self.content[0..range.start].to_owned() + new_text + &self.content[range.end..]).into();
+        let range = self.replacement_range(range_utf16);
+        self.splice(&range, new_text);
         let cursor = range.start + new_text.len();
         self.selected_range = cursor..cursor;
         self.marked_range = None;
@@ -381,13 +391,8 @@ impl EntityInputHandler for TextInput {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let range = range_utf16
-            .as_ref()
-            .map(|r| self.range_from_utf16(r))
-            .or(self.marked_range.clone())
-            .unwrap_or(self.selected_range.clone());
-        self.content =
-            (self.content[0..range.start].to_owned() + new_text + &self.content[range.end..]).into();
+        let range = self.replacement_range(range_utf16);
+        self.splice(&range, new_text);
         self.marked_range = (!new_text.is_empty()).then(|| range.start..range.start + new_text.len());
         self.selected_range = new_selected_range
             .as_ref()
