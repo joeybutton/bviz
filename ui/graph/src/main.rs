@@ -10,7 +10,7 @@ use bviz_ui_shell::Chrome;
 use clap::Parser;
 use gpui::{
     App, BorderStyle, Bounds, Context, Div, Entity, FocusHandle,
-    IntoElement, KeyDownEvent, Length, MouseButton, MouseDownEvent, Hsla, MouseMoveEvent, MouseUpEvent, PathBuilder,
+    IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, Hsla, MouseMoveEvent, MouseUpEvent, PathBuilder,
     Pixels, Point, Render, Rgba, ScrollDelta, ScrollWheelEvent, Stateful, Task, TextAlign, Size,
     Window, canvas, div, point, prelude::*, px, quad, rems, rgb, size,
 };
@@ -437,51 +437,6 @@ impl GraphView {
         .detach();
     }
 
-    // A rounded pill toggling one boolean field, pinned to the top-left corner.
-    // On reads in the file-leaf accent with a filled dot; off reads muted with a
-    // hollow dot. Clicking runs `mutate`, then redraws.
-    fn toggle_pill(
-        id: &'static str,
-        top: impl Into<Length>,
-        label: &str,
-        on: bool,
-        palette: &Palette,
-        entity: Entity<GraphView>,
-        mutate: impl Fn(&mut GraphView, &mut Context<GraphView>) + 'static,
-    ) -> Stateful<Div> {
-        let top = top.into();
-        let accent = kind_accent(Kind::Artifact);
-        let (dot, label_color, border_color) = if on {
-            ('\u{25CF}', accent, accent)
-        } else {
-            ('\u{25CB}', palette.label, palette.border)
-        };
-        div()
-            .id(id)
-            .absolute()
-            .left_2()
-            .top(top)
-            .flex()
-            .items_center()
-            .gap_1()
-            .px_2()
-            .py_1()
-            .rounded_md()
-            .bg(palette.container_fill)
-            .border_1()
-            .border_color(border_color)
-            .text_xs()
-            .text_color(label_color)
-            .cursor_pointer()
-            .child(format!("{dot} {label}"))
-            .on_click(move |_, _, cx| {
-                entity.update(cx, |this, cx| {
-                    mutate(this, cx);
-                    cx.notify();
-                });
-            })
-    }
-
     /// Assembles the single-canvas viewport: the painted boxes and connectors,
     /// the overlay controls layered over them, and the prepaint/paint closures
     /// that fit and draw the graph under the shared pan/zoom transform.
@@ -510,23 +465,29 @@ impl GraphView {
         let legend = legend(g, &palette);
         let relaying_indicator = relaying_indicator(relaying, &palette);
         // Kept in sync with the `h` key, which flips the same field.
-        let dim_toggle = Self::toggle_pill(
+        let dim_toggle = bviz_ui_components::toggle_pill(
             "dim-toggle",
             rems(0.5),
             "dim",
             dim_enabled,
-            &palette,
+            kind_accent(Kind::Artifact),
+            palette.label,
+            palette.border,
+            palette.container_fill,
             entity.clone(),
             |this, _| this.dim_enabled = !this.dim_enabled,
         );
         // Sits below the dim pill; flipping it relays out the view with or without
         // transitive reduction.
-        let reduce_toggle = Self::toggle_pill(
+        let reduce_toggle = bviz_ui_components::toggle_pill(
             "reduce-toggle",
             px(40.),
             "reduce",
             reduced,
-            &palette,
+            kind_accent(Kind::Artifact),
+            palette.label,
+            palette.border,
+            palette.container_fill,
             entity.clone(),
             |this, cx| {
                 this.reduced = !this.reduced;

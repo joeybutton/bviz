@@ -9,6 +9,7 @@ mod dropdown;
 mod scrollbar;
 mod spinner;
 pub mod text_input;
+mod toggle;
 
 pub use background::load_in_background;
 pub use button::Button;
@@ -18,6 +19,7 @@ pub use dropdown::{Dropdown, DropdownEvent};
 pub use scrollbar::{Axis, Scrollbar};
 pub use spinner::spinner;
 pub use text_input::TextInput;
+pub use toggle::toggle_pill;
 
 use gpui::App;
 
