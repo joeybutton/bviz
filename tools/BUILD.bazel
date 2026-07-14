@@ -5,16 +5,19 @@ load(":bazel_env.bzl", "local_exec_tool")
 local_exec_tool(
     name = "cargo",
     actual = "@rules_rs_rules_rust//tools/upstream_wrapper:cargo",
+    tags = ["manual"],
 )
 
 local_exec_tool(
     name = "rustc",
     actual = "@rules_rs_rules_rust//tools/upstream_wrapper:rustc",
+    tags = ["manual"],
 )
 
 local_exec_tool(
     name = "rustfmt",
     actual = "@rules_rs_rules_rust//tools/upstream_wrapper:rustfmt",
+    tags = ["manual"],
 )
 
 # `bazel run //tools:bazel_env` to update / install the direnv environment.
