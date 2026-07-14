@@ -1,9 +1,10 @@
 //! A single-select dropdown: a trigger showing the chosen option and a menu that
 //! opens beneath it.
 
+use bviz_ui_theme::Colors;
 use gpui::{
     deferred, div, prelude::*, px, ClickEvent, Context, ElementId, EventEmitter, FocusHandle,
-    IntoElement, MouseButton, Render, SharedString, Subscription, Window,
+    IntoElement, MouseButton, Pixels, Render, SharedString, Subscription, Window,
 };
 
 /// Emitted when the user picks a different option. Programmatic
@@ -73,31 +74,10 @@ impl Dropdown {
         }
         cx.notify();
     }
-}
 
-impl EventEmitter<DropdownEvent> for Dropdown {}
-
-impl Render for Dropdown {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // Close on an outside click: the menu holds focus while open (see the
-        // trigger handler), so losing it means a click landed elsewhere.
-        if self.dismiss.is_none() {
-            self.dismiss = Some(
-                cx.on_focus_out(&self.focus_handle, window, |this, _, _, cx| {
-                    if this.open {
-                        this.open = false;
-                        cx.notify();
-                    }
-                }),
-            );
-        }
-
-        let colors = bviz_ui_theme::colors(window);
-        let hover = colors.selected;
-        let label = self.options.get(self.selected).cloned().unwrap_or_default();
-
-        // Size the label area to the widest option so the trigger keeps a fixed
-        // width as the selection changes (the options font is proportional).
+    /// Width of the widest option, so the trigger keeps a fixed width as the
+    /// selection changes (the options font is proportional).
+    fn option_width(&self, window: &mut Window) -> Pixels {
         let metrics = bviz_ui_assets::text_metrics(window);
         let measure_color = window.text_style().color;
         let mut measured = px(0.);
@@ -115,9 +95,13 @@ impl Render for Dropdown {
         // Round up and add slack so the chosen label sits on one line: at the exact
         // measured width, sub-pixel rounding between measuring and laying out the
         // glyph run can push the longest option onto a second line.
-        let option_width = px(f32::from(measured).ceil() + 6.);
+        px(f32::from(measured).ceil() + 6.)
+    }
 
-        let trigger = div()
+    fn trigger(&self, colors: &Colors, option_width: Pixels, cx: &Context<Self>) -> impl IntoElement {
+        let hover = colors.selected;
+        let label = self.options.get(self.selected).cloned().unwrap_or_default();
+        div()
             .id(self.id.clone())
             .flex()
             .flex_row()
@@ -151,48 +135,69 @@ impl Render for Dropdown {
                 bviz_ui_assets::icon("caret-down")
                     .size(px(12.))
                     .text_color(colors.text),
-            );
-
-        let menu = self.open.then(|| {
-            let rows = self.options.iter().enumerate().map(|(index, option)| {
-                div()
-                    .id(("dropdown-option", index))
-                    .px_2()
-                    .py_1()
-                    .cursor_pointer()
-                    .text_color(colors.text)
-                    .when(index == self.selected, |row| row.bg(colors.selected))
-                    .hover(move |style| style.bg(hover))
-                    .on_click(
-                        cx.listener(move |this, _: &ClickEvent, _, cx| this.choose(index, cx)),
-                    )
-                    .child(div().whitespace_nowrap().child(option.clone()))
-            });
-            // Defer the menu so it paints over the content below the trigger; its
-            // layout stays in place, anchored just under the trigger.
-            deferred(
-                div()
-                    .occlude()
-                    .absolute()
-                    .top(px(26.))
-                    .left_0()
-                    // No explicit width: the menu shrinks to fit its options, so a
-                    // row never wraps. A fixed width would have to budget for the row
-                    // padding and border, which is error-prone.
-                    .flex()
-                    .flex_col()
-                    .bg(colors.container)
-                    .border_1()
-                    .border_color(colors.border)
-                    .rounded_md()
-                    .children(rows),
             )
+    }
+
+    fn menu(&self, colors: &Colors, cx: &Context<Self>) -> impl IntoElement {
+        let hover = colors.selected;
+        let rows = self.options.iter().enumerate().map(|(index, option)| {
+            div()
+                .id(("dropdown-option", index))
+                .px_2()
+                .py_1()
+                .cursor_pointer()
+                .text_color(colors.text)
+                .when(index == self.selected, |row| row.bg(colors.selected))
+                .hover(move |style| style.bg(hover))
+                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.choose(index, cx)))
+                .child(div().whitespace_nowrap().child(option.clone()))
         });
+        // Defer the menu so it paints over the content below the trigger; its
+        // layout stays in place, anchored just under the trigger.
+        deferred(
+            div()
+                .occlude()
+                .absolute()
+                .top(px(26.))
+                .left_0()
+                // No explicit width: the menu shrinks to fit its options, so a
+                // row never wraps. A fixed width would have to budget for the row
+                // padding and border, which is error-prone.
+                .flex()
+                .flex_col()
+                .bg(colors.container)
+                .border_1()
+                .border_color(colors.border)
+                .rounded_md()
+                .children(rows),
+        )
+    }
+}
+
+impl EventEmitter<DropdownEvent> for Dropdown {}
+
+impl Render for Dropdown {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Close on an outside click: the menu holds focus while open (see the
+        // trigger handler), so losing it means a click landed elsewhere.
+        if self.dismiss.is_none() {
+            self.dismiss = Some(
+                cx.on_focus_out(&self.focus_handle, window, |this, _, _, cx| {
+                    if this.open {
+                        this.open = false;
+                        cx.notify();
+                    }
+                }),
+            );
+        }
+
+        let colors = bviz_ui_theme::colors(window);
+        let option_width = self.option_width(window);
 
         div()
             .relative()
             .track_focus(&self.focus_handle)
-            .child(trigger)
-            .children(menu)
+            .child(self.trigger(&colors, option_width, cx))
+            .children(self.open.then(|| self.menu(&colors, cx)))
     }
 }
