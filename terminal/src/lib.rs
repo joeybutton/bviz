@@ -3,10 +3,31 @@
 
 pub use bazel_build_event_proto as bep;
 
+use alacritty_terminal::event::VoidListener;
+use alacritty_terminal::grid::Dimensions;
+use alacritty_terminal::term::{Config, Term};
+use alacritty_terminal::vte::ansi::Processor;
+
 mod display;
 mod output;
 mod replay;
 mod screen;
+
+/// History depth; large enough to retain every line of a build's output.
+const SCROLLBACK: usize = 100_000;
+
+/// Build an emulator of the given dimensions and feed it `bytes`, leaving the
+/// grid holding the state those bytes produced.
+fn build_term<D: Dimensions>(dimensions: &D, bytes: &[u8]) -> Term<VoidListener> {
+    let config = Config {
+        scrolling_history: SCROLLBACK,
+        ..Config::default()
+    };
+    let mut term = Term::new(config, dimensions, VoidListener);
+    let mut processor: Processor = Processor::new();
+    processor.advance(&mut term, bytes);
+    term
+}
 
 pub use alacritty_terminal::grid::Scroll;
 pub use alacritty_terminal::index::Side;

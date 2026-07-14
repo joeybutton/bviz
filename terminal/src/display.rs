@@ -9,8 +9,7 @@ use alacritty_terminal::index::{Column, Direction, Line, Point, Side};
 use alacritty_terminal::selection::{Selection, SelectionType};
 use alacritty_terminal::term::cell::Cell;
 use alacritty_terminal::term::search::{Match, RegexIter, RegexSearch};
-use alacritty_terminal::term::{Config, Term};
-use alacritty_terminal::vte::ansi::Processor;
+use alacritty_terminal::term::Term;
 
 /// URLs to detect in the terminal text, by scheme. Mirrors the set Zed's
 /// terminal recognizes; the body excludes control characters, whitespace, and
@@ -37,11 +36,9 @@ impl Url {
     }
 }
 
+use crate::build_term;
 use crate::output::BuildOutput;
 use crate::screen::Screen;
-
-/// History depth; large enough to retain every line of a build's output.
-const SCROLLBACK: usize = 100_000;
 
 /// A build's reconstructed output, serialized to a clean ANSI stream ready to
 /// replay into a window-sized terminal. The reconstruction is window
@@ -125,13 +122,7 @@ impl Terminal {
     pub fn from_display(source: &DisplaySource, columns: usize, rows: usize) -> Terminal {
         let columns = columns.max(1);
         let rows = rows.max(1);
-        let config = Config {
-            scrolling_history: SCROLLBACK,
-            ..Config::default()
-        };
-        let mut term = Term::new(config, &Size { columns, rows }, VoidListener);
-        let mut processor: Processor = Processor::new();
-        processor.advance(&mut term, &source.ansi);
+        let mut term = build_term(&Size { columns, rows }, &source.ansi);
         // Reflow can leave content the cursor scrolled past in history; show the
         // build from its first line, leaving the rest to scrollback.
         term.scroll_display(Scroll::Top);

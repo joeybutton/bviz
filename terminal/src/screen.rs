@@ -5,13 +5,12 @@
 //! emulator at the width Bazel used resolves those sequences into a flat
 //! character grid: the build output as it finally appeared.
 
-use alacritty_terminal::event::VoidListener;
 use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::index::{Column, Line};
 use alacritty_terminal::term::cell::{Cell, Flags};
-use alacritty_terminal::term::{Config, Term};
-use alacritty_terminal::vte::ansi::{Color, NamedColor, Processor, Rgb};
+use alacritty_terminal::vte::ansi::{Color, NamedColor, Rgb};
 
+use crate::build_term;
 use crate::output::BuildOutput;
 
 /// Rows in the internal emulator. The build event stream carries the terminal
@@ -20,9 +19,6 @@ use crate::output::BuildOutput;
 /// reproduces the output; this is generously larger. Content above the screen
 /// scrolls into history and is preserved by `scrolling_history`.
 const INTERNAL_ROWS: usize = 100;
-
-/// History depth; large enough to retain every line of a build's output.
-const SCROLLBACK: usize = 100_000;
 
 /// The final terminal state: rows from the top of scrollback history down to the
 /// last non-blank screen line, each `columns` cells wide. Cells are
@@ -63,13 +59,7 @@ impl Screen {
     /// playback frame is such a prefix.
     pub(crate) fn from_bytes(bytes: &[u8], columns: u16) -> Screen {
         let columns = columns as usize;
-        let config = Config {
-            scrolling_history: SCROLLBACK,
-            ..Config::default()
-        };
-        let mut term = Term::new(config, &Size { columns }, VoidListener);
-        let mut processor: Processor = Processor::new();
-        processor.advance(&mut term, &lf_to_crlf(bytes));
+        let term = build_term(&Size { columns }, &lf_to_crlf(bytes));
 
         let grid = term.grid();
         let mut rows: Vec<Vec<Cell>> = (grid.topmost_line().0..=grid.bottommost_line().0)
