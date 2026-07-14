@@ -28,9 +28,7 @@ pub fn transitive_reduction(graph: &Graph) -> Graph {
 
 /// Transitive reduction of a DAG: the redundant pairs are those whose target is
 /// reachable from another of the source's successors. `None` if a cycle is found
-/// (no topological order), so the caller can fall back. Reachability is held in
-/// per-node bitsets over a compact node index, built in reverse topological order
-/// so a node's successors are already resolved.
+/// (no topological order), so the caller can fall back.
 fn dag_reduction(graph: &Graph) -> Option<Graph> {
     let mut index: HashMap<Id, u32> = HashMap::with_capacity(graph.nodes.len());
     for node in &graph.nodes {
@@ -51,7 +49,24 @@ fn dag_reduction(graph: &Graph) -> Option<Graph> {
         indeg[v as usize] += 1;
     }
 
-    // Kahn's algorithm; a leftover node means a cycle.
+    let order = topo_order(&succ, indeg)?;
+    let redundant = redundant_pairs(&order, &succ);
+
+    let mut out = graph.clone();
+    out.edges.retain(|e| {
+        e.from == e.to
+            || match (index.get(&e.from), index.get(&e.to)) {
+                (Some(&u), Some(&v)) => !redundant.contains(&(u, v)),
+                _ => true,
+            }
+    });
+    Some(out)
+}
+
+/// Kahn's algorithm over the successor adjacency; `None` when a leftover node
+/// betrays a cycle. Consumes `indeg`, decrementing it as nodes are emitted.
+fn topo_order(succ: &[Vec<u32>], mut indeg: Vec<u32>) -> Option<Vec<u32>> {
+    let n = succ.len();
     let mut order: Vec<u32> = Vec::with_capacity(n);
     let mut ready: Vec<u32> = (0..n as u32).filter(|&i| indeg[i as usize] == 0).collect();
     while let Some(u) = ready.pop() {
@@ -63,10 +78,14 @@ fn dag_reduction(graph: &Graph) -> Option<Graph> {
             }
         }
     }
-    if order.len() != n {
-        return None;
-    }
+    (order.len() == n).then_some(order)
+}
 
+/// The `(u, v)` pairs whose direct edge a longer path already implies.
+/// Reachability is held in per-node bitsets over the compact node index, filled
+/// in reverse topological `order` so a node's successors are already resolved.
+fn redundant_pairs(order: &[u32], succ: &[Vec<u32>]) -> HashSet<(u32, u32)> {
+    let n = succ.len();
     let words = n.div_ceil(64);
     let mut reach = vec![0u64; n * words]; // reach[u]: every node reachable from u
     let mut redundant: HashSet<(u32, u32)> = HashSet::new();
@@ -92,16 +111,7 @@ fn dag_reduction(graph: &Graph) -> Option<Graph> {
             reach[ub + w as usize / 64] |= 1u64 << (w % 64);
         }
     }
-
-    let mut out = graph.clone();
-    out.edges.retain(|e| {
-        e.from == e.to
-            || match (index.get(&e.from), index.get(&e.to)) {
-                (Some(&u), Some(&v)) => !redundant.contains(&(u, v)),
-                _ => true,
-            }
-    });
-    Some(out)
+    redundant
 }
 
 /// Cycle-tolerant reduction: drop a pair only while its endpoints stay linked
