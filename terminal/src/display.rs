@@ -207,6 +207,19 @@ impl Terminal {
         )
     }
 
+    /// Grid line for a content line (counted from the top of the scrollback),
+    /// clamped into the grid. Inverse of [`grid_to_content_line`](Self::grid_to_content_line).
+    fn content_to_grid_line(&self, content_line: i32) -> Line {
+        let grid = self.term.grid();
+        let (top, bottom) = (grid.topmost_line().0, grid.bottommost_line().0);
+        Line((content_line - self.history_size() as i32).clamp(top, bottom))
+    }
+
+    /// Content line, counted from the top of the scrollback, for a grid line.
+    fn grid_to_content_line(&self, line: Line) -> i32 {
+        line.0 + self.history_size() as i32
+    }
+
     /// Begin a selection of the given type anchored at a viewport cell.
     pub fn begin_selection(&mut self, ty: SelectionType, column: usize, row: usize, side: Side) {
         let point = self.grid_point(column, row);
@@ -234,7 +247,7 @@ impl Terminal {
             .selection
             .as_ref()
             .and_then(|selection| selection.to_range(&self.term))?;
-        let from_top = |point: Point| (point.line.0 + self.history_size() as i32, point.column.0);
+        let from_top = |point: Point| (self.grid_to_content_line(point.line), point.column.0);
         Some(SelectionSpan {
             start: from_top(range.start),
             end: from_top(range.end),
@@ -249,10 +262,8 @@ impl Terminal {
     pub fn drag_select(&mut self, anchor: (i32, usize, Side), end: (usize, usize, Side)) {
         let (anchor_line, anchor_column, anchor_side) = anchor;
         let (end_column, end_row, end_side) = end;
-        let grid = self.term.grid();
-        let (top, bottom) = (grid.topmost_line().0, grid.bottommost_line().0);
         let anchor_point = Point::new(
-            Line((anchor_line - self.history_size() as i32).clamp(top, bottom)),
+            self.content_to_grid_line(anchor_line),
             Column(anchor_column.min(self.columns.saturating_sub(1))),
         );
         let mut selection = Selection::new(SelectionType::Simple, anchor_point, anchor_side);
@@ -265,13 +276,10 @@ impl Terminal {
     /// selection across a playback frame change. Re-created as a simple range,
     /// which reproduces the selected cells for the selection kinds made here.
     pub fn restore_selection(&mut self, span: SelectionSpan) {
-        let history = self.history_size() as i32;
-        let grid = self.term.grid();
-        let (top, bottom) = (grid.topmost_line().0, grid.bottommost_line().0);
         let last_column = self.columns.saturating_sub(1);
         let to_point = |(from_top, column): (i32, usize)| {
             Point::new(
-                Line((from_top - history).clamp(top, bottom)),
+                self.content_to_grid_line(from_top),
                 Column(column.min(last_column)),
             )
         };
