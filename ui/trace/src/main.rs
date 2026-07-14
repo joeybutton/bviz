@@ -16,7 +16,7 @@ use bviz_ui_components::{Axis, Scrollbar, TextInput, load_in_background, track_d
 use bviz_ui_shell::Chrome;
 use clap::Parser;
 use gpui::{
-    AnyElement, Animation, AnimationExt, App, BorderStyle, Bounds, ContentMask, Context, Div, Edges,
+    AnyElement, Animation, AnimationExt, App, BorderStyle, Bounds, ContentMask, Context, Div,
     Entity, FocusHandle, Hsla, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent,
     MouseUpEvent, PathBuilder, Pixels, Point, Render, Rgba, ScrollDelta, ScrollWheelEvent,
     ScrollHandle, SharedString, Stateful, Subscription, Task, TextAlign, Transformation,
@@ -3629,7 +3629,7 @@ fn paint_gutter_label(
     window: &mut Window,
     cx: &mut App,
 ) {
-    let line = shape_truncated(name, avail, font.clone(), fs, palette.label.into(), window);
+    let line = bviz_ui_components::shape_truncated(name, avail, font.clone(), fs, palette.label.into(), window);
     let _ = line.paint(
         point(px(gutter_left + SLICE_TEXT_PAD), px(ty)),
         fs,
@@ -3732,7 +3732,7 @@ fn paint_group_bands(
         let ty = top + (GROUP_BAND_HEIGHT - GUTTER_LABEL_SIZE) / 2.0;
         // Keep the label clear of the icon when one is drawn.
         let label_avail = if show_icon { avail - GROUP_ICON - SLICE_TEXT_PAD } else { avail };
-        let line = shape_truncated(&text, label_avail, font.clone(), fs, strong, window);
+        let line = bviz_ui_components::shape_truncated(&text, label_avail, font.clone(), fs, strong, window);
         let _ = line.paint(
             point(px(gutter_left + SLICE_TEXT_PAD), px(ty)),
             fs,
@@ -3788,80 +3788,6 @@ fn paint_counter_labels(
     }
 }
 
-/// Shapes `text` at `fs`, truncating with an ellipsis to fit `avail` pixels by
-/// the same proportional estimate slices and gutter labels share.
-fn shape_truncated(
-    text: &str,
-    avail: f32,
-    font: gpui::Font,
-    fs: Pixels,
-    color: Hsla,
-    window: &mut Window,
-) -> gpui::ShapedLine {
-    let line = bviz_ui_assets::shape_line(window, text.to_string(), font.clone(), fs, color);
-    if f32::from(line.width()) <= avail {
-        return line;
-    }
-    // The proportional estimate can overshoot in a variable-width font, leaving
-    // the ellipsized line wider than the box, so drop characters until it fits.
-    let chars: Vec<char> = text.chars().collect();
-    let mut keep = ((chars.len() as f32 * avail / f32::from(line.width())).floor() as usize)
-        .min(chars.len())
-        .saturating_sub(1);
-    loop {
-        let mut truncated: String = chars[..keep].iter().collect();
-        truncated.push('…');
-        let shaped = bviz_ui_assets::shape_line(window, truncated, font.clone(), fs, color);
-        if keep == 0 || f32::from(shaped.width()) <= avail {
-            return shaped;
-        }
-        keep -= 1;
-    }
-}
-
-/// Paints a filled box and, if it is wide enough, its name truncated to fit and
-/// centered vertically — the shared shape behind a flame-chart slice and a
-/// flame-graph node.
-fn paint_labeled_box(
-    rect: Bounds<Pixels>,
-    fill: Hsla,
-    name: &str,
-    palette: &Palette,
-    window: &mut Window,
-    cx: &mut App,
-) {
-    let w = f32::from(rect.size.width);
-    let h = f32::from(rect.size.height);
-    // Square corners: every column paints the box's full height, so a run of
-    // thin boxes reads as an even band rather than rounded humps that dip in
-    // height between them. A box wide enough to spare its first column carries a
-    // muted left-edge seam to divide it from its neighbor; a narrower one keeps
-    // its whole fill so it still reads as its color rather than an edge line.
-    let (border, seam) = if w > SLICE_SEAM_MIN_PX {
-        let seam = Hsla::from(bviz_ui_theme::mix(Rgba::from(fill), palette.background, SLICE_SEAM_MIX));
-        (Edges { left: px(1.), ..Default::default() }, seam)
-    } else {
-        (Edges::default(), fill)
-    };
-    window.paint_quad(quad(rect, px(0.), fill, border, seam, BorderStyle::Solid));
-    if w < LABEL_MIN_PX {
-        return;
-    }
-    let avail = w - 2. * SLICE_TEXT_PAD;
-    let font = bviz_ui_assets::text_metrics(window).font;
-    let fs = px(h - 2. * SLICE_TEXT_PAD);
-    let line = shape_truncated(name, avail, font, fs, label_on(fill), window);
-    let ty = rect.origin.y + px((h - f32::from(fs)) / 2.);
-    let _ = line.paint(
-        point(rect.origin.x + px(SLICE_TEXT_PAD), ty),
-        fs,
-        TextAlign::Left,
-        None,
-        window,
-        cx,
-    );
-}
-
 /// Paints a slice quad and, if wide enough, its truncated name.
 #[allow(clippy::too_many_arguments)]
 fn paint_slice(
@@ -3878,7 +3804,19 @@ fn paint_slice(
 ) {
     let rect = Bounds::new(point(px(content_left + x), px(y)), size(px(w), px(h)));
     let fill = bviz_ui_theme::span_role_color(slice.role, palette.background);
-    paint_labeled_box(rect, fill, profile.str(slice.name), palette, window, cx);
+    bviz_ui_components::paint_labeled_box(
+        rect,
+        fill,
+        profile.str(slice.name),
+        label_on(fill),
+        palette.background,
+        SLICE_SEAM_MIN_PX,
+        SLICE_SEAM_MIX,
+        LABEL_MIN_PX,
+        SLICE_TEXT_PAD,
+        window,
+        cx,
+    );
 }
 
 /// Paints the aggregated flame graph filling the body: each box a work-class-colored
@@ -3926,7 +3864,19 @@ fn paint_flame_graph(
             }
             let rect = Bounds::new(point(px(left + b.x), px(y)), size(px(b.w), px(b.h)));
             let fill = bviz_ui_theme::span_role_color(b.role, palette.background);
-            paint_labeled_box(rect, fill, graph.str(b.name), palette, window, cx);
+            bviz_ui_components::paint_labeled_box(
+                rect,
+                fill,
+                graph.str(b.name),
+                label_on(fill),
+                palette.background,
+                SLICE_SEAM_MIN_PX,
+                SLICE_SEAM_MIX,
+                LABEL_MIN_PX,
+                SLICE_TEXT_PAD,
+                window,
+                cx,
+            );
         }
     });
 
