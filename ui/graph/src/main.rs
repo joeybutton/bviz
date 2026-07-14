@@ -1273,9 +1273,8 @@ fn to_screen(x: f64, y: f64, bounds: Bounds<Pixels>, zoom: f32, pan: (f32, f32))
     )
 }
 
-/// Paints a box's quad and its centered label. A container's label sits in its
-/// top band; a leaf's label is centered in the whole box. Off-screen boxes are
-/// culled.
+/// Paints a box: its filled quad, an emphasis border and glow when highlighted,
+/// and its centered label. Off-screen boxes are culled.
 fn paint_box(
     b: &PaintBox,
     bounds: Bounds<Pixels>,
@@ -1297,47 +1296,71 @@ fn paint_box(
     } else {
         b.fill
     };
-    let label_color = if b.dim {
-        bviz_ui_theme::mix(palette.label, palette.background, DIM_FADE)
-    } else {
-        palette.label
-    };
+    let ((border_w, border_c), glow) = box_emphasis(b, zoom, palette, rect, corner);
+    window.paint_quad(quad(rect, corner, fill, border_w, border_c, BorderStyle::Solid));
+    glow(window);
+    paint_box_label(b, rect, zoom, palette, window, cx);
+}
+
+/// A box's emphasis: the quad border to stroke, and a deferred paint of the glow
+/// wash. The border fades from the themed border to the amber accent, and from a
+/// normal to a thick stroke, by the highlight alpha; a dim box uses a faded
+/// themed border. The returned closure paints a faint accent wash over the fill
+/// so the emphasis reads as a glow, not just a brighter outline.
+fn box_emphasis(
+    b: &PaintBox,
+    zoom: f32,
+    palette: &Palette,
+    rect: Bounds<Pixels>,
+    corner: Pixels,
+) -> ((Pixels, Hsla), impl FnOnce(&mut Window)) {
     let (border_w, border_c) = if b.highlight > 0.0 {
-        // Fade from the themed border to the amber accent, and from a normal to a
-        // thick stroke, by the highlight alpha.
         let normal = px(1.);
         let thick = px((2. * zoom).max(2.));
         let mut accent = HIGHLIGHT_ACCENT;
         accent.a = b.highlight;
-        (
-            normal + (thick - normal) * b.highlight,
-            Hsla::from(accent),
-        )
+        (normal + (thick - normal) * b.highlight, Hsla::from(accent))
     } else if b.dim {
         (px(1.), Hsla::from(bviz_ui_theme::mix(palette.border, palette.background, DIM_FADE)))
     } else {
         (px(1.), Hsla::from(palette.border))
     };
-    window.paint_quad(quad(rect, corner, fill, border_w, border_c, BorderStyle::Solid));
-    if b.highlight > 0.0 {
-        // A faint accent wash over the fill so the emphasis reads as a glow, not
-        // just a brighter outline.
-        let mut wash = HIGHLIGHT_ACCENT;
-        wash.a = 0.15 * b.highlight;
-        window.paint_quad(quad(
-            rect,
-            corner,
-            wash,
-            px(0.),
-            Hsla::transparent_black(),
-            BorderStyle::Solid,
-        ));
-    }
+    let highlight = b.highlight;
+    let glow = move |window: &mut Window| {
+        if highlight > 0.0 {
+            let mut wash = HIGHLIGHT_ACCENT;
+            wash.a = 0.15 * highlight;
+            window.paint_quad(quad(
+                rect,
+                corner,
+                wash,
+                px(0.),
+                Hsla::transparent_black(),
+                BorderStyle::Solid,
+            ));
+        }
+    };
+    ((border_w, border_c), glow)
+}
 
-    // The label font comes from the window's inherited UI text style (the same
-    // one the chrome and the other views use), so the views stay visually
-    // coherent; a container's title is bold. The size is the layout's own, kept
-    // in step with the width the layout reserved for the label.
+/// Paints a box's centered label, with a disclosure caret for a collapsed group
+/// leaf. A container's title sits in its top band; other labels center in the
+/// whole box. The font is the window's inherited UI text style so the views stay
+/// visually coherent; a container's title is bold, and its size is the layout's
+/// own, kept in step with the width the layout reserved for the label.
+fn paint_box_label(
+    b: &PaintBox,
+    rect: Bounds<Pixels>,
+    zoom: f32,
+    palette: &Palette,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let label_color = if b.dim {
+        bviz_ui_theme::mix(palette.label, palette.background, DIM_FADE)
+    } else {
+        palette.label
+    };
     let base = bviz_ui_assets::text_metrics(window).font;
     let font = if b.compound { base.bold() } else { base };
     let fs = px(LABEL_SIZE as f32 * zoom);
