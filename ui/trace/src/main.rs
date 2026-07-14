@@ -1814,37 +1814,17 @@ impl TraceView {
             .track_scroll(&self.menu_scroll)
             .children(rows);
         let menu_scroll = self.menu_scroll.clone();
-        let menu_bar = self.menu_bar.clone();
-        let entity = cx.entity();
-        let dragging = matches!(self.drag, Drag::MenuThumb(_));
-        let (track, thumb) = (palette.scroll_track, palette.scroll_thumb);
-        let bar = canvas(
-            move |_, _, _| {},
-            move |bounds, _, window: &mut Window, _| {
+        let bar = scrollbar_canvas(
+            self.menu_bar.clone(),
+            cx.entity(),
+            matches!(self.drag, Drag::MenuThumb(_)),
+            palette.scroll_track,
+            palette.scroll_thumb,
+            move |bounds| {
                 let visible = f32::from(bounds.size.height);
                 let content = visible + f32::from(menu_scroll.max_offset().y);
                 let offset = -f32::from(menu_scroll.offset().y);
-                let layout = Scrollbar::new(
-                    Axis::Vertical,
-                    Bounds::new(
-                        point(
-                            bounds.origin.x + bounds.size.width - px(BAR_WIDTH),
-                            bounds.origin.y,
-                        ),
-                        size(px(BAR_WIDTH), bounds.size.height),
-                    ),
-                    content,
-                    visible,
-                    offset,
-                    MIN_THUMB,
-                );
-                if let Some(bar) = layout {
-                    bar.paint(track, thumb, window);
-                }
-                menu_bar.set(layout);
-                if dragging {
-                    track_drag(window, &entity, on_drag, end_drag);
-                }
+                (content, visible, offset)
             },
         );
         div()
@@ -1853,7 +1833,7 @@ impl TraceView {
             .flex()
             .min_h_0()
             .child(list)
-            .child(bar.absolute().inset_0())
+            .child(bar)
     }
 
     /// A backdrop the size of the viewport, behind the menu, closing it on an
@@ -2504,40 +2484,18 @@ impl TraceView {
         )
         .track_scroll(&self.stats_scroll);
 
-        // A scroll bar painted over the body's right edge: a canvas reads the
-        // list's scroll offset and content/visible extents to place the thumb,
-        // stashes the geometry for hit-testing, and re-installs the drag handlers
-        // each frame while a thumb drag is in progress.
         let scroll = self.stats_scroll.clone();
-        let stats_bar = self.stats_bar.clone();
-        let entity = cx.entity();
-        let dragging = matches!(self.drag, Drag::StatsThumb(_));
-        let track = palette.scroll_track;
-        let thumb = palette.scroll_thumb;
-        let bar = canvas(
-            move |_, _, _| {},
-            move |bounds, _, window: &mut Window, _| {
+        let bar = scrollbar_canvas(
+            self.stats_bar.clone(),
+            cx.entity(),
+            matches!(self.drag, Drag::StatsThumb(_)),
+            palette.scroll_track,
+            palette.scroll_thumb,
+            move |bounds| {
                 let content = row_count as f32 * STATS_ROW_HEIGHT;
                 let visible = f32::from(bounds.size.height);
                 let offset = -f32::from(scroll.0.borrow().base_handle.offset().y);
-                let layout = Scrollbar::new(
-                    Axis::Vertical,
-                    Bounds::new(
-                        point(bounds.origin.x + bounds.size.width - px(BAR_WIDTH), bounds.origin.y),
-                        size(px(BAR_WIDTH), bounds.size.height),
-                    ),
-                    content,
-                    visible,
-                    offset,
-                    MIN_THUMB,
-                );
-                if let Some(bar) = layout {
-                    bar.paint(track, thumb, window);
-                }
-                stats_bar.set(layout);
-                if dragging {
-                    track_drag(window, &entity, on_drag, end_drag);
-                }
+                (content, visible, offset)
             },
         );
 
@@ -2547,7 +2505,7 @@ impl TraceView {
                 .flex_1()
                 .w_full()
                 .child(body.size_full())
-                .child(bar.absolute().inset_0()),
+                .child(bar),
         )
     }
 
@@ -3206,6 +3164,46 @@ fn on_drag(view: &mut TraceView, event: &MouseMoveEvent, cx: &mut Context<TraceV
 fn end_drag(view: &mut TraceView, _: &MouseUpEvent, cx: &mut Context<TraceView>) {
     view.drag = Drag::None;
     cx.notify();
+}
+
+/// A vertical scroll bar painted over the right edge of a scrollable body. Each
+/// frame the canvas reads `extents` (content extent, visible extent, scroll
+/// offset) to place the thumb, paints it, stashes the geometry in `bar` for
+/// hit-testing, and re-installs the drag handlers while `dragging`.
+fn scrollbar_canvas(
+    bar: Rc<Cell<Option<Scrollbar>>>,
+    entity: Entity<TraceView>,
+    dragging: bool,
+    track: Rgba,
+    thumb: Rgba,
+    extents: impl Fn(Bounds<Pixels>) -> (f32, f32, f32) + 'static,
+) -> impl IntoElement {
+    canvas(
+        move |_, _, _| {},
+        move |bounds, _, window: &mut Window, _| {
+            let (content, visible, offset) = extents(bounds);
+            let layout = Scrollbar::new(
+                Axis::Vertical,
+                Bounds::new(
+                    point(bounds.origin.x + bounds.size.width - px(BAR_WIDTH), bounds.origin.y),
+                    size(px(BAR_WIDTH), bounds.size.height),
+                ),
+                content,
+                visible,
+                offset,
+                MIN_THUMB,
+            );
+            if let Some(painted) = layout {
+                painted.paint(track, thumb, window);
+            }
+            bar.set(layout);
+            if dragging {
+                track_drag(window, &entity, on_drag, end_drag);
+            }
+        },
+    )
+    .absolute()
+    .inset_0()
 }
 
 /// Maps the flame chart's lane vertical thumb drag back to a scroll offset.
