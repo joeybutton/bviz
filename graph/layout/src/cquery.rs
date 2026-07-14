@@ -65,32 +65,69 @@ pub(crate) fn build_with_packages(
     packages: &BTreeSet<(String, String)>,
     names: &mut Names,
 ) -> Graph {
-    let config_mnemonic: HashMap<u32, String> = results
+    let config_mnemonic = config_mnemonics(results);
+    let config_checksum = config_checksums(results);
+    let cts: Vec<&ConfiguredTarget> = results.iter().flat_map(|r| r.results.iter()).collect();
+
+    let mut graph = Graph::new();
+    let index = build_nodes(
+        &cts,
+        packages,
+        &config_mnemonic,
+        &config_checksum,
+        &mut graph,
+        names,
+    );
+    wire_edges(&cts, &index, &config_checksum, &mut graph, names);
+    graph
+}
+
+/// Each configuration's mnemonic, dropping the empty ones so a target in such a
+/// configuration falls back to its id.
+fn config_mnemonics(results: &[CqueryResult]) -> HashMap<u32, String> {
+    results
         .iter()
         .flat_map(|r| r.configurations.iter())
         .filter(|c| !c.mnemonic.is_empty())
         .map(|c| (c.id, c.mnemonic.clone()))
-        .collect();
-    let config_checksum: HashMap<u32, String> = results
+        .collect()
+}
+
+/// Each configuration's checksum, the stable part of a configured target's key.
+fn config_checksums(results: &[CqueryResult]) -> HashMap<u32, String> {
+    results
         .iter()
         .flat_map(|r| r.configurations.iter())
         .map(|c| (c.id, c.checksum.clone()))
-        .collect();
-    let cts: Vec<&ConfiguredTarget> = results.iter().flat_map(|r| r.results.iter()).collect();
+        .collect()
+}
 
-    let mut graph = Graph::new();
-    // Rule label -> its target container id.
+/// The node id maps pass 1 builds for pass 2 to resolve dependency edges against.
+struct NodeIndex {
+    /// Rule label -> its target container id.
+    target_box: HashMap<String, Id>,
+    /// Non-rule leaf label -> its node id.
+    leaf_id: HashMap<String, Id>,
+    /// The (label, configuration key) pairs that have a configured-target node.
+    ct_ids: HashSet<(String, String)>,
+}
+
+/// Pass 1: a rule becomes a target container plus a configured-target leaf per
+/// configuration; any other target becomes one leaf per label.
+fn build_nodes(
+    cts: &[&ConfiguredTarget],
+    packages: &BTreeSet<(String, String)>,
+    config_mnemonic: &HashMap<u32, String>,
+    config_checksum: &HashMap<u32, String>,
+    graph: &mut Graph,
+    names: &mut Names,
+) -> NodeIndex {
+    let hierarchy = PackageHierarchy::build(packages, graph, names);
     let mut target_box: HashMap<String, Id> = HashMap::new();
-    // Non-rule leaf label -> its node id.
     let mut leaf_id: HashMap<String, Id> = HashMap::new();
-    // The (label, configuration key) pairs that have a configured-target node.
     let mut ct_ids: HashSet<(String, String)> = HashSet::new();
 
-    let hierarchy = PackageHierarchy::build(packages, &mut graph, names);
-
-    // Pass 1: a rule becomes a target container plus a configured-target leaf
-    // per configuration; any other target becomes one leaf per label.
-    for ct in &cts {
+    for ct in cts {
         let Some(target) = ct.target.as_ref() else {
             continue;
         };
@@ -130,10 +167,23 @@ pub(crate) fn build_with_packages(
         }
     }
 
-    // Pass 2: an edge from each dependency to the configured target that
-    // consumes it.
+    NodeIndex {
+        target_box,
+        leaf_id,
+        ct_ids,
+    }
+}
+
+/// Pass 2: an edge from each dependency to the configured target that consumes it.
+fn wire_edges(
+    cts: &[&ConfiguredTarget],
+    index: &NodeIndex,
+    config_checksum: &HashMap<u32, String>,
+    graph: &mut Graph,
+    names: &mut Names,
+) {
     let mut seen_edge: HashSet<(Id, Id)> = HashSet::new();
-    for ct in &cts {
+    for ct in cts {
         let Some(target) = ct.target.as_ref() else {
             continue;
         };
@@ -152,8 +202,8 @@ pub(crate) fn build_with_packages(
         ));
         if rule.configured_rule_input.is_empty() {
             for dep_label in &rule.rule_input {
-                if let Some(dep) = resolve_label_dep(dep_label, &target_box, &leaf_id) {
-                    add_edge(&mut graph, &mut seen_edge, dep, consumer);
+                if let Some(dep) = resolve_label_dep(dep_label, &index.target_box, &index.leaf_id) {
+                    add_edge(graph, &mut seen_edge, dep, consumer);
                 }
             }
         } else {
@@ -164,19 +214,17 @@ pub(crate) fn build_with_packages(
                 if let Some(dep) = resolve_configured_dep(
                     dep_label,
                     input.configuration_id,
-                    &config_checksum,
-                    &ct_ids,
-                    &target_box,
-                    &leaf_id,
+                    config_checksum,
+                    &index.ct_ids,
+                    &index.target_box,
+                    &index.leaf_id,
                     names,
                 ) {
-                    add_edge(&mut graph, &mut seen_edge, dep, consumer);
+                    add_edge(graph, &mut seen_edge, dep, consumer);
                 }
             }
         }
     }
-
-    graph
 }
 
 /// The node a configuration-resolved dependency lands on: the dependency's
