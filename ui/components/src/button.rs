@@ -1,6 +1,6 @@
 use gpui::{
-    App, ClickEvent, ElementId, FocusHandle, IntoElement, KeyDownEvent, KeyUpEvent, RenderOnce,
-    SharedString, Window, div, prelude::*, px,
+    App, ClickEvent, Div, ElementId, Entity, FocusHandle, IntoElement, KeyDownEvent, KeyUpEvent,
+    RenderOnce, SharedString, Stateful, Window, div, prelude::*, px,
 };
 
 /// Whether a key activates a focused button (enter or space).
@@ -57,6 +57,76 @@ impl Button {
     }
 }
 
+/// Ghost buttons read as flat text; filled ones have a solid fill and a border that
+/// brightens on focus. `focused` drives the filled border; `has_label` sizes a ghost
+/// to its text rather than as a square icon hit target.
+fn styled_variant(
+    el: Stateful<Div>,
+    ghost: bool,
+    has_label: bool,
+    focused: bool,
+    colors: &bviz_ui_theme::Colors,
+) -> Stateful<Div> {
+    if ghost {
+        let hover_bg = colors.selected;
+        let el = if has_label {
+            el.px_4().py_2()
+        } else {
+            el.size(px(28.))
+        };
+        el.rounded_md()
+            .text_color(colors.text)
+            .hover(move |s| s.bg(hover_bg))
+            .active(|s| s.opacity(0.6))
+    } else {
+        el.px_4()
+            .py_2()
+            .rounded_md()
+            .bg(colors.selected)
+            .text_color(colors.selected_text)
+            .border_2()
+            .border_color(if focused { colors.text } else { colors.selected })
+            .hover(|s| s.opacity(0.92))
+            .active(|s| s.opacity(0.8))
+    }
+}
+
+/// Wire enter/space to drive the persisted `pressed` state so a keyboard-held button
+/// shows the same press as the mouse. A button without a focus handle is unfocusable
+/// and gets no key handlers.
+fn with_held_state_handlers(
+    el: Stateful<Div>,
+    focus_handle: Option<&FocusHandle>,
+    pressed: Entity<bool>,
+) -> Stateful<Div> {
+    let Some(handle) = focus_handle else {
+        return el;
+    };
+    el.track_focus(handle)
+        .on_key_down({
+            let pressed = pressed.clone();
+            move |e: &KeyDownEvent, _, cx| {
+                if is_activate(&e.keystroke.key) {
+                    pressed.update(cx, |p, cx| {
+                        *p = true;
+                        cx.notify();
+                    });
+                }
+            }
+        })
+        .on_key_up({
+            let pressed = pressed.clone();
+            move |e: &KeyUpEvent, _, cx| {
+                if is_activate(&e.keystroke.key) {
+                    pressed.update(cx, |p, cx| {
+                        *p = false;
+                        cx.notify();
+                    });
+                }
+            }
+        })
+}
+
 impl RenderOnce for Button {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let colors = bviz_ui_theme::colors(window);
@@ -69,8 +139,7 @@ impl RenderOnce for Button {
         let pressed = window.use_keyed_state(self.id.clone(), cx, |_, _| false);
         let is_pressed = *pressed.read(cx);
 
-        let hover_bg = colors.selected;
-        let mut el = div()
+        let el = div()
             .id(self.id.clone())
             .flex()
             .flex_row()
@@ -81,56 +150,8 @@ impl RenderOnce for Button {
             .on_click(self.on_click)
             .when(is_pressed, |el| el.opacity(0.8));
 
-        if let Some(handle) = self.focus_handle.as_ref() {
-            el = el
-                .track_focus(handle)
-                .on_key_down({
-                    let pressed = pressed.clone();
-                    move |e: &KeyDownEvent, _, cx| {
-                        if is_activate(&e.keystroke.key) {
-                            pressed.update(cx, |p, cx| {
-                                *p = true;
-                                cx.notify();
-                            });
-                        }
-                    }
-                })
-                .on_key_up({
-                    let pressed = pressed.clone();
-                    move |e: &KeyUpEvent, _, cx| {
-                        if is_activate(&e.keystroke.key) {
-                            pressed.update(cx, |p, cx| {
-                                *p = false;
-                                cx.notify();
-                            });
-                        }
-                    }
-                });
-        }
-
-        let el = if self.ghost {
-            // An icon-only ghost is a square hit target; a labeled one is padded
-            // to its text like the filled variant so the label isn't clipped.
-            let el = if self.label.is_some() {
-                el.px_4().py_2()
-            } else {
-                el.size(px(28.))
-            };
-            el.rounded_md()
-                .text_color(colors.text)
-                .hover(move |s| s.bg(hover_bg))
-                .active(|s| s.opacity(0.6))
-        } else {
-            el.px_4()
-                .py_2()
-                .rounded_md()
-                .bg(colors.selected)
-                .text_color(colors.selected_text)
-                .border_2()
-                .border_color(if focused { colors.text } else { colors.selected })
-                .hover(|s| s.opacity(0.92))
-                .active(|s| s.opacity(0.8))
-        };
+        let el = styled_variant(el, self.ghost, self.label.is_some(), focused, &colors);
+        let el = with_held_state_handlers(el, self.focus_handle.as_ref(), pressed);
 
         let el = match self.label {
             Some(label) => el.child(label),
