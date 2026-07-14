@@ -1425,6 +1425,57 @@ impl TerminalElement {
         }
         overlays
     }
+
+    /// While dragging the thumb, follow and end the drag with window-global
+    /// handlers so it keeps working when the cursor leaves the window.
+    fn install_thumb_drag(&self, window: &mut Window, cx: &App) {
+        if self.view.read(cx).drag_grab.is_some() {
+            track_drag(
+                window,
+                &self.view,
+                |view, event, cx| view.drag_to(event.position, cx),
+                |view, _, cx| {
+                    if view.drag_grab.take().is_some() {
+                        // Keep the bar up briefly after the drag, then hide.
+                        view.reveal_scrollbar(cx);
+                    }
+                },
+            );
+        }
+    }
+
+    /// Follow and end a text-selection drag with window-global handlers, so
+    /// dragging past the window edge keeps extending the selection and a release
+    /// outside still ends it.
+    fn install_selection_drag(&self, window: &mut Window, cx: &App) {
+        if self.view.read(cx).selecting {
+            track_drag(
+                window,
+                &self.view,
+                |view, event, cx| view.selection_drag_to(event.position, cx),
+                |view, _, cx| {
+                    if view.selecting {
+                        view.selecting = false;
+                        view.selection_drag = None;
+                        view.selection_anchor = None;
+                        // A press that did not drag (no selection text) and
+                        // landed on a URL opens it.
+                        if let Some(url) = view.pressed_url.take() {
+                            let dragged = view
+                                .terminal
+                                .as_ref()
+                                .and_then(Terminal::selection_text)
+                                .is_some();
+                            if !dragged {
+                                cx.open_url(&url);
+                            }
+                        }
+                        cx.notify();
+                    }
+                },
+            );
+        }
+    }
 }
 
 impl Element for TerminalElement {
@@ -1563,52 +1614,8 @@ impl Element for TerminalElement {
             window.paint_quad(scrollbar);
         }
 
-        // While dragging the thumb, follow and end the drag with window-global
-        // handlers so it keeps working when the cursor leaves the window.
-        if self.view.read(cx).drag_grab.is_some() {
-            track_drag(
-                window,
-                &self.view,
-                |view, event, cx| view.drag_to(event.position, cx),
-                |view, _, cx| {
-                    if view.drag_grab.take().is_some() {
-                        // Keep the bar up briefly after the drag, then hide.
-                        view.reveal_scrollbar(cx);
-                    }
-                },
-            );
-        }
-
-        // Likewise follow and end a text-selection drag, so dragging past the
-        // window edge keeps extending the selection and a release outside still
-        // ends it.
-        if self.view.read(cx).selecting {
-            track_drag(
-                window,
-                &self.view,
-                |view, event, cx| view.selection_drag_to(event.position, cx),
-                |view, _, cx| {
-                    if view.selecting {
-                        view.selecting = false;
-                        view.selection_drag = None;
-                        view.selection_anchor = None;
-                        // A press that did not drag (no selection text) and
-                        // landed on a URL opens it.
-                        if let Some(url) = view.pressed_url.take() {
-                            let dragged = view
-                                .terminal
-                                .as_ref()
-                                .and_then(Terminal::selection_text)
-                                .is_some();
-                            if !dragged {
-                                cx.open_url(&url);
-                            }
-                        }
-                        cx.notify();
-                    }
-                },
-            );
-        }
+        self.install_thumb_drag(window, cx);
+        self.install_selection_drag(window, cx);
     }
 }
 
