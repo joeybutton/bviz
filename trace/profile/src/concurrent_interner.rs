@@ -11,7 +11,15 @@ use std::sync::RwLock;
 use crossbeam_utils::CachePadded;
 use hashbrown::HashTable;
 
-use crate::model::{intern_hash, Str};
+use crate::model::Str;
+
+/// Hashes an interner key. Non-cryptographic: the keys are short,
+/// non-adversarial profile strings interned tens of millions of times, where
+/// the default SipHash is the dominant lookup cost.
+fn intern_hash(s: &str) -> u64 {
+    use std::hash::BuildHasher;
+    rustc_hash::FxBuildHasher.hash_one(s)
+}
 
 /// Bytes handed out per page-cursor bump. Large enough that the atomic bump is
 /// rare — one per this many bytes of distinct text per worker — yet small

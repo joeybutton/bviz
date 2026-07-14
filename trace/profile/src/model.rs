@@ -573,14 +573,6 @@ pub(crate) struct ProfileParts {
     pub distinct_strings: usize,
 }
 
-/// Hashes an interner key. Non-cryptographic: the keys are short,
-/// non-adversarial profile strings interned tens of millions of times, where
-/// the default SipHash is the dominant lookup cost.
-pub(crate) fn intern_hash(s: &str) -> u64 {
-    use std::hash::BuildHasher;
-    rustc_hash::FxBuildHasher.hash_one(s)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
