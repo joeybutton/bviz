@@ -283,6 +283,45 @@ impl StatsOrder {
     }
 }
 
+/// Row display order for a non-default stats sort, as indices into `rows`.
+///
+/// Every comparison is integer-only: a row's key rank orders exactly as its key
+/// text does (byte-wise), so the Key column sorts by rank and every other column
+/// tie-breaks by rank — ties by key keep the order stable regardless of input
+/// order. Each row is decorated into one packed key — primary above the
+/// always-ascending rank above the row index (the index is never reached, ranks
+/// being distinct) — so no comparison chases a row pointer.
+fn sort_stats(rows: &[StatRow], column: StatsColumn, desc: bool) -> Vec<u32> {
+    // Bit offsets of the fields packed into each 128-bit sort key: primary in
+    // the high 64 bits, rank in the next 32, row index in the low 32.
+    const PRIMARY_SHIFT: u32 = 64;
+    const RANK_SHIFT: u32 = 32;
+    // Order-preserving bias from i64 to u64, so a signed value packs into the
+    // unsigned key.
+    let bias = |v: i64| (v as u64) ^ (1 << 63);
+    let primary = |r: &StatRow| match column {
+        StatsColumn::Key => r.rank as u64,
+        StatsColumn::Count => r.count as u64,
+        StatsColumn::Total | StatsColumn::Percent => bias(r.total_us),
+        StatsColumn::Avg => bias(r.avg_us()),
+        StatsColumn::Max => bias(r.max_us),
+    };
+    // A descending numeric sort inverts its primary; for the Key column the
+    // primary IS the tie-break key, whose descending header state shows
+    // ascending text.
+    let invert = if column == StatsColumn::Key { !desc } else { desc };
+    let mut keyed: Vec<u128> = rows
+        .iter()
+        .enumerate()
+        .map(|(i, r)| {
+            let p = if invert { !primary(r) } else { primary(r) };
+            ((p as u128) << PRIMARY_SHIFT) | ((r.rank as u128) << RANK_SHIFT) | i as u128
+        })
+        .collect();
+    keyed.sort_unstable();
+    keyed.into_iter().map(|k| k as u32).collect()
+}
+
 /// The flame graph's laid-out boxes together with the inputs that determine
 /// them, so a paint reuses them unless one changed. The retained
 /// `ScopeAggregate` both keeps the graph alive for the boxes' name handles and
@@ -2337,38 +2376,7 @@ impl TraceView {
         self._stats_order_task = load_in_background(
             cx,
             move || {
-                let stats = &aggregates.stats;
-                // Every comparison is integer-only: a row's key rank orders
-                // exactly as its key text does (byte-wise), so the Key column
-                // sorts by rank and every other column tie-breaks by rank —
-                // ties by key keep the order stable regardless of input order.
-                // Order-preserving bias from i64 to u64, so a signed value
-                // packs into the unsigned key.
-                let bias = |v: i64| (v as u64) ^ (1 << 63);
-                let primary = |r: &StatRow| match column {
-                    StatsColumn::Key => r.rank as u64,
-                    StatsColumn::Count => r.count as u64,
-                    StatsColumn::Total | StatsColumn::Percent => bias(r.total_us),
-                    StatsColumn::Avg => bias(r.avg_us()),
-                    StatsColumn::Max => bias(r.max_us),
-                };
-                // A descending numeric sort inverts its primary; for the Key
-                // column the primary IS the tie-break key, whose descending
-                // header state shows ascending text.
-                let invert = if column == StatsColumn::Key { !desc } else { desc };
-                // Decorate-sort on one packed key per row: primary above the
-                // always-ascending rank above the row index (never reached —
-                // ranks are distinct), so no comparison chases a row pointer.
-                let mut keyed: Vec<u128> = stats
-                    .iter()
-                    .enumerate()
-                    .map(|(i, r)| {
-                        let p = if invert { !primary(r) } else { primary(r) };
-                        ((p as u128) << 64) | ((r.rank as u128) << 32) | i as u128
-                    })
-                    .collect();
-                keyed.sort_unstable();
-                let order: Vec<u32> = keyed.into_iter().map(|k| k as u32).collect();
+                let order = sort_stats(&aggregates.stats, column, desc);
                 StatsOrder { aggregates, sorted: Some(order) }
             },
             move |view, stats_order, _cx| {
