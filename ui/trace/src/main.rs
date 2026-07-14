@@ -2944,25 +2944,36 @@ impl TraceView {
             .copied()
     }
 
-    /// Begins a flame-chart drag at `pos`: the lane vertical or time horizontal
-    /// scroll thumb/track if the press hit one (the thumb is grabbed where
-    /// pressed, a track click centers the thumb there), otherwise a pan.
-    fn press(&mut self, pos: Point<Pixels>) {
-        if let Some(bar) = self.vbar.get() {
-            if bar.track_hit(pos) {
-                let grab = bar.grab(pos);
-                self.drag = Drag::VThumb(grab);
-                scroll_thumb_to(self, pos, grab);
-                return;
-            }
+    /// If `pos` hits `bar`'s track, begins a thumb drag: the thumb is grabbed
+    /// where pressed (a track click centers it there), `drag` becomes the active
+    /// drag holding that grab offset, and `thumb_to` maps the press to the
+    /// target's scroll offset. Returns whether the press was consumed by the bar.
+    fn begin_thumb_drag(
+        &mut self,
+        pos: Point<Pixels>,
+        bar: Option<Scrollbar>,
+        drag: impl FnOnce(f32) -> Drag,
+        thumb_to: impl FnOnce(&mut Self, Point<Pixels>, f32),
+    ) -> bool {
+        let Some(bar) = bar else {
+            return false;
+        };
+        if !bar.track_hit(pos) {
+            return false;
         }
-        if let Some(bar) = self.hbar.get() {
-            if bar.track_hit(pos) {
-                let grab = bar.grab(pos);
-                self.drag = Drag::HThumb(grab);
-                pan_thumb_to(self, pos, grab);
-                return;
-            }
+        let grab = bar.grab(pos);
+        self.drag = drag(grab);
+        thumb_to(self, pos, grab);
+        true
+    }
+
+    /// Begins a flame-chart drag at `pos`: the lane vertical or time horizontal
+    /// scroll thumb/track if the press hit one, otherwise a pan.
+    fn press(&mut self, pos: Point<Pixels>) {
+        if self.begin_thumb_drag(pos, self.vbar.get(), Drag::VThumb, scroll_thumb_to)
+            || self.begin_thumb_drag(pos, self.hbar.get(), Drag::HThumb, pan_thumb_to)
+        {
+            return;
         }
         self.drag = Drag::Pan;
         self.last_mouse = pos;
@@ -2971,61 +2982,40 @@ impl TraceView {
     /// Begins a flame-graph panel drag at `pos`: its vertical or horizontal
     /// scroll thumb/track if the press hit one, otherwise a pan of the panel.
     fn press_flame(&mut self, pos: Point<Pixels>) {
-        if let Some(bar) = self.flame_vbar.get() {
-            if bar.track_hit(pos) {
-                let grab = bar.grab(pos);
-                self.drag = Drag::FlameVThumb(grab);
-                flame_scroll_thumb_to(self, pos, grab);
-                return;
-            }
-        }
-        if let Some(bar) = self.flame_hbar.get() {
-            if bar.track_hit(pos) {
-                let grab = bar.grab(pos);
-                self.drag = Drag::FlameHThumb(grab);
-                self.flame_hthumb_to(pos, grab);
-                return;
-            }
+        if self.begin_thumb_drag(pos, self.flame_vbar.get(), Drag::FlameVThumb, flame_scroll_thumb_to)
+            || self.begin_thumb_drag(
+                pos,
+                self.flame_hbar.get(),
+                Drag::FlameHThumb,
+                TraceView::flame_hthumb_to,
+            )
+        {
+            return;
         }
         self.drag = Drag::FlamePan;
         self.last_mouse = pos;
     }
 
-    /// Begins a stats-table scroll drag if `pos` hit its bar (grabbing the thumb
-    /// where pressed, a track click centering the thumb there); otherwise leaves
+    /// Begins a stats-table scroll drag if `pos` hit its bar; otherwise leaves
     /// the press to fall through to a row.
     fn press_stats(&mut self, pos: Point<Pixels>) {
-        if let Some(bar) = self.stats_bar.get() {
-            if bar.track_hit(pos) {
-                let grab = bar.grab(pos);
-                self.drag = Drag::StatsThumb(grab);
-                stats_thumb_to(self, pos, grab);
-            }
-        }
+        self.begin_thumb_drag(pos, self.stats_bar.get(), Drag::StatsThumb, stats_thumb_to);
     }
 
-    /// If `pos` hits the tracks-menu scroll bar, grabs its thumb (or jumps the
-    /// track to it). Returns whether the press was consumed by the bar.
+    /// If `pos` hits the tracks-menu scroll bar, begins a thumb drag. Returns
+    /// whether the press was consumed by the bar.
     fn press_menu(&mut self, pos: Point<Pixels>) -> bool {
-        let Some(bar) = self.menu_bar.get() else {
-            return false;
-        };
-        if !bar.track_hit(pos) {
-            return false;
-        }
-        let grab = bar.grab(pos);
-        self.drag = Drag::MenuThumb(grab);
-        menu_thumb_to(self, pos, grab);
-        true
+        self.begin_thumb_drag(pos, self.menu_bar.get(), Drag::MenuThumb, menu_thumb_to)
     }
 
     /// Maps a flame-graph panel horizontal thumb drag to its normalized scroll.
     fn flame_hthumb_to(&mut self, pos: Point<Pixels>, grab: f32) {
-        let (Some(bar), Some(fl)) = (self.flame_hbar.get(), self.flame_layout()) else {
+        let (Some(offset), Some(fl)) = (thumb_offset(&self.flame_hbar, pos, grab), self.flame_layout())
+        else {
             return;
         };
         let mut fv = fl.view;
-        fv.set_scroll_px(bar.offset_at(pos, grab), fl.width);
+        fv.set_scroll_px(offset, fl.width);
         self.flame_view.set(fv);
     }
 
@@ -3206,43 +3196,46 @@ fn scrollbar_canvas(
     .inset_0()
 }
 
+/// The scroll offset a thumb at `pos` (grabbed at `grab`) maps to, or `None`
+/// when the bar is not currently painted.
+fn thumb_offset(bar: &Cell<Option<Scrollbar>>, pos: Point<Pixels>, grab: f32) -> Option<f32> {
+    Some(bar.get()?.offset_at(pos, grab))
+}
+
+/// Scrolls a list `handle` so a downward thumb `offset` maps to a matching
+/// negative vertical scroll.
+fn set_list_thumb(handle: &ScrollHandle, offset: f32) {
+    let mut o = handle.offset();
+    o.y = px(-offset);
+    handle.set_offset(o);
+}
+
 /// Maps the flame chart's lane vertical thumb drag back to a scroll offset.
 fn scroll_thumb_to(view: &mut TraceView, pos: Point<Pixels>, grab: f32) {
-    let Some(bar) = view.vbar.get() else {
-        return;
-    };
-    view.scroll_y.set(bar.offset_at(pos, grab));
+    if let Some(offset) = thumb_offset(&view.vbar, pos, grab) {
+        view.scroll_y.set(offset);
+    }
 }
 
 /// Maps the flame-graph panel's vertical thumb drag back to a scroll offset.
 fn flame_scroll_thumb_to(view: &mut TraceView, pos: Point<Pixels>, grab: f32) {
-    let Some(bar) = view.flame_vbar.get() else {
-        return;
-    };
-    view.flame_scroll_y.set(bar.offset_at(pos, grab));
+    if let Some(offset) = thumb_offset(&view.flame_vbar, pos, grab) {
+        view.flame_scroll_y.set(offset);
+    }
 }
 
-/// Maps a stats-table thumb drag back to the list's scroll offset (negative y as
-/// the body scrolls down).
+/// Maps a stats-table thumb drag back to the list's scroll offset.
 fn stats_thumb_to(view: &mut TraceView, pos: Point<Pixels>, grab: f32) {
-    let Some(bar) = view.stats_bar.get() else {
-        return;
-    };
-    let handle = view.stats_scroll.0.borrow();
-    let mut offset = handle.base_handle.offset();
-    offset.y = px(-bar.offset_at(pos, grab));
-    handle.base_handle.set_offset(offset);
+    if let Some(offset) = thumb_offset(&view.stats_bar, pos, grab) {
+        set_list_thumb(&view.stats_scroll.0.borrow().base_handle, offset);
+    }
 }
 
-/// Maps a tracks-menu thumb drag back to the list's scroll offset (negative y as
-/// the list scrolls down).
+/// Maps a tracks-menu thumb drag back to the list's scroll offset.
 fn menu_thumb_to(view: &mut TraceView, pos: Point<Pixels>, grab: f32) {
-    let Some(bar) = view.menu_bar.get() else {
-        return;
-    };
-    let mut offset = view.menu_scroll.offset();
-    offset.y = px(-bar.offset_at(pos, grab));
-    view.menu_scroll.set_offset(offset);
+    if let Some(offset) = thumb_offset(&view.menu_bar, pos, grab) {
+        set_list_thumb(&view.menu_scroll, offset);
+    }
 }
 
 /// Maps a horizontal thumb drag back to a pan start time, then clamps the view.
@@ -3255,14 +3248,14 @@ fn pan_thumb_to(view: &mut TraceView, pos: Point<Pixels>, grab: f32) {
     };
     let span = profile.span();
     let regions = view.regions();
-    let Some(bar) = view.hbar.get() else {
+    let Some(offset) = thumb_offset(&view.hbar, pos, grab) else {
         return;
     };
     let mut v = view.view.get();
     // The bar's offset is measured from the span start less the reachable margin,
     // so map it back through the same shift before clamping.
     let margin_us = EDGE_MARGIN_PX / v.px_per_us as f32;
-    v.start_us = (span.start_us as f32 - margin_us) as f64 + bar.offset_at(pos, grab) as f64;
+    v.start_us = (span.start_us as f32 - margin_us) as f64 + offset as f64;
     v.clamp_to(span, regions.time_w, EDGE_MARGIN_PX);
     view.view.set(v);
 }
