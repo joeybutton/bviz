@@ -13,8 +13,9 @@ use gpui::{
     Animation, AnimationExt, App, Bounds, ClipboardItem, Context, Element, Entity, FocusHandle,
     Focusable, Font, GlobalElementId, InspectorElementId, IntoElement, KeyBinding, LayoutId,
     MouseButton, MouseDownEvent, MouseMoveEvent, PaintQuad, Pixels, Point, Render, Rgba,
-    ScrollWheelEvent, ShapedLine, SharedString, Style, Subscription, Task, TextRun, Transformation,
-    Window, actions, canvas, div, fill, percentage, point, prelude::*, px, relative, size,
+    ScrollWheelEvent, ShapedLine, SharedString, Style, Subscription, Task, TextRun,
+    Transformation, Window, actions, canvas, div, fill, percentage, point, prelude::*, px,
+    relative, size,
 };
 
 use crate::color::{CellStyle, ansi_palette, style_key};
@@ -829,48 +830,8 @@ impl Render for TerminalView {
                     )
                     .into_any_element()
             }
-            TermSource::Loading => div()
-                .flex_1()
-                .flex()
-                .flex_col()
-                .justify_center()
-                .items_center()
-                .gap_3()
-                .child(
-                    bviz_ui_assets::icon("circle-notch")
-                        .size(px(36.))
-                        .text_color(colors.text)
-                        .with_animation(
-                            "spinner",
-                            Animation::new(Duration::from_millis(900)).repeat(),
-                            |icon, delta| {
-                                icon.with_transformation(Transformation::rotate(percentage(delta)))
-                            },
-                        ),
-                )
-                .child(
-                    div()
-                        .text_sm()
-                        .text_color(colors.disabled)
-                        .child("Loading…"),
-                )
-                .into_any_element(),
-            TermSource::Error(msg) => div()
-                .flex_1()
-                .flex()
-                .flex_col()
-                .justify_center()
-                .items_center()
-                .gap_4()
-                .p_4()
-                .child(
-                    div()
-                        .max_w(px(400.))
-                        .text_sm()
-                        .text_color(colors.disabled)
-                        .child(msg.clone()),
-                )
-                .into_any_element(),
+            TermSource::Loading => Self::loading_view(&colors).into_any_element(),
+            TermSource::Error(msg) => Self::error_view(&colors, msg).into_any_element(),
         };
         Chrome::new(&self.focus_handle)
             .title("bazel_term")
@@ -879,6 +840,54 @@ impl Render for TerminalView {
 }
 
 impl TerminalView {
+    /// A centered spinner over a "Loading…" caption, shown while the source loads.
+    fn loading_view(colors: &bviz_ui_theme::Colors) -> impl IntoElement {
+        div()
+            .flex_1()
+            .flex()
+            .flex_col()
+            .justify_center()
+            .items_center()
+            .gap_3()
+            .child(
+                bviz_ui_assets::icon("circle-notch")
+                    .size(px(36.))
+                    .text_color(colors.text)
+                    .with_animation(
+                        "spinner",
+                        Animation::new(Duration::from_millis(900)).repeat(),
+                        |icon, delta| {
+                            icon.with_transformation(Transformation::rotate(percentage(delta)))
+                        },
+                    ),
+            )
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(colors.disabled)
+                    .child("Loading…"),
+            )
+    }
+
+    /// A centered, width-capped error message shown when the source fails to load.
+    fn error_view(colors: &bviz_ui_theme::Colors, msg: &str) -> impl IntoElement {
+        div()
+            .flex_1()
+            .flex()
+            .flex_col()
+            .justify_center()
+            .items_center()
+            .gap_4()
+            .p_4()
+            .child(
+                div()
+                    .max_w(px(400.))
+                    .text_sm()
+                    .text_color(colors.disabled)
+                    .child(msg.to_string()),
+            )
+    }
+
     /// The find box overlaid at the top-right of the terminal: the query field,
     /// a match counter, and previous/next/close controls. `None` before the field
     /// has been created (i.e. the box has never been opened).
