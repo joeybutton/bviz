@@ -1035,8 +1035,9 @@ impl TraceView {
     /// (ruler, gridlines, lanes, slices, phase markers, gutter, scroll bars, and
     /// — for the Counters tab — the counter plots), with the tab bar, the
     /// selected bottom panel, and the gutter-handle drag as overlays. The canvas
-    /// closures are `'static`, so they capture owned snapshots (`Rc`s and the
-    /// const metrics) rather than borrowing the view.
+    /// prepaint and paint closures are `'static`, so the builders take owned
+    /// snapshots (`Rc`s and the const metrics) to capture rather than borrowing
+    /// the view.
     fn trace_body(
         &self,
         profile: Arc<Profile>,
@@ -1054,61 +1055,15 @@ impl TraceView {
         let entity = cx.entity();
         let panel_height = self.panel_height;
         let gutter_width = self.gutter_width;
-        let prepaint = {
-            let (profile, lanes, view, fitted, viewport) = (
-                profile.clone(),
-                lanes.clone(),
-                view.clone(),
-                fitted.clone(),
-                viewport.clone(),
-            );
-            move |bounds: Bounds<Pixels>, _: &mut Window, _: &mut App| {
-                let old_bounds = viewport.get();
-                viewport.set(bounds);
-                // The time axis maps to the time column, past the gutter and clear
-                // of the reserved vertical-bar column.
-                let flame_total = flame_total_height(&lanes);
-                let regions = Regions::new(
-                    bounds,
-                    profile.counters().len(),
-                    panel_height,
-                    gutter_width,
-                    flame_total,
-                );
-                let time_w = regions.time_w;
-                let span = profile.span();
-                if !fitted.get() {
-                    view.set(TimeView::fit(span, time_w, EDGE_MARGIN_PX));
-                    fitted.set(true);
-                } else {
-                    // On a width change, keep the zoom relative to the window so a
-                    // resize stays invertible — without this the view spills over
-                    // (and a scroll bar appears) after a grow-then-shrink cycle.
-                    let old_time_w = Regions::new(
-                        old_bounds,
-                        profile.counters().len(),
-                        panel_height,
-                        gutter_width,
-                        flame_total,
-                    )
-                    .time_w;
-                    if old_bounds.size.width > px(0.) && (old_time_w - time_w).abs() > f32::EPSILON
-                    {
-                        let mut v = view.get();
-                        v.rescale_to_width(span, old_time_w, time_w, EDGE_MARGIN_PX);
-                        view.set(v);
-                    }
-                }
-                // Keep the fit as the zoom floor and the pan within the span for
-                // the current width.
-                let mut v = view.get();
-                v.px_per_us = v
-                    .px_per_us
-                    .max(fit_px_per_us(span, time_w, EDGE_MARGIN_PX));
-                v.clamp_to(span, time_w, EDGE_MARGIN_PX);
-                view.set(v);
-            }
-        };
+        let prepaint = Self::fit_prepaint(
+            profile.clone(),
+            lanes.clone(),
+            view.clone(),
+            fitted.clone(),
+            viewport.clone(),
+            panel_height,
+            gutter_width,
+        );
         let flame_total = flame_total_height(&lanes);
         let regions = Regions::new(
             viewport.get(),
@@ -1118,179 +1073,19 @@ impl TraceView {
             flame_total,
         );
         let origin = viewport.get().origin;
-        let canvas = {
-            let (profile, lanes) = (profile.clone(), lanes.clone());
-            canvas(prepaint, move |bounds, _, window, cx| {
-                let layout = &*lanes;
-                let tv = view.get();
-                let n_counters = profile.counters().len();
-                let (tab, panel_height, gutter_width, selected, crosshair, hover, dragging, chrome) = {
-                    let this = entity.read(cx);
-                    (
-                        this.bottom_tab,
-                        this.panel_height,
-                        this.gutter_width,
-                        this.selected_tracks.clone(),
-                        this.crosshair,
-                        this.hover,
-                        !matches!(this.drag, Drag::None),
-                        this.group_chrome().unwrap_or_default(),
-                    )
-                };
-                let flame_total = flame_total_height(layout);
-                let regions =
-                    Regions::new(bounds, n_counters, panel_height, gutter_width, flame_total);
-                let scroll = scroll_y.get();
-                let vp = Viewport {
-                    width: regions.time_w,
-                    height: regions.flame_h(),
-                    scroll_y: scroll,
-                };
-                // The counter plots share the flame chart's time axis, so they
-                // paint on this canvas below the tab bar when their tab is up.
-                let show_counters = regions.has_graph && tab == BottomTab::Counters;
-
-                let ticks = ruler_ticks(tv, regions.time_w);
-                paint_gridlines(
-                    &ticks,
-                    regions.content_left,
-                    regions.flame_top,
-                    regions.flame_bottom,
-                    &palette,
-                    window,
-                );
-                if show_counters {
-                    paint_gridlines(
-                        &ticks,
-                        regions.content_left,
-                        regions.panel_top,
-                        regions.panel_bottom,
-                        &palette,
-                        window,
-                    );
-                }
-
-                // The flame lanes clip to their band so rows panned past the
-                // bottom don't bleed into the tab bar or panel.
-                let flame_mask = ContentMask {
-                    bounds: Bounds::new(
-                        point(px(regions.content_left), px(regions.flame_top)),
-                        size(px(regions.time_w), px(regions.flame_h())),
-                    ),
-                };
-                window.with_content_mask(Some(flame_mask), |window| {
-                    // A hairline parts adjacent lanes, drawn first so slices
-                    // paint over it and it shows only in the gaps.
-                    for lane in layout.lanes.iter().skip(1) {
-                        let ry = regions.flame_top + lane.top - METRICS.lane_gap / 2.0 - scroll;
-                        window.paint_quad(quad(
-                            Bounds::new(
-                                point(px(regions.content_left), px(ry)),
-                                size(px(regions.time_w), px(1.0)),
-                            ),
-                            px(0.),
-                            palette.gridline,
-                            px(0.),
-                            Hsla::from(palette.border),
-                            BorderStyle::Solid,
-                        ));
-                    }
-                    // Group header bands read across the full width as section
-                    // dividers; their gutter labels and show-all icon paint later,
-                    // over the opaque gutter.
-                    for band in &chrome.bands {
-                        let y = regions.flame_top + band.top - scroll;
-                        window.paint_quad(quad(
-                            Bounds::new(
-                                point(px(regions.content_left), px(y)),
-                                size(px(regions.time_w), px(GROUP_BAND_HEIGHT)),
-                            ),
-                            px(0.),
-                            palette.header_band,
-                            px(0.),
-                            Hsla::from(palette.border),
-                            BorderStyle::Solid,
-                        ));
-                    }
-                    for vs in visible_slices(&profile, layout, &tv, &vp, &METRICS, MIN_SLICE_PX) {
-                        let track = &profile.threads()[vs.track];
-                        let slice = profile.slices(track)[vs.slice];
-                        paint_slice(
-                            &profile,
-                            &slice,
-                            vs.x,
-                            vs.y + regions.flame_top,
-                            vs.w,
-                            vs.h,
-                            regions.content_left,
-                            &palette,
-                            window,
-                            cx,
-                        );
-                    }
-                });
-
-                if show_counters {
-                    paint_graph(&profile, tv, regions, &palette, window);
-                }
-                paint_markers(&profile, tv, regions, show_counters, &palette, window, cx);
-                paint_scrollbars(
-                    profile.span(),
-                    tv,
-                    flame_total,
-                    regions,
-                    scroll,
-                    &palette,
-                    &vbar,
-                    &hbar,
-                    window,
-                );
-
-                // The opaque gutter covers any lane content that panned under
-                // it, then carries the lane and (for the Counters tab) counter
-                // names.
-                paint_gutter(
-                    &profile,
-                    layout,
-                    &chrome,
-                    regions,
-                    gutter_width,
-                    scroll,
-                    show_counters,
-                    &selected,
-                    &palette,
-                    window,
-                    cx,
-                );
-
-                // The ruler paints over scrolled-up rows; the tooltip paints
-                // over everything.
-                paint_ruler(&ticks, regions, bounds, &palette, window, cx);
-                if let Some(at) = crosshair {
-                    if f32::from(at.x) >= regions.content_left {
-                        paint_crosshair(
-                            &profile,
-                            tv,
-                            regions,
-                            at,
-                            show_counters,
-                            &palette,
-                            window,
-                            cx,
-                        );
-                    }
-                }
-                if let Some(h) = hover {
-                    let track = &profile.threads()[h.track];
-                    let slice = profile.slices(track)[h.slice];
-                    let detail = profile.details(track)[h.slice];
-                    paint_tooltip(&profile, &slice, &detail, h.at, bounds, &palette, window, cx);
-                }
-                if dragging {
-                    track_drag(window, &entity, on_drag, end_drag);
-                }
-            })
-        }
+        let canvas = canvas(
+            prepaint,
+            Self::chart_paint(
+                profile.clone(),
+                lanes.clone(),
+                view,
+                scroll_y,
+                vbar,
+                hbar,
+                entity,
+                palette,
+            ),
+        )
         .absolute()
         .left_0()
         .top_0()
@@ -1302,33 +1097,7 @@ impl TraceView {
         // The selected panel sits over the content column of the bottom region;
         // the counter plots are drawn by the canvas above instead.
         let panel = self.bottom_panel(regions, origin, palette, colors, cx);
-        // A thin overlay strip at the gutter's right edge that begins a width
-        // drag; a double-click resets the gutter to its default width.
-        let gutter_handle = {
-            let drag_entity = cx.entity();
-            div()
-                .id("trace-gutter-handle")
-                .absolute()
-                .left(px(regions.content_left - f32::from(origin.x) - GUTTER_HANDLE_WIDTH / 2.0))
-                .top_0()
-                .w(px(GUTTER_HANDLE_WIDTH))
-                .h_full()
-                .cursor_col_resize()
-                .on_mouse_down(
-                    MouseButton::Left,
-                    move |e: &MouseDownEvent, _: &mut Window, cx: &mut App| {
-                        drag_entity.update(cx, |this, cx| {
-                            if e.click_count == 2 {
-                                this.gutter_width = DEFAULT_GUTTER_WIDTH;
-                            } else {
-                                this.drag = Drag::Gutter;
-                            }
-                            cx.notify();
-                        });
-                        cx.stop_propagation();
-                    },
-                )
-        };
+        let gutter_handle = self.gutter_handle(regions, origin, cx);
         let tracks_menu = self.tracks_menu(palette, colors, cx);
         let viewport = div()
             .id("trace-viewport")
@@ -1341,6 +1110,287 @@ impl TraceView {
             .child(gutter_handle)
             .child(tracks_menu);
         self.body_handlers(viewport, cx)
+    }
+
+    /// Prepaint fit: capture the painted viewport bounds, then fit the time view
+    /// to the span before the first paint and, on a later width change, rescale
+    /// the zoom relative to the window so a resize stays invertible; finally hold
+    /// the fit as the zoom floor and clamp the pan to the span.
+    fn fit_prepaint(
+        profile: Arc<Profile>,
+        lanes: Rc<LaneLayout>,
+        view: Rc<Cell<TimeView>>,
+        fitted: Rc<Cell<bool>>,
+        viewport: Rc<Cell<Bounds<Pixels>>>,
+        panel_height: f32,
+        gutter_width: f32,
+    ) -> impl FnOnce(Bounds<Pixels>, &mut Window, &mut App) {
+        move |bounds: Bounds<Pixels>, _: &mut Window, _: &mut App| {
+            let old_bounds = viewport.get();
+            viewport.set(bounds);
+            // The time axis maps to the time column, past the gutter and clear
+            // of the reserved vertical-bar column.
+            let flame_total = flame_total_height(&lanes);
+            let regions = Regions::new(
+                bounds,
+                profile.counters().len(),
+                panel_height,
+                gutter_width,
+                flame_total,
+            );
+            let time_w = regions.time_w;
+            let span = profile.span();
+            if !fitted.get() {
+                view.set(TimeView::fit(span, time_w, EDGE_MARGIN_PX));
+                fitted.set(true);
+            } else {
+                // On a width change, keep the zoom relative to the window so a
+                // resize stays invertible — without this the view spills over
+                // (and a scroll bar appears) after a grow-then-shrink cycle.
+                let old_time_w = Regions::new(
+                    old_bounds,
+                    profile.counters().len(),
+                    panel_height,
+                    gutter_width,
+                    flame_total,
+                )
+                .time_w;
+                if old_bounds.size.width > px(0.) && (old_time_w - time_w).abs() > f32::EPSILON
+                {
+                    let mut v = view.get();
+                    v.rescale_to_width(span, old_time_w, time_w, EDGE_MARGIN_PX);
+                    view.set(v);
+                }
+            }
+            // Keep the fit as the zoom floor and the pan within the span for
+            // the current width.
+            let mut v = view.get();
+            v.px_per_us = v
+                .px_per_us
+                .max(fit_px_per_us(span, time_w, EDGE_MARGIN_PX));
+            v.clamp_to(span, time_w, EDGE_MARGIN_PX);
+            view.set(v);
+        }
+    }
+
+    /// The chart paint body: the canvas paint closure that draws the flame
+    /// timeline — gridlines, lanes and slices, phase markers, gutter, scroll
+    /// bars, and (for the Counters tab) the counter plots — reading the live view
+    /// state through the entity, then the ruler and hover/crosshair overlays on
+    /// top.
+    fn chart_paint(
+        profile: Arc<Profile>,
+        lanes: Rc<LaneLayout>,
+        view: Rc<Cell<TimeView>>,
+        scroll_y: Rc<Cell<f32>>,
+        vbar: Rc<Cell<Option<Scrollbar>>>,
+        hbar: Rc<Cell<Option<Scrollbar>>>,
+        entity: Entity<TraceView>,
+        palette: Palette,
+    ) -> impl FnOnce(Bounds<Pixels>, (), &mut Window, &mut App) {
+        move |bounds, _, window, cx| {
+            let layout = &*lanes;
+            let tv = view.get();
+            let n_counters = profile.counters().len();
+            let (tab, panel_height, gutter_width, selected, crosshair, hover, dragging, chrome) = {
+                let this = entity.read(cx);
+                (
+                    this.bottom_tab,
+                    this.panel_height,
+                    this.gutter_width,
+                    this.selected_tracks.clone(),
+                    this.crosshair,
+                    this.hover,
+                    !matches!(this.drag, Drag::None),
+                    this.group_chrome().unwrap_or_default(),
+                )
+            };
+            let flame_total = flame_total_height(layout);
+            let regions =
+                Regions::new(bounds, n_counters, panel_height, gutter_width, flame_total);
+            let scroll = scroll_y.get();
+            let vp = Viewport {
+                width: regions.time_w,
+                height: regions.flame_h(),
+                scroll_y: scroll,
+            };
+            // The counter plots share the flame chart's time axis, so they
+            // paint on this canvas below the tab bar when their tab is up.
+            let show_counters = regions.has_graph && tab == BottomTab::Counters;
+
+            let ticks = ruler_ticks(tv, regions.time_w);
+            paint_gridlines(
+                &ticks,
+                regions.content_left,
+                regions.flame_top,
+                regions.flame_bottom,
+                &palette,
+                window,
+            );
+            if show_counters {
+                paint_gridlines(
+                    &ticks,
+                    regions.content_left,
+                    regions.panel_top,
+                    regions.panel_bottom,
+                    &palette,
+                    window,
+                );
+            }
+
+            // The flame lanes clip to their band so rows panned past the
+            // bottom don't bleed into the tab bar or panel.
+            let flame_mask = ContentMask {
+                bounds: Bounds::new(
+                    point(px(regions.content_left), px(regions.flame_top)),
+                    size(px(regions.time_w), px(regions.flame_h())),
+                ),
+            };
+            window.with_content_mask(Some(flame_mask), |window| {
+                // A hairline parts adjacent lanes, drawn first so slices
+                // paint over it and it shows only in the gaps.
+                for lane in layout.lanes.iter().skip(1) {
+                    let ry = regions.flame_top + lane.top - METRICS.lane_gap / 2.0 - scroll;
+                    window.paint_quad(quad(
+                        Bounds::new(
+                            point(px(regions.content_left), px(ry)),
+                            size(px(regions.time_w), px(1.0)),
+                        ),
+                        px(0.),
+                        palette.gridline,
+                        px(0.),
+                        Hsla::from(palette.border),
+                        BorderStyle::Solid,
+                    ));
+                }
+                // Group header bands read across the full width as section
+                // dividers; their gutter labels and show-all icon paint later,
+                // over the opaque gutter.
+                for band in &chrome.bands {
+                    let y = regions.flame_top + band.top - scroll;
+                    window.paint_quad(quad(
+                        Bounds::new(
+                            point(px(regions.content_left), px(y)),
+                            size(px(regions.time_w), px(GROUP_BAND_HEIGHT)),
+                        ),
+                        px(0.),
+                        palette.header_band,
+                        px(0.),
+                        Hsla::from(palette.border),
+                        BorderStyle::Solid,
+                    ));
+                }
+                for vs in visible_slices(&profile, layout, &tv, &vp, &METRICS, MIN_SLICE_PX) {
+                    let track = &profile.threads()[vs.track];
+                    let slice = profile.slices(track)[vs.slice];
+                    paint_slice(
+                        &profile,
+                        &slice,
+                        vs.x,
+                        vs.y + regions.flame_top,
+                        vs.w,
+                        vs.h,
+                        regions.content_left,
+                        &palette,
+                        window,
+                        cx,
+                    );
+                }
+            });
+
+            if show_counters {
+                paint_graph(&profile, tv, regions, &palette, window);
+            }
+            paint_markers(&profile, tv, regions, show_counters, &palette, window, cx);
+            paint_scrollbars(
+                profile.span(),
+                tv,
+                flame_total,
+                regions,
+                scroll,
+                &palette,
+                &vbar,
+                &hbar,
+                window,
+            );
+
+            // The opaque gutter covers any lane content that panned under
+            // it, then carries the lane and (for the Counters tab) counter
+            // names.
+            paint_gutter(
+                &profile,
+                layout,
+                &chrome,
+                regions,
+                gutter_width,
+                scroll,
+                show_counters,
+                &selected,
+                &palette,
+                window,
+                cx,
+            );
+
+            // The ruler paints over scrolled-up rows; the tooltip paints
+            // over everything.
+            paint_ruler(&ticks, regions, bounds, &palette, window, cx);
+            if let Some(at) = crosshair {
+                if f32::from(at.x) >= regions.content_left {
+                    paint_crosshair(
+                        &profile,
+                        tv,
+                        regions,
+                        at,
+                        show_counters,
+                        &palette,
+                        window,
+                        cx,
+                    );
+                }
+            }
+            if let Some(h) = hover {
+                let track = &profile.threads()[h.track];
+                let slice = profile.slices(track)[h.slice];
+                let detail = profile.details(track)[h.slice];
+                paint_tooltip(&profile, &slice, &detail, h.at, bounds, &palette, window, cx);
+            }
+            if dragging {
+                track_drag(window, &entity, on_drag, end_drag);
+            }
+        }
+    }
+
+    /// A thin overlay strip at the gutter's right edge that begins a width drag;
+    /// a double-click resets the gutter to its default width.
+    fn gutter_handle(
+        &self,
+        regions: Regions,
+        origin: Point<Pixels>,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        let drag_entity = cx.entity();
+        div()
+            .id("trace-gutter-handle")
+            .absolute()
+            .left(px(regions.content_left - f32::from(origin.x) - GUTTER_HANDLE_WIDTH / 2.0))
+            .top_0()
+            .w(px(GUTTER_HANDLE_WIDTH))
+            .h_full()
+            .cursor_col_resize()
+            .on_mouse_down(
+                MouseButton::Left,
+                move |e: &MouseDownEvent, _: &mut Window, cx: &mut App| {
+                    drag_entity.update(cx, |this, cx| {
+                        if e.click_count == 2 {
+                            this.gutter_width = DEFAULT_GUTTER_WIDTH;
+                        } else {
+                            this.drag = Drag::Gutter;
+                        }
+                        cx.notify();
+                    });
+                    cx.stop_propagation();
+                },
+            )
     }
 
     /// The tab bar between the flame chart and the bottom panel: a row of tab
