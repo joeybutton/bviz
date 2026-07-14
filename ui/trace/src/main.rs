@@ -939,23 +939,7 @@ impl TraceView {
         let load_task = load_in_background(
             cx,
             move || load.join().unwrap_or_else(|_| Err("profile loader thread panicked".into())),
-            |view, result, cx| {
-                view.invalidate_aggregates();
-                // The lane layouts depend only on the profile, so they must be
-                // dropped when a new profile loads.
-                view.lanes.borrow_mut().take();
-                view.visible_lanes.borrow_mut().take();
-                view.flame_view.set(FlameView::FIT);
-                view.source = match result {
-                    Ok(profile) => Source::Loaded(Arc::new(profile)),
-                    Err(err) => Source::Message(err),
-                };
-                if let Source::Loaded(profile) = &view.source {
-                    let profile = profile.clone();
-                    view.init_tracks(&profile);
-                }
-                cx.notify();
-            },
+            |view, result, cx| view.on_profile_loaded(result, cx),
         );
         Self {
             focus_handle,
@@ -1015,6 +999,24 @@ impl TraceView {
             crosshair: None,
             _load_task: load_task,
         }
+    }
+
+    fn on_profile_loaded(&mut self, result: Result<Profile, String>, cx: &mut Context<Self>) {
+        self.invalidate_aggregates();
+        // The lane layouts depend only on the profile, so they must be dropped
+        // when a new profile loads.
+        self.lanes.borrow_mut().take();
+        self.visible_lanes.borrow_mut().take();
+        self.flame_view.set(FlameView::FIT);
+        self.source = match result {
+            Ok(profile) => Source::Loaded(Arc::new(profile)),
+            Err(err) => Source::Message(err),
+        };
+        if let Source::Loaded(profile) = &self.source {
+            let profile = profile.clone();
+            self.init_tracks(&profile);
+        }
+        cx.notify();
     }
 
     /// The default track selection for a freshly loaded profile: every
