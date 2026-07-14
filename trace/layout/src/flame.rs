@@ -128,7 +128,7 @@ fn scan<'p>(
     // base, a couple of doublings at most.
     let shard_count = workers.clamp(1, threads.len().max(1));
     let per_shard = profile.distinct_strings().div_ceil(shard_count);
-    let mut shards = run_sharded(workers, threads.len(), |shard: &mut ScanShard, i| {
+    let shards = run_sharded(workers, threads.len(), |shard: &mut ScanShard, i| {
         if shard.by_text.capacity() == 0 {
             shard.by_text.reserve(per_shard);
             shard.handles.reserve(per_shard);
@@ -156,9 +156,20 @@ fn scan<'p>(
         }
     });
 
-    // Seed the merged maps by moving the first shard's — a single-worker scan
-    // merges for free — and size them for the rest up front, so the merge never
-    // regrows (a regrow re-hashes every string key).
+    let (by_text, mnemonics) = merge_shards(shards);
+    (
+        build_ranks(&by_text, workers),
+        build_index(&by_text, &mnemonics),
+    )
+}
+
+/// Merge the per-worker scan shards into one text→handle map and one
+/// name→smallest-mnemonic map. Seeds from the first shard by move — a
+/// single-worker scan merges for free — and reserves for the rest up front, so
+/// the merge never regrows (a regrow re-hashes every string key).
+fn merge_shards<'p>(
+    mut shards: Vec<ScanShard<'p>>,
+) -> (FxHashMap<&'p str, Str>, FxHashMap<&'p str, &'p str>) {
     let (mut by_text, mut mnemonics) = {
         let first = &mut shards[0];
         (
@@ -183,32 +194,40 @@ fn scan<'p>(
                 .or_insert(mn);
         }
     }
+    (by_text, mnemonics)
+}
 
-    // Rank the distinct texts by one sort under `&str`'s byte-wise `Ord`, so
-    // comparing two ranks is exactly comparing the texts.
+/// Rank the distinct scanned texts by one sort under `&str`'s byte-wise `Ord`,
+/// so comparing two ranks is exactly comparing the texts.
+fn build_ranks<'p>(by_text: &FxHashMap<&'p str, Str>, workers: usize) -> Ranks {
     let ordered = sort_pairs_by_text(by_text.iter().map(|(&t, &h)| (t, h)).collect(), workers);
-    let rank: FxHashMap<Str, u32> = ordered
+    let rank = ordered
         .iter()
         .enumerate()
         .map(|(i, &(_, h))| (h, i as u32))
         .collect();
+    Ranks { rank }
+}
 
-    let idx_by_text: FxHashMap<&str, Str> =
+/// Build the mnemonic index from the merged maps: a text-keyed table over every
+/// scanned name, and a handle-keyed table restricted to names with a noted
+/// handle. A name seen only on unadmitted lanes has no noted handle and needs
+/// no handle-keyed entry: only a walked — hence noted — slice's name is ever
+/// looked up by handle, while text-keyed lookups cover every name.
+fn build_index<'p>(
+    by_text: &FxHashMap<&'p str, Str>,
+    mnemonics: &FxHashMap<&'p str, &'p str>,
+) -> MnemonicIndex<'p> {
+    let by_text_idx: FxHashMap<&'p str, Str> =
         mnemonics.iter().map(|(&n, &m)| (n, by_text[m])).collect();
-    // A name seen only on unadmitted lanes has no noted handle and needs no
-    // handle-keyed entry: only a walked — hence noted — slice's name is ever
-    // looked up by handle, while text-keyed lookups cover every name.
-    let by_name = idx_by_text
+    let by_name = by_text_idx
         .iter()
         .filter_map(|(&n, &m)| by_text.get(n).map(|&h| (h, m)))
         .collect();
-    (
-        Ranks { rank },
-        MnemonicIndex {
-            by_name,
-            by_text: idx_by_text,
-        },
-    )
+    MnemonicIndex {
+        by_name,
+        by_text: by_text_idx,
+    }
 }
 
 /// Run `task` over the indexes `0..n`, each worker folding into its own `S`;
