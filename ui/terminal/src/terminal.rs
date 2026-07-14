@@ -6,16 +6,15 @@ use std::time::{Duration, Instant};
 
 use bviz_terminal::{Cell, Flags, Replay, Scroll, SelectionType, Side, Terminal, Url};
 use bviz_ui_components::{
-    Axis, Button, Dropdown, Scrollbar, TextInput, load_in_background, track_drag,
+    Axis, Button, Dropdown, Scrollbar, TextInput, load_in_background, spinner, track_drag,
 };
 use bviz_ui_shell::Chrome;
 use gpui::{
-    Animation, AnimationExt, App, Bounds, ClipboardItem, Context, Element, Entity, FocusHandle,
+    App, Bounds, ClipboardItem, Context, Element, Entity, FocusHandle,
     Focusable, Font, GlobalElementId, InspectorElementId, IntoElement, KeyBinding, LayoutId,
     MouseButton, MouseDownEvent, MouseMoveEvent, PaintQuad, Pixels, Point, Render, Rgba,
     ScrollWheelEvent, ShapedLine, SharedString, Style, Subscription, Task, TextRun,
-    Transformation, Window, actions, canvas, div, fill, percentage, point, prelude::*, px,
-    relative, size,
+    Window, actions, canvas, div, fill, point, prelude::*, px, relative, size,
 };
 
 use crate::color::{CellStyle, ansi_palette, style_key};
@@ -849,18 +848,7 @@ impl TerminalView {
             .justify_center()
             .items_center()
             .gap_3()
-            .child(
-                bviz_ui_assets::icon("circle-notch")
-                    .size(px(36.))
-                    .text_color(colors.text)
-                    .with_animation(
-                        "spinner",
-                        Animation::new(Duration::from_millis(900)).repeat(),
-                        |icon, delta| {
-                            icon.with_transformation(Transformation::rotate(percentage(delta)))
-                        },
-                    ),
-            )
+            .child(spinner("spinner", px(36.), colors.text))
             .child(
                 div()
                     .text_sm()
