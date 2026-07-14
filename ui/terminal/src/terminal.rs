@@ -965,39 +965,13 @@ impl TerminalView {
         focused: bool,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
-        let (duration, real_time) = match &self.source {
-            TermSource::Loaded(replay) => (replay.duration(), replay.real_time()),
-            _ => (0.0, true),
-        };
-        // The playhead tracks the playback clock, so it glides smoothly even when
-        // the shown frame jumps across a coarse timeline's large gaps.
-        let current = self.position;
-        let fraction = if duration > 0.0 {
-            (current / duration).clamp(0.0, 1.0) as f32
-        } else {
-            0.0
-        };
         let playing = self.playing;
+        let (fraction, readout) = self.playback_readout();
 
         let view = cx.entity();
         let start_view = view.clone();
         let play_view = view.clone();
-        let end_view = view.clone();
-        let bounds_view = view.clone();
-        let drag_view = view;
-
-        let track_color = bviz_ui_theme::mix(colors.text, colors.background, 0.6);
-        let played_color = colors.text;
-        let knob_color = colors.text;
-
-        // Without --show_timestamps the playhead time is interpolated, so mark the
-        // current time approximate; the total is still bracketed by the build's
-        // start and finish events and needs no mark.
-        let readout = if real_time {
-            format!("{} / {}", fmt_time(current), fmt_time(duration))
-        } else {
-            format!("~{} / {}", fmt_time(current), fmt_time(duration))
-        };
+        let end_view = view;
 
         div()
             .key_context("Playback")
@@ -1056,60 +1030,102 @@ impl TerminalView {
                 .ghost()
                 .icon("skip-forward"),
             )
-            .child(
-                div()
-                    .id("scrubber")
-                    .flex_1()
-                    .h_full()
-                    .on_mouse_down(MouseButton::Left, cx.listener(Self::scrub_begin))
-                    .child(
-                        canvas(
-                            move |bounds, _, cx| {
-                                bounds_view.update(cx, |this, _| {
-                                    this.scrubber = Some(ScrubberLayout {
-                                        left: f32::from(bounds.origin.x),
-                                        width: f32::from(bounds.size.width),
-                                    });
-                                });
-                            },
-                            move |bounds, _, window, cx| {
-                                paint_scrubber(
-                                    bounds,
-                                    fraction,
-                                    track_color,
-                                    played_color,
-                                    knob_color,
-                                    window,
-                                );
-                                // Keep a scrub drag live past the window edge.
-                                if drag_view.read(cx).scrubbing {
-                                    track_drag(
-                                        window,
-                                        &drag_view,
-                                        |this, event, cx| {
-                                            this.scrub_to_x(f32::from(event.position.x), cx)
-                                        },
-                                        |this, _, cx| {
-                                            if this.scrubbing {
-                                                this.scrubbing = false;
-                                                cx.notify();
-                                            }
-                                        },
-                                    );
-                                }
-                            },
-                        )
-                        .size_full(),
-                    ),
-            )
+            .child(self.render_scrubber(fraction, colors, cx))
             .child(
                 div()
                     .w(px(128.))
                     .text_size(px(12.))
-                    .child(SharedString::from(readout)),
+                    .child(readout),
             )
             .child(self.speed_dropdown.clone())
             .into_any_element()
+    }
+
+    /// The played fraction (0..=1) positioning the playhead, and the
+    /// `current / total` readout text.
+    fn playback_readout(&self) -> (f32, SharedString) {
+        let (duration, real_time) = match &self.source {
+            TermSource::Loaded(replay) => (replay.duration(), replay.real_time()),
+            _ => (0.0, true),
+        };
+        // The playhead tracks the playback clock, so it glides smoothly even when
+        // the shown frame jumps across a coarse timeline's large gaps.
+        let current = self.position;
+        let fraction = if duration > 0.0 {
+            (current / duration).clamp(0.0, 1.0) as f32
+        } else {
+            0.0
+        };
+        // Without --show_timestamps the playhead time is interpolated, so mark the
+        // current time approximate; the total is still bracketed by the build's
+        // start and finish events and needs no mark.
+        let readout = if real_time {
+            format!("{} / {}", fmt_time(current), fmt_time(duration))
+        } else {
+            format!("~{} / {}", fmt_time(current), fmt_time(duration))
+        };
+        (fraction, SharedString::from(readout))
+    }
+
+    /// The scrubber: a canvas that records its painted track geometry, draws the
+    /// track/played/knob for `fraction`, and keeps a scrub drag live past the
+    /// window edge.
+    fn render_scrubber(
+        &self,
+        fraction: f32,
+        colors: &bviz_ui_theme::Colors,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let track_color = bviz_ui_theme::mix(colors.text, colors.background, 0.6);
+        let played_color = colors.text;
+        let knob_color = colors.text;
+
+        let bounds_view = cx.entity();
+        let drag_view = cx.entity();
+
+        div()
+            .id("scrubber")
+            .flex_1()
+            .h_full()
+            .on_mouse_down(MouseButton::Left, cx.listener(Self::scrub_begin))
+            .child(
+                canvas(
+                    move |bounds, _, cx| {
+                        bounds_view.update(cx, |this, _| {
+                            this.scrubber = Some(ScrubberLayout {
+                                left: f32::from(bounds.origin.x),
+                                width: f32::from(bounds.size.width),
+                            });
+                        });
+                    },
+                    move |bounds, _, window, cx| {
+                        paint_scrubber(
+                            bounds,
+                            fraction,
+                            track_color,
+                            played_color,
+                            knob_color,
+                            window,
+                        );
+                        if drag_view.read(cx).scrubbing {
+                            track_drag(
+                                window,
+                                &drag_view,
+                                |this, event, cx| {
+                                    this.scrub_to_x(f32::from(event.position.x), cx)
+                                },
+                                |this, _, cx| {
+                                    if this.scrubbing {
+                                        this.scrubbing = false;
+                                        cx.notify();
+                                    }
+                                },
+                            );
+                        }
+                    },
+                )
+                .size_full(),
+            )
     }
 }
 
