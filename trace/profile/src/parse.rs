@@ -819,7 +819,11 @@ impl<'a> EventScanner<'a> {
     fn skip_value(&mut self) -> Option<()> {
         match *self.bytes.get(self.pos)? {
             b'"' => self.skip_string(),
-            b'{' | b'[' => {
+            b'{' => {
+                self.pos = object_end(self.bytes, self.pos)? + 1;
+                Some(())
+            }
+            b'[' => {
                 let mut depth = 0usize;
                 while let Some(&b) = self.bytes.get(self.pos) {
                     match b {
@@ -1089,6 +1093,38 @@ fn find_trace_events_array(bytes: &[u8]) -> TraceEventsArray {
     }
 }
 
+/// Byte index of the `}` closing the object whose `{` is at `open`, counting
+/// braces while skipping those inside string literals (respecting `\"`
+/// escapes). `None` if the object is never closed before end of input.
+fn object_end(bytes: &[u8], open: usize) -> Option<usize> {
+    let mut depth = 0i32;
+    let mut in_str = false;
+    let mut escaped = false;
+    for (offset, &c) in bytes[open..].iter().enumerate() {
+        if in_str {
+            match c {
+                _ if escaped => escaped = false,
+                b'\\' => escaped = true,
+                b'"' => in_str = false,
+                _ => {}
+            }
+        } else {
+            match c {
+                b'"' => in_str = true,
+                b'{' => depth += 1,
+                b'}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some(open + offset);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    None
+}
+
 /// Best-effort parse of a truncated profile: read otherData if present and pull
 /// whole events out of the traceEvents array until the first incomplete one.
 fn recover(text: &str) -> Result<Profile, LoadError> {
@@ -1123,38 +1159,9 @@ fn recover(text: &str) -> Result<Profile, LoadError> {
             if i >= bytes.len() {
                 break;
             }
-            // Walk the object's braces, skipping any inside string literals, to
-            // find its close. A missing close means the array was cut
-            // mid-object: stop.
+            // A missing close means the array was cut mid-object: stop.
             let start = i;
-            let mut depth = 0i32;
-            let mut in_str = false;
-            let mut escaped = false;
-            let mut end = None;
-            for (offset, &c) in bytes[start..].iter().enumerate() {
-                if in_str {
-                    match c {
-                        _ if escaped => escaped = false,
-                        b'\\' => escaped = true,
-                        b'"' => in_str = false,
-                        _ => {}
-                    }
-                } else {
-                    match c {
-                        b'"' => in_str = true,
-                        b'{' => depth += 1,
-                        b'}' => {
-                            depth -= 1;
-                            if depth == 0 {
-                                end = Some(start + offset);
-                                break;
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-            }
-            let Some(end) = end else { break };
+            let Some(end) = object_end(bytes, start) else { break };
             let mut de = serde_json::Deserializer::from_str(&text[start..=end]);
             if let Ok(ev) = RawEventSeed(&mut scratch)
                 .deserialize(&mut de)
@@ -1179,21 +1186,8 @@ fn recover(text: &str) -> Result<Profile, LoadError> {
 fn recover_other_data(prefix: &str) -> Option<Map<String, Value>> {
     let key = prefix.find("\"otherData\"")?;
     let obj_start = prefix[key..].find('{').map(|i| key + i)?;
-    let mut depth = 0i32;
-    for (i, c) in prefix[obj_start..].char_indices() {
-        match c {
-            '{' => depth += 1,
-            '}' => {
-                depth -= 1;
-                if depth == 0 {
-                    let end = obj_start + i + 1;
-                    return serde_json::from_str(&prefix[obj_start..end]).ok();
-                }
-            }
-            _ => {}
-        }
-    }
-    None
+    let end = object_end(prefix.as_bytes(), obj_start)?;
+    serde_json::from_str(&prefix[obj_start..=end]).ok()
 }
 
 /// A counter lane during build: owned series with owned point lists, before
