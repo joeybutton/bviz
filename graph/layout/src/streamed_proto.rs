@@ -5,32 +5,31 @@ use bazel_query_proto::analysis::{ActionGraphContainer, CqueryResult};
 use bazel_query_proto::blaze_query::Target;
 use prost::Message;
 
-/// Parses every `ActionGraphContainer` from an aquery streamed_proto buffer.
-pub fn read_action_graph_containers(
+/// Decodes every length-delimited `M` from a streamed_proto buffer, in order.
+fn read_length_delimited<M: Message + Default>(
     mut buf: &[u8],
-) -> Result<Vec<ActionGraphContainer>, prost::DecodeError> {
-    let mut containers = Vec::new();
+) -> Result<Vec<M>, prost::DecodeError> {
+    let mut messages = Vec::new();
     while !buf.is_empty() {
         // Decoding advances `buf` past the consumed length prefix and message.
-        containers.push(ActionGraphContainer::decode_length_delimited(&mut buf)?);
+        messages.push(M::decode_length_delimited(&mut buf)?);
     }
-    Ok(containers)
+    Ok(messages)
+}
+
+/// Parses every `ActionGraphContainer` from an aquery streamed_proto buffer.
+pub fn read_action_graph_containers(
+    buf: &[u8],
+) -> Result<Vec<ActionGraphContainer>, prost::DecodeError> {
+    read_length_delimited(buf)
 }
 
 /// Parses every `Target` from a query streamed_proto buffer.
-pub fn read_query_targets(mut buf: &[u8]) -> Result<Vec<Target>, prost::DecodeError> {
-    let mut targets = Vec::new();
-    while !buf.is_empty() {
-        targets.push(Target::decode_length_delimited(&mut buf)?);
-    }
-    Ok(targets)
+pub fn read_query_targets(buf: &[u8]) -> Result<Vec<Target>, prost::DecodeError> {
+    read_length_delimited(buf)
 }
 
 /// Parses every `CqueryResult` from a cquery streamed_proto buffer.
-pub fn read_cquery_results(mut buf: &[u8]) -> Result<Vec<CqueryResult>, prost::DecodeError> {
-    let mut results = Vec::new();
-    while !buf.is_empty() {
-        results.push(CqueryResult::decode_length_delimited(&mut buf)?);
-    }
-    Ok(results)
+pub fn read_cquery_results(buf: &[u8]) -> Result<Vec<CqueryResult>, prost::DecodeError> {
+    read_length_delimited(buf)
 }
