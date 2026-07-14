@@ -4,10 +4,10 @@
 
 use gpui::{
     App, Bounds, ClipboardItem, Context, CursorStyle, Element, ElementInputHandler, Entity,
-    EntityInputHandler, FocusHandle, Focusable, GlobalElementId, InspectorElementId, IntoElement,
-    KeyBinding, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad,
-    Pixels, Point, Render, ShapedLine, SharedString, Style, TextRun, UTF16Selection, UnderlineStyle,
-    Window, div, fill, point, prelude::*, px, relative, size,
+    EntityInputHandler, FocusHandle, Focusable, Font, GlobalElementId, InspectorElementId,
+    IntoElement, KeyBinding, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
+    PaintQuad, Pixels, Point, Render, Rgba, ShapedLine, SharedString, Style, TextRun,
+    UTF16Selection, UnderlineStyle, Window, div, fill, point, prelude::*, px, relative, size,
 };
 use std::ops::Range;
 
@@ -449,6 +449,84 @@ impl IntoElement for TextElement {
     }
 }
 
+/// Split the text into runs, underlining the in-progress IME composition (the
+/// marked range).
+fn ime_marked_runs(
+    text_len: usize,
+    font: Font,
+    color: Rgba,
+    marked_range: Option<&Range<usize>>,
+) -> Vec<TextRun> {
+    let run = TextRun {
+        len: text_len,
+        font,
+        color: color.into(),
+        background_color: None,
+        underline: None,
+        strikethrough: None,
+    };
+    match marked_range {
+        Some(marked) => vec![
+            TextRun {
+                len: marked.start,
+                ..run.clone()
+            },
+            TextRun {
+                len: marked.end - marked.start,
+                underline: Some(UnderlineStyle {
+                    color: Some(run.color),
+                    thickness: px(1.0),
+                    wavy: false,
+                }),
+                ..run.clone()
+            },
+            TextRun {
+                len: text_len - marked.end,
+                ..run
+            },
+        ]
+        .into_iter()
+        .filter(|run| run.len > 0)
+        .collect(),
+        None => vec![run],
+    }
+}
+
+/// Caret quad when the selection is empty, otherwise the selection rect.
+fn cursor_selection_quads(
+    line: &ShapedLine,
+    selected: &Range<usize>,
+    cursor: usize,
+    bounds: Bounds<Pixels>,
+    cursor_color: Rgba,
+    selection_color: Rgba,
+) -> (Option<PaintQuad>, Option<PaintQuad>) {
+    if selected.is_empty() {
+        let x = line.x_for_index(cursor);
+        (
+            Some(fill(
+                Bounds::new(
+                    point(bounds.left() + x, bounds.top()),
+                    size(px(1.5), bounds.bottom() - bounds.top()),
+                ),
+                cursor_color,
+            )),
+            None,
+        )
+    } else {
+        (
+            None,
+            Some(fill(
+                Bounds::from_corners(
+                    point(bounds.left() + line.x_for_index(selected.start), bounds.top()),
+                    point(bounds.left() + line.x_for_index(selected.end), bounds.bottom()),
+                ),
+                selection_color,
+            )),
+        )
+    }
+}
+
 impl Element for TextElement {
     type RequestLayoutState = ();
     type PrepaintState = TextPrepaint;
@@ -494,67 +572,12 @@ impl Element for TextElement {
         } else {
             (input.content.clone(), colors.text)
         };
-        let run = TextRun {
-            len: text.len(),
-            font: style.font(),
-            color: color.into(),
-            background_color: None,
-            underline: None,
-            strikethrough: None,
-        };
-        // Underline the in-progress IME composition (the marked range).
-        let runs = match input.marked_range.as_ref() {
-            Some(marked) => vec![
-                TextRun {
-                    len: marked.start,
-                    ..run.clone()
-                },
-                TextRun {
-                    len: marked.end - marked.start,
-                    underline: Some(UnderlineStyle {
-                        color: Some(run.color),
-                        thickness: px(1.0),
-                        wavy: false,
-                    }),
-                    ..run.clone()
-                },
-                TextRun {
-                    len: text.len() - marked.end,
-                    ..run
-                },
-            ]
-            .into_iter()
-            .filter(|run| run.len > 0)
-            .collect(),
-            None => vec![run],
-        };
+        let runs = ime_marked_runs(text.len(), style.font(), color, input.marked_range.as_ref());
         let font_size = style.font_size.to_pixels(window.rem_size());
         let line = window.text_system().shape_line(text, font_size, &runs, None);
 
-        let (cursor_quad, selection_quad) = if selected.is_empty() {
-            let x = line.x_for_index(cursor);
-            (
-                Some(fill(
-                    Bounds::new(
-                        point(bounds.left() + x, bounds.top()),
-                        size(px(1.5), bounds.bottom() - bounds.top()),
-                    ),
-                    colors.text,
-                )),
-                None,
-            )
-        } else {
-            (
-                None,
-                Some(fill(
-                    Bounds::from_corners(
-                        point(bounds.left() + line.x_for_index(selected.start), bounds.top()),
-                        point(bounds.left() + line.x_for_index(selected.end), bounds.bottom()),
-                    ),
-                    colors.selected,
-                )),
-            )
-        };
+        let (cursor_quad, selection_quad) =
+            cursor_selection_quads(&line, &selected, cursor, bounds, colors.text, colors.selected);
         TextPrepaint {
             line: Some(line),
             cursor: cursor_quad,
