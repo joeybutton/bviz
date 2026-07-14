@@ -324,9 +324,23 @@ impl Terminal {
     /// by scheme over the logical line containing the cell.
     pub fn url_at(&mut self, column: usize, row: usize) -> Option<Url> {
         let point = self.grid_point(column, row);
+        let (start, end) = self.url_match_at(point)?;
+        let full = self.term.bounds_to_string(start, end);
+        let (text, end) = Self::trim_trailing_punctuation(&full, end);
+        if text.is_empty() {
+            return None;
+        }
+        Some(Url {
+            text,
+            spans: self.point_range_spans(start, end),
+        })
+    }
+
+    /// The inclusive linear grid bounds of the URL regex match containing
+    /// `point` on its logical line, or `None` when no match covers it.
+    fn url_match_at(&mut self, point: Point) -> Option<(Point, Point)> {
         let line_start = self.term.line_search_left(point);
         let line_end = self.term.line_search_right(point);
-        let mut bounds = None;
         for m in RegexIter::new(
             line_start,
             line_end,
@@ -335,34 +349,30 @@ impl Terminal {
             &mut self.url_regex,
         ) {
             if m.contains(&point) {
-                bounds = Some((*m.start(), *m.end()));
-                break;
+                return Some((*m.start(), *m.end()));
             }
             if *m.start() > point {
                 break;
             }
         }
-        let (start, mut end) = bounds?;
+        None
+    }
 
-        // Trailing sentence punctuation usually belongs to the prose, not the
-        // URL; drop it from both the opened text and the highlighted span.
-        let full = self.term.bounds_to_string(start, end);
+    /// Trailing sentence punctuation usually belongs to the prose, not the URL;
+    /// drop it from both the opened text and the highlighted span's end column.
+    fn trim_trailing_punctuation(full: &str, end: Point) -> (String, Point) {
         let kept = full
             .trim_end_matches(['.', ',', ';', ':', '!', '?', ')'])
             .chars()
             .count();
         let removed = full.chars().count() - kept;
-        if removed > 0 && removed <= end.column.0 {
-            end = Point::new(end.line, Column(end.column.0 - removed));
-        }
+        let end = if removed > 0 && removed <= end.column.0 {
+            Point::new(end.line, Column(end.column.0 - removed))
+        } else {
+            end
+        };
         let text: String = full.chars().take(kept).collect();
-        if text.is_empty() {
-            return None;
-        }
-        Some(Url {
-            text,
-            spans: self.point_range_spans(start, end),
-        })
+        (text, end)
     }
 
     /// The inclusive column span of the linear grid range `start..=end` (reading
