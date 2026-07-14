@@ -2,7 +2,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use bviz_trace_profile::{LaneClass, Profile, Slice, SliceDetail, Span32, SpanRole, Str, Workload};
+use bviz_trace_profile::{
+    LaneClass, Profile, Slice, SliceDetail, Span32, SpanRole, Str, ThreadTrack, Workload,
+};
 use rustc_hash::{FxHashMap, FxHashSet};
 
 /// Which thread lanes an aggregation draws from, by the role their lane carries.
@@ -632,6 +634,19 @@ impl<'p> Flamer<'p> {
     }
 }
 
+/// Merge one lane's containment forest into `root`: each top-level span's
+/// duration adds to the root total, then merges in as a frame.
+fn merge_lane(root: &mut Builder, profile: &Profile, flamer: &Flamer, thread: &ThreadTrack) {
+    let slices = profile.slices(thread);
+    let details = profile.details(thread);
+    let forest = containment_forest(slices);
+    for ri in 0..forest.roots.len() {
+        let r = forest.roots[ri];
+        root.total_us += slices[r].dur_us;
+        flamer.merge_span(root, slices, details, &forest, r);
+    }
+}
+
 /// End time of a slice.
 fn end_us(slice: &Slice) -> i64 {
     slice.start_us + slice.dur_us
@@ -754,14 +769,7 @@ pub fn build_flame_graph_for_tracks(
             return;
         }
         let thread = &threads[i];
-        let slices = profile.slices(thread);
-        let details = profile.details(thread);
-        let forest = containment_forest(slices);
-        for ri in 0..forest.roots.len() {
-            let r = forest.roots[ri];
-            root.total_us += slices[r].dur_us;
-            flamer.merge_span(root, slices, details, &forest, r);
-        }
+        merge_lane(root, profile, &flamer, thread);
     });
     let mut root = fold_all(shards);
     seal(&mut root, profile)
@@ -804,14 +812,7 @@ pub(crate) fn class_trees<'p>(
             return;
         }
         let root = class_slot(trees, class);
-        let slices = profile.slices(thread);
-        let details = profile.details(thread);
-        let forest = containment_forest(slices);
-        for ri in 0..forest.roots.len() {
-            let r = forest.roots[ri];
-            root.total_us += slices[r].dur_us;
-            flamer.merge_span(root, slices, details, &forest, r);
-        }
+        merge_lane(root, profile, flamer, thread);
     });
 
     let mut buckets: Vec<(LaneClass, Vec<Builder>)> = Vec::new();
