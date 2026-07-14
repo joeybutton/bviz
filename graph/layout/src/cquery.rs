@@ -20,7 +20,7 @@ use bazel_query_proto::blaze_query::target::Discriminator;
 use crate::graph::{EdgeKind, Graph, Kind};
 use crate::intern::{Id, Names};
 use crate::label::{self, PackageHierarchy};
-use crate::query::label_and_kind;
+use crate::query::{self, label_and_kind};
 
 pub fn build(results: &[CqueryResult]) -> (Graph, Names) {
     let packages = package_keys(results);
@@ -48,17 +48,13 @@ pub(crate) fn package_keys(results: &[CqueryResult]) -> BTreeSet<(String, String
         .collect()
 }
 
-/// The labels of generated-file targets in this cquery, which a joint graph uses
-/// to recognize aquery output artifacts that are also targets.
 pub(crate) fn generated_labels(results: &[CqueryResult]) -> HashSet<String> {
-    results
-        .iter()
-        .flat_map(|r| r.results.iter())
-        .filter_map(|ct| ct.target.as_ref())
-        .filter_map(label_and_kind)
-        .filter(|(_, kind)| *kind == Kind::Artifact)
-        .map(|(label, _)| label.to_string())
-        .collect()
+    query::generated_labels(
+        results
+            .iter()
+            .flat_map(|r| r.results.iter())
+            .filter_map(|ct| ct.target.as_ref()),
+    )
 }
 
 /// Builds the cquery graph attaching its boxes to the `packages` hierarchy,

@@ -45,11 +45,13 @@ pub(crate) fn label_and_kind(target: &Target) -> Option<(&str, Kind)> {
     }
 }
 
-/// The labels of generated-file targets in this query, which a joint graph uses
-/// to recognize aquery output artifacts that are also targets.
-pub(crate) fn generated_labels(targets: &[Target]) -> HashSet<String> {
+/// The labels of generated-file targets among `targets`, which a joint graph
+/// uses to recognize aquery output artifacts that are also targets.
+pub(crate) fn generated_labels<'a>(
+    targets: impl IntoIterator<Item = &'a Target>,
+) -> HashSet<String> {
     targets
-        .iter()
+        .into_iter()
         .filter_map(label_and_kind)
         .filter(|(_, kind)| *kind == Kind::Artifact)
         .map(|(label, _)| label.to_string())
