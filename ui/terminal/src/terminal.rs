@@ -1332,6 +1332,24 @@ impl TerminalElement {
 
     /// Translucent tint over the selected cells; painted under the text so it
     /// stays legible.
+    /// Full-cell fill covering the inclusive column span `first..=last` on `row`.
+    fn span_fill(
+        bounds: Bounds<Pixels>,
+        metrics: &Metrics,
+        row: usize,
+        first: usize,
+        last: usize,
+        color: Rgba,
+    ) -> PaintQuad {
+        let x = bounds.left() + metrics.cell_width * first as f32;
+        let y = bounds.top() + metrics.line_height * row as f32;
+        let width = metrics.cell_width * (last - first + 1) as f32;
+        fill(
+            Bounds::new(point(x, y), size(width, metrics.line_height)),
+            color,
+        )
+    }
+
     fn selection_quads(
         selection: &[Option<(usize, usize)>],
         bounds: Bounds<Pixels>,
@@ -1342,13 +1360,7 @@ impl TerminalElement {
         let mut quads = Vec::new();
         for (r, span) in selection.iter().enumerate() {
             let Some((first, last)) = span else { continue };
-            let x = bounds.left() + metrics.cell_width * *first as f32;
-            let y = bounds.top() + metrics.line_height * r as f32;
-            let width = metrics.cell_width * (*last - *first + 1) as f32;
-            quads.push(fill(
-                Bounds::new(point(x, y), size(width, metrics.line_height)),
-                selection_color,
-            ));
+            quads.push(Self::span_fill(bounds, metrics, r, *first, *last, selection_color));
         }
         quads
     }
@@ -1361,10 +1373,7 @@ impl TerminalElement {
     ) -> Vec<PaintQuad> {
         let mut quads = Vec::new();
         for (r, spans) in search.iter().enumerate() {
-            let y = bounds.top() + metrics.line_height * r as f32;
             for &(first, last, focused) in spans {
-                let x = bounds.left() + metrics.cell_width * first as f32;
-                let width = metrics.cell_width * (last - first + 1) as f32;
                 let color = if focused {
                     Rgba {
                         r: 0.85,
@@ -1380,10 +1389,7 @@ impl TerminalElement {
                         a: 0.30,
                     }
                 };
-                quads.push(fill(
-                    Bounds::new(point(x, y), size(width, metrics.line_height)),
-                    color,
-                ));
+                quads.push(Self::span_fill(bounds, metrics, r, first, last, color));
             }
         }
         quads
