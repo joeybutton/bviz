@@ -1064,14 +1064,7 @@ impl TraceView {
             panel_height,
             gutter_width,
         );
-        let flame_total = flame_total_height(&lanes);
-        let regions = Regions::new(
-            viewport.get(),
-            profile.counters().len(),
-            panel_height,
-            gutter_width,
-            flame_total,
-        );
+        let regions = self.regions();
         let origin = viewport.get().origin;
         let canvas = canvas(
             prepaint,
@@ -2015,24 +2008,34 @@ impl TraceView {
         }
     }
 
+    /// [`Regions`] for the current viewport, panel and gutter sizes, the loaded
+    /// profile's counter count, and the flame lanes' total height.
+    fn regions(&self) -> Regions {
+        let n_counters = match &self.source {
+            Source::Loaded(p) => p.counters().len(),
+            _ => 0,
+        };
+        let flame_total = self
+            .lane_layout()
+            .map(|l| flame_total_height(&l))
+            .unwrap_or(0.0);
+        Regions::new(
+            self.viewport.get(),
+            n_counters,
+            self.panel_height,
+            self.gutter_width,
+            flame_total,
+        )
+    }
+
     /// The pixel ceiling for the flame chart's lane scroll: the thread-lane
     /// height past the flame region's on-screen height.
     fn max_scroll(&self) -> f32 {
-        let Source::Loaded(p) = &self.source else {
-            return 0.0;
-        };
         let total = self
             .lane_layout()
             .map(|l| flame_total_height(&l))
             .unwrap_or(0.0);
-        let regions = Regions::new(
-            self.viewport.get(),
-            p.counters().len(),
-            self.panel_height,
-            self.gutter_width,
-            total,
-        );
-        (total - regions.flame_h()).max(0.0)
+        (total - self.regions().flame_h()).max(0.0)
     }
 
     /// The pixel ceiling for the flame-graph panel's vertical scroll: the tree's
@@ -2641,22 +2644,14 @@ impl Render for TraceView {
 
 impl TraceView {
     fn on_scroll_wheel(&mut self, e: &ScrollWheelEvent, _: &mut Window, cx: &mut Context<Self>) {
-        let Some(lanes) = self.lane_layout() else {
+        if self.lane_layout().is_none() {
             return;
-        };
+        }
         let Source::Loaded(profile) = &self.source else {
             return;
         };
         let span = profile.span();
-        let vp = self.viewport.get();
-        let flame_total = flame_total_height(&lanes);
-        let regions = Regions::new(
-            vp,
-            profile.counters().len(),
-            self.panel_height,
-            self.gutter_width,
-            flame_total,
-        );
+        let regions = self.regions();
         let time_w = regions.time_w;
         let content_left = regions.content_left;
         let (dx, dy) = match e.delta {
@@ -2735,20 +2730,10 @@ impl TraceView {
     /// shares the time axis). The flame-graph and stats panels and the tab bar do
     /// not map to time, so the crosshair does not extend over them.
     fn in_content(&self, pos: Point<Pixels>) -> bool {
-        let Some(lanes) = self.lane_layout() else {
+        if self.lane_layout().is_none() {
             return false;
-        };
-        let Source::Loaded(profile) = &self.source else {
-            return false;
-        };
-        let flame_total = flame_total_height(&lanes);
-        let regions = Regions::new(
-            self.viewport.get(),
-            profile.counters().len(),
-            self.panel_height,
-            self.gutter_width,
-            flame_total,
-        );
+        }
+        let regions = self.regions();
         let x = f32::from(pos.x);
         let y = f32::from(pos.y);
         if x < regions.content_left || x >= regions.time_right {
@@ -2770,14 +2755,7 @@ impl TraceView {
         let Source::Loaded(profile) = &self.source else {
             return None;
         };
-        let flame_total = flame_total_height(&layout);
-        let regions = Regions::new(
-            self.viewport.get(),
-            profile.counters().len(),
-            self.panel_height,
-            self.gutter_width,
-            flame_total,
-        );
+        let regions = self.regions();
         let x = f32::from(pos.x);
         let y = f32::from(pos.y);
         // The flame lanes, past the gutter, clear of the reserved vertical-bar
@@ -2829,19 +2807,9 @@ impl TraceView {
     /// The group header band or show-more row at `pos`, if the press lands on one
     /// (across the full chart width, gutter included).
     fn group_row_at(&self, pos: Point<Pixels>) -> Option<GroupHit> {
-        let layout = self.lane_layout()?;
+        self.lane_layout()?;
         let chrome = self.group_chrome()?;
-        let Source::Loaded(profile) = &self.source else {
-            return None;
-        };
-        let flame_total = flame_total_height(&layout);
-        let regions = Regions::new(
-            self.viewport.get(),
-            profile.counters().len(),
-            self.panel_height,
-            self.gutter_width,
-            flame_total,
-        );
+        let regions = self.regions();
         let x = f32::from(pos.x);
         let y = f32::from(pos.y);
         let gutter_left = regions.content_left - self.gutter_width;
@@ -2863,17 +2831,7 @@ impl TraceView {
 
     fn track_label_at(&self, pos: Point<Pixels>) -> Option<usize> {
         let layout = self.lane_layout()?;
-        let Source::Loaded(profile) = &self.source else {
-            return None;
-        };
-        let flame_total = flame_total_height(&layout);
-        let regions = Regions::new(
-            self.viewport.get(),
-            profile.counters().len(),
-            self.panel_height,
-            self.gutter_width,
-            flame_total,
-        );
+        let regions = self.regions();
         let x = f32::from(pos.x);
         let y = f32::from(pos.y);
         let gutter_left = regions.content_left - self.gutter_width;
@@ -3175,21 +3133,14 @@ fn on_drag(view: &mut TraceView, event: &MouseMoveEvent, cx: &mut Context<TraceV
         Drag::Pan => {
             let dx = f32::from(event.position.x) - f32::from(view.last_mouse.x);
             let dy = f32::from(event.position.y) - f32::from(view.last_mouse.y);
-            let Some(lanes) = view.lane_layout() else {
+            if view.lane_layout().is_none() {
                 return;
-            };
+            }
             let Source::Loaded(profile) = &view.source else {
                 return;
             };
             let span = profile.span();
-            let flame_total = flame_total_height(&lanes);
-            let regions = Regions::new(
-                view.viewport.get(),
-                profile.counters().len(),
-                view.panel_height,
-                view.gutter_width,
-                flame_total,
-            );
+            let regions = view.regions();
             let mut v = view.view.get();
             v.pan_px(dx);
             v.clamp_to(span, regions.time_w, EDGE_MARGIN_PX);
@@ -3290,21 +3241,14 @@ fn menu_thumb_to(view: &mut TraceView, pos: Point<Pixels>, grab: f32) {
 
 /// Maps a horizontal thumb drag back to a pan start time, then clamps the view.
 fn pan_thumb_to(view: &mut TraceView, pos: Point<Pixels>, grab: f32) {
-    let Some(lanes) = view.lane_layout() else {
+    if view.lane_layout().is_none() {
         return;
-    };
+    }
     let Source::Loaded(profile) = &view.source else {
         return;
     };
     let span = profile.span();
-    let flame_total = flame_total_height(&lanes);
-    let regions = Regions::new(
-        view.viewport.get(),
-        profile.counters().len(),
-        view.panel_height,
-        view.gutter_width,
-        flame_total,
-    );
+    let regions = view.regions();
     let Some(bar) = view.hbar.get() else {
         return;
     };
