@@ -3,8 +3,11 @@
 
 pub use bazel_build_event_proto as bep;
 
+use std::ops::RangeInclusive;
+
 use alacritty_terminal::event::VoidListener;
-use alacritty_terminal::grid::Dimensions;
+use alacritty_terminal::grid::{Dimensions, Grid};
+use alacritty_terminal::index::{Column, Line};
 use alacritty_terminal::term::{Config, Term};
 use alacritty_terminal::vte::ansi::Processor;
 
@@ -27,6 +30,16 @@ fn build_term<D: Dimensions>(dimensions: &D, bytes: &[u8]) -> Term<VoidListener>
     let mut processor: Processor = Processor::new();
     processor.advance(&mut term, bytes);
     term
+}
+
+/// Clone `lines` of the grid, each as its first `columns` cells, top to bottom.
+fn snapshot_rows(grid: &Grid<Cell>, lines: RangeInclusive<i32>, columns: usize) -> Vec<Vec<Cell>> {
+    lines
+        .map(|line| {
+            let row = &grid[Line(line)];
+            (0..columns).map(|col| row[Column(col)].clone()).collect()
+        })
+        .collect()
 }
 
 pub use alacritty_terminal::grid::Scroll;

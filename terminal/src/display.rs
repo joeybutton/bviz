@@ -36,9 +36,9 @@ impl Url {
     }
 }
 
-use crate::build_term;
 use crate::output::BuildOutput;
 use crate::screen::Screen;
+use crate::{build_term, snapshot_rows};
 
 /// A build's reconstructed output, serialized to a clean ANSI stream ready to
 /// replay into a window-sized terminal. The reconstruction is window
@@ -517,14 +517,7 @@ impl Terminal {
     pub fn viewport(&self) -> Vec<Vec<Cell>> {
         let grid = self.term.grid();
         let top = -(grid.display_offset() as i32);
-        (0..self.rows)
-            .map(|v| {
-                let row = &grid[Line(top + v as i32)];
-                (0..self.columns)
-                    .map(|col| row[Column(col)].clone())
-                    .collect()
-            })
-            .collect()
+        snapshot_rows(grid, top..=top + self.rows as i32 - 1, self.columns)
     }
 }
 

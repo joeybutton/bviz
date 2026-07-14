@@ -6,12 +6,11 @@
 //! character grid: the build output as it finally appeared.
 
 use alacritty_terminal::grid::Dimensions;
-use alacritty_terminal::index::{Column, Line};
 use alacritty_terminal::term::cell::{Cell, Flags};
 use alacritty_terminal::vte::ansi::{Color, NamedColor, Rgb};
 
-use crate::build_term;
 use crate::output::BuildOutput;
+use crate::{build_term, snapshot_rows};
 
 /// Rows in the internal emulator. The build event stream carries the terminal
 /// width but not its height, and Bazel's progress repaints move the cursor only
@@ -62,12 +61,11 @@ impl Screen {
         let term = build_term(&Size { columns }, &lf_to_crlf(bytes));
 
         let grid = term.grid();
-        let mut rows: Vec<Vec<Cell>> = (grid.topmost_line().0..=grid.bottommost_line().0)
-            .map(|line| {
-                let row = &grid[Line(line)];
-                (0..columns).map(|col| row[Column(col)].clone()).collect()
-            })
-            .collect();
+        let mut rows = snapshot_rows(
+            grid,
+            grid.topmost_line().0..=grid.bottommost_line().0,
+            columns,
+        );
 
         while rows.last().is_some_and(|row| is_blank(row)) {
             rows.pop();
