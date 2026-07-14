@@ -15,8 +15,8 @@ pub struct ScopeAggregate {
     pub flame: FlameGraph,
     /// One row per distinct frame name; unordered, indexed by `default_order`.
     pub stats: Vec<StatRow>,
-    /// Indices into `stats` in the default display order: total descending,
-    /// ties by key text ascending.
+    /// Indices into `stats` in the default display order (see
+    /// [`default_order`]).
     pub default_order: Vec<u32>,
     /// Summed `total_us` over `stats` — the denominator of a row's share.
     pub grand_total: i64,
@@ -41,21 +41,7 @@ impl ScopeAggregate {
 
     fn from_graph(flame: FlameGraph) -> ScopeAggregate {
         let stats = stats_from_flame(&flame);
-        // Decorate-sort on one packed integer key per row — total descending
-        // (an order-preserving i64→u64 bias, inverted) above the key rank,
-        // which orders exactly as the key text does, above the row index. No
-        // two rows share a rank, so the order is total, and no comparison
-        // resolves a string or chases a row pointer.
-        let mut keyed: Vec<u128> = stats
-            .iter()
-            .enumerate()
-            .map(|(i, r)| {
-                let total_desc = !((r.total_us as u64) ^ (1 << 63));
-                ((total_desc as u128) << 64) | ((r.rank as u128) << 32) | i as u128
-            })
-            .collect();
-        keyed.sort_unstable();
-        let default_order: Vec<u32> = keyed.into_iter().map(|k| k as u32).collect();
+        let default_order = default_order(&stats);
         let grand_total = stats.iter().map(|r| r.total_us).sum();
         ScopeAggregate {
             flame,
@@ -64,6 +50,29 @@ impl ScopeAggregate {
             grand_total,
         }
     }
+}
+
+/// Indices into `stats` in the default display order: `total_us` descending,
+/// ties broken by key rank ascending — which orders exactly as the key text
+/// does — then by row index. Each row decorate-sorts on one packed integer key:
+/// the total in the high bits as an order-preserving `i64`→`u64` bias inverted
+/// for descending, above the rank, above the index. No two rows share an index,
+/// so the order is total, and no comparison resolves a string or chases a row
+/// pointer.
+fn default_order(stats: &[StatRow]) -> Vec<u32> {
+    const RANK_SHIFT: u32 = u32::BITS;
+    const TOTAL_SHIFT: u32 = 2 * u32::BITS;
+    const SIGN_BIT: u64 = 1 << (u64::BITS - 1);
+    let mut keyed: Vec<u128> = stats
+        .iter()
+        .enumerate()
+        .map(|(i, r)| {
+            let total_desc = !((r.total_us as u64) ^ SIGN_BIT);
+            ((total_desc as u128) << TOTAL_SHIFT) | ((r.rank as u128) << RANK_SHIFT) | i as u128
+        })
+        .collect();
+    keyed.sort_unstable();
+    keyed.into_iter().map(|k| k as u32).collect()
 }
 
 /// The aggregates of every flame scope, built from one pass over the profile:
