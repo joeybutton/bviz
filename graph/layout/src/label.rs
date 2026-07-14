@@ -45,6 +45,12 @@ pub(crate) fn config_key(config_id: u32, checksum: Option<&str>) -> String {
     }
 }
 
+/// The node id of a configured target: `ct:{label}#{config_key}`. Keyed by
+/// `config_key` so the aquery and cquery builders emit the same id and merge.
+pub(crate) fn ct_node_id(label: &str, config_key: &str) -> String {
+    format!("ct:{label}#{config_key}")
+}
+
 #[derive(Default)]
 struct Trie {
     children: BTreeMap<String, Trie>,

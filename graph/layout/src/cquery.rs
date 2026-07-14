@@ -116,7 +116,7 @@ pub(crate) fn build_with_packages(
                     .get(&config_id)
                     .cloned()
                     .unwrap_or_else(|| format!("config {config_id}"));
-                let id = names.intern(&ct_node_id(label, &key));
+                let id = names.intern(&label::ct_node_id(label, &key));
                 graph.add_node(
                     id,
                     mnemonic,
@@ -147,7 +147,7 @@ pub(crate) fn build_with_packages(
         let Some(rule) = target.rule.as_ref() else {
             continue;
         };
-        let consumer = names.intern(&ct_node_id(
+        let consumer = names.intern(&label::ct_node_id(
             &rule.name,
             &label::config_key(
                 ct.configuration_id,
@@ -183,10 +183,6 @@ pub(crate) fn build_with_packages(
     graph
 }
 
-fn ct_node_id(label: &str, config_key: &str) -> String {
-    format!("ct:{label}#{config_key}")
-}
-
 /// The node a configuration-resolved dependency lands on: the dependency's
 /// configured target when that configuration is present, its source/generated
 /// leaf when the dependency carries no configuration, and the dependency's
@@ -205,7 +201,7 @@ fn resolve_configured_dep(
         Some(config_id) if config_id != 0 => {
             let key = label::config_key(config_id, config_checksum.get(&config_id).map(String::as_str));
             if ct_ids.contains(&(dep_label.to_string(), key.clone())) {
-                Some(names.intern(&ct_node_id(dep_label, &key)))
+                Some(names.intern(&label::ct_node_id(dep_label, &key)))
             } else {
                 target_box.get(dep_label).copied()
             }

@@ -324,9 +324,9 @@ fn target_ct_box(
     config_by_id: &HashMap<u32, &Configuration>,
     names: &mut Names,
 ) -> Id {
-    let ct_node_id = names.intern(&format!(
-        "ct:{full_label}#{}",
-        label::config_key(config_id, config_by_id.get(&config_id).map(|c| c.checksum.as_str()))
+    let ct_node_id = names.intern(&label::ct_node_id(
+        full_label,
+        &label::config_key(config_id, config_by_id.get(&config_id).map(|c| c.checksum.as_str())),
     ));
     if !ct_boxes.insert(ct_node_id) {
         return ct_node_id;
