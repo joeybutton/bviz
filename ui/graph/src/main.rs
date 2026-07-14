@@ -9,10 +9,10 @@ use bviz_ui_components::{load_in_background, track_drag, Axis, Scrollbar};
 use bviz_ui_shell::Chrome;
 use clap::Parser;
 use gpui::{
-    Animation, AnimationExt, App, BorderStyle, Bounds, Context, Div, Entity, FocusHandle,
+    App, BorderStyle, Bounds, Context, Div, Entity, FocusHandle,
     IntoElement, KeyDownEvent, Length, MouseButton, MouseDownEvent, Hsla, MouseMoveEvent, MouseUpEvent, PathBuilder,
     Pixels, Point, Render, Rgba, ScrollDelta, ScrollWheelEvent, Stateful, Task, TextAlign, Size,
-    Transformation, Window, canvas, div, percentage, point, prelude::*, px, quad, rems, rgb, size,
+    Window, canvas, div, point, prelude::*, px, quad, rems, rgb, size,
 };
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -670,18 +670,7 @@ impl GraphView {
             .justify_center()
             .items_center()
             .gap_3()
-            .child(
-                bviz_ui_assets::icon("circle-notch")
-                    .size(px(36.))
-                    .text_color(colors.text)
-                    .with_animation(
-                        "spinner",
-                        Animation::new(Duration::from_millis(900)).repeat(),
-                        |icon, delta| {
-                            icon.with_transformation(Transformation::rotate(percentage(delta)))
-                        },
-                    ),
-            )
+            .child(bviz_ui_components::spinner("spinner", px(36.), colors.text))
             .child(div().text_sm().text_color(colors.disabled).child("Loading…"))
     }
 
@@ -966,18 +955,11 @@ fn relaying_indicator(relaying: bool, palette: &Palette) -> Option<Div> {
             .py_1()
             .rounded_md()
             .bg(palette.container_fill)
-            .child(
-                bviz_ui_assets::icon("circle-notch")
-                    .size(px(14.))
-                    .text_color(palette.label)
-                    .with_animation(
-                        "relaying-spinner",
-                        Animation::new(Duration::from_millis(900)).repeat(),
-                        |icon, delta| {
-                            icon.with_transformation(Transformation::rotate(percentage(delta)))
-                        },
-                    ),
-            )
+            .child(bviz_ui_components::spinner(
+                "relaying-spinner",
+                px(14.),
+                palette.label,
+            ))
             .child(div().text_xs().text_color(palette.label).child("laying out…"))
     })
 }
