@@ -95,14 +95,48 @@ pub struct LaidOut {
 pub fn layout(graph: &Graph) -> LaidOut {
     initialize_plain_java_layout();
 
-    // Children indexed by parent id; a node that appears as a key is a container.
+    let children_of = children_by_parent(graph);
+    let (root, elk_of) = build_elk_graph(graph, &children_of);
+    let edges = route_edges(graph, &elk_of, &root);
+
+    let mut engine = RecursiveGraphLayoutEngine::new();
+    let mut monitor = BasicProgressMonitor::new();
+    engine.layout(&root, &mut monitor);
+
+    let boxes = collect_boxes(graph, &children_of, &elk_of);
+    let connectors = collect_connectors(edges);
+
+    let width = boxes.iter().map(|b| b.x + b.width).fold(0.0, f64::max);
+    let height = boxes.iter().map(|b| b.y + b.height).fold(0.0, f64::max);
+
+    LaidOut {
+        boxes,
+        connectors,
+        full_edges: Vec::new(),
+        width,
+        height,
+    }
+}
+
+/// Children indexed by parent id; a node that appears as a key is a container.
+fn children_by_parent(graph: &Graph) -> HashMap<Id, Vec<&Node>> {
     let mut children_of: HashMap<Id, Vec<&Node>> = HashMap::new();
     for node in &graph.nodes {
         if let Some(parent) = node.parent {
             children_of.entry(parent).or_default().push(node);
         }
     }
+    children_of
+}
 
+/// Builds the ELK graph mirroring the containment forest and maps each graph node
+/// to its ELK node by id. The root and every container carry the layout options,
+/// since INCLUDE_CHILDREN lays each container out as its own nested graph reading
+/// its own properties.
+fn build_elk_graph<'g>(
+    graph: &'g Graph,
+    children_of: &HashMap<Id, Vec<&'g Node>>,
+) -> (ElkNodeRef, HashMap<Id, ElkNodeRef>) {
     // Lay the dependency flow out top-to-bottom and route every edge through the
     // single hierarchy-spanning layered pass, so a node sits below the inputs it
     // consumes and cross-container edges run orthogonally between subgraphs.
@@ -112,11 +146,10 @@ pub fn layout(graph: &Graph) -> LaidOut {
     set_property(&root, CoreOptions::HIERARCHY_HANDLING, HierarchyHandling::IncludeChildren);
     apply_options(&root);
 
-    // Build the ELK node tree, remembering each graph node's ELK node by id.
     let mut elk_of: HashMap<Id, ElkNodeRef> = HashMap::new();
     for node in &graph.nodes {
         if node.parent.is_none() {
-            build_node(node, &root, &children_of, &mut elk_of);
+            build_node(node, &root, children_of, &mut elk_of);
         }
     }
     for node in &graph.nodes {
@@ -124,12 +157,21 @@ pub fn layout(graph: &Graph) -> LaidOut {
             apply_options(&elk_of[&node.id]);
         }
     }
+    (root, elk_of)
+}
 
-    // Route one edge per ordered node pair, not one per provenance: the parallel
-    // query/cquery/aquery edges between the same two boxes would each cost ELK a
-    // full route, and that edge count is what dominates layout time on a dense
-    // view. Collect the distinct kinds per pair (keyed in canonical id order) so
-    // the renderer can still draw each along the shared route.
+/// Routes one ELK edge per ordered node pair, collapsing the parallel provenance
+/// edges between the same two boxes into a single route: the parallel
+/// query/cquery/aquery edges would each cost ELK a full route, and that edge count
+/// is what dominates layout time on a dense view. The distinct kinds per pair ride
+/// along so the renderer can still draw each along the shared route.
+fn route_edges(
+    graph: &Graph,
+    elk_of: &HashMap<Id, ElkNodeRef>,
+    root: &ElkNodeRef,
+) -> Vec<(ElkEdgeRef, Vec<EdgeKind>, Id, Id)> {
+    // Ordered by id pair so the routed edges, and thus the connectors, come out
+    // in a deterministic order regardless of input edge order.
     let mut kinds_of: BTreeMap<(Id, Id), Vec<EdgeKind>> = BTreeMap::new();
     for edge in &graph.edges {
         if !elk_of.contains_key(&edge.from) || !elk_of.contains_key(&edge.to) {
@@ -144,7 +186,7 @@ pub fn layout(graph: &Graph) -> LaidOut {
     // single sweep reads about as well, so spend the default effort only on views
     // sparse enough for it to matter and finish quickly.
     if kinds_of.len() > DENSE_ROUTED_EDGES {
-        set_property(&root, LayeredOptions::THOROUGHNESS, 1);
+        set_property(root, LayeredOptions::THOROUGHNESS, 1);
     }
     // create_simple_edge places each edge in the common container of its
     // endpoints, which is where ELK then routes and reports it.
@@ -162,12 +204,11 @@ pub fn layout(graph: &Graph) -> LaidOut {
             to_id,
         ));
     }
+    edges
+}
 
-    let mut engine = RecursiveGraphLayoutEngine::new();
-    let mut monitor = BasicProgressMonitor::new();
-    engine.layout(&root, &mut monitor);
-
-    // Containment depth per node, used only to draw parents before children.
+/// Containment depth per node, used only to draw parents before children.
+fn node_depths(graph: &Graph) -> HashMap<Id, usize> {
     let parent_of: HashMap<Id, Id> = graph
         .nodes
         .iter()
@@ -183,7 +224,17 @@ pub fn layout(graph: &Graph) -> LaidOut {
         }
         depth_of.insert(node.id, depth);
     }
+    depth_of
+}
 
+/// Reads each node's laid-out box in absolute coordinates, ordered
+/// parent-before-child so a renderer can draw containers under their children.
+fn collect_boxes(
+    graph: &Graph,
+    children_of: &HashMap<Id, Vec<&Node>>,
+    elk_of: &HashMap<Id, ElkNodeRef>,
+) -> Vec<Box> {
+    let depth_of = node_depths(graph);
     let mut boxes: Vec<(usize, Box)> = Vec::with_capacity(graph.nodes.len());
     for node in &graph.nodes {
         let elk = &elk_of[&node.id];
@@ -204,11 +255,14 @@ pub fn layout(graph: &Graph) -> LaidOut {
             },
         ));
     }
-    // Parent-before-child so a renderer can draw containers under their children.
     boxes.sort_by_key(|(depth, _)| *depth);
-    let boxes: Vec<Box> = boxes.into_iter().map(|(_, b)| b).collect();
+    boxes.into_iter().map(|(_, b)| b).collect()
+}
 
-    let connectors = edges
+/// Builds a drawable connector for each routed pair, dropping any ELK left without
+/// a polyline of at least a start and an end.
+fn collect_connectors(edges: Vec<(ElkEdgeRef, Vec<EdgeKind>, Id, Id)>) -> Vec<Connector> {
+    edges
         .into_iter()
         .filter_map(|(edge, kinds, from, to)| {
             connector(&edge).map(|points| Connector {
@@ -218,18 +272,7 @@ pub fn layout(graph: &Graph) -> LaidOut {
                 to,
             })
         })
-        .collect();
-
-    let width = boxes.iter().map(|b| b.x + b.width).fold(0.0, f64::max);
-    let height = boxes.iter().map(|b| b.y + b.height).fold(0.0, f64::max);
-
-    LaidOut {
-        boxes,
-        connectors,
-        full_edges: Vec::new(),
-        width,
-        height,
-    }
+        .collect()
 }
 
 /// Creates the ELK node for `node` under `parent` and recurses into its subtree,
