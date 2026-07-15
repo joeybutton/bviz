@@ -66,28 +66,7 @@ pub(crate) fn build_with_packages(
     labeled_outputs: &HashSet<String>,
     names: &mut Names,
 ) -> Graph {
-    let mut artifacts: Vec<&Artifact> = Vec::new();
-    let mut actions: Vec<&Action> = Vec::new();
-    let mut targets: Vec<&Target> = Vec::new();
-    let mut dep_sets: Vec<&DepSetOfFiles> = Vec::new();
-    let mut configurations: Vec<&Configuration> = Vec::new();
-    let mut path_fragments: Vec<&PathFragment> = Vec::new();
-    for c in containers {
-        artifacts.extend(c.artifacts.iter());
-        actions.extend(c.actions.iter());
-        targets.extend(c.targets.iter());
-        dep_sets.extend(c.dep_set_of_files.iter());
-        configurations.extend(c.configuration.iter());
-        path_fragments.extend(c.path_fragments.iter());
-    }
-
-    let artifact_by_id: HashMap<u32, &Artifact> = artifacts.iter().map(|a| (a.id, *a)).collect();
-    let fragment_by_id: HashMap<u32, &PathFragment> =
-        path_fragments.iter().map(|p| (p.id, *p)).collect();
-    let target_by_id: HashMap<u32, &Target> = targets.iter().map(|t| (t.id, *t)).collect();
-    let config_by_id: HashMap<u32, &Configuration> =
-        configurations.iter().map(|c| (c.id, *c)).collect();
-    let depset_by_id: HashMap<u32, &DepSetOfFiles> = dep_sets.iter().map(|d| (d.id, *d)).collect();
+    let index = Index::build(containers);
 
     let mut graph = Graph::new();
     let hierarchy = PackageHierarchy::build(packages, &mut graph, names);
@@ -99,9 +78,10 @@ pub(crate) fn build_with_packages(
     let mut producer_node_id: HashMap<u32, Id> = HashMap::new();
 
     // Pass 1: actions and the output artifacts they produce.
-    for (i, action) in actions.iter().enumerate() {
+    for (i, action) in index.actions.iter().enumerate() {
         let config_id = action.configuration_id;
-        let rule_label = target_by_id
+        let rule_label = index
+            .target_by_id
             .get(&action.target_id)
             .map(|t| t.label.clone())
             .unwrap_or_else(|| format!("target {}", action.target_id));
@@ -113,62 +93,37 @@ pub(crate) fn build_with_packages(
             &hierarchy,
             &mut target_boxes,
             &mut ct_boxes,
-            &config_by_id,
+            &index,
             names,
         );
         let action_id = names.intern(&format!("action{i}"));
         graph.add_node(action_id, action.mnemonic.clone(), Kind::Action, Some(ct_id));
         for &out in &action.output_ids {
-            let path = full_path(out, &artifact_by_id, &fragment_by_id);
-            // A labeled generated output nests under its own target's per-config
-            // box; an unlabeled one sits directly under the producing rule's box.
-            let art_id = match generated_label(&hierarchy, &path)
-                .filter(|label| labeled_outputs.contains(label))
-            {
-                Some(out_label) => {
-                    let out_ct = target_ct_box(
-                        &out_label,
-                        Kind::Artifact,
-                        config_id,
-                        &mut graph,
-                        &hierarchy,
-                        &mut target_boxes,
-                        &mut ct_boxes,
-                        &config_by_id,
-                        names,
-                    );
-                    let id = names.intern(&format!(
-                        "artifact:{out_label}#{}",
-                        label::config_key(
-                            config_id,
-                            config_by_id.get(&config_id).map(|c| c.checksum.as_str())
-                        )
-                    ));
-                    graph.add_node(
-                        id,
-                        basename(out, &artifact_by_id, &fragment_by_id),
-                        Kind::Artifact,
-                        Some(out_ct),
-                    );
-                    id
-                }
-                None => {
-                    let id = names.intern(&format!("artifact{out}"));
-                    graph.add_node(
-                        id,
-                        basename(out, &artifact_by_id, &fragment_by_id),
-                        Kind::Artifact,
-                        Some(ct_id),
-                    );
-                    id
-                }
-            };
+            let art_id = output_artifact(
+                out,
+                ct_id,
+                config_id,
+                &mut graph,
+                &hierarchy,
+                &index,
+                labeled_outputs,
+                &mut target_boxes,
+                &mut ct_boxes,
+                names,
+            );
             producer_node_id.insert(out, art_id);
             graph.add_edge(action_id, art_id, EdgeKind::Aquery);
         }
     }
 
     // Pass 2: wire each action's inputs, flattening its depsets into direct edges.
+    let Index {
+        actions,
+        artifact_by_id,
+        fragment_by_id,
+        depset_by_id,
+        ..
+    } = index;
     let mut wiring = Wiring {
         seen_edge: HashSet::new(),
         source_nodes,
@@ -189,6 +144,102 @@ pub(crate) fn build_with_packages(
     }
 
     graph
+}
+
+/// The actions to walk plus the by-id lookups box creation and input wiring
+/// resolve against, gathered across every container.
+struct Index<'a> {
+    actions: Vec<&'a Action>,
+    artifact_by_id: HashMap<u32, &'a Artifact>,
+    fragment_by_id: HashMap<u32, &'a PathFragment>,
+    target_by_id: HashMap<u32, &'a Target>,
+    config_by_id: HashMap<u32, &'a Configuration>,
+    depset_by_id: HashMap<u32, &'a DepSetOfFiles>,
+}
+
+impl<'a> Index<'a> {
+    fn build(containers: &'a [ActionGraphContainer]) -> Index<'a> {
+        let mut artifacts: Vec<&Artifact> = Vec::new();
+        let mut actions: Vec<&Action> = Vec::new();
+        let mut targets: Vec<&Target> = Vec::new();
+        let mut dep_sets: Vec<&DepSetOfFiles> = Vec::new();
+        let mut configurations: Vec<&Configuration> = Vec::new();
+        let mut path_fragments: Vec<&PathFragment> = Vec::new();
+        for c in containers {
+            artifacts.extend(c.artifacts.iter());
+            actions.extend(c.actions.iter());
+            targets.extend(c.targets.iter());
+            dep_sets.extend(c.dep_set_of_files.iter());
+            configurations.extend(c.configuration.iter());
+            path_fragments.extend(c.path_fragments.iter());
+        }
+        Index {
+            artifact_by_id: artifacts.iter().map(|a| (a.id, *a)).collect(),
+            fragment_by_id: path_fragments.iter().map(|p| (p.id, *p)).collect(),
+            target_by_id: targets.iter().map(|t| (t.id, *t)).collect(),
+            config_by_id: configurations.iter().map(|c| (c.id, *c)).collect(),
+            depset_by_id: dep_sets.iter().map(|d| (d.id, *d)).collect(),
+            actions,
+        }
+    }
+}
+
+/// The leaf node for one output artifact `out` of an action whose box is
+/// `producing_ct`. A labeled generated output nests under its own target's
+/// per-config box; an unlabeled one sits directly under the producing rule's box.
+#[allow(clippy::too_many_arguments)]
+fn output_artifact(
+    out: u32,
+    producing_ct: Id,
+    config_id: u32,
+    graph: &mut Graph,
+    hierarchy: &PackageHierarchy,
+    index: &Index,
+    labeled_outputs: &HashSet<String>,
+    target_boxes: &mut HashSet<Id>,
+    ct_boxes: &mut HashSet<Id>,
+    names: &mut Names,
+) -> Id {
+    let path = full_path(out, &index.artifact_by_id, &index.fragment_by_id);
+    match generated_label(hierarchy, &path).filter(|label| labeled_outputs.contains(label)) {
+        Some(out_label) => {
+            let out_ct = target_ct_box(
+                &out_label,
+                Kind::Artifact,
+                config_id,
+                graph,
+                hierarchy,
+                target_boxes,
+                ct_boxes,
+                index,
+                names,
+            );
+            let id = names.intern(&format!(
+                "artifact:{out_label}#{}",
+                label::config_key(
+                    config_id,
+                    index.config_by_id.get(&config_id).map(|c| c.checksum.as_str())
+                )
+            ));
+            graph.add_node(
+                id,
+                basename(out, &index.artifact_by_id, &index.fragment_by_id),
+                Kind::Artifact,
+                Some(out_ct),
+            );
+            id
+        }
+        None => {
+            let id = names.intern(&format!("artifact{out}"));
+            graph.add_node(
+                id,
+                basename(out, &index.artifact_by_id, &index.fragment_by_id),
+                Kind::Artifact,
+                Some(producing_ct),
+            );
+            id
+        }
+    }
 }
 
 /// Mutable state threaded through the recursive input wiring.
@@ -321,12 +372,15 @@ fn target_ct_box(
     hierarchy: &PackageHierarchy,
     target_boxes: &mut HashSet<Id>,
     ct_boxes: &mut HashSet<Id>,
-    config_by_id: &HashMap<u32, &Configuration>,
+    index: &Index,
     names: &mut Names,
 ) -> Id {
     let ct_node_id = names.intern(&label::ct_node_id(
         full_label,
-        &label::config_key(config_id, config_by_id.get(&config_id).map(|c| c.checksum.as_str())),
+        &label::config_key(
+            config_id,
+            index.config_by_id.get(&config_id).map(|c| c.checksum.as_str()),
+        ),
     ));
     if !ct_boxes.insert(ct_node_id) {
         return ct_node_id;
@@ -343,7 +397,8 @@ fn target_ct_box(
         );
     }
 
-    let mnemonic = config_by_id
+    let mnemonic = index
+        .config_by_id
         .get(&config_id)
         .map(|c| c.mnemonic.clone())
         .filter(|m| !m.is_empty())
