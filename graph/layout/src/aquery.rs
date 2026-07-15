@@ -71,48 +71,38 @@ pub(crate) fn build_with_packages(
     let mut graph = Graph::new();
     let hierarchy = PackageHierarchy::build(packages, &mut graph, names);
 
-    let mut target_boxes: HashSet<Id> = HashSet::new();
-    let mut ct_boxes: HashSet<Id> = HashSet::new();
     let source_nodes: HashSet<Id> = HashSet::new();
     // Per produced artifact, the leaf node that represents it.
     let mut producer_node_id: HashMap<u32, Id> = HashMap::new();
 
     // Pass 1: actions and the output artifacts they produce.
-    for (i, action) in index.actions.iter().enumerate() {
-        let config_id = action.configuration_id;
-        let rule_label = index
-            .target_by_id
-            .get(&action.target_id)
-            .map(|t| t.label.clone())
-            .unwrap_or_else(|| format!("target {}", action.target_id));
-        let ct_id = target_ct_box(
-            &rule_label,
-            Kind::Target,
-            config_id,
-            &mut graph,
-            &hierarchy,
-            &mut target_boxes,
-            &mut ct_boxes,
-            &index,
-            names,
-        );
-        let action_id = names.intern(&format!("action{i}"));
-        graph.add_node(action_id, action.mnemonic.clone(), Kind::Action, Some(ct_id));
-        for &out in &action.output_ids {
-            let art_id = output_artifact(
-                out,
-                ct_id,
-                config_id,
-                &mut graph,
-                &hierarchy,
-                &index,
-                labeled_outputs,
-                &mut target_boxes,
-                &mut ct_boxes,
-                names,
-            );
-            producer_node_id.insert(out, art_id);
-            graph.add_edge(action_id, art_id, EdgeKind::Aquery);
+    {
+        let mut boxes = Boxes {
+            graph: &mut graph,
+            names: &mut *names,
+            hierarchy: &hierarchy,
+            index: &index,
+            labeled_outputs,
+            targets: HashSet::new(),
+            configured: HashSet::new(),
+        };
+        for (i, action) in index.actions.iter().enumerate() {
+            let config_id = action.configuration_id;
+            let rule_label = index
+                .target_by_id
+                .get(&action.target_id)
+                .map(|t| t.label.clone())
+                .unwrap_or_else(|| format!("target {}", action.target_id));
+            let ct_id = boxes.target_ct(&rule_label, Kind::Target, config_id);
+            let action_id = boxes.names.intern(&format!("action{i}"));
+            boxes
+                .graph
+                .add_node(action_id, action.mnemonic.clone(), Kind::Action, Some(ct_id));
+            for &out in &action.output_ids {
+                let art_id = boxes.output_artifact(out, ct_id, config_id);
+                producer_node_id.insert(out, art_id);
+                boxes.graph.add_edge(action_id, art_id, EdgeKind::Aquery);
+            }
         }
     }
 
@@ -190,56 +180,95 @@ impl<'a> Index<'a> {
     }
 }
 
-/// The leaf node for one output artifact `out` of an action whose box is
-/// `producing_ct`. A labeled generated output nests under its own target's
-/// per-config box; an unlabeled one sits directly under the producing rule's box.
-#[allow(clippy::too_many_arguments)]
-fn output_artifact(
-    out: u32,
-    producing_ct: Id,
-    config_id: u32,
-    graph: &mut Graph,
-    hierarchy: &PackageHierarchy,
-    index: &Index,
-    labeled_outputs: &HashSet<String>,
-    target_boxes: &mut HashSet<Id>,
-    ct_boxes: &mut HashSet<Id>,
-    names: &mut Names,
-) -> Id {
-    let path = index.paths.full_path(out);
-    match generated_label(hierarchy, &path).filter(|label| labeled_outputs.contains(label)) {
-        Some(out_label) => {
-            let out_ct = target_ct_box(
-                &out_label,
-                Kind::Artifact,
+/// Pass-1 box creation: builds the target, configured-target, and artifact
+/// boxes into `graph`, deduping repeats through `targets`/`configured` and
+/// resolving names and paths through `index` and `hierarchy`. A generated
+/// output whose label is in `labeled_outputs` is promoted to its own box.
+struct Boxes<'a> {
+    graph: &'a mut Graph,
+    names: &'a mut Names,
+    hierarchy: &'a PackageHierarchy,
+    index: &'a Index<'a>,
+    labeled_outputs: &'a HashSet<String>,
+    targets: HashSet<Id>,
+    configured: HashSet<Id>,
+}
+
+impl Boxes<'_> {
+    /// The leaf node for one output artifact `out` of an action whose box is
+    /// `producing_ct`. A labeled generated output nests under its own target's
+    /// per-config box; an unlabeled one sits directly under the producing rule's box.
+    fn output_artifact(&mut self, out: u32, producing_ct: Id, config_id: u32) -> Id {
+        let path = self.index.paths.full_path(out);
+        match generated_label(self.hierarchy, &path).filter(|label| self.labeled_outputs.contains(label)) {
+            Some(out_label) => {
+                let out_ct = self.target_ct(&out_label, Kind::Artifact, config_id);
+                let id = self.names.intern(&format!(
+                    "artifact:{out_label}#{}",
+                    label::config_key(
+                        config_id,
+                        self.index.config_by_id.get(&config_id).map(|c| c.checksum.as_str())
+                    )
+                ));
+                self.graph
+                    .add_node(id, self.index.paths.basename(out), Kind::Artifact, Some(out_ct));
+                id
+            }
+            None => {
+                let id = self.names.intern(&format!("artifact{out}"));
+                self.graph.add_node(
+                    id,
+                    self.index.paths.basename(out),
+                    Kind::Artifact,
+                    Some(producing_ct),
+                );
+                id
+            }
+        }
+    }
+
+    /// The configured-target box `ct:{full_label}#{checksum}` for a target in one
+    /// configuration, creating the `target:{full_label}` box (of kind `target_kind`)
+    /// above it on first use and returning the configured-target id. Used both for a
+    /// rule (a `target` box holding actions) and for a labeled generated output (an
+    /// `artifact` box holding the concrete file).
+    fn target_ct(&mut self, full_label: &str, target_kind: Kind, config_id: u32) -> Id {
+        let ct_node_id = self.names.intern(&label::ct_node_id(
+            full_label,
+            &label::config_key(
                 config_id,
-                graph,
-                hierarchy,
-                target_boxes,
-                ct_boxes,
-                index,
-                names,
-            );
-            let id = names.intern(&format!(
-                "artifact:{out_label}#{}",
-                label::config_key(
-                    config_id,
-                    index.config_by_id.get(&config_id).map(|c| c.checksum.as_str())
-                )
-            ));
-            graph.add_node(id, index.paths.basename(out), Kind::Artifact, Some(out_ct));
-            id
+                self.index.config_by_id.get(&config_id).map(|c| c.checksum.as_str()),
+            ),
+        ));
+        if !self.configured.insert(ct_node_id) {
+            return ct_node_id;
         }
-        None => {
-            let id = names.intern(&format!("artifact{out}"));
-            graph.add_node(
-                id,
-                index.paths.basename(out),
-                Kind::Artifact,
-                Some(producing_ct),
+
+        let target_node_id = self.names.intern(&format!("target:{full_label}"));
+        if self.targets.insert(target_node_id) {
+            let package = self.hierarchy.package_box(full_label);
+            self.graph.add_node(
+                target_node_id,
+                label::target_label(full_label),
+                target_kind,
+                package,
             );
-            id
         }
+
+        let mnemonic = self
+            .index
+            .config_by_id
+            .get(&config_id)
+            .map(|c| c.mnemonic.clone())
+            .filter(|m| !m.is_empty())
+            .unwrap_or_else(|| format!("config {config_id}"));
+        self.graph.add_node(
+            ct_node_id,
+            mnemonic,
+            Kind::ConfiguredTarget,
+            Some(target_node_id),
+        );
+        ct_node_id
     }
 }
 
@@ -355,60 +384,6 @@ impl Wiring<'_> {
             graph.add_edge(from, to, EdgeKind::Aquery);
         }
     }
-}
-
-/// The configured-target box `ct:{full_label}#{checksum}` for a target in one
-/// configuration, creating the `target:{full_label}` box (of kind `target_kind`)
-/// above it on first use and returning the configured-target id. Used both for a
-/// rule (a `target` box holding actions) and for a labeled generated output (an
-/// `artifact` box holding the concrete file).
-#[allow(clippy::too_many_arguments)]
-fn target_ct_box(
-    full_label: &str,
-    target_kind: Kind,
-    config_id: u32,
-    graph: &mut Graph,
-    hierarchy: &PackageHierarchy,
-    target_boxes: &mut HashSet<Id>,
-    ct_boxes: &mut HashSet<Id>,
-    index: &Index,
-    names: &mut Names,
-) -> Id {
-    let ct_node_id = names.intern(&label::ct_node_id(
-        full_label,
-        &label::config_key(
-            config_id,
-            index.config_by_id.get(&config_id).map(|c| c.checksum.as_str()),
-        ),
-    ));
-    if !ct_boxes.insert(ct_node_id) {
-        return ct_node_id;
-    }
-
-    let target_node_id = names.intern(&format!("target:{full_label}"));
-    if target_boxes.insert(target_node_id) {
-        let package = hierarchy.package_box(full_label);
-        graph.add_node(
-            target_node_id,
-            label::target_label(full_label),
-            target_kind,
-            package,
-        );
-    }
-
-    let mnemonic = index
-        .config_by_id
-        .get(&config_id)
-        .map(|c| c.mnemonic.clone())
-        .filter(|m| !m.is_empty())
-        .unwrap_or_else(|| format!("config {config_id}"));
-    graph.add_node(
-        ct_node_id,
-        mnemonic,
-        Kind::ConfiguredTarget,
-        Some(target_node_id),
-    );
-    ct_node_id
 }
 
 /// The label of a generated output at exec path `path`: its `bazel-out/<cfg>/bin`
