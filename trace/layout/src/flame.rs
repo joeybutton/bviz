@@ -278,24 +278,36 @@ fn sort_pairs_by_text<'p>(mut pairs: Vec<(&'p str, Str)>, workers: usize) -> Vec
         pairs.sort_unstable_by_key(|&(t, _)| t);
         return pairs;
     }
-    // Evenly spaced cuts of a sorted sparse sample balance the buckets even
-    // when the keys cluster under shared prefixes.
+    let pivots = sample_pivots(&pairs, workers);
+    let buckets = classify_into_buckets(&pairs, &pivots, workers);
+    sort_buckets(buckets)
+}
+
+/// Evenly spaced cuts of a sorted sparse sample balance the buckets even when
+/// the keys cluster under shared prefixes.
+fn sample_pivots<'p>(pairs: &[(&'p str, Str)], workers: usize) -> Vec<&'p str> {
     const OVERSAMPLE: usize = 32;
     let step = (pairs.len() / (workers * OVERSAMPLE)).max(1);
     let mut sample: Vec<&str> = pairs.iter().step_by(step).map(|&(t, _)| t).collect();
     sample.sort_unstable();
-    let pivots: Vec<&str> = (1..workers)
+    (1..workers)
         .map(|i| sample[i * sample.len() / workers])
-        .collect();
+        .collect()
+}
 
-    // Bucket `b` holds the texts with exactly `b` pivots at or below them.
+/// Bucket `b` holds the texts with exactly `b` pivots at or below them. Chunks
+/// of the input classify in parallel and merge per bucket in chunk order.
+fn classify_into_buckets<'p>(
+    pairs: &[(&'p str, Str)],
+    pivots: &[&str],
+    workers: usize,
+) -> Vec<Vec<(&'p str, Str)>> {
     let chunk = pairs.len().div_ceil(workers);
     let mut buckets: Vec<Vec<(&str, Str)>> = vec![Vec::new(); workers];
     std::thread::scope(|scope| {
         let handles: Vec<_> = pairs
             .chunks(chunk)
             .map(|part| {
-                let pivots = &pivots;
                 scope.spawn(move || {
                     let mut local: Vec<Vec<(&str, Str)>> = vec![Vec::new(); workers];
                     for &(t, h) in part {
@@ -311,6 +323,11 @@ fn sort_pairs_by_text<'p>(mut pairs: Vec<(&'p str, Str)>, workers: usize) -> Vec
             }
         }
     });
+    buckets
+}
+
+/// Sort each bucket on its own worker, then concatenate in pivot order.
+fn sort_buckets<'p>(mut buckets: Vec<Vec<(&'p str, Str)>>) -> Vec<(&'p str, Str)> {
     std::thread::scope(|scope| {
         for bucket in &mut buckets {
             scope.spawn(move || bucket.sort_unstable_by_key(|&(t, _)| t));
