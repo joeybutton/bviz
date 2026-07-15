@@ -570,7 +570,11 @@ impl GraphView {
             return;
         };
         let vp = self.view_state.viewport.get();
-        let (gx, gy) = from_screen(e.position, vp.origin, self.view_state.zoom.get(), self.view_state.pan.get());
+        let (gx, gy) = from_screen(
+            e.position,
+            vp.origin,
+            Camera { zoom: self.view_state.zoom.get(), pan: self.view_state.pan.get() },
+        );
         let hit = hit_box(&g.boxes, gx, gy).map(|b| b.id);
         if hit != self.hovered {
             self.hovered = hit;
@@ -1035,8 +1039,9 @@ fn canvas_body(
     move |bounds, _, window, cx| {
         let z = zoom.get();
         let p = pan.get();
+        let camera = Camera { zoom: z, pan: p };
         for b in &boxes {
-            paint_box(b, bounds, z, p, &palette, window, cx);
+            paint_box(b, bounds, camera, &palette, window, cx);
         }
         for (points, kinds, dim) in &connectors {
             // ELK routes a node pair once; fan its provenances out into nested
@@ -1045,7 +1050,7 @@ fn canvas_body(
             let screen: Vec<(f32, f32)> = points
                 .iter()
                 .map(|(x, y)| {
-                    let s = to_screen(*x, *y, bounds, z, p);
+                    let s = to_screen(*x, *y, bounds, camera);
                     (f32::from(s.x), f32::from(s.y))
                 })
                 .collect();
@@ -1061,7 +1066,7 @@ fn canvas_body(
         let track = Hsla::from(bviz_ui_theme::mix(palette.border, palette.background, 0.5));
         let thumb = Hsla::from(bviz_ui_theme::mix(palette.label, palette.background, 0.45));
         for axis in [Axis::Vertical, Axis::Horizontal] {
-            if let Some(bar) = scrollbar_geom(axis, bounds, content, z, p) {
+            if let Some(bar) = scrollbar_geom(axis, bounds, content, camera) {
                 bar.paint(track, thumb, window);
             }
         }
@@ -1127,12 +1132,8 @@ fn clamp_pan(pan: (f32, f32), zoom: f32, viewport: Size<Pixels>, content: (f32, 
 /// view-settling that follows a toggle keeps these in frame; a partly-clipped
 /// box (or one larger than the viewport) is left out, so a big container the
 /// user only saw part of does not force the whole graph back into view.
-fn enclosed_boxes(
-    boxes: &[bviz_graph_layout::Box],
-    viewport: Size<Pixels>,
-    zoom: f32,
-    pan: (f32, f32),
-) -> Vec<Id> {
+fn enclosed_boxes(boxes: &[bviz_graph_layout::Box], viewport: Size<Pixels>, camera: Camera) -> Vec<Id> {
+    let Camera { zoom, pan } = camera;
     let (vw, vh) = (f32::from(viewport.width), f32::from(viewport.height));
     boxes
         .iter()
@@ -1205,7 +1206,16 @@ fn fit_view(viewport: Size<Pixels>, content: (f32, f32)) -> (f32, (f32, f32)) {
 /// Maps a layout-space point to window space with pan and zoom baked in, atop
 /// the same margin offset the boxes use and the canvas's origin within the
 /// window.
-fn to_screen(x: f64, y: f64, bounds: Bounds<Pixels>, zoom: f32, pan: (f32, f32)) -> Point<Pixels> {
+/// The pan/zoom viewport transform: `zoom` scales layout units to pixels and
+/// `pan` is the screen offset of the content's near edges.
+#[derive(Clone, Copy)]
+struct Camera {
+    zoom: f32,
+    pan: (f32, f32),
+}
+
+fn to_screen(x: f64, y: f64, bounds: Bounds<Pixels>, camera: Camera) -> Point<Pixels> {
+    let Camera { zoom, pan } = camera;
     point(
         bounds.origin.x + px((x as f32 + MARGIN as f32) * zoom + pan.0),
         bounds.origin.y + px((y as f32 + MARGIN as f32) * zoom + pan.1),
@@ -1217,13 +1227,13 @@ fn to_screen(x: f64, y: f64, bounds: Bounds<Pixels>, zoom: f32, pan: (f32, f32))
 fn paint_box(
     b: &PaintBox,
     bounds: Bounds<Pixels>,
-    zoom: f32,
-    pan: (f32, f32),
+    camera: Camera,
     palette: &Palette,
     window: &mut Window,
     cx: &mut App,
 ) {
-    let origin = to_screen(b.x, b.y, bounds, zoom, pan);
+    let Camera { zoom, pan: _ } = camera;
+    let origin = to_screen(b.x, b.y, bounds, camera);
     let size = size(px(b.w as f32 * zoom), px(b.h as f32 * zoom));
     let rect = Bounds::new(origin, size);
     if !rect.intersects(&bounds) {
@@ -1618,12 +1628,8 @@ fn relayout(
 }
 
 /// Inverse of [`to_screen`]: maps a window-space point back to layout space.
-fn from_screen(
-    screen: Point<Pixels>,
-    origin: Point<Pixels>,
-    zoom: f32,
-    pan: (f32, f32),
-) -> (f32, f32) {
+fn from_screen(screen: Point<Pixels>, origin: Point<Pixels>, camera: Camera) -> (f32, f32) {
+    let Camera { zoom, pan } = camera;
     (
         (f32::from(screen.x) - f32::from(origin.x) - pan.0) / zoom - MARGIN as f32,
         (f32::from(screen.y) - f32::from(origin.y) - pan.1) / zoom - MARGIN as f32,
@@ -1678,7 +1684,11 @@ fn toggle_box_at(view: &mut GraphView, pos: Point<Pixels>, cx: &mut Context<Grap
         return;
     };
     let vp = view.view_state.viewport.get();
-    let (gx, gy) = from_screen(pos, vp.origin, view.view_state.zoom.get(), view.view_state.pan.get());
+    let (gx, gy) = from_screen(
+        pos,
+        vp.origin,
+        Camera { zoom: view.view_state.zoom.get(), pan: view.view_state.pan.get() },
+    );
     let Some(hit) = hit_box(&g.boxes, gx, gy) else {
         return;
     };
@@ -1696,7 +1706,11 @@ fn toggle_box_at(view: &mut GraphView, pos: Point<Pixels>, cx: &mut Context<Grap
     drop(expanded);
     // The boxes fully on screen now, so the relayout settles the view to keep
     // them — and the toggled box — in frame.
-    view.prev_visible = enclosed_boxes(&g.boxes, vp.size, view.view_state.zoom.get(), view.view_state.pan.get());
+    view.prev_visible = enclosed_boxes(
+        &g.boxes,
+        vp.size,
+        Camera { zoom: view.view_state.zoom.get(), pan: view.view_state.pan.get() },
+    );
     // The relayout may drop the hovered node (it was collapsed away), which would
     // otherwise leave the whole graph dimmed until the next mouse move.
     view.hovered = None;
@@ -1715,9 +1729,9 @@ fn scrollbar_geom(
     axis: Axis,
     viewport: Bounds<Pixels>,
     content: (f32, f32),
-    zoom: f32,
-    pan: (f32, f32),
+    camera: Camera,
 ) -> Option<Scrollbar> {
+    let Camera { zoom, pan } = camera;
     let (vw, vh) = (f32::from(viewport.size.width), f32::from(viewport.size.height));
     let (cw, ch) = (content.0 * zoom, content.1 * zoom);
     let (vlen, clen, panc, other_overflows) = match axis {
@@ -1751,7 +1765,12 @@ fn current_scrollbar(view: &GraphView, axis: Axis) -> Option<Scrollbar> {
         return None;
     };
     let content = content_size(g);
-    scrollbar_geom(axis, view.view_state.viewport.get(), content, view.view_state.zoom.get(), view.view_state.pan.get())
+    scrollbar_geom(
+        axis,
+        view.view_state.viewport.get(),
+        content,
+        Camera { zoom: view.view_state.zoom.get(), pan: view.view_state.pan.get() },
+    )
 }
 
 /// The axis of the scroll bar whose track a press at `position` (window px) landed
@@ -1913,11 +1932,10 @@ mod tests {
     #[test]
     fn from_screen_inverts_to_screen() {
         let bounds = Bounds::new(point(px(10.), px(20.)), size(px(800.), px(600.)));
-        let zoom = 1.7_f32;
-        let pan = (33.0_f32, -12.0_f32);
+        let camera = Camera { zoom: 1.7, pan: (33.0, -12.0) };
         for &(x, y) in &[(0.0_f64, 0.0_f64), (42.5, 7.25), (123.0, 456.0)] {
-            let screen = to_screen(x, y, bounds, zoom, pan);
-            let (gx, gy) = from_screen(screen, bounds.origin, zoom, pan);
+            let screen = to_screen(x, y, bounds, camera);
+            let (gx, gy) = from_screen(screen, bounds.origin, camera);
             assert!((gx as f64 - x).abs() < 1e-3, "x: {gx} vs {x}");
             assert!((gy as f64 - y).abs() < 1e-3, "y: {gy} vs {y}");
         }
@@ -2059,7 +2077,7 @@ mod tests {
             lbox(2, 100.0, 580.0, 50.0, 40.0),  // spills past the bottom edge
             lbox(3, 200.0, 200.0, 30.0, 30.0),  // fully inside
         ];
-        let mut ids = enclosed_boxes(&boxes, vp(800., 600.), 1.0, (0.0, 0.0));
+        let mut ids = enclosed_boxes(&boxes, vp(800., 600.), Camera { zoom: 1.0, pan: (0.0, 0.0) });
         ids.sort_by_key(|id| id.0);
         assert_eq!(ids, vec![bviz_graph_layout::Id(0), bviz_graph_layout::Id(3)]);
     }
