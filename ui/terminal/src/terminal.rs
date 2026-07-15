@@ -2,11 +2,13 @@
 //! text: the visible viewport, reflowed to the window, one shaped line per row
 //! with per-cell colors and background fills.
 
+use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use bviz_terminal::{Cell, Flags, Replay, Scroll, SelectionType, Side, Terminal, Url};
 use bviz_ui_components::{
-    Axis, Button, Dropdown, Scrollbar, TextInput, load_in_background, spinner, track_drag,
+    Axis, Button, Dropdown, Scrollbar, ScrubberLayout, TextInput, load_in_background, scrubber,
+    spinner, track_drag,
 };
 use bviz_ui_shell::Chrome;
 use gpui::{
@@ -14,7 +16,7 @@ use gpui::{
     Focusable, Font, GlobalElementId, InspectorElementId, IntoElement, KeyBinding, LayoutId,
     MouseButton, MouseDownEvent, MouseMoveEvent, PaintQuad, Pixels, Point, Render, Rgba,
     ScrollWheelEvent, ShapedLine, SharedString, Style, Subscription, Task, TextRun,
-    Window, actions, canvas, div, fill, point, prelude::*, px, relative, size,
+    Window, actions, div, fill, point, prelude::*, px, relative, size,
 };
 
 use crate::color::{CellStyle, ansi_palette, style_key};
@@ -60,14 +62,6 @@ const MIN_THUMB: f32 = 24.0;
 
 /// Playback speed multipliers the speed control cycles through.
 const SPEEDS: [f32; 4] = [1.0, 2.0, 4.0, 8.0];
-
-/// Geometry of the painted playback scrubber track, in window pixels, kept so a
-/// click or drag on it maps to a position in the timeline.
-#[derive(Clone, Copy)]
-struct ScrubberLayout {
-    left: f32,
-    width: f32,
-}
 
 /// Geometry of the painted terminal content, in window pixels, kept so mouse
 /// positions can be mapped to grid cells for selection.
@@ -115,7 +109,7 @@ pub struct TerminalView {
     /// Whether the scrubber thumb is being dragged.
     scrubbing: bool,
     /// The painted scrubber track geometry, set each layout for hit-testing.
-    scrubber: Option<ScrubberLayout>,
+    scrubber: Rc<std::cell::Cell<Option<ScrubberLayout>>>,
     /// The display terminal, built at the window size for [`current_frame`] and
     /// rebuilt when the frame changes.
     terminal: Option<Terminal>,
@@ -198,7 +192,7 @@ impl TerminalView {
             play_anchor: None,
             position: 0.0,
             scrubbing: false,
-            scrubber: None,
+            scrubber: Rc::new(std::cell::Cell::new(None)),
             terminal: None,
             terminal_frame: None,
             follow_bottom: true,
@@ -751,20 +745,15 @@ impl TerminalView {
             .update(cx, |dropdown, cx| dropdown.set_selected(next, cx));
     }
 
-    /// Begin a scrubber drag: pause and jump to the pressed position.
-    fn scrub_begin(&mut self, event: &MouseDownEvent, _: &mut Window, cx: &mut Context<Self>) {
-        self.scrubbing = true;
-        self.playing = false;
-        self.play_anchor = None;
-        self.scrub_to_x(f32::from(event.position.x), cx);
-    }
-
-    /// Seek to the timeline position under a window x-coordinate on the scrubber.
-    fn scrub_to_x(&mut self, x: f32, cx: &mut Context<Self>) {
-        let Some(layout) = self.scrubber else {
-            return;
-        };
-        let fraction = ((x - layout.left) / layout.width.max(1.0)).clamp(0.0, 1.0);
+    /// Pause and seek to the timeline position at `fraction` along the scrubber.
+    fn scrub_to(&mut self, fraction: f32, cx: &mut Context<Self>) {
+        // Grabbing the scrubber pauses playback; a drag that follows only seeks,
+        // so a keyboard play toggled mid-drag is left standing.
+        if !self.scrubbing {
+            self.scrubbing = true;
+            self.playing = false;
+            self.play_anchor = None;
+        }
         let (frame, position) = match &self.source {
             TermSource::Loaded(replay) => {
                 let position = fraction as f64 * replay.duration();
@@ -1079,9 +1068,8 @@ impl TerminalView {
         (fraction, SharedString::from(readout))
     }
 
-    /// The scrubber: a canvas that records its painted track geometry, draws the
-    /// track/played/knob for `fraction`, and keeps a scrub drag live past the
-    /// window edge.
+    /// The playback scrubber, drawn at `fraction` and driving a seek on press or
+    /// drag.
     fn render_scrubber(
         &self,
         fraction: f32,
@@ -1089,55 +1077,23 @@ impl TerminalView {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let track_color = bviz_ui_theme::mix(colors.text, colors.background, 0.6);
-        let played_color = colors.text;
-        let knob_color = colors.text;
-
-        let bounds_view = cx.entity();
-        let drag_view = cx.entity();
-
-        div()
-            .id("scrubber")
-            .flex_1()
-            .h_full()
-            .on_mouse_down(MouseButton::Left, cx.listener(Self::scrub_begin))
-            .child(
-                canvas(
-                    move |bounds, _, cx| {
-                        bounds_view.update(cx, |this, _| {
-                            this.scrubber = Some(ScrubberLayout {
-                                left: f32::from(bounds.origin.x),
-                                width: f32::from(bounds.size.width),
-                            });
-                        });
-                    },
-                    move |bounds, _, window, cx| {
-                        paint_scrubber(
-                            bounds,
-                            fraction,
-                            track_color,
-                            played_color,
-                            knob_color,
-                            window,
-                        );
-                        if drag_view.read(cx).scrubbing {
-                            track_drag(
-                                window,
-                                &drag_view,
-                                |this, event, cx| {
-                                    this.scrub_to_x(f32::from(event.position.x), cx)
-                                },
-                                |this, _, cx| {
-                                    if this.scrubbing {
-                                        this.scrubbing = false;
-                                        cx.notify();
-                                    }
-                                },
-                            );
-                        }
-                    },
-                )
-                .size_full(),
-            )
+        scrubber(
+            "scrubber",
+            fraction,
+            track_color,
+            colors.text,
+            colors.text,
+            self.scrubber.clone(),
+            cx.entity(),
+            self.scrubbing,
+            |this, fraction, cx| this.scrub_to(fraction, cx),
+            |this, cx| {
+                if this.scrubbing {
+                    this.scrubbing = false;
+                    cx.notify();
+                }
+            },
+        )
     }
 }
 
@@ -1633,40 +1589,3 @@ fn fmt_time(seconds: f64) -> String {
     format!("{}:{:02}", whole / 60, whole % 60)
 }
 
-/// Paint the scrubber into its bounds: a dim full-width track, a brighter played
-/// portion up to `fraction`, and a knob marking the current position.
-fn paint_scrubber(
-    bounds: Bounds<Pixels>,
-    fraction: f32,
-    track: Rgba,
-    played: Rgba,
-    knob: Rgba,
-    window: &mut Window,
-) {
-    let left = f32::from(bounds.left());
-    let width = f32::from(bounds.size.width);
-    let mid = f32::from(bounds.top()) + f32::from(bounds.size.height) / 2.0;
-    let track_h = 4.0;
-    let knob_size = 12.0;
-    let played_w = width * fraction.clamp(0.0, 1.0);
-    let knob_x = (left + played_w - knob_size / 2.0).clamp(left, left + width - knob_size);
-
-    let bar = |x: f32, w: f32, color: Rgba| {
-        fill(
-            Bounds::new(
-                point(px(x), px(mid - track_h / 2.0)),
-                size(px(w), px(track_h)),
-            ),
-            color,
-        )
-    };
-    window.paint_quad(bar(left, width, track));
-    window.paint_quad(bar(left, played_w, played));
-    window.paint_quad(fill(
-        Bounds::new(
-            point(px(knob_x), px(mid - knob_size / 2.0)),
-            size(px(knob_size), px(knob_size)),
-        ),
-        knob,
-    ));
-}
