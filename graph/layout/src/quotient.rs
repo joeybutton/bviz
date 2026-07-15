@@ -42,7 +42,7 @@ pub fn quotient(
     // Nodes that hold children: only leaf data nodes merge, so a container of
     // kind `artifact` (a labeled generated output holding its configured
     // targets) is never collapsed into a group.
-    let containers: HashSet<Id> = graph.nodes.iter().filter_map(|n| n.parent).collect();
+    let containers = crate::lod::containers(graph);
     let mergeable = |node: &Node| is_candidate(node.kind) && !containers.contains(&node.id);
 
     let groups = group_by_signature(graph, &mergeable, &producers, &consumers);
