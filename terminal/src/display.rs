@@ -161,6 +161,11 @@ impl Terminal {
         // The viewport top is `history_size - display_offset` lines from the top,
         // so the offset that puts `line` there is `history_size - line`.
         let target = self.history_size().saturating_sub(line) as i32;
+        self.scroll_to_offset(target);
+    }
+
+    /// Move the viewport to a display offset, doing nothing if already there.
+    fn scroll_to_offset(&mut self, target: i32) {
         let delta = target - self.display_offset() as i32;
         if delta != 0 {
             self.term.scroll_display(Scroll::Delta(delta));
@@ -172,10 +177,7 @@ impl Terminal {
     pub fn scroll_to_fraction(&mut self, fraction: f32) {
         let history = self.history_size() as f32;
         let target = ((1.0 - fraction.clamp(0.0, 1.0)) * history).round() as i32;
-        let delta = target - self.display_offset() as i32;
-        if delta != 0 {
-            self.term.scroll_display(Scroll::Delta(delta));
-        }
+        self.scroll_to_offset(target);
     }
 
     pub fn columns(&self) -> usize {
