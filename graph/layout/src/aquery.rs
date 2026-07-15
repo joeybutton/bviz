@@ -119,8 +119,7 @@ pub(crate) fn build_with_packages(
     // Pass 2: wire each action's inputs, flattening its depsets into direct edges.
     let Index {
         actions,
-        artifact_by_id,
-        fragment_by_id,
+        paths,
         depset_by_id,
         ..
     } = index;
@@ -130,8 +129,7 @@ pub(crate) fn build_with_packages(
         hierarchy: &hierarchy,
         producer_node_id,
         depset_by_id,
-        artifact_by_id,
-        fragment_by_id,
+        paths,
         external_sources,
         resolved: HashMap::new(),
     };
@@ -146,12 +144,18 @@ pub(crate) fn build_with_packages(
     graph
 }
 
+/// The by-id artifact and path-fragment lookups, paired so an artifact's
+/// name and path can be reconstructed from one value.
+struct Paths<'a> {
+    artifact_by_id: HashMap<u32, &'a Artifact>,
+    fragment_by_id: HashMap<u32, &'a PathFragment>,
+}
+
 /// The actions to walk plus the by-id lookups box creation and input wiring
 /// resolve against, gathered across every container.
 struct Index<'a> {
     actions: Vec<&'a Action>,
-    artifact_by_id: HashMap<u32, &'a Artifact>,
-    fragment_by_id: HashMap<u32, &'a PathFragment>,
+    paths: Paths<'a>,
     target_by_id: HashMap<u32, &'a Target>,
     config_by_id: HashMap<u32, &'a Configuration>,
     depset_by_id: HashMap<u32, &'a DepSetOfFiles>,
@@ -174,8 +178,10 @@ impl<'a> Index<'a> {
             path_fragments.extend(c.path_fragments.iter());
         }
         Index {
-            artifact_by_id: artifacts.iter().map(|a| (a.id, *a)).collect(),
-            fragment_by_id: path_fragments.iter().map(|p| (p.id, *p)).collect(),
+            paths: Paths {
+                artifact_by_id: artifacts.iter().map(|a| (a.id, *a)).collect(),
+                fragment_by_id: path_fragments.iter().map(|p| (p.id, *p)).collect(),
+            },
             target_by_id: targets.iter().map(|t| (t.id, *t)).collect(),
             config_by_id: configurations.iter().map(|c| (c.id, *c)).collect(),
             depset_by_id: dep_sets.iter().map(|d| (d.id, *d)).collect(),
@@ -200,7 +206,7 @@ fn output_artifact(
     ct_boxes: &mut HashSet<Id>,
     names: &mut Names,
 ) -> Id {
-    let path = full_path(out, &index.artifact_by_id, &index.fragment_by_id);
+    let path = index.paths.full_path(out);
     match generated_label(hierarchy, &path).filter(|label| labeled_outputs.contains(label)) {
         Some(out_label) => {
             let out_ct = target_ct_box(
@@ -221,19 +227,14 @@ fn output_artifact(
                     index.config_by_id.get(&config_id).map(|c| c.checksum.as_str())
                 )
             ));
-            graph.add_node(
-                id,
-                basename(out, &index.artifact_by_id, &index.fragment_by_id),
-                Kind::Artifact,
-                Some(out_ct),
-            );
+            graph.add_node(id, index.paths.basename(out), Kind::Artifact, Some(out_ct));
             id
         }
         None => {
             let id = names.intern(&format!("artifact{out}"));
             graph.add_node(
                 id,
-                basename(out, &index.artifact_by_id, &index.fragment_by_id),
+                index.paths.basename(out),
                 Kind::Artifact,
                 Some(producing_ct),
             );
@@ -252,8 +253,7 @@ struct Wiring<'a> {
     hierarchy: &'a PackageHierarchy,
     producer_node_id: HashMap<u32, Id>,
     depset_by_id: HashMap<u32, &'a DepSetOfFiles>,
-    artifact_by_id: HashMap<u32, &'a Artifact>,
-    fragment_by_id: HashMap<u32, &'a PathFragment>,
+    paths: Paths<'a>,
     external_sources: bool,
     /// The leaf node each input artifact wires from, or `None` when it is
     /// dropped. Resolution scans the package set and rebuilds the artifact's
@@ -315,7 +315,7 @@ impl Wiring<'_> {
     }
 
     fn compute_member(&mut self, artifact_id: u32, graph: &mut Graph, names: &mut Names) -> Option<Id> {
-        let path = full_path(artifact_id, &self.artifact_by_id, &self.fragment_by_id);
+        let path = self.paths.full_path(artifact_id);
         if !self.external_sources && is_external(&path) {
             return None;
         }
@@ -343,8 +343,7 @@ impl Wiring<'_> {
                 artifact_id,
                 graph,
                 &mut self.source_nodes,
-                &self.artifact_by_id,
-                &self.fragment_by_id,
+                &self.paths,
                 names,
             ),
         };
@@ -435,15 +434,14 @@ fn root_source_node(
     artifact_id: u32,
     graph: &mut Graph,
     source_nodes: &mut HashSet<Id>,
-    artifact_by_id: &HashMap<u32, &Artifact>,
-    fragment_by_id: &HashMap<u32, &PathFragment>,
+    paths: &Paths,
     names: &mut Names,
 ) -> Id {
     let node_id = names.intern(&format!("source{artifact_id}"));
     if source_nodes.insert(node_id) {
         graph.add_node(
             node_id,
-            basename(artifact_id, artifact_by_id, fragment_by_id),
+            paths.basename(artifact_id),
             Kind::Source,
             None,
         );
@@ -451,41 +449,35 @@ fn root_source_node(
     node_id
 }
 
-fn basename(
-    artifact_id: u32,
-    artifact_by_id: &HashMap<u32, &Artifact>,
-    fragment_by_id: &HashMap<u32, &PathFragment>,
-) -> String {
-    let Some(artifact) = artifact_by_id.get(&artifact_id) else {
-        return format!("artifact {artifact_id}");
-    };
-    fragment_by_id
-        .get(&artifact.path_fragment_id)
-        .map(|f| f.label.clone())
-        .unwrap_or_else(|| format!("artifact {artifact_id}"))
-}
-
-/// Reconstructs an artifact's exec-root-relative path by walking path fragments.
-fn full_path(
-    artifact_id: u32,
-    artifact_by_id: &HashMap<u32, &Artifact>,
-    fragment_by_id: &HashMap<u32, &PathFragment>,
-) -> String {
-    let Some(artifact) = artifact_by_id.get(&artifact_id) else {
-        return String::new();
-    };
-    let mut parts: Vec<&str> = Vec::new();
-    let mut seen: HashSet<u32> = HashSet::new();
-    let mut fragment_id = artifact.path_fragment_id;
-    while fragment_id != 0 && seen.insert(fragment_id) {
-        let Some(fragment) = fragment_by_id.get(&fragment_id) else {
-            break;
+impl Paths<'_> {
+    fn basename(&self, artifact_id: u32) -> String {
+        let Some(artifact) = self.artifact_by_id.get(&artifact_id) else {
+            return format!("artifact {artifact_id}");
         };
-        parts.push(&fragment.label);
-        fragment_id = fragment.parent_id;
+        self.fragment_by_id
+            .get(&artifact.path_fragment_id)
+            .map(|f| f.label.clone())
+            .unwrap_or_else(|| format!("artifact {artifact_id}"))
     }
-    parts.reverse();
-    parts.join("/")
+
+    /// Reconstructs an artifact's exec-root-relative path by walking path fragments.
+    fn full_path(&self, artifact_id: u32) -> String {
+        let Some(artifact) = self.artifact_by_id.get(&artifact_id) else {
+            return String::new();
+        };
+        let mut parts: Vec<&str> = Vec::new();
+        let mut seen: HashSet<u32> = HashSet::new();
+        let mut fragment_id = artifact.path_fragment_id;
+        while fragment_id != 0 && seen.insert(fragment_id) {
+            let Some(fragment) = self.fragment_by_id.get(&fragment_id) else {
+                break;
+            };
+            parts.push(&fragment.label);
+            fragment_id = fragment.parent_id;
+        }
+        parts.reverse();
+        parts.join("/")
+    }
 }
 
 /// `bazel-out/<config>/bin/<rest>`: returns `<rest>` for generated paths.
