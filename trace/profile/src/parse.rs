@@ -1656,8 +1656,9 @@ fn finish_merge(
     let parts = timed("    tail", || {
         phase_markers.sort_by_key(|m| m.start_us);
         let metadata = build_metadata(&mut pool.writer, other_data.as_ref());
-        let span = compute_span(&segments, &results, &counters, &phase_markers);
-        let threads = build_thread_tracks(&segments, &results, &thread_meta, &mut pool.writer);
+        let merge = ThreadMerge { segments: &segments, results: &results };
+        let span = compute_span(merge, &counters, &phase_markers);
+        let threads = build_thread_tracks(merge, &thread_meta, &mut pool.writer);
         let (series_pool, point_pool, counters) =
             build_counter_lanes(counter_order, counters, pool);
 
@@ -1687,16 +1688,23 @@ fn finish_merge(
     parts
 }
 
+/// The per-thread merge output: `segments[i]` (thread id and its slice span)
+/// paired index-wise with `results[i]` (max depth, min start, max end).
+#[derive(Clone, Copy)]
+struct ThreadMerge<'a> {
+    segments: &'a [(i64, Span32)],
+    results: &'a [(u32, i64, i64)],
+}
+
 /// Overall time span of the merged profile: the extent of every non-empty
-/// thread segment (`segments` paired index-wise with the merge phase's
-/// `results`), every counter sample, and every phase marker. With no events at
-/// all the span collapses to zero.
+/// thread segment, every counter sample, and every phase marker. With no events
+/// at all the span collapses to zero.
 fn compute_span(
-    segments: &[(i64, Span32)],
-    results: &[(u32, i64, i64)],
+    merge: ThreadMerge,
     counters: &HashMap<Str, RawLane>,
     phase_markers: &[PhaseMarker],
 ) -> TimeSpan {
+    let ThreadMerge { segments, results } = merge;
     let mut start: Option<i64> = None;
     let mut end: Option<i64> = None;
     let mut note = |s: i64, e: i64| {
@@ -1724,16 +1732,15 @@ fn compute_span(
     }
 }
 
-/// One [`ThreadTrack`] per merged thread segment (`segments` paired index-wise
-/// with the merge phase's `results`), named from `thread_meta` — falling back
-/// to `thread {tid}` when the trace named no thread — and ordered by
-/// `(sort_index, tid)`.
+/// One [`ThreadTrack`] per merged thread segment, named from `thread_meta` —
+/// falling back to `thread {tid}` when the trace named no thread — and ordered
+/// by `(sort_index, tid)`.
 fn build_thread_tracks(
-    segments: &[(i64, Span32)],
-    results: &[(u32, i64, i64)],
+    merge: ThreadMerge,
     thread_meta: &BTreeMap<i64, (Option<String>, i64)>,
     writer: &mut Writer,
 ) -> Vec<ThreadTrack> {
+    let ThreadMerge { segments, results } = merge;
     let mut threads: Vec<ThreadTrack> = segments
         .iter()
         .zip(results)
