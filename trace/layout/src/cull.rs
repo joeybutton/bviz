@@ -11,6 +11,16 @@ pub struct Viewport {
     pub scroll_y: f32,
 }
 
+/// The time-to-pixel mapping, visible pixel region, lane sizing, and minimum
+/// slice width — the parameters that place a profile's slices onto the screen.
+#[derive(Debug, Clone, Copy)]
+pub struct Cull<'a> {
+    pub view: &'a TimeView,
+    pub viewport: &'a Viewport,
+    pub metrics: &'a LaneMetrics,
+    pub min_px: f32,
+}
+
 /// A slice positioned for painting. `track`/`slice` index back into the profile
 /// for label and tooltip lookup.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -29,14 +39,13 @@ pub struct VisibleSlice {
 /// stacking, a widened slice starting in a pixel column an earlier slice at the
 /// same depth already covers is dropped. Slices wide enough to render on their
 /// own are always kept.
-pub fn visible_slices(
-    profile: &Profile,
-    layout: &LaneLayout,
-    view: &TimeView,
-    viewport: &Viewport,
-    metrics: &LaneMetrics,
-    min_px: f32,
-) -> Vec<VisibleSlice> {
+pub fn visible_slices(profile: &Profile, layout: &LaneLayout, cull: Cull) -> Vec<VisibleSlice> {
+    let Cull {
+        view,
+        viewport,
+        metrics,
+        min_px,
+    } = cull;
     let view_end_us = view.t_of(viewport.width);
     let mut out = Vec::new();
     // First pixel column free of an emitted slice, per depth row; markers whose
@@ -64,18 +73,7 @@ pub fn visible_slices(
         let end_maxes = profile.end_maxes(track);
         let lower = end_maxes[..upper].partition_point(|&e| (e as f64) < view_start_us);
         for (i, s) in slices[lower..upper].iter().enumerate() {
-            emit_slice(
-                s,
-                lane.track,
-                lower + i,
-                view,
-                viewport,
-                metrics,
-                rows_top,
-                min_px,
-                &mut next_free_col,
-                &mut out,
-            );
+            emit_slice(s, lane.track, lower + i, cull, rows_top, &mut next_free_col, &mut out);
         }
     }
     out
@@ -85,19 +83,21 @@ pub fn visible_slices(
 /// start pixel column at the same depth, clamp the painted span to a viewport
 /// margin, and push the result. `next_free_col` carries the coalesce state
 /// across calls within a lane; `slice` is the slice's index in the track.
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn emit_slice(
     s: &Slice,
     track: usize,
     slice: usize,
-    view: &TimeView,
-    viewport: &Viewport,
-    metrics: &LaneMetrics,
+    cull: Cull,
     rows_top: f32,
-    min_px: f32,
     next_free_col: &mut Vec<i32>,
     out: &mut Vec<VisibleSlice>,
 ) {
+    let Cull {
+        view,
+        viewport,
+        metrics,
+        min_px,
+    } = cull;
     let x = view.x_of(s.start_us);
     let natural = view.x_of(s.start_us + s.dur_us) - x;
     let w = natural.max(min_px);

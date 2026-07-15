@@ -14,8 +14,8 @@ use chart::{
 };
 
 use bviz_trace_layout::{
-    FlameBox, FlameGraph, FlameMetrics, FlameView, Lane, LaneLayout, LaneMetrics, ScopeAggregate,
-    StatRow, TimeView, Viewport, flame_height, lay_out_flame, lay_out_lanes,
+    Cull, FlameBox, FlameGraph, FlameMetrics, FlameView, Lane, LaneLayout, LaneMetrics,
+    ScopeAggregate, StatRow, TimeView, Viewport, flame_height, lay_out_flame, lay_out_lanes,
     visible_slices,
 };
 use bviz_trace_profile::{LaneClass, Profile, Slice, SliceDetail, TimeSpan};
@@ -1304,7 +1304,11 @@ impl TraceView {
                         BorderStyle::Solid,
                     ));
                 }
-                for vs in visible_slices(&profile, layout, &tv, &vp, &METRICS, MIN_SLICE_PX) {
+                for vs in visible_slices(
+                    &profile,
+                    layout,
+                    Cull { view: &tv, viewport: &vp, metrics: &METRICS, min_px: MIN_SLICE_PX },
+                ) {
                     let track = &profile.threads()[vs.track];
                     let slice = profile.slices(track)[vs.slice];
                     paint_slice(

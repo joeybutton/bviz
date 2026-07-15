@@ -8,7 +8,7 @@ mod test_profile;
 mod view;
 
 pub use bviz_trace_profile::{LaneClass, SpanRole, Workload};
-pub use cull::{Viewport, VisibleSlice, visible_slices};
+pub use cull::{Cull, Viewport, VisibleSlice, visible_slices};
 pub use flame::{
     FlameBox, FlameGraph, FlameMetrics, FlameNode, Scope, build_flame_graph,
     build_flame_graph_for_tracks, flame_height, lay_out_flame,
@@ -161,7 +161,11 @@ mod tests {
             height: 100.0,
             scroll_y: 0.0,
         };
-        let vis = visible_slices(&p, &layout, &view, &viewport, &METRICS, 0.5);
+        let vis = visible_slices(
+            &p,
+            &layout,
+            Cull { view: &view, viewport: &viewport, metrics: &METRICS, min_px: 0.5 },
+        );
         let placed: Vec<(f32, f32)> = vis.iter().map(|v| (v.x, v.w)).collect();
         // "d" is off-time and dropped; the zero-width "c" survives as a
         // min-width marker in its own pixel column past "b".
@@ -196,7 +200,11 @@ mod tests {
             height: 100.0,
             scroll_y: 0.0,
         };
-        let vis = visible_slices(&p, &layout, &view, &viewport, &METRICS, 1.0);
+        let vis = visible_slices(
+            &p,
+            &layout,
+            Cull { view: &view, viewport: &viewport, metrics: &METRICS, min_px: 1.0 },
+        );
         let placed: Vec<(f32, f32, f32)> = vis.iter().map(|v| (v.x, v.w, v.y)).collect();
         let row0 = METRICS.header_height;
         let row1 = METRICS.header_height + METRICS.row_height;
@@ -232,7 +240,11 @@ mod tests {
             height: 100.0,
             scroll_y: 0.0,
         };
-        let vis = visible_slices(&p, &layout, &view, &viewport, &METRICS, 1.0);
+        let vis = visible_slices(
+            &p,
+            &layout,
+            Cull { view: &view, viewport: &viewport, metrics: &METRICS, min_px: 1.0 },
+        );
         assert_eq!(vis.len(), 1);
         let s = vis[0];
         assert_eq!(s.x, -viewport.width);
@@ -246,11 +258,14 @@ mod tests {
     fn visible_slices_full_scan(
         profile: &bviz_trace_profile::Profile,
         layout: &LaneLayout,
-        view: &TimeView,
-        viewport: &Viewport,
-        metrics: &LaneMetrics,
-        min_px: f32,
+        cull: Cull,
     ) -> Vec<VisibleSlice> {
+        let Cull {
+            view,
+            viewport,
+            metrics,
+            min_px: _,
+        } = cull;
         let view_end_us = view.t_of(viewport.width);
         let mut out = Vec::new();
         let mut next_free_col: Vec<i32> = Vec::new();
@@ -264,18 +279,7 @@ mod tests {
             let slices = profile.slices(&profile.threads()[lane.track]);
             let upper = slices.partition_point(|s| s.start_us as f64 <= view_end_us);
             for (slice, s) in slices[..upper].iter().enumerate() {
-                crate::cull::emit_slice(
-                    s,
-                    lane.track,
-                    slice,
-                    view,
-                    viewport,
-                    metrics,
-                    rows_top,
-                    min_px,
-                    &mut next_free_col,
-                    &mut out,
-                );
+                crate::cull::emit_slice(s, lane.track, slice, cull, rows_top, &mut next_free_col, &mut out);
             }
         }
         out
@@ -335,16 +339,21 @@ mod tests {
             ("before content", TimeView { start_us: -50_000.0, px_per_us: 1.0 }),
         ];
         for (label, view) in views {
-            let indexed = visible_slices(&p, &layout, &view, &viewport, &METRICS, MIN_PX);
-            let full = visible_slices_full_scan(&p, &layout, &view, &viewport, &METRICS, MIN_PX);
+            let cull = Cull { view: &view, viewport: &viewport, metrics: &METRICS, min_px: MIN_PX };
+            let indexed = visible_slices(&p, &layout, cull);
+            let full = visible_slices_full_scan(&p, &layout, cull);
             assert_eq!(indexed, full, "view {label}");
         }
         // The mid view exercises every class: the crossing span, the widened
         // tiny slice, and the interior slices survive; everything ending left
         // of the widening margin is culled.
         let (_, mid) = views[1];
-        let names: Vec<&str> = visible_slices(&p, &layout, &mid, &viewport, &METRICS, MIN_PX)
-            .iter()
+        let names: Vec<&str> = visible_slices(
+            &p,
+            &layout,
+            Cull { view: &mid, viewport: &viewport, metrics: &METRICS, min_px: MIN_PX },
+        )
+        .iter()
             .map(|v| p.str(p.slices(&p.threads()[v.track])[v.slice].name))
             .collect();
         assert_eq!(names, ["span", "tiny_kept", "in1", "in2", "b4", "b3"]);
@@ -367,6 +376,13 @@ mod tests {
             height: 100.0,
             scroll_y: 1000.0,
         };
-        assert!(visible_slices(&p, &layout, &view, &viewport, &METRICS, 0.5).is_empty());
+        assert!(
+            visible_slices(
+                &p,
+                &layout,
+                Cull { view: &view, viewport: &viewport, metrics: &METRICS, min_px: 0.5 },
+            )
+            .is_empty()
+        );
     }
 }
