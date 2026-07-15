@@ -19,7 +19,7 @@ use gpui::{
     Window, actions, div, fill, point, prelude::*, px, relative, size,
 };
 
-use crate::color::{CellStyle, ansi_palette, style_key};
+use crate::color::{CellStyle, Defaults, ansi_palette, style_key};
 
 actions!(
     bazel_terminal,
@@ -1238,9 +1238,7 @@ impl TerminalElement {
         viewport: &[Vec<Cell>],
         bounds: Bounds<Pixels>,
         metrics: &Metrics,
-        fg: Rgba,
-        bg: Rgba,
-        ansi: &[u32; 16],
+        defaults: Defaults,
         window: &mut Window,
     ) -> (Vec<PositionedLine>, Vec<PaintQuad>) {
         let mut lines = Vec::with_capacity(viewport.len());
@@ -1262,10 +1260,10 @@ impl TerminalElement {
                     }
                     col += 1;
                 }
-                let style = CellStyle::resolve(&row[start], fg, bg, ansi);
+                let style = CellStyle::resolve(&row[start], defaults);
                 let x = bounds.left() + metrics.cell_width * start as f32;
 
-                if style.background != bg {
+                if style.background != defaults.bg {
                     let width = metrics.cell_width * (col - start) as f32;
                     backgrounds.push(fill(
                         Bounds::new(point(x, y), size(width, metrics.line_height)),
@@ -1493,9 +1491,11 @@ impl Element for TerminalElement {
         cx: &mut App,
     ) -> Prepaint {
         let colors = bviz_ui_theme::colors(window);
-        let fg = colors.text;
-        let bg = colors.background;
-        let ansi = ansi_palette(window);
+        let defaults = Defaults {
+            fg: colors.text,
+            bg: colors.background,
+            ansi: ansi_palette(window),
+        };
 
         // Columns fit the width less the scroll bar gutter; rows fit the height.
         let cols = ((f32::from(bounds.size.width) - SCROLLBAR_WIDTH)
@@ -1532,7 +1532,7 @@ impl Element for TerminalElement {
         let scrollbar = self.scrollbar_quad(bounds, history, offset, rows, &colors, cx);
 
         let (lines, mut backgrounds) =
-            Self::shape_viewport(&viewport, bounds, metrics, fg, bg, ansi, window);
+            Self::shape_viewport(&viewport, bounds, metrics, defaults, window);
         backgrounds.extend(Self::selection_quads(&selection, bounds, metrics, colors.selected));
         backgrounds.extend(Self::search_quads(&search, bounds, metrics));
         let overlays = self.url_overlay(bounds, metrics, colors.selected, cx);

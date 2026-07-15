@@ -13,6 +13,15 @@ pub(crate) fn style_key(cell: &Cell) -> (Color, Color, Flags) {
     (cell.fg, cell.bg, cell.flags)
 }
 
+/// The terminal's default foreground and background plus the appearance-selected
+/// ANSI palette — the colors an alacritty cell color resolves against.
+#[derive(Clone, Copy)]
+pub(crate) struct Defaults<'a> {
+    pub(crate) fg: Rgba,
+    pub(crate) bg: Rgba,
+    pub(crate) ansi: &'a [u32; 16],
+}
+
 /// A cell's appearance resolved to concrete colors and font attributes.
 pub(crate) struct CellStyle {
     pub(crate) foreground: Rgba,
@@ -24,9 +33,9 @@ pub(crate) struct CellStyle {
 }
 
 impl CellStyle {
-    pub(crate) fn resolve(cell: &Cell, fg: Rgba, bg: Rgba, ansi: &[u32; 16]) -> CellStyle {
-        let mut foreground = to_rgba(cell.fg, fg, bg, ansi);
-        let mut background = to_rgba(cell.bg, fg, bg, ansi);
+    pub(crate) fn resolve(cell: &Cell, defaults: Defaults) -> CellStyle {
+        let mut foreground = to_rgba(cell.fg, defaults);
+        let mut background = to_rgba(cell.bg, defaults);
         if cell.flags.contains(Flags::INVERSE) {
             std::mem::swap(&mut foreground, &mut background);
         }
@@ -104,7 +113,8 @@ fn rgb_to_rgba(c: Rgb) -> Rgba {
 
 /// Resolve an alacritty [`Color`] against the terminal's default fore/background
 /// and the appearance-selected ANSI palette.
-fn to_rgba(color: Color, fg: Rgba, bg: Rgba, ansi: &[u32; 16]) -> Rgba {
+fn to_rgba(color: Color, defaults: Defaults) -> Rgba {
+    let Defaults { fg, bg, ansi } = defaults;
     match color {
         Color::Spec(c) => rgb_to_rgba(c),
         Color::Indexed(i) => indexed(i, ansi),
