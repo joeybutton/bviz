@@ -1022,23 +1022,23 @@ fn gzip_isize(bytes: &[u8]) -> Option<usize> {
 
 /// Transcodes an ISO-8859-1 (Latin-1) byte buffer — how Bazel writes profile
 /// strings — to UTF-8. A Bazel profile is overwhelmingly ASCII, so the all-ASCII
-/// case (already valid UTF-8) reuses the buffer with no per-byte work; otherwise
+/// case (already valid UTF-8) borrows the buffer with no per-byte work; otherwise
 /// [`latin1_expand`] rewrites it.
-fn latin1_to_utf8(raw: Vec<u8>) -> String {
-    if raw.is_ascii() {
-        return String::from_utf8(raw).expect("ascii is valid utf-8");
-    }
-    latin1_expand(&raw)
-}
-
-/// [`latin1_to_utf8`] over a borrowed buffer: the all-ASCII case borrows it
-/// outright.
 fn latin1_cow(raw: &[u8]) -> Cow<'_, str> {
     if raw.is_ascii() {
         // SAFETY: ASCII is valid UTF-8.
         return Cow::Borrowed(unsafe { std::str::from_utf8_unchecked(raw) });
     }
     Cow::Owned(latin1_expand(raw))
+}
+
+/// [`latin1_cow`] over an owned buffer: the all-ASCII case reuses it in place,
+/// otherwise it takes the expanded string.
+fn latin1_to_utf8(raw: Vec<u8>) -> String {
+    match latin1_cow(&raw) {
+        Cow::Borrowed(_) => String::from_utf8(raw).expect("ascii is valid utf-8"),
+        Cow::Owned(expanded) => expanded,
+    }
 }
 
 /// Rewrites Latin-1 bytes as UTF-8: each leading ASCII run is copied wholesale
