@@ -12,6 +12,7 @@ use serde::{Deserialize, Deserializer};
 use serde_json::{Map, Value};
 
 use crate::concurrent_interner::{ConcurrentInterner, Writer};
+use crate::worker_count;
 use crate::model::{
     lane_class, span_role, CounterLane, CounterPoint, CounterSeries, Metadata, PhaseMarker,
     Profile, ProfileParts, Slice, SliceDetail, Span32, Str, ThreadTrack, TimeSpan,
@@ -1854,17 +1855,6 @@ fn build_counter_lanes(
 /// overhead outweighs the gain, so [`parse_parallel`] declines and the serial
 /// path runs.
 const MIN_PARALLEL_BYTES: usize = 8 << 20;
-
-/// Worker count for the parallel passes over profile data: the machine's
-/// physical core count rather than its logical (SMT) thread count, because the
-/// passes are memory-bandwidth bound, so threads past the cores that own the
-/// memory channels mostly stall on bandwidth, burning CPU for a wall-time gain
-/// that has flattened. Clamped to the parallelism the process is actually
-/// granted, so a CPU quota or affinity mask is honored.
-pub fn worker_count() -> usize {
-    let granted = std::thread::available_parallelism().map_or(1, |n| n.get());
-    num_cpus::get_physical().min(granted)
-}
 
 /// Parses the `traceEvents` array across several threads when the profile is
 /// large enough to repay it, returning `None` so the caller runs the serial
