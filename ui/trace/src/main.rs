@@ -14,8 +14,9 @@ use chart::{
 };
 
 use bviz_trace_layout::{
-    Cull, FlameBox, FlameGraph, FlameMetrics, FlameView, Lane, LaneLayout, LaneMetrics,
-    ScopeAggregate, StatRow, TimeView, Viewport, flame_height, lay_out_flame, lay_out_lanes,
+    Cull, FlameBox, FlameGraph, FlameMetrics, FlamePlacement, FlameView, Lane, LaneLayout,
+    LaneMetrics, ScopeAggregate, StatRow, TimeView, Viewport, flame_height, lay_out_flame,
+    lay_out_lanes,
     visible_slices,
 };
 use bviz_trace_profile::{LaneClass, Profile, Slice, SliceDetail, TimeSpan};
@@ -3910,10 +3911,7 @@ fn flame_boxes(
     let boxes = Rc::new(lay_out_flame(
         &aggregates.flame,
         content_w,
-        scroll_x,
-        view_w,
-        metrics,
-        MIN_SLICE_PX,
+        FlamePlacement { scroll_x, view_w, metrics, min_px: MIN_SLICE_PX },
     ));
     *cache.borrow_mut() = Some(FlameBoxCache {
         aggregates: aggregates.clone(),

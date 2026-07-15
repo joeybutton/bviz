@@ -970,41 +970,31 @@ fn set_subtree_max_depth(nodes: &mut [FlameNode]) {
 /// in `f64` so the proportional division holds precision at deep zoom, and each
 /// box is clamped to a viewport-sized margin so no huge value reaches its `f32`
 /// fields. Boxes come back in paint order, parents before children.
-pub fn lay_out_flame(
-    graph: &FlameGraph,
-    content_w: f64,
-    scroll_x: f64,
-    view_w: f32,
-    metrics: &FlameMetrics,
-    min_px: f32,
-) -> Vec<FlameBox> {
+pub fn lay_out_flame(graph: &FlameGraph, content_w: f64, placement: FlamePlacement) -> Vec<FlameBox> {
     let mut out = Vec::new();
-    place(
-        graph,
-        graph.root(),
-        0.0,
-        content_w,
-        scroll_x,
-        view_w,
-        metrics,
-        min_px,
-        &mut out,
-    );
+    place(graph, graph.root(), 0.0, content_w, placement, &mut out);
     out
 }
 
-#[allow(clippy::too_many_arguments)]
+/// Horizontal scroll offset, viewport width, row sizing, and minimum box width
+/// — the parameters that place the flame graph's visible window into pixels.
+#[derive(Debug, Clone, Copy)]
+pub struct FlamePlacement<'a> {
+    pub scroll_x: f64,
+    pub view_w: f32,
+    pub metrics: &'a FlameMetrics,
+    pub min_px: f32,
+}
+
 fn place(
     graph: &FlameGraph,
     node: &FlameNode,
     cx: f64,
     cw: f64,
-    scroll_x: f64,
-    view_w: f32,
-    metrics: &FlameMetrics,
-    min_px: f32,
+    placement: FlamePlacement,
     out: &mut Vec<FlameBox>,
 ) {
+    let FlamePlacement { scroll_x, view_w, metrics, min_px } = placement;
     let min = min_px as f64;
     // The node's left edge and widened right edge in viewport pixels.
     let vx = cx - scroll_x;
@@ -1032,14 +1022,14 @@ fn place(
     while i < children.len() {
         let ccw = child_w(&children[i]);
         if ccw >= min {
-            place(graph, &children[i], cursor, ccw, scroll_x, view_w, metrics, min_px, out);
+            place(graph, &children[i], cursor, ccw, placement, out);
             cursor += ccw;
             i += 1;
             continue;
         }
         let (best, best_cx, best_cw, run_cursor, next) =
-            deepest_in_column(children, i, ccw, cursor, scroll_x, min, &child_w);
-        place(graph, best, best_cx, best_cw, scroll_x, view_w, metrics, min_px, out);
+            deepest_in_column(children, i, ccw, cursor, placement, &child_w);
+        place(graph, best, best_cx, best_cw, placement, out);
         cursor = run_cursor;
         i = next;
     }
@@ -1056,10 +1046,11 @@ fn deepest_in_column<'a>(
     start: usize,
     start_cw: f64,
     cursor: f64,
-    scroll_x: f64,
-    min: f64,
+    placement: FlamePlacement,
     child_w: &impl Fn(&FlameNode) -> f64,
 ) -> (&'a FlameNode, f64, f64, f64, usize) {
+    let scroll_x = placement.scroll_x;
+    let min = placement.min_px as f64;
     let col = (cursor - scroll_x).floor() as i32;
     let (mut best, mut best_cx, mut best_cw) = (&children[start], cursor, start_cw);
     let mut run_cursor = cursor + start_cw;
@@ -1461,7 +1452,11 @@ mod tests {
             vec![action("CppCompile", 0, 100), action("Rustc", 100, 50)],
         )]);
         let g = build_flame_graph(&p, Scope::All);
-        let boxes = lay_out_flame(&g, 300.0, 0.0, 300.0, &METRICS, 0.0);
+        let boxes = lay_out_flame(
+            &g,
+            300.0,
+            FlamePlacement { scroll_x: 0.0, view_w: 300.0, metrics: &METRICS, min_px: 0.0 },
+        );
         let root_box = &boxes[0];
         assert_eq!(root_box.w, 300.0);
         assert_eq!(root_box.y, 0.0);
@@ -1491,7 +1486,11 @@ mod tests {
         )]);
         let g = build_flame_graph(&p, Scope::All);
         // Fully visible: 100px wide graph, no scroll, 100px viewport.
-        let boxes = lay_out_flame(&g, 100.0, 0.0, 100.0, &METRICS, 1.0);
+        let boxes = lay_out_flame(
+            &g,
+            100.0,
+            FlamePlacement { scroll_x: 0.0, view_w: 100.0, metrics: &METRICS, min_px: 1.0 },
+        );
         let wide = boxes.iter().find(|b| g.str(b.name) == "wide").unwrap();
         // Wide keeps its proportional slot at the left.
         assert_eq!(wide.x, 0.0);
@@ -1520,7 +1519,11 @@ mod tests {
             ],
         )]);
         let g = build_flame_graph(&p, Scope::All);
-        let boxes = lay_out_flame(&g, 100.0, 0.0, 100.0, &METRICS, 1.0);
+        let boxes = lay_out_flame(
+            &g,
+            100.0,
+            FlamePlacement { scroll_x: 0.0, view_w: 100.0, metrics: &METRICS, min_px: 1.0 },
+        );
         assert!(boxes.iter().any(|b| g.str(b.name) == "pad"));
         assert!(boxes.iter().any(|b| g.str(b.name) == "deep"));
         assert!(boxes.iter().any(|b| g.str(b.name) == "deepchild"));
@@ -1540,7 +1543,11 @@ mod tests {
         // 1000px content, scrolled 600px into a 400px viewport: the window covers
         // content [600, 1000) — the right half. "left" (content [0, 500)) is fully
         // off-screen; "right" (content [500, 1000)) shows from its middle.
-        let boxes = lay_out_flame(&g, 1000.0, 600.0, 400.0, &METRICS, 1.0);
+        let boxes = lay_out_flame(
+            &g,
+            1000.0,
+            FlamePlacement { scroll_x: 600.0, view_w: 400.0, metrics: &METRICS, min_px: 1.0 },
+        );
         assert!(!boxes.iter().any(|b| g.str(b.name) == "left"));
         let right = boxes.iter().find(|b| g.str(b.name) == "right").unwrap();
         // Its content x is 500; viewport-relative that is 500 - 600 = -100 (still
