@@ -446,8 +446,7 @@ impl GraphView {
         expandable: &HashSet<Id>,
         entity: Entity<GraphView>,
         view_state: ViewState,
-        recent: Option<Id>,
-        recent_at: Instant,
+        highlight: Option<Highlight>,
         prev_visible: &[Id],
         relaying: bool,
         hovered: Option<Id>,
@@ -456,7 +455,7 @@ impl GraphView {
         palette: Palette,
     ) -> Stateful<Div> {
         let dimming = compute_dimming(g, hovered, dim_enabled);
-        let boxes = paint_boxes(g, expandable, recent, recent_at, &dimming, &palette);
+        let boxes = paint_boxes(g, expandable, highlight, &dimming, &palette);
         let connectors = collect_connectors(g, &dimming);
         let legend = legend(g, &palette);
         let relaying_indicator = relaying_indicator(relaying, &palette);
@@ -491,7 +490,7 @@ impl GraphView {
             },
         );
         let content = content_size(g);
-        let recenter_target = recenter_rect(g, recent, prev_visible);
+        let recenter_target = recenter_rect(g, highlight.map(|h| h.id), prev_visible);
         let prepaint = build_prepaint(view_state.clone(), content, recenter_target);
         let paint = canvas_body(
             boxes,
@@ -669,8 +668,7 @@ impl Render for GraphView {
                         &self.expandable.borrow(),
                         cx.entity(),
                         self.view_state.clone(),
-                        self.recent,
-                        self.recent_at,
+                        self.recent.map(|id| Highlight { id, at: self.recent_at }),
                         &self.prev_visible,
                         self.relaying,
                         self.hovered,
@@ -788,19 +786,31 @@ fn compute_dimming(g: &LaidOut, hovered: Option<Id>, dim_enabled: bool) -> Dimmi
     }
 }
 
+/// The just-toggled box and the instant its highlight began, so the fade
+/// emphasis and the time it is measured from travel together to the painter.
+#[derive(Clone, Copy)]
+struct Highlight {
+    id: Id,
+    at: Instant,
+}
+
 /// Flattens each laid-out box to what the canvas paints, resolving its themed
 /// fill and marking those the dimming fades.
 fn paint_boxes(
     g: &LaidOut,
     expandable: &HashSet<Id>,
-    recent: Option<Id>,
-    recent_at: Instant,
+    highlight: Option<Highlight>,
     dimming: &Dimming,
     palette: &Palette,
 ) -> Vec<PaintBox> {
     // The highlight fades linearly to nothing over the linger window.
-    let highlight_alpha =
-        (1.0 - recent_at.elapsed().as_secs_f32() / HIGHLIGHT_LINGER.as_secs_f32()).clamp(0.0, 1.0);
+    let (recent, highlight_alpha) = match highlight {
+        Some(h) => (
+            Some(h.id),
+            (1.0 - h.at.elapsed().as_secs_f32() / HIGHLIGHT_LINGER.as_secs_f32()).clamp(0.0, 1.0),
+        ),
+        None => (None, 0.0),
+    };
     g.boxes
         .iter()
         .map(|b| PaintBox {
