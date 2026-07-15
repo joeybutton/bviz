@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use bviz_trace_profile::{LaneClass, Profile};
+use bviz_trace_profile::{LaneClass, Profile, Slice, SliceDetail};
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use super::{Builder, Flamer, Forest, containment_forest};
@@ -78,45 +78,60 @@ pub(crate) fn critical_lanes(
     lanes
 }
 
+/// Graft a matched action's worker span into `root`: its whole subtree merges
+/// under the root so the critical action shows its internal breakdown, and its
+/// duration adds to the root total. Each worker lane's containment forest is
+/// built once, on first use, and cached in `forests`.
+fn graft_action(
+    profile: &Profile,
+    flamer: &Flamer,
+    loc: &ActionLoc,
+    forests: &mut HashMap<usize, Forest>,
+    root: &mut Builder,
+) {
+    let &ActionLoc { lane, slice } = loc;
+    let threads = profile.threads();
+    let lane_slices = profile.slices(&threads[lane]);
+    let lane_details = profile.details(&threads[lane]);
+    let forest = forests
+        .entry(lane)
+        .or_insert_with(|| containment_forest(lane_slices));
+    root.total_us += lane_slices[slice].dur_us;
+    flamer.merge_span(root, lane_slices, lane_details, forest, slice);
+}
+
+/// Merge a component with no matching action (e.g. "Writing file …") as a bare
+/// leaf under `root`, adding its duration to the leaf frame and the root total.
+fn merge_leaf(flamer: &Flamer, cp: &Slice, cp_detail: &SliceDetail, root: &mut Builder) {
+    root.total_us += cp.dur_us;
+    let seg = flamer.span_label(cp, cp_detail);
+    let node = root.child(seg, || flamer.ranks.rank_of(seg.label));
+    node.total_us += cp.dur_us;
+    node.count += 1;
+}
+
 /// Graft the critical path's components into `root`. Each component on a
-/// `LaneClass::CriticalPath` lane names an action (`action '<desc>'`); when that
-/// action's worker span is found in `actions` (an [`action_locations`] index),
-/// its whole subtree is merged under the root so the critical action shows its
-/// internal breakdown. Components with no matching action (e.g. "Writing file
-/// …") merge as a bare leaf. `flamer`'s scan must cover the lanes
-/// [`critical_lanes`] selects from the same index.
+/// `LaneClass::CriticalPath` lane names an action (`action '<desc>'`); when
+/// `resolve_action` finds its worker span in `actions` (an [`action_locations`]
+/// index) [`graft_action`] copies that span's subtree, otherwise
+/// [`merge_leaf`] merges the component directly. `flamer`'s scan must cover the
+/// lanes [`critical_lanes`] selects from the same index.
 pub(crate) fn build_critical_path(
     profile: &Profile,
     flamer: &Flamer,
     actions: &FxHashMap<&str, ActionLoc>,
     root: &mut Builder,
 ) {
-    let threads = profile.threads();
-    // Components cluster on few worker lanes; build each lane's forest once.
     let mut forests: HashMap<usize, Forest> = HashMap::new();
-    for thread in threads {
+    for thread in profile.threads() {
         if thread.lane_class != LaneClass::CriticalPath {
             continue;
         }
         for (cp, cp_detail) in profile.slices(thread).iter().zip(profile.details(thread)) {
             let name = profile.str(cp.name);
             match resolve_action(name, actions) {
-                Some(&ActionLoc { lane, slice }) => {
-                    let lane_slices = profile.slices(&threads[lane]);
-                    let lane_details = profile.details(&threads[lane]);
-                    let forest = forests
-                        .entry(lane)
-                        .or_insert_with(|| containment_forest(lane_slices));
-                    root.total_us += lane_slices[slice].dur_us;
-                    flamer.merge_span(root, lane_slices, lane_details, forest, slice);
-                }
-                None => {
-                    root.total_us += cp.dur_us;
-                    let seg = flamer.span_label(cp, cp_detail);
-                    let node = root.child(seg, || flamer.ranks.rank_of(seg.label));
-                    node.total_us += cp.dur_us;
-                    node.count += 1;
-                }
+                Some(loc) => graft_action(profile, flamer, loc, &mut forests, root),
+                None => merge_leaf(flamer, cp, cp_detail, root),
             }
         }
     }
