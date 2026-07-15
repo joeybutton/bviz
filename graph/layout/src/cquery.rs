@@ -69,17 +69,17 @@ pub(crate) fn build_with_packages(
     let config_checksum = config_checksums(results);
     let cts: Vec<&ConfiguredTarget> = results.iter().flat_map(|r| r.results.iter()).collect();
 
-    let mut graph = Graph::new();
-    let index = build_nodes(
-        &cts,
-        packages,
-        &config_mnemonic,
-        &config_checksum,
-        &mut graph,
-        names,
-    );
-    wire_edges(&cts, &index, &config_checksum, &mut graph, names);
-    graph
+    let mut b = Builder { graph: Graph::new(), names };
+    let index = build_nodes(&mut b, &cts, packages, &config_mnemonic, &config_checksum);
+    wire_edges(&mut b, &cts, &index, &config_checksum);
+    b.graph
+}
+
+/// The graph under construction and the shared name interner, threaded together
+/// through the two build passes.
+struct Builder<'a> {
+    graph: Graph,
+    names: &'a mut Names,
 }
 
 /// Each configuration's mnemonic, dropping the empty ones so a target in such a
@@ -115,14 +115,13 @@ struct NodeIndex {
 /// Pass 1: a rule becomes a target container plus a configured-target leaf per
 /// configuration; any other target becomes one leaf per label.
 fn build_nodes(
+    b: &mut Builder,
     cts: &[&ConfiguredTarget],
     packages: &BTreeSet<(String, String)>,
     config_mnemonic: &HashMap<u32, String>,
     config_checksum: &HashMap<u32, String>,
-    graph: &mut Graph,
-    names: &mut Names,
 ) -> NodeIndex {
-    let hierarchy = PackageHierarchy::build(packages, graph, names);
+    let hierarchy = PackageHierarchy::build(packages, &mut b.graph, b.names);
     let mut target_box: HashMap<String, Id> = HashMap::new();
     let mut leaf_id: HashMap<String, Id> = HashMap::new();
     let mut ct_ids: HashSet<(String, String)> = HashSet::new();
@@ -138,8 +137,8 @@ fn build_nodes(
             let label = rule.name.as_str();
             if !target_box.contains_key(label) {
                 let parent = hierarchy.package_box(label);
-                let id = names.intern(&format!("target:{label}"));
-                graph.add_node(id, label::target_label(label), Kind::Target, parent);
+                let id = b.names.intern(&format!("target:{label}"));
+                b.graph.add_node(id, label::target_label(label), Kind::Target, parent);
                 target_box.insert(label.to_string(), id);
             }
             let config_id = ct.configuration_id;
@@ -149,8 +148,8 @@ fn build_nodes(
                     .get(&config_id)
                     .cloned()
                     .unwrap_or_else(|| format!("config {config_id}"));
-                let id = names.intern(&label::ct_node_id(label, &key));
-                graph.add_node(
+                let id = b.names.intern(&label::ct_node_id(label, &key));
+                b.graph.add_node(
                     id,
                     mnemonic,
                     Kind::ConfiguredTarget,
@@ -160,8 +159,8 @@ fn build_nodes(
         } else if let Some((label, kind)) = label_and_kind(target) {
             if !leaf_id.contains_key(label) {
                 let parent = hierarchy.package_box(label);
-                let id = names.intern(&format!("target:{label}"));
-                graph.add_node(id, label::target_label(label), kind, parent);
+                let id = b.names.intern(&format!("target:{label}"));
+                b.graph.add_node(id, label::target_label(label), kind, parent);
                 leaf_id.insert(label.to_string(), id);
             }
         }
@@ -175,13 +174,7 @@ fn build_nodes(
 }
 
 /// Pass 2: an edge from each dependency to the configured target that consumes it.
-fn wire_edges(
-    cts: &[&ConfiguredTarget],
-    index: &NodeIndex,
-    config_checksum: &HashMap<u32, String>,
-    graph: &mut Graph,
-    names: &mut Names,
-) {
+fn wire_edges(b: &mut Builder, cts: &[&ConfiguredTarget], index: &NodeIndex, config_checksum: &HashMap<u32, String>) {
     let mut seen_edge: HashSet<(Id, Id)> = HashSet::new();
     for ct in cts {
         let Some(target) = ct.target.as_ref() else {
@@ -193,7 +186,7 @@ fn wire_edges(
         let Some(rule) = target.rule.as_ref() else {
             continue;
         };
-        let consumer = names.intern(&label::ct_node_id(
+        let consumer = b.names.intern(&label::ct_node_id(
             &rule.name,
             &label::config_key(
                 ct.configuration_id,
@@ -203,7 +196,7 @@ fn wire_edges(
         if rule.configured_rule_input.is_empty() {
             for dep_label in &rule.rule_input {
                 if let Some(dep) = resolve_label_dep(dep_label, index) {
-                    add_edge(graph, &mut seen_edge, dep, consumer);
+                    add_edge(&mut b.graph, &mut seen_edge, dep, consumer);
                 }
             }
         } else {
@@ -212,9 +205,9 @@ fn wire_edges(
                     continue;
                 };
                 if let Some(dep) =
-                    resolve_configured_dep(dep_label, input.configuration_id, config_checksum, index, names)
+                    resolve_configured_dep(dep_label, input.configuration_id, config_checksum, index, b.names)
                 {
-                    add_edge(graph, &mut seen_edge, dep, consumer);
+                    add_edge(&mut b.graph, &mut seen_edge, dep, consumer);
                 }
             }
         }
