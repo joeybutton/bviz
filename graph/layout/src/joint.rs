@@ -24,6 +24,26 @@ pub fn build_joint(
     query: Option<&[Target]>,
     external_sources: bool,
 ) -> (Graph, Names) {
+    let union = package_union(aquery, cquery, query);
+    let labeled_outputs = labeled_outputs(cquery, query);
+    let mut names = Names::default();
+    let graphs = build_inputs(
+        aquery,
+        cquery,
+        query,
+        external_sources,
+        &union,
+        &labeled_outputs,
+        &mut names,
+    );
+    canonicalize(merge(graphs), &names)
+}
+
+fn package_union(
+    aquery: Option<&[ActionGraphContainer]>,
+    cquery: Option<&[CqueryResult]>,
+    query: Option<&[Target]>,
+) -> BTreeSet<(String, String)> {
     let mut union: BTreeSet<(String, String)> = BTreeSet::new();
     if let Some(a) = aquery {
         union.extend(aquery::package_keys(a));
@@ -34,9 +54,12 @@ pub fn build_joint(
     if let Some(q) = query {
         union.extend(query::package_keys(q));
     }
+    union
+}
 
-    // Labels of generated files that query or cquery knows as targets, so aquery
-    // promotes the matching output artifacts to merge with those target nodes.
+/// Labels of generated files that query or cquery knows as targets, so aquery
+/// promotes the matching output artifacts to merge with those target nodes.
+fn labeled_outputs(cquery: Option<&[CqueryResult]>, query: Option<&[Target]>) -> HashSet<String> {
     let mut labeled_outputs: HashSet<String> = HashSet::new();
     if let Some(c) = cquery {
         labeled_outputs.extend(cquery::generated_labels(c));
@@ -44,27 +67,36 @@ pub fn build_joint(
     if let Some(q) = query {
         labeled_outputs.extend(query::generated_labels(q));
     }
+    labeled_outputs
+}
 
-    let mut names = Names::default();
+fn build_inputs(
+    aquery: Option<&[ActionGraphContainer]>,
+    cquery: Option<&[CqueryResult]>,
+    query: Option<&[Target]>,
+    external_sources: bool,
+    union: &BTreeSet<(String, String)>,
+    labeled_outputs: &HashSet<String>,
+    names: &mut Names,
+) -> Vec<Graph> {
     let mut graphs: Vec<Graph> = Vec::new();
     if let Some(a) = aquery {
         graphs.push(aquery::build_with_packages(
             a,
             external_sources,
-            &union,
-            &labeled_outputs,
-            &mut names,
+            union,
+            labeled_outputs,
+            names,
         ));
     }
     if let Some(c) = cquery {
-        graphs.push(cquery::build_with_packages(c, &union, &mut names));
+        graphs.push(cquery::build_with_packages(c, union, names));
     }
     if let Some(q) = query {
         let refs: Vec<&Target> = q.iter().collect();
-        graphs.push(query::build_with_packages(&refs, &union, &mut names));
+        graphs.push(query::build_with_packages(&refs, union, names));
     }
-
-    canonicalize(merge(graphs), &names)
+    graphs
 }
 
 /// Re-numbers a graph's ids into lexicographic order of their names, so a graph
