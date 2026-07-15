@@ -45,7 +45,7 @@ fn snapshot_rows(grid: &Grid<Cell>, lines: RangeInclusive<i32>, columns: usize) 
 pub use alacritty_terminal::grid::Scroll;
 pub use alacritty_terminal::index::Side;
 pub use alacritty_terminal::selection::SelectionType;
-pub use display::{DisplaySource, SelectionSpan, Terminal, Url};
+pub use display::{CellPos, DisplaySource, SelectionSpan, Terminal, Url};
 pub use output::{parse, BuildOutput};
 pub use replay::Replay;
 pub use screen::Screen;

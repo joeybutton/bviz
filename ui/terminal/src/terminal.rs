@@ -5,7 +5,7 @@
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
-use bviz_terminal::{Cell, Flags, Replay, Scroll, SelectionType, Side, Terminal, Url};
+use bviz_terminal::{Cell, CellPos, Flags, Replay, Scroll, SelectionType, Side, Terminal, Url};
 use bviz_ui_components::{
     Axis, Button, Dropdown, Scrollbar, ScrubberLayout, TextInput, load_in_background, scrubber,
     spinner, track_drag,
@@ -394,7 +394,7 @@ impl TerminalView {
         // drag (a selection), so dragging from a link still selects its text.
         self.pressed_url = self.hovered_url.as_ref().map(|url| url.text().to_string());
         if let Some(terminal) = self.terminal.as_mut() {
-            terminal.begin_selection(selection, column, row, side);
+            terminal.begin_selection(selection, CellPos { column, row }, side);
             // The anchor's line counted from the top of the scrollback, fixed to its
             // text so it survives rebuilds and scrolling under the drag.
             let anchor_line =
@@ -435,7 +435,7 @@ impl TerminalView {
             return;
         };
         if let Some(terminal) = self.terminal.as_mut() {
-            terminal.extend_selection(column, row, side);
+            terminal.extend_selection(CellPos { column, row }, side);
             cx.notify();
         }
     }

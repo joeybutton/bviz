@@ -107,6 +107,13 @@ impl Dimensions for Size {
     }
 }
 
+/// A viewport cell coordinate: `column` across, `row` down.
+#[derive(Clone, Copy)]
+pub struct CellPos {
+    pub column: usize,
+    pub row: usize,
+}
+
 impl Terminal {
     /// Reconstruct the build's final screen (at the width Bazel used) and replay
     /// it into a display terminal of `columns` by `rows`. Reconstruction happens
@@ -223,14 +230,14 @@ impl Terminal {
     }
 
     /// Begin a selection of the given type anchored at a viewport cell.
-    pub fn begin_selection(&mut self, ty: SelectionType, column: usize, row: usize, side: Side) {
-        let point = self.grid_point(column, row);
+    pub fn begin_selection(&mut self, ty: SelectionType, cell: CellPos, side: Side) {
+        let point = self.grid_point(cell.column, cell.row);
         self.term.selection = Some(Selection::new(ty, point, side));
     }
 
     /// Extend the in-progress selection to a viewport cell.
-    pub fn extend_selection(&mut self, column: usize, row: usize, side: Side) {
-        let point = self.grid_point(column, row);
+    pub fn extend_selection(&mut self, cell: CellPos, side: Side) {
+        let point = self.grid_point(cell.column, cell.row);
         if let Some(selection) = self.term.selection.as_mut() {
             selection.update(point, side);
         }
@@ -620,8 +627,8 @@ mod tests {
         let output = BuildOutput::from_bytes(40, b"alpha\nbeta\ngamma\n".to_vec());
         let mut terminal = Terminal::new(&output, 40, 10);
         // Select "lph": from the left of column 1 to the right of column 3.
-        terminal.begin_selection(SelectionType::Simple, 1, 0, Side::Left);
-        terminal.extend_selection(3, 0, Side::Right);
+        terminal.begin_selection(SelectionType::Simple, CellPos { column: 1, row: 0 }, Side::Left);
+        terminal.extend_selection(CellPos { column: 3, row: 0 }, Side::Right);
         assert_eq!(terminal.selection_text().as_deref(), Some("lph"));
         let spans = terminal.selection_spans();
         assert_eq!(spans[0], Some((1, 3)));
@@ -637,8 +644,8 @@ mod tests {
         // Select "beta" on the second line of an early frame.
         let early = BuildOutput::from_bytes(40, b"alpha\nbeta\ngamma\n".to_vec());
         let mut terminal = Terminal::new(&early, 40, 10);
-        terminal.begin_selection(SelectionType::Simple, 0, 1, Side::Left);
-        terminal.extend_selection(3, 1, Side::Right);
+        terminal.begin_selection(SelectionType::Simple, CellPos { column: 0, row: 1 }, Side::Left);
+        terminal.extend_selection(CellPos { column: 3, row: 1 }, Side::Right);
         assert_eq!(terminal.selection_text().as_deref(), Some("beta"));
         let span = terminal.selection_span().expect("a captured selection");
 
@@ -761,11 +768,11 @@ mod tests {
         let mut terminal = Terminal::new(&output, 40, 10);
 
         // A word selection anchored inside "beta" expands to the whole word.
-        terminal.begin_selection(SelectionType::Semantic, 7, 0, Side::Left);
+        terminal.begin_selection(SelectionType::Semantic, CellPos { column: 7, row: 0 }, Side::Left);
         assert_eq!(terminal.selection_text().as_deref(), Some("beta"));
 
         // A line selection takes the whole line regardless of the column.
-        terminal.begin_selection(SelectionType::Lines, 2, 0, Side::Left);
+        terminal.begin_selection(SelectionType::Lines, CellPos { column: 2, row: 0 }, Side::Left);
         assert_eq!(
             terminal.selection_text().as_deref().map(str::trim_end),
             Some("alpha beta")
