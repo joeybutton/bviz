@@ -264,31 +264,18 @@ mod tests {
             let slices = profile.slices(&profile.threads()[lane.track]);
             let upper = slices.partition_point(|s| s.start_us as f64 <= view_end_us);
             for (slice, s) in slices[..upper].iter().enumerate() {
-                let x = view.x_of(s.start_us);
-                let natural = view.x_of(s.start_us + s.dur_us) - x;
-                let w = natural.max(min_px);
-                if x + w < 0.0 || x > viewport.width {
-                    continue;
-                }
-                let depth = s.depth as usize;
-                if depth >= next_free_col.len() {
-                    next_free_col.resize(depth + 1, i32::MIN);
-                }
-                let start_col = x.floor() as i32;
-                if natural < min_px && start_col < next_free_col[depth] {
-                    continue;
-                }
-                next_free_col[depth] = ((x + w).floor() as i32).max(start_col + 1);
-                let paint_x = x.max(-viewport.width);
-                let paint_w = (x + w).min(2.0 * viewport.width) - paint_x;
-                out.push(VisibleSlice {
-                    track: lane.track,
+                crate::cull::emit_slice(
+                    s,
+                    lane.track,
                     slice,
-                    x: paint_x,
-                    y: rows_top + s.depth as f32 * metrics.row_height,
-                    w: paint_w,
-                    h: metrics.row_height,
-                });
+                    view,
+                    viewport,
+                    metrics,
+                    rows_top,
+                    min_px,
+                    &mut next_free_col,
+                    &mut out,
+                );
             }
         }
         out

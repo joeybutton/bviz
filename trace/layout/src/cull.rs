@@ -1,4 +1,4 @@
-use bviz_trace_profile::Profile;
+use bviz_trace_profile::{Profile, Slice};
 
 use crate::lanes::{LaneLayout, LaneMetrics};
 use crate::view::TimeView;
@@ -64,39 +64,68 @@ pub fn visible_slices(
         let end_maxes = profile.end_maxes(track);
         let lower = end_maxes[..upper].partition_point(|&e| (e as f64) < view_start_us);
         for (i, s) in slices[lower..upper].iter().enumerate() {
-            let slice = lower + i;
-            let x = view.x_of(s.start_us);
-            let natural = view.x_of(s.start_us + s.dur_us) - x;
-            let w = natural.max(min_px);
-            if x + w < 0.0 || x > viewport.width {
-                continue;
-            }
-            let depth = s.depth as usize;
-            if depth >= next_free_col.len() {
-                next_free_col.resize(depth + 1, i32::MIN);
-            }
-            let start_col = x.floor() as i32;
-            if natural < min_px && start_col < next_free_col[depth] {
-                continue;
-            }
-            next_free_col[depth] = ((x + w).floor() as i32).max(start_col + 1);
-            // Bound the painted span to a margin around the viewport. At extreme
-            // zoom a span reaching far off-screen otherwise carries coordinates
-            // large enough that the renderer's rounded-rect distance field loses
-            // precision and places the clipped edge wrong, bleeding past the
-            // content mask; the visible portion is unchanged since the margin
-            // exceeds the viewport.
-            let paint_x = x.max(-viewport.width);
-            let paint_w = (x + w).min(2.0 * viewport.width) - paint_x;
-            out.push(VisibleSlice {
-                track: lane.track,
-                slice,
-                x: paint_x,
-                y: rows_top + s.depth as f32 * metrics.row_height,
-                w: paint_w,
-                h: metrics.row_height,
-            });
+            emit_slice(
+                s,
+                lane.track,
+                lower + i,
+                view,
+                viewport,
+                metrics,
+                rows_top,
+                min_px,
+                &mut next_free_col,
+                &mut out,
+            );
         }
     }
     out
+}
+
+/// Widen a slice to `min_px`, coalesce it into an earlier marker sharing its
+/// start pixel column at the same depth, clamp the painted span to a viewport
+/// margin, and push the result. `next_free_col` carries the coalesce state
+/// across calls within a lane; `slice` is the slice's index in the track.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn emit_slice(
+    s: &Slice,
+    track: usize,
+    slice: usize,
+    view: &TimeView,
+    viewport: &Viewport,
+    metrics: &LaneMetrics,
+    rows_top: f32,
+    min_px: f32,
+    next_free_col: &mut Vec<i32>,
+    out: &mut Vec<VisibleSlice>,
+) {
+    let x = view.x_of(s.start_us);
+    let natural = view.x_of(s.start_us + s.dur_us) - x;
+    let w = natural.max(min_px);
+    if x + w < 0.0 || x > viewport.width {
+        return;
+    }
+    let depth = s.depth as usize;
+    if depth >= next_free_col.len() {
+        next_free_col.resize(depth + 1, i32::MIN);
+    }
+    let start_col = x.floor() as i32;
+    if natural < min_px && start_col < next_free_col[depth] {
+        return;
+    }
+    next_free_col[depth] = ((x + w).floor() as i32).max(start_col + 1);
+    // Bound the painted span to a margin around the viewport. At extreme zoom a
+    // span reaching far off-screen otherwise carries coordinates large enough
+    // that the renderer's rounded-rect distance field loses precision and places
+    // the clipped edge wrong, bleeding past the content mask; the visible portion
+    // is unchanged since the margin exceeds the viewport.
+    let paint_x = x.max(-viewport.width);
+    let paint_w = (x + w).min(2.0 * viewport.width) - paint_x;
+    out.push(VisibleSlice {
+        track,
+        slice,
+        x: paint_x,
+        y: rows_top + s.depth as f32 * metrics.row_height,
+        w: paint_w,
+        h: metrics.row_height,
+    });
 }
