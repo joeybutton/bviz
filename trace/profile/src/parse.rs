@@ -657,27 +657,32 @@ impl<'a> EventScanner<'a> {
     fn scan_string(&mut self) -> Option<Cow<'a, str>> {
         self.eat(b'"').then_some(())?;
         let start = self.pos;
-        let mut escaped = false;
-        loop {
-            self.pos = find_special(self.bytes, self.pos)?;
-            match self.bytes[self.pos] {
-                b'"' => break,
-                b'\\' => {
-                    escaped = true;
-                    self.pos += 2;
-                    if self.pos > self.bytes.len() {
-                        return None;
-                    }
-                }
-                _ => return None,
-            }
-        }
+        let escaped = self.scan_string_body()?;
         let raw = &self.text[start..self.pos];
         self.pos += 1;
         if escaped {
             unescape(raw).map(Cow::Owned)
         } else {
             Some(Cow::Borrowed(raw))
+        }
+    }
+
+    /// Advances the cursor from a string body to its closing quote (left
+    /// unconsumed), reporting whether the body held an escape. `None` on a
+    /// control byte or end of input; a `\uXXXX` escape passes here and is
+    /// deferred to [`unescape`] by the caller that materializes the token.
+    fn scan_string_body(&mut self) -> Option<bool> {
+        let mut escaped = false;
+        loop {
+            self.pos = find_special(self.bytes, self.pos)?;
+            match self.bytes[self.pos] {
+                b'"' => return Some(escaped),
+                b'\\' => {
+                    escaped = true;
+                    self.pos += 2;
+                }
+                _ => return None,
+            }
         }
     }
 
@@ -865,17 +870,9 @@ impl<'a> EventScanner<'a> {
     /// [`Self::scan_string`] without materializing the token.
     fn skip_string(&mut self) -> Option<()> {
         self.eat(b'"').then_some(())?;
-        loop {
-            self.pos = find_special(self.bytes, self.pos)?;
-            match self.bytes[self.pos] {
-                b'"' => {
-                    self.pos += 1;
-                    return Some(());
-                }
-                b'\\' => self.pos += 2,
-                _ => return None,
-            }
-        }
+        self.scan_string_body()?;
+        self.pos += 1;
+        Some(())
     }
 }
 
