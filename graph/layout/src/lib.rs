@@ -19,6 +19,9 @@ pub mod quotient;
 pub mod reduce;
 pub mod streamed_proto;
 
+#[cfg(test)]
+mod test_support;
+
 pub use graph::{EdgeKind, Graph, Kind};
 pub use intern::{Id, Names};
 pub use joint::build_joint;

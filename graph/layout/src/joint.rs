@@ -153,7 +153,8 @@ fn merge(graphs: Vec<Graph>) -> Graph {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::graph::{EdgeKind, Node};
+    use crate::graph::EdgeKind;
+    use crate::test_support::find;
     use bazel_query_proto::analysis::{
         Action, Artifact, DepSetOfFiles, PathFragment, Target as ActionTarget,
     };
@@ -181,10 +182,6 @@ mod tests {
             }),
             ..Default::default()
         }
-    }
-
-    fn find<'a>(graph: &'a Graph, names: &Names, id: &str) -> &'a Node {
-        graph.nodes.iter().find(|n| names.resolve(n.id) == id).unwrap()
     }
 
     fn edges<'a>(graph: &Graph, names: &'a Names) -> HashSet<(&'a str, &'a str, EdgeKind)> {

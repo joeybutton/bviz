@@ -95,7 +95,7 @@ pub(crate) fn build_with_packages(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::graph::Node;
+    use crate::test_support::{edges, find, parent_of};
     use bazel_query_proto::blaze_query::{target::Discriminator, GeneratedFile, Rule, SourceFile};
 
     fn rule(name: &str, inputs: &[&str]) -> Target {
@@ -130,22 +130,6 @@ mod tests {
             }),
             ..Default::default()
         }
-    }
-
-    fn find<'a>(graph: &'a Graph, names: &Names, id: &str) -> &'a Node {
-        graph.nodes.iter().find(|n| names.resolve(n.id) == id).unwrap()
-    }
-
-    fn parent_of<'a>(graph: &Graph, names: &'a Names, id: &str) -> Option<&'a str> {
-        find(graph, names, id).parent.map(|p| names.resolve(p))
-    }
-
-    fn edges<'a>(graph: &Graph, names: &'a Names) -> HashSet<(&'a str, &'a str)> {
-        graph
-            .edges
-            .iter()
-            .map(|e| (names.resolve(e.from), names.resolve(e.to)))
-            .collect()
     }
 
     #[test]

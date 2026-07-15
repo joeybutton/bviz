@@ -255,6 +255,7 @@ mod tests {
     use super::*;
     use crate::graph::Kind;
     use crate::intern::Names;
+    use crate::test_support::{edges, find};
 
     /// The interned ids of `ids`, which must already be present in `names`; used
     /// both as the expected set in assertions and as the `expanded` argument to
@@ -269,18 +270,6 @@ mod tests {
 
     fn node_ids<'a>(graph: &Graph, names: &'a Names) -> HashSet<&'a str> {
         graph.nodes.iter().map(|n| names.resolve(n.id)).collect()
-    }
-
-    fn edges<'a>(graph: &Graph, names: &'a Names) -> HashSet<(&'a str, &'a str)> {
-        graph
-            .edges
-            .iter()
-            .map(|e| (names.resolve(e.from), names.resolve(e.to)))
-            .collect()
-    }
-
-    fn find<'a>(graph: &'a Graph, names: &Names, id: &str) -> &'a super::super::graph::Node {
-        graph.nodes.iter().find(|n| names.resolve(n.id) == id).unwrap()
     }
 
     /// Two roots A and B, each a multi-child container holding `x`/`y`

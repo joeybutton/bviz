@@ -272,6 +272,7 @@ fn clone_node(node: &Node) -> Node {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::find;
 
     fn leaf(graph: &mut Graph, names: &mut Names, id: &str, kind: Kind, parent: Option<&str>) {
         node(graph, names, id, id, kind, parent);
@@ -306,10 +307,6 @@ mod tests {
             .iter()
             .map(|e| (names.resolve(e.from), names.resolve(e.to)))
             .collect()
-    }
-
-    fn find<'a>(graph: &'a Graph, names: &Names, id: &str) -> &'a Node {
-        graph.nodes.iter().find(|n| names.resolve(n.id) == id).unwrap()
     }
 
     /// Collapse every group (the empty-`expanded` default).

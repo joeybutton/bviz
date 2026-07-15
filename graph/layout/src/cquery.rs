@@ -282,7 +282,7 @@ fn add_edge(graph: &mut Graph, seen: &mut HashSet<(Id, Id)>, from: Id, to: Id) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::graph::Node;
+    use crate::test_support::{edges, find};
     use bazel_query_proto::analysis::Configuration;
     use bazel_query_proto::blaze_query::{ConfiguredRuleInput, Rule, SourceFile, Target};
 
@@ -349,18 +349,6 @@ mod tests {
             results,
             configurations,
         }
-    }
-
-    fn find<'a>(graph: &'a Graph, names: &Names, id: &str) -> &'a Node {
-        graph.nodes.iter().find(|n| names.resolve(n.id) == id).unwrap()
-    }
-
-    fn edges<'a>(graph: &Graph, names: &'a Names) -> HashSet<(&'a str, &'a str)> {
-        graph
-            .edges
-            .iter()
-            .map(|e| (names.resolve(e.from), names.resolve(e.to)))
-            .collect()
     }
 
     #[test]
