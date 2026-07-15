@@ -6,7 +6,7 @@ use crate::flame::{
     Builder, FlameGraph, Flamer, Scope, action_locations, build_critical_path, build_flame_graph,
     build_flame_graph_for_tracks, class_trees, fold_all, fold_into, seal,
 };
-use crate::stats::{StatRow, stats_from_flame};
+use crate::stats::{StatRow, default_order, stats_from_flame};
 
 /// Everything the UI presents for one flame scope, derived together so a held
 /// box, node, or row always resolves its name [`Str`](bviz_trace_profile::Str)
@@ -50,29 +50,6 @@ impl ScopeAggregate {
             grand_total,
         }
     }
-}
-
-/// Indices into `stats` in the default display order: `total_us` descending,
-/// ties broken by key rank ascending — which orders exactly as the key text
-/// does — then by row index. Each row decorate-sorts on one packed integer key:
-/// the total in the high bits as an order-preserving `i64`→`u64` bias inverted
-/// for descending, above the rank, above the index. No two rows share an index,
-/// so the order is total, and no comparison resolves a string or chases a row
-/// pointer.
-fn default_order(stats: &[StatRow]) -> Vec<u32> {
-    const RANK_SHIFT: u32 = u32::BITS;
-    const TOTAL_SHIFT: u32 = 2 * u32::BITS;
-    const SIGN_BIT: u64 = 1 << (u64::BITS - 1);
-    let mut keyed: Vec<u128> = stats
-        .iter()
-        .enumerate()
-        .map(|(i, r)| {
-            let total_desc = !((r.total_us as u64) ^ SIGN_BIT);
-            ((total_desc as u128) << TOTAL_SHIFT) | ((r.rank as u128) << RANK_SHIFT) | i as u128
-        })
-        .collect();
-    keyed.sort_unstable();
-    keyed.into_iter().map(|k| k as u32).collect()
 }
 
 /// The aggregates of every flame scope, built from one pass over the profile:
