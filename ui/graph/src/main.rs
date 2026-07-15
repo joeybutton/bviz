@@ -194,6 +194,20 @@ struct Dimming {
     applies: bool,
 }
 
+/// The shared, interior-mutable view state threaded through the render tree and
+/// its prepaint/paint closures: zoom factor, pan offset, whether the initial fit
+/// has run, the last painted viewport, a pending recenter request, and the
+/// in-flight settle animation.
+#[derive(Clone)]
+struct ViewState {
+    zoom: Rc<Cell<f32>>,
+    pan: Rc<Cell<(f32, f32)>>,
+    fitted: Rc<Cell<bool>>,
+    viewport: Rc<Cell<Bounds<Pixels>>>,
+    recenter: Rc<Cell<bool>>,
+    anim: Rc<Cell<Option<Settle>>>,
+}
+
 /// Loads, lays out, and renders a Bazel build graph.
 ///
 /// Zoom, pan, and the captured viewport bounds are shared cells so the canvas
@@ -202,12 +216,7 @@ struct Dimming {
 struct GraphView {
     focus_handle: FocusHandle,
     source: Source,
-    /// Zoom scale baked into every coordinate (1.0 = layout pixels).
-    zoom: Rc<Cell<f32>>,
-    /// Pixel translation applied after scaling.
-    pan: Rc<Cell<(f32, f32)>>,
-    /// Whether the initial fit-to-window view has been applied.
-    fitted: Rc<Cell<bool>>,
+    view_state: ViewState,
     dragging: bool,
     /// Whether the cursor moved past the click threshold since the press, which
     /// distinguishes a drag (pan) from a click (toggle).
@@ -217,9 +226,6 @@ struct GraphView {
     press: Point<Pixels>,
     /// The scroll-bar drag in progress, or `None` when no thumb is held.
     scroll_drag: Option<ScrollDrag>,
-    /// Viewport bounds captured during canvas paint, so the scroll handler can
-    /// map a window cursor to viewport space and bound the zoom to a fit.
-    viewport: Rc<Cell<Bounds<Pixels>>>,
     /// The built (pre-quotient) graph, cached so toggling a group re-lays-out
     /// without re-reading or re-parsing the proto. `None` until the load lands.
     base: Rc<RefCell<Option<Graph>>>,
@@ -250,18 +256,11 @@ struct GraphView {
     /// retires at once, leaving `recent` for the new toggle rather than clearing
     /// it or repainting a stale highlight.
     highlight_seq: u64,
-    /// Set after a toggle so the next relayout's first paint settles the view on
-    /// `recent` together with the boxes that were on screen when it was toggled.
-    recenter: Rc<Cell<bool>>,
     /// Ids of the boxes the viewport fully enclosed when the recent toggle fired.
     /// The settling relayout keeps these — and the toggled box — in view, so the
     /// view tracks what the user was looking at rather than snapping to the
     /// toggled box alone.
     prev_visible: Vec<Id>,
-    /// The in-flight ease toward the settled view, or `None` when the view is at
-    /// rest. The canvas paint advances it; a manual pan or zoom clears it so the
-    /// animation never fights the cursor.
-    anim: Rc<Cell<Option<Settle>>>,
     /// Whether a relayout is running, so the view shows a progress indicator
     /// while the prior layout stays interactive.
     relaying: bool,
@@ -341,15 +340,19 @@ impl GraphView {
         Self {
             focus_handle,
             source: Source::Loading,
-            zoom: Rc::new(Cell::new(1.0)),
-            pan: Rc::new(Cell::new((0.0, 0.0))),
-            fitted: Rc::new(Cell::new(false)),
+            view_state: ViewState {
+                zoom: Rc::new(Cell::new(1.0)),
+                pan: Rc::new(Cell::new((0.0, 0.0))),
+                fitted: Rc::new(Cell::new(false)),
+                viewport: Rc::new(Cell::new(Bounds::default())),
+                recenter: Rc::new(Cell::new(false)),
+                anim: Rc::new(Cell::new(None)),
+            },
             dragging: false,
             moved: false,
             last_mouse: Point::default(),
             press: Point::default(),
             scroll_drag: None,
-            viewport: Rc::new(Cell::new(Bounds::default())),
             base,
             reduced_base,
             names,
@@ -358,9 +361,7 @@ impl GraphView {
             recent: None,
             recent_at: Instant::now(),
             highlight_seq: 0,
-            recenter: Rc::new(Cell::new(false)),
             prev_visible: Vec::new(),
-            anim: Rc::new(Cell::new(None)),
             relaying: false,
             hovered: None,
             dim_enabled: true,
@@ -399,7 +400,7 @@ impl GraphView {
             |view, (laid_out, names), cx| {
                 *view.names.borrow_mut() = Some(names);
                 view.source = Source::Loaded(laid_out);
-                view.recenter.set(true);
+                view.view_state.recenter.set(true);
                 view.relaying = false;
                 view.highlight_recent(cx);
             },
@@ -444,14 +445,9 @@ impl GraphView {
         g: &LaidOut,
         expandable: &HashSet<Id>,
         entity: Entity<GraphView>,
-        zoom: Rc<Cell<f32>>,
-        pan: Rc<Cell<(f32, f32)>>,
-        fitted: Rc<Cell<bool>>,
-        viewport: Rc<Cell<Bounds<Pixels>>>,
+        view_state: ViewState,
         recent: Option<Id>,
         recent_at: Instant,
-        recenter: Rc<Cell<bool>>,
-        anim: Rc<Cell<Option<Settle>>>,
         prev_visible: &[Id],
         relaying: bool,
         hovered: Option<Id>,
@@ -496,17 +492,16 @@ impl GraphView {
         );
         let content = content_size(g);
         let recenter_target = recenter_rect(g, recent, prev_visible);
-        let prepaint = build_prepaint(
-            zoom.clone(),
-            pan.clone(),
-            fitted.clone(),
-            viewport.clone(),
-            recenter.clone(),
-            anim.clone(),
+        let prepaint = build_prepaint(view_state.clone(), content, recenter_target);
+        let paint = canvas_body(
+            boxes,
+            connectors,
+            view_state.zoom.clone(),
+            view_state.pan.clone(),
+            palette,
             content,
-            recenter_target,
+            entity,
         );
-        let paint = canvas_body(boxes, connectors, zoom, pan, palette, content, entity);
         div()
             .id("graph-viewport")
             .relative()
@@ -575,8 +570,8 @@ impl GraphView {
         let Source::Loaded(g) = &self.source else {
             return;
         };
-        let vp = self.viewport.get();
-        let (gx, gy) = from_screen(e.position, vp.origin, self.zoom.get(), self.pan.get());
+        let vp = self.view_state.viewport.get();
+        let (gx, gy) = from_screen(e.position, vp.origin, self.view_state.zoom.get(), self.view_state.pan.get());
         let hit = hit_box(&g.boxes, gx, gy).map(|b| b.id);
         if hit != self.hovered {
             self.hovered = hit;
@@ -592,23 +587,23 @@ impl GraphView {
             Source::Loaded(g) => content_size(g),
             _ => return,
         };
-        let vp = self.viewport.get();
+        let vp = self.view_state.viewport.get();
         let lx = f32::from(e.position.x) - f32::from(vp.origin.x);
         let ly = f32::from(e.position.y) - f32::from(vp.origin.y);
         let dy = match e.delta {
             ScrollDelta::Lines(p) => p.y,
             ScrollDelta::Pixels(p) => f32::from(p.y) / 120.0,
         };
-        let old = self.zoom.get();
+        let old = self.view_state.zoom.get();
         let new = (old * 1.1_f32.powf(dy)).clamp(fit_zoom(vp.size, content), MAX_ZOOM);
-        let (px, py) = self.pan.get();
+        let (px, py) = self.view_state.pan.get();
         let content_x = (lx - px) / old;
         let content_y = (ly - py) / old;
         let pan = (lx - content_x * new, ly - content_y * new);
-        self.pan.set(clamp_pan(pan, new, vp.size, content));
-        self.zoom.set(new);
+        self.view_state.pan.set(clamp_pan(pan, new, vp.size, content));
+        self.view_state.zoom.set(new);
         // A manual zoom overrides any settle still easing.
-        self.anim.set(None);
+        self.view_state.anim.set(None);
         cx.notify();
     }
 
@@ -673,14 +668,9 @@ impl Render for GraphView {
                         g,
                         &self.expandable.borrow(),
                         cx.entity(),
-                        self.zoom.clone(),
-                        self.pan.clone(),
-                        self.fitted.clone(),
-                        self.viewport.clone(),
+                        self.view_state.clone(),
                         self.recent,
                         self.recent_at,
-                        self.recenter.clone(),
-                        self.anim.clone(),
                         &self.prev_visible,
                         self.relaying,
                         self.hovered,
@@ -930,15 +920,11 @@ fn relaying_indicator(relaying: bool, palette: &Palette) -> Option<Div> {
 /// Runs at canvas prepaint because the fit needs the viewport size, known only
 /// once laid out. Owns the shared cells so it can both read and update the view.
 fn build_prepaint(
-    zoom: Rc<Cell<f32>>,
-    pan: Rc<Cell<(f32, f32)>>,
-    fitted: Rc<Cell<bool>>,
-    viewport: Rc<Cell<Bounds<Pixels>>>,
-    recenter: Rc<Cell<bool>>,
-    anim: Rc<Cell<Option<Settle>>>,
+    view_state: ViewState,
     content: (f32, f32),
     recenter_target: Option<(f64, f64, f64, f64)>,
 ) -> impl FnOnce(Bounds<Pixels>, &mut Window, &mut App) {
+    let ViewState { zoom, pan, fitted, viewport, recenter, anim } = view_state;
     move |bounds: Bounds<Pixels>, window: &mut Window, _: &mut App| {
         let prev = viewport.get();
         viewport.set(bounds);
@@ -1642,20 +1628,20 @@ fn drag_pan(view: &mut GraphView, event: &MouseMoveEvent, cx: &mut Context<Graph
     if traveled > CLICK_SLOP {
         view.moved = true;
     }
-    let (px, py) = view.pan.get();
+    let (px, py) = view.view_state.pan.get();
     let dx = f32::from(event.position.x) - f32::from(view.last_mouse.x);
     let dy = f32::from(event.position.y) - f32::from(view.last_mouse.y);
     let pan = (px + dx, py + dy);
-    view.pan.set(match &view.source {
+    view.view_state.pan.set(match &view.source {
         Source::Loaded(g) => {
             let content = content_size(g);
-            clamp_pan(pan, view.zoom.get(), view.viewport.get().size, content)
+            clamp_pan(pan, view.view_state.zoom.get(), view.view_state.viewport.get().size, content)
         }
         _ => pan,
     });
     view.last_mouse = event.position;
     // A manual pan overrides any settle still easing.
-    view.anim.set(None);
+    view.view_state.anim.set(None);
     cx.notify();
 }
 
@@ -1681,8 +1667,8 @@ fn toggle_box_at(view: &mut GraphView, pos: Point<Pixels>, cx: &mut Context<Grap
     let Source::Loaded(g) = &view.source else {
         return;
     };
-    let vp = view.viewport.get();
-    let (gx, gy) = from_screen(pos, vp.origin, view.zoom.get(), view.pan.get());
+    let vp = view.view_state.viewport.get();
+    let (gx, gy) = from_screen(pos, vp.origin, view.view_state.zoom.get(), view.view_state.pan.get());
     let Some(hit) = hit_box(&g.boxes, gx, gy) else {
         return;
     };
@@ -1700,7 +1686,7 @@ fn toggle_box_at(view: &mut GraphView, pos: Point<Pixels>, cx: &mut Context<Grap
     drop(expanded);
     // The boxes fully on screen now, so the relayout settles the view to keep
     // them — and the toggled box — in frame.
-    view.prev_visible = enclosed_boxes(&g.boxes, vp.size, view.zoom.get(), view.pan.get());
+    view.prev_visible = enclosed_boxes(&g.boxes, vp.size, view.view_state.zoom.get(), view.view_state.pan.get());
     // The relayout may drop the hovered node (it was collapsed away), which would
     // otherwise leave the whole graph dimmed until the next mouse move.
     view.hovered = None;
@@ -1755,7 +1741,7 @@ fn current_scrollbar(view: &GraphView, axis: Axis) -> Option<Scrollbar> {
         return None;
     };
     let content = content_size(g);
-    scrollbar_geom(axis, view.viewport.get(), content, view.zoom.get(), view.pan.get())
+    scrollbar_geom(axis, view.view_state.viewport.get(), content, view.view_state.zoom.get(), view.view_state.pan.get())
 }
 
 /// The axis of the scroll bar whose track a press at `position` (window px) landed
@@ -1773,16 +1759,16 @@ fn scroll_to(view: &mut GraphView, axis: Axis, offset: f32, cx: &mut Context<Gra
         return;
     };
     let content = content_size(g);
-    let zoom = view.zoom.get();
-    let vp = view.viewport.get().size;
-    let (px, py) = view.pan.get();
+    let zoom = view.view_state.zoom.get();
+    let vp = view.view_state.viewport.get().size;
+    let (px, py) = view.view_state.pan.get();
     let pan = match axis {
         Axis::Vertical => (px, -offset),
         Axis::Horizontal => (-offset, py),
     };
-    view.pan.set(clamp_pan(pan, zoom, vp, content));
+    view.view_state.pan.set(clamp_pan(pan, zoom, vp, content));
     // A manual scroll overrides any settle still easing.
-    view.anim.set(None);
+    view.view_state.anim.set(None);
     cx.notify();
 }
 
