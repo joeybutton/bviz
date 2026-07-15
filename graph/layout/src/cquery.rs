@@ -202,7 +202,7 @@ fn wire_edges(
         ));
         if rule.configured_rule_input.is_empty() {
             for dep_label in &rule.rule_input {
-                if let Some(dep) = resolve_label_dep(dep_label, &index.target_box, &index.leaf_id) {
+                if let Some(dep) = resolve_label_dep(dep_label, index) {
                     add_edge(graph, &mut seen_edge, dep, consumer);
                 }
             }
@@ -211,15 +211,9 @@ fn wire_edges(
                 let Some(dep_label) = input.label.as_deref() else {
                     continue;
                 };
-                if let Some(dep) = resolve_configured_dep(
-                    dep_label,
-                    input.configuration_id,
-                    config_checksum,
-                    &index.ct_ids,
-                    &index.target_box,
-                    &index.leaf_id,
-                    names,
-                ) {
+                if let Some(dep) =
+                    resolve_configured_dep(dep_label, input.configuration_id, config_checksum, index, names)
+                {
                     add_edge(graph, &mut seen_edge, dep, consumer);
                 }
             }
@@ -236,37 +230,33 @@ fn resolve_configured_dep(
     dep_label: &str,
     dep_config: Option<u32>,
     config_checksum: &HashMap<u32, String>,
-    ct_ids: &HashSet<(String, String)>,
-    target_box: &HashMap<String, Id>,
-    leaf_id: &HashMap<String, Id>,
+    index: &NodeIndex,
     names: &mut Names,
 ) -> Option<Id> {
     match dep_config {
         Some(config_id) if config_id != 0 => {
             let key = label::config_key(config_id, config_checksum.get(&config_id).map(String::as_str));
-            if ct_ids.contains(&(dep_label.to_string(), key.clone())) {
+            if index.ct_ids.contains(&(dep_label.to_string(), key.clone())) {
                 Some(names.intern(&label::ct_node_id(dep_label, &key)))
             } else {
-                target_box.get(dep_label).copied()
+                index.target_box.get(dep_label).copied()
             }
         }
-        _ => leaf_id
+        _ => index
+            .leaf_id
             .get(dep_label)
-            .or_else(|| target_box.get(dep_label))
+            .or_else(|| index.target_box.get(dep_label))
             .copied(),
     }
 }
 
 /// The node a label-only dependency lands on: the dependency's target container,
 /// or its leaf when it is not a rule. `None` when outside the queried set.
-fn resolve_label_dep(
-    dep_label: &str,
-    target_box: &HashMap<String, Id>,
-    leaf_id: &HashMap<String, Id>,
-) -> Option<Id> {
-    target_box
+fn resolve_label_dep(dep_label: &str, index: &NodeIndex) -> Option<Id> {
+    index
+        .target_box
         .get(dep_label)
-        .or_else(|| leaf_id.get(dep_label))
+        .or_else(|| index.leaf_id.get(dep_label))
         .copied()
 }
 
