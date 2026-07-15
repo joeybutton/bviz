@@ -202,15 +202,11 @@ fn event_points(anchors: &[Anchor], count: usize) -> Vec<(usize, f64)> {
         .collect()
 }
 
-/// Assign every frame a time by linear interpolation between anchor points.
-///
-/// Points are sanitized first — sorted by frame, one per frame, and forced
-/// non-decreasing in time — then shifted so the timeline starts at zero. Frames
-/// before the first anchor or after the last take that anchor's time. With no
-/// anchors the timeline is flat at zero.
-fn interpolate(mut points: Vec<(usize, f64)>, count: usize) -> Vec<f64> {
+/// Anchor points sorted by frame, collapsed to one per frame (keeping the latest
+/// time seen there), forced non-decreasing in time, and shifted so the timeline
+/// starts at zero.
+fn sanitize_anchors(mut points: Vec<(usize, f64)>) -> Vec<(usize, f64)> {
     points.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.total_cmp(&b.1)));
-    // One anchor per frame (the latest time seen there), monotonic in time.
     let mut anchors: Vec<(usize, f64)> = Vec::new();
     for (frame, time) in points {
         let time = anchors.last().map_or(time, |&(_, t)| time.max(t));
@@ -219,12 +215,22 @@ fn interpolate(mut points: Vec<(usize, f64)>, count: usize) -> Vec<f64> {
             _ => anchors.push((frame, time)),
         }
     }
+    if let Some(&(_, base)) = anchors.first() {
+        for anchor in &mut anchors {
+            anchor.1 -= base;
+        }
+    }
+    anchors
+}
+
+/// Assign every frame a time by linear interpolation between anchor points.
+///
+/// Frames before the first anchor or after the last take that anchor's time.
+/// With no anchors the timeline is flat at zero.
+fn interpolate(points: Vec<(usize, f64)>, count: usize) -> Vec<f64> {
+    let anchors = sanitize_anchors(points);
     if anchors.is_empty() {
         return vec![0.0; count];
-    }
-    let base = anchors[0].1;
-    for anchor in &mut anchors {
-        anchor.1 -= base;
     }
 
     let mut times = Vec::with_capacity(count);
