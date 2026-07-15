@@ -75,12 +75,7 @@ impl Screen {
 
     /// The plain text of the screen, one line per row with trailing blanks trimmed.
     pub fn text(&self) -> String {
-        self.rows
-            .iter()
-            .map(|row| row.iter().map(|cell| cell.c).collect::<String>())
-            .map(|line| line.trim_end().to_string())
-            .collect::<Vec<_>>()
-            .join("\n")
+        rows_to_text(&self.rows)
     }
 
     /// Serialize the screen to a clean ANSI byte stream: one logical line per row
@@ -207,6 +202,17 @@ fn lf_to_crlf(bytes: &[u8]) -> Vec<u8> {
         prev = b;
     }
     out
+}
+
+/// Rows rendered as text: each row's characters joined and its trailing blanks
+/// trimmed, rows joined by newline. Rows that are entirely blank become empty
+/// lines; trimming trailing empty lines is left to the caller.
+pub(crate) fn rows_to_text(rows: &[Vec<Cell>]) -> String {
+    rows.iter()
+        .map(|row| row.iter().map(|cell| cell.c).collect::<String>())
+        .map(|line| line.trim_end().to_string())
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// A cell is blank if it is a space on the default background.

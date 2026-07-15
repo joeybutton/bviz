@@ -540,13 +540,7 @@ mod tests {
     use super::*;
 
     fn viewport_text(terminal: &Terminal) -> String {
-        terminal
-            .viewport()
-            .iter()
-            .map(|row| row.iter().map(|cell| cell.c).collect::<String>())
-            .map(|line| line.trim_end().to_string())
-            .collect::<Vec<_>>()
-            .join("\n")
+        crate::screen::rows_to_text(&terminal.viewport())
             .trim_end()
             .to_string()
     }

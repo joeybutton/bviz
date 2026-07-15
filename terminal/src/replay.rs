@@ -355,15 +355,9 @@ mod tests {
         assert_eq!(replay.frame_count(), 2);
 
         let at = |frame| {
-            crate::Terminal::from_display(&replay.display_at(frame), 40, 10)
-                .viewport()
-                .iter()
-                .map(|row| row.iter().map(|cell| cell.c).collect::<String>())
-                .map(|line| line.trim_end().to_string())
-                .collect::<Vec<_>>()
-                .join("\n")
-                .trim_end()
-                .to_string()
+            let viewport =
+                crate::Terminal::from_display(&replay.display_at(frame), 40, 10).viewport();
+            crate::screen::rows_to_text(&viewport).trim_end().to_string()
         };
         assert_eq!(at(0), "alpha");
         assert_eq!(at(1), "alpha\nbeta");
