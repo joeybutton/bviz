@@ -123,3 +123,50 @@ pub fn role_legend(label: Rgba, background: Rgba, text_size: f32) -> impl IntoEl
                 .child(name)
         }))
 }
+
+/// Theme-resolved colors the canvas paints with, owned so the `'static` paint
+/// closure can capture them.
+#[derive(Clone, Copy)]
+pub(crate) struct Palette {
+    pub(crate) border: Rgba,
+    pub(crate) label: Rgba,
+    pub(crate) background: Rgba,
+    /// The sticky lane-header band fill, shared by the ruler band.
+    pub(crate) header_band: Rgba,
+    /// Faint vertical line dropped from each ruler tick through the lanes.
+    pub(crate) gridline: Rgba,
+    /// Accent for the build-phase boundary lines and their labels.
+    pub(crate) marker: Rgba,
+    /// Scroll-bar track and thumb fills.
+    pub(crate) scroll_track: Rgba,
+    pub(crate) scroll_thumb: Rgba,
+    /// The section-splitter and gutter-edge divider lines, subtler than the
+    /// scroll thumb so they don't dominate a dark background.
+    pub(crate) divider: Rgba,
+    /// Opaque fill of the hover tooltip panel.
+    pub(crate) panel: Rgba,
+    /// The hover crosshair line, unobtrusive against the background.
+    pub(crate) crosshair: Rgba,
+    /// Accent marking a selected track's gutter row.
+    pub(crate) selection: Rgba,
+}
+
+impl Palette {
+    pub(crate) fn from_colors(colors: &bviz_ui_theme::Colors) -> Palette {
+        Palette {
+            border: colors.border,
+            label: colors.text,
+            background: colors.background,
+            header_band: bviz_ui_theme::mix(colors.container, colors.background, 0.5),
+            gridline: bviz_ui_theme::mix(colors.border, colors.background, 0.55),
+            // A mid-tone amber, legible against a light or dark background.
+            marker: Rgba::from(hsla(0.09, 0.6, 0.55, 1.0)),
+            scroll_track: bviz_ui_theme::mix(colors.container, colors.background, 0.3),
+            scroll_thumb: bviz_ui_theme::mix(colors.text, colors.background, 0.55),
+            divider: bviz_ui_theme::mix(colors.border, colors.background, 0.4),
+            panel: colors.container,
+            crosshair: bviz_ui_theme::mix(colors.text, colors.background, 0.35),
+            selection: colors.selected,
+        }
+    }
+}
