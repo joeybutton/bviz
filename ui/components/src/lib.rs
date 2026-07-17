@@ -23,7 +23,7 @@ pub use scrollbar::{Axis, DEFAULT_MIN_THUMB, Scrollbar};
 pub use scrubber::{ScrubberColors, ScrubberLayout, scrubber};
 pub use spinner::spinner;
 pub use text_input::TextInput;
-pub use toggle::toggle_pill;
+pub use toggle::{PillColors, toggle_pill};
 
 use gpui::App;
 

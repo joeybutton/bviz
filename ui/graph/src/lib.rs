@@ -372,10 +372,12 @@ impl GraphView {
             rems(0.5),
             "dim",
             dim_enabled,
-            kind_accent(Kind::Artifact),
-            palette.label,
-            palette.border,
-            palette.container_fill,
+            bviz_ui_components::PillColors {
+                accent: kind_accent(Kind::Artifact),
+                off_label: palette.label,
+                off_border: palette.border,
+                fill: palette.container_fill,
+            },
             entity.clone(),
             |this, _| this.dim_enabled = !this.dim_enabled,
         );
@@ -386,10 +388,12 @@ impl GraphView {
             px(40.),
             "reduce",
             reduced,
-            kind_accent(Kind::Artifact),
-            palette.label,
-            palette.border,
-            palette.container_fill,
+            bviz_ui_components::PillColors {
+                accent: kind_accent(Kind::Artifact),
+                off_label: palette.label,
+                off_border: palette.border,
+                fill: palette.container_fill,
+            },
             entity.clone(),
             |this, cx| {
                 this.reduced = !this.reduced;
