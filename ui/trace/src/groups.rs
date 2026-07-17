@@ -1,6 +1,6 @@
 use crate::{GROUP_BAND_HEIGHT, METRICS, TOP_N_PER_GROUP};
 use bviz_trace_layout::{Lane, LaneLayout};
-use bviz_trace_profile::{LaneClass, Profile};
+use bviz_trace_profile::{LaneClass, Profile, ThreadTrack};
 
 /// The full layout restricted to the tracks `visible` admits, the kept lanes
 /// Lane classes in the order their groups stack in the flame chart: the critical
@@ -47,6 +47,18 @@ pub(crate) enum GroupHit {
     ShowAll(usize),
 }
 
+/// Orders `tracks` (indices into `threads`) busiest first — most slices first,
+/// ties broken by tid so the order is stable frame to frame.
+pub(crate) fn sort_tracks_by_activity(profile: &Profile, threads: &[ThreadTrack], tracks: &mut [usize]) {
+    tracks.sort_by(|&a, &b| {
+        profile
+            .slices(&threads[b])
+            .len()
+            .cmp(&profile.slices(&threads[a]).len())
+            .then(threads[a].tid.cmp(&threads[b].tid))
+    });
+}
+
 /// The lane layout the flame chart draws: visible tracks ordered into lane-class
 /// groups, each group behind a header band and sorted by descending activity, so
 /// the busiest lanes lead and a collapsed or capped group folds its lanes away.
@@ -61,7 +73,6 @@ pub(crate) fn build_grouped_layout(
     show_all: &[bool; GROUP_ORDER.len()],
 ) -> (LaneLayout, GroupChrome) {
     let threads = profile.threads();
-    let activity = |t: usize| profile.slices(&threads[t]).len();
     let mut lanes = Vec::new();
     let mut chrome = GroupChrome::default();
     let mut top = 0.0;
@@ -75,12 +86,7 @@ pub(crate) fn build_grouped_layout(
             continue;
         }
         let total = tracks.len();
-        // Busiest first; tie-break by tid so the order is stable frame to frame.
-        tracks.sort_by(|&a, &b| {
-            activity(b)
-                .cmp(&activity(a))
-                .then(threads[a].tid.cmp(&threads[b].tid))
-        });
+        sort_tracks_by_activity(profile, threads, &mut tracks);
         let band_top = top;
         top += GROUP_BAND_HEIGHT + METRICS.lane_gap;
         let is_collapsed = collapsed[group];

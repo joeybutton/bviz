@@ -98,7 +98,6 @@ impl TraceView {
         let hover_bg = bviz_ui_theme::mix(colors.container, colors.background, 0.2);
         let filter = self.track_filter.read(cx).content().to_lowercase();
         let threads = profile.threads();
-        let activity = |t: usize| profile.slices(&threads[t]).len();
         let mut rows: Vec<AnyElement> = Vec::new();
         for (group, &class) in GROUP_ORDER.iter().enumerate() {
             let mut tracks: Vec<usize> = (0..threads.len())
@@ -111,11 +110,7 @@ impl TraceView {
             if tracks.is_empty() {
                 continue;
             }
-            tracks.sort_by(|&a, &b| {
-                activity(b)
-                    .cmp(&activity(a))
-                    .then(threads[a].tid.cmp(&threads[b].tid))
-            });
+            crate::groups::sort_tracks_by_activity(profile, threads, &mut tracks);
             let folded = self.menu_collapsed_groups.get(group).copied().unwrap_or(false);
             rows.push(
                 self.group_row(group, class, &tracks, folded, palette, hover_bg, selected, cx)
