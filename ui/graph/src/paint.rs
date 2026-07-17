@@ -125,15 +125,21 @@ pub(crate) fn paint_boxes(
 /// Snapshots each connector's polyline, provenance kinds, and whether the
 /// dimming fades it, owned so the `'static` paint closure needs no borrow of the
 /// graph.
-pub(crate) fn collect_connectors(
-    g: &LaidOut,
-    dimming: &Dimming,
-) -> Vec<(Vec<(f64, f64)>, Vec<EdgeKind>, bool)> {
+/// A connector ready to paint: the routed polyline in graph coordinates, the
+/// edge kinds sharing it, and whether the hover dimming applies to it.
+pub(crate) struct PaintConnector {
+    pub(crate) points: Vec<(f64, f64)>,
+    pub(crate) kinds: Vec<EdgeKind>,
+    pub(crate) dim: bool,
+}
+
+pub(crate) fn collect_connectors(g: &LaidOut, dimming: &Dimming) -> Vec<PaintConnector> {
     g.connectors
         .iter()
-        .map(|c| {
-            let dim = dimming.applies && !dimming.lit_edges.contains(&(c.from, c.to));
-            (c.points.clone(), c.kinds.clone(), dim)
+        .map(|c| PaintConnector {
+            points: c.points.clone(),
+            kinds: c.kinds.clone(),
+            dim: dimming.applies && !dimming.lit_edges.contains(&(c.from, c.to)),
         })
         .collect()
 }

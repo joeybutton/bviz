@@ -31,8 +31,8 @@ use camera::{
 };
 use dimming::compute_dimming;
 use paint::{
-    collect_connectors, edge_color, kind_accent, lane_polyline, paint_box, paint_boxes,
-    paint_connector,
+    PaintConnector, collect_connectors, edge_color, kind_accent, lane_polyline, paint_box,
+    paint_boxes, paint_connector,
 };
 use scroll::{
     end_scroll_drag, scroll_drag_move, scrollbar_geom, scrollbar_hit, start_scroll_drag, ScrollDrag,
@@ -758,7 +758,7 @@ fn build_prepaint(
 /// Owns snapshots of the boxes and connectors so it need not borrow the graph.
 fn canvas_body(
     boxes: Vec<PaintBox>,
-    connectors: Vec<(Vec<(f64, f64)>, Vec<EdgeKind>, bool)>,
+    connectors: Vec<PaintConnector>,
     zoom: Rc<Cell<f32>>,
     pan: Rc<Cell<(f32, f32)>>,
     palette: Palette,
@@ -772,7 +772,7 @@ fn canvas_body(
         for b in &boxes {
             paint_box(b, bounds, camera, &palette, window, cx);
         }
-        for (points, kinds, dim) in &connectors {
+        for PaintConnector { points, kinds, dim } in &connectors {
             // ELK routes a node pair once; fan its provenances out into nested
             // lanes centered on that route — each anchored at the nodes like a
             // lone edge — so a pair several queries connect still shows each.
