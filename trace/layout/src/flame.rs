@@ -736,15 +736,19 @@ pub fn build_flame_graph_for_tracks(
     seal(&mut root, profile)
 }
 
-/// The tree for `class` in a class-keyed list, inserted at its slot ([`LaneClass`]
-/// declaration order) when absent.
-fn class_slot(trees: &mut Vec<(LaneClass, Builder)>, class: LaneClass) -> &mut Builder {
-    match trees.iter().position(|(c, _)| *c == class) {
-        Some(i) => &mut trees[i].1,
+/// A mutable reference to `class`'s value in a class-keyed list, inserting
+/// `make()` at its slot ([`LaneClass`] declaration order) when absent.
+fn class_entry<T>(
+    entries: &mut Vec<(LaneClass, T)>,
+    class: LaneClass,
+    make: impl FnOnce() -> T,
+) -> &mut T {
+    match entries.iter().position(|(c, _)| *c == class) {
+        Some(i) => &mut entries[i].1,
         None => {
-            let at = trees.partition_point(|(c, _)| (*c as usize) < class as usize);
-            trees.insert(at, (class, Builder::new_root()));
-            &mut trees[at].1
+            let at = entries.partition_point(|(c, _)| (*c as usize) < class as usize);
+            entries.insert(at, (class, make()));
+            &mut entries[at].1
         }
     }
 }
@@ -772,7 +776,7 @@ pub(crate) fn class_trees<'p>(
         if class == LaneClass::CriticalPath || !include(class) {
             return;
         }
-        let root = class_slot(trees, class);
+        let root = class_entry(trees, class, Builder::new_root);
         merge_lane(root, profile, flamer, thread);
     });
 
@@ -785,13 +789,7 @@ fn bucket_by_class(shards: Vec<Vec<(LaneClass, Builder)>>) -> Vec<(LaneClass, Ve
     let mut buckets: Vec<(LaneClass, Vec<Builder>)> = Vec::new();
     for shard in shards {
         for (class, tree) in shard {
-            match buckets.iter_mut().find(|(c, _)| *c == class) {
-                Some((_, parts)) => parts.push(tree),
-                None => {
-                    let at = buckets.partition_point(|(c, _)| (*c as usize) < class as usize);
-                    buckets.insert(at, (class, vec![tree]));
-                }
-            }
+            class_entry(&mut buckets, class, Vec::new).push(tree);
         }
     }
     buckets
