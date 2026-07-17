@@ -353,14 +353,10 @@ impl GraphView {
         expandable: &HashSet<Id>,
         entity: Entity<GraphView>,
         view_state: ViewState,
-        highlight: Option<Highlight>,
-        prev_visible: &[Id],
-        relaying: bool,
-        hovered: Option<Id>,
-        dim_enabled: bool,
-        reduced: bool,
+        flags: ViewFlags,
         palette: Palette,
     ) -> Stateful<Div> {
+        let ViewFlags { highlight, prev_visible, relaying, hovered, dim_enabled, reduced } = flags;
         let dimming = compute_dimming(g, hovered, dim_enabled);
         let boxes = paint_boxes(g, expandable, highlight, &dimming, &palette);
         let connectors = collect_connectors(g, &dimming);
@@ -554,12 +550,14 @@ impl Render for GraphView {
                         &self.expandable.borrow(),
                         cx.entity(),
                         self.view_state.clone(),
-                        self.recent.map(|id| Highlight { id, at: self.recent_at }),
-                        &self.prev_visible,
-                        self.relaying,
-                        self.hovered,
-                        self.dim_enabled,
-                        self.reduced,
+                        ViewFlags {
+                            highlight: self.recent.map(|id| Highlight { id, at: self.recent_at }),
+                            prev_visible: &self.prev_visible,
+                            relaying: self.relaying,
+                            hovered: self.hovered,
+                            dim_enabled: self.dim_enabled,
+                            reduced: self.reduced,
+                        },
                         palette,
                     )
                     .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
@@ -593,6 +591,18 @@ impl Render for GraphView {
 struct Highlight {
     id: Id,
     at: Instant,
+}
+
+/// The per-render view state the layout reads: what to highlight, the previously
+/// visible nodes a relayout animates from, whether a relayout is running, the
+/// hovered node, and the dim and reduce toggle states.
+struct ViewFlags<'a> {
+    highlight: Option<Highlight>,
+    prev_visible: &'a [Id],
+    relaying: bool,
+    hovered: Option<Id>,
+    dim_enabled: bool,
+    reduced: bool,
 }
 
 /// Overlay listing the edge provenances actually drawn, in enum order, so it
