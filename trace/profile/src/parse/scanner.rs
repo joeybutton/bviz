@@ -30,15 +30,7 @@ pub(crate) fn scan_event<'a>(
 ) -> Option<(RawEvent<'a>, usize)> {
     let mut s = EventScanner { text, bytes: text.as_bytes(), pos: start };
     s.eat(b'{').then_some(())?;
-    let mut ev = RawEvent {
-        ph: None,
-        cat: None,
-        name: None,
-        ts: None,
-        dur: None,
-        tid: None,
-        has_args: false,
-    };
+    let mut ev = RawEvent::default();
     s.skip_ws();
     if s.eat(b'}') {
         return Some((ev, s.pos));

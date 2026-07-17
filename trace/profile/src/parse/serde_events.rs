@@ -94,6 +94,7 @@ impl<'de, 'w> DeserializeSeed<'de> for EventSeed<'_, 'de, 'w> {
     }
 }
 
+#[derive(Default)]
 pub(crate) struct RawEvent<'a> {
     pub(crate) ph: Option<Cow<'a, str>>,
     pub(crate) cat: Option<Cow<'a, str>>,
@@ -178,15 +179,7 @@ impl<'de: 'a, 'a> Visitor<'de> for RawEventVisitor<'_, 'a> {
     }
 
     fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<RawEvent<'a>, A::Error> {
-        let mut ev = RawEvent {
-            ph: None,
-            cat: None,
-            name: None,
-            ts: None,
-            dur: None,
-            tid: None,
-            has_args: false,
-        };
+        let mut ev = RawEvent::default();
         while let Some(CowKey(key)) = map.next_key::<CowKey>()? {
             match key.as_ref() {
                 "ph" => ev.ph = map.next_value::<MaybeCowStr>()?.0,
