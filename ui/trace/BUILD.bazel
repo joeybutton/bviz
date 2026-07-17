@@ -1,9 +1,10 @@
 load("@rules_rs//rs:rust_binary.bzl", "rust_binary")
+load("@rules_rs//rs:rust_library.bzl", "rust_library")
 load("@rules_rs//rs:rust_test.bzl", "rust_test")
 
-rust_binary(
-    name = "trace",
-    srcs = glob(["src/**/*.rs"]),
+rust_library(
+    name = "trace_lib",
+    srcs = glob(["src/**/*.rs"], exclude = ["src/main.rs"]),
     crate_name = "bviz_ui_trace",
     deps = [
         "//alloc",
@@ -18,7 +19,14 @@ rust_binary(
     ],
 )
 
+rust_binary(
+    name = "trace",
+    srcs = ["src/main.rs"],
+    crate_name = "bviz_ui_trace_bin",
+    deps = [":trace_lib"],
+)
+
 rust_test(
     name = "trace_test",
-    crate = ":trace",
+    crate = ":trace_lib",
 )
