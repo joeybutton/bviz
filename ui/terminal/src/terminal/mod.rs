@@ -7,7 +7,8 @@ use std::time::{Duration, Instant};
 
 use bviz_terminal::{CellPos, Replay, Scroll, SelectionType, Side, Terminal, Url};
 use bviz_ui_components::{
-    Button, Dropdown, Scrollbar, ScrubberLayout, TextInput, load_in_background, scrubber,
+    Button, Dropdown, Scrollbar, ScrubberColors, ScrubberLayout, TextInput, load_in_background,
+    scrubber,
 };
 use bviz_ui_shell::Chrome;
 use gpui::{
@@ -1039,9 +1040,7 @@ impl TerminalView {
         scrubber(
             "scrubber",
             fraction,
-            track_color,
-            colors.text,
-            colors.text,
+            ScrubberColors { track: track_color, played: colors.text, knob: colors.text },
             self.scrubber.clone(),
             cx.entity(),
             self.scrubbing,

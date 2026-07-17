@@ -13,6 +13,15 @@ use gpui::{
 
 use crate::track_drag;
 
+/// The scrubber's three fills: the full-width track, the played portion up to
+/// the current fraction, and the knob.
+#[derive(Clone, Copy)]
+pub struct ScrubberColors {
+    pub track: Rgba,
+    pub played: Rgba,
+    pub knob: Rgba,
+}
+
 /// Geometry of the painted scrubber track, in window pixels, kept so a click or
 /// drag on it maps to a fraction along the track.
 #[derive(Clone, Copy)]
@@ -28,23 +37,22 @@ impl ScrubberLayout {
     }
 }
 
-/// A scrubber element with id `id`: a full-width track in `track`, a played
-/// portion and knob in `played`/`knob` placed at `fraction`. Its geometry is
-/// stashed into `layout` each layout pass so a press or drag can report the
-/// fraction under the cursor to `on_scrub`; `on_release` runs when the drag ends.
-/// Pass `active` while a drag is in progress to keep it live past the window edge.
+/// A scrubber element with id `id`, filled per `colors`, placed at `fraction`.
+/// Its geometry is stashed into `layout` each layout pass so a press or drag can
+/// report the fraction under the cursor to `on_scrub`; `on_release` runs when the
+/// drag ends. Pass `active` while a drag is in progress to keep it live past the
+/// window edge.
 pub fn scrubber<V: 'static>(
     id: &'static str,
     fraction: f32,
-    track: Rgba,
-    played: Rgba,
-    knob: Rgba,
+    colors: ScrubberColors,
     layout: Rc<Cell<Option<ScrubberLayout>>>,
     entity: Entity<V>,
     active: bool,
     on_scrub: impl Fn(&mut V, f32, &mut Context<V>) + 'static,
     on_release: impl Fn(&mut V, &mut Context<V>) + 'static,
 ) -> impl IntoElement {
+    let ScrubberColors { track, played, knob } = colors;
     let on_scrub = Rc::new(on_scrub);
     let on_release = Rc::new(on_release);
 
