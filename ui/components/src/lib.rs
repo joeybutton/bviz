@@ -15,7 +15,7 @@ mod toggle;
 
 pub use background::load_in_background;
 pub use button::Button;
-pub use canvas::{paint_labeled_box, shape_truncated};
+pub use canvas::{LabelBoxStyle, paint_labeled_box, shape_truncated};
 pub use drag::track_drag;
 pub use dropdown::{Dropdown, DropdownEvent};
 pub use notice::{centered_notice, centered_spinner};

@@ -184,11 +184,13 @@ fn paint_flame_graph(
                 fill,
                 graph.str(b.name),
                 bviz_ui_theme::label_on(fill),
-                palette.background,
-                SLICE_SEAM_MIN_PX,
-                SLICE_SEAM_MIX,
-                LABEL_MIN_PX,
-                SLICE_TEXT_PAD,
+                bviz_ui_components::LabelBoxStyle {
+                    background: palette.background,
+                    seam_min_px: SLICE_SEAM_MIN_PX,
+                    seam_mix: SLICE_SEAM_MIX,
+                    label_min_px: LABEL_MIN_PX,
+                    text_pad: SLICE_TEXT_PAD,
+                },
                 window,
                 cx,
             );

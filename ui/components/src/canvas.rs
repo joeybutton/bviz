@@ -34,23 +34,31 @@ pub fn shape_truncated(
     }
 }
 
+/// The chart-wide styling of a labeled box: the surface it sits on (mixed into
+/// the left-edge seam) and the width thresholds and text padding that decide
+/// when a seam and a label are drawn.
+#[derive(Clone, Copy)]
+pub struct LabelBoxStyle {
+    pub background: Rgba,
+    pub seam_min_px: f32,
+    pub seam_mix: f32,
+    pub label_min_px: f32,
+    pub text_pad: f32,
+}
+
 /// Paints a filled box and, if it is wide enough, its name truncated to fit and
 /// centered vertically — the shared shape behind a flame-chart slice and a
 /// flame-graph node.
-#[allow(clippy::too_many_arguments)]
 pub fn paint_labeled_box(
     rect: Bounds<Pixels>,
     fill: Hsla,
     name: &str,
     label_color: Hsla,
-    background: Rgba,
-    seam_min_px: f32,
-    seam_mix: f32,
-    label_min_px: f32,
-    text_pad: f32,
+    style: LabelBoxStyle,
     window: &mut Window,
     cx: &mut App,
 ) {
+    let LabelBoxStyle { background, seam_min_px, seam_mix, label_min_px, text_pad } = style;
     let w = f32::from(rect.size.width);
     let h = f32::from(rect.size.height);
     // Square corners: every column paints the box's full height, so a run of
