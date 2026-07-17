@@ -27,7 +27,7 @@ mod scroll;
 use build::{build_graph, relayout, Input, InputKind};
 use camera::{
     clamp_pan, content_size, ease_out_cubic, enclosed_boxes, fit_view, fit_zoom, from_screen,
-    recenter_rect, settle_view, to_screen, Camera, Settle,
+    recenter_rect, settle_view, to_screen, Camera, Rect, Settle,
 };
 use dimming::compute_dimming;
 use paint::{
@@ -665,7 +665,7 @@ fn relaying_indicator(relaying: bool, palette: &Palette) -> Option<Div> {
 fn build_prepaint(
     view_state: ViewState,
     content: (f32, f32),
-    recenter_target: Option<(f64, f64, f64, f64)>,
+    recenter_target: Option<Rect>,
 ) -> impl FnOnce(Bounds<Pixels>, &mut Window, &mut App) {
     let ViewState { zoom, pan, fitted, viewport, recenter, anim } = view_state;
     move |bounds: Bounds<Pixels>, window: &mut Window, _: &mut App| {
@@ -1054,8 +1054,8 @@ mod tests {
 
     /// Asserts `target`'s screen rect under `(zoom, pan)` lies fully within the
     /// viewport, inset by the breathing-room pad (with a small tolerance).
-    fn assert_enclosed(target: (f64, f64, f64, f64), vw: f32, vh: f32, zoom: f32, pan: (f32, f32)) {
-        let (bx, by, bw, bh) = (target.0 as f32, target.1 as f32, target.2 as f32, target.3 as f32);
+    fn assert_enclosed(target: Rect, vw: f32, vh: f32, zoom: f32, pan: (f32, f32)) {
+        let (bx, by, bw, bh) = (target.x as f32, target.y as f32, target.w as f32, target.h as f32);
         let x0 = (bx + MARGIN as f32) * zoom + pan.0;
         let y0 = (by + MARGIN as f32) * zoom + pan.1;
         let x1 = (bx + bw + MARGIN as f32) * zoom + pan.0;
@@ -1069,7 +1069,7 @@ mod tests {
     #[test]
     fn settle_view_leaves_a_fitting_centered_target_put() {
         // A small rect already comfortably inside: neither zoom nor pan moves.
-        let target = (375.0, 280.0, 50.0, 40.0);
+        let target = Rect { x: 375.0, y: 280.0, w: 50.0, h: 40.0 };
         let (z, p) = settle_view(target, vp(800., 600.), CONTENT, 1.0, (0.0, 0.0));
         assert!((z - 1.0).abs() < 1e-4, "zoom moved: {z}");
         assert!(p.0.abs() < 1e-3 && p.1.abs() < 1e-3, "pan moved: {p:?}");
@@ -1079,7 +1079,7 @@ mod tests {
     fn settle_view_only_zooms_out_to_enclose_a_big_target() {
         // A rect larger than the viewport at the current zoom forces a zoom-out,
         // never below the whole-graph fit, and ends up fully framed.
-        let target = (0.0, 0.0, 2000.0, 1500.0);
+        let target = Rect { x: 0.0, y: 0.0, w: 2000.0, h: 1500.0 };
         let (z, p) = settle_view(target, vp(800., 600.), CONTENT, 1.0, (0.0, 0.0));
         assert!(z < 1.0, "expected zoom-out, got {z}");
         assert!(z >= fit_zoom(vp(800., 600.), CONTENT) - 1e-4, "below whole-graph fit: {z}");
@@ -1090,7 +1090,7 @@ mod tests {
     fn settle_view_never_zooms_in_on_a_small_target() {
         // A node opening smaller than the current zoom keeps the zoom — the
         // disorienting blow-up-to-fill case is gone.
-        let target = (100.0, 100.0, 30.0, 20.0);
+        let target = Rect { x: 100.0, y: 100.0, w: 30.0, h: 20.0 };
         let (z, _) = settle_view(target, vp(800., 600.), CONTENT, 0.5, (0.0, 0.0));
         assert!(z <= 0.5 + 1e-4, "zoomed in: {z}");
     }
@@ -1099,7 +1099,7 @@ mod tests {
     fn settle_view_pans_an_offscreen_target_into_view_without_rezoom() {
         // A small rect off to the right fits at the current zoom, so the zoom
         // holds and only the pan shifts it back into frame.
-        let target = (1000.0, 100.0, 50.0, 40.0);
+        let target = Rect { x: 1000.0, y: 100.0, w: 50.0, h: 40.0 };
         let (z, p) = settle_view(target, vp(800., 600.), CONTENT, 1.0, (0.0, 0.0));
         assert!((z - 1.0).abs() < 1e-4, "zoom moved: {z}");
         assert!(p.0 < 0.0, "expected a leftward pan, got {p:?}");

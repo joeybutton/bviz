@@ -3,6 +3,15 @@ use bviz_graph_layout::{Id, LaidOut};
 use gpui::{Bounds, Pixels, Point, Size, point, px};
 use std::time::Instant;
 
+/// A layout-pixel rectangle by origin and size.
+#[derive(Clone, Copy)]
+pub(crate) struct Rect {
+    pub(crate) x: f64,
+    pub(crate) y: f64,
+    pub(crate) w: f64,
+    pub(crate) h: f64,
+}
+
 /// An in-flight ease of the view from one zoom/pan to another, so a toggle's
 /// settle shifts over a few frames instead of jumping. Driven from the canvas
 /// prepaint, which re-requests a frame until the ease lands.
@@ -109,14 +118,14 @@ pub(crate) fn ease_out_cubic(t: f32) -> f32 {
 /// any zoom change so the content does not lurch, then the pan shifts the minimum
 /// needed to seat the rect inside with `RECENTER_PAD` of breathing room.
 pub(crate) fn settle_view(
-    target: (f64, f64, f64, f64),
+    target: Rect,
     viewport: Size<Pixels>,
     content: (f32, f32),
     zoom: f32,
     pan: (f32, f32),
 ) -> (f32, (f32, f32)) {
     let (vw, vh) = (f32::from(viewport.width), f32::from(viewport.height));
-    let (bx, by, bw, bh) = (target.0 as f32, target.1 as f32, target.2 as f32, target.3 as f32);
+    let (bx, by, bw, bh) = (target.x as f32, target.y as f32, target.w as f32, target.h as f32);
     let z_fit = if bw > 0. && bh > 0. {
         (vw / bw).min(vh / bh) * FIT_MARGIN
     } else {
@@ -166,7 +175,7 @@ pub(crate) fn recenter_rect(
     g: &LaidOut,
     recent: Option<Id>,
     prev_visible: &[Id],
-) -> Option<(f64, f64, f64, f64)> {
+) -> Option<Rect> {
     let id = recent?;
     let mut rect: Option<(f64, f64, f64, f64)> = None;
     for &bid in std::iter::once(&id).chain(prev_visible) {
@@ -179,5 +188,5 @@ pub(crate) fn recenter_rect(
             Some((ax0, ay0, ax1, ay1)) => (ax0.min(x0), ay0.min(y0), ax1.max(x1), ay1.max(y1)),
         });
     }
-    rect.map(|(x0, y0, x1, y1)| (x0, y0, x1 - x0, y1 - y0))
+    rect.map(|(x0, y0, x1, y1)| Rect { x: x0, y: y0, w: x1 - x0, h: y1 - y0 })
 }
