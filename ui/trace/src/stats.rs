@@ -6,7 +6,7 @@ use crate::{
 };
 use bviz_trace_layout::{ScopeAggregate, StatRow};
 use bviz_ui_components::{centered_spinner, load_in_background};
-use gpui::{Context, Div, Pixels, Point, SharedString, Task, div, prelude::*, px, uniform_list};
+use gpui::{Context, Div, Pixels, Point, SharedString, div, prelude::*, px, uniform_list};
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -284,39 +284,31 @@ impl TraceView {
         let Some(aggregates) = self.aggregates() else {
             return;
         };
-        let Some(version) = self.agg_ready else {
+        let Some(version) = self.agg.ready() else {
             return;
         };
         let key = (version, self.stats_sort, self.stats_desc);
-        if self.stats_order_ready == Some(key) {
+        if self.stats_build.is_ready(key) {
             // The shown order is already current; cancel a sort for a key the
             // inputs have since left so its late result can't clobber it.
-            if self.stats_order_inflight.take().is_some() {
-                self.stats_order_gen += 1;
-                self._stats_order_task = Task::ready(());
-            }
+            self.stats_build.cancel_inflight();
             return;
         }
         if (self.stats_sort, self.stats_desc) == DEFAULT_STATS_SORT {
             *self.stats_order.borrow_mut() =
                 Some(Rc::new(StatsOrder { aggregates, sorted: None }));
-            self.stats_order_ready = Some(key);
+            self.stats_build.mark_ready(key);
             // The swap supersedes any background sort still running.
-            if self.stats_order_inflight.take().is_some() {
-                self.stats_order_gen += 1;
-                self._stats_order_task = Task::ready(());
-            }
+            self.stats_build.cancel_inflight();
             return;
         }
-        if self.stats_order_inflight == Some(key) {
+        if self.stats_build.is_inflight(key) {
             return;
         }
-        self.stats_order_inflight = Some(key);
-        self.stats_order_gen += 1;
-        let generation = self.stats_order_gen;
+        let generation = self.stats_build.start(key);
         let column = self.stats_sort;
         let desc = self.stats_desc;
-        self._stats_order_task = load_in_background(
+        let task = load_in_background(
             cx,
             move || {
                 let order = sort_stats(&aggregates.stats, column, desc);
@@ -324,14 +316,13 @@ impl TraceView {
             },
             move |view, stats_order, _cx| {
                 // Discard a result the inputs have moved past since this spawn.
-                if view.stats_order_gen != generation {
+                if !view.stats_build.accept(generation, key) {
                     return;
                 }
                 *view.stats_order.borrow_mut() = Some(Rc::new(stats_order));
-                view.stats_order_ready = Some(key);
-                view.stats_order_inflight = None;
             },
         );
+        self.stats_build.set_task(task);
     }
 
     /// Sets the stats sort to `column`, toggling the direction when it is already

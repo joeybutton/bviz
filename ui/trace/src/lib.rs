@@ -10,6 +10,7 @@ mod chart;
 mod counters;
 mod flame_graph;
 mod groups;
+mod rebuild;
 mod regions;
 mod stats;
 mod theme;
@@ -22,6 +23,7 @@ use flame_graph::{FlameBoxCache, FlameHover, flame_scroll_thumb_to};
 use groups::{
     GROUP_ORDER, GroupChrome, GroupHit, build_grouped_layout, default_collapsed_groups, group_label,
 };
+use rebuild::Rebuild;
 use regions::{Regions, clamp_gutter_width, clamp_panel_height, flame_total_height, graph_lanes};
 use stats::{DEFAULT_STATS_SORT, StatsColumn, StatsOrder, stats_thumb_to};
 use theme::Palette;
@@ -325,15 +327,9 @@ struct TraceView {
     aggregates: Rc<RefCell<Option<Arc<ScopeAggregate>>>>,
     /// The flame graph's memoized box layout; see [`FlameBoxCache`].
     flame_boxes: Rc<RefCell<Option<FlameBoxCache>>>,
-    /// The `selection_version` the ready `flame`/`stats` reflect, if any.
-    agg_ready: Option<u64>,
-    /// The `selection_version` a background flame/stats build is running for.
-    agg_inflight: Option<u64>,
-    /// Bumped on every (re)spawn so a superseded build's result is discarded when
-    /// it lands after the inputs have moved on.
-    agg_gen: u64,
-    /// Holds the background flame/stats build task so it isn't cancelled on drop.
-    _agg_task: Task<()>,
+    /// Background-build bookkeeping for `aggregates`/`flame_boxes`, keyed on
+    /// `selection_version`.
+    agg: Rebuild<u64>,
     /// Which column the stats table sorts by, and whether descending.
     stats_sort: StatsColumn,
     stats_desc: bool,
@@ -342,15 +338,9 @@ struct TraceView {
     /// when ready. The previous order stays shown while a re-sort runs, so a
     /// header click doesn't blank the table.
     stats_order: Rc<RefCell<Option<Rc<StatsOrder>>>>,
-    /// The `(selection_version, sort, desc)` the ready `stats_order` reflects.
-    stats_order_ready: Option<(u64, StatsColumn, bool)>,
-    /// The `(selection_version, sort, desc)` a background sort is running for.
-    stats_order_inflight: Option<(u64, StatsColumn, bool)>,
-    /// Bumped on every (re)spawn so a superseded sort's result is discarded when
-    /// it lands after the inputs have moved on.
-    stats_order_gen: u64,
-    /// Holds the background sort task so it isn't cancelled on drop.
-    _stats_order_task: Task<()>,
+    /// Background-sort bookkeeping for `stats_order`, keyed on
+    /// `(selection_version, sort, desc)`.
+    stats_build: Rebuild<(u64, StatsColumn, bool)>,
     /// Scroll position of the virtualized stats table body.
     stats_scroll: UniformListScrollHandle,
     /// Stats-table scroll-bar geometry set during paint, read by mouse handlers;
@@ -434,17 +424,11 @@ impl TraceView {
             group_chrome: Rc::new(RefCell::new(None)),
             aggregates: Rc::new(RefCell::new(None)),
             flame_boxes: Rc::new(RefCell::new(None)),
-            agg_ready: None,
-            agg_inflight: None,
-            agg_gen: 0,
-            _agg_task: Task::ready(()),
+            agg: Rebuild::new(),
             stats_sort: DEFAULT_STATS_SORT.0,
             stats_desc: DEFAULT_STATS_SORT.1,
             stats_order: Rc::new(RefCell::new(None)),
-            stats_order_ready: None,
-            stats_order_inflight: None,
-            stats_order_gen: 0,
-            _stats_order_task: Task::ready(()),
+            stats_build: Rebuild::new(),
             stats_scroll: UniformListScrollHandle::new(),
             stats_bar: Rc::new(Cell::new(None)),
             menu_scroll: ScrollHandle::new(),
@@ -1254,24 +1238,19 @@ impl TraceView {
             return;
         };
         let key = self.selection_version;
-        if self.agg_ready == Some(key) {
+        if self.agg.is_ready(key) {
             // The shown value is already current; cancel a build for a key the
             // inputs have since left so its late result can't clobber it.
-            if self.agg_inflight.take().is_some() {
-                self.agg_gen += 1;
-                self._agg_task = Task::ready(());
-            }
+            self.agg.cancel_inflight();
             return;
         }
-        if self.agg_inflight == Some(key) {
+        if self.agg.is_inflight(key) {
             return;
         }
-        self.agg_inflight = Some(key);
-        self.agg_gen += 1;
-        let generation = self.agg_gen;
+        let generation = self.agg.start(key);
         let profile = profile.clone();
         let selected = self.selected_tracks.clone();
-        self._agg_task = load_in_background(
+        let task = load_in_background(
             cx,
             move || {
                 let t = std::time::Instant::now();
@@ -1285,19 +1264,18 @@ impl TraceView {
             },
             move |view, aggregates, _cx| {
                 // Discard a result the inputs have moved past since this spawn.
-                if view.agg_gen != generation {
+                if !view.agg.accept(generation, key) {
                     return;
                 }
                 *view.aggregates.borrow_mut() = Some(Arc::new(aggregates));
                 view.flame_boxes.borrow_mut().take();
-                view.agg_ready = Some(key);
-                view.agg_inflight = None;
                 // The sorted order is keyed on the new aggregates; let
                 // `ensure_stats_order` re-derive it (the old order keeps
                 // showing until it lands).
-                view.stats_order_ready = None;
+                view.stats_build.clear_ready();
             },
         );
+        self.agg.set_task(task);
     }
 
     /// Drops the cached flame graph and stats rows and abandons any in-flight
@@ -1308,13 +1286,8 @@ impl TraceView {
         self.aggregates.borrow_mut().take();
         self.flame_boxes.borrow_mut().take();
         self.stats_order.borrow_mut().take();
-        self.agg_ready = None;
-        self.agg_inflight = None;
-        self.stats_order_ready = None;
-        self.stats_order_inflight = None;
-        // Supersede any build/sort still running for the previous profile.
-        self.agg_gen += 1;
-        self.stats_order_gen += 1;
+        self.agg.invalidate();
+        self.stats_build.invalidate();
     }
 
     /// Switches the bottom panel tab, dropping the flame-chart and flame-graph

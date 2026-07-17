@@ -322,7 +322,7 @@ impl TraceView {
         // While a rebuild for a new selection runs off the thread, the prior
         // graph stays shown and interactive; a spinner pill signals the update,
         // since aggregating a large selection can take a moment.
-        let spinner = self.agg_inflight.is_some().then(|| {
+        let spinner = self.agg.is_building().then(|| {
             div()
                 .absolute()
                 .top_2()
