@@ -1,7 +1,7 @@
-diff --git a/src/linux/wayland/window.rs b/src/linux/wayland/window.rs
+diff --git a/crates/gpui_linux/src/linux/wayland/window.rs b/crates/gpui_linux/src/linux/wayland/window.rs
 index 9d5c85b..db50a6c 100644
---- a/src/linux/wayland/window.rs
-+++ b/src/linux/wayland/window.rs
+--- a/crates/gpui_linux/src/linux/wayland/window.rs
++++ b/crates/gpui_linux/src/linux/wayland/window.rs
 @@ -620,6 +620,8 @@ impl WaylandWindowStatePtr {
  
                  if let Some(mut configure) = state.in_progress_configure.take() {

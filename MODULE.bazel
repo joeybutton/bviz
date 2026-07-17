@@ -7,13 +7,13 @@ bazel_dep(name = "llvm", version = "0.7.0")
 bazel_dep(name = "platforms", version = "1.0.0")
 bazel_dep(name = "protobuf", version = "35.0", repo_name = "com_google_protobuf")
 bazel_dep(name = "rules_proto", version = "7.1.0")
-bazel_dep(name = "rules_rs", version = "0.0.53")
+bazel_dep(name = "rules_rs", version = "0.0.96")
 
 # System libraries for gpui's Wayland backend, provided via the BCR.
 bazel_dep(name = "wayland", version = "1.24.0.bcr.1")
 bazel_dep(name = "xkbcommon", version = "1.9.2.bcr.beta.1")
 
-rs_toolchains = use_extension("@rules_rs//rs/experimental/toolchains:module_extension.bzl", "toolchains")
+rs_toolchains = use_extension("@rules_rs//rs/toolchains:module_extension.bzl", "toolchains")
 rs_toolchains.toolchain(
     edition = "2024",
     version = "1.95.0",
@@ -35,7 +35,6 @@ crate.from_cargo(
     cargo_lock = "//:Cargo.lock",
     cargo_toml = "//:Cargo.toml",
     platform_triples = PLATFORM_TRIPLES,
-    use_experimental_platforms = True,
 )
 
 # Load libfontconfig at runtime (dlopen) instead of linking it via pkg-config.
@@ -108,10 +107,10 @@ crate.annotation(
 )
 use_repo(crate, "crates")
 
-rules_rust = use_extension("@rules_rs//rs/experimental:rules_rust.bzl", "rules_rust")
+rules_rust = use_extension("@rules_rs//rs:rules_rust.bzl", "rules_rust")
 use_repo(rules_rust, rules_rs_rules_rust = "rules_rust")
 
-rules_rust_prost = use_extension("@rules_rs//rs/experimental:rules_rust_prost.bzl", "rules_rust_prost")
+rules_rust_prost = use_extension("@rules_rs//rs:rules_rust_prost.bzl", "rules_rust_prost")
 use_repo(rules_rust_prost, "rules_rust_prost")
 
 register_toolchains(
