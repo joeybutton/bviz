@@ -2048,6 +2048,15 @@ fn paint_scrollbars(
     hbar.set(hlayout);
 }
 
+struct GutterPaint<'a> {
+    left: f32,
+    width: f32,
+    avail: f32,
+    font: gpui::Font,
+    fs: Pixels,
+    palette: &'a Palette,
+}
+
 /// Paints the opaque left gutter — a single column spanning the flame chart and
 /// the bottom panel — over any content that panned or scrolled under it, then the
 /// names left-aligned within it: thread names track the flame lanes' vertical
@@ -2074,6 +2083,7 @@ fn paint_gutter(
     let font = bviz_ui_assets::text_metrics(window).font;
     let fs = px(GUTTER_LABEL_SIZE);
     let avail = gutter_width - 2.0 * SLICE_TEXT_PAD;
+    let g = GutterPaint { left: gutter_left, width: gutter_width, avail, font, fs, palette };
 
     // Thread and group labels scroll with the lanes, so clip them to the flame
     // region.
@@ -2084,18 +2094,12 @@ fn paint_gutter(
         ),
     };
     window.with_content_mask(Some(flame_mask), |window| {
-        paint_thread_labels(
-            profile, layout, regions, gutter_left, gutter_width, scroll_y, selected, avail, &font,
-            fs, palette, window, cx,
-        );
-        paint_group_bands(
-            chrome, regions, gutter_left, gutter_width, scroll_y, avail, &font, fs, palette, window,
-            cx,
-        );
+        paint_thread_labels(&g, profile, layout, regions, scroll_y, selected, window, cx);
+        paint_group_bands(&g, chrome, regions, scroll_y, window, cx);
     });
 
     if show_counters {
-        paint_counter_labels(profile, regions, gutter_left, avail, &font, fs, palette, window, cx);
+        paint_counter_labels(&g, profile, regions, window, cx);
     }
 }
 
@@ -2126,18 +2130,18 @@ fn paint_gutter_frame(
 
 /// Shapes `name` truncated to `avail` and paints it left-aligned at the gutter's
 /// text inset, vertically offset to `ty`.
-#[allow(clippy::too_many_arguments)]
 fn paint_gutter_label(
+    g: &GutterPaint,
     name: &str,
     ty: f32,
-    gutter_left: f32,
-    avail: f32,
-    font: &gpui::Font,
-    fs: Pixels,
-    palette: &Palette,
     window: &mut Window,
     cx: &mut App,
 ) {
+    let gutter_left = g.left;
+    let avail = g.avail;
+    let font = &g.font;
+    let fs = g.fs;
+    let palette = g.palette;
     let line = bviz_ui_components::shape_truncated(name, avail, font.clone(), fs, palette.label.into(), window);
     let _ = line.paint(
         point(px(gutter_left + SLICE_TEXT_PAD), px(ty)),
@@ -2155,20 +2159,18 @@ fn paint_gutter_label(
 /// reads at a glance.
 #[allow(clippy::too_many_arguments)]
 fn paint_thread_labels(
+    g: &GutterPaint,
     profile: &Profile,
     layout: &LaneLayout,
     regions: Regions,
-    gutter_left: f32,
-    gutter_width: f32,
     scroll_y: f32,
     selected: &[bool],
-    avail: f32,
-    font: &gpui::Font,
-    fs: Pixels,
-    palette: &Palette,
     window: &mut Window,
     cx: &mut App,
 ) {
+    let gutter_left = g.left;
+    let gutter_width = g.width;
+    let palette = g.palette;
     let selection_tint = bviz_ui_theme::mix(palette.selection, palette.header_band, 0.8);
     for lane in &layout.lanes {
         let top = regions.flame_top + lane.top - scroll_y;
@@ -2186,37 +2188,27 @@ fn paint_thread_labels(
             ));
         }
         let ty = top + (lane.height - GUTTER_LABEL_SIZE) / 2.0;
-        paint_gutter_label(
-            profile.str(profile.threads()[lane.track].name),
-            ty,
-            gutter_left,
-            avail,
-            font,
-            fs,
-            palette,
-            window,
-            cx,
-        );
+        paint_gutter_label(g, profile.str(profile.threads()[lane.track].name), ty, window, cx);
     }
 }
 
 /// Paints each group header band's chevron, class name, and shown/total lane
 /// count; a capped, expanded group shows a caret-double icon at the gutter's right
 /// edge — down to show every lane, up to show the busiest.
-#[allow(clippy::too_many_arguments)]
 fn paint_group_bands(
+    g: &GutterPaint,
     chrome: &GroupChrome,
     regions: Regions,
-    gutter_left: f32,
-    gutter_width: f32,
     scroll_y: f32,
-    avail: f32,
-    font: &gpui::Font,
-    fs: Pixels,
-    palette: &Palette,
     window: &mut Window,
     cx: &mut App,
 ) {
+    let gutter_left = g.left;
+    let gutter_width = g.width;
+    let avail = g.avail;
+    let font = &g.font;
+    let fs = g.fs;
+    let palette = g.palette;
     let strong = palette.label.into();
     for band in &chrome.bands {
         let top = regions.flame_top + band.top - scroll_y;
@@ -2260,32 +2252,17 @@ fn paint_group_bands(
 
 /// Paints each counter's name at its panel lane's chart baseline, so it associates
 /// with low values rather than floating at the top.
-#[allow(clippy::too_many_arguments)]
 fn paint_counter_labels(
+    g: &GutterPaint,
     profile: &Profile,
     regions: Regions,
-    gutter_left: f32,
-    avail: f32,
-    font: &gpui::Font,
-    fs: Pixels,
-    palette: &Palette,
     window: &mut Window,
     cx: &mut App,
 ) {
     for gl in graph_lanes(profile.counters().len(), regions.panel_top, regions.panel_h()) {
         let lane_bottom = gl.top + METRICS.header_height + gl.chart_h;
         let ty = lane_bottom - GUTTER_LABEL_SIZE - SLICE_TEXT_PAD;
-        paint_gutter_label(
-            profile.str(profile.counters()[gl.lane].name),
-            ty,
-            gutter_left,
-            avail,
-            font,
-            fs,
-            palette,
-            window,
-            cx,
-        );
+        paint_gutter_label(g, profile.str(profile.counters()[gl.lane].name), ty, window, cx);
     }
 }
 
