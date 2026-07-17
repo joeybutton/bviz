@@ -249,11 +249,7 @@ fn paint_counter_readouts(
             bviz_ui_theme::opaque(color).into(),
         );
         let value_w = f32::from(value_line.width());
-        // Default to the right of the line; flip to the left near the edge.
-        let mut value_x = cx_px + CROSSHAIR_LABEL_GAP;
-        if value_x + value_w > regions.time_right {
-            value_x = cx_px - CROSSHAIR_LABEL_GAP - value_w;
-        }
+        let value_x = crate::label_x(cx_px, value_w, CROSSHAIR_LABEL_GAP, regions.time_right);
         let _ = value_line.paint(
             point(px(value_x), px(label_y)),
             px(CROSSHAIR_VALUE_SIZE),

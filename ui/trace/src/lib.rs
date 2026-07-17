@@ -1829,6 +1829,16 @@ fn pan_thumb_to(view: &mut TraceView, pos: Point<Pixels>, grab: f32) {
 /// label spanning `[left, right]`, adding a new row when none is clear, and
 /// records the label's extent in the chosen row. Keeps clustered labels visible
 /// by staggering them down across as many rows as the cluster needs.
+/// The left x of a `label_w`-wide label placed `gap` right of `anchor`, flipped
+/// to `gap` left of it when the right placement would spill past `right_limit`.
+pub(crate) fn label_x(anchor: f32, label_w: f32, gap: f32, right_limit: f32) -> f32 {
+    if anchor + gap + label_w > right_limit {
+        anchor - gap - label_w
+    } else {
+        anchor + gap
+    }
+}
+
 fn assign_marker_row(rows: &mut Vec<f32>, left: f32, right: f32) -> usize {
     let row = (0..rows.len())
         .find(|&r| left >= rows[r])
@@ -1891,18 +1901,10 @@ fn paint_markers(
             palette.marker.into(),
         );
         let label_w = f32::from(line.width());
-        // Place the label to the right of the line, flipping it left of the line
-        // when it would otherwise spill past the right edge.
-        let (left, tx) = if lx + SLICE_TEXT_PAD + label_w > regions.time_right {
-            let left = lx - SLICE_TEXT_PAD - label_w;
-            (left, left)
-        } else {
-            let tx = lx + SLICE_TEXT_PAD;
-            (tx, tx)
-        };
+        let left = label_x(lx, label_w, SLICE_TEXT_PAD, regions.time_right);
         let row = assign_marker_row(&mut rows, left, left + label_w + SLICE_TEXT_PAD);
         let _ = line.paint(
-            point(px(tx), px(top + 2.0 + row as f32 * row_h)),
+            point(px(left), px(top + 2.0 + row as f32 * row_h)),
             fs,
             TextAlign::Left,
             None,
