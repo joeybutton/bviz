@@ -1,10 +1,11 @@
 load("@rules_rs//rs:rust_binary.bzl", "rust_binary")
+load("@rules_rs//rs:rust_library.bzl", "rust_library")
+load("@rules_rs//rs:rust_test.bzl", "rust_test")
 
-rust_binary(
-    name = "terminal",
-    srcs = glob(["src/**/*.rs"]),
+rust_library(
+    name = "terminal_lib",
+    srcs = glob(["src/**/*.rs"], exclude = ["src/main.rs"]),
     crate_name = "bviz_ui_terminal",
-    visibility = ["//:__pkg__"],
     deps = [
         "//terminal",
         "//ui/assets",
@@ -13,4 +14,16 @@ rust_binary(
         "//ui/theme",
         "@crates//:gpui",
     ],
+)
+
+rust_binary(
+    name = "terminal",
+    srcs = ["src/main.rs"],
+    crate_name = "bviz_ui_terminal_bin",
+    deps = [":terminal_lib"],
+)
+
+rust_test(
+    name = "terminal_test",
+    crate = ":terminal_lib",
 )
