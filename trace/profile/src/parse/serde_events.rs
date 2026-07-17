@@ -128,14 +128,10 @@ impl ArgVal<'_> {
     }
 }
 
-/// One kept entry of an event's `args` object: a scalar keyed by its arg name,
-/// deserialized as a flat key/value list rather than the
-/// `serde_json::Map<String, Value>` the generic path would build. Over the
-/// millions of slice events in a large profile the saved per-arg `Value`/`Map`
-/// allocations are a large share of parse time, and every consumer (slice args,
-/// thread metadata, counters) reads this list directly. Entries accumulate into
-/// a caller-owned scratch vector reused across events, so an event's args cost
-/// no per-event allocation either.
+/// One kept entry of an event's `args` object: a scalar keyed by its arg name.
+/// Args are a flat key/value list every consumer (slice args, thread metadata,
+/// counters) reads directly. Entries accumulate into a caller-owned scratch
+/// vector reused across events, so an event's args cost no per-event allocation.
 pub(crate) type ArgEntry<'a> = (Cow<'a, str>, ArgVal<'a>);
 
 /// The value for `key` among an event's arg entries, if present.

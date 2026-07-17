@@ -40,9 +40,8 @@ struct RawSeries {
     points: Vec<CounterPoint>,
 }
 
-/// Accumulates the arena pools as `traceEvents` stream in, so each event's
-/// strings are interned in the one parse pass rather than collected into a
-/// `Vec<RawEvent>` and re-walked. [`Merge::fold`] folds one or more builders,
+/// Accumulates the arena pools as `traceEvents` stream in, interning each
+/// event's strings as it is parsed. [`Merge::fold`] folds one or more builders,
 /// and [`finish_merge`] seals them and `otherData` into the profile's flat
 /// pools.
 pub(crate) struct Builder {
@@ -323,10 +322,9 @@ fn finish_merge(
         counters,
         runs,
     } = merge;
-    // The pools are handed to the merge phase as uninitialized capacity rather
-    // than pre-filled: a fill pass would touch every page serially just to be
-    // overwritten, so the first (and only) write of each slot happens on the
-    // worker that merges it.
+    // The pools are handed to the merge phase as uninitialized capacity, so each
+    // slot's first and only write — and thus its page's first touch — lands on
+    // the worker that merges it.
     let slice_total: usize = runs.iter().map(|r| r.lane_pool.len()).sum();
     let mut slice_pool: Vec<Slice> = Vec::with_capacity(slice_total);
     let mut detail_pool: Vec<SliceDetail> = Vec::with_capacity(slice_total);

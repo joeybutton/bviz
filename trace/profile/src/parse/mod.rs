@@ -61,9 +61,8 @@ impl std::error::Error for LoadError {
 /// Streams the top-level profile object straight into a [`Builder`]: each
 /// `traceEvents` element is interned into the arena as it is parsed, so no
 /// intermediate `Vec<RawEvent>` is materialized and each event's strings are
-/// visited once rather than allocated by the parser and re-interned by a second
-/// pass. `otherData` may appear before or after the array; it is independent of
-/// the events, so it is folded in whenever it is seen.
+/// visited once. `otherData` may appear before or after the array; it is
+/// independent of the events, so it is folded in whenever it is seen.
 fn parse_streaming(text: &str) -> Result<Profile, serde_json::Error> {
     let mut de = serde_json::Deserializer::from_str(text);
     let profile =
