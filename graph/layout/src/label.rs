@@ -28,6 +28,13 @@ pub(crate) fn package_key(label: &str) -> Option<(String, String)> {
     parse_package(label).map(|(repo, path)| (repo.to_string(), path.to_string()))
 }
 
+/// The distinct package keys of `labels`, dropping any label with no package.
+pub(crate) fn package_keys<'a>(
+    labels: impl Iterator<Item = &'a str>,
+) -> BTreeSet<(String, String)> {
+    labels.filter_map(package_key).collect()
+}
+
 /// The `:name` shown on a target box: the portion of a label after its last `:`
 /// (`//a/b:c` -> `:c`), or the whole label when it has none.
 pub(crate) fn target_label(label: &str) -> String {

@@ -22,11 +22,7 @@ pub fn build(targets: &[Target]) -> (Graph, Names) {
 /// The (repository, package path) keys of every target this query names, for the
 /// package hierarchy.
 pub(crate) fn package_keys(targets: &[Target]) -> BTreeSet<(String, String)> {
-    targets
-        .iter()
-        .filter_map(label_and_kind)
-        .filter_map(|(label, _)| label::package_key(label))
-        .collect()
+    label::package_keys(targets.iter().filter_map(label_and_kind).map(|(label, _)| label))
 }
 
 /// The labels of generated-file targets among `targets`, which a joint graph

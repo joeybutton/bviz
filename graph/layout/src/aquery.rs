@@ -45,11 +45,12 @@ pub fn build(containers: &[ActionGraphContainer], external_sources: bool) -> (Gr
 /// The (repository, package path) keys of every target this aquery names, for
 /// the package hierarchy.
 pub(crate) fn package_keys(containers: &[ActionGraphContainer]) -> BTreeSet<(String, String)> {
-    containers
-        .iter()
-        .flat_map(|c| c.targets.iter())
-        .filter_map(|t| label::package_key(&t.label))
-        .collect()
+    label::package_keys(
+        containers
+            .iter()
+            .flat_map(|c| c.targets.iter())
+            .map(|t| t.label.as_str()),
+    )
 }
 
 /// Builds the aquery graph attaching its boxes to the `packages` hierarchy,

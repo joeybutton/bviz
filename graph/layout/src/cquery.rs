@@ -33,19 +33,19 @@ pub fn build(results: &[CqueryResult]) -> (Graph, Names) {
 /// names, for the package hierarchy. A rule contributes its rule name's package,
 /// any other target the package of its `label_and_kind` label.
 pub(crate) fn package_keys(results: &[CqueryResult]) -> BTreeSet<(String, String)> {
-    results
-        .iter()
-        .flat_map(|r| r.results.iter())
-        .filter_map(|ct| ct.target.as_ref())
-        .filter_map(|target| {
-            if let Ok(Discriminator::Rule) = Discriminator::try_from(target.r#type) {
-                Some(target.rule.as_ref()?.name.as_str())
-            } else {
-                label_and_kind(target).map(|(label, _)| label)
-            }
-        })
-        .filter_map(label::package_key)
-        .collect()
+    label::package_keys(
+        results
+            .iter()
+            .flat_map(|r| r.results.iter())
+            .filter_map(|ct| ct.target.as_ref())
+            .filter_map(|target| {
+                if let Ok(Discriminator::Rule) = Discriminator::try_from(target.r#type) {
+                    Some(target.rule.as_ref()?.name.as_str())
+                } else {
+                    label_and_kind(target).map(|(label, _)| label)
+                }
+            }),
+    )
 }
 
 pub(crate) fn generated_labels(results: &[CqueryResult]) -> HashSet<String> {
