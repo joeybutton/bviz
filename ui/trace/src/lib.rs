@@ -22,23 +22,23 @@ use bviz_trace_layout::{
 };
 use bviz_trace_profile::{LaneClass, Profile, Slice, SliceDetail, TimeSpan};
 use bviz_ui_components::{
-    Axis, Scrollbar, TextInput, centered_notice, centered_spinner, load_in_background, track_drag,
+    Axis, Scrollbar, TextInput, centered_notice, centered_spinner, load_in_background, spinner,
+    track_drag,
 };
 use bviz_ui_shell::Chrome;
 use clap::Parser;
 use gpui::{
-    AnyElement, Animation, AnimationExt, App, BorderStyle, Bounds, ContentMask, Context, Div,
+    AnyElement, App, BorderStyle, Bounds, ContentMask, Context, Div,
     Entity, FocusHandle, Hsla, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent,
     MouseUpEvent, PathBuilder, Pixels, Point, Render, Rgba, ScrollDelta, ScrollWheelEvent,
-    ScrollHandle, SharedString, Stateful, Subscription, Task, TextAlign, Transformation,
+    ScrollHandle, SharedString, Stateful, Subscription, Task, TextAlign,
     TransformationMatrix, UniformListScrollHandle,
-    Window, canvas, deferred, div, hsla, percentage, point, prelude::*, px, quad, size, uniform_list,
+    Window, canvas, deferred, div, hsla, point, prelude::*, px, quad, size, uniform_list,
 };
 use std::cell::{Cell, RefCell};
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
-use std::time::Duration;
 
 gpui::actions!(bviz_trace, [SelectAllTracks]);
 
@@ -1973,7 +1973,7 @@ impl TraceView {
                         .border_color(palette.border)
                         .text_color(palette.label)
                         .text_size(px(STATS_TEXT_SIZE))
-                        .child(spinner_icon("flame-rebuild", px(14.), palette.label.into()))
+                        .child(spinner("flame-rebuild", px(14.), palette.label))
                         .child("Updating…"),
                 )
         });
@@ -2523,19 +2523,6 @@ impl TraceView {
         self.hover = None;
         self.flame_hover = None;
     }
-}
-
-/// A spinning circle-notch icon at `size`, tinted `color`. `id` keys its
-/// animation, so distinct spinners in one tree get distinct ids.
-fn spinner_icon(id: &'static str, size: Pixels, color: Hsla) -> impl IntoElement {
-    bviz_ui_assets::icon("circle-notch")
-        .size(size)
-        .text_color(color)
-        .with_animation(
-            id,
-            Animation::new(Duration::from_millis(900)).repeat(),
-            |icon, delta| icon.with_transformation(Transformation::rotate(percentage(delta))),
-        )
 }
 
 impl Render for TraceView {
