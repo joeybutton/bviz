@@ -621,35 +621,6 @@ impl GraphView {
         }
     }
 
-    fn loading_view(colors: &bviz_ui_theme::Colors) -> impl IntoElement {
-        div()
-            .flex_1()
-            .flex()
-            .flex_col()
-            .justify_center()
-            .items_center()
-            .gap_3()
-            .child(bviz_ui_components::spinner("spinner", px(36.), colors.text))
-            .child(div().text_sm().text_color(colors.disabled).child("Loading…"))
-    }
-
-    fn message_view(msg: &str, colors: &bviz_ui_theme::Colors) -> impl IntoElement {
-        div()
-            .flex_1()
-            .flex()
-            .flex_col()
-            .justify_center()
-            .items_center()
-            .gap_4()
-            .p_4()
-            .child(
-                div()
-                    .max_w(px(400.))
-                    .text_sm()
-                    .text_color(colors.disabled)
-                    .child(msg.to_owned()),
-            )
-    }
 }
 
 impl Render for GraphView {
@@ -692,8 +663,11 @@ impl Render for GraphView {
                     .on_key_down(cx.listener(Self::on_key_down)),
                 )
                 .into_any_element(),
-            Source::Loading => Self::loading_view(&colors).into_any_element(),
-            Source::Message(msg) => Self::message_view(msg, &colors).into_any_element(),
+            Source::Loading => bviz_ui_components::centered_spinner("Loading…", &colors)
+                .into_any_element(),
+            Source::Message(msg) => {
+                bviz_ui_components::centered_notice(msg.clone(), &colors).into_any_element()
+            }
         };
         Chrome::new(&self.focus_handle)
             .title("bazel_viz graph")

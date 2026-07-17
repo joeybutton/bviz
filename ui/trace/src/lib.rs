@@ -21,7 +21,9 @@ use bviz_trace_layout::{
     visible_slices,
 };
 use bviz_trace_profile::{LaneClass, Profile, Slice, SliceDetail, TimeSpan};
-use bviz_ui_components::{Axis, Scrollbar, TextInput, load_in_background, track_drag};
+use bviz_ui_components::{
+    Axis, Scrollbar, TextInput, centered_notice, centered_spinner, load_in_background, track_drag,
+};
 use bviz_ui_shell::Chrome;
 use clap::Parser;
 use gpui::{
@@ -1875,7 +1877,7 @@ impl TraceView {
                 Some(aggregates) => {
                     self.flame_graph_panel(aggregates, palette, cx).into_any_element()
                 }
-                None => loading_indicator("Building flame graph…", colors).into_any_element(),
+                None => centered_spinner("Building flame graph…", colors).into_any_element(),
             },
             BottomTab::Stats => self.stats_panel(palette, colors, cx).into_any_element(),
         };
@@ -2442,7 +2444,7 @@ impl TraceView {
         // Until the off-thread sort lands, keep the header but show a spinner in
         // place of the body rather than an empty band.
         let Some(order) = self.stats_order.borrow().clone() else {
-            return table.child(loading_indicator("Sorting…", colors));
+            return table.child(centered_spinner("Sorting…", colors));
         };
 
         let row_count = order.order().len();
@@ -2536,20 +2538,6 @@ fn spinner_icon(id: &'static str, size: Pixels, color: Hsla) -> impl IntoElement
         )
 }
 
-/// A centered spinner over a caption, shown while a profile loads or its flame
-/// graph and stats are (re)built off the UI thread.
-fn loading_indicator(label: impl Into<SharedString>, colors: &bviz_ui_theme::Colors) -> Div {
-    div()
-        .flex_1()
-        .flex()
-        .flex_col()
-        .justify_center()
-        .items_center()
-        .gap_3()
-        .child(spinner_icon("spinner", px(36.), colors.text.into()))
-        .child(div().text_sm().text_color(colors.disabled).child(label.into()))
-}
-
 impl Render for TraceView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = bviz_ui_theme::colors(window);
@@ -2572,22 +2560,8 @@ impl Render for TraceView {
                     .overflow_hidden()
                     .child(self.trace_body(profile.clone(), lanes, palette, &colors, cx))
             }
-            Source::Loading => loading_indicator("Loading…", &colors),
-            Source::Message(msg) => div()
-                .flex_1()
-                .flex()
-                .flex_col()
-                .justify_center()
-                .items_center()
-                .gap_4()
-                .p_4()
-                .child(
-                    div()
-                        .max_w(px(400.))
-                        .text_sm()
-                        .text_color(colors.disabled)
-                        .child(msg.clone()),
-                ),
+            Source::Loading => centered_spinner("Loading…", &colors),
+            Source::Message(msg) => centered_notice(msg.clone(), &colors),
         };
         Chrome::new(&self.focus_handle)
             .title("bazel_viz trace")
