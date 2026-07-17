@@ -165,11 +165,20 @@ fn build_elk_graph<'g>(
 /// query/cquery/aquery edges would each cost ELK a full route, and that edge count
 /// is what dominates layout time on a dense view. The distinct kinds per pair ride
 /// along so the renderer can still draw each along the shared route.
+/// A graph edge ELK has routed: the ELK edge carrying the polyline, the kinds
+/// the endpoint pair represents, and the endpoints' node ids.
+struct RoutedEdge {
+    edge: ElkEdgeRef,
+    kinds: Vec<EdgeKind>,
+    from: Id,
+    to: Id,
+}
+
 fn route_edges(
     graph: &Graph,
     elk_of: &HashMap<Id, ElkNodeRef>,
     root: &ElkNodeRef,
-) -> Vec<(ElkEdgeRef, Vec<EdgeKind>, Id, Id)> {
+) -> Vec<RoutedEdge> {
     // Ordered by id pair so the routed edges, and thus the connectors, come out
     // in a deterministic order regardless of input edge order.
     let mut kinds_of: BTreeMap<(Id, Id), Vec<EdgeKind>> = BTreeMap::new();
@@ -190,19 +199,19 @@ fn route_edges(
     }
     // create_simple_edge places each edge in the common container of its
     // endpoints, which is where ELK then routes and reports it.
-    let mut edges: Vec<(ElkEdgeRef, Vec<EdgeKind>, Id, Id)> = Vec::with_capacity(kinds_of.len());
+    let mut edges: Vec<RoutedEdge> = Vec::with_capacity(kinds_of.len());
     for ((from_id, to_id), mut kinds) in kinds_of {
         kinds.sort_unstable();
         let (from, to) = (&elk_of[&from_id], &elk_of[&to_id]);
-        edges.push((
-            ElkGraphUtil::create_simple_edge(
+        edges.push(RoutedEdge {
+            edge: ElkGraphUtil::create_simple_edge(
                 ElkConnectableShapeRef::Node(from.clone()),
                 ElkConnectableShapeRef::Node(to.clone()),
             ),
             kinds,
-            from_id,
-            to_id,
-        ));
+            from: from_id,
+            to: to_id,
+        });
     }
     edges
 }
@@ -261,10 +270,10 @@ fn collect_boxes(
 
 /// Builds a drawable connector for each routed pair, dropping any ELK left without
 /// a polyline of at least a start and an end.
-fn collect_connectors(edges: Vec<(ElkEdgeRef, Vec<EdgeKind>, Id, Id)>) -> Vec<Connector> {
+fn collect_connectors(edges: Vec<RoutedEdge>) -> Vec<Connector> {
     edges
         .into_iter()
-        .filter_map(|(edge, kinds, from, to)| {
+        .filter_map(|RoutedEdge { edge, kinds, from, to }| {
             connector(&edge).map(|points| Connector {
                 points,
                 kinds,
