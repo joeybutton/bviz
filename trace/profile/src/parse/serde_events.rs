@@ -138,22 +138,27 @@ impl ArgVal<'_> {
 /// no per-event allocation either.
 pub(crate) type ArgEntry<'a> = (Cow<'a, str>, ArgVal<'a>);
 
+/// The value for `key` among an event's arg entries, if present.
+fn find_arg<'e>(entries: &'e [ArgEntry], key: &str) -> Option<&'e ArgVal<'e>> {
+    entries.iter().find(|(k, _)| k == key).map(|(_, v)| v)
+}
+
 /// The string value for `key` among an event's arg entries, if present and a
 /// string.
 pub(crate) fn arg_str<'e>(entries: &'e [ArgEntry], key: &str) -> Option<&'e str> {
-    entries.iter().find(|(k, _)| k == key).and_then(|(_, v)| match v {
+    match find_arg(entries, key)? {
         ArgVal::Str(s) => Some(s.as_ref()),
         _ => None,
-    })
+    }
 }
 
 /// The integer value for `key` among an event's arg entries, if present and an
 /// integer.
 pub(crate) fn arg_i64(entries: &[ArgEntry], key: &str) -> Option<i64> {
-    entries.iter().find(|(k, _)| k == key).and_then(|(_, v)| match v {
+    match find_arg(entries, key)? {
         ArgVal::Int(n) => Some(*n),
         _ => None,
-    })
+    }
 }
 
 /// Deserializes one event object; its `args` entries land in the borrowed
