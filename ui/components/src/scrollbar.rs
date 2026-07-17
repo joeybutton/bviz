@@ -54,6 +54,11 @@ impl Axis {
     }
 }
 
+/// The shortest a thumb is drawn, in pixels, so it stays grabbable when the
+/// visible fraction is tiny. Passed as `min_thumb` to [`Scrollbar::new`] by views
+/// that have no reason to pick their own.
+pub const DEFAULT_MIN_THUMB: f32 = 24.0;
+
 /// A scroll bar's geometry in window coordinates, derived from a track rect and
 /// the content/visible extents. Scalars run along the bar's long axis (y for
 /// [`Axis::Vertical`], x for [`Axis::Horizontal`]).

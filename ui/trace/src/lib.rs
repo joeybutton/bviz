@@ -22,8 +22,8 @@ use bviz_trace_layout::{
 };
 use bviz_trace_profile::{LaneClass, Profile, Slice, SliceDetail, TimeSpan};
 use bviz_ui_components::{
-    Axis, Scrollbar, TextInput, centered_notice, centered_spinner, load_in_background, spinner,
-    track_drag,
+    Axis, DEFAULT_MIN_THUMB, Scrollbar, TextInput, centered_notice, centered_spinner,
+    load_in_background, spinner, track_drag,
 };
 use bviz_ui_shell::Chrome;
 use clap::Parser;
@@ -117,9 +117,6 @@ const RULER_TARGET_TICK_PX: f64 = 120.0;
 
 /// Thickness of a scroll bar across its short axis.
 const BAR_WIDTH: f32 = 10.0;
-/// Shortest a scroll thumb is drawn, so it stays grabbable when the visible
-/// fraction is tiny.
-const MIN_THUMB: f32 = 24.0;
 
 /// Font size of a phase-marker label.
 const MARKER_LABEL_SIZE: f32 = 11.0;
@@ -3130,7 +3127,7 @@ fn scrollbar_canvas(
                 content,
                 visible,
                 offset,
-                MIN_THUMB,
+                DEFAULT_MIN_THUMB,
             );
             if let Some(painted) = layout {
                 painted.paint(track, thumb, window);
@@ -3436,7 +3433,7 @@ fn paint_scrollbars(
         flame_total,
         flame_h,
         scroll_y,
-        MIN_THUMB,
+        DEFAULT_MIN_THUMB,
     );
     // The time horizontal track runs the full time axis in the strip below the
     // flame lanes, ending left of the reserved vertical-bar column.
@@ -3449,7 +3446,7 @@ fn paint_scrollbars(
         span_us + 2.0 * margin_us,
         visible_us,
         tv.start_us as f32 - (span.start_us as f32 - margin_us),
-        MIN_THUMB,
+        DEFAULT_MIN_THUMB,
     );
 
     for bar in [vlayout, hlayout].into_iter().flatten() {
@@ -3820,7 +3817,7 @@ fn paint_flame_graph(
         total_h,
         height,
         scroll_y,
-        MIN_THUMB,
+        DEFAULT_MIN_THUMB,
     );
     if let Some(bar) = vlayout {
         bar.paint(palette.scroll_track, palette.scroll_thumb, window);
@@ -3837,7 +3834,7 @@ fn paint_flame_graph(
         content_w as f32,
         width,
         scroll_x as f32,
-        MIN_THUMB,
+        DEFAULT_MIN_THUMB,
     );
     if let Some(bar) = hlayout {
         bar.paint(palette.scroll_track, palette.scroll_thumb, window);

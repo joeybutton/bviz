@@ -7,8 +7,8 @@ use std::time::{Duration, Instant};
 
 use bviz_terminal::{Cell, CellPos, Flags, Replay, Scroll, SelectionType, Side, Terminal, Url};
 use bviz_ui_components::{
-    Axis, Button, Dropdown, Scrollbar, ScrubberLayout, TextInput, load_in_background, scrubber,
-    track_drag,
+    Axis, Button, DEFAULT_MIN_THUMB, Dropdown, Scrollbar, ScrubberLayout, TextInput,
+    load_in_background, scrubber, track_drag,
 };
 use bviz_ui_shell::Chrome;
 use gpui::{
@@ -56,9 +56,6 @@ const SCROLLBAR_WIDTH: f32 = 8.0;
 
 /// How long the scroll bar stays visible after the last scroll interaction.
 const SCROLLBAR_HIDE: Duration = Duration::from_millis(1200);
-
-/// Smallest the scroll bar thumb may shrink to.
-const MIN_THUMB: f32 = 24.0;
 
 /// Playback speed multipliers the speed control cycles through.
 const SPEEDS: [f32; 4] = [1.0, 2.0, 4.0, 8.0];
@@ -1185,7 +1182,7 @@ impl TerminalElement {
             (history + rows) as f32,
             rows as f32,
             (history - offset) as f32,
-            MIN_THUMB,
+            DEFAULT_MIN_THUMB,
         );
         self.view
             .update(cx, |view, _| view.scrollbar = scrollbar_layout);

@@ -19,7 +19,7 @@ pub use canvas::{paint_labeled_box, shape_truncated};
 pub use drag::track_drag;
 pub use dropdown::{Dropdown, DropdownEvent};
 pub use notice::{centered_notice, centered_spinner};
-pub use scrollbar::{Axis, Scrollbar};
+pub use scrollbar::{Axis, DEFAULT_MIN_THUMB, Scrollbar};
 pub use scrubber::{ScrubberLayout, scrubber};
 pub use spinner::spinner;
 pub use text_input::TextInput;
