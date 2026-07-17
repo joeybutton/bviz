@@ -11,7 +11,7 @@ use bviz_trace_layout::TimeView;
 use bviz_trace_profile::Profile;
 use gpui::{
     App, BorderStyle, Bounds, ContentMask, Hsla, PathBuilder, Pixels, Point, TextAlign, Window,
-    point, px, quad, size,
+    fill, point, px, quad, size,
 };
 
 /// Maps a counter lane's values to y-positions in its chart area, so the plotted
@@ -68,14 +68,7 @@ pub(crate) fn paint_graph(
             point(px(regions.content_left), px(gl.top)),
             size(px(regions.time_w), px(METRICS.header_height)),
         );
-        window.paint_quad(quad(
-            band,
-            px(0.),
-            palette.header_band,
-            px(0.),
-            Hsla::from(palette.border),
-            BorderStyle::Solid,
-        ));
+        window.paint_quad(fill(band, palette.header_band));
         if gl.chart_h <= 0.0 {
             continue;
         }
@@ -153,13 +146,9 @@ pub(crate) fn paint_crosshair(
     let t = tv.t_of(cx_px - regions.content_left);
 
     let crosshair_line = |top: f32, height: f32, window: &mut Window| {
-        window.paint_quad(quad(
+        window.paint_quad(fill(
             Bounds::new(point(px(cx_px), px(top)), size(px(1.), px(height))),
-            px(0.),
             palette.crosshair,
-            px(0.),
-            Hsla::from(palette.border),
-            BorderStyle::Solid,
         ));
     };
     crosshair_line(regions.flame_top, regions.flame_h(), window);

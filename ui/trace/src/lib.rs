@@ -45,7 +45,7 @@ use gpui::{
     MouseUpEvent, Pixels, Point, Render, Rgba, ScrollDelta, ScrollWheelEvent,
     ScrollHandle, SharedString, Stateful, Subscription, Task, TextAlign,
     TransformationMatrix, UniformListScrollHandle,
-    Window, canvas, div, point, prelude::*, px, quad, size,
+    Window, canvas, div, fill, point, prelude::*, px, quad, size,
 };
 use std::cell::{Cell, RefCell};
 use std::path::PathBuf;
@@ -744,16 +744,12 @@ impl TraceView {
                 // paint over it and it shows only in the gaps.
                 for lane in layout.lanes.iter().skip(1) {
                     let ry = regions.flame_top + lane.top - METRICS.lane_gap / 2.0 - scroll;
-                    window.paint_quad(quad(
+                    window.paint_quad(fill(
                         Bounds::new(
                             point(px(regions.content_left), px(ry)),
                             size(px(regions.time_w), px(1.0)),
                         ),
-                        px(0.),
                         palette.gridline,
-                        px(0.),
-                        Hsla::from(palette.border),
-                        BorderStyle::Solid,
                     ));
                 }
                 // Group header bands read across the full width as section
@@ -761,16 +757,12 @@ impl TraceView {
                 // over the opaque gutter.
                 for band in &chrome.bands {
                     let y = regions.flame_top + band.top - scroll;
-                    window.paint_quad(quad(
+                    window.paint_quad(fill(
                         Bounds::new(
                             point(px(regions.content_left), px(y)),
                             size(px(regions.time_w), px(GROUP_BAND_HEIGHT)),
                         ),
-                        px(0.),
                         palette.header_band,
-                        px(0.),
-                        Hsla::from(palette.border),
-                        BorderStyle::Solid,
                     ));
                 }
                 for vs in visible_slices(
@@ -1876,27 +1868,19 @@ fn paint_markers(
             continue;
         }
         let lx = regions.content_left + x;
-        window.paint_quad(quad(
+        window.paint_quad(fill(
             Bounds::new(point(px(lx), px(top)), size(px(1.), px(height))),
-            px(0.),
             palette.marker,
-            px(0.),
-            Hsla::from(palette.border),
-            BorderStyle::Solid,
         ));
         // Continue the marker line through the counter panel, which shares the
         // time axis, so a phase boundary reads across both.
         if show_counters {
-            window.paint_quad(quad(
+            window.paint_quad(fill(
                 Bounds::new(
                     point(px(lx), px(regions.panel_top)),
                     size(px(1.), px(regions.panel_h())),
                 ),
-                px(0.),
                 palette.marker,
-                px(0.),
-                Hsla::from(palette.border),
-                BorderStyle::Solid,
             ));
         }
         let line = bviz_ui_assets::shape_line(
@@ -1961,14 +1945,7 @@ fn paint_gridlines(
     let height = px(bottom - top);
     for (x, _) in ticks {
         let rect = Bounds::new(point(px(content_left + *x), px(top)), size(px(1.), height));
-        window.paint_quad(quad(
-            rect,
-            px(0.),
-            palette.gridline,
-            px(0.),
-            Hsla::from(palette.border),
-            BorderStyle::Solid,
-        ));
+        window.paint_quad(fill(rect, palette.gridline));
     }
 }
 
@@ -1983,14 +1960,7 @@ fn paint_ruler(
     cx: &mut App,
 ) {
     let band = Bounds::new(bounds.origin, size(bounds.size.width, px(RULER_HEIGHT)));
-    window.paint_quad(quad(
-        band,
-        px(0.),
-        palette.header_band,
-        px(0.),
-        Hsla::from(palette.border),
-        BorderStyle::Solid,
-    ));
+    window.paint_quad(fill(band, palette.header_band));
     let font = bviz_ui_assets::text_metrics(window).font;
     let fs = px(RULER_HEIGHT - 2. * SLICE_TEXT_PAD);
     let ty = bounds.origin.y + px((RULER_HEIGHT - f32::from(fs)) / 2.);
@@ -2000,14 +1970,7 @@ fn paint_ruler(
             point(tx, bounds.origin.y + px(RULER_HEIGHT - 4.)),
             size(px(1.), px(4.)),
         );
-        window.paint_quad(quad(
-            tick,
-            px(0.),
-            palette.label,
-            px(0.),
-            Hsla::from(palette.border),
-            BorderStyle::Solid,
-        ));
+        window.paint_quad(fill(tick, palette.label));
         let line = bviz_ui_assets::shape_line(
             window,
             label.clone(),
@@ -2149,24 +2112,13 @@ fn paint_gutter_frame(
         point(px(gutter_left), px(regions.flame_top)),
         size(px(gutter_width), px(gutter_bottom - regions.flame_top)),
     );
-    window.paint_quad(quad(
-        strip,
-        px(0.),
-        palette.header_band,
-        px(0.),
-        Hsla::from(palette.border),
-        BorderStyle::Solid,
-    ));
-    window.paint_quad(quad(
+    window.paint_quad(fill(strip, palette.header_band));
+    window.paint_quad(fill(
         Bounds::new(
             point(px(regions.content_left - 1.0), px(regions.flame_top)),
             size(px(1.0), px(gutter_bottom - regions.flame_top)),
         ),
-        px(0.),
         palette.divider,
-        px(0.),
-        Hsla::from(palette.border),
-        BorderStyle::Solid,
     ));
 }
 
@@ -2222,21 +2174,13 @@ fn paint_thread_labels(
             continue;
         }
         if selected.get(lane.track).copied().unwrap_or(false) {
-            window.paint_quad(quad(
+            window.paint_quad(fill(
                 Bounds::new(point(px(gutter_left), px(top)), size(px(gutter_width), px(lane.height))),
-                px(0.),
                 selection_tint,
-                px(0.),
-                Hsla::from(palette.border),
-                BorderStyle::Solid,
             ));
-            window.paint_quad(quad(
+            window.paint_quad(fill(
                 Bounds::new(point(px(gutter_left), px(top)), size(px(2.0), px(lane.height))),
-                px(0.),
                 palette.selection,
-                px(0.),
-                Hsla::from(palette.border),
-                BorderStyle::Solid,
             ));
         }
         let ty = top + (lane.height - GUTTER_LABEL_SIZE) / 2.0;
