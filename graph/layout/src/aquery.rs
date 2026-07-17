@@ -195,6 +195,13 @@ struct Boxes<'a> {
 }
 
 impl Boxes<'_> {
+    fn config_key(&self, config_id: u32) -> String {
+        label::config_key(
+            config_id,
+            self.index.config_by_id.get(&config_id).map(|c| c.checksum.as_str()),
+        )
+    }
+
     /// The leaf node for one output artifact `out` of an action whose box is
     /// `producing_ct`. A labeled generated output nests under its own target's
     /// per-config box; an unlabeled one sits directly under the producing rule's box.
@@ -203,13 +210,8 @@ impl Boxes<'_> {
         match generated_label(self.hierarchy, &path).filter(|label| self.labeled_outputs.contains(label)) {
             Some(out_label) => {
                 let out_ct = self.target_ct(&out_label, Kind::Artifact, config_id);
-                let id = self.names.intern(&format!(
-                    "artifact:{out_label}#{}",
-                    label::config_key(
-                        config_id,
-                        self.index.config_by_id.get(&config_id).map(|c| c.checksum.as_str())
-                    )
-                ));
+                let config_key = self.config_key(config_id);
+                let id = self.names.intern(&format!("artifact:{out_label}#{config_key}"));
                 self.graph
                     .add_node(id, self.index.paths.basename(out), Kind::Artifact, Some(out_ct));
                 id
@@ -233,13 +235,8 @@ impl Boxes<'_> {
     /// rule (a `target` box holding actions) and for a labeled generated output (an
     /// `artifact` box holding the concrete file).
     fn target_ct(&mut self, full_label: &str, target_kind: Kind, config_id: u32) -> Id {
-        let ct_node_id = self.names.intern(&label::ct_node_id(
-            full_label,
-            &label::config_key(
-                config_id,
-                self.index.config_by_id.get(&config_id).map(|c| c.checksum.as_str()),
-            ),
-        ));
+        let config_key = self.config_key(config_id);
+        let ct_node_id = self.names.intern(&label::ct_node_id(full_label, &config_key));
         if !self.configured.insert(ct_node_id) {
             return ct_node_id;
         }
@@ -255,13 +252,10 @@ impl Boxes<'_> {
             );
         }
 
-        let mnemonic = self
-            .index
-            .config_by_id
-            .get(&config_id)
-            .map(|c| c.mnemonic.clone())
-            .filter(|m| !m.is_empty())
-            .unwrap_or_else(|| format!("config {config_id}"));
+        let mnemonic = label::config_mnemonic(
+            config_id,
+            self.index.config_by_id.get(&config_id).map(|c| c.mnemonic.as_str()),
+        );
         self.graph.add_node(
             ct_node_id,
             mnemonic,

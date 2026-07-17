@@ -47,6 +47,15 @@ pub(crate) fn config_key(config_id: u32, checksum: Option<&str>) -> String {
     }
 }
 
+/// A configuration's display mnemonic, or `config {id}` when it records no
+/// non-empty one.
+pub(crate) fn config_mnemonic(config_id: u32, mnemonic: Option<&str>) -> String {
+    mnemonic
+        .filter(|m| !m.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("config {config_id}"))
+}
+
 /// The node id of a configured target: `ct:{label}#{config_key}`. Keyed by
 /// `config_key` so the aquery and cquery builders emit the same id and merge.
 pub(crate) fn ct_node_id(label: &str, config_key: &str) -> String {
