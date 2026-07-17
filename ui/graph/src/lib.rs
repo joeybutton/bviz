@@ -3,45 +3,47 @@
 //! rendering the result.
 
 use bviz_graph_layout::graph::Graph;
-use bviz_graph_layout::layout::CARET_RESERVE;
-use bviz_graph_layout::{layout, quotient, streamed_proto, EdgeKind, Id, Kind, LaidOut, Names};
-use bviz_ui_components::{load_in_background, track_drag, Axis, Scrollbar};
+use bviz_graph_layout::{EdgeKind, Id, Kind, LaidOut, Names};
+use bviz_ui_components::{load_in_background, track_drag, Axis};
 use bviz_ui_shell::Chrome;
 use clap::Parser;
 use gpui::{
-    App, BorderStyle, Bounds, Context, Div, Entity, FocusHandle,
-    IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, Hsla, MouseMoveEvent, MouseUpEvent, PathBuilder,
-    Pixels, Point, Render, Rgba, ScrollDelta, ScrollWheelEvent, Stateful, Task, TextAlign, Size,
-    Window, canvas, div, point, prelude::*, px, quad, rems, rgb, size,
+    App, Bounds, Context, Div, Entity, FocusHandle, Hsla, IntoElement, KeyDownEvent, MouseButton,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Render, Rgba, ScrollDelta,
+    ScrollWheelEvent, Stateful, Task, Window, canvas, div, prelude::*, px, rems, size,
 };
 use std::cell::{Cell, RefCell};
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
-/// Height of the top band a container reserves for its title.
-const LABEL_BAND: f64 = 26.0;
+mod build;
+mod camera;
+mod dimming;
+mod paint;
+mod scroll;
 
-/// Box label font size in layout pixels.
-const LABEL_SIZE: f64 = 13.0;
+use build::{build_graph, relayout, Input, InputKind};
+use camera::{
+    clamp_pan, content_size, ease_out_cubic, enclosed_boxes, fit_view, fit_zoom, from_screen,
+    recenter_rect, settle_view, to_screen, Camera, Settle,
+};
+use dimming::compute_dimming;
+use paint::{
+    collect_connectors, edge_color, kind_accent, lane_polyline, paint_box, paint_boxes,
+    paint_connector,
+};
+use scroll::{
+    end_scroll_drag, scroll_drag_move, scrollbar_geom, scrollbar_hit, start_scroll_drag, ScrollDrag,
+};
 
 /// Padding around the graph, in layout pixels.
 const MARGIN: f64 = 16.0;
 
-/// Arrowhead size along and across the edge direction, in layout pixels.
-const ARROW_LENGTH: f64 = 9.0;
-const ARROW_HALF_WIDTH: f64 = 4.0;
-/// How far the stroke runs past the arrowhead base into the head, closing the
-/// seam without letting the line broaden the visible tip.
-const ARROW_OVERDRAW: f64 = 1.0;
 /// Perpendicular gap (pre-zoom px) between the parallel provenance lines drawn
 /// along a node pair that several queries connect.
 const PARALLEL_SPACING: f32 = 3.0;
-
-/// Fraction by which a kind accent is blended toward the themed background; the
-/// result is the leaf fill, so kinds stay recognizable yet read on light or dark.
-const KIND_BLEND: f32 = 0.68;
 
 /// Largest zoom-in factor. The smallest is computed per graph so the whole graph
 /// always fits the viewport.
@@ -61,12 +63,6 @@ const FIT_MARGIN: f32 = 2.0 / 3.0;
 /// relayout settles the view, so a kept box never sits flush against the border.
 const RECENTER_PAD: f32 = 24.0;
 
-/// Thickness of a scroll-bar track and thumb, in px.
-const SCROLLBAR_THICKNESS: f32 = 10.0;
-
-/// Smallest a scroll thumb may shrink to, so it stays grabbable on a long track.
-const MIN_THUMB: f32 = 28.0;
-
 /// How long the view eases to its settled position after a toggle: short enough
 /// to stay responsive, long enough that the eye can follow the shift instead of
 /// the view jumping there in a single frame.
@@ -76,72 +72,6 @@ const SETTLE_DURATION: Duration = Duration::from_millis(220);
 /// toggle that leaves the view already framed does not twitch.
 const SETTLE_MIN_ZOOM_STEP: f32 = 0.002;
 const SETTLE_MIN_PAN_STEP: f32 = 0.5;
-
-/// An in-flight ease of the view from one zoom/pan to another, so a toggle's
-/// settle shifts over a few frames instead of jumping. Driven from the canvas
-/// prepaint, which re-requests a frame until the ease lands.
-#[derive(Clone, Copy)]
-struct Settle {
-    from_zoom: f32,
-    from_pan: (f32, f32),
-    to_zoom: f32,
-    to_pan: (f32, f32),
-    start: Instant,
-}
-
-/// An in-progress scroll-bar drag: which bar holds it and the grab offset down the
-/// thumb at the press, so the thumb tracks the cursor from the point it was grabbed.
-#[derive(Clone, Copy)]
-struct ScrollDrag {
-    axis: Axis,
-    grab: f32,
-}
-
-/// Accent hue for a leaf box, keyed by its node kind. These are mid-saturation
-/// and recognizable against either a light or dark background.
-fn kind_accent(kind: Kind) -> Rgba {
-    match kind {
-        Kind::Action => rgb(0xe69a3c),   // orange
-        Kind::Artifact => rgb(0x57b85a), // green
-        Kind::Source => rgb(0x9b7fd0),   // purple
-        _ => rgb(0x5b8fd0),              // blue
-    }
-}
-
-/// Connector color, keyed by the query an edge came from, so static (query),
-/// configured (cquery), and execution-phase (aquery) dependencies read
-/// distinctly. These are mid-tone hues legible on light or dark backgrounds.
-fn edge_color(kind: EdgeKind) -> Rgba {
-    match kind {
-        EdgeKind::Query => rgb(0x4f7fbf),  // blue
-        EdgeKind::Cquery => rgb(0x3fa07a), // green-teal
-        EdgeKind::Aquery => rgb(0xc77b3c), // orange
-    }
-}
-
-/// Fraction by which the package container fill is pulled toward the border
-/// color, deepening it so the outer package box reads as containing the lighter
-/// target and configured-target boxes.
-const PACKAGE_DEEPEN: f32 = 0.18;
-
-/// Fraction by which an expanded group's fill is pulled toward the file-leaf
-/// accent, tinting the box so it reads as a grouping of files and stays distinct
-/// from the neutral package/target containers.
-const GROUP_TINT: f32 = 0.30;
-
-/// Fill for a container box. The outer package box is deepened toward the border
-/// so nesting reads package > target > configured-target; an expanded group of
-/// files is tinted toward the file leaves it holds; other inner
-/// containers use the plain themed container fill.
-fn container_fill(kind: Kind, palette: &Palette) -> Rgba {
-    match kind {
-        Kind::Package => bviz_ui_theme::mix(palette.container_fill, palette.border, PACKAGE_DEEPEN),
-        Kind::Group => {
-            bviz_ui_theme::mix(palette.container_fill, kind_accent(Kind::Artifact), GROUP_TINT)
-        }
-        _ => palette.container_fill,
-    }
-}
 
 /// Theme-resolved colors the canvas paints with, owned so the `'static` paint
 /// closure can capture them.
@@ -181,17 +111,6 @@ struct PaintBox {
     highlight: f32,
     /// Outside the hovered node's neighborhood, drawn faded to recede.
     dim: bool,
-}
-
-/// The lit/dimmed partition induced by hovering a node.
-struct Dimming {
-    /// Boxes kept lit: the hovered node's subtree and its direct neighbors.
-    lit: HashSet<Id>,
-    /// Connectors kept lit.
-    lit_edges: HashSet<(Id, Id)>,
-    /// Whether any dimming is in effect; false when the hover reveals no
-    /// incident edge or dimming is off.
-    applies: bool,
 }
 
 /// The shared, interior-mutable view state threaded through the render tree and
@@ -285,18 +204,6 @@ const CLICK_SLOP: f32 = 4.0;
 
 /// How long the just-toggled box stays emphasized before the highlight fades.
 const HIGHLIGHT_LINGER: Duration = Duration::from_millis(1100);
-
-/// Accent for the just-toggled box's emphasis border and inset glow, bright
-/// enough to catch the eye on either a light or dark background.
-const HIGHLIGHT_ACCENT: Rgba = Rgba { r: 1.0, g: 0.819, b: 0.4, a: 1.0 };
-
-/// Fraction a dimmed box's fill and border are pulled toward the background, so
-/// the hovered node's neighborhood stands out against the receded rest.
-const DIM_FADE: f32 = 0.6;
-
-/// Alpha a dimmed connector keeps, fading edges outside the hovered node's
-/// neighborhood without erasing them.
-const DIM_EDGE_ALPHA: f32 = 0.2;
 
 impl GraphView {
     fn new(inputs: Vec<Input>, window: &mut Window, cx: &mut Context<Self>) -> Self {
@@ -676,178 +583,12 @@ impl Render for GraphView {
     }
 }
 
-/// The lit/dimmed partition for the hovered node. Dimming traces the hovered
-/// node's whole subtree neighborhood: the boxes geometrically nested inside the
-/// hovered box (it and its descendants, since the layout nests children within
-/// their parent's rect) plus the far endpoint of every edge incident to that
-/// subtree. The subtree's incident edges stay lit and everything else dims, but
-/// only when there is at least one such edge to reveal — an edgeless subtree (or
-/// a disabled toggle) would fade the graph for no signal, so those suppress
-/// dimming entirely.
-fn compute_dimming(g: &LaidOut, hovered: Option<Id>, dim_enabled: bool) -> Dimming {
-    let hovered_box = hovered.and_then(|h| g.boxes.iter().find(|b| b.id == h));
-    let subtree: HashSet<Id> = hovered_box
-        .filter(|_| dim_enabled)
-        .map(|h| {
-            g.boxes
-                .iter()
-                .filter(|b| {
-                    b.x >= h.x
-                        && b.y >= h.y
-                        && b.x + b.width <= h.x + h.width
-                        && b.y + b.height <= h.y + h.height
-                })
-                .map(|b| b.id)
-                .collect()
-        })
-        .unwrap_or_default();
-    // The subtree plus the far endpoint of each full-connectivity edge incident
-    // to it: the direct neighbors, the only nodes a hover lights. This walks the
-    // full connectivity, not the drawn connectors, so a neighbor still lights up
-    // when reduction dropped the edge to it. The far endpoints are split by
-    // direction so the path tracing below follows dependency edges the right way.
-    // An empty active set (no incident edge) leaves dimming off.
-    let mut active: HashSet<Id> = subtree.clone();
-    let mut out_targets: HashSet<Id> = HashSet::new();
-    let mut in_targets: HashSet<Id> = HashSet::new();
-    let mut has_edge = false;
-    for &(from, to) in &g.full_edges {
-        let (f_in, t_in) = (subtree.contains(&from), subtree.contains(&to));
-        if f_in || t_in {
-            has_edge = true;
-        }
-        if f_in && !t_in {
-            active.insert(to);
-            out_targets.insert(to);
-        } else if t_in && !f_in {
-            active.insert(from);
-            in_targets.insert(from);
-        }
-    }
-    if !has_edge {
-        active.clear();
-    }
-    // Edges to light. Every drawn edge incident to the subtree is a surviving
-    // direct-neighbor edge — the drawn graph is a subset of the full
-    // connectivity — so light them all; a compound box thus lights every
-    // member's neighbor edge at once, not one at a time. A neighbor whose direct
-    // edge reduction dropped is reached by no such edge; for it alone, trace the
-    // shortest drawn path so it is not left floating. A path's interior nodes are
-    // conduits, not neighbors, so they stay out of `lit` (the undimmed boxes
-    // remain just the direct neighbors).
-    let mut lit_edges: HashSet<(Id, Id)> = HashSet::new();
-    if has_edge {
-        let mut out_adj: HashMap<Id, Vec<Id>> = HashMap::new();
-        let mut in_adj: HashMap<Id, Vec<Id>> = HashMap::new();
-        for c in &g.connectors {
-            out_adj.entry(c.from).or_default().push(c.to);
-            in_adj.entry(c.to).or_default().push(c.from);
-            if subtree.contains(&c.from) || subtree.contains(&c.to) {
-                lit_edges.insert((c.from, c.to));
-            }
-        }
-        // Neighbors a drawn edge already reaches need no path.
-        let reached: HashSet<Id> = lit_edges
-            .iter()
-            .flat_map(|&(f, t)| [f, t])
-            .filter(|n| !subtree.contains(n))
-            .collect();
-        let out_missing: HashSet<Id> = out_targets.difference(&reached).copied().collect();
-        let in_missing: HashSet<Id> = in_targets.difference(&reached).copied().collect();
-        trace_paths(&subtree, &out_missing, &out_adj, true, &mut lit_edges);
-        trace_paths(&subtree, &in_missing, &in_adj, false, &mut lit_edges);
-    }
-    Dimming {
-        lit: active,
-        lit_edges,
-        applies: has_edge,
-    }
-}
-
 /// The just-toggled box and the instant its highlight began, so the fade
 /// emphasis and the time it is measured from travel together to the painter.
 #[derive(Clone, Copy)]
 struct Highlight {
     id: Id,
     at: Instant,
-}
-
-/// Flattens each laid-out box to what the canvas paints, resolving its themed
-/// fill and marking those the dimming fades.
-fn paint_boxes(
-    g: &LaidOut,
-    expandable: &HashSet<Id>,
-    highlight: Option<Highlight>,
-    dimming: &Dimming,
-    palette: &Palette,
-) -> Vec<PaintBox> {
-    // The highlight fades linearly to nothing over the linger window.
-    let (recent, highlight_alpha) = match highlight {
-        Some(h) => (
-            Some(h.id),
-            (1.0 - h.at.elapsed().as_secs_f32() / HIGHLIGHT_LINGER.as_secs_f32()).clamp(0.0, 1.0),
-        ),
-        None => (None, 0.0),
-    };
-    g.boxes
-        .iter()
-        .map(|b| PaintBox {
-            x: b.x,
-            y: b.y,
-            w: b.width,
-            h: b.height,
-            compound: b.compound,
-            expandable: expandable.contains(&b.id) || b.group,
-            fill: if b.compound {
-                container_fill(b.kind, palette)
-            } else {
-                bviz_ui_theme::mix(kind_accent(b.kind), palette.background, KIND_BLEND)
-            },
-            label: b.label.clone(),
-            highlight: if recent == Some(b.id) { highlight_alpha } else { 0.0 },
-            dim: dimming.applies && !dimming.lit.contains(&b.id),
-        })
-        .collect()
-}
-
-/// Snapshots each connector's polyline, provenance kinds, and whether the
-/// dimming fades it, owned so the `'static` paint closure needs no borrow of the
-/// graph.
-fn collect_connectors(
-    g: &LaidOut,
-    dimming: &Dimming,
-) -> Vec<(Vec<(f64, f64)>, Vec<EdgeKind>, bool)> {
-    g.connectors
-        .iter()
-        .map(|c| {
-            let dim = dimming.applies && !dimming.lit_edges.contains(&(c.from, c.to));
-            (c.points.clone(), c.kinds.clone(), dim)
-        })
-        .collect()
-}
-
-/// Smallest layout rect covering the just-toggled box and every box that was
-/// fully on screen when it was toggled (those that survived the relayout), as
-/// (x, y, w, h). The view settles onto this once the relayout lands, so the user
-/// keeps sight of what they were looking at.
-fn recenter_rect(
-    g: &LaidOut,
-    recent: Option<Id>,
-    prev_visible: &[Id],
-) -> Option<(f64, f64, f64, f64)> {
-    let id = recent?;
-    let mut rect: Option<(f64, f64, f64, f64)> = None;
-    for &bid in std::iter::once(&id).chain(prev_visible) {
-        let Some(b) = g.boxes.iter().find(|b| b.id == bid) else {
-            continue;
-        };
-        let (x0, y0, x1, y1) = (b.x, b.y, b.x + b.width, b.y + b.height);
-        rect = Some(match rect {
-            None => (x0, y0, x1, y1),
-            Some((ax0, ay0, ax1, ay1)) => (ax0.min(x0), ay0.min(y0), ax1.max(x1), ay1.max(y1)),
-        });
-    }
-    rect.map(|(x0, y0, x1, y1)| (x0, y0, x1 - x0, y1 - y0))
 }
 
 /// Overlay listing the edge provenances actually drawn, in enum order, so it
@@ -1062,554 +803,6 @@ fn canvas_body(
     }
 }
 
-/// The graph's full extent in layout pixels: its laid-out size plus `MARGIN` on
-/// every side.
-fn content_size(g: &LaidOut) -> (f32, f32) {
-    (
-        g.width as f32 + 2. * MARGIN as f32,
-        g.height as f32 + 2. * MARGIN as f32,
-    )
-}
-
-/// The largest zoom at which `content` (its full width×height in layout pixels)
-/// still fits `viewport`, capped at 1:1 so a small graph is never blown up. This
-/// is both the initial zoom and the minimum the scroll handler allows, so the
-/// whole graph always fits.
-fn fit_zoom(viewport: Size<Pixels>, content: (f32, f32)) -> f32 {
-    let (vw, vh) = (f32::from(viewport.width), f32::from(viewport.height));
-    let (gw, gh) = content;
-    if gw <= 0. || gh <= 0. || vw <= 1. || vh <= 1. {
-        return 1.0;
-    }
-    ((vw / gw).min(vh / gh) * FIT_MARGIN).min(1.0)
-}
-
-/// Clamp the pan so the graph can never be moved out of view, the panning
-/// counterpart to the fit-zoom floor that bounds zoom-out. Per axis the content
-/// (its full extent times `zoom`) reaches the viewport edge — fully inside when
-/// smaller, fully covering when larger — plus the same breathing room the fit zoom
-/// leaves: `FIT_MARGIN` holds a zoomed-out graph off the edges, so the pan bound
-/// permits an equal clearance rather than snapping the content flush. Without it a
-/// settle that frames a node with room to spare jumps the first time the user pans.
-fn clamp_pan(pan: (f32, f32), zoom: f32, viewport: Size<Pixels>, content: (f32, f32)) -> (f32, f32) {
-    let axis = |p: f32, vp: f32, extent: f32| {
-        let clearance = vp * (1.0 - FIT_MARGIN) / 2.0;
-        p.clamp((vp - extent).min(0.0) - clearance, (vp - extent).max(0.0) + clearance)
-    };
-    (
-        axis(pan.0, f32::from(viewport.width), content.0 * zoom),
-        axis(pan.1, f32::from(viewport.height), content.1 * zoom),
-    )
-}
-
-/// Ids of the boxes the viewport fully encloses at the given zoom and pan. The
-/// view-settling that follows a toggle keeps these in frame; a partly-clipped
-/// box (or one larger than the viewport) is left out, so a big container the
-/// user only saw part of does not force the whole graph back into view.
-fn enclosed_boxes(boxes: &[bviz_graph_layout::Box], viewport: Size<Pixels>, camera: Camera) -> Vec<Id> {
-    let Camera { zoom, pan } = camera;
-    let (vw, vh) = (f32::from(viewport.width), f32::from(viewport.height));
-    boxes
-        .iter()
-        .filter(|b| {
-            let x0 = (b.x as f32 + MARGIN as f32) * zoom + pan.0;
-            let y0 = (b.y as f32 + MARGIN as f32) * zoom + pan.1;
-            let x1 = ((b.x + b.width) as f32 + MARGIN as f32) * zoom + pan.0;
-            let y1 = ((b.y + b.height) as f32 + MARGIN as f32) * zoom + pan.1;
-            x0 >= 0. && y0 >= 0. && x1 <= vw && y1 <= vh
-        })
-        .map(|b| b.id)
-        .collect()
-}
-
-/// Ease-out cubic over `t` in `0..=1`: quick to start, decelerating into place,
-/// so a settle arrives gently rather than stopping abruptly.
-fn ease_out_cubic(t: f32) -> f32 {
-    let u = 1.0 - t;
-    1.0 - u * u * u
-}
-
-/// The zoom and pan that keep `target` (a layout-space rect `(x, y, w, h)`) fully
-/// in view after a toggle, disturbing the view as little as that allows. The zoom
-/// only ever drops: it stays put when `target` already fits, and falls just far
-/// enough to enclose it otherwise — never zooming in to fill the view with one
-/// box, nor below the whole-graph fit. The rect's center is held on screen across
-/// any zoom change so the content does not lurch, then the pan shifts the minimum
-/// needed to seat the rect inside with `RECENTER_PAD` of breathing room.
-fn settle_view(
-    target: (f64, f64, f64, f64),
-    viewport: Size<Pixels>,
-    content: (f32, f32),
-    zoom: f32,
-    pan: (f32, f32),
-) -> (f32, (f32, f32)) {
-    let (vw, vh) = (f32::from(viewport.width), f32::from(viewport.height));
-    let (bx, by, bw, bh) = (target.0 as f32, target.1 as f32, target.2 as f32, target.3 as f32);
-    let z_fit = if bw > 0. && bh > 0. {
-        (vw / bw).min(vh / bh) * FIT_MARGIN
-    } else {
-        zoom
-    };
-    let z = zoom.min(z_fit).clamp(fit_zoom(viewport, content), MAX_ZOOM);
-    let (cx, cy) = (bx + bw / 2. + MARGIN as f32, by + bh / 2. + MARGIN as f32);
-    let mut panx = cx * zoom + pan.0 - cx * z;
-    let mut pany = cy * zoom + pan.1 - cy * z;
-    let (sx0, sx1) = ((bx + MARGIN as f32) * z + panx, (bx + bw + MARGIN as f32) * z + panx);
-    let (sy0, sy1) = ((by + MARGIN as f32) * z + pany, (by + bh + MARGIN as f32) * z + pany);
-    if sx0 < RECENTER_PAD {
-        panx += RECENTER_PAD - sx0;
-    } else if sx1 > vw - RECENTER_PAD {
-        panx -= sx1 - (vw - RECENTER_PAD);
-    }
-    if sy0 < RECENTER_PAD {
-        pany += RECENTER_PAD - sy0;
-    } else if sy1 > vh - RECENTER_PAD {
-        pany -= sy1 - (vh - RECENTER_PAD);
-    }
-    (z, (panx, pany))
-}
-
-/// The zoom and pan that fit `content` centered in `viewport`.
-fn fit_view(viewport: Size<Pixels>, content: (f32, f32)) -> (f32, (f32, f32)) {
-    let zoom = fit_zoom(viewport, content);
-    let (vw, vh) = (f32::from(viewport.width), f32::from(viewport.height));
-    let (gw, gh) = content;
-    (zoom, ((vw - gw * zoom) / 2., (vh - gh * zoom) / 2.))
-}
-
-/// Maps a layout-space point to window space with pan and zoom baked in, atop
-/// the same margin offset the boxes use and the canvas's origin within the
-/// window.
-/// The pan/zoom viewport transform: `zoom` scales layout units to pixels and
-/// `pan` is the screen offset of the content's near edges.
-#[derive(Clone, Copy)]
-struct Camera {
-    zoom: f32,
-    pan: (f32, f32),
-}
-
-fn to_screen(x: f64, y: f64, bounds: Bounds<Pixels>, camera: Camera) -> Point<Pixels> {
-    let Camera { zoom, pan } = camera;
-    point(
-        bounds.origin.x + px((x as f32 + MARGIN as f32) * zoom + pan.0),
-        bounds.origin.y + px((y as f32 + MARGIN as f32) * zoom + pan.1),
-    )
-}
-
-/// Paints a box: its filled quad, an emphasis border and glow when highlighted,
-/// and its centered label. Off-screen boxes are culled.
-fn paint_box(
-    b: &PaintBox,
-    bounds: Bounds<Pixels>,
-    camera: Camera,
-    palette: &Palette,
-    window: &mut Window,
-    cx: &mut App,
-) {
-    let Camera { zoom, pan: _ } = camera;
-    let origin = to_screen(b.x, b.y, bounds, camera);
-    let size = size(px(b.w as f32 * zoom), px(b.h as f32 * zoom));
-    let rect = Bounds::new(origin, size);
-    if !rect.intersects(&bounds) {
-        return;
-    }
-    let corner = px(6. * zoom);
-    let fill = if b.dim {
-        bviz_ui_theme::mix(b.fill, palette.background, DIM_FADE)
-    } else {
-        b.fill
-    };
-    let ((border_w, border_c), glow) = box_emphasis(b, zoom, palette, rect, corner);
-    window.paint_quad(quad(rect, corner, fill, border_w, border_c, BorderStyle::Solid));
-    glow(window);
-    paint_box_label(b, rect, zoom, palette, window, cx);
-}
-
-/// A box's emphasis: the quad border to stroke, and a deferred paint of the glow
-/// wash. The border fades from the themed border to the amber accent, and from a
-/// normal to a thick stroke, by the highlight alpha; a dim box uses a faded
-/// themed border. The returned closure paints a faint accent wash over the fill
-/// so the emphasis reads as a glow, not just a brighter outline.
-fn box_emphasis(
-    b: &PaintBox,
-    zoom: f32,
-    palette: &Palette,
-    rect: Bounds<Pixels>,
-    corner: Pixels,
-) -> ((Pixels, Hsla), impl FnOnce(&mut Window)) {
-    let (border_w, border_c) = if b.highlight > 0.0 {
-        let normal = px(1.);
-        let thick = px((2. * zoom).max(2.));
-        let mut accent = HIGHLIGHT_ACCENT;
-        accent.a = b.highlight;
-        (normal + (thick - normal) * b.highlight, Hsla::from(accent))
-    } else if b.dim {
-        (px(1.), Hsla::from(bviz_ui_theme::mix(palette.border, palette.background, DIM_FADE)))
-    } else {
-        (px(1.), Hsla::from(palette.border))
-    };
-    let highlight = b.highlight;
-    let glow = move |window: &mut Window| {
-        if highlight > 0.0 {
-            let mut wash = HIGHLIGHT_ACCENT;
-            wash.a = 0.15 * highlight;
-            window.paint_quad(quad(
-                rect,
-                corner,
-                wash,
-                px(0.),
-                Hsla::transparent_black(),
-                BorderStyle::Solid,
-            ));
-        }
-    };
-    ((border_w, border_c), glow)
-}
-
-/// Paints a box's centered label, with a disclosure caret for a collapsed group
-/// leaf. A container's title sits in its top band; other labels center in the
-/// whole box. The font is the window's inherited UI text style so the views stay
-/// visually coherent; a container's title is bold, and its size is the layout's
-/// own, kept in step with the width the layout reserved for the label.
-fn paint_box_label(
-    b: &PaintBox,
-    rect: Bounds<Pixels>,
-    zoom: f32,
-    palette: &Palette,
-    window: &mut Window,
-    cx: &mut App,
-) {
-    let label_color = if b.dim {
-        bviz_ui_theme::mix(palette.label, palette.background, DIM_FADE)
-    } else {
-        palette.label
-    };
-    let base = bviz_ui_assets::text_metrics(window).font;
-    let font = if b.compound { base.bold() } else { base };
-    let fs = px(LABEL_SIZE as f32 * zoom);
-    let line = bviz_ui_assets::shape_line(window, b.label.clone(), font, fs, label_color.into());
-    // A collapsed group leaf carries a disclosure caret left of the label,
-    // occupying the reserved width the layout sized the box to hold; the label
-    // and caret are centered together as one unit. Other boxes center the label
-    // alone.
-    let caret = b.expandable;
-    let footprint = px(CARET_RESERVE as f32 * zoom);
-    let unit_width = if caret {
-        footprint + line.width()
-    } else {
-        line.width()
-    };
-    let unit_left = rect.origin.x + (rect.size.width - unit_width) / 2.;
-    let tx = if caret {
-        unit_left + footprint
-    } else {
-        unit_left
-    };
-    let ty = if b.compound {
-        let band = px(LABEL_BAND as f32 * zoom);
-        rect.origin.y + (band - fs) / 2.
-    } else {
-        rect.origin.y + (rect.size.height - fs) / 2.
-    };
-    let _ = line.paint(point(tx, ty), fs, TextAlign::Left, None, window, cx);
-
-    // An open container (compound) points the caret down; a collapsed box points
-    // it right. Phosphor icons render as `svg()` elements and cannot be painted
-    // inside this canvas, so the caret is a small filled triangle.
-    if caret {
-        let cy = ty + fs / 2.;
-        paint_caret(
-            point(unit_left, cy),
-            footprint,
-            fs,
-            b.compound,
-            label_color,
-            window,
-        );
-    }
-}
-
-/// Paints a small filled-triangle disclosure caret inside the reserved
-/// `footprint` whose left edge is `at.x`, centered vertically at `at.y`. The
-/// triangle width fills the footprint less a trailing gap before the label; its
-/// height scales with the font size `fs`. `down` points it downward (expanded),
-/// otherwise rightward (collapsed).
-fn paint_caret(
-    at: Point<Pixels>,
-    footprint: Pixels,
-    fs: Pixels,
-    down: bool,
-    color: Rgba,
-    window: &mut Window,
-) {
-    let s = f32::from(footprint) * 0.6; // triangle width within the footprint
-    let height = f32::from(fs) * 0.5; // triangle height, scaling with the label
-    let left = at.x;
-    let right = left + px(s);
-    let (top, bottom) = (at.y - px(height / 2.), at.y + px(height / 2.));
-    let mut tri = PathBuilder::fill();
-    if down {
-        // Apex down, base along the top.
-        tri.add_polygon(
-            &[
-                point(left, top),
-                point(right, top),
-                point(left + px(s / 2.), bottom),
-            ],
-            true,
-        );
-    } else {
-        // Apex right, base along the left.
-        tri.add_polygon(
-            &[point(left, top), point(right, at.y), point(left, bottom)],
-            true,
-        );
-    }
-    if let Ok(path) = tri.build() {
-        window.paint_path(path, color);
-    }
-}
-
-/// A polyline parallel to `pts` at signed perpendicular distance `d` (screen px),
-/// for drawing a node pair's several provenances as evenly spaced parallel lanes.
-/// Every vertex is pushed off its segments' normals — the endpoints perpendicular
-/// to their one segment, the interior mitered at the corners — so a lane stays
-/// parallel to the route along its whole length and meets each node offset
-/// alongside its siblings rather than converging to a single point.
-fn lane_polyline(pts: &[(f32, f32)], d: f32) -> Vec<(f32, f32)> {
-    if d == 0.0 || pts.len() < 2 {
-        return pts.to_vec();
-    }
-    let left_normal = |from: (f32, f32), to: (f32, f32)| {
-        let (dx, dy) = (to.0 - from.0, to.1 - from.1);
-        let l = (dx * dx + dy * dy).sqrt().max(1e-3);
-        (-dy / l, dx / l)
-    };
-    let n = pts.len();
-    let mut out = Vec::with_capacity(n);
-    let ns = left_normal(pts[0], pts[1]);
-    out.push((pts[0].0 + ns.0 * d, pts[0].1 + ns.1 * d));
-    for i in 1..n - 1 {
-        out.push(miter_vertex(pts[i - 1], pts[i], pts[i + 1], d));
-    }
-    let ne = left_normal(pts[n - 2], pts[n - 1]);
-    out.push((pts[n - 1].0 + ne.0 * d, pts[n - 1].1 + ne.1 * d));
-    out
-}
-
-/// Offsets the corner `b` (between segments `a->b` and `b->c`) by `d` along the
-/// miter direction, keeping it distance `d` from both segments. A near-reversal,
-/// or a miter that would shoot far past a sharp corner, falls back to one
-/// segment's normal.
-fn miter_vertex(a: (f32, f32), b: (f32, f32), c: (f32, f32), d: f32) -> (f32, f32) {
-    let unit = |(x, y): (f32, f32)| {
-        let l = (x * x + y * y).sqrt().max(1e-3);
-        (x / l, y / l)
-    };
-    let d1 = unit((b.0 - a.0, b.1 - a.1));
-    let d2 = unit((c.0 - b.0, c.1 - b.1));
-    let (n1, n2) = ((-d1.1, d1.0), (-d2.1, d2.0)); // left normals
-    let m = (n1.0 + n2.0, n1.1 + n2.1);
-    let ml = (m.0 * m.0 + m.1 * m.1).sqrt();
-    if ml < 1e-3 {
-        return (b.0 + n1.0 * d, b.1 + n1.1 * d);
-    }
-    let mdir = (m.0 / ml, m.1 / ml);
-    let cos_half = (mdir.0 * n1.0 + mdir.1 * n1.1).max(0.35); // miter limit
-    let scale = d / cos_half;
-    (b.0 + mdir.0 * scale, b.1 + mdir.1 * scale)
-}
-
-/// Strokes a connector polyline (screen coordinates) and caps its end with a
-/// filled arrowhead pointing along the final segment.
-fn paint_connector(points: &[(f32, f32)], kind: EdgeKind, dim: bool, zoom: f32, window: &mut Window) {
-    if points.len() < 2 {
-        return;
-    }
-    let mut color = edge_color(kind);
-    if dim {
-        color.a = DIM_EDGE_ALPHA;
-    }
-    let pts: Vec<Point<Pixels>> = points.iter().map(|(x, y)| point(px(*x), px(*y))).collect();
-
-    // Stop the stroke at the arrowhead's base (less a slight overdraw) so the
-    // line doesn't paint through the head and broaden the visible tip.
-    let n = pts.len();
-    let tip = pts[n - 1];
-    let prev = pts[n - 2];
-    let dx = f32::from(tip.x - prev.x);
-    let dy = f32::from(tip.y - prev.y);
-    let seg = (dx * dx + dy * dy).sqrt().max(1e-3);
-    let (ux, uy) = (dx / seg, dy / seg);
-    let trim = ((ARROW_LENGTH as f32 - ARROW_OVERDRAW as f32) * zoom).min(seg);
-    let line_end = point(tip.x - px(ux * trim), tip.y - px(uy * trim));
-
-    let mut line = PathBuilder::stroke(px(1.5 * zoom));
-    line.move_to(pts[0]);
-    for p in &pts[1..n - 1] {
-        line.line_to(*p);
-    }
-    line.line_to(line_end);
-    if let Ok(path) = line.build() {
-        window.paint_path(path, color);
-    }
-
-    paint_arrowhead(&pts, zoom, color, window);
-}
-
-/// Paints a filled triangle at the polyline's last point, aimed along the
-/// direction of its final segment.
-fn paint_arrowhead(pts: &[Point<Pixels>], zoom: f32, color: Rgba, window: &mut Window) {
-    let length = ARROW_LENGTH as f32 * zoom;
-    let half_width = ARROW_HALF_WIDTH as f32 * zoom;
-
-    let n = pts.len();
-    let tip = pts[n - 1];
-    let dx = f32::from(tip.x - pts[n - 2].x);
-    let dy = f32::from(tip.y - pts[n - 2].y);
-    let len = (dx * dx + dy * dy).sqrt().max(1e-3);
-    let (ux, uy) = (dx / len, dy / len); // forward unit vector
-    let (perp_x, perp_y) = (-uy, ux); // left-perpendicular unit vector
-
-    let base = point(tip.x - px(ux * length), tip.y - px(uy * length));
-    let left = point(base.x + px(perp_x * half_width), base.y + px(perp_y * half_width));
-    let right = point(base.x - px(perp_x * half_width), base.y - px(perp_y * half_width));
-
-    let mut head = PathBuilder::fill();
-    head.add_polygon(&[tip, left, right], true);
-    if let Ok(path) = head.build() {
-        window.paint_path(path, color);
-    }
-}
-
-/// Reads every input's streamed_proto file and merges them into one joint graph,
-/// before any group quotienting. Cached so toggling a group needn't re-read or
-/// re-parse.
-fn build_graph(inputs: &[Input]) -> Result<(Graph, Graph, Names), String> {
-    let mut aq = None;
-    let mut cq = None;
-    let mut q = None;
-    for input in inputs {
-        let path = input.path.display();
-        let bytes = std::fs::read(&input.path).map_err(|e| format!("{path}: {e}"))?;
-        match input.kind {
-            InputKind::Aquery => {
-                aq = Some(
-                    streamed_proto::read_action_graph_containers(&bytes)
-                        .map_err(|e| format!("{path}: {e}"))?,
-                );
-            }
-            InputKind::Cquery => {
-                cq = Some(
-                    streamed_proto::read_cquery_results(&bytes)
-                        .map_err(|e| format!("{path}: {e}"))?,
-                );
-            }
-            InputKind::Query => {
-                q = Some(
-                    streamed_proto::read_query_targets(&bytes)
-                        .map_err(|e| format!("{path}: {e}"))?,
-                );
-            }
-        }
-    }
-    let (base, names) =
-        bviz_graph_layout::build_joint(aq.as_deref(), cq.as_deref(), q.as_deref(), false);
-    // Transitively reduce the whole base once: a collapsed box then draws the
-    // reduction of its hidden subtree's edges, so its edge count is stable under
-    // expansion rather than re-derived (differently) from each view.
-    let reduced = bviz_graph_layout::reduce::transitive_reduction(&base);
-    Ok((base, reduced, names))
-}
-
-/// Lights the shortest drawn path from `subtree` to each target. A breadth-first
-/// walk over `adj` records each node's predecessor; reconstructing from a target
-/// back to the subtree yields the path's edges. With `forward`, `adj` is the
-/// out-adjacency and a predecessor edge `p->cur` is itself a drawn edge; otherwise
-/// `adj` is the in-adjacency and the drawn edge runs the other way, `cur->p`. The
-/// walk seeds the subtree in id order so a tie between equal-length paths resolves
-/// the same way every paint, rather than flickering with hash iteration order.
-fn trace_paths(
-    subtree: &HashSet<Id>,
-    targets: &HashSet<Id>,
-    adj: &HashMap<Id, Vec<Id>>,
-    forward: bool,
-    lit: &mut HashSet<(Id, Id)>,
-) {
-    let mut came: HashMap<Id, Id> = HashMap::new();
-    let mut seen: HashSet<Id> = subtree.clone();
-    let mut seeds: Vec<Id> = subtree.iter().copied().collect();
-    seeds.sort_unstable_by_key(|id| id.0);
-    let mut queue: VecDeque<Id> = seeds.into();
-    while let Some(u) = queue.pop_front() {
-        for &w in adj.get(&u).into_iter().flatten() {
-            if seen.insert(w) {
-                came.insert(w, u);
-                queue.push_back(w);
-            }
-        }
-    }
-    for &target in targets {
-        let mut cur = target;
-        while !subtree.contains(&cur) {
-            let Some(&prev) = came.get(&cur) else { break };
-            lit.insert(if forward { (prev, cur) } else { (cur, prev) });
-            cur = prev;
-        }
-    }
-}
-
-/// Builds the display graph with the given ids expanded and lays it out: fold
-/// every unexpanded container away, merge interchangeable leaves, then lay out
-/// only the resulting visible view. When `reduced`, the view is transitively
-/// reduced in two steps. First the base's reduction projects onto the view's
-/// boxes — the full base and the already-reduced base collapse to the same
-/// boxes, so a collapsed box stands in for its hidden subtree's reduced edges,
-/// keeping its edge count stable under expansion. Then the projected box graph
-/// is reduced again, because merging a subtree into one box creates box-level
-/// shortcuts that no longer hold at node granularity (a box A->B edge implied by
-/// a drawn A->M->B path through other visible boxes); the second pass drops them.
-/// `full_edges` keeps the unreduced connectivity for hover.
-fn relayout(
-    base: &Graph,
-    reduced_base: &Graph,
-    expanded: &HashSet<Id>,
-    names: &mut Names,
-    reduced: bool,
-) -> LaidOut {
-    let visible = bviz_graph_layout::lod::collapse(base, expanded);
-    let (mut view, remap) = quotient::quotient(&visible, expanded, names);
-    let full_edges: Vec<(Id, Id)> =
-        view.edges.iter().map(|e| (e.from, e.to)).collect::<HashSet<_>>().into_iter().collect();
-    if reduced {
-        // Project the reduced base's edges onto the same boxes (a collapsed group's
-        // members map through `remap`, everything else keeps its id), and keep only
-        // those of the view's edges.
-        let skeleton = bviz_graph_layout::lod::collapse(reduced_base, expanded);
-        let box_of = |id: Id| remap.get(&id).copied().unwrap_or(id);
-        let kept: HashSet<(Id, Id)> = skeleton
-            .edges
-            .iter()
-            .map(|e| (box_of(e.from), box_of(e.to)))
-            .filter(|(a, b)| a != b)
-            .collect();
-        view.edges.retain(|e| kept.contains(&(e.from, e.to)));
-        view = bviz_graph_layout::reduce::transitive_reduction(&view);
-    }
-    let mut laid = layout::layout(&view);
-    laid.full_edges = full_edges;
-    laid
-}
-
-/// Inverse of [`to_screen`]: maps a window-space point back to layout space.
-fn from_screen(screen: Point<Pixels>, origin: Point<Pixels>, camera: Camera) -> (f32, f32) {
-    let Camera { zoom, pan } = camera;
-    (
-        (f32::from(screen.x) - f32::from(origin.x) - pan.0) / zoom - MARGIN as f32,
-        (f32::from(screen.y) - f32::from(origin.y) - pan.1) / zoom - MARGIN as f32,
-    )
-}
-
 /// Pan the graph by the cursor delta during a drag, latching `moved` once the
 /// cursor has travelled past the click threshold.
 fn drag_pan(view: &mut GraphView, event: &MouseMoveEvent, cx: &mut Context<GraphView>) {
@@ -1695,121 +888,6 @@ fn toggle_box_at(view: &mut GraphView, pos: Point<Pixels>, cx: &mut Context<Grap
     view.retoggle(cx);
 }
 
-/// The scroll bar for `axis` given the view's current zoom, pan, and `viewport`
-/// (window px), or `None` when that axis fits and needs none. The bar's track,
-/// content, visible extent, and offset are the axis length in window px, so a
-/// press maps straight through in window coordinates.
-fn scrollbar_geom(
-    axis: Axis,
-    viewport: Bounds<Pixels>,
-    content: (f32, f32),
-    camera: Camera,
-) -> Option<Scrollbar> {
-    let Camera { zoom, pan } = camera;
-    let (vw, vh) = (f32::from(viewport.size.width), f32::from(viewport.size.height));
-    let (cw, ch) = (content.0 * zoom, content.1 * zoom);
-    let (vlen, clen, panc, other_overflows) = match axis {
-        Axis::Vertical => (vh, ch, pan.1, cw > vw),
-        Axis::Horizontal => (vw, cw, pan.0, ch > vh),
-    };
-    // Pan is the screen offset of the content's near edge: 0 at the start, down to
-    // `viewport - content` at the far edge, so the distance scrolled past the near
-    // edge is `-pan`, in `[0, content - viewport]`.
-    let offset = (-panc).clamp(0.0, (clen - vlen).max(0.0));
-    // Where the crossing axis overflows too, stop the track short of its bar so the
-    // two don't overlap in the corner.
-    let track_len = vlen - if other_overflows { SCROLLBAR_THICKNESS } else { 0.0 };
-    let thickness = px(SCROLLBAR_THICKNESS);
-    let track = match axis {
-        Axis::Vertical => Bounds::new(
-            point(viewport.right() - thickness, viewport.top()),
-            size(thickness, px(track_len)),
-        ),
-        Axis::Horizontal => Bounds::new(
-            point(viewport.left(), viewport.bottom() - thickness),
-            size(px(track_len), thickness),
-        ),
-    };
-    Scrollbar::new(axis, track, clen, vlen, offset, MIN_THUMB)
-}
-
-/// The scroll bar for `axis` built from the loaded graph's current view state.
-fn current_scrollbar(view: &GraphView, axis: Axis) -> Option<Scrollbar> {
-    let Source::Loaded(g) = &view.source else {
-        return None;
-    };
-    let content = content_size(g);
-    scrollbar_geom(
-        axis,
-        view.view_state.viewport.get(),
-        content,
-        Camera { zoom: view.view_state.zoom.get(), pan: view.view_state.pan.get() },
-    )
-}
-
-/// The axis of the scroll bar whose track a press at `position` (window px) landed
-/// on, or `None` when the press is over the content.
-fn scrollbar_hit(view: &GraphView, position: Point<Pixels>) -> Option<Axis> {
-    [Axis::Vertical, Axis::Horizontal].into_iter().find(|&axis| {
-        current_scrollbar(view, axis).is_some_and(|bar| bar.track_hit(position))
-    })
-}
-
-/// Scroll `axis` so `offset` window px of content sit past the near edge, panning
-/// the content's near edge to `-offset`.
-fn scroll_to(view: &mut GraphView, axis: Axis, offset: f32, cx: &mut Context<GraphView>) {
-    let Source::Loaded(g) = &view.source else {
-        return;
-    };
-    let content = content_size(g);
-    let zoom = view.view_state.zoom.get();
-    let vp = view.view_state.viewport.get().size;
-    let (px, py) = view.view_state.pan.get();
-    let pan = match axis {
-        Axis::Vertical => (px, -offset),
-        Axis::Horizontal => (-offset, py),
-    };
-    view.view_state.pan.set(clamp_pan(pan, zoom, vp, content));
-    // A manual scroll overrides any settle still easing.
-    view.view_state.anim.set(None);
-    cx.notify();
-}
-
-/// Begin a scroll-bar drag: record the grabbed thumb and the grab offset, then
-/// scroll to the press so a track click jumps the view at once.
-fn start_scroll_drag(
-    view: &mut GraphView,
-    axis: Axis,
-    position: Point<Pixels>,
-    cx: &mut Context<GraphView>,
-) {
-    let Some(bar) = current_scrollbar(view, axis) else {
-        return;
-    };
-    let grab = bar.grab(position);
-    view.scroll_drag = Some(ScrollDrag { axis, grab });
-    scroll_to(view, axis, bar.offset_at(position, grab), cx);
-}
-
-/// Track a held scroll thumb to the cursor.
-fn scroll_drag_move(view: &mut GraphView, event: &MouseMoveEvent, cx: &mut Context<GraphView>) {
-    let Some(drag) = view.scroll_drag else {
-        return;
-    };
-    let Some(bar) = current_scrollbar(view, drag.axis) else {
-        return;
-    };
-    scroll_to(view, drag.axis, bar.offset_at(event.position, drag.grab), cx);
-}
-
-/// End a scroll-bar drag. Called both from the element release handler and the
-/// window-global one, so it is a no-op when no drag is in progress.
-fn end_scroll_drag(view: &mut GraphView, cx: &mut Context<GraphView>) {
-    if view.scroll_drag.take().is_some() {
-        cx.notify();
-    }
-}
-
 /// The smallest-area box (in layout space) containing `(gx, gy)`, so an inner
 /// member or header wins over its enclosing container; `None` if outside all.
 fn hit_box(boxes: &[bviz_graph_layout::Box], gx: f32, gy: f32) -> Option<&bviz_graph_layout::Box> {
@@ -1820,22 +898,6 @@ fn hit_box(boxes: &[bviz_graph_layout::Box], gx: f32, gy: f32) -> Option<&bviz_g
             gx >= x && gx <= x + b.width as f32 && gy >= y && gy <= y + b.height as f32
         })
         .min_by(|a, b| (a.width * a.height).total_cmp(&(b.width * b.height)))
-}
-
-/// Which Bazel query produced a `--output=streamed_proto` file, selecting the
-/// reader and builder used to turn it into a graph.
-#[derive(Clone, Copy)]
-enum InputKind {
-    Aquery,
-    Cquery,
-    Query,
-}
-
-/// A graph input: a streamed_proto file and the query kind that produced it.
-#[derive(Clone)]
-struct Input {
-    kind: InputKind,
-    path: PathBuf,
 }
 
 /// Renders a Bazel build graph from one or more `--output=streamed_proto`
@@ -1889,6 +951,7 @@ pub fn run() {
 mod tests {
     use super::*;
     use bviz_graph_layout::Box;
+    use gpui::{point, Size};
 
     fn lbox(id: u32, x: f64, y: f64, w: f64, h: f64) -> Box {
         Box {
