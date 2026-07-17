@@ -29,6 +29,11 @@ use crate::graph::{EdgeKind, Graph, Kind};
 use crate::intern::{Id, Names};
 use crate::label::{self, PackageHierarchy};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct ArtifactId(u32);
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct ConfigId(u32);
+
 pub fn build(containers: &[ActionGraphContainer], external_sources: bool) -> (Graph, Names) {
     let packages = package_keys(containers);
     let mut names = Names::default();
@@ -74,7 +79,7 @@ pub(crate) fn build_with_packages(
 
     let source_nodes: HashSet<Id> = HashSet::new();
     // Per produced artifact, the leaf node that represents it.
-    let mut producer_node_id: HashMap<u32, Id> = HashMap::new();
+    let mut producer_node_id: HashMap<ArtifactId, Id> = HashMap::new();
 
     // Pass 1: actions and the output artifacts they produce.
     {
@@ -88,7 +93,7 @@ pub(crate) fn build_with_packages(
             configured: HashSet::new(),
         };
         for (i, action) in index.actions.iter().enumerate() {
-            let config_id = action.configuration_id;
+            let config_id = ConfigId(action.configuration_id);
             let rule_label = index
                 .target_by_id
                 .get(&action.target_id)
@@ -100,6 +105,7 @@ pub(crate) fn build_with_packages(
                 .graph
                 .add_node(action_id, action.mnemonic.clone(), Kind::Action, Some(ct_id));
             for &out in &action.output_ids {
+                let out = ArtifactId(out);
                 let art_id = boxes.output_artifact(out, ct_id, config_id);
                 producer_node_id.insert(out, art_id);
                 boxes.graph.add_edge(action_id, art_id, EdgeKind::Aquery);
@@ -138,7 +144,7 @@ pub(crate) fn build_with_packages(
 /// The by-id artifact and path-fragment lookups, paired so an artifact's
 /// name and path can be reconstructed from one value.
 struct Paths<'a> {
-    artifact_by_id: HashMap<u32, &'a Artifact>,
+    artifact_by_id: HashMap<ArtifactId, &'a Artifact>,
     fragment_by_id: HashMap<u32, &'a PathFragment>,
 }
 
@@ -148,7 +154,7 @@ struct Index<'a> {
     actions: Vec<&'a Action>,
     paths: Paths<'a>,
     target_by_id: HashMap<u32, &'a Target>,
-    config_by_id: HashMap<u32, &'a Configuration>,
+    config_by_id: HashMap<ConfigId, &'a Configuration>,
     depset_by_id: HashMap<u32, &'a DepSetOfFiles>,
 }
 
@@ -170,11 +176,11 @@ impl<'a> Index<'a> {
         }
         Index {
             paths: Paths {
-                artifact_by_id: artifacts.iter().map(|a| (a.id, *a)).collect(),
+                artifact_by_id: artifacts.iter().map(|a| (ArtifactId(a.id), *a)).collect(),
                 fragment_by_id: path_fragments.iter().map(|p| (p.id, *p)).collect(),
             },
             target_by_id: targets.iter().map(|t| (t.id, *t)).collect(),
-            config_by_id: configurations.iter().map(|c| (c.id, *c)).collect(),
+            config_by_id: configurations.iter().map(|c| (ConfigId(c.id), *c)).collect(),
             depset_by_id: dep_sets.iter().map(|d| (d.id, *d)).collect(),
             actions,
         }
@@ -196,9 +202,9 @@ struct Boxes<'a> {
 }
 
 impl Boxes<'_> {
-    fn config_key(&self, config_id: u32) -> String {
+    fn config_key(&self, config_id: ConfigId) -> String {
         label::config_key(
-            config_id,
+            config_id.0,
             self.index.config_by_id.get(&config_id).map(|c| c.checksum.as_str()),
         )
     }
@@ -206,7 +212,7 @@ impl Boxes<'_> {
     /// The leaf node for one output artifact `out` of an action whose box is
     /// `producing_ct`. A labeled generated output nests under its own target's
     /// per-config box; an unlabeled one sits directly under the producing rule's box.
-    fn output_artifact(&mut self, out: u32, producing_ct: Id, config_id: u32) -> Id {
+    fn output_artifact(&mut self, out: ArtifactId, producing_ct: Id, config_id: ConfigId) -> Id {
         let path = self.index.paths.full_path(out);
         match generated_label(self.hierarchy, &path).filter(|label| self.labeled_outputs.contains(label)) {
             Some(out_label) => {
@@ -218,7 +224,7 @@ impl Boxes<'_> {
                 id
             }
             None => {
-                let id = self.names.intern(&format!("artifact{out}"));
+                let id = self.names.intern(&format!("artifact{}", out.0));
                 self.graph.add_node(
                     id,
                     self.index.paths.basename(out),
@@ -235,7 +241,7 @@ impl Boxes<'_> {
     /// above it on first use and returning the configured-target id. Used both for a
     /// rule (a `target` box holding actions) and for a labeled generated output (an
     /// `artifact` box holding the concrete file).
-    fn target_ct(&mut self, full_label: &str, target_kind: Kind, config_id: u32) -> Id {
+    fn target_ct(&mut self, full_label: &str, target_kind: Kind, config_id: ConfigId) -> Id {
         let config_key = self.config_key(config_id);
         let ct_node_id = self.names.intern(&label::ct_node_id(full_label, &config_key));
         if !self.configured.insert(ct_node_id) {
@@ -254,7 +260,7 @@ impl Boxes<'_> {
         }
 
         let mnemonic = label::config_mnemonic(
-            config_id,
+            config_id.0,
             self.index.config_by_id.get(&config_id).map(|c| c.mnemonic.as_str()),
         );
         self.graph.add_node(
@@ -275,14 +281,14 @@ struct Wiring<'a> {
     seen_edge: HashSet<(Id, Id)>,
     source_nodes: HashSet<Id>,
     hierarchy: &'a PackageHierarchy,
-    producer_node_id: HashMap<u32, Id>,
+    producer_node_id: HashMap<ArtifactId, Id>,
     depset_by_id: HashMap<u32, &'a DepSetOfFiles>,
     paths: Paths<'a>,
     external_sources: bool,
     /// The leaf node each input artifact wires from, or `None` when it is
     /// dropped. Resolution scans the package set and rebuilds the artifact's
     /// path, so it is cached: an artifact in many actions' inputs resolves once.
-    resolved: HashMap<u32, Option<Id>>,
+    resolved: HashMap<ArtifactId, Option<Id>>,
 }
 
 impl Wiring<'_> {
@@ -305,7 +311,8 @@ impl Wiring<'_> {
         let Some(dep_set) = self.depset_by_id.get(&dep_set_id).copied() else {
             return;
         };
-        let directs: Vec<u32> = dep_set.direct_artifact_ids.clone();
+        let directs: Vec<ArtifactId> =
+            dep_set.direct_artifact_ids.iter().copied().map(ArtifactId).collect();
         let transitives: Vec<u32> = dep_set.transitive_dep_set_ids.clone();
         for artifact_id in directs {
             self.emit_member(artifact_id, consumer, graph, names);
@@ -317,7 +324,7 @@ impl Wiring<'_> {
 
     /// Wires one member artifact to `consumer` through the leaf node it resolves
     /// to, creating that node on first sight and skipping a dropped input.
-    fn emit_member(&mut self, artifact_id: u32, consumer: Id, graph: &mut Graph, names: &mut Names) {
+    fn emit_member(&mut self, artifact_id: ArtifactId, consumer: Id, graph: &mut Graph, names: &mut Names) {
         if let Some(from) = self.resolve_member(artifact_id, graph, names) {
             self.add_edge(from, consumer, graph);
         }
@@ -329,7 +336,7 @@ impl Wiring<'_> {
     /// `external_sources` is off, or generated outside the queried scope, which
     /// has no producer node). The result depends only on the artifact, so it is
     /// memoized across the many consumers a shared input feeds.
-    fn resolve_member(&mut self, artifact_id: u32, graph: &mut Graph, names: &mut Names) -> Option<Id> {
+    fn resolve_member(&mut self, artifact_id: ArtifactId, graph: &mut Graph, names: &mut Names) -> Option<Id> {
         if let Some(&cached) = self.resolved.get(&artifact_id) {
             return cached;
         }
@@ -338,7 +345,7 @@ impl Wiring<'_> {
         from
     }
 
-    fn compute_member(&mut self, artifact_id: u32, graph: &mut Graph, names: &mut Names) -> Option<Id> {
+    fn compute_member(&mut self, artifact_id: ArtifactId, graph: &mut Graph, names: &mut Names) -> Option<Id> {
         let path = self.paths.full_path(artifact_id);
         if !self.external_sources && is_external(&path) {
             return None;
@@ -401,13 +408,13 @@ fn generated_label(hierarchy: &PackageHierarchy, path: &str) -> Option<String> {
 /// A source artifact that no known package encloses: a root-level node keyed by
 /// its artifact id, since it has no package-relative label to identify it.
 fn root_source_node(
-    artifact_id: u32,
+    artifact_id: ArtifactId,
     graph: &mut Graph,
     source_nodes: &mut HashSet<Id>,
     paths: &Paths,
     names: &mut Names,
 ) -> Id {
-    let node_id = names.intern(&format!("source{artifact_id}"));
+    let node_id = names.intern(&format!("source{}", artifact_id.0));
     if source_nodes.insert(node_id) {
         graph.add_node(
             node_id,
@@ -420,18 +427,18 @@ fn root_source_node(
 }
 
 impl Paths<'_> {
-    fn basename(&self, artifact_id: u32) -> String {
+    fn basename(&self, artifact_id: ArtifactId) -> String {
         let Some(artifact) = self.artifact_by_id.get(&artifact_id) else {
-            return format!("artifact {artifact_id}");
+            return format!("artifact {}", artifact_id.0);
         };
         self.fragment_by_id
             .get(&artifact.path_fragment_id)
             .map(|f| f.label.clone())
-            .unwrap_or_else(|| format!("artifact {artifact_id}"))
+            .unwrap_or_else(|| format!("artifact {}", artifact_id.0))
     }
 
     /// Reconstructs an artifact's exec-root-relative path by walking path fragments.
-    fn full_path(&self, artifact_id: u32) -> String {
+    fn full_path(&self, artifact_id: ArtifactId) -> String {
         let Some(artifact) = self.artifact_by_id.get(&artifact_id) else {
             return String::new();
         };
