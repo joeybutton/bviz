@@ -13,7 +13,6 @@ rust_library(
         "//ui/trace:__pkg__",
     ],
     deps = [
-        "//trace/layout",
         "@crates//:gpui",
     ],
 )

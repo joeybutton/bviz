@@ -7,6 +7,7 @@
 static GLOBAL: bviz_alloc::MiMalloc = bviz_alloc::MiMalloc;
 
 mod chart;
+mod theme;
 
 use chart::{
     clip_polyline_x, downsample_columns, fit_px_per_us, format_counter, format_duration,
@@ -1499,7 +1500,7 @@ impl TraceView {
                     .flex()
                     .items_center()
                     .pr_2()
-                    .child(bviz_ui_theme::role_legend(
+                    .child(theme::role_legend(
                         palette.label,
                         palette.background,
                         STATS_TEXT_SIZE,
@@ -3772,7 +3773,7 @@ fn paint_slice(
     cx: &mut App,
 ) {
     let rect = Bounds::new(point(px(content_left + x), px(y)), size(px(w), px(h)));
-    let fill = bviz_ui_theme::span_role_color(slice.role, palette.background);
+    let fill = theme::span_role_color(slice.role, palette.background);
     bviz_ui_components::paint_labeled_box(
         rect,
         fill,
@@ -3832,7 +3833,7 @@ fn paint_flame_graph(
                 continue;
             }
             let rect = Bounds::new(point(px(left + b.x), px(y)), size(px(b.w), px(b.h)));
-            let fill = bviz_ui_theme::span_role_color(b.role, palette.background);
+            let fill = theme::span_role_color(b.role, palette.background);
             bviz_ui_components::paint_labeled_box(
                 rect,
                 fill,
@@ -4159,7 +4160,7 @@ fn paint_graph(
             area.line_to(point(px(top[top.len() - 1].0), px(chart_bottom)));
             area.line_to(point(px(top[0].0), px(chart_bottom)));
             if let Ok(path) = area.build() {
-                window.paint_path(path, bviz_ui_theme::counter_color(profile.str(series.name)));
+                window.paint_path(path, theme::counter_color(profile.str(series.name)));
             }
         });
     }
@@ -4258,7 +4259,7 @@ fn paint_counter_readouts(
         let chart_top = y_scale.chart_top;
         let chart_bottom = y_scale.chart_bottom;
         let dot_y = y_scale.value_to_y(value);
-        let color = bviz_ui_theme::counter_color(profile.str(series.name));
+        let color = theme::counter_color(profile.str(series.name));
         window.paint_quad(quad(
             Bounds::new(
                 point(

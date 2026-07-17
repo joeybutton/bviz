@@ -7,7 +7,6 @@ rust_library(
     srcs = glob(["src/**/*.rs"]),
     crate_name = "bviz_trace_layout",
     visibility = [
-        "//ui/theme:__pkg__",
         "//ui/trace:__pkg__",
     ],
     deps = [
