@@ -52,9 +52,9 @@ pub(crate) fn scan_event<'a>(
             "ph" => ev.ph = s.scan_opt_str()?,
             "cat" => ev.cat = s.scan_opt_str()?,
             "name" => ev.name = s.scan_opt_str()?,
-            "ts" => ev.ts = s.scan_opt_f64()?,
-            "dur" => ev.dur = s.scan_opt_f64()?,
-            "tid" => ev.tid = s.scan_opt_i64()?,
+            "ts" => ev.ts = s.scan_opt_number(IntTok::to_f64)?,
+            "dur" => ev.dur = s.scan_opt_number(IntTok::to_f64)?,
+            "tid" => ev.tid = s.scan_opt_number(IntTok::to_i64)?,
             "args" => {
                 scratch.clear();
                 ev.has_args = s.scan_args(scratch)?;
@@ -199,23 +199,14 @@ impl<'a> EventScanner<'a> {
         }
     }
 
-    /// An integer-or-null field value read as `f64`.
-    fn scan_opt_f64(&mut self) -> Option<Option<f64>> {
+    /// An integer-or-null field value, converted by `conv`; an out-of-range
+    /// magnitude defers (and serde then errors, failing the chunk).
+    fn scan_opt_number<T>(&mut self, conv: impl FnOnce(&IntTok) -> Option<T>) -> Option<Option<T>> {
         match *self.bytes.get(self.pos)? {
-            b'-' | b'0'..=b'9' => Some(Some(self.scan_int()?.to_f64()?)),
-            b'n' => {
-                self.expect_keyword("null")?;
-                Some(None)
+            b'-' | b'0'..=b'9' => {
+                let tok = self.scan_int()?;
+                Some(Some(conv(&tok)?))
             }
-            _ => None,
-        }
-    }
-
-    /// An integer-or-null field value; an out-of-range magnitude defers (and
-    /// serde then errors, failing the chunk).
-    fn scan_opt_i64(&mut self) -> Option<Option<i64>> {
-        match *self.bytes.get(self.pos)? {
-            b'-' | b'0'..=b'9' => Some(Some(self.scan_int()?.to_i64()?)),
             b'n' => {
                 self.expect_keyword("null")?;
                 Some(None)
