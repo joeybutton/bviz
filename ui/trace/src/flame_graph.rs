@@ -71,11 +71,16 @@ fn flame_metrics() -> FlameMetrics {
 /// zoomed width overflows the visible width). Both reserves may apply at once,
 /// leaving the bottom-right corner to neither bar. Returned as
 /// `(left, top, width, height)`.
-fn flame_graph_rect(
-    bounds: Bounds<Pixels>,
-    flame_total: f32,
-    flame_view: FlameView,
-) -> (f32, f32, f32, f32) {
+/// The flame-graph drawing area within its bounds, shrunk by whichever scroll
+/// bars the content needs.
+struct Rect {
+    left: f32,
+    top: f32,
+    width: f32,
+    height: f32,
+}
+
+fn flame_graph_rect(bounds: Bounds<Pixels>, flame_total: f32, flame_view: FlameView) -> Rect {
     let left = f32::from(bounds.origin.x);
     let top = f32::from(bounds.origin.y);
     let width_full = f32::from(bounds.size.width);
@@ -95,7 +100,7 @@ fn flame_graph_rect(
         0.0
     };
     let width = (width_full - vbar_reserve).max(0.0);
-    (left, top, width, height)
+    Rect { left, top, width, height }
 }
 
 /// Lays out the graph's visible window, reusing the [`FlameBoxCache`] in `cache`
@@ -158,7 +163,7 @@ fn paint_flame_graph(
     let graph = &aggregates.flame;
     let metrics = flame_metrics();
     let total_h = flame_height(graph, &metrics);
-    let (left, top, width, height) = flame_graph_rect(bounds, total_h, flame_view);
+    let Rect { left, top, width, height } = flame_graph_rect(bounds, total_h, flame_view);
     // Lay out only the visible window, viewport-relative: the tree occupies
     // `content_w` pixels at this zoom, scrolled `scroll_x` in, so a box's x is
     // already relative to the content column's left edge. Off-screen boxes are
@@ -368,7 +373,8 @@ impl TraceView {
         let aggregates = self.aggregates.borrow().clone()?;
         let view = self.flame_view.get();
         let total_h = flame_height(&aggregates.flame, &flame_metrics());
-        let (left, top, width, height) = flame_graph_rect(self.flame_bounds.get(), total_h, view);
+        let Rect { left, top, width, height } =
+            flame_graph_rect(self.flame_bounds.get(), total_h, view);
         Some(FlameLayout {
             view,
             total_h,
