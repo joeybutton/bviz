@@ -1,0 +1,499 @@
+use bviz_terminal::{Cell, Flags, Scroll, Terminal};
+use bviz_ui_components::{Axis, DEFAULT_MIN_THUMB, Scrollbar, track_drag};
+use gpui::{
+    App, Bounds, Element, Entity, Font, GlobalElementId, InspectorElementId, IntoElement, LayoutId,
+    PaintQuad, Pixels, Point, Rgba, ShapedLine, Style, TextRun, Window, fill, point, px, relative,
+    size,
+};
+
+use super::{ContentLayout, TermSource, TerminalView};
+use crate::color::{CellStyle, Defaults, ansi_palette, style_key};
+
+/// Width of the scroll bar gutter reserved on the right edge.
+const SCROLLBAR_WIDTH: f32 = 8.0;
+
+/// Custom element that sizes the terminal to its bounds, then shapes the visible
+/// viewport and paints background fills and glyphs.
+pub(super) struct TerminalElement {
+    pub(super) view: Entity<TerminalView>,
+}
+
+/// Font metrics resolved once per layout from the inherited monospace text style.
+pub(super) struct Metrics {
+    cell_width: Pixels,
+    line_height: Pixels,
+    font_size: Pixels,
+    font: Font,
+}
+
+/// A shaped run of text and the origin it paints at. Runs are positioned per
+/// grid column rather than as one line per row, so wide glyphs and the cells
+/// after them stay column-aligned instead of drifting by the shaped advances.
+struct PositionedLine {
+    origin: Point<Pixels>,
+    line: ShapedLine,
+}
+
+pub(super) struct Prepaint {
+    lines: Vec<PositionedLine>,
+    backgrounds: Vec<PaintQuad>,
+    /// Quads painted over the text, such as the hovered URL's underline.
+    overlays: Vec<PaintQuad>,
+    scrollbar: Option<PaintQuad>,
+}
+
+impl IntoElement for TerminalElement {
+    type Element = Self;
+
+    fn into_element(self) -> Self::Element {
+        self
+    }
+}
+
+impl TerminalElement {
+    /// Build the terminal at `cols`x`rows` for the played frame so alacritty
+    /// wraps to the window, or reflow the existing one to that size. On rebuild,
+    /// restore scroll, search, and selection so scrubbing keeps them; before the
+    /// source loads there is nothing to build and the viewport reads empty.
+    fn sync_terminal(&self, cols: usize, rows: usize, cx: &mut App) {
+        self.view.update(cx, |view, cx| {
+            let frame = view.current_frame;
+            if view.terminal.is_none() || view.terminal_frame != Some(frame) {
+                if let TermSource::Loaded(replay) = &view.source {
+                    let source = replay.display_at(frame);
+                    let mut terminal = Terminal::from_display(&source, cols, rows);
+                    // Restore the user's remembered scroll. If the held line lies
+                    // beyond the output at this frame, scroll_to_top_line clamps to
+                    // the bottom without forgetting it, so scrubbing forward returns.
+                    if view.follow_bottom {
+                        terminal.scroll(Scroll::Bottom);
+                    } else {
+                        terminal.scroll_to_top_line(view.scroll_top);
+                    }
+                    // Carry an active search onto the rebuilt content, keeping the
+                    // focused match rather than resetting it to the first.
+                    if view.find_active {
+                        if let Some(input) = view.find_input.as_ref() {
+                            let query = input.read(cx).content().to_string();
+                            let current = view
+                                .terminal
+                                .as_ref()
+                                .and_then(Terminal::current_match_index);
+                            terminal.restore_search(&query, current);
+                        }
+                    }
+                    // Carry the text selection onto the rebuilt content. A live drag
+                    // keeps its anchor on its text but lets the far end follow the
+                    // cursor's cell, so it grows as playback scrolls under a held
+                    // cursor; a settled selection just re-applies its range.
+                    if let (true, Some(anchor), Some(cursor)) =
+                        (view.selecting, view.selection_anchor, view.selection_drag)
+                    {
+                        if let Some(end) = view.cell_at(cursor) {
+                            terminal.drag_select(anchor, end);
+                        }
+                    } else if let Some(span) =
+                        view.terminal.as_ref().and_then(Terminal::selection_span)
+                    {
+                        terminal.restore_selection(span);
+                    }
+                    view.terminal = Some(terminal);
+                    view.terminal_frame = Some(frame);
+                }
+            } else if let Some(terminal) = view.terminal.as_mut() {
+                terminal.resize(cols, rows);
+            }
+        });
+    }
+
+    /// Size and place the scroll bar from how much is off-screen and how far the
+    /// viewport is scrolled: the content is the whole scrollback plus the visible
+    /// rows, and the offset is how far below the top the viewport sits
+    /// (`history - offset`). The geometry is kept on the view for hit-testing even
+    /// while hidden; the returned thumb quad is painted only while the bar is
+    /// revealed or being dragged, with no track.
+    fn scrollbar_quad(
+        &self,
+        bounds: Bounds<Pixels>,
+        history: usize,
+        offset: usize,
+        rows: usize,
+        colors: &bviz_ui_theme::Colors,
+        cx: &mut App,
+    ) -> Option<PaintQuad> {
+        let scrollbar_layout = Scrollbar::new(
+            Axis::Vertical,
+            Bounds::new(
+                point(
+                    px(f32::from(bounds.right()) - SCROLLBAR_WIDTH),
+                    bounds.top(),
+                ),
+                size(px(SCROLLBAR_WIDTH), bounds.size.height),
+            ),
+            (history + rows) as f32,
+            rows as f32,
+            (history - offset) as f32,
+            DEFAULT_MIN_THUMB,
+        );
+        self.view
+            .update(cx, |view, _| view.scrollbar = scrollbar_layout);
+        let view = self.view.read(cx);
+        let show_scrollbar = view.scrollbar_visible || view.drag_grab.is_some();
+        scrollbar_layout.filter(|_| show_scrollbar).map(|bar| {
+            fill(
+                bar.thumb(),
+                bviz_ui_theme::mix(colors.text, colors.background, 0.6),
+            )
+        })
+    }
+
+    /// Shape the visible grid into one [`PositionedLine`] per contiguous
+    /// same-style span and collect the non-default cell background fills.
+    fn shape_viewport(
+        viewport: &[Vec<Cell>],
+        bounds: Bounds<Pixels>,
+        metrics: &Metrics,
+        defaults: Defaults,
+        window: &mut Window,
+    ) -> (Vec<PositionedLine>, Vec<PaintQuad>) {
+        let mut lines = Vec::with_capacity(viewport.len());
+        let mut backgrounds = Vec::new();
+
+        for (r, row) in viewport.iter().enumerate() {
+            let y = bounds.top() + metrics.line_height * r as f32;
+
+            let mut col = 0;
+            while col < row.len() {
+                let start = col;
+                let key = style_key(&row[col]);
+                // A wide character occupies two columns: its glyph cell carries
+                // the character, the following spacer cell carries none.
+                let mut run_text = String::new();
+                while col < row.len() && style_key(&row[col]) == key {
+                    if !row[col].flags.contains(Flags::WIDE_CHAR_SPACER) {
+                        run_text.push(row[col].c);
+                    }
+                    col += 1;
+                }
+                let style = CellStyle::resolve(&row[start], defaults);
+                let x = bounds.left() + metrics.cell_width * start as f32;
+
+                if style.background != defaults.bg {
+                    let width = metrics.cell_width * (col - start) as f32;
+                    backgrounds.push(fill(
+                        Bounds::new(point(x, y), size(width, metrics.line_height)),
+                        style.background,
+                    ));
+                }
+
+                if run_text.is_empty() {
+                    continue;
+                }
+                let mut font = metrics.font.clone();
+                font.weight = style.weight;
+                font.style = style.font_style;
+                let run = TextRun {
+                    len: run_text.len(),
+                    font,
+                    color: style.foreground.into(),
+                    background_color: None,
+                    underline: style.underline,
+                    strikethrough: style.strikethrough,
+                };
+                lines.push(PositionedLine {
+                    origin: point(x, y),
+                    line: window.text_system().shape_line(
+                        run_text.into(),
+                        metrics.font_size,
+                        std::slice::from_ref(&run),
+                        None,
+                    ),
+                });
+            }
+        }
+        (lines, backgrounds)
+    }
+
+    /// Translucent tint over the selected cells; painted under the text so it
+    /// stays legible.
+    /// Full-cell fill covering the inclusive column span `first..=last` on `row`.
+    fn span_fill(
+        bounds: Bounds<Pixels>,
+        metrics: &Metrics,
+        row: usize,
+        first: usize,
+        last: usize,
+        color: Rgba,
+    ) -> PaintQuad {
+        let x = bounds.left() + metrics.cell_width * first as f32;
+        let y = bounds.top() + metrics.line_height * row as f32;
+        let width = metrics.cell_width * (last - first + 1) as f32;
+        fill(
+            Bounds::new(point(x, y), size(width, metrics.line_height)),
+            color,
+        )
+    }
+
+    fn selection_quads(
+        selection: &[Option<(usize, usize)>],
+        bounds: Bounds<Pixels>,
+        metrics: &Metrics,
+        selected: Rgba,
+    ) -> Vec<PaintQuad> {
+        let selection_color = Rgba { a: 0.4, ..selected };
+        let mut quads = Vec::new();
+        for (r, span) in selection.iter().enumerate() {
+            let Some((first, last)) = span else { continue };
+            quads.push(Self::span_fill(bounds, metrics, r, *first, *last, selection_color));
+        }
+        quads
+    }
+
+    /// Yellow tint over search matches, the focused match more strongly.
+    fn search_quads(
+        search: &[Vec<(usize, usize, bool)>],
+        bounds: Bounds<Pixels>,
+        metrics: &Metrics,
+    ) -> Vec<PaintQuad> {
+        let mut quads = Vec::new();
+        for (r, spans) in search.iter().enumerate() {
+            for &(first, last, focused) in spans {
+                let color = if focused {
+                    Rgba {
+                        r: 0.85,
+                        g: 0.72,
+                        b: 0.18,
+                        a: 0.60,
+                    }
+                } else {
+                    Rgba {
+                        r: 0.85,
+                        g: 0.72,
+                        b: 0.18,
+                        a: 0.30,
+                    }
+                };
+                quads.push(Self::span_fill(bounds, metrics, r, first, last, color));
+            }
+        }
+        quads
+    }
+
+    /// Underline the hovered URL in the accent color to mark it as a link.
+    fn url_overlay(
+        &self,
+        bounds: Bounds<Pixels>,
+        metrics: &Metrics,
+        selected: Rgba,
+        cx: &App,
+    ) -> Vec<PaintQuad> {
+        let mut overlays = Vec::new();
+        if let Some(url) = self.view.read(cx).hovered_url.as_ref() {
+            for (r, span) in url.spans().iter().enumerate() {
+                let Some((first, last)) = span else { continue };
+                let x = bounds.left() + metrics.cell_width * *first as f32;
+                let y = bounds.top() + metrics.line_height * (r as f32 + 1.0) - px(2.0);
+                let width = metrics.cell_width * (*last - *first + 1) as f32;
+                overlays.push(fill(
+                    Bounds::new(point(x, y), size(width, px(1.5))),
+                    selected,
+                ));
+            }
+        }
+        overlays
+    }
+
+    /// While dragging the thumb, follow and end the drag with window-global
+    /// handlers so it keeps working when the cursor leaves the window.
+    fn install_thumb_drag(&self, window: &mut Window, cx: &App) {
+        if self.view.read(cx).drag_grab.is_some() {
+            track_drag(
+                window,
+                &self.view,
+                |view, event, cx| view.drag_to(event.position, cx),
+                |view, _, cx| {
+                    if view.drag_grab.take().is_some() {
+                        // Keep the bar up briefly after the drag, then hide.
+                        view.reveal_scrollbar(cx);
+                    }
+                },
+            );
+        }
+    }
+
+    /// Follow and end a text-selection drag with window-global handlers, so
+    /// dragging past the window edge keeps extending the selection and a release
+    /// outside still ends it.
+    fn install_selection_drag(&self, window: &mut Window, cx: &App) {
+        if self.view.read(cx).selecting {
+            track_drag(
+                window,
+                &self.view,
+                |view, event, cx| view.selection_drag_to(event.position, cx),
+                |view, _, cx| {
+                    if view.selecting {
+                        view.selecting = false;
+                        view.selection_drag = None;
+                        view.selection_anchor = None;
+                        // A press that did not drag (no selection text) and
+                        // landed on a URL opens it.
+                        if let Some(url) = view.pressed_url.take() {
+                            let dragged = view
+                                .terminal
+                                .as_ref()
+                                .and_then(Terminal::selection_text)
+                                .is_some();
+                            if !dragged {
+                                cx.open_url(&url);
+                            }
+                        }
+                        cx.notify();
+                    }
+                },
+            );
+        }
+    }
+}
+
+impl Element for TerminalElement {
+    type RequestLayoutState = Metrics;
+    type PrepaintState = Prepaint;
+
+    fn id(&self) -> Option<gpui::ElementId> {
+        None
+    }
+
+    fn source_location(&self) -> Option<&'static core::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (LayoutId, Metrics) {
+        let metrics = bviz_ui_assets::text_metrics(window);
+        // A monospace advance width, measured from a single glyph.
+        let color = window.text_style().color;
+        let cell_width =
+            bviz_ui_assets::shape_line(window, "M", metrics.font.clone(), metrics.font_size, color)
+                .width;
+
+        let mut style = Style::default();
+        style.size.width = relative(1.).into();
+        style.size.height = relative(1.).into();
+
+        (
+            window.request_layout(style, [], cx),
+            Metrics {
+                cell_width,
+                line_height: metrics.line_height,
+                font_size: metrics.font_size,
+                font: metrics.font,
+            },
+        )
+    }
+
+    fn prepaint(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        metrics: &mut Metrics,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Prepaint {
+        let colors = bviz_ui_theme::colors(window);
+        let defaults = Defaults {
+            fg: colors.text,
+            bg: colors.background,
+            ansi: ansi_palette(window),
+        };
+
+        // Columns fit the width less the scroll bar gutter; rows fit the height.
+        let cols = ((f32::from(bounds.size.width) - SCROLLBAR_WIDTH)
+            / f32::from(metrics.cell_width))
+        .floor()
+        .max(1.0) as usize;
+        let rows = (f32::from(bounds.size.height) / f32::from(metrics.line_height))
+            .floor()
+            .max(1.0) as usize;
+        self.sync_terminal(cols, rows, cx);
+
+        let (viewport, history, offset, selection, search) =
+            match self.view.read(cx).terminal.as_ref() {
+                Some(terminal) => (
+                    terminal.viewport(),
+                    terminal.history_size(),
+                    terminal.display_offset(),
+                    terminal.selection_spans(),
+                    terminal.search_spans(),
+                ),
+                None => (Vec::new(), 0, 0, Vec::new(), Vec::new()),
+            };
+        self.view.update(cx, |view, _| {
+            view.content = Some(ContentLayout {
+                left: f32::from(bounds.left()),
+                top: f32::from(bounds.top()),
+                cell_width: f32::from(metrics.cell_width),
+                line_height: f32::from(metrics.line_height),
+                columns: cols,
+                rows,
+            });
+        });
+
+        let scrollbar = self.scrollbar_quad(bounds, history, offset, rows, &colors, cx);
+
+        let (lines, mut backgrounds) =
+            Self::shape_viewport(&viewport, bounds, metrics, defaults, window);
+        backgrounds.extend(Self::selection_quads(&selection, bounds, metrics, colors.selected));
+        backgrounds.extend(Self::search_quads(&search, bounds, metrics));
+        let overlays = self.url_overlay(bounds, metrics, colors.selected, cx);
+
+        Prepaint {
+            lines,
+            backgrounds,
+            overlays,
+            scrollbar,
+        }
+    }
+
+    fn paint(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        _bounds: Bounds<Pixels>,
+        metrics: &mut Metrics,
+        prepaint: &mut Prepaint,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        for quad in prepaint.backgrounds.drain(..) {
+            window.paint_quad(quad);
+        }
+        for positioned in prepaint.lines.iter() {
+            positioned
+                .line
+                .paint(
+                    positioned.origin,
+                    metrics.line_height,
+                    gpui::TextAlign::Left,
+                    None,
+                    window,
+                    cx,
+                )
+                .unwrap();
+        }
+        for quad in prepaint.overlays.drain(..) {
+            window.paint_quad(quad);
+        }
+        if let Some(scrollbar) = prepaint.scrollbar.take() {
+            window.paint_quad(scrollbar);
+        }
+
+        self.install_thumb_drag(window, cx);
+        self.install_selection_drag(window, cx);
+    }
+}
