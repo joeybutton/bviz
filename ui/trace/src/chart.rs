@@ -187,35 +187,45 @@ pub(crate) fn sample_at(points: &[CounterPoint], t: f64) -> Option<f64> {
 /// The unit a counter lane's values carry, inferred from its name since the
 /// trace format stores none. Empty for unitless counts (action counts,
 /// SkyFunctions, RPCs, load averages).
-pub(crate) fn unit_for(lane: &str) -> &'static str {
+/// The unit a counter lane's values carry, inferred from its name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CounterUnit {
+    Cores,
+    Megabytes,
+    Megabits,
+    Percent,
+    Plain,
+}
+
+pub(crate) fn unit_for(lane: &str) -> CounterUnit {
     let lane = lane.to_lowercase();
     if lane.contains("cpu usage") {
-        "cores"
+        CounterUnit::Cores
     } else if lane.contains("memory") {
-        "MB"
+        CounterUnit::Megabytes
     } else if lane.contains("network") {
-        "Mbps"
+        CounterUnit::Megabits
     } else if lane.contains("pressure") {
-        "%"
+        CounterUnit::Percent
     } else {
-        ""
+        CounterUnit::Plain
     }
 }
 
 /// A compact `"<value> <unit>"` label, rescaling memory past 1 GB.
-pub(crate) fn format_counter(value: f64, unit: &str) -> String {
+pub(crate) fn format_counter(value: f64, unit: CounterUnit) -> String {
     match unit {
-        "cores" => format!("{value:.2} cores"),
-        "MB" => {
+        CounterUnit::Cores => format!("{value:.2} cores"),
+        CounterUnit::Megabytes => {
             if value >= 1024.0 {
                 format!("{:.2} GB", value / 1024.0)
             } else {
                 format!("{value:.0} MB")
             }
         }
-        "Mbps" => format!("{value:.2} Mbps"),
-        "%" => format!("{value:.0}%"),
-        _ => format!("{value:.1}"),
+        CounterUnit::Megabits => format!("{value:.2} Mbps"),
+        CounterUnit::Percent => format!("{value:.0}%"),
+        CounterUnit::Plain => format!("{value:.1}"),
     }
 }
 
@@ -349,25 +359,25 @@ mod tests {
 
     #[test]
     fn unit_for_infers_from_lane_name() {
-        assert_eq!(unit_for("CPU usage (Bazel)"), "cores");
-        assert_eq!(unit_for("System memory usage"), "MB");
-        assert_eq!(unit_for("Network Up (system)"), "Mbps");
+        assert_eq!(unit_for("CPU usage (Bazel)"), CounterUnit::Cores);
+        assert_eq!(unit_for("System memory usage"), CounterUnit::Megabytes);
+        assert_eq!(unit_for("Network Up (system)"), CounterUnit::Megabits);
         // "memory" wins over "pressure" by the inference order, so a pressure
         // lane reads as "%" only when it does not also mention memory.
-        assert_eq!(unit_for("CPU pressure"), "%");
-        assert_eq!(unit_for("Action count"), "");
-        assert_eq!(unit_for("System load average"), "");
+        assert_eq!(unit_for("CPU pressure"), CounterUnit::Percent);
+        assert_eq!(unit_for("Action count"), CounterUnit::Plain);
+        assert_eq!(unit_for("System load average"), CounterUnit::Plain);
     }
 
     #[test]
     fn format_counter_uses_unit_and_thresholds() {
-        assert_eq!(format_counter(3.5, "cores"), "3.50 cores");
-        assert_eq!(format_counter(512.0, "MB"), "512 MB");
+        assert_eq!(format_counter(3.5, CounterUnit::Cores), "3.50 cores");
+        assert_eq!(format_counter(512.0, CounterUnit::Megabytes), "512 MB");
         // At and past 1024 MB, rescale to GB.
-        assert_eq!(format_counter(1024.0, "MB"), "1.00 GB");
-        assert_eq!(format_counter(2048.0, "MB"), "2.00 GB");
-        assert_eq!(format_counter(12.5, "Mbps"), "12.50 Mbps");
-        assert_eq!(format_counter(80.0, "%"), "80%");
-        assert_eq!(format_counter(42.0, ""), "42.0");
+        assert_eq!(format_counter(1024.0, CounterUnit::Megabytes), "1.00 GB");
+        assert_eq!(format_counter(2048.0, CounterUnit::Megabytes), "2.00 GB");
+        assert_eq!(format_counter(12.5, CounterUnit::Megabits), "12.50 Mbps");
+        assert_eq!(format_counter(80.0, CounterUnit::Percent), "80%");
+        assert_eq!(format_counter(42.0, CounterUnit::Plain), "42.0");
     }
 }
