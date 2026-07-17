@@ -214,8 +214,6 @@ impl TerminalElement {
         (lines, backgrounds)
     }
 
-    /// Translucent tint over the selected cells; painted under the text so it
-    /// stays legible.
     /// Full-cell fill covering the inclusive column span `first..=last` on `row`.
     fn span_fill(
         bounds: Bounds<Pixels>,
@@ -234,6 +232,8 @@ impl TerminalElement {
         )
     }
 
+    /// Translucent tint over the selected cells; painted under the text so it
+    /// stays legible.
     fn selection_quads(
         selection: &[Option<(usize, usize)>],
         bounds: Bounds<Pixels>,

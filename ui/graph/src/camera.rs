@@ -24,9 +24,6 @@ pub(crate) struct Settle {
     pub(crate) start: Instant,
 }
 
-/// Maps a layout-space point to window space with pan and zoom baked in, atop
-/// the same margin offset the boxes use and the canvas's origin within the
-/// window.
 /// The pan/zoom viewport transform: `zoom` scales layout units to pixels and
 /// `pan` is the screen offset of the content's near edges.
 #[derive(Clone, Copy)]
@@ -35,6 +32,9 @@ pub(crate) struct Camera {
     pub(crate) pan: (f32, f32),
 }
 
+/// Maps a layout-space point to window space with pan and zoom baked in, atop
+/// the same margin offset the boxes use and the canvas's origin within the
+/// window.
 pub(crate) fn to_screen(x: f64, y: f64, bounds: Bounds<Pixels>, camera: Camera) -> Point<Pixels> {
     let Camera { zoom, pan } = camera;
     point(

@@ -2,7 +2,6 @@ use crate::{GROUP_BAND_HEIGHT, METRICS, TOP_N_PER_GROUP};
 use bviz_trace_layout::{Lane, LaneLayout};
 use bviz_trace_profile::{LaneClass, Profile, ThreadTrack};
 
-/// The full layout restricted to the tracks `visible` admits, the kept lanes
 /// Lane classes in the order their groups stack in the flame chart: the critical
 /// path and main thread first, then the build phases (loading, analysis,
 /// execution), then gc and the leftovers.

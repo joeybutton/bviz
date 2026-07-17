@@ -1485,9 +1485,6 @@ impl TraceView {
             .map(|slice| (lane.track, slice))
     }
 
-    /// The track whose gutter label lies under `pos`, if the press hit the flame
-    /// chart's track-label column (below the ruler, left of the content, above
-    /// the tab bar). `None` elsewhere or over a lane's empty tail.
     /// The group header band or show-more row at `pos`, if the press lands on one
     /// (across the full chart width, gutter included).
     fn group_row_at(&self, pos: Point<Pixels>) -> Option<GroupHit> {
@@ -1513,6 +1510,9 @@ impl TraceView {
         }
     }
 
+    /// The track whose gutter label lies under `pos`, if the press hit the flame
+    /// chart's track-label column (below the ruler, left of the content, above
+    /// the tab bar). `None` elsewhere or over a lane's empty tail.
     fn track_label_at(&self, pos: Point<Pixels>) -> Option<usize> {
         let layout = self.lane_layout()?;
         let regions = self.regions();
