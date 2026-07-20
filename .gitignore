@@ -3,6 +3,10 @@ bazel_env.lock
 user.bazelrc
 .envrc.user
 .workspaces/
+.zed/
+
+rust-project.json
+.rules_rust_analyzer/
 
 # cargo's build tree, created when repinning Cargo.lock; Bazel never produces it
 /target/
