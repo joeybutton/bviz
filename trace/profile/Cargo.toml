@@ -8,7 +8,7 @@ name = "bviz_trace_profile"
 path = "src/lib.rs"
 
 [dependencies]
-crossbeam-utils = "0.8"
+crossbeam-utils = { workspace = true }
 hashbrown = { workspace = true }
 rustc-hash = { workspace = true }
 serde = { workspace = true }
