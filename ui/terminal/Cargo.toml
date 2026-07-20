@@ -1,0 +1,20 @@
+[package]
+name = "bviz_ui_terminal"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "terminal"
+path = "src/main.rs"
+
+[lib]
+name = "bviz_ui_terminal"
+path = "src/lib.rs"
+
+[dependencies]
+gpui = { workspace = true }
+bviz_terminal = { path = "../../terminal" }
+bviz_ui_assets = { path = "../assets" }
+bviz_ui_components = { path = "../components" }
+bviz_ui_shell = { path = "../shell" }
+bviz_ui_theme = { path = "../theme" }

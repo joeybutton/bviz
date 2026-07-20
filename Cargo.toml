@@ -8,7 +8,12 @@ members = [
     "terminal",
     "trace/layout",
     "trace/profile",
+    "ui/assets",
+    "ui/components",
     "ui/graph",
+    "ui/shell",
+    "ui/terminal",
+    "ui/theme",
     "ui/trace",
 ]
 resolver = "2"

@@ -910,6 +910,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "bviz_ui_assets"
+version = "0.1.0"
+dependencies = [
+ "gpui",
+]
+
+[[package]]
+name = "bviz_ui_components"
+version = "0.1.0"
+dependencies = [
+ "bviz_ui_assets",
+ "bviz_ui_theme",
+ "gpui",
+]
+
+[[package]]
 name = "bviz_ui_graph"
 version = "0.1.0"
 dependencies = [
@@ -917,6 +933,36 @@ dependencies = [
  "clap",
  "gpui",
  "gpui_platform",
+]
+
+[[package]]
+name = "bviz_ui_shell"
+version = "0.1.0"
+dependencies = [
+ "bviz_ui_assets",
+ "bviz_ui_components",
+ "bviz_ui_theme",
+ "gpui",
+ "gpui_platform",
+]
+
+[[package]]
+name = "bviz_ui_terminal"
+version = "0.1.0"
+dependencies = [
+ "bviz_terminal",
+ "bviz_ui_assets",
+ "bviz_ui_components",
+ "bviz_ui_shell",
+ "bviz_ui_theme",
+ "gpui",
+]
+
+[[package]]
+name = "bviz_ui_theme"
+version = "0.1.0"
+dependencies = [
+ "gpui",
 ]
 
 [[package]]

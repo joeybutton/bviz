@@ -1,0 +1,13 @@
+[package]
+name = "bviz_ui_components"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "bviz_ui_components"
+path = "src/lib.rs"
+
+[dependencies]
+gpui = { workspace = true }
+bviz_ui_assets = { path = "../assets" }
+bviz_ui_theme = { path = "../theme" }
