@@ -154,10 +154,13 @@ Everything is pinned and Bazel-managed. No system toolchains, no system tools.
   `target/` tree (cargo's, not Bazel's); it is gitignored — never commit it.
 - When a build needs a native/system C library (e.g. a Rust `*-sys` crate or a
   `#[link]`/pkg-config dependency on the host), do not link the host's copy or
-  vendor sources by hand. First check the Bazel Central Registry
-  (https://registry.bazel.build) for a module that builds it, and if one exists
-  add it as a `bazel_dep` and link the Bazel-built library. This keeps the system
-  dependency pinned and hermetic like everything else.
+  hand-vendor unpinned sources. The invariant is hermeticity: the library must be
+  fetched at a pinned version and built by Bazel from source, never taken from the
+  host. Any Bazel-managed fetch satisfies this — a Bazel Central Registry
+  (https://registry.bazel.build) module added as a `bazel_dep` when one exists, or
+  an `http_archive` (or similar) pinned by sha256 with a BUILD overlay otherwise.
+  Prefer a BCR module when available for the maintained build files, but an
+  `http_archive` is an equally hermetic path, not a fallback to avoid.
 - JavaScript is built with aspect_rules_js (Node via rules_nodejs); build/test/
   run through Bazel targets, never a bare `node`/`npm`/`pnpm`. Manage npm deps
   with pnpm — repin via `bazel run -- @pnpm --dir $PWD install --lockfile-only`
