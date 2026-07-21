@@ -9,4 +9,5 @@ path = "src/lib.rs"
 
 [dependencies]
 bviz_trace_profile = { path = "../profile" }
+rayon = { workspace = true }
 rustc-hash = { workspace = true }

@@ -18,6 +18,15 @@ pub use scopes::{FlameScopes, ScopeAggregate};
 pub use stats::{StatRow, aggregate_stats, stats_from_flame};
 pub use view::{FlameView, TimeView};
 
+/// Sizes rayon's global thread pool to the physical worker count. Call once at
+/// startup, before any parallel layout pass; a no-op if the pool already exists.
+pub fn init_thread_pool() {
+    rayon::ThreadPoolBuilder::new()
+        .num_threads(bviz_trace_profile::worker_count())
+        .build_global()
+        .ok();
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

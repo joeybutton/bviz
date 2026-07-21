@@ -24,6 +24,7 @@ fn min_secs(iters: usize, mut f: impl FnMut()) -> f64 {
 
 fn main() {
     bviz_alloc::retain_freed_memory_across_load();
+    bviz_trace_layout::init_thread_pool();
     let path = std::env::args().nth(1).expect("usage: bench_flame <profile>");
     let iters = std::env::var("BVIZ_BENCH_ITERS")
         .ok()

@@ -893,6 +893,7 @@ name = "bviz_trace_layout"
 version = "0.1.0"
 dependencies = [
  "bviz_trace_profile",
+ "rayon",
  "rustc-hash 2.1.2",
 ]
 

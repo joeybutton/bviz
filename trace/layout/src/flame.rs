@@ -4,6 +4,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use bviz_trace_profile::{
     LaneClass, Profile, Slice, SliceDetail, Span32, SpanRole, Str, ThreadTrack, Workload,
 };
+use rayon::slice::ParallelSliceMut;
 use rustc_hash::{FxHashMap, FxHashSet};
 
 mod critical_path;
@@ -162,7 +163,7 @@ fn scan<'p>(
 
     let (by_text, mnemonics) = merge_shards(shards);
     (
-        build_ranks(&by_text, workers),
+        build_ranks(&by_text),
         build_index(&by_text, &mnemonics),
     )
 }
@@ -203,8 +204,9 @@ fn merge_shards<'p>(
 
 /// Rank the distinct scanned texts by one sort under `&str`'s byte-wise `Ord`,
 /// so comparing two ranks is exactly comparing the texts.
-fn build_ranks<'p>(by_text: &FxHashMap<&'p str, Str>, workers: usize) -> Ranks {
-    let ordered = sort_pairs_by_text(by_text.iter().map(|(&t, &h)| (t, h)).collect(), workers);
+fn build_ranks<'p>(by_text: &FxHashMap<&'p str, Str>) -> Ranks {
+    let mut ordered: Vec<(&'p str, Str)> = by_text.iter().map(|(&t, &h)| (t, h)).collect();
+    sort_pairs_by_text(&mut ordered);
     let rank = ordered
         .iter()
         .enumerate()
@@ -265,75 +267,17 @@ fn run_sharded<S: Default + Send>(
     })
 }
 
-/// Sort `(text, handle)` pairs into byte-wise text order, sharding across
-/// `workers` by sampled pivots: each worker classifies a chunk of the input
-/// into pivot-bounded buckets, each bucket sorts on its own worker, and the
-/// buckets concatenate in pivot order. The texts must be distinct, so the
-/// result is the one total order whatever the sampled partition. Small inputs
-/// sort serially — the partition overhead only pays off at scale.
-fn sort_pairs_by_text<'p>(mut pairs: Vec<(&'p str, Str)>, workers: usize) -> Vec<(&'p str, Str)> {
-    /// Input size below which the serial sort wins over partitioning.
+/// Sort `(text, handle)` pairs into byte-wise text order. The texts are
+/// distinct, so the result is the one total order. Small inputs sort serially —
+/// the parallel split only pays off at scale.
+fn sort_pairs_by_text(pairs: &mut [(&str, Str)]) {
+    /// Input size below which the serial sort wins over the parallel split.
     const PARALLEL_MIN: usize = 1 << 13;
-    if workers <= 1 || pairs.len() < PARALLEL_MIN {
+    if pairs.len() < PARALLEL_MIN {
         pairs.sort_unstable_by_key(|&(t, _)| t);
-        return pairs;
+    } else {
+        pairs.par_sort_unstable_by_key(|&(t, _)| t);
     }
-    let pivots = sample_pivots(&pairs, workers);
-    let buckets = classify_into_buckets(&pairs, &pivots, workers);
-    sort_buckets(buckets)
-}
-
-/// Evenly spaced cuts of a sorted sparse sample balance the buckets even when
-/// the keys cluster under shared prefixes.
-fn sample_pivots<'p>(pairs: &[(&'p str, Str)], workers: usize) -> Vec<&'p str> {
-    const OVERSAMPLE: usize = 32;
-    let step = (pairs.len() / (workers * OVERSAMPLE)).max(1);
-    let mut sample: Vec<&str> = pairs.iter().step_by(step).map(|&(t, _)| t).collect();
-    sample.sort_unstable();
-    (1..workers)
-        .map(|i| sample[i * sample.len() / workers])
-        .collect()
-}
-
-/// Bucket `b` holds the texts with exactly `b` pivots at or below them. Chunks
-/// of the input classify in parallel and merge per bucket in chunk order.
-fn classify_into_buckets<'p>(
-    pairs: &[(&'p str, Str)],
-    pivots: &[&str],
-    workers: usize,
-) -> Vec<Vec<(&'p str, Str)>> {
-    let chunk = pairs.len().div_ceil(workers);
-    let mut buckets: Vec<Vec<(&str, Str)>> = vec![Vec::new(); workers];
-    std::thread::scope(|scope| {
-        let handles: Vec<_> = pairs
-            .chunks(chunk)
-            .map(|part| {
-                scope.spawn(move || {
-                    let mut local: Vec<Vec<(&str, Str)>> = vec![Vec::new(); workers];
-                    for &(t, h) in part {
-                        local[pivots.partition_point(|&p| p <= t)].push((t, h));
-                    }
-                    local
-                })
-            })
-            .collect();
-        for handle in handles {
-            for (b, mut part) in handle.join().unwrap().into_iter().enumerate() {
-                buckets[b].append(&mut part);
-            }
-        }
-    });
-    buckets
-}
-
-/// Sort each bucket on its own worker, then concatenate in pivot order.
-fn sort_buckets<'p>(mut buckets: Vec<Vec<(&'p str, Str)>>) -> Vec<(&'p str, Str)> {
-    std::thread::scope(|scope| {
-        for bucket in &mut buckets {
-            scope.spawn(move || bucket.sort_unstable_by_key(|&(t, _)| t));
-        }
-    });
-    buckets.into_iter().flatten().collect()
 }
 
 /// One node of the aggregated flame graph: a frame merged across every span that
@@ -1116,8 +1060,8 @@ mod tests {
     #[test]
     fn parallel_text_sort_matches_serial() {
         // Enough pairs to cross the parallel threshold, with heavy shared
-        // prefixes, case splits, and non-ASCII segments, so the sampled pivot
-        // partition is exercised on clustered keys.
+        // prefixes, case splits, and non-ASCII segments, so the parallel sort is
+        // exercised on clustered keys.
         let texts: Vec<String> = (0..20_000)
             .map(|i| format!("prefix/{}/x{:05}", ["a", "A", "é", ""][i % 4], i))
             .collect();
@@ -1131,13 +1075,9 @@ mod tests {
             p.sort_unstable_by_key(|&(t, _)| t);
             p
         };
-        for workers in [2, 3, 8, 16] {
-            assert_eq!(
-                sort_pairs_by_text(pairs.clone(), workers),
-                serial,
-                "x{workers}"
-            );
-        }
+        let mut parallel = pairs;
+        sort_pairs_by_text(&mut parallel);
+        assert_eq!(parallel, serial);
     }
 
     #[test]

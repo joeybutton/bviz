@@ -2401,6 +2401,7 @@ struct Cli {
 /// Parses `--profile` and opens the trace-viewer window.
 pub fn run() {
     bviz_alloc::retain_freed_memory_across_load();
+    bviz_trace_layout::init_thread_pool();
     let path = Cli::parse().profile;
     // Loading from process entry overlaps the decode and parse with the app
     // shell's startup (font-database scan, window and GPU-surface setup); the
