@@ -1,0 +1,11 @@
+--- a/crates/gpui_linux/src/linux/platform.rs
++++ b/crates/gpui_linux/src/linux/platform.rs
+@@ -130,7 +130,7 @@
+         let (main_sender, main_receiver) = PriorityQueueCalloopReceiver::new();
+ 
+         #[cfg(any(feature = "wayland", feature = "x11"))]
+-        let text_system = Arc::new(crate::linux::CosmicTextSystem::new("IBM Plex Sans"));
++        let text_system = Arc::new(crate::linux::CosmicTextSystem::new_without_system_fonts("IBM Plex Sans"));
+         #[cfg(not(any(feature = "wayland", feature = "x11")))]
+         let text_system = Arc::new(gpui::NoopTextSystem::new());
+ 

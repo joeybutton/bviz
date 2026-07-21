@@ -43,18 +43,22 @@ crate.annotation(
     crate_features = ["source-fontconfig-dlopen"],
 )
 
-# Two fixes to gpui's Wayland backend:
+# Fixes and startup tuning for gpui's Linux backend:
 # - untile-restore: gpui restores the floating window size on un-maximize but not
 #   un-tile, leaving the window stuck at the tiled size; preserve window_bounds
 #   while tiled so it restores on untile.
 # - clear-hover-on-leave: gpui recomputes hover only on mouse-move, so a pointer
 #   leaving the window leaves the last element hovered; synthesize an off-screen
 #   move on wl_pointer.leave to clear it.
+# - embedded-fonts-only: construct the text system with an empty font DB to skip
+#   the ~700ms startup enumeration of every system font on the main thread; the
+#   app registers its own embedded faces, which cover its ASCII/Latin-1 labels.
 crate.annotation(
     crate = "gpui_linux",
     patches = [
         "@@//patches:gpui_linux-untile-restore.patch",
         "@@//patches:gpui_linux-clear-hover-on-leave.patch",
+        "@@//patches:gpui_linux-embedded-fonts-only.patch",
     ],
     patch_args = ["-p1"],
 )
