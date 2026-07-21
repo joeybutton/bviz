@@ -234,17 +234,33 @@ const PIPELINE_MAX_EVENT_BYTES: usize = 64 << 20;
 /// — for a single core, a stream whose ISIZE trailer is missing, zero, or
 /// under the parallel threshold, or any decode or parse failure.
 pub(crate) fn parse_gz_pipelined(bytes: &[u8]) -> Option<Profile> {
-    let workers = worker_count();
-    if workers < 2 {
-        return None;
-    }
     let decoded_size = gzip_isize(bytes)?;
-    if decoded_size < MIN_PARALLEL_BYTES {
+    let (workers, chunk_bytes) = pipeline_params(decoded_size)?;
+    parse_gz_stream_from(bytes, workers, chunk_bytes, decoded_size)
+}
+
+/// The pipelined decode over a streaming reader whose ISIZE trailer was read
+/// ahead of the stream: [`parse_gz_pipelined`] without the whole compressed
+/// buffer in hand. `None` for the same size gates.
+pub(crate) fn parse_gz_pipelined_reader(
+    reader: impl Read + Send,
+    decoded_size: usize,
+) -> Option<Profile> {
+    let (workers, chunk_bytes) = pipeline_params(decoded_size)?;
+    parse_gz_stream_from(reader, workers, chunk_bytes, decoded_size)
+}
+
+/// Worker count and per-chunk byte target for a pipelined decode of a stream
+/// declaring `decoded_size` uncompressed bytes, or `None` when the pipeline
+/// declines — a single core, or a stream under the parallel threshold.
+pub(crate) fn pipeline_params(decoded_size: usize) -> Option<(usize, usize)> {
+    let workers = worker_count();
+    if workers < 2 || decoded_size < MIN_PARALLEL_BYTES {
         return None;
     }
     let chunk_bytes = (decoded_size / (workers * CHUNKS_PER_WORKER))
         .clamp(MIN_CHUNK_BYTES, PIPELINE_MAX_CHUNK_BYTES);
-    parse_gz_stream(bytes, workers, chunk_bytes)
+    Some((workers, chunk_bytes))
 }
 
 /// One newline-aligned run of decoded profile bytes, numbered so builders can
@@ -343,12 +359,12 @@ fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 /// navigate (no array, no closing bracket, an over-long line), or a closed
 /// queue.
 fn stream_pieces<'a>(
-    bytes: &[u8],
+    reader: impl Read + Send,
     chunk_bytes: usize,
     tx: crossbeam_channel::Sender<Piece<'a>>,
     pool: std::sync::mpsc::Receiver<&'a mut [u8]>,
 ) -> Option<StreamEnds> {
-    let mut dec = MultiGzDecoder::new(bytes);
+    let mut dec = MultiGzDecoder::new(reader);
 
     // Grow the first buffer until the traceEvents array opens inside it; the
     // bytes before the bracket become `head`, the rest seed the chunk loop.
@@ -432,7 +448,17 @@ fn stream_pieces<'a>(
 /// leg. The merger reorders finished builders back into array order and folds
 /// each into the running [`Merge`] while later chunks are still decoding and
 /// parsing, so after the last chunk only [`finish_merge`] remains.
+#[cfg(test)]
 pub(crate) fn parse_gz_stream(bytes: &[u8], workers: usize, chunk_bytes: usize) -> Option<Profile> {
+    parse_gz_stream_from(bytes, workers, chunk_bytes, gzip_isize(bytes).unwrap_or(0))
+}
+
+fn parse_gz_stream_from(
+    reader: impl Read + Send,
+    workers: usize,
+    chunk_bytes: usize,
+    decoded_size: usize,
+) -> Option<Profile> {
     // The buffer ring is one slab split into fixed-size parts — a single
     // zeroed allocation whose pages are first touched by the inflate's own
     // writes — holding one part more than the piece queue and the workers can
@@ -449,12 +475,11 @@ pub(crate) fn parse_gz_stream(bytes: &[u8], workers: usize, chunk_bytes: usize) 
     // Every worker interns into this one arena, so a builder's handles are
     // global and the merger never rebases them. The distinct pool is bounded by
     // the decoded size the ISIZE trailer declares.
-    let decoded_size = gzip_isize(bytes).unwrap_or(0);
     let interner = ConcurrentInterner::new(decoded_size, decoded_size / BYTES_PER_DISTINCT);
     let (ends, merged) = timed("  decode+parse+fold chunks", || {
         let interner = &interner;
         std::thread::scope(|scope| {
-            let producer = scope.spawn(move || stream_pieces(bytes, chunk_bytes, tx, pool_rx));
+            let producer = scope.spawn(move || stream_pieces(reader, chunk_bytes, tx, pool_rx));
             for _ in 0..workers {
                 let builder_tx = builder_tx.clone();
                 let pool_tx = pool_tx.clone();

@@ -1,4 +1,5 @@
 use std::fmt;
+use std::io::{BufReader, Seek, SeekFrom};
 use std::path::Path;
 
 use serde::de::DeserializeSeed;
@@ -14,8 +15,11 @@ mod scanner;
 mod serde_events;
 
 use build::{seal, Builder, Merge};
-use decode::decode;
-use pipeline::{find_trace_events_array, parse_gz_pipelined, parse_parallel, TraceEventsArray};
+use decode::{decode, gzip_isize_from_file};
+use pipeline::{
+    find_trace_events_array, parse_gz_pipelined, parse_gz_pipelined_reader, parse_parallel,
+    TraceEventsArray,
+};
 use scanner::object_end;
 use serde_events::{ArgEntry, ProfileVisitor, RawEventSeed};
 
@@ -84,7 +88,25 @@ fn timed<T>(label: &str, f: impl FnOnce() -> T) -> T {
 }
 
 impl Profile {
+    /// Loads a profile from a file, streaming the pipelined gzip decode directly
+    /// from disk so the file read overlaps decompression and parsing (see
+    /// [`parse_gz_pipelined`]). The uncompressed size the pipeline needs is read
+    /// from the gzip ISIZE trailer without pulling the whole file in. Anything
+    /// the pipeline declines — plain JSON, a small or oddly shaped stream, a
+    /// decode or parse failure — reads the whole file and goes through
+    /// [`from_bytes`], which owns the whole-buffer fallback chain.
     pub fn from_path(path: &Path) -> Result<Profile, LoadError> {
+        if let Ok(mut file) = std::fs::File::open(path) {
+            if let Ok(Some(decoded_size)) = gzip_isize_from_file(&mut file) {
+                if file.seek(SeekFrom::Start(0)).is_ok() {
+                    if let Some(profile) = timed("decode+parse (pipelined, streamed)", || {
+                        parse_gz_pipelined_reader(BufReader::new(&mut file), decoded_size)
+                    }) {
+                        return Ok(profile);
+                    }
+                }
+            }
+        }
         let bytes = timed("read file", || std::fs::read(path).map_err(LoadError::Io))?;
         Profile::from_bytes(&bytes)
     }
@@ -797,5 +819,18 @@ mod tests {
             Profile::from_path(&path).expect("stream"),
             Profile::from_bytes(json.as_bytes()).expect("bytes"),
         );
+    }
+
+    #[test]
+    fn from_path_rejects_sub_frame_gzip() {
+        // A gzip-magic file shorter than a full frame: its last four bytes
+        // overlap the header, so read as a trailer they decode to a ~4 GiB bogus
+        // ISIZE. from_path must not size the streamed parse from that trailer; it
+        // falls back to the whole-buffer path and reports a clean error rather
+        // than over-allocating or panicking.
+        let dir = std::env::var("TEST_TMPDIR").unwrap_or_else(|_| "/tmp".into());
+        let path = std::path::Path::new(&dir).join("sub_frame.profile.gz");
+        std::fs::write(&path, [0x1f, 0x8b, 0xff, 0xff, 0xff, 0xff]).unwrap();
+        assert!(Profile::from_path(&path).is_err());
     }
 }

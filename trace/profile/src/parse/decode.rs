@@ -1,5 +1,5 @@
 use std::borrow::Cow;
-use std::io::Read;
+use std::io::{Read, Seek, SeekFrom};
 
 use flate2::read::MultiGzDecoder;
 
@@ -25,19 +25,52 @@ fn gunzip(bytes: &[u8]) -> Result<Vec<u8>, LoadError> {
     Ok(out)
 }
 
+/// Smallest well-formed gzip stream: a 10-byte header plus an 8-byte trailer.
+/// Below this the last 4 bytes overlap the header and are not a valid ISIZE.
+const GZIP_FRAMING_MIN: usize = 18;
+
+/// The uncompressed length declared by a gzip stream's 4-byte little-endian
+/// ISIZE trailer (the length mod 2^32, exact under 4 GiB). `None` for a zero
+/// trailer.
+fn isize_from_trailer(trailer: &[u8; 4]) -> Option<usize> {
+    match u32::from_le_bytes(*trailer) as usize {
+        0 => None,
+        n => Some(n),
+    }
+}
+
 /// The uncompressed length a gzip stream declares in its ISIZE trailer (the
 /// length mod 2^32, exact under 4 GiB). `None` for input too short to frame or
 /// a zero trailer.
 pub(crate) fn gzip_isize(bytes: &[u8]) -> Option<usize> {
-    const GZIP_FRAMING_MIN: usize = 18; // 10-byte header + 8-byte trailer
     if bytes.len() < GZIP_FRAMING_MIN {
         return None;
     }
-    let isize_trailer = u32::from_le_bytes(bytes[bytes.len() - 4..].try_into().ok()?) as usize;
-    if isize_trailer == 0 {
-        return None;
+    isize_from_trailer(&bytes[bytes.len() - 4..].try_into().ok()?)
+}
+
+/// Reads a gzip stream's ISIZE trailer directly from an open file without
+/// pulling the whole stream into memory: verifies the leading [`GZIP_MAGIC`],
+/// then seeks to the last 4 bytes. `Ok(None)` if the file isn't gzip, is shorter
+/// than a full frame (so the last 4 bytes would overlap the header rather than
+/// be a trailer), or the trailer is zero. The file cursor is left wherever the
+/// reads and seeks land; the caller re-seeks before use.
+pub(crate) fn gzip_isize_from_file(file: &mut std::fs::File) -> std::io::Result<Option<usize>> {
+    let mut magic = [0u8; 2];
+    if file.read_exact(&mut magic).is_err() || magic != GZIP_MAGIC {
+        return Ok(None);
     }
-    Some(isize_trailer)
+    if file.metadata().map_or(0, |m| m.len()) < GZIP_FRAMING_MIN as u64 {
+        return Ok(None);
+    }
+    if file.seek(SeekFrom::End(-4)).is_err() {
+        return Ok(None);
+    }
+    let mut trailer = [0u8; 4];
+    if file.read_exact(&mut trailer).is_err() {
+        return Ok(None);
+    }
+    Ok(isize_from_trailer(&trailer))
 }
 
 /// Transcodes an ISO-8859-1 (Latin-1) byte buffer — how Bazel writes profile
