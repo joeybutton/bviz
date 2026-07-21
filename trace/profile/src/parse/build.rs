@@ -47,16 +47,16 @@ struct RawSeries {
 pub(crate) struct Builder {
     pub(crate) args_pool: Vec<(Str, Str)>,
     thread_meta: BTreeMap<i64, (Option<String>, i64)>,
-    /// Slices in event order, each tagged with its thread — one flat vector
-    /// whose allocation the chunk parse loops reuse across chunks, so
-    /// accumulating a slice is one push into pre-grown capacity.
-    /// [`Builder::seal_slices`] regroups it into `lane_pool` and `lanes`
-    /// before the builder is folded.
+    /// Slices in event order, each tagged with its thread; accumulating a slice
+    /// is one push into pre-grown capacity. [`Builder::seal_slices`] builds
+    /// `order` and `lanes` over this buffer without relocating its payloads,
+    /// which the builder carries into the merge as [`FoldedRun::payloads`].
     pub(crate) staging: Vec<(i64, Slice, SliceDetail)>,
-    /// After [`Builder::seal_slices`]: every staged slice, contiguous per
-    /// thread in lane order, sized exactly.
-    lane_pool: Vec<(Slice, SliceDetail)>,
-    /// After [`Builder::seal_slices`]: each thread's range of `lane_pool`, in
+    /// After [`Builder::seal_slices`]: a permutation of `staging` indices,
+    /// contiguous per thread and sorted into lane order within each thread's
+    /// range.
+    order: Vec<u32>,
+    /// After [`Builder::seal_slices`]: each thread's range of `order`, in
     /// first-appearance order.
     lanes: Vec<(i64, Span32)>,
     phase_markers: Vec<PhaseMarker>,
@@ -70,7 +70,7 @@ impl Builder {
             args_pool: Vec::new(),
             thread_meta: BTreeMap::new(),
             staging: Vec::new(),
-            lane_pool: Vec::new(),
+            order: Vec::new(),
             lanes: Vec::new(),
             phase_markers: Vec::new(),
             counter_order: Vec::new(),
@@ -130,13 +130,14 @@ impl Builder {
         }
     }
 
-    /// Regroups the staged slices into per-thread runs and sorts each run
-    /// into lane order — the form [`Merge::fold`] requires of a folded run.
-    /// The pool is allocated at its exact final size and filled through
-    /// per-thread cursors, preserving event order within a thread. On the
-    /// parallel paths this runs on the parse workers, so the per-chunk work
-    /// hides under the decode∥parse phase instead of adding to the final
-    /// merge.
+    /// Builds a per-thread index permutation of the staged slices, sorted into
+    /// lane order within each thread — the form [`Merge::fold`] requires of a
+    /// folded run. The index array is allocated at its exact final size and
+    /// filled through per-thread cursors, then each thread's range is sorted;
+    /// the payloads stay put in `staging`, gathered through the permutation at
+    /// merge time. On the parallel paths this runs on the parse workers, so the
+    /// per-chunk work hides under the decode∥parse phase instead of adding to
+    /// the final merge.
     pub(crate) fn seal_slices(&mut self) {
         // The lane bookkeeping (counts, spans, cursors) is u32; wrapping it
         // would break the exactly-once scatter argument below.
@@ -167,22 +168,23 @@ impl Builder {
         let mut cursors: Vec<u32> =
             self.lanes.iter().map(|&(_, s)| s.range().start as u32).collect();
         let total = self.staging.len();
-        let mut pool: Vec<(Slice, SliceDetail)> = Vec::with_capacity(total);
-        let spare = pool.spare_capacity_mut();
-        for &(tid, s, d) in &self.staging {
+        let mut order: Vec<u32> = Vec::with_capacity(total);
+        let spare = order.spare_capacity_mut();
+        for (i, &(tid, ..)) in self.staging.iter().enumerate() {
             let lane = lane_of[&tid];
-            spare[cursors[lane] as usize].write((s, d));
+            spare[cursors[lane] as usize].write(i as u32);
             cursors[lane] += 1;
         }
         // Every slot in [0, total) was written exactly once: the cursors
         // advance through disjoint per-lane ranges whose lengths sum to the
         // staging count.
-        unsafe { pool.set_len(total) };
+        unsafe { order.set_len(total) };
+        let payloads = &self.staging;
         for &(_, span) in &self.lanes {
-            pool[span.range()].sort_by(|a, b| slice_order(&a.0, &b.0));
+            order[span.range()]
+                .sort_by(|&a, &b| slice_order(&payloads[a as usize].1, &payloads[b as usize].1));
         }
-        self.lane_pool = pool;
-        self.staging.clear();
+        self.order = order;
     }
 }
 
@@ -217,7 +219,11 @@ pub(crate) struct Merge {
 
 struct FoldedRun {
     args_base: u32,
-    lane_pool: Vec<(Slice, SliceDetail)>,
+    /// Slice payloads in event order, moved from the builder's `staging`.
+    payloads: Vec<(i64, Slice, SliceDetail)>,
+    /// Per-lane sorted indices into `payloads`.
+    order: Vec<u32>,
+    /// Each thread's range of `order`, in first-appearance order.
     lanes: Vec<(i64, Span32)>,
 }
 
@@ -240,8 +246,8 @@ impl Merge {
         let Builder {
             args_pool,
             thread_meta,
-            staging: _,
-            lane_pool,
+            staging,
+            order,
             lanes,
             phase_markers,
             counter_order,
@@ -282,7 +288,7 @@ impl Merge {
                 }
             }
         }
-        self.runs.push(FoldedRun { args_base, lane_pool, lanes });
+        self.runs.push(FoldedRun { args_base, payloads: staging, order, lanes });
     }
 }
 
@@ -325,15 +331,17 @@ fn finish_merge(
     // The pools are handed to the merge phase as uninitialized capacity, so each
     // slot's first and only write — and thus its page's first touch — lands on
     // the worker that merges it.
-    let slice_total: usize = runs.iter().map(|r| r.lane_pool.len()).sum();
+    let slice_total: usize = runs.iter().map(|r| r.order.len()).sum();
     let mut slice_pool: Vec<Slice> = Vec::with_capacity(slice_total);
     let mut detail_pool: Vec<SliceDetail> = Vec::with_capacity(slice_total);
     let mut end_max_pool: Vec<i64> = Vec::with_capacity(slice_total);
 
-    // One source run per (thread, builder): that builder's slices for the
-    // thread, in lane order, with the arg-pool base its detail spans rebase by.
+    // One source run per (thread, builder): the thread's lane-ordered indices
+    // into that builder's event-order payloads, with the arg-pool base its
+    // detail spans rebase by.
     struct Run<'a> {
-        src: &'a [(Slice, SliceDetail)],
+        payloads: &'a [(i64, Slice, SliceDetail)],
+        order: &'a [u32],
         args_base: u32,
     }
     // A thread's contiguous destination segments — one per pool, the same
@@ -373,8 +381,9 @@ fn finish_merge(
         // but ends after it is a sibling, not a child — building a runaway
         // staircase of false depth.
         let mut stack: Vec<i64> = Vec::new();
-        let mut emit = |run: &Run, src: &(Slice, SliceDetail)| {
-            let (mut s, mut d) = *src;
+        let mut emit = |run: &Run, src: &(i64, Slice, SliceDetail)| {
+            let mut s = src.1;
+            let mut d = src.2;
             d.others = d.others.shifted(run.args_base);
             let end = s.start_us.saturating_add(s.dur_us);
             while stack.last().is_some_and(|&e| e < end) {
@@ -390,25 +399,27 @@ fn finish_merge(
             end_max_slots.next().expect("segment sized to the runs' total").write(*max_end_us);
         };
         if let [run] = &runs[..] {
-            for src in run.src {
-                emit(run, src);
+            for &idx in run.order {
+                emit(run, &run.payloads[idx as usize]);
             }
         } else {
             let mut cursors = vec![0usize; runs.len()];
             let mut heap: BinaryHeap<Reverse<(i64, Reverse<i64>, usize)>> =
                 BinaryHeap::with_capacity(runs.len());
             for (i, run) in runs.iter().enumerate() {
-                if let Some((s, _)) = run.src.first() {
+                if let Some(&idx) = run.order.first() {
+                    let s = &run.payloads[idx as usize].1;
                     heap.push(Reverse((s.start_us, Reverse(s.dur_us), i)));
                 }
             }
             while let Some(Reverse((.., i))) = heap.pop() {
                 let run = &runs[i];
-                let src = &run.src[cursors[i]];
+                let idx = run.order[cursors[i]] as usize;
                 cursors[i] += 1;
-                emit(run, src);
-                if let Some((next, _)) = run.src.get(cursors[i]) {
-                    heap.push(Reverse((next.start_us, Reverse(next.dur_us), i)));
+                emit(run, &run.payloads[idx]);
+                if let Some(&next) = run.order.get(cursors[i]) {
+                    let s = &run.payloads[next as usize].1;
+                    heap.push(Reverse((s.start_us, Reverse(s.dur_us), i)));
                 }
             }
         }
@@ -417,7 +428,8 @@ fn finish_merge(
     for folded in &runs {
         for &(tid, span) in &folded.lanes {
             tid_runs.entry(tid).or_default().push(Run {
-                src: &folded.lane_pool[span.range()],
+                payloads: &folded.payloads,
+                order: &folded.order[span.range()],
                 args_base: folded.args_base,
             });
         }
@@ -429,7 +441,7 @@ fn finish_merge(
     let mut rest_end_max = end_max_pool.spare_capacity_mut();
     let mut off = 0u32;
     for (tid, runs) in tid_runs {
-        let len: usize = runs.iter().map(|r| r.src.len()).sum();
+        let len: usize = runs.iter().map(|r| r.order.len()).sum();
         let (dest, tail) = std::mem::take(&mut rest).split_at_mut(len);
         rest = tail;
         let (dest_detail, tail) = std::mem::take(&mut rest_detail).split_at_mut(len);
@@ -507,7 +519,7 @@ fn finish_merge(
         }
     });
 
-    // The folded runs' teardown (per-chunk lane pools) is pure
+    // The folded runs' teardown (per-chunk payload and index buffers) is pure
     // page-return work; detached so the load doesn't wait on it.
     std::thread::spawn(move || drop(runs));
     parts

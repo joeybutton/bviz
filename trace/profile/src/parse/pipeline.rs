@@ -6,7 +6,7 @@ use flate2::read::MultiGzDecoder;
 use serde::de::{DeserializeSeed, IgnoredAny};
 
 use crate::concurrent_interner::{ConcurrentInterner, Writer};
-use crate::model::{Profile, Slice, SliceDetail};
+use crate::model::Profile;
 use crate::worker_count;
 
 use super::build::{seal, Builder, Merge};
@@ -86,23 +86,24 @@ impl Chunk for &str {
     fn release(self) {}
 }
 
-/// Parses one chunk into a fresh [`Builder`] on a worker, reusing the worker's
-/// `staging` buffer across chunks and sizing the new arg pool from the previous
-/// chunk's. The arg pool is live data the builder carries to the merge, so
-/// unlike `staging` it cannot be reclaimed; chunks are near-equal in bytes and
-/// so in arg count, so `args_cap` lets the next builder fill without regrowing
-/// from empty. The chunk is released between the parse and the seal: everything the
-/// builder keeps was interned during the parse, so a streamed chunk's slab part
-/// returns to the producer without the inflate waiting out the per-lane sorts.
-/// Returns `None` on a parse failure.
+/// Parses one chunk into a fresh [`Builder`] on a worker, sizing its staging
+/// and arg pools from the previous chunk's counts. Both are live data the
+/// builder carries to the merge — the staging slices become the folded run's
+/// payloads, the arg pool the base its detail spans rebase by — so neither can
+/// be reclaimed; chunks are near-equal in bytes and so in slice and arg count,
+/// so the `staging_cap`/`args_cap` hints let the next builder fill without
+/// regrowing from empty. The chunk is released between the parse and the seal:
+/// everything the builder keeps was interned during the parse, so a streamed
+/// chunk's slab part returns to the producer without the inflate waiting out
+/// the per-lane sorts. Returns `None` on a parse failure.
 fn parse_chunk(
     chunk: impl Chunk,
     writer: &mut Writer,
-    staging: &mut Vec<(i64, Slice, SliceDetail)>,
+    staging_cap: &mut usize,
     args_cap: &mut usize,
 ) -> Option<Builder> {
     let mut builder = Builder::new();
-    builder.staging = std::mem::take(staging);
+    builder.staging.reserve(*staging_cap);
     builder.args_pool.reserve(*args_cap);
     let ok = {
         let text = chunk.text();
@@ -112,10 +113,9 @@ fn parse_chunk(
     };
     chunk.release();
     if ok {
+        *staging_cap = builder.staging.len();
         builder.seal_slices();
     }
-    *staging = std::mem::take(&mut builder.staging);
-    staging.clear();
     ok.then_some(builder)
 }
 
@@ -177,13 +177,13 @@ pub(crate) fn parse_chunks(text: &str, n: usize, min_bytes: usize) -> Option<Pro
                     scope.spawn(|| {
                         let mut writer = interner.writer();
                         let mut parsed = Vec::new();
-                        let mut staging = Vec::new();
+                        let mut staging_cap = 0usize;
                         let mut args_cap = 0;
                         loop {
                             let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                             let Some(&chunk) = chunks.get(i) else { break };
                             let builder =
-                                parse_chunk(chunk, &mut writer, &mut staging, &mut args_cap);
+                                parse_chunk(chunk, &mut writer, &mut staging_cap, &mut args_cap);
                             parsed.push((i, builder));
                         }
                         parsed
@@ -486,7 +486,7 @@ fn parse_gz_stream_from(
                 let rx = &rx;
                 scope.spawn(move || {
                     let mut writer = interner.writer();
-                    let mut staging = Vec::new();
+                    let mut staging_cap = 0usize;
                     let mut args_cap = 0;
                     loop {
                         let piece = match rx.recv() {
@@ -494,7 +494,8 @@ fn parse_gz_stream_from(
                             Err(_) => break,
                         };
                         let chunk = StreamChunk { buf: piece.buf, pool: &pool_tx };
-                        let builder = parse_chunk(chunk, &mut writer, &mut staging, &mut args_cap);
+                        let builder =
+                            parse_chunk(chunk, &mut writer, &mut staging_cap, &mut args_cap);
                         if builder_tx.send((piece.idx, builder)).is_err() {
                             break;
                         }
