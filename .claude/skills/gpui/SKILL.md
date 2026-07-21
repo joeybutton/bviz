@@ -1,6 +1,6 @@
 ---
 name: gpui
-description: How to write, build, and run gpui (Zed's GPU-accelerated UI framework) code in the bazel_viz repo — opening an application window, defining views and elements/widgets, styling with the div() builder, and wiring click/keyboard interaction. Use this whenever a task involves gpui, a `Render` view, `div()` element styling, the desktop UI layer, or the eventual Rust visualization frontend — even if "gpui" is not named explicitly.
+description: How to write, build, and run gpui (Zed's GPU-accelerated UI framework) code in the bazel_viz repo — opening an application window, defining views and elements/widgets, styling with the div() builder, wiring click/keyboard interaction, and running work off the UI thread (background tasks, bridging tokio async runtimes, and rayon data parallelism). Use this whenever a task involves gpui, a `Render` view, `div()` element styling, the desktop UI layer, or the eventual Rust visualization frontend — even if "gpui" is not named explicitly. Also use it when wiring tokio, reqwest/gRPC/SDK async, rayon, or any off-UI-thread background/parallel work into a gpui app, since gpui's executor is not tokio and needs an explicit bridge.
 ---
 
 # Writing gpui apps
@@ -407,6 +407,28 @@ with `.with_animation(..)`). `GraphView` and `TerminalView` both follow this sha
 a one-shot *delay* rather than background work (e.g. an auto-hiding scroll bar), use
 `cx.spawn` + `cx.background_executor().timer(..)` directly instead.
 
+## Foreign async (tokio) and CPU parallelism (rayon)
+
+gpui runs its own executor (a UI-thread foreground queue plus a background thread pool).
+It is **neither a tokio runtime nor rayon**, so two kinds of foreign work need an explicit
+bridge. `references/async-tokio-rayon.md` has the full patterns, the bridge source to
+adapt, and sizing/gotchas; the essentials:
+
+- **tokio** — futures from libraries that need tokio's reactor (`reqwest`, `tonic`, cloud
+  SDKs, `tokio::net`/`time`) panic *"there is no reactor running"* on gpui's executor. Own
+  one tokio runtime as a gpui `Global` and turn each tokio `JoinHandle` into a gpui `Task`;
+  dropping the `Task` aborts the tokio work. This is Zed's `crates/gpui_tokio` (v1.6.3, ~100
+  lines) — there is no such crate here yet, so adapt it into `//ui`. For a synchronous
+  constructor that calls `Handle::current()`, hold a `Tokio::handle(cx).enter()` guard.
+- **rayon** — a parallel iterator (`par_iter`, `par_sort`) blocks its calling thread until
+  the whole job finishes, so it must **only** run inside a background task (e.g. the `work`
+  closure of `load_in_background`, or `cx.background_executor().spawn(..)`), never on the UI
+  thread. Gate the parallel path by input size, and if you adopt rayon size its global pool
+  with `bviz_trace_profile::worker_count()` (physical cores) — the repo's heavy passes are
+  memory-bandwidth bound, so widening past physical cores adds overhead for no gain. For a
+  few coarse chunks, `cx.background_executor().scoped(..)` (or the existing
+  `std::thread::scope` pattern) avoids pulling in rayon at all.
+
 ## Building and running in this repo
 
 Build and run through Bazel (`rust_binary` via `rules_rs`), never cargo — see `CLAUDE.md`.
@@ -444,3 +466,5 @@ Resolve the binary with `bazel cquery --output=files //path:target` after buildi
 - A `canvas`/`Element` paint closure is `'static` — capture owned snapshots, not view borrows.
 - A background `Task` you don't store is cancelled on drop — keep it in a view field.
 - An element's mouse handlers stop at the window edge — use `track_drag` for a drag that must continue outside.
+- gpui's executor is not tokio — a `reqwest`/`tonic`/SDK future run directly on it panics "no reactor running"; bridge it through a tokio runtime (see the tokio/rayon section).
+- A rayon `par_iter`/`par_sort` on the UI thread freezes the frame — it blocks its caller; run it inside a background task and size rayon's pool by physical cores.
