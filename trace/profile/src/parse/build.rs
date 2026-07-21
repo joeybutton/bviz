@@ -239,6 +239,17 @@ impl Merge {
         }
     }
 
+    pub(crate) fn with_capacity(runs: usize, args: usize) -> Merge {
+        Merge {
+            args_pool: Vec::with_capacity(args),
+            phase_markers: Vec::new(),
+            thread_meta: BTreeMap::new(),
+            counter_order: Vec::new(),
+            counters: HashMap::new(),
+            runs: Vec::with_capacity(runs),
+        }
+    }
+
     /// Absorbs one builder. The builder's slices must already be sealed into
     /// per-thread lane order ([`Builder::seal_slices`]): [`finish_merge`]
     /// k-way merges the folded runs rather than re-sorting whole lanes.

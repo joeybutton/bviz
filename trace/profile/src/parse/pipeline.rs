@@ -203,7 +203,10 @@ pub(crate) fn parse_chunks(text: &str, n: usize, min_bytes: usize) -> Option<Pro
         return None;
     }
     Some(timed("  assemble", || {
-        let mut merge = Merge::new();
+        let mut merge = Merge::with_capacity(
+            builders.len(),
+            builders.iter().map(|b| b.args_pool.len()).sum(),
+        );
         for builder in builders {
             merge.fold(builder);
         }
@@ -502,7 +505,7 @@ fn parse_gz_stream_from(
             // channel closes when the last of them finishes.
             drop(builder_tx);
             let merger = scope.spawn(move || {
-                let mut merge = Merge::new();
+                let mut merge = Merge::with_capacity(decoded_size.div_ceil(chunk_bytes), 0);
                 let mut pending: BTreeMap<usize, Builder> = BTreeMap::new();
                 let mut next = 0usize;
                 let mut failed = false;
