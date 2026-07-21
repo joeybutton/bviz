@@ -345,7 +345,7 @@ fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 fn stream_pieces<'a>(
     bytes: &[u8],
     chunk_bytes: usize,
-    tx: std::sync::mpsc::SyncSender<Piece<'a>>,
+    tx: crossbeam_channel::Sender<Piece<'a>>,
     pool: std::sync::mpsc::Receiver<&'a mut [u8]>,
 ) -> Option<StreamEnds> {
     let mut dec = MultiGzDecoder::new(bytes);
@@ -440,8 +440,7 @@ pub(crate) fn parse_gz_stream(bytes: &[u8], workers: usize, chunk_bytes: usize) 
     // return is already on its way.
     let ring = 2 * workers + 1;
     let mut slab: Vec<u8> = vec![0u8; ring * chunk_bytes];
-    let (tx, rx) = std::sync::mpsc::sync_channel::<Piece>(workers);
-    let rx = std::sync::Mutex::new(rx);
+    let (tx, rx) = crossbeam_channel::bounded::<Piece>(workers);
     let (builder_tx, builder_rx) = std::sync::mpsc::channel::<(usize, Option<Builder>)>();
     let (pool_tx, pool_rx) = std::sync::mpsc::channel::<&mut [u8]>();
     for part in slab.chunks_mut(chunk_bytes) {
@@ -465,7 +464,7 @@ pub(crate) fn parse_gz_stream(bytes: &[u8], workers: usize, chunk_bytes: usize) 
                     let mut staging = Vec::new();
                     let mut args_cap = 0;
                     loop {
-                        let piece = match rx.lock().unwrap().recv() {
+                        let piece = match rx.recv() {
                             Ok(piece) => piece,
                             Err(_) => break,
                         };

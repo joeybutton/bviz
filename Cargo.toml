@@ -21,6 +21,7 @@ resolver = "2"
 [workspace.dependencies]
 alacritty_terminal = "0.26"
 clap = { version = "4", features = ["derive"] }
+crossbeam-channel = "0.5"
 crossbeam-utils = "0.8"
 flate2 = { version = "1", features = ["zlib-rs"] }
 hashbrown = { version = "0.16", default-features = false }
