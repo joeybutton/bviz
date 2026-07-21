@@ -29,8 +29,8 @@ use stats::{DEFAULT_STATS_SORT, StatsColumn, StatsOrder, stats_thumb_to};
 use theme::Palette;
 
 use bviz_trace_layout::{
-    Cull, FlameView, LaneLayout, LaneMetrics, ScopeAggregate, TimeView, Viewport, lay_out_lanes,
-    visible_slices,
+    Cull, FlameView, LaneLayout, LaneMetrics, ScopeAggregate, TimeView, Viewport, VisibleSlice,
+    lay_out_lanes, visible_slices,
 };
 use bviz_trace_profile::{LaneClass, Profile, Slice, SliceDetail, TimeSpan};
 use bviz_ui_components::{
@@ -236,6 +236,20 @@ enum Source {
     Message(String),
 }
 
+/// The timeline's culled draw list together with the inputs that determine it,
+/// so a repaint reuses it unless one changed. The list turns only on the profile
+/// (`Arc` identity), the lane layout (`Rc` identity, a fresh one on any
+/// visibility, collapse, or show-all change), the time view (pan/zoom), and the
+/// viewport (width, height, and `scroll_y`); `min_px` and the metrics are consts,
+/// so they are not keys.
+struct SliceDrawCache {
+    profile: Arc<Profile>,
+    lanes: Rc<LaneLayout>,
+    view: TimeView,
+    viewport: Viewport,
+    slices: Rc<Vec<VisibleSlice>>,
+}
+
 /// Loads and renders a Bazel trace profile as a flame chart.
 ///
 /// The time view, vertical scroll, and captured viewport bounds are shared cells
@@ -327,6 +341,8 @@ struct TraceView {
     aggregates: Rc<RefCell<Option<Arc<ScopeAggregate>>>>,
     /// The flame graph's memoized box layout; see [`FlameBoxCache`].
     flame_boxes: Rc<RefCell<Option<FlameBoxCache>>>,
+    /// The timeline's memoized culled draw list; see [`SliceDrawCache`].
+    slice_draw: Rc<RefCell<Option<SliceDrawCache>>>,
     /// Background-build bookkeeping for `aggregates`/`flame_boxes`, keyed on
     /// `selection_version`.
     agg: Rebuild<u64>,
@@ -424,6 +440,7 @@ impl TraceView {
             group_chrome: Rc::new(RefCell::new(None)),
             aggregates: Rc::new(RefCell::new(None)),
             flame_boxes: Rc::new(RefCell::new(None)),
+            slice_draw: Rc::new(RefCell::new(None)),
             agg: Rebuild::new(),
             stats_sort: DEFAULT_STATS_SORT.0,
             stats_desc: DEFAULT_STATS_SORT.1,
@@ -446,6 +463,7 @@ impl TraceView {
         // when a new profile loads.
         self.lanes.borrow_mut().take();
         self.visible_lanes.borrow_mut().take();
+        self.slice_draw.borrow_mut().take();
         self.flame_view.set(FlameView::FIT);
         self.source = match result {
             Ok(profile) => Source::Loaded(Arc::new(profile)),
@@ -575,6 +593,7 @@ impl TraceView {
                 scroll_y,
                 vbar,
                 hbar,
+                self.slice_draw.clone(),
                 entity,
                 palette,
             ),
@@ -666,11 +685,49 @@ impl TraceView {
         }
     }
 
+    /// The timeline's culled draw list, reusing the [`SliceDrawCache`] in `cache`
+    /// unless a key changed, so a repaint that leaves the profile, lane layout,
+    /// time view, and viewport unchanged — crosshair or hover motion, a menu,
+    /// filter, or drag repaint — reuses the list rather than re-culling. The
+    /// vertical scroll lives in `viewport.scroll_y`, so it is a key: the timeline
+    /// culls off-screen lanes by scroll.
+    fn cached_slices(
+        cache: &Rc<RefCell<Option<SliceDrawCache>>>,
+        profile: &Arc<Profile>,
+        lanes: &Rc<LaneLayout>,
+        view: TimeView,
+        viewport: Viewport,
+    ) -> Rc<Vec<VisibleSlice>> {
+        if let Some(c) = cache.borrow().as_ref() {
+            if Arc::ptr_eq(&c.profile, profile)
+                && Rc::ptr_eq(&c.lanes, lanes)
+                && c.view == view
+                && c.viewport == viewport
+            {
+                return c.slices.clone();
+            }
+        }
+        let slices = Rc::new(visible_slices(
+            profile,
+            lanes,
+            Cull { view: &view, viewport: &viewport, metrics: &METRICS, min_px: MIN_SLICE_PX },
+        ));
+        *cache.borrow_mut() = Some(SliceDrawCache {
+            profile: profile.clone(),
+            lanes: lanes.clone(),
+            view,
+            viewport,
+            slices: slices.clone(),
+        });
+        slices
+    }
+
     /// The chart paint body: the canvas paint closure that draws the flame
     /// timeline — gridlines, lanes and slices, phase markers, gutter, scroll
     /// bars, and (for the Counters tab) the counter plots — reading the live view
     /// state through the entity, then the ruler and hover/crosshair overlays on
     /// top.
+    #[allow(clippy::too_many_arguments)]
     fn chart_paint(
         profile: Arc<Profile>,
         lanes: Rc<LaneLayout>,
@@ -678,6 +735,7 @@ impl TraceView {
         scroll_y: Rc<Cell<f32>>,
         vbar: Rc<Cell<Option<Scrollbar>>>,
         hbar: Rc<Cell<Option<Scrollbar>>>,
+        slice_draw: Rc<RefCell<Option<SliceDrawCache>>>,
         entity: Entity<TraceView>,
         palette: Palette,
     ) -> impl FnOnce(Bounds<Pixels>, (), &mut Window, &mut App) {
@@ -765,11 +823,7 @@ impl TraceView {
                         palette.header_band,
                     ));
                 }
-                for vs in visible_slices(
-                    &profile,
-                    layout,
-                    Cull { view: &tv, viewport: &vp, metrics: &METRICS, min_px: MIN_SLICE_PX },
-                ) {
+                for vs in Self::cached_slices(&slice_draw, &profile, &lanes, tv, vp).iter() {
                     let track = &profile.threads()[vs.track];
                     let slice = profile.slices(track)[vs.slice];
                     paint_slice(
