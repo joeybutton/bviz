@@ -122,7 +122,11 @@ impl<'a> EventScanner<'a> {
         self.eat(b'"').then_some(())?;
         let start = self.pos;
         let escaped = self.scan_string_body()?;
-        let raw = &self.text[start..self.pos];
+        // SAFETY: `start` is captured one byte past the ASCII opening quote and
+        // `self.pos` here sits on the ASCII closing quote (`scan_string_body`
+        // returns `Some` only from its `b'"'` arm), so both offsets are in bounds
+        // and on char boundaries, and `start <= self.pos`.
+        let raw = unsafe { self.text.get_unchecked(start..self.pos) };
         self.pos += 1;
         if escaped {
             unescape(raw).map(Cow::Owned)
