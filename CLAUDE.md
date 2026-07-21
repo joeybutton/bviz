@@ -92,6 +92,25 @@ Interactive visualization and inspection tool for Bazel builds.
   (parse, aggregation) are memory-bandwidth bound and saturate at the physical
   cores that own the memory channels, so SMT oversubscription burns CPU for no
   wall-time gain. Reach for the logical thread count only with a measured reason.
+- Pre-allocate a collection's capacity whenever its final size is known or
+  cheaply estimable, so a buffer filled by `push` in a loop does not grow from
+  empty by repeated reallocation. Each `grow_one` reallocates and moves the whole
+  buffer, and the churn hides in `memmove` and allocator time that a profiler only
+  later attributes back — a recurring, avoidable cost in the parse/merge path.
+  Size from whichever is available: an exact count (one element per known input,
+  e.g. one `FoldedRun` per builder, one lane per distinct thread), a small
+  structural bound (per lane, thread, or counter), or a byte-density estimate for
+  a collection whose length tracks the input (mirror `BYTES_PER_DISTINCT` /
+  `BYTES_PER_SLICE` — measure the density on a representative profile and round it
+  down so the reservation over-reserves slightly). Reserve at the point that knows
+  the count: when a type's `new` cannot, add a `with_capacity` constructor and
+  size it at the call site (as `Merge::with_capacity` does from the builder count)
+  rather than leaving `Vec::new()` to double. Over-reserving costs only transient
+  capacity freed when the buffer is dropped or sealed; under-reserving costs
+  bounded regrowth — for a hot buffer prefer the slight over-reserve. `reserve`
+  the same way for a buffer reused across iterations, and note that `collect` from
+  an `ExactSizeIterator` already pre-sizes; the trap is a hand-grown
+  `Vec::new()`/`vec![]`/`String::new()`.
 - Comments are terse and only earn their place by adding what the code can't
   say — a sentence, not a paragraph. Don't restate the code (a comment that
   names what the next line already names is noise — including one that restates
