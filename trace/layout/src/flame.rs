@@ -580,7 +580,9 @@ fn containment_forest(slices: &[Slice]) -> Forest {
         "slices must be in lane order: start ascending, ties longest-first"
     );
     let mut children = vec![Vec::new(); slices.len()];
-    let mut roots = Vec::new();
+    // Each slice is a root or nested under one parent, never both, so the roots
+    // number at most the lane's slices; a flat lane reaches that bound.
+    let mut roots = Vec::with_capacity(slices.len());
     let mut stack: Vec<usize> = Vec::new();
     for i in 0..slices.len() {
         let slice_end = end_us(&slices[i]);
