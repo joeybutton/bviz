@@ -56,6 +56,10 @@ fn intern_prefault_bytes(total_bytes: usize) -> usize {
 
 const GZIP_MAGIC: [u8; 2] = [0x1f, 0x8b];
 
+/// Read-buffer capacity for the compressed input, sized to amortize read
+/// syscalls over the streamed inflate of a large profile.
+const GZIP_READ_BUFFER_BYTES: usize = 1 << 20;
+
 #[derive(Debug)]
 pub enum LoadError {
     Io(std::io::Error),
@@ -123,7 +127,10 @@ impl Profile {
             if let Ok(Some(decoded_size)) = gzip_isize_from_file(&mut file) {
                 if file.seek(SeekFrom::Start(0)).is_ok() {
                     if let Some(profile) = timed("decode+parse (pipelined, streamed)", || {
-                        parse_gz_pipelined_reader(BufReader::new(&mut file), decoded_size)
+                        parse_gz_pipelined_reader(
+                            BufReader::with_capacity(GZIP_READ_BUFFER_BYTES, &mut file),
+                            decoded_size,
+                        )
                     }) {
                         return Ok(profile);
                     }
