@@ -1,11 +1,13 @@
 //! Benchmarks the UI's real flame-graph path: `ScopeAggregate::build_for_tracks`
 //! is rebuilt from scratch on every track-selection change. Times a single-track
 //! selection (the largest lane, walked serially by one worker) and the all-track
-//! selection (walked in parallel), the two ends the interactive profile exercised.
+//! selection (walked in parallel), the two ends the interactive profile exercised,
+//! plus the all-track rebuild from a reused whole-profile scan (`TrackFlamer`),
+//! which is what the view does for every selection after the first.
 
 use std::sync::Arc;
 
-use bviz_trace_layout::ScopeAggregate;
+use bviz_trace_layout::{ScopeAggregate, TrackFlamer};
 use bviz_trace_profile::{LaneClass, Profile};
 
 #[global_allocator]
@@ -60,6 +62,17 @@ fn main() {
             threads[i].lane_class != LaneClass::CriticalPath
         }));
     });
+    // The whole-profile scan the view holds after the first build; every later
+    // selection rebuilds from it rather than rescanning.
+    let scan_cold = min_secs(iters, || {
+        std::hint::black_box(TrackFlamer::new(&profile));
+    });
+    let scan = TrackFlamer::new(&profile);
+    let all_reused = min_secs(iters, || {
+        std::hint::black_box(ScopeAggregate::build_for_tracks_reusing(&scan, |i| {
+            threads[i].lane_class != LaneClass::CriticalPath
+        }));
+    });
 
     let single_agg = ScopeAggregate::build_for_tracks(&profile, |i| i == biggest);
     let all_agg = ScopeAggregate::build_for_tracks(&profile, |i| {
@@ -72,6 +85,12 @@ fn main() {
     eprintln!(
         "[bench] build_for_tracks(1 biggest): {single:.3}s  \
          build_for_tracks(all {real_lanes}): {all:.3}s  (min of {iters})"
+    );
+    eprintln!(
+        "[bench] scan once: {scan_cold:.3}s  \
+         build_for_tracks_reusing(all): {all_reused:.3}s  \
+         (rebuild saves {:.3}s vs one-shot {all:.3}s)",
+        all - all_reused,
     );
     eprintln!(
         "[bench] single: {} nodes / {} rows;  all: {} nodes / {} rows",
