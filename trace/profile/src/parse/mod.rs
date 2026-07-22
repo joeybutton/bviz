@@ -38,6 +38,22 @@ const BYTES_PER_DISTINCT: usize = 160;
 /// is transient capacity freed at the merge, in exchange for no regrowth.
 const BYTES_PER_SLICE: usize = 160;
 
+/// Fraction of decoded bytes to pre-fault into the interner arena: distinct text
+/// measures about a third of a Bazel profile's decoded bytes, so touching half
+/// over-covers the real faults slightly, with limited slack.
+const INTERN_PREFAULT_DIVISOR: usize = 2;
+
+/// Advisory size for the interner arena's page pre-fault — the byte prefix each
+/// parse worker faults in (its own page-aligned share) before its receive loop,
+/// so the workers' first touches do not fault lazily and serially in the hot
+/// loop. Unlike [`BYTES_PER_DISTINCT`], which sizes the dedup index, this is not
+/// a capacity bound: [`ConcurrentInterner::prefault_shard`] clamps it to the
+/// arena's capacity, and too small merely leaves a lazy tail — so it can only
+/// cost bandwidth, never correctness.
+fn intern_prefault_bytes(total_bytes: usize) -> usize {
+    total_bytes / INTERN_PREFAULT_DIVISOR
+}
+
 const GZIP_MAGIC: [u8; 2] = [0x1f, 0x8b];
 
 #[derive(Debug)]

@@ -13,7 +13,7 @@ use super::build::{seal, Builder, Merge};
 use super::decode::{gzip_isize, latin1_cow, latin1_to_utf8};
 use super::scanner::scan_event;
 use super::serde_events::{ArgEntry, RawEventSeed};
-use super::{recover_other_data, timed, BYTES_PER_DISTINCT, BYTES_PER_SLICE};
+use super::{intern_prefault_bytes, recover_other_data, timed, BYTES_PER_DISTINCT, BYTES_PER_SLICE};
 
 /// Outcome of locating the `traceEvents` array in a decoded profile buffer.
 pub(crate) enum TraceEventsArray {
@@ -167,13 +167,20 @@ pub(crate) fn parse_chunks(text: &str, n: usize, min_bytes: usize) -> Option<Pro
     // global and merging never rebases them. The distinct pool is bounded by
     // the region's byte length.
     let interner = ConcurrentInterner::new(region.len(), region.len() / BYTES_PER_DISTINCT);
+    let prefault_bytes = intern_prefault_bytes(region.len());
     let builders: Vec<Option<Builder>> = timed("  parse chunks", || {
         let next = std::sync::atomic::AtomicUsize::new(0);
         let interner = &interner;
+        let workers = n.min(chunks.len());
         let parsed: Vec<(usize, Option<Builder>)> = std::thread::scope(|scope| {
-            let handles: Vec<_> = (0..n.min(chunks.len()))
-                .map(|_| {
-                    scope.spawn(|| {
+            let handles: Vec<_> = (0..workers)
+                .map(|shard| {
+                    let next = &next;
+                    let chunks = &chunks;
+                    scope.spawn(move || {
+                        // Fault this worker's arena share up front, in parallel
+                        // with the others, before entering the steal loop.
+                        interner.prefault_shard(shard, workers, prefault_bytes);
                         let mut writer = interner.writer();
                         let mut parsed = Vec::new();
                         let mut args_cap = 0;
@@ -476,15 +483,19 @@ fn parse_gz_stream_from(
     // global and the merger never rebases them. The distinct pool is bounded by
     // the decoded size the ISIZE trailer declares.
     let interner = ConcurrentInterner::new(decoded_size, decoded_size / BYTES_PER_DISTINCT);
+    let prefault_bytes = intern_prefault_bytes(decoded_size);
     let (ends, merged) = timed("  decode+parse+fold chunks", || {
         let interner = &interner;
         std::thread::scope(|scope| {
             let producer = scope.spawn(move || stream_pieces(reader, chunk_bytes, tx, pool_rx));
-            for _ in 0..workers {
+            for shard in 0..workers {
                 let builder_tx = builder_tx.clone();
                 let pool_tx = pool_tx.clone();
                 let rx = &rx;
                 scope.spawn(move || {
+                    // Fault this worker's arena share before the receive loop,
+                    // overlapping the producer's initial inflate.
+                    interner.prefault_shard(shard, workers, prefault_bytes);
                     let mut writer = interner.writer();
                     let mut args_cap = 0;
                     loop {

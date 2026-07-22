@@ -174,6 +174,68 @@ impl ConcurrentInterner {
         }
     }
 
+    /// Faults in this worker's page-aligned share of the arena's first
+    /// `min(hint_bytes, cap)` bytes with writable pages, so the first touches
+    /// interning would otherwise take one 4 KB page at a time in the hot loop
+    /// happen up front. Each parse worker calls it as `shard` of `shards`
+    /// before its receive loop, so the fault sweep overlaps the producer's
+    /// initial inflate — the window workers would otherwise spend blocked
+    /// waiting for the first chunk — rather than a dedicated pass on the
+    /// sequential path. `hint_bytes` is advisory: it governs only how many
+    /// pages to touch, never the buffer's size, so a wrong hint costs only
+    /// bandwidth — too large faults never-written pages, too small leaves a
+    /// lazy tail — and never correctness.
+    ///
+    /// Only MADV_POPULATE_WRITE is used: it faults absent pages in writable and
+    /// leaves any already-present page's bytes untouched, so a worker may run it
+    /// while others intern into the shared arena. A page another worker has
+    /// already written keeps its bytes; an absent page it zero-fills names no
+    /// live handle yet. A kernel without the advice (before 5.14) leaves the
+    /// arena to fault lazily during parse.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn prefault_shard(&self, shard: usize, shards: usize, hint_bytes: usize) {
+        use std::os::raw::{c_int, c_void};
+
+        // Linux `asm-generic/mman-common.h` (Linux 5.14+): fault the range's
+        // page tables in and populate them with writable anonymous pages.
+        const MADV_POPULATE_WRITE: c_int = 23;
+
+        unsafe extern "C" {
+            fn madvise(addr: *mut c_void, len: usize, advice: c_int) -> c_int;
+            fn getpagesize() -> c_int;
+        }
+
+        // The kernel's base page size — the alignment madvise requires. Queried
+        // rather than assumed 4 KB so the fast path still applies on kernels
+        // with larger base pages (arm64 16/64 KB); NOHUGEPAGE suppresses only
+        // transparent huge pages, not the base size.
+        // SAFETY: getpagesize reads a cached value and has no preconditions.
+        let page = unsafe { getpagesize() } as usize;
+        let len = hint_bytes.min(self.arena.cap);
+        let shards = shards.max(1);
+        // Page-align the per-shard span so each shard's start is a page boundary
+        // (the arena base is page-aligned): madvise requires it, and it keeps
+        // two shards off a shared boundary page.
+        let per = len.div_ceil(shards).next_multiple_of(page);
+        let start = shard * per;
+        if start >= len {
+            return;
+        }
+        let sub = (start + per).min(len) - start;
+        let addr = (self.arena.buf.as_ptr() as usize + start) as *mut c_void;
+        // SAFETY: `[start, start + sub)` lies within `[0, cap)` of the live
+        // `buf` allocation (the `.min(cap)` clamp and the split bound it).
+        // MADV_POPULATE_WRITE only faults page tables and modifies no present
+        // page's bytes, so it neither races nor corrupts the concurrent
+        // interning writes through `&self`'s UnsafeCell buffer.
+        unsafe {
+            let _ = madvise(addr, sub, MADV_POPULATE_WRITE);
+        }
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    pub(crate) fn prefault_shard(&self, _shard: usize, _shards: usize, _hint_bytes: usize) {}
+
     /// A per-worker handle owning a current page, so its hot path does no
     /// atomics on a hit and one page-cursor bump only when a miss overflows the
     /// page. The borrow makes the mutable phase explicit.
