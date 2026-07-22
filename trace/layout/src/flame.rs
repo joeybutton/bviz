@@ -384,15 +384,34 @@ pub struct FlameBox {
     pub count: u32,
 }
 
+/// Child count above which a node's child index switches from a linear scan of
+/// the child list to a hashmap. Most nodes gather only a handful of children and
+/// stay under it, paying no map allocation; the rare wide frames (a mnemonic
+/// gathering thousands of children) promote and keep O(1) lookup. Set just above
+/// the width where a scan per insert starts to lose to a hash.
+const CHILD_INDEX_LINEAR_MAX: usize = 16;
+
+/// A node's `(label, role)` → child-index accelerator. Below
+/// [`CHILD_INDEX_LINEAR_MAX`] children it is [`Linear`](ChildIndex::Linear) — the
+/// lookup scans `children`, and the node holds no map — so most nodes carry no
+/// hash table at all. A frame that gathers more promotes to
+/// [`Map`](ChildIndex::Map) for O(1) lookup.
+enum ChildIndex {
+    /// Scan `children` for the `(name, role)` key.
+    Linear,
+    /// `(name, role)` → index into `children`.
+    Map(FxHashMap<(Str, SpanRole), u32>),
+}
+
 /// A node still under construction. Children are kept in insertion order in
-/// `children` and located by their `(label, role)` merge key through
-/// `index`, so merging a span into an existing child is O(1): labels are
-/// per-mnemonic, so a single frame can gather thousands of distinct children,
-/// where a linear scan per insert would be quadratic. Labels are interned
-/// profile handles, so the key is a `Copy` `(Str, SpanRole)` — small and
-/// fixed-size, which FxHash hashes in a few cycles where SipHash would dominate
-/// the per-span lookup. Sorting for [`flatten`] reorders `children` without
-/// updating `index`, so no merge may follow a sort.
+/// `children` and located by their `(label, role)` merge key through `index`:
+/// labels are per-mnemonic, so a single frame can gather thousands of distinct
+/// children — past [`CHILD_INDEX_LINEAR_MAX`] the index promotes from a linear
+/// scan to a hashmap so wide frames keep O(1) lookup instead of a quadratic scan.
+/// Labels are interned profile handles, so the key is a `Copy` `(Str, SpanRole)`
+/// — small and fixed-size, which FxHash hashes in a few cycles where SipHash
+/// would dominate the per-span lookup. Sorting for [`flatten`] reorders
+/// `children` without updating `index`, so no merge may follow a sort.
 pub(crate) struct Builder {
     name: Str,
     /// Lexicographic rank of `name`'s text (see [`FlameNode::rank`]); the
@@ -402,7 +421,7 @@ pub(crate) struct Builder {
     total_us: i64,
     count: u32,
     children: Vec<Builder>,
-    index: FxHashMap<(Str, SpanRole), usize>,
+    index: ChildIndex,
 }
 
 impl Builder {
@@ -422,7 +441,40 @@ impl Builder {
             total_us: 0,
             count: 0,
             children: Vec::new(),
-            index: FxHashMap::default(),
+            index: ChildIndex::Linear,
+        }
+    }
+
+    /// The index of the child matching `key`, or `None` if none is present.
+    fn find_child(&self, key: (Str, SpanRole)) -> Option<usize> {
+        match &self.index {
+            ChildIndex::Linear => self
+                .children
+                .iter()
+                .position(|c| (c.name, c.role) == key),
+            ChildIndex::Map(m) => m.get(&key).map(|&i| i as usize),
+        }
+    }
+
+    /// Record the child just pushed at `idx` under `key`. When still linear,
+    /// crossing [`CHILD_INDEX_LINEAR_MAX`] promotes to a map built from every
+    /// current child (the just-pushed one included); below that the linear scan
+    /// keeps finding it, so nothing is recorded.
+    fn index_child(&mut self, idx: usize, key: (Str, SpanRole)) {
+        match &mut self.index {
+            ChildIndex::Map(m) => {
+                m.insert(key, idx as u32);
+            }
+            ChildIndex::Linear => {
+                if self.children.len() > CHILD_INDEX_LINEAR_MAX {
+                    let mut m = FxHashMap::default();
+                    m.reserve(self.children.len());
+                    for (i, c) in self.children.iter().enumerate() {
+                        m.insert((c.name, c.role), i as u32);
+                    }
+                    self.index = ChildIndex::Map(m);
+                }
+            }
         }
     }
 
@@ -431,12 +483,16 @@ impl Builder {
     /// wins. Ranks are lazy so a merge into an existing child costs no lookup.
     fn child(&mut self, seg: Segment, rank: impl FnOnce() -> u32) -> &mut Builder {
         let key = (seg.label, seg.role);
-        let idx = *self.index.entry(key).or_insert_with(|| {
-            let i = self.children.len();
-            self.children
-                .push(Builder::new(seg.label, rank(), seg.role));
-            i
-        });
+        let idx = match self.find_child(key) {
+            Some(i) => i,
+            None => {
+                let i = self.children.len();
+                self.children
+                    .push(Builder::new(seg.label, rank(), seg.role));
+                self.index_child(i, key);
+                i
+            }
+        };
         &mut self.children[idx]
     }
 }
@@ -535,7 +591,7 @@ impl Flamer {
         for ci in 0..forest.children[span_idx].len() {
             let c = forest.children[span_idx][ci];
             let node = {
-                let i = parent.index[&key];
+                let i = parent.find_child(key).expect("child was just inserted");
                 &mut parent.children[i]
             };
             self.merge_span(node, lane_slices, lane_details, forest, c);
@@ -795,14 +851,13 @@ pub(crate) fn fold_into(dst: &mut Builder, src: Builder) {
     dst.total_us += src.total_us;
     dst.count += src.count;
     for child in src.children {
-        match dst.index.entry((child.name, child.role)) {
-            std::collections::hash_map::Entry::Occupied(e) => {
-                let i = *e.get();
-                fold_into(&mut dst.children[i], child);
-            }
-            std::collections::hash_map::Entry::Vacant(e) => {
-                e.insert(dst.children.len());
+        let key = (child.name, child.role);
+        match dst.find_child(key) {
+            Some(i) => fold_into(&mut dst.children[i], child),
+            None => {
+                let i = dst.children.len();
                 dst.children.push(child);
+                dst.index_child(i, key);
             }
         }
     }
