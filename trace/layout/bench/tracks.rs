@@ -63,7 +63,10 @@ fn main() {
         }));
     });
     // The whole-profile scan the view holds after the first build; every later
-    // selection rebuilds from it rather than rescanning.
+    // selection rebuilds from it rather than rescanning. `TrackFlamer::new` now
+    // also builds each lane's path-reduced node table, so this scan-once timing
+    // includes that per-lane precompute — work paid once so the cached rebuild
+    // below is a pure merge.
     let scan_cold = min_secs(iters, || {
         std::hint::black_box(TrackFlamer::new(&profile));
     });
@@ -75,6 +78,11 @@ fn main() {
     });
     let all_columnar = min_secs(iters, || {
         std::hint::black_box(ScopeAggregate::build_for_tracks_columnar(&scan, |i| {
+            threads[i].lane_class != LaneClass::CriticalPath
+        }));
+    });
+    let all_columnar_cached = min_secs(iters, || {
+        std::hint::black_box(ScopeAggregate::build_for_tracks_columnar_cached(&scan, |i| {
             threads[i].lane_class != LaneClass::CriticalPath
         }));
     });
@@ -91,14 +99,26 @@ fn main() {
     let columnar_all = ScopeAggregate::build_for_tracks_columnar(&scan, |i| {
         threads[i].lane_class != LaneClass::CriticalPath
     });
+    let columnar_cached_all = ScopeAggregate::build_for_tracks_columnar_cached(&scan, |i| {
+        threads[i].lane_class != LaneClass::CriticalPath
+    });
     assert_eq!(
         columnar_all.flame.nodes(),
         trie_all.flame.nodes(),
         "columnar aggregation must match the trie on the all-track selection"
     );
+    assert_eq!(
+        columnar_cached_all.flame.nodes(),
+        trie_all.flame.nodes(),
+        "cached columnar aggregation must match the trie on the all-track selection"
+    );
     eprintln!(
         "[bench] columnar matches trie: {} nodes",
         columnar_all.flame.nodes().len()
+    );
+    eprintln!(
+        "[bench] columnar_cached matches trie: {} nodes",
+        columnar_cached_all.flame.nodes().len()
     );
     eprintln!(
         "[bench] lanes: {real_lanes} real, {total_slices} slices; \
@@ -109,9 +129,10 @@ fn main() {
          build_for_tracks(all {real_lanes}): {all:.3}s  (min of {iters})"
     );
     eprintln!(
-        "[bench] scan once: {scan_cold:.3}s  \
+        "[bench] scan once (incl. lane tables): {scan_cold:.3}s  \
          build_for_tracks_reusing(all): {all_reused:.3}s  \
          build_for_tracks_columnar(all): {all_columnar:.3}s  \
+         build_for_tracks_columnar_cached(all): {all_columnar_cached:.3}s  \
          (rebuild saves {:.3}s vs one-shot {all:.3}s)",
         all - all_reused,
     );

@@ -64,6 +64,19 @@ impl ScopeAggregate {
         ScopeAggregate::from_graph(scan.build_columnar(selected))
     }
 
+    /// Builds a selection's aggregate from an already-scanned [`TrackFlamer`] by
+    /// merging the selection's cached per-lane node tables (see
+    /// [`TrackFlamer::build_columnar_cached`](crate::flame)), so the per-span
+    /// emission, keying, and per-lane sort are paid once when the scan is built
+    /// rather than on every selection. Produces the same aggregate as
+    /// [`Self::build_for_tracks_reusing`].
+    pub fn build_for_tracks_columnar_cached(
+        scan: &TrackFlamer,
+        selected: impl Fn(usize) -> bool + Sync,
+    ) -> ScopeAggregate {
+        ScopeAggregate::from_graph(scan.build_columnar_cached(selected))
+    }
+
     fn from_graph(flame: FlameGraph) -> ScopeAggregate {
         let stats = stats_from_flame(&flame);
         let default_order = default_order(&stats);
@@ -449,13 +462,20 @@ mod tests {
         ];
         for sel in &selections {
             let columnar = ScopeAggregate::build_for_tracks_columnar(&scan, sel);
+            let cached = ScopeAggregate::build_for_tracks_columnar_cached(&scan, sel);
             let trie = ScopeAggregate::build_for_tracks_reusing(&scan, sel);
             assert_eq!(columnar.flame, trie.flame);
+            assert_eq!(cached.flame, trie.flame);
             assert_eq!(
                 resolved_rows(&columnar.flame, &columnar.stats),
                 resolved_rows(&trie.flame, &trie.stats),
             );
+            assert_eq!(
+                resolved_rows(&cached.flame, &cached.stats),
+                resolved_rows(&trie.flame, &trie.stats),
+            );
             assert_eq!(columnar.grand_total, trie.grand_total);
+            assert_eq!(cached.grand_total, trie.grand_total);
         }
     }
 
