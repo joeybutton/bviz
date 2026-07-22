@@ -3,8 +3,8 @@ use std::sync::Arc;
 use bviz_trace_profile::{LaneClass, Profile};
 
 use crate::flame::{
-    Builder, FlameGraph, Flamer, Scope, action_locations, build_critical_path, build_flame_graph,
-    build_flame_graph_for_tracks, class_trees, fold_all, fold_into, seal,
+    Builder, FlameGraph, Flamer, Scope, TrackFlamer, action_locations, build_critical_path,
+    build_flame_graph, class_trees, fold_all, fold_into, seal,
 };
 use crate::stats::{StatRow, default_order, stats_from_flame};
 
@@ -31,12 +31,25 @@ impl ScopeAggregate {
 
     /// Builds the aggregate over exactly the thread tracks `selected` admits (by
     /// index into [`Profile::threads`]), for a view driven by a lane selection
-    /// rather than a fixed scope.
+    /// rather than a fixed scope. Scans the whole profile for a throwaway
+    /// [`TrackFlamer`]; a caller rebuilding several selections should hold one
+    /// [`TrackFlamer`] and go through [`Self::build_for_tracks_reusing`] instead,
+    /// so the scan is paid once.
     pub fn build_for_tracks(
         profile: &Arc<Profile>,
         selected: impl Fn(usize) -> bool + Sync,
     ) -> ScopeAggregate {
-        ScopeAggregate::from_graph(build_flame_graph_for_tracks(profile, selected))
+        ScopeAggregate::from_graph(TrackFlamer::new(profile).build(selected))
+    }
+
+    /// Builds a selection's aggregate from an already-scanned [`TrackFlamer`],
+    /// skipping the whole-profile scan so a view can rebuild across selection
+    /// changes without rescanning.
+    pub fn build_for_tracks_reusing(
+        scan: &TrackFlamer,
+        selected: impl Fn(usize) -> bool + Sync,
+    ) -> ScopeAggregate {
+        ScopeAggregate::from_graph(scan.build(selected))
     }
 
     fn from_graph(flame: FlameGraph) -> ScopeAggregate {
@@ -358,6 +371,49 @@ mod tests {
         assert_eq!(agg.flame.nodes().len(), 1);
         assert!(agg.stats.is_empty());
         assert_eq!(agg.grand_total, 0);
+    }
+
+    #[test]
+    fn reusing_a_track_flamer_matches_fresh_builds() {
+        // One whole-profile scan, reused across selections, must reproduce for
+        // each selection the graph and stats a fresh per-selection build gives.
+        let p = full_profile();
+        let threads = p.threads();
+        let scan = TrackFlamer::new(&p);
+        let one_execution = threads
+            .iter()
+            .position(|t| t.lane_class == LaneClass::Execution)
+            .unwrap();
+        let selections: Vec<Box<dyn Fn(usize) -> bool + Sync>> = vec![
+            Box::new(|i: usize| threads[i].lane_class != LaneClass::CriticalPath),
+            Box::new(move |i: usize| i == one_execution),
+            Box::new(|_: usize| false),
+            // Every lane, the critical-path lane included: its components resolve
+            // their labels through the same whole-profile mnemonic index, so the
+            // reused scan must match a fresh build here too.
+            Box::new(|_: usize| true),
+            Box::new(|i: usize| i % 2 == 0),
+        ];
+        // Ranks are dense over each build's own scanned texts, so the global
+        // scan and a per-selection scan number names differently; the default
+        // order is compared through resolved keys, never raw rank values.
+        let order = |a: &ScopeAggregate| -> Vec<String> {
+            a.default_order
+                .iter()
+                .map(|&i| a.flame.str(a.stats[i as usize].key).to_owned())
+                .collect()
+        };
+        for sel in &selections {
+            let reused = ScopeAggregate::build_for_tracks_reusing(&scan, sel);
+            let fresh = ScopeAggregate::build_for_tracks(&p, sel);
+            assert_eq!(resolved(&reused.flame), resolved(&fresh.flame));
+            assert_eq!(
+                resolved_rows(&reused.flame, &reused.stats),
+                resolved_rows(&fresh.flame, &fresh.stats),
+            );
+            assert_eq!(order(&reused), order(&fresh));
+            assert_eq!(reused.grand_total, fresh.grand_total);
+        }
     }
 
     #[test]

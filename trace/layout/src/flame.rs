@@ -83,9 +83,9 @@ impl Ranks {
 /// holds the same entries keyed by name text, for the critical-path components
 /// whose stripped `action '…'` inner has no handle of its own. Values are
 /// mnemonic handles.
-struct MnemonicIndex<'p> {
+struct MnemonicIndex {
     by_name: FxHashMap<Str, Str>,
-    by_text: FxHashMap<&'p str, Str>,
+    by_text: FxHashMap<Box<str>, Str>,
 }
 
 /// One worker's share of the name scan.
@@ -119,11 +119,11 @@ impl<'p> ScanShard<'p> {
 /// mnemonic-bearing slices, a small fraction of the profile — because a
 /// mnemonic-less slice's label can resolve to a mnemonic carried on a lane
 /// outside the scan, and that label needs a rank like any other.
-fn scan<'p>(
-    profile: &'p Profile,
+fn scan(
+    profile: &Profile,
     workers: usize,
     note_lane: impl Fn(usize) -> bool + Sync,
-) -> (Ranks, MnemonicIndex<'p>) {
+) -> (Ranks, MnemonicIndex) {
     let threads = profile.threads();
     // Each distinct name/mnemonic is noted once, keyed by its text, so a shard
     // holds at most the profile's distinct strings; sharing them roughly evenly
@@ -220,15 +220,19 @@ fn build_ranks<'p>(by_text: &FxHashMap<&'p str, Str>) -> Ranks {
 /// handle. A name seen only on unadmitted lanes has no noted handle and needs
 /// no handle-keyed entry: only a walked — hence noted — slice's name is ever
 /// looked up by handle, while text-keyed lookups cover every name.
-fn build_index<'p>(
-    by_text: &FxHashMap<&'p str, Str>,
-    mnemonics: &FxHashMap<&'p str, &'p str>,
-) -> MnemonicIndex<'p> {
-    let by_text_idx: FxHashMap<&'p str, Str> =
+fn build_index(
+    by_text: &FxHashMap<&str, Str>,
+    mnemonics: &FxHashMap<&str, &str>,
+) -> MnemonicIndex {
+    let name_to_mnemonic: Vec<(&str, Str)> =
         mnemonics.iter().map(|(&n, &m)| (n, by_text[m])).collect();
-    let by_name = by_text_idx
+    let by_name = name_to_mnemonic
         .iter()
-        .filter_map(|(&n, &m)| by_text.get(n).map(|&h| (h, m)))
+        .filter_map(|&(n, m)| by_text.get(n).map(|&h| (h, m)))
+        .collect();
+    let by_text_idx = name_to_mnemonic
+        .into_iter()
+        .map(|(n, m)| (Box::from(n), m))
         .collect();
     MnemonicIndex {
         by_name,
@@ -449,16 +453,16 @@ impl Default for Builder {
 /// equal handle: frames key by handle directly, and merge keys compare and hash
 /// as plain integers with no per-span string work. Read-only once built, so
 /// merge workers share one.
-pub(crate) struct Flamer<'p> {
-    profile: &'p Profile,
-    idx: MnemonicIndex<'p>,
+pub(crate) struct Flamer {
+    profile: Arc<Profile>,
+    idx: MnemonicIndex,
     ranks: Ranks,
 }
 
-impl<'p> Flamer<'p> {
+impl Flamer {
     /// A flamer whose name scan covers every lane, for a build that may walk
     /// any of them.
-    pub(crate) fn new(profile: &'p Profile, workers: usize) -> Self {
+    pub(crate) fn new(profile: &Arc<Profile>, workers: usize) -> Self {
         Flamer::scoped(profile, workers, |_| true)
     }
 
@@ -467,13 +471,13 @@ impl<'p> Flamer<'p> {
     /// is the dominant cost of a single-scope build, so a build that walks few
     /// lanes scans only those.
     pub(crate) fn scoped(
-        profile: &'p Profile,
+        profile: &Arc<Profile>,
         workers: usize,
         note_lane: impl Fn(usize) -> bool + Sync,
     ) -> Self {
         let (ranks, idx) = scan(profile, workers, note_lane);
         Flamer {
-            profile,
+            profile: Arc::clone(profile),
             idx,
             ranks,
         }
@@ -651,23 +655,43 @@ pub fn build_flame_graph(profile: &Arc<Profile>, scope: Scope) -> FlameGraph {
     seal(&mut root, profile)
 }
 
+/// A whole-profile name scan (rank table + mnemonic index) held so a
+/// track-selection flame graph can be rebuilt for any lane subset without
+/// rescanning. The scan covers every lane, so it ranks and labels any
+/// selection the caller later chooses.
+pub struct TrackFlamer {
+    flamer: Flamer,
+}
+
+impl TrackFlamer {
+    pub fn new(profile: &Arc<Profile>) -> TrackFlamer {
+        TrackFlamer {
+            flamer: Flamer::new(profile, bviz_trace_profile::worker_count()),
+        }
+    }
+
+    pub(crate) fn build(&self, selected: impl Fn(usize) -> bool + Sync) -> FlameGraph {
+        build_flame_graph_for_tracks(&self.flamer, selected)
+    }
+}
+
 /// Build the aggregated flame graph over exactly the thread tracks `selected`
 /// admits (by index into [`Profile::threads`]), by the same time-containment
 /// plus semantic merge as [`build_flame_graph`]: within each selected lane every
 /// span nests under the span that time-contains it, and identically labelled
 /// spans at the same place merge across the selected lanes into one frame.
 ///
-/// The name scan covers exactly the selected lanes, so the rank-coverage
-/// invariant [`scan`] documents holds. A critical-path lane holds redirected
-/// copies of worker time, so selecting it alongside the worker lanes it copies
-/// sums both; membership is the caller's to choose.
-pub fn build_flame_graph_for_tracks(
-    profile: &Arc<Profile>,
+/// `flamer`'s name scan must cover every selected lane, so the rank-coverage
+/// invariant [`scan`] documents holds; a whole-profile scan (see [`TrackFlamer`])
+/// satisfies any selection. A critical-path lane holds redirected copies of
+/// worker time, so selecting it alongside the worker lanes it copies sums both;
+/// membership is the caller's to choose.
+pub(crate) fn build_flame_graph_for_tracks(
+    flamer: &Flamer,
     selected: impl Fn(usize) -> bool + Sync,
 ) -> FlameGraph {
     let workers = bviz_trace_profile::worker_count();
-    let flamer = Flamer::scoped(profile, workers, &selected);
-    let threads = profile.threads();
+    let threads = flamer.profile.threads();
     // Each worker folds its stolen lanes into one root; the roots then fold
     // together. Lane order within a worker can't change the sealed graph, since
     // the flatten sort is total.
@@ -676,10 +700,10 @@ pub fn build_flame_graph_for_tracks(
             return;
         }
         let thread = &threads[i];
-        merge_lane(root, profile, &flamer, thread);
+        merge_lane(root, &flamer.profile, flamer, thread);
     });
     let mut root = fold_all(shards);
-    seal(&mut root, profile)
+    seal(&mut root, &flamer.profile)
 }
 
 /// A mutable reference to `class`'s value in a class-keyed list, inserting
@@ -709,9 +733,9 @@ fn class_entry<T>(
 /// The lanes shard across `workers` into per-worker partial trees; which lanes
 /// a worker steals cannot change the result, because the partial-tree fold sums
 /// and the flatten sort is total.
-pub(crate) fn class_trees<'p>(
-    profile: &'p Profile,
-    flamer: &Flamer<'p>,
+pub(crate) fn class_trees(
+    profile: &Profile,
+    flamer: &Flamer,
     include: impl Fn(LaneClass) -> bool + Sync,
     workers: usize,
 ) -> Vec<(LaneClass, Builder)> {
@@ -1056,6 +1080,7 @@ mod tests {
         _assert_thread_safe::<FlameGraph>();
         _assert_thread_safe::<FlameNode>();
         _assert_thread_safe::<FlameBox>();
+        _assert_thread_safe::<TrackFlamer>();
         _assert_thread_safe::<crate::StatRow>();
     }
 
