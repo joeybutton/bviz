@@ -29,8 +29,8 @@ use stats::{DEFAULT_STATS_SORT, StatsColumn, StatsOrder, stats_thumb_to};
 use theme::Palette;
 
 use bviz_trace_layout::{
-    Cull, FlameView, LaneLayout, LaneMetrics, ScopeAggregate, TimeView, Viewport, VisibleSlice,
-    lay_out_lanes, visible_slices,
+    Cull, FlameView, LaneLayout, LaneMetrics, ScopeAggregate, TimeView, TrackFlamer, Viewport,
+    VisibleSlice, lay_out_lanes, visible_slices,
 };
 use bviz_trace_profile::{LaneClass, Profile, Slice, SliceDetail, TimeSpan};
 use bviz_ui_components::{
@@ -339,6 +339,10 @@ struct TraceView {
     /// value stays shown while a rebuild runs, so a selection change doesn't
     /// blank the view.
     aggregates: Rc<RefCell<Option<Arc<ScopeAggregate>>>>,
+    /// The loaded profile's whole-profile flame name scan, reused across track
+    /// selections; `None` until the first aggregate build scans it. Valid for any
+    /// selection, so it is dropped only when a new profile loads.
+    flame_scan: Rc<RefCell<Option<Arc<TrackFlamer>>>>,
     /// The flame graph's memoized box layout; see [`FlameBoxCache`].
     flame_boxes: Rc<RefCell<Option<FlameBoxCache>>>,
     /// The timeline's memoized culled draw list; see [`SliceDrawCache`].
@@ -439,6 +443,7 @@ impl TraceView {
             visible_lanes: Rc::new(RefCell::new(None)),
             group_chrome: Rc::new(RefCell::new(None)),
             aggregates: Rc::new(RefCell::new(None)),
+            flame_scan: Rc::new(RefCell::new(None)),
             flame_boxes: Rc::new(RefCell::new(None)),
             slice_draw: Rc::new(RefCell::new(None)),
             agg: Rebuild::new(),
@@ -1296,23 +1301,26 @@ impl TraceView {
         let generation = self.agg.start(key);
         let profile = profile.clone();
         let selected = self.selected_tracks.clone();
+        let cached_scan = self.flame_scan.borrow().clone();
         let task = load_in_background(
             cx,
             move || {
                 let t = std::time::Instant::now();
-                let aggregate = ScopeAggregate::build_for_tracks(&profile, |i| {
+                let scan = cached_scan.unwrap_or_else(|| Arc::new(TrackFlamer::new(&profile)));
+                let aggregate = ScopeAggregate::build_for_tracks_reusing(&scan, |i| {
                     selected.get(i).copied().unwrap_or(false)
                 });
                 if std::env::var_os("BVIZ_TRACE_TIMING").is_some() {
                     eprintln!("[timing] track_aggregate: {:.3}s", t.elapsed().as_secs_f64());
                 }
-                aggregate
+                (scan, aggregate)
             },
-            move |view, aggregates, _cx| {
+            move |view, (scan, aggregates), _cx| {
                 // Discard a result the inputs have moved past since this spawn.
                 if !view.agg.accept(generation, key) {
                     return;
                 }
+                *view.flame_scan.borrow_mut() = Some(scan);
                 *view.aggregates.borrow_mut() = Some(Arc::new(aggregates));
                 view.flame_boxes.borrow_mut().take();
                 // The sorted order is keyed on the new aggregates; let
@@ -1330,6 +1338,7 @@ impl TraceView {
     /// graph is no longer a valid thing to keep showing.
     fn invalidate_aggregates(&mut self) {
         self.aggregates.borrow_mut().take();
+        self.flame_scan.borrow_mut().take();
         self.flame_boxes.borrow_mut().take();
         self.stats_order.borrow_mut().take();
         self.agg.invalidate();
