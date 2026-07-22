@@ -73,11 +73,33 @@ fn main() {
             threads[i].lane_class != LaneClass::CriticalPath
         }));
     });
+    let all_columnar = min_secs(iters, || {
+        std::hint::black_box(ScopeAggregate::build_for_tracks_columnar(&scan, |i| {
+            threads[i].lane_class != LaneClass::CriticalPath
+        }));
+    });
 
     let single_agg = ScopeAggregate::build_for_tracks(&profile, |i| i == biggest);
     let all_agg = ScopeAggregate::build_for_tracks(&profile, |i| {
         threads[i].lane_class != LaneClass::CriticalPath
     });
+    // Both aggregation paths must agree on the real profile: build the all-track
+    // selection each way from the one reused scan and compare their nodes.
+    let trie_all = ScopeAggregate::build_for_tracks_reusing(&scan, |i| {
+        threads[i].lane_class != LaneClass::CriticalPath
+    });
+    let columnar_all = ScopeAggregate::build_for_tracks_columnar(&scan, |i| {
+        threads[i].lane_class != LaneClass::CriticalPath
+    });
+    assert_eq!(
+        columnar_all.flame.nodes(),
+        trie_all.flame.nodes(),
+        "columnar aggregation must match the trie on the all-track selection"
+    );
+    eprintln!(
+        "[bench] columnar matches trie: {} nodes",
+        columnar_all.flame.nodes().len()
+    );
     eprintln!(
         "[bench] lanes: {real_lanes} real, {total_slices} slices; \
          biggest lane #{biggest} = {big_slices} slices"
@@ -89,6 +111,7 @@ fn main() {
     eprintln!(
         "[bench] scan once: {scan_cold:.3}s  \
          build_for_tracks_reusing(all): {all_reused:.3}s  \
+         build_for_tracks_columnar(all): {all_columnar:.3}s  \
          (rebuild saves {:.3}s vs one-shot {all:.3}s)",
         all - all_reused,
     );

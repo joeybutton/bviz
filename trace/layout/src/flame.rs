@@ -729,6 +729,10 @@ impl TrackFlamer {
     pub(crate) fn build(&self, selected: impl Fn(usize) -> bool + Sync) -> FlameGraph {
         build_flame_graph_for_tracks(&self.flamer, selected)
     }
+
+    pub(crate) fn build_columnar(&self, selected: impl Fn(usize) -> bool + Sync) -> FlameGraph {
+        build_flame_graph_for_tracks_columnar(&self.flamer, selected)
+    }
 }
 
 /// Build the aggregated flame graph over exactly the thread tracks `selected`
@@ -759,6 +763,195 @@ pub(crate) fn build_flame_graph_for_tracks(
         merge_lane(root, &flamer.profile, flamer, thread);
     });
     let mut root = fold_all(shards);
+    seal(&mut root, &flamer.profile)
+}
+
+/// Bytes encoding one aggregation-path segment in a [`Row`] key: the label's
+/// [`Ranks`] rank as 4 big-endian bytes, then one byte packing the span role.
+/// Big-endian keeps lexicographic key order equal to rank order, and equal
+/// segments produce equal bytes, so a path's key is a byte prefix of every
+/// descendant's key.
+const SEGMENT_BYTES: usize = 5;
+
+/// One byte encoding a [`SpanRole`]: the workload in the high bits, the payload
+/// flag in bit 0. The 8-variant workload occupies bits 1..4, so the pair
+/// round-trips to a distinct byte and equal roles encode equally.
+fn role_byte(role: SpanRole) -> u8 {
+    ((role.workload as u8) << 1) | (role.payload as u8)
+}
+
+/// One emitted span in the path-sort aggregation: its full aggregation-path key
+/// (5 bytes per segment, root-to-span), the frame it merges into, and its own
+/// duration. Rows sharing a key merge into one node.
+struct Row {
+    key: Vec<u8>,
+    label: Str,
+    rank: u32,
+    role: SpanRole,
+    dur: i64,
+}
+
+/// A node of the aggregation tree under reconstruction from path-sorted rows,
+/// held in an index arena so the tree is built without a borrow-stack: `children`
+/// lists arena indices in insertion (key) order. Converted to an owned [`Builder`]
+/// once every node is placed.
+struct ArenaNode {
+    name: Str,
+    rank: u32,
+    role: SpanRole,
+    total_us: i64,
+    count: u32,
+    children: Vec<usize>,
+}
+
+/// The containment parent of each slice: the nearest enclosing earlier slice, or
+/// `None` for a top-level slice. Same depth-stack walk as [`containment_forest`],
+/// yielding the parent index directly rather than per-node child lists.
+fn containment_parents(slices: &[Slice]) -> Vec<Option<usize>> {
+    debug_assert!(
+        slices.windows(2).all(|w| {
+            w[0].start_us < w[1].start_us
+                || (w[0].start_us == w[1].start_us && w[0].dur_us >= w[1].dur_us)
+        }),
+        "slices must be in lane order: start ascending, ties longest-first"
+    );
+    let mut parents = vec![None; slices.len()];
+    let mut stack: Vec<usize> = Vec::new();
+    for i in 0..slices.len() {
+        let slice_end = end_us(&slices[i]);
+        while stack
+            .last()
+            .is_some_and(|&top| end_us(&slices[top]) < slice_end)
+        {
+            stack.pop();
+        }
+        parents[i] = stack.last().copied();
+        stack.push(i);
+    }
+    parents
+}
+
+/// Emit one [`Row`] per slice of `thread` into `out`, keyed by its
+/// aggregation path. Slices are in lane order, so a slice's containment parent
+/// precedes it and its key is the parent's key extended by this slice's segment.
+fn emit_lane_rows(flamer: &Flamer, thread: &ThreadTrack, out: &mut Vec<Row>) {
+    let slices = flamer.profile.slices(thread);
+    let details = flamer.profile.details(thread);
+    let parents = containment_parents(slices);
+    out.reserve(slices.len());
+    let mut keys: Vec<Vec<u8>> = Vec::with_capacity(slices.len());
+    for i in 0..slices.len() {
+        let seg = flamer.span_label(&slices[i], &details[i]);
+        let rank = flamer.ranks.rank_of(seg.label);
+        let parent_key = match parents[i] {
+            Some(p) => keys[p].as_slice(),
+            None => &[],
+        };
+        let mut key = Vec::with_capacity(parent_key.len() + SEGMENT_BYTES);
+        key.extend_from_slice(parent_key);
+        key.extend_from_slice(&rank.to_be_bytes());
+        key.push(role_byte(seg.role));
+        out.push(Row {
+            key: key.clone(),
+            label: seg.label,
+            rank,
+            role: seg.role,
+            dur: slices[i].dur_us,
+        });
+        keys.push(key);
+    }
+}
+
+/// Convert an [`ArenaNode`] and its subtree into an owned [`Builder`]. Child
+/// order follows the arena's insertion order; [`flatten`] re-sorts children, so
+/// the order carried here does not affect the sealed graph.
+fn arena_to_builder(arena: &[ArenaNode], idx: usize) -> Builder {
+    let node = &arena[idx];
+    let children = node
+        .children
+        .iter()
+        .map(|&c| arena_to_builder(arena, c))
+        .collect();
+    Builder {
+        name: node.name,
+        rank: node.rank,
+        role: node.role,
+        total_us: node.total_us,
+        count: node.count,
+        children,
+        index: ChildIndex::Linear,
+    }
+}
+
+/// Build the same aggregated flame graph as [`build_flame_graph_for_tracks`] by
+/// path-sort accumulation rather than a merge trie: emit one keyed row per span,
+/// sort the rows by key, segment-reduce equal keys into nodes, and rebuild the
+/// tree from the sorted nodes. Ascending key order lists every parent before its
+/// descendants, so a stack indexed by depth locates each node's parent. The
+/// result seals through the same [`seal`], so it is byte-identical to the trie
+/// build.
+pub(crate) fn build_flame_graph_for_tracks_columnar(
+    flamer: &Flamer,
+    selected: impl Fn(usize) -> bool + Sync,
+) -> FlameGraph {
+    let workers = bviz_trace_profile::worker_count();
+    let threads = flamer.profile.threads();
+    let shards = run_sharded(workers, threads.len(), |rows: &mut Vec<Row>, i| {
+        if !selected(i) {
+            return;
+        }
+        emit_lane_rows(flamer, &threads[i], rows);
+    });
+    let mut rows: Vec<Row> = shards.into_iter().flatten().collect();
+    rows.par_sort_unstable_by(|a, b| a.key.cmp(&b.key));
+
+    let mut arena: Vec<ArenaNode> = Vec::with_capacity(rows.len() + 1);
+    arena.push(ArenaNode {
+        name: ROOT_LABEL,
+        rank: 0,
+        role: SpanRole { workload: Workload::Other, payload: false },
+        total_us: 0,
+        count: 0,
+        children: Vec::new(),
+    });
+    // `stack[d]` holds the arena index of the current path's depth-`d` node; the
+    // root seeds depth 0. Reducing rows in ascending key order visits a parent
+    // before any descendant, so a node at depth `d` finds its parent at
+    // `stack[d - 1]`, still in place from when that parent was reduced.
+    let mut stack: Vec<usize> = vec![0];
+    let mut root_total = 0i64;
+    let mut i = 0;
+    while i < rows.len() {
+        let mut total = rows[i].dur;
+        let mut count = 1u32;
+        let mut j = i + 1;
+        while j < rows.len() && rows[j].key == rows[i].key {
+            total += rows[j].dur;
+            count += 1;
+            j += 1;
+        }
+        let depth = rows[i].key.len() / SEGMENT_BYTES;
+        let parent = stack[depth - 1];
+        let idx = arena.len();
+        arena.push(ArenaNode {
+            name: rows[i].label,
+            rank: rows[i].rank,
+            role: rows[i].role,
+            total_us: total,
+            count,
+            children: Vec::new(),
+        });
+        arena[parent].children.push(idx);
+        stack.truncate(depth);
+        stack.push(idx);
+        if depth == 1 {
+            root_total += total;
+        }
+        i = j;
+    }
+    arena[0].total_us = root_total;
+
+    let mut root = arena_to_builder(&arena, 0);
     seal(&mut root, &flamer.profile)
 }
 

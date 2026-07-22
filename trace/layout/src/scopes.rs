@@ -52,6 +52,18 @@ impl ScopeAggregate {
         ScopeAggregate::from_graph(scan.build(selected))
     }
 
+    /// Builds a selection's aggregate from an already-scanned [`TrackFlamer`] by
+    /// the path-sort accumulation of
+    /// [`build_flame_graph_for_tracks_columnar`](crate::flame). It produces the
+    /// same aggregate as [`Self::build_for_tracks_reusing`] by a different
+    /// aggregation path.
+    pub fn build_for_tracks_columnar(
+        scan: &TrackFlamer,
+        selected: impl Fn(usize) -> bool + Sync,
+    ) -> ScopeAggregate {
+        ScopeAggregate::from_graph(scan.build_columnar(selected))
+    }
+
     fn from_graph(flame: FlameGraph) -> ScopeAggregate {
         let stats = stats_from_flame(&flame);
         let default_order = default_order(&stats);
@@ -413,6 +425,37 @@ mod tests {
             );
             assert_eq!(order(&reused), order(&fresh));
             assert_eq!(reused.grand_total, fresh.grand_total);
+        }
+    }
+
+    #[test]
+    fn columnar_matches_trie_across_selections() {
+        // Path-sort accumulation must reproduce the merge-trie graph and stats
+        // byte-for-byte for every selection, built from one shared scan so both
+        // paths rank labels identically and the graphs compare by handle.
+        let p = full_profile();
+        let threads = p.threads();
+        let scan = TrackFlamer::new(&p);
+        let one_execution = threads
+            .iter()
+            .position(|t| t.lane_class == LaneClass::Execution)
+            .unwrap();
+        let selections: Vec<Box<dyn Fn(usize) -> bool + Sync>> = vec![
+            Box::new(|i: usize| threads[i].lane_class != LaneClass::CriticalPath),
+            Box::new(move |i: usize| i == one_execution),
+            Box::new(|_: usize| false),
+            Box::new(|_: usize| true),
+            Box::new(|i: usize| i % 2 == 0),
+        ];
+        for sel in &selections {
+            let columnar = ScopeAggregate::build_for_tracks_columnar(&scan, sel);
+            let trie = ScopeAggregate::build_for_tracks_reusing(&scan, sel);
+            assert_eq!(columnar.flame, trie.flame);
+            assert_eq!(
+                resolved_rows(&columnar.flame, &columnar.stats),
+                resolved_rows(&trie.flame, &trie.stats),
+            );
+            assert_eq!(columnar.grand_total, trie.grand_total);
         }
     }
 
