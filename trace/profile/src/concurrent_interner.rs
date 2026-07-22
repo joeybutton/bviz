@@ -13,6 +13,34 @@ use hashbrown::HashTable;
 
 use crate::model::Str;
 
+/// Backs `[ptr, ptr + len)` with ordinary 4 KB pages, best-effort. The arena is
+/// a large anonymous mapping first-touched concurrently by the parse workers;
+/// under system THP=always, fault-time or khugepaged huge-page collapse of it
+/// triggers compaction stalls that serialize those first touches.
+#[cfg(target_os = "linux")]
+fn advise_no_thp(ptr: *mut std::os::raw::c_void, len: usize) {
+    use std::os::raw::{c_int, c_void};
+
+    // Linux `asm-generic/mman-common.h` MADV_NOHUGEPAGE (architecture-independent).
+    const MADV_NOHUGEPAGE: c_int = 15;
+
+    unsafe extern "C" {
+        fn madvise(addr: *mut c_void, len: usize, advice: c_int) -> c_int;
+    }
+
+    // SAFETY: `[ptr, len)` names the just-allocated arena mapping; madvise only
+    // sets page-backing policy and neither reads, writes, nor aliases the
+    // buffer, so it cannot violate the arena's aliasing invariants. Advisory: a
+    // failure (unaligned base from the allocator, a kernel without THP) leaves
+    // ordinary backing, so the result is ignored.
+    unsafe {
+        let _ = madvise(ptr, len, MADV_NOHUGEPAGE);
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn advise_no_thp(_ptr: *mut std::os::raw::c_void, _len: usize) {}
+
 /// Hashes an interner key. Non-cryptographic: the keys are short,
 /// non-adversarial profile strings interned tens of millions of times, where
 /// the default SipHash is the dominant lookup cost.
@@ -131,6 +159,7 @@ impl ConcurrentInterner {
         // silently truncate a handle.
         assert!(cap <= u32::MAX as usize, "interner pool must index in u32");
         let buf: Box<[u8]> = vec![0u8; cap].into_boxed_slice();
+        advise_no_thp(buf.as_ptr() as *mut std::os::raw::c_void, cap);
         // SAFETY: `UnsafeCell<u8>` is `repr(transparent)` over `u8` — identical
         // size and alignment — so reinterpreting the zeroed buffer as a slice of
         // cells preserves its layout and lets disjoint page writes go through
