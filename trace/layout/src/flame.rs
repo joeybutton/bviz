@@ -720,7 +720,7 @@ pub fn build_flame_graph(profile: &Arc<Profile>, scope: Scope) -> FlameGraph {
 /// ([`LaneTable`], one per [`Profile::threads`] entry): a lane's spans emit
 /// path keys and reduce into per-node totals that do not depend on the
 /// selection, so this per-lane work is done once here and a selection is then a
-/// merge of the selected lanes' tables (see [`build_columnar_cached`](TrackFlamer::build_columnar_cached)).
+/// merge of the selected lanes' tables (see [`build`](TrackFlamer::build)).
 pub struct TrackFlamer {
     flamer: Flamer,
     lane_tables: Vec<LaneTable>,
@@ -734,25 +734,13 @@ impl TrackFlamer {
         TrackFlamer { flamer, lane_tables }
     }
 
-    pub(crate) fn build(&self, selected: impl Fn(usize) -> bool + Sync) -> FlameGraph {
-        build_flame_graph_for_tracks(&self.flamer, selected)
-    }
-
-    pub(crate) fn build_columnar(&self, selected: impl Fn(usize) -> bool + Sync) -> FlameGraph {
-        build_flame_graph_for_tracks_columnar(&self.flamer, selected)
-    }
-
     /// Build the selection's flame graph by merging the selected lanes' cached
     /// [`LaneTable`]s: concatenate their reduced nodes, sort the union by path
     /// key, coalesce equal paths across lanes (summing totals and counts), and
-    /// reconstruct through the same [`reconstruct_and_seal`] the one-shot
-    /// columnar build uses. Byte-identical to
-    /// [`build_flame_graph_for_tracks`], since it aggregates the same spans by
-    /// the same path keys.
-    pub(crate) fn build_columnar_cached(
-        &self,
-        selected: impl Fn(usize) -> bool + Sync,
-    ) -> FlameGraph {
+    /// reconstruct through [`reconstruct_and_seal`]. Byte-identical to the merge
+    /// trie [`build_flame_graph_for_tracks`], since it aggregates the same spans
+    /// by the same path keys.
+    pub(crate) fn build(&self, selected: impl Fn(usize) -> bool + Sync) -> FlameGraph {
         let union_len: usize = self
             .lane_tables
             .iter()
@@ -823,8 +811,7 @@ fn build_lane_tables(flamer: &Flamer, workers: usize) -> Vec<LaneTable> {
 
 /// Reduce lane `lane_index` to its [`LaneTable`]: emit one keyed row per span,
 /// sort by key, segment-reduce equal keys into nodes, and pack each distinct key
-/// into the shared `key_pool`. Same emission and reduction as the one-shot
-/// columnar build, restricted to one lane and stopping at the reduced nodes.
+/// into the shared `key_pool`.
 fn build_lane_table(flamer: &Flamer, lane_index: usize) -> LaneTable {
     let thread = &flamer.profile.threads()[lane_index];
     let mut rows: Vec<Row> = Vec::new();
@@ -869,6 +856,19 @@ fn build_lane_table(flamer: &Flamer, lane_index: usize) -> LaneTable {
 /// satisfies any selection. A critical-path lane holds redirected copies of
 /// worker time, so selecting it alongside the worker lanes it copies sums both;
 /// membership is the caller's to choose.
+///
+/// Retained as the byte-exactness oracle for [`TrackFlamer::build`], which the
+/// production cached-columnar merge is diff-tested against.
+#[cfg(test)]
+impl TrackFlamer {
+    /// The merge-trie build over the same selection, reached from the flamer a
+    /// test holds — the oracle [`TrackFlamer::build`] is compared against.
+    pub(crate) fn build_trie(&self, selected: impl Fn(usize) -> bool + Sync) -> FlameGraph {
+        build_flame_graph_for_tracks(&self.flamer, selected)
+    }
+}
+
+#[cfg(test)]
 pub(crate) fn build_flame_graph_for_tracks(
     flamer: &Flamer,
     selected: impl Fn(usize) -> bool + Sync,
@@ -1007,10 +1007,9 @@ fn arena_to_builder(arena: &[ArenaNode], idx: usize) -> Builder {
 }
 
 /// One path-sorted node awaiting tree reconstruction: its aggregation-path key
-/// bytes, the frame it becomes, and its already-summed duration and span count.
-/// A single-span row carries `total_us = dur`, `count = 1`; a cached lane node
-/// carries its lane's reduced sums. Equal adjacent keys still coalesce in
-/// [`reconstruct_and_seal`], so nodes from several sources sharing a path merge.
+/// bytes, the frame it becomes, and its already-summed duration and span count
+/// (a cached [`LaneNode`]'s per-lane reduced sums). Equal adjacent keys coalesce
+/// in [`reconstruct_and_seal`], so nodes from several lanes sharing a path merge.
 struct SortedNode<'a> {
     key: &'a [u8],
     label: Str,
@@ -1074,37 +1073,6 @@ fn reconstruct_and_seal(nodes: &[SortedNode], profile: &Arc<Profile>) -> FlameGr
 
     let mut root = arena_to_builder(&arena, 0);
     seal(&mut root, profile)
-}
-
-/// Build the same aggregated flame graph as [`build_flame_graph_for_tracks`] by
-/// path-sort accumulation rather than a merge trie: emit one keyed row per span,
-/// sort the rows by key, then reconstruct through [`reconstruct_and_seal`].
-pub(crate) fn build_flame_graph_for_tracks_columnar(
-    flamer: &Flamer,
-    selected: impl Fn(usize) -> bool + Sync,
-) -> FlameGraph {
-    let workers = bviz_trace_profile::worker_count();
-    let threads = flamer.profile.threads();
-    let shards = run_sharded(workers, threads.len(), |rows: &mut Vec<Row>, i| {
-        if !selected(i) {
-            return;
-        }
-        emit_lane_rows(flamer, &threads[i], rows);
-    });
-    let mut rows: Vec<Row> = shards.into_iter().flatten().collect();
-    rows.par_sort_unstable_by(|a, b| a.key.cmp(&b.key));
-    let nodes: Vec<SortedNode> = rows
-        .iter()
-        .map(|r| SortedNode {
-            key: &r.key,
-            label: r.label,
-            rank: r.rank,
-            role: r.role,
-            total_us: r.dur,
-            count: 1,
-        })
-        .collect();
-    reconstruct_and_seal(&nodes, &flamer.profile)
 }
 
 /// A mutable reference to `class`'s value in a class-keyed list, inserting

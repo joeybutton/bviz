@@ -7,7 +7,7 @@
 
 use std::sync::Arc;
 
-use bviz_trace_layout::{ScopeAggregate, TrackFlamer};
+use bviz_trace_layout::{Scope, ScopeAggregate, TrackFlamer};
 use bviz_trace_profile::{LaneClass, Profile};
 
 #[global_allocator]
@@ -76,49 +76,26 @@ fn main() {
             threads[i].lane_class != LaneClass::CriticalPath
         }));
     });
-    let all_columnar = min_secs(iters, || {
-        std::hint::black_box(ScopeAggregate::build_for_tracks_columnar(&scan, |i| {
-            threads[i].lane_class != LaneClass::CriticalPath
-        }));
-    });
-    let all_columnar_cached = min_secs(iters, || {
-        std::hint::black_box(ScopeAggregate::build_for_tracks_columnar_cached(&scan, |i| {
-            threads[i].lane_class != LaneClass::CriticalPath
-        }));
-    });
 
     let single_agg = ScopeAggregate::build_for_tracks(&profile, |i| i == biggest);
     let all_agg = ScopeAggregate::build_for_tracks(&profile, |i| {
         threads[i].lane_class != LaneClass::CriticalPath
     });
-    // Both aggregation paths must agree on the real profile: build the all-track
-    // selection each way from the one reused scan and compare their nodes.
-    let trie_all = ScopeAggregate::build_for_tracks_reusing(&scan, |i| {
+    // Selecting every non-critical-path lane is the membership Scope::All uses,
+    // so the production track build must reproduce the trie-based Scope::All
+    // graph node-for-node on the real profile.
+    let track_all = ScopeAggregate::build_for_tracks_reusing(&scan, |i| {
         threads[i].lane_class != LaneClass::CriticalPath
     });
-    let columnar_all = ScopeAggregate::build_for_tracks_columnar(&scan, |i| {
-        threads[i].lane_class != LaneClass::CriticalPath
-    });
-    let columnar_cached_all = ScopeAggregate::build_for_tracks_columnar_cached(&scan, |i| {
-        threads[i].lane_class != LaneClass::CriticalPath
-    });
+    let scope_all = ScopeAggregate::build(&profile, Scope::All);
     assert_eq!(
-        columnar_all.flame.nodes(),
-        trie_all.flame.nodes(),
-        "columnar aggregation must match the trie on the all-track selection"
-    );
-    assert_eq!(
-        columnar_cached_all.flame.nodes(),
-        trie_all.flame.nodes(),
-        "cached columnar aggregation must match the trie on the all-track selection"
+        track_all.flame.nodes(),
+        scope_all.flame.nodes(),
+        "the track build must match Scope::All on the all-track selection"
     );
     eprintln!(
-        "[bench] columnar matches trie: {} nodes",
-        columnar_all.flame.nodes().len()
-    );
-    eprintln!(
-        "[bench] columnar_cached matches trie: {} nodes",
-        columnar_cached_all.flame.nodes().len()
+        "[bench] track build matches Scope::All: {} nodes",
+        track_all.flame.nodes().len()
     );
     eprintln!(
         "[bench] lanes: {real_lanes} real, {total_slices} slices; \
@@ -131,8 +108,6 @@ fn main() {
     eprintln!(
         "[bench] scan once (incl. lane tables): {scan_cold:.3}s  \
          build_for_tracks_reusing(all): {all_reused:.3}s  \
-         build_for_tracks_columnar(all): {all_columnar:.3}s  \
-         build_for_tracks_columnar_cached(all): {all_columnar_cached:.3}s  \
          (rebuild saves {:.3}s vs one-shot {all:.3}s)",
         all - all_reused,
     );

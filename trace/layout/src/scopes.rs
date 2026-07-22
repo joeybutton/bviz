@@ -31,10 +31,11 @@ impl ScopeAggregate {
 
     /// Builds the aggregate over exactly the thread tracks `selected` admits (by
     /// index into [`Profile::threads`]), for a view driven by a lane selection
-    /// rather than a fixed scope. Scans the whole profile for a throwaway
-    /// [`TrackFlamer`]; a caller rebuilding several selections should hold one
-    /// [`TrackFlamer`] and go through [`Self::build_for_tracks_reusing`] instead,
-    /// so the scan is paid once.
+    /// rather than a fixed scope. Scans the whole profile and builds the per-lane
+    /// node tables for a throwaway [`TrackFlamer`]; a caller rebuilding several
+    /// selections should hold one [`TrackFlamer`] and go through
+    /// [`Self::build_for_tracks_reusing`] instead, so that precompute is paid
+    /// once.
     pub fn build_for_tracks(
         profile: &Arc<Profile>,
         selected: impl Fn(usize) -> bool + Sync,
@@ -42,39 +43,15 @@ impl ScopeAggregate {
         ScopeAggregate::from_graph(TrackFlamer::new(profile).build(selected))
     }
 
-    /// Builds a selection's aggregate from an already-scanned [`TrackFlamer`],
-    /// skipping the whole-profile scan so a view can rebuild across selection
-    /// changes without rescanning.
+    /// Builds a selection's aggregate from an already-scanned [`TrackFlamer`] by
+    /// merging its cached per-lane node tables (see [`TrackFlamer::build`]),
+    /// skipping the whole-profile scan and per-lane reduction so a view can
+    /// rebuild across selection changes paying only the merge.
     pub fn build_for_tracks_reusing(
         scan: &TrackFlamer,
         selected: impl Fn(usize) -> bool + Sync,
     ) -> ScopeAggregate {
         ScopeAggregate::from_graph(scan.build(selected))
-    }
-
-    /// Builds a selection's aggregate from an already-scanned [`TrackFlamer`] by
-    /// the path-sort accumulation of
-    /// [`build_flame_graph_for_tracks_columnar`](crate::flame). It produces the
-    /// same aggregate as [`Self::build_for_tracks_reusing`] by a different
-    /// aggregation path.
-    pub fn build_for_tracks_columnar(
-        scan: &TrackFlamer,
-        selected: impl Fn(usize) -> bool + Sync,
-    ) -> ScopeAggregate {
-        ScopeAggregate::from_graph(scan.build_columnar(selected))
-    }
-
-    /// Builds a selection's aggregate from an already-scanned [`TrackFlamer`] by
-    /// merging the selection's cached per-lane node tables (see
-    /// [`TrackFlamer::build_columnar_cached`](crate::flame)), so the per-span
-    /// emission, keying, and per-lane sort are paid once when the scan is built
-    /// rather than on every selection. Produces the same aggregate as
-    /// [`Self::build_for_tracks_reusing`].
-    pub fn build_for_tracks_columnar_cached(
-        scan: &TrackFlamer,
-        selected: impl Fn(usize) -> bool + Sync,
-    ) -> ScopeAggregate {
-        ScopeAggregate::from_graph(scan.build_columnar_cached(selected))
     }
 
     fn from_graph(flame: FlameGraph) -> ScopeAggregate {
@@ -443,9 +420,10 @@ mod tests {
 
     #[test]
     fn columnar_matches_trie_across_selections() {
-        // Path-sort accumulation must reproduce the merge-trie graph and stats
-        // byte-for-byte for every selection, built from one shared scan so both
-        // paths rank labels identically and the graphs compare by handle.
+        // The production cached-columnar merge must reproduce the merge-trie
+        // oracle's graph and stats byte-for-byte for every selection, built from
+        // one shared scan so both paths rank labels identically and the graphs
+        // compare by handle.
         let p = full_profile();
         let threads = p.threads();
         let scan = TrackFlamer::new(&p);
@@ -461,21 +439,14 @@ mod tests {
             Box::new(|i: usize| i % 2 == 0),
         ];
         for sel in &selections {
-            let columnar = ScopeAggregate::build_for_tracks_columnar(&scan, sel);
-            let cached = ScopeAggregate::build_for_tracks_columnar_cached(&scan, sel);
-            let trie = ScopeAggregate::build_for_tracks_reusing(&scan, sel);
-            assert_eq!(columnar.flame, trie.flame);
-            assert_eq!(cached.flame, trie.flame);
+            let production = ScopeAggregate::build_for_tracks_reusing(&scan, sel);
+            let trie = ScopeAggregate::from_graph(scan.build_trie(sel));
+            assert_eq!(production.flame, trie.flame);
             assert_eq!(
-                resolved_rows(&columnar.flame, &columnar.stats),
+                resolved_rows(&production.flame, &production.stats),
                 resolved_rows(&trie.flame, &trie.stats),
             );
-            assert_eq!(
-                resolved_rows(&cached.flame, &cached.stats),
-                resolved_rows(&trie.flame, &trie.stats),
-            );
-            assert_eq!(columnar.grand_total, trie.grand_total);
-            assert_eq!(cached.grand_total, trie.grand_total);
+            assert_eq!(production.grand_total, trie.grand_total);
         }
     }
 
