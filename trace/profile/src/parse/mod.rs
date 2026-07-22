@@ -31,12 +31,14 @@ use serde_events::{ArgEntry, ProfileVisitor, RawEventSeed};
 /// under-sizes the shard tables and costs a rehash.
 const BYTES_PER_DISTINCT: usize = 160;
 
-/// Estimated slice density of a Bazel profile — about one `X`/`i` event
-/// (staged slice) per this many decoded bytes — used to pre-size a parse
-/// chunk's `staging` buffer so it never regrows. Measured near one slice per
-/// 175 bytes on a large profile; rounding down over-reserves slightly, which
-/// is transient capacity freed at the merge, in exchange for no regrowth.
-const BYTES_PER_SLICE: usize = 160;
+/// Densest slice density of a Bazel profile — the fewest decoded bytes per
+/// `X`/`i` event (staged slice) any one chunk reaches — used to pre-size a
+/// parse chunk's `staging` buffer to the worst-case, not average, density so no
+/// chunk regrows. The densest chunks of a large profile pack a slice per ~112
+/// bytes; sizing below that reserves at least as many entries as even the
+/// densest chunk stages. The extra capacity an average chunk over-reserves is
+/// transient, freed at the merge, in exchange for no regrowth.
+const BYTES_PER_SLICE: usize = 100;
 
 /// Fraction of decoded bytes to pre-fault into the interner arena, as
 /// [`INTERN_PREFAULT_NUM`]/[`INTERN_PREFAULT_DEN`]: distinct text measures about
