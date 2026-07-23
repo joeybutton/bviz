@@ -4,6 +4,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use bviz_trace_profile::{
     LaneClass, Profile, Slice, SliceDetail, Span32, SpanRole, Str, ThreadTrack, Workload,
 };
+use rayon::iter::{IntoParallelRefMutIterator, ParallelIterator};
 use rayon::slice::ParallelSliceMut;
 use rustc_hash::{FxHashMap, FxHashSet};
 
@@ -1017,8 +1018,18 @@ fn flatten_arena(arena: &mut Vec<ArenaNode>) -> Vec<FlameNode> {
         .iter()
         .map(|n| (std::cmp::Reverse(n.total_us), n.rank, n.role))
         .collect();
-    for node in arena.iter_mut() {
-        node.children.sort_unstable_by_key(|&c| key[c]);
+    // Each node's child list is independent, so the arena sorts across nodes in
+    // parallel; a small arena sorts serially, the parallel split paying only at
+    // scale.
+    const PARALLEL_MIN: usize = 1 << 13;
+    if arena.len() < PARALLEL_MIN {
+        for node in arena.iter_mut() {
+            node.children.sort_unstable_by_key(|&c| key[c]);
+        }
+    } else {
+        arena
+            .par_iter_mut()
+            .for_each(|node| node.children.sort_unstable_by_key(|&c| key[c]));
     }
 
     let mut nodes = Vec::with_capacity(arena.len());
