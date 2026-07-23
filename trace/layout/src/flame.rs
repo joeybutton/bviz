@@ -985,25 +985,71 @@ fn emit_lane_rows(flamer: &Flamer, thread: &ThreadTrack, out: &mut Vec<Row>) {
     }
 }
 
-/// Convert an [`ArenaNode`] and its subtree into an owned [`Builder`]. Child
-/// order follows the arena's insertion order; [`flatten`] re-sorts children, so
-/// the order carried here does not affect the sealed graph.
-fn arena_to_builder(arena: &[ArenaNode], idx: usize) -> Builder {
+/// Freeze arena node `idx` into a flame node at `depth`, leaving `width_us` at a
+/// placeholder (the node's own total) and `children` blank for the bottom-up pass
+/// and the BFS layout to fill. Mirrors [`freeze`]'s self-time floor.
+fn freeze_arena(arena: &[ArenaNode], idx: usize, depth: u32) -> FlameNode {
     let node = &arena[idx];
-    let children = node
-        .children
-        .iter()
-        .map(|&c| arena_to_builder(arena, c))
-        .collect();
-    Builder {
+    let children_total: i64 = node.children.iter().map(|&c| arena[c].total_us).sum();
+    FlameNode {
         name: node.name,
         rank: node.rank,
-        role: node.role,
         total_us: node.total_us,
+        self_us: (node.total_us - children_total).max(0),
+        width_us: node.total_us,
+        role: node.role,
         count: node.count,
-        children,
-        index: ChildIndex::Linear,
+        depth,
+        subtree_max_depth: depth,
+        children: Span32::default(),
     }
+}
+
+/// Flatten the arena forest directly into a flat node array with node 0 the root,
+/// producing the same [`FlameNode`] array as [`flatten`] on the equivalent
+/// [`Builder`] tree. Every node's children are sorted widest-first (breaking ties
+/// by name rank, then role), laid down breadth-first as one contiguous block per
+/// parent, then a single reverse pass fills each node's `width_us`
+/// (`max(total, Σ children width)`) and `subtree_max_depth`. Sorts the arena's
+/// child lists in place.
+fn flatten_arena(arena: &mut Vec<ArenaNode>) -> Vec<FlameNode> {
+    let key: Vec<(std::cmp::Reverse<i64>, u32, SpanRole)> = arena
+        .iter()
+        .map(|n| (std::cmp::Reverse(n.total_us), n.rank, n.role))
+        .collect();
+    for node in arena.iter_mut() {
+        node.children.sort_unstable_by_key(|&c| key[c]);
+    }
+
+    let mut nodes = Vec::with_capacity(arena.len());
+    nodes.push(freeze_arena(arena, 0, 0));
+    let mut queue: std::collections::VecDeque<(usize, usize, u32)> =
+        std::collections::VecDeque::new();
+    queue.push_back((0, 0, 0));
+    while let Some((ai, ni, depth)) = queue.pop_front() {
+        let off = nodes.len() as u32;
+        for &c in &arena[ai].children {
+            let child_idx = nodes.len();
+            nodes.push(freeze_arena(arena, c, depth + 1));
+            queue.push_back((c, child_idx, depth + 1));
+        }
+        nodes[ni].children = Span32::new(off, nodes.len() as u32 - off);
+    }
+
+    // A child block always follows its parent, so a reverse pass sees every
+    // child finalized before its parent. `width_us` starts at the node's own
+    // total (its placeholder), and takes the max with the summed child widths.
+    for i in (0..nodes.len()).rev() {
+        let mut max_depth = nodes[i].depth;
+        let mut children_width = 0i64;
+        for c in nodes[i].children.range() {
+            max_depth = max_depth.max(nodes[c].subtree_max_depth);
+            children_width += nodes[c].width_us;
+        }
+        nodes[i].width_us = nodes[i].width_us.max(children_width);
+        nodes[i].subtree_max_depth = max_depth;
+    }
+    nodes
 }
 
 /// One path-sorted node awaiting tree reconstruction: its aggregation-path key
@@ -1023,8 +1069,8 @@ struct SortedNode<'a> {
 /// order lists every parent before its descendants, so a stack indexed by depth
 /// locates each node's parent; equal adjacent keys coalesce into one node,
 /// summing totals and counts, so nodes emitted from different lanes on the same
-/// path merge. Seals through the same [`seal`] as every other build, so the
-/// result is byte-identical to the trie build.
+/// path merge. Flattens the arena directly into the sealed node array, byte for
+/// byte the same as sealing the equivalent [`Builder`] tree through [`seal`].
 fn reconstruct_and_seal(nodes: &[SortedNode], profile: &Arc<Profile>) -> FlameGraph {
     let mut arena: Vec<ArenaNode> = Vec::with_capacity(nodes.len() + 1);
     arena.push(ArenaNode {
@@ -1071,8 +1117,13 @@ fn reconstruct_and_seal(nodes: &[SortedNode], profile: &Arc<Profile>) -> FlameGr
     }
     arena[0].total_us = root_total;
 
-    let mut root = arena_to_builder(&arena, 0);
-    seal(&mut root, profile)
+    let nodes = flatten_arena(&mut arena);
+    let max_depth = nodes.iter().map(|n| n.depth).max().unwrap_or(0);
+    FlameGraph {
+        profile: Arc::clone(profile),
+        nodes,
+        max_depth,
+    }
 }
 
 /// A mutable reference to `class`'s value in a class-keyed list, inserting
