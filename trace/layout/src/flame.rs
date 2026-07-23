@@ -912,16 +912,30 @@ struct Row {
 }
 
 /// A node of the aggregation tree under reconstruction from path-sorted rows,
-/// held in an index arena so the tree is built without a borrow-stack: `children`
-/// lists arena indices in insertion (key) order. Converted to an owned [`Builder`]
-/// once every node is placed.
+/// held in an index arena so the tree is built without a borrow-stack. Edges to
+/// children live in a separate CSR ([`ArenaChildren`]) built once every node is
+/// placed.
 struct ArenaNode {
     name: Str,
     rank: u32,
     role: SpanRole,
     total_us: i64,
     count: u32,
-    children: Vec<usize>,
+}
+
+/// Parent-child edges of the reconstruction arena in compressed-sparse-row form:
+/// node `i`'s children are `pool[off[i]..off[i + 1]]`. `off` has length n+1;
+/// `pool` holds one entry per non-root node, listing children in ascending
+/// creation index until [`flatten_arena`] sorts each range widest-first.
+struct ArenaChildren {
+    off: Vec<u32>,
+    pool: Vec<u32>,
+}
+
+impl ArenaChildren {
+    fn of(&self, i: usize) -> &[u32] {
+        &self.pool[self.off[i] as usize..self.off[i + 1] as usize]
+    }
 }
 
 /// The containment parent of each slice: the nearest enclosing earlier slice, or
@@ -985,9 +999,9 @@ fn emit_lane_rows(flamer: &Flamer, thread: &ThreadTrack, out: &mut Vec<Row>) {
 /// Freeze arena node `idx` into a flame node at `depth`, leaving `width_us` at a
 /// placeholder (the node's own total) and `children` blank for the bottom-up pass
 /// and the BFS layout to fill. Mirrors [`freeze`]'s self-time floor.
-fn freeze_arena(arena: &[ArenaNode], idx: usize, depth: u32) -> FlameNode {
+fn freeze_arena(arena: &[ArenaNode], kids: &ArenaChildren, idx: usize, depth: u32) -> FlameNode {
     let node = &arena[idx];
-    let children_total: i64 = node.children.iter().map(|&c| arena[c].total_us).sum();
+    let children_total: i64 = kids.of(idx).iter().map(|&c| arena[c as usize].total_us).sum();
     FlameNode {
         name: node.name,
         rank: node.rank,
@@ -1007,38 +1021,51 @@ fn freeze_arena(arena: &[ArenaNode], idx: usize, depth: u32) -> FlameNode {
 /// [`Builder`] tree. Every node's children are sorted widest-first (breaking ties
 /// by name rank, then role), laid down breadth-first as one contiguous block per
 /// parent, then a single reverse pass fills each node's `width_us`
-/// (`max(total, Σ children width)`) and `subtree_max_depth`. Sorts the arena's
-/// child lists in place.
-fn flatten_arena(arena: &mut Vec<ArenaNode>) -> Vec<FlameNode> {
+/// (`max(total, Σ children width)`) and `subtree_max_depth`. Sorts each node's
+/// CSR child range in place.
+fn flatten_arena(arena: &[ArenaNode], kids: &mut ArenaChildren) -> Vec<FlameNode> {
     let key: Vec<(std::cmp::Reverse<i64>, u32, SpanRole)> = arena
         .iter()
         .map(|n| (std::cmp::Reverse(n.total_us), n.rank, n.role))
         .collect();
-    // Each node's child list is independent, so the arena sorts across nodes in
-    // parallel; a small arena sorts serially, the parallel split paying only at
-    // scale.
+    // Each node's child range is disjoint, so the pool tiles into per-node
+    // mutable sub-slices that sort across nodes in parallel; a small arena sorts
+    // serially, the parallel split paying only at scale.
     const PARALLEL_MIN: usize = 1 << 13;
-    if arena.len() < PARALLEL_MIN {
-        for node in arena.iter_mut() {
-            node.children.sort_unstable_by_key(|&c| key[c]);
+    {
+        let off = &kids.off;
+        let mut rest: &mut [u32] = &mut kids.pool;
+        let mut tiles: Vec<&mut [u32]> = Vec::new();
+        for i in 0..arena.len() {
+            let len = (off[i + 1] - off[i]) as usize;
+            let (head, tail) = rest.split_at_mut(len);
+            rest = tail;
+            if head.len() >= 2 {
+                tiles.push(head);
+            }
         }
-    } else {
-        arena
-            .par_iter_mut()
-            .for_each(|node| node.children.sort_unstable_by_key(|&c| key[c]));
+        if arena.len() < PARALLEL_MIN {
+            for slice in &mut tiles {
+                slice.sort_unstable_by_key(|&c| key[c as usize]);
+            }
+        } else {
+            tiles
+                .par_iter_mut()
+                .for_each(|slice| slice.sort_unstable_by_key(|&c| key[c as usize]));
+        }
     }
 
     let mut nodes = Vec::with_capacity(arena.len());
-    nodes.push(freeze_arena(arena, 0, 0));
+    nodes.push(freeze_arena(arena, kids, 0, 0));
     let mut queue: std::collections::VecDeque<(usize, usize, u32)> =
         std::collections::VecDeque::new();
     queue.push_back((0, 0, 0));
     while let Some((ai, ni, depth)) = queue.pop_front() {
         let off = nodes.len() as u32;
-        for &c in &arena[ai].children {
+        for &c in kids.of(ai) {
             let child_idx = nodes.len();
-            nodes.push(freeze_arena(arena, c, depth + 1));
-            queue.push_back((c, child_idx, depth + 1));
+            nodes.push(freeze_arena(arena, kids, c as usize, depth + 1));
+            queue.push_back((c as usize, child_idx, depth + 1));
         }
         nodes[ni].children = Span32::new(off, nodes.len() as u32 - off);
     }
@@ -1102,8 +1129,10 @@ fn reconstruct_and_seal(
         role: SpanRole { workload: Workload::Other, payload: false },
         total_us: 0,
         count: 0,
-        children: Vec::new(),
     });
+    // Each node's parent arena index, parallel to `arena`; the root has none.
+    let mut parents: Vec<u32> = Vec::with_capacity(elems.len() + 1);
+    parents.push(u32::MAX);
     // `stack[d]` holds the arena index of the current path's depth-`d` node; the
     // root seeds depth 0. A node at depth `d` finds its parent at `stack[d - 1]`,
     // still in place from when that parent was reduced.
@@ -1130,9 +1159,8 @@ fn reconstruct_and_seal(
             role: head.role,
             total_us: total,
             count,
-            children: Vec::new(),
         });
-        arena[parent].children.push(idx);
+        parents.push(parent as u32);
         stack.truncate(depth);
         stack.push(idx);
         if depth == 1 {
@@ -1142,7 +1170,28 @@ fn reconstruct_and_seal(
     }
     arena[0].total_us = root_total;
 
-    let nodes = flatten_arena(&mut arena);
+    // CSR child edges: count per parent, prefix-sum to offsets, then fill from a
+    // per-parent cursor. Ascending-index fill lists each parent's children in
+    // creation order, the pre-sort order [`flatten_arena`] reorders widest-first.
+    let n = arena.len();
+    let mut child_count = vec![0u32; n];
+    for i in 1..n {
+        child_count[parents[i] as usize] += 1;
+    }
+    let mut off = vec![0u32; n + 1];
+    for k in 0..n {
+        off[k + 1] = off[k] + child_count[k];
+    }
+    let mut pool = vec![0u32; n - 1];
+    let mut cursor = off[..n].to_vec();
+    for i in 1..n {
+        let p = parents[i] as usize;
+        pool[cursor[p] as usize] = i as u32;
+        cursor[p] += 1;
+    }
+    let mut kids = ArenaChildren { off, pool };
+
+    let nodes = flatten_arena(&arena, &mut kids);
     let max_depth = nodes.iter().map(|n| n.depth).max().unwrap_or(0);
     FlameGraph {
         profile: Arc::clone(profile),
