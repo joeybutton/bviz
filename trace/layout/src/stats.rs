@@ -60,24 +60,25 @@ pub fn stats_from_flame(graph: &FlameGraph) -> Vec<StatRow> {
     // synthetic root, whose placeholder rank 0 aliases the real
     // lexicographically-smallest name; skipping it drops its zero-self frame
     // without evicting that name's real rank-0 row.
-    let nodes = graph.nodes();
-    let cap = nodes.iter().map(|n| n.rank).max().unwrap_or(0) as usize + 1;
+    let cap = (0..graph.len()).map(|i| graph.rank(i)).max().unwrap_or(0) as usize + 1;
     let mut rows: Vec<Option<StatRow>> = vec![None; cap];
-    for node in &nodes[1..] {
-        match &mut rows[node.rank as usize] {
+    for i in 1..graph.len() {
+        let rank = graph.rank(i);
+        let self_us = graph.self_us(i);
+        match &mut rows[rank as usize] {
             Some(row) => {
-                row.count += node.count;
-                row.total_us += node.self_us;
-                row.max_us = row.max_us.max(node.self_us);
+                row.count += graph.count(i);
+                row.total_us += self_us;
+                row.max_us = row.max_us.max(self_us);
             }
             None => {
-                rows[node.rank as usize] = Some(StatRow {
-                    key: node.name,
-                    rank: node.rank,
-                    role: node.role,
-                    count: node.count,
-                    total_us: node.self_us,
-                    max_us: node.self_us,
+                rows[rank as usize] = Some(StatRow {
+                    key: graph.name(i),
+                    rank,
+                    role: graph.role(i),
+                    count: graph.count(i),
+                    total_us: self_us,
+                    max_us: self_us,
                 });
             }
         }

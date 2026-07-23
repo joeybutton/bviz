@@ -352,6 +352,61 @@ impl FlameGraph {
         &self.nodes[node.children.range()]
     }
 
+    pub(crate) fn len(&self) -> usize {
+        self.nodes.len()
+    }
+
+    /// The root frame's summed duration (node 0's total).
+    pub fn root_total_us(&self) -> i64 {
+        self.nodes[0].total_us
+    }
+
+    pub(crate) fn name(&self, i: usize) -> Str {
+        self.nodes[i].name
+    }
+
+    pub(crate) fn rank(&self, i: usize) -> u32 {
+        self.nodes[i].rank
+    }
+
+    pub(crate) fn role(&self, i: usize) -> SpanRole {
+        self.nodes[i].role
+    }
+
+    pub(crate) fn total_us(&self, i: usize) -> i64 {
+        self.nodes[i].total_us
+    }
+
+    pub(crate) fn self_us(&self, i: usize) -> i64 {
+        self.nodes[i].self_us
+    }
+
+    pub(crate) fn width_us(&self, i: usize) -> i64 {
+        self.nodes[i].width_us
+    }
+
+    pub(crate) fn count(&self, i: usize) -> u32 {
+        self.nodes[i].count
+    }
+
+    pub(crate) fn subtree_max_depth(&self, i: usize) -> u32 {
+        self.nodes[i].subtree_max_depth
+    }
+
+    pub fn depth(&self, i: usize) -> u32 {
+        self.nodes[i].depth
+    }
+
+    /// The number of direct children of node `i`.
+    pub(crate) fn child_count(&self, i: usize) -> usize {
+        self.nodes[i].children.len()
+    }
+
+    /// The node index of node `i`'s `k`-th child, in widest-first order.
+    pub(crate) fn child_id(&self, i: usize, k: usize) -> usize {
+        self.nodes[i].children.range().start + k
+    }
+
     /// Resolves a node name (or a [`StatRow`](crate::StatRow) key) to its text,
     /// through the profile the graph was built from.
     pub fn str(&self, s: Str) -> &str {
@@ -1433,7 +1488,7 @@ fn set_subtree_max_depth(nodes: &mut [FlameNode]) {
 /// fields. Boxes come back in paint order, parents before children.
 pub fn lay_out_flame(graph: &FlameGraph, content_w: f64, placement: FlamePlacement) -> Vec<FlameBox> {
     let mut out = Vec::new();
-    place(graph, graph.root(), 0.0, content_w, placement, &mut out);
+    place(graph, 0, 0, 0.0, content_w, placement, &mut out);
     out
 }
 
@@ -1449,7 +1504,8 @@ pub struct FlamePlacement<'a> {
 
 fn place(
     graph: &FlameGraph,
-    node: &FlameNode,
+    idx: usize,
+    depth: u32,
     cx: f64,
     cw: f64,
     placement: FlamePlacement,
@@ -1469,28 +1525,29 @@ fn place(
     // never stores a huge coordinate; a visible marker's `vx` is already small.
     let px = vx.max(-(view_w as f64));
     let pr = right.min(2.0 * view_w as f64);
-    out.push(box_of(node, px as f32, (pr - px) as f32, metrics));
-    if node.width_us == 0 {
+    out.push(box_of(graph, idx, depth, px as f32, (pr - px) as f32, metrics));
+    let width = graph.width_us(idx);
+    if width == 0 {
         return;
     }
     // Place children left-to-right. A child wide enough to render recurses on its
     // own; a run of sub-pixel children sharing one pixel column collapses to a
     // single kept sibling (see `deepest_in_column`).
-    let children = graph.children(node);
-    let child_w = |c: &FlameNode| cw * c.width_us as f64 / node.width_us as f64;
+    let child_w = |c: usize| cw * graph.width_us(c) as f64 / width as f64;
     let mut cursor = cx;
     let mut i = 0;
-    while i < children.len() {
-        let ccw = child_w(&children[i]);
+    while i < graph.child_count(idx) {
+        let child = graph.child_id(idx, i);
+        let ccw = child_w(child);
         if ccw >= min {
-            place(graph, &children[i], cursor, ccw, placement, out);
+            place(graph, child, depth + 1, cursor, ccw, placement, out);
             cursor += ccw;
             i += 1;
             continue;
         }
         let (best, best_cx, best_cw, run_cursor, next) =
-            deepest_in_column(children, i, ccw, cursor, placement, &child_w);
-        place(graph, best, best_cx, best_cw, placement, out);
+            deepest_in_column(graph, idx, i, ccw, cursor, placement, &child_w);
+        place(graph, best, depth + 1, best_cx, best_cw, placement, out);
         cursor = run_cursor;
         i = next;
     }
@@ -1502,27 +1559,29 @@ fn place(
 /// and its width; `cursor` is its left edge. Returns the chosen child with its
 /// left edge and width, the cursor advanced past the whole run, and the index of
 /// the first sibling beyond it.
-fn deepest_in_column<'a>(
-    children: &'a [FlameNode],
+fn deepest_in_column(
+    graph: &FlameGraph,
+    parent: usize,
     start: usize,
     start_cw: f64,
     cursor: f64,
     placement: FlamePlacement,
-    child_w: &impl Fn(&FlameNode) -> f64,
-) -> (&'a FlameNode, f64, f64, f64, usize) {
+    child_w: &impl Fn(usize) -> f64,
+) -> (usize, f64, f64, f64, usize) {
     let scroll_x = placement.scroll_x;
     let min = placement.min_px as f64;
     let col = (cursor - scroll_x).floor() as i32;
-    let (mut best, mut best_cx, mut best_cw) = (&children[start], cursor, start_cw);
+    let (mut best, mut best_cx, mut best_cw) = (graph.child_id(parent, start), cursor, start_cw);
     let mut run_cursor = cursor + start_cw;
     let mut j = start + 1;
-    while j < children.len() {
-        let cjw = child_w(&children[j]);
+    while j < graph.child_count(parent) {
+        let child = graph.child_id(parent, j);
+        let cjw = child_w(child);
         if cjw >= min || ((run_cursor - scroll_x).floor() as i32) != col {
             break;
         }
-        if children[j].subtree_max_depth > best.subtree_max_depth {
-            (best, best_cx, best_cw) = (&children[j], run_cursor, cjw);
+        if graph.subtree_max_depth(child) > graph.subtree_max_depth(best) {
+            (best, best_cx, best_cw) = (child, run_cursor, cjw);
         }
         run_cursor += cjw;
         j += 1;
@@ -1530,18 +1589,25 @@ fn deepest_in_column<'a>(
     (best, best_cx, best_cw, run_cursor, j)
 }
 
-fn box_of(node: &FlameNode, x: f32, w: f32, metrics: &FlameMetrics) -> FlameBox {
+fn box_of(
+    graph: &FlameGraph,
+    idx: usize,
+    depth: u32,
+    x: f32,
+    w: f32,
+    metrics: &FlameMetrics,
+) -> FlameBox {
     FlameBox {
         x,
-        y: node.depth as f32 * metrics.row_height,
+        y: depth as f32 * metrics.row_height,
         w,
         h: metrics.row_height,
-        depth: node.depth,
-        name: node.name,
-        total_us: node.total_us,
-        self_us: node.self_us,
-        role: node.role,
-        count: node.count,
+        depth,
+        name: graph.name(idx),
+        total_us: graph.total_us(idx),
+        self_us: graph.self_us(idx),
+        role: graph.role(idx),
+        count: graph.count(idx),
     }
 }
 

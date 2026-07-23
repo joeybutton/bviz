@@ -236,7 +236,7 @@ fn paint_flame_graph(
     hbar.set(hlayout);
 
     if let Some(h) = hover {
-        paint_flame_tooltip(graph, &h.boxed, graph.root().total_us, h.at, bounds, palette, window, cx);
+        paint_flame_tooltip(graph, &h.boxed, graph.root_total_us(), h.at, bounds, palette, window, cx);
     }
 }
 
