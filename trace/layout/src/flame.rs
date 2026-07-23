@@ -765,7 +765,7 @@ impl TrackFlamer {
                 });
             }
         }
-        union.par_sort_unstable_by(|a, b| a.key.cmp(b.key));
+        union.par_sort_by(|a, b| a.key.cmp(b.key));
         reconstruct_and_seal(&union, &self.flamer.profile)
     }
 }
