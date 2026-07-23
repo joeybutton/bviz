@@ -1,5 +1,7 @@
 use std::sync::Arc;
 
+use rayon::slice::ParallelSliceMut;
+
 use bviz_trace_profile::{Profile, SpanRole, Str};
 
 use crate::flame::{build_flame_graph, FlameGraph, Scope};
@@ -102,7 +104,7 @@ pub(crate) fn default_order(stats: &[StatRow]) -> Vec<u32> {
             ((total_desc as u128) << TOTAL_SHIFT) | ((r.rank as u128) << RANK_SHIFT) | i as u128
         })
         .collect();
-    keyed.sort_unstable();
+    keyed.par_sort_unstable();
     keyed.into_iter().map(|k| k as u32).collect()
 }
 
