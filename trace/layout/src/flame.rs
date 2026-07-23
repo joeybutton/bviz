@@ -316,19 +316,49 @@ pub struct FlameNode {
     pub children: Span32,
 }
 
-/// An aggregated flame graph as a flat arena: node 0 is the synthetic root,
-/// every other node is reached through a parent's `children` range, and all node
-/// names are [`Str`] handles into the text of the [`Profile`] the graph holds —
-/// every label is already a profile string, so the graph carries no text of its
-/// own. Holding the profile by `Arc` keeps the graph free of lifetime
+/// An aggregated flame graph as struct-of-arrays over its nodes: index 0 is the
+/// synthetic root, every field vector is parallel to the node index, and edges
+/// live in a compressed-sparse-row pair (`child_off`, `child_pool`) — node `i`'s
+/// children are `child_pool[child_off[i]..child_off[i + 1]]`, listed widest-first.
+/// All node names are [`Str`] handles into the text of the [`Profile`] the graph
+/// holds — every label is already a profile string, so the graph carries no text
+/// of its own. Holding the profile by `Arc` keeps the graph free of lifetime
 /// parameters, so it is built off the UI thread and handed back across threads.
-#[derive(Debug, Clone, PartialEq)]
+///
+/// Node depth is not stored: layout threads it top-down, and nothing else needs
+/// it per node. The two builders order their arrays differently (the columnar
+/// path by aggregation-path key, the legacy path breadth-first), so equality
+/// canonicalizes through [`nodes`](FlameGraph::nodes) rather than comparing the
+/// field vectors elementwise.
+#[derive(Debug, Clone)]
 pub struct FlameGraph {
     profile: Arc<Profile>,
-    nodes: Vec<FlameNode>,
+    name: Vec<Str>,
+    rank: Vec<u32>,
+    total_us: Vec<i64>,
+    self_us: Vec<i64>,
+    width_us: Vec<i64>,
+    role: Vec<SpanRole>,
+    count: Vec<u32>,
+    subtree_max_depth: Vec<u32>,
+    /// CSR row offsets, length `len + 1`.
+    child_off: Vec<u32>,
+    /// CSR child node ids, one per non-root node, widest-first within each row.
+    child_pool: Vec<u32>,
     /// Deepest node depth, found once at build so [`flame_height`] need not scan
     /// every node on each paint.
     max_depth: u32,
+}
+
+impl PartialEq for FlameGraph {
+    /// Compares the canonical breadth-first node arrays, so two graphs built by
+    /// different paths — hence carrying different internal orderings — compare
+    /// equal when they describe the same tree.
+    fn eq(&self, other: &Self) -> bool {
+        self.max_depth == other.max_depth
+            && self.profile == other.profile
+            && self.nodes() == other.nodes()
+    }
 }
 
 /// The synthetic root's name. Its label ("All") is the one frame name not in the
@@ -338,73 +368,158 @@ pub struct FlameGraph {
 const ROOT_LABEL: Str = Str::new(0, 0);
 
 impl FlameGraph {
+    /// Assemble node `id`'s [`FlameNode`] at `depth`, leaving `children` for the
+    /// caller to fill from the breadth-first layout.
+    fn node_at(&self, id: usize, depth: u32) -> FlameNode {
+        FlameNode {
+            name: self.name[id],
+            rank: self.rank[id],
+            total_us: self.total_us[id],
+            self_us: self.self_us[id],
+            width_us: self.width_us[id],
+            role: self.role[id],
+            count: self.count[id],
+            depth,
+            subtree_max_depth: self.subtree_max_depth[id],
+            children: Span32::default(),
+        }
+    }
+
+    /// Materialize the full breadth-first [`FlameNode`] array: root first, then
+    /// each node's children as one contiguous block, depths threaded top-down and
+    /// each node's `children` range recorded. Canonicalizes the internal ordering,
+    /// so two graphs describing the same tree materialize identically regardless
+    /// of how their arrays were built.
+    pub fn nodes(&self) -> Vec<FlameNode> {
+        let n = self.len();
+        let mut out: Vec<FlameNode> = Vec::with_capacity(n);
+        out.push(self.node_at(0, 0));
+        let mut queue: std::collections::VecDeque<(usize, usize, u32)> =
+            std::collections::VecDeque::new();
+        queue.push_back((0, 0, 0));
+        while let Some((id, oi, depth)) = queue.pop_front() {
+            let off = out.len() as u32;
+            for k in 0..self.child_count(id) {
+                let c = self.child_id(id, k);
+                let child_oi = out.len();
+                out.push(self.node_at(c, depth + 1));
+                queue.push_back((c, child_oi, depth + 1));
+            }
+            out[oi].children = Span32::new(off, out.len() as u32 - off);
+        }
+        out
+    }
+
     /// The synthetic root frame (node 0), under which every lane's forest merges.
-    pub fn root(&self) -> &FlameNode {
-        &self.nodes[0]
+    pub fn root(&self) -> FlameNode {
+        self.nodes()[0]
     }
 
-    pub fn nodes(&self) -> &[FlameNode] {
-        &self.nodes
-    }
-
-    /// The direct children of a node, in widest-first order.
-    pub fn children(&self, node: &FlameNode) -> &[FlameNode] {
-        &self.nodes[node.children.range()]
+    /// The direct children of a node, in widest-first order. The node's
+    /// `children` range indexes the breadth-first array [`nodes`](Self::nodes)
+    /// yields, so this and the node must come from the same graph.
+    pub fn children(&self, node: &FlameNode) -> Vec<FlameNode> {
+        self.nodes()[node.children.range()].to_vec()
     }
 
     pub(crate) fn len(&self) -> usize {
-        self.nodes.len()
+        self.name.len()
     }
 
     /// The root frame's summed duration (node 0's total).
     pub fn root_total_us(&self) -> i64 {
-        self.nodes[0].total_us
+        self.total_us[0]
     }
 
     pub(crate) fn name(&self, i: usize) -> Str {
-        self.nodes[i].name
+        self.name[i]
     }
 
     pub(crate) fn rank(&self, i: usize) -> u32 {
-        self.nodes[i].rank
+        self.rank[i]
     }
 
     pub(crate) fn role(&self, i: usize) -> SpanRole {
-        self.nodes[i].role
+        self.role[i]
     }
 
     pub(crate) fn total_us(&self, i: usize) -> i64 {
-        self.nodes[i].total_us
+        self.total_us[i]
     }
 
     pub(crate) fn self_us(&self, i: usize) -> i64 {
-        self.nodes[i].self_us
+        self.self_us[i]
     }
 
     pub(crate) fn width_us(&self, i: usize) -> i64 {
-        self.nodes[i].width_us
+        self.width_us[i]
     }
 
     pub(crate) fn count(&self, i: usize) -> u32 {
-        self.nodes[i].count
+        self.count[i]
     }
 
     pub(crate) fn subtree_max_depth(&self, i: usize) -> u32 {
-        self.nodes[i].subtree_max_depth
-    }
-
-    pub fn depth(&self, i: usize) -> u32 {
-        self.nodes[i].depth
+        self.subtree_max_depth[i]
     }
 
     /// The number of direct children of node `i`.
     pub(crate) fn child_count(&self, i: usize) -> usize {
-        self.nodes[i].children.len()
+        (self.child_off[i + 1] - self.child_off[i]) as usize
     }
 
-    /// The node index of node `i`'s `k`-th child, in widest-first order.
+    /// The node id of node `i`'s `k`-th child, in widest-first order.
     pub(crate) fn child_id(&self, i: usize, k: usize) -> usize {
-        self.nodes[i].children.range().start + k
+        self.child_pool[self.child_off[i] as usize + k] as usize
+    }
+
+    /// Build the graph from a flat breadth-first [`FlameNode`] array (node 0 the
+    /// root), reading each node's fields into the parallel vectors and rebuilding
+    /// the CSR edges from the nodes' `children` ranges — already widest-first and
+    /// contiguous per parent.
+    fn from_flat_nodes(profile: &Arc<Profile>, nodes: Vec<FlameNode>) -> FlameGraph {
+        let n = nodes.len();
+        let mut name = Vec::with_capacity(n);
+        let mut rank = Vec::with_capacity(n);
+        let mut total_us = Vec::with_capacity(n);
+        let mut self_us = Vec::with_capacity(n);
+        let mut width_us = Vec::with_capacity(n);
+        let mut role = Vec::with_capacity(n);
+        let mut count = Vec::with_capacity(n);
+        let mut subtree_max_depth = Vec::with_capacity(n);
+        let mut child_off = Vec::with_capacity(n + 1);
+        child_off.push(0);
+        let mut child_pool = Vec::with_capacity(n.saturating_sub(1));
+        let mut max_depth = 0u32;
+        for node in &nodes {
+            name.push(node.name);
+            rank.push(node.rank);
+            total_us.push(node.total_us);
+            self_us.push(node.self_us);
+            width_us.push(node.width_us);
+            role.push(node.role);
+            count.push(node.count);
+            subtree_max_depth.push(node.subtree_max_depth);
+            max_depth = max_depth.max(node.depth);
+            for c in node.children.range() {
+                child_pool.push(c as u32);
+            }
+            child_off.push(child_pool.len() as u32);
+        }
+        FlameGraph {
+            profile: Arc::clone(profile),
+            name,
+            rank,
+            total_us,
+            self_us,
+            width_us,
+            role,
+            count,
+            subtree_max_depth,
+            child_off,
+            child_pool,
+            max_depth,
+        }
     }
 
     /// Resolves a node name (or a [`StatRow`](crate::StatRow) key) to its text,
@@ -981,7 +1096,7 @@ struct ArenaNode {
 /// Parent-child edges of the reconstruction arena in compressed-sparse-row form:
 /// node `i`'s children are `pool[off[i]..off[i + 1]]`. `off` has length n+1;
 /// `pool` holds one entry per non-root node, listing children in ascending
-/// creation index until [`flatten_arena`] sorts each range widest-first.
+/// creation index until [`sort_child_ranges`] sorts each range widest-first.
 struct ArenaChildren {
     off: Vec<u32>,
     pool: Vec<u32>,
@@ -1051,94 +1166,109 @@ fn emit_lane_rows(flamer: &Flamer, thread: &ThreadTrack, out: &mut Vec<Row>) {
     }
 }
 
-/// Freeze arena node `idx` into a flame node at `depth`, leaving `width_us` at a
-/// placeholder (the node's own total) and `children` blank for the bottom-up pass
-/// and the BFS layout to fill. Mirrors [`freeze`]'s self-time floor.
-fn freeze_arena(arena: &[ArenaNode], kids: &ArenaChildren, idx: usize, depth: u32) -> FlameNode {
-    let node = &arena[idx];
-    let children_total: i64 = kids.of(idx).iter().map(|&c| arena[c as usize].total_us).sum();
-    FlameNode {
-        name: node.name,
-        rank: node.rank,
-        total_us: node.total_us,
-        self_us: (node.total_us - children_total).max(0),
-        width_us: node.total_us,
-        role: node.role,
-        count: node.count,
-        depth,
-        subtree_max_depth: depth,
-        children: Span32::default(),
+/// Sort each node's CSR child range widest-first, breaking ties by name rank then
+/// role, using `key[child]` per child. Each node's range is disjoint, so the pool
+/// tiles into per-node mutable sub-slices that sort across nodes in parallel; a
+/// small arena sorts serially, the parallel split paying only at scale.
+fn sort_child_ranges(kids: &mut ArenaChildren, n: usize, key: &[(std::cmp::Reverse<i64>, u32, SpanRole)]) {
+    const PARALLEL_MIN: usize = 1 << 13;
+    let off = &kids.off;
+    let mut rest: &mut [u32] = &mut kids.pool;
+    let mut tiles: Vec<&mut [u32]> = Vec::new();
+    for i in 0..n {
+        let len = (off[i + 1] - off[i]) as usize;
+        let (head, tail) = rest.split_at_mut(len);
+        rest = tail;
+        if head.len() >= 2 {
+            tiles.push(head);
+        }
+    }
+    if n < PARALLEL_MIN {
+        for slice in &mut tiles {
+            slice.sort_unstable_by_key(|&c| key[c as usize]);
+        }
+    } else {
+        tiles
+            .par_iter_mut()
+            .for_each(|slice| slice.sort_unstable_by_key(|&c| key[c as usize]));
     }
 }
 
-/// Flatten the arena forest directly into a flat node array with node 0 the root,
-/// producing the same [`FlameNode`] array as [`flatten`] on the equivalent
-/// [`Builder`] tree. Every node's children are sorted widest-first (breaking ties
-/// by name rank, then role), laid down breadth-first as one contiguous block per
-/// parent, then a single reverse pass fills each node's `width_us`
-/// (`max(total, Σ children width)`) and `subtree_max_depth`. Sorts each node's
-/// CSR child range in place.
-fn flatten_arena(arena: &[ArenaNode], kids: &mut ArenaChildren) -> Vec<FlameNode> {
+/// Seal a path-sorted reconstruction arena into a [`FlameGraph`]. `parents[i]` is
+/// node `i`'s parent (the root's is unused), and the arena is in path-sorted order
+/// — a parent's index precedes every descendant's, each subtree contiguous — so a
+/// forward pass threads depth top-down and a reverse pass folds child aggregates
+/// up. Sorts each node's CSR child range widest-first, then moves the arena's
+/// scalar fields and CSR edges into the graph's parallel vectors. Byte for byte
+/// the same graph as sealing the equivalent [`Builder`] tree through [`seal`].
+fn seal_arena(
+    profile: &Arc<Profile>,
+    arena: Vec<ArenaNode>,
+    parents: Vec<u32>,
+    mut kids: ArenaChildren,
+) -> FlameGraph {
+    let n = arena.len();
     let key: Vec<(std::cmp::Reverse<i64>, u32, SpanRole)> = arena
         .iter()
-        .map(|n| (std::cmp::Reverse(n.total_us), n.rank, n.role))
+        .map(|nd| (std::cmp::Reverse(nd.total_us), nd.rank, nd.role))
         .collect();
-    // Each node's child range is disjoint, so the pool tiles into per-node
-    // mutable sub-slices that sort across nodes in parallel; a small arena sorts
-    // serially, the parallel split paying only at scale.
-    const PARALLEL_MIN: usize = 1 << 13;
-    {
-        let off = &kids.off;
-        let mut rest: &mut [u32] = &mut kids.pool;
-        let mut tiles: Vec<&mut [u32]> = Vec::new();
-        for i in 0..arena.len() {
-            let len = (off[i + 1] - off[i]) as usize;
-            let (head, tail) = rest.split_at_mut(len);
-            rest = tail;
-            if head.len() >= 2 {
-                tiles.push(head);
-            }
-        }
-        if arena.len() < PARALLEL_MIN {
-            for slice in &mut tiles {
-                slice.sort_unstable_by_key(|&c| key[c as usize]);
-            }
-        } else {
-            tiles
-                .par_iter_mut()
-                .for_each(|slice| slice.sort_unstable_by_key(|&c| key[c as usize]));
-        }
+    sort_child_ranges(&mut kids, n, &key);
+
+    let mut name = Vec::with_capacity(n);
+    let mut rank = Vec::with_capacity(n);
+    let mut total_us = Vec::with_capacity(n);
+    let mut role = Vec::with_capacity(n);
+    let mut count = Vec::with_capacity(n);
+    for nd in arena {
+        name.push(nd.name);
+        rank.push(nd.rank);
+        total_us.push(nd.total_us);
+        role.push(nd.role);
+        count.push(nd.count);
     }
 
-    let mut nodes = Vec::with_capacity(arena.len());
-    nodes.push(freeze_arena(arena, kids, 0, 0));
-    let mut queue: std::collections::VecDeque<(usize, usize, u32)> =
-        std::collections::VecDeque::new();
-    queue.push_back((0, 0, 0));
-    while let Some((ai, ni, depth)) = queue.pop_front() {
-        let off = nodes.len() as u32;
-        for &c in kids.of(ai) {
-            let child_idx = nodes.len();
-            nodes.push(freeze_arena(arena, kids, c as usize, depth + 1));
-            queue.push_back((c as usize, child_idx, depth + 1));
-        }
-        nodes[ni].children = Span32::new(off, nodes.len() as u32 - off);
+    let mut depth = vec![0u32; n];
+    let mut max_depth = 0u32;
+    for i in 1..n {
+        let d = depth[parents[i] as usize] + 1;
+        depth[i] = d;
+        max_depth = max_depth.max(d);
     }
 
-    // A child block always follows its parent, so a reverse pass sees every
-    // child finalized before its parent. `width_us` starts at the node's own
-    // total (its placeholder), and takes the max with the summed child widths.
-    for i in (0..nodes.len()).rev() {
-        let mut max_depth = nodes[i].depth;
+    // Children precede no parent in path-sorted order, so a reverse pass sees each
+    // child's aggregates finalized before its parent's.
+    let mut self_us = vec![0i64; n];
+    let mut width_us = vec![0i64; n];
+    let mut subtree_max_depth = vec![0u32; n];
+    for i in (0..n).rev() {
+        let mut children_total = 0i64;
         let mut children_width = 0i64;
-        for c in nodes[i].children.range() {
-            max_depth = max_depth.max(nodes[c].subtree_max_depth);
-            children_width += nodes[c].width_us;
+        let mut smd = depth[i];
+        for &c in kids.of(i) {
+            let c = c as usize;
+            children_total += total_us[c];
+            children_width += width_us[c];
+            smd = smd.max(subtree_max_depth[c]);
         }
-        nodes[i].width_us = nodes[i].width_us.max(children_width);
-        nodes[i].subtree_max_depth = max_depth;
+        self_us[i] = (total_us[i] - children_total).max(0);
+        width_us[i] = total_us[i].max(children_width);
+        subtree_max_depth[i] = smd;
     }
-    nodes
+
+    FlameGraph {
+        profile: Arc::clone(profile),
+        name,
+        rank,
+        total_us,
+        self_us,
+        width_us,
+        role,
+        count,
+        subtree_max_depth,
+        child_off: kids.off,
+        child_pool: kids.pool,
+        max_depth,
+    }
 }
 
 /// One path-sorted element awaiting tree reconstruction: the aggregation-path
@@ -1168,9 +1298,9 @@ struct Src {
 /// summing totals and counts, so nodes emitted from different lanes on the same
 /// path merge. Each element's payload (label/rank/role/total/count) is read
 /// through its `src` into `tables`, the coalesced frame drawing label/rank/role
-/// from the run's first element. Flattens the arena directly into the sealed node
-/// array, byte for byte the same as sealing the equivalent [`Builder`] tree
-/// through [`seal`].
+/// from the run's first element. Seals the arena through [`seal_arena`], byte for
+/// byte the same graph as sealing the equivalent [`Builder`] tree through
+/// [`seal`].
 fn reconstruct_and_seal(
     elems: &[KeyRef],
     tables: &[LaneTable],
@@ -1227,7 +1357,7 @@ fn reconstruct_and_seal(
 
     // CSR child edges: count per parent, prefix-sum to offsets, then fill from a
     // per-parent cursor. Ascending-index fill lists each parent's children in
-    // creation order, the pre-sort order [`flatten_arena`] reorders widest-first.
+    // creation order, the pre-sort order [`seal_arena`] reorders widest-first.
     let n = arena.len();
     let mut child_count = vec![0u32; n];
     for i in 1..n {
@@ -1244,15 +1374,9 @@ fn reconstruct_and_seal(
         pool[cursor[p] as usize] = i as u32;
         cursor[p] += 1;
     }
-    let mut kids = ArenaChildren { off, pool };
+    let kids = ArenaChildren { off, pool };
 
-    let nodes = flatten_arena(&arena, &mut kids);
-    let max_depth = nodes.iter().map(|n| n.depth).max().unwrap_or(0);
-    FlameGraph {
-        profile: Arc::clone(profile),
-        nodes,
-        max_depth,
-    }
+    seal_arena(profile, arena, parents, kids)
 }
 
 /// A mutable reference to `class`'s value in a class-keyed list, inserting
@@ -1369,13 +1493,7 @@ pub(crate) fn fold_all(trees: Vec<Builder>) -> Builder {
 
 /// Sort and freeze a finished builder tree into a [`FlameGraph`] over `profile`.
 pub(crate) fn seal(root: &mut Builder, profile: &Arc<Profile>) -> FlameGraph {
-    let nodes = flatten(root);
-    let max_depth = nodes.iter().map(|n| n.depth).max().unwrap_or(0);
-    FlameGraph {
-        profile: Arc::clone(profile),
-        nodes,
-        max_depth,
-    }
+    FlameGraph::from_flat_nodes(profile, flatten(root))
 }
 
 /// The layout width of a builder subtree: the larger of its own merged total and
@@ -1621,10 +1739,10 @@ mod tests {
     use super::*;
     use crate::test_profile::{action, action_named, profile, slice, track};
 
-    fn child<'a>(graph: &'a FlameGraph, node: &FlameNode, name: &str) -> &'a FlameNode {
+    fn child(graph: &FlameGraph, node: &FlameNode, name: &str) -> FlameNode {
         graph
             .children(node)
-            .iter()
+            .into_iter()
             .find(|c| graph.str(c.name) == name)
             .unwrap_or_else(|| panic!("no child {name}"))
     }
@@ -1692,12 +1810,12 @@ mod tests {
         let g = build_flame_graph(&p, Scope::All);
         // A slice's own mnemonic always wins; only the mnemonic-less slice
         // resolves through the index and joins the smallest-text frame.
-        assert_eq!(child(&g, g.root(), "Rustc").total_us, 100);
-        let javac = child(&g, g.root(), "Javac");
+        assert_eq!(child(&g, &g.root(), "Rustc").total_us, 100);
+        let javac = child(&g, &g.root(), "Javac");
         assert_eq!(javac.total_us, 80);
         assert_eq!(javac.count, 2);
         assert!(
-            g.children(g.root())
+            g.children(&g.root())
                 .iter()
                 .all(|c| g.str(c.name) != "Compiling foo")
         );
@@ -1720,12 +1838,12 @@ mod tests {
         )]);
         let g = build_flame_graph(&p, Scope::All);
         assert_eq!(g.root().total_us, 100);
-        let rustc = child(&g, g.root(), "Rustc");
+        let rustc = child(&g, &g.root(), "Rustc");
         assert_eq!(rustc.total_us, 100);
         assert_eq!(rustc.self_us, 10);
-        let exec = child(&g, rustc, "Action.execute");
+        let exec = child(&g, &rustc, "Action.execute");
         assert_eq!(exec.total_us, 90);
-        let sub = child(&g, exec, "subprocess.run");
+        let sub = child(&g, &exec, "subprocess.run");
         assert_eq!(sub.total_us, 80);
         assert_eq!(sub.self_us, 80);
     }
@@ -1746,11 +1864,11 @@ mod tests {
             track(9, LaneClass::Execution, lane(0)),
         ]);
         let g = build_flame_graph(&p, Scope::All);
-        assert_eq!(g.children(g.root()).len(), 1);
-        let rustc = child(&g, g.root(), "Rustc");
+        assert_eq!(g.children(&g.root()).len(), 1);
+        let rustc = child(&g, &g.root(), "Rustc");
         assert_eq!(rustc.total_us, 200);
         assert_eq!(rustc.count, 2);
-        let exec = child(&g, rustc, "Action.execute");
+        let exec = child(&g, &rustc, "Action.execute");
         assert_eq!(exec.total_us, 160);
         assert_eq!(exec.count, 2);
     }
@@ -1768,8 +1886,8 @@ mod tests {
             ],
         )]);
         let g = build_flame_graph(&p, Scope::All);
-        assert_eq!(child(&g, g.root(), "CppCompile").total_us, 100);
-        assert_eq!(child(&g, g.root(), "checkOutputs").total_us, 30);
+        assert_eq!(child(&g, &g.root(), "CppCompile").total_us, 100);
+        assert_eq!(child(&g, &g.root(), "checkOutputs").total_us, 30);
     }
 
     #[test]
@@ -1783,14 +1901,14 @@ mod tests {
         let analysis = build_flame_graph(&p, Scope::Analysis);
         assert_eq!(analysis.root().total_us, 20);
         assert!(analysis
-            .children(analysis.root())
+            .children(&analysis.root())
             .iter()
             .all(|c| analysis.str(c.name) == "CppCompile"));
         // Execution: only the execution lane.
         let exec = build_flame_graph(&p, Scope::Execution);
         assert_eq!(exec.root().total_us, 40);
         assert!(exec
-            .children(exec.root())
+            .children(&exec.root())
             .iter()
             .all(|c| exec.str(c.name) == "Rustc"));
         // Loading: only the repo-fetch lane.
@@ -1817,12 +1935,12 @@ mod tests {
             track(0, LaneClass::CriticalPath, vec![cp]),
         ]);
         let g = build_flame_graph(&p, Scope::CriticalPath);
-        assert_eq!(g.children(g.root()).len(), 1);
-        let rustc = child(&g, g.root(), "Rustc");
+        assert_eq!(g.children(&g.root()).len(), 1);
+        let rustc = child(&g, &g.root(), "Rustc");
         // Grafted from the worker lane: total is the worker action's 100, not the
         // critical component's 50, and the sub-span is present.
         assert_eq!(rustc.total_us, 100);
-        assert_eq!(child(&g, rustc, "subprocess.run").total_us, 80);
+        assert_eq!(child(&g, &rustc, "subprocess.run").total_us, 80);
     }
 
     #[test]
@@ -1848,13 +1966,13 @@ mod tests {
             ),
         ]);
         let g = build_flame_graph(&p, Scope::CriticalPath);
-        assert_eq!(g.children(g.root()).len(), 2);
-        let rustc = child(&g, g.root(), "Rustc");
+        assert_eq!(g.children(&g.root()).len(), 2);
+        let rustc = child(&g, &g.root(), "Rustc");
         assert_eq!(rustc.total_us, 100);
-        assert_eq!(child(&g, rustc, "subprocess.run").total_us, 80);
-        let link = child(&g, g.root(), "Link");
+        assert_eq!(child(&g, &rustc, "subprocess.run").total_us, 80);
+        let link = child(&g, &g.root(), "Link");
         assert_eq!(link.total_us, 60);
-        assert_eq!(child(&g, link, "subprocess.run").total_us, 40);
+        assert_eq!(child(&g, &link, "subprocess.run").total_us, 40);
     }
 
     #[test]
@@ -1864,7 +1982,7 @@ mod tests {
         let p = profile(vec![track(0, LaneClass::CriticalPath, vec![cp])]);
         let g = build_flame_graph(&p, Scope::CriticalPath);
         assert_eq!(g.root().total_us, 40);
-        assert_eq!(child(&g, g.root(), "Writing file out").total_us, 40);
+        assert_eq!(child(&g, &g.root(), "Writing file out").total_us, 40);
     }
 
     #[test]
@@ -1881,13 +1999,13 @@ mod tests {
             ],
         )]);
         let g = build_flame_graph(&p, Scope::All);
-        let outer = child(&g, g.root(), "Outer");
+        let outer = child(&g, &g.root(), "Outer");
         assert_eq!(outer.total_us, 50);
         assert!(
-            g.children(outer).is_empty(),
+            g.children(&outer).is_empty(),
             "inner must not nest under Outer"
         );
-        assert_eq!(child(&g, g.root(), "inner").total_us, 100);
+        assert_eq!(child(&g, &g.root(), "inner").total_us, 100);
     }
 
     #[test]
