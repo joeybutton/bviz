@@ -749,24 +749,20 @@ impl TrackFlamer {
             .filter(|&(i, _)| selected(i))
             .map(|(_, t)| t.nodes.len())
             .sum();
-        let mut union: Vec<SortedNode> = Vec::with_capacity(union_len);
+        let mut elems: Vec<KeyRef> = Vec::with_capacity(union_len);
         for (i, table) in self.lane_tables.iter().enumerate() {
             if !selected(i) {
                 continue;
             }
-            for node in &table.nodes {
-                union.push(SortedNode {
+            for (node_idx, node) in table.nodes.iter().enumerate() {
+                elems.push(KeyRef {
                     key: &table.key_pool[node.key.range()],
-                    label: node.label,
-                    rank: node.rank,
-                    role: node.role,
-                    total_us: node.total_us,
-                    count: node.count,
+                    src: Src { lane: i as u32, node: node_idx as u32 },
                 });
             }
         }
-        union.par_sort_by(|a, b| a.key.cmp(b.key));
-        reconstruct_and_seal(&union, &self.flamer.profile)
+        elems.par_sort_by(|a, b| a.key.cmp(b.key));
+        reconstruct_and_seal(&elems, &self.lane_tables, &self.flamer.profile)
     }
 }
 
@@ -1063,27 +1059,43 @@ fn flatten_arena(arena: &mut Vec<ArenaNode>) -> Vec<FlameNode> {
     nodes
 }
 
-/// One path-sorted node awaiting tree reconstruction: its aggregation-path key
-/// bytes, the frame it becomes, and its already-summed duration and span count
-/// (a cached [`LaneNode`]'s per-lane reduced sums). Equal adjacent keys coalesce
-/// in [`reconstruct_and_seal`], so nodes from several lanes sharing a path merge.
-struct SortedNode<'a> {
+/// One path-sorted element awaiting tree reconstruction: the aggregation-path
+/// key bytes (borrowed from the source lane's `key_pool`) sorted on, and `src`
+/// locating the [`LaneNode`] whose payload the coalesced frame draws. Holding the
+/// key slice keeps the sort comparator a single deref into `key_pool`; the heavy
+/// payload is read back through `src` at reconstruction. Equal adjacent keys
+/// coalesce in [`reconstruct_and_seal`], so nodes from several lanes sharing a
+/// path merge.
+#[derive(Clone, Copy)]
+struct KeyRef<'a> {
     key: &'a [u8],
-    label: Str,
-    rank: u32,
-    role: SpanRole,
-    total_us: i64,
-    count: u32,
+    src: Src,
 }
 
-/// Rebuild the aggregation tree from key-sorted nodes and seal it. Ascending key
-/// order lists every parent before its descendants, so a stack indexed by depth
-/// locates each node's parent; equal adjacent keys coalesce into one node,
+/// Locates a [`LaneNode`]: `lane` indexes [`TrackFlamer::lane_tables`], `node`
+/// its `.nodes`.
+#[derive(Clone, Copy)]
+struct Src {
+    lane: u32,
+    node: u32,
+}
+
+/// Rebuild the aggregation tree from key-sorted elements and seal it. Ascending
+/// key order lists every parent before its descendants, so a stack indexed by
+/// depth locates each node's parent; equal adjacent keys coalesce into one node,
 /// summing totals and counts, so nodes emitted from different lanes on the same
-/// path merge. Flattens the arena directly into the sealed node array, byte for
-/// byte the same as sealing the equivalent [`Builder`] tree through [`seal`].
-fn reconstruct_and_seal(nodes: &[SortedNode], profile: &Arc<Profile>) -> FlameGraph {
-    let mut arena: Vec<ArenaNode> = Vec::with_capacity(nodes.len() + 1);
+/// path merge. Each element's payload (label/rank/role/total/count) is read
+/// through its `src` into `tables`, the coalesced frame drawing label/rank/role
+/// from the run's first element. Flattens the arena directly into the sealed node
+/// array, byte for byte the same as sealing the equivalent [`Builder`] tree
+/// through [`seal`].
+fn reconstruct_and_seal(
+    elems: &[KeyRef],
+    tables: &[LaneTable],
+    profile: &Arc<Profile>,
+) -> FlameGraph {
+    let node_of = |src: Src| &tables[src.lane as usize].nodes[src.node as usize];
+    let mut arena: Vec<ArenaNode> = Vec::with_capacity(elems.len() + 1);
     arena.push(ArenaNode {
         name: ROOT_LABEL,
         rank: 0,
@@ -1098,22 +1110,24 @@ fn reconstruct_and_seal(nodes: &[SortedNode], profile: &Arc<Profile>) -> FlameGr
     let mut stack: Vec<usize> = vec![0];
     let mut root_total = 0i64;
     let mut i = 0;
-    while i < nodes.len() {
-        let mut total = nodes[i].total_us;
-        let mut count = nodes[i].count;
+    while i < elems.len() {
+        let head = node_of(elems[i].src);
+        let mut total = head.total_us;
+        let mut count = head.count;
         let mut j = i + 1;
-        while j < nodes.len() && nodes[j].key == nodes[i].key {
-            total += nodes[j].total_us;
-            count += nodes[j].count;
+        while j < elems.len() && elems[j].key == elems[i].key {
+            let n = node_of(elems[j].src);
+            total += n.total_us;
+            count += n.count;
             j += 1;
         }
-        let depth = nodes[i].key.len() / SEGMENT_BYTES;
+        let depth = elems[i].key.len() / SEGMENT_BYTES;
         let parent = stack[depth - 1];
         let idx = arena.len();
         arena.push(ArenaNode {
-            name: nodes[i].label,
-            rank: nodes[i].rank,
-            role: nodes[i].role,
+            name: head.label,
+            rank: head.rank,
+            role: head.role,
             total_us: total,
             count,
             children: Vec::new(),
