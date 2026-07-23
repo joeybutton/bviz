@@ -1,9 +1,8 @@
 use std::sync::Arc;
 
 use bviz_trace_profile::{Profile, SpanRole, Str};
-use rustc_hash::FxHashMap;
 
-use crate::flame::{build_flame_graph, FlameGraph, FlameNode, Scope};
+use crate::flame::{build_flame_graph, FlameGraph, Scope};
 
 /// One aggregated group of frames, summed across the flame graph. `total_us` is
 /// the summed self time of every frame keyed here, so the rows partition the
@@ -54,17 +53,34 @@ pub fn aggregate_stats(profile: &Arc<Profile>, scope: Scope) -> (FlameGraph, Vec
 /// frame's self time. Lets a caller that already holds the graph derive the table
 /// without rebuilding it. Keys resolve with `graph`'s [`str`](FlameGraph::str).
 pub fn stats_from_flame(graph: &FlameGraph) -> Vec<StatRow> {
-    // One entry per distinct frame name, of which there are at most as many as
-    // nodes; reserving to the node count sizes the map so the fold inserts
-    // without rehashing up from empty (the graph runs to millions of nodes).
-    let mut groups: FxHashMap<Str, StatRow> =
-        FxHashMap::with_capacity_and_hasher(graph.nodes().len(), Default::default());
-    for node in graph.nodes() {
-        accumulate(node, &mut groups);
+    // A node's rank is a dense `u32` bijection with its name within one build,
+    // so a table indexed by rank groups by name without hashing. Node 0 is the
+    // synthetic root, whose placeholder rank 0 aliases the real
+    // lexicographically-smallest name; skipping it drops its zero-self frame
+    // without evicting that name's real rank-0 row.
+    let nodes = graph.nodes();
+    let cap = nodes.iter().map(|n| n.rank).max().unwrap_or(0) as usize + 1;
+    let mut rows: Vec<Option<StatRow>> = vec![None; cap];
+    for node in &nodes[1..] {
+        match &mut rows[node.rank as usize] {
+            Some(row) => {
+                row.count += node.count;
+                row.total_us += node.self_us;
+                row.max_us = row.max_us.max(node.self_us);
+            }
+            None => {
+                rows[node.rank as usize] = Some(StatRow {
+                    key: node.name,
+                    rank: node.rank,
+                    role: node.role,
+                    count: node.count,
+                    total_us: node.self_us,
+                    max_us: node.self_us,
+                });
+            }
+        }
     }
-    // The synthetic root carries no slices of its own; drop its zero-self frame.
-    groups.remove(&graph.root().name);
-    groups.into_values().collect()
+    rows.into_iter().flatten().collect()
 }
 
 /// Indices into `stats` in the default display order: `total_us` descending,
@@ -88,21 +104,6 @@ pub(crate) fn default_order(stats: &[StatRow]) -> Vec<u32> {
         .collect();
     keyed.sort_unstable();
     keyed.into_iter().map(|k| k as u32).collect()
-}
-
-/// Fold a frame's self time into its name's row.
-fn accumulate(node: &FlameNode, groups: &mut FxHashMap<Str, StatRow>) {
-    let row = groups.entry(node.name).or_insert_with(|| StatRow {
-        key: node.name,
-        rank: node.rank,
-        role: node.role,
-        count: 0,
-        total_us: 0,
-        max_us: 0,
-    });
-    row.count += node.count;
-    row.total_us += node.self_us;
-    row.max_us = row.max_us.max(node.self_us);
 }
 
 #[cfg(test)]
