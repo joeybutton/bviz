@@ -45,9 +45,11 @@ This is the one thing to internalize; everything else follows from it.
 - **The element tree is immediate.** `render()` returns a fresh tree of elements
   (`div()`, text, widgets) describing *this frame*. The tree is rebuilt and dropped each
   frame — never store element references; store state in the view struct or child entities.
-- **Rendering is notify-driven, not a vsync loop.** `render()` runs only when the view is
-  marked dirty: call `cx.notify()` after mutating state, and the framework re-renders. Idle
-  views do no work.
+- **Rendering is notify-driven, not a vsync loop.** Any `cx.notify()` re-renders the whole
+  window from the root view — there is no per-view scoped redraw. A notify marks the view's
+  *ancestors* dirty, and gpui rebuilds the element tree from the root, cascading `render` down.
+  With no notify there is no frame, so idle views do no work. To make a frequent cheap repaint
+  skip expensive content, see *Incremental redraw and view caching* below.
 
 Consequence: mutate `self` in an event handler, call `cx.notify()`, and the UI updates.
 
@@ -390,6 +392,41 @@ geometry on the view each layout (the terminal keeps a `ContentLayout` / `Scroll
 the graph keeps the viewport `bounds` in an `Rc<Cell<…>>`), then in the mouse handler
 invert the same transform the paint used: the terminal's `cell_at` maps a pixel to a grid
 cell, the graph's `from_screen` + `hit_box` map a pixel to the innermost box.
+
+## Incremental redraw and view caching
+
+- **A notify re-renders everything.** `cx.notify()` on any entity re-runs the root view's
+  `render` and cascades down the tree — there is no scoped "just this view" redraw. So on its
+  own, moving expensive paint into a separate view or `canvas` does not save that paint: a
+  `canvas` has no id and no paint cache, and its `'static` paint closure runs every time the
+  element is painted.
+- **`AnyView::cached(style)` is the one paint-reuse lever.** Embed an expensive child
+  `Entity<V: Render>` as `.child(self.layer.clone())` styled with `.cached(style)`. gpui then
+  *replays* that child's recorded scene from the previous frame — skipping the child's `render`
+  and paint — as long as the child was not itself notified this frame, its bounds, content mask,
+  and text style are all unchanged, and the window is not refreshing. A resize changes bounds, so
+  the cache key breaks and the child repaints on its own; `Window::refresh()` (e.g. an appearance
+  change) bypasses caching entirely.
+- **Parent-notify vs child-notify is the control.** Because a notify marks *ancestors* dirty and
+  never descendants, a parent notify does not dirty an embedded child — its cached scene replays.
+  This is the lever for cheap frequent repaints over expensive content: put the expensive,
+  data-dependent content in a child layer embedded `.cached(style)`, and put the cheap overlay (a
+  hover crosshair, a tooltip, an in-progress drag) in the parent above it. Notify the **parent**
+  for a cheap overlay change — the child scene replays and only the overlay repaints; notify the
+  **child** for any change to what it paints — it rebuilds its scene.
+- **The stale-cache gate.** The one real bug class: a state change that alters what the cached
+  child paints but leaves the child un-notified shows stale content until the next child notify —
+  and a static screenshot won't reveal it. Route every content-mutating handler through one helper
+  that notifies the child (and the parent), and keep only genuinely overlay-only handlers as
+  parent-only notify.
+- **`deferred(child)` is paint *ordering* only** — it draws its subtree on top, for overlays and
+  popups. It has nothing to do with caching.
+- **Worked examples in this repo.** `ui/trace/src/lib.rs` `SliceLayer` (timeline slices cached;
+  crosshair/tooltip live in the parent; `invalidate_chart` notifies the layer) and
+  `ui/trace/src/flame_graph.rs` `FlameLayer` (flame boxes cached; tooltip overlay;
+  `invalidate_flame`). A complementary `SliceDrawCache` (also in `lib.rs`) memoizes the *cull*
+  list — which slices are visible — keyed by viewport; it avoids re-culling but not re-painting,
+  so it is a separate, view-held cache from the cached child view that avoids re-painting.
 
 ## Background work: loading off the UI thread
 
