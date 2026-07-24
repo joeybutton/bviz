@@ -168,8 +168,8 @@ fn paint_flame_graph(
     // already relative to the content column's left edge. Off-screen boxes are
     // culled and coalescing runs locally, matching the flame chart's slice
     // layout. Coordinates are f64 so precision holds at deep zoom.
-    let content_w = width as f64 * flame_view.zoom;
-    let scroll_x = flame_view.left * content_w;
+    let content_w = flame_view.content_px(width);
+    let scroll_x = flame_view.scroll_px(width);
     let boxes = flame_boxes(cache, aggregates, content_w, scroll_x, width, &metrics);
 
     let mask = ContentMask {
@@ -491,8 +491,8 @@ impl TraceView {
         }
         let content_y = y - fl.top + self.flame_scroll_y.get();
         let depth = (content_y / metrics.row_height) as u32;
-        let content_w = fl.width as f64 * fl.view.zoom;
-        let scroll_x = fl.view.left * content_w;
+        let content_w = fl.view.content_px(fl.width);
+        let scroll_x = fl.view.scroll_px(fl.width);
         let vx = x - fl.left;
         let boxes = flame_boxes(&self.flame_boxes, &aggregates, content_w, scroll_x, fl.width, &metrics);
         boxes

@@ -98,15 +98,16 @@ impl FlameView {
     };
 
     /// Full laid-out width in pixels at this zoom for a content column `width_px`
-    /// wide. Lay the tree out at this width so sub-pixel culling tracks the zoom.
-    pub fn content_px(&self, width_px: f32) -> f32 {
-        (width_px as f64 * self.zoom) as f32
+    /// wide. In f64: at deep zoom the laid-out width outruns f32's integer-exact
+    /// range, so sub-pixel culling that maps back to it needs the wider type.
+    pub fn content_px(&self, width_px: f32) -> f64 {
+        width_px as f64 * self.zoom
     }
 
     /// Pixel offset of the window's left edge into the laid-out width — the
     /// horizontal scroll position.
-    pub fn scroll_px(&self, width_px: f32) -> f32 {
-        (self.left * width_px as f64 * self.zoom) as f32
+    pub fn scroll_px(&self, width_px: f32) -> f64 {
+        self.left * self.content_px(width_px)
     }
 
     /// Laid-out width in pixels, floored at one so a collapsed column can't make
@@ -251,7 +252,7 @@ mod tests {
         v.zoom_at(400.0, 800.0, 4.0);
         let offset = v.scroll_px(800.0);
         let mut w = FlameView { left: 0.0, zoom: 4.0 };
-        w.set_scroll_px(offset, 800.0);
+        w.set_scroll_px(offset as f32, 800.0);
         assert!((w.left - v.left).abs() < 1e-12);
     }
 }
