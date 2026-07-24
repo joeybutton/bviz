@@ -257,10 +257,13 @@ struct SliceDrawCache {
 /// the initial fit-to-window view (which needs the viewport size, known only at
 /// paint time).
 struct TraceView {
-    focus_handle: FocusHandle,
+    /// Focus for the window chrome, held by [`Chrome`] so the window's own
+    /// actions (quit, close, tab) dispatch to it; the ancestor of `content_focus`
+    /// in the focus tree.
+    window_focus: FocusHandle,
     /// Focus for the trace content, held by the timeline so Ctrl-A (select all
-    /// tracks) dispatches to it; a descendant of the window's focus, so the
-    /// window's own actions (quit, tab) still fire.
+    /// tracks) dispatches to it; a descendant of `window_focus`, so the window's
+    /// own actions still fire.
     content_focus: FocusHandle,
     source: Source,
     /// Horizontal time-to-pixel mapping (pan and zoom).
@@ -400,9 +403,7 @@ impl TraceView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let focus_handle = cx.focus_handle();
-        // Focus the content so Ctrl-A reaches it; the window's actions still fire
-        // since the content focus is a descendant of the window focus.
+        let window_focus = cx.focus_handle();
         let content_focus = cx.focus_handle();
         content_focus.focus(window, cx);
         cx.bind_keys([gpui::KeyBinding::new(
@@ -474,7 +475,7 @@ impl TraceView {
             }
         });
         Self {
-            focus_handle,
+            window_focus,
             content_focus,
             source: Source::Loading,
             view,
@@ -1546,7 +1547,7 @@ impl Render for TraceView {
             Source::Loading => centered_spinner("Loading…", &colors),
             Source::Message(msg) => centered_notice(msg.clone(), &colors),
         };
-        Chrome::new(&self.focus_handle)
+        Chrome::new(&self.window_focus)
             .title("bazel_viz trace")
             .status(self.status())
             .child(body)
