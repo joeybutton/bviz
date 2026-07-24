@@ -157,6 +157,14 @@ Interactive visualization and inspection tool for Bazel builds.
   replaces an earlier one instead of leaving the churn; and do it on a scratch
   branch, confirming the rewritten tree is unchanged (or changed only as
   intended, via `git diff`) before moving the real branch.
+- `jj restore <path>` resets that path to the PARENT commit (`@-`), not to some
+  pre-edit snapshot — and because the working copy IS a commit, that discards the
+  CURRENT commit's own changes to the path, not just an uncommitted tweak. So
+  never reach for it to strip a small unwanted edit (a debug tweak, a temporary
+  flag flip) from a file the working commit is actively changing: it silently
+  wipes that commit's work on the whole file. Revert the unwanted hunk with a
+  targeted edit instead; if you already ran the restore, `jj undo` recovers it.
+  See the jujutsu skill.
 
 ## Hermeticity
 
