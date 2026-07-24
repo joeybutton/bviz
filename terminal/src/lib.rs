@@ -48,7 +48,6 @@ pub use alacritty_terminal::selection::SelectionType;
 pub use display::{CellPos, DisplaySource, SelectionSpan, Terminal, Url};
 pub use output::{parse, BuildOutput};
 pub use replay::Replay;
-pub use screen::Screen;
 
 /// The terminal cell and its styling vocabulary, re-exported from
 /// `alacritty_terminal` so renderers can read cells while depending only on this
