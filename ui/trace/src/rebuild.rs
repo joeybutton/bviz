@@ -51,11 +51,6 @@ impl<K: Copy + PartialEq> Rebuild<K> {
         self.ready = Some(key);
     }
 
-    /// Forget the ready key so the value is rebuilt, without cancelling a build.
-    pub(crate) fn clear_ready(&mut self) {
-        self.ready = None;
-    }
-
     /// Begin a build for `key`; returns the generation to check on completion.
     pub(crate) fn start(&mut self, key: K) -> u64 {
         self.inflight = Some(key);
