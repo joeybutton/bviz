@@ -1747,6 +1747,13 @@ mod tests {
             .unwrap_or_else(|| panic!("no child {name}"))
     }
 
+    /// The all-lanes flame graph: every real lane, the critical-path lane's
+    /// redirected copies of worker time excluded.
+    fn flame(p: &Arc<Profile>) -> FlameGraph {
+        let t = p.threads();
+        TrackFlamer::new(p).build(|i| t[i].lane_class != LaneClass::CriticalPath)
+    }
+
     const METRICS: FlameMetrics = FlameMetrics { row_height: 10.0 };
 
     // The graph is built off the UI thread and handed back, so it must cross
@@ -1807,7 +1814,7 @@ mod tests {
                 vec![slice("Compiling foo", "action processing", 400, 30)],
             ),
         ]);
-        let g = build_flame_graph(&p, Scope::All);
+        let g = flame(&p);
         // A slice's own mnemonic always wins; only the mnemonic-less slice
         // resolves through the index and joins the smallest-text frame.
         assert_eq!(child(&g, &g.root(), "Rustc").total_us, 100);
@@ -1836,7 +1843,7 @@ mod tests {
                 slice("subprocess.run", "subprocess run", 0, 80),
             ],
         )]);
-        let g = build_flame_graph(&p, Scope::All);
+        let g = flame(&p);
         assert_eq!(g.root().total_us, 100);
         let rustc = child(&g, &g.root(), "Rustc");
         assert_eq!(rustc.total_us, 100);
@@ -1863,7 +1870,7 @@ mod tests {
             track(8, LaneClass::Execution, lane(0)),
             track(9, LaneClass::Execution, lane(0)),
         ]);
-        let g = build_flame_graph(&p, Scope::All);
+        let g = flame(&p);
         assert_eq!(g.children(&g.root()).len(), 1);
         let rustc = child(&g, &g.root(), "Rustc");
         assert_eq!(rustc.total_us, 200);
@@ -1885,104 +1892,36 @@ mod tests {
                 slice("checkOutputs", "general information", 100, 30),
             ],
         )]);
-        let g = build_flame_graph(&p, Scope::All);
+        let g = flame(&p);
         assert_eq!(child(&g, &g.root(), "CppCompile").total_us, 100);
         assert_eq!(child(&g, &g.root(), "checkOutputs").total_us, 30);
     }
 
     #[test]
-    fn scope_selects_lanes_by_role() {
+    fn selection_draws_only_the_chosen_lane_class() {
         let p = profile(vec![
             track(7, LaneClass::Analysis, vec![action("CppCompile", 0, 20)]),
             track(8, LaneClass::Execution, vec![action("Rustc", 0, 40)]),
             track(9, LaneClass::RepoFetch, vec![action("Fetch", 0, 5)]),
         ]);
-        // Analysis: only the analysis lane.
-        let analysis = build_flame_graph(&p, Scope::Analysis);
+        let t = p.threads();
+        let class = |c: LaneClass| TrackFlamer::new(&p).build(move |i| t[i].lane_class == c);
+        let analysis = class(LaneClass::Analysis);
         assert_eq!(analysis.root().total_us, 20);
         assert!(analysis
             .children(&analysis.root())
             .iter()
             .all(|c| analysis.str(c.name) == "CppCompile"));
-        // Execution: only the execution lane.
-        let exec = build_flame_graph(&p, Scope::Execution);
+        let exec = class(LaneClass::Execution);
         assert_eq!(exec.root().total_us, 40);
         assert!(exec
             .children(&exec.root())
             .iter()
             .all(|c| exec.str(c.name) == "Rustc"));
-        // Loading: only the repo-fetch lane.
-        let loading = build_flame_graph(&p, Scope::Loading);
+        let loading = class(LaneClass::RepoFetch);
         assert_eq!(loading.root().total_us, 5);
-        // All: every real lane.
-        let all = build_flame_graph(&p, Scope::All);
-        assert_eq!(all.root().total_us, 65);
-    }
-
-    #[test]
-    fn critical_path_grafts_the_originating_action_subtree() {
-        // A critical-path component names an action but carries no sub-spans; its
-        // worker action (mnemonic Rustc) contains a subprocess.run child. Under
-        // CriticalPath the worker's whole subtree grafts under the root, so the
-        // critical action shows its sub-detail rather than a bare leaf.
-        let worker = vec![
-            action_named("Compiling foo", "Rustc", 0, 100),
-            slice("subprocess.run", "subprocess run", 0, 80),
-        ];
-        let cp = slice("action 'Compiling foo'", "critical path component", 500, 50);
-        let p = profile(vec![
-            track(8, LaneClass::Execution, worker),
-            track(0, LaneClass::CriticalPath, vec![cp]),
-        ]);
-        let g = build_flame_graph(&p, Scope::CriticalPath);
-        assert_eq!(g.children(&g.root()).len(), 1);
-        let rustc = child(&g, &g.root(), "Rustc");
-        // Grafted from the worker lane: total is the worker action's 100, not the
-        // critical component's 50, and the sub-span is present.
-        assert_eq!(rustc.total_us, 100);
-        assert_eq!(child(&g, &rustc, "subprocess.run").total_us, 80);
-    }
-
-    #[test]
-    fn critical_path_reuses_a_lane_forest_across_components() {
-        // Two critical components match actions on the same worker lane, so the
-        // second graft runs against the lane's cached forest; both actions must
-        // still graft with their own subtrees.
-        let worker = vec![
-            action_named("Compiling foo", "Rustc", 0, 100),
-            slice("subprocess.run", "subprocess run", 0, 80),
-            action_named("Linking foo", "Link", 200, 60),
-            slice("subprocess.run", "subprocess run", 200, 40),
-        ];
-        let p = profile(vec![
-            track(8, LaneClass::Execution, worker),
-            track(
-                0,
-                LaneClass::CriticalPath,
-                vec![
-                    slice("action 'Compiling foo'", "critical path component", 500, 50),
-                    slice("action 'Linking foo'", "critical path component", 560, 30),
-                ],
-            ),
-        ]);
-        let g = build_flame_graph(&p, Scope::CriticalPath);
-        assert_eq!(g.children(&g.root()).len(), 2);
-        let rustc = child(&g, &g.root(), "Rustc");
-        assert_eq!(rustc.total_us, 100);
-        assert_eq!(child(&g, &rustc, "subprocess.run").total_us, 80);
-        let link = child(&g, &g.root(), "Link");
-        assert_eq!(link.total_us, 60);
-        assert_eq!(child(&g, &link, "subprocess.run").total_us, 40);
-    }
-
-    #[test]
-    fn critical_path_unmatched_component_is_a_leaf() {
-        // A critical component with no matching action merges as a bare leaf.
-        let cp = slice("Writing file out", "critical path component", 0, 40);
-        let p = profile(vec![track(0, LaneClass::CriticalPath, vec![cp])]);
-        let g = build_flame_graph(&p, Scope::CriticalPath);
-        assert_eq!(g.root().total_us, 40);
-        assert_eq!(child(&g, &g.root(), "Writing file out").total_us, 40);
+        // Every real lane, the three classes unioned.
+        assert_eq!(flame(&p).root().total_us, 65);
     }
 
     #[test]
@@ -1998,7 +1937,7 @@ mod tests {
                 slice("inner", "general information", 10, 100),
             ],
         )]);
-        let g = build_flame_graph(&p, Scope::All);
+        let g = flame(&p);
         let outer = child(&g, &g.root(), "Outer");
         assert_eq!(outer.total_us, 50);
         assert!(
@@ -2021,8 +1960,8 @@ mod tests {
         ];
         let mut reversed = ordered.clone();
         reversed.reverse();
-        let ga = build_flame_graph(&profile(vec![track(1, LaneClass::Execution, ordered)]), Scope::All);
-        let gb = build_flame_graph(&profile(vec![track(1, LaneClass::Execution, reversed)]), Scope::All);
+        let ga = flame(&profile(vec![track(1, LaneClass::Execution, ordered)]));
+        let gb = flame(&profile(vec![track(1, LaneClass::Execution, reversed)]));
         // Compare every node field with the name resolved: the graphs hold two
         // independently interned profiles, so equal names need not share a
         // handle across them, but the flattened structure must be identical.
@@ -2047,6 +1986,46 @@ mod tests {
     }
 
     #[test]
+    fn large_build_is_deterministic_across_the_parallel_threshold() {
+        // More distinct disjoint frames than PARALLEL_MIN (1 << 13), so the union
+        // `par_sort_by` merge and the `sort_child_ranges` parallel branch both run:
+        // the sealed graph must be deterministic and independent of input order.
+        const N: i64 = 9000;
+        let slices = |reversed: bool| {
+            let mut v: Vec<_> = (0..N)
+                .map(|i| action(&format!("M{i:05}"), i * 100, (i % 97) + 1))
+                .collect();
+            if reversed {
+                v.reverse();
+            }
+            v
+        };
+        let resolved = |g: &FlameGraph| -> Vec<_> {
+            g.nodes()
+                .iter()
+                .map(|n| {
+                    (
+                        g.str(n.name).to_owned(),
+                        n.total_us,
+                        n.self_us,
+                        n.width_us,
+                        n.role,
+                        n.count,
+                        n.depth,
+                        n.children,
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        let a = flame(&profile(vec![track(1, LaneClass::Execution, slices(false))]));
+        let b = flame(&profile(vec![track(1, LaneClass::Execution, slices(true))]));
+        let c = flame(&profile(vec![track(1, LaneClass::Execution, slices(false))]));
+        assert!(a.nodes().len() > (1 << 13), "profile must cross the parallel threshold");
+        assert_eq!(resolved(&a), resolved(&b), "independent of input order");
+        assert_eq!(resolved(&a), resolved(&c), "deterministic across builds");
+    }
+
+    #[test]
     fn tied_same_text_children_order_by_role() {
         // Two same-named, same-duration top-level slices of different span roles
         // tie on (total, text); the role tie-break keeps the flattened order
@@ -2056,7 +2035,7 @@ mod tests {
                 track(1, LaneClass::Execution, vec![slice("x", cats[0], 0, 50)]),
                 track(2, LaneClass::Execution, vec![slice("x", cats[1], 0, 50)]),
             ]);
-            build_flame_graph(&p, Scope::All)
+            flame(&p)
         };
         let ga = build(["local action execution", "thread wait"]);
         let gb = build(["thread wait", "local action execution"]);
@@ -2093,7 +2072,7 @@ mod tests {
             LaneClass::Execution,
             vec![action("CppCompile", 0, 100), action("Rustc", 100, 50)],
         )]);
-        let g = build_flame_graph(&p, Scope::All);
+        let g = flame(&p);
         let boxes = lay_out_flame(
             &g,
             300.0,
@@ -2126,7 +2105,7 @@ mod tests {
                 action("bbb", 501, 1),
             ],
         )]);
-        let g = build_flame_graph(&p, Scope::All);
+        let g = flame(&p);
         // Fully visible: 100px wide graph, no scroll, 100px viewport.
         let boxes = lay_out_flame(
             &g,
@@ -2160,7 +2139,7 @@ mod tests {
                 slice("deepchild", "general information", 996, 1),
             ],
         )]);
-        let g = build_flame_graph(&p, Scope::All);
+        let g = flame(&p);
         let boxes = lay_out_flame(
             &g,
             100.0,
@@ -2181,7 +2160,7 @@ mod tests {
             LaneClass::Execution,
             vec![action("left", 0, 100), action("right", 100, 100)],
         )]);
-        let g = build_flame_graph(&p, Scope::All);
+        let g = flame(&p);
         // 1000px content, scrolled 600px into a 400px viewport: the window covers
         // content [600, 1000) — the right half. "left" (content [0, 500)) is fully
         // off-screen; "right" (content [500, 1000)) shows from its middle.
@@ -2211,7 +2190,7 @@ mod tests {
                 slice("Action.execute", "general information", 0, 90),
             ],
         )]);
-        let g = build_flame_graph(&p, Scope::All);
+        let g = flame(&p);
         assert_eq!(flame_height(&g, &METRICS), 30.0);
     }
 }

@@ -112,8 +112,15 @@ pub(crate) fn default_order(stats: &[StatRow]) -> Vec<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::flame::TrackFlamer;
     use crate::test_profile::{action, profile, slice, track};
     use bviz_trace_profile::{LaneClass, Workload};
+
+    /// The all-lanes flame graph, whose stats every all-scope test aggregates.
+    fn flame(p: &Arc<Profile>) -> FlameGraph {
+        let t = p.threads();
+        TrackFlamer::new(p).build(|i| t[i].lane_class != LaneClass::CriticalPath)
+    }
 
     /// Sum of every row's self-time total — must equal the root's total.
     fn total(rows: &[StatRow]) -> i64 {
@@ -139,7 +146,8 @@ mod tests {
                 action("CppLink", 200, 30),
             ],
         )]);
-        let (g, rows) = aggregate_stats(&p, Scope::All);
+        let g = flame(&p);
+        let rows = stats_from_flame(&g);
         assert_eq!(rows.len(), 2);
         let c = row(&g, &rows, "CppCompile");
         assert_eq!(c.count, 2);
@@ -168,7 +176,8 @@ mod tests {
                 slice("subprocess.run", "subprocess run", 0, 80),
             ],
         )]);
-        let (g, rows) = aggregate_stats(&p, Scope::All);
+        let g = flame(&p);
+        let rows = stats_from_flame(&g);
         assert_eq!(row(&g, &rows, "Rustc").total_us, 20);
         assert_eq!(row(&g, &rows, "subprocess.run").total_us, 80);
         assert_eq!(total(&rows), 100);
@@ -180,7 +189,9 @@ mod tests {
             track(7, LaneClass::Analysis, vec![action("CppCompile", 0, 100)]),
             track(8, LaneClass::Execution, vec![action("Rustc", 0, 50)]),
         ]);
-        let (g, rows) = aggregate_stats(&p, Scope::Execution);
+        let t = p.threads();
+        let g = TrackFlamer::new(&p).build(|i| t[i].lane_class == LaneClass::Execution);
+        let rows = stats_from_flame(&g);
         assert_eq!(rows.len(), 1);
         assert_eq!(g.str(rows[0].key), "Rustc");
         assert_eq!(rows[0].total_us, 50);
@@ -197,7 +208,8 @@ mod tests {
                 slice("checkOutputs", "general information", 200, 30),
             ],
         )]);
-        let (g, rows) = aggregate_stats(&p, Scope::All);
+        let g = flame(&p);
+        let rows = stats_from_flame(&g);
         assert_eq!(rows.len(), 2);
         assert_eq!(row(&g, &rows, "checkOutputs").total_us, 30);
         assert_eq!(row(&g, &rows, "CppCompile").count, 1);
@@ -212,10 +224,10 @@ mod tests {
         ];
         let mut reversed = ordered.clone();
         reversed.reverse();
-        let (ga, mut ra) =
-            aggregate_stats(&profile(vec![track(1, LaneClass::Execution, ordered)]), Scope::All);
-        let (gb, mut rb) =
-            aggregate_stats(&profile(vec![track(1, LaneClass::Execution, reversed)]), Scope::All);
+        let ga = flame(&profile(vec![track(1, LaneClass::Execution, ordered)]));
+        let mut ra = stats_from_flame(&ga);
+        let gb = flame(&profile(vec![track(1, LaneClass::Execution, reversed)]));
+        let mut rb = stats_from_flame(&gb);
         ra.sort_by(|x, y| ga.str(x.key).cmp(ga.str(y.key)));
         rb.sort_by(|x, y| gb.str(x.key).cmp(gb.str(y.key)));
         // Compare by resolved key: the graphs hold two independently interned

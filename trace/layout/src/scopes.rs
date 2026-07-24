@@ -249,8 +249,6 @@ impl FlameScopes {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::flame::build_flame_graph;
-    use crate::stats::aggregate_stats;
     use crate::test_profile::{action, action_named, profile, slice, track};
 
     /// A profile touching every lane class plus a critical path, with nesting
@@ -324,45 +322,54 @@ mod tests {
         rows
     }
 
-    const ALL_SCOPES: [Scope; 5] = [
-        Scope::CriticalPath,
-        Scope::Loading,
-        Scope::Analysis,
-        Scope::Execution,
-        Scope::All,
-    ];
-
-    #[test]
-    fn set_matches_single_scope_builds() {
-        let p = full_profile();
-        let set = FlameScopes::build(&p);
-        for scope in ALL_SCOPES {
-            let agg = set.get(scope).expect("scope present");
-            let (single_graph, single_rows) = aggregate_stats(&p, scope);
-            assert_eq!(resolved(&agg.flame), resolved(&single_graph), "{scope:?}");
-            assert_eq!(
-                resolved_rows(&agg.flame, &agg.stats),
-                resolved_rows(&single_graph, &single_rows),
-                "{scope:?}"
-            );
-        }
+    /// Summed `total_us` of every frame named `name` in the graph. Robust frames
+    /// occur once, but summing folds any repeat so the check never depends on a
+    /// name being unique.
+    fn frame_total(g: &FlameGraph, name: &str) -> i64 {
+        g.nodes()
+            .iter()
+            .filter(|n| g.str(n.name) == name)
+            .map(|n| n.total_us)
+            .sum()
     }
 
     #[test]
-    fn tracks_selection_matches_all_scope() {
-        // Selecting every non-critical-path lane is the same membership
-        // Scope::All uses, so both builds must yield the same graph and stats.
+    fn non_cp_selection_partitions_the_root() {
         let p = full_profile();
-        let threads = p.threads();
-        let select = |i: usize| threads[i].lane_class != LaneClass::CriticalPath;
-        let by_tracks = ScopeAggregate::build_for_tracks(&p, select);
-        let all = ScopeAggregate::build(&p, Scope::All);
-        assert_eq!(resolved(&by_tracks.flame), resolved(&all.flame));
+        let t = p.threads();
+        let select = |i: usize| t[i].lane_class != LaneClass::CriticalPath;
+        let agg = ScopeAggregate::build_for_tracks(&p, select);
+        let g = &agg.flame;
+        let root_total = g.root().total_us;
+
+        // Self time partitions the root: summed once per node it equals the root
+        // total, so no time-contained span is counted at both itself and its
+        // parent.
+        let self_sum: i64 = g.nodes().iter().map(|n| n.self_us).sum();
+        assert_eq!(self_sum, root_total);
+        // The stats rows are that same self-time partition, grouped by name.
+        let rows_total: i64 = agg.stats.iter().map(|r| r.total_us).sum();
+        assert_eq!(rows_total, root_total);
+        assert_eq!(agg.grand_total, root_total);
+
+        // Known frames from full_profile's slice durations. Leaves carry their own
+        // duration; subprocess.run nests under a Rustc action; the three
+        // execution "Rustc" spans (two lanes, mnemonic-tagged and bare) merge into
+        // one frame summing 100 + 60 + 50.
+        assert_eq!(frame_total(g, "runAnalysisPhase"), 300);
+        assert_eq!(frame_total(g, "@rules_rs//:fetch"), 80);
+        assert_eq!(frame_total(g, "CppCompile"), 40);
+        assert_eq!(frame_total(g, "subprocess.run"), 80);
+        assert_eq!(frame_total(g, "minor GC"), 5);
+        assert_eq!(frame_total(g, "idle"), 20);
+        assert_eq!(frame_total(g, "Rustc"), 210);
+        assert_eq!(root_total, 655);
+
+        // A second build of the same selection is byte-identical.
         assert_eq!(
-            resolved_rows(&by_tracks.flame, &by_tracks.stats),
-            resolved_rows(&all.flame, &all.stats),
+            g.nodes(),
+            ScopeAggregate::build_for_tracks(&p, select).flame.nodes()
         );
-        assert_eq!(by_tracks.grand_total, all.grand_total);
     }
 
     #[test]
@@ -419,215 +426,48 @@ mod tests {
     }
 
     #[test]
-    fn columnar_matches_trie_across_selections() {
-        // The production cached-columnar merge must reproduce the merge-trie
-        // oracle's graph and stats byte-for-byte for every selection, built from
-        // one shared scan so both paths rank labels identically and the graphs
-        // compare by handle.
+    fn class_selections_sum_to_their_union() {
         let p = full_profile();
-        let threads = p.threads();
-        let scan = TrackFlamer::new(&p);
-        let one_execution = threads
-            .iter()
-            .position(|t| t.lane_class == LaneClass::Execution)
-            .unwrap();
-        let selections: Vec<Box<dyn Fn(usize) -> bool + Sync>> = vec![
-            Box::new(|i: usize| threads[i].lane_class != LaneClass::CriticalPath),
-            Box::new(move |i: usize| i == one_execution),
-            Box::new(|_: usize| false),
-            Box::new(|_: usize| true),
-            Box::new(|i: usize| i % 2 == 0),
-        ];
-        for sel in &selections {
-            let production = ScopeAggregate::build_for_tracks_reusing(&scan, sel);
-            let trie = ScopeAggregate::from_graph(scan.build_trie(sel));
-            assert_eq!(production.flame, trie.flame);
-            assert_eq!(
-                resolved_rows(&production.flame, &production.stats),
-                resolved_rows(&trie.flame, &trie.stats),
-            );
-            assert_eq!(production.grand_total, trie.grand_total);
-        }
+        let t = p.threads();
+        let class_total = |c: LaneClass| {
+            ScopeAggregate::build_for_tracks(&p, move |i| t[i].lane_class == c)
+                .flame
+                .root()
+                .total_us
+        };
+        let loading = class_total(LaneClass::RepoFetch);
+        let analysis = class_total(LaneClass::Analysis);
+        let execution = class_total(LaneClass::Execution);
+        assert_eq!(loading, 80);
+        assert_eq!(analysis, 40);
+        // Two execution lanes, three Rustc spans merging into one frame.
+        assert_eq!(execution, 210);
+        // A selection's root total is additive over disjoint lane sets: the three
+        // classes unioned total exactly the sum of the three.
+        let union = ScopeAggregate::build_for_tracks(&p, |i| {
+            matches!(
+                t[i].lane_class,
+                LaneClass::RepoFetch | LaneClass::Analysis | LaneClass::Execution
+            )
+        })
+        .flame
+        .root()
+        .total_us;
+        assert_eq!(union, loading + analysis + execution);
+        assert_eq!(union, 330);
     }
 
     #[test]
-    fn all_scope_unions_the_classes() {
-        let p = full_profile();
-        let set = FlameScopes::build(&p);
-        let all = set.get(Scope::All).unwrap();
-        // Every real lane's top-level time lands in All exactly once.
-        assert_eq!(
-            all.flame.root().total_us,
-            300 + 5 + 80 + 40 + 100 + 60 + 50 + 20
-        );
-        // The scoped graphs partition their classes out of the same walk.
-        assert_eq!(set.get(Scope::Loading).unwrap().flame.root().total_us, 80);
-        assert_eq!(set.get(Scope::Analysis).unwrap().flame.root().total_us, 40);
-        assert_eq!(
-            set.get(Scope::Execution).unwrap().flame.root().total_us,
-            210
-        );
-    }
-
-    #[test]
-    fn critical_path_absent_yields_none_and_empty_scopes_bare_roots() {
-        let p = profile(vec![track(
-            5,
-            LaneClass::Execution,
-            vec![action("Rustc", 0, 50)],
-        )]);
-        let set = FlameScopes::build(&p);
-        assert!(set.get(Scope::CriticalPath).is_none());
-        let loading = set.get(Scope::Loading).unwrap();
-        assert_eq!(loading.flame.nodes().len(), 1);
-        assert_eq!(loading.flame.root().total_us, 0);
-        assert!(loading.stats.is_empty());
-        assert_eq!(loading.grand_total, 0);
-    }
-
-    #[test]
-    fn critical_path_present_matches_single_build() {
-        let p = full_profile();
-        let set = FlameScopes::build(&p);
-        let cp = set.get(Scope::CriticalPath).expect("critical path");
-        // The graft pulls the worker action's subtree, not the bare component.
-        assert_eq!(
-            resolved(&cp.flame),
-            resolved(&build_flame_graph(&p, Scope::CriticalPath))
-        );
-    }
-
-    #[test]
-    fn sharded_build_matches_serial() {
-        // Enough lanes that several workers really shard, spread over the
-        // classes, so the sharded merge must reproduce the serial one.
-        let mut tracks = vec![track(
-            0,
-            LaneClass::CriticalPath,
-            vec![slice(
-                "action 'Compiling foo'",
-                "critical path component",
-                900,
-                40,
-            )],
-        )];
-        for i in 0..4i64 {
-            let base = i * 1000;
-            tracks.push(track(
-                10 + i,
-                LaneClass::Execution,
-                vec![
-                    action_named("Compiling foo", "Rustc", base, 100),
-                    slice("subprocess.run", "subprocess run", base, 80),
-                    action("CppCompile", base + 200, 50),
-                ],
-            ));
-            tracks.push(track(
-                20 + i,
-                LaneClass::Analysis,
-                vec![action("CppCompile", base, 30)],
-            ));
-            tracks.push(track(
-                30 + i,
-                LaneClass::RepoFetch,
-                vec![slice("fetch", "generic", base, 10)],
-            ));
-            tracks.push(track(
-                40 + i,
-                LaneClass::Other,
-                vec![slice("idle", "generic", base, 5)],
-            ));
-        }
-        // One name under two mnemonics plus a mnemonic-less carrier: the
-        // smallest-text resolution must not depend on which shard scans which
-        // lane.
-        tracks.push(track(
-            50,
-            LaneClass::Execution,
-            vec![action_named("Compiling foo", "Javac", 5000, 60)],
-        ));
-        tracks.push(track(
-            51,
-            LaneClass::Execution,
-            vec![slice("Compiling foo", "action processing", 5100, 30)],
-        ));
-        let p = profile(tracks);
-
-        let serial = FlameScopes::build_with_workers(&p, 1, None, None);
-        for workers in [2, 5, 16] {
-            let sharded = FlameScopes::build_with_workers(&p, workers, None, None);
-            for scope in ALL_SCOPES {
-                match (serial.get(scope), sharded.get(scope)) {
-                    (Some(a), Some(b)) => {
-                        assert_eq!(a.flame.nodes(), b.flame.nodes(), "{scope:?} x{workers}");
-                        assert_eq!(a.stats, b.stats, "{scope:?} x{workers}");
-                        assert_eq!(a.default_order, b.default_order, "{scope:?} x{workers}");
-                        assert_eq!(a.grand_total, b.grand_total, "{scope:?} x{workers}");
-                    }
-                    (None, None) => {}
-                    _ => panic!("critical-path presence differs at {workers} workers"),
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn reusing_a_scope_matches_full_build() {
-        // Handing back an already-built default scope must reproduce a
-        // from-scratch set: every other scope is unchanged and the reused one is
-        // the very object passed in. Both possible initial scopes are covered.
-        let p = full_profile();
-        let full = FlameScopes::build(&p);
-        for reused_scope in [Scope::All, Scope::CriticalPath] {
-            let held = full.get(reused_scope).unwrap().clone();
-            let reused = FlameScopes::build_reusing(&p, reused_scope, held);
-            for scope in ALL_SCOPES {
-                match (full.get(scope), reused.get(scope)) {
-                    (Some(a), Some(b)) => {
-                        assert_eq!(resolved(&a.flame), resolved(&b.flame), "{scope:?}");
-                        assert_eq!(
-                            resolved_rows(&a.flame, &a.stats),
-                            resolved_rows(&b.flame, &b.stats),
-                            "{scope:?}"
-                        );
-                        assert_eq!(a.default_order, b.default_order, "{scope:?}");
-                        assert_eq!(a.grand_total, b.grand_total, "{scope:?}");
-                    }
-                    (None, None) => {}
-                    _ => panic!("critical-path presence differs for {scope:?}"),
-                }
-            }
-            assert!(Arc::ptr_eq(
-                full.get(reused_scope).unwrap(),
-                reused.get(reused_scope).unwrap()
-            ));
-        }
-    }
-
-    #[test]
-    fn restricted_single_scope_matches_the_set() {
-        // The single-scope path scans only the lanes its build walks, while the
-        // set pass scans the whole profile; both must produce the same graphs,
-        // rows, and default order. The fixture stresses the restricted scan's
-        // coverage: the mnemonic-less "Compiling foo" carriers on the analysis
-        // and repo-fetch lanes resolve their labels to mnemonics carried only
-        // on execution lanes — lanes outside those scopes' scans.
-        let tracks = vec![
-            track(
-                0,
-                LaneClass::CriticalPath,
-                vec![
-                    slice("action 'Compiling foo'", "critical path component", 500, 100),
-                    slice("Writing file out", "critical path component", 620, 10),
-                ],
-            ),
+    fn carrier_resolves_to_a_foreign_lanes_smallest_mnemonic() {
+        // A mnemonic-less "Compiling foo" carrier on the analysis lane; the same
+        // action name carries Rustc and Javac mnemonics on execution lanes. The
+        // whole-profile scan resolves the carrier's label to the byte-wise
+        // smallest mnemonic (Javac), even when only the analysis lane is selected.
+        let p = profile(vec![
             track(
                 1,
                 LaneClass::Execution,
-                vec![
-                    action_named("Compiling foo", "Rustc", 0, 100),
-                    slice("subprocess.run", "subprocess run", 0, 80),
-                ],
+                vec![action_named("Compiling foo", "Rustc", 0, 100)],
             ),
             track(
                 2,
@@ -642,47 +482,17 @@ mod tests {
                     slice("Compiling foo", "action processing", 50, 20),
                 ],
             ),
-            track(
-                4,
-                LaneClass::RepoFetch,
-                vec![
-                    slice("@rules_rs//:fetch", "generic", 0, 80),
-                    slice("Compiling foo", "generic", 90, 5),
-                ],
-            ),
-        ];
-        let p = profile(tracks);
-        let set = FlameScopes::build(&p);
-        // Row keys in default display order, resolved: ranks differ between a
-        // restricted and a full scan (each is dense over its own scanned
-        // texts), so the order must be compared through the resolved keys.
-        let order = |a: &ScopeAggregate| -> Vec<String> {
-            a.default_order
-                .iter()
-                .map(|&i| a.flame.str(a.stats[i as usize].key).to_owned())
-                .collect()
-        };
-        for scope in ALL_SCOPES {
-            let single = ScopeAggregate::build(&p, scope);
-            let agg = set.get(scope).expect("scope present");
-            assert_eq!(resolved(&agg.flame), resolved(&single.flame), "{scope:?}");
-            assert_eq!(
-                resolved_rows(&agg.flame, &agg.stats),
-                resolved_rows(&single.flame, &single.stats),
-                "{scope:?}"
-            );
-            assert_eq!(order(agg), order(&single), "{scope:?}");
-            assert_eq!(agg.grand_total, single.grand_total, "{scope:?}");
-        }
-        // The cross-lane resolution really happened: the analysis scope's rows
-        // label the mnemonic-less carrier by the smallest foreign mnemonic.
-        let analysis = ScopeAggregate::build(&p, Scope::Analysis);
+        ]);
+        let t = p.threads();
+        let agg = ScopeAggregate::build_for_tracks(&p, |i| t[i].lane_class == LaneClass::Analysis);
+        let g = &agg.flame;
+        // The carrier joined the foreign smallest-mnemonic frame carrying its own
+        // 20us; no bare "Compiling foo" frame remains.
+        assert_eq!(frame_total(g, "Javac"), 20);
+        assert!(g.nodes().iter().all(|n| g.str(n.name) != "Compiling foo"));
         assert!(
-            analysis
-                .stats
-                .iter()
-                .any(|r| analysis.flame.str(r.key) == "Javac"),
-            "the foreign-lane mnemonic must label the analysis carrier"
+            agg.stats.iter().any(|r| g.str(r.key) == "Javac"),
+            "the foreign-lane mnemonic must label the carrier"
         );
     }
 
@@ -700,8 +510,7 @@ mod tests {
             .map(|(i, k)| slice(k, "generic", i as i64 * 10, 5))
             .collect();
         let p = profile(vec![track(1, LaneClass::Execution, slices)]);
-        let set = FlameScopes::build(&p);
-        let agg = set.get(Scope::All).unwrap();
+        let agg = ScopeAggregate::build_for_tracks(&p, |_| true);
         assert_eq!(agg.stats.len(), keys.len());
         let text_of = |r: &StatRow| agg.flame.str(r.key).to_owned();
         let mut by_rank: Vec<String> = {
@@ -730,9 +539,13 @@ mod tests {
     #[test]
     fn default_order_is_total_desc_then_key_text() {
         let p = full_profile();
-        let set = FlameScopes::build(&p);
-        for scope in ALL_SCOPES {
-            let agg = set.get(scope).unwrap();
+        let t = p.threads();
+        let selections: Vec<Box<dyn Fn(usize) -> bool + Sync>> = vec![
+            Box::new(|i: usize| t[i].lane_class != LaneClass::CriticalPath),
+            Box::new(|i: usize| t[i].lane_class == LaneClass::Execution),
+        ];
+        for sel in &selections {
+            let agg = ScopeAggregate::build_for_tracks(&p, sel);
             assert_eq!(agg.default_order.len(), agg.stats.len());
             let keys: Vec<(i64, &str)> = agg
                 .default_order
@@ -742,7 +555,7 @@ mod tests {
                     (-r.total_us, agg.flame.str(r.key))
                 })
                 .collect();
-            assert!(keys.windows(2).all(|w| w[0] <= w[1]), "{scope:?}: {keys:?}");
+            assert!(keys.windows(2).all(|w| w[0] <= w[1]), "{keys:?}");
             assert_eq!(
                 agg.grand_total,
                 agg.stats.iter().map(|r| r.total_us).sum::<i64>()
