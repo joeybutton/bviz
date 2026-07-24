@@ -13,7 +13,7 @@ mod groups;
 mod model;
 mod rebuild;
 mod regions;
-mod stats;
+mod stats_panel;
 mod theme;
 mod timeline;
 mod tracks_menu;
@@ -23,12 +23,11 @@ use chart::{format_duration, format_time, nice_step, span_seconds};
 use flame_panel::FlamePanel;
 use groups::{GROUP_ORDER, GroupChrome, default_collapsed_groups, group_label};
 use model::TraceModel;
-use rebuild::Rebuild;
 use regions::{
     Regions, clamp_gutter_width, clamp_panel_height, flame_total_height, graph_lanes,
     max_lane_scroll,
 };
-use stats::{DEFAULT_STATS_SORT, StatsColumn, StatsOrder, stats_thumb_to};
+use stats_panel::StatsPanel;
 use theme::Palette;
 use timeline::TimelinePanel;
 
@@ -44,9 +43,9 @@ use gpui::{
     AnyElement, App, BorderStyle, Bounds, ContentMask, Context, Div, Entity, FocusHandle, Hsla,
     IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Render,
     Rgba, ScrollHandle, SharedString, Stateful, Subscription, Task, TextAlign, TransformationMatrix,
-    UniformListScrollHandle, Window, canvas, div, fill, point, prelude::*, px, quad, size,
+    Window, canvas, div, fill, point, prelude::*, px, quad, size,
 };
-use std::cell::{Cell, RefCell};
+use std::cell::Cell;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -189,8 +188,6 @@ impl BottomTab {
 #[derive(Clone, Copy)]
 enum Drag {
     None,
-    /// A press on the stats-table scroll thumb/track, holding that grab offset.
-    StatsThumb(f32),
     /// A press on the tracks-menu scroll thumb/track, holding that grab offset.
     MenuThumb(f32),
     /// A press on the tab bar resizes the bottom panel.
@@ -244,6 +241,10 @@ struct TraceView {
     /// captured bounds, scroll bars, box layout, and hover, reading the aggregate
     /// from `model`.
     flame: Entity<FlamePanel>,
+    /// The aggregated stats table: it owns its sort state, off-thread row order,
+    /// list scroll, scroll bar, and thumb drag, observing `model` so it re-sorts
+    /// when a fresh aggregate lands.
+    stats: Entity<StatsPanel>,
     drag: Drag,
     last_mouse: Point<Pixels>,
     /// Height of the bottom panel, set by the tab-bar splitter; clamped on use.
@@ -261,25 +262,6 @@ struct TraceView {
     /// The tracks menu's filter field; its text narrows the listed tracks.
     track_filter: Entity<TextInput>,
     _filter_observer: Subscription,
-    /// Rebuilds the stats sort order when the model swaps in a freshly built
-    /// aggregate for the current selection.
-    _agg_observer: Subscription,
-    /// Which column the stats table sorts by, and whether descending.
-    stats_sort: StatsColumn,
-    stats_desc: bool,
-    /// The stats rows in sorted display order for the active key and sort, built
-    /// off the UI thread (sorting ~2M rows would freeze a paint) and swapped in
-    /// when ready. The previous order stays shown while a re-sort runs, so a
-    /// header click doesn't blank the table.
-    stats_order: Rc<RefCell<Option<Rc<StatsOrder>>>>,
-    /// Background-sort bookkeeping for `stats_order`, keyed on
-    /// `(selection_version, sort, desc)`.
-    stats_build: Rebuild<(u64, StatsColumn, bool)>,
-    /// Scroll position of the virtualized stats table body.
-    stats_scroll: UniformListScrollHandle,
-    /// Stats-table scroll-bar geometry set during paint, read by mouse handlers;
-    /// `None` when the body fits and so shows no bar.
-    stats_bar: Rc<Cell<Option<Scrollbar>>>,
     /// The tracks menu's scroll handle and its scroll-bar geometry (stashed each
     /// frame for hit-testing), mirroring the stats table's bar.
     menu_scroll: ScrollHandle,
@@ -323,6 +305,13 @@ impl TraceView {
             let model = model.clone();
             cx.new(|cx| FlamePanel::new(model, cx))
         };
+        // The aggregated stats table owns its own sort/scroll state and observes
+        // the model so it re-sorts when a fresh aggregate lands; it reads the
+        // aggregate from `model`.
+        let stats = {
+            let model = model.clone();
+            cx.new(|cx| StatsPanel::new(model, cx))
+        };
         let appearance_observer = window.observe_window_appearance({
             let timeline = timeline.clone();
             let flame = flame.clone();
@@ -331,19 +320,12 @@ impl TraceView {
                 flame.update(cx, |f, cx| f.invalidate_canvas(cx));
             }
         });
-        // The model notifies only when a background aggregate build lands, so this
-        // fires 1:1 with a swapped-in aggregate: drop the stats order keyed on the
-        // old one and re-render so `ensure_stats_order` re-sorts. The flame panel's
-        // own observer drops its box layout.
-        let agg_observer = cx.observe(&model, |this, _, cx| {
-            this.stats_build.clear_ready();
-            cx.notify();
-        });
         Self {
             window_focus,
             model,
             timeline,
             flame,
+            stats,
             drag: Drag::None,
             last_mouse: Point::default(),
             panel_height: DEFAULT_PANEL_HEIGHT,
@@ -353,13 +335,6 @@ impl TraceView {
             tracks_menu_open: false,
             track_filter,
             _filter_observer: filter_observer,
-            _agg_observer: agg_observer,
-            stats_sort: DEFAULT_STATS_SORT.0,
-            stats_desc: DEFAULT_STATS_SORT.1,
-            stats_order: Rc::new(RefCell::new(None)),
-            stats_build: Rebuild::new(),
-            stats_scroll: UniformListScrollHandle::new(),
-            stats_bar: Rc::new(Cell::new(None)),
             menu_scroll: ScrollHandle::new(),
             menu_bar: Rc::new(Cell::new(None)),
             _appearance_observer: appearance_observer,
@@ -380,8 +355,7 @@ impl TraceView {
         self.flame.update(cx, |f, _| f.reset_for_new_profile());
         // The aggregate-derived panel caches: dropped up front so a new profile
         // shows the spinner rather than the prior graph until its build lands.
-        self.stats_order.borrow_mut().take();
-        self.stats_build.invalidate();
+        self.stats.update(cx, |s, _| s.reset_for_new_profile());
         let source = match result {
             Ok(profile) => Source::Loaded(Arc::new(profile)),
             Err(err) => Source::Message(err),
@@ -593,7 +567,7 @@ impl TraceView {
                 Some(_) => self.flame.clone().into_any_element(),
                 None => centered_spinner("Building flame graph…", colors).into_any_element(),
             },
-            BottomTab::Stats => self.stats_panel(palette, colors, cx).into_any_element(),
+            BottomTab::Stats => self.stats.clone().into_any_element(),
         };
         Some(
             div()
@@ -610,32 +584,6 @@ impl TraceView {
                 .child(content)
                 .into_any_element(),
         )
-    }
-
-    /// The stats panel: the sortable, virtualized stats table for the current
-    /// selection, with the table's scroll-bar press wiring.
-    fn stats_panel(
-        &self,
-        palette: Palette,
-        colors: &bviz_ui_theme::Colors,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        div()
-            .size_full()
-            .overflow_hidden()
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|this, e: &MouseDownEvent, _, cx| {
-                    // A press on the scroll thumb/track drives the bar; the canvas
-                    // paint re-installs the drag handlers while the drag is set, so
-                    // repaint now.
-                    this.press_stats(e.position);
-                    cx.stop_propagation();
-                    cx.notify();
-                }),
-            )
-            .on_scroll_wheel(|_, _, cx: &mut App| cx.stop_propagation())
-            .child(self.stats_table(&palette, colors, cx))
     }
 
     fn status(&self, cx: &App) -> String {
@@ -726,15 +674,10 @@ impl Render for TraceView {
             Source::Message(msg) => Err(centered_notice(msg.clone(), &colors)),
         };
         let body = match loaded {
-            Ok(_) => {
-                // Re-sort the stats off the UI thread when the aggregates or sort
-                // change; sorting ~2M rows on the paint thread would freeze it.
-                self.ensure_stats_order(cx);
-                div()
-                    .flex_1()
-                    .overflow_hidden()
-                    .child(self.trace_body(palette, &colors, cx))
-            }
+            Ok(_) => div()
+                .flex_1()
+                .overflow_hidden()
+                .child(self.trace_body(palette, &colors, cx)),
             Err(placeholder) => placeholder,
         };
         Chrome::new(&self.window_focus)
@@ -781,7 +724,6 @@ impl TraceView {
 /// panel's own drags are routed inside [`TimelinePanel`] and [`FlamePanel`].
 fn on_drag(view: &mut TraceView, event: &MouseMoveEvent, cx: &mut Context<TraceView>) {
     match view.drag {
-        Drag::StatsThumb(grab) => stats_thumb_to(view, event.position, grab),
         Drag::MenuThumb(grab) => menu_thumb_to(view, event.position, grab),
         Drag::Splitter => {
             let profile = match view.model.read(cx).source() {
@@ -809,10 +751,10 @@ fn on_drag(view: &mut TraceView, event: &MouseMoveEvent, cx: &mut Context<TraceV
         }
         Drag::None => {}
     }
-    // Stats and menu drags touch no cached layer, so a parent repaint is enough.
+    // The menu drag touches no cached layer, so a parent repaint is enough.
     // Panel and gutter resizes move the timeline's split, so they rebuild it.
     match view.drag {
-        Drag::StatsThumb(_) | Drag::MenuThumb(_) => cx.notify(),
+        Drag::MenuThumb(_) => cx.notify(),
         _ => view.invalidate_timeline(cx),
     }
 }
@@ -821,7 +763,7 @@ fn end_drag(view: &mut TraceView, _: &MouseUpEvent, cx: &mut Context<TraceView>)
     let ended = view.drag;
     view.drag = Drag::None;
     match ended {
-        Drag::StatsThumb(_) | Drag::MenuThumb(_) => cx.notify(),
+        Drag::MenuThumb(_) => cx.notify(),
         _ => view.invalidate_timeline(cx),
     }
 }

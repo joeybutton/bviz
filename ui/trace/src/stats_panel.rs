@@ -1,12 +1,21 @@
 use crate::chart::format_duration;
+use crate::model::TraceModel;
+use crate::rebuild::Rebuild;
 use crate::theme::Palette;
 use crate::{
-    BAR_WIDTH, Drag, STATS_CELL_PAD, STATS_HEADER_HEIGHT, STATS_NUM_COL_WIDTH, STATS_ROW_HEIGHT,
-    STATS_TEXT_SIZE, TraceView, scrollbar_canvas, set_list_thumb, thumb_offset,
+    BAR_WIDTH, STATS_CELL_PAD, STATS_HEADER_HEIGHT, STATS_NUM_COL_WIDTH, STATS_ROW_HEIGHT,
+    STATS_TEXT_SIZE, set_list_thumb, thumb_offset,
 };
 use bviz_trace_layout::{ScopeAggregate, StatRow};
-use bviz_ui_components::{centered_spinner, load_in_background};
-use gpui::{Context, Div, Pixels, Point, SharedString, div, prelude::*, px, uniform_list};
+use bviz_ui_components::{
+    Axis, DEFAULT_MIN_THUMB, Scrollbar, centered_spinner, load_in_background, track_drag,
+};
+use gpui::{
+    App, Bounds, Context, Div, Entity, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent,
+    MouseUpEvent, Pixels, Point, Render, Rgba, SharedString, Subscription, UniformListScrollHandle,
+    Window, canvas, div, point, prelude::*, px, size, uniform_list,
+};
+use std::cell::Cell;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -42,7 +51,7 @@ const STATS_COLUMNS: [StatsColumnSpec; 6] = [
 
 /// The sort the stats table opens with. Every aggregate ships this order
 /// precomputed ([`ScopeAggregate::default_order`]), so serving it costs no sort.
-pub(crate) const DEFAULT_STATS_SORT: (StatsColumn, bool) = (StatsColumn::Total, true);
+const DEFAULT_STATS_SORT: (StatsColumn, bool) = (StatsColumn::Total, true);
 
 /// The stats rows in sorted display order, as indices into `aggregates.stats`.
 /// Holds its own `Arc<ScopeAggregate>` so the table renders consistent rows even
@@ -126,14 +135,77 @@ fn stats_cell(spec: &StatsColumnSpec, text: impl Into<SharedString>) -> Div {
     }
 }
 
-/// Maps a stats-table thumb drag back to the list's scroll offset.
-pub(crate) fn stats_thumb_to(view: &mut TraceView, pos: Point<Pixels>, grab: f32) {
-    if let Some(offset) = thumb_offset(&view.stats_bar, pos, grab) {
-        set_list_thumb(&view.stats_scroll.0.borrow().base_handle, offset);
-    }
+/// What a left-button drag over the stats panel is currently moving.
+#[derive(Clone, Copy)]
+enum StatsDrag {
+    None,
+    /// A press on the scroll thumb/track, holding that grab offset from the
+    /// thumb's leading edge.
+    Thumb(f32),
 }
 
-impl TraceView {
+/// The graph-mode stats table as a self-contained panel: a header band of
+/// clickable, sortable columns over a scrollable, virtualized body of one row per
+/// group, reading the aggregate from [`TraceModel`]. Owns its sort state, the row
+/// order rebuilt off the UI thread, the list scroll and scroll-bar geometry, and
+/// the thumb drag as plain and interior-mutable fields.
+pub(crate) struct StatsPanel {
+    /// The shared trace document and selection state; read for the current
+    /// selection's aggregate (its stats rows) and the version its sort keys on.
+    model: Entity<TraceModel>,
+    /// Which column the table sorts by, and whether descending.
+    stats_sort: StatsColumn,
+    stats_desc: bool,
+    /// The stats rows in sorted display order for the active key and sort, built
+    /// off the UI thread (sorting ~2M rows would freeze a paint) and swapped in
+    /// when ready. The previous order stays shown while a re-sort runs, so a
+    /// header click doesn't blank the table.
+    stats_order: Option<Rc<StatsOrder>>,
+    /// Background-sort bookkeeping for `stats_order`, keyed on
+    /// `(selection_version, sort, desc)`.
+    stats_build: Rebuild<(u64, StatsColumn, bool)>,
+    /// Scroll position of the virtualized body.
+    stats_scroll: UniformListScrollHandle,
+    /// The scroll-bar geometry set during paint, read by mouse handlers; `None`
+    /// when the body fits and so shows no bar.
+    stats_bar: Cell<Option<Scrollbar>>,
+    drag: StatsDrag,
+    /// Rebuilds the sort order when the model swaps in a freshly built aggregate:
+    /// the order derives from the aggregate, which lands asynchronously.
+    _model_observer: Subscription,
+}
+
+impl StatsPanel {
+    pub(crate) fn new(model: Entity<TraceModel>, cx: &mut Context<Self>) -> Self {
+        // The model notifies only when a background aggregate build lands. Kick the
+        // re-sort here rather than waiting for a render, so the order stays current
+        // even while the Stats tab is hidden — switching to it then shows the sorted
+        // rows without a rebuild, instead of a stale flash or spinner.
+        let model_observer = cx.observe(&model, |this, _, cx| {
+            this.ensure_stats_order(cx);
+            cx.notify();
+        });
+        Self {
+            model,
+            stats_sort: DEFAULT_STATS_SORT.0,
+            stats_desc: DEFAULT_STATS_SORT.1,
+            stats_order: None,
+            stats_build: Rebuild::new(),
+            stats_scroll: UniformListScrollHandle::new(),
+            stats_bar: Cell::new(None),
+            drag: StatsDrag::None,
+            _model_observer: model_observer,
+        }
+    }
+
+    /// Drops the shown order and abandons any in-flight sort, so a freshly loaded
+    /// profile shows the sort spinner rather than the prior selection's rows until
+    /// its aggregate lands.
+    pub(crate) fn reset_for_new_profile(&mut self) {
+        self.stats_order = None;
+        self.stats_build.invalidate();
+    }
+
     /// The graph-mode stats table: a header band of clickable, sortable columns
     /// over a scrollable, virtualized body of one row per group, themed like the
     /// rest of the view. The rows are aggregated over the same scope as the
@@ -144,7 +216,7 @@ impl TraceView {
     /// through [`stats_cell`], so their widths cannot disagree at any window
     /// width: each fixed column reserves its pixel width without shrinking, and
     /// the one flexible column takes the remainder.
-    pub(crate) fn stats_table(
+    fn stats_table(
         &self,
         palette: &Palette,
         colors: &bviz_ui_theme::Colors,
@@ -202,7 +274,7 @@ impl TraceView {
 
         // Until the off-thread sort lands, keep the header but show a spinner in
         // place of the body rather than an empty band.
-        let Some(order) = self.stats_order.borrow().clone() else {
+        let Some(order) = self.stats_order.clone() else {
             return table.child(centered_spinner("Sorting…", colors));
         };
 
@@ -248,10 +320,9 @@ impl TraceView {
         .track_scroll(&self.stats_scroll);
 
         let scroll = self.stats_scroll.clone();
-        let bar = scrollbar_canvas(
-            self.stats_bar.clone(),
+        let bar = stats_scrollbar(
             cx.entity(),
-            matches!(self.drag, Drag::StatsThumb(_)),
+            matches!(self.drag, StatsDrag::Thumb(_)),
             palette.scroll_track,
             palette.scroll_thumb,
             move |bounds| {
@@ -280,7 +351,7 @@ impl TraceView {
     /// lands. An in-flight sort whose key the inputs have moved past is
     /// abandoned. The visible rows are formatted lazily at paint. Idempotent —
     /// safe to call each frame.
-    pub(crate) fn ensure_stats_order(&mut self, cx: &mut Context<Self>) {
+    fn ensure_stats_order(&mut self, cx: &mut Context<Self>) {
         let Some(aggregates) = self.model.read(cx).aggregates() else {
             return;
         };
@@ -295,8 +366,7 @@ impl TraceView {
             return;
         }
         if (self.stats_sort, self.stats_desc) == DEFAULT_STATS_SORT {
-            *self.stats_order.borrow_mut() =
-                Some(Rc::new(StatsOrder { aggregates, sorted: None }));
+            self.stats_order = Some(Rc::new(StatsOrder { aggregates, sorted: None }));
             self.stats_build.mark_ready(key);
             // The swap supersedes any background sort still running.
             self.stats_build.cancel_inflight();
@@ -314,19 +384,19 @@ impl TraceView {
                 let order = sort_stats(&aggregates.stats, column, desc);
                 StatsOrder { aggregates, sorted: Some(order) }
             },
-            move |view, stats_order, _cx| {
+            move |panel, stats_order, _cx| {
                 // Discard a result the inputs have moved past since this spawn.
-                if !view.stats_build.accept(generation, key) {
+                if !panel.stats_build.accept(generation, key) {
                     return;
                 }
-                *view.stats_order.borrow_mut() = Some(Rc::new(stats_order));
+                panel.stats_order = Some(Rc::new(stats_order));
             },
         );
         self.stats_build.set_task(task);
     }
 
-    /// Sets the stats sort to `column`, toggling the direction when it is already
-    /// the active column.
+    /// Sets the sort to `column`, toggling the direction when it is already the
+    /// active column.
     fn sort_by(&mut self, column: StatsColumn) {
         if self.stats_sort == column {
             self.stats_desc = !self.stats_desc;
@@ -336,9 +406,101 @@ impl TraceView {
         }
     }
 
-    /// Begins a stats-table scroll drag if `pos` hit its bar; otherwise leaves
-    /// the press to fall through to a row.
-    pub(crate) fn press_stats(&mut self, pos: Point<Pixels>) {
-        self.begin_thumb_drag(pos, self.stats_bar.get(), Drag::StatsThumb, stats_thumb_to);
+    /// Begins a scroll drag if `pos` hit the bar; otherwise leaves the press to
+    /// fall through to a row.
+    fn press(&mut self, pos: Point<Pixels>) {
+        if let Some(bar) = self.stats_bar.get() {
+            if bar.track_hit(pos) {
+                let grab = bar.grab(pos);
+                self.drag = StatsDrag::Thumb(grab);
+                self.thumb_to(pos, grab);
+            }
+        }
     }
+
+    /// Maps a thumb drag back to the list's scroll offset.
+    fn thumb_to(&mut self, pos: Point<Pixels>, grab: f32) {
+        if let Some(offset) = thumb_offset(&self.stats_bar, pos, grab) {
+            set_list_thumb(&self.stats_scroll.0.borrow().base_handle, offset);
+        }
+    }
+}
+
+impl Render for StatsPanel {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Re-sort off the UI thread when the aggregates or sort change; sorting
+        // ~2M rows on the paint thread would freeze it.
+        self.ensure_stats_order(cx);
+        let colors = bviz_ui_theme::colors(window);
+        let palette = Palette::from_colors(&colors);
+        div()
+            .size_full()
+            .overflow_hidden()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, e: &MouseDownEvent, _, cx| {
+                    // A press on the scroll thumb/track drives the bar; the canvas
+                    // paint re-installs the drag handlers while the drag is set, so
+                    // repaint now.
+                    this.press(e.position);
+                    cx.stop_propagation();
+                    cx.notify();
+                }),
+            )
+            .on_scroll_wheel(|_, _, cx: &mut App| cx.stop_propagation())
+            .child(self.stats_table(&palette, &colors, cx))
+    }
+}
+
+/// The stats table's vertical scroll bar, painted over the right edge of its
+/// body. Each frame the canvas reads `extents` (content extent, visible extent,
+/// scroll offset) to place the thumb, paints it, stashes the geometry in the
+/// panel's `stats_bar` for hit-testing, and re-installs the drag handlers while
+/// `dragging`.
+fn stats_scrollbar(
+    entity: Entity<StatsPanel>,
+    dragging: bool,
+    track: Rgba,
+    thumb: Rgba,
+    extents: impl Fn(Bounds<Pixels>) -> (f32, f32, f32) + 'static,
+) -> impl IntoElement {
+    canvas(
+        move |_, _, _| {},
+        move |bounds, _, window: &mut Window, cx: &mut App| {
+            let (content, visible, offset) = extents(bounds);
+            let layout = Scrollbar::new(
+                Axis::Vertical,
+                Bounds::new(
+                    point(bounds.origin.x + bounds.size.width - px(BAR_WIDTH), bounds.origin.y),
+                    size(px(BAR_WIDTH), bounds.size.height),
+                ),
+                content,
+                visible,
+                offset,
+                DEFAULT_MIN_THUMB,
+            );
+            if let Some(painted) = layout {
+                painted.paint(track, thumb, window);
+            }
+            entity.read(cx).stats_bar.set(layout);
+            if dragging {
+                track_drag(window, &entity, stats_on_drag, stats_end_drag);
+            }
+        },
+    )
+    .absolute()
+    .inset_0()
+}
+
+/// Routes an in-progress thumb drag to the list's scroll offset.
+fn stats_on_drag(panel: &mut StatsPanel, event: &MouseMoveEvent, cx: &mut Context<StatsPanel>) {
+    if let StatsDrag::Thumb(grab) = panel.drag {
+        panel.thumb_to(event.position, grab);
+    }
+    cx.notify();
+}
+
+fn stats_end_drag(panel: &mut StatsPanel, _: &MouseUpEvent, cx: &mut Context<StatsPanel>) {
+    panel.drag = StatsDrag::None;
+    cx.notify();
 }
