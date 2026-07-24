@@ -11,7 +11,8 @@ use crate::graph::{EdgeKind, Graph, Kind};
 use crate::intern::{Id, Names};
 use crate::label::{self, label_and_kind, PackageHierarchy};
 
-pub fn build(targets: &[Target]) -> (Graph, Names) {
+#[cfg(test)]
+fn build(targets: &[Target]) -> (Graph, Names) {
     let refs: Vec<&Target> = targets.iter().collect();
     let packages = package_keys(targets);
     let mut names = Names::default();

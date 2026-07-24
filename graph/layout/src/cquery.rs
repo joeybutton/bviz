@@ -22,7 +22,8 @@ use crate::intern::{Id, Names};
 use crate::label::{self, label_and_kind, PackageHierarchy};
 use crate::query;
 
-pub fn build(results: &[CqueryResult]) -> (Graph, Names) {
+#[cfg(test)]
+fn build(results: &[CqueryResult]) -> (Graph, Names) {
     let packages = package_keys(results);
     let mut names = Names::default();
     let graph = build_with_packages(results, &packages, &mut names);

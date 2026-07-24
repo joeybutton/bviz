@@ -34,7 +34,8 @@ struct ArtifactId(u32);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct ConfigId(u32);
 
-pub fn build(containers: &[ActionGraphContainer], external_sources: bool) -> (Graph, Names) {
+#[cfg(test)]
+fn build(containers: &[ActionGraphContainer], external_sources: bool) -> (Graph, Names) {
     let packages = package_keys(containers);
     let mut names = Names::default();
     let graph = build_with_packages(
