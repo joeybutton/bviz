@@ -10,6 +10,7 @@ mod chart;
 mod counters;
 mod flame_graph;
 mod groups;
+mod model;
 mod rebuild;
 mod regions;
 mod stats;
@@ -20,9 +21,8 @@ use chart::{fit_px_per_us, format_duration, format_time, nice_step, span_seconds
 
 use counters::{paint_crosshair, paint_graph};
 use flame_graph::{FlameBoxCache, FlameHover, FlameLayer, flame_scroll_thumb_to};
-use groups::{
-    GROUP_ORDER, GroupChrome, GroupHit, build_grouped_layout, default_collapsed_groups, group_label,
-};
+use groups::{GROUP_ORDER, GroupChrome, GroupHit, default_collapsed_groups, group_label};
+use model::TraceModel;
 use rebuild::Rebuild;
 use regions::{Regions, clamp_gutter_width, clamp_panel_height, flame_total_height, graph_lanes};
 use stats::{DEFAULT_STATS_SORT, StatsColumn, StatsOrder, stats_thumb_to};
@@ -30,9 +30,9 @@ use theme::Palette;
 
 use bviz_trace_layout::{
     Cull, FlameView, LaneLayout, LaneMetrics, ScopeAggregate, TimeView, TrackFlamer, Viewport,
-    VisibleSlice, lay_out_lanes, visible_slices,
+    VisibleSlice, visible_slices,
 };
-use bviz_trace_profile::{LaneClass, Profile, Slice, SliceDetail, TimeSpan};
+use bviz_trace_profile::{Profile, Slice, SliceDetail, TimeSpan};
 use bviz_ui_components::{
     Axis, DEFAULT_MIN_THUMB, Scrollbar, TextInput, centered_notice, centered_spinner,
     load_in_background, track_drag,
@@ -230,7 +230,7 @@ const TOP_N_PER_GROUP: usize = 12;
 
 /// The loaded profile, a load in progress, or a message explaining why none is
 /// shown.
-enum Source {
+pub(crate) enum Source {
     Loading,
     Loaded(Arc<Profile>),
     Message(String),
@@ -265,7 +265,10 @@ struct TraceView {
     /// tracks) dispatches to it; a descendant of `window_focus`, so the window's
     /// own actions still fire.
     content_focus: FocusHandle,
-    source: Source,
+    /// The shared trace document and the selection/visibility state derived from
+    /// it. Held as an entity so the panels read one source of truth; the panel's
+    /// own view state stays on this view.
+    model: Entity<TraceModel>,
     /// Horizontal time-to-pixel mapping (pan and zoom).
     view: Rc<Cell<TimeView>>,
     /// How far the lanes are scrolled up, in pixels.
@@ -297,42 +300,15 @@ struct TraceView {
     gutter_width: f32,
     /// Which panel the tab bar shows.
     bottom_tab: BottomTab,
-    /// Which tracks the flame chart draws, indexed by `profile.threads()` order.
-    visible_tracks: Vec<bool>,
-    /// Which tracks the flame graph and stats aggregate over, indexed likewise.
-    selected_tracks: Vec<bool>,
-    /// Which lane-class groups are collapsed in the chart, indexed by
-    /// [`GROUP_ORDER`]. Loading starts collapsed — it holds one lane per external
-    /// repository, hundreds on a large build.
-    collapsed_groups: [bool; GROUP_ORDER.len()],
-    /// Which lane-class groups are folded in the tracks menu, indexed likewise;
-    /// independent of the chart's collapse so the menu can manage a group's
-    /// visibility while its lanes are collapsed in the chart.
+    /// Which lane-class groups are folded in the tracks menu, indexed by
+    /// [`GROUP_ORDER`]; independent of the chart's collapse so the menu can manage
+    /// a group's visibility while its lanes are collapsed in the chart.
     menu_collapsed_groups: [bool; GROUP_ORDER.len()],
-    /// Which groups show every lane rather than the [`TOP_N_PER_GROUP`] busiest,
-    /// indexed by [`GROUP_ORDER`].
-    group_show_all: [bool; GROUP_ORDER.len()],
-    /// Bumped whenever `selected_tracks` changes, keying the aggregate build so a
-    /// stale build's result is discarded when the selection moves on.
-    selection_version: u64,
-    /// The track a shift-click range-selection extends from, if any.
-    select_anchor: Option<usize>,
     /// Whether the tracks visibility menu is open.
     tracks_menu_open: bool,
     /// The tracks menu's filter field; its text narrows the listed tracks.
     track_filter: Entity<TextInput>,
     _filter_observer: Subscription,
-    /// The full thread/counter lane layout for the loaded profile, built on first
-    /// use. It depends only on the immutable profile, so it is cleared only when a
-    /// new profile loads.
-    lanes: Rc<RefCell<Option<Rc<LaneLayout>>>>,
-    /// The lane layout restricted to the visible tracks and restacked into
-    /// lane-class groups, derived from `lanes` and cleared whenever the
-    /// visibility, collapse, or show-all state changes.
-    visible_lanes: Rc<RefCell<Option<Rc<LaneLayout>>>>,
-    /// The group headers and show-more rows over `visible_lanes`, built and
-    /// cleared alongside it.
-    group_chrome: Rc<RefCell<Option<Rc<GroupChrome>>>>,
     /// The selected tracks' aggregate — its flame graph and stats rows, held
     /// together so the rows' and laid-out boxes' name handles resolve against
     /// the graph that produced them. Built on demand off the UI thread (walking
@@ -474,10 +450,11 @@ impl TraceView {
                 flame_layer.update(cx, |_, cx| cx.notify());
             }
         });
+        let model = cx.new(|_| TraceModel::new());
         Self {
             window_focus,
             content_focus,
-            source: Source::Loading,
+            model,
             view,
             scroll_y,
             flame_view,
@@ -493,19 +470,10 @@ impl TraceView {
             panel_height: DEFAULT_PANEL_HEIGHT,
             gutter_width: DEFAULT_GUTTER_WIDTH,
             bottom_tab: BottomTab::Counters,
-            visible_tracks: Vec::new(),
-            selected_tracks: Vec::new(),
-            collapsed_groups: default_collapsed_groups(),
             menu_collapsed_groups: default_collapsed_groups(),
-            group_show_all: [false; GROUP_ORDER.len()],
-            selection_version: 0,
-            select_anchor: None,
             tracks_menu_open: false,
             track_filter,
             _filter_observer: filter_observer,
-            lanes: Rc::new(RefCell::new(None)),
-            visible_lanes: Rc::new(RefCell::new(None)),
-            group_chrome: Rc::new(RefCell::new(None)),
             aggregates: Rc::new(RefCell::new(None)),
             flame_scan: Rc::new(RefCell::new(None)),
             flame_boxes,
@@ -547,39 +515,28 @@ impl TraceView {
 
     fn on_profile_loaded(&mut self, result: Result<Profile, String>, cx: &mut Context<Self>) {
         self.invalidate_aggregates();
-        // The lane layouts depend only on the profile, so they must be dropped
-        // when a new profile loads.
-        self.lanes.borrow_mut().take();
-        self.visible_lanes.borrow_mut().take();
         self.slice_draw.borrow_mut().take();
         self.flame_view.set(FlameView::FIT);
-        self.source = match result {
+        let source = match result {
             Ok(profile) => Source::Loaded(Arc::new(profile)),
             Err(err) => Source::Message(err),
         };
-        if let Source::Loaded(profile) = &self.source {
-            let profile = profile.clone();
-            self.init_tracks(&profile);
+        // The tracks-menu fold state, unlike the document-derived selection the
+        // model seeds, is view-local, so reset it here for a freshly loaded
+        // profile.
+        let loaded = matches!(source, Source::Loaded(_));
+        self.model.update(cx, |m, _| m.set_source(source));
+        if loaded {
+            self.menu_collapsed_groups = default_collapsed_groups();
         }
         self.invalidate_chart(cx);
     }
 
-    /// The default track selection for a freshly loaded profile: every
-    /// non-critical-path lane selected. The critical-path lane holds redirected
-    /// copies of worker time, so leaving it out of the default selection keeps
-    /// the aggregate from double-counting that time.
-    fn init_tracks(&mut self, profile: &Profile) {
-        self.visible_tracks = vec![true; profile.threads().len()];
-        self.collapsed_groups = default_collapsed_groups();
-        self.menu_collapsed_groups = default_collapsed_groups();
-        self.group_show_all = [false; GROUP_ORDER.len()];
-        self.selected_tracks = profile
-            .threads()
-            .iter()
-            .map(|t| t.lane_class != LaneClass::CriticalPath)
-            .collect();
-        self.select_anchor = None;
-        self.selection_version += 1;
+    /// Clamps the flame chart's lane scroll to the current layout height, dropping
+    /// any overscroll a visibility or collapse change left past the new bottom.
+    fn clamp_lane_scroll(&self, cx: &App) {
+        let scrolled = self.scroll_y.get().min(self.max_scroll(cx));
+        self.scroll_y.set(scrolled);
     }
 
     /// The flame chart's mouse/scroll/hover wiring: a press on a track label
@@ -599,26 +556,29 @@ impl TraceView {
                     this.content_focus.focus(window, cx);
                     // A press on a group header collapses or expands it; on a
                     // show-more row, toggles whether the group shows every lane.
-                    if let Some(hit) = this.group_row_at(e.position) {
-                        match hit {
-                            GroupHit::Collapse(g) => this.toggle_group_collapsed(g),
-                            GroupHit::ShowAll(g) => this.toggle_group_show_all(g),
-                        }
+                    if let Some(hit) = this.group_row_at(e.position, cx) {
+                        this.model.update(cx, |m, _| match hit {
+                            GroupHit::Collapse(g) => m.toggle_group_collapsed(g),
+                            GroupHit::ShowAll(g) => m.toggle_group_show_all(g),
+                        });
+                        this.clamp_lane_scroll(cx);
                         this.invalidate_chart(cx);
                         return;
                     }
                     // A press on a track label selects it rather than panning;
                     // ctrl/cmd toggles it, shift extends a range.
-                    if let Some(track) = this.track_label_at(e.position) {
+                    if let Some(track) = this.track_label_at(e.position, cx) {
                         let ctrl = e.modifiers.control || e.modifiers.platform;
-                        this.select_track(track, e.modifiers.shift, ctrl);
+                        this.model.update(cx, |m, _| {
+                            m.select_track(track, e.modifiers.shift, ctrl)
+                        });
                         this.invalidate_chart(cx);
                         return;
                     }
                     // A press on a scroll thumb/track drives that bar; anywhere
                     // else pans. The window-global drag handlers are installed
                     // from the overlay paint while a drag is set, so repaint now.
-                    this.press(e.position);
+                    this.press(e.position, cx);
                     this.invalidate_chart(cx);
                 }),
             )
@@ -653,7 +613,7 @@ impl TraceView {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let entity = cx.entity();
-        let regions = self.regions();
+        let regions = self.regions(cx);
         let origin = self.viewport.get().origin;
 
         // Embedding the slice layer cached lets a hover reuse its last scene: a
@@ -816,12 +776,13 @@ impl TraceView {
             let n_counters = profile.counters().len();
             let (tab, panel_height, gutter_width, selected, chrome) = {
                 let this = entity.read(cx);
+                let model = this.model.read(cx);
                 (
                     this.bottom_tab,
                     this.panel_height,
                     this.gutter_width,
-                    this.selected_tracks.clone(),
-                    this.group_chrome().unwrap_or_default(),
+                    model.selected_tracks().to_vec(),
+                    model.group_chrome().unwrap_or_default(),
                 )
             };
             let flame_total = flame_total_height(layout);
@@ -1191,8 +1152,8 @@ impl TraceView {
             .child(self.stats_table(&palette, colors, cx))
     }
 
-    fn status(&self) -> String {
-        match &self.source {
+    fn status(&self, cx: &App) -> String {
+        match self.model.read(cx).source() {
             Source::Loaded(p) => {
                 let slices: usize = p.threads().iter().map(|t| t.slices.len()).sum();
                 format!(
@@ -1209,12 +1170,13 @@ impl TraceView {
 
     /// [`Regions`] for the current viewport, panel and gutter sizes, the loaded
     /// profile's counter count, and the flame lanes' total height.
-    fn regions(&self) -> Regions {
-        let n_counters = match &self.source {
+    fn regions(&self, cx: &App) -> Regions {
+        let model = self.model.read(cx);
+        let n_counters = match model.source() {
             Source::Loaded(p) => p.counters().len(),
             _ => 0,
         };
-        let flame_total = self
+        let flame_total = model
             .lane_layout()
             .map(|l| flame_total_height(&l))
             .unwrap_or(0.0);
@@ -1229,130 +1191,14 @@ impl TraceView {
 
     /// The pixel ceiling for the flame chart's lane scroll: the thread-lane
     /// height past the flame region's on-screen height.
-    fn max_scroll(&self) -> f32 {
+    fn max_scroll(&self, cx: &App) -> f32 {
         let total = self
+            .model
+            .read(cx)
             .lane_layout()
             .map(|l| flame_total_height(&l))
             .unwrap_or(0.0);
-        (total - self.regions().flame_h()).max(0.0)
-    }
-
-    /// The full lane layout for the loaded profile, built on first use and reused
-    /// across paints and mouse handlers. `None` until a profile is loaded.
-    fn full_lane_layout(&self) -> Option<Rc<LaneLayout>> {
-        let Source::Loaded(profile) = &self.source else {
-            return None;
-        };
-        if self.lanes.borrow().is_none() {
-            let t = std::time::Instant::now();
-            let layout = lay_out_lanes(profile, &METRICS);
-            if std::env::var_os("BVIZ_TRACE_TIMING").is_some() {
-                eprintln!("[timing] lay_out_lanes: {:.3}s", t.elapsed().as_secs_f64());
-            }
-            *self.lanes.borrow_mut() = Some(Rc::new(layout));
-        }
-        self.lanes.borrow().clone()
-    }
-
-    /// The lane layout the flame chart draws: the full layout restricted to the
-    /// visible tracks and restacked into lane-class groups, cached until the
-    /// visibility, collapse, or show-all state changes. Every paint and hit-test
-    /// works from this, so a lane hidden by its group is neither drawn nor
-    /// selectable.
-    fn lane_layout(&self) -> Option<Rc<LaneLayout>> {
-        self.ensure_grouped();
-        self.visible_lanes.borrow().clone()
-    }
-
-    /// The group headers and show-more rows over [`Self::lane_layout`].
-    fn group_chrome(&self) -> Option<Rc<GroupChrome>> {
-        self.ensure_grouped();
-        self.group_chrome.borrow().clone()
-    }
-
-    /// Builds and caches the grouped lane layout and its chrome if stale.
-    fn ensure_grouped(&self) {
-        if self.visible_lanes.borrow().is_some() {
-            return;
-        }
-        let Some(full) = self.full_lane_layout() else {
-            return;
-        };
-        let Source::Loaded(profile) = &self.source else {
-            return;
-        };
-        let (layout, chrome) = build_grouped_layout(
-            profile,
-            &full,
-            &self.visible_tracks,
-            &self.collapsed_groups,
-            &self.group_show_all,
-        );
-        *self.visible_lanes.borrow_mut() = Some(Rc::new(layout));
-        *self.group_chrome.borrow_mut() = Some(Rc::new(chrome));
-    }
-
-    /// Toggles a lane-class group's collapse and rebuilds the grouped layout.
-    fn toggle_group_collapsed(&mut self, group: usize) {
-        if let Some(c) = self.collapsed_groups.get_mut(group) {
-            *c = !*c;
-            self.invalidate_visible_lanes();
-        }
-    }
-
-    /// Toggles whether a group shows every lane or only the busiest.
-    fn toggle_group_show_all(&mut self, group: usize) {
-        if let Some(s) = self.group_show_all.get_mut(group) {
-            *s = !*s;
-            self.invalidate_visible_lanes();
-        }
-    }
-
-    /// The number of visible tracks and the total.
-    fn visible_count(&self) -> (usize, usize) {
-        let visible = self.visible_tracks.iter().filter(|v| **v).count();
-        (visible, self.visible_tracks.len())
-    }
-
-    /// Toggles whether track `i` is drawn in the flame chart, dropping the cached
-    /// visible layout so it restacks, and clamping the lane scroll to the new
-    /// height.
-    fn toggle_track(&mut self, i: usize) {
-        if let Some(v) = self.visible_tracks.get_mut(i) {
-            *v = !*v;
-            self.invalidate_visible_lanes();
-        }
-    }
-
-    /// Shows or hides every track at once.
-    fn set_all_visible(&mut self, visible: bool) {
-        for v in &mut self.visible_tracks {
-            *v = visible;
-        }
-        self.invalidate_visible_lanes();
-    }
-
-    /// Shows or hides every track in one lane-class group at once.
-    fn set_group_visible(&mut self, group: usize, visible: bool) {
-        let class = GROUP_ORDER[group];
-        let targets: Vec<usize> = {
-            let Source::Loaded(profile) = &self.source else {
-                return;
-            };
-            profile
-                .threads()
-                .iter()
-                .enumerate()
-                .filter(|(_, t)| t.lane_class == class)
-                .map(|(i, _)| i)
-                .collect()
-        };
-        for i in targets {
-            if let Some(v) = self.visible_tracks.get_mut(i) {
-                *v = visible;
-            }
-        }
-        self.invalidate_visible_lanes();
+        (total - self.regions(cx).flame_h()).max(0.0)
     }
 
     /// Folds or unfolds a lane-class group's track list in the tracks menu.
@@ -1360,15 +1206,6 @@ impl TraceView {
         if let Some(c) = self.menu_collapsed_groups.get_mut(group) {
             *c = !*c;
         }
-    }
-
-    /// Drops the cached visible layout so it rebuilds and restacks, then clamps
-    /// the lane scroll to the new height.
-    fn invalidate_visible_lanes(&mut self) {
-        self.visible_lanes.borrow_mut().take();
-        self.group_chrome.borrow_mut().take();
-        let scrolled = self.scroll_y.get().min(self.max_scroll());
-        self.scroll_y.set(scrolled);
     }
 
     /// The aggregated flame graph and stats for the current track selection, or
@@ -1386,10 +1223,11 @@ impl TraceView {
     /// abandoned. Idempotent — a no-op once the right value is ready or being
     /// computed — so it is safe to call each frame.
     fn ensure_aggregates(&mut self, cx: &mut Context<Self>) {
-        let Source::Loaded(profile) = &self.source else {
-            return;
+        let profile = match self.model.read(cx).source() {
+            Source::Loaded(p) => p.clone(),
+            _ => return,
         };
-        let key = self.selection_version;
+        let key = self.model.read(cx).selection_version();
         if self.agg.is_ready(key) {
             // The shown value is already current; cancel a build for a key the
             // inputs have since left so its late result can't clobber it.
@@ -1400,8 +1238,7 @@ impl TraceView {
             return;
         }
         let generation = self.agg.start(key);
-        let profile = profile.clone();
-        let selected = self.selected_tracks.clone();
+        let selected = self.model.read(cx).selected_tracks().to_vec();
         let cached_scan = self.flame_scan.borrow().clone();
         let task = load_in_background(
             cx,
@@ -1485,10 +1322,11 @@ impl Render for SliceLayer {
         };
         let (profile, lanes, panel_height, gutter_width) = {
             let this = parent.read(cx);
-            let Source::Loaded(profile) = &this.source else {
+            let model = this.model.read(cx);
+            let Source::Loaded(profile) = model.source() else {
                 return div().into_any_element();
             };
-            let Some(lanes) = this.lane_layout() else {
+            let Some(lanes) = model.lane_layout() else {
                 return div().into_any_element();
             };
             (profile.clone(), lanes, this.panel_height, this.gutter_width)
@@ -1526,11 +1364,15 @@ impl Render for TraceView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = bviz_ui_theme::colors(window);
         let palette = Palette::from_colors(&colors);
-        let body = match &self.source {
-            Source::Loaded(profile) => {
-                // Own the handle so the borrow of `self.source` ends before the
-                // `&mut self` build call below.
-                let profile = profile.clone();
+        // Resolve the document first, ending the model borrow before the
+        // `&mut self` build calls below.
+        let loaded = match self.model.read(cx).source() {
+            Source::Loaded(profile) => Ok(profile.clone()),
+            Source::Loading => Err(centered_spinner("Loading…", &colors)),
+            Source::Message(msg) => Err(centered_notice(msg.clone(), &colors)),
+        };
+        let body = match loaded {
+            Ok(profile) => {
                 // Build (or rebuild) the flame graph and stats off the UI thread
                 // for the current selection; keeping them warm on any tab makes
                 // the first switch to the graph or stats instant.
@@ -1538,32 +1380,36 @@ impl Render for TraceView {
                 // Re-sort the stats off the UI thread when the aggregates or sort
                 // change; sorting ~2M rows on the paint thread would freeze it.
                 self.ensure_stats_order(cx);
-                let lanes = self.lane_layout().expect("a loaded profile has a lane layout");
+                let lanes = self
+                    .model
+                    .read(cx)
+                    .lane_layout()
+                    .expect("a loaded profile has a lane layout");
                 div()
                     .flex_1()
                     .overflow_hidden()
-                    .child(self.trace_body(profile.clone(), lanes, palette, &colors, cx))
+                    .child(self.trace_body(profile, lanes, palette, &colors, cx))
             }
-            Source::Loading => centered_spinner("Loading…", &colors),
-            Source::Message(msg) => centered_notice(msg.clone(), &colors),
+            Err(placeholder) => placeholder,
         };
         Chrome::new(&self.window_focus)
             .title("bazel_viz trace")
-            .status(self.status())
+            .status(self.status(cx))
             .child(body)
     }
 }
 
 impl TraceView {
     fn on_scroll_wheel(&mut self, e: &ScrollWheelEvent, _: &mut Window, cx: &mut Context<Self>) {
-        if self.lane_layout().is_none() {
+        if self.model.read(cx).lane_layout().is_none() {
             return;
         }
-        let Source::Loaded(profile) = &self.source else {
-            return;
+        let profile = match self.model.read(cx).source() {
+            Source::Loaded(p) => p.clone(),
+            _ => return,
         };
         let span = profile.span();
-        let regions = self.regions();
+        let regions = self.regions(cx);
         let time_w = regions.time_w;
         let content_left = regions.content_left;
         let (dx, dy) = match e.delta {
@@ -1591,7 +1437,7 @@ impl TraceView {
             } else {
                 (dx, dy)
             };
-            let scrolled = (self.scroll_y.get() - scroll_dy).clamp(0.0, self.max_scroll());
+            let scrolled = (self.scroll_y.get() - scroll_dy).clamp(0.0, self.max_scroll(cx));
             self.scroll_y.set(scrolled);
             let mut v = self.view.get();
             v.pan_px(pan_dx);
@@ -1613,10 +1459,10 @@ impl TraceView {
             return;
         }
         // The crosshair shows anywhere in the time-content column.
-        let in_content = self.in_content(e.position);
+        let in_content = self.in_content(e.position, cx);
         self.crosshair = in_content.then_some(e.position);
 
-        let hit = self.slice_at(e.position);
+        let hit = self.slice_at(e.position, cx);
         let slice_unchanged = match (self.hover, hit) {
             (Some(h), Some((track, slice))) => h.track == track && h.slice == slice,
             (None, None) => true,
@@ -1641,11 +1487,11 @@ impl TraceView {
     /// flame lanes always, and the counter panel when it is the shown tab (it
     /// shares the time axis). The flame-graph and stats panels and the tab bar do
     /// not map to time, so the crosshair does not extend over them.
-    fn in_content(&self, pos: Point<Pixels>) -> bool {
-        if self.lane_layout().is_none() {
+    fn in_content(&self, pos: Point<Pixels>, cx: &App) -> bool {
+        if self.model.read(cx).lane_layout().is_none() {
             return false;
         }
-        let regions = self.regions();
+        let regions = self.regions(cx);
         let x = f32::from(pos.x);
         let y = f32::from(pos.y);
         if x < regions.content_left || x >= regions.time_right {
@@ -1662,12 +1508,13 @@ impl TraceView {
     /// The slice under a window-space cursor, inverting the paint transform:
     /// window → flame lanes → (lane, depth row) and time. `None` over the gutter,
     /// the ruler, the tab bar, the panel, a lane header, or empty space.
-    fn slice_at(&self, pos: Point<Pixels>) -> Option<(usize, usize)> {
-        let layout = self.lane_layout()?;
-        let Source::Loaded(profile) = &self.source else {
-            return None;
+    fn slice_at(&self, pos: Point<Pixels>, cx: &App) -> Option<(usize, usize)> {
+        let layout = self.model.read(cx).lane_layout()?;
+        let profile = match self.model.read(cx).source() {
+            Source::Loaded(p) => p.clone(),
+            _ => return None,
         };
-        let regions = self.regions();
+        let regions = self.regions(cx);
         let x = f32::from(pos.x);
         let y = f32::from(pos.y);
         // The flame lanes, past the gutter, clear of the reserved vertical-bar
@@ -1715,10 +1562,11 @@ impl TraceView {
 
     /// The group header band or show-more row at `pos`, if the press lands on one
     /// (across the full chart width, gutter included).
-    fn group_row_at(&self, pos: Point<Pixels>) -> Option<GroupHit> {
-        self.lane_layout()?;
-        let chrome = self.group_chrome()?;
-        let regions = self.regions();
+    fn group_row_at(&self, pos: Point<Pixels>, cx: &App) -> Option<GroupHit> {
+        let model = self.model.read(cx);
+        model.lane_layout()?;
+        let chrome = model.group_chrome()?;
+        let regions = self.regions(cx);
         let x = f32::from(pos.x);
         let y = f32::from(pos.y);
         let gutter_left = regions.content_left - self.gutter_width;
@@ -1741,9 +1589,9 @@ impl TraceView {
     /// The track whose gutter label lies under `pos`, if the press hit the flame
     /// chart's track-label column (below the ruler, left of the content, above
     /// the tab bar). `None` elsewhere or over a lane's empty tail.
-    fn track_label_at(&self, pos: Point<Pixels>) -> Option<usize> {
-        let layout = self.lane_layout()?;
-        let regions = self.regions();
+    fn track_label_at(&self, pos: Point<Pixels>, cx: &App) -> Option<usize> {
+        let layout = self.model.read(cx).lane_layout()?;
+        let regions = self.regions(cx);
         let x = f32::from(pos.x);
         let y = f32::from(pos.y);
         let gutter_left = regions.content_left - self.gutter_width;
@@ -1762,86 +1610,9 @@ impl TraceView {
             .map(|l| l.track)
     }
 
-    /// Selects `track` for the flame graph and stats, with file-manager gesture
-    /// semantics. A plain click selects it alone; a `ctrl` (or cmd) click flips it
-    /// in the current set; a `shift` click replaces the selection with the run of
-    /// visible lanes from the anchor to `track`; a `shift`+`ctrl` click sets that
-    /// run to the anchor's own state, extending a just-added run or clearing a
-    /// just-removed one. A plain or ctrl click moves the anchor to `track`; a
-    /// shift click leaves it, so the run can be re-adjusted. Bumps the selection
-    /// version only when the set actually changes, so a repeat click is free.
-    fn select_track(&mut self, track: usize, shift: bool, ctrl: bool) {
-        let n = self.selected_tracks.len();
-        if track >= n {
-            return;
-        }
-        // The anchor run and the anchor's own selected state, read before any
-        // mutation so the range extends from the existing anchor.
-        let run = self.visible_run_to(track);
-        let anchor_state = self.select_anchor.and_then(|a| self.selected_tracks.get(a).copied());
-        let sel = match (shift, ctrl, run) {
-            // Plain click: select the one track and anchor there.
-            (false, false, _) => {
-                let mut sel = vec![false; n];
-                sel[track] = true;
-                self.select_anchor = Some(track);
-                sel
-            }
-            // Ctrl-click: flip the one track, keeping the rest, and re-anchor.
-            (false, true, _) => {
-                let mut sel = self.selected_tracks.clone();
-                sel[track] = !sel[track];
-                self.select_anchor = Some(track);
-                sel
-            }
-            // Shift-click: replace the selection with the anchor run.
-            (true, false, Some(run)) => {
-                let mut sel = vec![false; n];
-                for t in run {
-                    sel[t] = true;
-                }
-                sel
-            }
-            // Shift-Ctrl-click: set the anchor run to the anchor's state,
-            // extending a just-added run or clearing a just-removed one.
-            (true, true, Some(run)) => {
-                let state = anchor_state.unwrap_or(true);
-                let mut sel = self.selected_tracks.clone();
-                for t in run {
-                    sel[t] = state;
-                }
-                sel
-            }
-            // A shift click with no anchor (or an anchor no longer visible) falls
-            // back to selecting the one track.
-            (true, _, None) => {
-                let mut sel = vec![false; n];
-                sel[track] = true;
-                self.select_anchor = Some(track);
-                sel
-            }
-        };
-        if sel != self.selected_tracks {
-            self.selected_tracks = sel;
-            self.selection_version += 1;
-        }
-    }
-
-    /// The visible-lane tracks from the selection anchor to `track` inclusive, in
-    /// display order; `None` with no anchor or one no longer a visible lane.
-    fn visible_run_to(&self, track: usize) -> Option<Vec<usize>> {
-        let anchor = self.select_anchor?;
-        let order: Vec<usize> = self.lane_layout()?.lanes.iter().map(|l| l.track).collect();
-        let ai = order.iter().position(|&t| t == anchor)?;
-        let ti = order.iter().position(|&t| t == track)?;
-        Some(order[ai.min(ti)..=ai.max(ti)].to_vec())
-    }
-
     /// Selects every currently visible track (the Ctrl-A gesture).
     fn select_all_visible(&mut self, _: &SelectAllTracks, _: &mut Window, cx: &mut Context<Self>) {
-        if self.selected_tracks != self.visible_tracks {
-            self.selected_tracks = self.visible_tracks.clone();
-            self.selection_version += 1;
+        if self.model.update(cx, |m, _| m.select_all_visible()) {
             self.invalidate_chart(cx);
         }
     }
@@ -1871,11 +1642,20 @@ impl TraceView {
 
     /// Begins a flame-chart drag at `pos`: the lane vertical or time horizontal
     /// scroll thumb/track if the press hit one, otherwise a pan.
-    fn press(&mut self, pos: Point<Pixels>) {
-        if self.begin_thumb_drag(pos, self.vbar.get(), Drag::VThumb, scroll_thumb_to)
-            || self.begin_thumb_drag(pos, self.hbar.get(), Drag::HThumb, pan_thumb_to)
-        {
+    fn press(&mut self, pos: Point<Pixels>, cx: &mut Context<Self>) {
+        if self.begin_thumb_drag(pos, self.vbar.get(), Drag::VThumb, scroll_thumb_to) {
             return;
+        }
+        // The time bar's press jumps the pan, which reads the profile span and
+        // regions through the model, so it is threaded here rather than via the
+        // model-free `begin_thumb_drag`.
+        if let Some(bar) = self.hbar.get() {
+            if bar.track_hit(pos) {
+                let grab = bar.grab(pos);
+                self.drag = Drag::HThumb(grab);
+                pan_thumb_to(self, pos, grab, cx);
+                return;
+            }
         }
         self.drag = Drag::Pan;
         self.last_mouse = pos;
@@ -1896,19 +1676,20 @@ fn on_drag(view: &mut TraceView, event: &MouseMoveEvent, cx: &mut Context<TraceV
         Drag::Pan => {
             let dx = f32::from(event.position.x) - f32::from(view.last_mouse.x);
             let dy = f32::from(event.position.y) - f32::from(view.last_mouse.y);
-            if view.lane_layout().is_none() {
+            if view.model.read(cx).lane_layout().is_none() {
                 return;
             }
-            let Source::Loaded(profile) = &view.source else {
-                return;
+            let profile = match view.model.read(cx).source() {
+                Source::Loaded(p) => p.clone(),
+                _ => return,
             };
             let span = profile.span();
-            let regions = view.regions();
+            let regions = view.regions(cx);
             let mut v = view.view.get();
             v.pan_px(dx);
             v.clamp_to(span, regions.time_w, EDGE_MARGIN_PX);
             view.view.set(v);
-            let scrolled = (view.scroll_y.get() - dy).clamp(0.0, view.max_scroll());
+            let scrolled = (view.scroll_y.get() - dy).clamp(0.0, view.max_scroll(cx));
             view.scroll_y.set(scrolled);
             view.last_mouse = event.position;
         }
@@ -1925,14 +1706,15 @@ fn on_drag(view: &mut TraceView, event: &MouseMoveEvent, cx: &mut Context<TraceV
             view.last_mouse = event.position;
         }
         Drag::VThumb(grab) => scroll_thumb_to(view, event.position, grab),
-        Drag::HThumb(grab) => pan_thumb_to(view, event.position, grab),
+        Drag::HThumb(grab) => pan_thumb_to(view, event.position, grab, cx),
         Drag::FlameVThumb(grab) => flame_scroll_thumb_to(view, event.position, grab),
         Drag::FlameHThumb(grab) => view.flame_hthumb_to(event.position, grab),
         Drag::StatsThumb(grab) => stats_thumb_to(view, event.position, grab),
         Drag::MenuThumb(grab) => menu_thumb_to(view, event.position, grab),
         Drag::Splitter => {
-            let Source::Loaded(profile) = &view.source else {
-                return;
+            let profile = match view.model.read(cx).source() {
+                Source::Loaded(p) => p.clone(),
+                _ => return,
             };
             let vp = view.viewport.get();
             let vh = f32::from(vp.size.height);
@@ -2045,15 +1827,16 @@ fn menu_thumb_to(view: &mut TraceView, pos: Point<Pixels>, grab: f32) {
 }
 
 /// Maps a horizontal thumb drag back to a pan start time, then clamps the view.
-fn pan_thumb_to(view: &mut TraceView, pos: Point<Pixels>, grab: f32) {
-    if view.lane_layout().is_none() {
+fn pan_thumb_to(view: &mut TraceView, pos: Point<Pixels>, grab: f32, cx: &App) {
+    if view.model.read(cx).lane_layout().is_none() {
         return;
     }
-    let Source::Loaded(profile) = &view.source else {
-        return;
+    let profile = match view.model.read(cx).source() {
+        Source::Loaded(p) => p.clone(),
+        _ => return,
     };
     let span = profile.span();
-    let regions = view.regions();
+    let regions = view.regions(cx);
     let Some(offset) = thumb_offset(&view.hbar, pos, grab) else {
         return;
     };

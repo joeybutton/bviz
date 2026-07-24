@@ -21,7 +21,7 @@ impl TraceView {
         colors: &bviz_ui_theme::Colors,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let (nvis, ntot) = self.visible_count();
+        let (nvis, ntot) = self.model.read(cx).visible_count();
         let hover_bg = bviz_ui_theme::mix(colors.container, colors.background, 0.2);
         let trigger = div()
             .id("tracks-menu")
@@ -75,10 +75,11 @@ impl TraceView {
         if !self.tracks_menu_open {
             return None;
         }
-        let Source::Loaded(profile) = &self.source else {
-            return None;
+        let profile = match self.model.read(cx).source() {
+            Source::Loaded(p) => p.clone(),
+            _ => return None,
         };
-        let rows = self.menu_rows(profile, palette, colors, cx);
+        let rows = self.menu_rows(&profile, palette, colors, cx);
 
         let menu = self.tracks_menu_chrome(rows, palette, colors, cx);
         let backdrop = self.tracks_menu_backdrop(cx);
@@ -121,7 +122,7 @@ impl TraceView {
             }
             for i in tracks {
                 let name = profile.str(threads[i].name);
-                let visible = self.visible_tracks.get(i).copied().unwrap_or(true);
+                let visible = self.model.read(cx).visible_tracks().get(i).copied().unwrap_or(true);
                 rows.push(
                     self.track_row(i, name, visible, palette, selected, cx).into_any_element(),
                 );
@@ -144,10 +145,13 @@ impl TraceView {
         selected: Rgba,
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
-        let n_visible = tracks
-            .iter()
-            .filter(|&&t| self.visible_tracks.get(t).copied().unwrap_or(true))
-            .count();
+        let n_visible = {
+            let model = self.model.read(cx);
+            tracks
+                .iter()
+                .filter(|&&t| model.visible_tracks().get(t).copied().unwrap_or(true))
+                .count()
+        };
         let group_all_visible = n_visible == tracks.len();
         let chevron = if folded { "▸" } else { "▾" };
         div()
@@ -180,7 +184,8 @@ impl TraceView {
                     .hover(move |s| s.bg(selected))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         cx.stop_propagation();
-                        this.set_group_visible(group, !group_all_visible);
+                        this.model.update(cx, |m, _| m.set_group_visible(group, !group_all_visible));
+                        this.clamp_lane_scroll(cx);
                         this.invalidate_chart(cx);
                     }))
                     .child(if group_all_visible { "hide" } else { "show" }),
@@ -218,7 +223,8 @@ impl TraceView {
             .rounded_sm()
             .hover(move |s| s.bg(selected))
             .on_click(cx.listener(move |this, _, _, cx| {
-                this.toggle_track(i);
+                this.model.update(cx, |m, _| m.toggle_track(i));
+                this.clamp_lane_scroll(cx);
                 this.invalidate_chart(cx);
             }))
             .child(check)
@@ -270,7 +276,7 @@ impl TraceView {
             )
             .child(div().p_1().child(self.track_filter.clone()))
             .child({
-                let (nvis, ntot) = self.visible_count();
+                let (nvis, ntot) = self.model.read(cx).visible_count();
                 let all_visible = ntot > 0 && nvis == ntot;
                 div()
                     .id("tracks-toggle-all")
@@ -286,7 +292,8 @@ impl TraceView {
                     .border_color(palette.border)
                     .hover(move |s| s.bg(hover_bg))
                     .on_click(cx.listener(move |this, _, _, cx| {
-                        this.set_all_visible(!all_visible);
+                        this.model.update(cx, |m, _| m.set_all_visible(!all_visible));
+                        this.clamp_lane_scroll(cx);
                         this.invalidate_chart(cx);
                     }))
                     .child(if all_visible { "Hide all" } else { "Show all" })
