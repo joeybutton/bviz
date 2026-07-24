@@ -21,7 +21,7 @@ mod tracks_menu;
 use chart::{format_duration, format_time, nice_step, span_seconds};
 
 use flame_panel::FlamePanel;
-use groups::{GROUP_ORDER, GroupChrome, default_collapsed_groups, group_label};
+use groups::{GroupChrome, group_label};
 use model::TraceModel;
 use regions::{
     Regions, clamp_gutter_width, clamp_panel_height, flame_total_height, graph_lanes,
@@ -30,24 +30,24 @@ use regions::{
 use stats_panel::StatsPanel;
 use theme::Palette;
 use timeline::TimelinePanel;
+use tracks_menu::TracksMenu;
 
 use bviz_trace_layout::{LaneLayout, LaneMetrics, TimeView};
 use bviz_trace_profile::{Profile, Slice, SliceDetail, TimeSpan};
 use bviz_ui_components::{
-    Axis, DEFAULT_MIN_THUMB, Scrollbar, TextInput, centered_notice, centered_spinner,
-    load_in_background, track_drag,
+    Axis, DEFAULT_MIN_THUMB, Scrollbar, centered_notice, centered_spinner, load_in_background,
+    track_drag,
 };
 use bviz_ui_shell::Chrome;
 use clap::Parser;
 use gpui::{
     AnyElement, App, BorderStyle, Bounds, ContentMask, Context, Div, Entity, FocusHandle, Hsla,
     IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Render,
-    Rgba, ScrollHandle, SharedString, Stateful, Subscription, Task, TextAlign, TransformationMatrix,
+    ScrollHandle, SharedString, Stateful, Subscription, Task, TextAlign, TransformationMatrix,
     Window, canvas, div, fill, point, prelude::*, px, quad, size,
 };
 use std::cell::Cell;
 use std::path::PathBuf;
-use std::rc::Rc;
 use std::sync::Arc;
 
 gpui::actions!(bviz_trace, [SelectAllTracks]);
@@ -188,8 +188,6 @@ impl BottomTab {
 #[derive(Clone, Copy)]
 enum Drag {
     None,
-    /// A press on the tracks-menu scroll thumb/track, holding that grab offset.
-    MenuThumb(f32),
     /// A press on the tab bar resizes the bottom panel.
     Splitter,
     /// A press on the gutter handle resizes the gutter.
@@ -253,19 +251,10 @@ struct TraceView {
     gutter_width: f32,
     /// Which panel the tab bar shows.
     bottom_tab: BottomTab,
-    /// Which lane-class groups are folded in the tracks menu, indexed by
-    /// [`GROUP_ORDER`]; independent of the chart's collapse so the menu can manage
-    /// a group's visibility while its lanes are collapsed in the chart.
-    menu_collapsed_groups: [bool; GROUP_ORDER.len()],
-    /// Whether the tracks visibility menu is open.
-    tracks_menu_open: bool,
-    /// The tracks menu's filter field; its text narrows the listed tracks.
-    track_filter: Entity<TextInput>,
-    _filter_observer: Subscription,
-    /// The tracks menu's scroll handle and its scroll-bar geometry (stashed each
-    /// frame for hit-testing), mirroring the stats table's bar.
-    menu_scroll: ScrollHandle,
-    menu_bar: Rc<Cell<Option<Scrollbar>>>,
+    /// The tracks-visibility menu: a gutter-corner popover that owns its open
+    /// state, filter, fold state, and scroll, reading and writing track
+    /// visibility on `model` and reflowing the timeline through this view.
+    tracks_menu: Entity<TracksMenu>,
     /// Rebuilds the timeline's and flame-graph panel's cached scenes on a system
     /// appearance change so they repaint in the new palette.
     _appearance_observer: Subscription,
@@ -280,10 +269,6 @@ impl TraceView {
         cx: &mut Context<Self>,
     ) -> Self {
         let window_focus = cx.focus_handle();
-        let track_filter = cx.new(|cx| TextInput::new(cx, "Filter tracks…", 0));
-        // Re-render the menu list as the filter text changes; TextInput notifies
-        // on every edit.
-        let filter_observer = cx.observe(&track_filter, |_, _, cx| cx.notify());
         let load_task = load_in_background(
             cx,
             move || load.join().unwrap_or_else(|_| Err("profile loader thread panicked".into())),
@@ -312,6 +297,14 @@ impl TraceView {
             let model = model.clone();
             cx.new(|cx| StatsPanel::new(model, cx))
         };
+        // The tracks-visibility menu owns its open/fold/filter/scroll state; it
+        // reads and writes visibility on `model` and reflows the timeline through
+        // this view.
+        let tracks_menu = {
+            let shell = cx.entity().downgrade();
+            let model = model.clone();
+            cx.new(|cx| TracksMenu::new(model, shell, cx))
+        };
         let appearance_observer = window.observe_window_appearance({
             let timeline = timeline.clone();
             let flame = flame.clone();
@@ -331,12 +324,7 @@ impl TraceView {
             panel_height: DEFAULT_PANEL_HEIGHT,
             gutter_width: DEFAULT_GUTTER_WIDTH,
             bottom_tab: BottomTab::Counters,
-            menu_collapsed_groups: default_collapsed_groups(),
-            tracks_menu_open: false,
-            track_filter,
-            _filter_observer: filter_observer,
-            menu_scroll: ScrollHandle::new(),
-            menu_bar: Rc::new(Cell::new(None)),
+            tracks_menu,
             _appearance_observer: appearance_observer,
             _load_task: load_task,
         }
@@ -369,7 +357,7 @@ impl TraceView {
             m.set_source(source, cx);
         });
         if loaded {
-            self.menu_collapsed_groups = default_collapsed_groups();
+            self.tracks_menu.update(cx, |m, _| m.reset_for_new_profile());
         }
         self.invalidate_timeline(cx);
     }
@@ -418,7 +406,6 @@ impl TraceView {
         // the counter plots are drawn by the timeline instead.
         let panel = self.bottom_panel(regions, origin, palette, colors, cx);
         let gutter_handle = self.gutter_handle(regions, origin, cx);
-        let tracks_menu = self.tracks_menu(palette, colors, cx);
         div()
             .id("trace-viewport")
             .relative()
@@ -429,7 +416,7 @@ impl TraceView {
             .children(panel)
             .child(tab_bar)
             .child(gutter_handle)
-            .child(tracks_menu)
+            .child(self.tracks_menu.clone())
     }
 
     /// A thin overlay strip at the gutter's right edge that begins a width drag;
@@ -642,13 +629,6 @@ impl TraceView {
         self.timeline.update(cx, |t, _| t.clamp_scroll_to(max));
     }
 
-    /// Folds or unfolds a lane-class group's track list in the tracks menu.
-    fn toggle_menu_group_collapsed(&mut self, group: usize) {
-        if let Some(c) = self.menu_collapsed_groups.get_mut(group) {
-            *c = !*c;
-        }
-    }
-
     /// Switches the bottom panel tab, dropping the flame-graph and timeline hover
     /// tooltips and the timeline crosshair (the newly shown panel picks its own
     /// up on the next move).
@@ -687,44 +667,11 @@ impl Render for TraceView {
     }
 }
 
-impl TraceView {
-    /// If `pos` hits `bar`'s track, begins a thumb drag: the thumb is grabbed
-    /// where pressed (a track click centers it there), `drag` becomes the active
-    /// drag holding that grab offset, and `thumb_to` maps the press to the
-    /// target's scroll offset. Returns whether the press was consumed by the bar.
-    fn begin_thumb_drag(
-        &mut self,
-        pos: Point<Pixels>,
-        bar: Option<Scrollbar>,
-        drag: impl FnOnce(f32) -> Drag,
-        thumb_to: impl FnOnce(&mut Self, Point<Pixels>, f32),
-    ) -> bool {
-        let Some(bar) = bar else {
-            return false;
-        };
-        if !bar.track_hit(pos) {
-            return false;
-        }
-        let grab = bar.grab(pos);
-        self.drag = drag(grab);
-        thumb_to(self, pos, grab);
-        true
-    }
-
-    /// If `pos` hits the tracks-menu scroll bar, begins a thumb drag. Returns
-    /// whether the press was consumed by the bar.
-    fn press_menu(&mut self, pos: Point<Pixels>) -> bool {
-        self.begin_thumb_drag(pos, self.menu_bar.get(), Drag::MenuThumb, menu_thumb_to)
-    }
-
-}
-
-/// Routes an in-progress drag to its target: moving a scroll thumb, or resizing
-/// the bottom panel or the gutter. The flame-chart timeline's and flame-graph
-/// panel's own drags are routed inside [`TimelinePanel`] and [`FlamePanel`].
+/// Routes an in-progress drag to its target: resizing the bottom panel or the
+/// gutter. The flame-chart timeline's, flame-graph panel's, and tracks menu's own
+/// drags are routed inside [`TimelinePanel`], [`FlamePanel`], and [`TracksMenu`].
 fn on_drag(view: &mut TraceView, event: &MouseMoveEvent, cx: &mut Context<TraceView>) {
     match view.drag {
-        Drag::MenuThumb(grab) => menu_thumb_to(view, event.position, grab),
         Drag::Splitter => {
             let profile = match view.model.read(cx).source() {
                 Source::Loaded(p) => p.clone(),
@@ -751,61 +698,13 @@ fn on_drag(view: &mut TraceView, event: &MouseMoveEvent, cx: &mut Context<TraceV
         }
         Drag::None => {}
     }
-    // The menu drag touches no cached layer, so a parent repaint is enough.
     // Panel and gutter resizes move the timeline's split, so they rebuild it.
-    match view.drag {
-        Drag::MenuThumb(_) => cx.notify(),
-        _ => view.invalidate_timeline(cx),
-    }
+    view.invalidate_timeline(cx);
 }
 
 fn end_drag(view: &mut TraceView, _: &MouseUpEvent, cx: &mut Context<TraceView>) {
-    let ended = view.drag;
     view.drag = Drag::None;
-    match ended {
-        Drag::MenuThumb(_) => cx.notify(),
-        _ => view.invalidate_timeline(cx),
-    }
-}
-
-/// A vertical scroll bar painted over the right edge of a scrollable body. Each
-/// frame the canvas reads `extents` (content extent, visible extent, scroll
-/// offset) to place the thumb, paints it, stashes the geometry in `bar` for
-/// hit-testing, and re-installs the drag handlers while `dragging`.
-fn scrollbar_canvas(
-    bar: Rc<Cell<Option<Scrollbar>>>,
-    entity: Entity<TraceView>,
-    dragging: bool,
-    track: Rgba,
-    thumb: Rgba,
-    extents: impl Fn(Bounds<Pixels>) -> (f32, f32, f32) + 'static,
-) -> impl IntoElement {
-    canvas(
-        move |_, _, _| {},
-        move |bounds, _, window: &mut Window, _| {
-            let (content, visible, offset) = extents(bounds);
-            let layout = Scrollbar::new(
-                Axis::Vertical,
-                Bounds::new(
-                    point(bounds.origin.x + bounds.size.width - px(BAR_WIDTH), bounds.origin.y),
-                    size(px(BAR_WIDTH), bounds.size.height),
-                ),
-                content,
-                visible,
-                offset,
-                DEFAULT_MIN_THUMB,
-            );
-            if let Some(painted) = layout {
-                painted.paint(track, thumb, window);
-            }
-            bar.set(layout);
-            if dragging {
-                track_drag(window, &entity, on_drag, end_drag);
-            }
-        },
-    )
-    .absolute()
-    .inset_0()
+    view.invalidate_timeline(cx);
 }
 
 /// The scroll offset a thumb at `pos` (grabbed at `grab`) maps to, or `None`
@@ -820,13 +719,6 @@ fn set_list_thumb(handle: &ScrollHandle, offset: f32) {
     let mut o = handle.offset();
     o.y = px(-offset);
     handle.set_offset(o);
-}
-
-/// Maps a tracks-menu thumb drag back to the list's scroll offset.
-fn menu_thumb_to(view: &mut TraceView, pos: Point<Pixels>, grab: f32) {
-    if let Some(offset) = thumb_offset(&view.menu_bar, pos, grab) {
-        set_list_thumb(&view.menu_scroll, offset);
-    }
 }
 
 /// Picks the lowest of `rows` whose last occupied right-extent leaves room for a
