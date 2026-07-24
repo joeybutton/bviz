@@ -8,7 +8,7 @@ static GLOBAL: bviz_alloc::MiMalloc = bviz_alloc::MiMalloc;
 
 mod chart;
 mod counters;
-mod flame_graph;
+mod flame_panel;
 mod groups;
 mod model;
 mod rebuild;
@@ -20,7 +20,7 @@ mod tracks_menu;
 
 use chart::{format_duration, format_time, nice_step, span_seconds};
 
-use flame_graph::{FlameBoxCache, FlameHover, FlameLayer, flame_scroll_thumb_to};
+use flame_panel::FlamePanel;
 use groups::{GROUP_ORDER, GroupChrome, default_collapsed_groups, group_label};
 use model::TraceModel;
 use rebuild::Rebuild;
@@ -32,7 +32,7 @@ use stats::{DEFAULT_STATS_SORT, StatsColumn, StatsOrder, stats_thumb_to};
 use theme::Palette;
 use timeline::TimelinePanel;
 
-use bviz_trace_layout::{FlameView, LaneLayout, LaneMetrics, TimeView};
+use bviz_trace_layout::{LaneLayout, LaneMetrics, TimeView};
 use bviz_trace_profile::{Profile, Slice, SliceDetail, TimeSpan};
 use bviz_ui_components::{
     Axis, DEFAULT_MIN_THUMB, Scrollbar, TextInput, centered_notice, centered_spinner,
@@ -189,12 +189,6 @@ impl BottomTab {
 #[derive(Clone, Copy)]
 enum Drag {
     None,
-    /// A press inside the flame-graph panel pans it.
-    FlamePan,
-    /// A press on the flame-graph panel's vertical or horizontal scroll
-    /// thumb/track, holding that grab offset.
-    FlameVThumb(f32),
-    FlameHThumb(f32),
     /// A press on the stats-table scroll thumb/track, holding that grab offset.
     StatsThumb(f32),
     /// A press on the tracks-menu scroll thumb/track, holding that grab offset.
@@ -231,11 +225,9 @@ pub(crate) enum Source {
 
 /// Loads and renders a Bazel trace profile as a flame chart.
 ///
-/// The flame-graph panel's zoom/pan view and captured bounds are shared cells so
-/// its canvas can both read them while painting and, on the first frame, set the
-/// initial fit-to-window view (which needs the viewport size, known only at paint
-/// time). The flame-chart timeline lives in [`TimelinePanel`], which owns its own
-/// view state.
+/// The flame-chart timeline lives in [`TimelinePanel`] and the aggregated
+/// flame-graph panel in [`FlamePanel`]; each owns its own view state, reading the
+/// document and selection from the shared [`TraceModel`].
 struct TraceView {
     /// Focus for the window chrome, held by [`Chrome`] so the window's own
     /// actions (quit, close, tab) dispatch to it; the ancestor of the timeline's
@@ -248,18 +240,10 @@ struct TraceView {
     /// viewport, scroll bars, hover, and crosshair, reading the document from
     /// `model` and the panel/gutter layout from this view.
     timeline: Entity<TimelinePanel>,
-    /// Horizontal window into the aggregated flame graph's normalized width (the
-    /// flame-graph panel's zoom and pan); held as a fraction so a resize stays
-    /// invertible.
-    flame_view: Rc<Cell<FlameView>>,
-    /// How far the flame-graph panel is scrolled down, in pixels.
-    flame_scroll_y: Rc<Cell<f32>>,
-    /// The flame-graph panel's own bounds, captured during its paint, so its
-    /// handlers map the cursor within the panel rather than the whole window.
-    flame_bounds: Rc<Cell<Bounds<Pixels>>>,
-    /// The flame-graph panel's own vertical and horizontal bar geometry.
-    flame_vbar: Rc<Cell<Option<Scrollbar>>>,
-    flame_hbar: Rc<Cell<Option<Scrollbar>>>,
+    /// The aggregated flame-graph panel: it owns its zoom/pan, vertical scroll,
+    /// captured bounds, scroll bars, box layout, and hover, reading the aggregate
+    /// from `model`.
+    flame: Entity<FlamePanel>,
     drag: Drag,
     last_mouse: Point<Pixels>,
     /// Height of the bottom panel, set by the tab-bar splitter; clamped on use.
@@ -277,11 +261,9 @@ struct TraceView {
     /// The tracks menu's filter field; its text narrows the listed tracks.
     track_filter: Entity<TextInput>,
     _filter_observer: Subscription,
-    /// Rebuilds the panel-local aggregate follow-up when the model swaps in a
-    /// freshly built flame graph and stats aggregate for the current selection.
+    /// Rebuilds the stats sort order when the model swaps in a freshly built
+    /// aggregate for the current selection.
     _agg_observer: Subscription,
-    /// The flame graph's memoized box layout; see [`FlameBoxCache`].
-    flame_boxes: Rc<RefCell<Option<FlameBoxCache>>>,
     /// Which column the stats table sorts by, and whether descending.
     stats_sort: StatsColumn,
     stats_desc: bool,
@@ -302,16 +284,8 @@ struct TraceView {
     /// frame for hit-testing), mirroring the stats table's bar.
     menu_scroll: ScrollHandle,
     menu_bar: Rc<Cell<Option<Scrollbar>>>,
-    /// The flame-graph box under the cursor in graph mode, drawn as a tooltip.
-    flame_hover: Option<FlameHover>,
-    /// The child view that paints the flame-graph panel's boxes and scroll bars,
-    /// embedded cached so a hover — which touches only the tooltip overlay —
-    /// replays its last scene rather than re-emitting every box. A parent
-    /// `cx.notify()` leaves it to replay; [`Self::invalidate_flame`] notifies it to
-    /// rebuild when its content changes.
-    flame_layer: Entity<FlameLayer>,
-    /// Rebuilds the timeline's canvas and `flame_layer` on a system appearance
-    /// change so they repaint in the new palette.
+    /// Rebuilds the timeline's and flame-graph panel's cached scenes on a system
+    /// appearance change so they repaint in the new palette.
     _appearance_observer: Subscription,
     /// Holds the background load task so it isn't cancelled on drop.
     _load_task: Task<()>,
@@ -342,53 +316,34 @@ impl TraceView {
             let model = model.clone();
             cx.new(|cx| TimelinePanel::new(model, shell, window, cx))
         };
-        // The flame-graph panel's zoom/pan view, vertical scroll, captured bounds,
-        // scroll-bar geometry, and memoized box layout are shared with the flame
-        // layer, which paints from them while the parent's handlers read and
-        // mutate them.
-        let flame_view = Rc::new(Cell::new(FlameView::FIT));
-        let flame_scroll_y = Rc::new(Cell::new(0.0));
-        let flame_bounds = Rc::new(Cell::new(Bounds::default()));
-        let flame_vbar = Rc::new(Cell::new(None));
-        let flame_hbar = Rc::new(Cell::new(None));
-        let flame_boxes = Rc::new(RefCell::new(None));
-        let flame_parent = cx.entity().downgrade();
-        let flame_layer = cx.new(|_| {
-            FlameLayer::new(
-                flame_parent,
-                flame_view.clone(),
-                flame_scroll_y.clone(),
-                flame_bounds.clone(),
-                flame_vbar.clone(),
-                flame_hbar.clone(),
-                flame_boxes.clone(),
-            )
-        });
+        // The aggregated flame-graph panel owns its own view state and observes the
+        // model so it rebuilds its boxes when a fresh aggregate lands; it reads the
+        // aggregate from `model`.
+        let flame = {
+            let model = model.clone();
+            cx.new(|cx| FlamePanel::new(model, cx))
+        };
         let appearance_observer = window.observe_window_appearance({
             let timeline = timeline.clone();
-            let flame_layer = flame_layer.clone();
+            let flame = flame.clone();
             move |_, cx| {
                 timeline.update(cx, |t, cx| t.invalidate_canvas(cx));
-                flame_layer.update(cx, |_, cx| cx.notify());
+                flame.update(cx, |f, cx| f.invalidate_canvas(cx));
             }
         });
-        // The model notifies only when a background aggregate build lands, so
-        // this fires 1:1 with a swapped-in graph: drop the memoized box layout and
-        // stats order keyed on the old aggregate and rebuild the flame layer.
+        // The model notifies only when a background aggregate build lands, so this
+        // fires 1:1 with a swapped-in aggregate: drop the stats order keyed on the
+        // old one and re-render so `ensure_stats_order` re-sorts. The flame panel's
+        // own observer drops its box layout.
         let agg_observer = cx.observe(&model, |this, _, cx| {
-            this.flame_boxes.borrow_mut().take();
             this.stats_build.clear_ready();
-            this.invalidate_flame(cx);
+            cx.notify();
         });
         Self {
             window_focus,
             model,
             timeline,
-            flame_view,
-            flame_scroll_y,
-            flame_bounds,
-            flame_vbar,
-            flame_hbar,
+            flame,
             drag: Drag::None,
             last_mouse: Point::default(),
             panel_height: DEFAULT_PANEL_HEIGHT,
@@ -399,7 +354,6 @@ impl TraceView {
             track_filter,
             _filter_observer: filter_observer,
             _agg_observer: agg_observer,
-            flame_boxes,
             stats_sort: DEFAULT_STATS_SORT.0,
             stats_desc: DEFAULT_STATS_SORT.1,
             stats_order: Rc::new(RefCell::new(None)),
@@ -408,8 +362,6 @@ impl TraceView {
             stats_bar: Rc::new(Cell::new(None)),
             menu_scroll: ScrollHandle::new(),
             menu_bar: Rc::new(Cell::new(None)),
-            flame_hover: None,
-            flame_layer,
             _appearance_observer: appearance_observer,
             _load_task: load_task,
         }
@@ -423,20 +375,11 @@ impl TraceView {
         cx.notify();
     }
 
-    /// Marks both the flame layer and this view dirty, so a change to what the
-    /// flame layer paints rebuilds its cached scene rather than replaying it.
-    /// A plain `cx.notify()` (the hover path) leaves the flame layer to replay.
-    fn invalidate_flame(&self, cx: &mut Context<Self>) {
-        self.flame_layer.update(cx, |_, cx| cx.notify());
-        cx.notify();
-    }
-
     fn on_profile_loaded(&mut self, result: Result<Profile, String>, cx: &mut Context<Self>) {
         self.timeline.update(cx, |t, _| t.reset_draw_cache());
-        self.flame_view.set(FlameView::FIT);
+        self.flame.update(cx, |f, _| f.reset_for_new_profile());
         // The aggregate-derived panel caches: dropped up front so a new profile
         // shows the spinner rather than the prior graph until its build lands.
-        self.flame_boxes.borrow_mut().take();
         self.stats_order.borrow_mut().take();
         self.stats_build.invalidate();
         let source = match result {
@@ -584,11 +527,6 @@ impl TraceView {
                     .on_mouse_down(MouseButton::Left, |_, _, cx: &mut App| cx.stop_propagation())
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.set_bottom_tab(tab, cx);
-                        // Switching to the flame tab may reveal an aggregate that
-                        // changed while another tab was up, so rebuild its layer.
-                        if tab == BottomTab::FlameGraph {
-                            this.invalidate_flame(cx);
-                        }
                         this.invalidate_timeline(cx);
                     }))
                     .child(label)
@@ -652,9 +590,7 @@ impl TraceView {
         let content: AnyElement = match self.bottom_tab {
             BottomTab::Counters => return None,
             BottomTab::FlameGraph => match self.model.read(cx).aggregates() {
-                Some(aggregates) => {
-                    self.flame_graph_panel(aggregates, palette, cx).into_any_element()
-                }
+                Some(_) => self.flame.clone().into_any_element(),
                 None => centered_spinner("Building flame graph…", colors).into_any_element(),
             },
             BottomTab::Stats => self.stats_panel(palette, colors, cx).into_any_element(),
@@ -773,7 +709,7 @@ impl TraceView {
             return;
         }
         self.bottom_tab = tab;
-        self.flame_hover = None;
+        self.flame.update(cx, |f, _| f.clear_hover());
         self.timeline.update(cx, |t, _| t.clear_hover());
     }
 }
@@ -840,25 +776,11 @@ impl TraceView {
 
 }
 
-/// Routes an in-progress drag to its target: panning the flame-graph panel,
-/// moving a scroll thumb, or resizing the bottom panel or the gutter. The
-/// flame-chart timeline's own drags are routed inside [`TimelinePanel`].
+/// Routes an in-progress drag to its target: moving a scroll thumb, or resizing
+/// the bottom panel or the gutter. The flame-chart timeline's and flame-graph
+/// panel's own drags are routed inside [`TimelinePanel`] and [`FlamePanel`].
 fn on_drag(view: &mut TraceView, event: &MouseMoveEvent, cx: &mut Context<TraceView>) {
     match view.drag {
-        Drag::FlamePan => {
-            let dx = f32::from(event.position.x) - f32::from(view.last_mouse.x);
-            let dy = f32::from(event.position.y) - f32::from(view.last_mouse.y);
-            if let Some(fl) = view.flame_layout(cx) {
-                let mut fv = fl.view;
-                fv.pan_px(dx, fl.width);
-                view.flame_view.set(fv);
-            }
-            let scrolled = (view.flame_scroll_y.get() - dy).clamp(0.0, view.flame_max_scroll(cx));
-            view.flame_scroll_y.set(scrolled);
-            view.last_mouse = event.position;
-        }
-        Drag::FlameVThumb(grab) => flame_scroll_thumb_to(view, event.position, grab),
-        Drag::FlameHThumb(grab) => view.flame_hthumb_to(event.position, grab, cx),
         Drag::StatsThumb(grab) => stats_thumb_to(view, event.position, grab),
         Drag::MenuThumb(grab) => menu_thumb_to(view, event.position, grab),
         Drag::Splitter => {
@@ -887,12 +809,9 @@ fn on_drag(view: &mut TraceView, event: &MouseMoveEvent, cx: &mut Context<TraceV
         }
         Drag::None => {}
     }
-    // A flame-panel drag moves the flame layer's content but leaves the timeline
-    // unchanged, so it rebuilds the flame layer's cached scene. Stats and menu
-    // drags touch neither cached layer, so a parent repaint is enough. Panel and
-    // gutter resizes move the timeline's split, so they rebuild it.
+    // Stats and menu drags touch no cached layer, so a parent repaint is enough.
+    // Panel and gutter resizes move the timeline's split, so they rebuild it.
     match view.drag {
-        Drag::FlamePan | Drag::FlameVThumb(_) | Drag::FlameHThumb(_) => view.invalidate_flame(cx),
         Drag::StatsThumb(_) | Drag::MenuThumb(_) => cx.notify(),
         _ => view.invalidate_timeline(cx),
     }
@@ -902,7 +821,6 @@ fn end_drag(view: &mut TraceView, _: &MouseUpEvent, cx: &mut Context<TraceView>)
     let ended = view.drag;
     view.drag = Drag::None;
     match ended {
-        Drag::FlamePan | Drag::FlameVThumb(_) | Drag::FlameHThumb(_) => view.invalidate_flame(cx),
         Drag::StatsThumb(_) | Drag::MenuThumb(_) => cx.notify(),
         _ => view.invalidate_timeline(cx),
     }
