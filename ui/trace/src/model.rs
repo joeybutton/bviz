@@ -1,9 +1,12 @@
 use crate::groups::{GROUP_ORDER, GroupChrome, build_grouped_layout, default_collapsed_groups};
+use crate::rebuild::Rebuild;
 use crate::{METRICS, Source};
-use bviz_trace_layout::{LaneLayout, lay_out_lanes};
+use bviz_trace_layout::{LaneLayout, ScopeAggregate, TrackFlamer, lay_out_lanes};
 use bviz_trace_profile::{LaneClass, Profile};
+use gpui::Context;
 use std::cell::RefCell;
 use std::rc::Rc;
+use std::sync::Arc;
 
 /// The shared trace document and the selection/visibility state derived from it:
 /// which tracks the flame chart draws and which the aggregates cover, the
@@ -40,6 +43,20 @@ pub(crate) struct TraceModel {
     /// The group headers and show-more rows over `visible_lanes`, built and
     /// cleared alongside it.
     group_chrome: Rc<RefCell<Option<Rc<GroupChrome>>>>,
+    /// The selected tracks' aggregate — its flame graph and stats rows, held
+    /// together so the rows' and laid-out boxes' name handles resolve against
+    /// the graph that produced them. Built on demand off the UI thread (walking
+    /// every slice would freeze a paint) and swapped in when ready; the previous
+    /// value stays shown while a rebuild runs, so a selection change doesn't
+    /// blank the view.
+    aggregates: Rc<RefCell<Option<Arc<ScopeAggregate>>>>,
+    /// The loaded profile's whole-profile flame name scan, reused across track
+    /// selections; `None` until the first aggregate build scans it. Valid for any
+    /// selection, so it is dropped only when a new profile loads.
+    flame_scan: Rc<RefCell<Option<Arc<TrackFlamer>>>>,
+    /// Background-build bookkeeping for `aggregates`, keyed on
+    /// `selection_version`.
+    agg: Rebuild<u64>,
 }
 
 impl TraceModel {
@@ -55,6 +72,9 @@ impl TraceModel {
             select_anchor: None,
             visible_lanes: Rc::new(RefCell::new(None)),
             group_chrome: Rc::new(RefCell::new(None)),
+            aggregates: Rc::new(RefCell::new(None)),
+            flame_scan: Rc::new(RefCell::new(None)),
+            agg: Rebuild::new(),
         }
     }
 
@@ -70,20 +90,16 @@ impl TraceModel {
         &self.selected_tracks
     }
 
-    pub(crate) fn selection_version(&self) -> u64 {
-        self.selection_version
-    }
-
     /// Replaces the loaded document, dropping the lane layouts (which depend only
     /// on the profile) and, for a loaded profile, seeding the default track
     /// selection.
-    pub(crate) fn set_source(&mut self, source: Source) {
+    pub(crate) fn set_source(&mut self, source: Source, cx: &mut Context<Self>) {
         self.lanes.borrow_mut().take();
         self.visible_lanes.borrow_mut().take();
         self.source = source;
         if let Source::Loaded(profile) = &self.source {
             let profile = profile.clone();
-            self.init_tracks(&profile);
+            self.init_tracks(&profile, cx);
         }
     }
 
@@ -91,7 +107,7 @@ impl TraceModel {
     /// non-critical-path lane selected. The critical-path lane holds redirected
     /// copies of worker time, so leaving it out of the default selection keeps
     /// the aggregate from double-counting that time.
-    pub(crate) fn init_tracks(&mut self, profile: &Profile) {
+    pub(crate) fn init_tracks(&mut self, profile: &Profile, cx: &mut Context<Self>) {
         self.visible_tracks = vec![true; profile.threads().len()];
         self.collapsed_groups = default_collapsed_groups();
         self.group_show_all = [false; GROUP_ORDER.len()];
@@ -102,6 +118,7 @@ impl TraceModel {
             .collect();
         self.select_anchor = None;
         self.selection_version += 1;
+        self.ensure_aggregates(cx);
     }
 
     /// The full lane layout for the loaded profile, built on first use and reused
@@ -235,7 +252,13 @@ impl TraceModel {
     /// just-removed one. A plain or ctrl click moves the anchor to `track`; a
     /// shift click leaves it, so the run can be re-adjusted. Bumps the selection
     /// version only when the set actually changes, so a repeat click is free.
-    pub(crate) fn select_track(&mut self, track: usize, shift: bool, ctrl: bool) {
+    pub(crate) fn select_track(
+        &mut self,
+        track: usize,
+        shift: bool,
+        ctrl: bool,
+        cx: &mut Context<Self>,
+    ) {
         let n = self.selected_tracks.len();
         if track >= n {
             return;
@@ -290,18 +313,112 @@ impl TraceModel {
             self.selected_tracks = sel;
             self.selection_version += 1;
         }
+        self.ensure_aggregates(cx);
     }
 
     /// Sets the selection to every visible track (the Ctrl-A gesture), returning
     /// whether the set changed.
-    pub(crate) fn select_all_visible(&mut self) -> bool {
-        if self.selected_tracks != self.visible_tracks {
+    pub(crate) fn select_all_visible(&mut self, cx: &mut Context<Self>) -> bool {
+        let changed = if self.selected_tracks != self.visible_tracks {
             self.selected_tracks = self.visible_tracks.clone();
             self.selection_version += 1;
             true
         } else {
             false
+        };
+        self.ensure_aggregates(cx);
+        changed
+    }
+
+    /// The aggregated flame graph and stats for the current track selection, or
+    /// `None` until the first background build for the loaded profile completes.
+    /// Reflects the previous selection while a rebuild is still running;
+    /// [`Self::ensure_aggregates`] owns the (re)build.
+    pub(crate) fn aggregates(&self) -> Option<Arc<ScopeAggregate>> {
+        self.aggregates.borrow().clone()
+    }
+
+    /// The `selection_version` the ready aggregate reflects, if any; the stats
+    /// panel keys its sort order on it.
+    pub(crate) fn aggregate_version(&self) -> Option<u64> {
+        self.agg.ready()
+    }
+
+    /// Whether a background aggregate build is currently running.
+    pub(crate) fn aggregate_building(&self) -> bool {
+        self.agg.is_building()
+    }
+
+    /// Makes the current selection's aggregate the shown one: built on demand
+    /// off the UI thread (walking every slice is far too costly for a paint) and
+    /// swapped in on completion, the previously built graph staying shown until
+    /// then. An in-flight build whose selection the inputs have moved past is
+    /// abandoned. Idempotent — a no-op once the right value is ready or being
+    /// computed. Notifies observers only when a fresh aggregate lands, so a
+    /// panel's follow-up (dropping its memoized box layout and stats order)
+    /// runs exactly once per completed build.
+    pub(crate) fn ensure_aggregates(&mut self, cx: &mut Context<Self>) {
+        let profile = match &self.source {
+            Source::Loaded(p) => p.clone(),
+            _ => return,
+        };
+        let key = self.selection_version;
+        if self.agg.is_ready(key) {
+            // The shown value is already current; cancel a build for a key the
+            // inputs have since left so its late result can't clobber it.
+            self.agg.cancel_inflight();
+            return;
         }
+        if self.agg.is_inflight(key) {
+            return;
+        }
+        let generation = self.agg.start(key);
+        let selected = self.selected_tracks.clone();
+        let cached_scan = self.flame_scan.borrow().clone();
+        let aggregates = self.aggregates.clone();
+        let flame_scan = self.flame_scan.clone();
+        let task = cx.spawn(async move |model, cx| {
+            let (scan, aggregate) = cx
+                .background_executor()
+                .spawn(async move {
+                    let t = std::time::Instant::now();
+                    let scan =
+                        cached_scan.unwrap_or_else(|| Arc::new(TrackFlamer::new(&profile)));
+                    let aggregate = ScopeAggregate::build_for_tracks_reusing(&scan, |i| {
+                        selected.get(i).copied().unwrap_or(false)
+                    });
+                    if std::env::var_os("BVIZ_TRACE_TIMING").is_some() {
+                        eprintln!(
+                            "[timing] track_aggregate: {:.3}s",
+                            t.elapsed().as_secs_f64()
+                        );
+                    }
+                    (scan, aggregate)
+                })
+                .await;
+            model
+                .update(cx, |m, cx| {
+                    // Discard a result the inputs have moved past since this spawn.
+                    if !m.agg.accept(generation, key) {
+                        return;
+                    }
+                    *flame_scan.borrow_mut() = Some(scan);
+                    *aggregates.borrow_mut() = Some(Arc::new(aggregate));
+                    cx.notify();
+                })
+                .ok();
+        });
+        self.agg.set_task(task);
+    }
+
+    /// Drops the cached flame graph and abandons any in-flight build, so the next
+    /// [`Self::ensure_aggregates`] rebuilds from scratch. Called when a new
+    /// profile loads — unlike a mere selection change, the old graph is no longer
+    /// a valid thing to keep showing.
+    pub(crate) fn invalidate_aggregates(&mut self) {
+        self.aggregates.borrow_mut().take();
+        self.flame_scan.borrow_mut().take();
+        self.agg.invalidate();
     }
 
     /// The visible-lane tracks from the selection anchor to `track` inclusive, in

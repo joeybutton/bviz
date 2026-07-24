@@ -29,8 +29,7 @@ use stats::{DEFAULT_STATS_SORT, StatsColumn, StatsOrder, stats_thumb_to};
 use theme::Palette;
 
 use bviz_trace_layout::{
-    Cull, FlameView, LaneLayout, LaneMetrics, ScopeAggregate, TimeView, TrackFlamer, Viewport,
-    VisibleSlice, visible_slices,
+    Cull, FlameView, LaneLayout, LaneMetrics, TimeView, Viewport, VisibleSlice, visible_slices,
 };
 use bviz_trace_profile::{Profile, Slice, SliceDetail, TimeSpan};
 use bviz_ui_components::{
@@ -309,24 +308,13 @@ struct TraceView {
     /// The tracks menu's filter field; its text narrows the listed tracks.
     track_filter: Entity<TextInput>,
     _filter_observer: Subscription,
-    /// The selected tracks' aggregate — its flame graph and stats rows, held
-    /// together so the rows' and laid-out boxes' name handles resolve against
-    /// the graph that produced them. Built on demand off the UI thread (walking
-    /// every slice would freeze a paint) and swapped in when ready; the previous
-    /// value stays shown while a rebuild runs, so a selection change doesn't
-    /// blank the view.
-    aggregates: Rc<RefCell<Option<Arc<ScopeAggregate>>>>,
-    /// The loaded profile's whole-profile flame name scan, reused across track
-    /// selections; `None` until the first aggregate build scans it. Valid for any
-    /// selection, so it is dropped only when a new profile loads.
-    flame_scan: Rc<RefCell<Option<Arc<TrackFlamer>>>>,
+    /// Rebuilds the panel-local aggregate follow-up when the model swaps in a
+    /// freshly built flame graph and stats aggregate for the current selection.
+    _agg_observer: Subscription,
     /// The flame graph's memoized box layout; see [`FlameBoxCache`].
     flame_boxes: Rc<RefCell<Option<FlameBoxCache>>>,
     /// The timeline's memoized culled draw list; see [`SliceDrawCache`].
     slice_draw: Rc<RefCell<Option<SliceDrawCache>>>,
-    /// Background-build bookkeeping for `aggregates`/`flame_boxes`, keyed on
-    /// `selection_version`.
-    agg: Rebuild<u64>,
     /// Which column the stats table sorts by, and whether descending.
     stats_sort: StatsColumn,
     stats_desc: bool,
@@ -451,6 +439,14 @@ impl TraceView {
             }
         });
         let model = cx.new(|_| TraceModel::new());
+        // The model notifies only when a background aggregate build lands, so
+        // this fires 1:1 with a swapped-in graph: drop the memoized box layout and
+        // stats order keyed on the old aggregate and rebuild the flame layer.
+        let agg_observer = cx.observe(&model, |this, _, cx| {
+            this.flame_boxes.borrow_mut().take();
+            this.stats_build.clear_ready();
+            this.invalidate_flame(cx);
+        });
         Self {
             window_focus,
             content_focus,
@@ -474,11 +470,9 @@ impl TraceView {
             tracks_menu_open: false,
             track_filter,
             _filter_observer: filter_observer,
-            aggregates: Rc::new(RefCell::new(None)),
-            flame_scan: Rc::new(RefCell::new(None)),
+            _agg_observer: agg_observer,
             flame_boxes,
             slice_draw,
-            agg: Rebuild::new(),
             stats_sort: DEFAULT_STATS_SORT.0,
             stats_desc: DEFAULT_STATS_SORT.1,
             stats_order: Rc::new(RefCell::new(None)),
@@ -514,9 +508,13 @@ impl TraceView {
     }
 
     fn on_profile_loaded(&mut self, result: Result<Profile, String>, cx: &mut Context<Self>) {
-        self.invalidate_aggregates();
         self.slice_draw.borrow_mut().take();
         self.flame_view.set(FlameView::FIT);
+        // The aggregate-derived panel caches: dropped up front so a new profile
+        // shows the spinner rather than the prior graph until its build lands.
+        self.flame_boxes.borrow_mut().take();
+        self.stats_order.borrow_mut().take();
+        self.stats_build.invalidate();
         let source = match result {
             Ok(profile) => Source::Loaded(Arc::new(profile)),
             Err(err) => Source::Message(err),
@@ -525,7 +523,10 @@ impl TraceView {
         // model seeds, is view-local, so reset it here for a freshly loaded
         // profile.
         let loaded = matches!(source, Source::Loaded(_));
-        self.model.update(cx, |m, _| m.set_source(source));
+        self.model.update(cx, |m, cx| {
+            m.invalidate_aggregates();
+            m.set_source(source, cx);
+        });
         if loaded {
             self.menu_collapsed_groups = default_collapsed_groups();
         }
@@ -569,8 +570,8 @@ impl TraceView {
                     // ctrl/cmd toggles it, shift extends a range.
                     if let Some(track) = this.track_label_at(e.position, cx) {
                         let ctrl = e.modifiers.control || e.modifiers.platform;
-                        this.model.update(cx, |m, _| {
-                            m.select_track(track, e.modifiers.shift, ctrl)
+                        this.model.update(cx, |m, cx| {
+                            m.select_track(track, e.modifiers.shift, ctrl, cx)
                         });
                         this.invalidate_chart(cx);
                         return;
@@ -1101,7 +1102,7 @@ impl TraceView {
     ) -> Option<AnyElement> {
         let content: AnyElement = match self.bottom_tab {
             BottomTab::Counters => return None,
-            BottomTab::FlameGraph => match self.aggregates() {
+            BottomTab::FlameGraph => match self.model.read(cx).aggregates() {
                 Some(aggregates) => {
                     self.flame_graph_panel(aggregates, palette, cx).into_any_element()
                 }
@@ -1208,84 +1209,6 @@ impl TraceView {
         }
     }
 
-    /// The aggregated flame graph and stats for the current track selection, or
-    /// `None` until the first background build for the loaded profile completes.
-    /// Reflects the previous selection while a rebuild is still running;
-    /// [`Self::ensure_aggregates`] owns the (re)build.
-    fn aggregates(&self) -> Option<Arc<ScopeAggregate>> {
-        self.aggregates.borrow().clone()
-    }
-
-    /// Makes the current selection's aggregate the shown one: built on demand
-    /// off the UI thread (walking every slice is far too costly for a paint) and
-    /// swapped in on completion, the previously built graph staying shown until
-    /// then. An in-flight build whose selection the inputs have moved past is
-    /// abandoned. Idempotent — a no-op once the right value is ready or being
-    /// computed — so it is safe to call each frame.
-    fn ensure_aggregates(&mut self, cx: &mut Context<Self>) {
-        let profile = match self.model.read(cx).source() {
-            Source::Loaded(p) => p.clone(),
-            _ => return,
-        };
-        let key = self.model.read(cx).selection_version();
-        if self.agg.is_ready(key) {
-            // The shown value is already current; cancel a build for a key the
-            // inputs have since left so its late result can't clobber it.
-            self.agg.cancel_inflight();
-            return;
-        }
-        if self.agg.is_inflight(key) {
-            return;
-        }
-        let generation = self.agg.start(key);
-        let selected = self.model.read(cx).selected_tracks().to_vec();
-        let cached_scan = self.flame_scan.borrow().clone();
-        let task = load_in_background(
-            cx,
-            move || {
-                let t = std::time::Instant::now();
-                let scan = cached_scan.unwrap_or_else(|| Arc::new(TrackFlamer::new(&profile)));
-                let aggregate = ScopeAggregate::build_for_tracks_reusing(&scan, |i| {
-                    selected.get(i).copied().unwrap_or(false)
-                });
-                if std::env::var_os("BVIZ_TRACE_TIMING").is_some() {
-                    eprintln!("[timing] track_aggregate: {:.3}s", t.elapsed().as_secs_f64());
-                }
-                (scan, aggregate)
-            },
-            move |view, (scan, aggregates), cx| {
-                // Discard a result the inputs have moved past since this spawn.
-                if !view.agg.accept(generation, key) {
-                    return;
-                }
-                *view.flame_scan.borrow_mut() = Some(scan);
-                *view.aggregates.borrow_mut() = Some(Arc::new(aggregates));
-                view.flame_boxes.borrow_mut().take();
-                // The sorted order is keyed on the new aggregates; let
-                // `ensure_stats_order` re-derive it (the old order keeps
-                // showing until it lands).
-                view.stats_build.clear_ready();
-                // The flame layer's cached scene shows the prior graph; rebuild it
-                // for the swapped-in aggregate.
-                view.invalidate_flame(cx);
-            },
-        );
-        self.agg.set_task(task);
-    }
-
-    /// Drops the cached flame graph and stats rows and abandons any in-flight
-    /// build, so the next [`Self::ensure_aggregates`] rebuilds from scratch.
-    /// Called when a new profile loads — unlike a mere selection change, the old
-    /// graph is no longer a valid thing to keep showing.
-    fn invalidate_aggregates(&mut self) {
-        self.aggregates.borrow_mut().take();
-        self.flame_scan.borrow_mut().take();
-        self.flame_boxes.borrow_mut().take();
-        self.stats_order.borrow_mut().take();
-        self.agg.invalidate();
-        self.stats_build.invalidate();
-    }
-
     /// Switches the bottom panel tab, dropping the flame-chart and flame-graph
     /// hover tooltips (the newly shown panel picks its own up on the next move).
     fn set_bottom_tab(&mut self, tab: BottomTab) {
@@ -1373,10 +1296,6 @@ impl Render for TraceView {
         };
         let body = match loaded {
             Ok(profile) => {
-                // Build (or rebuild) the flame graph and stats off the UI thread
-                // for the current selection; keeping them warm on any tab makes
-                // the first switch to the graph or stats instant.
-                self.ensure_aggregates(cx);
                 // Re-sort the stats off the UI thread when the aggregates or sort
                 // change; sorting ~2M rows on the paint thread would freeze it.
                 self.ensure_stats_order(cx);
@@ -1612,7 +1531,7 @@ impl TraceView {
 
     /// Selects every currently visible track (the Ctrl-A gesture).
     fn select_all_visible(&mut self, _: &SelectAllTracks, _: &mut Window, cx: &mut Context<Self>) {
-        if self.model.update(cx, |m, _| m.select_all_visible()) {
+        if self.model.update(cx, |m, cx| m.select_all_visible(cx)) {
             self.invalidate_chart(cx);
         }
     }
@@ -1696,19 +1615,19 @@ fn on_drag(view: &mut TraceView, event: &MouseMoveEvent, cx: &mut Context<TraceV
         Drag::FlamePan => {
             let dx = f32::from(event.position.x) - f32::from(view.last_mouse.x);
             let dy = f32::from(event.position.y) - f32::from(view.last_mouse.y);
-            if let Some(fl) = view.flame_layout() {
+            if let Some(fl) = view.flame_layout(cx) {
                 let mut fv = fl.view;
                 fv.pan_px(dx, fl.width);
                 view.flame_view.set(fv);
             }
-            let scrolled = (view.flame_scroll_y.get() - dy).clamp(0.0, view.flame_max_scroll());
+            let scrolled = (view.flame_scroll_y.get() - dy).clamp(0.0, view.flame_max_scroll(cx));
             view.flame_scroll_y.set(scrolled);
             view.last_mouse = event.position;
         }
         Drag::VThumb(grab) => scroll_thumb_to(view, event.position, grab),
         Drag::HThumb(grab) => pan_thumb_to(view, event.position, grab, cx),
         Drag::FlameVThumb(grab) => flame_scroll_thumb_to(view, event.position, grab),
-        Drag::FlameHThumb(grab) => view.flame_hthumb_to(event.position, grab),
+        Drag::FlameHThumb(grab) => view.flame_hthumb_to(event.position, grab, cx),
         Drag::StatsThumb(grab) => stats_thumb_to(view, event.position, grab),
         Drag::MenuThumb(grab) => menu_thumb_to(view, event.position, grab),
         Drag::Splitter => {

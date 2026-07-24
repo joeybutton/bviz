@@ -281,10 +281,10 @@ impl TraceView {
     /// abandoned. The visible rows are formatted lazily at paint. Idempotent —
     /// safe to call each frame.
     pub(crate) fn ensure_stats_order(&mut self, cx: &mut Context<Self>) {
-        let Some(aggregates) = self.aggregates() else {
+        let Some(aggregates) = self.model.read(cx).aggregates() else {
             return;
         };
-        let Some(version) = self.agg.ready() else {
+        let Some(version) = self.model.read(cx).aggregate_version() else {
             return;
         };
         let key = (version, self.stats_sort, self.stats_desc);

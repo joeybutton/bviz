@@ -311,7 +311,8 @@ impl Render for FlameLayer {
         let Some(parent) = self.parent.upgrade() else {
             return div().into_any_element();
         };
-        let Some(aggregates) = parent.read(cx).aggregates.borrow().clone() else {
+        let model = parent.read(cx).model.clone();
+        let Some(aggregates) = model.read(cx).aggregates() else {
             return div().into_any_element();
         };
         let palette = Palette::from_colors(&bviz_ui_theme::colors(window));
@@ -406,7 +407,7 @@ impl TraceView {
         // While a rebuild for a new selection runs off the thread, the prior
         // graph stays shown and interactive; a spinner pill signals the update,
         // since aggregating a large selection can take a moment.
-        let spinner = self.agg.is_building().then(|| {
+        let spinner = self.model.read(cx).aggregate_building().then(|| {
             div()
                 .absolute()
                 .top_2()
@@ -447,8 +448,8 @@ impl TraceView {
     }
 
     /// The current flame-graph panel geometry, or `None` until the graph exists.
-    pub(crate) fn flame_layout(&self) -> Option<FlameLayout> {
-        let aggregates = self.aggregates.borrow().clone()?;
+    pub(crate) fn flame_layout(&self, cx: &App) -> Option<FlameLayout> {
+        let aggregates = self.model.read(cx).aggregates()?;
         let view = self.flame_view.get();
         let total_h = flame_height(&aggregates.flame, &flame_metrics());
         let Rect { left, top, width, height } =
@@ -466,8 +467,8 @@ impl TraceView {
     /// The pixel ceiling for the flame-graph panel's vertical scroll: the tree's
     /// height past the panel's on-screen height (which excludes any reserved
     /// horizontal-bar strip, so the last row clears that bar).
-    pub(crate) fn flame_max_scroll(&self) -> f32 {
-        self.flame_layout()
+    pub(crate) fn flame_max_scroll(&self, cx: &App) -> f32 {
+        self.flame_layout(cx)
             .map(|fl| (fl.total_h - fl.height).max(0.0))
             .unwrap_or(0.0)
     }
@@ -477,9 +478,9 @@ impl TraceView {
     /// column, then find the laid-out box at that depth whose x-range contains it.
     /// Searching the same viewport-relative box vector the paint uses (widened
     /// and coalesced) makes the hover match what is drawn.
-    fn flame_box_at(&self, pos: Point<Pixels>) -> Option<FlameBox> {
-        let fl = self.flame_layout()?;
-        let aggregates = self.aggregates.borrow().clone()?;
+    fn flame_box_at(&self, pos: Point<Pixels>, cx: &App) -> Option<FlameBox> {
+        let fl = self.flame_layout(cx)?;
+        let aggregates = self.model.read(cx).aggregates()?;
         let metrics = flame_metrics();
         let x = f32::from(pos.x);
         let y = f32::from(pos.y);
@@ -503,7 +504,7 @@ impl TraceView {
     /// position on entry into a box and stays there while the cursor moves within
     /// it, so a move that stays in one box costs no repaint.
     fn update_flame_hover(&mut self, pos: Point<Pixels>, cx: &mut Context<Self>) {
-        let hit = self.flame_box_at(pos);
+        let hit = self.flame_box_at(pos, cx);
         let changed = match (&self.flame_hover, &hit) {
             (Some(h), Some(b)) => h.boxed != *b,
             (None, None) => false,
@@ -518,24 +519,30 @@ impl TraceView {
 
     /// Begins a flame-graph panel drag at `pos`: its vertical or horizontal
     /// scroll thumb/track if the press hit one, otherwise a pan of the panel.
-    fn press_flame(&mut self, pos: Point<Pixels>) {
+    fn press_flame(&mut self, pos: Point<Pixels>, cx: &mut Context<Self>) {
         if self.begin_thumb_drag(pos, self.flame_vbar.get(), Drag::FlameVThumb, flame_scroll_thumb_to)
-            || self.begin_thumb_drag(
-                pos,
-                self.flame_hbar.get(),
-                Drag::FlameHThumb,
-                TraceView::flame_hthumb_to,
-            )
         {
             return;
+        }
+        // The horizontal thumb maps through the flame layout, which reads the
+        // aggregate through the model, so it is threaded here rather than via the
+        // model-free `begin_thumb_drag`.
+        if let Some(bar) = self.flame_hbar.get() {
+            if bar.track_hit(pos) {
+                let grab = bar.grab(pos);
+                self.drag = Drag::FlameHThumb(grab);
+                self.flame_hthumb_to(pos, grab, cx);
+                return;
+            }
         }
         self.drag = Drag::FlamePan;
         self.last_mouse = pos;
     }
 
     /// Maps a flame-graph panel horizontal thumb drag to its normalized scroll.
-    pub(crate) fn flame_hthumb_to(&mut self, pos: Point<Pixels>, grab: f32) {
-        let (Some(offset), Some(fl)) = (thumb_offset(&self.flame_hbar, pos, grab), self.flame_layout())
+    pub(crate) fn flame_hthumb_to(&mut self, pos: Point<Pixels>, grab: f32, cx: &App) {
+        let (Some(offset), Some(fl)) =
+            (thumb_offset(&self.flame_hbar, pos, grab), self.flame_layout(cx))
         else {
             return;
         };
@@ -552,7 +559,7 @@ impl TraceView {
         root.on_mouse_down(
             MouseButton::Left,
             cx.listener(|this, e: &MouseDownEvent, _, cx| {
-                this.press_flame(e.position);
+                this.press_flame(e.position, cx);
                 cx.stop_propagation();
                 this.invalidate_flame(cx);
             }),
@@ -576,7 +583,7 @@ impl TraceView {
     /// Ctrl/Cmd+wheel zooms the flame-graph panel about the cursor, Shift+wheel
     /// pans it horizontally, plain wheel scrolls it vertically.
     fn on_flame_scroll_wheel(&mut self, e: &ScrollWheelEvent, cx: &mut Context<Self>) {
-        let Some(fl) = self.flame_layout() else {
+        let Some(fl) = self.flame_layout(cx) else {
             return;
         };
         let (dx, dy) = match e.delta {
@@ -601,7 +608,7 @@ impl TraceView {
         // Re-clamp after any wheel action: a zoom that adds or drops the
         // horizontal-bar strip changes the panel's usable height, and so the
         // vertical scroll ceiling.
-        let scrolled = self.flame_scroll_y.get().clamp(0.0, self.flame_max_scroll());
+        let scrolled = self.flame_scroll_y.get().clamp(0.0, self.flame_max_scroll(cx));
         self.flame_scroll_y.set(scrolled);
         self.invalidate_flame(cx);
     }
