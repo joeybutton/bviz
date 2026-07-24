@@ -124,6 +124,12 @@ pub(crate) fn flame_total_height(layout: &LaneLayout) -> f32 {
     layout.lanes.last().map(|l| l.top + l.height).unwrap_or(0.0)
 }
 
+/// The pixel ceiling for the lane scroll: the thread-lane height past the flame
+/// region's on-screen height.
+pub(crate) fn max_lane_scroll(layout: &LaneLayout, regions: &Regions) -> f32 {
+    (flame_total_height(layout) - regions.flame_h()).max(0.0)
+}
+
 /// One fitted counter lane in the panel: its top (window y) and the height of
 /// its chart area below the header band.
 #[derive(Clone, Copy)]

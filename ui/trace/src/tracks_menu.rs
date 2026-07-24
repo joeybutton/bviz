@@ -185,8 +185,9 @@ impl TraceView {
                     .on_click(cx.listener(move |this, _, _, cx| {
                         cx.stop_propagation();
                         this.model.update(cx, |m, _| m.set_group_visible(group, !group_all_visible));
-                        this.clamp_lane_scroll(cx);
-                        this.invalidate_chart(cx);
+                        this.clamp_timeline_scroll(cx);
+                        this.timeline.update(cx, |t, cx| t.invalidate_canvas(cx));
+                        cx.notify();
                     }))
                     .child(if group_all_visible { "hide" } else { "show" }),
             )
@@ -224,8 +225,9 @@ impl TraceView {
             .hover(move |s| s.bg(selected))
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.model.update(cx, |m, _| m.toggle_track(i));
-                this.clamp_lane_scroll(cx);
-                this.invalidate_chart(cx);
+                this.clamp_timeline_scroll(cx);
+                this.timeline.update(cx, |t, cx| t.invalidate_canvas(cx));
+                cx.notify();
             }))
             .child(check)
             .child(
@@ -293,8 +295,9 @@ impl TraceView {
                     .hover(move |s| s.bg(hover_bg))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.model.update(cx, |m, _| m.set_all_visible(!all_visible));
-                        this.clamp_lane_scroll(cx);
-                        this.invalidate_chart(cx);
+                        this.clamp_timeline_scroll(cx);
+                        this.timeline.update(cx, |t, cx| t.invalidate_canvas(cx));
+                        cx.notify();
                     }))
                     .child(if all_visible { "Hide all" } else { "Show all" })
             })
@@ -346,7 +349,7 @@ impl TraceView {
     /// A backdrop the size of the viewport, behind the menu, closing it on an
     /// outside click.
     fn tracks_menu_backdrop(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
-        let viewport = self.viewport.get();
+        let viewport = self.timeline.read(cx).viewport();
         div()
             .absolute()
             .left_0()

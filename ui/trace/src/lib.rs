@@ -15,22 +15,24 @@ mod rebuild;
 mod regions;
 mod stats;
 mod theme;
+mod timeline;
 mod tracks_menu;
 
-use chart::{fit_px_per_us, format_duration, format_time, nice_step, span_seconds};
+use chart::{format_duration, format_time, nice_step, span_seconds};
 
-use counters::{paint_crosshair, paint_graph};
 use flame_graph::{FlameBoxCache, FlameHover, FlameLayer, flame_scroll_thumb_to};
-use groups::{GROUP_ORDER, GroupChrome, GroupHit, default_collapsed_groups, group_label};
+use groups::{GROUP_ORDER, GroupChrome, default_collapsed_groups, group_label};
 use model::TraceModel;
 use rebuild::Rebuild;
-use regions::{Regions, clamp_gutter_width, clamp_panel_height, flame_total_height, graph_lanes};
+use regions::{
+    Regions, clamp_gutter_width, clamp_panel_height, flame_total_height, graph_lanes,
+    max_lane_scroll,
+};
 use stats::{DEFAULT_STATS_SORT, StatsColumn, StatsOrder, stats_thumb_to};
 use theme::Palette;
+use timeline::TimelinePanel;
 
-use bviz_trace_layout::{
-    Cull, FlameView, LaneLayout, LaneMetrics, TimeView, Viewport, VisibleSlice, visible_slices,
-};
+use bviz_trace_layout::{FlameView, LaneLayout, LaneMetrics, TimeView};
 use bviz_trace_profile::{Profile, Slice, SliceDetail, TimeSpan};
 use bviz_ui_components::{
     Axis, DEFAULT_MIN_THUMB, Scrollbar, TextInput, centered_notice, centered_spinner,
@@ -39,12 +41,10 @@ use bviz_ui_components::{
 use bviz_ui_shell::Chrome;
 use clap::Parser;
 use gpui::{
-    AnyElement, AnyView, App, BorderStyle, Bounds, ContentMask, Context, Div,
-    Entity, FocusHandle, Hsla, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, Pixels, Point, Render, Rgba, ScrollDelta, ScrollWheelEvent,
-    ScrollHandle, SharedString, Stateful, StyleRefinement, Subscription, Task, TextAlign,
-    TransformationMatrix, UniformListScrollHandle, WeakEntity,
-    Window, canvas, div, fill, point, prelude::*, px, quad, size,
+    AnyElement, App, BorderStyle, Bounds, ContentMask, Context, Div, Entity, FocusHandle, Hsla,
+    IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Render,
+    Rgba, ScrollHandle, SharedString, Stateful, Subscription, Task, TextAlign, TransformationMatrix,
+    UniformListScrollHandle, Window, canvas, div, fill, point, prelude::*, px, quad, size,
 };
 use std::cell::{Cell, RefCell};
 use std::path::PathBuf;
@@ -189,12 +189,6 @@ impl BottomTab {
 #[derive(Clone, Copy)]
 enum Drag {
     None,
-    /// A press on the flame chart pans the timeline (and scrolls its lanes).
-    Pan,
-    /// A press on the flame chart's lane vertical or time horizontal scroll
-    /// thumb/track, holding the grab offset from the thumb's leading edge.
-    VThumb(f32),
-    HThumb(f32),
     /// A press inside the flame-graph panel pans it.
     FlamePan,
     /// A press on the flame-graph panel's vertical or horizontal scroll
@@ -235,59 +229,34 @@ pub(crate) enum Source {
     Message(String),
 }
 
-/// The timeline's culled draw list together with the inputs that determine it,
-/// so a repaint reuses it unless one changed. The list turns only on the profile
-/// (`Arc` identity), the lane layout (`Rc` identity, a fresh one on any
-/// visibility, collapse, or show-all change), the time view (pan/zoom), and the
-/// viewport (width, height, and `scroll_y`); `min_px` and the metrics are consts,
-/// so they are not keys.
-struct SliceDrawCache {
-    profile: Arc<Profile>,
-    lanes: Rc<LaneLayout>,
-    view: TimeView,
-    viewport: Viewport,
-    slices: Rc<Vec<VisibleSlice>>,
-}
-
 /// Loads and renders a Bazel trace profile as a flame chart.
 ///
-/// The time view, vertical scroll, and captured viewport bounds are shared cells
-/// so the canvas can both read them while painting and, on the first frame, set
-/// the initial fit-to-window view (which needs the viewport size, known only at
-/// paint time).
+/// The flame-graph panel's zoom/pan view and captured bounds are shared cells so
+/// its canvas can both read them while painting and, on the first frame, set the
+/// initial fit-to-window view (which needs the viewport size, known only at paint
+/// time). The flame-chart timeline lives in [`TimelinePanel`], which owns its own
+/// view state.
 struct TraceView {
     /// Focus for the window chrome, held by [`Chrome`] so the window's own
-    /// actions (quit, close, tab) dispatch to it; the ancestor of `content_focus`
-    /// in the focus tree.
+    /// actions (quit, close, tab) dispatch to it; the ancestor of the timeline's
+    /// content focus in the focus tree.
     window_focus: FocusHandle,
-    /// Focus for the trace content, held by the timeline so Ctrl-A (select all
-    /// tracks) dispatches to it; a descendant of `window_focus`, so the window's
-    /// own actions still fire.
-    content_focus: FocusHandle,
     /// The shared trace document and the selection/visibility state derived from
-    /// it. Held as an entity so the panels read one source of truth; the panel's
-    /// own view state stays on this view.
+    /// it. Held as an entity so the panels read one source of truth.
     model: Entity<TraceModel>,
-    /// Horizontal time-to-pixel mapping (pan and zoom).
-    view: Rc<Cell<TimeView>>,
-    /// How far the lanes are scrolled up, in pixels.
-    scroll_y: Rc<Cell<f32>>,
+    /// The flame-chart timeline: it owns its pan/zoom, lane scroll, captured
+    /// viewport, scroll bars, hover, and crosshair, reading the document from
+    /// `model` and the panel/gutter layout from this view.
+    timeline: Entity<TimelinePanel>,
     /// Horizontal window into the aggregated flame graph's normalized width (the
     /// flame-graph panel's zoom and pan); held as a fraction so a resize stays
     /// invertible.
     flame_view: Rc<Cell<FlameView>>,
     /// How far the flame-graph panel is scrolled down, in pixels.
     flame_scroll_y: Rc<Cell<f32>>,
-    /// Viewport bounds captured during canvas paint, so handlers can map a window
-    /// cursor to viewport space and bound the zoom to a fit.
-    viewport: Rc<Cell<Bounds<Pixels>>>,
     /// The flame-graph panel's own bounds, captured during its paint, so its
     /// handlers map the cursor within the panel rather than the whole window.
     flame_bounds: Rc<Cell<Bounds<Pixels>>>,
-    /// The flame chart's lane vertical bar and time horizontal bar geometry, set
-    /// during paint and read by mouse handlers; `None` when that axis fits.
-    vbar: Rc<Cell<Option<Scrollbar>>>,
-    hbar: Rc<Cell<Option<Scrollbar>>>,
     /// The flame-graph panel's own vertical and horizontal bar geometry.
     flame_vbar: Rc<Cell<Option<Scrollbar>>>,
     flame_hbar: Rc<Cell<Option<Scrollbar>>>,
@@ -313,8 +282,6 @@ struct TraceView {
     _agg_observer: Subscription,
     /// The flame graph's memoized box layout; see [`FlameBoxCache`].
     flame_boxes: Rc<RefCell<Option<FlameBoxCache>>>,
-    /// The timeline's memoized culled draw list; see [`SliceDrawCache`].
-    slice_draw: Rc<RefCell<Option<SliceDrawCache>>>,
     /// Which column the stats table sorts by, and whether descending.
     stats_sort: StatsColumn,
     stats_desc: bool,
@@ -335,27 +302,16 @@ struct TraceView {
     /// frame for hit-testing), mirroring the stats table's bar.
     menu_scroll: ScrollHandle,
     menu_bar: Rc<Cell<Option<Scrollbar>>>,
-    /// The slice under the cursor, if any, drawn as a tooltip.
-    hover: Option<Hover>,
     /// The flame-graph box under the cursor in graph mode, drawn as a tooltip.
     flame_hover: Option<FlameHover>,
-    /// The cursor position while it hovers the time-content column and no drag is
-    /// in progress, drawn as a crosshair; `None` otherwise.
-    crosshair: Option<Point<Pixels>>,
-    /// The child view that paints the timeline slices, gridlines, gutter, ruler,
-    /// scroll bars, and counter plots, embedded cached so a hover — which touches
-    /// only the crosshair/tooltip overlay — replays its last scene rather than
-    /// re-emitting every slice. A parent `cx.notify()` leaves it to replay;
-    /// [`Self::invalidate_chart`] notifies it to rebuild when its content changes.
-    slice_layer: Entity<SliceLayer>,
     /// The child view that paints the flame-graph panel's boxes and scroll bars,
     /// embedded cached so a hover — which touches only the tooltip overlay —
     /// replays its last scene rather than re-emitting every box. A parent
     /// `cx.notify()` leaves it to replay; [`Self::invalidate_flame`] notifies it to
     /// rebuild when its content changes.
     flame_layer: Entity<FlameLayer>,
-    /// Rebuilds `slice_layer` and `flame_layer` on a system appearance change so
-    /// they repaint in the new palette.
+    /// Rebuilds the timeline's canvas and `flame_layer` on a system appearance
+    /// change so they repaint in the new palette.
     _appearance_observer: Subscription,
     /// Holds the background load task so it isn't cancelled on drop.
     _load_task: Task<()>,
@@ -368,13 +324,6 @@ impl TraceView {
         cx: &mut Context<Self>,
     ) -> Self {
         let window_focus = cx.focus_handle();
-        let content_focus = cx.focus_handle();
-        content_focus.focus(window, cx);
-        cx.bind_keys([gpui::KeyBinding::new(
-            "ctrl-a",
-            SelectAllTracks,
-            Some("TraceContent"),
-        )]);
         let track_filter = cx.new(|cx| TextInput::new(cx, "Filter tracks…", 0));
         // Re-render the menu list as the filter text changes; TextInput notifies
         // on every edit.
@@ -384,30 +333,15 @@ impl TraceView {
             move || load.join().unwrap_or_else(|_| Err("profile loader thread panicked".into())),
             |view, result, cx| view.on_profile_loaded(result, cx),
         );
-        // The time view, lane scroll, captured viewport, scroll-bar geometry, and
-        // culled draw list are shared with the slice layer, which paints from them
-        // while the parent's handlers read and mutate them.
-        let view = Rc::new(Cell::new(TimeView {
-            start_us: 0.0,
-            px_per_us: 1.0,
-        }));
-        let scroll_y = Rc::new(Cell::new(0.0));
-        let fitted = Rc::new(Cell::new(false));
-        let viewport = Rc::new(Cell::new(Bounds::default()));
-        let vbar = Rc::new(Cell::new(None));
-        let hbar = Rc::new(Cell::new(None));
-        let slice_draw = Rc::new(RefCell::new(None));
-        let parent = cx.entity().downgrade();
-        let slice_layer = cx.new(|_| SliceLayer {
-            parent,
-            view: view.clone(),
-            scroll_y: scroll_y.clone(),
-            fitted,
-            viewport: viewport.clone(),
-            vbar: vbar.clone(),
-            hbar: hbar.clone(),
-            slice_draw: slice_draw.clone(),
-        });
+        let model = cx.new(|_| TraceModel::new());
+        // The flame-chart timeline owns its own view state and content focus, and
+        // holds the Ctrl-A action; it reads the document from `model` and the
+        // panel/gutter layout from this view.
+        let timeline = {
+            let shell = cx.entity().downgrade();
+            let model = model.clone();
+            cx.new(|cx| TimelinePanel::new(model, shell, window, cx))
+        };
         // The flame-graph panel's zoom/pan view, vertical scroll, captured bounds,
         // scroll-bar geometry, and memoized box layout are shared with the flame
         // layer, which paints from them while the parent's handlers read and
@@ -431,14 +365,13 @@ impl TraceView {
             )
         });
         let appearance_observer = window.observe_window_appearance({
-            let slice_layer = slice_layer.clone();
+            let timeline = timeline.clone();
             let flame_layer = flame_layer.clone();
             move |_, cx| {
-                slice_layer.update(cx, |_, cx| cx.notify());
+                timeline.update(cx, |t, cx| t.invalidate_canvas(cx));
                 flame_layer.update(cx, |_, cx| cx.notify());
             }
         });
-        let model = cx.new(|_| TraceModel::new());
         // The model notifies only when a background aggregate build lands, so
         // this fires 1:1 with a swapped-in graph: drop the memoized box layout and
         // stats order keyed on the old aggregate and rebuild the flame layer.
@@ -449,16 +382,11 @@ impl TraceView {
         });
         Self {
             window_focus,
-            content_focus,
             model,
-            view,
-            scroll_y,
+            timeline,
             flame_view,
             flame_scroll_y,
-            viewport,
             flame_bounds,
-            vbar,
-            hbar,
             flame_vbar,
             flame_hbar,
             drag: Drag::None,
@@ -472,7 +400,6 @@ impl TraceView {
             _filter_observer: filter_observer,
             _agg_observer: agg_observer,
             flame_boxes,
-            slice_draw,
             stats_sort: DEFAULT_STATS_SORT.0,
             stats_desc: DEFAULT_STATS_SORT.1,
             stats_order: Rc::new(RefCell::new(None)),
@@ -481,21 +408,18 @@ impl TraceView {
             stats_bar: Rc::new(Cell::new(None)),
             menu_scroll: ScrollHandle::new(),
             menu_bar: Rc::new(Cell::new(None)),
-            hover: None,
             flame_hover: None,
-            crosshair: None,
-            slice_layer,
             flame_layer,
             _appearance_observer: appearance_observer,
             _load_task: load_task,
         }
     }
 
-    /// Marks both the slice layer and this view dirty, so a change to what the
-    /// slice layer paints rebuilds its cached scene rather than replaying it.
-    /// A plain `cx.notify()` (the hover path) leaves the slice layer to replay.
-    fn invalidate_chart(&self, cx: &mut Context<Self>) {
-        self.slice_layer.update(cx, |_, cx| cx.notify());
+    /// Rebuilds the timeline's cached scene and re-renders this view (so the tab
+    /// bar, bottom panel, and gutter handle reposition). A change to the timeline
+    /// content, the panel/gutter layout, or the shown tab uses this.
+    fn invalidate_timeline(&self, cx: &mut Context<Self>) {
+        self.timeline.update(cx, |t, cx| t.invalidate_canvas(cx));
         cx.notify();
     }
 
@@ -508,7 +432,7 @@ impl TraceView {
     }
 
     fn on_profile_loaded(&mut self, result: Result<Profile, String>, cx: &mut Context<Self>) {
-        self.slice_draw.borrow_mut().take();
+        self.timeline.update(cx, |t, _| t.reset_draw_cache());
         self.flame_view.set(FlameView::FIT);
         // The aggregate-derived panel caches: dropped up front so a new profile
         // shows the spinner rather than the prior graph until its build lands.
@@ -530,440 +454,65 @@ impl TraceView {
         if loaded {
             self.menu_collapsed_groups = default_collapsed_groups();
         }
-        self.invalidate_chart(cx);
+        self.invalidate_timeline(cx);
     }
 
-    /// Clamps the flame chart's lane scroll to the current layout height, dropping
-    /// any overscroll a visibility or collapse change left past the new bottom.
-    fn clamp_lane_scroll(&self, cx: &App) {
-        let scrolled = self.scroll_y.get().min(self.max_scroll(cx));
-        self.scroll_y.set(scrolled);
-    }
-
-    /// The flame chart's mouse/scroll/hover wiring: a press on a track label
-    /// selects that track, a press on a scroll thumb/track drives that bar,
-    /// anywhere else pans; the wheel zooms/pans/scrolls, and a move updates the
-    /// hover (clearing it when the cursor leaves). Holds the content focus and
-    /// the Ctrl-A action so a press here makes Ctrl-A select all visible tracks.
-    fn body_handlers(&self, root: Stateful<Div>, cx: &mut Context<Self>) -> Stateful<Div> {
-        root.key_context("TraceContent")
-            .track_focus(&self.content_focus)
-            .on_action(cx.listener(Self::select_all_visible))
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|this, e: &MouseDownEvent, window, cx| {
-                    // Take content focus so Ctrl-A selects tracks after a chart
-                    // interaction (a click may have moved focus to the filter).
-                    this.content_focus.focus(window, cx);
-                    // A press on a group header collapses or expands it; on a
-                    // show-more row, toggles whether the group shows every lane.
-                    if let Some(hit) = this.group_row_at(e.position, cx) {
-                        this.model.update(cx, |m, _| match hit {
-                            GroupHit::Collapse(g) => m.toggle_group_collapsed(g),
-                            GroupHit::ShowAll(g) => m.toggle_group_show_all(g),
-                        });
-                        this.clamp_lane_scroll(cx);
-                        this.invalidate_chart(cx);
-                        return;
-                    }
-                    // A press on a track label selects it rather than panning;
-                    // ctrl/cmd toggles it, shift extends a range.
-                    if let Some(track) = this.track_label_at(e.position, cx) {
-                        let ctrl = e.modifiers.control || e.modifiers.platform;
-                        this.model.update(cx, |m, cx| {
-                            m.select_track(track, e.modifiers.shift, ctrl, cx)
-                        });
-                        this.invalidate_chart(cx);
-                        return;
-                    }
-                    // A press on a scroll thumb/track drives that bar; anywhere
-                    // else pans. The window-global drag handlers are installed
-                    // from the overlay paint while a drag is set, so repaint now.
-                    this.press(e.position, cx);
-                    this.invalidate_chart(cx);
-                }),
-            )
-            .on_scroll_wheel(cx.listener(Self::on_scroll_wheel))
-            .on_mouse_move(cx.listener(Self::on_mouse_move))
-            .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
-            // Drop the crosshair and hover tooltips when the cursor leaves.
-            if !*hovered {
-                let cleared = this.crosshair.take().is_some()
-                    | this.hover.take().is_some()
-                    | this.flame_hover.take().is_some();
-                if cleared {
-                    cx.notify();
-                }
-            }
-        }))
-    }
-
-    /// The whole trace body: the cached [`SliceLayer`] painting the flame chart
-    /// (ruler, gridlines, lanes, slices, phase markers, gutter, scroll bars, and
-    /// — for the Counters tab — the counter plots), an overlay canvas above it for
-    /// the crosshair, hover tooltip, and in-progress drag, then the tab bar, the
-    /// selected bottom panel, and the gutter handle. The overlay's paint closure
-    /// is `'static`, so it captures owned snapshots (`Rc`s, the palette) rather
-    /// than borrowing the view.
+    /// The whole trace body: the [`TimelinePanel`] filling the viewport (it paints
+    /// the flame chart and counter plots and owns the timeline's mouse/scroll/
+    /// hover wiring), a drag overlay that keeps the panel-resize and gutter drags
+    /// tracking the cursor, then the tab bar, the selected bottom panel, the
+    /// gutter handle, and the tracks menu over it.
     fn trace_body(
         &self,
-        profile: Arc<Profile>,
-        lanes: Rc<LaneLayout>,
         palette: Palette,
         colors: &bviz_ui_theme::Colors,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let entity = cx.entity();
         let regions = self.regions(cx);
-        let origin = self.viewport.get().origin;
+        let origin = self.timeline.read(cx).viewport().origin;
 
-        // Embedding the slice layer cached lets a hover reuse its last scene: a
-        // parent `cx.notify()` does not dirty it, so gpui replays its slices
-        // instead of re-emitting them.
-        let slice_layer = AnyView::from(self.slice_layer.clone())
-            .cached(StyleRefinement::default().absolute().inset_0().size_full());
-        // The crosshair, hover tooltip, and drag paint over the cached slices,
-        // sharing the slice layer's full bounds so the tooltip's viewport clamping
-        // is unchanged. A hover repaints only this overlay.
-        let overlay = canvas(
-            |_, _, _| {},
-            Self::overlay_paint(profile.clone(), lanes.clone(), self.view.clone(), entity, palette),
-        )
-        .absolute()
-        .left_0()
-        .top_0()
-        .size_full();
+        let timeline = div()
+            .absolute()
+            .inset_0()
+            .size_full()
+            .child(self.timeline.clone());
+        // The panel-resize and gutter drags live on this view; while one runs, a
+        // full-bounds canvas re-installs their window-global handlers each frame.
+        // It is non-interactive, so it does not intercept the timeline's presses.
+        let drag_overlay = {
+            let entity = cx.entity();
+            canvas(
+                |_, _, _| {},
+                move |_, _, window, cx| {
+                    if matches!(entity.read(cx).drag, Drag::Splitter | Drag::Gutter) {
+                        track_drag(window, &entity, on_drag, end_drag);
+                    }
+                },
+            )
+            .absolute()
+            .inset_0()
+            .size_full()
+        };
 
         // The tab bar spans the content column between the flame chart and the
         // bottom panel, doubling as the panel's resize splitter.
         let tab_bar = self.tab_bar(regions, origin, palette, colors, cx);
         // The selected panel sits over the content column of the bottom region;
-        // the counter plots are drawn by the slice layer instead.
+        // the counter plots are drawn by the timeline instead.
         let panel = self.bottom_panel(regions, origin, palette, colors, cx);
         let gutter_handle = self.gutter_handle(regions, origin, cx);
         let tracks_menu = self.tracks_menu(palette, colors, cx);
-        let viewport = div()
+        div()
             .id("trace-viewport")
             .relative()
             .size_full()
             .overflow_hidden()
-            .child(slice_layer)
-            .child(overlay)
+            .child(timeline)
+            .child(drag_overlay)
             .children(panel)
             .child(tab_bar)
             .child(gutter_handle)
-            .child(tracks_menu);
-        self.body_handlers(viewport, cx)
-    }
-
-    /// Prepaint fit: capture the painted viewport bounds, then fit the time view
-    /// to the span before the first paint and, on a later width change, rescale
-    /// the zoom relative to the window so a resize stays invertible; finally hold
-    /// the fit as the zoom floor and clamp the pan to the span.
-    fn fit_prepaint(
-        profile: Arc<Profile>,
-        lanes: Rc<LaneLayout>,
-        view: Rc<Cell<TimeView>>,
-        fitted: Rc<Cell<bool>>,
-        viewport: Rc<Cell<Bounds<Pixels>>>,
-        panel_height: f32,
-        gutter_width: f32,
-    ) -> impl FnOnce(Bounds<Pixels>, &mut Window, &mut App) {
-        move |bounds: Bounds<Pixels>, _: &mut Window, _: &mut App| {
-            let old_bounds = viewport.get();
-            viewport.set(bounds);
-            // The time axis maps to the time column, past the gutter and clear
-            // of the reserved vertical-bar column.
-            let flame_total = flame_total_height(&lanes);
-            let regions = Regions::new(
-                bounds,
-                profile.counters().len(),
-                panel_height,
-                gutter_width,
-                flame_total,
-            );
-            let time_w = regions.time_w;
-            let span = profile.span();
-            if !fitted.get() {
-                view.set(TimeView::fit(span, time_w, EDGE_MARGIN_PX));
-                fitted.set(true);
-            } else {
-                // On a width change, keep the zoom relative to the window so a
-                // resize stays invertible — without this the view spills over
-                // (and a scroll bar appears) after a grow-then-shrink cycle.
-                let old_time_w = Regions::new(
-                    old_bounds,
-                    profile.counters().len(),
-                    panel_height,
-                    gutter_width,
-                    flame_total,
-                )
-                .time_w;
-                if old_bounds.size.width > px(0.) && (old_time_w - time_w).abs() > f32::EPSILON
-                {
-                    let mut v = view.get();
-                    v.rescale_to_width(span, old_time_w, time_w, EDGE_MARGIN_PX);
-                    view.set(v);
-                }
-            }
-            // Keep the fit as the zoom floor and the pan within the span for
-            // the current width.
-            let mut v = view.get();
-            v.px_per_us = v
-                .px_per_us
-                .max(fit_px_per_us(span, time_w, EDGE_MARGIN_PX));
-            v.clamp_to(span, time_w, EDGE_MARGIN_PX);
-            view.set(v);
-        }
-    }
-
-    /// The timeline's culled draw list, reusing the [`SliceDrawCache`] in `cache`
-    /// unless a key changed, so a repaint that leaves the profile, lane layout,
-    /// time view, and viewport unchanged — crosshair or hover motion, a menu,
-    /// filter, or drag repaint — reuses the list rather than re-culling. The
-    /// vertical scroll lives in `viewport.scroll_y`, so it is a key: the timeline
-    /// culls off-screen lanes by scroll.
-    fn cached_slices(
-        cache: &Rc<RefCell<Option<SliceDrawCache>>>,
-        profile: &Arc<Profile>,
-        lanes: &Rc<LaneLayout>,
-        view: TimeView,
-        viewport: Viewport,
-    ) -> Rc<Vec<VisibleSlice>> {
-        if let Some(c) = cache.borrow().as_ref() {
-            if Arc::ptr_eq(&c.profile, profile)
-                && Rc::ptr_eq(&c.lanes, lanes)
-                && c.view == view
-                && c.viewport == viewport
-            {
-                return c.slices.clone();
-            }
-        }
-        let slices = Rc::new(visible_slices(
-            profile,
-            lanes,
-            Cull { view: &view, viewport: &viewport, metrics: &METRICS, min_px: MIN_SLICE_PX },
-        ));
-        *cache.borrow_mut() = Some(SliceDrawCache {
-            profile: profile.clone(),
-            lanes: lanes.clone(),
-            view,
-            viewport,
-            slices: slices.clone(),
-        });
-        slices
-    }
-
-    /// The slice layer's paint closure: the flame timeline — gridlines, lanes and
-    /// slices, phase markers, gutter, scroll bars, ruler, and (for the Counters
-    /// tab) the counter plots — reading the live view state through the entity.
-    /// The crosshair and hover tooltip paint from a separate overlay above, so a
-    /// hover leaves this layer's cached scene to replay.
-    #[allow(clippy::too_many_arguments)]
-    fn slice_paint(
-        profile: Arc<Profile>,
-        lanes: Rc<LaneLayout>,
-        view: Rc<Cell<TimeView>>,
-        scroll_y: Rc<Cell<f32>>,
-        vbar: Rc<Cell<Option<Scrollbar>>>,
-        hbar: Rc<Cell<Option<Scrollbar>>>,
-        slice_draw: Rc<RefCell<Option<SliceDrawCache>>>,
-        entity: Entity<TraceView>,
-        palette: Palette,
-    ) -> impl FnOnce(Bounds<Pixels>, (), &mut Window, &mut App) {
-        move |bounds, _, window, cx| {
-            let layout = &*lanes;
-            let tv = view.get();
-            let n_counters = profile.counters().len();
-            let (tab, panel_height, gutter_width, selected, chrome) = {
-                let this = entity.read(cx);
-                let model = this.model.read(cx);
-                (
-                    this.bottom_tab,
-                    this.panel_height,
-                    this.gutter_width,
-                    model.selected_tracks().to_vec(),
-                    model.group_chrome().unwrap_or_default(),
-                )
-            };
-            let flame_total = flame_total_height(layout);
-            let regions =
-                Regions::new(bounds, n_counters, panel_height, gutter_width, flame_total);
-            let scroll = scroll_y.get();
-            let vp = Viewport {
-                width: regions.time_w,
-                height: regions.flame_h(),
-                scroll_y: scroll,
-            };
-            // The counter plots share the flame chart's time axis, so they
-            // paint on this canvas below the tab bar when their tab is up.
-            let show_counters = regions.has_graph && tab == BottomTab::Counters;
-
-            let ticks = ruler_ticks(tv, regions.time_w);
-            paint_gridlines(
-                &ticks,
-                regions.content_left,
-                regions.flame_top,
-                regions.flame_bottom,
-                &palette,
-                window,
-            );
-            if show_counters {
-                paint_gridlines(
-                    &ticks,
-                    regions.content_left,
-                    regions.panel_top,
-                    regions.panel_bottom,
-                    &palette,
-                    window,
-                );
-            }
-
-            // The flame lanes clip to their band so rows panned past the
-            // bottom don't bleed into the tab bar or panel.
-            let flame_mask = ContentMask {
-                bounds: Bounds::new(
-                    point(px(regions.content_left), px(regions.flame_top)),
-                    size(px(regions.time_w), px(regions.flame_h())),
-                ),
-            };
-            window.with_content_mask(Some(flame_mask), |window| {
-                // A hairline parts adjacent lanes, drawn first so slices
-                // paint over it and it shows only in the gaps.
-                for lane in layout.lanes.iter().skip(1) {
-                    let ry = regions.flame_top + lane.top - METRICS.lane_gap / 2.0 - scroll;
-                    window.paint_quad(fill(
-                        Bounds::new(
-                            point(px(regions.content_left), px(ry)),
-                            size(px(regions.time_w), px(1.0)),
-                        ),
-                        palette.gridline,
-                    ));
-                }
-                // Group header bands read across the full width as section
-                // dividers; their gutter labels and show-all icon paint later,
-                // over the opaque gutter.
-                for band in &chrome.bands {
-                    let y = regions.flame_top + band.top - scroll;
-                    window.paint_quad(fill(
-                        Bounds::new(
-                            point(px(regions.content_left), px(y)),
-                            size(px(regions.time_w), px(GROUP_BAND_HEIGHT)),
-                        ),
-                        palette.header_band,
-                    ));
-                }
-                for vs in Self::cached_slices(&slice_draw, &profile, &lanes, tv, vp).iter() {
-                    let track = &profile.threads()[vs.track];
-                    let slice = profile.slices(track)[vs.slice];
-                    paint_slice(
-                        &profile,
-                        &slice,
-                        vs.x,
-                        vs.y + regions.flame_top,
-                        vs.w,
-                        vs.h,
-                        regions.content_left,
-                        &palette,
-                        window,
-                        cx,
-                    );
-                }
-            });
-
-            if show_counters {
-                paint_graph(&profile, tv, regions, &palette, window);
-            }
-            paint_markers(&profile, tv, regions, show_counters, &palette, window, cx);
-            paint_scrollbars(
-                profile.span(),
-                tv,
-                flame_total,
-                regions,
-                scroll,
-                &palette,
-                &vbar,
-                &hbar,
-                window,
-            );
-
-            // The opaque gutter covers any lane content that panned under
-            // it, then carries the lane and (for the Counters tab) counter
-            // names.
-            paint_gutter(
-                &profile,
-                layout,
-                &chrome,
-                regions,
-                gutter_width,
-                scroll,
-                show_counters,
-                &selected,
-                &palette,
-                window,
-                cx,
-            );
-
-            // The ruler paints over scrolled-up rows.
-            paint_ruler(&ticks, regions, bounds, &palette, window, cx);
-        }
-    }
-
-    /// The overlay paint closure, layered above the cached slice layer: the
-    /// crosshair, the hover tooltip, and — while a drag runs — the window-global
-    /// drag handlers. It reads the live crosshair/hover/drag state through the
-    /// entity, and so repaints on a hover without disturbing the slice layer's
-    /// cached scene. Its bounds match the slice layer's, so the tooltip clamps to
-    /// the same viewport.
-    fn overlay_paint(
-        profile: Arc<Profile>,
-        lanes: Rc<LaneLayout>,
-        view: Rc<Cell<TimeView>>,
-        entity: Entity<TraceView>,
-        palette: Palette,
-    ) -> impl FnOnce(Bounds<Pixels>, (), &mut Window, &mut App) {
-        move |bounds, _, window, cx| {
-            let tv = view.get();
-            let n_counters = profile.counters().len();
-            let (tab, panel_height, gutter_width, crosshair, hover, dragging) = {
-                let this = entity.read(cx);
-                (
-                    this.bottom_tab,
-                    this.panel_height,
-                    this.gutter_width,
-                    this.crosshair,
-                    this.hover,
-                    !matches!(this.drag, Drag::None),
-                )
-            };
-            let flame_total = flame_total_height(&lanes);
-            let regions =
-                Regions::new(bounds, n_counters, panel_height, gutter_width, flame_total);
-            let show_counters = regions.has_graph && tab == BottomTab::Counters;
-            if let Some(at) = crosshair {
-                if f32::from(at.x) >= regions.content_left {
-                    paint_crosshair(
-                        &profile,
-                        tv,
-                        regions,
-                        at,
-                        show_counters,
-                        &palette,
-                        window,
-                        cx,
-                    );
-                }
-            }
-            if let Some(h) = hover {
-                let track = &profile.threads()[h.track];
-                let slice = profile.slices(track)[h.slice];
-                let detail = profile.details(track)[h.slice];
-                paint_tooltip(&profile, &slice, &detail, h.at, bounds, &palette, window, cx);
-            }
-            if dragging {
-                track_drag(window, &entity, on_drag, end_drag);
-            }
-        }
+            .child(tracks_menu)
     }
 
     /// A thin overlay strip at the gutter's right edge that begins a width drag;
@@ -992,7 +541,7 @@ impl TraceView {
                         } else {
                             this.drag = Drag::Gutter;
                         }
-                        this.invalidate_chart(cx);
+                        this.invalidate_timeline(cx);
                     });
                     cx.stop_propagation();
                 },
@@ -1034,13 +583,13 @@ impl TraceView {
                     // A press on a tab must switch it, not begin a panel resize.
                     .on_mouse_down(MouseButton::Left, |_, _, cx: &mut App| cx.stop_propagation())
                     .on_click(cx.listener(move |this, _, _, cx| {
-                        this.set_bottom_tab(tab);
+                        this.set_bottom_tab(tab, cx);
                         // Switching to the flame tab may reveal an aggregate that
                         // changed while another tab was up, so rebuild its layer.
                         if tab == BottomTab::FlameGraph {
                             this.invalidate_flame(cx);
                         }
-                        this.invalidate_chart(cx);
+                        this.invalidate_timeline(cx);
                     }))
                     .child(label)
             })
@@ -1069,7 +618,7 @@ impl TraceView {
                         this.last_mouse = e.position;
                     }
                     cx.stop_propagation();
-                    this.invalidate_chart(cx);
+                    this.invalidate_timeline(cx);
                 }),
             )
             .children(tabs)
@@ -1169,20 +718,25 @@ impl TraceView {
         }
     }
 
-    /// [`Regions`] for the current viewport, panel and gutter sizes, the loaded
-    /// profile's counter count, and the flame lanes' total height.
+    /// [`Regions`] for the current viewport (captured by the timeline), panel and
+    /// gutter sizes, the loaded profile's counter count, and the flame lanes'
+    /// total height. Positions the tab bar, bottom panel, and gutter handle over
+    /// the same split the timeline paints into.
     fn regions(&self, cx: &App) -> Regions {
-        let model = self.model.read(cx);
-        let n_counters = match model.source() {
-            Source::Loaded(p) => p.counters().len(),
-            _ => 0,
+        let (n_counters, flame_total) = {
+            let model = self.model.read(cx);
+            let n_counters = match model.source() {
+                Source::Loaded(p) => p.counters().len(),
+                _ => 0,
+            };
+            let flame_total = model
+                .lane_layout()
+                .map(|l| flame_total_height(&l))
+                .unwrap_or(0.0);
+            (n_counters, flame_total)
         };
-        let flame_total = model
-            .lane_layout()
-            .map(|l| flame_total_height(&l))
-            .unwrap_or(0.0);
         Regions::new(
-            self.viewport.get(),
+            self.timeline.read(cx).viewport(),
             n_counters,
             self.panel_height,
             self.gutter_width,
@@ -1190,16 +744,18 @@ impl TraceView {
         )
     }
 
-    /// The pixel ceiling for the flame chart's lane scroll: the thread-lane
-    /// height past the flame region's on-screen height.
-    fn max_scroll(&self, cx: &App) -> f32 {
-        let total = self
-            .model
-            .read(cx)
-            .lane_layout()
-            .map(|l| flame_total_height(&l))
-            .unwrap_or(0.0);
-        (total - self.regions(cx).flame_h()).max(0.0)
+    /// Clamps the timeline's lane scroll to the current layout height after a
+    /// visibility or collapse change. Computes the scroll ceiling from this
+    /// view's own reads and pushes it down, so no [`TimelinePanel`] method reads
+    /// this view while it is leased (as it is inside a `cx.listener`); the panel
+    /// itself would read the shell back and double-lease.
+    fn clamp_timeline_scroll(&mut self, cx: &mut Context<Self>) {
+        let regions = self.regions(cx);
+        let max = match self.model.read(cx).lane_layout() {
+            Some(lanes) => max_lane_scroll(&lanes, &regions),
+            None => 0.0,
+        };
+        self.timeline.update(cx, |t, _| t.clamp_scroll_to(max));
     }
 
     /// Folds or unfolds a lane-class group's track list in the tracks menu.
@@ -1209,77 +765,16 @@ impl TraceView {
         }
     }
 
-    /// Switches the bottom panel tab, dropping the flame-chart and flame-graph
-    /// hover tooltips (the newly shown panel picks its own up on the next move).
-    fn set_bottom_tab(&mut self, tab: BottomTab) {
+    /// Switches the bottom panel tab, dropping the flame-graph and timeline hover
+    /// tooltips and the timeline crosshair (the newly shown panel picks its own
+    /// up on the next move).
+    fn set_bottom_tab(&mut self, tab: BottomTab, cx: &mut Context<Self>) {
         if self.bottom_tab == tab {
             return;
         }
         self.bottom_tab = tab;
-        self.hover = None;
         self.flame_hover = None;
-    }
-}
-
-/// The cached child view painting the flame chart's slices and chrome. It shares
-/// the parent's time view, lane scroll, captured viewport, scroll-bar geometry,
-/// and culled draw list through `Rc` cells, and reads the parent's profile, lane
-/// layout, and snapshot state (selection, groups, tab, panel and gutter sizes)
-/// through `parent`. Rendered only for a content change (see
-/// [`TraceView::invalidate_chart`]); a hover leaves its scene to replay.
-struct SliceLayer {
-    parent: WeakEntity<TraceView>,
-    view: Rc<Cell<TimeView>>,
-    scroll_y: Rc<Cell<f32>>,
-    fitted: Rc<Cell<bool>>,
-    viewport: Rc<Cell<Bounds<Pixels>>>,
-    vbar: Rc<Cell<Option<Scrollbar>>>,
-    hbar: Rc<Cell<Option<Scrollbar>>>,
-    slice_draw: Rc<RefCell<Option<SliceDrawCache>>>,
-}
-
-impl Render for SliceLayer {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let Some(parent) = self.parent.upgrade() else {
-            return div().into_any_element();
-        };
-        let (profile, lanes, panel_height, gutter_width) = {
-            let this = parent.read(cx);
-            let model = this.model.read(cx);
-            let Source::Loaded(profile) = model.source() else {
-                return div().into_any_element();
-            };
-            let Some(lanes) = model.lane_layout() else {
-                return div().into_any_element();
-            };
-            (profile.clone(), lanes, this.panel_height, this.gutter_width)
-        };
-        let palette = Palette::from_colors(&bviz_ui_theme::colors(window));
-        let prepaint = TraceView::fit_prepaint(
-            profile.clone(),
-            lanes.clone(),
-            self.view.clone(),
-            self.fitted.clone(),
-            self.viewport.clone(),
-            panel_height,
-            gutter_width,
-        );
-        let paint = TraceView::slice_paint(
-            profile,
-            lanes,
-            self.view.clone(),
-            self.scroll_y.clone(),
-            self.vbar.clone(),
-            self.hbar.clone(),
-            self.slice_draw.clone(),
-            parent,
-            palette,
-        );
-        canvas(prepaint, paint)
-            .absolute()
-            .inset_0()
-            .size_full()
-            .into_any_element()
+        self.timeline.update(cx, |t, _| t.clear_hover());
     }
 }
 
@@ -1295,19 +790,14 @@ impl Render for TraceView {
             Source::Message(msg) => Err(centered_notice(msg.clone(), &colors)),
         };
         let body = match loaded {
-            Ok(profile) => {
+            Ok(_) => {
                 // Re-sort the stats off the UI thread when the aggregates or sort
                 // change; sorting ~2M rows on the paint thread would freeze it.
                 self.ensure_stats_order(cx);
-                let lanes = self
-                    .model
-                    .read(cx)
-                    .lane_layout()
-                    .expect("a loaded profile has a lane layout");
                 div()
                     .flex_1()
                     .overflow_hidden()
-                    .child(self.trace_body(profile, lanes, palette, &colors, cx))
+                    .child(self.trace_body(palette, &colors, cx))
             }
             Err(placeholder) => placeholder,
         };
@@ -1319,223 +809,6 @@ impl Render for TraceView {
 }
 
 impl TraceView {
-    fn on_scroll_wheel(&mut self, e: &ScrollWheelEvent, _: &mut Window, cx: &mut Context<Self>) {
-        if self.model.read(cx).lane_layout().is_none() {
-            return;
-        }
-        let profile = match self.model.read(cx).source() {
-            Source::Loaded(p) => p.clone(),
-            _ => return,
-        };
-        let span = profile.span();
-        let regions = self.regions(cx);
-        let time_w = regions.time_w;
-        let content_left = regions.content_left;
-        let (dx, dy) = match e.delta {
-            ScrollDelta::Lines(p) => (p.x * LINE_SCROLL_PX, p.y * LINE_SCROLL_PX),
-            ScrollDelta::Pixels(p) => (f32::from(p.x), f32::from(p.y)),
-        };
-        if e.modifiers.control || e.modifiers.platform {
-            // Horizontal zoom anchored at the cursor, floored at the fit so the
-            // whole span can't be zoomed out of view.
-            let rel_x = f32::from(e.position.x) - content_left;
-            let dy_lines = dy / LINE_SCROLL_PX;
-            let mut v = self.view.get();
-            v.zoom_at(rel_x, ZOOM_PER_NOTCH.powf(dy_lines as f64));
-            v.px_per_us = v
-                .px_per_us
-                .clamp(fit_px_per_us(span, time_w, EDGE_MARGIN_PX), MAX_PX_PER_US);
-            v.clamp_to(span, time_w, EDGE_MARGIN_PX);
-            self.view.set(v);
-        } else {
-            // Shift folds the vertical wheel into horizontal panning, so
-            // shift+wheel pans the timeline regardless of focus (the platform
-            // turns shift+wheel into dx only while focused, leaving dy otherwise).
-            let (pan_dx, scroll_dy) = if e.modifiers.shift {
-                (dx + dy, 0.0)
-            } else {
-                (dx, dy)
-            };
-            let scrolled = (self.scroll_y.get() - scroll_dy).clamp(0.0, self.max_scroll(cx));
-            self.scroll_y.set(scrolled);
-            let mut v = self.view.get();
-            v.pan_px(pan_dx);
-            v.clamp_to(span, time_w, EDGE_MARGIN_PX);
-            self.view.set(v);
-        }
-        self.invalidate_chart(cx);
-    }
-
-    /// Tracks the slice under the cursor and the crosshair position while not
-    /// dragging. The crosshair follows the cursor, so any in-content move
-    /// repaints; the slice tooltip repaints only when the hovered slice changes.
-    fn on_mouse_move(&mut self, e: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
-        if !matches!(self.drag, Drag::None) {
-            // A drag clears the crosshair; notify only if it was showing.
-            if self.crosshair.take().is_some() {
-                cx.notify();
-            }
-            return;
-        }
-        // The crosshair shows anywhere in the time-content column.
-        let in_content = self.in_content(e.position, cx);
-        self.crosshair = in_content.then_some(e.position);
-
-        let hit = self.slice_at(e.position, cx);
-        let slice_unchanged = match (self.hover, hit) {
-            (Some(h), Some((track, slice))) => h.track == track && h.slice == slice,
-            (None, None) => true,
-            _ => false,
-        };
-        if !slice_unchanged {
-            self.hover = hit.map(|(track, slice)| Hover {
-                track,
-                slice,
-                at: e.position,
-            });
-        }
-        // Repaint on every in-content move (the crosshair tracks the cursor) and
-        // whenever the hovered slice changes (including the move out of content
-        // that clears the crosshair).
-        if in_content || !slice_unchanged {
-            cx.notify();
-        }
-    }
-
-    /// Whether `pos` lies over a time-axis region the crosshair shows on: the
-    /// flame lanes always, and the counter panel when it is the shown tab (it
-    /// shares the time axis). The flame-graph and stats panels and the tab bar do
-    /// not map to time, so the crosshair does not extend over them.
-    fn in_content(&self, pos: Point<Pixels>, cx: &App) -> bool {
-        if self.model.read(cx).lane_layout().is_none() {
-            return false;
-        }
-        let regions = self.regions(cx);
-        let x = f32::from(pos.x);
-        let y = f32::from(pos.y);
-        if x < regions.content_left || x >= regions.time_right {
-            return false;
-        }
-        let in_flame = y >= regions.flame_top && y < regions.flame_bottom;
-        let in_counters = self.bottom_tab == BottomTab::Counters
-            && regions.has_graph
-            && y >= regions.panel_top
-            && y < regions.panel_bottom;
-        in_flame || in_counters
-    }
-
-    /// The slice under a window-space cursor, inverting the paint transform:
-    /// window → flame lanes → (lane, depth row) and time. `None` over the gutter,
-    /// the ruler, the tab bar, the panel, a lane header, or empty space.
-    fn slice_at(&self, pos: Point<Pixels>, cx: &App) -> Option<(usize, usize)> {
-        let layout = self.model.read(cx).lane_layout()?;
-        let profile = match self.model.read(cx).source() {
-            Source::Loaded(p) => p.clone(),
-            _ => return None,
-        };
-        let regions = self.regions(cx);
-        let x = f32::from(pos.x);
-        let y = f32::from(pos.y);
-        // The flame lanes, past the gutter, clear of the reserved vertical-bar
-        // column and below the ruler, above the tab bar.
-        if x < regions.content_left
-            || x >= regions.time_right
-            || y < regions.flame_top
-            || y >= regions.flame_bottom
-        {
-            return None;
-        }
-        let content_y = y - regions.flame_top + self.scroll_y.get();
-        let lane = layout
-            .lanes
-            .iter()
-            .find(|l| content_y >= l.top && content_y < l.top + l.height)?;
-        let rows_top = lane.top + METRICS.header_height;
-        if content_y < rows_top {
-            return None;
-        }
-        let depth = ((content_y - rows_top) / METRICS.row_height) as u32;
-        let view = self.view.get();
-        let cursor_px = x - regions.content_left;
-        // Hit-test against a slice's painted span, not its raw time span: a
-        // sub-pixel slice paints a marker widened to MIN_SLICE_PX (see
-        // visible_slices), so a cursor over that marker sits past the slice's
-        // brief duration. Slices are sorted by start and x_of is monotonic, so
-        // only those painting from at or left of the cursor can reach it;
-        // binary-search that prefix. The first at the cursor's depth whose
-        // widened span still covers the cursor is the hit (at most one per depth).
-        let slices = profile.slices(&profile.threads()[lane.track]);
-        let upper = slices.partition_point(|s| view.x_of(s.start_us) <= cursor_px);
-        slices[..upper]
-            .iter()
-            .position(|s| {
-                if s.depth != depth {
-                    return false;
-                }
-                let sx = view.x_of(s.start_us);
-                let sw = (view.x_of(s.start_us + s.dur_us) - sx).max(MIN_SLICE_PX);
-                cursor_px < sx + sw
-            })
-            .map(|slice| (lane.track, slice))
-    }
-
-    /// The group header band or show-more row at `pos`, if the press lands on one
-    /// (across the full chart width, gutter included).
-    fn group_row_at(&self, pos: Point<Pixels>, cx: &App) -> Option<GroupHit> {
-        let model = self.model.read(cx);
-        model.lane_layout()?;
-        let chrome = model.group_chrome()?;
-        let regions = self.regions(cx);
-        let x = f32::from(pos.x);
-        let y = f32::from(pos.y);
-        let gutter_left = regions.content_left - self.gutter_width;
-        if x < gutter_left || x >= regions.content_right || y < regions.flame_top || y >= regions.flame_bottom {
-            return None;
-        }
-        let content_y = y - regions.flame_top + self.scroll_y.get();
-        let hits = |top: f32| content_y >= top && content_y < top + GROUP_BAND_HEIGHT;
-        let band = chrome.bands.iter().find(|b| hits(b.top))?;
-        // The show-all icon sits at the gutter's right edge on a capped, expanded
-        // group; a press there toggles show-all, anywhere else toggles collapse.
-        let icon_left = regions.content_left - GROUP_ICON - 2.0 * SLICE_TEXT_PAD;
-        if band.capped && !band.collapsed && x >= icon_left && x < regions.content_left {
-            Some(GroupHit::ShowAll(band.group))
-        } else {
-            Some(GroupHit::Collapse(band.group))
-        }
-    }
-
-    /// The track whose gutter label lies under `pos`, if the press hit the flame
-    /// chart's track-label column (below the ruler, left of the content, above
-    /// the tab bar). `None` elsewhere or over a lane's empty tail.
-    fn track_label_at(&self, pos: Point<Pixels>, cx: &App) -> Option<usize> {
-        let layout = self.model.read(cx).lane_layout()?;
-        let regions = self.regions(cx);
-        let x = f32::from(pos.x);
-        let y = f32::from(pos.y);
-        let gutter_left = regions.content_left - self.gutter_width;
-        if x < gutter_left
-            || x >= regions.content_left
-            || y < regions.flame_top
-            || y >= regions.flame_bottom
-        {
-            return None;
-        }
-        let content_y = y - regions.flame_top + self.scroll_y.get();
-        layout
-            .lanes
-            .iter()
-            .find(|l| content_y >= l.top && content_y < l.top + l.height)
-            .map(|l| l.track)
-    }
-
-    /// Selects every currently visible track (the Ctrl-A gesture).
-    fn select_all_visible(&mut self, _: &SelectAllTracks, _: &mut Window, cx: &mut Context<Self>) {
-        if self.model.update(cx, |m, cx| m.select_all_visible(cx)) {
-            self.invalidate_chart(cx);
-        }
-    }
-
     /// If `pos` hits `bar`'s track, begins a thumb drag: the thumb is grabbed
     /// where pressed (a track click centers it there), `drag` becomes the active
     /// drag holding that grab offset, and `thumb_to` maps the press to the
@@ -1559,27 +832,6 @@ impl TraceView {
         true
     }
 
-    /// Begins a flame-chart drag at `pos`: the lane vertical or time horizontal
-    /// scroll thumb/track if the press hit one, otherwise a pan.
-    fn press(&mut self, pos: Point<Pixels>, cx: &mut Context<Self>) {
-        if self.begin_thumb_drag(pos, self.vbar.get(), Drag::VThumb, scroll_thumb_to) {
-            return;
-        }
-        // The time bar's press jumps the pan, which reads the profile span and
-        // regions through the model, so it is threaded here rather than via the
-        // model-free `begin_thumb_drag`.
-        if let Some(bar) = self.hbar.get() {
-            if bar.track_hit(pos) {
-                let grab = bar.grab(pos);
-                self.drag = Drag::HThumb(grab);
-                pan_thumb_to(self, pos, grab, cx);
-                return;
-            }
-        }
-        self.drag = Drag::Pan;
-        self.last_mouse = pos;
-    }
-
     /// If `pos` hits the tracks-menu scroll bar, begins a thumb drag. Returns
     /// whether the press was consumed by the bar.
     fn press_menu(&mut self, pos: Point<Pixels>) -> bool {
@@ -1588,30 +840,11 @@ impl TraceView {
 
 }
 
-/// Routes an in-progress drag to its target: panning the flame chart or the
-/// flame-graph panel, moving a scroll thumb, or resizing the panel or gutter.
+/// Routes an in-progress drag to its target: panning the flame-graph panel,
+/// moving a scroll thumb, or resizing the bottom panel or the gutter. The
+/// flame-chart timeline's own drags are routed inside [`TimelinePanel`].
 fn on_drag(view: &mut TraceView, event: &MouseMoveEvent, cx: &mut Context<TraceView>) {
     match view.drag {
-        Drag::Pan => {
-            let dx = f32::from(event.position.x) - f32::from(view.last_mouse.x);
-            let dy = f32::from(event.position.y) - f32::from(view.last_mouse.y);
-            if view.model.read(cx).lane_layout().is_none() {
-                return;
-            }
-            let profile = match view.model.read(cx).source() {
-                Source::Loaded(p) => p.clone(),
-                _ => return,
-            };
-            let span = profile.span();
-            let regions = view.regions(cx);
-            let mut v = view.view.get();
-            v.pan_px(dx);
-            v.clamp_to(span, regions.time_w, EDGE_MARGIN_PX);
-            view.view.set(v);
-            let scrolled = (view.scroll_y.get() - dy).clamp(0.0, view.max_scroll(cx));
-            view.scroll_y.set(scrolled);
-            view.last_mouse = event.position;
-        }
         Drag::FlamePan => {
             let dx = f32::from(event.position.x) - f32::from(view.last_mouse.x);
             let dy = f32::from(event.position.y) - f32::from(view.last_mouse.y);
@@ -1624,8 +857,6 @@ fn on_drag(view: &mut TraceView, event: &MouseMoveEvent, cx: &mut Context<TraceV
             view.flame_scroll_y.set(scrolled);
             view.last_mouse = event.position;
         }
-        Drag::VThumb(grab) => scroll_thumb_to(view, event.position, grab),
-        Drag::HThumb(grab) => pan_thumb_to(view, event.position, grab, cx),
         Drag::FlameVThumb(grab) => flame_scroll_thumb_to(view, event.position, grab),
         Drag::FlameHThumb(grab) => view.flame_hthumb_to(event.position, grab, cx),
         Drag::StatsThumb(grab) => stats_thumb_to(view, event.position, grab),
@@ -1635,7 +866,7 @@ fn on_drag(view: &mut TraceView, event: &MouseMoveEvent, cx: &mut Context<TraceV
                 Source::Loaded(p) => p.clone(),
                 _ => return,
             };
-            let vp = view.viewport.get();
+            let vp = view.timeline.read(cx).viewport();
             let vh = f32::from(vp.size.height);
             // The panel's top follows the cursor: the panel spans from just below
             // the tab bar down to the window bottom. Clamped to keep the flame
@@ -1648,7 +879,7 @@ fn on_drag(view: &mut TraceView, event: &MouseMoveEvent, cx: &mut Context<TraceV
             );
         }
         Drag::Gutter => {
-            let vp = view.viewport.get();
+            let vp = view.timeline.read(cx).viewport();
             view.gutter_width = clamp_gutter_width(
                 f32::from(event.position.x) - f32::from(vp.origin.x),
                 f32::from(vp.size.width),
@@ -1657,13 +888,13 @@ fn on_drag(view: &mut TraceView, event: &MouseMoveEvent, cx: &mut Context<TraceV
         Drag::None => {}
     }
     // A flame-panel drag moves the flame layer's content but leaves the timeline
-    // unchanged, so it rebuilds the flame layer's cached scene while the timeline
-    // replays. Stats and menu drags touch neither cached layer, so a parent
-    // repaint is enough. The rest move the timeline and rebuild it.
+    // unchanged, so it rebuilds the flame layer's cached scene. Stats and menu
+    // drags touch neither cached layer, so a parent repaint is enough. Panel and
+    // gutter resizes move the timeline's split, so they rebuild it.
     match view.drag {
         Drag::FlamePan | Drag::FlameVThumb(_) | Drag::FlameHThumb(_) => view.invalidate_flame(cx),
         Drag::StatsThumb(_) | Drag::MenuThumb(_) => cx.notify(),
-        _ => view.invalidate_chart(cx),
+        _ => view.invalidate_timeline(cx),
     }
 }
 
@@ -1673,7 +904,7 @@ fn end_drag(view: &mut TraceView, _: &MouseUpEvent, cx: &mut Context<TraceView>)
     match ended {
         Drag::FlamePan | Drag::FlameVThumb(_) | Drag::FlameHThumb(_) => view.invalidate_flame(cx),
         Drag::StatsThumb(_) | Drag::MenuThumb(_) => cx.notify(),
-        _ => view.invalidate_chart(cx),
+        _ => view.invalidate_timeline(cx),
     }
 }
 
@@ -1731,41 +962,11 @@ fn set_list_thumb(handle: &ScrollHandle, offset: f32) {
     handle.set_offset(o);
 }
 
-/// Maps the flame chart's lane vertical thumb drag back to a scroll offset.
-fn scroll_thumb_to(view: &mut TraceView, pos: Point<Pixels>, grab: f32) {
-    if let Some(offset) = thumb_offset(&view.vbar, pos, grab) {
-        view.scroll_y.set(offset);
-    }
-}
-
 /// Maps a tracks-menu thumb drag back to the list's scroll offset.
 fn menu_thumb_to(view: &mut TraceView, pos: Point<Pixels>, grab: f32) {
     if let Some(offset) = thumb_offset(&view.menu_bar, pos, grab) {
         set_list_thumb(&view.menu_scroll, offset);
     }
-}
-
-/// Maps a horizontal thumb drag back to a pan start time, then clamps the view.
-fn pan_thumb_to(view: &mut TraceView, pos: Point<Pixels>, grab: f32, cx: &App) {
-    if view.model.read(cx).lane_layout().is_none() {
-        return;
-    }
-    let profile = match view.model.read(cx).source() {
-        Source::Loaded(p) => p.clone(),
-        _ => return,
-    };
-    let span = profile.span();
-    let regions = view.regions(cx);
-    let Some(offset) = thumb_offset(&view.hbar, pos, grab) else {
-        return;
-    };
-    let mut v = view.view.get();
-    // The bar's offset is measured from the span start less the reachable margin,
-    // so map it back through the same shift before clamping.
-    let margin_us = EDGE_MARGIN_PX / v.px_per_us as f32;
-    v.start_us = (span.start_us as f32 - margin_us) as f64 + offset as f64;
-    v.clamp_to(span, regions.time_w, EDGE_MARGIN_PX);
-    view.view.set(v);
 }
 
 /// Picks the lowest of `rows` whose last occupied right-extent leaves room for a
@@ -1946,8 +1147,8 @@ fn paint_scrollbars(
     regions: Regions,
     scroll_y: f32,
     palette: &Palette,
-    vbar: &Rc<Cell<Option<Scrollbar>>>,
-    hbar: &Rc<Cell<Option<Scrollbar>>>,
+    vbar: &Cell<Option<Scrollbar>>,
+    hbar: &Cell<Option<Scrollbar>>,
     window: &mut Window,
 ) {
     let flame_h = regions.flame_h();
