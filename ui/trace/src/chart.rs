@@ -187,7 +187,6 @@ pub(crate) fn sample_at(points: &[CounterPoint], t: f64) -> Option<f64> {
 /// The unit a counter lane's values carry, inferred from its name since the
 /// trace format stores none. Empty for unitless counts (action counts,
 /// SkyFunctions, RPCs, load averages).
-/// The unit a counter lane's values carry, inferred from its name.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CounterUnit {
     Cores,

@@ -69,10 +69,7 @@ fn flame_metrics() -> FlameMetrics {
 /// and no time axis, less a reserved vertical-bar column (when the tree's rows
 /// overflow the visible height) and a reserved horizontal-bar strip (when the
 /// zoomed width overflows the visible width). Both reserves may apply at once,
-/// leaving the bottom-right corner to neither bar. Returned as
-/// `(left, top, width, height)`.
-/// The flame-graph drawing area within its bounds, shrunk by whichever scroll
-/// bars the content needs.
+/// leaving the bottom-right corner to neither bar.
 struct Rect {
     left: f32,
     top: f32,
