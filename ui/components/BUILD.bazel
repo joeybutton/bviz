@@ -6,7 +6,6 @@ rust_library(
     srcs = glob(["src/**/*.rs"]),
     crate_name = "bviz_ui_components",
     visibility = [
-        "//gpui_hello:__pkg__",
         "//ui/graph:__pkg__",
         "//ui/shell:__pkg__",
         "//ui/terminal:__pkg__",

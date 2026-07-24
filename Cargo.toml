@@ -4,7 +4,6 @@ members = [
     "bazel_viz",
     "graph/layout",
     "greeting",
-    "gpui_hello",
     "terminal",
     "trace/layout",
     "trace/profile",
