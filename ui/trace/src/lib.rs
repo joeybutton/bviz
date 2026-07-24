@@ -19,7 +19,7 @@ mod tracks_menu;
 use chart::{fit_px_per_us, format_duration, format_time, nice_step, span_seconds};
 
 use counters::{paint_crosshair, paint_graph};
-use flame_graph::{FlameBoxCache, FlameHover, flame_scroll_thumb_to};
+use flame_graph::{FlameBoxCache, FlameHover, FlameLayer, flame_scroll_thumb_to};
 use groups::{
     GROUP_ORDER, GroupChrome, GroupHit, build_grouped_layout, default_collapsed_groups, group_label,
 };
@@ -381,8 +381,14 @@ struct TraceView {
     /// re-emitting every slice. A parent `cx.notify()` leaves it to replay;
     /// [`Self::invalidate_chart`] notifies it to rebuild when its content changes.
     slice_layer: Entity<SliceLayer>,
-    /// Rebuilds `slice_layer` on a system appearance change so it repaints in the
-    /// new palette.
+    /// The child view that paints the flame-graph panel's boxes and scroll bars,
+    /// embedded cached so a hover — which touches only the tooltip overlay —
+    /// replays its last scene rather than re-emitting every box. A parent
+    /// `cx.notify()` leaves it to replay; [`Self::invalidate_flame`] notifies it to
+    /// rebuild when its content changes.
+    flame_layer: Entity<FlameLayer>,
+    /// Rebuilds `slice_layer` and `flame_layer` on a system appearance change so
+    /// they repaint in the new palette.
     _appearance_observer: Subscription,
     /// Holds the background load task so it isn't cancelled on drop.
     _load_task: Task<()>,
@@ -437,9 +443,35 @@ impl TraceView {
             hbar: hbar.clone(),
             slice_draw: slice_draw.clone(),
         });
+        // The flame-graph panel's zoom/pan view, vertical scroll, captured bounds,
+        // scroll-bar geometry, and memoized box layout are shared with the flame
+        // layer, which paints from them while the parent's handlers read and
+        // mutate them.
+        let flame_view = Rc::new(Cell::new(FlameView::FIT));
+        let flame_scroll_y = Rc::new(Cell::new(0.0));
+        let flame_bounds = Rc::new(Cell::new(Bounds::default()));
+        let flame_vbar = Rc::new(Cell::new(None));
+        let flame_hbar = Rc::new(Cell::new(None));
+        let flame_boxes = Rc::new(RefCell::new(None));
+        let flame_parent = cx.entity().downgrade();
+        let flame_layer = cx.new(|_| {
+            FlameLayer::new(
+                flame_parent,
+                flame_view.clone(),
+                flame_scroll_y.clone(),
+                flame_bounds.clone(),
+                flame_vbar.clone(),
+                flame_hbar.clone(),
+                flame_boxes.clone(),
+            )
+        });
         let appearance_observer = window.observe_window_appearance({
             let slice_layer = slice_layer.clone();
-            move |_, cx| slice_layer.update(cx, |_, cx| cx.notify())
+            let flame_layer = flame_layer.clone();
+            move |_, cx| {
+                slice_layer.update(cx, |_, cx| cx.notify());
+                flame_layer.update(cx, |_, cx| cx.notify());
+            }
         });
         Self {
             focus_handle,
@@ -447,14 +479,14 @@ impl TraceView {
             source: Source::Loading,
             view,
             scroll_y,
-            flame_view: Rc::new(Cell::new(FlameView::FIT)),
-            flame_scroll_y: Rc::new(Cell::new(0.0)),
+            flame_view,
+            flame_scroll_y,
             viewport,
-            flame_bounds: Rc::new(Cell::new(Bounds::default())),
+            flame_bounds,
             vbar,
             hbar,
-            flame_vbar: Rc::new(Cell::new(None)),
-            flame_hbar: Rc::new(Cell::new(None)),
+            flame_vbar,
+            flame_hbar,
             drag: Drag::None,
             last_mouse: Point::default(),
             panel_height: DEFAULT_PANEL_HEIGHT,
@@ -475,7 +507,7 @@ impl TraceView {
             group_chrome: Rc::new(RefCell::new(None)),
             aggregates: Rc::new(RefCell::new(None)),
             flame_scan: Rc::new(RefCell::new(None)),
-            flame_boxes: Rc::new(RefCell::new(None)),
+            flame_boxes,
             slice_draw,
             agg: Rebuild::new(),
             stats_sort: DEFAULT_STATS_SORT.0,
@@ -490,6 +522,7 @@ impl TraceView {
             flame_hover: None,
             crosshair: None,
             slice_layer,
+            flame_layer,
             _appearance_observer: appearance_observer,
             _load_task: load_task,
         }
@@ -500,6 +533,14 @@ impl TraceView {
     /// A plain `cx.notify()` (the hover path) leaves the slice layer to replay.
     fn invalidate_chart(&self, cx: &mut Context<Self>) {
         self.slice_layer.update(cx, |_, cx| cx.notify());
+        cx.notify();
+    }
+
+    /// Marks both the flame layer and this view dirty, so a change to what the
+    /// flame layer paints rebuilds its cached scene rather than replaying it.
+    /// A plain `cx.notify()` (the hover path) leaves the flame layer to replay.
+    fn invalidate_flame(&self, cx: &mut Context<Self>) {
+        self.flame_layer.update(cx, |_, cx| cx.notify());
         cx.notify();
     }
 
@@ -1031,6 +1072,11 @@ impl TraceView {
                     .on_mouse_down(MouseButton::Left, |_, _, cx: &mut App| cx.stop_propagation())
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.set_bottom_tab(tab);
+                        // Switching to the flame tab may reveal an aggregate that
+                        // changed while another tab was up, so rebuild its layer.
+                        if tab == BottomTab::FlameGraph {
+                            this.invalidate_flame(cx);
+                        }
                         this.invalidate_chart(cx);
                     }))
                     .child(label)
@@ -1369,7 +1415,7 @@ impl TraceView {
                 }
                 (scan, aggregate)
             },
-            move |view, (scan, aggregates), _cx| {
+            move |view, (scan, aggregates), cx| {
                 // Discard a result the inputs have moved past since this spawn.
                 if !view.agg.accept(generation, key) {
                     return;
@@ -1381,6 +1427,9 @@ impl TraceView {
                 // `ensure_stats_order` re-derive it (the old order keeps
                 // showing until it lands).
                 view.stats_build.clear_ready();
+                // The flame layer's cached scene shows the prior graph; rebuild it
+                // for the swapped-in aggregate.
+                view.invalidate_flame(cx);
             },
         );
         self.agg.set_task(task);
@@ -1905,22 +1954,25 @@ fn on_drag(view: &mut TraceView, event: &MouseMoveEvent, cx: &mut Context<TraceV
         }
         Drag::None => {}
     }
-    // Flame-panel, stats, and menu drags leave the timeline unchanged, so its
-    // cached layer replays; a parent repaint is enough. The rest move the
-    // timeline and rebuild it.
+    // A flame-panel drag moves the flame layer's content but leaves the timeline
+    // unchanged, so it rebuilds the flame layer's cached scene while the timeline
+    // replays. Stats and menu drags touch neither cached layer, so a parent
+    // repaint is enough. The rest move the timeline and rebuild it.
     match view.drag {
-        Drag::FlamePan
-        | Drag::FlameVThumb(_)
-        | Drag::FlameHThumb(_)
-        | Drag::StatsThumb(_)
-        | Drag::MenuThumb(_) => cx.notify(),
+        Drag::FlamePan | Drag::FlameVThumb(_) | Drag::FlameHThumb(_) => view.invalidate_flame(cx),
+        Drag::StatsThumb(_) | Drag::MenuThumb(_) => cx.notify(),
         _ => view.invalidate_chart(cx),
     }
 }
 
 fn end_drag(view: &mut TraceView, _: &MouseUpEvent, cx: &mut Context<TraceView>) {
+    let ended = view.drag;
     view.drag = Drag::None;
-    view.invalidate_chart(cx);
+    match ended {
+        Drag::FlamePan | Drag::FlameVThumb(_) | Drag::FlameHThumb(_) => view.invalidate_flame(cx),
+        Drag::StatsThumb(_) | Drag::MenuThumb(_) => cx.notify(),
+        _ => view.invalidate_chart(cx),
+    }
 }
 
 /// A vertical scroll bar painted over the right edge of a scrollable body. Each

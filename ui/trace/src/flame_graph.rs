@@ -11,9 +11,9 @@ use bviz_trace_layout::{
 };
 use bviz_ui_components::{Axis, DEFAULT_MIN_THUMB, Scrollbar, spinner, track_drag};
 use gpui::{
-    App, Bounds, ContentMask, Context, Div, IntoElement, MouseButton, MouseDownEvent,
-    MouseMoveEvent, Pixels, Point, ScrollDelta, ScrollWheelEvent, Stateful, Window, canvas, div,
-    point, prelude::*, px, size,
+    AnyView, App, Bounds, ContentMask, Context, Div, IntoElement, MouseButton,
+    MouseDownEvent, MouseMoveEvent, Pixels, Point, Render, ScrollDelta, ScrollWheelEvent,
+    Stateful, StyleRefinement, WeakEntity, Window, canvas, div, point, prelude::*, px, size,
 };
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -143,9 +143,9 @@ fn flame_boxes(
 /// quad with a truncated label, clipped to the content rect, scrolled vertically
 /// by `scroll_y` and zoomed/panned horizontally by `flame_view`. A vertical
 /// scroll bar shows when the tree's rows overflow the height and a horizontal one
-/// when the zoomed width overflows the width; a tooltip draws for the hovered
-/// box. No time-axis chrome (ruler, gridlines, gutter, markers) applies, so none
-/// is drawn.
+/// when the zoomed width overflows the width. No time-axis chrome (ruler,
+/// gridlines, gutter, markers) applies, so none is drawn. The hover tooltip paints
+/// from a separate overlay above, so this layer's cached scene replays on a hover.
 #[allow(clippy::too_many_arguments)]
 fn paint_flame_graph(
     aggregates: &Arc<ScopeAggregate>,
@@ -155,7 +155,6 @@ fn paint_flame_graph(
     palette: &Palette,
     vbar: &Rc<Cell<Option<Scrollbar>>>,
     hbar: &Rc<Cell<Option<Scrollbar>>>,
-    hover: Option<FlameHover>,
     bounds: Bounds<Pixels>,
     window: &mut Window,
     cx: &mut App,
@@ -234,10 +233,6 @@ fn paint_flame_graph(
         bar.paint(palette.scroll_track, palette.scroll_thumb, window);
     }
     hbar.set(hlayout);
-
-    if let Some(h) = hover {
-        paint_flame_tooltip(graph, &h.boxed, graph.root_total_us(), h.at, bounds, palette, window, cx);
-    }
 }
 
 /// Paints a tooltip near `at` with the flame node's name and, below it, its total
@@ -276,35 +271,65 @@ pub(crate) fn flame_scroll_thumb_to(view: &mut TraceView, pos: Point<Pixels>, gr
     }
 }
 
-impl TraceView {
-    /// The flame-graph panel: its own canvas painting the merged boxes and the
-    /// panel's horizontal/vertical scroll bars, with the panel's pan/scroll/hover
-    /// handlers. The canvas closures are `'static`, so they capture owned
-    /// snapshots rather than borrowing the view.
-    pub(crate) fn flame_graph_panel(
-        &self,
-        aggregates: Arc<ScopeAggregate>,
-        palette: Palette,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        let flame_scroll_y = self.flame_scroll_y.clone();
-        let flame_view = self.flame_view.clone();
-        let flame_bounds = self.flame_bounds.clone();
-        let vbar = self.flame_vbar.clone();
-        let hbar = self.flame_hbar.clone();
-        let flame_boxes = self.flame_boxes.clone();
-        let entity = cx.entity();
+/// The cached child view painting the flame-graph panel's boxes and scroll bars.
+/// It shares the panel's zoom/pan view, vertical scroll, captured bounds, and
+/// scroll-bar geometry through `Rc` cells, and reads the parent's aggregate
+/// through `parent`. Rendered only for a content change (see
+/// [`TraceView::invalidate_flame`]); a hover leaves its scene to replay.
+pub(crate) struct FlameLayer {
+    parent: WeakEntity<TraceView>,
+    flame_view: Rc<Cell<FlameView>>,
+    flame_scroll_y: Rc<Cell<f32>>,
+    flame_bounds: Rc<Cell<Bounds<Pixels>>>,
+    flame_vbar: Rc<Cell<Option<Scrollbar>>>,
+    flame_hbar: Rc<Cell<Option<Scrollbar>>>,
+    flame_boxes: Rc<RefCell<Option<FlameBoxCache>>>,
+}
+
+impl FlameLayer {
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new(
+        parent: WeakEntity<TraceView>,
+        flame_view: Rc<Cell<FlameView>>,
+        flame_scroll_y: Rc<Cell<f32>>,
+        flame_bounds: Rc<Cell<Bounds<Pixels>>>,
+        flame_vbar: Rc<Cell<Option<Scrollbar>>>,
+        flame_hbar: Rc<Cell<Option<Scrollbar>>>,
+        flame_boxes: Rc<RefCell<Option<FlameBoxCache>>>,
+    ) -> Self {
+        Self {
+            parent,
+            flame_view,
+            flame_scroll_y,
+            flame_bounds,
+            flame_vbar,
+            flame_hbar,
+            flame_boxes,
+        }
+    }
+}
+
+impl Render for FlameLayer {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let Some(parent) = self.parent.upgrade() else {
+            return div().into_any_element();
+        };
+        let Some(aggregates) = parent.read(cx).aggregates.borrow().clone() else {
+            return div().into_any_element();
+        };
+        let palette = Palette::from_colors(&bviz_ui_theme::colors(window));
         let prepaint = {
-            let flame_bounds = flame_bounds.clone();
+            let flame_bounds = self.flame_bounds.clone();
             move |bounds: Bounds<Pixels>, _: &mut Window, _: &mut App| {
                 flame_bounds.set(bounds);
             }
         };
-        let canvas = canvas(prepaint, move |bounds, _, window, cx| {
-            let (flame_hover, dragging) = {
-                let this = entity.read(cx);
-                (this.flame_hover.clone(), !matches!(this.drag, Drag::None))
-            };
+        let flame_boxes = self.flame_boxes.clone();
+        let flame_scroll_y = self.flame_scroll_y.clone();
+        let flame_view = self.flame_view.clone();
+        let vbar = self.flame_vbar.clone();
+        let hbar = self.flame_hbar.clone();
+        let paint = move |bounds, _: (), window: &mut Window, cx: &mut App| {
             paint_flame_graph(
                 &aggregates,
                 &flame_boxes,
@@ -313,15 +338,70 @@ impl TraceView {
                 &palette,
                 &vbar,
                 &hbar,
-                flame_hover,
                 bounds,
                 window,
                 cx,
             );
-            if dragging {
-                track_drag(window, &entity, on_drag, end_drag);
-            }
-        })
+        };
+        canvas(prepaint, paint)
+            .absolute()
+            .inset_0()
+            .size_full()
+            .into_any_element()
+    }
+}
+
+impl TraceView {
+    /// The flame-graph panel: the cached [`FlameLayer`] painting the merged boxes
+    /// and the panel's scroll bars, an overlay canvas above it for the hover
+    /// tooltip and in-progress drag, and — while a rebuild runs — an "Updating…"
+    /// pill. Embedding the layer cached lets a hover reuse its last scene: a parent
+    /// `cx.notify()` does not dirty it, so gpui replays its boxes instead of
+    /// re-emitting them. The overlay's paint closure is `'static`, so it captures
+    /// owned snapshots rather than borrowing the view.
+    pub(crate) fn flame_graph_panel(
+        &self,
+        aggregates: Arc<ScopeAggregate>,
+        palette: Palette,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let entity = cx.entity();
+        let flame_layer = AnyView::from(self.flame_layer.clone())
+            .cached(StyleRefinement::default().absolute().inset_0().size_full());
+        // The tooltip and drag paint over the cached boxes, sharing the layer's
+        // full bounds so the tooltip's viewport clamping is unchanged. A hover
+        // repaints only this overlay.
+        let overlay = canvas(
+            |_, _, _| {},
+            move |bounds, _, window, cx| {
+                let (flame_hover, dragging) = {
+                    let this = entity.read(cx);
+                    (
+                        this.flame_hover.clone(),
+                        matches!(
+                            this.drag,
+                            Drag::FlamePan | Drag::FlameVThumb(_) | Drag::FlameHThumb(_)
+                        ),
+                    )
+                };
+                if let Some(h) = flame_hover {
+                    let graph = &aggregates.flame;
+                    paint_flame_tooltip(
+                        graph,
+                        &h.boxed,
+                        graph.root_total_us(),
+                        h.at,
+                        bounds,
+                        &palette,
+                        window,
+                        cx,
+                    );
+                }
+                if dragging {
+                    track_drag(window, &entity, on_drag, end_drag);
+                }
+            },
+        )
         .absolute()
         .left_0()
         .top_0()
@@ -362,7 +442,8 @@ impl TraceView {
                 .relative()
                 .size_full()
                 .overflow_hidden()
-                .child(canvas)
+                .child(flame_layer)
+                .child(overlay)
                 .children(spinner),
             cx,
         )
@@ -476,7 +557,7 @@ impl TraceView {
             cx.listener(|this, e: &MouseDownEvent, _, cx| {
                 this.press_flame(e.position);
                 cx.stop_propagation();
-                cx.notify();
+                this.invalidate_flame(cx);
             }),
         )
         .on_scroll_wheel(cx.listener(|this, e: &ScrollWheelEvent, _, cx| {
@@ -525,6 +606,6 @@ impl TraceView {
         // vertical scroll ceiling.
         let scrolled = self.flame_scroll_y.get().clamp(0.0, self.flame_max_scroll());
         self.flame_scroll_y.set(scrolled);
-        cx.notify();
+        self.invalidate_flame(cx);
     }
 }
