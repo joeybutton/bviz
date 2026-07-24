@@ -22,17 +22,6 @@ rust_test(
 )
 
 rust_binary(
-    name = "bench_flame",
-    srcs = ["bench/flame.rs"],
-    crate_name = "bench_flame",
-    deps = [
-        ":layout",
-        "//alloc",
-        "//trace/profile",
-    ],
-)
-
-rust_binary(
     name = "bench_tracks",
     srcs = ["bench/tracks.rs"],
     crate_name = "bench_tracks",

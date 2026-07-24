@@ -1,11 +1,8 @@
 use std::sync::Arc;
 
-use bviz_trace_profile::{LaneClass, Profile};
+use bviz_trace_profile::Profile;
 
-use crate::flame::{
-    Builder, FlameGraph, Flamer, Scope, TrackFlamer, action_locations, build_critical_path,
-    build_flame_graph, class_trees, fold_all, fold_into, seal,
-};
+use crate::flame::{FlameGraph, TrackFlamer};
 use crate::stats::{StatRow, default_order, stats_from_flame};
 
 /// Everything the UI presents for one flame scope, derived together so a held
@@ -23,12 +20,6 @@ pub struct ScopeAggregate {
 }
 
 impl ScopeAggregate {
-    /// Builds the one scope's aggregate on its own, for a caller that needs a
-    /// single scope before (or without) the full [`FlameScopes`] pass.
-    pub fn build(profile: &Arc<Profile>, scope: Scope) -> ScopeAggregate {
-        ScopeAggregate::from_graph(build_flame_graph(profile, scope))
-    }
-
     /// Builds the aggregate over exactly the thread tracks `selected` admits (by
     /// index into [`Profile::threads`]), for a view driven by a lane selection
     /// rather than a fixed scope. Scans the whole profile and builds the per-lane
@@ -67,189 +58,11 @@ impl ScopeAggregate {
     }
 }
 
-/// The aggregates of every flame scope, built from one pass over the profile:
-/// the label rank table and mnemonic index are scope-independent and shared,
-/// and each lane is walked once into its lane class's tree, from which the
-/// class-scoped graphs and their union `All` all derive. The critical-path
-/// aggregate exists only when the profile has a critical-path lane.
-/// Each aggregate is held as its own [`Arc`] so a caller can serve one scope's
-/// handle on its own, keyed by identity, without cloning the aggregate.
-pub struct FlameScopes {
-    critical_path: Option<Arc<ScopeAggregate>>,
-    loading: Arc<ScopeAggregate>,
-    analysis: Arc<ScopeAggregate>,
-    execution: Arc<ScopeAggregate>,
-    all: Arc<ScopeAggregate>,
-}
-
-/// The three class scopes sealed, each paired with its [`Builder`] tree, plus
-/// the critical path when it was sealed alongside them.
-struct SealedScopes {
-    loading: (ScopeAggregate, Builder),
-    analysis: (ScopeAggregate, Builder),
-    execution: (ScopeAggregate, Builder),
-    critical_path: Option<ScopeAggregate>,
-}
-
-impl FlameScopes {
-    pub fn build(profile: &Arc<Profile>) -> FlameScopes {
-        FlameScopes::build_with_workers(profile, bviz_trace_profile::worker_count(), None, None)
-    }
-
-    /// Builds the set while reusing an already-computed aggregate for `scope` —
-    /// the scope a caller has just served on demand, which is always the profile
-    /// default ([`Scope::All`], or [`Scope::CriticalPath`] when the profile has a
-    /// critical path). Reusing `All` also lets the set pass skip building and
-    /// sealing the union entirely; reusing `CriticalPath` skips the graft. Any
-    /// other scope is rebuilt normally.
-    pub fn build_reusing(
-        profile: &Arc<Profile>,
-        scope: Scope,
-        aggregate: Arc<ScopeAggregate>,
-    ) -> FlameScopes {
-        let workers = bviz_trace_profile::worker_count();
-        match scope {
-            Scope::All => FlameScopes::build_with_workers(profile, workers, Some(aggregate), None),
-            Scope::CriticalPath => {
-                FlameScopes::build_with_workers(profile, workers, None, Some(aggregate))
-            }
-            _ => FlameScopes::build_with_workers(profile, workers, None, None),
-        }
-    }
-
-    /// Parallelism override, so the sharded build can be asserted equal to the
-    /// single-worker one; [`FlameScopes::build`] derives the count from the
-    /// parallelism granted to the process. `prebuilt_all` / `prebuilt_cp` supply
-    /// those scopes when the caller already holds them (see [`build_reusing`]).
-    fn build_with_workers(
-        profile: &Arc<Profile>,
-        workers: usize,
-        prebuilt_all: Option<Arc<ScopeAggregate>>,
-        prebuilt_cp: Option<Arc<ScopeAggregate>>,
-    ) -> FlameScopes {
-        let flamer = Flamer::new(profile, workers);
-        let reuse_all = prebuilt_all.is_some();
-
-        let mut loading = None;
-        let mut analysis = None;
-        let mut execution = None;
-        let mut rest = Vec::new();
-        // With the union already built, the other classes exist only to fold
-        // into it, so a reusing build walks just the three class scopes' lanes.
-        let include = |class: LaneClass| {
-            !reuse_all
-                || matches!(
-                    class,
-                    LaneClass::RepoFetch | LaneClass::Analysis | LaneClass::Execution
-                )
-        };
-        for (class, tree) in class_trees(profile, &flamer, include, workers) {
-            match class {
-                LaneClass::RepoFetch => loading = Some(tree),
-                LaneClass::Analysis => analysis = Some(tree),
-                LaneClass::Execution => execution = Some(tree),
-                _ => rest.push(tree),
-            }
-        }
-
-        let include_critical_path = prebuilt_cp.is_none() && profile.has_critical_path();
-        let sealed = Self::seal_scopes(
-            profile,
-            &flamer,
-            loading,
-            analysis,
-            execution,
-            include_critical_path,
-        );
-        let (loading, loading_tree) = sealed.loading;
-        let (analysis, analysis_tree) = sealed.analysis;
-        let (execution, execution_tree) = sealed.execution;
-
-        let all = prebuilt_all.unwrap_or_else(|| {
-            Self::fold_union(profile, rest, [loading_tree, analysis_tree, execution_tree])
-        });
-        FlameScopes {
-            critical_path: prebuilt_cp.or_else(|| sealed.critical_path.map(Arc::new)),
-            loading: Arc::new(loading),
-            analysis: Arc::new(analysis),
-            execution: Arc::new(execution),
-            all,
-        }
-    }
-
-    /// Seals the three class scopes concurrently, the critical path alongside
-    /// when `include_critical_path`. Each class scope keeps its now-sorted tree
-    /// so the union folds it by move rather than deep-copying: the sort only
-    /// reorders children, which the union re-sorts, so the merge is unchanged.
-    fn seal_scopes(
-        profile: &Arc<Profile>,
-        flamer: &Flamer,
-        loading: Option<Builder>,
-        analysis: Option<Builder>,
-        execution: Option<Builder>,
-        include_critical_path: bool,
-    ) -> SealedScopes {
-        let seal_scope = |tree: Option<Builder>| -> (ScopeAggregate, Builder) {
-            let mut root = tree.unwrap_or_else(Builder::new_root);
-            let graph = seal(&mut root, profile);
-            (ScopeAggregate::from_graph(graph), root)
-        };
-        let mut cp_slot = None;
-        let mut loading_slot = None;
-        let mut analysis_slot = None;
-        let mut execution_slot = None;
-        std::thread::scope(|scope| {
-            if include_critical_path {
-                scope.spawn(|| {
-                    let actions = action_locations(profile);
-                    let mut root = Builder::new_root();
-                    build_critical_path(profile, flamer, &actions, &mut root);
-                    cp_slot = Some(ScopeAggregate::from_graph(seal(&mut root, profile)));
-                });
-            }
-            scope.spawn(|| loading_slot = Some(seal_scope(loading)));
-            scope.spawn(|| analysis_slot = Some(seal_scope(analysis)));
-            scope.spawn(|| execution_slot = Some(seal_scope(execution)));
-        });
-        SealedScopes {
-            loading: loading_slot.unwrap(),
-            analysis: analysis_slot.unwrap(),
-            execution: execution_slot.unwrap(),
-            critical_path: cp_slot,
-        }
-    }
-
-    /// Folds the unclassed trees and the three sealed class trees by move into
-    /// the union, then seals it.
-    fn fold_union(
-        profile: &Arc<Profile>,
-        rest: Vec<Builder>,
-        class_trees: [Builder; 3],
-    ) -> Arc<ScopeAggregate> {
-        let mut all = fold_all(rest);
-        for tree in class_trees {
-            fold_into(&mut all, tree);
-        }
-        Arc::new(ScopeAggregate::from_graph(seal(&mut all, profile)))
-    }
-
-    /// The aggregate presented under `scope`; `None` only for
-    /// [`Scope::CriticalPath`] on a profile without a critical-path lane.
-    pub fn get(&self, scope: Scope) -> Option<&Arc<ScopeAggregate>> {
-        match scope {
-            Scope::CriticalPath => self.critical_path.as_ref(),
-            Scope::Loading => Some(&self.loading),
-            Scope::Analysis => Some(&self.analysis),
-            Scope::Execution => Some(&self.execution),
-            Scope::All => Some(&self.all),
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::test_profile::{action, action_named, profile, slice, track};
+    use bviz_trace_profile::LaneClass;
 
     /// A profile touching every lane class plus a critical path, with nesting
     /// and cross-lane merges.

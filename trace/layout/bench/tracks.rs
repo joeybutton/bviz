@@ -7,7 +7,7 @@
 
 use std::sync::Arc;
 
-use bviz_trace_layout::{Scope, ScopeAggregate, TrackFlamer};
+use bviz_trace_layout::{ScopeAggregate, TrackFlamer};
 use bviz_trace_profile::{LaneClass, Profile};
 
 #[global_allocator]
@@ -81,22 +81,6 @@ fn main() {
     let all_agg = ScopeAggregate::build_for_tracks(&profile, |i| {
         threads[i].lane_class != LaneClass::CriticalPath
     });
-    // Selecting every non-critical-path lane is the membership Scope::All uses,
-    // so the production track build must reproduce the trie-based Scope::All
-    // graph node-for-node on the real profile.
-    let track_all = ScopeAggregate::build_for_tracks_reusing(&scan, |i| {
-        threads[i].lane_class != LaneClass::CriticalPath
-    });
-    let scope_all = ScopeAggregate::build(&profile, Scope::All);
-    assert_eq!(
-        track_all.flame.nodes(),
-        scope_all.flame.nodes(),
-        "the track build must match Scope::All on the all-track selection"
-    );
-    eprintln!(
-        "[bench] track build matches Scope::All: {} nodes",
-        track_all.flame.nodes().len()
-    );
     eprintln!(
         "[bench] lanes: {real_lanes} real, {total_slices} slices; \
          biggest lane #{biggest} = {big_slices} slices"

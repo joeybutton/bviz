@@ -2,47 +2,11 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use bviz_trace_profile::{
-    LaneClass, Profile, Slice, SliceDetail, Span32, SpanRole, Str, ThreadTrack, Workload,
+    Profile, Slice, SliceDetail, Span32, SpanRole, Str, ThreadTrack, Workload,
 };
 use rayon::iter::{IntoParallelRefMutIterator, ParallelIterator};
 use rayon::slice::ParallelSliceMut;
 use rustc_hash::{FxHashMap, FxHashSet};
-
-mod critical_path;
-
-pub(crate) use critical_path::{action_locations, build_critical_path};
-use critical_path::{action_inner, critical_lanes};
-
-/// Which thread lanes an aggregation draws from, by the role their lane carries.
-/// Under Skymeld analysis and execution share one phase marker, so the role
-/// comes from the lane class, not the build phase.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Scope {
-    /// Only the synthetic critical-path lane (tid 0).
-    CriticalPath,
-    /// Repository-rule fetching — the loading-phase work.
-    Loading,
-    /// Configured-target/aspect analysis.
-    Analysis,
-    /// Action execution and its support threads.
-    Execution,
-    /// Every real lane. Excludes the critical-path lane, whose slices are
-    /// redirected copies of worker time; counting both would double-count.
-    All,
-}
-
-impl Scope {
-    /// Whether a thread of this lane class is included in the aggregation.
-    pub fn includes(self, lane: LaneClass) -> bool {
-        match self {
-            Scope::CriticalPath => lane == LaneClass::CriticalPath,
-            Scope::Loading => lane == LaneClass::RepoFetch,
-            Scope::Analysis => lane == LaneClass::Analysis,
-            Scope::Execution => lane == LaneClass::Execution,
-            Scope::All => lane != LaneClass::CriticalPath,
-        }
-    }
-}
 
 /// One key segment of a slice's aggregation path: a frame label — a [`Str`]
 /// handle into the source profile's text — and the work class it carries (for
@@ -326,10 +290,7 @@ pub struct FlameNode {
 /// parameters, so it is built off the UI thread and handed back across threads.
 ///
 /// Node depth is not stored: layout threads it top-down, and nothing else needs
-/// it per node. The two builders order their arrays differently (the columnar
-/// path by aggregation-path key, the legacy path breadth-first), so equality
-/// canonicalizes through [`nodes`](FlameGraph::nodes) rather than comparing the
-/// field vectors elementwise.
+/// it per node.
 #[derive(Debug, Clone)]
 pub struct FlameGraph {
     profile: Arc<Profile>,
@@ -348,17 +309,6 @@ pub struct FlameGraph {
     /// Deepest node depth, found once at build so [`flame_height`] need not scan
     /// every node on each paint.
     max_depth: u32,
-}
-
-impl PartialEq for FlameGraph {
-    /// Compares the canonical breadth-first node arrays, so two graphs built by
-    /// different paths — hence carrying different internal orderings — compare
-    /// equal when they describe the same tree.
-    fn eq(&self, other: &Self) -> bool {
-        self.max_depth == other.max_depth
-            && self.profile == other.profile
-            && self.nodes() == other.nodes()
-    }
 }
 
 /// The synthetic root's name. Its label ("All") is the one frame name not in the
@@ -387,9 +337,7 @@ impl FlameGraph {
 
     /// Materialize the full breadth-first [`FlameNode`] array: root first, then
     /// each node's children as one contiguous block, depths threaded top-down and
-    /// each node's `children` range recorded. Canonicalizes the internal ordering,
-    /// so two graphs describing the same tree materialize identically regardless
-    /// of how their arrays were built.
+    /// each node's `children` range recorded.
     pub fn nodes(&self) -> Vec<FlameNode> {
         let n = self.len();
         let mut out: Vec<FlameNode> = Vec::with_capacity(n);
@@ -473,55 +421,6 @@ impl FlameGraph {
         self.child_pool[self.child_off[i] as usize + k] as usize
     }
 
-    /// Build the graph from a flat breadth-first [`FlameNode`] array (node 0 the
-    /// root), reading each node's fields into the parallel vectors and rebuilding
-    /// the CSR edges from the nodes' `children` ranges — already widest-first and
-    /// contiguous per parent.
-    fn from_flat_nodes(profile: &Arc<Profile>, nodes: Vec<FlameNode>) -> FlameGraph {
-        let n = nodes.len();
-        let mut name = Vec::with_capacity(n);
-        let mut rank = Vec::with_capacity(n);
-        let mut total_us = Vec::with_capacity(n);
-        let mut self_us = Vec::with_capacity(n);
-        let mut width_us = Vec::with_capacity(n);
-        let mut role = Vec::with_capacity(n);
-        let mut count = Vec::with_capacity(n);
-        let mut subtree_max_depth = Vec::with_capacity(n);
-        let mut child_off = Vec::with_capacity(n + 1);
-        child_off.push(0);
-        let mut child_pool = Vec::with_capacity(n.saturating_sub(1));
-        let mut max_depth = 0u32;
-        for node in &nodes {
-            name.push(node.name);
-            rank.push(node.rank);
-            total_us.push(node.total_us);
-            self_us.push(node.self_us);
-            width_us.push(node.width_us);
-            role.push(node.role);
-            count.push(node.count);
-            subtree_max_depth.push(node.subtree_max_depth);
-            max_depth = max_depth.max(node.depth);
-            for c in node.children.range() {
-                child_pool.push(c as u32);
-            }
-            child_off.push(child_pool.len() as u32);
-        }
-        FlameGraph {
-            profile: Arc::clone(profile),
-            name,
-            rank,
-            total_us,
-            self_us,
-            width_us,
-            role,
-            count,
-            subtree_max_depth,
-            child_off,
-            child_pool,
-            max_depth,
-        }
-    }
-
     /// Resolves a node name (or a [`StatRow`](crate::StatRow) key) to its text,
     /// through the profile the graph was built from.
     pub fn str(&self, s: Str) -> &str {
@@ -555,128 +454,17 @@ pub struct FlameBox {
     pub count: u32,
 }
 
-/// Child count above which a node's child index switches from a linear scan of
-/// the child list to a hashmap. Most nodes gather only a handful of children and
-/// stay under it, paying no map allocation; the rare wide frames (a mnemonic
-/// gathering thousands of children) promote and keep O(1) lookup. Set just above
-/// the width where a scan per insert starts to lose to a hash.
-const CHILD_INDEX_LINEAR_MAX: usize = 16;
-
-/// A node's `(label, role)` → child-index accelerator. Below
-/// [`CHILD_INDEX_LINEAR_MAX`] children it is [`Linear`](ChildIndex::Linear) — the
-/// lookup scans `children`, and the node holds no map — so most nodes carry no
-/// hash table at all. A frame that gathers more promotes to
-/// [`Map`](ChildIndex::Map) for O(1) lookup.
-enum ChildIndex {
-    /// Scan `children` for the `(name, role)` key.
-    Linear,
-    /// `(name, role)` → index into `children`.
-    Map(FxHashMap<(Str, SpanRole), u32>),
+/// The inner of an `action '…'` name, `None` for any other shape. A
+/// critical-path component is named `action '<desc>'` where `<desc>` is the
+/// action processing slice's name elsewhere; stripping the wrapper lets the
+/// name index recover its mnemonic.
+fn action_inner(name: &str) -> Option<&str> {
+    name.strip_prefix("action '")?.strip_suffix('\'')
 }
 
-/// A node still under construction. Children are kept in insertion order in
-/// `children` and located by their `(label, role)` merge key through `index`:
-/// labels are per-mnemonic, so a single frame can gather thousands of distinct
-/// children — past [`CHILD_INDEX_LINEAR_MAX`] the index promotes from a linear
-/// scan to a hashmap so wide frames keep O(1) lookup instead of a quadratic scan.
-/// Labels are interned profile handles, so the key is a `Copy` `(Str, SpanRole)`
-/// — small and fixed-size, which FxHash hashes in a few cycles where SipHash
-/// would dominate the per-span lookup. Sorting for [`flatten`] reorders
-/// `children` without updating `index`, so no merge may follow a sort.
-pub(crate) struct Builder {
-    name: Str,
-    /// Lexicographic rank of `name`'s text (see [`FlameNode::rank`]); the
-    /// root's is unused — a root is never ordered against a sibling.
-    rank: u32,
-    role: SpanRole,
-    total_us: i64,
-    count: u32,
-    children: Vec<Builder>,
-    index: ChildIndex,
-}
-
-impl Builder {
-    pub(crate) fn new_root() -> Self {
-        Builder::new(
-            ROOT_LABEL,
-            0,
-            SpanRole { workload: Workload::Other, payload: false },
-        )
-    }
-
-    fn new(name: Str, rank: u32, role: SpanRole) -> Self {
-        Builder {
-            name,
-            rank,
-            role,
-            total_us: 0,
-            count: 0,
-            children: Vec::new(),
-            index: ChildIndex::Linear,
-        }
-    }
-
-    /// The index of the child matching `key`, or `None` if none is present.
-    fn find_child(&self, key: (Str, SpanRole)) -> Option<usize> {
-        match &self.index {
-            ChildIndex::Linear => self
-                .children
-                .iter()
-                .position(|c| (c.name, c.role) == key),
-            ChildIndex::Map(m) => m.get(&key).map(|&i| i as usize),
-        }
-    }
-
-    /// Record the child just pushed at `idx` under `key`. When still linear,
-    /// crossing [`CHILD_INDEX_LINEAR_MAX`] promotes to a map built from every
-    /// current child (the just-pushed one included); below that the linear scan
-    /// keeps finding it, so nothing is recorded.
-    fn index_child(&mut self, idx: usize, key: (Str, SpanRole)) {
-        match &mut self.index {
-            ChildIndex::Map(m) => {
-                m.insert(key, idx as u32);
-            }
-            ChildIndex::Linear => {
-                if self.children.len() > CHILD_INDEX_LINEAR_MAX {
-                    let mut m = FxHashMap::default();
-                    m.reserve(self.children.len());
-                    for (i, c) in self.children.iter().enumerate() {
-                        m.insert((c.name, c.role), i as u32);
-                    }
-                    self.index = ChildIndex::Map(m);
-                }
-            }
-        }
-    }
-
-    /// Find the child matching this segment, or append a fresh one built with
-    /// `rank()`. The span role travels with the label; the first occurrence
-    /// wins. Ranks are lazy so a merge into an existing child costs no lookup.
-    fn child(&mut self, seg: Segment, rank: impl FnOnce() -> u32) -> &mut Builder {
-        let key = (seg.label, seg.role);
-        let idx = match self.find_child(key) {
-            Some(i) => i,
-            None => {
-                let i = self.children.len();
-                self.children
-                    .push(Builder::new(seg.label, rank(), seg.role));
-                self.index_child(i, key);
-                i
-            }
-        };
-        &mut self.children[idx]
-    }
-}
-
-impl Default for Builder {
-    fn default() -> Self {
-        Builder::new_root()
-    }
-}
-
-/// Merges spans into the builder tree. Every frame label is an interned handle
-/// of the source profile — a span's mnemonic and name already live in its text.
-/// The profile interns each distinct string to one handle, so equal text ⇒
+/// Resolves each span to its aggregation label. Every frame label is an interned
+/// handle of the source profile — a span's mnemonic and name already live in its
+/// text. The profile interns each distinct string to one handle, so equal text ⇒
 /// equal handle: frames key by handle directly, and merge keys compare and hash
 /// as plain integers with no per-span string work. Read-only once built, so
 /// merge workers share one.
@@ -737,149 +525,11 @@ impl Flamer {
             role: slice.role,
         }
     }
-
-    /// Merge span `span_idx` of `lane_slices` and its time-children into `parent`:
-    /// the span's duration lands once at its own labelled node, then each child
-    /// recurses under that node. So a node merging N spans sums their durations,
-    /// and a child's duration is counted at the child, not again at the parent.
-    /// `lane_details` is the lane's parallel detail slice.
-    fn merge_span(
-        &self,
-        parent: &mut Builder,
-        lane_slices: &[Slice],
-        lane_details: &[SliceDetail],
-        forest: &Forest,
-        span_idx: usize,
-    ) {
-        let seg = self.span_label(&lane_slices[span_idx], &lane_details[span_idx]);
-        let node = parent.child(seg, || self.ranks.rank_of(seg.label));
-        node.total_us += lane_slices[span_idx].dur_us;
-        node.count += 1;
-        // Reborrow `node` per child: `child()` borrows `parent` mutably, so the
-        // recursion can't hold a `&mut node` across calls; locate it by key each
-        // time, which the index makes O(1).
-        let key = (seg.label, seg.role);
-        for ci in 0..forest.children[span_idx].len() {
-            let c = forest.children[span_idx][ci];
-            let node = {
-                let i = parent.find_child(key).expect("child was just inserted");
-                &mut parent.children[i]
-            };
-            self.merge_span(node, lane_slices, lane_details, forest, c);
-        }
-    }
-}
-
-/// Merge one lane's containment forest into `root`: each top-level span's
-/// duration adds to the root total, then merges in as a frame.
-fn merge_lane(root: &mut Builder, profile: &Profile, flamer: &Flamer, thread: &ThreadTrack) {
-    let slices = profile.slices(thread);
-    let details = profile.details(thread);
-    let forest = containment_forest(slices);
-    for ri in 0..forest.roots.len() {
-        let r = forest.roots[ri];
-        root.total_us += slices[r].dur_us;
-        flamer.merge_span(root, slices, details, &forest, r);
-    }
 }
 
 /// End time of a slice.
 fn end_us(slice: &Slice) -> i64 {
     slice.start_us + slice.dur_us
-}
-
-/// The time-containment forest of a lane's slices. `children[i]` lists the
-/// slices directly nested in slice `i`; `roots` lists the top-level slices (no
-/// container). Slices must be in lane order — start ascending, ties
-/// longest-first, the order [`Profile::slices`] guarantees — so a depth-stack
-/// walk visits every container before its contents: a slice's parent is the
-/// nearest ENCLOSING span, so pop while the stack top doesn't enclose the slice
-/// (`top.end < slice.end`). Popping on end-before-start alone would wrongly nest
-/// spans that merely overlap — one that starts inside another but ends after it
-/// is a sibling, not a child — which otherwise builds a runaway staircase.
-struct Forest {
-    children: Vec<Vec<usize>>,
-    roots: Vec<usize>,
-}
-
-fn containment_forest(slices: &[Slice]) -> Forest {
-    debug_assert!(
-        slices.windows(2).all(|w| {
-            w[0].start_us < w[1].start_us
-                || (w[0].start_us == w[1].start_us && w[0].dur_us >= w[1].dur_us)
-        }),
-        "slices must be in lane order: start ascending, ties longest-first"
-    );
-    let mut children = vec![Vec::new(); slices.len()];
-    // Each slice is a root or nested under one parent, never both, so the roots
-    // number at most the lane's slices; a flat lane reaches that bound.
-    let mut roots = Vec::with_capacity(slices.len());
-    let mut stack: Vec<usize> = Vec::new();
-    for i in 0..slices.len() {
-        let slice_end = end_us(&slices[i]);
-        while stack
-            .last()
-            .is_some_and(|&top| end_us(&slices[top]) < slice_end)
-        {
-            stack.pop();
-        }
-        match stack.last() {
-            Some(&parent) => children[parent].push(i),
-            None => roots.push(i),
-        }
-        stack.push(i);
-    }
-    Forest { children, roots }
-}
-
-/// Build the aggregated flame graph for a profile by time-containment plus
-/// semantic merge: within each in-scope lane every span nests under the span that
-/// time-contains it, and identically labelled spans at the same place merge
-/// into one frame whose duration is the sum of the merged spans' own durations.
-/// A parent span's Bazel duration already includes its children's, so counting
-/// each span once at its own node avoids the double-count of summing a span and
-/// its sub-spans as siblings.
-///
-/// For [`Scope::CriticalPath`] the critical-path lane holds only bare components
-/// with no sub-spans, so each component is associated with its originating action
-/// (by name) and that action's whole worker-lane subtree is grafted under the
-/// root, giving the critical action its internal breakdown.
-///
-/// The returned [`FlameGraph`] keeps a clone of `profile`, whose interned text
-/// its node names index, so it is `Send` with no lifetime parameters.
-///
-/// The name scan — the dominant cost — covers only the lanes the scope's build
-/// walks: [`Scope::All`] scans the whole profile, a class scope its own lanes,
-/// and the critical path the lanes [`critical_lanes`] selects.
-///
-/// [`FlameScopes`](crate::FlameScopes) derives every scope from one aggregation
-/// pass; this composes the same pieces for a single scope.
-pub fn build_flame_graph(profile: &Arc<Profile>, scope: Scope) -> FlameGraph {
-    let workers = bviz_trace_profile::worker_count();
-    let mut root = if scope == Scope::CriticalPath {
-        // Locate the actions before the scan: the index hashes only the
-        // mnemonic-bearing slices, so it is cheap, and it bounds the lanes the
-        // graft walks — and hence the lanes the scan must cover.
-        let actions = action_locations(profile);
-        let lanes = critical_lanes(profile, &actions);
-        let flamer = Flamer::scoped(profile, workers, |i| lanes.contains(&i));
-        let mut root = Builder::new_root();
-        build_critical_path(profile, &flamer, &actions, &mut root);
-        root
-    } else {
-        let threads = profile.threads();
-        let flamer = match scope {
-            Scope::All => Flamer::new(profile, workers),
-            _ => Flamer::scoped(profile, workers, |i| scope.includes(threads[i].lane_class)),
-        };
-        fold_all(
-            class_trees(profile, &flamer, |class| scope.includes(class), workers)
-                .into_iter()
-                .map(|(_, tree)| tree)
-                .collect(),
-        )
-    };
-    seal(&mut root, profile)
 }
 
 /// A whole-profile name scan (rank table + mnemonic index) held so a
@@ -908,9 +558,7 @@ impl TrackFlamer {
     /// Build the selection's flame graph by merging the selected lanes' cached
     /// [`LaneTable`]s: concatenate their reduced nodes, sort the union by path
     /// key, coalesce equal paths across lanes (summing totals and counts), and
-    /// reconstruct through [`reconstruct_and_seal`]. Byte-identical to the merge
-    /// trie [`build_flame_graph_for_tracks`], since it aggregates the same spans
-    /// by the same path keys.
+    /// reconstruct through [`reconstruct_and_seal`].
     pub(crate) fn build(&self, selected: impl Fn(usize) -> bool + Sync) -> FlameGraph {
         let union_len: usize = self
             .lane_tables
@@ -1012,50 +660,6 @@ fn build_lane_table(flamer: &Flamer, lane_index: usize) -> LaneTable {
     LaneTable { key_pool, nodes }
 }
 
-/// Build the aggregated flame graph over exactly the thread tracks `selected`
-/// admits (by index into [`Profile::threads`]), by the same time-containment
-/// plus semantic merge as [`build_flame_graph`]: within each selected lane every
-/// span nests under the span that time-contains it, and identically labelled
-/// spans at the same place merge across the selected lanes into one frame.
-///
-/// `flamer`'s name scan must cover every selected lane, so the rank-coverage
-/// invariant [`scan`] documents holds; a whole-profile scan (see [`TrackFlamer`])
-/// satisfies any selection. A critical-path lane holds redirected copies of
-/// worker time, so selecting it alongside the worker lanes it copies sums both;
-/// membership is the caller's to choose.
-///
-/// Retained as the byte-exactness oracle for [`TrackFlamer::build`], which the
-/// production cached-columnar merge is diff-tested against.
-#[cfg(test)]
-impl TrackFlamer {
-    /// The merge-trie build over the same selection, reached from the flamer a
-    /// test holds — the oracle [`TrackFlamer::build`] is compared against.
-    pub(crate) fn build_trie(&self, selected: impl Fn(usize) -> bool + Sync) -> FlameGraph {
-        build_flame_graph_for_tracks(&self.flamer, selected)
-    }
-}
-
-#[cfg(test)]
-pub(crate) fn build_flame_graph_for_tracks(
-    flamer: &Flamer,
-    selected: impl Fn(usize) -> bool + Sync,
-) -> FlameGraph {
-    let workers = bviz_trace_profile::worker_count();
-    let threads = flamer.profile.threads();
-    // Each worker folds its stolen lanes into one root; the roots then fold
-    // together. Lane order within a worker can't change the sealed graph, since
-    // the flatten sort is total.
-    let shards = run_sharded(workers, threads.len(), |root: &mut Builder, i| {
-        if !selected(i) {
-            return;
-        }
-        let thread = &threads[i];
-        merge_lane(root, &flamer.profile, flamer, thread);
-    });
-    let mut root = fold_all(shards);
-    seal(&mut root, &flamer.profile)
-}
-
 /// Bytes encoding one aggregation-path segment in a [`Row`] key: the label's
 /// [`Ranks`] rank as 4 big-endian bytes, then one byte packing the span role.
 /// Big-endian keeps lexicographic key order equal to rank order, and equal
@@ -1109,8 +713,8 @@ impl ArenaChildren {
 }
 
 /// The containment parent of each slice: the nearest enclosing earlier slice, or
-/// `None` for a top-level slice. Same depth-stack walk as [`containment_forest`],
-/// yielding the parent index directly rather than per-node child lists.
+/// `None` for a top-level slice. A depth stack of open slices, popped past each
+/// slice's end, yields each slice's parent index directly.
 fn containment_parents(slices: &[Slice]) -> Vec<Option<usize>> {
     debug_assert!(
         slices.windows(2).all(|w| {
@@ -1199,8 +803,7 @@ fn sort_child_ranges(kids: &mut ArenaChildren, n: usize, key: &[(std::cmp::Rever
 /// — a parent's index precedes every descendant's, each subtree contiguous — so a
 /// forward pass threads depth top-down and a reverse pass folds child aggregates
 /// up. Sorts each node's CSR child range widest-first, then moves the arena's
-/// scalar fields and CSR edges into the graph's parallel vectors. Byte for byte
-/// the same graph as sealing the equivalent [`Builder`] tree through [`seal`].
+/// scalar fields and CSR edges into the graph's parallel vectors.
 fn seal_arena(
     profile: &Arc<Profile>,
     arena: Vec<ArenaNode>,
@@ -1298,9 +901,7 @@ struct Src {
 /// summing totals and counts, so nodes emitted from different lanes on the same
 /// path merge. Each element's payload (label/rank/role/total/count) is read
 /// through its `src` into `tables`, the coalesced frame drawing label/rank/role
-/// from the run's first element. Seals the arena through [`seal_arena`], byte for
-/// byte the same graph as sealing the equivalent [`Builder`] tree through
-/// [`seal`].
+/// from the run's first element. Seals the arena through [`seal_arena`].
 fn reconstruct_and_seal(
     elems: &[KeyRef],
     tables: &[LaneTable],
@@ -1377,209 +978,6 @@ fn reconstruct_and_seal(
     let kids = ArenaChildren { off, pool };
 
     seal_arena(profile, arena, parents, kids)
-}
-
-/// A mutable reference to `class`'s value in a class-keyed list, inserting
-/// `make()` at its slot ([`LaneClass`] declaration order) when absent.
-fn class_entry<T>(
-    entries: &mut Vec<(LaneClass, T)>,
-    class: LaneClass,
-    make: impl FnOnce() -> T,
-) -> &mut T {
-    match entries.iter().position(|(c, _)| *c == class) {
-        Some(i) => &mut entries[i].1,
-        None => {
-            let at = entries.partition_point(|(c, _)| (*c as usize) < class as usize);
-            entries.insert(at, (class, make()));
-            &mut entries[at].1
-        }
-    }
-}
-
-/// One aggregation tree per lane class over the lanes `include` admits, keyed in
-/// [`LaneClass`] declaration order; classes with no admitted lane get no entry.
-/// Each lane's containment forest merges into its class's tree, so any scope —
-/// a single class or a union — derives from these without re-walking a lane.
-/// The critical-path lane is never walked: its slices are redirected copies of
-/// worker time, aggregated only by the [`build_critical_path`] graft.
-///
-/// The lanes shard across `workers` into per-worker partial trees; which lanes
-/// a worker steals cannot change the result, because the partial-tree fold sums
-/// and the flatten sort is total.
-pub(crate) fn class_trees(
-    profile: &Profile,
-    flamer: &Flamer,
-    include: impl Fn(LaneClass) -> bool + Sync,
-    workers: usize,
-) -> Vec<(LaneClass, Builder)> {
-    let threads = profile.threads();
-    let shards: Vec<Vec<(LaneClass, Builder)>> = run_sharded(workers, threads.len(), |trees, i| {
-        let thread = &threads[i];
-        let class = thread.lane_class;
-        if class == LaneClass::CriticalPath || !include(class) {
-            return;
-        }
-        let root = class_entry(trees, class, Builder::new_root);
-        merge_lane(root, profile, flamer, thread);
-    });
-
-    fold_buckets(bucket_by_class(shards), workers)
-}
-
-/// Regroup the per-worker shards' partial trees by lane class, keyed in
-/// [`LaneClass`] declaration order.
-fn bucket_by_class(shards: Vec<Vec<(LaneClass, Builder)>>) -> Vec<(LaneClass, Vec<Builder>)> {
-    let mut buckets: Vec<(LaneClass, Vec<Builder>)> = Vec::new();
-    for shard in shards {
-        for (class, tree) in shard {
-            class_entry(&mut buckets, class, Vec::new).push(tree);
-        }
-    }
-    buckets
-}
-
-/// Fold each class's partial trees into one tree per class. The classes merge
-/// independently of one another, so with more than one class and worker they
-/// fold on a thread apiece.
-fn fold_buckets(
-    buckets: Vec<(LaneClass, Vec<Builder>)>,
-    workers: usize,
-) -> Vec<(LaneClass, Builder)> {
-    if buckets.len() > 1 && workers > 1 {
-        std::thread::scope(|scope| {
-            let handles: Vec<_> = buckets
-                .into_iter()
-                .map(|(class, parts)| scope.spawn(move || (class, fold_all(parts))))
-                .collect();
-            handles.into_iter().map(|h| h.join().unwrap()).collect()
-        })
-    } else {
-        buckets
-            .into_iter()
-            .map(|(class, parts)| (class, fold_all(parts)))
-            .collect()
-    }
-}
-
-/// Merge `src`'s subtree into `dst`, matching children by the `(label, work
-/// class)` merge key and summing totals and counts; a subtree `dst` has no
-/// match for is moved over wholesale.
-pub(crate) fn fold_into(dst: &mut Builder, src: Builder) {
-    dst.total_us += src.total_us;
-    dst.count += src.count;
-    for child in src.children {
-        let key = (child.name, child.role);
-        match dst.find_child(key) {
-            Some(i) => fold_into(&mut dst.children[i], child),
-            None => {
-                let i = dst.children.len();
-                dst.children.push(child);
-                dst.index_child(i, key);
-            }
-        }
-    }
-}
-
-/// Fold a set of trees into one, in the given order; empty input yields a bare
-/// root.
-pub(crate) fn fold_all(trees: Vec<Builder>) -> Builder {
-    let mut iter = trees.into_iter();
-    let mut acc = iter.next().unwrap_or_else(Builder::new_root);
-    for tree in iter {
-        fold_into(&mut acc, tree);
-    }
-    acc
-}
-
-/// Sort and freeze a finished builder tree into a [`FlameGraph`] over `profile`.
-pub(crate) fn seal(root: &mut Builder, profile: &Arc<Profile>) -> FlameGraph {
-    FlameGraph::from_flat_nodes(profile, flatten(root))
-}
-
-/// The layout width of a builder subtree: the larger of its own merged total and
-/// the sum of its children's widths, so a time-overflowing child stays inside the
-/// width allotted to its parent.
-fn width_us(builder: &Builder) -> i64 {
-    let children_width: i64 = builder.children.iter().map(width_us).sum();
-    builder.total_us.max(children_width)
-}
-
-/// Freeze a builder into a flame node at `depth`, leaving its `children` range
-/// blank for the caller to fill once the children are laid down. Self time is the
-/// own total minus the children's totals, floored at zero since an overflowing
-/// child can exceed the parent's total.
-fn freeze(builder: &Builder, depth: u32) -> FlameNode {
-    let children_total: i64 = builder.children.iter().map(|c| c.total_us).sum();
-    let children_width: i64 = builder.children.iter().map(width_us).sum();
-    FlameNode {
-        name: builder.name,
-        rank: builder.rank,
-        total_us: builder.total_us,
-        self_us: (builder.total_us - children_total).max(0),
-        width_us: builder.total_us.max(children_width),
-        role: builder.role,
-        count: builder.count,
-        depth,
-        // Filled by a bottom-up pass once the whole tree is flattened.
-        subtree_max_depth: depth,
-        children: Span32::default(),
-    }
-}
-
-/// Flatten the builder forest into a flat node array with node 0 the root. A
-/// breadth-first walk lays each node's direct children down as one contiguous
-/// block, recorded as the parent's `children` range; the children are sorted
-/// widest-first, breaking ties by name — via the precomputed rank, whose order
-/// equals text order — so the layout is independent of the non-deterministic
-/// input order. Sorts the tree in place, leaving its merge indexes stale.
-fn flatten(root: &mut Builder) -> Vec<FlameNode> {
-    // Returns the node count of the subtree (itself plus its descendants), so
-    // the flat array reserves exactly once instead of doubling through millions
-    // of nodes.
-    fn sort_tree(builder: &mut Builder) -> usize {
-        builder
-            .children
-            // Same-text children carry the same handle, so they differ only by
-            // span role — the role tie-break makes the order total and hence
-            // independent of merge order.
-            .sort_unstable_by_key(|c| (std::cmp::Reverse(c.total_us), c.rank, c.role));
-        let mut count = 1;
-        for c in &mut builder.children {
-            count += sort_tree(c);
-        }
-        count
-    }
-    let node_count = sort_tree(root);
-
-    let mut nodes = Vec::with_capacity(node_count);
-    nodes.push(freeze(root, 0));
-    let mut queue: std::collections::VecDeque<(&Builder, usize, u32)> =
-        std::collections::VecDeque::new();
-    queue.push_back((root, 0, 0));
-    while let Some((builder, idx, depth)) = queue.pop_front() {
-        let off = nodes.len() as u32;
-        for c in &builder.children {
-            let child_idx = nodes.len();
-            nodes.push(freeze(c, depth + 1));
-            queue.push_back((c, child_idx, depth + 1));
-        }
-        nodes[idx].children = Span32::new(off, nodes.len() as u32 - off);
-    }
-    set_subtree_max_depth(&mut nodes);
-    nodes
-}
-
-/// Fills each node's `subtree_max_depth` with the deepest `depth` reached in its
-/// subtree (itself or any descendant). A child block always follows its parent,
-/// so a reverse pass sees every child's value finalized before its parent's.
-fn set_subtree_max_depth(nodes: &mut [FlameNode]) {
-    for i in (0..nodes.len()).rev() {
-        let mut m = nodes[i].depth;
-        for c in nodes[i].children.range() {
-            m = m.max(nodes[c].subtree_max_depth);
-        }
-        nodes[i].subtree_max_depth = m;
-    }
 }
 
 /// Lay the visible window of the graph into pixels, mirroring the flame chart's
@@ -1738,6 +1136,7 @@ pub fn flame_height(graph: &FlameGraph, metrics: &FlameMetrics) -> f32 {
 mod tests {
     use super::*;
     use crate::test_profile::{action, action_named, profile, slice, track};
+    use bviz_trace_profile::LaneClass;
 
     fn child(graph: &FlameGraph, node: &FlameNode, name: &str) -> FlameNode {
         graph

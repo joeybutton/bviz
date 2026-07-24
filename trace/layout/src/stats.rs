@@ -1,10 +1,8 @@
-use std::sync::Arc;
-
 use rayon::slice::ParallelSliceMut;
 
-use bviz_trace_profile::{Profile, SpanRole, Str};
+use bviz_trace_profile::{SpanRole, Str};
 
-use crate::flame::{build_flame_graph, FlameGraph, Scope};
+use crate::flame::FlameGraph;
 
 /// One aggregated group of frames, summed across the flame graph. `total_us` is
 /// the summed self time of every frame keyed here, so the rows partition the
@@ -37,18 +35,6 @@ impl StatRow {
             0
         }
     }
-}
-
-/// Aggregate the profile into one row per distinct frame name of the flame graph
-/// built under `scope`, summing each frame's self time. Self time sums
-/// to the root's total, so the rows partition the aggregated time without the
-/// double-count of summing a span and its sub-spans. Order is unspecified; the
-/// caller sorts. The returned [`FlameGraph`] resolves the rows' keys — it holds
-/// the profile whose text they index — so it must be kept alongside them.
-pub fn aggregate_stats(profile: &Arc<Profile>, scope: Scope) -> (FlameGraph, Vec<StatRow>) {
-    let graph = build_flame_graph(profile, scope);
-    let rows = stats_from_flame(&graph);
-    (graph, rows)
 }
 
 /// Aggregate an already-built flame graph into its stats rows, summing each
@@ -111,10 +97,12 @@ pub(crate) fn default_order(stats: &[StatRow]) -> Vec<u32> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::*;
     use crate::flame::TrackFlamer;
     use crate::test_profile::{action, profile, slice, track};
-    use bviz_trace_profile::{LaneClass, Workload};
+    use bviz_trace_profile::{LaneClass, Profile, Workload};
 
     /// The all-lanes flame graph, whose stats every all-scope test aggregates.
     fn flame(p: &Arc<Profile>) -> FlameGraph {
