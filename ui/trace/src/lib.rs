@@ -40,11 +40,11 @@ use bviz_ui_components::{
 use bviz_ui_shell::Chrome;
 use clap::Parser;
 use gpui::{
-    AnyElement, App, BorderStyle, Bounds, ContentMask, Context, Div,
+    AnyElement, AnyView, App, BorderStyle, Bounds, ContentMask, Context, Div,
     Entity, FocusHandle, Hsla, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent,
     MouseUpEvent, Pixels, Point, Render, Rgba, ScrollDelta, ScrollWheelEvent,
-    ScrollHandle, SharedString, Stateful, Subscription, Task, TextAlign,
-    TransformationMatrix, UniformListScrollHandle,
+    ScrollHandle, SharedString, Stateful, StyleRefinement, Subscription, Task, TextAlign,
+    TransformationMatrix, UniformListScrollHandle, WeakEntity,
     Window, canvas, div, fill, point, prelude::*, px, quad, size,
 };
 use std::cell::{Cell, RefCell};
@@ -273,8 +273,6 @@ struct TraceView {
     flame_view: Rc<Cell<FlameView>>,
     /// How far the flame-graph panel is scrolled down, in pixels.
     flame_scroll_y: Rc<Cell<f32>>,
-    /// Whether the initial fit-to-window view has been applied.
-    fitted: Rc<Cell<bool>>,
     /// Viewport bounds captured during canvas paint, so handlers can map a window
     /// cursor to viewport space and bound the zoom to a fit.
     viewport: Rc<Cell<Bounds<Pixels>>>,
@@ -377,6 +375,15 @@ struct TraceView {
     /// The cursor position while it hovers the time-content column and no drag is
     /// in progress, drawn as a crosshair; `None` otherwise.
     crosshair: Option<Point<Pixels>>,
+    /// The child view that paints the timeline slices, gridlines, gutter, ruler,
+    /// scroll bars, and counter plots, embedded cached so a hover — which touches
+    /// only the crosshair/tooltip overlay — replays its last scene rather than
+    /// re-emitting every slice. A parent `cx.notify()` leaves it to replay;
+    /// [`Self::invalidate_chart`] notifies it to rebuild when its content changes.
+    slice_layer: Entity<SliceLayer>,
+    /// Rebuilds `slice_layer` on a system appearance change so it repaints in the
+    /// new palette.
+    _appearance_observer: Subscription,
     /// Holds the background load task so it isn't cancelled on drop.
     _load_task: Task<()>,
 }
@@ -406,22 +413,46 @@ impl TraceView {
             move || load.join().unwrap_or_else(|_| Err("profile loader thread panicked".into())),
             |view, result, cx| view.on_profile_loaded(result, cx),
         );
+        // The time view, lane scroll, captured viewport, scroll-bar geometry, and
+        // culled draw list are shared with the slice layer, which paints from them
+        // while the parent's handlers read and mutate them.
+        let view = Rc::new(Cell::new(TimeView {
+            start_us: 0.0,
+            px_per_us: 1.0,
+        }));
+        let scroll_y = Rc::new(Cell::new(0.0));
+        let fitted = Rc::new(Cell::new(false));
+        let viewport = Rc::new(Cell::new(Bounds::default()));
+        let vbar = Rc::new(Cell::new(None));
+        let hbar = Rc::new(Cell::new(None));
+        let slice_draw = Rc::new(RefCell::new(None));
+        let parent = cx.entity().downgrade();
+        let slice_layer = cx.new(|_| SliceLayer {
+            parent,
+            view: view.clone(),
+            scroll_y: scroll_y.clone(),
+            fitted,
+            viewport: viewport.clone(),
+            vbar: vbar.clone(),
+            hbar: hbar.clone(),
+            slice_draw: slice_draw.clone(),
+        });
+        let appearance_observer = window.observe_window_appearance({
+            let slice_layer = slice_layer.clone();
+            move |_, cx| slice_layer.update(cx, |_, cx| cx.notify())
+        });
         Self {
             focus_handle,
             content_focus,
             source: Source::Loading,
-            view: Rc::new(Cell::new(TimeView {
-                start_us: 0.0,
-                px_per_us: 1.0,
-            })),
-            scroll_y: Rc::new(Cell::new(0.0)),
+            view,
+            scroll_y,
             flame_view: Rc::new(Cell::new(FlameView::FIT)),
             flame_scroll_y: Rc::new(Cell::new(0.0)),
-            fitted: Rc::new(Cell::new(false)),
-            viewport: Rc::new(Cell::new(Bounds::default())),
+            viewport,
             flame_bounds: Rc::new(Cell::new(Bounds::default())),
-            vbar: Rc::new(Cell::new(None)),
-            hbar: Rc::new(Cell::new(None)),
+            vbar,
+            hbar,
             flame_vbar: Rc::new(Cell::new(None)),
             flame_hbar: Rc::new(Cell::new(None)),
             drag: Drag::None,
@@ -445,7 +476,7 @@ impl TraceView {
             aggregates: Rc::new(RefCell::new(None)),
             flame_scan: Rc::new(RefCell::new(None)),
             flame_boxes: Rc::new(RefCell::new(None)),
-            slice_draw: Rc::new(RefCell::new(None)),
+            slice_draw,
             agg: Rebuild::new(),
             stats_sort: DEFAULT_STATS_SORT.0,
             stats_desc: DEFAULT_STATS_SORT.1,
@@ -458,8 +489,18 @@ impl TraceView {
             hover: None,
             flame_hover: None,
             crosshair: None,
+            slice_layer,
+            _appearance_observer: appearance_observer,
             _load_task: load_task,
         }
+    }
+
+    /// Marks both the slice layer and this view dirty, so a change to what the
+    /// slice layer paints rebuilds its cached scene rather than replaying it.
+    /// A plain `cx.notify()` (the hover path) leaves the slice layer to replay.
+    fn invalidate_chart(&self, cx: &mut Context<Self>) {
+        self.slice_layer.update(cx, |_, cx| cx.notify());
+        cx.notify();
     }
 
     fn on_profile_loaded(&mut self, result: Result<Profile, String>, cx: &mut Context<Self>) {
@@ -478,7 +519,7 @@ impl TraceView {
             let profile = profile.clone();
             self.init_tracks(&profile);
         }
-        cx.notify();
+        self.invalidate_chart(cx);
     }
 
     /// The default track selection for a freshly loaded profile: every
@@ -521,7 +562,7 @@ impl TraceView {
                             GroupHit::Collapse(g) => this.toggle_group_collapsed(g),
                             GroupHit::ShowAll(g) => this.toggle_group_show_all(g),
                         }
-                        cx.notify();
+                        this.invalidate_chart(cx);
                         return;
                     }
                     // A press on a track label selects it rather than panning;
@@ -529,14 +570,14 @@ impl TraceView {
                     if let Some(track) = this.track_label_at(e.position) {
                         let ctrl = e.modifiers.control || e.modifiers.platform;
                         this.select_track(track, e.modifiers.shift, ctrl);
-                        cx.notify();
+                        this.invalidate_chart(cx);
                         return;
                     }
                     // A press on a scroll thumb/track drives that bar; anywhere
                     // else pans. The window-global drag handlers are installed
-                    // from the canvas paint while a drag is set, so repaint now.
+                    // from the overlay paint while a drag is set, so repaint now.
                     this.press(e.position);
-                    cx.notify();
+                    this.invalidate_chart(cx);
                 }),
             )
             .on_scroll_wheel(cx.listener(Self::on_scroll_wheel))
@@ -554,13 +595,13 @@ impl TraceView {
         }))
     }
 
-    /// The whole trace body: the flame chart drawn by one full-window canvas
+    /// The whole trace body: the cached [`SliceLayer`] painting the flame chart
     /// (ruler, gridlines, lanes, slices, phase markers, gutter, scroll bars, and
-    /// — for the Counters tab — the counter plots), with the tab bar, the
-    /// selected bottom panel, and the gutter-handle drag as overlays. The canvas
-    /// prepaint and paint closures are `'static`, so the builders take owned
-    /// snapshots (`Rc`s and the const metrics) to capture rather than borrowing
-    /// the view.
+    /// — for the Counters tab — the counter plots), an overlay canvas above it for
+    /// the crosshair, hover tooltip, and in-progress drag, then the tab bar, the
+    /// selected bottom panel, and the gutter handle. The overlay's paint closure
+    /// is `'static`, so it captures owned snapshots (`Rc`s, the palette) rather
+    /// than borrowing the view.
     fn trace_body(
         &self,
         profile: Arc<Profile>,
@@ -569,39 +610,21 @@ impl TraceView {
         colors: &bviz_ui_theme::Colors,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let view = self.view.clone();
-        let scroll_y = self.scroll_y.clone();
-        let fitted = self.fitted.clone();
-        let viewport = self.viewport.clone();
-        let vbar = self.vbar.clone();
-        let hbar = self.hbar.clone();
         let entity = cx.entity();
-        let panel_height = self.panel_height;
-        let gutter_width = self.gutter_width;
-        let prepaint = Self::fit_prepaint(
-            profile.clone(),
-            lanes.clone(),
-            view.clone(),
-            fitted.clone(),
-            viewport.clone(),
-            panel_height,
-            gutter_width,
-        );
         let regions = self.regions();
-        let origin = viewport.get().origin;
-        let canvas = canvas(
-            prepaint,
-            Self::chart_paint(
-                profile.clone(),
-                lanes.clone(),
-                view,
-                scroll_y,
-                vbar,
-                hbar,
-                self.slice_draw.clone(),
-                entity,
-                palette,
-            ),
+        let origin = self.viewport.get().origin;
+
+        // Embedding the slice layer cached lets a hover reuse its last scene: a
+        // parent `cx.notify()` does not dirty it, so gpui replays its slices
+        // instead of re-emitting them.
+        let slice_layer = AnyView::from(self.slice_layer.clone())
+            .cached(StyleRefinement::default().absolute().inset_0().size_full());
+        // The crosshair, hover tooltip, and drag paint over the cached slices,
+        // sharing the slice layer's full bounds so the tooltip's viewport clamping
+        // is unchanged. A hover repaints only this overlay.
+        let overlay = canvas(
+            |_, _, _| {},
+            Self::overlay_paint(profile.clone(), lanes.clone(), self.view.clone(), entity, palette),
         )
         .absolute()
         .left_0()
@@ -612,7 +635,7 @@ impl TraceView {
         // bottom panel, doubling as the panel's resize splitter.
         let tab_bar = self.tab_bar(regions, origin, palette, colors, cx);
         // The selected panel sits over the content column of the bottom region;
-        // the counter plots are drawn by the canvas above instead.
+        // the counter plots are drawn by the slice layer instead.
         let panel = self.bottom_panel(regions, origin, palette, colors, cx);
         let gutter_handle = self.gutter_handle(regions, origin, cx);
         let tracks_menu = self.tracks_menu(palette, colors, cx);
@@ -621,7 +644,8 @@ impl TraceView {
             .relative()
             .size_full()
             .overflow_hidden()
-            .child(canvas)
+            .child(slice_layer)
+            .child(overlay)
             .children(panel)
             .child(tab_bar)
             .child(gutter_handle)
@@ -727,13 +751,13 @@ impl TraceView {
         slices
     }
 
-    /// The chart paint body: the canvas paint closure that draws the flame
-    /// timeline — gridlines, lanes and slices, phase markers, gutter, scroll
-    /// bars, and (for the Counters tab) the counter plots — reading the live view
-    /// state through the entity, then the ruler and hover/crosshair overlays on
-    /// top.
+    /// The slice layer's paint closure: the flame timeline — gridlines, lanes and
+    /// slices, phase markers, gutter, scroll bars, ruler, and (for the Counters
+    /// tab) the counter plots — reading the live view state through the entity.
+    /// The crosshair and hover tooltip paint from a separate overlay above, so a
+    /// hover leaves this layer's cached scene to replay.
     #[allow(clippy::too_many_arguments)]
-    fn chart_paint(
+    fn slice_paint(
         profile: Arc<Profile>,
         lanes: Rc<LaneLayout>,
         view: Rc<Cell<TimeView>>,
@@ -748,16 +772,13 @@ impl TraceView {
             let layout = &*lanes;
             let tv = view.get();
             let n_counters = profile.counters().len();
-            let (tab, panel_height, gutter_width, selected, crosshair, hover, dragging, chrome) = {
+            let (tab, panel_height, gutter_width, selected, chrome) = {
                 let this = entity.read(cx);
                 (
                     this.bottom_tab,
                     this.panel_height,
                     this.gutter_width,
                     this.selected_tracks.clone(),
-                    this.crosshair,
-                    this.hover,
-                    !matches!(this.drag, Drag::None),
                     this.group_chrome().unwrap_or_default(),
                 )
             };
@@ -879,9 +900,42 @@ impl TraceView {
                 cx,
             );
 
-            // The ruler paints over scrolled-up rows; the tooltip paints
-            // over everything.
+            // The ruler paints over scrolled-up rows.
             paint_ruler(&ticks, regions, bounds, &palette, window, cx);
+        }
+    }
+
+    /// The overlay paint closure, layered above the cached slice layer: the
+    /// crosshair, the hover tooltip, and — while a drag runs — the window-global
+    /// drag handlers. It reads the live crosshair/hover/drag state through the
+    /// entity, and so repaints on a hover without disturbing the slice layer's
+    /// cached scene. Its bounds match the slice layer's, so the tooltip clamps to
+    /// the same viewport.
+    fn overlay_paint(
+        profile: Arc<Profile>,
+        lanes: Rc<LaneLayout>,
+        view: Rc<Cell<TimeView>>,
+        entity: Entity<TraceView>,
+        palette: Palette,
+    ) -> impl FnOnce(Bounds<Pixels>, (), &mut Window, &mut App) {
+        move |bounds, _, window, cx| {
+            let tv = view.get();
+            let n_counters = profile.counters().len();
+            let (tab, panel_height, gutter_width, crosshair, hover, dragging) = {
+                let this = entity.read(cx);
+                (
+                    this.bottom_tab,
+                    this.panel_height,
+                    this.gutter_width,
+                    this.crosshair,
+                    this.hover,
+                    !matches!(this.drag, Drag::None),
+                )
+            };
+            let flame_total = flame_total_height(&lanes);
+            let regions =
+                Regions::new(bounds, n_counters, panel_height, gutter_width, flame_total);
+            let show_counters = regions.has_graph && tab == BottomTab::Counters;
             if let Some(at) = crosshair {
                 if f32::from(at.x) >= regions.content_left {
                     paint_crosshair(
@@ -934,7 +988,7 @@ impl TraceView {
                         } else {
                             this.drag = Drag::Gutter;
                         }
-                        cx.notify();
+                        this.invalidate_chart(cx);
                     });
                     cx.stop_propagation();
                 },
@@ -977,7 +1031,7 @@ impl TraceView {
                     .on_mouse_down(MouseButton::Left, |_, _, cx: &mut App| cx.stop_propagation())
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.set_bottom_tab(tab);
-                        cx.notify();
+                        this.invalidate_chart(cx);
                     }))
                     .child(label)
             })
@@ -1006,7 +1060,7 @@ impl TraceView {
                         this.last_mouse = e.position;
                     }
                     cx.stop_propagation();
-                    cx.notify();
+                    this.invalidate_chart(cx);
                 }),
             )
             .children(tabs)
@@ -1357,6 +1411,67 @@ impl TraceView {
     }
 }
 
+/// The cached child view painting the flame chart's slices and chrome. It shares
+/// the parent's time view, lane scroll, captured viewport, scroll-bar geometry,
+/// and culled draw list through `Rc` cells, and reads the parent's profile, lane
+/// layout, and snapshot state (selection, groups, tab, panel and gutter sizes)
+/// through `parent`. Rendered only for a content change (see
+/// [`TraceView::invalidate_chart`]); a hover leaves its scene to replay.
+struct SliceLayer {
+    parent: WeakEntity<TraceView>,
+    view: Rc<Cell<TimeView>>,
+    scroll_y: Rc<Cell<f32>>,
+    fitted: Rc<Cell<bool>>,
+    viewport: Rc<Cell<Bounds<Pixels>>>,
+    vbar: Rc<Cell<Option<Scrollbar>>>,
+    hbar: Rc<Cell<Option<Scrollbar>>>,
+    slice_draw: Rc<RefCell<Option<SliceDrawCache>>>,
+}
+
+impl Render for SliceLayer {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let Some(parent) = self.parent.upgrade() else {
+            return div().into_any_element();
+        };
+        let (profile, lanes, panel_height, gutter_width) = {
+            let this = parent.read(cx);
+            let Source::Loaded(profile) = &this.source else {
+                return div().into_any_element();
+            };
+            let Some(lanes) = this.lane_layout() else {
+                return div().into_any_element();
+            };
+            (profile.clone(), lanes, this.panel_height, this.gutter_width)
+        };
+        let palette = Palette::from_colors(&bviz_ui_theme::colors(window));
+        let prepaint = TraceView::fit_prepaint(
+            profile.clone(),
+            lanes.clone(),
+            self.view.clone(),
+            self.fitted.clone(),
+            self.viewport.clone(),
+            panel_height,
+            gutter_width,
+        );
+        let paint = TraceView::slice_paint(
+            profile,
+            lanes,
+            self.view.clone(),
+            self.scroll_y.clone(),
+            self.vbar.clone(),
+            self.hbar.clone(),
+            self.slice_draw.clone(),
+            parent,
+            palette,
+        );
+        canvas(prepaint, paint)
+            .absolute()
+            .inset_0()
+            .size_full()
+            .into_any_element()
+    }
+}
+
 impl Render for TraceView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = bviz_ui_theme::colors(window);
@@ -1433,7 +1548,7 @@ impl TraceView {
             v.clamp_to(span, time_w, EDGE_MARGIN_PX);
             self.view.set(v);
         }
-        cx.notify();
+        self.invalidate_chart(cx);
     }
 
     /// Tracks the slice under the cursor and the crosshair position while not
@@ -1677,7 +1792,7 @@ impl TraceView {
         if self.selected_tracks != self.visible_tracks {
             self.selected_tracks = self.visible_tracks.clone();
             self.selection_version += 1;
-            cx.notify();
+            self.invalidate_chart(cx);
         }
     }
 
@@ -1790,12 +1905,22 @@ fn on_drag(view: &mut TraceView, event: &MouseMoveEvent, cx: &mut Context<TraceV
         }
         Drag::None => {}
     }
-    cx.notify();
+    // Flame-panel, stats, and menu drags leave the timeline unchanged, so its
+    // cached layer replays; a parent repaint is enough. The rest move the
+    // timeline and rebuild it.
+    match view.drag {
+        Drag::FlamePan
+        | Drag::FlameVThumb(_)
+        | Drag::FlameHThumb(_)
+        | Drag::StatsThumb(_)
+        | Drag::MenuThumb(_) => cx.notify(),
+        _ => view.invalidate_chart(cx),
+    }
 }
 
 fn end_drag(view: &mut TraceView, _: &MouseUpEvent, cx: &mut Context<TraceView>) {
     view.drag = Drag::None;
-    cx.notify();
+    view.invalidate_chart(cx);
 }
 
 /// A vertical scroll bar painted over the right edge of a scrollable body. Each

@@ -181,7 +181,7 @@ impl TraceView {
                     .on_click(cx.listener(move |this, _, _, cx| {
                         cx.stop_propagation();
                         this.set_group_visible(group, !group_all_visible);
-                        cx.notify();
+                        this.invalidate_chart(cx);
                     }))
                     .child(if group_all_visible { "hide" } else { "show" }),
             )
@@ -219,7 +219,7 @@ impl TraceView {
             .hover(move |s| s.bg(selected))
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.toggle_track(i);
-                cx.notify();
+                this.invalidate_chart(cx);
             }))
             .child(check)
             .child(
@@ -287,7 +287,7 @@ impl TraceView {
                     .hover(move |s| s.bg(hover_bg))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.set_all_visible(!all_visible);
-                        cx.notify();
+                        this.invalidate_chart(cx);
                     }))
                     .child(if all_visible { "Hide all" } else { "Show all" })
             })
