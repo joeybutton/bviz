@@ -26,6 +26,16 @@ pub(crate) struct TraceModel {
     /// The full thread/counter lane layout for the loaded profile, built on first
     /// use. It depends only on the immutable profile, so it is cleared only when a
     /// new profile loads.
+    ///
+    /// This and the two layouts derived from it are the model's lazy caches, and
+    /// the cell around each is what keeps their readers read-only: every hit-test
+    /// and paint asks for a layout through a shared `&TraceModel`, several of them
+    /// from inside a `read` of a panel that holds the model, where no `&mut` to
+    /// the model can be taken. Filling on demand through the cell keeps
+    /// [`Self::lane_layout`] callable from those paths; the alternative is either
+    /// an exclusive borrow threaded through every read helper or building the
+    /// layouts eagerly on each visibility change, which would move the cost of
+    /// [`lay_out_lanes`] onto the load path.
     lanes: RefCell<Option<Rc<LaneLayout>>>,
     /// Which tracks the flame chart draws, indexed by `profile.threads()` order.
     visible_tracks: Vec<bool>,
