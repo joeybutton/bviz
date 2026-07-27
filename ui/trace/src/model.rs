@@ -19,7 +19,7 @@ pub(crate) struct TraceModel {
     /// The full thread/counter lane layout for the loaded profile, built on first
     /// use. It depends only on the immutable profile, so it is cleared only when a
     /// new profile loads.
-    lanes: Rc<RefCell<Option<Rc<LaneLayout>>>>,
+    lanes: RefCell<Option<Rc<LaneLayout>>>,
     /// Which tracks the flame chart draws, indexed by `profile.threads()` order.
     visible_tracks: Vec<bool>,
     /// Which tracks the flame graph and stats aggregate over, indexed likewise.
@@ -39,10 +39,10 @@ pub(crate) struct TraceModel {
     /// The lane layout restricted to the visible tracks and restacked into
     /// lane-class groups, derived from `lanes` and cleared whenever the
     /// visibility, collapse, or show-all state changes.
-    visible_lanes: Rc<RefCell<Option<Rc<LaneLayout>>>>,
+    visible_lanes: RefCell<Option<Rc<LaneLayout>>>,
     /// The group headers and show-more rows over `visible_lanes`, built and
     /// cleared alongside it.
-    group_chrome: Rc<RefCell<Option<Rc<GroupChrome>>>>,
+    group_chrome: RefCell<Option<Rc<GroupChrome>>>,
     /// The selected tracks' aggregate — its flame graph and stats rows, held
     /// together so the rows' and laid-out boxes' name handles resolve against
     /// the graph that produced them. Built on demand off the UI thread (walking
@@ -63,15 +63,15 @@ impl TraceModel {
     pub(crate) fn new() -> Self {
         Self {
             source: Source::Loading,
-            lanes: Rc::new(RefCell::new(None)),
+            lanes: RefCell::new(None),
             visible_tracks: Vec::new(),
             selected_tracks: Vec::new(),
             collapsed_groups: default_collapsed_groups(),
             group_show_all: [false; GROUP_ORDER.len()],
             selection_version: 0,
             select_anchor: None,
-            visible_lanes: Rc::new(RefCell::new(None)),
-            group_chrome: Rc::new(RefCell::new(None)),
+            visible_lanes: RefCell::new(None),
+            group_chrome: RefCell::new(None),
             aggregates: Rc::new(RefCell::new(None)),
             flame_scan: Rc::new(RefCell::new(None)),
             agg: Rebuild::new(),
