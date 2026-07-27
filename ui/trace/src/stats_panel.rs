@@ -15,7 +15,6 @@ use gpui::{
     MouseUpEvent, Pixels, Point, Render, Rgba, SharedString, Subscription, UniformListScrollHandle,
     Window, canvas, div, point, prelude::*, px, size, uniform_list,
 };
-use std::cell::Cell;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -147,7 +146,7 @@ enum StatsDrag {
 /// The graph-mode stats table as a self-contained panel: a header band of
 /// clickable, sortable columns over a scrollable, virtualized body of one row per
 /// group, reading the aggregate from [`TraceModel`]. Owns its sort, scroll, and
-/// drag state as plain and interior-mutable fields.
+/// drag state as plain fields.
 pub(crate) struct StatsPanel {
     /// Read for the current selection's aggregate and the version its sort keys
     /// on.
@@ -167,7 +166,7 @@ pub(crate) struct StatsPanel {
     stats_scroll: UniformListScrollHandle,
     /// The scroll-bar geometry set during paint, read by mouse handlers; `None`
     /// when the body fits and so shows no bar.
-    stats_bar: Cell<Option<Scrollbar>>,
+    stats_bar: Option<Scrollbar>,
     drag: StatsDrag,
     /// Rebuilds the sort order when the model swaps in a freshly built aggregate:
     /// the order derives from the aggregate, which lands asynchronously.
@@ -191,7 +190,7 @@ impl StatsPanel {
             stats_order: None,
             stats_build: Rebuild::new(),
             stats_scroll: UniformListScrollHandle::new(),
-            stats_bar: Cell::new(None),
+            stats_bar: None,
             drag: StatsDrag::None,
             _model_observer: model_observer,
         }
@@ -408,7 +407,7 @@ impl StatsPanel {
     /// Begins a scroll drag if `pos` hit the bar; otherwise leaves the press to
     /// fall through to a row.
     fn press(&mut self, pos: Point<Pixels>) {
-        if let Some(bar) = self.stats_bar.get() {
+        if let Some(bar) = self.stats_bar {
             if bar.track_hit(pos) {
                 let grab = bar.grab(pos);
                 self.drag = StatsDrag::Thumb(grab);
@@ -419,7 +418,7 @@ impl StatsPanel {
 
     /// Maps a thumb drag back to the list's scroll offset.
     fn thumb_to(&mut self, pos: Point<Pixels>, grab: f32) {
-        if let Some(offset) = thumb_offset(self.stats_bar.get(), pos, grab) {
+        if let Some(offset) = thumb_offset(self.stats_bar, pos, grab) {
             set_list_thumb(&self.stats_scroll.0.borrow().base_handle, offset);
         }
     }
@@ -481,7 +480,7 @@ fn stats_scrollbar(
             if let Some(painted) = layout {
                 painted.paint(track, thumb, window);
             }
-            entity.read(cx).stats_bar.set(layout);
+            entity.update(cx, |panel, _| panel.stats_bar = layout);
             if dragging {
                 track_drag(window, &entity, stats_on_drag, stats_end_drag);
             }
