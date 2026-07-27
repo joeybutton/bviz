@@ -20,7 +20,7 @@ use gpui::{
     ScrollWheelEvent, Stateful, StyleRefinement, WeakEntity, Window, canvas, div,
     fill, point, prelude::*, px, size,
 };
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -81,8 +81,8 @@ pub(crate) struct TimelinePanel {
     fitted: bool,
     /// The lane vertical bar and time horizontal bar geometry, set during paint
     /// and read by mouse handlers; `None` when that axis fits.
-    vbar: Cell<Option<Scrollbar>>,
-    hbar: Cell<Option<Scrollbar>>,
+    vbar: Option<Scrollbar>,
+    hbar: Option<Scrollbar>,
     /// The timeline's memoized culled draw list; see [`SliceDrawCache`].
     slice_draw: RefCell<Option<SliceDrawCache>>,
     /// The slice under the cursor, if any, drawn as a tooltip.
@@ -118,8 +118,8 @@ impl TimelinePanel {
             scroll_y: 0.0,
             viewport: Bounds::default(),
             fitted: false,
-            vbar: Cell::new(None),
-            hbar: Cell::new(None),
+            vbar: None,
+            hbar: None,
             slice_draw: RefCell::new(None),
             hover: None,
             crosshair: None,
@@ -339,7 +339,7 @@ impl TimelinePanel {
     /// Begins a timeline drag at `pos`: the lane vertical or time horizontal
     /// scroll thumb/track if the press hit one, otherwise a pan.
     fn press(&mut self, pos: Point<Pixels>, cx: &App) {
-        if let Some(bar) = self.vbar.get() {
+        if let Some(bar) = self.vbar {
             if bar.track_hit(pos) {
                 let grab = bar.grab(pos);
                 self.drag = TimelineDrag::VThumb(grab);
@@ -347,7 +347,7 @@ impl TimelinePanel {
                 return;
             }
         }
-        if let Some(bar) = self.hbar.get() {
+        if let Some(bar) = self.hbar {
             if bar.track_hit(pos) {
                 let grab = bar.grab(pos);
                 self.drag = TimelineDrag::HThumb(grab);
@@ -361,7 +361,7 @@ impl TimelinePanel {
 
     /// Maps the lane vertical thumb drag back to a scroll offset.
     fn scroll_thumb_to(&mut self, pos: Point<Pixels>, grab: f32) {
-        if let Some(offset) = thumb_offset(&self.vbar, pos, grab) {
+        if let Some(offset) = thumb_offset(self.vbar, pos, grab) {
             self.scroll_y = offset;
         }
     }
@@ -377,7 +377,7 @@ impl TimelinePanel {
         };
         let span = profile.span();
         let regions = self.regions(cx);
-        let Some(offset) = thumb_offset(&self.hbar, pos, grab) else {
+        let Some(offset) = thumb_offset(self.hbar, pos, grab) else {
             return;
         };
         // The bar's offset is measured from the span start less the reachable
@@ -797,20 +797,19 @@ fn slice_paint(
             crate::counters::paint_graph(&profile, tv, regions, &palette, window);
         }
         paint_markers(&profile, tv, regions, show_counters, &palette, window, cx);
-        {
-            let panel = parent.read(cx);
-            paint_scrollbars(
-                profile.span(),
-                tv,
-                flame_total,
-                regions,
-                scroll,
-                &palette,
-                &panel.vbar,
-                &panel.hbar,
-                window,
-            );
-        }
+        let (vlayout, hlayout) = paint_scrollbars(
+            profile.span(),
+            tv,
+            flame_total,
+            regions,
+            scroll,
+            &palette,
+            window,
+        );
+        parent.update(cx, |panel, _| {
+            panel.vbar = vlayout;
+            panel.hbar = hlayout;
+        });
 
         paint_gutter(
             &profile,

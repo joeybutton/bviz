@@ -117,7 +117,7 @@ impl TracksMenu {
 
     /// Maps a thumb drag back to the list's scroll offset.
     fn thumb_to(&mut self, pos: Point<Pixels>, grab: f32) {
-        if let Some(offset) = thumb_offset(&self.bar, pos, grab) {
+        if let Some(offset) = thumb_offset(self.bar.get(), pos, grab) {
             set_list_thumb(&self.scroll, offset);
         }
     }

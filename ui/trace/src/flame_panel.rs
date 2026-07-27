@@ -373,7 +373,7 @@ impl FlamePanel {
 
     /// Maps the vertical thumb drag back to a scroll offset.
     fn scroll_thumb_to(&mut self, pos: Point<Pixels>, grab: f32) {
-        if let Some(offset) = thumb_offset(&self.flame_vbar, pos, grab) {
+        if let Some(offset) = thumb_offset(self.flame_vbar.get(), pos, grab) {
             self.flame_scroll_y = offset;
         }
     }
@@ -381,7 +381,7 @@ impl FlamePanel {
     /// Maps a horizontal thumb drag to its normalized scroll.
     fn hthumb_to(&mut self, pos: Point<Pixels>, grab: f32, cx: &App) {
         let (Some(offset), Some(fl)) =
-            (thumb_offset(&self.flame_hbar, pos, grab), self.layout(cx))
+            (thumb_offset(self.flame_hbar.get(), pos, grab), self.layout(cx))
         else {
             return;
         };

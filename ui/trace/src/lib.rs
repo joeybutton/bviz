@@ -46,7 +46,6 @@ use gpui::{
     ScrollHandle, SharedString, Stateful, Subscription, Task, TextAlign, TransformationMatrix,
     Window, canvas, div, fill, point, prelude::*, px, quad, size,
 };
-use std::cell::Cell;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -686,8 +685,8 @@ fn end_drag(view: &mut TraceView, _: &MouseUpEvent, cx: &mut Context<TraceView>)
 
 /// The scroll offset a thumb at `pos` (grabbed at `grab`) maps to, or `None`
 /// when the bar is not currently painted.
-fn thumb_offset(bar: &Cell<Option<Scrollbar>>, pos: Point<Pixels>, grab: f32) -> Option<f32> {
-    Some(bar.get()?.offset_at(pos, grab))
+fn thumb_offset(bar: Option<Scrollbar>, pos: Point<Pixels>, grab: f32) -> Option<f32> {
+    Some(bar?.offset_at(pos, grab))
 }
 
 /// Scrolls a list `handle` so a downward thumb `offset` maps to a matching
@@ -865,9 +864,9 @@ fn paint_ruler(
 }
 
 /// Paints the flame section's vertical bar and/or the content column's
-/// horizontal bar for whichever axis overflows, storing each bar's geometry in
-/// its cell for hit-testing; an axis that fits gets no bar and a cleared cell.
-/// The vertical bar maps to the flame lanes' pixel scroll; the horizontal to the
+/// horizontal bar for whichever axis overflows, returning each bar's geometry
+/// for the caller to hold for hit-testing; an axis that fits gets `None`. The
+/// vertical bar maps to the flame lanes' pixel scroll; the horizontal to the
 /// view's start time within the profile span.
 fn paint_scrollbars(
     span: TimeSpan,
@@ -876,10 +875,8 @@ fn paint_scrollbars(
     regions: Regions,
     scroll_y: f32,
     palette: &Palette,
-    vbar: &Cell<Option<Scrollbar>>,
-    hbar: &Cell<Option<Scrollbar>>,
     window: &mut Window,
-) {
+) -> (Option<Scrollbar>, Option<Scrollbar>) {
     let flame_h = regions.flame_h();
 
     let span_us = (span.end_us - span.start_us) as f32;
@@ -917,8 +914,7 @@ fn paint_scrollbars(
     for bar in [vlayout, hlayout].into_iter().flatten() {
         bar.paint(palette.scroll_track, palette.scroll_thumb, window);
     }
-    vbar.set(vlayout);
-    hbar.set(hlayout);
+    (vlayout, hlayout)
 }
 
 struct GutterPaint<'a> {

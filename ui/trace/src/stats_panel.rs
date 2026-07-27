@@ -419,7 +419,7 @@ impl StatsPanel {
 
     /// Maps a thumb drag back to the list's scroll offset.
     fn thumb_to(&mut self, pos: Point<Pixels>, grab: f32) {
-        if let Some(offset) = thumb_offset(&self.stats_bar, pos, grab) {
+        if let Some(offset) = thumb_offset(self.stats_bar.get(), pos, grab) {
             set_list_thumb(&self.stats_scroll.0.borrow().base_handle, offset);
         }
     }
