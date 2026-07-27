@@ -17,7 +17,6 @@ use gpui::{
     ScrollWheelEvent, Stateful, StyleRefinement, Subscription, WeakEntity, Window, canvas, div,
     point, prelude::*, px, size,
 };
-use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -119,14 +118,14 @@ fn flame_graph_rect(bounds: Bounds<Pixels>, flame_total: f32, flame_view: FlameV
 /// boxes' name handles and keys the cache by identity; the layout is
 /// viewport-relative, so panning (a change in `scroll_x`) is a key too.
 fn flame_boxes(
-    cache: &RefCell<Option<FlameBoxCache>>,
+    cache: &mut Option<FlameBoxCache>,
     aggregates: &Arc<ScopeAggregate>,
     content_w: f64,
     scroll_x: f64,
     view_w: f32,
     metrics: &FlameMetrics,
 ) -> Rc<Vec<FlameBox>> {
-    if let Some(c) = cache.borrow().as_ref() {
+    if let Some(c) = cache.as_ref() {
         if Arc::ptr_eq(&c.aggregates, aggregates)
             && c.content_w == content_w
             && c.scroll_x == scroll_x
@@ -140,7 +139,7 @@ fn flame_boxes(
         content_w,
         FlamePlacement { scroll_x, view_w, metrics, min_px: MIN_SLICE_PX },
     ));
-    *cache.borrow_mut() = Some(FlameBoxCache {
+    *cache = Some(FlameBoxCache {
         aggregates: aggregates.clone(),
         content_w,
         scroll_x,
@@ -181,8 +180,8 @@ fn paint_flame_tooltip(
 
 /// The aggregated flame-graph panel: time-free work-class-colored boxes filling
 /// the body, zoom/pan on the x axis and vertical scroll on the y, with its own
-/// scroll bars and a hover tooltip. Owns its view state as plain and
-/// interior-mutable fields, reading the aggregate from [`TraceModel`]. The
+/// scroll bars and a hover tooltip. Owns its view state as plain fields,
+/// reading the aggregate from [`TraceModel`]. The
 /// expensive box paint lives in a separate cached child ([`FlameCanvas`]) so a
 /// hover — which touches only the tooltip overlay — replays its last scene rather
 /// than re-emitting every box.
@@ -197,13 +196,13 @@ pub(crate) struct FlamePanel {
     flame_scroll_y: f32,
     /// The panel's own bounds, captured during its canvas paint, so handlers map
     /// the cursor within the panel rather than the whole window.
-    flame_bounds: Cell<Bounds<Pixels>>,
+    flame_bounds: Bounds<Pixels>,
     /// The panel's vertical and horizontal bar geometry, set during paint and read
     /// by mouse handlers; `None` when that axis fits.
-    flame_vbar: Cell<Option<Scrollbar>>,
-    flame_hbar: Cell<Option<Scrollbar>>,
+    flame_vbar: Option<Scrollbar>,
+    flame_hbar: Option<Scrollbar>,
     /// The panel's memoized box layout; see [`FlameBoxCache`].
-    flame_boxes: RefCell<Option<FlameBoxCache>>,
+    flame_boxes: Option<FlameBoxCache>,
     /// The box under the cursor, if any, drawn as a tooltip.
     flame_hover: Option<FlameHover>,
     drag: FlameDrag,
@@ -235,10 +234,10 @@ impl FlamePanel {
             model,
             flame_view: FlameView::FIT,
             flame_scroll_y: 0.0,
-            flame_bounds: Cell::new(Bounds::default()),
-            flame_vbar: Cell::new(None),
-            flame_hbar: Cell::new(None),
-            flame_boxes: RefCell::new(None),
+            flame_bounds: Bounds::default(),
+            flame_vbar: None,
+            flame_hbar: None,
+            flame_boxes: None,
             flame_hover: None,
             drag: FlameDrag::None,
             last_mouse: Point::default(),
@@ -261,7 +260,7 @@ impl FlamePanel {
     /// produced them. Both are re-acquired against whichever graph replaces it —
     /// the boxes on the next paint, the hover on the next mouse move.
     fn reset_aggregate_derived(&mut self) {
-        self.flame_boxes.borrow_mut().take();
+        self.flame_boxes = None;
         self.flame_hover = None;
     }
 
@@ -284,7 +283,7 @@ impl FlamePanel {
         let view = self.flame_view;
         let total_h = flame_height(&aggregates.flame, &flame_metrics());
         let Rect { left, top, width, height } =
-            flame_graph_rect(self.flame_bounds.get(), total_h, view);
+            flame_graph_rect(self.flame_bounds, total_h, view);
         Some(FlameLayout {
             view,
             total_h,
@@ -309,7 +308,7 @@ impl FlamePanel {
     /// find the laid-out box at that depth whose x-range contains it. Searching the
     /// same viewport-relative box vector the paint uses (widened and coalesced)
     /// makes the hover match what is drawn.
-    fn box_at(&self, pos: Point<Pixels>, cx: &App) -> Option<FlameBox> {
+    fn box_at(&mut self, pos: Point<Pixels>, cx: &App) -> Option<FlameBox> {
         let fl = self.layout(cx)?;
         let aggregates = self.model.read(cx).aggregates()?;
         let metrics = flame_metrics();
@@ -323,7 +322,8 @@ impl FlamePanel {
         let content_w = fl.view.content_px(fl.width);
         let scroll_x = fl.view.scroll_px(fl.width);
         let vx = x - fl.left;
-        let boxes = flame_boxes(&self.flame_boxes, &aggregates, content_w, scroll_x, fl.width, &metrics);
+        let boxes =
+            flame_boxes(&mut self.flame_boxes, &aggregates, content_w, scroll_x, fl.width, &metrics);
         boxes
             .iter()
             .find(|b| b.depth == depth && vx >= b.x && vx < b.x + b.w)
@@ -351,7 +351,7 @@ impl FlamePanel {
     /// Begins a drag at `pos`: the vertical or horizontal scroll thumb/track if the
     /// press hit one, otherwise a pan of the panel.
     fn press(&mut self, pos: Point<Pixels>, cx: &App) {
-        if let Some(bar) = self.flame_vbar.get() {
+        if let Some(bar) = self.flame_vbar {
             if bar.track_hit(pos) {
                 let grab = bar.grab(pos);
                 self.drag = FlameDrag::VThumb(grab);
@@ -359,7 +359,7 @@ impl FlamePanel {
                 return;
             }
         }
-        if let Some(bar) = self.flame_hbar.get() {
+        if let Some(bar) = self.flame_hbar {
             if bar.track_hit(pos) {
                 let grab = bar.grab(pos);
                 self.drag = FlameDrag::HThumb(grab);
@@ -373,7 +373,7 @@ impl FlamePanel {
 
     /// Maps the vertical thumb drag back to a scroll offset.
     fn scroll_thumb_to(&mut self, pos: Point<Pixels>, grab: f32) {
-        if let Some(offset) = thumb_offset(self.flame_vbar.get(), pos, grab) {
+        if let Some(offset) = thumb_offset(self.flame_vbar, pos, grab) {
             self.flame_scroll_y = offset;
         }
     }
@@ -381,7 +381,7 @@ impl FlamePanel {
     /// Maps a horizontal thumb drag to its normalized scroll.
     fn hthumb_to(&mut self, pos: Point<Pixels>, grab: f32, cx: &App) {
         let (Some(offset), Some(fl)) =
-            (thumb_offset(self.flame_hbar.get(), pos, grab), self.layout(cx))
+            (thumb_offset(self.flame_hbar, pos, grab), self.layout(cx))
         else {
             return;
         };
@@ -593,7 +593,7 @@ impl Render for FlameCanvas {
         let prepaint = {
             let parent = parent.clone();
             move |bounds: Bounds<Pixels>, _: &mut Window, cx: &mut App| {
-                parent.read(cx).flame_bounds.set(bounds);
+                parent.update(cx, |panel, _| panel.flame_bounds = bounds);
             }
         };
         let paint = flame_paint(aggregates, parent, palette);
@@ -623,7 +623,7 @@ fn flame_paint(
         let total_h = flame_height(graph, &metrics);
         // Read the panel's view state and lay out the visible window, then drop the
         // borrow before the box paint uses `cx` mutably.
-        let (scroll_y, boxes, rect, content_w, scroll_x) = {
+        let (scroll_y, rect, content_w, scroll_x) = {
             let panel = parent.read(cx);
             let flame_view = panel.flame_view;
             let scroll_y = panel.flame_scroll_y;
@@ -634,10 +634,11 @@ fn flame_paint(
             // f64 so precision holds at deep zoom.
             let content_w = flame_view.content_px(rect.width);
             let scroll_x = flame_view.scroll_px(rect.width);
-            let boxes =
-                flame_boxes(&panel.flame_boxes, &aggregates, content_w, scroll_x, rect.width, &metrics);
-            (scroll_y, boxes, rect, content_w, scroll_x)
+            (scroll_y, rect, content_w, scroll_x)
         };
+        let boxes = parent.update(cx, |panel, _| {
+            flame_boxes(&mut panel.flame_boxes, &aggregates, content_w, scroll_x, rect.width, &metrics)
+        });
         let Rect { left, top, width, height } = rect;
 
         let mask = ContentMask {
@@ -698,8 +699,9 @@ fn flame_paint(
         if let Some(bar) = hlayout {
             bar.paint(palette.scroll_track, palette.scroll_thumb, window);
         }
-        let panel = parent.read(cx);
-        panel.flame_vbar.set(vlayout);
-        panel.flame_hbar.set(hlayout);
+        parent.update(cx, |panel, _| {
+            panel.flame_vbar = vlayout;
+            panel.flame_hbar = hlayout;
+        });
     }
 }
