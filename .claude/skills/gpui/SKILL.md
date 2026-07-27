@@ -389,9 +389,56 @@ state types and three methods:
 **Hit-testing.** A `canvas`/`Element` paints one surface, so gpui's per-`div`
 `on_click`/`hover` don't reach what's inside it — hit-test by hand. Store the painted
 geometry on the view each layout (the terminal keeps a `ContentLayout` / `ScrollbarLayout`;
-the graph keeps the viewport `bounds` in an `Rc<Cell<…>>`), then in the mouse handler
-invert the same transform the paint used: the terminal's `cell_at` maps a pixel to a grid
-cell, the graph's `from_screen` + `hit_box` map a pixel to the innermost box.
+the graph keeps the viewport `bounds`), then in the mouse handler invert the same transform
+the paint used: the terminal's `cell_at` maps a pixel to a grid cell, the graph's
+`from_screen` + `hit_box` map a pixel to the innermost box.
+
+## View state: plain fields, not `Cell`/`RefCell`/`Rc`
+
+**Default to plain fields.** `Render::render(&mut self, ..)`, every `cx.listener` handler,
+and every `Entity::update` closure hand you `&mut View`, so almost nothing a view owns
+needs interior mutability.
+
+**The one thing that pushes back** is the geometry a paint discovers: a `canvas`
+prepaint/paint closure is `'static` and reaches the view through `parent.read(cx)` — a
+*shared* reference — so writing the captured bounds, the fitted zoom, or a scroll-bar
+layout through it seems to demand a `Cell`. It doesn't: those closures also receive
+`&mut App`, so they can write through `parent.update(cx, |view, _| ..)` instead. Shape it
+as read-then-commit — pull what you need out of `parent.read(cx)`, let that borrow end,
+then commit in one `update`:
+
+```rust
+let old_bounds = parent.read(cx).viewport;   // shared read; the borrow ends here
+let zoom = fit_zoom(old_bounds, bounds);     // whatever the geometry needs
+parent.update(cx, |view, _| {                // exclusive write
+    view.viewport = bounds;
+    view.zoom = zoom;
+});
+```
+
+A helper that a paint uses to stash geometry should **return** it rather than take a
+`&Cell<T>` to fill — `paint_scrollbars` returns its two `Option<Scrollbar>` layouts and the
+caller assigns them.
+
+**This is safe and does not loop.** By the time elements lay out, prepaint, and paint, the
+view's own `render` lease has ended, so `update` there does not double-lease. And `update`
+alone does not notify, so it schedules no extra frame — confirm on a real profile by
+counting paint calls (an `eprintln!` in the paint closure should fire once for a settled
+idle window, not continuously).
+
+**An `Rc` around a cell is almost always vestigial.** It buys something only if the handle
+itself is cloned into a `'static` closure — a `cx.spawn` background block that writes the
+result back. If nothing clones it, drop the `Rc` and keep only the cell. And if the value
+is written *only* from a background task's completion, that runs inside `Entity::update`
+with `&mut View`, so it needs neither the `Rc` nor the cell.
+
+**What the cell costs.** Dynamic borrow checking on a field nothing shares, a `RefCell`
+that can panic at runtime, and read-modify-write (`let mut v = f.get(); …; f.set(v)`) where
+in-place mutation would do. `TimelinePanel` in `ui/trace/src/timeline.rs` holds its time
+view, viewport, fit latch, scroll-bar geometry, and memoized cull list as plain fields, and
+`fit_prepaint` / `slice_paint` are the worked examples of the read-then-commit shape.
+
+Reach for a cell only for a writer with no path to `&mut App` or `&mut self` at all.
 
 ## Incremental redraw and view caching
 
@@ -501,6 +548,7 @@ Resolve the binary with `bazel cquery --output=files //path:target` after buildi
 - Unsized content collapses; set an explicit size or `size_full()`/`flex_1()` in a flex parent.
 - The element tree is rebuilt every render — hold `Entity<_>` references, never element ones.
 - A `canvas`/`Element` paint closure is `'static` — capture owned snapshots, not view borrows.
+- A `Cell`/`RefCell` on a view field is usually avoidable — a prepaint/paint closure holds `&mut App`, so it can `parent.update(..)` and write a plain field.
 - A background `Task` you don't store is cancelled on drop — keep it in a view field.
 - An element's mouse handlers stop at the window edge — use `track_drag` for a drag that must continue outside.
 - gpui's executor is not tokio — a `reqwest`/`tonic`/SDK future run directly on it panics "no reactor running"; bridge it through a tokio runtime (see the tokio/rayon section).
