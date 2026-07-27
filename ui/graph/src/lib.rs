@@ -12,7 +12,7 @@ use gpui::{
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Render, Rgba, ScrollDelta,
     ScrollWheelEvent, Stateful, Task, Window, canvas, div, prelude::*, px, rems, size,
 };
-use std::cell::{Cell, RefCell};
+use std::cell::Cell;
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -147,21 +147,21 @@ struct GraphView {
     scroll_drag: Option<ScrollDrag>,
     /// The built (pre-quotient) graph, cached so toggling a group re-lays-out
     /// without re-reading or re-parsing the proto. `None` until the load lands.
-    base: Rc<RefCell<Option<Graph>>>,
+    base: Option<Graph>,
     /// The base with its transitively-redundant edges removed, cached so the
     /// reduced view's edges are a stable projection of one fixed skeleton.
-    reduced_base: Rc<RefCell<Option<Graph>>>,
+    reduced_base: Option<Graph>,
     /// The interned node-id table the base graph keys on, threaded into each
     /// relayout so the quotient pass can mint group ids. `None` until the load
     /// lands.
-    names: Rc<RefCell<Option<Names>>>,
+    names: Option<Names>,
     /// Container and group ids currently expanded; every other container folds
     /// its subtree away so the layout only processes the visible view.
-    expanded: Rc<RefCell<HashSet<Id>>>,
+    expanded: HashSet<Id>,
     /// Multi-child container ids of the base graph; only these carry an
     /// expand/collapse handle (a leaf can't open, a singleton auto-expands), so a
     /// click or caret can tell an expandable box from a plain one.
-    expandable: Rc<RefCell<HashSet<Id>>>,
+    expandable: HashSet<Id>,
     /// The most-recently toggled node id: the box its relayout frames or
     /// recenters, and the box emphasized briefly afterward so the eye can find
     /// what opened or closed. Cleared when the highlight fades.
@@ -209,9 +209,6 @@ impl GraphView {
     fn new(inputs: Vec<Input>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let focus_handle = cx.focus_handle();
         focus_handle.focus(window, cx);
-        let base: Rc<RefCell<Option<Graph>>> = Rc::new(RefCell::new(None));
-        let reduced_base: Rc<RefCell<Option<Graph>>> = Rc::new(RefCell::new(None));
-        let names: Rc<RefCell<Option<Names>>> = Rc::new(RefCell::new(None));
         // Build and lay out the graph on the background executor so window
         // appearance and interactivity are never blocked; swap the view to the
         // result and cache the base graph when it completes.
@@ -232,12 +229,11 @@ impl GraphView {
             |view, result, _| {
                 view.source = match result {
                     Ok((graph, reduced, names, expanded, laid_out)) => {
-                        *view.expandable.borrow_mut() =
-                            bviz_graph_layout::lod::expandable_containers(&graph);
-                        *view.expanded.borrow_mut() = expanded;
-                        *view.base.borrow_mut() = Some(graph);
-                        *view.reduced_base.borrow_mut() = Some(reduced);
-                        *view.names.borrow_mut() = Some(names);
+                        view.expandable = bviz_graph_layout::lod::expandable_containers(&graph);
+                        view.expanded = expanded;
+                        view.base = Some(graph);
+                        view.reduced_base = Some(reduced);
+                        view.names = Some(names);
                         Source::Loaded(laid_out)
                     }
                     Err(err) => Source::Message(err),
@@ -260,11 +256,11 @@ impl GraphView {
             last_mouse: Point::default(),
             press: Point::default(),
             scroll_drag: None,
-            base,
-            reduced_base,
-            names,
-            expanded: Rc::new(RefCell::new(HashSet::new())),
-            expandable: Rc::new(RefCell::new(HashSet::new())),
+            base: None,
+            reduced_base: None,
+            names: None,
+            expanded: HashSet::new(),
+            expandable: HashSet::new(),
             recent: None,
             recent_at: Instant::now(),
             highlight_seq: 0,
@@ -281,10 +277,10 @@ impl GraphView {
     /// UI thread and swaps in the result, leaving zoom, pan, and the fit flag
     /// untouched so the view stays put across a toggle.
     fn retoggle(&mut self, cx: &mut Context<Self>) {
-        let Some(graph) = self.base.borrow().clone() else {
+        let Some(graph) = self.base.clone() else {
             return;
         };
-        let Some(reduced_base) = self.reduced_base.borrow().clone() else {
+        let Some(reduced_base) = self.reduced_base.clone() else {
             return;
         };
         // The background relayout mints group ids against the interned-name table,
@@ -292,10 +288,10 @@ impl GraphView {
         // accumulated table when the task lands. Cloning (rather than moving the
         // table out) keeps a superseded toggle's table from stranding the slot, so
         // a fresh toggle can still cancel and replace an in-flight relayout.
-        let Some(mut names) = self.names.borrow().clone() else {
+        let Some(mut names) = self.names.clone() else {
             return;
         };
-        let expanded = self.expanded.borrow().clone();
+        let expanded = self.expanded.clone();
         let reduced = self.reduced;
         self.relaying = true;
         self._load_task = load_in_background(
@@ -305,7 +301,7 @@ impl GraphView {
                 (laid_out, names)
             },
             |view, (laid_out, names), cx| {
-                *view.names.borrow_mut() = Some(names);
+                view.names = Some(names);
                 view.source = Source::Loaded(laid_out);
                 view.view_state.recenter.set(true);
                 view.relaying = false;
@@ -547,7 +543,7 @@ impl Render for GraphView {
                 .child(
                     Self::graph(
                         g,
-                        &self.expandable.borrow(),
+                        &self.expandable,
                         cx.entity(),
                         self.view_state.clone(),
                         ViewFlags {
@@ -875,16 +871,13 @@ fn toggle_box_at(view: &mut GraphView, pos: Point<Pixels>, cx: &mut Context<Grap
     };
     // A multi-child container or a collapsed group can be opened/closed; a leaf
     // or singleton can't.
-    if !hit.group && !view.expandable.borrow().contains(&hit.id) {
+    if !hit.group && !view.expandable.contains(&hit.id) {
         return;
     }
     let id = hit.id;
-    let mut expanded = view.expanded.borrow_mut();
-    let removed = expanded.remove(&id);
-    if !removed {
-        expanded.insert(id);
+    if !view.expanded.remove(&id) {
+        view.expanded.insert(id);
     }
-    drop(expanded);
     // The boxes fully on screen now, so the relayout settles the view to keep
     // them — and the toggled box — in frame.
     view.prev_visible = enclosed_boxes(
