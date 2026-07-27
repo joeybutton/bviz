@@ -213,8 +213,7 @@ pub(crate) struct FlamePanel {
     /// `cx.notify()` (the hover path) leaves it to replay; [`Self::invalidate_canvas`]
     /// notifies it to rebuild.
     canvas: Entity<FlameCanvas>,
-    /// Rebuilds the box layout when the model swaps in a freshly built aggregate:
-    /// the boxes derive from the aggregate, which lands asynchronously.
+    /// Re-syncs the panel with the model's aggregate, which lands asynchronously.
     _model_observer: Subscription,
 }
 
@@ -222,10 +221,9 @@ impl FlamePanel {
     pub(crate) fn new(model: Entity<TraceModel>, cx: &mut Context<Self>) -> Self {
         let parent = cx.entity().downgrade();
         let canvas = cx.new(|_| FlameCanvas { parent });
-        // The model notifies only when a background aggregate build lands, so drop
-        // the memoized boxes keyed on the old aggregate and rebuild the canvas.
+        // The model notifies only when a background aggregate build lands.
         let model_observer = cx.observe(&model, |this, _, cx| {
-            this.flame_boxes.borrow_mut().take();
+            this.reset_aggregate_derived();
             this.invalidate_canvas(cx);
         });
         Self {
@@ -252,12 +250,20 @@ impl FlamePanel {
         cx.notify();
     }
 
-    /// Resets the panel to its fit-to-window view and drops the memoized boxes, so
-    /// a freshly loaded profile starts from the fit rather than the prior graph's
-    /// zoom.
+    /// Drops the state that identifies a node of the shown graph: the memoized
+    /// box layout and the hovered box, whose fields address the graph that
+    /// produced them. Both are re-acquired against whichever graph replaces it —
+    /// the boxes on the next paint, the hover on the next mouse move.
+    fn reset_aggregate_derived(&mut self) {
+        self.flame_boxes.borrow_mut().take();
+        self.flame_hover = None;
+    }
+
+    /// Resets the panel to its fit-to-window view, so a freshly loaded profile
+    /// starts from the fit rather than the prior graph's zoom.
     pub(crate) fn reset_for_new_profile(&mut self) {
         self.flame_view = FlameView::FIT;
-        self.flame_boxes.borrow_mut().take();
+        self.reset_aggregate_derived();
     }
 
     /// Clears the box tooltip, so a tab switch drops it instead of leaving it until
