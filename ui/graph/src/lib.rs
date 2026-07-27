@@ -12,10 +12,8 @@ use gpui::{
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Render, Rgba, ScrollDelta,
     ScrollWheelEvent, Stateful, Task, Window, canvas, div, prelude::*, px, rems, size,
 };
-use std::cell::Cell;
 use std::collections::HashSet;
 use std::path::PathBuf;
-use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 mod build;
@@ -113,29 +111,22 @@ struct PaintBox {
     dim: bool,
 }
 
-/// The shared, interior-mutable view state threaded through the render tree and
-/// its prepaint/paint closures: zoom factor, pan offset, whether the initial fit
-/// has run, the last painted viewport, a pending recenter request, and the
-/// in-flight settle animation.
-#[derive(Clone)]
-struct ViewState {
-    zoom: Rc<Cell<f32>>,
-    pan: Rc<Cell<(f32, f32)>>,
-    fitted: Rc<Cell<bool>>,
-    viewport: Rc<Cell<Bounds<Pixels>>>,
-    recenter: Rc<Cell<bool>>,
-    anim: Rc<Cell<Option<Settle>>>,
-}
-
 /// Loads, lays out, and renders a Bazel build graph.
-///
-/// Zoom, pan, and the captured viewport bounds are shared cells so the canvas
-/// can both read them while painting and, on the first frame, set the initial
-/// fit-to-window view (which needs the viewport size, known only at paint time).
 struct GraphView {
     focus_handle: FocusHandle,
     source: Source,
-    view_state: ViewState,
+    zoom: f32,
+    pan: (f32, f32),
+    /// Whether the fit-to-window view has been established.
+    fitted: bool,
+    /// Canvas bounds captured at the last prepaint, so hit-testing and the
+    /// pan/zoom handlers can work in the same frame the canvas painted.
+    viewport: Bounds<Pixels>,
+    /// Asks the next prepaint to settle the view onto the reframed content; set
+    /// when a relayout lands.
+    recenter: bool,
+    /// The settle ease in flight, stepped once per frame; `None` at rest.
+    anim: Option<Settle>,
     dragging: bool,
     /// Whether the cursor moved past the click threshold since the press, which
     /// distinguishes a drag (pan) from a click (toggle).
@@ -243,14 +234,12 @@ impl GraphView {
         Self {
             focus_handle,
             source: Source::Loading,
-            view_state: ViewState {
-                zoom: Rc::new(Cell::new(1.0)),
-                pan: Rc::new(Cell::new((0.0, 0.0))),
-                fitted: Rc::new(Cell::new(false)),
-                viewport: Rc::new(Cell::new(Bounds::default())),
-                recenter: Rc::new(Cell::new(false)),
-                anim: Rc::new(Cell::new(None)),
-            },
+            zoom: 1.0,
+            pan: (0.0, 0.0),
+            fitted: false,
+            viewport: Bounds::default(),
+            recenter: false,
+            anim: None,
             dragging: false,
             moved: false,
             last_mouse: Point::default(),
@@ -303,7 +292,7 @@ impl GraphView {
             |view, (laid_out, names), cx| {
                 view.names = Some(names);
                 view.source = Source::Loaded(laid_out);
-                view.view_state.recenter.set(true);
+                view.recenter = true;
                 view.relaying = false;
                 view.highlight_recent(cx);
             },
@@ -343,12 +332,11 @@ impl GraphView {
 
     /// Assembles the single-canvas viewport: the painted boxes and connectors,
     /// the overlay controls layered over them, and the prepaint/paint closures
-    /// that fit and draw the graph under the shared pan/zoom transform.
+    /// that fit and draw the graph under the view's pan/zoom transform.
     fn graph(
         g: &LaidOut,
         expandable: &HashSet<Id>,
         entity: Entity<GraphView>,
-        view_state: ViewState,
         flags: ViewFlags,
         palette: Palette,
     ) -> Stateful<Div> {
@@ -394,16 +382,8 @@ impl GraphView {
         );
         let content = content_size(g);
         let recenter_target = recenter_rect(g, highlight.map(|h| h.id), prev_visible);
-        let prepaint = build_prepaint(view_state.clone(), content, recenter_target);
-        let paint = canvas_body(
-            boxes,
-            connectors,
-            view_state.zoom.clone(),
-            view_state.pan.clone(),
-            palette,
-            content,
-            entity,
-        );
+        let prepaint = build_prepaint(entity.clone(), content, recenter_target);
+        let paint = canvas_body(boxes, connectors, palette, content, entity);
         div()
             .id("graph-viewport")
             .relative()
@@ -472,12 +452,8 @@ impl GraphView {
         let Source::Loaded(g) = &self.source else {
             return;
         };
-        let vp = self.view_state.viewport.get();
-        let (gx, gy) = from_screen(
-            e.position,
-            vp.origin,
-            Camera { zoom: self.view_state.zoom.get(), pan: self.view_state.pan.get() },
-        );
+        let camera = Camera { zoom: self.zoom, pan: self.pan };
+        let (gx, gy) = from_screen(e.position, self.viewport.origin, camera);
         let hit = hit_box(&g.boxes, gx, gy).map(|b| b.id);
         if hit != self.hovered {
             self.hovered = hit;
@@ -493,23 +469,23 @@ impl GraphView {
             Source::Loaded(g) => content_size(g),
             _ => return,
         };
-        let vp = self.view_state.viewport.get();
+        let vp = self.viewport;
         let lx = f32::from(e.position.x) - f32::from(vp.origin.x);
         let ly = f32::from(e.position.y) - f32::from(vp.origin.y);
         let dy = match e.delta {
             ScrollDelta::Lines(p) => p.y,
             ScrollDelta::Pixels(p) => f32::from(p.y) / 120.0,
         };
-        let old = self.view_state.zoom.get();
+        let old = self.zoom;
         let new = (old * 1.1_f32.powf(dy)).clamp(fit_zoom(vp.size, content), MAX_ZOOM);
-        let (px, py) = self.view_state.pan.get();
+        let (px, py) = self.pan;
         let content_x = (lx - px) / old;
         let content_y = (ly - py) / old;
         let pan = (lx - content_x * new, ly - content_y * new);
-        self.view_state.pan.set(clamp_pan(pan, new, vp.size, content));
-        self.view_state.zoom.set(new);
+        self.pan = clamp_pan(pan, new, vp.size, content);
+        self.zoom = new;
         // A manual zoom overrides any settle still easing.
-        self.view_state.anim.set(None);
+        self.anim = None;
         cx.notify();
     }
 
@@ -545,7 +521,6 @@ impl Render for GraphView {
                         g,
                         &self.expandable,
                         cx.entity(),
-                        self.view_state.clone(),
                         ViewFlags {
                             highlight: self.recent.map(|id| Highlight { id, at: self.recent_at }),
                             prev_visible: &self.prev_visible,
@@ -657,93 +632,94 @@ fn relaying_indicator(relaying: bool, palette: &Palette) -> Option<Div> {
 /// Fits the graph to the viewport on the first frame, holds the framing stable
 /// across a resize, and drives the settle animation toward `recenter_target`.
 /// Runs at canvas prepaint because the fit needs the viewport size, known only
-/// once laid out. Owns the shared cells so it can both read and update the view.
+/// once laid out.
 fn build_prepaint(
-    view_state: ViewState,
+    parent: Entity<GraphView>,
     content: (f32, f32),
     recenter_target: Option<Rect>,
 ) -> impl FnOnce(Bounds<Pixels>, &mut Window, &mut App) {
-    let ViewState { zoom, pan, fitted, viewport, recenter, anim } = view_state;
-    move |bounds: Bounds<Pixels>, window: &mut Window, _: &mut App| {
-        let prev = viewport.get();
-        viewport.set(bounds);
-        if !fitted.get() {
-            let (z, p) = fit_view(bounds.size, content);
-            zoom.set(z);
-            pan.set(p);
-            fitted.set(true);
-        } else if prev.size != bounds.size {
-            // Keep the view stable across a resize at any zoom level: hold the
-            // graph point under the viewport center fixed and scale the zoom with
-            // the fit, so the same section stays framed at the same zoom relative
-            // to the window rather than snapping to the fully fitted view. A
-            // settle in flight targeted the old size, so drop it rather than ease
-            // toward a stale destination.
-            anim.set(None);
-            let old_fit = fit_zoom(prev.size, content);
-            let new_fit = fit_zoom(bounds.size, content);
-            let z_old = zoom.get();
-            let (pan_x, pan_y) = pan.get();
-            let center_x = (f32::from(prev.size.width) / 2. - pan_x) / z_old;
-            let center_y = (f32::from(prev.size.height) / 2. - pan_y) / z_old;
-            let z = (z_old * new_fit / old_fit).clamp(new_fit, MAX_ZOOM);
-            zoom.set(z);
-            pan.set(clamp_pan(
-                (
-                    f32::from(bounds.size.width) / 2. - center_x * z,
-                    f32::from(bounds.size.height) / 2. - center_y * z,
-                ),
-                z,
-                bounds.size,
-                content,
-            ));
-        }
-        // Settle the view on the toggled box and the boxes that shared the screen
-        // with it. Fit that rect, but only ever zoom out: a node opening smaller
-        // than the current zoom must not blow up to fill the view, the
-        // disorienting case this avoids. Hold the rect's center fixed across the
-        // zoom change so the content does not lurch, then pan the minimum needed
-        // to seat the rect fully inside — leaving the view put when it already
-        // fits. The move is eased over a few frames (the driver below) rather than
-        // jumped.
-        if recenter.get() {
-            if let Some(target) = recenter_target {
-                let (tz, (tpx, tpy)) =
-                    settle_view(target, bounds.size, content, zoom.get(), pan.get());
-                let (z, (px, py)) = (zoom.get(), pan.get());
-                let moves = (tz - z).abs() > SETTLE_MIN_ZOOM_STEP
-                    || (tpx - px).abs() > SETTLE_MIN_PAN_STEP
-                    || (tpy - py).abs() > SETTLE_MIN_PAN_STEP;
-                if moves {
-                    anim.set(Some(Settle {
-                        from_zoom: z,
-                        from_pan: (px, py),
-                        to_zoom: tz,
-                        to_pan: (tpx, tpy),
-                        start: Instant::now(),
-                    }));
+    move |bounds: Bounds<Pixels>, window: &mut Window, cx: &mut App| {
+        parent.update(cx, |view, _| {
+            let prev = view.viewport;
+            view.viewport = bounds;
+            if !view.fitted {
+                let (z, p) = fit_view(bounds.size, content);
+                view.zoom = z;
+                view.pan = p;
+                view.fitted = true;
+            } else if prev.size != bounds.size {
+                // Keep the view stable across a resize at any zoom level: hold the
+                // graph point under the viewport center fixed and scale the zoom with
+                // the fit, so the same section stays framed at the same zoom relative
+                // to the window rather than snapping to the fully fitted view. A
+                // settle in flight targeted the old size, so drop it rather than ease
+                // toward a stale destination.
+                view.anim = None;
+                let old_fit = fit_zoom(prev.size, content);
+                let new_fit = fit_zoom(bounds.size, content);
+                let z_old = view.zoom;
+                let (pan_x, pan_y) = view.pan;
+                let center_x = (f32::from(prev.size.width) / 2. - pan_x) / z_old;
+                let center_y = (f32::from(prev.size.height) / 2. - pan_y) / z_old;
+                let z = (z_old * new_fit / old_fit).clamp(new_fit, MAX_ZOOM);
+                view.zoom = z;
+                view.pan = clamp_pan(
+                    (
+                        f32::from(bounds.size.width) / 2. - center_x * z,
+                        f32::from(bounds.size.height) / 2. - center_y * z,
+                    ),
+                    z,
+                    bounds.size,
+                    content,
+                );
+            }
+            // Settle the view on the toggled box and the boxes that shared the screen
+            // with it. Fit that rect, but only ever zoom out: a node opening smaller
+            // than the current zoom must not blow up to fill the view, the
+            // disorienting case this avoids. Hold the rect's center fixed across the
+            // zoom change so the content does not lurch, then pan the minimum needed
+            // to seat the rect fully inside — leaving the view put when it already
+            // fits. The move is eased over a few frames (the driver below) rather than
+            // jumped.
+            if view.recenter {
+                if let Some(target) = recenter_target {
+                    let (tz, (tpx, tpy)) =
+                        settle_view(target, bounds.size, content, view.zoom, view.pan);
+                    let (z, (px, py)) = (view.zoom, view.pan);
+                    let moves = (tz - z).abs() > SETTLE_MIN_ZOOM_STEP
+                        || (tpx - px).abs() > SETTLE_MIN_PAN_STEP
+                        || (tpy - py).abs() > SETTLE_MIN_PAN_STEP;
+                    if moves {
+                        view.anim = Some(Settle {
+                            from_zoom: z,
+                            from_pan: (px, py),
+                            to_zoom: tz,
+                            to_pan: (tpx, tpy),
+                            start: Instant::now(),
+                        });
+                    }
+                }
+                view.recenter = false;
+            }
+            // Advance an in-flight settle and ask for the next frame until it lands,
+            // then snap to the target and stop, so the window returns to idle.
+            // request_animation_frame redraws even with no other change.
+            if let Some(a) = view.anim {
+                let t = (a.start.elapsed().as_secs_f32() / SETTLE_DURATION.as_secs_f32())
+                    .clamp(0.0, 1.0);
+                let e = ease_out_cubic(t);
+                view.zoom = a.from_zoom + (a.to_zoom - a.from_zoom) * e;
+                view.pan = (
+                    a.from_pan.0 + (a.to_pan.0 - a.from_pan.0) * e,
+                    a.from_pan.1 + (a.to_pan.1 - a.from_pan.1) * e,
+                );
+                if t >= 1.0 {
+                    view.anim = None;
+                } else {
+                    window.request_animation_frame();
                 }
             }
-            recenter.set(false);
-        }
-        // Advance an in-flight settle and ask for the next frame until it lands,
-        // then snap to the target and stop, so the window returns to idle.
-        // request_animation_frame redraws even with no other change.
-        if let Some(a) = anim.get() {
-            let t =
-                (a.start.elapsed().as_secs_f32() / SETTLE_DURATION.as_secs_f32()).clamp(0.0, 1.0);
-            let e = ease_out_cubic(t);
-            zoom.set(a.from_zoom + (a.to_zoom - a.from_zoom) * e);
-            pan.set((
-                a.from_pan.0 + (a.to_pan.0 - a.from_pan.0) * e,
-                a.from_pan.1 + (a.to_pan.1 - a.from_pan.1) * e,
-            ));
-            if t >= 1.0 {
-                anim.set(None);
-            } else {
-                window.request_animation_frame();
-            }
-        }
+        });
     }
 }
 
@@ -755,16 +731,16 @@ fn build_prepaint(
 fn canvas_body(
     boxes: Vec<PaintBox>,
     connectors: Vec<PaintConnector>,
-    zoom: Rc<Cell<f32>>,
-    pan: Rc<Cell<(f32, f32)>>,
     palette: Palette,
     content: (f32, f32),
     entity: Entity<GraphView>,
 ) -> impl FnOnce(Bounds<Pixels>, (), &mut Window, &mut App) {
     move |bounds, _, window, cx| {
-        let z = zoom.get();
-        let p = pan.get();
-        let camera = Camera { zoom: z, pan: p };
+        let camera = {
+            let v = entity.read(cx);
+            Camera { zoom: v.zoom, pan: v.pan }
+        };
+        let z = camera.zoom;
         for b in &boxes {
             paint_box(b, bounds, camera, &palette, window, cx);
         }
@@ -821,20 +797,20 @@ fn drag_pan(view: &mut GraphView, event: &MouseMoveEvent, cx: &mut Context<Graph
     if traveled > CLICK_SLOP {
         view.moved = true;
     }
-    let (px, py) = view.view_state.pan.get();
+    let (px, py) = view.pan;
     let dx = f32::from(event.position.x) - f32::from(view.last_mouse.x);
     let dy = f32::from(event.position.y) - f32::from(view.last_mouse.y);
     let pan = (px + dx, py + dy);
-    view.view_state.pan.set(match &view.source {
+    view.pan = match &view.source {
         Source::Loaded(g) => {
             let content = content_size(g);
-            clamp_pan(pan, view.view_state.zoom.get(), view.view_state.viewport.get().size, content)
+            clamp_pan(pan, view.zoom, view.viewport.size, content)
         }
         _ => pan,
-    });
+    };
     view.last_mouse = event.position;
     // A manual pan overrides any settle still easing.
-    view.view_state.anim.set(None);
+    view.anim = None;
     cx.notify();
 }
 
@@ -860,12 +836,8 @@ fn toggle_box_at(view: &mut GraphView, pos: Point<Pixels>, cx: &mut Context<Grap
     let Source::Loaded(g) = &view.source else {
         return;
     };
-    let vp = view.view_state.viewport.get();
-    let (gx, gy) = from_screen(
-        pos,
-        vp.origin,
-        Camera { zoom: view.view_state.zoom.get(), pan: view.view_state.pan.get() },
-    );
+    let vp = view.viewport;
+    let (gx, gy) = from_screen(pos, vp.origin, Camera { zoom: view.zoom, pan: view.pan });
     let Some(hit) = hit_box(&g.boxes, gx, gy) else {
         return;
     };
@@ -880,11 +852,8 @@ fn toggle_box_at(view: &mut GraphView, pos: Point<Pixels>, cx: &mut Context<Grap
     }
     // The boxes fully on screen now, so the relayout settles the view to keep
     // them — and the toggled box — in frame.
-    view.prev_visible = enclosed_boxes(
-        &g.boxes,
-        vp.size,
-        Camera { zoom: view.view_state.zoom.get(), pan: view.view_state.pan.get() },
-    );
+    view.prev_visible =
+        enclosed_boxes(&g.boxes, vp.size, Camera { zoom: view.zoom, pan: view.pan });
     // The relayout may drop the hovered node (it was collapsed away), which would
     // otherwise leave the whole graph dimmed until the next mouse move.
     view.hovered = None;

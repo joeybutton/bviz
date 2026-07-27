@@ -61,12 +61,7 @@ fn current_scrollbar(view: &GraphView, axis: Axis) -> Option<Scrollbar> {
         return None;
     };
     let content = content_size(g);
-    scrollbar_geom(
-        axis,
-        view.view_state.viewport.get(),
-        content,
-        Camera { zoom: view.view_state.zoom.get(), pan: view.view_state.pan.get() },
-    )
+    scrollbar_geom(axis, view.viewport, content, Camera { zoom: view.zoom, pan: view.pan })
 }
 
 /// The axis of the scroll bar whose track a press at `position` (window px) landed
@@ -84,16 +79,16 @@ fn scroll_to(view: &mut GraphView, axis: Axis, offset: f32, cx: &mut Context<Gra
         return;
     };
     let content = content_size(g);
-    let zoom = view.view_state.zoom.get();
-    let vp = view.view_state.viewport.get().size;
-    let (px, py) = view.view_state.pan.get();
+    let zoom = view.zoom;
+    let vp = view.viewport.size;
+    let (px, py) = view.pan;
     let pan = match axis {
         Axis::Vertical => (px, -offset),
         Axis::Horizontal => (-offset, py),
     };
-    view.view_state.pan.set(clamp_pan(pan, zoom, vp, content));
+    view.pan = clamp_pan(pan, zoom, vp, content);
     // A manual scroll overrides any settle still easing.
-    view.view_state.anim.set(None);
+    view.anim = None;
     cx.notify();
 }
 
