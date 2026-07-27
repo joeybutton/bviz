@@ -78,7 +78,7 @@ pub(crate) struct TimelinePanel {
     viewport: Cell<Bounds<Pixels>>,
     /// Whether the initial fit-to-window view has been set; latched during the
     /// first paint, when the viewport size is first known.
-    fitted: Cell<bool>,
+    fitted: bool,
     /// The lane vertical bar and time horizontal bar geometry, set during paint
     /// and read by mouse handlers; `None` when that axis fits.
     vbar: Cell<Option<Scrollbar>>,
@@ -117,7 +117,7 @@ impl TimelinePanel {
             view: TimeView { start_us: 0.0, px_per_us: 1.0 },
             scroll_y: 0.0,
             viewport: Cell::new(Bounds::default()),
-            fitted: Cell::new(false),
+            fitted: false,
             vbar: Cell::new(None),
             hbar: Cell::new(None),
             slice_draw: RefCell::new(None),
@@ -644,9 +644,9 @@ fn fit_prepaint(
         let old_time_w = width_of(old_bounds);
         let span = profile.span();
         parent.update(cx, |panel, _| {
-            if !panel.fitted.get() {
+            if !panel.fitted {
                 panel.view = TimeView::fit(span, time_w, EDGE_MARGIN_PX);
-                panel.fitted.set(true);
+                panel.fitted = true;
             } else if old_bounds.size.width > px(0.)
                 && (old_time_w - time_w).abs() > f32::EPSILON
             {
