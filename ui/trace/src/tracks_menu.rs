@@ -12,7 +12,6 @@ use gpui::{
     MouseMoveEvent, MouseUpEvent, Pixels, Point, Render, Rgba, ScrollHandle, SharedString,
     Subscription, WeakEntity, Window, canvas, deferred, div, point, prelude::*, px, size,
 };
-use std::cell::Cell;
 
 /// What a left-button drag over the tracks menu is currently moving.
 #[derive(Clone, Copy)]
@@ -26,8 +25,8 @@ enum MenuDrag {
 /// The tracks-visibility menu as a self-contained popover: a trigger in the
 /// gutter corner where the ruler meets the track-label column, and, when open, a
 /// filter field over a checklist of track names grouped by lane class. Owns its
-/// open, fold, filter, scroll, and drag state as plain and interior-mutable
-/// fields. Reads the visible tracks from [`TraceModel`] and writes visibility
+/// open, fold, filter, scroll, and drag state as plain fields. Reads the visible
+/// tracks from [`TraceModel`] and writes visibility
 /// there; reflows the timeline through the owning [`TraceView`].
 pub(crate) struct TracksMenu {
     /// Whether the menu is open.
@@ -45,7 +44,7 @@ pub(crate) struct TracksMenu {
     scroll: ScrollHandle,
     /// The scroll-bar geometry set during paint, read by mouse handlers; `None`
     /// when the list fits and so shows no bar.
-    bar: Cell<Option<Scrollbar>>,
+    bar: Option<Scrollbar>,
     drag: MenuDrag,
     /// Read for the visible tracks, written to toggle them.
     model: Entity<TraceModel>,
@@ -68,7 +67,7 @@ impl TracksMenu {
             filter,
             _filter_observer: filter_observer,
             scroll: ScrollHandle::new(),
-            bar: Cell::new(None),
+            bar: None,
             drag: MenuDrag::None,
             model,
             shell,
@@ -106,7 +105,7 @@ impl TracksMenu {
     /// Begins a scroll drag if `pos` hit the bar; otherwise leaves the press to
     /// fall through.
     fn press(&mut self, pos: Point<Pixels>) {
-        if let Some(bar) = self.bar.get() {
+        if let Some(bar) = self.bar {
             if bar.track_hit(pos) {
                 let grab = bar.grab(pos);
                 self.drag = MenuDrag::Thumb(grab);
@@ -117,7 +116,7 @@ impl TracksMenu {
 
     /// Maps a thumb drag back to the list's scroll offset.
     fn thumb_to(&mut self, pos: Point<Pixels>, grab: f32) {
-        if let Some(offset) = thumb_offset(self.bar.get(), pos, grab) {
+        if let Some(offset) = thumb_offset(self.bar, pos, grab) {
             set_list_thumb(&self.scroll, offset);
         }
     }
@@ -507,7 +506,7 @@ fn menu_scrollbar(
             if let Some(painted) = layout {
                 painted.paint(track, thumb, window);
             }
-            entity.read(cx).bar.set(layout);
+            entity.update(cx, |menu, _| menu.bar = layout);
             if dragging {
                 track_drag(window, &entity, menu_on_drag, menu_end_drag);
             }
