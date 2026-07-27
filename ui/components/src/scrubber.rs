@@ -3,7 +3,6 @@
 //! `fraction` to draw and receives the fraction under the cursor on press and
 //! drag, mapping it to whatever position it keeps.
 
-use std::cell::Cell;
 use std::rc::Rc;
 
 use gpui::{
@@ -38,59 +37,70 @@ impl ScrubberLayout {
 }
 
 /// A scrubber element with id `id`, filled per `colors`, placed at `fraction`.
-/// Its geometry is stashed into `layout` each layout pass so a press or drag can
-/// report the fraction under the cursor to `on_scrub`; `on_release` runs when the
-/// drag ends. Pass `active` while a drag is in progress to keep it live past the
-/// window edge.
+/// `slot` reaches the [`ScrubberLayout`] the caller keeps in its own state: the
+/// painted geometry is written there each layout pass and read back on a press or
+/// drag to report the fraction under the cursor to `on_scrub`; `on_release` runs
+/// when the drag ends. Pass `active` while a drag is in progress to keep it live
+/// past the window edge.
+///
+/// `slot` runs under a lease on `entity`, so `V` must not already be leased where
+/// this element lays out or paints — placing it inside an element whose own
+/// prepaint holds `V` open would panic.
 pub fn scrubber<V: 'static>(
     id: &'static str,
     fraction: f32,
     colors: ScrubberColors,
-    layout: Rc<Cell<Option<ScrubberLayout>>>,
+    slot: impl Fn(&mut V) -> &mut Option<ScrubberLayout> + 'static,
     entity: Entity<V>,
     active: bool,
     on_scrub: impl Fn(&mut V, f32, &mut Context<V>) + 'static,
     on_release: impl Fn(&mut V, &mut Context<V>) + 'static,
 ) -> impl IntoElement {
     let ScrubberColors { track, played, knob } = colors;
+    let slot = Rc::new(slot);
     let on_scrub = Rc::new(on_scrub);
     let on_release = Rc::new(on_release);
 
     let press_entity = entity.clone();
-    let press_layout = layout.clone();
+    let press_slot = slot.clone();
     let press_scrub = on_scrub.clone();
 
-    let stash = layout.clone();
+    let stash_entity = entity.clone();
+    let stash_slot = slot.clone();
 
     div()
         .id(id)
         .flex_1()
         .h_full()
         .on_mouse_down(MouseButton::Left, move |event: &MouseDownEvent, _, cx| {
-            if let Some(geom) = press_layout.get() {
-                let fraction = geom.fraction_at(f32::from(event.position.x));
-                press_entity.update(cx, |view, cx| press_scrub(view, fraction, cx));
-            }
+            press_entity.update(cx, |view, cx| {
+                if let Some(geom) = *press_slot(view) {
+                    let fraction = geom.fraction_at(f32::from(event.position.x));
+                    press_scrub(view, fraction, cx);
+                }
+            });
         })
         .child(
             canvas(
-                move |bounds, _, _| {
-                    stash.set(Some(ScrubberLayout {
-                        left: f32::from(bounds.origin.x),
-                        width: f32::from(bounds.size.width),
-                    }));
+                move |bounds, _, cx| {
+                    stash_entity.update(cx, |view, _| {
+                        *stash_slot(view) = Some(ScrubberLayout {
+                            left: f32::from(bounds.origin.x),
+                            width: f32::from(bounds.size.width),
+                        });
+                    });
                 },
                 move |bounds, _, window, _| {
                     paint_scrubber(bounds, fraction, track, played, knob, window);
                     if active {
                         let move_scrub = on_scrub.clone();
-                        let move_layout = layout.clone();
+                        let move_slot = slot.clone();
                         let up_release = on_release.clone();
                         track_drag(
                             window,
                             &entity,
                             move |view, event, cx| {
-                                if let Some(geom) = move_layout.get() {
+                                if let Some(geom) = *move_slot(view) {
                                     let fraction = geom.fraction_at(f32::from(event.position.x));
                                     move_scrub(view, fraction, cx);
                                 }

@@ -2,7 +2,6 @@
 //! text: the visible viewport, reflowed to the window, one shaped line per row
 //! with per-cell colors and background fills.
 
-use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use bviz_terminal::{CellPos, Replay, Scroll, SelectionType, Side, Terminal, Url};
@@ -102,7 +101,7 @@ pub struct TerminalView {
     /// Whether the scrubber thumb is being dragged.
     scrubbing: bool,
     /// The painted scrubber track geometry, set each layout for hit-testing.
-    scrubber: Rc<std::cell::Cell<Option<ScrubberLayout>>>,
+    scrubber: Option<ScrubberLayout>,
     /// The display terminal, built at the window size for [`current_frame`] and
     /// rebuilt when the frame changes.
     terminal: Option<Terminal>,
@@ -185,7 +184,7 @@ impl TerminalView {
             play_anchor: None,
             position: 0.0,
             scrubbing: false,
-            scrubber: Rc::new(std::cell::Cell::new(None)),
+            scrubber: None,
             terminal: None,
             terminal_frame: None,
             follow_bottom: true,
@@ -1041,7 +1040,7 @@ impl TerminalView {
             "scrubber",
             fraction,
             ScrubberColors { track: track_color, played: colors.text, knob: colors.text },
-            self.scrubber.clone(),
+            |this| &mut this.scrubber,
             cx.entity(),
             self.scrubbing,
             |this, fraction, cx| this.scrub_to(fraction, cx),
