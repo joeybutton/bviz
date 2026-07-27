@@ -166,6 +166,13 @@ Interactive visualization and inspection tool for Bazel builds.
   purpose, and on a handle field what this holder reads or writes through it and
   which way the coupling runs. Where the name and type already say it, write no
   comment at all.
+- A comment at a construction or call site must not repeat what the constructed
+  or called item's own doc says. The definition is where behaviour is explained;
+  echoing it where the item is used puts one fact in two hand-maintained places
+  that drift apart the first time either is edited. A comment there earns its
+  place only by adding what is true of *this* site and nowhere else — an
+  ordering constraint between two calls, why this caller passes what it passes,
+  a consequence local to this context.
 - Avoid unnamed magic numbers: bind a non-obvious literal to a named constant
   (or a `let` with a descriptive name) at its definition, so its meaning is
   stated once where the value lives. A self-evident literal in context (an index
