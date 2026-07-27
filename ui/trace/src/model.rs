@@ -49,11 +49,11 @@ pub(crate) struct TraceModel {
     /// every slice would freeze a paint) and swapped in when ready; the previous
     /// value stays shown while a rebuild runs, so a selection change doesn't
     /// blank the view.
-    aggregates: Rc<RefCell<Option<Arc<ScopeAggregate>>>>,
+    aggregates: Option<Arc<ScopeAggregate>>,
     /// The loaded profile's whole-profile flame name scan, reused across track
     /// selections; `None` until the first aggregate build scans it. Valid for any
     /// selection, so it is dropped only when a new profile loads.
-    flame_scan: Rc<RefCell<Option<Arc<TrackFlamer>>>>,
+    flame_scan: Option<Arc<TrackFlamer>>,
     /// Background-build bookkeeping for `aggregates`, keyed on
     /// `selection_version`.
     agg: Rebuild<u64>,
@@ -72,8 +72,8 @@ impl TraceModel {
             select_anchor: None,
             visible_lanes: RefCell::new(None),
             group_chrome: RefCell::new(None),
-            aggregates: Rc::new(RefCell::new(None)),
-            flame_scan: Rc::new(RefCell::new(None)),
+            aggregates: None,
+            flame_scan: None,
             agg: Rebuild::new(),
         }
     }
@@ -335,7 +335,7 @@ impl TraceModel {
     /// Reflects the previous selection while a rebuild is still running;
     /// [`Self::ensure_aggregates`] owns the (re)build.
     pub(crate) fn aggregates(&self) -> Option<Arc<ScopeAggregate>> {
-        self.aggregates.borrow().clone()
+        self.aggregates.clone()
     }
 
     /// The `selection_version` the ready aggregate reflects, if any; the stats
@@ -374,9 +374,7 @@ impl TraceModel {
         }
         let generation = self.agg.start(key);
         let selected = self.selected_tracks.clone();
-        let cached_scan = self.flame_scan.borrow().clone();
-        let aggregates = self.aggregates.clone();
-        let flame_scan = self.flame_scan.clone();
+        let cached_scan = self.flame_scan.clone();
         let task = cx.spawn(async move |model, cx| {
             let (scan, aggregate) = cx
                 .background_executor()
@@ -402,8 +400,8 @@ impl TraceModel {
                     if !m.agg.accept(generation, key) {
                         return;
                     }
-                    *flame_scan.borrow_mut() = Some(scan);
-                    *aggregates.borrow_mut() = Some(Arc::new(aggregate));
+                    m.flame_scan = Some(scan);
+                    m.aggregates = Some(Arc::new(aggregate));
                     cx.notify();
                 })
                 .ok();
@@ -416,8 +414,8 @@ impl TraceModel {
     /// profile loads — unlike a mere selection change, the old graph is no longer
     /// a valid thing to keep showing.
     pub(crate) fn invalidate_aggregates(&mut self) {
-        self.aggregates.borrow_mut().take();
-        self.flame_scan.borrow_mut().take();
+        self.aggregates = None;
+        self.flame_scan = None;
         self.agg.invalidate();
     }
 
