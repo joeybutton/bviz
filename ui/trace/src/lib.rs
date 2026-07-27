@@ -41,10 +41,11 @@ use bviz_ui_components::{
 use bviz_ui_shell::Chrome;
 use clap::Parser;
 use gpui::{
-    AnyElement, App, BorderStyle, Bounds, ContentMask, Context, Div, Entity, FocusHandle, Hsla,
-    IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Render,
-    ScrollHandle, SharedString, Stateful, Subscription, Task, TextAlign, TransformationMatrix,
-    Window, canvas, div, fill, point, prelude::*, px, quad, size,
+    AnyElement, App, AvailableSpace, BorderStyle, Bounds, ContentMask, Context, Div, Edges, Element,
+    ElementId, Entity, FocusHandle, GlobalElementId, Hsla, InspectorElementId, IntoElement, LayoutId,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Position, Render,
+    ScrollHandle, SharedString, Stateful, Style, Subscription, Task, TextAlign,
+    TransformationMatrix, Window, canvas, div, fill, point, prelude::*, px, quad, relative, size,
 };
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -349,9 +350,6 @@ impl TraceView {
         colors: &bviz_ui_theme::Colors,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let regions = self.regions(cx);
-        let origin = self.timeline.read(cx).viewport().origin;
-
         let timeline = div()
             .absolute()
             .inset_0()
@@ -376,12 +374,19 @@ impl TraceView {
         };
 
         // The tab bar spans the content column between the flame chart and the
-        // bottom panel, doubling as the panel's resize splitter.
-        let tab_bar = self.tab_bar(regions, origin, palette, colors, cx);
-        // The selected panel sits over the content column of the bottom region;
-        // the counter plots are drawn by the timeline instead.
-        let panel = self.bottom_panel(regions, origin, palette, colors, cx);
-        let gutter_handle = self.gutter_handle(regions, origin, cx);
+        // bottom panel, doubling as the panel's resize splitter. The selected
+        // panel sits over the content column of the bottom region; the counter
+        // plots are drawn by the timeline instead.
+        let mut overlays = RegionOverlays::new(self.region_inputs(cx));
+        if let Some(panel) = self.bottom_panel(palette, colors, cx) {
+            overlays = overlays.child(panel, panel_rect);
+        }
+        // The gutter handle spans the full height and so crosses both, and must
+        // take a press over either: it is placed last, and hit-testing follows
+        // paint order.
+        let overlays = overlays
+            .child(self.tab_bar(palette, colors, cx), tab_bar_rect)
+            .child(self.gutter_handle(cx), gutter_handle_rect);
         div()
             .id("trace-viewport")
             .relative()
@@ -389,28 +394,17 @@ impl TraceView {
             .overflow_hidden()
             .child(timeline)
             .child(drag_overlay)
-            .children(panel)
-            .child(tab_bar)
-            .child(gutter_handle)
+            .child(overlays)
             .child(self.tracks_menu.clone())
     }
 
     /// A thin overlay strip at the gutter's right edge that begins a width drag;
     /// a double-click resets the gutter to its default width.
-    fn gutter_handle(
-        &self,
-        regions: Regions,
-        origin: Point<Pixels>,
-        cx: &mut Context<Self>,
-    ) -> Stateful<Div> {
+    fn gutter_handle(&self, cx: &mut Context<Self>) -> Stateful<Div> {
         let drag_entity = cx.entity();
         div()
             .id("trace-gutter-handle")
-            .absolute()
-            .left(px(regions.content_left - f32::from(origin.x) - GUTTER_HANDLE_WIDTH / 2.0))
-            .top_0()
-            .w(px(GUTTER_HANDLE_WIDTH))
-            .h_full()
+            .size_full()
             .cursor_col_resize()
             .on_mouse_down(
                 MouseButton::Left,
@@ -429,13 +423,11 @@ impl TraceView {
     }
 
     /// The tab bar between the flame chart and the bottom panel: a row of tab
-    /// buttons over the content column, positioned from the last painted bounds.
-    /// A press on its background begins a panel-resize drag (double-click resets
-    /// the panel height); a tab button switches the panel.
+    /// buttons filling the rect [`RegionOverlays`] places it in. A press on its
+    /// background begins a panel-resize drag (double-click resets the panel
+    /// height); a tab button switches the panel.
     fn tab_bar(
         &self,
-        regions: Regions,
-        origin: Point<Pixels>,
         palette: Palette,
         colors: &bviz_ui_theme::Colors,
         cx: &mut Context<Self>,
@@ -471,11 +463,7 @@ impl TraceView {
             .collect();
         div()
             .id("trace-tab-bar")
-            .absolute()
-            .left(px(regions.content_left - f32::from(origin.x)))
-            .top(px(regions.tab_top - f32::from(origin.y)))
-            .w(px((regions.content_right - regions.content_left).max(0.0)))
-            .h(px(TAB_BAR_HEIGHT))
+            .size_full()
             .flex()
             .flex_row()
             .items_stretch()
@@ -518,8 +506,6 @@ impl TraceView {
     /// canvas, so it needs no overlay.
     fn bottom_panel(
         &self,
-        regions: Regions,
-        origin: Point<Pixels>,
         palette: Palette,
         colors: &bviz_ui_theme::Colors,
         cx: &mut Context<Self>,
@@ -535,11 +521,7 @@ impl TraceView {
         Some(
             div()
                 .id("trace-panel")
-                .absolute()
-                .left(px(regions.content_left - f32::from(origin.x)))
-                .top(px(regions.panel_top - f32::from(origin.y)))
-                .w(px((regions.content_right - regions.content_left).max(0.0)))
-                .h(px(regions.panel_h()))
+                .size_full()
                 .flex()
                 .flex_col()
                 .overflow_hidden()
@@ -567,28 +549,27 @@ impl TraceView {
 
     /// [`Regions`] for the current viewport (captured by the timeline), panel and
     /// gutter sizes, the loaded profile's counter count, and the flame lanes'
-    /// total height. Positions the tab bar, bottom panel, and gutter handle over
-    /// the same split the timeline paints into.
-    fn regions(&self, cx: &App) -> Regions {
-        let (n_counters, flame_total) = {
-            let model = self.model.read(cx);
-            let n_counters = match model.source() {
+    /// total height.
+    fn region_inputs(&self, cx: &App) -> RegionInputs {
+        let model = self.model.read(cx);
+        RegionInputs {
+            n_counters: match model.source() {
                 Source::Loaded(p) => p.counters().len(),
                 _ => 0,
-            };
-            let flame_total = model
+            },
+            panel_height: self.panel_height,
+            gutter_width: self.gutter_width,
+            flame_total: model
                 .lane_layout()
                 .map(|l| flame_total_height(&l))
-                .unwrap_or(0.0);
-            (n_counters, flame_total)
-        };
-        Regions::new(
-            self.timeline.read(cx).viewport(),
-            n_counters,
-            self.panel_height,
-            self.gutter_width,
-            flame_total,
-        )
+                .unwrap_or(0.0),
+        }
+    }
+
+    /// The split over the timeline's last painted viewport, for a handler that
+    /// must map the cursor to the same regions the previous frame drew.
+    fn regions(&self, cx: &App) -> Regions {
+        self.region_inputs(cx).split(self.timeline.read(cx).viewport())
     }
 
     /// Clamps the timeline's lane scroll to the current layout height after a
@@ -640,6 +621,145 @@ impl Render for TraceView {
             .title("bazel_viz trace")
             .status(self.status(cx))
             .child(body)
+    }
+}
+
+/// What [`Regions`] needs beyond the bounds it splits.
+#[derive(Clone, Copy)]
+struct RegionInputs {
+    n_counters: usize,
+    panel_height: f32,
+    gutter_width: f32,
+    flame_total: f32,
+}
+
+impl RegionInputs {
+    fn split(&self, bounds: Bounds<Pixels>) -> Regions {
+        Regions::new(
+            bounds,
+            self.n_counters,
+            self.panel_height,
+            self.gutter_width,
+            self.flame_total,
+        )
+    }
+}
+
+/// Where an overlay sits within the split, given the body's own bounds.
+type PlaceInRegions = fn(&Regions, Bounds<Pixels>) -> Bounds<Pixels>;
+
+fn tab_bar_rect(r: &Regions, _: Bounds<Pixels>) -> Bounds<Pixels> {
+    Bounds::new(
+        point(px(r.content_left), px(r.tab_top)),
+        size(px((r.content_right - r.content_left).max(0.0)), px(TAB_BAR_HEIGHT)),
+    )
+}
+
+fn panel_rect(r: &Regions, _: Bounds<Pixels>) -> Bounds<Pixels> {
+    Bounds::new(
+        point(px(r.content_left), px(r.panel_top)),
+        size(px((r.content_right - r.content_left).max(0.0)), px(r.panel_h())),
+    )
+}
+
+fn gutter_handle_rect(r: &Regions, body: Bounds<Pixels>) -> Bounds<Pixels> {
+    Bounds::new(
+        point(px(r.content_left - GUTTER_HANDLE_WIDTH / 2.0), body.origin.y),
+        size(px(GUTTER_HANDLE_WIDTH), body.size.height),
+    )
+}
+
+/// The trace body's overlays — the tab bar, the bottom panel, and the gutter
+/// handle — laid out from the body's own bounds. Each belongs at a pixel offset
+/// within the [`Regions`] split, which is defined only once the body has a size,
+/// so the split is resolved here during prepaint and each child placed against
+/// it. Styling the children from a size measured elsewhere would put them a frame
+/// behind the body they overlay, since that size is known only after a paint.
+struct RegionOverlays {
+    inputs: RegionInputs,
+    children: Vec<(AnyElement, PlaceInRegions)>,
+}
+
+impl RegionOverlays {
+    fn new(inputs: RegionInputs) -> Self {
+        Self { inputs, children: Vec::new() }
+    }
+
+    fn child(mut self, element: impl IntoElement, place: PlaceInRegions) -> Self {
+        self.children.push((element.into_any_element(), place));
+        self
+    }
+}
+
+impl IntoElement for RegionOverlays {
+    type Element = Self;
+
+    fn into_element(self) -> Self::Element {
+        self
+    }
+}
+
+impl Element for RegionOverlays {
+    type RequestLayoutState = ();
+    type PrepaintState = ();
+
+    fn id(&self) -> Option<ElementId> {
+        None
+    }
+
+    fn source_location(&self) -> Option<&'static std::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (LayoutId, ()) {
+        // The overlays cover the body without displacing the timeline beneath them.
+        let mut style = Style::default();
+        style.position = Position::Absolute;
+        style.inset = Edges::all(px(0.).into());
+        style.size.width = relative(1.).into();
+        style.size.height = relative(1.).into();
+        (window.request_layout(style, [], cx), ())
+    }
+
+    fn prepaint(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        _: &mut (),
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        let regions = self.inputs.split(bounds);
+        for (child, place) in &mut self.children {
+            let rect = place(&regions, bounds);
+            let space = size(
+                AvailableSpace::Definite(rect.size.width),
+                AvailableSpace::Definite(rect.size.height),
+            );
+            child.prepaint_as_root(rect.origin, space, window, cx);
+        }
+    }
+
+    fn paint(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        _: Bounds<Pixels>,
+        _: &mut (),
+        _: &mut (),
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        for (child, _) in &mut self.children {
+            child.paint(window, cx);
+        }
     }
 }
 
