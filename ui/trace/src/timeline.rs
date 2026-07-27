@@ -20,7 +20,6 @@ use gpui::{
     ScrollWheelEvent, Stateful, StyleRefinement, WeakEntity, Window, canvas, div,
     fill, point, prelude::*, px, size,
 };
-use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -84,7 +83,7 @@ pub(crate) struct TimelinePanel {
     vbar: Option<Scrollbar>,
     hbar: Option<Scrollbar>,
     /// The timeline's memoized culled draw list; see [`SliceDrawCache`].
-    slice_draw: RefCell<Option<SliceDrawCache>>,
+    slice_draw: Option<SliceDrawCache>,
     /// The slice under the cursor, if any, drawn as a tooltip.
     hover: Option<Hover>,
     /// The cursor position while it hovers the time-content column and no drag is
@@ -120,7 +119,7 @@ impl TimelinePanel {
             fitted: false,
             vbar: None,
             hbar: None,
-            slice_draw: RefCell::new(None),
+            slice_draw: None,
             hover: None,
             crosshair: None,
             drag: TimelineDrag::None,
@@ -139,8 +138,8 @@ impl TimelinePanel {
 
     /// Drops the memoized draw list so it re-culls when the loaded document
     /// changes.
-    pub(crate) fn reset_draw_cache(&self) {
-        self.slice_draw.borrow_mut().take();
+    pub(crate) fn reset_draw_cache(&mut self) {
+        self.slice_draw = None;
     }
 
     /// The bottom-tab selection, panel height, and gutter width the timeline
@@ -661,13 +660,13 @@ fn fit_prepaint(
 /// unless a key changed, so a repaint that leaves the profile, lane layout, time
 /// view, and viewport unchanged reuses the list rather than re-culling.
 fn cached_slices(
-    cache: &RefCell<Option<SliceDrawCache>>,
+    cache: &mut Option<SliceDrawCache>,
     profile: &Arc<Profile>,
     lanes: &Rc<LaneLayout>,
     view: TimeView,
     viewport: Viewport,
 ) -> Rc<Vec<VisibleSlice>> {
-    if let Some(c) = cache.borrow().as_ref() {
+    if let Some(c) = cache.as_ref() {
         if Arc::ptr_eq(&c.profile, profile)
             && Rc::ptr_eq(&c.lanes, lanes)
             && c.view == view
@@ -681,7 +680,7 @@ fn cached_slices(
         lanes,
         Cull { view: &view, viewport: &viewport, metrics: &METRICS, min_px: MIN_SLICE_PX },
     ));
-    *cache.borrow_mut() = Some(SliceDrawCache {
+    *cache = Some(SliceDrawCache {
         profile: profile.clone(),
         lanes: lanes.clone(),
         view,
@@ -704,7 +703,7 @@ fn slice_paint(
         let layout = &*lanes;
         let n_counters = profile.counters().len();
         let flame_total = flame_total_height(layout);
-        let (tv, scroll, gutter_width, selected, chrome, regions, show_counters, slices) = {
+        let (tv, scroll, gutter_width, selected, chrome, regions, show_counters, vp) = {
             let panel = parent.read(cx);
             let tv = panel.view;
             let scroll = panel.scroll_y;
@@ -724,9 +723,11 @@ fn slice_paint(
                 scroll_y: scroll,
             };
             let show_counters = regions.has_graph && tab == BottomTab::Counters;
-            let slices = cached_slices(&panel.slice_draw, &profile, &lanes, tv, vp);
-            (tv, scroll, gutter_width, selected, chrome, regions, show_counters, slices)
+            (tv, scroll, gutter_width, selected, chrome, regions, show_counters, vp)
         };
+        let slices = parent.update(cx, |panel, _| {
+            cached_slices(&mut panel.slice_draw, &profile, &lanes, tv, vp)
+        });
 
         let ticks = ruler_ticks(tv, regions.time_w);
         paint_gridlines(
