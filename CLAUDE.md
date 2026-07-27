@@ -156,6 +156,16 @@ Interactive visualization and inspection tool for Bazel builds.
   and is the first thing a later refactor deletes — if a comment is not
   load-bearing, leave it out. Citing an external source (paper, spec, issue) is
   fine.
+- Never document a struct by enumerating what it contains — neither a doc
+  comment on the struct that lists its own fields, nor a comment on a field
+  whose type names a struct that lists that struct's fields. The declaration
+  right below or beside the comment already gives the inventory, and the copy is
+  unverified: it goes stale the moment a field is added, renamed, or moved, and
+  a reader who trusts it is then misled about the very thing they could have
+  read directly. Document instead what the declaration cannot state — the type's
+  purpose, and on a handle field what this holder reads or writes through it and
+  which way the coupling runs. Where the name and type already say it, write no
+  comment at all.
 - Avoid unnamed magic numbers: bind a non-obvious literal to a named constant
   (or a `let` with a descriptive name) at its definition, so its meaning is
   stated once where the value lives. A self-evident literal in context (an index
