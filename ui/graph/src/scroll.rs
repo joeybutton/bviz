@@ -61,7 +61,7 @@ fn current_scrollbar(view: &GraphView, axis: Axis) -> Option<Scrollbar> {
         return None;
     };
     let content = content_size(g);
-    scrollbar_geom(axis, view.viewport, content, Camera { zoom: view.zoom, pan: view.pan })
+    scrollbar_geom(axis, view.viewport, content, view.camera())
 }
 
 /// The axis of the scroll bar whose track a press at `position` (window px) landed

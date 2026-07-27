@@ -197,6 +197,12 @@ const CLICK_SLOP: f32 = 4.0;
 const HIGHLIGHT_LINGER: Duration = Duration::from_millis(1100);
 
 impl GraphView {
+    /// The transform between graph and screen space that the paint, the
+    /// hit-tests and the scroll bars all map through.
+    fn camera(&self) -> Camera {
+        Camera { zoom: self.zoom, pan: self.pan }
+    }
+
     fn new(inputs: Vec<Input>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let focus_handle = cx.focus_handle();
         focus_handle.focus(window, cx);
@@ -452,8 +458,7 @@ impl GraphView {
         let Source::Loaded(g) = &self.source else {
             return;
         };
-        let camera = Camera { zoom: self.zoom, pan: self.pan };
-        let (gx, gy) = from_screen(e.position, self.viewport.origin, camera);
+        let (gx, gy) = from_screen(e.position, self.viewport.origin, self.camera());
         let hit = hit_box(&g.boxes, gx, gy).map(|b| b.id);
         if hit != self.hovered {
             self.hovered = hit;
@@ -642,7 +647,7 @@ struct Framing {
 impl Framing {
     fn of(view: &GraphView) -> Self {
         Framing {
-            camera: Camera { zoom: view.zoom, pan: view.pan },
+            camera: view.camera(),
             viewport: view.viewport,
             fitted: view.fitted,
             recenter: view.recenter,
@@ -786,10 +791,7 @@ fn canvas_body(
     entity: Entity<GraphView>,
 ) -> impl FnOnce(Bounds<Pixels>, (), &mut Window, &mut App) {
     move |bounds, _, window, cx| {
-        let camera = {
-            let v = entity.read(cx);
-            Camera { zoom: v.zoom, pan: v.pan }
-        };
+        let camera = entity.read(cx).camera();
         let z = camera.zoom;
         for b in &boxes {
             paint_box(b, bounds, camera, &palette, window, cx);
@@ -887,7 +889,7 @@ fn toggle_box_at(view: &mut GraphView, pos: Point<Pixels>, cx: &mut Context<Grap
         return;
     };
     let vp = view.viewport;
-    let (gx, gy) = from_screen(pos, vp.origin, Camera { zoom: view.zoom, pan: view.pan });
+    let (gx, gy) = from_screen(pos, vp.origin, view.camera());
     let Some(hit) = hit_box(&g.boxes, gx, gy) else {
         return;
     };
@@ -903,7 +905,7 @@ fn toggle_box_at(view: &mut GraphView, pos: Point<Pixels>, cx: &mut Context<Grap
     // The boxes fully on screen now, so the relayout settles the view to keep
     // them — and the toggled box — in frame.
     view.prev_visible =
-        enclosed_boxes(&g.boxes, vp.size, Camera { zoom: view.zoom, pan: view.pan });
+        enclosed_boxes(&g.boxes, vp.size, view.camera());
     // The relayout may drop the hovered node (it was collapsed away), which would
     // otherwise leave the whole graph dimmed until the next mouse move.
     view.hovered = None;
