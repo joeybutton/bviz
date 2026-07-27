@@ -6,7 +6,7 @@ pub use chrome::Chrome;
 
 use gpui::{
     App, Application, Bounds, KeyBinding, Pixels, Render, Size, TitlebarOptions, WindowBounds,
-    WindowDecorations, WindowOptions, actions, px, size,
+    WindowDecorations, WindowOptions, actions, px,
 };
 
 actions!(ui_shell, [Quit, CloseWindow, Tab, TabPrev]);
