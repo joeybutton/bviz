@@ -228,20 +228,10 @@ struct TraceView {
     /// actions (quit, close, tab) dispatch to it; the ancestor of the timeline's
     /// content focus in the focus tree.
     window_focus: FocusHandle,
-    /// The shared trace document and the selection/visibility state derived from
-    /// it. Held as an entity so the panels read one source of truth.
+    /// The one instance the four panels each hold a handle to.
     model: Entity<TraceModel>,
-    /// The flame-chart timeline: it owns its pan/zoom, lane scroll, captured
-    /// viewport, scroll bars, hover, and crosshair, reading the document from
-    /// `model` and the panel/gutter layout from this view.
     timeline: Entity<TimelinePanel>,
-    /// The aggregated flame-graph panel: it owns its zoom/pan, vertical scroll,
-    /// captured bounds, scroll bars, box layout, and hover, reading the aggregate
-    /// from `model`.
     flame: Entity<FlamePanel>,
-    /// The aggregated stats table: it owns its sort state, off-thread row order,
-    /// list scroll, scroll bar, and thumb drag, observing `model` so it re-sorts
-    /// when a fresh aggregate lands.
     stats: Entity<StatsPanel>,
     drag: Drag,
     last_mouse: Point<Pixels>,
@@ -251,9 +241,6 @@ struct TraceView {
     gutter_width: f32,
     /// Which panel the tab bar shows.
     bottom_tab: BottomTab,
-    /// The tracks-visibility menu: a gutter-corner popover that owns its open
-    /// state, filter, fold state, and scroll, reading and writing track
-    /// visibility on `model` and reflowing the timeline through this view.
     tracks_menu: Entity<TracksMenu>,
     /// Rebuilds the timeline's and flame-graph panel's cached scenes on a system
     /// appearance change so they repaint in the new palette.

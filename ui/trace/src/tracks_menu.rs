@@ -26,10 +26,9 @@ enum MenuDrag {
 /// The tracks-visibility menu as a self-contained popover: a trigger in the
 /// gutter corner where the ruler meets the track-label column, and, when open, a
 /// filter field over a checklist of track names grouped by lane class. Owns its
-/// open state, per-group fold, filter field, list scroll, scroll-bar geometry,
-/// and thumb drag as plain and interior-mutable fields. Reads the visible tracks
-/// from [`TraceModel`] and writes visibility there; reflows the timeline through
-/// the owning [`TraceView`].
+/// open, fold, filter, scroll, and drag state as plain and interior-mutable
+/// fields. Reads the visible tracks from [`TraceModel`] and writes visibility
+/// there; reflows the timeline through the owning [`TraceView`].
 pub(crate) struct TracksMenu {
     /// Whether the menu is open.
     open: bool,
@@ -48,8 +47,7 @@ pub(crate) struct TracksMenu {
     /// when the list fits and so shows no bar.
     bar: Cell<Option<Scrollbar>>,
     drag: MenuDrag,
-    /// The shared trace document and visibility state; read for the visible
-    /// tracks, written to toggle them.
+    /// Read for the visible tracks, written to toggle them.
     model: Entity<TraceModel>,
     /// The owning view, read for the gutter width and viewport that position the
     /// popover, and updated to reflow the timeline after a visibility change.

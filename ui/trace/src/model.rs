@@ -17,12 +17,10 @@ use std::sync::Arc;
 /// moved.
 pub(crate) struct AggregateBuildStarted;
 
-/// The shared trace document and the selection/visibility state derived from it:
-/// which tracks the flame chart draws and which the aggregates cover, the
-/// lane-class group collapse and show-all state, and the lane layouts cached from
-/// them. Held by [`crate::TraceView`] as an entity so a panel reads this once and
-/// the state lives in one place; the panel's own view state (scroll, hover, tabs,
-/// layers) stays on the view.
+/// The shared trace document and the selection and visibility state derived from
+/// it, plus the layouts and aggregates cached from those. Held by
+/// [`crate::TraceView`] as an entity so every panel reads one source of truth; a
+/// panel's own view state stays on the panel.
 pub(crate) struct TraceModel {
     source: Source,
     /// The full thread/counter lane layout for the loaded profile, built on first

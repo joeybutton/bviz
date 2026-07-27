@@ -146,12 +146,11 @@ enum StatsDrag {
 
 /// The graph-mode stats table as a self-contained panel: a header band of
 /// clickable, sortable columns over a scrollable, virtualized body of one row per
-/// group, reading the aggregate from [`TraceModel`]. Owns its sort state, the row
-/// order rebuilt off the UI thread, the list scroll and scroll-bar geometry, and
-/// the thumb drag as plain and interior-mutable fields.
+/// group, reading the aggregate from [`TraceModel`]. Owns its sort, scroll, and
+/// drag state as plain and interior-mutable fields.
 pub(crate) struct StatsPanel {
-    /// The shared trace document and selection state; read for the current
-    /// selection's aggregate (its stats rows) and the version its sort keys on.
+    /// Read for the current selection's aggregate and the version its sort keys
+    /// on.
     model: Entity<TraceModel>,
     /// Which column the table sorts by, and whether descending.
     stats_sort: StatsColumn,

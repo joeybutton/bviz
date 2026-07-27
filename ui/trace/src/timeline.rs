@@ -52,9 +52,8 @@ enum TimelineDrag {
 
 /// The flame-chart timeline: time on the x axis, stacked thread lanes on the y
 /// axis, the counter plots (Counters tab), the ruler, gutter, phase markers, and
-/// scroll bars. Owns the timeline's view state (pan/zoom, lane scroll, captured
-/// viewport, scroll-bar geometry, culled draw list) as plain fields, reading the
-/// document and selection from [`TraceModel`] and the panel/gutter layout from
+/// scroll bars. Owns the timeline's view state, reading the document and
+/// selection from [`TraceModel`] and the panel/gutter layout from
 /// [`TraceView`]. The expensive slice paint lives in a separate cached child
 /// ([`SliceCanvas`]) so a hover — which touches only the crosshair/tooltip
 /// overlay — replays its last scene rather than re-emitting every slice.
@@ -62,11 +61,10 @@ pub(crate) struct TimelinePanel {
     /// Focus for the trace content, so Ctrl-A (select all tracks) dispatches
     /// here; a descendant of the window focus, so the window's own actions fire.
     content_focus: FocusHandle,
-    /// The shared trace document and the selection/visibility state derived from
-    /// it: read for the document and lanes, written for selection and grouping.
+    /// Read for the document and lanes, written for selection and grouping.
     model: Entity<TraceModel>,
-    /// The owning view, read for the panel/gutter layout (heights and widths) the
-    /// timeline shares with the bottom panel and the tab bar.
+    /// The owning view, read for the panel and gutter layout the timeline shares
+    /// with the bottom panel and the tab bar.
     shell: WeakEntity<TraceView>,
     /// Horizontal time-to-pixel mapping (pan and zoom). Interior-mutable because
     /// the first-frame fit (which needs the painted width) sets it during paint.
@@ -590,8 +588,7 @@ fn timeline_end_drag(
 }
 
 /// The cached child view painting the timeline's slices and chrome. It reads the
-/// timeline's view state (time view, lane scroll, viewport, scroll-bar geometry,
-/// culled draw list) and the document and lanes through `parent`, so a hover
+/// timeline's view state and the document and lanes through `parent`, so a hover
 /// leaves its cached scene to replay.
 struct SliceCanvas {
     parent: WeakEntity<TimelinePanel>,

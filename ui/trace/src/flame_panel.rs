@@ -181,15 +181,14 @@ fn paint_flame_tooltip(
 
 /// The aggregated flame-graph panel: time-free work-class-colored boxes filling
 /// the body, zoom/pan on the x axis and vertical scroll on the y, with its own
-/// scroll bars and a hover tooltip. Owns its view state (zoom/pan, vertical
-/// scroll, captured bounds, scroll-bar geometry, culled box layout) as plain and
+/// scroll bars and a hover tooltip. Owns its view state as plain and
 /// interior-mutable fields, reading the aggregate from [`TraceModel`]. The
 /// expensive box paint lives in a separate cached child ([`FlameCanvas`]) so a
 /// hover — which touches only the tooltip overlay — replays its last scene rather
 /// than re-emitting every box.
 pub(crate) struct FlamePanel {
-    /// The shared trace document and selection state; read for the current
-    /// selection's aggregate (its flame graph) and whether a rebuild is running.
+    /// Read for the current selection's aggregate and whether a rebuild is
+    /// running.
     model: Entity<TraceModel>,
     /// Horizontal window into the aggregated flame graph's normalized width (the
     /// panel's zoom and pan); a fraction so a resize stays invertible.
@@ -577,9 +576,8 @@ fn flame_end_drag(panel: &mut FlamePanel, _: &MouseUpEvent, cx: &mut Context<Fla
 }
 
 /// The cached child view painting the flame-graph panel's boxes and scroll bars.
-/// It reads the panel's view state (zoom/pan, vertical scroll, captured bounds,
-/// scroll-bar geometry, culled box layout) and the aggregate through `parent`, so
-/// a hover leaves its cached scene to replay.
+/// It reads the panel's view state and the aggregate through `parent`, so a
+/// hover leaves its cached scene to replay.
 struct FlameCanvas {
     parent: WeakEntity<FlamePanel>,
 }
