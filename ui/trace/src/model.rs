@@ -3,10 +3,19 @@ use crate::rebuild::Rebuild;
 use crate::{METRICS, Source};
 use bviz_trace_layout::{LaneLayout, ScopeAggregate, TrackFlamer, lay_out_lanes};
 use bviz_trace_profile::{LaneClass, Profile};
-use gpui::Context;
+use gpui::{Context, EventEmitter};
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;
+
+/// A background aggregate build started for the current selection. Carried as an
+/// event rather than a notification because nothing the model exposes has
+/// changed yet — the previously built aggregate stays the shown one — so it
+/// concerns only a panel that signals the rebuild in progress. A notification
+/// would instead reach every observer, whose follow-up is written for a *replaced*
+/// aggregate: dropping memoized layouts and re-sorting for a graph that has not
+/// moved.
+pub(crate) struct AggregateBuildStarted;
 
 /// The shared trace document and the selection/visibility state derived from it:
 /// which tracks the flame chart draws and which the aggregates cover, the
@@ -58,6 +67,8 @@ pub(crate) struct TraceModel {
     /// `selection_version`.
     agg: Rebuild<u64>,
 }
+
+impl EventEmitter<AggregateBuildStarted> for TraceModel {}
 
 impl TraceModel {
     pub(crate) fn new() -> Self {
@@ -354,9 +365,10 @@ impl TraceModel {
     /// swapped in on completion, the previously built graph staying shown until
     /// then. An in-flight build whose selection the inputs have moved past is
     /// abandoned. Idempotent — a no-op once the right value is ready or being
-    /// computed. Notifies observers only when a fresh aggregate lands, so a
-    /// panel's follow-up (dropping its memoized box layout and stats order)
-    /// runs exactly once per completed build.
+    /// computed. Emits [`AggregateBuildStarted`] when it spawns a build and
+    /// notifies when one lands, so a panel showing the rebuild in progress and a
+    /// panel holding state derived from the aggregate each hear only their own
+    /// step, exactly once per build.
     pub(crate) fn ensure_aggregates(&mut self, cx: &mut Context<Self>) {
         let profile = match &self.source {
             Source::Loaded(p) => p.clone(),
@@ -373,6 +385,7 @@ impl TraceModel {
             return;
         }
         let generation = self.agg.start(key);
+        cx.emit(AggregateBuildStarted);
         let selected = self.selected_tracks.clone();
         let cached_scan = self.flame_scan.clone();
         let task = cx.spawn(async move |model, cx| {

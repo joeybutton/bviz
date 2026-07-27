@@ -80,3 +80,70 @@ impl<K: Copy + PartialEq> Rebuild<K> {
         self.r#gen += 1;
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::Rebuild;
+
+    #[test]
+    fn a_build_runs_from_its_start_until_its_result_is_accepted() {
+        let mut r: Rebuild<u64> = Rebuild::new();
+        assert!(!r.is_building());
+        assert_eq!(r.ready(), None);
+
+        let generation = r.start(1);
+        assert!(r.is_building());
+        assert!(r.is_inflight(1));
+        // Still nothing to show: whatever was shown before stays.
+        assert_eq!(r.ready(), None);
+
+        assert!(r.accept(generation, 1));
+        assert!(!r.is_building());
+        assert!(r.is_ready(1));
+    }
+
+    #[test]
+    fn a_superseded_result_is_discarded_and_leaves_the_newer_build_running() {
+        let mut r: Rebuild<u64> = Rebuild::new();
+        let stale = r.start(1);
+        let current = r.start(2);
+        // Key 1's result lands after the inputs moved on to key 2.
+        assert!(!r.accept(stale, 1));
+        assert_eq!(r.ready(), None);
+        assert!(r.is_building());
+        assert!(r.is_inflight(2));
+
+        assert!(r.accept(current, 2));
+        assert!(r.is_ready(2));
+        assert!(!r.is_building());
+    }
+
+    #[test]
+    fn cancelling_ends_the_build_and_keeps_the_ready_value() {
+        let mut r: Rebuild<u64> = Rebuild::new();
+        let first = r.start(1);
+        assert!(r.accept(first, 1));
+
+        let cancelled = r.start(2);
+        r.cancel_inflight();
+        assert!(!r.is_building());
+        assert!(r.is_ready(1));
+        // The cancelled build's late result cannot clobber the shown value.
+        assert!(!r.accept(cancelled, 2));
+        assert!(r.is_ready(1));
+    }
+
+    #[test]
+    fn invalidating_drops_readiness_and_supersedes_the_running_build() {
+        let mut r: Rebuild<u64> = Rebuild::new();
+        let first = r.start(1);
+        assert!(r.accept(first, 1));
+
+        let running = r.start(2);
+        r.invalidate();
+        assert_eq!(r.ready(), None);
+        assert!(!r.is_building());
+        assert!(!r.accept(running, 2));
+        assert_eq!(r.ready(), None);
+    }
+}

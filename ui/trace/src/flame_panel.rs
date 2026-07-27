@@ -1,5 +1,5 @@
 use crate::chart::format_duration;
-use crate::model::TraceModel;
+use crate::model::{AggregateBuildStarted, TraceModel};
 use crate::theme::{self, Palette};
 use crate::{
     BAR_WIDTH, LABEL_MIN_PX, LINE_SCROLL_PX, METRICS, MIN_SLICE_PX, SLICE_SEAM_MIN_PX,
@@ -215,6 +215,9 @@ pub(crate) struct FlamePanel {
     canvas: Entity<FlameCanvas>,
     /// Re-syncs the panel with the model's aggregate, which lands asynchronously.
     _model_observer: Subscription,
+    /// Raises the rebuild pill when a build starts, which no state the panel
+    /// renders from would otherwise reveal.
+    _build_start: Subscription,
 }
 
 impl FlamePanel {
@@ -226,6 +229,10 @@ impl FlamePanel {
             this.reset_aggregate_derived();
             this.invalidate_canvas(cx);
         });
+        // The graph the boxes and hover address is still the shown one, so the
+        // cached scene keeps replaying; only the pill outside it needs the frame.
+        let build_start =
+            cx.subscribe(&model, |_, _, _: &AggregateBuildStarted, cx| cx.notify());
         Self {
             model,
             flame_view: FlameView::FIT,
@@ -239,6 +246,7 @@ impl FlamePanel {
             last_mouse: Point::default(),
             canvas,
             _model_observer: model_observer,
+            _build_start: build_start,
         }
     }
 
