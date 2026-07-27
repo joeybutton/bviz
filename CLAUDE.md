@@ -173,6 +173,37 @@ Interactive visualization and inspection tool for Bazel builds.
   place only by adding what is true of *this* site and nowhere else — an
   ordering constraint between two calls, why this caller passes what it passes,
   a consequence local to this context.
+- Make invalid states unrepresentable rather than documenting or guarding them.
+  When a combination of fields cannot legitimately occur — an `Option` that is
+  always `Some` once some other field says so, a flag that is only meaningful
+  while a second one is set, an index valid only for one particular buffer —
+  reshape the types so the combination cannot be written: move the fields into
+  the enum variant that guarantees them, pair them in one struct, or make the
+  handle carry what it indexes. An invariant kept only by the order of a few
+  assignments is enforced by nothing; it survives until the next edit, and every
+  reader downstream must either re-derive it or take it on trust.
+  The tell is a guard for a case the author believes cannot happen — an
+  `unwrap`, an `unreachable!`, an early return unwrapping something that "will
+  always" be set, or a comment asserting a combination never occurs. A reader
+  cannot tell such a guard from a live one, so each is both dead weight and a
+  silent place for a real case to hide later. Prefer a type that removes the
+  guard to a comment that explains it.
+  Where the invariant is a property of a single value rather than a combination
+  of fields — a range, a non-empty sequence, a normalized or validated form, a
+  clamped dimension — carry it in an opaque newtype: a private inner field, a
+  constructor that performs the check and reports failure (`Result`/`Option`) or
+  coerces into range, and an API whose every operation either preserves the
+  property or is itself fallible. The check then happens once, where the value
+  enters, and every function downstream receives the invariant as a given
+  instead of re-checking it or trusting a comment. Expose no route back — no
+  public field, no `From<Inner>` — that would let a caller mint an unchecked
+  value, or the guarantee is only advisory.
+  This is not a licence to invent elaborate type machinery: the reshaping should
+  make the code shorter and the guards fewer. If encoding an invariant in the
+  types costs more than it removes — deep generics, a state machine of marker
+  types, a conversion at every use — state the invariant once at the definition
+  and keep the guard, but reach for that after the reshaping and the newtype,
+  not before them.
 - Avoid unnamed magic numbers: bind a non-obvious literal to a named constant
   (or a `let` with a descriptive name) at its definition, so its meaning is
   stated once where the value lives. A self-evident literal in context (an index
