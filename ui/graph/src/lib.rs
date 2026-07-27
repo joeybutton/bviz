@@ -82,11 +82,25 @@ struct Palette {
     background: Rgba,
 }
 
+/// A graph that finished loading, in the form every later relayout starts from.
+struct Loaded {
+    laid_out: LaidOut,
+    /// The built (pre-quotient) graph, cached so toggling a group re-lays-out
+    /// without re-reading or re-parsing the proto.
+    base: Graph,
+    /// The base with its transitively-redundant edges removed, cached so the
+    /// reduced view's edges are a stable projection of one fixed skeleton.
+    reduced_base: Graph,
+    /// The interned node-id table the base graph keys on, threaded into each
+    /// relayout so the quotient pass can mint group ids.
+    names: Names,
+}
+
 /// The loaded graph, a load in progress, or a message explaining why none is
 /// shown.
 enum Source {
     Loading,
-    Loaded(LaidOut),
+    Loaded(Loaded),
     Message(String),
 }
 
@@ -136,16 +150,6 @@ struct GraphView {
     press: Point<Pixels>,
     /// The scroll-bar drag in progress, or `None` when no thumb is held.
     scroll_drag: Option<ScrollDrag>,
-    /// The built (pre-quotient) graph, cached so toggling a group re-lays-out
-    /// without re-reading or re-parsing the proto. `None` until the load lands.
-    base: Option<Graph>,
-    /// The base with its transitively-redundant edges removed, cached so the
-    /// reduced view's edges are a stable projection of one fixed skeleton.
-    reduced_base: Option<Graph>,
-    /// The interned node-id table the base graph keys on, threaded into each
-    /// relayout so the quotient pass can mint group ids. `None` until the load
-    /// lands.
-    names: Option<Names>,
     /// Container and group ids currently expanded; every other container folds
     /// its subtree away so the layout only processes the visible view.
     expanded: HashSet<Id>,
@@ -203,6 +207,14 @@ impl GraphView {
         Camera { zoom: self.zoom, pan: self.pan }
     }
 
+    /// The layout being drawn, or `None` while loading or after a failure.
+    fn laid_out(&self) -> Option<&LaidOut> {
+        match &self.source {
+            Source::Loaded(loaded) => Some(&loaded.laid_out),
+            _ => None,
+        }
+    }
+
     fn new(inputs: Vec<Input>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let focus_handle = cx.focus_handle();
         focus_handle.focus(window, cx);
@@ -228,10 +240,12 @@ impl GraphView {
                     Ok((graph, reduced, names, expanded, laid_out)) => {
                         view.expandable = bviz_graph_layout::lod::expandable_containers(&graph);
                         view.expanded = expanded;
-                        view.base = Some(graph);
-                        view.reduced_base = Some(reduced);
-                        view.names = Some(names);
-                        Source::Loaded(laid_out)
+                        Source::Loaded(Loaded {
+                            laid_out,
+                            base: graph,
+                            reduced_base: reduced,
+                            names,
+                        })
                     }
                     Err(err) => Source::Message(err),
                 };
@@ -251,9 +265,6 @@ impl GraphView {
             last_mouse: Point::default(),
             press: Point::default(),
             scroll_drag: None,
-            base: None,
-            reduced_base: None,
-            names: None,
             expanded: HashSet::new(),
             expandable: HashSet::new(),
             recent: None,
@@ -272,32 +283,25 @@ impl GraphView {
     /// UI thread and swaps in the result, leaving zoom, pan, and the fit flag
     /// untouched so the view stays put across a toggle.
     fn retoggle(&mut self, cx: &mut Context<Self>) {
-        let Some(graph) = self.base.clone() else {
+        let Source::Loaded(loaded) = &self.source else {
             return;
         };
-        let Some(reduced_base) = self.reduced_base.clone() else {
-            return;
-        };
-        // The background relayout mints group ids against the interned-name table,
-        // so it gets a clone to extend and returns it; the view adopts that
-        // accumulated table when the task lands. Cloning (rather than moving the
-        // table out) keeps a superseded toggle's table from stranding the slot, so
-        // a fresh toggle can still cancel and replace an in-flight relayout.
-        let Some(mut names) = self.names.clone() else {
-            return;
-        };
+        let base = loaded.base.clone();
+        let reduced_base = loaded.reduced_base.clone();
+        // The relayout mints group ids against the interned-name table, so it
+        // extends a clone and hands it back for the view to adopt.
+        let mut names = loaded.names.clone();
         let expanded = self.expanded.clone();
         let reduced = self.reduced;
         self.relaying = true;
         self._load_task = load_in_background(
             cx,
             move || {
-                let laid_out = relayout(&graph, &reduced_base, &expanded, &mut names, reduced);
-                (laid_out, names)
+                let laid_out = relayout(&base, &reduced_base, &expanded, &mut names, reduced);
+                Loaded { laid_out, base, reduced_base, names }
             },
-            |view, (laid_out, names), cx| {
-                view.names = Some(names);
-                view.source = Source::Loaded(laid_out);
+            |view, loaded, cx| {
+                view.source = Source::Loaded(loaded);
                 view.recenter = true;
                 view.relaying = false;
                 view.highlight_recent(cx);
@@ -410,7 +414,7 @@ impl GraphView {
 
     fn status(&self) -> String {
         match &self.source {
-            Source::Loaded(g) => format!(
+            Source::Loaded(Loaded { laid_out: g, .. }) => format!(
                 "{} boxes · {} connectors · {}×{}",
                 g.boxes.len(),
                 g.connectors.len(),
@@ -455,7 +459,7 @@ impl GraphView {
         if self.dragging {
             return;
         }
-        let Source::Loaded(g) = &self.source else {
+        let Some(g) = self.laid_out() else {
             return;
         };
         let (gx, gy) = from_screen(e.position, self.viewport.origin, self.camera());
@@ -470,9 +474,8 @@ impl GraphView {
         // Anchor the zoom at the cursor: keep the content point under the cursor
         // fixed as the scale changes. The minimum zoom is the fit, so the graph
         // can't be zoomed out of view.
-        let content = match &self.source {
-            Source::Loaded(g) => content_size(g),
-            _ => return,
+        let Some(content) = self.laid_out().map(content_size) else {
+            return;
         };
         let vp = self.viewport;
         let lx = f32::from(e.position.x) - f32::from(vp.origin.x);
@@ -517,7 +520,7 @@ impl Render for GraphView {
             background: colors.background,
         };
         let body = match &self.source {
-            Source::Loaded(g) => div()
+            Source::Loaded(Loaded { laid_out: g, .. }) => div()
                 .flex_1()
                 .flex()
                 .overflow_hidden()
@@ -853,12 +856,9 @@ fn drag_pan(view: &mut GraphView, event: &MouseMoveEvent, cx: &mut Context<Graph
     let dx = f32::from(event.position.x) - f32::from(view.last_mouse.x);
     let dy = f32::from(event.position.y) - f32::from(view.last_mouse.y);
     let pan = (px + dx, py + dy);
-    view.pan = match &view.source {
-        Source::Loaded(g) => {
-            let content = content_size(g);
-            clamp_pan(pan, view.zoom, view.viewport.size, content)
-        }
-        _ => pan,
+    view.pan = match view.laid_out().map(content_size) {
+        Some(content) => clamp_pan(pan, view.zoom, view.viewport.size, content),
+        None => pan,
     };
     view.last_mouse = event.position;
     // A manual pan overrides any settle still easing.
@@ -885,7 +885,9 @@ fn end_drag(view: &mut GraphView, event: &MouseUpEvent, cx: &mut Context<GraphVi
 /// Open or close the container (or group) box under `pos` (window px) and settle
 /// the view to keep it in frame.
 fn toggle_box_at(view: &mut GraphView, pos: Point<Pixels>, cx: &mut Context<GraphView>) {
-    let Source::Loaded(g) = &view.source else {
+    // Borrows one field rather than going through `laid_out`, whose `&self` would
+    // conflict with the expansion set this mutates while still reading the boxes.
+    let Source::Loaded(Loaded { laid_out: g, .. }) = &view.source else {
         return;
     };
     let vp = view.viewport;
