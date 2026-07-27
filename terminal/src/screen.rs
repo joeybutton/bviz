@@ -20,10 +20,9 @@ use crate::{build_term, snapshot_rows};
 const INTERNAL_ROWS: usize = 100;
 
 /// The final terminal state: rows from the top of scrollback history down to the
-/// last non-blank screen line, each `columns` cells wide. Cells are
-/// `alacritty_terminal`'s, carrying their character, colors, and style flags.
+/// last non-blank screen line. Cells are `alacritty_terminal`'s, carrying their
+/// character, colors, and style flags.
 pub struct Screen {
-    pub columns: usize,
     pub rows: Vec<Vec<Cell>>,
 }
 
@@ -70,7 +69,7 @@ impl Screen {
         while rows.last().is_some_and(|row| is_blank(row)) {
             rows.pop();
         }
-        Screen { columns, rows }
+        Screen { rows }
     }
 
     /// The plain text of the screen, one line per row with trailing blanks trimmed.
@@ -238,7 +237,9 @@ mod tests {
     fn renders_final_build_output() {
         let output = parse(SAMPLE).expect("parse sample stream");
         let screen = Screen::from_output(&output);
-        assert_eq!(screen.columns, 100);
+        // The emulator was sized to the width the stream reported, so every
+        // retained row spans it.
+        assert!(screen.rows.iter().all(|row| row.len() == 100));
 
         // The build finished, so its concluding line survives into the grid.
         let text = screen.text();
