@@ -393,6 +393,43 @@ the graph keeps the viewport `bounds`), then in the mouse handler invert the sam
 the paint used: the terminal's `cell_at` maps a pixel to a grid cell, the graph's
 `from_screen` + `hit_box` map a pixel to the innermost box.
 
+**Geometry measured by a paint is for hit-testing, never for layout.** Stashing the
+painted bounds on the view is right for a mouse handler: it runs between frames, and the
+geometry the user clicked is exactly the geometry last painted. Styling a *sibling*
+element from that same stash is not. Sizes are resolved during layout, which runs before
+any paint, so an element positioned from a measured field is a frame behind whatever it
+overlays — and on the first frame there is no measurement at all, so it renders at a
+degenerate position (everything stacked at the origin). Whether a corrective frame ever
+arrives is incidental: it takes some unrelated `cx.notify()`, which makes the opening
+frame right or wrong depending on timing rather than on the code.
+
+When a child's placement depends on the parent's own size, put the placement in a custom
+`Element`. Its `prepaint` receives `bounds`, which is where the geometry is first known
+and still early enough to lay children out:
+
+```rust
+fn prepaint(&mut self, .., bounds: Bounds<Pixels>, .., window, cx) {
+    for (child, place) in &mut self.children {
+        let rect = place(bounds);
+        let space = size(
+            AvailableSpace::Definite(rect.size.width),
+            AvailableSpace::Definite(rect.size.height),
+        );
+        child.prepaint_as_root(rect.origin, space, window, cx);   // AnyElement
+    }
+}
+fn paint(&mut self, ..) {
+    for (child, _) in &mut self.children { child.paint(window, cx); }
+}
+```
+
+The children then carry no position of their own — `size_full()` inside the rect they are
+given. `request_layout` returns a `Style` with `position: Absolute` and `inset` 0 so the
+container overlays its siblings rather than displacing them. Placement order is paint
+order is hit-test order, so a child that must win a press over another goes last.
+`RegionOverlays` in `ui/trace/src/lib.rs` places a tab bar, a bottom panel, and a drag
+handle this way.
+
 ## View state: plain fields, not `Cell`/`RefCell`/`Rc`
 
 **Default to plain fields.** `Render::render(&mut self, ..)`, every `cx.listener` handler,
@@ -551,6 +588,7 @@ Resolve the binary with `bazel cquery --output=files //path:target` after buildi
 - The element tree is rebuilt every render — hold `Entity<_>` references, never element ones.
 - A `canvas`/`Element` paint closure is `'static` — capture owned snapshots, not view borrows.
 - A `Cell`/`RefCell` on a view field is usually avoidable — a prepaint/paint closure holds `&mut App`, so it can `parent.update(..)` and write a plain field.
+- Styling an element from bounds a paint measured puts it a frame behind, and at the origin on the first frame — place children from a custom `Element`'s prepaint instead.
 - A background `Task` you don't store is cancelled on drop — keep it in a view field.
 - An element's mouse handlers stop at the window edge — use `track_drag` for a drag that must continue outside.
 - gpui's executor is not tokio — a `reqwest`/`tonic`/SDK future run directly on it panics "no reactor running"; bridge it through a tokio runtime (see the tokio/rayon section).
