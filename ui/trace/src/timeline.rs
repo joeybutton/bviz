@@ -75,7 +75,7 @@ pub(crate) struct TimelinePanel {
     scroll_y: f32,
     /// Viewport bounds captured during canvas paint, so handlers can map a window
     /// cursor to viewport space and bound the zoom to a fit.
-    viewport: Cell<Bounds<Pixels>>,
+    viewport: Bounds<Pixels>,
     /// Whether the initial fit-to-window view has been set; latched during the
     /// first paint, when the viewport size is first known.
     fitted: bool,
@@ -116,7 +116,7 @@ impl TimelinePanel {
             shell,
             view: TimeView { start_us: 0.0, px_per_us: 1.0 },
             scroll_y: 0.0,
-            viewport: Cell::new(Bounds::default()),
+            viewport: Bounds::default(),
             fitted: false,
             vbar: Cell::new(None),
             hbar: Cell::new(None),
@@ -157,7 +157,7 @@ impl TimelinePanel {
 
     /// The viewport bounds last captured during paint.
     pub(crate) fn viewport(&self) -> Bounds<Pixels> {
-        self.viewport.get()
+        self.viewport
     }
 
     /// [`Regions`] for the current viewport, panel and gutter sizes, the loaded
@@ -176,7 +176,7 @@ impl TimelinePanel {
             (n_counters, flame_total)
         };
         let (_, panel_height, gutter_width) = self.shell_layout(cx);
-        Regions::new(self.viewport.get(), n_counters, panel_height, gutter_width, flame_total)
+        Regions::new(self.viewport, n_counters, panel_height, gutter_width, flame_total)
     }
 
     /// The pixel ceiling for the lane scroll: the thread-lane height past the
@@ -629,12 +629,7 @@ fn fit_prepaint(
     gutter_width: f32,
 ) -> impl FnOnce(Bounds<Pixels>, &mut Window, &mut App) {
     move |bounds: Bounds<Pixels>, _: &mut Window, cx: &mut App| {
-        let old_bounds = {
-            let panel = parent.read(cx);
-            let old_bounds = panel.viewport.get();
-            panel.viewport.set(bounds);
-            old_bounds
-        };
+        let old_bounds = parent.read(cx).viewport;
         let flame_total = flame_total_height(&lanes);
         let width_of = |b| {
             Regions::new(b, profile.counters().len(), panel_height, gutter_width, flame_total)
@@ -644,6 +639,7 @@ fn fit_prepaint(
         let old_time_w = width_of(old_bounds);
         let span = profile.span();
         parent.update(cx, |panel, _| {
+            panel.viewport = bounds;
             if !panel.fitted {
                 panel.view = TimeView::fit(span, time_w, EDGE_MARGIN_PX);
                 panel.fitted = true;
