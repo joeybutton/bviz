@@ -223,7 +223,6 @@ impl FlamePanel {
     pub(crate) fn new(model: Entity<TraceModel>, cx: &mut Context<Self>) -> Self {
         let parent = cx.entity().downgrade();
         let canvas = cx.new(|_| FlameCanvas { parent });
-        // The model notifies only when a background aggregate build lands.
         let model_observer = cx.observe(&model, |this, _, cx| {
             this.reset_aggregate_derived();
             this.invalidate_canvas(cx);

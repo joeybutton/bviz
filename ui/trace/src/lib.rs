@@ -262,31 +262,21 @@ impl TraceView {
             |view, result, cx| view.on_profile_loaded(result, cx),
         );
         let model = cx.new(|_| TraceModel::new());
-        // The flame-chart timeline owns its own view state and content focus, and
-        // holds the Ctrl-A action; it reads the document from `model` and the
-        // panel/gutter layout from this view.
+        // A panel that reaches back here takes a weak handle, so the shell's own
+        // handle to it is what keeps it alive.
         let timeline = {
             let shell = cx.entity().downgrade();
             let model = model.clone();
             cx.new(|cx| TimelinePanel::new(model, shell, window, cx))
         };
-        // The aggregated flame-graph panel owns its own view state and observes the
-        // model so it rebuilds its boxes when a fresh aggregate lands; it reads the
-        // aggregate from `model`.
         let flame = {
             let model = model.clone();
             cx.new(|cx| FlamePanel::new(model, cx))
         };
-        // The aggregated stats table owns its own sort/scroll state and observes
-        // the model so it re-sorts when a fresh aggregate lands; it reads the
-        // aggregate from `model`.
         let stats = {
             let model = model.clone();
             cx.new(|cx| StatsPanel::new(model, cx))
         };
-        // The tracks-visibility menu owns its open/fold/filter/scroll state; it
-        // reads and writes visibility on `model` and reflows the timeline through
-        // this view.
         let tracks_menu = {
             let shell = cx.entity().downgrade();
             let model = model.clone();

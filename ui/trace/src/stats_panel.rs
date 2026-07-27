@@ -176,10 +176,10 @@ pub(crate) struct StatsPanel {
 
 impl StatsPanel {
     pub(crate) fn new(model: Entity<TraceModel>, cx: &mut Context<Self>) -> Self {
-        // The model notifies only when a background aggregate build lands. Kick the
-        // re-sort here rather than waiting for a render, so the order stays current
-        // even while the Stats tab is hidden — switching to it then shows the sorted
-        // rows without a rebuild, instead of a stale flash or spinner.
+        // Kick the re-sort here rather than waiting for a render, so the order
+        // stays current even while the Stats tab is hidden — switching to it then
+        // shows the sorted rows without a rebuild, instead of a stale flash or
+        // spinner.
         let model_observer = cx.observe(&model, |this, _, cx| {
             this.ensure_stats_order(cx);
             cx.notify();
