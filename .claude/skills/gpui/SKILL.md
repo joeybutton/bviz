@@ -31,7 +31,7 @@ behaves consistently:
   text metrics, single-run line shaping, Phosphor icons.
 - `bviz_ui_theme::{colors, mix}` — appearance-aware palette and a blend helper.
 
-The sections below cover each in context. `ui/terminal/src/terminal.rs` and
+The sections below cover each in context. `ui/terminal/src/terminal/` and
 `ui/graph/src/main.rs` are the worked examples for everything here; read them rather
 than reinventing a pattern they already show.
 
@@ -293,7 +293,7 @@ drawn thumb:
   delay with `cx.spawn` + `cx.background_executor().timer(..)`; guard the hide with a
   reveal counter so a later reveal isn't undone by an earlier timer firing.
 
-The terminal's scroll bar (`ui/terminal/src/terminal.rs`) implements all of this.
+The terminal's scroll bar (`ui/terminal/src/terminal/mod.rs`) implements all of this.
 
 **Wheel modifiers need window focus — and on Wayland an unfocused window CANNOT get them.**
 `wl_pointer.axis` (scroll) carries no modifier field; modifier state rides only on
@@ -383,12 +383,12 @@ state types and three methods:
 - `paint(.., bounds, &mut RequestLayoutState, &mut PrepaintState, ..)` — drain those
   quads and lines onto the window.
 
-`id()` / `source_location()` return `None`. The terminal (`ui/terminal/src/terminal.rs`:
+`id()` / `source_location()` return `None`. The terminal (`ui/terminal/src/terminal/element.rs`:
 `TerminalElement`) is the worked example; the text field's `TextElement` is another.
 
 **Hit-testing.** A `canvas`/`Element` paints one surface, so gpui's per-`div`
 `on_click`/`hover` don't reach what's inside it — hit-test by hand. Store the painted
-geometry on the view each layout (the terminal keeps a `ContentLayout` / `ScrollbarLayout`;
+geometry on the view each layout (the terminal keeps a `ContentLayout`;
 the graph keeps the viewport `bounds`), then in the mouse handler invert the same transform
 the paint used: the terminal's `cell_at` maps a pixel to a grid cell, the graph's
 `from_screen` + `hit_box` map a pixel to the innermost box.
@@ -468,12 +468,14 @@ Reach for a cell only for a writer with no path to `&mut App` or `&mut self` at 
   parent-only notify.
 - **`deferred(child)` is paint *ordering* only** — it draws its subtree on top, for overlays and
   popups. It has nothing to do with caching.
-- **Worked examples in this repo.** `ui/trace/src/lib.rs` `SliceLayer` (timeline slices cached;
-  crosshair/tooltip live in the parent; `invalidate_chart` notifies the layer) and
-  `ui/trace/src/flame_graph.rs` `FlameLayer` (flame boxes cached; tooltip overlay;
-  `invalidate_flame`). A complementary `SliceDrawCache` (also in `lib.rs`) memoizes the *cull*
-  list — which slices are visible — keyed by viewport; it avoids re-culling but not re-painting,
-  so it is a separate, view-held cache from the cached child view that avoids re-painting.
+- **Worked examples in this repo.** `ui/trace/src/timeline.rs` `SliceCanvas` (timeline slices
+  cached; crosshair/tooltip live in the parent's `overlay_paint`) and
+  `ui/trace/src/flame_panel.rs` `FlameCanvas` (flame boxes cached; tooltip overlay). Each panel
+  routes every content change through its own `invalidate_canvas`, which notifies the cached
+  child as well as the parent. A complementary `SliceDrawCache` (in `timeline.rs`) memoizes the
+  *cull* list — which slices are visible — keyed by viewport; it avoids re-culling but not
+  re-painting, so it is a separate, view-held cache from the cached child view that avoids
+  re-painting.
 
 ## Background work: loading off the UI thread
 
