@@ -66,9 +66,11 @@ pub(crate) struct TimelinePanel {
     /// The owning view, read for the panel and gutter layout the timeline shares
     /// with the bottom panel and the tab bar.
     shell: WeakEntity<TraceView>,
-    /// Horizontal time-to-pixel mapping (pan and zoom). Interior-mutable because
-    /// the first-frame fit (which needs the painted width) sets it during paint.
-    view: Cell<TimeView>,
+    /// Horizontal time-to-pixel mapping (pan and zoom). Prepaint settles it
+    /// against the painted width — the fit, the resize rescale, and the zoom
+    /// floor all need a width the panel learns only there — and the same frame's
+    /// paint then reads the result.
+    view: TimeView,
     /// How far the lanes are scrolled up, in pixels.
     scroll_y: f32,
     /// Viewport bounds captured during canvas paint, so handlers can map a window
@@ -112,7 +114,7 @@ impl TimelinePanel {
             content_focus,
             model,
             shell,
-            view: Cell::new(TimeView { start_us: 0.0, px_per_us: 1.0 }),
+            view: TimeView { start_us: 0.0, px_per_us: 1.0 },
             scroll_y: 0.0,
             viewport: Cell::new(Bounds::default()),
             fitted: Cell::new(false),
@@ -257,7 +259,7 @@ impl TimelinePanel {
             return None;
         }
         let depth = ((content_y - rows_top) / METRICS.row_height) as u32;
-        let view = self.view.get();
+        let view = self.view;
         let cursor_px = x - regions.content_left;
         let slices = profile.slices(&profile.threads()[lane.track]);
         let upper = slices.partition_point(|s| view.x_of(s.start_us) <= cursor_px);
@@ -365,7 +367,7 @@ impl TimelinePanel {
     }
 
     /// Maps a horizontal thumb drag back to a pan start time, then clamps the view.
-    fn pan_thumb_to(&self, pos: Point<Pixels>, grab: f32, cx: &App) {
+    fn pan_thumb_to(&mut self, pos: Point<Pixels>, grab: f32, cx: &App) {
         if self.model.read(cx).lane_layout().is_none() {
             return;
         }
@@ -378,13 +380,11 @@ impl TimelinePanel {
         let Some(offset) = thumb_offset(&self.hbar, pos, grab) else {
             return;
         };
-        let mut v = self.view.get();
         // The bar's offset is measured from the span start less the reachable
         // margin, so map it back through the same shift before clamping.
-        let margin_us = EDGE_MARGIN_PX / v.px_per_us as f32;
-        v.start_us = (span.start_us as f32 - margin_us) as f64 + offset as f64;
-        v.clamp_to(span, regions.time_w, EDGE_MARGIN_PX);
-        self.view.set(v);
+        let margin_us = EDGE_MARGIN_PX / self.view.px_per_us as f32;
+        self.view.start_us = (span.start_us as f32 - margin_us) as f64 + offset as f64;
+        self.view.clamp_to(span, regions.time_w, EDGE_MARGIN_PX);
     }
 
     fn on_scroll_wheel(&mut self, e: &ScrollWheelEvent, _: &mut Window, cx: &mut Context<Self>) {
@@ -406,13 +406,12 @@ impl TimelinePanel {
         if e.modifiers.control || e.modifiers.platform {
             let rel_x = f32::from(e.position.x) - content_left;
             let dy_lines = dy / LINE_SCROLL_PX;
-            let mut v = self.view.get();
-            v.zoom_at(rel_x, ZOOM_PER_NOTCH.powf(dy_lines as f64));
-            v.px_per_us = v
+            self.view.zoom_at(rel_x, ZOOM_PER_NOTCH.powf(dy_lines as f64));
+            self.view.px_per_us = self
+                .view
                 .px_per_us
                 .clamp(fit_px_per_us(span, time_w, EDGE_MARGIN_PX), MAX_PX_PER_US);
-            v.clamp_to(span, time_w, EDGE_MARGIN_PX);
-            self.view.set(v);
+            self.view.clamp_to(span, time_w, EDGE_MARGIN_PX);
         } else {
             let (pan_dx, scroll_dy) = if e.modifiers.shift {
                 (dx + dy, 0.0)
@@ -421,10 +420,8 @@ impl TimelinePanel {
             };
             let scrolled = (self.scroll_y - scroll_dy).clamp(0.0, self.max_scroll(cx));
             self.scroll_y = scrolled;
-            let mut v = self.view.get();
-            v.pan_px(pan_dx);
-            v.clamp_to(span, time_w, EDGE_MARGIN_PX);
-            self.view.set(v);
+            self.view.pan_px(pan_dx);
+            self.view.clamp_to(span, time_w, EDGE_MARGIN_PX);
         }
         self.invalidate_canvas(cx);
     }
@@ -563,10 +560,8 @@ fn timeline_on_drag(
             };
             let span = profile.span();
             let regions = panel.regions(cx);
-            let mut v = panel.view.get();
-            v.pan_px(dx);
-            v.clamp_to(span, regions.time_w, EDGE_MARGIN_PX);
-            panel.view.set(v);
+            panel.view.pan_px(dx);
+            panel.view.clamp_to(span, regions.time_w, EDGE_MARGIN_PX);
             let scrolled = (panel.scroll_y - dy).clamp(0.0, panel.max_scroll(cx));
             panel.scroll_y = scrolled;
             panel.last_mouse = event.position;
@@ -634,41 +629,35 @@ fn fit_prepaint(
     gutter_width: f32,
 ) -> impl FnOnce(Bounds<Pixels>, &mut Window, &mut App) {
     move |bounds: Bounds<Pixels>, _: &mut Window, cx: &mut App| {
-        let panel = parent.read(cx);
-        let old_bounds = panel.viewport.get();
-        panel.viewport.set(bounds);
+        let old_bounds = {
+            let panel = parent.read(cx);
+            let old_bounds = panel.viewport.get();
+            panel.viewport.set(bounds);
+            old_bounds
+        };
         let flame_total = flame_total_height(&lanes);
-        let regions = Regions::new(
-            bounds,
-            profile.counters().len(),
-            panel_height,
-            gutter_width,
-            flame_total,
-        );
-        let time_w = regions.time_w;
+        let width_of = |b| {
+            Regions::new(b, profile.counters().len(), panel_height, gutter_width, flame_total)
+                .time_w
+        };
+        let time_w = width_of(bounds);
+        let old_time_w = width_of(old_bounds);
         let span = profile.span();
-        if !panel.fitted.get() {
-            panel.view.set(TimeView::fit(span, time_w, EDGE_MARGIN_PX));
-            panel.fitted.set(true);
-        } else {
-            let old_time_w = Regions::new(
-                old_bounds,
-                profile.counters().len(),
-                panel_height,
-                gutter_width,
-                flame_total,
-            )
-            .time_w;
-            if old_bounds.size.width > px(0.) && (old_time_w - time_w).abs() > f32::EPSILON {
-                let mut v = panel.view.get();
-                v.rescale_to_width(span, old_time_w, time_w, EDGE_MARGIN_PX);
-                panel.view.set(v);
+        parent.update(cx, |panel, _| {
+            if !panel.fitted.get() {
+                panel.view = TimeView::fit(span, time_w, EDGE_MARGIN_PX);
+                panel.fitted.set(true);
+            } else if old_bounds.size.width > px(0.)
+                && (old_time_w - time_w).abs() > f32::EPSILON
+            {
+                panel.view.rescale_to_width(span, old_time_w, time_w, EDGE_MARGIN_PX);
             }
-        }
-        let mut v = panel.view.get();
-        v.px_per_us = v.px_per_us.max(fit_px_per_us(span, time_w, EDGE_MARGIN_PX));
-        v.clamp_to(span, time_w, EDGE_MARGIN_PX);
-        panel.view.set(v);
+            panel.view.px_per_us = panel
+                .view
+                .px_per_us
+                .max(fit_px_per_us(span, time_w, EDGE_MARGIN_PX));
+            panel.view.clamp_to(span, time_w, EDGE_MARGIN_PX);
+        });
     }
 }
 
@@ -721,7 +710,7 @@ fn slice_paint(
         let flame_total = flame_total_height(layout);
         let (tv, scroll, gutter_width, selected, chrome, regions, show_counters, slices) = {
             let panel = parent.read(cx);
-            let tv = panel.view.get();
+            let tv = panel.view;
             let scroll = panel.scroll_y;
             let (tab, panel_height, gutter_width) = panel.shell_layout(cx);
             let (selected, chrome) = {
@@ -859,7 +848,7 @@ fn overlay_paint(
         let n_counters = profile.counters().len();
         let (tv, tab, panel_height, gutter_width, crosshair, hover, dragging) = {
             let panel = parent.read(cx);
-            let tv = panel.view.get();
+            let tv = panel.view;
             let (tab, panel_height, gutter_width) = panel.shell_layout(cx);
             (
                 tv,
