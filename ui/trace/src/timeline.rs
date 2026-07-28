@@ -136,10 +136,12 @@ impl TimelinePanel {
         cx.notify();
     }
 
-    /// Drops the memoized draw list so it re-culls when the loaded document
-    /// changes.
-    pub(crate) fn reset_draw_cache(&mut self) {
+    /// Drops the state that addresses the loaded document: the memoized draw
+    /// list, which re-culls against the new one, and the lane scroll, whose
+    /// pixels index the lane layout the old document produced.
+    pub(crate) fn reset_for_new_profile(&mut self) {
         self.slice_draw = None;
+        self.scroll_y = 0.0;
     }
 
     /// The bottom-tab selection, panel height, and gutter width the timeline

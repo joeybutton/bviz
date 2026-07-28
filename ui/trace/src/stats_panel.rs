@@ -198,10 +198,11 @@ impl StatsPanel {
 
     /// Drops the shown order and abandons any in-flight sort, so a freshly loaded
     /// profile shows the sort spinner rather than the prior selection's rows until
-    /// its aggregate lands.
+    /// its aggregate lands, and returns the body to the first row.
     pub(crate) fn reset_for_new_profile(&mut self) {
         self.stats_order = None;
         self.stats_build.invalidate();
+        set_list_thumb(&self.stats_scroll.0.borrow().base_handle, 0.0);
     }
 
     /// The graph-mode stats table: a header band of clickable, sortable columns

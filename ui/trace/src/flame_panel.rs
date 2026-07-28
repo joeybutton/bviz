@@ -265,10 +265,12 @@ impl FlamePanel {
         self.flame_hover = None;
     }
 
-    /// Resets the panel to its fit-to-window view, so a freshly loaded profile
-    /// starts from the fit rather than the prior graph's zoom.
+    /// Resets the panel to the fit-to-window view at the top of the tree, so a
+    /// freshly loaded profile starts from the fit rather than the prior graph's
+    /// zoom and scroll.
     pub(crate) fn reset_for_new_profile(&mut self) {
         self.flame_view = FlameView::FIT;
+        self.flame_scroll_y = 0.0;
         self.reset_aggregate_derived();
     }
 

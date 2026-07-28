@@ -74,10 +74,11 @@ impl TracksMenu {
         }
     }
 
-    /// Resets the view-local fold state for a freshly loaded profile. The
-    /// document-derived visibility is seeded by the model instead.
+    /// Resets the view-local fold state and list scroll for a freshly loaded
+    /// profile. The document-derived visibility is seeded by the model instead.
     pub(crate) fn reset_for_new_profile(&mut self) {
         self.collapsed_groups = default_collapsed_groups();
+        set_list_thumb(&self.scroll, 0.0);
     }
 
     /// Reflows the timeline after a visibility change: clamps its lane scroll to

@@ -316,7 +316,7 @@ impl TraceView {
     }
 
     fn on_profile_loaded(&mut self, result: Result<Profile, String>, cx: &mut Context<Self>) {
-        self.timeline.update(cx, |t, _| t.reset_draw_cache());
+        self.timeline.update(cx, |t, _| t.reset_for_new_profile());
         self.flame.update(cx, |f, _| f.reset_for_new_profile());
         // The aggregate-derived panel caches: dropped up front so a new profile
         // shows the spinner rather than the prior graph until its build lands.
