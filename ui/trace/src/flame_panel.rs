@@ -198,10 +198,6 @@ pub(crate) struct FlamePanel {
     /// map the cursor within the panel rather than the whole window; `None`
     /// until the panel has been laid out once.
     flame_bounds: Option<Bounds<Pixels>>,
-    /// The panel's vertical and horizontal bar geometry, set during paint and read
-    /// by mouse handlers; `None` when that axis fits.
-    flame_vbar: Option<Scrollbar>,
-    flame_hbar: Option<Scrollbar>,
     /// The panel's memoized box layout; see [`FlameBoxCache`].
     flame_boxes: Option<FlameBoxCache>,
     /// The box under the cursor, if any, drawn as a tooltip.
@@ -236,8 +232,6 @@ impl FlamePanel {
             flame_view: FlameView::FIT,
             flame_scroll_y: 0.0,
             flame_bounds: None,
-            flame_vbar: None,
-            flame_hbar: None,
             flame_boxes: None,
             flame_hover: None,
             drag: FlameDrag::None,
@@ -296,6 +290,40 @@ impl FlamePanel {
             width,
             height,
         })
+    }
+
+    /// The bar for the tree's rows against the visible height; none while the
+    /// layout is unknown.
+    fn vbar(&self, cx: &App) -> Option<Scrollbar> {
+        let fl = self.layout(cx)?;
+        Scrollbar::new(
+            Axis::Vertical,
+            Bounds::new(
+                point(px(fl.left + fl.width), px(fl.top)),
+                size(px(BAR_WIDTH), px(fl.height)),
+            ),
+            fl.total_h,
+            fl.height,
+            self.flame_scroll_y,
+            DEFAULT_MIN_THUMB,
+        )
+    }
+
+    /// The bar for the zoomed width against the visible width; none while the
+    /// layout is unknown.
+    fn hbar(&self, cx: &App) -> Option<Scrollbar> {
+        let fl = self.layout(cx)?;
+        Scrollbar::new(
+            Axis::Horizontal,
+            Bounds::new(
+                point(px(fl.left), px(fl.top + fl.height)),
+                size(px(fl.width), px(BAR_WIDTH)),
+            ),
+            fl.view.content_px(fl.width) as f32,
+            fl.width,
+            fl.view.scroll_px(fl.width) as f32,
+            DEFAULT_MIN_THUMB,
+        )
     }
 
     /// The pixel ceiling for the panel's vertical scroll: the tree's height past
@@ -368,7 +396,7 @@ impl FlamePanel {
     /// Begins a drag at `pos`: the vertical or horizontal scroll thumb/track if the
     /// press hit one, otherwise a pan of the panel.
     fn press(&mut self, pos: Point<Pixels>, cx: &App) {
-        if let Some(bar) = self.flame_vbar {
+        if let Some(bar) = self.vbar(cx) {
             if bar.track_hit(pos) {
                 let grab = bar.grab(pos);
                 self.drag = FlameDrag::VThumb(grab);
@@ -376,7 +404,7 @@ impl FlamePanel {
                 return;
             }
         }
-        if let Some(bar) = self.flame_hbar {
+        if let Some(bar) = self.hbar(cx) {
             if bar.track_hit(pos) {
                 let grab = bar.grab(pos);
                 self.drag = FlameDrag::HThumb(grab);
@@ -390,15 +418,14 @@ impl FlamePanel {
 
     /// Maps the vertical thumb drag back to a scroll offset.
     fn scroll_thumb_to(&mut self, pos: Point<Pixels>, grab: f32, cx: &App) {
-        if let Some(offset) = thumb_offset(self.flame_vbar, pos, grab) {
+        if let Some(offset) = thumb_offset(self.vbar(cx), pos, grab) {
             self.set_scroll_y(offset, cx);
         }
     }
 
     /// Maps a horizontal thumb drag to its normalized scroll.
     fn hthumb_to(&mut self, pos: Point<Pixels>, grab: f32, cx: &App) {
-        let (Some(offset), Some(fl)) =
-            (thumb_offset(self.flame_hbar, pos, grab), self.layout(cx))
+        let (Some(offset), Some(fl)) = (thumb_offset(self.hbar(cx), pos, grab), self.layout(cx))
         else {
             return;
         };
@@ -633,29 +660,28 @@ fn flame_paint(
     parent: Entity<FlamePanel>,
     palette: Palette,
 ) -> impl FnOnce(Bounds<Pixels>, (), &mut Window, &mut App) {
-    move |bounds, _, window, cx| {
+    move |_, _, window, cx| {
         let graph = &aggregates.flame;
         let metrics = flame_metrics();
-        let total_h = flame_height(graph, &metrics);
         // Read the panel's view state and lay out the visible window, then drop the
         // borrow before the box paint uses `cx` mutably.
-        let (scroll_y, rect, content_w, scroll_x) = {
+        let (fl, scroll_y, content_w, scroll_x, vbar, hbar) = {
             let panel = parent.read(cx);
-            let flame_view = panel.flame_view;
-            let scroll_y = panel.flame_scroll_y;
-            let rect = flame_graph_rect(bounds, total_h, flame_view);
+            let Some(fl) = panel.layout(cx) else {
+                return;
+            };
             // Lay out only the visible window, viewport-relative: the tree occupies
             // `content_w` pixels at this zoom, scrolled `scroll_x` in, so a box's x
             // is already relative to the content column's left edge. Coordinates are
             // f64 so precision holds at deep zoom.
-            let content_w = flame_view.content_px(rect.width);
-            let scroll_x = flame_view.scroll_px(rect.width);
-            (scroll_y, rect, content_w, scroll_x)
+            let content_w = fl.view.content_px(fl.width);
+            let scroll_x = fl.view.scroll_px(fl.width);
+            (fl, panel.flame_scroll_y, content_w, scroll_x, panel.vbar(cx), panel.hbar(cx))
         };
         let boxes = parent.update(cx, |panel, _| {
-            flame_boxes(&mut panel.flame_boxes, &aggregates, content_w, scroll_x, rect.width, &metrics)
+            flame_boxes(&mut panel.flame_boxes, &aggregates, content_w, scroll_x, fl.width, &metrics)
         });
-        let Rect { left, top, width, height } = rect;
+        let FlameLayout { left, top, width, height, .. } = fl;
 
         let mask = ContentMask {
             bounds: Bounds::new(point(px(left), px(top)), size(px(width), px(height))),
@@ -686,38 +712,8 @@ fn flame_paint(
             }
         });
 
-        let vlayout = Scrollbar::new(
-            Axis::Vertical,
-            Bounds::new(
-                point(px(left + width), px(top)),
-                size(px(BAR_WIDTH), px(height)),
-            ),
-            total_h,
-            height,
-            scroll_y,
-            DEFAULT_MIN_THUMB,
-        );
-        if let Some(bar) = vlayout {
+        for bar in vbar.into_iter().chain(hbar) {
             bar.paint(palette.scroll_track, palette.scroll_thumb, window);
         }
-        // The horizontal bar runs along the bottom strip reserved beneath the content.
-        let hlayout = Scrollbar::new(
-            Axis::Horizontal,
-            Bounds::new(
-                point(px(left), px(top + height)),
-                size(px(width), px(BAR_WIDTH)),
-            ),
-            content_w as f32,
-            width,
-            scroll_x as f32,
-            DEFAULT_MIN_THUMB,
-        );
-        if let Some(bar) = hlayout {
-            bar.paint(palette.scroll_track, palette.scroll_thumb, window);
-        }
-        parent.update(cx, |panel, _| {
-            panel.flame_vbar = vlayout;
-            panel.flame_hbar = hlayout;
-        });
     }
 }
