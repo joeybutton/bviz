@@ -476,6 +476,7 @@ impl TraceView {
                 cx.listener(|this, e: &MouseDownEvent, _, cx| {
                     if e.click_count == 2 {
                         this.panel_height = DEFAULT_PANEL_HEIGHT;
+                        this.clamp_timeline_scroll(cx);
                     } else {
                         this.drag = Drag::Splitter;
                         this.last_mouse = e.position;
@@ -572,17 +573,15 @@ impl TraceView {
         self.region_inputs(cx).split(self.timeline.read(cx).viewport())
     }
 
-    /// Clamps the timeline's lane scroll to the current layout height after a
-    /// visibility or collapse change. Computes the scroll ceiling from this
-    /// view's own reads and pushes it down, so no [`TimelinePanel`] method reads
-    /// this view while it is leased (as it is inside a `cx.listener`); the panel
-    /// itself would read the shell back and double-lease.
+    /// Clamps the timeline's lane scroll to the current layout height, after a
+    /// visibility or collapse change or a resize of the flame region.
     fn clamp_timeline_scroll(&mut self, cx: &mut Context<Self>) {
         let regions = self.regions(cx);
-        let max = match self.model.read(cx).lane_layout() {
-            Some(lanes) => max_lane_scroll(&lanes, &regions),
-            None => 0.0,
-        };
+        let max = self
+            .model
+            .read(cx)
+            .lane_layout()
+            .map(|lanes| max_lane_scroll(&lanes, &regions));
         self.timeline.update(cx, |t, _| t.clamp_scroll_to(max));
     }
 
@@ -784,6 +783,7 @@ fn on_drag(view: &mut TraceView, event: &MouseMoveEvent, cx: &mut Context<TraceV
                 profile.counters().len(),
                 vh,
             );
+            view.clamp_timeline_scroll(cx);
         }
         Drag::Gutter => {
             let vp = view.timeline.read(cx).viewport();

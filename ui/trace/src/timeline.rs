@@ -178,29 +178,35 @@ impl TimelinePanel {
         Regions::new(self.viewport, n_counters, panel_height, gutter_width, flame_total)
     }
 
-    /// The pixel ceiling for the lane scroll: the thread-lane height past the
-    /// flame region's on-screen height.
-    fn max_scroll(&self, cx: &App) -> f32 {
-        match self.model.read(cx).lane_layout() {
-            Some(lanes) => max_lane_scroll(&lanes, &self.regions(cx)),
-            None => 0.0,
+    /// The lane-scroll ceiling, or `None` until a lane layout exists.
+    fn max_scroll(&self, cx: &App) -> Option<f32> {
+        let lanes = self.model.read(cx).lane_layout()?;
+        Some(max_lane_scroll(&lanes, &self.regions(cx)))
+    }
+
+    /// Moves the lane scroll to `y` held within `[0, max_scroll]`, so no lane
+    /// paints past the end of the lanes; leaves the offset alone while the
+    /// ceiling is unknown.
+    fn set_scroll_y(&mut self, y: f32, cx: &App) {
+        if let Some(max) = self.max_scroll(cx) {
+            self.scroll_y = y.clamp(0.0, max);
         }
     }
 
-    /// Clamps the lane scroll to the current layout height, dropping any
-    /// overscroll a visibility or collapse change left past the new bottom.
-    /// Reads the shell for its layout, so it must not run while the shell is
-    /// leased; a leased-shell caller uses [`TraceView::clamp_timeline_scroll`],
-    /// which computes the ceiling from the shell's own reads and pushes it down
-    /// through [`Self::clamp_scroll_to`].
+    /// Pulls the standing lane offset back under the current ceiling. Reads the
+    /// shell for its layout, so it must not run while the shell is leased; a
+    /// leased-shell caller computes the ceiling from its own reads and pushes it
+    /// down through [`Self::clamp_scroll_to`].
     pub(crate) fn clamp_lane_scroll(&mut self, cx: &App) {
-        self.scroll_y = self.scroll_y.min(self.max_scroll(cx));
+        self.set_scroll_y(self.scroll_y, cx);
     }
 
-    /// Drops any lane overscroll past `max`, the scroll ceiling computed by the
-    /// caller (which holds the shell's layout without leasing this panel).
-    pub(crate) fn clamp_scroll_to(&mut self, max: f32) {
-        self.scroll_y = self.scroll_y.min(max);
+    /// Pulls the standing lane offset back under `max`, a ceiling the caller
+    /// computed; `None` leaves the offset alone.
+    pub(crate) fn clamp_scroll_to(&mut self, max: Option<f32>) {
+        if let Some(max) = max {
+            self.scroll_y = self.scroll_y.clamp(0.0, max);
+        }
     }
 
     /// Clears the slice tooltip and crosshair, so a tab switch drops them
@@ -342,7 +348,7 @@ impl TimelinePanel {
             if bar.track_hit(pos) {
                 let grab = bar.grab(pos);
                 self.drag = TimelineDrag::VThumb(grab);
-                self.scroll_thumb_to(pos, grab);
+                self.scroll_thumb_to(pos, grab, cx);
                 return;
             }
         }
@@ -359,9 +365,9 @@ impl TimelinePanel {
     }
 
     /// Maps the lane vertical thumb drag back to a scroll offset.
-    fn scroll_thumb_to(&mut self, pos: Point<Pixels>, grab: f32) {
+    fn scroll_thumb_to(&mut self, pos: Point<Pixels>, grab: f32, cx: &App) {
         if let Some(offset) = thumb_offset(self.vbar, pos, grab) {
-            self.scroll_y = offset;
+            self.set_scroll_y(offset, cx);
         }
     }
 
@@ -417,8 +423,7 @@ impl TimelinePanel {
             } else {
                 (dx, dy)
             };
-            let scrolled = (self.scroll_y - scroll_dy).clamp(0.0, self.max_scroll(cx));
-            self.scroll_y = scrolled;
+            self.set_scroll_y(self.scroll_y - scroll_dy, cx);
             self.view.pan_px(pan_dx);
             self.view.clamp_to(span, time_w, EDGE_MARGIN_PX);
         }
@@ -561,11 +566,10 @@ fn timeline_on_drag(
             let regions = panel.regions(cx);
             panel.view.pan_px(dx);
             panel.view.clamp_to(span, regions.time_w, EDGE_MARGIN_PX);
-            let scrolled = (panel.scroll_y - dy).clamp(0.0, panel.max_scroll(cx));
-            panel.scroll_y = scrolled;
+            panel.set_scroll_y(panel.scroll_y - dy, cx);
             panel.last_mouse = event.position;
         }
-        TimelineDrag::VThumb(grab) => panel.scroll_thumb_to(event.position, grab),
+        TimelineDrag::VThumb(grab) => panel.scroll_thumb_to(event.position, grab, cx),
         TimelineDrag::HThumb(grab) => panel.pan_thumb_to(event.position, grab, cx),
         TimelineDrag::None => {}
     }
@@ -616,8 +620,9 @@ impl Render for SliceCanvas {
     }
 }
 
-/// Prepaint fit: capture the painted viewport bounds, then fit the time view to
-/// the span before the first paint and, on a later width change, rescale the zoom
+/// Prepaint fit: capture the painted viewport bounds, pull the lane scroll under
+/// the ceiling those bounds imply, then fit the time view to the span before the
+/// first paint and, on a later width change, rescale the zoom
 /// relative to the window so a resize stays invertible; finally hold the fit as
 /// the zoom floor and clamp the pan to the span.
 fn fit_prepaint(
@@ -630,15 +635,17 @@ fn fit_prepaint(
     move |bounds: Bounds<Pixels>, _: &mut Window, cx: &mut App| {
         let old_bounds = parent.read(cx).viewport;
         let flame_total = flame_total_height(&lanes);
-        let width_of = |b| {
+        let regions_of = |b| {
             Regions::new(b, profile.counters().len(), panel_height, gutter_width, flame_total)
-                .time_w
         };
-        let time_w = width_of(bounds);
-        let old_time_w = width_of(old_bounds);
+        let regions = regions_of(bounds);
+        let time_w = regions.time_w;
+        let old_time_w = regions_of(old_bounds).time_w;
+        let max_scroll = max_lane_scroll(&lanes, &regions);
         let span = profile.span();
         parent.update(cx, |panel, _| {
             panel.viewport = bounds;
+            panel.clamp_scroll_to(Some(max_scroll));
             if !panel.fitted {
                 panel.view = TimeView::fit(span, time_w, EDGE_MARGIN_PX);
                 panel.fitted = true;

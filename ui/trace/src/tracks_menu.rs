@@ -81,11 +81,7 @@ impl TracksMenu {
     }
 
     /// Reflows the timeline after a visibility change: clamps its lane scroll to
-    /// the new layout height and rebuilds its scene. Runs on the shell — a
-    /// different entity than this menu — so leasing it from a menu handler that
-    /// already leases this menu does not double-lease, and the clamp reads the
-    /// shell's own fields and the timeline/model entities rather than reading
-    /// this menu back.
+    /// the new layout height and rebuilds its scene.
     fn reflow_timeline(&self, cx: &mut Context<Self>) {
         if let Some(shell) = self.shell.upgrade() {
             shell.update(cx, |tv, cx| {
