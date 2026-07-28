@@ -194,9 +194,10 @@ pub(crate) struct FlamePanel {
     flame_view: FlameView,
     /// How far the panel is scrolled down, in pixels.
     flame_scroll_y: f32,
-    /// The panel's own bounds, captured during its canvas paint, so handlers map
-    /// the cursor within the panel rather than the whole window.
-    flame_bounds: Bounds<Pixels>,
+    /// The panel's own bounds, captured during its canvas prepaint, so handlers
+    /// map the cursor within the panel rather than the whole window; `None`
+    /// until the panel has been laid out once.
+    flame_bounds: Option<Bounds<Pixels>>,
     /// The panel's vertical and horizontal bar geometry, set during paint and read
     /// by mouse handlers; `None` when that axis fits.
     flame_vbar: Option<Scrollbar>,
@@ -234,7 +235,7 @@ impl FlamePanel {
             model,
             flame_view: FlameView::FIT,
             flame_scroll_y: 0.0,
-            flame_bounds: Bounds::default(),
+            flame_bounds: None,
             flame_vbar: None,
             flame_hbar: None,
             flame_boxes: None,
@@ -277,13 +278,14 @@ impl FlamePanel {
         self.flame_hover = None;
     }
 
-    /// The current panel geometry, or `None` until the graph exists.
+    /// The current panel geometry, or `None` until the graph exists and the panel
+    /// has been laid out.
     fn layout(&self, cx: &App) -> Option<FlameLayout> {
         let aggregates = self.model.read(cx).aggregates()?;
         let view = self.flame_view;
         let total_h = flame_height(&aggregates.flame, &flame_metrics());
         let Rect { left, top, width, height } =
-            flame_graph_rect(self.flame_bounds, total_h, view);
+            flame_graph_rect(self.flame_bounds?, total_h, view);
         Some(FlameLayout {
             view,
             total_h,
@@ -296,11 +298,24 @@ impl FlamePanel {
 
     /// The pixel ceiling for the panel's vertical scroll: the tree's height past
     /// the panel's on-screen height (which excludes any reserved horizontal-bar
-    /// strip, so the last row clears that bar).
-    fn max_scroll(&self, cx: &App) -> f32 {
-        self.layout(cx)
-            .map(|fl| (fl.total_h - fl.height).max(0.0))
-            .unwrap_or(0.0)
+    /// strip, so the last row clears that bar), or `None` until the layout is
+    /// known.
+    fn max_scroll(&self, cx: &App) -> Option<f32> {
+        self.layout(cx).map(|fl| (fl.total_h - fl.height).max(0.0))
+    }
+
+    /// Moves the vertical scroll to `y` held within `[0, max_scroll]`, so no row
+    /// paints past the end of the tree; leaves the offset alone while the ceiling
+    /// is unknown.
+    fn set_scroll_y(&mut self, y: f32, cx: &App) {
+        if let Some(max) = self.max_scroll(cx) {
+            self.flame_scroll_y = y.clamp(0.0, max);
+        }
+    }
+
+    /// Pulls the standing offset back under the current ceiling.
+    fn clamp_scroll_y(&mut self, cx: &App) {
+        self.set_scroll_y(self.flame_scroll_y, cx);
     }
 
     /// The box under a window-space cursor: map the cursor to a depth row via the
@@ -355,7 +370,7 @@ impl FlamePanel {
             if bar.track_hit(pos) {
                 let grab = bar.grab(pos);
                 self.drag = FlameDrag::VThumb(grab);
-                self.scroll_thumb_to(pos, grab);
+                self.scroll_thumb_to(pos, grab, cx);
                 return;
             }
         }
@@ -372,9 +387,9 @@ impl FlamePanel {
     }
 
     /// Maps the vertical thumb drag back to a scroll offset.
-    fn scroll_thumb_to(&mut self, pos: Point<Pixels>, grab: f32) {
+    fn scroll_thumb_to(&mut self, pos: Point<Pixels>, grab: f32, cx: &App) {
         if let Some(offset) = thumb_offset(self.flame_vbar, pos, grab) {
-            self.flame_scroll_y = offset;
+            self.set_scroll_y(offset, cx);
         }
     }
 
@@ -409,16 +424,13 @@ impl FlamePanel {
                 ZOOM_PER_NOTCH.powf(dy_lines as f64),
             );
             self.flame_view = fv;
+            self.clamp_scroll_y(cx);
         } else if e.modifiers.shift {
             fv.pan_px(dx + dy, width);
             self.flame_view = fv;
         } else {
-            self.flame_scroll_y -= dy;
+            self.set_scroll_y(self.flame_scroll_y - dy, cx);
         }
-        // Re-clamp after any wheel action: a zoom that adds or drops the
-        // horizontal-bar strip changes the panel's usable height, and so the
-        // vertical scroll ceiling.
-        self.flame_scroll_y = self.flame_scroll_y.clamp(0.0, self.max_scroll(cx));
         self.invalidate_canvas(cx);
     }
 
@@ -558,11 +570,10 @@ fn flame_on_drag(panel: &mut FlamePanel, event: &MouseMoveEvent, cx: &mut Contex
                 fv.pan_px(dx, fl.width);
                 panel.flame_view = fv;
             }
-            let scrolled = (panel.flame_scroll_y - dy).clamp(0.0, panel.max_scroll(cx));
-            panel.flame_scroll_y = scrolled;
+            panel.set_scroll_y(panel.flame_scroll_y - dy, cx);
             panel.last_mouse = event.position;
         }
-        FlameDrag::VThumb(grab) => panel.scroll_thumb_to(event.position, grab),
+        FlameDrag::VThumb(grab) => panel.scroll_thumb_to(event.position, grab, cx),
         FlameDrag::HThumb(grab) => panel.hthumb_to(event.position, grab, cx),
         FlameDrag::None => {}
     }
@@ -593,7 +604,10 @@ impl Render for FlameCanvas {
         let prepaint = {
             let parent = parent.clone();
             move |bounds: Bounds<Pixels>, _: &mut Window, cx: &mut App| {
-                parent.update(cx, |panel, _| panel.flame_bounds = bounds);
+                parent.update(cx, |panel, cx| {
+                    panel.flame_bounds = Some(bounds);
+                    panel.clamp_scroll_y(cx);
+                });
             }
         };
         let paint = flame_paint(aggregates, parent, palette);
