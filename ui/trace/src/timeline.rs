@@ -8,7 +8,7 @@ use crate::{
     BottomTab, DEFAULT_GUTTER_WIDTH, DEFAULT_PANEL_HEIGHT, EDGE_MARGIN_PX, GROUP_BAND_HEIGHT,
     GROUP_ICON, Hover, LINE_SCROLL_PX, MAX_PX_PER_US, METRICS, MIN_SLICE_PX, SLICE_TEXT_PAD,
     SelectAllTracks, Source, TraceView, ZOOM_PER_NOTCH, paint_gridlines, paint_gutter,
-    paint_markers, paint_ruler, paint_scrollbars, paint_slice, paint_tooltip, ruler_ticks,
+    paint_markers, paint_ruler, paint_slice, paint_tooltip, ruler_ticks, scrollbar_geom,
     thumb_offset,
 };
 use bviz_trace_layout::{Cull, LaneLayout, TimeView, Viewport, VisibleSlice, visible_slices};
@@ -78,10 +78,6 @@ pub(crate) struct TimelinePanel {
     /// Whether the initial fit-to-window view has been set; latched during the
     /// first paint, when the viewport size is first known.
     fitted: bool,
-    /// The lane vertical bar and time horizontal bar geometry, set during paint
-    /// and read by mouse handlers; `None` when that axis fits.
-    vbar: Option<Scrollbar>,
-    hbar: Option<Scrollbar>,
     /// The timeline's memoized culled draw list; see [`SliceDrawCache`].
     slice_draw: Option<SliceDrawCache>,
     /// The slice under the cursor, if any, drawn as a tooltip.
@@ -117,8 +113,6 @@ impl TimelinePanel {
             scroll_y: 0.0,
             viewport: Bounds::default(),
             fitted: false,
-            vbar: None,
-            hbar: None,
             slice_draw: None,
             hover: None,
             crosshair: None,
@@ -178,6 +172,28 @@ impl TimelinePanel {
         };
         let (_, panel_height, gutter_width) = self.shell_layout(cx);
         Regions::new(self.viewport, n_counters, panel_height, gutter_width, flame_total)
+    }
+
+    /// The lane and time bars for the panel's view state; both `None` while no
+    /// profile with a lane layout is loaded.
+    fn scroll_bars(&self, cx: &App) -> (Option<Scrollbar>, Option<Scrollbar>) {
+        let (span, flame_total) = {
+            let model = self.model.read(cx);
+            let (Source::Loaded(profile), Some(lanes)) = (model.source(), model.lane_layout())
+            else {
+                return (None, None);
+            };
+            (profile.span(), flame_total_height(&lanes))
+        };
+        scrollbar_geom(span, self.view, flame_total, self.regions(cx), self.scroll_y)
+    }
+
+    fn vbar(&self, cx: &App) -> Option<Scrollbar> {
+        self.scroll_bars(cx).0
+    }
+
+    fn hbar(&self, cx: &App) -> Option<Scrollbar> {
+        self.scroll_bars(cx).1
     }
 
     /// The lane-scroll ceiling, or `None` until a lane layout exists.
@@ -346,7 +362,8 @@ impl TimelinePanel {
     /// Begins a timeline drag at `pos`: the lane vertical or time horizontal
     /// scroll thumb/track if the press hit one, otherwise a pan.
     fn press(&mut self, pos: Point<Pixels>, cx: &App) {
-        if let Some(bar) = self.vbar {
+        let (vbar, hbar) = self.scroll_bars(cx);
+        if let Some(bar) = vbar {
             if bar.track_hit(pos) {
                 let grab = bar.grab(pos);
                 self.drag = TimelineDrag::VThumb(grab);
@@ -354,7 +371,7 @@ impl TimelinePanel {
                 return;
             }
         }
-        if let Some(bar) = self.hbar {
+        if let Some(bar) = hbar {
             if bar.track_hit(pos) {
                 let grab = bar.grab(pos);
                 self.drag = TimelineDrag::HThumb(grab);
@@ -368,7 +385,7 @@ impl TimelinePanel {
 
     /// Maps the lane vertical thumb drag back to a scroll offset.
     fn scroll_thumb_to(&mut self, pos: Point<Pixels>, grab: f32, cx: &App) {
-        if let Some(offset) = thumb_offset(self.vbar, pos, grab) {
+        if let Some(offset) = thumb_offset(self.vbar(cx), pos, grab) {
             self.set_scroll_y(offset, cx);
         }
     }
@@ -384,7 +401,7 @@ impl TimelinePanel {
         };
         let span = profile.span();
         let regions = self.regions(cx);
-        let Some(offset) = thumb_offset(self.hbar, pos, grab) else {
+        let Some(offset) = thumb_offset(self.hbar(cx), pos, grab) else {
             return;
         };
         // The bar's offset is measured from the span start less the reachable
@@ -807,19 +824,10 @@ fn slice_paint(
             crate::counters::paint_graph(&profile, tv, regions, &palette, window);
         }
         paint_markers(&profile, tv, regions, show_counters, &palette, window, cx);
-        let (vlayout, hlayout) = paint_scrollbars(
-            profile.span(),
-            tv,
-            flame_total,
-            regions,
-            scroll,
-            &palette,
-            window,
-        );
-        parent.update(cx, |panel, _| {
-            panel.vbar = vlayout;
-            panel.hbar = hlayout;
-        });
+        let (vbar, hbar) = scrollbar_geom(profile.span(), tv, flame_total, regions, scroll);
+        for bar in vbar.into_iter().chain(hbar) {
+            bar.paint(palette.scroll_track, palette.scroll_thumb, window);
+        }
 
         paint_gutter(
             &profile,

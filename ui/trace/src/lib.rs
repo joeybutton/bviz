@@ -983,19 +983,16 @@ fn paint_ruler(
     }
 }
 
-/// Paints the flame section's vertical bar and/or the content column's
-/// horizontal bar for whichever axis overflows, returning each bar's geometry
-/// for the caller to hold for hit-testing; an axis that fits gets `None`. The
-/// vertical bar maps to the flame lanes' pixel scroll; the horizontal to the
-/// view's start time within the profile span.
-fn paint_scrollbars(
+/// The flame section's vertical bar and the content column's horizontal bar,
+/// each `None` on an axis that fits. The vertical bar maps to the flame lanes'
+/// pixel scroll; the horizontal to the view's start time within the profile
+/// span.
+fn scrollbar_geom(
     span: TimeSpan,
     tv: TimeView,
     flame_total: f32,
     regions: Regions,
     scroll_y: f32,
-    palette: &Palette,
-    window: &mut Window,
 ) -> (Option<Scrollbar>, Option<Scrollbar>) {
     let flame_h = regions.flame_h();
 
@@ -1031,9 +1028,6 @@ fn paint_scrollbars(
         DEFAULT_MIN_THUMB,
     );
 
-    for bar in [vlayout, hlayout].into_iter().flatten() {
-        bar.paint(palette.scroll_track, palette.scroll_thumb, window);
-    }
     (vlayout, hlayout)
 }
 
