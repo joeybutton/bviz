@@ -118,10 +118,12 @@ pub(crate) fn clamp_gutter_width(gutter_width: f32, window_w: f32) -> f32 {
     gutter_width.clamp(MIN_GUTTER, max)
 }
 
-/// Total height the flame section's thread lanes occupy, ignoring the layout's
-/// counter lanes (the graph section places those itself).
+/// Total height the flame section's rows occupy — thread lanes and the group
+/// bands they hang under, which share one coordinate space — ignoring the
+/// layout's counter lanes (the graph section places those itself). The grouped
+/// layout's height ends on a trailing gap, past the last row.
 pub(crate) fn flame_total_height(layout: &LaneLayout) -> f32 {
-    layout.lanes.last().map(|l| l.top + l.height).unwrap_or(0.0)
+    (layout.total_height - METRICS.lane_gap).max(0.0)
 }
 
 /// The pixel ceiling for the lane scroll: the thread-lane height past the flame
