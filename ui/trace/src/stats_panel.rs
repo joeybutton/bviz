@@ -164,9 +164,6 @@ pub(crate) struct StatsPanel {
     stats_build: Rebuild<(u64, StatsColumn, bool)>,
     /// Scroll position of the virtualized body.
     stats_scroll: UniformListScrollHandle,
-    /// The scroll-bar geometry set during paint, read by mouse handlers; `None`
-    /// when the body fits and so shows no bar.
-    stats_bar: Option<Scrollbar>,
     drag: StatsDrag,
     /// Rebuilds the sort order when the model swaps in a freshly built aggregate:
     /// the order derives from the aggregate, which lands asynchronously.
@@ -190,7 +187,6 @@ impl StatsPanel {
             stats_order: None,
             stats_build: Rebuild::new(),
             stats_scroll: UniformListScrollHandle::new(),
-            stats_bar: None,
             drag: StatsDrag::None,
             _model_observer: model_observer,
         }
@@ -318,18 +314,11 @@ impl StatsPanel {
         )
         .track_scroll(&self.stats_scroll);
 
-        let scroll = self.stats_scroll.clone();
         let bar = stats_scrollbar(
             cx.entity(),
             matches!(self.drag, StatsDrag::Thumb(_)),
             palette.scroll_track,
             palette.scroll_thumb,
-            move |bounds| {
-                let content = row_count as f32 * STATS_ROW_HEIGHT;
-                let visible = f32::from(bounds.size.height);
-                let offset = -f32::from(scroll.0.borrow().base_handle.offset().y);
-                (content, visible, offset)
-            },
         );
 
         table.child(
@@ -405,10 +394,30 @@ impl StatsPanel {
         }
     }
 
+    /// The bar for the rows' content height against the body's visible height;
+    /// `None` while no order exists or the rows fit.
+    fn vbar(&self) -> Option<Scrollbar> {
+        self.stats_order.as_ref()?;
+        let state = self.stats_scroll.0.borrow();
+        let body = state.base_handle.bounds();
+        let visible = f32::from(body.size.height);
+        Scrollbar::new(
+            Axis::Vertical,
+            Bounds::new(
+                point(body.right() - px(BAR_WIDTH), body.origin.y),
+                size(px(BAR_WIDTH), body.size.height),
+            ),
+            visible + f32::from(state.base_handle.max_offset().y),
+            visible,
+            -f32::from(state.base_handle.offset().y),
+            DEFAULT_MIN_THUMB,
+        )
+    }
+
     /// Begins a scroll drag if `pos` hit the bar; otherwise leaves the press to
     /// fall through to a row.
     fn press(&mut self, pos: Point<Pixels>) {
-        if let Some(bar) = self.stats_bar {
+        if let Some(bar) = self.vbar() {
             if bar.track_hit(pos) {
                 let grab = bar.grab(pos);
                 self.drag = StatsDrag::Thumb(grab);
@@ -419,7 +428,7 @@ impl StatsPanel {
 
     /// Maps a thumb drag back to the list's scroll offset.
     fn thumb_to(&mut self, pos: Point<Pixels>, grab: f32) {
-        if let Some(offset) = thumb_offset(self.stats_bar, pos, grab) {
+        if let Some(offset) = thumb_offset(self.vbar(), pos, grab) {
             set_list_thumb(&self.stats_scroll.0.borrow().base_handle, offset);
         }
     }
@@ -451,37 +460,20 @@ impl Render for StatsPanel {
     }
 }
 
-/// The stats table's vertical scroll bar, painted over the right edge of its
-/// body. Each frame the canvas reads `extents` (content extent, visible extent,
-/// scroll offset) to place the thumb, paints it, stashes the geometry in the
-/// panel's `stats_bar` for hit-testing, and re-installs the drag handlers while
-/// `dragging`.
+/// The stats table's scroll bar, drawn over the body once the list has been
+/// laid out; keeps the drag handlers installed while `dragging`.
 fn stats_scrollbar(
     entity: Entity<StatsPanel>,
     dragging: bool,
     track: Rgba,
     thumb: Rgba,
-    extents: impl Fn(Bounds<Pixels>) -> (f32, f32, f32) + 'static,
 ) -> impl IntoElement {
     canvas(
         move |_, _, _| {},
-        move |bounds, _, window: &mut Window, cx: &mut App| {
-            let (content, visible, offset) = extents(bounds);
-            let layout = Scrollbar::new(
-                Axis::Vertical,
-                Bounds::new(
-                    point(bounds.origin.x + bounds.size.width - px(BAR_WIDTH), bounds.origin.y),
-                    size(px(BAR_WIDTH), bounds.size.height),
-                ),
-                content,
-                visible,
-                offset,
-                DEFAULT_MIN_THUMB,
-            );
-            if let Some(painted) = layout {
-                painted.paint(track, thumb, window);
+        move |_, _, window: &mut Window, cx: &mut App| {
+            if let Some(bar) = entity.read(cx).vbar() {
+                bar.paint(track, thumb, window);
             }
-            entity.update(cx, |panel, _| panel.stats_bar = layout);
             if dragging {
                 track_drag(window, &entity, stats_on_drag, stats_end_drag);
             }

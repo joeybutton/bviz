@@ -42,9 +42,6 @@ pub(crate) struct TracksMenu {
     _filter_observer: Subscription,
     /// Scroll position of the track list.
     scroll: ScrollHandle,
-    /// The scroll-bar geometry set during paint, read by mouse handlers; `None`
-    /// when the list fits and so shows no bar.
-    bar: Option<Scrollbar>,
     drag: MenuDrag,
     /// Read for the visible tracks, written to toggle them.
     model: Entity<TraceModel>,
@@ -67,7 +64,6 @@ impl TracksMenu {
             filter,
             _filter_observer: filter_observer,
             scroll: ScrollHandle::new(),
-            bar: None,
             drag: MenuDrag::None,
             model,
             shell,
@@ -99,10 +95,28 @@ impl TracksMenu {
         }
     }
 
+    /// The bar for the track list's content height against its visible height;
+    /// `None` while the list fits.
+    fn vbar(&self) -> Option<Scrollbar> {
+        let list = self.scroll.bounds();
+        let visible = f32::from(list.size.height);
+        Scrollbar::new(
+            Axis::Vertical,
+            Bounds::new(
+                point(list.right() - px(crate::BAR_WIDTH), list.origin.y),
+                size(px(crate::BAR_WIDTH), list.size.height),
+            ),
+            visible + f32::from(self.scroll.max_offset().y),
+            visible,
+            -f32::from(self.scroll.offset().y),
+            DEFAULT_MIN_THUMB,
+        )
+    }
+
     /// Begins a scroll drag if `pos` hit the bar; otherwise leaves the press to
     /// fall through.
     fn press(&mut self, pos: Point<Pixels>) {
-        if let Some(bar) = self.bar {
+        if let Some(bar) = self.vbar() {
             if bar.track_hit(pos) {
                 let grab = bar.grab(pos);
                 self.drag = MenuDrag::Thumb(grab);
@@ -113,7 +127,7 @@ impl TracksMenu {
 
     /// Maps a thumb drag back to the list's scroll offset.
     fn thumb_to(&mut self, pos: Point<Pixels>, grab: f32) {
-        if let Some(offset) = thumb_offset(self.bar, pos, grab) {
+        if let Some(offset) = thumb_offset(self.vbar(), pos, grab) {
             set_list_thumb(&self.scroll, offset);
         }
     }
@@ -357,9 +371,7 @@ impl TracksMenu {
             .child(self.menu_list(rows, palette, cx))
     }
 
-    /// The scrollable track list with a scroll bar over its right edge; the bar
-    /// reads the list's scroll handle to place the thumb and stashes the geometry
-    /// for the menu's press hit-test.
+    /// The scrollable track list with a scroll bar over its right edge.
     fn menu_list(
         &self,
         rows: Vec<AnyElement>,
@@ -376,18 +388,11 @@ impl TracksMenu {
             .overflow_y_scroll()
             .track_scroll(&self.scroll)
             .children(rows);
-        let scroll = self.scroll.clone();
         let bar = menu_scrollbar(
             cx.entity(),
             matches!(self.drag, MenuDrag::Thumb(_)),
             palette.scroll_track,
             palette.scroll_thumb,
-            move |bounds| {
-                let visible = f32::from(bounds.size.height);
-                let content = visible + f32::from(scroll.max_offset().y);
-                let offset = -f32::from(scroll.offset().y);
-                (content, visible, offset)
-            },
         );
         div()
             .relative()
@@ -473,37 +478,20 @@ impl Render for TracksMenu {
     }
 }
 
-/// The tracks menu's vertical scroll bar, painted over the right edge of its
-/// track list. Each frame the canvas reads `extents` (content extent, visible
-/// extent, scroll offset) to place the thumb, paints it, stashes the geometry in
-/// the menu's `bar` for hit-testing, and re-installs the drag handlers while
-/// `dragging`.
+/// The tracks menu's scroll bar, drawn over the track list once it has been
+/// laid out; keeps the drag handlers installed while `dragging`.
 fn menu_scrollbar(
     entity: Entity<TracksMenu>,
     dragging: bool,
     track: Rgba,
     thumb: Rgba,
-    extents: impl Fn(Bounds<Pixels>) -> (f32, f32, f32) + 'static,
 ) -> impl IntoElement {
     canvas(
         move |_, _, _| {},
-        move |bounds, _, window: &mut Window, cx: &mut App| {
-            let (content, visible, offset) = extents(bounds);
-            let layout = Scrollbar::new(
-                Axis::Vertical,
-                Bounds::new(
-                    point(bounds.origin.x + bounds.size.width - px(crate::BAR_WIDTH), bounds.origin.y),
-                    size(px(crate::BAR_WIDTH), bounds.size.height),
-                ),
-                content,
-                visible,
-                offset,
-                DEFAULT_MIN_THUMB,
-            );
-            if let Some(painted) = layout {
-                painted.paint(track, thumb, window);
+        move |_, _, window: &mut Window, cx: &mut App| {
+            if let Some(bar) = entity.read(cx).vbar() {
+                bar.paint(track, thumb, window);
             }
-            entity.update(cx, |menu, _| menu.bar = layout);
             if dragging {
                 track_drag(window, &entity, menu_on_drag, menu_end_drag);
             }
