@@ -26,6 +26,9 @@ build:remote-cache --remote_cache=grpcs://aherrmann.buildbuddy.io
 build:remote-cache --remote_cache_compression
 # docs: https://bazel.build/reference/command-line-reference#flag--remote_download_toplevel
 build:remote-cache --remote_download_toplevel
+# bazel_env requires sha256sum on disk
+# docs: https://bazel.build/reference/command-line-reference#flag--remote_download_regex
+build:remote-cache --remote_download_regex=.*/sha256sum(\.exe)?$
 # docs: https://bazel.build/reference/command-line-reference#flag--remote_timeout
 build:remote-cache --remote_timeout=3600
 # docs: https://bazel.build/reference/command-line-reference#flag--experimental_remote_cache_ttl
