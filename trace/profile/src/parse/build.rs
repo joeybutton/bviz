@@ -339,104 +339,87 @@ fn finish_merge(
         counters,
         runs,
     } = merge;
-    // The pools are handed to the merge phase as uninitialized capacity, so each
-    // slot's first and only write — and thus its page's first touch — lands on
-    // the worker that merges it.
     let slice_total: usize = runs.iter().map(|r| r.order.len()).sum();
-    let mut slice_pool: Vec<Slice> = Vec::with_capacity(slice_total);
-    let mut detail_pool: Vec<SliceDetail> = Vec::with_capacity(slice_total);
-    let mut end_max_pool: Vec<i64> = Vec::with_capacity(slice_total);
+    let mut slice_pools = SlicePools::with_capacity(slice_total);
+    let (segments, mut tasks) =
+        carve_segments(&mut slice_pools, group_runs_by_tid(&runs), slice_total);
+    merge_lanes(&mut tasks);
+    let results: Vec<(u32, i64, i64)> = tasks
+        .into_iter()
+        .map(|t| (t.max_depth, t.min_start_us, t.max_end_us))
+        .collect();
+    // SAFETY: the segments partition the first `slice_total` slots of each
+    // pool's spare capacity, each merge wrote its whole segment in all three
+    // pools (the runs' lengths sum to the segment length, and every emit
+    // writes one slot of each), and the merge scope joined all their writers.
+    unsafe { slice_pools.slice_pool.set_len(slice_total) };
+    unsafe { slice_pools.detail_pool.set_len(slice_total) };
+    unsafe { slice_pools.end_max_pool.set_len(slice_total) };
 
-    // One source run per (thread, builder): the thread's lane-ordered indices
-    // into that builder's event-order payloads, with the arg-pool base its
-    // detail spans rebase by.
-    struct Run<'a> {
-        payloads: &'a [(i64, Slice, SliceDetail)],
-        order: &'a [u32],
-        args_base: u32,
-    }
-    // A thread's contiguous destination segments — one per pool, the same
-    // index range — its runs in builder order, and the merge phase's
-    // per-thread results. The segments start uninitialized; the runs' lengths
-    // sum to exactly their length, so the merge phase writes every slot of
-    // each exactly once.
-    struct TidTask<'a> {
-        dest: &'a mut [std::mem::MaybeUninit<Slice>],
-        dest_detail: &'a mut [std::mem::MaybeUninit<SliceDetail>],
-        dest_end_max: &'a mut [std::mem::MaybeUninit<i64>],
-        runs: Vec<Run<'a>>,
-        max_depth: u32,
-        min_start_us: i64,
-        max_end_us: i64,
-    }
-    /// K-way merges a thread's runs into its destination segments, in
-    /// whole-lane [`slice_order`] — on an equal key the lowest run index goes
-    /// first, which reproduces a stable whole-lane sort of the runs
-    /// concatenated in fold order. Each slot is written exactly once, and that
-    /// one write also rebases the detail's arg-pool span by its run's base
-    /// (text handles are already global), assigns the slice's depth from the
-    /// ancestor stack, and accumulates the lane's time span — whose running end
-    /// also fills the slice's end-max slot, giving [`Profile::end_maxes`] its
-    /// segment-local prefix maximum. Slice, detail, and end max travel as one
-    /// triple, so the three pools stay index-parallel by construction.
-    fn merge_lane(task: &mut TidTask) {
-        let TidTask { dest, dest_detail, dest_end_max, runs, max_depth, min_start_us, max_end_us } =
-            task;
-        let mut slots = dest.iter_mut();
-        let mut detail_slots = dest_detail.iter_mut();
-        let mut end_max_slots = dest_end_max.iter_mut();
-        // Ancestor end-times. A slice is nested only in a span that contains
-        // it, so pop while the stack top ends before the slice does
-        // (`end < slice_end`); popping on end-before-start alone would keep
-        // merely overlapping spans stacked — a span that starts inside another
-        // but ends after it is a sibling, not a child — building a runaway
-        // staircase of false depth.
-        let mut stack: Vec<i64> = Vec::new();
-        let mut emit = |run: &Run, src: &(i64, Slice, SliceDetail)| {
-            let mut s = src.1;
-            let mut d = src.2;
-            d.others = d.others.shifted(run.args_base);
-            let end = s.start_us.saturating_add(s.dur_us);
-            while stack.last().is_some_and(|&e| e < end) {
-                stack.pop();
-            }
-            s.depth = stack.len() as u32;
-            *max_depth = (*max_depth).max(s.depth + 1);
-            stack.push(end);
-            *min_start_us = (*min_start_us).min(s.start_us);
-            *max_end_us = (*max_end_us).max(end);
-            slots.next().expect("segment sized to the runs' total").write(s);
-            detail_slots.next().expect("segment sized to the runs' total").write(d);
-            end_max_slots.next().expect("segment sized to the runs' total").write(*max_end_us);
-        };
-        if let [run] = &runs[..] {
-            for &idx in run.order {
-                emit(run, &run.payloads[idx as usize]);
-            }
-        } else {
-            let mut cursors = vec![0usize; runs.len()];
-            let mut heap: BinaryHeap<Reverse<(i64, Reverse<i64>, usize)>> =
-                BinaryHeap::with_capacity(runs.len());
-            for (i, run) in runs.iter().enumerate() {
-                if let Some(&idx) = run.order.first() {
-                    let s = &run.payloads[idx as usize].1;
-                    heap.push(Reverse((s.start_us, Reverse(s.dur_us), i)));
-                }
-            }
-            while let Some(Reverse((.., i))) = heap.pop() {
-                let run = &runs[i];
-                let idx = run.order[cursors[i]] as usize;
-                cursors[i] += 1;
-                emit(run, &run.payloads[idx]);
-                if let Some(&next) = run.order.get(cursors[i]) {
-                    let s = &run.payloads[next as usize].1;
-                    heap.push(Reverse((s.start_us, Reverse(s.dur_us), i)));
-                }
-            }
+    let parts = build_parts(
+        slice_pools,
+        ThreadMerge { segments: &segments, results: &results },
+        args_pool,
+        phase_markers,
+        thread_meta,
+        counter_order,
+        counters,
+        pool,
+        other_data,
+    );
+
+    // The folded runs' teardown (per-chunk payload and index buffers) is pure
+    // page-return work; detached so the load doesn't wait on it.
+    std::thread::spawn(move || drop(runs));
+    parts
+}
+
+struct SlicePools {
+    slice_pool: Vec<Slice>,
+    detail_pool: Vec<SliceDetail>,
+    end_max_pool: Vec<i64>,
+}
+
+impl SlicePools {
+    /// Allocates room for `slices` slices, left as uninitialized capacity for
+    /// the merge phase, so a slot's page is first touched by the worker that
+    /// merges it.
+    fn with_capacity(slices: usize) -> SlicePools {
+        SlicePools {
+            slice_pool: Vec::with_capacity(slices),
+            detail_pool: Vec::with_capacity(slices),
+            end_max_pool: Vec::with_capacity(slices),
         }
     }
+}
+
+/// One source run per (thread, builder): the thread's lane-ordered indices
+/// into that builder's event-order payloads, with the arg-pool base its
+/// detail spans rebase by.
+struct Run<'a> {
+    payloads: &'a [(i64, Slice, SliceDetail)],
+    order: &'a [u32],
+    args_base: u32,
+}
+
+/// One thread's share of the merge phase. Its destination segments cover the
+/// same index range in each pool and start uninitialized; the runs' lengths
+/// sum to exactly that range, so the merge writes every slot of each exactly
+/// once.
+struct TidTask<'a> {
+    dest: &'a mut [std::mem::MaybeUninit<Slice>],
+    dest_detail: &'a mut [std::mem::MaybeUninit<SliceDetail>],
+    dest_end_max: &'a mut [std::mem::MaybeUninit<i64>],
+    runs: Vec<Run<'a>>,
+    max_depth: u32,
+    min_start_us: i64,
+    max_end_us: i64,
+}
+
+/// The runs feeding each thread's merge, in fold order within a thread.
+fn group_runs_by_tid(runs: &[FoldedRun]) -> BTreeMap<i64, Vec<Run<'_>>> {
     let mut tid_runs: BTreeMap<i64, Vec<Run>> = BTreeMap::new();
-    for folded in &runs {
+    for folded in runs {
         for &(tid, span) in &folded.lanes {
             tid_runs.entry(tid).or_default().push(Run {
                 payloads: &folded.payloads,
@@ -445,11 +428,22 @@ fn finish_merge(
             });
         }
     }
+    tid_runs
+}
+
+/// Carves each thread a destination segment out of the pools' spare capacity,
+/// sized to its runs and paired with them into a merge task. The returned
+/// spans locate the threads in the sealed pools.
+fn carve_segments<'a>(
+    pools: &'a mut SlicePools,
+    tid_runs: BTreeMap<i64, Vec<Run<'a>>>,
+    slice_total: usize,
+) -> (Vec<(i64, Span32)>, Vec<TidTask<'a>>) {
     let mut segments: Vec<(i64, Span32)> = Vec::with_capacity(tid_runs.len());
     let mut tasks: Vec<TidTask> = Vec::with_capacity(tid_runs.len());
-    let mut rest = slice_pool.spare_capacity_mut();
-    let mut rest_detail = detail_pool.spare_capacity_mut();
-    let mut rest_end_max = end_max_pool.spare_capacity_mut();
+    let mut rest = pools.slice_pool.spare_capacity_mut();
+    let mut rest_detail = pools.detail_pool.spare_capacity_mut();
+    let mut rest_end_max = pools.end_max_pool.spare_capacity_mut();
     let mut off = 0u32;
     for (tid, runs) in tid_runs {
         let len: usize = runs.iter().map(|r| r.order.len()).sum();
@@ -472,7 +466,10 @@ fn finish_merge(
         });
     }
     debug_assert_eq!(off as usize, slice_total);
+    (segments, tasks)
+}
 
+fn merge_lanes(tasks: &mut [TidTask]) {
     timed("    slices", || {
         // Thread sizes are heavily skewed toward a few big evaluator lanes, so
         // workers steal tasks one thread at a time.
@@ -489,28 +486,97 @@ fn finish_merge(
             }
         });
     });
-    let results: Vec<(u32, i64, i64)> = tasks
-        .into_iter()
-        .map(|t| (t.max_depth, t.min_start_us, t.max_end_us))
-        .collect();
-    // SAFETY: the segments partition the first `slice_total` slots of each
-    // pool's spare capacity, each merge wrote its whole segment in all three
-    // pools (the runs' lengths sum to the segment length, and every emit
-    // writes one slot of each), and the merge scope joined all their writers.
-    unsafe { slice_pool.set_len(slice_total) };
-    unsafe { detail_pool.set_len(slice_total) };
-    unsafe { end_max_pool.set_len(slice_total) };
+}
 
-    let parts = timed("    tail", || {
+/// K-way merges a thread's runs into its destination segments, in
+/// whole-lane [`slice_order`] — on an equal key the lowest run index goes
+/// first, which reproduces a stable whole-lane sort of the runs
+/// concatenated in fold order. The write that fills a slot also rebases the
+/// detail's arg-pool span by its run's base (text handles are already
+/// global), assigns the slice's depth from the ancestor stack, and
+/// accumulates the lane's time span — whose running end also fills the
+/// slice's end-max slot, giving [`Profile::end_maxes`] its segment-local
+/// prefix maximum. Slice, detail, and end max travel as one triple, so the
+/// three pools stay index-parallel by construction.
+fn merge_lane(task: &mut TidTask) {
+    let TidTask { dest, dest_detail, dest_end_max, runs, max_depth, min_start_us, max_end_us } =
+        task;
+    let mut slots = dest.iter_mut();
+    let mut detail_slots = dest_detail.iter_mut();
+    let mut end_max_slots = dest_end_max.iter_mut();
+    // Ancestor end-times. A slice is nested only in a span that contains
+    // it, so pop while the stack top ends before the slice does
+    // (`end < slice_end`); popping on end-before-start alone would keep
+    // merely overlapping spans stacked — a span that starts inside another
+    // but ends after it is a sibling, not a child — building a runaway
+    // staircase of false depth.
+    let mut stack: Vec<i64> = Vec::new();
+    let mut emit = |run: &Run, src: &(i64, Slice, SliceDetail)| {
+        let mut s = src.1;
+        let mut d = src.2;
+        d.others = d.others.shifted(run.args_base);
+        let end = s.start_us.saturating_add(s.dur_us);
+        while stack.last().is_some_and(|&e| e < end) {
+            stack.pop();
+        }
+        s.depth = stack.len() as u32;
+        *max_depth = (*max_depth).max(s.depth + 1);
+        stack.push(end);
+        *min_start_us = (*min_start_us).min(s.start_us);
+        *max_end_us = (*max_end_us).max(end);
+        slots.next().expect("segment sized to the runs' total").write(s);
+        detail_slots.next().expect("segment sized to the runs' total").write(d);
+        end_max_slots.next().expect("segment sized to the runs' total").write(*max_end_us);
+    };
+    if let [run] = &runs[..] {
+        for &idx in run.order {
+            emit(run, &run.payloads[idx as usize]);
+        }
+    } else {
+        let mut cursors = vec![0usize; runs.len()];
+        let mut heap: BinaryHeap<Reverse<(i64, Reverse<i64>, usize)>> =
+            BinaryHeap::with_capacity(runs.len());
+        for (i, run) in runs.iter().enumerate() {
+            if let Some(&idx) = run.order.first() {
+                let s = &run.payloads[idx as usize].1;
+                heap.push(Reverse((s.start_us, Reverse(s.dur_us), i)));
+            }
+        }
+        while let Some(Reverse((.., i))) = heap.pop() {
+            let run = &runs[i];
+            let idx = run.order[cursors[i]] as usize;
+            cursors[i] += 1;
+            emit(run, &run.payloads[idx]);
+            if let Some(&next) = run.order.get(cursors[i]) {
+                let s = &run.payloads[next as usize].1;
+                heap.push(Reverse((s.start_us, Reverse(s.dur_us), i)));
+            }
+        }
+    }
+}
+
+/// Assembles the merged slice pools and the folded counters, phase markers,
+/// and thread metadata into the profile's flat parts. `text` and
+/// `distinct_strings` are filled by [`seal`].
+fn build_parts(
+    pools: SlicePools,
+    merged: ThreadMerge,
+    args_pool: Vec<(Str, Str)>,
+    phase_markers: Vec<PhaseMarker>,
+    thread_meta: BTreeMap<i64, (Option<String>, i64)>,
+    counter_order: Vec<Str>,
+    counters: HashMap<Str, RawLane>,
+    pool: &mut WriterPool,
+    other_data: Option<Map<String, Value>>,
+) -> ProfileParts {
+    timed("    tail", || {
+        let SlicePools { slice_pool, detail_pool, end_max_pool } = pools;
         let metadata = build_metadata(&mut pool.writer, other_data.as_ref());
-        let merge = ThreadMerge { segments: &segments, results: &results };
-        let span = compute_span(merge, &counters, &phase_markers);
-        let threads = build_thread_tracks(merge, &thread_meta, &mut pool.writer);
+        let span = compute_span(merged, &counters, &phase_markers);
+        let threads = build_thread_tracks(merged, &thread_meta, &mut pool.writer);
         let (series_pool, point_pool, counters) =
             build_counter_lanes(counter_order, counters, pool);
 
-        // The caller seals its owned interner into `text` once this returns and
-        // the late-interning writer is dropped.
         ProfileParts {
             text: String::new(),
             slice_pool,
@@ -524,15 +590,9 @@ fn finish_merge(
             counters,
             phase_markers,
             span,
-            // Filled by `seal` from the interner before it is consumed.
             distinct_strings: 0,
         }
-    });
-
-    // The folded runs' teardown (per-chunk payload and index buffers) is pure
-    // page-return work; detached so the load doesn't wait on it.
-    std::thread::spawn(move || drop(runs));
-    parts
+    })
 }
 
 /// The per-thread merge output: `segments[i]` (thread id and its slice span)
