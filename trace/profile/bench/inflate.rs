@@ -14,6 +14,7 @@ use std::io::Read;
 
 const STREAM_BUF_BYTES: usize = 32 << 20;
 const ROUNDS: usize = 4;
+const GZIP_ISIZE_BYTES: usize = 4;
 
 fn report(label: &str, round: usize, start: std::time::Instant, out_bytes: usize) {
     let dt = start.elapsed().as_secs_f64();
@@ -26,10 +27,10 @@ fn report(label: &str, round: usize, start: std::time::Instant, out_bytes: usize
 /// The gzip ISIZE trailer, from which the whole-buffer side reserves its
 /// output like the loader's fallback decode does.
 fn isize_trailer(bytes: &[u8]) -> usize {
-    if bytes.len() < 4 {
+    if bytes.len() < GZIP_ISIZE_BYTES {
         return 0;
     }
-    u32::from_le_bytes(bytes[bytes.len() - 4..].try_into().unwrap()) as usize
+    u32::from_le_bytes(bytes[bytes.len() - GZIP_ISIZE_BYTES..].try_into().unwrap()) as usize
 }
 
 fn main() {

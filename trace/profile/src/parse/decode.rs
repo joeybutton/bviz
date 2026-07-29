@@ -26,13 +26,16 @@ fn gunzip(bytes: &[u8]) -> Result<Vec<u8>, LoadError> {
 }
 
 /// Smallest well-formed gzip stream: a 10-byte header plus an 8-byte trailer.
-/// Below this the last 4 bytes overlap the header and are not a valid ISIZE.
+/// Below this the trailing ISIZE field overlaps the header and is not valid.
 const GZIP_FRAMING_MIN: usize = 18;
 
-/// The uncompressed length declared by a gzip stream's 4-byte little-endian
-/// ISIZE trailer (the length mod 2^32, exact under 4 GiB). `None` for a zero
+/// Width of the gzip ISIZE trailer field (RFC 1952).
+const GZIP_ISIZE_BYTES: usize = 4;
+
+/// The uncompressed length declared by a gzip stream's little-endian ISIZE
+/// trailer (the length mod 2^32, exact under 4 GiB). `None` for a zero
 /// trailer.
-fn isize_from_trailer(trailer: &[u8; 4]) -> Option<usize> {
+fn isize_from_trailer(trailer: &[u8; GZIP_ISIZE_BYTES]) -> Option<usize> {
     match u32::from_le_bytes(*trailer) as usize {
         0 => None,
         n => Some(n),
@@ -46,14 +49,14 @@ pub(crate) fn gzip_isize(bytes: &[u8]) -> Option<usize> {
     if bytes.len() < GZIP_FRAMING_MIN {
         return None;
     }
-    isize_from_trailer(&bytes[bytes.len() - 4..].try_into().ok()?)
+    isize_from_trailer(&bytes[bytes.len() - GZIP_ISIZE_BYTES..].try_into().ok()?)
 }
 
 /// Reads a gzip stream's ISIZE trailer directly from an open file without
 /// pulling the whole stream into memory: verifies the leading [`GZIP_MAGIC`],
-/// then seeks to the last 4 bytes. `Ok(None)` if the file isn't gzip, is shorter
-/// than a full frame (so the last 4 bytes would overlap the header rather than
-/// be a trailer), or the trailer is zero. The file cursor is left wherever the
+/// then seeks to the ISIZE field. `Ok(None)` if the file isn't gzip, is shorter
+/// than a full frame (so that field would overlap the header rather than be a
+/// trailer), or the trailer is zero. The file cursor is left wherever the
 /// reads and seeks land; the caller re-seeks before use.
 pub(crate) fn gzip_isize_from_file(file: &mut std::fs::File) -> std::io::Result<Option<usize>> {
     let mut magic = [0u8; 2];
@@ -63,10 +66,10 @@ pub(crate) fn gzip_isize_from_file(file: &mut std::fs::File) -> std::io::Result<
     if file.metadata().map_or(0, |m| m.len()) < GZIP_FRAMING_MIN as u64 {
         return Ok(None);
     }
-    if file.seek(SeekFrom::End(-4)).is_err() {
+    if file.seek(SeekFrom::End(-(GZIP_ISIZE_BYTES as i64))).is_err() {
         return Ok(None);
     }
-    let mut trailer = [0u8; 4];
+    let mut trailer = [0u8; GZIP_ISIZE_BYTES];
     if file.read_exact(&mut trailer).is_err() {
         return Ok(None);
     }
