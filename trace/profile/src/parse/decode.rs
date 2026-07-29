@@ -55,9 +55,8 @@ pub(crate) fn gzip_isize(bytes: &[u8]) -> Option<usize> {
 /// Reads a gzip stream's ISIZE trailer directly from an open file without
 /// pulling the whole stream into memory: verifies the leading [`GZIP_MAGIC`],
 /// then seeks to the ISIZE field. `Ok(None)` if the file isn't gzip, is shorter
-/// than a full frame (so that field would overlap the header rather than be a
-/// trailer), or the trailer is zero. The file cursor is left wherever the
-/// reads and seeks land; the caller re-seeks before use.
+/// than a full frame, or the trailer is zero. The file cursor is left wherever
+/// the reads and seeks land; the caller re-seeks before use.
 pub(crate) fn gzip_isize_from_file(file: &mut std::fs::File) -> std::io::Result<Option<usize>> {
     let mut magic = [0u8; 2];
     if file.read_exact(&mut magic).is_err() || magic != GZIP_MAGIC {
