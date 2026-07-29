@@ -3,8 +3,8 @@ use crate::model::{AggregateBuildStarted, TraceModel};
 use crate::theme::{self, Palette};
 use crate::{
     BAR_WIDTH, LABEL_MIN_PX, LINE_SCROLL_PX, METRICS, MIN_SLICE_PX, SLICE_SEAM_MIN_PX,
-    SLICE_SEAM_MIX, SLICE_TEXT_PAD, STATS_TEXT_SIZE, ZOOM_PER_NOTCH, paint_tooltip_box,
-    thumb_offset,
+    SLICE_SEAM_MIX, SLICE_TEXT_PAD, STATS_TEXT_SIZE, ZOOM_PER_NOTCH, drawn_scroll,
+    paint_tooltip_box, scroll_request, thumb_offset,
 };
 use bviz_trace_layout::{
     FlameBox, FlameGraph, FlameMetrics, FlamePlacement, FlameView, ScopeAggregate, flame_height,
@@ -192,7 +192,9 @@ pub(crate) struct FlamePanel {
     /// Horizontal window into the aggregated flame graph's normalized width (the
     /// panel's zoom and pan); a fraction so a resize stays invertible.
     flame_view: FlameView,
-    /// How far the panel is scrolled down, in pixels.
+    /// Where the panel's top edge sits in the tree, in pixels from its top. Held
+    /// unbounded, so a position past the end of a graph that is momentarily
+    /// shorter returns the view once the graph grows back.
     flame_scroll_y: f32,
     /// The panel's own bounds, captured during its canvas prepaint, so handlers
     /// map the cursor within the panel rather than the whole window; `None`
@@ -304,7 +306,7 @@ impl FlamePanel {
             ),
             fl.total_h,
             fl.height,
-            self.flame_scroll_y,
+            self.flame_scroll(cx),
             DEFAULT_MIN_THUMB,
         )
     }
@@ -334,18 +336,32 @@ impl FlamePanel {
         self.layout(cx).map(|fl| (fl.total_h - fl.height).max(0.0))
     }
 
-    /// Moves the vertical scroll to `y` held within `[0, max_scroll]`, so no row
-    /// paints past the end of the tree; leaves the offset alone while the ceiling
-    /// is unknown.
-    fn set_scroll_y(&mut self, y: f32, cx: &App) {
-        if let Some(max) = self.max_scroll(cx) {
-            self.flame_scroll_y = y.clamp(0.0, max);
+    /// How far down the tree the panel draws, in pixels; see [`drawn_scroll`].
+    /// The sole reading of the vertical offset, so what is painted and what is
+    /// hit-tested agree.
+    fn flame_scroll(&self, cx: &App) -> f32 {
+        let Some(max) = self.max_scroll(cx) else {
+            return self.flame_scroll_y;
+        };
+        drawn_scroll(self.flame_scroll_y, max)
+    }
+
+    /// Moves the panel's top edge to `y` pixels down the tree; see
+    /// [`scroll_request`]. This is a gesture entry point rather than an absolute
+    /// seek: while a position past the tree's end is held, `scroll_to(0.0)` is a
+    /// no-op, so a caller that means "go to the top" assigns the offset instead.
+    fn scroll_to(&mut self, y: f32, cx: &App) {
+        let Some(max) = self.max_scroll(cx) else {
+            return;
+        };
+        if let Some(y) = scroll_request(self.flame_scroll_y, max, y) {
+            self.flame_scroll_y = y;
         }
     }
 
-    /// Pulls the standing offset back under the current ceiling.
-    fn clamp_scroll_y(&mut self, cx: &App) {
-        self.set_scroll_y(self.flame_scroll_y, cx);
+    /// Moves the panel's top edge up by a gesture's `dy` pixels.
+    fn scroll_by(&mut self, dy: f32, cx: &App) {
+        self.scroll_to(self.flame_scroll(cx) - dy, cx);
     }
 
     /// The box under a window-space cursor: map the cursor to a depth row via the
@@ -362,7 +378,7 @@ impl FlamePanel {
         if x < fl.left || x >= fl.left + fl.width || y < fl.top || y >= fl.top + fl.height {
             return None;
         }
-        let content_y = y - fl.top + self.flame_scroll_y;
+        let content_y = y - fl.top + self.flame_scroll(cx);
         let depth = (content_y / metrics.row_height) as u32;
         let content_w = fl.view.content_px(fl.width);
         let scroll_x = fl.view.scroll_px(fl.width);
@@ -419,7 +435,7 @@ impl FlamePanel {
     /// Maps the vertical thumb drag back to a scroll offset.
     fn scroll_thumb_to(&mut self, pos: Point<Pixels>, grab: f32, cx: &App) {
         if let Some(offset) = thumb_offset(self.vbar(cx), pos, grab) {
-            self.set_scroll_y(offset, cx);
+            self.scroll_to(offset, cx);
         }
     }
 
@@ -453,12 +469,11 @@ impl FlamePanel {
                 ZOOM_PER_NOTCH.powf(dy_lines as f64),
             );
             self.flame_view = fv;
-            self.clamp_scroll_y(cx);
         } else if e.modifiers.shift {
             fv.pan_px(dx + dy, width);
             self.flame_view = fv;
         } else {
-            self.set_scroll_y(self.flame_scroll_y - dy, cx);
+            self.scroll_by(dy, cx);
         }
         self.invalidate_canvas(cx);
     }
@@ -599,7 +614,7 @@ fn flame_on_drag(panel: &mut FlamePanel, event: &MouseMoveEvent, cx: &mut Contex
                 fv.pan_px(dx, fl.width);
                 panel.flame_view = fv;
             }
-            panel.set_scroll_y(panel.flame_scroll_y - dy, cx);
+            panel.scroll_by(dy, cx);
             panel.last_mouse = event.position;
         }
         FlameDrag::VThumb(grab) => panel.scroll_thumb_to(event.position, grab, cx),
@@ -633,9 +648,8 @@ impl Render for FlameCanvas {
         let prepaint = {
             let parent = parent.clone();
             move |bounds: Bounds<Pixels>, _: &mut Window, cx: &mut App| {
-                parent.update(cx, |panel, cx| {
+                parent.update(cx, |panel, _| {
                     panel.flame_bounds = Some(bounds);
-                    panel.clamp_scroll_y(cx);
                 });
             }
         };
@@ -676,7 +690,7 @@ fn flame_paint(
             // f64 so precision holds at deep zoom.
             let content_w = fl.view.content_px(fl.width);
             let scroll_x = fl.view.scroll_px(fl.width);
-            (fl, panel.flame_scroll_y, content_w, scroll_x, panel.vbar(cx), panel.hbar(cx))
+            (fl, panel.flame_scroll(cx), content_w, scroll_x, panel.vbar(cx), panel.hbar(cx))
         };
         let boxes = parent.update(cx, |panel, _| {
             flame_boxes(&mut panel.flame_boxes, &aggregates, content_w, scroll_x, fl.width, &metrics)
