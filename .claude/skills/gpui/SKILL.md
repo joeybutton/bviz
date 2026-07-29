@@ -278,39 +278,50 @@ gpui gives you scroll *state* and clipping, not a scroll bar. `ScrollHandle` wit
 `.overflow_y_scroll()` / `.track_scroll(handle)`, and `uniform_list` /
 `UniformListScrollHandle`, move and clip content but draw no bar. The reusable
 `Scrollbar` component lives in Zed's `ui` crate (`crates/ui/src/components/scrollbar.rs`),
-which is heavy (pulls `theme`, `editor`, …) and not a dependency here. So render the bar
-yourself, and make it interactive — a scroll bar drags and its track clicks, not just a
-drawn thumb:
+which is heavy (pulls `theme`, `editor`, …) and not a dependency here, so render the bar
+yourself with `bviz_ui_components::Scrollbar` — a geometry/hit-test/drag-mapping helper
+that owns no scroll state. Make it interactive: a scroll bar drags and its track clicks,
+not just a drawn thumb. Drive the drag with `track_drag` (see Interactivity) so it keeps
+following the cursor past the window edge and ends on a release anywhere.
 
-- Paint a thumb sized to the visible fraction and positioned by the scroll offset.
-- Keep its track/thumb geometry on the view; on a left mouse-down hit-test it, grab the
-  thumb (or center it on a track click). Drive the drag with `bviz_ui_components::
-  track_drag` (see Interactivity) so it keeps following the cursor past the window edge
-  and ends on a release anywhere.
-- Map the pixel drag to your scroll model (a 0..1 track fraction → a target offset). For
-  a line-based terminal, bridge the fraction to alacritty's `display_offset`.
-- To auto-hide: reveal the bar on scroll / drag / gutter-hover, and hide it after an idle
-  delay with `cx.spawn` + `cx.background_executor().timer(..)`; guard the hide with a
-  reveal counter so a later reveal isn't undone by an earlier timer firing.
+Four rules carry most of the weight. **`references/scroll-model.md` has the reasoning,
+Zed's three layers, and the verification method — read it before designing or changing a
+scroll model.**
 
-The terminal's scroll bar (`ui/terminal/src/terminal/mod.rs`) implements all of this.
+- **The offset is the model; the bar is a rendering of it.** Build the bar in one accessor
+  that the paint *and* the mouse handlers both call. Do not keep an `Option<Scrollbar>` on
+  the view and write it back from inside the paint closure: that is one fact in two
+  places, hit-tested against a rect from a frame that may since have been replayed rather
+  than repainted. `ui/graph/src/scroll.rs` is the model; every trace panel follows it.
+- **For a list, derive the bar from the handle itself** — `bounds()`, `max_offset()`,
+  `offset()` are all live on `ScrollHandle`/`UniformListScrollHandle`, rewritten every
+  prepaint. That is Zed's own `ScrollableHandle` shape, and it means the bar cannot
+  disagree with what actually scrolls.
+- **Hold your own offset unclamped and bound it where it is used**, in one accessor every
+  reader goes through. Clamping into stored state destroys what it truncates, so a resize
+  or a reflow silently discards where the user was. (gpui's div clamps in prepaint — fine
+  for a list, wrong for a custom-painted panel.)
+- **Bound a gesture's target before deciding whether it moved anything.** Comparing an
+  unclamped request against the clamped drawn offset reduces the guard to "delta ≠ 0", so
+  a wheel notch at the bottom that moves nothing on screen still overwrites the held
+  position. `drawn_scroll`/`scroll_request` in `ui/trace/src/lib.rs` are the shared rule.
 
-**Wheel modifiers need window focus — and on Wayland an unfocused window CANNOT get them.**
-`wl_pointer.axis` (scroll) carries no modifier field; modifier state rides only on
-`wl_keyboard.modifiers`, which a compositor sends only to the keyboard-focused surface. So
-inside `on_scroll_wheel` an unfocused window sees `event.modifiers` empty, and `Ctrl/Shift+wheel`
-zoom/pan do nothing. `window.modifiers()` is no better (gpui overwrites it from the same scroll
-event), nor is a `ModifiersChanged` tracker (those events also stop when unfocused). This is NOT
-recoverable client-side: Mutter explicitly stopped leaking modifier state to non-focused surfaces
-(GNOME/mutter MR !3704), and `window.activate_window()` (xdg_activation_v1) is rejected by GNOME's
-focus-stealing prevention without a valid recent-interaction serial — so activating on hover is a
-no-op there (do NOT add it; it's dead code with a false premise). What DOES work: GNOME's
-click-to-focus already focuses the window on a click, so Ctrl/Shift+wheel works after one click;
-focus-follows-mouse (a user setting the app can't change) makes it work on hover. For an affordance
-that works while unfocused, use pure-pointer controls (on-canvas/toolbar +/- zoom buttons) — those
-need no modifier. Plain-wheel scroll always works unfocused; only modifier-gated gestures are
-affected. Evidence: wayland-book seat/pointer + seat/keyboard; gpui wayland `client.rs` builds
-`ScrollWheelEvent.modifiers` from the last `wl_keyboard.modifiers` only.
+If the content itself reflows — rows collapsing, being filtered or reordered — a pixel
+offset cannot survive it; anchor to a row identity instead. That is the second half of
+`references/scroll-model.md`.
+
+For a line-based terminal, bridge the drag fraction to alacritty's `display_offset`
+(`ui/terminal/src/terminal/mod.rs`), which also implements auto-hide: reveal on scroll /
+drag / gutter-hover, hide after an idle delay with `cx.spawn` +
+`cx.background_executor().timer(..)`, guarding the hide with a reveal counter so a later
+reveal isn't undone by an earlier timer firing.
+
+**Wheel modifiers need window focus, and on Wayland an unfocused window cannot get them** —
+so `Ctrl/Shift+wheel` silently does nothing until the window is clicked, and no client-side
+workaround exists (activating the window on hover is dead code with a false premise; do not
+add it). Plain-wheel scroll is unaffected. For an affordance that works while unfocused, use
+pure-pointer controls. `references/wayland-input.md` has the protocol-level reasoning and the
+evidence, and is worth reading before designing any modifier-gated gesture.
 
 ## Aligned tables
 
@@ -454,11 +465,23 @@ parent.update(cx, |view, _| {                // exclusive write
 ```
 
 A helper that a paint uses to stash geometry should **return** it rather than take a
-`&Cell<T>` to fill — `paint_scrollbars` returns its two `Option<Scrollbar>` layouts and the
-caller assigns them.
+`&Cell<T>` to fill.
+
+**First ask whether it needs stashing at all.** Geometry a paint can *derive* — a scroll
+bar's track and thumb, which follow from the offset and the layout — belongs in an
+accessor both the paint and the handlers call, not in a field the paint writes back. What
+genuinely has to be captured is what only the layout knows: the bounds a `canvas` was
+given. Capture that in the **prepaint**, where it is known before anything reads it, and
+prefer `Option<Bounds<Pixels>>` over a zero default so "not laid out yet" is
+distinguishable from "laid out at the origin" instead of quietly producing a wrong
+ceiling.
 
 **This is safe and does not loop.** By the time elements lay out, prepaint, and paint, the
-view's own `render` lease has ended, so `update` there does not double-lease. And `update`
+view's own `render` lease has ended, so `update` there does not double-lease — and a
+descendant's prepaint never runs with an ancestor leased, which is what makes reading a
+*sibling* entity (the model) from inside a `parent.update(..)` sound. Note that `read` is
+not exempt: `EntityMap` panics on the same condition as `update`, so a shared read of an
+already-leased entity is just as fatal as a second `update`. And `update`
 alone does not notify, so it schedules no extra frame — confirm on a real profile by
 counting paint calls (an `eprintln!` in the paint closure should fire once for a settled
 idle window, not continuously).
@@ -472,7 +495,7 @@ with `&mut View`, so it needs neither the `Rc` nor the cell.
 **What the cell costs.** Dynamic borrow checking on a field nothing shares, a `RefCell`
 that can panic at runtime, and read-modify-write (`let mut v = f.get(); …; f.set(v)`) where
 in-place mutation would do. `TimelinePanel` in `ui/trace/src/timeline.rs` holds its time
-view, viewport, fit latch, scroll-bar geometry, and memoized cull list as plain fields, and
+view, viewport, fit latch, scroll anchor, and memoized cull list as plain fields, and
 `fit_prepaint` / `slice_paint` are the worked examples of the read-then-commit shape.
 
 Reach for a cell only for a writer with no path to `&mut App` or `&mut self` at all.
@@ -491,6 +514,12 @@ Reach for a cell only for a writer with no path to `&mut App` or `&mut self` at 
   and text style are all unchanged, and the window is not refreshing. A resize changes bounds, so
   the cache key breaks and the child repaints on its own; `Window::refresh()` (e.g. an appearance
   change) bypasses caching entirely.
+- **A cached child's prepaint and paint are reused together** — gpui never replays one
+  without the other, and a `canvas`'s prepaint and paint are handed the *same* `bounds`. So
+  geometry a prepaint captures always describes the frame that was painted, and a hit-test
+  reading it cannot be half a frame stale. What it *can* be is a whole frame old, which is
+  why derived geometry (a scroll bar) belongs in an accessor rather than in a field the
+  paint wrote.
 - **Parent-notify vs child-notify is the control.** Because a notify marks *ancestors* dirty and
   never descendants, a parent notify does not dirty an embedded child — its cached scene replays.
   This is the lever for cheap frequent repaints over expensive content: put the expensive,
@@ -579,6 +608,17 @@ while the GNOME screen is locked or idle (a nested window would not be presented
 Resolve the binary with `bazel cquery --output=files //path:target` after building it.
 `SCREENSHOT_DELAY` (default 5s) sets how long to wait for the first frame.
 
+**A capture proves the frame, not the behaviour.** Bit-identical PNGs across a refactor are
+strong evidence that nothing moved — build the binary before and after, capture both, and
+compare with `sha256sum`; that is the cheapest proof a "no visible change" claim can have.
+But they say nothing about state that only a gesture reaches. `cage` cannot inject input,
+so for a behavioural claim (a position surviving a reflow, a selection surviving a rebuild)
+drive the sequence programmatically with the *same* throwaway instrumentation on both
+revisions, and take **three** captures — control, old-revision cycle, new-revision cycle —
+so the result distinguishes "fixed" from merely "different". `references/scroll-model.md`
+has the full method, including which region to diff and how to pick a perturbation that
+actually moves the bound.
+
 ## Gotchas
 
 - No `.id()` → no interactivity. `on_click`/focus/state need a `Stateful` element.
@@ -588,6 +628,9 @@ Resolve the binary with `bazel cquery --output=files //path:target` after buildi
 - The element tree is rebuilt every render — hold `Entity<_>` references, never element ones.
 - A `canvas`/`Element` paint closure is `'static` — capture owned snapshots, not view borrows.
 - A `Cell`/`RefCell` on a view field is usually avoidable — a prepaint/paint closure holds `&mut App`, so it can `parent.update(..)` and write a plain field.
+- `read`ing an entity that is already leased panics exactly like a second `update` — a shared borrow is not a way around a double-lease.
+- A view field holding geometry a paint could derive (a scroll bar) is one fact in two places — derive it in an accessor the paint and the handlers share.
+- Clamping a scroll offset into stored state destroys the position it truncates — hold it unclamped and bound it at the read, or a resize silently loses where the user was.
 - Styling an element from bounds a paint measured puts it a frame behind, and at the origin on the first frame — place children from a custom `Element`'s prepaint instead.
 - A background `Task` you don't store is cancelled on drop — keep it in a view field.
 - An element's mouse handlers stop at the window edge — use `track_drag` for a drag that must continue outside.
