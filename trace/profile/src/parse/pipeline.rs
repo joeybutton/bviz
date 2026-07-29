@@ -231,15 +231,10 @@ const PIPELINE_MAX_CHUNK_BYTES: usize = 32 << 20;
 /// whole-buffer fallback parses such input instead.
 const PIPELINE_MAX_EVENT_BYTES: usize = 64 << 20;
 
-/// Decompresses a gzipped profile and parses it concurrently: a producer
-/// thread streams the inflate, cuts the decoded bytes into newline-aligned
-/// chunks, and feeds them through a bounded queue to workers running the same
-/// per-chunk builders as [`parse_chunks`], so the decode leg hides under the
-/// parse leg. Each chunk buffer is dropped right after its parse — everything
-/// a builder keeps is interned — so the whole decoded text never exists in
-/// memory at once. Returns `None` — leaving the input to the whole-buffer path
-/// — for a single core, a stream whose ISIZE trailer is missing, zero, or
-/// under the parallel threshold, or any decode or parse failure.
+/// The pipelined decode of a gzipped profile held whole in memory, sized from
+/// that buffer's own ISIZE trailer. Returns `None` — leaving the input to the
+/// whole-buffer path — for a missing or zero trailer, a size
+/// [`pipeline_params`] declines, or any decode or parse failure.
 pub(crate) fn parse_gz_pipelined(bytes: &[u8]) -> Option<Profile> {
     let decoded_size = gzip_isize(bytes)?;
     let (workers, chunk_bytes) = pipeline_params(decoded_size)?;
@@ -361,10 +356,9 @@ fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 /// The producer side of the pipelined decode: streams the inflate and sends
 /// newline-aligned pieces of the `traceEvents` array, blocking on the bounded
 /// queue when the workers are behind and on the buffer ring when every part
-/// is in flight (a return is then already on its way; see [`parse_gz_stream`]
-/// on the ring size). `None` on a decode error, an input the chunker can't
-/// navigate (no array, no closing bracket, an over-long line), or a closed
-/// queue.
+/// is in flight (a return is then already on its way). `None` on a decode
+/// error, an input the chunker can't navigate (no array, no closing bracket,
+/// an over-long line), or a closed queue.
 fn stream_pieces<'a>(
     reader: impl Read + Send,
     chunk_bytes: usize,
@@ -448,18 +442,25 @@ fn stream_pieces<'a>(
     }
 }
 
-/// Runs the decode producer, `workers` chunk parsers, and a merger over
-/// bounded queues. The piece-queue bound keeps at most about two chunks per
-/// worker decoded-but-unparsed, so peak memory scales with the worker count,
-/// not the profile; transcoding runs per chunk on the workers, off the decode
-/// leg. The merger reorders finished builders back into array order and folds
-/// each into the running [`Merge`] while later chunks are still decoding and
-/// parsing, so after the last chunk only [`finish_merge`] remains.
+/// Takes the decoded size from the stream's own ISIZE trailer, or zero when it
+/// declares none.
 #[cfg(test)]
 pub(crate) fn parse_gz_stream(bytes: &[u8], workers: usize, chunk_bytes: usize) -> Option<Profile> {
     parse_gz_stream_from(bytes, workers, chunk_bytes, gzip_isize(bytes).unwrap_or(0))
 }
 
+/// Runs a decode producer over `reader`, `workers` chunk parsers, and a merger,
+/// cutting pieces of about `chunk_bytes` from a stream declaring `decoded_size`
+/// uncompressed bytes. The piece queue is bounded by the worker count, so the
+/// producer can decode no further than that many pieces ahead of the parsers;
+/// transcoding runs per chunk on the workers, off the decode leg. Chunk buffers
+/// are reused as pieces finish parsing, so the whole decoded text never exists
+/// in memory at once. The merger reorders finished builders back into array
+/// order and folds each into the running [`Merge`] while later chunks are still
+/// decoding and parsing, so after the last chunk only the final seal remains.
+/// `None` if the decode or any chunk parse fails, if the folded builders do not
+/// account for every piece cut, or if no piece was cut at all — an empty
+/// `traceEvents` array.
 fn parse_gz_stream_from(
     reader: impl Read + Send,
     workers: usize,
