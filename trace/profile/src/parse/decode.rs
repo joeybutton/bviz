@@ -25,8 +25,9 @@ fn gunzip(bytes: &[u8]) -> Result<Vec<u8>, LoadError> {
     Ok(out)
 }
 
-/// Smallest well-formed gzip stream: a 10-byte header plus an 8-byte trailer.
-/// Below this the trailing ISIZE field overlaps the header and is not valid.
+/// The gzip framing alone: a 10-byte header plus an 8-byte trailer, with no
+/// deflate payload between them. Below this no ISIZE field is framed at all,
+/// whatever the tail bytes hold.
 const GZIP_FRAMING_MIN: usize = 18;
 
 /// Width of the gzip ISIZE trailer field (RFC 1952).
