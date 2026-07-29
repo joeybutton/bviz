@@ -94,9 +94,6 @@ impl Span32 {
 pub struct Profile {
     /// The one text pool every [`Str`] in this profile indexes.
     pub(crate) text: String,
-    /// All threads' slices, partitioned into one contiguous run per track
-    /// ([`ThreadTrack::slices`]); the runs sit in an order of their own,
-    /// unrelated to that of [`Profile::threads`].
     pub(crate) slice_pool: Vec<Slice>,
     pub(crate) detail_pool: Vec<SliceDetail>,
     pub(crate) end_max_pool: Vec<i64>,
@@ -130,7 +127,11 @@ pub struct ThreadTrack {
     pub tid: i64,
     pub name: Str,
     pub sort_index: i64,
-    /// Range into the profile's slice pool; resolve with [`Profile::slices`].
+    /// This track's contiguous run in the slice, detail, and end-max pools
+    /// alike — the runs partition all three, but not necessarily in the order
+    /// of [`Profile::threads`], so a track's run is reached only through this
+    /// span and never through the track's position. Resolve with
+    /// [`Profile::slices`], [`Profile::details`], and [`Profile::end_maxes`].
     pub slices: Span32,
     /// Slice rows the track's nesting occupies: one past the deepest
     /// [`Slice::depth`], and zero for a track with no slices.
