@@ -10,7 +10,7 @@ use crate::concurrent_interner::{ConcurrentInterner, Writer};
 use crate::model::Profile;
 
 use super::build::{seal, Builder, Merge};
-use super::BYTES_PER_DISTINCT;
+use super::{merge_other_data, BYTES_PER_DISTINCT};
 
 /// Carries the decoded text's byte length so [`Self::visit_map`] can size the
 /// interner it fills, since the map visitor never sees the whole text.
@@ -33,7 +33,10 @@ impl<'de> Visitor<'de> for ProfileVisitor {
             let mut writer = interner.writer();
             while let Some(key) = map.next_key::<Cow<str>>()? {
                 match key.as_ref() {
-                    "otherData" => other_data = map.next_value::<Option<Map<String, Value>>>()?,
+                    "otherData" => {
+                        let seen = map.next_value::<Option<Map<String, Value>>>()?;
+                        other_data = merge_other_data(other_data, seen);
+                    }
                     "traceEvents" => {
                         map.next_value_seed(EventsSeed(&mut builder, &mut writer))?
                     }

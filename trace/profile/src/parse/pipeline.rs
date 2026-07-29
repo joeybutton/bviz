@@ -13,7 +13,10 @@ use super::build::{seal, Builder, Merge};
 use super::decode::{gzip_isize, latin1_cow, latin1_to_utf8};
 use super::scanner::scan_event;
 use super::serde_events::{ArgEntry, RawEventSeed};
-use super::{intern_prefault_bytes, recover_other_data, timed, BYTES_PER_DISTINCT, BYTES_PER_SLICE};
+use super::{
+    intern_prefault_bytes, merge_other_data, recover_other_data, timed, BYTES_PER_DISTINCT,
+    BYTES_PER_SLICE,
+};
 
 /// Outcome of locating the `traceEvents` array in a decoded profile buffer.
 pub(crate) enum TraceEventsArray {
@@ -131,9 +134,9 @@ pub(crate) fn parse_chunks(text: &str, n: usize, min_bytes: usize) -> Option<Pro
     else {
         return None;
     };
-    // Bound the region to the array's closing bracket (the last `]`, since only
-    // the outer object's `}` follows it) so a chunk never picks up the trailing
-    // `]}` as event content. `traceEvents` is the profile's last key.
+    // Bound the region to the array's closing bracket — the last `]`, as no
+    // other key of the outer object carries one — so a chunk never picks up
+    // the close as event content.
     let array_end = text.rfind(']')?;
     if array_end <= array_start {
         return None;
@@ -162,7 +165,10 @@ pub(crate) fn parse_chunks(text: &str, n: usize, min_bytes: usize) -> Option<Pro
     }
     let chunks: Vec<&str> = bounds.windows(2).map(|w| &region[w[0]..w[1]]).collect();
 
-    let other_data = recover_other_data(text);
+    let other_data = merge_other_data(
+        recover_other_data(&text[..array_start]),
+        recover_other_data(&text[array_end..]),
+    );
     // Every worker interns into this one arena, so a builder's handles are
     // global and merging never rebases them. The distinct pool is bounded by
     // the region's byte length.
@@ -326,9 +332,9 @@ impl Chunk for StreamChunk<'_, '_> {
     }
 }
 
-/// What the producer keeps besides the event chunks: the text before the
-/// `traceEvents` array and from its closing bracket to the end of the stream —
-/// one of which carries `otherData` — and how many pieces it sent.
+/// What the producer keeps besides the event chunks: the two regions outside
+/// the `traceEvents` array, which is where [`merge_other_data`] finds the
+/// profile's metadata.
 struct StreamEnds {
     head: Vec<u8>,
     tail: Vec<u8>,
@@ -550,7 +556,7 @@ fn parse_gz_stream_from(
     }
     let head = latin1_to_utf8(ends.head);
     let tail = latin1_to_utf8(ends.tail);
-    let other_data = recover_other_data(&head).or_else(|| recover_other_data(&tail));
+    let other_data = merge_other_data(recover_other_data(&head), recover_other_data(&tail));
     Some(timed("  finish", || seal(interner, merge, other_data)))
 }
 

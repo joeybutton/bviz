@@ -245,11 +245,32 @@ fn recover_events(
     recovered
 }
 
+/// The first `otherData` object in `prefix`, or `None` when it holds none or
+/// the object does not parse.
 fn recover_other_data(prefix: &str) -> Option<Map<String, Value>> {
     let key = prefix.find("\"otherData\"")?;
     let obj_start = prefix[key..].find('{').map(|i| key + i)?;
     let end = object_end(prefix.as_bytes(), obj_start)?;
     serde_json::from_str(&prefix[obj_start..=end]).ok()
+}
+
+/// Combines two `otherData` objects into the metadata of a profile that
+/// carries the key on both sides of its `traceEvents` array, splitting its
+/// keys across them. `head` is the object appearing earlier in the stream, and
+/// wins a key both carry.
+pub(crate) fn merge_other_data(
+    head: Option<Map<String, Value>>,
+    tail: Option<Map<String, Value>>,
+) -> Option<Map<String, Value>> {
+    match (head, tail) {
+        (Some(mut head), Some(tail)) => {
+            for (key, value) in tail {
+                head.entry(key).or_insert(value);
+            }
+            Some(head)
+        }
+        (head, tail) => head.or(tail),
+    }
 }
 
 #[cfg(test)]
@@ -586,6 +607,26 @@ mod tests {
         let gz = enc.finish().unwrap();
         let p = parse_gz_stream(&gz, 2, 64).expect("pipelined");
         assert_eq!(p.opt_str(p.metadata().bazel_version), Some("9.0.0"));
+    }
+
+    #[test]
+    fn other_data_merges_across_both_ends() {
+        // Keys split either side of the array, with `bazel_version` repeated so
+        // the leading object's value must win.
+        let json = "{\"otherData\":{\"bazel_version\":\"9.0.0\"},\"traceEvents\":[\n".to_string()
+            + "{\"name\":\"thread_name\",\"ph\":\"M\",\"tid\":1,\"args\":{\"name\":\"L\"}},\n"
+            + "{\"cat\":\"c\",\"name\":\"a\",\"ph\":\"X\",\"ts\":0,\"dur\":1,\"tid\":1}\n"
+            + "],\"otherData\":{\"build_id\":\"abc\",\"bazel_version\":\"0.0.0\"}}";
+        let check = |p: &Profile| {
+            assert_eq!(p.opt_str(p.metadata().bazel_version), Some("9.0.0"));
+            assert_eq!(p.opt_str(p.metadata().build_id), Some("abc"));
+        };
+        check(&parse_streaming(&json).expect("serial"));
+        check(&parse_chunks(&json, 4, 0).expect("parallel"));
+        let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        enc.write_all(json.as_bytes()).unwrap();
+        let gz = enc.finish().unwrap();
+        check(&parse_gz_stream(&gz, 2, 64).expect("pipelined"));
     }
 
     #[test]
