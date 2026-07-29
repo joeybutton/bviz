@@ -87,9 +87,9 @@ impl Span32 {
 
 /// A parsed Bazel profile as flat, string-interned arenas. Every model type
 /// holds only `Copy` handles ([`Str`], [`Span32`]) and scalars, so all owned
-/// heap lives in the pools below — dropping a `Profile` frees a handful of large
-/// allocations rather than millions of tiny ones, and the type is `Send + Sync`
-/// with no lifetime parameters.
+/// heap lives in this type's text and element pools — dropping a `Profile`
+/// frees a handful of large allocations rather than millions of tiny ones, and
+/// the type is `Send + Sync` with no lifetime parameters.
 #[derive(Debug, PartialEq)]
 pub struct Profile {
     /// The one text pool every [`Str`] in this profile indexes.
@@ -140,8 +140,7 @@ pub struct ThreadTrack {
 }
 
 /// The hot per-slice record: only what culling, hit-testing, and painting read
-/// per frame, sized to fit two slices per cache line. The cold companion fields
-/// live in the parallel [`SliceDetail`] at the same index.
+/// per frame, sized to fit two slices per cache line.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Slice {
     pub name: Str,
@@ -155,16 +154,16 @@ const _: () = assert!(std::mem::size_of::<Slice>() == 32);
 
 /// The cold companion of a [`Slice`], read only on demand (tooltips, grouping):
 /// the profile's detail pool is exactly parallel to its slice pool, so a
-/// thread's `slices` span resolves both. The three typed args carry the Bazel
-/// keys callers query directly; `others` is a range into the profile's args
-/// pool of the remaining key/value pairs, resolved with
-/// [`Profile::slice_others`].
+/// slice's detail is the entry at the same index and a thread's `slices` span
+/// resolves both. The typed args carry the Bazel keys callers query directly.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct SliceDetail {
     pub category: Str,
     pub target: OptStr,
     pub mnemonic: OptStr,
     pub configuration: OptStr,
+    /// Range into the profile's args pool of the key/value pairs beyond the
+    /// typed args; resolve with [`Profile::slice_others`].
     pub others: Span32,
 }
 
@@ -304,12 +303,13 @@ fn general_information_role(name: &str) -> (Workload, bool) {
 }
 
 /// A counter graph. The parser splits every counter into one lane per numeric
-/// series, so `series` spans at most one entry (zero for a counter that
-/// carried no numeric points).
+/// series.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CounterLane {
     pub name: Str,
     /// Range into the profile's series pool; resolve with [`Profile::series`].
+    /// Spans at most one entry — the lane's own series — and none for a counter
+    /// that carried no numeric points.
     pub series: Span32,
 }
 
