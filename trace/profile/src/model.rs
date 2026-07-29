@@ -521,14 +521,16 @@ impl Profile {
     /// interned handle; resolve with [`Profile::str`].
     pub fn phase_intervals(&self) -> Vec<(Str, i64, i64)> {
         let markers = &self.phase_markers;
-        let mut intervals = Vec::with_capacity(markers.len());
-        for (i, marker) in markers.iter().enumerate() {
-            let end = markers
-                .get(i + 1)
-                .map_or(self.span.end_us, |next| next.start_us);
-            intervals.push((marker.name, marker.start_us, end));
-        }
-        intervals
+        markers
+            .iter()
+            .enumerate()
+            .map(|(i, marker)| {
+                let end = markers
+                    .get(i + 1)
+                    .map_or(self.span.end_us, |next| next.start_us);
+                (marker.name, marker.start_us, end)
+            })
+            .collect()
     }
 }
 
