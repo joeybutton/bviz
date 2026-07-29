@@ -1,15 +1,15 @@
 use crate::chart::fit_px_per_us;
 use crate::counters::paint_crosshair;
-use crate::groups::{GroupChrome, GroupHit};
+use crate::groups::{GroupChrome, GroupHit, RowAnchor, anchor_at, anchor_offset, chart_rows};
 use crate::model::TraceModel;
 use crate::regions::{Regions, flame_total_height, max_lane_scroll};
 use crate::theme::Palette;
 use crate::{
     BottomTab, DEFAULT_GUTTER_WIDTH, DEFAULT_PANEL_HEIGHT, EDGE_MARGIN_PX, GROUP_BAND_HEIGHT,
     GROUP_ICON, Hover, LINE_SCROLL_PX, MAX_PX_PER_US, METRICS, MIN_SLICE_PX, SLICE_TEXT_PAD,
-    SelectAllTracks, Source, TraceView, ZOOM_PER_NOTCH, paint_gridlines, paint_gutter,
-    paint_markers, paint_ruler, paint_slice, paint_tooltip, ruler_ticks, scrollbar_geom,
-    thumb_offset,
+    SelectAllTracks, Source, TraceView, ZOOM_PER_NOTCH, drawn_scroll, paint_gridlines,
+    paint_gutter, paint_markers, paint_ruler, paint_slice, paint_tooltip, ruler_ticks,
+    scroll_request, scrollbar_geom, thumb_offset,
 };
 use bviz_trace_layout::{Cull, LaneLayout, TimeView, Viewport, VisibleSlice, visible_slices};
 use bviz_trace_profile::Profile;
@@ -35,6 +35,16 @@ pub(crate) struct SliceDrawCache {
     view: TimeView,
     viewport: Viewport,
     slices: Rc<Vec<VisibleSlice>>,
+}
+
+/// The flame chart as it currently stands, read against the lane scroll's
+/// standing anchor.
+struct AnchoredChart {
+    lanes: Rc<LaneLayout>,
+    chrome: Rc<GroupChrome>,
+    /// Where the anchored row sits in the chart, before the ceiling bounds it.
+    held: f32,
+    ceiling: f32,
 }
 
 /// What a left-button drag over the timeline is currently moving.
@@ -70,8 +80,9 @@ pub(crate) struct TimelinePanel {
     /// floor all need a width the panel learns only there — and the same frame's
     /// paint then reads the result.
     view: TimeView,
-    /// How far the lanes are scrolled up, in pixels.
-    scroll_y: f32,
+    /// Which chart row the flame region's top edge sits in, and where within it;
+    /// [`Self::lane_scroll`] turns it into the pixel offset the frame draws at.
+    scroll: RowAnchor,
     /// Viewport bounds captured during canvas paint, so handlers can map a window
     /// cursor to viewport space and bound the zoom to a fit.
     viewport: Bounds<Pixels>,
@@ -110,7 +121,7 @@ impl TimelinePanel {
             model,
             shell,
             view: TimeView { start_us: 0.0, px_per_us: 1.0 },
-            scroll_y: 0.0,
+            scroll: RowAnchor::Start,
             viewport: Bounds::default(),
             fitted: false,
             slice_draw: None,
@@ -131,11 +142,11 @@ impl TimelinePanel {
     }
 
     /// Drops the state that addresses the loaded document: the memoized draw
-    /// list, which re-culls against the new one, and the lane scroll, whose
-    /// pixels index the lane layout the old document produced.
+    /// list, which re-culls against the new one, and the lane scroll, whose row
+    /// belongs to the old document's chart.
     pub(crate) fn reset_for_new_profile(&mut self) {
         self.slice_draw = None;
-        self.scroll_y = 0.0;
+        self.scroll = RowAnchor::Start;
     }
 
     /// The bottom-tab selection, panel height, and gutter width the timeline
@@ -185,7 +196,7 @@ impl TimelinePanel {
             };
             (profile.span(), flame_total_height(&lanes))
         };
-        scrollbar_geom(span, self.view, flame_total, self.regions(cx), self.scroll_y)
+        scrollbar_geom(span, self.view, flame_total, self.regions(cx), self.lane_scroll(cx))
     }
 
     fn vbar(&self, cx: &App) -> Option<Scrollbar> {
@@ -196,35 +207,40 @@ impl TimelinePanel {
         self.scroll_bars(cx).1
     }
 
-    /// The lane-scroll ceiling, or `None` until a lane layout exists.
-    fn max_scroll(&self, cx: &App) -> Option<f32> {
-        let lanes = self.model.read(cx).lane_layout()?;
-        Some(max_lane_scroll(&lanes, &self.regions(cx)))
+    /// The chart the lane scroll addresses; `None` while no profile with a lane
+    /// layout is loaded. Reads the shell for its layout, so it must not run while
+    /// the shell is leased.
+    fn anchored_chart(&self, cx: &App) -> Option<AnchoredChart> {
+        let model = self.model.read(cx);
+        let (lanes, chrome) = (model.lane_layout()?, model.group_chrome()?);
+        let held = anchor_offset(chart_rows(&lanes, &chrome), self.scroll);
+        let ceiling = max_lane_scroll(&lanes, &self.regions(cx));
+        Some(AnchoredChart { lanes, chrome, held, ceiling })
     }
 
-    /// Moves the lane scroll to `y` held within `[0, max_scroll]`, so no lane
-    /// paints past the end of the lanes; leaves the offset alone while the
-    /// ceiling is unknown.
-    fn set_scroll_y(&mut self, y: f32, cx: &App) {
-        if let Some(max) = self.max_scroll(cx) {
-            self.scroll_y = y.clamp(0.0, max);
-        }
+    /// How far the lanes are scrolled up, in pixels. The sole reading of the
+    /// vertical offset, so what is painted, what is culled, and what is
+    /// hit-tested agree.
+    fn lane_scroll(&self, cx: &App) -> f32 {
+        self.anchored_chart(cx)
+            .map_or(0.0, |chart| drawn_scroll(chart.held, chart.ceiling))
     }
 
-    /// Pulls the standing lane offset back under the current ceiling. Reads the
-    /// shell for its layout, so it must not run while the shell is leased; a
-    /// leased-shell caller computes the ceiling from its own reads and pushes it
-    /// down through [`Self::clamp_scroll_to`].
-    pub(crate) fn clamp_lane_scroll(&mut self, cx: &App) {
-        self.set_scroll_y(self.scroll_y, cx);
+    /// Re-anchors the lane scroll to the row a gesture asking for `y` pixels down
+    /// the chart lands in.
+    fn scroll_to(&mut self, y: f32, cx: &App) {
+        let Some(chart) = self.anchored_chart(cx) else {
+            return;
+        };
+        let Some(target) = scroll_request(chart.held, chart.ceiling, y) else {
+            return;
+        };
+        self.scroll = anchor_at(chart_rows(&chart.lanes, &chart.chrome), target);
     }
 
-    /// Pulls the standing lane offset back under `max`, a ceiling the caller
-    /// computed; `None` leaves the offset alone.
-    pub(crate) fn clamp_scroll_to(&mut self, max: Option<f32>) {
-        if let Some(max) = max {
-            self.scroll_y = self.scroll_y.clamp(0.0, max);
-        }
+    /// Scrolls the lanes down by a gesture's `dy` pixels.
+    fn scroll_by(&mut self, dy: f32, cx: &App) {
+        self.scroll_to(self.lane_scroll(cx) - dy, cx);
     }
 
     /// Clears the slice tooltip and crosshair, so a tab switch drops them
@@ -272,7 +288,7 @@ impl TimelinePanel {
         {
             return None;
         }
-        let content_y = y - regions.flame_top + self.scroll_y;
+        let content_y = y - regions.flame_top + self.lane_scroll(cx);
         let lane = layout
             .lanes
             .iter()
@@ -317,7 +333,7 @@ impl TimelinePanel {
         {
             return None;
         }
-        let content_y = y - regions.flame_top + self.scroll_y;
+        let content_y = y - regions.flame_top + self.lane_scroll(cx);
         let hits = |top: f32| content_y >= top && content_y < top + GROUP_BAND_HEIGHT;
         let band = chrome.bands.iter().find(|b| hits(b.top))?;
         let icon_left = regions.content_left - GROUP_ICON - 2.0 * SLICE_TEXT_PAD;
@@ -344,7 +360,7 @@ impl TimelinePanel {
         {
             return None;
         }
-        let content_y = y - regions.flame_top + self.scroll_y;
+        let content_y = y - regions.flame_top + self.lane_scroll(cx);
         layout
             .lanes
             .iter()
@@ -386,7 +402,7 @@ impl TimelinePanel {
     /// Maps the lane vertical thumb drag back to a scroll offset.
     fn scroll_thumb_to(&mut self, pos: Point<Pixels>, grab: f32, cx: &App) {
         if let Some(offset) = thumb_offset(self.vbar(cx), pos, grab) {
-            self.set_scroll_y(offset, cx);
+            self.scroll_to(offset, cx);
         }
     }
 
@@ -442,7 +458,7 @@ impl TimelinePanel {
             } else {
                 (dx, dy)
             };
-            self.set_scroll_y(self.scroll_y - scroll_dy, cx);
+            self.scroll_by(scroll_dy, cx);
             self.view.pan_px(pan_dx);
             self.view.clamp_to(span, time_w, EDGE_MARGIN_PX);
         }
@@ -495,7 +511,6 @@ impl TimelinePanel {
                             GroupHit::Collapse(g) => m.toggle_group_collapsed(g),
                             GroupHit::ShowAll(g) => m.toggle_group_show_all(g),
                         });
-                        this.clamp_lane_scroll(cx);
                         this.invalidate_canvas(cx);
                         return;
                     }
@@ -585,7 +600,7 @@ fn timeline_on_drag(
             let regions = panel.regions(cx);
             panel.view.pan_px(dx);
             panel.view.clamp_to(span, regions.time_w, EDGE_MARGIN_PX);
-            panel.set_scroll_y(panel.scroll_y - dy, cx);
+            panel.scroll_by(dy, cx);
             panel.last_mouse = event.position;
         }
         TimelineDrag::VThumb(grab) => panel.scroll_thumb_to(event.position, grab, cx),
@@ -639,9 +654,8 @@ impl Render for SliceCanvas {
     }
 }
 
-/// Prepaint fit: capture the painted viewport bounds, pull the lane scroll under
-/// the ceiling those bounds imply, then fit the time view to the span before the
-/// first paint and, on a later width change, rescale the zoom
+/// Prepaint fit: capture the painted viewport bounds, then fit the time view to
+/// the span before the first paint and, on a later width change, rescale the zoom
 /// relative to the window so a resize stays invertible; finally hold the fit as
 /// the zoom floor and clamp the pan to the span.
 fn fit_prepaint(
@@ -660,11 +674,9 @@ fn fit_prepaint(
         let regions = regions_of(bounds);
         let time_w = regions.time_w;
         let old_time_w = regions_of(old_bounds).time_w;
-        let max_scroll = max_lane_scroll(&lanes, &regions);
         let span = profile.span();
         parent.update(cx, |panel, _| {
             panel.viewport = bounds;
-            panel.clamp_scroll_to(Some(max_scroll));
             if !panel.fitted {
                 panel.view = TimeView::fit(span, time_w, EDGE_MARGIN_PX);
                 panel.fitted = true;
@@ -733,7 +745,7 @@ fn slice_paint(
         let (tv, scroll, gutter_width, selected, regions, show_counters, vp) = {
             let panel = parent.read(cx);
             let tv = panel.view;
-            let scroll = panel.scroll_y;
+            let scroll = panel.lane_scroll(cx);
             let (tab, panel_height, gutter_width) = panel.shell_layout(cx);
             let selected = panel.model.read(cx).selected_tracks().to_vec();
             let regions =

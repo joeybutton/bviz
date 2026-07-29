@@ -25,7 +25,6 @@ use groups::{GroupChrome, group_label};
 use model::TraceModel;
 use regions::{
     Regions, clamp_gutter_width, clamp_panel_height, flame_total_height, graph_lanes,
-    max_lane_scroll,
 };
 use stats_panel::StatsPanel;
 use theme::Palette;
@@ -476,7 +475,6 @@ impl TraceView {
                 cx.listener(|this, e: &MouseDownEvent, _, cx| {
                     if e.click_count == 2 {
                         this.panel_height = DEFAULT_PANEL_HEIGHT;
-                        this.clamp_timeline_scroll(cx);
                     } else {
                         this.drag = Drag::Splitter;
                         this.last_mouse = e.position;
@@ -565,24 +563,6 @@ impl TraceView {
                 .map(|l| flame_total_height(&l))
                 .unwrap_or(0.0),
         }
-    }
-
-    /// The split over the timeline's last painted viewport, for a handler that
-    /// must map the cursor to the same regions the previous frame drew.
-    fn regions(&self, cx: &App) -> Regions {
-        self.region_inputs(cx).split(self.timeline.read(cx).viewport())
-    }
-
-    /// Clamps the timeline's lane scroll to the current layout height, after a
-    /// visibility or collapse change or a resize of the flame region.
-    fn clamp_timeline_scroll(&mut self, cx: &mut Context<Self>) {
-        let regions = self.regions(cx);
-        let max = self
-            .model
-            .read(cx)
-            .lane_layout()
-            .map(|lanes| max_lane_scroll(&lanes, &regions));
-        self.timeline.update(cx, |t, _| t.clamp_scroll_to(max));
     }
 
     /// Switches the bottom panel tab, dropping the flame-graph and timeline hover
@@ -783,7 +763,6 @@ fn on_drag(view: &mut TraceView, event: &MouseMoveEvent, cx: &mut Context<TraceV
                 profile.counters().len(),
                 vh,
             );
-            view.clamp_timeline_scroll(cx);
         }
         Drag::Gutter => {
             let vp = view.timeline.read(cx).viewport();
@@ -807,6 +786,23 @@ fn end_drag(view: &mut TraceView, _: &MouseUpEvent, cx: &mut Context<TraceView>)
 /// when the bar is not currently painted.
 fn thumb_offset(bar: Option<Scrollbar>, pos: Point<Pixels>, grab: f32) -> Option<f32> {
     Some(bar?.offset_at(pos, grab))
+}
+
+/// The offset a view holding `held` draws at, bounded by the end of its content
+/// at `ceiling`.
+fn drawn_scroll(held: f32, ceiling: f32) -> f32 {
+    held.clamp(0.0, ceiling)
+}
+
+/// Where a gesture asking for `request` leaves a view holding `held`, and `None`
+/// for a gesture that moves nothing on screen. A held position past the ceiling
+/// — a place the content has shrunk away from, which comes back when it grows
+/// again — draws at the ceiling, so a further gesture into the bound asks for
+/// the pixels already shown: taking it would spend the held position and invent
+/// an overscroll past the end.
+fn scroll_request(held: f32, ceiling: f32, request: f32) -> Option<f32> {
+    let target = drawn_scroll(request, ceiling);
+    (target != drawn_scroll(held, ceiling)).then_some(target)
 }
 
 /// Scrolls a list `handle` so a downward thumb `offset` maps to a matching
@@ -1440,6 +1436,40 @@ mod tests {
         // Lanes stack from graph_top, header band plus chart tall.
         assert_eq!(lanes[0].top, graph_top);
         assert_eq!(lanes[1].top, graph_top + METRICS.header_height + 40.0);
+    }
+
+    #[test]
+    fn a_scroll_request_moving_nothing_leaves_the_held_position_standing() {
+        let ceiling = 400.0;
+        // A position the content has shrunk away from, drawn at the ceiling.
+        let held = 900.0;
+        assert_eq!(drawn_scroll(held, ceiling), ceiling);
+        assert_eq!(scroll_request(held, ceiling, ceiling + LINE_SCROLL_PX), None);
+        assert_eq!(scroll_request(held, ceiling, ceiling), None);
+        // It draws where it stands again once the content grows back past it.
+        assert_eq!(drawn_scroll(held, 1000.0), held);
+    }
+
+    #[test]
+    fn a_scroll_request_that_moves_reports_its_bounded_target() {
+        let ceiling = 400.0;
+        assert_eq!(scroll_request(900.0, ceiling, 250.0), Some(250.0));
+        assert_eq!(
+            scroll_request(100.0, ceiling, 100.0 + LINE_SCROLL_PX),
+            Some(100.0 + LINE_SCROLL_PX)
+        );
+        // Past either end the gesture lands on the bound rather than being refused.
+        assert_eq!(scroll_request(100.0, ceiling, 5000.0), Some(ceiling));
+        assert_eq!(scroll_request(100.0, ceiling, -20.0), Some(0.0));
+    }
+
+    #[test]
+    fn a_scroll_request_holds_at_the_floor_and_the_ceiling() {
+        let ceiling = 400.0;
+        assert_eq!(scroll_request(0.0, ceiling, -LINE_SCROLL_PX), None);
+        assert_eq!(scroll_request(ceiling, ceiling, ceiling + LINE_SCROLL_PX), None);
+        // Content shorter than its viewport pins every gesture to the top.
+        assert_eq!(scroll_request(0.0, 0.0, LINE_SCROLL_PX), None);
     }
 
     #[test]

@@ -77,14 +77,11 @@ impl TracksMenu {
         set_list_thumb(&self.scroll, 0.0);
     }
 
-    /// Reflows the timeline after a visibility change: clamps its lane scroll to
-    /// the new layout height and rebuilds its scene.
+    /// Reflows the timeline after a visibility change, rebuilding its scene over
+    /// the restacked lanes.
     fn reflow_timeline(&self, cx: &mut Context<Self>) {
         if let Some(shell) = self.shell.upgrade() {
-            shell.update(cx, |tv, cx| {
-                tv.clamp_timeline_scroll(cx);
-                tv.invalidate_timeline(cx);
-            });
+            shell.update(cx, |tv, cx| tv.invalidate_timeline(cx));
         }
     }
 
