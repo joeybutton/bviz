@@ -333,7 +333,7 @@ fn finish_merge(
 ) -> ProfileParts {
     let Merge {
         args_pool,
-        mut phase_markers,
+        phase_markers,
         thread_meta,
         counter_order,
         counters,
@@ -502,7 +502,6 @@ fn finish_merge(
     unsafe { end_max_pool.set_len(slice_total) };
 
     let parts = timed("    tail", || {
-        phase_markers.sort_by_key(|m| m.start_us);
         let metadata = build_metadata(&mut pool.writer, other_data.as_ref());
         let merge = ThreadMerge { segments: &segments, results: &results };
         let span = compute_span(merge, &counters, &phase_markers);

@@ -430,6 +430,7 @@ impl Profile {
         &self.counters
     }
 
+    /// The build's phase markers, sorted by `start_us` ascending.
     pub fn phase_markers(&self) -> &[PhaseMarker] {
         &self.phase_markers
     }
@@ -506,8 +507,7 @@ impl Profile {
     /// phase-summary reconstruction from consecutive markers. Each name is an
     /// interned handle; resolve with [`Profile::str`].
     pub fn phase_intervals(&self) -> Vec<(Str, i64, i64)> {
-        let mut markers = self.phase_markers.clone();
-        markers.sort_by_key(|m| m.start_us);
+        let markers = &self.phase_markers;
         let mut intervals = Vec::with_capacity(markers.len());
         for (i, marker) in markers.iter().enumerate() {
             let end = markers
@@ -534,10 +534,11 @@ impl Profile {
             metadata,
             threads,
             counters,
-            phase_markers,
+            mut phase_markers,
             span,
             distinct_strings,
         } = parts;
+        phase_markers.sort_by_key(|m| m.start_us);
         Profile {
             text,
             slice_pool,
