@@ -112,10 +112,10 @@ pub struct Profile {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Metadata {
-    pub bazel_version: Option<Str>,
-    pub build_id: Option<Str>,
-    pub output_base: Option<Str>,
-    pub date: Option<Str>,
+    pub bazel_version: OptStr,
+    pub build_id: OptStr,
+    pub output_base: OptStr,
+    pub date: OptStr,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -5,8 +5,8 @@ use serde_json::{Map, Value};
 
 use crate::concurrent_interner::{ConcurrentInterner, Writer};
 use crate::model::{
-    lane_class, span_role, CounterLane, CounterPoint, CounterSeries, Metadata, PhaseMarker,
-    Profile, ProfileParts, Slice, SliceDetail, Span32, Str, ThreadTrack, TimeSpan,
+    lane_class, span_role, CounterLane, CounterPoint, CounterSeries, Metadata, OptStr,
+    PhaseMarker, Profile, ProfileParts, Slice, SliceDetail, Span32, Str, ThreadTrack, TimeSpan,
 };
 use crate::worker_count;
 
@@ -707,9 +707,9 @@ fn build_counter_lanes(
 }
 
 fn build_metadata(interner: &mut Writer, other: Option<&Map<String, Value>>) -> Metadata {
-    let mut get = |k: &str| {
+    let mut get = |k: &str| -> OptStr {
         let v = other.and_then(|m| m.get(k)).and_then(Value::as_str);
-        v.map(|v| interner.intern(v))
+        v.map(|v| interner.intern(v)).into()
     };
     Metadata {
         bazel_version: get("bazel_version"),
