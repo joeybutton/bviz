@@ -166,6 +166,23 @@ Interactive visualization and inspection tool for Bazel builds.
   purpose, and on a handle field what this holder reads or writes through it and
   which way the coupling runs. Where the name and type already say it, write no
   comment at all.
+- A doc comment binds to exactly one declaration, and everything that surfaces
+  it — an editor hover, rustdoc, a reader scanning the declaration — shows it
+  only there, so a fact stated on one field is invisible from its siblings.
+  Never let one field's doc carry a property that in truth governs several:
+  parallel pools indexed alike, a partition they all follow, an invariant tying
+  two fields together. The field that happens to host the sentence looks
+  documented and the others look undocumented, when the property covers all of
+  them equally. The resolution is not to copy the sentence onto each sibling,
+  nor to leave it standing in several plausible homes at once: pick exactly one
+  — the declaration every reader of every field it governs must pass through,
+  which is the handle, span, or accessor they are all reached by where one
+  exists, and only failing that the type's own doc — and delete the fact from
+  the others. On a type's doc such a sentence states an invariant relating the
+  fields, which is not the inventory the preceding rule forbids: say what holds
+  between them, never what they are. Leave each field a doc that stands alone
+  about itself. That is still one site for the fact, just the correct one; and
+  where a field's name and type already say it, still write no comment.
 - A comment at a construction or call site must not repeat what the constructed
   or called item's own doc says. The definition is where behaviour is explained;
   echoing it where the item is used puts one fact in two hand-maintained places
