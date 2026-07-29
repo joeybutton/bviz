@@ -33,7 +33,7 @@ mod tests {
     use crate::test_profile::{counter, profile, profile_with_counters, slice, track};
     use bviz_trace_profile::{LaneClass, TimeSpan};
 
-    /// A track whose slices' nesting yields `depth_rows` slice rows (max_depth).
+    /// A track whose slices' nesting yields `depth_rows` slice rows.
     /// One slice gives one row; an outer span containing `depth_rows - 1` nested
     /// spans gives that many rows.
     fn track_rows(tid: i64, depth_rows: u32) -> crate::test_profile::TestTrack {

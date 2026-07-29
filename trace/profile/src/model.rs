@@ -132,6 +132,8 @@ pub struct ThreadTrack {
     pub sort_index: i64,
     /// Range into the profile's slice pool; resolve with [`Profile::slices`].
     pub slices: Span32,
+    /// Slice rows the track's nesting occupies: one past the deepest
+    /// [`Slice::depth`], and zero for a track with no slices.
     pub max_depth: u32,
     pub lane_class: LaneClass,
 }
