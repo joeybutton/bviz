@@ -92,7 +92,11 @@ impl Span32 {
 /// with no lifetime parameters.
 #[derive(Debug, PartialEq)]
 pub struct Profile {
+    /// The one text pool every [`Str`] in this profile indexes.
     pub(crate) text: String,
+    /// All threads' slices, partitioned into one contiguous run per track
+    /// ([`ThreadTrack::slices`]); the runs sit in an order of their own,
+    /// unrelated to that of [`Profile::threads`].
     pub(crate) slice_pool: Vec<Slice>,
     pub(crate) detail_pool: Vec<SliceDetail>,
     pub(crate) end_max_pool: Vec<i64>,
@@ -104,9 +108,6 @@ pub struct Profile {
     counters: Vec<CounterLane>,
     phase_markers: Vec<PhaseMarker>,
     span: TimeSpan,
-    /// Count of distinct interned strings — an upper bound on the distinct slice
-    /// names and mnemonics an aggregation keys on, so a scan or stats pass sizes
-    /// its per-text maps once instead of rehashing up from empty.
     distinct_strings: usize,
 }
 
@@ -422,10 +423,16 @@ impl Profile {
         &self.metadata
     }
 
+    /// The thread tracks in display order — `sort_index` ascending, ties by
+    /// `tid` — the position that per-track UI state is indexed by.
     pub fn threads(&self) -> &[ThreadTrack] {
         &self.threads
     }
 
+    /// The counter lanes in display order: grouped by kind — action counts,
+    /// system load, CPU, memory, network — with each cluster's aggregate ahead
+    /// of its Bazel-only breakdown. Kinds the grouping does not recognise come
+    /// last, in first-seen order.
     pub fn counters(&self) -> &[CounterLane] {
         &self.counters
     }
@@ -435,12 +442,15 @@ impl Profile {
         &self.phase_markers
     }
 
+    /// The extent covering every thread slice, counter sample, and phase
+    /// marker, collapsed to zero for a profile carrying none of them.
     pub fn span(&self) -> TimeSpan {
         self.span
     }
 
     /// The number of distinct interned strings — an upper bound on the distinct
-    /// slice names and mnemonics, for sizing aggregation maps up front.
+    /// slice names and mnemonics an aggregation keys on, so a scan or stats
+    /// pass sizes its per-text maps once instead of rehashing up from empty.
     pub fn distinct_strings(&self) -> usize {
         self.distinct_strings
     }

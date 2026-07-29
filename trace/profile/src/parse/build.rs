@@ -543,9 +543,6 @@ struct ThreadMerge<'a> {
     results: &'a [(u32, i64, i64)],
 }
 
-/// Overall time span of the merged profile: the extent of every non-empty
-/// thread segment, every counter sample, and every phase marker. With no events
-/// at all the span collapses to zero.
 fn compute_span(
     merge: ThreadMerge,
     counters: &HashMap<Str, RawLane>,
@@ -579,9 +576,8 @@ fn compute_span(
     }
 }
 
-/// One [`ThreadTrack`] per merged thread segment, named from `thread_meta` —
-/// falling back to `thread {tid}` when the trace named no thread — and ordered
-/// by `(sort_index, tid)`.
+/// One [`ThreadTrack`] per merged thread segment, named from `thread_meta`,
+/// falling back to `thread {tid}` when the trace named no thread.
 fn build_thread_tracks(
     merge: ThreadMerge,
     thread_meta: &BTreeMap<i64, (Option<String>, i64)>,
@@ -614,10 +610,7 @@ fn build_thread_tracks(
 
 /// Splits each counter into one lane per numeric series: overlaid series are
 /// hard to read, so each becomes its own graph, labelled with its arg key when
-/// a counter carries more than one. Lanes are ordered by kind (action, system
-/// load, CPU, memory, network) with each cluster's aggregate ahead of its
-/// Bazel-only breakdown; a series this ordering does not recognise keeps its
-/// first-seen position via the stable sort. A counter that carried no numeric
+/// a counter carries more than one. A counter that carried no numeric
 /// series (e.g. worker memory on a build with no persistent workers) keeps an
 /// empty lane so its absence stays visible rather than being silently dropped.
 /// Returns the flattened `(series_pool, point_pool, lanes)` pools that
@@ -828,12 +821,10 @@ fn apply_counter_event(
     }
 }
 
-/// Preferred display order for a Bazel profile counter series, as
-/// `(cluster, within)`: group by kind — action counts, system load, CPU,
-/// memory, network — and within a cluster place the aggregate ("total") ahead
-/// of the Bazel-only breakdown. A series whose counter this does not recognise
-/// lands in a trailing cluster and, via a stable sort, keeps its first-seen
-/// order. `name` is the counter event's name, `series` its arg key.
+/// Sort key `(cluster, within)` placing a counter series in the order
+/// [`Profile::counters`] states, from the counter event's `name` and its arg
+/// key `series`. Every unrecognised counter ranks alike, so the stable sort
+/// leaves those in first-seen order.
 fn counter_rank(name: &str, series: &str) -> (u8, u8) {
     let name = name.to_lowercase();
     let series = series.to_lowercase();
