@@ -1,6 +1,6 @@
 use crate::chart::fit_px_per_us;
 use crate::counters::paint_crosshair;
-use crate::groups::GroupHit;
+use crate::groups::{GroupChrome, GroupHit};
 use crate::model::TraceModel;
 use crate::regions::{Regions, flame_total_height, max_lane_scroll};
 use crate::theme::Palette;
@@ -616,21 +616,21 @@ impl Render for SliceCanvas {
         let Some(parent) = self.parent.upgrade() else {
             return div().into_any_element();
         };
-        let (profile, lanes, panel_height, gutter_width) = {
+        let (profile, lanes, chrome, panel_height, gutter_width) = {
             let panel = parent.read(cx);
             let model = panel.model.read(cx);
             let Source::Loaded(profile) = model.source() else {
                 return div().into_any_element();
             };
-            let Some(lanes) = model.lane_layout() else {
+            let (Some(lanes), Some(chrome)) = (model.lane_layout(), model.group_chrome()) else {
                 return div().into_any_element();
             };
             let (_, panel_height, gutter_width) = panel.shell_layout(cx);
-            (profile.clone(), lanes, panel_height, gutter_width)
+            (profile.clone(), lanes, chrome, panel_height, gutter_width)
         };
         let palette = Palette::from_colors(&bviz_ui_theme::colors(window));
         let prepaint = fit_prepaint(profile.clone(), lanes.clone(), parent.clone(), panel_height, gutter_width);
-        let paint = slice_paint(profile, lanes, parent, palette);
+        let paint = slice_paint(profile, lanes, chrome, parent, palette);
         canvas(prepaint, paint)
             .absolute()
             .inset_0()
@@ -722,6 +722,7 @@ fn cached_slices(
 fn slice_paint(
     profile: Arc<Profile>,
     lanes: Rc<LaneLayout>,
+    chrome: Rc<GroupChrome>,
     parent: Entity<TimelinePanel>,
     palette: Palette,
 ) -> impl FnOnce(Bounds<Pixels>, (), &mut Window, &mut App) {
@@ -729,18 +730,12 @@ fn slice_paint(
         let layout = &*lanes;
         let n_counters = profile.counters().len();
         let flame_total = flame_total_height(layout);
-        let (tv, scroll, gutter_width, selected, chrome, regions, show_counters, vp) = {
+        let (tv, scroll, gutter_width, selected, regions, show_counters, vp) = {
             let panel = parent.read(cx);
             let tv = panel.view;
             let scroll = panel.scroll_y;
             let (tab, panel_height, gutter_width) = panel.shell_layout(cx);
-            let (selected, chrome) = {
-                let model = panel.model.read(cx);
-                (
-                    model.selected_tracks().to_vec(),
-                    model.group_chrome().unwrap_or_default(),
-                )
-            };
+            let selected = panel.model.read(cx).selected_tracks().to_vec();
             let regions =
                 Regions::new(bounds, n_counters, panel_height, gutter_width, flame_total);
             let vp = Viewport {
@@ -749,7 +744,7 @@ fn slice_paint(
                 scroll_y: scroll,
             };
             let show_counters = regions.has_graph && tab == BottomTab::Counters;
-            (tv, scroll, gutter_width, selected, chrome, regions, show_counters, vp)
+            (tv, scroll, gutter_width, selected, regions, show_counters, vp)
         };
         let slices = parent.update(cx, |panel, _| {
             cached_slices(&mut panel.slice_draw, &profile, &lanes, tv, vp)
