@@ -134,10 +134,9 @@ pub(crate) fn parse_chunks(text: &str, n: usize, min_bytes: usize) -> Option<Pro
     else {
         return None;
     };
-    // Bound the region to the array's closing bracket — the last `]`, as no
-    // other key of the outer object carries one — so a chunk never picks up
-    // the close as event content.
-    let array_end = text.rfind(']')?;
+    // Bound the region to the array's close so a chunk never picks it up as
+    // event content.
+    let array_end = array_close(text.as_bytes())?;
     if array_end <= array_start {
         return None;
     }
@@ -359,6 +358,122 @@ fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack.windows(needle.len()).position(|w| w == needle)
 }
 
+/// Byte index of the `traceEvents` array's closing bracket, taken to be the
+/// last `]` — an assumption about the input, holding while no value outside
+/// the array carries a bracket, as the flat string maps of `otherData` do not.
+fn array_close(bytes: &[u8]) -> Option<usize> {
+    bytes.iter().rposition(|&b| b == b']')
+}
+
+/// Decodes until the `traceEvents` array opens, doubling the buffer while it
+/// has not, and returns the bytes before the array's contents together with
+/// those decoded past them. `None` on a decode error, on a stream that ends
+/// before the array opens, and on a preamble reaching
+/// [`PIPELINE_MAX_EVENT_BYTES`].
+fn read_to_array_start(dec: &mut impl Read, chunk_bytes: usize) -> Option<(Vec<u8>, Vec<u8>)> {
+    let mut buf = vec![0u8; chunk_bytes];
+    let mut filled = fill(dec, &mut buf, 0).ok()?;
+    let array_start = loop {
+        if let TraceEventsArray::Found { content_start, .. } =
+            find_trace_events_array(&buf[..filled])
+        {
+            break content_start;
+        }
+        if filled < buf.len() || buf.len() >= PIPELINE_MAX_EVENT_BYTES {
+            return None;
+        }
+        buf.resize(buf.len() * 2, 0);
+        filled = fill(dec, &mut buf, filled).ok()?;
+    };
+    Some((buf[..array_start].to_vec(), buf[array_start..filled].to_vec()))
+}
+
+/// Supplies the buffer each piece is decoded into. A slab part comes back
+/// through the ring once a worker has parsed its piece, or straight to the
+/// stash when its chunk yielded no piece at all; the stash is drawn on before
+/// the ring, so a part put aside is reused rather than waited for.
+struct BufferPool<'a> {
+    pool: std::sync::mpsc::Receiver<&'a mut [u8]>,
+    stash: Vec<&'a mut [u8]>,
+    chunk_bytes: usize,
+}
+
+impl<'a> BufferPool<'a> {
+    /// A buffer sized for `carry_len` carried bytes and a decode after them. A
+    /// carry past half a slab part leaves too little room to decode into, so
+    /// it moves to an owned buffer of twice its length. `None` once the stash
+    /// is empty and the ring is closed.
+    fn take(&mut self, carry_len: usize) -> Option<PieceBuf<'a>> {
+        if carry_len * 2 > self.chunk_bytes {
+            return Some(PieceBuf::Owned(vec![0u8; carry_len * 2]));
+        }
+        let data = match self.stash.pop() {
+            Some(data) => data,
+            None => self.pool.recv().ok()?,
+        };
+        Some(PieceBuf::Slab { data, len: 0 })
+    }
+
+    fn put_back(&mut self, buf: PieceBuf<'a>) {
+        if let PieceBuf::Slab { data, .. } = buf {
+            self.stash.push(data);
+        }
+    }
+}
+
+/// Copies `carry` to the front of `buf` and decodes after it until the buffer
+/// is full or the stream ends, setting the filled length. `true` when the fill
+/// ran short, which happens exactly at end of stream.
+fn fill_piece(dec: &mut impl Read, buf: &mut PieceBuf<'_>, carry: &[u8]) -> std::io::Result<bool> {
+    let region = buf.region();
+    region[..carry.len()].copy_from_slice(carry);
+    let filled = fill(dec, region, carry.len())?;
+    let end_of_stream = filled < region.len();
+    buf.set_len(filled);
+    Ok(end_of_stream)
+}
+
+/// Splits the array's closing bracket and the trailing otherData that may
+/// follow it off `buf`, leaving `buf` the event content before it. `None` when
+/// the stream held no `]`.
+fn split_off_tail(buf: &mut PieceBuf<'_>) -> Option<Vec<u8>> {
+    let close = array_close(buf.bytes())?;
+    let tail = buf.bytes()[close..].to_vec();
+    buf.set_len(close);
+    Some(tail)
+}
+
+/// Cuts `buf` after its last newline, moving the bytes past it into `carry` to
+/// head the next piece. `false` when the buffer holds no newline, leaving both
+/// untouched.
+fn cut_at_newline(buf: &mut PieceBuf<'_>, carry: &mut Vec<u8>) -> bool {
+    let Some(newline) = buf.bytes().iter().rposition(|&b| b == b'\n') else {
+        return false;
+    };
+    let cut = newline + 1;
+    carry.clear();
+    carry.extend_from_slice(&buf.bytes()[cut..]);
+    buf.set_len(cut);
+    true
+}
+
+/// The producer's end of the piece queue, and the one place a piece is
+/// numbered: the indices the merger reorders by and the count it must account
+/// for come from the same running total, so they cannot drift apart.
+struct PieceSink<'a> {
+    tx: crossbeam_channel::Sender<Piece<'a>>,
+    sent: usize,
+}
+
+impl<'a> PieceSink<'a> {
+    /// `None` once the consumers are gone.
+    fn send(&mut self, buf: PieceBuf<'a>) -> Option<()> {
+        self.tx.send(Piece { idx: self.sent, buf }).ok()?;
+        self.sent += 1;
+        Some(())
+    }
+}
+
 /// The producer side of the pipelined decode: streams the inflate and sends
 /// newline-aligned pieces of the `traceEvents` array, blocking on the bounded
 /// queue when the workers are behind and on the buffer ring when every part
@@ -372,78 +487,26 @@ fn stream_pieces<'a>(
     pool: std::sync::mpsc::Receiver<&'a mut [u8]>,
 ) -> Option<StreamEnds> {
     let mut dec = MultiGzDecoder::new(reader);
-
-    // Grow the first buffer until the traceEvents array opens inside it; the
-    // bytes before the bracket become `head`, the rest seed the chunk loop.
-    let mut buf = vec![0u8; chunk_bytes];
-    let mut filled = fill(&mut dec, &mut buf, 0).ok()?;
-    let array_start = loop {
-        if let TraceEventsArray::Found { content_start, .. } =
-            find_trace_events_array(&buf[..filled])
-        {
-            break content_start;
-        }
-        if filled < buf.len() || buf.len() >= PIPELINE_MAX_EVENT_BYTES {
-            return None;
-        }
-        buf.resize(buf.len() * 2, 0);
-        filled = fill(&mut dec, &mut buf, filled).ok()?;
-    };
-    let head = buf[..array_start].to_vec();
-    let mut carry = buf[array_start..filled].to_vec();
-
-    let mut pieces = 0usize;
-    // A slab part put aside when its chunk held no newline (the run moved to
-    // `carry` for the owned-buffer path), reused ahead of the pool.
-    let mut stash: Vec<&'a mut [u8]> = Vec::new();
+    let (head, mut carry) = read_to_array_start(&mut dec, chunk_bytes)?;
+    let mut bufs = BufferPool { pool, stash: Vec::new(), chunk_bytes };
+    let mut sink = PieceSink { tx, sent: 0 };
     loop {
-        // A carry too long for a slab part means the previous chunk held no
-        // newline; doubling the owned buffer lets the run keep growing.
-        let mut buf = if carry.len() * 2 > chunk_bytes {
-            PieceBuf::Owned(vec![0u8; carry.len() * 2])
-        } else {
-            let data = match stash.pop() {
-                Some(data) => data,
-                None => pool.recv().ok()?,
-            };
-            PieceBuf::Slab { data, len: 0 }
-        };
-        let (filled, end_of_stream) = {
-            let region = buf.region();
-            region[..carry.len()].copy_from_slice(&carry);
-            let filled = fill(&mut dec, region, carry.len()).ok()?;
-            (filled, filled < region.len())
-        };
-        buf.set_len(filled);
-        if end_of_stream {
-            // End of stream: everything before the last `]` is event content,
-            // the bracket onward may carry a trailing otherData.
-            let close = buf.bytes().iter().rposition(|&b| b == b']')?;
-            let tail = buf.bytes()[close..].to_vec();
-            buf.set_len(close);
-            if close > 0 {
-                tx.send(Piece { idx: pieces, buf }).ok()?;
-                pieces += 1;
+        let mut buf = bufs.take(carry.len())?;
+        if fill_piece(&mut dec, &mut buf, &carry).ok()? {
+            let tail = split_off_tail(&mut buf)?;
+            if !buf.bytes().is_empty() {
+                sink.send(buf)?;
             }
-            return Some(StreamEnds { head, tail, pieces });
+            return Some(StreamEnds { head, tail, pieces: sink.sent });
         }
-        match buf.bytes().iter().rposition(|&b| b == b'\n') {
-            Some(newline) => {
-                let cut = newline + 1;
-                carry.clear();
-                carry.extend_from_slice(&buf.bytes()[cut..]);
-                buf.set_len(cut);
-                tx.send(Piece { idx: pieces, buf }).ok()?;
-                pieces += 1;
-            }
-            None if filled >= PIPELINE_MAX_EVENT_BYTES => return None,
-            None => {
-                carry.clear();
-                carry.extend_from_slice(buf.bytes());
-                if let PieceBuf::Slab { data, .. } = buf {
-                    stash.push(data);
-                }
-            }
+        if cut_at_newline(&mut buf, &mut carry) {
+            sink.send(buf)?;
+        } else if buf.bytes().len() >= PIPELINE_MAX_EVENT_BYTES {
+            return None;
+        } else {
+            carry.clear();
+            carry.extend_from_slice(buf.bytes());
+            bufs.put_back(buf);
         }
     }
 }
