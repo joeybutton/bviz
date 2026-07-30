@@ -490,16 +490,18 @@ fn merge_lanes(tasks: &mut [TidTask]) {
     });
 }
 
-/// K-way merges a thread's runs into its destination segments, in
-/// whole-lane [`slice_order`] — on an equal key the lowest run index goes
-/// first, which reproduces a stable whole-lane sort of the runs
-/// concatenated in fold order. The write that fills a slot also rebases the
-/// detail's arg-pool span by its run's base (text handles are already
-/// global), assigns the slice's depth from the ancestor stack, and
-/// accumulates the lane's time span — whose running end also fills the
-/// slice's end-max slot, giving [`Profile::end_maxes`] its segment-local
-/// prefix maximum. Slice, detail, and end max travel as one triple, so the
-/// three pools stay index-parallel by construction.
+/// K-way merges a thread's runs into its destination segments, in whole-lane
+/// [`slice_order`]; an equal key takes the lowest run index, which reproduces a
+/// stable sort of the runs concatenated in fold order.
+///
+/// Filling a slot carries the rest of the per-slice work in the same pass: it
+/// rebases the detail's arg-pool span onto its run's base, assigns the depth
+/// the ancestor stack gives, and folds the slice into the lane's time span.
+/// That span's running end is what the end-max slot receives, feeding
+/// [`Profile::end_maxes`].
+///
+/// Slice, detail, and end max travel as one triple, so the three pools stay
+/// index-parallel by construction.
 fn merge_lane(task: &mut TidTask) {
     let TidTask { dest, dest_detail, dest_end_max, runs, max_depth, min_start_us, max_end_us } =
         task;
