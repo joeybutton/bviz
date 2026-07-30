@@ -679,11 +679,13 @@ fn parse_gz_stream_from(
 }
 
 /// Parses every `{...}` event object in one chunk of the `traceEvents` array
-/// into `builder`, in place: each event goes through [`scan_event`], with
-/// serde deserialization from the same offset as the fallback for whatever
-/// the scanner defers, and the comma/whitespace separators between events are
-/// skipped by hand. Returns `false` on malformed content so the caller falls
-/// back to the serial parser rather than silently dropping events.
+/// into `builder`, skipping the separators between them by hand: a chunk holds
+/// bare array content, so it is not itself a JSON document.
+///
+/// Each event goes through [`scan_event`], with serde deserialization from the
+/// same offset as the fallback for whatever the scanner defers. Returns `false`
+/// on malformed content, so the caller falls back to the serial parser rather
+/// than silently dropping events.
 fn parse_range_into(builder: &mut Builder, interner: &mut Writer, chunk: &str) -> bool {
     let bytes = chunk.as_bytes();
     let mut scratch: Vec<ArgEntry> = Vec::new();
