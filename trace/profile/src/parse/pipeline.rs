@@ -89,17 +89,20 @@ impl Chunk for &str {
     fn release(self) {}
 }
 
-/// Parses one chunk into a fresh [`Builder`] on a worker, pre-sizing its
-/// staging buffer from the chunk's byte length (via [`BYTES_PER_SLICE`]) so it
-/// never regrows, and its arg pool from the previous chunk's count. Both are
-/// live data the builder carries to the merge — the staging slices become the
-/// folded run's payloads, the arg pool the base its detail spans rebase by — so
-/// neither can be reclaimed; chunks are near-equal in bytes and so in arg
-/// count, so the `args_cap` hint lets the next builder fill without regrowing
-/// from empty. The chunk is released between the parse and the seal:
-/// everything the builder keeps was interned during the parse, so a streamed
-/// chunk's ring buffer returns to the producer without the inflate waiting out
-/// the per-lane sorts. Returns `None` on a parse failure.
+/// Parses one chunk into a fresh [`Builder`] on a worker. Returns `None` on a
+/// parse failure.
+///
+/// Both of the builder's growing buffers are pre-sized: `staging` from the
+/// chunk's byte length (via [`BYTES_PER_SLICE`]), the arg pool from `args_cap`,
+/// the previous chunk's arg count — a fair estimate, since chunks hold
+/// near-equal bytes. `args_cap` is updated for the next chunk. The buffers
+/// themselves cannot be reused across chunks; the merge consumes them as the
+/// builder's live data.
+///
+/// The chunk is released between the parse and the seal — everything the
+/// builder keeps was interned during the parse — so a streamed chunk's buffer
+/// returns to the producer's ring without the inflate waiting out the seal's
+/// per-lane sorts.
 fn parse_chunk(
     chunk: impl Chunk,
     writer: &mut Writer,
