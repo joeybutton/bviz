@@ -565,6 +565,30 @@ mod tests {
         assert_eq!(semantic(&serial), semantic(&pipelined));
     }
 
+    /// Events short enough that every piece takes a ring buffer, and enough of
+    /// them to outnumber the ring, so the producer has to wait on a buffer a
+    /// worker has finished with instead of always finding a fresh one.
+    #[test]
+    fn pipelined_recycles_ring_buffers() {
+        let mut json = String::from("{\"traceEvents\":[\n");
+        for i in 0..24 {
+            json += &format!(
+                "{{\"cat\":\"c\",\"name\":\"a\",\"ph\":\"X\",\"ts\":{i},\"dur\":1,\"tid\":{}}},\n",
+                i % 3
+            );
+        }
+        // Drop the last event's separator, which no element follows.
+        json.truncate(json.len() - 2);
+        json += "\n]}";
+        let serial = parse_streaming(&json).expect("serial");
+        let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        enc.write_all(json.as_bytes()).unwrap();
+        let gz = enc.finish().unwrap();
+        // Two workers, so the ring holds five buffers.
+        let pipelined = parse_gz_stream(&gz, 2, 64).expect("pipelined");
+        assert_eq!(semantic(&serial), semantic(&pipelined));
+    }
+
     #[test]
     fn merge_keeps_event_order_for_equal_keys() {
         // One thread with several slices sharing an identical (ts, dur) key,

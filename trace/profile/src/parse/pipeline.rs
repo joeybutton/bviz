@@ -75,7 +75,7 @@ const MIN_CHUNK_BYTES: usize = 4 << 20;
 
 /// One chunk handed to a worker: its bytes as text, plus the cleanup owed once
 /// the parse has read them. The pre-split path borrows the shared buffer and
-/// owes nothing; the streamed path hands its slab part back to the producer to
+/// owes nothing; the streamed path hands its buffer back to the producer to
 /// refill.
 trait Chunk {
     fn text(&self) -> Cow<'_, str>;
@@ -98,7 +98,7 @@ impl Chunk for &str {
 /// count, so the `args_cap` hint lets the next builder fill without regrowing
 /// from empty. The chunk is released between the parse and the seal:
 /// everything the builder keeps was interned during the parse, so a streamed
-/// chunk's slab part returns to the producer without the inflate waiting out
+/// chunk's ring buffer returns to the producer without the inflate waiting out
 /// the per-lane sorts. Returns `None` on a parse failure.
 fn parse_chunk(
     chunk: impl Chunk,
@@ -272,60 +272,60 @@ pub(crate) fn pipeline_params(decoded_size: usize) -> Option<(usize, usize)> {
 
 /// One newline-aligned run of decoded profile bytes, numbered so builders can
 /// be reassembled in array order after out-of-order parsing.
-struct Piece<'a> {
+struct Piece {
     idx: usize,
-    buf: PieceBuf<'a>,
+    buf: PieceBuf,
 }
 
-/// The bytes behind a piece: normally a fixed-size part of the shared slab,
-/// carrying its filled length; a run too long for a part (an event line
-/// longer than a chunk) rides in a one-off owned buffer instead, dropped
-/// after its parse rather than returned to the ring.
-enum PieceBuf<'a> {
-    Slab { data: &'a mut [u8], len: usize },
-    Owned(Vec<u8>),
+/// The bytes behind a piece: normally a buffer from the ring, carrying its
+/// filled length; a run too long for a ring buffer (an event line longer than a
+/// chunk) rides in a one-off buffer instead, dropped after its parse rather
+/// than returned to the ring.
+enum PieceBuf {
+    Ring { data: Vec<u8>, len: usize },
+    OneOff(Vec<u8>),
 }
 
-impl PieceBuf<'_> {
+impl PieceBuf {
     /// The whole writable region, independent of the filled length.
     fn region(&mut self) -> &mut [u8] {
         match self {
-            PieceBuf::Slab { data, .. } => data,
-            PieceBuf::Owned(v) => v,
+            PieceBuf::Ring { data, .. } => data,
+            PieceBuf::OneOff(v) => v,
         }
     }
 
     /// The filled prefix a consumer may read.
     fn bytes(&self) -> &[u8] {
         match self {
-            PieceBuf::Slab { data, len } => &data[..*len],
-            PieceBuf::Owned(v) => v,
+            PieceBuf::Ring { data, len } => &data[..*len],
+            PieceBuf::OneOff(v) => v,
         }
     }
 
     fn set_len(&mut self, n: usize) {
         match self {
-            PieceBuf::Slab { len, .. } => *len = n,
-            PieceBuf::Owned(v) => v.truncate(n),
+            PieceBuf::Ring { len, .. } => *len = n,
+            PieceBuf::OneOff(v) => v.truncate(n),
         }
     }
 }
 
-/// A streamed chunk: its decoded bytes read as Latin-1, and a slab part that
-/// goes back to the producer's ring once parsed (an owned run keeps nothing to
+/// A streamed chunk: its decoded bytes read as Latin-1, and a buffer that goes
+/// back to the producer's ring once parsed (a one-off run keeps nothing to
 /// return).
-struct StreamChunk<'buf, 'pool> {
-    buf: PieceBuf<'buf>,
-    pool: &'pool std::sync::mpsc::Sender<&'buf mut [u8]>,
+struct StreamChunk<'pool> {
+    buf: PieceBuf,
+    pool: &'pool std::sync::mpsc::Sender<Vec<u8>>,
 }
 
-impl Chunk for StreamChunk<'_, '_> {
+impl Chunk for StreamChunk<'_> {
     fn text(&self) -> Cow<'_, str> {
         latin1_cow(self.buf.bytes())
     }
 
     fn release(self) {
-        if let PieceBuf::Slab { data, .. } = self.buf {
+        if let PieceBuf::Ring { data, .. } = self.buf {
             let _ = self.pool.send(data);
         }
     }
@@ -388,34 +388,50 @@ fn read_to_array_start(dec: &mut impl Read, chunk_bytes: usize) -> Option<(Vec<u
     Some((buf[..array_start].to_vec(), buf[array_start..filled].to_vec()))
 }
 
-/// Supplies the buffer each piece is decoded into. A slab part comes back
-/// through the ring once a worker has parsed its piece, or straight to the
-/// stash when its chunk yielded no piece at all; the stash is drawn on before
-/// the ring, so a part put aside is reused rather than waited for.
-struct BufferPool<'a> {
-    pool: std::sync::mpsc::Receiver<&'a mut [u8]>,
-    stash: Vec<&'a mut [u8]>,
+/// Supplies the buffer each piece is decoded into. A buffer comes back through
+/// the ring once a worker has parsed its piece, or straight to the stash when
+/// its chunk yielded no piece at all; the stash is drawn on before the ring, so
+/// a buffer put aside is reused rather than waited for.
+struct BufferPool {
+    pool: std::sync::mpsc::Receiver<Vec<u8>>,
+    stash: Vec<Vec<u8>>,
     chunk_bytes: usize,
 }
 
-impl<'a> BufferPool<'a> {
+impl BufferPool {
+    /// Allocates the ring's `count` buffers of `chunk_bytes` each on the
+    /// calling thread, so a producer building its pool before its first decode
+    /// overlaps the allocation with whatever the consumers do before their
+    /// first piece.
+    fn new(
+        pool: std::sync::mpsc::Receiver<Vec<u8>>,
+        count: usize,
+        chunk_bytes: usize,
+    ) -> BufferPool {
+        BufferPool {
+            pool,
+            stash: (0..count).map(|_| vec![0u8; chunk_bytes]).collect(),
+            chunk_bytes,
+        }
+    }
+
     /// A buffer sized for `carry_len` carried bytes and a decode after them. A
-    /// carry past half a slab part leaves too little room to decode into, so
-    /// it moves to an owned buffer of twice its length. `None` once the stash
+    /// carry past half a ring buffer leaves too little room to decode into, so
+    /// it moves to a one-off buffer of twice its length. `None` once the stash
     /// is empty and the ring is closed.
-    fn take(&mut self, carry_len: usize) -> Option<PieceBuf<'a>> {
+    fn take(&mut self, carry_len: usize) -> Option<PieceBuf> {
         if carry_len * 2 > self.chunk_bytes {
-            return Some(PieceBuf::Owned(vec![0u8; carry_len * 2]));
+            return Some(PieceBuf::OneOff(vec![0u8; carry_len * 2]));
         }
         let data = match self.stash.pop() {
             Some(data) => data,
             None => self.pool.recv().ok()?,
         };
-        Some(PieceBuf::Slab { data, len: 0 })
+        Some(PieceBuf::Ring { data, len: 0 })
     }
 
-    fn put_back(&mut self, buf: PieceBuf<'a>) {
-        if let PieceBuf::Slab { data, .. } = buf {
+    fn put_back(&mut self, buf: PieceBuf) {
+        if let PieceBuf::Ring { data, .. } = buf {
             self.stash.push(data);
         }
     }
@@ -424,7 +440,7 @@ impl<'a> BufferPool<'a> {
 /// Copies `carry` to the front of `buf` and decodes after it until the buffer
 /// is full or the stream ends, setting the filled length. `true` when the fill
 /// ran short, which happens exactly at end of stream.
-fn fill_piece(dec: &mut impl Read, buf: &mut PieceBuf<'_>, carry: &[u8]) -> std::io::Result<bool> {
+fn fill_piece(dec: &mut impl Read, buf: &mut PieceBuf, carry: &[u8]) -> std::io::Result<bool> {
     let region = buf.region();
     region[..carry.len()].copy_from_slice(carry);
     let filled = fill(dec, region, carry.len())?;
@@ -436,7 +452,7 @@ fn fill_piece(dec: &mut impl Read, buf: &mut PieceBuf<'_>, carry: &[u8]) -> std:
 /// Splits the array's closing bracket and the trailing otherData that may
 /// follow it off `buf`, leaving `buf` the event content before it. `None` when
 /// the stream held no `]`.
-fn split_off_tail(buf: &mut PieceBuf<'_>) -> Option<Vec<u8>> {
+fn split_off_tail(buf: &mut PieceBuf) -> Option<Vec<u8>> {
     let close = array_close(buf.bytes())?;
     let tail = buf.bytes()[close..].to_vec();
     buf.set_len(close);
@@ -446,7 +462,7 @@ fn split_off_tail(buf: &mut PieceBuf<'_>) -> Option<Vec<u8>> {
 /// Cuts `buf` after its last newline, moving the bytes past it into `carry` to
 /// head the next piece. `false` when the buffer holds no newline, leaving both
 /// untouched.
-fn cut_at_newline(buf: &mut PieceBuf<'_>, carry: &mut Vec<u8>) -> bool {
+fn cut_at_newline(buf: &mut PieceBuf, carry: &mut Vec<u8>) -> bool {
     let Some(newline) = buf.bytes().iter().rposition(|&b| b == b'\n') else {
         return false;
     };
@@ -460,14 +476,14 @@ fn cut_at_newline(buf: &mut PieceBuf<'_>, carry: &mut Vec<u8>) -> bool {
 /// The producer's end of the piece queue, and the one place a piece is
 /// numbered: the indices the merger reorders by and the count it must account
 /// for come from the same running total, so they cannot drift apart.
-struct PieceSink<'a> {
-    tx: crossbeam_channel::Sender<Piece<'a>>,
+struct PieceSink {
+    tx: crossbeam_channel::Sender<Piece>,
     sent: usize,
 }
 
-impl<'a> PieceSink<'a> {
+impl PieceSink {
     /// `None` once the consumers are gone.
-    fn send(&mut self, buf: PieceBuf<'a>) -> Option<()> {
+    fn send(&mut self, buf: PieceBuf) -> Option<()> {
         self.tx.send(Piece { idx: self.sent, buf }).ok()?;
         self.sent += 1;
         Some(())
@@ -476,19 +492,23 @@ impl<'a> PieceSink<'a> {
 
 /// The producer side of the pipelined decode: streams the inflate and sends
 /// newline-aligned pieces of the `traceEvents` array, blocking on the bounded
-/// queue when the workers are behind and on the buffer ring when every part
-/// is in flight (a return is then already on its way). `None` on a decode
-/// error, an input the chunker can't navigate (no array, no closing bracket,
-/// an over-long line), or a closed queue.
-fn stream_pieces<'a>(
+/// queue when the workers are behind and on the buffer ring when every buffer
+/// is in flight. `None` on a decode error, an input the chunker can't navigate
+/// (no array, no closing bracket, an over-long line), or a closed queue.
+fn stream_pieces(
     reader: impl Read + Send,
     chunk_bytes: usize,
-    tx: crossbeam_channel::Sender<Piece<'a>>,
-    pool: std::sync::mpsc::Receiver<&'a mut [u8]>,
+    workers: usize,
+    tx: crossbeam_channel::Sender<Piece>,
+    pool: std::sync::mpsc::Receiver<Vec<u8>>,
 ) -> Option<StreamEnds> {
+    // One buffer more than the piece queue and the parsers can have in flight
+    // together, so whenever the producer blocks on the pool a return is already
+    // on its way.
+    let ring = 2 * workers + 1;
+    let mut bufs = BufferPool::new(pool, ring, chunk_bytes);
     let mut dec = MultiGzDecoder::new(reader);
     let (head, mut carry) = read_to_array_start(&mut dec, chunk_bytes)?;
-    let mut bufs = BufferPool { pool, stash: Vec::new(), chunk_bytes };
     let mut sink = PieceSink { tx, sent: 0 };
     loop {
         let mut buf = bufs.take(carry.len())?;
@@ -521,10 +541,10 @@ pub(crate) fn parse_gz_stream(bytes: &[u8], workers: usize, chunk_bytes: usize) 
 /// One chunk parser, running until the queue closes or the merger is gone.
 /// Each piece is parsed into its own [`Builder`], keeping the workers
 /// independent of each other, and passed on under the piece's number.
-fn parse_pieces<'a>(
-    rx: &crossbeam_channel::Receiver<Piece<'a>>,
+fn parse_pieces(
+    rx: &crossbeam_channel::Receiver<Piece>,
     builder_tx: std::sync::mpsc::Sender<(usize, Option<Builder>)>,
-    pool_tx: std::sync::mpsc::Sender<&'a mut [u8]>,
+    pool_tx: std::sync::mpsc::Sender<Vec<u8>>,
     interner: &ConcurrentInterner,
     shard: usize,
     workers: usize,
@@ -581,29 +601,26 @@ fn fold_pieces(
     (!failed).then_some((merge, next))
 }
 
-/// Runs the producer decoding `reader` into the ring cut from `slab`, the
-/// `workers` chunk parsers, and the merger against each other. The piece queue
-/// is bounded by the worker count, so the producer decodes no further than that
-/// many pieces ahead of the parsers. Returns the stream's ends and the folded
-/// merge, each `None` when its own stage failed.
-fn decode_parse_fold<'a>(
+/// Runs the producer decoding `reader`, the `workers` chunk parsers, and the
+/// merger against each other. The piece queue is bounded by the worker count,
+/// so the producer decodes no further than that many pieces ahead of the
+/// parsers. Returns the stream's ends and the folded merge, each `None` when
+/// its own stage failed.
+fn decode_parse_fold(
     reader: impl Read + Send,
-    slab: &'a mut [u8],
     interner: &ConcurrentInterner,
     workers: usize,
     chunk_bytes: usize,
     decoded_size: usize,
 ) -> (Option<StreamEnds>, Option<(Merge, usize)>) {
-    let (tx, rx) = crossbeam_channel::bounded::<Piece<'a>>(workers);
+    let (tx, rx) = crossbeam_channel::bounded::<Piece>(workers);
     let (builder_tx, builder_rx) = std::sync::mpsc::channel::<(usize, Option<Builder>)>();
-    let (pool_tx, pool_rx) = std::sync::mpsc::channel::<&'a mut [u8]>();
-    for part in slab.chunks_mut(chunk_bytes) {
-        let _ = pool_tx.send(part);
-    }
+    let (pool_tx, pool_rx) = std::sync::mpsc::channel::<Vec<u8>>();
     let prefault_bytes = intern_prefault_bytes(decoded_size);
     timed("  decode+parse+fold chunks", || {
         std::thread::scope(|scope| {
-            let producer = scope.spawn(move || stream_pieces(reader, chunk_bytes, tx, pool_rx));
+            let producer =
+                scope.spawn(move || stream_pieces(reader, chunk_bytes, workers, tx, pool_rx));
             for shard in 0..workers {
                 let builder_tx = builder_tx.clone();
                 let pool_tx = pool_tx.clone();
@@ -645,25 +662,11 @@ fn parse_gz_stream_from(
     chunk_bytes: usize,
     decoded_size: usize,
 ) -> Option<Profile> {
-    // The buffer ring is one slab split into fixed-size parts — a single
-    // zeroed allocation whose pages are first touched by the inflate's own
-    // writes — holding one part more than the piece queue and the workers can
-    // have in flight together, so whenever the producer blocks on the pool a
-    // return is already on its way.
-    let ring = 2 * workers + 1;
-    let mut slab: Vec<u8> = vec![0u8; ring * chunk_bytes];
     // Every worker interns into this one arena, so a builder's handles are
     // global and the merger never rebases them. The distinct pool is bounded by
     // the decoded size the ISIZE trailer declares.
     let interner = ConcurrentInterner::new(decoded_size, decoded_size / BYTES_PER_DISTINCT);
-    let (ends, merged) = decode_parse_fold(
-        reader,
-        &mut slab,
-        &interner,
-        workers,
-        chunk_bytes,
-        decoded_size,
-    );
+    let (ends, merged) = decode_parse_fold(reader, &interner, workers, chunk_bytes, decoded_size);
     let ends = ends?;
     let (merge, folded) = merged?;
     if folded != ends.pieces || folded == 0 {
