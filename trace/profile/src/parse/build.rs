@@ -130,14 +130,16 @@ impl Builder {
         }
     }
 
-    /// Builds a per-thread index permutation of the staged slices, sorted into
-    /// lane order within each thread — the form [`Merge::fold`] requires of a
-    /// folded run. The index array is allocated at its exact final size and
-    /// filled through per-thread cursors, then each thread's range is sorted;
-    /// the payloads stay put in `staging`, gathered through the permutation at
-    /// merge time. On the parallel paths this runs on the parse workers, so the
-    /// per-chunk work hides under the decode∥parse phase instead of adding to
-    /// the final merge.
+    /// Puts the staged slices into the form [`Merge::fold`] requires of a
+    /// folded run, filling `order` and `lanes`.
+    ///
+    /// `order` is allocated at its exact final size and filled through
+    /// per-thread cursors, then sorted one thread's range at a time. The
+    /// payloads never move; the merge gathers them through the permutation.
+    ///
+    /// On the parallel paths this runs on the parse workers, so the per-chunk
+    /// work hides under the decode∥parse phase instead of adding to the final
+    /// merge.
     pub(crate) fn seal_slices(&mut self) {
         // The lane bookkeeping (counts, spans, cursors) is u32; wrapping it
         // would break the exactly-once scatter argument below.
