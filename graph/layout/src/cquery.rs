@@ -16,6 +16,7 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 
 use bazel_query_proto::analysis::{ConfiguredTarget, CqueryResult};
 use bazel_query_proto::blaze_query::target::Discriminator;
+use bazel_query_proto::blaze_query::Rule;
 
 use crate::graph::{EdgeKind, Graph, Kind};
 use crate::intern::{Id, Names};
@@ -206,9 +207,13 @@ impl Nodes<'_, '_> {
     }
 }
 
-/// Pass 2: an edge from each dependency to the configured target that consumes it.
+/// Pass 2: the edges into each rule's configured target.
 fn wire_edges(b: &mut Builder, cts: &[&ConfiguredTarget], index: &NodeIndex) {
-    let mut seen_edge: HashSet<(Id, Id)> = HashSet::new();
+    let mut edges = Edges {
+        b,
+        index,
+        seen: HashSet::new(),
+    };
     for ct in cts {
         let Some(target) = ct.target.as_ref() else {
             continue;
@@ -219,12 +224,29 @@ fn wire_edges(b: &mut Builder, cts: &[&ConfiguredTarget], index: &NodeIndex) {
         let Some(rule) = target.rule.as_ref() else {
             continue;
         };
-        let key = b.config_key(ct.configuration_id);
-        let consumer = b.names.intern(&label::ct_node_id(&rule.name, &key));
+        edges.wire_rule(rule, ct.configuration_id);
+    }
+}
+
+/// Resolves dependencies against the nodes pass 1 created and wires them to
+/// their consumer.
+struct Edges<'a, 'n> {
+    b: &'a mut Builder<'n>,
+    index: &'a NodeIndex,
+    /// The (from, to) pairs already wired, so a dependency named twice gets one edge.
+    seen: HashSet<(Id, Id)>,
+}
+
+impl Edges<'_, '_> {
+    /// An edge from each dependency `rule` consumes to its configured target in
+    /// `config_id`.
+    fn wire_rule(&mut self, rule: &Rule, config_id: u32) {
+        let key = self.b.config_key(config_id);
+        let consumer = self.b.names.intern(&label::ct_node_id(&rule.name, &key));
         if rule.configured_rule_input.is_empty() {
             for dep_label in &rule.rule_input {
-                if let Some(dep) = resolve_label_dep(dep_label, index) {
-                    add_edge(&mut b.graph, &mut seen_edge, dep, consumer);
+                if let Some(dep) = self.label_dep(dep_label) {
+                    self.add_edge(dep, consumer);
                 }
             }
         } else {
@@ -232,60 +254,55 @@ fn wire_edges(b: &mut Builder, cts: &[&ConfiguredTarget], index: &NodeIndex) {
                 let Some(dep_label) = input.label.as_deref() else {
                     continue;
                 };
-                if let Some(dep) =
-                    resolve_configured_dep(dep_label, input.configuration_id, b, index)
-                {
-                    add_edge(&mut b.graph, &mut seen_edge, dep, consumer);
+                if let Some(dep) = self.configured_dep(dep_label, input.configuration_id) {
+                    self.add_edge(dep, consumer);
                 }
             }
         }
     }
-}
 
-/// The node a configuration-resolved dependency lands on: the dependency's
-/// configured target when that configuration is present, its source/generated
-/// leaf when the dependency carries no configuration, and the dependency's
-/// target container as a fallback. `None` when the dependency is outside the
-/// queried set.
-fn resolve_configured_dep(
-    dep_label: &str,
-    dep_config: Option<u32>,
-    b: &mut Builder,
-    index: &NodeIndex,
-) -> Option<Id> {
-    match dep_config {
-        Some(config_id) if config_id != 0 => {
-            let key = b.config_key(config_id);
-            if index.ct_ids.contains(&(dep_label.to_string(), key.clone())) {
-                Some(b.names.intern(&label::ct_node_id(dep_label, &key)))
-            } else {
-                index.target_box.get(dep_label).copied()
+    /// The node a configuration-resolved dependency lands on: the dependency's
+    /// configured target when that configuration is present, its source/generated
+    /// leaf when the dependency carries no configuration, and the dependency's
+    /// target container as a fallback. `None` when the dependency is outside the
+    /// queried set.
+    fn configured_dep(&mut self, dep_label: &str, dep_config: Option<u32>) -> Option<Id> {
+        match dep_config {
+            Some(config_id) if config_id != 0 => {
+                let key = self.b.config_key(config_id);
+                if self.index.ct_ids.contains(&(dep_label.to_string(), key.clone())) {
+                    Some(self.b.names.intern(&label::ct_node_id(dep_label, &key)))
+                } else {
+                    self.index.target_box.get(dep_label).copied()
+                }
             }
+            _ => self
+                .index
+                .leaf_id
+                .get(dep_label)
+                .or_else(|| self.index.target_box.get(dep_label))
+                .copied(),
         }
-        _ => index
-            .leaf_id
+    }
+
+    /// The node a label-only dependency lands on: the dependency's target
+    /// container, or its leaf when it is not a rule. `None` when outside the
+    /// queried set.
+    fn label_dep(&self, dep_label: &str) -> Option<Id> {
+        self.index
+            .target_box
             .get(dep_label)
-            .or_else(|| index.target_box.get(dep_label))
-            .copied(),
+            .or_else(|| self.index.leaf_id.get(dep_label))
+            .copied()
     }
-}
 
-/// The node a label-only dependency lands on: the dependency's target container,
-/// or its leaf when it is not a rule. `None` when outside the queried set.
-fn resolve_label_dep(dep_label: &str, index: &NodeIndex) -> Option<Id> {
-    index
-        .target_box
-        .get(dep_label)
-        .or_else(|| index.leaf_id.get(dep_label))
-        .copied()
-}
-
-fn add_edge(graph: &mut Graph, seen: &mut HashSet<(Id, Id)>, from: Id, to: Id) {
-    if from == to {
-        return;
-    }
-    if seen.insert((from, to)) {
-        graph.add_edge(from, to, EdgeKind::Cquery);
+    fn add_edge(&mut self, from: Id, to: Id) {
+        if from == to {
+            return;
+        }
+        if self.seen.insert((from, to)) {
+            self.b.graph.add_edge(from, to, EdgeKind::Cquery);
+        }
     }
 }
 
