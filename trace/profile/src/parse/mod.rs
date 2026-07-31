@@ -507,6 +507,37 @@ mod tests {
         assert!(parse_chunks(&with_last_event(&trailing_comma), 4, 0).is_none());
     }
 
+    #[test]
+    fn a_bracket_after_the_array_declines_the_chunked_paths() {
+        let profile = |build_id: &str| {
+            "{\"traceEvents\":[\n".to_string()
+                + "{\"name\":\"thread_name\",\"ph\":\"M\",\"tid\":1,\"args\":{\"name\":\"L\"}},\n"
+                + "{\"cat\":\"c\",\"name\":\"a\",\"ph\":\"X\",\"ts\":0,\"dur\":1,\"tid\":1},\n"
+                + "{\"cat\":\"c\",\"name\":\"b\",\"ph\":\"X\",\"ts\":1,\"dur\":1,\"tid\":1}\n"
+                + &format!("],\"otherData\":{{\"build_id\":\"{build_id}\"}}}}")
+        };
+        let gzipped = |json: &str| {
+            let mut enc =
+                flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+            enc.write_all(json.as_bytes()).unwrap();
+            enc.finish().unwrap()
+        };
+        // The same profile with a bracket-free value clears every gate ahead of
+        // the parse, leaving only the bracket to decline the other.
+        assert!(parse_chunks(&profile("abc"), 4, 0).is_some());
+        assert!(parse_gz_stream(&gzipped(&profile("abc")), 2, 64).is_some());
+        let json = profile("a]b");
+        assert!(parse_chunks(&json, 4, 0).is_none());
+        assert!(parse_gz_stream(&gzipped(&json), 2, 64).is_none());
+
+        // Read whole, the profile parses intact — events and the
+        // bracket-bearing metadata alike.
+        let p = Profile::from_bytes(json.as_bytes()).expect("serial");
+        let names: Vec<_> = p.slices(&p.threads()[0]).iter().map(|s| p.str(s.name)).collect();
+        assert_eq!(names, ["a", "b"]);
+        assert_eq!(p.opt_str(p.metadata().build_id), Some("a]b"));
+    }
+
     /// Constructs the chunked path can only take through the scanner's serde
     /// fallback (floats, `\uXXXX` escapes, huge magnitudes) mixed with
     /// fast-path constructs (nulls, duplicate keys, ignored composites, arg

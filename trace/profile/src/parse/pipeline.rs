@@ -400,6 +400,8 @@ fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 /// Byte index of the `traceEvents` array's closing bracket, taken to be the
 /// last `]` — an assumption about the input, holding while no value outside
 /// the array carries a bracket, as the flat string maps of `otherData` do not.
+/// A bracket that breaks it can only sit past the true close, so the array's own
+/// `]` is left among the events, where [`parse_range_into`] rejects it.
 fn array_close(bytes: &[u8]) -> Option<usize> {
     bytes.iter().rposition(|&b| b == b']')
 }
