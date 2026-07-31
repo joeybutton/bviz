@@ -1,12 +1,14 @@
 use crate::camera::{to_screen, Camera};
 use crate::dimming::Dimming;
+use crate::drag::track_gesture;
 use crate::emphasis::Emphasis;
-use crate::{PaintBox, Palette};
+use crate::scroll::paint_scrollbars;
+use crate::{GraphView, Palette};
 use bviz_graph_layout::layout::CARET_RESERVE;
 use bviz_graph_layout::{EdgeKind, Id, Kind, LaidOut};
 use gpui::{
-    App, BorderStyle, Bounds, Hsla, PathBuilder, Pixels, Point, Rgba, TextAlign, Window, point, px,
-    quad, rgb, size,
+    App, BorderStyle, Bounds, Entity, Hsla, PathBuilder, Pixels, Point, Rgba, TextAlign, Window,
+    point, px, quad, rgb, size,
 };
 use std::collections::HashSet;
 
@@ -23,6 +25,10 @@ const ARROW_HALF_WIDTH: f64 = 4.0;
 /// seam without letting the line broaden the visible tip.
 const ARROW_OVERDRAW: f64 = 1.0;
 
+/// Perpendicular gap (pre-zoom px) between the parallel provenance lines drawn
+/// along a node pair that several queries connect.
+const PARALLEL_SPACING: f32 = 3.0;
+
 /// Fraction by which a kind accent is blended toward the themed background; the
 /// result is the leaf fill, so kinds stay recognizable yet read on light or dark.
 const KIND_BLEND: f32 = 0.68;
@@ -38,6 +44,28 @@ const DIM_FADE: f32 = 0.6;
 /// Alpha a dimmed connector keeps, fading edges outside the hovered node's
 /// neighborhood without erasing them.
 const DIM_EDGE_ALPHA: f32 = 0.2;
+
+/// The canvas paint pass: boxes parent-before-child so children sit over their
+/// containers, and the connectors over the fills.
+pub(crate) fn canvas_body(
+    boxes: Vec<PaintBox>,
+    connectors: Vec<PaintConnector>,
+    palette: Palette,
+    content: (f32, f32),
+    entity: Entity<GraphView>,
+) -> impl FnOnce(Bounds<Pixels>, (), &mut Window, &mut App) {
+    move |bounds, _, window, cx| {
+        let camera = entity.read(cx).camera();
+        for b in &boxes {
+            paint_box(b, bounds, camera, &palette, window, cx);
+        }
+        for c in &connectors {
+            paint_lanes(c, bounds, camera, window);
+        }
+        paint_scrollbars(bounds, content, camera, &palette, window);
+        track_gesture(&entity, window, cx);
+    }
+}
 
 /// Accent hue for a leaf box, keyed by its node kind. These are mid-saturation
 /// and recognizable against either a light or dark background.
@@ -83,6 +111,27 @@ fn container_fill(kind: Kind, palette: &Palette) -> Rgba {
         }
         _ => palette.container_fill,
     }
+}
+
+/// A box flattened to what the canvas needs to paint it, in layout pixels.
+pub(crate) struct PaintBox {
+    x: f64,
+    y: f64,
+    w: f64,
+    h: f64,
+    compound: bool,
+    /// Whether this box can be opened or closed (a container or a collapsed
+    /// group), so the renderer draws a disclosure caret: down when open
+    /// (compound), right when collapsed.
+    expandable: bool,
+    /// Fill resolved from the active theme when the box vec is built.
+    fill: Rgba,
+    label: String,
+    /// Highlight alpha for the just-toggled box (0.0 = none), scaling the
+    /// emphasis border and inset glow as it fades.
+    highlight: f32,
+    /// Outside the hovered node's neighborhood, drawn faded to recede.
+    dim: bool,
 }
 
 /// Flattens each laid-out box to what the canvas paints, resolving its themed
@@ -142,9 +191,29 @@ pub(crate) fn collect_connectors(g: &LaidOut, dimming: &Dimming) -> Vec<PaintCon
         .collect()
 }
 
+/// Paints a connector's provenances as evenly spaced parallel lanes centered on
+/// its route.
+fn paint_lanes(c: &PaintConnector, bounds: Bounds<Pixels>, camera: Camera, window: &mut Window) {
+    let z = camera.zoom;
+    let screen: Vec<(f32, f32)> = c
+        .points
+        .iter()
+        .map(|(x, y)| {
+            let s = to_screen(*x, *y, bounds, camera);
+            (f32::from(s.x), f32::from(s.y))
+        })
+        .collect();
+    let n = c.kinds.len() as f32;
+    for (i, kind) in c.kinds.iter().enumerate() {
+        let slot = i as f32 - (n - 1.0) / 2.0;
+        let lane = lane_polyline(&screen, slot * PARALLEL_SPACING * z);
+        paint_connector(&lane, *kind, c.dim, z, window);
+    }
+}
+
 /// Paints a box: its filled quad, an emphasis border and glow when highlighted,
 /// and its centered label. Off-screen boxes are culled.
-pub(crate) fn paint_box(
+fn paint_box(
     b: &PaintBox,
     bounds: Bounds<Pixels>,
     camera: Camera,
@@ -368,7 +437,7 @@ fn miter_vertex(a: (f32, f32), b: (f32, f32), c: (f32, f32), d: f32) -> (f32, f3
 
 /// Strokes a connector polyline (screen coordinates) and caps its end with a
 /// filled arrowhead pointing along the final segment.
-pub(crate) fn paint_connector(points: &[(f32, f32)], kind: EdgeKind, dim: bool, zoom: f32, window: &mut Window) {
+fn paint_connector(points: &[(f32, f32)], kind: EdgeKind, dim: bool, zoom: f32, window: &mut Window) {
     if points.len() < 2 {
         return;
     }

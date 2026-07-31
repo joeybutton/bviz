@@ -1,14 +1,22 @@
 use crate::camera::{clamp_pan, content_size, Camera};
 use crate::drag::Drag;
-use crate::GraphView;
+use crate::{GraphView, Palette};
 use bviz_ui_components::{Axis, Scrollbar};
-use gpui::{Bounds, Context, MouseMoveEvent, Pixels, Point, point, px, size};
+use gpui::{Bounds, Context, Hsla, MouseMoveEvent, Pixels, Point, Window, point, px, size};
 
 /// Thickness of a scroll-bar track and thumb, in px.
 const SCROLLBAR_THICKNESS: f32 = 10.0;
 
 /// Smallest a scroll thumb may shrink to, so it stays grabbable on a long track.
 const MIN_THUMB: f32 = 28.0;
+
+/// Fraction by which the border color is blended toward the background to give
+/// the scroll-bar track.
+const TRACK_BLEND: f32 = 0.5;
+
+/// Fraction by which the label color is blended toward the background to give
+/// the scroll thumb.
+const THUMB_BLEND: f32 = 0.45;
 
 /// An in-progress scroll-bar drag: which bar holds it and the grab offset down the
 /// thumb at the press, so the thumb tracks the cursor from the point it was grabbed.
@@ -22,7 +30,7 @@ pub(crate) struct ScrollDrag {
 /// (window px), or `None` when that axis fits and needs none. The bar's track,
 /// content, visible extent, and offset are the axis length in window px, so a
 /// press maps straight through in window coordinates.
-pub(crate) fn scrollbar_geom(
+fn scrollbar_geom(
     axis: Axis,
     viewport: Bounds<Pixels>,
     content: (f32, f32),
@@ -54,6 +62,24 @@ pub(crate) fn scrollbar_geom(
         ),
     };
     Scrollbar::new(axis, track, clen, vlen, offset, MIN_THUMB)
+}
+
+/// Paints a scroll bar along the edge of each axis that overflows the viewport,
+/// an alternative to drag-panning.
+pub(crate) fn paint_scrollbars(
+    viewport: Bounds<Pixels>,
+    content: (f32, f32),
+    camera: Camera,
+    palette: &Palette,
+    window: &mut Window,
+) {
+    let track = Hsla::from(bviz_ui_theme::mix(palette.border, palette.background, TRACK_BLEND));
+    let thumb = Hsla::from(bviz_ui_theme::mix(palette.label, palette.background, THUMB_BLEND));
+    for axis in [Axis::Vertical, Axis::Horizontal] {
+        if let Some(bar) = scrollbar_geom(axis, viewport, content, camera) {
+            bar.paint(track, thumb, window);
+        }
+    }
 }
 
 /// The scroll bar for `axis` built from the loaded graph's current view state.

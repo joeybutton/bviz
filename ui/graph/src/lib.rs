@@ -3,13 +3,12 @@
 //! rendering the result.
 
 use bviz_graph_layout::{Id, LaidOut};
-use bviz_ui_components::{track_drag, Axis};
 use bviz_ui_shell::Chrome;
 use clap::Parser;
 use gpui::{
-    App, Bounds, Context, Div, Entity, FocusHandle, Hsla, IntoElement, KeyDownEvent, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Render, Rgba, ScrollDelta,
-    ScrollWheelEvent, Stateful, Window, canvas, div, prelude::*, px, size,
+    Context, Div, Entity, FocusHandle, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent,
+    MouseMoveEvent, MouseUpEvent, Pixels, Point, Render, Rgba, ScrollDelta, ScrollWheelEvent,
+    Stateful, Window, canvas, div, prelude::*, px, size,
 };
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -27,26 +26,17 @@ mod paint;
 mod scroll;
 
 use build::{Input, InputKind};
-use camera::{
-    clamp_pan, content_size, enclosed_boxes, fit_zoom, from_screen, recenter_rect, to_screen,
-    Camera,
-};
+use camera::{clamp_pan, content_size, enclosed_boxes, fit_zoom, from_screen, recenter_rect, Camera};
 use dimming::compute_dimming;
-use drag::{drag_pan, end_drag, start_pan, Drag};
+use drag::{end_drag, start_pan, Drag};
 use emphasis::Emphasis;
 use framing::{build_prepaint, Framing};
 use model::{Model, Source};
-use paint::{
-    PaintConnector, collect_connectors, lane_polyline, paint_box, paint_boxes, paint_connector,
-};
-use scroll::{scroll_drag_move, scrollbar_geom, scrollbar_hit, start_scroll_drag};
+use paint::{canvas_body, collect_connectors, paint_boxes};
+use scroll::{scrollbar_hit, start_scroll_drag};
 
 /// Padding around the graph, in layout pixels.
 const MARGIN: f64 = 16.0;
-
-/// Perpendicular gap (pre-zoom px) between the parallel provenance lines drawn
-/// along a node pair that several queries connect.
-const PARALLEL_SPACING: f32 = 3.0;
 
 /// Largest zoom-in factor. The smallest is computed per graph so the whole graph
 /// always fits the viewport.
@@ -79,27 +69,6 @@ struct Palette {
     container_fill: Rgba,
     /// Background the kind accents are blended toward to form leaf fills.
     background: Rgba,
-}
-
-/// A box flattened to what the canvas needs to paint it, in layout pixels.
-struct PaintBox {
-    x: f64,
-    y: f64,
-    w: f64,
-    h: f64,
-    compound: bool,
-    /// Whether this box can be opened or closed (a container or a collapsed
-    /// group), so the renderer draws a disclosure caret: down when open
-    /// (compound), right when collapsed.
-    expandable: bool,
-    /// Fill resolved from the active theme when the box vec is built.
-    fill: Rgba,
-    label: String,
-    /// Highlight alpha for the just-toggled box (0.0 = none), scaling the
-    /// emphasis border and inset glow as it fades.
-    highlight: f32,
-    /// Outside the hovered node's neighborhood, drawn faded to recede.
-    dim: bool,
 }
 
 /// Loads, lays out, and renders a Bazel build graph.
@@ -310,59 +279,6 @@ struct ViewFlags<'a> {
     reduced: bool,
 }
 
-/// The canvas paint pass: draws every box parent-before-child so children sit
-/// over their containers, then the connectors over the fills (fanning each node
-/// pair's provenances into nested lanes), then the scroll bars, and installs the
-/// window-global drag handlers while a pan or scroll-bar drag is in progress.
-/// Owns snapshots of the boxes and connectors so it need not borrow the graph.
-fn canvas_body(
-    boxes: Vec<PaintBox>,
-    connectors: Vec<PaintConnector>,
-    palette: Palette,
-    content: (f32, f32),
-    entity: Entity<GraphView>,
-) -> impl FnOnce(Bounds<Pixels>, (), &mut Window, &mut App) {
-    move |bounds, _, window, cx| {
-        let camera = entity.read(cx).camera();
-        let z = camera.zoom;
-        for b in &boxes {
-            paint_box(b, bounds, camera, &palette, window, cx);
-        }
-        for PaintConnector { points, kinds, dim } in &connectors {
-            // ELK routes a node pair once; fan its provenances out into nested
-            // lanes centered on that route — each anchored at the nodes like a
-            // lone edge — so a pair several queries connect still shows each.
-            let screen: Vec<(f32, f32)> = points
-                .iter()
-                .map(|(x, y)| {
-                    let s = to_screen(*x, *y, bounds, camera);
-                    (f32::from(s.x), f32::from(s.y))
-                })
-                .collect();
-            let n = kinds.len() as f32;
-            for (i, kind) in kinds.iter().enumerate() {
-                let slot = i as f32 - (n - 1.0) / 2.0;
-                let lane = lane_polyline(&screen, slot * PARALLEL_SPACING * z);
-                paint_connector(&lane, *kind, *dim, z, window);
-            }
-        }
-        // Scroll bars along the edges of whichever axes overflow the viewport, an
-        // alternative to drag-panning.
-        let track = Hsla::from(bviz_ui_theme::mix(palette.border, palette.background, 0.5));
-        let thumb = Hsla::from(bviz_ui_theme::mix(palette.label, palette.background, 0.45));
-        for axis in [Axis::Vertical, Axis::Horizontal] {
-            if let Some(bar) = scrollbar_geom(axis, bounds, content, camera) {
-                bar.paint(track, thumb, window);
-            }
-        }
-        match entity.read(cx).drag {
-            Drag::None => {}
-            Drag::Pan(_) => track_drag(window, &entity, drag_pan, end_drag),
-            Drag::Scrollbar(_) => track_drag(window, &entity, scroll_drag_move, end_drag),
-        }
-    }
-}
-
 /// Open or close the container (or group) box under `pos` (window px) and settle
 /// the view to keep it in frame.
 fn toggle_box_at(view: &mut GraphView, pos: Point<Pixels>, cx: &mut Context<GraphView>) {
@@ -451,9 +367,10 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::camera::{ease_out_cubic, settle_view, Rect};
+    use crate::camera::{ease_out_cubic, settle_view, to_screen, Rect};
+    use crate::paint::lane_polyline;
     use bviz_graph_layout::{Box, Kind};
-    use gpui::{point, Size};
+    use gpui::{point, Bounds, Size};
 
     fn lbox(id: u32, x: f64, y: f64, w: f64, h: f64) -> Box {
         Box {

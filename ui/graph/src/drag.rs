@@ -1,7 +1,8 @@
 use crate::camera::{clamp_pan, content_size, Camera};
-use crate::scroll::ScrollDrag;
+use crate::scroll::{scroll_drag_move, ScrollDrag};
 use crate::{toggle_box_at, GraphView};
-use gpui::{Context, MouseMoveEvent, MouseUpEvent, Pixels, Point};
+use bviz_ui_components::track_drag;
+use gpui::{App, Context, Entity, MouseMoveEvent, MouseUpEvent, Pixels, Point, Window};
 
 /// A cursor must travel at least this far from the press before the gesture
 /// counts as a drag rather than a click.
@@ -76,5 +77,15 @@ pub(crate) fn end_drag(view: &mut GraphView, event: &MouseUpEvent, cx: &mut Cont
             }
         }
         Drag::Scrollbar(_) => cx.notify(),
+    }
+}
+
+/// Installs the window-global handlers that advance and end whichever gesture is
+/// in progress.
+pub(crate) fn track_gesture(entity: &Entity<GraphView>, window: &mut Window, cx: &App) {
+    match entity.read(cx).drag {
+        Drag::None => {}
+        Drag::Pan(_) => track_drag(window, entity, drag_pan, end_drag),
+        Drag::Scrollbar(_) => track_drag(window, entity, scroll_drag_move, end_drag),
     }
 }
