@@ -460,7 +460,7 @@ fn boxes(visible: &Graph, drawing: &Drawing, containment: &Containment) -> Vec<B
     boxes.into_iter().map(|(_, b)| b).collect()
 }
 
-/// One straight connector per drawn node pair.
+/// One connector per drawn node pair.
 fn connectors(drawn: &Graph, drawing: &Drawing) -> Vec<Connector> {
     let mut kinds_of: BTreeMap<(Id, Id), Vec<EdgeKind>> = BTreeMap::new();
     for edge in &drawn.edges {
@@ -473,35 +473,80 @@ fn connectors(drawn: &Graph, drawing: &Drawing) -> Vec<Connector> {
     for ((from, to), mut kinds) in kinds_of {
         kinds.sort_unstable();
         let (tail, head) = (drawing.placed[&from], drawing.placed[&to]);
-        connectors.push(Connector {
-            points: vec![border_point(&tail, &head), border_point(&head, &tail)],
-            kinds,
-            from,
-            to,
-        });
+        connectors.push(Connector { points: route(&tail, &head), kinds, from, to });
     }
     connectors
 }
 
-/// Where the line joining the two boxes' centers meets `from`'s border on the
-/// side the drawn segment runs from.
-fn border_point(from: &Placed, to: &Placed) -> (f64, f64) {
+/// An axis-aligned route between two boxes. It leaves the middle of the side of
+/// `from` that faces `to` and enters the middle of the facing side of `to`,
+/// preferring the vertical sides so that the placement's top-to-bottom flow
+/// draws as lanes. Boxes that overlap on both axes — one nested in the other —
+/// have no side facing the other, and take a straight segment instead.
+fn route(from: &Placed, to: &Placed) -> Vec<(f64, f64)> {
+    let (fx, fy) = from.center();
+    let (tx, ty) = to.center();
+    if to.y > from.y + from.height {
+        elbow((fx, from.y + from.height), (tx, to.y), Axis::Vertical)
+    } else if from.y > to.y + to.height {
+        elbow((fx, from.y), (tx, to.y + to.height), Axis::Vertical)
+    } else if to.x > from.x + from.width {
+        elbow((from.x + from.width, fy), (to.x, ty), Axis::Horizontal)
+    } else if from.x > to.x + to.width {
+        elbow((from.x, fy), (to.x + to.width, ty), Axis::Horizontal)
+    } else {
+        crossing(from, to)
+    }
+}
+
+/// Which axis a route runs along, and so which one its jog crosses.
+enum Axis {
+    Vertical,
+    Horizontal,
+}
+
+/// The route from `from` to `to` that runs along `axis` and takes the whole
+/// offset across it in one jog, halfway along the gap the two leave. Two points
+/// facing each other need no jog and take the direct leg.
+fn elbow(from: (f64, f64), to: (f64, f64), axis: Axis) -> Vec<(f64, f64)> {
+    match axis {
+        Axis::Vertical if from.0 == to.0 => vec![from, to],
+        Axis::Vertical => {
+            let mid = (from.1 + to.1) / 2.0;
+            vec![from, (from.0, mid), (to.0, mid), to]
+        }
+        Axis::Horizontal if from.1 == to.1 => vec![from, to],
+        Axis::Horizontal => {
+            let mid = (from.0 + to.0) / 2.0;
+            vec![from, (mid, from.1), (mid, to.1), to]
+        }
+    }
+}
+
+/// The straight segment between two boxes neither of which has a side facing the
+/// other: it sets out from `from`'s border and stops where it first meets `to`'s,
+/// so it reaches the box it points at without running across it.
+fn crossing(from: &Placed, to: &Placed) -> Vec<(f64, f64)> {
     let (x, y) = from.center();
     let (tx, ty) = to.center();
-    let (dx, dy) = (tx - x, ty - y);
-    let (dx, dy) = if dx == 0.0 && dy == 0.0 {
-        // Boxes sharing a center leave no direction to run in, so the segment
-        // takes the flow the layout arranges every edge along.
-        (0.0, 1.0)
-    } else if from.holds((tx, ty)) {
-        // A box holding the other's center has no border between the two, so the
-        // segment sets out from the far side and stops where it reaches the box
-        // it points at.
-        (-dx, -dy)
-    } else {
-        (dx, dy)
+    // A box holding the other's center has no border between the two, so the
+    // segment leaves by the side away from it and still has length to draw.
+    let aim = match from.holds((tx, ty)) {
+        true => (2.0 * x - tx, 2.0 * y - ty),
+        false => (tx, ty),
     };
-    let reach = (from.width / 2.0 / dx.abs()).min(from.height / 2.0 / dy.abs());
+    let start = border_point(from, aim);
+    vec![start, border_point(to, start)]
+}
+
+/// Where the ray from `b`'s center toward `aim` meets `b`'s border.
+fn border_point(b: &Placed, aim: (f64, f64)) -> (f64, f64) {
+    let (x, y) = b.center();
+    let (dx, dy) = (aim.0 - x, aim.1 - y);
+    // An aim on the center leaves no direction to run in, so the point takes the
+    // flow the layout arranges every edge along.
+    let (dx, dy) = if dx == 0.0 && dy == 0.0 { (0.0, 1.0) } else { (dx, dy) };
+    let reach = (b.width / 2.0 / dx.abs()).min(b.height / 2.0 / dy.abs());
     (x + reach * dx, y + reach * dy)
 }
 
@@ -666,9 +711,8 @@ mod tests {
                         && y >= b.y - slack
                         && y <= b.y + b.height + slack
                 };
-                assert_eq!(connector.points.len(), 2);
                 assert!(on_border(tail, connector.points[0]));
-                assert!(on_border(head, connector.points[1]));
+                assert!(on_border(head, *connector.points.last().unwrap()));
             }
         }
     }
@@ -707,20 +751,35 @@ mod tests {
         (g, names)
     }
 
-    #[test]
-    fn a_connector_into_a_nested_box_stops_at_its_border() {
-        let (base, names) = parent_to_child();
-        let map = mapped(&base);
-        let (outer, a) = (names.get("outer").unwrap(), names.get("a").unwrap());
+    /// A container whose one child leaves it no room of its own, so the
+    /// container's center falls inside the child and each box holds the other's.
+    fn parent_to_only_child() -> (Graph, Names) {
+        let mut g = Graph::new();
+        let mut names = Names::default();
+        let outer = names.intern("outer");
+        g.add_node(outer, "outer", Kind::Package, None);
+        let only = names.intern("only");
+        g.add_node(only, "only", Kind::Action, Some(outer));
+        let other = names.intern("other");
+        g.add_node(other, "other", Kind::Target, None);
+        g.add_edge(outer, only, EdgeKind::Aquery);
+        g.add_edge(only, other, EdgeKind::Aquery);
+        (g, names)
+    }
+
+    /// Asserts the connector drawn from `outer` to the box `inner` nested in it
+    /// keeps clear of `inner`, meeting it at the border instead of running
+    /// across it.
+    fn assert_stops_at_the_nested_border(base: &Graph, names: &Names, inner: &str) {
+        let map = mapped(base);
+        let (outer, id) = (names.get("outer").unwrap(), names.get(inner).unwrap());
         let view = (0..map.level_count())
             .map(|i| map.level(i))
-            .find(|v| v.boxes.iter().any(|b| b.id == a))
+            .find(|v| v.boxes.iter().any(|b| b.id == id))
             .unwrap();
-        let inner = view.boxes.iter().find(|b| b.id == a).unwrap();
-        let connector =
-            view.connectors.iter().find(|c| c.from == outer && c.to == a).unwrap();
+        let inner = view.boxes.iter().find(|b| b.id == id).unwrap();
+        let connector = view.connectors.iter().find(|c| c.from == outer && c.to == id).unwrap();
 
-        let (start, end) = (connector.points[0], connector.points[1]);
         let strictly_inside = |(x, y): (f64, f64)| {
             let slack = 1e-6;
             x > inner.x + slack
@@ -728,24 +787,70 @@ mod tests {
                 && y > inner.y + slack
                 && y < inner.y + inner.height - slack
         };
-        assert!(!strictly_inside(start), "the connector starts inside the box it points at");
-        // Every point up to the border is clear of the nested box, so the
-        // segment stops at it instead of running across it.
-        for step in 0..100 {
-            let t = step as f64 / 100.0;
-            let at = (start.0 + t * (end.0 - start.0), start.1 + t * (end.1 - start.1));
-            assert!(!strictly_inside(at), "the connector crosses the box it points at");
+        for leg in connector.points.windows(2) {
+            let (start, end) = (leg[0], leg[1]);
+            for step in 0..=100 {
+                let t = step as f64 / 100.0;
+                let at = (start.0 + t * (end.0 - start.0), start.1 + t * (end.1 - start.1));
+                assert!(!strictly_inside(at), "the connector crosses the box it points at");
+            }
         }
+    }
+
+    #[test]
+    fn a_connector_into_a_nested_box_stops_at_its_border() {
+        let (base, names) = parent_to_child();
+        assert_stops_at_the_nested_border(&base, &names, "a");
+        // A lone child fills its container, so the two centers sit inside each
+        // other's box and the segment has to pick its ends from that.
+        let (base, names) = parent_to_only_child();
+        assert_stops_at_the_nested_border(&base, &names, "only");
+    }
+
+    /// Each leg of a route runs along one axis, so the whole route is
+    /// rectilinear.
+    fn axis_aligned(points: &[(f64, f64)]) -> bool {
+        points.windows(2).all(|leg| leg[0].0 == leg[1].0 || leg[0].1 == leg[1].1)
+    }
+
+    #[test]
+    fn a_route_leaves_and_enters_the_facing_borders_along_the_axes() {
+        let above = Placed { x: 0.0, y: 0.0, width: 100.0, height: 20.0 };
+        let below = Placed { x: 300.0, y: 200.0, width: 60.0, height: 40.0 };
+        let beside = Placed { x: 400.0, y: 0.0, width: 40.0, height: 60.0 };
+
+        let down = route(&above, &below);
+        assert!(axis_aligned(&down), "{down:?}");
+        assert_eq!(down[0], (50.0, 20.0), "leaves the source's bottom border");
+        assert_eq!(*down.last().unwrap(), (330.0, 200.0), "enters the target's top border");
+        assert!(down[1..3].iter().all(|p| p.1 == 110.0), "jogs across between the two: {down:?}");
+
+        let up = route(&below, &above);
+        assert!(axis_aligned(&up), "{up:?}");
+        assert_eq!(up[0], (330.0, 200.0), "leaves the source's top border");
+        assert_eq!(*up.last().unwrap(), (50.0, 20.0), "enters the target's bottom border");
+
+        // Overlapping rows leave no vertical gap, so the route runs sideways.
+        let across = route(&above, &beside);
+        assert!(axis_aligned(&across), "{across:?}");
+        assert_eq!(across[0], (100.0, 10.0), "leaves the source's right border");
+        assert_eq!(*across.last().unwrap(), (400.0, 30.0), "enters the target's left border");
+    }
+
+    #[test]
+    fn boxes_facing_each_other_head_on_take_one_leg() {
+        let above = Placed { x: 0.0, y: 0.0, width: 100.0, height: 20.0 };
+        let below = Placed { x: 20.0, y: 200.0, width: 60.0, height: 40.0 };
+        assert_eq!(route(&above, &below), vec![(50.0, 20.0), (50.0, 200.0)]);
     }
 
     #[test]
     fn boxes_sharing_a_center_still_get_a_segment() {
         let square = Placed { x: 0.0, y: 0.0, width: 100.0, height: 100.0 };
         let inside = Placed { x: 40.0, y: 40.0, width: 20.0, height: 20.0 };
-        let (start, end) = (border_point(&square, &inside), border_point(&inside, &square));
-        assert!(start.0.is_finite() && start.1.is_finite());
-        assert!(end.0.is_finite() && end.1.is_finite());
-        assert_ne!(start, end);
+        let points = route(&square, &inside);
+        assert!(points.iter().all(|p| p.0.is_finite() && p.1.is_finite()), "{points:?}");
+        assert_ne!(points[0], *points.last().unwrap());
     }
 
     #[test]
