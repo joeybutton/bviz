@@ -16,8 +16,11 @@ use crate::layout::{self, Box, Connector, LaidOut, BORDER, LABEL_BAND, LEAF_HEIG
 use crate::{lod, reduce};
 
 /// A container opens once its smaller side covers this many screen pixels, the
-/// point at which the boxes inside it are worth drawing.
-const OPEN_PX: f64 = 220.0;
+/// point at which the boxes inside it are worth drawing. It sets how much of the
+/// graph a level holds: the whole pyramid spans roughly the zoom range the
+/// camera allows, so a larger value pushes every level's detail toward the
+/// zoomed-in end and leaves the fitted view all but empty.
+const OPEN_PX: f64 = 55.0;
 
 /// Scale ratio between one level and the next, so a level spans a fixed zoom
 /// factor whatever the graph's containers happen to measure.
