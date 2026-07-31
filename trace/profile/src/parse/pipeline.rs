@@ -152,10 +152,32 @@ fn locate_event_region(text: &str) -> Option<EventRegion<'_>> {
     })
 }
 
-/// Splits the `traceEvents` array into byte chunks at newline boundaries — a
-/// literal newline never falls inside a JSON string, so it always lies between
-/// events — parses each chunk into its own [`Builder`] on a pool of `n` worker
-/// threads pulling chunks from a shared queue, then assembles the builders in
+/// Splits `region` into byte chunks for `n` workers, cutting at the first
+/// newline at or after each evenly spaced target: a literal newline never falls
+/// inside a JSON string, so it always lies between two events and a chunk holds
+/// only whole events. `None` when the cuts yield a single chunk, which leaves
+/// nothing to parallelize.
+fn cut_chunks(region: &str, n: usize) -> Option<Vec<&str>> {
+    let target_chunks = (n * CHUNKS_PER_WORKER).min(region.len() / MIN_CHUNK_BYTES).max(n);
+    let mut bounds = vec![0usize];
+    for k in 1..target_chunks {
+        let target = region.len() * k / target_chunks;
+        if let Some(off) = region[target..].find('\n') {
+            let cut = target + off + 1;
+            if cut > *bounds.last().unwrap() {
+                bounds.push(cut);
+            }
+        }
+    }
+    bounds.push(region.len());
+    if bounds.len() < 3 {
+        return None;
+    }
+    Some(bounds.windows(2).map(|w| &region[w[0]..w[1]]).collect())
+}
+
+/// Parses the `traceEvents` array into a profile across `n` worker threads
+/// pulling chunks of it from a shared queue, then assembles the builders in
 /// array order. `min_bytes` gates the array size below which it
 /// declines. Returns `None` if the array can't be located, no split yields more
 /// than one chunk, or any chunk fails to parse.
@@ -164,25 +186,7 @@ pub(crate) fn parse_chunks(text: &str, n: usize, min_bytes: usize) -> Option<Pro
     if events.len() < min_bytes {
         return None;
     }
-    let target_chunks = (n * CHUNKS_PER_WORKER).min(events.len() / MIN_CHUNK_BYTES).max(n);
-    // Cut at the first newline at or after each evenly spaced target; each cut
-    // sits between two events, so a chunk holds only whole events.
-    let mut bounds = vec![0usize];
-    for k in 1..target_chunks {
-        let target = events.len() * k / target_chunks;
-        if let Some(off) = events[target..].find('\n') {
-            let cut = target + off + 1;
-            if cut > *bounds.last().unwrap() {
-                bounds.push(cut);
-            }
-        }
-    }
-    bounds.push(events.len());
-    if bounds.len() < 3 {
-        // Only one chunk — nothing to parallelize, let the serial path handle it.
-        return None;
-    }
-    let chunks: Vec<&str> = bounds.windows(2).map(|w| &events[w[0]..w[1]]).collect();
+    let chunks = cut_chunks(events, n)?;
 
     let other_data = merge_other_data(recover_other_data(head), recover_other_data(tail));
     // Every worker interns into this one arena, so a builder's handles are
