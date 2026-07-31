@@ -254,9 +254,6 @@ pub(crate) fn parse_chunks(text: &str, n: usize, min_bytes: usize) -> Option<Pro
     let prefault_bytes = intern_prefault_bytes(events.len());
     let builders =
         timed("  parse chunks", || parse_chunks_on_workers(&chunks, n, &interner, prefault_bytes))?;
-    if builders.is_empty() {
-        return None;
-    }
     Some(timed("  assemble", || seal_chunks(interner, builders, head, tail)))
 }
 
