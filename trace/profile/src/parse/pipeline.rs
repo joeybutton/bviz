@@ -124,17 +124,20 @@ fn parse_chunk(
     ok.then_some(builder)
 }
 
-/// A decoded profile buffer cut at the bounds of its `traceEvents` array.
+/// A decoded profile buffer cut twice: `head` ends where the `traceEvents`
+/// array's contents begin and `tail` begins at the array's closing `]`. The
+/// events between are bare array content, so no chunk of them picks a bracket
+/// up as event text, and every byte outside the array falls whole into one end
+/// or the other.
 struct EventRegion<'a> {
     head: &'a str,
     events: &'a str,
     tail: &'a str,
 }
 
-/// Cuts `text` at the `traceEvents` array's contents, whose end is the array's
-/// close so that a chunk of the events never picks the close up as event
-/// content. `None` when no array can be located, or when it closes before it
-/// opens.
+/// Cuts `text` around its `traceEvents` array. `None` when no array can be
+/// located, or when its close does not lie past the start of its contents — an
+/// empty array, or a `]` ahead of the `[`.
 fn locate_event_region(text: &str) -> Option<EventRegion<'_>> {
     let TraceEventsArray::Found { content_start: array_start, .. } =
         find_trace_events_array(text.as_bytes())
