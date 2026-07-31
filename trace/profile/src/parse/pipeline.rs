@@ -220,6 +220,23 @@ fn parse_chunks_on_workers(
     builders.into_iter().collect()
 }
 
+/// Recovers `otherData` from the text on either side of the array and folds the
+/// builders into the finished profile.
+fn seal_chunks(
+    interner: ConcurrentInterner,
+    builders: Vec<Builder>,
+    head: &str,
+    tail: &str,
+) -> Profile {
+    let other_data = merge_other_data(recover_other_data(head), recover_other_data(tail));
+    let mut merge =
+        Merge::with_capacity(builders.len(), builders.iter().map(|b| b.args_pool.len()).sum());
+    for builder in builders {
+        merge.fold(builder);
+    }
+    seal(interner, merge, other_data)
+}
+
 /// Parses the `traceEvents` array of `text` into a profile on `n` workers.
 /// `min_bytes` is the array size below which it declines; it also returns
 /// `None` for an array it cannot locate or split, and for a chunk that fails to
@@ -230,8 +247,6 @@ pub(crate) fn parse_chunks(text: &str, n: usize, min_bytes: usize) -> Option<Pro
         return None;
     }
     let chunks = cut_chunks(events, n)?;
-
-    let other_data = merge_other_data(recover_other_data(head), recover_other_data(tail));
     // Every worker interns into this one arena, so a builder's handles are
     // global and merging never rebases them. The distinct pool is bounded by
     // the region's byte length.
@@ -242,16 +257,7 @@ pub(crate) fn parse_chunks(text: &str, n: usize, min_bytes: usize) -> Option<Pro
     if builders.is_empty() {
         return None;
     }
-    Some(timed("  assemble", || {
-        let mut merge = Merge::with_capacity(
-            builders.len(),
-            builders.iter().map(|b| b.args_pool.len()).sum(),
-        );
-        for builder in builders {
-            merge.fold(builder);
-        }
-        seal(interner, merge, other_data)
-    }))
+    Some(timed("  assemble", || seal_chunks(interner, builders, head, tail)))
 }
 
 /// Ceiling on a pipelined chunk buffer, bounding the memory the bounded queue
