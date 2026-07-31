@@ -14,12 +14,13 @@ use gpui::{
 };
 use std::collections::HashSet;
 use std::path::PathBuf;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 mod build;
 mod camera;
 mod dimming;
 mod drag;
+mod emphasis;
 mod framing;
 mod paint;
 mod scroll;
@@ -31,6 +32,7 @@ use camera::{
 };
 use dimming::compute_dimming;
 use drag::{drag_pan, end_drag, start_pan, Drag};
+use emphasis::Emphasis;
 use framing::{build_prepaint, Framing};
 use paint::{
     PaintConnector, collect_connectors, edge_color, kind_accent, lane_polyline, paint_box,
@@ -140,24 +142,7 @@ struct GraphView {
     /// expand/collapse handle (a leaf can't open, a singleton auto-expands), so a
     /// click or caret can tell an expandable box from a plain one.
     expandable: HashSet<Id>,
-    /// The most-recently toggled node id: the box its relayout frames or
-    /// recenters, and the box emphasized briefly afterward so the eye can find
-    /// what opened or closed. Cleared when the highlight fades.
-    recent: Option<Id>,
-    /// When the highlight began — set as the relayout lands, so the emphasis
-    /// fades over `HIGHLIGHT_LINGER` measured from when the box becomes visible.
-    /// A relayout slower than the linger would otherwise outlast a fade timed
-    /// from the click, surfacing the box already un-highlighted.
-    recent_at: Instant,
-    /// Guards the highlight-fade timer: a toggle bumps this so any in-flight fade
-    /// retires at once, leaving `recent` for the new toggle rather than clearing
-    /// it or repainting a stale highlight.
-    highlight_seq: u64,
-    /// Ids of the boxes the viewport fully enclosed when the recent toggle fired.
-    /// The settling relayout keeps these — and the toggled box — in view, so the
-    /// view tracks what the user was looking at rather than snapping to the
-    /// toggled box alone.
-    prev_visible: Vec<Id>,
+    emphasis: Emphasis,
     /// Whether a relayout is running, so the view shows a progress indicator
     /// while the prior layout stays interactive.
     relaying: bool,
@@ -175,9 +160,6 @@ struct GraphView {
     /// Holds the background load/relayout task so it isn't cancelled on drop.
     _load_task: Task<()>,
 }
-
-/// How long the just-toggled box stays emphasized before the highlight fades.
-const HIGHLIGHT_LINGER: Duration = Duration::from_millis(1100);
 
 impl GraphView {
     fn camera(&self) -> Camera {
@@ -235,10 +217,7 @@ impl GraphView {
             drag: Drag::None,
             expanded: HashSet::new(),
             expandable: HashSet::new(),
-            recent: None,
-            recent_at: Instant::now(),
-            highlight_seq: 0,
-            prev_visible: Vec::new(),
+            emphasis: Emphasis::none(),
             relaying: false,
             hovered: None,
             dim_enabled: true,
@@ -272,40 +251,9 @@ impl GraphView {
                 view.source = Source::Loaded(loaded);
                 view.framing.request_recenter();
                 view.relaying = false;
-                view.highlight_recent(cx);
+                emphasis::begin_fade(view, cx);
             },
         );
-    }
-
-    /// Emphasizes `recent` (the just-toggled box) for `HIGHLIGHT_LINGER`,
-    /// repainting so the emphasis fades smoothly, then clears it. Begun once the
-    /// relayout lands so the highlight appears on the new layout: a relayout
-    /// slower than the linger would outlast a fade begun at click time, so the
-    /// box would surface with no highlight at all.
-    fn highlight_recent(&mut self, cx: &mut Context<Self>) {
-        self.recent_at = Instant::now();
-        let seq = self.highlight_seq;
-        cx.spawn(async move |this, cx| {
-            loop {
-                cx.background_executor().timer(Duration::from_millis(33)).await;
-                let done = this.update(cx, |this, cx| {
-                    if this.highlight_seq != seq {
-                        return true;
-                    }
-                    if this.recent_at.elapsed() >= HIGHLIGHT_LINGER {
-                        this.recent = None;
-                        cx.notify();
-                        return true;
-                    }
-                    cx.notify();
-                    false
-                });
-                if done.unwrap_or(true) {
-                    break;
-                }
-            }
-        })
-        .detach();
     }
 
     /// Assembles the single-canvas viewport: the painted boxes and connectors,
@@ -318,9 +266,9 @@ impl GraphView {
         flags: ViewFlags,
         palette: Palette,
     ) -> Stateful<Div> {
-        let ViewFlags { highlight, prev_visible, relaying, hovered, dim_enabled, reduced } = flags;
+        let ViewFlags { emphasis, relaying, hovered, dim_enabled, reduced } = flags;
         let dimming = compute_dimming(g, hovered, dim_enabled);
-        let boxes = paint_boxes(g, expandable, highlight, &dimming, &palette);
+        let boxes = paint_boxes(g, expandable, emphasis, &dimming, &palette);
         let connectors = collect_connectors(g, &dimming);
         let legend = legend(g, &palette);
         let relaying_indicator = relaying_indicator(relaying, &palette);
@@ -359,7 +307,7 @@ impl GraphView {
             },
         );
         let content = content_size(g);
-        let recenter_target = recenter_rect(g, highlight.map(|h| h.id), prev_visible);
+        let recenter_target = recenter_rect(g, emphasis);
         let prepaint = build_prepaint(entity.clone(), content, recenter_target);
         let paint = canvas_body(boxes, connectors, palette, content, entity);
         div()
@@ -484,8 +432,7 @@ impl Render for GraphView {
                         &self.expandable,
                         cx.entity(),
                         ViewFlags {
-                            highlight: self.recent.map(|id| Highlight { id, at: self.recent_at }),
-                            prev_visible: &self.prev_visible,
+                            emphasis: &self.emphasis,
                             relaying: self.relaying,
                             hovered: self.hovered,
                             dim_enabled: self.dim_enabled,
@@ -518,20 +465,9 @@ impl Render for GraphView {
     }
 }
 
-/// The just-toggled box and the instant its highlight began, so the fade
-/// emphasis and the time it is measured from travel together to the painter.
-#[derive(Clone, Copy)]
-struct Highlight {
-    id: Id,
-    at: Instant,
-}
-
-/// The per-render view state the layout reads: what to highlight, the previously
-/// visible nodes a relayout animates from, whether a relayout is running, the
-/// hovered node, and the dim and reduce toggle states.
+/// The per-render view state the graph element reads off the view.
 struct ViewFlags<'a> {
-    highlight: Option<Highlight>,
-    prev_visible: &'a [Id],
+    emphasis: &'a Emphasis,
     relaying: bool,
     hovered: Option<Id>,
     dim_enabled: bool,
@@ -666,17 +602,11 @@ fn toggle_box_at(view: &mut GraphView, pos: Point<Pixels>, cx: &mut Context<Grap
     if !view.expanded.remove(&id) {
         view.expanded.insert(id);
     }
-    // The boxes fully on screen now, so the relayout settles the view to keep
-    // them — and the toggled box — in frame.
-    view.prev_visible =
-        enclosed_boxes(&g.boxes, vp.size, view.camera());
+    let enclosed = enclosed_boxes(&g.boxes, vp.size, view.camera());
     // The relayout may drop the hovered node (it was collapsed away), which would
     // otherwise leave the whole graph dimmed until the next mouse move.
     view.hovered = None;
-    view.recent = Some(id);
-    // Retire any in-flight fade so it can't clear this fresh `recent`; the new
-    // highlight starts when the relayout lands.
-    view.highlight_seq = view.highlight_seq.wrapping_add(1);
+    view.emphasis.toggled(id, enclosed);
     view.retoggle(cx);
 }
 

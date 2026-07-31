@@ -1,6 +1,7 @@
 use crate::camera::{to_screen, Camera};
 use crate::dimming::Dimming;
-use crate::{Highlight, PaintBox, Palette, HIGHLIGHT_LINGER};
+use crate::emphasis::Emphasis;
+use crate::{PaintBox, Palette};
 use bviz_graph_layout::layout::CARET_RESERVE;
 use bviz_graph_layout::{EdgeKind, Id, Kind, LaidOut};
 use gpui::{
@@ -89,18 +90,11 @@ fn container_fill(kind: Kind, palette: &Palette) -> Rgba {
 pub(crate) fn paint_boxes(
     g: &LaidOut,
     expandable: &HashSet<Id>,
-    highlight: Option<Highlight>,
+    emphasis: &Emphasis,
     dimming: &Dimming,
     palette: &Palette,
 ) -> Vec<PaintBox> {
-    // The highlight fades linearly to nothing over the linger window.
-    let (recent, highlight_alpha) = match highlight {
-        Some(h) => (
-            Some(h.id),
-            (1.0 - h.at.elapsed().as_secs_f32() / HIGHLIGHT_LINGER.as_secs_f32()).clamp(0.0, 1.0),
-        ),
-        None => (None, 0.0),
-    };
+    let highlight = emphasis.highlight();
     g.boxes
         .iter()
         .map(|b| PaintBox {
@@ -116,7 +110,10 @@ pub(crate) fn paint_boxes(
                 bviz_ui_theme::mix(kind_accent(b.kind), palette.background, KIND_BLEND)
             },
             label: b.label.clone(),
-            highlight: if recent == Some(b.id) { highlight_alpha } else { 0.0 },
+            highlight: match highlight {
+                Some((id, alpha)) if id == b.id => alpha,
+                _ => 0.0,
+            },
             dim: dimming.applies && !dimming.lit.contains(&b.id),
         })
         .collect()

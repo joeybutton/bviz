@@ -1,3 +1,4 @@
+use crate::emphasis::Emphasis;
 use crate::{FIT_MARGIN, MARGIN, MAX_ZOOM, RECENTER_PAD};
 use bviz_graph_layout::{Id, LaidOut};
 use gpui::{Bounds, Pixels, Point, Size, point, px};
@@ -167,18 +168,11 @@ pub(crate) fn content_size(g: &LaidOut) -> (f32, f32) {
     )
 }
 
-/// Smallest layout rect covering the just-toggled box and every box that was
-/// fully on screen when it was toggled (those that survived the relayout), as
-/// (x, y, w, h). The view settles onto this once the relayout lands, so the user
-/// keeps sight of what they were looking at.
-pub(crate) fn recenter_rect(
-    g: &LaidOut,
-    recent: Option<Id>,
-    prev_visible: &[Id],
-) -> Option<Rect> {
-    let id = recent?;
+/// Smallest layout rect covering the boxes the emphasis keeps framed that
+/// survived the relayout.
+pub(crate) fn recenter_rect(g: &LaidOut, emphasis: &Emphasis) -> Option<Rect> {
     let mut rect: Option<(f64, f64, f64, f64)> = None;
-    for &bid in std::iter::once(&id).chain(prev_visible) {
+    for bid in emphasis.framed() {
         let Some(b) = g.boxes.iter().find(|b| b.id == bid) else {
             continue;
         };
