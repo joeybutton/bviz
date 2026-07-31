@@ -155,13 +155,14 @@ fn locate_event_region(text: &str) -> Option<EventRegion<'_>> {
     })
 }
 
-/// Splits `region` into byte chunks for `n` workers, cutting at the first
-/// newline at or after each evenly spaced target: a literal newline never falls
-/// inside a JSON string, so it always lies between two events and a chunk holds
-/// only whole events. `None` when the cuts yield a single chunk, which leaves
-/// nothing to parallelize.
-fn cut_chunks(region: &str, n: usize) -> Option<Vec<&str>> {
-    let target_chunks = (n * CHUNKS_PER_WORKER).min(region.len() / MIN_CHUNK_BYTES).max(n);
+/// Splits `region` into byte chunks for `workers` parse workers, cutting at
+/// the first newline at or after each evenly spaced target: a literal newline
+/// never falls inside a JSON string, so it always lies between two events and a
+/// chunk holds only whole events. `None` when the cuts yield a single chunk,
+/// which leaves nothing to parallelize.
+fn cut_chunks(region: &str, workers: usize) -> Option<Vec<&str>> {
+    let target_chunks =
+        (workers * CHUNKS_PER_WORKER).min(region.len() / MIN_CHUNK_BYTES).max(workers);
     let mut bounds = vec![0usize];
     for k in 1..target_chunks {
         let target = region.len() * k / target_chunks;
@@ -179,26 +180,26 @@ fn cut_chunks(region: &str, n: usize) -> Option<Vec<&str>> {
     Some(bounds.windows(2).map(|w| &region[w[0]..w[1]]).collect())
 }
 
-/// Parses each chunk into its own [`Builder`] on a pool of `n` worker threads
-/// stealing chunks from a shared counter, all of them interning into
+/// Parses each chunk into its own [`Builder`] on a pool of up to `workers`
+/// threads stealing chunks from a shared counter, all of them interning into
 /// `interner`, and returns the builders in array order. `None` if any chunk
 /// fails to parse.
 fn parse_chunks_on_workers(
     chunks: &[&str],
-    n: usize,
+    workers: usize,
     interner: &ConcurrentInterner,
     prefault_bytes: usize,
 ) -> Option<Vec<Builder>> {
     let next = std::sync::atomic::AtomicUsize::new(0);
-    let workers = n.min(chunks.len());
+    let spawned = workers.min(chunks.len());
     let parsed: Vec<(usize, Option<Builder>)> = std::thread::scope(|scope| {
-        let handles: Vec<_> = (0..workers)
+        let handles: Vec<_> = (0..spawned)
             .map(|shard| {
                 let next = &next;
                 scope.spawn(move || {
                     // Fault this worker's arena share up front, in parallel
                     // with the others, before entering the steal loop.
-                    interner.prefault_shard(shard, workers, prefault_bytes);
+                    interner.prefault_shard(shard, spawned, prefault_bytes);
                     let mut writer = interner.writer();
                     let mut parsed = Vec::new();
                     let mut args_cap = 0;
@@ -240,22 +241,23 @@ fn seal_chunks(
     seal(interner, merge, other_data)
 }
 
-/// Parses the `traceEvents` array of `text` into a profile on `n` workers.
-/// `min_bytes` is the array size below which it declines; it also returns
-/// `None` for an array it cannot locate or split, and for a chunk that fails to
-/// parse.
-pub(crate) fn parse_chunks(text: &str, n: usize, min_bytes: usize) -> Option<Profile> {
+/// Parses the `traceEvents` array of `text` into a profile on `workers`
+/// threads. `min_bytes` is the array size below which it declines; it also
+/// returns `None` for an array it cannot locate or split, and for a chunk that
+/// fails to parse.
+pub(crate) fn parse_chunks(text: &str, workers: usize, min_bytes: usize) -> Option<Profile> {
     let EventRegion { head, events, tail } = locate_event_region(text)?;
     if events.len() < min_bytes {
         return None;
     }
-    let chunks = cut_chunks(events, n)?;
+    let chunks = cut_chunks(events, workers)?;
     // Every worker interns into this one arena, so a builder's handles are
     // global and merging never rebases them.
     let interner = ConcurrentInterner::new(events.len(), events.len() / BYTES_PER_DISTINCT);
     let prefault_bytes = intern_prefault_bytes(events.len());
-    let builders =
-        timed("  parse chunks", || parse_chunks_on_workers(&chunks, n, &interner, prefault_bytes))?;
+    let builders = timed("  parse chunks", || {
+        parse_chunks_on_workers(&chunks, workers, &interner, prefault_bytes)
+    })?;
     Some(timed("  assemble", || seal_chunks(interner, builders, head, tail)))
 }
 
