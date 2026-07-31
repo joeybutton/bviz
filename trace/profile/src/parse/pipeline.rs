@@ -176,11 +176,54 @@ fn cut_chunks(region: &str, n: usize) -> Option<Vec<&str>> {
     Some(bounds.windows(2).map(|w| &region[w[0]..w[1]]).collect())
 }
 
-/// Parses the `traceEvents` array into a profile across `n` worker threads
-/// pulling chunks of it from a shared queue, then assembles the builders in
-/// array order. `min_bytes` gates the array size below which it
-/// declines. Returns `None` if the array can't be located, no split yields more
-/// than one chunk, or any chunk fails to parse.
+/// Parses each chunk into its own [`Builder`] on a pool of `n` worker threads
+/// stealing chunks from a shared counter, all of them interning into
+/// `interner`, and returns the builders in array order. `None` if any chunk
+/// fails to parse.
+fn parse_chunks_on_workers(
+    chunks: &[&str],
+    n: usize,
+    interner: &ConcurrentInterner,
+    prefault_bytes: usize,
+) -> Option<Vec<Builder>> {
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let workers = n.min(chunks.len());
+    let parsed: Vec<(usize, Option<Builder>)> = std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..workers)
+            .map(|shard| {
+                let next = &next;
+                scope.spawn(move || {
+                    // Fault this worker's arena share up front, in parallel
+                    // with the others, before entering the steal loop.
+                    interner.prefault_shard(shard, workers, prefault_bytes);
+                    let mut writer = interner.writer();
+                    let mut parsed = Vec::new();
+                    let mut args_cap = 0;
+                    loop {
+                        let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        let Some(&chunk) = chunks.get(i) else { break };
+                        let builder = parse_chunk(chunk, &mut writer, &mut args_cap);
+                        parsed.push((i, builder));
+                    }
+                    parsed
+                })
+            })
+            .collect();
+        handles.into_iter().flat_map(|h| h.join().unwrap()).collect()
+    });
+    // Chunks were stolen out of order; restore array order for the merge.
+    let mut builders: Vec<Option<Builder>> = Vec::new();
+    builders.resize_with(chunks.len(), || None);
+    for (i, b) in parsed {
+        builders[i] = b;
+    }
+    builders.into_iter().collect()
+}
+
+/// Parses the `traceEvents` array of `text` into a profile on `n` workers.
+/// `min_bytes` is the array size below which it declines; it also returns
+/// `None` for an array it cannot locate or split, and for a chunk that fails to
+/// parse.
 pub(crate) fn parse_chunks(text: &str, n: usize, min_bytes: usize) -> Option<Profile> {
     let EventRegion { head, events, tail } = locate_event_region(text)?;
     if events.len() < min_bytes {
@@ -194,44 +237,8 @@ pub(crate) fn parse_chunks(text: &str, n: usize, min_bytes: usize) -> Option<Pro
     // the region's byte length.
     let interner = ConcurrentInterner::new(events.len(), events.len() / BYTES_PER_DISTINCT);
     let prefault_bytes = intern_prefault_bytes(events.len());
-    let builders: Vec<Option<Builder>> = timed("  parse chunks", || {
-        let next = std::sync::atomic::AtomicUsize::new(0);
-        let interner = &interner;
-        let workers = n.min(chunks.len());
-        let parsed: Vec<(usize, Option<Builder>)> = std::thread::scope(|scope| {
-            let handles: Vec<_> = (0..workers)
-                .map(|shard| {
-                    let next = &next;
-                    let chunks = &chunks;
-                    scope.spawn(move || {
-                        // Fault this worker's arena share up front, in parallel
-                        // with the others, before entering the steal loop.
-                        interner.prefault_shard(shard, workers, prefault_bytes);
-                        let mut writer = interner.writer();
-                        let mut parsed = Vec::new();
-                        let mut args_cap = 0;
-                        loop {
-                            let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                            let Some(&chunk) = chunks.get(i) else { break };
-                            let builder = parse_chunk(chunk, &mut writer, &mut args_cap);
-                            parsed.push((i, builder));
-                        }
-                        parsed
-                    })
-                })
-                .collect();
-            handles.into_iter().flat_map(|h| h.join().unwrap()).collect()
-        });
-        // Chunks were stolen out of order; restore array order for the merge.
-        let mut builders: Vec<Option<Builder>> = Vec::new();
-        builders.resize_with(chunks.len(), || None);
-        for (i, b) in parsed {
-            builders[i] = b;
-        }
-        builders
-    });
-
-    let builders: Vec<Builder> = builders.into_iter().collect::<Option<_>>()?;
+    let builders =
+        timed("  parse chunks", || parse_chunks_on_workers(&chunks, n, &interner, prefault_bytes))?;
     if builders.is_empty() {
         return None;
     }
