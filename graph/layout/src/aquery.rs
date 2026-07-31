@@ -78,43 +78,72 @@ pub(crate) fn build_with_packages(
     let mut graph = Graph::new();
     let hierarchy = PackageHierarchy::build(packages, &mut graph, names);
 
-    let source_nodes: HashSet<Id> = HashSet::new();
-    // Per produced artifact, the leaf node that represents it.
-    let mut producer_node_id: HashMap<ArtifactId, Id> = HashMap::new();
+    let producer_node_id =
+        build_action_boxes(&index, &hierarchy, labeled_outputs, &mut graph, names);
+    wire_action_inputs(
+        index,
+        producer_node_id,
+        &hierarchy,
+        external_sources,
+        &mut graph,
+        names,
+    );
 
-    // Pass 1: actions and the output artifacts they produce.
-    {
-        let mut boxes = Boxes {
-            graph: &mut graph,
-            names: &mut *names,
-            hierarchy: &hierarchy,
-            index: &index,
-            labeled_outputs,
-            targets: HashSet::new(),
-            configured: HashSet::new(),
-        };
-        for (i, action) in index.actions.iter().enumerate() {
-            let config_id = ConfigId(action.configuration_id);
-            let rule_label = index
-                .target_by_id
-                .get(&action.target_id)
-                .map(|t| t.label.clone())
-                .unwrap_or_else(|| format!("target {}", action.target_id));
-            let ct_id = boxes.target_ct(&rule_label, Kind::Target, config_id);
-            let action_id = boxes.names.intern(&format!("action{i}"));
-            boxes
-                .graph
-                .add_node(action_id, action.mnemonic.clone(), Kind::Action, Some(ct_id));
-            for &out in &action.output_ids {
-                let out = ArtifactId(out);
-                let art_id = boxes.output_artifact(out, ct_id, config_id);
-                producer_node_id.insert(out, art_id);
-                boxes.graph.add_edge(action_id, art_id, EdgeKind::Aquery);
-            }
+    graph
+}
+
+/// Creates the box of the configured target each action belongs to, the action's
+/// own node, and a node per artifact it outputs, returning the node that
+/// represents each produced artifact.
+fn build_action_boxes(
+    index: &Index,
+    hierarchy: &PackageHierarchy,
+    labeled_outputs: &HashSet<String>,
+    graph: &mut Graph,
+    names: &mut Names,
+) -> HashMap<ArtifactId, Id> {
+    let mut producer_node_id: HashMap<ArtifactId, Id> = HashMap::new();
+    let mut boxes = Boxes {
+        graph,
+        names,
+        hierarchy,
+        index,
+        labeled_outputs,
+        targets: HashSet::new(),
+        configured: HashSet::new(),
+    };
+    for (i, action) in index.actions.iter().enumerate() {
+        let config_id = ConfigId(action.configuration_id);
+        let rule_label = index
+            .target_by_id
+            .get(&action.target_id)
+            .map(|t| t.label.clone())
+            .unwrap_or_else(|| format!("target {}", action.target_id));
+        let ct_id = boxes.target_ct(&rule_label, Kind::Target, config_id);
+        let action_id = boxes.names.intern(&format!("action{i}"));
+        boxes
+            .graph
+            .add_node(action_id, action.mnemonic.clone(), Kind::Action, Some(ct_id));
+        for &out in &action.output_ids {
+            let out = ArtifactId(out);
+            let art_id = boxes.output_artifact(out, ct_id, config_id);
+            producer_node_id.insert(out, art_id);
+            boxes.graph.add_edge(action_id, art_id, EdgeKind::Aquery);
         }
     }
+    producer_node_id
+}
 
-    // Pass 2: wire each action's inputs, flattening its depsets into direct edges.
+/// Wires each action's inputs onto its node, flattening the action's input
+/// depsets into direct edges.
+fn wire_action_inputs(
+    index: Index,
+    producer_node_id: HashMap<ArtifactId, Id>,
+    hierarchy: &PackageHierarchy,
+    external_sources: bool,
+    graph: &mut Graph,
+    names: &mut Names,
+) {
     let Index {
         actions,
         paths,
@@ -123,8 +152,8 @@ pub(crate) fn build_with_packages(
     } = index;
     let mut wiring = Wiring {
         seen_edge: HashSet::new(),
-        source_nodes,
-        hierarchy: &hierarchy,
+        source_nodes: HashSet::new(),
+        hierarchy,
         producer_node_id,
         depset_by_id,
         paths,
@@ -135,11 +164,9 @@ pub(crate) fn build_with_packages(
         let action_id = names.intern(&format!("action{i}"));
         let mut visited: HashSet<u32> = HashSet::new();
         for &dep_set_id in &action.input_dep_set_ids {
-            wiring.wire(dep_set_id, action_id, &mut visited, &mut graph, names);
+            wiring.wire(dep_set_id, action_id, &mut visited, graph, names);
         }
     }
-
-    graph
 }
 
 /// The by-id artifact and path-fragment lookups, paired so an artifact's
@@ -188,10 +215,9 @@ impl<'a> Index<'a> {
     }
 }
 
-/// Pass-1 box creation: builds the target, configured-target, and artifact
-/// boxes into `graph`, deduping repeats through `targets`/`configured` and
-/// resolving names and paths through `index` and `hierarchy`. A generated
-/// output whose label is in `labeled_outputs` is promoted to its own box.
+/// Mutable state threaded through box creation: the ids of the boxes already
+/// added, so a target or configured target that several actions share is
+/// created once.
 struct Boxes<'a> {
     graph: &'a mut Graph,
     names: &'a mut Names,
