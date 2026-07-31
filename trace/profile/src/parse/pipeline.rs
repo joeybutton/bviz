@@ -257,8 +257,6 @@ pub(crate) fn parse_chunks(text: &str, workers: usize, min_bytes: usize) -> Opti
         return None;
     }
     let chunks = cut_chunks(events, workers)?;
-    // Every worker interns into this one arena, so a builder's handles are
-    // global and merging never rebases them.
     let interner = ConcurrentInterner::new(events.len(), events.len() / BYTES_PER_DISTINCT);
     let prefault_bytes = intern_prefault_bytes(events.len());
     let builders = timed("  parse chunks", || {
@@ -703,9 +701,6 @@ fn parse_gz_stream_from(
     chunk_bytes: usize,
     decoded_size: usize,
 ) -> Option<Profile> {
-    // Every worker interns into this one arena, so a builder's handles are
-    // global and the merger never rebases them. The distinct pool is bounded by
-    // the decoded size the ISIZE trailer declares.
     let interner = ConcurrentInterner::new(decoded_size, decoded_size / BYTES_PER_DISTINCT);
     let (ends, merged) = decode_parse_fold(reader, &interner, workers, chunk_bytes, decoded_size);
     let ends = ends?;
