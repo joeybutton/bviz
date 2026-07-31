@@ -16,6 +16,11 @@ build:profile --@rules_rs_rules_rust//rust/settings:extra_rustc_flag=-Cdebuginfo
 build:profile --@rules_rs_rules_rust//rust/settings:extra_rustc_flag=-Cforce-frame-pointers=yes
 build:profile --@rules_rs_rules_rust//rust/settings:extra_rustc_flag=-Cstrip=none
 
+build:bazel_profile --noslim_profile
+build:bazel_profile --record_full_profiler_data
+build:bazel_profile --experimental_profile_include_target_label
+build:bazel_profile --experimental_profile_include_target_configuration
+
 # Remote cache configuration.
 import %workspace%/.bazelrc.remote
 
