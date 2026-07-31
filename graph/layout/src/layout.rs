@@ -160,13 +160,7 @@ fn build_elk_graph<'g>(
     (root, elk_of)
 }
 
-/// Routes one ELK edge per ordered node pair, collapsing the parallel provenance
-/// edges between the same two boxes into a single route: the parallel
-/// query/cquery/aquery edges would each cost ELK a full route, and that edge count
-/// is what dominates layout time on a dense view. The distinct kinds per pair ride
-/// along so the renderer can still draw each along the shared route.
-/// A graph edge ELK has routed: the ELK edge carrying the polyline, the kinds
-/// the endpoint pair represents, and the endpoints' node ids.
+/// A node pair ELK routes, and the edge kinds that share the route.
 struct RoutedEdge {
     edge: ElkEdgeRef,
     kinds: Vec<EdgeKind>,
@@ -174,6 +168,11 @@ struct RoutedEdge {
     to: Id,
 }
 
+/// Routes one ELK edge per ordered node pair, collapsing the parallel provenance
+/// edges between the same two boxes into a single route: the parallel
+/// query/cquery/aquery edges would each cost ELK a full route, and that edge count
+/// is what dominates layout time on a dense view. The distinct kinds per pair ride
+/// along so the renderer can still draw each along the shared route.
 fn route_edges(
     graph: &Graph,
     elk_of: &HashMap<Id, ElkNodeRef>,

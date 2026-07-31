@@ -122,17 +122,18 @@ pub(crate) fn paint_boxes(
         .collect()
 }
 
-/// Snapshots each connector's polyline, provenance kinds, and whether the
-/// dimming fades it, owned so the `'static` paint closure needs no borrow of the
-/// graph.
-/// A connector ready to paint: the routed polyline in graph coordinates, the
-/// edge kinds sharing it, and whether the hover dimming applies to it.
+/// A connector ready to paint, owned so the `'static` paint closure needs no
+/// borrow of the graph.
 pub(crate) struct PaintConnector {
+    /// The routed polyline, in graph coordinates.
     pub(crate) points: Vec<(f64, f64)>,
+    /// The edge kinds sharing the route, drawn as parallel lanes along it.
     pub(crate) kinds: Vec<EdgeKind>,
+    /// Whether the hover dimming fades this connector.
     pub(crate) dim: bool,
 }
 
+/// Snapshots each of the graph's connectors for the painter.
 pub(crate) fn collect_connectors(g: &LaidOut, dimming: &Dimming) -> Vec<PaintConnector> {
     g.connectors
         .iter()
