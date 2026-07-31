@@ -40,7 +40,14 @@ use crate::intern::Id;
 /// default thoroughness, so their layouts are unaffected.
 const DENSE_ROUTED_EDGES: usize = 1000;
 
-const LEAF_HEIGHT: f64 = 30.0;
+/// Above this many edges one flat frame is a tangle whose long edges become
+/// chains of dummy nodes, and balancing those by network simplex runs orders of
+/// magnitude longer than the rest of the layout together. Such a frame places by
+/// the simple strategy, which fills each layer left to right in time linear in
+/// the frame, and on a tangle lands narrower than the balanced placement does.
+const TANGLED_FRAME_EDGES: usize = 500;
+
+pub(crate) const LEAF_HEIGHT: f64 = 30.0;
 const CHAR_WIDTH: f64 = 7.0;
 const LABEL_PADDING: f64 = 22.0;
 /// Horizontal space (in layout pixels, pre-zoom) reserved on an expandable leaf
@@ -48,8 +55,20 @@ const LABEL_PADDING: f64 = 22.0;
 pub const CARET_RESERVE: f64 = 12.0;
 /// Inset reserved at the top of each container for its title; the other three
 /// sides keep a uniform border.
-const LABEL_BAND: f64 = 26.0;
-const BORDER: f64 = 12.0;
+pub(crate) const LABEL_BAND: f64 = 26.0;
+pub(crate) const BORDER: f64 = 12.0;
+
+/// Width of a leaf box holding `label`. Every leaf reserves the caret space,
+/// expandable or not, which also keeps plain leaves from crowding their labels.
+pub(crate) fn leaf_width(label: &str) -> f64 {
+    label.chars().count() as f64 * CHAR_WIDTH + LABEL_PADDING + CARET_RESERVE
+}
+
+/// Width a container needs for its bold, centered title to sit clear of the
+/// rounded corners and border.
+pub(crate) fn title_width(label: &str) -> f64 {
+    label.chars().count() as f64 * CHAR_WIDTH + LABEL_PADDING + 2.0 * BORDER
+}
 
 /// A laid-out box in absolute coordinates, top-left origin.
 pub struct Box {
@@ -82,6 +101,7 @@ pub struct Connector {
 
 #[derive(Default)]
 pub struct LaidOut {
+    /// Parent before child, so a renderer draws a container under its children.
     pub boxes: Vec<Box>,
     pub connectors: Vec<Connector>,
     /// Every connected node pair in the view before any edges were dropped for
@@ -93,8 +113,6 @@ pub struct LaidOut {
 }
 
 pub fn layout(graph: &Graph) -> LaidOut {
-    initialize_plain_java_layout();
-
     let children_of = children_by_parent(graph);
     let (root, elk_of) = build_elk_graph(graph, &children_of);
     let edges = route_edges(graph, &elk_of, &root);
@@ -118,8 +136,92 @@ pub fn layout(graph: &Graph) -> LaidOut {
     }
 }
 
+/// A root graph laying the dependency flow out top-to-bottom through ELK's
+/// layered algorithm, so a node sits below the inputs it consumes.
+fn layered_root() -> ElkNodeRef {
+    initialize_plain_java_layout();
+    let root = ElkGraphUtil::create_graph();
+    set_property(&root, CoreOptions::ALGORITHM, "org.eclipse.elk.layered".to_string());
+    set_property(&root, CoreOptions::DIRECTION, Direction::Down);
+    apply_options(&root);
+    root
+}
+
+/// A box's top-left corner within the frame that laid it out.
+pub(crate) struct Placement {
+    pub id: Id,
+    pub x: f64,
+    pub y: f64,
+}
+
+/// Lays out sized boxes and their edges as one flat graph, returning each box's
+/// position within the frame and the frame's own size.
+pub(crate) fn layout_flat(
+    boxes: &[(Id, f64, f64)],
+    edges: &[(Id, Id)],
+) -> (Vec<Placement>, f64, f64) {
+    // A frame of one box has nothing to decide, and such frames are the bulk of
+    // a containment forest.
+    if let [(id, width, height)] = *boxes {
+        return (vec![Placement { id, x: 0.0, y: 0.0 }], width, height);
+    }
+    if boxes.is_empty() {
+        return (Vec::new(), 0.0, 0.0);
+    }
+
+    let root = layered_root();
+    // A frame is one of many that make up a drawing, so it gets the single sweep
+    // that DENSE_ROUTED_EDGES reserves for a dense view.
+    set_property(&root, LayeredOptions::THOROUGHNESS, 1);
+    if edges.len() > TANGLED_FRAME_EDGES {
+        set_property(
+            &root,
+            LayeredOptions::NODE_PLACEMENT_STRATEGY,
+            NodePlacementStrategy::Simple,
+        );
+    }
+
+    let mut elk_of: HashMap<Id, ElkNodeRef> = HashMap::with_capacity(boxes.len());
+    for &(id, width, height) in boxes {
+        let elk = ElkGraphUtil::create_node(Some(root.clone()));
+        elk.borrow_mut().connectable().shape().set_dimensions(width, height);
+        elk_of.insert(id, elk);
+    }
+    for (from, to) in edges {
+        ElkGraphUtil::create_simple_edge(
+            ElkConnectableShapeRef::Node(elk_of[from].clone()),
+            ElkConnectableShapeRef::Node(elk_of[to].clone()),
+        );
+    }
+
+    let mut engine = RecursiveGraphLayoutEngine::new();
+    let mut monitor = BasicProgressMonitor::new();
+    engine.layout(&root, &mut monitor);
+
+    // ELK insets the graph by its own padding; anchoring at the boxes' own
+    // extent leaves the frame's size to the caller alone.
+    let placed: Vec<(Id, f64, f64, f64, f64)> = boxes
+        .iter()
+        .map(|&(id, ..)| {
+            let (x, y) = origin(&elk_of[&id]);
+            let (width, height) = dimensions(&elk_of[&id]);
+            (id, x, y, width, height)
+        })
+        .collect();
+    let left = placed.iter().map(|p| p.1).fold(f64::INFINITY, f64::min);
+    let top = placed.iter().map(|p| p.2).fold(f64::INFINITY, f64::min);
+    let width = placed.iter().map(|p| p.1 + p.3).fold(0.0, f64::max) - left;
+    let height = placed.iter().map(|p| p.2 + p.4).fold(0.0, f64::max) - top;
+
+    let placements = placed
+        .into_iter()
+        .map(|(id, x, y, ..)| Placement { id, x: x - left, y: y - top })
+        .collect();
+    (placements, width, height)
+}
+
 /// Children indexed by parent id; a node that appears as a key is a container.
-fn children_by_parent(graph: &Graph) -> HashMap<Id, Vec<&Node>> {
+pub(crate) fn children_by_parent(graph: &Graph) -> HashMap<Id, Vec<&Node>> {
     let mut children_of: HashMap<Id, Vec<&Node>> = HashMap::new();
     for node in &graph.nodes {
         if let Some(parent) = node.parent {
@@ -137,14 +239,10 @@ fn build_elk_graph<'g>(
     graph: &'g Graph,
     children_of: &HashMap<Id, Vec<&'g Node>>,
 ) -> (ElkNodeRef, HashMap<Id, ElkNodeRef>) {
-    // Lay the dependency flow out top-to-bottom and route every edge through the
-    // single hierarchy-spanning layered pass, so a node sits below the inputs it
-    // consumes and cross-container edges run orthogonally between subgraphs.
-    let root = ElkGraphUtil::create_graph();
-    set_property(&root, CoreOptions::ALGORITHM, "org.eclipse.elk.layered".to_string());
-    set_property(&root, CoreOptions::DIRECTION, Direction::Down);
+    // Routing every edge through one hierarchy-spanning layered pass runs the
+    // cross-container edges orthogonally between subgraphs.
+    let root = layered_root();
     set_property(&root, CoreOptions::HIERARCHY_HANDLING, HierarchyHandling::IncludeChildren);
-    apply_options(&root);
 
     let mut elk_of: HashMap<Id, ElkNodeRef> = HashMap::new();
     for node in &graph.nodes {
@@ -235,8 +333,7 @@ fn node_depths(graph: &Graph) -> HashMap<Id, usize> {
     depth_of
 }
 
-/// Reads each node's laid-out box in absolute coordinates, ordered
-/// parent-before-child so a renderer can draw containers under their children.
+/// Reads each node's laid-out box in absolute coordinates.
 fn collect_boxes(
     graph: &Graph,
     children_of: &HashMap<Id, Vec<&Node>>,
@@ -301,18 +398,14 @@ fn build_node<'g>(
                 CoreOptions::PADDING,
                 ElkPadding::with_values(LABEL_BAND, BORDER, BORDER, BORDER),
             );
-            // ELK sizes a container to its children; widen the floor to the
-            // bold, centered title so a title wider than the children does not
-            // overflow the box. The extra 2*BORDER keeps it clear of the
-            // rounded corners and border.
+            // ELK sizes a container to its children; the title floor keeps a
+            // title wider than the children from overflowing the box.
             //
             // The layered algorithm always lays out left-to-right internally and
             // rotates the result into DIRECTION; for the Down direction used here
             // the container's minimum size is consumed in that pre-rotation frame
             // and never transposed back, so the title width goes in y to land on
             // the box's output width.
-            let title_width =
-                node.label.chars().count() as f64 * CHAR_WIDTH + LABEL_PADDING + 2.0 * BORDER;
             set_property(
                 &elk,
                 CoreOptions::NODE_SIZE_CONSTRAINTS,
@@ -321,23 +414,17 @@ fn build_node<'g>(
             set_property(
                 &elk,
                 CoreOptions::NODE_SIZE_MINIMUM,
-                KVector { x: 0.0, y: title_width },
+                KVector { x: 0.0, y: title_width(&node.label) },
             );
             for kid in kids {
                 build_node(kid, &elk, children_of, elk_of);
             }
         }
         None => {
-            // Every leaf reserves room for a disclosure caret left of the label:
-            // the renderer draws one on any expandable box (a collapsed container
-            // or group), and the uniform reserve also keeps plain leaves from
-            // crowding their labels.
-            let width =
-                node.label.chars().count() as f64 * CHAR_WIDTH + LABEL_PADDING + CARET_RESERVE;
             elk.borrow_mut()
                 .connectable()
                 .shape()
-                .set_dimensions(width, LEAF_HEIGHT);
+                .set_dimensions(leaf_width(&node.label), LEAF_HEIGHT);
         }
     }
     elk_of.insert(node.id, elk);
@@ -388,14 +475,17 @@ fn dimensions(node: &ElkNodeRef) -> (f64, f64) {
     (shape.width(), shape.height())
 }
 
+/// A node's top-left within its parent.
+fn origin(node: &ElkNodeRef) -> (f64, f64) {
+    let mut node = node.borrow_mut();
+    let shape = node.connectable().shape();
+    (shape.x(), shape.y())
+}
+
 /// A node's absolute top-left: its parent-relative position plus the absolute
 /// origin of its parent, accumulated up to the root.
 fn absolute_origin(node: &ElkNodeRef) -> (f64, f64) {
-    let (x, y) = {
-        let mut node = node.borrow_mut();
-        let shape = node.connectable().shape();
-        (shape.x(), shape.y())
-    };
+    let (x, y) = origin(node);
     match node.borrow().parent() {
         Some(parent) => {
             let (px, py) = absolute_origin(&parent);

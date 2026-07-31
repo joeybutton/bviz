@@ -8,6 +8,8 @@ name = "bviz_graph_layout"
 path = "src/lib.rs"
 
 [dependencies]
+bviz_parallel = { workspace = true }
+rayon = { workspace = true }
 org-eclipse-elk-alg-layered = { workspace = true }
 org-eclipse-elk-core = { workspace = true }
 org-eclipse-elk-graph = { workspace = true }

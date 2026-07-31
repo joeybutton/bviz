@@ -20,16 +20,22 @@ use crate::intern::Id;
 /// Returns `graph` with the same nodes but only the edges of a transitive
 /// reduction.
 pub fn transitive_reduction(graph: &Graph) -> Graph {
+    reduced(graph.clone())
+}
+
+/// [`transitive_reduction`] of a graph the caller is done with, which spares the
+/// copy of its nodes.
+pub fn reduced(graph: Graph) -> Graph {
     match dag_reduction(graph) {
-        Some(reduced) => reduced,
-        None => iterative_reduction(graph),
+        Ok(reduced) => reduced,
+        Err(cyclic) => iterative_reduction(cyclic),
     }
 }
 
 /// Transitive reduction of a DAG: the redundant pairs are those whose target is
-/// reachable from another of the source's successors. `None` if a cycle is found
-/// (no topological order), so the caller can fall back.
-fn dag_reduction(graph: &Graph) -> Option<Graph> {
+/// reachable from another of the source's successors. A cycle leaves no
+/// topological order, and hands `graph` back for the caller to fall back with.
+fn dag_reduction(graph: Graph) -> Result<Graph, Graph> {
     let mut index: HashMap<Id, u32> = HashMap::with_capacity(graph.nodes.len());
     for node in &graph.nodes {
         let next = index.len() as u32;
@@ -49,10 +55,12 @@ fn dag_reduction(graph: &Graph) -> Option<Graph> {
         indeg[v as usize] += 1;
     }
 
-    let order = topo_order(&succ, indeg)?;
+    let Some(order) = topo_order(&succ, indeg) else {
+        return Err(graph);
+    };
     let redundant = redundant_pairs(&order, &succ);
 
-    let mut out = graph.clone();
+    let mut out = graph;
     out.edges.retain(|e| {
         e.from == e.to
             || match (index.get(&e.from), index.get(&e.to)) {
@@ -60,7 +68,7 @@ fn dag_reduction(graph: &Graph) -> Option<Graph> {
                 _ => true,
             }
     });
-    Some(out)
+    Ok(out)
 }
 
 /// Kahn's algorithm over the successor adjacency; `None` when a leftover node
@@ -117,7 +125,7 @@ fn redundant_pairs(order: &[u32], succ: &[Vec<u32>]) -> HashSet<(u32, u32)> {
 /// Cycle-tolerant reduction: drop a pair only while its endpoints stay linked
 /// through the pairs kept so far, visiting pairs in a fixed order for a
 /// deterministic result.
-fn iterative_reduction(graph: &Graph) -> Graph {
+fn iterative_reduction(graph: Graph) -> Graph {
     let mut pairs: BTreeSet<(Id, Id)> =
         graph.edges.iter().filter(|e| e.from != e.to).map(|e| (e.from, e.to)).collect();
     let mut succ: HashMap<Id, HashSet<Id>> = HashMap::new();
@@ -132,7 +140,7 @@ fn iterative_reduction(graph: &Graph) -> Graph {
             succ.get_mut(&u).unwrap().insert(v);
         }
     }
-    let mut out = graph.clone();
+    let mut out = graph;
     out.edges.retain(|e| e.from == e.to || pairs.contains(&(e.from, e.to)));
     out
 }
@@ -272,7 +280,7 @@ mod tests {
         let refs: Vec<(&str, &str)> = owned.iter().map(|(a, b)| (a.as_str(), b.as_str())).collect();
         let (g, n) = build(&refs);
         // The fast path must apply (the graph is acyclic).
-        assert!(dag_reduction(&g).is_some());
+        assert!(dag_reduction(g.clone()).is_ok());
         let e = kept(&transitive_reduction(&g), &n);
         let chain: HashSet<(String, String)> =
             (0..len - 1).map(|i| (format!("n{i:03}"), format!("n{:03}", i + 1))).collect();
@@ -286,6 +294,9 @@ mod tests {
         let owned = long_chain_with_skips(70);
         let refs: Vec<(&str, &str)> = owned.iter().map(|(a, b)| (a.as_str(), b.as_str())).collect();
         let (g, n) = build(&refs);
-        assert_eq!(kept(&dag_reduction(&g).unwrap(), &n), kept(&iterative_reduction(&g), &n));
+        assert_eq!(
+            kept(&dag_reduction(g.clone()).ok().unwrap(), &n),
+            kept(&iterative_reduction(g), &n),
+        );
     }
 }

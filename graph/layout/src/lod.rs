@@ -72,6 +72,22 @@ pub fn collapse(graph: &Graph, expanded: &HashSet<Id>) -> Graph {
     out
 }
 
+/// The node pairs [`collapse`] would leave, without materializing the folded
+/// nodes, for a caller that needs only which boxes stay connected.
+pub fn collapse_edges(graph: &Graph, expanded: &HashSet<Id>) -> HashSet<(Id, Id)> {
+    let indexed = IndexedGraph::new(graph);
+    let rep = indexed.reps(&indexed.expanded_indices(expanded));
+
+    let mut pairs: HashSet<(Id, Id)> = HashSet::with_capacity(indexed.edges.len());
+    for &(from, to, _) in &indexed.edges {
+        let (from, to) = (rep[from as usize], rep[to as usize]);
+        if from != to {
+            pairs.insert((Id(from), Id(to)));
+        }
+    }
+    pairs
+}
+
 /// A startup expansion set: the containers to expand for the largest collapsed
 /// view that fits both `max_nodes` and `max_edges`.
 pub fn default_expansion(graph: &Graph, max_nodes: usize, max_edges: usize) -> HashSet<Id> {
