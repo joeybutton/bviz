@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use bviz_trace_profile::Profile;
 
-use crate::flame::{FlameGraph, FlameLabels, TrackFlamer};
+use crate::flame::{FlameDirection, FlameGraph, FlameMode, TrackFlamer, invert};
 use crate::stats::{StatRow, default_order, stats_from_flame};
 
 /// Everything the UI presents for one flame scope, derived together so a held
@@ -11,6 +11,8 @@ use crate::stats::{StatRow, default_order, stats_from_flame};
 pub struct ScopeAggregate {
     pub flame: FlameGraph,
     /// One row per distinct frame name; unordered, indexed by `default_order`.
+    /// A frame's self time is a property of the profile's own nesting, so the
+    /// rows read the same whichever direction `flame` presents.
     pub stats: Vec<StatRow>,
     /// Indices into `stats` in the default display order (see
     /// [`default_order`]).
@@ -29,10 +31,10 @@ impl ScopeAggregate {
     /// once.
     pub fn build_for_tracks(
         profile: &Arc<Profile>,
-        labels: FlameLabels,
+        mode: FlameMode,
         selected: impl Fn(usize) -> bool + Sync,
     ) -> ScopeAggregate {
-        ScopeAggregate::from_graph(TrackFlamer::new(profile).build(labels, selected))
+        ScopeAggregate::from_graph(TrackFlamer::new(profile).build(mode.labels, selected), mode)
     }
 
     /// Builds a selection's aggregate from an already-scanned [`TrackFlamer`] by
@@ -41,16 +43,23 @@ impl ScopeAggregate {
     /// rebuild across selection changes paying only the merge.
     pub fn build_for_tracks_reusing(
         scan: &TrackFlamer,
-        labels: FlameLabels,
+        mode: FlameMode,
         selected: impl Fn(usize) -> bool + Sync,
     ) -> ScopeAggregate {
-        ScopeAggregate::from_graph(scan.build(labels, selected))
+        ScopeAggregate::from_graph(scan.build(mode.labels, selected), mode)
     }
 
-    fn from_graph(flame: FlameGraph) -> ScopeAggregate {
+    /// Derives the aggregate from the top-down graph `mode.labels` builds,
+    /// inverting it afterwards where `mode.direction` asks for the bottom-up
+    /// presentation.
+    fn from_graph(flame: FlameGraph, mode: FlameMode) -> ScopeAggregate {
         let stats = stats_from_flame(&flame);
         let default_order = default_order(&stats);
         let grand_total = stats.iter().map(|r| r.total_us).sum();
+        let flame = match mode.direction {
+            FlameDirection::TopDown => flame,
+            FlameDirection::BottomUp => invert(flame),
+        };
         ScopeAggregate {
             flame,
             stats,
@@ -158,7 +167,7 @@ mod tests {
         let p = full_profile();
         let t = p.threads();
         let select = |i: usize| t[i].lane_class != LaneClass::CriticalPath;
-        let agg = ScopeAggregate::build_for_tracks(&p, FlameLabels::Mnemonic, select);
+        let agg = ScopeAggregate::build_for_tracks(&p, FlameMode::default(), select);
         let g = &agg.flame;
         let root_total = g.root().total_us;
 
@@ -188,7 +197,7 @@ mod tests {
         // A second build of the same selection is byte-identical.
         assert_eq!(
             g.nodes(),
-            ScopeAggregate::build_for_tracks(&p, FlameLabels::Mnemonic, select)
+            ScopeAggregate::build_for_tracks(&p, FlameMode::default(), select)
                 .flame
                 .nodes()
         );
@@ -197,11 +206,16 @@ mod tests {
     #[test]
     fn empty_track_selection_yields_a_bare_root() {
         let p = full_profile();
-        let agg = ScopeAggregate::build_for_tracks(&p, FlameLabels::Mnemonic, |_| false);
-        // Only the synthetic root, no frames and no rows.
-        assert_eq!(agg.flame.nodes().len(), 1);
-        assert!(agg.stats.is_empty());
-        assert_eq!(agg.grand_total, 0);
+        // Either direction: there is no frame for the inversion to walk out of.
+        for direction in [FlameDirection::TopDown, FlameDirection::BottomUp] {
+            let mode = FlameMode { direction, ..FlameMode::default() };
+            let agg = ScopeAggregate::build_for_tracks(&p, mode, |_| false);
+            // Only the synthetic root, no frames and no rows.
+            assert_eq!(agg.flame.nodes().len(), 1);
+            assert_eq!(agg.flame.root().total_us, 0);
+            assert!(agg.stats.is_empty());
+            assert_eq!(agg.grand_total, 0);
+        }
     }
 
     #[test]
@@ -236,8 +250,8 @@ mod tests {
         };
         for sel in &selections {
             let reused =
-                ScopeAggregate::build_for_tracks_reusing(&scan, FlameLabels::Mnemonic, sel);
-            let fresh = ScopeAggregate::build_for_tracks(&p, FlameLabels::Mnemonic, sel);
+                ScopeAggregate::build_for_tracks_reusing(&scan, FlameMode::default(), sel);
+            let fresh = ScopeAggregate::build_for_tracks(&p, FlameMode::default(), sel);
             assert_eq!(resolved(&reused.flame), resolved(&fresh.flame));
             assert_eq!(
                 resolved_rows(&reused.flame, &reused.stats),
@@ -253,7 +267,7 @@ mod tests {
         let p = full_profile();
         let t = p.threads();
         let class_total = |c: LaneClass| {
-            ScopeAggregate::build_for_tracks(&p, FlameLabels::Mnemonic, move |i| {
+            ScopeAggregate::build_for_tracks(&p, FlameMode::default(), move |i| {
                 t[i].lane_class == c
             })
                 .flame
@@ -269,7 +283,7 @@ mod tests {
         assert_eq!(execution, 210);
         // A selection's root total is additive over disjoint lane sets: the three
         // classes unioned total exactly the sum of the three.
-        let union = ScopeAggregate::build_for_tracks(&p, FlameLabels::Mnemonic, |i| {
+        let union = ScopeAggregate::build_for_tracks(&p, FlameMode::default(), |i| {
             matches!(
                 t[i].lane_class,
                 LaneClass::RepoFetch | LaneClass::Analysis | LaneClass::Execution
@@ -309,7 +323,7 @@ mod tests {
             ),
         ]);
         let t = p.threads();
-        let agg = ScopeAggregate::build_for_tracks(&p, FlameLabels::Mnemonic, |i| {
+        let agg = ScopeAggregate::build_for_tracks(&p, FlameMode::default(), |i| {
             t[i].lane_class == LaneClass::Analysis
         });
         let g = &agg.flame;
@@ -337,7 +351,7 @@ mod tests {
             .map(|(i, k)| slice(k, "generic", i as i64 * 10, 5))
             .collect();
         let p = profile(vec![track(1, LaneClass::Execution, slices)]);
-        let agg = ScopeAggregate::build_for_tracks(&p, FlameLabels::Mnemonic, |_| true);
+        let agg = ScopeAggregate::build_for_tracks(&p, FlameMode::default(), |_| true);
         assert_eq!(agg.stats.len(), keys.len());
         let text_of = |r: &StatRow| agg.flame.str(r.key).to_owned();
         let mut by_rank: Vec<String> = {
@@ -372,7 +386,7 @@ mod tests {
             Box::new(|i: usize| t[i].lane_class == LaneClass::Execution),
         ];
         for sel in &selections {
-            let agg = ScopeAggregate::build_for_tracks(&p, FlameLabels::Mnemonic, sel);
+            let agg = ScopeAggregate::build_for_tracks(&p, FlameMode::default(), sel);
             assert_eq!(agg.default_order.len(), agg.stats.len());
             let keys: Vec<(i64, &str)> = agg
                 .default_order

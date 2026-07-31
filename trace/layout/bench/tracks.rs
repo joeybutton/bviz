@@ -3,11 +3,12 @@
 //! selection (the largest lane, walked serially by one worker) and the all-track
 //! selection (walked in parallel), the two ends the interactive profile exercised,
 //! plus the all-track rebuild from a reused whole-profile scan (`TrackFlamer`),
-//! which is what the view does for every selection after the first.
+//! which is what the view does for every selection after the first, in both the
+//! top-down and the bottom-up presentation.
 
 use std::sync::Arc;
 
-use bviz_trace_layout::{FlameLabels, ScopeAggregate, TrackFlamer};
+use bviz_trace_layout::{FlameDirection, FlameMode, ScopeAggregate, TrackFlamer};
 use bviz_trace_profile::{LaneClass, Profile};
 
 #[global_allocator]
@@ -54,15 +55,15 @@ fn main() {
         .map(|t| profile.slices(t).len())
         .sum();
 
-    // The labelling the view opens on.
-    let labels = FlameLabels::Mnemonic;
+    // The presentation the view opens on.
+    let mode = FlameMode::default();
     let single = min_secs(iters, || {
-        std::hint::black_box(ScopeAggregate::build_for_tracks(&profile, labels, |i| {
+        std::hint::black_box(ScopeAggregate::build_for_tracks(&profile, mode, |i| {
             i == biggest
         }));
     });
     let all = min_secs(iters, || {
-        std::hint::black_box(ScopeAggregate::build_for_tracks(&profile, labels, |i| {
+        std::hint::black_box(ScopeAggregate::build_for_tracks(&profile, mode, |i| {
             threads[i].lane_class != LaneClass::CriticalPath
         }));
     });
@@ -75,13 +76,28 @@ fn main() {
     // this timing is warm: the pure merge every selection change after it costs.
     let scan = TrackFlamer::new(&profile);
     let all_reused = min_secs(iters, || {
-        std::hint::black_box(ScopeAggregate::build_for_tracks_reusing(&scan, labels, |i| {
+        std::hint::black_box(ScopeAggregate::build_for_tracks_reusing(&scan, mode, |i| {
             threads[i].lane_class != LaneClass::CriticalPath
         }));
     });
 
-    let single_agg = ScopeAggregate::build_for_tracks(&profile, labels, |i| i == biggest);
-    let all_agg = ScopeAggregate::build_for_tracks(&profile, labels, |i| {
+    // The same rebuild presented bottom-up, so the gap against `all_reused` is
+    // what inverting a built graph costs.
+    let all_inverted = min_secs(iters, || {
+        std::hint::black_box(ScopeAggregate::build_for_tracks_reusing(
+            &scan,
+            FlameMode { direction: FlameDirection::BottomUp, ..mode },
+            |i| threads[i].lane_class != LaneClass::CriticalPath,
+        ));
+    });
+
+    let bottom_up_agg = ScopeAggregate::build_for_tracks_reusing(
+        &scan,
+        FlameMode { direction: FlameDirection::BottomUp, ..mode },
+        |i| threads[i].lane_class != LaneClass::CriticalPath,
+    );
+    let single_agg = ScopeAggregate::build_for_tracks(&profile, mode, |i| i == biggest);
+    let all_agg = ScopeAggregate::build_for_tracks(&profile, mode, |i| {
         threads[i].lane_class != LaneClass::CriticalPath
     });
     eprintln!(
@@ -99,10 +115,17 @@ fn main() {
         all - all_reused,
     );
     eprintln!(
-        "[bench] single: {} nodes / {} rows;  all: {} nodes / {} rows",
+        "[bench] build_for_tracks_reusing(all, bottom-up): {all_inverted:.3}s  \
+         (inversion adds {:.3}s)",
+        all_inverted - all_reused,
+    );
+    eprintln!(
+        "[bench] single: {} nodes / {} rows;  all: {} nodes / {} rows;  \
+         all bottom-up: {} nodes",
         single_agg.flame.nodes().len(),
         single_agg.stats.len(),
         all_agg.flame.nodes().len(),
         all_agg.stats.len(),
+        bottom_up_agg.flame.nodes().len(),
     );
 }

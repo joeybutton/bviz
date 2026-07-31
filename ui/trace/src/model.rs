@@ -1,7 +1,7 @@
 use crate::groups::{GROUP_ORDER, GroupChrome, build_grouped_layout, default_collapsed_groups};
 use crate::rebuild::Rebuild;
 use crate::{METRICS, Source};
-use bviz_trace_layout::{FlameLabels, LaneLayout, ScopeAggregate, TrackFlamer, lay_out_lanes};
+use bviz_trace_layout::{FlameMode, LaneLayout, ScopeAggregate, TrackFlamer, lay_out_lanes};
 use bviz_trace_profile::{LaneClass, Profile};
 use gpui::{Context, EventEmitter};
 use std::cell::RefCell;
@@ -404,7 +404,7 @@ impl TraceModel {
                     let scan =
                         cached_scan.unwrap_or_else(|| Arc::new(TrackFlamer::new(&profile)));
                     let aggregate =
-                        ScopeAggregate::build_for_tracks_reusing(&scan, FlameLabels::Mnemonic, |i| {
+                        ScopeAggregate::build_for_tracks_reusing(&scan, FlameMode::default(), |i| {
                             selected.get(i).copied().unwrap_or(false)
                         });
                     if std::env::var_os("BVIZ_TRACE_TIMING").is_some() {

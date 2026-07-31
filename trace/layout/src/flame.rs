@@ -263,7 +263,12 @@ fn sort_pairs_by_text(pairs: &mut [(&str, Str)]) {
 /// shares this label at the same place in the time-containment tree. `total_us`
 /// is the summed duration of the spans merged here (each counted once, at its own
 /// node); `self_us` is that minus the children's totals (`max(0, …)`); `count` is
-/// how many spans merged at this node. `width_us` is the layout width
+/// how many spans merged at this node. Under
+/// [`BottomUp`](FlameDirection::BottomUp) a node is instead one step of a caller
+/// chain, and `total_us` and `count` are summed over the contributions that
+/// passed through it — the self time and span count of the frames whose chain
+/// runs through this node — so one frame is counted at every node of its chain.
+/// `width_us` is the layout width
 /// `max(total_us, Σ children.width_us)` — a time-contained child may overflow its
 /// parent's end (Bazel's catch-all frames), so laying out by `width_us` keeps
 /// children inside their parent. `children` is a contiguous range into the
@@ -489,6 +494,34 @@ pub enum FlameLabels {
     /// Every span's own name, so an action frame names its target ("Compiling
     /// //x/y:z") and the tree is the profile's own nesting.
     Name,
+}
+
+/// Which way a flame graph reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum FlameDirection {
+    /// Outward from each action, following the profile's own nesting: a frame's
+    /// children are the frames it contains.
+    TopDown,
+    /// Outward from each frame to its callers: the root's children are the
+    /// frames themselves, each carrying the time spent in it wherever it
+    /// occurs, and depth walks back up the chains that reached it.
+    BottomUp,
+}
+
+/// How a flame graph presents its spans.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct FlameMode {
+    pub direction: FlameDirection,
+    pub labels: FlameLabels,
+}
+
+impl Default for FlameMode {
+    fn default() -> Self {
+        FlameMode {
+            direction: FlameDirection::TopDown,
+            labels: FlameLabels::Mnemonic,
+        }
+    }
 }
 
 /// Resolves each span to its aggregation label. Every frame label is an interned
@@ -882,8 +915,9 @@ fn emit_lane_rows(flamer: &Flamer, labels: FlameLabels, thread: &ThreadTrack, ou
 }
 
 /// A node's place among its siblings: widest first, ties broken by name rank,
-/// then role, then the detail flag. Siblings differ in at least one of the last
-/// three — those are exactly what a key segment encodes — so the order is total.
+/// then role, then the detail flag. A parent holds at most one child per
+/// (label, role, detail) triple and a rank bijects with its label, so two
+/// siblings differ in at least one of the last three and the order is total.
 type ChildOrder = (std::cmp::Reverse<i64>, u32, SpanRole, bool);
 
 /// Sort each node's CSR child range into [`ChildOrder`], using `key[child]` per
@@ -1078,10 +1112,16 @@ fn reconstruct_and_seal(
     }
     arena[0].total_us = root_total;
 
-    // CSR child edges: count per parent, prefix-sum to offsets, then fill from a
-    // per-parent cursor. Ascending-index fill lists each parent's children in
-    // creation order, the pre-sort order [`seal_arena`] reorders widest-first.
-    let n = arena.len();
+    let kids = csr_from_parents(&parents);
+    seal_arena(profile, arena, parents, kids)
+}
+
+/// The CSR child edges of an arena described by its parent array: count children
+/// per parent, prefix-sum to offsets, then fill from a per-parent cursor. The
+/// ascending-index fill lists each parent's children in creation order, the
+/// pre-sort order [`seal_arena`] reorders widest-first.
+fn csr_from_parents(parents: &[u32]) -> ArenaChildren {
+    let n = parents.len();
     let mut child_count = vec![0u32; n];
     for i in 1..n {
         child_count[parents[i] as usize] += 1;
@@ -1097,9 +1137,130 @@ fn reconstruct_and_seal(
         pool[cursor[p] as usize] = i as u32;
         cursor[p] += 1;
     }
-    let kids = ArenaChildren { off, pool };
+    ArenaChildren { off, pool }
+}
 
-    seal_arena(profile, arena, parents, kids)
+/// Identifies a node of the graph under inversion by the edge reaching it: the
+/// node it hangs off plus everything a frame is distinguished by, so equal
+/// caller chains merge into one node.
+#[derive(PartialEq, Eq, Hash)]
+struct InvertedEdge {
+    parent: u32,
+    label: Str,
+    role: SpanRole,
+    detail: bool,
+}
+
+/// An upper bound on the node count of `graph`'s inversion: the summed caller-
+/// chain length over the frames that contribute self time, which is what the
+/// inversion creates when no two chains share a prefix. `parent[i]` is node
+/// `i`'s parent; a node's parent precedes it, so one forward pass threads the
+/// depths the chain lengths are read from.
+fn inverted_node_bound(graph: &FlameGraph, parent: &[u32]) -> usize {
+    let mut depth = vec![0u32; graph.len()];
+    let mut bound = 0usize;
+    for i in 1..graph.len() {
+        depth[i] = depth[parent[i] as usize] + 1;
+        if graph.self_us(i) != 0 {
+            bound += depth[i] as usize;
+        }
+    }
+    bound
+}
+
+/// The bottom-up form of `graph`: each frame's self time travels one path from
+/// the root outward through that frame's callers and accumulates into every node
+/// it passes, so a node's total is the summed self time of the frames whose
+/// caller chain runs through it.
+///
+/// A detail frame trails the chain it breaks out instead of leading it, so a
+/// mnemonic-labelled bottom-up graph reads from a frame outward through its
+/// callers to the target that spent the time.
+///
+/// The root's total is that whole summed self time, which meets the top-down
+/// root's total only where no frame's children overrun it: enclosed spans may
+/// overlap each other, and a frame's self time floors at zero rather than going
+/// negative, so an overrun is charged to the children and subtracted from
+/// nothing.
+pub(crate) fn invert(graph: FlameGraph) -> FlameGraph {
+    let profile = Arc::clone(&graph.profile);
+    let n = graph.len();
+    let mut parent = vec![0u32; n];
+    for i in 0..n {
+        for k in 0..graph.child_count(i) {
+            parent[graph.child_id(i, k)] = i as u32;
+        }
+    }
+    let bound = inverted_node_bound(&graph, &parent);
+
+    let mut arena: Vec<ArenaNode> = Vec::with_capacity(bound + 1);
+    arena.push(ArenaNode {
+        name: ROOT_LABEL,
+        rank: 0,
+        role: SpanRole { workload: Workload::Other, payload: false },
+        detail: false,
+        total_us: 0,
+        count: 0,
+    });
+    // A node is created before any of its children, so indices ascend down every
+    // path — the order [`seal_arena`] threads depth and folds aggregates in.
+    let mut parents: Vec<u32> = Vec::with_capacity(bound + 1);
+    parents.push(u32::MAX);
+    let mut nodes: FxHashMap<InvertedEdge, u32> = FxHashMap::default();
+    nodes.reserve(bound);
+    let mut path: Vec<usize> = Vec::new();
+    let mut root_total = 0i64;
+    for i in 1..n {
+        let contribution = graph.self_us(i);
+        if contribution == 0 {
+            continue;
+        }
+        root_total += contribution;
+        let detail = graph.is_detail(i);
+        path.clear();
+        let mut up = if detail { parent[i] as usize } else { i };
+        while up != 0 {
+            path.push(up);
+            up = parent[up] as usize;
+        }
+        if detail {
+            path.push(i);
+        }
+        let count = graph.count(i);
+        let mut cur = 0u32;
+        for &src in &path {
+            let edge = InvertedEdge {
+                parent: cur,
+                label: graph.name(src),
+                role: graph.role(src),
+                detail: graph.is_detail(src),
+            };
+            cur = *nodes.entry(edge).or_insert_with(|| {
+                let idx = arena.len() as u32;
+                arena.push(ArenaNode {
+                    name: graph.name(src),
+                    rank: graph.rank(src),
+                    role: graph.role(src),
+                    detail: graph.is_detail(src),
+                    total_us: 0,
+                    count: 0,
+                });
+                parents.push(cur);
+                idx
+            });
+            let node = &mut arena[cur as usize];
+            node.total_us += contribution;
+            node.count += count;
+        }
+    }
+    arena[0].total_us = root_total;
+
+    // Neither the edge map nor the source graph is read past the accumulation,
+    // so releasing both here keeps them off the peak the seal reaches.
+    drop(nodes);
+    drop(graph);
+    let kids = csr_from_parents(&parents);
+    seal_arena(&profile, arena, parents, kids)
 }
 
 /// Lay the visible window of the graph into pixels, mirroring the flame chart's
@@ -1277,6 +1438,22 @@ mod tests {
 
     fn flame(p: &Arc<Profile>) -> FlameGraph {
         flame_as(p, FlameLabels::Mnemonic)
+    }
+
+    /// The bottom-up form of [`flame_as`]'s graph.
+    fn inverted_as(p: &Arc<Profile>, labels: FlameLabels) -> FlameGraph {
+        invert(flame_as(p, labels))
+    }
+
+    /// Every child of `node`, as (text, total) pairs sorted by text.
+    fn child_totals(graph: &FlameGraph, node: &FlameNode) -> Vec<(String, i64)> {
+        let mut kids: Vec<(String, i64)> = graph
+            .children(node)
+            .iter()
+            .map(|c| (graph.str(c.name).to_owned(), c.total_us))
+            .collect();
+        kids.sort();
+        kids
     }
 
     const METRICS: FlameMetrics = FlameMetrics { row_height: 10.0 };
@@ -1827,5 +2004,156 @@ mod tests {
         assert_eq!(child(&g, &child(&g, &g.root(), "Rustc"), "Action.execute").depth, 2);
         assert_eq!(flame_height(&g, &METRICS), 40.0);
         assert_eq!(flame_height(&flame_as(&p, FlameLabels::Name), &METRICS), 30.0);
+    }
+
+    #[test]
+    fn inversion_roots_each_frame_and_walks_out_to_its_callers() {
+        // Rustc(0..100) contains Action.execute(0..90) contains
+        // subprocess.run(0..80), so the three frames spend 10, 10 and 80 of
+        // their own. Labelled by name, so each frame is one of those spans.
+        let p = profile(vec![track(
+            1,
+            LaneClass::Execution,
+            vec![
+                action("Rustc", 0, 100),
+                slice("Action.execute", "general information", 0, 90),
+                slice("subprocess.run", "subprocess run", 0, 80),
+            ],
+        )]);
+        let g = inverted_as(&p, FlameLabels::Name);
+        assert_eq!(g.root().total_us, 100);
+        assert_eq!(
+            child_totals(&g, &g.root()),
+            [
+                ("Action.execute".to_owned(), 10),
+                ("Rustc".to_owned(), 10),
+                ("subprocess.run".to_owned(), 80),
+            ]
+        );
+        // The innermost frame's time reads out through both spans that reached it.
+        let sub = child(&g, &g.root(), "subprocess.run");
+        let via_sub = child(&g, &sub, "Action.execute");
+        assert_eq!(via_sub.total_us, 80);
+        let outermost = child(&g, &via_sub, "Rustc");
+        assert_eq!(outermost.total_us, 80);
+        assert!(g.children(&outermost).is_empty());
+        // The middle frame's own time reaches back to its one caller, and the
+        // outermost frame's own time has no caller below it at all.
+        let exec = child(&g, &g.root(), "Action.execute");
+        assert_eq!(child_totals(&g, &exec), [("Rustc".to_owned(), 10)]);
+        assert!(g.children(&child(&g, &g.root(), "Rustc")).is_empty());
+    }
+
+    #[test]
+    fn a_frame_reached_two_ways_merges_at_the_root_and_splits_below() {
+        // "upload inputs" runs under two different actions; bottom-up it is one
+        // frame carrying both, splitting into its two callers one level out.
+        let lane = |mnemonic: &str, upload: i64| {
+            vec![
+                action(mnemonic, 0, 100),
+                slice("upload inputs", "general information", 0, upload),
+            ]
+        };
+        let p = profile(vec![
+            track(1, LaneClass::Execution, lane("Rustc", 30)),
+            track(2, LaneClass::Execution, lane("CppCompile", 40)),
+        ]);
+        let g = inverted_as(&p, FlameLabels::Name);
+        assert_eq!(g.root().total_us, 200);
+        let upload = child(&g, &g.root(), "upload inputs");
+        assert_eq!(upload.total_us, 70);
+        assert_eq!(
+            child_totals(&g, &upload),
+            [("CppCompile".to_owned(), 40), ("Rustc".to_owned(), 30)]
+        );
+    }
+
+    #[test]
+    fn inversion_carries_over_the_whole_graphs_self_time() {
+        let p = profile(vec![
+            track(
+                1,
+                LaneClass::Execution,
+                vec![
+                    action_named("Compiling //a:a", "Rustc", 0, 100),
+                    slice("subprocess.run", "subprocess run", 0, 80),
+                    slice("upload inputs", "general information", 0, 30),
+                    action_named("Compiling //b:b", "Rustc", 200, 60),
+                ],
+            ),
+            track(
+                2,
+                LaneClass::Analysis,
+                vec![
+                    action("CppCompile", 0, 40),
+                    slice("checkOutputs", "general information", 40, 25),
+                ],
+            ),
+            // Two enclosed spans that overlap each other, so together they
+            // overrun what encloses them.
+            track(
+                3,
+                LaneClass::Execution,
+                vec![
+                    action_named("Compiling //c:c", "Rustc", 400, 100),
+                    slice("checkOutputs", "general information", 400, 80),
+                    slice("checkOutputs", "general information", 420, 80),
+                ],
+            ),
+        ]);
+        for labels in [FlameLabels::Mnemonic, FlameLabels::Name] {
+            let top_down = flame_as(&p, labels);
+            let root_total = top_down.root().total_us;
+            let self_sum: i64 = top_down.nodes().iter().map(|n| n.self_us).sum();
+            let g = invert(top_down);
+            assert_eq!(g.root().total_us, self_sum);
+            // And the inverted tree partitions it again: every contribution ends
+            // at exactly one leaf-most caller.
+            assert_eq!(g.nodes().iter().map(|n| n.self_us).sum::<i64>(), self_sum);
+            // The overrunning frame's self time floors at zero instead of
+            // subtracting the overrun, so that summed self time is more than the
+            // top-down root's total and the two roots read differently.
+            assert!(
+                self_sum > root_total,
+                "{labels:?}: self {self_sum} vs root {root_total}"
+            );
+        }
+    }
+
+    #[test]
+    fn inverted_target_details_end_the_path_rather_than_starting_it() {
+        // A Rustc action on //x:y containing subprocess.run: under mnemonic
+        // labelling both frames break their self time out under the target.
+        let p = profile(vec![track(
+            1,
+            LaneClass::Execution,
+            vec![
+                action_named("Compiling //x:y", "Rustc", 0, 100),
+                slice("subprocess.run", "subprocess run", 0, 80),
+            ],
+        )]);
+        let g = inverted_as(&p, FlameLabels::Mnemonic);
+        assert_eq!(
+            child_totals(&g, &g.root()),
+            [("Rustc".to_owned(), 20), ("subprocess.run".to_owned(), 80)]
+        );
+        assert!(
+            (0..g.child_count(0)).all(|k| !g.is_detail(g.child_id(0, k))),
+            "a target detail must never root a bottom-up path"
+        );
+        // The leaf frame's time reads out through its caller to the target,
+        // which ends the path.
+        let sub = child(&g, &g.root(), "subprocess.run");
+        let rustc = child(&g, &sub, "Rustc");
+        assert_eq!(rustc.total_us, 80);
+        let target = child(&g, &rustc, "Compiling //x:y");
+        assert_eq!(target.total_us, 80);
+        assert!(g.children(&target).is_empty());
+        // The action frame's own time ends on the same target one level up.
+        let own = child(&g, &g.root(), "Rustc");
+        assert_eq!(
+            child_totals(&g, &own),
+            [("Compiling //x:y".to_owned(), 20)]
+        );
     }
 }
