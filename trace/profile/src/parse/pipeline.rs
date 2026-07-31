@@ -158,14 +158,20 @@ fn locate_event_region(text: &str) -> Option<EventRegion<'_>> {
 /// Splits `region` into byte chunks for `workers` parse workers, cutting at
 /// the first newline at or after each evenly spaced target: a literal newline
 /// never falls inside a JSON string, so it always lies between two events and a
-/// chunk holds only whole events. `None` when the cuts yield a single chunk,
-/// which leaves nothing to parallelize.
+/// chunk holds only whole events. A target is a byte offset that can land inside
+/// a multi-byte character, so it is advanced to the next character boundary
+/// before the search; every bound then lands one past a newline, and so on a
+/// boundary as well. `None` when the cuts yield a single chunk, which leaves
+/// nothing to parallelize.
 fn cut_chunks(region: &str, workers: usize) -> Option<Vec<&str>> {
     let target_chunks =
         (workers * CHUNKS_PER_WORKER).min(region.len() / MIN_CHUNK_BYTES).max(workers);
     let mut bounds = vec![0usize];
     for k in 1..target_chunks {
-        let target = region.len() * k / target_chunks;
+        let mut target = region.len() * k / target_chunks;
+        while !region.is_char_boundary(target) {
+            target += 1;
+        }
         if let Some(off) = region[target..].find('\n') {
             let cut = target + off + 1;
             if cut > *bounds.last().unwrap() {

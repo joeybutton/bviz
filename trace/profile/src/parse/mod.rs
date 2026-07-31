@@ -494,6 +494,24 @@ mod tests {
     }
 
     #[test]
+    fn multibyte_text_never_splits_a_character() {
+        // The whole-buffer path parses the Latin-1 transcode, in which every
+        // high byte became a two-byte sequence, so a cut target computed from
+        // the region's byte length can land inside a character. This name is
+        // long enough to hold every target.
+        let name = "é".repeat(200);
+        let json = "{\"traceEvents\":[\n".to_string()
+            + &format!(
+                "{{\"cat\":\"c\",\"name\":\"{name}\",\"ph\":\"X\",\"ts\":0,\"dur\":1,\"tid\":1}},\n"
+            )
+            + "{\"cat\":\"c\",\"name\":\"b\",\"ph\":\"X\",\"ts\":1,\"dur\":1,\"tid\":1}\n"
+            + "]}";
+        let serial = parse_streaming(&json).expect("serial");
+        let parallel = parse_chunks(&json, 4, 0).expect("parallel");
+        assert_eq!(semantic(&serial), semantic(&parallel));
+    }
+
+    #[test]
     fn scan_event_reads_a_typical_event() {
         let json = r#"{"cat":"skyframe evaluator","name":"a b","ph":"X","ts":10,"dur":20,"tid":3,"args":{"target":"//a:b","n":4}} ,"#;
         let mut scratch = Vec::new();
