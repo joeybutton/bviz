@@ -9,6 +9,9 @@ use crate::stats::{StatRow, default_order, stats_from_flame};
 /// box, node, or row always resolves its name [`Str`](bviz_trace_profile::Str)
 /// against the graph that produced it.
 pub struct ScopeAggregate {
+    /// The mode this aggregate was built under, so a view presenting it names
+    /// what it is showing rather than what a later rebuild is targeting.
+    pub mode: FlameMode,
     pub flame: FlameGraph,
     /// One row per distinct frame name; unordered, indexed by `default_order`.
     /// A frame's self time is a property of the profile's own nesting, so the
@@ -61,6 +64,7 @@ impl ScopeAggregate {
             FlameDirection::BottomUp => invert(flame),
         };
         ScopeAggregate {
+            mode,
             flame,
             stats,
             default_order,

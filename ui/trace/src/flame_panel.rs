@@ -150,7 +150,8 @@ fn flame_boxes(
 }
 
 /// Paints a tooltip near `at` with the flame node's name and, below it, its total
-/// and self time, occurrence count, and share of the view's aggregated total.
+/// and self time, the number of spans whose time it accounts for, and its share
+/// of the view's aggregated total.
 #[allow(clippy::too_many_arguments)]
 fn paint_flame_tooltip(
     graph: &FlameGraph,
@@ -168,10 +169,11 @@ fn paint_flame_tooltip(
         0.0
     };
     let detail = format!(
-        "total {}, self {}, {}×, {:.1}% of view",
+        "total {}, self {}, {} span{}, {:.1}% of view",
         format_duration(boxed.total_us),
         format_duration(boxed.self_us),
         boxed.count,
+        if boxed.count == 1 { "" } else { "s" },
         pct,
     );
     let lines = [graph.str(boxed.name).to_string(), detail];
@@ -261,10 +263,10 @@ impl FlamePanel {
         self.flame_hover = None;
     }
 
-    /// Resets the panel to the fit-to-window view at the top of the tree, so a
-    /// freshly loaded profile starts from the fit rather than the prior graph's
-    /// zoom and scroll.
-    pub(crate) fn reset_for_new_profile(&mut self) {
+    /// Resets the panel to the fit-to-window view at the top of the tree: a zoom,
+    /// pan, and scroll held for one graph address nothing in a graph whose
+    /// geometry is unrelated to it.
+    pub(crate) fn reset_view(&mut self) {
         self.flame_view = FlameView::FIT;
         self.flame_scroll_y = 0.0;
         self.reset_aggregate_derived();

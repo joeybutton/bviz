@@ -48,9 +48,11 @@ pub(crate) struct TraceModel {
     /// Which groups show every lane rather than the busiest, indexed by
     /// [`GROUP_ORDER`].
     group_show_all: [bool; GROUP_ORDER.len()],
-    /// Bumped whenever `selected_tracks` changes, keying the aggregate build so a
-    /// stale build's result is discarded when the selection moves on.
-    selection_version: u64,
+    flame_mode: FlameMode,
+    /// Bumped whenever an input the aggregate is built from changes — the track
+    /// selection or the flame mode — keying the build so a stale build's result
+    /// is discarded once the inputs have moved on.
+    aggregate_key: u64,
     /// The track a shift-click range-selection extends from, if any.
     select_anchor: Option<usize>,
     /// The lane layout restricted to the visible tracks and restacked into
@@ -72,7 +74,7 @@ pub(crate) struct TraceModel {
     /// selection, so it is dropped only when a new profile loads.
     flame_scan: Option<Arc<TrackFlamer>>,
     /// Background-build bookkeeping for `aggregates`, keyed on
-    /// `selection_version`.
+    /// `aggregate_key`.
     agg: Rebuild<u64>,
 }
 
@@ -87,7 +89,8 @@ impl TraceModel {
             selected_tracks: Vec::new(),
             collapsed_groups: default_collapsed_groups(),
             group_show_all: [false; GROUP_ORDER.len()],
-            selection_version: 0,
+            flame_mode: FlameMode::default(),
+            aggregate_key: 0,
             select_anchor: None,
             visible_lanes: RefCell::new(None),
             group_chrome: RefCell::new(None),
@@ -136,7 +139,7 @@ impl TraceModel {
             .map(|t| t.lane_class != LaneClass::CriticalPath)
             .collect();
         self.select_anchor = None;
-        self.selection_version += 1;
+        self.aggregate_key += 1;
         self.ensure_aggregates(cx);
     }
 
@@ -269,8 +272,8 @@ impl TraceModel {
     /// visible lanes from the anchor to `track`; a `shift`+`ctrl` click sets that
     /// run to the anchor's own state, extending a just-added run or clearing a
     /// just-removed one. A plain or ctrl click moves the anchor to `track`; a
-    /// shift click leaves it, so the run can be re-adjusted. Bumps the selection
-    /// version only when the set actually changes, so a repeat click is free.
+    /// shift click leaves it, so the run can be re-adjusted. Keys a rebuild only
+    /// when the set actually changes, so a repeat click is free.
     pub(crate) fn select_track(
         &mut self,
         track: usize,
@@ -330,9 +333,38 @@ impl TraceModel {
         };
         if sel != self.selected_tracks {
             self.selected_tracks = sel;
-            self.selection_version += 1;
+            self.aggregate_key += 1;
         }
         self.ensure_aggregates(cx);
+    }
+
+    pub(crate) fn flame_mode(&self) -> FlameMode {
+        self.flame_mode
+    }
+
+    /// Puts the flame graph under `mode` and kicks off the rebuild it needs.
+    /// Reports what [`Self::adopt_flame_mode`] did, so a caller can skip the work
+    /// that only a mode change calls for.
+    pub(crate) fn set_flame_mode(&mut self, mode: FlameMode, cx: &mut Context<Self>) -> bool {
+        if !self.adopt_flame_mode(mode) {
+            return false;
+        }
+        // The mode controls render from the mode itself, so their selected state
+        // must not wait for the rebuild to land.
+        cx.notify();
+        self.ensure_aggregates(cx);
+        true
+    }
+
+    /// Adopts `mode` and keys a rebuild for it, or reports false when it is
+    /// already the standing mode, so re-choosing one costs nothing.
+    fn adopt_flame_mode(&mut self, mode: FlameMode) -> bool {
+        if self.flame_mode == mode {
+            return false;
+        }
+        self.flame_mode = mode;
+        self.aggregate_key += 1;
+        true
     }
 
     /// Sets the selection to every visible track (the Ctrl-A gesture), returning
@@ -340,7 +372,7 @@ impl TraceModel {
     pub(crate) fn select_all_visible(&mut self, cx: &mut Context<Self>) -> bool {
         let changed = if self.selected_tracks != self.visible_tracks {
             self.selected_tracks = self.visible_tracks.clone();
-            self.selection_version += 1;
+            self.aggregate_key += 1;
             true
         } else {
             false
@@ -357,7 +389,7 @@ impl TraceModel {
         self.aggregates.clone()
     }
 
-    /// The `selection_version` the ready aggregate reflects, if any; the stats
+    /// The `aggregate_key` the ready aggregate reflects, if any; the stats
     /// panel keys its sort order on it.
     pub(crate) fn aggregate_version(&self) -> Option<u64> {
         self.agg.ready()
@@ -382,7 +414,7 @@ impl TraceModel {
             Source::Loaded(p) => p.clone(),
             _ => return,
         };
-        let key = self.selection_version;
+        let key = self.aggregate_key;
         if self.agg.is_ready(key) {
             // The shown value is already current; cancel a build for a key the
             // inputs have since left so its late result can't clobber it.
@@ -395,6 +427,7 @@ impl TraceModel {
         let generation = self.agg.start(key);
         cx.emit(AggregateBuildStarted);
         let selected = self.selected_tracks.clone();
+        let mode = self.flame_mode;
         let cached_scan = self.flame_scan.clone();
         let task = cx.spawn(async move |model, cx| {
             let (scan, aggregate) = cx
@@ -404,7 +437,7 @@ impl TraceModel {
                     let scan =
                         cached_scan.unwrap_or_else(|| Arc::new(TrackFlamer::new(&profile)));
                     let aggregate =
-                        ScopeAggregate::build_for_tracks_reusing(&scan, FlameMode::default(), |i| {
+                        ScopeAggregate::build_for_tracks_reusing(&scan, mode, |i| {
                             selected.get(i).copied().unwrap_or(false)
                         });
                     if std::env::var_os("BVIZ_TRACE_TIMING").is_some() {
@@ -449,5 +482,41 @@ impl TraceModel {
         let ai = order.iter().position(|&t| t == anchor)?;
         let ti = order.iter().position(|&t| t == track)?;
         Some(order[ai.min(ti)..=ai.max(ti)].to_vec())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::TraceModel;
+    use bviz_trace_layout::{FlameDirection, FlameLabels, FlameMode};
+
+    #[test]
+    fn re_choosing_the_standing_flame_mode_keys_no_rebuild() {
+        let mut model = TraceModel::new();
+        let key = model.aggregate_key;
+        let standing = model.flame_mode();
+        assert!(!model.adopt_flame_mode(standing));
+        assert_eq!(model.aggregate_key, key);
+    }
+
+    #[test]
+    fn each_half_of_the_flame_mode_keys_a_rebuild_of_its_own() {
+        let mut model = TraceModel::new();
+        let key = model.aggregate_key;
+
+        let inverted = FlameMode {
+            direction: FlameDirection::BottomUp,
+            ..model.flame_mode()
+        };
+        assert!(model.adopt_flame_mode(inverted));
+        assert_eq!(model.flame_mode(), inverted);
+        assert_eq!(model.aggregate_key, key + 1);
+
+        // The labelling moves independently of the direction, which the new mode
+        // carries over.
+        let renamed = FlameMode { labels: FlameLabels::Name, ..inverted };
+        assert!(model.adopt_flame_mode(renamed));
+        assert_eq!(model.flame_mode(), renamed);
+        assert_eq!(model.aggregate_key, key + 2);
     }
 }

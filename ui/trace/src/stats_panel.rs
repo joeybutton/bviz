@@ -6,7 +6,7 @@ use crate::{
     BAR_WIDTH, STATS_CELL_PAD, STATS_HEADER_HEIGHT, STATS_NUM_COL_WIDTH, STATS_ROW_HEIGHT,
     STATS_TEXT_SIZE, set_list_thumb, thumb_offset,
 };
-use bviz_trace_layout::{ScopeAggregate, StatRow};
+use bviz_trace_layout::{FlameLabels, ScopeAggregate, StatRow};
 use bviz_ui_components::{
     Axis, DEFAULT_MIN_THUMB, Scrollbar, centered_spinner, load_in_background, track_drag,
 };
@@ -29,24 +29,39 @@ pub(crate) enum StatsColumn {
     Percent,
 }
 
-/// One column of the stats table: which value it sorts by, its header label, and
-/// its fixed width (`None` for the one flexible column that takes the remainder).
-/// The header and every body cell are laid out from this single spec so their
-/// widths cannot disagree.
+/// One column of the stats table: which value it sorts by and its fixed width
+/// (`None` for the one flexible column that takes the remainder). The header and
+/// every body cell are laid out from this single spec so their widths cannot
+/// disagree.
 struct StatsColumnSpec {
     column: StatsColumn,
-    label: &'static str,
     width: Option<f32>,
 }
 
 const STATS_COLUMNS: [StatsColumnSpec; 6] = [
-    StatsColumnSpec { column: StatsColumn::Key, label: "Mnemonic", width: None },
-    StatsColumnSpec { column: StatsColumn::Count, label: "Count", width: Some(STATS_NUM_COL_WIDTH) },
-    StatsColumnSpec { column: StatsColumn::Total, label: "Total", width: Some(STATS_NUM_COL_WIDTH) },
-    StatsColumnSpec { column: StatsColumn::Avg, label: "Avg", width: Some(STATS_NUM_COL_WIDTH) },
-    StatsColumnSpec { column: StatsColumn::Max, label: "Max", width: Some(STATS_NUM_COL_WIDTH) },
-    StatsColumnSpec { column: StatsColumn::Percent, label: "%", width: Some(STATS_NUM_COL_WIDTH) },
+    StatsColumnSpec { column: StatsColumn::Key, width: None },
+    StatsColumnSpec { column: StatsColumn::Count, width: Some(STATS_NUM_COL_WIDTH) },
+    StatsColumnSpec { column: StatsColumn::Total, width: Some(STATS_NUM_COL_WIDTH) },
+    StatsColumnSpec { column: StatsColumn::Avg, width: Some(STATS_NUM_COL_WIDTH) },
+    StatsColumnSpec { column: StatsColumn::Max, width: Some(STATS_NUM_COL_WIDTH) },
+    StatsColumnSpec { column: StatsColumn::Percent, width: Some(STATS_NUM_COL_WIDTH) },
 ];
+
+/// The header text of `column`. Rows are keyed by whatever text labels the
+/// graph's frames, so the key column is named for `labels`.
+fn column_header(column: StatsColumn, labels: FlameLabels) -> &'static str {
+    match column {
+        StatsColumn::Key => match labels {
+            FlameLabels::Mnemonic => "Mnemonic",
+            FlameLabels::Name => "Name",
+        },
+        StatsColumn::Count => "Count",
+        StatsColumn::Total => "Total",
+        StatsColumn::Avg => "Avg",
+        StatsColumn::Max => "Max",
+        StatsColumn::Percent => "%",
+    }
+}
 
 /// The sort the stats table opens with. Every aggregate ships this order
 /// precomputed ([`ScopeAggregate::default_order`]), so serving it costs no sort.
@@ -160,7 +175,7 @@ pub(crate) struct StatsPanel {
     /// header click doesn't blank the table.
     stats_order: Option<Rc<StatsOrder>>,
     /// Background-sort bookkeeping for `stats_order`, keyed on
-    /// `(selection_version, sort, desc)`.
+    /// `(aggregate version, sort, desc)`.
     stats_build: Rebuild<(u64, StatsColumn, bool)>,
     /// Scroll position of the virtualized body.
     stats_scroll: UniformListScrollHandle,
@@ -217,6 +232,13 @@ impl StatsPanel {
         colors: &bviz_ui_theme::Colors,
         cx: &mut Context<Self>,
     ) -> Div {
+        // The key column names the labelling the shown rows were keyed by, which
+        // trails the model's mode for as long as a rebuild takes; with no rows
+        // up there is nothing for the model's mode to disagree with.
+        let labels = match &self.stats_order {
+            Some(order) => order.aggregates.mode.labels,
+            None => self.model.read(cx).flame_mode().labels,
+        };
         // Reserve the scroll bar's width on the right of the header and every row
         // (the bar is painted as an overlay there), so the last column's values
         // don't run under or up against the bar.
@@ -230,7 +252,7 @@ impl StatsPanel {
             .border_b_1()
             .border_color(palette.border)
             .text_color(palette.label)
-            .children(STATS_COLUMNS.iter().map(|spec| {
+            .children(STATS_COLUMNS.iter().enumerate().map(|(i, spec)| {
                 let column = spec.column;
                 let glyph = if self.stats_sort != column {
                     None
@@ -239,7 +261,7 @@ impl StatsPanel {
                 } else {
                     Some('▴')
                 };
-                let label = spec.label;
+                let label = column_header(column, labels);
                 // Place the caret on the side away from the text's anchor so the
                 // label can't shift as the sort indicator moves: left of a
                 // right-aligned numeric value, right of the left-aligned key.
@@ -249,7 +271,7 @@ impl StatsPanel {
                     (None, _) => label.to_string(),
                 };
                 stats_cell(spec, text)
-                    .id(SharedString::from(format!("stats-h-{}", spec.label)))
+                    .id(SharedString::from(format!("stats-h-{i}")))
                     .cursor_pointer()
                     .hover(|s| s.bg(palette.scroll_track))
                     .on_click(cx.listener(move |this, _, _, cx| {

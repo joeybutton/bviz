@@ -31,11 +31,13 @@ use theme::Palette;
 use timeline::TimelinePanel;
 use tracks_menu::TracksMenu;
 
-use bviz_trace_layout::{LaneLayout, LaneMetrics, TimeView};
+use bviz_trace_layout::{
+    FlameDirection, FlameLabels, FlameMode, LaneLayout, LaneMetrics, TimeView,
+};
 use bviz_trace_profile::{Profile, Slice, SliceDetail, TimeSpan};
 use bviz_ui_components::{
-    Axis, DEFAULT_MIN_THUMB, Scrollbar, centered_notice, centered_spinner, load_in_background,
-    track_drag,
+    Axis, Button, DEFAULT_MIN_THUMB, Scrollbar, centered_notice, centered_spinner,
+    load_in_background, track_drag,
 };
 use bviz_ui_shell::Chrome;
 use clap::Parser;
@@ -316,7 +318,7 @@ impl TraceView {
 
     fn on_profile_loaded(&mut self, result: Result<Profile, String>, cx: &mut Context<Self>) {
         self.timeline.update(cx, |t, _| t.reset_for_new_profile());
-        self.flame.update(cx, |f, _| f.reset_for_new_profile());
+        self.flame.update(cx, |f, _| f.reset_view());
         // The aggregate-derived panel caches: dropped up front so a new profile
         // shows the spinner rather than the prior graph until its build lands.
         self.stats.update(cx, |s, _| s.reset_for_new_profile());
@@ -484,20 +486,89 @@ impl TraceView {
                 }),
             )
             .children(tabs)
-            // The flame graph's work-class legend sits at the far right of the
-            // bar while its tab is up, keyed to the box fills.
+            // The flame graph's mode controls and its work-class legend, keyed to
+            // the box fills, sit at the far right of the bar while its tab is up.
             .child(div().flex_1())
             .children((active == BottomTab::FlameGraph).then(|| {
                 div()
                     .flex()
+                    .flex_row()
                     .items_center()
+                    .gap_4()
                     .pr_2()
+                    .child(self.flame_mode_controls(cx))
                     .child(theme::role_legend(
                         palette.label,
                         palette.background,
                         STATS_TEXT_SIZE,
                     ))
             }))
+    }
+
+    /// The flame graph's mode controls: the two directions as an exclusive pair,
+    /// and the labelling as a toggle that holds across both.
+    fn flame_mode_controls(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let mode = self.model.read(cx).flame_mode();
+        let mnemonics = mode.labels == FlameLabels::Mnemonic;
+        let button = |id: &'static str, label: &'static str, on: bool, to: FlameMode| {
+            let view = cx.entity();
+            div()
+                .id(SharedString::from(format!("{id}-press")))
+                // A press on a control must not also begin a panel resize.
+                .on_mouse_down(MouseButton::Left, |_, _, cx: &mut App| cx.stop_propagation())
+                .child(
+                    Button::new(id, move |_, _, cx| {
+                        view.update(cx, |this, cx| this.set_flame_mode(to, cx));
+                    })
+                    .ghost()
+                    .compact()
+                    .selected(on)
+                    .label(label),
+                )
+        };
+        div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_1()
+            .text_size(px(STATS_TEXT_SIZE))
+            .child(button(
+                "flame-top-down",
+                "Top-down",
+                mode.direction == FlameDirection::TopDown,
+                FlameMode { direction: FlameDirection::TopDown, ..mode },
+            ))
+            .child(button(
+                "flame-bottom-up",
+                "Bottom-up",
+                mode.direction == FlameDirection::BottomUp,
+                FlameMode { direction: FlameDirection::BottomUp, ..mode },
+            ))
+            .child(button(
+                "flame-mnemonics",
+                "Mnemonics",
+                mnemonics,
+                FlameMode {
+                    labels: if mnemonics {
+                        FlameLabels::Name
+                    } else {
+                        FlameLabels::Mnemonic
+                    },
+                    ..mode
+                },
+            ))
+    }
+
+    /// Applies a mode chosen in the tab bar, leaving the panel's view alone for a
+    /// click that re-chooses the standing mode.
+    fn set_flame_mode(&mut self, mode: FlameMode, cx: &mut Context<Self>) {
+        if !self.model.update(cx, |m, cx| m.set_flame_mode(mode, cx)) {
+            return;
+        }
+        self.flame.update(cx, |f, cx| {
+            f.reset_view();
+            f.invalidate_canvas(cx);
+        });
     }
 
     /// The bottom-panel overlay for the active tab, positioned over the content
