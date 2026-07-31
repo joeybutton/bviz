@@ -1,6 +1,5 @@
-use crate::build::trace_paths;
 use bviz_graph_layout::{Id, LaidOut};
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 /// The lit/dimmed partition induced by hovering a node.
 pub(crate) struct Dimming {
@@ -98,5 +97,42 @@ pub(crate) fn compute_dimming(g: &LaidOut, hovered: Option<Id>, dim_enabled: boo
         lit: active,
         lit_edges,
         applies: has_edge,
+    }
+}
+
+/// Lights the shortest drawn path from `subtree` to each target. A breadth-first
+/// walk over `adj` records each node's predecessor; reconstructing from a target
+/// back to the subtree yields the path's edges. With `forward`, `adj` is the
+/// out-adjacency and a predecessor edge `p->cur` is itself a drawn edge; otherwise
+/// `adj` is the in-adjacency and the drawn edge runs the other way, `cur->p`. The
+/// walk seeds the subtree in id order so a tie between equal-length paths resolves
+/// the same way every paint, rather than flickering with hash iteration order.
+fn trace_paths(
+    subtree: &HashSet<Id>,
+    targets: &HashSet<Id>,
+    adj: &HashMap<Id, Vec<Id>>,
+    forward: bool,
+    lit: &mut HashSet<(Id, Id)>,
+) {
+    let mut came: HashMap<Id, Id> = HashMap::new();
+    let mut seen: HashSet<Id> = subtree.clone();
+    let mut seeds: Vec<Id> = subtree.iter().copied().collect();
+    seeds.sort_unstable_by_key(|id| id.0);
+    let mut queue: VecDeque<Id> = seeds.into();
+    while let Some(u) = queue.pop_front() {
+        for &w in adj.get(&u).into_iter().flatten() {
+            if seen.insert(w) {
+                came.insert(w, u);
+                queue.push_back(w);
+            }
+        }
+    }
+    for &target in targets {
+        let mut cur = target;
+        while !subtree.contains(&cur) {
+            let Some(&prev) = came.get(&cur) else { break };
+            lit.insert(if forward { (prev, cur) } else { (cur, prev) });
+            cur = prev;
+        }
     }
 }

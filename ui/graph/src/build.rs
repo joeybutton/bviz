@@ -1,6 +1,6 @@
 use bviz_graph_layout::graph::Graph;
 use bviz_graph_layout::{layout, quotient, streamed_proto, Id, LaidOut, Names};
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::HashSet;
 use std::path::PathBuf;
 
 /// Which Bazel query produced a `--output=streamed_proto` file, selecting the
@@ -57,43 +57,6 @@ pub(crate) fn build_graph(inputs: &[Input]) -> Result<(Graph, Graph, Names), Str
     // expansion rather than re-derived (differently) from each view.
     let reduced = bviz_graph_layout::reduce::transitive_reduction(&base);
     Ok((base, reduced, names))
-}
-
-/// Lights the shortest drawn path from `subtree` to each target. A breadth-first
-/// walk over `adj` records each node's predecessor; reconstructing from a target
-/// back to the subtree yields the path's edges. With `forward`, `adj` is the
-/// out-adjacency and a predecessor edge `p->cur` is itself a drawn edge; otherwise
-/// `adj` is the in-adjacency and the drawn edge runs the other way, `cur->p`. The
-/// walk seeds the subtree in id order so a tie between equal-length paths resolves
-/// the same way every paint, rather than flickering with hash iteration order.
-pub(crate) fn trace_paths(
-    subtree: &HashSet<Id>,
-    targets: &HashSet<Id>,
-    adj: &HashMap<Id, Vec<Id>>,
-    forward: bool,
-    lit: &mut HashSet<(Id, Id)>,
-) {
-    let mut came: HashMap<Id, Id> = HashMap::new();
-    let mut seen: HashSet<Id> = subtree.clone();
-    let mut seeds: Vec<Id> = subtree.iter().copied().collect();
-    seeds.sort_unstable_by_key(|id| id.0);
-    let mut queue: VecDeque<Id> = seeds.into();
-    while let Some(u) = queue.pop_front() {
-        for &w in adj.get(&u).into_iter().flatten() {
-            if seen.insert(w) {
-                came.insert(w, u);
-                queue.push_back(w);
-            }
-        }
-    }
-    for &target in targets {
-        let mut cur = target;
-        while !subtree.contains(&cur) {
-            let Some(&prev) = came.get(&cur) else { break };
-            lit.insert(if forward { (prev, cur) } else { (cur, prev) });
-            cur = prev;
-        }
-    }
 }
 
 /// Builds the display graph with the given ids expanded and lays it out: fold
