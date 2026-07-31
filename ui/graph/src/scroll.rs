@@ -1,4 +1,5 @@
 use crate::camera::{clamp_pan, content_size, Camera};
+use crate::drag::Drag;
 use crate::GraphView;
 use bviz_ui_components::{Axis, Scrollbar};
 use gpui::{Bounds, Context, MouseMoveEvent, Pixels, Point, point, px, size};
@@ -97,25 +98,17 @@ pub(crate) fn start_scroll_drag(
         return;
     };
     let grab = bar.grab(position);
-    view.scroll_drag = Some(ScrollDrag { axis, grab });
+    view.drag = Drag::Scrollbar(ScrollDrag { axis, grab });
     scroll_to(view, axis, bar.offset_at(position, grab), cx);
 }
 
 /// Track a held scroll thumb to the cursor.
 pub(crate) fn scroll_drag_move(view: &mut GraphView, event: &MouseMoveEvent, cx: &mut Context<GraphView>) {
-    let Some(drag) = view.scroll_drag else {
+    let Drag::Scrollbar(drag) = view.drag else {
         return;
     };
     let Some(bar) = current_scrollbar(view, drag.axis) else {
         return;
     };
     scroll_to(view, drag.axis, bar.offset_at(event.position, drag.grab), cx);
-}
-
-/// End a scroll-bar drag. Called both from the element release handler and the
-/// window-global one, so it is a no-op when no drag is in progress.
-pub(crate) fn end_scroll_drag(view: &mut GraphView, cx: &mut Context<GraphView>) {
-    if view.scroll_drag.take().is_some() {
-        cx.notify();
-    }
 }

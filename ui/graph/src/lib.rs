@@ -19,6 +19,7 @@ use std::time::{Duration, Instant};
 mod build;
 mod camera;
 mod dimming;
+mod drag;
 mod framing;
 mod paint;
 mod scroll;
@@ -29,14 +30,13 @@ use camera::{
     Camera,
 };
 use dimming::compute_dimming;
+use drag::{drag_pan, end_drag, start_pan, Drag};
 use framing::{build_prepaint, Framing};
 use paint::{
     PaintConnector, collect_connectors, edge_color, kind_accent, lane_polyline, paint_box,
     paint_boxes, paint_connector,
 };
-use scroll::{
-    end_scroll_drag, scroll_drag_move, scrollbar_geom, scrollbar_hit, start_scroll_drag, ScrollDrag,
-};
+use scroll::{scroll_drag_move, scrollbar_geom, scrollbar_hit, start_scroll_drag};
 
 /// Padding around the graph, in layout pixels.
 const MARGIN: f64 = 16.0;
@@ -132,15 +132,7 @@ struct GraphView {
     focus_handle: FocusHandle,
     source: Source,
     framing: Framing,
-    dragging: bool,
-    /// Whether the cursor moved past the click threshold since the press, which
-    /// distinguishes a drag (pan) from a click (toggle).
-    moved: bool,
-    last_mouse: Point<Pixels>,
-    /// Cursor position at the most recent left press, the click/drag origin.
-    press: Point<Pixels>,
-    /// The scroll-bar drag in progress, or `None` when no thumb is held.
-    scroll_drag: Option<ScrollDrag>,
+    drag: Drag,
     /// Container and group ids currently expanded; every other container folds
     /// its subtree away so the layout only processes the visible view.
     expanded: HashSet<Id>,
@@ -183,10 +175,6 @@ struct GraphView {
     /// Holds the background load/relayout task so it isn't cancelled on drop.
     _load_task: Task<()>,
 }
-
-/// A cursor must travel at least this far from the press before the gesture
-/// counts as a drag rather than a click.
-const CLICK_SLOP: f32 = 4.0;
 
 /// How long the just-toggled box stays emphasized before the highlight fades.
 const HIGHLIGHT_LINGER: Duration = Duration::from_millis(1100);
@@ -244,11 +232,7 @@ impl GraphView {
             focus_handle,
             source: Source::Loading,
             framing: Framing::new(),
-            dragging: false,
-            moved: false,
-            last_mouse: Point::default(),
-            press: Point::default(),
-            scroll_drag: None,
+            drag: Drag::None,
             expanded: HashSet::new(),
             expandable: HashSet::new(),
             recent: None,
@@ -417,30 +401,20 @@ impl GraphView {
             start_scroll_drag(self, axis, e.position, cx);
             return;
         }
-        // Start a pan drag. The window-global move handler that pans it is
-        // installed from the canvas paint while `dragging` is set (so it keeps
-        // working past the window edge), hence the repaint request. The release is
-        // caught both there and by `on_mouse_up`.
-        self.dragging = true;
-        self.moved = false;
-        self.press = e.position;
-        self.last_mouse = e.position;
-        cx.notify();
+        start_pan(self, e.position, cx);
     }
 
-    /// Ends the drag on the release the element receives directly. The canvas-paint
-    /// handler also ends it (and catches releases outside the window), but it is
-    /// only installed once a frame paints with `dragging` set; a press-move-release
-    /// quick enough to finish before that paint would otherwise never clear
-    /// `dragging`, leaving every later move panning the view.
+    /// Ends the drag on the release the element receives directly, which the
+    /// window-global handlers can miss: they are installed only once a frame
+    /// paints with a drag in progress, so a press-release quick enough to finish
+    /// before that paint would leave the drag running.
     fn on_mouse_up(&mut self, e: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
         end_drag(self, e, cx);
-        end_scroll_drag(self, cx);
     }
 
     fn on_mouse_move(&mut self, e: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
-        // A drag pans rather than hovers; leave the lit set alone.
-        if self.dragging {
+        // A pan moves the view rather than the hover; leave the lit set alone.
+        if matches!(self.drag, Drag::Pan(_)) {
             return;
         }
         let Some(g) = self.laid_out() else {
@@ -662,59 +636,12 @@ fn canvas_body(
                 bar.paint(track, thumb, window);
             }
         }
-        // While a pan or a scroll-bar drag is in progress, run it through
-        // window-global handlers so it keeps working when the cursor leaves the
-        // window. A pan release also toggles the group under it when it was a
-        // click rather than a drag.
-        let (dragging, scroll_dragging) = {
-            let v = entity.read(cx);
-            (v.dragging, v.scroll_drag.is_some())
-        };
-        if dragging {
-            track_drag(window, &entity, drag_pan, end_drag);
-        } else if scroll_dragging {
-            track_drag(window, &entity, scroll_drag_move, |view, _, cx| {
-                end_scroll_drag(view, cx)
-            });
+        match entity.read(cx).drag {
+            Drag::None => {}
+            Drag::Pan(_) => track_drag(window, &entity, drag_pan, end_drag),
+            Drag::Scrollbar(_) => track_drag(window, &entity, scroll_drag_move, end_drag),
         }
     }
-}
-
-/// Pan the graph by the cursor delta during a drag, latching `moved` once the
-/// cursor has travelled past the click threshold.
-fn drag_pan(view: &mut GraphView, event: &MouseMoveEvent, cx: &mut Context<GraphView>) {
-    let traveled = (f32::from(event.position.x) - f32::from(view.press.x))
-        .hypot(f32::from(event.position.y) - f32::from(view.press.y));
-    if traveled > CLICK_SLOP {
-        view.moved = true;
-    }
-    let Camera { zoom, pan: (px, py) } = view.camera();
-    let dx = f32::from(event.position.x) - f32::from(view.last_mouse.x);
-    let dy = f32::from(event.position.y) - f32::from(view.last_mouse.y);
-    let pan = (px + dx, py + dy);
-    let pan = match view.laid_out().map(content_size) {
-        Some(content) => clamp_pan(pan, zoom, view.framing.viewport().size, content),
-        None => pan,
-    };
-    view.last_mouse = event.position;
-    view.framing.move_to(Camera { zoom, pan });
-    cx.notify();
-}
-
-/// End a drag. A release that never travelled past the click threshold is a
-/// click rather than a pan.
-fn end_drag(view: &mut GraphView, event: &MouseUpEvent, cx: &mut Context<GraphView>) {
-    // Both the element-level release handler and the window-global one installed
-    // during a drag can fire for the same release; guard so the toggle below runs
-    // once. The guard also makes a stray release (no drag in progress) a no-op.
-    if !view.dragging {
-        return;
-    }
-    view.dragging = false;
-    if view.moved {
-        return;
-    }
-    toggle_box_at(view, event.position, cx);
 }
 
 /// Open or close the container (or group) box under `pos` (window px) and settle
