@@ -251,8 +251,7 @@ pub(crate) fn parse_chunks(text: &str, n: usize, min_bytes: usize) -> Option<Pro
     }
     let chunks = cut_chunks(events, n)?;
     // Every worker interns into this one arena, so a builder's handles are
-    // global and merging never rebases them. The distinct pool is bounded by
-    // the region's byte length.
+    // global and merging never rebases them.
     let interner = ConcurrentInterner::new(events.len(), events.len() / BYTES_PER_DISTINCT);
     let prefault_bytes = intern_prefault_bytes(events.len());
     let builders =
