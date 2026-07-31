@@ -124,6 +124,34 @@ fn parse_chunk(
     ok.then_some(builder)
 }
 
+/// A decoded profile buffer cut at the bounds of its `traceEvents` array.
+struct EventRegion<'a> {
+    head: &'a str,
+    events: &'a str,
+    tail: &'a str,
+}
+
+/// Cuts `text` at the `traceEvents` array's contents, whose end is the array's
+/// close so that a chunk of the events never picks the close up as event
+/// content. `None` when no array can be located, or when it closes before it
+/// opens.
+fn locate_event_region(text: &str) -> Option<EventRegion<'_>> {
+    let TraceEventsArray::Found { content_start: array_start, .. } =
+        find_trace_events_array(text.as_bytes())
+    else {
+        return None;
+    };
+    let array_end = array_close(text.as_bytes())?;
+    if array_end <= array_start {
+        return None;
+    }
+    Some(EventRegion {
+        head: &text[..array_start],
+        events: &text[array_start..array_end],
+        tail: &text[array_end..],
+    })
+}
+
 /// Splits the `traceEvents` array into byte chunks at newline boundaries — a
 /// literal newline never falls inside a JSON string, so it always lies between
 /// events — parses each chunk into its own [`Builder`] on a pool of `n` worker
@@ -132,50 +160,36 @@ fn parse_chunk(
 /// declines. Returns `None` if the array can't be located, no split yields more
 /// than one chunk, or any chunk fails to parse.
 pub(crate) fn parse_chunks(text: &str, n: usize, min_bytes: usize) -> Option<Profile> {
-    let TraceEventsArray::Found { content_start: array_start, .. } =
-        find_trace_events_array(text.as_bytes())
-    else {
-        return None;
-    };
-    // Bound the region to the array's close so a chunk never picks it up as
-    // event content.
-    let array_end = array_close(text.as_bytes())?;
-    if array_end <= array_start {
+    let EventRegion { head, events, tail } = locate_event_region(text)?;
+    if events.len() < min_bytes {
         return None;
     }
-    let region = &text[array_start..array_end];
-    if region.len() < min_bytes {
-        return None;
-    }
-    let target_chunks = (n * CHUNKS_PER_WORKER).min(region.len() / MIN_CHUNK_BYTES).max(n);
+    let target_chunks = (n * CHUNKS_PER_WORKER).min(events.len() / MIN_CHUNK_BYTES).max(n);
     // Cut at the first newline at or after each evenly spaced target; each cut
     // sits between two events, so a chunk holds only whole events.
     let mut bounds = vec![0usize];
     for k in 1..target_chunks {
-        let target = region.len() * k / target_chunks;
-        if let Some(off) = region[target..].find('\n') {
+        let target = events.len() * k / target_chunks;
+        if let Some(off) = events[target..].find('\n') {
             let cut = target + off + 1;
             if cut > *bounds.last().unwrap() {
                 bounds.push(cut);
             }
         }
     }
-    bounds.push(region.len());
+    bounds.push(events.len());
     if bounds.len() < 3 {
         // Only one chunk — nothing to parallelize, let the serial path handle it.
         return None;
     }
-    let chunks: Vec<&str> = bounds.windows(2).map(|w| &region[w[0]..w[1]]).collect();
+    let chunks: Vec<&str> = bounds.windows(2).map(|w| &events[w[0]..w[1]]).collect();
 
-    let other_data = merge_other_data(
-        recover_other_data(&text[..array_start]),
-        recover_other_data(&text[array_end..]),
-    );
+    let other_data = merge_other_data(recover_other_data(head), recover_other_data(tail));
     // Every worker interns into this one arena, so a builder's handles are
     // global and merging never rebases them. The distinct pool is bounded by
     // the region's byte length.
-    let interner = ConcurrentInterner::new(region.len(), region.len() / BYTES_PER_DISTINCT);
-    let prefault_bytes = intern_prefault_bytes(region.len());
+    let interner = ConcurrentInterner::new(events.len(), events.len() / BYTES_PER_DISTINCT);
+    let prefault_bytes = intern_prefault_bytes(events.len());
     let builders: Vec<Option<Builder>> = timed("  parse chunks", || {
         let next = std::sync::atomic::AtomicUsize::new(0);
         let interner = &interner;
