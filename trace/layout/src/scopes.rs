@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use bviz_trace_profile::Profile;
 
-use crate::flame::{FlameGraph, TrackFlamer};
+use crate::flame::{FlameGraph, FlameLabels, TrackFlamer};
 use crate::stats::{StatRow, default_order, stats_from_flame};
 
 /// Everything the UI presents for one flame scope, derived together so a held
@@ -29,9 +29,10 @@ impl ScopeAggregate {
     /// once.
     pub fn build_for_tracks(
         profile: &Arc<Profile>,
+        labels: FlameLabels,
         selected: impl Fn(usize) -> bool + Sync,
     ) -> ScopeAggregate {
-        ScopeAggregate::from_graph(TrackFlamer::new(profile).build(selected))
+        ScopeAggregate::from_graph(TrackFlamer::new(profile).build(labels, selected))
     }
 
     /// Builds a selection's aggregate from an already-scanned [`TrackFlamer`] by
@@ -40,9 +41,10 @@ impl ScopeAggregate {
     /// rebuild across selection changes paying only the merge.
     pub fn build_for_tracks_reusing(
         scan: &TrackFlamer,
+        labels: FlameLabels,
         selected: impl Fn(usize) -> bool + Sync,
     ) -> ScopeAggregate {
-        ScopeAggregate::from_graph(scan.build(selected))
+        ScopeAggregate::from_graph(scan.build(labels, selected))
     }
 
     fn from_graph(flame: FlameGraph) -> ScopeAggregate {
@@ -151,7 +153,7 @@ mod tests {
         let p = full_profile();
         let t = p.threads();
         let select = |i: usize| t[i].lane_class != LaneClass::CriticalPath;
-        let agg = ScopeAggregate::build_for_tracks(&p, select);
+        let agg = ScopeAggregate::build_for_tracks(&p, FlameLabels::Mnemonic, select);
         let g = &agg.flame;
         let root_total = g.root().total_us;
 
@@ -181,14 +183,16 @@ mod tests {
         // A second build of the same selection is byte-identical.
         assert_eq!(
             g.nodes(),
-            ScopeAggregate::build_for_tracks(&p, select).flame.nodes()
+            ScopeAggregate::build_for_tracks(&p, FlameLabels::Mnemonic, select)
+                .flame
+                .nodes()
         );
     }
 
     #[test]
     fn empty_track_selection_yields_a_bare_root() {
         let p = full_profile();
-        let agg = ScopeAggregate::build_for_tracks(&p, |_| false);
+        let agg = ScopeAggregate::build_for_tracks(&p, FlameLabels::Mnemonic, |_| false);
         // Only the synthetic root, no frames and no rows.
         assert_eq!(agg.flame.nodes().len(), 1);
         assert!(agg.stats.is_empty());
@@ -226,8 +230,9 @@ mod tests {
                 .collect()
         };
         for sel in &selections {
-            let reused = ScopeAggregate::build_for_tracks_reusing(&scan, sel);
-            let fresh = ScopeAggregate::build_for_tracks(&p, sel);
+            let reused =
+                ScopeAggregate::build_for_tracks_reusing(&scan, FlameLabels::Mnemonic, sel);
+            let fresh = ScopeAggregate::build_for_tracks(&p, FlameLabels::Mnemonic, sel);
             assert_eq!(resolved(&reused.flame), resolved(&fresh.flame));
             assert_eq!(
                 resolved_rows(&reused.flame, &reused.stats),
@@ -243,7 +248,9 @@ mod tests {
         let p = full_profile();
         let t = p.threads();
         let class_total = |c: LaneClass| {
-            ScopeAggregate::build_for_tracks(&p, move |i| t[i].lane_class == c)
+            ScopeAggregate::build_for_tracks(&p, FlameLabels::Mnemonic, move |i| {
+                t[i].lane_class == c
+            })
                 .flame
                 .root()
                 .total_us
@@ -257,7 +264,7 @@ mod tests {
         assert_eq!(execution, 210);
         // A selection's root total is additive over disjoint lane sets: the three
         // classes unioned total exactly the sum of the three.
-        let union = ScopeAggregate::build_for_tracks(&p, |i| {
+        let union = ScopeAggregate::build_for_tracks(&p, FlameLabels::Mnemonic, |i| {
             matches!(
                 t[i].lane_class,
                 LaneClass::RepoFetch | LaneClass::Analysis | LaneClass::Execution
@@ -297,7 +304,9 @@ mod tests {
             ),
         ]);
         let t = p.threads();
-        let agg = ScopeAggregate::build_for_tracks(&p, |i| t[i].lane_class == LaneClass::Analysis);
+        let agg = ScopeAggregate::build_for_tracks(&p, FlameLabels::Mnemonic, |i| {
+            t[i].lane_class == LaneClass::Analysis
+        });
         let g = &agg.flame;
         // The carrier joined the foreign smallest-mnemonic frame carrying its own
         // 20us; no bare "Compiling foo" frame remains.
@@ -323,7 +332,7 @@ mod tests {
             .map(|(i, k)| slice(k, "generic", i as i64 * 10, 5))
             .collect();
         let p = profile(vec![track(1, LaneClass::Execution, slices)]);
-        let agg = ScopeAggregate::build_for_tracks(&p, |_| true);
+        let agg = ScopeAggregate::build_for_tracks(&p, FlameLabels::Mnemonic, |_| true);
         assert_eq!(agg.stats.len(), keys.len());
         let text_of = |r: &StatRow| agg.flame.str(r.key).to_owned();
         let mut by_rank: Vec<String> = {
@@ -358,7 +367,7 @@ mod tests {
             Box::new(|i: usize| t[i].lane_class == LaneClass::Execution),
         ];
         for sel in &selections {
-            let agg = ScopeAggregate::build_for_tracks(&p, sel);
+            let agg = ScopeAggregate::build_for_tracks(&p, FlameLabels::Mnemonic, sel);
             assert_eq!(agg.default_order.len(), agg.stats.len());
             let keys: Vec<(i64, &str)> = agg
                 .default_order

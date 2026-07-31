@@ -7,7 +7,7 @@
 
 use std::sync::Arc;
 
-use bviz_trace_layout::{ScopeAggregate, TrackFlamer};
+use bviz_trace_layout::{FlameLabels, ScopeAggregate, TrackFlamer};
 use bviz_trace_profile::{LaneClass, Profile};
 
 #[global_allocator]
@@ -54,31 +54,34 @@ fn main() {
         .map(|t| profile.slices(t).len())
         .sum();
 
+    // The labelling the view opens on.
+    let labels = FlameLabels::Mnemonic;
     let single = min_secs(iters, || {
-        std::hint::black_box(ScopeAggregate::build_for_tracks(&profile, |i| i == biggest));
+        std::hint::black_box(ScopeAggregate::build_for_tracks(&profile, labels, |i| {
+            i == biggest
+        }));
     });
     let all = min_secs(iters, || {
-        std::hint::black_box(ScopeAggregate::build_for_tracks(&profile, |i| {
+        std::hint::black_box(ScopeAggregate::build_for_tracks(&profile, labels, |i| {
             threads[i].lane_class != LaneClass::CriticalPath
         }));
     });
     // The whole-profile scan the view holds after the first build; every later
-    // selection rebuilds from it rather than rescanning. `TrackFlamer::new` now
-    // also builds each lane's path-reduced node table, so this scan-once timing
-    // includes that per-lane precompute — work paid once so the cached rebuild
-    // below is a pure merge.
+    // selection rebuilds from it rather than rescanning.
     let scan_cold = min_secs(iters, || {
         std::hint::black_box(TrackFlamer::new(&profile));
     });
+    // The first rebuild off a scan pays that labelling's per-lane reduction, so
+    // this timing is warm: the pure merge every selection change after it costs.
     let scan = TrackFlamer::new(&profile);
     let all_reused = min_secs(iters, || {
-        std::hint::black_box(ScopeAggregate::build_for_tracks_reusing(&scan, |i| {
+        std::hint::black_box(ScopeAggregate::build_for_tracks_reusing(&scan, labels, |i| {
             threads[i].lane_class != LaneClass::CriticalPath
         }));
     });
 
-    let single_agg = ScopeAggregate::build_for_tracks(&profile, |i| i == biggest);
-    let all_agg = ScopeAggregate::build_for_tracks(&profile, |i| {
+    let single_agg = ScopeAggregate::build_for_tracks(&profile, labels, |i| i == biggest);
+    let all_agg = ScopeAggregate::build_for_tracks(&profile, labels, |i| {
         threads[i].lane_class != LaneClass::CriticalPath
     });
     eprintln!(
@@ -90,7 +93,7 @@ fn main() {
          build_for_tracks(all {real_lanes}): {all:.3}s  (min of {iters})"
     );
     eprintln!(
-        "[bench] scan once (incl. lane tables): {scan_cold:.3}s  \
+        "[bench] scan once: {scan_cold:.3}s  \
          build_for_tracks_reusing(all): {all_reused:.3}s  \
          (rebuild saves {:.3}s vs one-shot {all:.3}s)",
         all - all_reused,

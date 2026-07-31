@@ -1,5 +1,5 @@
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, OnceLock};
 
 use bviz_trace_profile::{
     Profile, Slice, SliceDetail, Span32, SpanRole, Str, ThreadTrack, Workload,
@@ -462,6 +462,17 @@ fn action_inner(name: &str) -> Option<&str> {
     name.strip_prefix("action '")?.strip_suffix('\'')
 }
 
+/// Which text labels a flame frame, and so which spans merge into one frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum FlameLabels {
+    /// A span's action mnemonic where one resolves, so every span of the same
+    /// action kind merges into one frame ("Rustc").
+    Mnemonic,
+    /// Every span's own name, so an action frame names its target ("Compiling
+    /// //x/y:z") and the tree is the profile's own nesting.
+    Name,
+}
+
 /// Resolves each span to its aggregation label. Every frame label is an interned
 /// handle of the source profile — a span's mnemonic and name already live in its
 /// text. The profile interns each distinct string to one handle, so equal text ⇒
@@ -498,17 +509,29 @@ impl Flamer {
         }
     }
 
-    /// The label a span carries: its action mnemonic — from its own args if
-    /// present, else recovered from the name index by the slice's name or, for
-    /// a critical-path component, by its unwrapped `action '…'` description —
-    /// so all Rustc collapse together; else its own name (the informative label
-    /// for non-action slices — "checkOutputs", "subprocess.run", a repo
-    /// target, …). The tree shape comes from time-containment, not from this
-    /// label; the label only decides which spans at the same place merge into
-    /// one frame. Only the critical-path unwrapping consults the text-keyed
-    /// index, so the hot per-span path never hashes a full string.
-    fn span_label(&self, slice: &Slice, detail: &SliceDetail) -> Segment {
-        let label = match detail.mnemonic.get() {
+    /// The label a span carries under `labels`. The tree shape comes from
+    /// time-containment, not from this label; the label only decides which
+    /// spans at the same place merge into one frame.
+    fn span_label(&self, labels: FlameLabels, slice: &Slice, detail: &SliceDetail) -> Segment {
+        let label = match labels {
+            FlameLabels::Mnemonic => self.mnemonic_label(slice, detail),
+            FlameLabels::Name => slice.name,
+        };
+        Segment {
+            label,
+            role: slice.role,
+        }
+    }
+
+    /// A span's action mnemonic — from its own args if present, else recovered
+    /// from the name index by the slice's name or, for a critical-path
+    /// component, by its unwrapped `action '…'` description — so all Rustc
+    /// collapse together; else its own name (the informative label for
+    /// non-action slices — "checkOutputs", "subprocess.run", a repo target, …).
+    /// Only the critical-path unwrapping consults the text-keyed index, so the
+    /// hot per-span path never hashes a full string.
+    fn mnemonic_label(&self, slice: &Slice, detail: &SliceDetail) -> Str {
+        match detail.mnemonic.get() {
             Some(m) => m,
             None => {
                 let name = slice.name;
@@ -519,10 +542,6 @@ impl Flamer {
                         .unwrap_or(name),
                 }
             }
-        };
-        Segment {
-            label,
-            role: slice.role,
         }
     }
 }
@@ -536,39 +555,67 @@ fn end_us(slice: &Slice) -> i64 {
 /// track-selection flame graph can be rebuilt for any lane subset without
 /// rescanning. The scan covers every lane, so it ranks and labels any
 /// selection the caller later chooses.
-///
-/// Alongside the scan it holds each lane's path-reduced node table
-/// ([`LaneTable`], one per [`Profile::threads`] entry): a lane's spans emit
-/// path keys and reduce into per-node totals that do not depend on the
-/// selection, so this per-lane work is done once here and a selection is then a
-/// merge of the selected lanes' tables (see [`build`](TrackFlamer::build)).
 pub struct TrackFlamer {
     flamer: Flamer,
-    lane_tables: Vec<LaneTable>,
+    /// The path-reduced lane tables ([`LaneTable`], one per
+    /// [`Profile::threads`] entry) a selection's graph merges, filled on first
+    /// use. A lane's spans emit path keys and reduce into per-node totals that
+    /// do not depend on the selection but do key by label, so the reduction is
+    /// paid once for a labelling asked for, never for one that is not, and a
+    /// selection change pays only the merge (see [`build`](TrackFlamer::build)).
+    lane_tables: LaneTableSets,
+}
+
+/// One [`LaneTable`] set per [`FlameLabels`] variant, reached through
+/// [`of`](Self::of) — whose exhaustive match is what binds the slots to the
+/// variants, so a labelling cannot be added without one.
+#[derive(Default)]
+struct LaneTableSets {
+    mnemonic: OnceLock<Vec<LaneTable>>,
+    name: OnceLock<Vec<LaneTable>>,
+}
+
+impl LaneTableSets {
+    fn of(&self, labels: FlameLabels) -> &OnceLock<Vec<LaneTable>> {
+        match labels {
+            FlameLabels::Mnemonic => &self.mnemonic,
+            FlameLabels::Name => &self.name,
+        }
+    }
 }
 
 impl TrackFlamer {
     pub fn new(profile: &Arc<Profile>) -> TrackFlamer {
-        let workers = bviz_trace_profile::worker_count();
-        let flamer = Flamer::new(profile, workers);
-        let lane_tables = build_lane_tables(&flamer, workers);
-        TrackFlamer { flamer, lane_tables }
+        TrackFlamer {
+            flamer: Flamer::new(profile, bviz_trace_profile::worker_count()),
+            lane_tables: LaneTableSets::default(),
+        }
     }
 
-    /// Build the selection's flame graph by merging the selected lanes' cached
+    fn lane_tables(&self, labels: FlameLabels) -> &[LaneTable] {
+        self.lane_tables.of(labels).get_or_init(|| {
+            build_lane_tables(&self.flamer, labels, bviz_trace_profile::worker_count())
+        })
+    }
+
+    /// Build the selection's flame graph by merging the selected lanes'
     /// [`LaneTable`]s: concatenate their reduced nodes, sort the union by path
     /// key, coalesce equal paths across lanes (summing totals and counts), and
     /// reconstruct through [`reconstruct_and_seal`].
-    pub(crate) fn build(&self, selected: impl Fn(usize) -> bool + Sync) -> FlameGraph {
-        let union_len: usize = self
-            .lane_tables
+    pub(crate) fn build(
+        &self,
+        labels: FlameLabels,
+        selected: impl Fn(usize) -> bool + Sync,
+    ) -> FlameGraph {
+        let tables = self.lane_tables(labels);
+        let union_len: usize = tables
             .iter()
             .enumerate()
             .filter(|&(i, _)| selected(i))
             .map(|(_, t)| t.nodes.len())
             .sum();
         let mut elems: Vec<KeyRef> = Vec::with_capacity(union_len);
-        for (i, table) in self.lane_tables.iter().enumerate() {
+        for (i, table) in tables.iter().enumerate() {
             if !selected(i) {
                 continue;
             }
@@ -580,15 +627,14 @@ impl TrackFlamer {
             }
         }
         elems.par_sort_by(|a, b| a.key.cmp(b.key));
-        reconstruct_and_seal(&elems, &self.lane_tables, &self.flamer.profile)
+        reconstruct_and_seal(&elems, tables, &self.flamer.profile)
     }
 }
 
 /// One lane's path-reduced node table: every distinct aggregation path in the
 /// lane, reduced to one [`LaneNode`], with the paths' key bytes packed into one
 /// shared `key_pool` (rather than a `Vec<u8>` per node) and `nodes` sorted
-/// ascending by key bytes. Selection-independent, so it is built once per lane
-/// when the [`TrackFlamer`] is.
+/// ascending by key bytes.
 struct LaneTable {
     key_pool: Vec<u8>,
     nodes: Vec<LaneNode>,
@@ -610,10 +656,10 @@ struct LaneNode {
 /// Build every lane's [`LaneTable`], one per [`Profile::threads`] entry, sharded
 /// across `workers`. A lane never selected (a critical-path lane) still gets a
 /// table so the vector indexes by thread index directly.
-fn build_lane_tables(flamer: &Flamer, workers: usize) -> Vec<LaneTable> {
+fn build_lane_tables(flamer: &Flamer, labels: FlameLabels, workers: usize) -> Vec<LaneTable> {
     let n = flamer.profile.threads().len();
     let shards = run_sharded(workers, n, |out: &mut Vec<(usize, LaneTable)>, i| {
-        out.push((i, build_lane_table(flamer, i)));
+        out.push((i, build_lane_table(flamer, labels, i)));
     });
     let mut tables: Vec<Option<LaneTable>> = (0..n).map(|_| None).collect();
     for shard in shards {
@@ -627,10 +673,10 @@ fn build_lane_tables(flamer: &Flamer, workers: usize) -> Vec<LaneTable> {
 /// Reduce lane `lane_index` to its [`LaneTable`]: emit one keyed row per span,
 /// sort by key, segment-reduce equal keys into nodes, and pack each distinct key
 /// into the shared `key_pool`.
-fn build_lane_table(flamer: &Flamer, lane_index: usize) -> LaneTable {
+fn build_lane_table(flamer: &Flamer, labels: FlameLabels, lane_index: usize) -> LaneTable {
     let thread = &flamer.profile.threads()[lane_index];
     let mut rows: Vec<Row> = Vec::new();
-    emit_lane_rows(flamer, thread, &mut rows);
+    emit_lane_rows(flamer, labels, thread, &mut rows);
     rows.sort_unstable_by(|a, b| a.key.cmp(&b.key));
 
     let mut key_pool: Vec<u8> = Vec::new();
@@ -742,14 +788,14 @@ fn containment_parents(slices: &[Slice]) -> Vec<Option<usize>> {
 /// Emit one [`Row`] per slice of `thread` into `out`, keyed by its
 /// aggregation path. Slices are in lane order, so a slice's containment parent
 /// precedes it and its key is the parent's key extended by this slice's segment.
-fn emit_lane_rows(flamer: &Flamer, thread: &ThreadTrack, out: &mut Vec<Row>) {
+fn emit_lane_rows(flamer: &Flamer, labels: FlameLabels, thread: &ThreadTrack, out: &mut Vec<Row>) {
     let slices = flamer.profile.slices(thread);
     let details = flamer.profile.details(thread);
     let parents = containment_parents(slices);
     out.reserve(slices.len());
     let mut keys: Vec<Vec<u8>> = Vec::with_capacity(slices.len());
     for i in 0..slices.len() {
-        let seg = flamer.span_label(&slices[i], &details[i]);
+        let seg = flamer.span_label(labels, &slices[i], &details[i]);
         let rank = flamer.ranks.rank_of(seg.label);
         let parent_key = match parents[i] {
             Some(p) => keys[p].as_slice(),
@@ -887,8 +933,8 @@ struct KeyRef<'a> {
     src: Src,
 }
 
-/// Locates a [`LaneNode`]: `lane` indexes [`TrackFlamer::lane_tables`], `node`
-/// its `.nodes`.
+/// Locates a [`LaneNode`] within one labelling's lane tables: `lane` indexes the
+/// tables, `node` that table's `.nodes`.
 #[derive(Clone, Copy)]
 struct Src {
     lane: u32,
@@ -1146,11 +1192,15 @@ mod tests {
             .unwrap_or_else(|| panic!("no child {name}"))
     }
 
-    /// The all-lanes flame graph: every real lane, the critical-path lane's
-    /// redirected copies of worker time excluded.
-    fn flame(p: &Arc<Profile>) -> FlameGraph {
+    /// The all-lanes flame graph under `labels`: every real lane, the
+    /// critical-path lane's redirected copies of worker time excluded.
+    fn flame_as(p: &Arc<Profile>, labels: FlameLabels) -> FlameGraph {
         let t = p.threads();
-        TrackFlamer::new(p).build(|i| t[i].lane_class != LaneClass::CriticalPath)
+        TrackFlamer::new(p).build(labels, |i| t[i].lane_class != LaneClass::CriticalPath)
+    }
+
+    fn flame(p: &Arc<Profile>) -> FlameGraph {
+        flame_as(p, FlameLabels::Mnemonic)
     }
 
     const METRICS: FlameMetrics = FlameMetrics { row_height: 10.0 };
@@ -1280,6 +1330,30 @@ mod tests {
     }
 
     #[test]
+    fn name_labels_keep_one_mnemonics_targets_apart() {
+        // Two actions of the same mnemonic on different targets: under `Name`
+        // each keeps its own frame reading its action name, under `Mnemonic`
+        // the two merge into one.
+        let p = profile(vec![track(
+            1,
+            LaneClass::Execution,
+            vec![
+                action_named("Compiling //a:a", "Rustc", 0, 100),
+                action_named("Compiling //b:b", "Rustc", 100, 40),
+            ],
+        )]);
+        let named = flame_as(&p, FlameLabels::Name);
+        assert_eq!(named.children(&named.root()).len(), 2);
+        assert_eq!(child(&named, &named.root(), "Compiling //a:a").total_us, 100);
+        assert_eq!(child(&named, &named.root(), "Compiling //b:b").total_us, 40);
+        let merged = flame_as(&p, FlameLabels::Mnemonic);
+        assert_eq!(merged.children(&merged.root()).len(), 1);
+        let rustc = child(&merged, &merged.root(), "Rustc");
+        assert_eq!(rustc.total_us, 140);
+        assert_eq!(rustc.count, 2);
+    }
+
+    #[test]
     fn mnemonicless_slice_keeps_its_name() {
         // A top-level slice with no mnemonic keeps its own informative name, not a
         // coarse work-class bucket — so distinct operations stay distinct.
@@ -1304,7 +1378,9 @@ mod tests {
             track(9, LaneClass::RepoFetch, vec![action("Fetch", 0, 5)]),
         ]);
         let t = p.threads();
-        let class = |c: LaneClass| TrackFlamer::new(&p).build(move |i| t[i].lane_class == c);
+        let class = |c: LaneClass| {
+            TrackFlamer::new(&p).build(FlameLabels::Mnemonic, move |i| t[i].lane_class == c)
+        };
         let analysis = class(LaneClass::Analysis);
         assert_eq!(analysis.root().total_us, 20);
         assert!(analysis

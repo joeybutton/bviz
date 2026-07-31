@@ -10,8 +10,8 @@ mod view;
 pub use bviz_trace_profile::{LaneClass, SpanRole, Workload};
 pub use cull::{Cull, Viewport, VisibleSlice, visible_slices};
 pub use flame::{
-    FlameBox, FlameGraph, FlameMetrics, FlameNode, FlamePlacement, TrackFlamer, flame_height,
-    lay_out_flame,
+    FlameBox, FlameGraph, FlameLabels, FlameMetrics, FlameNode, FlamePlacement, TrackFlamer,
+    flame_height, lay_out_flame,
 };
 pub use lanes::{CounterPos, Lane, LaneLayout, LaneMetrics, lay_out_lanes};
 pub use scopes::ScopeAggregate;
