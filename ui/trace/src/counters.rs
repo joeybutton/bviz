@@ -1,6 +1,6 @@
 use crate::chart::{
-    clip_polyline_x, downsample_columns, format_counter, format_time, nice_step, sample_at,
-    step_vertices, unit_for,
+    clip_polyline_x, collapse_runs, downsample_columns, format_counter, format_time, nice_step,
+    sample_at, step_vertices, unit_for,
 };
 use crate::regions::{Regions, graph_lanes};
 use crate::theme::{self, Palette};
@@ -13,6 +13,11 @@ use gpui::{
     App, BorderStyle, Bounds, ContentMask, Hsla, PathBuilder, Pixels, Point, TextAlign, Window,
     fill, point, px, quad, size,
 };
+
+/// How far a counter plot's drawn edge may be displaced, in device pixels, in
+/// exchange for spending fewer vertices on it: half a device pixel, which the
+/// raster cannot resolve.
+const COUNTER_EDGE_SLACK_PX: f32 = 0.5;
 
 /// Maps a counter lane's values to y-positions in its chart area, so the plotted
 /// line and the crosshair readout share one transform. The floor (value 0) sits
@@ -42,8 +47,10 @@ impl CounterYScale {
 /// height. Each lane is a header band over a chart area that holds the lane's
 /// series as a filled step area scaled to the chart height and the series' peak.
 /// Charts are confined to the content column. Work per lane is bounded by the
-/// viewport: the visible points are found by binary search and dense runs are
-/// collapsed to per-pixel-column extremes before tessellation.
+/// viewport: the visible points are found by binary search, and dense runs are
+/// collapsed to per-pixel-column extremes and then thinned to the edge slack
+/// before tessellation, so a chart costs vertices in proportion to the detail it
+/// can show rather than to the samples behind it.
 pub(crate) fn paint_graph(
     profile: &Profile,
     tv: TimeView,
@@ -56,6 +63,7 @@ pub(crate) fn paint_graph(
     }
     let counters = profile.counters();
     let lanes = graph_lanes(counters.len(), regions.panel_top, regions.panel_h());
+    let edge_slack = COUNTER_EDGE_SLACK_PX / window.scale_factor();
     let content_mask = ContentMask {
         bounds: Bounds::new(
             point(px(regions.content_left), px(regions.panel_top)),
@@ -109,6 +117,7 @@ pub(crate) fn paint_graph(
                 .iter()
                 .map(|p| (x_of(p.ts_us), y_scale.value_to_y(p.value))),
         ));
+        let boundary = collapse_runs(&boundary, edge_slack);
         let top = clip_polyline_x(&boundary, clip_lo, clip_hi);
         if top.len() < 2 {
             continue;

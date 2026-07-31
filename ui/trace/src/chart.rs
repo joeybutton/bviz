@@ -109,6 +109,33 @@ pub(crate) fn step_vertices(
     })
 }
 
+/// Thins a boundary polyline (x non-decreasing) by splitting it into runs that
+/// stay within half of `max_shift` of the y each run starts at and keeping only
+/// each run's first and last vertex, which bounds the drawn edge's displacement
+/// by `max_shift`: a dropped vertex and the segment drawn across it both lie
+/// within half of it of the run's first y. A counter chart is a few pixels tall,
+/// so a dense series spends most of its vertices on edge detail below what the
+/// raster resolves; dropping them shrinks the tessellated area, which every
+/// repaint of the window copies in full. Values read at the crosshair come from
+/// the series rather than this polyline, so they stay exact.
+pub(crate) fn collapse_runs(verts: &[(f32, f32)], max_shift: f32) -> Vec<(f32, f32)> {
+    let tol = max_shift / 2.0;
+    let mut out: Vec<(f32, f32)> = Vec::with_capacity(verts.len());
+    let mut rest = verts;
+    while let Some((&anchor, tail)) = rest.split_first() {
+        out.push(anchor);
+        let run = tail
+            .iter()
+            .position(|v| (v.1 - anchor.1).abs() > tol)
+            .unwrap_or(tail.len());
+        if run > 0 {
+            out.push(tail[run - 1]);
+        }
+        rest = &tail[run..];
+    }
+    out
+}
+
 /// Collapses a boundary polyline (x non-decreasing) to at most two vertices per
 /// whole-pixel column: a column crowded with points keeps only its extreme-y
 /// pair, in encounter order, preserving the filled area's per-pixel envelope; a
@@ -344,6 +371,45 @@ mod tests {
             vec![(3.0, 1.0)]
         );
         assert_eq!(step_vertices([]).collect::<Vec<_>>(), vec![]);
+    }
+
+    #[test]
+    fn collapse_runs_thins_within_the_shift_budget() {
+        // A flat run keeps only its ends, whatever its length.
+        let flat: Vec<(f32, f32)> = (0..10).map(|i| (i as f32, 4.0)).collect();
+        assert_eq!(collapse_runs(&flat, 1.0), vec![(0.0, 4.0), (9.0, 4.0)]);
+
+        // A vertex beyond half the budget from the run's first y starts a new run.
+        let steps = vec![(0.0, 0.0), (1.0, 0.4), (2.0, 0.4), (3.0, 9.0), (4.0, 9.0)];
+        assert_eq!(
+            collapse_runs(&steps, 1.0),
+            vec![(0.0, 0.0), (2.0, 0.4), (3.0, 9.0), (4.0, 9.0)]
+        );
+
+        // Every kept vertex is one of the input's, in order, first and last among
+        // them, and no dropped vertex is further than the budget from the segment
+        // drawn across it.
+        let noisy: Vec<(f32, f32)> = (0..200)
+            .map(|i| (i as f32, (i as f32 * 0.3).sin() * 0.2 + i as f32 * 0.01))
+            .collect();
+        let budget = 0.5;
+        let kept = collapse_runs(&noisy, budget);
+        assert!(kept.len() < noisy.len());
+        assert_eq!(kept.first(), noisy.first());
+        assert_eq!(kept.last(), noisy.last());
+        assert!(kept.windows(2).all(|w| w[0].0 <= w[1].0));
+        for p in &noisy {
+            let i = kept.partition_point(|k| k.0 <= p.0).max(1) - 1;
+            let drawn = match kept.get(i + 1) {
+                Some(&b) if b.0 > kept[i].0 => lerp_y(kept[i].0, kept[i].1, b.0, b.1, p.0),
+                _ => kept[i].1,
+            };
+            assert!((drawn - p.1).abs() <= budget, "{p:?} shifted to {drawn}");
+        }
+
+        // A tolerance of zero still merges exactly equal runs and nothing else.
+        assert_eq!(collapse_runs(&steps, 0.0), steps);
+        assert_eq!(collapse_runs(&[], 1.0), vec![]);
     }
 
     #[test]
