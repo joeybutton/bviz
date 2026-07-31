@@ -58,7 +58,7 @@ pub(crate) fn scrollbar_geom(
 /// The scroll bar for `axis` built from the loaded graph's current view state.
 fn current_scrollbar(view: &GraphView, axis: Axis) -> Option<Scrollbar> {
     let content = content_size(view.laid_out()?);
-    scrollbar_geom(axis, view.viewport, content, view.camera())
+    scrollbar_geom(axis, view.framing.viewport(), content, view.camera())
 }
 
 /// The axis of the scroll bar whose track a press at `position` (window px) landed
@@ -75,16 +75,13 @@ fn scroll_to(view: &mut GraphView, axis: Axis, offset: f32, cx: &mut Context<Gra
     let Some(content) = view.laid_out().map(content_size) else {
         return;
     };
-    let zoom = view.zoom;
-    let vp = view.viewport.size;
-    let (px, py) = view.pan;
+    let Camera { zoom, pan: (px, py) } = view.camera();
+    let vp = view.framing.viewport().size;
     let pan = match axis {
         Axis::Vertical => (px, -offset),
         Axis::Horizontal => (-offset, py),
     };
-    view.pan = clamp_pan(pan, zoom, vp, content);
-    // A manual scroll overrides any settle still easing.
-    view.anim = None;
+    view.framing.move_to(Camera { zoom, pan: clamp_pan(pan, zoom, vp, content) });
     cx.notify();
 }
 
