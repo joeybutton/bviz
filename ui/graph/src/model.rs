@@ -6,6 +6,7 @@ use bviz_graph_layout::{Id, LaidOut, Names};
 use bviz_ui_components::load_in_background;
 use gpui::{Context, Task};
 use std::collections::HashSet;
+use std::sync::Arc;
 
 /// Caps the nodes the startup view opens with.
 const MAX_VISIBLE_NODES: usize = 400;
@@ -18,10 +19,10 @@ pub(crate) struct Loaded {
     laid_out: LaidOut,
     /// The built (pre-quotient) graph, cached so toggling a group re-lays-out
     /// without re-reading or re-parsing the proto.
-    base: Graph,
+    base: Arc<Graph>,
     /// The base with its transitively-redundant edges removed, cached so the
     /// reduced view's edges are a stable projection of one fixed skeleton.
-    reduced_base: Graph,
+    reduced_base: Arc<Graph>,
     /// The interned node-id table the base graph keys on, threaded into each
     /// relayout so the quotient pass can mint group ids.
     names: Names,
@@ -83,7 +84,12 @@ impl Model {
                         view.model.expandable =
                             bviz_graph_layout::lod::expandable_containers(&graph);
                         view.model.expanded = expanded;
-                        Source::Loaded(Loaded { laid_out, base: graph, reduced_base, names })
+                        Source::Loaded(Loaded {
+                            laid_out,
+                            base: Arc::new(graph),
+                            reduced_base: Arc::new(reduced_base),
+                            names,
+                        })
                     }
                     Err(err) => Source::Message(err),
                 };
@@ -147,8 +153,8 @@ pub(crate) fn relayout(view: &mut GraphView, cx: &mut Context<GraphView>) {
     let Source::Loaded(loaded) = &view.model.source else {
         return;
     };
-    let base = loaded.base.clone();
-    let reduced_base = loaded.reduced_base.clone();
+    let base = Arc::clone(&loaded.base);
+    let reduced_base = Arc::clone(&loaded.reduced_base);
     // The relayout mints group ids against the interned-name table, so it
     // extends a clone and hands it back for the view to adopt.
     let mut names = loaded.names.clone();
