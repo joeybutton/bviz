@@ -457,6 +457,56 @@ mod tests {
         assert_eq!(semantic(&serial), semantic(&parallel));
     }
 
+    #[test]
+    fn parse_chunks_declines_without_a_usable_array() {
+        for text in [
+            // No `traceEvents` key.
+            r#"{"otherData":{"bazel_version":"9.0.0"}}"#,
+            // The key, with nothing opening an array after it.
+            r#"{"traceEvents":null}"#,
+            // An array that never closes.
+            "{\"traceEvents\":[\n{\"cat\":\"c\",\"name\":\"a\",\"ph\":\"X\",\"ts\":0,\"dur\":1,\"tid\":1}\n",
+            // An empty array, whose close sits on the start of its contents.
+            r#"{"traceEvents":[]}"#,
+        ] {
+            assert!(parse_chunks(text, 4, 0).is_none(), "{text}");
+        }
+    }
+
+    #[test]
+    fn parse_chunks_declines_an_array_under_the_threshold() {
+        let json = chunkable_profile_json();
+        assert!(parse_chunks(&json, 4, 0).is_some());
+        assert!(parse_chunks(&json, 4, json.len() + 1).is_none());
+    }
+
+    #[test]
+    fn parse_chunks_declines_an_array_on_one_line() {
+        // Chunks are cut at newlines, so an array written on a single line
+        // offers no cut, though it parses serially.
+        let json = "{\"traceEvents\":[".to_string()
+            + "{\"cat\":\"c\",\"name\":\"a\",\"ph\":\"X\",\"ts\":0,\"dur\":1,\"tid\":1},"
+            + "{\"cat\":\"c\",\"name\":\"b\",\"ph\":\"X\",\"ts\":1,\"dur\":1,\"tid\":1}"
+            + "]}";
+        assert!(parse_streaming(&json).is_ok());
+        assert!(parse_chunks(&json, 4, 0).is_none());
+    }
+
+    #[test]
+    fn parse_chunks_declines_a_chunk_that_fails_to_parse() {
+        let with_last_event =
+            |event: &str| chunkable_profile_json().replace("\n]}", &format!(",\n{event}\n]}}"));
+        let event = "{\"cat\":\"c\",\"name\":\"z\",\"ph\":\"X\",\"ts\":40,\"dur\":1,\"tid\":2}";
+        // A trailing comma inside the object: the scanner defers it and the
+        // serde fallback rejects it, so whichever chunk holds the line fails.
+        let trailing_comma = event.replace('}', ",}");
+        // The well-formed array is of the same shape and clears every gate
+        // ahead of the parse, leaving only the failed chunk to decline the
+        // other.
+        assert!(parse_chunks(&with_last_event(event), 4, 0).is_some());
+        assert!(parse_chunks(&with_last_event(&trailing_comma), 4, 0).is_none());
+    }
+
     /// Constructs the chunked path can only take through the scanner's serde
     /// fallback (floats, `\uXXXX` escapes, huge magnitudes) mixed with
     /// fast-path constructs (nulls, duplicate keys, ignored composites, arg
