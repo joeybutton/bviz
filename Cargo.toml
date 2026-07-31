@@ -14,11 +14,13 @@ members = [
     "ui/terminal",
     "ui/theme",
     "ui/trace",
+    "util/parallel",
 ]
 resolver = "2"
 
 [workspace.dependencies]
 alacritty_terminal = "0.26"
+bviz_parallel = { path = "util/parallel" }
 clap = { version = "4", features = ["derive"] }
 crossbeam-channel = "0.5"
 crossbeam-utils = "0.8"

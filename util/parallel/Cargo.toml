@@ -1,0 +1,11 @@
+[package]
+name = "bviz_parallel"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "bviz_parallel"
+path = "src/lib.rs"
+
+[dependencies]
+num_cpus = { workspace = true }

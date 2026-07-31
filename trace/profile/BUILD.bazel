@@ -8,11 +8,11 @@ rust_library(
     crate_name = "bviz_trace_profile",
     visibility = ["//trace/layout:__pkg__", "//ui/trace:__pkg__"],
     deps = [
+        "//util/parallel",
         "@crates//:crossbeam-channel",
         "@crates//:crossbeam-utils",
         "@crates//:flate2",
         "@crates//:hashbrown",
-        "@crates//:num_cpus",
         "@crates//:rustc-hash",
         "@crates//:serde",
         "@crates//:serde_json",

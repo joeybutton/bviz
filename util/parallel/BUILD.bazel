@@ -1,0 +1,12 @@
+load("@rules_rs//rs:rust_library.bzl", "rust_library")
+
+rust_library(
+    name = "parallel",
+    srcs = glob(["src/**/*.rs"]),
+    crate_name = "bviz_parallel",
+    visibility = [
+        "//graph/layout:__pkg__",
+        "//trace/profile:__pkg__",
+    ],
+    deps = ["@crates//:num_cpus"],
+)
