@@ -95,12 +95,26 @@ pub(crate) fn clip_polyline_x(verts: &[(f32, f32)], lo: f32, hi: f32) -> Vec<(f3
     out
 }
 
+/// Expands a sequence of projected samples (x non-decreasing) into a staircase
+/// boundary: each sample's value holds until the next sample's x, so the plot
+/// asserts nothing about the unmeasured interval between two samples. The last
+/// sample ends the boundary at its own x, having no successor to hold until.
+pub(crate) fn step_vertices(
+    samples: impl IntoIterator<Item = (f32, f32)>,
+) -> impl Iterator<Item = (f32, f32)> {
+    let mut held_y: Option<f32> = None;
+    samples.into_iter().flat_map(move |(x, y)| {
+        let tread = held_y.replace(y).map(|prev| (x, prev));
+        tread.into_iter().chain(std::iter::once((x, y)))
+    })
+}
+
 /// Collapses a boundary polyline (x non-decreasing) to at most two vertices per
 /// whole-pixel column: a column crowded with points keeps only its extreme-y
 /// pair, in encounter order, preserving the filled area's per-pixel envelope; a
 /// column with at most two points passes through unchanged, so sparse runs keep
-/// their exact linear slopes at high zoom. Streams its input, so the caller
-/// need not materialize the projected vertices.
+/// their exact shape at high zoom. Streams its input, so the caller need not
+/// materialize the projected vertices.
 pub(crate) fn downsample_columns(verts: impl IntoIterator<Item = (f32, f32)>) -> Vec<(f32, f32)> {
     struct Col {
         x: f32,
@@ -161,27 +175,18 @@ pub(crate) fn downsample_columns(verts: impl IntoIterator<Item = (f32, f32)>) ->
     out
 }
 
-/// The series' value at time `t` (microseconds), linearly interpolated between
-/// the two bracketing points. `None` when `t` lies outside the series' covered
-/// `[first.ts, last.ts]` range. Points are assumed sorted by `ts_us` ascending.
+/// The series' value in effect at time `t` (microseconds): the value of the last
+/// point at or before `t`, held until the next point, as [`step_vertices`] plots
+/// it. `None` when `t` lies outside the series' covered `[first.ts, last.ts]`
+/// range. Points are assumed sorted by `ts_us` ascending.
 pub(crate) fn sample_at(points: &[CounterPoint], t: f64) -> Option<f64> {
     let first = points.first()?;
     let last = points.last()?;
     if t < first.ts_us as f64 || t > last.ts_us as f64 {
         return None;
     }
-    let hi = points.partition_point(|p| (p.ts_us as f64) < t);
-    if hi == 0 {
-        return Some(points[0].value);
-    }
-    let a = &points[hi - 1];
-    let b = &points[hi];
-    let span = (b.ts_us - a.ts_us) as f64;
-    if span <= 0.0 {
-        return Some(b.value);
-    }
-    let frac = (t - a.ts_us as f64) / span;
-    Some(a.value + (b.value - a.value) * frac)
+    let after = points.partition_point(|p| (p.ts_us as f64) <= t);
+    Some(points[after - 1].value)
 }
 
 /// The unit a counter lane's values carry, inferred from its name since the
@@ -285,7 +290,7 @@ mod tests {
     }
 
     #[test]
-    fn sample_at_interpolates_within_range() {
+    fn sample_at_holds_each_value_until_the_next_point() {
         let points = vec![
             CounterPoint {
                 ts_us: 100,
@@ -299,13 +304,14 @@ mod tests {
         // Exact hit on a point.
         assert_eq!(sample_at(&points, 100.0), Some(10.0));
         assert_eq!(sample_at(&points, 200.0), Some(30.0));
-        // Midpoint linear interpolation.
-        assert_eq!(sample_at(&points, 150.0), Some(20.0));
+        // Between points the earlier value still stands, right up to the next.
+        assert_eq!(sample_at(&points, 150.0), Some(10.0));
+        assert_eq!(sample_at(&points, 199.9), Some(10.0));
         // Out of range on either side yields no value.
         assert_eq!(sample_at(&points, 50.0), None);
         assert_eq!(sample_at(&points, 250.0), None);
         assert_eq!(sample_at(&[], 100.0), None);
-        // Coincident timestamps resolve to the first, without dividing by 0.
+        // Of coincident timestamps the last is the one in effect.
         let dup = vec![
             CounterPoint {
                 ts_us: 100,
@@ -316,7 +322,28 @@ mod tests {
                 value: 30.0,
             },
         ];
-        assert_eq!(sample_at(&dup, 100.0), Some(10.0));
+        assert_eq!(sample_at(&dup, 100.0), Some(30.0));
+    }
+
+    #[test]
+    fn step_vertices_holds_each_value_to_the_next_sample() {
+        let samples = vec![(0.0, 5.0), (10.0, 2.0), (20.0, 7.0)];
+        assert_eq!(
+            step_vertices(samples).collect::<Vec<_>>(),
+            vec![
+                (0.0, 5.0),
+                (10.0, 5.0),
+                (10.0, 2.0),
+                (20.0, 2.0),
+                (20.0, 7.0),
+            ]
+        );
+        // A lone sample has no interval to span, so it stands alone.
+        assert_eq!(
+            step_vertices([(3.0, 1.0)]).collect::<Vec<_>>(),
+            vec![(3.0, 1.0)]
+        );
+        assert_eq!(step_vertices([]).collect::<Vec<_>>(), vec![]);
     }
 
     #[test]

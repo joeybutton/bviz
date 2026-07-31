@@ -1,6 +1,6 @@
 use crate::chart::{
     clip_polyline_x, downsample_columns, format_counter, format_time, nice_step, sample_at,
-    unit_for,
+    step_vertices, unit_for,
 };
 use crate::regions::{Regions, graph_lanes};
 use crate::theme::{self, Palette};
@@ -40,7 +40,7 @@ impl CounterYScale {
 
 /// Paints the bottom graph section: every counter lane fitted to the section
 /// height. Each lane is a header band over a chart area that holds the lane's
-/// series as a filled area scaled to the chart height and the series' peak.
+/// series as a filled step area scaled to the chart height and the series' peak.
 /// Charts are confined to the content column. Work per lane is bounded by the
 /// viewport: the visible points are found by binary search and dense runs are
 /// collapsed to per-pixel-column extremes before tessellation.
@@ -104,11 +104,11 @@ pub(crate) fn paint_graph(
         if visible.len() < 2 {
             continue;
         }
-        let boundary = downsample_columns(
+        let boundary = downsample_columns(step_vertices(
             visible
                 .iter()
                 .map(|p| (x_of(p.ts_us), y_scale.value_to_y(p.value))),
-        );
+        ));
         let top = clip_polyline_x(&boundary, clip_lo, clip_hi);
         if top.len() < 2 {
             continue;
