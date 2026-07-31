@@ -7,6 +7,7 @@
 //! before quotient and layout shrinks a graph of tens of thousands of nodes to
 //! a view whose size the caller caps.
 
+use std::cell::RefCell;
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashMap, HashSet};
 
@@ -71,29 +72,41 @@ pub fn collapse(graph: &Graph, expanded: &HashSet<Id>) -> Graph {
     out
 }
 
-/// A startup expansion set: the largest prefix of the reachable multi-child
-/// containers — ordered cheapest-first, by the number of nodes each reveals —
-/// whose collapsed view fits both `max_nodes` and `max_edges`. Singletons
-/// auto-expand in `collapse` and leaves can't expand, so only multi-child
-/// containers are candidates; their direct children's nearest multi-child
-/// descendants become reachable as each is expanded. Visiting the cheapest
-/// container next keeps each prefix step small, so the search settles close to
-/// the caps rather than overshooting a whole level and falling far short.
+/// A startup expansion set: the containers to expand for the largest collapsed
+/// view that fits both `max_nodes` and `max_edges`.
 pub fn default_expansion(graph: &Graph, max_nodes: usize, max_edges: usize) -> HashSet<Id> {
-    let mut children: HashMap<Id, Vec<Id>> = HashMap::new();
-    let mut roots: Vec<Id> = Vec::new();
-    for node in &graph.nodes {
-        match node.parent {
-            Some(parent) => children.entry(parent).or_default().push(node.id),
-            None => roots.push(node.id),
+    let order = expansion_order(&Forest::new(graph));
+    let fitting = largest_fitting_prefix(&IndexedGraph::new(graph), &order, max_nodes, max_edges);
+    order[..fitting].iter().copied().collect()
+}
+
+/// A graph's containment forest, queried while choosing containers to expand.
+struct Forest {
+    children: HashMap<Id, Vec<Id>>,
+    roots: Vec<Id>,
+    /// Memoizes [`Self::visible_subtree`].
+    visible: RefCell<HashMap<Id, usize>>,
+}
+
+impl Forest {
+    fn new(graph: &Graph) -> Self {
+        let mut children: HashMap<Id, Vec<Id>> = HashMap::new();
+        let mut roots: Vec<Id> = Vec::new();
+        for node in &graph.nodes {
+            match node.parent {
+                Some(parent) => children.entry(parent).or_default().push(node.id),
+                None => roots.push(node.id),
+            }
         }
+        Self { children, roots, visible: RefCell::new(HashMap::new()) }
     }
 
-    // Nearest multi-child container at or below `n`, walking through single-child
-    // nodes (which auto-expand) until a node with two or more or zero children.
-    fn descend(children: &HashMap<Id, Vec<Id>>, mut n: Id) -> Option<Id> {
+    /// The nearest multi-child container at or below `n`, walking through
+    /// single-child nodes (which auto-expand) until a node with two or more or
+    /// zero children.
+    fn descend(&self, mut n: Id) -> Option<Id> {
         loop {
-            match children.get(&n).map(Vec::as_slice) {
+            match self.children.get(&n).map(Vec::as_slice) {
                 Some([only]) => n = *only,
                 Some(_) => return Some(n),
                 None => return None,
@@ -101,32 +114,38 @@ pub fn default_expansion(graph: &Graph, max_nodes: usize, max_edges: usize) -> H
         }
     }
 
-    // Nodes revealed by expanding a container: its direct children plus the
-    // singleton descendants that auto-expand beneath each.
-    fn visible_subtree(children: &HashMap<Id, Vec<Id>>, n: Id, memo: &mut HashMap<Id, usize>) -> usize {
-        if let Some(&v) = memo.get(&n) {
-            return v;
-        }
-        let v = 1 + match children.get(&n).map(Vec::as_slice) {
-            Some([only]) => visible_subtree(children, *only, memo),
-            _ => 0,
-        };
-        memo.insert(n, v);
-        v
+    /// How many nodes expanding `container` puts on screen.
+    fn reveal_count(&self, container: Id) -> usize {
+        self.children[&container].iter().map(|&c| self.visible_subtree(c)).sum()
     }
 
-    // Best-first over reachable multi-child containers, cheapest reveal first
-    // (ties by id for a stable order). A container is reached only after its
-    // nearest multi-child ancestor is taken, so `order` is ancestor-closed and
-    // its prefixes nest.
+    /// `n` plus the chain of singleton descendants that auto-expands below it.
+    fn visible_subtree(&self, n: Id) -> usize {
+        if let Some(&v) = self.visible.borrow().get(&n) {
+            return v;
+        }
+        let v = 1 + match self.children.get(&n).map(Vec::as_slice) {
+            Some([only]) => self.visible_subtree(*only),
+            _ => 0,
+        };
+        self.visible.borrow_mut().insert(n, v);
+        v
+    }
+}
+
+/// The multi-child containers of `forest` reachable from its roots, cheapest
+/// reveal first (ties by id for a stable order). A container is reached only
+/// once its nearest multi-child ancestor is taken, so the order is
+/// ancestor-closed and its prefixes nest. Taking the cheapest container next
+/// keeps each prefix step small, so a search over the prefixes settles close to
+/// a size cap.
+fn expansion_order(forest: &Forest) -> Vec<Id> {
     let mut order: Vec<Id> = Vec::new();
     let mut seen: HashSet<Id> = HashSet::new();
-    let mut memo: HashMap<Id, usize> = HashMap::new();
     let mut heap: BinaryHeap<Reverse<(usize, Id)>> = BinaryHeap::new();
-    for &r in &roots {
-        if let Some(d) = descend(&children, r) {
-            let reveal = children[&d].iter().map(|&c| visible_subtree(&children, c, &mut memo)).sum();
-            heap.push(Reverse((reveal, d)));
+    for &r in &forest.roots {
+        if let Some(d) = forest.descend(r) {
+            heap.push(Reverse((forest.reveal_count(d), d)));
         }
     }
     while let Some(Reverse((_, c))) = heap.pop() {
@@ -134,23 +153,27 @@ pub fn default_expansion(graph: &Graph, max_nodes: usize, max_edges: usize) -> H
             continue;
         }
         order.push(c);
-        for &k in &children[&c] {
-            if let Some(d) = descend(&children, k) {
+        for &k in &forest.children[&c] {
+            if let Some(d) = forest.descend(k) {
                 if !seen.contains(&d) {
-                    let reveal =
-                        children[&d].iter().map(|&c| visible_subtree(&children, c, &mut memo)).sum();
-                    heap.push(Reverse((reveal, d)));
+                    heap.push(Reverse((forest.reveal_count(d), d)));
                 }
             }
         }
     }
+    order
+}
 
-    // Both counts rise monotonically with the prefix length (more expansion only
-    // reveals nodes and de-aggregates edges), so binary-search the largest prefix
-    // whose collapsed view fits both caps. The binary search probes many
-    // candidate prefixes, so it counts each view over an integer-indexed copy of
-    // the graph rather than materializing the collapsed graph every time.
-    let indexed = IndexedGraph::new(graph);
+/// The length of the longest prefix of `order` whose expansion collapses to a
+/// view fitting both caps. Both counts rise monotonically with the prefix
+/// length — more expansion only reveals nodes and de-aggregates edges — so the
+/// answer is a binary search.
+fn largest_fitting_prefix(
+    indexed: &IndexedGraph,
+    order: &[Id],
+    max_nodes: usize,
+    max_edges: usize,
+) -> usize {
     let order_idx: Vec<u32> = order.iter().map(|id| id.0).collect();
     let fits = |k: usize| {
         let (nodes, edges) = indexed.counts(&order_idx[..k]);
@@ -165,7 +188,7 @@ pub fn default_expansion(graph: &Graph, max_nodes: usize, max_edges: usize) -> H
             hi = mid - 1;
         }
     }
-    order[..lo].iter().copied().collect()
+    lo
 }
 
 /// An integer-indexed copy of a graph's containment forest and edges, so a
