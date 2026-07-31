@@ -2,14 +2,14 @@
 //! through `bviz_graph_layout`, lays the graph out, and opens a window
 //! rendering the result.
 
-use bviz_graph_layout::{EdgeKind, Id, Kind, LaidOut};
+use bviz_graph_layout::{Id, LaidOut};
 use bviz_ui_components::{track_drag, Axis};
 use bviz_ui_shell::Chrome;
 use clap::Parser;
 use gpui::{
     App, Bounds, Context, Div, Entity, FocusHandle, Hsla, IntoElement, KeyDownEvent, MouseButton,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Render, Rgba, ScrollDelta,
-    ScrollWheelEvent, Stateful, Window, canvas, div, prelude::*, px, rems, size,
+    ScrollWheelEvent, Stateful, Window, canvas, div, prelude::*, px, size,
 };
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -22,6 +22,7 @@ mod drag;
 mod emphasis;
 mod framing;
 mod model;
+mod overlay;
 mod paint;
 mod scroll;
 
@@ -36,8 +37,7 @@ use emphasis::Emphasis;
 use framing::{build_prepaint, Framing};
 use model::{Model, Source};
 use paint::{
-    PaintConnector, collect_connectors, edge_color, kind_accent, lane_polyline, paint_box,
-    paint_boxes, paint_connector,
+    PaintConnector, collect_connectors, lane_polyline, paint_box, paint_boxes, paint_connector,
 };
 use scroll::{scroll_drag_move, scrollbar_geom, scrollbar_hit, start_scroll_drag};
 
@@ -155,48 +155,12 @@ impl GraphView {
         flags: ViewFlags,
         palette: Palette,
     ) -> Stateful<Div> {
-        let ViewFlags { emphasis, relaying, hovered, dim_enabled, reduced } = flags;
-        let dimming = compute_dimming(g, hovered, dim_enabled);
-        let boxes = paint_boxes(g, expandable, emphasis, &dimming, &palette);
+        let dimming = compute_dimming(g, flags.hovered, flags.dim_enabled);
+        let boxes = paint_boxes(g, expandable, flags.emphasis, &dimming, &palette);
         let connectors = collect_connectors(g, &dimming);
-        let legend = legend(g, &palette);
-        let relaying_indicator = relaying_indicator(relaying, &palette);
-        // Kept in sync with the `h` key, which flips the same field.
-        let dim_toggle = bviz_ui_components::toggle_pill(
-            "dim-toggle",
-            rems(0.5),
-            "dim",
-            dim_enabled,
-            bviz_ui_components::PillColors {
-                accent: kind_accent(Kind::Artifact),
-                off_label: palette.label,
-                off_border: palette.border,
-                fill: palette.container_fill,
-            },
-            entity.clone(),
-            |this, _| this.dim_enabled = !this.dim_enabled,
-        );
-        // Sits below the dim pill; flipping it relays out the view with or without
-        // transitive reduction.
-        let reduce_toggle = bviz_ui_components::toggle_pill(
-            "reduce-toggle",
-            px(40.),
-            "reduce",
-            reduced,
-            bviz_ui_components::PillColors {
-                accent: kind_accent(Kind::Artifact),
-                off_label: palette.label,
-                off_border: palette.border,
-                fill: palette.container_fill,
-            },
-            entity.clone(),
-            |this, cx| {
-                this.reduced = !this.reduced;
-                model::relayout(this, cx);
-            },
-        );
+        let controls = overlay::controls(g, &palette, &flags, entity.clone());
         let content = content_size(g);
-        let recenter_target = recenter_rect(g, emphasis);
+        let recenter_target = recenter_rect(g, flags.emphasis);
         let prepaint = build_prepaint(entity.clone(), content, recenter_target);
         let paint = canvas_body(boxes, connectors, palette, content, entity);
         div()
@@ -211,10 +175,7 @@ impl GraphView {
                     .top_0()
                     .size_full(),
             )
-            .children(legend)
-            .children(relaying_indicator)
-            .child(dim_toggle)
-            .child(reduce_toggle)
+            .children(controls)
     }
 
     fn on_mouse_down(&mut self, e: &MouseDownEvent, _: &mut Window, cx: &mut Context<Self>) {
@@ -347,59 +308,6 @@ struct ViewFlags<'a> {
     hovered: Option<Id>,
     dim_enabled: bool,
     reduced: bool,
-}
-
-/// Overlay listing the edge provenances actually drawn, in enum order, so it
-/// explains only the kinds present in this graph. `None` when none are drawn.
-fn legend(g: &LaidOut, palette: &Palette) -> Option<Div> {
-    let present: Vec<EdgeKind> = [EdgeKind::Query, EdgeKind::Cquery, EdgeKind::Aquery]
-        .into_iter()
-        .filter(|k| g.connectors.iter().any(|c| c.kinds.contains(k)))
-        .collect();
-    (!present.is_empty()).then(|| {
-        div()
-            .absolute()
-            .left_2()
-            .bottom_2()
-            .flex()
-            .flex_col()
-            .gap_1()
-            .p_2()
-            .rounded_md()
-            .bg(palette.container_fill)
-            .children(present.into_iter().map(|k| {
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .child(div().w(px(16.)).h(px(2.)).bg(edge_color(k)))
-                    .child(div().text_xs().text_color(palette.label).child(k.label()))
-            }))
-    })
-}
-
-/// Spinner shown while a relayout runs, so the prior layout stays interactive
-/// with a visible cue that a new one is in flight. `None` when not relaying.
-fn relaying_indicator(relaying: bool, palette: &Palette) -> Option<Div> {
-    relaying.then(|| {
-        div()
-            .absolute()
-            .right_2()
-            .top_2()
-            .flex()
-            .items_center()
-            .gap_2()
-            .px_2()
-            .py_1()
-            .rounded_md()
-            .bg(palette.container_fill)
-            .child(bviz_ui_components::spinner(
-                "relaying-spinner",
-                px(14.),
-                palette.label,
-            ))
-            .child(div().text_xs().text_color(palette.label).child("laying out…"))
-    })
 }
 
 /// The canvas paint pass: draws every box parent-before-child so children sit
@@ -544,7 +452,7 @@ pub fn run() {
 mod tests {
     use super::*;
     use crate::camera::{ease_out_cubic, settle_view, Rect};
-    use bviz_graph_layout::Box;
+    use bviz_graph_layout::{Box, Kind};
     use gpui::{point, Size};
 
     fn lbox(id: u32, x: f64, y: f64, w: f64, h: f64) -> Box {
