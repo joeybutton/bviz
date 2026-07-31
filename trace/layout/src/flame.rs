@@ -17,6 +17,16 @@ struct Segment {
     role: SpanRole,
 }
 
+/// How a span aggregates under a labelling.
+struct SpanLabels {
+    segment: Segment,
+    /// The name of the action this span itself resolves, which labels the detail
+    /// frame breaking its self time out by target (see [`emit_lane_rows`]);
+    /// `None` for a span resolving none, which inherits its containment
+    /// parent's.
+    action: Option<Str>,
+}
+
 /// Lexicographic rank of each distinct scanned label handle: dense `u32`s
 /// assigned by one byte-wise sort of the scanned distinct texts. The profile
 /// interns each distinct string to one handle, so the handles biject with
@@ -300,6 +310,10 @@ pub struct FlameGraph {
     self_us: Vec<i64>,
     width_us: Vec<i64>,
     role: Vec<SpanRole>,
+    /// Whether each node is a detail frame — part of its parent's self time
+    /// re-labelled with the action's own name (see [`emit_lane_rows`]) — rather
+    /// than a frame of merged spans.
+    detail: Vec<bool>,
     count: Vec<u32>,
     subtree_max_depth: Vec<u32>,
     /// CSR row offsets, length `len + 1`.
@@ -407,6 +421,10 @@ impl FlameGraph {
         self.count[i]
     }
 
+    pub(crate) fn is_detail(&self, i: usize) -> bool {
+        self.detail[i]
+    }
+
     pub(crate) fn subtree_max_depth(&self, i: usize) -> u32 {
         self.subtree_max_depth[i]
     }
@@ -509,40 +527,41 @@ impl Flamer {
         }
     }
 
-    /// The label a span carries under `labels`. The tree shape comes from
-    /// time-containment, not from this label; the label only decides which
-    /// spans at the same place merge into one frame.
-    fn span_label(&self, labels: FlameLabels, slice: &Slice, detail: &SliceDetail) -> Segment {
-        let label = match labels {
-            FlameLabels::Mnemonic => self.mnemonic_label(slice, detail),
-            FlameLabels::Name => slice.name,
+    /// How a span aggregates under `labels`. A span whose mnemonic resolves is
+    /// labelled by it, so all Rustc collapse together; any other span — and
+    /// every span under [`FlameLabels::Name`] — is labelled by its own name (the
+    /// informative label for non-action slices: "checkOutputs",
+    /// "subprocess.run", a repo target, …). The tree shape comes from
+    /// time-containment, not from these labels; a label only decides which spans
+    /// at the same place merge into one frame.
+    fn span_labels(&self, labels: FlameLabels, slice: &Slice, detail: &SliceDetail) -> SpanLabels {
+        let mnemonic = match labels {
+            FlameLabels::Mnemonic => self.mnemonic_of(slice, detail),
+            FlameLabels::Name => None,
         };
-        Segment {
-            label,
-            role: slice.role,
+        SpanLabels {
+            segment: Segment {
+                label: mnemonic.unwrap_or(slice.name),
+                role: slice.role,
+            },
+            action: mnemonic.is_some().then_some(slice.name),
         }
     }
 
     /// A span's action mnemonic — from its own args if present, else recovered
     /// from the name index by the slice's name or, for a critical-path
-    /// component, by its unwrapped `action '…'` description — so all Rustc
-    /// collapse together; else its own name (the informative label for
-    /// non-action slices — "checkOutputs", "subprocess.run", a repo target, …).
-    /// Only the critical-path unwrapping consults the text-keyed index, so the
-    /// hot per-span path never hashes a full string.
-    fn mnemonic_label(&self, slice: &Slice, detail: &SliceDetail) -> Str {
-        match detail.mnemonic.get() {
-            Some(m) => m,
-            None => {
-                let name = slice.name;
-                match self.idx.by_name.get(&name) {
-                    Some(&m) => m,
-                    None => action_inner(self.profile.str(slice.name))
-                        .and_then(|inner| self.idx.by_text.get(inner).copied())
-                        .unwrap_or(name),
-                }
-            }
+    /// component, by its unwrapped `action '…'` description — and `None` for a
+    /// span that names no action. Only the critical-path unwrapping consults the
+    /// text-keyed index, so the hot per-span path never hashes a full string.
+    fn mnemonic_of(&self, slice: &Slice, detail: &SliceDetail) -> Option<Str> {
+        if let Some(m) = detail.mnemonic.get() {
+            return Some(m);
         }
+        if let Some(&m) = self.idx.by_name.get(&slice.name) {
+            return Some(m);
+        }
+        action_inner(self.profile.str(slice.name))
+            .and_then(|inner| self.idx.by_text.get(inner).copied())
     }
 }
 
@@ -649,6 +668,7 @@ struct LaneNode {
     label: Str,
     rank: u32,
     role: SpanRole,
+    detail: bool,
     total_us: i64,
     count: u32,
 }
@@ -698,6 +718,7 @@ fn build_lane_table(flamer: &Flamer, labels: FlameLabels, lane_index: usize) -> 
             label: rows[i].label,
             rank: rows[i].rank,
             role: rows[i].role,
+            detail: rows[i].detail,
             total_us: total,
             count,
         });
@@ -707,27 +728,33 @@ fn build_lane_table(flamer: &Flamer, labels: FlameLabels, lane_index: usize) -> 
 }
 
 /// Bytes encoding one aggregation-path segment in a [`Row`] key: the label's
-/// [`Ranks`] rank as 4 big-endian bytes, then one byte packing the span role.
+/// [`Ranks`] rank as 4 big-endian bytes, then one [`segment_flags`] byte.
 /// Big-endian keeps lexicographic key order equal to rank order, and equal
 /// segments produce equal bytes, so a path's key is a byte prefix of every
 /// descendant's key.
 const SEGMENT_BYTES: usize = 5;
 
-/// One byte encoding a [`SpanRole`]: the workload in the high bits, the payload
-/// flag in bit 0. The 8-variant workload occupies bits 1..4, so the pair
-/// round-trips to a distinct byte and equal roles encode equally.
-fn role_byte(role: SpanRole) -> u8 {
-    ((role.workload as u8) << 1) | (role.payload as u8)
+/// One byte distinguishing a segment by everything about it but its label: the
+/// [`SpanRole`]'s payload flag in bit 0 and its 8-variant workload in bits 1..4,
+/// and `detail` in bit 7 — so a detail frame never merges with a same-named real
+/// child of the same role. Equal segments encode equally.
+fn segment_flags(role: SpanRole, detail: bool) -> u8 {
+    const DETAIL_BIT: u32 = 7;
+    ((detail as u8) << DETAIL_BIT) | ((role.workload as u8) << 1) | (role.payload as u8)
 }
 
-/// One emitted span in the path-sort aggregation: its full aggregation-path key
-/// (5 bytes per segment, root-to-span), the frame it merges into, and its own
-/// duration. Rows sharing a key merge into one node.
+/// One emitted frame contribution in the path-sort aggregation: its full
+/// aggregation-path key (5 bytes per segment, root-to-frame), the frame it
+/// merges into, and the duration it brings. Rows sharing a key merge into one
+/// node.
 struct Row {
     key: Vec<u8>,
     label: Str,
     rank: u32,
     role: SpanRole,
+    /// Whether this is a detail row — a span's self time broken out under the
+    /// action it belongs to — rather than a span of its own.
+    detail: bool,
     dur: i64,
 }
 
@@ -739,6 +766,7 @@ struct ArenaNode {
     name: Str,
     rank: u32,
     role: SpanRole,
+    detail: bool,
     total_us: i64,
     count: u32,
 }
@@ -785,17 +813,34 @@ fn containment_parents(slices: &[Slice]) -> Vec<Option<usize>> {
     parents
 }
 
-/// Emit one [`Row`] per slice of `thread` into `out`, keyed by its
-/// aggregation path. Slices are in lane order, so a slice's containment parent
-/// precedes it and its key is the parent's key extended by this slice's segment.
+/// Emit one [`Row`] per slice of `thread` into `out`, keyed by its aggregation
+/// path. Slices are in lane order, so a slice's containment parent precedes it
+/// and its key is the parent's key extended by this slice's segment.
+///
+/// A slice that belongs to a resolved action — its own or the nearest enclosing
+/// one — also emits a detail row: an extra child frame labelled with that
+/// action's name and carrying the slice's self time, so mnemonic grouping still
+/// shows which target the time went to. Under [`FlameLabels::Name`] no action
+/// resolves and no detail row is emitted.
 fn emit_lane_rows(flamer: &Flamer, labels: FlameLabels, thread: &ThreadTrack, out: &mut Vec<Row>) {
     let slices = flamer.profile.slices(thread);
     let details = flamer.profile.details(thread);
     let parents = containment_parents(slices);
-    out.reserve(slices.len());
-    let mut keys: Vec<Vec<u8>> = Vec::with_capacity(slices.len());
+    // Each slice's direct containment children's summed duration; its own
+    // duration less this is its self time.
+    let mut nested_us = vec![0i64; slices.len()];
     for i in 0..slices.len() {
-        let seg = flamer.span_label(labels, &slices[i], &details[i]);
+        if let Some(p) = parents[i] {
+            nested_us[p] += slices[i].dur_us;
+        }
+    }
+    // At most one detail row per slice.
+    out.reserve(2 * slices.len());
+    let mut keys: Vec<Vec<u8>> = Vec::with_capacity(slices.len());
+    let mut actions: Vec<Option<Str>> = Vec::with_capacity(slices.len());
+    for i in 0..slices.len() {
+        let span = flamer.span_labels(labels, &slices[i], &details[i]);
+        let seg = span.segment;
         let rank = flamer.ranks.rank_of(seg.label);
         let parent_key = match parents[i] {
             Some(p) => keys[p].as_slice(),
@@ -804,23 +849,48 @@ fn emit_lane_rows(flamer: &Flamer, labels: FlameLabels, thread: &ThreadTrack, ou
         let mut key = Vec::with_capacity(parent_key.len() + SEGMENT_BYTES);
         key.extend_from_slice(parent_key);
         key.extend_from_slice(&rank.to_be_bytes());
-        key.push(role_byte(seg.role));
+        key.push(segment_flags(seg.role, false));
         out.push(Row {
             key: key.clone(),
             label: seg.label,
             rank,
             role: seg.role,
+            detail: false,
             dur: slices[i].dur_us,
         });
+
+        let action = span.action.or_else(|| parents[i].and_then(|p| actions[p]));
+        let self_us = (slices[i].dur_us - nested_us[i]).max(0);
+        if let Some(action) = action.filter(|_| self_us > 0) {
+            let rank = flamer.ranks.rank_of(action);
+            let mut detail_key = Vec::with_capacity(key.len() + SEGMENT_BYTES);
+            detail_key.extend_from_slice(&key);
+            detail_key.extend_from_slice(&rank.to_be_bytes());
+            detail_key.push(segment_flags(seg.role, true));
+            out.push(Row {
+                key: detail_key,
+                label: action,
+                rank,
+                role: seg.role,
+                detail: true,
+                dur: self_us,
+            });
+        }
         keys.push(key);
+        actions.push(action);
     }
 }
 
-/// Sort each node's CSR child range widest-first, breaking ties by name rank then
-/// role, using `key[child]` per child. Each node's range is disjoint, so the pool
-/// tiles into per-node mutable sub-slices that sort across nodes in parallel; a
-/// small arena sorts serially, the parallel split paying only at scale.
-fn sort_child_ranges(kids: &mut ArenaChildren, n: usize, key: &[(std::cmp::Reverse<i64>, u32, SpanRole)]) {
+/// A node's place among its siblings: widest first, ties broken by name rank,
+/// then role, then the detail flag. Siblings differ in at least one of the last
+/// three — those are exactly what a key segment encodes — so the order is total.
+type ChildOrder = (std::cmp::Reverse<i64>, u32, SpanRole, bool);
+
+/// Sort each node's CSR child range into [`ChildOrder`], using `key[child]` per
+/// child. Each node's range is disjoint, so the pool tiles into per-node mutable
+/// sub-slices that sort across nodes in parallel; a small arena sorts serially,
+/// the parallel split paying only at scale.
+fn sort_child_ranges(kids: &mut ArenaChildren, n: usize, key: &[ChildOrder]) {
     const PARALLEL_MIN: usize = 1 << 13;
     let off = &kids.off;
     let mut rest: &mut [u32] = &mut kids.pool;
@@ -857,9 +927,9 @@ fn seal_arena(
     mut kids: ArenaChildren,
 ) -> FlameGraph {
     let n = arena.len();
-    let key: Vec<(std::cmp::Reverse<i64>, u32, SpanRole)> = arena
+    let key: Vec<ChildOrder> = arena
         .iter()
-        .map(|nd| (std::cmp::Reverse(nd.total_us), nd.rank, nd.role))
+        .map(|nd| (std::cmp::Reverse(nd.total_us), nd.rank, nd.role, nd.detail))
         .collect();
     sort_child_ranges(&mut kids, n, &key);
 
@@ -867,12 +937,14 @@ fn seal_arena(
     let mut rank = Vec::with_capacity(n);
     let mut total_us = Vec::with_capacity(n);
     let mut role = Vec::with_capacity(n);
+    let mut detail = Vec::with_capacity(n);
     let mut count = Vec::with_capacity(n);
     for nd in arena {
         name.push(nd.name);
         rank.push(nd.rank);
         total_us.push(nd.total_us);
         role.push(nd.role);
+        detail.push(nd.detail);
         count.push(nd.count);
     }
 
@@ -912,6 +984,7 @@ fn seal_arena(
         self_us,
         width_us,
         role,
+        detail,
         count,
         subtree_max_depth,
         child_off: kids.off,
@@ -922,7 +995,7 @@ fn seal_arena(
 
 /// One path-sorted element awaiting tree reconstruction: the aggregation-path
 /// key bytes (borrowed from the source lane's `key_pool`) sorted on, and `src`
-/// locating the [`LaneNode`] whose payload the coalesced frame draws. Holding the
+/// locating the [`LaneNode`] the coalesced frame draws from. Holding the
 /// key slice keeps the sort comparator a single deref into `key_pool`; the heavy
 /// payload is read back through `src` at reconstruction. Equal adjacent keys
 /// coalesce in [`reconstruct_and_seal`], so nodes from several lanes sharing a
@@ -946,8 +1019,9 @@ struct Src {
 /// depth locates each node's parent; equal adjacent keys coalesce into one node,
 /// summing totals and counts, so nodes emitted from different lanes on the same
 /// path merge. Each element's payload (label/rank/role/total/count) is read
-/// through its `src` into `tables`, the coalesced frame drawing label/rank/role
-/// from the run's first element. Seals the arena through [`seal_arena`].
+/// through its `src` into `tables`, the coalesced frame drawing everything but
+/// its totals from the run's first element. Seals the arena through
+/// [`seal_arena`].
 fn reconstruct_and_seal(
     elems: &[KeyRef],
     tables: &[LaneTable],
@@ -959,6 +1033,7 @@ fn reconstruct_and_seal(
         name: ROOT_LABEL,
         rank: 0,
         role: SpanRole { workload: Workload::Other, payload: false },
+        detail: false,
         total_us: 0,
         count: 0,
     });
@@ -989,6 +1064,7 @@ fn reconstruct_and_seal(
             name: head.label,
             rank: head.rank,
             role: head.role,
+            detail: head.detail,
             total_us: total,
             count,
         });
@@ -1282,7 +1358,8 @@ mod tests {
         // A lane with Rustc(0..100) containing Action.execute(0..90) containing
         // subprocess.run(0..80): the tree nests by time, each span's duration
         // counted once at its own node. Root total is the action's wall time
-        // (100), NOT the inflated 270 that summing siblings would give.
+        // (100), NOT the inflated 270 that summing siblings would give. Labelled
+        // by name, so the frames are exactly the three spans.
         let p = profile(vec![track(
             8,
             LaneClass::Execution,
@@ -1292,7 +1369,7 @@ mod tests {
                 slice("subprocess.run", "subprocess run", 0, 80),
             ],
         )]);
-        let g = flame(&p);
+        let g = flame_as(&p, FlameLabels::Name);
         assert_eq!(g.root().total_us, 100);
         let rustc = child(&g, &g.root(), "Rustc");
         assert_eq!(rustc.total_us, 100);
@@ -1354,6 +1431,67 @@ mod tests {
     }
 
     #[test]
+    fn detail_frames_break_each_action_frame_self_time_out_by_name() {
+        // Rustc(0..100) contains Action.execute(0..90) contains
+        // subprocess.run(0..80). Every frame belongs to the one action, so each
+        // gains a detail child named after it carrying that frame's self time:
+        // 10 for Rustc, 10 for Action.execute, 80 for the leaf.
+        let p = profile(vec![track(
+            1,
+            LaneClass::Execution,
+            vec![
+                action_named("Compiling //x:y", "Rustc", 0, 100),
+                slice("Action.execute", "general information", 0, 90),
+                slice("subprocess.run", "subprocess run", 0, 80),
+            ],
+        )]);
+        let g = flame(&p);
+        let rustc = child(&g, &g.root(), "Rustc");
+        let exec = child(&g, &rustc, "Action.execute");
+        let sub = child(&g, &exec, "subprocess.run");
+        for (frame, self_us) in [(rustc, 10), (exec, 10), (sub, 80)] {
+            let detail = child(&g, &frame, "Compiling //x:y");
+            assert_eq!(detail.total_us, self_us);
+            assert!(g.children(&detail).is_empty());
+            // All of the frame's own time sits in that child.
+            assert_eq!(frame.self_us, 0);
+        }
+        // Broken out, not double-counted: the tree still totals the wall time.
+        assert_eq!(g.root().total_us, 100);
+        assert_eq!(g.nodes().iter().map(|n| n.self_us).sum::<i64>(), 100);
+    }
+
+    #[test]
+    fn a_merged_frame_details_each_of_its_targets() {
+        // Two targets of one mnemonic merge into a single Rustc frame, which
+        // then breaks its time back out per target.
+        let p = profile(vec![track(
+            1,
+            LaneClass::Execution,
+            vec![
+                action_named("Compiling //a:a", "Rustc", 0, 100),
+                action_named("Compiling //b:b", "Rustc", 100, 40),
+            ],
+        )]);
+        let g = flame(&p);
+        let rustc = child(&g, &g.root(), "Rustc");
+        assert_eq!(rustc.total_us, 140);
+        assert_eq!(child(&g, &rustc, "Compiling //a:a").total_us, 100);
+        assert_eq!(child(&g, &rustc, "Compiling //b:b").total_us, 40);
+        assert_eq!(g.children(&rustc).len(), 2);
+        // Labelled by name there is nothing to break out: the two targets are
+        // frames of their own.
+        let named = flame_as(&p, FlameLabels::Name);
+        assert!(
+            named
+                .children(&named.root())
+                .iter()
+                .all(|c| named.children(c).is_empty())
+        );
+        assert_eq!(named.nodes().len(), 3);
+    }
+
+    #[test]
     fn mnemonicless_slice_keeps_its_name() {
         // A top-level slice with no mnemonic keeps its own informative name, not a
         // coarse work-class bucket — so distinct operations stay distinct.
@@ -1404,6 +1542,8 @@ mod tests {
         // A span that starts inside another but ends AFTER it isn't enclosed, so
         // it is a sibling, not a child. Nesting it (popping only on
         // end-before-start) is what built the runaway false-depth staircase.
+        // Labelled by name, so every frame is a span and Outer's childlessness
+        // is exactly the containment claim.
         let p = profile(vec![track(
             1,
             LaneClass::Execution,
@@ -1412,7 +1552,7 @@ mod tests {
                 slice("inner", "general information", 10, 100),
             ],
         )]);
-        let g = flame(&p);
+        let g = flame_as(&p, FlameLabels::Name);
         let outer = child(&g, &g.root(), "Outer");
         assert_eq!(outer.total_us, 50);
         assert!(
@@ -1656,7 +1796,8 @@ mod tests {
     #[test]
     fn height_counts_one_row_per_depth() {
         // Rustc(0..100) contains Action.execute(0..90): root depth 0, Rustc depth
-        // 1, Action.execute depth 2 -> 3 rows.
+        // 1, Action.execute depth 2 -> 3 rows. Labelled by name, so the depth is
+        // the span nesting alone.
         let p = profile(vec![track(
             1,
             LaneClass::Execution,
@@ -1665,7 +1806,26 @@ mod tests {
                 slice("Action.execute", "general information", 0, 90),
             ],
         )]);
-        let g = flame(&p);
+        let g = flame_as(&p, FlameLabels::Name);
         assert_eq!(flame_height(&g, &METRICS), 30.0);
+    }
+
+    #[test]
+    fn height_counts_the_row_a_detail_frame_adds() {
+        // The same two-deep nesting, but the action resolves a mnemonic, so the
+        // innermost frame's self time hangs one row deeper under the target's
+        // name: 4 rows to the same profile's 3 when nothing is broken out.
+        let p = profile(vec![track(
+            1,
+            LaneClass::Execution,
+            vec![
+                action_named("Compiling //x:y", "Rustc", 0, 100),
+                slice("Action.execute", "general information", 0, 90),
+            ],
+        )]);
+        let g = flame(&p);
+        assert_eq!(child(&g, &child(&g, &g.root(), "Rustc"), "Action.execute").depth, 2);
+        assert_eq!(flame_height(&g, &METRICS), 40.0);
+        assert_eq!(flame_height(&flame_as(&p, FlameLabels::Name), &METRICS), 30.0);
     }
 }

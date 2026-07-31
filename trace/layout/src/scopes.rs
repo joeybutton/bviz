@@ -137,15 +137,20 @@ mod tests {
         rows
     }
 
-    /// Summed `total_us` of every frame named `name` in the graph. Robust frames
-    /// occur once, but summing folds any repeat so the check never depends on a
-    /// name being unique.
+    /// Summed `total_us` of every span frame named `name` in the graph. Robust
+    /// frames occur once, but summing folds any repeat so the check never
+    /// depends on a name being unique. Detail frames re-label part of their
+    /// parent's time, so they are not spans of their own and are left out.
     fn frame_total(g: &FlameGraph, name: &str) -> i64 {
-        g.nodes()
-            .iter()
-            .filter(|n| g.str(n.name) == name)
-            .map(|n| n.total_us)
+        span_frames(g)
+            .filter(|&i| g.str(g.name(i)) == name)
+            .map(|i| g.total_us(i))
             .sum()
+    }
+
+    /// The graph's non-detail node ids.
+    fn span_frames(g: &FlameGraph) -> impl Iterator<Item = usize> + '_ {
+        (0..g.len()).filter(|&i| !g.is_detail(i))
     }
 
     #[test]
@@ -309,9 +314,9 @@ mod tests {
         });
         let g = &agg.flame;
         // The carrier joined the foreign smallest-mnemonic frame carrying its own
-        // 20us; no bare "Compiling foo" frame remains.
+        // 20us; no span frame is left under the carrier's own name.
         assert_eq!(frame_total(g, "Javac"), 20);
-        assert!(g.nodes().iter().all(|n| g.str(n.name) != "Compiling foo"));
+        assert!(span_frames(g).all(|i| g.str(g.name(i)) != "Compiling foo"));
         assert!(
             agg.stats.iter().any(|r| g.str(r.key) == "Javac"),
             "the foreign-lane mnemonic must label the carrier"

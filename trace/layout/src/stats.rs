@@ -40,6 +40,11 @@ impl StatRow {
 /// Aggregate an already-built flame graph into its stats rows, summing each
 /// frame's self time. Lets a caller that already holds the graph derive the table
 /// without rebuilding it. Keys resolve with `graph`'s [`str`](FlameGraph::str).
+///
+/// A detail frame carries part of its parent's own self time under another
+/// label, so a row of its own would double-count that time and split it away
+/// from the label it belongs to. Each is skipped, and its parent contributes
+/// [`self_us_without_details`] instead.
 pub fn stats_from_flame(graph: &FlameGraph) -> Vec<StatRow> {
     // A node's rank is a dense `u32` bijection with its name within one build,
     // so a table indexed by rank groups by name without hashing. Node 0 is the
@@ -49,8 +54,11 @@ pub fn stats_from_flame(graph: &FlameGraph) -> Vec<StatRow> {
     let cap = (0..graph.len()).map(|i| graph.rank(i)).max().unwrap_or(0) as usize + 1;
     let mut rows: Vec<Option<StatRow>> = vec![None; cap];
     for i in 1..graph.len() {
+        if graph.is_detail(i) {
+            continue;
+        }
         let rank = graph.rank(i);
-        let self_us = graph.self_us(i);
+        let self_us = self_us_without_details(graph, i);
         match &mut rows[rank as usize] {
             Some(row) => {
                 row.count += graph.count(i);
@@ -70,6 +78,18 @@ pub fn stats_from_flame(graph: &FlameGraph) -> Vec<StatRow> {
         }
     }
     rows.into_iter().flatten().collect()
+}
+
+/// The self time node `i` would carry with no detail frames beneath it: its
+/// total less its span children's totals, floored at zero — enclosed spans may
+/// overlap each other and so overrun what encloses them.
+fn self_us_without_details(graph: &FlameGraph, i: usize) -> i64 {
+    let spanned: i64 = (0..graph.child_count(i))
+        .map(|k| graph.child_id(i, k))
+        .filter(|&c| !graph.is_detail(c))
+        .map(|c| graph.total_us(c))
+        .sum();
+    (graph.total_us(i) - spanned).max(0)
 }
 
 /// Indices into `stats` in the default display order: `total_us` descending,
@@ -101,7 +121,7 @@ mod tests {
 
     use super::*;
     use crate::flame::{FlameLabels, TrackFlamer};
-    use crate::test_profile::{action, profile, slice, track};
+    use crate::test_profile::{action, action_named, profile, slice, track};
     use bviz_trace_profile::{LaneClass, Profile, Workload};
 
     /// The all-lanes flame graph, whose stats every all-scope test aggregates.
@@ -171,6 +191,84 @@ mod tests {
         assert_eq!(row(&g, &rows, "Rustc").total_us, 20);
         assert_eq!(row(&g, &rows, "subprocess.run").total_us, 80);
         assert_eq!(total(&rows), 100);
+    }
+
+    #[test]
+    fn detail_frames_leave_the_rows_alone() {
+        // A Rustc action on one target containing subprocess.run: the graph
+        // breaks each frame's self time out under the target's name, and the
+        // rows stay the self time per mnemonic — 20 for the action's own work,
+        // 80 for the subprocess — with no row for the target.
+        let p = profile(vec![track(
+            1,
+            LaneClass::Execution,
+            vec![
+                action_named("Compiling //x:y", "Rustc", 0, 100),
+                slice("subprocess.run", "subprocess run", 0, 80),
+            ],
+        )]);
+        let g = flame(&p);
+        assert!((0..g.len()).any(|i| g.is_detail(i)), "no detail frame to fold");
+        let rows = stats_from_flame(&g);
+        assert_eq!(rows.len(), 2);
+        let rustc = row(&g, &rows, "Rustc");
+        assert_eq!((rustc.count, rustc.total_us, rustc.max_us), (1, 20, 20));
+        assert_eq!(row(&g, &rows, "subprocess.run").total_us, 80);
+        assert_eq!(total(&rows), 100);
+    }
+
+    #[test]
+    fn overlapping_enclosed_siblings_fold_back_to_the_undetailed_rows() {
+        // Under //b:b two c1 spans overlap each other, so the c1 frame they
+        // merge into (210) overruns the Rustc frame the two actions merge into
+        // (200). The rows must read exactly as they do for the same tree built
+        // without detail frames — the same lane carrying no mnemonic, so no
+        // action resolves and nothing is broken out by target.
+        let c1 = |start, dur| slice("c1", "general information", start, dur);
+        let detailed = profile(vec![track(
+            1,
+            LaneClass::Execution,
+            vec![
+                action_named("Compiling //a:a", "Rustc", 0, 100),
+                c1(0, 50),
+                action_named("Compiling //b:b", "Rustc", 200, 100),
+                c1(200, 80),
+                c1(220, 80),
+            ],
+        )]);
+        let plain = profile(vec![track(
+            1,
+            LaneClass::Execution,
+            vec![
+                slice("Rustc", "action processing", 0, 100),
+                c1(0, 50),
+                slice("Rustc", "action processing", 200, 100),
+                c1(200, 80),
+                c1(220, 80),
+            ],
+        )]);
+        let gd = flame(&detailed);
+        let gp = flame(&plain);
+        assert!((0..gd.len()).any(|i| gd.is_detail(i)), "no detail frame to fold");
+        assert!((0..gp.len()).all(|i| !gp.is_detail(i)), "the reference must have none");
+        let resolved = |g: &FlameGraph| -> Vec<(String, u32, i64, i64)> {
+            let mut rows: Vec<_> = stats_from_flame(g)
+                .iter()
+                .map(|r| (g.str(r.key).to_owned(), r.count, r.total_us, r.max_us))
+                .collect();
+            rows.sort();
+            rows
+        };
+        assert_eq!(resolved(&gd), resolved(&gp));
+        // The overrun clamps the Rustc frame's self time to nothing, leaving c1
+        // holding the whole 210.
+        assert_eq!(
+            resolved(&gd),
+            [
+                ("Rustc".to_owned(), 2, 0, 0),
+                ("c1".to_owned(), 3, 210, 210),
+            ]
+        );
     }
 
     #[test]
