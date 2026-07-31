@@ -140,9 +140,10 @@ impl Forest {
 /// keeps each prefix step small, so a search over the prefixes settles close to
 /// a size cap.
 fn expansion_order(forest: &Forest) -> Vec<Id> {
-    let mut order: Vec<Id> = Vec::new();
-    let mut seen: HashSet<Id> = HashSet::new();
-    let mut heap: BinaryHeap<Reverse<(usize, Id)>> = BinaryHeap::new();
+    let candidates = forest.children.values().filter(|kids| kids.len() >= 2).count();
+    let mut order: Vec<Id> = Vec::with_capacity(candidates);
+    let mut seen: HashSet<Id> = HashSet::with_capacity(candidates);
+    let mut heap: BinaryHeap<Reverse<(usize, Id)>> = BinaryHeap::with_capacity(forest.roots.len());
     for &r in &forest.roots {
         if let Some(d) = forest.descend(r) {
             heap.push(Reverse((forest.reveal_count(d), d)));
