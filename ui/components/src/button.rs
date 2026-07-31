@@ -1,3 +1,4 @@
+use crate::CONTROL_HEIGHT;
 use gpui::{
     App, ClickEvent, Div, ElementId, Entity, FocusHandle, IntoElement, KeyDownEvent, KeyUpEvent,
     RenderOnce, SharedString, Stateful, Window, div, prelude::*, px, relative, transparent_black,
@@ -91,9 +92,9 @@ fn sized(el: Stateful<Div>, button: &Button) -> Stateful<Div> {
         el.px_2().py_0p5().line_height(relative(COMPACT_LINE_HEIGHT))
     } else if button.ghost && button.label.is_none() {
         // A square hit target, so a bare icon is no harder to hit than a label.
-        el.size(px(28.))
+        el.size(CONTROL_HEIGHT)
     } else {
-        el.px_4().py_2()
+        el.px_4().h(CONTROL_HEIGHT)
     }
 }
 

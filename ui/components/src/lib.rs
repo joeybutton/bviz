@@ -1,5 +1,4 @@
-//! Reusable, window-agnostic widgets (a text field, a button, and a dropdown) and
-//! gpui interaction helpers.
+//! Reusable, window-agnostic widgets and gpui interaction helpers.
 
 mod background;
 mod button;
@@ -13,6 +12,7 @@ mod scrubber;
 mod spinner;
 pub mod text_input;
 mod toggle;
+mod toolbar;
 mod tooltip;
 
 pub use background::load_in_background;
@@ -26,10 +26,14 @@ pub use scrollbar::{Axis, DEFAULT_MIN_THUMB, Scrollbar};
 pub use scrubber::{ScrubberColors, ScrubberLayout, scrubber};
 pub use spinner::spinner;
 pub use text_input::TextInput;
-pub use toggle::{PillColors, toggle_pill};
+pub use toggle::Toggle;
+pub use toolbar::Toolbar;
 pub use tooltip::{TooltipColors, paint_tooltip_box};
 
-use gpui::App;
+use gpui::{App, Pixels, px};
+
+/// Height every control renders at, so controls sharing a row line up.
+pub(crate) const CONTROL_HEIGHT: Pixels = px(28.);
 
 /// Register the key bindings the components rely on (currently the text field's).
 pub fn register_keys(cx: &mut App) {

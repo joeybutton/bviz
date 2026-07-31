@@ -20,10 +20,11 @@ mod dimming;
 mod drag;
 mod emphasis;
 mod framing;
+mod legend;
 mod model;
-mod overlay;
 mod paint;
 mod scroll;
+mod toolbar;
 
 use build::{Input, InputKind};
 use camera::{clamp_pan, content_size, enclosed_boxes, fit_zoom, from_screen, recenter_rect, Camera};
@@ -31,6 +32,7 @@ use dimming::compute_dimming;
 use drag::{end_drag, start_pan, Drag};
 use emphasis::Emphasis;
 use framing::{build_prepaint, Framing};
+use legend::legend;
 use model::{Model, Source};
 use paint::{canvas_body, collect_connectors, paint_boxes};
 use scroll::{scrollbar_hit, start_scroll_drag};
@@ -82,11 +84,11 @@ struct GraphView {
     /// dims; `None` when the cursor is over no node.
     hovered: Option<Id>,
     /// Whether hovering a node dims the rest of the graph; flipped by the `h` key
-    /// or the on-screen toggle so the dimming can be turned off when it is more
+    /// or the toolbar toggle so the dimming can be turned off when it is more
     /// noise than help.
     dim_enabled: bool,
     /// Whether the view draws the transitive reduction of the edges (the default)
-    /// rather than every edge; flipped by the `r` key or the on-screen toggle,
+    /// rather than every edge; flipped by the `r` key or the toolbar toggle,
     /// which relays out. Hover lights up a node's full neighbors either way.
     reduced: bool,
 }
@@ -99,7 +101,7 @@ impl GraphView {
     fn new(inputs: Vec<Input>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let focus_handle = cx.focus_handle();
         focus_handle.focus(window, cx);
-        // The first layout and the `reduce` toggle read one value, so the pill
+        // The first layout and the `reduce` toggle read one value, so the control
         // matches what is drawn.
         let reduced = true;
         Self {
@@ -115,21 +117,21 @@ impl GraphView {
     }
 
     /// Assembles the single-canvas viewport: the painted boxes and connectors,
-    /// the overlay controls layered over them, and the prepaint/paint closures
-    /// that fit and draw the graph under the view's pan/zoom transform.
+    /// the legend layered over them, and the prepaint/paint closures that fit
+    /// and draw the graph under the view's pan/zoom transform.
     fn graph(
         g: &LaidOut,
         expandable: &HashSet<Id>,
         entity: Entity<GraphView>,
-        flags: ViewFlags,
+        lit: Lit,
         palette: Palette,
     ) -> Stateful<Div> {
-        let dimming = compute_dimming(g, flags.hovered, flags.dim_enabled);
-        let boxes = paint_boxes(g, expandable, flags.emphasis, &dimming, &palette);
+        let dimming = compute_dimming(g, lit.hovered, lit.dim_enabled);
+        let boxes = paint_boxes(g, expandable, lit.emphasis, &dimming, &palette);
         let connectors = collect_connectors(g, &dimming);
-        let controls = overlay::controls(g, &palette, &flags, entity.clone());
+        let edge_legend = legend(g, &palette);
         let content = content_size(g);
-        let recenter_target = recenter_rect(g, flags.emphasis);
+        let recenter_target = recenter_rect(g, lit.emphasis);
         let prepaint = build_prepaint(entity.clone(), content, recenter_target);
         let paint = canvas_body(boxes, connectors, palette, content, entity);
         div()
@@ -144,7 +146,7 @@ impl GraphView {
                     .top_0()
                     .size_full(),
             )
-            .children(controls)
+            .children(edge_legend)
     }
 
     fn on_mouse_down(&mut self, e: &MouseDownEvent, _: &mut Window, cx: &mut Context<Self>) {
@@ -181,6 +183,17 @@ impl GraphView {
         }
     }
 
+    /// Drops the hover when the pointer leaves the canvas, so a node's
+    /// neighborhood does not stay lit while the cursor is over the toolbar or the
+    /// window chrome — the move handler is bounds-gated and never fires there.
+    /// gpui reports the canvas unhovered while a button is held, so the drag guard
+    /// keeps a pan from dropping the lit set it started with.
+    fn on_hover(&mut self, over: &bool, _: &mut Window, cx: &mut Context<Self>) {
+        if !over && matches!(self.drag, Drag::None) && self.hovered.take().is_some() {
+            cx.notify();
+        }
+    }
+
     fn on_scroll_wheel(&mut self, e: &ScrollWheelEvent, _: &mut Window, cx: &mut Context<Self>) {
         // Anchor the zoom at the cursor: keep the content point under the cursor
         // fixed as the scale changes. The minimum zoom is the fit, so the graph
@@ -204,17 +217,24 @@ impl GraphView {
         cx.notify();
     }
 
-    fn on_key_down(&mut self, e: &KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
-        if e.keystroke.key == "h" {
-            self.dim_enabled = !self.dim_enabled;
-            cx.notify();
-        } else if e.keystroke.key == "r" {
-            self.reduced = !self.reduced;
-            model::relayout(self, cx);
-            cx.notify();
-        }
+    fn toggle_dim(&mut self, cx: &mut Context<Self>) {
+        self.dim_enabled = !self.dim_enabled;
+        cx.notify();
     }
 
+    fn toggle_reduce(&mut self, cx: &mut Context<Self>) {
+        self.reduced = !self.reduced;
+        model::relayout(self, cx);
+        cx.notify();
+    }
+
+    fn on_key_down(&mut self, e: &KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
+        if e.keystroke.key == "h" {
+            self.toggle_dim(cx);
+        } else if e.keystroke.key == "r" {
+            self.toggle_reduce(cx);
+        }
+    }
 }
 
 impl Render for GraphView {
@@ -227,36 +247,47 @@ impl Render for GraphView {
             background: colors.background,
         };
         let body = match self.model.source() {
-            Source::Loaded(loaded) => div()
-                .flex_1()
-                .flex()
-                .overflow_hidden()
-                .child(
-                    Self::graph(
-                        loaded.laid_out(),
-                        self.model.expandable(),
-                        cx.entity(),
-                        ViewFlags {
-                            emphasis: &self.emphasis,
-                            relaying: self.model.relaying(),
-                            hovered: self.hovered,
-                            dim_enabled: self.dim_enabled,
-                            reduced: self.reduced,
-                        },
-                        palette,
+            Source::Loaded(loaded) => {
+                let controls = Controls {
+                    dim_enabled: self.dim_enabled,
+                    reduced: self.reduced,
+                    relaying: self.model.relaying(),
+                };
+                let lit = Lit {
+                    emphasis: &self.emphasis,
+                    hovered: self.hovered,
+                    dim_enabled: self.dim_enabled,
+                };
+                div()
+                    .flex_1()
+                    .flex()
+                    .flex_col()
+                    .overflow_hidden()
+                    .child(toolbar::toolbar(controls, &palette, cx))
+                    .child(
+                        div().flex_1().flex().overflow_hidden().child(
+                            Self::graph(
+                                loaded.laid_out(),
+                                self.model.expandable(),
+                                cx.entity(),
+                                lit,
+                                palette,
+                            )
+                            .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
+                            .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
+                            .on_mouse_move(cx.listener(Self::on_mouse_move))
+                            .on_hover(cx.listener(Self::on_hover))
+                            .on_scroll_wheel(cx.listener(Self::on_scroll_wheel))
+                            // Track the shared focus handle here too (the chrome
+                            // already tracks it on an ancestor) so this deepest
+                            // focused element receives key events. Events still
+                            // bubble up to the chrome's own key bindings.
+                            .track_focus(&self.focus_handle)
+                            .on_key_down(cx.listener(Self::on_key_down)),
+                        ),
                     )
-                    .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
-                    .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
-                    .on_mouse_move(cx.listener(Self::on_mouse_move))
-                    .on_scroll_wheel(cx.listener(Self::on_scroll_wheel))
-                    // Track the shared focus handle here too (the chrome already
-                    // tracks it on an ancestor) so this deepest focused element
-                    // receives key events. Events still bubble up to the chrome's
-                    // own key bindings.
-                    .track_focus(&self.focus_handle)
-                    .on_key_down(cx.listener(Self::on_key_down)),
-                )
-                .into_any_element(),
+                    .into_any_element()
+            }
             Source::Loading => bviz_ui_components::centered_spinner("Loading…", &colors)
                 .into_any_element(),
             Source::Message(msg) => {
@@ -270,13 +301,18 @@ impl Render for GraphView {
     }
 }
 
-/// The per-render view state the graph element reads off the view.
-struct ViewFlags<'a> {
+/// Which nodes the canvas lights up, and which it lets recede.
+struct Lit<'a> {
     emphasis: &'a Emphasis,
-    relaying: bool,
     hovered: Option<Id>,
     dim_enabled: bool,
+}
+
+/// What the toolbar's controls show.
+struct Controls {
+    dim_enabled: bool,
     reduced: bool,
+    relaying: bool,
 }
 
 /// Open or close the container (or group) box under `pos` (window px) and settle

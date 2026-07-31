@@ -1,11 +1,15 @@
 //! A single-select dropdown: a trigger showing the chosen option and a menu that
 //! opens beneath it.
 
+use crate::CONTROL_HEIGHT;
 use bviz_ui_theme::Colors;
 use gpui::{
     deferred, div, prelude::*, px, ClickEvent, Context, ElementId, EventEmitter, FocusHandle,
     IntoElement, MouseButton, Pixels, Render, SharedString, Subscription, Window,
 };
+
+/// Breathing room between the trigger and the menu it opens.
+const MENU_GAP: Pixels = px(2.);
 
 /// Emitted when the user picks a different option. Programmatic
 /// [`set_selected`](Dropdown::set_selected) does NOT emit — only a user choice —
@@ -108,7 +112,7 @@ impl Dropdown {
             .items_center()
             .gap_1()
             .px_2()
-            .h(px(24.))
+            .h(CONTROL_HEIGHT)
             // Hold the trigger's measured width in a flex parent (e.g. a toolbar);
             // without this it shrinks and the label wraps to a second line.
             .flex_none()
@@ -158,7 +162,7 @@ impl Dropdown {
             div()
                 .occlude()
                 .absolute()
-                .top(px(26.))
+                .top(CONTROL_HEIGHT + MENU_GAP)
                 .left_0()
                 // No explicit width: the menu shrinks to fit its options, so a
                 // row never wraps. A fixed width would have to budget for the row

@@ -1,56 +1,62 @@
-use gpui::{Context, Div, Entity, Length, Rgba, Stateful, div, prelude::*};
+use crate::CONTROL_HEIGHT;
+use gpui::{
+    App, ClickEvent, ElementId, IntoElement, RenderOnce, SharedString, Window, div, prelude::*,
+};
 
-/// A pill's colors: the on-state accent (label and border and filled dot), and
-/// the off-state label, border, and dot fill.
-#[derive(Clone, Copy)]
-pub struct PillColors {
-    pub accent: Rgba,
-    pub off_label: Rgba,
-    pub off_border: Rgba,
-    pub fill: Rgba,
+/// A labelled on/off control, sized to line up in a [`Toolbar`](crate::Toolbar)
+/// row.
+#[derive(IntoElement)]
+pub struct Toggle {
+    id: ElementId,
+    label: SharedString,
+    on: bool,
+    on_click: Box<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>,
 }
 
-/// A rounded pill toggling one boolean field, pinned to the top-left corner.
-/// On reads in the accent with a filled dot; off reads in the off label/border
-/// with a hollow dot. Clicking runs `mutate`, then redraws.
-pub fn toggle_pill<V: 'static>(
-    id: &'static str,
-    top: impl Into<Length>,
-    label: &str,
-    on: bool,
-    colors: PillColors,
-    entity: Entity<V>,
-    mutate: impl Fn(&mut V, &mut Context<V>) + 'static,
-) -> Stateful<Div> {
-    let PillColors { accent, off_label, off_border, fill } = colors;
-    let top = top.into();
-    let (dot, label_color, border_color) = if on {
-        ('\u{25CF}', accent, accent)
-    } else {
-        ('\u{25CB}', off_label, off_border)
-    };
-    div()
-        .id(id)
-        .absolute()
-        .left_2()
-        .top(top)
-        .flex()
-        .items_center()
-        .gap_1()
-        .px_2()
-        .py_1()
-        .rounded_md()
-        .bg(fill)
-        .border_1()
-        .border_color(border_color)
-        .text_xs()
-        .text_color(label_color)
-        .cursor_pointer()
-        .child(format!("{dot} {label}"))
-        .on_click(move |_, _, cx| {
-            entity.update(cx, |this, cx| {
-                mutate(this, cx);
-                cx.notify();
-            });
-        })
+impl Toggle {
+    pub fn new(
+        id: impl Into<ElementId>,
+        label: impl Into<SharedString>,
+        on: bool,
+        on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            label: label.into(),
+            on,
+            on_click: Box::new(on_click),
+        }
+    }
+}
+
+impl RenderOnce for Toggle {
+    fn render(self, window: &mut Window, _cx: &mut App) -> impl IntoElement {
+        let colors = bviz_ui_theme::colors(window);
+        let el = div()
+            .id(self.id)
+            .flex()
+            .flex_row()
+            .items_center()
+            .flex_none()
+            .h(CONTROL_HEIGHT)
+            .px_3()
+            .rounded_md()
+            .border_1()
+            .cursor_pointer()
+            .active(|s| s.opacity(0.8))
+            .on_click(self.on_click)
+            .child(self.label);
+        if self.on {
+            el.bg(colors.selected)
+                // Bordered in its own fill, so both states measure the same width.
+                .border_color(colors.selected)
+                .text_color(colors.selected_text)
+                .hover(|s| s.opacity(0.92))
+        } else {
+            let hover_border = colors.text;
+            el.border_color(colors.border)
+                .text_color(colors.text)
+                .hover(move |s| s.border_color(hover_border))
+        }
+    }
 }
