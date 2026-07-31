@@ -2,15 +2,14 @@
 //! through `bviz_graph_layout`, lays the graph out, and opens a window
 //! rendering the result.
 
-use bviz_graph_layout::graph::Graph;
-use bviz_graph_layout::{EdgeKind, Id, Kind, LaidOut, Names};
-use bviz_ui_components::{load_in_background, track_drag, Axis};
+use bviz_graph_layout::{EdgeKind, Id, Kind, LaidOut};
+use bviz_ui_components::{track_drag, Axis};
 use bviz_ui_shell::Chrome;
 use clap::Parser;
 use gpui::{
     App, Bounds, Context, Div, Entity, FocusHandle, Hsla, IntoElement, KeyDownEvent, MouseButton,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Render, Rgba, ScrollDelta,
-    ScrollWheelEvent, Stateful, Task, Window, canvas, div, prelude::*, px, rems, size,
+    ScrollWheelEvent, Stateful, Window, canvas, div, prelude::*, px, rems, size,
 };
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -22,10 +21,11 @@ mod dimming;
 mod drag;
 mod emphasis;
 mod framing;
+mod model;
 mod paint;
 mod scroll;
 
-use build::{build_graph, relayout, Input, InputKind};
+use build::{Input, InputKind};
 use camera::{
     clamp_pan, content_size, enclosed_boxes, fit_zoom, from_screen, recenter_rect, to_screen,
     Camera,
@@ -34,6 +34,7 @@ use dimming::compute_dimming;
 use drag::{drag_pan, end_drag, start_pan, Drag};
 use emphasis::Emphasis;
 use framing::{build_prepaint, Framing};
+use model::{Model, Source};
 use paint::{
     PaintConnector, collect_connectors, edge_color, kind_accent, lane_polyline, paint_box,
     paint_boxes, paint_connector,
@@ -50,12 +51,6 @@ const PARALLEL_SPACING: f32 = 3.0;
 /// Largest zoom-in factor. The smallest is computed per graph so the whole graph
 /// always fits the viewport.
 const MAX_ZOOM: f32 = 4.0;
-
-/// Startup expands containment levels outward from the roots until the visible
-/// view would exceed either cap, so a large graph opens to a bounded but
-/// non-trivial overview rather than a single collapsed box.
-const MAX_VISIBLE_NODES: usize = 400;
-const MAX_VISIBLE_EDGES: usize = 600;
 
 /// Fraction of the viewport the fitted graph spans, leaving a margin so the whole
 /// graph sits within the inner part of the window rather than edge to edge.
@@ -86,28 +81,6 @@ struct Palette {
     background: Rgba,
 }
 
-/// A graph that finished loading, in the form every later relayout starts from.
-struct Loaded {
-    laid_out: LaidOut,
-    /// The built (pre-quotient) graph, cached so toggling a group re-lays-out
-    /// without re-reading or re-parsing the proto.
-    base: Graph,
-    /// The base with its transitively-redundant edges removed, cached so the
-    /// reduced view's edges are a stable projection of one fixed skeleton.
-    reduced_base: Graph,
-    /// The interned node-id table the base graph keys on, threaded into each
-    /// relayout so the quotient pass can mint group ids.
-    names: Names,
-}
-
-/// The loaded graph, a load in progress, or a message explaining why none is
-/// shown.
-enum Source {
-    Loading,
-    Loaded(Loaded),
-    Message(String),
-}
-
 /// A box flattened to what the canvas needs to paint it, in layout pixels.
 struct PaintBox {
     x: f64,
@@ -132,20 +105,10 @@ struct PaintBox {
 /// Loads, lays out, and renders a Bazel build graph.
 struct GraphView {
     focus_handle: FocusHandle,
-    source: Source,
+    model: Model,
     framing: Framing,
     drag: Drag,
-    /// Container and group ids currently expanded; every other container folds
-    /// its subtree away so the layout only processes the visible view.
-    expanded: HashSet<Id>,
-    /// Multi-child container ids of the base graph; only these carry an
-    /// expand/collapse handle (a leaf can't open, a singleton auto-expands), so a
-    /// click or caret can tell an expandable box from a plain one.
-    expandable: HashSet<Id>,
     emphasis: Emphasis,
-    /// Whether a relayout is running, so the view shows a progress indicator
-    /// while the prior layout stays interactive.
-    relaying: bool,
     /// Node under the cursor, whose neighborhood stays lit while everything else
     /// dims; `None` when the cursor is over no node.
     hovered: Option<Id>,
@@ -157,8 +120,6 @@ struct GraphView {
     /// rather than every edge; flipped by the `r` key or the on-screen toggle,
     /// which relays out. Hover lights up a node's full neighbors either way.
     reduced: bool,
-    /// Holds the background load/relayout task so it isn't cancelled on drop.
-    _load_task: Task<()>,
 }
 
 impl GraphView {
@@ -166,94 +127,22 @@ impl GraphView {
         self.framing.camera()
     }
 
-    /// The layout being drawn, or `None` while loading or after a failure.
-    fn laid_out(&self) -> Option<&LaidOut> {
-        match &self.source {
-            Source::Loaded(loaded) => Some(&loaded.laid_out),
-            _ => None,
-        }
-    }
-
     fn new(inputs: Vec<Input>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let focus_handle = cx.focus_handle();
         focus_handle.focus(window, cx);
-        // Build and lay out the graph on the background executor so window
-        // appearance and interactivity are never blocked; swap the view to the
-        // result and cache the base graph when it completes.
-        let load_task = load_in_background(
-            cx,
-            move || {
-                let (graph, reduced, mut names) = build_graph(&inputs)?;
-                // Open to a bounded overview instead of laying out the whole graph.
-                let expanded = bviz_graph_layout::lod::default_expansion(
-                    &graph,
-                    MAX_VISIBLE_NODES,
-                    MAX_VISIBLE_EDGES,
-                );
-                // Open showing the transitive reduction (the `reduced` default).
-                let laid_out = relayout(&graph, &reduced, &expanded, &mut names, true);
-                Ok::<_, String>((graph, reduced, names, expanded, laid_out))
-            },
-            |view, result, _| {
-                view.source = match result {
-                    Ok((graph, reduced, names, expanded, laid_out)) => {
-                        view.expandable = bviz_graph_layout::lod::expandable_containers(&graph);
-                        view.expanded = expanded;
-                        Source::Loaded(Loaded {
-                            laid_out,
-                            base: graph,
-                            reduced_base: reduced,
-                            names,
-                        })
-                    }
-                    Err(err) => Source::Message(err),
-                };
-            },
-        );
+        // The first layout and the `reduce` toggle read one value, so the pill
+        // matches what is drawn.
+        let reduced = true;
         Self {
             focus_handle,
-            source: Source::Loading,
+            model: Model::loading(inputs, reduced, cx),
             framing: Framing::new(),
             drag: Drag::None,
-            expanded: HashSet::new(),
-            expandable: HashSet::new(),
             emphasis: Emphasis::none(),
-            relaying: false,
             hovered: None,
             dim_enabled: true,
-            reduced: true,
-            _load_task: load_task,
+            reduced,
         }
-    }
-
-    /// Re-lays-out the cached base graph with the current expansion set off the
-    /// UI thread and swaps in the result, leaving zoom, pan, and the fit flag
-    /// untouched so the view stays put across a toggle.
-    fn retoggle(&mut self, cx: &mut Context<Self>) {
-        let Source::Loaded(loaded) = &self.source else {
-            return;
-        };
-        let base = loaded.base.clone();
-        let reduced_base = loaded.reduced_base.clone();
-        // The relayout mints group ids against the interned-name table, so it
-        // extends a clone and hands it back for the view to adopt.
-        let mut names = loaded.names.clone();
-        let expanded = self.expanded.clone();
-        let reduced = self.reduced;
-        self.relaying = true;
-        self._load_task = load_in_background(
-            cx,
-            move || {
-                let laid_out = relayout(&base, &reduced_base, &expanded, &mut names, reduced);
-                Loaded { laid_out, base, reduced_base, names }
-            },
-            |view, loaded, cx| {
-                view.source = Source::Loaded(loaded);
-                view.framing.request_recenter();
-                view.relaying = false;
-                emphasis::begin_fade(view, cx);
-            },
-        );
     }
 
     /// Assembles the single-canvas viewport: the painted boxes and connectors,
@@ -303,7 +192,7 @@ impl GraphView {
             entity.clone(),
             |this, cx| {
                 this.reduced = !this.reduced;
-                this.retoggle(cx);
+                model::relayout(this, cx);
             },
         );
         let content = content_size(g);
@@ -326,20 +215,6 @@ impl GraphView {
             .children(relaying_indicator)
             .child(dim_toggle)
             .child(reduce_toggle)
-    }
-
-    fn status(&self) -> String {
-        match &self.source {
-            Source::Loaded(Loaded { laid_out: g, .. }) => format!(
-                "{} boxes · {} connectors · {}×{}",
-                g.boxes.len(),
-                g.connectors.len(),
-                g.width.round() as i64,
-                g.height.round() as i64,
-            ),
-            Source::Loading => "Loading…".into(),
-            Source::Message(_) => "No graph".into(),
-        }
     }
 
     fn on_mouse_down(&mut self, e: &MouseDownEvent, _: &mut Window, cx: &mut Context<Self>) {
@@ -365,7 +240,7 @@ impl GraphView {
         if matches!(self.drag, Drag::Pan(_)) {
             return;
         }
-        let Some(g) = self.laid_out() else {
+        let Some(g) = self.model.laid_out() else {
             return;
         };
         let (gx, gy) = from_screen(e.position, self.framing.viewport().origin, self.camera());
@@ -380,7 +255,7 @@ impl GraphView {
         // Anchor the zoom at the cursor: keep the content point under the cursor
         // fixed as the scale changes. The minimum zoom is the fit, so the graph
         // can't be zoomed out of view.
-        let Some(content) = self.laid_out().map(content_size) else {
+        let Some(content) = self.model.laid_out().map(content_size) else {
             return;
         };
         let vp = self.framing.viewport();
@@ -405,7 +280,7 @@ impl GraphView {
             cx.notify();
         } else if e.keystroke.key == "r" {
             self.reduced = !self.reduced;
-            self.retoggle(cx);
+            model::relayout(self, cx);
             cx.notify();
         }
     }
@@ -421,19 +296,19 @@ impl Render for GraphView {
             container_fill: colors.container,
             background: colors.background,
         };
-        let body = match &self.source {
-            Source::Loaded(Loaded { laid_out: g, .. }) => div()
+        let body = match self.model.source() {
+            Source::Loaded(loaded) => div()
                 .flex_1()
                 .flex()
                 .overflow_hidden()
                 .child(
                     Self::graph(
-                        g,
-                        &self.expandable,
+                        loaded.laid_out(),
+                        self.model.expandable(),
                         cx.entity(),
                         ViewFlags {
                             emphasis: &self.emphasis,
-                            relaying: self.relaying,
+                            relaying: self.model.relaying(),
                             hovered: self.hovered,
                             dim_enabled: self.dim_enabled,
                             reduced: self.reduced,
@@ -460,7 +335,7 @@ impl Render for GraphView {
         };
         Chrome::new(&self.focus_handle)
             .title("bazel_viz graph")
-            .status(self.status())
+            .status(self.model.status())
             .child(body)
     }
 }
@@ -583,31 +458,27 @@ fn canvas_body(
 /// Open or close the container (or group) box under `pos` (window px) and settle
 /// the view to keep it in frame.
 fn toggle_box_at(view: &mut GraphView, pos: Point<Pixels>, cx: &mut Context<GraphView>) {
-    // Borrows one field rather than going through `laid_out`, whose `&self` would
-    // conflict with the expansion set this mutates while still reading the boxes.
-    let Source::Loaded(Loaded { laid_out: g, .. }) = &view.source else {
+    let vp = view.framing.viewport();
+    let camera = view.camera();
+    let Some(g) = view.model.laid_out() else {
         return;
     };
-    let vp = view.framing.viewport();
-    let (gx, gy) = from_screen(pos, vp.origin, view.camera());
+    let (gx, gy) = from_screen(pos, vp.origin, camera);
     let Some(hit) = hit_box(&g.boxes, gx, gy) else {
         return;
     };
     // A multi-child container or a collapsed group can be opened/closed; a leaf
     // or singleton can't.
-    if !hit.group && !view.expandable.contains(&hit.id) {
+    if !hit.group && !view.model.expandable().contains(&hit.id) {
         return;
     }
     let id = hit.id;
-    if !view.expanded.remove(&id) {
-        view.expanded.insert(id);
-    }
-    let enclosed = enclosed_boxes(&g.boxes, vp.size, view.camera());
+    let enclosed = enclosed_boxes(&g.boxes, vp.size, camera);
     // The relayout may drop the hovered node (it was collapsed away), which would
     // otherwise leave the whole graph dimmed until the next mouse move.
     view.hovered = None;
+    model::toggle_expansion(view, id, cx);
     view.emphasis.toggled(id, enclosed);
-    view.retoggle(cx);
 }
 
 /// The smallest-area box (in layout space) containing `(gx, gy)`, so an inner

@@ -58,7 +58,7 @@ pub(crate) fn scrollbar_geom(
 
 /// The scroll bar for `axis` built from the loaded graph's current view state.
 fn current_scrollbar(view: &GraphView, axis: Axis) -> Option<Scrollbar> {
-    let content = content_size(view.laid_out()?);
+    let content = content_size(view.model.laid_out()?);
     scrollbar_geom(axis, view.framing.viewport(), content, view.camera())
 }
 
@@ -73,7 +73,7 @@ pub(crate) fn scrollbar_hit(view: &GraphView, position: Point<Pixels>) -> Option
 /// Scroll `axis` so `offset` window px of content sit past the near edge, panning
 /// the content's near edge to `-offset`.
 fn scroll_to(view: &mut GraphView, axis: Axis, offset: f32, cx: &mut Context<GraphView>) {
-    let Some(content) = view.laid_out().map(content_size) else {
+    let Some(content) = view.model.laid_out().map(content_size) else {
         return;
     };
     let Camera { zoom, pan: (px, py) } = view.camera();

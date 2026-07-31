@@ -52,7 +52,7 @@ pub(crate) fn drag_pan(view: &mut GraphView, event: &MouseMoveEvent, cx: &mut Co
     let dx = f32::from(event.position.x) - f32::from(pan.last.x);
     let dy = f32::from(event.position.y) - f32::from(pan.last.y);
     let panned = (px + dx, py + dy);
-    let panned = match view.laid_out().map(content_size) {
+    let panned = match view.model.laid_out().map(content_size) {
         Some(content) => clamp_pan(panned, zoom, view.framing.viewport().size, content),
         None => panned,
     };
