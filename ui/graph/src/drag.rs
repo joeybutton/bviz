@@ -1,6 +1,6 @@
-use crate::camera::{clamp_pan, content_size, Camera};
+use crate::camera::{clamp_pan, Camera};
 use crate::scroll::{scroll_drag_move, ScrollDrag};
-use crate::{toggle_box_at, GraphView};
+use crate::{click_box_at, GraphView};
 use bviz_ui_components::track_drag;
 use gpui::{App, Context, Entity, MouseMoveEvent, MouseUpEvent, Pixels, Point, Window};
 
@@ -53,7 +53,7 @@ pub(crate) fn drag_pan(view: &mut GraphView, event: &MouseMoveEvent, cx: &mut Co
     let dx = f32::from(event.position.x) - f32::from(pan.last.x);
     let dy = f32::from(event.position.y) - f32::from(pan.last.y);
     let panned = (px + dx, py + dy);
-    let panned = match view.model.laid_out().map(content_size) {
+    let panned = match view.drawn().map(|d| d.content()) {
         Some(content) => clamp_pan(panned, zoom, view.framing.viewport().size, content),
         None => panned,
     };
@@ -64,16 +64,16 @@ pub(crate) fn drag_pan(view: &mut GraphView, event: &MouseMoveEvent, cx: &mut Co
 }
 
 /// End whatever gesture is in progress. A pan release that never travelled past
-/// the click threshold is a click, and toggles the box under the cursor. Taking
-/// the gesture out of the view makes a second call a no-op, as the element-level
-/// release handler and the window-global one installed during a drag can both
-/// fire for one release.
+/// the click threshold is a click on the box under the cursor. Taking the gesture
+/// out of the view makes a second call a no-op, as the element-level release
+/// handler and the window-global one installed during a drag can both fire for
+/// one release.
 pub(crate) fn end_drag(view: &mut GraphView, event: &MouseUpEvent, cx: &mut Context<GraphView>) {
     match std::mem::take(&mut view.drag) {
         Drag::None => {}
         Drag::Pan(Pan { moved, .. }) => {
             if !moved {
-                toggle_box_at(view, event.position, cx);
+                click_box_at(view, event.position, cx);
             }
         }
         Drag::Scrollbar(_) => cx.notify(),

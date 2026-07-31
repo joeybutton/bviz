@@ -12,6 +12,13 @@ pub(crate) struct Dimming {
     pub(crate) applies: bool,
 }
 
+impl Dimming {
+    /// Nothing dimmed, so every box and connector paints at full strength.
+    fn off() -> Self {
+        Self { lit: HashSet::new(), lit_edges: HashSet::new(), applies: false }
+    }
+}
+
 /// The lit/dimmed partition for the hovered node. Dimming traces the hovered
 /// node's whole subtree neighborhood: the boxes geometrically nested inside the
 /// hovered box (it and its descendants, since the layout nests children within
@@ -19,24 +26,26 @@ pub(crate) struct Dimming {
 /// subtree. The subtree's incident edges stay lit and everything else dims, but
 /// only when there is at least one such edge to reveal — an edgeless subtree (or
 /// a disabled toggle) would fade the graph for no signal, so those suppress
-/// dimming entirely.
+/// dimming entirely. Each step below walks the whole view, so the cases that
+/// suppress it are answered before any of them run.
 pub(crate) fn compute_dimming(g: &LaidOut, hovered: Option<Id>, dim_enabled: bool) -> Dimming {
-    let hovered_box = hovered.and_then(|h| g.boxes.iter().find(|b| b.id == h));
-    let subtree: HashSet<Id> = hovered_box
-        .filter(|_| dim_enabled)
-        .map(|h| {
-            g.boxes
-                .iter()
-                .filter(|b| {
-                    b.x >= h.x
-                        && b.y >= h.y
-                        && b.x + b.width <= h.x + h.width
-                        && b.y + b.height <= h.y + h.height
-                })
-                .map(|b| b.id)
-                .collect()
+    let Some(hovered) = hovered.filter(|_| dim_enabled) else {
+        return Dimming::off();
+    };
+    let Some(h) = g.boxes.iter().find(|b| b.id == hovered) else {
+        return Dimming::off();
+    };
+    let subtree: HashSet<Id> = g
+        .boxes
+        .iter()
+        .filter(|b| {
+            b.x >= h.x
+                && b.y >= h.y
+                && b.x + b.width <= h.x + h.width
+                && b.y + b.height <= h.y + h.height
         })
-        .unwrap_or_default();
+        .map(|b| b.id)
+        .collect();
     // The subtree plus the far endpoint of each full-connectivity edge incident
     // to it: the direct neighbors, the only nodes a hover lights. This walks the
     // full connectivity, not the drawn connectors, so a neighbor still lights up
@@ -73,11 +82,7 @@ pub(crate) fn compute_dimming(g: &LaidOut, hovered: Option<Id>, dim_enabled: boo
     // remain just the direct neighbors).
     let mut lit_edges: HashSet<(Id, Id)> = HashSet::new();
     if has_edge {
-        let mut out_adj: HashMap<Id, Vec<Id>> = HashMap::new();
-        let mut in_adj: HashMap<Id, Vec<Id>> = HashMap::new();
         for c in &g.connectors {
-            out_adj.entry(c.from).or_default().push(c.to);
-            in_adj.entry(c.to).or_default().push(c.from);
             if subtree.contains(&c.from) || subtree.contains(&c.to) {
                 lit_edges.insert((c.from, c.to));
             }
@@ -90,8 +95,18 @@ pub(crate) fn compute_dimming(g: &LaidOut, hovered: Option<Id>, dim_enabled: boo
             .collect();
         let out_missing: HashSet<Id> = out_targets.difference(&reached).copied().collect();
         let in_missing: HashSet<Id> = in_targets.difference(&reached).copied().collect();
-        trace_paths(&subtree, &out_missing, &out_adj, true, &mut lit_edges);
-        trace_paths(&subtree, &in_missing, &in_adj, false, &mut lit_edges);
+        // Indexing the connectors costs an entry per drawn edge, so build the
+        // adjacency only where a path has to be traced through it.
+        if !out_missing.is_empty() || !in_missing.is_empty() {
+            let mut out_adj: HashMap<Id, Vec<Id>> = HashMap::new();
+            let mut in_adj: HashMap<Id, Vec<Id>> = HashMap::new();
+            for c in &g.connectors {
+                out_adj.entry(c.from).or_default().push(c.to);
+                in_adj.entry(c.to).or_default().push(c.from);
+            }
+            trace_paths(&subtree, &out_missing, &out_adj, true, &mut lit_edges);
+            trace_paths(&subtree, &in_missing, &in_adj, false, &mut lit_edges);
+        }
     }
     Dimming {
         lit: active,

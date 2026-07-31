@@ -1,4 +1,4 @@
-use crate::camera::{clamp_pan, content_size, Camera};
+use crate::camera::{clamp_pan, Camera};
 use crate::drag::Drag;
 use crate::{GraphView, Palette};
 use bviz_ui_components::{Axis, Scrollbar};
@@ -84,7 +84,7 @@ pub(crate) fn paint_scrollbars(
 
 /// The scroll bar for `axis` built from the loaded graph's current view state.
 fn current_scrollbar(view: &GraphView, axis: Axis) -> Option<Scrollbar> {
-    let content = content_size(view.model.laid_out()?);
+    let content = view.drawn()?.content();
     scrollbar_geom(axis, view.framing.viewport(), content, view.camera())
 }
 
@@ -99,7 +99,7 @@ pub(crate) fn scrollbar_hit(view: &GraphView, position: Point<Pixels>) -> Option
 /// Scroll `axis` so `offset` window px of content sit past the near edge, panning
 /// the content's near edge to `-offset`.
 fn scroll_to(view: &mut GraphView, axis: Axis, offset: f32, cx: &mut Context<GraphView>) {
-    let Some(content) = view.model.laid_out().map(content_size) else {
+    let Some(content) = view.drawn().map(|d| d.content()) else {
         return;
     };
     let Camera { zoom, pan: (px, py) } = view.camera();

@@ -13,6 +13,58 @@ pub(crate) struct Rect {
     pub(crate) h: f64,
 }
 
+impl Rect {
+    /// Whether the two rectangles meet, counting a shared edge.
+    pub(crate) fn overlaps(&self, other: &Rect) -> bool {
+        self.x <= other.x + other.w
+            && other.x <= self.x + self.w
+            && self.y <= other.y + other.h
+            && other.y <= self.y + self.h
+    }
+
+    /// Whether any leg of the polyline `points` runs through this rectangle.
+    pub(crate) fn crossed_by(&self, points: &[(f64, f64)]) -> bool {
+        points.windows(2).any(|leg| self.crossed_by_leg(leg[0], leg[1]))
+    }
+
+    /// Liang–Barsky: the segment reaches the rectangle while the stretch of it
+    /// all four edges admit is still non-empty.
+    fn crossed_by_leg(&self, from: (f64, f64), to: (f64, f64)) -> bool {
+        let (dx, dy) = (to.0 - from.0, to.1 - from.1);
+        let (mut enter, mut leave) = (0.0f64, 1.0f64);
+        let mut admits = |along: f64, room: f64| {
+            if along == 0.0 {
+                return room >= 0.0;
+            }
+            let at = room / along;
+            if along < 0.0 {
+                if at > leave {
+                    return false;
+                }
+                enter = enter.max(at);
+            } else {
+                if at < enter {
+                    return false;
+                }
+                leave = leave.min(at);
+            }
+            true
+        };
+        admits(-dx, from.0 - self.x)
+            && admits(dx, self.x + self.w - from.0)
+            && admits(-dy, from.1 - self.y)
+            && admits(dy, self.y + self.h - from.1)
+    }
+}
+
+/// The part of layout space `bounds` shows under `camera`, so a paint reaches
+/// only the boxes and connectors that fall inside the window.
+pub(crate) fn visible_rect(bounds: Bounds<Pixels>, camera: Camera) -> Rect {
+    let (x0, y0) = from_screen(bounds.origin, bounds.origin, camera);
+    let (x1, y1) = from_screen(bounds.bottom_right(), bounds.origin, camera);
+    Rect { x: x0 as f64, y: y0 as f64, w: (x1 - x0) as f64, h: (y1 - y0) as f64 }
+}
+
 /// An in-flight ease of the view from one zoom/pan to another, so a toggle's
 /// settle shifts over a few frames instead of jumping. Driven from the canvas
 /// prepaint, which re-requests a frame until the ease lands.
@@ -127,12 +179,8 @@ pub(crate) fn settle_view(
 ) -> (f32, (f32, f32)) {
     let (vw, vh) = (f32::from(viewport.width), f32::from(viewport.height));
     let (bx, by, bw, bh) = (target.x as f32, target.y as f32, target.w as f32, target.h as f32);
-    let z_fit = if bw > 0. && bh > 0. {
-        (vw / bw).min(vh / bh) * FIT_MARGIN
-    } else {
-        zoom
-    };
-    let z = zoom.min(z_fit).clamp(fit_zoom(viewport, content), MAX_ZOOM);
+    let z = zoom.min(fit_rect_zoom(target, viewport).unwrap_or(zoom));
+    let z = z.clamp(fit_zoom(viewport, content), MAX_ZOOM);
     let (cx, cy) = (bx + bw / 2. + MARGIN as f32, by + bh / 2. + MARGIN as f32);
     let mut panx = cx * zoom + pan.0 - cx * z;
     let mut pany = cy * zoom + pan.1 - cy * z;
@@ -151,21 +199,41 @@ pub(crate) fn settle_view(
     (z, (panx, pany))
 }
 
+/// The zoom at which `target` spans `viewport` with the fit margin's breathing
+/// room around it; `None` for a rect with no extent, which no zoom fills.
+fn fit_rect_zoom(target: Rect, viewport: Size<Pixels>) -> Option<f32> {
+    let (bw, bh) = (target.w as f32, target.h as f32);
+    (bw > 0. && bh > 0.).then(|| {
+        let (vw, vh) = (f32::from(viewport.width), f32::from(viewport.height));
+        (vw / bw).min(vh / bh) * FIT_MARGIN
+    })
+}
+
+/// The zoom and pan that put `target` (a layout-space rect) centered and filling
+/// `viewport`, so picking a box out of the graph makes it the frame. The zoom
+/// rises as well as falls, within the whole-graph fit and [`MAX_ZOOM`]: framing a
+/// box can neither push the graph out of view nor magnify past the ceiling the
+/// scroll wheel honors.
+pub(crate) fn frame_view(
+    target: Rect,
+    viewport: Size<Pixels>,
+    content: (f32, f32),
+) -> (f32, (f32, f32)) {
+    let whole = fit_zoom(viewport, content);
+    let zoom = fit_rect_zoom(target, viewport).unwrap_or(whole).clamp(whole, MAX_ZOOM);
+    let (vw, vh) = (f32::from(viewport.width), f32::from(viewport.height));
+    let cx = target.x as f32 + target.w as f32 / 2. + MARGIN as f32;
+    let cy = target.y as f32 + target.h as f32 / 2. + MARGIN as f32;
+    let pan = (vw / 2. - cx * zoom, vh / 2. - cy * zoom);
+    (zoom, clamp_pan(pan, zoom, viewport, content))
+}
+
 /// The zoom and pan that fit `content` centered in `viewport`.
 pub(crate) fn fit_view(viewport: Size<Pixels>, content: (f32, f32)) -> (f32, (f32, f32)) {
     let zoom = fit_zoom(viewport, content);
     let (vw, vh) = (f32::from(viewport.width), f32::from(viewport.height));
     let (gw, gh) = content;
     (zoom, ((vw - gw * zoom) / 2., (vh - gh * zoom) / 2.))
-}
-
-/// The graph's full extent in layout pixels: its laid-out size plus `MARGIN` on
-/// every side.
-pub(crate) fn content_size(g: &LaidOut) -> (f32, f32) {
-    (
-        g.width as f32 + 2. * MARGIN as f32,
-        g.height as f32 + 2. * MARGIN as f32,
-    )
 }
 
 /// Smallest layout rect covering the boxes the emphasis keeps framed that

@@ -55,7 +55,7 @@ const LABEL_PADDING: f64 = 22.0;
 pub const CARET_RESERVE: f64 = 12.0;
 /// Inset reserved at the top of each container for its title; the other three
 /// sides keep a uniform border.
-pub(crate) const LABEL_BAND: f64 = 26.0;
+pub const LABEL_BAND: f64 = 26.0;
 pub(crate) const BORDER: f64 = 12.0;
 
 /// Width of a leaf box holding `label`. Every leaf reserves the caret space,

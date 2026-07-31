@@ -1,22 +1,33 @@
-use crate::camera::{to_screen, Camera};
-use crate::dimming::Dimming;
+use crate::camera::{to_screen, visible_rect, Camera, Rect};
+use crate::dimming::{compute_dimming, Dimming};
 use crate::drag::track_gesture;
-use crate::emphasis::Emphasis;
+use crate::model::Drawn;
 use crate::scroll::paint_scrollbars;
 use crate::{GraphView, Palette};
-use bviz_graph_layout::layout::CARET_RESERVE;
-use bviz_graph_layout::{EdgeKind, Id, Kind, LaidOut};
+use bviz_graph_layout::layout::{CARET_RESERVE, LABEL_BAND};
+use bviz_graph_layout::{Connector, EdgeKind, Id, Kind};
 use gpui::{
     App, BorderStyle, Bounds, Entity, Hsla, PathBuilder, Pixels, Point, Rgba, TextAlign, Window,
     point, px, quad, rgb, size,
 };
 use std::collections::HashSet;
-
-/// Height of the top band a container reserves for its title.
-const LABEL_BAND: f64 = 26.0;
+use std::sync::Arc;
 
 /// Box label font size in layout pixels.
 const LABEL_SIZE: f64 = 13.0;
+
+/// Screen-pixel size a label is never drawn below. Zoom scales the label with
+/// the box down to this floor and no further, so a box wide enough to hold its
+/// name shows it rather than fading to a blank rectangle.
+const LABEL_FLOOR: f32 = 11.0;
+
+/// Screen-pixel clearance held between a label and its box's edges, so a label
+/// held at the floor is not painted flush against the border.
+const LABEL_PAD: f32 = 2.0;
+
+/// Screen width a box needs to spare for its label before one is drawn: any
+/// narrower and what survives truncation names nothing, so the box is left bare.
+const LABEL_MIN_WIDTH: f32 = 22.0;
 
 /// Arrowhead size along and across the edge direction, in layout pixels.
 const ARROW_LENGTH: f64 = 9.0;
@@ -45,26 +56,65 @@ const DIM_FADE: f32 = 0.6;
 /// neighborhood without erasing them.
 const DIM_EDGE_ALPHA: f32 = 0.2;
 
-/// The canvas paint pass: boxes parent-before-child so children sit over their
-/// containers, and the connectors over the fills.
+/// Everything the canvas draws from, owned so the `'static` paint closure holds
+/// no borrow of the view.
+pub(crate) struct Scene {
+    pub(crate) drawn: Drawn,
+    pub(crate) expandable: Arc<HashSet<Id>>,
+    pub(crate) palette: Palette,
+    pub(crate) hovered: Option<Id>,
+    pub(crate) dim_enabled: bool,
+    /// The emphasized box and the alpha its highlight paints at.
+    pub(crate) highlight: Option<(Id, f32)>,
+}
+
+/// The canvas paint pass: box fills parent-before-child so children sit over
+/// their containers, then the connectors, then every label on top.
+///
+/// Labels go last, in a pass of their own, so a name wins over the routes
+/// crossing its box; at the finest levels the lanes are dense enough to shred
+/// one painted under them. That pass keeps the boxes' outermost-first order,
+/// which is the order [`paint_box_label`] arbitrates overlapping titles in.
+///
+/// The camera is read here, once the prepaint has fitted it, so the level a map
+/// draws and the part of it the window shows are both the frame's own. Only what
+/// falls inside that part is touched, which is what keeps a level of tens of
+/// thousands of boxes paintable.
 pub(crate) fn canvas_body(
-    boxes: Vec<PaintBox>,
-    connectors: Vec<PaintConnector>,
-    palette: Palette,
-    content: (f32, f32),
+    scene: Scene,
     entity: Entity<GraphView>,
 ) -> impl FnOnce(Bounds<Pixels>, (), &mut Window, &mut App) {
     move |bounds, _, window, cx| {
         let camera = entity.read(cx).camera();
-        for b in &boxes {
-            paint_box(b, bounds, camera, &palette, window, cx);
+        let g = scene.drawn.view(camera.zoom);
+        let visible = visible_rect(bounds, camera);
+        let dimming = compute_dimming(g, scene.hovered, scene.dim_enabled);
+        let drawn: Vec<(PaintBox, Bounds<Pixels>)> = g
+            .boxes
+            .iter()
+            .filter(|b| visible.overlaps(&box_rect(b)))
+            .map(|b| {
+                let b = PaintBox::of(b, &scene, &dimming);
+                let rect = screen_rect(&b, bounds, camera);
+                paint_box(&b, rect, camera.zoom, &scene.palette, window);
+                (b, rect)
+            })
+            .collect();
+        for c in g.connectors.iter().filter(|c| visible.crossed_by(&c.points)) {
+            let dim = dimming.applies && !dimming.lit_edges.contains(&(c.from, c.to));
+            paint_lanes(c, dim, bounds, camera, window);
         }
-        for c in &connectors {
-            paint_lanes(c, bounds, camera, window);
+        let mut floated: Vec<Bounds<Pixels>> = Vec::new();
+        for (b, rect) in &drawn {
+            paint_box_label(b, *rect, camera.zoom, &scene.palette, &mut floated, window, cx);
         }
-        paint_scrollbars(bounds, content, camera, &palette, window);
+        paint_scrollbars(bounds, scene.drawn.content(), camera, &scene.palette, window);
         track_gesture(&entity, window, cx);
     }
+}
+
+fn box_rect(b: &bviz_graph_layout::Box) -> Rect {
+    Rect { x: b.x, y: b.y, w: b.width, h: b.height }
 }
 
 /// Accent hue for a leaf box, keyed by its node kind. These are mid-saturation
@@ -113,8 +163,9 @@ fn container_fill(kind: Kind, palette: &Palette) -> Rgba {
     }
 }
 
-/// A box flattened to what the canvas needs to paint it, in layout pixels.
-pub(crate) struct PaintBox {
+/// A box resolved against the theme and the frame's lit/dimmed partition, in
+/// layout pixels.
+struct PaintBox<'a> {
     x: f64,
     y: f64,
     w: f64,
@@ -124,9 +175,10 @@ pub(crate) struct PaintBox {
     /// group), so the renderer draws a disclosure caret: down when open
     /// (compound), right when collapsed.
     expandable: bool,
-    /// Fill resolved from the active theme when the box vec is built.
+    /// The themed fill, already faded if this box is dimmed, which the quad and
+    /// the plate a label sits on are both painted in.
     fill: Rgba,
-    label: String,
+    label: &'a str,
     /// Highlight alpha for the just-toggled box (0.0 = none), scaling the
     /// emphasis border and inset glow as it fades.
     highlight: f32,
@@ -134,66 +186,44 @@ pub(crate) struct PaintBox {
     dim: bool,
 }
 
-/// Flattens each laid-out box to what the canvas paints, resolving its themed
-/// fill and marking those the dimming fades.
-pub(crate) fn paint_boxes(
-    g: &LaidOut,
-    expandable: &HashSet<Id>,
-    emphasis: &Emphasis,
-    dimming: &Dimming,
-    palette: &Palette,
-) -> Vec<PaintBox> {
-    let highlight = emphasis.highlight();
-    g.boxes
-        .iter()
-        .map(|b| PaintBox {
+impl<'a> PaintBox<'a> {
+    fn of(b: &'a bviz_graph_layout::Box, scene: &Scene, dimming: &Dimming) -> Self {
+        let palette = &scene.palette;
+        let dim = dimming.applies && !dimming.lit.contains(&b.id);
+        let fill = match b.compound {
+            true => container_fill(b.kind, palette),
+            false => bviz_ui_theme::mix(kind_accent(b.kind), palette.background, KIND_BLEND),
+        };
+        PaintBox {
             x: b.x,
             y: b.y,
             w: b.width,
             h: b.height,
             compound: b.compound,
-            expandable: expandable.contains(&b.id) || b.group,
-            fill: if b.compound {
-                container_fill(b.kind, palette)
-            } else {
-                bviz_ui_theme::mix(kind_accent(b.kind), palette.background, KIND_BLEND)
+            expandable: scene.expandable.contains(&b.id) || b.group,
+            fill: match dim {
+                true => bviz_ui_theme::mix(fill, palette.background, DIM_FADE),
+                false => fill,
             },
-            label: b.label.clone(),
-            highlight: match highlight {
+            label: &b.label,
+            highlight: match scene.highlight {
                 Some((id, alpha)) if id == b.id => alpha,
                 _ => 0.0,
             },
-            dim: dimming.applies && !dimming.lit.contains(&b.id),
-        })
-        .collect()
-}
-
-/// A connector ready to paint, owned so the `'static` paint closure needs no
-/// borrow of the graph.
-pub(crate) struct PaintConnector {
-    /// The routed polyline, in graph coordinates.
-    pub(crate) points: Vec<(f64, f64)>,
-    /// The edge kinds sharing the route, drawn as parallel lanes along it.
-    pub(crate) kinds: Vec<EdgeKind>,
-    /// Whether the hover dimming fades this connector.
-    pub(crate) dim: bool,
-}
-
-/// Snapshots each of the graph's connectors for the painter.
-pub(crate) fn collect_connectors(g: &LaidOut, dimming: &Dimming) -> Vec<PaintConnector> {
-    g.connectors
-        .iter()
-        .map(|c| PaintConnector {
-            points: c.points.clone(),
-            kinds: c.kinds.clone(),
-            dim: dimming.applies && !dimming.lit_edges.contains(&(c.from, c.to)),
-        })
-        .collect()
+            dim,
+        }
+    }
 }
 
 /// Paints a connector's provenances as evenly spaced parallel lanes centered on
-/// its route.
-fn paint_lanes(c: &PaintConnector, bounds: Bounds<Pixels>, camera: Camera, window: &mut Window) {
+/// its route, `dim` fading those outside the hovered node's neighborhood.
+fn paint_lanes(
+    c: &Connector,
+    dim: bool,
+    bounds: Bounds<Pixels>,
+    camera: Camera,
+    window: &mut Window,
+) {
     let z = camera.zoom;
     let screen: Vec<(f32, f32)> = c
         .points
@@ -207,37 +237,30 @@ fn paint_lanes(c: &PaintConnector, bounds: Bounds<Pixels>, camera: Camera, windo
     for (i, kind) in c.kinds.iter().enumerate() {
         let slot = i as f32 - (n - 1.0) / 2.0;
         let lane = lane_polyline(&screen, slot * PARALLEL_SPACING * z);
-        paint_connector(&lane, *kind, c.dim, z, window);
+        paint_connector(&lane, *kind, dim, z, window);
     }
 }
 
-/// Paints a box: its filled quad, an emphasis border and glow when highlighted,
-/// and its centered label. Off-screen boxes are culled.
+/// Where `b` falls in the window under `camera`.
+fn screen_rect(b: &PaintBox, bounds: Bounds<Pixels>, camera: Camera) -> Bounds<Pixels> {
+    let origin = to_screen(b.x, b.y, bounds, camera);
+    let zoom = camera.zoom;
+    Bounds::new(origin, size(px(b.w as f32 * zoom), px(b.h as f32 * zoom)))
+}
+
+/// Paints a box's filled quad, with an emphasis border and glow when
+/// highlighted.
 fn paint_box(
     b: &PaintBox,
-    bounds: Bounds<Pixels>,
-    camera: Camera,
+    rect: Bounds<Pixels>,
+    zoom: f32,
     palette: &Palette,
     window: &mut Window,
-    cx: &mut App,
 ) {
-    let Camera { zoom, pan: _ } = camera;
-    let origin = to_screen(b.x, b.y, bounds, camera);
-    let size = size(px(b.w as f32 * zoom), px(b.h as f32 * zoom));
-    let rect = Bounds::new(origin, size);
-    if !rect.intersects(&bounds) {
-        return;
-    }
     let corner = px(6. * zoom);
-    let fill = if b.dim {
-        bviz_ui_theme::mix(b.fill, palette.background, DIM_FADE)
-    } else {
-        b.fill
-    };
     let ((border_w, border_c), glow) = box_emphasis(b, zoom, palette, rect, corner);
-    window.paint_quad(quad(rect, corner, fill, border_w, border_c, BorderStyle::Solid));
+    window.paint_quad(quad(rect, corner, b.fill, border_w, border_c, BorderStyle::Solid));
     glow(window);
-    paint_box_label(b, rect, zoom, palette, window, cx);
 }
 
 /// A box's emphasis: the quad border to stroke, and a deferred paint of the glow
@@ -281,19 +304,52 @@ fn box_emphasis(
     ((border_w, border_c), glow)
 }
 
-/// Paints a box's centered label, with a disclosure caret for a collapsed group
-/// leaf. A container's title sits in its top band; other labels center in the
-/// whole box. The font is the window's inherited UI text style so the views stay
-/// visually coherent; a container's title is bold, and its size is the layout's
-/// own, kept in step with the width the layout reserved for the label.
+/// Paints a box's label, truncated to the width there is room for, with a
+/// disclosure caret for an expandable box. A box too short or too narrow for the
+/// floored label is left bare. The font is the window's inherited UI text style
+/// so the views stay visually coherent, and a container's title is bold.
+///
+/// A label normally centers in the strip its own box keeps for it — a
+/// container's title band, or the whole box for anything else — which no other
+/// box's label reaches into. A container whose band the zoom has shrunk below
+/// the floored label instead floats its title to the top of its box, over ground
+/// the boxes inside it are drawn on; `floated` collects what those titles have
+/// taken, and a label that would land on any of it is dropped rather than
+/// printed over it. Since the caller walks the boxes outermost first, that
+/// leaves the coarser, more telling name standing.
 fn paint_box_label(
     b: &PaintBox,
     rect: Bounds<Pixels>,
     zoom: f32,
     palette: &Palette,
+    floated: &mut Vec<Bounds<Pixels>>,
     window: &mut Window,
     cx: &mut App,
 ) {
+    let (w, h) = (f32::from(rect.size.width), f32::from(rect.size.height));
+    let fs = (LABEL_SIZE as f32 * zoom).max(LABEL_FLOOR);
+    let needed = fs + 2. * LABEL_PAD;
+    if h < needed {
+        return;
+    }
+    let band = LABEL_BAND as f32 * zoom;
+    let (top_offset, floats) = match b.compound {
+        true if band >= needed => ((band - fs) / 2., false),
+        true => (LABEL_PAD, true),
+        false => ((h - fs) / 2., false),
+    };
+    // A box that can be opened or closed carries a disclosure caret left of the
+    // label; the two are centered together as one unit. The caret keeps the
+    // proportion the layout reserved for it whatever size the label is drawn at.
+    let caret = b.expandable;
+    let footprint = match caret {
+        true => fs * (CARET_RESERVE / LABEL_SIZE) as f32,
+        false => 0.,
+    };
+    let avail = w - 2. * LABEL_PAD - footprint;
+    if avail < LABEL_MIN_WIDTH {
+        return;
+    }
     let label_color = if b.dim {
         bviz_ui_theme::mix(palette.label, palette.background, DIM_FADE)
     } else {
@@ -301,42 +357,54 @@ fn paint_box_label(
     };
     let base = bviz_ui_assets::text_metrics(window).font;
     let font = if b.compound { base.bold() } else { base };
-    let fs = px(LABEL_SIZE as f32 * zoom);
-    let line = bviz_ui_assets::shape_line(window, b.label.clone(), font, fs, label_color.into());
-    // A collapsed group leaf carries a disclosure caret left of the label,
-    // occupying the reserved width the layout sized the box to hold; the label
-    // and caret are centered together as one unit. Other boxes center the label
-    // alone.
-    let caret = b.expandable;
-    let footprint = px(CARET_RESERVE as f32 * zoom);
-    let unit_width = if caret {
-        footprint + line.width()
-    } else {
-        line.width()
-    };
-    let unit_left = rect.origin.x + (rect.size.width - unit_width) / 2.;
-    let tx = if caret {
-        unit_left + footprint
-    } else {
-        unit_left
-    };
-    let ty = if b.compound {
-        let band = px(LABEL_BAND as f32 * zoom);
-        rect.origin.y + (band - fs) / 2.
-    } else {
-        rect.origin.y + (rect.size.height - fs) / 2.
-    };
-    let _ = line.paint(point(tx, ty), fs, TextAlign::Left, None, window, cx);
+    let line = bviz_ui_components::shape_truncated(
+        b.label,
+        avail,
+        font,
+        px(fs),
+        label_color.into(),
+        window,
+    );
+    let unit_left = f32::from(rect.origin.x) + (w - footprint - f32::from(line.width())) / 2.;
+    let ty = f32::from(rect.origin.y) + top_offset;
+    let plate = Bounds::new(
+        point(px(unit_left - LABEL_PAD), px(ty - LABEL_PAD)),
+        size(px(footprint + f32::from(line.width()) + 2. * LABEL_PAD), px(needed)),
+    );
+    if floated.iter().any(|taken| taken.intersects(&plate)) {
+        return;
+    }
+    if floats {
+        floated.push(plate);
+    }
+    // The plate is painted in the box's own fill, so a name reads against its box
+    // rather than against the routes crossing it. On the box's own ground it is
+    // invisible.
+    window.paint_quad(quad(
+        plate,
+        px(0.),
+        b.fill,
+        px(0.),
+        Hsla::transparent_black(),
+        BorderStyle::Solid,
+    ));
+    let _ = line.paint(
+        point(px(unit_left + footprint), px(ty)),
+        px(fs),
+        TextAlign::Left,
+        None,
+        window,
+        cx,
+    );
 
     // An open container (compound) points the caret down; a collapsed box points
     // it right. Phosphor icons render as `svg()` elements and cannot be painted
     // inside this canvas, so the caret is a small filled triangle.
     if caret {
-        let cy = ty + fs / 2.;
         paint_caret(
-            point(unit_left, cy),
-            footprint,
-            fs,
+            point(px(unit_left), px(ty + fs / 2.)),
+            px(footprint),
+            px(fs),
             b.compound,
             label_color,
             window,

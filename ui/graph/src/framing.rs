@@ -1,5 +1,5 @@
 use crate::camera::{
-    clamp_pan, ease_out_cubic, fit_view, fit_zoom, settle_view, Camera, Rect, Settle,
+    clamp_pan, ease_out_cubic, fit_view, fit_zoom, frame_view, settle_view, Camera, Rect, Settle,
 };
 use crate::{GraphView, MAX_ZOOM, SETTLE_DURATION, SETTLE_MIN_PAN_STEP, SETTLE_MIN_ZOOM_STEP};
 use gpui::{App, Bounds, Entity, Pixels, Window};
@@ -52,8 +52,37 @@ impl Framing {
         self.recenter = true;
     }
 
+    /// Drops the established framing, so the next prepaint fits the content
+    /// afresh. A layout of a different extent has nothing in common with the
+    /// zoom and pan held over from the last one.
+    pub(crate) fn refit(&mut self) {
+        self.fitted = false;
+        self.anim = None;
+    }
+
+    /// Eases the view onto `target`, scaling it to fill the viewport.
+    pub(crate) fn frame(&mut self, target: Rect, content: (f32, f32)) {
+        let (zoom, pan) = frame_view(target, self.viewport.size, content);
+        self.ease_to(zoom, pan);
+    }
+
+    /// Arms an ease from where the camera stands onto `(to_zoom, to_pan)`. A move
+    /// below the settle steps arms nothing, so a gesture that leaves the view
+    /// already framed does not twitch.
+    fn ease_to(&mut self, to_zoom: f32, to_pan: (f32, f32)) {
+        let (from_zoom, from_pan) = (self.camera.zoom, self.camera.pan);
+        let moves = (to_zoom - from_zoom).abs() > SETTLE_MIN_ZOOM_STEP
+            || (to_pan.0 - from_pan.0).abs() > SETTLE_MIN_PAN_STEP
+            || (to_pan.1 - from_pan.1).abs() > SETTLE_MIN_PAN_STEP;
+        if moves {
+            self.anim =
+                Some(Settle { from_zoom, from_pan, to_zoom, to_pan, start: Instant::now() });
+        }
+    }
+
     /// Records the canvas bounds and establishes the framing they call for: the
-    /// first prepaint fits the graph to the window.
+    /// first prepaint fits the graph to the window. Reports whether the camera
+    /// moved.
     ///
     /// A later prepaint whose bounds changed size keeps the view stable at any
     /// zoom level instead, holding the graph point under the viewport center
@@ -61,8 +90,9 @@ impl Framing {
     /// at the same zoom relative to the window rather than snapping to the fully
     /// fitted view. A settle in flight targeted the old size, so it is dropped
     /// rather than eased toward a stale destination.
-    fn fit_or_rescale(&mut self, bounds: Bounds<Pixels>, content: (f32, f32)) {
+    fn fit_or_rescale(&mut self, bounds: Bounds<Pixels>, content: (f32, f32)) -> bool {
         let prev = self.viewport;
+        let before = self.camera;
         self.viewport = bounds;
         if !self.fitted {
             let (z, p) = fit_view(bounds.size, content);
@@ -88,41 +118,33 @@ impl Framing {
                 content,
             );
         }
+        (before.zoom, before.pan) != (self.camera.zoom, self.camera.pan)
     }
 
-    /// Answers a pending recenter request by arming an ease onto `target`. A move
-    /// below the settle steps arms nothing; the request is consumed either way.
+    /// Answers a pending recenter request by arming an ease onto `target`; the
+    /// request is consumed whether or not one is armed.
     fn arm_settle(&mut self, content: (f32, f32), target: Option<Rect>) {
         if !self.recenter {
             return;
         }
         if let Some(target) = target {
-            let (z, (pan_x, pan_y)) = (self.camera.zoom, self.camera.pan);
-            let (tz, (tpan_x, tpan_y)) =
-                settle_view(target, self.viewport.size, content, z, (pan_x, pan_y));
-            let moves = (tz - z).abs() > SETTLE_MIN_ZOOM_STEP
-                || (tpan_x - pan_x).abs() > SETTLE_MIN_PAN_STEP
-                || (tpan_y - pan_y).abs() > SETTLE_MIN_PAN_STEP;
-            if moves {
-                self.anim = Some(Settle {
-                    from_zoom: z,
-                    from_pan: (pan_x, pan_y),
-                    to_zoom: tz,
-                    to_pan: (tpan_x, tpan_y),
-                    start: Instant::now(),
-                });
-            }
+            let (zoom, pan) = (self.camera.zoom, self.camera.pan);
+            let (to_zoom, to_pan) =
+                settle_view(target, self.viewport.size, content, zoom, pan);
+            self.ease_to(to_zoom, to_pan);
         }
         self.recenter = false;
     }
 
     /// Advances an in-flight settle, writing the eased zoom and pan and landing
-    /// exactly on the target on the last step. Returns whether the ease is still
-    /// running.
+    /// exactly on the target on the last step. Reports whether a frame is due:
+    /// every step of a running ease needs the next one, and the step that lands
+    /// needs one more if it moved the camera.
     fn step_settle(&mut self) -> bool {
         let Some(a) = self.anim else {
             return false;
         };
+        let before = self.camera;
         let t = (a.start.elapsed().as_secs_f32() / SETTLE_DURATION.as_secs_f32()).clamp(0.0, 1.0);
         let e = ease_out_cubic(t);
         self.camera.zoom = a.from_zoom + (a.to_zoom - a.from_zoom) * e;
@@ -130,12 +152,11 @@ impl Framing {
             a.from_pan.0 + (a.to_pan.0 - a.from_pan.0) * e,
             a.from_pan.1 + (a.to_pan.1 - a.from_pan.1) * e,
         );
-        if t >= 1.0 {
-            self.anim = None;
-            false
-        } else {
-            true
+        if t < 1.0 {
+            return true;
         }
+        self.anim = None;
+        (before.zoom, before.pan) != (self.camera.zoom, self.camera.pan)
     }
 }
 
@@ -148,12 +169,15 @@ pub(crate) fn build_prepaint(
     recenter_target: Option<Rect>,
 ) -> impl FnOnce(Bounds<Pixels>, &mut Window, &mut App) {
     move |bounds: Bounds<Pixels>, window: &mut Window, cx: &mut App| {
-        let easing = parent.update(cx, |view, _| {
-            view.framing.fit_or_rescale(bounds, content);
+        let redraw = parent.update(cx, |view, _| {
+            let moved = view.framing.fit_or_rescale(bounds, content);
             view.framing.arm_settle(content, recenter_target);
-            view.framing.step_settle()
+            // A moved camera leaves the frame that was rendered from the old one
+            // (its status line, its legend) describing a view that is no longer
+            // drawn, so ask for one more.
+            moved | view.framing.step_settle()
         });
-        if easing {
+        if redraw {
             window.request_animation_frame();
         }
     }
@@ -279,11 +303,22 @@ mod tests {
     }
 
     #[test]
-    fn a_finished_settle_lands_on_the_target_and_stops() {
+    fn a_finished_settle_lands_on_the_target_and_asks_for_the_frame_that_shows_it() {
         let mut f = framed(1.0, (0.0, 0.0), canvas_bounds(800., 600.));
         f.anim = Some(settle_to(2.0, (100.0, -50.0), Instant::now() - SETTLE_DURATION));
-        assert!(!f.step_settle(), "a landed ease still asked for a frame");
+        assert!(f.step_settle(), "the step that moved the camera asked for no frame");
         assert_eq!((f.camera.zoom, f.camera.pan), (2.0, (100.0, -50.0)));
+        assert!(f.anim.is_none());
+        // Landed and drawn: the ease is over and asks for nothing further.
+        assert!(!f.step_settle());
+    }
+
+    #[test]
+    fn a_settle_landing_where_the_camera_already_stands_asks_for_no_frame() {
+        let (zoom, pan) = (EASE_FROM_ZOOM, EASE_FROM_PAN);
+        let mut f = framed(zoom, pan, canvas_bounds(800., 600.));
+        f.anim = Some(settle_to(zoom, pan, Instant::now() - SETTLE_DURATION));
+        assert!(!f.step_settle(), "a landing that moved nothing asked for a frame");
         assert!(f.anim.is_none());
     }
 

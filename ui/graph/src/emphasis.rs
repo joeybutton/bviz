@@ -50,6 +50,12 @@ impl Emphasis {
         self.generation = self.generation.wrapping_add(1);
     }
 
+    /// Drops the emphasis, retiring any fade timer driving it.
+    pub(crate) fn clear(&mut self) {
+        self.current = None;
+        self.generation = self.generation.wrapping_add(1);
+    }
+
     /// The emphasized box and the alpha its highlight paints at, falling linearly
     /// to zero across `HIGHLIGHT_LINGER` once the fade begins.
     pub(crate) fn highlight(&self) -> Option<(Id, f32)> {

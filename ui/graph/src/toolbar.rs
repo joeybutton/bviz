@@ -7,22 +7,23 @@ pub(crate) fn toolbar(
     palette: &Palette,
     cx: &mut Context<GraphView>,
 ) -> Toolbar {
-    Toolbar::new()
-        .child(Toggle::new(
-            "dim-toggle",
-            "dim",
-            controls.dim_enabled,
-            cx.listener(|view, _: &ClickEvent, _, cx| view.toggle_dim(cx)),
-        ))
-        .child(Toggle::new(
+    let mut bar = Toolbar::new().child(controls.picker).child(Toggle::new(
+        "dim-toggle",
+        "dim",
+        controls.dim_enabled,
+        cx.listener(|view, _: &ClickEvent, _, cx| view.toggle_dim(cx)),
+    ));
+    // The strip only ever offers a control the mode's layout can answer, so
+    // everything on it acts on what is drawn.
+    if controls.mode.honors_reduce() {
+        bar = bar.child(Toggle::new(
             "reduce-toggle",
             "reduce",
             controls.reduced,
             cx.listener(|view, _: &ClickEvent, _, cx| view.toggle_reduce(cx)),
-        ))
-        .when(controls.relaying, |bar| {
-            bar.trailing(relaying_indicator(palette))
-        })
+        ));
+    }
+    bar.when(controls.relaying, |bar| bar.trailing(relaying_indicator(palette)))
 }
 
 /// Shown while a relayout runs, so the prior layout stays interactive with a
