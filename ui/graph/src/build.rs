@@ -1,6 +1,6 @@
 use bviz_graph_layout::graph::Graph;
 use bviz_graph_layout::{layout, quotient, streamed_proto, Id, LaidOut, Names};
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::path::PathBuf;
 
 /// Which Bazel query produced a `--output=streamed_proto` file, selecting the
@@ -59,17 +59,36 @@ pub(crate) fn build_graph(inputs: &[Input]) -> Result<(Graph, Graph, Names), Str
     Ok((base, reduced, names))
 }
 
+/// The transitive reduction `view` draws. `reduced_base` collapses to the same
+/// boxes as the base it reduces, so `view` keeps only the edges that projection
+/// leaves (a quotiented group's members map through `remap`, every other node
+/// keeps its id). The projected box graph is reduced once more because folding a
+/// subtree into one box makes edges redundant that are not redundant between
+/// nodes: a box A->B edge is implied by a drawn A->M->B path through other
+/// visible boxes.
+fn reduce_view(
+    mut view: Graph,
+    reduced_base: &Graph,
+    expanded: &HashSet<Id>,
+    remap: &BTreeMap<Id, Id>,
+) -> Graph {
+    let skeleton = bviz_graph_layout::lod::collapse(reduced_base, expanded);
+    let box_of = |id: Id| remap.get(&id).copied().unwrap_or(id);
+    let kept: HashSet<(Id, Id)> = skeleton
+        .edges
+        .iter()
+        .map(|e| (box_of(e.from), box_of(e.to)))
+        .filter(|(a, b)| a != b)
+        .collect();
+    view.edges.retain(|e| kept.contains(&(e.from, e.to)));
+    bviz_graph_layout::reduce::transitive_reduction(&view)
+}
+
 /// Builds the display graph with the given ids expanded and lays it out: fold
 /// every unexpanded container away, merge interchangeable leaves, then lay out
-/// only the resulting visible view. When `reduced`, the view is transitively
-/// reduced in two steps. First the base's reduction projects onto the view's
-/// boxes — the full base and the already-reduced base collapse to the same
-/// boxes, so a collapsed box stands in for its hidden subtree's reduced edges,
-/// keeping its edge count stable under expansion. Then the projected box graph
-/// is reduced again, because merging a subtree into one box creates box-level
-/// shortcuts that no longer hold at node granularity (a box A->B edge implied by
-/// a drawn A->M->B path through other visible boxes); the second pass drops them.
-/// `full_edges` keeps the unreduced connectivity for hover.
+/// only the resulting visible view, transitively reduced when `reduced`. The
+/// result's `full_edges` is the visible view's unreduced connectivity, for
+/// hover.
 pub(crate) fn relayout(
     base: &Graph,
     reduced_base: &Graph,
@@ -82,19 +101,7 @@ pub(crate) fn relayout(
     let full_edges: Vec<(Id, Id)> =
         view.edges.iter().map(|e| (e.from, e.to)).collect::<HashSet<_>>().into_iter().collect();
     if reduced {
-        // Project the reduced base's edges onto the same boxes (a collapsed group's
-        // members map through `remap`, everything else keeps its id), and keep only
-        // those of the view's edges.
-        let skeleton = bviz_graph_layout::lod::collapse(reduced_base, expanded);
-        let box_of = |id: Id| remap.get(&id).copied().unwrap_or(id);
-        let kept: HashSet<(Id, Id)> = skeleton
-            .edges
-            .iter()
-            .map(|e| (box_of(e.from), box_of(e.to)))
-            .filter(|(a, b)| a != b)
-            .collect();
-        view.edges.retain(|e| kept.contains(&(e.from, e.to)));
-        view = bviz_graph_layout::reduce::transitive_reduction(&view);
+        view = reduce_view(view, reduced_base, expanded, &remap);
     }
     let mut laid = layout::layout(&view);
     laid.full_edges = full_edges;
