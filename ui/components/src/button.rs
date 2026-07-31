@@ -1,7 +1,11 @@
 use gpui::{
     App, ClickEvent, Div, ElementId, Entity, FocusHandle, IntoElement, KeyDownEvent, KeyUpEvent,
-    RenderOnce, SharedString, Stateful, Window, div, prelude::*, px, transparent_black,
+    RenderOnce, SharedString, Stateful, Window, div, prelude::*, px, relative, transparent_black,
 };
+
+/// A compact button's line box as a multiple of its font size, tight enough that
+/// the label's own leading does not set the button's height.
+const COMPACT_LINE_HEIGHT: f32 = 1.2;
 
 /// How far a toggle's hover fill sits from the window background toward the text
 /// color: enough to show the pointer is on it, and clear of the selection color,
@@ -25,6 +29,7 @@ pub struct Button {
     /// Whether the button reads as on, for one built as a toggle; `None` for a
     /// button that is not one.
     selected: Option<bool>,
+    compact: bool,
     focus_handle: Option<FocusHandle>,
     on_click: Box<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>,
 }
@@ -40,6 +45,7 @@ impl Button {
             icon: None,
             ghost: false,
             selected: None,
+            compact: false,
             focus_handle: None,
             on_click: Box::new(on_click),
         }
@@ -67,6 +73,13 @@ impl Button {
         self
     }
 
+    /// Tightens the button to its label for a dense row, dropping the square
+    /// minimum an icon-only button is otherwise given.
+    pub fn compact(mut self) -> Self {
+        self.compact = true;
+        self
+    }
+
     pub fn track_focus(mut self, handle: &FocusHandle) -> Self {
         self.focus_handle = Some(handle.clone());
         self
@@ -74,7 +87,9 @@ impl Button {
 }
 
 fn sized(el: Stateful<Div>, button: &Button) -> Stateful<Div> {
-    if button.ghost && button.label.is_none() {
+    if button.compact {
+        el.px_2().py_0p5().line_height(relative(COMPACT_LINE_HEIGHT))
+    } else if button.ghost && button.label.is_none() {
         // A square hit target, so a bare icon is no harder to hit than a label.
         el.size(px(28.))
     } else {
