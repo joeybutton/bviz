@@ -686,7 +686,7 @@ impl TrackFlamer {
         }
         elems.par_sort_by(|a, b| a.key.cmp(b.key));
         let node_of = |src: Src| &tables[src.lane as usize].nodes[src.node as usize];
-        let (arena, parents) = reconstruct(&elems, |run| {
+        let arena = reconstruct(&elems, |run| {
             let head = node_of(run[0].src);
             let mut total_us = 0i64;
             let mut count = 0u32;
@@ -705,8 +705,8 @@ impl TrackFlamer {
             }
         });
         drop(elems);
-        let kids = csr_from_parents(&parents);
-        seal_arena(&self.flamer.profile, arena, parents, kids)
+        let kids = csr_from_parents(&arena.parents);
+        seal_arena(&self.flamer.profile, arena, kids)
     }
 }
 
@@ -829,6 +829,39 @@ struct ArenaNode {
     detail: bool,
     total_us: i64,
     count: u32,
+}
+
+/// An aggregation tree under reconstruction, seeded with the synthetic root at
+/// index 0. `parents` is parallel to `nodes`; the root's entry is `u32::MAX`,
+/// which no node index reaches.
+struct Arena {
+    nodes: Vec<ArenaNode>,
+    parents: Vec<u32>,
+}
+
+impl Arena {
+    fn with_capacity(n: usize) -> Arena {
+        let mut nodes = Vec::with_capacity(n);
+        nodes.push(ArenaNode {
+            name: ROOT_LABEL,
+            rank: 0,
+            role: SpanRole { workload: Workload::Other, payload: false },
+            detail: false,
+            total_us: 0,
+            count: 0,
+        });
+        let mut parents = Vec::with_capacity(n);
+        parents.push(u32::MAX);
+        Arena { nodes, parents }
+    }
+
+    /// Places `node` under `parent`, returning its index.
+    fn push(&mut self, node: ArenaNode, parent: usize) -> usize {
+        let idx = self.nodes.len();
+        self.nodes.push(node);
+        self.parents.push(parent as u32);
+        idx
+    }
 }
 
 /// Parent-child edges of the reconstruction arena in compressed-sparse-row form:
@@ -1025,16 +1058,12 @@ fn sort_child_ranges(kids: &mut ArenaChildren, n: usize, arena: &[ArenaNode]) {
 }
 
 /// Seal a reconstruction arena into a [`FlameGraph`], whose node order it carries
-/// unchanged. `parents[i]` is node `i`'s parent (the root's is unused), so a
-/// forward pass threads depth top-down and a reverse pass folds child aggregates
-/// up. Sorts each node's CSR child range widest-first, then moves the arena's
-/// scalar fields and CSR edges into the graph's parallel vectors.
-fn seal_arena(
-    profile: &Arc<Profile>,
-    arena: Vec<ArenaNode>,
-    parents: Vec<u32>,
-    mut kids: ArenaChildren,
-) -> FlameGraph {
+/// unchanged. A forward pass over the arena's parent array threads depth
+/// top-down and a reverse pass folds child aggregates up. Sorts each node's CSR
+/// child range widest-first, then moves the arena's scalar fields and CSR edges
+/// into the graph's parallel vectors.
+fn seal_arena(profile: &Arc<Profile>, arena: Arena, mut kids: ArenaChildren) -> FlameGraph {
+    let Arena { nodes: arena, parents } = arena;
     let n = arena.len();
     sort_child_ranges(&mut kids, n, &arena);
 
@@ -1127,30 +1156,13 @@ struct Src {
     node: u32,
 }
 
-/// Rebuild the aggregation tree from key-sorted elements, returning the arena and
-/// its parent array for [`seal_arena`]. Ascending key order lists every parent
-/// before its descendants, so a stack indexed by depth locates each node's
-/// parent; each maximal run of equal keys is one node, built by `node_of` from
-/// the run. The root's total is the summed total of the depth-1 nodes.
-///
-/// The caller seals, so the element buffer is released before the seal's own
-/// allocations.
-fn reconstruct<E: Keyed>(
-    elems: &[E],
-    node_of: impl Fn(&[E]) -> ArenaNode,
-) -> (Vec<ArenaNode>, Vec<u32>) {
-    let mut arena: Vec<ArenaNode> = Vec::with_capacity(elems.len() + 1);
-    arena.push(ArenaNode {
-        name: ROOT_LABEL,
-        rank: 0,
-        role: SpanRole { workload: Workload::Other, payload: false },
-        detail: false,
-        total_us: 0,
-        count: 0,
-    });
-    // Each node's parent arena index, parallel to `arena`; the root has none.
-    let mut parents: Vec<u32> = Vec::with_capacity(elems.len() + 1);
-    parents.push(u32::MAX);
+/// Rebuild the aggregation tree from key-sorted elements, returning the arena
+/// for [`seal_arena`]. Ascending key order lists every parent before its
+/// descendants, so a stack indexed by depth locates each node's parent; each
+/// maximal run of equal keys is one node, built by `node_of` from the run. The
+/// root's total is the summed total of the depth-1 nodes.
+fn reconstruct<E: Keyed>(elems: &[E], node_of: impl Fn(&[E]) -> ArenaNode) -> Arena {
+    let mut arena = Arena::with_capacity(elems.len() + 1);
     // `stack[d]` holds the arena index of the current path's depth-`d` node; the
     // root seeds depth 0. A node at depth `d` finds its parent at `stack[d - 1]`,
     // still in place from when that parent was reduced.
@@ -1164,19 +1176,16 @@ fn reconstruct<E: Keyed>(
         }
         let node = node_of(&elems[i..j]);
         let depth = elems[i].key().len() / SEGMENT_BYTES;
-        let parent = stack[depth - 1];
-        let idx = arena.len();
         if depth == 1 {
             root_total += node.total_us;
         }
-        arena.push(node);
-        parents.push(parent as u32);
+        let idx = arena.push(node, stack[depth - 1]);
         stack.truncate(depth);
         stack.push(idx);
         i = j;
     }
-    arena[0].total_us = root_total;
-    (arena, parents)
+    arena.nodes[0].total_us = root_total;
+    arena
 }
 
 /// The CSR child edges of an arena described by its parent array: count children
@@ -1349,7 +1358,7 @@ pub(crate) fn invert(graph: FlameGraph) -> FlameGraph {
     }
     elems.par_sort_by(|a, b| a.key.cmp(b.key));
 
-    let (arena, parents) = reconstruct(&elems, |run| {
+    let arena = reconstruct(&elems, |run| {
         let head = run[0].node as usize;
         let mut total_us = 0i64;
         let mut count = 0u32;
@@ -1372,8 +1381,8 @@ pub(crate) fn invert(graph: FlameGraph) -> FlameGraph {
     drop(elems);
     drop(keys);
     drop(graph);
-    let kids = csr_from_parents(&parents);
-    seal_arena(&profile, arena, parents, kids)
+    let kids = csr_from_parents(&arena.parents);
+    seal_arena(&profile, arena, kids)
 }
 
 /// Lay the visible window of the graph into pixels, mirroring the flame chart's
