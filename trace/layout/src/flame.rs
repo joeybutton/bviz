@@ -5,7 +5,7 @@ use bviz_trace_profile::{
     Profile, Slice, SliceDetail, Span32, SpanRole, Str, ThreadTrack, Workload,
 };
 use rayon::iter::{IntoParallelRefIterator, IntoParallelRefMutIterator, ParallelIterator};
-use rayon::slice::ParallelSliceMut;
+use rayon::slice::{ParallelSlice, ParallelSliceMut};
 use rustc_hash::{FxHashMap, FxHashSet};
 
 /// One key segment of a slice's aggregation path: a frame label — a [`Str`]
@@ -818,10 +818,8 @@ struct Row {
     dur: i64,
 }
 
-/// A node of the aggregation tree under reconstruction from path-sorted rows,
-/// held in an index arena so the tree is built without a borrow-stack. Edges to
-/// children live in a separate CSR ([`ArenaChildren`]) built once every node is
-/// placed.
+/// One node's field values as [`Arena::push`] takes them, decomposed into the
+/// arena's parallel vectors on the way in.
 struct ArenaNode {
     name: Str,
     rank: u32,
@@ -832,43 +830,68 @@ struct ArenaNode {
 }
 
 /// An aggregation tree under reconstruction, seeded with the synthetic root at
-/// index 0. `parents` is parallel to `nodes`; the root's entry is `u32::MAX`,
-/// which no node index reaches.
+/// index 0. The node fields carry the [`FlameGraph`]'s own struct-of-arrays
+/// shape, so sealing moves the vectors out; the capacity an arena is built with
+/// is therefore the graph's own, and must be a node count rather than a bound
+/// on one. `parents` is parallel to the node fields and the root's entry is
+/// `u32::MAX`, which no node index reaches.
 struct Arena {
-    nodes: Vec<ArenaNode>,
+    name: Vec<Str>,
+    rank: Vec<u32>,
+    role: Vec<SpanRole>,
+    detail: Vec<bool>,
+    total_us: Vec<i64>,
+    count: Vec<u32>,
     parents: Vec<u32>,
 }
 
 impl Arena {
     fn with_capacity(n: usize) -> Arena {
-        let mut nodes = Vec::with_capacity(n);
-        nodes.push(ArenaNode {
-            name: ROOT_LABEL,
-            rank: 0,
-            role: SpanRole { workload: Workload::Other, payload: false },
-            detail: false,
-            total_us: 0,
-            count: 0,
-        });
-        let mut parents = Vec::with_capacity(n);
-        parents.push(u32::MAX);
-        Arena { nodes, parents }
+        let mut arena = Arena {
+            name: Vec::with_capacity(n),
+            rank: Vec::with_capacity(n),
+            role: Vec::with_capacity(n),
+            detail: Vec::with_capacity(n),
+            total_us: Vec::with_capacity(n),
+            count: Vec::with_capacity(n),
+            parents: Vec::with_capacity(n),
+        };
+        arena.push(
+            ArenaNode {
+                name: ROOT_LABEL,
+                rank: 0,
+                role: SpanRole { workload: Workload::Other, payload: false },
+                detail: false,
+                total_us: 0,
+                count: 0,
+            },
+            u32::MAX,
+        );
+        arena
+    }
+
+    fn len(&self) -> usize {
+        self.name.len()
     }
 
     /// Places `node` under `parent`, returning its index.
-    fn push(&mut self, node: ArenaNode, parent: usize) -> usize {
-        let idx = self.nodes.len();
-        self.nodes.push(node);
-        self.parents.push(parent as u32);
+    fn push(&mut self, node: ArenaNode, parent: u32) -> usize {
+        let idx = self.len();
+        self.name.push(node.name);
+        self.rank.push(node.rank);
+        self.role.push(node.role);
+        self.detail.push(node.detail);
+        self.total_us.push(node.total_us);
+        self.count.push(node.count);
+        self.parents.push(parent);
         idx
     }
 
     /// Adds a finished node's aggregates to its parent's, so a parent totals its
     /// whole subtree.
     fn fold_up(&mut self, node: usize, parent: usize) {
-        let (total_us, count) = (self.nodes[node].total_us, self.nodes[node].count);
-        self.nodes[parent].total_us += total_us;
-        self.nodes[parent].count += count;
+        self.total_us[parent] += self.total_us[node];
+        self.count[parent] += self.count[node];
     }
 }
 
@@ -991,8 +1014,13 @@ fn emit_lane_rows(flamer: &Flamer, labels: FlameLabels, thread: &ThreadTrack, ou
 /// uniqueness.
 type ChildOrder = (std::cmp::Reverse<i64>, u32, SpanRole, bool);
 
-fn child_order(nd: &ArenaNode) -> ChildOrder {
-    (std::cmp::Reverse(nd.total_us), nd.rank, nd.role, nd.detail)
+fn child_order(arena: &Arena, i: usize) -> ChildOrder {
+    (
+        std::cmp::Reverse(arena.total_us[i]),
+        arena.rank[i],
+        arena.role[i],
+        arena.detail[i],
+    )
 }
 
 /// Entries a child range must hold before spreading its sort across the workers
@@ -1009,7 +1037,7 @@ fn wide_range_min() -> usize {
 /// nodes in parallel. Range widths are heavily skewed — the inverted root holds
 /// one child per distinct frame — so a range [`wide_range_min`] admits is itself
 /// spread over the workers.
-fn sort_child_ranges(kids: &mut ArenaChildren, n: usize, arena: &[ArenaNode]) {
+fn sort_child_ranges(kids: &mut ArenaChildren, n: usize, arena: &Arena) {
     /// Arena size below which sorting the ranges serially wins over the
     /// parallel split.
     const PARALLEL_MIN: usize = 1 << 13;
@@ -1038,7 +1066,7 @@ fn sort_child_ranges(kids: &mut ArenaChildren, n: usize, arena: &[ArenaNode]) {
     for tile in &mut wide {
         let mut buf: Vec<(ChildOrder, u32)> = tile
             .par_iter()
-            .map(|&c| (child_order(&arena[c as usize]), c))
+            .map(|&c| (child_order(arena, c as usize), c))
             .collect();
         buf.par_sort_unstable();
         for (dst, &(_, c)) in tile.iter_mut().zip(buf.iter()) {
@@ -1047,7 +1075,7 @@ fn sort_child_ranges(kids: &mut ArenaChildren, n: usize, arena: &[ArenaNode]) {
     }
     let sort_tile = |buf: &mut Vec<(ChildOrder, u32)>, tile: &mut [u32]| {
         buf.clear();
-        buf.extend(tile.iter().map(|&c| (child_order(&arena[c as usize]), c)));
+        buf.extend(tile.iter().map(|&c| (child_order(arena, c as usize), c)));
         buf.sort_unstable();
         for (dst, &(_, c)) in tile.iter_mut().zip(buf.iter()) {
             *dst = c;
@@ -1065,30 +1093,12 @@ fn sort_child_ranges(kids: &mut ArenaChildren, n: usize, arena: &[ArenaNode]) {
     }
 }
 
-/// Seal a reconstruction arena into a [`FlameGraph`], whose node order it carries
-/// unchanged. A forward pass over the arena's parent array threads depth
-/// top-down and a reverse pass folds child aggregates up. Sorts each node's CSR
-/// child range widest-first, then moves the arena's scalar fields and CSR edges
-/// into the graph's parallel vectors.
+/// Seal a reconstruction arena into a [`FlameGraph`], whose node order it
+/// carries unchanged and whose vectors it moves out of the arena.
 fn seal_arena(profile: &Arc<Profile>, arena: Arena, mut kids: ArenaChildren) -> FlameGraph {
-    let Arena { nodes: arena, parents } = arena;
     let n = arena.len();
     sort_child_ranges(&mut kids, n, &arena);
-
-    let mut name = Vec::with_capacity(n);
-    let mut rank = Vec::with_capacity(n);
-    let mut total_us = Vec::with_capacity(n);
-    let mut role = Vec::with_capacity(n);
-    let mut detail = Vec::with_capacity(n);
-    let mut count = Vec::with_capacity(n);
-    for nd in arena {
-        name.push(nd.name);
-        rank.push(nd.rank);
-        total_us.push(nd.total_us);
-        role.push(nd.role);
-        detail.push(nd.detail);
-        count.push(nd.count);
-    }
+    let Arena { name, rank, role, detail, total_us, count, parents } = arena;
 
     let mut depth = vec![0u32; n];
     let mut max_depth = 0u32;
@@ -1158,7 +1168,11 @@ struct Src {
 /// maximal run of equal keys is one node, built by `node_of` from the run. The
 /// root's total is the summed total of the depth-1 nodes.
 fn reconstruct(elems: &[KeyRef], node_of: impl Fn(&[KeyRef]) -> ArenaNode) -> Arena {
-    let mut arena = Arena::with_capacity(elems.len() + 1);
+    // One node per maximal run of equal keys, and the root.
+    let nodes = 1
+        + usize::from(!elems.is_empty())
+        + elems.par_windows(2).filter(|w| w[0].key != w[1].key).count();
+    let mut arena = Arena::with_capacity(nodes);
     // `stack[d]` holds the arena index of the current path's depth-`d` node; the
     // root seeds depth 0. A node at depth `d` finds its parent at `stack[d - 1]`,
     // still in place from when that parent was reduced.
@@ -1175,12 +1189,13 @@ fn reconstruct(elems: &[KeyRef], node_of: impl Fn(&[KeyRef]) -> ArenaNode) -> Ar
         if depth == 1 {
             root_total += node.total_us;
         }
-        let idx = arena.push(node, stack[depth - 1]);
+        let idx = arena.push(node, stack[depth - 1] as u32);
         stack.truncate(depth);
         stack.push(idx);
         i = j;
     }
-    arena.nodes[0].total_us = root_total;
+    arena.total_us[0] = root_total;
+    debug_assert_eq!(arena.len(), nodes, "the run count must be exact");
     arena
 }
 
@@ -1346,20 +1361,21 @@ fn reconstruct_chains(
                 total_us: 0,
                 count: 0,
             };
-            let idx = arena.push(node, stack[d - 1]);
+            let idx = arena.push(node, stack[d - 1] as u32);
             stack.push(idx);
         }
         depth = end;
         let leaf = stack[depth];
-        arena.nodes[leaf].total_us += graph.self_us(src);
-        arena.nodes[leaf].count += graph.count(src);
+        arena.total_us[leaf] += graph.self_us(src);
+        arena.count[leaf] += graph.count(src);
     }
     while depth > 0 {
         arena.fold_up(stack[depth], stack[depth - 1]);
         depth -= 1;
     }
     // The synthetic root spans no frame, so it carries the summed time alone.
-    arena.nodes[0].count = 0;
+    arena.count[0] = 0;
+    debug_assert_eq!(arena.len(), nodes, "the prefix scan's node count must be exact");
     arena
 }
 
@@ -1988,7 +2004,7 @@ mod tests {
     /// An arena of one parent per entry of `sizes` under the root, the `k`th
     /// holding `sizes[k]` children whose totals are distinct and in no
     /// particular order, returned with its parent array.
-    fn child_range_arena(sizes: &[usize]) -> (Vec<ArenaNode>, Vec<u32>) {
+    fn child_range_arena(sizes: &[usize]) -> Arena {
         let node = |total_us: i64| ArenaNode {
             name: ROOT_LABEL,
             rank: 0,
@@ -1997,22 +2013,17 @@ mod tests {
             total_us,
             count: 0,
         };
-        let n = 1 + sizes.len() + sizes.iter().sum::<usize>();
-        let mut arena = Vec::with_capacity(n);
-        let mut parents = Vec::with_capacity(n);
-        arena.push(node(0));
-        parents.push(u32::MAX);
+        let mut arena = Arena::with_capacity(1 + sizes.len() + sizes.iter().sum::<usize>());
         for _ in sizes {
-            arena.push(node(0));
-            parents.push(0);
+            arena.push(node(0), 0);
         }
         for (k, &size) in sizes.iter().enumerate() {
             for j in 0..size {
-                arena.push(node((j as u64).wrapping_mul(SCRAMBLE) as i64));
-                parents.push(1 + k as u32);
+                let total_us = (j as u64).wrapping_mul(SCRAMBLE) as i64;
+                arena.push(node(total_us), 1 + k as u32);
             }
         }
-        (arena, parents)
+        arena
     }
 
     #[test]
@@ -2023,19 +2034,56 @@ mod tests {
             sizes.iter().any(|&s| s >= wide) && sizes.iter().any(|&s| (2..wide).contains(&s)),
             "the ranges must straddle the width at which a sort spreads over the workers"
         );
-        let (arena, parents) = child_range_arena(&sizes);
-        let mut kids = csr_from_parents(&parents);
+        let arena = child_range_arena(&sizes);
+        let mut kids = csr_from_parents(&arena.parents);
         let n = arena.len();
         let expect: Vec<Vec<u32>> = (0..n)
             .map(|i| {
                 let mut ids = kids.of(i).to_vec();
-                ids.sort_by_key(|&c| (child_order(&arena[c as usize]), c));
+                ids.sort_by_key(|&c| (child_order(&arena, c as usize), c));
                 ids
             })
             .collect();
         sort_child_ranges(&mut kids, n, &arena);
         for i in 0..n {
             assert_eq!(kids.of(i), expect[i], "children of node {i}");
+        }
+    }
+
+    #[test]
+    fn a_sealed_graph_holds_no_capacity_past_its_nodes() {
+        // Two lanes walking the same paths, so the merge sorts twice as many
+        // elements as there are distinct paths to reconstruct: an arena sized
+        // from the element count would leave its graph holding the difference.
+        let lane = |tid: i64| {
+            track(
+                tid,
+                LaneClass::Execution,
+                vec![
+                    action("Rustc", 0, 100),
+                    slice("subprocess.run", "subprocess run", 0, 80),
+                ],
+            )
+        };
+        let p = profile(vec![lane(1), lane(2)]);
+        for g in [flame(&p), invert(flame(&p))] {
+            let held = [
+                (g.name.len(), g.name.capacity()),
+                (g.rank.len(), g.rank.capacity()),
+                (g.total_us.len(), g.total_us.capacity()),
+                (g.self_us.len(), g.self_us.capacity()),
+                (g.width_us.len(), g.width_us.capacity()),
+                (g.role.len(), g.role.capacity()),
+                (g.detail.len(), g.detail.capacity()),
+                (g.count.len(), g.count.capacity()),
+                (g.subtree_max_depth.len(), g.subtree_max_depth.capacity()),
+                (g.child_off.len(), g.child_off.capacity()),
+                (g.child_pool.len(), g.child_pool.capacity()),
+            ];
+            assert!(
+                held.iter().all(|&(len, capacity)| len == capacity),
+                "(length, capacity) per vector: {held:?}"
+            );
         }
     }
 
