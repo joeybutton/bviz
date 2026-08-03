@@ -1218,11 +1218,16 @@ fn write_segment(out: &mut [u8], rank: u32, role: SpanRole, detail: bool) {
 
 /// Every node's caller-chain key — the path the inversion hangs that node's
 /// frame on, one [`SEGMENT_BYTES`] segment per frame from the root of the
-/// inverted tree outward — packed into one arena, node `i`'s key occupying
-/// segments `at[i]..at[i + 1]` of both `pool` and `owner`.
+/// inverted tree outward — packed into one byte pool in node order, indexed by
+/// `segments`.
 struct ChainKeys {
-    /// The segment bytes of every key, in node order.
     pool: Vec<u8>,
+    segments: ChainSegments,
+}
+
+/// Where each node's caller-chain key lies and what its segments name: node
+/// `i`'s key occupies segments `at[i]..at[i + 1]`.
+struct ChainSegments {
     /// The graph node each segment was encoded from, so a key prefix names the
     /// frame it ends at.
     owner: Vec<u32>,
@@ -1232,10 +1237,9 @@ struct ChainKeys {
 
 impl ChainKeys {
     fn key(&self, i: usize) -> &[u8] {
-        let (start, end) = (self.at[i] as usize, self.at[i + 1] as usize);
-        &self.pool[start * SEGMENT_BYTES..end * SEGMENT_BYTES]
+        let at = &self.segments.at;
+        &self.pool[at[i] as usize * SEGMENT_BYTES..at[i + 1] as usize * SEGMENT_BYTES]
     }
-
 }
 
 /// Whether node `i` has self time for the inversion to hang on its caller chain.
@@ -1281,7 +1285,11 @@ fn chain_keys(graph: &FlameGraph, parent: &[u32]) -> (ChainKeys, usize) {
         );
         owner[own] = i as u32;
     }
-    (ChainKeys { pool, owner, at }, contributors)
+    let keys = ChainKeys {
+        pool,
+        segments: ChainSegments { owner, at },
+    };
+    (keys, contributors)
 }
 
 /// One contributing frame's whole caller-chain key, sorted on to place the
@@ -1299,35 +1307,36 @@ fn common_segments(a: &[u8], b: &[u8]) -> usize {
     shared / SEGMENT_BYTES
 }
 
-/// Rebuild the inverted tree from whole caller-chain keys in ascending order,
-/// returning the arena for [`seal_arena`]. Ascending order is the tree's
-/// pre-order, so each key branches off the one before it past the `lcp[k]`
-/// segments they share: the nodes deeper than that are complete and fold into
-/// their parents, and the key's remaining segments open fresh nodes labelled
-/// from the graph node each was encoded from. The key's own frame then charges
-/// its self time and span count to the node it ends at, which every ancestor
-/// picks up as it is folded. `nodes` sizes the arena.
+/// Rebuild the inverted tree from the caller chains of `srcs` — the contributing
+/// frames in ascending key order — returning the arena for [`seal_arena`].
+/// Ascending order is the tree's pre-order, so each chain branches off the one
+/// before it past the `lcp[k]` segments they share: the nodes deeper than that
+/// are complete and fold into their parents, and the chain's remaining segments
+/// open fresh nodes labelled from the graph node each was encoded from. The
+/// frame then charges its self time and span count to the node its chain ends
+/// at, which every ancestor picks up as it is folded. `nodes` sizes the arena.
 fn reconstruct_chains(
     graph: &FlameGraph,
-    keys: &ChainKeys,
-    elems: &[ChainRef],
+    chain: &ChainSegments,
+    srcs: &[u32],
     lcp: &[u32],
     nodes: usize,
 ) -> Arena {
     let mut arena = Arena::with_capacity(nodes);
     let mut stack: Vec<usize> = vec![0];
     let mut depth = 0usize;
-    for (k, e) in elems.iter().enumerate() {
+    for (k, &src) in srcs.iter().enumerate() {
+        let src = src as usize;
         let shared = lcp[k] as usize;
         while depth > shared {
             arena.fold_up(stack[depth], stack[depth - 1]);
             depth -= 1;
         }
         stack.truncate(shared + 1);
-        let end = e.key.len() / SEGMENT_BYTES;
-        let base = keys.at[e.src as usize] as usize;
+        let base = chain.at[src] as usize;
+        let end = chain.at[src + 1] as usize - base;
         for d in shared + 1..=end {
-            let owner = keys.owner[base + d - 1] as usize;
+            let owner = chain.owner[base + d - 1] as usize;
             let node = ArenaNode {
                 name: graph.name(owner),
                 rank: graph.rank(owner),
@@ -1341,8 +1350,8 @@ fn reconstruct_chains(
         }
         depth = end;
         let leaf = stack[depth];
-        arena.nodes[leaf].total_us += graph.self_us(e.src as usize);
-        arena.nodes[leaf].count += graph.count(e.src as usize);
+        arena.nodes[leaf].total_us += graph.self_us(src);
+        arena.nodes[leaf].count += graph.count(src);
     }
     while depth > 0 {
         arena.fold_up(stack[depth], stack[depth - 1]);
@@ -1399,13 +1408,16 @@ pub(crate) fn invert(graph: FlameGraph) -> FlameGraph {
         prev = e.key;
     }
 
-    let arena = reconstruct_chains(&graph, &keys, &elems, &lcp, nodes);
-    drop(lcp);
-    // The key arena and the source graph are read only up to here, so they leave
-    // with the elements.
+    let srcs: Vec<u32> = elems.iter().map(|e| e.src).collect();
     drop(elems);
-    drop(keys);
-    drop(graph);
+    // Peak live bytes fall where the arena is largest, and nothing past the
+    // prefix scan reads key bytes, so the pool goes before the arena grows.
+    let ChainKeys { pool, segments } = keys;
+    drop(pool);
+
+    let arena = reconstruct_chains(&graph, &segments, &srcs, &lcp, nodes);
+    // The reconstruction is the last reader of everything it takes.
+    drop((segments, srcs, lcp, graph));
     let kids = csr_from_parents(&arena.parents);
     seal_arena(&profile, arena, kids)
 }
