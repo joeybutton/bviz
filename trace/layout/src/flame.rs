@@ -1273,7 +1273,9 @@ fn chain_keys(graph: &FlameGraph, parent: &[u32]) -> (ChainKeys, usize) {
     for i in 1..n {
         let p = parent[i] as usize;
         debug_assert!(p < i, "a node's parent must precede it");
-        at[i + 1] = at[i] + (at[p + 1] - at[p] + 1);
+        at[i + 1] = at[i]
+            .checked_add(at[p + 1] - at[p] + 1)
+            .expect("summed caller-chain depth overflows the chain segment index");
         contributors += contributes(graph, i) as usize;
     }
 
