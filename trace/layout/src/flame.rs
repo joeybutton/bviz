@@ -1184,27 +1184,28 @@ fn reconstruct(elems: &[KeyRef], node_of: impl Fn(&[KeyRef]) -> ArenaNode) -> Ar
     arena
 }
 
-/// The CSR child edges of an arena described by its parent array: count children
-/// per parent, prefix-sum to offsets, then fill from a per-parent cursor. The
-/// ascending-index fill lists each parent's children in creation order, the
-/// pre-sort order [`seal_arena`] reorders widest-first.
+/// The CSR child edges of an arena described by its parent array. `off[p]`
+/// doubles as `p`'s fill cursor, leaving every offset one slot past where it
+/// belongs, which shifting the array right restores. The ascending-index fill
+/// lists each parent's children in creation order, the pre-sort order
+/// [`seal_arena`] reorders widest-first.
 fn csr_from_parents(parents: &[u32]) -> ArenaChildren {
     let n = parents.len();
-    let mut child_count = vec![0u32; n];
-    for i in 1..n {
-        child_count[parents[i] as usize] += 1;
-    }
     let mut off = vec![0u32; n + 1];
+    for i in 1..n {
+        off[parents[i] as usize + 1] += 1;
+    }
     for k in 0..n {
-        off[k + 1] = off[k] + child_count[k];
+        off[k + 1] += off[k];
     }
     let mut pool = vec![0u32; n - 1];
-    let mut cursor = off[..n].to_vec();
     for i in 1..n {
         let p = parents[i] as usize;
-        pool[cursor[p] as usize] = i as u32;
-        cursor[p] += 1;
+        pool[off[p] as usize] = i as u32;
+        off[p] += 1;
     }
+    off.copy_within(0..n, 1);
+    off[0] = 0;
     ArenaChildren { off, pool }
 }
 
