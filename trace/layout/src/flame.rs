@@ -862,6 +862,14 @@ impl Arena {
         self.parents.push(parent as u32);
         idx
     }
+
+    /// Adds a finished node's aggregates to its parent's, so a parent totals its
+    /// whole subtree.
+    fn fold_up(&mut self, node: usize, parent: usize) {
+        let (total_us, count) = (self.nodes[node].total_us, self.nodes[node].count);
+        self.nodes[parent].total_us += total_us;
+        self.nodes[parent].count += count;
+    }
 }
 
 /// Parent-child edges of the reconstruction arena in compressed-sparse-row form:
@@ -1125,12 +1133,6 @@ fn seal_arena(profile: &Arc<Profile>, arena: Arena, mut kids: ArenaChildren) -> 
     }
 }
 
-/// An element of a key-sorted reconstruction, ordered and grouped by its
-/// aggregation-path key.
-trait Keyed {
-    fn key(&self) -> &[u8];
-}
-
 /// One path-sorted element awaiting tree reconstruction: the aggregation-path
 /// key bytes (borrowed from the source lane's `key_pool`) sorted on, and `src`
 /// locating the [`LaneNode`] the coalesced frame draws from. Holding the
@@ -1140,12 +1142,6 @@ trait Keyed {
 struct KeyRef<'a> {
     key: &'a [u8],
     src: Src,
-}
-
-impl Keyed for KeyRef<'_> {
-    fn key(&self) -> &[u8] {
-        self.key
-    }
 }
 
 /// Locates a [`LaneNode`] within one labelling's lane tables: `lane` indexes the
@@ -1161,7 +1157,7 @@ struct Src {
 /// descendants, so a stack indexed by depth locates each node's parent; each
 /// maximal run of equal keys is one node, built by `node_of` from the run. The
 /// root's total is the summed total of the depth-1 nodes.
-fn reconstruct<E: Keyed>(elems: &[E], node_of: impl Fn(&[E]) -> ArenaNode) -> Arena {
+fn reconstruct(elems: &[KeyRef], node_of: impl Fn(&[KeyRef]) -> ArenaNode) -> Arena {
     let mut arena = Arena::with_capacity(elems.len() + 1);
     // `stack[d]` holds the arena index of the current path's depth-`d` node; the
     // root seeds depth 0. A node at depth `d` finds its parent at `stack[d - 1]`,
@@ -1171,11 +1167,11 @@ fn reconstruct<E: Keyed>(elems: &[E], node_of: impl Fn(&[E]) -> ArenaNode) -> Ar
     let mut i = 0;
     while i < elems.len() {
         let mut j = i + 1;
-        while j < elems.len() && elems[j].key() == elems[i].key() {
+        while j < elems.len() && elems[j].key == elems[i].key {
             j += 1;
         }
         let node = node_of(&elems[i..j]);
-        let depth = elems[i].key().len() / SEGMENT_BYTES;
+        let depth = elems[i].key.len() / SEGMENT_BYTES;
         if depth == 1 {
             root_total += node.total_us;
         }
@@ -1240,33 +1236,25 @@ impl ChainKeys {
         &self.pool[start * SEGMENT_BYTES..end * SEGMENT_BYTES]
     }
 
-    fn depth(&self, i: usize) -> usize {
-        (self.at[i + 1] - self.at[i]) as usize
-    }
 }
 
 /// Whether node `i` has self time for the inversion to hang on its caller chain.
-/// The pass that counts [`ChainPrefix`] elements and the pass that emits them
-/// must admit the same frames, or the exact pre-size stops being exact.
 fn contributes(graph: &FlameGraph, i: usize) -> bool {
     graph.self_us(i) != 0
 }
 
-/// Pack `graph`'s [`ChainKeys`] and count the [`ChainPrefix`] elements the
-/// inversion emits from them. `parent[i]` is node `i`'s parent, and one forward
-/// pass extends each parent's key into its children's.
+/// Pack `graph`'s [`ChainKeys`] and count the frames [`contributes`] admits.
+/// `parent[i]` is node `i`'s parent, and one forward pass extends each parent's
+/// key into its children's.
 fn chain_keys(graph: &FlameGraph, parent: &[u32]) -> (ChainKeys, usize) {
     let n = graph.len();
     let mut at = vec![0u32; n + 1];
-    let mut elem_count = 0usize;
+    let mut contributors = 0usize;
     for i in 1..n {
         let p = parent[i] as usize;
         debug_assert!(p < i, "a node's parent must precede it");
-        let depth = at[p + 1] - at[p] + 1;
-        at[i + 1] = at[i] + depth;
-        if contributes(graph, i) {
-            elem_count += depth as usize;
-        }
+        at[i + 1] = at[i] + (at[p + 1] - at[p] + 1);
+        contributors += contributes(graph, i) as usize;
     }
 
     let segments = at[n] as usize;
@@ -1293,26 +1281,76 @@ fn chain_keys(graph: &FlameGraph, parent: &[u32]) -> (ChainKeys, usize) {
         );
         owner[own] = i as u32;
     }
-    (ChainKeys { pool, owner, at }, elem_count)
+    (ChainKeys { pool, owner, at }, contributors)
 }
 
-/// One prefix of a caller-chain key awaiting reconstruction: a frame that
-/// [`contributes`] emits one element per prefix of its key, a frame that does not
-/// emits none. `node` is the graph node the prefix ends at — the identity of the
-/// inverted node — and `src` the contributing frame, whose self time and span
-/// count every element of a coalesced run adds. Holding the key slice keeps the
-/// sort comparator a single deref into the [`ChainKeys`] pool.
-#[derive(Clone, Copy)]
-struct ChainPrefix<'a> {
+/// One contributing frame's whole caller-chain key, sorted on to place the
+/// frame's self time and span count in the inverted tree; `src` is that frame.
+/// Holding the key slice keeps the sort comparator a single deref into the
+/// [`ChainKeys`] pool.
+struct ChainRef<'a> {
     key: &'a [u8],
-    node: u32,
     src: u32,
 }
 
-impl Keyed for ChainPrefix<'_> {
-    fn key(&self) -> &[u8] {
-        self.key
+/// How many whole leading segments two caller-chain keys share.
+fn common_segments(a: &[u8], b: &[u8]) -> usize {
+    let shared = a.iter().zip(b).take_while(|(x, y)| x == y).count();
+    shared / SEGMENT_BYTES
+}
+
+/// Rebuild the inverted tree from whole caller-chain keys in ascending order,
+/// returning the arena for [`seal_arena`]. Ascending order is the tree's
+/// pre-order, so each key branches off the one before it past the `lcp[k]`
+/// segments they share: the nodes deeper than that are complete and fold into
+/// their parents, and the key's remaining segments open fresh nodes labelled
+/// from the graph node each was encoded from. The key's own frame then charges
+/// its self time and span count to the node it ends at, which every ancestor
+/// picks up as it is folded. `nodes` sizes the arena.
+fn reconstruct_chains(
+    graph: &FlameGraph,
+    keys: &ChainKeys,
+    elems: &[ChainRef],
+    lcp: &[u32],
+    nodes: usize,
+) -> Arena {
+    let mut arena = Arena::with_capacity(nodes);
+    let mut stack: Vec<usize> = vec![0];
+    let mut depth = 0usize;
+    for (k, e) in elems.iter().enumerate() {
+        let shared = lcp[k] as usize;
+        while depth > shared {
+            arena.fold_up(stack[depth], stack[depth - 1]);
+            depth -= 1;
+        }
+        stack.truncate(shared + 1);
+        let end = e.key.len() / SEGMENT_BYTES;
+        let base = keys.at[e.src as usize] as usize;
+        for d in shared + 1..=end {
+            let owner = keys.owner[base + d - 1] as usize;
+            let node = ArenaNode {
+                name: graph.name(owner),
+                rank: graph.rank(owner),
+                role: graph.role(owner),
+                detail: graph.is_detail(owner),
+                total_us: 0,
+                count: 0,
+            };
+            let idx = arena.push(node, stack[d - 1]);
+            stack.push(idx);
+        }
+        depth = end;
+        let leaf = stack[depth];
+        arena.nodes[leaf].total_us += graph.self_us(e.src as usize);
+        arena.nodes[leaf].count += graph.count(e.src as usize);
     }
+    while depth > 0 {
+        arena.fold_up(stack[depth], stack[depth - 1]);
+        depth -= 1;
+    }
+    // The synthetic root spans no frame, so it carries the summed time alone.
+    arena.nodes[0].count = 0;
+    arena
 }
 
 /// The bottom-up form of `graph`: each frame's self time travels one path from
@@ -1338,44 +1376,31 @@ pub(crate) fn invert(graph: FlameGraph) -> FlameGraph {
             parent[graph.child_id(i, k)] = i as u32;
         }
     }
-    let (keys, elem_count) = chain_keys(&graph, &parent);
+    let (keys, contributors) = chain_keys(&graph, &parent);
     drop(parent);
 
-    let mut elems: Vec<ChainPrefix> = Vec::with_capacity(elem_count);
+    let mut elems: Vec<ChainRef> = Vec::with_capacity(contributors);
     for i in 1..n {
-        if !contributes(&graph, i) {
-            continue;
-        }
-        let key = keys.key(i);
-        let base = keys.at[i] as usize;
-        for depth in 1..=keys.depth(i) {
-            elems.push(ChainPrefix {
-                key: &key[..depth * SEGMENT_BYTES],
-                node: keys.owner[base + depth - 1],
-                src: i as u32,
-            });
+        if contributes(&graph, i) {
+            elems.push(ChainRef { key: keys.key(i), src: i as u32 });
         }
     }
     elems.par_sort_by(|a, b| a.key.cmp(b.key));
 
-    let arena = reconstruct(&elems, |run| {
-        let head = run[0].node as usize;
-        let mut total_us = 0i64;
-        let mut count = 0u32;
-        for e in run {
-            total_us += graph.self_us(e.src as usize);
-            count += graph.count(e.src as usize);
-        }
-        ArenaNode {
-            name: graph.name(head),
-            rank: graph.rank(head),
-            role: graph.role(head),
-            detail: graph.is_detail(head),
-            total_us,
-            count,
-        }
-    });
+    // Each key opens one node per segment past the prefix it shares with the key
+    // before it, so the scan recording those prefixes also counts the nodes.
+    let mut lcp: Vec<u32> = Vec::with_capacity(elems.len());
+    let mut nodes = 1usize;
+    let mut prev: &[u8] = &[];
+    for e in &elems {
+        let shared = common_segments(prev, e.key);
+        lcp.push(shared as u32);
+        nodes += e.key.len() / SEGMENT_BYTES - shared;
+        prev = e.key;
+    }
 
+    let arena = reconstruct_chains(&graph, &keys, &elems, &lcp, nodes);
+    drop(lcp);
     // The key arena and the source graph are read only up to here, so they leave
     // with the elements.
     drop(elems);
@@ -2229,6 +2254,27 @@ mod tests {
     }
 
     #[test]
+    fn a_frame_nested_in_one_of_its_own_name_branches_off_the_shared_chain() {
+        // Compile(0..10) directly contains Compile(0..4), so the caller chains
+        // are [Compile] and [Compile, Compile] and the first is a whole prefix
+        // of the second: the second must branch off the node the first ends at
+        // rather than open a root child beside it.
+        let p = profile(vec![track(
+            1,
+            LaneClass::Execution,
+            vec![
+                slice("Compile", "general information", 0, 10),
+                slice("Compile", "general information", 0, 4),
+            ],
+        )]);
+        let g = inverted_as(&p, FlameLabels::Name);
+        assert_eq!(child_totals(&g, &g.root()), [("Compile".to_owned(), 10)]);
+        let inner = child(&g, &g.root(), "Compile");
+        assert_eq!(child_totals(&g, &inner), [("Compile".to_owned(), 4)]);
+        assert!(g.children(&child(&g, &inner, "Compile")).is_empty());
+    }
+
+    #[test]
     fn a_frame_reached_two_ways_merges_at_the_root_and_splits_below() {
         // "upload inputs" runs under two different actions; bottom-up it is one
         // frame carrying both, splitting into its two callers one level out.
@@ -2407,6 +2453,9 @@ mod tests {
             ),
         ]);
         let g = inverted_as(&p, FlameLabels::Name);
+        // The synthetic root is no frame's chain step, so it counts no spans
+        // however many its children carry.
+        assert_eq!(g.root().count, 0);
         let counted = |node: &FlameNode| -> Vec<(String, i64, u32)> {
             let mut kids: Vec<_> = g
                 .children(node)
