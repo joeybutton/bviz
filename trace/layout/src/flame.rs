@@ -975,12 +975,18 @@ fn sort_child_ranges(kids: &mut ArenaChildren, n: usize, arena: &[ArenaNode]) {
 
     let wide_min = wide_range_min();
     let off = &kids.off;
-    let mut tiles: Vec<&mut [u32]> = Vec::new();
-    let mut wide: Vec<&mut [u32]> = Vec::new();
+    let range_len = |i: usize| (off[i + 1] - off[i]) as usize;
+    let (mut tile_count, mut wide_count) = (0usize, 0usize);
+    for i in 0..n {
+        let len = range_len(i);
+        wide_count += (len >= wide_min) as usize;
+        tile_count += (len >= 2 && len < wide_min) as usize;
+    }
+    let mut tiles: Vec<&mut [u32]> = Vec::with_capacity(tile_count);
+    let mut wide: Vec<&mut [u32]> = Vec::with_capacity(wide_count);
     let mut rest: &mut [u32] = &mut kids.pool;
     for i in 0..n {
-        let len = (off[i + 1] - off[i]) as usize;
-        let (head, tail) = rest.split_at_mut(len);
+        let (head, tail) = rest.split_at_mut(range_len(i));
         rest = tail;
         if head.len() >= wide_min {
             wide.push(head);
