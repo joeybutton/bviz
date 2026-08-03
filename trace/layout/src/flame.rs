@@ -944,14 +944,23 @@ fn emit_lane_rows(flamer: &Flamer, labels: FlameLabels, thread: &ThreadTrack, ou
 /// A node's place among its siblings: widest first, ties broken by name rank,
 /// then role, then the detail flag. A parent holds at most one child per
 /// (label, role, detail) triple and a rank bijects with its label, so two
-/// siblings differ in at least one of the last three and the order is total.
+/// siblings differ in at least one of the last three. [`sort_child_ranges`]
+/// nonetheless sorts on this paired with the child id, so what its unstable
+/// sorts produce is fixed by the comparison alone rather than by that
+/// uniqueness.
 type ChildOrder = (std::cmp::Reverse<i64>, u32, SpanRole, bool);
 
-/// Sort each node's CSR child range into [`ChildOrder`], using `key[child]` per
-/// child. Each node's range is disjoint, so the pool tiles into per-node mutable
-/// sub-slices that sort across nodes in parallel; a small arena sorts serially,
-/// the parallel split paying only at scale.
-fn sort_child_ranges(kids: &mut ArenaChildren, n: usize, key: &[ChildOrder]) {
+fn child_order(nd: &ArenaNode) -> ChildOrder {
+    (std::cmp::Reverse(nd.total_us), nd.rank, nd.role, nd.detail)
+}
+
+/// Sort each node's CSR child range into [`ChildOrder`]. A range sorts on keys
+/// gathered into a buffer beside its child ids, so a comparison reads that
+/// buffer rather than indexing the arena at a child's id. Each node's range is
+/// disjoint, so the pool tiles into per-node mutable sub-slices that sort across
+/// nodes in parallel; a small arena sorts serially, the parallel split paying
+/// only at scale.
+fn sort_child_ranges(kids: &mut ArenaChildren, n: usize, arena: &[ArenaNode]) {
     const PARALLEL_MIN: usize = 1 << 13;
     let off = &kids.off;
     let mut rest: &mut [u32] = &mut kids.pool;
@@ -964,14 +973,23 @@ fn sort_child_ranges(kids: &mut ArenaChildren, n: usize, key: &[ChildOrder]) {
             tiles.push(head);
         }
     }
+    let sort_tile = |buf: &mut Vec<(ChildOrder, u32)>, tile: &mut [u32]| {
+        buf.clear();
+        buf.extend(tile.iter().map(|&c| (child_order(&arena[c as usize]), c)));
+        buf.sort_unstable();
+        for (dst, &(_, c)) in tile.iter_mut().zip(buf.iter()) {
+            *dst = c;
+        }
+    };
     if n < PARALLEL_MIN {
-        for slice in &mut tiles {
-            slice.sort_unstable_by_key(|&c| key[c as usize]);
+        let mut buf = Vec::new();
+        for tile in &mut tiles {
+            sort_tile(&mut buf, tile);
         }
     } else {
         tiles
             .par_iter_mut()
-            .for_each(|slice| slice.sort_unstable_by_key(|&c| key[c as usize]));
+            .for_each_init(Vec::new, |buf, tile| sort_tile(buf, tile));
     }
 }
 
@@ -987,11 +1005,7 @@ fn seal_arena(
     mut kids: ArenaChildren,
 ) -> FlameGraph {
     let n = arena.len();
-    let key: Vec<ChildOrder> = arena
-        .iter()
-        .map(|nd| (std::cmp::Reverse(nd.total_us), nd.rank, nd.role, nd.detail))
-        .collect();
-    sort_child_ranges(&mut kids, n, &key);
+    sort_child_ranges(&mut kids, n, &arena);
 
     let mut name = Vec::with_capacity(n);
     let mut rank = Vec::with_capacity(n);
