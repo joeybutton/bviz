@@ -4,7 +4,7 @@ use std::sync::{Arc, OnceLock};
 use bviz_trace_profile::{
     Profile, Slice, SliceDetail, Span32, SpanRole, Str, ThreadTrack, Workload,
 };
-use rayon::iter::{IntoParallelRefMutIterator, ParallelIterator};
+use rayon::iter::{IntoParallelRefIterator, IntoParallelRefMutIterator, ParallelIterator};
 use rayon::slice::ParallelSliceMut;
 use rustc_hash::{FxHashMap, FxHashSet};
 
@@ -954,23 +954,48 @@ fn child_order(nd: &ArenaNode) -> ChildOrder {
     (std::cmp::Reverse(nd.total_us), nd.rank, nd.role, nd.detail)
 }
 
+/// Entries a child range must hold before spreading its sort across the workers
+/// beats sorting it whole on one.
+fn wide_range_min() -> usize {
+    const PER_WORKER: usize = 1 << 13;
+    PER_WORKER * bviz_trace_profile::worker_count()
+}
+
 /// Sort each node's CSR child range into [`ChildOrder`]. A range sorts on keys
 /// gathered into a buffer beside its child ids, so a comparison reads that
 /// buffer rather than indexing the arena at a child's id. Each node's range is
 /// disjoint, so the pool tiles into per-node mutable sub-slices that sort across
-/// nodes in parallel; a small arena sorts serially, the parallel split paying
-/// only at scale.
+/// nodes in parallel. Range widths are heavily skewed — the inverted root holds
+/// one child per distinct frame — so a range [`wide_range_min`] admits is itself
+/// spread over the workers.
 fn sort_child_ranges(kids: &mut ArenaChildren, n: usize, arena: &[ArenaNode]) {
+    /// Arena size below which sorting the ranges serially wins over the
+    /// parallel split.
     const PARALLEL_MIN: usize = 1 << 13;
+
+    let wide_min = wide_range_min();
     let off = &kids.off;
-    let mut rest: &mut [u32] = &mut kids.pool;
     let mut tiles: Vec<&mut [u32]> = Vec::new();
+    let mut wide: Vec<&mut [u32]> = Vec::new();
+    let mut rest: &mut [u32] = &mut kids.pool;
     for i in 0..n {
         let len = (off[i + 1] - off[i]) as usize;
         let (head, tail) = rest.split_at_mut(len);
         rest = tail;
-        if head.len() >= 2 {
+        if head.len() >= wide_min {
+            wide.push(head);
+        } else if head.len() >= 2 {
             tiles.push(head);
+        }
+    }
+    for tile in &mut wide {
+        let mut buf: Vec<(ChildOrder, u32)> = tile
+            .par_iter()
+            .map(|&c| (child_order(&arena[c as usize]), c))
+            .collect();
+        buf.par_sort_unstable();
+        for (dst, &(_, c)) in tile.iter_mut().zip(buf.iter()) {
+            *dst = c;
         }
     }
     let sort_tile = |buf: &mut Vec<(ChildOrder, u32)>, tile: &mut [u32]| {
@@ -1897,6 +1922,68 @@ mod tests {
         assert!(a.nodes().len() > (1 << 13), "profile must cross the parallel threshold");
         assert_eq!(resolved(&a), resolved(&b), "independent of input order");
         assert_eq!(resolved(&a), resolved(&c), "deterministic across builds");
+    }
+
+    /// Knuth's multiplicative-hashing multiplier (*The Art of Computer
+    /// Programming* vol. 3, §6.4): the odd integer nearest 2^64/φ. Odd makes it
+    /// a unit mod 2^64, so multiplying is a bijection and the totals come out
+    /// distinct; the golden ratio spreads consecutive multiples most evenly
+    /// across the range, so they arrive in an order neither ascending nor
+    /// descending.
+    const SCRAMBLE: u64 = 0x9E37_79B9_7F4A_7C15;
+
+    /// An arena of one parent per entry of `sizes` under the root, the `k`th
+    /// holding `sizes[k]` children whose totals are distinct and in no
+    /// particular order, returned with its parent array.
+    fn child_range_arena(sizes: &[usize]) -> (Vec<ArenaNode>, Vec<u32>) {
+        let node = |total_us: i64| ArenaNode {
+            name: ROOT_LABEL,
+            rank: 0,
+            role: SpanRole { workload: Workload::Other, payload: false },
+            detail: false,
+            total_us,
+            count: 0,
+        };
+        let n = 1 + sizes.len() + sizes.iter().sum::<usize>();
+        let mut arena = Vec::with_capacity(n);
+        let mut parents = Vec::with_capacity(n);
+        arena.push(node(0));
+        parents.push(u32::MAX);
+        for _ in sizes {
+            arena.push(node(0));
+            parents.push(0);
+        }
+        for (k, &size) in sizes.iter().enumerate() {
+            for j in 0..size {
+                arena.push(node((j as u64).wrapping_mul(SCRAMBLE) as i64));
+                parents.push(1 + k as u32);
+            }
+        }
+        (arena, parents)
+    }
+
+    #[test]
+    fn a_wide_child_range_sorts_into_the_order_a_narrow_one_does() {
+        let wide = wide_range_min();
+        let sizes = [wide + 1, wide, wide - 1, 2, 1, 0];
+        assert!(
+            sizes.iter().any(|&s| s >= wide) && sizes.iter().any(|&s| (2..wide).contains(&s)),
+            "the ranges must straddle the width at which a sort spreads over the workers"
+        );
+        let (arena, parents) = child_range_arena(&sizes);
+        let mut kids = csr_from_parents(&parents);
+        let n = arena.len();
+        let expect: Vec<Vec<u32>> = (0..n)
+            .map(|i| {
+                let mut ids = kids.of(i).to_vec();
+                ids.sort_by_key(|&c| (child_order(&arena[c as usize]), c));
+                ids
+            })
+            .collect();
+        sort_child_ranges(&mut kids, n, &arena);
+        for i in 0..n {
+            assert_eq!(kids.of(i), expect[i], "children of node {i}");
+        }
     }
 
     #[test]
