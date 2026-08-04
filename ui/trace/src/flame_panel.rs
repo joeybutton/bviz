@@ -2,8 +2,8 @@ use crate::chart::format_duration;
 use crate::model::{AggregateBuildStarted, TraceModel};
 use crate::theme::{self, Palette};
 use crate::{
-    BAR_WIDTH, LABEL_MIN_PX, LINE_SCROLL_PX, METRICS, MIN_SLICE_PX, SLICE_SEAM_MIN_PX,
-    SLICE_SEAM_MIX, SLICE_TEXT_PAD, STATS_TEXT_SIZE, ZOOM_PER_NOTCH, drawn_scroll,
+    BAR_WIDTH, LABEL_MIN_PX, LINE_SCROLL_PX, METRICS, MIN_SLICE_PX, SLICE_SEAM_MIX,
+    SLICE_TEXT_PAD, STATS_TEXT_SIZE, ZOOM_PER_NOTCH, drawn_scroll,
     paint_tooltip_box, scroll_request, thumb_offset,
 };
 use bviz_trace_layout::{
@@ -717,7 +717,6 @@ fn flame_paint(
                     bviz_ui_theme::label_on(fill),
                     LabelBoxStyle {
                         background: palette.background,
-                        seam_min_px: SLICE_SEAM_MIN_PX,
                         seam_mix: SLICE_SEAM_MIX,
                         label_min_px: LABEL_MIN_PX,
                         text_pad: SLICE_TEXT_PAD,

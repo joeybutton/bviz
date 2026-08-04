@@ -1,7 +1,7 @@
 //! Window-agnostic canvas primitives: shaping text to fit a width, and painting a
 //! filled, bordered, labeled quad.
 
-use gpui::{App, BorderStyle, Bounds, Edges, Hsla, Pixels, Rgba, TextAlign, Window, point, px, quad};
+use gpui::{App, Bounds, Hsla, Pixels, Rgba, TextAlign, Window, fill, point, px, size};
 
 /// Shapes `text` at `fs`, truncating with an ellipsis to fit `avail` pixels by
 /// the same proportional estimate slices and gutter labels share.
@@ -34,13 +34,14 @@ pub fn shape_truncated(
     }
 }
 
-/// The chart-wide styling of a labeled box: the surface it sits on (mixed into
-/// the left-edge seam) and the width thresholds and text padding that decide
-/// when a seam and a label are drawn.
+/// Width of the muted leading column that divides a box from its neighbor.
+const SEAM_PX: f32 = 1.0;
+
+/// Box styling held constant across a chart, so every box in it seams and labels
+/// alike whatever color or width it is drawn at.
 #[derive(Clone, Copy)]
 pub struct LabelBoxStyle {
     pub background: Rgba,
-    pub seam_min_px: f32,
     pub seam_mix: f32,
     pub label_min_px: f32,
     pub text_pad: f32,
@@ -51,28 +52,26 @@ pub struct LabelBoxStyle {
 /// flame-graph node.
 pub fn paint_labeled_box(
     rect: Bounds<Pixels>,
-    fill: Hsla,
+    fill_color: Hsla,
     name: &str,
     label_color: Hsla,
     style: LabelBoxStyle,
     window: &mut Window,
     cx: &mut App,
 ) {
-    let LabelBoxStyle { background, seam_min_px, seam_mix, label_min_px, text_pad } = style;
+    let LabelBoxStyle { background, seam_mix, label_min_px, text_pad } = style;
     let w = f32::from(rect.size.width);
     let h = f32::from(rect.size.height);
-    // Square corners: every column paints the box's full height, so a run of
-    // thin boxes reads as an even band rather than rounded humps that dip in
-    // height between them. A box wide enough to spare its first column carries a
-    // muted left-edge seam to divide it from its neighbor; a narrower one keeps
-    // its whole fill so it still reads as its color rather than an edge line.
-    let (border, seam) = if w > seam_min_px {
-        let seam = Hsla::from(bviz_ui_theme::mix(Rgba::from(fill), background, seam_mix));
-        (Edges { left: px(1.), ..Default::default() }, seam)
-    } else {
-        (Edges::default(), fill)
-    };
-    window.paint_quad(quad(rect, px(0.), fill, border, seam, BorderStyle::Solid));
+    // Square corners keep every column at the box's full height, so a run of thin
+    // boxes reads as an even band; a box no wider than its seam is seam throughout,
+    // so a run of one-pixel boxes reads as a band of edges.
+    let seam_color = Hsla::from(bviz_ui_theme::mix(Rgba::from(fill_color), background, seam_mix));
+    let seam_w = w.min(SEAM_PX);
+    if w > seam_w {
+        window.paint_quad(fill(rect, fill_color));
+    }
+    let seam = Bounds { origin: rect.origin, size: size(px(seam_w), rect.size.height) };
+    window.paint_quad(fill(seam, seam_color));
     if w < label_min_px {
         return;
     }

@@ -92,11 +92,6 @@ const EDGE_MARGIN_PX: f32 = 24.0;
 /// Pixels scrolled per wheel line.
 const LINE_SCROLL_PX: f32 = 24.0;
 
-/// A box wider than this gets a 1px muted seam on its left edge to divide it
-/// from its neighbor; a narrower box keeps its whole fill so it still reads as
-/// its color rather than losing a column to the seam.
-const SLICE_SEAM_MIN_PX: f32 = 3.0;
-
 /// How far the left-edge seam is mixed from a box's fill toward the background:
 /// enough to read as a muted divider against any fill on either theme.
 const SLICE_SEAM_MIX: f32 = 0.35;
@@ -1339,7 +1334,6 @@ fn paint_slice(
         bviz_ui_theme::label_on(fill),
         bviz_ui_components::LabelBoxStyle {
             background: palette.background,
-            seam_min_px: SLICE_SEAM_MIN_PX,
             seam_mix: SLICE_SEAM_MIX,
             label_min_px: LABEL_MIN_PX,
             text_pad: SLICE_TEXT_PAD,
