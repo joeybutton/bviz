@@ -605,8 +605,25 @@ while the GNOME screen is locked or idle (a nested window would not be presented
 .claude/skills/gpui/screenshot.sh <out.png> <app-binary> [args...]
 ```
 
-Resolve the binary with `bazel cquery --output=files //path:target` after building it.
-`SCREENSHOT_DELAY` (default 5s) sets how long to wait for the first frame.
+**Build and resolve the binary with `-c opt`, always:**
+
+```
+bazel build -c opt //path:target
+bazel cquery -c opt --output=files //path:target
+```
+
+A `fastbuild` binary parses and lays out real input roughly an order of magnitude
+slower, so on anything beyond a toy graph the capture lands on the loading spinner
+instead of the view. That failure is worse than it sounds, because it does not look
+like a failure: the spinner is drawn at whatever angle it had reached, so two captures
+of the *same* binary differ, and an A/B comparison reports a change that is only the
+animation. `-c opt` costs one slower build and removes the whole class.
+
+`SCREENSHOT_DELAY` (default 5s) sets how long to wait before capturing, and must cover
+load *and* layout, not just the first frame — an app that reads a file off the disk and
+lays a graph out reaches its first frame almost at once and the view many seconds later.
+Size it from the app's own measured load time with room to spare, and confirm the
+capture shows the view rather than a spinner before drawing any conclusion from it.
 
 **A capture proves the frame, not the behaviour.** Bit-identical PNGs across a refactor are
 strong evidence that nothing moved — build the binary before and after, capture both, and

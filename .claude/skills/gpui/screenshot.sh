@@ -14,12 +14,32 @@
 # the GNOME screen is locked.
 #
 # Usage: screenshot.sh <out.png> <app-binary> [args...]
-# Env:   SCREENSHOT_DELAY  seconds to wait for the first frame (default 5)
+# Env:   SCREENSHOT_DELAY  seconds to wait before capturing (default 5); must
+#                          cover the app's load and layout, not just its first frame
+#        SCREENSHOT_ALLOW_FASTBUILD  capture an unoptimized binary anyway
 set -euo pipefail
 
 out=${1:?usage: screenshot.sh <out.png> <app-binary> [args...]}
 shift
 delay=${SCREENSHOT_DELAY:-5}
+
+# An unoptimized binary loads and lays out roughly an order of magnitude slower,
+# so the capture tends to land on a loading state. That reads as a successful
+# capture, and because a spinner is drawn wherever its animation had reached, two
+# runs of one binary differ — so a comparison reports a change that is only the
+# animation.
+case ${1:?usage: screenshot.sh <out.png> <app-binary> [args...]} in
+*fastbuild*)
+    if [ -z "${SCREENSHOT_ALLOW_FASTBUILD:-}" ]; then
+        echo "screenshot.sh: $1 is an unoptimized build." >&2
+        echo "  Build and resolve it with -c opt:" >&2
+        echo "    bazel build -c opt //path:target" >&2
+        echo "    bazel cquery -c opt --output=files //path:target" >&2
+        echo "  Set SCREENSHOT_ALLOW_FASTBUILD=1 to capture it anyway." >&2
+        exit 1
+    fi
+    ;;
+esac
 
 # Inside cage, $@ is the app command; cage exports WAYLAND_DISPLAY for it and for
 # grim. Capture after the app has drawn, then stop it so cage (and this run) exit.
