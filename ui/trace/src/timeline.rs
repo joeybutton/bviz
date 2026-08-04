@@ -271,13 +271,11 @@ impl TimelinePanel {
         in_flame || in_counters
     }
 
-    /// The slice under a window-space cursor, inverting the paint transform.
+    /// The slice under a window-space cursor: the box the last paint drew there,
+    /// found in the memoized draw list, so a hover names what is on screen. Boxes
+    /// may overlap, and a later one is drawn over an earlier one, so the last
+    /// match wins. `None` until the first paint has culled a draw list.
     fn slice_at(&self, pos: Point<Pixels>, cx: &App) -> Option<(usize, usize)> {
-        let layout = self.model.read(cx).lane_layout()?;
-        let profile = match self.model.read(cx).source() {
-            Source::Loaded(p) => p.clone(),
-            _ => return None,
-        };
         let regions = self.regions(cx);
         let x = f32::from(pos.x);
         let y = f32::from(pos.y);
@@ -288,31 +286,16 @@ impl TimelinePanel {
         {
             return None;
         }
-        let content_y = y - regions.flame_top + self.lane_scroll(cx);
-        let lane = layout
-            .lanes
+        let (hit_x, hit_y) = (x - regions.content_left, y - regions.flame_top);
+        self.slice_draw
+            .as_ref()?
+            .slices
             .iter()
-            .find(|l| content_y >= l.top && content_y < l.top + l.height)?;
-        let rows_top = lane.top + METRICS.header_height;
-        if content_y < rows_top {
-            return None;
-        }
-        let depth = ((content_y - rows_top) / METRICS.row_height) as u32;
-        let view = self.view;
-        let cursor_px = x - regions.content_left;
-        let slices = profile.slices(&profile.threads()[lane.track]);
-        let upper = slices.partition_point(|s| view.x_of(s.start_us) <= cursor_px);
-        slices[..upper]
-            .iter()
-            .position(|s| {
-                if s.depth != depth {
-                    return false;
-                }
-                let sx = view.x_of(s.start_us);
-                let sw = (view.x_of(s.start_us + s.dur_us) - sx).max(MIN_SLICE_PX);
-                cursor_px < sx + sw
+            .rev()
+            .find(|v| {
+                hit_x >= v.x && hit_x < v.x + v.w && hit_y >= v.y && hit_y < v.y + v.h
             })
-            .map(|slice| (lane.track, slice))
+            .map(|v| (v.track, v.slice))
     }
 
     /// The group header band or show-more row at `pos`, if the press lands on one
