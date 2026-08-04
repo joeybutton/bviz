@@ -68,7 +68,8 @@ const METRICS: LaneMetrics = LaneMetrics {
 /// thin lane header so the names stay legible.
 const GUTTER_LABEL_SIZE: f32 = 11.0;
 
-/// Slices rendering narrower than this are culled — too thin to see or label.
+/// Narrowest width a slice or flame node paints at; one that would render thinner
+/// becomes a marker of this width.
 const MIN_SLICE_PX: f32 = 1.0;
 
 /// Only slices at least this wide carry a text label; narrower ones would have no

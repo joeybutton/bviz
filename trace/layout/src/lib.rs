@@ -1,6 +1,7 @@
 mod cull;
 mod flame;
 mod lanes;
+mod paint;
 mod scopes;
 mod stats;
 #[cfg(test)]
@@ -52,6 +53,20 @@ mod tests {
         lane_gap: 4.0,
         counter_height: 20.0,
     };
+
+    /// Asserts one depth row's painted spans — `(x, w)` pairs in paint order —
+    /// leave no hole over `[start, end)`: the first reaches back to `start`, each
+    /// reaches the next, and the last reaches `end`.
+    pub(crate) fn assert_gapless(row: &[(f32, f32)], start: f32, end: f32) {
+        assert!(!row.is_empty(), "nothing painted over [{start}, {end})");
+        for pair in row.windows(2) {
+            let (x, w) = pair[0];
+            assert!(x + w >= pair[1].0, "hole between {:?} and {:?}", pair[0], pair[1]);
+        }
+        let last = row[row.len() - 1];
+        assert!(row[0].0 <= start, "band opens at {} past {start}", row[0].0);
+        assert!(last.0 + last.1 >= end, "band closes at {} short of {end}", last.0 + last.1);
+    }
 
     #[test]
     fn fit_maps_span_to_width() {
@@ -227,6 +242,68 @@ mod tests {
         );
     }
 
+    /// The painted `(x, w)` of every slice `visible_slices` keeps, in paint
+    /// order, over a viewport wide enough to hold the whole profile.
+    fn painted_row(p: &bviz_trace_profile::Profile, view: TimeView) -> Vec<(f32, f32)> {
+        let layout = lay_out_lanes(p, &METRICS);
+        let viewport = Viewport {
+            width: 300.0,
+            height: 100.0,
+            scroll_y: 0.0,
+        };
+        visible_slices(
+            p,
+            &layout,
+            Cull { view: &view, viewport: &viewport, metrics: &METRICS, min_px: 1.0 },
+        )
+        .iter()
+        .map(|v| (v.x, v.w))
+        .collect()
+    }
+
+    #[test]
+    fn contiguous_subpixel_slices_paint_a_gapless_band() {
+        // Eleven touching 3us slices at 0.25px/us: each is 0.75px, so none
+        // renders on its own, and the run starts mid-column at 0.5px.
+        let p = profile(vec![track(
+            1,
+            LaneClass::Execution,
+            (0..11)
+                .map(|i: i64| slice(&format!("s{i}"), "general information", 2 + 3 * i, 3))
+                .collect(),
+        )]);
+        let view = TimeView {
+            start_us: 0.0,
+            px_per_us: 0.25,
+        };
+        assert_gapless(&painted_row(&p, view), view.x_of(2), view.x_of(35));
+    }
+
+    #[test]
+    fn a_subpixel_run_joins_the_wide_slices_around_it_without_a_gap() {
+        // At 0.125px/us a 1px slice, then three 0.875px ones — each running past
+        // the edge the one before it paints to — then a 3px slice. The run leaves
+        // off at 3.625px, whose fractional part exceeds a half, so the wide
+        // slice's left edge rounds up to the next device column: a painted span
+        // stopping short of it leaves a whole empty column between the two.
+        let p = profile(vec![track(
+            1,
+            LaneClass::Execution,
+            vec![
+                slice("w0", "general information", 0, 8),
+                slice("n0", "general information", 8, 7),
+                slice("n1", "general information", 15, 7),
+                slice("n2", "general information", 22, 7),
+                slice("w1", "general information", 29, 24),
+            ],
+        )]);
+        let view = TimeView {
+            start_us: 0.0,
+            px_per_us: 0.125,
+        };
+        assert_gapless(&painted_row(&p, view), view.x_of(0), view.x_of(53));
+    }
+
     #[test]
     fn far_off_screen_span_is_clamped_to_a_viewport_margin() {
         // A span far wider than the view: at high zoom its raw pixel extent is
@@ -277,18 +354,18 @@ mod tests {
         } = cull;
         let view_end_us = view.t_of(viewport.width);
         let mut out = Vec::new();
-        let mut next_free_col: Vec<i32> = Vec::new();
+        let mut covered: Vec<f64> = Vec::new();
         for lane in &layout.lanes {
             let lane_top = lane.top - viewport.scroll_y;
             if lane_top + lane.height < 0.0 || lane_top > viewport.height {
                 continue;
             }
-            next_free_col.clear();
+            covered.clear();
             let rows_top = lane.top + metrics.header_height - viewport.scroll_y;
             let slices = profile.slices(&profile.threads()[lane.track]);
             let upper = slices.partition_point(|s| s.start_us as f64 <= view_end_us);
             for (slice, s) in slices[..upper].iter().enumerate() {
-                crate::cull::emit_slice(s, lane.track, slice, cull, rows_top, &mut next_free_col, &mut out);
+                crate::cull::emit_slice(s, lane.track, slice, cull, rows_top, &mut covered, &mut out);
             }
         }
         out

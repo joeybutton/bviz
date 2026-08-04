@@ -8,6 +8,8 @@ use rayon::iter::{IntoParallelRefIterator, IntoParallelRefMutIterator, ParallelI
 use rayon::slice::{ParallelSlice, ParallelSliceMut};
 use rustc_hash::{FxHashMap, FxHashSet};
 
+use crate::paint::{Span, painted};
+
 /// One key segment of a slice's aggregation path: a frame label — a [`Str`]
 /// handle into the source profile's text — and the work class it carries (for
 /// coloring and class-keyed merging).
@@ -287,10 +289,9 @@ pub struct FlameNode {
     pub role: SpanRole,
     pub count: u32,
     pub depth: u32,
-    /// The deepest node depth in this node's subtree (itself included). Layout
-    /// keeps, among sub-pixel siblings sharing a pixel column, the one reaching
-    /// deepest, so the depth drawn at a column is stable as the zoom shifts which
-    /// siblings fall in it.
+    /// The deepest node depth in this node's subtree (itself included), which
+    /// layout reads to pick the sibling a marker stands for (see
+    /// [`lay_out_flame`]).
     pub subtree_max_depth: u32,
     pub children: Span32,
 }
@@ -1453,19 +1454,25 @@ pub(crate) fn invert(graph: FlameGraph) -> FlameGraph {
 /// and only boxes overlapping the viewport are laid out — an off-screen subtree
 /// is pruned — so the layout is local to what is on screen, not the whole graph.
 ///
-/// A box narrower than `min_px` is widened to a one-pixel marker so it stays
-/// visible. Where several sub-pixel siblings fall in one pixel column, only the
-/// one reaching the **deepest** is kept (its subtree drawn, the rest dropped):
-/// keeping the leftmost instead would let its shallow subtree hide a deeper
-/// sibling's, so the depth drawn at a column would jump as the zoom shifted
-/// which sibling was leftmost. Keeping the deepest makes a column's depth stable.
-/// A box wide enough to render on its own is always kept. Coordinates are carried
-/// in `f64` so the proportional division holds precision at deep zoom, and each
-/// box is clamped to a viewport-sized margin so no huge value reaches its `f32`
-/// fields. Boxes come back in paint order, parents before children.
+/// Each box is placed against the boxes already painted at its depth by
+/// `paint::painted`. Where a marker's slot stands for a run of sub-pixel
+/// siblings, the one reaching the **deepest** is the one drawn and recursed into
+/// (the rest dropped): keeping the leftmost instead would let its shallow subtree
+/// hide a deeper sibling's, so the depth drawn at a slot would jump as the zoom
+/// shifted which sibling was leftmost. Keeping the deepest makes a slot's depth
+/// stable. That sibling keeps its own content span for dividing its children, so
+/// only the painted rect follows the slot. Coordinates are carried in `f64` so
+/// the proportional division holds precision at deep zoom, and each box is
+/// clamped to a viewport-sized margin so no huge value reaches its `f32` fields.
+/// Boxes come back in paint order, parents before children.
 pub fn lay_out_flame(graph: &FlameGraph, content_w: f64, placement: FlamePlacement) -> Vec<FlameBox> {
     let mut out = Vec::new();
-    place(graph, 0, 0, 0.0, content_w, placement, &mut out);
+    let mut covered = vec![f64::NEG_INFINITY; graph.max_depth as usize + 1];
+    let content = Span { x: 0.0, w: content_w };
+    let root = in_view(content, placement.scroll_x);
+    if let Some(paint) = painted(root, covered[0], placement.min_px as f64) {
+        place(graph, 0, 0, content, paint, placement, &mut covered, &mut out);
+    }
     out
 }
 
@@ -1479,91 +1486,110 @@ pub struct FlamePlacement<'a> {
     pub min_px: f32,
 }
 
+/// A content-pixel span in viewport coordinates.
+fn in_view(content: Span, scroll_x: f64) -> Span {
+    Span { x: content.x - scroll_x, w: content.w }
+}
+
+/// Emit `idx`'s box at `paint`, the viewport span it is drawn at — for a marker,
+/// the slot standing for a run of siblings (see [`deepest_in_slot`]) — and lay
+/// its children out across `content`, its own span in content pixels. `covered`
+/// carries the painted right edge per depth row across the recursion.
 fn place(
     graph: &FlameGraph,
     idx: usize,
     depth: u32,
-    cx: f64,
-    cw: f64,
+    content: Span,
+    paint: Span,
     placement: FlamePlacement,
+    covered: &mut [f64],
     out: &mut Vec<FlameBox>,
 ) {
     let FlamePlacement { scroll_x, view_w, metrics, min_px } = placement;
-    let min = min_px as f64;
-    // The node's left edge and widened right edge in viewport pixels.
-    let vx = cx - scroll_x;
-    let right = vx + cw.max(min);
-    // Prune a subtree that lies entirely off either edge; a sub-pixel node's
-    // widened edge is what must reach the viewport, so `right` uses `min`.
-    if right <= 0.0 || vx >= view_w as f64 {
+    let (min, view_w) = (min_px as f64, view_w as f64);
+    if paint.end() <= 0.0 || paint.x >= view_w {
         return;
     }
+    covered[depth as usize] = paint.end();
     // Clamp to a viewport-sized margin so a wide box spanning far off-screen
-    // never stores a huge coordinate; a visible marker's `vx` is already small.
-    let px = vx.max(-(view_w as f64));
-    let pr = right.min(2.0 * view_w as f64);
+    // never stores a huge coordinate; a visible marker's left edge is already
+    // small.
+    let px = paint.x.max(-view_w);
+    let pr = paint.end().min(2.0 * view_w);
     out.push(box_of(graph, idx, depth, px as f32, (pr - px) as f32, metrics));
     let width = graph.width_us(idx);
     if width == 0 {
         return;
     }
-    // Place children left-to-right. A child wide enough to render recurses on its
-    // own; a run of sub-pixel children sharing one pixel column collapses to a
-    // single kept sibling (see `deepest_in_column`).
-    let child_w = |c: usize| cw * graph.width_us(c) as f64 / width as f64;
-    let mut cursor = cx;
+    let child_w = |c: usize| content.w * graph.width_us(c) as f64 / width as f64;
+    let row = depth as usize + 1;
+    let mut cursor = content.x;
     let mut i = 0;
     while i < graph.child_count(idx) {
         let child = graph.child_id(idx, i);
-        let ccw = child_w(child);
-        if ccw >= min {
-            place(graph, child, depth + 1, cursor, ccw, placement, out);
-            cursor += ccw;
+        let cc = Span { x: cursor, w: child_w(child) };
+        let Some(slot) = painted(in_view(cc, scroll_x), covered[row], min) else {
+            cursor = cc.end();
+            i += 1;
+            continue;
+        };
+        if cc.w >= min {
+            place(graph, child, depth + 1, cc, slot, placement, covered, out);
+            cursor = cc.end();
             i += 1;
             continue;
         }
-        let (best, best_cx, best_cw, run_cursor, next) =
-            deepest_in_column(graph, idx, i, ccw, cursor, placement, &child_w);
-        place(graph, best, depth + 1, best_cx, best_cw, placement, out);
-        cursor = run_cursor;
-        i = next;
+        let run = deepest_in_slot(graph, idx, i, cc, slot, scroll_x, min, &child_w);
+        place(graph, run.best, depth + 1, run.content, slot, placement, covered, out);
+        cursor = run.cursor;
+        i = run.next;
     }
 }
 
-/// Within a run of consecutive sub-pixel siblings sharing one pixel column, keep
-/// the one whose subtree reaches deepest — see `lay_out_flame` for why the
-/// deepest, not the leftmost, must win. `start`/`start_cw` are the first sibling
-/// and its width; `cursor` is its left edge. Returns the chosen child with its
-/// left edge and width, the cursor advanced past the whole run, and the index of
-/// the first sibling beyond it.
-fn deepest_in_column(
+/// The sibling a marker's slot is placed for, and where the run it stands for
+/// ends.
+struct Run {
+    /// The node id of the sibling placed for the run.
+    best: usize,
+    /// `best`'s own span in content pixels, which its children divide.
+    content: Span,
+    /// The content x past the whole run.
+    cursor: f64,
+    /// The index of the first sibling beyond the run.
+    next: usize,
+}
+
+/// The run of consecutive siblings a marker's `slot` stands for: the one at
+/// `start`, spanning `first`, plus every following sibling the slot leaves
+/// nothing to paint. Among them the one whose subtree reaches deepest is placed —
+/// see [`lay_out_flame`] for why the deepest, not the leftmost, must win.
+fn deepest_in_slot(
     graph: &FlameGraph,
     parent: usize,
     start: usize,
-    start_cw: f64,
-    cursor: f64,
-    placement: FlamePlacement,
+    first: Span,
+    slot: Span,
+    scroll_x: f64,
+    min: f64,
     child_w: &impl Fn(usize) -> f64,
-) -> (usize, f64, f64, f64, usize) {
-    let scroll_x = placement.scroll_x;
-    let min = placement.min_px as f64;
-    let col = (cursor - scroll_x).floor() as i32;
-    let (mut best, mut best_cx, mut best_cw) = (graph.child_id(parent, start), cursor, start_cw);
-    let mut run_cursor = cursor + start_cw;
-    let mut j = start + 1;
-    while j < graph.child_count(parent) {
-        let child = graph.child_id(parent, j);
-        let cjw = child_w(child);
-        if cjw >= min || ((run_cursor - scroll_x).floor() as i32) != col {
+) -> Run {
+    let mut best = graph.child_id(parent, start);
+    let mut content = first;
+    let mut cursor = first.end();
+    let mut next = start + 1;
+    while next < graph.child_count(parent) {
+        let child = graph.child_id(parent, next);
+        let cc = Span { x: cursor, w: child_w(child) };
+        if painted(in_view(cc, scroll_x), slot.end(), min).is_some() {
             break;
         }
         if graph.subtree_max_depth(child) > graph.subtree_max_depth(best) {
-            (best, best_cx, best_cw) = (child, run_cursor, cjw);
+            (best, content) = (child, cc);
         }
-        run_cursor += cjw;
-        j += 1;
+        cursor = cc.end();
+        next += 1;
     }
-    (best, best_cx, best_cw, run_cursor, j)
+    Run { best, content, cursor, next }
 }
 
 fn box_of(
@@ -1597,6 +1623,7 @@ pub fn flame_height(graph: &FlameGraph, metrics: &FlameMetrics) -> f32 {
 mod tests {
     use super::*;
     use crate::test_profile::{action, action_named, profile, slice, track};
+    use crate::tests::assert_gapless;
     use bviz_trace_profile::LaneClass;
 
     fn child(graph: &FlameGraph, node: &FlameNode, name: &str) -> FlameNode {
@@ -2214,6 +2241,67 @@ mod tests {
         assert!(boxes.iter().any(|b| g.str(b.name) == "deepchild"));
         // The shallower leftmost sibling is dropped in favour of the deeper one.
         assert!(!boxes.iter().any(|b| g.str(b.name) == "shallow"));
+    }
+
+    /// The painted `(x, w)` of every box at `depth`, in paint order.
+    fn painted_row(boxes: &[FlameBox], depth: u32) -> Vec<(f32, f32)> {
+        boxes
+            .iter()
+            .filter(|b| b.depth == depth)
+            .map(|b| (b.x, b.w))
+            .collect()
+    }
+
+    #[test]
+    fn contiguous_subpixel_siblings_paint_a_gapless_band() {
+        // "pad" takes 5.5px of the 13.75px content; the eleven 3us siblings after
+        // it are 0.75px each, so none renders on its own, and the run starts
+        // mid-column at 5.5px. Their equal totals order them by name.
+        let mut slices = vec![slice("pad", "general information", 0, 22)];
+        slices.extend(
+            (0..11).map(|i: i64| slice(&format!("r{i:02}"), "general information", 22 + 3 * i, 3)),
+        );
+        let p = profile(vec![track(1, LaneClass::Execution, slices)]);
+        let g = flame(&p);
+        let content_w = 13.75;
+        let boxes = lay_out_flame(
+            &g,
+            content_w,
+            FlamePlacement { scroll_x: 0.0, view_w: 100.0, metrics: &METRICS, min_px: 1.0 },
+        );
+        assert_gapless(&painted_row(&boxes, 1), 0.0, content_w as f32);
+    }
+
+    #[test]
+    fn a_subpixel_run_joins_the_wide_boxes_around_it_without_a_gap() {
+        // Over 6.625px of content, "p" holds a 1px child then three 0.875px ones
+        // — each running past the edge the one before it paints to — and "q",
+        // the next parent along, opens with a 2.875px child. The run leaves off
+        // at 3.625px, whose fractional part exceeds a half, so that child's left
+        // edge rounds up to the next device column: a painted span stopping short
+        // of it leaves a whole empty column between the two. Siblings are ordered
+        // widest-first, so a wide box can only follow a sub-pixel run under a
+        // later parent.
+        let p = profile(vec![track(
+            1,
+            LaneClass::Execution,
+            vec![
+                slice("p", "general information", 0, 29),
+                slice("a0", "general information", 0, 8),
+                slice("a1", "general information", 8, 7),
+                slice("a2", "general information", 15, 7),
+                slice("a3", "general information", 22, 7),
+                slice("q", "general information", 29, 24),
+                slice("b0", "general information", 29, 23),
+            ],
+        )]);
+        let g = flame_as(&p, FlameLabels::Name);
+        let boxes = lay_out_flame(
+            &g,
+            6.625,
+            FlamePlacement { scroll_x: 0.0, view_w: 100.0, metrics: &METRICS, min_px: 1.0 },
+        );
+        assert_gapless(&painted_row(&boxes, 2), 0.0, 6.5);
     }
 
     #[test]

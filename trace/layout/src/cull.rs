@@ -1,6 +1,7 @@
 use bviz_trace_profile::{Profile, Slice};
 
 use crate::lanes::{LaneLayout, LaneMetrics};
+use crate::paint::{Span, painted};
 use crate::view::TimeView;
 
 /// The visible region, in pixels. `scroll_y` is how far the lanes are scrolled up.
@@ -33,12 +34,10 @@ pub struct VisibleSlice {
     pub h: f32,
 }
 
-/// Slices that fall within the viewport, dropping off-screen lanes and
-/// off-time slices. A slice too narrow to reach `min_px` is widened to it so it
-/// stays a visible marker of where to zoom in; to keep such markers from
-/// stacking, a widened slice starting in a pixel column an earlier slice at the
-/// same depth already covers is dropped. Slices wide enough to render on their
-/// own are always kept.
+/// Slices that fall within the viewport, dropping off-screen lanes and off-time
+/// slices. Each is placed against the boxes already painted at its depth by
+/// `paint::painted`, and its painted span is bounded to a margin around the
+/// viewport.
 pub fn visible_slices(profile: &Profile, layout: &LaneLayout, cull: Cull) -> Vec<VisibleSlice> {
     let Cull {
         view,
@@ -48,48 +47,45 @@ pub fn visible_slices(profile: &Profile, layout: &LaneLayout, cull: Cull) -> Vec
     } = cull;
     let view_end_us = view.t_of(viewport.width);
     let mut out = Vec::new();
-    // First pixel column free of an emitted slice, per depth row; markers whose
-    // start column falls before it coalesce into the slice already there.
-    let mut next_free_col: Vec<i32> = Vec::new();
+    let mut covered: Vec<f64> = Vec::new();
     for lane in &layout.lanes {
         let lane_top = lane.top - viewport.scroll_y;
         if lane_top + lane.height < 0.0 || lane_top > viewport.height {
             continue;
         }
-        next_free_col.clear();
+        covered.clear();
         let rows_top = lane.top + metrics.header_height - viewport.scroll_y;
         let track = &profile.threads()[lane.track];
         let slices = profile.slices(track);
         // Slices are sorted by start, so none past the right edge can be visible.
         let upper = slices.partition_point(|s| s.start_us as f64 <= view_end_us);
-        // A slice is emitted only if its widened right edge reaches the left
-        // viewport edge: either its end is at or past t_of(0), or (widened to
-        // min_px) its start is at or past t_of(-min_px). Its end — and hence
-        // the monotone prefix max of ends — is at least t_of(-min_px) in both
-        // cases, so binary-searching the end maxes for that backed-off bound
-        // skips no slice with visible extent (only edge cases within a float
-        // rounding step of the boundary, whose painted width is sub-pixel).
+        // Nothing left of this bound paints, so the covered edge is still clear
+        // at every slice up to it: against a clear edge a slice's painted right
+        // edge is at most its own end plus min_px, which for an end left of
+        // t_of(-min_px) is off the left of the viewport. Ends' prefix max is
+        // monotone, so binary-searching it for that backed-off bound skips no
+        // slice with visible extent (only edge cases within a float rounding
+        // step of the boundary, whose painted width is sub-pixel).
         let view_start_us = view.t_of(-min_px);
         let end_maxes = profile.end_maxes(track);
         let lower = end_maxes[..upper].partition_point(|&e| (e as f64) < view_start_us);
         for (i, s) in slices[lower..upper].iter().enumerate() {
-            emit_slice(s, lane.track, lower + i, cull, rows_top, &mut next_free_col, &mut out);
+            emit_slice(s, lane.track, lower + i, cull, rows_top, &mut covered, &mut out);
         }
     }
     out
 }
 
-/// Widen a slice to `min_px`, coalesce it into an earlier marker sharing its
-/// start pixel column at the same depth, clamp the painted span to a viewport
-/// margin, and push the result. `next_free_col` carries the coalesce state
-/// across calls within a lane; `slice` is the slice's index in the track.
+/// Place one slice for painting, bounding its painted span to a viewport margin.
+/// `covered` carries the painted right edge per depth row across the calls of one
+/// lane; `slice` is the slice's index in the track.
 pub(crate) fn emit_slice(
     s: &Slice,
     track: usize,
     slice: usize,
     cull: Cull,
     rows_top: f32,
-    next_free_col: &mut Vec<i32>,
+    covered: &mut Vec<f64>,
     out: &mut Vec<VisibleSlice>,
 ) {
     let Cull {
@@ -98,34 +94,36 @@ pub(crate) fn emit_slice(
         metrics,
         min_px,
     } = cull;
-    let x = view.x_of(s.start_us);
-    let natural = view.x_of(s.start_us + s.dur_us) - x;
-    let w = natural.max(min_px);
-    if x + w < 0.0 || x > viewport.width {
-        return;
-    }
     let depth = s.depth as usize;
-    if depth >= next_free_col.len() {
-        next_free_col.resize(depth + 1, i32::MIN);
+    if depth >= covered.len() {
+        covered.resize(depth + 1, f64::NEG_INFINITY);
     }
-    let start_col = x.floor() as i32;
-    if natural < min_px && start_col < next_free_col[depth] {
+    let x = view.x_of(s.start_us) as f64;
+    let content = Span {
+        x,
+        w: view.x_of(s.start_us + s.dur_us) as f64 - x,
+    };
+    let Some(paint) = painted(content, covered[depth], min_px as f64) else {
+        return;
+    };
+    let view_w = viewport.width as f64;
+    if paint.end() < 0.0 || paint.x > view_w {
         return;
     }
-    next_free_col[depth] = ((x + w).floor() as i32).max(start_col + 1);
+    covered[depth] = paint.end();
     // Bound the painted span to a margin around the viewport. At extreme zoom a
     // span reaching far off-screen otherwise carries coordinates large enough
     // that the renderer's rounded-rect distance field loses precision and places
     // the clipped edge wrong, bleeding past the content mask; the visible portion
     // is unchanged since the margin exceeds the viewport.
-    let paint_x = x.max(-viewport.width);
-    let paint_w = (x + w).min(2.0 * viewport.width) - paint_x;
+    let paint_x = paint.x.max(-view_w);
+    let paint_w = paint.end().min(2.0 * view_w) - paint_x;
     out.push(VisibleSlice {
         track,
         slice,
-        x: paint_x,
+        x: paint_x as f32,
         y: rows_top + s.depth as f32 * metrics.row_height,
-        w: paint_w,
+        w: paint_w as f32,
         h: metrics.row_height,
     });
 }
