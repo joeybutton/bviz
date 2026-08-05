@@ -29,7 +29,7 @@ mod scroll;
 mod toolbar;
 
 use build::{Input, InputKind};
-use camera::{clamp_pan, enclosed_boxes, fit_zoom, from_screen, recenter_rect, Camera};
+use camera::{enclosed_boxes, from_screen, recenter_rect, zoom_step, Camera};
 use drag::{end_drag, start_pan, Drag};
 use emphasis::Emphasis;
 use framing::{build_prepaint, Framing};
@@ -45,6 +45,14 @@ const MARGIN: f64 = 16.0;
 /// Largest zoom-in factor. The smallest is computed per graph so the whole graph
 /// always fits the viewport.
 const MAX_ZOOM: f32 = 4.0;
+
+/// Factor one wheel notch scales the zoom by, small enough that a notch nudges
+/// the view rather than jumping it.
+const ZOOM_PER_NOTCH: f32 = 1.1;
+
+/// Scroll delta one wheel notch amounts to, for the devices that report a delta
+/// in pixels rather than in lines.
+const PIXELS_PER_NOTCH: f32 = 120.0;
 
 /// Fraction of the viewport the fitted graph spans, leaving a margin so the whole
 /// graph sits within the inner part of the window rather than edge to edge.
@@ -264,25 +272,15 @@ impl GraphView {
     }
 
     fn on_scroll_wheel(&mut self, e: &ScrollWheelEvent, _: &mut Window, cx: &mut Context<Self>) {
-        // Anchor the zoom at the cursor: keep the content point under the cursor
-        // fixed as the scale changes. The minimum zoom is the fit, so the graph
-        // can't be zoomed out of view.
         let Some(content) = self.drawn().map(|d| d.content()) else {
             return;
         };
-        let vp = self.framing.viewport();
-        let lx = f32::from(e.position.x) - f32::from(vp.origin.x);
-        let ly = f32::from(e.position.y) - f32::from(vp.origin.y);
-        let dy = match e.delta {
+        let notches = match e.delta {
             ScrollDelta::Lines(p) => p.y,
-            ScrollDelta::Pixels(p) => f32::from(p.y) / 120.0,
+            ScrollDelta::Pixels(p) => f32::from(p.y) / PIXELS_PER_NOTCH,
         };
-        let Camera { zoom: old, pan: (px, py) } = self.camera();
-        let new = (old * 1.1_f32.powf(dy)).clamp(fit_zoom(vp.size, content), MAX_ZOOM);
-        let content_x = (lx - px) / old;
-        let content_y = (ly - py) / old;
-        let pan = (lx - content_x * new, ly - content_y * new);
-        self.framing.move_to(Camera { zoom: new, pan: clamp_pan(pan, new, vp.size, content) });
+        let viewport = self.framing.viewport();
+        self.framing.move_to(zoom_step(e.position, self.camera(), notches, viewport, content));
         cx.notify();
     }
 
@@ -448,7 +446,7 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::camera::{ease_out_cubic, settle_view, to_screen, Rect};
+    use crate::camera::{clamp_pan, ease_out_cubic, fit_view, fit_zoom, settle_view, to_screen, Rect};
     use crate::paint::lane_polyline;
     use bviz_graph_layout::{Box, Kind};
     use gpui::{point, Bounds, Size};
@@ -663,28 +661,27 @@ mod tests {
         assert_eq!(ids, vec![bviz_graph_layout::Id(0), bviz_graph_layout::Id(3)]);
     }
 
-    /// The breathing room `clamp_pan` allows past the flush edge on an axis, matching
-    /// the fit zoom's margin.
-    fn clearance(vp_axis: f32) -> f32 {
-        vp_axis * (1.0 - FIT_MARGIN) / 2.0
+    /// The slack `clamp_pan` allows past the flush position on an axis.
+    fn clearance(vp_axis: f32, extent: f32) -> f32 {
+        (1.0 - FIT_MARGIN) * vp_axis.min(extent)
     }
 
     #[test]
     fn clamp_pan_keeps_smaller_content_within_the_viewport() {
-        // Content smaller than the viewport (zoom 0.1) stays inside, give or take the
+        // Content smaller than the viewport (zoom 0.05) stays inside, give or take the
         // edge clearance, so the pan stays in -clearance..=(viewport - content + clearance).
         let viewport = vp(800., 600.);
-        let zoom = 0.1;
+        let zoom = 0.05;
         let (cw, ch) = (CONTENT.0 * zoom, CONTENT.1 * zoom);
-        let (mx, my) = (clearance(800.), clearance(600.));
+        let (mx, my) = (clearance(800., cw), clearance(600., ch));
         assert_eq!(clamp_pan((-9999.0, -9999.0), zoom, viewport, CONTENT), (-mx, -my));
         assert_eq!(
             clamp_pan((9999.0, 9999.0), zoom, viewport, CONTENT),
             (800.0 - cw + mx, 600.0 - ch + my)
         );
-        // A pan within the bound is left untouched, including a small overscroll into
-        // the clearance the strict edge would have snapped away.
-        assert_eq!(clamp_pan((-50.0, -50.0), zoom, viewport, CONTENT), (-50.0, -50.0));
+        // A pan within the bound is left untouched, including one that overscrolls
+        // into the clearance.
+        assert_eq!(clamp_pan((-50.0, -40.0), zoom, viewport, CONTENT), (-50.0, -40.0));
         assert_eq!(clamp_pan((100.0, 80.0), zoom, viewport, CONTENT), (100.0, 80.0));
     }
 
@@ -695,13 +692,173 @@ mod tests {
         // (viewport - content - clearance)..=clearance.
         let viewport = vp(800., 600.);
         let (cw, ch) = (CONTENT.0, CONTENT.1);
-        let (mx, my) = (clearance(800.), clearance(600.));
+        let (mx, my) = (clearance(800., cw), clearance(600., ch));
         assert_eq!(clamp_pan((9999.0, 9999.0), 1.0, viewport, CONTENT), (mx, my));
         assert_eq!(
             clamp_pan((-9999.0, -9999.0), 1.0, viewport, CONTENT),
             (800.0 - cw - mx, 600.0 - ch - my)
         );
-        // The flush-cover position the strict bound enforced is still permitted.
+        // The flush-cover position sits inside the bound, so it is left alone.
         assert_eq!(clamp_pan((0.0, 0.0), 1.0, viewport, CONTENT), (0.0, 0.0));
+    }
+
+    #[test]
+    fn clamp_pan_never_carries_a_small_graph_off_an_edge() {
+        let viewport = vp(800., 600.);
+        let content = (60.0, 40.0);
+        let near = clamp_pan((-9999.0, -9999.0), 1.0, viewport, content);
+        let far = clamp_pan((9999.0, 9999.0), 1.0, viewport, content);
+        assert!(near.0 + content.0 > 0. && near.1 + content.1 > 0., "off the near edge: {near:?}");
+        assert!(far.0 < 800. && far.1 < 600., "off the far edge: {far:?}");
+    }
+
+    /// Float slack in the anchor assertions, far below a pixel of visible drift.
+    const ANCHOR_TOLERANCE: f32 = 0.05;
+
+    /// A canvas laid out away from the window origin, so a step that neglects to
+    /// take the canvas offset off the cursor lands visibly wrong.
+    fn canvas(w: f32, h: f32) -> Bounds<Pixels> {
+        Bounds::new(point(px(10.), px(20.)), vp(w, h))
+    }
+
+    /// Cursor positions over `bounds` covering its center, its four edges and its
+    /// four corners.
+    fn cursors(bounds: Bounds<Pixels>) -> impl Iterator<Item = Point<Pixels>> {
+        const ALONG: [f32; 3] = [0.02, 0.5, 0.98];
+        let (w, h) = (f32::from(bounds.size.width), f32::from(bounds.size.height));
+        let (ox, oy) = (f32::from(bounds.origin.x), f32::from(bounds.origin.y));
+        ALONG.into_iter().flat_map(move |a| {
+            ALONG.into_iter().map(move |b| point(px(ox + a * w), px(oy + b * h)))
+        })
+    }
+
+    /// How far the layout point under `cursor` travels on screen across one wheel
+    /// step: the drift the cursor anchoring exists to hold at zero.
+    fn anchor_drift(
+        cursor: Point<Pixels>,
+        camera: Camera,
+        notches: f32,
+        bounds: Bounds<Pixels>,
+        content: (f32, f32),
+    ) -> (f32, f32) {
+        let (gx, gy) = from_screen(cursor, bounds.origin, camera);
+        let after = zoom_step(cursor, camera, notches, bounds, content);
+        let landed = to_screen(gx as f64, gy as f64, bounds, after);
+        (f32::from(landed.x) - f32::from(cursor.x), f32::from(landed.y) - f32::from(cursor.y))
+    }
+
+    /// Asserts a step in and a step out hold their anchor at every cursor over
+    /// `bounds`, naming `state` in the failure so the camera it started from is
+    /// identifiable.
+    fn assert_anchored(state: &str, camera: Camera, bounds: Bounds<Pixels>, content: (f32, f32)) {
+        for cursor in cursors(bounds) {
+            for notches in [1.0, -1.0] {
+                let (dx, dy) = anchor_drift(cursor, camera, notches, bounds, content);
+                assert!(
+                    dx.abs() < ANCHOR_TOLERANCE && dy.abs() < ANCHOR_TOLERANCE,
+                    "{state}: {notches:+} notches at {cursor:?} slipped the anchor by ({dx}, {dy}) px"
+                );
+            }
+        }
+    }
+
+    /// The camera showing `content` centered in `bounds` at `zoom`.
+    fn centered(zoom: f32, bounds: Bounds<Pixels>, content: (f32, f32)) -> Camera {
+        let (vw, vh) = (f32::from(bounds.size.width), f32::from(bounds.size.height));
+        Camera { zoom, pan: ((vw - content.0 * zoom) / 2., (vh - content.1 * zoom) / 2.) }
+    }
+
+    #[test]
+    fn a_wheel_step_holds_its_anchor_while_the_graph_fits_the_window() {
+        let bounds = canvas(800., 600.);
+        let (zoom, pan) = fit_view(bounds.size, CONTENT);
+        assert_anchored("fitted", Camera { zoom, pan }, bounds, CONTENT);
+    }
+
+    #[test]
+    fn a_wheel_step_holds_its_anchor_when_one_axis_overflows() {
+        // A wide graph zoomed until its width spills past the window while its
+        // height still fits, so one scroll bar is up.
+        const WIDE: (f32, f32) = (4000.0, 900.0);
+        let bounds = canvas(800., 600.);
+        let zoom = 0.4;
+        assert!(WIDE.0 * zoom > 800. && WIDE.1 * zoom < 600.);
+        assert_anchored("wide graph", centered(zoom, bounds, WIDE), bounds, WIDE);
+    }
+
+    #[test]
+    fn a_wheel_step_holds_its_anchor_when_both_axes_overflow() {
+        let bounds = canvas(800., 600.);
+        let zoom = 0.5;
+        assert!(CONTENT.0 * zoom > 800. && CONTENT.1 * zoom > 600.);
+        let (cw, ch) = (CONTENT.0 * zoom, CONTENT.1 * zoom);
+        for (state, pan) in [
+            ("centered", ((800. - cw) / 2., (600. - ch) / 2.)),
+            ("flush at the near edges", (0.0, 0.0)),
+            ("flush at the far edges", (800. - cw, 600. - ch)),
+            ("a gutter past the near edges", (100.0, 80.0)),
+        ] {
+            assert_anchored(state, Camera { zoom, pan }, bounds, CONTENT);
+        }
+    }
+
+    #[test]
+    fn every_step_of_a_wheel_run_holds_its_anchor() {
+        // What a wheel actually sends: notch after notch at one cursor, from a
+        // view scrolled off the near edges of a graph larger than the window.
+        let bounds = canvas(800., 600.);
+        let cursor = point(px(10. + 600.), px(20. + 450.));
+        let mut camera = Camera { zoom: 0.5, pan: (100.0, 80.0) };
+        for step in 0..4 {
+            let (dx, dy) = anchor_drift(cursor, camera, -1.0, bounds, CONTENT);
+            assert!(
+                dx.abs() < ANCHOR_TOLERANCE && dy.abs() < ANCHOR_TOLERANCE,
+                "step {step} slipped the anchor by ({dx}, {dy}) px"
+            );
+            camera = zoom_step(cursor, camera, -1.0, bounds, CONTENT);
+        }
+    }
+
+    #[test]
+    fn a_wheel_run_into_max_zoom_stops_there_holding_its_anchor() {
+        let bounds = canvas(800., 600.);
+        let camera = Camera { zoom: MAX_ZOOM * 0.98, pan: (-4000.0, -3000.0) };
+        let cursor = point(px(10. + 500.), px(20. + 200.));
+        assert_eq!(zoom_step(cursor, camera, 5.0, bounds, CONTENT).zoom, MAX_ZOOM);
+        let (dx, dy) = anchor_drift(cursor, camera, 5.0, bounds, CONTENT);
+        assert!(dx.abs() < ANCHOR_TOLERANCE && dy.abs() < ANCHOR_TOLERANCE, "({dx}, {dy}) px");
+    }
+
+    #[test]
+    fn a_wheel_run_pinned_in_a_corner_keeps_the_graph_in_view() {
+        // A cursor in the corner asks the content to shrink away into it, which the
+        // pan bound refuses past its clearance: the anchor gives before the graph
+        // leaves the window.
+        let bounds = canvas(800., 600.);
+        let cursor = point(px(10. + 784.), px(20. + 588.));
+        let mut camera = Camera { zoom: 0.5, pan: (0.0, 0.0) };
+        for _ in 0..20 {
+            camera = zoom_step(cursor, camera, -1.0, bounds, CONTENT);
+            let (w, h) = (CONTENT.0 * camera.zoom, CONTENT.1 * camera.zoom);
+            let on_screen = |pan: f32, extent: f32, vp: f32| (pan + extent).min(vp) - pan.max(0.);
+            let (sx, sy) = (on_screen(camera.pan.0, w, 800.), on_screen(camera.pan.1, h, 600.));
+            let eps = 1e-2;
+            assert!(
+                sx + eps >= FIT_MARGIN * w.min(800.) && sy + eps >= FIT_MARGIN * h.min(600.),
+                "only ({sx}, {sy}) px of graph left on screen at zoom {}",
+                camera.zoom
+            );
+        }
+    }
+
+    #[test]
+    fn a_wheel_run_into_the_fit_zoom_stops_there_holding_its_anchor() {
+        let bounds = canvas(800., 600.);
+        let fit = fit_zoom(bounds.size, CONTENT);
+        let camera = centered(fit * 1.05, bounds, CONTENT);
+        let cursor = point(px(10. + 400.), px(20. + 300.));
+        assert_eq!(zoom_step(cursor, camera, -5.0, bounds, CONTENT).zoom, fit);
+        let (dx, dy) = anchor_drift(cursor, camera, -5.0, bounds, CONTENT);
+        assert!(dx.abs() < ANCHOR_TOLERANCE && dy.abs() < ANCHOR_TOLERANCE, "({dx}, {dy}) px");
     }
 }

@@ -1,5 +1,5 @@
 use crate::emphasis::Emphasis;
-use crate::{FIT_MARGIN, MARGIN, MAX_ZOOM, RECENTER_PAD};
+use crate::{FIT_MARGIN, MARGIN, MAX_ZOOM, RECENTER_PAD, ZOOM_PER_NOTCH};
 use bviz_graph_layout::{Id, LaidOut};
 use gpui::{Bounds, Pixels, Point, Size, point, px};
 use std::time::Instant;
@@ -120,20 +120,49 @@ pub(crate) fn fit_zoom(viewport: Size<Pixels>, content: (f32, f32)) -> f32 {
 
 /// Clamp the pan so the graph can never be moved out of view, the panning
 /// counterpart to the fit-zoom floor that bounds zoom-out. Per axis the content
-/// (its full extent times `zoom`) reaches the viewport edge — fully inside when
-/// smaller, fully covering when larger — plus the same breathing room the fit zoom
-/// leaves: `FIT_MARGIN` holds a zoomed-out graph off the edges, so the pan bound
-/// permits an equal clearance rather than snapping the content flush. Without it a
-/// settle that frames a node with room to spare jumps the first time the user pans.
+/// (its full extent times `zoom`) reaches the flush position — fully inside the
+/// viewport when smaller, fully covering it when larger — and may be carried one
+/// clearance past it, which leaves `FIT_MARGIN` of the shorter of the viewport
+/// and the extent on screen. That share is what a fitted graph itself spans, so
+/// the room a fit or a settle leaves around the content is a pan position in its
+/// own right; and since the clearance is measured against the extent too, a graph
+/// smaller than the viewport keeps that share of itself visible however far it is
+/// pushed.
+///
+/// Measuring against the extent is also what leaves a cursor-anchored zoom
+/// ([`zoom_step`]) room to hold its anchor: at the extent where the content
+/// matches the viewport the flush interval collapses to a point, and the
+/// clearance is the whole of the play the bound has.
 pub(crate) fn clamp_pan(pan: (f32, f32), zoom: f32, viewport: Size<Pixels>, content: (f32, f32)) -> (f32, f32) {
     let axis = |p: f32, vp: f32, extent: f32| {
-        let clearance = vp * (1.0 - FIT_MARGIN) / 2.0;
+        let clearance = (1.0 - FIT_MARGIN) * vp.min(extent);
         p.clamp((vp - extent).min(0.0) - clearance, (vp - extent).max(0.0) + clearance)
     };
     (
         axis(pan.0, f32::from(viewport.width), content.0 * zoom),
         axis(pan.1, f32::from(viewport.height), content.1 * zoom),
     )
+}
+
+/// The camera a wheel step of `notches` lands on. The zoom scales about
+/// `cursor` (a window-space position), holding the layout point under it in
+/// place, and spans the whole-graph fit up to [`MAX_ZOOM`]. Where the anchored
+/// pan would carry the graph past what [`clamp_pan`] permits, the bound takes
+/// over and the anchor slips by exactly the amount it holds back.
+pub(crate) fn zoom_step(
+    cursor: Point<Pixels>,
+    camera: Camera,
+    notches: f32,
+    viewport: Bounds<Pixels>,
+    content: (f32, f32),
+) -> Camera {
+    let Camera { zoom, pan } = camera;
+    let lx = f32::from(cursor.x) - f32::from(viewport.origin.x);
+    let ly = f32::from(cursor.y) - f32::from(viewport.origin.y);
+    let scaled =
+        (zoom * ZOOM_PER_NOTCH.powf(notches)).clamp(fit_zoom(viewport.size, content), MAX_ZOOM);
+    let anchored = (lx - (lx - pan.0) / zoom * scaled, ly - (ly - pan.1) / zoom * scaled);
+    Camera { zoom: scaled, pan: clamp_pan(anchored, scaled, viewport.size, content) }
 }
 
 /// Ids of the boxes the viewport fully encloses at the given zoom and pan. The
