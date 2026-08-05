@@ -36,8 +36,8 @@ pub(crate) struct FlameBoxCache {
     boxes: Rc<Vec<FlameBox>>,
 }
 
-/// A flame-graph box under the cursor: the laid-out box and where the cursor was,
-/// so a tooltip can be drawn for it.
+/// A flame-graph box under the cursor: the laid-out box and the cursor position,
+/// so a tooltip can be drawn for it there.
 #[derive(Clone)]
 struct FlameHover {
     boxed: FlameBox,
@@ -393,22 +393,15 @@ impl FlamePanel {
             .copied()
     }
 
-    /// Updates the box hover to the box under `pos`, repainting only when the
-    /// hovered box changes. The tooltip anchors at the cursor position on entry
-    /// into a box and stays there while the cursor moves within it, so a move that
-    /// stays in one box costs no repaint.
+    /// Updates the box hover to the box under `pos`, anchoring its tooltip there.
+    /// A move that touches no box costs no repaint.
     fn update_hover(&mut self, pos: Point<Pixels>, cx: &mut Context<Self>) {
         let hit = self.box_at(pos, cx);
-        let changed = match (&self.flame_hover, &hit) {
-            (Some(h), Some(b)) => h.boxed != *b,
-            (None, None) => false,
-            _ => true,
-        };
-        if !changed {
-            return;
-        }
+        let was_hovering = self.flame_hover.is_some();
         self.flame_hover = hit.map(|boxed| FlameHover { boxed, at: pos });
-        cx.notify();
+        if was_hovering || self.flame_hover.is_some() {
+            cx.notify();
+        }
     }
 
     /// Begins a drag at `pos`: the vertical or horizontal scroll thumb/track if the

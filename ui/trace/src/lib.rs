@@ -191,8 +191,8 @@ enum Drag {
     Gutter,
 }
 
-/// The slice under the cursor and where the cursor was when it was picked, so a
-/// tooltip can be drawn for it.
+/// The slice under the cursor and the cursor position, so a tooltip can be drawn
+/// for it there.
 #[derive(Clone, Copy)]
 struct Hover {
     track: usize,
