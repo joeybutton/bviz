@@ -1,5 +1,5 @@
 use crate::camera::{
-    clamp_pan, ease_out_cubic, fit_view, fit_zoom, frame_view, settle_view, Camera, Rect, Settle,
+    clamp_pan, ease_out_cubic, fit_view, fit_zoom, settle_view, Camera, Rect, Settle,
 };
 use crate::{GraphView, MAX_ZOOM, SETTLE_DURATION, SETTLE_MIN_PAN_STEP, SETTLE_MIN_ZOOM_STEP};
 use gpui::{App, Bounds, Entity, Pixels, Window};
@@ -58,12 +58,6 @@ impl Framing {
     pub(crate) fn refit(&mut self) {
         self.fitted = false;
         self.anim = None;
-    }
-
-    /// Eases the view onto `target`, scaling it to fill the viewport.
-    pub(crate) fn frame(&mut self, target: Rect, content: (f32, f32)) {
-        let (zoom, pan) = frame_view(target, self.viewport.size, content);
-        self.ease_to(zoom, pan);
     }
 
     /// Arms an ease from where the camera stands onto `(to_zoom, to_pan)`. A move

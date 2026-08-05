@@ -1,7 +1,7 @@
 use crate::camera::{to_screen, visible_rect, Camera, Rect};
 use crate::dimming::{compute_dimming, Dimming};
 use crate::drag::track_gesture;
-use crate::model::Drawn;
+use crate::model::{Drawn, Expandable};
 use crate::scroll::paint_scrollbars;
 use crate::{GraphView, Palette};
 use bviz_graph_layout::layout::{CARET_RESERVE, LABEL_BAND};
@@ -10,8 +10,6 @@ use gpui::{
     App, BorderStyle, Bounds, Entity, Hsla, PathBuilder, Pixels, Point, Rgba, TextAlign, Window,
     point, px, quad, rgb, size,
 };
-use std::collections::HashSet;
-use std::sync::Arc;
 
 /// Box label font size in layout pixels.
 const LABEL_SIZE: f64 = 13.0;
@@ -60,7 +58,7 @@ const DIM_EDGE_ALPHA: f32 = 0.2;
 /// no borrow of the view.
 pub(crate) struct Scene {
     pub(crate) drawn: Drawn,
-    pub(crate) expandable: Arc<HashSet<Id>>,
+    pub(crate) expandable: Expandable,
     pub(crate) palette: Palette,
     pub(crate) hovered: Option<Id>,
     pub(crate) dim_enabled: bool,
@@ -171,9 +169,8 @@ struct PaintBox<'a> {
     w: f64,
     h: f64,
     compound: bool,
-    /// Whether this box can be opened or closed (a container or a collapsed
-    /// group), so the renderer draws a disclosure caret: down when open
-    /// (compound), right when collapsed.
+    /// Whether this box can be opened or closed, so the renderer draws a
+    /// disclosure caret: down when open (compound), right when collapsed.
     expandable: bool,
     /// The themed fill, already faded if this box is dimmed, which the quad and
     /// the plate a label sits on are both painted in.
@@ -200,7 +197,7 @@ impl<'a> PaintBox<'a> {
             w: b.width,
             h: b.height,
             compound: b.compound,
-            expandable: scene.expandable.contains(&b.id) || b.group,
+            expandable: scene.expandable.holds(b),
             fill: match dim {
                 true => bviz_ui_theme::mix(fill, palette.background, DIM_FADE),
                 false => fill,

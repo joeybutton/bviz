@@ -13,7 +13,6 @@ use gpui::{
     ScrollWheelEvent, Subscription, Window, canvas, div, prelude::*, px, size,
 };
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::time::Duration;
 
 mod build;
@@ -30,13 +29,13 @@ mod scroll;
 mod toolbar;
 
 use build::{Input, InputKind};
-use camera::{clamp_pan, enclosed_boxes, fit_zoom, from_screen, recenter_rect, Camera, Rect};
+use camera::{clamp_pan, enclosed_boxes, fit_zoom, from_screen, recenter_rect, Camera};
 use drag::{end_drag, start_pan, Drag};
 use emphasis::Emphasis;
 use framing::{build_prepaint, Framing};
 use legend::legend;
 use mode::LayoutMode;
-use model::{Drawn, Model, Source};
+use model::{Drawn, Expandable, Model, Source};
 use paint::{canvas_body, Scene};
 use scroll::{scrollbar_hit, start_scroll_drag};
 
@@ -111,6 +110,11 @@ impl GraphView {
         self.model.drawn(self.mode)
     }
 
+    /// The boxes the selected mode's layout lets the user open or close.
+    fn expandable(&self) -> Expandable {
+        self.model.expandable(self.mode)
+    }
+
     fn new(inputs: Vec<Input>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let focus_handle = cx.focus_handle();
         focus_handle.focus(window, cx);
@@ -157,7 +161,7 @@ impl GraphView {
         let content = drawn.content();
         let recenter_target = recenter_rect(g, &self.emphasis);
         let scene = Scene {
-            expandable: Arc::clone(self.model.expandable()),
+            expandable: self.expandable(),
             palette,
             hovered: self.hovered,
             dim_enabled: self.dim_enabled,
@@ -360,10 +364,8 @@ struct Controls {
     relaying: bool,
 }
 
-/// Acts on the box under `pos` (window px). The layered layout opens or closes
-/// the box and settles the view to keep it in frame; a map is opened by zoom
-/// alone, so there the box becomes the frame and the level rule reveals what is
-/// inside it.
+/// Opens or closes the box under `pos` (window px) and settles the view to keep
+/// it in frame. A box the drawn layout holds no handle on is left alone.
 fn click_box_at(view: &mut GraphView, pos: Point<Pixels>, cx: &mut Context<GraphView>) {
     let vp = view.framing.viewport();
     let camera = view.camera();
@@ -372,34 +374,16 @@ fn click_box_at(view: &mut GraphView, pos: Point<Pixels>, cx: &mut Context<Graph
     };
     let g = drawn.view(camera.zoom);
     let (gx, gy) = from_screen(pos, vp.origin, camera);
-    let Some(hit) = hit_box(&g.boxes, gx, gy) else {
+    let Some(hit) = hit_box(&g.boxes, gx, gy).filter(|b| view.expandable().holds(b)) else {
         return;
     };
-    match view.mode {
-        LayoutMode::Map => {
-            if !view.model.expandable().contains(&hit.id) {
-                return;
-            }
-            let target = Rect { x: hit.x, y: hit.y, w: hit.width, h: hit.height };
-            view.framing.frame(target, drawn.content());
-            cx.notify();
-        }
-        LayoutMode::Layered => {
-            // A multi-child container or a collapsed group can be opened/closed;
-            // a leaf or singleton can't.
-            if !hit.group && !view.model.expandable().contains(&hit.id) {
-                return;
-            }
-            let id = hit.id;
-            let enclosed = enclosed_boxes(&g.boxes, vp.size, camera);
-            // The relayout may drop the hovered node (it was collapsed away),
-            // which would otherwise leave the whole graph dimmed until the next
-            // mouse move.
-            view.hovered = None;
-            model::toggle_expansion(view, id, cx);
-            view.emphasis.toggled(id, enclosed);
-        }
-    }
+    let id = hit.id;
+    let enclosed = enclosed_boxes(&g.boxes, vp.size, camera);
+    // The relayout may drop the hovered node (it was collapsed away), which would
+    // otherwise leave the whole graph dimmed until the next mouse move.
+    view.hovered = None;
+    model::toggle_expansion(view, id, cx);
+    view.emphasis.toggled(id, enclosed);
 }
 
 /// The smallest-area box (in layout space) containing `(gx, gy)`, so an inner
@@ -464,7 +448,7 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::camera::{ease_out_cubic, frame_view, settle_view, to_screen, Rect};
+    use crate::camera::{ease_out_cubic, settle_view, to_screen, Rect};
     use crate::paint::lane_polyline;
     use bviz_graph_layout::{Box, Kind};
     use gpui::{point, Bounds, Size};
@@ -623,32 +607,6 @@ mod tests {
         assert!((z - 1.0).abs() < 1e-4, "zoom moved: {z}");
         assert!(p.0 < 0.0, "expected a leftward pan, got {p:?}");
         assert_enclosed(target, 800., 600., z, p);
-    }
-
-    #[test]
-    fn frame_view_zooms_in_on_a_small_target_and_centers_it() {
-        // The rect a map click hands over is far smaller than the viewport, and
-        // framing it magnifies — the direction settle_view never takes.
-        let target = Rect { x: 1000.0, y: 800.0, w: 200.0, h: 150.0 };
-        let (z, p) = frame_view(target, vp(800., 600.), CONTENT);
-        assert!(z > 1.0, "expected a zoom-in, got {z}");
-        let center = |lo: f64, extent: f64, pan: f32| {
-            (lo as f32 + extent as f32 / 2. + MARGIN as f32) * z + pan
-        };
-        assert!((center(target.x, target.w, p.0) - 400.).abs() < 0.5, "x off center: {p:?}");
-        assert!((center(target.y, target.h, p.1) - 300.).abs() < 0.5, "y off center: {p:?}");
-        assert_enclosed(target, 800., 600., z, p);
-    }
-
-    #[test]
-    fn frame_view_stays_between_the_whole_graph_fit_and_the_zoom_ceiling() {
-        let viewport = vp(800., 600.);
-        let pinhead = Rect { x: 10.0, y: 10.0, w: 0.5, h: 0.5 };
-        let (z, _) = frame_view(pinhead, viewport, CONTENT);
-        assert!((z - MAX_ZOOM).abs() < 1e-4, "a tiny target passed the ceiling: {z}");
-        let whole = Rect { x: 0.0, y: 0.0, w: CONTENT.0 as f64, h: CONTENT.1 as f64 };
-        let (z, _) = frame_view(whole, viewport, CONTENT);
-        assert!((z - fit_zoom(viewport, CONTENT)).abs() < 1e-4, "framing everything is the fit: {z}");
     }
 
     /// The window in layout space that the culling tests measure against.

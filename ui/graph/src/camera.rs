@@ -209,25 +209,6 @@ fn fit_rect_zoom(target: Rect, viewport: Size<Pixels>) -> Option<f32> {
     })
 }
 
-/// The zoom and pan that put `target` (a layout-space rect) centered and filling
-/// `viewport`, so picking a box out of the graph makes it the frame. The zoom
-/// rises as well as falls, within the whole-graph fit and [`MAX_ZOOM`]: framing a
-/// box can neither push the graph out of view nor magnify past the ceiling the
-/// scroll wheel honors.
-pub(crate) fn frame_view(
-    target: Rect,
-    viewport: Size<Pixels>,
-    content: (f32, f32),
-) -> (f32, (f32, f32)) {
-    let whole = fit_zoom(viewport, content);
-    let zoom = fit_rect_zoom(target, viewport).unwrap_or(whole).clamp(whole, MAX_ZOOM);
-    let (vw, vh) = (f32::from(viewport.width), f32::from(viewport.height));
-    let cx = target.x as f32 + target.w as f32 / 2. + MARGIN as f32;
-    let cy = target.y as f32 + target.h as f32 / 2. + MARGIN as f32;
-    let pan = (vw / 2. - cx * zoom, vh / 2. - cy * zoom);
-    (zoom, clamp_pan(pan, zoom, viewport, content))
-}
-
 /// The zoom and pan that fit `content` centered in `viewport`.
 pub(crate) fn fit_view(viewport: Size<Pixels>, content: (f32, f32)) -> (f32, (f32, f32)) {
     let zoom = fit_zoom(viewport, content);

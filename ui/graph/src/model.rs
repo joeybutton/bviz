@@ -80,6 +80,28 @@ impl Drawn {
     }
 }
 
+/// The boxes a mode's layout lets the user open or close, cheap to clone into a
+/// `'static` paint closure. A box outside it carries no disclosure caret and
+/// ignores a click.
+#[derive(Clone)]
+pub(crate) enum Expandable {
+    /// No box at all: a map draws whichever level its camera calls for, so what
+    /// a container holds is reached by zooming in on it.
+    Nothing,
+    /// The multi-child containers of the base graph, plus every collapsed group
+    /// — a leaf holds nothing to open, and a singleton container opens itself.
+    Containers(Arc<HashSet<Id>>),
+}
+
+impl Expandable {
+    pub(crate) fn holds(&self, b: &bviz_graph_layout::Box) -> bool {
+        match self {
+            Self::Nothing => false,
+            Self::Containers(ids) => ids.contains(&b.id) || b.group,
+        }
+    }
+}
+
 /// The loaded graph, a load in progress, or a message explaining why none is
 /// shown.
 pub(crate) enum Source {
@@ -95,10 +117,8 @@ pub(crate) struct Model {
     /// Container and group ids currently expanded; every other container folds
     /// its subtree away so the layered layout only processes the visible view.
     expanded: HashSet<Id>,
-    /// Multi-child container ids of the base graph; only these carry an
-    /// expand/collapse handle (a leaf can't open, a singleton auto-expands), so a
-    /// click or caret can tell an expandable box from a plain one.
-    expandable: Arc<HashSet<Id>>,
+    /// The set a layered layout's [`Expandable`] is built from.
+    containers: Arc<HashSet<Id>>,
     /// Whether a layered layout is running, so the view shows a progress
     /// indicator while the prior layout stays interactive.
     relaying: bool,
@@ -126,7 +146,7 @@ impl Model {
             |view, result, _| {
                 view.model.source = match result {
                     Ok((graph, reduced_base, names, expanded, map)) => {
-                        view.model.expandable =
+                        view.model.containers =
                             Arc::new(bviz_graph_layout::lod::expandable_containers(&graph));
                         view.model.expanded = expanded;
                         Source::Loaded(Loaded {
@@ -144,7 +164,7 @@ impl Model {
         Self {
             source: Source::Loading,
             expanded: HashSet::new(),
-            expandable: Arc::new(HashSet::new()),
+            containers: Arc::new(HashSet::new()),
             relaying: false,
             _task: task,
         }
@@ -166,8 +186,12 @@ impl Model {
         }
     }
 
-    pub(crate) fn expandable(&self) -> &Arc<HashSet<Id>> {
-        &self.expandable
+    /// The boxes `mode`'s layout lets the user open or close.
+    pub(crate) fn expandable(&self, mode: LayoutMode) -> Expandable {
+        match mode {
+            LayoutMode::Map => Expandable::Nothing,
+            LayoutMode::Layered => Expandable::Containers(Arc::clone(&self.containers)),
+        }
     }
 
     pub(crate) fn relaying(&self) -> bool {
