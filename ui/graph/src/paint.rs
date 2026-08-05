@@ -103,9 +103,13 @@ pub(crate) fn canvas_body(
             paint_lanes(c, dim, bounds, camera, window);
         }
         let mut floated: Vec<Bounds<Pixels>> = Vec::new();
+        let mut titles: Vec<TitleTarget> = Vec::new();
         for (b, rect) in &drawn {
-            paint_box_label(b, *rect, camera.zoom, &scene.palette, &mut floated, window, cx);
+            let target =
+                paint_box_label(b, *rect, camera.zoom, &scene.palette, &mut floated, window, cx);
+            titles.extend(target);
         }
+        entity.update(cx, |view, _| view.titles = titles);
         paint_scrollbars(bounds, scene.drawn.content(), camera, &scene.palette, window);
         track_gesture(&entity, window, cx);
     }
@@ -161,9 +165,17 @@ fn container_fill(kind: Kind, palette: &Palette) -> Rgba {
     }
 }
 
+/// A disclosure title as a frame painted it, by which a gesture landing on the
+/// title reaches the box it names.
+pub(crate) struct TitleTarget {
+    plate: Bounds<Pixels>,
+    id: Id,
+}
+
 /// A box resolved against the theme and the frame's lit/dimmed partition, in
 /// layout pixels.
 struct PaintBox<'a> {
+    id: Id,
     x: f64,
     y: f64,
     w: f64,
@@ -192,6 +204,7 @@ impl<'a> PaintBox<'a> {
             false => bviz_ui_theme::mix(kind_accent(b.kind), palette.background, KIND_BLEND),
         };
         PaintBox {
+            id: b.id,
             x: b.x,
             y: b.y,
             w: b.width,
@@ -301,19 +314,91 @@ fn box_emphasis(
     ((border_w, border_c), glow)
 }
 
+/// Where a box's label falls within it, in screen pixels: centered in the strip
+/// its own box keeps for a label — a container's title band, or the whole box
+/// for anything else — which no other box's label reaches into.
+struct LabelPlacement {
+    /// Font size the label is drawn at.
+    size: f32,
+    /// Distance from the box's top edge to the label's top.
+    top: f32,
+    /// Width held left of the label for a disclosure caret; `None` for a box that
+    /// carries none. The caret keeps the proportion the layout reserved for it
+    /// whatever size the label is drawn at.
+    caret: Option<f32>,
+    /// Width the label text is truncated to.
+    avail: f32,
+    /// Whether the title is lifted to the top of its box, over ground the boxes
+    /// inside it are drawn on, which a container whose band the zoom has shrunk
+    /// below the floored label does.
+    floats: bool,
+}
+
+impl LabelPlacement {
+    /// Where `b`'s label falls in the `rect` it is drawn at, or `None` if that
+    /// rect is too short or too narrow for the floored label — what survives
+    /// truncation in a narrower one names nothing, so the box is left bare.
+    fn of(b: &PaintBox, rect: Bounds<Pixels>, zoom: f32) -> Option<Self> {
+        let (w, h) = (f32::from(rect.size.width), f32::from(rect.size.height));
+        let size = (LABEL_SIZE as f32 * zoom).max(LABEL_FLOOR);
+        let needed = size + 2. * LABEL_PAD;
+        if h < needed {
+            return None;
+        }
+        let band = LABEL_BAND as f32 * zoom;
+        let (top, floats) = match b.compound {
+            true if band >= needed => ((band - size) / 2., false),
+            true => (LABEL_PAD, true),
+            false => ((h - size) / 2., false),
+        };
+        let caret = b.expandable.then(|| size * (CARET_RESERVE / LABEL_SIZE) as f32);
+        let avail = w - 2. * LABEL_PAD - caret.unwrap_or(0.);
+        (avail >= LABEL_MIN_WIDTH).then_some(LabelPlacement { size, top, caret, avail, floats })
+    }
+
+    /// Width the caret takes out of the plate, zero where the box carries none.
+    fn reserved(&self) -> f32 {
+        self.caret.unwrap_or(0.)
+    }
+
+    /// The plate a `text`-wide label fills in `rect`: the caret and the text
+    /// centered together as one unit, with the label's clearance around them.
+    fn plate(&self, rect: Bounds<Pixels>, text: f32) -> Bounds<Pixels> {
+        let unit = self.reserved() + text;
+        let left = f32::from(rect.origin.x) + (f32::from(rect.size.width) - unit) / 2.;
+        Bounds::new(
+            point(px(left - LABEL_PAD), px(f32::from(rect.origin.y) + self.top - LABEL_PAD)),
+            size(px(unit + 2. * LABEL_PAD), px(self.size + 2. * LABEL_PAD)),
+        )
+    }
+
+    /// Where the caret sits in `plate`: its left edge, at the label's vertical
+    /// center.
+    fn caret_at(&self, plate: Bounds<Pixels>) -> Point<Pixels> {
+        point(plate.origin.x + px(LABEL_PAD), plate.origin.y + px(LABEL_PAD + self.size / 2.))
+    }
+
+    /// The handle box `id`'s label is, once drawn on `plate`; `None` for a box
+    /// that carries no disclosure caret.
+    fn title(&self, plate: Bounds<Pixels>, id: Id) -> Option<TitleTarget> {
+        self.caret.map(|_| TitleTarget { plate, id })
+    }
+}
+
+/// The box a title painted over `pos` (window px) opens or closes.
+pub(crate) fn title_at(titles: &[TitleTarget], pos: Point<Pixels>) -> Option<Id> {
+    titles.iter().find(|t| t.plate.contains(&pos)).map(|t| t.id)
+}
+
 /// Paints a box's label, truncated to the width there is room for, with a
-/// disclosure caret for an expandable box. A box too short or too narrow for the
-/// floored label is left bare. The font is the window's inherited UI text style
-/// so the views stay visually coherent, and a container's title is bold.
+/// disclosure caret for an expandable box, and reports the title a click on it
+/// toggles. The font is the window's inherited UI text style so the views stay
+/// visually coherent, and a container's title is bold.
 ///
-/// A label normally centers in the strip its own box keeps for it — a
-/// container's title band, or the whole box for anything else — which no other
-/// box's label reaches into. A container whose band the zoom has shrunk below
-/// the floored label instead floats its title to the top of its box, over ground
-/// the boxes inside it are drawn on; `floated` collects what those titles have
-/// taken, and a label that would land on any of it is dropped rather than
-/// printed over it. Since the caller walks the boxes outermost first, that
-/// leaves the coarser, more telling name standing.
+/// `floated` collects what the floating titles have taken, and a label that
+/// would land on any of it is dropped rather than printed over it. Since the
+/// caller walks the boxes outermost first, that leaves the coarser, more telling
+/// name standing.
 fn paint_box_label(
     b: &PaintBox,
     rect: Bounds<Pixels>,
@@ -322,31 +407,9 @@ fn paint_box_label(
     floated: &mut Vec<Bounds<Pixels>>,
     window: &mut Window,
     cx: &mut App,
-) {
-    let (w, h) = (f32::from(rect.size.width), f32::from(rect.size.height));
-    let fs = (LABEL_SIZE as f32 * zoom).max(LABEL_FLOOR);
-    let needed = fs + 2. * LABEL_PAD;
-    if h < needed {
-        return;
-    }
-    let band = LABEL_BAND as f32 * zoom;
-    let (top_offset, floats) = match b.compound {
-        true if band >= needed => ((band - fs) / 2., false),
-        true => (LABEL_PAD, true),
-        false => ((h - fs) / 2., false),
-    };
-    // A box that can be opened or closed carries a disclosure caret left of the
-    // label; the two are centered together as one unit. The caret keeps the
-    // proportion the layout reserved for it whatever size the label is drawn at.
-    let caret = b.expandable;
-    let footprint = match caret {
-        true => fs * (CARET_RESERVE / LABEL_SIZE) as f32,
-        false => 0.,
-    };
-    let avail = w - 2. * LABEL_PAD - footprint;
-    if avail < LABEL_MIN_WIDTH {
-        return;
-    }
+) -> Option<TitleTarget> {
+    let placement = LabelPlacement::of(b, rect, zoom)?;
+    let fs = placement.size;
     let label_color = if b.dim {
         bviz_ui_theme::mix(palette.label, palette.background, DIM_FADE)
     } else {
@@ -356,22 +419,17 @@ fn paint_box_label(
     let font = if b.compound { base.bold() } else { base };
     let line = bviz_ui_components::shape_truncated(
         b.label,
-        avail,
+        placement.avail,
         font,
         px(fs),
         label_color.into(),
         window,
     );
-    let unit_left = f32::from(rect.origin.x) + (w - footprint - f32::from(line.width())) / 2.;
-    let ty = f32::from(rect.origin.y) + top_offset;
-    let plate = Bounds::new(
-        point(px(unit_left - LABEL_PAD), px(ty - LABEL_PAD)),
-        size(px(footprint + f32::from(line.width()) + 2. * LABEL_PAD), px(needed)),
-    );
+    let plate = placement.plate(rect, f32::from(line.width()));
     if floated.iter().any(|taken| taken.intersects(&plate)) {
-        return;
+        return None;
     }
-    if floats {
+    if placement.floats {
         floated.push(plate);
     }
     // The plate is painted in the box's own fill, so a name reads against its box
@@ -386,7 +444,7 @@ fn paint_box_label(
         BorderStyle::Solid,
     ));
     let _ = line.paint(
-        point(px(unit_left + footprint), px(ty)),
+        plate.origin + point(px(LABEL_PAD + placement.reserved()), px(LABEL_PAD)),
         px(fs),
         TextAlign::Left,
         None,
@@ -394,19 +452,12 @@ fn paint_box_label(
         cx,
     );
 
-    // An open container (compound) points the caret down; a collapsed box points
-    // it right. Phosphor icons render as `svg()` elements and cannot be painted
-    // inside this canvas, so the caret is a small filled triangle.
-    if caret {
-        paint_caret(
-            point(px(unit_left), px(ty + fs / 2.)),
-            px(footprint),
-            px(fs),
-            b.compound,
-            label_color,
-            window,
-        );
+    if let Some(caret) = placement.caret {
+        // Phosphor icons render as `svg()` elements, which cannot be painted
+        // inside this canvas, so the caret is a small filled triangle.
+        paint_caret(placement.caret_at(plate), px(caret), px(fs), b.compound, label_color, window);
     }
+    placement.title(plate, b.id)
 }
 
 /// Paints a small filled-triangle disclosure caret inside the reserved
@@ -559,5 +610,235 @@ fn paint_arrowhead(pts: &[Point<Pixels>], zoom: f32, color: Rgba, window: &mut W
     head.add_polygon(&[tip, left, right], true);
     if let Ok(path) = head.build() {
         window.paint_path(path, color);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::camera::from_screen;
+    use bviz_graph_layout::LaidOut;
+    use std::collections::HashSet;
+    use std::sync::Arc;
+
+    /// The zooms the caret invariant is checked over, spanning both sides of the
+    /// band width at which a container's title stops fitting in it.
+    const ZOOMS: [f32; 9] = [0.05, 0.1, 0.2, 0.4, 0.5, 0.6, 0.8, 1.0, 2.0];
+
+    fn lbox(
+        id: u32,
+        label: &str,
+        x: f64,
+        y: f64,
+        w: f64,
+        h: f64,
+        compound: bool,
+    ) -> bviz_graph_layout::Box {
+        bviz_graph_layout::Box {
+            id: Id(id),
+            label: label.into(),
+            kind: Kind::Source,
+            x,
+            y,
+            width: w,
+            height: h,
+            compound,
+            group: false,
+        }
+    }
+
+    /// A container large enough to carry a title at every zoom in [`ZOOMS`],
+    /// holding one child over all of it but the title band — so a title floated
+    /// out of that band lands wholly on the child, and the container's only
+    /// ground of its own is the band itself.
+    fn covered_container() -> LaidOut {
+        let (w, h) = (4000.0, 3000.0);
+        LaidOut {
+            boxes: vec![
+                lbox(0, "container", 0.0, 0.0, w, h, true),
+                lbox(1, "member", 0.0, LABEL_BAND, w, h - LABEL_BAND, false),
+            ],
+            ..Default::default()
+        }
+    }
+
+    fn paint_box_of<'a>(b: &'a bviz_graph_layout::Box, expandable: &Expandable) -> PaintBox<'a> {
+        PaintBox {
+            id: b.id,
+            x: b.x,
+            y: b.y,
+            w: b.width,
+            h: b.height,
+            compound: b.compound,
+            expandable: expandable.holds(b),
+            fill: rgb(0),
+            label: &b.label,
+            highlight: 0.0,
+            dim: false,
+        }
+    }
+
+    /// Which boxes of [`covered_container`] open and close: both, as a container
+    /// and the collapsed group filling it do, so a click landing on the wrong one
+    /// still toggles something; and the container alone, as one holding a plain
+    /// leaf does.
+    fn expansion_sets() -> [Expandable; 2] {
+        [
+            Expandable::Containers(Arc::new(HashSet::from([Id(0), Id(1)]))),
+            Expandable::Containers(Arc::new(HashSet::from([Id(0)]))),
+        ]
+    }
+
+    /// A caret a frame painted: the box it belongs to, the point at the middle of
+    /// its footprint, and whether the title carrying it floated out of its band.
+    struct DrawnCaret {
+        id: Id,
+        at: Point<Pixels>,
+        floats: bool,
+    }
+
+    /// The titles a frame of `g` records under `camera`, and a caret for each,
+    /// following the same order and overlap arbitration [`canvas_body`] paints
+    /// in. Every label is measured at the widest its box has room for, which puts
+    /// the plate at its widest and the caret furthest from the box's own center.
+    fn drawn_titles(
+        g: &LaidOut,
+        expandable: &Expandable,
+        viewport: Bounds<Pixels>,
+        camera: Camera,
+    ) -> (Vec<TitleTarget>, Vec<DrawnCaret>) {
+        let mut floated: Vec<Bounds<Pixels>> = Vec::new();
+        let mut titles: Vec<TitleTarget> = Vec::new();
+        let mut carets: Vec<DrawnCaret> = Vec::new();
+        for b in &g.boxes {
+            let pb = paint_box_of(b, expandable);
+            let rect = screen_rect(&pb, viewport, camera);
+            let Some(placement) = LabelPlacement::of(&pb, rect, camera.zoom) else {
+                continue;
+            };
+            let plate = placement.plate(rect, placement.avail);
+            if floated.iter().any(|taken| taken.intersects(&plate)) {
+                continue;
+            }
+            if placement.floats {
+                floated.push(plate);
+            }
+            let Some(title) = placement.title(plate, b.id) else {
+                continue;
+            };
+            carets.push(DrawnCaret {
+                id: b.id,
+                at: placement.caret_at(plate) + point(px(placement.reserved() / 2.), px(0.)),
+                floats: placement.floats,
+            });
+            titles.push(title);
+        }
+        (titles, carets)
+    }
+
+    /// A viewport laid out away from the window origin, so a resolution that
+    /// neglects to take the canvas offset off the cursor lands visibly wrong.
+    fn viewport() -> Bounds<Pixels> {
+        Bounds::new(point(px(10.), px(20.)), size(px(800.), px(600.)))
+    }
+
+    #[test]
+    fn a_drawn_title_resolves_to_the_box_it_names() {
+        for expandable in expansion_sets() {
+            check_titles_resolve(&expandable);
+        }
+    }
+
+    /// Asserts that every title drawn over [`covered_container`] both toggles and
+    /// hovers the box it names, at every zoom in [`ZOOMS`].
+    fn check_titles_resolve(expandable: &Expandable) {
+        let g = covered_container();
+        let (mut floating, mut banded, mut covered) = (0, 0, 0);
+        for zoom in ZOOMS {
+            let camera = Camera { zoom, pan: (0.0, 0.0) };
+            let (titles, carets) = drawn_titles(&g, expandable, viewport(), camera);
+            for caret in carets {
+                let DrawnCaret { id, at, floats } = caret;
+                match floats {
+                    true => floating += 1,
+                    false => banded += 1,
+                }
+                let resolved = crate::box_at(&titles, &g, viewport(), camera, at);
+                assert_eq!(
+                    resolved.map(|b| b.id),
+                    Some(id),
+                    "zoom {zoom}: the caret drawn for {id:?} resolves to another box"
+                );
+                // What the click keeps of that: a box it holds no handle on is
+                // left alone, and every title target names one it does.
+                assert_eq!(
+                    resolved.filter(|b| expandable.holds(b)).map(|b| b.id),
+                    Some(id),
+                    "zoom {zoom}: the caret drawn for {id:?} toggles nothing"
+                );
+                let (gx, gy) = from_screen(at, viewport().origin, camera);
+                covered += (crate::hit_box(&g.boxes, gx, gy).map(|b| b.id) != Some(id)) as u32;
+            }
+        }
+        assert!(floating > 0, "no zoom floated a title out of its band");
+        assert!(banded > 0, "no zoom left a title in its band");
+        assert!(covered > 0, "no caret fell on a box other than its own, so the boxes alone \
+            would have resolved every gesture and the case this pins never arose");
+    }
+
+    /// The width of each container in [`side_by_side`], also the distance a
+    /// relayout has to slide them for one to take the other's ground.
+    const CONTAINER_WIDTH: f64 = 2000.0;
+
+    /// Two containers abreast, each carrying a title of its own.
+    fn side_by_side() -> LaidOut {
+        let (w, h) = (CONTAINER_WIDTH, 1200.0);
+        LaidOut {
+            boxes: vec![
+                lbox(0, "left", 0.0, 0.0, w, h, true),
+                lbox(1, "right", w, 0.0, w, h, true),
+            ],
+            ..Default::default()
+        }
+    }
+
+    /// The same boxes laid out `dx` units along, keeping every id.
+    fn slid(g: &LaidOut, dx: f64) -> LaidOut {
+        LaidOut {
+            boxes: g
+                .boxes
+                .iter()
+                .map(|b| lbox(b.id.0, &b.label, b.x + dx, b.y, b.width, b.height, b.compound))
+                .collect(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_title_the_layout_has_moved_out_from_under_resolves_to_the_box_now_there() {
+        let g = side_by_side();
+        let expandable = Expandable::Containers(Arc::new(HashSet::from([Id(0), Id(1)])));
+        let camera = Camera { zoom: 0.2, pan: (0.0, 0.0) };
+        let (titles, carets) = drawn_titles(&g, &expandable, viewport(), camera);
+        let left = carets.iter().find(|c| c.id == Id(0));
+        let at = left.expect("the left container drew no title").at;
+        assert_eq!(crate::box_at(&titles, &g, viewport(), camera, at).map(|b| b.id), Some(Id(0)));
+
+        // A relayout that keeps both ids and slides the right container onto the
+        // ground the left one's title was painted over. The recorded plate still
+        // covers the cursor and still names a box the layout holds; what it no
+        // longer names is the box drawn there.
+        let moved = slid(&g, -CONTAINER_WIDTH);
+        let (gx, gy) = from_screen(at, viewport().origin, camera);
+        assert_eq!(
+            crate::hit_box(&moved.boxes, gx, gy).map(|b| b.id),
+            Some(Id(1)),
+            "the slide left the caret over no other container, so nothing was displaced"
+        );
+        assert_eq!(
+            crate::box_at(&titles, &moved, viewport(), camera, at).map(|b| b.id),
+            Some(Id(1)),
+            "a title from a frame the layout has moved on from still answered for it"
+        );
     }
 }

@@ -8,7 +8,7 @@ use bviz_ui_shell::Chrome;
 use bviz_ui_theme::Colors;
 use clap::Parser;
 use gpui::{
-    AnyElement, Context, Entity, FocusHandle, IntoElement, KeyDownEvent, MouseButton,
+    AnyElement, Bounds, Context, Entity, FocusHandle, IntoElement, KeyDownEvent, MouseButton,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Render, Rgba, ScrollDelta,
     ScrollWheelEvent, Subscription, Window, canvas, div, prelude::*, px, size,
 };
@@ -36,7 +36,7 @@ use framing::{build_prepaint, Framing};
 use legend::legend;
 use mode::LayoutMode;
 use model::{Drawn, Expandable, Model, Source};
-use paint::{canvas_body, Scene};
+use paint::{canvas_body, Scene, TitleTarget};
 use scroll::{scrollbar_hit, start_scroll_drag};
 
 /// Padding around the graph, in layout pixels.
@@ -106,6 +106,9 @@ struct GraphView {
     /// toolbar toggle, which relays out. Hover lights up a node's full neighbors
     /// either way.
     reduced: bool,
+    /// The titles the canvas drew, rewritten by every paint and resolved against
+    /// a pointer by [`box_at`].
+    titles: Vec<TitleTarget>,
 }
 
 impl GraphView {
@@ -155,6 +158,7 @@ impl GraphView {
             hovered: None,
             dim_enabled: true,
             reduced: true,
+            titles: Vec::new(),
         }
     }
 
@@ -252,8 +256,9 @@ impl GraphView {
             return;
         };
         let camera = self.camera();
-        let (gx, gy) = from_screen(e.position, self.framing.viewport().origin, camera);
-        let hit = hit_box(&drawn.view(camera.zoom).boxes, gx, gy).map(|b| b.id);
+        let vp = self.framing.viewport();
+        let hit = box_at(&self.titles, drawn.view(camera.zoom), vp, camera, e.position)
+            .map(|b| b.id);
         if hit != self.hovered {
             self.hovered = hit;
             cx.notify();
@@ -362,6 +367,34 @@ struct Controls {
     relaying: bool,
 }
 
+/// The box a pointer at `pos` (window px) resolves to, which every gesture that
+/// names a box — the hover that lights a neighborhood, the click that opens or
+/// closes one — goes through, so the box under the cursor is the same box for
+/// all of them.
+///
+/// A title the frame painted wins over the box the cursor falls in, because a
+/// title the zoom has floated out of its container's band is drawn over the
+/// boxes inside it: there the innermost box under the cursor is one of those,
+/// and the opaque title covering it is both what the user sees and what the
+/// user is aiming at. A title is taken only where the box it names covers the
+/// cursor in `g` under `camera`. Since a title is always painted within its own
+/// box, that leaves a set recorded from a frame the view has moved on from — a
+/// relayout, a mode switch, a camera step — resolving to the box under the
+/// cursor instead.
+fn box_at<'a>(
+    titles: &[TitleTarget],
+    g: &'a bviz_graph_layout::LaidOut,
+    viewport: Bounds<Pixels>,
+    camera: Camera,
+    pos: Point<Pixels>,
+) -> Option<&'a bviz_graph_layout::Box> {
+    let (gx, gy) = from_screen(pos, viewport.origin, camera);
+    let titled = paint::title_at(titles, pos)
+        .and_then(|id| g.boxes.iter().find(|b| b.id == id))
+        .filter(|b| covers(b, gx, gy));
+    titled.or_else(|| hit_box(&g.boxes, gx, gy))
+}
+
 /// Opens or closes the box under `pos` (window px) and settles the view to keep
 /// it in frame. A box the drawn layout holds no handle on is left alone.
 fn click_box_at(view: &mut GraphView, pos: Point<Pixels>, cx: &mut Context<GraphView>) {
@@ -371,11 +404,10 @@ fn click_box_at(view: &mut GraphView, pos: Point<Pixels>, cx: &mut Context<Graph
         return;
     };
     let g = drawn.view(camera.zoom);
-    let (gx, gy) = from_screen(pos, vp.origin, camera);
-    let Some(hit) = hit_box(&g.boxes, gx, gy).filter(|b| view.expandable().holds(b)) else {
+    let hit = box_at(&view.titles, g, vp, camera, pos).filter(|b| view.expandable().holds(b));
+    let Some(id) = hit.map(|b| b.id) else {
         return;
     };
-    let id = hit.id;
     let enclosed = enclosed_boxes(&g.boxes, vp.size, camera);
     // The relayout may drop the hovered node (it was collapsed away), which would
     // otherwise leave the whole graph dimmed until the next mouse move.
@@ -384,15 +416,18 @@ fn click_box_at(view: &mut GraphView, pos: Point<Pixels>, cx: &mut Context<Graph
     view.emphasis.toggled(id, enclosed);
 }
 
+/// Whether `b`'s layout rect covers `(gx, gy)`, counting its edges.
+fn covers(b: &bviz_graph_layout::Box, gx: f32, gy: f32) -> bool {
+    let (x, y) = (b.x as f32, b.y as f32);
+    gx >= x && gx <= x + b.width as f32 && gy >= y && gy <= y + b.height as f32
+}
+
 /// The smallest-area box (in layout space) containing `(gx, gy)`, so an inner
 /// member or header wins over its enclosing container; `None` if outside all.
 fn hit_box(boxes: &[bviz_graph_layout::Box], gx: f32, gy: f32) -> Option<&bviz_graph_layout::Box> {
     boxes
         .iter()
-        .filter(|b| {
-            let (x, y) = (b.x as f32, b.y as f32);
-            gx >= x && gx <= x + b.width as f32 && gy >= y && gy <= y + b.height as f32
-        })
+        .filter(|b| covers(b, gx, gy))
         .min_by(|a, b| (a.width * a.height).total_cmp(&(b.width * b.height)))
 }
 
