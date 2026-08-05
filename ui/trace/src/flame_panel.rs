@@ -36,12 +36,24 @@ pub(crate) struct FlameBoxCache {
     boxes: Rc<Vec<FlameBox>>,
 }
 
-/// A flame-graph box under the cursor: the laid-out box and the cursor position,
-/// so a tooltip can be drawn for it there.
-#[derive(Clone)]
-struct FlameHover {
-    boxed: FlameBox,
-    at: Point<Pixels>,
+impl FlameBoxCache {
+    /// The memoized boxes when every key matches, `None` otherwise. Every change
+    /// to the panel's view, scroll, or bounds rebuilds the canvas scene, whose
+    /// paint re-memoizes ahead of the overlay that reads this, so a hit test
+    /// taken during paint names a box of the layout on screen.
+    fn matching(
+        &self,
+        aggregates: &Arc<ScopeAggregate>,
+        content_w: f64,
+        scroll_x: f64,
+        view_w: f32,
+    ) -> Option<&Rc<Vec<FlameBox>>> {
+        (Arc::ptr_eq(&self.aggregates, aggregates)
+            && self.content_w == content_w
+            && self.scroll_x == scroll_x
+            && self.view_w == view_w)
+            .then_some(&self.boxes)
+    }
 }
 
 /// The flame graph's current geometry, shared by hit-testing and the
@@ -56,6 +68,15 @@ struct FlameLayout {
     top: f32,
     width: f32,
     height: f32,
+}
+
+impl FlameLayout {
+    /// Whether a window-space `pos` lies over the graph's content rect.
+    fn contains(&self, pos: Point<Pixels>) -> bool {
+        let x = f32::from(pos.x);
+        let y = f32::from(pos.y);
+        x >= self.left && x < self.left + self.width && y >= self.top && y < self.top + self.height
+    }
 }
 
 /// What a left-button drag over the flame-graph panel is currently moving.
@@ -125,14 +146,11 @@ fn flame_boxes(
     view_w: f32,
     metrics: &FlameMetrics,
 ) -> Rc<Vec<FlameBox>> {
-    if let Some(c) = cache.as_ref() {
-        if Arc::ptr_eq(&c.aggregates, aggregates)
-            && c.content_w == content_w
-            && c.scroll_x == scroll_x
-            && c.view_w == view_w
-        {
-            return c.boxes.clone();
-        }
+    if let Some(boxes) = cache
+        .as_ref()
+        .and_then(|c| c.matching(aggregates, content_w, scroll_x, view_w))
+    {
+        return boxes.clone();
     }
     let boxes = Rc::new(lay_out_flame(
         &aggregates.flame,
@@ -204,8 +222,9 @@ pub(crate) struct FlamePanel {
     flame_bounds: Option<Bounds<Pixels>>,
     /// The panel's memoized box layout; see [`FlameBoxCache`].
     flame_boxes: Option<FlameBoxCache>,
-    /// The box under the cursor, if any, drawn as a tooltip.
-    flame_hover: Option<FlameHover>,
+    /// The cursor position while it hovers the graph, anchoring the box tooltip;
+    /// `None` otherwise.
+    flame_hover: Option<Point<Pixels>>,
     drag: FlameDrag,
     last_mouse: Point<Pixels>,
     /// The cached child that paints the boxes and scroll bars. A parent
@@ -227,8 +246,8 @@ impl FlamePanel {
             this.reset_aggregate_derived();
             this.invalidate_canvas(cx);
         });
-        // The graph the boxes and hover address is still the shown one, so the
-        // cached scene keeps replaying; only the pill outside it needs the frame.
+        // The graph the boxes address is still the shown one, so the cached scene
+        // keeps replaying; only the pill outside it needs the frame.
         let build_start =
             cx.subscribe(&model, |_, _, _: &AggregateBuildStarted, cx| cx.notify());
         Self {
@@ -254,13 +273,9 @@ impl FlamePanel {
         cx.notify();
     }
 
-    /// Drops the state that identifies a node of the shown graph: the memoized
-    /// box layout and the hovered box, whose fields address the graph that
-    /// produced them. Both are re-acquired against whichever graph replaces it —
-    /// the boxes on the next paint, the hover on the next mouse move.
+    /// Drops the memoized box layout, which addresses the graph that produced it.
     fn reset_aggregate_derived(&mut self) {
         self.flame_boxes = None;
-        self.flame_hover = None;
     }
 
     /// Resets the panel to the fit-to-window view at the top of the tree: a zoom,
@@ -368,40 +383,45 @@ impl FlamePanel {
 
     /// The box under a window-space cursor: map the cursor to a depth row via the
     /// vertical scroll and to a viewport x relative to the content column, then
-    /// find the laid-out box at that depth whose x-range contains it. Searching the
-    /// same viewport-relative box vector the paint uses (widened and coalesced)
-    /// makes the hover match what is drawn.
-    fn box_at(&mut self, pos: Point<Pixels>, cx: &App) -> Option<FlameBox> {
+    /// find the laid-out box at that depth whose x-range contains it. `None` while
+    /// the memoized layout does not match the current view.
+    fn box_at(&self, pos: Point<Pixels>, cx: &App) -> Option<FlameBox> {
         let fl = self.layout(cx)?;
-        let aggregates = self.model.read(cx).aggregates()?;
-        let metrics = flame_metrics();
-        let x = f32::from(pos.x);
-        let y = f32::from(pos.y);
-        if x < fl.left || x >= fl.left + fl.width || y < fl.top || y >= fl.top + fl.height {
+        if !fl.contains(pos) {
             return None;
         }
-        let content_y = y - fl.top + self.flame_scroll(cx);
-        let depth = (content_y / metrics.row_height) as u32;
-        let content_w = fl.view.content_px(fl.width);
-        let scroll_x = fl.view.scroll_px(fl.width);
-        let vx = x - fl.left;
-        let boxes =
-            flame_boxes(&mut self.flame_boxes, &aggregates, content_w, scroll_x, fl.width, &metrics);
+        let aggregates = self.model.read(cx).aggregates()?;
+        let boxes = self.flame_boxes.as_ref()?.matching(
+            &aggregates,
+            fl.view.content_px(fl.width),
+            fl.view.scroll_px(fl.width),
+            fl.width,
+        )?;
+        let content_y = f32::from(pos.y) - fl.top + self.flame_scroll(cx);
+        let depth = (content_y / flame_metrics().row_height) as u32;
+        let vx = f32::from(pos.x) - fl.left;
         boxes
             .iter()
             .find(|b| b.depth == depth && vx >= b.x && vx < b.x + b.w)
             .copied()
     }
 
-    /// Updates the box hover to the box under `pos`, anchoring its tooltip there.
-    /// A move that touches no box costs no repaint.
+    /// Tracks the cursor for the box tooltip: the position is recorded across the
+    /// whole graph rect so the tooltip follows the cursor, while only a move that
+    /// draws or erases one repaints.
     fn update_hover(&mut self, pos: Point<Pixels>, cx: &mut Context<Self>) {
-        let hit = self.box_at(pos, cx);
-        let was_hovering = self.flame_hover.is_some();
-        self.flame_hover = hit.map(|boxed| FlameHover { boxed, at: pos });
-        if was_hovering || self.flame_hover.is_some() {
+        let drawn_before = self.hovered_box(cx).is_some();
+        self.flame_hover = self.layout(cx).filter(|fl| fl.contains(pos)).map(|_| pos);
+        if drawn_before || self.hovered_box(cx).is_some() {
             cx.notify();
         }
+    }
+
+    /// The box the tooltip names and the position it anchors at, when the hover
+    /// lands on one.
+    fn hovered_box(&self, cx: &App) -> Option<(Point<Pixels>, FlameBox)> {
+        let at = self.flame_hover?;
+        Some((at, self.box_at(at, cx)?))
     }
 
     /// Begins a drag at `pos`: the vertical or horizontal scroll thumb/track if the
@@ -522,20 +542,17 @@ impl Render for FlamePanel {
             canvas(
                 |_, _, _| {},
                 move |bounds, _, window, cx| {
-                    let (flame_hover, dragging) = {
+                    let (hovered, dragging) = {
                         let this = entity.read(cx);
-                        (
-                            this.flame_hover.clone(),
-                            !matches!(this.drag, FlameDrag::None),
-                        )
+                        (this.hovered_box(cx), !matches!(this.drag, FlameDrag::None))
                     };
-                    if let Some(h) = flame_hover {
+                    if let Some((at, boxed)) = hovered {
                         let graph = &aggregates.flame;
                         paint_flame_tooltip(
                             graph,
-                            &h.boxed,
+                            &boxed,
                             graph.root_total_us(),
-                            h.at,
+                            at,
                             bounds,
                             &palette,
                             window,
@@ -723,5 +740,33 @@ fn flame_paint(
         for bar in vbar.into_iter().chain(hbar) {
             bar.paint(palette.scroll_track, palette.scroll_thumb, window);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_content_rect_holds_its_left_and_top_edges() {
+        let fl = FlameLayout {
+            view: FlameView::FIT,
+            total_h: 600.0,
+            left: 40.0,
+            top: 30.0,
+            width: 200.0,
+            height: 100.0,
+        };
+        let at = |x, y| point(px(x), px(y));
+        // The left and top edges lie inside the rect.
+        assert!(fl.contains(at(40.0, 30.0)));
+        assert!(fl.contains(at(239.0, 129.0)));
+        // The right and bottom edges lie past it, so the reserved scroll-bar
+        // column and strip belong to the bars.
+        assert!(!fl.contains(at(240.0, 30.0)));
+        assert!(!fl.contains(at(40.0, 130.0)));
+        // Clear of the rect on either axis.
+        assert!(!fl.contains(at(10.0, 50.0)));
+        assert!(!fl.contains(at(100.0, 10.0)));
     }
 }

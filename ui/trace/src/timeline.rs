@@ -6,7 +6,7 @@ use crate::regions::{Regions, flame_total_height, max_lane_scroll};
 use crate::theme::Palette;
 use crate::{
     BottomTab, DEFAULT_GUTTER_WIDTH, DEFAULT_PANEL_HEIGHT, EDGE_MARGIN_PX, GROUP_BAND_HEIGHT,
-    GROUP_ICON, Hover, LINE_SCROLL_PX, MAX_PX_PER_US, METRICS, MIN_SLICE_PX, SLICE_TEXT_PAD,
+    GROUP_ICON, LINE_SCROLL_PX, MAX_PX_PER_US, METRICS, MIN_SLICE_PX, SLICE_TEXT_PAD,
     SelectAllTracks, Source, TraceView, ZOOM_PER_NOTCH, drawn_scroll, paint_gridlines,
     paint_gutter, paint_markers, paint_ruler, paint_slice, paint_tooltip, ruler_ticks,
     scroll_request, scrollbar_geom, thumb_offset,
@@ -91,8 +91,9 @@ pub(crate) struct TimelinePanel {
     fitted: bool,
     /// The timeline's memoized culled draw list; see [`SliceDrawCache`].
     slice_draw: Option<SliceDrawCache>,
-    /// The slice under the cursor, if any, drawn as a tooltip.
-    hover: Option<Hover>,
+    /// The cursor position while it hovers the flame lanes, anchoring the slice
+    /// tooltip; `None` otherwise.
+    hover: Option<Point<Pixels>>,
     /// The cursor position while it hovers the time-content column and no drag is
     /// in progress, drawn as a crosshair; `None` otherwise.
     crosshair: Option<Point<Pixels>>,
@@ -260,15 +261,13 @@ impl TimelinePanel {
         let (tab, _, _) = self.shell_layout(cx);
         let x = f32::from(pos.x);
         let y = f32::from(pos.y);
-        if x < regions.content_left || x >= regions.time_right {
-            return false;
-        }
-        let in_flame = y >= regions.flame_top && y < regions.flame_bottom;
         let in_counters = tab == BottomTab::Counters
             && regions.has_graph
+            && x >= regions.content_left
+            && x < regions.time_right
             && y >= regions.panel_top
             && y < regions.panel_bottom;
-        in_flame || in_counters
+        regions.in_flame(pos) || in_counters
     }
 
     /// The slice under a window-space cursor: the box the last paint drew there,
@@ -277,16 +276,11 @@ impl TimelinePanel {
     /// match wins. `None` until the first paint has culled a draw list.
     fn slice_at(&self, pos: Point<Pixels>, cx: &App) -> Option<(usize, usize)> {
         let regions = self.regions(cx);
-        let x = f32::from(pos.x);
-        let y = f32::from(pos.y);
-        if x < regions.content_left
-            || x >= regions.time_right
-            || y < regions.flame_top
-            || y >= regions.flame_bottom
-        {
+        if !regions.in_flame(pos) {
             return None;
         }
-        let (hit_x, hit_y) = (x - regions.content_left, y - regions.flame_top);
+        let hit_x = f32::from(pos.x) - regions.content_left;
+        let hit_y = f32::from(pos.y) - regions.flame_top;
         self.slice_draw
             .as_ref()?
             .slices
@@ -448,9 +442,9 @@ impl TimelinePanel {
         self.invalidate_canvas(cx);
     }
 
-    /// Tracks the slice under the cursor and the crosshair position while not
-    /// dragging. Only the overlay reads these, so a change replays the cached
-    /// canvas via a plain notify.
+    /// Tracks the cursor for the tooltip and the crosshair while not dragging.
+    /// Only the overlay reads these, so a change replays the cached canvas via a
+    /// plain notify.
     fn on_mouse_move(&mut self, e: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
         if !matches!(self.drag, TimelineDrag::None) {
             if self.crosshair.take().is_some() {
@@ -461,9 +455,8 @@ impl TimelinePanel {
         let in_content = self.in_content(e.position, cx);
         let was_crosshair = self.crosshair.is_some();
         self.crosshair = in_content.then_some(e.position);
-        let hit = self.slice_at(e.position, cx);
         let was_hovering = self.hover.is_some();
-        self.hover = hit.map(|(track, slice)| Hover { track, slice, at: e.position });
+        self.hover = self.regions(cx).in_flame(e.position).then_some(e.position);
         if in_content || was_crosshair || was_hovering {
             cx.notify();
         }
@@ -844,17 +837,18 @@ fn overlay_paint(
 ) -> impl FnOnce(Bounds<Pixels>, (), &mut Window, &mut App) {
     move |bounds, _, window, cx| {
         let n_counters = profile.counters().len();
-        let (tv, tab, panel_height, gutter_width, crosshair, hover, dragging) = {
+        let (tv, tab, panel_height, gutter_width, crosshair, hovered, dragging) = {
             let panel = parent.read(cx);
             let tv = panel.view;
             let (tab, panel_height, gutter_width) = panel.shell_layout(cx);
+            let hovered = panel.hover.and_then(|at| Some((at, panel.slice_at(at, cx)?)));
             (
                 tv,
                 tab,
                 panel_height,
                 gutter_width,
                 panel.crosshair,
-                panel.hover,
+                hovered,
                 !matches!(panel.drag, TimelineDrag::None),
             )
         };
@@ -866,11 +860,11 @@ fn overlay_paint(
                 paint_crosshair(&profile, tv, regions, at, show_counters, &palette, window, cx);
             }
         }
-        if let Some(h) = hover {
-            let track = &profile.threads()[h.track];
-            let slice = profile.slices(track)[h.slice];
-            let detail = profile.details(track)[h.slice];
-            paint_tooltip(&profile, &slice, &detail, h.at, bounds, &palette, window, cx);
+        if let Some((at, (track_ix, slice_ix))) = hovered {
+            let track = &profile.threads()[track_ix];
+            let slice = profile.slices(track)[slice_ix];
+            let detail = profile.details(track)[slice_ix];
+            paint_tooltip(&profile, &slice, &detail, at, bounds, &palette, window, cx);
         }
         if dragging {
             track_drag(window, &parent, timeline_on_drag, timeline_end_drag);

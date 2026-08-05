@@ -191,15 +191,6 @@ enum Drag {
     Gutter,
 }
 
-/// The slice under the cursor and the cursor position, so a tooltip can be drawn
-/// for it there.
-#[derive(Clone, Copy)]
-struct Hover {
-    track: usize,
-    slice: usize,
-    at: Point<Pixels>,
-}
-
 /// Height of a group header band and of a group's "show more" row.
 const GROUP_BAND_HEIGHT: f32 = 18.0;
 /// Side of the show-all icon at a group band's gutter edge.
@@ -1487,6 +1478,33 @@ mod tests {
         assert_eq!(clamp_gutter_width(900.0, 1000.0), 500.0);
         // In a tiny window the floor wins over the half-window ceiling.
         assert_eq!(clamp_gutter_width(120.0, 100.0), MIN_GUTTER);
+    }
+
+    #[test]
+    fn the_flame_region_holds_its_left_and_top_edges() {
+        let regions = Regions {
+            content_left: 120.0,
+            content_right: 520.0,
+            time_right: 500.0,
+            time_w: 380.0,
+            flame_top: 24.0,
+            flame_bottom: 300.0,
+            tab_top: 300.0,
+            panel_top: 320.0,
+            panel_bottom: 400.0,
+            has_graph: true,
+        };
+        let at = |x, y| point(px(x), px(y));
+        // The gutter edge and the ruler's bottom lie inside the region.
+        assert!(regions.in_flame(at(120.0, 24.0)));
+        assert!(regions.in_flame(at(499.0, 299.0)));
+        // The reserved vertical-bar column and the row below the lanes lie past
+        // it.
+        assert!(!regions.in_flame(at(500.0, 24.0)));
+        assert!(!regions.in_flame(at(120.0, 300.0)));
+        // Clear of the region on either axis: in the gutter, and in the ruler.
+        assert!(!regions.in_flame(at(60.0, 100.0)));
+        assert!(!regions.in_flame(at(200.0, 10.0)));
     }
 
     #[test]

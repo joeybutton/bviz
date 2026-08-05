@@ -3,7 +3,7 @@ use crate::{
     STATS_HEADER_HEIGHT, STATS_ROW_HEIGHT, TAB_BAR_HEIGHT,
 };
 use bviz_trace_layout::LaneLayout;
-use gpui::{Bounds, Pixels};
+use gpui::{Bounds, Pixels, Point};
 
 /// The window content split into the flame chart region on top, the tab bar,
 /// and the bottom panel, plus the gutter/time-axis columns shared across them.
@@ -87,6 +87,16 @@ impl Regions {
             panel_bottom,
             has_graph: n_counters > 0,
         }
+    }
+
+    /// Whether a window-space `pos` lies over the flame lanes' time content.
+    pub(crate) fn in_flame(&self, pos: Point<Pixels>) -> bool {
+        let x = f32::from(pos.x);
+        let y = f32::from(pos.y);
+        x >= self.content_left
+            && x < self.time_right
+            && y >= self.flame_top
+            && y < self.flame_bottom
     }
 
     /// Height the flame lanes scroll within.
