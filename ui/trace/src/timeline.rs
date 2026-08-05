@@ -459,11 +459,12 @@ impl TimelinePanel {
             return;
         }
         let in_content = self.in_content(e.position, cx);
+        let was_crosshair = self.crosshair.is_some();
         self.crosshair = in_content.then_some(e.position);
         let hit = self.slice_at(e.position, cx);
         let was_hovering = self.hover.is_some();
         self.hover = hit.map(|(track, slice)| Hover { track, slice, at: e.position });
-        if in_content || was_hovering {
+        if in_content || was_crosshair || was_hovering {
             cx.notify();
         }
     }
