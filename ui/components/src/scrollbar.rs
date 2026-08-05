@@ -15,6 +15,14 @@ pub enum Axis {
 }
 
 impl Axis {
+    /// The axis at right angles to this one.
+    pub fn cross(self) -> Axis {
+        match self {
+            Axis::Vertical => Axis::Horizontal,
+            Axis::Horizontal => Axis::Vertical,
+        }
+    }
+
     /// Project a track rect onto this axis: its leading edge and length along the
     /// long axis, and its thickness across the short axis.
     fn project(self, track: Bounds<Pixels>) -> (f32, f32, f32) {

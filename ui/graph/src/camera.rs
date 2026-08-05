@@ -2,6 +2,7 @@ use crate::emphasis::Emphasis;
 use crate::{FIT_MARGIN, MARGIN, MAX_ZOOM, RECENTER_PAD, ZOOM_PER_NOTCH};
 use bviz_graph_layout::{Id, LaidOut};
 use gpui::{Bounds, Pixels, Point, Size, point, px};
+use std::ops::RangeInclusive;
 use std::time::Instant;
 
 /// A layout-pixel rectangle by origin and size.
@@ -118,25 +119,31 @@ pub(crate) fn fit_zoom(viewport: Size<Pixels>, content: (f32, f32)) -> f32 {
     ((vw / gw).min(vh / gh) * FIT_MARGIN).min(1.0)
 }
 
-/// Clamp the pan so the graph can never be moved out of view, the panning
-/// counterpart to the fit-zoom floor that bounds zoom-out. Per axis the content
-/// (its full extent times `zoom`) reaches the flush position — fully inside the
-/// viewport when smaller, fully covering it when larger — and may be carried one
-/// clearance past it, which leaves `FIT_MARGIN` of the shorter of the viewport
-/// and the extent on screen. That share is what a fitted graph itself spans, so
-/// the room a fit or a settle leaves around the content is a pan position in its
-/// own right; and since the clearance is measured against the extent too, a graph
-/// smaller than the viewport keeps that share of itself visible however far it is
-/// pushed.
+/// The pan positions one axis admits, from the viewport length `vp` and the
+/// content's `extent` along it, both in window px. The content reaches the flush
+/// position — fully inside the viewport when smaller than it, fully covering it
+/// when larger — and may be carried one clearance past either end. The clearance
+/// keeps `FIT_MARGIN` of the shorter of the viewport and the extent on screen:
+/// the share a fitted graph itself spans, so a fit or a settle is a pan position
+/// in its own right; measured against the extent, so a graph smaller than the
+/// viewport keeps that share of itself visible however far it is pushed, and a
+/// cursor-anchored [`zoom_step`] keeps play to hold its anchor where the flush
+/// interval collapses to a point.
 ///
-/// Measuring against the extent is also what leaves a cursor-anchored zoom
-/// ([`zoom_step`]) room to hold its anchor: at the extent where the content
-/// matches the viewport the flush interval collapses to a point, and the
-/// clearance is the whole of the play the bound has.
+/// This is the whole of where the view can pan: a gesture is bounded by it, and a
+/// scroll bar's thumb travels over it.
+pub(crate) fn pan_range(vp: f32, extent: f32) -> RangeInclusive<f32> {
+    let clearance = (1.0 - FIT_MARGIN) * vp.min(extent);
+    ((vp - extent).min(0.0) - clearance)..=((vp - extent).max(0.0) + clearance)
+}
+
+/// Clamps `pan` into the range each axis admits, so the graph can never be moved
+/// out of view — the panning counterpart to the fit-zoom floor that bounds
+/// zoom-out.
 pub(crate) fn clamp_pan(pan: (f32, f32), zoom: f32, viewport: Size<Pixels>, content: (f32, f32)) -> (f32, f32) {
     let axis = |p: f32, vp: f32, extent: f32| {
-        let clearance = (1.0 - FIT_MARGIN) * vp.min(extent);
-        p.clamp((vp - extent).min(0.0) - clearance, (vp - extent).max(0.0) + clearance)
+        let range = pan_range(vp, extent);
+        p.clamp(*range.start(), *range.end())
     };
     (
         axis(pan.0, f32::from(viewport.width), content.0 * zoom),
