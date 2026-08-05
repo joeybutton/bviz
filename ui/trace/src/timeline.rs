@@ -442,6 +442,16 @@ impl TimelinePanel {
         self.invalidate_canvas(cx);
     }
 
+    /// Tracks the cursor for the slice tooltip. A move outside the lanes that
+    /// leaves nothing to clear costs no repaint.
+    fn update_hover(&mut self, pos: Point<Pixels>, cx: &mut Context<Self>) {
+        let was_hovering = self.hover.is_some();
+        self.hover = self.regions(cx).in_flame(pos).then_some(pos);
+        if was_hovering || self.hover.is_some() {
+            cx.notify();
+        }
+    }
+
     /// Tracks the cursor for the tooltip and the crosshair while not dragging.
     /// Only the overlay reads these, so a change replays the cached canvas via a
     /// plain notify.
@@ -455,9 +465,8 @@ impl TimelinePanel {
         let in_content = self.in_content(e.position, cx);
         let was_crosshair = self.crosshair.is_some();
         self.crosshair = in_content.then_some(e.position);
-        let was_hovering = self.hover.is_some();
-        self.hover = self.regions(cx).in_flame(e.position).then_some(e.position);
-        if in_content || was_crosshair || was_hovering {
+        self.update_hover(e.position, cx);
+        if in_content || was_crosshair {
             cx.notify();
         }
     }
@@ -578,6 +587,7 @@ fn timeline_on_drag(
         TimelineDrag::HThumb(grab) => panel.pan_thumb_to(event.position, grab, cx),
         TimelineDrag::None => {}
     }
+    panel.update_hover(event.position, cx);
     panel.invalidate_canvas(cx);
 }
 

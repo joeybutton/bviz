@@ -633,6 +633,7 @@ fn flame_on_drag(panel: &mut FlamePanel, event: &MouseMoveEvent, cx: &mut Contex
         FlameDrag::HThumb(grab) => panel.hthumb_to(event.position, grab, cx),
         FlameDrag::None => {}
     }
+    panel.update_hover(event.position, cx);
     panel.invalidate_canvas(cx);
 }
 
