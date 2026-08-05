@@ -355,6 +355,7 @@ impl TimelinePanel {
     /// Begins a timeline drag at `pos`: the lane vertical or time horizontal
     /// scroll thumb/track if the press hit one, otherwise a pan.
     fn press(&mut self, pos: Point<Pixels>, cx: &App) {
+        self.crosshair = None;
         let (vbar, hbar) = self.scroll_bars(cx);
         if let Some(bar) = vbar {
             if bar.track_hit(pos) {
@@ -457,9 +458,6 @@ impl TimelinePanel {
     /// plain notify.
     fn on_mouse_move(&mut self, e: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
         if !matches!(self.drag, TimelineDrag::None) {
-            if self.crosshair.take().is_some() {
-                cx.notify();
-            }
             return;
         }
         let in_content = self.in_content(e.position, cx);
