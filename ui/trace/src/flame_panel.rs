@@ -7,7 +7,7 @@ use crate::{
     paint_tooltip_box, scroll_request, thumb_offset,
 };
 use bviz_trace_layout::{
-    FlameBox, FlameGraph, FlameMetrics, FlamePlacement, FlameView, ScopeAggregate, flame_height,
+    FlameBox, FlameMetrics, FlamePlacement, FlameView, ScopeAggregate, flame_height,
     lay_out_flame,
 };
 use bviz_ui_components::{Axis, DEFAULT_MIN_THUMB, LabelBoxStyle, Scrollbar, paint_labeled_box, spinner, track_drag};
@@ -37,10 +37,24 @@ pub(crate) struct FlameBoxCache {
 }
 
 impl FlameBoxCache {
-    /// The memoized boxes when every key matches, `None` otherwise. Every change
-    /// to the panel's view, scroll, or bounds rebuilds the canvas scene, whose
-    /// paint re-memoizes ahead of the overlay that reads this, so a hit test
-    /// taken during paint names a box of the layout on screen.
+    /// Lays the boxes out from `aggregates`'s own graph, so a hit's box and the
+    /// graph it names that box through are the same aggregate's.
+    fn new(
+        aggregates: Arc<ScopeAggregate>,
+        content_w: f64,
+        scroll_x: f64,
+        view_w: f32,
+        metrics: &FlameMetrics,
+    ) -> Self {
+        let boxes = Rc::new(lay_out_flame(
+            &aggregates.flame,
+            content_w,
+            FlamePlacement { scroll_x, view_w, metrics, min_px: MIN_SLICE_PX },
+        ));
+        Self { aggregates, content_w, scroll_x, view_w, boxes }
+    }
+
+    /// The memoized boxes when every key matches, `None` otherwise.
     fn matching(
         &self,
         aggregates: &Arc<ScopeAggregate>,
@@ -54,6 +68,45 @@ impl FlameBoxCache {
             && self.view_w == view_w)
             .then_some(&self.boxes)
     }
+
+    /// The box under a window-space `pos`, which maps to a depth row via the
+    /// vertical scroll `scroll_y` and to an x relative to `fl`'s content column.
+    /// `None` when the cursor lies off that rect, the row carries no box there, or
+    /// a key no longer matches. Every change to the panel's view, scroll, or
+    /// bounds rebuilds the canvas scene, whose paint re-memoizes ahead of the
+    /// overlay that reads this, so a hit test taken during paint names a box of
+    /// the layout on screen.
+    fn hit(
+        &self,
+        aggregates: &Arc<ScopeAggregate>,
+        fl: FlameLayout,
+        scroll_y: f32,
+        pos: Point<Pixels>,
+    ) -> Option<HoveredBox> {
+        if !fl.contains(pos) {
+            return None;
+        }
+        let boxes = self.matching(
+            aggregates,
+            fl.view.content_px(fl.width),
+            fl.view.scroll_px(fl.width),
+            fl.width,
+        )?;
+        let content_y = f32::from(pos.y) - fl.top + scroll_y;
+        let depth = (content_y / flame_metrics().row_height) as u32;
+        let vx = f32::from(pos.x) - fl.left;
+        let boxed = *boxes
+            .iter()
+            .find(|b| b.depth == depth && vx >= b.x && vx < b.x + b.w)?;
+        Some(HoveredBox { aggregates: self.aggregates.clone(), boxed })
+    }
+}
+
+/// A hovered flame box paired with the aggregate its name handle resolves
+/// through.
+struct HoveredBox {
+    aggregates: Arc<ScopeAggregate>,
+    boxed: FlameBox,
 }
 
 /// The flame graph's current geometry, shared by hit-testing and the
@@ -135,9 +188,7 @@ fn flame_graph_rect(bounds: Bounds<Pixels>, flame_total: f32, flame_view: FlameV
 }
 
 /// Lays out the graph's visible window, reusing the [`FlameBoxCache`] in `cache`
-/// unless a key changed. The retained `aggregates` keeps the graph alive for the
-/// boxes' name handles and keys the cache by identity; the layout is
-/// viewport-relative, so panning (a change in `scroll_x`) is a key too.
+/// unless a key changed.
 fn flame_boxes(
     cache: &mut Option<FlameBoxCache>,
     aggregates: &Arc<ScopeAggregate>,
@@ -152,35 +203,25 @@ fn flame_boxes(
     {
         return boxes.clone();
     }
-    let boxes = Rc::new(lay_out_flame(
-        &aggregates.flame,
-        content_w,
-        FlamePlacement { scroll_x, view_w, metrics, min_px: MIN_SLICE_PX },
-    ));
-    *cache = Some(FlameBoxCache {
-        aggregates: aggregates.clone(),
-        content_w,
-        scroll_x,
-        view_w,
-        boxes: boxes.clone(),
-    });
-    boxes
+    cache
+        .insert(FlameBoxCache::new(aggregates.clone(), content_w, scroll_x, view_w, metrics))
+        .boxes
+        .clone()
 }
 
 /// Paints a tooltip near `at` with the flame node's name and, below it, its total
 /// and self time, the number of spans whose time it accounts for, and its share
 /// of the view's aggregated total.
-#[allow(clippy::too_many_arguments)]
 fn paint_flame_tooltip(
-    graph: &FlameGraph,
-    boxed: &FlameBox,
-    root_total_us: i64,
+    hovered: &HoveredBox,
     at: Point<Pixels>,
     bounds: Bounds<Pixels>,
     palette: &Palette,
     window: &mut Window,
     cx: &mut App,
 ) {
+    let (graph, boxed) = (&hovered.aggregates.flame, &hovered.boxed);
+    let root_total_us = graph.root_total_us();
     let pct = if root_total_us > 0 {
         100.0 * boxed.total_us as f64 / root_total_us as f64
     } else {
@@ -381,29 +422,15 @@ impl FlamePanel {
         self.scroll_to(self.flame_scroll(cx) - dy, cx);
     }
 
-    /// The box under a window-space cursor: map the cursor to a depth row via the
-    /// vertical scroll and to a viewport x relative to the content column, then
-    /// find the laid-out box at that depth whose x-range contains it. `None` while
-    /// the memoized layout does not match the current view.
-    fn box_at(&self, pos: Point<Pixels>, cx: &App) -> Option<FlameBox> {
+    /// The box under a window-space cursor, resolved against the memoized layout;
+    /// see [`FlameBoxCache::hit`]. `None` until the graph exists and the panel
+    /// has painted once.
+    fn box_at(&self, pos: Point<Pixels>, cx: &App) -> Option<HoveredBox> {
         let fl = self.layout(cx)?;
-        if !fl.contains(pos) {
-            return None;
-        }
         let aggregates = self.model.read(cx).aggregates()?;
-        let boxes = self.flame_boxes.as_ref()?.matching(
-            &aggregates,
-            fl.view.content_px(fl.width),
-            fl.view.scroll_px(fl.width),
-            fl.width,
-        )?;
-        let content_y = f32::from(pos.y) - fl.top + self.flame_scroll(cx);
-        let depth = (content_y / flame_metrics().row_height) as u32;
-        let vx = f32::from(pos.x) - fl.left;
-        boxes
-            .iter()
-            .find(|b| b.depth == depth && vx >= b.x && vx < b.x + b.w)
-            .copied()
+        self.flame_boxes
+            .as_ref()?
+            .hit(&aggregates, fl, self.flame_scroll(cx), pos)
     }
 
     /// Tracks the cursor for the box tooltip: the position is recorded across the
@@ -417,9 +444,9 @@ impl FlamePanel {
         }
     }
 
-    /// The box the tooltip names and the position it anchors at, when the hover
-    /// lands on one.
-    fn hovered_box(&self, cx: &App) -> Option<(Point<Pixels>, FlameBox)> {
+    /// The hovered box, with the graph the tooltip names it through, and the
+    /// position the tooltip anchors at, when the hover lands on one.
+    fn hovered_box(&self, cx: &App) -> Option<(Point<Pixels>, HoveredBox)> {
         let at = self.flame_hover?;
         Some((at, self.box_at(at, cx)?))
     }
@@ -525,9 +552,9 @@ impl FlamePanel {
 
 impl Render for FlamePanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let Some(aggregates) = self.model.read(cx).aggregates() else {
+        if self.model.read(cx).aggregates().is_none() {
             return div().into_any_element();
-        };
+        }
         let palette = Palette::from_colors(&bviz_ui_theme::colors(window));
         let entity = cx.entity();
         // Embedding the canvas cached lets a hover reuse its last scene: a parent
@@ -537,38 +564,25 @@ impl Render for FlamePanel {
         // The tooltip and drag paint over the cached boxes, sharing the canvas's
         // full bounds so the tooltip's viewport clamping is unchanged. A hover
         // repaints only this overlay.
-        let overlay = {
-            let aggregates = aggregates.clone();
-            canvas(
-                |_, _, _| {},
-                move |bounds, _, window, cx| {
-                    let (hovered, dragging) = {
-                        let this = entity.read(cx);
-                        (this.hovered_box(cx), !matches!(this.drag, FlameDrag::None))
-                    };
-                    if let Some((at, boxed)) = hovered {
-                        let graph = &aggregates.flame;
-                        paint_flame_tooltip(
-                            graph,
-                            &boxed,
-                            graph.root_total_us(),
-                            at,
-                            bounds,
-                            &palette,
-                            window,
-                            cx,
-                        );
-                    }
-                    if dragging {
-                        track_drag(window, &entity, flame_on_drag, flame_end_drag);
-                    }
-                },
-            )
-            .absolute()
-            .left_0()
-            .top_0()
-            .size_full()
-        };
+        let overlay = canvas(
+            |_, _, _| {},
+            move |bounds, _, window, cx| {
+                let (hovered, dragging) = {
+                    let this = entity.read(cx);
+                    (this.hovered_box(cx), !matches!(this.drag, FlameDrag::None))
+                };
+                if let Some((at, drawn)) = hovered {
+                    paint_flame_tooltip(&drawn, at, bounds, &palette, window, cx);
+                }
+                if dragging {
+                    track_drag(window, &entity, flame_on_drag, flame_end_drag);
+                }
+            },
+        )
+        .absolute()
+        .left_0()
+        .top_0()
+        .size_full();
         // While a rebuild for a new selection runs off the thread, the prior graph
         // stays shown and interactive; a spinner pill signals the update, since
         // aggregating a large selection can take a moment.
@@ -747,6 +761,112 @@ fn flame_paint(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bviz_trace_layout::{FlameDirection, FlameLabels, FlameMode};
+    use bviz_trace_profile::Profile;
+
+    /// Width of the content column the fixture layouts are placed for, wide
+    /// enough that every fixture frame clears [`MIN_SLICE_PX`].
+    const VIEW_W: f32 = 800.0;
+
+    /// A profile of one execution lane whose spans nest two deep, so its graph
+    /// has an interior frame with two siblings under it.
+    fn fixture() -> Arc<Profile> {
+        let mut events = vec![
+            r#"{"name":"thread_name","ph":"M","tid":1,"args":{"name":"skyframe-evaluator-execution-1"}}"#
+                .to_string(),
+        ];
+        for (name, ts, dur) in [("build", 0, 1000), ("compile", 0, 400), ("link", 400, 600)] {
+            events.push(format!(
+                r#"{{"cat":"general information","name":"{name}","ph":"X","ts":{ts},"dur":{dur},"tid":1}}"#,
+            ));
+        }
+        let json = format!(r#"{{"traceEvents":[{}]}}"#, events.join(","));
+        Arc::new(Profile::from_bytes(json.as_bytes()).expect("parse test profile"))
+    }
+
+    /// The aggregate over every track of `profile`, each frame named by its own
+    /// span's name so a box's text identifies which span it stands for.
+    fn aggregate(profile: &Arc<Profile>) -> Arc<ScopeAggregate> {
+        Arc::new(ScopeAggregate::build_for_tracks(
+            profile,
+            FlameMode { direction: FlameDirection::TopDown, labels: FlameLabels::Name },
+            |_| true,
+        ))
+    }
+
+    /// The layout of `aggregates` fitted to a [`VIEW_W`]-wide column, memoized as
+    /// the panel would, with the geometry it was placed for. The rect runs one
+    /// row past the graph, so a probe on an empty row still lands inside it.
+    fn laid_out(aggregates: &Arc<ScopeAggregate>) -> (FlameBoxCache, FlameLayout) {
+        let metrics = flame_metrics();
+        let total_h = flame_height(&aggregates.flame, &metrics);
+        let fl = FlameLayout {
+            view: FlameView::FIT,
+            total_h,
+            left: 40.0,
+            top: 30.0,
+            width: VIEW_W,
+            height: total_h + metrics.row_height,
+        };
+        let cache = FlameBoxCache::new(
+            aggregates.clone(),
+            fl.view.content_px(fl.width),
+            fl.view.scroll_px(fl.width),
+            fl.width,
+            &metrics,
+        );
+        (cache, fl)
+    }
+
+    /// Where the unscrolled panel draws `b`'s center, in window space.
+    fn center_of(fl: FlameLayout, b: &FlameBox) -> Point<Pixels> {
+        point(px(fl.left + b.x + b.w / 2.0), px(fl.top + b.y + b.h / 2.0))
+    }
+
+    #[test]
+    fn a_hit_names_the_box_drawn_there() {
+        let profile = fixture();
+        let aggregates = aggregate(&profile);
+        let (cache, fl) = laid_out(&aggregates);
+        let names: Vec<&str> =
+            cache.boxes.iter().map(|b| aggregates.flame.str(b.name)).collect();
+        assert!(names.contains(&"compile") && names.contains(&"link"), "{names:?}");
+        for b in cache.boxes.iter() {
+            let hovered = cache
+                .hit(&aggregates, fl, 0.0, center_of(fl, b))
+                .expect("the box at its own center");
+            assert_eq!(&hovered.boxed, b);
+        }
+    }
+
+    #[test]
+    fn a_hit_off_the_boxes_names_nothing() {
+        let profile = fixture();
+        let aggregates = aggregate(&profile);
+        let (cache, fl) = laid_out(&aggregates);
+        let hit = |x, y| cache.hit(&aggregates, fl, 0.0, point(px(x), px(y))).is_some();
+        let mid_x = fl.left + fl.width / 2.0;
+        // The row past the deepest one the graph reaches carries no box.
+        assert!(!hit(mid_x, fl.top + fl.total_h + flame_metrics().row_height / 2.0));
+        // Clear of the content rect on either axis.
+        assert!(!hit(fl.left - 1.0, fl.top + 1.0));
+        assert!(!hit(mid_x, fl.top - 1.0));
+    }
+
+    #[test]
+    fn a_layout_keyed_to_another_view_names_nothing() {
+        let profile = fixture();
+        let aggregates = aggregate(&profile);
+        let (cache, fl) = laid_out(&aggregates);
+        let at = center_of(fl, cache.boxes.first().expect("the root frame"));
+        assert!(cache.hit(&aggregates, fl, 0.0, at).is_some());
+        // A rebuild yields a distinct allocation, so the boxes address a graph
+        // that is no longer the one on screen.
+        assert!(cache.hit(&aggregate(&profile), fl, 0.0, at).is_none());
+        // A narrower content column is one the boxes were not placed for.
+        let resized = FlameLayout { width: fl.width - 1.0, ..fl };
+        assert!(cache.hit(&aggregates, resized, 0.0, at).is_none());
+    }
 
     #[test]
     fn the_content_rect_holds_its_left_and_top_edges() {
