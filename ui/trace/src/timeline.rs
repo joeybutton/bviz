@@ -12,7 +12,7 @@ use crate::{
     scroll_request, scrollbar_geom, thumb_offset,
 };
 use bviz_trace_layout::{Cull, LaneLayout, TimeView, Viewport, VisibleSlice, visible_slices};
-use bviz_trace_profile::Profile;
+use bviz_trace_profile::{Profile, Slice, SliceDetail};
 use bviz_ui_components::{Scrollbar, track_drag};
 use gpui::{
     AnyView, App, Bounds, ContentMask, Context, Div, Entity, FocusHandle, IntoElement, KeyBinding,
@@ -35,6 +35,66 @@ pub(crate) struct SliceDrawCache {
     view: TimeView,
     viewport: Viewport,
     slices: Rc<Vec<VisibleSlice>>,
+}
+
+/// A hovered slice paired with the profile its string handles resolve through.
+/// Only [`SliceDrawCache::hit`] builds one, from the profile the slice was
+/// culled from, so no caller can pair it with a document it never came from.
+pub(crate) struct HoveredSlice {
+    profile: Arc<Profile>,
+    slice: Slice,
+    detail: SliceDetail,
+}
+
+impl HoveredSlice {
+    pub(crate) fn profile(&self) -> &Profile {
+        &self.profile
+    }
+
+    pub(crate) fn slice(&self) -> &Slice {
+        &self.slice
+    }
+
+    pub(crate) fn detail(&self) -> &SliceDetail {
+        &self.detail
+    }
+}
+
+impl SliceDrawCache {
+    /// Every [`VisibleSlice`] the cull emits addresses `profile`'s own threads
+    /// and their slice spans, and the cache retains `profile`, so a hit indexes
+    /// both without checking.
+    fn new(
+        profile: Arc<Profile>,
+        lanes: Rc<LaneLayout>,
+        view: TimeView,
+        viewport: Viewport,
+    ) -> Self {
+        let slices = Rc::new(visible_slices(
+            &profile,
+            &lanes,
+            Cull { view: &view, viewport: &viewport, metrics: &METRICS, min_px: MIN_SLICE_PX },
+        ));
+        Self { profile, lanes, view, viewport, slices }
+    }
+
+    /// The slice drawn at flame-content-relative `(x, y)`, which the caller has
+    /// already gated to the flame region — a point outside it still matches any
+    /// box it falls in. Boxes may overlap, and a later one is drawn over an
+    /// earlier one, so the last match wins.
+    fn hit(&self, x: f32, y: f32) -> Option<HoveredSlice> {
+        let vs = self
+            .slices
+            .iter()
+            .rev()
+            .find(|v| x >= v.x && x < v.x + v.w && y >= v.y && y < v.y + v.h)?;
+        let track = &self.profile.threads()[vs.track];
+        Some(HoveredSlice {
+            profile: self.profile.clone(),
+            slice: self.profile.slices(track)[vs.slice],
+            detail: self.profile.details(track)[vs.slice],
+        })
+    }
 }
 
 /// The flame chart as it currently stands, read against the lane scroll's
@@ -271,25 +331,18 @@ impl TimelinePanel {
     }
 
     /// The slice under a window-space cursor: the box the last paint drew there,
-    /// found in the memoized draw list, so a hover names what is on screen. Boxes
-    /// may overlap, and a later one is drawn over an earlier one, so the last
-    /// match wins. `None` until the first paint has culled a draw list.
-    fn slice_at(&self, pos: Point<Pixels>, cx: &App) -> Option<(usize, usize)> {
+    /// found in the memoized draw list, so a hover names what is on screen, and
+    /// the document it was drawn from. `None` until the first paint has culled a
+    /// draw list.
+    fn slice_at(&self, pos: Point<Pixels>, cx: &App) -> Option<HoveredSlice> {
         let regions = self.regions(cx);
         if !regions.in_flame(pos) {
             return None;
         }
-        let hit_x = f32::from(pos.x) - regions.content_left;
-        let hit_y = f32::from(pos.y) - regions.flame_top;
-        self.slice_draw
-            .as_ref()?
-            .slices
-            .iter()
-            .rev()
-            .find(|v| {
-                hit_x >= v.x && hit_x < v.x + v.w && hit_y >= v.y && hit_y < v.y + v.h
-            })
-            .map(|v| (v.track, v.slice))
+        self.slice_draw.as_ref()?.hit(
+            f32::from(pos.x) - regions.content_left,
+            f32::from(pos.y) - regions.flame_top,
+        )
     }
 
     /// The group header band or show-more row at `pos`, if the press lands on one
@@ -692,19 +745,10 @@ fn cached_slices(
             return c.slices.clone();
         }
     }
-    let slices = Rc::new(visible_slices(
-        profile,
-        lanes,
-        Cull { view: &view, viewport: &viewport, metrics: &METRICS, min_px: MIN_SLICE_PX },
-    ));
-    *cache = Some(SliceDrawCache {
-        profile: profile.clone(),
-        lanes: lanes.clone(),
-        view,
-        viewport,
-        slices: slices.clone(),
-    });
-    slices
+    cache
+        .insert(SliceDrawCache::new(profile.clone(), lanes.clone(), view, viewport))
+        .slices
+        .clone()
 }
 
 /// The cached canvas's paint closure: the flame timeline — gridlines, lanes and
@@ -868,14 +912,114 @@ fn overlay_paint(
                 paint_crosshair(&profile, tv, regions, at, show_counters, &palette, window, cx);
             }
         }
-        if let Some((at, (track_ix, slice_ix))) = hovered {
-            let track = &profile.threads()[track_ix];
-            let slice = profile.slices(track)[slice_ix];
-            let detail = profile.details(track)[slice_ix];
-            paint_tooltip(&profile, &slice, &detail, at, bounds, &palette, window, cx);
+        if let Some((at, drawn)) = hovered {
+            paint_tooltip(&drawn, at, bounds, &palette, window, cx);
         }
         if dragging {
             track_drag(window, &parent, timeline_on_drag, timeline_end_drag);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bviz_trace_layout::lay_out_lanes;
+
+    const TEST_TIDS: [i64; 2] = [1, 2];
+    const TEST_VIEW: TimeView = TimeView { start_us: 0.0, px_per_us: 0.1 };
+    const TEST_VIEWPORT: Viewport = Viewport { width: 1000.0, height: 500.0, scroll_y: 0.0 };
+
+    /// One thread's name metadata followed by its `spans`, each `(start_us,
+    /// dur_us)`, as `X` events named `t{tid}s{i}` in category `c{tid}s{i}` —
+    /// unique across a profile of distinct tids, so either identifies both the
+    /// thread and the slice within it.
+    fn thread_events(tid: i64, spans: impl IntoIterator<Item = (i64, i64)>) -> Vec<String> {
+        let mut events = vec![format!(
+            r#"{{"name":"thread_name","ph":"M","tid":{tid},"args":{{"name":"skyframe-evaluator-execution-{tid}"}}}}"#,
+        )];
+        events.extend(spans.into_iter().enumerate().map(|(i, (start_us, dur_us))| {
+            format!(
+                r#"{{"cat":"c{tid}s{i}","name":"t{tid}s{i}","ph":"X","ts":{start_us},"dur":{dur_us},"tid":{tid}}}"#,
+            )
+        }));
+        events
+    }
+
+    fn profile_of_events(events: Vec<String>) -> Arc<Profile> {
+        let json = format!(r#"{{"traceEvents":[{}]}}"#, events.join(","));
+        Arc::new(Profile::from_bytes(json.as_bytes()).expect("parse test profile"))
+    }
+
+    /// A profile of two threads, each carrying `per_thread` back-to-back
+    /// millisecond slices.
+    fn profile_of(per_thread: usize) -> Arc<Profile> {
+        profile_of_events(
+            TEST_TIDS
+                .iter()
+                .flat_map(|&tid| {
+                    thread_events(tid, (0..per_thread as i64).map(|i| (i * 1000, 1000)))
+                })
+                .collect(),
+        )
+    }
+
+    /// A profile of one thread whose opening slice is narrower than
+    /// [`MIN_SLICE_PX`] at [`TEST_VIEW`]'s zoom: widened to that minimum, its box
+    /// reaches over the start of the millisecond slice that abuts it at the same
+    /// depth.
+    fn profile_of_overlapping_boxes() -> Arc<Profile> {
+        let sub_pixel_us = (f64::from(MIN_SLICE_PX) / TEST_VIEW.px_per_us) as i64 - 1;
+        profile_of_events(thread_events(TEST_TIDS[0], [(0, sub_pixel_us), (sub_pixel_us, 1000)]))
+    }
+
+    /// A draw list culled from `profile` over a viewport holding all of it.
+    fn draw_cache(profile: &Arc<Profile>) -> SliceDrawCache {
+        SliceDrawCache::new(
+            profile.clone(),
+            Rc::new(lay_out_lanes(profile, &METRICS)),
+            TEST_VIEW,
+            TEST_VIEWPORT,
+        )
+    }
+
+    #[test]
+    fn a_hit_names_the_slice_drawn_there() {
+        let profile = profile_of(3);
+        let cache = draw_cache(&profile);
+        assert_eq!(cache.slices.len(), TEST_TIDS.len() * 3);
+        for vs in cache.slices.iter() {
+            let track = &profile.threads()[vs.track];
+            let drawn = profile.slices(track)[vs.slice];
+            let detail = profile.details(track)[vs.slice];
+            let hit = cache
+                .hit(vs.x + vs.w / 2.0, vs.y + vs.h / 2.0)
+                .expect("the slice at its own center");
+            assert_eq!(hit.profile().str(hit.slice().name), profile.str(drawn.name));
+            assert_eq!(hit.profile().str(hit.detail().category), profile.str(detail.category));
+        }
+
+        let below_every_box = cache.slices.iter().map(|vs| vs.y + vs.h).fold(0.0, f32::max);
+        let first = cache.slices.first().expect("a culled slice");
+        assert!(cache.hit(first.x + first.w / 2.0, below_every_box).is_none());
+    }
+
+    #[test]
+    fn a_hit_where_boxes_overlap_names_the_one_drawn_last() {
+        let profile = profile_of_overlapping_boxes();
+        let cache = draw_cache(&profile);
+        let [under, over] = cache.slices[..] else {
+            panic!("expected the fixture's two boxes, got {}", cache.slices.len());
+        };
+        let overlap_end = under.x + under.w;
+        assert_eq!(under.y, over.y, "the fixture's boxes must share a row");
+        assert!(over.x < overlap_end, "the fixture's boxes must cover a common point");
+
+        let hit = cache
+            .hit((over.x + overlap_end) / 2.0, over.y + over.h / 2.0)
+            .expect("the box drawn over the point");
+        let track = &profile.threads()[over.track];
+        let drawn = profile.slices(track)[over.slice];
+        assert_eq!(hit.profile().str(hit.slice().name), profile.str(drawn.name));
     }
 }

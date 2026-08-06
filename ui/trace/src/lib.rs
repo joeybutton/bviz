@@ -28,13 +28,13 @@ use regions::{
 };
 use stats_panel::StatsPanel;
 use theme::Palette;
-use timeline::TimelinePanel;
+use timeline::{HoveredSlice, TimelinePanel};
 use tracks_menu::TracksMenu;
 
 use bviz_trace_layout::{
     FlameDirection, FlameLabels, FlameMode, LaneLayout, LaneMetrics, TimeView,
 };
-use bviz_trace_profile::{Profile, Slice, SliceDetail, TimeSpan};
+use bviz_trace_profile::{Profile, Slice, TimeSpan};
 use bviz_ui_components::{
     Axis, Button, DEFAULT_MIN_THUMB, Scrollbar, centered_notice, centered_spinner,
     load_in_background, track_drag,
@@ -1398,15 +1398,14 @@ fn paint_tooltip_box(
 /// Paints a tooltip panel near `at` with the slice's name, its category and
 /// duration, and its args, one per line. Kept inside the viewport.
 fn paint_tooltip(
-    profile: &Profile,
-    slice: &Slice,
-    detail: &SliceDetail,
+    hovered: &HoveredSlice,
     at: Point<Pixels>,
     bounds: Bounds<Pixels>,
     palette: &Palette,
     window: &mut Window,
     cx: &mut App,
 ) {
+    let (profile, slice, detail) = (hovered.profile(), hovered.slice(), hovered.detail());
     let mut lines = vec![
         profile.str(slice.name).to_string(),
         format!("{} · {}", profile.str(detail.category), format_duration(slice.dur_us)),
