@@ -13,7 +13,7 @@ use gpui::{
     ScrollWheelEvent, Subscription, Window, canvas, div, prelude::*, px, size,
 };
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 mod build;
 mod camera;
@@ -24,18 +24,20 @@ mod framing;
 mod legend;
 mod mode;
 mod model;
+mod morph;
 mod paint;
 mod scroll;
 mod toolbar;
 
 use build::{Input, InputKind};
-use camera::{enclosed_boxes, from_screen, recenter_rect, zoom_step, Camera};
+use camera::{enclosed_boxes, from_screen, recenter_rect, zoom_step, Camera, Rect};
 use drag::{end_drag, start_pan, Drag};
 use emphasis::Emphasis;
 use framing::{build_prepaint, Framing};
 use legend::legend;
 use mode::LayoutMode;
 use model::{Drawn, Expandable, Model, Source};
+use morph::{Frame, Morph};
 use paint::{canvas_body, Scene, TitleTarget};
 use scroll::{scrollbar_hit, start_scroll_drag};
 
@@ -62,9 +64,10 @@ const FIT_MARGIN: f32 = 2.0 / 3.0;
 /// relayout settles the view, so a kept box never sits flush against the border.
 const RECENTER_PAD: f32 = 24.0;
 
-/// How long the view eases to its settled position after a toggle: short enough
-/// to stay responsive, long enough that the eye can follow the shift instead of
-/// the view jumping there in a single frame.
+/// How long a toggle takes to come to rest — the camera easing onto the reframed
+/// content, and each box onto its place in the new drawing, over the one stretch
+/// of time. Short enough to stay responsive, long enough that the eye can follow
+/// the shift instead of the view jumping there in a single frame.
 const SETTLE_DURATION: Duration = Duration::from_millis(220);
 
 /// Below these per-axis deltas a settle is a no-op and is not animated, so a
@@ -90,6 +93,7 @@ struct GraphView {
     framing: Framing,
     drag: Drag,
     emphasis: Emphasis,
+    morph: Morph,
     mode: LayoutMode,
     mode_picker: Entity<Dropdown>,
     /// Carries the picker's selections into [`GraphView::set_mode`].
@@ -126,6 +130,14 @@ impl GraphView {
         self.model.expandable(self.mode)
     }
 
+    /// How far the drawing being eased onto its successor has travelled at this
+    /// instant; `None` at rest, where every box sits at its own layout rect. The
+    /// paint and every gesture that names a box place through this one frame, so
+    /// what the cursor lands on is what is drawn under it.
+    fn morph_frame(&self) -> Option<Frame> {
+        self.morph.at(Instant::now())
+    }
+
     fn new(inputs: Vec<Input>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let focus_handle = cx.focus_handle();
         focus_handle.focus(window, cx);
@@ -152,6 +164,7 @@ impl GraphView {
             framing: Framing::new(),
             drag: Drag::None,
             emphasis: Emphasis::none(),
+            morph: Morph::none(),
             mode,
             mode_picker,
             _mode_choices: choices,
@@ -212,9 +225,11 @@ impl GraphView {
     /// has not been computed yet. The two span different extents, so the view
     /// refits.
     ///
-    /// The hover and the emphasis both describe the layout being left: an
-    /// emphasis carried across would let a relayout still in flight settle the
-    /// incoming view onto a box picked out in the other one, and highlight it.
+    /// The hover, the emphasis and the morph all describe the layout being left:
+    /// an emphasis carried across would let a relayout still in flight settle the
+    /// incoming view onto a box picked out in the other one, and highlight it,
+    /// and a morph would ease boxes of the layout left behind over the one
+    /// arriving.
     fn set_mode(&mut self, mode: LayoutMode, cx: &mut Context<Self>) {
         if self.mode == mode {
             return;
@@ -222,6 +237,7 @@ impl GraphView {
         self.mode = mode;
         self.hovered = None;
         self.emphasis.clear();
+        self.morph.clear();
         self.framing.refit();
         if self.drawn().is_none() && !self.model.relaying() {
             model::relayout(self, cx);
@@ -257,7 +273,8 @@ impl GraphView {
         };
         let camera = self.camera();
         let vp = self.framing.viewport();
-        let hit = box_at(&self.titles, drawn.view(camera.zoom), vp, camera, e.position)
+        let morph = self.morph_frame();
+        let hit = box_at(&self.titles, drawn.view(camera.zoom), morph.as_ref(), vp, camera, e.position)
             .map(|b| b.id);
         if hit != self.hovered {
             self.hovered = hit;
@@ -376,14 +393,15 @@ struct Controls {
 /// title the zoom has floated out of its container's band is drawn over the
 /// boxes inside it: there the innermost box under the cursor is one of those,
 /// and the opaque title covering it is both what the user sees and what the
-/// user is aiming at. A title is taken only where the box it names covers the
-/// cursor in `g` under `camera`. Since a title is always painted within its own
-/// box, that leaves a set recorded from a frame the view has moved on from — a
-/// relayout, a mode switch, a camera step — resolving to the box under the
-/// cursor instead.
+/// user is aiming at. A title is taken only where the box it names is drawn over
+/// the cursor in `g` under `camera` and `morph`. Since a title is always painted
+/// within its own box, that leaves a set recorded from a frame the view has moved
+/// on from — a relayout, a mode switch, a camera step — resolving to the box
+/// under the cursor instead.
 fn box_at<'a>(
     titles: &[TitleTarget],
     g: &'a bviz_graph_layout::LaidOut,
+    morph: Option<&Frame>,
     viewport: Bounds<Pixels>,
     camera: Camera,
     pos: Point<Pixels>,
@@ -391,8 +409,8 @@ fn box_at<'a>(
     let (gx, gy) = from_screen(pos, viewport.origin, camera);
     let titled = paint::title_at(titles, pos)
         .and_then(|id| g.boxes.iter().find(|b| b.id == id))
-        .filter(|b| covers(b, gx, gy));
-    titled.or_else(|| hit_box(&g.boxes, gx, gy))
+        .filter(|b| placed_rect(b, morph).covers(gx, gy));
+    titled.or_else(|| hit_box(&g.boxes, morph, gx, gy))
 }
 
 /// Opens or closes the box under `pos` (window px) and settles the view to keep
@@ -404,7 +422,9 @@ fn click_box_at(view: &mut GraphView, pos: Point<Pixels>, cx: &mut Context<Graph
         return;
     };
     let g = drawn.view(camera.zoom);
-    let hit = box_at(&view.titles, g, vp, camera, pos).filter(|b| view.expandable().holds(b));
+    let morph = view.morph_frame();
+    let hit = box_at(&view.titles, g, morph.as_ref(), vp, camera, pos)
+        .filter(|b| view.expandable().holds(b));
     let Some(id) = hit.map(|b| b.id) else {
         return;
     };
@@ -416,19 +436,28 @@ fn click_box_at(view: &mut GraphView, pos: Point<Pixels>, cx: &mut Context<Graph
     view.emphasis.toggled(id, enclosed);
 }
 
-/// Whether `b`'s layout rect covers `(gx, gy)`, counting its edges.
-fn covers(b: &bviz_graph_layout::Box, gx: f32, gy: f32) -> bool {
-    let (x, y) = (b.x as f32, b.y as f32);
-    gx >= x && gx <= x + b.width as f32 && gy >= y && gy <= y + b.height as f32
+/// Where `b` is drawn: its own layout rect at rest, and the rect `morph` has
+/// eased it to while one drawing settles onto another.
+fn placed_rect(b: &bviz_graph_layout::Box, morph: Option<&Frame>) -> Rect {
+    morph.map_or(Rect::of(b), |frame| frame.place(b).0)
 }
 
-/// The smallest-area box (in layout space) containing `(gx, gy)`, so an inner
+/// The smallest-area box (in layout space) drawn over `(gx, gy)`, so an inner
 /// member or header wins over its enclosing container; `None` if outside all.
-fn hit_box(boxes: &[bviz_graph_layout::Box], gx: f32, gy: f32) -> Option<&bviz_graph_layout::Box> {
+/// The boxes a morph is fading out are absent from `boxes`, so a gesture passes
+/// through them to whatever the new drawing puts there.
+fn hit_box<'a>(
+    boxes: &'a [bviz_graph_layout::Box],
+    morph: Option<&Frame>,
+    gx: f32,
+    gy: f32,
+) -> Option<&'a bviz_graph_layout::Box> {
     boxes
         .iter()
-        .filter(|b| covers(b, gx, gy))
-        .min_by(|a, b| (a.width * a.height).total_cmp(&(b.width * b.height)))
+        .map(|b| (b, placed_rect(b, morph)))
+        .filter(|(_, rect)| rect.covers(gx, gy))
+        .min_by(|(_, a), (_, b)| (a.w * a.h).total_cmp(&(b.w * b.h)))
+        .map(|(b, _)| b)
 }
 
 /// Renders a Bazel build graph from one or more `--output=streamed_proto`
@@ -534,12 +563,12 @@ mod tests {
         // An outer container (id 0) with a small inner box (id 1) nested in it.
         let boxes = vec![lbox(0, 0.0, 0.0, 100.0, 100.0), lbox(1, 20.0, 20.0, 30.0, 30.0)];
         // Inside both rects: the smaller (inner) wins.
-        assert_eq!(hit_box(&boxes, 30.0, 30.0).unwrap().id, bviz_graph_layout::Id(1));
+        assert_eq!(hit_box(&boxes, None, 30.0, 30.0).unwrap().id, bviz_graph_layout::Id(1));
         // Inside only the container.
-        assert_eq!(hit_box(&boxes, 5.0, 5.0).unwrap().id, bviz_graph_layout::Id(0));
+        assert_eq!(hit_box(&boxes, None, 5.0, 5.0).unwrap().id, bviz_graph_layout::Id(0));
         // Outside everything.
-        assert!(hit_box(&boxes, 200.0, 200.0).is_none());
-        assert!(hit_box(&boxes, -1.0, 50.0).is_none());
+        assert!(hit_box(&boxes, None, 200.0, 200.0).is_none());
+        assert!(hit_box(&boxes, None, -1.0, 50.0).is_none());
     }
 
     #[test]

@@ -2,6 +2,7 @@ use crate::camera::{to_screen, visible_rect, Camera, Rect};
 use crate::dimming::{compute_dimming, Dimming};
 use crate::drag::track_gesture;
 use crate::model::{Drawn, Expandable};
+use crate::morph::Frame;
 use crate::scroll::paint_scrollbars;
 use crate::{GraphView, Palette};
 use bviz_graph_layout::layout::{CARET_RESERVE, LABEL_BAND};
@@ -74,6 +75,11 @@ pub(crate) struct Scene {
 /// one painted under them. That pass keeps the boxes' outermost-first order,
 /// which is the order [`paint_box_label`] arbitrates overlapping titles in.
 ///
+/// A morph in flight places each box between the drawing it came from and the
+/// one it is going to. The boxes only the departing drawing held come after the
+/// rest, so a member fading into the container it collapses into is drawn over
+/// it rather than under.
+///
 /// The camera is read here, once the prepaint has fitted it, so the level a map
 /// draws and the part of it the window shows are both the frame's own. Only what
 /// falls inside that part is touched, which is what keeps a level of tens of
@@ -83,24 +89,40 @@ pub(crate) fn canvas_body(
     entity: Entity<GraphView>,
 ) -> impl FnOnce(Bounds<Pixels>, (), &mut Window, &mut App) {
     move |bounds, _, window, cx| {
-        let camera = entity.read(cx).camera();
+        let (camera, morph) = {
+            let view = entity.read(cx);
+            (view.camera(), view.morph_frame())
+        };
         let g = scene.drawn.view(camera.zoom);
         let visible = visible_rect(bounds, camera);
         let dimming = compute_dimming(g, scene.hovered, scene.dim_enabled);
         let drawn: Vec<(PaintBox, Bounds<Pixels>)> = g
             .boxes
             .iter()
-            .filter(|b| visible.overlaps(&box_rect(b)))
             .map(|b| {
-                let b = PaintBox::of(b, &scene, &dimming);
+                let (rect, alpha) = morph.as_ref().map_or((Rect::of(b), 1.0), |m| m.place(b));
+                Placed { b, rect, alpha, leaving: false }
+            })
+            .chain(morph.iter().flat_map(Frame::leaving).map(|(b, rect, alpha)| Placed {
+                b,
+                rect,
+                alpha,
+                leaving: true,
+            }))
+            .filter(|p| visible.overlaps(&p.rect))
+            .map(|p| {
+                let b = PaintBox::of(&p, &scene, &dimming);
                 let rect = screen_rect(&b, bounds, camera);
                 paint_box(&b, rect, camera.zoom, &scene.palette, window);
                 (b, rect)
             })
             .collect();
-        for c in g.connectors.iter().filter(|c| visible.crossed_by(&c.points)) {
-            let dim = dimming.applies && !dimming.lit_edges.contains(&(c.from, c.to));
-            paint_lanes(c, dim, bounds, camera, window);
+        let edges = morph.as_ref().map_or(1.0, |m| m.connectors);
+        if edges > 0.0 {
+            for c in g.connectors.iter().filter(|c| visible.crossed_by(&c.points)) {
+                let dim = dimming.applies && !dimming.lit_edges.contains(&(c.from, c.to));
+                paint_lanes(c, dim, edges, bounds, camera, window);
+            }
         }
         let mut floated: Vec<Bounds<Pixels>> = Vec::new();
         let mut titles: Vec<TitleTarget> = Vec::new();
@@ -115,8 +137,10 @@ pub(crate) fn canvas_body(
     }
 }
 
-fn box_rect(b: &bviz_graph_layout::Box) -> Rect {
-    Rect { x: b.x, y: b.y, w: b.width, h: b.height }
+/// `c` at `alpha` of its own opacity, by which a box a morph is fading in or out
+/// takes its whole appearance — fill, border, label — down together.
+fn faded(c: Rgba, alpha: f32) -> Rgba {
+    Rgba { a: c.a * alpha, ..c }
 }
 
 /// Accent hue for a leaf box, keyed by its node kind. These are mid-saturation
@@ -172,6 +196,26 @@ pub(crate) struct TitleTarget {
     id: Id,
 }
 
+/// A box the frame draws: the rect it occupies and the opacity it paints at,
+/// both in layout pixels.
+struct Placed<'a> {
+    b: &'a bviz_graph_layout::Box,
+    rect: Rect,
+    alpha: f32,
+    /// On its way out of the drawing, which only the morph still holds it for.
+    leaving: bool,
+}
+
+impl Placed<'_> {
+    /// Whether this box draws a disclosure caret. A box on its way out is absent
+    /// from the drawing that replaced it, so there is nothing left there to open
+    /// or close and it carries none however the layout it is leaving classified
+    /// it.
+    fn expandable(&self, expandable: &Expandable) -> bool {
+        !self.leaving && expandable.holds(self.b)
+    }
+}
+
 /// A box resolved against the theme and the frame's lit/dimmed partition, in
 /// layout pixels.
 struct PaintBox<'a> {
@@ -193,10 +237,14 @@ struct PaintBox<'a> {
     highlight: f32,
     /// Outside the hovered node's neighborhood, drawn faded to recede.
     dim: bool,
+    /// Opacity the whole box paints at, which a morph fades from zero for a box
+    /// only the new drawing holds and to zero for one only the old one held.
+    alpha: f32,
 }
 
 impl<'a> PaintBox<'a> {
-    fn of(b: &'a bviz_graph_layout::Box, scene: &Scene, dimming: &Dimming) -> Self {
+    fn of(p: &Placed<'a>, scene: &Scene, dimming: &Dimming) -> Self {
+        let Placed { b, rect, alpha, .. } = *p;
         let palette = &scene.palette;
         let dim = dimming.applies && !dimming.lit.contains(&b.id);
         let fill = match b.compound {
@@ -205,22 +253,26 @@ impl<'a> PaintBox<'a> {
         };
         PaintBox {
             id: b.id,
-            x: b.x,
-            y: b.y,
-            w: b.width,
-            h: b.height,
+            x: rect.x,
+            y: rect.y,
+            w: rect.w,
+            h: rect.h,
             compound: b.compound,
-            expandable: scene.expandable.holds(b),
-            fill: match dim {
-                true => bviz_ui_theme::mix(fill, palette.background, DIM_FADE),
-                false => fill,
-            },
+            expandable: p.expandable(&scene.expandable),
+            fill: faded(
+                match dim {
+                    true => bviz_ui_theme::mix(fill, palette.background, DIM_FADE),
+                    false => fill,
+                },
+                alpha,
+            ),
             label: &b.label,
             highlight: match scene.highlight {
                 Some((id, alpha)) if id == b.id => alpha,
                 _ => 0.0,
             },
             dim,
+            alpha,
         }
     }
 }
@@ -230,6 +282,7 @@ impl<'a> PaintBox<'a> {
 fn paint_lanes(
     c: &Connector,
     dim: bool,
+    alpha: f32,
     bounds: Bounds<Pixels>,
     camera: Camera,
     window: &mut Window,
@@ -247,7 +300,7 @@ fn paint_lanes(
     for (i, kind) in c.kinds.iter().enumerate() {
         let slot = i as f32 - (n - 1.0) / 2.0;
         let lane = lane_polyline(&screen, slot * PARALLEL_SPACING * z);
-        paint_connector(&lane, *kind, dim, z, window);
+        paint_connector(&lane, *kind, dim, alpha, z, window);
     }
 }
 
@@ -290,17 +343,18 @@ fn box_emphasis(
         let thick = px((2. * zoom).max(2.));
         let mut accent = HIGHLIGHT_ACCENT;
         accent.a = b.highlight;
-        (normal + (thick - normal) * b.highlight, Hsla::from(accent))
+        (normal + (thick - normal) * b.highlight, Hsla::from(faded(accent, b.alpha)))
     } else if b.dim {
-        (px(1.), Hsla::from(bviz_ui_theme::mix(palette.border, palette.background, DIM_FADE)))
+        let receded = bviz_ui_theme::mix(palette.border, palette.background, DIM_FADE);
+        (px(1.), Hsla::from(faded(receded, b.alpha)))
     } else {
-        (px(1.), Hsla::from(palette.border))
+        (px(1.), Hsla::from(faded(palette.border, b.alpha)))
     };
-    let highlight = b.highlight;
+    let (highlight, alpha) = (b.highlight, b.alpha);
     let glow = move |window: &mut Window| {
         if highlight > 0.0 {
             let mut wash = HIGHLIGHT_ACCENT;
-            wash.a = 0.15 * highlight;
+            wash.a = 0.15 * highlight * alpha;
             window.paint_quad(quad(
                 rect,
                 corner,
@@ -410,11 +464,13 @@ fn paint_box_label(
 ) -> Option<TitleTarget> {
     let placement = LabelPlacement::of(b, rect, zoom)?;
     let fs = placement.size;
-    let label_color = if b.dim {
-        bviz_ui_theme::mix(palette.label, palette.background, DIM_FADE)
-    } else {
-        palette.label
-    };
+    let label_color = faded(
+        match b.dim {
+            true => bviz_ui_theme::mix(palette.label, palette.background, DIM_FADE),
+            false => palette.label,
+        },
+        b.alpha,
+    );
     let base = bviz_ui_assets::text_metrics(window).font;
     let font = if b.compound { base.bold() } else { base };
     let line = bviz_ui_components::shape_truncated(
@@ -553,7 +609,14 @@ fn miter_vertex(a: (f32, f32), b: (f32, f32), c: (f32, f32), d: f32) -> (f32, f3
 
 /// Strokes a connector polyline (screen coordinates) and caps its end with a
 /// filled arrowhead pointing along the final segment.
-fn paint_connector(points: &[(f32, f32)], kind: EdgeKind, dim: bool, zoom: f32, window: &mut Window) {
+fn paint_connector(
+    points: &[(f32, f32)],
+    kind: EdgeKind,
+    dim: bool,
+    alpha: f32,
+    zoom: f32,
+    window: &mut Window,
+) {
     if points.len() < 2 {
         return;
     }
@@ -561,6 +624,7 @@ fn paint_connector(points: &[(f32, f32)], kind: EdgeKind, dim: bool, zoom: f32, 
     if dim {
         color.a = DIM_EDGE_ALPHA;
     }
+    color = faded(color, alpha);
     let pts: Vec<Point<Pixels>> = points.iter().map(|(x, y)| point(px(*x), px(*y))).collect();
 
     // Stop the stroke at the arrowhead's base (less a slight overdraw) so the
@@ -617,9 +681,11 @@ fn paint_arrowhead(pts: &[Point<Pixels>], zoom: f32, color: Rgba, window: &mut W
 mod tests {
     use super::*;
     use crate::camera::from_screen;
+    use crate::morph::Transition;
     use bviz_graph_layout::LaidOut;
     use std::collections::HashSet;
     use std::sync::Arc;
+    use std::time::Instant;
 
     /// The zooms the caret invariant is checked over, spanning both sides of the
     /// band width at which a container's title stops fitting in it.
@@ -662,20 +728,35 @@ mod tests {
         }
     }
 
-    fn paint_box_of<'a>(b: &'a bviz_graph_layout::Box, expandable: &Expandable) -> PaintBox<'a> {
+    /// A box as a frame draws it, where the theme and the lit/dimmed partition a
+    /// full [`PaintBox::of`] resolves have no bearing on what is measured.
+    fn paint_box_of<'a>(p: &Placed<'a>, expandable: &Expandable) -> PaintBox<'a> {
         PaintBox {
-            id: b.id,
-            x: b.x,
-            y: b.y,
-            w: b.width,
-            h: b.height,
-            compound: b.compound,
-            expandable: expandable.holds(b),
+            id: p.b.id,
+            x: p.rect.x,
+            y: p.rect.y,
+            w: p.rect.w,
+            h: p.rect.h,
+            compound: p.b.compound,
+            expandable: p.expandable(expandable),
             fill: rgb(0),
-            label: &b.label,
+            label: &p.b.label,
             highlight: 0.0,
             dim: false,
+            alpha: p.alpha,
         }
+    }
+
+    /// The boxes of `g` as a frame under `morph` draws them, placed as
+    /// [`canvas_body`] places them.
+    fn placed<'a>(g: &'a LaidOut, morph: Option<&Frame>) -> Vec<Placed<'a>> {
+        g.boxes
+            .iter()
+            .map(|b| {
+                let (rect, alpha) = morph.map_or((Rect::of(b), 1.0), |m| m.place(b));
+                Placed { b, rect, alpha, leaving: false }
+            })
+            .collect()
     }
 
     /// Which boxes of [`covered_container`] open and close: both, as a container
@@ -697,12 +778,12 @@ mod tests {
         floats: bool,
     }
 
-    /// The titles a frame of `g` records under `camera`, and a caret for each,
+    /// The titles a frame drawing `boxes` records under `camera`, and a caret for each,
     /// following the same order and overlap arbitration [`canvas_body`] paints
     /// in. Every label is measured at the widest its box has room for, which puts
     /// the plate at its widest and the caret furthest from the box's own center.
     fn drawn_titles(
-        g: &LaidOut,
+        boxes: &[Placed],
         expandable: &Expandable,
         viewport: Bounds<Pixels>,
         camera: Camera,
@@ -710,8 +791,8 @@ mod tests {
         let mut floated: Vec<Bounds<Pixels>> = Vec::new();
         let mut titles: Vec<TitleTarget> = Vec::new();
         let mut carets: Vec<DrawnCaret> = Vec::new();
-        for b in &g.boxes {
-            let pb = paint_box_of(b, expandable);
+        for p in boxes {
+            let pb = paint_box_of(p, expandable);
             let rect = screen_rect(&pb, viewport, camera);
             let Some(placement) = LabelPlacement::of(&pb, rect, camera.zoom) else {
                 continue;
@@ -723,11 +804,11 @@ mod tests {
             if placement.floats {
                 floated.push(plate);
             }
-            let Some(title) = placement.title(plate, b.id) else {
+            let Some(title) = placement.title(plate, p.b.id) else {
                 continue;
             };
             carets.push(DrawnCaret {
-                id: b.id,
+                id: p.b.id,
                 at: placement.caret_at(plate) + point(px(placement.reserved() / 2.), px(0.)),
                 floats: placement.floats,
             });
@@ -756,14 +837,14 @@ mod tests {
         let (mut floating, mut banded, mut covered) = (0, 0, 0);
         for zoom in ZOOMS {
             let camera = Camera { zoom, pan: (0.0, 0.0) };
-            let (titles, carets) = drawn_titles(&g, expandable, viewport(), camera);
+            let (titles, carets) = drawn_titles(&placed(&g, None), expandable, viewport(), camera);
             for caret in carets {
                 let DrawnCaret { id, at, floats } = caret;
                 match floats {
                     true => floating += 1,
                     false => banded += 1,
                 }
-                let resolved = crate::box_at(&titles, &g, viewport(), camera, at);
+                let resolved = crate::box_at(&titles, &g, None, viewport(), camera, at);
                 assert_eq!(
                     resolved.map(|b| b.id),
                     Some(id),
@@ -777,13 +858,69 @@ mod tests {
                     "zoom {zoom}: the caret drawn for {id:?} toggles nothing"
                 );
                 let (gx, gy) = from_screen(at, viewport().origin, camera);
-                covered += (crate::hit_box(&g.boxes, gx, gy).map(|b| b.id) != Some(id)) as u32;
+                covered += (crate::hit_box(&g.boxes, None, gx, gy).map(|b| b.id) != Some(id)) as u32;
             }
         }
         assert!(floating > 0, "no zoom floated a title out of its band");
         assert!(banded > 0, "no zoom left a title in its band");
         assert!(covered > 0, "no caret fell on a box other than its own, so the boxes alone \
             would have resolved every gesture and the case this pins never arose");
+    }
+
+    /// How far a relayout slides [`covered_container`] for the mid-morph frame:
+    /// wide enough that a box the morph places falls clear of every rect the
+    /// layout laid out, so resolving a gesture against the layout alone lands on
+    /// a different box or on none.
+    const SLIDE: f64 = 6000.0;
+
+    #[test]
+    fn a_title_drawn_mid_morph_resolves_to_the_box_it_names() {
+        let g = covered_container();
+        let expandable = Expandable::Containers(Arc::new(HashSet::from([Id(0), Id(1)])));
+        let t = Arc::new(
+            Transition::between(Arc::new(slid(&g, SLIDE)), &g, None).expect("nothing to animate"),
+        );
+        // The morph's opening frame, which draws every box a whole slide away
+        // from where the layout put it.
+        let frame = Transition::at(&t, Instant::now()).expect("the transition was already over");
+
+        let (mut floating, mut covered) = (0, 0);
+        for zoom in ZOOMS {
+            let camera = Camera { zoom, pan: (0.0, 0.0) };
+            let boxes = placed(&g, Some(&frame));
+            let (titles, carets) = drawn_titles(&boxes, &expandable, viewport(), camera);
+            for DrawnCaret { id, at, floats } in carets {
+                floating += floats as u32;
+                assert_eq!(
+                    crate::box_at(&titles, &g, Some(&frame), viewport(), camera, at).map(|b| b.id),
+                    Some(id),
+                    "zoom {zoom}: the caret a morph drew for {id:?} resolves to another box"
+                );
+                let (gx, gy) = from_screen(at, viewport().origin, camera);
+                covered +=
+                    (crate::hit_box(&g.boxes, Some(&frame), gx, gy).map(|b| b.id) != Some(id))
+                        as u32;
+            }
+        }
+        assert!(floating > 0, "no zoom floated a title out of its band");
+        assert!(covered > 0, "no caret fell on a box other than its own, so the boxes alone \
+            would have resolved every gesture and the case this pins never arose");
+    }
+
+    #[test]
+    fn a_box_on_its_way_out_carries_no_disclosure_caret() {
+        let g = covered_container();
+        let expandable = Expandable::Containers(Arc::new(HashSet::from([Id(0)])));
+        let b = &g.boxes[0];
+        let held = |leaving| Placed { b, rect: Rect::of(b), alpha: 1.0, leaving };
+        assert!(
+            held(false).expandable(&expandable),
+            "the container the layout opens and closes carries no caret",
+        );
+        assert!(
+            !held(true).expandable(&expandable),
+            "a container the relayout dropped still carries a caret it cannot answer",
+        );
     }
 
     /// The width of each container in [`side_by_side`], also the distance a
@@ -819,10 +956,13 @@ mod tests {
         let g = side_by_side();
         let expandable = Expandable::Containers(Arc::new(HashSet::from([Id(0), Id(1)])));
         let camera = Camera { zoom: 0.2, pan: (0.0, 0.0) };
-        let (titles, carets) = drawn_titles(&g, &expandable, viewport(), camera);
+        let (titles, carets) = drawn_titles(&placed(&g, None), &expandable, viewport(), camera);
         let left = carets.iter().find(|c| c.id == Id(0));
         let at = left.expect("the left container drew no title").at;
-        assert_eq!(crate::box_at(&titles, &g, viewport(), camera, at).map(|b| b.id), Some(Id(0)));
+        assert_eq!(
+            crate::box_at(&titles, &g, None, viewport(), camera, at).map(|b| b.id),
+            Some(Id(0))
+        );
 
         // A relayout that keeps both ids and slides the right container onto the
         // ground the left one's title was painted over. The recorded plate still
@@ -831,12 +971,12 @@ mod tests {
         let moved = slid(&g, -CONTAINER_WIDTH);
         let (gx, gy) = from_screen(at, viewport().origin, camera);
         assert_eq!(
-            crate::hit_box(&moved.boxes, gx, gy).map(|b| b.id),
+            crate::hit_box(&moved.boxes, None, gx, gy).map(|b| b.id),
             Some(Id(1)),
             "the slide left the caret over no other container, so nothing was displaced"
         );
         assert_eq!(
-            crate::box_at(&titles, &moved, viewport(), camera, at).map(|b| b.id),
+            crate::box_at(&titles, &moved, None, viewport(), camera, at).map(|b| b.id),
             Some(Id(1)),
             "a title from a frame the layout has moved on from still answered for it"
         );

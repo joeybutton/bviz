@@ -1,6 +1,7 @@
 use crate::build::{self, Input, build_graph};
 use crate::emphasis;
 use crate::mode::LayoutMode;
+use crate::morph;
 use crate::{GraphView, MARGIN};
 use bviz_graph_layout::graph::Graph;
 use bviz_graph_layout::{Id, LaidOut, MapLayout, Names};
@@ -261,9 +262,20 @@ pub(crate) fn relayout(view: &mut GraphView, cx: &mut Context<GraphView>) {
             (laid_out, names)
         },
         |view, (laid_out, names), cx| {
-            if let Source::Loaded(loaded) = &mut view.model.source {
-                loaded.layered = Some(Arc::new(laid_out));
-                loaded.names = names;
+            let laid_out = Arc::new(laid_out);
+            let replaced = match &mut view.model.source {
+                Source::Loaded(loaded) => {
+                    loaded.names = names;
+                    loaded.layered.replace(Arc::clone(&laid_out))
+                }
+                _ => None,
+            };
+            // A morph eases one layered drawing onto its successor, so it says
+            // nothing about a map's levels, which the camera alone selects
+            // between: armed while the map is on screen it would pump repaints
+            // of a canvas that draws none of it.
+            if let Some(replaced) = replaced.filter(|_| view.mode == LayoutMode::Layered) {
+                morph::begin(view, replaced, &laid_out, cx);
             }
             view.framing.request_recenter();
             view.model.relaying = false;

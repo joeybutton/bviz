@@ -6,7 +6,7 @@ use std::ops::RangeInclusive;
 use std::time::Instant;
 
 /// A layout-pixel rectangle by origin and size.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub(crate) struct Rect {
     pub(crate) x: f64,
     pub(crate) y: f64,
@@ -15,12 +15,31 @@ pub(crate) struct Rect {
 }
 
 impl Rect {
+    /// The rect a laid-out box spans.
+    pub(crate) fn of(b: &bviz_graph_layout::Box) -> Rect {
+        Rect { x: b.x, y: b.y, w: b.width, h: b.height }
+    }
+
     /// Whether the two rectangles meet, counting a shared edge.
     pub(crate) fn overlaps(&self, other: &Rect) -> bool {
         self.x <= other.x + other.w
             && other.x <= self.x + self.w
             && self.y <= other.y + other.h
             && other.y <= self.y + self.h
+    }
+
+    /// Whether this rectangle covers `(x, y)`, counting its edges.
+    pub(crate) fn covers(&self, x: f32, y: f32) -> bool {
+        let (x, y) = (x as f64, y as f64);
+        self.x <= x && x <= self.x + self.w && self.y <= y && y <= self.y + self.h
+    }
+
+    /// Whether `other` lies wholly within this rectangle, counting a shared edge.
+    pub(crate) fn encloses(&self, other: &Rect) -> bool {
+        self.x <= other.x
+            && self.y <= other.y
+            && other.x + other.w <= self.x + self.w
+            && other.y + other.h <= self.y + self.h
     }
 
     /// Whether any leg of the polyline `points` runs through this rectangle.
@@ -197,6 +216,14 @@ pub(crate) fn enclosed_boxes(boxes: &[bviz_graph_layout::Box], viewport: Size<Pi
 pub(crate) fn ease_out_cubic(t: f32) -> f32 {
     let u = 1.0 - t;
     1.0 - u * u * u
+}
+
+/// Smoothstep over `t` in `0..=1`: flat at both ends. What is eased through it
+/// leaves and reaches its endpoints gradually rather than at full rate, which a
+/// value crossing the threshold of visibility needs at its start as much as at
+/// its end.
+pub(crate) fn smoothstep(t: f32) -> f32 {
+    t * t * (3.0 - 2.0 * t)
 }
 
 /// The zoom and pan that keep `target` (a layout-space rect `(x, y, w, h)`) fully
