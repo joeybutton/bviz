@@ -189,8 +189,8 @@ pub enum Workload {
     /// Remote and cache transfer: action-cache checks, up/download, RPC, and
     /// repository fetching.
     RemoteCache,
-    /// Scheduling and contention: resource locks, semaphores, dependency
-    /// checking, queuing, and thread waits.
+    /// Scheduling and contention: resource locks, throttle semaphores, queuing,
+    /// and thread waits.
     Scheduling,
     /// Skyframe graph evaluation and its action-execution envelopes.
     Skyframe,
@@ -224,9 +224,8 @@ pub fn span_role(category: &str, name: &str) -> SpanRole {
     use Workload::*;
     let (workload, payload) = match category {
         "general information" => general_information_role(name),
-        "Remote execution setup" | "Remote execution upload time" => {
-            remote_cache_role(name)
-        }
+        "Remote execution setup" | "Remote execution upload time"
+        | "action dependency checking" => remote_cache_role(name),
 
         "action processing"
         | "local action execution"
@@ -262,7 +261,7 @@ pub fn span_role(category: &str, name: &str) -> SpanRole {
         | "Fetching repository" => (RemoteCache, false),
 
         "Remote execution queuing time" | "thread wait" | "action resource lock"
-        | "Acquiring dynamic execution output lock" | "action dependency checking"
+        | "Acquiring dynamic execution output lock"
         | "borrowing a worker" | "waiting for response from worker"
         | "blocked on repo contents cache GC" => (Scheduling, false),
 
@@ -648,8 +647,13 @@ mod tests {
             role("Remote execution upload time", "upload outputs"),
             overhead(Workload::RemoteCache)
         );
+        // The local action-cache lookup is named after the action it checks.
         assert_eq!(
-            role("action dependency checking", ""),
+            role("action dependency checking", "action 'Compiling foo.cc'"),
+            overhead(Workload::RemoteCache)
+        );
+        assert_eq!(
+            role("action dependency checking", "acquiring semaphore"),
             overhead(Workload::Scheduling)
         );
         // The held resource slot envelopes the action body, so it takes the
