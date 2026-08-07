@@ -1,5 +1,5 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use bviz_trace_profile::{
     Profile, Slice, SliceDetail, Span32, SpanRole, Str, ThreadTrack, Workload,
@@ -9,6 +9,7 @@ use rayon::slice::{ParallelSlice, ParallelSliceMut};
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::paint::{Span, painted};
+use crate::selection::TimeSelection;
 
 /// One key segment of a slice's aggregation path: a frame label — a [`Str`]
 /// handle into the source profile's text — and the work class it carries (for
@@ -624,6 +625,22 @@ pub struct TrackFlamer {
     /// paid once for a labelling asked for, never for one that is not, and a
     /// selection change pays only the merge (see [`build`](TrackFlamer::build)).
     lane_tables: LaneTableSets,
+    /// The reduced lanes last built for under a restricting window, so a track
+    /// selection change under an unchanged window pays only the merge.
+    windowed: Mutex<Option<WindowedTables>>,
+    /// How many times [`windowed_tables`](TrackFlamer::windowed_tables) has
+    /// reduced the lanes afresh, so a test can hold the memo to its one entry.
+    #[cfg(test)]
+    reductions: AtomicUsize,
+}
+
+/// Lane tables beside the labelling and window they were reduced for. The tables
+/// sit behind an [`Arc`] so a build takes a handle of its own and merges with the
+/// lock released.
+struct WindowedTables {
+    labels: FlameLabels,
+    window: TimeSelection,
+    tables: Arc<Vec<LaneTable>>,
 }
 
 /// One [`LaneTable`] set per [`FlameLabels`] variant, reached through
@@ -649,24 +666,69 @@ impl TrackFlamer {
         TrackFlamer {
             flamer: Flamer::new(profile, bviz_trace_profile::worker_count()),
             lane_tables: LaneTableSets::default(),
+            windowed: Mutex::new(None),
+            #[cfg(test)]
+            reductions: AtomicUsize::new(0),
         }
     }
 
     fn lane_tables(&self, labels: FlameLabels) -> &[LaneTable] {
         self.lane_tables.of(labels).get_or_init(|| {
-            build_lane_tables(&self.flamer, labels, bviz_trace_profile::worker_count())
+            build_lane_tables(
+                &self.flamer,
+                labels,
+                &TimeSelection::default(),
+                bviz_trace_profile::worker_count(),
+            )
         })
+    }
+
+    /// The lane tables `labels` and `window` reduce to, from the memo where it
+    /// holds that pair and reduced afresh otherwise, replacing whatever it held.
+    fn windowed_tables(&self, labels: FlameLabels, window: &TimeSelection) -> Arc<Vec<LaneTable>> {
+        let mut memo = self.windowed.lock().unwrap();
+        if let Some(held) = memo
+            .as_ref()
+            .filter(|h| h.labels == labels && h.window == *window)
+        {
+            return Arc::clone(&held.tables);
+        }
+        #[cfg(test)]
+        self.reductions.fetch_add(1, Ordering::Relaxed);
+        let tables = Arc::new(build_lane_tables(
+            &self.flamer,
+            labels,
+            window,
+            bviz_trace_profile::worker_count(),
+        ));
+        *memo = Some(WindowedTables {
+            labels,
+            window: window.clone(),
+            tables: Arc::clone(&tables),
+        });
+        tables
+    }
+
+    #[cfg(test)]
+    fn reductions(&self) -> usize {
+        self.reductions.load(Ordering::Relaxed)
     }
 
     /// Build the selection's flame graph by merging the selected lanes'
     /// [`LaneTable`]s: concatenate their reduced nodes, sort the union by path
-    /// key, and reconstruct.
+    /// key, and reconstruct. The lanes are reduced under `window`, which
+    /// [`emit_lane_rows`] clips each of their spans against.
     pub(crate) fn build(
         &self,
         labels: FlameLabels,
+        window: &TimeSelection,
         selected: impl Fn(usize) -> bool + Sync,
     ) -> FlameGraph {
-        let tables = self.lane_tables(labels);
+        let restricted = (!window.is_empty()).then(|| self.windowed_tables(labels, window));
+        let tables: &[LaneTable] = match &restricted {
+            Some(tables) => tables,
+            None => self.lane_tables(labels),
+        };
         let union_len: usize = tables
             .iter()
             .enumerate()
@@ -737,10 +799,15 @@ struct LaneNode {
 /// Build every lane's [`LaneTable`], one per [`Profile::threads`] entry, sharded
 /// across `workers`. A lane never selected (a critical-path lane) still gets a
 /// table so the vector indexes by thread index directly.
-fn build_lane_tables(flamer: &Flamer, labels: FlameLabels, workers: usize) -> Vec<LaneTable> {
+fn build_lane_tables(
+    flamer: &Flamer,
+    labels: FlameLabels,
+    window: &TimeSelection,
+    workers: usize,
+) -> Vec<LaneTable> {
     let n = flamer.profile.threads().len();
     let shards = run_sharded(workers, n, |out: &mut Vec<(usize, LaneTable)>, i| {
-        out.push((i, build_lane_table(flamer, labels, i)));
+        out.push((i, build_lane_table(flamer, labels, window, i)));
     });
     let mut tables: Vec<Option<LaneTable>> = (0..n).map(|_| None).collect();
     for shard in shards {
@@ -754,10 +821,15 @@ fn build_lane_tables(flamer: &Flamer, labels: FlameLabels, workers: usize) -> Ve
 /// Reduce lane `lane_index` to its [`LaneTable`]: emit one keyed row per span,
 /// sort by key, segment-reduce equal keys into nodes, and pack each distinct key
 /// into the shared `key_pool`.
-fn build_lane_table(flamer: &Flamer, labels: FlameLabels, lane_index: usize) -> LaneTable {
+fn build_lane_table(
+    flamer: &Flamer,
+    labels: FlameLabels,
+    window: &TimeSelection,
+    lane_index: usize,
+) -> LaneTable {
     let thread = &flamer.profile.threads()[lane_index];
     let mut rows: Vec<Row> = Vec::new();
-    emit_lane_rows(flamer, labels, thread, &mut rows);
+    emit_lane_rows(flamer, labels, thread, window, &mut rows);
     rows.sort_unstable_by(|a, b| a.key.cmp(&b.key));
 
     let mut key_pool: Vec<u8> = Vec::new();
@@ -938,6 +1010,20 @@ fn containment_parents(slices: &[Slice]) -> Vec<Option<usize>> {
     parents
 }
 
+/// The microseconds of `slice` that lie inside `window`, and `None` for a slice
+/// the window holds no part of. A zero-duration slice covers no microsecond to
+/// clip — microsecond quantization puts a large share of a profile's spans at
+/// zero — so it turns on whether a region holds the instant it sits at.
+fn windowed_dur_us(window: &TimeSelection, slice: &Slice) -> Option<i64> {
+    if window.is_empty() {
+        return Some(slice.dur_us);
+    }
+    if slice.dur_us == 0 {
+        return window.region_at(slice.start_us).map(|_| 0);
+    }
+    Some(window.overlap_us(slice.start_us, end_us(slice))).filter(|&us| us > 0)
+}
+
 /// Emit one [`Row`] per slice of `thread` into `out`, keyed by its aggregation
 /// path. Slices are in lane order, so a slice's containment parent precedes it
 /// and its key is the parent's key extended by this slice's segment.
@@ -947,16 +1033,38 @@ fn containment_parents(slices: &[Slice]) -> Vec<Option<usize>> {
 /// action's name and carrying the slice's self time, so mnemonic grouping still
 /// shows which target the time went to. Under [`FlameLabels::Name`] no action
 /// resolves and no detail row is emitted.
-fn emit_lane_rows(flamer: &Flamer, labels: FlameLabels, thread: &ThreadTrack, out: &mut Vec<Row>) {
+///
+/// Durations are what `window` holds of them (see [`windowed_dur_us`]), and a
+/// slice it holds none of emits no row at all, so a frame's total, self time and
+/// span count all read as of the window.
+fn emit_lane_rows(
+    flamer: &Flamer,
+    labels: FlameLabels,
+    thread: &ThreadTrack,
+    window: &TimeSelection,
+    out: &mut Vec<Row>,
+) {
     let slices = flamer.profile.slices(thread);
     let details = flamer.profile.details(thread);
     let parents = containment_parents(slices);
+    // What each slice brings, `None` for one left out. A slice whose containment
+    // parent is left out is left out with it, so whatever a slice keys onto is
+    // itself keyed; lane order puts a parent before its children, so one forward
+    // pass carries that down the chain.
+    let mut dur_us: Vec<Option<i64>> = Vec::with_capacity(slices.len());
+    for i in 0..slices.len() {
+        dur_us.push(match parents[i] {
+            Some(p) if dur_us[p].is_none() => None,
+            _ => windowed_dur_us(window, &slices[i]),
+        });
+    }
     // Each slice's direct containment children's summed duration; its own
-    // duration less this is its self time.
+    // duration less this is its self time. Containment children are disjoint and
+    // enclosed, so clipping them one by one clips their sum.
     let mut nested_us = vec![0i64; slices.len()];
     for i in 0..slices.len() {
-        if let Some(p) = parents[i] {
-            nested_us[p] += slices[i].dur_us;
+        if let (Some(p), Some(dur)) = (parents[i], dur_us[i]) {
+            nested_us[p] += dur;
         }
     }
     // At most one detail row per slice.
@@ -964,6 +1072,12 @@ fn emit_lane_rows(flamer: &Flamer, labels: FlameLabels, thread: &ThreadTrack, ou
     let mut keys: Vec<Vec<u8>> = Vec::with_capacity(slices.len());
     let mut actions: Vec<Option<Str>> = Vec::with_capacity(slices.len());
     for i in 0..slices.len() {
+        let Some(dur) = dur_us[i] else {
+            // Placeholders, so both vectors stay indexed by slice.
+            keys.push(Vec::new());
+            actions.push(None);
+            continue;
+        };
         let span = flamer.span_labels(labels, &slices[i], &details[i]);
         let seg = span.segment;
         let rank = flamer.ranks.rank_of(seg.label);
@@ -981,11 +1095,11 @@ fn emit_lane_rows(flamer: &Flamer, labels: FlameLabels, thread: &ThreadTrack, ou
             rank,
             role: seg.role,
             detail: false,
-            dur: slices[i].dur_us,
+            dur,
         });
 
         let action = span.action.or_else(|| parents[i].and_then(|p| actions[p]));
-        let self_us = (slices[i].dur_us - nested_us[i]).max(0);
+        let self_us = (dur - nested_us[i]).max(0);
         if let Some(action) = action.filter(|_| self_us > 0) {
             let rank = flamer.ranks.rank_of(action);
             let mut detail_key = Vec::with_capacity(key.len() + SEGMENT_BYTES);
@@ -1622,6 +1736,7 @@ pub fn flame_height(graph: &FlameGraph, metrics: &FlameMetrics) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::selection::span_between;
     use crate::test_profile::{action, action_named, profile, slice, track};
     use crate::tests::assert_gapless;
     use bviz_trace_profile::LaneClass;
@@ -1634,15 +1749,49 @@ mod tests {
             .unwrap_or_else(|| panic!("no child {name}"))
     }
 
-    /// The all-lanes flame graph under `labels`: every real lane, the
-    /// critical-path lane's redirected copies of worker time excluded.
-    fn flame_as(p: &Arc<Profile>, labels: FlameLabels) -> FlameGraph {
+    /// The all-lanes flame graph under `labels`, restricted to `window`: every
+    /// real lane, the critical-path lane's redirected copies of worker time
+    /// excluded.
+    fn flame_within(p: &Arc<Profile>, labels: FlameLabels, window: &TimeSelection) -> FlameGraph {
         let t = p.threads();
-        TrackFlamer::new(p).build(labels, |i| t[i].lane_class != LaneClass::CriticalPath)
+        TrackFlamer::new(p).build(labels, window, |i| {
+            t[i].lane_class != LaneClass::CriticalPath
+        })
+    }
+
+    fn flame_as(p: &Arc<Profile>, labels: FlameLabels) -> FlameGraph {
+        flame_within(p, labels, &TimeSelection::default())
     }
 
     fn flame(p: &Arc<Profile>) -> FlameGraph {
         flame_as(p, FlameLabels::Mnemonic)
+    }
+
+    /// A selection of the given regions, each inserted in turn.
+    fn window(regions: &[(i64, i64)]) -> TimeSelection {
+        let mut sel = TimeSelection::default();
+        for &(a, b) in regions {
+            assert!(sel.insert(span_between(a, b)).is_some());
+        }
+        sel
+    }
+
+    /// A graph's nodes with names resolved, so two graphs over one profile
+    /// compare structurally.
+    fn resolved(g: &FlameGraph) -> Vec<(String, i64, i64, i64, u32, u32)> {
+        g.nodes()
+            .iter()
+            .map(|n| {
+                (
+                    g.str(n.name).to_owned(),
+                    n.total_us,
+                    n.self_us,
+                    n.width_us,
+                    n.count,
+                    n.depth,
+                )
+            })
+            .collect()
     }
 
     /// The bottom-up form of [`flame_as`]'s graph.
@@ -1899,7 +2048,9 @@ mod tests {
         ]);
         let t = p.threads();
         let class = |c: LaneClass| {
-            TrackFlamer::new(&p).build(FlameLabels::Mnemonic, move |i| t[i].lane_class == c)
+            TrackFlamer::new(&p).build(FlameLabels::Mnemonic, &TimeSelection::default(), move |i| {
+                t[i].lane_class == c
+            })
         };
         let analysis = class(LaneClass::Analysis);
         assert_eq!(analysis.root().total_us, 20);
@@ -1917,6 +2068,152 @@ mod tests {
         assert_eq!(loading.root().total_us, 5);
         // Every real lane, the three classes unioned.
         assert_eq!(flame(&p).root().total_us, 65);
+    }
+
+    /// A profile spanning 0..250 whose shapes a window has to clip: a nested
+    /// mnemonic action, a zero-duration span, and a second lane.
+    fn clipping_profile() -> Arc<Profile> {
+        profile(vec![
+            track(
+                1,
+                LaneClass::Execution,
+                vec![
+                    action_named("Compiling //x:y", "Rustc", 0, 100),
+                    slice("subprocess.run", "subprocess run", 60, 20),
+                    slice("checkOutputs", "general information", 90, 0),
+                ],
+            ),
+            track(2, LaneClass::Analysis, vec![action("CppCompile", 200, 50)]),
+        ])
+    }
+
+    #[test]
+    fn a_window_spanning_the_profile_matches_the_unrestricted_graph() {
+        let p = clipping_profile();
+        for labels in [FlameLabels::Mnemonic, FlameLabels::Name] {
+            let whole = flame_within(&p, labels, &window(&[(0, 250)]));
+            assert_eq!(resolved(&whole), resolved(&flame_as(&p, labels)), "{labels:?}");
+        }
+    }
+
+    #[test]
+    fn a_window_over_half_a_span_halves_its_total() {
+        let p = profile(vec![track(
+            1,
+            LaneClass::Execution,
+            vec![action("Rustc", 0, 100)],
+        )]);
+        let g = flame_within(&p, FlameLabels::Name, &window(&[(0, 50)]));
+        let rustc = child(&g, &g.root(), "Rustc");
+        assert_eq!(rustc.total_us, 50);
+        assert_eq!(rustc.count, 1);
+        assert_eq!(g.root().total_us, 50);
+    }
+
+    #[test]
+    fn regions_covering_a_span_between_them_count_it_once() {
+        let p = profile(vec![track(
+            1,
+            LaneClass::Execution,
+            vec![action("Rustc", 0, 100)],
+        )]);
+        let total = |regions: &[(i64, i64)]| {
+            let g = flame_within(&p, FlameLabels::Name, &window(regions));
+            child(&g, &g.root(), "Rustc").total_us
+        };
+        assert_eq!(total(&[(0, 40)]), 40);
+        assert_eq!(total(&[(60, 100)]), 40);
+        // The pieces the two regions take are the pieces each takes alone.
+        assert_eq!(total(&[(0, 40), (60, 100)]), 80);
+        // Two regions meeting at an instant cover the span, and cover it once.
+        assert_eq!(total(&[(0, 50), (50, 100)]), 100);
+        assert_eq!(total(&[(0, 100)]), 100);
+    }
+
+    #[test]
+    fn a_span_outside_every_region_contributes_no_frame() {
+        let p = profile(vec![track(
+            1,
+            LaneClass::Execution,
+            vec![action("Rustc", 0, 50), action("CppCompile", 200, 50)],
+        )]);
+        let g = flame_within(&p, FlameLabels::Name, &window(&[(0, 50)]));
+        assert_eq!(g.root().total_us, 50);
+        let kids: Vec<String> = g
+            .children(&g.root())
+            .iter()
+            .map(|c| g.str(c.name).to_owned())
+            .collect();
+        assert_eq!(kids, ["Rustc"]);
+    }
+
+    #[test]
+    fn a_zero_duration_span_needs_a_region_holding_its_instant() {
+        let p = profile(vec![track(
+            1,
+            LaneClass::Execution,
+            vec![
+                slice("inside", "general information", 25, 0),
+                slice("outside", "general information", 75, 0),
+            ],
+        )]);
+        let g = flame_within(&p, FlameLabels::Name, &window(&[(0, 50)]));
+        assert_eq!(child(&g, &g.root(), "inside").total_us, 0);
+        assert_eq!(g.children(&g.root()).len(), 1);
+        // Unrestricted, a zero-duration span frames like any other.
+        let all = flame_as(&p, FlameLabels::Name);
+        assert_eq!(all.children(&all.root()).len(), 2);
+    }
+
+    #[test]
+    fn a_window_cutting_a_parent_leaves_a_nested_child_whole() {
+        // Rustc(0..100) contains subprocess.run(60..80); the window opens at 50,
+        // so the action loses its first half and the child none of itself.
+        let p = profile(vec![track(
+            1,
+            LaneClass::Execution,
+            vec![
+                action_named("Compiling //x:y", "Rustc", 0, 100),
+                slice("subprocess.run", "subprocess run", 60, 20),
+            ],
+        )]);
+        let g = flame_within(&p, FlameLabels::Mnemonic, &window(&[(50, 100)]));
+        let rustc = child(&g, &g.root(), "Rustc");
+        assert_eq!(rustc.total_us, 50);
+        let sub = child(&g, &rustc, "subprocess.run");
+        assert_eq!(sub.total_us, 20);
+        // Each frame's self time is what the window leaves it less its children.
+        assert_eq!(child(&g, &rustc, "Compiling //x:y").total_us, 30);
+        assert_eq!(child(&g, &sub, "Compiling //x:y").total_us, 20);
+        assert_eq!(g.root().total_us, 50);
+    }
+
+    #[test]
+    fn a_track_selection_change_under_one_window_reuses_the_reduced_lanes() {
+        let p = clipping_profile();
+        let win = window(&[(0, 90)]);
+        let scan = TrackFlamer::new(&p);
+        let one = scan.build(FlameLabels::Name, &win, |i| i == 0);
+        let other = scan.build(FlameLabels::Name, &win, |i| i == 1);
+        let both = scan.build(FlameLabels::Name, &win, |_| true);
+        assert_eq!(scan.reductions(), 1, "one window, one reduction");
+        // Each selection reads as an independently scanned build of it.
+        for (graph, lane) in [(&one, 0usize), (&other, 1)] {
+            let fresh = TrackFlamer::new(&p).build(FlameLabels::Name, &win, |i| i == lane);
+            assert_eq!(resolved(graph), resolved(&fresh));
+        }
+        // The lanes are disjoint, so their totals add up to the union's.
+        assert_eq!(
+            both.root().total_us,
+            one.root().total_us + other.root().total_us
+        );
+        // The memo holds one entry, so changing either half of its key reduces
+        // the lanes afresh.
+        let narrower = window(&[(0, 40)]);
+        scan.build(FlameLabels::Name, &narrower, |_| true);
+        assert_eq!(scan.reductions(), 2);
+        scan.build(FlameLabels::Mnemonic, &narrower, |_| true);
+        assert_eq!(scan.reductions(), 3);
     }
 
     #[test]

@@ -3,6 +3,7 @@ use std::sync::Arc;
 use bviz_trace_profile::Profile;
 
 use crate::flame::{FlameDirection, FlameGraph, FlameMode, TrackFlamer, invert};
+use crate::selection::TimeSelection;
 use crate::stats::{StatRow, default_order, stats_from_flame};
 
 /// Everything the UI presents for one flame scope, derived together so a held
@@ -12,6 +13,10 @@ pub struct ScopeAggregate {
     /// The mode this aggregate was built under, so a view presenting it names
     /// what it is showing rather than what a later rebuild is targeting.
     pub mode: FlameMode,
+    /// The window this aggregate's figures are restricted to, so a view
+    /// presenting it names the time they cover rather than what a later rebuild
+    /// is targeting.
+    pub window: TimeSelection,
     pub flame: FlameGraph,
     /// One row per distinct frame name; unordered, indexed by `default_order`.
     /// A frame's self time is a property of the profile's own nesting, so the
@@ -35,9 +40,14 @@ impl ScopeAggregate {
     pub fn build_for_tracks(
         profile: &Arc<Profile>,
         mode: FlameMode,
+        window: &TimeSelection,
         selected: impl Fn(usize) -> bool + Sync,
     ) -> ScopeAggregate {
-        ScopeAggregate::from_graph(TrackFlamer::new(profile).build(mode.labels, selected), mode)
+        ScopeAggregate::from_graph(
+            TrackFlamer::new(profile).build(mode.labels, window, selected),
+            mode,
+            window,
+        )
     }
 
     /// Builds a selection's aggregate from an already-scanned [`TrackFlamer`] by
@@ -47,15 +57,16 @@ impl ScopeAggregate {
     pub fn build_for_tracks_reusing(
         scan: &TrackFlamer,
         mode: FlameMode,
+        window: &TimeSelection,
         selected: impl Fn(usize) -> bool + Sync,
     ) -> ScopeAggregate {
-        ScopeAggregate::from_graph(scan.build(mode.labels, selected), mode)
+        ScopeAggregate::from_graph(scan.build(mode.labels, window, selected), mode, window)
     }
 
     /// Derives the aggregate from the top-down graph `mode.labels` builds,
     /// inverting it afterwards where `mode.direction` asks for the bottom-up
     /// presentation.
-    fn from_graph(flame: FlameGraph, mode: FlameMode) -> ScopeAggregate {
+    fn from_graph(flame: FlameGraph, mode: FlameMode, window: &TimeSelection) -> ScopeAggregate {
         let stats = stats_from_flame(&flame);
         let default_order = default_order(&stats);
         let grand_total = stats.iter().map(|r| r.total_us).sum();
@@ -65,6 +76,7 @@ impl ScopeAggregate {
         };
         ScopeAggregate {
             mode,
+            window: window.clone(),
             flame,
             stats,
             default_order,
@@ -76,6 +88,7 @@ impl ScopeAggregate {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::selection::span_between;
     use crate::test_profile::{action, action_named, profile, slice, track};
     use bviz_trace_profile::LaneClass;
 
@@ -171,7 +184,12 @@ mod tests {
         let p = full_profile();
         let t = p.threads();
         let select = |i: usize| t[i].lane_class != LaneClass::CriticalPath;
-        let agg = ScopeAggregate::build_for_tracks(&p, FlameMode::default(), select);
+        let agg = ScopeAggregate::build_for_tracks(
+            &p,
+            FlameMode::default(),
+            &TimeSelection::default(),
+            select,
+        );
         let g = &agg.flame;
         let root_total = g.root().total_us;
 
@@ -201,9 +219,14 @@ mod tests {
         // A second build of the same selection is byte-identical.
         assert_eq!(
             g.nodes(),
-            ScopeAggregate::build_for_tracks(&p, FlameMode::default(), select)
-                .flame
-                .nodes()
+            ScopeAggregate::build_for_tracks(
+                &p,
+                FlameMode::default(),
+                &TimeSelection::default(),
+                select
+            )
+            .flame
+            .nodes()
         );
     }
 
@@ -213,7 +236,8 @@ mod tests {
         // Either direction: there is no frame for the inversion to walk out of.
         for direction in [FlameDirection::TopDown, FlameDirection::BottomUp] {
             let mode = FlameMode { direction, ..FlameMode::default() };
-            let agg = ScopeAggregate::build_for_tracks(&p, mode, |_| false);
+            let agg =
+                ScopeAggregate::build_for_tracks(&p, mode, &TimeSelection::default(), |_| false);
             // Only the synthetic root, no frames and no rows.
             assert_eq!(agg.flame.nodes().len(), 1);
             assert_eq!(agg.flame.root().total_us, 0);
@@ -253,9 +277,18 @@ mod tests {
                 .collect()
         };
         for sel in &selections {
-            let reused =
-                ScopeAggregate::build_for_tracks_reusing(&scan, FlameMode::default(), sel);
-            let fresh = ScopeAggregate::build_for_tracks(&p, FlameMode::default(), sel);
+            let reused = ScopeAggregate::build_for_tracks_reusing(
+                &scan,
+                FlameMode::default(),
+                &TimeSelection::default(),
+                sel,
+            );
+            let fresh = ScopeAggregate::build_for_tracks(
+                &p,
+                FlameMode::default(),
+                &TimeSelection::default(),
+                sel,
+            );
             assert_eq!(resolved(&reused.flame), resolved(&fresh.flame));
             assert_eq!(
                 resolved_rows(&reused.flame, &reused.stats),
@@ -267,16 +300,37 @@ mod tests {
     }
 
     #[test]
+    fn an_aggregate_carries_the_window_its_figures_cover() {
+        let p = full_profile();
+        let mut window = TimeSelection::default();
+        window.insert(span_between(0, 100));
+        let agg = ScopeAggregate::build_for_tracks(&p, FlameMode::default(), &window, |_| true);
+        assert_eq!(agg.window, window);
+        let unrestricted = ScopeAggregate::build_for_tracks(
+            &p,
+            FlameMode::default(),
+            &TimeSelection::default(),
+            |_| true,
+        );
+        assert!(unrestricted.window.is_empty());
+        // The window bites: the profile runs past it, so the two differ.
+        assert!(agg.grand_total < unrestricted.grand_total);
+    }
+
+    #[test]
     fn class_selections_sum_to_their_union() {
         let p = full_profile();
         let t = p.threads();
         let class_total = |c: LaneClass| {
-            ScopeAggregate::build_for_tracks(&p, FlameMode::default(), move |i| {
-                t[i].lane_class == c
-            })
-                .flame
-                .root()
-                .total_us
+            ScopeAggregate::build_for_tracks(
+                &p,
+                FlameMode::default(),
+                &TimeSelection::default(),
+                move |i| t[i].lane_class == c,
+            )
+            .flame
+            .root()
+            .total_us
         };
         let loading = class_total(LaneClass::RepoFetch);
         let analysis = class_total(LaneClass::Analysis);
@@ -287,12 +341,17 @@ mod tests {
         assert_eq!(execution, 210);
         // A selection's root total is additive over disjoint lane sets: the three
         // classes unioned total exactly the sum of the three.
-        let union = ScopeAggregate::build_for_tracks(&p, FlameMode::default(), |i| {
-            matches!(
-                t[i].lane_class,
-                LaneClass::RepoFetch | LaneClass::Analysis | LaneClass::Execution
-            )
-        })
+        let union = ScopeAggregate::build_for_tracks(
+            &p,
+            FlameMode::default(),
+            &TimeSelection::default(),
+            |i| {
+                matches!(
+                    t[i].lane_class,
+                    LaneClass::RepoFetch | LaneClass::Analysis | LaneClass::Execution
+                )
+            },
+        )
         .flame
         .root()
         .total_us;
@@ -327,9 +386,12 @@ mod tests {
             ),
         ]);
         let t = p.threads();
-        let agg = ScopeAggregate::build_for_tracks(&p, FlameMode::default(), |i| {
-            t[i].lane_class == LaneClass::Analysis
-        });
+        let agg = ScopeAggregate::build_for_tracks(
+            &p,
+            FlameMode::default(),
+            &TimeSelection::default(),
+            |i| t[i].lane_class == LaneClass::Analysis,
+        );
         let g = &agg.flame;
         // The carrier joined the foreign smallest-mnemonic frame carrying its own
         // 20us; no span frame is left under the carrier's own name.
@@ -355,7 +417,12 @@ mod tests {
             .map(|(i, k)| slice(k, "generic", i as i64 * 10, 5))
             .collect();
         let p = profile(vec![track(1, LaneClass::Execution, slices)]);
-        let agg = ScopeAggregate::build_for_tracks(&p, FlameMode::default(), |_| true);
+        let agg = ScopeAggregate::build_for_tracks(
+            &p,
+            FlameMode::default(),
+            &TimeSelection::default(),
+            |_| true,
+        );
         assert_eq!(agg.stats.len(), keys.len());
         let text_of = |r: &StatRow| agg.flame.str(r.key).to_owned();
         let mut by_rank: Vec<String> = {
@@ -390,7 +457,12 @@ mod tests {
             Box::new(|i: usize| t[i].lane_class == LaneClass::Execution),
         ];
         for sel in &selections {
-            let agg = ScopeAggregate::build_for_tracks(&p, FlameMode::default(), sel);
+            let agg = ScopeAggregate::build_for_tracks(
+                &p,
+                FlameMode::default(),
+                &TimeSelection::default(),
+                sel,
+            );
             assert_eq!(agg.default_order.len(), agg.stats.len());
             let keys: Vec<(i64, &str)> = agg
                 .default_order

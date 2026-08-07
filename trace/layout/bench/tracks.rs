@@ -8,7 +8,7 @@
 
 use std::sync::Arc;
 
-use bviz_trace_layout::{FlameDirection, FlameMode, ScopeAggregate, TrackFlamer};
+use bviz_trace_layout::{FlameDirection, FlameMode, ScopeAggregate, TimeSelection, TrackFlamer};
 use bviz_trace_profile::{LaneClass, Profile};
 
 #[global_allocator]
@@ -55,17 +55,24 @@ fn main() {
         .map(|t| profile.slices(t).len())
         .sum();
 
-    // The presentation the view opens on.
+    // The presentation the view opens on, over the whole timeline.
     let mode = FlameMode::default();
+    let window = TimeSelection::default();
     let single = min_secs(iters, || {
-        std::hint::black_box(ScopeAggregate::build_for_tracks(&profile, mode, |i| {
-            i == biggest
-        }));
+        std::hint::black_box(ScopeAggregate::build_for_tracks(
+            &profile,
+            mode,
+            &window,
+            |i| i == biggest,
+        ));
     });
     let all = min_secs(iters, || {
-        std::hint::black_box(ScopeAggregate::build_for_tracks(&profile, mode, |i| {
-            threads[i].lane_class != LaneClass::CriticalPath
-        }));
+        std::hint::black_box(ScopeAggregate::build_for_tracks(
+            &profile,
+            mode,
+            &window,
+            |i| threads[i].lane_class != LaneClass::CriticalPath,
+        ));
     });
     // The whole-profile scan the view holds after the first build; every later
     // selection rebuilds from it rather than rescanning.
@@ -76,9 +83,12 @@ fn main() {
     // this timing is warm: the pure merge every selection change after it costs.
     let scan = TrackFlamer::new(&profile);
     let all_reused = min_secs(iters, || {
-        std::hint::black_box(ScopeAggregate::build_for_tracks_reusing(&scan, mode, |i| {
-            threads[i].lane_class != LaneClass::CriticalPath
-        }));
+        std::hint::black_box(ScopeAggregate::build_for_tracks_reusing(
+            &scan,
+            mode,
+            &window,
+            |i| threads[i].lane_class != LaneClass::CriticalPath,
+        ));
     });
 
     // The same rebuild presented bottom-up, so the gap against `all_reused` is
@@ -87,6 +97,7 @@ fn main() {
         std::hint::black_box(ScopeAggregate::build_for_tracks_reusing(
             &scan,
             FlameMode { direction: FlameDirection::BottomUp, ..mode },
+            &window,
             |i| threads[i].lane_class != LaneClass::CriticalPath,
         ));
     });
@@ -94,10 +105,11 @@ fn main() {
     let bottom_up_agg = ScopeAggregate::build_for_tracks_reusing(
         &scan,
         FlameMode { direction: FlameDirection::BottomUp, ..mode },
+        &window,
         |i| threads[i].lane_class != LaneClass::CriticalPath,
     );
-    let single_agg = ScopeAggregate::build_for_tracks(&profile, mode, |i| i == biggest);
-    let all_agg = ScopeAggregate::build_for_tracks(&profile, mode, |i| {
+    let single_agg = ScopeAggregate::build_for_tracks(&profile, mode, &window, |i| i == biggest);
+    let all_agg = ScopeAggregate::build_for_tracks(&profile, mode, &window, |i| {
         threads[i].lane_class != LaneClass::CriticalPath
     });
     eprintln!(

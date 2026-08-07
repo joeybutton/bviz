@@ -712,7 +712,7 @@ fn flame_paint(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bviz_trace_layout::{FlameDirection, FlameLabels, FlameMode};
+    use bviz_trace_layout::{FlameDirection, FlameLabels, FlameMode, TimeSelection};
     use bviz_trace_profile::Profile;
 
     /// Width of the content column the fixture layouts are placed for, wide
@@ -741,6 +741,7 @@ mod tests {
         Arc::new(ScopeAggregate::build_for_tracks(
             profile,
             FlameMode { direction: FlameDirection::TopDown, labels: FlameLabels::Name },
+            &TimeSelection::default(),
             |_| true,
         ))
     }
