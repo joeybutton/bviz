@@ -176,10 +176,9 @@ const _: () = assert!(std::mem::size_of::<SliceDetail>() == 40);
 /// envelope.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Workload {
-    /// The spawned action body: a local/remote/worker process, the frames that
-    /// envelope it (the mnemonic-bearing action frame, the local resource slot
-    /// the action holds for the length of its body), and its replay on the
-    /// critical path.
+    /// The action body: a span whose duration is the time an action's own
+    /// process was running, whether it measures that process directly or stands
+    /// for it.
     Subprocess,
     /// Build logic run by the interpreter: Starlark calls, rule bodies, module
     /// and repository evaluation.
