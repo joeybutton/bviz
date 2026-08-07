@@ -37,6 +37,16 @@ crate.from_cargo(
     platform_triples = PLATFORM_TRIPLES,
 )
 
+# InteractiveExternalPortPositioner holds a node's lock while calling the searches
+# that re-lock that same node, and elk-rs's node lock is a plain parking_lot mutex,
+# so the thread blocks on itself. Every layered layout that runs an interactive
+# phase and has an edge crossing a container boundary reaches it and hangs.
+crate.annotation(
+    crate = "org-eclipse-elk-alg-layered",
+    patches = ["@@//patches:elk-rs-reentrant-external-port-lock.patch"],
+    patch_args = ["-p1"],
+)
+
 # Load libfontconfig at runtime (dlopen) instead of linking it via pkg-config.
 crate.annotation(
     crate = "zed-font-kit",
