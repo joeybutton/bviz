@@ -16,7 +16,7 @@ use bviz_trace_profile::{Profile, Slice, SliceDetail};
 use bviz_ui_components::{Scrollbar, cached_layer, overlay_canvas, track_drag};
 use gpui::{
     App, Bounds, ContentMask, Context, Div, Entity, FocusHandle, IntoElement, KeyBinding,
-    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Render, ScrollDelta,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Render,
     ScrollWheelEvent, Stateful, WeakEntity, Window, canvas, div,
     fill, point, prelude::*, px, size,
 };
@@ -467,10 +467,8 @@ impl TimelinePanel {
         let regions = self.regions(cx);
         let time_w = regions.time_w;
         let content_left = regions.content_left;
-        let (dx, dy) = match e.delta {
-            ScrollDelta::Lines(p) => (p.x * LINE_SCROLL_PX, p.y * LINE_SCROLL_PX),
-            ScrollDelta::Pixels(p) => (f32::from(p.x), f32::from(p.y)),
-        };
+        let delta = e.delta.pixel_delta(px(LINE_SCROLL_PX));
+        let (dx, dy) = (f32::from(delta.x), f32::from(delta.y));
         if e.modifiers.control || e.modifiers.platform {
             let rel_x = f32::from(e.position.x) - content_left;
             let dy_lines = dy / LINE_SCROLL_PX;

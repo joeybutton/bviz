@@ -16,7 +16,7 @@ use bviz_ui_components::{
 };
 use gpui::{
     App, Bounds, ContentMask, Context, Div, Entity, IntoElement, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Render, ScrollDelta,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Render,
     ScrollWheelEvent, Stateful, Subscription, WeakEntity, Window, canvas, div,
     point, prelude::*, px, size,
 };
@@ -497,10 +497,8 @@ impl FlamePanel {
         let Some(fl) = self.layout(cx) else {
             return;
         };
-        let (dx, dy) = match e.delta {
-            ScrollDelta::Lines(p) => (p.x * LINE_SCROLL_PX, p.y * LINE_SCROLL_PX),
-            ScrollDelta::Pixels(p) => (f32::from(p.x), f32::from(p.y)),
-        };
+        let delta = e.delta.pixel_delta(px(LINE_SCROLL_PX));
+        let (dx, dy) = (f32::from(delta.x), f32::from(delta.y));
         let (mut fv, left, width) = (fl.view, fl.left, fl.width);
         if e.modifiers.control || e.modifiers.platform {
             let dy_lines = dy / LINE_SCROLL_PX;
