@@ -4,7 +4,7 @@
 use bviz_trace_layout::{SpanRole, Workload};
 use bviz_ui_components::{LabelBoxStyle, TooltipColors};
 use bviz_ui_theme::{hue_of, luminance};
-use gpui::{div, hsla, prelude::*, px, Hsla, IntoElement, Rgba};
+use gpui::{Hsla, IntoElement, Rgba, div, hsla, prelude::*, px};
 
 /// Saturation of a counter series' translucent fill.
 const CATEGORY_SATURATION: f32 = 0.5;
@@ -54,6 +54,10 @@ const SELECTION_TINT_MIX: f32 = 0.8;
 const LEGEND_SWATCH: f32 = 10.0;
 const LEGEND_LABEL_GAP: f32 = 4.0;
 
+/// Leading of a legend label, and so the height of the legend's single row: a
+/// wrapped entry starts below that row and is clipped away.
+const LEGEND_LEADING: f32 = 1.6;
+
 /// Fill for a span, keyed by its [`SpanRole`]: the workload gives the base hue and
 /// the payload flag its weight, so the compiler and the Starlark that drives the
 /// build read vivid while Bazel's own overhead (scheduling, caching, graph
@@ -96,6 +100,8 @@ pub fn span_role_color(role: SpanRole, background: Rgba) -> Hsla {
 
 /// A legend of the span-role colors: a swatch and name per workload in a row,
 /// matching the fills the flame boxes use. Payload workloads lead, then overhead.
+/// Squeezed, it sheds whole entries off its right end, so every swatch it shows
+/// keeps the size that keys it to the fill.
 pub fn role_legend(label: Rgba, background: Rgba, text_size: f32) -> impl IntoElement {
     const ROLES: [(Workload, bool, &str); 8] = [
         (Workload::Subprocess, true, "action"),
@@ -107,10 +113,16 @@ pub fn role_legend(label: Rgba, background: Rgba, text_size: f32) -> impl IntoEl
         (Workload::Gc, false, "gc"),
         (Workload::Other, false, "other"),
     ];
+    let row = px(text_size * LEGEND_LEADING);
     div()
         .flex()
         .flex_row()
+        .flex_wrap()
         .items_center()
+        .content_start()
+        .h(row)
+        .line_height(row)
+        .overflow_hidden()
         .gap_3()
         .text_color(label)
         .text_size(px(text_size))
@@ -119,6 +131,7 @@ pub fn role_legend(label: Rgba, background: Rgba, text_size: f32) -> impl IntoEl
                 .flex()
                 .flex_row()
                 .items_center()
+                .flex_shrink_0()
                 .gap(px(LEGEND_LABEL_GAP))
                 .child(
                     div()

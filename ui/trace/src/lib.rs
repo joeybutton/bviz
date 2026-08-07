@@ -424,6 +424,7 @@ impl TraceView {
                     .id(SharedString::from(format!("trace-tab-{label}")))
                     .flex()
                     .items_center()
+                    .flex_shrink_0()
                     .px_3()
                     .h_full()
                     .cursor_pointer()
@@ -448,6 +449,7 @@ impl TraceView {
             .flex()
             .flex_row()
             .items_stretch()
+            .overflow_hidden()
             .bg(palette.header_band)
             .border_t_1()
             .border_color(palette.divider)
@@ -465,13 +467,10 @@ impl TraceView {
                     this.invalidate_timeline(cx);
                 }),
             )
+            // The tabs, the chip and the mode controls all hold their width, so
+            // the legend is the one item that gives when the bar runs short.
             .children(tabs)
-            // The time-window chip follows the tabs, in space every tab leaves
-            // free, so it does not compete with the flame graph's controls for the
-            // right end of the bar.
             .children(self.time_window_chip(palette, cx))
-            // The flame graph's mode controls and its work-class legend, keyed to
-            // the box fills, sit at the far right of the bar while its tab is up.
             .child(div().flex_1())
             .children((active == BottomTab::FlameGraph).then(|| {
                 div()
@@ -575,6 +574,7 @@ impl TraceView {
             .flex()
             .flex_row()
             .items_center()
+            .flex_shrink_0()
             .gap_1()
             .text_size(px(STATS_TEXT_SIZE))
             .child(button(
