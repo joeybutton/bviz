@@ -9,7 +9,7 @@
 use std::sync::Arc;
 
 use bviz_trace_layout::{FlameDirection, FlameMode, ScopeAggregate, TimeSelection, TrackFlamer};
-use bviz_trace_profile::{LaneClass, Profile};
+use bviz_trace_profile::{LaneClass, Profile, TimeSpan};
 
 #[global_allocator]
 static GLOBAL: bviz_alloc::MiMalloc = bviz_alloc::MiMalloc;
@@ -22,6 +22,40 @@ fn min_secs(iters: usize, mut f: impl FnMut()) -> f64 {
             t.elapsed().as_secs_f64()
         })
         .fold(f64::INFINITY, f64::min)
+}
+
+/// A selection of `parts` equal regions spread evenly over `span`, together
+/// covering `coverage` of it, each centred in its own even share. One part is
+/// the single stretch a drag selects; several stand for regions far enough apart
+/// that their bounds reach across the profile. Expressed as a fraction so a case
+/// means the same thing on any profile.
+fn spread(span: TimeSpan, coverage: f64, parts: usize) -> TimeSelection {
+    let stride = (span.end_us - span.start_us) as f64 / parts as f64;
+    let width = stride * coverage;
+    let mut sel = TimeSelection::default();
+    for k in 0..parts {
+        let start = span.start_us as f64 + k as f64 * stride + (stride - width) / 2.0;
+        let region = TimeSpan {
+            start_us: start as i64,
+            end_us: (start + width) as i64,
+        };
+        assert!(sel.insert(region).is_some(), "a region of non-zero width");
+    }
+    sel
+}
+
+/// The same selection with its last region ending a microsecond earlier: all but
+/// an instant of the same time, under a key of its own. Building alternately
+/// against `sel` and this misses the per-window memo every time, so each build
+/// pays a reduction.
+fn evicting(sel: &TimeSelection) -> TimeSelection {
+    let mut out = TimeSelection::default();
+    for (i, region) in sel.spans().iter().enumerate() {
+        let shorten = (i + 1 == sel.len()) as i64;
+        let region = TimeSpan { end_us: region.end_us - shorten, ..*region };
+        assert!(out.insert(region).is_some(), "a region of non-zero width");
+    }
+    out
 }
 
 fn main() {
@@ -140,4 +174,44 @@ fn main() {
         all_agg.stats.len(),
         bottom_up_agg.flame.nodes().len(),
     );
+
+    // What a window costs the view: dragging a region out reduces the lanes
+    // afresh under it, and every track-selection change under that same region
+    // then merges from the memo. The reduce walks the slices the regions' bounds
+    // reach, so it falls away with a narrowing single region but not with a set
+    // spread across the profile. Spans sit unevenly in time, so what a case
+    // aggregates is its node and row counts rather than its coverage.
+    for (coverage, parts) in [(0.01, 1), (0.10, 1), (1.00, 1), (0.10, 8)] {
+        let win = spread(profile.span(), coverage, parts);
+        let other = evicting(&win);
+        let mut builds = 0usize;
+        let reduced = min_secs(iters, || {
+            builds += 1;
+            let w = if builds % 2 == 0 { &other } else { &win };
+            std::hint::black_box(ScopeAggregate::build_for_tracks_reusing(
+                &scan,
+                mode,
+                w,
+                |i| threads[i].lane_class != LaneClass::CriticalPath,
+            ));
+        });
+        let merged = min_secs(iters, || {
+            std::hint::black_box(ScopeAggregate::build_for_tracks_reusing(
+                &scan,
+                mode,
+                &win,
+                |i| threads[i].lane_class != LaneClass::CriticalPath,
+            ));
+        });
+        let agg = ScopeAggregate::build_for_tracks_reusing(&scan, mode, &win, |i| {
+            threads[i].lane_class != LaneClass::CriticalPath
+        });
+        eprintln!(
+            "[bench] window {:.0}% in {parts} region(s): reduce+merge {reduced:.3}s  \
+             memo-hit merge {merged:.3}s  ({} nodes / {} rows)",
+            coverage * 100.0,
+            agg.flame.nodes().len(),
+            agg.stats.len(),
+        );
+    }
 }
