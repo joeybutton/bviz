@@ -413,10 +413,11 @@ fn level(
     LaidOut {
         boxes,
         connectors: connectors(&drawn, drawing),
+        // The frames are laid out by layout_flat, which numbers no node.
+        anchors: HashMap::new(),
         full_edges: connected.into_iter().collect(),
         width: drawing.width,
         height: drawing.height,
-        ..Default::default()
     }
 }
 

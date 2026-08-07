@@ -12,10 +12,11 @@
 //! relative to the edge's containing node, so both are accumulated up the
 //! containment chain into the absolute, top-left frame the renderer expects.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use org_eclipse_elk_alg_layered::org::eclipse::elk::alg::layered::options::{
-    GraphCompactionStrategy, LayeredOptions, NodePlacementStrategy,
+    CycleBreakingStrategy, GraphCompactionStrategy, InteractiveReferencePoint, LayeredOptions,
+    LayeringStrategy, NodePlacementStrategy,
 };
 use org_eclipse_elk_alg_layered::org::eclipse::elk::alg::layered::plain_java_initialization::initialize_plain_java_layout;
 use org_eclipse_elk_core::org::eclipse::elk::core::math::{ElkPadding, KVector};
@@ -117,7 +118,8 @@ pub struct LaidOut {
     pub connectors: Vec<Connector>,
     /// The layered configuration this drawing realizes, for reproducing its
     /// reading order in another drawing. A node the layout reported no place for
-    /// is absent.
+    /// is absent, and a drawing from a layout that numbers no node at all leaves
+    /// this empty.
     pub anchors: HashMap<Id, Anchor>,
     /// Every connected node pair in the view before any edges were dropped for
     /// drawing (e.g. by transitive reduction), so hovering can still light up a
@@ -128,8 +130,30 @@ pub struct LaidOut {
 }
 
 pub fn layout(graph: &Graph) -> LaidOut {
+    lay_out(graph, None)
+}
+
+/// Lays `graph` out held to `anchors`: each frame takes its layering, its cycle
+/// breaking, and the order within each layer from the given configuration instead
+/// of deriving one, so the anchored nodes come back in the order they were given.
+/// The layers and slots they come back numbered by are the drawing's own, counted
+/// densely from zero, not the numbers they were pinned at. Coordinates and edge
+/// routes are computed as usual, so the drawing fits whatever the boxes now
+/// measure.
+///
+/// A node `anchors` omits carries no pinned position, so the crossing
+/// minimization ranks it freely within its layer. The layerer reads a position
+/// for every node and sees such a node at the origin, which puts it in the first
+/// layer; from there ELK's feasibility repair pushes any node that would draw at
+/// or above one of its sources one layer past that source, cascading along the
+/// edges out of each node it moves.
+pub fn layout_pinned(graph: &Graph, anchors: &HashMap<Id, Anchor>) -> LaidOut {
+    lay_out(graph, Some(anchors))
+}
+
+fn lay_out(graph: &Graph, pinned: Option<&HashMap<Id, Anchor>>) -> LaidOut {
     let children_of = children_by_parent(graph);
-    let (root, elk_of) = build_elk_graph(graph, &children_of);
+    let (root, elk_of) = build_elk_graph(graph, &children_of, pinned);
     let edges = route_edges(graph, &elk_of, &root);
 
     let mut engine = RecursiveGraphLayoutEngine::new();
@@ -254,6 +278,7 @@ pub(crate) fn children_by_parent(graph: &Graph) -> HashMap<Id, Vec<&Node>> {
 fn build_elk_graph<'g>(
     graph: &'g Graph,
     children_of: &HashMap<Id, Vec<&'g Node>>,
+    pinned: Option<&HashMap<Id, Anchor>>,
 ) -> (ElkNodeRef, HashMap<Id, ElkNodeRef>) {
     // Routing every edge through one hierarchy-spanning layered pass runs the
     // cross-container edges orthogonally between subgraphs.
@@ -271,6 +296,20 @@ fn build_elk_graph<'g>(
         if children_of.contains_key(&node.id) {
             apply_options(&elk_of[&node.id]);
             report_anchors(&elk_of[&node.id]);
+        }
+    }
+    if let Some(anchors) = pinned {
+        let anchored = anchored_frames(graph, anchors);
+        if anchored.contains(&None) {
+            pin_frame(&root);
+        }
+        for node in &graph.nodes {
+            if children_of.contains_key(&node.id) && anchored.contains(&Some(node.id)) {
+                pin_frame(&elk_of[&node.id]);
+            }
+            if let Some(&anchor) = anchors.get(&node.id) {
+                pin_node(&elk_of[&node.id], anchor);
+            }
         }
     }
     (root, elk_of)
@@ -498,6 +537,56 @@ fn apply_options(node: &ElkNodeRef) {
     );
 }
 
+/// Each frame that holds a node `anchors` carries a place for, named by the
+/// parent its members share; the root frame's members are the nodes without a
+/// parent, so it is named `None`.
+fn anchored_frames(graph: &Graph, anchors: &HashMap<Id, Anchor>) -> HashSet<Option<Id>> {
+    let mut frames = HashSet::new();
+    for node in &graph.nodes {
+        if anchors.contains_key(&node.id) {
+            frames.insert(node.parent);
+        }
+    }
+    frames
+}
+
+/// Has the frame `node` heads read its layering, its cycle breaking, and the
+/// order within each layer off its nodes' positions, which is what [`pin_node`]
+/// writes an [`Anchor`] as. A frame takes its configuration from the anchors when
+/// one of its members carries one, and derives one of its own otherwise.
+fn pin_frame(node: &ElkNodeRef) {
+    set_property(node, LayeredOptions::LAYERING_STRATEGY, LayeringStrategy::Interactive);
+    set_property(
+        node,
+        LayeredOptions::CYCLE_BREAKING_STRATEGY,
+        CycleBreakingStrategy::Interactive,
+    );
+    set_property(node, LayeredOptions::CROSSING_MINIMIZATION_SEMI_INTERACTIVE, true);
+    // Read each pinned position as written, rather than offset by half a node's
+    // extent, which at cycle breaking a leaf has and a container has not.
+    set_property(
+        node,
+        LayeredOptions::INTERACTIVE_REFERENCE_POINT,
+        InteractiveReferencePoint::TopLeft,
+    );
+}
+
+/// Spacing between the pseudo coordinates of consecutive layers and slots. It
+/// exceeds any extent a node has along the flow axis while the layout reads these
+/// positions, so that two layers' spans stay disjoint: the layerer groups nodes
+/// into layers by overlapping spans and merges two whose spans touch.
+const STRIDE: f64 = 1_000_000.0;
+
+/// Writes `anchor` where the layout reads a configuration from: a pseudo position
+/// laying the layer out along the flow axis and the slot across it, both as the
+/// node's shape position, which the layerer reads, and as the position property,
+/// which the crossing minimization orders each layer by.
+fn pin_node(node: &ElkNodeRef, anchor: Anchor) {
+    let at = KVector { x: f64::from(anchor.slot) * STRIDE, y: f64::from(anchor.layer) * STRIDE };
+    node.borrow_mut().connectable().shape().set_location(at.x, at.y);
+    set_property(node, LayeredOptions::POSITION, at);
+}
+
 /// Has the frame `node` heads number its nodes' layers and in-layer positions,
 /// which costs it an extra pass once the layout is otherwise settled. A frame
 /// that omits this leaves its nodes without an [`Anchor`].
@@ -576,7 +665,7 @@ mod tests {
     /// Three package containers of leaves, with dependencies inside each and
     /// across the boundaries, so the root frame and the container frames each
     /// span several layers and one layer holds boxes of differing width.
-    fn compound() -> (Graph, LaidOut) {
+    fn compound_graph() -> Graph {
         let mut names = Names::default();
         let mut graph = Graph::new();
         let mut add = |graph: &mut Graph, name: &str, kind: Kind, parent: Option<Id>| {
@@ -609,8 +698,75 @@ mod tests {
             graph.add_edge(from, to, EdgeKind::Query);
         }
 
+        graph
+    }
+
+    fn compound() -> (Graph, LaidOut) {
+        let graph = compound_graph();
         let laid = layout(&graph);
         (graph, laid)
+    }
+
+    /// The compound fixture with a dependency from the last package back into the
+    /// first, so the three packages depend on one another in a cycle that the root
+    /// frame has to break to lay out.
+    fn cyclic() -> (Graph, LaidOut) {
+        let mut graph = compound_graph();
+        let (image, source) = (labeled(&graph, "image"), labeled(&graph, "source"));
+        graph.add_edge(image, source, EdgeKind::Query);
+        let laid = layout(&graph);
+        (graph, laid)
+    }
+
+    /// Two packages, neither depending on the other. One holds a frame whose
+    /// balanced layering no layering from the sources alone reaches: `early`
+    /// reaches `late` in one step while `first` reaches it through `middle`, so a
+    /// balanced layering draws `early` beside `middle` and only a layering that
+    /// pushes every source to the top strands it above them. The other holds a
+    /// pair for a pinning to bite on.
+    fn unbalanced_graph() -> Graph {
+        let mut names = Names::default();
+        let mut graph = Graph::new();
+        let mut add = |graph: &mut Graph, name: &str, kind: Kind, parent: Option<Id>| {
+            let id = names.intern(name);
+            graph.add_node(id, name, kind, parent);
+            id
+        };
+
+        let compute = add(&mut graph, "compute", Kind::Package, None);
+        let report = add(&mut graph, "report", Kind::Package, None);
+
+        let early = add(&mut graph, "early", Kind::Target, Some(compute));
+        let first = add(&mut graph, "first", Kind::Target, Some(compute));
+        let middle = add(&mut graph, "middle", Kind::Target, Some(compute));
+        let late = add(&mut graph, "late", Kind::Target, Some(compute));
+        let draft = add(&mut graph, "draft", Kind::Target, Some(report));
+        let published = add(&mut graph, "published", Kind::Target, Some(report));
+
+        for (from, to) in [(early, late), (first, middle), (middle, late), (draft, published)] {
+            graph.add_edge(from, to, EdgeKind::Query);
+        }
+
+        graph
+    }
+
+    fn labeled(graph: &Graph, label: &str) -> Id {
+        graph
+            .nodes
+            .iter()
+            .find(|node| node.label == label)
+            .unwrap_or_else(|| panic!("the fixture has no node labeled {label}"))
+            .id
+    }
+
+    /// A configuration keyed by node label and ordered, so a mismatch reports
+    /// which nodes moved.
+    fn by_label(graph: &Graph, anchors: &HashMap<Id, Anchor>) -> BTreeMap<String, Anchor> {
+        graph
+            .nodes
+            .iter()
+            .filter_map(|node| Some((node.label.clone(), *anchors.get(&node.id)?)))
+            .collect()
     }
 
     /// The boxes of each frame the layout ran: the root frame, keyed by `None`,
@@ -682,5 +838,179 @@ mod tests {
             }
         }
         assert!(compared > 0, "no layer holds two boxes");
+    }
+
+    /// Holding a drawing to its own configuration is a fixed point. This says
+    /// nothing about whether the configuration was read, since laying the same
+    /// graph out twice repeats itself either way; it guards the pinned path
+    /// against drifting away from the free one.
+    #[test]
+    fn a_layout_held_to_the_configuration_it_produced_reproduces_it() {
+        let (graph, laid) = compound();
+        let held = layout_pinned(&graph, &laid.anchors);
+        assert_eq!(by_label(&graph, &held.anchors), by_label(&graph, &laid.anchors));
+    }
+
+    /// The drawing follows the configuration it is given rather than the one the
+    /// free layout derives, which reproducing a configuration alone cannot show:
+    /// laying the same graph out twice repeats itself whether or not the anchors
+    /// are read.
+    #[test]
+    fn a_pair_pinned_the_other_way_round_comes_back_the_other_way_round() {
+        let (graph, laid) = compound();
+        let (one, other) = (labeled(&graph, "widget"), labeled(&graph, "much_longer_label"));
+        let (one_at, other_at) = (laid.anchors[&one], laid.anchors[&other]);
+        assert_eq!(one_at.layer, other_at.layer, "the fixture holds these two in one layer");
+
+        let mut pinning = laid.anchors.clone();
+        pinning.insert(one, other_at);
+        pinning.insert(other, one_at);
+
+        let held = layout_pinned(&graph, &pinning);
+        assert_eq!((held.anchors[&one], held.anchors[&other]), (other_at, one_at));
+    }
+
+    /// The fixed point of the round trip holds for a graph whose frames have a
+    /// cycle to break as well; like the acyclic round trip, it guards the pinned
+    /// path rather than showing the configuration was read.
+    #[test]
+    fn a_layout_of_packages_in_a_cycle_reproduces_its_own_configuration() {
+        let (graph, laid) = cyclic();
+        let held = layout_pinned(&graph, &laid.anchors);
+        assert_eq!(by_label(&graph, &held.anchors), by_label(&graph, &laid.anchors));
+    }
+
+    /// The layering follows the configuration it is given: a node pinned a layer
+    /// past the frame-mate the free layout draws it beside comes back below it,
+    /// which no layering derived from the graph alone would produce.
+    #[test]
+    fn a_node_pinned_a_layer_on_comes_back_below_the_mate_it_shared_one_with() {
+        let (graph, laid) = compound();
+        let (stays, moves) = (labeled(&graph, "widget"), labeled(&graph, "much_longer_label"));
+        let moves_at = laid.anchors[&moves];
+        let stays_at = laid.anchors[&stays];
+        assert_eq!(stays_at.layer, moves_at.layer, "the fixture holds these two in one layer");
+
+        let mut pinning = laid.anchors.clone();
+        pinning.insert(moves, Anchor { layer: moves_at.layer + 1, ..moves_at });
+
+        let held = layout_pinned(&graph, &pinning);
+        assert!(
+            held.anchors[&stays].layer < held.anchors[&moves].layer,
+            "much_longer_label (layer {}) did not come back below widget (layer {})",
+            held.anchors[&moves].layer,
+            held.anchors[&stays].layer,
+        );
+    }
+
+    /// The cycle breaking follows the configuration it is given: pinning the three
+    /// packages in an order that makes a different edge of their cycle the
+    /// backward one leaves every other edge running forward, so the packages come
+    /// back in the pinned order. Breaking the cycle at the edge the graph alone
+    /// suggests would leave one edge pointing against the pinning, and the
+    /// layerer's feasibility repair would push its target past its source.
+    #[test]
+    fn a_cycle_pinned_to_break_at_another_edge_comes_back_in_the_pinned_order() {
+        let (graph, laid) = cyclic();
+        let (lib, front, back) =
+            (labeled(&graph, "lib"), labeled(&graph, "front"), labeled(&graph, "back"));
+
+        // The packages depend on one another lib -> front -> back -> lib; rotating
+        // them to back, lib, front makes front -> back the edge that runs backward.
+        let mut pinning = laid.anchors.clone();
+        for (package, layer) in [(back, 0), (lib, 1), (front, 2)] {
+            pinning.insert(package, Anchor { layer, ..laid.anchors[&package] });
+        }
+
+        let held = layout_pinned(&graph, &pinning);
+        let (back_at, lib_at, front_at) =
+            (held.anchors[&back], held.anchors[&lib], held.anchors[&front]);
+        assert!(
+            back_at.layer < lib_at.layer && lib_at.layer < front_at.layer,
+            "the packages came back at layers back {}, lib {}, front {}",
+            back_at.layer,
+            lib_at.layer,
+            front_at.layer,
+        );
+    }
+
+    /// A frame none of whose members is pinned derives its own configuration, the
+    /// same one the free layout gives it, while the frames around it are held to
+    /// theirs. This is the frame a container just revealed heads: its members were
+    /// in no earlier drawing, so a pinning has nothing to say about them.
+    #[test]
+    fn a_frame_with_no_member_pinned_is_laid_out_as_the_free_layout_lays_it_out() {
+        let graph = unbalanced_graph();
+        let free = layout(&graph);
+        let revealed = labeled(&graph, "compute");
+
+        let mut pinning = free.anchors.clone();
+        for node in graph.nodes.iter().filter(|node| node.parent == Some(revealed)) {
+            pinning.remove(&node.id);
+        }
+
+        let held = layout_pinned(&graph, &pinning);
+        for node in graph.nodes.iter().filter(|node| node.parent == Some(revealed)) {
+            assert_eq!(
+                held.anchors[&node.id], free.anchors[&node.id],
+                "{} moved in a frame nothing pinned",
+                node.label,
+            );
+        }
+    }
+
+    #[test]
+    fn an_unpinned_node_is_placed_and_leaves_the_pinned_order_intact() {
+        let (graph, laid) = compound();
+        let loose = labeled(&graph, "widget");
+        let mut pinning = laid.anchors.clone();
+        pinning.remove(&loose);
+
+        let held = layout_pinned(&graph, &pinning);
+        assert!(held.anchors.contains_key(&loose), "the unpinned node came back unplaced");
+
+        let mut compared = 0;
+        for boxes in frames(&graph, &laid).values() {
+            for first in boxes {
+                for second in boxes {
+                    if first.id == second.id {
+                        continue;
+                    }
+                    let (Some(&was_first), Some(&was_second)) =
+                        (pinning.get(&first.id), pinning.get(&second.id))
+                    else {
+                        continue;
+                    };
+                    let (now_first, now_second) =
+                        (held.anchors[&first.id], held.anchors[&second.id]);
+                    compared += 1;
+                    assert_eq!(
+                        now_first.layer.cmp(&now_second.layer),
+                        was_first.layer.cmp(&was_second.layer),
+                        "{} (layer {} -> {}) and {} (layer {} -> {}) swapped layer order",
+                        first.label,
+                        was_first.layer,
+                        now_first.layer,
+                        second.label,
+                        was_second.layer,
+                        now_second.layer,
+                    );
+                    if was_first.layer == was_second.layer {
+                        assert_eq!(
+                            now_first.slot.cmp(&now_second.slot),
+                            was_first.slot.cmp(&was_second.slot),
+                            "{} (slot {} -> {}) and {} (slot {} -> {}) swapped slot order",
+                            first.label,
+                            was_first.slot,
+                            now_first.slot,
+                            second.label,
+                            was_second.slot,
+                            now_second.slot,
+                        );
+                    }
+                }
+            }
+        }
+        assert!(compared > 0, "no frame holds two pinned boxes");
     }
 }
