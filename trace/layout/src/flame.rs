@@ -624,36 +624,37 @@ pub struct TrackFlamer {
     /// do not depend on the selection but do key by label, so the reduction is
     /// paid once for a labelling asked for, never for one that is not, and a
     /// selection change pays only the merge (see [`build`](TrackFlamer::build)).
-    lane_tables: LaneTableSets,
-    /// The reduced lanes last built for under a restricting window, so a track
-    /// selection change under an unchanged window pays only the merge.
-    windowed: Mutex<Option<WindowedTables>>,
+    lane_tables: ByLabels<OnceLock<Vec<LaneTable>>>,
+    /// The reduced lanes last built for under a restricting window, one window
+    /// held per labelling, so a track selection or labelling change under an
+    /// unchanged window pays only the merge. A window change evicts: the tables
+    /// hold only what their own window admits.
+    windowed: ByLabels<Mutex<Option<WindowedTables>>>,
     /// How many times [`windowed_tables`](TrackFlamer::windowed_tables) has
-    /// reduced the lanes afresh, so a test can hold the memo to its one entry.
+    /// reduced the lanes afresh, so a test can hold the memo to its reuse.
     #[cfg(test)]
     reductions: AtomicUsize,
 }
 
-/// Lane tables beside the labelling and window they were reduced for. The tables
-/// sit behind an [`Arc`] so a build takes a handle of its own and merges with the
-/// lock released.
+/// Lane tables beside the window they were reduced for. The tables sit behind an
+/// [`Arc`] so a build takes a handle of its own and merges with the lock
+/// released.
 struct WindowedTables {
-    labels: FlameLabels,
     window: TimeSelection,
     tables: Arc<Vec<LaneTable>>,
 }
 
-/// One [`LaneTable`] set per [`FlameLabels`] variant, reached through
-/// [`of`](Self::of) — whose exhaustive match is what binds the slots to the
-/// variants, so a labelling cannot be added without one.
+/// One `T` per [`FlameLabels`] variant, reached through [`of`](Self::of) — whose
+/// exhaustive match is what binds the slots to the variants, so a labelling
+/// cannot be added without one.
 #[derive(Default)]
-struct LaneTableSets {
-    mnemonic: OnceLock<Vec<LaneTable>>,
-    name: OnceLock<Vec<LaneTable>>,
+struct ByLabels<T> {
+    mnemonic: T,
+    name: T,
 }
 
-impl LaneTableSets {
-    fn of(&self, labels: FlameLabels) -> &OnceLock<Vec<LaneTable>> {
+impl<T> ByLabels<T> {
+    fn of(&self, labels: FlameLabels) -> &T {
         match labels {
             FlameLabels::Mnemonic => &self.mnemonic,
             FlameLabels::Name => &self.name,
@@ -665,8 +666,8 @@ impl TrackFlamer {
     pub fn new(profile: &Arc<Profile>) -> TrackFlamer {
         TrackFlamer {
             flamer: Flamer::new(profile, bviz_trace_profile::worker_count()),
-            lane_tables: LaneTableSets::default(),
-            windowed: Mutex::new(None),
+            lane_tables: ByLabels::default(),
+            windowed: ByLabels::default(),
             #[cfg(test)]
             reductions: AtomicUsize::new(0),
         }
@@ -683,14 +684,12 @@ impl TrackFlamer {
         })
     }
 
-    /// The lane tables `labels` and `window` reduce to, from the memo where it
-    /// holds that pair and reduced afresh otherwise, replacing whatever it held.
+    /// The lane tables `labels` and `window` reduce to, from `labels`'s memo
+    /// where it holds that window and reduced afresh otherwise, replacing
+    /// whatever it held.
     fn windowed_tables(&self, labels: FlameLabels, window: &TimeSelection) -> Arc<Vec<LaneTable>> {
-        let mut memo = self.windowed.lock().unwrap();
-        if let Some(held) = memo
-            .as_ref()
-            .filter(|h| h.labels == labels && h.window == *window)
-        {
+        let mut memo = self.windowed.of(labels).lock().unwrap();
+        if let Some(held) = memo.as_ref().filter(|h| h.window == *window) {
             return Arc::clone(&held.tables);
         }
         #[cfg(test)]
@@ -702,7 +701,6 @@ impl TrackFlamer {
             bviz_trace_profile::worker_count(),
         ));
         *memo = Some(WindowedTables {
-            labels,
             window: window.clone(),
             tables: Arc::clone(&tables),
         });
@@ -2207,13 +2205,28 @@ mod tests {
             both.root().total_us,
             one.root().total_us + other.root().total_us
         );
-        // The memo holds one entry, so changing either half of its key reduces
-        // the lanes afresh.
+        // A labelling's memo holds one window, so a window change reduces its
+        // lanes afresh, as does a labelling not yet reduced under that window.
         let narrower = window(&[(0, 40)]);
         scan.build(FlameLabels::Name, &narrower, |_| true);
         assert_eq!(scan.reductions(), 2);
         scan.build(FlameLabels::Mnemonic, &narrower, |_| true);
         assert_eq!(scan.reductions(), 3);
+    }
+
+    #[test]
+    fn toggling_the_labelling_under_one_window_reduces_each_labelling_once() {
+        let p = clipping_profile();
+        let win = window(&[(0, 90)]);
+        let scan = TrackFlamer::new(&p);
+        let mnemonic = scan.build(FlameLabels::Mnemonic, &win, |_| true);
+        let name = scan.build(FlameLabels::Name, &win, |_| true);
+        assert_eq!(scan.reductions(), 2, "one reduction per labelling");
+        let mnemonic_again = scan.build(FlameLabels::Mnemonic, &win, |_| true);
+        let name_again = scan.build(FlameLabels::Name, &win, |_| true);
+        assert_eq!(scan.reductions(), 2, "a revisited labelling is a memo hit");
+        assert_eq!(resolved(&mnemonic), resolved(&mnemonic_again));
+        assert_eq!(resolved(&name), resolved(&name_again));
     }
 
     #[test]
