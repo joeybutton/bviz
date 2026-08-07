@@ -1,6 +1,6 @@
 use bviz_graph_layout::graph::Graph;
-use bviz_graph_layout::{layout, quotient, streamed_proto, Id, LaidOut, Names};
-use std::collections::{BTreeMap, HashSet};
+use bviz_graph_layout::{layout, quotient, streamed_proto, Anchor, Id, LaidOut, Names};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 
 /// Which Bazel query produced a `--output=streamed_proto` file, selecting the
@@ -89,12 +89,19 @@ fn reduce_view(
 /// only the resulting visible view, transitively reduced when `reduced`. The
 /// result's `full_edges` is the visible view's unreduced connectivity, for
 /// hover.
+///
+/// `pinned` is the configuration of the drawing this one replaces, which the
+/// layout is held to so every box the two drawings share keeps its reading
+/// order; the first layered layout of a session has no drawing to replace. A
+/// configuration that anchors nothing holds no frame, so a drawing that numbered
+/// no node leaves the view as free as no configuration at all.
 pub(crate) fn relayout(
     base: &Graph,
     reduced_base: &Graph,
     expanded: &HashSet<Id>,
     names: &mut Names,
     reduced: bool,
+    pinned: Option<&HashMap<Id, Anchor>>,
 ) -> LaidOut {
     let visible = bviz_graph_layout::lod::collapse(base, expanded);
     let (mut view, remap) = quotient::quotient(&visible, expanded, names);
@@ -103,7 +110,196 @@ pub(crate) fn relayout(
     if reduced {
         view = reduce_view(view, reduced_base, expanded, &remap);
     }
-    let mut laid = layout::layout(&view);
+    let mut laid = match pinned {
+        Some(anchors) => layout::layout_pinned(&view, anchors),
+        None => layout::layout(&view),
+    };
     laid.full_edges = full_edges;
     laid
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bviz_graph_layout::{EdgeKind, Kind};
+    use std::cmp::Ordering;
+
+    /// A graph and the tables a relayout of it needs, so a test draws it at an
+    /// expansion of its choosing.
+    struct Fixture {
+        base: Graph,
+        reduced_base: Graph,
+        names: Names,
+    }
+
+    impl Fixture {
+        /// Two packages wired so the order the layout reads `srcs`'s targets in
+        /// depends on whether `build` is open: `source` feeds the step `build`
+        /// runs first and `plugin` the step it runs second, a distinction a
+        /// collapsed `build` hides by taking both as one box.
+        fn new() -> Self {
+            let mut names = Names::default();
+            let mut base = Graph::new();
+            let mut add = |base: &mut Graph, name: &str, kind: Kind, parent: Option<Id>| {
+                let id = names.intern(name);
+                base.add_node(id, name, kind, parent);
+                id
+            };
+
+            let build = add(&mut base, "build", Kind::Package, None);
+            let srcs = add(&mut base, "srcs", Kind::Package, None);
+            let compile = add(&mut base, "compile", Kind::Action, Some(build));
+            let link = add(&mut base, "link", Kind::Action, Some(build));
+            let plugin = add(&mut base, "plugin", Kind::Target, Some(srcs));
+            let source = add(&mut base, "source", Kind::Target, Some(srcs));
+
+            for (from, to) in [(compile, link), (source, compile), (plugin, link)] {
+                base.add_edge(from, to, EdgeKind::Query);
+            }
+
+            let reduced_base = bviz_graph_layout::reduce::transitive_reduction(&base);
+            Self { base, reduced_base, names }
+        }
+
+        fn id(&self, label: &str) -> Id {
+            self.names
+                .get(label)
+                .unwrap_or_else(|| panic!("the fixture has no node labeled {label}"))
+        }
+
+        fn expansion(&self, labels: &[&str]) -> HashSet<Id> {
+            labels.iter().map(|label| self.id(label)).collect()
+        }
+
+        /// Draws the fixture the way the view draws it, reducing as the view
+        /// does by default.
+        fn draw(
+            &mut self,
+            expanded: &HashSet<Id>,
+            pinned: Option<&HashMap<Id, Anchor>>,
+        ) -> LaidOut {
+            relayout(&self.base, &self.reduced_base, expanded, &mut self.names, true, pinned)
+        }
+
+        fn label_of(&self, id: Id) -> &str {
+            self.names.resolve(id)
+        }
+    }
+
+    /// How many pairs of boxes of one frame both drawings drew, and which of
+    /// them `after` reads in the opposite order: swapped layer order, or swapped
+    /// slot order within a layer they still share. Two boxes that shared a layer
+    /// and no longer do have not swapped: a revealed node the layout must place
+    /// above one of them pushes it past the other without either crossing.
+    fn reversed_pairs(
+        fixture: &Fixture,
+        before: &LaidOut,
+        after: &LaidOut,
+    ) -> (usize, Vec<String>) {
+        let parent_of: HashMap<Id, Option<Id>> =
+            fixture.base.nodes.iter().map(|node| (node.id, node.parent)).collect();
+        let (mut compared, mut reversed) = (0, Vec::new());
+        for (&first, &was_first) in &before.anchors {
+            for (&second, &was_second) in &before.anchors {
+                if first == second || parent_of[&first] != parent_of[&second] {
+                    continue;
+                }
+                let (Some(&now_first), Some(&now_second)) =
+                    (after.anchors.get(&first), after.anchors.get(&second))
+                else {
+                    continue;
+                };
+                compared += 1;
+                let swapped = match (
+                    was_first.layer.cmp(&was_second.layer),
+                    now_first.layer.cmp(&now_second.layer),
+                ) {
+                    (Ordering::Less, Ordering::Greater) | (Ordering::Greater, Ordering::Less) => {
+                        true
+                    }
+                    (Ordering::Equal, Ordering::Equal) => matches!(
+                        (
+                            was_first.slot.cmp(&was_second.slot),
+                            now_first.slot.cmp(&now_second.slot),
+                        ),
+                        (Ordering::Less, Ordering::Greater) | (Ordering::Greater, Ordering::Less)
+                    ),
+                    _ => false,
+                };
+                if swapped {
+                    reversed.push(format!(
+                        "{} {:?}->{:?} and {} {:?}->{:?}",
+                        fixture.label_of(first),
+                        was_first,
+                        now_first,
+                        fixture.label_of(second),
+                        was_second,
+                        now_second,
+                    ));
+                }
+            }
+        }
+        (compared, reversed)
+    }
+
+    /// A configuration keyed by node label and ordered, so a mismatch reports
+    /// which nodes moved.
+    fn by_label(fixture: &Fixture, anchors: &HashMap<Id, Anchor>) -> BTreeMap<String, Anchor> {
+        anchors.iter().map(|(&id, &at)| (fixture.label_of(id).to_string(), at)).collect()
+    }
+
+    /// Opening a container leaves every box the drawing already held reading
+    /// where it did. The same expansion laid out with nothing to follow reorders
+    /// boxes it kept, so it is the pinning that holds them and not the graph.
+    #[test]
+    fn opening_a_container_holds_the_boxes_around_it_in_their_order() {
+        let mut fixture = Fixture::new();
+        let closed = fixture.expansion(&["srcs"]);
+        let open = fixture.expansion(&["srcs", "build"]);
+
+        let before = fixture.draw(&closed, None);
+        let held = fixture.draw(&open, Some(&before.anchors));
+        assert!(
+            held.boxes.len() > before.boxes.len(),
+            "opening build revealed nothing: {} boxes before, {} after",
+            before.boxes.len(),
+            held.boxes.len(),
+        );
+
+        let (compared, reversed) = reversed_pairs(&fixture, &before, &held);
+        assert!(reversed.is_empty(), "boxes swapped over an expansion: {reversed:#?}");
+        assert!(compared > 0, "no frame holds two boxes both drawings drew");
+
+        let free = fixture.draw(&open, None);
+        let (_, unheld) = reversed_pairs(&fixture, &before, &free);
+        assert!(
+            !unheld.is_empty(),
+            "the fixture's expansion reorders nothing on its own, so holding it to an \
+             order proves nothing",
+        );
+    }
+
+    /// A relayout with no drawing to replace orders the view itself: the same
+    /// view held to a configuration that swaps a pair comes back swapped, so the
+    /// order the unheld drawings settle on is one a configuration could have
+    /// overridden and none did.
+    #[test]
+    fn a_relayout_with_no_drawing_to_replace_orders_the_view_itself() {
+        let mut fixture = Fixture::new();
+        let open = fixture.expansion(&["srcs", "build"]);
+        let free = fixture.draw(&open, None);
+
+        let (one, other) = (fixture.id("plugin"), fixture.id("source"));
+        let (one_at, other_at) = (free.anchors[&one], free.anchors[&other]);
+        assert_eq!(one_at.layer, other_at.layer, "the fixture holds these two in one layer");
+        let mut swapped = free.anchors.clone();
+        swapped.insert(one, other_at);
+        swapped.insert(other, one_at);
+
+        let held = fixture.draw(&open, Some(&swapped));
+        assert_eq!((held.anchors[&one], held.anchors[&other]), (other_at, one_at));
+
+        let free_again = fixture.draw(&open, None);
+        assert_eq!(by_label(&fixture, &free_again.anchors), by_label(&fixture, &free.anchors));
+    }
 }

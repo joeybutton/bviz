@@ -243,13 +243,21 @@ pub(crate) fn relayout(view: &mut GraphView, cx: &mut Context<GraphView>) {
     // The relayout mints group ids against the interned-name table, so it
     // extends a clone and hands it back for the view to adopt.
     let mut names = loaded.names.clone();
+    let previous = loaded.layered.clone();
     let expanded = view.model.expanded.clone();
     let reduced = view.reduced;
     view.model.relaying = true;
     view.model._task = load_in_background(
         cx,
         move || {
-            let laid_out = build::relayout(&base, &reduced_base, &expanded, &mut names, reduced);
+            let laid_out = build::relayout(
+                &base,
+                &reduced_base,
+                &expanded,
+                &mut names,
+                reduced,
+                previous.as_deref().map(|previous| &previous.anchors),
+            );
             (laid_out, names)
         },
         |view, (laid_out, names), cx| {
