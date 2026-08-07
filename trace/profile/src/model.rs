@@ -227,6 +227,7 @@ pub fn span_role(category: &str, name: &str) -> SpanRole {
         "general information" => general_information_role(name),
         "bazel module processing" => bazel_module_role(name),
         "Starlark repository function call" => starlark_repository_role(name),
+        "Conflict checking" => conflict_checking_role(name),
         "Remote execution setup" | "Remote execution upload time"
         | "action dependency checking" => remote_cache_role(name),
 
@@ -270,7 +271,7 @@ pub fn span_role(category: &str, name: &str) -> SpanRole {
 
         "skyfunction" | "skyframe evaluator" | "package creation"
         | "complete action execution"
-        | "prepare action rewind plan" | "Conflict checking" => (Skyframe, false),
+        | "prepare action rewind plan" => (Skyframe, false),
 
         "gc notification" => (Gc, false),
 
@@ -300,6 +301,18 @@ fn starlark_repository_role(name: &str) -> (Workload, bool) {
         (Subprocess, true)
     } else {
         (Starlark, true)
+    }
+}
+
+/// The role of a "Conflict checking" span: waiting on a prior key's signal is
+/// one conflict-finding thread blocked on another, the rest is the traversal
+/// that inspects actions for conflicts.
+fn conflict_checking_role(name: &str) -> (Workload, bool) {
+    use Workload::*;
+    if name == "Awaiting signal from a prior key." {
+        (Scheduling, false)
+    } else {
+        (Skyframe, false)
     }
 }
 
@@ -743,6 +756,14 @@ mod tests {
         );
         // The skyfunction frame is overhead; its Starlark children carry the work.
         assert_eq!(role("skyfunction", "CONFIGURED_TARGET"), overhead(Workload::Skyframe));
+        assert_eq!(
+            role("Conflict checking", "Go through actions"),
+            overhead(Workload::Skyframe)
+        );
+        assert_eq!(
+            role("Conflict checking", "Awaiting signal from a prior key."),
+            overhead(Workload::Scheduling)
+        );
         assert_eq!(role("gc notification", "minor GC"), overhead(Workload::Gc));
         // "general information" splits by name.
         assert_eq!(
