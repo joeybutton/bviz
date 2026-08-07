@@ -3,8 +3,8 @@ use crate::model::{AggregateBuildStarted, TraceModel};
 use crate::theme::{self, Palette};
 use crate::{
     BAR_WIDTH, LABEL_MIN_PX, LINE_SCROLL_PX, METRICS, MIN_SLICE_PX, SLICE_SEAM_MIX,
-    SLICE_TEXT_PAD, STATS_TEXT_SIZE, ZOOM_PER_NOTCH, drawn_scroll,
-    paint_tooltip_box, scroll_request, thumb_offset,
+    SLICE_TEXT_PAD, STATS_TEXT_SIZE, ZOOM_PER_NOTCH, drawn_scroll, scroll_request,
+    thumb_offset,
 };
 use bviz_trace_layout::{
     FlameBox, FlameMetrics, FlamePlacement, FlameView, ScopeAggregate, flame_height,
@@ -12,7 +12,7 @@ use bviz_trace_layout::{
 };
 use bviz_ui_components::{
     Axis, DEFAULT_MIN_THUMB, LabelBoxStyle, Scrollbar, cached_layer, overlay_canvas,
-    paint_labeled_box, spinner, track_drag,
+    paint_labeled_box, paint_tooltip_box, spinner, track_drag,
 };
 use gpui::{
     App, Bounds, ContentMask, Context, Div, Entity, IntoElement, MouseButton,
@@ -239,7 +239,7 @@ fn paint_flame_tooltip(
         pct,
     );
     let lines = [graph.str(boxed.name).to_string(), detail];
-    paint_tooltip_box(&lines, at, bounds, palette, window, cx);
+    paint_tooltip_box(&lines, at, bounds, palette.tooltip(), window, cx);
 }
 
 /// The aggregated flame-graph panel: time-free work-class-colored boxes filling

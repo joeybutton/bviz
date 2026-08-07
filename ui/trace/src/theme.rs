@@ -2,6 +2,7 @@
 //! the shared palette helpers in [`bviz_ui_theme`].
 
 use bviz_trace_layout::{SpanRole, Workload};
+use bviz_ui_components::TooltipColors;
 use bviz_ui_theme::{hue_of, luminance};
 use gpui::{div, hsla, prelude::*, px, Hsla, IntoElement, Rgba};
 
@@ -143,7 +144,7 @@ pub(crate) struct Palette {
     /// The section-splitter and gutter-edge divider lines, subtler than the
     /// scroll thumb so they don't dominate a dark background.
     pub(crate) divider: Rgba,
-    /// Opaque fill of the hover tooltip panel.
+    /// Opaque fill of a panel drawn over the chart.
     pub(crate) panel: Rgba,
     /// The hover crosshair line, unobtrusive against the background.
     pub(crate) crosshair: Rgba,
@@ -168,5 +169,10 @@ impl Palette {
             crosshair: bviz_ui_theme::mix(colors.text, colors.background, 0.35),
             selection: colors.selected,
         }
+    }
+
+    /// The colors a hover tooltip paints with.
+    pub(crate) fn tooltip(&self) -> TooltipColors {
+        TooltipColors { panel: self.panel, border: self.border, label: self.label }
     }
 }

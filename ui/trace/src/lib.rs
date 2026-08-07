@@ -37,16 +37,16 @@ use bviz_trace_layout::{
 use bviz_trace_profile::{Profile, Slice, TimeSpan};
 use bviz_ui_components::{
     Axis, Button, DEFAULT_MIN_THUMB, Scrollbar, centered_notice, centered_spinner,
-    load_in_background, track_drag,
+    load_in_background, paint_tooltip_box, track_drag,
 };
 use bviz_ui_shell::Chrome;
 use clap::Parser;
 use gpui::{
-    AnyElement, App, AvailableSpace, BorderStyle, Bounds, ContentMask, Context, Div, Edges, Element,
-    ElementId, Entity, FocusHandle, GlobalElementId, Hsla, InspectorElementId, IntoElement, LayoutId,
-    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Position, Render,
-    ScrollHandle, SharedString, Stateful, Style, Subscription, Task, TextAlign,
-    TransformationMatrix, Window, canvas, div, fill, point, prelude::*, px, quad, relative, size,
+    AnyElement, App, AvailableSpace, Bounds, ContentMask, Context, Div, Edges, Element, ElementId,
+    Entity, FocusHandle, GlobalElementId, InspectorElementId, IntoElement, LayoutId, MouseButton,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Position, Render, ScrollHandle,
+    SharedString, Stateful, Style, Subscription, Task, TextAlign, TransformationMatrix, Window,
+    canvas, div, fill, point, prelude::*, px, relative, size,
 };
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -148,13 +148,6 @@ const STATS_TEXT_SIZE: f32 = 12.0;
 const STATS_NUM_COL_WIDTH: f32 = 104.0;
 /// Horizontal padding inside a stats cell.
 const STATS_CELL_PAD: f32 = 8.0;
-
-/// Hover-tooltip text size, inner padding, gap between lines, and offset from the
-/// cursor.
-const TOOLTIP_TEXT_SIZE: f32 = 12.0;
-const TOOLTIP_PAD: f32 = 6.0;
-const TOOLTIP_LINE_GAP: f32 = 4.0;
-const TOOLTIP_OFFSET: f32 = 12.0;
 
 /// Radius of a crosshair value dot, font size of its value labels, and the gap
 /// between the crosshair line and a value label.
@@ -1335,66 +1328,6 @@ fn paint_slice(
     );
 }
 
-/// Measures `lines`, sizes a padded box, clamps it inside `bounds`, and paints
-/// the panel background, border, and each line near `at`.
-fn paint_tooltip_box(
-    lines: &[String],
-    at: Point<Pixels>,
-    bounds: Bounds<Pixels>,
-    palette: &Palette,
-    window: &mut Window,
-    cx: &mut App,
-) {
-    let font = bviz_ui_assets::text_metrics(window).font;
-    let fs = px(TOOLTIP_TEXT_SIZE);
-    let shaped: Vec<_> = lines
-        .iter()
-        .map(|line| {
-            bviz_ui_assets::shape_line(window, line.clone(), font.clone(), fs, palette.label.into())
-        })
-        .collect();
-    let text_w = shaped
-        .iter()
-        .map(|l| f32::from(l.width()))
-        .fold(0.0_f32, f32::max);
-    let line_h = TOOLTIP_TEXT_SIZE + TOOLTIP_LINE_GAP;
-    let box_w = text_w + 2.0 * TOOLTIP_PAD;
-    let box_h = shaped.len() as f32 * line_h + 2.0 * TOOLTIP_PAD;
-
-    let left = f32::from(bounds.origin.x);
-    let top = f32::from(bounds.origin.y);
-    let right = left + f32::from(bounds.size.width);
-    let bottom = top + f32::from(bounds.size.height);
-    let mut x = f32::from(at.x) + TOOLTIP_OFFSET;
-    let mut y = f32::from(at.y) + TOOLTIP_OFFSET;
-    if x + box_w > right {
-        x = (right - box_w).max(left);
-    }
-    if y + box_h > bottom {
-        y = (bottom - box_h).max(top);
-    }
-
-    window.paint_quad(quad(
-        Bounds::new(point(px(x), px(y)), size(px(box_w), px(box_h))),
-        px(4.),
-        palette.panel,
-        px(1.),
-        Hsla::from(palette.border),
-        BorderStyle::Solid,
-    ));
-    for (i, line) in shaped.into_iter().enumerate() {
-        let ly = y + TOOLTIP_PAD + i as f32 * line_h;
-        let _ = line.paint(
-            point(px(x + TOOLTIP_PAD), px(ly)),
-            fs,
-            TextAlign::Left,
-            None,
-            window,
-            cx,
-        );
-    }
-}
-
 /// Paints a tooltip panel near `at` with the slice's name, its category and
 /// duration, and its args, one per line. Kept inside the viewport.
 fn paint_tooltip(
@@ -1422,7 +1355,7 @@ fn paint_tooltip(
     for (key, value) in profile.slice_others(detail) {
         lines.push(format!("{}: {}", profile.str(*key), profile.str(*value)));
     }
-    paint_tooltip_box(&lines, at, bounds, palette, window, cx);
+    paint_tooltip_box(&lines, at, bounds, palette.tooltip(), window, cx);
 }
 
 /// Renders a Bazel `--profile` trace as a flame-chart timeline.

@@ -13,6 +13,7 @@ mod scrubber;
 mod spinner;
 pub mod text_input;
 mod toggle;
+mod tooltip;
 
 pub use background::load_in_background;
 pub use button::Button;
@@ -26,6 +27,7 @@ pub use scrubber::{ScrubberColors, ScrubberLayout, scrubber};
 pub use spinner::spinner;
 pub use text_input::TextInput;
 pub use toggle::{PillColors, toggle_pill};
+pub use tooltip::{TooltipColors, paint_tooltip_box};
 
 use gpui::App;
 
