@@ -255,7 +255,7 @@ pub fn span_role(category: &str, name: &str) -> SpanRole {
         | "globbing" | "filesystem traversal"
         | "Staging per-action file system"
         | "setting up inputs for worker" | "copying outputs from worker"
-        | "include scanner" | "discover inputs"
+        | "include scanner" | "discover inputs" | "update action information"
         | "Vendoring repository" | "logging spawn" => (Filesystem, false),
 
         "Remote execution file fetching" | "remote output download"
@@ -269,7 +269,7 @@ pub fn span_role(category: &str, name: &str) -> SpanRole {
         | "blocked on repo contents cache GC" => (Scheduling, false),
 
         "skyfunction" | "skyframe evaluator" | "package creation"
-        | "complete action execution" | "update action information"
+        | "complete action execution"
         | "prepare action rewind plan" | "Conflict checking" => (Skyframe, false),
 
         "gc notification" => (Gc, false),
@@ -700,6 +700,10 @@ mod tests {
         assert_eq!(role("VFS stat", ""), overhead(Workload::Filesystem));
         assert_eq!(role("VFS md5", ""), overhead(Workload::Filesystem));
         assert_eq!(role("include scanner", ""), overhead(Workload::Filesystem));
+        assert_eq!(
+            role("update action information", "Compiling foo.cc"),
+            overhead(Workload::Filesystem)
+        );
         assert_eq!(role("RPC", ""), overhead(Workload::RemoteCache));
         assert_eq!(
             role("calling credential helper", ""),
