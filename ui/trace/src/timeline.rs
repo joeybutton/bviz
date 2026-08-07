@@ -13,11 +13,11 @@ use crate::{
 };
 use bviz_trace_layout::{Cull, LaneLayout, TimeView, Viewport, VisibleSlice, visible_slices};
 use bviz_trace_profile::{Profile, Slice, SliceDetail};
-use bviz_ui_components::{Scrollbar, track_drag};
+use bviz_ui_components::{Scrollbar, cached_layer, overlay_canvas, track_drag};
 use gpui::{
-    AnyView, App, Bounds, ContentMask, Context, Div, Entity, FocusHandle, IntoElement, KeyBinding,
+    App, Bounds, ContentMask, Context, Div, Entity, FocusHandle, IntoElement, KeyBinding,
     MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Render, ScrollDelta,
-    ScrollWheelEvent, Stateful, StyleRefinement, WeakEntity, Window, canvas, div,
+    ScrollWheelEvent, Stateful, WeakEntity, Window, canvas, div,
     fill, point, prelude::*, px, size,
 };
 use std::rc::Rc;
@@ -123,9 +123,8 @@ enum TimelineDrag {
 /// axis, the counter plots (Counters tab), the ruler, gutter, phase markers, and
 /// scroll bars. Owns the timeline's view state, reading the document and
 /// selection from [`TraceModel`] and the panel/gutter layout from
-/// [`TraceView`]. The expensive slice paint lives in a separate cached child
-/// ([`SliceCanvas`]) so a hover — which touches only the crosshair/tooltip
-/// overlay — replays its last scene rather than re-emitting every slice.
+/// [`TraceView`]. The slices are painted by [`SliceCanvas`], the crosshair and
+/// tooltip by an overlay above it.
 pub(crate) struct TimelinePanel {
     /// Focus for the trace content, so Ctrl-A (select all tracks) dispatches
     /// here; a descendant of the window focus, so the window's own actions fire.
@@ -159,9 +158,8 @@ pub(crate) struct TimelinePanel {
     crosshair: Option<Point<Pixels>>,
     drag: TimelineDrag,
     last_mouse: Point<Pixels>,
-    /// The cached child that paints the slices, gutter, ruler, markers, scroll
-    /// bars, and counter plots. A parent `cx.notify()` (the hover path) leaves it
-    /// to replay; [`Self::invalidate_canvas`] notifies it to rebuild.
+    /// The layer painting the slices, gutter, ruler, markers, scroll bars, and
+    /// counter plots; notified through [`Self::invalidate_canvas`].
     canvas: Entity<SliceCanvas>,
 }
 
@@ -194,9 +192,8 @@ impl TimelinePanel {
         }
     }
 
-    /// Rebuilds the cached slice scene along with the overlay, so a change to what
-    /// the canvas paints re-emits its scene rather than replaying it. A plain
-    /// `cx.notify()` (the hover path) leaves the canvas to replay.
+    /// Rebuilds the slice scene along with the overlay; every change to what the
+    /// slices show routes through here.
     pub(crate) fn invalidate_canvas(&self, cx: &mut Context<Self>) {
         self.canvas.update(cx, |_, cx| cx.notify());
         cx.notify();
@@ -507,8 +504,7 @@ impl TimelinePanel {
     }
 
     /// Tracks the cursor for the tooltip and the crosshair while not dragging.
-    /// Only the overlay reads these, so a change replays the cached canvas via a
-    /// plain notify.
+    /// Only the overlay reads these, so the slices need no rebuild.
     fn on_mouse_move(&mut self, e: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
         if !matches!(self.drag, TimelineDrag::None) {
             return;
@@ -583,21 +579,8 @@ impl Render for TimelinePanel {
         };
         let palette = Palette::from_colors(&bviz_ui_theme::colors(window));
         let entity = cx.entity();
-        // Embedding the canvas cached lets a hover reuse its last scene: a parent
-        // `cx.notify()` does not dirty it, so gpui replays its slices.
-        let slices = AnyView::from(self.canvas.clone())
-            .cached(StyleRefinement::default().absolute().inset_0().size_full());
-        // The crosshair, hover tooltip, and drag paint over the cached slices,
-        // sharing the canvas's full bounds so the tooltip's viewport clamping is
-        // unchanged. A hover repaints only this overlay.
-        let overlay = canvas(
-            |_, _, _| {},
-            overlay_paint(profile, lanes, entity, palette),
-        )
-        .absolute()
-        .left_0()
-        .top_0()
-        .size_full();
+        let slices = cached_layer(self.canvas.clone());
+        let overlay = overlay_canvas(overlay_paint(profile, lanes, entity, palette));
         let root = div()
             .id("trace-content")
             .relative()
@@ -651,9 +634,8 @@ fn timeline_end_drag(
     panel.invalidate_canvas(cx);
 }
 
-/// The cached child view painting the timeline's slices and chrome. It reads the
-/// timeline's view state and the document and lanes through `parent`, so a hover
-/// leaves its cached scene to replay.
+/// The layer painting the timeline's slices and chrome, from the view state,
+/// document, and lanes it reads through `parent`.
 struct SliceCanvas {
     parent: WeakEntity<TimelinePanel>,
 }
@@ -751,7 +733,7 @@ fn cached_slices(
         .clone()
 }
 
-/// The cached canvas's paint closure: the flame timeline — gridlines, lanes and
+/// The slice layer's paint closure: the flame timeline — gridlines, lanes and
 /// slices, phase markers, gutter, scroll bars, ruler, and (for the Counters tab)
 /// the counter plots — reading the live view state through `parent`.
 fn slice_paint(
@@ -877,17 +859,16 @@ fn slice_paint(
     }
 }
 
-/// The overlay paint closure, layered above the cached canvas: the crosshair, the
-/// hover tooltip, and — while a drag runs — the window-global drag handlers. It
-/// reads the live crosshair/hover/drag state through `parent`, so it repaints on
-/// a hover without disturbing the canvas's cached scene.
+/// The overlay's paint closure: the crosshair, the hover tooltip, and — while a
+/// drag runs — the window-global drag handlers, from the crosshair, hover, and
+/// drag state it reads through `parent`.
 fn overlay_paint(
     profile: Arc<Profile>,
     lanes: Rc<LaneLayout>,
     parent: Entity<TimelinePanel>,
     palette: Palette,
-) -> impl FnOnce(Bounds<Pixels>, (), &mut Window, &mut App) {
-    move |bounds, _, window, cx| {
+) -> impl FnOnce(Bounds<Pixels>, &mut Window, &mut App) {
+    move |bounds, window, cx| {
         let n_counters = profile.counters().len();
         let (tv, tab, panel_height, gutter_width, crosshair, hovered, dragging) = {
             let panel = parent.read(cx);

@@ -10,11 +10,14 @@ use bviz_trace_layout::{
     FlameBox, FlameMetrics, FlamePlacement, FlameView, ScopeAggregate, flame_height,
     lay_out_flame,
 };
-use bviz_ui_components::{Axis, DEFAULT_MIN_THUMB, LabelBoxStyle, Scrollbar, paint_labeled_box, spinner, track_drag};
+use bviz_ui_components::{
+    Axis, DEFAULT_MIN_THUMB, LabelBoxStyle, Scrollbar, cached_layer, overlay_canvas,
+    paint_labeled_box, spinner, track_drag,
+};
 use gpui::{
-    AnyView, App, Bounds, ContentMask, Context, Div, Entity, IntoElement, MouseButton,
+    App, Bounds, ContentMask, Context, Div, Entity, IntoElement, MouseButton,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Render, ScrollDelta,
-    ScrollWheelEvent, Stateful, StyleRefinement, Subscription, WeakEntity, Window, canvas, div,
+    ScrollWheelEvent, Stateful, Subscription, WeakEntity, Window, canvas, div,
     point, prelude::*, px, size,
 };
 use std::rc::Rc;
@@ -242,10 +245,8 @@ fn paint_flame_tooltip(
 /// The aggregated flame-graph panel: time-free work-class-colored boxes filling
 /// the body, zoom/pan on the x axis and vertical scroll on the y, with its own
 /// scroll bars and a hover tooltip. Owns its view state as plain fields,
-/// reading the aggregate from [`TraceModel`]. The
-/// expensive box paint lives in a separate cached child ([`FlameCanvas`]) so a
-/// hover — which touches only the tooltip overlay — replays its last scene rather
-/// than re-emitting every box.
+/// reading the aggregate from [`TraceModel`]. The boxes are painted by
+/// [`FlameCanvas`], the tooltip by an overlay above it.
 pub(crate) struct FlamePanel {
     /// Read for the current selection's aggregate and whether a rebuild is
     /// running.
@@ -268,9 +269,8 @@ pub(crate) struct FlamePanel {
     flame_hover: Option<Point<Pixels>>,
     drag: FlameDrag,
     last_mouse: Point<Pixels>,
-    /// The cached child that paints the boxes and scroll bars. A parent
-    /// `cx.notify()` (the hover path) leaves it to replay; [`Self::invalidate_canvas`]
-    /// notifies it to rebuild.
+    /// The layer painting the boxes and scroll bars; notified through
+    /// [`Self::invalidate_canvas`].
     canvas: Entity<FlameCanvas>,
     /// Re-syncs the panel with the model's aggregate, which lands asynchronously.
     _model_observer: Subscription,
@@ -287,8 +287,8 @@ impl FlamePanel {
             this.reset_aggregate_derived();
             this.invalidate_canvas(cx);
         });
-        // The graph the boxes address is still the shown one, so the cached scene
-        // keeps replaying; only the pill outside it needs the frame.
+        // The boxes still address the shown graph; only the pill above them needs
+        // the frame.
         let build_start =
             cx.subscribe(&model, |_, _, _: &AggregateBuildStarted, cx| cx.notify());
         Self {
@@ -306,9 +306,8 @@ impl FlamePanel {
         }
     }
 
-    /// Rebuilds the cached box scene along with the overlay, so a change to what
-    /// the canvas paints re-emits its scene rather than replaying it. A plain
-    /// `cx.notify()` (the hover path) leaves the canvas to replay.
+    /// Rebuilds the box scene along with the overlay; every change to what the
+    /// boxes show routes through here.
     pub(crate) fn invalidate_canvas(&self, cx: &mut Context<Self>) {
         self.canvas.update(cx, |_, cx| cx.notify());
         cx.notify();
@@ -557,32 +556,19 @@ impl Render for FlamePanel {
         }
         let palette = Palette::from_colors(&bviz_ui_theme::colors(window));
         let entity = cx.entity();
-        // Embedding the canvas cached lets a hover reuse its last scene: a parent
-        // `cx.notify()` does not dirty it, so gpui replays its boxes.
-        let boxes = AnyView::from(self.canvas.clone())
-            .cached(StyleRefinement::default().absolute().inset_0().size_full());
-        // The tooltip and drag paint over the cached boxes, sharing the canvas's
-        // full bounds so the tooltip's viewport clamping is unchanged. A hover
-        // repaints only this overlay.
-        let overlay = canvas(
-            |_, _, _| {},
-            move |bounds, _, window, cx| {
-                let (hovered, dragging) = {
-                    let this = entity.read(cx);
-                    (this.hovered_box(cx), !matches!(this.drag, FlameDrag::None))
-                };
-                if let Some((at, drawn)) = hovered {
-                    paint_flame_tooltip(&drawn, at, bounds, &palette, window, cx);
-                }
-                if dragging {
-                    track_drag(window, &entity, flame_on_drag, flame_end_drag);
-                }
-            },
-        )
-        .absolute()
-        .left_0()
-        .top_0()
-        .size_full();
+        let boxes = cached_layer(self.canvas.clone());
+        let overlay = overlay_canvas(move |bounds, window, cx| {
+            let (hovered, dragging) = {
+                let this = entity.read(cx);
+                (this.hovered_box(cx), !matches!(this.drag, FlameDrag::None))
+            };
+            if let Some((at, drawn)) = hovered {
+                paint_flame_tooltip(&drawn, at, bounds, &palette, window, cx);
+            }
+            if dragging {
+                track_drag(window, &entity, flame_on_drag, flame_end_drag);
+            }
+        });
         // While a rebuild for a new selection runs off the thread, the prior graph
         // stays shown and interactive; a spinner pill signals the update, since
         // aggregating a large selection can take a moment.
@@ -656,9 +642,8 @@ fn flame_end_drag(panel: &mut FlamePanel, _: &MouseUpEvent, cx: &mut Context<Fla
     panel.invalidate_canvas(cx);
 }
 
-/// The cached child view painting the flame-graph panel's boxes and scroll bars.
-/// It reads the panel's view state and the aggregate through `parent`, so a
-/// hover leaves its cached scene to replay.
+/// The layer painting the flame-graph panel's boxes and scroll bars, from the
+/// view state and aggregate it reads through `parent`.
 struct FlameCanvas {
     parent: WeakEntity<FlamePanel>,
 }
@@ -689,13 +674,12 @@ impl Render for FlameCanvas {
     }
 }
 
-/// The cached canvas's paint closure: the aggregated flame graph filling the body
+/// The box layer's paint closure: the aggregated flame graph filling the body
 /// — each box a work-class-colored quad with a truncated label, clipped to the
 /// content rect, scrolled vertically by the panel's scroll and zoomed/panned
 /// horizontally by its view — plus the vertical and horizontal scroll bars for
 /// whichever axis overflows. No time-axis chrome applies, so none is drawn. It
-/// reads the live view state through `parent`; the hover tooltip paints from a
-/// separate overlay above, so this scene replays on a hover.
+/// reads the live view state through `parent`.
 fn flame_paint(
     aggregates: Arc<ScopeAggregate>,
     parent: Entity<FlamePanel>,
