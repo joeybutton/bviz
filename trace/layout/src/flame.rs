@@ -1,5 +1,5 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 
 use bviz_trace_profile::{
     Profile, Slice, SliceDetail, Span32, SpanRole, Str, ThreadTrack, Workload,
@@ -625,11 +625,10 @@ pub struct TrackFlamer {
     /// paid once for a labelling asked for, never for one that is not, and a
     /// selection change pays only the merge (see [`build`](TrackFlamer::build)).
     lane_tables: ByLabels<OnceLock<Vec<LaneTable>>>,
-    /// The reduced lanes last built for under a restricting window, one window
-    /// held per labelling, so a track selection or labelling change under an
-    /// unchanged window pays only the merge. A window change evicts: the tables
-    /// hold only what their own window admits.
-    windowed: ByLabels<Mutex<Option<WindowedTables>>>,
+    /// The reduced lanes last built for under a restricting window, one memo
+    /// per labelling, so a track selection or labelling change under an
+    /// unchanged window pays only the merge.
+    windowed: ByLabels<WindowMemo>,
     /// How many times [`windowed_tables`](TrackFlamer::windowed_tables) has
     /// reduced the lanes afresh, so a test can hold the memo to its reuse.
     #[cfg(test)]
@@ -642,6 +641,36 @@ pub struct TrackFlamer {
 struct WindowedTables {
     window: TimeSelection,
     tables: Arc<Vec<LaneTable>>,
+}
+
+/// A memo of the lane tables reduced under one window; the tables admit only
+/// what that window does, so asking under another reduces afresh. Its lock spans
+/// a read or a write alone and never a reduction, so callers that miss together
+/// each reduce and the memo keeps whichever finishes last.
+#[derive(Default)]
+struct WindowMemo(Mutex<Option<WindowedTables>>);
+
+impl WindowMemo {
+    /// The entry, taken up as it stands where a panic elsewhere poisoned the
+    /// lock: an entry is only ever replaced wholesale by already-reduced
+    /// tables, so no panic can leave one half-written.
+    fn entry(&self) -> MutexGuard<'_, Option<WindowedTables>> {
+        self.0.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn get(&self, window: &TimeSelection) -> Option<Arc<Vec<LaneTable>>> {
+        self.entry()
+            .as_ref()
+            .filter(|held| held.window == *window)
+            .map(|held| Arc::clone(&held.tables))
+    }
+
+    fn put(&self, window: &TimeSelection, tables: &Arc<Vec<LaneTable>>) {
+        *self.entry() = Some(WindowedTables {
+            window: window.clone(),
+            tables: Arc::clone(tables),
+        });
+    }
 }
 
 /// One `T` per [`FlameLabels`] variant, reached through [`of`](Self::of) — whose
@@ -684,13 +713,12 @@ impl TrackFlamer {
         })
     }
 
-    /// The lane tables `labels` and `window` reduce to, from `labels`'s memo
-    /// where it holds that window and reduced afresh otherwise, replacing
-    /// whatever it held.
+    /// The lane tables `labels` and `window` reduce to, served by and stored in
+    /// `labels`'s [`WindowMemo`].
     fn windowed_tables(&self, labels: FlameLabels, window: &TimeSelection) -> Arc<Vec<LaneTable>> {
-        let mut memo = self.windowed.of(labels).lock().unwrap();
-        if let Some(held) = memo.as_ref().filter(|h| h.window == *window) {
-            return Arc::clone(&held.tables);
+        let memo = self.windowed.of(labels);
+        if let Some(held) = memo.get(window) {
+            return held;
         }
         #[cfg(test)]
         self.reductions.fetch_add(1, Ordering::Relaxed);
@@ -700,10 +728,7 @@ impl TrackFlamer {
             window,
             bviz_trace_profile::worker_count(),
         ));
-        *memo = Some(WindowedTables {
-            window: window.clone(),
-            tables: Arc::clone(&tables),
-        });
+        memo.put(window, &tables);
         tables
     }
 
@@ -2227,6 +2252,41 @@ mod tests {
         assert_eq!(scan.reductions(), 2, "a revisited labelling is a memo hit");
         assert_eq!(resolved(&mnemonic), resolved(&mnemonic_again));
         assert_eq!(resolved(&name), resolved(&name_again));
+    }
+
+    #[test]
+    fn a_memo_poisoned_by_a_panic_still_serves_the_reduced_lanes() {
+        let p = clipping_profile();
+        let win = window(&[(0, 90)]);
+        let scan = TrackFlamer::new(&p);
+        let before = scan.build(FlameLabels::Name, &win, |_| true);
+        let memo = scan.windowed.of(FlameLabels::Name);
+        let panicked = std::panic::catch_unwind(|| {
+            let _entry = memo.0.lock().unwrap();
+            panic!("a panic while the entry is locked");
+        });
+        assert!(panicked.is_err());
+        assert!(memo.0.is_poisoned());
+        let after = scan.build(FlameLabels::Name, &win, |_| true);
+        assert_eq!(scan.reductions(), 1, "the poisoned memo still hits");
+        assert_eq!(resolved(&before), resolved(&after));
+    }
+
+    #[test]
+    fn a_build_racing_another_under_a_different_window_gets_its_own_lanes() {
+        let p = clipping_profile();
+        let scan = TrackFlamer::new(&p);
+        let wide = window(&[(0, 90)]);
+        let narrow = window(&[(0, 40)]);
+        let raced = std::thread::scope(|s| {
+            let a = s.spawn(|| scan.build(FlameLabels::Name, &wide, |_| true));
+            let b = s.spawn(|| scan.build(FlameLabels::Name, &narrow, |_| true));
+            [a.join().unwrap(), b.join().unwrap()]
+        });
+        for (graph, win) in raced.iter().zip([&wide, &narrow]) {
+            let fresh = TrackFlamer::new(&p).build(FlameLabels::Name, win, |_| true);
+            assert_eq!(resolved(graph), resolved(&fresh));
+        }
     }
 
     #[test]
