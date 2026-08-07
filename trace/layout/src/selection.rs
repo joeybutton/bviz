@@ -38,9 +38,10 @@ impl TimeSelection {
     /// First start to last end, for bracketing a scan before testing regions
     /// individually.
     pub fn bounds(&self) -> Option<TimeSpan> {
+        let (first, last) = self.spans.first().zip(self.spans.last())?;
         Some(TimeSpan {
-            start_us: self.spans.first()?.start_us,
-            end_us: self.spans.last()?.end_us,
+            start_us: first.start_us,
+            end_us: last.end_us,
         })
     }
 
