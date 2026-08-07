@@ -176,8 +176,9 @@ const _: () = assert!(std::mem::size_of::<SliceDetail>() == 40);
 /// envelope.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Workload {
-    /// The spawned action body: a local/remote/worker process and the
-    /// mnemonic-bearing action frame that owns it.
+    /// The spawned action body: a local/remote/worker process, and the frames
+    /// that envelope it — the mnemonic-bearing action frame and the local
+    /// resource slot the action holds for the length of its body.
     Subprocess,
     /// Build logic run by the interpreter: Starlark calls, rule bodies, module
     /// and repository evaluation.
@@ -232,6 +233,8 @@ pub fn span_role(category: &str, name: &str) -> SpanRole {
         | "remote action execution"
         | "Remote execution process wall time" => (Subprocess, true),
 
+        "action count (local)" => (Subprocess, false),
+
         "Starlark Parser"
         | "Starlark user function call"
         | "Starlark builtin function call"
@@ -259,8 +262,7 @@ pub fn span_role(category: &str, name: &str) -> SpanRole {
         "Remote execution queuing time" | "thread wait" | "action resource lock"
         | "Acquiring dynamic execution output lock" | "action dependency checking"
         | "borrowing a worker" | "waiting for response from worker"
-        | "blocked on repo contents cache GC"
-        | "action count (local)" => (Scheduling, false),
+        | "blocked on repo contents cache GC" => (Scheduling, false),
 
         "skyfunction" | "skyframe evaluator" | "package creation"
         | "complete action execution" | "update action information"
@@ -619,7 +621,12 @@ mod tests {
             role("action dependency checking", ""),
             overhead(Workload::Scheduling)
         );
-        assert_eq!(role("action count (local)", "Resources acquired"), overhead(Workload::Scheduling));
+        // The held resource slot envelopes the action body, so it takes the
+        // action's hue but stays overhead.
+        assert_eq!(
+            role("action count (local)", "Resources acquired"),
+            overhead(Workload::Subprocess)
+        );
         // The skyfunction frame is overhead; its Starlark children carry the work.
         assert_eq!(role("skyfunction", "CONFIGURED_TARGET"), overhead(Workload::Skyframe));
         assert_eq!(role("gc notification", "minor GC"), overhead(Workload::Gc));
