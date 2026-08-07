@@ -187,8 +187,9 @@ pub enum Workload {
     /// Filesystem work: VFS operations, sandbox construction, globbing, input
     /// and output staging, include scanning.
     Filesystem,
-    /// Remote and cache transfer: action-cache checks, up/download, RPC, and
-    /// repository fetching.
+    /// Consulting a cache and moving bytes for it: the action-cache lookup that
+    /// decides whether a spawn runs at all, local or remote, plus up/download,
+    /// RPC, credential acquisition, and repository fetching.
     RemoteCache,
     /// Scheduling and contention: resource locks, throttle semaphores, queuing,
     /// and thread waits.
