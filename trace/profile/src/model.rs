@@ -216,7 +216,8 @@ pub struct SpanRole {
 /// alone. An unknown or future category falls through to [`Workload::Other`]
 /// overhead.
 ///
-/// Two placements are judgment calls: skyfunction frames (including
+/// A span that could be filed either under the work it serves or under the work
+/// it does is placed by what its own time goes on: skyfunction frames (including
 /// `CONFIGURED_TARGET`) are [`Workload::Skyframe`] overhead — the payload is the
 /// Starlark they nest, not the graph node itself; and include scanning and input
 /// discovery are [`Workload::Filesystem`] overhead rather than action body,
