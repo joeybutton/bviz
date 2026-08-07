@@ -489,9 +489,8 @@ impl TraceView {
             }))
     }
 
-    /// The time window the flame graph and stats are restricted to, as a chip
-    /// carrying the control that widens them back to the whole build. Absent
-    /// while the whole timeline contributes.
+    /// The window the shown flame graph and stats cover, as a chip carrying
+    /// [`Self::clear_time_selection`].
     fn time_window_chip(
         &self,
         palette: Palette,
@@ -502,16 +501,12 @@ impl TraceView {
             let Source::Loaded(profile) = model.source() else {
                 return None;
             };
-            let selection = model.time_selection();
-            if selection.is_empty() {
-                return None;
-            }
             let span = profile.span();
+            let shown = model.aggregates();
             time_window_summary(
-                selection.total_us(),
+                shown.as_deref().map(|a| &a.window),
                 span.end_us - span.start_us,
-                selection.len(),
-            )
+            )?
         };
         let view = cx.entity();
         Some(
@@ -545,7 +540,7 @@ impl TraceView {
         )
     }
 
-    /// Widens the flame graph and stats back to the whole timeline.
+    /// Widens the next aggregate build back to the whole timeline.
     fn clear_time_selection(&mut self, cx: &mut Context<Self>) {
         if !self.model.update(cx, |m, cx| m.set_time_selection(TimeSelection::default(), cx)) {
             return;
@@ -699,18 +694,21 @@ impl TraceView {
     }
 }
 
-/// The chip's label for an aggregate covering `total_us` of a build spanning
-/// `span_us`, drawn from `regions` regions of profile time.
-fn time_window_summary(total_us: i64, span_us: i64, regions: usize) -> String {
+/// The chip's label for the `window` a shown aggregate covers, of a build
+/// spanning `span_us`. Absent while no aggregate is shown, or the shown one
+/// covers the whole build.
+fn time_window_summary(window: Option<&TimeSelection>, span_us: i64) -> Option<String> {
+    let window = window.filter(|w| !w.is_empty())?;
     let mut text = format!(
         "Window: {} of {}",
-        format_duration(total_us),
+        format_duration(window.total_us()),
         format_duration(span_us)
     );
+    let regions = window.len();
     if regions > 1 {
         text.push_str(&format!(" · {regions} regions"));
     }
-    text
+    Some(text)
 }
 
 impl Render for TraceView {
@@ -1584,28 +1582,49 @@ mod tests {
         assert_eq!(rows.len(), 4);
     }
 
+    const BUILD_US: i64 = 40_000_000;
+
+    fn selection(regions: &[(i64, i64)]) -> TimeSelection {
+        let mut selection = TimeSelection::default();
+        for &(start_us, end_us) in regions {
+            selection.insert(TimeSpan { start_us, end_us });
+        }
+        selection
+    }
+
     #[test]
     fn a_one_region_window_reads_as_a_share_of_the_build() {
         assert_eq!(
-            time_window_summary(2_500_000, 40_000_000, 1),
-            "Window: 2.50s of 40.00s"
+            time_window_summary(Some(&selection(&[(0, 2_500_000)])), BUILD_US).as_deref(),
+            Some("Window: 2.50s of 40.00s")
         );
     }
 
     #[test]
     fn several_regions_are_counted_alongside_the_time_they_hold() {
+        let three = selection(&[(0, 1_000_000), (2_000_000, 3_000_000), (4_000_000, 5_000_000)]);
         assert_eq!(
-            time_window_summary(3_000_000, 40_000_000, 3),
-            "Window: 3.00s of 40.00s · 3 regions"
+            time_window_summary(Some(&three), BUILD_US).as_deref(),
+            Some("Window: 3.00s of 40.00s · 3 regions")
         );
     }
 
     #[test]
     fn a_window_far_shorter_than_the_build_keeps_its_own_unit() {
         assert_eq!(
-            time_window_summary(4_200, 40_000_000, 1),
-            "Window: 4.20ms of 40.00s"
+            time_window_summary(Some(&selection(&[(0, 4_200)])), BUILD_US).as_deref(),
+            Some("Window: 4.20ms of 40.00s")
         );
+    }
+
+    #[test]
+    fn an_unrestricted_aggregate_carries_no_chip() {
+        assert_eq!(time_window_summary(Some(&TimeSelection::default()), BUILD_US), None);
+    }
+
+    #[test]
+    fn no_chip_stands_for_figures_that_are_not_on_screen_yet() {
+        assert_eq!(time_window_summary(None, BUILD_US), None);
     }
 
     #[test]
