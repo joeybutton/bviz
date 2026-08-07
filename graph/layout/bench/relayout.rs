@@ -8,6 +8,11 @@
 //! drawing the toggle replaces, which is what keeps the boxes both drawings
 //! share reading where they did. Reporting both prices the holding.
 //!
+//! Each drawing is reported alongside the layered configuration it realizes —
+//! how many layers its frames divide their nodes into and how far its connectors
+//! reach across them — since the layered algorithm materializes a dummy node per
+//! layer an edge spans, making that span the size of the graph it then places.
+//!
 //! The container opened is, of those the starting view draws collapsed, the one
 //! whose expansion unfolds the most nodes, so the layout timed is about the
 //! heaviest a single toggle of that view can ask for.
@@ -24,7 +29,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use bviz_graph_layout::graph::Graph;
-use bviz_graph_layout::{layout, lod, quotient, reduce, streamed_proto, Id, Names};
+use bviz_graph_layout::{layout, lod, quotient, reduce, streamed_proto, Id, LaidOut, Names};
 
 /// The node cap `--max-nodes` defaults to: the cap the application's first
 /// layered view opens with.
@@ -38,14 +43,174 @@ const USAGE: &str = "usage: bench_relayout [--query FILE] [--cquery FILE] [--aqu
                      [--max-nodes N] [--max-edges N] (at least one input); \
                      iterations from BVIZ_BENCH_ITERS";
 
-fn min_secs(iters: usize, mut f: impl FnMut()) -> f64 {
-    (0..iters)
-        .map(|_| {
-            let t = std::time::Instant::now();
-            f();
-            t.elapsed().as_secs_f64()
-        })
-        .fold(f64::INFINITY, f64::min)
+fn secs(mut f: impl FnMut()) -> f64 {
+    let t = std::time::Instant::now();
+    f();
+    t.elapsed().as_secs_f64()
+}
+
+/// The smallest, middle and largest of `samples`, which must be non-empty.
+fn spread(samples: &[f64]) -> (f64, f64, f64) {
+    let mut sorted = samples.to_vec();
+    sorted.sort_by(f64::total_cmp);
+    (sorted[0], sorted[sorted.len() / 2], sorted[sorted.len() - 1])
+}
+
+/// What one frame gives the layered algorithm to place: the nodes it ranks, the
+/// layers it ranks them into, and the connectors it routes with the layers they
+/// span, one dummy node per layer.
+#[derive(Default)]
+struct Frame {
+    nodes: usize,
+    layers: u32,
+    connectors: usize,
+    span: u64,
+}
+
+impl Frame {
+    /// Everything this frame's node placement has to position: its own nodes and
+    /// the dummy standing in for each layer a connector spans.
+    fn placed(&self) -> u64 {
+        self.nodes as u64 + self.span
+    }
+}
+
+/// The layered configuration a drawing realizes: how its frames divide their
+/// nodes and how far the connectors each routes reach across that division.
+struct Shape {
+    frames: usize,
+    layers: u64,
+    span: u64,
+    longest_span: u32,
+    /// The frame with the most to place. Frames are laid out one at a time and
+    /// vary by orders of magnitude, so the largest sets the pace of the whole.
+    largest: Frame,
+    /// Containment levels the connectors descend below the frame that routes
+    /// them, summed over both ends, each level costing a hierarchical port.
+    descent: u64,
+    /// Connectors running between a container and its own descendant, which no
+    /// one frame's layering ranks against each other.
+    nested: usize,
+    /// Interior points of every connector drawn.
+    bends: usize,
+}
+
+/// Depth in the containment forest, a root counting zero.
+fn depths(graph: &Graph, parent_of: &HashMap<Id, Option<Id>>) -> HashMap<Id, u32> {
+    let mut depth_of = HashMap::with_capacity(graph.nodes.len());
+    for node in &graph.nodes {
+        let mut chain = Vec::new();
+        let mut at = Some(node.id);
+        let mut depth = loop {
+            match at {
+                None => break 0,
+                Some(id) => match depth_of.get(&id) {
+                    Some(&known) => break known + 1,
+                    None => {
+                        chain.push(id);
+                        at = parent_of[&id];
+                    }
+                },
+            }
+        };
+        for &id in chain.iter().rev() {
+            depth_of.insert(id, depth);
+            depth += 1;
+        }
+    }
+    depth_of
+}
+
+/// The pair of nodes ELK ranks against each other for an edge between `from` and
+/// `to`: each endpoint lifted to its ancestor sitting directly in the deepest
+/// frame containing both, which is the frame that routes the edge. `None` where
+/// one endpoint contains the other, so no frame holds both.
+fn ranked_pair(
+    parent_of: &HashMap<Id, Option<Id>>,
+    depth_of: &HashMap<Id, u32>,
+    from: Id,
+    to: Id,
+) -> Option<(Id, Id)> {
+    let (mut a, mut b) = (from, to);
+    while depth_of[&a] > depth_of[&b] {
+        a = parent_of[&a]?;
+    }
+    while depth_of[&b] > depth_of[&a] {
+        b = parent_of[&b]?;
+    }
+    while a != b {
+        let (up_a, up_b) = (parent_of[&a], parent_of[&b]);
+        if up_a == up_b {
+            return Some((a, b));
+        }
+        a = up_a?;
+        b = up_b?;
+    }
+    None
+}
+
+fn shape(graph: &Graph, drawing: &LaidOut) -> Shape {
+    let parent_of: HashMap<Id, Option<Id>> =
+        graph.nodes.iter().map(|n| (n.id, n.parent)).collect();
+    let depth_of = depths(graph, &parent_of);
+    let mut frames: HashMap<Option<Id>, Frame> = HashMap::new();
+    for (id, anchor) in &drawing.anchors {
+        let frame = frames.entry(parent_of[id]).or_default();
+        frame.nodes += 1;
+        frame.layers = frame.layers.max(anchor.layer + 1);
+    }
+
+    let mut longest_span = 0;
+    let mut descent = 0;
+    let mut nested = 0;
+    let mut bends = 0;
+    for connector in &drawing.connectors {
+        bends += connector.points.len().saturating_sub(2);
+        let ranked = ranked_pair(&parent_of, &depth_of, connector.from, connector.to);
+        let placed = ranked
+            .and_then(|(a, b)| Some((a, b, drawing.anchors.get(&a)?, drawing.anchors.get(&b)?)));
+        let Some((a, b, from, to)) = placed else {
+            nested += 1;
+            continue;
+        };
+        let span = from.layer.abs_diff(to.layer);
+        longest_span = longest_span.max(span);
+        descent += u64::from(depth_of[&connector.from] - depth_of[&a])
+            + u64::from(depth_of[&connector.to] - depth_of[&b]);
+        let frame = frames.entry(parent_of[&a]).or_default();
+        frame.connectors += 1;
+        frame.span += u64::from(span);
+    }
+
+    Shape {
+        frames: frames.len(),
+        layers: frames.values().map(|f| u64::from(f.layers)).sum(),
+        span: frames.values().map(|f| f.span).sum(),
+        longest_span,
+        largest: frames.into_values().max_by_key(Frame::placed).unwrap_or_default(),
+        descent,
+        nested,
+        bends,
+    }
+}
+
+fn report_shape(held: &str, shape: &Shape) {
+    eprintln!(
+        "[bench] {held} shape: {} layers over {} frames, connectors spanning {} layers \
+         (longest {}) and descending {} levels, {} nested; {} bends; \
+         its largest frame ranks {} nodes into {} layers, routing {} connectors over {}",
+        shape.layers,
+        shape.frames,
+        shape.span,
+        shape.longest_span,
+        shape.descent,
+        shape.nested,
+        shape.bends,
+        shape.largest.nodes,
+        shape.largest.layers,
+        shape.largest.connectors,
+        shape.largest.span,
+    );
 }
 
 struct Args {
@@ -218,12 +383,18 @@ fn main() {
     opened.insert(container);
     let toggled = view_at(&base, &reduced_base, &opened, &mut names);
 
-    let free = min_secs(iters, || {
-        std::hint::black_box(layout::layout(&toggled));
-    });
-    let pinned = min_secs(iters, || {
-        std::hint::black_box(layout::layout_pinned(&toggled, &start.anchors));
-    });
+    // Alternating the two within each iteration pairs them against the same
+    // machine load, which over a run of minutes is not otherwise steady.
+    let mut free_secs = Vec::with_capacity(iters);
+    let mut pinned_secs = Vec::with_capacity(iters);
+    let mut free_drawing = LaidOut::default();
+    let mut pinned_drawing = LaidOut::default();
+    for _ in 0..iters {
+        free_secs.push(secs(|| free_drawing = layout::layout(&toggled)));
+        pinned_secs.push(secs(|| pinned_drawing = layout::layout_pinned(&toggled, &start.anchors)));
+    }
+    let (free, free_median, free_max) = spread(&free_secs);
+    let (pinned, pinned_median, pinned_max) = spread(&pinned_secs);
 
     eprintln!(
         "[bench] base: {} nodes / {} edges; under caps {}/{} the starting view is \
@@ -243,5 +414,20 @@ fn main() {
         toggled.nodes.len(),
         toggled.edges.len(),
     );
-    eprintln!("[bench] layout free: {free:.3}s  pinned: {pinned:.3}s  (min of {iters})");
+    report_shape("free", &shape(&toggled, &free_drawing));
+    report_shape("pinned", &shape(&toggled, &pinned_drawing));
+    eprintln!(
+        "[bench] layout free: {free:.3}s min / {free_median:.3}s median / {free_max:.3}s max  \
+         pinned: {pinned:.3}s / {pinned_median:.3}s / {pinned_max:.3}s  (of {iters})"
+    );
+    let paired: Vec<String> = free_secs
+        .iter()
+        .zip(&pinned_secs)
+        .map(|(free, pinned)| format!("{:.3}", pinned / free))
+        .collect();
+    eprintln!(
+        "[bench] pinned/free: {:.3} on the minima, {} paired",
+        pinned / free,
+        paired.join(" "),
+    );
 }
