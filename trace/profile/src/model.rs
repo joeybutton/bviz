@@ -260,6 +260,7 @@ pub fn span_role(category: &str, name: &str) -> SpanRole {
 
         "Remote execution file fetching" | "remote output download"
         | "remote action cache check" | "remote network" | "RPC"
+        | "calling credential helper"
         | "Fetching repository" => (RemoteCache, false),
 
         "Remote execution queuing time" | "thread wait" | "action resource lock"
@@ -700,6 +701,10 @@ mod tests {
         assert_eq!(role("VFS md5", ""), overhead(Workload::Filesystem));
         assert_eq!(role("include scanner", ""), overhead(Workload::Filesystem));
         assert_eq!(role("RPC", ""), overhead(Workload::RemoteCache));
+        assert_eq!(
+            role("calling credential helper", ""),
+            overhead(Workload::RemoteCache)
+        );
         // The throttle wait splits away from the transfer it gates.
         assert_eq!(
             role("Remote execution setup", "acquiring semaphore"),
