@@ -210,10 +210,10 @@ pub struct SpanRole {
     pub payload: bool,
 }
 
-/// Classify a slice for coloring from its Bazel `cat` and name. The name
-/// disambiguates the heterogeneous "general information" category; every other
-/// category maps by `cat` alone. An unknown or future category falls through to
-/// [`Workload::Other`] overhead.
+/// Classify a slice for coloring from its Bazel `cat` and name. A category whose
+/// spans are not all one kind of work splits on the name; the rest map by `cat`
+/// alone. An unknown or future category falls through to [`Workload::Other`]
+/// overhead.
 ///
 /// Two placements are judgment calls: skyfunction frames (including
 /// `CONFIGURED_TARGET`) are [`Workload::Skyframe`] overhead — the payload is the
@@ -224,6 +224,9 @@ pub fn span_role(category: &str, name: &str) -> SpanRole {
     use Workload::*;
     let (workload, payload) = match category {
         "general information" => general_information_role(name),
+        "Remote execution setup" | "Remote execution upload time" => {
+            remote_cache_role(name)
+        }
 
         "action processing"
         | "local action execution"
@@ -254,9 +257,8 @@ pub fn span_role(category: &str, name: &str) -> SpanRole {
         | "include scanner" | "discover inputs"
         | "Vendoring repository" | "logging spawn" => (Filesystem, false),
 
-        "Remote execution upload time" | "Remote execution file fetching"
-        | "remote output download" | "remote action cache check"
-        | "Remote execution setup" | "remote network" | "RPC"
+        "Remote execution file fetching" | "remote output download"
+        | "remote action cache check" | "remote network" | "RPC"
         | "Fetching repository" => (RemoteCache, false),
 
         "Remote execution queuing time" | "thread wait" | "action resource lock"
@@ -273,6 +275,18 @@ pub fn span_role(category: &str, name: &str) -> SpanRole {
         _ => (Other, false),
     };
     SpanRole { workload, payload }
+}
+
+/// The role of a span in a category that hosts `acquiring semaphore` alongside
+/// [`Workload::RemoteCache`] work: that name is a throttle wait, which Bazel
+/// profiles under the category of the work it gates rather than one of its own.
+fn remote_cache_role(name: &str) -> (Workload, bool) {
+    use Workload::*;
+    if name == "acquiring semaphore" {
+        (Scheduling, false)
+    } else {
+        (RemoteCache, false)
+    }
 }
 
 /// The role of a "general information" span, which alone spans several workloads:
@@ -617,6 +631,23 @@ mod tests {
         assert_eq!(role("VFS md5", ""), overhead(Workload::Filesystem));
         assert_eq!(role("include scanner", ""), overhead(Workload::Filesystem));
         assert_eq!(role("RPC", ""), overhead(Workload::RemoteCache));
+        // The throttle wait splits away from the transfer it gates.
+        assert_eq!(
+            role("Remote execution setup", "acquiring semaphore"),
+            overhead(Workload::Scheduling)
+        );
+        assert_eq!(
+            role("Remote execution upload time", "acquiring semaphore"),
+            overhead(Workload::Scheduling)
+        );
+        assert_eq!(
+            role("Remote execution setup", "prepare remote action"),
+            overhead(Workload::RemoteCache)
+        );
+        assert_eq!(
+            role("Remote execution upload time", "upload outputs"),
+            overhead(Workload::RemoteCache)
+        );
         assert_eq!(
             role("action dependency checking", ""),
             overhead(Workload::Scheduling)
