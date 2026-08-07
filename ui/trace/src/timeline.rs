@@ -220,6 +220,32 @@ enum TimelineDrag {
     TimeRegion(RegionDrag),
 }
 
+impl TimelineDrag {
+    /// The region drag under way, which the overlay previews and a release
+    /// commits, so what is drawn during a drag is what lands.
+    fn region(&self) -> Option<RegionDrag> {
+        match *self {
+            TimelineDrag::TimeRegion(drag) => Some(drag),
+            _ => None,
+        }
+    }
+
+    /// The selection to paint over `standing` while the drag runs.
+    fn preview(&self, standing: &TimeSelection) -> TimeSelection {
+        self.region().map_or_else(|| standing.clone(), |drag| drag.applied(standing))
+    }
+
+    /// Abandons a region drag under way, reporting whether there was one. It
+    /// commits nothing, so the selection stands as the press found it.
+    fn cancel_region(&mut self) -> bool {
+        let live = self.region().is_some();
+        if live {
+            *self = TimelineDrag::None;
+        }
+        live
+    }
+}
+
 /// The flame-chart timeline: time on the x axis, stacked thread lanes on the y
 /// axis, the counter plots (Counters tab), the ruler, gutter, phase markers, and
 /// scroll bars. Owns the timeline's view state, reading the document and
@@ -506,14 +532,18 @@ impl TimelinePanel {
         }
     }
 
-    /// Widens the aggregate back to the whole timeline (the Escape gesture).
+    /// Backs out of the innermost gesture (the Escape gesture): a region drag
+    /// under way is abandoned, and failing that the aggregate widens back to the
+    /// whole timeline.
     fn clear_time_selection(
         &mut self,
         _: &ClearTimeSelection,
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.model.update(cx, |m, cx| m.set_time_selection(TimeSelection::default(), cx)) {
+        let backed_out = self.drag.cancel_region()
+            || self.model.update(cx, |m, cx| m.set_time_selection(TimeSelection::default(), cx));
+        if backed_out {
             cx.notify();
         }
     }
@@ -853,14 +883,14 @@ fn timeline_end_drag(
     _: &MouseUpEvent,
     cx: &mut Context<TimelinePanel>,
 ) {
-    match std::mem::replace(&mut panel.drag, TimelineDrag::None) {
+    match std::mem::replace(&mut panel.drag, TimelineDrag::None).region() {
         // The committed selection feeds only the aggregate, so here too the
         // slice layer's scene stands.
-        TimelineDrag::TimeRegion(drag) => {
+        Some(drag) => {
             panel.commit_time_region(drag, cx);
             cx.notify();
         }
-        _ => panel.invalidate_canvas(cx),
+        None => panel.invalidate_canvas(cx),
     }
 }
 
@@ -1219,13 +1249,7 @@ fn overlay_paint(
             let tv = panel.view;
             let (tab, panel_height, gutter_width) = panel.shell_layout(cx);
             let hovered = panel.hover.and_then(|at| Some((at, panel.slice_at(at, cx)?)));
-            let standing = panel.model.read(cx).time_selection();
-            // The preview runs through the same edit the release commits, so what
-            // is drawn during a drag is what lands.
-            let selection = match panel.drag {
-                TimelineDrag::TimeRegion(drag) => drag.applied(standing),
-                _ => standing.clone(),
-            };
+            let selection = panel.drag.preview(panel.model.read(cx).time_selection());
             (
                 tv,
                 tab,
@@ -1487,6 +1511,41 @@ mod tests {
             let held = RegionDrag { moved: false, ..drag(edit, 700, 701) };
             assert!(held.released(&base).spans().is_empty());
         }
+    }
+
+    /// A region drag under way over the timeline.
+    fn live(edit: RegionEdit, anchor_us: i64, cursor_us: i64) -> TimelineDrag {
+        TimelineDrag::TimeRegion(drag(edit, anchor_us, cursor_us))
+    }
+
+    #[test]
+    fn cancelling_a_replacing_drag_leaves_the_standing_selection() {
+        let base = selection(&[(0, 100), (200, 300)]);
+        let mut gesture = live(RegionEdit::Replace, 500, 700);
+        assert_eq!(regions(&gesture.preview(&base)), [(500, 700)], "the drag previews a region");
+        assert!(gesture.cancel_region());
+        assert_eq!(regions(&gesture.preview(&base)), regions(&base));
+    }
+
+    #[test]
+    fn cancelling_a_resize_drag_leaves_its_region_at_its_own_extent() {
+        let base = selection(&[(0, 100), (200, 300)]);
+        let mut gesture = live(RegionEdit::Resize { index: 1 }, 300, 150);
+        assert!(gesture.cancel_region());
+        assert_eq!(regions(&gesture.preview(&base)), [(0, 100), (200, 300)]);
+    }
+
+    #[test]
+    fn a_release_after_a_cancel_commits_nothing() {
+        let mut gesture = live(RegionEdit::Replace, 500, 700);
+        gesture.cancel_region();
+        assert!(gesture.region().is_none(), "the release finds no drag to commit");
+    }
+
+    #[test]
+    fn cancelling_with_no_drag_under_way_reports_nothing_to_abandon() {
+        assert!(!TimelineDrag::None.cancel_region());
+        assert!(!TimelineDrag::Pan.cancel_region());
     }
 
     /// A viewport split with a gutter of [`TEST_GUTTER`] and no counter lanes,
