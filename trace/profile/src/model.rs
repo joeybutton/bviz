@@ -688,23 +688,31 @@ mod tests {
     use crate::concurrent_interner::ConcurrentInterner;
     use crate::parse::build_for_test;
 
+    /// One action's `describe()` text, which a profile repeats verbatim across
+    /// every category that names an action.
+    const ACTION_DESCRIPTION: &str = "Compiling Rust rlib //trace/profile:profile (9 files)";
+
     #[test]
     fn span_role_maps_categories_and_names_to_workload_and_payload() {
         let role = |cat, name| span_role(cat, name);
         let payload = |w| SpanRole { workload: w, payload: true };
         let overhead = |w| SpanRole { workload: w, payload: false };
         // The action body and Starlark are payload.
-        assert_eq!(role("action processing", "Rustc"), payload(Workload::Subprocess));
         assert_eq!(
-            role("remote action execution", ""),
+            role("action processing", ACTION_DESCRIPTION),
+            payload(Workload::Subprocess)
+        );
+        assert_eq!(
+            role("remote action execution", "execute remotely"),
             payload(Workload::Subprocess)
         );
         assert_eq!(
             role("remote action execution", "send Execute request"),
             overhead(Workload::RemoteCache)
         );
+        let replayed = format!("action '{ACTION_DESCRIPTION}'");
         assert_eq!(
-            role("critical path component", "action 'Compiling foo.cc'"),
+            role("critical path component", &replayed),
             payload(Workload::Subprocess)
         );
         assert_eq!(
@@ -742,12 +750,12 @@ mod tests {
         assert_eq!(role("VFS md5", ""), overhead(Workload::Filesystem));
         assert_eq!(role("include scanner", ""), overhead(Workload::Filesystem));
         assert_eq!(
-            role("update action information", "Compiling foo.cc"),
+            role("update action information", "Compiling gnulib/lib/c-ctype.c [for tool]"),
             overhead(Workload::Filesystem)
         );
         assert_eq!(role("RPC", ""), overhead(Workload::RemoteCache));
         assert_eq!(
-            role("calling credential helper", ""),
+            role("calling credential helper", "calling credential helper"),
             overhead(Workload::RemoteCache)
         );
         // The throttle wait splits away from the transfer it gates.
@@ -760,16 +768,19 @@ mod tests {
             overhead(Workload::Scheduling)
         );
         assert_eq!(
-            role("Remote execution setup", "prepare remote action"),
+            role("Remote execution setup", "pre-fetch"),
             overhead(Workload::RemoteCache)
         );
         assert_eq!(
             role("Remote execution upload time", "upload outputs"),
             overhead(Workload::RemoteCache)
         );
-        // The local action-cache lookup is named after the action it checks.
+        // The local action-cache lookup carries the bare description of the
+        // action it checks — the same text the action's own span carries, and
+        // the form the flame graph's mnemonic index is keyed by. Only the
+        // critical-path replay wraps that description in `action '…'`.
         assert_eq!(
-            role("action dependency checking", "action 'Compiling foo.cc'"),
+            role("action dependency checking", ACTION_DESCRIPTION),
             overhead(Workload::RemoteCache)
         );
         assert_eq!(
@@ -836,9 +847,26 @@ mod tests {
                 "{name}"
             );
         }
+        // Real names that fall just outside each open-ended prefix, so
+        // loosening one is a test failure rather than a silent reclassification.
+        for name in [
+            "buildTargets",
+            "RemoteModule.beforeCommand",
+            "BazelRepositoryModule.beforeCommand",
+            "fetch module file: platforms@1.0.0",
+        ] {
+            assert_eq!(
+                role("general information", name),
+                overhead(Workload::Other),
+                "{name}"
+            );
+        }
         assert_eq!(
-            role("general information", "buildTargets"),
-            overhead(Workload::Other)
+            role(
+                "Starlark repository function call",
+                "rules_java++toolchains+remote_jdk8_linux_toolchain_config_repo"
+            ),
+            payload(Workload::Starlark)
         );
         // An unknown category is Other overhead.
         assert_eq!(role("some future task", ""), overhead(Workload::Other));
