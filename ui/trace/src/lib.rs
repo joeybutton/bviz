@@ -1317,12 +1317,7 @@ fn paint_slice(
         fill,
         profile.str(slice.name),
         bviz_ui_theme::label_on(fill),
-        bviz_ui_components::LabelBoxStyle {
-            background: palette.background,
-            seam_mix: SLICE_SEAM_MIX,
-            label_min_px: LABEL_MIN_PX,
-            text_pad: SLICE_TEXT_PAD,
-        },
+        palette.label_box(),
         window,
         cx,
     );

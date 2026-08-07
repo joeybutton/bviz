@@ -2,7 +2,7 @@
 //! the shared palette helpers in [`bviz_ui_theme`].
 
 use bviz_trace_layout::{SpanRole, Workload};
-use bviz_ui_components::TooltipColors;
+use bviz_ui_components::{LabelBoxStyle, TooltipColors};
 use bviz_ui_theme::{hue_of, luminance};
 use gpui::{div, hsla, prelude::*, px, Hsla, IntoElement, Rgba};
 
@@ -174,5 +174,15 @@ impl Palette {
     /// The colors a hover tooltip paints with.
     pub(crate) fn tooltip(&self) -> TooltipColors {
         TooltipColors { panel: self.panel, border: self.border, label: self.label }
+    }
+
+    /// The style a labeled box paints with.
+    pub(crate) fn label_box(&self) -> LabelBoxStyle {
+        LabelBoxStyle {
+            background: self.background,
+            seam_mix: crate::SLICE_SEAM_MIX,
+            label_min_px: crate::LABEL_MIN_PX,
+            text_pad: crate::SLICE_TEXT_PAD,
+        }
     }
 }

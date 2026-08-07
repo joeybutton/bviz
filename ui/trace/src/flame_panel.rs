@@ -2,17 +2,16 @@ use crate::chart::format_duration;
 use crate::model::{AggregateBuildStarted, TraceModel};
 use crate::theme::{self, Palette};
 use crate::{
-    BAR_WIDTH, LABEL_MIN_PX, LINE_SCROLL_PX, METRICS, MIN_SLICE_PX, SLICE_SEAM_MIX,
-    SLICE_TEXT_PAD, STATS_TEXT_SIZE, ZOOM_PER_NOTCH, drawn_scroll, scroll_request,
-    thumb_offset,
+    BAR_WIDTH, LINE_SCROLL_PX, METRICS, MIN_SLICE_PX, STATS_TEXT_SIZE, ZOOM_PER_NOTCH,
+    drawn_scroll, scroll_request, thumb_offset,
 };
 use bviz_trace_layout::{
     FlameBox, FlameMetrics, FlamePlacement, FlameView, ScopeAggregate, flame_height,
     lay_out_flame,
 };
 use bviz_ui_components::{
-    Axis, DEFAULT_MIN_THUMB, LabelBoxStyle, Scrollbar, cached_layer, overlay_canvas,
-    paint_labeled_box, paint_tooltip_box, spinner, track_drag,
+    Axis, DEFAULT_MIN_THUMB, Scrollbar, cached_layer, overlay_canvas, paint_labeled_box,
+    paint_tooltip_box, spinner, track_drag,
 };
 use gpui::{
     App, Bounds, ContentMask, Context, Div, Entity, IntoElement, MouseButton,
@@ -697,12 +696,7 @@ fn flame_paint(
                     fill,
                     graph.str(b.name),
                     bviz_ui_theme::label_on(fill),
-                    LabelBoxStyle {
-                        background: palette.background,
-                        seam_mix: SLICE_SEAM_MIX,
-                        label_min_px: LABEL_MIN_PX,
-                        text_pad: SLICE_TEXT_PAD,
-                    },
+                    palette.label_box(),
                     window,
                     cx,
                 );
