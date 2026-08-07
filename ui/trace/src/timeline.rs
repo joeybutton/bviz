@@ -785,12 +785,7 @@ fn slice_paint(
             );
         }
 
-        let flame_mask = ContentMask {
-            bounds: Bounds::new(
-                point(px(regions.content_left), px(regions.flame_top)),
-                size(px(regions.time_w), px(regions.flame_h())),
-            ),
-        };
+        let flame_mask = ContentMask { bounds: regions.flame_rect() };
         window.with_content_mask(Some(flame_mask), |window| {
             for lane in layout.lanes.iter().skip(1) {
                 let ry = regions.flame_top + lane.top - METRICS.lane_gap / 2.0 - scroll;

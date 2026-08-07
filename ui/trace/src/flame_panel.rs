@@ -86,7 +86,7 @@ impl FlameBoxCache {
         scroll_y: f32,
         pos: Point<Pixels>,
     ) -> Option<HoveredBox> {
-        if !fl.contains(pos) {
+        if !fl.rect().contains(&pos) {
             return None;
         }
         let boxes = self.matching(
@@ -113,9 +113,7 @@ struct HoveredBox {
 }
 
 /// The flame graph's current geometry, shared by hit-testing and the
-/// scroll/zoom/pan handlers so they map the cursor the same way the paint does:
-/// the horizontal view, the full laid-out height, and the flame section's
-/// content rect after the scroll-bar reserves.
+/// scroll/zoom/pan handlers so they map the cursor the same way the paint does.
 #[derive(Clone, Copy)]
 struct FlameLayout {
     view: FlameView,
@@ -127,11 +125,35 @@ struct FlameLayout {
 }
 
 impl FlameLayout {
-    /// Whether a window-space `pos` lies over the graph's content rect.
-    fn contains(&self, pos: Point<Pixels>) -> bool {
-        let x = f32::from(pos.x);
-        let y = f32::from(pos.y);
-        x >= self.left && x < self.left + self.width && y >= self.top && y < self.top + self.height
+    /// Places a graph `total_h` tall, viewed through `view`, in `bounds`: the
+    /// content rect spans the full body with no gutter and no time axis, less a
+    /// reserved vertical-bar column (when the tree's rows overflow the visible
+    /// height) and a reserved horizontal-bar strip (when the zoomed width
+    /// overflows the visible width). Both reserves may apply at once, leaving the
+    /// bottom-right corner to neither bar.
+    fn new(bounds: Bounds<Pixels>, total_h: f32, view: FlameView) -> Self {
+        // Zoom > 1 overflows horizontally, so a bottom strip is reserved for the
+        // h-bar; that shrinks the height the rows must clear, which is what decides
+        // the v-bar reserve. Resolve in that order.
+        let hbar_reserve = if view.zoom > 1.0 { BAR_WIDTH } else { 0.0 };
+        let height = (f32::from(bounds.size.height) - hbar_reserve).max(0.0);
+        let vbar_reserve = if total_h > height { BAR_WIDTH } else { 0.0 };
+        let width = (f32::from(bounds.size.width) - vbar_reserve).max(0.0);
+        Self {
+            view,
+            total_h,
+            left: f32::from(bounds.origin.x),
+            top: f32::from(bounds.origin.y),
+            width,
+            height,
+        }
+    }
+
+    fn rect(&self) -> Bounds<Pixels> {
+        Bounds::new(
+            point(px(self.left), px(self.top)),
+            size(px(self.width), px(self.height)),
+        )
     }
 }
 
@@ -153,41 +175,6 @@ fn flame_metrics() -> FlameMetrics {
     FlameMetrics {
         row_height: METRICS.row_height,
     }
-}
-
-/// The flame graph's content rectangle: it spans the full body with no gutter
-/// and no time axis, less a reserved vertical-bar column (when the tree's rows
-/// overflow the visible height) and a reserved horizontal-bar strip (when the
-/// zoomed width overflows the visible width). Both reserves may apply at once,
-/// leaving the bottom-right corner to neither bar.
-struct Rect {
-    left: f32,
-    top: f32,
-    width: f32,
-    height: f32,
-}
-
-fn flame_graph_rect(bounds: Bounds<Pixels>, flame_total: f32, flame_view: FlameView) -> Rect {
-    let left = f32::from(bounds.origin.x);
-    let top = f32::from(bounds.origin.y);
-    let width_full = f32::from(bounds.size.width);
-    let height_full = f32::from(bounds.size.height);
-    // Zoom > 1 overflows horizontally, so a bottom strip is reserved for the
-    // h-bar; that shrinks the height the rows must clear, which is what decides
-    // the v-bar reserve. Resolve in that order.
-    let hbar_reserve = if flame_view.zoom > 1.0 {
-        BAR_WIDTH
-    } else {
-        0.0
-    };
-    let height = (height_full - hbar_reserve).max(0.0);
-    let vbar_reserve = if flame_total > height {
-        BAR_WIDTH
-    } else {
-        0.0
-    };
-    let width = (width_full - vbar_reserve).max(0.0);
-    Rect { left, top, width, height }
 }
 
 /// Lays out the graph's visible window, reusing the [`FlameBoxCache`] in `cache`
@@ -337,18 +324,8 @@ impl FlamePanel {
     /// has been laid out.
     fn layout(&self, cx: &App) -> Option<FlameLayout> {
         let aggregates = self.model.read(cx).aggregates()?;
-        let view = self.flame_view;
         let total_h = flame_height(&aggregates.flame, &flame_metrics());
-        let Rect { left, top, width, height } =
-            flame_graph_rect(self.flame_bounds?, total_h, view);
-        Some(FlameLayout {
-            view,
-            total_h,
-            left,
-            top,
-            width,
-            height,
-        })
+        Some(FlameLayout::new(self.flame_bounds?, total_h, self.flame_view))
     }
 
     /// The bar for the tree's rows against the visible height; none while the
@@ -437,7 +414,7 @@ impl FlamePanel {
     /// draws or erases one repaints.
     fn update_hover(&mut self, pos: Point<Pixels>, cx: &mut Context<Self>) {
         let drawn_before = self.hovered_box(cx).is_some();
-        self.flame_hover = self.layout(cx).filter(|fl| fl.contains(pos)).map(|_| pos);
+        self.flame_hover = self.layout(cx).filter(|fl| fl.rect().contains(&pos)).map(|_| pos);
         if drawn_before || self.hovered_box(cx).is_some() {
             cx.notify();
         }
@@ -704,11 +681,9 @@ fn flame_paint(
         let boxes = parent.update(cx, |panel, _| {
             flame_boxes(&mut panel.flame_boxes, &aggregates, content_w, scroll_x, fl.width, &metrics)
         });
-        let FlameLayout { left, top, width, height, .. } = fl;
+        let FlameLayout { left, top, height, .. } = fl;
 
-        let mask = ContentMask {
-            bounds: Bounds::new(point(px(left), px(top)), size(px(width), px(height))),
-        };
+        let mask = ContentMask { bounds: fl.rect() };
         window.with_content_mask(Some(mask), |window| {
             for b in boxes.iter() {
                 let y = top + b.y - scroll_y;
@@ -851,25 +826,26 @@ mod tests {
     }
 
     #[test]
-    fn the_content_rect_holds_its_left_and_top_edges() {
-        let fl = FlameLayout {
-            view: FlameView::FIT,
-            total_h: 600.0,
-            left: 40.0,
-            top: 30.0,
-            width: 200.0,
-            height: 100.0,
-        };
-        let at = |x, y| point(px(x), px(y));
-        // The left and top edges lie inside the rect.
-        assert!(fl.contains(at(40.0, 30.0)));
-        assert!(fl.contains(at(239.0, 129.0)));
-        // The right and bottom edges lie past it, so the reserved scroll-bar
-        // column and strip belong to the bars.
-        assert!(!fl.contains(at(240.0, 30.0)));
-        assert!(!fl.contains(at(40.0, 130.0)));
-        // Clear of the rect on either axis.
-        assert!(!fl.contains(at(10.0, 50.0)));
-        assert!(!fl.contains(at(100.0, 10.0)));
+    fn the_content_rect_reserves_a_column_and_a_strip_for_the_bars_shown() {
+        let bounds = Bounds::new(point(px(40.0), px(30.0)), size(px(800.0), px(400.0)));
+        let full_w = f32::from(bounds.size.width);
+        let full_h = f32::from(bounds.size.height);
+        let zoomed = FlameView { left: 0.0, zoom: 2.0 };
+        let rect = |total_h, view| FlameLayout::new(bounds, total_h, view).rect();
+        // A graph that fits, at the zoom that fits it: neither bar shows, so the
+        // rect is the whole body.
+        assert_eq!(rect(full_h, FlameView::FIT), bounds);
+        // Zoomed in, the h-bar takes its strip; the rows still clear what is left
+        // of the height, so no column goes to the v-bar.
+        assert_eq!(
+            rect(full_h - BAR_WIDTH, zoomed),
+            Bounds::new(bounds.origin, size(px(full_w), px(full_h - BAR_WIDTH)))
+        );
+        // Rows that fit the body but not the height left by the h-bar's strip
+        // overflow, so both bars show and each takes its reserve.
+        assert_eq!(
+            rect(full_h, zoomed),
+            Bounds::new(bounds.origin, size(px(full_w - BAR_WIDTH), px(full_h - BAR_WIDTH)))
+        );
     }
 }

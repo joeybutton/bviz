@@ -1412,31 +1412,33 @@ mod tests {
         assert_eq!(clamp_gutter_width(120.0, 100.0), MIN_GUTTER);
     }
 
+    /// gpui's `Bounds::contains` documents inclusive edges and implements
+    /// half-open ones; the hover regions are built on the implementation, so a
+    /// pin that resolved the contradiction the other way would move which pixel
+    /// column and row show a tooltip.
     #[test]
-    fn the_flame_region_holds_its_left_and_top_edges() {
-        let regions = Regions {
-            content_left: 120.0,
-            content_right: 520.0,
-            time_right: 500.0,
-            time_w: 380.0,
-            flame_top: 24.0,
-            flame_bottom: 300.0,
-            tab_top: 300.0,
-            panel_top: 320.0,
-            panel_bottom: 400.0,
-            has_graph: true,
-        };
+    fn the_flame_region_ends_left_of_the_bar_column() {
+        let window = Bounds::new(point(px(0.0), px(0.0)), size(px(1000.0), px(600.0)));
+        // Lanes taller than any region this window can hold, so the split
+        // reserves a column for the vertical bar.
+        let flame_total = 2.0 * f32::from(window.size.height);
+        let regions =
+            Regions::new(window, 0, DEFAULT_PANEL_HEIGHT, DEFAULT_GUTTER_WIDTH, flame_total);
+        let right = regions.content_left + regions.time_w;
+        assert_eq!(right, regions.content_right - BAR_WIDTH);
+
         let at = |x, y| point(px(x), px(y));
-        // The gutter edge and the ruler's bottom lie inside the region.
-        assert!(regions.in_flame(at(120.0, 24.0)));
-        assert!(regions.in_flame(at(499.0, 299.0)));
-        // The reserved vertical-bar column and the row below the lanes lie past
-        // it.
-        assert!(!regions.in_flame(at(500.0, 24.0)));
-        assert!(!regions.in_flame(at(120.0, 300.0)));
+        // The gutter's edge, the ruler's bottom, and the last column left of the
+        // bar lie inside the region.
+        assert!(regions.in_flame(at(regions.content_left, regions.flame_top)));
+        assert!(regions.in_flame(at(right - 1.0, regions.flame_bottom - 1.0)));
+        // The bar's own column and the row below the lanes lie past it.
+        assert!(!regions.in_flame(at(right, regions.flame_top)));
+        assert!(!regions.in_flame(at(regions.content_right - 1.0, regions.flame_top)));
+        assert!(!regions.in_flame(at(regions.content_left, regions.flame_bottom)));
         // Clear of the region on either axis: in the gutter, and in the ruler.
-        assert!(!regions.in_flame(at(60.0, 100.0)));
-        assert!(!regions.in_flame(at(200.0, 10.0)));
+        assert!(!regions.in_flame(at(regions.content_left - 1.0, regions.flame_top)));
+        assert!(!regions.in_flame(at(right - 1.0, regions.flame_top - 1.0)));
     }
 
     #[test]
