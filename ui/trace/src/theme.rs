@@ -45,6 +45,11 @@ const OVERHEAD_LIGHTNESS_LIGHT: f32 = 0.72;
 const FLAME_ROOT_LIGHTNESS_DARK: f32 = 0.30;
 const FLAME_ROOT_LIGHTNESS_LIGHT: f32 = 0.78;
 
+/// How far a selection tint is mixed from the selection accent toward the header
+/// band it lies on: faint enough that the label over it stays legible, strong
+/// enough to read as accented.
+const SELECTION_TINT_MIX: f32 = 0.8;
+
 /// Side of a legend swatch and the gap between a swatch and its label.
 const LEGEND_SWATCH: f32 = 10.0;
 const LEGEND_LABEL_GAP: f32 = 4.0;
@@ -169,6 +174,12 @@ impl Palette {
             crosshair: bviz_ui_theme::mix(colors.text, colors.background, 0.35),
             selection: colors.selected,
         }
+    }
+
+    /// A wash marking what the flame graph and stats aggregate over, over the
+    /// header band.
+    pub(crate) fn selection_tint(&self) -> Rgba {
+        bviz_ui_theme::mix(self.selection, self.header_band, SELECTION_TINT_MIX)
     }
 
     /// The colors a hover tooltip paints with.

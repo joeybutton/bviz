@@ -32,7 +32,7 @@ use timeline::{HoveredSlice, TimelinePanel};
 use tracks_menu::TracksMenu;
 
 use bviz_trace_layout::{
-    FlameDirection, FlameLabels, FlameMode, LaneLayout, LaneMetrics, TimeView,
+    FlameDirection, FlameLabels, FlameMode, LaneLayout, LaneMetrics, TimeSelection, TimeView,
 };
 use bviz_trace_profile::{Profile, Slice, TimeSpan};
 use bviz_ui_components::{
@@ -466,6 +466,10 @@ impl TraceView {
                 }),
             )
             .children(tabs)
+            // The time-window chip follows the tabs, in space every tab leaves
+            // free, so it does not compete with the flame graph's controls for the
+            // right end of the bar.
+            .children(self.time_window_chip(palette, cx))
             // The flame graph's mode controls and its work-class legend, keyed to
             // the box fills, sit at the far right of the bar while its tab is up.
             .child(div().flex_1())
@@ -483,6 +487,72 @@ impl TraceView {
                         STATS_TEXT_SIZE,
                     ))
             }))
+    }
+
+    /// The time window the flame graph and stats are restricted to, as a chip
+    /// carrying the control that widens them back to the whole build. Absent
+    /// while the whole timeline contributes.
+    fn time_window_chip(
+        &self,
+        palette: Palette,
+        cx: &mut Context<Self>,
+    ) -> Option<impl IntoElement> {
+        let summary = {
+            let model = self.model.read(cx);
+            let Source::Loaded(profile) = model.source() else {
+                return None;
+            };
+            let selection = model.time_selection();
+            if selection.is_empty() {
+                return None;
+            }
+            let span = profile.span();
+            time_window_summary(
+                selection.total_us(),
+                span.end_us - span.start_us,
+                selection.len(),
+            )
+        };
+        let view = cx.entity();
+        Some(
+            div()
+                .id("trace-time-window")
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_1()
+                .ml_2()
+                .my_1()
+                .pl_2()
+                .flex_shrink_0()
+                .rounded_md()
+                .bg(palette.selection_tint())
+                .border_1()
+                .border_color(palette.selection)
+                .text_size(px(STATS_TEXT_SIZE))
+                .text_color(palette.label)
+                // A press on the chip must not also begin a panel resize.
+                .on_mouse_down(MouseButton::Left, |_, _, cx: &mut App| cx.stop_propagation())
+                .child(summary)
+                .child(
+                    Button::new("trace-time-window-clear", move |_, _, cx| {
+                        view.update(cx, |this, cx| this.clear_time_selection(cx));
+                    })
+                    .ghost()
+                    .compact()
+                    .icon("x"),
+                ),
+        )
+    }
+
+    /// Widens the flame graph and stats back to the whole timeline.
+    fn clear_time_selection(&mut self, cx: &mut Context<Self>) {
+        if !self.model.update(cx, |m, cx| m.set_time_selection(TimeSelection::default(), cx)) {
+            return;
+        }
+        // The regions are painted by the timeline's overlay, so the slice layer's
+        // scene stands.
+        cx.notify();
     }
 
     /// The flame graph's mode controls: the two directions as an exclusive pair,
@@ -627,6 +697,20 @@ impl TraceView {
         self.flame.update(cx, |f, _| f.clear_hover());
         self.timeline.update(cx, |t, _| t.clear_hover());
     }
+}
+
+/// The chip's label for an aggregate covering `total_us` of a build spanning
+/// `span_us`, drawn from `regions` regions of profile time.
+fn time_window_summary(total_us: i64, span_us: i64, regions: usize) -> String {
+    let mut text = format!(
+        "Window: {} of {}",
+        format_duration(total_us),
+        format_duration(span_us)
+    );
+    if regions > 1 {
+        text.push_str(&format!(" · {regions} regions"));
+    }
+    text
 }
 
 impl Render for TraceView {
@@ -1201,7 +1285,7 @@ fn paint_thread_labels(
     let gutter_left = g.left;
     let gutter_width = g.width;
     let palette = g.palette;
-    let selection_tint = bviz_ui_theme::mix(palette.selection, palette.header_band, 0.8);
+    let selection_tint = palette.selection_tint();
     for lane in &layout.lanes {
         let top = regions.flame_top + lane.top - scroll_y;
         if top + lane.height < regions.flame_top || top > regions.flame_bottom {
@@ -1498,6 +1582,30 @@ mod tests {
         // A label clear of row 0's extent reuses it rather than adding a row.
         assert_eq!(assign_marker_row(&mut rows, 60.0, 100.0), 0);
         assert_eq!(rows.len(), 4);
+    }
+
+    #[test]
+    fn a_one_region_window_reads_as_a_share_of_the_build() {
+        assert_eq!(
+            time_window_summary(2_500_000, 40_000_000, 1),
+            "Window: 2.50s of 40.00s"
+        );
+    }
+
+    #[test]
+    fn several_regions_are_counted_alongside_the_time_they_hold() {
+        assert_eq!(
+            time_window_summary(3_000_000, 40_000_000, 3),
+            "Window: 3.00s of 40.00s · 3 regions"
+        );
+    }
+
+    #[test]
+    fn a_window_far_shorter_than_the_build_keeps_its_own_unit() {
+        assert_eq!(
+            time_window_summary(4_200, 40_000_000, 1),
+            "Window: 4.20ms of 40.00s"
+        );
     }
 
     #[test]
