@@ -225,6 +225,7 @@ pub fn span_role(category: &str, name: &str) -> SpanRole {
     use Workload::*;
     let (workload, payload) = match category {
         "general information" => general_information_role(name),
+        "bazel module processing" => bazel_module_role(name),
         "Remote execution setup" | "Remote execution upload time"
         | "action dependency checking" => remote_cache_role(name),
 
@@ -245,7 +246,6 @@ pub fn span_role(category: &str, name: &str) -> SpanRole {
         | "Starlark compiled user function call"
         | "Starlark repository function call"
         | "Starlark thread context"
-        | "bazel module processing"
         | "load WebAssembly module"
         | "execute WebAssembly function" => (Starlark, true),
 
@@ -276,6 +276,18 @@ pub fn span_role(category: &str, name: &str) -> SpanRole {
         _ => (Other, false),
     };
     SpanRole { workload, payload }
+}
+
+/// The role of a "bazel module processing" span: the registry transfer that
+/// fetches a module's metadata and archives, and the Starlark that module
+/// resolution and extension evaluation run.
+fn bazel_module_role(name: &str) -> (Workload, bool) {
+    use Workload::*;
+    if name.starts_with("download file: ") || name.starts_with("fetch module file: ") {
+        (RemoteCache, false)
+    } else {
+        (Starlark, true)
+    }
 }
 
 /// The role of a span in a category that hosts `acquiring semaphore` alongside
@@ -647,6 +659,19 @@ mod tests {
         );
         assert_eq!(
             role("Starlark user function call", "_cc_library_impl"),
+            payload(Workload::Starlark)
+        );
+        // Module resolution splits registry transfer from its Starlark.
+        assert_eq!(
+            role("bazel module processing", "download file: https://bcr/modules/foo"),
+            overhead(Workload::RemoteCache)
+        );
+        assert_eq!(
+            role("bazel module processing", "fetch module file: rules_cc@0.1.5"),
+            overhead(Workload::RemoteCache)
+        );
+        assert_eq!(
+            role("bazel module processing", "evaluate module extension: crate"),
             payload(Workload::Starlark)
         );
         // Overhead workloads.
