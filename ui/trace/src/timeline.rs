@@ -131,6 +131,15 @@ pub(crate) enum RegionEdit {
     Slide { index: usize, width_us: i64, grab_us: i64 },
 }
 
+impl RegionEdit {
+    /// Whether the press took hold of a region. Short of the click threshold
+    /// such a press moves it nowhere and the selection stands; a press holding
+    /// nothing is a click on empty time, which drops the selection.
+    fn holds_a_region(self) -> bool {
+        matches!(self, Self::Resize { .. } | Self::Slide { .. })
+    }
+}
+
 /// A time-region drag in progress. Its region is only committed to the model on
 /// release, so the aggregate is rebuilt once rather than per mouse move.
 #[derive(Clone, Copy)]
@@ -175,6 +184,15 @@ impl RegionDrag {
             };
         }
         sel
+    }
+
+    /// The selection a release of the drag leaves over `base`.
+    pub(crate) fn released(&self, base: &TimeSelection) -> TimeSelection {
+        if self.moved || self.edit.holds_a_region() {
+            self.applied(base)
+        } else {
+            TimeSelection::default()
+        }
     }
 }
 
@@ -578,15 +596,9 @@ impl TimelinePanel {
         })
     }
 
-    /// Lands a finished time-region drag on the model: one that never passed the
-    /// click threshold is a click, which drops the selection entirely; otherwise
-    /// its edit applies to the standing selection.
+    /// Lands a finished time-region drag on the model.
     fn commit_time_region(&mut self, drag: RegionDrag, cx: &mut Context<Self>) {
-        let selection = if drag.moved {
-            drag.applied(self.model.read(cx).time_selection())
-        } else {
-            TimeSelection::default()
-        };
+        let selection = drag.released(self.model.read(cx).time_selection());
         self.model.update(cx, |m, cx| m.set_time_selection(selection, cx));
     }
 
@@ -1424,6 +1436,30 @@ mod tests {
         let base = selection(&[(0, 100)]);
         let held = RegionDrag { moved: false, ..drag(RegionEdit::Replace, 500, 501) };
         assert_eq!(held.applied(&base), base);
+    }
+
+    #[test]
+    fn a_resize_released_under_the_click_threshold_keeps_every_region() {
+        let base = selection(&[(0, 100), (200, 300), (400, 500)]);
+        let held = RegionDrag { moved: false, ..drag(RegionEdit::Resize { index: 1 }, 300, 202) };
+        assert_eq!(regions(&held.released(&base)), regions(&base));
+    }
+
+    #[test]
+    fn a_slide_released_under_the_click_threshold_keeps_every_region() {
+        let base = selection(&[(0, 100), (200, 300), (400, 500)]);
+        let edit = RegionEdit::Slide { index: 1, width_us: 100, grab_us: 50 };
+        let held = RegionDrag { moved: false, ..drag(edit, 250, 252) };
+        assert_eq!(regions(&held.released(&base)), regions(&base));
+    }
+
+    #[test]
+    fn a_click_on_empty_time_drops_the_whole_selection() {
+        let base = selection(&[(0, 100), (200, 300), (400, 500)]);
+        for edit in [RegionEdit::Replace, RegionEdit::Union] {
+            let held = RegionDrag { moved: false, ..drag(edit, 700, 701) };
+            assert!(held.released(&base).spans().is_empty());
+        }
     }
 
     /// A viewport split with a gutter of [`TEST_GUTTER`] and no counter lanes,
