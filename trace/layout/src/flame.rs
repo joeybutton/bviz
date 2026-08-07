@@ -2,7 +2,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 
 use bviz_trace_profile::{
-    Profile, Slice, SliceDetail, Span32, SpanRole, Str, ThreadTrack, Workload,
+    Profile, Slice, SliceDetail, Span32, SpanRole, Str, ThreadTrack, TimeSpan, Workload,
 };
 use rayon::iter::{IntoParallelRefIterator, IntoParallelRefMutIterator, ParallelIterator};
 use rayon::slice::{ParallelSlice, ParallelSliceMut};
@@ -1033,6 +1033,17 @@ fn containment_parents(slices: &[Slice]) -> Vec<Option<usize>> {
     parents
 }
 
+/// The range of a track's slices that can reach `span`, by binary search on
+/// either end: starts are ascending, so none at or past the span's end reaches
+/// it, and `end_maxes` is monotone, so the first element reaching the span's
+/// start is where slices ending before it stop. `end_maxes` must be the track's
+/// [`Profile::end_maxes`], index-parallel to `slices`.
+fn reaching(slices: &[Slice], end_maxes: &[i64], span: TimeSpan) -> std::ops::Range<usize> {
+    let upper = slices.partition_point(|s| s.start_us <= span.end_us);
+    let lower = end_maxes[..upper].partition_point(|&e| e < span.start_us);
+    lower..upper
+}
+
 /// The microseconds of `slice` that lie inside `window`, and `None` for a slice
 /// the window holds no part of. A zero-duration slice covers no microsecond to
 /// clip — microsecond quantization puts a large share of a profile's spans at
@@ -1067,8 +1078,19 @@ fn emit_lane_rows(
     window: &TimeSelection,
     out: &mut Vec<Row>,
 ) {
-    let slices = flamer.profile.slices(thread);
-    let details = flamer.profile.details(thread);
+    // A slice that contributes overlaps a region and so falls within the
+    // regions' bounds, as does every ancestor of one — a containment parent ends
+    // no earlier than its child, and `reaching` admits every slice whose end
+    // gets that far — so the bracket holds every slice that keys a row and every
+    // slice one keys onto. Regions spread far apart bracket to nearly the whole
+    // lane; only a narrow selection shrinks the walk.
+    let lane = flamer.profile.slices(thread);
+    let bracket = match window.bounds() {
+        Some(bounds) => reaching(lane, flamer.profile.end_maxes(thread), bounds),
+        None => 0..lane.len(),
+    };
+    let slices = &lane[bracket.clone()];
+    let details = &flamer.profile.details(thread)[bracket];
     let parents = containment_parents(slices);
     // What each slice brings, `None` for one left out. A slice whose containment
     // parent is left out is left out with it, so whatever a slice keys onto is
@@ -2186,6 +2208,71 @@ mod tests {
         // Unrestricted, a zero-duration span frames like any other.
         let all = flame_as(&p, FlameLabels::Name);
         assert_eq!(all.children(&all.root()).len(), 2);
+    }
+
+    #[test]
+    fn a_window_over_a_lanes_tail_aggregates_what_the_whole_lanes_walk_would() {
+        // The lane's slices all sit past 20, so the leading region holds none of
+        // them and adds nothing but reach: the two selections aggregate the same
+        // spans, one walking from the tail and one from the head of the lane.
+        let p = profile(vec![track(
+            1,
+            LaneClass::Execution,
+            vec![
+                action_named("Compiling //a:a", "Rustc", 20, 30),
+                slice("subprocess.run", "subprocess run", 25, 10),
+                action_named("Compiling //b:b", "Rustc", 80, 20),
+                slice("checkOutputs", "check outputs", 85, 5),
+            ],
+        )]);
+        for labels in [FlameLabels::Mnemonic, FlameLabels::Name] {
+            let tail = flame_within(&p, labels, &window(&[(80, 100)]));
+            let reaching_back = flame_within(&p, labels, &window(&[(0, 5), (80, 100)]));
+            assert_eq!(resolved(&tail), resolved(&reaching_back), "{labels:?}");
+        }
+    }
+
+    #[test]
+    fn a_span_starting_before_the_window_still_parents_its_nested_spans() {
+        let p = profile(vec![track(
+            1,
+            LaneClass::Execution,
+            vec![
+                action_named("Compiling //x:y", "Rustc", 0, 100),
+                slice("subprocess.run", "subprocess run", 60, 30),
+                slice("checkOutputs", "check outputs", 70, 10),
+            ],
+        )]);
+        let g = flame_within(&p, FlameLabels::Name, &window(&[(75, 95)]));
+        let compiling = child(&g, &g.root(), "Compiling //x:y");
+        assert_eq!(compiling.total_us, 20);
+        let sub = child(&g, &compiling, "subprocess.run");
+        assert_eq!(sub.total_us, 15);
+        assert_eq!(child(&g, &sub, "checkOutputs").total_us, 5);
+    }
+
+    #[test]
+    fn a_lane_lying_wholly_outside_the_window_contributes_nothing() {
+        let p = profile(vec![
+            track(1, LaneClass::Execution, vec![action("Rustc", 0, 50)]),
+            track(2, LaneClass::Execution, vec![action("Javac", 200, 50)]),
+        ]);
+        let g = flame_within(&p, FlameLabels::Mnemonic, &window(&[(200, 250)]));
+        assert_eq!(child_totals(&g, &g.root()), [("Javac".to_owned(), 50)]);
+    }
+
+    #[test]
+    fn a_selection_whose_regions_sit_far_apart_aggregates_both_of_them() {
+        let p = profile(vec![track(
+            1,
+            LaneClass::Execution,
+            vec![action("Rustc", 0, 10), action("Javac", 990, 10)],
+        )]);
+        let g = flame_within(&p, FlameLabels::Mnemonic, &window(&[(0, 10), (990, 1000)]));
+        assert_eq!(
+            child_totals(&g, &g.root()),
+            [("Javac".to_owned(), 10), ("Rustc".to_owned(), 10)]
+        );
     }
 
     #[test]
