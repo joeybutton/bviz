@@ -326,6 +326,7 @@ fn general_information_role(name: &str) -> (Workload, bool) {
     {
         (RemoteCache, false)
     } else if name == "Action.execute"
+        || name == "postprocessing.run"
         || name == "runAnalysisAndExecutionPhase"
         || name == "ParallelEvaluator.eval"
         || name.starts_with("skyframeExecutor")
@@ -699,6 +700,10 @@ mod tests {
         );
         assert_eq!(
             role("general information", "Action.execute"),
+            overhead(Workload::Skyframe)
+        );
+        assert_eq!(
+            role("general information", "postprocessing.run"),
             overhead(Workload::Skyframe)
         );
         for name in [
