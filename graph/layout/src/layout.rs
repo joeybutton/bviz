@@ -99,11 +99,26 @@ pub struct Connector {
     pub to: Id,
 }
 
+/// A node's place in the layered configuration of the frame that laid it out.
+/// The drawn coordinates follow from it, so two drawings whose nodes anchor
+/// alike read the same way however far their boxes moved.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Anchor {
+    /// How far along the layout direction the node sits, counted in layers.
+    pub layer: u32,
+    /// Rank across the layer, ascending along the frame's other axis.
+    pub slot: u32,
+}
+
 #[derive(Default)]
 pub struct LaidOut {
     /// Parent before child, so a renderer draws a container under its children.
     pub boxes: Vec<Box>,
     pub connectors: Vec<Connector>,
+    /// The layered configuration this drawing realizes, for reproducing its
+    /// reading order in another drawing. A node the layout reported no place for
+    /// is absent.
+    pub anchors: HashMap<Id, Anchor>,
     /// Every connected node pair in the view before any edges were dropped for
     /// drawing (e.g. by transitive reduction), so hovering can still light up a
     /// node's full set of neighbors even where no connector is drawn to them.
@@ -130,6 +145,7 @@ pub fn layout(graph: &Graph) -> LaidOut {
     LaidOut {
         boxes,
         connectors,
+        anchors: collect_anchors(&elk_of),
         full_edges: Vec::new(),
         width,
         height,
@@ -243,6 +259,7 @@ fn build_elk_graph<'g>(
     // cross-container edges orthogonally between subgraphs.
     let root = layered_root();
     set_property(&root, CoreOptions::HIERARCHY_HANDLING, HierarchyHandling::IncludeChildren);
+    report_anchors(&root);
 
     let mut elk_of: HashMap<Id, ElkNodeRef> = HashMap::new();
     for node in &graph.nodes {
@@ -253,6 +270,7 @@ fn build_elk_graph<'g>(
     for node in &graph.nodes {
         if children_of.contains_key(&node.id) {
             apply_options(&elk_of[&node.id]);
+            report_anchors(&elk_of[&node.id]);
         }
     }
     (root, elk_of)
@@ -364,6 +382,30 @@ fn collect_boxes(
     boxes.into_iter().map(|(_, b)| b).collect()
 }
 
+/// Reads the anchor of every node the layout numbered.
+fn collect_anchors(elk_of: &HashMap<Id, ElkNodeRef>) -> HashMap<Id, Anchor> {
+    let mut anchors = HashMap::with_capacity(elk_of.len());
+    for (&id, elk) in elk_of {
+        if let Some(anchor) = anchor(elk) {
+            anchors.insert(id, anchor);
+        }
+    }
+    anchors
+}
+
+/// A node's place in its frame, or `None` where the layout numbered none: the
+/// properties then carry their -1 default, out of an unsigned rank's range.
+fn anchor(node: &ElkNodeRef) -> Option<Anchor> {
+    let mut node = node.borrow_mut();
+    let properties = node.connectable().shape().graph_element().properties();
+    let layer = properties.get_property(LayeredOptions::LAYERING_LAYER_ID)?;
+    let slot = properties.get_property(LayeredOptions::CROSSING_MINIMIZATION_POSITION_ID)?;
+    Some(Anchor {
+        layer: u32::try_from(layer).ok()?,
+        slot: u32::try_from(slot).ok()?,
+    })
+}
+
 /// Builds a drawable connector for each routed pair, dropping any ELK left without
 /// a polyline of at least a start and an end.
 fn collect_connectors(edges: Vec<RoutedEdge>) -> Vec<Connector> {
@@ -456,6 +498,13 @@ fn apply_options(node: &ElkNodeRef) {
     );
 }
 
+/// Has the frame `node` heads number its nodes' layers and in-layer positions,
+/// which costs it an extra pass once the layout is otherwise settled. A frame
+/// that omits this leaves its nodes without an [`Anchor`].
+fn report_anchors(node: &ElkNodeRef) {
+    set_property(node, LayeredOptions::GENERATE_POSITION_AND_LAYER_IDS, true);
+}
+
 fn set_property<T: Clone + Send + Sync + 'static>(
     node: &ElkNodeRef,
     property: &Property<T>,
@@ -517,4 +566,121 @@ fn connector(edge: &ElkEdgeRef) -> Option<Vec<(f64, f64)>> {
         points.push((section.end_x() + ox, section.end_y() + oy));
     }
     (points.len() >= 2).then_some(points)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::intern::Names;
+
+    /// Three package containers of leaves, with dependencies inside each and
+    /// across the boundaries, so the root frame and the container frames each
+    /// span several layers and one layer holds boxes of differing width.
+    fn compound() -> (Graph, LaidOut) {
+        let mut names = Names::default();
+        let mut graph = Graph::new();
+        let mut add = |graph: &mut Graph, name: &str, kind: Kind, parent: Option<Id>| {
+            let id = names.intern(name);
+            graph.add_node(id, name, kind, parent);
+            id
+        };
+
+        let lib = add(&mut graph, "lib", Kind::Package, None);
+        let front = add(&mut graph, "front", Kind::Package, None);
+        let back = add(&mut graph, "back", Kind::Package, None);
+
+        let source = add(&mut graph, "source", Kind::Source, Some(lib));
+        let archive = add(&mut graph, "archive", Kind::Artifact, Some(lib));
+        let entry = add(&mut graph, "entry", Kind::Target, Some(front));
+        let widget = add(&mut graph, "widget", Kind::Target, Some(front));
+        let much_longer_label = add(&mut graph, "much_longer_label", Kind::Target, Some(front));
+        let bundle = add(&mut graph, "bundle", Kind::Target, Some(back));
+        let image = add(&mut graph, "image", Kind::Target, Some(back));
+
+        for (from, to) in [
+            (source, archive),
+            (archive, entry),
+            (entry, widget),
+            (entry, much_longer_label),
+            (widget, bundle),
+            (much_longer_label, bundle),
+            (bundle, image),
+        ] {
+            graph.add_edge(from, to, EdgeKind::Query);
+        }
+
+        let laid = layout(&graph);
+        (graph, laid)
+    }
+
+    /// The boxes of each frame the layout ran: the root frame, keyed by `None`,
+    /// and one per container.
+    fn frames<'a>(graph: &Graph, laid: &'a LaidOut) -> HashMap<Option<Id>, Vec<&'a Box>> {
+        let parent_of: HashMap<Id, Option<Id>> =
+            graph.nodes.iter().map(|node| (node.id, node.parent)).collect();
+        let mut frames: HashMap<Option<Id>, Vec<&Box>> = HashMap::new();
+        for drawn in &laid.boxes {
+            frames.entry(parent_of[&drawn.id]).or_default().push(drawn);
+        }
+        frames
+    }
+
+    #[test]
+    fn every_box_carries_an_anchor() {
+        let (_, laid) = compound();
+        for drawn in &laid.boxes {
+            assert!(laid.anchors.contains_key(&drawn.id), "{} has no anchor", drawn.label);
+        }
+    }
+
+    #[test]
+    fn a_greater_layer_draws_below_every_box_of_a_lesser_one_in_the_frame() {
+        let (graph, laid) = compound();
+        let mut compared = 0;
+        for boxes in frames(&graph, &laid).values() {
+            for above in boxes {
+                for below in boxes {
+                    if laid.anchors[&above.id].layer >= laid.anchors[&below.id].layer {
+                        continue;
+                    }
+                    compared += 1;
+                    assert!(
+                        above.y + above.height < below.y,
+                        "{} (layer {}) does not end above {} (layer {})",
+                        above.label,
+                        laid.anchors[&above.id].layer,
+                        below.label,
+                        laid.anchors[&below.id].layer,
+                    );
+                }
+            }
+        }
+        assert!(compared > 0, "no frame spans two layers");
+    }
+
+    #[test]
+    fn a_greater_slot_draws_right_of_a_lesser_one_in_the_same_layer() {
+        let (graph, laid) = compound();
+        let mut compared = 0;
+        for boxes in frames(&graph, &laid).values() {
+            for left in boxes {
+                for right in boxes {
+                    let (left_at, right_at) = (laid.anchors[&left.id], laid.anchors[&right.id]);
+                    if left_at.layer != right_at.layer || left_at.slot >= right_at.slot {
+                        continue;
+                    }
+                    compared += 1;
+                    assert!(
+                        left.x < right.x,
+                        "{} (slot {}) does not draw left of {} (slot {})",
+                        left.label,
+                        left_at.slot,
+                        right.label,
+                        right_at.slot,
+                    );
+                }
+            }
+        }
+        assert!(compared > 0, "no layer holds two boxes");
+    }
 }

@@ -416,6 +416,7 @@ fn level(
         full_edges: connected.into_iter().collect(),
         width: drawing.width,
         height: drawing.height,
+        ..Default::default()
     }
 }
 
