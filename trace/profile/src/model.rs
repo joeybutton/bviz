@@ -361,8 +361,8 @@ fn general_information_role(name: &str) -> (Workload, bool) {
     } else if name.starts_with("Remote.")
         || name.starts_with("MerkleTree")
         || name.starts_with("BazelOutputService.")
-        || name.starts_with("fetching: repository")
-        || name.starts_with("extracting: repository")
+        || name.starts_with("fetching: ")
+        || name.starts_with("extracting: ")
         || matches!(
             name,
             "collect digests"
@@ -819,6 +819,8 @@ mod tests {
             "mergeBulkTransfer",
             "fetching: repository @@rules_m4++default_toolchain_ext+m4_v1.4.18",
             "extracting: repository @@rules_m4++default_toolchain_ext+m4_v1.4.18",
+            "fetching: module extension @@rules_go+//go:extensions.bzl%go_sdk",
+            "extracting: module extension @@rules_go+//go:extensions.bzl%go_sdk",
         ] {
             assert_eq!(
                 role("general information", name),
