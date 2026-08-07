@@ -292,9 +292,10 @@ fn remote_cache_role(name: &str) -> (Workload, bool) {
 
 /// The role of a "general information" span, which alone spans several workloads:
 /// the real spawn (`subprocess.run`, the one payload here), the sandbox and I/O
-/// helpers around it, and the skyframe/action-execution envelopes. Whole-build
-/// umbrellas (`buildTargets`) and module lifecycle fall through to
-/// [`Workload::Other`].
+/// helpers around it, the remote-cache and repository transfer that the
+/// profiler's no-task overload files here, and the skyframe/action-execution
+/// envelopes. Whole-build umbrellas (`buildTargets`) and module lifecycle fall
+/// through to [`Workload::Other`].
 fn general_information_role(name: &str) -> (Workload, bool) {
     use Workload::*;
     if name == "subprocess.run" {
@@ -308,6 +309,22 @@ fn general_information_role(name: &str) -> (Workload, bool) {
         || name == "Create symlink tree"
     {
         (Filesystem, false)
+    } else if name.starts_with("Remote.")
+        || name.starts_with("MerkleTree")
+        || name.starts_with("fetching: repository")
+        || name.starts_with("extracting: repository")
+        || matches!(
+            name,
+            "findMissingDigests"
+                | "upload"
+                | "build upload manifest"
+                | "checkForConcurrentModifications"
+                | "doExtendLeases"
+                | "getServerCapabilities"
+                | "getAndVerifyServerCapabilities"
+        )
+    {
+        (RemoteCache, false)
     } else if name == "Action.execute"
         || name == "runAnalysisAndExecutionPhase"
         || name == "ParallelEvaluator.eval"
@@ -684,6 +701,25 @@ mod tests {
             role("general information", "Action.execute"),
             overhead(Workload::Skyframe)
         );
+        for name in [
+            "Remote.download",
+            "MerkleTreeComputer.buildForSpawn",
+            "findMissingDigests",
+            "upload",
+            "build upload manifest",
+            "checkForConcurrentModifications",
+            "doExtendLeases",
+            "getServerCapabilities",
+            "getAndVerifyServerCapabilities",
+            "fetching: repository @@rules_m4++default_toolchain_ext+m4_v1.4.18",
+            "extracting: repository @@rules_m4++default_toolchain_ext+m4_v1.4.18",
+        ] {
+            assert_eq!(
+                role("general information", name),
+                overhead(Workload::RemoteCache),
+                "{name}"
+            );
+        }
         assert_eq!(
             role("general information", "buildTargets"),
             overhead(Workload::Other)
