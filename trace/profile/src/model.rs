@@ -307,9 +307,11 @@ fn starlark_repository_role(name: &str) -> (Workload, bool) {
     }
 }
 
-/// The role of a "Conflict checking" span: waiting on a prior key's signal is
-/// one conflict-finding thread blocked on another, the rest is the traversal
-/// that inspects actions for conflicts.
+/// The role of a "Conflict checking" span. Every name here is a thread blocked,
+/// so they split on whose work the block covers: the prior key's signal is a
+/// wait for an unrelated top-level key's check to finish, with none of this
+/// key's own work in flight, while the rest envelope the pools running this
+/// key's conflict check and so carry that check's time.
 fn conflict_checking_role(name: &str) -> (Workload, bool) {
     use Workload::*;
     if name == "Awaiting signal from a prior key." {
