@@ -226,6 +226,7 @@ pub fn span_role(category: &str, name: &str) -> SpanRole {
     let (workload, payload) = match category {
         "general information" => general_information_role(name),
         "bazel module processing" => bazel_module_role(name),
+        "Starlark repository function call" => starlark_repository_role(name),
         "Remote execution setup" | "Remote execution upload time"
         | "action dependency checking" => remote_cache_role(name),
 
@@ -244,7 +245,6 @@ pub fn span_role(category: &str, name: &str) -> SpanRole {
         | "Starlark user function call"
         | "Starlark builtin function call"
         | "Starlark compiled user function call"
-        | "Starlark repository function call"
         | "Starlark thread context"
         | "load WebAssembly module"
         | "execute WebAssembly function" => (Starlark, true),
@@ -285,6 +285,18 @@ fn bazel_module_role(name: &str) -> (Workload, bool) {
     use Workload::*;
     if name.starts_with("download file: ") || name.starts_with("fetch module file: ") {
         (RemoteCache, false)
+    } else {
+        (Starlark, true)
+    }
+}
+
+/// The role of a "Starlark repository function call" span: a `local: ` name is
+/// a command line `repository_ctx.execute` spawned, the rest is the repository
+/// rule's own Starlark.
+fn starlark_repository_role(name: &str) -> (Workload, bool) {
+    use Workload::*;
+    if name.starts_with("local: ") {
+        (Subprocess, true)
     } else {
         (Starlark, true)
     }
@@ -659,6 +671,15 @@ mod tests {
         );
         assert_eq!(
             role("Starlark user function call", "_cc_library_impl"),
+            payload(Workload::Starlark)
+        );
+        // A repository rule's spawns split from its interpreter time.
+        assert_eq!(
+            role("Starlark repository function call", "local: /usr/bin/uname -m"),
+            payload(Workload::Subprocess)
+        );
+        assert_eq!(
+            role("Starlark repository function call", "crate_index"),
             payload(Workload::Starlark)
         );
         // Module resolution splits registry transfer from its Starlark.
