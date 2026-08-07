@@ -292,12 +292,13 @@ fn bazel_module_role(name: &str) -> (Workload, bool) {
     }
 }
 
-/// The role of a "Starlark repository function call" span: a `local: ` name is
-/// a command line `repository_ctx.execute` spawned, the rest is the repository
-/// rule's own Starlark.
+/// The role of a "Starlark repository function call" span: a `local: ` or
+/// `remote: ` name is the command line a `repository_ctx.execute` or
+/// `execute_remote` spawned; every other name is the repository rule's own
+/// Starlark.
 fn starlark_repository_role(name: &str) -> (Workload, bool) {
     use Workload::*;
-    if name.starts_with("local: ") {
+    if name.starts_with("local: ") || name.starts_with("remote: ") {
         (Subprocess, true)
     } else {
         (Starlark, true)
@@ -710,6 +711,10 @@ mod tests {
         // A repository rule's spawns split from its interpreter time.
         assert_eq!(
             role("Starlark repository function call", "local: /usr/bin/uname -m"),
+            payload(Workload::Subprocess)
+        );
+        assert_eq!(
+            role("Starlark repository function call", "remote: /usr/bin/uname -m"),
             payload(Workload::Subprocess)
         );
         assert_eq!(
