@@ -176,9 +176,10 @@ const _: () = assert!(std::mem::size_of::<SliceDetail>() == 40);
 /// envelope.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Workload {
-    /// The spawned action body: a local/remote/worker process, and the frames
-    /// that envelope it — the mnemonic-bearing action frame and the local
-    /// resource slot the action holds for the length of its body.
+    /// The spawned action body: a local/remote/worker process, the frames that
+    /// envelope it (the mnemonic-bearing action frame, the local resource slot
+    /// the action holds for the length of its body), and its replay on the
+    /// critical path.
     Subprocess,
     /// Build logic run by the interpreter: Starlark calls, rule bodies, module
     /// and repository evaluation.
@@ -233,7 +234,8 @@ pub fn span_role(category: &str, name: &str) -> SpanRole {
         | "local execution in worker"
         | "Local parse to prepare for remote execution"
         | "remote action execution"
-        | "Remote execution process wall time" => (Subprocess, true),
+        | "Remote execution process wall time"
+        | "critical path component" => (Subprocess, true),
 
         "action count (local)" => (Subprocess, false),
 
@@ -619,6 +621,10 @@ mod tests {
         assert_eq!(role("action processing", "Rustc"), payload(Workload::Subprocess));
         assert_eq!(
             role("remote action execution", ""),
+            payload(Workload::Subprocess)
+        );
+        assert_eq!(
+            role("critical path component", "action 'Compiling foo.cc'"),
             payload(Workload::Subprocess)
         );
         assert_eq!(
