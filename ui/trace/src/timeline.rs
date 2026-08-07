@@ -329,12 +329,12 @@ impl TimelinePanel {
         cx.notify();
     }
 
-    /// Drops the state that addresses the loaded document: the memoized draw
-    /// list, which re-culls against the new one, and the lane scroll, whose row
-    /// belongs to the old document's chart.
+    /// Drops the state that addresses the document being replaced, so nothing
+    /// survives the swap still pointing into the old profile.
     pub(crate) fn reset_for_new_profile(&mut self) {
         self.slice_draw = None;
         self.scroll = RowAnchor::Start;
+        self.drag = TimelineDrag::None;
     }
 
     /// The bottom-tab selection, panel height, and gutter width the timeline
