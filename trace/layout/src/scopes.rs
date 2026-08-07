@@ -8,14 +8,12 @@ use crate::stats::{StatRow, default_order, stats_from_flame};
 
 /// Everything the UI presents for one flame scope, derived together so a held
 /// box, node, or row always resolves its name [`Str`](bviz_trace_profile::Str)
-/// against the graph that produced it.
+/// against the graph that produced it. The inputs it was built under travel
+/// with it, so a view presenting it names what it is showing rather than what a
+/// later rebuild is targeting.
 pub struct ScopeAggregate {
-    /// The mode this aggregate was built under, so a view presenting it names
-    /// what it is showing rather than what a later rebuild is targeting.
     pub mode: FlameMode,
-    /// The window this aggregate's figures are restricted to, so a view
-    /// presenting it names the time they cover rather than what a later rebuild
-    /// is targeting.
+    /// The profile time its figures are restricted to.
     pub window: TimeSelection,
     pub flame: FlameGraph,
     /// One row per distinct frame name; unordered, indexed by `default_order`.

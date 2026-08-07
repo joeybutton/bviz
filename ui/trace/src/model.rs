@@ -44,7 +44,7 @@ pub(crate) struct TraceModel {
     /// Which tracks the flame graph and stats aggregate over, indexed likewise.
     selected_tracks: Vec<bool>,
     /// The profile time the flame graph and stats aggregate over, intersected
-    /// with the selected tracks; empty for the whole timeline.
+    /// with the selected tracks.
     time_selection: TimeSelection,
     /// Which lane-class groups are collapsed in the chart, indexed by
     /// [`GROUP_ORDER`]. Loading starts collapsed — it holds one lane per external

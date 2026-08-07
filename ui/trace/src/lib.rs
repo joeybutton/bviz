@@ -467,8 +467,6 @@ impl TraceView {
                     this.invalidate_timeline(cx);
                 }),
             )
-            // The tabs, the chip and the mode controls all hold their width, so
-            // the legend is the one item that gives when the bar runs short.
             .children(tabs)
             .children(self.time_window_chip(palette, cx))
             .child(div().flex_1())
@@ -544,8 +542,6 @@ impl TraceView {
         if !self.model.update(cx, |m, cx| m.set_time_selection(TimeSelection::default(), cx)) {
             return;
         }
-        // The regions are painted by the timeline's overlay, so the slice layer's
-        // scene stands.
         cx.notify();
     }
 

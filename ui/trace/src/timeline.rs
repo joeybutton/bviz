@@ -123,8 +123,8 @@ pub(crate) enum RegionEdit {
     Replace,
     /// Union the dragged region into the selection.
     Union,
-    /// Move the grabbed edge of the region at `index`; the drag is anchored at
-    /// that region's other, fixed edge, so dragging past it flips the region.
+    /// Move the grabbed edge of the region at `index`; dragging it past the
+    /// anchor flips the region.
     Resize { index: usize },
     /// Move the region at `index` whole, keeping `width_us`; the press took hold
     /// of it `grab_us` past its start, within the profile span `bounds`.
@@ -140,15 +140,14 @@ impl RegionEdit {
     }
 }
 
-/// A time-region drag in progress. Its region is only committed to the model on
-/// release, so the aggregate is rebuilt once rather than per mouse move.
+/// A time-region drag in progress. Its region reaches the model on release, so
+/// a whole drag costs one aggregate rebuild.
 #[derive(Clone, Copy)]
 pub(crate) struct RegionDrag {
     edit: RegionEdit,
     /// The instant the drag is anchored at: a resize's fixed edge, otherwise
     /// where the press landed.
     anchor_us: i64,
-    /// The instant under the cursor.
     cursor_us: i64,
     /// Window x of the press, which the click threshold measures from.
     press_x: f32,
@@ -323,7 +322,8 @@ impl TimelinePanel {
     }
 
     /// Rebuilds the slice scene along with the overlay; every change to what the
-    /// slices show routes through here.
+    /// slices show routes through here, and a change that leaves them alone
+    /// notifies alone, so the slice scene replays from its cache.
     pub(crate) fn invalidate_canvas(&self, cx: &mut Context<Self>) {
         self.canvas.update(cx, |_, cx| cx.notify());
         cx.notify();
@@ -804,8 +804,6 @@ fn timeline_on_drag(
     event: &MouseMoveEvent,
     cx: &mut Context<TimelinePanel>,
 ) {
-    // A region drag moves no input the slice layer paints from, so its scene
-    // replays while the drag runs.
     let moves_slices = !matches!(panel.drag, TimelineDrag::TimeRegion(_));
     match panel.drag {
         TimelineDrag::Pan => {
@@ -850,8 +848,6 @@ fn timeline_end_drag(
     cx: &mut Context<TimelinePanel>,
 ) {
     match std::mem::replace(&mut panel.drag, TimelineDrag::None).region() {
-        // The committed selection feeds only the aggregate, so here too the
-        // slice layer's scene stands.
         Some(drag) => {
             panel.commit_time_region(drag, cx);
             cx.notify();
@@ -1093,8 +1089,8 @@ impl RegionPixels {
     /// Where the region `span` lands on the time axis, or `None` when it falls
     /// entirely off it. `left`/`right` are bounded to the axis; `starts`/`ends`
     /// mark the sides whose own edge lands on it, so an edge is drawn and live to
-    /// a press together. The sole derivation of selection geometry: the veil, the
-    /// ruler tint, the edges, their grips, and the grab all measure from it.
+    /// a press together. The sole derivation of selection geometry, so what is
+    /// painted and what a press takes hold of agree.
     fn of(span: TimeSpan, tv: TimeView, regions: Regions) -> Option<RegionPixels> {
         let start = regions.content_left + tv.x_of(span.start_us);
         let end = regions.content_left + tv.x_of(span.end_us);
@@ -1105,8 +1101,8 @@ impl RegionPixels {
             left: start.max(regions.content_left),
             right: end.min(regions.time_right),
             starts: start >= regions.content_left,
-            // An end edge's hairline is inset by its own width, so an end resting
-            // on the axis's far edge still lands on the axis.
+            // An end edge is drawn inside the region it bounds, so an end
+            // resting on the axis's far edge still lands on the axis.
             ends: end <= regions.time_right,
         })
     }

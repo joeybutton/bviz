@@ -619,15 +619,11 @@ fn end_us(slice: &Slice) -> i64 {
 pub struct TrackFlamer {
     flamer: Flamer,
     /// The path-reduced lane tables ([`LaneTable`], one per
-    /// [`Profile::threads`] entry) a selection's graph merges, filled on first
+    /// [`Profile::threads`] entry) covering the whole timeline, filled on first
     /// use. A lane's spans emit path keys and reduce into per-node totals that
-    /// do not depend on the selection but do key by label, so the reduction is
-    /// paid once for a labelling asked for, never for one that is not, and a
-    /// selection change pays only the merge (see [`build`](TrackFlamer::build)).
+    /// do not depend on the selection but do key by label.
     lane_tables: ByLabels<OnceLock<Vec<LaneTable>>>,
-    /// The reduced lanes last built for under a restricting window, one memo
-    /// per labelling, so a track selection or labelling change under an
-    /// unchanged window pays only the merge.
+    /// The lane tables last reduced under a restricting window.
     windowed: ByLabels<WindowMemo>,
     /// How many times [`windowed_tables`](TrackFlamer::windowed_tables) has
     /// reduced the lanes afresh, so a test can hold the memo to its reuse.
@@ -635,11 +631,10 @@ pub struct TrackFlamer {
     reductions: AtomicUsize,
 }
 
-/// Lane tables beside the window they were reduced for. The tables sit behind an
-/// [`Arc`] so a build takes a handle of its own and merges with the lock
-/// released.
 struct WindowedTables {
     window: TimeSelection,
+    /// Behind an [`Arc`] so a build takes a handle of its own and merges with
+    /// the lock released.
     tables: Arc<Vec<LaneTable>>,
 }
 
@@ -713,8 +708,6 @@ impl TrackFlamer {
         })
     }
 
-    /// The lane tables `labels` and `window` reduce to, served by and stored in
-    /// `labels`'s [`WindowMemo`].
     fn windowed_tables(&self, labels: FlameLabels, window: &TimeSelection) -> Arc<Vec<LaneTable>> {
         let memo = self.windowed.of(labels);
         if let Some(held) = memo.get(window) {
@@ -739,8 +732,10 @@ impl TrackFlamer {
 
     /// Build the selection's flame graph by merging the selected lanes'
     /// [`LaneTable`]s: concatenate their reduced nodes, sort the union by path
-    /// key, and reconstruct. The lanes are reduced under `window`, which
-    /// [`emit_lane_rows`] clips each of their spans against.
+    /// key, and reconstruct. The lanes are reduced under `window` (see
+    /// [`emit_lane_rows`]) and the reduction is held, so it is paid once per
+    /// labelling and window asked for, never for one that is not, and a change
+    /// of selection alone pays only the merge.
     pub(crate) fn build(
         &self,
         labels: FlameLabels,
@@ -1094,8 +1089,7 @@ fn emit_lane_rows(
     let parents = containment_parents(slices);
     // What each slice brings, `None` for one left out. A slice whose containment
     // parent is left out is left out with it, so whatever a slice keys onto is
-    // itself keyed; lane order puts a parent before its children, so one forward
-    // pass carries that down the chain.
+    // itself keyed; one forward pass carries that down the chain.
     let mut dur_us: Vec<Option<i64>> = Vec::with_capacity(slices.len());
     for i in 0..slices.len() {
         dur_us.push(match parents[i] {
@@ -2317,8 +2311,6 @@ mod tests {
             both.root().total_us,
             one.root().total_us + other.root().total_us
         );
-        // A labelling's memo holds one window, so a window change reduces its
-        // lanes afresh, as does a labelling not yet reduced under that window.
         let narrower = window(&[(0, 40)]);
         scan.build(FlameLabels::Name, &narrower, |_| true);
         assert_eq!(scan.reductions(), 2);
