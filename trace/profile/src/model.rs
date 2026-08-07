@@ -360,17 +360,22 @@ fn general_information_role(name: &str) -> (Workload, bool) {
         (Filesystem, false)
     } else if name.starts_with("Remote.")
         || name.starts_with("MerkleTree")
+        || name.starts_with("BazelOutputService.")
         || name.starts_with("fetching: repository")
         || name.starts_with("extracting: repository")
         || matches!(
             name,
-            "findMissingDigests"
+            "collect digests"
+                | "findMissingDigests"
                 | "upload"
                 | "build upload manifest"
                 | "checkForConcurrentModifications"
                 | "doExtendLeases"
                 | "getServerCapabilities"
                 | "getAndVerifyServerCapabilities"
+                | "init channel and check server capabilities"
+                | "compose prefetches"
+                | "mergeBulkTransfer"
         )
     {
         (RemoteCache, false)
@@ -800,6 +805,8 @@ mod tests {
         for name in [
             "Remote.download",
             "MerkleTreeComputer.buildForSpawn",
+            "BazelOutputService.StageArtifacts",
+            "collect digests",
             "findMissingDigests",
             "upload",
             "build upload manifest",
@@ -807,6 +814,9 @@ mod tests {
             "doExtendLeases",
             "getServerCapabilities",
             "getAndVerifyServerCapabilities",
+            "init channel and check server capabilities",
+            "compose prefetches",
+            "mergeBulkTransfer",
             "fetching: repository @@rules_m4++default_toolchain_ext+m4_v1.4.18",
             "extracting: repository @@rules_m4++default_toolchain_ext+m4_v1.4.18",
         ] {
