@@ -566,11 +566,7 @@ impl TimelinePanel {
     fn press_time_region(&mut self, e: &MouseDownEvent, cx: &App) -> bool {
         let regions = self.regions(cx);
         let x = f32::from(e.position.x);
-        let y = f32::from(e.position.y);
-        let in_ruler = x >= regions.content_left
-            && x < regions.time_right
-            && y >= f32::from(self.viewport.origin.y)
-            && y < regions.flame_top;
+        let in_ruler = regions.in_ruler(e.position);
         if !in_ruler && !(e.modifiers.shift && regions.in_flame(e.position)) {
             return false;
         }
@@ -581,7 +577,9 @@ impl TimelinePanel {
         let at = time_at_x(self.view, bounds, x - regions.content_left);
         let (edit, anchor_us) = {
             let sel = self.model.read(cx).time_selection();
-            let held = in_ruler.then(|| self.region_grab(sel, at, x, regions, bounds)).flatten();
+            let held = in_ruler
+                .then(|| region_grab(sel, self.view, regions, bounds, at, x))
+                .flatten();
             held.unwrap_or_else(|| {
                 let ctrl = e.modifiers.control || e.modifiers.platform;
                 (if ctrl { RegionEdit::Union } else { RegionEdit::Replace }, at)
@@ -596,38 +594,6 @@ impl TimelinePanel {
             moved: false,
         });
         true
-    }
-
-    /// The edit a press at window `x`, on the instant `at`, takes hold of in
-    /// `sel` — a resize of the region edge within [`EDGE_GRAB_PX`] of the press,
-    /// else a slide of the region it landed in — with the instant to anchor the
-    /// drag at.
-    fn region_grab(
-        &self,
-        sel: &TimeSelection,
-        at: i64,
-        x: f32,
-        regions: Regions,
-        bounds: TimeSpan,
-    ) -> Option<(RegionEdit, i64)> {
-        let edge_x = |t_us: i64| regions.content_left + self.view.x_of(t_us);
-        sel.spans().iter().enumerate().find_map(|(index, s)| {
-            if (edge_x(s.start_us) - x).abs() <= EDGE_GRAB_PX {
-                Some((RegionEdit::Resize { index }, s.end_us))
-            } else if (edge_x(s.end_us) - x).abs() <= EDGE_GRAB_PX {
-                Some((RegionEdit::Resize { index }, s.start_us))
-            } else if at >= s.start_us && at < s.end_us {
-                let edit = RegionEdit::Slide {
-                    index,
-                    width_us: s.end_us - s.start_us,
-                    grab_us: at - s.start_us,
-                    bounds,
-                };
-                Some((edit, at))
-            } else {
-                None
-            }
-        })
     }
 
     /// Lands a finished time-region drag on the model.
@@ -1114,10 +1080,7 @@ fn slice_paint(
     }
 }
 
-/// A selected region's slice of the time axis, in window x. `left` and `right`
-/// are bounded to the axis, and `starts`/`ends` tell whether that side is the
-/// region's own edge rather than the bound, so an edge lying off screen is left
-/// undrawn.
+/// A selected region's slice of the time axis, in window x.
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct RegionPixels {
     left: f32,
@@ -1126,25 +1089,66 @@ struct RegionPixels {
     ends: bool,
 }
 
-/// Where `sel`'s regions land on the time axis, dropping any that falls entirely
-/// outside it. The sole derivation of selection geometry: the veil, the ruler
-/// band, the edges, and the grips all measure from it.
-fn selection_pixels(sel: &TimeSelection, tv: TimeView, regions: Regions) -> Vec<RegionPixels> {
-    let mut out = Vec::with_capacity(sel.len());
-    for s in sel.spans() {
-        let start = regions.content_left + tv.x_of(s.start_us);
-        let end = regions.content_left + tv.x_of(s.end_us);
+impl RegionPixels {
+    /// Where the region `span` lands on the time axis, or `None` when it falls
+    /// entirely off it. `left`/`right` are bounded to the axis; `starts`/`ends`
+    /// mark the sides whose own edge lands on it, so an edge is drawn and live to
+    /// a press together. The sole derivation of selection geometry: the veil, the
+    /// ruler tint, the edges, their grips, and the grab all measure from it.
+    fn of(span: TimeSpan, tv: TimeView, regions: Regions) -> Option<RegionPixels> {
+        let start = regions.content_left + tv.x_of(span.start_us);
+        let end = regions.content_left + tv.x_of(span.end_us);
         if end <= regions.content_left || start >= regions.time_right {
-            continue;
+            return None;
         }
-        out.push(RegionPixels {
+        Some(RegionPixels {
             left: start.max(regions.content_left),
             right: end.min(regions.time_right),
             starts: start >= regions.content_left,
-            ends: end < regions.time_right,
-        });
+            // An end edge's hairline is inset by its own width, so an end resting
+            // on the axis's far edge still lands on the axis.
+            ends: end <= regions.time_right,
+        })
     }
+}
+
+/// Where `sel`'s regions land on the time axis, dropping any that falls entirely
+/// outside it.
+fn selection_pixels(sel: &TimeSelection, tv: TimeView, regions: Regions) -> Vec<RegionPixels> {
+    let mut out = Vec::with_capacity(sel.len());
+    out.extend(sel.spans().iter().filter_map(|s| RegionPixels::of(*s, tv, regions)));
     out
+}
+
+/// The edit a press at window `x`, on the instant `at`, takes hold of in `sel` —
+/// a resize of a drawn region edge within [`EDGE_GRAB_PX`] of the press, else a
+/// slide of the region it landed in — with the instant to anchor the drag at.
+fn region_grab(
+    sel: &TimeSelection,
+    tv: TimeView,
+    regions: Regions,
+    bounds: TimeSpan,
+    at: i64,
+    x: f32,
+) -> Option<(RegionEdit, i64)> {
+    sel.spans().iter().enumerate().find_map(|(index, s)| {
+        let drawn = RegionPixels::of(*s, tv, regions)?;
+        if drawn.starts && (drawn.left - x).abs() <= EDGE_GRAB_PX {
+            Some((RegionEdit::Resize { index }, s.end_us))
+        } else if drawn.ends && (drawn.right - x).abs() <= EDGE_GRAB_PX {
+            Some((RegionEdit::Resize { index }, s.start_us))
+        } else if at >= s.start_us && at < s.end_us {
+            let edit = RegionEdit::Slide {
+                index,
+                width_us: s.end_us - s.start_us,
+                grab_us: at - s.start_us,
+                bounds,
+            };
+            Some((edit, at))
+        } else {
+            None
+        }
+    })
 }
 
 /// Alpha of the wash laid over unselected time: heavy enough that the selection
@@ -1160,22 +1164,22 @@ const RULER_BAND_ALPHA: f32 = 0.5;
 /// Width of a region edge's hairline.
 const EDGE_LINE_PX: f32 = 1.0;
 
-/// Width of an edge's grip, spanning exactly the zone a press takes hold of the
-/// edge in, so the affordance and the hit-test cannot drift apart.
+/// Width of an edge's grip, spanning exactly the horizontal zone
+/// [`EDGE_GRAB_PX`] gives a press either side of the edge to take hold of it.
 const GRIP_WIDTH: f32 = 2.0 * EDGE_GRAB_PX;
 
-/// Share of the ruler band's height a grip stands in, centred.
+/// Share of the ruler band's height a grip stands in, centred, so it reads as a
+/// handle rather than a bar filling the band.
 const GRIP_BAND_FRACTION: f32 = 0.55;
 
 /// Paints `sel` over the timeline: a wash over the time outside it, an accent
-/// fill and edge grips in the ruler band between `ruler_top` and the lanes, and a
-/// hairline down each region edge. Covers the time-axis sections the crosshair
-/// does, so a selection reads across the lanes and the counter plots alike.
+/// fill and edge grips in the ruler band, and a hairline down each region edge.
+/// Covers the time-axis sections the crosshair does, so a selection reads across
+/// the lanes and the counter plots alike.
 fn paint_time_selection(
     sel: &TimeSelection,
     tv: TimeView,
     regions: Regions,
-    ruler_top: f32,
     show_counters: bool,
     palette: &Palette,
     window: &mut Window,
@@ -1205,15 +1209,17 @@ fn paint_time_selection(
     }
     veil_span(unselected_from, regions.time_right, window);
 
-    let band_h = regions.flame_top - ruler_top;
-    let band = Rgba { a: RULER_BAND_ALPHA, ..palette.selection };
+    let band = regions.ruler_rect();
+    let band_top = f32::from(band.origin.y);
+    let band_h = f32::from(band.size.height);
+    let tint = Rgba { a: RULER_BAND_ALPHA, ..palette.selection };
     for r in &painted {
-        quad(r.left, r.right - r.left, ruler_top, band_h, band, window);
+        quad(r.left, r.right - r.left, band_top, band_h, tint, window);
     }
 
     let accent = palette.selection;
     let grip_h = band_h * GRIP_BAND_FRACTION;
-    let grip_top = ruler_top + (band_h - grip_h) / 2.0;
+    let grip_top = band_top + (band_h - grip_h) / 2.0;
     for r in &painted {
         // An end edge's line is inset by its own width, so both hairlines fall
         // inside the region they bound.
@@ -1224,7 +1230,7 @@ fn paint_time_selection(
                 continue;
             }
             let line_x = edge_x - line_inset;
-            quad(line_x, EDGE_LINE_PX, ruler_top, regions.flame_bottom - ruler_top, accent, window);
+            quad(line_x, EDGE_LINE_PX, band_top, regions.flame_bottom - band_top, accent, window);
             if show_counters {
                 quad(line_x, EDGE_LINE_PX, regions.panel_top, regions.panel_h(), accent, window);
             }
@@ -1264,15 +1270,7 @@ fn overlay_paint(
         let flame_total = flame_total_height(&lanes);
         let regions = Regions::new(bounds, n_counters, panel_height, gutter_width, flame_total);
         let show_counters = regions.has_graph && tab == BottomTab::Counters;
-        paint_time_selection(
-            &selection,
-            tv,
-            regions,
-            f32::from(bounds.origin.y),
-            show_counters,
-            &palette,
-            window,
-        );
+        paint_time_selection(&selection, tv, regions, show_counters, &palette, window);
         if let Some(at) = crosshair {
             if f32::from(at.x) >= regions.content_left {
                 paint_crosshair(&profile, tv, regions, at, show_counters, &palette, window, cx);
@@ -1585,6 +1583,67 @@ mod tests {
         let axis = test_axis();
         let sel = selection(&[(0, 3000), (25000, 26000)]);
         assert_eq!(selection_pixels(&sel, TEST_SELECTION_VIEW, axis), []);
+    }
+
+    #[test]
+    fn a_region_ending_on_the_axis_edge_keeps_its_end_hairline() {
+        let axis = test_axis();
+        let sel = selection(&[(10_000, 13_000)]);
+        assert_eq!(
+            selection_pixels(&sel, TEST_SELECTION_VIEW, axis),
+            [RegionPixels { left: 700.0, right: 1000.0, starts: true, ends: true }]
+        );
+    }
+
+    #[test]
+    fn the_ruler_band_covers_the_time_axis_down_to_the_flame_lanes() {
+        let axis = test_axis();
+        let band = axis.ruler_rect();
+        assert_eq!(f32::from(band.origin.x), axis.content_left);
+        assert_eq!(f32::from(band.size.width), axis.time_w);
+        assert_eq!(f32::from(band.origin.y) + f32::from(band.size.height), axis.flame_top);
+    }
+
+    #[test]
+    fn a_press_is_in_the_ruler_band_exactly_where_the_paint_fills_it() {
+        let axis = test_axis();
+        let band = axis.ruler_rect();
+        let mid_y = px(f32::from(band.origin.y) + f32::from(band.size.height) / 2.0);
+        assert!(axis.in_ruler(point(px(axis.content_left), mid_y)));
+        assert!(!axis.in_ruler(point(px(axis.content_left - 1.0), mid_y)), "over the gutter");
+        assert!(!axis.in_ruler(point(px(axis.time_right), mid_y)), "past the time axis");
+        assert!(!axis.in_ruler(point(px(axis.content_left), px(axis.flame_top))), "in the lanes");
+    }
+
+    /// The press instant `x` maps to, as the ruler's own handler derives it.
+    fn press_at(x: f32, axis: Regions) -> i64 {
+        time_at_x(TEST_SELECTION_VIEW, TEST_SPAN, x - axis.content_left)
+    }
+
+    #[test]
+    fn an_edge_clipped_off_the_axis_is_not_grabbable() {
+        let axis = test_axis();
+        // The region's start maps just left of the axis, within a grip's reach of
+        // its leftmost pixel.
+        let sel = selection(&[(4970, 8000)]);
+        let drawn = selection_pixels(&sel, TEST_SELECTION_VIEW, axis);
+        assert!(!drawn[0].starts, "the fixture's start edge is off the axis");
+        let x = axis.content_left;
+        let grabbed = region_grab(&sel, TEST_SELECTION_VIEW, axis, TEST_SPAN, press_at(x, axis), x);
+        assert!(
+            matches!(grabbed, Some((RegionEdit::Slide { .. }, _))),
+            "the press takes hold of the drawn body, not the hidden edge"
+        );
+    }
+
+    #[test]
+    fn a_press_on_a_drawn_edge_resizes_from_the_regions_far_side() {
+        let axis = test_axis();
+        let sel = selection(&[(6500, 8000)]);
+        let x = axis.content_left + TEST_SELECTION_VIEW.x_of(6500);
+        let grabbed = region_grab(&sel, TEST_SELECTION_VIEW, axis, TEST_SPAN, press_at(x, axis), x);
+        assert_eq!(grabbed.map(|(_, anchor)| anchor), Some(8000));
+        assert!(matches!(grabbed, Some((RegionEdit::Resize { index: 0 }, _))));
     }
 
     #[test]

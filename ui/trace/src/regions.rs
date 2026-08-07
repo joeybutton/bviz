@@ -23,6 +23,8 @@ pub(crate) struct Regions {
     /// Width of the time axis: the content column less the reserved vertical-bar
     /// column.
     pub(crate) time_w: f32,
+    /// Top of the ruler band (the viewport's top edge).
+    ruler_top: f32,
     /// Top of the flame lanes (ruler bottom).
     pub(crate) flame_top: f32,
     /// Bottom of the scrollable flame lanes; the time horizontal bar sits below.
@@ -80,6 +82,7 @@ impl Regions {
             content_right,
             time_right: content_right - vbar_reserve,
             time_w: (content_w - vbar_reserve).max(0.0),
+            ruler_top: oy,
             flame_top,
             flame_bottom,
             tab_top,
@@ -87,6 +90,19 @@ impl Regions {
             panel_bottom,
             has_graph: n_counters > 0,
         }
+    }
+
+    /// The ruler band over the time axis: the strip the selection's regions are
+    /// tinted and gripped in, and that a press takes hold of them from.
+    pub(crate) fn ruler_rect(&self) -> Bounds<Pixels> {
+        Bounds::new(
+            point(px(self.content_left), px(self.ruler_top)),
+            size(px(self.time_w), px(self.flame_top - self.ruler_top)),
+        )
+    }
+
+    pub(crate) fn in_ruler(&self, pos: Point<Pixels>) -> bool {
+        self.ruler_rect().contains(&pos)
     }
 
     /// The flame lanes' time content, which their paint is masked to and their
