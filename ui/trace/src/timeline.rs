@@ -127,8 +127,8 @@ pub(crate) enum RegionEdit {
     /// that region's other, fixed edge, so dragging past it flips the region.
     Resize { index: usize },
     /// Move the region at `index` whole, keeping `width_us`; the press took hold
-    /// of it `grab_us` past its start.
-    Slide { index: usize, width_us: i64, grab_us: i64 },
+    /// of it `grab_us` past its start, within the profile span `bounds`.
+    Slide { index: usize, width_us: i64, grab_us: i64, bounds: TimeSpan },
 }
 
 impl RegionEdit {
@@ -158,11 +158,13 @@ pub(crate) struct RegionDrag {
 }
 
 impl RegionDrag {
-    /// The region the drag currently covers.
+    /// The region the drag currently covers, never reaching outside the profile:
+    /// a slide pushed against an end stops there, keeping its width.
     pub(crate) fn span(&self) -> TimeSpan {
         match self.edit {
-            RegionEdit::Slide { width_us, grab_us, .. } => {
-                let start_us = self.cursor_us - grab_us;
+            RegionEdit::Slide { width_us, grab_us, bounds, .. } => {
+                let last_start_us = bounds.end_us - width_us;
+                let start_us = (self.cursor_us - grab_us).min(last_start_us).max(bounds.start_us);
                 TimeSpan { start_us, end_us: start_us + width_us }
             }
             _ => span_between(self.anchor_us, self.cursor_us),
@@ -197,9 +199,8 @@ impl RegionDrag {
 }
 
 /// The instant `x_px` right of the time content's left edge points at, bounded
-/// to `span` so a gesture reaching into the timeline's edge margin cannot select
-/// time the profile does not cover. The sole rounding of a mapped time to a
-/// profile instant.
+/// to `span` — the timeline's edge margin reaches beyond the profile. The sole
+/// rounding of a mapped time to a profile instant.
 fn time_at_x(view: TimeView, span: TimeSpan, x_px: f32) -> i64 {
     (view.t_of(x_px).round() as i64).clamp(span.start_us, span.end_us)
 }
@@ -543,13 +544,14 @@ impl TimelinePanel {
         if !in_ruler && !(e.modifiers.shift && regions.in_flame(e.position)) {
             return false;
         }
-        let Some(at) = self.time_at(e.position, cx) else {
+        let Source::Loaded(profile) = self.model.read(cx).source() else {
             return false;
         };
+        let bounds = profile.span();
+        let at = time_at_x(self.view, bounds, x - regions.content_left);
         let (edit, anchor_us) = {
-            let held = in_ruler
-                .then(|| self.region_grab(self.model.read(cx).time_selection(), at, x, regions))
-                .flatten();
+            let sel = self.model.read(cx).time_selection();
+            let held = in_ruler.then(|| self.region_grab(sel, at, x, regions, bounds)).flatten();
             held.unwrap_or_else(|| {
                 let ctrl = e.modifiers.control || e.modifiers.platform;
                 (if ctrl { RegionEdit::Union } else { RegionEdit::Replace }, at)
@@ -576,6 +578,7 @@ impl TimelinePanel {
         at: i64,
         x: f32,
         regions: Regions,
+        bounds: TimeSpan,
     ) -> Option<(RegionEdit, i64)> {
         let edge_x = |t_us: i64| regions.content_left + self.view.x_of(t_us);
         sel.spans().iter().enumerate().find_map(|(index, s)| {
@@ -588,6 +591,7 @@ impl TimelinePanel {
                     index,
                     width_us: s.end_us - s.start_us,
                     grab_us: at - s.start_us,
+                    bounds,
                 };
                 Some((edit, at))
             } else {
@@ -1381,6 +1385,14 @@ mod tests {
         RegionDrag { edit, anchor_us, cursor_us, press_x: 0.0, moved: true }
     }
 
+    /// The profile a slide is dragged over.
+    const TEST_SPAN: TimeSpan = TimeSpan { start_us: 0, end_us: 40_000 };
+
+    /// A slide bounded to [`TEST_SPAN`].
+    fn slide(index: usize, width_us: i64, grab_us: i64) -> RegionEdit {
+        RegionEdit::Slide { index, width_us, grab_us, bounds: TEST_SPAN }
+    }
+
     #[test]
     fn a_replacing_drag_spans_its_press_and_its_cursor() {
         assert_eq!(drag(RegionEdit::Replace, 100, 400).span(), span_between(100, 400));
@@ -1397,8 +1409,25 @@ mod tests {
 
     #[test]
     fn a_slide_carries_the_region_width_to_the_cursor() {
-        let edit = RegionEdit::Slide { index: 0, width_us: 100, grab_us: 30 };
-        assert_eq!(drag(edit, 0, 500).span(), span_between(470, 570));
+        assert_eq!(drag(slide(0, 100, 30), 0, 500).span(), span_between(470, 570));
+    }
+
+    #[test]
+    fn a_slide_pushed_past_the_profile_end_stops_at_it_keeping_its_width() {
+        let held = drag(slide(0, 5_000, 2_000), 12_000, TEST_SPAN.end_us);
+        assert_eq!(held.span(), span_between(35_000, 40_000));
+    }
+
+    #[test]
+    fn a_slide_pushed_past_the_profile_start_stops_at_it_keeping_its_width() {
+        let held = drag(slide(0, 5_000, 2_000), 12_000, TEST_SPAN.start_us);
+        assert_eq!(held.span(), span_between(0, 5_000));
+    }
+
+    #[test]
+    fn a_slide_clear_of_the_profile_ends_follows_the_cursor() {
+        let held = drag(slide(0, 5_000, 2_000), 12_000, 20_000);
+        assert_eq!(held.span(), span_between(18_000, 23_000));
     }
 
     #[test]
@@ -1426,8 +1455,7 @@ mod tests {
     #[test]
     fn a_slide_keeps_its_region_width_and_leaves_the_others() {
         let base = selection(&[(0, 100), (200, 300)]);
-        let edit = RegionEdit::Slide { index: 1, width_us: 100, grab_us: 50 };
-        let sel = drag(edit, 250, 550).applied(&base);
+        let sel = drag(slide(1, 100, 50), 250, 550).applied(&base);
         assert_eq!(regions(&sel), [(0, 100), (500, 600)]);
     }
 
@@ -1448,8 +1476,7 @@ mod tests {
     #[test]
     fn a_slide_released_under_the_click_threshold_keeps_every_region() {
         let base = selection(&[(0, 100), (200, 300), (400, 500)]);
-        let edit = RegionEdit::Slide { index: 1, width_us: 100, grab_us: 50 };
-        let held = RegionDrag { moved: false, ..drag(edit, 250, 252) };
+        let held = RegionDrag { moved: false, ..drag(slide(1, 100, 50), 250, 252) };
         assert_eq!(regions(&held.released(&base)), regions(&base));
     }
 
