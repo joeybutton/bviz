@@ -51,7 +51,7 @@ use gpui::{
 use std::path::PathBuf;
 use std::sync::Arc;
 
-gpui::actions!(bviz_trace, [SelectAllTracks]);
+gpui::actions!(bviz_trace, [SelectAllTracks, ClearTimeSelection]);
 
 /// Vertical sizing of the stacked thread and counter lanes, in pixels. The lane
 /// header is a thin top margin above the depth rows — the names live in the

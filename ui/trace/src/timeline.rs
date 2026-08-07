@@ -5,14 +5,17 @@ use crate::model::TraceModel;
 use crate::regions::{Regions, flame_total_height, max_lane_scroll};
 use crate::theme::Palette;
 use crate::{
-    BottomTab, DEFAULT_GUTTER_WIDTH, DEFAULT_PANEL_HEIGHT, EDGE_MARGIN_PX, GROUP_BAND_HEIGHT,
-    GROUP_ICON, LINE_SCROLL_PX, MAX_PX_PER_US, METRICS, MIN_SLICE_PX, SLICE_TEXT_PAD,
-    SelectAllTracks, Source, TraceView, ZOOM_PER_NOTCH, drawn_scroll, paint_gridlines,
-    paint_gutter, paint_markers, paint_ruler, paint_slice, paint_tooltip, ruler_ticks,
-    scroll_request, scrollbar_geom, thumb_offset,
+    BottomTab, ClearTimeSelection, DEFAULT_GUTTER_WIDTH, DEFAULT_PANEL_HEIGHT, EDGE_MARGIN_PX,
+    GROUP_BAND_HEIGHT, GROUP_ICON, LINE_SCROLL_PX, MAX_PX_PER_US, METRICS, MIN_SLICE_PX,
+    SLICE_TEXT_PAD, SelectAllTracks, Source, TraceView, ZOOM_PER_NOTCH, drawn_scroll,
+    paint_gridlines, paint_gutter, paint_markers, paint_ruler, paint_slice, paint_tooltip,
+    ruler_ticks, scroll_request, scrollbar_geom, thumb_offset,
 };
-use bviz_trace_layout::{Cull, LaneLayout, TimeView, Viewport, VisibleSlice, visible_slices};
-use bviz_trace_profile::{Profile, Slice, SliceDetail};
+use bviz_trace_layout::{
+    Cull, LaneLayout, TimeSelection, TimeView, Viewport, VisibleSlice, span_between,
+    visible_slices,
+};
+use bviz_trace_profile::{Profile, Slice, SliceDetail, TimeSpan};
 use bviz_ui_components::{Scrollbar, cached_layer, overlay_canvas, track_drag};
 use gpui::{
     App, Bounds, ContentMask, Context, Div, Entity, FocusHandle, IntoElement, KeyBinding,
@@ -107,6 +110,82 @@ struct AnchoredChart {
     ceiling: f32,
 }
 
+/// How near a region's edge in the ruler a press must land to take hold of it.
+const EDGE_GRAB_PX: f32 = 4.0;
+
+/// How far a press must travel before it is read as a drag rather than a click.
+const MIN_DRAG_PX: f32 = 3.0;
+
+/// What a time-region drag makes of the selection.
+#[derive(Clone, Copy)]
+pub(crate) enum RegionEdit {
+    /// Restrict the selection to the dragged region alone.
+    Replace,
+    /// Union the dragged region into the selection.
+    Union,
+    /// Move the grabbed edge of the region at `index`; the drag is anchored at
+    /// that region's other, fixed edge, so dragging past it flips the region.
+    Resize { index: usize },
+    /// Move the region at `index` whole, keeping `width_us`; the press took hold
+    /// of it `grab_us` past its start.
+    Slide { index: usize, width_us: i64, grab_us: i64 },
+}
+
+/// A time-region drag in progress. Its region is only committed to the model on
+/// release, so the aggregate is rebuilt once rather than per mouse move.
+#[derive(Clone, Copy)]
+pub(crate) struct RegionDrag {
+    edit: RegionEdit,
+    /// The instant the drag is anchored at: a resize's fixed edge, otherwise
+    /// where the press landed.
+    anchor_us: i64,
+    /// The instant under the cursor.
+    cursor_us: i64,
+    /// Window x of the press, which the click threshold measures from.
+    press_x: f32,
+    /// Whether the cursor has passed [`MIN_DRAG_PX`], latched so a drag that
+    /// returns to the press point stays a drag.
+    moved: bool,
+}
+
+impl RegionDrag {
+    /// The region the drag currently covers.
+    pub(crate) fn span(&self) -> TimeSpan {
+        match self.edit {
+            RegionEdit::Slide { width_us, grab_us, .. } => {
+                let start_us = self.cursor_us - grab_us;
+                TimeSpan { start_us, end_us: start_us + width_us }
+            }
+            _ => span_between(self.anchor_us, self.cursor_us),
+        }
+    }
+
+    /// The selection the drag would leave when applied over `base`. Below the
+    /// click threshold it covers no region yet, so it yields `base` itself.
+    pub(crate) fn applied(&self, base: &TimeSelection) -> TimeSelection {
+        let mut sel = base.clone();
+        if self.moved {
+            let span = self.span();
+            match self.edit {
+                RegionEdit::Replace => sel.set(span),
+                RegionEdit::Union => sel.insert(span),
+                RegionEdit::Resize { index } | RegionEdit::Slide { index, .. } => {
+                    sel.replace(index, span)
+                }
+            };
+        }
+        sel
+    }
+}
+
+/// The instant `x_px` right of the time content's left edge points at, bounded
+/// to `span` so a gesture reaching into the timeline's edge margin cannot select
+/// time the profile does not cover. The sole rounding of a mapped time to a
+/// profile instant.
+fn time_at_x(view: TimeView, span: TimeSpan, x_px: f32) -> i64 {
+    (view.t_of(x_px).round() as i64).clamp(span.start_us, span.end_us)
+}
+
 /// What a left-button drag over the timeline is currently moving.
 #[derive(Clone, Copy)]
 enum TimelineDrag {
@@ -117,6 +196,9 @@ enum TimelineDrag {
     /// holding the grab offset from the thumb's leading edge.
     VThumb(f32),
     HThumb(f32),
+    /// A press on the ruler, or a shift-press on the flame lanes, selecting the
+    /// time the flame graph and stats aggregate over.
+    TimeRegion(RegionDrag),
 }
 
 /// The flame-chart timeline: time on the x axis, stacked thread lanes on the y
@@ -172,7 +254,10 @@ impl TimelinePanel {
     ) -> Self {
         let content_focus = cx.focus_handle();
         content_focus.focus(window, cx);
-        cx.bind_keys([KeyBinding::new("ctrl-a", SelectAllTracks, Some("TraceContent"))]);
+        cx.bind_keys([
+            KeyBinding::new("ctrl-a", SelectAllTracks, Some("TraceContent")),
+            KeyBinding::new("escape", ClearTimeSelection, Some("TraceContent")),
+        ]);
         let parent = cx.entity().downgrade();
         let canvas = cx.new(|_| SliceCanvas { parent });
         Self {
@@ -402,6 +487,109 @@ impl TimelinePanel {
         }
     }
 
+    /// Widens the aggregate back to the whole timeline (the Escape gesture).
+    fn clear_time_selection(
+        &mut self,
+        _: &ClearTimeSelection,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.model.update(cx, |m, cx| m.set_time_selection(TimeSelection::default(), cx)) {
+            cx.notify();
+        }
+    }
+
+    /// The instant a window-space cursor points at; `None` while no profile is
+    /// loaded.
+    fn time_at(&self, pos: Point<Pixels>, cx: &App) -> Option<i64> {
+        let Source::Loaded(profile) = self.model.read(cx).source() else {
+            return None;
+        };
+        let x_px = f32::from(pos.x) - self.regions(cx).content_left;
+        Some(time_at_x(self.view, profile.span(), x_px))
+    }
+
+    /// Begins a time-region drag if the press asks for one — anywhere in the
+    /// ruler band, or a shift-press over the flame lanes — reporting whether it
+    /// took the press. A ruler press takes hold of the region edge or region it
+    /// lands on; otherwise the drag replaces the selection, or unions into it
+    /// while ctrl is held.
+    fn press_time_region(&mut self, e: &MouseDownEvent, cx: &App) -> bool {
+        let regions = self.regions(cx);
+        let x = f32::from(e.position.x);
+        let y = f32::from(e.position.y);
+        let in_ruler = x >= regions.content_left
+            && x < regions.time_right
+            && y >= f32::from(self.viewport.origin.y)
+            && y < regions.flame_top;
+        if !in_ruler && !(e.modifiers.shift && regions.in_flame(e.position)) {
+            return false;
+        }
+        let Some(at) = self.time_at(e.position, cx) else {
+            return false;
+        };
+        let (edit, anchor_us) = {
+            let held = in_ruler
+                .then(|| self.region_grab(self.model.read(cx).time_selection(), at, x, regions))
+                .flatten();
+            held.unwrap_or_else(|| {
+                let ctrl = e.modifiers.control || e.modifiers.platform;
+                (if ctrl { RegionEdit::Union } else { RegionEdit::Replace }, at)
+            })
+        };
+        self.crosshair = None;
+        self.drag = TimelineDrag::TimeRegion(RegionDrag {
+            edit,
+            anchor_us,
+            cursor_us: at,
+            press_x: x,
+            moved: false,
+        });
+        true
+    }
+
+    /// The edit a press at window `x`, on the instant `at`, takes hold of in
+    /// `sel` — a resize of the region edge within [`EDGE_GRAB_PX`] of the press,
+    /// else a slide of the region it landed in — with the instant to anchor the
+    /// drag at.
+    fn region_grab(
+        &self,
+        sel: &TimeSelection,
+        at: i64,
+        x: f32,
+        regions: Regions,
+    ) -> Option<(RegionEdit, i64)> {
+        let edge_x = |t_us: i64| regions.content_left + self.view.x_of(t_us);
+        sel.spans().iter().enumerate().find_map(|(index, s)| {
+            if (edge_x(s.start_us) - x).abs() <= EDGE_GRAB_PX {
+                Some((RegionEdit::Resize { index }, s.end_us))
+            } else if (edge_x(s.end_us) - x).abs() <= EDGE_GRAB_PX {
+                Some((RegionEdit::Resize { index }, s.start_us))
+            } else if at >= s.start_us && at < s.end_us {
+                let edit = RegionEdit::Slide {
+                    index,
+                    width_us: s.end_us - s.start_us,
+                    grab_us: at - s.start_us,
+                };
+                Some((edit, at))
+            } else {
+                None
+            }
+        })
+    }
+
+    /// Lands a finished time-region drag on the model: one that never passed the
+    /// click threshold is a click, which drops the selection entirely; otherwise
+    /// its edit applies to the standing selection.
+    fn commit_time_region(&mut self, drag: RegionDrag, cx: &mut Context<Self>) {
+        let selection = if drag.moved {
+            drag.applied(self.model.read(cx).time_selection())
+        } else {
+            TimeSelection::default()
+        };
+        self.model.update(cx, |m, cx| m.set_time_selection(selection, cx));
+    }
+
     /// Begins a timeline drag at `pos`: the lane vertical or time horizontal
     /// scroll thumb/track if the press hit one, otherwise a pan.
     fn press(&mut self, pos: Point<Pixels>, cx: &App) {
@@ -518,13 +706,16 @@ impl TimelinePanel {
 
     /// The timeline's mouse/scroll/hover wiring: a press on a group header folds
     /// or shows-all it, on a track label selects that track, on a scroll
-    /// thumb/track drives that bar, anywhere else pans; the wheel zooms/pans/
-    /// scrolls, and a move updates the crosshair and hover. Holds the content
-    /// focus and the Ctrl-A action so a press here makes Ctrl-A select all tracks.
+    /// thumb/track drives that bar, on the ruler (or with shift on the lanes)
+    /// selects time regions, anywhere else pans; the wheel zooms/pans/scrolls,
+    /// and a move updates the crosshair and hover. Holds the content focus and
+    /// the chart's actions, so a press here makes Ctrl-A select all tracks and
+    /// Escape widen the aggregate to the whole timeline.
     fn content_handlers(&self, root: Stateful<Div>, cx: &mut Context<Self>) -> Stateful<Div> {
         root.key_context("TraceContent")
             .track_focus(&self.content_focus)
             .on_action(cx.listener(Self::select_all_visible))
+            .on_action(cx.listener(Self::clear_time_selection))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, e: &MouseDownEvent, window, cx| {
@@ -544,6 +735,10 @@ impl TimelinePanel {
                         this.model
                             .update(cx, |m, cx| m.select_track(track, e.modifiers.shift, ctrl, cx));
                         this.invalidate_canvas(cx);
+                        return;
+                    }
+                    if this.press_time_region(e, cx) {
+                        cx.notify();
                         return;
                     }
                     this.press(e.position, cx);
@@ -590,13 +785,16 @@ impl Render for TimelinePanel {
     }
 }
 
-/// Routes an in-progress timeline drag to its target: panning the chart, or
-/// moving a scroll thumb.
+/// Routes an in-progress timeline drag to its target: panning the chart, moving
+/// a scroll thumb, or stretching a time region.
 fn timeline_on_drag(
     panel: &mut TimelinePanel,
     event: &MouseMoveEvent,
     cx: &mut Context<TimelinePanel>,
 ) {
+    // A region drag moves no input the slice layer paints from, so its scene
+    // replays while the drag runs.
+    let moves_slices = !matches!(panel.drag, TimelineDrag::TimeRegion(_));
     match panel.drag {
         TimelineDrag::Pan => {
             let dx = f32::from(event.position.x) - f32::from(panel.last_mouse.x);
@@ -617,10 +815,21 @@ fn timeline_on_drag(
         }
         TimelineDrag::VThumb(grab) => panel.scroll_thumb_to(event.position, grab, cx),
         TimelineDrag::HThumb(grab) => panel.pan_thumb_to(event.position, grab, cx),
+        TimelineDrag::TimeRegion(mut drag) => {
+            if let Some(at) = panel.time_at(event.position, cx) {
+                drag.cursor_us = at;
+                drag.moved |= (f32::from(event.position.x) - drag.press_x).abs() > MIN_DRAG_PX;
+                panel.drag = TimelineDrag::TimeRegion(drag);
+            }
+        }
         TimelineDrag::None => {}
     }
     panel.update_hover(event.position, cx);
-    panel.invalidate_canvas(cx);
+    if moves_slices {
+        panel.invalidate_canvas(cx);
+    } else {
+        cx.notify();
+    }
 }
 
 fn timeline_end_drag(
@@ -628,8 +837,15 @@ fn timeline_end_drag(
     _: &MouseUpEvent,
     cx: &mut Context<TimelinePanel>,
 ) {
-    panel.drag = TimelineDrag::None;
-    panel.invalidate_canvas(cx);
+    match std::mem::replace(&mut panel.drag, TimelineDrag::None) {
+        // The committed selection feeds only the aggregate, so here too the
+        // slice layer's scene stands.
+        TimelineDrag::TimeRegion(drag) => {
+            panel.commit_time_region(drag, cx);
+            cx.notify();
+        }
+        _ => panel.invalidate_canvas(cx),
+    }
 }
 
 /// The layer painting the timeline's slices and chrome, from the view state,
@@ -995,5 +1211,96 @@ mod tests {
         let track = &profile.threads()[over.track];
         let drawn = profile.slices(track)[over.slice];
         assert_eq!(hit.profile().str(hit.slice().name), profile.str(drawn.name));
+    }
+
+    /// A selection of the given regions, built the way a sequence of union drags
+    /// would leave it.
+    fn selection(regions: &[(i64, i64)]) -> TimeSelection {
+        let mut sel = TimeSelection::default();
+        for &(a, b) in regions {
+            assert!(sel.insert(span_between(a, b)).is_some(), "({a}, {b})");
+        }
+        sel
+    }
+
+    fn regions(sel: &TimeSelection) -> Vec<(i64, i64)> {
+        sel.spans().iter().map(|s| (s.start_us, s.end_us)).collect()
+    }
+
+    /// A drag that has passed the click threshold, anchored at `anchor_us` with
+    /// its cursor on `cursor_us`.
+    fn drag(edit: RegionEdit, anchor_us: i64, cursor_us: i64) -> RegionDrag {
+        RegionDrag { edit, anchor_us, cursor_us, press_x: 0.0, moved: true }
+    }
+
+    #[test]
+    fn a_replacing_drag_spans_its_press_and_its_cursor() {
+        assert_eq!(drag(RegionEdit::Replace, 100, 400).span(), span_between(100, 400));
+        // Dragged leftward, the ends arrive the other way round.
+        assert_eq!(drag(RegionEdit::Union, 400, 100).span(), span_between(100, 400));
+    }
+
+    #[test]
+    fn a_resize_dragged_past_its_fixed_edge_flips_the_region() {
+        let edit = RegionEdit::Resize { index: 0 };
+        assert_eq!(drag(edit, 400, 500).span(), span_between(400, 500));
+        assert_eq!(drag(edit, 400, 250).span(), span_between(250, 400));
+    }
+
+    #[test]
+    fn a_slide_carries_the_region_width_to_the_cursor() {
+        let edit = RegionEdit::Slide { index: 0, width_us: 100, grab_us: 30 };
+        assert_eq!(drag(edit, 0, 500).span(), span_between(470, 570));
+    }
+
+    #[test]
+    fn a_replacing_drag_restricts_the_selection_to_its_own_region() {
+        let base = selection(&[(0, 100), (200, 300)]);
+        let sel = drag(RegionEdit::Replace, 500, 700).applied(&base);
+        assert_eq!(regions(&sel), [(500, 700)]);
+    }
+
+    #[test]
+    fn a_union_drag_over_an_existing_region_merges_with_it() {
+        let base = selection(&[(0, 100), (200, 300)]);
+        let sel = drag(RegionEdit::Union, 250, 400).applied(&base);
+        assert_eq!(regions(&sel), [(0, 100), (200, 400)]);
+    }
+
+    #[test]
+    fn a_resize_moves_only_the_edge_it_took_hold_of() {
+        let base = selection(&[(0, 100), (200, 300)]);
+        // Anchored at the second region's end, so its start follows the cursor.
+        let sel = drag(RegionEdit::Resize { index: 1 }, 300, 150).applied(&base);
+        assert_eq!(regions(&sel), [(0, 100), (150, 300)]);
+    }
+
+    #[test]
+    fn a_slide_keeps_its_region_width_and_leaves_the_others() {
+        let base = selection(&[(0, 100), (200, 300)]);
+        let edit = RegionEdit::Slide { index: 1, width_us: 100, grab_us: 50 };
+        let sel = drag(edit, 250, 550).applied(&base);
+        assert_eq!(regions(&sel), [(0, 100), (500, 600)]);
+    }
+
+    #[test]
+    fn a_drag_under_the_click_threshold_leaves_the_selection_alone() {
+        let base = selection(&[(0, 100)]);
+        let held = RegionDrag { moved: false, ..drag(RegionEdit::Replace, 500, 501) };
+        assert_eq!(held.applied(&base), base);
+    }
+
+    #[test]
+    fn a_cursor_outside_the_profile_span_maps_back_onto_it() {
+        let profile = profile_of(3);
+        let span = profile.span();
+        // The edge margin the pan reaches into lies outside the profile.
+        assert_eq!(time_at_x(TEST_VIEW, span, -EDGE_MARGIN_PX), span.start_us);
+        assert_eq!(
+            time_at_x(TEST_VIEW, span, TEST_VIEW.x_of(span.end_us) + EDGE_MARGIN_PX),
+            span.end_us
+        );
+        let inside = (span.start_us + span.end_us) / 2;
+        assert_eq!(time_at_x(TEST_VIEW, span, TEST_VIEW.x_of(inside)), inside);
     }
 }

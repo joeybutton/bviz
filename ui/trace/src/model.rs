@@ -43,6 +43,9 @@ pub(crate) struct TraceModel {
     visible_tracks: Vec<bool>,
     /// Which tracks the flame graph and stats aggregate over, indexed likewise.
     selected_tracks: Vec<bool>,
+    /// The profile time the flame graph and stats aggregate over, intersected
+    /// with the selected tracks; empty for the whole timeline.
+    time_selection: TimeSelection,
     /// Which lane-class groups are collapsed in the chart, indexed by
     /// [`GROUP_ORDER`]. Loading starts collapsed — it holds one lane per external
     /// repository, hundreds on a large build.
@@ -52,8 +55,8 @@ pub(crate) struct TraceModel {
     group_show_all: [bool; GROUP_ORDER.len()],
     flame_mode: FlameMode,
     /// Bumped whenever an input the aggregate is built from changes — the track
-    /// selection or the flame mode — keying the build so a stale build's result
-    /// is discarded once the inputs have moved on.
+    /// selection, the time selection, or the flame mode — keying the build so a
+    /// stale build's result is discarded once the inputs have moved on.
     aggregate_key: u64,
     /// The track a shift-click range-selection extends from, if any.
     select_anchor: Option<usize>,
@@ -89,6 +92,7 @@ impl TraceModel {
             lanes: RefCell::new(None),
             visible_tracks: Vec::new(),
             selected_tracks: Vec::new(),
+            time_selection: TimeSelection::default(),
             collapsed_groups: default_collapsed_groups(),
             group_show_all: [false; GROUP_ORDER.len()],
             flame_mode: FlameMode::default(),
@@ -114,12 +118,35 @@ impl TraceModel {
         &self.selected_tracks
     }
 
+    pub(crate) fn time_selection(&self) -> &TimeSelection {
+        &self.time_selection
+    }
+
+    /// Restricts the aggregate to `selection`, reporting whether that differs
+    /// from the standing one. Keys a rebuild only for a set that actually
+    /// changed, so re-committing the same regions costs nothing.
+    pub(crate) fn set_time_selection(
+        &mut self,
+        selection: TimeSelection,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if selection == self.time_selection {
+            return false;
+        }
+        self.time_selection = selection;
+        self.aggregate_key += 1;
+        self.ensure_aggregates(cx);
+        true
+    }
+
     /// Replaces the loaded document, dropping the lane layouts (which depend only
-    /// on the profile) and, for a loaded profile, seeding the default track
+    /// on the profile) and the time selection (whose instants address the old
+    /// profile's timeline) and, for a loaded profile, seeding the default track
     /// selection.
     pub(crate) fn set_source(&mut self, source: Source, cx: &mut Context<Self>) {
         self.lanes.borrow_mut().take();
         self.visible_lanes.borrow_mut().take();
+        self.time_selection.clear();
         self.source = source;
         if let Source::Loaded(profile) = &self.source {
             let profile = profile.clone();
@@ -429,6 +456,7 @@ impl TraceModel {
         let generation = self.agg.start(key);
         cx.emit(AggregateBuildStarted);
         let selected = self.selected_tracks.clone();
+        let time_window = self.time_selection.clone();
         let mode = self.flame_mode;
         let cached_scan = self.flame_scan.clone();
         let task = cx.spawn(async move |model, cx| {
@@ -441,7 +469,7 @@ impl TraceModel {
                     let aggregate = ScopeAggregate::build_for_tracks_reusing(
                         &scan,
                         mode,
-                        &TimeSelection::default(),
+                        &time_window,
                         |i| selected.get(i).copied().unwrap_or(false),
                     );
                     if std::env::var_os("BVIZ_TRACE_TIMING").is_some() {
