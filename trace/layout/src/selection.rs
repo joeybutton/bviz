@@ -77,12 +77,6 @@ impl TimeSelection {
         Some(self.merge_in(span))
     }
 
-    pub fn remove(&mut self, index: usize) {
-        if index < self.spans.len() {
-            self.spans.remove(index);
-        }
-    }
-
     pub fn region_at(&self, t_us: i64) -> Option<usize> {
         let i = self.spans.partition_point(|s| s.end_us <= t_us);
         self.spans.get(i).filter(|s| s.start_us <= t_us).map(|_| i)
@@ -240,15 +234,7 @@ mod tests {
         let mut sel = selection(&[(0, 10)]);
         let before = sel.clone();
         assert_eq!(sel.replace(1, span_between(20, 30)), None);
-        sel.remove(7);
         assert_eq!(sel, before);
-    }
-
-    #[test]
-    fn remove_drops_only_the_named_region() {
-        let mut sel = selection(&[(0, 10), (20, 30), (40, 50)]);
-        sel.remove(1);
-        assert_eq!(regions(&sel), [(0, 10), (40, 50)]);
     }
 
     #[test]
