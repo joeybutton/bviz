@@ -19,7 +19,7 @@ use bviz_trace_profile::{Profile, Slice, SliceDetail, TimeSpan};
 use bviz_ui_components::{Scrollbar, cached_layer, overlay_canvas, track_drag};
 use gpui::{
     App, Bounds, ContentMask, Context, Div, Entity, FocusHandle, IntoElement, KeyBinding,
-    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Render,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Render, Rgba,
     ScrollWheelEvent, Stateful, WeakEntity, Window, canvas, div,
     fill, point, prelude::*, px, size,
 };
@@ -205,8 +205,8 @@ enum TimelineDrag {
 /// axis, the counter plots (Counters tab), the ruler, gutter, phase markers, and
 /// scroll bars. Owns the timeline's view state, reading the document and
 /// selection from [`TraceModel`] and the panel/gutter layout from
-/// [`TraceView`]. The slices are painted by [`SliceCanvas`], the crosshair and
-/// tooltip by an overlay above it.
+/// [`TraceView`]. The slices are painted by [`SliceCanvas`], the time selection,
+/// crosshair, and tooltip by an overlay above it.
 pub(crate) struct TimelinePanel {
     /// Focus for the trace content, so Ctrl-A (select all tracks) dispatches
     /// here; a descendant of the window focus, so the window's own actions fire.
@@ -1068,9 +1068,128 @@ fn slice_paint(
     }
 }
 
-/// The overlay's paint closure: the crosshair, the hover tooltip, and — while a
-/// drag runs — the window-global drag handlers, from the crosshair, hover, and
-/// drag state it reads through `parent`.
+/// A selected region's slice of the time axis, in window x. `left` and `right`
+/// are bounded to the axis, and `starts`/`ends` tell whether that side is the
+/// region's own edge rather than the bound, so an edge lying off screen is left
+/// undrawn.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct RegionPixels {
+    left: f32,
+    right: f32,
+    starts: bool,
+    ends: bool,
+}
+
+/// Where `sel`'s regions land on the time axis, dropping any that falls entirely
+/// outside it. The sole derivation of selection geometry: the veil, the ruler
+/// band, the edges, and the grips all measure from it.
+fn selection_pixels(sel: &TimeSelection, tv: TimeView, regions: Regions) -> Vec<RegionPixels> {
+    let mut out = Vec::with_capacity(sel.len());
+    for s in sel.spans() {
+        let start = regions.content_left + tv.x_of(s.start_us);
+        let end = regions.content_left + tv.x_of(s.end_us);
+        if end <= regions.content_left || start >= regions.time_right {
+            continue;
+        }
+        out.push(RegionPixels {
+            left: start.max(regions.content_left),
+            right: end.min(regions.time_right),
+            starts: start >= regions.content_left,
+            ends: end < regions.time_right,
+        });
+    }
+    out
+}
+
+/// Alpha of the wash laid over unselected time: heavy enough that the selection
+/// reads at a glance, light enough that the chart under it stays legible.
+const VEIL_ALPHA: f32 = 0.62;
+
+/// Alpha of the selection accent tinting a selected region's stretch of the
+/// ruler band. The ruler's ticks and time labels are painted beneath it, so the
+/// tint stays translucent enough to read them through while still marking the
+/// stretch the regions are dragged in.
+const RULER_BAND_ALPHA: f32 = 0.5;
+
+/// Width of a region edge's hairline.
+const EDGE_LINE_PX: f32 = 1.0;
+
+/// Width of an edge's grip, spanning exactly the zone a press takes hold of the
+/// edge in, so the affordance and the hit-test cannot drift apart.
+const GRIP_WIDTH: f32 = 2.0 * EDGE_GRAB_PX;
+
+/// Share of the ruler band's height a grip stands in, centred.
+const GRIP_BAND_FRACTION: f32 = 0.55;
+
+/// Paints `sel` over the timeline: a wash over the time outside it, an accent
+/// fill and edge grips in the ruler band between `ruler_top` and the lanes, and a
+/// hairline down each region edge. Covers the time-axis sections the crosshair
+/// does, so a selection reads across the lanes and the counter plots alike.
+fn paint_time_selection(
+    sel: &TimeSelection,
+    tv: TimeView,
+    regions: Regions,
+    ruler_top: f32,
+    show_counters: bool,
+    palette: &Palette,
+    window: &mut Window,
+) {
+    if sel.is_empty() {
+        return;
+    }
+    let painted = selection_pixels(sel, tv, regions);
+    let quad = |x: f32, w: f32, top: f32, h: f32, color: Rgba, window: &mut Window| {
+        if w <= 0.0 || h <= 0.0 {
+            return;
+        }
+        window.paint_quad(fill(Bounds::new(point(px(x), px(top)), size(px(w), px(h))), color));
+    };
+
+    let veil = Rgba { a: VEIL_ALPHA, ..palette.background };
+    let veil_span = |from: f32, to: f32, window: &mut Window| {
+        quad(from, to - from, regions.flame_top, regions.flame_h(), veil, window);
+        if show_counters {
+            quad(from, to - from, regions.panel_top, regions.panel_h(), veil, window);
+        }
+    };
+    let mut unselected_from = regions.content_left;
+    for r in &painted {
+        veil_span(unselected_from, r.left, window);
+        unselected_from = r.right;
+    }
+    veil_span(unselected_from, regions.time_right, window);
+
+    let band_h = regions.flame_top - ruler_top;
+    let band = Rgba { a: RULER_BAND_ALPHA, ..palette.selection };
+    for r in &painted {
+        quad(r.left, r.right - r.left, ruler_top, band_h, band, window);
+    }
+
+    let accent = palette.selection;
+    let grip_h = band_h * GRIP_BAND_FRACTION;
+    let grip_top = ruler_top + (band_h - grip_h) / 2.0;
+    for r in &painted {
+        // An end edge's line is inset by its own width, so both hairlines fall
+        // inside the region they bound.
+        for (on_axis, edge_x, line_inset) in
+            [(r.starts, r.left, 0.0), (r.ends, r.right, EDGE_LINE_PX)]
+        {
+            if !on_axis {
+                continue;
+            }
+            let line_x = edge_x - line_inset;
+            quad(line_x, EDGE_LINE_PX, ruler_top, regions.flame_bottom - ruler_top, accent, window);
+            if show_counters {
+                quad(line_x, EDGE_LINE_PX, regions.panel_top, regions.panel_h(), accent, window);
+            }
+            quad(edge_x - EDGE_GRAB_PX, GRIP_WIDTH, grip_top, grip_h, accent, window);
+        }
+    }
+}
+
+/// The overlay's paint closure: the time selection, the crosshair, the hover
+/// tooltip, and — while a drag runs — the window-global drag handlers, from the
+/// selection, crosshair, hover, and drag state it reads through `parent`.
 fn overlay_paint(
     profile: Arc<Profile>,
     lanes: Rc<LaneLayout>,
@@ -1079,16 +1198,24 @@ fn overlay_paint(
 ) -> impl FnOnce(Bounds<Pixels>, &mut Window, &mut App) {
     move |bounds, window, cx| {
         let n_counters = profile.counters().len();
-        let (tv, tab, panel_height, gutter_width, crosshair, hovered, dragging) = {
+        let (tv, tab, panel_height, gutter_width, selection, crosshair, hovered, dragging) = {
             let panel = parent.read(cx);
             let tv = panel.view;
             let (tab, panel_height, gutter_width) = panel.shell_layout(cx);
             let hovered = panel.hover.and_then(|at| Some((at, panel.slice_at(at, cx)?)));
+            let standing = panel.model.read(cx).time_selection();
+            // The preview runs through the same edit the release commits, so what
+            // is drawn during a drag is what lands.
+            let selection = match panel.drag {
+                TimelineDrag::TimeRegion(drag) => drag.applied(standing),
+                _ => standing.clone(),
+            };
             (
                 tv,
                 tab,
                 panel_height,
                 gutter_width,
+                selection,
                 panel.crosshair,
                 hovered,
                 !matches!(panel.drag, TimelineDrag::None),
@@ -1097,6 +1224,15 @@ fn overlay_paint(
         let flame_total = flame_total_height(&lanes);
         let regions = Regions::new(bounds, n_counters, panel_height, gutter_width, flame_total);
         let show_counters = regions.has_graph && tab == BottomTab::Counters;
+        paint_time_selection(
+            &selection,
+            tv,
+            regions,
+            f32::from(bounds.origin.y),
+            show_counters,
+            &palette,
+            window,
+        );
         if let Some(at) = crosshair {
             if f32::from(at.x) >= regions.content_left {
                 paint_crosshair(&profile, tv, regions, at, show_counters, &palette, window, cx);
@@ -1288,6 +1424,45 @@ mod tests {
         let base = selection(&[(0, 100)]);
         let held = RegionDrag { moved: false, ..drag(RegionEdit::Replace, 500, 501) };
         assert_eq!(held.applied(&base), base);
+    }
+
+    /// A viewport split with a gutter of [`TEST_GUTTER`] and no counter lanes,
+    /// whose flame lanes are short enough that no vertical-bar column is reserved.
+    fn test_axis() -> Regions {
+        Regions::new(
+            Bounds::new(point(px(0.), px(0.)), size(px(1000.), px(800.))),
+            0,
+            DEFAULT_PANEL_HEIGHT,
+            TEST_GUTTER,
+            0.0,
+        )
+    }
+
+    /// A view whose window opens well after the profile start, so a region can
+    /// reach off either end of the axis.
+    const TEST_SELECTION_VIEW: TimeView = TimeView { start_us: 5000.0, px_per_us: 0.1 };
+    const TEST_GUTTER: f32 = 200.0;
+
+    #[test]
+    fn a_region_is_clipped_to_the_axis_and_keeps_only_the_edges_on_it() {
+        let axis = test_axis();
+        assert_eq!((axis.content_left, axis.time_right), (200.0, 1000.0), "the fixture's axis");
+        let sel = selection(&[(4000, 6000), (6500, 8000), (12000, 20000)]);
+        assert_eq!(
+            selection_pixels(&sel, TEST_SELECTION_VIEW, axis),
+            [
+                RegionPixels { left: 200.0, right: 300.0, starts: false, ends: true },
+                RegionPixels { left: 350.0, right: 500.0, starts: true, ends: true },
+                RegionPixels { left: 900.0, right: 1000.0, starts: true, ends: false },
+            ]
+        );
+    }
+
+    #[test]
+    fn a_region_entirely_off_the_axis_is_not_painted() {
+        let axis = test_axis();
+        let sel = selection(&[(0, 3000), (25000, 26000)]);
+        assert_eq!(selection_pixels(&sel, TEST_SELECTION_VIEW, axis), []);
     }
 
     #[test]
