@@ -228,6 +228,7 @@ pub fn span_role(category: &str, name: &str) -> SpanRole {
         "bazel module processing" => bazel_module_role(name),
         "Starlark repository function call" => starlark_repository_role(name),
         "Conflict checking" => conflict_checking_role(name),
+        "remote action execution" => remote_execution_role(name),
         "Remote execution setup" | "Remote execution upload time"
         | "action dependency checking" => remote_cache_role(name),
 
@@ -236,7 +237,6 @@ pub fn span_role(category: &str, name: &str) -> SpanRole {
         | "Local execution process wall time"
         | "local execution in worker"
         | "Local parse to prepare for remote execution"
-        | "remote action execution"
         | "Remote execution process wall time"
         | "critical path component" => (Subprocess, true),
 
@@ -313,6 +313,17 @@ fn conflict_checking_role(name: &str) -> (Workload, bool) {
         (Scheduling, false)
     } else {
         (Skyframe, false)
+    }
+}
+
+/// The role of a "remote action execution" span: dispatching the Execute RPC is
+/// time on the wire to the executor, the rest is the remote action body.
+fn remote_execution_role(name: &str) -> (Workload, bool) {
+    use Workload::*;
+    if name == "send Execute request" {
+        (RemoteCache, false)
+    } else {
+        (Subprocess, true)
     }
 }
 
@@ -678,6 +689,10 @@ mod tests {
         assert_eq!(
             role("remote action execution", ""),
             payload(Workload::Subprocess)
+        );
+        assert_eq!(
+            role("remote action execution", "send Execute request"),
+            overhead(Workload::RemoteCache)
         );
         assert_eq!(
             role("critical path component", "action 'Compiling foo.cc'"),
