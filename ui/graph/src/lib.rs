@@ -3,7 +3,7 @@
 //! rendering the result.
 
 use bviz_graph_layout::Id;
-use bviz_ui_components::{Dropdown, DropdownEvent};
+use bviz_ui_components::{Dropdown, DropdownEvent, ScrollbarColors};
 use bviz_ui_shell::Chrome;
 use bviz_ui_theme::Colors;
 use clap::Parser;
@@ -84,6 +84,7 @@ struct Palette {
     container_fill: Rgba,
     /// Background the kind accents are blended toward to form leaf fills.
     background: Rgba,
+    scroll: ScrollbarColors,
 }
 
 /// Loads, lays out, and renders a Bazel build graph.
@@ -337,6 +338,7 @@ impl Render for GraphView {
             label: colors.text,
             container_fill: colors.container,
             background: colors.background,
+            scroll: ScrollbarColors::from_colors(&colors),
         };
         let body = match self.model.source() {
             Source::Loaded(_) => {

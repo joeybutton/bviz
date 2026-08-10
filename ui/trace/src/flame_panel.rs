@@ -2,16 +2,16 @@ use crate::chart::format_duration;
 use crate::model::{AggregateBuildStarted, TraceModel};
 use crate::theme::{self, Palette};
 use crate::{
-    BAR_WIDTH, LINE_SCROLL_PX, METRICS, MIN_SLICE_PX, STATS_TEXT_SIZE, ZOOM_PER_NOTCH,
-    drawn_scroll, scroll_request, thumb_offset,
+    LINE_SCROLL_PX, METRICS, MIN_SLICE_PX, STATS_TEXT_SIZE, ZOOM_PER_NOTCH, drawn_scroll,
+    scroll_request, thumb_offset,
 };
 use bviz_trace_layout::{
     FlameBox, FlameMetrics, FlamePlacement, FlameView, ScopeAggregate, flame_height,
     lay_out_flame,
 };
 use bviz_ui_components::{
-    Axis, DEFAULT_MIN_THUMB, Scrollbar, cached_layer, overlay_canvas, paint_labeled_box,
-    paint_tooltip_box, spinner, track_drag,
+    Axis, DEFAULT_MIN_THUMB, SCROLLBAR_THICKNESS, Scrollbar, cached_layer, overlay_canvas,
+    paint_labeled_box, paint_tooltip_box, spinner, track_drag,
 };
 use gpui::{
     App, Bounds, ContentMask, Context, Div, Entity, IntoElement, MouseButton,
@@ -134,9 +134,9 @@ impl FlameLayout {
         // Zoom > 1 overflows horizontally, so a bottom strip is reserved for the
         // h-bar; that shrinks the height the rows must clear, which is what decides
         // the v-bar reserve. Resolve in that order.
-        let hbar_reserve = if view.zoom > 1.0 { BAR_WIDTH } else { 0.0 };
+        let hbar_reserve = if view.zoom > 1.0 { SCROLLBAR_THICKNESS } else { 0.0 };
         let height = (f32::from(bounds.size.height) - hbar_reserve).max(0.0);
-        let vbar_reserve = if total_h > height { BAR_WIDTH } else { 0.0 };
+        let vbar_reserve = if total_h > height { SCROLLBAR_THICKNESS } else { 0.0 };
         let width = (f32::from(bounds.size.width) - vbar_reserve).max(0.0);
         Self {
             view,
@@ -335,7 +335,7 @@ impl FlamePanel {
             Axis::Vertical,
             Bounds::new(
                 point(px(fl.left + fl.width), px(fl.top)),
-                size(px(BAR_WIDTH), px(fl.height)),
+                size(px(SCROLLBAR_THICKNESS), px(fl.height)),
             ),
             fl.total_h,
             fl.height,
@@ -352,7 +352,7 @@ impl FlamePanel {
             Axis::Horizontal,
             Bounds::new(
                 point(px(fl.left), px(fl.top + fl.height)),
-                size(px(fl.width), px(BAR_WIDTH)),
+                size(px(fl.width), px(SCROLLBAR_THICKNESS)),
             ),
             fl.view.content_px(fl.width) as f32,
             fl.width,
@@ -704,7 +704,7 @@ fn flame_paint(
         });
 
         for bar in vbar.into_iter().chain(hbar) {
-            bar.paint(palette.scroll_track, palette.scroll_thumb, window);
+            bar.paint(palette.scroll.track, palette.scroll.thumb, window);
         }
     }
 }
@@ -833,14 +833,17 @@ mod tests {
         // Zoomed in, the h-bar takes its strip; the rows still clear what is left
         // of the height, so no column goes to the v-bar.
         assert_eq!(
-            rect(full_h - BAR_WIDTH, zoomed),
-            Bounds::new(bounds.origin, size(px(full_w), px(full_h - BAR_WIDTH)))
+            rect(full_h - SCROLLBAR_THICKNESS, zoomed),
+            Bounds::new(bounds.origin, size(px(full_w), px(full_h - SCROLLBAR_THICKNESS)))
         );
         // Rows that fit the body but not the height left by the h-bar's strip
         // overflow, so both bars show and each takes its reserve.
         assert_eq!(
             rect(full_h, zoomed),
-            Bounds::new(bounds.origin, size(px(full_w - BAR_WIDTH), px(full_h - BAR_WIDTH)))
+            Bounds::new(
+                bounds.origin,
+                size(px(full_w - SCROLLBAR_THICKNESS), px(full_h - SCROLLBAR_THICKNESS))
+            )
         );
     }
 }

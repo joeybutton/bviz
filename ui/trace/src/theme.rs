@@ -2,7 +2,7 @@
 //! the shared palette helpers in [`bviz_ui_theme`].
 
 use bviz_trace_layout::{SpanRole, Workload};
-use bviz_ui_components::{LabelBoxStyle, TooltipColors};
+use bviz_ui_components::{LabelBoxStyle, ScrollbarColors, TooltipColors};
 use bviz_ui_theme::{hue_of, luminance};
 use gpui::{Hsla, IntoElement, Rgba, div, hsla, prelude::*, px};
 
@@ -49,6 +49,11 @@ const FLAME_ROOT_LIGHTNESS_LIGHT: f32 = 0.78;
 /// band it lies on: faint enough that the label over it stays legible, strong
 /// enough to read as accented.
 const SELECTION_TINT_MIX: f32 = 0.8;
+
+/// Fraction by which the container color is blended toward the background to give
+/// the stats table's hover fill: enough of a lift to follow the cursor down the
+/// table, faint enough that the values on the row stay the strongest thing in it.
+const TABLE_HOVER_MIX: f32 = 0.3;
 
 /// Side of a legend swatch and the gap between a swatch and its label.
 const LEGEND_SWATCH: f32 = 10.0;
@@ -156,9 +161,9 @@ pub(crate) struct Palette {
     pub(crate) gridline: Rgba,
     /// Accent for the build-phase boundary lines and their labels.
     pub(crate) marker: Rgba,
-    /// Scroll-bar track and thumb fills.
-    pub(crate) scroll_track: Rgba,
-    pub(crate) scroll_thumb: Rgba,
+    pub(crate) scroll: ScrollbarColors,
+    /// Fill marking the stats table row or header cell under the cursor.
+    pub(crate) table_hover: Rgba,
     /// The section-splitter and gutter-edge divider lines, subtler than the
     /// scroll thumb so they don't dominate a dark background.
     pub(crate) divider: Rgba,
@@ -180,8 +185,8 @@ impl Palette {
             gridline: bviz_ui_theme::mix(colors.border, colors.background, 0.55),
             // A mid-tone amber, legible against a light or dark background.
             marker: Rgba::from(hsla(0.09, 0.6, 0.55, 1.0)),
-            scroll_track: bviz_ui_theme::mix(colors.container, colors.background, 0.3),
-            scroll_thumb: bviz_ui_theme::mix(colors.text, colors.background, 0.55),
+            scroll: ScrollbarColors::from_colors(colors),
+            table_hover: bviz_ui_theme::mix(colors.container, colors.background, TABLE_HOVER_MIX),
             divider: bviz_ui_theme::mix(colors.border, colors.background, 0.4),
             panel: colors.container,
             crosshair: bviz_ui_theme::mix(colors.text, colors.background, 0.35),

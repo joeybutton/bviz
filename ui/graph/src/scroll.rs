@@ -1,23 +1,9 @@
 use crate::camera::{clamp_pan, pan_range, Camera};
 use crate::drag::Drag;
 use crate::{GraphView, Palette};
-use bviz_ui_components::{Axis, Scrollbar};
-use gpui::{Bounds, Context, Hsla, MouseMoveEvent, Pixels, Point, Size, Window, point, px, size};
+use bviz_ui_components::{Axis, DEFAULT_MIN_THUMB, SCROLLBAR_THICKNESS, Scrollbar};
+use gpui::{Bounds, Context, MouseMoveEvent, Pixels, Point, Size, Window, point, px, size};
 use std::ops::RangeInclusive;
-
-/// Thickness of a scroll-bar track and thumb, in px.
-const SCROLLBAR_THICKNESS: f32 = 10.0;
-
-/// Smallest a scroll thumb may shrink to, so it stays grabbable on a long track.
-const MIN_THUMB: f32 = 28.0;
-
-/// Fraction by which the border color is blended toward the background to give
-/// the scroll-bar track.
-const TRACK_BLEND: f32 = 0.5;
-
-/// Fraction by which the label color is blended toward the background to give
-/// the scroll thumb.
-const THUMB_BLEND: f32 = 0.45;
 
 /// An in-progress scroll-bar drag: which bar holds it and the grab offset down the
 /// thumb at the press, so the thumb tracks the cursor from the point it was grabbed.
@@ -118,7 +104,7 @@ fn scrollbar_geom(
         along.viewport_len + along.span(),
         along.viewport_len,
         along.offset_of(panc),
-        MIN_THUMB,
+        DEFAULT_MIN_THUMB,
     )
 }
 
@@ -131,11 +117,9 @@ pub(crate) fn paint_scrollbars(
     palette: &Palette,
     window: &mut Window,
 ) {
-    let track = Hsla::from(bviz_ui_theme::mix(palette.border, palette.background, TRACK_BLEND));
-    let thumb = Hsla::from(bviz_ui_theme::mix(palette.label, palette.background, THUMB_BLEND));
     for axis in [Axis::Vertical, Axis::Horizontal] {
         if let Some(bar) = scrollbar_geom(axis, viewport, content, camera) {
-            bar.paint(track, thumb, window);
+            bar.paint(palette.scroll.track, palette.scroll.thumb, window);
         }
     }
 }

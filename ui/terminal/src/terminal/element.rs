@@ -1,5 +1,5 @@
 use bviz_terminal::{Cell, Flags, Scroll, Terminal};
-use bviz_ui_components::{Axis, DEFAULT_MIN_THUMB, Scrollbar, track_drag};
+use bviz_ui_components::{Axis, DEFAULT_MIN_THUMB, Scrollbar, ScrollbarColors, track_drag};
 use gpui::{
     App, Bounds, Element, Entity, Font, GlobalElementId, InspectorElementId, IntoElement, LayoutId,
     PaintQuad, Pixels, Point, Rgba, ShapedLine, Style, TextRun, Window, fill, point, px, relative,
@@ -9,7 +9,10 @@ use gpui::{
 use super::{ContentLayout, TermSource, TerminalView};
 use crate::color::{CellStyle, Defaults, ansi_palette, style_key};
 
-/// Width of the scroll bar gutter reserved on the right edge.
+/// Width of the scroll bar gutter reserved on the right edge. The bar is an
+/// overlay that auto-hides and paints only a thumb, so this strip is empty
+/// whenever the bar is at rest: it is kept to the narrowest that stays grabbable,
+/// leaving the width to the text grid it floats over.
 const SCROLLBAR_WIDTH: f32 = 8.0;
 
 /// Custom element that sizes the terminal to its bounds, then shapes the visible
@@ -139,12 +142,9 @@ impl TerminalElement {
             .update(cx, |view, _| view.scrollbar = scrollbar_layout);
         let view = self.view.read(cx);
         let show_scrollbar = view.scrollbar_visible || view.drag_grab.is_some();
-        scrollbar_layout.filter(|_| show_scrollbar).map(|bar| {
-            fill(
-                bar.thumb(),
-                bviz_ui_theme::mix(colors.text, colors.background, 0.6),
-            )
-        })
+        scrollbar_layout
+            .filter(|_| show_scrollbar)
+            .map(|bar| fill(bar.thumb(), ScrollbarColors::from_colors(colors).thumb))
     }
 
     /// Shape the visible grid into one [`PositionedLine`] per contiguous

@@ -3,13 +3,13 @@ use crate::model::TraceModel;
 use crate::rebuild::Rebuild;
 use crate::theme::Palette;
 use crate::{
-    BAR_WIDTH, STATS_CELL_PAD, STATS_HEADER_HEIGHT, STATS_NUM_COL_WIDTH, STATS_ROW_HEIGHT,
-    STATS_TEXT_SIZE, set_list_thumb, thumb_offset,
+    STATS_CELL_PAD, STATS_HEADER_HEIGHT, STATS_NUM_COL_WIDTH, STATS_ROW_HEIGHT, STATS_TEXT_SIZE,
+    set_list_thumb, thumb_offset,
 };
 use bviz_trace_layout::{FlameLabels, ScopeAggregate, StatRow};
 use bviz_ui_components::{
-    Axis, DEFAULT_MIN_THUMB, Scrollbar, centered_spinner, load_in_background, overlay_canvas,
-    track_drag,
+    Axis, DEFAULT_MIN_THUMB, SCROLLBAR_THICKNESS, Scrollbar, centered_spinner, load_in_background,
+    overlay_canvas, track_drag,
 };
 use gpui::{
     App, Bounds, Context, Div, Entity, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent,
@@ -248,7 +248,7 @@ impl StatsPanel {
             .flex_row()
             .h(px(STATS_HEADER_HEIGHT))
             .w_full()
-            .pr(px(BAR_WIDTH))
+            .pr(px(SCROLLBAR_THICKNESS))
             .bg(palette.header_band)
             .border_b_1()
             .border_color(palette.border)
@@ -274,7 +274,7 @@ impl StatsPanel {
                 stats_cell(spec, text)
                     .id(SharedString::from(format!("stats-h-{i}")))
                     .cursor_pointer()
-                    .hover(|s| s.bg(palette.scroll_track))
+                    .hover(|s| s.bg(palette.table_hover))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.sort_by(column);
                         cx.notify();
@@ -297,7 +297,7 @@ impl StatsPanel {
         };
 
         let row_count = order.order().len();
-        let scroll_track = palette.scroll_track;
+        let row_hover = palette.table_hover;
         let body = uniform_list(
             "stats-body",
             row_count,
@@ -318,8 +318,8 @@ impl StatsPanel {
                             .items_center()
                             .h(px(STATS_ROW_HEIGHT))
                             .w_full()
-                            .pr(px(BAR_WIDTH))
-                            .hover(move |s| s.bg(scroll_track))
+                            .pr(px(SCROLLBAR_THICKNESS))
+                            .hover(move |s| s.bg(row_hover))
                             .children(STATS_COLUMNS.iter().map(|spec| {
                                 let text: SharedString = match spec.column {
                                     StatsColumn::Key => key.to_string().into(),
@@ -340,8 +340,8 @@ impl StatsPanel {
         let bar = stats_scrollbar(
             cx.entity(),
             matches!(self.drag, StatsDrag::Thumb(_)),
-            palette.scroll_track,
-            palette.scroll_thumb,
+            palette.scroll.track,
+            palette.scroll.thumb,
         );
 
         table.child(
@@ -427,8 +427,8 @@ impl StatsPanel {
         Scrollbar::new(
             Axis::Vertical,
             Bounds::new(
-                point(body.right() - px(BAR_WIDTH), body.origin.y),
-                size(px(BAR_WIDTH), body.size.height),
+                point(body.right() - px(SCROLLBAR_THICKNESS), body.origin.y),
+                size(px(SCROLLBAR_THICKNESS), body.size.height),
             ),
             visible + f32::from(state.base_handle.max_offset().y),
             visible,

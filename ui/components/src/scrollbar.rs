@@ -4,7 +4,10 @@
 //! passes) and its own reveal/auto-hide policy, and uses this only to place the
 //! thumb, hit-test a press, and map a drag back to an offset.
 
-use gpui::{Background, BorderStyle, Bounds, Hsla, Pixels, Point, Window, point, px, quad, size};
+use bviz_ui_theme::{Colors, mix};
+use gpui::{
+    Background, BorderStyle, Bounds, Hsla, Pixels, Point, Rgba, Window, point, px, quad, size,
+};
 
 /// The axis a scroll bar runs along: its long dimension and the cursor
 /// coordinate a press is read from.
@@ -66,6 +69,37 @@ impl Axis {
 /// visible fraction is tiny. Passed as `min_thumb` to [`Scrollbar::new`] by views
 /// that have no reason to pick their own.
 pub const DEFAULT_MIN_THUMB: f32 = 24.0;
+
+/// Thickness of a scroll bar across its short axis, in pixels: the track's short
+/// dimension, and so the strip a view keeps clear along the edge it puts a bar on.
+pub const SCROLLBAR_THICKNESS: f32 = 10.0;
+
+/// Fraction by which the border color is blended toward the background to give
+/// the track: a channel that reads against the surface behind it in either
+/// appearance while staying subordinate to the thumb.
+const TRACK_BLEND: f32 = 0.5;
+
+/// Fraction by which the text color is blended toward the background to give the
+/// thumb, the bar's one grabbable part: it stands off the track without pulling
+/// the eye from the content.
+const THUMB_BLEND: f32 = 0.55;
+
+/// The fills a scroll bar paints with, so every bar reads the same whichever view
+/// draws it.
+#[derive(Clone, Copy)]
+pub struct ScrollbarColors {
+    pub track: Rgba,
+    pub thumb: Rgba,
+}
+
+impl ScrollbarColors {
+    pub fn from_colors(colors: &Colors) -> ScrollbarColors {
+        ScrollbarColors {
+            track: mix(colors.border, colors.background, TRACK_BLEND),
+            thumb: mix(colors.text, colors.background, THUMB_BLEND),
+        }
+    }
+}
 
 /// A scroll bar's geometry in window coordinates, derived from a track rect and
 /// the content/visible extents. Scalars run along the bar's long axis (y for
@@ -195,6 +229,33 @@ impl Scrollbar {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bviz_ui_theme::luminance;
+
+    /// The smallest step, in 8-bit sRGB levels, at which one neutral fill still
+    /// reads as separate from another it lies on.
+    const MIN_VISIBLE_STEP: f32 = 12.0;
+
+    /// The perceptual gap between two fills, in 8-bit sRGB levels.
+    fn step(a: Rgba, b: Rgba) -> f32 {
+        255.0 * (luminance(a) - luminance(b)).abs()
+    }
+
+    #[test]
+    fn the_track_reads_against_the_surface_in_either_appearance() {
+        for colors in [Colors::dark(), Colors::light()] {
+            let bar = ScrollbarColors::from_colors(&colors);
+            assert!(step(bar.track, colors.background) >= MIN_VISIBLE_STEP);
+        }
+    }
+
+    #[test]
+    fn the_thumb_outweighs_the_track_in_either_appearance() {
+        for colors in [Colors::dark(), Colors::light()] {
+            let bar = ScrollbarColors::from_colors(&colors);
+            assert!(step(bar.thumb, bar.track) > step(bar.track, colors.background));
+            assert!(step(bar.thumb, colors.background) >= MIN_VISIBLE_STEP);
+        }
+    }
 
     fn vtrack() -> Bounds<Pixels> {
         Bounds::new(point(px(100.), px(20.)), size(px(10.), px(200.)))

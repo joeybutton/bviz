@@ -1,8 +1,9 @@
 use crate::{
-    BAR_WIDTH, FLAME_MIN_HEIGHT, METRICS, MIN_CHART_HEIGHT, MIN_GUTTER, RULER_HEIGHT,
-    STATS_HEADER_HEIGHT, STATS_ROW_HEIGHT, TAB_BAR_HEIGHT,
+    FLAME_MIN_HEIGHT, METRICS, MIN_CHART_HEIGHT, MIN_GUTTER, RULER_HEIGHT, STATS_HEADER_HEIGHT,
+    STATS_ROW_HEIGHT, TAB_BAR_HEIGHT,
 };
 use bviz_trace_layout::LaneLayout;
+use bviz_ui_components::SCROLLBAR_THICKNESS;
 use gpui::{Bounds, Pixels, Point, point, px, size};
 
 /// The window content split into the flame chart region on top, the tab bar,
@@ -61,7 +62,7 @@ impl Regions {
         // The flame region: ruler at the top, scrollable lanes, then a strip for
         // the time horizontal bar always reserved above the tab bar.
         let flame_top = oy + RULER_HEIGHT;
-        let flame_bottom = (tab_top - BAR_WIDTH).max(flame_top);
+        let flame_bottom = (tab_top - SCROLLBAR_THICKNESS).max(flame_top);
         // Clamp the stored gutter width to the current window: a widened gutter
         // shrunk under by a later window resize must still leave the time axis
         // its share rather than collapsing it.
@@ -73,7 +74,7 @@ impl Regions {
         // Reserve a column for the vertical bar when the flame lanes overflow it,
         // so slices and charts end left of the bar rather than under it.
         let vbar_reserve = if flame_total > flame_h.max(0.0) {
-            BAR_WIDTH
+            SCROLLBAR_THICKNESS
         } else {
             0.0
         };
@@ -137,7 +138,8 @@ impl Regions {
 pub(crate) fn clamp_panel_height(panel_height: f32, n_counters: usize, vh: f32) -> f32 {
     let counter_floor = n_counters as f32 * (METRICS.header_height + MIN_CHART_HEIGHT);
     let min = counter_floor.max(STATS_HEADER_HEIGHT + STATS_ROW_HEIGHT);
-    let max = (vh - RULER_HEIGHT - BAR_WIDTH - TAB_BAR_HEIGHT - FLAME_MIN_HEIGHT).max(min);
+    let max =
+        (vh - RULER_HEIGHT - SCROLLBAR_THICKNESS - TAB_BAR_HEIGHT - FLAME_MIN_HEIGHT).max(min);
     panel_height.clamp(min, max)
 }
 

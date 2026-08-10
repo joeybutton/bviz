@@ -6,7 +6,9 @@ use crate::{
     set_list_thumb, thumb_offset,
 };
 use bviz_trace_profile::{LaneClass, Profile};
-use bviz_ui_components::{Axis, DEFAULT_MIN_THUMB, Scrollbar, TextInput, overlay_canvas, track_drag};
+use bviz_ui_components::{
+    Axis, DEFAULT_MIN_THUMB, SCROLLBAR_THICKNESS, Scrollbar, TextInput, overlay_canvas, track_drag,
+};
 use gpui::{
     AnyElement, App, Bounds, Context, Entity, IntoElement, MouseButton, MouseDownEvent,
     MouseMoveEvent, MouseUpEvent, Pixels, Point, Render, Rgba, ScrollHandle, SharedString,
@@ -100,8 +102,8 @@ impl TracksMenu {
         Scrollbar::new(
             Axis::Vertical,
             Bounds::new(
-                point(list.right() - px(crate::BAR_WIDTH), list.origin.y),
-                size(px(crate::BAR_WIDTH), list.size.height),
+                point(list.right() - px(SCROLLBAR_THICKNESS), list.origin.y),
+                size(px(SCROLLBAR_THICKNESS), list.size.height),
             ),
             visible + f32::from(self.scroll.max_offset().y),
             visible,
@@ -388,8 +390,8 @@ impl TracksMenu {
         let bar = menu_scrollbar(
             cx.entity(),
             matches!(self.drag, MenuDrag::Thumb(_)),
-            palette.scroll_track,
-            palette.scroll_thumb,
+            palette.scroll.track,
+            palette.scroll.thumb,
         );
         div()
             .relative()

@@ -36,8 +36,8 @@ use bviz_trace_layout::{
 };
 use bviz_trace_profile::{Profile, Slice, TimeSpan};
 use bviz_ui_components::{
-    Axis, Button, DEFAULT_MIN_THUMB, Scrollbar, centered_notice, centered_spinner,
-    load_in_background, overlay_canvas, paint_tooltip_box, track_drag,
+    Axis, Button, DEFAULT_MIN_THUMB, SCROLLBAR_THICKNESS, Scrollbar, centered_notice,
+    centered_spinner, load_in_background, overlay_canvas, paint_tooltip_box, track_drag,
 };
 use bviz_ui_shell::Chrome;
 use clap::Parser;
@@ -121,9 +121,6 @@ const RULER_HEIGHT: f32 = 20.0;
 /// Rough pixel spacing aimed for between ruler ticks; the actual step is rounded
 /// to a 1/2/5 multiple near this.
 const RULER_TARGET_TICK_PX: f64 = 120.0;
-
-/// Thickness of a scroll bar across its short axis.
-const BAR_WIDTH: f32 = 10.0;
 
 /// Font size of a phase-marker label.
 const MARKER_LABEL_SIZE: f32 = 11.0;
@@ -1125,8 +1122,8 @@ fn scrollbar_geom(
     let vlayout = Scrollbar::new(
         Axis::Vertical,
         Bounds::new(
-            point(px(regions.content_right - BAR_WIDTH), px(regions.flame_top)),
-            size(px(BAR_WIDTH), px(flame_h)),
+            point(px(regions.content_right - SCROLLBAR_THICKNESS), px(regions.flame_top)),
+            size(px(SCROLLBAR_THICKNESS), px(flame_h)),
         ),
         flame_total,
         flame_h,
@@ -1139,7 +1136,7 @@ fn scrollbar_geom(
         Axis::Horizontal,
         Bounds::new(
             point(px(regions.content_left), px(regions.flame_bottom)),
-            size(px(regions.time_w), px(BAR_WIDTH)),
+            size(px(regions.time_w), px(SCROLLBAR_THICKNESS)),
         ),
         span_us + 2.0 * margin_us,
         visible_us,
@@ -1463,7 +1460,7 @@ mod tests {
         // The flame-region ceiling: leaves FLAME_MIN_HEIGHT for the flame chart,
         // plus the ruler, time bar, and tab bar.
         let vh = 260.0;
-        let max = vh - RULER_HEIGHT - BAR_WIDTH - TAB_BAR_HEIGHT - FLAME_MIN_HEIGHT;
+        let max = vh - RULER_HEIGHT - SCROLLBAR_THICKNESS - TAB_BAR_HEIGHT - FLAME_MIN_HEIGHT;
         assert_eq!(clamp_panel_height(1000.0, 1, vh), max);
     }
 
@@ -1492,7 +1489,7 @@ mod tests {
         let regions =
             Regions::new(window, 0, DEFAULT_PANEL_HEIGHT, DEFAULT_GUTTER_WIDTH, flame_total);
         let right = regions.content_left + regions.time_w;
-        assert_eq!(right, regions.content_right - BAR_WIDTH);
+        assert_eq!(right, regions.content_right - SCROLLBAR_THICKNESS);
 
         let at = |x, y| point(px(x), px(y));
         // The gutter's edge, the ruler's bottom, and the last column left of the

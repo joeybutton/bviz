@@ -1087,7 +1087,7 @@ fn slice_paint(
         paint_markers(&profile, tv, regions, show_counters, &palette, window, cx);
         let (vbar, hbar) = scrollbar_geom(profile.span(), tv, flame_total, regions, scroll);
         for bar in vbar.into_iter().chain(hbar) {
-            bar.paint(palette.scroll_track, palette.scroll_thumb, window);
+            bar.paint(palette.scroll.track, palette.scroll.thumb, window);
         }
 
         paint_gutter(
