@@ -81,8 +81,8 @@ pub fn stats_from_flame(graph: &FlameGraph) -> Vec<StatRow> {
 }
 
 /// The self time node `i` would carry with no detail frames beneath it: its
-/// total less its span children's totals, floored at zero — enclosed spans may
-/// overlap each other and so overrun what encloses them.
+/// total less its span children's totals, floored at zero because a node's
+/// children can sum past it.
 fn self_us_without_details(graph: &FlameGraph, i: usize) -> i64 {
     let spanned: i64 = (0..graph.child_count(i))
         .map(|k| graph.child_id(i, k))

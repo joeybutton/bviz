@@ -1005,6 +1005,13 @@ impl ArenaChildren {
 /// The containment parent of each slice: the nearest enclosing earlier slice, or
 /// `None` for a top-level slice. A depth stack of open slices, popped past each
 /// slice's end, yields each slice's parent index directly.
+///
+/// A start and a duration are rounded to whole microseconds independently, so a
+/// callee's recorded end can fall a microsecond past its caller's. Such a span
+/// is filed beside its caller rather than under it, which leaves two of one
+/// parent's children overlapping: rare — well under one percent of the parents
+/// holding several — but enough that their durations can sum past the parent's
+/// own, so a self time derived by subtracting them is floored at zero.
 fn containment_parents(slices: &[Slice]) -> Vec<Option<usize>> {
     debug_assert!(
         slices.windows(2).all(|w| {
@@ -1099,8 +1106,9 @@ fn emit_lane_rows(
         });
     }
     // Each slice's direct containment children's summed duration; its own
-    // duration less this is its self time. Containment children are disjoint and
-    // enclosed, so clipping them one by one clips their sum.
+    // duration less this is its self time. Each child is clipped before it is
+    // summed, so the window's figure is built from the same terms as the whole
+    // timeline's.
     let mut nested_us = vec![0i64; slices.len()];
     for i in 0..slices.len() {
         if let (Some(p), Some(dur)) = (parents[i], dur_us[i]) {
