@@ -178,8 +178,10 @@ pub(crate) struct RegionDrag {
 
 impl RegionDrag {
     /// The region the drag currently covers, never reaching outside the profile:
-    /// a slide pushed against an end stops there, keeping its width. A drag that
-    /// has not left the instant it is anchored at covers no region.
+    /// a slide pushed against an end stops there, keeping its width. `None`
+    /// where the drag covers no region — one still resting on the instant it is
+    /// anchored at, and a removal, which names a region rather than sweeping one
+    /// out.
     pub(crate) fn span(&self) -> Option<TimeRegion> {
         match self.edit {
             RegionEdit::Slide { width_us, grab_us, bounds, .. } => {
@@ -187,7 +189,10 @@ impl RegionDrag {
                 let start_us = (self.cursor_us - grab_us).min(last_start_us).max(bounds.start_us);
                 span_between(start_us, start_us + width_us)
             }
-            _ => span_between(self.anchor_us, self.cursor_us),
+            RegionEdit::Replace | RegionEdit::Union | RegionEdit::Resize { .. } => {
+                span_between(self.anchor_us, self.cursor_us)
+            }
+            RegionEdit::Remove { .. } => None,
         }
     }
 
