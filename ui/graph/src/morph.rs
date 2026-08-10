@@ -44,9 +44,17 @@ const MIN_TRAVEL: f64 = 0.5;
 struct Start {
     from: Rect,
     /// Alpha at the start of the travel, reaching 1 as it ends: a box the
-    /// previous drawing also held is painted throughout, one it did not fades in
-    /// from nothing.
+    /// previous drawing did not hold fades in from nothing, one caught part way
+    /// through such a fade takes up again at the strength it had reached, and
+    /// any other box is painted throughout.
     alpha: f32,
+}
+
+impl Start {
+    /// The strength the box paints at, `travel` of the way through.
+    fn alpha_at(&self, travel: f32) -> f32 {
+        self.alpha + (1.0 - self.alpha) * travel
+    }
 }
 
 /// A box only the previous drawing held, on its way out.
@@ -64,8 +72,9 @@ pub(crate) struct Transition {
     /// The drawing being left, retained so the boxes it alone holds can still be
     /// painted while they fade.
     previous: Arc<LaidOut>,
-    /// Keyed by box id of the new drawing. A box absent from it neither moved
-    /// nor entered, so it paints where the new drawing puts it.
+    /// Keyed by box id of the new drawing. A box absent from it has neither
+    /// moved, nor entered, nor a fade left to finish, so it paints where the new
+    /// drawing puts it at full strength.
     starts: HashMap<Id, Start>,
     leaving: Vec<Leaving>,
     start: Instant,
@@ -74,8 +83,9 @@ pub(crate) struct Transition {
 impl Transition {
     /// The transition from `previous` to `current`, or `None` when the two
     /// drawings differ by nothing there is to animate. `drawn` places the boxes
-    /// of `previous`, so a relayout landing while a morph is still travelling
-    /// carries each box on from where it is drawn.
+    /// of `previous`, so a relayout landing while a morph is still under way
+    /// carries each box on from where it is drawn and at the strength it has
+    /// reached.
     pub(crate) fn between(
         previous: Arc<LaidOut>,
         current: &LaidOut,
@@ -94,10 +104,12 @@ impl Transition {
         for b in &current.boxes {
             let to = Rect::of(b);
             match was.get(&b.id) {
-                Some(&from) if travels(from, to) => {
-                    starts.insert(b.id, Start { from, alpha: 1.0 });
+                Some(&from) => {
+                    let alpha = drawn.map_or(1.0, |frame| frame.alpha_of(b.id));
+                    if travels(from, to) || alpha < 1.0 {
+                        starts.insert(b.id, Start { from, alpha });
+                    }
                 }
-                Some(_) => {}
                 None => {
                     starts.insert(b.id, Start { from: across(to, &kept_now), alpha: 0.0 });
                 }
@@ -155,11 +167,17 @@ impl Frame {
     /// at.
     pub(crate) fn place(&self, b: &Box) -> (Rect, f32) {
         let to = Rect::of(b);
-        let Some(start) = self.transition.starts.get(&b.id) else {
-            return (to, 1.0);
-        };
-        let alpha = start.alpha + (1.0 - start.alpha) * self.travel;
-        (between(start.from, to, self.travel), alpha)
+        match self.transition.starts.get(&b.id) {
+            Some(start) => (between(start.from, to, self.travel), start.alpha_at(self.travel)),
+            None => (to, 1.0),
+        }
+    }
+
+    /// The strength the box `id` paints at this frame, whatever rect it is drawn
+    /// in, so a transition armed over this one can take a fade up where it left
+    /// off.
+    fn alpha_of(&self, id: Id) -> f32 {
+        self.transition.starts.get(&id).map_or(1.0, |start| start.alpha_at(self.travel))
     }
 
     /// The boxes only the previous drawing held, each where it sits this frame
@@ -532,6 +550,60 @@ mod tests {
         assert!(sixth < 0.15, "a sixth of the way in the connectors already read at {sixth}");
         assert!(alpha(CONNECTOR_FADE / 2) < 0.75, "half way in the connectors are all but there");
         assert!(sixth > 0.0, "the fade had not begun a sixth of the way through itself");
+    }
+
+    /// The strength a box of `opened` is drawn at `fraction` of the way into a
+    /// transition onto it, paired with that frame, so a further transition can be
+    /// armed over the same instant.
+    fn caught_fading(fraction: f32) -> (Arc<LaidOut>, Frame, f32) {
+        let opened = Arc::new(opened());
+        let partway = at(&transition(collapsed(), &opened), fraction);
+        let reached = partway.place(&opened.boxes[2]).1;
+        assert!(reached > 0.0 && reached < 1.0, "the box is not mid-fade at {reached}");
+        (opened, partway, reached)
+    }
+
+    /// A relayout landing mid-fade carries the strength a box has reached, as it
+    /// carries where the box is drawn — a box half materialized must not snap to
+    /// full and fade no further.
+    #[test]
+    fn a_box_still_fading_in_takes_up_at_the_strength_it_had_reached() {
+        let (previous, partway, reached) = caught_fading(0.1);
+
+        // A drawing a box must travel to, so the transition has something to
+        // animate whatever the fading box turns out to contribute.
+        let mut next = opened();
+        next.boxes[1] = lbox(1, rect(80.0, 500.0, 200.0, 40.0), false);
+
+        let second = Arc::new(
+            Transition::between(previous, &next, Some(&partway)).expect("nothing to animate"),
+        );
+        let resumed = at(&second, 0.0).place(&next.boxes[2]).1;
+        assert!(
+            (resumed - reached).abs() < 1e-6,
+            "the box took up at {resumed} rather than the {reached} it had reached",
+        );
+    }
+
+    /// The fade is carried even by a box the new drawing happens to put where it
+    /// already stands, which travels no distance for the transition to notice.
+    #[test]
+    fn a_box_fading_where_it_already_stands_still_carries_its_fade() {
+        let (previous, partway, reached) = caught_fading(0.1);
+
+        let mut next = opened();
+        next.boxes[1] = lbox(1, rect(80.0, 500.0, 200.0, 40.0), false);
+        let standing = partway.place(&next.boxes[2]).0;
+        next.boxes[2] = lbox(2, standing, false);
+
+        let second = Arc::new(
+            Transition::between(previous, &next, Some(&partway)).expect("nothing to animate"),
+        );
+        let resumed = at(&second, 0.0).place(&next.boxes[2]).1;
+        assert!(
+            (resumed - reached).abs() < 1e-6,
+            "the box that stayed put took up at {resumed} rather than {reached}",
+        );
     }
 
     #[test]
