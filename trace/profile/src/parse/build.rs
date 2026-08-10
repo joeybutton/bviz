@@ -5,7 +5,7 @@ use serde_json::{Map, Value};
 
 use crate::concurrent_interner::{ConcurrentInterner, Writer};
 use crate::model::{
-    encloses_end, lane_class, occupied_span, span_role, CounterLane, CounterPoint, CounterSeries,
+    encloses, lane_class, occupied_span, span_role, CounterLane, CounterPoint, CounterSeries,
     Metadata, OptStr, PhaseMarker, Profile, ProfileParts, Slice, SliceDetail, Span32, Str,
     ThreadTrack, TimeSpan,
 };
@@ -520,7 +520,10 @@ fn merge_lane(task: &mut TidTask) {
         let mut d = src.2;
         d.others = d.others.shifted(run.args_base);
         let end = s.start_us.saturating_add(s.dur_us);
-        while stack.last().is_some_and(|&open| !encloses_end(open, end)) {
+        while stack
+            .last()
+            .is_some_and(|&open| !encloses(open, s.start_us, end))
+        {
             stack.pop();
         }
         s.depth = stack.len() as u32;

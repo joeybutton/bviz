@@ -2,7 +2,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 
 use bviz_trace_profile::{
-    encloses_end, occupied_span, Profile, Slice, SliceDetail, Span32, SpanRole, Str, ThreadTrack,
+    encloses, occupied_span, Profile, Slice, SliceDetail, Span32, SpanRole, Str, ThreadTrack,
     TimeSpan, Workload,
 };
 use rayon::iter::{IntoParallelRefIterator, IntoParallelRefMutIterator, ParallelIterator};
@@ -1004,12 +1004,11 @@ impl ArenaChildren {
 
 /// The containment parent of each slice: the nearest enclosing earlier slice, or
 /// `None` for a top-level slice. A depth stack of open slices, popped by
-/// [`encloses_end`], yields each slice's parent index directly.
+/// [`encloses`], yields each slice's parent index directly.
 ///
-/// Two children of one parent can therefore overlap: rare — well under one
-/// percent of the parents holding several — but enough that their durations can
-/// sum past the parent's own, so a self time derived by subtracting them is
-/// floored at zero.
+/// Children of one parent can overlap each other, and each can overrun the
+/// parent, so their durations can sum past the parent's own and a self time
+/// derived by subtracting them is floored at zero.
 fn containment_parents(slices: &[Slice]) -> Vec<Option<usize>> {
     debug_assert!(
         slices.windows(2).all(|w| {
@@ -1020,11 +1019,11 @@ fn containment_parents(slices: &[Slice]) -> Vec<Option<usize>> {
     );
     let mut parents = vec![None; slices.len()];
     let mut stack: Vec<usize> = Vec::new();
-    for i in 0..slices.len() {
-        let slice_end = end_us(&slices[i]);
+    for (i, slice) in slices.iter().enumerate() {
+        let slice_end = end_us(slice);
         while stack
             .last()
-            .is_some_and(|&top| !encloses_end(end_us(&slices[top]), slice_end))
+            .is_some_and(|&top| !encloses(end_us(&slices[top]), slice.start_us, slice_end))
         {
             stack.pop();
         }
@@ -1034,11 +1033,25 @@ fn containment_parents(slices: &[Slice]) -> Vec<Option<usize>> {
     parents
 }
 
-/// The range of a track's slices that can reach `span`, by binary search on
-/// either end: starts are ascending, so none at or past the span's end reaches
-/// it, and `end_maxes` is monotone, so the first element reaching the span's
-/// start is where slices ending before it stop. `end_maxes` must be the track's
+/// The range of a track's slices that can reach `span`, holding with them the
+/// slices those key onto, so a containment walk over the range gives each of
+/// them the parent chain the whole lane would. Found by binary search on either
+/// end: starts are ascending, so none starting past the span's end reaches it,
+/// and `end_maxes` is monotone, so the first element reaching the span's start
+/// is where slices ending before it stop. `end_maxes` must be the track's
 /// [`Profile::end_maxes`], index-parallel to `slices`.
+///
+/// Holding those ancestors needs no slack under the span's start, though
+/// [`encloses`] does let a child's end overshoot its parent's. A slice keys a
+/// row only when it and every ancestor of it in range reaches the span, which
+/// puts each of their ends at or past the span's start — a zero-duration slice
+/// at the start itself, by the microsecond it occupies (see [`occupied_span`]),
+/// any other past it. Their outermost was taken by its own parent either on its
+/// end, leaving that parent ending no earlier than it does, or on the overlap,
+/// leaving that parent ending past its start: past the span's start for the
+/// zero-duration case, whose start is its end, and otherwise one step back from
+/// an end already one clear. So no parent of a keyed slice ends before the span
+/// starts, and the prefix this drops holds none of them.
 fn reaching(slices: &[Slice], end_maxes: &[i64], span: TimeSpan) -> std::ops::Range<usize> {
     let upper = slices.partition_point(|s| s.start_us <= span.end_us);
     let lower = end_maxes[..upper].partition_point(|&e| e < span.start_us);
@@ -1079,12 +1092,8 @@ fn emit_lane_rows(
     window: &TimeSelection,
     out: &mut Vec<Row>,
 ) {
-    // A slice that contributes overlaps a region and so falls within the
-    // regions' bounds, as does every ancestor of one — a containment parent ends
-    // no earlier than its child, and `reaching` admits every slice whose end
-    // gets that far — so the bracket holds every slice that keys a row and every
-    // slice one keys onto. Regions spread far apart bracket to nearly the whole
-    // lane; only a narrow selection shrinks the walk.
+    // Regions spread far apart bracket to nearly the whole lane; only a narrow
+    // selection shrinks the walk.
     let lane = flamer.profile.slices(thread);
     let bracket = match window.bounds() {
         Some(bounds) => reaching(lane, flamer.profile.end_maxes(thread), *bounds),
@@ -2284,6 +2293,120 @@ mod tests {
             let reaching_back = flame_within(&p, labels, &window(&[(0, 5), (80, 100)]));
             assert_eq!(resolved(&tail), resolved(&reaching_back), "{labels:?}");
         }
+    }
+
+    #[test]
+    fn a_callee_nests_under_a_caller_it_overshoots_by_one_microsecond_but_not_by_two() {
+        let lane = |callee_dur| {
+            profile(vec![track(
+                1,
+                LaneClass::Execution,
+                vec![
+                    slice("_cc_library_impl", "general information", 0, 100),
+                    slice("_compile", "general information", 10, callee_dur),
+                ],
+            )])
+        };
+        let nested = flame(&lane(91));
+        let caller = child(&nested, &nested.root(), "_cc_library_impl");
+        assert_eq!(child(&nested, &caller, "_compile").total_us, 91);
+        assert_eq!(nested.children(&nested.root()).len(), 1);
+
+        let apart = flame(&lane(92));
+        assert_eq!(
+            child_totals(&apart, &apart.root()),
+            [("_cc_library_impl".to_owned(), 100), ("_compile".to_owned(), 92)]
+        );
+    }
+
+    #[test]
+    fn spans_running_back_to_back_a_step_apart_stay_siblings() {
+        // Bazel's per-module lifecycle callbacks run one after another, each a
+        // microsecond long, so every one ends a step past the one before it.
+        // Read as nesting they would chain into a staircase as deep as the run
+        // is long, and lane heights follow that depth.
+        let step = |name: &str, start| slice(name, "general information", start, 1);
+        let p = profile(vec![track(
+            1,
+            LaneClass::Execution,
+            vec![step("a", 0), step("b", 1), step("c", 2), step("d", 3)],
+        )]);
+        let g = flame(&p);
+        assert_eq!(g.children(&g.root()).len(), 4);
+        assert_eq!(p.threads()[0].max_depth, 1);
+    }
+
+    #[test]
+    fn slice_depth_matches_the_containment_chain_down_a_staircase_of_overshoots() {
+        // Each span here ends one microsecond after the one it nests in, and the
+        // last outlives them all by enough to sit beside the first. The parser's
+        // depth stack and the containment walk must read the lane alike.
+        let p = profile(vec![track(
+            1,
+            LaneClass::Execution,
+            vec![
+                slice("a", "general information", 0, 100),
+                slice("b", "general information", 1, 100),
+                slice("c", "general information", 2, 100),
+                slice("d", "general information", 3, 100),
+                slice("e", "general information", 4, 102),
+            ],
+        )]);
+        let thread = &p.threads()[0];
+        let slices = p.slices(thread);
+        let parents = containment_parents(slices);
+        let chain_depth = |mut i: usize| {
+            let mut depth = 0;
+            while let Some(parent) = parents[i] {
+                depth += 1;
+                i = parent;
+            }
+            depth
+        };
+        let from_parse: Vec<u32> = slices.iter().map(|s| s.depth).collect();
+        let from_chain: Vec<u32> = (0..slices.len()).map(|i| chain_depth(i)).collect();
+        assert_eq!(from_parse, [0, 1, 2, 3, 0]);
+        assert_eq!(from_parse, from_chain);
+        assert_eq!(thread.max_depth, 4);
+    }
+
+    #[test]
+    fn a_window_clipping_an_overshooting_pair_floors_the_parents_self_time() {
+        // The window holds one microsecond of "caller" and two of "callee",
+        // which began inside it and is recorded ending a microsecond past it, so
+        // the child's clipped duration exceeds the parent's.
+        let p = profile(vec![track(
+            1,
+            LaneClass::Execution,
+            vec![
+                slice("caller", "general information", 0, 100),
+                slice("callee", "general information", 50, 51),
+            ],
+        )]);
+        let g = flame_within(&p, FlameLabels::Name, &window(&[(99, 150)]));
+        let caller = child(&g, &g.root(), "caller");
+        assert_eq!((caller.total_us, caller.self_us), (1, 0));
+        assert_eq!(child(&g, &caller, "callee").total_us, 2);
+    }
+
+    #[test]
+    fn a_zero_duration_span_at_the_window_start_keeps_the_ancestor_it_keys_onto() {
+        // The lane walk's lower bound at its tightest. A zero-duration slice
+        // reaches the window by the microsecond it occupies, so its own end sits
+        // at the window's start rather than past it, as does the end of the
+        // slice it nests in — and `end_maxes` carries nothing higher. Admitting
+        // only slices ending past the window's start would drop the pair.
+        let p = profile(vec![track(
+            1,
+            LaneClass::Execution,
+            vec![
+                slice("outer", "general information", 10, 0),
+                slice("inner", "general information", 10, 0),
+            ],
+        )]);
+        let g = flame_within(&p, FlameLabels::Name, &window(&[(10, 20)]));
+        let outer = child(&g, &g.root(), "outer");
+        assert_eq!(child(&g, &outer, "inner").total_us, 0);
     }
 
     #[test]

@@ -168,18 +168,23 @@ pub fn occupied_span(start_us: i64, dur_us: i64) -> TimeSpan {
     }
 }
 
-/// Whether a span reaching `outer_end_us` contains one reaching `inner_end_us`,
-/// asked by a walk in start order so the outer span already starts no later.
-/// Nesting turns on the ends alone: a span that starts inside another but
-/// outlives it is its sibling, not its child, and admitting it as a child would
-/// stack every merely overlapping span on the last, building a runaway staircase
-/// of false depth.
+/// Whether a span reaching `outer_end_us` contains the span
+/// `[inner_start_us, inner_end_us)`, asked by a walk in start order so the outer
+/// span already starts no later. Containment goes by end, with one
+/// [`TIME_RESOLUTION_US`] of overshoot allowed a span that began inside: a span
+/// outliving its host by more than that is its sibling, since reading every
+/// overlap as containment would stack each merely overlapping span on the last.
 ///
-/// A start and a duration are rounded to whole microseconds independently, so a
-/// callee's recorded end can fall a [`TIME_RESOLUTION_US`] microsecond past its
-/// caller's and be held apart from it here.
-pub fn encloses_end(outer_end_us: i64, inner_end_us: i64) -> bool {
+/// The overshoot is there because a start and a duration are rounded to whole
+/// microseconds independently, so a callee's recorded end can land a step past
+/// its caller's. Requiring that the callee began inside is what holds spans
+/// running back to back apart: those land a step apart exactly as a rounded
+/// callee does, so without the test a run of one-step spans would chain into a
+/// staircase of false depth.
+pub fn encloses(outer_end_us: i64, inner_start_us: i64, inner_end_us: i64) -> bool {
     inner_end_us <= outer_end_us
+        || (inner_start_us < outer_end_us
+            && inner_end_us <= outer_end_us.saturating_add(TIME_RESOLUTION_US))
 }
 
 /// The cold companion of a [`Slice`], read only on demand (tooltips, grouping):
@@ -905,10 +910,27 @@ mod tests {
     }
 
     #[test]
-    fn a_span_nests_up_to_a_shared_end_and_no_further() {
-        assert!(encloses_end(100, 40));
-        assert!(encloses_end(100, 100));
-        assert!(!encloses_end(100, 100 + TIME_RESOLUTION_US));
+    fn a_span_begun_inside_another_nests_when_it_overshoots_by_one_step_but_not_two() {
+        let began_inside = |end| encloses(100, 10, end);
+        assert!(began_inside(40));
+        assert!(began_inside(100));
+        assert!(began_inside(100 + TIME_RESOLUTION_US));
+        assert!(!began_inside(100 + 2 * TIME_RESOLUTION_US));
+    }
+
+    #[test]
+    fn a_span_begun_at_or_after_anothers_end_stays_its_sibling() {
+        assert!(!encloses(100, 100, 100 + TIME_RESOLUTION_US));
+        assert!(!encloses(100, 100 + TIME_RESOLUTION_US, 100 + TIME_RESOLUTION_US));
+        // Ending within the other's own extent is nesting whatever the start.
+        assert!(encloses(100, 100, 100));
+    }
+
+    #[test]
+    fn a_span_ending_at_the_maximum_representable_time_nests_by_the_ordinary_rule() {
+        assert!(encloses(i64::MAX, 0, i64::MAX));
+        assert!(encloses(i64::MAX - TIME_RESOLUTION_US, 0, i64::MAX));
+        assert!(!encloses(i64::MAX - 2 * TIME_RESOLUTION_US, 0, i64::MAX));
     }
 
     #[test]
