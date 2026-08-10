@@ -12,17 +12,13 @@ use std::time::{Duration, Instant};
 /// an appearance out of nothing rather than as an arrival.
 const CONNECTOR_FADE: Duration = Duration::from_millis(520);
 
-/// Alpha under which a connector, a hairline against the background, does not
-/// read as drawn at all.
-const IMPERCEPTIBLE_CONNECTOR: f32 = 0.05;
-
 /// How far before the boxes land the connectors begin arriving. A route is
 /// computed for one drawing's box positions, so it meets its endpoints only once
 /// they have stopped; over this last stretch of a travel easing to a halt they
-/// have all but arrived, and the fade holds the routes under
-/// [`IMPERCEPTIBLE_CONNECTOR`] besides, so what little they are adrift by cannot
-/// be seen. Reaching visibility on the boxes' heels rather than from nothing
-/// afterwards is what keeps the drawing from pausing bare between the two.
+/// have all but arrived, and the fade holds the routes too faint to read
+/// besides, so what little they are adrift by cannot be seen. Reaching
+/// visibility on the boxes' heels rather than from nothing afterwards is what
+/// keeps the drawing from pausing bare between the two.
 const CONNECTOR_FADE_LEAD: Duration = Duration::from_millis(60);
 
 /// When the connectors start arriving, measured from the start of the travel.
@@ -339,6 +335,10 @@ pub(crate) fn begin(
 mod tests {
     use super::*;
     use bviz_graph_layout::Kind;
+
+    /// Alpha under which a connector, a hairline against the background, does
+    /// not read as drawn at all.
+    const IMPERCEPTIBLE_CONNECTOR: f32 = 0.05;
 
     fn lbox(id: u32, r: Rect, compound: bool) -> Box {
         Box {
