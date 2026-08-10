@@ -98,9 +98,10 @@ fn sized(el: Stateful<Div>, button: &Button) -> Stateful<Div> {
     }
 }
 
-/// Ghost buttons read as flat text; filled ones have a solid fill and a border that
-/// brightens on focus. An on toggle takes the filled look, so it reads as on
-/// whichever variant it was built as.
+/// An unselected toggle wears the affordance of the variant it was built as; only
+/// the selected state is a look every variant shares. Both of a toggle's states
+/// carry the same border width, so switching it does not resize it and shift its
+/// neighbours.
 fn styled_variant(
     el: Stateful<Div>,
     button: &Button,
@@ -108,27 +109,36 @@ fn styled_variant(
     colors: &bviz_ui_theme::Colors,
 ) -> Stateful<Div> {
     let el = sized(el, button).rounded_md();
-    if button.ghost && button.selected != Some(true) {
-        let toggle = button.selected.is_some();
-        let hover_bg = if toggle {
-            bviz_ui_theme::mix(colors.background, colors.text, TOGGLE_HOVER_TINT)
-        } else {
-            colors.selected
-        };
-        el
-            // A toggle holds the filled variant's border box while off, so
-            // switching it on does not resize it and shift its neighbours.
-            .when(toggle, |el| el.border_2().border_color(transparent_black()))
-            .text_color(colors.text)
-            .hover(move |s| s.bg(hover_bg))
-            .active(|s| s.opacity(0.6))
-    } else {
-        el.bg(colors.selected)
+    match (button.selected, button.ghost) {
+        (Some(false), true) => {
+            let hover_bg = bviz_ui_theme::mix(colors.background, colors.text, TOGGLE_HOVER_TINT);
+            el.border_2()
+                .border_color(transparent_black())
+                .text_color(colors.text)
+                .hover(move |s| s.bg(hover_bg))
+                .active(|s| s.opacity(0.6))
+        }
+        (Some(false), false) => {
+            let hover_border = colors.text;
+            el.border_2()
+                .border_color(colors.border)
+                .text_color(colors.text)
+                .hover(move |s| s.border_color(hover_border))
+                .active(|s| s.opacity(0.8))
+        }
+        (None, true) => {
+            let hover_bg = colors.selected;
+            el.text_color(colors.text)
+                .hover(move |s| s.bg(hover_bg))
+                .active(|s| s.opacity(0.6))
+        }
+        (Some(true), _) | (None, false) => el
+            .bg(colors.selected)
             .text_color(colors.selected_text)
             .border_2()
             .border_color(if focused { colors.text } else { colors.selected })
             .hover(|s| s.opacity(0.92))
-            .active(|s| s.opacity(0.8))
+            .active(|s| s.opacity(0.8)),
     }
 }
 
@@ -187,6 +197,9 @@ impl RenderOnce for Button {
             .items_center()
             .justify_center()
             .gap_1()
+            // Hold the measured size in a flex parent (e.g. a toolbar); without
+            // this the row shrinks the button and wraps its label to a second line.
+            .flex_none()
             .cursor_pointer()
             .when(is_pressed, |el| el.opacity(0.8));
 

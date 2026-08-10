@@ -1,5 +1,5 @@
 use crate::{Controls, GraphView, Palette};
-use bviz_ui_components::{Toggle, Toolbar, spinner};
+use bviz_ui_components::{Button, Toolbar, spinner};
 use gpui::{ClickEvent, Context, IntoElement, div, prelude::*, px};
 
 pub(crate) fn toolbar(
@@ -7,21 +7,22 @@ pub(crate) fn toolbar(
     palette: &Palette,
     cx: &mut Context<GraphView>,
 ) -> Toolbar {
-    let mut bar = Toolbar::new().child(controls.picker).child(Toggle::new(
-        "dim-toggle",
-        "dim",
-        controls.dim_enabled,
-        cx.listener(|view, _: &ClickEvent, _, cx| view.toggle_dim(cx)),
-    ));
+    let mut bar = Toolbar::new().child(controls.picker).child(
+        Button::new("dim-toggle", cx.listener(|view, _: &ClickEvent, _, cx| view.toggle_dim(cx)))
+            .label("dim")
+            .selected(controls.dim_enabled),
+    );
     // The strip only ever offers a control the mode's layout can answer, so
     // everything on it acts on what is drawn.
     if controls.mode.honors_reduce() {
-        bar = bar.child(Toggle::new(
-            "reduce-toggle",
-            "reduce",
-            controls.reduced,
-            cx.listener(|view, _: &ClickEvent, _, cx| view.toggle_reduce(cx)),
-        ));
+        bar = bar.child(
+            Button::new(
+                "reduce-toggle",
+                cx.listener(|view, _: &ClickEvent, _, cx| view.toggle_reduce(cx)),
+            )
+            .label("reduce")
+            .selected(controls.reduced),
+        );
     }
     bar.when(controls.relaying, |bar| bar.trailing(relaying_indicator(palette)))
 }

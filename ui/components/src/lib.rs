@@ -11,7 +11,6 @@ mod scrollbar;
 mod scrubber;
 mod spinner;
 pub mod text_input;
-mod toggle;
 mod toolbar;
 mod tooltip;
 
@@ -26,7 +25,6 @@ pub use scrollbar::{Axis, DEFAULT_MIN_THUMB, Scrollbar};
 pub use scrubber::{ScrubberColors, ScrubberLayout, scrubber};
 pub use spinner::spinner;
 pub use text_input::TextInput;
-pub use toggle::Toggle;
 pub use toolbar::Toolbar;
 pub use tooltip::{TooltipColors, paint_tooltip_box};
 
