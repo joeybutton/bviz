@@ -37,7 +37,7 @@ use bviz_trace_layout::{
 use bviz_trace_profile::{Profile, Slice, TimeSpan};
 use bviz_ui_components::{
     Axis, Button, DEFAULT_MIN_THUMB, Scrollbar, centered_notice, centered_spinner,
-    load_in_background, paint_tooltip_box, track_drag,
+    load_in_background, overlay_canvas, paint_tooltip_box, track_drag,
 };
 use bviz_ui_shell::Chrome;
 use clap::Parser;
@@ -46,7 +46,7 @@ use gpui::{
     Entity, FocusHandle, GlobalElementId, InspectorElementId, IntoElement, LayoutId, MouseButton,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Position, Render, ScrollHandle,
     SharedString, Stateful, Style, Subscription, Task, TextAlign, TransformationMatrix, Window,
-    canvas, div, fill, point, prelude::*, px, relative, size,
+    div, fill, point, prelude::*, px, relative, size,
 };
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -341,17 +341,11 @@ impl TraceView {
         // It is non-interactive, so it does not intercept the timeline's presses.
         let drag_overlay = {
             let entity = cx.entity();
-            canvas(
-                |_, _, _| {},
-                move |_, _, window, cx| {
-                    if matches!(entity.read(cx).drag, Drag::Splitter | Drag::Gutter) {
-                        track_drag(window, &entity, on_drag, end_drag);
-                    }
-                },
-            )
-            .absolute()
-            .inset_0()
-            .size_full()
+            overlay_canvas(move |_, window, cx| {
+                if matches!(entity.read(cx).drag, Drag::Splitter | Drag::Gutter) {
+                    track_drag(window, &entity, on_drag, end_drag);
+                }
+            })
         };
 
         // The tab bar spans the content column between the flame chart and the

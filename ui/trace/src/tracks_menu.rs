@@ -6,11 +6,11 @@ use crate::{
     set_list_thumb, thumb_offset,
 };
 use bviz_trace_profile::{LaneClass, Profile};
-use bviz_ui_components::{Axis, DEFAULT_MIN_THUMB, Scrollbar, TextInput, track_drag};
+use bviz_ui_components::{Axis, DEFAULT_MIN_THUMB, Scrollbar, TextInput, overlay_canvas, track_drag};
 use gpui::{
     AnyElement, App, Bounds, Context, Entity, IntoElement, MouseButton, MouseDownEvent,
     MouseMoveEvent, MouseUpEvent, Pixels, Point, Render, Rgba, ScrollHandle, SharedString,
-    Subscription, WeakEntity, Window, canvas, deferred, div, point, prelude::*, px, size,
+    Subscription, WeakEntity, Window, deferred, div, point, prelude::*, px, size,
 };
 
 /// What a left-button drag over the tracks menu is currently moving.
@@ -483,19 +483,14 @@ fn menu_scrollbar(
     track: Rgba,
     thumb: Rgba,
 ) -> impl IntoElement {
-    canvas(
-        move |_, _, _| {},
-        move |_, _, window: &mut Window, cx: &mut App| {
-            if let Some(bar) = entity.read(cx).vbar() {
-                bar.paint(track, thumb, window);
-            }
-            if dragging {
-                track_drag(window, &entity, menu_on_drag, menu_end_drag);
-            }
-        },
-    )
-    .absolute()
-    .inset_0()
+    overlay_canvas(move |_, window: &mut Window, cx: &mut App| {
+        if let Some(bar) = entity.read(cx).vbar() {
+            bar.paint(track, thumb, window);
+        }
+        if dragging {
+            track_drag(window, &entity, menu_on_drag, menu_end_drag);
+        }
+    })
 }
 
 /// Routes an in-progress thumb drag to the list's scroll offset.

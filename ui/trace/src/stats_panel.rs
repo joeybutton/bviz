@@ -8,12 +8,13 @@ use crate::{
 };
 use bviz_trace_layout::{FlameLabels, ScopeAggregate, StatRow};
 use bviz_ui_components::{
-    Axis, DEFAULT_MIN_THUMB, Scrollbar, centered_spinner, load_in_background, track_drag,
+    Axis, DEFAULT_MIN_THUMB, Scrollbar, centered_spinner, load_in_background, overlay_canvas,
+    track_drag,
 };
 use gpui::{
     App, Bounds, Context, Div, Entity, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent,
     MouseUpEvent, Pixels, Point, Render, Rgba, SharedString, Subscription, UniformListScrollHandle,
-    Window, canvas, div, point, prelude::*, px, size, uniform_list,
+    Window, div, point, prelude::*, px, size, uniform_list,
 };
 use std::rc::Rc;
 use std::sync::Arc;
@@ -490,19 +491,14 @@ fn stats_scrollbar(
     track: Rgba,
     thumb: Rgba,
 ) -> impl IntoElement {
-    canvas(
-        move |_, _, _| {},
-        move |_, _, window: &mut Window, cx: &mut App| {
-            if let Some(bar) = entity.read(cx).vbar() {
-                bar.paint(track, thumb, window);
-            }
-            if dragging {
-                track_drag(window, &entity, stats_on_drag, stats_end_drag);
-            }
-        },
-    )
-    .absolute()
-    .inset_0()
+    overlay_canvas(move |_, window: &mut Window, cx: &mut App| {
+        if let Some(bar) = entity.read(cx).vbar() {
+            bar.paint(track, thumb, window);
+        }
+        if dragging {
+            track_drag(window, &entity, stats_on_drag, stats_end_drag);
+        }
+    })
 }
 
 /// Routes an in-progress thumb drag to the list's scroll offset.
