@@ -10,11 +10,20 @@ use gpui::{Context, Task};
 use std::collections::HashSet;
 use std::sync::Arc;
 
-/// Caps the nodes the layered mode's first view opens with.
-const MAX_VISIBLE_NODES: usize = 400;
+/// Caps the nodes the layered mode's first view opens with. A layered drawing
+/// spreads sideways faster than it gains boxes, so beyond this size the fitted
+/// view is a smear of boxes too small to carry a label; the reader opens the
+/// containers that interest them out of a legible starting point instead.
+const MAX_VISIBLE_NODES: usize = 600;
 
-/// Caps the edges the layered mode's first view opens with.
-const MAX_VISIBLE_EDGES: usize = 600;
+/// Caps the edges the layered mode's first view opens with. On a dense graph an
+/// expansion multiplies the connectors among the boxes already drawn without
+/// adding many, and it is the connectors, not the boxes, that decide how far the
+/// drawing spreads — so the first view is held to both counts. The spread is not
+/// gradual either: a drawing routing enough edges is placed by the cheaper
+/// strategy, which buys its speed in width, so a first view sized past that goes
+/// abruptly wide.
+const MAX_VISIBLE_EDGES: usize = 6000;
 
 /// A graph that finished loading, in the form every later relayout starts from.
 pub(crate) struct Loaded {
