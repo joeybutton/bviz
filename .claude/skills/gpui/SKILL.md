@@ -576,7 +576,7 @@ adapt, and sizing/gotchas; the essentials:
   the whole job finishes, so it must **only** run inside a background task (e.g. the `work`
   closure of `load_in_background`, or `cx.background_executor().spawn(..)`), never on the UI
   thread. Gate the parallel path by input size, and if you adopt rayon size its global pool
-  with `bviz_trace_profile::worker_count()` (physical cores) — the repo's heavy passes are
+  with `bviz_parallel::worker_count()` (physical cores) — the repo's heavy passes are
   memory-bandwidth bound, so widening past physical cores adds overhead for no gain. For a
   few coarse chunks, `cx.background_executor().scoped(..)` (or the existing
   `std::thread::scope` pattern) avoids pulling in rayon at all.

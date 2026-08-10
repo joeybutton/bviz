@@ -1,6 +1,7 @@
 use std::cmp::{Ordering, Reverse};
 use std::collections::{BTreeMap, BinaryHeap, HashMap};
 
+use bviz_parallel::worker_count;
 use serde_json::{Map, Value};
 
 use crate::concurrent_interner::{ConcurrentInterner, Writer};
@@ -9,7 +10,6 @@ use crate::model::{
     Metadata, OptStr, PhaseMarker, Profile, ProfileParts, Slice, SliceDetail, Span32, Str,
     ThreadTrack, TimeSpan,
 };
-use crate::worker_count;
 
 use super::serde_events::{arg_i64, arg_str, ArgEntry, ArgVal, RawEvent};
 use super::timed;

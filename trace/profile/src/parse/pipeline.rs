@@ -2,12 +2,12 @@ use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::io::Read;
 
+use bviz_parallel::worker_count;
 use flate2::read::MultiGzDecoder;
 use serde::de::{DeserializeSeed, IgnoredAny};
 
 use crate::concurrent_interner::{ConcurrentInterner, Writer};
 use crate::model::Profile;
-use crate::worker_count;
 
 use super::build::{seal, Builder, Merge};
 use super::decode::{gzip_isize, latin1_cow, latin1_to_utf8};

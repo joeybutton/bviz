@@ -1,6 +1,7 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 
+use bviz_parallel::worker_count;
 use bviz_trace_profile::{
     encloses, occupied_span, Profile, Slice, SliceDetail, Span32, SpanRole, Str, ThreadTrack,
     TimeSpan, Workload,
@@ -685,7 +686,7 @@ impl<T> ByLabels<T> {
 impl TrackFlamer {
     pub fn new(profile: &Arc<Profile>) -> TrackFlamer {
         TrackFlamer {
-            flamer: Flamer::new(profile, bviz_trace_profile::worker_count()),
+            flamer: Flamer::new(profile, worker_count()),
             lane_tables: ByLabels::default(),
             windowed: ByLabels::default(),
             #[cfg(test)]
@@ -699,7 +700,7 @@ impl TrackFlamer {
                 &self.flamer,
                 labels,
                 &TimeSelection::default(),
-                bviz_trace_profile::worker_count(),
+                worker_count(),
             )
         })
     }
@@ -715,7 +716,7 @@ impl TrackFlamer {
             &self.flamer,
             labels,
             window,
-            bviz_trace_profile::worker_count(),
+            worker_count(),
         ));
         memo.put(window, &tables);
         tables
@@ -1192,7 +1193,7 @@ fn child_order(arena: &Arena, i: usize) -> ChildOrder {
 /// beats sorting it whole on one.
 fn wide_range_min() -> usize {
     const PER_WORKER: usize = 1 << 13;
-    PER_WORKER * bviz_trace_profile::worker_count()
+    PER_WORKER * worker_count()
 }
 
 /// Sort each node's CSR child range into [`ChildOrder`]. A range sorts on keys

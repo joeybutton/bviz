@@ -8,6 +8,7 @@ name = "bviz_trace_layout"
 path = "src/lib.rs"
 
 [dependencies]
+bviz_parallel = { workspace = true }
 bviz_trace_profile = { path = "../profile" }
 rayon = { workspace = true }
 rustc-hash = { workspace = true }

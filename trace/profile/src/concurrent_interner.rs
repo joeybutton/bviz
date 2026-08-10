@@ -8,6 +8,7 @@ use std::cell::UnsafeCell;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::RwLock;
 
+use bviz_parallel::worker_count;
 use crossbeam_utils::CachePadded;
 use hashbrown::HashTable;
 
@@ -144,7 +145,7 @@ impl ConcurrentInterner {
     pub(crate) fn new(text_bytes: usize, distinct: usize) -> ConcurrentInterner {
         // The parallel parse's writer count: shard fan-out and final-page
         // headroom track the threads that actually intern, i.e. physical cores.
-        let par = crate::worker_count();
+        let par = worker_count();
         let shard_count = (4 * par).next_power_of_two().clamp(MIN_SHARDS, MAX_SHARDS);
         let shard_shift = u64::BITS - shard_count.trailing_zeros();
         let shards = (0..shard_count)
@@ -436,7 +437,7 @@ mod tests {
         // (the parallel parse's writer count), so spawning more writers than that
         // can overflow it once enough of them grab a page. Match that count, with
         // a floor of two so this stays a concurrency test on a single core.
-        let threads = crate::worker_count().max(2);
+        let threads = worker_count().max(2);
         const DISTINCT: usize = 5000;
         let long = "z".repeat(1024);
         // A key each thread can reach, so the same strings recur across threads.

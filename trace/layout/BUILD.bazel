@@ -11,6 +11,7 @@ rust_library(
     ],
     deps = [
         "//trace/profile",
+        "//util/parallel",
         "@crates//:rayon",
         "@crates//:rustc-hash",
     ],

@@ -147,14 +147,14 @@ than always going parallel.
 
 Rayon's global pool defaults to the machine's *logical* (SMT) thread count. This
 repo's heavy passes are memory-bandwidth bound and saturate at the physical
-cores that own the memory channels — the reason `bviz_trace_profile::worker_count()`
+cores that own the memory channels — the reason `bviz_parallel::worker_count()`
 exists (physical cores, clamped to granted parallelism). If you adopt rayon,
 size its global pool the same way, once at startup, so it matches the existing
 `std::thread::scope` passes and doesn't oversubscribe:
 
 ```rust
 rayon::ThreadPoolBuilder::new()
-    .num_threads(bviz_trace_profile::worker_count())
+    .num_threads(bviz_parallel::worker_count())
     .build_global()
     .ok();
 ```

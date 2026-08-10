@@ -25,7 +25,7 @@ pub use view::{FlameView, TimeView};
 /// startup, before any parallel layout pass; a no-op if the pool already exists.
 pub fn init_thread_pool() {
     rayon::ThreadPoolBuilder::new()
-        .num_threads(bviz_trace_profile::worker_count())
+        .num_threads(bviz_parallel::worker_count())
         .build_global()
         .ok();
 }
