@@ -1583,7 +1583,10 @@ mod tests {
     fn selection(regions: &[(i64, i64)]) -> TimeSelection {
         let mut selection = TimeSelection::default();
         for &(start_us, end_us) in regions {
-            selection.insert(TimeSpan { start_us, end_us });
+            selection.insert(
+                bviz_trace_layout::span_between(start_us, end_us)
+                    .unwrap_or_else(|| panic!("({start_us}, {end_us}) spans no time")),
+            );
         }
         selection
     }

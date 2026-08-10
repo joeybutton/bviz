@@ -301,7 +301,7 @@ mod tests {
     fn an_aggregate_carries_the_window_its_figures_cover() {
         let p = full_profile();
         let mut window = TimeSelection::default();
-        window.insert(span_between(0, 100));
+        window.insert(span_between(0, 100).expect("a region of non-zero width"));
         let agg = ScopeAggregate::build_for_tracks(&p, FlameMode::default(), &window, |_| true);
         assert_eq!(agg.window, window);
         let unrestricted = ScopeAggregate::build_for_tracks(

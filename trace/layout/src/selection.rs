@@ -1,21 +1,33 @@
 use bviz_trace_profile::TimeSpan;
 
-/// The region between two instants, whichever order they are given in.
-pub fn span_between(a_us: i64, b_us: i64) -> TimeSpan {
-    TimeSpan {
-        start_us: a_us.min(b_us),
-        end_us: a_us.max(b_us),
+/// A [`TimeSpan`] of non-zero width, the only kind of region a [`TimeSelection`]
+/// holds. [`span_between`] is the sole way to build one, so the width is checked
+/// once, where a gesture names a region.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TimeRegion(TimeSpan);
+
+impl std::ops::Deref for TimeRegion {
+    type Target = TimeSpan;
+
+    fn deref(&self) -> &TimeSpan {
+        &self.0
     }
 }
 
+/// The region between two instants, whichever order they are given in, and
+/// `None` for two of the same instant, which spans no time.
+pub fn span_between(a_us: i64, b_us: i64) -> Option<TimeRegion> {
+    let (start_us, end_us) = (a_us.min(b_us), a_us.max(b_us));
+    (start_us < end_us).then_some(TimeRegion(TimeSpan { start_us, end_us }))
+}
+
 /// A set of profile-time regions an aggregation is restricted to. The regions
-/// are sorted ascending by start, pairwise disjoint and non-touching, and each
-/// has non-zero width, so an instant lies in at most one and no microsecond is
-/// counted twice. Consumers read the empty set as unrestricted: the whole
-/// timeline contributes.
+/// are sorted ascending by start and are pairwise disjoint and non-touching, so
+/// an instant lies in at most one and no microsecond is counted twice.
+/// Consumers read the empty set as unrestricted: the whole timeline contributes.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TimeSelection {
-    spans: Vec<TimeSpan>,
+    spans: Vec<TimeRegion>,
 }
 
 impl TimeSelection {
@@ -23,7 +35,7 @@ impl TimeSelection {
         self.spans.is_empty()
     }
 
-    pub fn spans(&self) -> &[TimeSpan] {
+    pub fn spans(&self) -> &[TimeRegion] {
         &self.spans
     }
 
@@ -37,41 +49,35 @@ impl TimeSelection {
 
     /// First start to last end, for bracketing a scan before testing regions
     /// individually.
-    pub fn bounds(&self) -> Option<TimeSpan> {
+    pub fn bounds(&self) -> Option<TimeRegion> {
         let (first, last) = self.spans.first().zip(self.spans.last())?;
-        Some(TimeSpan {
+        Some(TimeRegion(TimeSpan {
             start_us: first.start_us,
             end_us: last.end_us,
-        })
+        }))
     }
 
     pub fn clear(&mut self) {
         self.spans.clear();
     }
 
-    /// Restricts to `span` alone, reporting its index.
-    pub fn set(&mut self, span: TimeSpan) -> Option<usize> {
-        if span.start_us >= span.end_us {
-            return None;
-        }
+    /// Restricts to `span` alone.
+    pub fn set(&mut self, span: TimeRegion) {
         self.spans.clear();
         self.spans.push(span);
-        Some(0)
     }
 
     /// Unions `span` into the set, reporting the index of the region it became
     /// part of.
-    pub fn insert(&mut self, span: TimeSpan) -> Option<usize> {
-        if span.start_us >= span.end_us {
-            return None;
-        }
-        Some(self.merge_in(span))
+    pub fn insert(&mut self, span: TimeRegion) -> usize {
+        self.merge_in(span)
     }
 
     /// Moves or resizes the region at `index` to `span`, reporting the index it
-    /// lands at once it has absorbed whatever it now reaches.
-    pub fn replace(&mut self, index: usize, span: TimeSpan) -> Option<usize> {
-        if span.start_us >= span.end_us || index >= self.spans.len() {
+    /// lands at once it has absorbed whatever it now reaches, and `None` if the
+    /// set holds no region at `index`.
+    pub fn replace(&mut self, index: usize, span: TimeRegion) -> Option<usize> {
+        if index >= self.spans.len() {
             return None;
         }
         self.spans.remove(index);
@@ -110,19 +116,19 @@ impl TimeSelection {
 
     /// Absorbs into `span` every region it overlaps or touches and puts the
     /// result in their place, keeping the set sorted, disjoint and
-    /// non-touching. `span` must have non-zero width.
-    fn merge_in(&mut self, span: TimeSpan) -> usize {
+    /// non-touching.
+    fn merge_in(&mut self, span: TimeRegion) -> usize {
         let first = self.spans.partition_point(|s| s.end_us < span.start_us);
         let last = self.spans.partition_point(|s| s.start_us <= span.end_us);
         let absorbed = &self.spans[first..last];
-        let merged = TimeSpan {
+        let merged = TimeRegion(TimeSpan {
             start_us: absorbed
                 .first()
                 .map_or(span.start_us, |s| s.start_us.min(span.start_us)),
             end_us: absorbed
                 .last()
                 .map_or(span.end_us, |s| s.end_us.max(span.end_us)),
-        };
+        });
         self.spans.splice(first..last, [merged]);
         first
     }
@@ -135,15 +141,14 @@ mod tests {
     fn selection(regions: &[(i64, i64)]) -> TimeSelection {
         let mut sel = TimeSelection::default();
         for &(a, b) in regions {
-            assert!(sel.insert(span_between(a, b)).is_some(), "({a}, {b})");
+            sel.insert(region(a, b));
         }
         sel
     }
 
-    /// A span built without the ordering `span_between` imposes, so a test can
-    /// hand a mutator an inverted or zero-width region.
-    fn raw(start_us: i64, end_us: i64) -> TimeSpan {
-        TimeSpan { start_us, end_us }
+    /// The region between two instants a test names as a pair of distinct ones.
+    fn region(a_us: i64, b_us: i64) -> TimeRegion {
+        span_between(a_us, b_us).unwrap_or_else(|| panic!("({a_us}, {b_us}) spans no time"))
     }
 
     fn regions(sel: &TimeSelection) -> Vec<(i64, i64)> {
@@ -167,22 +172,23 @@ mod tests {
     }
 
     #[test]
-    fn span_between_orders_its_ends() {
+    fn span_between_orders_its_ends_and_refuses_an_instant() {
         assert_eq!(span_between(90, 10), span_between(10, 90));
-        assert_eq!(span_between(10, 90).start_us, 10);
+        assert_eq!(region(10, 90).start_us, 10);
+        assert_eq!(span_between(50, 50), None);
     }
 
     #[test]
     fn set_restricts_to_one_region() {
         let mut sel = selection(&[(0, 10), (20, 30)]);
-        assert_eq!(sel.set(span_between(100, 140)), Some(0));
+        sel.set(region(100, 140));
         assert_eq!(regions(&sel), [(100, 140)]);
     }
 
     #[test]
     fn inserting_an_overlapping_region_merges_it() {
         let mut sel = selection(&[(0, 100)]);
-        assert_eq!(sel.insert(span_between(50, 150)), Some(0));
+        assert_eq!(sel.insert(region(50, 150)), 0);
         assert_eq!(regions(&sel), [(0, 150)]);
         assert_disjoint(&sel);
     }
@@ -190,7 +196,7 @@ mod tests {
     #[test]
     fn inserting_a_touching_region_merges_it() {
         let mut sel = selection(&[(0, 100)]);
-        assert_eq!(sel.insert(span_between(100, 150)), Some(0));
+        assert_eq!(sel.insert(region(100, 150)), 0);
         assert_eq!(regions(&sel), [(0, 150)]);
         assert_disjoint(&sel);
     }
@@ -198,7 +204,7 @@ mod tests {
     #[test]
     fn inserting_across_several_regions_collapses_them_into_one() {
         let mut sel = selection(&[(0, 10), (20, 30), (40, 50), (200, 300)]);
-        assert_eq!(sel.insert(span_between(5, 45)), Some(0));
+        assert_eq!(sel.insert(region(5, 45)), 0);
         assert_eq!(regions(&sel), [(0, 50), (200, 300)]);
         assert_disjoint(&sel);
     }
@@ -206,8 +212,8 @@ mod tests {
     #[test]
     fn insert_returns_the_index_of_the_region_it_joined() {
         let mut sel = selection(&[(0, 10), (100, 110)]);
-        assert_eq!(sel.insert(span_between(50, 60)), Some(1));
-        assert_eq!(sel.insert(span_between(105, 130)), Some(2));
+        assert_eq!(sel.insert(region(50, 60)), 1);
+        assert_eq!(sel.insert(region(105, 130)), 2);
         assert_eq!(regions(&sel), [(0, 10), (50, 60), (100, 130)]);
     }
 
@@ -215,7 +221,7 @@ mod tests {
     fn replace_reports_the_index_the_region_moved_to() {
         let mut sel = selection(&[(0, 10), (100, 110), (200, 210)]);
         // The first region jumps past the second.
-        assert_eq!(sel.replace(0, span_between(120, 130)), Some(1));
+        assert_eq!(sel.replace(0, region(120, 130)), Some(1));
         assert_eq!(regions(&sel), [(100, 110), (120, 130), (200, 210)]);
         assert_disjoint(&sel);
     }
@@ -223,28 +229,17 @@ mod tests {
     #[test]
     fn replace_growing_a_region_into_its_neighbour_merges_them() {
         let mut sel = selection(&[(0, 10), (100, 110), (200, 210)]);
-        assert_eq!(sel.replace(1, span_between(100, 205)), Some(1));
+        assert_eq!(sel.replace(1, region(100, 205)), Some(1));
         assert_eq!(regions(&sel), [(0, 10), (100, 210)]);
         assert_eq!(sel.len(), 2);
         assert_disjoint(&sel);
     }
 
     #[test]
-    fn degenerate_and_inverted_spans_are_rejected_unchanged() {
-        let mut sel = selection(&[(0, 10)]);
-        let before = sel.clone();
-        assert_eq!(sel.insert(span_between(50, 50)), None);
-        assert_eq!(sel.set(raw(50, 50)), None);
-        assert_eq!(sel.insert(raw(90, 20)), None);
-        assert_eq!(sel.replace(0, raw(90, 20)), None);
-        assert_eq!(sel, before);
-    }
-
-    #[test]
     fn an_out_of_range_index_leaves_the_selection_unchanged() {
         let mut sel = selection(&[(0, 10)]);
         let before = sel.clone();
-        assert_eq!(sel.replace(1, span_between(20, 30)), None);
+        assert_eq!(sel.replace(1, region(20, 30)), None);
         assert!(!sel.remove(7));
         assert_eq!(sel, before);
     }
@@ -262,7 +257,7 @@ mod tests {
         assert_eq!(TimeSelection::default().total_us(), 0);
         let sel = selection(&[(0, 10), (100, 130)]);
         assert_eq!(sel.total_us(), 40);
-        assert_eq!(sel.bounds(), Some(span_between(0, 130)));
+        assert_eq!(sel.bounds(), span_between(0, 130));
     }
 
     #[test]
@@ -325,7 +320,7 @@ mod tests {
         ];
         // Dragged right-to-left, so the ends arrive inverted.
         for (a, b) in inserts {
-            assert!(sel.insert(span_between(b, a)).is_some(), "({a}, {b})");
+            sel.insert(region(b, a));
             assert_disjoint(&sel);
         }
         assert_eq!(regions(&sel), [(0, 50), (100, 1001)]);

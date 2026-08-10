@@ -1081,7 +1081,7 @@ fn emit_lane_rows(
     // lane; only a narrow selection shrinks the walk.
     let lane = flamer.profile.slices(thread);
     let bracket = match window.bounds() {
-        Some(bounds) => reaching(lane, flamer.profile.end_maxes(thread), bounds),
+        Some(bounds) => reaching(lane, flamer.profile.end_maxes(thread), *bounds),
         None => 0..lane.len(),
     };
     let slices = &lane[bracket.clone()];
@@ -1810,7 +1810,7 @@ mod tests {
     fn window(regions: &[(i64, i64)]) -> TimeSelection {
         let mut sel = TimeSelection::default();
         for &(a, b) in regions {
-            assert!(sel.insert(span_between(a, b)).is_some());
+            sel.insert(span_between(a, b).unwrap_or_else(|| panic!("({a}, {b}) spans no time")));
         }
         sel
     }

@@ -8,7 +8,9 @@
 
 use std::sync::Arc;
 
-use bviz_trace_layout::{FlameDirection, FlameMode, ScopeAggregate, TimeSelection, TrackFlamer};
+use bviz_trace_layout::{
+    FlameDirection, FlameMode, ScopeAggregate, TimeSelection, TrackFlamer, span_between,
+};
 use bviz_trace_profile::{LaneClass, Profile, TimeSpan};
 
 #[global_allocator]
@@ -35,11 +37,8 @@ fn spread(span: TimeSpan, coverage: f64, parts: usize) -> TimeSelection {
     let mut sel = TimeSelection::default();
     for k in 0..parts {
         let start = span.start_us as f64 + k as f64 * stride + (stride - width) / 2.0;
-        let region = TimeSpan {
-            start_us: start as i64,
-            end_us: (start + width) as i64,
-        };
-        assert!(sel.insert(region).is_some(), "a region of non-zero width");
+        let region = span_between(start as i64, (start + width) as i64);
+        sel.insert(region.expect("a region of non-zero width"));
     }
     sel
 }
@@ -52,8 +51,8 @@ fn evicting(sel: &TimeSelection) -> TimeSelection {
     let mut out = TimeSelection::default();
     for (i, region) in sel.spans().iter().enumerate() {
         let shorten = (i + 1 == sel.len()) as i64;
-        let region = TimeSpan { end_us: region.end_us - shorten, ..*region };
-        assert!(out.insert(region).is_some(), "a region of non-zero width");
+        let region = span_between(region.start_us, region.end_us - shorten);
+        out.insert(region.expect("a region of non-zero width"));
     }
     out
 }

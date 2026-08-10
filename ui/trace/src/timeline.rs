@@ -12,7 +12,7 @@ use crate::{
     ruler_ticks, scroll_request, scrollbar_geom, thumb_offset,
 };
 use bviz_trace_layout::{
-    Cull, LaneLayout, TimeSelection, TimeView, Viewport, VisibleSlice, span_between,
+    Cull, LaneLayout, TimeRegion, TimeSelection, TimeView, Viewport, VisibleSlice, span_between,
     visible_slices,
 };
 use bviz_trace_profile::{Profile, Slice, SliceDetail, TimeSpan};
@@ -160,13 +160,14 @@ pub(crate) struct RegionDrag {
 
 impl RegionDrag {
     /// The region the drag currently covers, never reaching outside the profile:
-    /// a slide pushed against an end stops there, keeping its width.
-    pub(crate) fn span(&self) -> TimeSpan {
+    /// a slide pushed against an end stops there, keeping its width. A drag that
+    /// has not left the instant it is anchored at covers no region.
+    pub(crate) fn span(&self) -> Option<TimeRegion> {
         match self.edit {
             RegionEdit::Slide { width_us, grab_us, bounds, .. } => {
                 let last_start_us = bounds.end_us - width_us;
                 let start_us = (self.cursor_us - grab_us).min(last_start_us).max(bounds.start_us);
-                TimeSpan { start_us, end_us: start_us + width_us }
+                span_between(start_us, start_us + width_us)
             }
             _ => span_between(self.anchor_us, self.cursor_us),
         }
@@ -174,22 +175,23 @@ impl RegionDrag {
 
     /// The selection the drag would leave when applied over `base`. A removal
     /// names its region outright and takes it away from the press onward; every
-    /// other edit covers no region until the cursor passes the click threshold,
-    /// so short of it those yield `base` itself.
+    /// other edit applies the region the drag covers, which it has only past the
+    /// click threshold, so short of that those yield `base` itself.
     pub(crate) fn applied(&self, base: &TimeSelection) -> TimeSelection {
         let mut sel = base.clone();
-        match self.edit {
-            RegionEdit::Remove { index } => {
+        let dragged = if self.moved { self.span() } else { None };
+        match (self.edit, dragged) {
+            (RegionEdit::Remove { index }, _) => {
                 sel.remove(index);
             }
-            RegionEdit::Replace if self.moved => {
-                sel.set(self.span());
+            (RegionEdit::Replace, Some(span)) => {
+                sel.set(span);
             }
-            RegionEdit::Union if self.moved => {
-                sel.insert(self.span());
+            (RegionEdit::Union, Some(span)) => {
+                sel.insert(span);
             }
-            RegionEdit::Resize { index } | RegionEdit::Slide { index, .. } if self.moved => {
-                sel.replace(index, self.span());
+            (RegionEdit::Resize { index } | RegionEdit::Slide { index, .. }, Some(span)) => {
+                sel.replace(index, span);
             }
             _ => {}
         }
@@ -1096,7 +1098,7 @@ impl RegionPixels {
     /// mark the sides whose own edge lands on it, so an edge is drawn and live to
     /// a press together. The sole derivation of selection geometry, so what is
     /// painted and what a press takes hold of agree.
-    fn of(span: TimeSpan, tv: TimeView, regions: Regions) -> Option<RegionPixels> {
+    fn of(span: TimeRegion, tv: TimeView, regions: Regions) -> Option<RegionPixels> {
         let start = regions.content_left + tv.x_of(span.start_us);
         let end = regions.content_left + tv.x_of(span.end_us);
         if end <= regions.content_left || start >= regions.time_right {
@@ -1412,7 +1414,7 @@ mod tests {
     fn selection(regions: &[(i64, i64)]) -> TimeSelection {
         let mut sel = TimeSelection::default();
         for &(a, b) in regions {
-            assert!(sel.insert(span_between(a, b)).is_some(), "({a}, {b})");
+            sel.insert(span_between(a, b).unwrap_or_else(|| panic!("({a}, {b}) spans no time")));
         }
         sel
     }

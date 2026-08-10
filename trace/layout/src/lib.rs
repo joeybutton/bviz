@@ -17,7 +17,7 @@ pub use flame::{
 };
 pub use lanes::{CounterPos, Lane, LaneLayout, LaneMetrics, lay_out_lanes};
 pub use scopes::ScopeAggregate;
-pub use selection::{TimeSelection, span_between};
+pub use selection::{TimeRegion, TimeSelection, span_between};
 pub use stats::{StatRow, stats_from_flame};
 pub use view::{FlameView, TimeView};
 
