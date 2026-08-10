@@ -41,6 +41,17 @@ use crate::intern::Id;
 /// default thoroughness, so their layouts are unaffected.
 const DENSE_ROUTED_EDGES: usize = 1000;
 
+/// Above this many routed edges a drawing places its nodes by Brandes-Köpf
+/// rather than balancing them by network simplex. The balanced placement costs
+/// super-linearly in the routed edges where Brandes-Köpf costs about linearly,
+/// so past this size the wait outgrows what balancing buys, which is width
+/// alone: the two agree on the layering and on the edge spans, so the cheaper
+/// drawing spreads sideways rather than reading differently. The threshold sits
+/// well past where the balanced placement stops being instant, because its width
+/// is a property of the drawing the reader then works in while its cost is paid
+/// once: only a wait running into seconds is worth a permanently wider drawing.
+const BALANCED_PLACEMENT_EDGES: usize = 800;
+
 /// Above this many edges one flat frame is a tangle whose long edges become
 /// chains of dummy nodes, and balancing those by network simplex runs orders of
 /// magnitude longer than the rest of the layout together. Such a frame places by
@@ -155,6 +166,7 @@ fn lay_out(graph: &Graph, pinned: Option<&HashMap<Id, Anchor>>) -> LaidOut {
     let children_of = children_by_parent(graph);
     let (root, elk_of) = build_elk_graph(graph, &children_of, pinned);
     let edges = route_edges(graph, &elk_of, &root);
+    choose_placement(&root, &children_of, &elk_of, edges.len());
 
     let mut engine = RecursiveGraphLayoutEngine::new();
     let mut monitor = BasicProgressMonitor::new();
@@ -368,6 +380,28 @@ fn route_edges(
         });
     }
     edges
+}
+
+/// Drops a drawing routing more than [`BALANCED_PLACEMENT_EDGES`] to the
+/// Brandes-Köpf placement, leaving a smaller one the balanced placement
+/// [`apply_options`] gives it. It runs over the same frames [`apply_options`]
+/// does, the root and every container, and for the same reason.
+fn choose_placement(
+    root: &ElkNodeRef,
+    children_of: &HashMap<Id, Vec<&Node>>,
+    elk_of: &HashMap<Id, ElkNodeRef>,
+    routed_edges: usize,
+) {
+    if routed_edges <= BALANCED_PLACEMENT_EDGES {
+        return;
+    }
+    for frame in std::iter::once(root).chain(children_of.keys().map(|id| &elk_of[id])) {
+        set_property(
+            frame,
+            LayeredOptions::NODE_PLACEMENT_STRATEGY,
+            NodePlacementStrategy::BrandesKoepf,
+        );
+    }
 }
 
 /// Containment depth per node, used only to draw parents before children.
@@ -779,6 +813,57 @@ mod tests {
             frames.entry(parent_of[&drawn.id]).or_default().push(drawn);
         }
         frames
+    }
+
+    /// The strategy each frame of `graph`'s drawing places its nodes by when the
+    /// view routes `routed_edges` edges: the root frame first, then one per
+    /// container. A drawing reports no strategy, so this reads it off the ELK
+    /// graph the layout hands the engine.
+    fn placements(graph: &Graph, routed_edges: usize) -> Vec<NodePlacementStrategy> {
+        let children_of = children_by_parent(graph);
+        let (root, elk_of) = build_elk_graph(graph, &children_of, None);
+        choose_placement(&root, &children_of, &elk_of, routed_edges);
+        std::iter::once(&root)
+            .chain(
+                graph
+                    .nodes
+                    .iter()
+                    .filter(|node| children_of.contains_key(&node.id))
+                    .map(|node| &elk_of[&node.id]),
+            )
+            .map(|frame| {
+                frame
+                    .borrow_mut()
+                    .connectable()
+                    .shape()
+                    .graph_element()
+                    .properties()
+                    .get_property(LayeredOptions::NODE_PLACEMENT_STRATEGY)
+                    .expect("a frame the layout options were applied to names a strategy")
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_view_within_the_gate_balances_every_frame() {
+        let graph = compound_graph();
+        let strategies = placements(&graph, BALANCED_PLACEMENT_EDGES);
+        assert!(strategies.len() > 1, "the fixture heads a root frame and container frames");
+        assert!(
+            strategies.iter().all(|&s| s == NodePlacementStrategy::NetworkSimplex),
+            "the frames placed by {strategies:?}",
+        );
+    }
+
+    #[test]
+    fn a_view_past_the_gate_places_every_frame_the_cheaper_way() {
+        let graph = compound_graph();
+        let strategies = placements(&graph, BALANCED_PLACEMENT_EDGES + 1);
+        assert!(strategies.len() > 1, "the fixture heads a root frame and container frames");
+        assert!(
+            strategies.iter().all(|&s| s == NodePlacementStrategy::BrandesKoepf),
+            "the frames placed by {strategies:?}",
+        );
     }
 
     #[test]
