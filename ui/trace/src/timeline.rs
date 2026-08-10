@@ -134,11 +134,18 @@ pub(crate) enum RegionEdit {
 }
 
 impl RegionEdit {
-    /// Whether the press landed on an existing region, leaving the rest of the
-    /// selection to stand. A press holding nothing is a click on empty time,
-    /// which drops the selection.
-    fn holds_a_region(self) -> bool {
-        matches!(self, Self::Resize { .. } | Self::Slide { .. } | Self::Remove { .. })
+    /// Whether a press that never passed the click threshold drops the whole
+    /// selection. Only a plain press on empty time does, naming no region and
+    /// asking for no set operation, so it reads as "select nothing". A ctrl
+    /// press asks to toggle one region's membership and leaves the rest of the
+    /// set standing, even where it found no region to toggle — the gap it
+    /// misses by is a few pixels, and the selection it would drop is
+    /// unrecoverable.
+    fn clears_on_a_click(self) -> bool {
+        match self {
+            Self::Replace => true,
+            Self::Union | Self::Resize { .. } | Self::Slide { .. } | Self::Remove { .. } => false,
+        }
     }
 }
 
@@ -200,10 +207,10 @@ impl RegionDrag {
 
     /// The selection a release of the drag leaves over `base`.
     pub(crate) fn released(&self, base: &TimeSelection) -> TimeSelection {
-        if self.moved || self.edit.holds_a_region() {
-            self.applied(base)
-        } else {
+        if !self.moved && self.edit.clears_on_a_click() {
             TimeSelection::default()
+        } else {
+            self.applied(base)
         }
     }
 }
@@ -1524,15 +1531,6 @@ mod tests {
         assert_eq!(regions(&held.released(&base)), regions(&base));
     }
 
-    #[test]
-    fn a_click_on_empty_time_drops_the_whole_selection() {
-        let base = selection(&[(0, 100), (200, 300), (400, 500)]);
-        for edit in [RegionEdit::Replace, RegionEdit::Union] {
-            let held = RegionDrag { moved: false, ..drag(edit, 700, 701) };
-            assert!(held.released(&base).spans().is_empty());
-        }
-    }
-
     /// A region drag under way over the timeline.
     fn live(edit: RegionEdit, anchor_us: i64, cursor_us: i64) -> TimelineDrag {
         TimelineDrag::TimeRegion(drag(edit, anchor_us, cursor_us))
@@ -1717,10 +1715,38 @@ mod tests {
         assert_eq!(regions(&dragged.released(&base)), [(6000, 7000), (10_000, 11_000)]);
     }
 
+    /// The instant of the gap between the first two of [`three_regions`], far
+    /// enough from both edges that a press there takes hold of nothing.
+    const IN_THE_GAP_US: i64 = 7500;
+
+    #[test]
+    fn a_plain_click_on_empty_ruler_drops_the_whole_selection() {
+        let base = three_regions();
+        let (edit, at) = ruler_press(&base, ruler_x(IN_THE_GAP_US), false);
+        assert!(matches!(edit, RegionEdit::Replace));
+        assert!(click(edit, at).released(&base).is_empty());
+    }
+
+    #[test]
+    fn a_ctrl_click_outside_every_region_leaves_the_selection_untouched() {
+        let base = three_regions();
+        let (edit, at) = ruler_press(&base, ruler_x(IN_THE_GAP_US), true);
+        assert!(matches!(edit, RegionEdit::Union), "it found no region to take away");
+        assert_eq!(regions(&click(edit, at).released(&base)), regions(&base));
+    }
+
+    #[test]
+    fn a_shift_ctrl_click_over_the_lanes_holding_no_region_keeps_the_selection() {
+        let base = three_regions();
+        let (edit, at) = region_press(&base, IN_THE_GAP_US, true, None);
+        assert!(matches!(edit, RegionEdit::Union));
+        assert_eq!(regions(&click(edit, at).released(&base)), regions(&base));
+    }
+
     #[test]
     fn a_ctrl_press_outside_every_region_unions_a_new_one() {
         let base = three_regions();
-        let (edit, at) = ruler_press(&base, ruler_x(7500), true);
+        let (edit, at) = ruler_press(&base, ruler_x(IN_THE_GAP_US), true);
         assert!(matches!(edit, RegionEdit::Union));
         let sel = drag(edit, at, 7800).released(&base);
         assert_eq!(regions(&sel), [(6000, 7000), (7500, 7800), (8000, 9000), (10_000, 11_000)]);
