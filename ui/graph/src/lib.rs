@@ -36,7 +36,7 @@ use emphasis::Emphasis;
 use framing::{build_prepaint, Framing};
 use legend::legend;
 use mode::LayoutMode;
-use model::{Drawn, Expandable, Model, Source};
+use model::{Drawn, Expandable, Model};
 use morph::{Frame, Morph};
 use paint::{canvas_body, Scene, TitleTarget};
 use scroll::{scrollbar_hit, start_scroll_drag};
@@ -340,8 +340,9 @@ impl Render for GraphView {
             background: colors.background,
             scroll: ScrollbarColors::from_colors(&colors),
         };
-        let body = match self.model.source() {
-            Source::Loaded(_) => {
+        let body = match self.model.source().placeholder(&colors) {
+            Some(placeholder) => placeholder.into_any_element(),
+            None => {
                 let controls = Controls {
                     mode: self.mode,
                     picker: self.mode_picker.clone(),
@@ -363,11 +364,6 @@ impl Render for GraphView {
                             .child(self.viewport(palette, &colors, cx)),
                     )
                     .into_any_element()
-            }
-            Source::Loading => bviz_ui_components::centered_spinner("Loading…", &colors)
-                .into_any_element(),
-            Source::Message(msg) => {
-                bviz_ui_components::centered_notice(msg.clone(), &colors).into_any_element()
             }
         };
         Chrome::new(&self.focus_handle)

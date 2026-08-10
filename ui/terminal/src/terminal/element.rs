@@ -6,7 +6,7 @@ use gpui::{
     size,
 };
 
-use super::{ContentLayout, TermSource, TerminalView};
+use super::{ContentLayout, Source, TerminalView};
 use crate::color::{CellStyle, Defaults, ansi_palette, style_key};
 
 /// Width of the scroll bar gutter reserved on the right edge. The bar is an
@@ -62,7 +62,7 @@ impl TerminalElement {
         self.view.update(cx, |view, cx| {
             let frame = view.current_frame;
             if view.terminal.is_none() || view.terminal_frame != Some(frame) {
-                if let TermSource::Loaded(replay) = &view.source {
+                if let Source::Loaded(replay) = &view.source {
                     let source = replay.display_at(frame);
                     let mut terminal = Terminal::from_display(&source, cols, rows);
                     // Restore the user's remembered scroll. If the held line lies

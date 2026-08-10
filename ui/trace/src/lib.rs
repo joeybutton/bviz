@@ -36,8 +36,8 @@ use bviz_trace_layout::{
 };
 use bviz_trace_profile::{Profile, Slice, TimeSpan};
 use bviz_ui_components::{
-    Axis, Button, DEFAULT_MIN_THUMB, SCROLLBAR_THICKNESS, Scrollbar, centered_notice,
-    centered_spinner, load_in_background, overlay_canvas, paint_tooltip_box, track_drag,
+    Axis, Button, DEFAULT_MIN_THUMB, SCROLLBAR_THICKNESS, Scrollbar, centered_spinner,
+    load_in_background, overlay_canvas, paint_tooltip_box, track_drag,
 };
 use bviz_ui_shell::Chrome;
 use clap::Parser;
@@ -188,13 +188,7 @@ const GROUP_ICON: f32 = 12.0;
 /// Lanes shown per group before the rest fold behind the band's show-all toggle.
 const TOP_N_PER_GROUP: usize = 12;
 
-/// The loaded profile, a load in progress, or a message explaining why none is
-/// shown.
-pub(crate) enum Source {
-    Loading,
-    Loaded(Arc<Profile>),
-    Message(String),
-}
+pub(crate) type Source = bviz_ui_components::Source<Arc<Profile>>;
 
 /// Loads and renders a Bazel trace profile as a flame chart.
 ///
@@ -634,19 +628,15 @@ impl TraceView {
     }
 
     fn status(&self, cx: &App) -> String {
-        match self.model.read(cx).source() {
-            Source::Loaded(p) => {
-                let slices: usize = p.threads().iter().map(|t| t.slices.len()).sum();
-                format!(
-                    "{} threads · {} slices · {:.3}s",
-                    p.threads().len(),
-                    slices,
-                    span_seconds(p.span()),
-                )
-            }
-            Source::Loading => "Loading…".into(),
-            Source::Message(_) => "No profile".into(),
-        }
+        self.model.read(cx).source().status("No profile", |p| {
+            let slices: usize = p.threads().iter().map(|t| t.slices.len()).sum();
+            format!(
+                "{} threads · {} slices · {:.3}s",
+                p.threads().len(),
+                slices,
+                span_seconds(p.span()),
+            )
+        })
     }
 
     /// [`Regions`] for the current viewport (captured by the timeline), panel and
@@ -702,19 +692,15 @@ impl Render for TraceView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = bviz_ui_theme::colors(window);
         let palette = Palette::from_colors(&colors);
-        // Resolve the document first, ending the model borrow before the
-        // `&mut self` build calls below.
-        let loaded = match self.model.read(cx).source() {
-            Source::Loaded(profile) => Ok(profile.clone()),
-            Source::Loading => Err(centered_spinner("Loading…", &colors)),
-            Source::Message(msg) => Err(centered_notice(msg.clone(), &colors)),
-        };
-        let body = match loaded {
-            Ok(_) => div()
+        // Take the placeholder before the `&mut self` build calls below, so the
+        // model borrow it is read through ends first.
+        let placeholder = self.model.read(cx).source().placeholder(&colors);
+        let body = match placeholder {
+            Some(placeholder) => placeholder,
+            None => div()
                 .flex_1()
                 .overflow_hidden()
                 .child(self.trace_body(palette, &colors, cx)),
-            Err(placeholder) => placeholder,
         };
         Chrome::new(&self.window_focus)
             .title("bazel_viz trace")

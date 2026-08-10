@@ -67,18 +67,12 @@ struct ContentLayout {
     rows: usize,
 }
 
-/// The build's playback timeline, a load in progress, or the error that stopped
-/// it.
-enum TermSource {
-    Loading,
-    Loaded(Replay),
-    Error(String),
-}
+type Source = bviz_ui_components::Source<Replay>;
 
 /// The root view: the rendered build terminal inside the window chrome.
 pub struct TerminalView {
     /// The playback timeline, loaded off the UI thread.
-    source: TermSource,
+    source: Source,
     /// Holds the background load task so it isn't cancelled on drop.
     _load_task: Task<()>,
     /// The frame currently shown; an index into the loaded [`Replay`]'s frames.
@@ -174,7 +168,7 @@ impl TerminalView {
             cx.notify();
         });
         let mut view = Self {
-            source: TermSource::Loading,
+            source: Source::Loading,
             _load_task: Task::ready(()),
             current_frame: 0,
             playing: false,
@@ -264,9 +258,9 @@ impl TerminalView {
                         // to replay from the start.
                         view.current_frame = replay.frame_count().saturating_sub(1);
                         view.position = replay.duration();
-                        TermSource::Loaded(replay)
+                        Source::Loaded(replay)
                     }
-                    Err(err) => TermSource::Error(err),
+                    Err(err) => Source::Message(err),
                 };
             },
         );
@@ -634,7 +628,7 @@ impl TerminalView {
     /// requests the next frame (see [`advance_playback`](Self::advance_playback)).
     fn play(&mut self, cx: &mut Context<Self>) {
         let last = match &self.source {
-            TermSource::Loaded(replay) => replay.frame_count().saturating_sub(1),
+            Source::Loaded(replay) => replay.frame_count().saturating_sub(1),
             _ => return,
         };
         if last == 0 {
@@ -676,7 +670,7 @@ impl TerminalView {
         };
         let target = base + started.elapsed().as_secs_f64() * self.speed as f64;
         let (frame, last, duration) = match &self.source {
-            TermSource::Loaded(replay) => (
+            Source::Loaded(replay) => (
                 replay.frame_at(target),
                 replay.frame_count().saturating_sub(1),
                 replay.duration(),
@@ -699,7 +693,7 @@ impl TerminalView {
     /// keeping playback running from there.
     fn seek_frame(&mut self, frame: usize, cx: &mut Context<Self>) {
         let (frame, time) = match &self.source {
-            TermSource::Loaded(replay) => {
+            Source::Loaded(replay) => {
                 let frame = frame.min(replay.frame_count().saturating_sub(1));
                 (frame, replay.time_of(frame))
             }
@@ -747,7 +741,7 @@ impl TerminalView {
             self.play_anchor = None;
         }
         let (frame, position) = match &self.source {
-            TermSource::Loaded(replay) => {
+            Source::Loaded(replay) => {
                 let position = fraction as f64 * replay.duration();
                 (replay.frame_at(position), position)
             }
@@ -765,8 +759,9 @@ impl Render for TerminalView {
         self.advance_playback(window);
         self.autoscroll_selection(window, cx);
         let colors = bviz_ui_theme::colors(window);
-        let body = match &self.source {
-            TermSource::Loaded(_) => {
+        let body = match self.source.placeholder(&colors) {
+            Some(placeholder) => placeholder.into_any_element(),
+            None => {
                 let find_box = if self.find_active {
                     self.render_find_box(&colors, cx)
                 } else {
@@ -824,12 +819,6 @@ impl Render for TerminalView {
                             .children(find_box),
                     )
                     .into_any_element()
-            }
-            TermSource::Loading => {
-                bviz_ui_components::centered_spinner("Loading…", &colors).into_any_element()
-            }
-            TermSource::Error(msg) => {
-                bviz_ui_components::centered_notice(msg.clone(), &colors).into_any_element()
             }
         };
         Chrome::new(&self.focus_handle)
@@ -1005,7 +994,7 @@ impl TerminalView {
     /// `current / total` readout text.
     fn playback_readout(&self) -> (f32, SharedString) {
         let (duration, real_time) = match &self.source {
-            TermSource::Loaded(replay) => (replay.duration(), replay.real_time()),
+            Source::Loaded(replay) => (replay.duration(), replay.real_time()),
             _ => (0.0, true),
         };
         // The playhead tracks the playback clock, so it glides smoothly even when

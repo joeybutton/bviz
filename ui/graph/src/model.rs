@@ -112,13 +112,7 @@ impl Expandable {
     }
 }
 
-/// The loaded graph, a load in progress, or a message explaining why none is
-/// shown.
-pub(crate) enum Source {
-    Loading,
-    Loaded(Loaded),
-    Message(String),
-}
+pub(crate) type Source = bviz_ui_components::Source<Loaded>;
 
 /// The graph being viewed: the layouts on screen and the expansion the next
 /// relayout starts from, every layout produced off the UI thread.
@@ -209,27 +203,23 @@ impl Model {
     }
 
     pub(crate) fn status(&self, mode: LayoutMode, zoom: f32) -> String {
-        match &self.source {
-            Source::Loading => "Loading…".into(),
-            Source::Message(_) => "No graph".into(),
-            Source::Loaded(_) => match self.drawn(mode) {
-                None => "Laying out…".into(),
-                Some(drawn) => {
-                    let g = drawn.view(zoom);
-                    let level = drawn
-                        .level(zoom)
-                        .map(|l| format!("level {}/{} · ", l.index + 1, l.count))
-                        .unwrap_or_default();
-                    format!(
-                        "{level}{} boxes · {} connectors · {}×{}",
-                        g.boxes.len(),
-                        g.connectors.len(),
-                        g.width.round() as i64,
-                        g.height.round() as i64,
-                    )
-                }
-            },
-        }
+        self.source.status("No graph", |_| match self.drawn(mode) {
+            None => "Laying out…".into(),
+            Some(drawn) => {
+                let g = drawn.view(zoom);
+                let level = drawn
+                    .level(zoom)
+                    .map(|l| format!("level {}/{} · ", l.index + 1, l.count))
+                    .unwrap_or_default();
+                format!(
+                    "{level}{} boxes · {} connectors · {}×{}",
+                    g.boxes.len(),
+                    g.connectors.len(),
+                    g.width.round() as i64,
+                    g.height.round() as i64,
+                )
+            }
+        })
     }
 }
 
