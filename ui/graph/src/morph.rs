@@ -6,17 +6,31 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-/// How long the new drawing's connectors take to fade in, beginning once every
-/// box has landed. A route is computed for one drawing's box positions, so it
-/// meets nothing while the boxes are still travelling; running the fade after the
-/// travel leaves no frame in which a connector is adrift of the boxes it joins.
-/// It runs well longer than the travel: a connector is a thin line against the
-/// background, so it reads as present over a short stretch of its alpha and a
-/// brisk fade lands as an appearance out of nothing rather than as an arrival.
+/// How long the new drawing's connectors take to fade in. It runs well longer
+/// than the travel: a connector is a thin line against the background, so it
+/// reads as present over a short stretch of its alpha and a brisk fade lands as
+/// an appearance out of nothing rather than as an arrival.
 const CONNECTOR_FADE: Duration = Duration::from_millis(520);
 
-/// The whole transition: the boxes travel, then the connectors arrive.
-const MORPH_SPAN: Duration = SETTLE_DURATION.saturating_add(CONNECTOR_FADE);
+/// Alpha under which a connector, a hairline against the background, does not
+/// read as drawn at all.
+const IMPERCEPTIBLE_CONNECTOR: f32 = 0.05;
+
+/// How far before the boxes land the connectors begin arriving. A route is
+/// computed for one drawing's box positions, so it meets its endpoints only once
+/// they have stopped; over this last stretch of a travel easing to a halt they
+/// have all but arrived, and the fade holds the routes under
+/// [`IMPERCEPTIBLE_CONNECTOR`] besides, so what little they are adrift by cannot
+/// be seen. Reaching visibility on the boxes' heels rather than from nothing
+/// afterwards is what keeps the drawing from pausing bare between the two.
+const CONNECTOR_FADE_LEAD: Duration = Duration::from_millis(60);
+
+/// When the connectors start arriving, measured from the start of the travel.
+const CONNECTOR_FADE_START: Duration = SETTLE_DURATION.saturating_sub(CONNECTOR_FADE_LEAD);
+
+/// The whole transition: the boxes travel, and the connectors arrive over the
+/// close of that travel and the stretch after it.
+const MORPH_SPAN: Duration = CONNECTOR_FADE_START.saturating_add(CONNECTOR_FADE);
 
 /// Repaint interval while a morph runs. Boxes are in motion, which reads as
 /// continuous only close to the display's own rate.
@@ -113,7 +127,7 @@ impl Transition {
             return None;
         }
         let travelled = (elapsed.as_secs_f32() / SETTLE_DURATION.as_secs_f32()).clamp(0.0, 1.0);
-        let connectors = (elapsed.saturating_sub(SETTLE_DURATION).as_secs_f32()
+        let connectors = (elapsed.saturating_sub(CONNECTOR_FADE_START).as_secs_f32()
             / CONNECTOR_FADE.as_secs_f32())
         .clamp(0.0, 1.0);
         Some(Frame {
@@ -475,20 +489,31 @@ mod tests {
     }
 
     #[test]
-    fn connectors_are_held_back_until_the_boxes_have_landed() {
+    fn connectors_stay_invisible_until_the_boxes_have_landed() {
         let after = opened();
         let t = transition(collapsed(), &after);
         for fraction in [0.0, 0.25, 0.5, 0.75, 1.0] {
-            assert_eq!(
-                at(&t, fraction).connectors,
-                0.0,
-                "connectors painted {fraction} of the way through the travel",
+            let connectors = at(&t, fraction).connectors;
+            assert!(
+                connectors < IMPERCEPTIBLE_CONNECTOR,
+                "connectors read at {connectors} {fraction} of the way through the travel",
             );
         }
+        assert!(at(&t, 1.0).connectors > 0.0, "the connectors had not begun as the boxes landed");
         let landing = Transition::at(&t, t.start + MORPH_SPAN - Duration::from_millis(1))
             .expect("over already");
         assert!(landing.connectors > 0.9, "connectors barely arrived: {}", landing.connectors);
         assert_eq!(landing.travel, 1.0, "the boxes were still moving as the connectors arrived");
+    }
+
+    /// What keeps the overlap from showing: over the lead the fade is still
+    /// imperceptible, and the travel it overlaps has all but finished.
+    #[test]
+    fn the_lead_the_connectors_start_on_is_one_nothing_can_be_seen_over() {
+        let lead = smoothstep(CONNECTOR_FADE_LEAD.as_secs_f32() / CONNECTOR_FADE.as_secs_f32());
+        assert!(lead < IMPERCEPTIBLE_CONNECTOR, "the connectors reach {lead} before the boxes land");
+        let travelled = at(&transition(collapsed(), &opened()), CONNECTOR_FADE_START.as_secs_f32() / SETTLE_DURATION.as_secs_f32()).travel;
+        assert!(travelled > 0.95, "the boxes are only {travelled} along when the connectors start");
     }
 
     /// A connector is a thin line, so it reads as present well below full
@@ -497,8 +522,8 @@ mod tests {
     #[test]
     fn the_connectors_come_up_gradually_rather_than_switching_on() {
         let t = transition(collapsed(), &opened());
-        let alpha = |after: Duration| {
-            Transition::at(&t, t.start + SETTLE_DURATION + after)
+        let alpha = |into: Duration| {
+            Transition::at(&t, t.start + CONNECTOR_FADE_START + into)
                 .expect("the fade was over already")
                 .connectors
         };
@@ -506,7 +531,7 @@ mod tests {
         let sixth = alpha(CONNECTOR_FADE / 6);
         assert!(sixth < 0.15, "a sixth of the way in the connectors already read at {sixth}");
         assert!(alpha(CONNECTOR_FADE / 2) < 0.75, "half way in the connectors are all but there");
-        assert!(sixth > 0.0, "the fade had not begun once the boxes landed");
+        assert!(sixth > 0.0, "the fade had not begun a sixth of the way through itself");
     }
 
     #[test]
