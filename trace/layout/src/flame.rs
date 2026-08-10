@@ -612,6 +612,20 @@ fn end_us(slice: &Slice) -> i64 {
     slice.start_us + slice.dur_us
 }
 
+/// The profile's time resolution: timestamps and durations are whole
+/// microseconds, so a span shorter than one is recorded at zero duration and
+/// stands for the microsecond it was quantized into.
+const TIME_RESOLUTION_US: i64 = 1;
+
+/// The time a slice occupies: its own extent, and the microsecond it was
+/// quantized into where that extent is empty.
+fn occupied_span(slice: &Slice) -> TimeSpan {
+    TimeSpan {
+        start_us: slice.start_us,
+        end_us: slice.start_us + slice.dur_us.max(TIME_RESOLUTION_US),
+    }
+}
+
 /// A whole-profile name scan (rank table + mnemonic index) held so a
 /// track-selection flame graph can be rebuilt for any lane subset without
 /// rescanning. The scan covers every lane, so it ranks and labels any
@@ -1040,17 +1054,17 @@ fn reaching(slices: &[Slice], end_maxes: &[i64], span: TimeSpan) -> std::ops::Ra
 }
 
 /// The microseconds of `slice` that lie inside `window`, and `None` for a slice
-/// the window holds no part of. A zero-duration slice covers no microsecond to
-/// clip — microsecond quantization puts a large share of a profile's spans at
-/// zero — so it turns on whether a region holds the instant it sits at.
+/// the window holds no part of. A slice contributes when the time it occupies
+/// (see [`occupied_span`]) reaches into the window, and brings what the window
+/// holds of its own extent — nothing, for a slice of zero duration.
 fn windowed_dur_us(window: &TimeSelection, slice: &Slice) -> Option<i64> {
     if window.is_empty() {
         return Some(slice.dur_us);
     }
-    if slice.dur_us == 0 {
-        return window.region_at(slice.start_us).map(|_| 0);
-    }
-    Some(window.overlap_us(slice.start_us, end_us(slice))).filter(|&us| us > 0)
+    let occupied = occupied_span(slice);
+    window
+        .overlaps(occupied.start_us, occupied.end_us)
+        .then(|| window.overlap_us(slice.start_us, end_us(slice)))
 }
 
 /// Emit one [`Row`] per slice of `thread` into `out`, keyed by its aggregation
@@ -2202,6 +2216,40 @@ mod tests {
         // Unrestricted, a zero-duration span frames like any other.
         let all = flame_as(&p, FlameLabels::Name);
         assert_eq!(all.children(&all.root()).len(), 2);
+    }
+
+    /// Whether a window of `regions` frames a lone zero-duration span sitting
+    /// at `at_us`.
+    fn frames_zero_duration_at(regions: &[(i64, i64)], at_us: i64) -> bool {
+        let p = profile(vec![track(
+            1,
+            LaneClass::Execution,
+            vec![slice("instant", "general information", at_us, 0)],
+        )]);
+        let g = flame_within(&p, FlameLabels::Name, &window(regions));
+        !g.children(&g.root()).is_empty()
+    }
+
+    #[test]
+    fn a_zero_duration_span_at_a_regions_start_is_present() {
+        assert!(frames_zero_duration_at(&[(100, 200)], 100));
+    }
+
+    #[test]
+    fn a_zero_duration_span_a_microsecond_before_a_regions_start_is_absent() {
+        // The leading region holds no part of the span either; it is there to
+        // carry the lane walk far enough to reach it.
+        assert!(!frames_zero_duration_at(&[(0, 50), (100, 200)], 99));
+    }
+
+    #[test]
+    fn a_zero_duration_span_a_microsecond_inside_a_regions_end_is_present() {
+        assert!(frames_zero_duration_at(&[(100, 200)], 199));
+    }
+
+    #[test]
+    fn a_zero_duration_span_at_a_regions_end_is_absent() {
+        assert!(!frames_zero_duration_at(&[(100, 200)], 200));
     }
 
     #[test]

@@ -99,6 +99,16 @@ impl TimeSelection {
         self.spans.get(i).filter(|s| s.start_us <= t_us).map(|_| i)
     }
 
+    /// Whether any region meets `[start_us, end_us)` — `overlap_us(..) > 0`,
+    /// decided by one search and no summing.
+    pub fn overlaps(&self, start_us: i64, end_us: i64) -> bool {
+        if start_us >= end_us {
+            return false;
+        }
+        let first = self.spans.partition_point(|s| s.end_us <= start_us);
+        self.spans.get(first).is_some_and(|s| s.start_us < end_us)
+    }
+
     /// Microseconds of `[start_us, end_us)` the selection covers. Aggregation
     /// calls this once per profile span, so it costs a binary search plus one
     /// step per region actually covered.
@@ -270,6 +280,21 @@ mod tests {
         assert_eq!(sel.region_at(10), None);
         assert_eq!(sel.region_at(129), Some(1));
         assert_eq!(sel.region_at(130), None);
+    }
+
+    #[test]
+    fn overlaps_answers_exactly_when_the_overlap_is_positive() {
+        let sel = selection(&[(0, 100), (200, 300)]);
+        for start in -5..=305 {
+            for len in 0..7 {
+                let end = start + len;
+                assert_eq!(
+                    sel.overlaps(start, end),
+                    sel.overlap_us(start, end) > 0,
+                    "[{start}, {end})"
+                );
+            }
+        }
     }
 
     #[test]
