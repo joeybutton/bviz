@@ -5,9 +5,9 @@ use serde_json::{Map, Value};
 
 use crate::concurrent_interner::{ConcurrentInterner, Writer};
 use crate::model::{
-    lane_class, occupied_span, span_role, CounterLane, CounterPoint, CounterSeries, Metadata,
-    OptStr, PhaseMarker, Profile, ProfileParts, Slice, SliceDetail, Span32, Str, ThreadTrack,
-    TimeSpan,
+    encloses_end, lane_class, occupied_span, span_role, CounterLane, CounterPoint, CounterSeries,
+    Metadata, OptStr, PhaseMarker, Profile, ProfileParts, Slice, SliceDetail, Span32, Str,
+    ThreadTrack, TimeSpan,
 };
 use crate::worker_count;
 
@@ -512,12 +512,7 @@ fn merge_lane(task: &mut TidTask) {
     let mut slots = dest.iter_mut();
     let mut detail_slots = dest_detail.iter_mut();
     let mut end_max_slots = dest_end_max.iter_mut();
-    // Ancestor end-times. A slice is nested only in a span that contains
-    // it, so pop while the stack top ends before the slice does
-    // (`end < slice_end`); popping on end-before-start alone would keep
-    // merely overlapping spans stacked — a span that starts inside another
-    // but ends after it is a sibling, not a child — building a runaway
-    // staircase of false depth.
+    // End times of the ancestors still open.
     let mut stack: Vec<i64> = Vec::new();
     let mut end_max_us = i64::MIN;
     let mut emit = |run: &Run, src: &(i64, Slice, SliceDetail)| {
@@ -525,7 +520,7 @@ fn merge_lane(task: &mut TidTask) {
         let mut d = src.2;
         d.others = d.others.shifted(run.args_base);
         let end = s.start_us.saturating_add(s.dur_us);
-        while stack.last().is_some_and(|&e| e < end) {
+        while stack.last().is_some_and(|&open| !encloses_end(open, end)) {
             stack.pop();
         }
         s.depth = stack.len() as u32;

@@ -2,8 +2,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 
 use bviz_trace_profile::{
-    occupied_span, Profile, Slice, SliceDetail, Span32, SpanRole, Str, ThreadTrack, TimeSpan,
-    Workload,
+    encloses_end, occupied_span, Profile, Slice, SliceDetail, Span32, SpanRole, Str, ThreadTrack,
+    TimeSpan, Workload,
 };
 use rayon::iter::{IntoParallelRefIterator, IntoParallelRefMutIterator, ParallelIterator};
 use rayon::slice::{ParallelSlice, ParallelSliceMut};
@@ -1003,15 +1003,13 @@ impl ArenaChildren {
 }
 
 /// The containment parent of each slice: the nearest enclosing earlier slice, or
-/// `None` for a top-level slice. A depth stack of open slices, popped past each
-/// slice's end, yields each slice's parent index directly.
+/// `None` for a top-level slice. A depth stack of open slices, popped by
+/// [`encloses_end`], yields each slice's parent index directly.
 ///
-/// A start and a duration are rounded to whole microseconds independently, so a
-/// callee's recorded end can fall a microsecond past its caller's. Such a span
-/// is filed beside its caller rather than under it, which leaves two of one
-/// parent's children overlapping: rare — well under one percent of the parents
-/// holding several — but enough that their durations can sum past the parent's
-/// own, so a self time derived by subtracting them is floored at zero.
+/// Two children of one parent can therefore overlap: rare — well under one
+/// percent of the parents holding several — but enough that their durations can
+/// sum past the parent's own, so a self time derived by subtracting them is
+/// floored at zero.
 fn containment_parents(slices: &[Slice]) -> Vec<Option<usize>> {
     debug_assert!(
         slices.windows(2).all(|w| {
@@ -1026,7 +1024,7 @@ fn containment_parents(slices: &[Slice]) -> Vec<Option<usize>> {
         let slice_end = end_us(&slices[i]);
         while stack
             .last()
-            .is_some_and(|&top| end_us(&slices[top]) < slice_end)
+            .is_some_and(|&top| !encloses_end(end_us(&slices[top]), slice_end))
         {
             stack.pop();
         }

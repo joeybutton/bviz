@@ -168,6 +168,20 @@ pub fn occupied_span(start_us: i64, dur_us: i64) -> TimeSpan {
     }
 }
 
+/// Whether a span reaching `outer_end_us` contains one reaching `inner_end_us`,
+/// asked by a walk in start order so the outer span already starts no later.
+/// Nesting turns on the ends alone: a span that starts inside another but
+/// outlives it is its sibling, not its child, and admitting it as a child would
+/// stack every merely overlapping span on the last, building a runaway staircase
+/// of false depth.
+///
+/// A start and a duration are rounded to whole microseconds independently, so a
+/// callee's recorded end can fall a [`TIME_RESOLUTION_US`] microsecond past its
+/// caller's and be held apart from it here.
+pub fn encloses_end(outer_end_us: i64, inner_end_us: i64) -> bool {
+    inner_end_us <= outer_end_us
+}
+
 /// The cold companion of a [`Slice`], read only on demand (tooltips, grouping):
 /// the profile's detail pool is exactly parallel to its slice pool, so a
 /// slice's detail is the entry at the same index and a thread's `slices` span
@@ -888,6 +902,13 @@ mod tests {
         );
         // An unknown category is Other overhead.
         assert_eq!(role("some future task", ""), overhead(Workload::Other));
+    }
+
+    #[test]
+    fn a_span_nests_up_to_a_shared_end_and_no_further() {
+        assert!(encloses_end(100, 40));
+        assert!(encloses_end(100, 100));
+        assert!(!encloses_end(100, 100 + TIME_RESOLUTION_US));
     }
 
     #[test]
