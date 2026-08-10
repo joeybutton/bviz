@@ -152,6 +152,15 @@ pub struct Slice {
 
 const _: () = assert!(std::mem::size_of::<Slice>() == 32);
 
+impl Slice {
+    /// When the slice ends, clamped to the maximum representable time: a
+    /// profile's floats round to a start and a duration independently, so their
+    /// sum can exceed `i64`.
+    pub fn end_us(self) -> i64 {
+        self.start_us.saturating_add(self.dur_us)
+    }
+}
+
 /// The profile's time resolution: timestamps and durations are whole
 /// microseconds, so an event shorter than one is recorded at zero duration and
 /// stands for the microsecond it fell in.
@@ -611,12 +620,12 @@ impl Profile {
         &self.detail_pool[track.slices.range()]
     }
 
-    /// The running maximum end time (`start_us + dur_us`) of a thread track's
-    /// slices: element `i` is the max over the track's slices `0..=i`, reset at
-    /// each track. Index-parallel to [`Profile::slices`] and monotone
-    /// nondecreasing within a track, so the leftmost slice that can still
-    /// overlap a view is a binary search (`partition_point`) for the first
-    /// element reaching the view's left cull bound, instead of a scan from 0.
+    /// The running maximum [`Slice::end_us`] of a thread track's slices:
+    /// element `i` is the max over the track's slices `0..=i`, reset at each
+    /// track. Index-parallel to [`Profile::slices`] and monotone nondecreasing
+    /// within a track, so the leftmost slice that can still overlap a view is a
+    /// binary search (`partition_point`) for the first element reaching the
+    /// view's left cull bound, instead of a scan from 0.
     pub fn end_maxes(&self, track: &ThreadTrack) -> &[i64] {
         &self.end_max_pool[track.slices.range()]
     }
@@ -907,6 +916,28 @@ mod tests {
         );
         // An unknown category is Other overhead.
         assert_eq!(role("some future task", ""), overhead(Workload::Other));
+    }
+
+    fn timed_slice(start_us: i64, dur_us: i64) -> Slice {
+        Slice {
+            name: Str::default(),
+            start_us,
+            dur_us,
+            depth: 0,
+            role: span_role("", ""),
+        }
+    }
+
+    #[test]
+    fn a_slices_end_is_its_start_plus_its_duration() {
+        assert_eq!(timed_slice(100, 25).end_us(), 125);
+        assert_eq!(timed_slice(100, 0).end_us(), 100);
+    }
+
+    #[test]
+    fn a_slice_whose_start_and_duration_overflow_ends_at_the_greatest_representable_time() {
+        assert_eq!(timed_slice(i64::MAX, i64::MAX).end_us(), i64::MAX);
+        assert_eq!(timed_slice(i64::MAX - 1, 25).end_us(), i64::MAX);
     }
 
     #[test]

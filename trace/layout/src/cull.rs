@@ -101,7 +101,7 @@ pub(crate) fn emit_slice(
     let x = view.x_of(s.start_us) as f64;
     let content = Span {
         x,
-        w: view.x_of(s.start_us + s.dur_us) as f64 - x,
+        w: view.x_of(s.end_us()) as f64 - x,
     };
     let Some(paint) = painted(content, covered[depth], min_px as f64) else {
         return;

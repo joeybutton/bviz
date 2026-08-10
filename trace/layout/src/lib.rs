@@ -164,6 +164,45 @@ mod tests {
     }
 
     #[test]
+    fn slices_ending_past_the_representable_range_nest_and_paint_against_the_clamped_end() {
+        const OUTER_START_US: i64 = 5_000_000_000_000_000_000;
+        // Summed with either start, leaves the `i64` range.
+        const DUR_US: i64 = 5_000_000_000_000_000_000;
+        // Inside the outer slice, and a multiple of the f64 step at this
+        // magnitude so the trace JSON carries it exactly.
+        const INNER_START_US: i64 = OUTER_START_US + 1_048_576;
+
+        let p = profile(vec![track(
+            1,
+            LaneClass::Execution,
+            vec![
+                slice("outer", "general information", OUTER_START_US, DUR_US),
+                slice("inner", "general information", INNER_START_US, DUR_US),
+            ],
+        )]);
+        assert_eq!(p.end_maxes(&p.threads()[0]), [i64::MAX, i64::MAX]);
+
+        let graph =
+            TrackFlamer::new(&p).build(FlameLabels::Name, &TimeSelection::default(), |_| true);
+        let top = graph.children(&graph.root());
+        assert_eq!(top.iter().map(|n| graph.str(n.name)).collect::<Vec<_>>(), ["outer"]);
+        let nested = graph.children(&top[0]);
+        assert_eq!(nested.iter().map(|n| graph.str(n.name)).collect::<Vec<_>>(), ["inner"]);
+
+        let viewport = Viewport { width: 300.0, height: 100.0, scroll_y: 0.0 };
+        let view = TimeView::fit(p.span(), viewport.width, 0.0);
+        let vis = visible_slices(
+            &p,
+            &lay_out_lanes(&p, &METRICS),
+            Cull { view: &view, viewport: &viewport, metrics: &METRICS, min_px: 1.0 },
+        );
+        // Both slices reach the right edge, the clamped end the view is fitted to.
+        let right_edges: Vec<f32> = vis.iter().map(|v| v.x + v.w).collect();
+        assert_eq!(right_edges.len(), 2);
+        assert!(right_edges.iter().all(|&e| e >= viewport.width), "{right_edges:?}");
+    }
+
+    #[test]
     fn culls_off_time_and_widens_subpixel_slices() {
         // Four disjoint top-level slices: one on-screen, one on-screen, one
         // zero-width, one far off-time. All sit at depth 0 (no nesting).

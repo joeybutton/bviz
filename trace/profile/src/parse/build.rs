@@ -519,7 +519,7 @@ fn merge_lane(task: &mut TidTask) {
         let mut s = src.1;
         let mut d = src.2;
         d.others = d.others.shifted(run.args_base);
-        let end = s.start_us.saturating_add(s.dur_us);
+        let end = s.end_us();
         while stack
             .last()
             .is_some_and(|&open| !encloses(open, s.start_us, end))

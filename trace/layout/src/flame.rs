@@ -608,11 +608,6 @@ impl Flamer {
     }
 }
 
-/// End time of a slice.
-fn end_us(slice: &Slice) -> i64 {
-    slice.start_us + slice.dur_us
-}
-
 /// A whole-profile name scan (rank table + mnemonic index) held so a
 /// track-selection flame graph can be rebuilt for any lane subset without
 /// rescanning. The scan covers every lane, so it ranks and labels any
@@ -1020,10 +1015,10 @@ fn containment_parents(slices: &[Slice]) -> Vec<Option<usize>> {
     let mut parents = vec![None; slices.len()];
     let mut stack: Vec<usize> = Vec::new();
     for (i, slice) in slices.iter().enumerate() {
-        let slice_end = end_us(slice);
+        let slice_end = slice.end_us();
         while stack
             .last()
-            .is_some_and(|&top| !encloses(end_us(&slices[top]), slice.start_us, slice_end))
+            .is_some_and(|&top| !encloses(slices[top].end_us(), slice.start_us, slice_end))
         {
             stack.pop();
         }
@@ -1069,7 +1064,7 @@ fn windowed_dur_us(window: &TimeSelection, slice: &Slice) -> Option<i64> {
     let occupied = occupied_span(slice.start_us, slice.dur_us);
     window
         .overlaps(occupied.start_us, occupied.end_us)
-        .then(|| window.overlap_us(slice.start_us, end_us(slice)))
+        .then(|| window.overlap_us(slice.start_us, slice.end_us()))
 }
 
 /// Emit one [`Row`] per slice of `thread` into `out`, keyed by its aggregation
