@@ -96,8 +96,9 @@ pub fn default_expansion(graph: &Graph, max_nodes: usize, max_edges: usize) -> H
     order[..fitting].iter().copied().collect()
 }
 
-/// A graph's containment forest, queried while choosing containers to expand.
-struct Forest {
+/// A graph's containment forest indexed by children, answering how much of the
+/// graph opening a container puts on screen.
+pub struct Forest {
     children: HashMap<Id, Vec<Id>>,
     roots: Vec<Id>,
     /// Memoizes [`Self::visible_subtree`].
@@ -105,7 +106,7 @@ struct Forest {
 }
 
 impl Forest {
-    fn new(graph: &Graph) -> Self {
+    pub fn new(graph: &Graph) -> Self {
         let mut children: HashMap<Id, Vec<Id>> = HashMap::new();
         let mut roots: Vec<Id> = Vec::new();
         for node in &graph.nodes {
@@ -130,8 +131,9 @@ impl Forest {
         }
     }
 
-    /// How many nodes expanding `container` puts on screen.
-    fn reveal_count(&self, container: Id) -> usize {
+    /// How many nodes expanding `container` puts on screen. `container` must
+    /// have children.
+    pub fn reveal_count(&self, container: Id) -> usize {
         self.children[&container].iter().map(|&c| self.visible_subtree(c)).sum()
     }
 

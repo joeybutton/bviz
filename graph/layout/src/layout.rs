@@ -31,7 +31,7 @@ use org_eclipse_elk_graph::org::eclipse::elk::graph::{
     ElkConnectableShapeRef, ElkEdgeRef, ElkNodeRef,
 };
 
-use crate::graph::{EdgeKind, Graph, Kind, Node};
+use crate::graph::{Containment, EdgeKind, Graph, Kind, Node};
 use crate::intern::Id;
 
 /// Above this many routed node pairs the view is a dense tangle whose crossings
@@ -404,40 +404,20 @@ fn choose_placement(
     }
 }
 
-/// Containment depth per node, used only to draw parents before children.
-fn node_depths(graph: &Graph) -> HashMap<Id, usize> {
-    let parent_of: HashMap<Id, Id> = graph
-        .nodes
-        .iter()
-        .filter_map(|node| node.parent.map(|p| (node.id, p)))
-        .collect();
-    let mut depth_of: HashMap<Id, usize> = HashMap::with_capacity(graph.nodes.len());
-    for node in &graph.nodes {
-        let mut depth = 0;
-        let mut id = node.id;
-        while let Some(&parent) = parent_of.get(&id) {
-            depth += 1;
-            id = parent;
-        }
-        depth_of.insert(node.id, depth);
-    }
-    depth_of
-}
-
 /// Reads each node's laid-out box in absolute coordinates.
 fn collect_boxes(
     graph: &Graph,
     children_of: &HashMap<Id, Vec<&Node>>,
     elk_of: &HashMap<Id, ElkNodeRef>,
 ) -> Vec<Box> {
-    let depth_of = node_depths(graph);
-    let mut boxes: Vec<(usize, Box)> = Vec::with_capacity(graph.nodes.len());
+    let containment = Containment::new(graph);
+    let mut boxes: Vec<(u32, Box)> = Vec::with_capacity(graph.nodes.len());
     for node in &graph.nodes {
         let elk = &elk_of[&node.id];
         let (x, y) = absolute_origin(elk);
         let (width, height) = dimensions(elk);
         boxes.push((
-            depth_of[&node.id],
+            containment.depth(node.id),
             Box {
                 id: node.id,
                 label: node.label.clone(),

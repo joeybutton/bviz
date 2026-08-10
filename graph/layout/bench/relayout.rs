@@ -28,7 +28,7 @@ use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use bviz_graph_layout::graph::Graph;
+use bviz_graph_layout::graph::{Containment, Graph};
 use bviz_graph_layout::{layout, lod, quotient, reduce, streamed_proto, Id, LaidOut, Names};
 
 /// The node cap `--max-nodes` defaults to: the cap the application's first
@@ -95,67 +95,11 @@ struct Shape {
     bends: usize,
 }
 
-/// Depth in the containment forest, a root counting zero.
-fn depths(graph: &Graph, parent_of: &HashMap<Id, Option<Id>>) -> HashMap<Id, u32> {
-    let mut depth_of = HashMap::with_capacity(graph.nodes.len());
-    for node in &graph.nodes {
-        let mut chain = Vec::new();
-        let mut at = Some(node.id);
-        let mut depth = loop {
-            match at {
-                None => break 0,
-                Some(id) => match depth_of.get(&id) {
-                    Some(&known) => break known + 1,
-                    None => {
-                        chain.push(id);
-                        at = parent_of[&id];
-                    }
-                },
-            }
-        };
-        for &id in chain.iter().rev() {
-            depth_of.insert(id, depth);
-            depth += 1;
-        }
-    }
-    depth_of
-}
-
-/// The pair of nodes ELK ranks against each other for an edge between `from` and
-/// `to`: each endpoint lifted to its ancestor sitting directly in the deepest
-/// frame containing both, which is the frame that routes the edge. `None` where
-/// one endpoint contains the other, so no frame holds both.
-fn ranked_pair(
-    parent_of: &HashMap<Id, Option<Id>>,
-    depth_of: &HashMap<Id, u32>,
-    from: Id,
-    to: Id,
-) -> Option<(Id, Id)> {
-    let (mut a, mut b) = (from, to);
-    while depth_of[&a] > depth_of[&b] {
-        a = parent_of[&a]?;
-    }
-    while depth_of[&b] > depth_of[&a] {
-        b = parent_of[&b]?;
-    }
-    while a != b {
-        let (up_a, up_b) = (parent_of[&a], parent_of[&b]);
-        if up_a == up_b {
-            return Some((a, b));
-        }
-        a = up_a?;
-        b = up_b?;
-    }
-    None
-}
-
 fn shape(graph: &Graph, drawing: &LaidOut) -> Shape {
-    let parent_of: HashMap<Id, Option<Id>> =
-        graph.nodes.iter().map(|n| (n.id, n.parent)).collect();
-    let depth_of = depths(graph, &parent_of);
+    let containment = Containment::new(graph);
     let mut frames: HashMap<Option<Id>, Frame> = HashMap::new();
-    for (id, anchor) in &drawing.anchors {
-        let frame = frames.entry(parent_of[id]).or_default();
+    for (&id, anchor) in &drawing.anchors {
+        let frame = frames.entry(containment.parent(id)).or_default();
         frame.nodes += 1;
         frame.layers = frame.layers.max(anchor.layer + 1);
     }
@@ -166,18 +110,19 @@ fn shape(graph: &Graph, drawing: &LaidOut) -> Shape {
     let mut bends = 0;
     for connector in &drawing.connectors {
         bends += connector.points.len().saturating_sub(2);
-        let ranked = ranked_pair(&parent_of, &depth_of, connector.from, connector.to);
-        let placed = ranked
-            .and_then(|(a, b)| Some((a, b, drawing.anchors.get(&a)?, drawing.anchors.get(&b)?)));
-        let Some((a, b, from, to)) = placed else {
+        let ranked = containment.sibling_pair(connector.from, connector.to);
+        let placed = ranked.and_then(|(frame, a, b)| {
+            Some((frame, a, b, drawing.anchors.get(&a)?, drawing.anchors.get(&b)?))
+        });
+        let Some((routing_frame, a, b, from, to)) = placed else {
             nested += 1;
             continue;
         };
         let span = from.layer.abs_diff(to.layer);
         longest_span = longest_span.max(span);
-        descent += u64::from(depth_of[&connector.from] - depth_of[&a])
-            + u64::from(depth_of[&connector.to] - depth_of[&b]);
-        let frame = frames.entry(parent_of[&a]).or_default();
+        descent += u64::from(containment.depth(connector.from) - containment.depth(a))
+            + u64::from(containment.depth(connector.to) - containment.depth(b));
+        let frame = frames.entry(routing_frame).or_default();
         frame.connectors += 1;
         frame.span += u64::from(span);
     }
@@ -309,59 +254,17 @@ fn view_at(base: &Graph, reduced_base: &Graph, expanded: &HashSet<Id>, names: &m
     reduce::transitive_reduction(&view)
 }
 
-fn children_by_parent(graph: &Graph) -> HashMap<Id, Vec<Id>> {
-    let mut children: HashMap<Id, Vec<Id>> = HashMap::new();
-    for node in &graph.nodes {
-        if let Some(parent) = node.parent {
-            children.entry(parent).or_default().push(node.id);
-        }
-    }
-    children
-}
-
-/// How many nodes the view gains when `node` becomes visible: itself plus the
-/// chain of single-child descendants below it, each of which auto-expands.
-fn opened_chain(children: &HashMap<Id, Vec<Id>>, memo: &mut HashMap<Id, usize>, node: Id) -> usize {
-    let mut chain = Vec::new();
-    let mut n = node;
-    let mut below = loop {
-        if let Some(&known) = memo.get(&n) {
-            break known;
-        }
-        match children.get(&n).map(Vec::as_slice) {
-            Some([only]) => {
-                chain.push(n);
-                n = *only;
-            }
-            _ => {
-                memo.insert(n, 1);
-                break 1;
-            }
-        }
-    };
-    for &n in chain.iter().rev() {
-        below += 1;
-        memo.insert(n, below);
-    }
-    below
-}
-
 /// Of the containers the view at `expanded` draws collapsed, the one whose
 /// expansion unfolds the most nodes, and how many that is — counted before
 /// interchangeable leaves merge, so the boxes the view gains are fewer. Ties go
 /// to the lower id, so a graph always picks the same container.
 fn densest_collapsed_container(base: &Graph, expanded: &HashSet<Id>) -> Option<(Id, usize)> {
     let drawn: HashSet<Id> = lod::collapse(base, expanded).nodes.iter().map(|n| n.id).collect();
-    let children = children_by_parent(base);
-    let mut chains: HashMap<Id, usize> = HashMap::new();
+    let forest = lod::Forest::new(base);
     lod::expandable_containers(base)
         .into_iter()
         .filter(|id| drawn.contains(id) && !expanded.contains(id))
-        .map(|id| {
-            let revealed =
-                children[&id].iter().map(|&c| opened_chain(&children, &mut chains, c)).sum();
-            (id, revealed)
-        })
+        .map(|id| (id, forest.reveal_count(id)))
         .max_by_key(|&(id, revealed)| (revealed, Reverse(id)))
 }
 

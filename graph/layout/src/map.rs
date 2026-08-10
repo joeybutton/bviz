@@ -10,7 +10,7 @@ use std::sync::OnceLock;
 use bviz_parallel::worker_count;
 use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 
-use crate::graph::{EdgeKind, Graph, Node};
+use crate::graph::{Containment, EdgeKind, Graph, Node};
 use crate::intern::Id;
 use crate::layout::{self, Box, Connector, LaidOut, BORDER, LABEL_BAND, LEAF_HEIGHT};
 use crate::{lod, reduce};
@@ -298,71 +298,6 @@ fn frame_edges(
         }
     }
     frames.into_iter().map(|(frame, edges)| (frame, edges.into_iter().collect())).collect()
-}
-
-/// A graph's containment forest, indexed by node id.
-struct Containment {
-    parent: Vec<Option<Id>>,
-    depth: Vec<u32>,
-}
-
-impl Containment {
-    fn new(graph: &Graph) -> Self {
-        let mentioned = graph.nodes.iter().flat_map(|n| [Some(n.id), n.parent]).flatten();
-        let len = mentioned.map(|id| id.0 as usize + 1).max().unwrap_or(0);
-        let mut parent: Vec<Option<Id>> = vec![None; len];
-        for node in &graph.nodes {
-            parent[node.id.0 as usize] = node.parent;
-        }
-        let mut depth: Vec<u32> = vec![0; len];
-        for node in &graph.nodes {
-            let mut steps = 0;
-            let mut id = node.id;
-            while let Some(up) = parent[id.0 as usize] {
-                steps += 1;
-                id = up;
-            }
-            depth[node.id.0 as usize] = steps;
-        }
-        Self { parent, depth }
-    }
-
-    fn parent(&self, id: Id) -> Option<Id> {
-        self.parent[id.0 as usize]
-    }
-
-    /// `id`'s containment parent, or `id` itself where it is a root.
-    fn up(&self, id: Id) -> Id {
-        self.parent(id).unwrap_or(id)
-    }
-
-    fn depth(&self, id: Id) -> u32 {
-        self.depth[id.0 as usize]
-    }
-
-    /// The frame that places `from` and `to` side by side — their nearest common
-    /// ancestor, or `None` for the top frame when they are in different trees —
-    /// and the child of it each of them descends from. `None` overall when one
-    /// of the two contains the other, which no frame places side by side.
-    fn sibling_pair(&self, from: Id, to: Id) -> Option<(Option<Id>, Id, Id)> {
-        let (mut a, mut b) = (from, to);
-        while self.depth(a) > self.depth(b) {
-            a = self.up(a);
-        }
-        while self.depth(b) > self.depth(a) {
-            b = self.up(b);
-        }
-        if a == b {
-            return None;
-        }
-        // Both stand at one depth from here, so they reach the roots together
-        // and meet at latest where both parents are `None`.
-        while self.parent(a) != self.parent(b) {
-            a = self.up(a);
-            b = self.up(b);
-        }
-        Some((self.parent(a), a, b))
-    }
 }
 
 /// The scale from which each level past the coarsest takes over, rising by
