@@ -152,6 +152,22 @@ pub struct Slice {
 
 const _: () = assert!(std::mem::size_of::<Slice>() == 32);
 
+/// The profile's time resolution: timestamps and durations are whole
+/// microseconds, so an event shorter than one is recorded at zero duration and
+/// stands for the microsecond it fell in.
+pub const TIME_RESOLUTION_US: i64 = 1;
+
+/// The time an event starting at `start_us` and lasting `dur_us` occupies: its
+/// own extent, and the one [`TIME_RESOLUTION_US`] microsecond it was recorded
+/// in where that extent is empty — as it is for an instant-like record, a
+/// counter sample or a phase marker.
+pub fn occupied_span(start_us: i64, dur_us: i64) -> TimeSpan {
+    TimeSpan {
+        start_us,
+        end_us: start_us.saturating_add(dur_us.max(TIME_RESOLUTION_US)),
+    }
+}
+
 /// The cold companion of a [`Slice`], read only on demand (tooltips, grouping):
 /// the profile's detail pool is exactly parallel to its slice pool, so a
 /// slice's detail is the entry at the same index and a thread's `slices` span
@@ -538,8 +554,10 @@ impl Profile {
         &self.phase_markers
     }
 
-    /// The extent covering every thread slice, counter sample, and phase
-    /// marker, collapsed to zero for a profile carrying none of them.
+    /// The extent covering the time every thread slice, counter sample, and
+    /// phase marker occupies (see [`occupied_span`]), collapsed to zero for a
+    /// profile carrying none of them. Restricting an aggregation to this holds
+    /// every event, so it aggregates what an unrestricted one does.
     pub fn span(&self) -> TimeSpan {
         self.span
     }

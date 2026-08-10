@@ -5,8 +5,9 @@ use serde_json::{Map, Value};
 
 use crate::concurrent_interner::{ConcurrentInterner, Writer};
 use crate::model::{
-    lane_class, span_role, CounterLane, CounterPoint, CounterSeries, Metadata, OptStr,
-    PhaseMarker, Profile, ProfileParts, Slice, SliceDetail, Span32, Str, ThreadTrack, TimeSpan,
+    lane_class, occupied_span, span_role, CounterLane, CounterPoint, CounterSeries, Metadata,
+    OptStr, PhaseMarker, Profile, ProfileParts, Slice, SliceDetail, Span32, Str, ThreadTrack,
+    TimeSpan,
 };
 use crate::worker_count;
 
@@ -348,7 +349,7 @@ fn finish_merge(
     merge_lanes(&mut tasks);
     let results: Vec<(u32, i64, i64)> = tasks
         .into_iter()
-        .map(|t| (t.max_depth, t.min_start_us, t.max_end_us))
+        .map(|t| (t.max_depth, t.min_start_us, t.max_occupied_us))
         .collect();
     // SAFETY: the segments partition the first `slice_total` slots of each
     // pool's spare capacity, each merge wrote its whole segment in all three
@@ -415,7 +416,10 @@ struct TidTask<'a> {
     runs: Vec<Run<'a>>,
     max_depth: u32,
     min_start_us: i64,
-    max_end_us: i64,
+    /// The furthest any of the lane's slices reaches by
+    /// [`occupied_span`], which is the lane's contribution to
+    /// [`compute_span`].
+    max_occupied_us: i64,
 }
 
 /// The runs feeding each thread's merge, in fold order within a thread.
@@ -464,7 +468,7 @@ fn carve_segments<'a>(
             runs,
             max_depth: 0,
             min_start_us: i64::MAX,
-            max_end_us: i64::MIN,
+            max_occupied_us: i64::MIN,
         });
     }
     debug_assert_eq!(off as usize, slice_total);
@@ -496,14 +500,14 @@ fn merge_lanes(tasks: &mut [TidTask]) {
 ///
 /// Filling a slot carries the rest of the per-slice work in the same pass: it
 /// rebases the detail's arg-pool span onto its run's base, assigns the depth
-/// the ancestor stack gives, and folds the slice into the lane's time span.
-/// That span's running end is what the end-max slot receives, feeding
+/// the ancestor stack gives, folds the slice into the lane's time extent, and
+/// hands the end-max slot the running end its slices have reached, feeding
 /// [`Profile::end_maxes`].
 ///
 /// Slice, detail, and end max travel as one triple, so the three pools stay
 /// index-parallel by construction.
 fn merge_lane(task: &mut TidTask) {
-    let TidTask { dest, dest_detail, dest_end_max, runs, max_depth, min_start_us, max_end_us } =
+    let TidTask { dest, dest_detail, dest_end_max, runs, max_depth, min_start_us, max_occupied_us } =
         task;
     let mut slots = dest.iter_mut();
     let mut detail_slots = dest_detail.iter_mut();
@@ -515,6 +519,7 @@ fn merge_lane(task: &mut TidTask) {
     // but ends after it is a sibling, not a child — building a runaway
     // staircase of false depth.
     let mut stack: Vec<i64> = Vec::new();
+    let mut end_max_us = i64::MIN;
     let mut emit = |run: &Run, src: &(i64, Slice, SliceDetail)| {
         let mut s = src.1;
         let mut d = src.2;
@@ -527,10 +532,11 @@ fn merge_lane(task: &mut TidTask) {
         *max_depth = (*max_depth).max(s.depth + 1);
         stack.push(end);
         *min_start_us = (*min_start_us).min(s.start_us);
-        *max_end_us = (*max_end_us).max(end);
+        *max_occupied_us = (*max_occupied_us).max(occupied_span(s.start_us, s.dur_us).end_us);
+        end_max_us = end_max_us.max(end);
         slots.next().expect("segment sized to the runs' total").write(s);
         detail_slots.next().expect("segment sized to the runs' total").write(d);
-        end_max_slots.next().expect("segment sized to the runs' total").write(*max_end_us);
+        end_max_slots.next().expect("segment sized to the runs' total").write(end_max_us);
     };
     if let [run] = &runs[..] {
         for &idx in run.order {
@@ -600,7 +606,8 @@ fn build_parts(
 }
 
 /// The per-thread merge output: `segments[i]` (thread id and its slice span)
-/// paired index-wise with `results[i]` (max depth, min start, max end).
+/// paired index-wise with `results[i]` (max depth, min start, max occupied
+/// end).
 #[derive(Clone, Copy)]
 struct ThreadMerge<'a> {
     segments: &'a [(i64, Span32)],
@@ -615,24 +622,24 @@ fn compute_span(
     let ThreadMerge { segments, results } = merge;
     let mut start: Option<i64> = None;
     let mut end: Option<i64> = None;
-    let mut note = |s: i64, e: i64| {
-        start = Some(start.map_or(s, |cur| cur.min(s)));
-        end = Some(end.map_or(e, |cur| cur.max(e)));
+    let mut note = |occupied: TimeSpan| {
+        start = Some(start.map_or(occupied.start_us, |cur| cur.min(occupied.start_us)));
+        end = Some(end.map_or(occupied.end_us, |cur| cur.max(occupied.end_us)));
     };
-    for (&(_, span), &(_, min_start, max_end)) in segments.iter().zip(results) {
+    for (&(_, span), &(_, min_start, max_occupied)) in segments.iter().zip(results) {
         if !span.is_empty() {
-            note(min_start, max_end);
+            note(TimeSpan { start_us: min_start, end_us: max_occupied });
         }
     }
     for lane in counters.values() {
         for series in &lane.series {
             for p in &series.points {
-                note(p.ts_us, p.ts_us);
+                note(occupied_span(p.ts_us, 0));
             }
         }
     }
     for m in phase_markers {
-        note(m.start_us, m.start_us);
+        note(occupied_span(m.start_us, 0));
     }
     TimeSpan {
         start_us: start.unwrap_or(0),

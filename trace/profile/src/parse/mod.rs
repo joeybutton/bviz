@@ -949,7 +949,44 @@ mod tests {
         }"#;
         let p = parse(json);
         assert_eq!(p.span().start_us, -2463000);
-        assert_eq!(p.span().end_us, 2000);
+        // The trailing counter sample occupies the microsecond it sits in.
+        assert_eq!(p.span().end_us, 2001);
+    }
+
+    #[test]
+    fn a_profile_whose_last_event_is_zero_duration_reaches_past_its_instant() {
+        // A trailing record of each kind the extent is folded from: a slice, a
+        // phase marker, and a counter sample.
+        for last in [
+            r#"{"cat":"c","name":"mark","ph":"X","ts":1000,"dur":0,"pid":1,"tid":1}"#,
+            r#"{"cat":"build phase marker","name":"Execute","ph":"X","ts":1000,"pid":1,"tid":1}"#,
+            r#"{"name":"Usage","ph":"C","ts":1000,"pid":1,"tid":1,"args":{"cpu":1.0}}"#,
+        ] {
+            let json = format!(
+                r#"{{"traceEvents": [
+                    {{"cat":"c","name":"x","ph":"X","ts":100,"dur":900,"pid":1,"tid":1}},
+                    {last}
+                ]}}"#
+            );
+            assert_eq!(parse(&json).span().end_us, 1001, "{last}");
+        }
+    }
+
+    #[test]
+    fn a_profile_whose_last_event_has_a_duration_ends_exactly_at_its_end() {
+        let json = r#"{
+            "traceEvents": [
+                {"cat":"c","name":"mark","ph":"X","ts":100,"dur":0,"pid":1,"tid":1},
+                {"cat":"c","name":"x","ph":"X","ts":100,"dur":900,"pid":1,"tid":1}
+            ]
+        }"#;
+        assert_eq!(parse(json).span().end_us, 1000);
+    }
+
+    #[test]
+    fn an_empty_profile_reports_a_zero_extent() {
+        let p = parse(r#"{"traceEvents": []}"#);
+        assert_eq!(p.span(), TimeSpan { start_us: 0, end_us: 0 });
     }
 
     #[test]

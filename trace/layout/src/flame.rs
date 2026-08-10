@@ -2,7 +2,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 
 use bviz_trace_profile::{
-    Profile, Slice, SliceDetail, Span32, SpanRole, Str, ThreadTrack, TimeSpan, Workload,
+    occupied_span, Profile, Slice, SliceDetail, Span32, SpanRole, Str, ThreadTrack, TimeSpan,
+    Workload,
 };
 use rayon::iter::{IntoParallelRefIterator, IntoParallelRefMutIterator, ParallelIterator};
 use rayon::slice::{ParallelSlice, ParallelSliceMut};
@@ -612,20 +613,6 @@ fn end_us(slice: &Slice) -> i64 {
     slice.start_us + slice.dur_us
 }
 
-/// The profile's time resolution: timestamps and durations are whole
-/// microseconds, so a span shorter than one is recorded at zero duration and
-/// stands for the microsecond it was quantized into.
-const TIME_RESOLUTION_US: i64 = 1;
-
-/// The time a slice occupies: its own extent, and the microsecond it was
-/// quantized into where that extent is empty.
-fn occupied_span(slice: &Slice) -> TimeSpan {
-    TimeSpan {
-        start_us: slice.start_us,
-        end_us: slice.start_us + slice.dur_us.max(TIME_RESOLUTION_US),
-    }
-}
-
 /// A whole-profile name scan (rank table + mnemonic index) held so a
 /// track-selection flame graph can be rebuilt for any lane subset without
 /// rescanning. The scan covers every lane, so it ranks and labels any
@@ -1061,7 +1048,7 @@ fn windowed_dur_us(window: &TimeSelection, slice: &Slice) -> Option<i64> {
     if window.is_empty() {
         return Some(slice.dur_us);
     }
-    let occupied = occupied_span(slice);
+    let occupied = occupied_span(slice.start_us, slice.dur_us);
     window
         .overlaps(occupied.start_us, occupied.end_us)
         .then(|| window.overlap_us(slice.start_us, end_us(slice)))
@@ -2145,6 +2132,25 @@ mod tests {
         let p = clipping_profile();
         for labels in [FlameLabels::Mnemonic, FlameLabels::Name] {
             let whole = flame_within(&p, labels, &window(&[(0, 250)]));
+            assert_eq!(resolved(&whole), resolved(&flame_as(&p, labels)), "{labels:?}");
+        }
+    }
+
+    #[test]
+    fn a_window_of_the_whole_profile_span_matches_the_unrestricted_graph() {
+        // The lane's last span is zero-duration, so the profile's extent
+        // reaches past it only if it covers the microsecond that span sits in.
+        let p = profile(vec![track(
+            1,
+            LaneClass::Execution,
+            vec![
+                action_named("Compiling //x:y", "Rustc", 0, 100),
+                slice("checkOutputs", "general information", 100, 0),
+            ],
+        )]);
+        let span = p.span();
+        for labels in [FlameLabels::Mnemonic, FlameLabels::Name] {
+            let whole = flame_within(&p, labels, &window(&[(span.start_us, span.end_us)]));
             assert_eq!(resolved(&whole), resolved(&flame_as(&p, labels)), "{labels:?}");
         }
     }
