@@ -147,6 +147,17 @@ impl RegionEdit {
             Self::Union | Self::Resize { .. } | Self::Slide { .. } | Self::Remove { .. } => false,
         }
     }
+
+    /// The region the edit acts on, and `None` for one that names no region of
+    /// its own and covers whatever its drag reaches.
+    fn region(self) -> Option<usize> {
+        match self {
+            Self::Replace | Self::Union => None,
+            Self::Resize { index } | Self::Slide { index, .. } | Self::Remove { index } => {
+                Some(index)
+            }
+        }
+    }
 }
 
 /// A time-region drag in progress. Its region reaches the model on release, so
@@ -593,9 +604,11 @@ impl TimelinePanel {
         let at = time_at_x(self.view, bounds, x - regions.content_left);
         let (edit, anchor_us) = {
             let sel = self.model.read(cx).time_selection();
-            let grab = in_ruler
-                .then(|| region_grab(sel, self.view, regions, bounds, at, x))
-                .flatten();
+            let grab = if in_ruler {
+                Grab::Ruler(region_grab(sel, self.view, regions, bounds, at, x))
+            } else {
+                Grab::Lanes
+            };
             let ctrl = e.modifiers.control || e.modifiers.platform;
             region_press(sel, at, ctrl, grab)
         };
@@ -1130,23 +1143,35 @@ fn selection_pixels(sel: &TimeSelection, tv: TimeView, regions: Regions) -> Vec<
     out
 }
 
+/// What a press could take hold of, which is a property of the band it landed
+/// in: the ruler draws edge grips and hit-tests them in pixels, the flame lanes
+/// draw neither and leave the pressed instant to say where the press is.
+#[derive(Clone, Copy)]
+enum Grab {
+    /// A press in the ruler band, holding what [`region_grab`] found for it.
+    Ruler(Option<(RegionEdit, i64)>),
+    /// A press over the flame lanes.
+    Lanes,
+}
+
 /// The edit a press on the instant `at` resolves to, with the instant to anchor
-/// its drag at. `ctrl` asks for the region under the press to be toggled in the
-/// set — inside a region it takes that region away, outside every region it
-/// unions the drag in — and overrides `grab`, so a region's edge zone removes
-/// like the rest of it. A press without ctrl takes whatever `grab` found, and
-/// failing that replaces the selection.
-fn region_press(
-    sel: &TimeSelection,
-    at: i64,
-    ctrl: bool,
-    grab: Option<(RegionEdit, i64)>,
-) -> (RegionEdit, i64) {
+/// its drag at. Ctrl toggles the pressed region's membership: it takes away
+/// whichever region the press took hold of, and where it held none it unions the
+/// drag in. Without ctrl the press keeps what it took hold of, and failing that
+/// replaces the selection.
+fn region_press(sel: &TimeSelection, at: i64, ctrl: bool, grab: Grab) -> (RegionEdit, i64) {
     if ctrl {
-        let removal = sel.region_at(at).map(|index| (RegionEdit::Remove { index }, at));
+        let held = match grab {
+            Grab::Ruler(held) => held.and_then(|(edit, _)| edit.region()),
+            Grab::Lanes => sel.region_at(at),
+        };
+        let removal = held.map(|index| (RegionEdit::Remove { index }, at));
         return removal.unwrap_or((RegionEdit::Union, at));
     }
-    grab.unwrap_or((RegionEdit::Replace, at))
+    match grab {
+        Grab::Ruler(Some(held)) => held,
+        Grab::Ruler(None) | Grab::Lanes => (RegionEdit::Replace, at),
+    }
 }
 
 /// The edit a press at window `x`, on the instant `at`, takes hold of in `sel` —
@@ -1676,7 +1701,8 @@ mod tests {
     fn ruler_press(sel: &TimeSelection, x: f32, ctrl: bool) -> (RegionEdit, i64) {
         let axis = test_axis();
         let at = press_at(x, axis);
-        region_press(sel, at, ctrl, region_grab(sel, TEST_SELECTION_VIEW, axis, TEST_SPAN, at, x))
+        let grab = Grab::Ruler(region_grab(sel, TEST_SELECTION_VIEW, axis, TEST_SPAN, at, x));
+        region_press(sel, at, ctrl, grab)
     }
 
     /// A press released without ever passing the click threshold.
@@ -1699,13 +1725,66 @@ mod tests {
     }
 
     #[test]
-    fn a_ctrl_press_in_a_regions_edge_zone_removes_the_whole_region() {
+    fn ctrl_removes_exactly_the_region_a_plain_press_would_take_hold_of() {
         let base = three_regions();
-        let x = ruler_x(8000);
-        assert!(matches!(ruler_press(&base, x, false).0, RegionEdit::Resize { index: 1 }));
+        let axis = test_axis();
+        let mut x = axis.content_left;
+        while x <= axis.time_right {
+            let plain = ruler_press(&base, x, false).0;
+            let ctrl = ruler_press(&base, x, true).0;
+            assert_eq!(plain.region(), ctrl.region(), "at x={x}");
+            x += 1.0;
+        }
+    }
+
+    /// Region 1 of [`three_regions`] as the fixture draws it, in window x. Its
+    /// edges carry the grips the removal gestures below aim at.
+    const REGION_1_EDGES_PX: (f32, f32) = (500.0, 600.0);
+
+    /// Asserts a ctrl press at window `x` takes region 1 away and leaves the
+    /// other two, and that a plain press there resizes the same region — the
+    /// grip is grabbable at `x`, and ctrl agrees on which region it belongs to.
+    fn assert_grip_removes_region_1(x: f32) {
+        let base = three_regions();
+        assert!(matches!(ruler_press(&base, x, false).0, RegionEdit::Resize { index: 1 }), "{x}");
         let (edit, at) = ruler_press(&base, x, true);
-        assert!(matches!(edit, RegionEdit::Remove { index: 1 }));
+        assert!(matches!(edit, RegionEdit::Remove { index: 1 }), "at x={x}");
         assert_eq!(regions(&click(edit, at).released(&base)), [(6000, 7000), (10_000, 11_000)]);
+    }
+
+    #[test]
+    fn a_ctrl_press_in_a_grips_outer_half_removes_its_region() {
+        assert_eq!((ruler_x(8000), ruler_x(9000)), REGION_1_EDGES_PX, "the fixture's drawn edges");
+        let (left, right) = REGION_1_EDGES_PX;
+        // Outside the region's own stretch of time, so only the grip holds them.
+        assert_grip_removes_region_1(left - 2.0);
+        assert_grip_removes_region_1(right + 2.0);
+    }
+
+    #[test]
+    fn a_ctrl_press_on_a_drawn_end_edge_removes_its_region() {
+        // A region ends on the instant past its last, so its end edge stands on
+        // time the region itself does not cover.
+        assert_grip_removes_region_1(REGION_1_EDGES_PX.1);
+    }
+
+    #[test]
+    fn a_ctrl_press_in_a_grips_inner_half_removes_its_region() {
+        let (left, right) = REGION_1_EDGES_PX;
+        assert_grip_removes_region_1(left);
+        assert_grip_removes_region_1(right - 2.0);
+    }
+
+    #[test]
+    fn a_ctrl_press_beyond_a_grips_reach_leaves_the_selection_untouched() {
+        let base = three_regions();
+        let (left, right) = REGION_1_EDGES_PX;
+        assert_eq!(EDGE_GRAB_PX, 4.0, "the reach the probes below are placed just outside");
+        for x in [left - 5.0, right + 5.0] {
+            let (edit, at) = ruler_press(&base, x, true);
+            assert!(matches!(edit, RegionEdit::Union), "at x={x}");
+            assert_eq!(regions(&click(edit, at).released(&base)), regions(&base), "at x={x}");
+        }
     }
 
     #[test]
@@ -1738,7 +1817,7 @@ mod tests {
     #[test]
     fn a_shift_ctrl_click_over_the_lanes_holding_no_region_keeps_the_selection() {
         let base = three_regions();
-        let (edit, at) = region_press(&base, IN_THE_GAP_US, true, None);
+        let (edit, at) = region_press(&base, IN_THE_GAP_US, true, Grab::Lanes);
         assert!(matches!(edit, RegionEdit::Union));
         assert_eq!(regions(&click(edit, at).released(&base)), regions(&base));
     }
@@ -1771,9 +1850,7 @@ mod tests {
     #[test]
     fn a_shift_ctrl_press_over_the_lanes_removes_the_region_it_lands_in() {
         let base = three_regions();
-        // The lanes offer no edge or body to grab, so the instant alone resolves
-        // the edit.
-        let (edit, at) = region_press(&base, 8500, true, None);
+        let (edit, at) = region_press(&base, 8500, true, Grab::Lanes);
         assert!(matches!(edit, RegionEdit::Remove { index: 1 }));
         assert_eq!(regions(&click(edit, at).released(&base)), [(6000, 7000), (10_000, 11_000)]);
     }
