@@ -129,14 +129,16 @@ pub(crate) enum RegionEdit {
     /// Move the region at `index` whole, keeping `width_us`; the press took hold
     /// of it `grab_us` past its start, within the profile span `bounds`.
     Slide { index: usize, width_us: i64, grab_us: i64, bounds: TimeSpan },
+    /// Drop the region at `index`, keeping the rest of the selection.
+    Remove { index: usize },
 }
 
 impl RegionEdit {
-    /// Whether the press took hold of a region. Short of the click threshold
-    /// such a press moves it nowhere and the selection stands; a press holding
-    /// nothing is a click on empty time, which drops the selection.
+    /// Whether the press landed on an existing region, leaving the rest of the
+    /// selection to stand. A press holding nothing is a click on empty time,
+    /// which drops the selection.
     fn holds_a_region(self) -> bool {
-        matches!(self, Self::Resize { .. } | Self::Slide { .. })
+        matches!(self, Self::Resize { .. } | Self::Slide { .. } | Self::Remove { .. })
     }
 }
 
@@ -170,19 +172,26 @@ impl RegionDrag {
         }
     }
 
-    /// The selection the drag would leave when applied over `base`. Below the
-    /// click threshold it covers no region yet, so it yields `base` itself.
+    /// The selection the drag would leave when applied over `base`. A removal
+    /// names its region outright and takes it away from the press onward; every
+    /// other edit covers no region until the cursor passes the click threshold,
+    /// so short of it those yield `base` itself.
     pub(crate) fn applied(&self, base: &TimeSelection) -> TimeSelection {
         let mut sel = base.clone();
-        if self.moved {
-            let span = self.span();
-            match self.edit {
-                RegionEdit::Replace => sel.set(span),
-                RegionEdit::Union => sel.insert(span),
-                RegionEdit::Resize { index } | RegionEdit::Slide { index, .. } => {
-                    sel.replace(index, span)
-                }
-            };
+        match self.edit {
+            RegionEdit::Remove { index } => {
+                sel.remove(index);
+            }
+            RegionEdit::Replace if self.moved => {
+                sel.set(self.span());
+            }
+            RegionEdit::Union if self.moved => {
+                sel.insert(self.span());
+            }
+            RegionEdit::Resize { index } | RegionEdit::Slide { index, .. } if self.moved => {
+                sel.replace(index, self.span());
+            }
+            _ => {}
         }
         sel
     }
@@ -560,9 +569,7 @@ impl TimelinePanel {
 
     /// Begins a time-region drag if the press asks for one — anywhere in the
     /// ruler band, or a shift-press over the flame lanes — reporting whether it
-    /// took the press. A ruler press takes hold of the region edge or region it
-    /// lands on; otherwise the drag replaces the selection, or unions into it
-    /// while ctrl is held.
+    /// took the press. [`region_press`] resolves what it edits.
     fn press_time_region(&mut self, e: &MouseDownEvent, cx: &App) -> bool {
         let regions = self.regions(cx);
         let x = f32::from(e.position.x);
@@ -577,13 +584,11 @@ impl TimelinePanel {
         let at = time_at_x(self.view, bounds, x - regions.content_left);
         let (edit, anchor_us) = {
             let sel = self.model.read(cx).time_selection();
-            let held = in_ruler
+            let grab = in_ruler
                 .then(|| region_grab(sel, self.view, regions, bounds, at, x))
                 .flatten();
-            held.unwrap_or_else(|| {
-                let ctrl = e.modifiers.control || e.modifiers.platform;
-                (if ctrl { RegionEdit::Union } else { RegionEdit::Replace }, at)
-            })
+            let ctrl = e.modifiers.control || e.modifiers.platform;
+            region_press(sel, at, ctrl, grab)
         };
         self.crosshair = None;
         self.drag = TimelineDrag::TimeRegion(RegionDrag {
@@ -1116,6 +1121,25 @@ fn selection_pixels(sel: &TimeSelection, tv: TimeView, regions: Regions) -> Vec<
     out
 }
 
+/// The edit a press on the instant `at` resolves to, with the instant to anchor
+/// its drag at. `ctrl` asks for the region under the press to be toggled in the
+/// set — inside a region it takes that region away, outside every region it
+/// unions the drag in — and overrides `grab`, so a region's edge zone removes
+/// like the rest of it. A press without ctrl takes whatever `grab` found, and
+/// failing that replaces the selection.
+fn region_press(
+    sel: &TimeSelection,
+    at: i64,
+    ctrl: bool,
+    grab: Option<(RegionEdit, i64)>,
+) -> (RegionEdit, i64) {
+    if ctrl {
+        let removal = sel.region_at(at).map(|index| (RegionEdit::Remove { index }, at));
+        return removal.unwrap_or((RegionEdit::Union, at));
+    }
+    grab.unwrap_or((RegionEdit::Replace, at))
+}
+
 /// The edit a press at window `x`, on the instant `at`, takes hold of in `sel` —
 /// a resize of a drawn region edge within [`EDGE_GRAB_PX`] of the press, else a
 /// slide of the region it landed in — with the instant to anchor the drag at.
@@ -1640,6 +1664,97 @@ mod tests {
         let grabbed = region_grab(&sel, TEST_SELECTION_VIEW, axis, TEST_SPAN, press_at(x, axis), x);
         assert_eq!(grabbed.map(|(_, anchor)| anchor), Some(8000));
         assert!(matches!(grabbed, Some((RegionEdit::Resize { index: 0 }, _))));
+    }
+
+    /// Window x of the instant `t_us` on the test axis.
+    fn ruler_x(t_us: i64) -> f32 {
+        test_axis().content_left + TEST_SELECTION_VIEW.x_of(t_us)
+    }
+
+    /// A press at window `x` over the ruler band, resolved as the ruler's own
+    /// handler resolves it.
+    fn ruler_press(sel: &TimeSelection, x: f32, ctrl: bool) -> (RegionEdit, i64) {
+        let axis = test_axis();
+        let at = press_at(x, axis);
+        region_press(sel, at, ctrl, region_grab(sel, TEST_SELECTION_VIEW, axis, TEST_SPAN, at, x))
+    }
+
+    /// A press released without ever passing the click threshold.
+    fn click(edit: RegionEdit, anchor_us: i64) -> RegionDrag {
+        RegionDrag { moved: false, ..drag(edit, anchor_us, anchor_us) }
+    }
+
+    /// Three regions the removal gestures pick from, each wide enough that a
+    /// press in its middle is clear of both edge zones.
+    fn three_regions() -> TimeSelection {
+        selection(&[(6000, 7000), (8000, 9000), (10_000, 11_000)])
+    }
+
+    #[test]
+    fn a_ctrl_click_inside_a_region_takes_that_region_away() {
+        let base = three_regions();
+        let (edit, at) = ruler_press(&base, ruler_x(8500), true);
+        assert!(matches!(edit, RegionEdit::Remove { index: 1 }));
+        assert_eq!(regions(&click(edit, at).released(&base)), [(6000, 7000), (10_000, 11_000)]);
+    }
+
+    #[test]
+    fn a_ctrl_press_in_a_regions_edge_zone_removes_the_whole_region() {
+        let base = three_regions();
+        let x = ruler_x(8000);
+        assert!(matches!(ruler_press(&base, x, false).0, RegionEdit::Resize { index: 1 }));
+        let (edit, at) = ruler_press(&base, x, true);
+        assert!(matches!(edit, RegionEdit::Remove { index: 1 }));
+        assert_eq!(regions(&click(edit, at).released(&base)), [(6000, 7000), (10_000, 11_000)]);
+    }
+
+    #[test]
+    fn a_removal_that_passes_the_click_threshold_still_removes_its_region() {
+        let base = three_regions();
+        let dragged = drag(RegionEdit::Remove { index: 1 }, 8500, 12_000);
+        assert_eq!(regions(&dragged.released(&base)), [(6000, 7000), (10_000, 11_000)]);
+    }
+
+    #[test]
+    fn a_ctrl_press_outside_every_region_unions_a_new_one() {
+        let base = three_regions();
+        let (edit, at) = ruler_press(&base, ruler_x(7500), true);
+        assert!(matches!(edit, RegionEdit::Union));
+        let sel = drag(edit, at, 7800).released(&base);
+        assert_eq!(regions(&sel), [(6000, 7000), (7500, 7800), (8000, 9000), (10_000, 11_000)]);
+    }
+
+    #[test]
+    fn a_plain_press_inside_a_region_slides_it_and_removes_nothing() {
+        let base = three_regions();
+        let (edit, at) = ruler_press(&base, ruler_x(8500), false);
+        assert!(matches!(edit, RegionEdit::Slide { index: 1, .. }));
+        assert_eq!(regions(&click(edit, at).released(&base)), regions(&base));
+    }
+
+    #[test]
+    fn removing_the_only_region_leaves_the_selection_unrestricted() {
+        let base = selection(&[(6000, 7000)]);
+        let (edit, at) = ruler_press(&base, ruler_x(6500), true);
+        assert!(matches!(edit, RegionEdit::Remove { index: 0 }));
+        assert!(click(edit, at).released(&base).is_empty());
+    }
+
+    #[test]
+    fn a_shift_ctrl_press_over_the_lanes_removes_the_region_it_lands_in() {
+        let base = three_regions();
+        // The lanes offer no edge or body to grab, so the instant alone resolves
+        // the edit.
+        let (edit, at) = region_press(&base, 8500, true, None);
+        assert!(matches!(edit, RegionEdit::Remove { index: 1 }));
+        assert_eq!(regions(&click(edit, at).released(&base)), [(6000, 7000), (10_000, 11_000)]);
+    }
+
+    #[test]
+    fn a_removal_previews_its_region_gone_from_the_press_onward() {
+        let base = selection(&[(6000, 7000), (8000, 9000)]);
+        let gesture = TimelineDrag::TimeRegion(click(RegionEdit::Remove { index: 0 }, 6500));
+        assert_eq!(regions(&gesture.preview(&base)), [(8000, 9000)]);
     }
 
     #[test]
