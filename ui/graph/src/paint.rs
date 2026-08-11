@@ -62,8 +62,8 @@ const DIM_EDGE_ALPHA: f32 = 0.2;
 /// Opacity of the wash the emphasized box's fill is painted over. Bounded below
 /// by the wash carrying the fill a [`bviz_ui_theme::MIN_DISTINCT_COLOR`] off the
 /// one the box wears unmarked, so the emphasis is seen at all, and above by the
-/// box keeping its kind — washed, its fill stays nearer that kind's own fill
-/// than any other kind's.
+/// box's name — inked from the unwashed fill — holding
+/// [`bviz_ui_theme::MIN_TEXT_CONTRAST`] on the ground the wash makes of it.
 const HIGHLIGHT_WASH: f32 = 0.125;
 
 /// Everything the canvas draws from, owned so the `'static` paint closure holds
@@ -1045,6 +1045,13 @@ mod colors {
             .collect()
     }
 
+    /// Every fill an emphasized box can be wearing when the wash lands on it:
+    /// any box fill, lit or receded, since the hover dims a box whether or not
+    /// the emphasis is on it.
+    fn emphasized_fills(p: &Palette) -> Vec<Rgba> {
+        box_fills(p).into_iter().flat_map(|fill| [fill, p.dimmed(fill)]).collect()
+    }
+
     /// A leaf's kind is read off the color of the box, so no two kinds may be
     /// taken for each other and none may sink into the canvas they are drawn on.
     #[test]
@@ -1100,13 +1107,18 @@ mod colors {
         }
     }
 
-    /// A box carries its name on its own fill, whichever kind picked that fill.
+    /// A box carries its name on its own fill, whichever kind picked that fill,
+    /// and on the ground the emphasis wash makes of it. The ink is picked from
+    /// the fill alone, so that one choice has to hold on both.
     #[test]
     fn a_name_is_legible_on_the_box_it_names() {
         for (theme, p) in palettes() {
             for fill in box_fills(&p) {
-                let held = contrast_ratio(label_on(fill), fill);
-                assert!(held >= MIN_TEXT_CONTRAST, "{theme}: {held}");
+                let ink = label_on(fill);
+                for ground in [fill, over(p.highlight_wash(1.0), fill)] {
+                    let held = contrast_ratio(ink, ground);
+                    assert!(held >= MIN_TEXT_CONTRAST, "{theme}: {held}");
+                }
             }
         }
     }
@@ -1183,25 +1195,15 @@ mod colors {
         }
     }
 
-    /// The wash marks the box the user just toggled without recoloring it: it
-    /// carries the fill far enough off the one that box wears unmarked to be
-    /// seen, and stops short of the fills the other kinds wear, so the kind is
-    /// still read off the box.
+    /// The wash marks the box the user just toggled: whatever fill that box
+    /// wears, the wash carries it far enough off the one the box wears unmarked
+    /// to be seen beside the boxes still wearing it.
     #[test]
-    fn an_emphasized_box_is_seen_and_keeps_its_kind_under_the_wash() {
+    fn an_emphasized_box_is_seen_whatever_fill_it_wears() {
         for (theme, p) in palettes() {
-            for kind in ACCENTED_KINDS {
-                let fill = p.leaf_fill(kind);
-                let washed = over(p.highlight_wash(1.0), fill);
-                let own = distance(washed, fill);
-                assert!(own >= MIN_DISTINCT_COLOR, "{theme} {kind:?}: {own} from itself");
-                for other in ACCENTED_KINDS.iter().filter(|k| **k != kind) {
-                    let apart = distance(washed, p.leaf_fill(*other));
-                    assert!(
-                        own < apart,
-                        "{theme} {kind:?}: {own} from itself, {apart} from {other:?}"
-                    );
-                }
+            for fill in emphasized_fills(&p) {
+                let seen = distance(over(p.highlight_wash(1.0), fill), fill);
+                assert!(seen >= MIN_DISTINCT_COLOR, "{theme}: {seen}");
             }
         }
     }

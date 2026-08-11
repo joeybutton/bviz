@@ -8,12 +8,7 @@ pub use registry::{ThemeRegistry, built_in_themes, init, theme};
 pub use schema::ThemeFamilyContent;
 pub use theme::{Appearance, DataColors, TerminalColors, Theme, ThemeColors};
 
-pub use gpui::colors::Colors;
-use gpui::{hsla, Hsla, Rgba, Window};
-
-pub fn colors(window: &Window) -> Colors {
-    Colors::for_appearance(window)
-}
+use gpui::{hsla, Hsla, Rgba};
 
 /// Linearly blend `a` toward `b` by `t` in [0, 1].
 pub fn mix(a: impl Into<Rgba>, b: impl Into<Rgba>, t: f32) -> Rgba {
@@ -52,18 +47,6 @@ pub const MIN_VISIBLE_STEP: f32 = 12.0;
 /// fills on either side of it part at half the step they need with nothing
 /// between them.
 pub const MIN_EDGED_STEP: f32 = MIN_VISIBLE_STEP / 2.0;
-
-/// How far a hover fill stands off the surface it lies on: enough to clear every
-/// surface a hoverable row sits on and the rule drawn between rows, enough to
-/// stay clear of the selection accent that marks a different state, and no more
-/// than that, so the row's own text stays the strongest thing in it.
-const HOVER_LIFT: f32 = 0.11;
-
-/// The fill marking the row or control under the cursor, for one that shows the
-/// cursor by lifting off its surface rather than by taking the selection accent.
-pub fn hover_fill(colors: &Colors) -> Rgba {
-    mix(colors.background, colors.text, HOVER_LIFT)
-}
 
 /// `overlay` composited over `surface`, which is what a translucent fill drawn on
 /// that surface actually looks like. Both may be translucent; the result carries
