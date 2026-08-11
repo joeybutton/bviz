@@ -9,7 +9,7 @@ use bviz_graph_layout::layout::{CARET_RESERVE, LABEL_BAND};
 use bviz_graph_layout::{Connector, EdgeKind, Id, Kind};
 use gpui::{
     App, BorderStyle, Bounds, Entity, Hsla, PathBuilder, Pixels, Point, Rgba, TextAlign, Window,
-    point, px, quad, rgb, size,
+    point, px, quad, size,
 };
 
 /// Box label font size in layout pixels.
@@ -39,21 +39,32 @@ const ARROW_OVERDRAW: f64 = 1.0;
 /// along a node pair that several queries connect.
 const PARALLEL_SPACING: f32 = 3.0;
 
-/// Fraction by which a kind accent is blended toward the themed background; the
-/// result is the leaf fill, so kinds stay recognizable yet read on light or dark.
-const KIND_BLEND: f32 = 0.68;
+/// How far a kind accent is carried toward the canvas to make a leaf fill.
+/// Bounded below by the fills staying clear of the connector colors drawn over
+/// and between them, which are taken from the same slots, and above by the kinds
+/// staying apart from one another and off the canvas.
+const KIND_BLEND: f32 = 0.6;
 
-/// Accent for the just-toggled box's emphasis border and inset glow, bright
-/// enough to catch the eye on either a light or dark background.
-const HIGHLIGHT_ACCENT: Rgba = Rgba { r: 1.0, g: 0.819, b: 0.4, a: 1.0 };
+/// How far a group's fill is tinted toward the accent of the files it holds: far
+/// enough to be told from a plain container fill, and not so far that the group
+/// passes for one of the files.
+const GROUP_TINT: f32 = 0.17;
 
-/// Fraction a dimmed box's fill and border are pulled toward the background, so
-/// the hovered node's neighborhood stands out against the receded rest.
+/// How far a dimmed box's fill and border are carried toward the canvas: far
+/// enough that the fade is seen beside the boxes left lit, and not so far that
+/// the box stops standing off the canvas it is drawn on.
 const DIM_FADE: f32 = 0.6;
 
-/// Alpha a dimmed connector keeps, fading edges outside the hovered node's
-/// neighborhood without erasing them.
+/// Opacity a dimmed connector keeps: enough to stay visible on the canvas,
+/// little enough to be told from a lit connector of the same provenance.
 const DIM_EDGE_ALPHA: f32 = 0.2;
+
+/// Opacity of the wash the emphasized box's fill is painted over. Bounded below
+/// by the wash carrying the fill a [`bviz_ui_theme::MIN_DISTINCT_COLOR`] off the
+/// one the box wears unmarked, so the emphasis is seen at all, and above by the
+/// box keeping its kind — washed, its fill stays nearer that kind's own fill
+/// than any other kind's.
+const HIGHLIGHT_WASH: f32 = 0.125;
 
 /// Everything the canvas draws from, owned so the `'static` paint closure holds
 /// no borrow of the view.
@@ -121,7 +132,7 @@ pub(crate) fn canvas_body(
         if edges > 0.0 {
             for c in g.connectors.iter().filter(|c| visible.crossed_by(&c.points)) {
                 let dim = dimming.applies && !dimming.lit_edges.contains(&(c.from, c.to));
-                paint_lanes(c, dim, edges, bounds, camera, window);
+                paint_lanes(c, dim, edges, bounds, camera, &scene.palette, window);
             }
         }
         let mut floated: Vec<Bounds<Pixels>> = Vec::new();
@@ -143,49 +154,65 @@ fn faded(c: Rgba, alpha: f32) -> Rgba {
     Rgba { a: c.a * alpha, ..c }
 }
 
-/// Accent hue for a leaf box, keyed by its node kind. These are mid-saturation
-/// and recognizable against either a light or dark background.
-pub(crate) fn kind_accent(kind: Kind) -> Rgba {
-    match kind {
-        Kind::Action => rgb(0xe69a3c),   // orange
-        Kind::Artifact => rgb(0x57b85a), // green
-        Kind::Source => rgb(0x9b7fd0),   // purple
-        _ => rgb(0x5b8fd0),              // blue
-    }
+/// `color` as a connector outside the hovered node's neighborhood paints it.
+fn dimmed_edge(color: Rgba) -> Rgba {
+    Rgba { a: DIM_EDGE_ALPHA, ..color }
 }
 
-/// Connector color, keyed by the query an edge came from, so static (query),
-/// configured (cquery), and execution-phase (aquery) dependencies read
-/// distinctly. These are mid-tone hues legible on light or dark backgrounds.
-pub(crate) fn edge_color(kind: EdgeKind) -> Rgba {
-    match kind {
-        EdgeKind::Query => rgb(0x4f7fbf),  // blue
-        EdgeKind::Cquery => rgb(0x3fa07a), // green-teal
-        EdgeKind::Aquery => rgb(0xc77b3c), // orange
-    }
-}
-
-/// Fraction by which the package container fill is pulled toward the border
-/// color, deepening it so the outer package box reads as containing the lighter
-/// target and configured-target boxes.
-const PACKAGE_DEEPEN: f32 = 0.18;
-
-/// Fraction by which an expanded group's fill is pulled toward the file-leaf
-/// accent, tinting the box so it reads as a grouping of files and stays distinct
-/// from the neutral package/target containers.
-const GROUP_TINT: f32 = 0.30;
-
-/// Fill for a container box. The outer package box is deepened toward the border
-/// so nesting reads package > target > configured-target; an expanded group of
-/// files is tinted toward the file leaves it holds; other inner
-/// containers use the plain themed container fill.
-fn container_fill(kind: Kind, palette: &Palette) -> Rgba {
-    match kind {
-        Kind::Package => bviz_ui_theme::mix(palette.container_fill, palette.border, PACKAGE_DEEPEN),
-        Kind::Group => {
-            bviz_ui_theme::mix(palette.container_fill, kind_accent(Kind::Artifact), GROUP_TINT)
+impl Palette {
+    /// Accent for a leaf box, keyed by its node kind. Actions, artifacts and
+    /// source files each take a slot of their own; every other kind shares the
+    /// catch-all.
+    fn kind_accent(&self, kind: Kind) -> Rgba {
+        match kind {
+            Kind::Action => self.data.orange,
+            Kind::Artifact => self.data.green,
+            Kind::Source => self.data.purple,
+            _ => self.data.blue,
         }
-        _ => palette.container_fill,
+        .into()
+    }
+
+    /// Fill for a leaf box, its kind's accent carried toward the canvas so the
+    /// box reads as ground a name is set on rather than as a mark.
+    fn leaf_fill(&self, kind: Kind) -> Rgba {
+        bviz_ui_theme::mix(self.kind_accent(kind), self.background, KIND_BLEND)
+    }
+
+    /// Fill for a container box, by which nesting reads package > target >
+    /// configured-target, and a group of files carries the accent of the files
+    /// it holds.
+    fn container_fill(&self, kind: Kind) -> Rgba {
+        match kind {
+            Kind::Package => self.package,
+            Kind::Group => {
+                bviz_ui_theme::mix(self.container, self.kind_accent(Kind::Artifact), GROUP_TINT)
+            }
+            _ => self.container,
+        }
+    }
+
+    /// Connector color, keyed by the query an edge came from, so static (query),
+    /// configured (cquery), and execution-phase (aquery) dependencies read
+    /// distinctly.
+    pub(crate) fn edge_color(&self, kind: EdgeKind) -> Rgba {
+        match kind {
+            EdgeKind::Query => self.data.blue,
+            EdgeKind::Cquery => self.data.cyan,
+            EdgeKind::Aquery => self.data.orange,
+        }
+        .into()
+    }
+
+    /// `fill` as a box outside the hovered node's neighborhood paints it.
+    fn dimmed(&self, fill: Rgba) -> Rgba {
+        bviz_ui_theme::mix(fill, self.background, DIM_FADE)
+    }
+
+    /// The wash an emphasized box's fill is painted over, at `strength` of the
+    /// full emphasis.
+    fn highlight_wash(&self, strength: f32) -> Rgba {
+        Rgba { a: HIGHLIGHT_WASH * strength, ..self.highlight }
     }
 }
 
@@ -248,8 +275,8 @@ impl<'a> PaintBox<'a> {
         let palette = &scene.palette;
         let dim = dimming.applies && !dimming.lit.contains(&b.id);
         let fill = match b.compound {
-            true => container_fill(b.kind, palette),
-            false => bviz_ui_theme::mix(kind_accent(b.kind), palette.background, KIND_BLEND),
+            true => palette.container_fill(b.kind),
+            false => palette.leaf_fill(b.kind),
         };
         PaintBox {
             id: b.id,
@@ -261,7 +288,7 @@ impl<'a> PaintBox<'a> {
             expandable: p.expandable(&scene.expandable),
             fill: faded(
                 match dim {
-                    true => bviz_ui_theme::mix(fill, palette.background, DIM_FADE),
+                    true => palette.dimmed(fill),
                     false => fill,
                 },
                 alpha,
@@ -285,6 +312,7 @@ fn paint_lanes(
     alpha: f32,
     bounds: Bounds<Pixels>,
     camera: Camera,
+    palette: &Palette,
     window: &mut Window,
 ) {
     let z = camera.zoom;
@@ -300,7 +328,7 @@ fn paint_lanes(
     for (i, kind) in c.kinds.iter().enumerate() {
         let slot = i as f32 - (n - 1.0) / 2.0;
         let lane = lane_polyline(&screen, slot * PARALLEL_SPACING * z);
-        paint_connector(&lane, *kind, dim, alpha, z, window);
+        paint_connector(&lane, *kind, dim, alpha, z, palette, window);
     }
 }
 
@@ -327,9 +355,9 @@ fn paint_box(
 }
 
 /// A box's emphasis: the quad border to stroke, and a deferred paint of the glow
-/// wash. The border fades from the themed border to the amber accent, and from a
+/// wash. The border fades from the themed border to the highlight, and from a
 /// normal to a thick stroke, by the highlight alpha; a dim box uses a faded
-/// themed border. The returned closure paints a faint accent wash over the fill
+/// themed border. The returned closure paints the highlight wash over the fill
 /// so the emphasis reads as a glow, not just a brighter outline.
 fn box_emphasis(
     b: &PaintBox,
@@ -341,20 +369,16 @@ fn box_emphasis(
     let (border_w, border_c) = if b.highlight > 0.0 {
         let normal = px(1.);
         let thick = px((2. * zoom).max(2.));
-        let mut accent = HIGHLIGHT_ACCENT;
-        accent.a = b.highlight;
+        let accent = Rgba { a: b.highlight, ..palette.highlight };
         (normal + (thick - normal) * b.highlight, Hsla::from(faded(accent, b.alpha)))
     } else if b.dim {
-        let receded = bviz_ui_theme::mix(palette.border, palette.background, DIM_FADE);
-        (px(1.), Hsla::from(faded(receded, b.alpha)))
+        (px(1.), Hsla::from(faded(palette.dimmed(palette.border), b.alpha)))
     } else {
         (px(1.), Hsla::from(faded(palette.border, b.alpha)))
     };
-    let (highlight, alpha) = (b.highlight, b.alpha);
+    let wash = palette.highlight_wash(b.highlight * b.alpha);
     let glow = move |window: &mut Window| {
-        if highlight > 0.0 {
-            let mut wash = HIGHLIGHT_ACCENT;
-            wash.a = 0.15 * highlight * alpha;
+        if wash.a > 0.0 {
             window.paint_quad(quad(
                 rect,
                 corner,
@@ -466,8 +490,8 @@ fn paint_box_label(
     let fs = placement.size;
     let label_color = faded(
         match b.dim {
-            true => bviz_ui_theme::mix(palette.label, palette.background, DIM_FADE),
-            false => palette.label,
+            true => palette.dim_label,
+            false => bviz_ui_theme::label_on(b.fill).into(),
         },
         b.alpha,
     );
@@ -488,13 +512,14 @@ fn paint_box_label(
     if placement.floats {
         floated.push(plate);
     }
-    // The plate is painted in the box's own fill, so a name reads against its box
-    // rather than against the routes crossing it. On the box's own ground it is
-    // invisible.
+    // The plate is painted in the box's own ground, wash and all, so a name reads
+    // against its box rather than against the routes crossing it and leaves no
+    // rectangle of its own behind.
+    let ground = bviz_ui_theme::over(palette.highlight_wash(b.highlight * b.alpha), b.fill);
     window.paint_quad(quad(
         plate,
         px(0.),
-        b.fill,
+        ground,
         px(0.),
         Hsla::transparent_black(),
         BorderStyle::Solid,
@@ -615,16 +640,14 @@ fn paint_connector(
     dim: bool,
     alpha: f32,
     zoom: f32,
+    palette: &Palette,
     window: &mut Window,
 ) {
     if points.len() < 2 {
         return;
     }
-    let mut color = edge_color(kind);
-    if dim {
-        color.a = DIM_EDGE_ALPHA;
-    }
-    color = faded(color, alpha);
+    let lit = palette.edge_color(kind);
+    let color = faded(if dim { dimmed_edge(lit) } else { lit }, alpha);
     let pts: Vec<Point<Pixels>> = points.iter().map(|(x, y)| point(px(*x), px(*y))).collect();
 
     // Stop the stroke at the arrowhead's base (less a slight overdraw) so the
@@ -683,6 +706,7 @@ mod tests {
     use crate::camera::from_screen;
     use crate::morph::Transition;
     use bviz_graph_layout::LaidOut;
+    use gpui::rgb;
     use std::collections::HashSet;
     use std::sync::Arc;
     use std::time::Instant;
@@ -980,5 +1004,205 @@ mod tests {
             Some(Id(1)),
             "a title from a frame the layout has moved on from still answered for it"
         );
+    }
+}
+
+#[cfg(test)]
+mod colors {
+    use super::*;
+    use bviz_ui_theme::{
+        MIN_DISTINCT_COLOR, MIN_EDGED_STEP, MIN_SECONDARY_CONTRAST, MIN_TEXT_CONTRAST,
+        MIN_VISIBLE_STEP, built_in_themes, contrast_ratio, distance, label_on, level_step, over,
+    };
+    use gpui::SharedString;
+
+    /// One node kind per accent slot: the three that carry a slot of their own,
+    /// and one standing for every kind that takes the catch-all.
+    const ACCENTED_KINDS: [Kind; 4] = [Kind::Action, Kind::Artifact, Kind::Source, Kind::Target];
+
+    /// One node kind per container fill: the two that carry a fill of their own,
+    /// and one standing for every kind that takes the plain one.
+    const CONTAINER_KINDS: [Kind; 3] = [Kind::Package, Kind::Group, Kind::Target];
+
+    /// Every provenance a connector is drawn in.
+    const EDGE_KINDS: [EdgeKind; 3] = [EdgeKind::Query, EdgeKind::Cquery, EdgeKind::Aquery];
+
+    /// Every theme's palette, under the name it answers to, for a rule that has
+    /// to hold whichever one a window paints with.
+    fn palettes() -> Vec<(SharedString, Palette)> {
+        built_in_themes()
+            .iter()
+            .map(|theme| (theme.name.clone(), Palette::from_theme(theme)))
+            .collect()
+    }
+
+    /// Every fill a box is painted in, each once.
+    fn box_fills(p: &Palette) -> Vec<Rgba> {
+        ACCENTED_KINDS
+            .iter()
+            .map(|kind| p.leaf_fill(*kind))
+            .chain(CONTAINER_KINDS.iter().map(|kind| p.container_fill(*kind)))
+            .collect()
+    }
+
+    /// A leaf's kind is read off the color of the box, so no two kinds may be
+    /// taken for each other and none may sink into the canvas they are drawn on.
+    #[test]
+    fn every_node_kind_is_told_from_the_others_and_from_the_canvas() {
+        for (theme, p) in palettes() {
+            for (i, kind) in ACCENTED_KINDS.iter().enumerate() {
+                let fill = p.leaf_fill(*kind);
+                let over_canvas = distance(fill, p.background);
+                assert!(over_canvas >= MIN_DISTINCT_COLOR, "{theme} {kind:?}: {over_canvas}");
+                for other in &ACCENTED_KINDS[i + 1..] {
+                    let apart = distance(fill, p.leaf_fill(*other));
+                    assert!(apart >= MIN_DISTINCT_COLOR, "{theme} {kind:?}/{other:?}: {apart}");
+                }
+            }
+        }
+    }
+
+    /// A connector is followed across the canvas and over the boxes it runs
+    /// between, so its provenance has to be told from the other provenances and
+    /// from every ground it crosses.
+    #[test]
+    fn every_edge_provenance_is_told_from_the_others_and_from_what_it_crosses() {
+        for (theme, p) in palettes() {
+            let grounds: Vec<Rgba> = box_fills(&p).into_iter().chain([p.background]).collect();
+            for (i, kind) in EDGE_KINDS.iter().enumerate() {
+                let color = p.edge_color(*kind);
+                for ground in &grounds {
+                    let apart = distance(color, *ground);
+                    assert!(apart >= MIN_DISTINCT_COLOR, "{theme} {kind:?} on a ground: {apart}");
+                }
+                for other in &EDGE_KINDS[i + 1..] {
+                    let apart = distance(color, p.edge_color(*other));
+                    assert!(apart >= MIN_DISTINCT_COLOR, "{theme} {kind:?}/{other:?}: {apart}");
+                }
+            }
+        }
+    }
+
+    /// The emphasis is what draws the eye back to the box just toggled, so it
+    /// has to stand off the border it replaces, the fill it is drawn around, the
+    /// canvas beyond it and the connectors meeting it.
+    #[test]
+    fn the_highlight_is_told_from_everything_it_is_drawn_against() {
+        for (theme, p) in palettes() {
+            let against = box_fills(&p)
+                .into_iter()
+                .chain([p.background, p.border])
+                .chain(EDGE_KINDS.iter().map(|kind| p.edge_color(*kind)));
+            for color in against {
+                let apart = distance(p.highlight, color);
+                assert!(apart >= MIN_DISTINCT_COLOR, "{theme}: {apart}");
+            }
+        }
+    }
+
+    /// A box carries its name on its own fill, whichever kind picked that fill.
+    #[test]
+    fn a_name_is_legible_on_the_box_it_names() {
+        for (theme, p) in palettes() {
+            for fill in box_fills(&p) {
+                let held = contrast_ratio(label_on(fill), fill);
+                assert!(held >= MIN_TEXT_CONTRAST, "{theme}: {held}");
+            }
+        }
+    }
+
+    /// Nesting is read off the fills: a container stands off the canvas it is
+    /// laid on, and the package holding it stands off the container in turn.
+    /// Each pair meets at a drawn border.
+    #[test]
+    fn a_container_and_the_package_holding_it_step_off_the_canvas_in_turn() {
+        for (theme, p) in palettes() {
+            let plain = p.container_fill(Kind::Target);
+            let off_canvas = level_step(plain, p.background);
+            assert!(off_canvas >= MIN_EDGED_STEP, "{theme}: {off_canvas} levels");
+            let off_container = level_step(p.container_fill(Kind::Package), plain);
+            assert!(off_container >= MIN_EDGED_STEP, "{theme}: {off_container} levels");
+        }
+    }
+
+    /// A group is a container of files, which its fill says by carrying their
+    /// accent — far enough from a plain container to be seen carrying it, and
+    /// not so far that the group passes for one of the files inside it.
+    #[test]
+    fn a_group_reads_as_a_container_of_the_files_it_holds() {
+        for (theme, p) in palettes() {
+            let group = p.container_fill(Kind::Group);
+            let off_plain = distance(group, p.container_fill(Kind::Target));
+            assert!(off_plain >= MIN_DISTINCT_COLOR, "{theme}: {off_plain}");
+            let off_file = distance(group, p.leaf_fill(Kind::Artifact));
+            assert!(off_file >= MIN_DISTINCT_COLOR, "{theme}: {off_file}");
+        }
+    }
+
+    /// Hovering a node sends the rest of the graph back without sending it away:
+    /// a dimmed box parts from the lit boxes beside it, and still stands off the
+    /// canvas within the border drawn round it.
+    #[test]
+    fn a_dimmed_box_recedes_without_leaving_the_canvas() {
+        for (theme, p) in palettes() {
+            for kind in ACCENTED_KINDS {
+                let (lit, dim) = (p.leaf_fill(kind), p.dimmed(p.leaf_fill(kind)));
+                let faded = level_step(lit, dim);
+                assert!(faded >= MIN_VISIBLE_STEP, "{theme} {kind:?}: {faded} levels");
+                let left = level_step(dim, p.background);
+                assert!(left >= MIN_EDGED_STEP, "{theme} {kind:?}: {left} levels");
+            }
+        }
+    }
+
+    /// A dimmed connector recedes by opacity: it stays visible on the canvas it
+    /// is washed into, and stays off the lit route of its own provenance.
+    #[test]
+    fn a_dimmed_connector_stays_on_the_canvas_and_off_its_lit_self() {
+        for (theme, p) in palettes() {
+            for kind in EDGE_KINDS {
+                let lit = p.edge_color(kind);
+                let dim = over(dimmed_edge(lit), p.background);
+                let left = level_step(dim, p.background);
+                assert!(left >= MIN_VISIBLE_STEP, "{theme} {kind:?}: {left} levels");
+                let apart = distance(dim, lit);
+                assert!(apart >= MIN_DISTINCT_COLOR, "{theme} {kind:?}: {apart}");
+            }
+        }
+    }
+
+    /// A dimmed name is scenery rather than something the reader is meant to
+    /// read, so it holds the bar for what is made out without being read.
+    #[test]
+    fn a_dimmed_name_is_still_made_out_on_the_box_it_receded_with() {
+        for (theme, p) in palettes() {
+            for fill in box_fills(&p) {
+                let held = contrast_ratio(p.dim_label, p.dimmed(fill));
+                assert!(held >= MIN_SECONDARY_CONTRAST, "{theme}: {held}");
+            }
+        }
+    }
+
+    /// The wash marks the box the user just toggled without recoloring it: it
+    /// carries the fill far enough off the one that box wears unmarked to be
+    /// seen, and stops short of the fills the other kinds wear, so the kind is
+    /// still read off the box.
+    #[test]
+    fn an_emphasized_box_is_seen_and_keeps_its_kind_under_the_wash() {
+        for (theme, p) in palettes() {
+            for kind in ACCENTED_KINDS {
+                let fill = p.leaf_fill(kind);
+                let washed = over(p.highlight_wash(1.0), fill);
+                let own = distance(washed, fill);
+                assert!(own >= MIN_DISTINCT_COLOR, "{theme} {kind:?}: {own} from itself");
+                for other in ACCENTED_KINDS.iter().filter(|k| **k != kind) {
+                    let apart = distance(washed, p.leaf_fill(*other));
+                    assert!(
+                        own < apart,
+                        "{theme} {kind:?}: {own} from itself, {apart} from {other:?}"
+                    );
+                }
+            }
+        }
     }
 }

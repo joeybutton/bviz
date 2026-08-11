@@ -5,6 +5,7 @@
 use bviz_graph_layout::Id;
 use bviz_ui_components::{Dropdown, DropdownEvent, ScrollbarColors};
 use bviz_ui_shell::Chrome;
+use bviz_ui_theme::{DataColors, Theme, ThemeColors};
 use clap::Parser;
 use gpui::{
     AnyElement, Bounds, Context, Entity, FocusHandle, IntoElement, KeyDownEvent, MouseButton,
@@ -79,11 +80,43 @@ const SETTLE_MIN_PAN_STEP: f32 = 0.5;
 #[derive(Clone, Copy)]
 struct Palette {
     border: Rgba,
+    /// Text on the controls framing the canvas.
     label: Rgba,
-    container_fill: Rgba,
-    /// Background the kind accents are blended toward to form leaf fills.
+    /// Fill of a container box, and the sheet the legend floats on.
+    container: Rgba,
+    /// Fill of the outermost package box, which stands one step further off the
+    /// canvas than `container` so nesting reads outermost first.
+    package: Rgba,
     background: Rgba,
+    /// Ink for the name on a box the hover has dimmed, which recedes with it.
+    dim_label: Rgba,
+    /// Accent the just-toggled box is picked out with.
+    highlight: Rgba,
+    /// The slots the node kinds and the edge provenances are colored from.
+    data: DataColors,
     scroll: ScrollbarColors,
+    /// The theme's own roles, for handing to a shared component that resolves
+    /// its colors from them; the canvas paints from this palette's roles rather
+    /// than from these.
+    colors: ThemeColors,
+}
+
+impl Palette {
+    fn from_theme(theme: &Theme) -> Palette {
+        let colors = &theme.colors;
+        Palette {
+            border: colors.border.into(),
+            label: colors.text.into(),
+            container: colors.panel.into(),
+            package: colors.surface.into(),
+            background: colors.background.into(),
+            dim_label: colors.text_disabled.into(),
+            highlight: colors.highlight.into(),
+            data: theme.data,
+            scroll: ScrollbarColors::from_colors(colors),
+            colors: *colors,
+        }
+    }
 }
 
 /// Loads, lays out, and renders a Bazel build graph.
@@ -177,14 +210,10 @@ impl GraphView {
 
     /// Draws the selected mode's layout, or a spinner while it is still being
     /// computed — the toolbar stays above either, so the picker remains reachable.
-    fn viewport(
-        &mut self,
-        palette: Palette,
-        colors: &bviz_ui_theme::ThemeColors,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
+    fn viewport(&mut self, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
         let Some(drawn) = self.drawn() else {
-            return bviz_ui_components::centered_spinner("Laying out…", colors).into_any_element();
+            return bviz_ui_components::centered_spinner("Laying out…", &palette.colors)
+                .into_any_element();
         };
         let g = drawn.view(self.camera().zoom);
         let edge_legend = legend(g, &palette);
@@ -336,16 +365,8 @@ impl GraphView {
 
 impl Render for GraphView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let colors = bviz_ui_theme::colors(window);
-        let roles = bviz_ui_theme::theme(window, cx).colors;
-        let palette = Palette {
-            border: colors.border,
-            label: colors.text,
-            container_fill: colors.container,
-            background: colors.background,
-            scroll: ScrollbarColors::from_colors(&roles),
-        };
-        let body = match self.model.source().placeholder(&roles) {
+        let palette = Palette::from_theme(&bviz_ui_theme::theme(window, cx));
+        let body = match self.model.source().placeholder(&palette.colors) {
             Some(placeholder) => placeholder.into_any_element(),
             None => {
                 let controls = Controls {
@@ -366,7 +387,7 @@ impl Render for GraphView {
                             .flex_1()
                             .flex()
                             .overflow_hidden()
-                            .child(self.viewport(palette, &roles, cx)),
+                            .child(self.viewport(palette, cx)),
                     )
                     .into_any_element()
             }

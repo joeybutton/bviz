@@ -1,5 +1,4 @@
 use crate::Palette;
-use crate::paint::edge_color;
 use bviz_graph_layout::{EdgeKind, LaidOut};
 use gpui::{Div, div, prelude::*, px};
 
@@ -20,13 +19,13 @@ pub(crate) fn legend(g: &LaidOut, palette: &Palette) -> Option<Div> {
             .gap_1()
             .p_2()
             .rounded_md()
-            .bg(palette.container_fill)
+            .bg(palette.container)
             .children(present.into_iter().map(|k| {
                 div()
                     .flex()
                     .items_center()
                     .gap_2()
-                    .child(div().w(px(16.)).h(px(2.)).bg(edge_color(k)))
+                    .child(div().w(px(16.)).h(px(2.)).bg(palette.edge_color(k)))
                     .child(div().text_xs().text_color(palette.label).child(k.label()))
             }))
     })
