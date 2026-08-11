@@ -1,8 +1,10 @@
 load("@rules_rs//rs:rust_library.bzl", "rust_library")
+load("@rules_rs//rs:rust_test.bzl", "rust_test")
 
 rust_library(
     name = "theme",
-    srcs = ["src/lib.rs"],
+    srcs = glob(["src/*.rs"]),
+    compile_data = ["//ui/theme/themes:one"],
     crate_name = "bviz_ui_theme",
     visibility = [
         "//ui/components:__pkg__",
@@ -13,5 +15,12 @@ rust_library(
     ],
     deps = [
         "@crates//:gpui",
+        "@crates//:serde",
+        "@crates//:serde_json",
     ],
+)
+
+rust_test(
+    name = "theme_test",
+    crate = ":theme",
 )
