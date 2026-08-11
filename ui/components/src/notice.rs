@@ -1,5 +1,5 @@
 use crate::spinner;
-use bviz_ui_theme::Colors;
+use bviz_ui_theme::ThemeColors;
 use gpui::{Div, SharedString, div, prelude::*, px};
 
 /// How a load in flight is labelled on screen.
@@ -9,35 +9,35 @@ const LOADING: &str = "Loading…";
 pub enum Source<T> {
     Loading,
     Loaded(T),
-    /// Why no document is shown, worded for the reader.
-    Message(String),
+    /// Why the document could not be loaded, worded for the reader.
+    Failed(String),
 }
 
 impl<T> Source<T> {
     /// What the view draws in place of the document until one is loaded, and
     /// `None` once one is.
-    pub fn placeholder(&self, colors: &Colors) -> Option<Div> {
+    pub fn placeholder(&self, colors: &ThemeColors) -> Option<Div> {
         match self {
             Self::Loading => Some(centered_spinner(LOADING, colors)),
             Self::Loaded(_) => None,
-            Self::Message(msg) => Some(centered_notice(msg.clone(), colors)),
+            Self::Failed(why) => Some(centered_notice(why.clone(), colors)),
         }
     }
 
     /// The status line for this state: the load label while one is in flight,
     /// `loaded` describing the document once one is loaded, and `absent` naming
-    /// what is missing when a message stands in the document's place.
+    /// what the reader does not have once the load has failed.
     pub fn status(&self, absent: &str, loaded: impl FnOnce(&T) -> String) -> String {
         match self {
             Self::Loading => LOADING.into(),
             Self::Loaded(document) => loaded(document),
-            Self::Message(_) => absent.into(),
+            Self::Failed(_) => absent.into(),
         }
     }
 }
 
 /// Shown while work is in flight.
-pub fn centered_spinner(label: impl Into<SharedString>, colors: &Colors) -> Div {
+pub fn centered_spinner(label: impl Into<SharedString>, colors: &ThemeColors) -> Div {
     div()
         .flex_1()
         .flex()
@@ -46,11 +46,12 @@ pub fn centered_spinner(label: impl Into<SharedString>, colors: &Colors) -> Div 
         .items_center()
         .gap_3()
         .child(spinner("spinner", px(36.), colors.text))
-        .child(div().text_sm().text_color(colors.disabled).child(label.into()))
+        .child(div().text_sm().text_color(colors.text_muted).child(label.into()))
 }
 
-/// Shown in place of content that is absent or failed to load.
-pub fn centered_notice(message: impl Into<SharedString>, colors: &Colors) -> Div {
+/// Shown in place of a document that could not be loaded, as the body of the view
+/// the document would have filled.
+pub fn centered_notice(message: impl Into<SharedString>, colors: &ThemeColors) -> Div {
     div()
         .flex_1()
         .flex()
@@ -63,7 +64,7 @@ pub fn centered_notice(message: impl Into<SharedString>, colors: &Colors) -> Div
             div()
                 .max_w(px(400.))
                 .text_sm()
-                .text_color(colors.disabled)
+                .text_color(colors.text)
                 .child(message.into()),
         )
 }

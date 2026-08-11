@@ -4,10 +4,10 @@
 
 use gpui::{
     App, Bounds, ClipboardItem, Context, CursorStyle, Element, ElementInputHandler, Entity,
-    EntityInputHandler, FocusHandle, Focusable, Font, GlobalElementId, InspectorElementId,
+    EntityInputHandler, FocusHandle, Focusable, Font, GlobalElementId, Hsla, InspectorElementId,
     IntoElement, KeyBinding, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
-    PaintQuad, Pixels, Point, Render, Rgba, ShapedLine, SharedString, Style, TextRun,
-    UTF16Selection, UnderlineStyle, Window, div, fill, point, prelude::*, px, relative, size,
+    PaintQuad, Pixels, Point, Render, ShapedLine, SharedString, Style, TextRun, UTF16Selection,
+    UnderlineStyle, Window, div, fill, point, prelude::*, px, relative, size,
 };
 use std::ops::Range;
 
@@ -454,13 +454,13 @@ impl IntoElement for TextElement {
 fn ime_marked_runs(
     text_len: usize,
     font: Font,
-    color: Rgba,
+    color: Hsla,
     marked_range: Option<&Range<usize>>,
 ) -> Vec<TextRun> {
     let run = TextRun {
         len: text_len,
         font,
-        color: color.into(),
+        color,
         background_color: None,
         underline: None,
         strikethrough: None,
@@ -498,8 +498,8 @@ fn cursor_selection_quads(
     selected: &Range<usize>,
     cursor: usize,
     bounds: Bounds<Pixels>,
-    cursor_color: Rgba,
-    selection_color: Rgba,
+    cursor_color: Hsla,
+    selection_color: Hsla,
 ) -> (Option<PaintQuad>, Option<PaintQuad>) {
     if selected.is_empty() {
         let x = line.x_for_index(cursor);
@@ -561,14 +561,14 @@ impl Element for TextElement {
         window: &mut Window,
         cx: &mut App,
     ) -> TextPrepaint {
-        let colors = bviz_ui_theme::colors(window);
+        let colors = bviz_ui_theme::theme(window, cx).colors;
         let input = self.input.read(cx);
         let selected = input.selected_range.clone();
         let cursor = input.cursor_offset();
         let style = window.text_style();
 
         let (text, color) = if input.content.is_empty() {
-            (input.placeholder.clone(), colors.disabled)
+            (input.placeholder.clone(), colors.text_muted)
         } else {
             (input.content.clone(), colors.text)
         };
@@ -577,7 +577,7 @@ impl Element for TextElement {
         let line = window.text_system().shape_line(text, font_size, &runs, None);
 
         let (cursor_quad, selection_quad) =
-            cursor_selection_quads(&line, &selected, cursor, bounds, colors.text, colors.selected);
+            cursor_selection_quads(&line, &selected, cursor, bounds, colors.text, colors.selection);
         TextPrepaint {
             line: Some(line),
             cursor: cursor_quad,
@@ -621,7 +621,7 @@ impl Element for TextElement {
 
 impl Render for TextInput {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let colors = bviz_ui_theme::colors(window);
+        let colors = bviz_ui_theme::theme(window, cx).colors;
         let focused = self.focus_handle.is_focused(window);
         div()
             .key_context("TextInput")
@@ -651,7 +651,7 @@ impl Render for TextInput {
             .rounded_md()
             .bg(colors.background)
             .border_1()
-            .border_color(if focused { colors.selected } else { colors.border })
+            .border_color(if focused { colors.border_focused } else { colors.border })
             .child(TextElement { input: cx.entity() })
     }
 }

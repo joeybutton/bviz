@@ -227,12 +227,7 @@ impl StatsPanel {
     /// through [`stats_cell`], so their widths cannot disagree at any window
     /// width: each fixed column reserves its pixel width without shrinking, and
     /// the one flexible column takes the remainder.
-    fn stats_table(
-        &self,
-        palette: &Palette,
-        colors: &bviz_ui_theme::Colors,
-        cx: &mut Context<Self>,
-    ) -> Div {
+    fn stats_table(&self, palette: &Palette, cx: &mut Context<Self>) -> Div {
         // The key column names the labelling the shown rows were keyed by, which
         // trails the model's mode for as long as a rebuild takes; with no rows
         // up there is nothing for the model's mode to disagree with.
@@ -293,7 +288,7 @@ impl StatsPanel {
         // Until the off-thread sort lands, keep the header but show a spinner in
         // place of the body rather than an empty band.
         let Some(order) = self.stats_order.clone() else {
-            return table.child(centered_spinner("Sorting…", colors));
+            return table.child(centered_spinner("Sorting…", &palette.roles));
         };
 
         let row_count = order.order().len();
@@ -463,7 +458,7 @@ impl Render for StatsPanel {
         // ~2M rows on the paint thread would freeze it.
         self.ensure_stats_order(cx);
         let colors = bviz_ui_theme::colors(window);
-        let palette = Palette::from_colors(&colors);
+        let palette = Palette::from_colors(&colors, &bviz_ui_theme::theme(window, cx).colors);
         div()
             .size_full()
             .overflow_hidden()
@@ -479,7 +474,7 @@ impl Render for StatsPanel {
                 }),
             )
             .on_scroll_wheel(|_, _, cx: &mut App| cx.stop_propagation())
-            .child(self.stats_table(&palette, &colors, cx))
+            .child(self.stats_table(&palette, cx))
     }
 }
 

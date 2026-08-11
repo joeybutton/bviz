@@ -30,8 +30,8 @@ impl Toolbar {
 }
 
 impl RenderOnce for Toolbar {
-    fn render(self, window: &mut Window, _cx: &mut App) -> impl IntoElement {
-        let colors = bviz_ui_theme::colors(window);
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let colors = bviz_ui_theme::theme(window, cx).colors;
         div()
             .flex()
             .flex_row()
@@ -42,7 +42,7 @@ impl RenderOnce for Toolbar {
             .flex_none()
             .h(CONTROL_HEIGHT + MARGIN)
             .px_2()
-            .bg(colors.container)
+            .bg(colors.surface)
             .border_b_1()
             .border_color(colors.border)
             .child(group(self.leading))

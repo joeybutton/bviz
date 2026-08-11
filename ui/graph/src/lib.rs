@@ -5,7 +5,6 @@
 use bviz_graph_layout::Id;
 use bviz_ui_components::{Dropdown, DropdownEvent, ScrollbarColors};
 use bviz_ui_shell::Chrome;
-use bviz_ui_theme::Colors;
 use clap::Parser;
 use gpui::{
     AnyElement, Bounds, Context, Entity, FocusHandle, IntoElement, KeyDownEvent, MouseButton,
@@ -178,7 +177,12 @@ impl GraphView {
 
     /// Draws the selected mode's layout, or a spinner while it is still being
     /// computed — the toolbar stays above either, so the picker remains reachable.
-    fn viewport(&mut self, palette: Palette, colors: &Colors, cx: &mut Context<Self>) -> AnyElement {
+    fn viewport(
+        &mut self,
+        palette: Palette,
+        colors: &bviz_ui_theme::ThemeColors,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let Some(drawn) = self.drawn() else {
             return bviz_ui_components::centered_spinner("Laying out…", colors).into_any_element();
         };
@@ -333,14 +337,15 @@ impl GraphView {
 impl Render for GraphView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = bviz_ui_theme::colors(window);
+        let roles = bviz_ui_theme::theme(window, cx).colors;
         let palette = Palette {
             border: colors.border,
             label: colors.text,
             container_fill: colors.container,
             background: colors.background,
-            scroll: ScrollbarColors::from_colors(&colors),
+            scroll: ScrollbarColors::from_colors(&roles),
         };
-        let body = match self.model.source().placeholder(&colors) {
+        let body = match self.model.source().placeholder(&roles) {
             Some(placeholder) => placeholder.into_any_element(),
             None => {
                 let controls = Controls {
@@ -361,7 +366,7 @@ impl Render for GraphView {
                             .flex_1()
                             .flex()
                             .overflow_hidden()
-                            .child(self.viewport(palette, &colors, cx)),
+                            .child(self.viewport(palette, &roles, cx)),
                     )
                     .into_any_element()
             }

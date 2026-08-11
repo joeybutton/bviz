@@ -422,7 +422,7 @@ impl TracksMenu {
 impl Render for TracksMenu {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = bviz_ui_theme::colors(window);
-        let palette = Palette::from_colors(&colors);
+        let palette = Palette::from_colors(&colors, &bviz_ui_theme::theme(window, cx).colors);
         let Some(shell) = self.shell.upgrade() else {
             return div().into_any_element();
         };

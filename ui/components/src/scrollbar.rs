@@ -4,7 +4,7 @@
 //! passes) and its own reveal/auto-hide policy, and uses this only to place the
 //! thumb, hit-test a press, and map a drag back to an offset.
 
-use bviz_ui_theme::{Colors, mix};
+use bviz_ui_theme::ThemeColors;
 use gpui::{
     Background, BorderStyle, Bounds, Hsla, Pixels, Point, Rgba, Window, point, px, quad, size,
 };
@@ -74,18 +74,9 @@ pub const DEFAULT_MIN_THUMB: f32 = 24.0;
 /// dimension, and so the strip a view keeps clear along the edge it puts a bar on.
 pub const SCROLLBAR_THICKNESS: f32 = 10.0;
 
-/// Fraction by which the border color is blended toward the background to give
-/// the track: a channel that reads against the surface behind it in either
-/// appearance while staying subordinate to the thumb.
-const TRACK_BLEND: f32 = 0.5;
-
-/// Fraction by which the text color is blended toward the background to give the
-/// thumb, the bar's one grabbable part: it stands off the track without pulling
-/// the eye from the content.
-const THUMB_BLEND: f32 = 0.55;
-
 /// The fills a scroll bar paints with, so every bar reads the same whichever view
-/// draws it.
+/// draws it. Both are washes, so one pair of values carries a bar over whichever
+/// surface the view that owns it lays it on.
 #[derive(Clone, Copy)]
 pub struct ScrollbarColors {
     pub track: Rgba,
@@ -93,10 +84,13 @@ pub struct ScrollbarColors {
 }
 
 impl ScrollbarColors {
-    pub fn from_colors(colors: &Colors) -> ScrollbarColors {
+    /// The bar's two parts take the palette's two neutral washes: each registers
+    /// on every surface and the heavier stands off the lighter, which is what a
+    /// track laid on any surface and a thumb laid on that track have to do.
+    pub fn from_colors(colors: &ThemeColors) -> ScrollbarColors {
         ScrollbarColors {
-            track: mix(colors.border, colors.background, TRACK_BLEND),
-            thumb: mix(colors.text, colors.background, THUMB_BLEND),
+            track: colors.element_hover.into(),
+            thumb: colors.element_active.into(),
         }
     }
 }
@@ -229,22 +223,25 @@ impl Scrollbar {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bviz_ui_theme::{MIN_VISIBLE_STEP, level_step};
+    use crate::palettes::default_palettes;
+    use bviz_ui_theme::{MIN_VISIBLE_STEP, level_step, over};
 
+    /// A bar lands wherever the view that owns it puts it, so its track has to
+    /// part from every surface it can lie on, its thumb from the track under it,
+    /// and — for a view that draws the thumb alone — from that surface too.
     #[test]
-    fn the_track_reads_against_the_surface_in_either_appearance() {
-        for colors in [Colors::dark(), Colors::light()] {
+    fn the_bar_reads_on_every_surface_it_is_drawn_over() {
+        for colors in default_palettes() {
             let bar = ScrollbarColors::from_colors(&colors);
-            assert!(level_step(bar.track, colors.background) >= MIN_VISIBLE_STEP);
-        }
-    }
-
-    #[test]
-    fn the_thumb_outweighs_the_track_in_either_appearance() {
-        for colors in [Colors::dark(), Colors::light()] {
-            let bar = ScrollbarColors::from_colors(&colors);
-            assert!(level_step(bar.thumb, bar.track) > level_step(bar.track, colors.background));
-            assert!(level_step(bar.thumb, colors.background) >= MIN_VISIBLE_STEP);
+            for surface in [colors.background, colors.surface, colors.panel] {
+                let track = over(bar.track, surface);
+                let laid = level_step(track, surface);
+                assert!(laid >= MIN_VISIBLE_STEP, "{laid} levels of track on its surface");
+                let grabbable = level_step(over(bar.thumb, track), track);
+                assert!(grabbable >= MIN_VISIBLE_STEP, "{grabbable} levels of thumb on its track");
+                let bare = level_step(over(bar.thumb, surface), surface);
+                assert!(bare >= MIN_VISIBLE_STEP, "{bare} levels of thumb on a bare surface");
+            }
         }
     }
 

@@ -121,7 +121,7 @@ impl TerminalElement {
         history: usize,
         offset: usize,
         rows: usize,
-        colors: &bviz_ui_theme::Colors,
+        colors: &bviz_ui_theme::ThemeColors,
         cx: &mut App,
     ) -> Option<PaintQuad> {
         let scrollbar_layout = Scrollbar::new(
@@ -444,7 +444,14 @@ impl Element for TerminalElement {
             });
         });
 
-        let scrollbar = self.scrollbar_quad(bounds, history, offset, rows, &colors, cx);
+        let scrollbar = self.scrollbar_quad(
+            bounds,
+            history,
+            offset,
+            rows,
+            &bviz_ui_theme::theme(window, cx).colors,
+            cx,
+        );
 
         let (lines, mut backgrounds) =
             Self::shape_viewport(&viewport, bounds, metrics, defaults, window);

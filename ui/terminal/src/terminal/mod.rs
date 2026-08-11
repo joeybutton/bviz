@@ -260,7 +260,7 @@ impl TerminalView {
                         view.position = replay.duration();
                         Source::Loaded(replay)
                     }
-                    Err(err) => Source::Message(err),
+                    Err(err) => Source::Failed(err),
                 };
             },
         );
@@ -759,7 +759,7 @@ impl Render for TerminalView {
         self.advance_playback(window);
         self.autoscroll_selection(window, cx);
         let colors = bviz_ui_theme::colors(window);
-        let body = match self.source.placeholder(&colors) {
+        let body = match self.source.placeholder(&bviz_ui_theme::theme(window, cx).colors) {
             Some(placeholder) => placeholder.into_any_element(),
             None => {
                 let find_box = if self.find_active {

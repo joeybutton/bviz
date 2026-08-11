@@ -295,7 +295,7 @@ impl TraceView {
         self.stats.update(cx, |s, _| s.reset_for_new_profile());
         let source = match result {
             Ok(profile) => Source::Loaded(Arc::new(profile)),
-            Err(err) => Source::Message(err),
+            Err(err) => Source::Failed(err),
         };
         // The tracks-menu fold state, unlike the document-derived selection the
         // model seeds, is view-local, so reset it here for a freshly loaded
@@ -344,7 +344,7 @@ impl TraceView {
         // panel sits over the content column of the bottom region; the counter
         // plots are drawn by the timeline instead.
         let mut overlays = RegionOverlays::new(self.region_inputs(cx));
-        if let Some(panel) = self.bottom_panel(palette, colors, cx) {
+        if let Some(panel) = self.bottom_panel(palette, cx) {
             overlays = overlays.child(panel, panel_rect);
         }
         // The gutter handle spans the full height and so crosses both, and must
@@ -601,17 +601,14 @@ impl TraceView {
     /// The bottom-panel overlay for the active tab, positioned over the content
     /// column of the panel region. The Counters tab draws on the flame chart's
     /// canvas, so it needs no overlay.
-    fn bottom_panel(
-        &self,
-        palette: Palette,
-        colors: &bviz_ui_theme::Colors,
-        cx: &mut Context<Self>,
-    ) -> Option<AnyElement> {
+    fn bottom_panel(&self, palette: Palette, cx: &mut Context<Self>) -> Option<AnyElement> {
         let content: AnyElement = match self.bottom_tab {
             BottomTab::Counters => return None,
             BottomTab::FlameGraph => match self.model.read(cx).aggregates() {
                 Some(_) => self.flame.clone().into_any_element(),
-                None => centered_spinner("Building flame graph…", colors).into_any_element(),
+                None => {
+                    centered_spinner("Building flame graph…", &palette.roles).into_any_element()
+                }
             },
             BottomTab::Stats => self.stats.clone().into_any_element(),
         };
@@ -692,10 +689,10 @@ fn time_window_summary(window: Option<&TimeSelection>, span_us: i64) -> Option<S
 impl Render for TraceView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = bviz_ui_theme::colors(window);
-        let palette = Palette::from_colors(&colors);
+        let palette = Palette::from_colors(&colors, &bviz_ui_theme::theme(window, cx).colors);
         // Take the placeholder before the `&mut self` build calls below, so the
         // model borrow it is read through ends first.
-        let placeholder = self.model.read(cx).source().placeholder(&colors);
+        let placeholder = self.model.read(cx).source().placeholder(&palette.roles);
         let body = match placeholder {
             Some(placeholder) => placeholder,
             None => div()

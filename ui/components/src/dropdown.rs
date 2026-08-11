@@ -2,10 +2,10 @@
 //! opens beneath it.
 
 use crate::CONTROL_HEIGHT;
-use bviz_ui_theme::Colors;
+use bviz_ui_theme::{ThemeColors, over};
 use gpui::{
     deferred, div, prelude::*, px, ClickEvent, Context, ElementId, EventEmitter, FocusHandle,
-    IntoElement, MouseButton, Pixels, Render, SharedString, Subscription, Window,
+    Hsla, IntoElement, MouseButton, Pixels, Render, SharedString, Subscription, Window,
 };
 
 /// Breathing room between the trigger and the menu it opens.
@@ -102,8 +102,13 @@ impl Dropdown {
         px(f32::from(measured).ceil() + 6.)
     }
 
-    fn trigger(&self, colors: &Colors, option_width: Pixels, cx: &Context<Self>) -> impl IntoElement {
-        let hover = colors.selected;
+    fn trigger(
+        &self,
+        colors: &ThemeColors,
+        option_width: Pixels,
+        cx: &Context<Self>,
+    ) -> impl IntoElement {
+        let hover = colors.element_hover;
         let label = self.options.get(self.selected).cloned().unwrap_or_default();
         div()
             .id(self.id.clone())
@@ -142,16 +147,20 @@ impl Dropdown {
             )
     }
 
-    fn menu(&self, colors: &Colors, cx: &Context<Self>) -> impl IntoElement {
-        let hover = colors.selected;
+    fn menu(&self, colors: &ThemeColors, cx: &Context<Self>) -> impl IntoElement {
+        // Composited so the chosen row keeps its accent while the cursor is on it.
+        let chosen_hover =
+            Hsla::from(over(colors.element_hover, over(colors.selection, colors.panel)));
         let rows = self.options.iter().enumerate().map(|(index, option)| {
+            let chosen = index == self.selected;
+            let hover = if chosen { chosen_hover } else { colors.element_hover };
             div()
                 .id(("dropdown-option", index))
                 .px_2()
                 .py_1()
                 .cursor_pointer()
                 .text_color(colors.text)
-                .when(index == self.selected, |row| row.bg(colors.selected))
+                .when(chosen, |row| row.bg(colors.selection))
                 .hover(move |style| style.bg(hover))
                 .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.choose(index, cx)))
                 .child(div().whitespace_nowrap().child(option.clone()))
@@ -169,7 +178,7 @@ impl Dropdown {
                 // padding and border, which is error-prone.
                 .flex()
                 .flex_col()
-                .bg(colors.container)
+                .bg(colors.panel)
                 .border_1()
                 .border_color(colors.border)
                 .rounded_md()
@@ -195,7 +204,7 @@ impl Render for Dropdown {
             );
         }
 
-        let colors = bviz_ui_theme::colors(window);
+        let colors = bviz_ui_theme::theme(window, cx).colors;
         let option_width = self.option_width(window);
 
         div()

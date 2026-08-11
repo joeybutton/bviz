@@ -1,3 +1,4 @@
+use bviz_ui_theme::ThemeColors;
 use gpui::{
     App, BorderStyle, Bounds, Hsla, Pixels, Point, Rgba, TextAlign, Window, point, px, quad, size,
 };
@@ -17,6 +18,16 @@ pub struct TooltipColors {
     pub panel: Rgba,
     pub border: Rgba,
     pub label: Rgba,
+}
+
+impl TooltipColors {
+    pub fn from_colors(colors: &ThemeColors) -> TooltipColors {
+        TooltipColors {
+            panel: colors.panel.into(),
+            border: colors.border.into(),
+            label: colors.text.into(),
+        }
+    }
 }
 
 /// Measures `lines`, sizes a padded box, clamps it inside `bounds`, and paints the

@@ -168,11 +168,17 @@ pub(crate) struct Palette {
     pub(crate) crosshair: Rgba,
     /// Accent marking a selected track's gutter row.
     pub(crate) selection: Rgba,
+    /// The semantic roles, for the shared components that paint from them.
+    pub(crate) roles: bviz_ui_theme::ThemeColors,
 }
 
 impl Palette {
-    pub(crate) fn from_colors(colors: &bviz_ui_theme::Colors) -> Palette {
+    pub(crate) fn from_colors(
+        colors: &bviz_ui_theme::Colors,
+        roles: &bviz_ui_theme::ThemeColors,
+    ) -> Palette {
         Palette {
+            roles: *roles,
             border: colors.border,
             label: colors.text,
             background: colors.background,
@@ -180,7 +186,7 @@ impl Palette {
             gridline: bviz_ui_theme::mix(colors.border, colors.background, 0.55),
             // A mid-tone amber, legible against a light or dark background.
             marker: Rgba::from(hsla(0.09, 0.6, 0.55, 1.0)),
-            scroll: ScrollbarColors::from_colors(colors),
+            scroll: ScrollbarColors::from_colors(roles),
             hover: bviz_ui_theme::hover_fill(colors),
             divider: bviz_ui_theme::mix(colors.border, colors.background, 0.4),
             panel: colors.container,
@@ -197,7 +203,7 @@ impl Palette {
 
     /// The colors a hover tooltip paints with.
     pub(crate) fn tooltip(&self) -> TooltipColors {
-        TooltipColors { panel: self.panel, border: self.border, label: self.label }
+        TooltipColors::from_colors(&self.roles)
     }
 
     /// The style a labeled box paints with.
@@ -214,7 +220,7 @@ impl Palette {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bviz_ui_theme::{Colors, MIN_VISIBLE_STEP, level_step};
+    use bviz_ui_theme::{Appearance, Colors, MIN_VISIBLE_STEP, ThemeRegistry, level_step};
 
     /// The most a hover fill may clear the surface under it, as a multiple of
     /// [`MIN_VISIBLE_STEP`]: hover is momentary feedback, so it registers and
@@ -222,10 +228,20 @@ mod tests {
     /// starts competing with the text on the row.
     const HOVER_HEADROOM: f32 = 3.0;
 
+    /// The palettes the two appearances fall back to, paired with the gpui
+    /// colors of the same appearance.
+    fn defaults() -> [Palette; 2] {
+        let registry = ThemeRegistry::new().expect("built-in themes load");
+        [(Appearance::Dark, Colors::dark()), (Appearance::Light, Colors::light())].map(
+            |(appearance, colors)| {
+                Palette::from_colors(&colors, &registry.resolve(appearance).colors)
+            },
+        )
+    }
+
     #[test]
     fn the_hover_clears_every_surface_it_sits_on_without_becoming_one() {
-        for colors in [Colors::dark(), Colors::light()] {
-            let palette = Palette::from_colors(&colors);
+        for palette in defaults() {
             for surface in [palette.background, palette.header_band, palette.panel] {
                 let lift = level_step(palette.hover, surface);
                 assert!(lift >= MIN_VISIBLE_STEP);
@@ -236,8 +252,7 @@ mod tests {
 
     #[test]
     fn the_hover_is_neither_the_rule_between_rows_nor_the_selection() {
-        for colors in [Colors::dark(), Colors::light()] {
-            let palette = Palette::from_colors(&colors);
+        for palette in defaults() {
             for neighbour in [palette.border, palette.selection] {
                 assert!(level_step(palette.hover, neighbour) >= MIN_VISIBLE_STEP);
             }

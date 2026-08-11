@@ -814,7 +814,8 @@ impl Render for TimelinePanel {
             };
             (profile.clone(), lanes)
         };
-        let palette = Palette::from_colors(&bviz_ui_theme::colors(window));
+        let colors = bviz_ui_theme::colors(window);
+        let palette = Palette::from_colors(&colors, &bviz_ui_theme::theme(window, cx).colors);
         let entity = cx.entity();
         let slices = cached_layer(self.canvas.clone());
         let overlay = overlay_canvas(overlay_paint(profile, lanes, entity, palette));
@@ -911,7 +912,8 @@ impl Render for SliceCanvas {
             let (_, panel_height, gutter_width) = panel.shell_layout(cx);
             (profile.clone(), lanes, chrome, panel_height, gutter_width)
         };
-        let palette = Palette::from_colors(&bviz_ui_theme::colors(window));
+        let colors = bviz_ui_theme::colors(window);
+        let palette = Palette::from_colors(&colors, &bviz_ui_theme::theme(window, cx).colors);
         let prepaint = fit_prepaint(profile.clone(), lanes.clone(), parent.clone(), panel_height, gutter_width);
         let paint = slice_paint(profile, lanes, chrome, parent, palette);
         canvas(prepaint, paint)

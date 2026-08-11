@@ -161,7 +161,7 @@ impl Model {
                             names,
                         })
                     }
-                    Err(err) => Source::Message(err),
+                    Err(err) => Source::Failed(err),
                 };
             },
         );

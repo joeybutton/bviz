@@ -528,7 +528,8 @@ impl Render for FlamePanel {
         if self.model.read(cx).aggregates().is_none() {
             return div().into_any_element();
         }
-        let palette = Palette::from_colors(&bviz_ui_theme::colors(window));
+        let colors = bviz_ui_theme::colors(window);
+        let palette = Palette::from_colors(&colors, &bviz_ui_theme::theme(window, cx).colors);
         let entity = cx.entity();
         let boxes = cached_layer(self.canvas.clone());
         let overlay = overlay_canvas(move |bounds, window, cx| {
@@ -630,7 +631,8 @@ impl Render for FlameCanvas {
         let Some(aggregates) = parent.read(cx).model.read(cx).aggregates() else {
             return div().into_any_element();
         };
-        let palette = Palette::from_colors(&bviz_ui_theme::colors(window));
+        let colors = bviz_ui_theme::colors(window);
+        let palette = Palette::from_colors(&colors, &bviz_ui_theme::theme(window, cx).colors);
         let prepaint = {
             let parent = parent.clone();
             move |bounds: Bounds<Pixels>, _: &mut Window, cx: &mut App| {
