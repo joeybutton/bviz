@@ -1,6 +1,6 @@
 use crate::{CloseWindow, Quit, Tab, TabPrev};
 use bviz_ui_components::Button;
-use bviz_ui_theme::{Colors, colors, mix};
+use bviz_ui_theme::{ThemeColors, mix};
 use gpui::{
     AnyElement, App, Bounds, BoxShadow, CursorStyle, Decorations, Div, Entity, FocusHandle,
     HitboxBehavior, Hsla, IntoElement, MouseButton, Pixels, Point, ResizeEdge, RenderOnce, Rgba,
@@ -12,6 +12,20 @@ use gpui::{
 const SHADOW: Pixels = px(10.0);
 const ROUNDING: Pixels = px(10.0);
 const BORDER: Pixels = px(1.0);
+
+/// The share of the theme's shadow opacity the drop shadow is painted at while
+/// the window is not the active one, so an inactive window sits shallower on the
+/// desktop behind it.
+const UNFOCUSED_SHADOW: f32 = 0.5;
+
+/// How far the bands framing the canvas are pulled toward it while the window is
+/// not the active one. Far enough that the dimming registers on its own, and
+/// short of the canvas so a dimmed band still reads as a band.
+const INACTIVE_BAND_PULL: f32 = 0.65;
+
+fn inactive_band(colors: &ThemeColors) -> Rgba {
+    mix(colors.surface, colors.background, INACTIVE_BAND_PULL)
+}
 
 /// The application window frame: client-side decorations (title bar with window
 /// controls, status bar, resize edges, rounded corners, drop shadow, focus
@@ -54,7 +68,7 @@ impl Chrome {
 
 impl RenderOnce for Chrome {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
-        let colors = colors(window);
+        let colors = bviz_ui_theme::theme(window, cx).colors;
         let decorations = window.window_decorations();
         let tiling = match decorations {
             Decorations::Server => Tiling::default(),
@@ -69,12 +83,16 @@ impl RenderOnce for Chrome {
         };
 
         let active = window.is_window_active();
-        let bar_bg = if active {
-            colors.container
+        let band = if active {
+            colors.surface.into()
         } else {
-            mix(colors.container, colors.background, 0.6)
+            inactive_band(&colors)
         };
-        let shadow_alpha = if active { 0.45 } else { 0.18 };
+        let shadow = if active {
+            colors.shadow
+        } else {
+            colors.shadow.opacity(UNFOCUSED_SHADOW)
+        };
         let should_move = window.use_keyed_state("chrome-window-move", cx, |_, _| false);
 
         let inner = div()
@@ -83,12 +101,12 @@ impl RenderOnce for Chrome {
             .size_full()
             .bg(colors.background)
             .text_color(colors.text)
-            .when(client, |this| decorate(this, &colors, tiling, shadow_alpha))
+            .when(client, |this| decorate(this, &colors, tiling, shadow))
             .when(client, |this| {
-                this.child(title_bar(&colors, radius, bar_bg, self.title, should_move))
+                this.child(title_bar(&colors, radius, band, self.title, should_move))
             })
             .child(self.body.unwrap_or_else(|| div().into_any_element()))
-            .child(status_bar(&colors, radius, bar_bg, self.status));
+            .child(status_bar(&colors, radius, band, self.status));
 
         div()
             .id("window-backdrop")
@@ -107,7 +125,7 @@ impl RenderOnce for Chrome {
 
 /// Per-tiling window decoration: a border and rounded corner on each non-tiled
 /// side, plus a drop shadow while the window floats free of the screen edges.
-fn decorate(this: Div, colors: &Colors, tiling: Tiling, shadow_alpha: f32) -> Div {
+fn decorate(this: Div, colors: &ThemeColors, tiling: Tiling, shadow: Hsla) -> Div {
     this.border_color(colors.border)
         .when(!tiling.top, |d| d.border_t(BORDER))
         .when(!tiling.bottom, |d| d.border_b(BORDER))
@@ -119,12 +137,7 @@ fn decorate(this: Div, colors: &Colors, tiling: Tiling, shadow_alpha: f32) -> Di
         .when(!tiling.bottom && !tiling.right, |d| d.rounded_br(ROUNDING))
         .when(!tiling.is_tiled(), |d| {
             d.shadow(vec![BoxShadow {
-                color: Hsla {
-                    h: 0.,
-                    s: 0.,
-                    l: 0.,
-                    a: shadow_alpha,
-                },
+                color: shadow,
                 blur_radius: SHADOW / 2.,
                 spread_radius: px(0.),
                 offset: point(px(0.), px(0.)),
@@ -165,9 +178,9 @@ fn resize_backdrop(this: Stateful<Div>, tiling: Tiling) -> Stateful<Div> {
 
 /// A title bar: draggable to move the window, with minimize/maximize/close controls.
 fn title_bar(
-    colors: &Colors,
+    colors: &ThemeColors,
     radius: Pixels,
-    bar_bg: Rgba,
+    band: Rgba,
     title: SharedString,
     should_move: Entity<bool>,
 ) -> impl IntoElement {
@@ -181,7 +194,7 @@ fn title_bar(
         .px_2()
         .rounded_tl(radius)
         .rounded_tr(radius)
-        .bg(bar_bg)
+        .bg(band)
         .border_b_1()
         .border_color(colors.border)
         // Start the move on the first drag, not the press, so an edge resize wins.
@@ -233,9 +246,9 @@ fn title_bar(
 }
 
 fn status_bar(
-    colors: &Colors,
+    colors: &ThemeColors,
     radius: Pixels,
-    bar_bg: Rgba,
+    band: Rgba,
     status: Option<AnyElement>,
 ) -> impl IntoElement {
     div()
@@ -246,10 +259,10 @@ fn status_bar(
         .px_2()
         .rounded_bl(radius)
         .rounded_br(radius)
-        .bg(bar_bg)
+        .bg(band)
         .border_t_1()
         .border_color(colors.border)
-        .text_color(colors.disabled)
+        .text_color(colors.text_muted)
         .text_sm()
         .font_family(bviz_ui_assets::MONO)
         .children(status)
@@ -337,5 +350,28 @@ fn resize_edge(
         Some(ResizeEdge::Right)
     } else {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bviz_ui_theme::{MIN_EDGED_STEP, MIN_VISIBLE_STEP, ThemeRegistry, level_step};
+
+    /// Dimming the bands is what says the window is no longer the active one, and
+    /// once a compositor tiles the window — taking the rounded corners and the
+    /// drop shadow with them — it is the only thing saying it. So a dimmed band
+    /// has to be told from a lit one, and must not sink into the canvas it frames
+    /// across the border the two meet along.
+    #[test]
+    fn a_dimmed_band_is_told_from_a_lit_one_and_from_the_canvas() {
+        let registry = ThemeRegistry::new().expect("the built-in themes load");
+        for name in ["One Dark", "One Light"] {
+            let colors = registry.get(name).expect("a built-in theme").colors;
+            let dimmed = level_step(inactive_band(&colors), colors.surface);
+            assert!(dimmed >= MIN_VISIBLE_STEP, "{name}: {dimmed} levels of dimming");
+            let framed = level_step(inactive_band(&colors), colors.background);
+            assert!(framed >= MIN_EDGED_STEP, "{name}: {framed} levels off the canvas");
+        }
     }
 }

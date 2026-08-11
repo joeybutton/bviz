@@ -1,4 +1,5 @@
 load("@rules_rs//rs:rust_library.bzl", "rust_library")
+load("@rules_rs//rs:rust_test.bzl", "rust_test")
 
 rust_library(
     name = "shell",
@@ -16,4 +17,9 @@ rust_library(
         "@crates//:gpui",
         "@crates//:gpui_platform",
     ],
+)
+
+rust_test(
+    name = "shell_test",
+    crate = ":shell",
 )
