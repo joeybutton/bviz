@@ -405,6 +405,7 @@ impl TraceView {
             .into_iter()
             .map(|(tab, label)| {
                 let is_active = tab == active;
+                let hover = palette.hover;
                 div()
                     .id(SharedString::from(format!("trace-tab-{label}")))
                     .flex()
@@ -418,7 +419,7 @@ impl TraceView {
                     .when(is_active, |t| {
                         t.bg(background).border_t_2().border_color(selected)
                     })
-                    .hover(|t| t.bg(background))
+                    .hover(move |t| t.bg(hover))
                     // A press on a tab must switch it, not begin a panel resize.
                     .on_mouse_down(MouseButton::Left, |_, _, cx: &mut App| cx.stop_propagation())
                     .on_click(cx.listener(move |this, _, _, cx| {
