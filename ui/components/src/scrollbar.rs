@@ -229,22 +229,13 @@ impl Scrollbar {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bviz_ui_theme::luminance;
-
-    /// The smallest step, in 8-bit sRGB levels, at which one neutral fill still
-    /// reads as separate from another it lies on.
-    const MIN_VISIBLE_STEP: f32 = 12.0;
-
-    /// The perceptual gap between two fills, in 8-bit sRGB levels.
-    fn step(a: Rgba, b: Rgba) -> f32 {
-        255.0 * (luminance(a) - luminance(b)).abs()
-    }
+    use bviz_ui_theme::{MIN_VISIBLE_STEP, level_step};
 
     #[test]
     fn the_track_reads_against_the_surface_in_either_appearance() {
         for colors in [Colors::dark(), Colors::light()] {
             let bar = ScrollbarColors::from_colors(&colors);
-            assert!(step(bar.track, colors.background) >= MIN_VISIBLE_STEP);
+            assert!(level_step(bar.track, colors.background) >= MIN_VISIBLE_STEP);
         }
     }
 
@@ -252,8 +243,8 @@ mod tests {
     fn the_thumb_outweighs_the_track_in_either_appearance() {
         for colors in [Colors::dark(), Colors::light()] {
             let bar = ScrollbarColors::from_colors(&colors);
-            assert!(step(bar.thumb, bar.track) > step(bar.track, colors.background));
-            assert!(step(bar.thumb, colors.background) >= MIN_VISIBLE_STEP);
+            assert!(level_step(bar.thumb, bar.track) > level_step(bar.track, colors.background));
+            assert!(level_step(bar.thumb, colors.background) >= MIN_VISIBLE_STEP);
         }
     }
 

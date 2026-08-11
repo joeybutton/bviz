@@ -26,6 +26,15 @@ pub fn luminance(c: Rgba) -> f32 {
     0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b
 }
 
+/// The perceptual gap between two fills, in 8-bit sRGB levels.
+pub fn level_step(a: Rgba, b: Rgba) -> f32 {
+    255.0 * (luminance(a) - luminance(b)).abs()
+}
+
+/// The smallest step, in 8-bit sRGB levels, at which one neutral fill still reads
+/// as separate from another it lies on.
+pub const MIN_VISIBLE_STEP: f32 = 12.0;
+
 /// `color` at full opacity, for legible text tinted like its translucent dot.
 pub fn opaque(color: Hsla) -> Hsla {
     Hsla { a: 1.0, ..color }
