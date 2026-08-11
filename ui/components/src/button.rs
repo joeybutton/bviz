@@ -8,11 +8,6 @@ use gpui::{
 /// the label's own leading does not set the button's height.
 const COMPACT_LINE_HEIGHT: f32 = 1.2;
 
-/// How far a toggle's hover fill sits from the window background toward the text
-/// color: enough to show the pointer is on it, and clear of the selection color,
-/// which is what an on toggle fills with.
-const TOGGLE_HOVER_TINT: f32 = 0.18;
-
 /// Whether a key activates a focused button (enter or space).
 fn is_activate(key: &str) -> bool {
     key == "enter" || key == "space"
@@ -111,7 +106,7 @@ fn styled_variant(
     let el = sized(el, button).rounded_md();
     match (button.selected, button.ghost) {
         (Some(false), true) => {
-            let hover_bg = bviz_ui_theme::mix(colors.background, colors.text, TOGGLE_HOVER_TINT);
+            let hover_bg = bviz_ui_theme::hover_fill(colors);
             el.border_2()
                 .border_color(transparent_black())
                 .text_color(colors.text)

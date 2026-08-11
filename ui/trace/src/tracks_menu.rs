@@ -164,7 +164,6 @@ impl TracksMenu {
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
         let selected = colors.selected;
-        let hover_bg = bviz_ui_theme::mix(colors.container, colors.background, 0.2);
         let filter = self.filter.read(cx).content().to_lowercase();
         let threads = profile.threads();
         let mut rows: Vec<AnyElement> = Vec::new();
@@ -182,7 +181,7 @@ impl TracksMenu {
             crate::groups::sort_tracks_by_activity(profile, threads, &mut tracks);
             let folded = self.collapsed_groups.get(group).copied().unwrap_or(false);
             rows.push(
-                self.group_row(group, class, &tracks, folded, palette, hover_bg, selected, cx)
+                self.group_row(group, class, &tracks, folded, palette, selected, cx)
                     .into_any_element(),
             );
             if folded {
@@ -209,7 +208,6 @@ impl TracksMenu {
         tracks: &[usize],
         folded: bool,
         palette: Palette,
-        hover_bg: Rgba,
         selected: Rgba,
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
@@ -233,7 +231,7 @@ impl TracksMenu {
             .py_1()
             .cursor_pointer()
             .text_color(palette.label)
-            .hover(move |s| s.bg(hover_bg))
+            .hover(move |s| s.bg(palette.hover))
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.toggle_group_collapsed(group);
                 cx.notify();
@@ -319,7 +317,6 @@ impl TracksMenu {
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
         let (container, text) = (colors.container, colors.text);
-        let hover_bg = bviz_ui_theme::mix(colors.container, colors.background, 0.2);
         div()
             .occlude()
             .absolute()
@@ -359,7 +356,7 @@ impl TracksMenu {
                     .cursor_pointer()
                     .border_b_1()
                     .border_color(palette.border)
-                    .hover(move |s| s.bg(hover_bg))
+                    .hover(move |s| s.bg(palette.hover))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.model.update(cx, |m, _| m.set_all_visible(!all_visible));
                         this.reflow_timeline(cx);
@@ -434,7 +431,6 @@ impl Render for TracksMenu {
             (s.gutter_width, s.timeline.read(cx).viewport())
         };
         let (nvis, ntot) = self.model.read(cx).visible_count();
-        let hover_bg = bviz_ui_theme::mix(colors.container, colors.background, 0.2);
         let trigger = div()
             .id("tracks-menu")
             .size_full()
@@ -448,7 +444,7 @@ impl Render for TracksMenu {
             .text_size(px(GUTTER_LABEL_SIZE))
             .text_color(palette.label)
             .bg(palette.header_band)
-            .hover(move |s| s.bg(hover_bg))
+            .hover(move |s| s.bg(palette.hover))
             // Keep the press off the chart handlers underneath.
             .on_mouse_down(MouseButton::Left, |_, _, cx: &mut App| cx.stop_propagation())
             .on_click(cx.listener(|this, _, _, cx| {

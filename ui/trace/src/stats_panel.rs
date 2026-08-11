@@ -274,7 +274,7 @@ impl StatsPanel {
                 stats_cell(spec, text)
                     .id(SharedString::from(format!("stats-h-{i}")))
                     .cursor_pointer()
-                    .hover(|s| s.bg(palette.table_hover))
+                    .hover(|s| s.bg(palette.hover))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.sort_by(column);
                         cx.notify();
@@ -297,7 +297,7 @@ impl StatsPanel {
         };
 
         let row_count = order.order().len();
-        let row_hover = palette.table_hover;
+        let row_hover = palette.hover;
         let body = uniform_list(
             "stats-body",
             row_count,

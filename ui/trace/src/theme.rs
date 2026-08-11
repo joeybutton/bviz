@@ -50,11 +50,6 @@ const FLAME_ROOT_LIGHTNESS_LIGHT: f32 = 0.78;
 /// enough to read as accented.
 const SELECTION_TINT_MIX: f32 = 0.8;
 
-/// Fraction by which the container color is blended toward the background to give
-/// the stats table's hover fill: enough of a lift to follow the cursor down the
-/// table, faint enough that the values on the row stay the strongest thing in it.
-const TABLE_HOVER_MIX: f32 = 0.3;
-
 /// Side of a legend swatch and the gap between a swatch and its label.
 const LEGEND_SWATCH: f32 = 10.0;
 const LEGEND_LABEL_GAP: f32 = 4.0;
@@ -162,8 +157,8 @@ pub(crate) struct Palette {
     /// Accent for the build-phase boundary lines and their labels.
     pub(crate) marker: Rgba,
     pub(crate) scroll: ScrollbarColors,
-    /// Fill marking the stats table row or header cell under the cursor.
-    pub(crate) table_hover: Rgba,
+    /// Fill for a row or control that marks the cursor by lifting off its surface.
+    pub(crate) hover: Rgba,
     /// The section-splitter and gutter-edge divider lines, subtler than the
     /// scroll thumb so they don't dominate a dark background.
     pub(crate) divider: Rgba,
@@ -186,7 +181,7 @@ impl Palette {
             // A mid-tone amber, legible against a light or dark background.
             marker: Rgba::from(hsla(0.09, 0.6, 0.55, 1.0)),
             scroll: ScrollbarColors::from_colors(colors),
-            table_hover: bviz_ui_theme::mix(colors.container, colors.background, TABLE_HOVER_MIX),
+            hover: bviz_ui_theme::hover_fill(colors),
             divider: bviz_ui_theme::mix(colors.border, colors.background, 0.4),
             panel: colors.container,
             crosshair: bviz_ui_theme::mix(colors.text, colors.background, 0.35),
@@ -212,6 +207,40 @@ impl Palette {
             seam_mix: crate::SLICE_SEAM_MIX,
             label_min_px: crate::LABEL_MIN_PX,
             text_pad: crate::SLICE_TEXT_PAD,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bviz_ui_theme::{Colors, MIN_VISIBLE_STEP, level_step};
+
+    /// The most a hover fill may clear the surface under it, as a multiple of
+    /// [`MIN_VISIBLE_STEP`]: hover is momentary feedback, so it registers and
+    /// stops there — lifted further it reads as a surface in its own right and
+    /// starts competing with the text on the row.
+    const HOVER_HEADROOM: f32 = 3.0;
+
+    #[test]
+    fn the_hover_clears_every_surface_it_sits_on_without_becoming_one() {
+        for colors in [Colors::dark(), Colors::light()] {
+            let palette = Palette::from_colors(&colors);
+            for surface in [palette.background, palette.header_band, palette.panel] {
+                let lift = level_step(palette.hover, surface);
+                assert!(lift >= MIN_VISIBLE_STEP);
+                assert!(lift <= HOVER_HEADROOM * MIN_VISIBLE_STEP);
+            }
+        }
+    }
+
+    #[test]
+    fn the_hover_is_neither_the_rule_between_rows_nor_the_selection() {
+        for colors in [Colors::dark(), Colors::light()] {
+            let palette = Palette::from_colors(&colors);
+            for neighbour in [palette.border, palette.selection] {
+                assert!(level_step(palette.hover, neighbour) >= MIN_VISIBLE_STEP);
+            }
         }
     }
 }
