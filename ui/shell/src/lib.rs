@@ -23,10 +23,11 @@ pub fn application() -> Application {
     gpui_platform::application().with_assets(bviz_ui_assets::Assets)
 }
 
-/// Register fonts, global key bindings, and quit-on-last-window-close. Call once
-/// at startup before opening windows.
+/// Register fonts, the themes, global key bindings, and quit-on-last-window-close.
+/// Call once at startup before opening windows.
 pub fn setup(cx: &mut App) {
     bviz_ui_assets::load_fonts(cx);
+    bviz_ui_theme::init(cx).expect("the built-in themes load");
     cx.bind_keys([
         KeyBinding::new("secondary-q", Quit, None),
         KeyBinding::new("secondary-w", CloseWindow, None),
