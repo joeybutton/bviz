@@ -138,7 +138,6 @@ impl TracksMenu {
         &self,
         viewport: Bounds<Pixels>,
         palette: Palette,
-        colors: &bviz_ui_theme::Colors,
         cx: &mut Context<Self>,
     ) -> Option<impl IntoElement> {
         if !self.open {
@@ -148,8 +147,8 @@ impl TracksMenu {
             Source::Loaded(p) => p.clone(),
             _ => return None,
         };
-        let rows = self.menu_rows(&profile, palette, colors, cx);
-        let menu = self.chrome(rows, palette, colors, cx);
+        let rows = self.menu_rows(&profile, palette, cx);
+        let menu = self.chrome(rows, palette, cx);
         let backdrop = self.backdrop(viewport, cx);
         Some(deferred(div().child(backdrop).child(menu)))
     }
@@ -160,10 +159,8 @@ impl TracksMenu {
         &self,
         profile: &Profile,
         palette: Palette,
-        colors: &bviz_ui_theme::Colors,
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
-        let selected = colors.selected;
         let filter = self.filter.read(cx).content().to_lowercase();
         let threads = profile.threads();
         let mut rows: Vec<AnyElement> = Vec::new();
@@ -181,7 +178,7 @@ impl TracksMenu {
             crate::groups::sort_tracks_by_activity(profile, threads, &mut tracks);
             let folded = self.collapsed_groups.get(group).copied().unwrap_or(false);
             rows.push(
-                self.group_row(group, class, &tracks, folded, palette, selected, cx)
+                self.group_row(group, class, &tracks, folded, palette, cx)
                     .into_any_element(),
             );
             if folded {
@@ -191,7 +188,7 @@ impl TracksMenu {
                 let name = profile.str(threads[i].name);
                 let visible = self.model.read(cx).visible_tracks().get(i).copied().unwrap_or(true);
                 rows.push(
-                    self.track_row(i, name, visible, palette, selected, cx).into_any_element(),
+                    self.track_row(i, name, visible, palette, cx).into_any_element(),
                 );
             }
         }
@@ -208,7 +205,6 @@ impl TracksMenu {
         tracks: &[usize],
         folded: bool,
         palette: Palette,
-        selected: Rgba,
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
         let n_visible = {
@@ -247,7 +243,7 @@ impl TracksMenu {
                     .id(SharedString::from(format!("track-group-vis-{group}")))
                     .px_1()
                     .rounded_sm()
-                    .hover(move |s| s.bg(selected))
+                    .hover(move |s| s.bg(palette.hover))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         cx.stop_propagation();
                         this.model.update(cx, |m, _| m.set_group_visible(group, !group_all_visible));
@@ -266,7 +262,6 @@ impl TracksMenu {
         name: &str,
         visible: bool,
         palette: Palette,
-        selected: Rgba,
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
         let check = div()
@@ -275,7 +270,7 @@ impl TracksMenu {
             .rounded_sm()
             .border_1()
             .border_color(palette.label)
-            .when(visible, |c| c.bg(selected).border_color(selected));
+            .when(visible, |c| c.bg(palette.accent).border_color(palette.accent));
         div()
             .id(SharedString::from(format!("track-row-{i}")))
             .flex()
@@ -287,7 +282,7 @@ impl TracksMenu {
             .py_1()
             .cursor_pointer()
             .rounded_sm()
-            .hover(move |s| s.bg(selected))
+            .hover(move |s| s.bg(palette.hover))
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.model.update(cx, |m, _| m.toggle_track(i));
                 this.reflow_timeline(cx);
@@ -313,10 +308,8 @@ impl TracksMenu {
         &self,
         rows: Vec<AnyElement>,
         palette: Palette,
-        colors: &bviz_ui_theme::Colors,
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
-        let (container, text) = (colors.container, colors.text);
         div()
             .occlude()
             .absolute()
@@ -325,13 +318,13 @@ impl TracksMenu {
             .w(px(TRACKS_MENU_WIDTH))
             .flex()
             .flex_col()
-            .bg(container)
+            .bg(palette.panel)
             .border_1()
             .border_color(palette.border)
             .rounded_md()
             .shadow_lg()
             .text_size(px(GUTTER_LABEL_SIZE))
-            .text_color(text)
+            .text_color(palette.label)
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, e: &MouseDownEvent, _, cx| {
@@ -421,8 +414,7 @@ impl TracksMenu {
 
 impl Render for TracksMenu {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let colors = bviz_ui_theme::colors(window);
-        let palette = Palette::from_colors(&colors, &bviz_ui_theme::theme(window, cx).colors);
+        let palette = Palette::from_theme(&bviz_ui_theme::theme(window, cx));
         let Some(shell) = self.shell.upgrade() else {
             return div().into_any_element();
         };
@@ -468,7 +460,7 @@ impl Render for TracksMenu {
             .w(px(gutter_width))
             .h(px(RULER_HEIGHT))
             .child(trigger)
-            .children(self.popover(viewport, palette, &colors, cx))
+            .children(self.popover(viewport, palette, cx))
             .into_any_element()
     }
 }

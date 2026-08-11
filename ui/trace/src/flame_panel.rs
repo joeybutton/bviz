@@ -1,6 +1,6 @@
 use crate::chart::format_duration;
 use crate::model::{AggregateBuildStarted, TraceModel};
-use crate::theme::{self, Palette};
+use crate::theme::Palette;
 use crate::{
     LINE_SCROLL_PX, METRICS, MIN_SLICE_PX, STATS_TEXT_SIZE, ZOOM_PER_NOTCH, drawn_scroll,
     scroll_request, thumb_offset,
@@ -225,7 +225,7 @@ fn paint_flame_tooltip(
         pct,
     );
     let lines = [graph.str(boxed.name).to_string(), detail];
-    paint_tooltip_box(&lines, at, bounds, palette.tooltip(), window, cx);
+    paint_tooltip_box(&lines, at, bounds, palette.tooltip, window, cx);
 }
 
 /// The aggregated flame-graph panel: time-free work-class-colored boxes filling
@@ -528,8 +528,7 @@ impl Render for FlamePanel {
         if self.model.read(cx).aggregates().is_none() {
             return div().into_any_element();
         }
-        let colors = bviz_ui_theme::colors(window);
-        let palette = Palette::from_colors(&colors, &bviz_ui_theme::theme(window, cx).colors);
+        let palette = Palette::from_theme(&bviz_ui_theme::theme(window, cx));
         let entity = cx.entity();
         let boxes = cached_layer(self.canvas.clone());
         let overlay = overlay_canvas(move |bounds, window, cx| {
@@ -631,8 +630,7 @@ impl Render for FlameCanvas {
         let Some(aggregates) = parent.read(cx).model.read(cx).aggregates() else {
             return div().into_any_element();
         };
-        let colors = bviz_ui_theme::colors(window);
-        let palette = Palette::from_colors(&colors, &bviz_ui_theme::theme(window, cx).colors);
+        let palette = Palette::from_theme(&bviz_ui_theme::theme(window, cx));
         let prepaint = {
             let parent = parent.clone();
             move |bounds: Bounds<Pixels>, _: &mut Window, cx: &mut App| {
@@ -692,7 +690,7 @@ fn flame_paint(
                     continue;
                 }
                 let rect = Bounds::new(point(px(left + b.x), px(y)), size(px(b.w), px(b.h)));
-                let fill = theme::span_role_color(b.role, palette.background);
+                let fill = palette.role_fill(b.role);
                 paint_labeled_box(
                     rect,
                     fill,

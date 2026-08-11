@@ -814,8 +814,7 @@ impl Render for TimelinePanel {
             };
             (profile.clone(), lanes)
         };
-        let colors = bviz_ui_theme::colors(window);
-        let palette = Palette::from_colors(&colors, &bviz_ui_theme::theme(window, cx).colors);
+        let palette = Palette::from_theme(&bviz_ui_theme::theme(window, cx));
         let entity = cx.entity();
         let slices = cached_layer(self.canvas.clone());
         let overlay = overlay_canvas(overlay_paint(profile, lanes, entity, palette));
@@ -912,8 +911,7 @@ impl Render for SliceCanvas {
             let (_, panel_height, gutter_width) = panel.shell_layout(cx);
             (profile.clone(), lanes, chrome, panel_height, gutter_width)
         };
-        let colors = bviz_ui_theme::colors(window);
-        let palette = Palette::from_colors(&colors, &bviz_ui_theme::theme(window, cx).colors);
+        let palette = Palette::from_theme(&bviz_ui_theme::theme(window, cx));
         let prepaint = fit_prepaint(profile.clone(), lanes.clone(), parent.clone(), panel_height, gutter_width);
         let paint = slice_paint(profile, lanes, chrome, parent, palette);
         canvas(prepaint, paint)
@@ -1273,12 +1271,12 @@ fn paint_time_selection(
     let band = regions.ruler_rect();
     let band_top = f32::from(band.origin.y);
     let band_h = f32::from(band.size.height);
-    let tint = Rgba { a: RULER_BAND_ALPHA, ..palette.selection };
+    let tint = Rgba { a: RULER_BAND_ALPHA, ..palette.accent };
     for r in &painted {
         quad(r.left, r.right - r.left, band_top, band_h, tint, window);
     }
 
-    let accent = palette.selection;
+    let accent = palette.accent;
     let grip_h = band_h * GRIP_BAND_FRACTION;
     let grip_top = band_top + (band_h - grip_h) / 2.0;
     for r in &painted {

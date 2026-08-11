@@ -288,7 +288,7 @@ impl StatsPanel {
         // Until the off-thread sort lands, keep the header but show a spinner in
         // place of the body rather than an empty band.
         let Some(order) = self.stats_order.clone() else {
-            return table.child(centered_spinner("Sorting…", &palette.roles));
+            return table.child(centered_spinner("Sorting…", &palette.colors));
         };
 
         let row_count = order.order().len();
@@ -457,8 +457,7 @@ impl Render for StatsPanel {
         // Re-sort off the UI thread when the aggregates or sort change; sorting
         // ~2M rows on the paint thread would freeze it.
         self.ensure_stats_order(cx);
-        let colors = bviz_ui_theme::colors(window);
-        let palette = Palette::from_colors(&colors, &bviz_ui_theme::theme(window, cx).colors);
+        let palette = Palette::from_theme(&bviz_ui_theme::theme(window, cx));
         div()
             .size_full()
             .overflow_hidden()

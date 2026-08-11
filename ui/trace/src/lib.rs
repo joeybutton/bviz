@@ -316,12 +316,7 @@ impl TraceView {
     /// hover wiring), a drag overlay that keeps the panel-resize and gutter drags
     /// tracking the cursor, then the tab bar, the selected bottom panel, the
     /// gutter handle, and the tracks menu over it.
-    fn trace_body(
-        &self,
-        palette: Palette,
-        colors: &bviz_ui_theme::Colors,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    fn trace_body(&self, palette: Palette, cx: &mut Context<Self>) -> impl IntoElement {
         let timeline = div()
             .absolute()
             .inset_0()
@@ -351,7 +346,7 @@ impl TraceView {
         // take a press over either: it is placed last, and hit-testing follows
         // paint order.
         let overlays = overlays
-            .child(self.tab_bar(palette, colors, cx), tab_bar_rect)
+            .child(self.tab_bar(palette, cx), tab_bar_rect)
             .child(self.gutter_handle(cx), gutter_handle_rect);
         div()
             .id("trace-viewport")
@@ -392,14 +387,7 @@ impl TraceView {
     /// buttons filling the rect [`RegionOverlays`] places it in. A press on its
     /// background begins a panel-resize drag (double-click resets the panel
     /// height); a tab button switches the panel.
-    fn tab_bar(
-        &self,
-        palette: Palette,
-        colors: &bviz_ui_theme::Colors,
-        cx: &mut Context<Self>,
-    ) -> Stateful<Div> {
-        let (text, background, selected) = (colors.text, colors.background, colors.selected);
-        let muted = bviz_ui_theme::mix(text, background, 0.4);
+    fn tab_bar(&self, palette: Palette, cx: &mut Context<Self>) -> Stateful<Div> {
         let active = self.bottom_tab;
         let tabs: Vec<_> = BottomTab::ALL
             .into_iter()
@@ -415,9 +403,9 @@ impl TraceView {
                     .h_full()
                     .cursor_pointer()
                     .text_size(px(STATS_TEXT_SIZE))
-                    .text_color(if is_active { text } else { muted })
+                    .text_color(if is_active { palette.label } else { palette.muted_label })
                     .when(is_active, |t| {
-                        t.bg(background).border_t_2().border_color(selected)
+                        t.bg(palette.background).border_t_2().border_color(palette.accent)
                     })
                     .hover(move |t| t.bg(hover))
                     // A press on a tab must switch it, not begin a panel resize.
@@ -464,11 +452,7 @@ impl TraceView {
                     .gap_4()
                     .pr_2()
                     .child(self.flame_mode_controls(cx))
-                    .child(theme::role_legend(
-                        palette.label,
-                        palette.background,
-                        STATS_TEXT_SIZE,
-                    ))
+                    .child(theme::role_legend(&palette, STATS_TEXT_SIZE))
             }))
     }
 
@@ -504,9 +488,9 @@ impl TraceView {
                 .pl_2()
                 .flex_shrink_0()
                 .rounded_md()
-                .bg(palette.selection_tint())
+                .bg(palette.selection)
                 .border_1()
-                .border_color(palette.selection)
+                .border_color(palette.accent)
                 .text_size(px(STATS_TEXT_SIZE))
                 .text_color(palette.label)
                 // A press on the chip must not also begin a panel resize.
@@ -606,9 +590,8 @@ impl TraceView {
             BottomTab::Counters => return None,
             BottomTab::FlameGraph => match self.model.read(cx).aggregates() {
                 Some(_) => self.flame.clone().into_any_element(),
-                None => {
-                    centered_spinner("Building flame graph…", &palette.roles).into_any_element()
-                }
+                None => centered_spinner("Building flame graph…", &palette.colors)
+                    .into_any_element(),
             },
             BottomTab::Stats => self.stats.clone().into_any_element(),
         };
@@ -688,17 +671,17 @@ fn time_window_summary(window: Option<&TimeSelection>, span_us: i64) -> Option<S
 
 impl Render for TraceView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let colors = bviz_ui_theme::colors(window);
-        let palette = Palette::from_colors(&colors, &bviz_ui_theme::theme(window, cx).colors);
+        let theme = bviz_ui_theme::theme(window, cx);
+        let palette = Palette::from_theme(&theme);
         // Take the placeholder before the `&mut self` build calls below, so the
         // model borrow it is read through ends first.
-        let placeholder = self.model.read(cx).source().placeholder(&palette.roles);
+        let placeholder = self.model.read(cx).source().placeholder(&theme.colors);
         let body = match placeholder {
             Some(placeholder) => placeholder,
             None => div()
                 .flex_1()
                 .overflow_hidden()
-                .child(self.trace_body(palette, &colors, cx)),
+                .child(self.trace_body(palette, cx)),
         };
         Chrome::new(&self.window_focus)
             .title("bazel_viz trace")
@@ -1254,7 +1237,6 @@ fn paint_thread_labels(
     let gutter_left = g.left;
     let gutter_width = g.width;
     let palette = g.palette;
-    let selection_tint = palette.selection_tint();
     for lane in &layout.lanes {
         let top = regions.flame_top + lane.top - scroll_y;
         if top + lane.height < regions.flame_top || top > regions.flame_bottom {
@@ -1263,11 +1245,11 @@ fn paint_thread_labels(
         if selected.get(lane.track).copied().unwrap_or(false) {
             window.paint_quad(fill(
                 Bounds::new(point(px(gutter_left), px(top)), size(px(gutter_width), px(lane.height))),
-                selection_tint,
+                palette.selection,
             ));
             window.paint_quad(fill(
                 Bounds::new(point(px(gutter_left), px(top)), size(px(2.0), px(lane.height))),
-                palette.selection,
+                palette.accent,
             ));
         }
         let ty = top + (lane.height - GUTTER_LABEL_SIZE) / 2.0;
@@ -1364,7 +1346,7 @@ fn paint_slice(
     cx: &mut App,
 ) {
     let rect = Bounds::new(point(px(content_left + x), px(y)), size(px(w), px(h)));
-    let fill = theme::span_role_color(slice.role, palette.background);
+    let fill = palette.role_fill(slice.role);
     bviz_ui_components::paint_labeled_box(
         rect,
         fill,
@@ -1403,7 +1385,7 @@ fn paint_tooltip(
     for (key, value) in profile.slice_others(detail) {
         lines.push(format!("{}: {}", profile.str(*key), profile.str(*value)));
     }
-    paint_tooltip_box(&lines, at, bounds, palette.tooltip(), window, cx);
+    paint_tooltip_box(&lines, at, bounds, palette.tooltip, window, cx);
 }
 
 /// Renders a Bazel `--profile` trace as a flame-chart timeline.
