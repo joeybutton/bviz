@@ -1,19 +1,28 @@
 use bviz_terminal::{Cell, Flags, Scroll, Terminal};
 use bviz_ui_components::{Axis, DEFAULT_MIN_THUMB, Scrollbar, ScrollbarColors, track_drag};
+use bviz_ui_theme::ThemeColors;
 use gpui::{
-    App, Bounds, Element, Entity, Font, GlobalElementId, InspectorElementId, IntoElement, LayoutId,
-    PaintQuad, Pixels, Point, Rgba, ShapedLine, Style, TextRun, Window, fill, point, px, relative,
-    size,
+    App, Bounds, Element, Entity, Font, GlobalElementId, Hsla, InspectorElementId, IntoElement,
+    LayoutId, PaintQuad, Pixels, Point, ShapedLine, Style, TextRun, Window, fill, point, px,
+    relative, size,
 };
 
 use super::{ContentLayout, Source, TerminalView};
-use crate::color::{CellStyle, Defaults, ansi_palette, style_key};
+use crate::color::{CellStyle, Defaults, style_key};
 
 /// Width of the scroll bar gutter reserved on the right edge. The bar is an
 /// overlay that auto-hides and paints only a thumb, so this strip is empty
 /// whenever the bar is at rest: it is kept to the narrowest that stays grabbable,
 /// leaving the width to the text grid it floats over.
 const SCROLLBAR_WIDTH: f32 = 8.0;
+
+/// The share of the highlight a search match is washed with: enough for the run
+/// to be picked out of the canvas, light enough that what it says is still read.
+const MATCH_TINT: f32 = 0.16;
+
+/// The share the focused match is washed with, which the reader has to tell from
+/// the wash on every other match.
+const FOCUSED_MATCH_TINT: f32 = 0.32;
 
 /// Custom element that sizes the terminal to its bounds, then shapes the visible
 /// viewport and paints background fills and glyphs.
@@ -121,7 +130,7 @@ impl TerminalElement {
         history: usize,
         offset: usize,
         rows: usize,
-        colors: &bviz_ui_theme::ThemeColors,
+        colors: &ThemeColors,
         cx: &mut App,
     ) -> Option<PaintQuad> {
         let scrollbar_layout = Scrollbar::new(
@@ -153,7 +162,7 @@ impl TerminalElement {
         viewport: &[Vec<Cell>],
         bounds: Bounds<Pixels>,
         metrics: &Metrics,
-        defaults: Defaults,
+        defaults: &Defaults,
         window: &mut Window,
     ) -> (Vec<PositionedLine>, Vec<PaintQuad>) {
         let mut lines = Vec::with_capacity(viewport.len());
@@ -221,7 +230,7 @@ impl TerminalElement {
         row: usize,
         first: usize,
         last: usize,
-        color: Rgba,
+        color: Hsla,
     ) -> PaintQuad {
         let x = bounds.left() + metrics.cell_width * first as f32;
         let y = bounds.top() + metrics.line_height * row as f32;
@@ -232,16 +241,15 @@ impl TerminalElement {
         )
     }
 
-    /// Translucent tint over the selected cells; painted under the text so it
+    /// The selection wash over the selected cells; painted under the text so it
     /// stays legible.
     fn selection_quads(
         selection: &[Option<(usize, usize)>],
         bounds: Bounds<Pixels>,
         metrics: &Metrics,
-        selected: Rgba,
+        selection_color: Hsla,
     ) -> Vec<PaintQuad> {
-        let selection_color = Rgba { a: 0.4, ..selected };
-        let mut quads = Vec::new();
+        let mut quads = Vec::with_capacity(selection.len());
         for (r, span) in selection.iter().enumerate() {
             let Some((first, last)) = span else { continue };
             quads.push(Self::span_fill(bounds, metrics, r, *first, *last, selection_color));
@@ -249,42 +257,30 @@ impl TerminalElement {
         quads
     }
 
-    /// Yellow tint over search matches, the focused match more strongly.
+    /// Highlight wash over search matches, the focused match more strongly.
     fn search_quads(
         search: &[Vec<(usize, usize, bool)>],
         bounds: Bounds<Pixels>,
         metrics: &Metrics,
+        highlight: Hsla,
     ) -> Vec<PaintQuad> {
-        let mut quads = Vec::new();
+        let mut quads = Vec::with_capacity(search.iter().map(Vec::len).sum());
         for (r, spans) in search.iter().enumerate() {
             for &(first, last, focused) in spans {
-                let color = if focused {
-                    Rgba {
-                        r: 0.85,
-                        g: 0.72,
-                        b: 0.18,
-                        a: 0.60,
-                    }
-                } else {
-                    Rgba {
-                        r: 0.85,
-                        g: 0.72,
-                        b: 0.18,
-                        a: 0.30,
-                    }
-                };
+                let tint = if focused { FOCUSED_MATCH_TINT } else { MATCH_TINT };
+                let color = highlight.opacity(tint);
                 quads.push(Self::span_fill(bounds, metrics, r, first, last, color));
             }
         }
         quads
     }
 
-    /// Underline the hovered URL in the accent color to mark it as a link.
+    /// Underline the hovered URL to mark it as one that can be opened.
     fn url_overlay(
         &self,
         bounds: Bounds<Pixels>,
         metrics: &Metrics,
-        selected: Rgba,
+        text_accent: Hsla,
         cx: &App,
     ) -> Vec<PaintQuad> {
         let mut overlays = Vec::new();
@@ -296,7 +292,7 @@ impl TerminalElement {
                 let width = metrics.cell_width * (*last - *first + 1) as f32;
                 overlays.push(fill(
                     Bounds::new(point(x, y), size(width, px(1.5))),
-                    selected,
+                    text_accent,
                 ));
             }
         }
@@ -405,12 +401,9 @@ impl Element for TerminalElement {
         window: &mut Window,
         cx: &mut App,
     ) -> Prepaint {
-        let colors = bviz_ui_theme::colors(window);
-        let defaults = Defaults {
-            fg: colors.text,
-            bg: colors.background,
-            ansi: ansi_palette(window),
-        };
+        let theme = bviz_ui_theme::theme(window, cx);
+        let colors = &theme.colors;
+        let defaults = Defaults::from_theme(&theme);
 
         // Columns fit the width less the scroll bar gutter; rows fit the height.
         let cols = ((f32::from(bounds.size.width) - SCROLLBAR_WIDTH)
@@ -444,20 +437,13 @@ impl Element for TerminalElement {
             });
         });
 
-        let scrollbar = self.scrollbar_quad(
-            bounds,
-            history,
-            offset,
-            rows,
-            &bviz_ui_theme::theme(window, cx).colors,
-            cx,
-        );
+        let scrollbar = self.scrollbar_quad(bounds, history, offset, rows, colors, cx);
 
         let (lines, mut backgrounds) =
-            Self::shape_viewport(&viewport, bounds, metrics, defaults, window);
-        backgrounds.extend(Self::selection_quads(&selection, bounds, metrics, colors.selected));
-        backgrounds.extend(Self::search_quads(&search, bounds, metrics));
-        let overlays = self.url_overlay(bounds, metrics, colors.selected, cx);
+            Self::shape_viewport(&viewport, bounds, metrics, &defaults, window);
+        backgrounds.extend(Self::selection_quads(&selection, bounds, metrics, colors.selection));
+        backgrounds.extend(Self::search_quads(&search, bounds, metrics, colors.highlight));
+        let overlays = self.url_overlay(bounds, metrics, colors.text_accent, cx);
 
         Prepaint {
             lines,
@@ -502,5 +488,37 @@ impl Element for TerminalElement {
 
         self.install_thumb_drag(window, cx);
         self.install_selection_drag(window, cx);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bviz_ui_theme::{
+        MIN_DISTINCT_COLOR, MIN_SECONDARY_CONTRAST, built_in_themes, contrast_ratio, distance, over,
+    };
+
+    /// Marking the matches is only worth anything if the reader can see which
+    /// runs matched, which one the find box is on, and what any of them says.
+    /// The one the find box is on is the one asking to be looked at, so it is the
+    /// wash that stands further off the canvas; the ranking read the other way
+    /// would send the eye to every match but that one.
+    #[test]
+    fn a_search_match_is_seen_the_focused_one_ranks_above_it_and_both_stay_readable() {
+        for theme in built_in_themes() {
+            let c = &theme.colors;
+            let wash = |tint| over(c.highlight.opacity(tint), c.background);
+            let (matched, focused) = (wash(MATCH_TINT), wash(FOCUSED_MATCH_TINT));
+            let off_canvas = |wash| distance(wash, c.background);
+
+            let marked = off_canvas(matched);
+            assert!(marked >= MIN_DISTINCT_COLOR, "{}: {marked}", theme.name);
+            let apart = distance(focused, matched);
+            assert!(apart >= MIN_DISTINCT_COLOR, "{}: {apart}", theme.name);
+            let lifted = off_canvas(focused);
+            assert!(lifted > marked, "{}: {lifted} against {marked}", theme.name);
+            let contrast = contrast_ratio(c.text, focused);
+            assert!(contrast >= MIN_SECONDARY_CONTRAST, "{}: {contrast}:1", theme.name);
+        }
     }
 }

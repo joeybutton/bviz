@@ -1,26 +1,40 @@
 //! Maps alacritty cell colors and flags to concrete gpui appearance: resolves
-//! foreground/background against the default colors and the appearance-selected
-//! ANSI palette, and derives font weight, style, and decorations.
+//! foreground/background against the theme's default colors and ANSI palette,
+//! and derives font weight, style, and decorations.
 
 use bviz_terminal::{Cell, Color, Flags, NamedColor, Rgb};
-use gpui::{
-    FontStyle, FontWeight, Rgba, StrikethroughStyle, UnderlineStyle, Window, WindowAppearance, px,
-    rgb,
-};
+use bviz_ui_theme::{TerminalColors, Theme};
+use gpui::{FontStyle, FontWeight, Rgba, StrikethroughStyle, UnderlineStyle, px};
 
 /// Cells are grouped into shaped runs by identical color and styling.
 pub(crate) fn style_key(cell: &Cell) -> (Color, Color, Flags) {
     (cell.fg, cell.bg, cell.flags)
 }
 
-/// The terminal's default foreground and background plus the appearance-selected
-/// ANSI palette — the colors an alacritty cell color resolves against.
-#[derive(Clone, Copy)]
-pub(crate) struct Defaults<'a> {
+/// The colors an alacritty cell color resolves against.
+pub(crate) struct Defaults {
     pub(crate) fg: Rgba,
     pub(crate) bg: Rgba,
-    pub(crate) ansi: &'a [u32; 16],
+    pub(crate) ansi: [Rgba; TerminalColors::ANSI],
 }
+
+impl Defaults {
+    /// A cell carrying no color of its own is set in the theme's body text on
+    /// its canvas, so plain output reads as the window's own text; one naming an
+    /// ANSI slot is set in the theme's terminal palette.
+    pub(crate) fn from_theme(theme: &Theme) -> Defaults {
+        Defaults {
+            fg: theme.colors.text.into(),
+            bg: theme.colors.background.into(),
+            ansi: theme.terminal.ansi.map(Rgba::from),
+        }
+    }
+}
+
+/// How far a faint cell (ECMA-48 SGR 2) is pulled toward its own background:
+/// far enough to be told from a normal cell beside it, and short enough that
+/// what it says is still read.
+const DIM_PULL: f32 = 0.35;
 
 /// A cell's appearance resolved to concrete colors and font attributes.
 pub(crate) struct CellStyle {
@@ -33,14 +47,14 @@ pub(crate) struct CellStyle {
 }
 
 impl CellStyle {
-    pub(crate) fn resolve(cell: &Cell, defaults: Defaults) -> CellStyle {
+    pub(crate) fn resolve(cell: &Cell, defaults: &Defaults) -> CellStyle {
         let mut foreground = to_rgba(cell.fg, defaults);
         let mut background = to_rgba(cell.bg, defaults);
         if cell.flags.contains(Flags::INVERSE) {
             std::mem::swap(&mut foreground, &mut background);
         }
         if cell.flags.contains(Flags::DIM) {
-            foreground = bviz_ui_theme::mix(foreground, background, 0.45);
+            foreground = bviz_ui_theme::mix(foreground, background, DIM_PULL);
         }
         if cell.flags.contains(Flags::HIDDEN) {
             foreground = background;
@@ -81,27 +95,6 @@ impl CellStyle {
     }
 }
 
-// gpui's base palette has no ANSI colors, so the 16 named colors come from an
-// established terminal theme — Zed's One — chosen to stay legible on gpui's
-// default dark and light backgrounds. The default foreground and background
-// still follow the gpui theme (see [`to_rgba`]).
-const ONE_DARK: [u32; 16] = [
-    0x282c34, 0xe06c75, 0x98c379, 0xe5c07b, 0x61afef, 0xc678dd, 0x56b6c2, 0xabb2bf, 0x636d83,
-    0xea858b, 0xaad581, 0xffd885, 0x85c1ff, 0xd398eb, 0x6ed5de, 0xfafafa,
-];
-const ONE_LIGHT: [u32; 16] = [
-    0x000000, 0xde3e35, 0x3f953a, 0xd2b67c, 0x2f5af3, 0x950095, 0x0997b3, 0xbbbbbb, 0x000000,
-    0xde3e35, 0x3f953a, 0xd2b67c, 0x2f5af3, 0xa00095, 0x0bbcd6, 0xffffff,
-];
-
-/// The ANSI palette for the window's current light/dark appearance.
-pub(crate) fn ansi_palette(window: &Window) -> &'static [u32; 16] {
-    match window.appearance() {
-        WindowAppearance::Light | WindowAppearance::VibrantLight => &ONE_LIGHT,
-        WindowAppearance::Dark | WindowAppearance::VibrantDark => &ONE_DARK,
-    }
-}
-
 fn rgb_to_rgba(c: Rgb) -> Rgba {
     Rgba {
         r: c.r as f32 / 255.0,
@@ -111,9 +104,8 @@ fn rgb_to_rgba(c: Rgb) -> Rgba {
     }
 }
 
-/// Resolve an alacritty [`Color`] against the terminal's default fore/background
-/// and the appearance-selected ANSI palette.
-fn to_rgba(color: Color, defaults: Defaults) -> Rgba {
+/// Resolve an alacritty [`Color`] against the terminal's [`Defaults`].
+fn to_rgba(color: Color, defaults: &Defaults) -> Rgba {
     let Defaults { fg, bg, ansi } = defaults;
     match color {
         Color::Spec(c) => rgb_to_rgba(c),
@@ -122,17 +114,17 @@ fn to_rgba(color: Color, defaults: Defaults) -> Rgba {
             NamedColor::Foreground
             | NamedColor::BrightForeground
             | NamedColor::DimForeground
-            | NamedColor::Cursor => fg,
-            NamedColor::Background => bg,
+            | NamedColor::Cursor => *fg,
+            NamedColor::Background => *bg,
             other => {
                 let idx = other as usize;
                 if idx < 16 {
-                    rgb(ansi[idx])
+                    ansi[idx]
                 } else if (259..=266).contains(&idx) {
                     // The dim ANSI block (DimBlack..DimWhite) maps to colors 0..7.
-                    rgb(ansi[idx - 259])
+                    ansi[idx - 259]
                 } else {
-                    fg
+                    *fg
                 }
             }
         },
@@ -140,9 +132,9 @@ fn to_rgba(color: Color, defaults: Defaults) -> Rgba {
 }
 
 /// Map a 256-color palette index to RGB: 0..15 ANSI, 16..231 cube, 232..255 gray.
-fn indexed(i: u8, ansi: &[u32; 16]) -> Rgba {
+fn indexed(i: u8, ansi: &[Rgba; TerminalColors::ANSI]) -> Rgba {
     match i {
-        0..=15 => rgb(ansi[i as usize]),
+        0..=15 => ansi[i as usize],
         16..=231 => {
             let j = i - 16;
             let level = |v: u8| -> f32 {
@@ -164,6 +156,30 @@ fn indexed(i: u8, ansi: &[u32; 16]) -> Rgba {
                 b: v,
                 a: 1.0,
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bviz_ui_theme::{
+        MIN_TEXT_CONTRAST, MIN_VISIBLE_STEP, built_in_themes, contrast_ratio, level_step, mix,
+    };
+
+    /// A faint cell says its text matters less than the text beside it, which it
+    /// can only say by being told from that text while still being read itself.
+    /// It is body text in a terminal, so it is read to the same bar as any other
+    /// cell.
+    #[test]
+    fn a_faint_cell_is_told_from_a_normal_one_and_still_read() {
+        for theme in built_in_themes() {
+            let (fg, bg) = (theme.colors.text, theme.colors.background);
+            let faint = mix(fg, bg, DIM_PULL);
+            let contrast = contrast_ratio(faint, bg);
+            assert!(contrast >= MIN_TEXT_CONTRAST, "{}: {contrast}:1", theme.name);
+            let step = level_step(faint, fg);
+            assert!(step >= MIN_VISIBLE_STEP, "{}: {step} levels", theme.name);
         }
     }
 }

@@ -223,16 +223,16 @@ impl Scrollbar {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::palettes::default_palettes;
-    use bviz_ui_theme::{MIN_VISIBLE_STEP, level_step, over};
+    use bviz_ui_theme::{MIN_VISIBLE_STEP, built_in_themes, level_step, over};
 
     /// A bar lands wherever the view that owns it puts it, so its track has to
     /// part from every surface it can lie on, its thumb from the track under it,
     /// and — for a view that draws the thumb alone — from that surface too.
     #[test]
     fn the_bar_reads_on_every_surface_it_is_drawn_over() {
-        for colors in default_palettes() {
-            let bar = ScrollbarColors::from_colors(&colors);
+        for theme in built_in_themes() {
+            let colors = &theme.colors;
+            let bar = ScrollbarColors::from_colors(colors);
             for surface in [colors.background, colors.surface, colors.panel] {
                 let track = over(bar.track, surface);
                 let laid = level_step(track, surface);

@@ -7,8 +7,6 @@ mod drag;
 mod dropdown;
 mod layer;
 mod notice;
-#[cfg(test)]
-mod palettes;
 mod scrollbar;
 mod scrubber;
 mod spinner;

@@ -85,6 +85,12 @@ impl ThemeRegistry {
     }
 }
 
+/// Every theme of the built-in family, for measuring a rule that has to hold
+/// whichever of them a window paints with.
+pub fn built_in_themes() -> Vec<Arc<Theme>> {
+    ThemeRegistry::new().expect("built-in themes load").themes
+}
+
 /// Loads the built-in themes, which every later theme lookup reads.
 pub fn init(cx: &mut App) -> Result<(), String> {
     cx.set_global(ThemeRegistry::new()?);
@@ -127,10 +133,6 @@ mod tests {
     /// with its own background and foreground, so nothing can be asked of how
     /// they sit against a surface.
     const ANSI_HUE_BANKS: [[usize; 6]; 2] = [[1, 2, 3, 4, 5, 6], [9, 10, 11, 12, 13, 14]];
-
-    fn built_in() -> Vec<Arc<Theme>> {
-        ThemeRegistry::new().expect("built-in themes load").themes
-    }
 
     /// The built-in light theme under a name of its own, standing in for a theme
     /// registered from outside the crate.
@@ -199,7 +201,7 @@ mod tests {
     /// others, whichever of them it is drawn against.
     #[test]
     fn each_surface_reads_as_a_plane_of_its_own() {
-        for theme in built_in() {
+        for theme in built_in_themes() {
             let planes = surfaces(&theme);
             for (i, upper) in planes.iter().enumerate() {
                 for lower in &planes[i + 1..] {
@@ -214,7 +216,7 @@ mod tests {
     /// on, including the one it separates least well from.
     #[test]
     fn each_state_layer_registers_on_every_surface() {
-        for theme in built_in() {
+        for theme in built_in_themes() {
             let c = &theme.colors;
             for layer in [c.element_hover, c.element_active] {
                 for surface in surfaces(&theme) {
@@ -229,7 +231,7 @@ mod tests {
     /// pressed control must not merely look hovered.
     #[test]
     fn a_pressed_control_is_told_from_a_hovered_one() {
-        for theme in built_in() {
+        for theme in built_in_themes() {
             let c = &theme.colors;
             for surface in surfaces(&theme) {
                 let step = level_step(over(c.element_active, surface), over(c.element_hover, surface));
@@ -243,7 +245,7 @@ mod tests {
     /// has to survive it.
     #[test]
     fn a_selected_row_reads_as_accented_and_keeps_its_text() {
-        for theme in built_in() {
+        for theme in built_in_themes() {
             let c = &theme.colors;
             assert!(c.selection.a < 1.0, "{}: selection is opaque", theme.name);
             assert_eq!(
@@ -267,7 +269,7 @@ mod tests {
     /// text that is secondary by design still has to be read to be worth setting.
     #[test]
     fn text_is_legible_on_every_surface() {
-        for theme in built_in() {
+        for theme in built_in_themes() {
             let c = &theme.colors;
             for surface in surfaces(&theme) {
                 let body = contrast_ratio(c.text, surface);
@@ -284,7 +286,7 @@ mod tests {
     /// to be read to say what the control would have done.
     #[test]
     fn disabled_text_reads_as_the_weakest_text_without_vanishing() {
-        for theme in built_in() {
+        for theme in built_in_themes() {
             let c = &theme.colors;
             for surface in surfaces(&theme) {
                 let disabled = contrast_ratio(c.text_disabled, surface);
@@ -303,7 +305,7 @@ mod tests {
     /// text can be laid out.
     #[test]
     fn accent_text_is_told_from_body_text_and_read_on_every_surface() {
-        for theme in built_in() {
+        for theme in built_in_themes() {
             let c = &theme.colors;
             let apart = distance(c.text_accent, c.text);
             assert!(apart >= MIN_DISTINCT_COLOR, "{}: {apart}", theme.name);
@@ -323,7 +325,7 @@ mod tests {
     /// same button is labelled two ways.
     #[test]
     fn text_set_on_the_accent_is_legible_against_it() {
-        for theme in built_in() {
+        for theme in built_in_themes() {
             let c = &theme.colors;
             let contrast = contrast_ratio(c.text_on_accent, c.accent);
             assert!(contrast >= MIN_TEXT_CONTRAST, "{}: {contrast}:1", theme.name);
@@ -339,7 +341,7 @@ mod tests {
     /// the fill marking a row hovered, which is a state and not scenery.
     #[test]
     fn the_lines_on_a_surface_register_and_keep_their_ranking() {
-        for theme in built_in() {
+        for theme in built_in_themes() {
             let c = &theme.colors;
             for surface in surfaces(&theme) {
                 let step = |line| level_step(over(line, surface), surface);
@@ -363,7 +365,7 @@ mod tests {
     /// criterion 2.4.11 Focus Appearance asks a focus indicator to.
     #[test]
     fn the_focus_ring_is_told_from_an_ordinary_border_and_seen_on_every_surface() {
-        for theme in built_in() {
+        for theme in built_in_themes() {
             let c = &theme.colors;
             let apart = distance(c.border_focused, c.border);
             assert!(apart >= MIN_DISTINCT_COLOR, "{}: {apart}", theme.name);
@@ -379,7 +381,7 @@ mod tests {
     /// surface the thing it marks sits on.
     #[test]
     fn the_status_colors_are_told_apart_and_seen_on_every_surface() {
-        for theme in built_in() {
+        for theme in built_in_themes() {
             let c = &theme.colors;
             let statuses = [c.error, c.warning, c.success, c.info];
             for (i, status) in statuses.iter().enumerate() {
@@ -402,7 +404,7 @@ mod tests {
     /// drawn over.
     #[test]
     fn the_highlight_is_told_from_the_warning_and_read_on_every_surface() {
-        for theme in built_in() {
+        for theme in built_in_themes() {
             let c = &theme.colors;
             let apart = distance(c.highlight, c.warning);
             assert!(apart >= MIN_DISTINCT_COLOR, "{}: {apart}", theme.name);
@@ -418,7 +420,7 @@ mod tests {
     /// lightness of its own.
     #[test]
     fn a_shadow_darkens_whatever_it_falls_across() {
-        for theme in built_in() {
+        for theme in built_in_themes() {
             let c = &theme.colors;
             assert!(c.shadow.a < 1.0, "{}: shadow is opaque", theme.name);
             for surface in surfaces(&theme) {
@@ -436,7 +438,7 @@ mod tests {
     /// from the canvas they are drawn on.
     #[test]
     fn the_data_slots_are_told_apart_from_each_other_and_the_canvas() {
-        for theme in built_in() {
+        for theme in built_in_themes() {
             let slots = theme.data.chromatic();
             for (i, a) in slots.iter().enumerate() {
                 assert!(a.s >= MIN_CHROMATIC_SATURATION, "{}: {} saturation", theme.name, a.s);
@@ -455,7 +457,7 @@ mod tests {
     /// never mistaken for a slot that does mean something.
     #[test]
     fn the_neutral_slot_carries_no_hue_of_its_own() {
-        for theme in built_in() {
+        for theme in built_in_themes() {
             let neutral = theme.data.neutral;
             assert!(
                 neutral.s < MIN_CHROMATIC_SATURATION,
@@ -479,7 +481,7 @@ mod tests {
     /// into the canvas the cells are painted on.
     #[test]
     fn every_ansi_hue_is_told_from_its_bank_and_from_the_canvas() {
-        for theme in built_in() {
+        for theme in built_in_themes() {
             let ansi = &theme.terminal.ansi;
             for bank in ANSI_HUE_BANKS {
                 for (i, slot) in bank.iter().enumerate() {
@@ -493,6 +495,4 @@ mod tests {
             }
         }
     }
-
 }
-

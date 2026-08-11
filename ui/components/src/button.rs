@@ -287,9 +287,9 @@ impl RenderOnce for Button {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::palettes::default_palettes;
     use bviz_ui_theme::{
-        MIN_SECONDARY_CONTRAST, MIN_TEXT_CONTRAST, MIN_VISIBLE_STEP, contrast_ratio,
+        MIN_SECONDARY_CONTRAST, MIN_TEXT_CONTRAST, MIN_VISIBLE_STEP, built_in_themes,
+        contrast_ratio,
     };
 
     /// Every look a caller can build, so a fill or a mark only one of them paints
@@ -325,9 +325,9 @@ mod tests {
     /// be focused in.
     #[test]
     fn the_focus_ring_stands_against_every_fill_it_is_drawn_on() {
-        for colors in default_palettes() {
+        for theme in built_in_themes() {
             for button in variants() {
-                for (ring, fill) in focus_marks(&button, &colors) {
+                for (ring, fill) in focus_marks(&button, &theme.colors) {
                     let contrast = contrast_ratio(ring, fill);
                     assert!(contrast >= MIN_SECONDARY_CONTRAST, "{contrast}:1");
                 }
@@ -340,10 +340,11 @@ mod tests {
     /// is read against whichever of the three is showing.
     #[test]
     fn a_filled_button_parts_its_three_states_and_keeps_its_label() {
-        for colors in default_palettes() {
+        for theme in built_in_themes() {
+            let colors = &theme.colors;
             let filled = Button::new("under-test", |_, _, _| {}).selected(true);
-            let ink = ink(&filled, &colors);
-            let fills = filled_fills(&colors);
+            let ink = ink(&filled, colors);
+            let fills = filled_fills(colors);
             for (index, fill) in fills.iter().enumerate() {
                 let contrast = contrast_ratio(ink, *fill);
                 assert!(contrast >= MIN_TEXT_CONTRAST, "{contrast}:1");

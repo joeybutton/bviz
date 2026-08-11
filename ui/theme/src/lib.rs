@@ -4,7 +4,7 @@ mod registry;
 mod schema;
 mod theme;
 
-pub use registry::{ThemeRegistry, init, theme};
+pub use registry::{ThemeRegistry, built_in_themes, init, theme};
 pub use schema::ThemeFamilyContent;
 pub use theme::{Appearance, DataColors, TerminalColors, Theme, ThemeColors};
 

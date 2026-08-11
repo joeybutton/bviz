@@ -10,6 +10,7 @@ use bviz_ui_components::{
     scrubber,
 };
 use bviz_ui_shell::Chrome;
+use bviz_ui_theme::ThemeColors;
 use gpui::{
     ClipboardItem, Context, Entity, FocusHandle, Focusable, IntoElement, KeyBinding, MouseButton,
     MouseDownEvent, MouseMoveEvent, Pixels, Point, Render, ScrollWheelEvent, SharedString,
@@ -758,12 +759,13 @@ impl Render for TerminalView {
         // Advance the timeline if playing, pacing playback by the frame loop.
         self.advance_playback(window);
         self.autoscroll_selection(window, cx);
-        let colors = bviz_ui_theme::colors(window);
-        let body = match self.source.placeholder(&bviz_ui_theme::theme(window, cx).colors) {
+        let theme = bviz_ui_theme::theme(window, cx);
+        let colors = &theme.colors;
+        let body = match self.source.placeholder(colors) {
             Some(placeholder) => placeholder.into_any_element(),
             None => {
                 let find_box = if self.find_active {
-                    self.render_find_box(&colors, cx)
+                    self.render_find_box(colors, cx)
                 } else {
                     None
                 };
@@ -771,9 +773,11 @@ impl Render for TerminalView {
                 // focused one gets the shared arrow/home/end keys and a left accent.
                 let terminal_focused = self.body_focus.is_focused(window);
                 let playback_focused = self.playback_focus.is_focused(window);
-                let controls = self.render_controls(&colors, playback_focused, cx);
+                let controls = self.render_controls(colors, playback_focused, cx);
+                // Unfocused, the accent takes the canvas it is drawn against, so
+                // the grid keeps the same width either way.
                 let terminal_accent = if terminal_focused {
-                    colors.selected
+                    colors.border_focused
                 } else {
                     colors.background
                 };
@@ -797,7 +801,6 @@ impl Render for TerminalView {
                     .flex()
                     .flex_col()
                     .size_full()
-                    .bg(colors.background)
                     .child(controls)
                     .child(
                         div()
@@ -833,7 +836,7 @@ impl TerminalView {
     /// has been created (i.e. the box has never been opened).
     fn render_find_box(
         &self,
-        colors: &bviz_ui_theme::Colors,
+        colors: &ThemeColors,
         cx: &mut Context<Self>,
     ) -> Option<gpui::AnyElement> {
         let input = self.find_input.as_ref()?.clone();
@@ -866,7 +869,7 @@ impl TerminalView {
                 .gap_2()
                 .p_1()
                 .rounded_md()
-                .bg(colors.container)
+                .bg(colors.panel)
                 .border_1()
                 .border_color(colors.border)
                 .on_action(cx.listener(Self::find_next))
@@ -910,7 +913,7 @@ impl TerminalView {
     /// which region the shared arrow/home/end keys drive.
     fn render_controls(
         &self,
-        colors: &bviz_ui_theme::Colors,
+        colors: &ThemeColors,
         focused: bool,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
@@ -932,7 +935,7 @@ impl TerminalView {
             .gap_2()
             .px_3()
             .h(px(40.))
-            .bg(colors.container)
+            .bg(colors.surface)
             .border_b_1()
             .border_color(colors.border)
             .font_family(bviz_ui_assets::UI)
@@ -955,7 +958,7 @@ impl TerminalView {
                         .top_0()
                         .bottom_0()
                         .w(px(2.))
-                        .bg(colors.selected),
+                        .bg(colors.border_focused),
                 )
             })
             .child(
@@ -1021,14 +1024,20 @@ impl TerminalView {
     fn render_scrubber(
         &self,
         fraction: f32,
-        colors: &bviz_ui_theme::Colors,
+        colors: &ThemeColors,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let track_color = bviz_ui_theme::mix(colors.text, colors.background, 0.6);
+        // The played portion and the knob mark a position within the span the
+        // track carries, so they take the text they are read among.
+        let fills = ScrubberColors {
+            track: colors.element_hover.into(),
+            played: colors.text.into(),
+            knob: colors.text.into(),
+        };
         scrubber(
             "scrubber",
             fraction,
-            ScrubberColors { track: track_color, played: colors.text, knob: colors.text },
+            fills,
             |this| &mut this.scrubber,
             cx.entity(),
             self.scrubbing,
