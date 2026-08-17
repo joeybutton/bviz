@@ -185,8 +185,6 @@ new_git_repository(
         "/LICENSE",
         "src/main/java/com/google/devtools/build/lib/buildeventstream/proto/build_event_stream.proto",
         "src/main/java/com/google/devtools/build/lib/packages/metrics/package_load_metrics.proto",
-        "src/main/java/com/google/devtools/build/lib/skyframe/serialization/analysis/proto/analysis_cache_service_metadata_status.proto",
-        "src/main/java/com/google/devtools/build/lib/skyframe/serialization/analysis/proto/analysis_cache_service_miss_reason.proto",
         "src/main/protobuf/action_cache.proto",
         "src/main/protobuf/command_line.proto",
         "src/main/protobuf/failure_details.proto",
