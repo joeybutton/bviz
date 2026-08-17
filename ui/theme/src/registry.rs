@@ -361,8 +361,7 @@ mod tests {
 
     /// The focus ring says which control the keyboard is aimed at, which it can
     /// only do by being told from the border every other control already has and
-    /// by standing against the surface it is drawn on as WCAG 2.2 success
-    /// criterion 2.4.11 Focus Appearance asks a focus indicator to.
+    /// by standing against the surface it is drawn on.
     #[test]
     fn the_focus_ring_is_told_from_an_ordinary_border_and_seen_on_every_surface() {
         for theme in built_in_themes() {
