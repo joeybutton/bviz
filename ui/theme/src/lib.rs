@@ -115,9 +115,9 @@ fn relative_luminance(c: impl Into<Rgba>) -> f32 {
 /// WCAG 2.2 success criterion 1.4.3 Contrast (Minimum) asks for at level AA.
 pub const MIN_TEXT_CONTRAST: f32 = 4.5;
 
-/// The contrast held by everything read without being body text — a caption, a
-/// link set in a band, an icon, a rule: the 3:1 of WCAG 2.2 success criteria
-/// 1.4.3, which relaxes to it for large text, and 1.4.11 Non-text Contrast.
+/// The contrast held by what is seen rather than read — an icon, a rule, a focus
+/// ring, a status dot: the 3:1 of WCAG 2.2 success criterion 1.4.11 Non-text
+/// Contrast.
 pub const MIN_SECONDARY_CONTRAST: f32 = 3.0;
 
 /// `color` at full opacity, for legible text tinted like its translucent dot.

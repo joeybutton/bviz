@@ -21,8 +21,8 @@ const SCROLLBAR_WIDTH: f32 = 8.0;
 const MATCH_TINT: f32 = 0.16;
 
 /// The share the focused match is washed with, which the reader has to tell from
-/// the wash on every other match.
-const FOCUSED_MATCH_TINT: f32 = 0.32;
+/// the wash on every other match while still reading the text set over it.
+const FOCUSED_MATCH_TINT: f32 = 0.31;
 
 /// Custom element that sizes the terminal to its bounds, then shapes the visible
 /// viewport and paints background fills and glyphs.
@@ -495,7 +495,7 @@ impl Element for TerminalElement {
 mod tests {
     use super::*;
     use bviz_ui_theme::{
-        MIN_DISTINCT_COLOR, MIN_SECONDARY_CONTRAST, built_in_themes, contrast_ratio, distance, over,
+        MIN_DISTINCT_COLOR, MIN_TEXT_CONTRAST, built_in_themes, contrast_ratio, distance, over,
     };
 
     /// Marking the matches is only worth anything if the reader can see which
@@ -518,7 +518,7 @@ mod tests {
             let lifted = off_canvas(focused);
             assert!(lifted > marked, "{}: {lifted} against {marked}", theme.name);
             let contrast = contrast_ratio(c.text, focused);
-            assert!(contrast >= MIN_SECONDARY_CONTRAST, "{}: {contrast}:1", theme.name);
+            assert!(contrast >= MIN_TEXT_CONTRAST, "{}: {contrast}:1", theme.name);
         }
     }
 }

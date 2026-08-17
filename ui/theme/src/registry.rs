@@ -275,7 +275,7 @@ mod tests {
                 let body = contrast_ratio(c.text, surface);
                 assert!(body >= MIN_TEXT_CONTRAST, "{}: {body}:1", theme.name);
                 let muted = contrast_ratio(c.text_muted, surface);
-                assert!(muted >= MIN_SECONDARY_CONTRAST, "{}: {muted}:1", theme.name);
+                assert!(muted >= MIN_TEXT_CONTRAST, "{}: {muted}:1", theme.name);
             }
         }
     }
@@ -313,7 +313,7 @@ mod tests {
             assert!(drift <= MAX_ACCENT_HUE_DRIFT, "{}: {drift} of the wheel", theme.name);
             for surface in surfaces(&theme) {
                 let contrast = contrast_ratio(c.text_accent, surface);
-                assert!(contrast >= MIN_SECONDARY_CONTRAST, "{}: {contrast}:1", theme.name);
+                assert!(contrast >= MIN_TEXT_CONTRAST, "{}: {contrast}:1", theme.name);
             }
         }
     }
