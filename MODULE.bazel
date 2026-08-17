@@ -169,6 +169,7 @@ new_git_repository(
     commit = "43f23b4349195333b97bef77cc62c2ea4ffd8e91",  # 9.0.1
     remote = "https://github.com/bazelbuild/bazel.git",
     sparse_checkout_patterns = [
+        "/LICENSE",
         "src/main/protobuf/analysis_v2.proto",
         "src/main/protobuf/build.proto",
         "src/main/protobuf/stardoc_output.proto",
@@ -181,6 +182,7 @@ new_git_repository(
     commit = "43f23b4349195333b97bef77cc62c2ea4ffd8e91",  # 9.0.1
     remote = "https://github.com/bazelbuild/bazel.git",
     sparse_checkout_patterns = [
+        "/LICENSE",
         "src/main/java/com/google/devtools/build/lib/buildeventstream/proto/build_event_stream.proto",
         "src/main/java/com/google/devtools/build/lib/packages/metrics/package_load_metrics.proto",
         "src/main/java/com/google/devtools/build/lib/skyframe/serialization/analysis/proto/analysis_cache_service_metadata_status.proto",
