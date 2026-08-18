@@ -146,9 +146,29 @@ mod tests {
             .expect("a renamed family carries the renamed theme")
     }
 
-    /// The surfaces a control, a state layer or a run of text can be drawn on.
-    fn surfaces(theme: &Theme) -> [Hsla; 3] {
-        [theme.colors.background, theme.colors.surface, theme.colors.panel]
+    /// The surfaces a control, a state layer or a run of text can be drawn on,
+    /// each under the name a failure reports it by.
+    fn surfaces(theme: &Theme) -> [(&'static str, Hsla); 3] {
+        let c = &theme.colors;
+        [("background", c.background), ("surface", c.surface), ("panel", c.panel)]
+    }
+
+    /// Every ground a run of body text lands on: each surface, and each wash the
+    /// palette lays over one. Each is named, so a failure says which ground it
+    /// was read against.
+    fn text_grounds(theme: &Theme) -> Vec<(String, Hsla)> {
+        let c = &theme.colors;
+        let washes =
+            [("hovered", c.element_hover), ("held", c.element_active), ("selected", c.selection)];
+        let surfaces = surfaces(theme);
+        let mut grounds = Vec::with_capacity(surfaces.len() * (washes.len() + 1));
+        for (name, surface) in surfaces {
+            grounds.push((name.to_owned(), surface));
+            for (state, wash) in washes {
+                grounds.push((format!("{state} {name}"), over(wash, surface).into()));
+            }
+        }
+        grounds
     }
 
     /// How far apart two hues sit on the wheel, the shorter way round.
@@ -202,7 +222,7 @@ mod tests {
     #[test]
     fn each_surface_reads_as_a_plane_of_its_own() {
         for theme in built_in_themes() {
-            let planes = surfaces(&theme);
+            let planes = surfaces(&theme).map(|(_, surface)| surface);
             for (i, upper) in planes.iter().enumerate() {
                 for lower in &planes[i + 1..] {
                     let step = level_step(*upper, *lower);
@@ -219,7 +239,7 @@ mod tests {
         for theme in built_in_themes() {
             let c = &theme.colors;
             for layer in [c.element_hover, c.element_active] {
-                for surface in surfaces(&theme) {
+                for (_, surface) in surfaces(&theme) {
                     let step = level_step(over(layer, surface), surface);
                     assert!(step >= MIN_VISIBLE_STEP, "{}: {step} levels", theme.name);
                 }
@@ -233,7 +253,7 @@ mod tests {
     fn a_pressed_control_is_told_from_a_hovered_one() {
         for theme in built_in_themes() {
             let c = &theme.colors;
-            for surface in surfaces(&theme) {
+            for (_, surface) in surfaces(&theme) {
                 let step = level_step(over(c.element_active, surface), over(c.element_hover, surface));
                 assert!(step >= MIN_VISIBLE_STEP, "{}: {step} levels", theme.name);
             }
@@ -246,7 +266,7 @@ mod tests {
     fn the_accent_is_seen_on_every_surface() {
         for theme in built_in_themes() {
             let c = &theme.colors;
-            for surface in surfaces(&theme) {
+            for (_, surface) in surfaces(&theme) {
                 let contrast = contrast_ratio(c.accent, surface);
                 assert!(contrast >= MIN_SECONDARY_CONTRAST, "{}: {contrast}:1", theme.name);
             }
@@ -254,10 +274,10 @@ mod tests {
     }
 
     /// Selection marks a row by washing the accent over it, so it has to be a
-    /// wash — of the accent, not of any color to hand — and the row's own text
-    /// has to survive it.
+    /// wash — of the accent, not of any color to hand — and the washed row has
+    /// to read as a color of its own against the surface it is drawn on.
     #[test]
-    fn a_selected_row_reads_as_accented_and_keeps_its_text() {
+    fn a_selected_row_reads_as_a_wash_of_the_accent() {
         for theme in built_in_themes() {
             let c = &theme.colors;
             assert!(c.selection.a < 1.0, "{}: selection is opaque", theme.name);
@@ -268,26 +288,31 @@ mod tests {
                 theme.name
             );
 
-            for surface in surfaces(&theme) {
+            for (_, surface) in surfaces(&theme) {
                 let selected = over(c.selection, surface);
                 let apart = distance(selected, surface);
                 assert!(apart >= MIN_DISTINCT_COLOR, "{}: {apart}", theme.name);
-                let contrast = contrast_ratio(c.text, selected);
-                assert!(contrast >= MIN_TEXT_CONTRAST, "{}: {contrast}:1", theme.name);
             }
         }
     }
 
-    /// Body text is read, not merely seen, on whichever surface it lands on;
-    /// text that is secondary by design still has to be read to be worth setting.
+    /// Body text is read, not merely seen, on whichever ground it lands on.
     #[test]
-    fn text_is_legible_on_every_surface() {
+    fn body_text_is_legible_on_every_ground() {
         for theme in built_in_themes() {
-            let c = &theme.colors;
-            for surface in surfaces(&theme) {
-                let body = contrast_ratio(c.text, surface);
-                assert!(body >= MIN_TEXT_CONTRAST, "{}: {body}:1", theme.name);
-                let muted = contrast_ratio(c.text_muted, surface);
+            for (ground, color) in text_grounds(&theme) {
+                let body = contrast_ratio(theme.colors.text, color);
+                assert!(body >= MIN_TEXT_CONTRAST, "{} on {ground}: {body}:1", theme.name);
+            }
+        }
+    }
+
+    /// Text that is secondary by design still has to be read to be worth setting.
+    #[test]
+    fn muted_text_is_legible_on_every_surface() {
+        for theme in built_in_themes() {
+            for (_, surface) in surfaces(&theme) {
+                let muted = contrast_ratio(theme.colors.text_muted, surface);
                 assert!(muted >= MIN_TEXT_CONTRAST, "{}: {muted}:1", theme.name);
             }
         }
@@ -301,7 +326,7 @@ mod tests {
     fn disabled_text_reads_as_the_weakest_text_without_vanishing() {
         for theme in built_in_themes() {
             let c = &theme.colors;
-            for surface in surfaces(&theme) {
+            for (_, surface) in surfaces(&theme) {
                 let disabled = contrast_ratio(c.text_disabled, surface);
                 assert!(disabled >= MIN_SECONDARY_CONTRAST, "{}: {disabled}:1", theme.name);
                 assert!(
@@ -324,7 +349,7 @@ mod tests {
             assert!(apart >= MIN_DISTINCT_COLOR, "{}: {apart}", theme.name);
             let drift = hue_gap(c.text_accent, c.accent);
             assert!(drift <= MAX_ACCENT_HUE_DRIFT, "{}: {drift} of the wheel", theme.name);
-            for surface in surfaces(&theme) {
+            for (_, surface) in surfaces(&theme) {
                 let contrast = contrast_ratio(c.text_accent, surface);
                 assert!(contrast >= MIN_TEXT_CONTRAST, "{}: {contrast}:1", theme.name);
             }
@@ -356,7 +381,7 @@ mod tests {
     fn the_lines_on_a_surface_register_and_keep_their_ranking() {
         for theme in built_in_themes() {
             let c = &theme.colors;
-            for surface in surfaces(&theme) {
+            for (_, surface) in surfaces(&theme) {
                 let step = |line| level_step(over(line, surface), surface);
                 let (gridline, variant, border) =
                     (step(c.gridline), step(c.border_variant), step(c.border));
@@ -381,7 +406,7 @@ mod tests {
             let c = &theme.colors;
             let apart = distance(c.border_focused, c.border);
             assert!(apart >= MIN_DISTINCT_COLOR, "{}: {apart}", theme.name);
-            for surface in surfaces(&theme) {
+            for (_, surface) in surfaces(&theme) {
                 let contrast = contrast_ratio(c.border_focused, surface);
                 assert!(contrast >= MIN_SECONDARY_CONTRAST, "{}: {contrast}:1", theme.name);
             }
@@ -397,7 +422,7 @@ mod tests {
             let c = &theme.colors;
             let statuses = [c.error, c.warning, c.success, c.info];
             for (i, status) in statuses.iter().enumerate() {
-                for surface in surfaces(&theme) {
+                for (_, surface) in surfaces(&theme) {
                     let contrast = contrast_ratio(*status, surface);
                     assert!(contrast >= MIN_SECONDARY_CONTRAST, "{}: {contrast}:1", theme.name);
                 }
@@ -420,7 +445,7 @@ mod tests {
             let c = &theme.colors;
             let apart = distance(c.highlight, c.warning);
             assert!(apart >= MIN_DISTINCT_COLOR, "{}: {apart}", theme.name);
-            for surface in surfaces(&theme) {
+            for (_, surface) in surfaces(&theme) {
                 let contrast = contrast_ratio(c.highlight, surface);
                 assert!(contrast >= MIN_TEXT_CONTRAST, "{}: {contrast}:1", theme.name);
             }
@@ -435,7 +460,7 @@ mod tests {
         for theme in built_in_themes() {
             let c = &theme.colors;
             assert!(c.shadow.a < 1.0, "{}: shadow is opaque", theme.name);
-            for surface in surfaces(&theme) {
+            for (_, surface) in surfaces(&theme) {
                 let cast = over(c.shadow, surface);
                 assert!(luminance(cast) < luminance(surface), "{}", theme.name);
                 let step = level_step(cast, surface);
@@ -477,7 +502,7 @@ mod tests {
                 theme.name,
                 neutral.s
             );
-            for surface in surfaces(&theme) {
+            for (_, surface) in surfaces(&theme) {
                 let apart = distance(neutral, surface);
                 assert!(apart >= MIN_DISTINCT_COLOR, "{}: {apart}", theme.name);
             }
