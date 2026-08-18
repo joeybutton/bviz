@@ -8,6 +8,12 @@ use gpui::{
     Hsla, IntoElement, MouseButton, Pixels, Render, SharedString, Subscription, Window,
 };
 
+/// The fill under the cursor on the row already chosen, composited so that row
+/// keeps its accent while the cursor is on it.
+fn chosen_hover(colors: &ThemeColors) -> Hsla {
+    Hsla::from(over(colors.element_hover, over(colors.selection, colors.panel)))
+}
+
 /// Breathing room between the trigger and the menu it opens.
 const MENU_GAP: Pixels = px(2.);
 
@@ -148,9 +154,7 @@ impl Dropdown {
     }
 
     fn menu(&self, colors: &ThemeColors, cx: &Context<Self>) -> impl IntoElement {
-        // Composited so the chosen row keeps its accent while the cursor is on it.
-        let chosen_hover =
-            Hsla::from(over(colors.element_hover, over(colors.selection, colors.panel)));
+        let chosen_hover = chosen_hover(colors);
         let rows = self.options.iter().enumerate().map(|(index, option)| {
             let chosen = index == self.selected;
             let hover = if chosen { chosen_hover } else { colors.element_hover };
@@ -212,5 +216,37 @@ impl Render for Dropdown {
             .track_focus(&self.focus_handle)
             .child(self.trigger(&colors, option_width, cx))
             .children(self.open.then(|| self.menu(&colors, cx)))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bviz_ui_theme::{
+        MIN_TEXT_CONTRAST, MIN_VISIBLE_STEP, built_in_themes, contrast_ratio, level_step,
+    };
+
+    /// A row names the option it picks, so the label has to be read on the fill
+    /// the row carries — including the deepest one, where the cursor rests on the
+    /// row already chosen.
+    #[test]
+    fn a_chosen_row_under_the_cursor_keeps_its_label() {
+        for theme in built_in_themes() {
+            let colors = &theme.colors;
+            let contrast = contrast_ratio(colors.text, chosen_hover(colors));
+            assert!(contrast >= MIN_TEXT_CONTRAST, "{}: {contrast}:1", theme.name);
+        }
+    }
+
+    /// Bringing the cursor onto the row already chosen has to show, or the row
+    /// the cursor rests on is told only by the choice already made.
+    #[test]
+    fn the_cursor_shows_on_the_row_already_chosen() {
+        for theme in built_in_themes() {
+            let colors = &theme.colors;
+            let chosen = over(colors.selection, colors.panel);
+            let step = level_step(chosen_hover(colors), chosen);
+            assert!(step >= MIN_VISIBLE_STEP, "{}: {step} levels", theme.name);
+        }
     }
 }
