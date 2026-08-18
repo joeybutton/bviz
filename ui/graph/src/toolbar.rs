@@ -8,9 +8,12 @@ pub(crate) fn toolbar(
     cx: &mut Context<GraphView>,
 ) -> Toolbar {
     let mut bar = Toolbar::new().child(controls.picker).child(
-        Button::new("dim-toggle", cx.listener(|view, _: &ClickEvent, _, cx| view.toggle_dim(cx)))
-            .label("dim")
-            .selected(controls.dim_enabled),
+        Button::new(
+            "neighborhood-toggle",
+            cx.listener(|view, _: &ClickEvent, _, cx| view.toggle_neighborhood(cx)),
+        )
+        .label("neighbors")
+        .selected(controls.neighborhood_enabled),
     );
     // The strip only ever offers a control the mode's layout can answer, so
     // everything on it acts on what is drawn.

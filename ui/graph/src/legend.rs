@@ -25,7 +25,7 @@ pub(crate) fn legend(g: &LaidOut, palette: &Palette) -> Option<Div> {
                     .flex()
                     .items_center()
                     .gap_2()
-                    .child(div().w(px(16.)).h(px(2.)).bg(palette.edge_color(k)))
+                    .child(div().w(px(16.)).h(px(2.)).bg(palette.edge_color(k, false)))
                     .child(div().text_xs().text_color(palette.label).child(k.label()))
             }))
     })

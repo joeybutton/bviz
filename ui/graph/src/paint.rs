@@ -1,5 +1,5 @@
 use crate::camera::{to_screen, visible_rect, Camera, Rect};
-use crate::dimming::{compute_dimming, Dimming};
+use crate::neighborhood::{compute_neighborhood, Neighborhood};
 use crate::drag::track_gesture;
 use crate::model::{Drawn, Expandable};
 use crate::morph::Frame;
@@ -35,9 +35,33 @@ const ARROW_HALF_WIDTH: f64 = 4.0;
 /// seam without letting the line broaden the visible tip.
 const ARROW_OVERDRAW: f64 = 1.0;
 
+/// Stroke width (pre-zoom px) of the line a connector's provenance is drawn in.
+const CONNECTOR_WIDTH: f32 = 1.5;
+
+/// Stroke width (pre-zoom px) of that line where the hover marks the connector.
+/// A doubling is the smallest step that reads as a heavier line rather than as
+/// an artifact of antialiasing.
+const MARKED_WIDTH: f32 = 2.0 * CONNECTOR_WIDTH;
+
+/// How far a hover mark carries a connector's color in perceptual lightness,
+/// away from the canvas. Bounded below by a marked line standing
+/// [`bviz_ui_theme::MIN_DISTINCT_COLOR`] off the unmarked line of its own query,
+/// and above by the three provenances holding that distance from one another
+/// however each of a pair is marked, and from the inks a route is drawn beside.
+/// Set where the nearest of those bounds is furthest off.
+const MARK_LIFT: f32 = 0.072;
+
+/// Bare ground (pre-zoom px) left between the strokes of two adjacent lanes, so
+/// a bundle of them reads as several lines rather than as one broad one. The
+/// zoom carries it along with the strokes it separates, so what holds at every
+/// zoom is its ratio to them.
+const LANE_GAP: f32 = 1.0;
+
 /// Perpendicular gap (pre-zoom px) between the parallel provenance lines drawn
-/// along a node pair that several queries connect.
-const PARALLEL_SPACING: f32 = 3.0;
+/// along a node pair that several queries connect. Either lane may be marked and
+/// so drawn at [`MARKED_WIDTH`], and every lane of an unmarked bundle pays for
+/// that too.
+const PARALLEL_SPACING: f32 = MARKED_WIDTH + LANE_GAP;
 
 /// How far a kind accent is carried toward the canvas to make a leaf fill.
 /// Bounded below by the fills staying clear of the connector colors drawn over
@@ -50,21 +74,12 @@ const KIND_BLEND: f32 = 0.6;
 /// passes for one of the files.
 const GROUP_TINT: f32 = 0.17;
 
-/// How far a dimmed box's fill and border are carried toward the canvas: far
-/// enough that the fade is seen beside the boxes left lit, and not so far that
-/// the box stops standing off the canvas it is drawn on.
-const DIM_FADE: f32 = 0.6;
-
-/// Opacity a dimmed connector keeps: enough to stay visible on the canvas,
-/// little enough to be told from a lit connector of the same provenance.
-const DIM_EDGE_ALPHA: f32 = 0.2;
-
-/// Opacity of the wash the emphasized box's fill is painted over. Bounded below
-/// by the wash carrying the fill a [`bviz_ui_theme::MIN_DISTINCT_COLOR`] off the
-/// one the box wears unmarked, so the emphasis is seen at all, and above by the
-/// box's name — inked from the unwashed fill — holding
-/// [`bviz_ui_theme::MIN_TEXT_CONTRAST`] on the ground the wash makes of it.
-const HIGHLIGHT_WASH: f32 = 0.125;
+/// Opacity of the wash a marked box's fill is painted over. Bounded below by the
+/// wash carrying the fill a [`bviz_ui_theme::MIN_DISTINCT_COLOR`] off the one the
+/// box wears unmarked, so the mark is seen at all, and above by the box's name —
+/// inked from the unwashed fill — holding [`bviz_ui_theme::MIN_TEXT_CONTRAST`] on
+/// the ground the wash makes of it.
+const HIGHLIGHT_WASH: f32 = 0.155;
 
 /// Everything the canvas draws from, owned so the `'static` paint closure holds
 /// no borrow of the view.
@@ -72,8 +87,8 @@ pub(crate) struct Scene {
     pub(crate) drawn: Drawn,
     pub(crate) expandable: Expandable,
     pub(crate) palette: Palette,
-    pub(crate) hovered: Option<Id>,
-    pub(crate) dim_enabled: bool,
+    /// The box whose neighborhood the hover marks; `None` when none is marked.
+    pub(crate) neighborhood: Option<Id>,
     /// The emphasized box and the alpha its highlight paints at.
     pub(crate) highlight: Option<(Id, f32)>,
 }
@@ -106,7 +121,7 @@ pub(crate) fn canvas_body(
         };
         let g = scene.drawn.view(camera.zoom);
         let visible = visible_rect(bounds, camera);
-        let dimming = compute_dimming(g, scene.hovered, scene.dim_enabled);
+        let neighborhood = compute_neighborhood(g, scene.neighborhood);
         let drawn: Vec<(PaintBox, Bounds<Pixels>)> = g
             .boxes
             .iter()
@@ -122,7 +137,7 @@ pub(crate) fn canvas_body(
             }))
             .filter(|p| visible.overlaps(&p.rect))
             .map(|p| {
-                let b = PaintBox::of(&p, &scene, &dimming);
+                let b = PaintBox::of(&p, &scene, &neighborhood);
                 let rect = screen_rect(&b, bounds, camera);
                 paint_box(&b, rect, camera.zoom, &scene.palette, window);
                 (b, rect)
@@ -131,8 +146,8 @@ pub(crate) fn canvas_body(
         let edges = morph.as_ref().map_or(1.0, |m| m.connectors);
         if edges > 0.0 {
             for c in g.connectors.iter().filter(|c| visible.crossed_by(&c.points)) {
-                let dim = dimming.applies && !dimming.lit_edges.contains(&(c.from, c.to));
-                paint_lanes(c, dim, edges, bounds, camera, &scene.palette, window);
+                let marked = neighborhood.edges.contains(&(c.from, c.to));
+                paint_lanes(c, marked, edges, bounds, camera, &scene.palette, window);
             }
         }
         let mut floated: Vec<Bounds<Pixels>> = Vec::new();
@@ -152,11 +167,6 @@ pub(crate) fn canvas_body(
 /// takes its whole appearance — fill, border, label — down together.
 fn faded(c: Rgba, alpha: f32) -> Rgba {
     Rgba { a: c.a * alpha, ..c }
-}
-
-/// `color` as a connector outside the hovered node's neighborhood paints it.
-fn dimmed_edge(color: Rgba) -> Rgba {
-    Rgba { a: DIM_EDGE_ALPHA, ..color }
 }
 
 impl Palette {
@@ -194,23 +204,31 @@ impl Palette {
 
     /// Connector color, keyed by the query an edge came from, so static (query),
     /// configured (cquery), and execution-phase (aquery) dependencies read
-    /// distinctly.
-    pub(crate) fn edge_color(&self, kind: EdgeKind) -> Rgba {
-        match kind {
+    /// distinctly. `marked` carries the color by [`MARK_LIFT`], which leaves
+    /// untouched the hue that names the query.
+    pub(crate) fn edge_color(&self, kind: EdgeKind, marked: bool) -> Rgba {
+        let slot = match kind {
             EdgeKind::Query => self.data.blue,
             EdgeKind::Cquery => self.data.cyan,
             EdgeKind::Aquery => self.data.orange,
+        };
+        match marked {
+            false => slot.into(),
+            true => bviz_ui_theme::lighten(slot, self.mark_lift()),
         }
-        .into()
     }
 
-    /// `fill` as a box outside the hovered node's neighborhood paints it.
-    fn dimmed(&self, fill: Rgba) -> Rgba {
-        bviz_ui_theme::mix(fill, self.background, DIM_FADE)
+    /// [`MARK_LIFT`] signed to point away from the canvas: up on a theme dark
+    /// enough to take white text, down on one that takes black.
+    fn mark_lift(&self) -> f32 {
+        match bviz_ui_theme::label_on(self.background).l > 0.5 {
+            true => MARK_LIFT,
+            false => -MARK_LIFT,
+        }
     }
 
-    /// The wash an emphasized box's fill is painted over, at `strength` of the
-    /// full emphasis.
+    /// The wash a marked box's fill is painted over, at `strength` of the full
+    /// mark.
     fn highlight_wash(&self, strength: f32) -> Rgba {
         Rgba { a: HIGHLIGHT_WASH * strength, ..self.highlight }
     }
@@ -243,8 +261,8 @@ impl Placed<'_> {
     }
 }
 
-/// A box resolved against the theme and the frame's lit/dimmed partition, in
-/// layout pixels.
+/// A box resolved against the theme and the hover's marked set, in layout
+/// pixels.
 struct PaintBox<'a> {
     id: Id,
     x: f64,
@@ -255,28 +273,31 @@ struct PaintBox<'a> {
     /// Whether this box can be opened or closed, so the renderer draws a
     /// disclosure caret: down when open (compound), right when collapsed.
     expandable: bool,
-    /// The themed fill, already faded if this box is dimmed, which the quad and
-    /// the plate a label sits on are both painted in.
+    /// The themed fill, which the quad and the plate a label sits on are both
+    /// painted in.
     fill: Rgba,
     label: &'a str,
-    /// Highlight alpha for the just-toggled box (0.0 = none), scaling the
-    /// emphasis border and inset glow as it fades.
+    /// How strongly the box wears the just-toggled emphasis, from 0 for none to
+    /// 1, scaling its accent border.
     highlight: f32,
-    /// Outside the hovered node's neighborhood, drawn faded to recede.
-    dim: bool,
+    /// Whether the hover marks this box, which the wash over its fill says.
+    marked: bool,
     /// Opacity the whole box paints at, which a morph fades from zero for a box
     /// only the new drawing holds and to zero for one only the old one held.
     alpha: f32,
 }
 
 impl<'a> PaintBox<'a> {
-    fn of(p: &Placed<'a>, scene: &Scene, dimming: &Dimming) -> Self {
+    fn of(p: &Placed<'a>, scene: &Scene, neighborhood: &Neighborhood) -> Self {
         let Placed { b, rect, alpha, .. } = *p;
         let palette = &scene.palette;
-        let dim = dimming.applies && !dimming.lit.contains(&b.id);
         let fill = match b.compound {
             true => palette.container_fill(b.kind),
             false => palette.leaf_fill(b.kind),
+        };
+        let toggled = match scene.highlight {
+            Some((id, alpha)) if id == b.id => alpha,
+            _ => 0.0,
         };
         PaintBox {
             id: b.id,
@@ -286,29 +307,26 @@ impl<'a> PaintBox<'a> {
             h: rect.h,
             compound: b.compound,
             expandable: p.expandable(&scene.expandable),
-            fill: faded(
-                match dim {
-                    true => palette.dimmed(fill),
-                    false => fill,
-                },
-                alpha,
-            ),
+            fill: faded(fill, alpha),
             label: &b.label,
-            highlight: match scene.highlight {
-                Some((id, alpha)) if id == b.id => alpha,
-                _ => 0.0,
-            },
-            dim,
+            highlight: toggled,
+            marked: neighborhood.boxes.contains(&b.id),
             alpha,
         }
+    }
+
+    /// The wash the hover mark lays over this box's fill, transparent where the
+    /// box is unmarked.
+    fn wash(&self, palette: &Palette) -> Rgba {
+        palette.highlight_wash(if self.marked { self.alpha } else { 0.0 })
     }
 }
 
 /// Paints a connector's provenances as evenly spaced parallel lanes centered on
-/// its route, `dim` fading those outside the hovered node's neighborhood.
+/// its route, `marked` where the hover has picked the connector out.
 fn paint_lanes(
     c: &Connector,
-    dim: bool,
+    marked: bool,
     alpha: f32,
     bounds: Bounds<Pixels>,
     camera: Camera,
@@ -328,7 +346,7 @@ fn paint_lanes(
     for (i, kind) in c.kinds.iter().enumerate() {
         let slot = i as f32 - (n - 1.0) / 2.0;
         let lane = lane_polyline(&screen, slot * PARALLEL_SPACING * z);
-        paint_connector(&lane, *kind, dim, alpha, z, palette, window);
+        paint_connector(&lane, *kind, marked, alpha, z, palette, window);
     }
 }
 
@@ -339,8 +357,7 @@ fn screen_rect(b: &PaintBox, bounds: Bounds<Pixels>, camera: Camera) -> Bounds<P
     Bounds::new(origin, size(px(b.w as f32 * zoom), px(b.h as f32 * zoom)))
 }
 
-/// Paints a box's filled quad, with an emphasis border and glow when
-/// highlighted.
+/// Paints a box's filled quad, over which the hover mark's wash goes.
 fn paint_box(
     b: &PaintBox,
     rect: Bounds<Pixels>,
@@ -349,16 +366,15 @@ fn paint_box(
     window: &mut Window,
 ) {
     let corner = px(6. * zoom);
-    let ((border_w, border_c), glow) = box_emphasis(b, zoom, palette, rect, corner);
+    let ((border_w, border_c), mark) = box_emphasis(b, zoom, palette, rect, corner);
     window.paint_quad(quad(rect, corner, b.fill, border_w, border_c, BorderStyle::Solid));
-    glow(window);
+    mark(window);
 }
 
-/// A box's emphasis: the quad border to stroke, and a deferred paint of the glow
-/// wash. The border fades from the themed border to the highlight, and from a
-/// normal to a thick stroke, by the highlight alpha; a dim box uses a faded
-/// themed border. The returned closure paints the highlight wash over the fill
-/// so the emphasis reads as a glow, not just a brighter outline.
+/// A box's two emphases, told apart by the channel each takes: the quad border
+/// to stroke, which the just-toggled emphasis fades from the themed border to
+/// the accent and from a normal to a thick stroke, and a deferred paint of the
+/// hover mark's wash, which the fill alone carries.
 fn box_emphasis(
     b: &PaintBox,
     zoom: f32,
@@ -371,13 +387,11 @@ fn box_emphasis(
         let thick = px((2. * zoom).max(2.));
         let accent = Rgba { a: b.highlight, ..palette.highlight };
         (normal + (thick - normal) * b.highlight, Hsla::from(faded(accent, b.alpha)))
-    } else if b.dim {
-        (px(1.), Hsla::from(faded(palette.dimmed(palette.border), b.alpha)))
     } else {
         (px(1.), Hsla::from(faded(palette.border, b.alpha)))
     };
-    let wash = palette.highlight_wash(b.highlight * b.alpha);
-    let glow = move |window: &mut Window| {
+    let wash = b.wash(palette);
+    let mark = move |window: &mut Window| {
         if wash.a > 0.0 {
             window.paint_quad(quad(
                 rect,
@@ -389,7 +403,7 @@ fn box_emphasis(
             ));
         }
     };
-    ((border_w, border_c), glow)
+    ((border_w, border_c), mark)
 }
 
 /// Where a box's label falls within it, in screen pixels: centered in the strip
@@ -488,13 +502,7 @@ fn paint_box_label(
 ) -> Option<TitleTarget> {
     let placement = LabelPlacement::of(b, rect, zoom)?;
     let fs = placement.size;
-    let label_color = faded(
-        match b.dim {
-            true => palette.dim_label,
-            false => bviz_ui_theme::label_on(b.fill).into(),
-        },
-        b.alpha,
-    );
+    let label_color = faded(bviz_ui_theme::label_on(b.fill).into(), b.alpha);
     let base = bviz_ui_assets::text_metrics(window).font;
     let font = if b.compound { base.bold() } else { base };
     let line = bviz_ui_components::shape_truncated(
@@ -515,7 +523,7 @@ fn paint_box_label(
     // The plate is painted in the box's own ground, wash and all, so a name reads
     // against its box rather than against the routes crossing it and leaves no
     // rectangle of its own behind.
-    let ground = bviz_ui_theme::over(palette.highlight_wash(b.highlight * b.alpha), b.fill);
+    let ground = bviz_ui_theme::over(b.wash(palette), b.fill);
     window.paint_quad(quad(
         plate,
         px(0.),
@@ -637,7 +645,7 @@ fn miter_vertex(a: (f32, f32), b: (f32, f32), c: (f32, f32), d: f32) -> (f32, f3
 fn paint_connector(
     points: &[(f32, f32)],
     kind: EdgeKind,
-    dim: bool,
+    marked: bool,
     alpha: f32,
     zoom: f32,
     palette: &Palette,
@@ -646,23 +654,20 @@ fn paint_connector(
     if points.len() < 2 {
         return;
     }
-    let lit = palette.edge_color(kind);
-    let color = faded(if dim { dimmed_edge(lit) } else { lit }, alpha);
+    let color = faded(palette.edge_color(kind, marked), alpha);
     let pts: Vec<Point<Pixels>> = points.iter().map(|(x, y)| point(px(*x), px(*y))).collect();
 
-    // Stop the stroke at the arrowhead's base (less a slight overdraw) so the
-    // line doesn't paint through the head and broaden the visible tip.
     let n = pts.len();
     let tip = pts[n - 1];
-    let prev = pts[n - 2];
-    let dx = f32::from(tip.x - prev.x);
-    let dy = f32::from(tip.y - prev.y);
-    let seg = (dx * dx + dy * dy).sqrt().max(1e-3);
-    let (ux, uy) = (dx / seg, dy / seg);
-    let trim = ((ARROW_LENGTH as f32 - ARROW_OVERDRAW as f32) * zoom).min(seg);
-    let line_end = point(tip.x - px(ux * trim), tip.y - px(uy * trim));
+    let (dir, seg) = direction(pts[n - 2], tip);
+    let trim = stem_trim(zoom).min(seg);
+    let line_end = point(tip.x - px(dir.0 * trim), tip.y - px(dir.1 * trim));
 
-    let mut line = PathBuilder::stroke(px(1.5 * zoom));
+    let width = match marked {
+        true => MARKED_WIDTH,
+        false => CONNECTOR_WIDTH,
+    };
+    let mut line = PathBuilder::stroke(px(width * zoom));
     line.move_to(pts[0]);
     for p in &pts[1..n - 1] {
         line.line_to(*p);
@@ -671,33 +676,48 @@ fn paint_connector(
     if let Ok(path) = line.build() {
         window.paint_path(path, color);
     }
-
-    paint_arrowhead(&pts, zoom, color, window);
+    paint_arrowhead(tip, dir, zoom, color, window);
 }
 
-/// Paints a filled triangle at the polyline's last point, aimed along the
-/// direction of its final segment.
-fn paint_arrowhead(pts: &[Point<Pixels>], zoom: f32, color: Rgba, window: &mut Window) {
-    let length = ARROW_LENGTH as f32 * zoom;
-    let half_width = ARROW_HALF_WIDTH as f32 * zoom;
-
-    let n = pts.len();
-    let tip = pts[n - 1];
-    let dx = f32::from(tip.x - pts[n - 2].x);
-    let dy = f32::from(tip.y - pts[n - 2].y);
+/// The unit vector from `a` to `b`, and how far apart they are.
+fn direction(a: Point<Pixels>, b: Point<Pixels>) -> ((f32, f32), f32) {
+    let (dx, dy) = (f32::from(b.x - a.x), f32::from(b.y - a.y));
     let len = (dx * dx + dy * dy).sqrt().max(1e-3);
-    let (ux, uy) = (dx / len, dy / len); // forward unit vector
-    let (perp_x, perp_y) = (-uy, ux); // left-perpendicular unit vector
+    ((dx / len, dy / len), len)
+}
 
-    let base = point(tip.x - px(ux * length), tip.y - px(uy * length));
-    let left = point(base.x + px(perp_x * half_width), base.y + px(perp_y * half_width));
-    let right = point(base.x - px(perp_x * half_width), base.y - px(perp_y * half_width));
+/// How far back from the tip a connector's line stops.
+fn stem_trim(zoom: f32) -> f32 {
+    (ARROW_LENGTH - ARROW_OVERDRAW) as f32 * zoom
+}
 
+/// Paints the triangle [`arrowhead`] describes.
+fn paint_arrowhead(
+    tip: Point<Pixels>,
+    dir: (f32, f32),
+    zoom: f32,
+    color: Rgba,
+    window: &mut Window,
+) {
     let mut head = PathBuilder::fill();
-    head.add_polygon(&[tip, left, right], true);
+    head.add_polygon(&arrowhead(tip, dir, zoom), true);
     if let Ok(path) = head.build() {
         window.paint_path(path, color);
     }
+}
+
+/// The triangle capping a connector at `tip` and pointing along the unit vector
+/// `dir`, sized as [`ARROW_LENGTH`] and [`ARROW_HALF_WIDTH`] give it at `zoom`.
+fn arrowhead(tip: Point<Pixels>, dir: (f32, f32), zoom: f32) -> [Point<Pixels>; 3] {
+    let (length, half_width) = (ARROW_LENGTH as f32 * zoom, ARROW_HALF_WIDTH as f32 * zoom);
+    let (ux, uy) = dir;
+    let (nx, ny) = (-uy, ux);
+    let base = point(tip.x - px(ux * length), tip.y - px(uy * length));
+    [
+        tip,
+        point(base.x + px(nx * half_width), base.y + px(ny * half_width)),
+        point(base.x - px(nx * half_width), base.y - px(ny * half_width)),
+    ]
 }
 
 #[cfg(test)]
@@ -752,8 +772,8 @@ mod tests {
         }
     }
 
-    /// A box as a frame draws it, where the theme and the lit/dimmed partition a
-    /// full [`PaintBox::of`] resolves have no bearing on what is measured.
+    /// A box as a frame draws it, where the theme and the marked set a full
+    /// [`PaintBox::of`] resolves have no bearing on what is measured.
     fn paint_box_of<'a>(p: &Placed<'a>, expandable: &Expandable) -> PaintBox<'a> {
         PaintBox {
             id: p.b.id,
@@ -766,7 +786,7 @@ mod tests {
             fill: rgb(0),
             label: &p.b.label,
             highlight: 0.0,
-            dim: false,
+            marked: false,
             alpha: p.alpha,
         }
     }
@@ -1011,8 +1031,8 @@ mod tests {
 mod colors {
     use super::*;
     use bviz_ui_theme::{
-        MIN_DISTINCT_COLOR, MIN_EDGED_STEP, MIN_SECONDARY_CONTRAST, MIN_TEXT_CONTRAST,
-        MIN_VISIBLE_STEP, built_in_themes, contrast_ratio, distance, label_on, level_step, over,
+        MIN_DISTINCT_COLOR, MIN_EDGED_STEP, MIN_TEXT_CONTRAST, built_in_themes, contrast_ratio,
+        distance, label_on, level_step, luminance, oklch, over,
     };
     use gpui::SharedString;
 
@@ -1045,11 +1065,29 @@ mod colors {
             .collect()
     }
 
-    /// Every fill an emphasized box can be wearing when the wash lands on it:
-    /// any box fill, lit or receded, since the hover dims a box whether or not
-    /// the emphasis is on it.
-    fn emphasized_fills(p: &Palette) -> Vec<Rgba> {
-        box_fills(p).into_iter().flat_map(|fill| [fill, p.dimmed(fill)]).collect()
+    /// Every ground a connector is drawn over, each once. A marked connector runs
+    /// between marked boxes, and the boxes are painted before the connectors, so
+    /// each fill counts both bare and under the hover mark's wash.
+    fn edge_grounds(p: &Palette) -> Vec<Rgba> {
+        box_fills(p)
+            .into_iter()
+            .flat_map(|fill| [fill, over(p.highlight_wash(1.0), fill)])
+            .chain([p.background])
+            .collect()
+    }
+
+    /// Every ink a route is drawn beside, each once: the text the controls
+    /// framing the canvas are set in, and the name a box carries over the routes
+    /// crossing it.
+    fn edge_inks(p: &Palette) -> Vec<Rgba> {
+        let mut inks = vec![p.label];
+        for fill in box_fills(p) {
+            let ink = label_on(fill).into();
+            if !inks.contains(&ink) {
+                inks.push(ink);
+            }
+        }
+        inks
     }
 
     /// A leaf's kind is read off the color of the box, so no two kinds may be
@@ -1070,36 +1108,139 @@ mod colors {
     }
 
     /// A connector is followed across the canvas and over the boxes it runs
-    /// between, so its provenance has to be told from the other provenances and
-    /// from every ground it crosses.
+    /// between, so its provenance has to be told from every ground it crosses,
+    /// wherever the hover leaves it.
     #[test]
-    fn every_edge_provenance_is_told_from_the_others_and_from_what_it_crosses() {
+    fn every_edge_provenance_is_told_from_what_it_crosses() {
         for (theme, p) in palettes() {
-            let grounds: Vec<Rgba> = box_fills(&p).into_iter().chain([p.background]).collect();
-            for (i, kind) in EDGE_KINDS.iter().enumerate() {
-                let color = p.edge_color(*kind);
-                for ground in &grounds {
-                    let apart = distance(color, *ground);
-                    assert!(apart >= MIN_DISTINCT_COLOR, "{theme} {kind:?} on a ground: {apart}");
-                }
-                for other in &EDGE_KINDS[i + 1..] {
-                    let apart = distance(color, p.edge_color(*other));
-                    assert!(apart >= MIN_DISTINCT_COLOR, "{theme} {kind:?}/{other:?}: {apart}");
+            let grounds = edge_grounds(&p);
+            for kind in EDGE_KINDS {
+                for marked in [false, true] {
+                    let color = p.edge_color(kind, marked);
+                    for ground in &grounds {
+                        let apart = distance(color, *ground);
+                        assert!(
+                            apart >= MIN_DISTINCT_COLOR,
+                            "{theme} {kind:?} marked {marked} on a ground: {apart}"
+                        );
+                    }
                 }
             }
         }
     }
 
-    /// The emphasis is what draws the eye back to the box just toggled, so it
-    /// has to stand off the border it replaces, the fill it is drawn around, the
-    /// canvas beyond it and the connectors meeting it.
+    /// A route is followed past writing as well as over fills — a box's own name
+    /// over the fill it crosses, the legend and toolbar text beyond the canvas.
+    /// A line that meets one of those has to go on reading as a line rather than
+    /// as more of the writing, wherever the hover leaves it.
+    #[test]
+    fn every_edge_provenance_is_told_from_the_inks_it_runs_beside() {
+        for (theme, p) in palettes() {
+            let inks = edge_inks(&p);
+            for kind in EDGE_KINDS {
+                for marked in [false, true] {
+                    let color = p.edge_color(kind, marked);
+                    for ink in &inks {
+                        let apart = distance(color, *ink);
+                        assert!(
+                            apart >= MIN_DISTINCT_COLOR,
+                            "{theme} {kind:?} marked {marked} beside an ink: {apart}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// The color of a connector names the query it came from, and a lane runs
+    /// beside lanes of every other provenance, each of the pair left as the
+    /// hover found it or carried by [`MARK_LIFT`]. No two of those meet.
+    #[test]
+    fn no_two_provenances_meet_however_the_hover_marks_them() {
+        for (theme, p) in palettes() {
+            for (i, kind) in EDGE_KINDS.iter().enumerate() {
+                for other in &EDGE_KINDS[i + 1..] {
+                    for marked in [false, true] {
+                        for other_marked in [false, true] {
+                            let apart = distance(
+                                p.edge_color(*kind, marked),
+                                p.edge_color(*other, other_marked),
+                            );
+                            assert!(
+                                apart >= MIN_DISTINCT_COLOR,
+                                "{theme} {kind:?} marked {marked} / {other:?} marked \
+                                 {other_marked}: {apart}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// A marked lane runs beside unmarked lanes of its own query, so the mark
+    /// has to carry the line clear of the one it is drawn from.
+    #[test]
+    fn a_marked_connector_is_told_from_the_unmarked_line_of_its_own_query() {
+        for (theme, p) in palettes() {
+            for kind in EDGE_KINDS {
+                let seen = distance(p.edge_color(kind, true), p.edge_color(kind, false));
+                assert!(seen >= MIN_DISTINCT_COLOR, "{theme} {kind:?}: {seen}");
+            }
+        }
+    }
+
+    /// Slack allowed on a hue compared across the lift, as a turn of the wheel,
+    /// covering the rounding of the f32 arithmetic through it.
+    const HUE_SLACK: f32 = 1e-3;
+
+    /// A connector's hue is what names the query it came from, so a mark leaves
+    /// the connector saying what it said and only turns the light up on it.
+    #[test]
+    fn a_mark_holds_the_hue_that_names_the_query() {
+        for (theme, p) in palettes() {
+            for kind in EDGE_KINDS {
+                let bare = oklch(p.edge_color(kind, false)).hue;
+                let marked = oklch(p.edge_color(kind, true)).hue;
+                let turned = (bare - marked).abs();
+                assert!(
+                    turned.min(1.0 - turned) < HUE_SLACK,
+                    "{theme} {kind:?}: hue {bare} -> {marked}"
+                );
+            }
+        }
+    }
+
+    /// Which way a mark carries a connector is the theme's to say: a marked line
+    /// stands further off the canvas in lightness than the line it marks,
+    /// whether the canvas is the dark end of the range or the light one.
+    #[test]
+    fn a_mark_carries_a_connector_away_from_the_canvas() {
+        for (theme, p) in palettes() {
+            let canvas = luminance(p.background);
+            for kind in EDGE_KINDS {
+                let bare = luminance(p.edge_color(kind, false)) - canvas;
+                let marked = luminance(p.edge_color(kind, true)) - canvas;
+                assert!(
+                    marked.abs() > bare.abs() && marked.signum() == bare.signum(),
+                    "{theme} {kind:?}: {bare} -> {marked} off the canvas"
+                );
+            }
+        }
+    }
+
+    /// The accent border is what draws the eye back to the box just toggled, so
+    /// it has to stand off the border it replaces, the fill it is drawn around,
+    /// the canvas beyond it and the connectors meeting it.
     #[test]
     fn the_highlight_is_told_from_everything_it_is_drawn_against() {
         for (theme, p) in palettes() {
             let against = box_fills(&p)
                 .into_iter()
                 .chain([p.background, p.border])
-                .chain(EDGE_KINDS.iter().map(|kind| p.edge_color(*kind)));
+                .chain(EDGE_KINDS.iter().flat_map(|kind| {
+                    [p.edge_color(*kind, false), p.edge_color(*kind, true)]
+                }));
             for color in against {
                 let apart = distance(p.highlight, color);
                 assert!(apart >= MIN_DISTINCT_COLOR, "{theme}: {apart}");
@@ -1108,8 +1249,9 @@ mod colors {
     }
 
     /// A box carries its name on its own fill, whichever kind picked that fill,
-    /// and on the ground the emphasis wash makes of it. The ink is picked from
-    /// the fill alone, so that one choice has to hold on both.
+    /// and on the ground the hover mark's wash makes of it — the one wash a fill
+    /// ever wears. The ink is picked from the fill alone, so that one choice has
+    /// to hold on both.
     #[test]
     fn a_name_is_legible_on_the_box_it_names() {
         for (theme, p) in palettes() {
@@ -1151,60 +1293,19 @@ mod colors {
         }
     }
 
-    /// Hovering a node sends the rest of the graph back without sending it away:
-    /// a dimmed box parts from the lit boxes beside it, and still stands off the
-    /// canvas within the border drawn round it.
+    /// The wash marks the box the hover picked out: whatever fill that box wears,
+    /// the wash carries it far enough off the one the box wears unmarked to be
+    /// seen beside the boxes still wearing it.
     #[test]
-    fn a_dimmed_box_recedes_without_leaving_the_canvas() {
-        for (theme, p) in palettes() {
-            for kind in ACCENTED_KINDS {
-                let (lit, dim) = (p.leaf_fill(kind), p.dimmed(p.leaf_fill(kind)));
-                let faded = level_step(lit, dim);
-                assert!(faded >= MIN_VISIBLE_STEP, "{theme} {kind:?}: {faded} levels");
-                let left = level_step(dim, p.background);
-                assert!(left >= MIN_EDGED_STEP, "{theme} {kind:?}: {left} levels");
-            }
-        }
-    }
-
-    /// A dimmed connector recedes by opacity: it stays visible on the canvas it
-    /// is washed into, and stays off the lit route of its own provenance.
-    #[test]
-    fn a_dimmed_connector_stays_on_the_canvas_and_off_its_lit_self() {
-        for (theme, p) in palettes() {
-            for kind in EDGE_KINDS {
-                let lit = p.edge_color(kind);
-                let dim = over(dimmed_edge(lit), p.background);
-                let left = level_step(dim, p.background);
-                assert!(left >= MIN_VISIBLE_STEP, "{theme} {kind:?}: {left} levels");
-                let apart = distance(dim, lit);
-                assert!(apart >= MIN_DISTINCT_COLOR, "{theme} {kind:?}: {apart}");
-            }
-        }
-    }
-
-    /// A dimmed name is scenery rather than something the reader is meant to
-    /// read, so it holds the bar for what is made out without being read.
-    #[test]
-    fn a_dimmed_name_is_still_made_out_on_the_box_it_receded_with() {
+    fn a_marked_box_is_seen_whatever_fill_it_wears() {
         for (theme, p) in palettes() {
             for fill in box_fills(&p) {
-                let held = contrast_ratio(p.dim_label, p.dimmed(fill));
-                assert!(held >= MIN_SECONDARY_CONTRAST, "{theme}: {held}");
-            }
-        }
-    }
-
-    /// The wash marks the box the user just toggled: whatever fill that box
-    /// wears, the wash carries it far enough off the one the box wears unmarked
-    /// to be seen beside the boxes still wearing it.
-    #[test]
-    fn an_emphasized_box_is_seen_whatever_fill_it_wears() {
-        for (theme, p) in palettes() {
-            for fill in emphasized_fills(&p) {
                 let seen = distance(over(p.highlight_wash(1.0), fill), fill);
                 assert!(seen >= MIN_DISTINCT_COLOR, "{theme}: {seen}");
             }
         }
     }
 }
+
+
+

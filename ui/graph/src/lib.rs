@@ -17,7 +17,6 @@ use std::time::{Duration, Instant};
 
 mod build;
 mod camera;
-mod dimming;
 mod drag;
 mod emphasis;
 mod framing;
@@ -25,6 +24,7 @@ mod legend;
 mod mode;
 mod model;
 mod morph;
+mod neighborhood;
 mod paint;
 mod scroll;
 mod toolbar;
@@ -88,9 +88,8 @@ struct Palette {
     /// canvas than `container` so nesting reads outermost first.
     package: Rgba,
     background: Rgba,
-    /// Ink for the name on a box the hover has dimmed, which recedes with it.
-    dim_label: Rgba,
-    /// Accent the just-toggled box is picked out with.
+    /// Accent every emphasis is drawn in: the border picking out the
+    /// just-toggled box and the wash over a marked box's fill.
     highlight: Rgba,
     /// The slots the node kinds and the edge provenances are colored from.
     data: DataColors,
@@ -110,7 +109,6 @@ impl Palette {
             container: colors.panel.into(),
             package: colors.surface.into(),
             background: colors.background.into(),
-            dim_label: colors.text_disabled.into(),
             highlight: colors.highlight.into(),
             data: theme.data,
             scroll: ScrollbarColors::from_colors(colors),
@@ -131,17 +129,15 @@ struct GraphView {
     mode_picker: Entity<Dropdown>,
     /// Carries the picker's selections into [`GraphView::set_mode`].
     _mode_choices: Subscription,
-    /// Node under the cursor, whose neighborhood stays lit while everything else
-    /// dims; `None` when the cursor is over no node.
+    /// Box under the cursor.
     hovered: Option<Id>,
-    /// Whether hovering a node dims the rest of the graph; flipped by the `h` key
-    /// or the toolbar toggle so the dimming can be turned off when it is more
-    /// noise than help.
-    dim_enabled: bool,
+    /// Whether hovering a box marks its neighborhood; flipped by the `h` key or
+    /// the toolbar toggle so the marking can be turned off when it is more noise
+    /// than help.
+    neighborhood_enabled: bool,
     /// Whether the layered layout draws the transitive reduction of the edges
     /// (the default) rather than every edge; flipped by the `r` key or the
-    /// toolbar toggle, which relays out. Hover lights up a node's full neighbors
-    /// either way.
+    /// toolbar toggle, which relays out.
     reduced: bool,
     /// The titles the canvas drew, rewritten by every paint and resolved against
     /// a pointer by [`box_at`].
@@ -202,7 +198,7 @@ impl GraphView {
             mode_picker,
             _mode_choices: choices,
             hovered: None,
-            dim_enabled: true,
+            neighborhood_enabled: true,
             reduced: true,
             titles: Vec::new(),
         }
@@ -222,8 +218,7 @@ impl GraphView {
         let scene = Scene {
             expandable: self.expandable(),
             palette,
-            hovered: self.hovered,
-            dim_enabled: self.dim_enabled,
+            neighborhood: self.hovered.filter(|_| self.neighborhood_enabled),
             highlight: self.emphasis.highlight(),
             drawn,
         };
@@ -298,7 +293,8 @@ impl GraphView {
     }
 
     fn on_mouse_move(&mut self, e: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
-        // A pan moves the view rather than the hover; leave the lit set alone.
+        // A pan moves the view under a stationary pointer, so the box it is over
+        // is the one already resolved.
         if matches!(self.drag, Drag::Pan(_)) {
             return;
         }
@@ -317,10 +313,10 @@ impl GraphView {
     }
 
     /// Drops the hover when the pointer leaves the canvas, so a node's
-    /// neighborhood does not stay lit while the cursor is over the toolbar or the
-    /// window chrome — the move handler is bounds-gated and never fires there.
+    /// neighborhood does not stay marked while the cursor is over the toolbar or
+    /// the window chrome — the move handler is bounds-gated and never fires there.
     /// gpui reports the canvas unhovered while a button is held, so the drag guard
-    /// keeps a pan from dropping the lit set it started with.
+    /// keeps a pan from dropping the marked set it started with.
     fn on_hover(&mut self, over: &bool, _: &mut Window, cx: &mut Context<Self>) {
         if !over && matches!(self.drag, Drag::None) && self.hovered.take().is_some() {
             cx.notify();
@@ -340,8 +336,8 @@ impl GraphView {
         cx.notify();
     }
 
-    fn toggle_dim(&mut self, cx: &mut Context<Self>) {
-        self.dim_enabled = !self.dim_enabled;
+    fn toggle_neighborhood(&mut self, cx: &mut Context<Self>) {
+        self.neighborhood_enabled = !self.neighborhood_enabled;
         cx.notify();
     }
 
@@ -356,7 +352,7 @@ impl GraphView {
 
     fn on_key_down(&mut self, e: &KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
         if e.keystroke.key == "h" {
-            self.toggle_dim(cx);
+            self.toggle_neighborhood(cx);
         } else if e.keystroke.key == "r" {
             self.toggle_reduce(cx);
         }
@@ -372,7 +368,7 @@ impl Render for GraphView {
                 let controls = Controls {
                     mode: self.mode,
                     picker: self.mode_picker.clone(),
-                    dim_enabled: self.dim_enabled,
+                    neighborhood_enabled: self.neighborhood_enabled,
                     reduced: self.reduced,
                     relaying: self.model.relaying(),
                 };
@@ -403,13 +399,13 @@ impl Render for GraphView {
 struct Controls {
     mode: LayoutMode,
     picker: Entity<Dropdown>,
-    dim_enabled: bool,
+    neighborhood_enabled: bool,
     reduced: bool,
     relaying: bool,
 }
 
 /// The box a pointer at `pos` (window px) resolves to, which every gesture that
-/// names a box — the hover that lights a neighborhood, the click that opens or
+/// names a box — the hover that marks a neighborhood, the click that opens or
 /// closes one — goes through, so the box under the cursor is the same box for
 /// all of them.
 ///
@@ -453,8 +449,8 @@ fn click_box_at(view: &mut GraphView, pos: Point<Pixels>, cx: &mut Context<Graph
         return;
     };
     let enclosed = enclosed_boxes(&g.boxes, vp.size, camera);
-    // The relayout may drop the hovered node (it was collapsed away), which would
-    // otherwise leave the whole graph dimmed until the next mouse move.
+    // The relayout places the boxes afresh, so the box resolved here need not be
+    // the one the cursor ends up over.
     view.hovered = None;
     model::toggle_expansion(view, id, cx);
     view.emphasis.toggled(id, enclosed);

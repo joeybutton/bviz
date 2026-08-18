@@ -133,8 +133,8 @@ pub struct LaidOut {
     /// this empty.
     pub anchors: HashMap<Id, Anchor>,
     /// Every connected node pair in the view before any edges were dropped for
-    /// drawing (e.g. by transitive reduction), so hovering can still light up a
-    /// node's full set of neighbors even where no connector is drawn to them.
+    /// drawing (e.g. by transitive reduction), so a hover marks a node's full set
+    /// of neighbors even where no connector is drawn to them.
     pub full_edges: Vec<(Id, Id)>,
     pub width: f64,
     pub height: f64,

@@ -55,9 +55,10 @@ pub struct ThemeColors {
     pub accent: Hsla,
     /// A wash of `accent`, marking a chosen row or a range dragged out.
     pub selection: Hsla,
-    /// Draws the eye to something transient — a just-toggled node, a phase
-    /// boundary. It is read as a rule and as the label naming it, so it holds
-    /// text contrast against every surface on either appearance.
+    /// Draws the eye to what a view is calling out for the moment — a
+    /// just-toggled node, a phase boundary, whatever the pointer rests on. It is
+    /// read as a rule and as the label naming it, so it holds text contrast
+    /// against every surface on either appearance.
     pub highlight: Hsla,
     pub error: Hsla,
     pub warning: Hsla,
