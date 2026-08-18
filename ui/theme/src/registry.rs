@@ -240,6 +240,19 @@ mod tests {
         }
     }
 
+    /// The accent marks what the reader has picked out, so it has to stand
+    /// against every surface something can be marked on.
+    #[test]
+    fn the_accent_is_seen_on_every_surface() {
+        for theme in built_in_themes() {
+            let c = &theme.colors;
+            for surface in surfaces(&theme) {
+                let contrast = contrast_ratio(c.accent, surface);
+                assert!(contrast >= MIN_SECONDARY_CONTRAST, "{}: {contrast}:1", theme.name);
+            }
+        }
+    }
+
     /// Selection marks a row by washing the accent over it, so it has to be a
     /// wash — of the accent, not of any color to hand — and the row's own text
     /// has to survive it.
