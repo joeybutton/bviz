@@ -3,7 +3,7 @@
 
 use bviz_trace_layout::{SpanRole, Workload};
 use bviz_ui_components::{LabelBoxStyle, ScrollbarColors, TooltipColors};
-use bviz_ui_theme::{DataColors, Theme, ThemeColors, hue_of, mix};
+use bviz_ui_theme::{DataColors, Theme, ThemeColors, hue_of, mix, over};
 use gpui::{Hsla, IntoElement, Rgba, div, hsla, prelude::*, px};
 
 /// Saturation of a counter series' translucent fill.
@@ -157,6 +157,12 @@ impl Palette {
         }
     }
 
+    /// The fill under the cursor on a picked row of the background canvas, so
+    /// that pointing at a picked row leaves it marked.
+    pub(crate) fn picked_hover(&self) -> Rgba {
+        over(self.hover, over(self.selection, self.background))
+    }
+
     /// Fill for a span, keyed by its [`SpanRole`]: the workload picks the data
     /// slot and the payload flag its weight. Both the flame chart and the flame
     /// graph paint with it, so a role is one color in both. The Other workload —
@@ -195,7 +201,7 @@ mod tests {
     use super::*;
     use bviz_ui_theme::{
         MIN_DISTINCT_COLOR, MIN_EDGED_STEP, MIN_VISIBLE_STEP, built_in_themes, distance,
-        level_step, over,
+        level_step,
     };
 
     /// The most a hover fill may clear the surface under it, as a multiple of
@@ -267,6 +273,21 @@ mod tests {
                 let apart = distance(hovered, over(palette.selection, surface));
                 assert!(apart >= MIN_DISTINCT_COLOR, "{apart}");
             }
+        }
+    }
+
+    /// The fill is the whole of what marks a picked row, so bringing the cursor
+    /// onto one must neither wipe the mark nor leave the row reading like any
+    /// other row under the cursor.
+    #[test]
+    fn a_picked_row_stays_marked_under_the_cursor() {
+        for palette in palettes() {
+            let canvas = palette.background;
+            let hovered_pick = palette.picked_hover();
+            let apart = distance(hovered_pick, over(palette.hover, canvas));
+            assert!(apart >= MIN_DISTINCT_COLOR, "{apart}");
+            let step = level_step(hovered_pick, over(palette.selection, canvas));
+            assert!(step >= MIN_VISIBLE_STEP, "{step} levels");
         }
     }
 
