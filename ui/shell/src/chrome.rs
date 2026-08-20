@@ -206,8 +206,16 @@ fn title_bar(
             let should_move = should_move.clone();
             move |_, _, cx| should_move.update(cx, |m, _| *m = false)
         })
-        .on_mouse_move(move |_, window, cx| {
-            if should_move.update(cx, |m, _| std::mem::replace(m, false)) {
+        // A press anywhere else belongs to a different gesture, and the drag it
+        // may grow into must not be taken for the title bar's own.
+        .on_mouse_down_out({
+            let should_move = should_move.clone();
+            move |_, _, cx| should_move.update(cx, |m, _| *m = false)
+        })
+        // A move with no button held means the press that armed the latch is
+        // over, wherever it was released, so consume it either way.
+        .on_mouse_move(move |e, window, cx| {
+            if should_move.update(cx, |m, _| std::mem::replace(m, false)) && e.dragging() {
                 window.start_window_move();
             }
         })
