@@ -343,8 +343,10 @@ impl StatsPanel {
                         });
                         // The row's fill runs under the reserved scroll-bar strip
                         // as well as under the cells, and only the cells take a
-                        // click, so a press that drives the bar picks no row.
+                        // click, so a press that drives the bar picks no row. The
+                        // fill's id is what gets its hover repainted.
                         div()
+                            .id(("stats-row", index as usize))
                             .flex()
                             .flex_row()
                             .h(px(STATS_ROW_HEIGHT))
@@ -354,7 +356,7 @@ impl StatsPanel {
                             .hover(move |s| s.bg(hover_fill))
                             .child(
                                 div()
-                                    .id(("stats-row", index as usize))
+                                    .id(("stats-row-cells", index as usize))
                                     .flex()
                                     .flex_row()
                                     .items_center()
