@@ -22,7 +22,7 @@ pub use dropdown::{Dropdown, DropdownEvent};
 pub use layer::{cached_layer, overlay_canvas};
 pub use notice::{Source, centered_notice, centered_spinner};
 pub use scrollbar::{Axis, DEFAULT_MIN_THUMB, SCROLLBAR_THICKNESS, Scrollbar, ScrollbarColors};
-pub use scrubber::{ScrubberColors, ScrubberLayout, scrubber};
+pub use scrubber::{ScrubberColors, ScrubberState, scrubber};
 pub use spinner::spinner;
 pub use text_input::TextInput;
 pub use toolbar::Toolbar;

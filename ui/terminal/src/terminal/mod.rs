@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use bviz_terminal::{CellPos, Replay, Scroll, SelectionType, Side, Terminal, Url};
 use bviz_ui_components::{
-    Button, Dropdown, Scrollbar, ScrubberColors, ScrubberLayout, TextInput, load_in_background,
+    Button, Dropdown, Scrollbar, ScrubberColors, ScrubberState, TextInput, load_in_background,
     scrubber,
 };
 use bviz_ui_shell::Chrome;
@@ -93,10 +93,7 @@ pub struct TerminalView {
     /// the playback clock continuously, so the playhead glides even when the shown
     /// frame (a coarse build may have few) only changes in steps.
     position: f64,
-    /// Whether the scrubber thumb is being dragged.
-    scrubbing: bool,
-    /// The painted scrubber track geometry, set each layout for hit-testing.
-    scrubber: Option<ScrubberLayout>,
+    scrubber: ScrubberState,
     /// The display terminal, built at the window size for [`current_frame`] and
     /// rebuilt when the frame changes.
     terminal: Option<Terminal>,
@@ -178,8 +175,7 @@ impl TerminalView {
             _speed_observer: speed_observer,
             play_anchor: None,
             position: 0.0,
-            scrubbing: false,
-            scrubber: None,
+            scrubber: ScrubberState::default(),
             terminal: None,
             terminal_frame: None,
             follow_bottom: true,
@@ -736,8 +732,7 @@ impl TerminalView {
     fn scrub_to(&mut self, fraction: f32, cx: &mut Context<Self>) {
         // Grabbing the scrubber pauses playback; a drag that follows only seeks,
         // so a keyboard play toggled mid-drag is left standing.
-        if !self.scrubbing {
-            self.scrubbing = true;
+        if !self.scrubber.held() {
             self.playing = false;
             self.play_anchor = None;
         }
@@ -1040,14 +1035,7 @@ impl TerminalView {
             fills,
             |this| &mut this.scrubber,
             cx.entity(),
-            self.scrubbing,
             |this, fraction, cx| this.scrub_to(fraction, cx),
-            |this, cx| {
-                if this.scrubbing {
-                    this.scrubbing = false;
-                    cx.notify();
-                }
-            },
         )
     }
 }

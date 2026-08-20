@@ -21,10 +21,27 @@ pub struct ScrubberColors {
     pub knob: Rgba,
 }
 
+/// What a [`scrubber`] carries between frames. The element is its only writer, so
+/// the hold it reports and the geometry that hold is measured against cannot
+/// fall out of step.
+#[derive(Default)]
+pub struct ScrubberState {
+    track: Option<ScrubberLayout>,
+    held: bool,
+}
+
+impl ScrubberState {
+    /// A press reports its scrub before taking hold, so this reads false for the
+    /// grab and true for the drag moves that follow it.
+    pub fn held(&self) -> bool {
+        self.held
+    }
+}
+
 /// Geometry of the painted scrubber track, in window pixels, kept so a click or
 /// drag on it maps to a fraction along the track.
 #[derive(Clone, Copy)]
-pub struct ScrubberLayout {
+struct ScrubberLayout {
     left: f32,
     width: f32,
 }
@@ -37,11 +54,8 @@ impl ScrubberLayout {
 }
 
 /// A scrubber element with id `id`, filled per `colors`, placed at `fraction`.
-/// `slot` reaches the [`ScrubberLayout`] the caller keeps in its own state: the
-/// painted geometry is written there each layout pass and read back on a press or
-/// drag to report the fraction under the cursor to `on_scrub`; `on_release` runs
-/// when the drag ends. Pass `active` while a drag is in progress to keep it live
-/// past the window edge.
+/// `slot` reaches this element's [`ScrubberState`] within the caller's own state;
+/// the fraction under the cursor on a press or drag goes to `on_scrub`.
 ///
 /// `slot` runs under a lease on `entity`, so `V` must not already be leased where
 /// this element lays out or paints — placing it inside an element whose own
@@ -50,16 +64,13 @@ pub fn scrubber<V: 'static>(
     id: &'static str,
     fraction: f32,
     colors: ScrubberColors,
-    slot: impl Fn(&mut V) -> &mut Option<ScrubberLayout> + 'static,
+    slot: impl Fn(&mut V) -> &mut ScrubberState + 'static,
     entity: Entity<V>,
-    active: bool,
     on_scrub: impl Fn(&mut V, f32, &mut Context<V>) + 'static,
-    on_release: impl Fn(&mut V, &mut Context<V>) + 'static,
 ) -> impl IntoElement {
     let ScrubberColors { track, played, knob } = colors;
     let slot = Rc::new(slot);
     let on_scrub = Rc::new(on_scrub);
-    let on_release = Rc::new(on_release);
 
     let press_entity = entity.clone();
     let press_slot = slot.clone();
@@ -74,38 +85,44 @@ pub fn scrubber<V: 'static>(
         .h_full()
         .on_mouse_down(MouseButton::Left, move |event: &MouseDownEvent, _, cx| {
             press_entity.update(cx, |view, cx| {
-                if let Some(geom) = *press_slot(view) {
-                    let fraction = geom.fraction_at(f32::from(event.position.x));
-                    press_scrub(view, fraction, cx);
-                }
+                let Some(geom) = press_slot(view).track else { return };
+                let fraction = geom.fraction_at(f32::from(event.position.x));
+                press_scrub(view, fraction, cx);
+                press_slot(view).held = true;
+                cx.notify();
             });
         })
         .child(
             canvas(
                 move |bounds, _, cx| {
                     stash_entity.update(cx, |view, _| {
-                        *stash_slot(view) = Some(ScrubberLayout {
+                        let state = stash_slot(view);
+                        state.track = Some(ScrubberLayout {
                             left: f32::from(bounds.origin.x),
                             width: f32::from(bounds.size.width),
                         });
-                    });
+                        state.held
+                    })
                 },
-                move |bounds, _, window, _| {
+                move |bounds, held, window, _| {
                     paint_scrubber(bounds, fraction, track, played, knob, window);
-                    if active {
+                    if held {
                         let move_scrub = on_scrub.clone();
                         let move_slot = slot.clone();
-                        let up_release = on_release.clone();
+                        let end_slot = slot.clone();
                         track_drag(
                             window,
                             &entity,
                             move |view, position, cx| {
-                                if let Some(geom) = *move_slot(view) {
+                                if let Some(geom) = move_slot(view).track {
                                     let fraction = geom.fraction_at(f32::from(position.x));
                                     move_scrub(view, fraction, cx);
                                 }
                             },
-                            move |view, _, _, cx| up_release(view, cx),
+                            move |view, _, _, cx| {
+                                end_slot(view).held = false;
+                                cx.notify();
+                            },
                         );
                     }
                 },
