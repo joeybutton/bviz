@@ -241,6 +241,15 @@ handler signature gpui expects. Other handlers (same pattern): `.on_mouse_down(b
 `.on_key_down(..)`, `.hover(|style| style.bg(..))`, `.on_scroll_wheel(..)`. For focus, add
 `.focusable()` / `.track_focus(&handle)`. See `examples/a11y.rs` for a focusable counter.
 
+**`.hover(..)` needs the id too, and fails quietly without it.** Unlike `on_click`, it is
+declared on `InteractiveElement`, so it compiles on an id-less element — and paints the
+right fill, resolved from the live hitbox every frame. What it cannot do is schedule the
+frame: the repaint on a hover flip is notified only through the element state an `.id(..)`
+creates, so an id-less hovered element updates when something else happens to repaint it and
+the fill then sits wherever that frame found the cursor. A list whose rows look like they
+"stick" the highlight on the first row entered is this. The id belongs on the element that
+carries `.hover(..)` — a child holding the click needs its own.
+
 **Dragging past the window edge.** An element's own `on_mouse_move` is bounds-gated,
 so a drag (a scroll thumb, a text selection, a canvas pan) freezes the moment the
 cursor leaves the window. To keep it live, register *window-global* handlers each
@@ -639,6 +648,7 @@ actually moves the bound.
 ## Gotchas
 
 - No `.id()` → no interactivity. `on_click`/focus/state need a `Stateful` element.
+- `.hover(..)` compiles without an `.id()` and paints correctly, but never schedules its own repaint — the fill sticks until an unrelated notify.
 - Forgetting `cx.notify()` after a state change → the UI silently won't update.
 - `.flex_col()`/`.flex_row()` do nothing without `.flex()` first.
 - Unsized content collapses; set an explicit size or `size_full()`/`flex_1()` in a flex parent.
