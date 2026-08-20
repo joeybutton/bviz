@@ -2,12 +2,13 @@
 //! movement, mouse selection, clipboard, and IME composition, built on gpui's
 //! platform input handler.
 
+use crate::track_drag;
 use gpui::{
     App, Bounds, ClipboardItem, Context, CursorStyle, Element, ElementInputHandler, Entity,
     EntityInputHandler, FocusHandle, Focusable, Font, GlobalElementId, Hsla, InspectorElementId,
-    IntoElement, KeyBinding, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
-    PaintQuad, Pixels, Point, Render, ShapedLine, SharedString, Style, TextRun, UTF16Selection,
-    UnderlineStyle, Window, div, fill, point, prelude::*, px, relative, size,
+    IntoElement, KeyBinding, LayoutId, MouseButton, MouseDownEvent, PaintQuad, Pixels, Point,
+    Render, ShapedLine, SharedString, Style, TextRun, UTF16Selection, UnderlineStyle, Window, div,
+    fill, point, prelude::*, px, relative, size,
 };
 use std::ops::Range;
 
@@ -208,16 +209,6 @@ impl TextInput {
             }
         }
         start..end
-    }
-
-    fn on_mouse_up(&mut self, _: &MouseUpEvent, _: &mut Window, _: &mut Context<Self>) {
-        self.is_selecting = false;
-    }
-
-    fn on_mouse_move(&mut self, event: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
-        if self.is_selecting {
-            self.select_to(self.index_for_mouse_position(event.position), cx);
-        }
     }
 
     fn move_to(&mut self, offset: usize, cx: &mut Context<Self>) {
@@ -436,6 +427,22 @@ struct TextElement {
     input: Entity<TextInput>,
 }
 
+impl TextElement {
+    fn install_selection_drag(&self, window: &mut Window, cx: &App) {
+        if self.input.read(cx).is_selecting {
+            track_drag(
+                window,
+                &self.input,
+                |input, position, cx| {
+                    let ix = input.index_for_mouse_position(position);
+                    input.select_to(ix, cx);
+                },
+                |input, _, _, _| input.is_selecting = false,
+            );
+        }
+    }
+}
+
 struct TextPrepaint {
     line: Option<ShapedLine>,
     cursor: Option<PaintQuad>,
@@ -616,6 +623,7 @@ impl Element for TextElement {
             input.last_layout = Some(line);
             input.last_bounds = Some(bounds);
         });
+        self.install_selection_drag(window, cx);
     }
 }
 
@@ -643,8 +651,6 @@ impl Render for TextInput {
             .on_action(cx.listener(Self::paste))
             .on_action(cx.listener(Self::show_character_palette))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
-            .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
-            .on_mouse_move(cx.listener(Self::on_mouse_move))
             .w_full()
             .px_2()
             .py_1()
