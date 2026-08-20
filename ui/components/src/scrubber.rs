@@ -99,9 +99,9 @@ pub fn scrubber<V: 'static>(
                         track_drag(
                             window,
                             &entity,
-                            move |view, event, cx| {
+                            move |view, position, cx| {
                                 if let Some(geom) = *move_slot(view) {
-                                    let fraction = geom.fraction_at(f32::from(event.position.x));
+                                    let fraction = geom.fraction_at(f32::from(position.x));
                                     move_scrub(view, fraction, cx);
                                 }
                             },

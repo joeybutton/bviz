@@ -2,7 +2,7 @@ use crate::camera::{clamp_pan, Camera};
 use crate::scroll::{scroll_drag_move, ScrollDrag};
 use crate::{click_box_at, GraphView};
 use bviz_ui_components::track_drag;
-use gpui::{App, Context, Entity, MouseMoveEvent, MouseUpEvent, Pixels, Point, Window};
+use gpui::{App, Context, Entity, Pixels, Point, Window};
 
 /// A cursor must travel at least this far from the press before the gesture
 /// counts as a drag rather than a click.
@@ -40,24 +40,28 @@ pub(crate) fn start_pan(
 
 /// Pan the graph by the cursor delta during a drag, latching `moved` once the
 /// cursor has travelled past the click threshold.
-pub(crate) fn drag_pan(view: &mut GraphView, event: &MouseMoveEvent, cx: &mut Context<GraphView>) {
+pub(crate) fn drag_pan(
+    view: &mut GraphView,
+    position: Point<Pixels>,
+    cx: &mut Context<GraphView>,
+) {
     let Drag::Pan(mut pan) = view.drag else {
         return;
     };
-    let traveled = (f32::from(event.position.x) - f32::from(pan.press.x))
-        .hypot(f32::from(event.position.y) - f32::from(pan.press.y));
+    let traveled = (f32::from(position.x) - f32::from(pan.press.x))
+        .hypot(f32::from(position.y) - f32::from(pan.press.y));
     if traveled > CLICK_SLOP {
         pan.moved = true;
     }
     let Camera { zoom, pan: (px, py) } = view.camera();
-    let dx = f32::from(event.position.x) - f32::from(pan.last.x);
-    let dy = f32::from(event.position.y) - f32::from(pan.last.y);
+    let dx = f32::from(position.x) - f32::from(pan.last.x);
+    let dy = f32::from(position.y) - f32::from(pan.last.y);
     let panned = (px + dx, py + dy);
     let panned = match view.drawn().map(|d| d.content()) {
         Some(content) => clamp_pan(panned, zoom, view.framing.viewport().size, content),
         None => panned,
     };
-    pan.last = event.position;
+    pan.last = position;
     view.drag = Drag::Pan(pan);
     view.framing.move_to(Camera { zoom, pan: panned });
     cx.notify();
@@ -65,15 +69,19 @@ pub(crate) fn drag_pan(view: &mut GraphView, event: &MouseMoveEvent, cx: &mut Co
 
 /// End whatever gesture is in progress. A pan release that never travelled past
 /// the click threshold is a click on the box under the cursor. Taking the gesture
-/// out of the view makes a second call a no-op, as the element-level release
-/// handler and the window-global one installed during a drag can both fire for
-/// one release.
-pub(crate) fn end_drag(view: &mut GraphView, event: &MouseUpEvent, cx: &mut Context<GraphView>) {
+/// out of the view makes a second call a no-op, as both the element-level
+/// release handler and the window-global handlers installed during a drag can
+/// end one gesture.
+pub(crate) fn end_drag(
+    view: &mut GraphView,
+    position: Point<Pixels>,
+    cx: &mut Context<GraphView>,
+) {
     match std::mem::take(&mut view.drag) {
         Drag::None => {}
         Drag::Pan(Pan { moved, .. }) => {
             if !moved {
-                click_box_at(view, event.position, cx);
+                click_box_at(view, position, cx);
             }
         }
         Drag::Scrollbar(_) => cx.notify(),

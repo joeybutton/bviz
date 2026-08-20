@@ -25,7 +25,7 @@ behaves consistently:
 
 - `bviz_ui_shell::{run, Chrome}` — window bootstrap + client-side decorations.
 - `bviz_ui_components::{Button, TextInput}` — a button and a focusable text field.
-- `bviz_ui_components::track_drag` — a drag that keeps running outside the window.
+- `bviz_ui_components::track_drag` — a drag that follows the cursor past the window.
 - `bviz_ui_components::load_in_background` — run work off the UI thread, then apply it.
 - `bviz_ui_assets::{text_metrics, shape_line, icon, UI, MONO, load_fonts}` — fonts,
   text metrics, single-run line shaping, Phosphor icons.
@@ -252,13 +252,21 @@ carries `.hover(..)` — a child holding the click needs its own.
 
 **Dragging past the window edge.** An element's own `on_mouse_move` is bounds-gated,
 so a drag (a scroll thumb, a text selection, a canvas pan) freezes the moment the
-cursor leaves the window. To keep it live, register *window-global* handlers each
-frame while a drag is in progress — on Wayland the compositor's implicit grab keeps
-delivering the held button's move/up to the focused window. `bviz_ui_components::
-track_drag(window, &view, on_move, on_up)` wraps this; call it from your element's (or
-`canvas`'s) paint while a drag flag is set, so it re-registers each frame — the
-handlers last only the current frame. The terminal uses it for the scroll thumb and
-selection, the graph for panning.
+cursor leaves the element. To keep it live, register *window-global* handlers while a
+drag is in progress — a compositor holds the pointer's implicit grab on the window a
+press landed in until every button is released, so its motion and its release go on
+arriving there with the cursor well outside it. A drag position outside the window is
+therefore ordinary, and each caller bounds it for itself.
+`bviz_ui_components::track_drag` wraps the registration and the rules below; its doc
+carries the contract.
+
+Equally, do not take every delivered move for a drag move. Leaving a window synthesizes
+an off-screen move to clear hover (`patches/gpui_linux-clear-hover-on-leave.patch`),
+which lands just after a release out there: a handler that reads it as a position seeks
+to the corner, and one that re-arms its own drag flag on the way keeps the gesture alive
+for good. `track_drag` ends on the first `MouseUpEvent` *or* the first `MouseMoveEvent`
+whose `dragging()` is false. Check `event.dragging()` the same way in any drag handler
+you write by hand.
 
 ## Actions, keybindings, and focus
 
@@ -291,7 +299,7 @@ which is heavy (pulls `theme`, `editor`, …) and not a dependency here, so rend
 yourself with `bviz_ui_components::Scrollbar` — a geometry/hit-test/drag-mapping helper
 that owns no scroll state. Make it interactive: a scroll bar drags and its track clicks,
 not just a drawn thumb. Drive the drag with `track_drag` (see Interactivity) so it keeps
-following the cursor past the window edge and ends on a release anywhere.
+following the cursor past the window edge and ends wherever the button is let go.
 
 Four rules carry most of the weight. **`references/scroll-model.md` has the reasoning,
 Zed's three layers, and the verification method — read it before designing or changing a
@@ -660,6 +668,7 @@ actually moves the bound.
 - Clamping a scroll offset into stored state destroys the position it truncates — hold it unclamped and bound it at the read, or a resize silently loses where the user was.
 - Styling an element from bounds a paint measured puts it a frame behind, and at the origin on the first frame — place children from a custom `Element`'s prepaint instead.
 - A background `Task` you don't store is cancelled on drop — keep it in a view field.
-- An element's mouse handlers stop at the window edge — use `track_drag` for a drag that must continue outside.
+- An element's mouse handlers stop at its own bounds — use `track_drag` for a drag that must follow the cursor past them, and past the window's edge.
+- A drag ended only on `MouseUpEvent` sticks when the compositor takes the pointer away mid-gesture — also end it on a move whose `dragging()` is false.
 - gpui's executor is not tokio — a `reqwest`/`tonic`/SDK future run directly on it panics "no reactor running"; bridge it through a tokio runtime (see the tokio/rayon section).
 - A rayon `par_iter`/`par_sort` on the UI thread freezes the frame — it blocks its caller; run it inside a background task and size rayon's pool by physical cores.

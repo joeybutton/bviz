@@ -306,7 +306,7 @@ impl TerminalElement {
             track_drag(
                 window,
                 &self.view,
-                |view, event, cx| view.drag_to(event.position, cx),
+                |view, position, cx| view.drag_to(position, cx),
                 |view, _, cx| {
                     if view.drag_grab.take().is_some() {
                         // Keep the bar up briefly after the drag, then hide.
@@ -325,7 +325,7 @@ impl TerminalElement {
             track_drag(
                 window,
                 &self.view,
-                |view, event, cx| view.selection_drag_to(event.position, cx),
+                |view, position, cx| view.selection_drag_to(position, cx),
                 |view, _, cx| {
                     if view.selecting {
                         view.selecting = false;

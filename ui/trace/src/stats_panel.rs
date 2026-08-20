@@ -12,8 +12,8 @@ use bviz_ui_components::{
     overlay_canvas, track_drag,
 };
 use gpui::{
-    App, Bounds, Context, Div, Entity, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, Pixels, Point, Render, Rgba, SharedString, Subscription, UniformListScrollHandle,
+    App, Bounds, Context, Div, Entity, IntoElement, MouseButton, MouseDownEvent, Pixels, Point,
+    Render, Rgba, SharedString, Subscription, UniformListScrollHandle,
     Window, div, point, prelude::*, px, size, uniform_list,
 };
 use std::rc::Rc;
@@ -549,14 +549,14 @@ fn stats_scrollbar(
 }
 
 /// Routes an in-progress thumb drag to the list's scroll offset.
-fn stats_on_drag(panel: &mut StatsPanel, event: &MouseMoveEvent, cx: &mut Context<StatsPanel>) {
+fn stats_on_drag(panel: &mut StatsPanel, position: Point<Pixels>, cx: &mut Context<StatsPanel>) {
     if let StatsDrag::Thumb(grab) = panel.drag {
-        panel.thumb_to(event.position, grab);
+        panel.thumb_to(position, grab);
     }
     cx.notify();
 }
 
-fn stats_end_drag(panel: &mut StatsPanel, _: &MouseUpEvent, cx: &mut Context<StatsPanel>) {
+fn stats_end_drag(panel: &mut StatsPanel, _: Point<Pixels>, cx: &mut Context<StatsPanel>) {
     panel.drag = StatsDrag::None;
     cx.notify();
 }

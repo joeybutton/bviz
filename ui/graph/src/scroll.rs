@@ -2,7 +2,7 @@ use crate::camera::{clamp_pan, pan_range, Camera};
 use crate::drag::Drag;
 use crate::{GraphView, Palette};
 use bviz_ui_components::{Axis, DEFAULT_MIN_THUMB, SCROLLBAR_THICKNESS, Scrollbar};
-use gpui::{Bounds, Context, MouseMoveEvent, Pixels, Point, Size, Window, point, px, size};
+use gpui::{Bounds, Context, Pixels, Point, Size, Window, point, px, size};
 use std::ops::RangeInclusive;
 
 /// An in-progress scroll-bar drag: which bar holds it and the grab offset down the
@@ -179,14 +179,18 @@ pub(crate) fn start_scroll_drag(
 }
 
 /// Track a held scroll thumb to the cursor.
-pub(crate) fn scroll_drag_move(view: &mut GraphView, event: &MouseMoveEvent, cx: &mut Context<GraphView>) {
+pub(crate) fn scroll_drag_move(
+    view: &mut GraphView,
+    position: Point<Pixels>,
+    cx: &mut Context<GraphView>,
+) {
     let Drag::Scrollbar(drag) = view.drag else {
         return;
     };
     let Some(bar) = current_scrollbar(view, drag.axis) else {
         return;
     };
-    scroll_to(view, drag.axis, bar.offset_at(event.position, drag.grab), cx);
+    scroll_to(view, drag.axis, bar.offset_at(position, drag.grab), cx);
 }
 
 #[cfg(test)]

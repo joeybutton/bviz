@@ -19,7 +19,7 @@ use bviz_trace_profile::{Profile, Slice, SliceDetail, TimeSpan};
 use bviz_ui_components::{Scrollbar, cached_layer, overlay_canvas, track_drag};
 use gpui::{
     App, Bounds, ContentMask, Context, Div, Entity, FocusHandle, IntoElement, KeyBinding,
-    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Render, Rgba,
+    MouseButton, MouseDownEvent, MouseMoveEvent, Pixels, Point, Render, Rgba,
     ScrollWheelEvent, Stateful, WeakEntity, Window, canvas, div,
     fill, point, prelude::*, px, size,
 };
@@ -833,14 +833,14 @@ impl Render for TimelinePanel {
 /// a scroll thumb, or stretching a time region.
 fn timeline_on_drag(
     panel: &mut TimelinePanel,
-    event: &MouseMoveEvent,
+    position: Point<Pixels>,
     cx: &mut Context<TimelinePanel>,
 ) {
     let moves_slices = !matches!(panel.drag, TimelineDrag::TimeRegion(_));
     match panel.drag {
         TimelineDrag::Pan => {
-            let dx = f32::from(event.position.x) - f32::from(panel.last_mouse.x);
-            let dy = f32::from(event.position.y) - f32::from(panel.last_mouse.y);
+            let dx = f32::from(position.x) - f32::from(panel.last_mouse.x);
+            let dy = f32::from(position.y) - f32::from(panel.last_mouse.y);
             if panel.model.read(cx).lane_layout().is_none() {
                 return;
             }
@@ -853,20 +853,20 @@ fn timeline_on_drag(
             panel.view.pan_px(dx);
             panel.view.clamp_to(span, regions.time_w, EDGE_MARGIN_PX);
             panel.scroll_by(dy, cx);
-            panel.last_mouse = event.position;
+            panel.last_mouse = position;
         }
-        TimelineDrag::VThumb(grab) => panel.scroll_thumb_to(event.position, grab, cx),
-        TimelineDrag::HThumb(grab) => panel.pan_thumb_to(event.position, grab, cx),
+        TimelineDrag::VThumb(grab) => panel.scroll_thumb_to(position, grab, cx),
+        TimelineDrag::HThumb(grab) => panel.pan_thumb_to(position, grab, cx),
         TimelineDrag::TimeRegion(mut drag) => {
-            if let Some(at) = panel.time_at(event.position, cx) {
+            if let Some(at) = panel.time_at(position, cx) {
                 drag.cursor_us = at;
-                drag.moved |= (f32::from(event.position.x) - drag.press_x).abs() > MIN_DRAG_PX;
+                drag.moved |= (f32::from(position.x) - drag.press_x).abs() > MIN_DRAG_PX;
                 panel.drag = TimelineDrag::TimeRegion(drag);
             }
         }
         TimelineDrag::None => {}
     }
-    panel.update_hover(event.position, cx);
+    panel.update_hover(position, cx);
     if moves_slices {
         panel.invalidate_canvas(cx);
     } else {
@@ -876,7 +876,7 @@ fn timeline_on_drag(
 
 fn timeline_end_drag(
     panel: &mut TimelinePanel,
-    _: &MouseUpEvent,
+    _: Point<Pixels>,
     cx: &mut Context<TimelinePanel>,
 ) {
     match std::mem::replace(&mut panel.drag, TimelineDrag::None).region() {

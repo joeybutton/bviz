@@ -44,7 +44,7 @@ use clap::Parser;
 use gpui::{
     AnyElement, App, AvailableSpace, Bounds, ContentMask, Context, Div, Edges, Element, ElementId,
     Entity, FocusHandle, GlobalElementId, InspectorElementId, IntoElement, LayoutId, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Position, Render, ScrollHandle,
+    MouseDownEvent, Pixels, Point, Position, Render, ScrollHandle,
     SharedString, Stateful, Style, Subscription, Task, TextAlign, TransformationMatrix, Window,
     div, fill, point, prelude::*, px, relative, size,
 };
@@ -832,7 +832,7 @@ impl Element for RegionOverlays {
 /// Routes an in-progress drag to its target: resizing the bottom panel or the
 /// gutter. The flame-chart timeline's, flame-graph panel's, and tracks menu's own
 /// drags are routed inside [`TimelinePanel`], [`FlamePanel`], and [`TracksMenu`].
-fn on_drag(view: &mut TraceView, event: &MouseMoveEvent, cx: &mut Context<TraceView>) {
+fn on_drag(view: &mut TraceView, position: Point<Pixels>, cx: &mut Context<TraceView>) {
     match view.drag {
         Drag::Splitter => {
             let profile = match view.model.read(cx).source() {
@@ -846,7 +846,7 @@ fn on_drag(view: &mut TraceView, event: &MouseMoveEvent, cx: &mut Context<TraceV
             // region and the panel content usable.
             let panel_bottom = f32::from(vp.origin.y) + vh;
             view.panel_height = clamp_panel_height(
-                panel_bottom - f32::from(event.position.y) - TAB_BAR_HEIGHT,
+                panel_bottom - f32::from(position.y) - TAB_BAR_HEIGHT,
                 profile.counters().len(),
                 vh,
             );
@@ -854,7 +854,7 @@ fn on_drag(view: &mut TraceView, event: &MouseMoveEvent, cx: &mut Context<TraceV
         Drag::Gutter => {
             let vp = view.timeline.read(cx).viewport();
             view.gutter_width = clamp_gutter_width(
-                f32::from(event.position.x) - f32::from(vp.origin.x),
+                f32::from(position.x) - f32::from(vp.origin.x),
                 f32::from(vp.size.width),
             );
         }
@@ -864,7 +864,7 @@ fn on_drag(view: &mut TraceView, event: &MouseMoveEvent, cx: &mut Context<TraceV
     view.invalidate_timeline(cx);
 }
 
-fn end_drag(view: &mut TraceView, _: &MouseUpEvent, cx: &mut Context<TraceView>) {
+fn end_drag(view: &mut TraceView, _: Point<Pixels>, cx: &mut Context<TraceView>) {
     view.drag = Drag::None;
     view.invalidate_timeline(cx);
 }

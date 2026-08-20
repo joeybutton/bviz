@@ -15,7 +15,7 @@ use bviz_ui_components::{
 };
 use gpui::{
     App, Bounds, ContentMask, Context, Div, Entity, IntoElement, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Render,
+    MouseDownEvent, MouseMoveEvent, Pixels, Point, Render,
     ScrollWheelEvent, Stateful, Subscription, WeakEntity, Window, canvas, div,
     point, prelude::*, px, size,
 };
@@ -590,28 +590,28 @@ impl Render for FlamePanel {
 
 /// Routes an in-progress panel drag to its target: panning the panel, or moving a
 /// scroll thumb.
-fn flame_on_drag(panel: &mut FlamePanel, event: &MouseMoveEvent, cx: &mut Context<FlamePanel>) {
+fn flame_on_drag(panel: &mut FlamePanel, position: Point<Pixels>, cx: &mut Context<FlamePanel>) {
     match panel.drag {
         FlameDrag::Pan => {
-            let dx = f32::from(event.position.x) - f32::from(panel.last_mouse.x);
-            let dy = f32::from(event.position.y) - f32::from(panel.last_mouse.y);
+            let dx = f32::from(position.x) - f32::from(panel.last_mouse.x);
+            let dy = f32::from(position.y) - f32::from(panel.last_mouse.y);
             if let Some(fl) = panel.layout(cx) {
                 let mut fv = fl.view;
                 fv.pan_px(dx, fl.width);
                 panel.flame_view = fv;
             }
             panel.scroll_by(dy, cx);
-            panel.last_mouse = event.position;
+            panel.last_mouse = position;
         }
-        FlameDrag::VThumb(grab) => panel.scroll_thumb_to(event.position, grab, cx),
-        FlameDrag::HThumb(grab) => panel.hthumb_to(event.position, grab, cx),
+        FlameDrag::VThumb(grab) => panel.scroll_thumb_to(position, grab, cx),
+        FlameDrag::HThumb(grab) => panel.hthumb_to(position, grab, cx),
         FlameDrag::None => {}
     }
-    panel.update_hover(event.position, cx);
+    panel.update_hover(position, cx);
     panel.invalidate_canvas(cx);
 }
 
-fn flame_end_drag(panel: &mut FlamePanel, _: &MouseUpEvent, cx: &mut Context<FlamePanel>) {
+fn flame_end_drag(panel: &mut FlamePanel, _: Point<Pixels>, cx: &mut Context<FlamePanel>) {
     panel.drag = FlameDrag::None;
     panel.invalidate_canvas(cx);
 }
