@@ -299,8 +299,6 @@ impl TerminalElement {
         overlays
     }
 
-    /// While dragging the thumb, follow and end the drag with window-global
-    /// handlers so it keeps working when the cursor leaves the window.
     fn install_thumb_drag(&self, window: &mut Window, cx: &App) {
         if self.view.read(cx).drag_grab.is_some() {
             track_drag(
@@ -309,7 +307,6 @@ impl TerminalElement {
                 |view, position, cx| view.drag_to(position, cx),
                 |view, _, _, cx| {
                     if view.drag_grab.take().is_some() {
-                        // Keep the bar up briefly after the drag, then hide.
                         view.reveal_scrollbar(cx);
                     }
                 },
@@ -317,9 +314,6 @@ impl TerminalElement {
         }
     }
 
-    /// Follow and end a text-selection drag with window-global handlers, so
-    /// dragging past the window edge keeps extending the selection and a release
-    /// outside still ends it.
     fn install_selection_drag(&self, window: &mut Window, cx: &App) {
         if self.view.read(cx).selecting {
             track_drag(
@@ -331,8 +325,6 @@ impl TerminalElement {
                         view.selecting = false;
                         view.selection_drag = None;
                         view.selection_anchor = None;
-                        // A press that did not drag (no selection text) and
-                        // landed on a URL opens it when released.
                         if let Some(url) = view.pressed_url.take() {
                             let dragged = view
                                 .terminal
