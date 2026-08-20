@@ -105,7 +105,7 @@ pub fn scrubber<V: 'static>(
                                     move_scrub(view, fraction, cx);
                                 }
                             },
-                            move |view, _, cx| up_release(view, cx),
+                            move |view, _, _, cx| up_release(view, cx),
                         );
                     }
                 },

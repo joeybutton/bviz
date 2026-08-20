@@ -1,7 +1,7 @@
 use crate::camera::{clamp_pan, Camera};
 use crate::scroll::{scroll_drag_move, ScrollDrag};
 use crate::{click_box_at, GraphView};
-use bviz_ui_components::track_drag;
+use bviz_ui_components::{DragEnd, track_drag};
 use gpui::{App, Context, Entity, Pixels, Point, Window};
 
 /// A cursor must travel at least this far from the press before the gesture
@@ -75,12 +75,13 @@ pub(crate) fn drag_pan(
 pub(crate) fn end_drag(
     view: &mut GraphView,
     position: Point<Pixels>,
+    end: DragEnd,
     cx: &mut Context<GraphView>,
 ) {
     match std::mem::take(&mut view.drag) {
         Drag::None => {}
         Drag::Pan(Pan { moved, .. }) => {
-            if !moved {
+            if !moved && matches!(end, DragEnd::Released) {
                 click_box_at(view, position, cx);
             }
         }

@@ -7,7 +7,8 @@ use crate::{
 };
 use bviz_trace_profile::{LaneClass, Profile};
 use bviz_ui_components::{
-    Axis, DEFAULT_MIN_THUMB, SCROLLBAR_THICKNESS, Scrollbar, TextInput, overlay_canvas, track_drag,
+    Axis, DEFAULT_MIN_THUMB, DragEnd, SCROLLBAR_THICKNESS, Scrollbar, TextInput, overlay_canvas,
+    track_drag,
 };
 use gpui::{
     AnyElement, App, Bounds, Context, Entity, IntoElement, MouseButton, MouseDownEvent,
@@ -491,7 +492,12 @@ fn menu_on_drag(menu: &mut TracksMenu, position: Point<Pixels>, cx: &mut Context
     cx.notify();
 }
 
-fn menu_end_drag(menu: &mut TracksMenu, _: Point<Pixels>, cx: &mut Context<TracksMenu>) {
+fn menu_end_drag(
+    menu: &mut TracksMenu,
+    _: Point<Pixels>,
+    _: DragEnd,
+    cx: &mut Context<TracksMenu>,
+) {
     menu.drag = MenuDrag::None;
     cx.notify();
 }

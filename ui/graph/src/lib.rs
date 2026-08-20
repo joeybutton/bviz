@@ -3,7 +3,7 @@
 //! rendering the result.
 
 use bviz_graph_layout::Id;
-use bviz_ui_components::{Dropdown, DropdownEvent, ScrollbarColors};
+use bviz_ui_components::{DragEnd, Dropdown, DropdownEvent, ScrollbarColors};
 use bviz_ui_shell::Chrome;
 use bviz_ui_theme::{DataColors, Theme, ThemeColors};
 use clap::Parser;
@@ -289,7 +289,7 @@ impl GraphView {
     /// paints with a drag in progress, so a press-release quick enough to finish
     /// before that paint would leave the drag running.
     fn on_mouse_up(&mut self, e: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
-        end_drag(self, e.position, cx);
+        end_drag(self, e.position, DragEnd::Released, cx);
     }
 
     fn on_mouse_move(&mut self, e: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {

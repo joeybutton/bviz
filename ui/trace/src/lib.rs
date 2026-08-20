@@ -36,7 +36,7 @@ use bviz_trace_layout::{
 };
 use bviz_trace_profile::{Profile, Slice, TimeSpan};
 use bviz_ui_components::{
-    Axis, Button, DEFAULT_MIN_THUMB, SCROLLBAR_THICKNESS, Scrollbar, centered_spinner,
+    Axis, Button, DEFAULT_MIN_THUMB, DragEnd, SCROLLBAR_THICKNESS, Scrollbar, centered_spinner,
     load_in_background, overlay_canvas, paint_tooltip_box, track_drag,
 };
 use bviz_ui_shell::Chrome;
@@ -864,7 +864,7 @@ fn on_drag(view: &mut TraceView, position: Point<Pixels>, cx: &mut Context<Trace
     view.invalidate_timeline(cx);
 }
 
-fn end_drag(view: &mut TraceView, _: Point<Pixels>, cx: &mut Context<TraceView>) {
+fn end_drag(view: &mut TraceView, _: Point<Pixels>, _: DragEnd, cx: &mut Context<TraceView>) {
     view.drag = Drag::None;
     view.invalidate_timeline(cx);
 }

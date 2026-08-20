@@ -268,6 +268,10 @@ for good. `track_drag` ends on the first `MouseUpEvent` *or* the first `MouseMov
 whose `dragging()` is false. Check `event.dragging()` the same way in any drag handler
 you write by hand.
 
+Anything a drag does that is really a *click* — opening a URL, toggling what was
+pressed, clearing a selection a bare click clears — must require `DragEnd::Released`; an abandoned gesture reports only where the cursor happened to be,
+so acting on it fires the click from a pointer move with no button down.
+
 ## Actions, keybindings, and focus
 
 Keyboard interaction goes through actions, not raw key handling. Declare unit actions with

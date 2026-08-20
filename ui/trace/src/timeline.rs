@@ -16,7 +16,7 @@ use bviz_trace_layout::{
     visible_slices,
 };
 use bviz_trace_profile::{Profile, Slice, SliceDetail, TimeSpan};
-use bviz_ui_components::{Scrollbar, cached_layer, overlay_canvas, track_drag};
+use bviz_ui_components::{DragEnd, Scrollbar, cached_layer, overlay_canvas, track_drag};
 use gpui::{
     App, Bounds, ContentMask, Context, Div, Entity, FocusHandle, IntoElement, KeyBinding,
     MouseButton, MouseDownEvent, MouseMoveEvent, Pixels, Point, Render, Rgba,
@@ -628,9 +628,15 @@ impl TimelinePanel {
         true
     }
 
-    /// Lands a finished time-region drag on the model.
-    fn commit_time_region(&mut self, drag: RegionDrag, cx: &mut Context<Self>) {
-        let selection = drag.released(self.model.read(cx).time_selection());
+    /// Lands a finished time-region drag on the model. Only a release carries
+    /// the click that clears the selection; an abandoned drag lands what it was
+    /// already showing.
+    fn commit_time_region(&mut self, drag: RegionDrag, end: DragEnd, cx: &mut Context<Self>) {
+        let standing = self.model.read(cx).time_selection();
+        let selection = match end {
+            DragEnd::Released => drag.released(standing),
+            DragEnd::Abandoned => drag.applied(standing),
+        };
         self.model.update(cx, |m, cx| m.set_time_selection(selection, cx));
     }
 
@@ -877,11 +883,12 @@ fn timeline_on_drag(
 fn timeline_end_drag(
     panel: &mut TimelinePanel,
     _: Point<Pixels>,
+    end: DragEnd,
     cx: &mut Context<TimelinePanel>,
 ) {
     match std::mem::replace(&mut panel.drag, TimelineDrag::None).region() {
         Some(drag) => {
-            panel.commit_time_region(drag, cx);
+            panel.commit_time_region(drag, end, cx);
             cx.notify();
         }
         None => panel.invalidate_canvas(cx),

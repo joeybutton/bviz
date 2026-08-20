@@ -2,14 +2,23 @@ use gpui::{Context, DispatchPhase, Entity, MouseMoveEvent, MouseUpEvent, Pixels,
 use std::cell::Cell;
 use std::rc::Rc;
 
+/// How a drag finished.
+pub enum DragEnd {
+    /// The button was released.
+    Released,
+    /// A move reported the button no longer held: the gesture was cut short
+    /// without a release, so the position `on_end` receives is where the cursor
+    /// was, not where the button was let go.
+    Abandoned,
+}
+
 /// Install window-global handlers that carry a drag past the dragged element's
 /// bounds and past the window's, where an element's own bounds-gated handlers
 /// stop: a compositor holds the pointer's implicit grab on the window a press
 /// landed in until every button is released, so a position outside the window is
-/// ordinary and each caller bounds it for itself. `on_move` follows the cursor while the left
-/// button is held. `on_end` runs at most once, on a release or on a move
-/// reporting the button let go, which is how a gesture the compositor cut short
-/// without a release finishes.
+/// ordinary and each caller bounds it for itself. `on_move` follows the cursor
+/// while the left button is held. `on_end` runs at most once, and its [`DragEnd`]
+/// says which way the gesture finished.
 ///
 /// Call this from an element's `paint` (or a `canvas` paint closure) while the
 /// drag is active. The handlers serve every event until the next paint replaces
@@ -19,7 +28,7 @@ pub fn track_drag<V: 'static>(
     window: &mut Window,
     view: &Entity<V>,
     on_move: impl Fn(&mut V, Point<Pixels>, &mut Context<V>) + 'static,
-    on_end: impl Fn(&mut V, Point<Pixels>, &mut Context<V>) + 'static,
+    on_end: impl Fn(&mut V, Point<Pixels>, DragEnd, &mut Context<V>) + 'static,
 ) {
     let on_end = Rc::new(on_end);
     let ended = Rc::new(Cell::new(false));
@@ -35,7 +44,9 @@ pub fn track_drag<V: 'static>(
             moving.update(cx, |view, cx| on_move(view, event.position, cx));
         } else {
             move_ended.set(true);
-            moving.update(cx, |view, cx| move_end(view, event.position, cx));
+            moving.update(cx, |view, cx| {
+                move_end(view, event.position, DragEnd::Abandoned, cx)
+            });
         }
     });
 
@@ -45,6 +56,6 @@ pub fn track_drag<V: 'static>(
             return;
         }
         ended.set(true);
-        ending.update(cx, |view, cx| on_end(view, event.position, cx));
+        ending.update(cx, |view, cx| on_end(view, event.position, DragEnd::Released, cx));
     });
 }

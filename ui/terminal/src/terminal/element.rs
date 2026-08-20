@@ -1,5 +1,5 @@
 use bviz_terminal::{Cell, Flags, Scroll, Terminal};
-use bviz_ui_components::{Axis, DEFAULT_MIN_THUMB, Scrollbar, ScrollbarColors, track_drag};
+use bviz_ui_components::{Axis, DEFAULT_MIN_THUMB, DragEnd, Scrollbar, ScrollbarColors, track_drag};
 use bviz_ui_theme::ThemeColors;
 use gpui::{
     App, Bounds, Element, Entity, Font, GlobalElementId, Hsla, InspectorElementId, IntoElement,
@@ -307,7 +307,7 @@ impl TerminalElement {
                 window,
                 &self.view,
                 |view, position, cx| view.drag_to(position, cx),
-                |view, _, cx| {
+                |view, _, _, cx| {
                     if view.drag_grab.take().is_some() {
                         // Keep the bar up briefly after the drag, then hide.
                         view.reveal_scrollbar(cx);
@@ -326,20 +326,20 @@ impl TerminalElement {
                 window,
                 &self.view,
                 |view, position, cx| view.selection_drag_to(position, cx),
-                |view, _, cx| {
+                |view, _, end, cx| {
                     if view.selecting {
                         view.selecting = false;
                         view.selection_drag = None;
                         view.selection_anchor = None;
                         // A press that did not drag (no selection text) and
-                        // landed on a URL opens it.
+                        // landed on a URL opens it when released.
                         if let Some(url) = view.pressed_url.take() {
                             let dragged = view
                                 .terminal
                                 .as_ref()
                                 .and_then(Terminal::selection_text)
                                 .is_some();
-                            if !dragged {
+                            if !dragged && matches!(end, DragEnd::Released) {
                                 cx.open_url(&url);
                             }
                         }

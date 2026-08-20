@@ -8,8 +8,8 @@ use crate::{
 };
 use bviz_trace_layout::{FlameLabels, ScopeAggregate, StatRow};
 use bviz_ui_components::{
-    Axis, DEFAULT_MIN_THUMB, SCROLLBAR_THICKNESS, Scrollbar, centered_spinner, load_in_background,
-    overlay_canvas, track_drag,
+    Axis, DEFAULT_MIN_THUMB, DragEnd, SCROLLBAR_THICKNESS, Scrollbar, centered_spinner,
+    load_in_background, overlay_canvas, track_drag,
 };
 use gpui::{
     App, Bounds, Context, Div, Entity, IntoElement, MouseButton, MouseDownEvent, Pixels, Point,
@@ -556,7 +556,12 @@ fn stats_on_drag(panel: &mut StatsPanel, position: Point<Pixels>, cx: &mut Conte
     cx.notify();
 }
 
-fn stats_end_drag(panel: &mut StatsPanel, _: Point<Pixels>, cx: &mut Context<StatsPanel>) {
+fn stats_end_drag(
+    panel: &mut StatsPanel,
+    _: Point<Pixels>,
+    _: DragEnd,
+    cx: &mut Context<StatsPanel>,
+) {
     panel.drag = StatsDrag::None;
     cx.notify();
 }

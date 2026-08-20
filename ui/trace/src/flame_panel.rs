@@ -10,7 +10,7 @@ use bviz_trace_layout::{
     lay_out_flame,
 };
 use bviz_ui_components::{
-    Axis, DEFAULT_MIN_THUMB, SCROLLBAR_THICKNESS, Scrollbar, cached_layer, overlay_canvas,
+    Axis, DEFAULT_MIN_THUMB, DragEnd, SCROLLBAR_THICKNESS, Scrollbar, cached_layer, overlay_canvas,
     paint_labeled_box, paint_tooltip_box, spinner, track_drag,
 };
 use gpui::{
@@ -611,7 +611,12 @@ fn flame_on_drag(panel: &mut FlamePanel, position: Point<Pixels>, cx: &mut Conte
     panel.invalidate_canvas(cx);
 }
 
-fn flame_end_drag(panel: &mut FlamePanel, _: Point<Pixels>, cx: &mut Context<FlamePanel>) {
+fn flame_end_drag(
+    panel: &mut FlamePanel,
+    _: Point<Pixels>,
+    _: DragEnd,
+    cx: &mut Context<FlamePanel>,
+) {
     panel.drag = FlameDrag::None;
     panel.invalidate_canvas(cx);
 }

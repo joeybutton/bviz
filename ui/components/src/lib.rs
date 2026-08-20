@@ -17,7 +17,7 @@ mod tooltip;
 pub use background::load_in_background;
 pub use button::Button;
 pub use canvas::{LabelBoxStyle, paint_labeled_box, shape_truncated};
-pub use drag::track_drag;
+pub use drag::{DragEnd, track_drag};
 pub use dropdown::{Dropdown, DropdownEvent};
 pub use layer::{cached_layer, overlay_canvas};
 pub use notice::{Source, centered_notice, centered_spinner};
