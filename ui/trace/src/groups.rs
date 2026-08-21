@@ -1,7 +1,7 @@
-use crate::track_order::{TrackSort, family_runs, sort_tracks_by_name};
+use crate::track_order::{TrackSort, family_runs};
 use crate::{GROUP_BAND_HEIGHT, METRICS, TOP_N_PER_GROUP};
 use bviz_trace_layout::{Lane, LaneLayout};
-use bviz_trace_profile::{LaneClass, Profile};
+use bviz_trace_profile::{LaneClass, Profile, ThreadTrack, track_family};
 
 /// Lane classes in the order their groups stack in the flame chart: the critical
 /// path and main thread first, then the build phases (loading, analysis,
@@ -201,22 +201,43 @@ pub(crate) enum GroupHit {
 }
 
 /// The pools a lane class's tracks fall into, in the order the group stacks
-/// them, each with the tracks it holds. Every track of the class counts, hidden
-/// or not, so a pool keeps its place in the group while its members come and go.
-fn class_pools<'a>(profile: &'a Profile, class: LaneClass) -> Vec<(&'a str, Vec<usize>)> {
+/// them and each with the tracks it holds, alongside the class's drawn tracks in
+/// that same stacking order — an order the two share, so that [`pool_runs`] can
+/// cut the drawn tracks into pool runs by walking both at once. Every track of
+/// the class counts toward a pool, hidden or not, so a pool keeps its place in
+/// the group while its members come and go. The weight order stacks the class as
+/// one run, which needs no partition.
+fn group_pools_and_tracks(
+    profile: &Profile,
+    class: LaneClass,
+    sort: TrackSort,
+    shows: impl Fn(usize) -> bool,
+) -> (Vec<(&str, Vec<usize>)>, Vec<usize>) {
     let threads = profile.threads();
     let mut tracks: Vec<usize> = (0..threads.len())
         .filter(|&t| threads[t].lane_class == class)
         .collect();
-    sort_tracks_by_name(profile, threads, &mut tracks);
-    let runs = family_runs(profile, threads, &tracks);
-    let mut pools = Vec::with_capacity(runs.len());
-    let mut start = 0;
-    for (family, members) in runs {
-        pools.push((family, tracks[start..start + members].to_vec()));
-        start += members;
+    match sort {
+        TrackSort::Weight => {
+            tracks.retain(|&t| shows(t));
+            sort.order(profile, threads, &mut tracks);
+            (Vec::new(), tracks)
+        }
+        TrackSort::Name => {
+            sort.order(profile, threads, &mut tracks);
+            let runs = family_runs(profile, threads, &tracks);
+            let mut pools = Vec::with_capacity(runs.len());
+            let mut drawn = Vec::with_capacity(tracks.len());
+            let mut start = 0;
+            for (family, members) in runs {
+                let pool = &tracks[start..start + members];
+                drawn.extend(pool.iter().copied().filter(|&t| shows(t)));
+                pools.push((family, pool.to_vec()));
+                start += members;
+            }
+            (pools, drawn)
+        }
     }
-    pools
 }
 
 /// A run of a group's drawn lanes stacked together.
@@ -232,6 +253,8 @@ struct PoolRun<'a> {
 /// holds more than one pool; the weight order interleaves the pools, so nothing
 /// heads its lanes and they form a single run.
 fn pool_runs<'a>(
+    profile: &Profile,
+    threads: &[ThreadTrack],
     sort: TrackSort,
     pools: &'a [(&'a str, Vec<usize>)],
     tracks: &'a [usize],
@@ -255,8 +278,12 @@ fn pool_runs<'a>(
             let mut runs = Vec::with_capacity(occupied.len());
             let mut seated = tracks;
             for (family, name, visible_members) in occupied {
-                let in_pool = pools[family].1.as_slice();
-                let seats = seated.iter().take_while(|t| in_pool.contains(t)).count();
+                let seats = seated
+                    .iter()
+                    .take_while(|&&t| {
+                        track_family(threads[t].tid, profile.str(threads[t].name)) == name
+                    })
+                    .count();
                 let (lanes, rest) = seated.split_at(seats);
                 seated = rest;
                 runs.push(PoolRun {
@@ -302,11 +329,7 @@ pub(crate) fn build_grouped_layout(
     let mut top = 0.0;
     for (group, &class) in GROUP_ORDER.iter().enumerate() {
         let shows = |t: usize| state.visible.get(t).copied().unwrap_or(true);
-        let pools = class_pools(profile, class);
-        let mut tracks: Vec<usize> = pools
-            .iter()
-            .flat_map(|(_, members)| members.iter().copied().filter(|&t| shows(t)))
-            .collect();
+        let (pools, mut tracks) = group_pools_and_tracks(profile, class, state.sort, shows);
         if tracks.is_empty() {
             continue;
         }
@@ -321,14 +344,16 @@ pub(crate) fn build_grouped_layout(
         let capped = total > TOP_N_PER_GROUP;
         let mut shown = 0;
         if !is_collapsed {
-            state.sort.order(profile, threads, &mut tracks);
+            // A pool takes a row of the chart and a band standing over it.
+            chrome.rows.reserve(pools.len());
+            chrome.families.reserve(pools.len());
             if !state.show_all[group] {
                 state
                     .sort
                     .sample(profile, threads, &mut tracks, TOP_N_PER_GROUP);
             }
             shown = tracks.len();
-            for run in pool_runs(state.sort, &pools, &tracks, shows) {
+            for run in pool_runs(profile, threads, state.sort, &pools, &tracks, shows) {
                 if let Some((family, name, visible_members)) = run.header {
                     let kind = RowKind::Family { group, family };
                     chrome.rows.push(ChartRow { top, kind });

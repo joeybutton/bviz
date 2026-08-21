@@ -42,16 +42,22 @@ impl TrackSort {
     }
 }
 
-/// Orders `tracks` (indices into `threads`) busiest first — most slices first,
+/// Ranks a track (an index into `threads`) busiest first — most slices first,
 /// ties broken by tid so the order is stable frame to frame.
+fn busiest_first(
+    profile: &Profile,
+    threads: &[ThreadTrack],
+    track: usize,
+) -> (Reverse<usize>, i64) {
+    (
+        Reverse(profile.slices(&threads[track]).len()),
+        threads[track].tid,
+    )
+}
+
+/// Orders `tracks` (indices into `threads`) under [`busiest_first`].
 fn sort_tracks_by_activity(profile: &Profile, threads: &[ThreadTrack], tracks: &mut [usize]) {
-    tracks.sort_by(|&a, &b| {
-        profile
-            .slices(&threads[b])
-            .len()
-            .cmp(&profile.slices(&threads[a]).len())
-            .then(threads[a].tid.cmp(&threads[b].tid))
-    });
+    tracks.sort_by_key(|&t| busiest_first(profile, threads, t));
 }
 
 /// Drops all but the `cap` busiest of `tracks`, leaving the survivors in the
@@ -61,14 +67,18 @@ fn retain_busiest(profile: &Profile, threads: &[ThreadTrack], tracks: &mut Vec<u
     if tracks.len() <= cap {
         return;
     }
-    let mut busiest = tracks.clone();
-    sort_tracks_by_activity(profile, threads, &mut busiest);
-    busiest.truncate(cap);
-    let mut kept = vec![false; threads.len()];
-    for &t in &busiest {
-        kept[t] = true;
+    let mut busiest: Vec<usize> = (0..tracks.len()).collect();
+    busiest.sort_by_key(|&at| busiest_first(profile, threads, tracks[at]));
+    let mut seated = vec![false; tracks.len()];
+    for &at in &busiest[..cap] {
+        seated[at] = true;
     }
-    tracks.retain(|&t| kept[t]);
+    let mut position = 0;
+    tracks.retain(|_| {
+        let keeps_its_seat = seated[position];
+        position += 1;
+        keeps_its_seat
+    });
 }
 
 /// The pools `tracks` runs through, each as its family and the number of members
@@ -79,7 +89,7 @@ pub(crate) fn family_runs<'a>(
     threads: &'a [ThreadTrack],
     tracks: &[usize],
 ) -> Vec<(&'a str, usize)> {
-    let mut runs: Vec<(&str, usize)> = Vec::new();
+    let mut runs: Vec<(&str, usize)> = Vec::with_capacity(tracks.len());
     for &t in tracks {
         let family = track_family(threads[t].tid, profile.str(threads[t].name));
         match runs.last_mut() {
