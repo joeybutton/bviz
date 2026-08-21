@@ -19,15 +19,16 @@ pub(crate) fn shared_names(profile: &Profile) -> Vec<bool> {
 }
 
 /// How a track reads in the flame chart's gutter and the tracks menu: its
-/// thread name, qualified by tid where [`shared_names`] marks the name as one
-/// several tracks carry, so rows that would otherwise read identically name the
-/// thread they stand for.
+/// thread name, qualified by tid where the name is one several tracks carry, so
+/// rows that would otherwise read identically name the thread they stand for.
+/// `shared` is [`shared_names`] over this same `profile`, indexed alike.
 pub(crate) fn track_label<'a>(profile: &'a Profile, shared: &[bool], track: usize) -> Cow<'a, str> {
     let thread = &profile.threads()[track];
     let name = profile.str(thread.name);
-    match shared.get(track) {
-        Some(true) => Cow::Owned(format!("{name} (tid {})", thread.tid)),
-        _ => Cow::Borrowed(name),
+    if shared[track] {
+        Cow::Owned(format!("{name} (tid {})", thread.tid))
+    } else {
+        Cow::Borrowed(name)
     }
 }
 

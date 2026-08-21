@@ -95,19 +95,12 @@ impl TracksMenu {
     /// and until they make one, whether the list is long enough to bury the
     /// groups below it.
     fn folded(&self, group: usize, listed: usize) -> bool {
-        self.folded_groups
-            .get(group)
-            .copied()
-            .flatten()
-            .unwrap_or(listed > TRACKS_MENU_FOLD_ABOVE)
+        self.folded_groups[group].unwrap_or(listed > TRACKS_MENU_FOLD_ABOVE)
     }
 
     /// Folds or unfolds a lane-class group's track list.
     fn toggle_group_folded(&mut self, group: usize, listed: usize) {
-        let folded = self.folded(group, listed);
-        if let Some(choice) = self.folded_groups.get_mut(group) {
-            *choice = Some(!folded);
-        }
+        self.folded_groups[group] = Some(!self.folded(group, listed));
     }
 
     /// The bar for the track list's content height against its visible height;
