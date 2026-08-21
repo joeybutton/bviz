@@ -210,9 +210,9 @@ impl TracksMenu {
         rows
     }
 
-    /// A group header: a chevron and the group's visible/total count, folding the
-    /// group's track list on click. Its trailing control toggles the whole
-    /// group's visibility without also folding.
+    /// A group header: a chevron and how many of the tracks listed under it are
+    /// visible, folding the group's track list on click. Its trailing control
+    /// toggles the whole group's visibility without also folding.
     fn group_row(
         &self,
         group: usize,
@@ -248,7 +248,7 @@ impl TracksMenu {
                 cx.notify();
             }))
             .child(format!(
-                "{chevron} {}  {}/{}",
+                "{chevron} {}  {}/{} visible",
                 group_label(class),
                 n_visible,
                 tracks.len()
