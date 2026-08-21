@@ -546,7 +546,10 @@ const EXECUTION_PREFIXES: [&str; 12] = [
 
 const REPO_FETCH_PREFIXES: [&str; 3] = ["starlark-repository", "module-extension-", "downloads["];
 
-const ANALYSIS_SKYFRAME_INFIX: &str = "skyframe-evaluator";
+/// Skyframe evaluator pools running analysis, longest infix first: Bazel routes
+/// configured-target and aspect analysis to `-cpu-heavy` and leaves loading and
+/// light analysis to the plain pool.
+const ANALYSIS_SKYFRAME_INFIXES: [&str; 2] = ["skyframe-evaluator-cpu-heavy", "skyframe-evaluator"];
 const GLOBBING_POOL_PREFIX: &str = "globbing pool";
 const DISK_CACHE_PREFIX: &str = "disk-cache-";
 const SANDBOX_PREFIX: &str = "sandbox-";
@@ -557,10 +560,8 @@ const SANDBOX_PREFIX: &str = "sandbox-";
 /// the separator that binds a worker index to it.
 ///
 /// The skyframe-evaluator tests run longest-match-first: the `-execution`/
-/// `-memoizing` pools run actions, the `-cpu-heavy` and plain pools run analysis
-/// (configured targets/aspects, plus loading and light analysis), so the plain
-/// `skyframe-evaluator` substring must be tested only after the execution
-/// infixes are ruled out.
+/// `-memoizing` pools run actions, so the analysis infixes must be tested only
+/// after the execution ones are ruled out.
 ///
 /// Module-extension evaluation resolves external dependencies alongside
 /// repository fetching, so it is loading work; the `globbing pool` threads run
@@ -579,8 +580,12 @@ fn classify(tid: i64, name: &str) -> (LaneClass, &str) {
         .find(|infix| name.contains(infix))
     {
         (LaneClass::Execution, infix)
-    } else if name.contains(ANALYSIS_SKYFRAME_INFIX) {
-        (LaneClass::Analysis, ANALYSIS_SKYFRAME_INFIX)
+    } else if let Some(infix) = ANALYSIS_SKYFRAME_INFIXES
+        .iter()
+        .copied()
+        .find(|infix| name.contains(infix))
+    {
+        (LaneClass::Analysis, infix)
     } else if name.starts_with(GLOBBING_POOL_PREFIX) {
         (LaneClass::Analysis, GLOBBING_POOL_PREFIX)
     } else if let Some(prefix) = REPO_FETCH_PREFIXES
@@ -1121,6 +1126,10 @@ mod tests {
         );
         assert_eq!(
             track_family(14, "skyframe-evaluator-cpu-heavy-2"),
+            "skyframe-evaluator-cpu-heavy"
+        );
+        assert_eq!(
+            track_family(15, "skyframe-evaluator-4"),
             "skyframe-evaluator"
         );
         assert_eq!(track_family(15, "globbing pool-3"), "globbing pool");
