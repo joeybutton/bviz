@@ -1,4 +1,4 @@
-use bviz_trace_profile::{Profile, Str};
+use bviz_trace_profile::{Profile, Str, track_family};
 use std::borrow::Cow;
 use std::collections::HashMap;
 
@@ -24,17 +24,52 @@ pub(crate) fn shared_names(profile: &Profile) -> Vec<bool> {
 /// `shared` is [`shared_names`] over this same `profile`, indexed alike.
 pub(crate) fn track_label<'a>(profile: &'a Profile, shared: &[bool], track: usize) -> Cow<'a, str> {
     let thread = &profile.threads()[track];
+    qualified(profile, shared, track, profile.str(thread.name))
+}
+
+/// How a track reads under a header naming its pool, which spells the run's
+/// shared name once so each lane under it need only carry
+/// [`distinguishing_part`] — what a gutter too narrow for the full name would
+/// otherwise clip away.
+pub(crate) fn pool_member_label<'a>(
+    profile: &'a Profile,
+    shared: &[bool],
+    track: usize,
+) -> Cow<'a, str> {
+    let thread = &profile.threads()[track];
     let name = profile.str(thread.name);
+    qualified(
+        profile,
+        shared,
+        track,
+        distinguishing_part(thread.tid, name),
+    )
+}
+
+/// `name`, read for `track` as [`track_label`] reads a whole thread name.
+fn qualified<'a>(profile: &Profile, shared: &[bool], track: usize, name: &'a str) -> Cow<'a, str> {
     if shared[track] {
-        Cow::Owned(format!("{name} (tid {})", thread.tid))
+        Cow::Owned(format!("{name} (tid {})", profile.threads()[track].tid))
     } else {
         Cow::Borrowed(name)
     }
 }
 
+/// What tells the thread named by `tid`/`name` from the rest of its pool: the
+/// name past its [`track_family`] prefix and any single `-`, `_`, or space
+/// binding the two. `name` itself where the family does not lead it or where
+/// nothing would be left.
+fn distinguishing_part(tid: i64, name: &str) -> &str {
+    let Some(rest) = name.strip_prefix(track_family(tid, name)) else {
+        return name;
+    };
+    let rest = rest.strip_prefix(['-', '_', ' ']).unwrap_or(rest);
+    if rest.is_empty() { name } else { rest }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{shared_names, track_label};
+    use super::{pool_member_label, shared_names, track_label};
     use crate::test_profile::profile_of;
     use bviz_trace_profile::Profile;
     use std::borrow::Cow;
@@ -70,6 +105,59 @@ mod tests {
         assert_eq!(
             track_label(&profile, &shared, track_of(&profile, 3)),
             "main"
+        );
+    }
+
+    #[test]
+    fn a_lane_under_a_pool_header_reads_as_what_tells_it_from_its_siblings() {
+        const REPO_TRACK: &str =
+            "starlark-repository-rules_rs++crate+crates__hashbrown-0.15.5-0 (Virtual)";
+        let profile = profile_of(&[
+            ("skyframe-evaluator-cpu-heavy-9".to_owned(), 1),
+            (REPO_TRACK.to_owned(), 1),
+            ("downloads[3]".to_owned(), 1),
+            ("Main Thread".to_owned(), 1),
+        ]);
+        let shared = shared_names(&profile);
+        let read = |tid| pool_member_label(&profile, &shared, track_of(&profile, tid));
+
+        assert_eq!(read(1), "9");
+        assert_eq!(
+            read(2),
+            "rules_rs++crate+crates__hashbrown-0.15.5-0 (Virtual)",
+            "the pool's prefix goes, the repo that distinguishes the track stays"
+        );
+        assert_eq!(
+            read(3),
+            "[3]",
+            "a family the name binds without a separator"
+        );
+        assert_eq!(
+            read(4),
+            "Main Thread",
+            "a track that is its whole pool keeps its name"
+        );
+        for tid in 1..=4 {
+            assert!(
+                matches!(read(tid), Cow::Borrowed(_)),
+                "a bare label costs no allocation"
+            );
+        }
+    }
+
+    #[test]
+    fn a_pool_members_tid_qualifier_survives_the_pool_prefix_going() {
+        const MEMBER: &str = "skyframe-evaluator-memoizing-1";
+        let profile = profile_of(&[(MEMBER.to_owned(), 1), (MEMBER.to_owned(), 1)]);
+        let shared = shared_names(&profile);
+
+        assert_eq!(
+            pool_member_label(&profile, &shared, track_of(&profile, 1)),
+            "1 (tid 1)"
+        );
+        assert_eq!(
+            pool_member_label(&profile, &shared, track_of(&profile, 2)),
+            "1 (tid 2)"
         );
     }
 

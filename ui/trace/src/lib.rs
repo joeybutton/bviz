@@ -25,13 +25,13 @@ mod tracks_menu;
 use chart::{format_duration, format_time, nice_step, span_seconds};
 
 use flame_panel::FlamePanel;
-use groups::{GroupChrome, group_label};
+use groups::{GroupChrome, group_label, lanes_headed_by_pool};
 use model::TraceModel;
 use regions::{Regions, clamp_gutter_width, clamp_panel_height, flame_total_height, graph_lanes};
 use stats_panel::StatsPanel;
 use theme::Palette;
 use timeline::{HoveredSlice, TimelinePanel};
-use track_label::track_label;
+use track_label::{pool_member_label, track_label};
 use tracks_menu::TracksMenu;
 
 use bviz_trace_layout::{
@@ -1224,18 +1224,14 @@ fn paint_gutter(
             size(px(gutter_width), px(regions.flame_h())),
         ),
     };
+    let lanes = GutterLanes {
+        profile,
+        chrome,
+        selected,
+        shared_names,
+    };
     window.with_content_mask(Some(flame_mask), |window| {
-        paint_thread_labels(
-            &g,
-            profile,
-            layout,
-            regions,
-            scroll_y,
-            selected,
-            shared_names,
-            window,
-            cx,
-        );
+        paint_thread_labels(&g, &lanes, layout, regions, scroll_y, window, cx);
         paint_group_bands(&g, chrome, regions, scroll_y, window, cx);
         paint_family_bands(&g, chrome, regions, scroll_y, window, cx);
     });
@@ -1296,32 +1292,37 @@ fn paint_gutter_label(g: &GutterPaint, name: &str, ty: f32, window: &mut Window,
     );
 }
 
+/// The state a flame lane's gutter row is drawn from.
+struct GutterLanes<'a> {
+    profile: &'a Profile,
+    chrome: &'a GroupChrome,
+    selected: &'a [bool],
+    shared_names: &'a [bool],
+}
+
 /// Paints each thread's label at its flame lane, scrolled with the lanes and
 /// centred on the part of the lane the flame region shows, so a lane taller than
 /// that region keeps its name on screen. A selected lane's row carries a faint
 /// accent tint and a leading accent bar, so which tracks feed the flame graph
 /// reads at a glance.
-#[allow(clippy::too_many_arguments)]
 fn paint_thread_labels(
     g: &GutterPaint,
-    profile: &Profile,
+    lanes: &GutterLanes,
     layout: &LaneLayout,
     regions: Regions,
     scroll_y: f32,
-    selected: &[bool],
-    shared_names: &[bool],
     window: &mut Window,
     cx: &mut App,
 ) {
     let gutter_left = g.left;
     let gutter_width = g.width;
     let palette = g.palette;
-    for lane in &layout.lanes {
+    for (lane, headed) in layout.lanes.iter().zip(lanes_headed_by_pool(lanes.chrome)) {
         let top = regions.flame_top + lane.top - scroll_y;
         if top + lane.height < regions.flame_top || top > regions.flame_bottom {
             continue;
         }
-        if selected.get(lane.track).copied().unwrap_or(false) {
+        if lanes.selected.get(lane.track).copied().unwrap_or(false) {
             window.paint_quad(fill(
                 Bounds::new(
                     point(px(gutter_left), px(top)),
@@ -1340,13 +1341,12 @@ fn paint_thread_labels(
         let seen_top = top.max(regions.flame_top);
         let seen_bottom = (top + lane.height).min(regions.flame_bottom);
         let ty = (seen_top + seen_bottom - GUTTER_LABEL_SIZE) / 2.0;
-        paint_gutter_label(
-            g,
-            &track_label(profile, shared_names, lane.track),
-            ty,
-            window,
-            cx,
-        );
+        let label = if headed {
+            pool_member_label(lanes.profile, lanes.shared_names, lane.track)
+        } else {
+            track_label(lanes.profile, lanes.shared_names, lane.track)
+        };
+        paint_gutter_label(g, &label, ty, window, cx);
     }
 }
 

@@ -123,6 +123,24 @@ pub(crate) fn chart_rows(chrome: &GroupChrome) -> impl Iterator<Item = ChartRow>
     chrome.rows.iter().copied()
 }
 
+/// Whether a pool header stands over each lane the chart draws, in the order
+/// [`LaneLayout`] stacks them, so a lane under one can leave the pool's name to
+/// the header.
+pub(crate) fn lanes_headed_by_pool(chrome: &GroupChrome) -> impl Iterator<Item = bool> + '_ {
+    let mut headed = false;
+    chart_rows(chrome).filter_map(move |row| match row.kind {
+        RowKind::Band { .. } => {
+            headed = false;
+            None
+        }
+        RowKind::Family { .. } => {
+            headed = true;
+            None
+        }
+        RowKind::Lane { .. } => Some(headed),
+    })
+}
+
 /// Where the flame chart's viewport top edge sits, as a position the rows carry
 /// with them as the chart restacks them.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -1020,6 +1038,45 @@ mod tests {
     fn pool_at(profile: &Profile, row: ChartRow) -> &str {
         let thread = &profile.threads()[track_at(row)];
         track_family(thread.tid, profile.str(thread.name))
+    }
+
+    #[test]
+    fn a_lane_reads_under_a_pool_header_only_where_one_stands_over_its_run() {
+        let (profile, full, visible) = many_pool_fixture();
+        let expanded = [false; GROUP_ORDER.len()];
+        let (layout, chrome) = built_in(&profile, &full, &visible, &expanded, TrackSort::Name);
+
+        let lane_rows: Vec<ChartRow> = chart_rows(&chrome)
+            .filter(|row| !row.kind.is_header())
+            .collect();
+        assert_eq!(
+            lane_rows
+                .iter()
+                .copied()
+                .map(track_at)
+                .collect::<Vec<usize>>(),
+            layout
+                .lanes
+                .iter()
+                .map(|lane| lane.track)
+                .collect::<Vec<usize>>(),
+            "the lane rows and the laid-out lanes pair up in order"
+        );
+
+        // The execution group falls into several pools and heads each; the main
+        // thread stands alone in its group, which heads nothing.
+        let execution = group_of(LaneClass::Execution);
+        let main = group_of(LaneClass::Main);
+        let headed: Vec<bool> = lanes_headed_by_pool(&chrome).collect();
+        assert_eq!(headed.len(), lane_rows.len());
+        assert!(lane_rows.iter().any(|row| row.kind.group() == main));
+        for (row, headed) in lane_rows.iter().zip(headed) {
+            assert_eq!(headed, row.kind.group() == execution, "{row:?}");
+        }
+
+        let (_, weighed) = built_in(&profile, &full, &visible, &expanded, TrackSort::Weight);
+        assert!(lanes_headed_by_pool(&weighed).count() > 0);
+        assert!(lanes_headed_by_pool(&weighed).all(|headed| !headed));
     }
 
     #[test]
