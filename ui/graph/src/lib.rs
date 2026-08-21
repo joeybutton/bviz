@@ -434,9 +434,13 @@ fn box_at<'a>(
 }
 
 /// Opens or closes the box under `pos` (window px) and settles the view to keep
-/// it in frame. A box the drawn layout holds no handle on is left alone.
+/// it in frame. A box the drawn layout holds no handle on, or a `pos` off the
+/// canvas, is left alone.
 fn click_box_at(view: &mut GraphView, pos: Point<Pixels>, cx: &mut Context<GraphView>) {
     let vp = view.framing.viewport();
+    if !vp.contains(&pos) {
+        return;
+    }
     let camera = view.camera();
     let Some(drawn) = view.drawn() else {
         return;
