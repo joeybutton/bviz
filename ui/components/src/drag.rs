@@ -1,4 +1,7 @@
-use gpui::{Context, DispatchPhase, Entity, MouseMoveEvent, MouseUpEvent, Pixels, Point, Window};
+use gpui::{
+    Context, DispatchPhase, Entity, MouseButton, MouseMoveEvent, MouseUpEvent, Pixels, Point,
+    Window,
+};
 use std::cell::Cell;
 use std::rc::Rc;
 
@@ -52,7 +55,7 @@ pub fn track_drag<V: 'static>(
 
     let ending = view.clone();
     window.on_mouse_event(move |event: &MouseUpEvent, phase, _, cx| {
-        if phase != DispatchPhase::Bubble || ended.get() {
+        if phase != DispatchPhase::Bubble || ended.get() || event.button != MouseButton::Left {
             return;
         }
         ended.set(true);
