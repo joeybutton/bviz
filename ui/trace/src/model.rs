@@ -2,6 +2,7 @@ use crate::groups::{
     GROUP_ORDER, GroupChrome, GroupLayoutState, build_grouped_layout, default_collapsed_groups,
 };
 use crate::rebuild::Rebuild;
+use crate::track_label::shared_names;
 use crate::track_order::TrackSort;
 use crate::{METRICS, Source};
 use bviz_trace_layout::{
@@ -44,6 +45,9 @@ pub(crate) struct TraceModel {
     lanes: RefCell<Option<Rc<LaneLayout>>>,
     /// Which tracks the flame chart draws, indexed by `profile.threads()` order.
     visible_tracks: Vec<bool>,
+    /// [`shared_names`] over the loaded profile, held so a label costs no scan
+    /// of the tracks per frame or per row.
+    shared_track_names: Vec<bool>,
     /// Which tracks the flame graph and stats aggregate over, indexed likewise.
     selected_tracks: Vec<bool>,
     /// The profile time the flame graph and stats aggregate over, intersected
@@ -96,6 +100,7 @@ impl TraceModel {
             source: Source::Loading,
             lanes: RefCell::new(None),
             visible_tracks: Vec::new(),
+            shared_track_names: Vec::new(),
             selected_tracks: Vec::new(),
             time_selection: TimeSelection::default(),
             collapsed_groups: default_collapsed_groups(),
@@ -118,6 +123,10 @@ impl TraceModel {
 
     pub(crate) fn visible_tracks(&self) -> &[bool] {
         &self.visible_tracks
+    }
+
+    pub(crate) fn shared_track_names(&self) -> &[bool] {
+        &self.shared_track_names
     }
 
     pub(crate) fn selected_tracks(&self) -> &[bool] {
@@ -166,6 +175,7 @@ impl TraceModel {
     /// the aggregate from double-counting that time.
     pub(crate) fn init_tracks(&mut self, profile: &Profile, cx: &mut Context<Self>) {
         self.visible_tracks = vec![true; profile.threads().len()];
+        self.shared_track_names = shared_names(profile);
         self.collapsed_groups = default_collapsed_groups();
         self.group_show_all = [false; GROUP_ORDER.len()];
         self.track_sort = TrackSort::default();

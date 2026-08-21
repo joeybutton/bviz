@@ -1075,12 +1075,13 @@ fn slice_paint(
         let layout = &*lanes;
         let n_counters = profile.counters().len();
         let flame_total = flame_total_height(layout);
-        let (tv, scroll, gutter_width, selected, regions, show_counters, vp) = {
+        let (tv, scroll, gutter_width, selected, shared_names, regions, show_counters, vp) = {
             let panel = parent.read(cx);
             let tv = panel.view;
             let scroll = panel.lane_scroll(cx);
             let (tab, panel_height, gutter_width) = panel.shell_layout(cx);
             let selected = panel.model.read(cx).selected_tracks().to_vec();
+            let shared_names = panel.model.read(cx).shared_track_names().to_vec();
             let regions = Regions::new(bounds, n_counters, panel_height, gutter_width, flame_total);
             let vp = Viewport {
                 width: regions.time_w,
@@ -1093,6 +1094,7 @@ fn slice_paint(
                 scroll,
                 gutter_width,
                 selected,
+                shared_names,
                 regions,
                 show_counters,
                 vp,
@@ -1187,6 +1189,7 @@ fn slice_paint(
             scroll,
             show_counters,
             &selected,
+            &shared_names,
             &palette,
             window,
             cx,

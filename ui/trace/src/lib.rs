@@ -18,6 +18,7 @@ mod stats_panel;
 mod test_profile;
 mod theme;
 mod timeline;
+mod track_label;
 mod track_order;
 mod tracks_menu;
 
@@ -30,6 +31,7 @@ use regions::{Regions, clamp_gutter_width, clamp_panel_height, flame_total_heigh
 use stats_panel::StatsPanel;
 use theme::Palette;
 use timeline::{HoveredSlice, TimelinePanel};
+use track_label::track_label;
 use tracks_menu::TracksMenu;
 
 use bviz_trace_layout::{
@@ -1186,6 +1188,7 @@ fn paint_gutter(
     scroll_y: f32,
     show_counters: bool,
     selected: &[bool],
+    shared_names: &[bool],
     palette: &Palette,
     window: &mut Window,
     cx: &mut App,
@@ -1222,7 +1225,17 @@ fn paint_gutter(
         ),
     };
     window.with_content_mask(Some(flame_mask), |window| {
-        paint_thread_labels(&g, profile, layout, regions, scroll_y, selected, window, cx);
+        paint_thread_labels(
+            &g,
+            profile,
+            layout,
+            regions,
+            scroll_y,
+            selected,
+            shared_names,
+            window,
+            cx,
+        );
         paint_group_bands(&g, chrome, regions, scroll_y, window, cx);
         paint_family_bands(&g, chrome, regions, scroll_y, window, cx);
     });
@@ -1283,7 +1296,7 @@ fn paint_gutter_label(g: &GutterPaint, name: &str, ty: f32, window: &mut Window,
     );
 }
 
-/// Paints each thread's name at its flame lane, scrolled with the lanes and
+/// Paints each thread's label at its flame lane, scrolled with the lanes and
 /// centered against the lane's full height. A selected lane's row carries a faint
 /// accent tint and a leading accent bar, so which tracks feed the flame graph
 /// reads at a glance.
@@ -1295,6 +1308,7 @@ fn paint_thread_labels(
     regions: Regions,
     scroll_y: f32,
     selected: &[bool],
+    shared_names: &[bool],
     window: &mut Window,
     cx: &mut App,
 ) {
@@ -1329,7 +1343,7 @@ fn paint_thread_labels(
         let ty = (seen_top + seen_bottom - GUTTER_LABEL_SIZE) / 2.0;
         paint_gutter_label(
             g,
-            profile.str(profile.threads()[lane.track].name),
+            &track_label(profile, shared_names, lane.track),
             ty,
             window,
             cx,

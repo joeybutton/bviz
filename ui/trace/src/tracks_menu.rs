@@ -1,6 +1,7 @@
 use crate::groups::{GROUP_ORDER, group_label};
 use crate::model::TraceModel;
 use crate::theme::Palette;
+use crate::track_label::track_label;
 use crate::track_order::TrackSort;
 use crate::{
     GUTTER_LABEL_SIZE, RULER_HEIGHT, Source, TRACKS_MENU_FOLD_ABOVE, TRACKS_MENU_MAX_LIST,
@@ -178,6 +179,7 @@ impl TracksMenu {
     ) -> Vec<AnyElement> {
         let filter = self.filter.read(cx).content().to_lowercase();
         let threads = profile.threads();
+        let shared_names = self.model.read(cx).shared_track_names().to_vec();
         let mut rows: Vec<AnyElement> = Vec::new();
         for (group, &class) in GROUP_ORDER.iter().enumerate() {
             let mut tracks: Vec<usize> = (0..threads.len())
@@ -206,7 +208,7 @@ impl TracksMenu {
                 continue;
             }
             for i in tracks {
-                let name = profile.str(threads[i].name);
+                let label = track_label(profile, &shared_names, i);
                 let visible = self
                     .model
                     .read(cx)
@@ -215,7 +217,7 @@ impl TracksMenu {
                     .copied()
                     .unwrap_or(true);
                 rows.push(
-                    self.track_row(i, name, visible, palette, cx)
+                    self.track_row(i, &label, visible, palette, cx)
                         .into_any_element(),
                 );
             }
@@ -323,12 +325,12 @@ impl TracksMenu {
         cx.notify();
     }
 
-    /// A track row: a visibility checkbox and the track name, toggling the track
-    /// on click.
+    /// A track row: a visibility checkbox and the track's label, toggling the
+    /// track on click.
     fn track_row(
         &self,
         i: usize,
-        name: &str,
+        label: &str,
         visible: bool,
         palette: Palette,
         cx: &mut Context<Self>,
@@ -367,7 +369,7 @@ impl TracksMenu {
                     .overflow_hidden()
                     .whitespace_nowrap()
                     .text_ellipsis()
-                    .child(name.to_string()),
+                    .child(label.to_string()),
             )
     }
 
