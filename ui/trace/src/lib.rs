@@ -1312,7 +1312,11 @@ fn paint_thread_labels(
                 palette.accent,
             ));
         }
-        let ty = top + (lane.height - GUTTER_LABEL_SIZE) / 2.0;
+        // Centred on the lane's visible part, not its full height: a lane taller
+        // than the flame region would otherwise carry its name past an edge.
+        let seen_top = top.max(regions.flame_top);
+        let seen_bottom = (top + lane.height).min(regions.flame_bottom);
+        let ty = (seen_top + seen_bottom - GUTTER_LABEL_SIZE) / 2.0;
         paint_gutter_label(
             g,
             profile.str(profile.threads()[lane.track].name),
