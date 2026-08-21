@@ -1,6 +1,6 @@
 --- a/crates/gpui_linux/src/linux/wayland/client.rs
 +++ b/crates/gpui_linux/src/linux/wayland/client.rs
-@@ -1810,6 +1810,14 @@
+@@ -1810,6 +1810,17 @@
              }
              wl_pointer::Event::Leave { .. } => {
                  if let Some(focused_window) = state.mouse_focused_window.clone() {
@@ -9,13 +9,16 @@
 +                    // cursor off-screen first to clear hover and hit-test state.
 +                    let moved_off = PlatformInput::MouseMove(MouseMoveEvent {
 +                        position: point(px(-1.), px(-1.)),
-+                        pressed_button: state.button_pressed,
++                        // Hover ignores buttons, and a Leave with one held is a
++                        // gesture the compositor took away: a drag ends here, and
++                        // this off-screen point is not somewhere it was dragged to.
++                        pressed_button: None,
 +                        modifiers: state.modifiers,
 +                    });
                      let input = PlatformInput::MouseExited(MouseExitEvent {
                          position: state.mouse_location.unwrap(),
                          pressed_button: state.button_pressed,
-@@ -1821,6 +1829,7 @@
+@@ -1821,6 +1832,7 @@
                      state.cursor_hidden_window = None;
  
                      drop(state);

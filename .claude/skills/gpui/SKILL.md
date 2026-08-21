@@ -264,9 +264,11 @@ Equally, do not take every delivered move for a drag move. Leaving a window synt
 an off-screen move to clear hover (`patches/gpui_linux-clear-hover-on-leave.patch`),
 which lands just after a release out there: a handler that reads it as a position seeks
 to the corner, and one that re-arms its own drag flag on the way keeps the gesture alive
-for good. `track_drag` ends on the first `MouseUpEvent` *or* the first `MouseMoveEvent`
-whose `dragging()` is false. Check `event.dragging()` the same way in any drag handler
-you write by hand.
+for good. That move reports no button held, which also ends a drag the compositor takes
+the pointer away from — an overview, a popup grab — since no release follows one.
+`track_drag` ends on the first `MouseUpEvent` *or* the first `MouseMoveEvent` whose
+`dragging()` is false. Check `event.dragging()` the same way in any drag handler you
+write by hand.
 
 Anything a drag does that is really a *click* — opening a URL, toggling what was
 pressed, clearing a selection a bare click clears — must require `DragEnd::Released`; an abandoned gesture reports only where the cursor happened to be,
