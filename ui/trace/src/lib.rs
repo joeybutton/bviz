@@ -134,6 +134,9 @@ const TAB_BAR_HEIGHT: f32 = 28.0;
 /// before it scrolls.
 const TRACKS_MENU_WIDTH: f32 = 280.0;
 const TRACKS_MENU_MAX_LIST: f32 = 320.0;
+/// Tracks a group lists in the menu before it starts folded, past which its
+/// entries fill the list and bury every group below it.
+const TRACKS_MENU_FOLD_ABOVE: usize = 20;
 
 /// Heights of a stats-table header row and a body row.
 const STATS_HEADER_HEIGHT: f32 = 24.0;

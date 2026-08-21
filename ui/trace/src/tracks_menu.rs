@@ -1,10 +1,10 @@
-use crate::groups::{GROUP_ORDER, default_collapsed_groups, group_label};
+use crate::groups::{GROUP_ORDER, group_label};
 use crate::model::TraceModel;
 use crate::theme::Palette;
 use crate::track_order::TrackSort;
 use crate::{
-    GUTTER_LABEL_SIZE, RULER_HEIGHT, Source, TRACKS_MENU_MAX_LIST, TRACKS_MENU_WIDTH, TraceView,
-    set_list_thumb, thumb_offset,
+    GUTTER_LABEL_SIZE, RULER_HEIGHT, Source, TRACKS_MENU_FOLD_ABOVE, TRACKS_MENU_MAX_LIST,
+    TRACKS_MENU_WIDTH, TraceView, set_list_thumb, thumb_offset,
 };
 use bviz_trace_profile::{LaneClass, Profile};
 use bviz_ui_components::{
@@ -35,10 +35,11 @@ enum MenuDrag {
 pub(crate) struct TracksMenu {
     /// Whether the menu is open.
     open: bool,
-    /// Which lane-class groups are folded in the menu, indexed by [`GROUP_ORDER`];
-    /// independent of the chart's collapse so the menu can manage a group's
+    /// The reader's fold choice per lane-class group, indexed by [`GROUP_ORDER`],
+    /// `None` where they have made none and the list's own length decides.
+    /// Independent of the chart's collapse so the menu can manage a group's
     /// visibility while its lanes are collapsed in the chart.
-    collapsed_groups: [bool; GROUP_ORDER.len()],
+    folded_groups: [Option<bool>; GROUP_ORDER.len()],
     /// The filter field; its text narrows the listed tracks.
     filter: Entity<TextInput>,
     /// Re-renders the menu as the filter text changes; `TextInput` notifies on
@@ -64,7 +65,7 @@ impl TracksMenu {
         let filter_observer = cx.observe(&filter, |_, _, cx| cx.notify());
         Self {
             open: false,
-            collapsed_groups: default_collapsed_groups(),
+            folded_groups: [None; GROUP_ORDER.len()],
             filter,
             _filter_observer: filter_observer,
             scroll: ScrollHandle::new(),
@@ -77,7 +78,7 @@ impl TracksMenu {
     /// Resets the view-local fold state and list scroll for a freshly loaded
     /// profile. The document-derived visibility is seeded by the model instead.
     pub(crate) fn reset_for_new_profile(&mut self) {
-        self.collapsed_groups = default_collapsed_groups();
+        self.folded_groups = [None; GROUP_ORDER.len()];
         set_list_thumb(&self.scroll, 0.0);
     }
 
@@ -89,10 +90,22 @@ impl TracksMenu {
         }
     }
 
+    /// Whether a group listing `listed` tracks is folded: the reader's choice,
+    /// and until they make one, whether the list is long enough to bury the
+    /// groups below it.
+    fn folded(&self, group: usize, listed: usize) -> bool {
+        self.folded_groups
+            .get(group)
+            .copied()
+            .flatten()
+            .unwrap_or(listed > TRACKS_MENU_FOLD_ABOVE)
+    }
+
     /// Folds or unfolds a lane-class group's track list.
-    fn toggle_group_collapsed(&mut self, group: usize) {
-        if let Some(c) = self.collapsed_groups.get_mut(group) {
-            *c = !*c;
+    fn toggle_group_folded(&mut self, group: usize, listed: usize) {
+        let folded = self.folded(group, listed);
+        if let Some(choice) = self.folded_groups.get_mut(group) {
+            *choice = Some(!folded);
         }
     }
 
@@ -184,7 +197,7 @@ impl TracksMenu {
                 .read(cx)
                 .track_sort()
                 .order(profile, threads, &mut tracks);
-            let folded = self.collapsed_groups.get(group).copied().unwrap_or(false);
+            let folded = self.folded(group, tracks.len());
             rows.push(
                 self.group_row(group, class, &tracks, folded, palette, cx)
                     .into_any_element(),
@@ -230,6 +243,7 @@ impl TracksMenu {
                 .count()
         };
         let group_all_visible = n_visible == tracks.len();
+        let listed = tracks.len();
         let chevron = if folded { "▸" } else { "▾" };
         div()
             .id(SharedString::from(format!("track-group-{group}")))
@@ -244,7 +258,7 @@ impl TracksMenu {
             .text_color(palette.label)
             .hover(move |s| s.bg(palette.hover))
             .on_click(cx.listener(move |this, _, _, cx| {
-                this.toggle_group_collapsed(group);
+                this.toggle_group_folded(group, listed);
                 cx.notify();
             }))
             .child(format!(
