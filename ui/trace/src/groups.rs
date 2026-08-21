@@ -32,10 +32,9 @@ pub(crate) struct GroupBand {
     pub(crate) show_all: bool,
 }
 
-/// A pool's label row, placed at `top` above the lanes it heads and under the
-/// band of the group it belongs to. `shown`/`total` count the pool's lanes drawn
-/// versus visible, so a pool the seat distribution left without a seat still
-/// reports its size.
+/// A pool's label row, headed under its group's band over the run of that pool's
+/// lanes the chart draws — a pool the seat distribution left without a lane
+/// included, so its size is reported rather than the pool going unnamed.
 #[derive(Debug, Clone)]
 pub(crate) struct FamilyBand {
     pub(crate) name: String,
@@ -276,7 +275,6 @@ pub(crate) struct GroupLayoutState<'a> {
     /// the end is drawn.
     pub(crate) visible: &'a [bool],
     pub(crate) collapsed: &'a [bool; GROUP_ORDER.len()],
-    /// Which groups draw every lane rather than a sample of [`TOP_N_PER_GROUP`].
     pub(crate) show_all: &'a [bool; GROUP_ORDER.len()],
     pub(crate) sort: TrackSort,
 }

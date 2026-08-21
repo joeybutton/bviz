@@ -136,8 +136,8 @@ const TAB_BAR_HEIGHT: f32 = 28.0;
 /// before it scrolls.
 const TRACKS_MENU_WIDTH: f32 = 280.0;
 const TRACKS_MENU_MAX_LIST: f32 = 320.0;
-/// Tracks a group lists in the menu before it starts folded, past which its
-/// entries fill the list and bury every group below it.
+/// Tracks a group lists in the menu before it starts folded, chosen to keep a
+/// long group from burying the groups under it while a short one stays open.
 const TRACKS_MENU_FOLD_ABOVE: usize = 20;
 
 /// Heights of a stats-table header row and a body row.
@@ -1297,7 +1297,8 @@ fn paint_gutter_label(g: &GutterPaint, name: &str, ty: f32, window: &mut Window,
 }
 
 /// Paints each thread's label at its flame lane, scrolled with the lanes and
-/// centered against the lane's full height. A selected lane's row carries a faint
+/// centred on the part of the lane the flame region shows, so a lane taller than
+/// that region keeps its name on screen. A selected lane's row carries a faint
 /// accent tint and a leading accent bar, so which tracks feed the flame graph
 /// reads at a glance.
 #[allow(clippy::too_many_arguments)]
@@ -1336,8 +1337,6 @@ fn paint_thread_labels(
                 palette.accent,
             ));
         }
-        // Centred on the lane's visible part, not its full height: a lane taller
-        // than the flame region would otherwise carry its name past an edge.
         let seen_top = top.max(regions.flame_top);
         let seen_bottom = (top + lane.height).min(regions.flame_bottom);
         let ty = (seen_top + seen_bottom - GUTTER_LABEL_SIZE) / 2.0;

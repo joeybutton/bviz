@@ -57,7 +57,7 @@ pub(crate) struct TraceModel {
     /// [`GROUP_ORDER`]. Loading starts collapsed — it holds one lane per external
     /// repository, hundreds on a large build.
     collapsed_groups: [bool; GROUP_ORDER.len()],
-    /// Which groups show every lane rather than their leading ones, indexed by
+    /// Which groups draw every lane rather than a sample, indexed by
     /// [`GROUP_ORDER`].
     group_show_all: [bool; GROUP_ORDER.len()],
     /// The order every group stands its tracks in.
