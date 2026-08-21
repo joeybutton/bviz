@@ -194,6 +194,8 @@ const GROUP_ICON: f32 = 12.0;
 /// Indent of a pool header's gutter label under its group band's label, one
 /// nesting step in.
 const FAMILY_LABEL_INDENT: f32 = 10.0;
+/// Least gap kept between a header row's name and the count at its trailing edge.
+const HEADER_COUNT_GAP: f32 = 6.0;
 /// Lanes shown per group before the rest fold behind the band's show-all toggle.
 const TOP_N_PER_GROUP: usize = 12;
 
@@ -1350,54 +1352,65 @@ fn paint_thread_labels(
     }
 }
 
-/// A header row's gutter label: its name, then how many of its lanes the chart
-/// draws of those it holds — the total alone where it draws none.
-fn header_text(name: &str, shown: Option<usize>, total: usize) -> String {
+/// How many of a header row's lanes the chart draws of those it holds — the
+/// total alone where it draws none.
+fn header_count(shown: Option<usize>, total: usize) -> String {
     match shown {
-        Some(shown) => format!("{name}  {shown}/{total}"),
-        None => format!("{name}  {total}"),
+        Some(shown) => format!("{shown}/{total}"),
+        None => format!("{total}"),
     }
 }
 
-/// Paints `text` centred in the [`GROUP_BAND_HEIGHT`] header row at `row_top`,
-/// left-aligned at the gutter's text inset plus `indent` and truncated to what the
-/// gutter leaves free of that indent and of `reserved` pixels at its right edge.
-/// Returns the row's top in screen space, and nothing where the flame region
-/// scrolls the row out of view.
-#[allow(clippy::too_many_arguments)]
-fn paint_header_label(
+/// A header row of the flame chart's gutter.
+struct HeaderRow<'a> {
+    /// Where the row sits in the chart, before the lane scroll moves it.
+    top: f32,
+    name: &'a str,
+    count: &'a str,
+    /// Inset of the name from the gutter's text inset, one nesting step per level.
+    indent: f32,
+    /// Width held at the row's trailing edge for an icon drawn over it.
+    reserved: f32,
+    color: Hsla,
+}
+
+/// Paints a header row: its count set against the gutter's trailing edge, clear
+/// of what the row reserves there, and its name truncated into the width left
+/// between the two. Returns the row's top in screen space, and nothing where the
+/// flame region scrolls the row out of view.
+fn paint_header_row(
     g: &GutterPaint,
     regions: Regions,
     scroll_y: f32,
-    row_top: f32,
-    text: &str,
-    indent: f32,
-    reserved: f32,
-    color: Hsla,
+    row: HeaderRow,
     window: &mut Window,
     cx: &mut App,
 ) -> Option<f32> {
-    let top = regions.flame_top + row_top - scroll_y;
+    let top = regions.flame_top + row.top - scroll_y;
     if top + GROUP_BAND_HEIGHT < regions.flame_top || top > regions.flame_bottom {
         return None;
     }
     let ty = top + (GROUP_BAND_HEIGHT - GUTTER_LABEL_SIZE) / 2.0;
-    let line = bviz_ui_components::shape_truncated(
-        text,
-        g.avail - indent - reserved,
-        g.font.clone(),
-        g.fs,
-        color,
-        window,
-    );
-    let _ = line.paint(
-        point(px(g.left + SLICE_TEXT_PAD + indent), px(ty)),
-        g.fs,
-        TextAlign::Left,
-        None,
-        window,
-        cx,
-    );
+    let shape = |text: &str, avail: f32, window: &mut Window| {
+        bviz_ui_components::shape_truncated(text, avail, g.font.clone(), g.fs, row.color, window)
+    };
+    let count = shape(row.count, g.avail - row.indent - row.reserved, window);
+    let count_width = f32::from(count.width());
+    let name_avail = g.avail - row.indent - row.reserved - count_width - HEADER_COUNT_GAP;
+    let name = shape(row.name, name_avail, window);
+    let paint = |line: gpui::ShapedLine, x: f32, window: &mut Window, cx: &mut App| {
+        let _ = line.paint(
+            point(px(x), px(ty)),
+            g.fs,
+            TextAlign::Left,
+            None,
+            window,
+            cx,
+        );
+    };
+    paint(name, g.left + SLICE_TEXT_PAD + row.indent, window, cx);
+    let count_x = g.left + g.width - SLICE_TEXT_PAD - row.reserved - count_width;
+    paint(count, count_x, window, cx);
     Some(top)
 }
 
@@ -1418,26 +1431,24 @@ fn paint_group_bands(
     for band in &chrome.bands {
         let show_icon = band.capped && !band.collapsed;
         let chevron = if band.collapsed { "▸" } else { "▾" };
-        let text = header_text(
-            &format!("{chevron} {}", group_label(band.class)),
-            (!band.collapsed).then_some(band.shown),
-            band.total,
-        );
-        // Keep the label clear of the icon when one is drawn.
-        let reserved = if show_icon {
-            GROUP_ICON + SLICE_TEXT_PAD
-        } else {
-            0.0
-        };
-        let Some(top) = paint_header_label(
+        let name = format!("{chevron} {}", group_label(band.class));
+        let count = header_count((!band.collapsed).then_some(band.shown), band.total);
+        let Some(top) = paint_header_row(
             g,
             regions,
             scroll_y,
-            band.top,
-            &text,
-            0.0,
-            reserved,
-            palette.label.into(),
+            HeaderRow {
+                top: band.top,
+                name: &name,
+                count: &count,
+                indent: 0.0,
+                reserved: if show_icon {
+                    GROUP_ICON + SLICE_TEXT_PAD
+                } else {
+                    0.0
+                },
+                color: palette.label.into(),
+            },
             window,
             cx,
         ) else {
@@ -1474,16 +1485,19 @@ fn paint_family_bands(
     cx: &mut App,
 ) {
     for family in &chrome.families {
-        let text = header_text(&family.name, Some(family.shown), family.total);
-        paint_header_label(
+        let count = header_count(Some(family.shown), family.total);
+        paint_header_row(
             g,
             regions,
             scroll_y,
-            family.top,
-            &text,
-            FAMILY_LABEL_INDENT,
-            0.0,
-            g.palette.muted_label.into(),
+            HeaderRow {
+                top: family.top,
+                name: &family.name,
+                count: &count,
+                indent: FAMILY_LABEL_INDENT,
+                reserved: 0.0,
+                color: g.palette.muted_label.into(),
+            },
             window,
             cx,
         );
