@@ -46,10 +46,10 @@ use bviz_ui_shell::Chrome;
 use clap::Parser;
 use gpui::{
     AnyElement, App, AvailableSpace, Bounds, ContentMask, Context, Div, Edges, Element, ElementId,
-    Entity, FocusHandle, GlobalElementId, InspectorElementId, IntoElement, LayoutId, MouseButton,
-    MouseDownEvent, Pixels, Point, Position, Render, ScrollHandle, SharedString, Stateful, Style,
-    Subscription, Task, TextAlign, TransformationMatrix, Window, div, fill, point, prelude::*, px,
-    relative, size,
+    Entity, FocusHandle, GlobalElementId, Hsla, InspectorElementId, IntoElement, LayoutId,
+    MouseButton, MouseDownEvent, Pixels, Point, Position, Render, ScrollHandle, SharedString,
+    Stateful, Style, Subscription, Task, TextAlign, TransformationMatrix, Window, div, fill, point,
+    prelude::*, px, relative, size,
 };
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -1350,6 +1350,57 @@ fn paint_thread_labels(
     }
 }
 
+/// A header row's gutter label: its name, then how many of its lanes the chart
+/// draws of those it holds — the total alone where it draws none.
+fn header_text(name: &str, shown: Option<usize>, total: usize) -> String {
+    match shown {
+        Some(shown) => format!("{name}  {shown}/{total}"),
+        None => format!("{name}  {total}"),
+    }
+}
+
+/// Paints `text` centred in the [`GROUP_BAND_HEIGHT`] header row at `row_top`,
+/// left-aligned at the gutter's text inset plus `indent` and truncated to what the
+/// gutter leaves free of that indent and of `reserved` pixels at its right edge.
+/// Returns the row's top in screen space, and nothing where the flame region
+/// scrolls the row out of view.
+#[allow(clippy::too_many_arguments)]
+fn paint_header_label(
+    g: &GutterPaint,
+    regions: Regions,
+    scroll_y: f32,
+    row_top: f32,
+    text: &str,
+    indent: f32,
+    reserved: f32,
+    color: Hsla,
+    window: &mut Window,
+    cx: &mut App,
+) -> Option<f32> {
+    let top = regions.flame_top + row_top - scroll_y;
+    if top + GROUP_BAND_HEIGHT < regions.flame_top || top > regions.flame_bottom {
+        return None;
+    }
+    let ty = top + (GROUP_BAND_HEIGHT - GUTTER_LABEL_SIZE) / 2.0;
+    let line = bviz_ui_components::shape_truncated(
+        text,
+        g.avail - indent - reserved,
+        g.font.clone(),
+        g.fs,
+        color,
+        window,
+    );
+    let _ = line.paint(
+        point(px(g.left + SLICE_TEXT_PAD + indent), px(ty)),
+        g.fs,
+        TextAlign::Left,
+        None,
+        window,
+        cx,
+    );
+    Some(top)
+}
+
 /// Paints each group header band's chevron, class name, and shown/total lane
 /// count; a capped, expanded group shows a caret-double icon at the gutter's right
 /// edge — down to show every lane, up to show only the leading ones.
@@ -1363,51 +1414,35 @@ fn paint_group_bands(
 ) {
     let gutter_left = g.left;
     let gutter_width = g.width;
-    let avail = g.avail;
-    let font = &g.font;
-    let fs = g.fs;
     let palette = g.palette;
-    let strong = palette.label.into();
     for band in &chrome.bands {
-        let top = regions.flame_top + band.top - scroll_y;
-        if top + GROUP_BAND_HEIGHT < regions.flame_top || top > regions.flame_bottom {
-            continue;
-        }
         let show_icon = band.capped && !band.collapsed;
         let chevron = if band.collapsed { "▸" } else { "▾" };
-        let text = if band.collapsed {
-            format!("{chevron} {}  {}", group_label(band.class), band.total)
-        } else {
-            format!(
-                "{chevron} {}  {}/{}",
-                group_label(band.class),
-                band.shown,
-                band.total
-            )
-        };
-        let ty = top + (GROUP_BAND_HEIGHT - GUTTER_LABEL_SIZE) / 2.0;
-        // Keep the label clear of the icon when one is drawn.
-        let label_avail = if show_icon {
-            avail - GROUP_ICON - SLICE_TEXT_PAD
-        } else {
-            avail
-        };
-        let line = bviz_ui_components::shape_truncated(
-            &text,
-            label_avail,
-            font.clone(),
-            fs,
-            strong,
-            window,
+        let text = header_text(
+            &format!("{chevron} {}", group_label(band.class)),
+            (!band.collapsed).then_some(band.shown),
+            band.total,
         );
-        let _ = line.paint(
-            point(px(gutter_left + SLICE_TEXT_PAD), px(ty)),
-            fs,
-            TextAlign::Left,
-            None,
+        // Keep the label clear of the icon when one is drawn.
+        let reserved = if show_icon {
+            GROUP_ICON + SLICE_TEXT_PAD
+        } else {
+            0.0
+        };
+        let Some(top) = paint_header_label(
+            g,
+            regions,
+            scroll_y,
+            band.top,
+            &text,
+            0.0,
+            reserved,
+            palette.label.into(),
             window,
             cx,
-        );
+        ) else {
+            continue;
+        };
         if show_icon {
             let name = if band.show_all {
                 "caret-double-up"
@@ -1439,25 +1474,16 @@ fn paint_family_bands(
     cx: &mut App,
 ) {
     for family in &chrome.families {
-        let top = regions.flame_top + family.top - scroll_y;
-        if top + GROUP_BAND_HEIGHT < regions.flame_top || top > regions.flame_bottom {
-            continue;
-        }
-        let text = format!("{}  {}/{}", family.name, family.shown, family.total);
-        let ty = top + (GROUP_BAND_HEIGHT - GUTTER_LABEL_SIZE) / 2.0;
-        let line = bviz_ui_components::shape_truncated(
+        let text = header_text(&family.name, Some(family.shown), family.total);
+        paint_header_label(
+            g,
+            regions,
+            scroll_y,
+            family.top,
             &text,
-            g.avail - FAMILY_LABEL_INDENT,
-            g.font.clone(),
-            g.fs,
+            FAMILY_LABEL_INDENT,
+            0.0,
             g.palette.muted_label.into(),
-            window,
-        );
-        let _ = line.paint(
-            point(px(g.left + SLICE_TEXT_PAD + FAMILY_LABEL_INDENT), px(ty)),
-            g.fs,
-            TextAlign::Left,
-            None,
             window,
             cx,
         );

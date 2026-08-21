@@ -1138,13 +1138,8 @@ fn slice_paint(
                     palette.gridline,
                 ));
             }
-            let header_rows = chrome
-                .bands
-                .iter()
-                .map(|band| band.top)
-                .chain(chrome.families.iter().map(|family| family.top));
-            for row_top in header_rows {
-                let y = regions.flame_top + row_top - scroll;
+            for header in chart_rows(&chrome).filter(|row| row.kind.is_header()) {
+                let y = regions.flame_top + header.top - scroll;
                 window.paint_quad(fill(
                     Bounds::new(
                         point(px(regions.content_left), px(y)),

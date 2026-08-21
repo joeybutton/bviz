@@ -81,6 +81,11 @@ impl RowKind {
         }
     }
 
+    /// Whether the row heads the rows under it rather than drawing a lane.
+    pub(crate) fn is_header(self) -> bool {
+        !matches!(self, RowKind::Lane { .. })
+    }
+
     /// Whether both name the same row of the document, whatever place the chart
     /// currently stacks it in.
     fn same_row(self, other: Self) -> bool {
