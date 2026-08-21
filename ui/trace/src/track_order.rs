@@ -2,13 +2,49 @@ use bviz_trace_profile::{Profile, ThreadTrack, track_family};
 use std::cmp::{Ordering, Reverse};
 use std::ops::Range;
 
+/// The order a lane-class group stands its tracks in, in the flame chart's
+/// gutter and the tracks menu alike.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum TrackSort {
+    /// Pool by pool, each pool's members under their names.
+    #[default]
+    Name,
+    /// Under the share of the profile each track holds, the heaviest leading,
+    /// whichever pools they come from.
+    Weight,
+}
+
+impl TrackSort {
+    /// Stands `tracks` (indices into `threads`) in this order.
+    pub(crate) fn order(self, profile: &Profile, threads: &[ThreadTrack], tracks: &mut [usize]) {
+        match self {
+            TrackSort::Name => sort_tracks_by_name(profile, threads, tracks),
+            TrackSort::Weight => sort_tracks_by_activity(profile, threads, tracks),
+        }
+    }
+
+    /// Drops all but `budget` of `tracks`, sampling as this order reads them:
+    /// under the name order every pool holds a seat, so a light pool is not
+    /// squeezed out of a list that gathers it; under the weight order the
+    /// busiest take the seats outright, the same measure the order itself runs
+    /// on. Survivors keep the order they arrived in.
+    pub(crate) fn sample(
+        self,
+        profile: &Profile,
+        threads: &[ThreadTrack],
+        tracks: &mut Vec<usize>,
+        budget: usize,
+    ) {
+        match self {
+            TrackSort::Name => retain_busiest_per_family(profile, threads, tracks, budget),
+            TrackSort::Weight => retain_busiest(profile, threads, tracks, budget),
+        }
+    }
+}
+
 /// Orders `tracks` (indices into `threads`) busiest first — most slices first,
 /// ties broken by tid so the order is stable frame to frame.
-pub(crate) fn sort_tracks_by_activity(
-    profile: &Profile,
-    threads: &[ThreadTrack],
-    tracks: &mut [usize],
-) {
+fn sort_tracks_by_activity(profile: &Profile, threads: &[ThreadTrack], tracks: &mut [usize]) {
     tracks.sort_by(|&a, &b| {
         profile
             .slices(&threads[b])
@@ -21,12 +57,7 @@ pub(crate) fn sort_tracks_by_activity(
 /// Drops all but the `cap` busiest of `tracks`, leaving the survivors in the
 /// order they arrived in, so a capped list is a sample of the group's weight
 /// rather than a prefix of its names.
-pub(crate) fn retain_busiest(
-    profile: &Profile,
-    threads: &[ThreadTrack],
-    tracks: &mut Vec<usize>,
-    cap: usize,
-) {
+fn retain_busiest(profile: &Profile, threads: &[ThreadTrack], tracks: &mut Vec<usize>, cap: usize) {
     if tracks.len() <= cap {
         return;
     }
@@ -73,7 +104,7 @@ struct Pool {
 /// so a pool holds a share of the seats near its share of the work and no pool
 /// is squeezed out while seats last. Survivors keep the order they arrived in,
 /// and a pool seats its busiest members.
-pub(crate) fn retain_busiest_per_family(
+fn retain_busiest_per_family(
     profile: &Profile,
     threads: &[ThreadTrack],
     tracks: &mut Vec<usize>,

@@ -1,14 +1,15 @@
 use crate::groups::{GROUP_ORDER, default_collapsed_groups, group_label};
 use crate::model::TraceModel;
 use crate::theme::Palette;
+use crate::track_order::TrackSort;
 use crate::{
     GUTTER_LABEL_SIZE, RULER_HEIGHT, Source, TRACKS_MENU_MAX_LIST, TRACKS_MENU_WIDTH, TraceView,
     set_list_thumb, thumb_offset,
 };
 use bviz_trace_profile::{LaneClass, Profile};
 use bviz_ui_components::{
-    Axis, DEFAULT_MIN_THUMB, DragEnd, SCROLLBAR_THICKNESS, Scrollbar, TextInput, overlay_canvas,
-    track_drag,
+    Axis, Button, DEFAULT_MIN_THUMB, DragEnd, SCROLLBAR_THICKNESS, Scrollbar, TextInput,
+    overlay_canvas, track_drag,
 };
 use gpui::{
     AnyElement, App, Bounds, Context, Entity, IntoElement, MouseButton, MouseDownEvent, Pixels,
@@ -154,8 +155,8 @@ impl TracksMenu {
         Some(deferred(div().child(backdrop).child(menu)))
     }
 
-    /// Tracks under their lane-class group headers, each group's tracks ordered
-    /// by pool and name — the same grouping and order the chart lays out.
+    /// Tracks under their lane-class group headers, each group's tracks in the
+    /// standing [`TrackSort`] — the same grouping and order the chart lays out.
     fn menu_rows(
         &self,
         profile: &Profile,
@@ -179,7 +180,10 @@ impl TracksMenu {
             if tracks.is_empty() {
                 continue;
             }
-            crate::track_order::sort_tracks_by_name(profile, threads, &mut tracks);
+            self.model
+                .read(cx)
+                .track_sort()
+                .order(profile, threads, &mut tracks);
             let folded = self.collapsed_groups.get(group).copied().unwrap_or(false);
             rows.push(
                 self.group_row(group, class, &tracks, folded, palette, cx)
@@ -266,6 +270,45 @@ impl TracksMenu {
             )
     }
 
+    /// The control choosing the order the chart's lanes and this list stand a
+    /// group's tracks in, the standing one filled in.
+    fn sort_row(&self, palette: Palette, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let standing = self.model.read(cx).track_sort();
+        let choice = |id: &'static str, label: &'static str, sort: TrackSort| {
+            Button::new(
+                id,
+                cx.listener(move |this, _, _, cx| this.choose_sort(sort, cx)),
+            )
+            .ghost()
+            .compact()
+            .selected(standing == sort)
+            .label(label)
+        };
+        let by_name = choice("tracks-sort-name", "Name", TrackSort::Name);
+        let by_weight = choice("tracks-sort-weight", "Busiest", TrackSort::Weight);
+        div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_1()
+            .mx_1()
+            .px_2()
+            .py_1()
+            .child(div().text_color(palette.muted_label).child("Order"))
+            .child(by_name)
+            .child(by_weight)
+    }
+
+    /// Stands every group's tracks in `sort`, reflowing the timeline over the
+    /// restacked lanes.
+    fn choose_sort(&mut self, sort: TrackSort, cx: &mut Context<Self>) {
+        if !self.model.update(cx, |m, _| m.set_track_sort(sort)) {
+            return;
+        }
+        self.reflow_timeline(cx);
+        cx.notify();
+    }
+
     /// A track row: a visibility checkbox and the track name, toggling the track
     /// on click.
     fn track_row(
@@ -314,8 +357,9 @@ impl TracksMenu {
             )
     }
 
-    /// The menu container over the built rows: the filter field, a show/hide-all
-    /// toggle, and the scrollable track list with its scroll bar. Clicks inside
+    /// The menu container over the built rows: the filter field, the order
+    /// control, a show/hide-all toggle, and the scrollable track list with its
+    /// scroll bar. Clicks inside
     /// must not reach the backdrop and close it; a press on the scroll bar grabs
     /// its thumb.
     fn chrome(
@@ -348,6 +392,7 @@ impl TracksMenu {
                 }),
             )
             .child(div().p_1().child(self.filter.clone()))
+            .child(self.sort_row(palette, cx))
             .child({
                 let (nvis, ntot) = self.model.read(cx).visible_count();
                 let all_visible = ntot > 0 && nvis == ntot;

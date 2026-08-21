@@ -1,4 +1,4 @@
-use crate::track_order::{family_runs, retain_busiest_per_family, sort_tracks_by_name};
+use crate::track_order::{TrackSort, family_runs, sort_tracks_by_name};
 use crate::{GROUP_BAND_HEIGHT, METRICS, TOP_N_PER_GROUP};
 use bviz_trace_layout::{Lane, LaneLayout};
 use bviz_trace_profile::{LaneClass, Profile};
@@ -80,9 +80,9 @@ pub(crate) enum RowKind {
         group: usize,
         family: usize,
         track: usize,
-        /// The lane's place in its pool's name order, which is fixed for a
-        /// profile: `track` names the row itself, `rank` the place another lane
-        /// takes over when the chart stops drawing that track.
+        /// The lane's place in the run of lanes it stands in: `track` names the
+        /// row itself, `rank` the place another lane takes over when the chart
+        /// stops drawing that track.
         rank: usize,
     },
 }
@@ -225,21 +225,86 @@ fn class_pools<'a>(profile: &'a Profile, class: LaneClass) -> Vec<(&'a str, Vec<
     pools
 }
 
+/// The pool index a lane carries where its group's order does not gather pools
+/// into runs, leaving the group one unheaded run.
+const UNPOOLED: usize = 0;
+
+/// A run of a group's drawn lanes standing under one pool index.
+struct PoolRun<'a> {
+    family: usize,
+    /// The pool's name and how many of its tracks are visible, for the header
+    /// leading the run; `None` where nothing heads it.
+    header: Option<(&'a str, usize)>,
+    lanes: &'a [usize],
+}
+
+/// The runs `tracks` — a group's drawn lanes, in `sort`'s order — falls into.
+/// The name order gathers each pool into a run of its own, headed once the group
+/// holds more than one pool; the weight order interleaves the pools, so nothing
+/// heads its lanes and they form a single run.
+fn pool_runs<'a>(
+    sort: TrackSort,
+    pools: &'a [(&'a str, Vec<usize>)],
+    tracks: &'a [usize],
+    shows: impl Fn(usize) -> bool,
+) -> Vec<PoolRun<'a>> {
+    match sort {
+        TrackSort::Weight => vec![PoolRun {
+            family: UNPOOLED,
+            header: None,
+            lanes: tracks,
+        }],
+        TrackSort::Name => {
+            let occupied: Vec<(usize, &str, usize)> = pools
+                .iter()
+                .enumerate()
+                .map(|(family, (name, members))| {
+                    (family, *name, members.iter().filter(|&&t| shows(t)).count())
+                })
+                .filter(|&(_, _, visible_members)| visible_members > 0)
+                .collect();
+            let headed = occupied.len() > 1;
+            let mut runs = Vec::with_capacity(occupied.len());
+            let mut seated = tracks;
+            for (family, name, visible_members) in occupied {
+                let in_pool = pools[family].1.as_slice();
+                let seats = seated.iter().take_while(|t| in_pool.contains(t)).count();
+                let (lanes, rest) = seated.split_at(seats);
+                seated = rest;
+                runs.push(PoolRun {
+                    family,
+                    header: headed.then_some((name, visible_members)),
+                    lanes,
+                });
+            }
+            runs
+        }
+    }
+}
+
+/// The viewer-held state a grouped lane layout is stacked under.
+pub(crate) struct GroupLayoutState<'a> {
+    /// Which tracks the chart draws, indexed by `Profile::threads`; a track past
+    /// the end is drawn.
+    pub(crate) visible: &'a [bool],
+    pub(crate) collapsed: &'a [bool; GROUP_ORDER.len()],
+    /// Which groups draw every lane rather than a sample of [`TOP_N_PER_GROUP`].
+    pub(crate) show_all: &'a [bool; GROUP_ORDER.len()],
+    pub(crate) sort: TrackSort,
+}
+
 /// The lane layout the flame chart draws: visible tracks sorted into lane-class
-/// groups, each group behind a header band and ordered by [`sort_tracks_by_name`],
-/// so a collapsed group folds its lanes away and a capped one keeps its busiest
-/// in that same order. A group holding several pools heads each pool's lanes with
-/// a [`FamilyBand`], which a group of one pool has no use for.
+/// groups, each group behind a header band and ordered by [`GroupLayoutState`]'s
+/// sort, so a collapsed group folds its lanes away and a capped one keeps its
+/// sample in that same order. A pool the order gathers into a run of its own is
+/// headed by a [`FamilyBand`], which a group of one pool has no use for.
 ///
 /// Returns the restacked [`LaneLayout`] (its `lanes` tops leave room for the
-/// bands) and the [`GroupChrome`] painted over it. A track absent from `visible`
-/// defaults to shown.
+/// bands) and the [`GroupChrome`] painted over it.
 pub(crate) fn build_grouped_layout(
     profile: &Profile,
     full: &LaneLayout,
-    visible: &[bool],
-    collapsed: &[bool; GROUP_ORDER.len()],
-    show_all: &[bool; GROUP_ORDER.len()],
+    state: &GroupLayoutState,
 ) -> (LaneLayout, GroupChrome) {
     let threads = profile.threads();
     let mut lanes = Vec::with_capacity(threads.len());
@@ -250,11 +315,11 @@ pub(crate) fn build_grouped_layout(
     };
     let mut top = 0.0;
     for (group, &class) in GROUP_ORDER.iter().enumerate() {
-        let shows = |&t: &usize| visible.get(t).copied().unwrap_or(true);
+        let shows = |t: usize| state.visible.get(t).copied().unwrap_or(true);
         let pools = class_pools(profile, class);
         let mut tracks: Vec<usize> = pools
             .iter()
-            .flat_map(|(_, members)| members.iter().copied().filter(shows))
+            .flat_map(|(_, members)| members.iter().copied().filter(|&t| shows(t)))
             .collect();
         if tracks.is_empty() {
             continue;
@@ -266,49 +331,39 @@ pub(crate) fn build_grouped_layout(
             top: band_top,
             kind: RowKind::Band { group },
         });
-        let is_collapsed = collapsed[group];
+        let is_collapsed = state.collapsed[group];
         let capped = total > TOP_N_PER_GROUP;
         let mut shown = 0;
         if !is_collapsed {
-            if !show_all[group] {
-                retain_busiest_per_family(profile, threads, &mut tracks, TOP_N_PER_GROUP);
+            state.sort.order(profile, threads, &mut tracks);
+            if !state.show_all[group] {
+                state
+                    .sort
+                    .sample(profile, threads, &mut tracks, TOP_N_PER_GROUP);
             }
             shown = tracks.len();
-            let occupied: Vec<(usize, &str, usize)> = pools
-                .iter()
-                .enumerate()
-                .map(|(family, (name, members))| {
-                    (family, *name, members.iter().copied().filter(shows).count())
-                })
-                .filter(|&(_, _, visible_members)| visible_members > 0)
-                .collect();
-            let headed = occupied.len() > 1;
-            let mut seated = &tracks[..];
-            for (family, name, visible_members) in occupied {
-                let in_pool = pools[family].1.as_slice();
-                let seats = seated.iter().take_while(|&t| in_pool.contains(t)).count();
-                let (pool_lanes, rest) = seated.split_at(seats);
-                seated = rest;
-                if headed {
-                    chrome.rows.push(ChartRow {
-                        top,
-                        kind: RowKind::Family { group, family },
-                    });
+            for run in pool_runs(state.sort, &pools, &tracks, shows) {
+                if let Some((name, visible_members)) = run.header {
+                    let kind = RowKind::Family {
+                        group,
+                        family: run.family,
+                    };
+                    chrome.rows.push(ChartRow { top, kind });
                     chrome.families.push(FamilyBand {
                         name: name.to_owned(),
                         top,
-                        shown: seats,
+                        shown: run.lanes.len(),
                         total: visible_members,
                     });
                     top += GROUP_BAND_HEIGHT + METRICS.lane_gap;
                 }
-                for (rank, &t) in pool_lanes.iter().enumerate() {
+                for (rank, &t) in run.lanes.iter().enumerate() {
                     let lane = full.lanes[t];
                     chrome.rows.push(ChartRow {
                         top,
                         kind: RowKind::Lane {
                             group,
-                            family,
+                            family: run.family,
                             track: t,
                             rank,
                         },
@@ -326,7 +381,7 @@ pub(crate) fn build_grouped_layout(
             shown,
             total,
             capped,
-            show_all: show_all[group],
+            show_all: state.show_all[group],
         });
     }
     let layout = LaneLayout {
@@ -511,20 +566,36 @@ mod tests {
         assert_eq!(chart_rows(&no_bands).count(), 0);
     }
 
-    /// The rows of the chart `visible` and `collapsed` build out of [`fixture`].
+    /// The chart `visible` and `collapsed` build out of a fixture, every capped
+    /// group sampled, with its tracks standing in `sort`.
+    fn built_in(
+        profile: &Profile,
+        full: &LaneLayout,
+        visible: &[bool],
+        collapsed: &[bool; GROUP_ORDER.len()],
+        sort: TrackSort,
+    ) -> (LaneLayout, GroupChrome) {
+        build_grouped_layout(
+            profile,
+            full,
+            &GroupLayoutState {
+                visible,
+                collapsed,
+                show_all: &[false; GROUP_ORDER.len()],
+                sort,
+            },
+        )
+    }
+
+    /// The rows of the chart `visible` and `collapsed` build out of [`fixture`],
+    /// under the name order.
     fn built_rows(
         profile: &Profile,
         full: &LaneLayout,
         visible: &[bool],
         collapsed: &[bool; GROUP_ORDER.len()],
     ) -> (LaneLayout, GroupChrome) {
-        build_grouped_layout(
-            profile,
-            full,
-            visible,
-            collapsed,
-            &[false; GROUP_ORDER.len()],
-        )
+        built_in(profile, full, visible, collapsed, TrackSort::Name)
     }
 
     /// The first lane row that has another lane of its group above it, so a
@@ -1018,9 +1089,12 @@ mod tests {
         let (layout, chrome) = build_grouped_layout(
             &profile,
             &full,
-            &visible,
-            &[false; GROUP_ORDER.len()],
-            &every_lane,
+            &GroupLayoutState {
+                visible: &visible,
+                collapsed: &[false; GROUP_ORDER.len()],
+                show_all: &every_lane,
+                sort: TrackSort::Name,
+            },
         );
         assert_eq!(
             pool_headers(&chrome),
@@ -1083,8 +1157,16 @@ mod tests {
         let expanded = [false; GROUP_ORDER.len()];
         let mut every_lane = expanded;
         every_lane[group_of(LaneClass::Execution)] = true;
-        let (_, shown_all) =
-            build_grouped_layout(&profile, &full, &visible, &expanded, &every_lane);
+        let (_, shown_all) = build_grouped_layout(
+            &profile,
+            &full,
+            &GroupLayoutState {
+                visible: &visible,
+                collapsed: &expanded,
+                show_all: &every_lane,
+                sort: TrackSort::Name,
+            },
+        );
         let rows: Vec<ChartRow> = chart_rows(&shown_all).collect();
         let header = *rows
             .iter()
@@ -1122,16 +1204,124 @@ mod tests {
         assert_eq!(names, busiest);
     }
 
+    /// The chart of a fixture with every lane drawn, its groups standing their
+    /// tracks in `sort`.
+    fn built_showing_all(
+        profile: &Profile,
+        full: &LaneLayout,
+        visible: &[bool],
+        sort: TrackSort,
+    ) -> (LaneLayout, GroupChrome) {
+        build_grouped_layout(
+            profile,
+            full,
+            &GroupLayoutState {
+                visible,
+                collapsed: &[false; GROUP_ORDER.len()],
+                show_all: &[true; GROUP_ORDER.len()],
+                sort,
+            },
+        )
+    }
+
+    /// The tracks `group` draws, in the order the chart stacks them.
+    fn drawn_tracks(rows: &[ChartRow], group: usize) -> Vec<usize> {
+        lanes_of(rows, group)
+            .iter()
+            .map(|row| track_at(*row))
+            .collect()
+    }
+
     #[test]
-    fn a_built_layout_stacks_every_band_and_lane_once() {
-        let (profile, full, visible) = fixture();
-        let (layout, chrome) = build_grouped_layout(
+    fn the_weight_order_stacks_a_group_busiest_first_and_heads_no_pool() {
+        let (profile, full, visible) = pooled_fixture();
+        let (_, chrome) = built_showing_all(&profile, &full, &visible, TrackSort::Weight);
+        let threads = profile.threads();
+        let mut busiest: Vec<usize> = (0..threads.len())
+            .filter(|&t| threads[t].lane_class == LaneClass::Execution)
+            .collect();
+        TrackSort::Weight.order(&profile, threads, &mut busiest);
+
+        let rows: Vec<ChartRow> = chart_rows(&chrome).collect();
+        assert_eq!(drawn_tracks(&rows, group_of(LaneClass::Execution)), busiest);
+        assert!(
+            chrome.families.is_empty(),
+            "a group of two pools, headed by neither"
+        );
+        assert!(
+            rows.iter().all(|row| !matches!(
+                row.kind,
+                RowKind::Lane { family, .. } if family != UNPOOLED
+            )),
+            "{rows:?}"
+        );
+    }
+
+    #[test]
+    fn the_weight_order_seats_a_capped_group_by_weight_alone() {
+        let (profile, full, visible) = pooled_fixture();
+        let (_, chrome) = built_in(
             &profile,
             &full,
             &visible,
-            &default_collapsed_groups(),
             &[false; GROUP_ORDER.len()],
+            TrackSort::Weight,
         );
+        let rows: Vec<ChartRow> = chart_rows(&chrome).collect();
+        let drawn = drawn_tracks(&rows, group_of(LaneClass::Execution));
+        assert_eq!(drawn.len(), TOP_N_PER_GROUP);
+        let names: Vec<&str> = drawn
+            .iter()
+            .map(|&t| profile.str(profile.threads()[t].name))
+            .collect();
+        assert!(
+            names.iter().all(|name| name.starts_with(BUSY_POOL.0)),
+            "every seat goes to the pool holding the weight: {names:?}"
+        );
+        assert!(chrome.families.is_empty());
+    }
+
+    #[test]
+    fn changing_the_order_restacks_a_group_without_moving_a_track_out_of_it() {
+        let (profile, full, visible) = pooled_fixture();
+        let (_, by_name) = built_showing_all(&profile, &full, &visible, TrackSort::Name);
+        let (_, by_weight) = built_showing_all(&profile, &full, &visible, TrackSort::Weight);
+        let named: Vec<ChartRow> = chart_rows(&by_name).collect();
+        let weighed: Vec<ChartRow> = chart_rows(&by_weight).collect();
+        for group in 0..GROUP_ORDER.len() {
+            let sorted = |rows: &[ChartRow]| {
+                let mut tracks = drawn_tracks(rows, group);
+                tracks.sort_unstable();
+                tracks
+            };
+            assert_eq!(sorted(&named), sorted(&weighed), "group {group}");
+        }
+        let execution = group_of(LaneClass::Execution);
+        assert_ne!(
+            drawn_tracks(&named, execution),
+            drawn_tracks(&weighed, execution),
+            "the same tracks, stacked in a different order"
+        );
+    }
+
+    #[test]
+    fn every_offset_down_a_weight_ordered_chart_round_trips_through_its_anchor() {
+        let (profile, full, visible) = pooled_fixture();
+        let (layout, chrome) = built_in(
+            &profile,
+            &full,
+            &visible,
+            &[false; GROUP_ORDER.len()],
+            TrackSort::Weight,
+        );
+        let rows: Vec<ChartRow> = chart_rows(&chrome).collect();
+        assert_offsets_round_trip(&rows, layout.total_height);
+    }
+
+    #[test]
+    fn a_built_layout_stacks_every_band_and_lane_once() {
+        let (profile, full, visible) = fixture();
+        let (layout, chrome) = built_rows(&profile, &full, &visible, &default_collapsed_groups());
         let band = |class| chrome.bands.iter().find(|b| b.class == class);
         let execution = band(LaneClass::Execution).expect("an execution band");
         assert!(execution.capped);
@@ -1175,13 +1365,7 @@ mod tests {
     fn flame_total_height_ends_at_the_last_row() {
         let (profile, full, visible) = fixture();
         let build = |visible: &[bool], collapsed: &[bool; GROUP_ORDER.len()]| {
-            build_grouped_layout(
-                &profile,
-                &full,
-                visible,
-                collapsed,
-                &[false; GROUP_ORDER.len()],
-            )
+            built_rows(&profile, &full, visible, collapsed)
         };
         let expanded = [false; GROUP_ORDER.len()];
         let middle_collapsed = default_collapsed_groups();
