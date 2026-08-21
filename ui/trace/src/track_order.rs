@@ -1,5 +1,6 @@
 use bviz_trace_profile::{Profile, ThreadTrack, track_family};
-use std::cmp::Ordering;
+use std::cmp::{Ordering, Reverse};
+use std::ops::Range;
 
 /// Orders `tracks` (indices into `threads`) busiest first — most slices first,
 /// ties broken by tid so the order is stable frame to frame.
@@ -37,6 +38,120 @@ pub(crate) fn retain_busiest(
         kept[t] = true;
     }
     tracks.retain(|&t| kept[t]);
+}
+
+/// The pools `tracks` runs through, each as its family and the number of members
+/// it contributes, in track order. [`sort_tracks_by_name`] gathers a pool into a
+/// single run, so over tracks in that order every pool appears once.
+pub(crate) fn family_runs<'a>(
+    profile: &'a Profile,
+    threads: &'a [ThreadTrack],
+    tracks: &[usize],
+) -> Vec<(&'a str, usize)> {
+    let mut runs: Vec<(&str, usize)> = Vec::new();
+    for &t in tracks {
+        let family = track_family(threads[t].tid, profile.str(threads[t].name));
+        match runs.last_mut() {
+            Some((run, members)) if *run == family => *members += 1,
+            _ => runs.push((family, 1)),
+        }
+    }
+    runs
+}
+
+/// A pool's standing in the distribution of a capped group's seats.
+struct Pool {
+    /// The pool's members, as a run of the group's track list.
+    members: Range<usize>,
+    /// Slices over the pool's members, the weight its claim scales with.
+    weight: usize,
+    seats: usize,
+}
+
+/// Drops all but `budget` of `tracks`, spreading the budget over the pools they
+/// belong to by the D'Hondt highest-averages rule over each pool's slice count,
+/// so a pool holds a share of the seats near its share of the work and no pool
+/// is squeezed out while seats last. Survivors keep the order they arrived in,
+/// and a pool seats its busiest members.
+pub(crate) fn retain_busiest_per_family(
+    profile: &Profile,
+    threads: &[ThreadTrack],
+    tracks: &mut Vec<usize>,
+    budget: usize,
+) {
+    if tracks.len() <= budget {
+        return;
+    }
+    let runs = family_runs(profile, threads, tracks);
+    let mut pools = Vec::with_capacity(runs.len());
+    let mut start = 0;
+    for (_, count) in runs {
+        let members = start..start + count;
+        let weight = tracks[members.clone()]
+            .iter()
+            .map(|&t| profile.slices(&threads[t]).len())
+            .sum();
+        start = members.end;
+        pools.push(Pool {
+            members,
+            weight,
+            seats: 0,
+        });
+    }
+    allocate_seats(&mut pools, budget);
+    let mut seated = Vec::with_capacity(budget);
+    for pool in &pools {
+        let mut members = tracks[pool.members.clone()].to_vec();
+        retain_busiest(profile, threads, &mut members, pool.seats);
+        seated.append(&mut members);
+    }
+    *tracks = seated;
+}
+
+/// Hands out `budget` seats over `pools`: one each while they fit, the rest to
+/// the pool with the highest weight per seat it would then hold. A budget too
+/// small to seat every pool goes to the busiest of them. No pool takes more
+/// seats than it has members, so a seat goes unfilled only once every member of
+/// every pool holds one.
+fn allocate_seats(pools: &mut [Pool], budget: usize) {
+    if pools.len() >= budget {
+        let mut busiest: Vec<usize> = (0..pools.len()).collect();
+        // A stable sort leaves equally busy pools in pool order.
+        busiest.sort_by_key(|&pool| Reverse(pools[pool].weight));
+        for &pool in &busiest[..budget] {
+            pools[pool].seats = 1;
+        }
+        return;
+    }
+    for pool in pools.iter_mut() {
+        pool.seats = 1;
+    }
+    for _ in pools.len()..budget {
+        let Some(pool) = highest_average(pools) else {
+            break;
+        };
+        pools[pool].seats += 1;
+    }
+}
+
+/// The pool with room for another member whose weight over the seats it would
+/// then hold is highest, ties going to the earliest of them.
+fn highest_average(pools: &[Pool]) -> Option<usize> {
+    let mut best: Option<(usize, &Pool)> = None;
+    for (index, pool) in pools.iter().enumerate() {
+        if pool.seats == pool.members.len() {
+            continue;
+        }
+        // weight / (seats + 1) against the same, compared without dividing.
+        let outbids = |held: &Pool| {
+            pool.weight as u128 * (held.seats + 1) as u128
+                > held.weight as u128 * (pool.seats + 1) as u128
+        };
+        if best.is_none_or(|(_, held)| outbids(held)) {
+            best = Some((index, pool));
+        }
+    }
+    best.map(|(index, _)| index)
 }
 
 /// Orders `tracks` (indices into `threads`) by pool, then by name under
@@ -240,6 +355,115 @@ mod tests {
                 "skyframe-evaluator-cpu-heavy-10",
             ]
         );
+    }
+
+    /// The names left standing once `budget` seats are spread over the pools of
+    /// `threads`, which the profile's tracks are taken to be in full.
+    fn sampled(profile: &Profile, budget: usize) -> Vec<String> {
+        let threads = profile.threads();
+        let mut tracks: Vec<usize> = (0..threads.len()).collect();
+        sort_tracks_by_name(profile, threads, &mut tracks);
+        retain_busiest_per_family(profile, threads, &mut tracks, budget);
+        names(profile, &tracks)
+    }
+
+    /// How many of `names` belong to the pool named by `prefix`.
+    fn from_pool(names: &[String], prefix: &str) -> usize {
+        names.iter().filter(|name| name.starts_with(prefix)).count()
+    }
+
+    /// `members` tracks of the pool `prefix` names, each carrying `slices`.
+    fn pool(prefix: &str, members: usize, slices: usize) -> Vec<(String, usize)> {
+        (0..members)
+            .map(|i| (format!("{prefix}{i}"), slices))
+            .collect()
+    }
+
+    #[test]
+    fn a_pool_of_light_tracks_keeps_a_seat_beside_a_heavy_one() {
+        const BUSY_SLICES: usize = 50;
+        let mut threads = pool("skyframe-evaluator-execution-", 16, BUSY_SLICES);
+        threads.extend(pool("sandbox-", 100, 1));
+        let profile = profile_of(&threads);
+
+        let kept = sampled(&profile, 12);
+        assert_eq!(kept.len(), 12);
+        assert_eq!(from_pool(&kept, "sandbox-"), 1, "{kept:?}");
+        assert_eq!(
+            from_pool(&kept, "skyframe-evaluator-execution-"),
+            11,
+            "{kept:?}"
+        );
+    }
+
+    #[test]
+    fn the_seats_a_pool_cannot_fill_go_to_the_pools_that_can() {
+        const BUSY_SLICES: usize = 100;
+        let mut threads = pool("skyframe-evaluator-execution-", 2, BUSY_SLICES);
+        threads.extend(pool("sandbox-", 20, 1));
+        let profile = profile_of(&threads);
+
+        let kept = sampled(&profile, 12);
+        assert_eq!(
+            (
+                from_pool(&kept, "skyframe-evaluator-execution-"),
+                from_pool(&kept, "sandbox-")
+            ),
+            (2, 10),
+            "the busiest pool seats every member it has and yields the rest"
+        );
+    }
+
+    #[test]
+    fn equally_busy_pools_split_the_seats_in_pool_order() {
+        const SLICES: usize = 5;
+        const MEMBERS: usize = 4;
+        let mut threads = pool("combined-cache-", MEMBERS, SLICES);
+        threads.extend(pool("merkle-tree-", MEMBERS, SLICES));
+        threads.extend(pool("sandbox-", MEMBERS, SLICES));
+        let profile = profile_of(&threads);
+
+        let kept = sampled(&profile, 7);
+        assert_eq!(
+            (
+                from_pool(&kept, "combined-cache-"),
+                from_pool(&kept, "merkle-tree-"),
+                from_pool(&kept, "sandbox-")
+            ),
+            (3, 2, 2)
+        );
+    }
+
+    #[test]
+    fn a_budget_short_of_the_pools_seats_the_busiest_of_them() {
+        let mut threads = pool("combined-cache-", 3, 1);
+        threads.extend(pool("merkle-tree-", 3, 9));
+        threads.extend(pool("sandbox-", 3, 5));
+        let profile = profile_of(&threads);
+
+        let kept = sampled(&profile, 2);
+        assert_eq!(
+            (
+                from_pool(&kept, "combined-cache-"),
+                from_pool(&kept, "merkle-tree-"),
+                from_pool(&kept, "sandbox-")
+            ),
+            (0, 1, 1)
+        );
+    }
+
+    #[test]
+    fn a_sample_fills_its_budget_without_outgrowing_it() {
+        let mut threads = pool("combined-cache-", 1, 7);
+        threads.extend(pool("merkle-tree-", 5, 3));
+        threads.extend(pool("sandbox-", 30, 1));
+        let profile = profile_of(&threads);
+        let total = threads.len();
+
+        for budget in [0, 1, 2, 5, 12, total - 1, total, total + 10] {
+            let kept = sampled(&profile, budget);
+            assert_eq!(kept.len(), budget.min(total), "budget {budget}");
+        }
     }
 
     #[test]

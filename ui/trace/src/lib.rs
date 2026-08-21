@@ -186,6 +186,9 @@ enum Drag {
 const GROUP_BAND_HEIGHT: f32 = 18.0;
 /// Side of the show-all icon at a group band's gutter edge.
 const GROUP_ICON: f32 = 12.0;
+/// Indent of a pool header's gutter label under its group band's label, one
+/// nesting step in.
+const FAMILY_LABEL_INDENT: f32 = 10.0;
 /// Lanes shown per group before the rest fold behind the band's show-all toggle.
 const TOP_N_PER_GROUP: usize = 12;
 
@@ -1218,6 +1221,7 @@ fn paint_gutter(
     window.with_content_mask(Some(flame_mask), |window| {
         paint_thread_labels(&g, profile, layout, regions, scroll_y, selected, window, cx);
         paint_group_bands(&g, chrome, regions, scroll_y, window, cx);
+        paint_family_bands(&g, chrome, regions, scroll_y, window, cx);
     });
 
     if show_counters {
@@ -1405,6 +1409,42 @@ fn paint_group_bands(
                 cx,
             );
         }
+    }
+}
+
+/// Paints each pool header's name and shown/total lane count, indented under the
+/// group band it hangs from.
+fn paint_family_bands(
+    g: &GutterPaint,
+    chrome: &GroupChrome,
+    regions: Regions,
+    scroll_y: f32,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    for family in &chrome.families {
+        let top = regions.flame_top + family.top - scroll_y;
+        if top + GROUP_BAND_HEIGHT < regions.flame_top || top > regions.flame_bottom {
+            continue;
+        }
+        let text = format!("{}  {}/{}", family.name, family.shown, family.total);
+        let ty = top + (GROUP_BAND_HEIGHT - GUTTER_LABEL_SIZE) / 2.0;
+        let line = bviz_ui_components::shape_truncated(
+            &text,
+            g.avail - FAMILY_LABEL_INDENT,
+            g.font.clone(),
+            g.fs,
+            g.palette.muted_label.into(),
+            window,
+        );
+        let _ = line.paint(
+            point(px(g.left + SLICE_TEXT_PAD + FAMILY_LABEL_INDENT), px(ty)),
+            g.fs,
+            TextAlign::Left,
+            None,
+            window,
+            cx,
+        );
     }
 }
 

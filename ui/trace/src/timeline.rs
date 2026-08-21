@@ -113,7 +113,6 @@ impl SliceDrawCache {
 /// The flame chart as it currently stands, read against the lane scroll's
 /// standing anchor.
 struct AnchoredChart {
-    lanes: Rc<LaneLayout>,
     chrome: Rc<GroupChrome>,
     /// Where the anchored row sits in the chart, before the ceiling bounds it.
     held: f32,
@@ -477,10 +476,9 @@ impl TimelinePanel {
     fn anchored_chart(&self, cx: &App) -> Option<AnchoredChart> {
         let model = self.model.read(cx);
         let (lanes, chrome) = (model.lane_layout()?, model.group_chrome()?);
-        let held = anchor_offset(chart_rows(&lanes, &chrome), self.scroll);
+        let held = anchor_offset(chart_rows(&chrome), self.scroll);
         let ceiling = max_lane_scroll(&lanes, &self.regions(cx));
         Some(AnchoredChart {
-            lanes,
             chrome,
             held,
             ceiling,
@@ -504,7 +502,7 @@ impl TimelinePanel {
         let Some(target) = scroll_request(chart.held, chart.ceiling, y) else {
             return;
         };
-        self.scroll = anchor_at(chart_rows(&chart.lanes, &chart.chrome), target);
+        self.scroll = anchor_at(chart_rows(&chart.chrome), target);
     }
 
     /// Scrolls the lanes down by a gesture's `dy` pixels.
@@ -1138,8 +1136,13 @@ fn slice_paint(
                     palette.gridline,
                 ));
             }
-            for band in &chrome.bands {
-                let y = regions.flame_top + band.top - scroll;
+            let header_rows = chrome
+                .bands
+                .iter()
+                .map(|band| band.top)
+                .chain(chrome.families.iter().map(|family| family.top));
+            for row_top in header_rows {
+                let y = regions.flame_top + row_top - scroll;
                 window.paint_quad(fill(
                     Bounds::new(
                         point(px(regions.content_left), px(y)),
