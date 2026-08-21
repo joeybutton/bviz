@@ -50,7 +50,7 @@ pub(crate) struct TraceModel {
     /// [`GROUP_ORDER`]. Loading starts collapsed — it holds one lane per external
     /// repository, hundreds on a large build.
     collapsed_groups: [bool; GROUP_ORDER.len()],
-    /// Which groups show every lane rather than the busiest, indexed by
+    /// Which groups show every lane rather than their leading ones, indexed by
     /// [`GROUP_ORDER`].
     group_show_all: [bool; GROUP_ORDER.len()],
     flame_mode: FlameMode,
@@ -241,7 +241,7 @@ impl TraceModel {
         }
     }
 
-    /// Toggles whether a group shows every lane or only the busiest.
+    /// Toggles whether a group shows every lane or only its leading ones.
     pub(crate) fn toggle_group_show_all(&mut self, group: usize) {
         if let Some(s) = self.group_show_all.get_mut(group) {
             *s = !*s;

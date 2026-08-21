@@ -14,8 +14,11 @@ mod model;
 mod rebuild;
 mod regions;
 mod stats_panel;
+#[cfg(test)]
+mod test_profile;
 mod theme;
 mod timeline;
+mod track_order;
 mod tracks_menu;
 
 use chart::{format_duration, format_time, nice_step, span_seconds};
@@ -1329,7 +1332,7 @@ fn paint_thread_labels(
 
 /// Paints each group header band's chevron, class name, and shown/total lane
 /// count; a capped, expanded group shows a caret-double icon at the gutter's right
-/// edge — down to show every lane, up to show the busiest.
+/// edge — down to show every lane, up to show only the leading ones.
 fn paint_group_bands(
     g: &GutterPaint,
     chrome: &GroupChrome,

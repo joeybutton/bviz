@@ -154,8 +154,8 @@ impl TracksMenu {
         Some(deferred(div().child(backdrop).child(menu)))
     }
 
-    /// Tracks under their lane-class group headers, each group's tracks sorted
-    /// busiest first — the same grouping and order the chart lays out.
+    /// Tracks under their lane-class group headers, each group's tracks ordered
+    /// by pool and name — the same grouping and order the chart lays out.
     fn menu_rows(
         &self,
         profile: &Profile,
@@ -179,7 +179,7 @@ impl TracksMenu {
             if tracks.is_empty() {
                 continue;
             }
-            crate::groups::sort_tracks_by_activity(profile, threads, &mut tracks);
+            crate::track_order::sort_tracks_by_name(profile, threads, &mut tracks);
             let folded = self.collapsed_groups.get(group).copied().unwrap_or(false);
             rows.push(
                 self.group_row(group, class, &tracks, folded, palette, cx)

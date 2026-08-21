@@ -1,6 +1,7 @@
+use crate::track_order::{retain_busiest, sort_tracks_by_name};
 use crate::{GROUP_BAND_HEIGHT, METRICS, TOP_N_PER_GROUP};
 use bviz_trace_layout::{Lane, LaneLayout};
-use bviz_trace_profile::{LaneClass, Profile, ThreadTrack};
+use bviz_trace_profile::{LaneClass, Profile};
 
 /// Lane classes in the order their groups stack in the flame chart: the critical
 /// path and main thread first, then the build phases (loading, analysis,
@@ -18,7 +19,7 @@ pub(crate) const GROUP_ORDER: [LaneClass; 7] = [
 /// A collapsible group header in the flame chart, one per non-empty lane class,
 /// placed at `top` above its group's lanes. `shown`/`total` count the group's
 /// lanes drawn versus visible; a group with more than [`TOP_N_PER_GROUP`] visible
-/// lanes is `capped`, showing only the busiest until `show_all`.
+/// lanes is `capped`, showing only its busiest [`TOP_N_PER_GROUP`] until `show_all`.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct GroupBand {
     pub(crate) group: usize,
@@ -56,7 +57,7 @@ pub(crate) enum RowKind {
     Lane {
         group: usize,
         track: usize,
-        /// The lane's place in its group's activity order, which is fixed for a
+        /// The lane's place in its group's name order, which is fixed for a
         /// profile: `track` names the row itself, `rank` the place another lane
         /// takes over when the chart stops drawing that track.
         rank: usize,
@@ -135,8 +136,7 @@ pub(crate) fn chart_rows<'a>(
 }
 
 /// Where the flame chart's viewport top edge sits, as a position the rows carry
-/// with them when a collapse, a visibility change, or an activity restack moves
-/// them.
+/// with them when a collapse or a visibility change moves them.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) enum RowAnchor {
     /// The top of the chart.
@@ -185,32 +185,18 @@ pub(crate) fn anchor_offset(rows: impl Iterator<Item = ChartRow>, anchor: RowAnc
 
 /// What a press on a group header band hit: its gutter half (toggles the group's
 /// collapse) or, for a capped expanded group, its time half (toggles whether the
-/// group shows every lane or only the busiest).
+/// group shows every lane or only its busiest).
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum GroupHit {
     Collapse(usize),
     ShowAll(usize),
 }
 
-/// Orders `tracks` (indices into `threads`) busiest first — most slices first,
-/// ties broken by tid so the order is stable frame to frame.
-pub(crate) fn sort_tracks_by_activity(
-    profile: &Profile,
-    threads: &[ThreadTrack],
-    tracks: &mut [usize],
-) {
-    tracks.sort_by(|&a, &b| {
-        profile
-            .slices(&threads[b])
-            .len()
-            .cmp(&profile.slices(&threads[a]).len())
-            .then(threads[a].tid.cmp(&threads[b].tid))
-    });
-}
-
-/// The lane layout the flame chart draws: visible tracks ordered into lane-class
-/// groups, each group behind a header band and sorted by descending activity, so
-/// the busiest lanes lead and a collapsed or capped group folds its lanes away.
+/// The lane layout the flame chart draws: visible tracks sorted into lane-class
+/// groups, each group behind a header band and ordered by [`sort_tracks_by_name`],
+/// so a collapsed group folds its lanes away and a capped one keeps its busiest
+/// in that same order.
+///
 /// Returns the restacked [`LaneLayout`] (its `lanes` tops leave room for the
 /// bands) and the [`GroupChrome`] painted over it. A track absent from `visible`
 /// defaults to shown.
@@ -233,24 +219,22 @@ pub(crate) fn build_grouped_layout(
             continue;
         }
         let total = tracks.len();
-        sort_tracks_by_activity(profile, threads, &mut tracks);
+        sort_tracks_by_name(profile, threads, &mut tracks);
         let band_top = top;
         top += GROUP_BAND_HEIGHT + METRICS.lane_gap;
         let is_collapsed = collapsed[group];
         let capped = total > TOP_N_PER_GROUP;
         let mut shown = 0;
         if !is_collapsed {
-            let cap = if show_all[group] {
-                tracks.len()
-            } else {
-                TOP_N_PER_GROUP.min(tracks.len())
-            };
-            for &t in &tracks[..cap] {
+            if !show_all[group] {
+                retain_busiest(profile, threads, &mut tracks, TOP_N_PER_GROUP);
+            }
+            for &t in &tracks {
                 let lane = full.lanes[t];
                 lanes.push(Lane { top, ..lane });
                 top += lane.height + METRICS.lane_gap;
             }
-            shown = cap;
+            shown = tracks.len();
         }
         chrome.bands.push(GroupBand {
             group,
@@ -299,6 +283,7 @@ pub(crate) fn group_label(class: LaneClass) -> &'static str {
 mod tests {
     use super::*;
     use crate::regions::flame_total_height;
+    use crate::test_profile::profile_of;
     use crate::{LINE_SCROLL_PX, drawn_scroll, scroll_request};
     use bviz_trace_layout::lay_out_lanes;
 
@@ -339,28 +324,6 @@ mod tests {
             total_height: (top - METRICS.lane_gap).max(0.0),
         };
         (layout, GroupChrome { bands })
-    }
-
-    /// Parses a profile of threads named `(thread name, slice count)` through the
-    /// real Chrome-trace parser, which derives each thread's lane class from its
-    /// name. A thread needs a slice to reach the model, so a count of zero yields
-    /// no track.
-    fn profile_of(threads: &[(String, usize)]) -> Profile {
-        let mut events = Vec::new();
-        for (i, (name, slices)) in threads.iter().enumerate() {
-            // tid 0 is Bazel's synthetic critical-path thread, whatever its name.
-            let tid = i + 1;
-            events.push(format!(
-                r#"{{"name":"thread_name","ph":"M","tid":{tid},"args":{{"name":"{name}"}}}}"#
-            ));
-            for ts in 0..*slices {
-                events.push(format!(
-                    r#"{{"cat":"general information","name":"s","ph":"X","ts":{ts},"dur":1,"tid":{tid}}}"#
-                ));
-            }
-        }
-        let json = format!(r#"{{"traceEvents":[{}]}}"#, events.join(","));
-        Profile::from_bytes(json.as_bytes()).expect("parse test profile")
     }
 
     /// The index in `profile.threads()` of the single track of `class`.
@@ -553,8 +516,15 @@ mod tests {
         let (layout, chrome) = built_rows(&profile, &full, &hidden, &expanded);
         let redrawn: Vec<ChartRow> = chart_rows(&layout, &chrome).collect();
         let took_the_rank = lanes_of(&redrawn, execution)[1];
-        assert_eq!(track_at(took_the_rank), track_at(lanes[2]));
-        assert_eq!(took_the_rank.top, anchored.top, "it rises into the slot");
+        assert_ne!(
+            track_at(took_the_rank),
+            track_at(anchored),
+            "the lane is gone"
+        );
+        assert_eq!(
+            took_the_rank.top, anchored.top,
+            "a lane rises into the slot"
+        );
         assert_eq!(anchor_offset(redrawn.iter().copied(), anchor), anchored.top);
     }
 
@@ -841,6 +811,23 @@ mod tests {
             .expect("an execution track");
         visible[an_execution_track] = false;
         (profile, full, visible)
+    }
+
+    #[test]
+    fn a_capped_group_draws_its_busiest_tracks_in_name_order() {
+        let (profile, full, visible) = fixture();
+        let (layout, chrome) = built_rows(&profile, &full, &visible, &[false; GROUP_ORDER.len()]);
+        let rows: Vec<ChartRow> = chart_rows(&layout, &chrome).collect();
+        let names: Vec<&str> = lanes_of(&rows, group_of(LaneClass::Execution))
+            .iter()
+            .map(|row| profile.str(profile.threads()[track_at(*row)].name))
+            .collect();
+        // The fixture's execution tracks carry slice counts rising with their
+        // worker index, so the cap drops the lowest-numbered visible ones.
+        let busiest: Vec<String> = (2..=TOP_N_PER_GROUP + 1)
+            .map(|i| format!("skyframe-evaluator-execution-{i}"))
+            .collect();
+        assert_eq!(names, busiest);
     }
 
     #[test]
