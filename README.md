@@ -58,13 +58,13 @@ bazel run //:buildifier
 ## Running a viewer
 
 `bazel run` starts the binary in its runfiles directory, so give input paths in
-full.
+full. To obtain good interactive performance, run with `-c opt`.
 
 ```sh
 bazel aquery --output=streamed_proto //... > /tmp/aquery.pb
 bazel cquery --output=streamed_proto --transitions=lite //... > /tmp/cquery.pb
 bazel query --output=streamed_proto //... > /tmp/query.pb
-bazel run //ui/graph:graph -- --aquery /tmp/aquery.pb --cquery /tmp/cquery.pb --query /tmp/query.pb
+bazel run -c opt //ui/graph:graph -- --aquery /tmp/aquery.pb --cquery /tmp/cquery.pb --query /tmp/query.pb
 ```
 
 At least one query is required; several are merged into one joint graph. Under
@@ -74,14 +74,14 @@ lands on the dependency's target container.
 
 ```sh
 bazel build --config=bazel_profile --profile=/tmp/build.profile.gz //...
-bazel run //ui/trace:trace -- --profile /tmp/build.profile.gz
+bazel run -c opt //ui/trace:trace -- --profile /tmp/build.profile.gz
 ```
 
 `--config=bazel_profile` widens what the profile records.
 
 ```sh
 bazel build --show_timestamps --build_event_binary_file=/tmp/build.bep //...
-bazel run //ui/terminal:terminal -- /tmp/build.bep
+bazel run -c opt //ui/terminal:terminal -- /tmp/build.bep
 ```
 
 Bazel does not timestamp its progress output, so without `--show_timestamps` the
