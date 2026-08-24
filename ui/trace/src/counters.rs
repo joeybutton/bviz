@@ -91,7 +91,7 @@ pub(crate) fn paint_graph(
         if points.len() < 2 {
             continue;
         }
-        let y_scale = CounterYScale::new(gl.top, gl.chart_h, series.max_value as f64);
+        let y_scale = CounterYScale::new(gl.top, gl.chart_h, series.max_value);
         let chart_bottom = y_scale.chart_bottom;
         let x_of = |ts| regions.content_left + tv.x_of(ts);
         // Clip the series to a margin around the content column so off-screen
@@ -223,7 +223,7 @@ fn paint_counter_readouts(
         let Some(value) = sample_at(profile.points(series), t) else {
             continue;
         };
-        let y_scale = CounterYScale::new(gl.top, gl.chart_h, series.max_value as f64);
+        let y_scale = CounterYScale::new(gl.top, gl.chart_h, series.max_value);
         let chart_top = y_scale.chart_top;
         let chart_bottom = y_scale.chart_bottom;
         let dot_y = y_scale.value_to_y(value);
@@ -255,7 +255,7 @@ fn paint_counter_readouts(
             format_counter(value, unit),
             font.clone(),
             px(CROSSHAIR_VALUE_SIZE),
-            bviz_ui_theme::opaque(color).into(),
+            bviz_ui_theme::opaque(color),
         );
         let value_w = f32::from(value_line.width());
         let value_x = crate::label_x(cx_px, value_w, CROSSHAIR_LABEL_GAP, regions.time_right);

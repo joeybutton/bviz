@@ -267,11 +267,11 @@ fn sorted_neighbors(lists: &BTreeMap<Id, Vec<Id>>, id: Id) -> Vec<Id> {
 
 fn clone_node(node: &Node) -> Node {
     Node {
-        id: node.id.clone(),
+        id: node.id,
         label: node.label.clone(),
         kind: node.kind,
         group: node.group,
-        parent: node.parent.clone(),
+        parent: node.parent,
     }
 }
 

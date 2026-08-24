@@ -240,7 +240,7 @@ fn run_sharded<S: Default + Send>(
         return vec![run_one()];
     }
     std::thread::scope(|scope| {
-        let handles: Vec<_> = (0..workers).map(|_| scope.spawn(&run_one)).collect();
+        let handles: Vec<_> = (0..workers).map(|_| scope.spawn(run_one)).collect();
         handles.into_iter().map(|h| h.join().unwrap()).collect()
     })
 }
@@ -2449,7 +2449,7 @@ mod tests {
             depth
         };
         let from_parse: Vec<u32> = slices.iter().map(|s| s.depth).collect();
-        let from_chain: Vec<u32> = (0..slices.len()).map(|i| chain_depth(i)).collect();
+        let from_chain: Vec<u32> = (0..slices.len()).map(chain_depth).collect();
         assert_eq!(from_parse, [0, 1, 2, 3, 0]);
         assert_eq!(from_parse, from_chain);
         assert_eq!(thread.max_depth, 4);

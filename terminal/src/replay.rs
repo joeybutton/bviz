@@ -146,7 +146,7 @@ fn parse_marker(window: &[u8]) -> Option<u32> {
     if h >= 24 || m >= 60 || s >= 60 {
         return None;
     }
-    Some((h * 3600 + m * 60 + s) as u32)
+    Some(h * 3600 + m * 60 + s)
 }
 
 const SECONDS_PER_DAY: f64 = 24.0 * 3600.0;
