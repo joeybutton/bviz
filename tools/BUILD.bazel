@@ -30,6 +30,7 @@ local_exec_tool(
 # `bazel run //tools:bazel_env` to update / install the direnv environment.
 bazel_env(
     name = "bazel_env",
+    tags = ["manual"],
     toolchains = {
     },
     tools = {
