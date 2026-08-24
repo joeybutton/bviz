@@ -1394,8 +1394,8 @@ fn csr_from_parents(parents: &[u32]) -> ArenaChildren {
         off[k + 1] += off[k];
     }
     let mut pool = vec![0u32; n - 1];
-    for i in 1..n {
-        let p = parents[i] as usize;
+    for (i, &parent) in parents.iter().enumerate().skip(1) {
+        let p = parent as usize;
         pool[off[p] as usize] = i as u32;
         off[p] += 1;
     }
@@ -2805,8 +2805,8 @@ mod tests {
             })
             .collect();
         sort_child_ranges(&mut kids, n, &arena);
-        for i in 0..n {
-            assert_eq!(kids.of(i), expect[i], "children of node {i}");
+        for (i, want) in expect.iter().enumerate() {
+            assert_eq!(kids.of(i), *want, "children of node {i}");
         }
     }
 

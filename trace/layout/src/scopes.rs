@@ -266,7 +266,7 @@ mod tests {
             // their labels through the same whole-profile mnemonic index, so the
             // reused scan must match a fresh build here too.
             Box::new(|_: usize| true),
-            Box::new(|i: usize| i % 2 == 0),
+            Box::new(|i: usize| i.is_multiple_of(2)),
         ];
         // Ranks are dense over each build's own scanned texts, so the global
         // scan and a per-selection scan number names differently; the default

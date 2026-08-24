@@ -194,7 +194,11 @@ fn main() {
         let mut builds = 0usize;
         let reduced = min_secs(iters, || {
             builds += 1;
-            let w = if builds % 2 == 0 { &other } else { &win };
+            let w = if builds.is_multiple_of(2) {
+                &other
+            } else {
+                &win
+            };
             std::hint::black_box(ScopeAggregate::build_for_tracks_reusing(
                 &scan,
                 mode,

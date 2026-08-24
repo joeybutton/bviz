@@ -617,11 +617,7 @@ fn parse_pieces(
     interner.prefault_shard(shard, workers, prefault_bytes);
     let mut writer = interner.writer();
     let mut args_cap = 0;
-    loop {
-        let piece = match rx.recv() {
-            Ok(piece) => piece,
-            Err(_) => break,
-        };
+    while let Ok(piece) = rx.recv() {
         let chunk = StreamChunk {
             buf: piece.buf,
             pool: &pool_tx,

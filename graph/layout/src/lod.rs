@@ -211,7 +211,7 @@ fn largest_fitting_prefix(
     };
     let (mut lo, mut hi) = (0usize, order.len());
     while lo < hi {
-        let mid = lo + (hi - lo + 1) / 2;
+        let mid = lo + (hi - lo).div_ceil(2);
         if fits(mid) {
             lo = mid;
         } else {

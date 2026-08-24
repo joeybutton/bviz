@@ -464,7 +464,7 @@ mod tests {
         let long = "z".repeat(1024);
         // A key each thread can reach, so the same strings recur across threads.
         let key = |i: usize| {
-            if i % 250 == 0 {
+            if i.is_multiple_of(250) {
                 format!("//very/long/package/path/number/{i}/{long}")
             } else {
                 format!("//pkg{}/lib{}:target{}", i % 97, i % 13, i)
