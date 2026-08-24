@@ -1,5 +1,9 @@
-use crate::groups::{GROUP_ORDER, GroupChrome, build_grouped_layout, default_collapsed_groups};
+use crate::groups::{
+    GROUP_ORDER, GroupChrome, GroupLayoutState, build_grouped_layout, default_collapsed_groups,
+};
 use crate::rebuild::Rebuild;
+use crate::track_label::shared_names;
+use crate::track_order::TrackSort;
 use crate::{METRICS, Source};
 use bviz_trace_layout::{
     FlameMode, LaneLayout, ScopeAggregate, TimeSelection, TrackFlamer, lay_out_lanes,
@@ -41,6 +45,9 @@ pub(crate) struct TraceModel {
     lanes: RefCell<Option<Rc<LaneLayout>>>,
     /// Which tracks the flame chart draws, indexed by `profile.threads()` order.
     visible_tracks: Vec<bool>,
+    /// [`shared_names`] over the loaded profile, which counting the names of
+    /// every track derives.
+    shared_track_names: Vec<bool>,
     /// Which tracks the flame graph and stats aggregate over, indexed likewise.
     selected_tracks: Vec<bool>,
     /// The profile time the flame graph and stats aggregate over, intersected
@@ -50,9 +57,11 @@ pub(crate) struct TraceModel {
     /// [`GROUP_ORDER`]. Loading starts collapsed — it holds one lane per external
     /// repository, hundreds on a large build.
     collapsed_groups: [bool; GROUP_ORDER.len()],
-    /// Which groups show every lane rather than the busiest, indexed by
+    /// Which groups draw every lane rather than a sample, indexed by
     /// [`GROUP_ORDER`].
     group_show_all: [bool; GROUP_ORDER.len()],
+    /// The order every group stands its tracks in.
+    track_sort: TrackSort,
     flame_mode: FlameMode,
     /// Bumped whenever an input the aggregate is built from changes — the track
     /// selection, the time selection, or the flame mode — keying the build so a
@@ -62,7 +71,7 @@ pub(crate) struct TraceModel {
     select_anchor: Option<usize>,
     /// The lane layout restricted to the visible tracks and restacked into
     /// lane-class groups, derived from `lanes` and cleared whenever the
-    /// visibility, collapse, or show-all state changes.
+    /// [`GroupLayoutState`] it was built under moves.
     visible_lanes: RefCell<Option<Rc<LaneLayout>>>,
     /// The group headers and show-more rows over `visible_lanes`, built and
     /// cleared alongside it.
@@ -91,10 +100,12 @@ impl TraceModel {
             source: Source::Loading,
             lanes: RefCell::new(None),
             visible_tracks: Vec::new(),
+            shared_track_names: Vec::new(),
             selected_tracks: Vec::new(),
             time_selection: TimeSelection::default(),
             collapsed_groups: default_collapsed_groups(),
             group_show_all: [false; GROUP_ORDER.len()],
+            track_sort: TrackSort::default(),
             flame_mode: FlameMode::default(),
             aggregate_key: 0,
             select_anchor: None,
@@ -112,6 +123,10 @@ impl TraceModel {
 
     pub(crate) fn visible_tracks(&self) -> &[bool] {
         &self.visible_tracks
+    }
+
+    pub(crate) fn shared_track_names(&self) -> &[bool] {
+        &self.shared_track_names
     }
 
     pub(crate) fn selected_tracks(&self) -> &[bool] {
@@ -160,8 +175,10 @@ impl TraceModel {
     /// the aggregate from double-counting that time.
     pub(crate) fn init_tracks(&mut self, profile: &Profile, cx: &mut Context<Self>) {
         self.visible_tracks = vec![true; profile.threads().len()];
+        self.shared_track_names = shared_names(profile);
         self.collapsed_groups = default_collapsed_groups();
         self.group_show_all = [false; GROUP_ORDER.len()];
+        self.track_sort = TrackSort::default();
         self.selected_tracks = profile
             .threads()
             .iter()
@@ -191,7 +208,7 @@ impl TraceModel {
 
     /// The lane layout the flame chart draws: the full layout restricted to the
     /// visible tracks and restacked into lane-class groups, cached until the
-    /// visibility, collapse, or show-all state changes. Every paint and hit-test
+    /// state it is built under moves. Every paint and hit-test
     /// works from this, so a lane hidden by its group is neither drawn nor
     /// selectable.
     pub(crate) fn lane_layout(&self) -> Option<Rc<LaneLayout>> {
@@ -219,9 +236,12 @@ impl TraceModel {
         let (layout, chrome) = build_grouped_layout(
             profile,
             &full,
-            &self.visible_tracks,
-            &self.collapsed_groups,
-            &self.group_show_all,
+            &GroupLayoutState {
+                visible: &self.visible_tracks,
+                collapsed: &self.collapsed_groups,
+                show_all: &self.group_show_all,
+                sort: self.track_sort,
+            },
         );
         *self.visible_lanes.borrow_mut() = Some(Rc::new(layout));
         *self.group_chrome.borrow_mut() = Some(Rc::new(chrome));
@@ -233,6 +253,22 @@ impl TraceModel {
         self.group_chrome.borrow_mut().take();
     }
 
+    pub(crate) fn track_sort(&self) -> TrackSort {
+        self.track_sort
+    }
+
+    /// Stands every group's tracks in `sort` and restacks the chart under it, or
+    /// reports false when it is already the standing order, so re-choosing one
+    /// costs nothing.
+    pub(crate) fn set_track_sort(&mut self, sort: TrackSort) -> bool {
+        if self.track_sort == sort {
+            return false;
+        }
+        self.track_sort = sort;
+        self.invalidate_visible_lanes();
+        true
+    }
+
     /// Toggles a lane-class group's collapse and rebuilds the grouped layout.
     pub(crate) fn toggle_group_collapsed(&mut self, group: usize) {
         if let Some(c) = self.collapsed_groups.get_mut(group) {
@@ -241,7 +277,7 @@ impl TraceModel {
         }
     }
 
-    /// Toggles whether a group shows every lane or only the busiest.
+    /// Toggles whether a group shows every lane or only its leading ones.
     pub(crate) fn toggle_group_show_all(&mut self, group: usize) {
         if let Some(s) = self.group_show_all.get_mut(group) {
             *s = !*s;
@@ -519,6 +555,7 @@ impl TraceModel {
 #[cfg(test)]
 mod tests {
     use super::TraceModel;
+    use crate::track_order::TrackSort;
     use bviz_trace_layout::{FlameDirection, FlameLabels, FlameMode};
 
     #[test]
@@ -528,6 +565,15 @@ mod tests {
         let standing = model.flame_mode();
         assert!(!model.adopt_flame_mode(standing));
         assert_eq!(model.aggregate_key, key);
+    }
+
+    #[test]
+    fn re_choosing_the_standing_track_order_restacks_nothing() {
+        let mut model = TraceModel::new();
+        assert!(!model.set_track_sort(model.track_sort()));
+        assert!(model.set_track_sort(TrackSort::Weight));
+        assert_eq!(model.track_sort(), TrackSort::Weight);
+        assert!(!model.set_track_sort(TrackSort::Weight));
     }
 
     #[test]

@@ -1,14 +1,16 @@
-use crate::groups::{GROUP_ORDER, default_collapsed_groups, group_label};
+use crate::groups::{GROUP_ORDER, group_label};
 use crate::model::TraceModel;
 use crate::theme::Palette;
+use crate::track_label::track_label;
+use crate::track_order::TrackSort;
 use crate::{
-    GUTTER_LABEL_SIZE, RULER_HEIGHT, Source, TRACKS_MENU_MAX_LIST, TRACKS_MENU_WIDTH, TraceView,
-    set_list_thumb, thumb_offset,
+    GUTTER_LABEL_SIZE, RULER_HEIGHT, Source, TRACKS_MENU_FOLD_ABOVE, TRACKS_MENU_MAX_LIST,
+    TRACKS_MENU_WIDTH, TraceView, set_list_thumb, thumb_offset,
 };
 use bviz_trace_profile::{LaneClass, Profile};
 use bviz_ui_components::{
-    Axis, DEFAULT_MIN_THUMB, DragEnd, SCROLLBAR_THICKNESS, Scrollbar, TextInput, overlay_canvas,
-    track_drag,
+    Axis, Button, DEFAULT_MIN_THUMB, DragEnd, SCROLLBAR_THICKNESS, Scrollbar, TextInput,
+    overlay_canvas, track_drag,
 };
 use gpui::{
     AnyElement, App, Bounds, Context, Entity, IntoElement, MouseButton, MouseDownEvent, Pixels,
@@ -34,10 +36,11 @@ enum MenuDrag {
 pub(crate) struct TracksMenu {
     /// Whether the menu is open.
     open: bool,
-    /// Which lane-class groups are folded in the menu, indexed by [`GROUP_ORDER`];
-    /// independent of the chart's collapse so the menu can manage a group's
+    /// The reader's fold choice per lane-class group, indexed by [`GROUP_ORDER`],
+    /// `None` where they have made none and the list's own length decides.
+    /// Independent of the chart's collapse so the menu can manage a group's
     /// visibility while its lanes are collapsed in the chart.
-    collapsed_groups: [bool; GROUP_ORDER.len()],
+    folded_groups: [Option<bool>; GROUP_ORDER.len()],
     /// The filter field; its text narrows the listed tracks.
     filter: Entity<TextInput>,
     /// Re-renders the menu as the filter text changes; `TextInput` notifies on
@@ -63,7 +66,7 @@ impl TracksMenu {
         let filter_observer = cx.observe(&filter, |_, _, cx| cx.notify());
         Self {
             open: false,
-            collapsed_groups: default_collapsed_groups(),
+            folded_groups: [None; GROUP_ORDER.len()],
             filter,
             _filter_observer: filter_observer,
             scroll: ScrollHandle::new(),
@@ -76,23 +79,28 @@ impl TracksMenu {
     /// Resets the view-local fold state and list scroll for a freshly loaded
     /// profile. The document-derived visibility is seeded by the model instead.
     pub(crate) fn reset_for_new_profile(&mut self) {
-        self.collapsed_groups = default_collapsed_groups();
+        self.folded_groups = [None; GROUP_ORDER.len()];
         set_list_thumb(&self.scroll, 0.0);
     }
 
-    /// Reflows the timeline after a visibility change, rebuilding its scene over
-    /// the restacked lanes.
+    /// Rebuilds the timeline's scene over the lanes as they stand, for a change
+    /// to what the chart stacks or the order it stacks them in.
     fn reflow_timeline(&self, cx: &mut Context<Self>) {
         if let Some(shell) = self.shell.upgrade() {
             shell.update(cx, |tv, cx| tv.invalidate_timeline(cx));
         }
     }
 
+    /// Whether a group listing `listed` tracks is folded: the reader's choice,
+    /// and until they make one, whether the list is long enough to bury the
+    /// groups below it.
+    fn folded(&self, group: usize, listed: usize) -> bool {
+        self.folded_groups[group].unwrap_or(listed > TRACKS_MENU_FOLD_ABOVE)
+    }
+
     /// Folds or unfolds a lane-class group's track list.
-    fn toggle_group_collapsed(&mut self, group: usize) {
-        if let Some(c) = self.collapsed_groups.get_mut(group) {
-            *c = !*c;
-        }
+    fn toggle_group_folded(&mut self, group: usize, listed: usize) {
+        self.folded_groups[group] = Some(!self.folded(group, listed));
     }
 
     /// The bar for the track list's content height against its visible height;
@@ -154,8 +162,8 @@ impl TracksMenu {
         Some(deferred(div().child(backdrop).child(menu)))
     }
 
-    /// Tracks under their lane-class group headers, each group's tracks sorted
-    /// busiest first — the same grouping and order the chart lays out.
+    /// Tracks under their lane-class group headers, each group's tracks in the
+    /// standing [`TrackSort`] — the same grouping and order the chart lays out.
     fn menu_rows(
         &self,
         profile: &Profile,
@@ -164,6 +172,7 @@ impl TracksMenu {
     ) -> Vec<AnyElement> {
         let filter = self.filter.read(cx).content().to_lowercase();
         let threads = profile.threads();
+        let shared_names = self.model.read(cx).shared_track_names().to_vec();
         let mut rows: Vec<AnyElement> = Vec::new();
         for (group, &class) in GROUP_ORDER.iter().enumerate() {
             let mut tracks: Vec<usize> = (0..threads.len())
@@ -179,8 +188,11 @@ impl TracksMenu {
             if tracks.is_empty() {
                 continue;
             }
-            crate::groups::sort_tracks_by_activity(profile, threads, &mut tracks);
-            let folded = self.collapsed_groups.get(group).copied().unwrap_or(false);
+            self.model
+                .read(cx)
+                .track_sort()
+                .order(profile, threads, &mut tracks);
+            let folded = self.folded(group, tracks.len());
             rows.push(
                 self.group_row(group, class, &tracks, folded, palette, cx)
                     .into_any_element(),
@@ -189,7 +201,7 @@ impl TracksMenu {
                 continue;
             }
             for i in tracks {
-                let name = profile.str(threads[i].name);
+                let label = track_label(profile, &shared_names, i);
                 let visible = self
                     .model
                     .read(cx)
@@ -198,7 +210,7 @@ impl TracksMenu {
                     .copied()
                     .unwrap_or(true);
                 rows.push(
-                    self.track_row(i, name, visible, palette, cx)
+                    self.track_row(i, &label, visible, palette, cx)
                         .into_any_element(),
                 );
             }
@@ -206,9 +218,9 @@ impl TracksMenu {
         rows
     }
 
-    /// A group header: a chevron and the group's visible/total count, folding the
-    /// group's track list on click. Its trailing control toggles the whole
-    /// group's visibility without also folding.
+    /// A group header: a chevron and how many of the tracks listed under it are
+    /// visible, folding the group's track list on click. Its trailing control
+    /// toggles the whole group's visibility without also folding.
     fn group_row(
         &self,
         group: usize,
@@ -226,6 +238,7 @@ impl TracksMenu {
                 .count()
         };
         let group_all_visible = n_visible == tracks.len();
+        let listed = tracks.len();
         let chevron = if folded { "▸" } else { "▾" };
         div()
             .id(SharedString::from(format!("track-group-{group}")))
@@ -240,11 +253,11 @@ impl TracksMenu {
             .text_color(palette.label)
             .hover(move |s| s.bg(palette.hover))
             .on_click(cx.listener(move |this, _, _, cx| {
-                this.toggle_group_collapsed(group);
+                this.toggle_group_folded(group, listed);
                 cx.notify();
             }))
             .child(format!(
-                "{chevron} {}  {}/{}",
+                "{chevron} {}  {}/{} visible",
                 group_label(class),
                 n_visible,
                 tracks.len()
@@ -266,12 +279,51 @@ impl TracksMenu {
             )
     }
 
-    /// A track row: a visibility checkbox and the track name, toggling the track
-    /// on click.
+    /// The control choosing the order the chart's lanes and this list stand a
+    /// group's tracks in, the standing one filled in.
+    fn sort_row(&self, palette: Palette, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let standing = self.model.read(cx).track_sort();
+        let choice = |id: &'static str, label: &'static str, sort: TrackSort| {
+            Button::new(
+                id,
+                cx.listener(move |this, _, _, cx| this.choose_sort(sort, cx)),
+            )
+            .ghost()
+            .compact()
+            .selected(standing == sort)
+            .label(label)
+        };
+        let by_name = choice("tracks-sort-name", "Name", TrackSort::Name);
+        let by_weight = choice("tracks-sort-weight", "Busiest", TrackSort::Weight);
+        div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_1()
+            .mx_1()
+            .px_2()
+            .py_1()
+            .child(div().text_color(palette.muted_label).child("Order"))
+            .child(by_name)
+            .child(by_weight)
+    }
+
+    /// Stands every group's tracks in `sort`, reflowing the timeline over the
+    /// restacked lanes.
+    fn choose_sort(&mut self, sort: TrackSort, cx: &mut Context<Self>) {
+        if !self.model.update(cx, |m, _| m.set_track_sort(sort)) {
+            return;
+        }
+        self.reflow_timeline(cx);
+        cx.notify();
+    }
+
+    /// A track row: a visibility checkbox and the track's label, toggling the
+    /// track on click.
     fn track_row(
         &self,
         i: usize,
-        name: &str,
+        label: &str,
         visible: bool,
         palette: Palette,
         cx: &mut Context<Self>,
@@ -310,12 +362,13 @@ impl TracksMenu {
                     .overflow_hidden()
                     .whitespace_nowrap()
                     .text_ellipsis()
-                    .child(name.to_string()),
+                    .child(label.to_string()),
             )
     }
 
-    /// The menu container over the built rows: the filter field, a show/hide-all
-    /// toggle, and the scrollable track list with its scroll bar. Clicks inside
+    /// The menu container over the built rows: the filter field, the order
+    /// control, a show/hide-all toggle, and the scrollable track list with its
+    /// scroll bar. Clicks inside
     /// must not reach the backdrop and close it; a press on the scroll bar grabs
     /// its thumb.
     fn chrome(
@@ -348,6 +401,7 @@ impl TracksMenu {
                 }),
             )
             .child(div().p_1().child(self.filter.clone()))
+            .child(self.sort_row(palette, cx))
             .child({
                 let (nvis, ntot) = self.model.read(cx).visible_count();
                 let all_visible = ntot > 0 && nvis == ntot;

@@ -27,8 +27,8 @@ use std::sync::Arc;
 
 /// The timeline's culled draw list together with the inputs that determine it,
 /// so a repaint reuses it unless one changed. The list turns only on the profile
-/// (`Arc` identity), the lane layout (`Rc` identity, a fresh one on any
-/// visibility, collapse, or show-all change), the time view (pan/zoom), and the
+/// (`Arc` identity), the lane layout (`Rc` identity, a fresh one whenever the
+/// chart restacks), the time view (pan/zoom), and the
 /// viewport (width, height, and `scroll_y`); `min_px` and the metrics are consts,
 /// so they are not keys.
 pub(crate) struct SliceDrawCache {
@@ -113,7 +113,6 @@ impl SliceDrawCache {
 /// The flame chart as it currently stands, read against the lane scroll's
 /// standing anchor.
 struct AnchoredChart {
-    lanes: Rc<LaneLayout>,
     chrome: Rc<GroupChrome>,
     /// Where the anchored row sits in the chart, before the ceiling bounds it.
     held: f32,
@@ -477,10 +476,9 @@ impl TimelinePanel {
     fn anchored_chart(&self, cx: &App) -> Option<AnchoredChart> {
         let model = self.model.read(cx);
         let (lanes, chrome) = (model.lane_layout()?, model.group_chrome()?);
-        let held = anchor_offset(chart_rows(&lanes, &chrome), self.scroll);
+        let held = anchor_offset(chart_rows(&chrome), self.scroll);
         let ceiling = max_lane_scroll(&lanes, &self.regions(cx));
         Some(AnchoredChart {
-            lanes,
             chrome,
             held,
             ceiling,
@@ -504,7 +502,7 @@ impl TimelinePanel {
         let Some(target) = scroll_request(chart.held, chart.ceiling, y) else {
             return;
         };
-        self.scroll = anchor_at(chart_rows(&chart.lanes, &chart.chrome), target);
+        self.scroll = anchor_at(chart_rows(&chart.chrome), target);
     }
 
     /// Scrolls the lanes down by a gesture's `dy` pixels.
@@ -1077,12 +1075,13 @@ fn slice_paint(
         let layout = &*lanes;
         let n_counters = profile.counters().len();
         let flame_total = flame_total_height(layout);
-        let (tv, scroll, gutter_width, selected, regions, show_counters, vp) = {
+        let (tv, scroll, gutter_width, selected, shared_names, regions, show_counters, vp) = {
             let panel = parent.read(cx);
             let tv = panel.view;
             let scroll = panel.lane_scroll(cx);
             let (tab, panel_height, gutter_width) = panel.shell_layout(cx);
             let selected = panel.model.read(cx).selected_tracks().to_vec();
+            let shared_names = panel.model.read(cx).shared_track_names().to_vec();
             let regions = Regions::new(bounds, n_counters, panel_height, gutter_width, flame_total);
             let vp = Viewport {
                 width: regions.time_w,
@@ -1095,6 +1094,7 @@ fn slice_paint(
                 scroll,
                 gutter_width,
                 selected,
+                shared_names,
                 regions,
                 show_counters,
                 vp,
@@ -1138,8 +1138,8 @@ fn slice_paint(
                     palette.gridline,
                 ));
             }
-            for band in &chrome.bands {
-                let y = regions.flame_top + band.top - scroll;
+            for header in chart_rows(&chrome).filter(|row| row.kind.is_header()) {
+                let y = regions.flame_top + header.top - scroll;
                 window.paint_quad(fill(
                     Bounds::new(
                         point(px(regions.content_left), px(y)),
@@ -1184,6 +1184,7 @@ fn slice_paint(
             scroll,
             show_counters,
             &selected,
+            &shared_names,
             &palette,
             window,
             cx,

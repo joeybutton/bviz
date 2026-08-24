@@ -544,46 +544,96 @@ const EXECUTION_PREFIXES: [&str; 12] = [
     "tree-deleter",
 ];
 
+const REPO_FETCH_PREFIXES: [&str; 3] = ["starlark-repository", "module-extension-", "downloads["];
+
+/// Skyframe evaluator pools running analysis, longest infix first: Bazel routes
+/// configured-target and aspect analysis to `-cpu-heavy` and leaves loading and
+/// light analysis to the plain pool.
+const ANALYSIS_SKYFRAME_INFIXES: [&str; 2] = ["skyframe-evaluator-cpu-heavy", "skyframe-evaluator"];
+const GLOBBING_POOL_PREFIX: &str = "globbing pool";
+const DISK_CACHE_PREFIX: &str = "disk-cache-";
+const SANDBOX_PREFIX: &str = "sandbox-";
+
 /// tid 0 is Bazel's synthetic critical-path thread; the rest are matched on the
-/// readable thread name Bazel emits.
+/// readable thread name Bazel emits. The second element is the family the arm
+/// keyed on: the fragment shared by every thread the arm accepts, stripped of
+/// the separator that binds a worker index to it.
 ///
 /// The skyframe-evaluator tests run longest-match-first: the `-execution`/
-/// `-memoizing` pools run actions, the `-cpu-heavy` and plain pools run analysis
-/// (configured targets/aspects, plus loading and light analysis), so the plain
-/// `skyframe-evaluator` substring must be tested only after the execution
-/// infixes are ruled out.
+/// `-memoizing` pools run actions, so the analysis infixes must be tested only
+/// after the execution ones are ruled out.
 ///
 /// Module-extension evaluation resolves external dependencies alongside
 /// repository fetching, so it is loading work; the `globbing pool` threads run
 /// glob I/O for package loading, which merges into analysis like the plain
 /// skyframe pools.
-pub fn lane_class(tid: i64, name: &str) -> LaneClass {
+fn classify(tid: i64, name: &str) -> (LaneClass, &str) {
     if tid == 0 || name == "Critical Path" {
-        LaneClass::CriticalPath
+        (LaneClass::CriticalPath, "Critical Path")
     } else if name == "Main Thread" {
-        LaneClass::Main
+        (LaneClass::Main, name)
     } else if name == "Garbage Collector" {
-        LaneClass::Gc
-    } else if EXECUTION_SKYFRAME_INFIXES
+        (LaneClass::Gc, name)
+    } else if let Some(infix) = EXECUTION_SKYFRAME_INFIXES
         .iter()
-        .any(|infix| name.contains(infix))
+        .copied()
+        .find(|infix| name.contains(infix))
     {
-        LaneClass::Execution
-    } else if name.contains("skyframe-evaluator") || name.starts_with("globbing pool") {
-        LaneClass::Analysis
-    } else if name.starts_with("starlark-repository")
-        || name.starts_with("module-extension-")
-        || name.starts_with("downloads[")
+        (LaneClass::Execution, infix)
+    } else if let Some(infix) = ANALYSIS_SKYFRAME_INFIXES
+        .iter()
+        .copied()
+        .find(|infix| name.contains(infix))
     {
-        LaneClass::RepoFetch
-    } else if EXECUTION_PREFIXES.iter().any(|p| name.starts_with(p))
-        || (name.starts_with("disk-cache-") && !name.starts_with("disk-cache-gc"))
-        || name.starts_with("sandbox-")
+        (LaneClass::Analysis, infix)
+    } else if name.starts_with(GLOBBING_POOL_PREFIX) {
+        (LaneClass::Analysis, GLOBBING_POOL_PREFIX)
+    } else if let Some(prefix) = REPO_FETCH_PREFIXES
+        .iter()
+        .copied()
+        .find(|prefix| name.starts_with(prefix))
     {
-        LaneClass::Execution
+        (LaneClass::RepoFetch, family_of(prefix))
+    } else if let Some(prefix) = EXECUTION_PREFIXES
+        .iter()
+        .copied()
+        .find(|prefix| name.starts_with(prefix))
+    {
+        (LaneClass::Execution, family_of(prefix))
+    } else if name.starts_with(DISK_CACHE_PREFIX) && !name.starts_with("disk-cache-gc") {
+        (LaneClass::Execution, family_of(DISK_CACHE_PREFIX))
+    } else if name.starts_with(SANDBOX_PREFIX) {
+        (LaneClass::Execution, family_of(SANDBOX_PREFIX))
     } else {
-        LaneClass::Other
+        (LaneClass::Other, strip_worker_index(name))
     }
+}
+
+/// A matched literal without the punctuation that binds a worker index to it.
+fn family_of(literal: &str) -> &str {
+    literal.trim_end_matches(['-', '_', ' ', '['])
+}
+
+/// `name` without a trailing worker index — a run of digits and the single
+/// separator ahead of it — or `name` itself when nothing but the index is left.
+fn strip_worker_index(name: &str) -> &str {
+    let stem = name.trim_end_matches(|c: char| c.is_ascii_digit());
+    if stem.len() == name.len() {
+        return name;
+    }
+    let stem = stem.strip_suffix(['-', '_', ' ']).unwrap_or(stem);
+    if stem.is_empty() { name } else { stem }
+}
+
+/// The role the thread named by `tid`/`name` plays in the build.
+pub fn lane_class(tid: i64, name: &str) -> LaneClass {
+    classify(tid, name).0
+}
+
+/// The pool the thread named by `tid`/`name` belongs to: one value shared by
+/// every member of a pool, distinct between pools.
+pub fn track_family(tid: i64, name: &str) -> &str {
+    classify(tid, name).1
 }
 
 impl Profile {
@@ -1059,6 +1109,72 @@ mod tests {
             LaneClass::Execution
         );
         assert_eq!(lane_class(99, "collect-local-resources"), LaneClass::Other);
+    }
+
+    #[test]
+    fn track_family_names_the_pool_a_thread_belongs_to() {
+        assert_eq!(track_family(0, "Critical Path"), "Critical Path");
+        assert_eq!(track_family(7, "Main Thread"), "Main Thread");
+        assert_eq!(track_family(8, "Garbage Collector"), "Garbage Collector");
+        assert_eq!(
+            track_family(12, "skyframe-evaluator-execution-3"),
+            "skyframe-evaluator-execution"
+        );
+        assert_eq!(
+            track_family(13, "skyframe-evaluator-memoizing-3"),
+            "skyframe-evaluator-memoizing"
+        );
+        assert_eq!(
+            track_family(14, "skyframe-evaluator-cpu-heavy-2"),
+            "skyframe-evaluator-cpu-heavy"
+        );
+        assert_eq!(
+            track_family(15, "skyframe-evaluator-4"),
+            "skyframe-evaluator"
+        );
+        assert_eq!(track_family(15, "globbing pool-3"), "globbing pool");
+        assert_eq!(
+            track_family(16, "starlark-repository-foo (Virtual)"),
+            "starlark-repository"
+        );
+        assert_eq!(
+            track_family(
+                17,
+                "module-extension-@@rules_rs+//rs:extensions.bzl%crate-0 (Virtual)"
+            ),
+            "module-extension"
+        );
+        assert_eq!(track_family(18, "downloads[3]"), "downloads");
+        assert_eq!(track_family(19, "combined-cache-7"), "combined-cache");
+        assert_eq!(
+            track_family(20, "Non-eager Symlink planter 1"),
+            "Non-eager Symlink planter"
+        );
+        assert_eq!(track_family(21, "disk-cache-4"), "disk-cache");
+        assert_eq!(track_family(22, "sandbox-2"), "sandbox");
+    }
+
+    #[test]
+    fn track_family_is_shared_within_a_pool_and_distinct_between_pools() {
+        assert_eq!(
+            track_family(12, "skyframe-evaluator-execution-3"),
+            track_family(13, "skyframe-evaluator-execution-11")
+        );
+        assert_ne!(
+            track_family(12, "skyframe-evaluator-execution-3"),
+            track_family(13, "skyframe-evaluator-memoizing-3")
+        );
+    }
+
+    #[test]
+    fn an_unrecognised_track_drops_its_worker_index() {
+        assert_eq!(track_family(99, "pid-file-watcher-0"), "pid-file-watcher");
+        assert_eq!(
+            track_family(99, "collect-local-resources"),
+            "collect-local-resources"
+        );
+        assert_eq!(track_family(99, "42"), "42");
+        assert_eq!(track_family(99, "-7"), "-7");
     }
 
     /// Builds a profile from phase markers and a span end via the parser's flat

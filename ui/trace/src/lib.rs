@@ -14,19 +14,24 @@ mod model;
 mod rebuild;
 mod regions;
 mod stats_panel;
+#[cfg(test)]
+mod test_profile;
 mod theme;
 mod timeline;
+mod track_label;
+mod track_order;
 mod tracks_menu;
 
 use chart::{format_duration, format_time, nice_step, span_seconds};
 
 use flame_panel::FlamePanel;
-use groups::{GroupChrome, group_label};
+use groups::{GroupChrome, group_label, lanes_headed_by_pool};
 use model::TraceModel;
 use regions::{Regions, clamp_gutter_width, clamp_panel_height, flame_total_height, graph_lanes};
 use stats_panel::StatsPanel;
 use theme::Palette;
 use timeline::{HoveredSlice, TimelinePanel};
+use track_label::{pool_member_label, track_label};
 use tracks_menu::TracksMenu;
 
 use bviz_trace_layout::{
@@ -41,10 +46,10 @@ use bviz_ui_shell::Chrome;
 use clap::Parser;
 use gpui::{
     AnyElement, App, AvailableSpace, Bounds, ContentMask, Context, Div, Edges, Element, ElementId,
-    Entity, FocusHandle, GlobalElementId, InspectorElementId, IntoElement, LayoutId, MouseButton,
-    MouseDownEvent, Pixels, Point, Position, Render, ScrollHandle, SharedString, Stateful, Style,
-    Subscription, Task, TextAlign, TransformationMatrix, Window, div, fill, point, prelude::*, px,
-    relative, size,
+    Entity, FocusHandle, GlobalElementId, Hsla, InspectorElementId, IntoElement, LayoutId,
+    MouseButton, MouseDownEvent, Pixels, Point, Position, Render, ScrollHandle, SharedString,
+    Stateful, Style, Subscription, Task, TextAlign, TransformationMatrix, Window, div, fill, point,
+    prelude::*, px, relative, size,
 };
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -131,6 +136,9 @@ const TAB_BAR_HEIGHT: f32 = 28.0;
 /// before it scrolls.
 const TRACKS_MENU_WIDTH: f32 = 280.0;
 const TRACKS_MENU_MAX_LIST: f32 = 320.0;
+/// Tracks a group lists in the menu before it starts folded, chosen to keep a
+/// long group from burying the groups under it while a short one stays open.
+const TRACKS_MENU_FOLD_ABOVE: usize = 20;
 
 /// Heights of a stats-table header row and a body row.
 const STATS_HEADER_HEIGHT: f32 = 24.0;
@@ -183,6 +191,11 @@ enum Drag {
 const GROUP_BAND_HEIGHT: f32 = 18.0;
 /// Side of the show-all icon at a group band's gutter edge.
 const GROUP_ICON: f32 = 12.0;
+/// Indent of a pool header's gutter label under its group band's label, one
+/// nesting step in.
+const FAMILY_LABEL_INDENT: f32 = 10.0;
+/// Least gap kept between a header row's name and the count at its trailing edge.
+const HEADER_COUNT_GAP: f32 = 6.0;
 /// Lanes shown per group before the rest fold behind the band's show-all toggle.
 const TOP_N_PER_GROUP: usize = 12;
 
@@ -1177,6 +1190,7 @@ fn paint_gutter(
     scroll_y: f32,
     show_counters: bool,
     selected: &[bool],
+    shared_names: &[bool],
     palette: &Palette,
     window: &mut Window,
     cx: &mut App,
@@ -1212,9 +1226,16 @@ fn paint_gutter(
             size(px(gutter_width), px(regions.flame_h())),
         ),
     };
+    let lanes = GutterLanes {
+        profile,
+        chrome,
+        selected,
+        shared_names,
+    };
     window.with_content_mask(Some(flame_mask), |window| {
-        paint_thread_labels(&g, profile, layout, regions, scroll_y, selected, window, cx);
+        paint_thread_labels(&g, &lanes, layout, regions, scroll_y, window, cx);
         paint_group_bands(&g, chrome, regions, scroll_y, window, cx);
+        paint_family_bands(&g, chrome, regions, scroll_y, window, cx);
     });
 
     if show_counters {
@@ -1273,30 +1294,37 @@ fn paint_gutter_label(g: &GutterPaint, name: &str, ty: f32, window: &mut Window,
     );
 }
 
-/// Paints each thread's name at its flame lane, scrolled with the lanes and
-/// centered against the lane's full height. A selected lane's row carries a faint
+/// The state a flame lane's gutter row is drawn from.
+struct GutterLanes<'a> {
+    profile: &'a Profile,
+    chrome: &'a GroupChrome,
+    selected: &'a [bool],
+    shared_names: &'a [bool],
+}
+
+/// Paints each thread's label at its flame lane, scrolled with the lanes and
+/// centred on the part of the lane the flame region shows, so a lane taller than
+/// that region keeps its name on screen. A selected lane's row carries a faint
 /// accent tint and a leading accent bar, so which tracks feed the flame graph
 /// reads at a glance.
-#[allow(clippy::too_many_arguments)]
 fn paint_thread_labels(
     g: &GutterPaint,
-    profile: &Profile,
+    lanes: &GutterLanes,
     layout: &LaneLayout,
     regions: Regions,
     scroll_y: f32,
-    selected: &[bool],
     window: &mut Window,
     cx: &mut App,
 ) {
     let gutter_left = g.left;
     let gutter_width = g.width;
     let palette = g.palette;
-    for lane in &layout.lanes {
+    for (lane, headed) in layout.lanes.iter().zip(lanes_headed_by_pool(lanes.chrome)) {
         let top = regions.flame_top + lane.top - scroll_y;
         if top + lane.height < regions.flame_top || top > regions.flame_bottom {
             continue;
         }
-        if selected.get(lane.track).copied().unwrap_or(false) {
+        if lanes.selected.get(lane.track).copied().unwrap_or(false) {
             window.paint_quad(fill(
                 Bounds::new(
                     point(px(gutter_left), px(top)),
@@ -1312,20 +1340,83 @@ fn paint_thread_labels(
                 palette.accent,
             ));
         }
-        let ty = top + (lane.height - GUTTER_LABEL_SIZE) / 2.0;
-        paint_gutter_label(
-            g,
-            profile.str(profile.threads()[lane.track].name),
-            ty,
+        let seen_top = top.max(regions.flame_top);
+        let seen_bottom = (top + lane.height).min(regions.flame_bottom);
+        let ty = (seen_top + seen_bottom - GUTTER_LABEL_SIZE) / 2.0;
+        let label = if headed {
+            pool_member_label(lanes.profile, lanes.shared_names, lane.track)
+        } else {
+            track_label(lanes.profile, lanes.shared_names, lane.track)
+        };
+        paint_gutter_label(g, &label, ty, window, cx);
+    }
+}
+
+/// How many of a header row's lanes the chart draws of those it holds — the
+/// total alone where it draws none.
+fn header_count(shown: Option<usize>, total: usize) -> String {
+    match shown {
+        Some(shown) => format!("{shown}/{total}"),
+        None => format!("{total}"),
+    }
+}
+
+/// A header row of the flame chart's gutter.
+struct HeaderRow<'a> {
+    /// Where the row sits in the chart, before the lane scroll moves it.
+    top: f32,
+    name: &'a str,
+    count: &'a str,
+    /// Inset of the name from the gutter's text inset, one nesting step per level.
+    indent: f32,
+    /// Width held at the row's trailing edge for an icon drawn over it.
+    reserved: f32,
+    color: Hsla,
+}
+
+/// Paints a header row: its count set against the gutter's trailing edge, clear
+/// of what the row reserves there, and its name truncated into the width left
+/// between the two. Returns the row's top in screen space, and nothing where the
+/// flame region scrolls the row out of view.
+fn paint_header_row(
+    g: &GutterPaint,
+    regions: Regions,
+    scroll_y: f32,
+    row: HeaderRow,
+    window: &mut Window,
+    cx: &mut App,
+) -> Option<f32> {
+    let top = regions.flame_top + row.top - scroll_y;
+    if top + GROUP_BAND_HEIGHT < regions.flame_top || top > regions.flame_bottom {
+        return None;
+    }
+    let ty = top + (GROUP_BAND_HEIGHT - GUTTER_LABEL_SIZE) / 2.0;
+    let shape = |text: &str, avail: f32, window: &mut Window| {
+        bviz_ui_components::shape_truncated(text, avail, g.font.clone(), g.fs, row.color, window)
+    };
+    let count = shape(row.count, g.avail - row.indent - row.reserved, window);
+    let count_width = f32::from(count.width());
+    let name_avail = g.avail - row.indent - row.reserved - count_width - HEADER_COUNT_GAP;
+    let name = shape(row.name, name_avail, window);
+    let paint = |line: gpui::ShapedLine, x: f32, window: &mut Window, cx: &mut App| {
+        let _ = line.paint(
+            point(px(x), px(ty)),
+            g.fs,
+            TextAlign::Left,
+            None,
             window,
             cx,
         );
-    }
+    };
+    paint(name, g.left + SLICE_TEXT_PAD + row.indent, window, cx);
+    let count_x = g.left + g.width - SLICE_TEXT_PAD - row.reserved - count_width;
+    paint(count, count_x, window, cx);
+    Some(top)
 }
 
 /// Paints each group header band's chevron, class name, and shown/total lane
 /// count; a capped, expanded group shows a caret-double icon at the gutter's right
-/// edge — down to show every lane, up to show the busiest.
+/// edge — down to show every lane, up to show only the leading ones.
 fn paint_group_bands(
     g: &GutterPaint,
     chrome: &GroupChrome,
@@ -1336,51 +1427,33 @@ fn paint_group_bands(
 ) {
     let gutter_left = g.left;
     let gutter_width = g.width;
-    let avail = g.avail;
-    let font = &g.font;
-    let fs = g.fs;
     let palette = g.palette;
-    let strong = palette.label.into();
     for band in &chrome.bands {
-        let top = regions.flame_top + band.top - scroll_y;
-        if top + GROUP_BAND_HEIGHT < regions.flame_top || top > regions.flame_bottom {
-            continue;
-        }
         let show_icon = band.capped && !band.collapsed;
         let chevron = if band.collapsed { "▸" } else { "▾" };
-        let text = if band.collapsed {
-            format!("{chevron} {}  {}", group_label(band.class), band.total)
-        } else {
-            format!(
-                "{chevron} {}  {}/{}",
-                group_label(band.class),
-                band.shown,
-                band.total
-            )
-        };
-        let ty = top + (GROUP_BAND_HEIGHT - GUTTER_LABEL_SIZE) / 2.0;
-        // Keep the label clear of the icon when one is drawn.
-        let label_avail = if show_icon {
-            avail - GROUP_ICON - SLICE_TEXT_PAD
-        } else {
-            avail
-        };
-        let line = bviz_ui_components::shape_truncated(
-            &text,
-            label_avail,
-            font.clone(),
-            fs,
-            strong,
-            window,
-        );
-        let _ = line.paint(
-            point(px(gutter_left + SLICE_TEXT_PAD), px(ty)),
-            fs,
-            TextAlign::Left,
-            None,
+        let name = format!("{chevron} {}", group_label(band.class));
+        let count = header_count((!band.collapsed).then_some(band.shown), band.total);
+        let Some(top) = paint_header_row(
+            g,
+            regions,
+            scroll_y,
+            HeaderRow {
+                top: band.top,
+                name: &name,
+                count: &count,
+                indent: 0.0,
+                reserved: if show_icon {
+                    GROUP_ICON + SLICE_TEXT_PAD
+                } else {
+                    0.0
+                },
+                color: palette.label.into(),
+            },
             window,
             cx,
-        );
+        ) else {
+            continue;
+        };
         if show_icon {
             let name = if band.show_all {
                 "caret-double-up"
@@ -1398,6 +1471,36 @@ fn paint_group_bands(
                 cx,
             );
         }
+    }
+}
+
+/// Paints each pool header's name and shown/total lane count, indented under the
+/// group band it hangs from.
+fn paint_family_bands(
+    g: &GutterPaint,
+    chrome: &GroupChrome,
+    regions: Regions,
+    scroll_y: f32,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    for family in &chrome.families {
+        let count = header_count(Some(family.shown), family.total);
+        paint_header_row(
+            g,
+            regions,
+            scroll_y,
+            HeaderRow {
+                top: family.top,
+                name: &family.name,
+                count: &count,
+                indent: FAMILY_LABEL_INDENT,
+                reserved: 0.0,
+                color: g.palette.muted_label.into(),
+            },
+            window,
+            cx,
+        );
     }
 }
 
