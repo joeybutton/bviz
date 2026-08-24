@@ -1169,6 +1169,61 @@ mod tests {
         assert_eq!(layout.lanes.len(), 1, "the main thread's lane alone");
     }
 
+    /// Execution-class thread-name prefixes that each name a pool of their own,
+    /// enough of them that a capped group cannot seat every one.
+    const CROWDED_POOLS: [&str; TOP_N_PER_GROUP + 3] = [
+        "skyframe-evaluator-execution",
+        "skyframe-evaluator-memoizing",
+        "dynamic-execution",
+        "Include scanner",
+        "remote-execution",
+        "remote-executor",
+        "lease-extension",
+        "combined-cache-",
+        "merkle-tree-",
+        "virtual-action-input-pipe-",
+        "jdeps-reader-",
+        "tree-artifact-visitor",
+        "Non-eager Symlink planter",
+        "tree-deleter",
+        "sandbox-",
+    ];
+
+    #[test]
+    fn a_pool_the_sample_cannot_seat_is_still_headed() {
+        // With a pool per seat and more pools than seats, the D'Hondt round
+        // never runs and the lightest pools come away with none.
+        let threads: Vec<(String, usize)> = CROWDED_POOLS
+            .iter()
+            .enumerate()
+            .flat_map(|(pool, name)| (0..2).map(move |i| (format!("{name}{i}"), pool + 1)))
+            .collect();
+        let profile = profile_of(&threads);
+        let full = lay_out_lanes(&profile, &METRICS);
+        let visible = vec![true; profile.threads().len()];
+        let (layout, chrome) = built_rows(&profile, &full, &visible, &[false; GROUP_ORDER.len()]);
+        assert_eq!(layout.lanes.len(), TOP_N_PER_GROUP, "the budget, filled");
+        assert_eq!(
+            chrome.families.len(),
+            CROWDED_POOLS.len(),
+            "every pool named, seated or not"
+        );
+        let unseated: Vec<&FamilyBand> = chrome.families.iter().filter(|f| f.shown == 0).collect();
+        assert_eq!(
+            unseated.len(),
+            CROWDED_POOLS.len() - TOP_N_PER_GROUP,
+            "the pools the budget could not reach"
+        );
+        for family in unseated {
+            assert_eq!(family.total, 2, "an unseated pool still reports its size");
+        }
+        // A header drawn over no lanes must not swallow the next pool's run.
+        assert_eq!(
+            chrome.families.iter().map(|f| f.shown).sum::<usize>(),
+            layout.lanes.len()
+        );
+    }
+
     #[test]
     fn a_pool_header_row_falls_outside_every_group_band() {
         let (profile, full, visible) = pooled_fixture();
