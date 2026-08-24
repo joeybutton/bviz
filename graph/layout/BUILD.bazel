@@ -9,12 +9,12 @@ rust_library(
     visibility = ["//ui/graph:__pkg__"],
     deps = [
         "//util/parallel",
-        "@crates//:rayon",
         "@bazel_query_proto//:bazel_query_rust_proto",
         "@crates//:org-eclipse-elk-alg-layered",
         "@crates//:org-eclipse-elk-core",
         "@crates//:org-eclipse-elk-graph",
         "@crates//:prost",
+        "@crates//:rayon",
     ],
 )
 

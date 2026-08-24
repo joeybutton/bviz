@@ -6,7 +6,10 @@ rust_library(
     name = "profile",
     srcs = glob(["src/**/*.rs"]),
     crate_name = "bviz_trace_profile",
-    visibility = ["//trace/layout:__pkg__", "//ui/trace:__pkg__"],
+    visibility = [
+        "//trace/layout:__pkg__",
+        "//ui/trace:__pkg__",
+    ],
     deps = [
         "//util/parallel",
         "@crates//:crossbeam-channel",

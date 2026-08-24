@@ -4,7 +4,10 @@ load("@rules_rs//rs:rust_test.bzl", "rust_test")
 
 rust_library(
     name = "terminal_lib",
-    srcs = glob(["src/**/*.rs"], exclude = ["src/main.rs"]),
+    srcs = glob(
+        ["src/**/*.rs"],
+        exclude = ["src/main.rs"],
+    ),
     crate_name = "bviz_ui_terminal",
     deps = [
         "//terminal",

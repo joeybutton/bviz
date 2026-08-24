@@ -44,8 +44,8 @@ crate.from_cargo(
 # phase and has an edge crossing a container boundary reaches it and hangs.
 crate.annotation(
     crate = "org-eclipse-elk-alg-layered",
-    patches = ["@@//patches:elk-rs-reentrant-external-port-lock.patch"],
     patch_args = ["-p1"],
+    patches = ["@@//patches:elk-rs-reentrant-external-port-lock.patch"],
 )
 
 # Load libfontconfig at runtime (dlopen) instead of linking it via pkg-config.
@@ -66,12 +66,12 @@ crate.annotation(
 #   app registers its own embedded faces, which cover its ASCII/Latin-1 labels.
 crate.annotation(
     crate = "gpui_linux",
+    patch_args = ["-p1"],
     patches = [
         "@@//patches:gpui_linux-untile-restore.patch",
         "@@//patches:gpui_linux-clear-hover-on-leave.patch",
         "@@//patches:gpui_linux-embedded-fonts-only.patch",
     ],
-    patch_args = ["-p1"],
 )
 
 # Link the BCR system libraries (aliased under //third_party) into the -sys crates
@@ -83,8 +83,8 @@ crate.annotation(
 # rules_rs resolves features from unpatched metadata.
 crate.annotation(
     crate = "xkbcommon",
-    patches = ["@@//patches:xkbcommon-drop-x11.patch"],
     patch_args = ["-p1"],
+    patches = ["@@//patches:xkbcommon-drop-x11.patch"],
     deps = ["@@//third_party:xkbcommon"],
 )
 crate.annotation(
@@ -100,8 +100,8 @@ crate.annotation(
 # The hermetic toolchain ships libc++ instead, so emit no explicit C++ stdlib and
 # let freetype's symbols resolve against the toolchain's libc++.
 crate.annotation(
-    crate = "freetype-sys",
     build_script_env = {"CXXSTDLIB": ""},
+    crate = "freetype-sys",
 )
 
 # wgpu's `vulkan` feature does not propagate to wgpu-core/wgpu-hal through wgpu's
@@ -115,7 +115,6 @@ crate.annotation(
     crate = "wgpu-hal",
     crate_features = ["vulkan"],
 )
-
 crate.annotation(
     crate = "protoc-gen-prost",
     gen_binaries = ["protoc-gen-prost"],
