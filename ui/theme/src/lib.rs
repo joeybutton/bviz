@@ -199,6 +199,7 @@ const GAMUT_SLACK: f32 = 1e-6;
 
 /// `color` as Oklab lightness and the two opponent axes, of which [`Oklch`]'s
 /// chroma and hue are the polar reading.
+#[allow(clippy::excessive_precision)]
 fn oklab(color: Rgba) -> (f32, f32, f32) {
     let (r, g, b) = (to_linear(color.r), to_linear(color.g), to_linear(color.b));
     let l = (0.4122214708 * r + 0.5363325363 * g + 0.0514459929 * b).cbrt();
@@ -213,6 +214,7 @@ fn oklab(color: Rgba) -> (f32, f32, f32) {
 
 /// The linear-light sRGB channels of the Oklab color `(l, a, b)`, which fall in
 /// [0, 1] exactly for a color sRGB can show.
+#[allow(clippy::excessive_precision)]
 fn oklab_to_linear(l: f32, a: f32, b: f32) -> [f32; 3] {
     let long = (l + 0.3963377774 * a + 0.2158037573 * b).powi(3);
     let medium = (l - 0.1055613458 * a - 0.0638541728 * b).powi(3);
