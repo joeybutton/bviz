@@ -11,6 +11,12 @@ common --incompatible_enable_proto_toolchain_resolution
 # its dependents start from that metadata instead of waiting for full codegen.
 build --@rules_rs_rules_rust//rust/settings:pipelined_compilation
 
+# Style and lint checks; both report a finding rather than rewriting the source.
+build:rustfmt --aspects=@rules_rs_rules_rust//rust:defs.bzl%rustfmt_aspect
+build:rustfmt --output_groups=rustfmt_checks
+build:clippy --aspects=@rules_rs_rules_rust//rust:defs.bzl%rust_clippy_aspect
+build:clippy --output_groups=clippy_checks
+
 build:perf_profile -c opt
 build:perf_profile --@rules_rs_rules_rust//rust/settings:extra_rustc_flag=-Cdebuginfo=2
 build:perf_profile --@rules_rs_rules_rust//rust/settings:extra_rustc_flag=-Cforce-frame-pointers=yes
