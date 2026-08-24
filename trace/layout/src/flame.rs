@@ -1700,6 +1700,7 @@ fn in_view(content: Span, scroll_x: f64) -> Span {
 /// the slot standing for a run of siblings (see [`deepest_in_slot`]) — and lay
 /// its children out across `content`, its own span in content pixels. `covered`
 /// carries the painted right edge per depth row across the recursion.
+#[allow(clippy::too_many_arguments)]
 fn place(
     graph: &FlameGraph,
     idx: usize,
@@ -1792,6 +1793,7 @@ struct Run {
 /// `start`, spanning `first`, plus every following sibling the slot leaves
 /// nothing to paint. Among them the one whose subtree reaches deepest is placed —
 /// see [`lay_out_flame`] for why the deepest, not the leftmost, must win.
+#[allow(clippy::too_many_arguments)]
 fn deepest_in_slot(
     graph: &FlameGraph,
     parent: usize,

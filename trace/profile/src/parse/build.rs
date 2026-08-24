@@ -607,6 +607,7 @@ fn merge_lane(task: &mut TidTask) {
 /// Assembles the merged slice pools and the folded counters, phase markers,
 /// and thread metadata into the profile's flat parts. `text` and
 /// `distinct_strings` are filled by [`seal`].
+#[allow(clippy::too_many_arguments)]
 fn build_parts(
     pools: SlicePools,
     merged: ThreadMerge,

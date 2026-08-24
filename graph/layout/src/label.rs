@@ -167,6 +167,7 @@ impl PackageHierarchy {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn emit(
         &mut self,
         node: &Trie,

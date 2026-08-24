@@ -141,6 +141,7 @@ pub(crate) fn paint_graph(
 /// Paints the hover crosshair: a vertical line at the cursor x spanning both
 /// sections and the hovered absolute time near the ruler, then the per-lane
 /// counter readouts.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn paint_crosshair(
     profile: &Profile,
     tv: TimeView,
@@ -197,6 +198,7 @@ pub(crate) fn paint_crosshair(
 /// For each counter lane whose series covers time `t` (microseconds), paints a
 /// dot where the crosshair at `cx_px` meets the lane's line plus a value label.
 /// Scaling matches [`paint_graph`].
+#[allow(clippy::too_many_arguments)]
 fn paint_counter_readouts(
     profile: &Profile,
     regions: Regions,
