@@ -5,7 +5,7 @@ use gpui::{AnyElement, App, Div, IntoElement, Pixels, RenderOnce, Window, div, p
 const MARGIN: Pixels = px(8.);
 
 /// A horizontal strip of controls acting on the content below it.
-#[derive(IntoElement)]
+#[derive(IntoElement, Default)]
 pub struct Toolbar {
     leading: Vec<AnyElement>,
     trailing: Vec<AnyElement>,
@@ -13,10 +13,7 @@ pub struct Toolbar {
 
 impl Toolbar {
     pub fn new() -> Self {
-        Self {
-            leading: Vec::new(),
-            trailing: Vec::new(),
-        }
+        Self::default()
     }
 
     /// Add to the group held against the left edge.
