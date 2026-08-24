@@ -86,15 +86,15 @@ impl TerminalElement {
                     }
                     // Carry an active search onto the rebuilt content, keeping the
                     // focused match rather than resetting it to the first.
-                    if view.find_active {
-                        if let Some(input) = view.find_input.as_ref() {
-                            let query = input.read(cx).content().to_string();
-                            let current = view
-                                .terminal
-                                .as_ref()
-                                .and_then(Terminal::current_match_index);
-                            terminal.restore_search(&query, current);
-                        }
+                    if view.find_active
+                        && let Some(input) = view.find_input.as_ref()
+                    {
+                        let query = input.read(cx).content().to_string();
+                        let current = view
+                            .terminal
+                            .as_ref()
+                            .and_then(Terminal::current_match_index);
+                        terminal.restore_search(&query, current);
                     }
                     // Carry the text selection onto the rebuilt content. A live drag
                     // keeps its anchor on its text but lets the far end follow the

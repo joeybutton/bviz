@@ -133,19 +133,17 @@ impl Profile {
     /// decode or parse failure — reads the whole file and goes through
     /// [`from_bytes`], which owns the whole-buffer fallback chain.
     pub fn from_path(path: &Path) -> Result<Profile, LoadError> {
-        if let Ok(mut file) = std::fs::File::open(path) {
-            if let Ok(Some(decoded_size)) = gzip_isize_from_file(&mut file) {
-                if file.seek(SeekFrom::Start(0)).is_ok() {
-                    if let Some(profile) = timed("decode+parse (pipelined, streamed)", || {
-                        parse_gz_pipelined_reader(
-                            BufReader::with_capacity(GZIP_READ_BUFFER_BYTES, &mut file),
-                            decoded_size,
-                        )
-                    }) {
-                        return Ok(profile);
-                    }
-                }
-            }
+        if let Ok(mut file) = std::fs::File::open(path)
+            && let Ok(Some(decoded_size)) = gzip_isize_from_file(&mut file)
+            && file.seek(SeekFrom::Start(0)).is_ok()
+            && let Some(profile) = timed("decode+parse (pipelined, streamed)", || {
+                parse_gz_pipelined_reader(
+                    BufReader::with_capacity(GZIP_READ_BUFFER_BYTES, &mut file),
+                    decoded_size,
+                )
+            })
+        {
+            return Ok(profile);
         }
         let bytes = timed("read file", || std::fs::read(path).map_err(LoadError::Io))?;
         Profile::from_bytes(&bytes)
@@ -161,10 +159,10 @@ impl Profile {
     /// comfortably. A parse failure — most often a profile truncated by an
     /// interrupted Bazel — falls back to the best-effort [`recover`].
     pub fn from_bytes(bytes: &[u8]) -> Result<Profile, LoadError> {
-        if bytes.starts_with(&GZIP_MAGIC) {
-            if let Some(profile) = timed("decode+parse (pipelined)", || parse_gz_pipelined(bytes)) {
-                return Ok(profile);
-            }
+        if bytes.starts_with(&GZIP_MAGIC)
+            && let Some(profile) = timed("decode+parse (pipelined)", || parse_gz_pipelined(bytes))
+        {
+            return Ok(profile);
         }
         let decoded = timed("decode (decompress+transcode)", || decode(bytes))?;
         if let Some(profile) = timed("parse+build (parallel)", || parse_parallel(&decoded)) {

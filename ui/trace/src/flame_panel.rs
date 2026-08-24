@@ -461,21 +461,21 @@ impl FlamePanel {
     /// Begins a drag at `pos`: the vertical or horizontal scroll thumb/track if the
     /// press hit one, otherwise a pan of the panel.
     fn press(&mut self, pos: Point<Pixels>, cx: &App) {
-        if let Some(bar) = self.vbar(cx) {
-            if bar.track_hit(pos) {
-                let grab = bar.grab(pos);
-                self.drag = FlameDrag::VThumb(grab);
-                self.scroll_thumb_to(pos, grab, cx);
-                return;
-            }
+        if let Some(bar) = self.vbar(cx)
+            && bar.track_hit(pos)
+        {
+            let grab = bar.grab(pos);
+            self.drag = FlameDrag::VThumb(grab);
+            self.scroll_thumb_to(pos, grab, cx);
+            return;
         }
-        if let Some(bar) = self.hbar(cx) {
-            if bar.track_hit(pos) {
-                let grab = bar.grab(pos);
-                self.drag = FlameDrag::HThumb(grab);
-                self.hthumb_to(pos, grab, cx);
-                return;
-            }
+        if let Some(bar) = self.hbar(cx)
+            && bar.track_hit(pos)
+        {
+            let grab = bar.grab(pos);
+            self.drag = FlameDrag::HThumb(grab);
+            self.hthumb_to(pos, grab, cx);
+            return;
         }
         self.drag = FlameDrag::Pan;
         self.last_mouse = pos;

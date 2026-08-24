@@ -184,10 +184,10 @@ fn expansion_order(forest: &Forest) -> Vec<Id> {
         }
         order.push(c);
         for &k in &forest.children[&c] {
-            if let Some(d) = forest.descend(k) {
-                if !seen.contains(&d) {
-                    heap.push(Reverse((forest.reveal_count(d), d)));
-                }
+            if let Some(d) = forest.descend(k)
+                && !seen.contains(&d)
+            {
+                heap.push(Reverse((forest.reveal_count(d), d)));
             }
         }
     }

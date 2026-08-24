@@ -648,7 +648,7 @@ impl TimelinePanel {
         let regions = self.regions(cx);
         let x = f32::from(e.position.x);
         let in_ruler = regions.in_ruler(e.position);
-        if !in_ruler && !(e.modifiers.shift && regions.in_flame(e.position)) {
+        if !(in_ruler || (e.modifiers.shift && regions.in_flame(e.position))) {
             return false;
         }
         let Source::Loaded(profile) = self.model.read(cx).source() else {
@@ -695,21 +695,21 @@ impl TimelinePanel {
     fn press(&mut self, pos: Point<Pixels>, cx: &App) {
         self.crosshair = None;
         let (vbar, hbar) = self.scroll_bars(cx);
-        if let Some(bar) = vbar {
-            if bar.track_hit(pos) {
-                let grab = bar.grab(pos);
-                self.drag = TimelineDrag::VThumb(grab);
-                self.scroll_thumb_to(pos, grab, cx);
-                return;
-            }
+        if let Some(bar) = vbar
+            && bar.track_hit(pos)
+        {
+            let grab = bar.grab(pos);
+            self.drag = TimelineDrag::VThumb(grab);
+            self.scroll_thumb_to(pos, grab, cx);
+            return;
         }
-        if let Some(bar) = hbar {
-            if bar.track_hit(pos) {
-                let grab = bar.grab(pos);
-                self.drag = TimelineDrag::HThumb(grab);
-                self.pan_thumb_to(pos, grab, cx);
-                return;
-            }
+        if let Some(bar) = hbar
+            && bar.track_hit(pos)
+        {
+            let grab = bar.grab(pos);
+            self.drag = TimelineDrag::HThumb(grab);
+            self.pan_thumb_to(pos, grab, cx);
+            return;
         }
         self.drag = TimelineDrag::Pan;
         self.last_mouse = pos;
@@ -1044,14 +1044,13 @@ fn cached_slices(
     view: TimeView,
     viewport: Viewport,
 ) -> Rc<Vec<VisibleSlice>> {
-    if let Some(c) = cache.as_ref() {
-        if Arc::ptr_eq(&c.profile, profile)
-            && Rc::ptr_eq(&c.lanes, lanes)
-            && c.view == view
-            && c.viewport == viewport
-        {
-            return c.slices.clone();
-        }
+    if let Some(c) = cache.as_ref()
+        && Arc::ptr_eq(&c.profile, profile)
+        && Rc::ptr_eq(&c.lanes, lanes)
+        && c.view == view
+        && c.viewport == viewport
+    {
+        return c.slices.clone();
     }
     cache
         .insert(SliceDrawCache::new(
@@ -1466,19 +1465,19 @@ fn overlay_paint(
         let regions = Regions::new(bounds, n_counters, panel_height, gutter_width, flame_total);
         let show_counters = regions.has_graph && tab == BottomTab::Counters;
         paint_time_selection(&selection, tv, regions, show_counters, &palette, window);
-        if let Some(at) = crosshair {
-            if f32::from(at.x) >= regions.content_left {
-                paint_crosshair(
-                    &profile,
-                    tv,
-                    regions,
-                    at,
-                    show_counters,
-                    &palette,
-                    window,
-                    cx,
-                );
-            }
+        if let Some(at) = crosshair
+            && f32::from(at.x) >= regions.content_left
+        {
+            paint_crosshair(
+                &profile,
+                tv,
+                regions,
+                at,
+                show_counters,
+                &palette,
+                window,
+                cx,
+            );
         }
         if let Some((at, drawn)) = hovered {
             paint_tooltip(&drawn, at, bounds, &palette, window, cx);

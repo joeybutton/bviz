@@ -344,11 +344,11 @@ impl TerminalView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Some(bar) = self.scrollbar {
-            if bar.track_hit(event.position) {
-                self.begin_scrollbar_drag(bar, event.position, cx);
-                return;
-            }
+        if let Some(bar) = self.scrollbar
+            && bar.track_hit(event.position)
+        {
+            self.begin_scrollbar_drag(bar, event.position, cx);
+            return;
         }
         self.begin_selection(event, window, cx);
     }
@@ -405,10 +405,11 @@ impl TerminalView {
             return;
         }
         // Moving the pointer onto the gutter reveals the hidden scroll bar.
-        if let Some(bar) = self.scrollbar {
-            if bar.track_hit(event.position) && !self.scrollbar_visible {
-                self.reveal_scrollbar(cx);
-            }
+        if let Some(bar) = self.scrollbar
+            && bar.track_hit(event.position)
+            && !self.scrollbar_visible
+        {
+            self.reveal_scrollbar(cx);
         }
         let cell = self.cell_at(event.position);
         let url = match (cell, self.terminal.as_mut()) {

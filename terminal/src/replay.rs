@@ -165,14 +165,14 @@ fn marker_points(markers: &[Marker], ends: &[usize]) -> Vec<(usize, f64)> {
     let mut prev_of_day: Option<u32> = None;
     let mut last_abs = f64::NEG_INFINITY;
     for marker in markers {
-        if let Some(prev) = prev_of_day {
-            if marker.secs_of_day < prev {
-                if prev >= LATE_NIGHT && marker.secs_of_day < EARLY_MORNING {
-                    day += 1;
-                } else {
-                    // Backwards without a midnight rollover: not a timestamp.
-                    continue;
-                }
+        if let Some(prev) = prev_of_day
+            && marker.secs_of_day < prev
+        {
+            if prev >= LATE_NIGHT && marker.secs_of_day < EARLY_MORNING {
+                day += 1;
+            } else {
+                // Backwards without a midnight rollover: not a timestamp.
+                continue;
             }
         }
         let abs = day as f64 * SECONDS_PER_DAY + marker.secs_of_day as f64;

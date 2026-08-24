@@ -116,12 +116,12 @@ impl TracksMenu {
     /// Begins a scroll drag if `pos` hit the bar; otherwise leaves the press to
     /// fall through.
     fn press(&mut self, pos: Point<Pixels>) {
-        if let Some(bar) = self.vbar() {
-            if bar.track_hit(pos) {
-                let grab = bar.grab(pos);
-                self.drag = MenuDrag::Thumb(grab);
-                self.thumb_to(pos, grab);
-            }
+        if let Some(bar) = self.vbar()
+            && bar.track_hit(pos)
+        {
+            let grab = bar.grab(pos);
+            self.drag = MenuDrag::Thumb(grab);
+            self.thumb_to(pos, grab);
         }
     }
 
