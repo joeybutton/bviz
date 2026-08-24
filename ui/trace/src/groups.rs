@@ -19,7 +19,8 @@ pub(crate) const GROUP_ORDER: [LaneClass; 7] = [
 /// A collapsible group header in the flame chart, one per non-empty lane class,
 /// placed at `top` above its group's lanes. `shown`/`total` count the group's
 /// lanes drawn versus visible; a group with more than [`TOP_N_PER_GROUP`] visible
-/// lanes is `capped`, showing only its busiest [`TOP_N_PER_GROUP`] until `show_all`.
+/// lanes is `capped`, drawing a sample of [`TOP_N_PER_GROUP`] of them until
+/// `show_all`.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct GroupBand {
     pub(crate) group: usize,
@@ -32,9 +33,10 @@ pub(crate) struct GroupBand {
     pub(crate) show_all: bool,
 }
 
-/// A pool's label row, headed under its group's band over the run of that pool's
-/// lanes the chart draws — a pool the seat distribution left without a lane
-/// included, so its size is reported rather than the pool going unnamed.
+/// A pool's label row, standing under its group's band over the run of that
+/// pool's lanes the chart draws. A pool the seat distribution left without a
+/// lane still gets one, so its size is reported rather than the pool going
+/// unnamed.
 #[derive(Debug, Clone)]
 pub(crate) struct FamilyBand {
     pub(crate) name: String,
@@ -216,7 +218,7 @@ pub(crate) fn anchor_offset(rows: impl Iterator<Item = ChartRow>, anchor: RowAnc
 
 /// What a press on a group header band hit: its gutter half (toggles the group's
 /// collapse) or, for a capped expanded group, its time half (toggles whether the
-/// group shows every lane or only its busiest).
+/// group shows every lane or a sample of them).
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum GroupHit {
     Collapse(usize),

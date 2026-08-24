@@ -83,8 +83,8 @@ impl TracksMenu {
         set_list_thumb(&self.scroll, 0.0);
     }
 
-    /// Reflows the timeline after a visibility change, rebuilding its scene over
-    /// the restacked lanes.
+    /// Rebuilds the timeline's scene over the lanes as they stand, for a change
+    /// to what the chart stacks or the order it stacks them in.
     fn reflow_timeline(&self, cx: &mut Context<Self>) {
         if let Some(shell) = self.shell.upgrade() {
             shell.update(cx, |tv, cx| tv.invalidate_timeline(cx));

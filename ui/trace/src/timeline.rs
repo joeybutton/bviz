@@ -27,8 +27,8 @@ use std::sync::Arc;
 
 /// The timeline's culled draw list together with the inputs that determine it,
 /// so a repaint reuses it unless one changed. The list turns only on the profile
-/// (`Arc` identity), the lane layout (`Rc` identity, a fresh one on any
-/// visibility, collapse, or show-all change), the time view (pan/zoom), and the
+/// (`Arc` identity), the lane layout (`Rc` identity, a fresh one whenever the
+/// chart restacks), the time view (pan/zoom), and the
 /// viewport (width, height, and `scroll_y`); `min_px` and the metrics are consts,
 /// so they are not keys.
 pub(crate) struct SliceDrawCache {

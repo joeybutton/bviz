@@ -45,8 +45,8 @@ pub(crate) struct TraceModel {
     lanes: RefCell<Option<Rc<LaneLayout>>>,
     /// Which tracks the flame chart draws, indexed by `profile.threads()` order.
     visible_tracks: Vec<bool>,
-    /// [`shared_names`] over the loaded profile, held so a label costs no scan
-    /// of the tracks per frame or per row.
+    /// [`shared_names`] over the loaded profile, which counting the names of
+    /// every track derives.
     shared_track_names: Vec<bool>,
     /// Which tracks the flame graph and stats aggregate over, indexed likewise.
     selected_tracks: Vec<bool>,
