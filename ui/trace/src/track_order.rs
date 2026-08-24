@@ -198,11 +198,7 @@ fn highest_average(pools: &[Pool]) -> Option<usize> {
 /// Orders `tracks` (indices into `threads`) by pool, then by name under
 /// [`natural_cmp`], then by tid — a pool reuses a name as it is recreated, so
 /// the name alone is not a total order.
-pub(crate) fn sort_tracks_by_name(
-    profile: &Profile,
-    threads: &[ThreadTrack],
-    tracks: &mut [usize],
-) {
+fn sort_tracks_by_name(profile: &Profile, threads: &[ThreadTrack], tracks: &mut [usize]) {
     let mut keyed: Vec<(&str, &str, i64, usize)> = tracks
         .iter()
         .map(|&t| {
@@ -226,7 +222,7 @@ pub(crate) fn sort_tracks_by_name(
 /// or of anything else: digit runs compare by numeric value, so `worker-2`
 /// precedes `worker-10`, and other runs case-insensitively. Names that compare
 /// equal that way fall back to their bytes, making the order total.
-pub(crate) fn natural_cmp(a: &str, b: &str) -> Ordering {
+fn natural_cmp(a: &str, b: &str) -> Ordering {
     let (mut a_runs, mut b_runs) = (runs(a), runs(b));
     loop {
         match (a_runs.next(), b_runs.next()) {

@@ -47,7 +47,7 @@ pub(crate) struct FamilyBand {
 
 /// The header rows overlaid on a grouped lane layout, and every row of the chart
 /// they and its lanes stack into, in the order they stack.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub(crate) struct GroupChrome {
     pub(crate) bands: Vec<GroupBand>,
     pub(crate) families: Vec<FamilyBand>,
@@ -451,7 +451,6 @@ mod tests {
     use crate::test_profile::profile_of;
     use crate::{LINE_SCROLL_PX, drawn_scroll, scroll_request};
     use bviz_trace_layout::lay_out_lanes;
-    use bviz_trace_profile::track_family;
 
     /// Stacks one band per group, each followed by its `(track, height)` lanes,
     /// in the geometry the flame chart draws. Every group holds a single pool, so
