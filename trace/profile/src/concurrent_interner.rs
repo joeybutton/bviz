@@ -82,14 +82,44 @@ struct Arena {
     buf: Box<[UnsafeCell<u8>]>,
     cap: usize,
     page_size: usize,
-    /// Next unallocated byte offset; page grabs (`fetch_add(page_size)`) start
-    /// at 1 so byte 0 is reserved as the placeholder. Every byte below this is
-    /// in a grabbed page or the placeholder, hence initialized — so its value
-    /// at seal is exactly the used pool length.
+    /// Next unallocated byte offset, starting at 1 so byte 0 is reserved as the
+    /// placeholder. Every byte below this is in a grabbed page or the
+    /// placeholder, hence initialized — so its value at seal is exactly the used
+    /// pool length.
     page_cursor: AtomicUsize,
 }
 
 impl Arena {
+    /// Takes `want` bytes from the cursor, or `least` where the pool has no room
+    /// left for the larger claim, reporting the offset taken and how much of it
+    /// was granted. Page granularity is an optimization over the pool's text
+    /// budget rather than a claim on it, so a writer the pool cannot give a
+    /// whole page takes only the bytes it needs and the pool runs out only when
+    /// the distinct text it is sized for does.
+    fn reserve(&self, want: usize, least: usize) -> (usize, usize) {
+        let mut start = self.page_cursor.load(Ordering::Relaxed);
+        loop {
+            let take = if start + want <= self.cap {
+                want
+            } else {
+                least
+            };
+            assert!(
+                start + take <= self.cap,
+                "concurrent interner arena overflow"
+            );
+            match self.page_cursor.compare_exchange_weak(
+                start,
+                start + take,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => return (start, take),
+                Err(current) => start = current,
+            }
+        }
+    }
+
     /// Copies `bytes` into `[off, off + bytes.len())`.
     ///
     /// SAFETY: the caller must have reserved `[off, off + bytes.len())` from the
@@ -140,8 +170,9 @@ unsafe impl Sync for ConcurrentInterner {}
 impl ConcurrentInterner {
     /// An interner whose pool is bounded by `text_bytes` of distinct text and
     /// whose index is sized for `distinct` strings. `text_bytes` is the caller's
-    /// bound on the total distinct bytes; the buffer adds slack for per-page and
-    /// per-worker final-page waste so a page grab never exceeds it.
+    /// bound on the total distinct bytes; the buffer adds slack over it so that
+    /// writers keep taking whole pages, which [`Arena::reserve`] gives up on
+    /// rather than exceeding the pool.
     pub(crate) fn new(text_bytes: usize, distinct: usize) -> ConcurrentInterner {
         // The parallel parse's writer count: shard fan-out and final-page
         // headroom track the threads that actually intern, i.e. physical cores.
@@ -157,7 +188,8 @@ impl ConcurrentInterner {
             .collect();
 
         // One byte for the placeholder, the bound itself, a small fraction for
-        // within-page slack, and a final page per worker (plus headroom).
+        // within-page slack, and a page per worker the host can run, which is
+        // what a parse sized to the host spends on final-page tails.
         let cap = 1 + text_bytes + text_bytes / 16 + (par + 2) * PAGE_SIZE;
         // The sealed pool indexes handles with u32, so every reserved offset
         // must fit u32; guard once here so `off as u32` in `alloc` can never
@@ -359,7 +391,7 @@ impl Writer<'_> {
 
     /// Reserves `s`'s bytes from the cursor and copies them in, returning the
     /// handle. A string that fits the current page bumps through it; one that
-    /// needs a fresh page grabs a full `page_size` page and adopts it; one
+    /// needs a fresh page adopts whatever [`Arena::reserve`] grants; one
     /// larger than a page takes a dedicated exact-size chunk without disturbing
     /// the writer's current page, so subsequent small strings keep filling it.
     fn alloc(&mut self, s: &str) -> Str {
@@ -373,20 +405,12 @@ impl Writer<'_> {
             return Str::new(1, 0);
         }
         let off = if n > arena.page_size {
-            let start = arena.page_cursor.fetch_add(n, Ordering::Relaxed);
-            assert!(start + n <= arena.cap, "concurrent interner arena overflow");
-            start
+            arena.reserve(n, n).0
         } else {
             if self.page_pos + n > self.page_end {
-                let start = arena
-                    .page_cursor
-                    .fetch_add(arena.page_size, Ordering::Relaxed);
+                let (start, granted) = arena.reserve(arena.page_size, n);
                 self.page_pos = start;
-                self.page_end = start + arena.page_size;
-                assert!(
-                    self.page_end <= arena.cap,
-                    "concurrent interner arena overflow"
-                );
+                self.page_end = start + granted;
             }
             let off = self.page_pos;
             self.page_pos += n;
