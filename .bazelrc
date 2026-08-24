@@ -9,7 +9,10 @@ common --incompatible_enable_proto_toolchain_resolution
 
 # Overlap crate compilation across the dependency DAG: each crate emits .rmeta and
 # its dependents start from that metadata instead of waiting for full codegen.
-build --@rules_rs_rules_rust//rust/settings:pipelined_compilation
+# Only under remote execution: built locally, a crate's metadata and its library
+# resolve to versions rustc considers different, and its dependents then fail to
+# find it (E0460, E0463).
+build:remote --@rules_rs_rules_rust//rust/settings:pipelined_compilation
 
 # Style and lint checks; both report a finding rather than rewriting the source.
 build:rustfmt --aspects=@rules_rs_rules_rust//rust:defs.bzl%rustfmt_aspect
