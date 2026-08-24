@@ -15,6 +15,9 @@ fn is_activate(key: &str) -> bool {
     key == "enter" || key == "space"
 }
 
+/// What a [`Button`] runs when it is activated.
+type OnClick = Box<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>;
+
 /// A clickable button: filled with a label by default, or `.ghost().icon(..)` for
 /// an icon-only control. Add `.track_focus(handle)` to make it keyboard-focusable,
 /// in which case enter/space activate it and show the same pressed state as the mouse.
@@ -29,7 +32,7 @@ pub struct Button {
     selected: Option<bool>,
     compact: bool,
     focus_handle: Option<FocusHandle>,
-    on_click: Box<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>,
+    on_click: OnClick,
 }
 
 impl Button {
