@@ -820,11 +820,12 @@ impl Element for RegionOverlays {
         cx: &mut App,
     ) -> (LayoutId, ()) {
         // The overlays cover the body without displacing the timeline beneath them.
-        let mut style = Style::default();
-        style.position = Position::Absolute;
-        style.inset = Edges::all(px(0.).into());
-        style.size.width = relative(1.).into();
-        style.size.height = relative(1.).into();
+        let style = Style {
+            position: Position::Absolute,
+            inset: Edges::all(px(0.).into()),
+            size: size(relative(1.).into(), relative(1.).into()),
+            ..Default::default()
+        };
         (window.request_layout(style, [], cx), ())
     }
 
