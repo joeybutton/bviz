@@ -28,7 +28,11 @@ pub(crate) fn scan_event<'a>(
     start: usize,
     scratch: &mut Vec<ArgEntry<'a>>,
 ) -> Option<(RawEvent<'a>, usize)> {
-    let mut s = EventScanner { text, bytes: text.as_bytes(), pos: start };
+    let mut s = EventScanner {
+        text,
+        bytes: text.as_bytes(),
+        pos: start,
+    };
     s.eat(b'{').then_some(())?;
     let mut ev = RawEvent::default();
     s.skip_ws();
@@ -76,7 +80,11 @@ impl IntTok {
     /// The token as serde delivers it to an `f64` field: through the i64
     /// (negative) or u64 (positive) visit, then a cast.
     fn to_f64(&self) -> Option<f64> {
-        Some(if self.neg { self.to_i64()? as f64 } else { self.mag as f64 })
+        Some(if self.neg {
+            self.to_i64()? as f64
+        } else {
+            self.mag as f64
+        })
     }
 
     /// The token as an `i64`, `None` when out of range.

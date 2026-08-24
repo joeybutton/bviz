@@ -68,7 +68,11 @@ pub fn scrubber<V: 'static>(
     entity: Entity<V>,
     on_scrub: impl Fn(&mut V, f32, &mut Context<V>) + 'static,
 ) -> impl IntoElement {
-    let ScrubberColors { track, played, knob } = colors;
+    let ScrubberColors {
+        track,
+        played,
+        knob,
+    } = colors;
     let slot = Rc::new(slot);
     let on_scrub = Rc::new(on_scrub);
 
@@ -85,7 +89,9 @@ pub fn scrubber<V: 'static>(
         .h_full()
         .on_mouse_down(MouseButton::Left, move |event: &MouseDownEvent, _, cx| {
             press_entity.update(cx, |view, cx| {
-                let Some(geom) = press_slot(view).track else { return };
+                let Some(geom) = press_slot(view).track else {
+                    return;
+                };
                 let fraction = geom.fraction_at(f32::from(event.position.x));
                 press_scrub(view, fraction, cx);
                 press_slot(view).held = true;

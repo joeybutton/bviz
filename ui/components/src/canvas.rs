@@ -59,18 +59,30 @@ pub fn paint_labeled_box(
     window: &mut Window,
     cx: &mut App,
 ) {
-    let LabelBoxStyle { background, seam_mix, label_min_px, text_pad } = style;
+    let LabelBoxStyle {
+        background,
+        seam_mix,
+        label_min_px,
+        text_pad,
+    } = style;
     let w = f32::from(rect.size.width);
     let h = f32::from(rect.size.height);
     // Square corners keep every column at the box's full height, so a run of thin
     // boxes reads as an even band; a box no wider than its seam is seam throughout,
     // so a run of one-pixel boxes reads as a band of edges.
-    let seam_color = Hsla::from(bviz_ui_theme::mix(Rgba::from(fill_color), background, seam_mix));
+    let seam_color = Hsla::from(bviz_ui_theme::mix(
+        Rgba::from(fill_color),
+        background,
+        seam_mix,
+    ));
     let seam_w = w.min(SEAM_PX);
     if w > seam_w {
         window.paint_quad(fill(rect, fill_color));
     }
-    let seam = Bounds { origin: rect.origin, size: size(px(seam_w), rect.size.height) };
+    let seam = Bounds {
+        origin: rect.origin,
+        size: size(px(seam_w), rect.size.height),
+    };
     window.paint_quad(fill(seam, seam_color));
     if w < label_min_px {
         return;

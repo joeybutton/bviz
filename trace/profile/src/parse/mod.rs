@@ -14,11 +14,11 @@ mod pipeline;
 mod scanner;
 mod serde_events;
 
-use build::{seal, Builder, Merge};
+use build::{Builder, Merge, seal};
 use decode::{decode, gzip_isize_from_file};
 use pipeline::{
-    find_trace_events_array, parse_gz_pipelined, parse_gz_pipelined_reader, parse_parallel,
-    TraceEventsArray,
+    TraceEventsArray, find_trace_events_array, parse_gz_pipelined, parse_gz_pipelined_reader,
+    parse_parallel,
 };
 use scanner::object_end;
 use serde_events::{ArgEntry, ProfileVisitor, RawEventSeed};
@@ -102,8 +102,12 @@ impl std::error::Error for LoadError {
 /// independent of the events, so it is folded in whenever it is seen.
 fn parse_streaming(text: &str) -> Result<Profile, serde_json::Error> {
     let mut de = serde_json::Deserializer::from_str(text);
-    let profile =
-        serde::Deserializer::deserialize_map(&mut de, ProfileVisitor { text_len: text.len() })?;
+    let profile = serde::Deserializer::deserialize_map(
+        &mut de,
+        ProfileVisitor {
+            text_len: text.len(),
+        },
+    )?;
     de.end()?;
     Ok(profile)
 }
@@ -158,8 +162,7 @@ impl Profile {
     /// interrupted Bazel — falls back to the best-effort [`recover`].
     pub fn from_bytes(bytes: &[u8]) -> Result<Profile, LoadError> {
         if bytes.starts_with(&GZIP_MAGIC) {
-            if let Some(profile) = timed("decode+parse (pipelined)", || parse_gz_pipelined(bytes))
-            {
+            if let Some(profile) = timed("decode+parse (pipelined)", || parse_gz_pipelined(bytes)) {
                 return Ok(profile);
             }
         }
@@ -178,12 +181,13 @@ impl Profile {
 /// whole events out of the traceEvents array until the first incomplete one.
 fn recover(text: &str) -> Result<Profile, LoadError> {
     let (events_at, array_start) = match find_trace_events_array(text.as_bytes()) {
-        TraceEventsArray::Found { key_at, content_start } => (key_at, content_start),
-        TraceEventsArray::NoKey => {
-            return Err(LoadError::Corrupted("no traceEvents array".into()))
-        }
+        TraceEventsArray::Found {
+            key_at,
+            content_start,
+        } => (key_at, content_start),
+        TraceEventsArray::NoKey => return Err(LoadError::Corrupted("no traceEvents array".into())),
         TraceEventsArray::NoArray => {
-            return Err(LoadError::Corrupted("traceEvents not an array".into()))
+            return Err(LoadError::Corrupted("traceEvents not an array".into()));
         }
     };
 
@@ -231,7 +235,9 @@ fn recover_events(
         }
         // A missing close means the array was cut mid-object: stop.
         let start = i;
-        let Some(end) = object_end(bytes, start) else { break };
+        let Some(end) = object_end(bytes, start) else {
+            break;
+        };
         let mut de = serde_json::Deserializer::from_str(&text[start..=end]);
         if let Ok(ev) = RawEventSeed(&mut scratch)
             .deserialize(&mut de)
@@ -423,7 +429,11 @@ mod tests {
         for lane in p.counters() {
             writeln!(out, "counter {:?}", p.str(lane.name)).unwrap();
             for series in p.series(lane) {
-                let pts: Vec<_> = p.points(series).iter().map(|pt| (pt.ts_us, pt.value)).collect();
+                let pts: Vec<_> = p
+                    .points(series)
+                    .iter()
+                    .map(|pt| (pt.ts_us, pt.value))
+                    .collect();
                 writeln!(out, "  series {:?} {:?}", p.str(series.name), pts).unwrap();
             }
         }
@@ -517,8 +527,7 @@ mod tests {
                 + &format!("],\"otherData\":{{\"build_id\":\"{build_id}\"}}}}")
         };
         let gzipped = |json: &str| {
-            let mut enc =
-                flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+            let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
             enc.write_all(json.as_bytes()).unwrap();
             enc.finish().unwrap()
         };
@@ -533,7 +542,11 @@ mod tests {
         // Read whole, the profile parses intact — events and the
         // bracket-bearing metadata alike.
         let p = Profile::from_bytes(json.as_bytes()).expect("serial");
-        let names: Vec<_> = p.slices(&p.threads()[0]).iter().map(|s| p.str(s.name)).collect();
+        let names: Vec<_> = p
+            .slices(&p.threads()[0])
+            .iter()
+            .map(|s| p.str(s.name))
+            .collect();
         assert_eq!(names, ["a", "b"]);
         assert_eq!(p.opt_str(p.metadata().build_id), Some("a]b"));
     }
@@ -626,7 +639,10 @@ mod tests {
             r#"{"ph":7}"#,
             r#"{"args":[1]}"#,
         ] {
-            assert!(scan_event(deferred, 0, &mut scratch).is_none(), "{deferred}");
+            assert!(
+                scan_event(deferred, 0, &mut scratch).is_none(),
+                "{deferred}"
+            );
         }
     }
 
@@ -644,8 +660,7 @@ mod tests {
             });
         }
         for start in 0..bytes.len() {
-            let naive =
-                (start..bytes.len()).find(|&j| matches!(bytes[j], b'"' | b'\\' | 0..=0x1f));
+            let naive = (start..bytes.len()).find(|&j| matches!(bytes[j], b'"' | b'\\' | 0..=0x1f));
             assert_eq!(find_special(&bytes, start), naive, "from {start}");
         }
         assert_eq!(find_special(b"no specials at all", 0), None);
@@ -707,8 +722,17 @@ mod tests {
             + "]}";
         let serial = parse_streaming(&json).expect("serial");
         let lane = &serial.threads()[0];
-        let names: Vec<_> = serial.slices(lane).iter().map(|s| serial.str(s.name)).collect();
-        assert_eq!(names, ["outer", "tie1", "tie2", "tie3", "tie4", "tie5", "mid", "last"]);
+        let names: Vec<_> = serial
+            .slices(lane)
+            .iter()
+            .map(|s| serial.str(s.name))
+            .collect();
+        assert_eq!(
+            names,
+            [
+                "outer", "tie1", "tie2", "tie3", "tie4", "tie5", "mid", "last"
+            ]
+        );
         // Chunking at newlines splits the ties across several builders.
         let parallel = parse_chunks(&json, 4, 0).expect("parallel");
         assert_eq!(semantic(&serial), semantic(&parallel));
@@ -786,8 +810,13 @@ mod tests {
         }"#;
         let p = parse(json);
         let t = &p.threads()[0];
-        let depth =
-            |name: &str| p.slices(t).iter().find(|s| p.str(s.name) == name).unwrap().depth;
+        let depth = |name: &str| {
+            p.slices(t)
+                .iter()
+                .find(|s| p.str(s.name) == name)
+                .unwrap()
+                .depth
+        };
         assert_eq!(depth("parent"), 0);
         assert_eq!(depth("child1"), 1);
         assert_eq!(depth("child2"), 1);
@@ -811,8 +840,11 @@ mod tests {
             + "{\"cat\":\"c\",\"name\":\"z\",\"ph\":\"X\",\"ts\":50,\"dur\":5,\"tid\":2}\n"
             + "]}";
         let check = |p: &Profile| {
-            let maxes: Vec<Vec<i64>> =
-                p.threads().iter().map(|t| p.end_maxes(t).to_vec()).collect();
+            let maxes: Vec<Vec<i64>> = p
+                .threads()
+                .iter()
+                .map(|t| p.end_maxes(t).to_vec())
+                .collect();
             assert_eq!(maxes, [vec![100, 100, 100, 100, 180], vec![15, 55]]);
             for t in p.threads() {
                 assert_eq!(p.end_maxes(t).len(), p.slices(t).len());
@@ -986,7 +1018,13 @@ mod tests {
     #[test]
     fn an_empty_profile_reports_a_zero_extent() {
         let p = parse(r#"{"traceEvents": []}"#);
-        assert_eq!(p.span(), TimeSpan { start_us: 0, end_us: 0 });
+        assert_eq!(
+            p.span(),
+            TimeSpan {
+                start_us: 0,
+                end_us: 0
+            }
+        );
     }
 
     #[test]

@@ -1,5 +1,5 @@
 use crate::camera::{
-    clamp_pan, ease_out_cubic, fit_view, fit_zoom, settle_view, Camera, Rect, Settle,
+    Camera, Rect, Settle, clamp_pan, ease_out_cubic, fit_view, fit_zoom, settle_view,
 };
 use crate::{GraphView, MAX_ZOOM, SETTLE_DURATION, SETTLE_MIN_PAN_STEP, SETTLE_MIN_ZOOM_STEP};
 use gpui::{App, Bounds, Entity, Pixels, Window};
@@ -24,7 +24,10 @@ impl Framing {
     /// A framing not yet fitted to a window.
     pub(crate) fn new() -> Self {
         Framing {
-            camera: Camera { zoom: 1.0, pan: (0.0, 0.0) },
+            camera: Camera {
+                zoom: 1.0,
+                pan: (0.0, 0.0),
+            },
             fitted: false,
             viewport: Bounds::default(),
             recenter: false,
@@ -69,8 +72,13 @@ impl Framing {
             || (to_pan.0 - from_pan.0).abs() > SETTLE_MIN_PAN_STEP
             || (to_pan.1 - from_pan.1).abs() > SETTLE_MIN_PAN_STEP;
         if moves {
-            self.anim =
-                Some(Settle { from_zoom, from_pan, to_zoom, to_pan, start: Instant::now() });
+            self.anim = Some(Settle {
+                from_zoom,
+                from_pan,
+                to_zoom,
+                to_pan,
+                start: Instant::now(),
+            });
         }
     }
 
@@ -123,8 +131,7 @@ impl Framing {
         }
         if let Some(target) = target {
             let (zoom, pan) = (self.camera.zoom, self.camera.pan);
-            let (to_zoom, to_pan) =
-                settle_view(target, self.viewport.size, content, zoom, pan);
+            let (to_zoom, to_pan) = settle_view(target, self.viewport.size, content, zoom, pan);
             self.ease_to(to_zoom, to_pan);
         }
         self.recenter = false;
@@ -180,7 +187,7 @@ pub(crate) fn build_prepaint(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gpui::{point, px, size, Size};
+    use gpui::{Size, point, px, size};
 
     // The whole graph, large enough that fit_zoom's floor stays well below 1.0 and
     // never bites in these cases.
@@ -256,25 +263,49 @@ mod tests {
             "refitted instead of rescaling: {}",
             f.camera.zoom
         );
-        assert!((f.camera.pan.0 + 800.0).abs() < 1e-3, "pan {:?}", f.camera.pan);
-        assert!((f.camera.pan.1 + 600.0).abs() < 1e-3, "pan {:?}", f.camera.pan);
-        assert!(f.anim.is_none(), "a settle aimed at the old size survived the resize");
+        assert!(
+            (f.camera.pan.0 + 800.0).abs() < 1e-3,
+            "pan {:?}",
+            f.camera.pan
+        );
+        assert!(
+            (f.camera.pan.1 + 600.0).abs() < 1e-3,
+            "pan {:?}",
+            f.camera.pan
+        );
+        assert!(
+            f.anim.is_none(),
+            "a settle aimed at the old size survived the resize"
+        );
     }
 
     #[test]
     fn arming_below_the_settle_steps_installs_no_ease() {
         // The target already sits comfortably framed, so the move is a no-op.
-        let target = Rect { x: 375.0, y: 280.0, w: 50.0, h: 40.0 };
+        let target = Rect {
+            x: 375.0,
+            y: 280.0,
+            w: 50.0,
+            h: 40.0,
+        };
         let mut f = framed(1.0, (0.0, 0.0), canvas_bounds(800., 600.));
         f.recenter = true;
         f.arm_settle(CONTENT, Some(target));
         assert!(f.anim.is_none());
-        assert!(!f.recenter, "the request outlived the prepaint that answered it");
+        assert!(
+            !f.recenter,
+            "the request outlived the prepaint that answered it"
+        );
     }
 
     #[test]
     fn arming_on_an_offscreen_target_eases_onto_it() {
-        let target = Rect { x: 1000.0, y: 100.0, w: 50.0, h: 40.0 };
+        let target = Rect {
+            x: 1000.0,
+            y: 100.0,
+            w: 50.0,
+            h: 40.0,
+        };
         let mut f = framed(1.0, (0.0, 0.0), canvas_bounds(800., 600.));
         f.recenter = true;
         f.arm_settle(CONTENT, Some(target));
@@ -299,8 +330,15 @@ mod tests {
     #[test]
     fn a_finished_settle_lands_on_the_target_and_asks_for_the_frame_that_shows_it() {
         let mut f = framed(1.0, (0.0, 0.0), canvas_bounds(800., 600.));
-        f.anim = Some(settle_to(2.0, (100.0, -50.0), Instant::now() - SETTLE_DURATION));
-        assert!(f.step_settle(), "the step that moved the camera asked for no frame");
+        f.anim = Some(settle_to(
+            2.0,
+            (100.0, -50.0),
+            Instant::now() - SETTLE_DURATION,
+        ));
+        assert!(
+            f.step_settle(),
+            "the step that moved the camera asked for no frame"
+        );
         assert_eq!((f.camera.zoom, f.camera.pan), (2.0, (100.0, -50.0)));
         assert!(f.anim.is_none());
         // Landed and drawn: the ease is over and asks for nothing further.
@@ -312,7 +350,10 @@ mod tests {
         let (zoom, pan) = (EASE_FROM_ZOOM, EASE_FROM_PAN);
         let mut f = framed(zoom, pan, canvas_bounds(800., 600.));
         f.anim = Some(settle_to(zoom, pan, Instant::now() - SETTLE_DURATION));
-        assert!(!f.step_settle(), "a landing that moved nothing asked for a frame");
+        assert!(
+            !f.step_settle(),
+            "a landing that moved nothing asked for a frame"
+        );
         assert!(f.anim.is_none());
     }
 
@@ -320,7 +361,11 @@ mod tests {
     fn a_settle_mid_ease_asks_for_another_frame() {
         let (to_zoom, to_pan) = (2.0, (100.0, -50.0));
         let mut f = framed(1.0, (0.0, 0.0), canvas_bounds(800., 600.));
-        f.anim = Some(settle_to(to_zoom, to_pan, Instant::now() - SETTLE_DURATION / 2));
+        f.anim = Some(settle_to(
+            to_zoom,
+            to_pan,
+            Instant::now() - SETTLE_DURATION / 2,
+        ));
         assert!(f.step_settle());
         assert!(f.anim.is_some());
         // Halfway through in time, so every component sits where the ease curve
@@ -332,9 +377,18 @@ mod tests {
             a.min(b)..=a.max(b)
         };
         let (z, (panx, pany)) = (f.camera.zoom, f.camera.pan);
-        assert!(eased(EASE_FROM_ZOOM, to_zoom).contains(&z), "zoom off the ease: {z}");
-        assert!(eased(EASE_FROM_PAN.0, to_pan.0).contains(&panx), "pan x off the ease: {panx}");
-        assert!(eased(EASE_FROM_PAN.1, to_pan.1).contains(&pany), "pan y off the ease: {pany}");
+        assert!(
+            eased(EASE_FROM_ZOOM, to_zoom).contains(&z),
+            "zoom off the ease: {z}"
+        );
+        assert!(
+            eased(EASE_FROM_PAN.0, to_pan.0).contains(&panx),
+            "pan x off the ease: {panx}"
+        );
+        assert!(
+            eased(EASE_FROM_PAN.1, to_pan.1).contains(&pany),
+            "pan y off the ease: {pany}"
+        );
     }
 
     #[test]
@@ -351,30 +405,61 @@ mod tests {
         // onto the target and starts it, so the framing left behind pins what
         // each step wrote.
         let bounds = canvas_bounds(800., 600.);
-        let target = Rect { x: 2000.0, y: 1500.0, w: 200.0, h: 150.0 };
+        let target = Rect {
+            x: 2000.0,
+            y: 1500.0,
+            w: 200.0,
+            h: 150.0,
+        };
         let mut f = framed(0.6, (-100.0, -200.0), canvas_bounds(400., 300.));
         f.recenter = true;
         f.anim = Some(settle_to(4.0, (1.0, 2.0), Instant::now()));
 
         f.fit_or_rescale(bounds, CONTENT);
         f.arm_settle(CONTENT, Some(target));
-        assert!(f.step_settle(), "the ease landed on the frame that armed it");
+        assert!(
+            f.step_settle(),
+            "the ease landed on the frame that armed it"
+        );
 
         assert_eq!(f.viewport, bounds);
         assert!(f.fitted);
-        assert!(!f.recenter, "the request outlived the prepaint that answered it");
+        assert!(
+            !f.recenter,
+            "the request outlived the prepaint that answered it"
+        );
         let a = f.anim.expect("the recenter armed no ease");
         // The viewport doubles on both axes, so the fit and with it the zoom
         // double, and the point under the old center stays under the new one.
-        assert!((a.from_zoom - 1.2).abs() < 1e-5, "ease origin zoom {}", a.from_zoom);
-        assert!((a.from_pan.0 + 200.0).abs() < 1e-3, "ease origin pan {:?}", a.from_pan);
-        assert!((a.from_pan.1 + 400.0).abs() < 1e-3, "ease origin pan {:?}", a.from_pan);
+        assert!(
+            (a.from_zoom - 1.2).abs() < 1e-5,
+            "ease origin zoom {}",
+            a.from_zoom
+        );
+        assert!(
+            (a.from_pan.0 + 200.0).abs() < 1e-3,
+            "ease origin pan {:?}",
+            a.from_pan
+        );
+        assert!(
+            (a.from_pan.1 + 400.0).abs() < 1e-3,
+            "ease origin pan {:?}",
+            a.from_pan
+        );
         assert_eq!(
             (a.to_zoom, a.to_pan),
             settle_view(target, bounds.size, CONTENT, a.from_zoom, a.from_pan)
         );
         let travelled = |v: f32, from: f32, to: f32| (from.min(to)..=from.max(to)).contains(&v);
-        assert!(travelled(f.camera.pan.0, a.from_pan.0, a.to_pan.0), "pan {:?}", f.camera.pan);
-        assert!(travelled(f.camera.pan.1, a.from_pan.1, a.to_pan.1), "pan {:?}", f.camera.pan);
+        assert!(
+            travelled(f.camera.pan.0, a.from_pan.0, a.to_pan.0),
+            "pan {:?}",
+            f.camera.pan
+        );
+        assert!(
+            travelled(f.camera.pan.1, a.from_pan.1, a.to_pan.1),
+            "pan {:?}",
+            f.camera.pan
+        );
     }
 }

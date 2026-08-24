@@ -437,7 +437,10 @@ mod tests {
         // Per column both extremes survive.
         for col in 0..10 {
             let in_col = |v: &[(f32, f32)]| -> Vec<(f32, f32)> {
-                v.iter().filter(|p| p.0.floor() == col as f32).copied().collect()
+                v.iter()
+                    .filter(|p| p.0.floor() == col as f32)
+                    .copied()
+                    .collect()
             };
             let (all, kept) = (in_col(&dense), in_col(&out));
             assert_eq!(max(&kept), max(&all));

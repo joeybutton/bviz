@@ -7,11 +7,20 @@ static GLOBAL: bviz_alloc::MiMalloc = bviz_alloc::MiMalloc;
 
 fn main() {
     bviz_alloc::retain_freed_memory_across_load();
-    let path = std::env::args().nth(1).expect("usage: bench_load <profile>");
+    let path = std::env::args()
+        .nth(1)
+        .expect("usage: bench_load <profile>");
     let start = std::time::Instant::now();
-    let profile = bviz_trace_profile::Profile::from_path(std::path::Path::new(&path))
-        .expect("load profile");
+    let profile =
+        bviz_trace_profile::Profile::from_path(std::path::Path::new(&path)).expect("load profile");
     let elapsed = start.elapsed().as_secs_f64();
-    let slices: usize = profile.threads().iter().map(|t| profile.slices(t).len()).sum();
-    eprintln!("[bench] load: {elapsed:.3}s  ({} threads, {slices} slices)", profile.threads().len());
+    let slices: usize = profile
+        .threads()
+        .iter()
+        .map(|t| profile.slices(t).len())
+        .sum();
+    eprintln!(
+        "[bench] load: {elapsed:.3}s  ({} threads, {slices} slices)",
+        profile.threads().len()
+    );
 }

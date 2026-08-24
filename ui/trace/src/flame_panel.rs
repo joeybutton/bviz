@@ -6,18 +6,16 @@ use crate::{
     scroll_request, thumb_offset,
 };
 use bviz_trace_layout::{
-    FlameBox, FlameMetrics, FlamePlacement, FlameView, ScopeAggregate, flame_height,
-    lay_out_flame,
+    FlameBox, FlameMetrics, FlamePlacement, FlameView, ScopeAggregate, flame_height, lay_out_flame,
 };
 use bviz_ui_components::{
     Axis, DEFAULT_MIN_THUMB, DragEnd, SCROLLBAR_THICKNESS, Scrollbar, cached_layer, overlay_canvas,
     paint_labeled_box, paint_tooltip_box, spinner, track_drag,
 };
 use gpui::{
-    App, Bounds, ContentMask, Context, Div, Entity, IntoElement, MouseButton,
-    MouseDownEvent, MouseMoveEvent, Pixels, Point, Render,
-    ScrollWheelEvent, Stateful, Subscription, WeakEntity, Window, canvas, div,
-    point, prelude::*, px, size,
+    App, Bounds, ContentMask, Context, Div, Entity, IntoElement, MouseButton, MouseDownEvent,
+    MouseMoveEvent, Pixels, Point, Render, ScrollWheelEvent, Stateful, Subscription, WeakEntity,
+    Window, canvas, div, point, prelude::*, px, size,
 };
 use std::rc::Rc;
 use std::sync::Arc;
@@ -51,9 +49,20 @@ impl FlameBoxCache {
         let boxes = Rc::new(lay_out_flame(
             &aggregates.flame,
             content_w,
-            FlamePlacement { scroll_x, view_w, metrics, min_px: MIN_SLICE_PX },
+            FlamePlacement {
+                scroll_x,
+                view_w,
+                metrics,
+                min_px: MIN_SLICE_PX,
+            },
         ));
-        Self { aggregates, content_w, scroll_x, view_w, boxes }
+        Self {
+            aggregates,
+            content_w,
+            scroll_x,
+            view_w,
+            boxes,
+        }
     }
 
     /// The memoized boxes when every key matches, `None` otherwise.
@@ -100,7 +109,10 @@ impl FlameBoxCache {
         let boxed = *boxes
             .iter()
             .find(|b| b.depth == depth && vx >= b.x && vx < b.x + b.w)?;
-        Some(HoveredBox { aggregates: self.aggregates.clone(), boxed })
+        Some(HoveredBox {
+            aggregates: self.aggregates.clone(),
+            boxed,
+        })
     }
 }
 
@@ -134,9 +146,17 @@ impl FlameLayout {
         // Zoom > 1 overflows horizontally, so a bottom strip is reserved for the
         // h-bar; that shrinks the height the rows must clear, which is what decides
         // the v-bar reserve. Resolve in that order.
-        let hbar_reserve = if view.zoom > 1.0 { SCROLLBAR_THICKNESS } else { 0.0 };
+        let hbar_reserve = if view.zoom > 1.0 {
+            SCROLLBAR_THICKNESS
+        } else {
+            0.0
+        };
         let height = (f32::from(bounds.size.height) - hbar_reserve).max(0.0);
-        let vbar_reserve = if total_h > height { SCROLLBAR_THICKNESS } else { 0.0 };
+        let vbar_reserve = if total_h > height {
+            SCROLLBAR_THICKNESS
+        } else {
+            0.0
+        };
         let width = (f32::from(bounds.size.width) - vbar_reserve).max(0.0);
         Self {
             view,
@@ -193,7 +213,13 @@ fn flame_boxes(
         return boxes.clone();
     }
     cache
-        .insert(FlameBoxCache::new(aggregates.clone(), content_w, scroll_x, view_w, metrics))
+        .insert(FlameBoxCache::new(
+            aggregates.clone(),
+            content_w,
+            scroll_x,
+            view_w,
+            metrics,
+        ))
         .boxes
         .clone()
 }
@@ -275,8 +301,7 @@ impl FlamePanel {
         });
         // The boxes still address the shown graph; only the pill above them needs
         // the frame.
-        let build_start =
-            cx.subscribe(&model, |_, _, _: &AggregateBuildStarted, cx| cx.notify());
+        let build_start = cx.subscribe(&model, |_, _, _: &AggregateBuildStarted, cx| cx.notify());
         Self {
             model,
             flame_view: FlameView::FIT,
@@ -324,7 +349,11 @@ impl FlamePanel {
     fn layout(&self, cx: &App) -> Option<FlameLayout> {
         let aggregates = self.model.read(cx).aggregates()?;
         let total_h = flame_height(&aggregates.flame, &flame_metrics());
-        Some(FlameLayout::new(self.flame_bounds?, total_h, self.flame_view))
+        Some(FlameLayout::new(
+            self.flame_bounds?,
+            total_h,
+            self.flame_view,
+        ))
     }
 
     /// The bar for the tree's rows against the visible height; none while the
@@ -413,7 +442,10 @@ impl FlamePanel {
     /// draws or erases one repaints.
     fn update_hover(&mut self, pos: Point<Pixels>, cx: &mut Context<Self>) {
         let drawn_before = self.hovered_box(cx).is_some();
-        self.flame_hover = self.layout(cx).filter(|fl| fl.rect().contains(&pos)).map(|_| pos);
+        self.flame_hover = self
+            .layout(cx)
+            .filter(|fl| fl.rect().contains(&pos))
+            .map(|_| pos);
         if drawn_before || self.hovered_box(cx).is_some() {
             cx.notify();
         }
@@ -680,12 +712,28 @@ fn flame_paint(
             // f64 so precision holds at deep zoom.
             let content_w = fl.view.content_px(fl.width);
             let scroll_x = fl.view.scroll_px(fl.width);
-            (fl, panel.flame_scroll(cx), content_w, scroll_x, panel.vbar(cx), panel.hbar(cx))
+            (
+                fl,
+                panel.flame_scroll(cx),
+                content_w,
+                scroll_x,
+                panel.vbar(cx),
+                panel.hbar(cx),
+            )
         };
         let boxes = parent.update(cx, |panel, _| {
-            flame_boxes(&mut panel.flame_boxes, &aggregates, content_w, scroll_x, fl.width, &metrics)
+            flame_boxes(
+                &mut panel.flame_boxes,
+                &aggregates,
+                content_w,
+                scroll_x,
+                fl.width,
+                &metrics,
+            )
         });
-        let FlameLayout { left, top, height, .. } = fl;
+        let FlameLayout {
+            left, top, height, ..
+        } = fl;
 
         let mask = ContentMask { bounds: fl.rect() };
         window.with_content_mask(Some(mask), |window| {
@@ -745,7 +793,10 @@ mod tests {
     fn aggregate(profile: &Arc<Profile>) -> Arc<ScopeAggregate> {
         Arc::new(ScopeAggregate::build_for_tracks(
             profile,
-            FlameMode { direction: FlameDirection::TopDown, labels: FlameLabels::Name },
+            FlameMode {
+                direction: FlameDirection::TopDown,
+                labels: FlameLabels::Name,
+            },
             &TimeSelection::default(),
             |_| true,
         ))
@@ -785,9 +836,15 @@ mod tests {
         let profile = fixture();
         let aggregates = aggregate(&profile);
         let (cache, fl) = laid_out(&aggregates);
-        let names: Vec<&str> =
-            cache.boxes.iter().map(|b| aggregates.flame.str(b.name)).collect();
-        assert!(names.contains(&"compile") && names.contains(&"link"), "{names:?}");
+        let names: Vec<&str> = cache
+            .boxes
+            .iter()
+            .map(|b| aggregates.flame.str(b.name))
+            .collect();
+        assert!(
+            names.contains(&"compile") && names.contains(&"link"),
+            "{names:?}"
+        );
         for b in cache.boxes.iter() {
             let hovered = cache
                 .hit(&aggregates, fl, 0.0, center_of(fl, b))
@@ -801,10 +858,17 @@ mod tests {
         let profile = fixture();
         let aggregates = aggregate(&profile);
         let (cache, fl) = laid_out(&aggregates);
-        let hit = |x, y| cache.hit(&aggregates, fl, 0.0, point(px(x), px(y))).is_some();
+        let hit = |x, y| {
+            cache
+                .hit(&aggregates, fl, 0.0, point(px(x), px(y)))
+                .is_some()
+        };
         let mid_x = fl.left + fl.width / 2.0;
         // The row past the deepest one the graph reaches carries no box.
-        assert!(!hit(mid_x, fl.top + fl.total_h + flame_metrics().row_height / 2.0));
+        assert!(!hit(
+            mid_x,
+            fl.top + fl.total_h + flame_metrics().row_height / 2.0
+        ));
         // Clear of the content rect on either axis.
         assert!(!hit(fl.left - 1.0, fl.top + 1.0));
         assert!(!hit(mid_x, fl.top - 1.0));
@@ -821,7 +885,10 @@ mod tests {
         // that is no longer the one on screen.
         assert!(cache.hit(&aggregate(&profile), fl, 0.0, at).is_none());
         // A narrower content column is one the boxes were not placed for.
-        let resized = FlameLayout { width: fl.width - 1.0, ..fl };
+        let resized = FlameLayout {
+            width: fl.width - 1.0,
+            ..fl
+        };
         assert!(cache.hit(&aggregates, resized, 0.0, at).is_none());
     }
 
@@ -830,7 +897,10 @@ mod tests {
         let bounds = Bounds::new(point(px(40.0), px(30.0)), size(px(800.0), px(400.0)));
         let full_w = f32::from(bounds.size.width);
         let full_h = f32::from(bounds.size.height);
-        let zoomed = FlameView { left: 0.0, zoom: 2.0 };
+        let zoomed = FlameView {
+            left: 0.0,
+            zoom: 2.0,
+        };
         let rect = |total_h, view| FlameLayout::new(bounds, total_h, view).rect();
         // A graph that fits, at the zoom that fits it: neither bar shows, so the
         // rect is the whole body.
@@ -839,7 +909,10 @@ mod tests {
         // of the height, so no column goes to the v-bar.
         assert_eq!(
             rect(full_h - SCROLLBAR_THICKNESS, zoomed),
-            Bounds::new(bounds.origin, size(px(full_w), px(full_h - SCROLLBAR_THICKNESS)))
+            Bounds::new(
+                bounds.origin,
+                size(px(full_w), px(full_h - SCROLLBAR_THICKNESS))
+            )
         );
         // Rows that fit the body but not the height left by the h-bar's strip
         // overflow, so both bars show and each takes its reserve.
@@ -847,7 +920,10 @@ mod tests {
             rect(full_h, zoomed),
             Bounds::new(
                 bounds.origin,
-                size(px(full_w - SCROLLBAR_THICKNESS), px(full_h - SCROLLBAR_THICKNESS))
+                size(
+                    px(full_w - SCROLLBAR_THICKNESS),
+                    px(full_h - SCROLLBAR_THICKNESS)
+                )
             )
         );
     }

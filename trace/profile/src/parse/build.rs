@@ -6,12 +6,12 @@ use serde_json::{Map, Value};
 
 use crate::concurrent_interner::{ConcurrentInterner, Writer};
 use crate::model::{
-    encloses, lane_class, occupied_span, span_role, CounterLane, CounterPoint, CounterSeries,
-    Metadata, OptStr, PhaseMarker, Profile, ProfileParts, Slice, SliceDetail, Span32, Str,
-    ThreadTrack, TimeSpan,
+    CounterLane, CounterPoint, CounterSeries, Metadata, OptStr, PhaseMarker, Profile, ProfileParts,
+    Slice, SliceDetail, Span32, Str, ThreadTrack, TimeSpan, encloses, lane_class, occupied_span,
+    span_role,
 };
 
-use super::serde_events::{arg_i64, arg_str, ArgEntry, ArgVal, RawEvent};
+use super::serde_events::{ArgEntry, ArgVal, RawEvent, arg_i64, arg_str};
 use super::timed;
 
 const MAX_SORT_INDEX: i64 = 1_000_000;
@@ -144,7 +144,10 @@ impl Builder {
     pub(crate) fn seal_slices(&mut self) {
         // The lane bookkeeping (counts, spans, cursors) is u32; wrapping it
         // would break the exactly-once scatter argument below.
-        assert!(u32::try_from(self.staging.len()).is_ok(), "chunk slice count exceeds u32");
+        assert!(
+            u32::try_from(self.staging.len()).is_ok(),
+            "chunk slice count exceeds u32"
+        );
         let mut lane_of: rustc_hash::FxHashMap<i64, usize> = Default::default();
         // Per lane in first-appearance order: the slice count, becoming the
         // scatter cursor once the spans are laid out.
@@ -168,8 +171,11 @@ impl Builder {
                 (tid, span)
             })
             .collect();
-        let mut cursors: Vec<u32> =
-            self.lanes.iter().map(|&(_, s)| s.range().start as u32).collect();
+        let mut cursors: Vec<u32> = self
+            .lanes
+            .iter()
+            .map(|&(_, s)| s.range().start as u32)
+            .collect();
         let total = self.staging.len();
         let mut order: Vec<u32> = Vec::with_capacity(total);
         let spare = order.spare_capacity_mut();
@@ -275,7 +281,10 @@ impl Merge {
         self.phase_markers.extend(phase_markers);
         // Per thread: the first folded name wins, the last explicit sort index wins.
         for (tid, (name, sort_index)) in thread_meta {
-            let entry = self.thread_meta.entry(tid).or_insert((None, MAX_SORT_INDEX));
+            let entry = self
+                .thread_meta
+                .entry(tid)
+                .or_insert((None, MAX_SORT_INDEX));
             if entry.0.is_none() {
                 entry.0 = name;
             }
@@ -292,7 +301,10 @@ impl Merge {
                 std::collections::hash_map::Entry::Occupied(e) => e.into_mut(),
                 std::collections::hash_map::Entry::Vacant(e) => {
                     self.counter_order.push(lane.name);
-                    e.insert(RawLane { name: lane.name, series: Vec::new() })
+                    e.insert(RawLane {
+                        name: lane.name,
+                        series: Vec::new(),
+                    })
                 }
             };
             for series in lane.series {
@@ -302,7 +314,12 @@ impl Merge {
                 }
             }
         }
-        self.runs.push(FoldedRun { args_base, payloads: staging, order, lanes });
+        self.runs.push(FoldedRun {
+            args_base,
+            payloads: staging,
+            order,
+            lanes,
+        });
     }
 }
 
@@ -316,7 +333,10 @@ pub(crate) fn seal(
     other_data: Option<Map<String, Value>>,
 ) -> Profile {
     let mut parts = {
-        let mut pool = WriterPool { writer: interner.writer(), interner: &interner };
+        let mut pool = WriterPool {
+            writer: interner.writer(),
+            interner: &interner,
+        };
         finish_merge(merge, &mut pool, other_data)
     };
     parts.distinct_strings = interner.distinct();
@@ -361,7 +381,10 @@ fn finish_merge(
 
     let parts = build_parts(
         slice_pools,
-        ThreadMerge { segments: &segments, results: &results },
+        ThreadMerge {
+            segments: &segments,
+            results: &results,
+        },
         args_pool,
         phase_markers,
         thread_meta,
@@ -483,11 +506,13 @@ fn merge_lanes(tasks: &mut [TidTask]) {
         let stealer = std::sync::Mutex::new(tasks.iter_mut());
         std::thread::scope(|scope| {
             for _ in 0..workers {
-                scope.spawn(|| loop {
-                    let Some(task) = stealer.lock().unwrap().next() else {
-                        break;
-                    };
-                    merge_lane(task);
+                scope.spawn(|| {
+                    loop {
+                        let Some(task) = stealer.lock().unwrap().next() else {
+                            break;
+                        };
+                        merge_lane(task);
+                    }
                 });
             }
         });
@@ -507,8 +532,15 @@ fn merge_lanes(tasks: &mut [TidTask]) {
 /// Slice, detail, and end max travel as one triple, so the three pools stay
 /// index-parallel by construction.
 fn merge_lane(task: &mut TidTask) {
-    let TidTask { dest, dest_detail, dest_end_max, runs, max_depth, min_start_us, max_occupied_us } =
-        task;
+    let TidTask {
+        dest,
+        dest_detail,
+        dest_end_max,
+        runs,
+        max_depth,
+        min_start_us,
+        max_occupied_us,
+    } = task;
     let mut slots = dest.iter_mut();
     let mut detail_slots = dest_detail.iter_mut();
     let mut end_max_slots = dest_end_max.iter_mut();
@@ -532,9 +564,18 @@ fn merge_lane(task: &mut TidTask) {
         *min_start_us = (*min_start_us).min(s.start_us);
         *max_occupied_us = (*max_occupied_us).max(occupied_span(s.start_us, s.dur_us).end_us);
         end_max_us = end_max_us.max(end);
-        slots.next().expect("segment sized to the runs' total").write(s);
-        detail_slots.next().expect("segment sized to the runs' total").write(d);
-        end_max_slots.next().expect("segment sized to the runs' total").write(end_max_us);
+        slots
+            .next()
+            .expect("segment sized to the runs' total")
+            .write(s);
+        detail_slots
+            .next()
+            .expect("segment sized to the runs' total")
+            .write(d);
+        end_max_slots
+            .next()
+            .expect("segment sized to the runs' total")
+            .write(end_max_us);
     };
     if let [run] = &runs[..] {
         for &idx in run.order {
@@ -578,7 +619,11 @@ fn build_parts(
     other_data: Option<Map<String, Value>>,
 ) -> ProfileParts {
     timed("    tail", || {
-        let SlicePools { slice_pool, detail_pool, end_max_pool } = pools;
+        let SlicePools {
+            slice_pool,
+            detail_pool,
+            end_max_pool,
+        } = pools;
         let metadata = build_metadata(&mut pool.writer, other_data.as_ref());
         let span = compute_span(merged, &counters, &phase_markers);
         let threads = build_thread_tracks(merged, &thread_meta, &mut pool.writer);
@@ -626,7 +671,10 @@ fn compute_span(
     };
     for (&(_, span), &(_, min_start, max_occupied)) in segments.iter().zip(results) {
         if !span.is_empty() {
-            note(TimeSpan { start_us: min_start, end_us: max_occupied });
+            note(TimeSpan {
+                start_us: min_start,
+                end_us: max_occupied,
+            });
         }
     }
     for lane in counters.values() {

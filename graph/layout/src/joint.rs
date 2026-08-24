@@ -122,7 +122,12 @@ fn canonicalize(graph: Graph, names: &Names) -> (Graph, Names) {
     let mut out = Graph::new();
     for &old in &order {
         let node = by_id[old as usize].expect("every id names a node");
-        out.add_node(map(node.id), node.label.clone(), node.kind, node.parent.map(map));
+        out.add_node(
+            map(node.id),
+            node.label.clone(),
+            node.kind,
+            node.parent.map(map),
+        );
     }
     for edge in &graph.edges {
         out.add_edge(map(edge.from), map(edge.to), edge.kind);
@@ -155,11 +160,11 @@ mod tests {
     use super::*;
     use crate::graph::EdgeKind;
     use crate::test_support::find;
+    use bazel_query_proto::analysis::Configuration;
     use bazel_query_proto::analysis::{
         Action, Artifact, DepSetOfFiles, PathFragment, Target as ActionTarget,
     };
-    use bazel_query_proto::analysis::Configuration;
-    use bazel_query_proto::blaze_query::{target::Discriminator, GeneratedFile, Rule, SourceFile};
+    use bazel_query_proto::blaze_query::{GeneratedFile, Rule, SourceFile, target::Discriminator};
 
     fn rule(name: &str, inputs: &[&str]) -> Target {
         Target {
@@ -230,28 +235,31 @@ mod tests {
             ..Default::default()
         };
 
-        let (graph, names) = build_joint(
-            Some(&[aquery_container]),
-            None,
-            Some(&query_targets),
-            false,
-        );
+        let (graph, names) =
+            build_joint(Some(&[aquery_container]), None, Some(&query_targets), false);
 
         // The target //foo:lib appears once though both inputs name it.
         assert_eq!(
-            graph.nodes.iter().filter(|n| names.resolve(n.id) == "target://foo:lib").count(),
+            graph
+                .nodes
+                .iter()
+                .filter(|n| names.resolve(n.id) == "target://foo:lib")
+                .count(),
             1
         );
         // The query dependency edge and an aquery input edge both survive.
         let edges = edges(&graph, &names);
-        assert!(edges
-            .iter()
-            .any(|(_, _, k)| *k == EdgeKind::Query));
-        assert!(edges
-            .iter()
-            .any(|(_, _, k)| *k == EdgeKind::Aquery));
+        assert!(edges.iter().any(|(_, _, k)| *k == EdgeKind::Query));
+        assert!(edges.iter().any(|(_, _, k)| *k == EdgeKind::Aquery));
         // The package box appears once.
-        assert_eq!(graph.nodes.iter().filter(|n| names.resolve(n.id) == "pkg:foo").count(), 1);
+        assert_eq!(
+            graph
+                .nodes
+                .iter()
+                .filter(|n| names.resolve(n.id) == "pkg:foo")
+                .count(),
+            1
+        );
     }
 
     #[test]
@@ -317,16 +325,31 @@ mod tests {
             ..Default::default()
         };
 
-        let (graph, names) = build_joint(Some(&[aquery_container]), None, Some(&query_targets), false);
+        let (graph, names) =
+            build_joint(Some(&[aquery_container]), None, Some(&query_targets), false);
 
         // The promoted target node is shared by query and aquery: it appears once.
         assert_eq!(
-            graph.nodes.iter().filter(|n| names.resolve(n.id) == "target://pkg:gen.out").count(),
+            graph
+                .nodes
+                .iter()
+                .filter(|n| names.resolve(n.id) == "target://pkg:gen.out")
+                .count(),
             1
         );
         // aquery's promotion contributes the per-config box and concrete artifact.
-        assert!(graph.nodes.iter().any(|n| names.resolve(n.id) == "ct://pkg:gen.out#ck1"));
-        assert!(graph.nodes.iter().any(|n| names.resolve(n.id) == "artifact://pkg:gen.out#ck1"));
+        assert!(
+            graph
+                .nodes
+                .iter()
+                .any(|n| names.resolve(n.id) == "ct://pkg:gen.out#ck1")
+        );
+        assert!(
+            graph
+                .nodes
+                .iter()
+                .any(|n| names.resolve(n.id) == "artifact://pkg:gen.out#ck1")
+        );
     }
 
     #[test]
@@ -350,12 +373,8 @@ mod tests {
             ..Default::default()
         };
 
-        let (graph, names) = build_joint(
-            Some(&[aquery_container]),
-            None,
-            Some(&query_targets),
-            false,
-        );
+        let (graph, names) =
+            build_joint(Some(&[aquery_container]), None, Some(&query_targets), false);
 
         assert_eq!(find(&graph, &names, "pkg:a").label, "//a");
         let nested = find(&graph, &names, "pkg:a/b");

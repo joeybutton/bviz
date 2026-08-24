@@ -9,7 +9,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-use bazel_query_proto::blaze_query::{target::Discriminator, Target};
+use bazel_query_proto::blaze_query::{Target, target::Discriminator};
 
 use crate::graph::{Graph, Kind};
 use crate::intern::{Id, Names};
@@ -155,7 +155,15 @@ impl PackageHierarchy {
             None
         };
         for (component, child) in &root.children {
-            self.emit(child, repo, component, &[component.clone()], parent, graph, names);
+            self.emit(
+                child,
+                repo,
+                component,
+                &[component.clone()],
+                parent,
+                graph,
+                names,
+            );
         }
     }
 
@@ -192,7 +200,15 @@ impl PackageHierarchy {
         }
         for (component, child) in &node.children {
             let child_path = format!("{full_path}/{component}");
-            self.emit(child, repo, &child_path, &[component.clone()], Some(id), graph, names);
+            self.emit(
+                child,
+                repo,
+                &child_path,
+                &[component.clone()],
+                Some(id),
+                graph,
+                names,
+            );
         }
     }
 
@@ -263,7 +279,11 @@ mod tests {
     }
 
     fn node<'a>(graph: &'a Graph, names: &Names, id: &str) -> &'a crate::graph::Node {
-        graph.nodes.iter().find(|n| names.resolve(n.id) == id).unwrap()
+        graph
+            .nodes
+            .iter()
+            .find(|n| names.resolve(n.id) == id)
+            .unwrap()
     }
 
     #[test]
@@ -281,12 +301,20 @@ mod tests {
         let outer = node(&graph, &names, &format!("pkg:{base}"));
         assert_eq!(outer.label, format!("//{base}"));
         assert_eq!(outer.parent, None);
-        assert_eq!(node(&graph, &names, &format!("pkg:{base}/processor")).label, "processor");
         assert_eq!(
-            node(&graph, &names, &format!("pkg:{base}/processor")).parent.map(|p| names.resolve(p)),
+            node(&graph, &names, &format!("pkg:{base}/processor")).label,
+            "processor"
+        );
+        assert_eq!(
+            node(&graph, &names, &format!("pkg:{base}/processor"))
+                .parent
+                .map(|p| names.resolve(p)),
             Some(format!("pkg:{base}").as_str())
         );
-        assert_eq!(node(&graph, &names, &format!("pkg:{base}/testing")).label, "testing");
+        assert_eq!(
+            node(&graph, &names, &format!("pkg:{base}/testing")).label,
+            "testing"
+        );
         // No box was emitted for the folded intermediate segments.
         assert!(!graph.nodes.iter().any(|n| names.resolve(n.id) == "pkg:src"));
     }
@@ -311,7 +339,12 @@ mod tests {
 
         assert_eq!(node(&graph, &names, "pkg:foo").label, "//foo");
         assert_eq!(node(&graph, &names, "pkg:foo/bar").label, "bar");
-        assert_eq!(node(&graph, &names, "pkg:foo/bar").parent.map(|p| names.resolve(p)), Some("pkg:foo"));
+        assert_eq!(
+            node(&graph, &names, "pkg:foo/bar")
+                .parent
+                .map(|p| names.resolve(p)),
+            Some("pkg:foo")
+        );
     }
 
     #[test]
@@ -333,7 +366,12 @@ mod tests {
         assert_eq!(node(&graph, &names, "pkg:").label, "//");
         assert_eq!(node(&graph, &names, "pkg:").parent, None);
         assert_eq!(node(&graph, &names, "pkg:a").label, "a");
-        assert_eq!(node(&graph, &names, "pkg:a").parent.map(|p| names.resolve(p)), Some("pkg:"));
+        assert_eq!(
+            node(&graph, &names, "pkg:a")
+                .parent
+                .map(|p| names.resolve(p)),
+            Some("pkg:")
+        );
     }
 
     #[test]

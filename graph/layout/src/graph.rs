@@ -103,7 +103,11 @@ pub struct Containment {
 
 impl Containment {
     pub fn new(graph: &Graph) -> Self {
-        let mentioned = graph.nodes.iter().flat_map(|n| [Some(n.id), n.parent]).flatten();
+        let mentioned = graph
+            .nodes
+            .iter()
+            .flat_map(|n| [Some(n.id), n.parent])
+            .flatten();
         let len = mentioned.map(|id| id.0 as usize + 1).max().unwrap_or(0);
         let mut parent: Vec<Option<Id>> = vec![None; len];
         for node in &graph.nodes {
@@ -209,15 +213,27 @@ mod tests {
     #[test]
     fn sibling_pair_lifts_both_ends_into_one_frame() {
         let containment = Containment::new(&forest());
-        assert_eq!(containment.sibling_pair(Id(3), Id(2)), Some((Some(Id(0)), Id(1), Id(2))));
-        assert_eq!(containment.sibling_pair(Id(2), Id(3)), Some((Some(Id(0)), Id(2), Id(1))));
+        assert_eq!(
+            containment.sibling_pair(Id(3), Id(2)),
+            Some((Some(Id(0)), Id(1), Id(2)))
+        );
+        assert_eq!(
+            containment.sibling_pair(Id(2), Id(3)),
+            Some((Some(Id(0)), Id(2), Id(1)))
+        );
     }
 
     #[test]
     fn sibling_pair_puts_separate_trees_in_the_top_frame() {
         let containment = Containment::new(&forest());
-        assert_eq!(containment.sibling_pair(Id(3), Id(5)), Some((None, Id(0), Id(4))));
-        assert_eq!(containment.sibling_pair(Id(1), Id(4)), Some((None, Id(0), Id(4))));
+        assert_eq!(
+            containment.sibling_pair(Id(3), Id(5)),
+            Some((None, Id(0), Id(4)))
+        );
+        assert_eq!(
+            containment.sibling_pair(Id(1), Id(4)),
+            Some((None, Id(0), Id(4)))
+        );
     }
 
     #[test]

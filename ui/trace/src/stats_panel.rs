@@ -13,8 +13,8 @@ use bviz_ui_components::{
 };
 use gpui::{
     App, Bounds, Context, Div, Entity, IntoElement, MouseButton, MouseDownEvent, Pixels, Point,
-    Render, Rgba, SharedString, Subscription, UniformListScrollHandle,
-    Window, div, point, prelude::*, px, size, uniform_list,
+    Render, Rgba, SharedString, Subscription, UniformListScrollHandle, Window, div, point,
+    prelude::*, px, size, uniform_list,
 };
 use std::rc::Rc;
 use std::sync::Arc;
@@ -40,12 +40,30 @@ struct StatsColumnSpec {
 }
 
 const STATS_COLUMNS: [StatsColumnSpec; 6] = [
-    StatsColumnSpec { column: StatsColumn::Key, width: None },
-    StatsColumnSpec { column: StatsColumn::Count, width: Some(STATS_NUM_COL_WIDTH) },
-    StatsColumnSpec { column: StatsColumn::Total, width: Some(STATS_NUM_COL_WIDTH) },
-    StatsColumnSpec { column: StatsColumn::Avg, width: Some(STATS_NUM_COL_WIDTH) },
-    StatsColumnSpec { column: StatsColumn::Max, width: Some(STATS_NUM_COL_WIDTH) },
-    StatsColumnSpec { column: StatsColumn::Percent, width: Some(STATS_NUM_COL_WIDTH) },
+    StatsColumnSpec {
+        column: StatsColumn::Key,
+        width: None,
+    },
+    StatsColumnSpec {
+        column: StatsColumn::Count,
+        width: Some(STATS_NUM_COL_WIDTH),
+    },
+    StatsColumnSpec {
+        column: StatsColumn::Total,
+        width: Some(STATS_NUM_COL_WIDTH),
+    },
+    StatsColumnSpec {
+        column: StatsColumn::Avg,
+        width: Some(STATS_NUM_COL_WIDTH),
+    },
+    StatsColumnSpec {
+        column: StatsColumn::Max,
+        width: Some(STATS_NUM_COL_WIDTH),
+    },
+    StatsColumnSpec {
+        column: StatsColumn::Percent,
+        width: Some(STATS_NUM_COL_WIDTH),
+    },
 ];
 
 /// The header text of `column`. Rows are keyed by whatever text labels the
@@ -84,7 +102,9 @@ pub(crate) struct StatsOrder {
 
 impl StatsOrder {
     fn order(&self) -> &[u32] {
-        self.sorted.as_deref().unwrap_or(&self.aggregates.default_order)
+        self.sorted
+            .as_deref()
+            .unwrap_or(&self.aggregates.default_order)
     }
 }
 
@@ -124,7 +144,11 @@ fn sort_stats(rows: &[StatRow], column: StatsColumn, desc: bool) -> Vec<u32> {
     // A descending numeric sort inverts its primary; for the Key column the
     // primary IS the tie-break key, whose descending header state shows
     // ascending text.
-    let invert = if column == StatsColumn::Key { !desc } else { desc };
+    let invert = if column == StatsColumn::Key {
+        !desc
+    } else {
+        desc
+    };
     let mut keyed: Vec<u128> = rows
         .iter()
         .enumerate()
@@ -312,71 +336,67 @@ impl StatsPanel {
         let picked = self.picked_row(&order);
         let version = order.aggregate_version;
         let entity = cx.entity();
-        let body = uniform_list(
-            "stats-body",
-            row_count,
-            move |range, _window, _cx| {
-                let graph = &order.aggregates.flame;
-                range
-                    .map(|i| {
-                        // Format only the visible rows here: formatting all ~2M up
-                        // front froze the UI thread for seconds and retained a huge
-                        // string structure that was slow to drop.
-                        let index = order.order()[i];
-                        let row = order.aggregates.stats[index as usize];
-                        let key = graph.str(row.key);
-                        let pct = 100.0 * row.total_us as f64
-                            / order.aggregates.grand_total.max(1) as f64;
-                        let entity = entity.clone();
-                        let is_picked = picked == Some(index);
-                        let hover_fill = if is_picked { row_pick_hover } else { row_hover };
-                        let cells = STATS_COLUMNS.iter().map(|spec| {
-                            let text: SharedString = match spec.column {
-                                StatsColumn::Key => key.to_string().into(),
-                                StatsColumn::Count => row.count.to_string().into(),
-                                StatsColumn::Total => format_duration(row.total_us).into(),
-                                StatsColumn::Avg => format_duration(row.avg_us()).into(),
-                                StatsColumn::Max => format_duration(row.max_us).into(),
-                                StatsColumn::Percent => format!("{pct:.1}%").into(),
-                            };
-                            stats_cell(spec, text)
-                        });
-                        // The row's fill runs under the reserved scroll-bar strip
-                        // as well as under the cells, and only the cells take a
-                        // click, so a press that drives the bar picks no row. The
-                        // fill's id is what gets its hover repainted.
-                        div()
-                            .id(("stats-row", index as usize))
-                            .flex()
-                            .flex_row()
-                            .h(px(STATS_ROW_HEIGHT))
-                            .w_full()
-                            .pr(px(SCROLLBAR_THICKNESS))
-                            .when(is_picked, |d| d.bg(row_pick))
-                            .hover(move |s| s.bg(hover_fill))
-                            .child(
-                                div()
-                                    .id(("stats-row-cells", index as usize))
-                                    .flex()
-                                    .flex_row()
-                                    .items_center()
-                                    .size_full()
-                                    .cursor_pointer()
-                                    .on_click(move |_, _, cx: &mut App| {
-                                        entity.update(cx, |panel, cx| {
-                                            panel.picked = Some(StatsPick {
-                                                aggregate_version: version,
-                                                index,
-                                            });
-                                            cx.notify();
+        let body = uniform_list("stats-body", row_count, move |range, _window, _cx| {
+            let graph = &order.aggregates.flame;
+            range
+                .map(|i| {
+                    // Format only the visible rows here: formatting all ~2M up
+                    // front froze the UI thread for seconds and retained a huge
+                    // string structure that was slow to drop.
+                    let index = order.order()[i];
+                    let row = order.aggregates.stats[index as usize];
+                    let key = graph.str(row.key);
+                    let pct =
+                        100.0 * row.total_us as f64 / order.aggregates.grand_total.max(1) as f64;
+                    let entity = entity.clone();
+                    let is_picked = picked == Some(index);
+                    let hover_fill = if is_picked { row_pick_hover } else { row_hover };
+                    let cells = STATS_COLUMNS.iter().map(|spec| {
+                        let text: SharedString = match spec.column {
+                            StatsColumn::Key => key.to_string().into(),
+                            StatsColumn::Count => row.count.to_string().into(),
+                            StatsColumn::Total => format_duration(row.total_us).into(),
+                            StatsColumn::Avg => format_duration(row.avg_us()).into(),
+                            StatsColumn::Max => format_duration(row.max_us).into(),
+                            StatsColumn::Percent => format!("{pct:.1}%").into(),
+                        };
+                        stats_cell(spec, text)
+                    });
+                    // The row's fill runs under the reserved scroll-bar strip
+                    // as well as under the cells, and only the cells take a
+                    // click, so a press that drives the bar picks no row. The
+                    // fill's id is what gets its hover repainted.
+                    div()
+                        .id(("stats-row", index as usize))
+                        .flex()
+                        .flex_row()
+                        .h(px(STATS_ROW_HEIGHT))
+                        .w_full()
+                        .pr(px(SCROLLBAR_THICKNESS))
+                        .when(is_picked, |d| d.bg(row_pick))
+                        .hover(move |s| s.bg(hover_fill))
+                        .child(
+                            div()
+                                .id(("stats-row-cells", index as usize))
+                                .flex()
+                                .flex_row()
+                                .items_center()
+                                .size_full()
+                                .cursor_pointer()
+                                .on_click(move |_, _, cx: &mut App| {
+                                    entity.update(cx, |panel, cx| {
+                                        panel.picked = Some(StatsPick {
+                                            aggregate_version: version,
+                                            index,
                                         });
-                                    })
-                                    .children(cells),
-                            )
-                    })
-                    .collect()
-            },
-        )
+                                        cx.notify();
+                                    });
+                                })
+                                .children(cells),
+                        )
+                })
+                .collect()
+        })
         .track_scroll(&self.stats_scroll);
 
         let bar = stats_scrollbar(
@@ -419,8 +439,11 @@ impl StatsPanel {
             return;
         }
         if (self.stats_sort, self.stats_desc) == DEFAULT_STATS_SORT {
-            self.stats_order =
-                Some(Rc::new(StatsOrder { aggregates, aggregate_version: version, sorted: None }));
+            self.stats_order = Some(Rc::new(StatsOrder {
+                aggregates,
+                aggregate_version: version,
+                sorted: None,
+            }));
             self.stats_build.mark_ready(key);
             // The swap supersedes any background sort still running.
             self.stats_build.cancel_inflight();
@@ -436,7 +459,11 @@ impl StatsPanel {
             cx,
             move || {
                 let order = sort_stats(&aggregates.stats, column, desc);
-                StatsOrder { aggregates, aggregate_version: version, sorted: Some(order) }
+                StatsOrder {
+                    aggregates,
+                    aggregate_version: version,
+                    sorted: Some(order),
+                }
             },
             move |panel, stats_order, _cx| {
                 // Discard a result the inputs have moved past since this spawn.

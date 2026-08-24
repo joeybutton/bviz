@@ -236,11 +236,20 @@ mod tests {
             for surface in [colors.background, colors.surface, colors.panel] {
                 let track = over(bar.track, surface);
                 let laid = level_step(track, surface);
-                assert!(laid >= MIN_VISIBLE_STEP, "{laid} levels of track on its surface");
+                assert!(
+                    laid >= MIN_VISIBLE_STEP,
+                    "{laid} levels of track on its surface"
+                );
                 let grabbable = level_step(over(bar.thumb, track), track);
-                assert!(grabbable >= MIN_VISIBLE_STEP, "{grabbable} levels of thumb on its track");
+                assert!(
+                    grabbable >= MIN_VISIBLE_STEP,
+                    "{grabbable} levels of thumb on its track"
+                );
                 let bare = level_step(over(bar.thumb, surface), surface);
-                assert!(bare >= MIN_VISIBLE_STEP, "{bare} levels of thumb on a bare surface");
+                assert!(
+                    bare >= MIN_VISIBLE_STEP,
+                    "{bare} levels of thumb on a bare surface"
+                );
             }
         }
     }

@@ -73,7 +73,10 @@ impl Span32 {
     /// The same span relocated by `by` elements, for rebasing onto a pool that
     /// has been concatenated after another.
     pub fn shifted(self, by: u32) -> Span32 {
-        Span32 { off: self.off + by, len: self.len }
+        Span32 {
+            off: self.off + by,
+            len: self.len,
+        }
     }
 
     pub fn len(self) -> usize {
@@ -274,7 +277,8 @@ pub fn span_role(category: &str, name: &str) -> SpanRole {
         "Starlark repository function call" => starlark_repository_role(name),
         "Conflict checking" => conflict_checking_role(name),
         "remote action execution" => remote_execution_role(name),
-        "Remote execution setup" | "Remote execution upload time"
+        "Remote execution setup"
+        | "Remote execution upload time"
         | "action dependency checking" => remote_cache_role(name),
 
         "action processing"
@@ -295,26 +299,48 @@ pub fn span_role(category: &str, name: &str) -> SpanRole {
         | "load WebAssembly module"
         | "execute WebAssembly function" => (Starlark, true),
 
-        "VFS stat" | "VFS readdir" | "VFS readlink" | "VFS md5" | "VFS xattr"
-        | "VFS delete" | "VFS open" | "VFS read" | "VFS write"
-        | "VMFS stat" | "VMFS readdir" | "VMFS read"
-        | "globbing" | "filesystem traversal"
+        "VFS stat"
+        | "VFS readdir"
+        | "VFS readlink"
+        | "VFS md5"
+        | "VFS xattr"
+        | "VFS delete"
+        | "VFS open"
+        | "VFS read"
+        | "VFS write"
+        | "VMFS stat"
+        | "VMFS readdir"
+        | "VMFS read"
+        | "globbing"
+        | "filesystem traversal"
         | "Staging per-action file system"
-        | "setting up inputs for worker" | "copying outputs from worker"
-        | "include scanner" | "discover inputs" | "update action information"
-        | "Vendoring repository" | "logging spawn" => (Filesystem, false),
+        | "setting up inputs for worker"
+        | "copying outputs from worker"
+        | "include scanner"
+        | "discover inputs"
+        | "update action information"
+        | "Vendoring repository"
+        | "logging spawn" => (Filesystem, false),
 
-        "Remote execution file fetching" | "remote output download"
-        | "remote action cache check" | "remote network" | "RPC"
+        "Remote execution file fetching"
+        | "remote output download"
+        | "remote action cache check"
+        | "remote network"
+        | "RPC"
         | "calling credential helper"
         | "Fetching repository" => (RemoteCache, false),
 
-        "Remote execution queuing time" | "thread wait" | "action resource lock"
+        "Remote execution queuing time"
+        | "thread wait"
+        | "action resource lock"
         | "Acquiring dynamic execution output lock"
-        | "borrowing a worker" | "waiting for response from worker"
+        | "borrowing a worker"
+        | "waiting for response from worker"
         | "blocked on repo contents cache GC" => (Scheduling, false),
 
-        "skyfunction" | "skyframe evaluator" | "package creation"
+        "skyfunction"
+        | "skyframe evaluator"
+        | "package creation"
         | "complete action execution"
         | "prepare action rewind plan" => (Skyframe, false),
 
@@ -494,8 +520,10 @@ pub enum LaneClass {
 /// Skyframe evaluator pools whose names carry the execution role. Bazel's
 /// `QuiescingExecutorsImpl` routes actions to the `-execution` and `-memoizing`
 /// pools (via `NodeEntryVisitor`), so these run execution work.
-const EXECUTION_SKYFRAME_INFIXES: [&str; 2] =
-    ["skyframe-evaluator-execution", "skyframe-evaluator-memoizing"];
+const EXECUTION_SKYFRAME_INFIXES: [&str; 2] = [
+    "skyframe-evaluator-execution",
+    "skyframe-evaluator-memoizing",
+];
 
 /// Thread-name prefixes for execution support (action processing and its
 /// machinery), distinct from the skyframe evaluator pools. The tree-artifact
@@ -741,8 +769,14 @@ mod tests {
     #[test]
     fn span_role_maps_categories_and_names_to_workload_and_payload() {
         let role = |cat, name| span_role(cat, name);
-        let payload = |w| SpanRole { workload: w, payload: true };
-        let overhead = |w| SpanRole { workload: w, payload: false };
+        let payload = |w| SpanRole {
+            workload: w,
+            payload: true,
+        };
+        let overhead = |w| SpanRole {
+            workload: w,
+            payload: false,
+        };
         // The action body and Starlark are payload.
         assert_eq!(
             role("action processing", ACTION_DESCRIPTION),
@@ -767,11 +801,17 @@ mod tests {
         );
         // A repository rule's spawns split from its interpreter time.
         assert_eq!(
-            role("Starlark repository function call", "local: /usr/bin/uname -m"),
+            role(
+                "Starlark repository function call",
+                "local: /usr/bin/uname -m"
+            ),
             payload(Workload::Subprocess)
         );
         assert_eq!(
-            role("Starlark repository function call", "remote: /usr/bin/uname -m"),
+            role(
+                "Starlark repository function call",
+                "remote: /usr/bin/uname -m"
+            ),
             payload(Workload::Subprocess)
         );
         assert_eq!(
@@ -780,15 +820,24 @@ mod tests {
         );
         // Module resolution splits registry transfer from its Starlark.
         assert_eq!(
-            role("bazel module processing", "download file: https://bcr/modules/foo"),
+            role(
+                "bazel module processing",
+                "download file: https://bcr/modules/foo"
+            ),
             overhead(Workload::RemoteCache)
         );
         assert_eq!(
-            role("bazel module processing", "fetch module file: rules_cc@0.1.5"),
+            role(
+                "bazel module processing",
+                "fetch module file: rules_cc@0.1.5"
+            ),
             overhead(Workload::RemoteCache)
         );
         assert_eq!(
-            role("bazel module processing", "evaluate module extension: crate"),
+            role(
+                "bazel module processing",
+                "evaluate module extension: crate"
+            ),
             payload(Workload::Starlark)
         );
         // Overhead workloads.
@@ -796,7 +845,10 @@ mod tests {
         assert_eq!(role("VFS md5", ""), overhead(Workload::Filesystem));
         assert_eq!(role("include scanner", ""), overhead(Workload::Filesystem));
         assert_eq!(
-            role("update action information", "Compiling gnulib/lib/c-ctype.c [for tool]"),
+            role(
+                "update action information",
+                "Compiling gnulib/lib/c-ctype.c [for tool]"
+            ),
             overhead(Workload::Filesystem)
         );
         assert_eq!(role("RPC", ""), overhead(Workload::RemoteCache));
@@ -840,7 +892,10 @@ mod tests {
             overhead(Workload::Subprocess)
         );
         // The skyfunction frame is overhead; its Starlark children carry the work.
-        assert_eq!(role("skyfunction", "CONFIGURED_TARGET"), overhead(Workload::Skyframe));
+        assert_eq!(
+            role("skyfunction", "CONFIGURED_TARGET"),
+            overhead(Workload::Skyframe)
+        );
         assert_eq!(
             role("Conflict checking", "Go through actions"),
             overhead(Workload::Skyframe)
@@ -952,7 +1007,11 @@ mod tests {
     #[test]
     fn a_span_begun_at_or_after_anothers_end_stays_its_sibling() {
         assert!(!encloses(100, 100, 100 + TIME_RESOLUTION_US));
-        assert!(!encloses(100, 100 + TIME_RESOLUTION_US, 100 + TIME_RESOLUTION_US));
+        assert!(!encloses(
+            100,
+            100 + TIME_RESOLUTION_US,
+            100 + TIME_RESOLUTION_US
+        ));
         // Ending within the other's own extent is nesting whatever the start.
         assert!(encloses(100, 100, 100));
     }
@@ -984,11 +1043,17 @@ mod tests {
             LaneClass::RepoFetch
         );
         assert_eq!(
-            lane_class(16, "module-extension-@@rules_rs+//rs:extensions.bzl%crate-0 (Virtual)"),
+            lane_class(
+                16,
+                "module-extension-@@rules_rs+//rs:extensions.bzl%crate-0 (Virtual)"
+            ),
             LaneClass::RepoFetch
         );
         assert_eq!(lane_class(17, "globbing pool-3"), LaneClass::Analysis);
-        assert_eq!(lane_class(18, "tree-artifact-visitor-2"), LaneClass::Execution);
+        assert_eq!(
+            lane_class(18, "tree-artifact-visitor-2"),
+            LaneClass::Execution
+        );
         assert_eq!(
             lane_class(19, "Non-eager Symlink planter 1"),
             LaneClass::Execution
@@ -1062,22 +1127,26 @@ mod tests {
             lane_class,
         };
         let p = profile_with(vec![], 0);
-        assert!(!build_for_test(
-            ConcurrentInterner::new(1024, 16),
-            Vec::new(),
-            p.span(),
-            vec![track(5, LaneClass::Execution)],
-        )
-        .has_critical_path());
-        assert!(build_for_test(
-            ConcurrentInterner::new(1024, 16),
-            Vec::new(),
-            p.span(),
-            vec![
-                track(5, LaneClass::Execution),
-                track(0, LaneClass::CriticalPath),
-            ],
-        )
-        .has_critical_path());
+        assert!(
+            !build_for_test(
+                ConcurrentInterner::new(1024, 16),
+                Vec::new(),
+                p.span(),
+                vec![track(5, LaneClass::Execution)],
+            )
+            .has_critical_path()
+        );
+        assert!(
+            build_for_test(
+                ConcurrentInterner::new(1024, 16),
+                Vec::new(),
+                p.span(),
+                vec![
+                    track(5, LaneClass::Execution),
+                    track(0, LaneClass::CriticalPath),
+                ],
+            )
+            .has_critical_path()
+        );
     }
 }

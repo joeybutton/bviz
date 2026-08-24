@@ -29,7 +29,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use bviz_graph_layout::graph::{Containment, Graph};
-use bviz_graph_layout::{layout, lod, quotient, reduce, streamed_proto, Id, LaidOut, Names};
+use bviz_graph_layout::{Id, LaidOut, Names, layout, lod, quotient, reduce, streamed_proto};
 
 /// The node cap `--max-nodes` defaults to: the cap the application's first
 /// layered view opens with.
@@ -53,7 +53,11 @@ fn secs(mut f: impl FnMut()) -> f64 {
 fn spread(samples: &[f64]) -> (f64, f64, f64) {
     let mut sorted = samples.to_vec();
     sorted.sort_by(f64::total_cmp);
-    (sorted[0], sorted[sorted.len() / 2], sorted[sorted.len() - 1])
+    (
+        sorted[0],
+        sorted[sorted.len() / 2],
+        sorted[sorted.len() - 1],
+    )
 }
 
 /// What one frame gives the layered algorithm to place: the nodes it ranks, the
@@ -112,7 +116,13 @@ fn shape(graph: &Graph, drawing: &LaidOut) -> Shape {
         bends += connector.points.len().saturating_sub(2);
         let ranked = containment.sibling_pair(connector.from, connector.to);
         let placed = ranked.and_then(|(frame, a, b)| {
-            Some((frame, a, b, drawing.anchors.get(&a)?, drawing.anchors.get(&b)?))
+            Some((
+                frame,
+                a,
+                b,
+                drawing.anchors.get(&a)?,
+                drawing.anchors.get(&b)?,
+            ))
         });
         let Some((routing_frame, a, b, from, to)) = placed else {
             nested += 1;
@@ -132,7 +142,10 @@ fn shape(graph: &Graph, drawing: &LaidOut) -> Shape {
         layers: frames.values().map(|f| u64::from(f.layers)).sum(),
         span: frames.values().map(|f| f.span).sum(),
         longest_span,
-        largest: frames.into_values().max_by_key(Frame::placed).unwrap_or_default(),
+        largest: frames
+            .into_values()
+            .max_by_key(Frame::placed)
+            .unwrap_or_default(),
         descent,
         nested,
         bends,
@@ -206,8 +219,14 @@ impl Args {
             .aquery
             .as_deref()
             .map(|p| decode(p, streamed_proto::read_action_graph_containers));
-        let cquery = self.cquery.as_deref().map(|p| decode(p, streamed_proto::read_cquery_results));
-        let query = self.query.as_deref().map(|p| decode(p, streamed_proto::read_query_targets));
+        let cquery = self
+            .cquery
+            .as_deref()
+            .map(|p| decode(p, streamed_proto::read_cquery_results));
+        let query = self
+            .query
+            .as_deref()
+            .map(|p| decode(p, streamed_proto::read_query_targets));
         bviz_graph_layout::build_joint(
             aquery.as_deref(),
             cquery.as_deref(),
@@ -259,7 +278,11 @@ fn view_at(base: &Graph, reduced_base: &Graph, expanded: &HashSet<Id>, names: &m
 /// interchangeable leaves merge, so the boxes the view gains are fewer. Ties go
 /// to the lower id, so a graph always picks the same container.
 fn densest_collapsed_container(base: &Graph, expanded: &HashSet<Id>) -> Option<(Id, usize)> {
-    let drawn: HashSet<Id> = lod::collapse(base, expanded).nodes.iter().map(|n| n.id).collect();
+    let drawn: HashSet<Id> = lod::collapse(base, expanded)
+        .nodes
+        .iter()
+        .map(|n| n.id)
+        .collect();
     let forest = lod::Forest::new(base);
     lod::expandable_containers(base)
         .into_iter()
@@ -270,8 +293,10 @@ fn densest_collapsed_container(base: &Graph, expanded: &HashSet<Id>) -> Option<(
 
 fn main() {
     let args = Args::from_env();
-    let iters: usize =
-        std::env::var("BVIZ_BENCH_ITERS").ok().and_then(|s| s.parse().ok()).unwrap_or(5);
+    let iters: usize = std::env::var("BVIZ_BENCH_ITERS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(5);
 
     let (base, mut names) = args.build_joint();
     let reduced_base = reduce::transitive_reduction(&base);
@@ -294,7 +319,9 @@ fn main() {
     let mut pinned_drawing = LaidOut::default();
     for _ in 0..iters {
         free_secs.push(secs(|| free_drawing = layout::layout(&toggled)));
-        pinned_secs.push(secs(|| pinned_drawing = layout::layout_pinned(&toggled, &start.anchors)));
+        pinned_secs.push(secs(|| {
+            pinned_drawing = layout::layout_pinned(&toggled, &start.anchors)
+        }));
     }
     let (free, free_median, free_max) = spread(&free_secs);
     let (pinned, pinned_median, pinned_max) = spread(&pinned_secs);

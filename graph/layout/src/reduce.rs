@@ -126,8 +126,12 @@ fn redundant_pairs(order: &[u32], succ: &[Vec<u32>]) -> HashSet<(u32, u32)> {
 /// through the pairs kept so far, visiting pairs in a fixed order for a
 /// deterministic result.
 fn iterative_reduction(graph: Graph) -> Graph {
-    let mut pairs: BTreeSet<(Id, Id)> =
-        graph.edges.iter().filter(|e| e.from != e.to).map(|e| (e.from, e.to)).collect();
+    let mut pairs: BTreeSet<(Id, Id)> = graph
+        .edges
+        .iter()
+        .filter(|e| e.from != e.to)
+        .map(|e| (e.from, e.to))
+        .collect();
     let mut succ: HashMap<Id, HashSet<Id>> = HashMap::new();
     for &(u, v) in &pairs {
         succ.entry(u).or_default().insert(v);
@@ -141,7 +145,8 @@ fn iterative_reduction(graph: Graph) -> Graph {
         }
     }
     let mut out = graph;
-    out.edges.retain(|e| e.from == e.to || pairs.contains(&(e.from, e.to)));
+    out.edges
+        .retain(|e| e.from == e.to || pairs.contains(&(e.from, e.to)));
     out
 }
 
@@ -267,7 +272,8 @@ mod tests {
     /// 64-bit words.
     fn long_chain_with_skips(len: usize) -> Vec<(String, String)> {
         let name = |i: usize| format!("n{i:03}");
-        let mut edges: Vec<(String, String)> = (0..len - 1).map(|i| (name(i), name(i + 1))).collect();
+        let mut edges: Vec<(String, String)> =
+            (0..len - 1).map(|i| (name(i), name(i + 1))).collect();
         edges.extend((2..len).map(|j| (name(0), name(j))));
         edges
     }
@@ -277,13 +283,17 @@ mod tests {
         // 100 nodes > 64, so reach[] uses two words and the v/64 indexing matters.
         let len = 100;
         let owned = long_chain_with_skips(len);
-        let refs: Vec<(&str, &str)> = owned.iter().map(|(a, b)| (a.as_str(), b.as_str())).collect();
+        let refs: Vec<(&str, &str)> = owned
+            .iter()
+            .map(|(a, b)| (a.as_str(), b.as_str()))
+            .collect();
         let (g, n) = build(&refs);
         // The fast path must apply (the graph is acyclic).
         assert!(dag_reduction(g.clone()).is_ok());
         let e = kept(&transitive_reduction(&g), &n);
-        let chain: HashSet<(String, String)> =
-            (0..len - 1).map(|i| (format!("n{i:03}"), format!("n{:03}", i + 1))).collect();
+        let chain: HashSet<(String, String)> = (0..len - 1)
+            .map(|i| (format!("n{i:03}"), format!("n{:03}", i + 1)))
+            .collect();
         assert_eq!(e, chain);
     }
 
@@ -292,7 +302,10 @@ mod tests {
         // On a DAG the reduction is unique, so the fast bitset path and the
         // per-edge fallback must yield the same edges.
         let owned = long_chain_with_skips(70);
-        let refs: Vec<(&str, &str)> = owned.iter().map(|(a, b)| (a.as_str(), b.as_str())).collect();
+        let refs: Vec<(&str, &str)> = owned
+            .iter()
+            .map(|(a, b)| (a.as_str(), b.as_str()))
+            .collect();
         let (g, n) = build(&refs);
         assert_eq!(
             kept(&dag_reduction(g.clone()).ok().unwrap(), &n),

@@ -3,8 +3,8 @@ mod model;
 mod parse;
 
 pub use model::{
-    encloses, lane_class, occupied_span, span_role, CounterLane, CounterPoint, CounterSeries,
-    LaneClass, Metadata, OptStr, PhaseMarker, Profile, Slice, SliceDetail, Span32, SpanRole, Str,
-    ThreadTrack, TimeSpan, Workload, TIME_RESOLUTION_US,
+    CounterLane, CounterPoint, CounterSeries, LaneClass, Metadata, OptStr, PhaseMarker, Profile,
+    Slice, SliceDetail, Span32, SpanRole, Str, TIME_RESOLUTION_US, ThreadTrack, TimeSpan, Workload,
+    encloses, lane_class, occupied_span, span_role,
 };
 pub use parse::LoadError;

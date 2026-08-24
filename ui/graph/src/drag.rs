@@ -1,6 +1,6 @@
-use crate::camera::{clamp_pan, Camera};
-use crate::scroll::{scroll_drag_move, ScrollDrag};
-use crate::{click_box_at, GraphView};
+use crate::camera::{Camera, clamp_pan};
+use crate::scroll::{ScrollDrag, scroll_drag_move};
+use crate::{GraphView, click_box_at};
 use bviz_ui_components::{DragEnd, track_drag};
 use gpui::{App, Context, Entity, Pixels, Point, Window};
 
@@ -34,17 +34,17 @@ pub(crate) fn start_pan(
     position: Point<Pixels>,
     cx: &mut Context<GraphView>,
 ) {
-    view.drag = Drag::Pan(Pan { press: position, last: position, moved: false });
+    view.drag = Drag::Pan(Pan {
+        press: position,
+        last: position,
+        moved: false,
+    });
     cx.notify();
 }
 
 /// Pan the graph by the cursor delta during a drag, latching `moved` once the
 /// cursor has travelled past the click threshold.
-pub(crate) fn drag_pan(
-    view: &mut GraphView,
-    position: Point<Pixels>,
-    cx: &mut Context<GraphView>,
-) {
+pub(crate) fn drag_pan(view: &mut GraphView, position: Point<Pixels>, cx: &mut Context<GraphView>) {
     let Drag::Pan(mut pan) = view.drag else {
         return;
     };
@@ -53,7 +53,10 @@ pub(crate) fn drag_pan(
     if traveled > CLICK_SLOP {
         pan.moved = true;
     }
-    let Camera { zoom, pan: (px, py) } = view.camera();
+    let Camera {
+        zoom,
+        pan: (px, py),
+    } = view.camera();
     let dx = f32::from(position.x) - f32::from(pan.last.x);
     let dy = f32::from(position.y) - f32::from(pan.last.y);
     let panned = (px + dx, py + dy);

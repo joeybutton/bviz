@@ -9,13 +9,13 @@ use serde::de::{DeserializeSeed, IgnoredAny};
 use crate::concurrent_interner::{ConcurrentInterner, Writer};
 use crate::model::Profile;
 
-use super::build::{seal, Builder, Merge};
+use super::build::{Builder, Merge, seal};
 use super::decode::{gzip_isize, latin1_cow, latin1_to_utf8};
 use super::scanner::scan_event;
 use super::serde_events::{ArgEntry, RawEventSeed};
 use super::{
-    intern_prefault_bytes, merge_other_data, recover_other_data, timed, BYTES_PER_DISTINCT,
-    BYTES_PER_SLICE,
+    BYTES_PER_DISTINCT, BYTES_PER_SLICE, intern_prefault_bytes, merge_other_data,
+    recover_other_data, timed,
 };
 
 /// Outcome of locating the `traceEvents` array in a decoded profile buffer.
@@ -41,7 +41,10 @@ pub(crate) fn find_trace_events_array(bytes: &[u8]) -> TraceEventsArray {
     };
     let after_key = key_at + KEY.len();
     match bytes[after_key..].iter().position(|&b| b == b'[') {
-        Some(bracket) => TraceEventsArray::Found { key_at, content_start: after_key + bracket + 1 },
+        Some(bracket) => TraceEventsArray::Found {
+            key_at,
+            content_start: after_key + bracket + 1,
+        },
         None => TraceEventsArray::NoArray,
     }
 }
@@ -103,11 +106,7 @@ impl Chunk for &str {
 /// builder keeps was interned during the parse — so a streamed chunk's buffer
 /// returns to the producer's ring without the inflate waiting out the seal's
 /// per-lane sorts.
-fn parse_chunk(
-    chunk: impl Chunk,
-    writer: &mut Writer,
-    args_cap: &mut usize,
-) -> Option<Builder> {
+fn parse_chunk(chunk: impl Chunk, writer: &mut Writer, args_cap: &mut usize) -> Option<Builder> {
     let mut builder = Builder::new();
     builder.args_pool.reserve(*args_cap);
     let ok = {
@@ -139,8 +138,10 @@ struct EventRegion<'a> {
 /// located, or when its close does not lie past the start of its contents — an
 /// empty array, or a `]` ahead of the `[`.
 fn locate_event_region(text: &str) -> Option<EventRegion<'_>> {
-    let TraceEventsArray::Found { content_start: array_start, .. } =
-        find_trace_events_array(text.as_bytes())
+    let TraceEventsArray::Found {
+        content_start: array_start,
+        ..
+    } = find_trace_events_array(text.as_bytes())
     else {
         return None;
     };
@@ -164,8 +165,9 @@ fn locate_event_region(text: &str) -> Option<EventRegion<'_>> {
 /// boundary as well. `None` when the cuts yield a single chunk, which leaves
 /// nothing to parallelize.
 fn cut_chunks(region: &str, workers: usize) -> Option<Vec<&str>> {
-    let target_chunks =
-        (workers * CHUNKS_PER_WORKER).min(region.len() / MIN_CHUNK_BYTES).max(workers);
+    let target_chunks = (workers * CHUNKS_PER_WORKER)
+        .min(region.len() / MIN_CHUNK_BYTES)
+        .max(workers);
     let mut bounds = vec![0usize];
     for k in 1..target_chunks {
         let mut target = region.len() * k / target_chunks;
@@ -219,7 +221,10 @@ fn parse_chunks_on_workers(
                 })
             })
             .collect();
-        handles.into_iter().flat_map(|h| h.join().unwrap()).collect()
+        handles
+            .into_iter()
+            .flat_map(|h| h.join().unwrap())
+            .collect()
     });
     // Chunks were stolen out of order; restore array order for the merge.
     let mut builders: Vec<Option<Builder>> = Vec::new();
@@ -239,8 +244,10 @@ fn seal_chunks(
     tail: &str,
 ) -> Profile {
     let other_data = merge_other_data(recover_other_data(head), recover_other_data(tail));
-    let mut merge =
-        Merge::with_capacity(builders.len(), builders.iter().map(|b| b.args_pool.len()).sum());
+    let mut merge = Merge::with_capacity(
+        builders.len(),
+        builders.iter().map(|b| b.args_pool.len()).sum(),
+    );
     for builder in builders {
         merge.fold(builder);
     }
@@ -262,7 +269,9 @@ pub(crate) fn parse_chunks(text: &str, workers: usize, min_bytes: usize) -> Opti
     let builders = timed("  parse chunks", || {
         parse_chunks_on_workers(&chunks, workers, &interner, prefault_bytes)
     })?;
-    Some(timed("  assemble", || seal_chunks(interner, builders, head, tail)))
+    Some(timed("  assemble", || {
+        seal_chunks(interner, builders, head, tail)
+    }))
 }
 
 /// Ceiling on a pipelined chunk buffer, bounding the memory the bounded queue
@@ -426,7 +435,10 @@ fn read_to_array_start(dec: &mut impl Read, chunk_bytes: usize) -> Option<(Vec<u
         buf.resize(buf.len() * 2, 0);
         filled = fill(dec, &mut buf, filled).ok()?;
     };
-    Some((buf[..array_start].to_vec(), buf[array_start..filled].to_vec()))
+    Some((
+        buf[..array_start].to_vec(),
+        buf[array_start..filled].to_vec(),
+    ))
 }
 
 /// Supplies the buffer each piece is decoded into. A buffer comes back through
@@ -525,7 +537,12 @@ struct PieceSink {
 impl PieceSink {
     /// `None` once the consumers are gone.
     fn send(&mut self, buf: PieceBuf) -> Option<()> {
-        self.tx.send(Piece { idx: self.sent, buf }).ok()?;
+        self.tx
+            .send(Piece {
+                idx: self.sent,
+                buf,
+            })
+            .ok()?;
         self.sent += 1;
         Some(())
     }
@@ -558,7 +575,11 @@ fn stream_pieces(
             if !buf.bytes().is_empty() {
                 sink.send(buf)?;
             }
-            return Some(StreamEnds { head, tail, pieces: sink.sent });
+            return Some(StreamEnds {
+                head,
+                tail,
+                pieces: sink.sent,
+            });
         }
         if cut_at_newline(&mut buf, &mut carry) {
             sink.send(buf)?;
@@ -601,7 +622,10 @@ fn parse_pieces(
             Ok(piece) => piece,
             Err(_) => break,
         };
-        let chunk = StreamChunk { buf: piece.buf, pool: &pool_tx };
+        let chunk = StreamChunk {
+            buf: piece.buf,
+            pool: &pool_tx,
+        };
         let builder = parse_chunk(chunk, &mut writer, &mut args_cap);
         if builder_tx.send((piece.idx, builder)).is_err() {
             break;
@@ -667,7 +691,15 @@ fn decode_parse_fold(
                 let pool_tx = pool_tx.clone();
                 let rx = &rx;
                 scope.spawn(move || {
-                    parse_pieces(rx, builder_tx, pool_tx, interner, shard, workers, prefault_bytes)
+                    parse_pieces(
+                        rx,
+                        builder_tx,
+                        pool_tx,
+                        interner,
+                        shard,
+                        workers,
+                        prefault_bytes,
+                    )
                 });
             }
             drop(pool_tx);

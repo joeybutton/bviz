@@ -44,7 +44,12 @@ mod tests {
         for d in 1..depth_rows {
             // Each deeper span is strictly contained in the one above it.
             let dur = 10 - d as i64;
-            slices.push(slice(&format!("s{d}"), "general information", 0, dur.max(1)));
+            slices.push(slice(
+                &format!("s{d}"),
+                "general information",
+                0,
+                dur.max(1),
+            ));
         }
         track(tid, LaneClass::Execution, slices)
     }
@@ -63,11 +68,20 @@ mod tests {
         assert!(!row.is_empty(), "nothing painted over [{start}, {end})");
         for pair in row.windows(2) {
             let (x, w) = pair[0];
-            assert!(x + w >= pair[1].0, "hole between {:?} and {:?}", pair[0], pair[1]);
+            assert!(
+                x + w >= pair[1].0,
+                "hole between {:?} and {:?}",
+                pair[0],
+                pair[1]
+            );
         }
         let last = row[row.len() - 1];
         assert!(row[0].0 <= start, "band opens at {} past {start}", row[0].0);
-        assert!(last.0 + last.1 >= end, "band closes at {} short of {end}", last.0 + last.1);
+        assert!(
+            last.0 + last.1 >= end,
+            "band closes at {} short of {end}",
+            last.0 + last.1
+        );
     }
 
     #[test]
@@ -185,21 +199,39 @@ mod tests {
         let graph =
             TrackFlamer::new(&p).build(FlameLabels::Name, &TimeSelection::default(), |_| true);
         let top = graph.children(&graph.root());
-        assert_eq!(top.iter().map(|n| graph.str(n.name)).collect::<Vec<_>>(), ["outer"]);
+        assert_eq!(
+            top.iter().map(|n| graph.str(n.name)).collect::<Vec<_>>(),
+            ["outer"]
+        );
         let nested = graph.children(&top[0]);
-        assert_eq!(nested.iter().map(|n| graph.str(n.name)).collect::<Vec<_>>(), ["inner"]);
+        assert_eq!(
+            nested.iter().map(|n| graph.str(n.name)).collect::<Vec<_>>(),
+            ["inner"]
+        );
 
-        let viewport = Viewport { width: 300.0, height: 100.0, scroll_y: 0.0 };
+        let viewport = Viewport {
+            width: 300.0,
+            height: 100.0,
+            scroll_y: 0.0,
+        };
         let view = TimeView::fit(p.span(), viewport.width, 0.0);
         let vis = visible_slices(
             &p,
             &lay_out_lanes(&p, &METRICS),
-            Cull { view: &view, viewport: &viewport, metrics: &METRICS, min_px: 1.0 },
+            Cull {
+                view: &view,
+                viewport: &viewport,
+                metrics: &METRICS,
+                min_px: 1.0,
+            },
         );
         // Both slices reach the right edge, the clamped end the view is fitted to.
         let right_edges: Vec<f32> = vis.iter().map(|v| v.x + v.w).collect();
         assert_eq!(right_edges.len(), 2);
-        assert!(right_edges.iter().all(|&e| e >= viewport.width), "{right_edges:?}");
+        assert!(
+            right_edges.iter().all(|&e| e >= viewport.width),
+            "{right_edges:?}"
+        );
     }
 
     #[test]
@@ -229,7 +261,12 @@ mod tests {
         let vis = visible_slices(
             &p,
             &layout,
-            Cull { view: &view, viewport: &viewport, metrics: &METRICS, min_px: 0.5 },
+            Cull {
+                view: &view,
+                viewport: &viewport,
+                metrics: &METRICS,
+                min_px: 0.5,
+            },
         );
         let placed: Vec<(f32, f32)> = vis.iter().map(|v| (v.x, v.w)).collect();
         // "d" is off-time and dropped; the zero-width "c" survives as a
@@ -268,7 +305,12 @@ mod tests {
         let vis = visible_slices(
             &p,
             &layout,
-            Cull { view: &view, viewport: &viewport, metrics: &METRICS, min_px: 1.0 },
+            Cull {
+                view: &view,
+                viewport: &viewport,
+                metrics: &METRICS,
+                min_px: 1.0,
+            },
         );
         let placed: Vec<(f32, f32, f32)> = vis.iter().map(|v| (v.x, v.w, v.y)).collect();
         let row0 = METRICS.header_height;
@@ -295,7 +337,12 @@ mod tests {
         visible_slices(
             p,
             &layout,
-            Cull { view: &view, viewport: &viewport, metrics: &METRICS, min_px: 1.0 },
+            Cull {
+                view: &view,
+                viewport: &viewport,
+                metrics: &METRICS,
+                min_px: 1.0,
+            },
         )
         .iter()
         .map(|v| (v.x, v.w))
@@ -370,7 +417,12 @@ mod tests {
         let vis = visible_slices(
             &p,
             &layout,
-            Cull { view: &view, viewport: &viewport, metrics: &METRICS, min_px: 1.0 },
+            Cull {
+                view: &view,
+                viewport: &viewport,
+                metrics: &METRICS,
+                min_px: 1.0,
+            },
         );
         assert_eq!(vis.len(), 1);
         let s = vis[0];
@@ -406,7 +458,15 @@ mod tests {
             let slices = profile.slices(&profile.threads()[lane.track]);
             let upper = slices.partition_point(|s| s.start_us as f64 <= view_end_us);
             for (slice, s) in slices[..upper].iter().enumerate() {
-                crate::cull::emit_slice(s, lane.track, slice, cull, rows_top, &mut covered, &mut out);
+                crate::cull::emit_slice(
+                    s,
+                    lane.track,
+                    slice,
+                    cull,
+                    rows_top,
+                    &mut covered,
+                    &mut out,
+                );
             }
         }
         out
@@ -459,14 +519,49 @@ mod tests {
         };
         let views = [
             ("fitted", TimeView::fit(p.span(), viewport.width, 24.0)),
-            ("mid", TimeView { start_us: 500_000.0, px_per_us: 1.0 }),
-            ("mid coarse", TimeView { start_us: 490_000.0, px_per_us: 0.01 }),
-            ("mid deep", TimeView { start_us: 500_000.0, px_per_us: 50.0 }),
-            ("tail", TimeView { start_us: 999_800.0, px_per_us: 1.0 }),
-            ("before content", TimeView { start_us: -50_000.0, px_per_us: 1.0 }),
+            (
+                "mid",
+                TimeView {
+                    start_us: 500_000.0,
+                    px_per_us: 1.0,
+                },
+            ),
+            (
+                "mid coarse",
+                TimeView {
+                    start_us: 490_000.0,
+                    px_per_us: 0.01,
+                },
+            ),
+            (
+                "mid deep",
+                TimeView {
+                    start_us: 500_000.0,
+                    px_per_us: 50.0,
+                },
+            ),
+            (
+                "tail",
+                TimeView {
+                    start_us: 999_800.0,
+                    px_per_us: 1.0,
+                },
+            ),
+            (
+                "before content",
+                TimeView {
+                    start_us: -50_000.0,
+                    px_per_us: 1.0,
+                },
+            ),
         ];
         for (label, view) in views {
-            let cull = Cull { view: &view, viewport: &viewport, metrics: &METRICS, min_px: MIN_PX };
+            let cull = Cull {
+                view: &view,
+                viewport: &viewport,
+                metrics: &METRICS,
+                min_px: MIN_PX,
+            };
             let indexed = visible_slices(&p, &layout, cull);
             let full = visible_slices_full_scan(&p, &layout, cull);
             assert_eq!(indexed, full, "view {label}");
@@ -478,11 +573,16 @@ mod tests {
         let names: Vec<&str> = visible_slices(
             &p,
             &layout,
-            Cull { view: &mid, viewport: &viewport, metrics: &METRICS, min_px: MIN_PX },
+            Cull {
+                view: &mid,
+                viewport: &viewport,
+                metrics: &METRICS,
+                min_px: MIN_PX,
+            },
         )
         .iter()
-            .map(|v| p.str(p.slices(&p.threads()[v.track])[v.slice].name))
-            .collect();
+        .map(|v| p.str(p.slices(&p.threads()[v.track])[v.slice].name))
+        .collect();
         assert_eq!(names, ["span", "tiny_kept", "in1", "in2", "b4", "b3"]);
     }
 
@@ -507,7 +607,12 @@ mod tests {
             visible_slices(
                 &p,
                 &layout,
-                Cull { view: &view, viewport: &viewport, metrics: &METRICS, min_px: 0.5 },
+                Cull {
+                    view: &view,
+                    viewport: &viewport,
+                    metrics: &METRICS,
+                    min_px: 0.5
+                },
             )
             .is_empty()
         );

@@ -24,7 +24,9 @@ use org_eclipse_elk_core::org::eclipse::elk::core::options::{
     CoreOptions, Direction, EdgeRouting, HierarchyHandling, SizeConstraint,
 };
 use org_eclipse_elk_core::org::eclipse::elk::core::util::BasicProgressMonitor;
-use org_eclipse_elk_core::org::eclipse::elk::core::{IGraphLayoutEngine, RecursiveGraphLayoutEngine};
+use org_eclipse_elk_core::org::eclipse::elk::core::{
+    IGraphLayoutEngine, RecursiveGraphLayoutEngine,
+};
 use org_eclipse_elk_graph::org::eclipse::elk::graph::properties::Property;
 use org_eclipse_elk_graph::org::eclipse::elk::graph::util::ElkGraphUtil;
 use org_eclipse_elk_graph::org::eclipse::elk::graph::{
@@ -193,7 +195,11 @@ fn lay_out(graph: &Graph, pinned: Option<&HashMap<Id, Anchor>>) -> LaidOut {
 fn layered_root() -> ElkNodeRef {
     initialize_plain_java_layout();
     let root = ElkGraphUtil::create_graph();
-    set_property(&root, CoreOptions::ALGORITHM, "org.eclipse.elk.layered".to_string());
+    set_property(
+        &root,
+        CoreOptions::ALGORITHM,
+        "org.eclipse.elk.layered".to_string(),
+    );
     set_property(&root, CoreOptions::DIRECTION, Direction::Down);
     apply_options(&root);
     root
@@ -236,7 +242,10 @@ pub(crate) fn layout_flat(
     let mut elk_of: HashMap<Id, ElkNodeRef> = HashMap::with_capacity(boxes.len());
     for &(id, width, height) in boxes {
         let elk = ElkGraphUtil::create_node(Some(root.clone()));
-        elk.borrow_mut().connectable().shape().set_dimensions(width, height);
+        elk.borrow_mut()
+            .connectable()
+            .shape()
+            .set_dimensions(width, height);
         elk_of.insert(id, elk);
     }
     for (from, to) in edges {
@@ -267,7 +276,11 @@ pub(crate) fn layout_flat(
 
     let placements = placed
         .into_iter()
-        .map(|(id, x, y, ..)| Placement { id, x: x - left, y: y - top })
+        .map(|(id, x, y, ..)| Placement {
+            id,
+            x: x - left,
+            y: y - top,
+        })
         .collect();
     (placements, width, height)
 }
@@ -295,7 +308,11 @@ fn build_elk_graph<'g>(
     // Routing every edge through one hierarchy-spanning layered pass runs the
     // cross-container edges orthogonally between subgraphs.
     let root = layered_root();
-    set_property(&root, CoreOptions::HIERARCHY_HANDLING, HierarchyHandling::IncludeChildren);
+    set_property(
+        &root,
+        CoreOptions::HIERARCHY_HANDLING,
+        HierarchyHandling::IncludeChildren,
+    );
     report_anchors(&root);
 
     let mut elk_of: HashMap<Id, ElkNodeRef> = HashMap::new();
@@ -464,14 +481,21 @@ fn anchor(node: &ElkNodeRef) -> Option<Anchor> {
 fn collect_connectors(edges: Vec<RoutedEdge>) -> Vec<Connector> {
     edges
         .into_iter()
-        .filter_map(|RoutedEdge { edge, kinds, from, to }| {
-            connector(&edge).map(|points| Connector {
-                points,
-                kinds,
-                from,
-                to,
-            })
-        })
+        .filter_map(
+            |RoutedEdge {
+                 edge,
+                 kinds,
+                 from,
+                 to,
+             }| {
+                connector(&edge).map(|points| Connector {
+                    points,
+                    kinds,
+                    from,
+                    to,
+                })
+            },
+        )
         .collect()
 }
 
@@ -509,7 +533,10 @@ fn build_node<'g>(
             set_property(
                 &elk,
                 CoreOptions::NODE_SIZE_MINIMUM,
-                KVector { x: 0.0, y: title_width(&node.label) },
+                KVector {
+                    x: 0.0,
+                    y: title_width(&node.label),
+                },
             );
             for kid in kids {
                 build_node(kid, &elk, children_of, elk_of);
@@ -543,7 +570,11 @@ fn apply_options(node: &ElkNodeRef) {
     set_property(node, LayeredOptions::SPACING_EDGE_NODE_BETWEEN_LAYERS, 10.0);
     set_property(node, CoreOptions::SPACING_EDGE_NODE, 2.0);
     set_property(node, CoreOptions::EDGE_ROUTING, EdgeRouting::Orthogonal);
-    set_property(node, LayeredOptions::NODE_PLACEMENT_STRATEGY, NodePlacementStrategy::NetworkSimplex);
+    set_property(
+        node,
+        LayeredOptions::NODE_PLACEMENT_STRATEGY,
+        NodePlacementStrategy::NetworkSimplex,
+    );
     set_property(
         node,
         LayeredOptions::COMPACTION_POST_COMPACTION_STRATEGY,
@@ -569,13 +600,21 @@ fn anchored_frames(graph: &Graph, anchors: &HashMap<Id, Anchor>) -> HashSet<Opti
 /// writes an [`Anchor`] as. A frame takes its configuration from the anchors when
 /// one of its members carries one, and derives one of its own otherwise.
 fn pin_frame(node: &ElkNodeRef) {
-    set_property(node, LayeredOptions::LAYERING_STRATEGY, LayeringStrategy::Interactive);
+    set_property(
+        node,
+        LayeredOptions::LAYERING_STRATEGY,
+        LayeringStrategy::Interactive,
+    );
     set_property(
         node,
         LayeredOptions::CYCLE_BREAKING_STRATEGY,
         CycleBreakingStrategy::Interactive,
     );
-    set_property(node, LayeredOptions::CROSSING_MINIMIZATION_SEMI_INTERACTIVE, true);
+    set_property(
+        node,
+        LayeredOptions::CROSSING_MINIMIZATION_SEMI_INTERACTIVE,
+        true,
+    );
     // Read each pinned position as written, rather than offset by half a node's
     // extent, which at cycle breaking a leaf has and a container has not.
     set_property(
@@ -596,8 +635,14 @@ const STRIDE: f64 = 1_000_000.0;
 /// node's shape position, which the layerer reads, and as the position property,
 /// which the crossing minimization orders each layer by.
 fn pin_node(node: &ElkNodeRef, anchor: Anchor) {
-    let at = KVector { x: f64::from(anchor.slot) * STRIDE, y: f64::from(anchor.layer) * STRIDE };
-    node.borrow_mut().connectable().shape().set_location(at.x, at.y);
+    let at = KVector {
+        x: f64::from(anchor.slot) * STRIDE,
+        y: f64::from(anchor.layer) * STRIDE,
+    };
+    node.borrow_mut()
+        .connectable()
+        .shape()
+        .set_location(at.x, at.y);
     set_property(node, LayeredOptions::POSITION, at);
 }
 
@@ -757,7 +802,12 @@ mod tests {
         let draft = add(&mut graph, "draft", Kind::Target, Some(report));
         let published = add(&mut graph, "published", Kind::Target, Some(report));
 
-        for (from, to) in [(early, late), (first, middle), (middle, late), (draft, published)] {
+        for (from, to) in [
+            (early, late),
+            (first, middle),
+            (middle, late),
+            (draft, published),
+        ] {
             graph.add_edge(from, to, EdgeKind::Query);
         }
 
@@ -786,8 +836,11 @@ mod tests {
     /// The boxes of each frame the layout ran: the root frame, keyed by `None`,
     /// and one per container.
     fn frames<'a>(graph: &Graph, laid: &'a LaidOut) -> HashMap<Option<Id>, Vec<&'a Box>> {
-        let parent_of: HashMap<Id, Option<Id>> =
-            graph.nodes.iter().map(|node| (node.id, node.parent)).collect();
+        let parent_of: HashMap<Id, Option<Id>> = graph
+            .nodes
+            .iter()
+            .map(|node| (node.id, node.parent))
+            .collect();
         let mut frames: HashMap<Option<Id>, Vec<&Box>> = HashMap::new();
         for drawn in &laid.boxes {
             frames.entry(parent_of[&drawn.id]).or_default().push(drawn);
@@ -828,9 +881,14 @@ mod tests {
     fn a_view_within_the_gate_balances_every_frame() {
         let graph = compound_graph();
         let strategies = placements(&graph, BALANCED_PLACEMENT_EDGES);
-        assert!(strategies.len() > 1, "the fixture heads a root frame and container frames");
         assert!(
-            strategies.iter().all(|&s| s == NodePlacementStrategy::NetworkSimplex),
+            strategies.len() > 1,
+            "the fixture heads a root frame and container frames"
+        );
+        assert!(
+            strategies
+                .iter()
+                .all(|&s| s == NodePlacementStrategy::NetworkSimplex),
             "the frames placed by {strategies:?}",
         );
     }
@@ -839,9 +897,14 @@ mod tests {
     fn a_view_past_the_gate_places_every_frame_the_cheaper_way() {
         let graph = compound_graph();
         let strategies = placements(&graph, BALANCED_PLACEMENT_EDGES + 1);
-        assert!(strategies.len() > 1, "the fixture heads a root frame and container frames");
         assert!(
-            strategies.iter().all(|&s| s == NodePlacementStrategy::BrandesKoepf),
+            strategies.len() > 1,
+            "the fixture heads a root frame and container frames"
+        );
+        assert!(
+            strategies
+                .iter()
+                .all(|&s| s == NodePlacementStrategy::BrandesKoepf),
             "the frames placed by {strategies:?}",
         );
     }
@@ -850,7 +913,11 @@ mod tests {
     fn every_box_carries_an_anchor() {
         let (_, laid) = compound();
         for drawn in &laid.boxes {
-            assert!(laid.anchors.contains_key(&drawn.id), "{} has no anchor", drawn.label);
+            assert!(
+                laid.anchors.contains_key(&drawn.id),
+                "{} has no anchor",
+                drawn.label
+            );
         }
     }
 
@@ -913,7 +980,10 @@ mod tests {
     fn a_layout_held_to_the_configuration_it_produced_reproduces_it() {
         let (graph, laid) = compound();
         let held = layout_pinned(&graph, &laid.anchors);
-        assert_eq!(by_label(&graph, &held.anchors), by_label(&graph, &laid.anchors));
+        assert_eq!(
+            by_label(&graph, &held.anchors),
+            by_label(&graph, &laid.anchors)
+        );
     }
 
     /// The drawing follows the configuration it is given rather than the one the
@@ -923,16 +993,25 @@ mod tests {
     #[test]
     fn a_pair_pinned_the_other_way_round_comes_back_the_other_way_round() {
         let (graph, laid) = compound();
-        let (one, other) = (labeled(&graph, "widget"), labeled(&graph, "much_longer_label"));
+        let (one, other) = (
+            labeled(&graph, "widget"),
+            labeled(&graph, "much_longer_label"),
+        );
         let (one_at, other_at) = (laid.anchors[&one], laid.anchors[&other]);
-        assert_eq!(one_at.layer, other_at.layer, "the fixture holds these two in one layer");
+        assert_eq!(
+            one_at.layer, other_at.layer,
+            "the fixture holds these two in one layer"
+        );
 
         let mut pinning = laid.anchors.clone();
         pinning.insert(one, other_at);
         pinning.insert(other, one_at);
 
         let held = layout_pinned(&graph, &pinning);
-        assert_eq!((held.anchors[&one], held.anchors[&other]), (other_at, one_at));
+        assert_eq!(
+            (held.anchors[&one], held.anchors[&other]),
+            (other_at, one_at)
+        );
     }
 
     /// The fixed point of the round trip holds for a graph whose frames have a
@@ -942,7 +1021,10 @@ mod tests {
     fn a_layout_of_packages_in_a_cycle_reproduces_its_own_configuration() {
         let (graph, laid) = cyclic();
         let held = layout_pinned(&graph, &laid.anchors);
-        assert_eq!(by_label(&graph, &held.anchors), by_label(&graph, &laid.anchors));
+        assert_eq!(
+            by_label(&graph, &held.anchors),
+            by_label(&graph, &laid.anchors)
+        );
     }
 
     /// The layering follows the configuration it is given: a node pinned a layer
@@ -951,13 +1033,25 @@ mod tests {
     #[test]
     fn a_node_pinned_a_layer_on_comes_back_below_the_mate_it_shared_one_with() {
         let (graph, laid) = compound();
-        let (stays, moves) = (labeled(&graph, "widget"), labeled(&graph, "much_longer_label"));
+        let (stays, moves) = (
+            labeled(&graph, "widget"),
+            labeled(&graph, "much_longer_label"),
+        );
         let moves_at = laid.anchors[&moves];
         let stays_at = laid.anchors[&stays];
-        assert_eq!(stays_at.layer, moves_at.layer, "the fixture holds these two in one layer");
+        assert_eq!(
+            stays_at.layer, moves_at.layer,
+            "the fixture holds these two in one layer"
+        );
 
         let mut pinning = laid.anchors.clone();
-        pinning.insert(moves, Anchor { layer: moves_at.layer + 1, ..moves_at });
+        pinning.insert(
+            moves,
+            Anchor {
+                layer: moves_at.layer + 1,
+                ..moves_at
+            },
+        );
 
         let held = layout_pinned(&graph, &pinning);
         assert!(
@@ -977,19 +1071,31 @@ mod tests {
     #[test]
     fn a_cycle_pinned_to_break_at_another_edge_comes_back_in_the_pinned_order() {
         let (graph, laid) = cyclic();
-        let (lib, front, back) =
-            (labeled(&graph, "lib"), labeled(&graph, "front"), labeled(&graph, "back"));
+        let (lib, front, back) = (
+            labeled(&graph, "lib"),
+            labeled(&graph, "front"),
+            labeled(&graph, "back"),
+        );
 
         // The packages depend on one another lib -> front -> back -> lib; rotating
         // them to back, lib, front makes front -> back the edge that runs backward.
         let mut pinning = laid.anchors.clone();
         for (package, layer) in [(back, 0), (lib, 1), (front, 2)] {
-            pinning.insert(package, Anchor { layer, ..laid.anchors[&package] });
+            pinning.insert(
+                package,
+                Anchor {
+                    layer,
+                    ..laid.anchors[&package]
+                },
+            );
         }
 
         let held = layout_pinned(&graph, &pinning);
-        let (back_at, lib_at, front_at) =
-            (held.anchors[&back], held.anchors[&lib], held.anchors[&front]);
+        let (back_at, lib_at, front_at) = (
+            held.anchors[&back],
+            held.anchors[&lib],
+            held.anchors[&front],
+        );
         assert!(
             back_at.layer < lib_at.layer && lib_at.layer < front_at.layer,
             "the packages came back at layers back {}, lib {}, front {}",
@@ -1010,12 +1116,20 @@ mod tests {
         let revealed = labeled(&graph, "compute");
 
         let mut pinning = free.anchors.clone();
-        for node in graph.nodes.iter().filter(|node| node.parent == Some(revealed)) {
+        for node in graph
+            .nodes
+            .iter()
+            .filter(|node| node.parent == Some(revealed))
+        {
             pinning.remove(&node.id);
         }
 
         let held = layout_pinned(&graph, &pinning);
-        for node in graph.nodes.iter().filter(|node| node.parent == Some(revealed)) {
+        for node in graph
+            .nodes
+            .iter()
+            .filter(|node| node.parent == Some(revealed))
+        {
             assert_eq!(
                 held.anchors[&node.id], free.anchors[&node.id],
                 "{} moved in a frame nothing pinned",
@@ -1032,7 +1146,10 @@ mod tests {
         pinning.remove(&loose);
 
         let held = layout_pinned(&graph, &pinning);
-        assert!(held.anchors.contains_key(&loose), "the unpinned node came back unplaced");
+        assert!(
+            held.anchors.contains_key(&loose),
+            "the unpinned node came back unplaced"
+        );
 
         let mut compared = 0;
         for boxes in frames(&graph, &laid).values() {

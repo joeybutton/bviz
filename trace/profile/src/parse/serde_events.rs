@@ -9,8 +9,8 @@ use serde_json::{Map, Value};
 use crate::concurrent_interner::{ConcurrentInterner, Writer};
 use crate::model::Profile;
 
-use super::build::{seal, Builder, Merge};
-use super::{merge_other_data, BYTES_PER_DISTINCT};
+use super::build::{Builder, Merge, seal};
+use super::{BYTES_PER_DISTINCT, merge_other_data};
 
 /// Carries the decoded text's byte length so [`Self::visit_map`] can size the
 /// interner it fills, since the map visitor never sees the whole text.
@@ -37,9 +37,7 @@ impl<'de> Visitor<'de> for ProfileVisitor {
                         let seen = map.next_value::<Option<Map<String, Value>>>()?;
                         other_data = merge_other_data(other_data, seen);
                     }
-                    "traceEvents" => {
-                        map.next_value_seed(EventsSeed(&mut builder, &mut writer))?
-                    }
+                    "traceEvents" => map.next_value_seed(EventsSeed(&mut builder, &mut writer))?,
                     _ => {
                         map.next_value::<IgnoredAny>()?;
                     }
@@ -85,7 +83,11 @@ impl<'de, 'a, 'w> Visitor<'de> for EventsVisitor<'a, 'w> {
     }
 }
 
-struct EventSeed<'b, 'de, 'w>(&'b mut Builder, &'b mut Writer<'w>, &'b mut Vec<ArgEntry<'de>>);
+struct EventSeed<'b, 'de, 'w>(
+    &'b mut Builder,
+    &'b mut Writer<'w>,
+    &'b mut Vec<ArgEntry<'de>>,
+);
 
 impl<'de, 'w> DeserializeSeed<'de> for EventSeed<'_, 'de, 'w> {
     type Value = ();
@@ -420,7 +422,9 @@ impl<'de: 'a, 'a> Visitor<'de> for MaybeArgVisitor<'a> {
 
     fn visit_u64<E>(self, v: u64) -> Result<MaybeArg<'a>, E> {
         Ok(MaybeArg(Some(
-            i64::try_from(v).map(ArgVal::Int).unwrap_or(ArgVal::Float(v as f64)),
+            i64::try_from(v)
+                .map(ArgVal::Int)
+                .unwrap_or(ArgVal::Float(v as f64)),
         )))
     }
 

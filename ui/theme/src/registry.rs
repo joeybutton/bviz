@@ -47,7 +47,10 @@ impl ThemeRegistry {
     /// second one under it could never be resolved.
     pub fn register(&mut self, theme: Theme) -> Result<(), String> {
         if self.get(&theme.name).is_some() {
-            return Err(format!("a theme named '{}' is already registered", theme.name));
+            return Err(format!(
+                "a theme named '{}' is already registered",
+                theme.name
+            ));
         }
         self.themes.push(Arc::new(theme));
         Ok(())
@@ -63,9 +66,11 @@ impl ThemeRegistry {
     /// was.
     pub fn select(&mut self, name: Option<&str>) -> Result<(), String> {
         self.selected = match name {
-            Some(name) => {
-                Some(self.get(name).ok_or_else(|| format!("no theme named '{name}'"))?.clone())
-            }
+            Some(name) => Some(
+                self.get(name)
+                    .ok_or_else(|| format!("no theme named '{name}'"))?
+                    .clone(),
+            ),
             None => None,
         };
         Ok(())
@@ -74,7 +79,9 @@ impl ThemeRegistry {
     /// What a window of `appearance` paints with: whatever was selected, and
     /// failing that the default for that appearance.
     pub fn resolve(&self, appearance: Appearance) -> &Arc<Theme> {
-        self.selected.as_ref().unwrap_or_else(|| self.default_for(appearance))
+        self.selected
+            .as_ref()
+            .unwrap_or_else(|| self.default_for(appearance))
     }
 
     fn default_for(&self, appearance: Appearance) -> &Arc<Theme> {
@@ -99,7 +106,9 @@ pub fn init(cx: &mut App) -> Result<(), String> {
 
 /// The theme `window` paints with.
 pub fn theme(window: &Window, cx: &App) -> Arc<Theme> {
-    cx.global::<ThemeRegistry>().resolve(appearance(window)).clone()
+    cx.global::<ThemeRegistry>()
+        .resolve(appearance(window))
+        .clone()
 }
 
 fn appearance(window: &Window) -> Appearance {
@@ -150,7 +159,11 @@ mod tests {
     /// each under the name a failure reports it by.
     fn surfaces(theme: &Theme) -> [(&'static str, Hsla); 3] {
         let c = &theme.colors;
-        [("background", c.background), ("surface", c.surface), ("panel", c.panel)]
+        [
+            ("background", c.background),
+            ("surface", c.surface),
+            ("panel", c.panel),
+        ]
     }
 
     /// Every ground a run of body text lands on: each surface, and each wash the
@@ -158,8 +171,11 @@ mod tests {
     /// was read against.
     fn text_grounds(theme: &Theme) -> Vec<(String, Hsla)> {
         let c = &theme.colors;
-        let washes =
-            [("hovered", c.element_hover), ("held", c.element_active), ("selected", c.selection)];
+        let washes = [
+            ("hovered", c.element_hover),
+            ("held", c.element_active),
+            ("selected", c.selection),
+        ];
         let surfaces = surfaces(theme);
         let mut grounds = Vec::with_capacity(surfaces.len() * (washes.len() + 1));
         for (name, surface) in surfaces {
@@ -183,13 +199,19 @@ mod tests {
     #[test]
     fn the_selected_theme_is_what_a_window_resolves_to() {
         let mut registry = ThemeRegistry::new().expect("built-in themes load");
-        registry.register(renamed("Under Test")).expect("a free name is taken");
-        registry.select(Some("Under Test")).expect("a registered theme can be selected");
+        registry
+            .register(renamed("Under Test"))
+            .expect("a free name is taken");
+        registry
+            .select(Some("Under Test"))
+            .expect("a registered theme can be selected");
         for appearance in [Appearance::Light, Appearance::Dark] {
             assert_eq!(registry.resolve(appearance).name, "Under Test");
         }
 
-        registry.select(None).expect("the system can always be given the choice back");
+        registry
+            .select(None)
+            .expect("the system can always be given the choice back");
         assert_eq!(registry.resolve(Appearance::Dark).name, "One Dark");
         assert_eq!(registry.resolve(Appearance::Light).name, "One Light");
     }
@@ -199,7 +221,9 @@ mod tests {
     #[test]
     fn selecting_a_theme_that_was_never_registered_is_an_error() {
         let mut registry = ThemeRegistry::new().expect("built-in themes load");
-        registry.select(Some("One Dark")).expect("a built-in theme can be selected");
+        registry
+            .select(Some("One Dark"))
+            .expect("a built-in theme can be selected");
 
         assert!(registry.select(Some("Under Test")).is_err());
         assert_eq!(registry.resolve(Appearance::Light).name, "One Dark");
@@ -213,7 +237,9 @@ mod tests {
         let mut registry = ThemeRegistry::new().expect("built-in themes load");
 
         assert!(registry.register(renamed("One Dark")).is_err());
-        let held = registry.get("One Dark").expect("the name still reaches a theme");
+        let held = registry
+            .get("One Dark")
+            .expect("the name still reaches a theme");
         assert_eq!(held.appearance, Appearance::Dark);
     }
 
@@ -254,7 +280,10 @@ mod tests {
         for theme in built_in_themes() {
             let c = &theme.colors;
             for (_, surface) in surfaces(&theme) {
-                let step = level_step(over(c.element_active, surface), over(c.element_hover, surface));
+                let step = level_step(
+                    over(c.element_active, surface),
+                    over(c.element_hover, surface),
+                );
                 assert!(step >= MIN_VISIBLE_STEP, "{}: {step} levels", theme.name);
             }
         }
@@ -268,7 +297,11 @@ mod tests {
             let c = &theme.colors;
             for (_, surface) in surfaces(&theme) {
                 let contrast = contrast_ratio(c.accent, surface);
-                assert!(contrast >= MIN_SECONDARY_CONTRAST, "{}: {contrast}:1", theme.name);
+                assert!(
+                    contrast >= MIN_SECONDARY_CONTRAST,
+                    "{}: {contrast}:1",
+                    theme.name
+                );
             }
         }
     }
@@ -283,7 +316,10 @@ mod tests {
             assert!(c.selection.a < 1.0, "{}: selection is opaque", theme.name);
             assert_eq!(
                 c.selection,
-                Hsla { a: c.selection.a, ..c.accent },
+                Hsla {
+                    a: c.selection.a,
+                    ..c.accent
+                },
                 "{}: selection is a wash of some other color",
                 theme.name
             );
@@ -302,7 +338,11 @@ mod tests {
         for theme in built_in_themes() {
             for (ground, color) in text_grounds(&theme) {
                 let body = contrast_ratio(theme.colors.text, color);
-                assert!(body >= MIN_TEXT_CONTRAST, "{} on {ground}: {body}:1", theme.name);
+                assert!(
+                    body >= MIN_TEXT_CONTRAST,
+                    "{} on {ground}: {body}:1",
+                    theme.name
+                );
             }
         }
     }
@@ -328,7 +368,11 @@ mod tests {
             let c = &theme.colors;
             for (_, surface) in surfaces(&theme) {
                 let disabled = contrast_ratio(c.text_disabled, surface);
-                assert!(disabled >= MIN_SECONDARY_CONTRAST, "{}: {disabled}:1", theme.name);
+                assert!(
+                    disabled >= MIN_SECONDARY_CONTRAST,
+                    "{}: {disabled}:1",
+                    theme.name
+                );
                 assert!(
                     disabled < contrast_ratio(c.text_muted, surface),
                     "{}: {disabled}:1",
@@ -348,10 +392,18 @@ mod tests {
             let apart = distance(c.text_accent, c.text);
             assert!(apart >= MIN_DISTINCT_COLOR, "{}: {apart}", theme.name);
             let drift = hue_gap(c.text_accent, c.accent);
-            assert!(drift <= MAX_ACCENT_HUE_DRIFT, "{}: {drift} of the wheel", theme.name);
+            assert!(
+                drift <= MAX_ACCENT_HUE_DRIFT,
+                "{}: {drift} of the wheel",
+                theme.name
+            );
             for (_, surface) in surfaces(&theme) {
                 let contrast = contrast_ratio(c.text_accent, surface);
-                assert!(contrast >= MIN_TEXT_CONTRAST, "{}: {contrast}:1", theme.name);
+                assert!(
+                    contrast >= MIN_TEXT_CONTRAST,
+                    "{}: {contrast}:1",
+                    theme.name
+                );
             }
         }
     }
@@ -366,7 +418,11 @@ mod tests {
         for theme in built_in_themes() {
             let c = &theme.colors;
             let contrast = contrast_ratio(c.text_on_accent, c.accent);
-            assert!(contrast >= MIN_TEXT_CONTRAST, "{}: {contrast}:1", theme.name);
+            assert!(
+                contrast >= MIN_TEXT_CONTRAST,
+                "{}: {contrast}:1",
+                theme.name
+            );
             assert_eq!(label_on(c.accent), c.text_on_accent, "{}", theme.name);
         }
     }
@@ -385,14 +441,22 @@ mod tests {
                 let step = |line| level_step(over(line, surface), surface);
                 let (gridline, variant, border) =
                     (step(c.gridline), step(c.border_variant), step(c.border));
-                assert!(gridline >= MIN_EDGED_STEP, "{}: {gridline} levels", theme.name);
+                assert!(
+                    gridline >= MIN_EDGED_STEP,
+                    "{}: {gridline} levels",
+                    theme.name
+                );
                 assert!(
                     gridline < variant && variant < border,
                     "{}: {gridline} / {variant} / {border} levels",
                     theme.name
                 );
                 let hover = step(c.element_hover);
-                assert!(variant < hover, "{}: {variant} levels against {hover}", theme.name);
+                assert!(
+                    variant < hover,
+                    "{}: {variant} levels against {hover}",
+                    theme.name
+                );
             }
         }
     }
@@ -408,7 +472,11 @@ mod tests {
             assert!(apart >= MIN_DISTINCT_COLOR, "{}: {apart}", theme.name);
             for (_, surface) in surfaces(&theme) {
                 let contrast = contrast_ratio(c.border_focused, surface);
-                assert!(contrast >= MIN_SECONDARY_CONTRAST, "{}: {contrast}:1", theme.name);
+                assert!(
+                    contrast >= MIN_SECONDARY_CONTRAST,
+                    "{}: {contrast}:1",
+                    theme.name
+                );
             }
         }
     }
@@ -424,7 +492,11 @@ mod tests {
             for (i, status) in statuses.iter().enumerate() {
                 for (_, surface) in surfaces(&theme) {
                     let contrast = contrast_ratio(*status, surface);
-                    assert!(contrast >= MIN_SECONDARY_CONTRAST, "{}: {contrast}:1", theme.name);
+                    assert!(
+                        contrast >= MIN_SECONDARY_CONTRAST,
+                        "{}: {contrast}:1",
+                        theme.name
+                    );
                 }
                 for other in &statuses[i + 1..] {
                     let apart = distance(*status, *other);
@@ -447,7 +519,11 @@ mod tests {
             assert!(apart >= MIN_DISTINCT_COLOR, "{}: {apart}", theme.name);
             for (_, surface) in surfaces(&theme) {
                 let contrast = contrast_ratio(c.highlight, surface);
-                assert!(contrast >= MIN_TEXT_CONTRAST, "{}: {contrast}:1", theme.name);
+                assert!(
+                    contrast >= MIN_TEXT_CONTRAST,
+                    "{}: {contrast}:1",
+                    theme.name
+                );
             }
         }
     }
@@ -478,9 +554,18 @@ mod tests {
         for theme in built_in_themes() {
             let slots = theme.data.chromatic();
             for (i, a) in slots.iter().enumerate() {
-                assert!(a.s >= MIN_CHROMATIC_SATURATION, "{}: {} saturation", theme.name, a.s);
+                assert!(
+                    a.s >= MIN_CHROMATIC_SATURATION,
+                    "{}: {} saturation",
+                    theme.name,
+                    a.s
+                );
                 let over_canvas = distance(*a, theme.colors.background);
-                assert!(over_canvas >= MIN_DISTINCT_COLOR, "{}: {over_canvas}", theme.name);
+                assert!(
+                    over_canvas >= MIN_DISTINCT_COLOR,
+                    "{}: {over_canvas}",
+                    theme.name
+                );
                 for b in &slots[i + 1..] {
                     let apart = distance(*a, *b);
                     assert!(apart >= MIN_DISTINCT_COLOR, "{}: {apart}", theme.name);
@@ -523,7 +608,11 @@ mod tests {
             for bank in ANSI_HUE_BANKS {
                 for (i, slot) in bank.iter().enumerate() {
                     let over_canvas = distance(ansi[*slot], theme.colors.background);
-                    assert!(over_canvas >= MIN_DISTINCT_COLOR, "{}: {over_canvas}", theme.name);
+                    assert!(
+                        over_canvas >= MIN_DISTINCT_COLOR,
+                        "{}: {over_canvas}",
+                        theme.name
+                    );
                     for other in &bank[i + 1..] {
                         let apart = distance(ansi[*slot], ansi[*other]);
                         assert!(apart >= MIN_DISTINCT_COLOR, "{}: {apart}", theme.name);

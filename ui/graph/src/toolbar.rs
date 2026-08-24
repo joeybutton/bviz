@@ -27,7 +27,9 @@ pub(crate) fn toolbar(
             .selected(controls.reduced),
         );
     }
-    bar.when(controls.relaying, |bar| bar.trailing(relaying_indicator(palette)))
+    bar.when(controls.relaying, |bar| {
+        bar.trailing(relaying_indicator(palette))
+    })
 }
 
 /// Shown while a relayout runs, so the prior layout stays interactive with a

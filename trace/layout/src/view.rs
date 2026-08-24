@@ -251,7 +251,10 @@ mod tests {
         let mut v = FlameView::FIT;
         v.zoom_at(400.0, 800.0, 4.0);
         let offset = v.scroll_px(800.0);
-        let mut w = FlameView { left: 0.0, zoom: 4.0 };
+        let mut w = FlameView {
+            left: 0.0,
+            zoom: 4.0,
+        };
         w.set_scroll_px(offset as f32, 800.0);
         assert!((w.left - v.left).abs() < 1e-12);
     }

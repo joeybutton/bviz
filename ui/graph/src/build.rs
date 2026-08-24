@@ -1,5 +1,5 @@
 use bviz_graph_layout::graph::Graph;
-use bviz_graph_layout::{layout, quotient, streamed_proto, Anchor, Id, LaidOut, Names};
+use bviz_graph_layout::{Anchor, Id, LaidOut, Names, layout, quotient, streamed_proto};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 
@@ -105,8 +105,13 @@ pub(crate) fn relayout(
 ) -> LaidOut {
     let visible = bviz_graph_layout::lod::collapse(base, expanded);
     let (mut view, remap) = quotient::quotient(&visible, expanded, names);
-    let full_edges: Vec<(Id, Id)> =
-        view.edges.iter().map(|e| (e.from, e.to)).collect::<HashSet<_>>().into_iter().collect();
+    let full_edges: Vec<(Id, Id)> = view
+        .edges
+        .iter()
+        .map(|e| (e.from, e.to))
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect();
     if reduced {
         view = reduce_view(view, reduced_base, expanded, &remap);
     }
@@ -158,7 +163,11 @@ mod tests {
             }
 
             let reduced_base = bviz_graph_layout::reduce::transitive_reduction(&base);
-            Self { base, reduced_base, names }
+            Self {
+                base,
+                reduced_base,
+                names,
+            }
         }
 
         fn id(&self, label: &str) -> Id {
@@ -178,7 +187,14 @@ mod tests {
             expanded: &HashSet<Id>,
             pinned: Option<&HashMap<Id, Anchor>>,
         ) -> LaidOut {
-            relayout(&self.base, &self.reduced_base, expanded, &mut self.names, true, pinned)
+            relayout(
+                &self.base,
+                &self.reduced_base,
+                expanded,
+                &mut self.names,
+                true,
+                pinned,
+            )
         }
 
         fn label_of(&self, id: Id) -> &str {
@@ -196,8 +212,12 @@ mod tests {
         before: &LaidOut,
         after: &LaidOut,
     ) -> (usize, Vec<String>) {
-        let parent_of: HashMap<Id, Option<Id>> =
-            fixture.base.nodes.iter().map(|node| (node.id, node.parent)).collect();
+        let parent_of: HashMap<Id, Option<Id>> = fixture
+            .base
+            .nodes
+            .iter()
+            .map(|node| (node.id, node.parent))
+            .collect();
         let (mut compared, mut reversed) = (0, Vec::new());
         for (&first, &was_first) in &before.anchors {
             for (&second, &was_second) in &before.anchors {
@@ -245,7 +265,10 @@ mod tests {
     /// A configuration keyed by node label and ordered, so a mismatch reports
     /// which nodes moved.
     fn by_label(fixture: &Fixture, anchors: &HashMap<Id, Anchor>) -> BTreeMap<String, Anchor> {
-        anchors.iter().map(|(&id, &at)| (fixture.label_of(id).to_string(), at)).collect()
+        anchors
+            .iter()
+            .map(|(&id, &at)| (fixture.label_of(id).to_string(), at))
+            .collect()
     }
 
     /// Opening a container leaves every box the drawing already held reading
@@ -267,7 +290,10 @@ mod tests {
         );
 
         let (compared, reversed) = reversed_pairs(&fixture, &before, &held);
-        assert!(reversed.is_empty(), "boxes swapped over an expansion: {reversed:#?}");
+        assert!(
+            reversed.is_empty(),
+            "boxes swapped over an expansion: {reversed:#?}"
+        );
         assert!(compared > 0, "no frame holds two boxes both drawings drew");
 
         let free = fixture.draw(&open, None);
@@ -291,15 +317,24 @@ mod tests {
 
         let (one, other) = (fixture.id("plugin"), fixture.id("source"));
         let (one_at, other_at) = (free.anchors[&one], free.anchors[&other]);
-        assert_eq!(one_at.layer, other_at.layer, "the fixture holds these two in one layer");
+        assert_eq!(
+            one_at.layer, other_at.layer,
+            "the fixture holds these two in one layer"
+        );
         let mut swapped = free.anchors.clone();
         swapped.insert(one, other_at);
         swapped.insert(other, one_at);
 
         let held = fixture.draw(&open, Some(&swapped));
-        assert_eq!((held.anchors[&one], held.anchors[&other]), (other_at, one_at));
+        assert_eq!(
+            (held.anchors[&one], held.anchors[&other]),
+            (other_at, one_at)
+        );
 
         let free_again = fixture.draw(&open, None);
-        assert_eq!(by_label(&fixture, &free_again.anchors), by_label(&fixture, &free.anchors));
+        assert_eq!(
+            by_label(&fixture, &free_again.anchors),
+            by_label(&fixture, &free.anchors)
+        );
     }
 }

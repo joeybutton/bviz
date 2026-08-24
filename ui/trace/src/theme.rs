@@ -46,14 +46,62 @@ const LEGEND_LEADING: f32 = 1.6;
 /// Every workload the reader is shown a name for, paired with the weight its
 /// swatch is drawn in, payload first.
 const LEGEND_ROLES: [(SpanRole, &str); 8] = [
-    (SpanRole { workload: Workload::Subprocess, payload: true }, "action"),
-    (SpanRole { workload: Workload::Starlark, payload: true }, "starlark"),
-    (SpanRole { workload: Workload::Filesystem, payload: false }, "filesystem"),
-    (SpanRole { workload: Workload::RemoteCache, payload: false }, "remote/cache"),
-    (SpanRole { workload: Workload::Scheduling, payload: false }, "scheduling"),
-    (SpanRole { workload: Workload::Skyframe, payload: false }, "skyframe"),
-    (SpanRole { workload: Workload::Gc, payload: false }, "gc"),
-    (SpanRole { workload: Workload::Other, payload: false }, "other"),
+    (
+        SpanRole {
+            workload: Workload::Subprocess,
+            payload: true,
+        },
+        "action",
+    ),
+    (
+        SpanRole {
+            workload: Workload::Starlark,
+            payload: true,
+        },
+        "starlark",
+    ),
+    (
+        SpanRole {
+            workload: Workload::Filesystem,
+            payload: false,
+        },
+        "filesystem",
+    ),
+    (
+        SpanRole {
+            workload: Workload::RemoteCache,
+            payload: false,
+        },
+        "remote/cache",
+    ),
+    (
+        SpanRole {
+            workload: Workload::Scheduling,
+            payload: false,
+        },
+        "scheduling",
+    ),
+    (
+        SpanRole {
+            workload: Workload::Skyframe,
+            payload: false,
+        },
+        "skyframe",
+    ),
+    (
+        SpanRole {
+            workload: Workload::Gc,
+            payload: false,
+        },
+        "gc",
+    ),
+    (
+        SpanRole {
+            workload: Workload::Other,
+            payload: false,
+        },
+        "other",
+    ),
 ];
 
 /// A legend of the span-role colors: a swatch and name per role in a row, painted
@@ -200,8 +248,7 @@ impl Palette {
 mod tests {
     use super::*;
     use bviz_ui_theme::{
-        MIN_DISTINCT_COLOR, MIN_EDGED_STEP, MIN_VISIBLE_STEP, built_in_themes, distance,
-        level_step,
+        MIN_DISTINCT_COLOR, MIN_EDGED_STEP, MIN_VISIBLE_STEP, built_in_themes, distance, level_step,
     };
 
     /// The most a hover fill may clear the surface under it, as a multiple of
@@ -226,7 +273,10 @@ mod tests {
     /// Every theme's palette, for a rule that has to hold whichever one a window
     /// paints with.
     fn palettes() -> Vec<Palette> {
-        built_in_themes().iter().map(|theme| Palette::from_theme(theme)).collect()
+        built_in_themes()
+            .iter()
+            .map(|theme| Palette::from_theme(theme))
+            .collect()
     }
 
     /// The surfaces the trace stacks its rows and controls on.
@@ -242,7 +292,10 @@ mod tests {
                 fills.push(palette.role_fill(SpanRole { workload, payload }));
             }
         }
-        fills.push(palette.role_fill(SpanRole { workload: Workload::Other, payload: false }));
+        fills.push(palette.role_fill(SpanRole {
+            workload: Workload::Other,
+            payload: false,
+        }));
         fills
     }
 
@@ -331,9 +384,20 @@ mod tests {
         for palette in palettes() {
             let (mut payload, mut overhead) = (f32::INFINITY, 0.0f32);
             for workload in HUED_WORKLOADS {
-                payload = payload.min(stand_off(&palette, SpanRole { workload, payload: true }));
-                overhead =
-                    overhead.max(stand_off(&palette, SpanRole { workload, payload: false }));
+                payload = payload.min(stand_off(
+                    &palette,
+                    SpanRole {
+                        workload,
+                        payload: true,
+                    },
+                ));
+                overhead = overhead.max(stand_off(
+                    &palette,
+                    SpanRole {
+                        workload,
+                        payload: false,
+                    },
+                ));
             }
             assert!(payload > overhead, "{payload} against {overhead}");
         }

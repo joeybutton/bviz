@@ -23,9 +23,7 @@ use chart::{format_duration, format_time, nice_step, span_seconds};
 use flame_panel::FlamePanel;
 use groups::{GroupChrome, group_label};
 use model::TraceModel;
-use regions::{
-    Regions, clamp_gutter_width, clamp_panel_height, flame_total_height, graph_lanes,
-};
+use regions::{Regions, clamp_gutter_width, clamp_panel_height, flame_total_height, graph_lanes};
 use stats_panel::StatsPanel;
 use theme::Palette;
 use timeline::{HoveredSlice, TimelinePanel};
@@ -44,9 +42,9 @@ use clap::Parser;
 use gpui::{
     AnyElement, App, AvailableSpace, Bounds, ContentMask, Context, Div, Edges, Element, ElementId,
     Entity, FocusHandle, GlobalElementId, InspectorElementId, IntoElement, LayoutId, MouseButton,
-    MouseDownEvent, Pixels, Point, Position, Render, ScrollHandle,
-    SharedString, Stateful, Style, Subscription, Task, TextAlign, TransformationMatrix, Window,
-    div, fill, point, prelude::*, px, relative, size,
+    MouseDownEvent, Pixels, Point, Position, Render, ScrollHandle, SharedString, Stateful, Style,
+    Subscription, Task, TextAlign, TransformationMatrix, Window, div, fill, point, prelude::*, px,
+    relative, size,
 };
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -230,7 +228,10 @@ impl TraceView {
         let window_focus = cx.focus_handle();
         let load_task = load_in_background(
             cx,
-            move || load.join().unwrap_or_else(|_| Err("profile loader thread panicked".into())),
+            move || {
+                load.join()
+                    .unwrap_or_else(|_| Err("profile loader thread panicked".into()))
+            },
             |view, result, cx| view.on_profile_loaded(result, cx),
         );
         let model = cx.new(|_| TraceModel::new());
@@ -306,7 +307,8 @@ impl TraceView {
             m.set_source(source, cx);
         });
         if loaded {
-            self.tracks_menu.update(cx, |m, _| m.reset_for_new_profile());
+            self.tracks_menu
+                .update(cx, |m, _| m.reset_for_new_profile());
         }
         self.invalidate_timeline(cx);
     }
@@ -403,13 +405,21 @@ impl TraceView {
                     .h_full()
                     .cursor_pointer()
                     .text_size(px(STATS_TEXT_SIZE))
-                    .text_color(if is_active { palette.label } else { palette.muted_label })
+                    .text_color(if is_active {
+                        palette.label
+                    } else {
+                        palette.muted_label
+                    })
                     .when(is_active, |t| {
-                        t.bg(palette.background).border_t_2().border_color(palette.accent)
+                        t.bg(palette.background)
+                            .border_t_2()
+                            .border_color(palette.accent)
                     })
                     .hover(move |t| t.bg(hover))
                     // A press on a tab must switch it, not begin a panel resize.
-                    .on_mouse_down(MouseButton::Left, |_, _, cx: &mut App| cx.stop_propagation())
+                    .on_mouse_down(MouseButton::Left, |_, _, cx: &mut App| {
+                        cx.stop_propagation()
+                    })
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.set_bottom_tab(tab, cx);
                         this.invalidate_timeline(cx);
@@ -494,7 +504,9 @@ impl TraceView {
                 .text_size(px(STATS_TEXT_SIZE))
                 .text_color(palette.label)
                 // A press on the chip must not also begin a panel resize.
-                .on_mouse_down(MouseButton::Left, |_, _, cx: &mut App| cx.stop_propagation())
+                .on_mouse_down(MouseButton::Left, |_, _, cx: &mut App| {
+                    cx.stop_propagation()
+                })
                 .child(summary)
                 .child(
                     Button::new("trace-time-window-clear", move |_, _, cx| {
@@ -509,7 +521,9 @@ impl TraceView {
 
     /// Widens the next aggregate build back to the whole timeline.
     fn clear_time_selection(&mut self, cx: &mut Context<Self>) {
-        if !self.model.update(cx, |m, cx| m.set_time_selection(TimeSelection::default(), cx)) {
+        if !self.model.update(cx, |m, cx| {
+            m.set_time_selection(TimeSelection::default(), cx)
+        }) {
             return;
         }
         cx.notify();
@@ -525,7 +539,9 @@ impl TraceView {
             div()
                 .id(SharedString::from(format!("{id}-press")))
                 // A press on a control must not also begin a panel resize.
-                .on_mouse_down(MouseButton::Left, |_, _, cx: &mut App| cx.stop_propagation())
+                .on_mouse_down(MouseButton::Left, |_, _, cx: &mut App| {
+                    cx.stop_propagation()
+                })
                 .child(
                     Button::new(id, move |_, _, cx| {
                         view.update(cx, |this, cx| this.set_flame_mode(to, cx));
@@ -547,13 +563,19 @@ impl TraceView {
                 "flame-top-down",
                 "Top-down",
                 mode.direction == FlameDirection::TopDown,
-                FlameMode { direction: FlameDirection::TopDown, ..mode },
+                FlameMode {
+                    direction: FlameDirection::TopDown,
+                    ..mode
+                },
             ))
             .child(button(
                 "flame-bottom-up",
                 "Bottom-up",
                 mode.direction == FlameDirection::BottomUp,
-                FlameMode { direction: FlameDirection::BottomUp, ..mode },
+                FlameMode {
+                    direction: FlameDirection::BottomUp,
+                    ..mode
+                },
             ))
             .child(button(
                 "flame-mnemonics",
@@ -590,8 +612,9 @@ impl TraceView {
             BottomTab::Counters => return None,
             BottomTab::FlameGraph => match self.model.read(cx).aggregates() {
                 Some(_) => self.flame.clone().into_any_element(),
-                None => centered_spinner("Building flame graph…", &palette.colors)
-                    .into_any_element(),
+                None => {
+                    centered_spinner("Building flame graph…", &palette.colors).into_any_element()
+                }
             },
             BottomTab::Stats => self.stats.clone().into_any_element(),
         };
@@ -717,20 +740,29 @@ type PlaceInRegions = fn(&Regions, Bounds<Pixels>) -> Bounds<Pixels>;
 fn tab_bar_rect(r: &Regions, _: Bounds<Pixels>) -> Bounds<Pixels> {
     Bounds::new(
         point(px(r.content_left), px(r.tab_top)),
-        size(px((r.content_right - r.content_left).max(0.0)), px(TAB_BAR_HEIGHT)),
+        size(
+            px((r.content_right - r.content_left).max(0.0)),
+            px(TAB_BAR_HEIGHT),
+        ),
     )
 }
 
 fn panel_rect(r: &Regions, _: Bounds<Pixels>) -> Bounds<Pixels> {
     Bounds::new(
         point(px(r.content_left), px(r.panel_top)),
-        size(px((r.content_right - r.content_left).max(0.0)), px(r.panel_h())),
+        size(
+            px((r.content_right - r.content_left).max(0.0)),
+            px(r.panel_h()),
+        ),
     )
 }
 
 fn gutter_handle_rect(r: &Regions, body: Bounds<Pixels>) -> Bounds<Pixels> {
     Bounds::new(
-        point(px(r.content_left - GUTTER_HANDLE_WIDTH / 2.0), body.origin.y),
+        point(
+            px(r.content_left - GUTTER_HANDLE_WIDTH / 2.0),
+            body.origin.y,
+        ),
         size(px(GUTTER_HANDLE_WIDTH), body.size.height),
     )
 }
@@ -748,7 +780,10 @@ struct RegionOverlays {
 
 impl RegionOverlays {
     fn new(inputs: RegionInputs) -> Self {
-        Self { inputs, children: Vec::new() }
+        Self {
+            inputs,
+            children: Vec::new(),
+        }
     }
 
     fn child(mut self, element: impl IntoElement, place: PlaceInRegions) -> Self {
@@ -1089,7 +1124,10 @@ fn scrollbar_geom(
     let vlayout = Scrollbar::new(
         Axis::Vertical,
         Bounds::new(
-            point(px(regions.content_right - SCROLLBAR_THICKNESS), px(regions.flame_top)),
+            point(
+                px(regions.content_right - SCROLLBAR_THICKNESS),
+                px(regions.flame_top),
+            ),
             size(px(SCROLLBAR_THICKNESS), px(flame_h)),
         ),
         flame_total,
@@ -1144,12 +1182,26 @@ fn paint_gutter(
 ) {
     let gutter_left = regions.content_left - gutter_width;
     let gutter_bottom = regions.panel_bottom;
-    paint_gutter_frame(regions, gutter_left, gutter_width, gutter_bottom, palette, window);
+    paint_gutter_frame(
+        regions,
+        gutter_left,
+        gutter_width,
+        gutter_bottom,
+        palette,
+        window,
+    );
 
     let font = bviz_ui_assets::text_metrics(window).font;
     let fs = px(GUTTER_LABEL_SIZE);
     let avail = gutter_width - 2.0 * SLICE_TEXT_PAD;
-    let g = GutterPaint { left: gutter_left, width: gutter_width, avail, font, fs, palette };
+    let g = GutterPaint {
+        left: gutter_left,
+        width: gutter_width,
+        avail,
+        font,
+        fs,
+        palette,
+    };
 
     // Thread and group labels scroll with the lanes, so clip them to the flame
     // region.
@@ -1196,19 +1248,20 @@ fn paint_gutter_frame(
 
 /// Shapes `name` truncated to `avail` and paints it left-aligned at the gutter's
 /// text inset, vertically offset to `ty`.
-fn paint_gutter_label(
-    g: &GutterPaint,
-    name: &str,
-    ty: f32,
-    window: &mut Window,
-    cx: &mut App,
-) {
+fn paint_gutter_label(g: &GutterPaint, name: &str, ty: f32, window: &mut Window, cx: &mut App) {
     let gutter_left = g.left;
     let avail = g.avail;
     let font = &g.font;
     let fs = g.fs;
     let palette = g.palette;
-    let line = bviz_ui_components::shape_truncated(name, avail, font.clone(), fs, palette.label.into(), window);
+    let line = bviz_ui_components::shape_truncated(
+        name,
+        avail,
+        font.clone(),
+        fs,
+        palette.label.into(),
+        window,
+    );
     let _ = line.paint(
         point(px(gutter_left + SLICE_TEXT_PAD), px(ty)),
         fs,
@@ -1244,16 +1297,28 @@ fn paint_thread_labels(
         }
         if selected.get(lane.track).copied().unwrap_or(false) {
             window.paint_quad(fill(
-                Bounds::new(point(px(gutter_left), px(top)), size(px(gutter_width), px(lane.height))),
+                Bounds::new(
+                    point(px(gutter_left), px(top)),
+                    size(px(gutter_width), px(lane.height)),
+                ),
                 palette.selection,
             ));
             window.paint_quad(fill(
-                Bounds::new(point(px(gutter_left), px(top)), size(px(2.0), px(lane.height))),
+                Bounds::new(
+                    point(px(gutter_left), px(top)),
+                    size(px(2.0), px(lane.height)),
+                ),
                 palette.accent,
             ));
         }
         let ty = top + (lane.height - GUTTER_LABEL_SIZE) / 2.0;
-        paint_gutter_label(g, profile.str(profile.threads()[lane.track].name), ty, window, cx);
+        paint_gutter_label(
+            g,
+            profile.str(profile.threads()[lane.track].name),
+            ty,
+            window,
+            cx,
+        );
     }
 }
 
@@ -1285,12 +1350,28 @@ fn paint_group_bands(
         let text = if band.collapsed {
             format!("{chevron} {}  {}", group_label(band.class), band.total)
         } else {
-            format!("{chevron} {}  {}/{}", group_label(band.class), band.shown, band.total)
+            format!(
+                "{chevron} {}  {}/{}",
+                group_label(band.class),
+                band.shown,
+                band.total
+            )
         };
         let ty = top + (GROUP_BAND_HEIGHT - GUTTER_LABEL_SIZE) / 2.0;
         // Keep the label clear of the icon when one is drawn.
-        let label_avail = if show_icon { avail - GROUP_ICON - SLICE_TEXT_PAD } else { avail };
-        let line = bviz_ui_components::shape_truncated(&text, label_avail, font.clone(), fs, strong, window);
+        let label_avail = if show_icon {
+            avail - GROUP_ICON - SLICE_TEXT_PAD
+        } else {
+            avail
+        };
+        let line = bviz_ui_components::shape_truncated(
+            &text,
+            label_avail,
+            font.clone(),
+            fs,
+            strong,
+            window,
+        );
         let _ = line.paint(
             point(px(gutter_left + SLICE_TEXT_PAD), px(ty)),
             fs,
@@ -1300,7 +1381,11 @@ fn paint_group_bands(
             cx,
         );
         if show_icon {
-            let name = if band.show_all { "caret-double-up" } else { "caret-double-down" };
+            let name = if band.show_all {
+                "caret-double-up"
+            } else {
+                "caret-double-down"
+            };
             let ix = gutter_left + gutter_width - GROUP_ICON - SLICE_TEXT_PAD;
             let iy = top + (GROUP_BAND_HEIGHT - GROUP_ICON) / 2.0;
             let _ = window.paint_svg(
@@ -1324,10 +1409,20 @@ fn paint_counter_labels(
     window: &mut Window,
     cx: &mut App,
 ) {
-    for gl in graph_lanes(profile.counters().len(), regions.panel_top, regions.panel_h()) {
+    for gl in graph_lanes(
+        profile.counters().len(),
+        regions.panel_top,
+        regions.panel_h(),
+    ) {
         let lane_bottom = gl.top + METRICS.header_height + gl.chart_h;
         let ty = lane_bottom - GUTTER_LABEL_SIZE - SLICE_TEXT_PAD;
-        paint_gutter_label(g, profile.str(profile.counters()[gl.lane].name), ty, window, cx);
+        paint_gutter_label(
+            g,
+            profile.str(profile.counters()[gl.lane].name),
+            ty,
+            window,
+            cx,
+        );
     }
 }
 
@@ -1371,7 +1466,11 @@ fn paint_tooltip(
     let (profile, slice, detail) = (hovered.profile(), hovered.slice(), hovered.detail());
     let mut lines = vec![
         profile.str(slice.name).to_string(),
-        format!("{} · {}", profile.str(detail.category), format_duration(slice.dur_us)),
+        format!(
+            "{} · {}",
+            profile.str(detail.category),
+            format_duration(slice.dur_us)
+        ),
     ];
     if let Some(target) = profile.opt_str(detail.target) {
         lines.push(format!("target: {target}"));
@@ -1452,8 +1551,13 @@ mod tests {
         // Lanes taller than any region this window can hold, so the split
         // reserves a column for the vertical bar.
         let flame_total = 2.0 * f32::from(window.size.height);
-        let regions =
-            Regions::new(window, 0, DEFAULT_PANEL_HEIGHT, DEFAULT_GUTTER_WIDTH, flame_total);
+        let regions = Regions::new(
+            window,
+            0,
+            DEFAULT_PANEL_HEIGHT,
+            DEFAULT_GUTTER_WIDTH,
+            flame_total,
+        );
         let right = regions.content_left + regions.time_w;
         assert_eq!(right, regions.content_right - SCROLLBAR_THICKNESS);
 
@@ -1492,7 +1596,10 @@ mod tests {
         // A position the content has shrunk away from, drawn at the ceiling.
         let held = 900.0;
         assert_eq!(drawn_scroll(held, ceiling), ceiling);
-        assert_eq!(scroll_request(held, ceiling, ceiling + LINE_SCROLL_PX), None);
+        assert_eq!(
+            scroll_request(held, ceiling, ceiling + LINE_SCROLL_PX),
+            None
+        );
         assert_eq!(scroll_request(held, ceiling, ceiling), None);
         // It draws where it stands again once the content grows back past it.
         assert_eq!(drawn_scroll(held, 1000.0), held);
@@ -1515,7 +1622,10 @@ mod tests {
     fn a_scroll_request_holds_at_the_floor_and_the_ceiling() {
         let ceiling = 400.0;
         assert_eq!(scroll_request(0.0, ceiling, -LINE_SCROLL_PX), None);
-        assert_eq!(scroll_request(ceiling, ceiling, ceiling + LINE_SCROLL_PX), None);
+        assert_eq!(
+            scroll_request(ceiling, ceiling, ceiling + LINE_SCROLL_PX),
+            None
+        );
         // Content shorter than its viewport pins every gesture to the top.
         assert_eq!(scroll_request(0.0, 0.0, LINE_SCROLL_PX), None);
     }
@@ -1558,7 +1668,11 @@ mod tests {
 
     #[test]
     fn several_regions_are_counted_alongside_the_time_they_hold() {
-        let three = selection(&[(0, 1_000_000), (2_000_000, 3_000_000), (4_000_000, 5_000_000)]);
+        let three = selection(&[
+            (0, 1_000_000),
+            (2_000_000, 3_000_000),
+            (4_000_000, 5_000_000),
+        ]);
         assert_eq!(
             time_window_summary(Some(&three), BUILD_US).as_deref(),
             Some("Window: 3.00s of 40.00s · 3 regions")
@@ -1575,7 +1689,10 @@ mod tests {
 
     #[test]
     fn an_unrestricted_aggregate_carries_no_chip() {
-        assert_eq!(time_window_summary(Some(&TimeSelection::default()), BUILD_US), None);
+        assert_eq!(
+            time_window_summary(Some(&TimeSelection::default()), BUILD_US),
+            None
+        );
     }
 
     #[test]

@@ -3,7 +3,7 @@ use bviz_ui_components::Button;
 use bviz_ui_theme::{ThemeColors, mix};
 use gpui::{
     AnyElement, App, Bounds, BoxShadow, CursorStyle, Decorations, Div, Entity, FocusHandle,
-    HitboxBehavior, Hsla, IntoElement, MouseButton, Pixels, Point, ResizeEdge, RenderOnce, Rgba,
+    HitboxBehavior, Hsla, IntoElement, MouseButton, Pixels, Point, RenderOnce, ResizeEdge, Rgba,
     SharedString, Size, Stateful, Tiling, Window, canvas, div, point, prelude::*, px, size,
     transparent_black,
 };
@@ -281,7 +281,10 @@ fn resize_cursor(tiling: Tiling) -> impl IntoElement {
     canvas(
         |_, window, _| {
             window.insert_hitbox(
-                Bounds::new(point(px(0.), px(0.)), window.window_bounds().get_bounds().size),
+                Bounds::new(
+                    point(px(0.), px(0.)),
+                    window.window_bounds().get_bounds().size,
+                ),
                 HitboxBehavior::Normal,
             )
         },
@@ -377,9 +380,15 @@ mod tests {
         for name in ["One Dark", "One Light"] {
             let colors = registry.get(name).expect("a built-in theme").colors;
             let dimmed = level_step(inactive_band(&colors), colors.surface);
-            assert!(dimmed >= MIN_VISIBLE_STEP, "{name}: {dimmed} levels of dimming");
+            assert!(
+                dimmed >= MIN_VISIBLE_STEP,
+                "{name}: {dimmed} levels of dimming"
+            );
             let framed = level_step(inactive_band(&colors), colors.background);
-            assert!(framed >= MIN_EDGED_STEP, "{name}: {framed} levels off the canvas");
+            assert!(
+                framed >= MIN_EDGED_STEP,
+                "{name}: {framed} levels off the canvas"
+            );
         }
     }
 }

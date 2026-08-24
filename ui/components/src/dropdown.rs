@@ -4,14 +4,17 @@
 use crate::CONTROL_HEIGHT;
 use bviz_ui_theme::{ThemeColors, over};
 use gpui::{
-    deferred, div, prelude::*, px, ClickEvent, Context, ElementId, EventEmitter, FocusHandle,
-    Hsla, IntoElement, MouseButton, Pixels, Render, SharedString, Subscription, Window,
+    ClickEvent, Context, ElementId, EventEmitter, FocusHandle, Hsla, IntoElement, MouseButton,
+    Pixels, Render, SharedString, Subscription, Window, deferred, div, prelude::*, px,
 };
 
 /// The fill under the cursor on the row already chosen, composited so that row
 /// keeps its accent while the cursor is on it.
 fn chosen_hover(colors: &ThemeColors) -> Hsla {
-    Hsla::from(over(colors.element_hover, over(colors.selection, colors.panel)))
+    Hsla::from(over(
+        colors.element_hover,
+        over(colors.selection, colors.panel),
+    ))
 }
 
 /// Breathing room between the trigger and the menu it opens.
@@ -145,7 +148,13 @@ impl Dropdown {
             }))
             // flex_none + nowrap so the flex row never shrinks the label below the
             // widest option, which would wrap the text and overflow the trigger.
-            .child(div().w(option_width).flex_none().whitespace_nowrap().child(label))
+            .child(
+                div()
+                    .w(option_width)
+                    .flex_none()
+                    .whitespace_nowrap()
+                    .child(label),
+            )
             .child(
                 bviz_ui_assets::icon("caret-down")
                     .size(px(12.))
@@ -157,7 +166,11 @@ impl Dropdown {
         let chosen_hover = chosen_hover(colors);
         let rows = self.options.iter().enumerate().map(|(index, option)| {
             let chosen = index == self.selected;
-            let hover = if chosen { chosen_hover } else { colors.element_hover };
+            let hover = if chosen {
+                chosen_hover
+            } else {
+                colors.element_hover
+            };
             div()
                 .id(("dropdown-option", index))
                 .px_2()
@@ -234,7 +247,11 @@ mod tests {
         for theme in built_in_themes() {
             let colors = &theme.colors;
             let contrast = contrast_ratio(colors.text, chosen_hover(colors));
-            assert!(contrast >= MIN_TEXT_CONTRAST, "{}: {contrast}:1", theme.name);
+            assert!(
+                contrast >= MIN_TEXT_CONTRAST,
+                "{}: {contrast}:1",
+                theme.name
+            );
         }
     }
 

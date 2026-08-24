@@ -1,4 +1,4 @@
-use crate::camera::{ease_out_cubic, smoothstep, Rect};
+use crate::camera::{Rect, ease_out_cubic, smoothstep};
 use crate::{GraphView, SETTLE_DURATION};
 use bviz_graph_layout::{Box, Id, LaidOut};
 use gpui::Context;
@@ -107,7 +107,13 @@ impl Transition {
                     }
                 }
                 None => {
-                    starts.insert(b.id, Start { from: across(to, &kept_now), alpha: 0.0 });
+                    starts.insert(
+                        b.id,
+                        Start {
+                            from: across(to, &kept_now),
+                            alpha: 0.0,
+                        },
+                    );
                 }
             }
         }
@@ -118,13 +124,22 @@ impl Transition {
             .filter(|(_, b)| !now.contains_key(&b.id))
             .map(|(index, b)| {
                 let from = was[&b.id];
-                Leaving { index, from, to: across(from, &kept_before) }
+                Leaving {
+                    index,
+                    from,
+                    to: across(from, &kept_before),
+                }
             })
             .collect();
         if starts.is_empty() && leaving.is_empty() {
             return None;
         }
-        Some(Transition { previous, starts, leaving, start: Instant::now() })
+        Some(Transition {
+            previous,
+            starts,
+            leaving,
+            start: Instant::now(),
+        })
     }
 
     /// How far along `transition` stands at `now`, or `None` once it is over —
@@ -164,7 +179,10 @@ impl Frame {
     pub(crate) fn place(&self, b: &Box) -> (Rect, f32) {
         let to = Rect::of(b);
         match self.transition.starts.get(&b.id) {
-            Some(start) => (between(start.from, to, self.travel), start.alpha_at(self.travel)),
+            Some(start) => (
+                between(start.from, to, self.travel),
+                start.alpha_at(self.travel),
+            ),
             None => (to, 1.0),
         }
     }
@@ -173,7 +191,10 @@ impl Frame {
     /// in, so a transition armed over this one can take a fade up where it left
     /// off.
     fn alpha_of(&self, id: Id) -> f32 {
-        self.transition.starts.get(&id).map_or(1.0, |start| start.alpha_at(self.travel))
+        self.transition
+            .starts
+            .get(&id)
+            .map_or(1.0, |start| start.alpha_at(self.travel))
     }
 
     /// The boxes only the previous drawing held, each where it sits this frame
@@ -227,7 +248,12 @@ fn remap(r: Rect, from: Rect, to: Rect) -> Rect {
 /// The rect `e` of the way from `from` to `to`.
 fn between(from: Rect, to: Rect, e: f32) -> Rect {
     let mix = |a: f64, b: f64| a + (b - a) * e as f64;
-    Rect { x: mix(from.x, to.x), y: mix(from.y, to.y), w: mix(from.w, to.w), h: mix(from.h, to.h) }
+    Rect {
+        x: mix(from.x, to.x),
+        y: mix(from.y, to.y),
+        w: mix(from.w, to.w),
+        h: mix(from.h, to.h),
+    }
 }
 
 /// Whether a box crossing from `from` to `to` moves far enough to be worth
@@ -258,7 +284,10 @@ enum Step {
 
 impl Morph {
     pub(crate) fn none() -> Self {
-        Self { current: None, generation: 0 }
+        Self {
+            current: None,
+            generation: 0,
+        }
     }
 
     /// How far the transition in flight stands at `now`; `None` at rest.
@@ -359,25 +388,44 @@ mod tests {
     }
 
     fn drawing(boxes: Vec<Box>) -> LaidOut {
-        LaidOut { boxes, ..Default::default() }
+        LaidOut {
+            boxes,
+            ..Default::default()
+        }
     }
 
     /// The container as the collapsed drawing holds it, and as the open one does.
-    const SHUT: Rect = Rect { x: 400.0, y: 0.0, w: 120.0, h: 30.0 };
-    const OPEN: Rect = Rect { x: 300.0, y: 200.0, w: 600.0, h: 400.0 };
+    const SHUT: Rect = Rect {
+        x: 400.0,
+        y: 0.0,
+        w: 120.0,
+        h: 30.0,
+    };
+    const OPEN: Rect = Rect {
+        x: 300.0,
+        y: 200.0,
+        w: 600.0,
+        h: 400.0,
+    };
 
     /// A container beside a neighbour, collapsed: the container holds nothing —
     /// which is why it is not compound, as a layout marks only a box with drawn
     /// children — and the neighbour sits where the open drawing does not put it.
     fn collapsed() -> LaidOut {
-        drawing(vec![lbox(0, SHUT, false), lbox(1, rect(0.0, 0.0, 200.0, 40.0), false)])
+        drawing(vec![
+            lbox(0, SHUT, false),
+            lbox(1, rect(0.0, 0.0, 200.0, 40.0), false),
+        ])
     }
 
     /// The collapsed drawing with its neighbour nudged `dx` along, so a
     /// transition onto it moves one box by exactly that much and leaves the
     /// other where it stands.
     fn nudged(dx: f64) -> LaidOut {
-        drawing(vec![lbox(0, SHUT, false), lbox(1, rect(dx, 0.0, 200.0, 40.0), false)])
+        drawing(vec![
+            lbox(0, SHUT, false),
+            lbox(1, rect(dx, 0.0, 200.0, 40.0), false),
+        ])
     }
 
     /// The same two boxes with the container open over two members, so a
@@ -393,9 +441,7 @@ mod tests {
     }
 
     fn transition(before: LaidOut, after: &LaidOut) -> Arc<Transition> {
-        Arc::new(
-            Transition::between(Arc::new(before), after, None).expect("nothing to animate"),
-        )
+        Arc::new(Transition::between(Arc::new(before), after, None).expect("nothing to animate"))
     }
 
     /// `t` sampled `fraction` of the way through the boxes' travel.
@@ -413,7 +459,9 @@ mod tests {
     fn assert_close(got: Rect, want: Rect, what: &str) {
         let near = |a: f64, b: f64| (a - b).abs() < 1e-6;
         assert!(
-            near(got.x, want.x) && near(got.y, want.y) && near(got.w, want.w)
+            near(got.x, want.x)
+                && near(got.y, want.y)
+                && near(got.w, want.w)
                 && near(got.h, want.h),
             "{what}: {got:?} is not {want:?}"
         );
@@ -438,7 +486,11 @@ mod tests {
 
         let start = at(&t, 0.0);
         assert_close(start.place(neighbour).0, was, "at the start");
-        assert_eq!(start.place(neighbour).1, 1.0, "a box both drawings hold faded");
+        assert_eq!(
+            start.place(neighbour).1,
+            1.0,
+            "a box both drawings hold faded"
+        );
 
         let end = at(&t, 1.0);
         assert_close(end.place(neighbour).0, is, "at the end");
@@ -458,8 +510,14 @@ mod tests {
         let t = transition(collapsed(), &after);
 
         let (from, alpha) = at(&t, 0.0).place(member);
-        assert_eq!(alpha, 0.0, "a box only the new drawing holds started painted");
-        assert!(from.w > 0.0 && from.h > 0.0, "the entering box starts at nothing: {from:?}");
+        assert_eq!(
+            alpha, 0.0,
+            "a box only the new drawing holds started painted"
+        );
+        assert!(
+            from.w > 0.0 && from.h > 0.0,
+            "the entering box starts at nothing: {from:?}"
+        );
         assert!(
             within(from, SHUT),
             "the entering box starts at {from:?}, outside the container it appears in ({SHUT:?})",
@@ -467,7 +525,10 @@ mod tests {
 
         let mid = at(&t, 0.5);
         let (half, half_alpha) = mid.place(member);
-        assert!(half_alpha > 0.0 && half_alpha < 1.0, "alpha {half_alpha} is not mid-fade");
+        assert!(
+            half_alpha > 0.0 && half_alpha < 1.0,
+            "alpha {half_alpha} is not mid-fade"
+        );
         assert!(
             within(half, between(SHUT, OPEN, mid.travel)),
             "halfway the entering box at {half:?} has left its container",
@@ -475,7 +536,11 @@ mod tests {
 
         let end = at(&t, 1.0);
         assert_close(end.place(member).0, Rect::of(member), "at the end");
-        assert_eq!(end.place(member).1, 1.0, "the entering box never reached full strength");
+        assert_eq!(
+            end.place(member).1,
+            1.0,
+            "the entering box never reached full strength"
+        );
     }
 
     #[test]
@@ -503,7 +568,10 @@ mod tests {
             within(to, SHUT),
             "the leaving box lands at {to:?}, outside the container it collapses into ({SHUT:?})",
         );
-        assert!(to.w > 0.0 && to.h > 0.0, "the leaving box collapses to nothing: {to:?}");
+        assert!(
+            to.w > 0.0 && to.h > 0.0,
+            "the leaving box collapses to nothing: {to:?}"
+        );
     }
 
     #[test]
@@ -517,11 +585,21 @@ mod tests {
                 "connectors read at {connectors} {fraction} of the way through the travel",
             );
         }
-        assert!(at(&t, 1.0).connectors > 0.0, "the connectors had not begun as the boxes landed");
+        assert!(
+            at(&t, 1.0).connectors > 0.0,
+            "the connectors had not begun as the boxes landed"
+        );
         let landing = Transition::at(&t, t.start + MORPH_SPAN - Duration::from_millis(1))
             .expect("over already");
-        assert!(landing.connectors > 0.9, "connectors barely arrived: {}", landing.connectors);
-        assert_eq!(landing.travel, 1.0, "the boxes were still moving as the connectors arrived");
+        assert!(
+            landing.connectors > 0.9,
+            "connectors barely arrived: {}",
+            landing.connectors
+        );
+        assert_eq!(
+            landing.travel, 1.0,
+            "the boxes were still moving as the connectors arrived"
+        );
     }
 
     /// What keeps the overlap from showing: over the lead the fade is still
@@ -529,9 +607,19 @@ mod tests {
     #[test]
     fn the_lead_the_connectors_start_on_is_one_nothing_can_be_seen_over() {
         let lead = smoothstep(CONNECTOR_FADE_LEAD.as_secs_f32() / CONNECTOR_FADE.as_secs_f32());
-        assert!(lead < IMPERCEPTIBLE_CONNECTOR, "the connectors reach {lead} before the boxes land");
-        let travelled = at(&transition(collapsed(), &opened()), CONNECTOR_FADE_START.as_secs_f32() / SETTLE_DURATION.as_secs_f32()).travel;
-        assert!(travelled > 0.95, "the boxes are only {travelled} along when the connectors start");
+        assert!(
+            lead < IMPERCEPTIBLE_CONNECTOR,
+            "the connectors reach {lead} before the boxes land"
+        );
+        let travelled = at(
+            &transition(collapsed(), &opened()),
+            CONNECTOR_FADE_START.as_secs_f32() / SETTLE_DURATION.as_secs_f32(),
+        )
+        .travel;
+        assert!(
+            travelled > 0.95,
+            "the boxes are only {travelled} along when the connectors start"
+        );
     }
 
     /// A connector is a thin line, so it reads as present well below full
@@ -545,11 +633,23 @@ mod tests {
                 .expect("the fade was over already")
                 .connectors
         };
-        assert!(CONNECTOR_FADE > SETTLE_DURATION, "the connectors arrive faster than the boxes");
+        assert!(
+            CONNECTOR_FADE > SETTLE_DURATION,
+            "the connectors arrive faster than the boxes"
+        );
         let sixth = alpha(CONNECTOR_FADE / 6);
-        assert!(sixth < 0.15, "a sixth of the way in the connectors already read at {sixth}");
-        assert!(alpha(CONNECTOR_FADE / 2) < 0.75, "half way in the connectors are all but there");
-        assert!(sixth > 0.0, "the fade had not begun a sixth of the way through itself");
+        assert!(
+            sixth < 0.15,
+            "a sixth of the way in the connectors already read at {sixth}"
+        );
+        assert!(
+            alpha(CONNECTOR_FADE / 2) < 0.75,
+            "half way in the connectors are all but there"
+        );
+        assert!(
+            sixth > 0.0,
+            "the fade had not begun a sixth of the way through itself"
+        );
     }
 
     /// The strength a box of `opened` is drawn at `fraction` of the way into a
@@ -559,7 +659,10 @@ mod tests {
         let opened = Arc::new(opened());
         let partway = at(&transition(collapsed(), &opened), fraction);
         let reached = partway.place(&opened.boxes[2]).1;
-        assert!(reached > 0.0 && reached < 1.0, "the box is not mid-fade at {reached}");
+        assert!(
+            reached > 0.0 && reached < 1.0,
+            "the box is not mid-fade at {reached}"
+        );
         (opened, partway, reached)
     }
 
@@ -620,7 +723,10 @@ mod tests {
         for fraction in [0.0, 0.5, 1.0] {
             let (rect, alpha) = at(&t, fraction).place(still);
             assert_close(rect, SHUT, "the box the relayout left where it stood");
-            assert_eq!(alpha, 1.0, "the box the relayout left put faded at {fraction}");
+            assert_eq!(
+                alpha, 1.0,
+                "the box the relayout left put faded at {fraction}"
+            );
         }
     }
 
@@ -657,10 +763,19 @@ mod tests {
              against either would answer the same",
         );
         let hit = |r: Rect| {
-            crate::hit_box(&after.boxes, Some(&frame), r.x as f32 + 1.0, r.y as f32 + 1.0)
-                .map(|b| b.id)
+            crate::hit_box(
+                &after.boxes,
+                Some(&frame),
+                r.x as f32 + 1.0,
+                r.y as f32 + 1.0,
+            )
+            .map(|b| b.id)
         };
-        assert_eq!(hit(drawn), Some(travelling.id), "the box the cursor is over resolves to another");
+        assert_eq!(
+            hit(drawn),
+            Some(travelling.id),
+            "the box the cursor is over resolves to another"
+        );
         assert_ne!(
             hit(settled),
             Some(travelling.id),
@@ -671,7 +786,9 @@ mod tests {
     #[test]
     fn a_relayout_landing_mid_morph_starts_each_box_from_where_it_is_drawn() {
         let mut morph = Morph::none();
-        morph.arm(Arc::new(collapsed()), &opened()).expect("nothing to animate");
+        morph
+            .arm(Arc::new(collapsed()), &opened())
+            .expect("nothing to animate");
         // Wind the first morph back to the middle of its travel, as the second
         // relayout finds it.
         let travelling = Arc::get_mut(morph.current.as_mut().unwrap()).unwrap();
@@ -679,7 +796,11 @@ mod tests {
 
         let after = opened();
         let moved = &after.boxes[1];
-        let drawn = morph.at(Instant::now()).expect("the first morph had landed").place(moved).0;
+        let drawn = morph
+            .at(Instant::now())
+            .expect("the first morph had landed")
+            .place(moved)
+            .0;
         assert!(
             (drawn.y - Rect::of(moved).y).abs() > SAMPLING_SLACK,
             "the first morph had all but landed the box, so a restart from where it \
@@ -687,8 +808,13 @@ mod tests {
         );
 
         let back = collapsed();
-        morph.arm(Arc::new(after), &back).expect("nothing to animate");
-        let second = morph.current.clone().expect("the second relayout armed nothing");
+        morph
+            .arm(Arc::new(after), &back)
+            .expect("nothing to animate");
+        let second = morph
+            .current
+            .clone()
+            .expect("the second relayout armed nothing");
         let from = Transition::at(&second, second.start)
             .expect("the second morph was over before it began")
             .place(&back.boxes[1])
@@ -702,12 +828,19 @@ mod tests {
     #[test]
     fn a_morph_superseded_by_a_second_relayout_leaves_the_first_pump_nothing_to_drive() {
         let mut morph = Morph::none();
-        let first = morph.arm(Arc::new(collapsed()), &opened()).expect("nothing to animate");
-        let second = morph.arm(Arc::new(opened()), &collapsed()).expect("nothing to animate");
+        let first = morph
+            .arm(Arc::new(collapsed()), &opened())
+            .expect("nothing to animate");
+        let second = morph
+            .arm(Arc::new(opened()), &collapsed())
+            .expect("nothing to animate");
         assert_ne!(first, second);
 
         assert!(matches!(morph.tick(first), Step::Superseded));
-        assert!(morph.current.is_some(), "the superseded pump ended a fresher morph");
+        assert!(
+            morph.current.is_some(),
+            "the superseded pump ended a fresher morph"
+        );
         assert!(matches!(morph.tick(second), Step::Travelling));
     }
 
@@ -717,7 +850,9 @@ mod tests {
     /// box already at rest, so there is nothing left to ease.
     fn all_but_landed() -> (Morph, u64) {
         let mut morph = Morph::none();
-        let generation = morph.arm(Arc::new(collapsed()), &opened()).expect("nothing to animate");
+        let generation = morph
+            .arm(Arc::new(collapsed()), &opened())
+            .expect("nothing to animate");
         Arc::get_mut(morph.current.as_mut().unwrap()).unwrap().start -= SETTLE_DURATION;
         (morph, generation)
     }
@@ -726,13 +861,19 @@ mod tests {
     fn a_relayout_that_redraws_the_same_picture_arms_no_morph() {
         let mut morph = Morph::none();
         assert!(morph.arm(Arc::new(opened()), &opened()).is_none());
-        assert!(morph.current.is_none(), "an unchanged drawing armed a morph");
+        assert!(
+            morph.current.is_none(),
+            "an unchanged drawing armed a morph"
+        );
 
         // The same arm with a morph in flight returns before it can disturb it:
         // the transition stands and so does its pump.
         let (mut morph, running) = all_but_landed();
         assert!(morph.arm(Arc::new(opened()), &opened()).is_none());
-        assert!(morph.current.is_some(), "an unchanged drawing dropped the morph in flight");
+        assert!(
+            morph.current.is_some(),
+            "an unchanged drawing dropped the morph in flight"
+        );
         assert!(
             matches!(morph.tick(running), Step::Travelling),
             "an unchanged drawing retired the pump of the morph in flight",
@@ -745,7 +886,10 @@ mod tests {
         let redrawn = opened();
         assert!(morph.arm(Arc::new(opened()), &redrawn).is_none());
 
-        let standing = morph.current.clone().expect("the morph in flight was dropped");
+        let standing = morph
+            .current
+            .clone()
+            .expect("the morph in flight was dropped");
         let frame =
             Transition::at(&standing, Instant::now()).expect("the transition was already over");
         for b in &redrawn.boxes {
@@ -758,9 +902,14 @@ mod tests {
     #[test]
     fn a_cleared_morph_drops_its_transition_and_retires_its_pump() {
         let mut morph = Morph::none();
-        let generation = morph.arm(Arc::new(collapsed()), &opened()).expect("nothing to animate");
+        let generation = morph
+            .arm(Arc::new(collapsed()), &opened())
+            .expect("nothing to animate");
         morph.clear();
-        assert!(morph.current.is_none(), "a cleared morph still holds the drawing it was leaving");
+        assert!(
+            morph.current.is_none(),
+            "a cleared morph still holds the drawing it was leaving"
+        );
         assert!(
             matches!(morph.tick(generation), Step::Superseded),
             "the pump of a cleared morph kept asking for frames",
@@ -770,7 +919,9 @@ mod tests {
     #[test]
     fn a_morph_whose_span_has_run_out_drops_the_drawing_it_was_leaving() {
         let mut morph = Morph::none();
-        let generation = morph.arm(Arc::new(collapsed()), &opened()).expect("nothing to animate");
+        let generation = morph
+            .arm(Arc::new(collapsed()), &opened())
+            .expect("nothing to animate");
         assert!(matches!(morph.tick(generation), Step::Travelling));
 
         // Wind the start back past the whole span, as the tick that lands on it
@@ -778,6 +929,9 @@ mod tests {
         let landed = Arc::get_mut(morph.current.as_mut().unwrap()).unwrap();
         landed.start -= MORPH_SPAN;
         assert!(matches!(morph.tick(generation), Step::Landed));
-        assert!(morph.current.is_none(), "a landed morph still holds the drawing it left");
+        assert!(
+            morph.current.is_none(),
+            "a landed morph still holds the drawing it left"
+        );
     }
 }

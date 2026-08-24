@@ -13,7 +13,9 @@ pub struct Names {
 }
 impl Names {
     pub fn intern(&mut self, name: &str) -> Id {
-        if let Some(&id) = self.lookup.get(name) { return id; }
+        if let Some(&id) = self.lookup.get(name) {
+            return id;
+        }
         // A 4-byte id keeps `Node`/`Edge` and the level-of-detail arrays compact;
         // a graph approaching u32::MAX nodes is wildly past anything Bazel emits,
         // so cap it with a panic rather than let the cast silently wrap an id onto
@@ -23,8 +25,16 @@ impl Names {
         self.lookup.insert(name.to_string(), id);
         id
     }
-    pub fn get(&self, name: &str) -> Option<Id> { self.lookup.get(name).copied() }
-    pub fn resolve(&self, id: Id) -> &str { &self.strings[id.0 as usize] }
-    pub fn len(&self) -> usize { self.strings.len() }
-    pub fn is_empty(&self) -> bool { self.strings.is_empty() }
+    pub fn get(&self, name: &str) -> Option<Id> {
+        self.lookup.get(name).copied()
+    }
+    pub fn resolve(&self, id: Id) -> &str {
+        &self.strings[id.0 as usize]
+    }
+    pub fn len(&self) -> usize {
+        self.strings.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.strings.is_empty()
+    }
 }

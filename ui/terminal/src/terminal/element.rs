@@ -1,5 +1,7 @@
 use bviz_terminal::{Cell, Flags, Scroll, Terminal};
-use bviz_ui_components::{Axis, DEFAULT_MIN_THUMB, DragEnd, Scrollbar, ScrollbarColors, track_drag};
+use bviz_ui_components::{
+    Axis, DEFAULT_MIN_THUMB, DragEnd, Scrollbar, ScrollbarColors, track_drag,
+};
 use bviz_ui_theme::ThemeColors;
 use gpui::{
     App, Bounds, Element, Entity, Font, GlobalElementId, Hsla, InspectorElementId, IntoElement,
@@ -252,7 +254,14 @@ impl TerminalElement {
         let mut quads = Vec::with_capacity(selection.len());
         for (r, span) in selection.iter().enumerate() {
             let Some((first, last)) = span else { continue };
-            quads.push(Self::span_fill(bounds, metrics, r, *first, *last, selection_color));
+            quads.push(Self::span_fill(
+                bounds,
+                metrics,
+                r,
+                *first,
+                *last,
+                selection_color,
+            ));
         }
         quads
     }
@@ -267,7 +276,11 @@ impl TerminalElement {
         let mut quads = Vec::with_capacity(search.iter().map(Vec::len).sum());
         for (r, spans) in search.iter().enumerate() {
             for &(first, last, focused) in spans {
-                let tint = if focused { FOCUSED_MATCH_TINT } else { MATCH_TINT };
+                let tint = if focused {
+                    FOCUSED_MATCH_TINT
+                } else {
+                    MATCH_TINT
+                };
                 let color = highlight.opacity(tint);
                 quads.push(Self::span_fill(bounds, metrics, r, first, last, color));
             }
@@ -433,8 +446,18 @@ impl Element for TerminalElement {
 
         let (lines, mut backgrounds) =
             Self::shape_viewport(&viewport, bounds, metrics, &defaults, window);
-        backgrounds.extend(Self::selection_quads(&selection, bounds, metrics, colors.selection));
-        backgrounds.extend(Self::search_quads(&search, bounds, metrics, colors.highlight));
+        backgrounds.extend(Self::selection_quads(
+            &selection,
+            bounds,
+            metrics,
+            colors.selection,
+        ));
+        backgrounds.extend(Self::search_quads(
+            &search,
+            bounds,
+            metrics,
+            colors.highlight,
+        ));
         let overlays = self.url_overlay(bounds, metrics, colors.text_accent, cx);
 
         Prepaint {
@@ -510,7 +533,11 @@ mod tests {
             let lifted = off_canvas(focused);
             assert!(lifted > marked, "{}: {lifted} against {marked}", theme.name);
             let contrast = contrast_ratio(c.text, focused);
-            assert!(contrast >= MIN_TEXT_CONTRAST, "{}: {contrast}:1", theme.name);
+            assert!(
+                contrast >= MIN_TEXT_CONTRAST,
+                "{}: {contrast}:1",
+                theme.name
+            );
         }
     }
 }

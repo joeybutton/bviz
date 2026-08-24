@@ -72,9 +72,10 @@ impl Drawn {
     pub(crate) fn level(&self, zoom: f32) -> Option<Level> {
         match self {
             Self::Layered(_) => None,
-            Self::Map(map) => {
-                Some(Level { index: map.level_for_scale(zoom), count: map.level_count() })
-            }
+            Self::Map(map) => Some(Level {
+                index: map.level_for_scale(zoom),
+                count: map.level_count(),
+            }),
         }
     }
 
@@ -86,7 +87,10 @@ impl Drawn {
             Self::Layered(view) => (view.width, view.height),
             Self::Map(map) => (map.width(), map.height()),
         };
-        (width as f32 + 2. * MARGIN as f32, height as f32 + 2. * MARGIN as f32)
+        (
+            width as f32 + 2. * MARGIN as f32,
+            height as f32 + 2. * MARGIN as f32,
+        )
     }
 }
 

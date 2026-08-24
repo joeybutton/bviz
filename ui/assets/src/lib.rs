@@ -5,8 +5,8 @@
 //! also resolves text metrics and shapes single-run lines from those fonts.
 
 use gpui::{
-    svg, App, AssetSource, Font, Hsla, Pixels, Result, ShapedLine, SharedString, Svg, TextRun,
-    Window,
+    App, AssetSource, Font, Hsla, Pixels, Result, ShapedLine, SharedString, Svg, TextRun, Window,
+    svg,
 };
 use std::borrow::Cow;
 

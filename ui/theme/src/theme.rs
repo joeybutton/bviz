@@ -92,7 +92,15 @@ impl DataColors {
     /// The slots that carry a hue, in the wheel order they are declared in, for
     /// a view assigning categories to slots by position rather than by name.
     pub fn chromatic(&self) -> [Hsla; Self::CHROMATIC] {
-        [self.red, self.orange, self.yellow, self.green, self.cyan, self.blue, self.purple]
+        [
+            self.red,
+            self.orange,
+            self.yellow,
+            self.green,
+            self.cyan,
+            self.blue,
+            self.purple,
+        ]
     }
 }
 

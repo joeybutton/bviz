@@ -317,7 +317,9 @@ impl TraceModel {
         // The anchor run and the anchor's own selected state, read before any
         // mutation so the range extends from the existing anchor.
         let run = self.visible_run_to(track);
-        let anchor_state = self.select_anchor.and_then(|a| self.selected_tracks.get(a).copied());
+        let anchor_state = self
+            .select_anchor
+            .and_then(|a| self.selected_tracks.get(a).copied());
         let sel = match (shift, ctrl, run) {
             // Plain click: select the one track and anchor there.
             (false, false, _) => {
@@ -464,14 +466,11 @@ impl TraceModel {
                 .background_executor()
                 .spawn(async move {
                     let t = std::time::Instant::now();
-                    let scan =
-                        cached_scan.unwrap_or_else(|| Arc::new(TrackFlamer::new(&profile)));
-                    let aggregate = ScopeAggregate::build_for_tracks_reusing(
-                        &scan,
-                        mode,
-                        &time_window,
-                        |i| selected.get(i).copied().unwrap_or(false),
-                    );
+                    let scan = cached_scan.unwrap_or_else(|| Arc::new(TrackFlamer::new(&profile)));
+                    let aggregate =
+                        ScopeAggregate::build_for_tracks_reusing(&scan, mode, &time_window, |i| {
+                            selected.get(i).copied().unwrap_or(false)
+                        });
                     if std::env::var_os("BVIZ_TRACE_TIMING").is_some() {
                         eprintln!(
                             "[timing] track_aggregate: {:.3}s",
@@ -546,7 +545,10 @@ mod tests {
 
         // The labelling moves independently of the direction, which the new mode
         // carries over.
-        let renamed = FlameMode { labels: FlameLabels::Name, ..inverted };
+        let renamed = FlameMode {
+            labels: FlameLabels::Name,
+            ..inverted
+        };
         assert!(model.adopt_flame_mode(renamed));
         assert_eq!(model.flame_mode(), renamed);
         assert_eq!(model.aggregate_key, key + 2);

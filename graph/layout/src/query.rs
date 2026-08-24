@@ -9,7 +9,7 @@ use bazel_query_proto::blaze_query::Target;
 
 use crate::graph::{EdgeKind, Graph, Kind};
 use crate::intern::{Id, Names};
-use crate::label::{self, label_and_kind, PackageHierarchy};
+use crate::label::{self, PackageHierarchy, label_and_kind};
 
 #[cfg(test)]
 fn build(targets: &[Target]) -> (Graph, Names) {
@@ -23,7 +23,12 @@ fn build(targets: &[Target]) -> (Graph, Names) {
 /// The (repository, package path) keys of every target this query names, for the
 /// package hierarchy.
 pub(crate) fn package_keys(targets: &[Target]) -> BTreeSet<(String, String)> {
-    label::package_keys(targets.iter().filter_map(label_and_kind).map(|(label, _)| label))
+    label::package_keys(
+        targets
+            .iter()
+            .filter_map(label_and_kind)
+            .map(|(label, _)| label),
+    )
 }
 
 /// The labels of generated-file targets among `targets`, which a joint graph
@@ -93,7 +98,7 @@ pub(crate) fn build_with_packages(
 mod tests {
     use super::*;
     use crate::test_support::{edges, find, parent_of};
-    use bazel_query_proto::blaze_query::{target::Discriminator, GeneratedFile, Rule, SourceFile};
+    use bazel_query_proto::blaze_query::{GeneratedFile, Rule, SourceFile, target::Discriminator};
 
     fn rule(name: &str, inputs: &[&str]) -> Target {
         Target {
@@ -138,7 +143,10 @@ mod tests {
         let node = find(&graph, &names, "target://foo:app");
         assert_eq!(node.kind, Kind::Target);
         assert_eq!(node.label, ":app");
-        assert_eq!(parent_of(&graph, &names, "target://foo:app"), Some("pkg:foo"));
+        assert_eq!(
+            parent_of(&graph, &names, "target://foo:app"),
+            Some("pkg:foo")
+        );
     }
 
     #[test]
@@ -146,7 +154,10 @@ mod tests {
         let (graph, names) = build(&[source("//foo:in.c"), generated("//foo:out.o")]);
 
         assert_eq!(find(&graph, &names, "target://foo:in.c").kind, Kind::Source);
-        assert_eq!(find(&graph, &names, "target://foo:out.o").kind, Kind::Artifact);
+        assert_eq!(
+            find(&graph, &names, "target://foo:out.o").kind,
+            Kind::Artifact
+        );
     }
 
     #[test]
@@ -161,7 +172,12 @@ mod tests {
     fn rule_input_to_absent_label_is_dropped() {
         let (graph, names) = build(&[rule("//foo:app", &["//bar:missing"])]);
 
-        assert!(!graph.nodes.iter().any(|n| names.resolve(n.id) == "target://bar:missing"));
+        assert!(
+            !graph
+                .nodes
+                .iter()
+                .any(|n| names.resolve(n.id) == "target://bar:missing")
+        );
         assert!(edges(&graph, &names).is_empty());
     }
 

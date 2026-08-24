@@ -40,13 +40,20 @@ enum Fade {
 
 impl Emphasis {
     pub(crate) fn none() -> Self {
-        Self { current: None, generation: 0 }
+        Self {
+            current: None,
+            generation: 0,
+        }
     }
 
     /// Emphasizes the box `id`, framed together with the boxes `enclosed` by the
     /// viewport.
     pub(crate) fn toggled(&mut self, id: Id, enclosed: Vec<Id>) {
-        self.current = Some(Toggled { id, enclosed, fading_since: None });
+        self.current = Some(Toggled {
+            id,
+            enclosed,
+            fading_since: None,
+        });
         self.generation = self.generation.wrapping_add(1);
     }
 
@@ -89,11 +96,10 @@ impl Emphasis {
             return Fade::Superseded;
         }
         match &self.current {
-            Some(Toggled { fading_since: Some(since), .. })
-                if since.elapsed() < HIGHLIGHT_LINGER =>
-            {
-                Fade::Fading
-            }
+            Some(Toggled {
+                fading_since: Some(since),
+                ..
+            }) if since.elapsed() < HIGHLIGHT_LINGER => Fade::Fading,
             _ => {
                 self.current = None;
                 Fade::Faded

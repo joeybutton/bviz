@@ -13,9 +13,7 @@ pub fn spinner(id: impl Into<ElementId>, size: Pixels, color: impl Into<Hsla>) -
     bviz_ui_assets::icon("circle-notch")
         .size(size)
         .text_color(color)
-        .with_animation(
-            id,
-            Animation::new(SPIN_PERIOD).repeat(),
-            |icon, delta| icon.with_transformation(Transformation::rotate(percentage(delta))),
-        )
+        .with_animation(id, Animation::new(SPIN_PERIOD).repeat(), |icon, delta| {
+            icon.with_transformation(Transformation::rotate(percentage(delta)))
+        })
 }

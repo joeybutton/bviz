@@ -17,7 +17,12 @@ pub(crate) struct Rebuild<K> {
 
 impl<K: Copy + PartialEq> Rebuild<K> {
     pub(crate) fn new() -> Self {
-        Self { ready: None, inflight: None, r#gen: 0, task: Task::ready(()) }
+        Self {
+            ready: None,
+            inflight: None,
+            r#gen: 0,
+            task: Task::ready(()),
+        }
     }
 
     pub(crate) fn is_ready(&self, key: K) -> bool {

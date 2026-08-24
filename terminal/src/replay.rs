@@ -357,7 +357,9 @@ mod tests {
         let at = |frame| {
             let viewport =
                 crate::Terminal::from_display(&replay.display_at(frame), 40, 10).viewport();
-            crate::screen::rows_to_text(&viewport).trim_end().to_string()
+            crate::screen::rows_to_text(&viewport)
+                .trim_end()
+                .to_string()
         };
         assert_eq!(at(0), "alpha");
         assert_eq!(at(1), "alpha\nbeta");

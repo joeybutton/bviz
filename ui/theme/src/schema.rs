@@ -108,9 +108,9 @@ impl ThemeFamilyContent {
         self.themes
             .iter()
             .map(|theme| {
-                theme
-                    .build()
-                    .map_err(|err| format!("theme '{}' of family '{}': {err}", theme.name, self.name))
+                theme.build().map_err(|err| {
+                    format!("theme '{}' of family '{}': {err}", theme.name, self.name)
+                })
             })
             .collect()
     }
@@ -211,7 +211,10 @@ mod tests {
     #[test]
     fn a_theme_missing_a_role_is_rejected() {
         let json = family_with(|theme| {
-            theme["colors"].as_object_mut().expect("colors is an object").remove("shadow");
+            theme["colors"]
+                .as_object_mut()
+                .expect("colors is an object")
+                .remove("shadow");
         });
         assert!(rejection(&json).contains("shadow"));
     }
@@ -237,7 +240,10 @@ mod tests {
     #[test]
     fn a_terminal_palette_of_the_wrong_length_is_rejected() {
         let json = family_with(|theme| {
-            theme["terminal"]["ansi"].as_array_mut().expect("ansi is an array").truncate(8);
+            theme["terminal"]["ansi"]
+                .as_array_mut()
+                .expect("ansi is an array")
+                .truncate(8);
         });
         let rejection = rejection(&json);
         assert!(rejection.contains("invalid length 8"), "{rejection}");

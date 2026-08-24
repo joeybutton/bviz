@@ -121,9 +121,12 @@ fn build_action_boxes(
             .unwrap_or_else(|| format!("target {}", action.target_id));
         let ct_id = boxes.target_ct(&rule_label, Kind::Target, config_id);
         let action_id = boxes.names.intern(&format!("action{i}"));
-        boxes
-            .graph
-            .add_node(action_id, action.mnemonic.clone(), Kind::Action, Some(ct_id));
+        boxes.graph.add_node(
+            action_id,
+            action.mnemonic.clone(),
+            Kind::Action,
+            Some(ct_id),
+        );
         for &out in &action.output_ids {
             let out = ArtifactId(out);
             let art_id = boxes.output_artifact(out, ct_id, config_id);
@@ -208,7 +211,10 @@ impl<'a> Index<'a> {
                 fragment_by_id: path_fragments.iter().map(|p| (p.id, *p)).collect(),
             },
             target_by_id: targets.iter().map(|t| (t.id, *t)).collect(),
-            config_by_id: configurations.iter().map(|c| (ConfigId(c.id), *c)).collect(),
+            config_by_id: configurations
+                .iter()
+                .map(|c| (ConfigId(c.id), *c))
+                .collect(),
             depset_by_id: dep_sets.iter().map(|d| (d.id, *d)).collect(),
             actions,
         }
@@ -232,7 +238,10 @@ impl Boxes<'_> {
     fn config_key(&self, config_id: ConfigId) -> String {
         label::config_key(
             config_id.0,
-            self.index.config_by_id.get(&config_id).map(|c| c.checksum.as_str()),
+            self.index
+                .config_by_id
+                .get(&config_id)
+                .map(|c| c.checksum.as_str()),
         )
     }
 
@@ -241,13 +250,21 @@ impl Boxes<'_> {
     /// per-config box; an unlabeled one sits directly under the producing rule's box.
     fn output_artifact(&mut self, out: ArtifactId, producing_ct: Id, config_id: ConfigId) -> Id {
         let path = self.index.paths.full_path(out);
-        match generated_label(self.hierarchy, &path).filter(|label| self.labeled_outputs.contains(label)) {
+        match generated_label(self.hierarchy, &path)
+            .filter(|label| self.labeled_outputs.contains(label))
+        {
             Some(out_label) => {
                 let out_ct = self.target_ct(&out_label, Kind::Artifact, config_id);
                 let config_key = self.config_key(config_id);
-                let id = self.names.intern(&format!("artifact:{out_label}#{config_key}"));
-                self.graph
-                    .add_node(id, self.index.paths.basename(out), Kind::Artifact, Some(out_ct));
+                let id = self
+                    .names
+                    .intern(&format!("artifact:{out_label}#{config_key}"));
+                self.graph.add_node(
+                    id,
+                    self.index.paths.basename(out),
+                    Kind::Artifact,
+                    Some(out_ct),
+                );
                 id
             }
             None => {
@@ -270,7 +287,9 @@ impl Boxes<'_> {
     /// `artifact` box holding the concrete file).
     fn target_ct(&mut self, full_label: &str, target_kind: Kind, config_id: ConfigId) -> Id {
         let config_key = self.config_key(config_id);
-        let ct_node_id = self.names.intern(&label::ct_node_id(full_label, &config_key));
+        let ct_node_id = self
+            .names
+            .intern(&label::ct_node_id(full_label, &config_key));
         if !self.configured.insert(ct_node_id) {
             return ct_node_id;
         }
@@ -288,7 +307,10 @@ impl Boxes<'_> {
 
         let mnemonic = label::config_mnemonic(
             config_id.0,
-            self.index.config_by_id.get(&config_id).map(|c| c.mnemonic.as_str()),
+            self.index
+                .config_by_id
+                .get(&config_id)
+                .map(|c| c.mnemonic.as_str()),
         );
         self.graph.add_node(
             ct_node_id,
@@ -338,8 +360,12 @@ impl Wiring<'_> {
         let Some(dep_set) = self.depset_by_id.get(&dep_set_id).copied() else {
             return;
         };
-        let directs: Vec<ArtifactId> =
-            dep_set.direct_artifact_ids.iter().copied().map(ArtifactId).collect();
+        let directs: Vec<ArtifactId> = dep_set
+            .direct_artifact_ids
+            .iter()
+            .copied()
+            .map(ArtifactId)
+            .collect();
         let transitives: Vec<u32> = dep_set.transitive_dep_set_ids.clone();
         for artifact_id in directs {
             self.emit_member(artifact_id, consumer, graph, names);
@@ -351,7 +377,13 @@ impl Wiring<'_> {
 
     /// Wires one member artifact to `consumer` through the leaf node it resolves
     /// to, creating that node on first sight and skipping a dropped input.
-    fn emit_member(&mut self, artifact_id: ArtifactId, consumer: Id, graph: &mut Graph, names: &mut Names) {
+    fn emit_member(
+        &mut self,
+        artifact_id: ArtifactId,
+        consumer: Id,
+        graph: &mut Graph,
+        names: &mut Names,
+    ) {
         if let Some(from) = self.resolve_member(artifact_id, graph, names) {
             self.add_edge(from, consumer, graph);
         }
@@ -363,7 +395,12 @@ impl Wiring<'_> {
     /// `external_sources` is off, or generated outside the queried scope, which
     /// has no producer node). The result depends only on the artifact, so it is
     /// memoized across the many consumers a shared input feeds.
-    fn resolve_member(&mut self, artifact_id: ArtifactId, graph: &mut Graph, names: &mut Names) -> Option<Id> {
+    fn resolve_member(
+        &mut self,
+        artifact_id: ArtifactId,
+        graph: &mut Graph,
+        names: &mut Names,
+    ) -> Option<Id> {
         if let Some(&cached) = self.resolved.get(&artifact_id) {
             return cached;
         }
@@ -372,7 +409,12 @@ impl Wiring<'_> {
         from
     }
 
-    fn compute_member(&mut self, artifact_id: ArtifactId, graph: &mut Graph, names: &mut Names) -> Option<Id> {
+    fn compute_member(
+        &mut self,
+        artifact_id: ArtifactId,
+        graph: &mut Graph,
+        names: &mut Names,
+    ) -> Option<Id> {
         let path = self.paths.full_path(artifact_id);
         if !self.external_sources && is_external(&path) {
             return None;
@@ -443,12 +485,7 @@ fn root_source_node(
 ) -> Id {
     let node_id = names.intern(&format!("source{}", artifact_id.0));
     if source_nodes.insert(node_id) {
-        graph.add_node(
-            node_id,
-            paths.basename(artifact_id),
-            Kind::Source,
-            None,
-        );
+        graph.add_node(node_id, paths.basename(artifact_id), Kind::Source, None);
     }
     node_id
 }
@@ -710,7 +747,12 @@ mod tests {
         let (graph, names) = build(&[container], false);
 
         // The member cannot be wired, so it produces no node and no edge.
-        assert!(!graph.nodes.iter().any(|n| names.resolve(n.id) == "artifact1"));
+        assert!(
+            !graph
+                .nodes
+                .iter()
+                .any(|n| names.resolve(n.id) == "artifact1")
+        );
         assert!(edges(&graph, &names).is_empty());
     }
 
@@ -734,10 +776,22 @@ mod tests {
         assert_eq!(find(&graph, &names, "pkg:foo").label, "//foo");
         assert_eq!(find(&graph, &names, "pkg:bar").label, "//bar");
 
-        assert_eq!(parent_of(&graph, &names, "target://foo:app"), Some("pkg:foo"));
-        assert_eq!(parent_of(&graph, &names, "target://bar:lib"), Some("pkg:bar"));
-        assert_eq!(parent_of(&graph, &names, "target://foo:main.c"), Some("pkg:foo"));
-        assert_eq!(parent_of(&graph, &names, "target://bar:lib.c"), Some("pkg:bar"));
+        assert_eq!(
+            parent_of(&graph, &names, "target://foo:app"),
+            Some("pkg:foo")
+        );
+        assert_eq!(
+            parent_of(&graph, &names, "target://bar:lib"),
+            Some("pkg:bar")
+        );
+        assert_eq!(
+            parent_of(&graph, &names, "target://foo:main.c"),
+            Some("pkg:foo")
+        );
+        assert_eq!(
+            parent_of(&graph, &names, "target://bar:lib.c"),
+            Some("pkg:bar")
+        );
     }
 
     #[test]
@@ -757,7 +811,10 @@ mod tests {
 
         let (graph, names) = build(&[container], false);
 
-        assert_eq!(parent_of(&graph, &names, "target://foo/bar:sub/deep.c"), Some("pkg:foo/bar"));
+        assert_eq!(
+            parent_of(&graph, &names, "target://foo/bar:sub/deep.c"),
+            Some("pkg:foo/bar")
+        );
     }
 
     #[test]
@@ -865,16 +922,30 @@ mod tests {
         let containers = vec![container];
         let labeled = HashSet::from(["//pkg:gen.out".to_string()]);
         let mut names = Names::default();
-        let graph =
-            build_with_packages(&containers, false, &package_keys(&containers), &labeled, &mut names);
+        let graph = build_with_packages(
+            &containers,
+            false,
+            &package_keys(&containers),
+            &labeled,
+            &mut names,
+        );
 
         // The output is promoted to its own target box, nesting its per-config
         // box and the concrete artifact, instead of sitting under the rule.
-        assert_eq!(find(&graph, &names, "target://pkg:gen.out").kind, Kind::Artifact);
-        assert_eq!(parent_of(&graph, &names, "ct://pkg:gen.out#ck1"), Some("target://pkg:gen.out"));
+        assert_eq!(
+            find(&graph, &names, "target://pkg:gen.out").kind,
+            Kind::Artifact
+        );
+        assert_eq!(
+            parent_of(&graph, &names, "ct://pkg:gen.out#ck1"),
+            Some("target://pkg:gen.out")
+        );
         let concrete = find(&graph, &names, "artifact://pkg:gen.out#ck1");
         assert_eq!(concrete.kind, Kind::Artifact);
-        assert_eq!(concrete.parent.map(|p| names.resolve(p)), Some("ct://pkg:gen.out#ck1"));
+        assert_eq!(
+            concrete.parent.map(|p| names.resolve(p)),
+            Some("ct://pkg:gen.out#ck1")
+        );
         // The producing action feeds the promoted concrete artifact.
         assert!(edges(&graph, &names).contains(&("action0", "artifact://pkg:gen.out#ck1")));
     }
@@ -905,12 +976,25 @@ mod tests {
         let containers = vec![container];
         let labeled = HashSet::new();
         let mut names = Names::default();
-        let graph =
-            build_with_packages(&containers, false, &package_keys(&containers), &labeled, &mut names);
+        let graph = build_with_packages(
+            &containers,
+            false,
+            &package_keys(&containers),
+            &labeled,
+            &mut names,
+        );
 
         // No promotion: the output is a bare artifact under the genrule's box.
-        assert!(!graph.nodes.iter().any(|n| names.resolve(n.id) == "target://pkg:gen.out"));
-        assert_eq!(parent_of(&graph, &names, "artifact1"), Some("ct://pkg:gen#ck1"));
+        assert!(
+            !graph
+                .nodes
+                .iter()
+                .any(|n| names.resolve(n.id) == "target://pkg:gen.out")
+        );
+        assert_eq!(
+            parent_of(&graph, &names, "artifact1"),
+            Some("ct://pkg:gen#ck1")
+        );
     }
 
     #[test]

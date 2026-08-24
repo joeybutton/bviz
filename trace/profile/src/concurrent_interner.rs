@@ -5,8 +5,8 @@
 //! that [`crate::Profile::str`] indexes directly.
 
 use std::cell::UnsafeCell;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::RwLock;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use bviz_parallel::worker_count;
 use crossbeam_utils::CachePadded;
@@ -149,7 +149,11 @@ impl ConcurrentInterner {
         let shard_count = (4 * par).next_power_of_two().clamp(MIN_SHARDS, MAX_SHARDS);
         let shard_shift = u64::BITS - shard_count.trailing_zeros();
         let shards = (0..shard_count)
-            .map(|_| CachePadded::new(RwLock::new(HashTable::with_capacity(distinct / shard_count + 1))))
+            .map(|_| {
+                CachePadded::new(RwLock::new(HashTable::with_capacity(
+                    distinct / shard_count + 1,
+                )))
+            })
             .collect();
 
         // One byte for the placeholder, the bound itself, a small fraction for
@@ -171,7 +175,12 @@ impl ConcurrentInterner {
         ConcurrentInterner {
             shards,
             shard_shift,
-            arena: Arena { buf, cap, page_size: PAGE_SIZE, page_cursor: AtomicUsize::new(1) },
+            arena: Arena {
+                buf,
+                cap,
+                page_size: PAGE_SIZE,
+                page_cursor: AtomicUsize::new(1),
+            },
         }
     }
 
@@ -332,8 +341,10 @@ impl Writer<'_> {
     fn intern_shard(&mut self, hash: u64, s: &str) -> Str {
         let shard = (hash >> self.interner.shard_shift) as usize;
         let arena = &self.interner.arena;
-        if let Some(&handle) =
-            self.interner.shards[shard].read().unwrap().find(hash, |&h| arena.str(h) == s)
+        if let Some(&handle) = self.interner.shards[shard]
+            .read()
+            .unwrap()
+            .find(hash, |&h| arena.str(h) == s)
         {
             return handle;
         }
@@ -367,10 +378,15 @@ impl Writer<'_> {
             start
         } else {
             if self.page_pos + n > self.page_end {
-                let start = arena.page_cursor.fetch_add(arena.page_size, Ordering::Relaxed);
+                let start = arena
+                    .page_cursor
+                    .fetch_add(arena.page_size, Ordering::Relaxed);
                 self.page_pos = start;
                 self.page_end = start + arena.page_size;
-                assert!(self.page_end <= arena.cap, "concurrent interner arena overflow");
+                assert!(
+                    self.page_end <= arena.cap,
+                    "concurrent interner arena overflow"
+                );
             }
             let off = self.page_pos;
             self.page_pos += n;
@@ -404,8 +420,14 @@ mod tests {
     #[test]
     fn single_thread_interns_and_dedups() {
         let seq = [
-            "CppCompile", "//src/foo:bar", "CppCompile", "Javac", "//src/foo:bar",
-            "//a/b/c/d:e", "Javac", "CppCompile",
+            "CppCompile",
+            "//src/foo:bar",
+            "CppCompile",
+            "Javac",
+            "//src/foo:bar",
+            "//a/b/c/d:e",
+            "Javac",
+            "CppCompile",
         ];
         let interner = ConcurrentInterner::new(256, 8);
         let handles: Vec<Str> = {
@@ -556,6 +578,9 @@ mod tests {
             assert_eq!(&text[h.range()], s);
         }
         assert_eq!(handles[1], handles[3], "the oversized string dedups");
-        assert_ne!(handles[0], handles[2], "small strings around it stay distinct");
+        assert_ne!(
+            handles[0], handles[2],
+            "small strings around it stay distinct"
+        );
     }
 }

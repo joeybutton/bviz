@@ -6,8 +6,8 @@
 
 use prost::Message;
 
-use crate::bep::build_event_stream::{build_event::Payload, BuildEvent};
-use crate::bep::command_line::{command_line_section::SectionType, CommandLine};
+use crate::bep::build_event_stream::{BuildEvent, build_event::Payload};
+use crate::bep::command_line::{CommandLine, command_line_section::SectionType};
 use crate::bep::timestamp_proto::google::protobuf::Timestamp;
 
 /// Console output captured from a build, with the terminal width Bazel used and
@@ -193,9 +193,11 @@ mod tests {
             "expected start and finish anchors"
         );
         assert!(output.anchors.windows(2).all(|w| w[0].time <= w[1].time));
-        assert!(output
-            .anchors
-            .iter()
-            .all(|a| a.frame <= output.frames.len()));
+        assert!(
+            output
+                .anchors
+                .iter()
+                .all(|a| a.frame <= output.frames.len())
+        );
     }
 }

@@ -30,15 +30,15 @@ mod scroll;
 mod toolbar;
 
 use build::{Input, InputKind};
-use camera::{enclosed_boxes, from_screen, recenter_rect, zoom_step, Camera, Rect};
-use drag::{end_drag, start_pan, Drag};
+use camera::{Camera, Rect, enclosed_boxes, from_screen, recenter_rect, zoom_step};
+use drag::{Drag, end_drag, start_pan};
 use emphasis::Emphasis;
-use framing::{build_prepaint, Framing};
+use framing::{Framing, build_prepaint};
 use legend::legend;
 use mode::LayoutMode;
 use model::{Drawn, Expandable, Model};
 use morph::{Frame, Morph};
-use paint::{canvas_body, Scene, TitleTarget};
+use paint::{Scene, TitleTarget, canvas_body};
 use scroll::{scrollbar_hit, start_scroll_drag};
 
 /// Padding around the graph, in layout pixels.
@@ -304,8 +304,15 @@ impl GraphView {
         let camera = self.camera();
         let vp = self.framing.viewport();
         let morph = self.morph_frame();
-        let hit = box_at(&self.titles, drawn.view(camera.zoom), morph.as_ref(), vp, camera, e.position)
-            .map(|b| b.id);
+        let hit = box_at(
+            &self.titles,
+            drawn.view(camera.zoom),
+            morph.as_ref(),
+            vp,
+            camera,
+            e.position,
+        )
+        .map(|b| b.id);
         if hit != self.hovered {
             self.hovered = hit;
             cx.notify();
@@ -332,7 +339,13 @@ impl GraphView {
             ScrollDelta::Pixels(p) => f32::from(p.y) / PIXELS_PER_NOTCH,
         };
         let viewport = self.framing.viewport();
-        self.framing.move_to(zoom_step(e.position, self.camera(), notches, viewport, content));
+        self.framing.move_to(zoom_step(
+            e.position,
+            self.camera(),
+            notches,
+            viewport,
+            content,
+        ));
         cx.notify();
     }
 
@@ -509,13 +522,22 @@ impl Cli {
     fn inputs(self) -> Vec<Input> {
         let mut inputs = Vec::new();
         if let Some(path) = self.aquery {
-            inputs.push(Input { kind: InputKind::Aquery, path });
+            inputs.push(Input {
+                kind: InputKind::Aquery,
+                path,
+            });
         }
         if let Some(path) = self.cquery {
-            inputs.push(Input { kind: InputKind::Cquery, path });
+            inputs.push(Input {
+                kind: InputKind::Cquery,
+                path,
+            });
         }
         if let Some(path) = self.query {
-            inputs.push(Input { kind: InputKind::Query, path });
+            inputs.push(Input {
+                kind: InputKind::Query,
+                path,
+            });
         }
         inputs
     }
@@ -534,10 +556,12 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::camera::{clamp_pan, ease_out_cubic, fit_view, fit_zoom, settle_view, to_screen, Rect};
+    use crate::camera::{
+        Rect, clamp_pan, ease_out_cubic, fit_view, fit_zoom, settle_view, to_screen,
+    };
     use crate::paint::lane_polyline;
     use bviz_graph_layout::{Box, Kind};
-    use gpui::{point, Bounds, Size};
+    use gpui::{Bounds, Size, point};
 
     fn lbox(id: u32, x: f64, y: f64, w: f64, h: f64) -> Box {
         Box {
@@ -556,7 +580,10 @@ mod tests {
     #[test]
     fn from_screen_inverts_to_screen() {
         let bounds = Bounds::new(point(px(10.), px(20.)), size(px(800.), px(600.)));
-        let camera = Camera { zoom: 1.7, pan: (33.0, -12.0) };
+        let camera = Camera {
+            zoom: 1.7,
+            pan: (33.0, -12.0),
+        };
         for &(x, y) in &[(0.0_f64, 0.0_f64), (42.5, 7.25), (123.0, 456.0)] {
             let screen = to_screen(x, y, bounds, camera);
             let (gx, gy) = from_screen(screen, bounds.origin, camera);
@@ -585,11 +612,20 @@ mod tests {
     #[test]
     fn hit_box_picks_innermost_and_none_outside() {
         // An outer container (id 0) with a small inner box (id 1) nested in it.
-        let boxes = vec![lbox(0, 0.0, 0.0, 100.0, 100.0), lbox(1, 20.0, 20.0, 30.0, 30.0)];
+        let boxes = vec![
+            lbox(0, 0.0, 0.0, 100.0, 100.0),
+            lbox(1, 20.0, 20.0, 30.0, 30.0),
+        ];
         // Inside both rects: the smaller (inner) wins.
-        assert_eq!(hit_box(&boxes, None, 30.0, 30.0).unwrap().id, bviz_graph_layout::Id(1));
+        assert_eq!(
+            hit_box(&boxes, None, 30.0, 30.0).unwrap().id,
+            bviz_graph_layout::Id(1)
+        );
         // Inside only the container.
-        assert_eq!(hit_box(&boxes, None, 5.0, 5.0).unwrap().id, bviz_graph_layout::Id(0));
+        assert_eq!(
+            hit_box(&boxes, None, 5.0, 5.0).unwrap().id,
+            bviz_graph_layout::Id(0)
+        );
         // Outside everything.
         assert!(hit_box(&boxes, None, 200.0, 200.0).is_none());
         assert!(hit_box(&boxes, None, -1.0, 50.0).is_none());
@@ -601,12 +637,26 @@ mod tests {
         let lane = lane_polyline(&[(0.0, 0.0), (100.0, 0.0), (100.0, 100.0)], 4.0);
         // Endpoints are pushed perpendicular too (not anchored), so the first and
         // last segments stay parallel to the route and meet the node offset.
-        assert!((lane[0].0).abs() < 0.01 && (lane[0].1 - 4.0).abs() < 0.5, "start {:?}", lane[0]);
-        assert!((lane[2].0 - 96.0).abs() < 0.5 && (lane[2].1 - 100.0).abs() < 0.01, "end {:?}", lane[2]);
+        assert!(
+            (lane[0].0).abs() < 0.01 && (lane[0].1 - 4.0).abs() < 0.5,
+            "start {:?}",
+            lane[0]
+        );
+        assert!(
+            (lane[2].0 - 96.0).abs() < 0.5 && (lane[2].1 - 100.0).abs() < 0.01,
+            "end {:?}",
+            lane[2]
+        );
         // First segment horizontal like the route's (no fanning in at the node).
-        assert!((lane[0].1 - lane[1].1).abs() < 0.01, "first seg not parallel: {lane:?}");
+        assert!(
+            (lane[0].1 - lane[1].1).abs() < 0.01,
+            "first seg not parallel: {lane:?}"
+        );
         // Last segment vertical like the route's.
-        assert!((lane[1].0 - lane[2].0).abs() < 0.01, "last seg not parallel: {lane:?}");
+        assert!(
+            (lane[1].0 - lane[2].0).abs() < 0.01,
+            "last seg not parallel: {lane:?}"
+        );
     }
 
     #[test]
@@ -629,8 +679,14 @@ mod tests {
         // A straight two-point edge shifts whole, both ends offset perpendicular.
         let lane = lane_polyline(&[(0.0, 0.0), (100.0, 0.0)], 4.0);
         assert_eq!(lane.len(), 2);
-        assert!((lane[0].0).abs() < 0.01 && (lane[0].1 - 4.0).abs() < 0.5, "{lane:?}");
-        assert!((lane[1].0 - 100.0).abs() < 0.01 && (lane[1].1 - 4.0).abs() < 0.5, "{lane:?}");
+        assert!(
+            (lane[0].0).abs() < 0.01 && (lane[0].1 - 4.0).abs() < 0.5,
+            "{lane:?}"
+        );
+        assert!(
+            (lane[1].0 - 100.0).abs() < 0.01 && (lane[1].1 - 4.0).abs() < 0.5,
+            "{lane:?}"
+        );
     }
 
     // The whole graph, large enough that fit_zoom's floor stays well below 1.0 and
@@ -644,21 +700,41 @@ mod tests {
     /// Asserts `target`'s screen rect under `(zoom, pan)` lies fully within the
     /// viewport, inset by the breathing-room pad (with a small tolerance).
     fn assert_enclosed(target: Rect, vw: f32, vh: f32, zoom: f32, pan: (f32, f32)) {
-        let (bx, by, bw, bh) = (target.x as f32, target.y as f32, target.w as f32, target.h as f32);
+        let (bx, by, bw, bh) = (
+            target.x as f32,
+            target.y as f32,
+            target.w as f32,
+            target.h as f32,
+        );
         let x0 = (bx + MARGIN as f32) * zoom + pan.0;
         let y0 = (by + MARGIN as f32) * zoom + pan.1;
         let x1 = (bx + bw + MARGIN as f32) * zoom + pan.0;
         let y1 = (by + bh + MARGIN as f32) * zoom + pan.1;
         let eps = 0.5;
-        let (lo, hix, hiy) = (RECENTER_PAD - eps, vw - RECENTER_PAD + eps, vh - RECENTER_PAD + eps);
-        assert!(x0 >= lo && x1 <= hix, "x out of view: {x0}..{x1} in 0..{vw}");
-        assert!(y0 >= lo && y1 <= hiy, "y out of view: {y0}..{y1} in 0..{vh}");
+        let (lo, hix, hiy) = (
+            RECENTER_PAD - eps,
+            vw - RECENTER_PAD + eps,
+            vh - RECENTER_PAD + eps,
+        );
+        assert!(
+            x0 >= lo && x1 <= hix,
+            "x out of view: {x0}..{x1} in 0..{vw}"
+        );
+        assert!(
+            y0 >= lo && y1 <= hiy,
+            "y out of view: {y0}..{y1} in 0..{vh}"
+        );
     }
 
     #[test]
     fn settle_view_leaves_a_fitting_centered_target_put() {
         // A small rect already comfortably inside: neither zoom nor pan moves.
-        let target = Rect { x: 375.0, y: 280.0, w: 50.0, h: 40.0 };
+        let target = Rect {
+            x: 375.0,
+            y: 280.0,
+            w: 50.0,
+            h: 40.0,
+        };
         let (z, p) = settle_view(target, vp(800., 600.), CONTENT, 1.0, (0.0, 0.0));
         assert!((z - 1.0).abs() < 1e-4, "zoom moved: {z}");
         assert!(p.0.abs() < 1e-3 && p.1.abs() < 1e-3, "pan moved: {p:?}");
@@ -668,10 +744,18 @@ mod tests {
     fn settle_view_only_zooms_out_to_enclose_a_big_target() {
         // A rect larger than the viewport at the current zoom forces a zoom-out,
         // never below the whole-graph fit, and ends up fully framed.
-        let target = Rect { x: 0.0, y: 0.0, w: 2000.0, h: 1500.0 };
+        let target = Rect {
+            x: 0.0,
+            y: 0.0,
+            w: 2000.0,
+            h: 1500.0,
+        };
         let (z, p) = settle_view(target, vp(800., 600.), CONTENT, 1.0, (0.0, 0.0));
         assert!(z < 1.0, "expected zoom-out, got {z}");
-        assert!(z >= fit_zoom(vp(800., 600.), CONTENT) - 1e-4, "below whole-graph fit: {z}");
+        assert!(
+            z >= fit_zoom(vp(800., 600.), CONTENT) - 1e-4,
+            "below whole-graph fit: {z}"
+        );
         assert_enclosed(target, 800., 600., z, p);
     }
 
@@ -679,7 +763,12 @@ mod tests {
     fn settle_view_never_zooms_in_on_a_small_target() {
         // A node opening smaller than the current zoom keeps the zoom — the
         // disorienting blow-up-to-fill case is gone.
-        let target = Rect { x: 100.0, y: 100.0, w: 30.0, h: 20.0 };
+        let target = Rect {
+            x: 100.0,
+            y: 100.0,
+            w: 30.0,
+            h: 20.0,
+        };
         let (z, _) = settle_view(target, vp(800., 600.), CONTENT, 0.5, (0.0, 0.0));
         assert!(z <= 0.5 + 1e-4, "zoomed in: {z}");
     }
@@ -688,7 +777,12 @@ mod tests {
     fn settle_view_pans_an_offscreen_target_into_view_without_rezoom() {
         // A small rect off to the right fits at the current zoom, so the zoom
         // holds and only the pan shifts it back into frame.
-        let target = Rect { x: 1000.0, y: 100.0, w: 50.0, h: 40.0 };
+        let target = Rect {
+            x: 1000.0,
+            y: 100.0,
+            w: 50.0,
+            h: 40.0,
+        };
         let (z, p) = settle_view(target, vp(800., 600.), CONTENT, 1.0, (0.0, 0.0));
         assert!((z - 1.0).abs() < 1e-4, "zoom moved: {z}");
         assert!(p.0 < 0.0, "expected a leftward pan, got {p:?}");
@@ -696,14 +790,24 @@ mod tests {
     }
 
     /// The window in layout space that the culling tests measure against.
-    const WINDOW: Rect = Rect { x: 0.0, y: 0.0, w: 10.0, h: 10.0 };
+    const WINDOW: Rect = Rect {
+        x: 0.0,
+        y: 0.0,
+        w: 10.0,
+        h: 10.0,
+    };
 
     #[test]
     fn a_route_is_kept_only_where_it_runs_through_the_window() {
         // A long diagonal whose bounding box swallows the window, but which
         // passes well clear of it: the bounds alone would keep it.
         let across = [(0.0, 1000.0), (1000.0, 0.0)];
-        assert!(WINDOW.overlaps(&Rect { x: 0.0, y: 0.0, w: 1000.0, h: 1000.0 }));
+        assert!(WINDOW.overlaps(&Rect {
+            x: 0.0,
+            y: 0.0,
+            w: 1000.0,
+            h: 1000.0
+        }));
         assert!(!WINDOW.crossed_by(&across));
         assert!(WINDOW.crossed_by(&[(-100.0, 5.0), (100.0, 5.0)]));
         // A route entirely inside, and one that only clips a corner leg.
@@ -724,7 +828,11 @@ mod tests {
     #[test]
     fn ease_out_cubic_endpoints_and_deceleration() {
         assert!(ease_out_cubic(0.0).abs() < 1e-6, "{}", ease_out_cubic(0.0));
-        assert!((ease_out_cubic(1.0) - 1.0).abs() < 1e-6, "{}", ease_out_cubic(1.0));
+        assert!(
+            (ease_out_cubic(1.0) - 1.0).abs() < 1e-6,
+            "{}",
+            ease_out_cubic(1.0)
+        );
         // Ease-out: past the halfway mark in eased progress before halfway in time.
         assert!(ease_out_cubic(0.5) > 0.5, "{}", ease_out_cubic(0.5));
         // Monotonically increasing.
@@ -744,9 +852,19 @@ mod tests {
             lbox(2, 100.0, 580.0, 50.0, 40.0),  // spills past the bottom edge
             lbox(3, 200.0, 200.0, 30.0, 30.0),  // fully inside
         ];
-        let mut ids = enclosed_boxes(&boxes, vp(800., 600.), Camera { zoom: 1.0, pan: (0.0, 0.0) });
+        let mut ids = enclosed_boxes(
+            &boxes,
+            vp(800., 600.),
+            Camera {
+                zoom: 1.0,
+                pan: (0.0, 0.0),
+            },
+        );
         ids.sort_by_key(|id| id.0);
-        assert_eq!(ids, vec![bviz_graph_layout::Id(0), bviz_graph_layout::Id(3)]);
+        assert_eq!(
+            ids,
+            vec![bviz_graph_layout::Id(0), bviz_graph_layout::Id(3)]
+        );
     }
 
     /// The slack `clamp_pan` allows past the flush position on an axis.
@@ -762,15 +880,24 @@ mod tests {
         let zoom = 0.05;
         let (cw, ch) = (CONTENT.0 * zoom, CONTENT.1 * zoom);
         let (mx, my) = (clearance(800., cw), clearance(600., ch));
-        assert_eq!(clamp_pan((-9999.0, -9999.0), zoom, viewport, CONTENT), (-mx, -my));
+        assert_eq!(
+            clamp_pan((-9999.0, -9999.0), zoom, viewport, CONTENT),
+            (-mx, -my)
+        );
         assert_eq!(
             clamp_pan((9999.0, 9999.0), zoom, viewport, CONTENT),
             (800.0 - cw + mx, 600.0 - ch + my)
         );
         // A pan within the bound is left untouched, including one that overscrolls
         // into the clearance.
-        assert_eq!(clamp_pan((-50.0, -40.0), zoom, viewport, CONTENT), (-50.0, -40.0));
-        assert_eq!(clamp_pan((100.0, 80.0), zoom, viewport, CONTENT), (100.0, 80.0));
+        assert_eq!(
+            clamp_pan((-50.0, -40.0), zoom, viewport, CONTENT),
+            (-50.0, -40.0)
+        );
+        assert_eq!(
+            clamp_pan((100.0, 80.0), zoom, viewport, CONTENT),
+            (100.0, 80.0)
+        );
     }
 
     #[test]
@@ -781,7 +908,10 @@ mod tests {
         let viewport = vp(800., 600.);
         let (cw, ch) = (CONTENT.0, CONTENT.1);
         let (mx, my) = (clearance(800., cw), clearance(600., ch));
-        assert_eq!(clamp_pan((9999.0, 9999.0), 1.0, viewport, CONTENT), (mx, my));
+        assert_eq!(
+            clamp_pan((9999.0, 9999.0), 1.0, viewport, CONTENT),
+            (mx, my)
+        );
         assert_eq!(
             clamp_pan((-9999.0, -9999.0), 1.0, viewport, CONTENT),
             (800.0 - cw - mx, 600.0 - ch - my)
@@ -796,7 +926,10 @@ mod tests {
         let content = (60.0, 40.0);
         let near = clamp_pan((-9999.0, -9999.0), 1.0, viewport, content);
         let far = clamp_pan((9999.0, 9999.0), 1.0, viewport, content);
-        assert!(near.0 + content.0 > 0. && near.1 + content.1 > 0., "off the near edge: {near:?}");
+        assert!(
+            near.0 + content.0 > 0. && near.1 + content.1 > 0.,
+            "off the near edge: {near:?}"
+        );
         assert!(far.0 < 800. && far.1 < 600., "off the far edge: {far:?}");
     }
 
@@ -816,7 +949,9 @@ mod tests {
         let (w, h) = (f32::from(bounds.size.width), f32::from(bounds.size.height));
         let (ox, oy) = (f32::from(bounds.origin.x), f32::from(bounds.origin.y));
         ALONG.into_iter().flat_map(move |a| {
-            ALONG.into_iter().map(move |b| point(px(ox + a * w), px(oy + b * h)))
+            ALONG
+                .into_iter()
+                .map(move |b| point(px(ox + a * w), px(oy + b * h)))
         })
     }
 
@@ -832,7 +967,10 @@ mod tests {
         let (gx, gy) = from_screen(cursor, bounds.origin, camera);
         let after = zoom_step(cursor, camera, notches, bounds, content);
         let landed = to_screen(gx as f64, gy as f64, bounds, after);
-        (f32::from(landed.x) - f32::from(cursor.x), f32::from(landed.y) - f32::from(cursor.y))
+        (
+            f32::from(landed.x) - f32::from(cursor.x),
+            f32::from(landed.y) - f32::from(cursor.y),
+        )
     }
 
     /// Asserts a step in and a step out hold their anchor at every cursor over
@@ -853,7 +991,10 @@ mod tests {
     /// The camera showing `content` centered in `bounds` at `zoom`.
     fn centered(zoom: f32, bounds: Bounds<Pixels>, content: (f32, f32)) -> Camera {
         let (vw, vh) = (f32::from(bounds.size.width), f32::from(bounds.size.height));
-        Camera { zoom, pan: ((vw - content.0 * zoom) / 2., (vh - content.1 * zoom) / 2.) }
+        Camera {
+            zoom,
+            pan: ((vw - content.0 * zoom) / 2., (vh - content.1 * zoom) / 2.),
+        }
     }
 
     #[test]
@@ -896,7 +1037,10 @@ mod tests {
         // view scrolled off the near edges of a graph larger than the window.
         let bounds = canvas(800., 600.);
         let cursor = point(px(10. + 600.), px(20. + 450.));
-        let mut camera = Camera { zoom: 0.5, pan: (100.0, 80.0) };
+        let mut camera = Camera {
+            zoom: 0.5,
+            pan: (100.0, 80.0),
+        };
         for step in 0..4 {
             let (dx, dy) = anchor_drift(cursor, camera, -1.0, bounds, CONTENT);
             assert!(
@@ -910,11 +1054,20 @@ mod tests {
     #[test]
     fn a_wheel_run_into_max_zoom_stops_there_holding_its_anchor() {
         let bounds = canvas(800., 600.);
-        let camera = Camera { zoom: MAX_ZOOM * 0.98, pan: (-4000.0, -3000.0) };
+        let camera = Camera {
+            zoom: MAX_ZOOM * 0.98,
+            pan: (-4000.0, -3000.0),
+        };
         let cursor = point(px(10. + 500.), px(20. + 200.));
-        assert_eq!(zoom_step(cursor, camera, 5.0, bounds, CONTENT).zoom, MAX_ZOOM);
+        assert_eq!(
+            zoom_step(cursor, camera, 5.0, bounds, CONTENT).zoom,
+            MAX_ZOOM
+        );
         let (dx, dy) = anchor_drift(cursor, camera, 5.0, bounds, CONTENT);
-        assert!(dx.abs() < ANCHOR_TOLERANCE && dy.abs() < ANCHOR_TOLERANCE, "({dx}, {dy}) px");
+        assert!(
+            dx.abs() < ANCHOR_TOLERANCE && dy.abs() < ANCHOR_TOLERANCE,
+            "({dx}, {dy}) px"
+        );
     }
 
     #[test]
@@ -924,12 +1077,18 @@ mod tests {
         // leaves the window.
         let bounds = canvas(800., 600.);
         let cursor = point(px(10. + 784.), px(20. + 588.));
-        let mut camera = Camera { zoom: 0.5, pan: (0.0, 0.0) };
+        let mut camera = Camera {
+            zoom: 0.5,
+            pan: (0.0, 0.0),
+        };
         for _ in 0..20 {
             camera = zoom_step(cursor, camera, -1.0, bounds, CONTENT);
             let (w, h) = (CONTENT.0 * camera.zoom, CONTENT.1 * camera.zoom);
             let on_screen = |pan: f32, extent: f32, vp: f32| (pan + extent).min(vp) - pan.max(0.);
-            let (sx, sy) = (on_screen(camera.pan.0, w, 800.), on_screen(camera.pan.1, h, 600.));
+            let (sx, sy) = (
+                on_screen(camera.pan.0, w, 800.),
+                on_screen(camera.pan.1, h, 600.),
+            );
             let eps = 1e-2;
             assert!(
                 sx + eps >= FIT_MARGIN * w.min(800.) && sy + eps >= FIT_MARGIN * h.min(600.),
@@ -947,6 +1106,9 @@ mod tests {
         let cursor = point(px(10. + 400.), px(20. + 300.));
         assert_eq!(zoom_step(cursor, camera, -5.0, bounds, CONTENT).zoom, fit);
         let (dx, dy) = anchor_drift(cursor, camera, -5.0, bounds, CONTENT);
-        assert!(dx.abs() < ANCHOR_TOLERANCE && dy.abs() < ANCHOR_TOLERANCE, "({dx}, {dy}) px");
+        assert!(
+            dx.abs() < ANCHOR_TOLERANCE && dy.abs() < ANCHOR_TOLERANCE,
+            "({dx}, {dy}) px"
+        );
     }
 }

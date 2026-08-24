@@ -86,7 +86,9 @@ impl Button {
 
 fn sized(el: Stateful<Div>, button: &Button) -> Stateful<Div> {
     if button.compact {
-        el.px_2().py_0p5().line_height(relative(COMPACT_LINE_HEIGHT))
+        el.px_2()
+            .py_0p5()
+            .line_height(relative(COMPACT_LINE_HEIGHT))
     } else if button.ghost && button.label.is_none() {
         // A square hit target, so a bare icon is no harder to hit than a label.
         el.size(CONTROL_HEIGHT)
@@ -97,12 +99,19 @@ fn sized(el: Stateful<Div>, button: &Button) -> Stateful<Div> {
 
 /// Whether the button paints as a block of accent.
 fn is_filled(button: &Button) -> bool {
-    matches!((button.selected, button.ghost), (Some(true), _) | (None, false))
+    matches!(
+        (button.selected, button.ghost),
+        (Some(true), _) | (None, false)
+    )
 }
 
 /// The ink a button's label and icon are set in, read against the fill behind them.
 fn ink(button: &Button, colors: &ThemeColors) -> Hsla {
-    if is_filled(button) { colors.text_on_accent } else { colors.text }
+    if is_filled(button) {
+        colors.text_on_accent
+    } else {
+        colors.text
+    }
 }
 
 /// The mark on a filled button holding keyboard focus. Its fill covers the surface
@@ -156,7 +165,8 @@ fn stateful(el: Stateful<Div>, held: bool, hovered: Hsla, pressed: Hsla) -> Stat
     if held {
         el.bg(pressed)
     } else {
-        el.hover(move |s| s.bg(hovered)).active(move |s| s.bg(pressed))
+        el.hover(move |s| s.bg(hovered))
+            .active(move |s| s.bg(pressed))
     }
 }
 
@@ -199,7 +209,12 @@ fn styled_variant(
         (Some(true), _) | (None, false) => {
             let [rest, hovered, pressed] = filled_fills(colors);
             let border = if focused { filled_ring(colors) } else { rest };
-            stateful(el.bg(rest).border_2().border_color(border), held, hovered, pressed)
+            stateful(
+                el.bg(rest).border_2().border_color(border),
+                held,
+                hovered,
+                pressed,
+            )
         }
     }
 }

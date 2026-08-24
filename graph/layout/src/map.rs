@@ -12,7 +12,7 @@ use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 
 use crate::graph::{Containment, EdgeKind, Graph, Node};
 use crate::intern::Id;
-use crate::layout::{self, Box, Connector, LaidOut, BORDER, LABEL_BAND, LEAF_HEIGHT};
+use crate::layout::{self, BORDER, Box, Connector, LABEL_BAND, LEAF_HEIGHT, LaidOut};
 use crate::{lod, reduce};
 
 /// A container opens once its smaller side covers this many screen pixels, the
@@ -64,7 +64,8 @@ pub struct MapLayout {
 impl MapLayout {
     /// The view to draw at `scale` screen pixels per layout unit.
     pub fn level_for_scale(&self, scale: f32) -> usize {
-        self.finer.partition_point(|&(from, _)| from <= scale as f64)
+        self.finer
+            .partition_point(|&(from, _)| from <= scale as f64)
     }
 
     pub fn level(&self, index: usize) -> &LaidOut {
@@ -130,8 +131,11 @@ fn place(
     containment: &Containment,
 ) -> Drawing {
     let children_of = layout::children_by_parent(graph);
-    let label_of: HashMap<Id, &str> =
-        graph.nodes.iter().map(|n| (n.id, n.label.as_str())).collect();
+    let label_of: HashMap<Id, &str> = graph
+        .nodes
+        .iter()
+        .map(|n| (n.id, n.label.as_str()))
+        .collect();
     let no_edges: Vec<(Id, Id)> = Vec::new();
     let edges_of = |frame: Option<Id>| frames.get(&frame).unwrap_or(&no_edges).as_slice();
 
@@ -142,15 +146,28 @@ fn place(
         // sort only keeps that order the same from run to run.
         stratum.sort_unstable();
         let members = |c: &Id| -> Vec<Id> { children_of[c].iter().map(|n| n.id).collect() };
-        let laid =
-            in_parallel(stratum, |c| lay_out_frame(&members(c), edges_of(Some(*c)), &size));
+        let laid = in_parallel(stratum, |c| {
+            lay_out_frame(&members(c), edges_of(Some(*c)), &size)
+        });
         for (container, frame) in laid {
-            fit_container(container, label_of[&container], frame, &mut size, &mut offset);
+            fit_container(
+                container,
+                label_of[&container],
+                frame,
+                &mut size,
+                &mut offset,
+            );
         }
     }
 
     let mut roots: Vec<Id> = Vec::with_capacity(graph.nodes.len());
-    roots.extend(graph.nodes.iter().filter(|n| n.parent.is_none()).map(|n| n.id));
+    roots.extend(
+        graph
+            .nodes
+            .iter()
+            .filter(|n| n.parent.is_none())
+            .map(|n| n.id),
+    );
     let top = on_worker(|| lay_out_frame(&roots, edges_of(None), &size));
     offset.extend(top.offsets);
 
@@ -176,7 +193,10 @@ fn leaf_sizes(graph: &Graph, children_of: &HashMap<Id, Vec<&Node>>) -> HashMap<I
 /// The containers at each containment depth, so a whole stratum can be laid out
 /// once every frame under it has been.
 fn strata(children_of: &HashMap<Id, Vec<&Node>>, containment: &Containment) -> Vec<Vec<Id>> {
-    let deepest = children_of.keys().map(|&c| containment.depth(c) as usize).max();
+    let deepest = children_of
+        .keys()
+        .map(|&c| containment.depth(c) as usize)
+        .max();
     let mut strata: Vec<Vec<Id>> = vec![Vec::new(); deepest.map_or(0, |d| d + 1)];
     for &container in children_of.keys() {
         strata[containment.depth(container) as usize].push(container);
@@ -197,8 +217,12 @@ fn fit_container(
     let width = (frame.width + 2.0 * BORDER).max(layout::title_width(label));
     let inset = (width - frame.width) / 2.0;
     size.insert(container, (width, frame.height + LABEL_BAND + BORDER));
-    offset
-        .extend(frame.offsets.into_iter().map(|(id, (x, y))| (id, (x + inset, y + LABEL_BAND))));
+    offset.extend(
+        frame
+            .offsets
+            .into_iter()
+            .map(|(id, (x, y))| (id, (x + inset, y + LABEL_BAND))),
+    );
 }
 
 /// Resolves every node's offset within its own frame against the frames holding
@@ -222,7 +246,15 @@ fn absolute(
             None => (dx, dy),
         };
         let (width, height) = size[&node.id];
-        placed.insert(node.id, Placed { x, y, width, height });
+        placed.insert(
+            node.id,
+            Placed {
+                x,
+                y,
+                width,
+                height,
+            },
+        );
     }
     placed
 }
@@ -286,10 +318,7 @@ fn workers() -> &'static rayon::ThreadPool {
 /// between the two children of their nearest common ancestor, keyed by that
 /// ancestor (`None` for the top frame). Edges inside a single child carry no
 /// information about how siblings sit, and are dropped.
-fn frame_edges(
-    graph: &Graph,
-    containment: &Containment,
-) -> HashMap<Option<Id>, Vec<(Id, Id)>> {
+fn frame_edges(graph: &Graph, containment: &Containment) -> HashMap<Option<Id>, Vec<(Id, Id)>> {
     let mut frames: HashMap<Option<Id>, BTreeSet<(Id, Id)>> =
         HashMap::with_capacity(graph.nodes.len());
     for edge in &graph.edges {
@@ -297,7 +326,10 @@ fn frame_edges(
             frames.entry(frame).or_default().insert((from, to));
         }
     }
-    frames.into_iter().map(|(frame, edges)| (frame, edges.into_iter().collect())).collect()
+    frames
+        .into_iter()
+        .map(|(frame, edges)| (frame, edges.into_iter().collect()))
+        .collect()
 }
 
 /// The scale from which each level past the coarsest takes over, rising by
@@ -413,7 +445,12 @@ fn connectors(drawn: &Graph, drawing: &Drawing) -> Vec<Connector> {
     for ((from, to), mut kinds) in kinds_of {
         kinds.sort_unstable();
         let (tail, head) = (drawing.placed[&from], drawing.placed[&to]);
-        connectors.push(Connector { points: route(&tail, &head), kinds, from, to });
+        connectors.push(Connector {
+            points: route(&tail, &head),
+            kinds,
+            from,
+            to,
+        });
     }
     connectors
 }
@@ -485,7 +522,11 @@ fn border_point(b: &Placed, aim: (f64, f64)) -> (f64, f64) {
     let (dx, dy) = (aim.0 - x, aim.1 - y);
     // An aim on the center leaves no direction to run in, so the point takes the
     // flow the layout arranges every edge along.
-    let (dx, dy) = if dx == 0.0 && dy == 0.0 { (0.0, 1.0) } else { (dx, dy) };
+    let (dx, dy) = if dx == 0.0 && dy == 0.0 {
+        (0.0, 1.0)
+    } else {
+        (dx, dy)
+    };
     let reach = (b.width / 2.0 / dx.abs()).min(b.height / 2.0 / dy.abs());
     (x + reach * dx, y + reach * dy)
 }
@@ -502,7 +543,11 @@ mod tests {
     fn towers() -> (Graph, Names) {
         let mut g = Graph::new();
         let mut names = Names::default();
-        let plan = [("wide", 6, "a-long-leaf-label"), ("mid", 3, "leaf-label"), ("narrow", 2, "x")];
+        let plan = [
+            ("wide", 6, "a-long-leaf-label"),
+            ("mid", 3, "leaf-label"),
+            ("narrow", 2, "x"),
+        ];
         for (tower, count, label) in plan {
             let root = names.intern(tower);
             g.add_node(root, tower, Kind::Package, None);
@@ -519,7 +564,11 @@ mod tests {
         }
         let lone = names.intern("lone");
         g.add_node(lone, "lone", Kind::Target, None);
-        g.add_edge(names.get("wide.5").unwrap(), names.get("narrow.0").unwrap(), EdgeKind::Query);
+        g.add_edge(
+            names.get("wide.5").unwrap(),
+            names.get("narrow.0").unwrap(),
+            EdgeKind::Query,
+        );
         (g, names)
     }
 
@@ -538,12 +587,17 @@ mod tests {
     }
 
     fn drawn_pairs<'a>(view: &LaidOut, names: &'a Names) -> HashSet<(&'a str, &'a str)> {
-        view.connectors.iter().map(|c| (names.resolve(c.from), names.resolve(c.to))).collect()
+        view.connectors
+            .iter()
+            .map(|c| (names.resolve(c.from), names.resolve(c.to)))
+            .collect()
     }
 
     /// The first level drawing `child`, so the one at which its container opens.
     fn opens_at(map: &MapLayout, names: &Names, child: &str) -> usize {
-        (0..map.level_count()).find(|&i| box_of(map.level(i), names, child).is_some()).unwrap()
+        (0..map.level_count())
+            .find(|&i| box_of(map.level(i), names, child).is_some())
+            .unwrap()
     }
 
     #[test]
@@ -555,7 +609,10 @@ mod tests {
                 .map(|b| (b.x.to_bits(), b.y.to_bits()))
                 .collect();
             assert!(!placed.is_empty(), "{id} is drawn on no level");
-            assert!(placed.iter().all(|p| *p == placed[0]), "{id} moves between levels");
+            assert!(
+                placed.iter().all(|p| *p == placed[0]),
+                "{id} moves between levels"
+            );
         }
     }
 
@@ -564,7 +621,10 @@ mod tests {
         let (map, names) = built();
         let coarsest = map.level(0);
         let drawn: HashSet<&str> = coarsest.boxes.iter().map(|b| names.resolve(b.id)).collect();
-        assert_eq!(drawn, ["wide", "mid", "narrow", "lone"].into_iter().collect());
+        assert_eq!(
+            drawn,
+            ["wide", "mid", "narrow", "lone"].into_iter().collect()
+        );
         // Zoomed out far enough that nothing is legible, that is the view served.
         for scale in [0.0, 1e-9, 1e-4] {
             assert_eq!(map.level_for_scale(scale), 0);
@@ -589,11 +649,18 @@ mod tests {
         let (map, names) = built();
         let drawn = |i: usize| -> HashSet<Id> { map.level(i).boxes.iter().map(|b| b.id).collect() };
         for i in 1..map.level_count() {
-            assert!(drawn(i - 1).is_subset(&drawn(i)), "level {i} drops a box level {} drew", i - 1);
+            assert!(
+                drawn(i - 1).is_subset(&drawn(i)),
+                "level {i} drops a box level {} drew",
+                i - 1
+            );
         }
         let finest = map.level(map.level_count() - 1);
         for leaf in ["wide.0", "wide.5", "mid.2", "narrow.1", "lone"] {
-            assert!(box_of(finest, &names, leaf).is_some(), "{leaf} is missing at full zoom");
+            assert!(
+                box_of(finest, &names, leaf).is_some(),
+                "{leaf} is missing at full zoom"
+            );
         }
     }
 
@@ -718,7 +785,11 @@ mod tests {
             .find(|v| v.boxes.iter().any(|b| b.id == id))
             .unwrap();
         let inner = view.boxes.iter().find(|b| b.id == id).unwrap();
-        let connector = view.connectors.iter().find(|c| c.from == outer && c.to == id).unwrap();
+        let connector = view
+            .connectors
+            .iter()
+            .find(|c| c.from == outer && c.to == id)
+            .unwrap();
 
         let strictly_inside = |(x, y): (f64, f64)| {
             let slack = 1e-6;
@@ -731,8 +802,14 @@ mod tests {
             let (start, end) = (leg[0], leg[1]);
             for step in 0..=100 {
                 let t = step as f64 / 100.0;
-                let at = (start.0 + t * (end.0 - start.0), start.1 + t * (end.1 - start.1));
-                assert!(!strictly_inside(at), "the connector crosses the box it points at");
+                let at = (
+                    start.0 + t * (end.0 - start.0),
+                    start.1 + t * (end.1 - start.1),
+                );
+                assert!(
+                    !strictly_inside(at),
+                    "the connector crosses the box it points at"
+                );
             }
         }
     }
@@ -750,46 +827,101 @@ mod tests {
     /// Each leg of a route runs along one axis, so the whole route is
     /// rectilinear.
     fn axis_aligned(points: &[(f64, f64)]) -> bool {
-        points.windows(2).all(|leg| leg[0].0 == leg[1].0 || leg[0].1 == leg[1].1)
+        points
+            .windows(2)
+            .all(|leg| leg[0].0 == leg[1].0 || leg[0].1 == leg[1].1)
     }
 
     #[test]
     fn a_route_leaves_and_enters_the_facing_borders_along_the_axes() {
-        let above = Placed { x: 0.0, y: 0.0, width: 100.0, height: 20.0 };
-        let below = Placed { x: 300.0, y: 200.0, width: 60.0, height: 40.0 };
-        let beside = Placed { x: 400.0, y: 0.0, width: 40.0, height: 60.0 };
+        let above = Placed {
+            x: 0.0,
+            y: 0.0,
+            width: 100.0,
+            height: 20.0,
+        };
+        let below = Placed {
+            x: 300.0,
+            y: 200.0,
+            width: 60.0,
+            height: 40.0,
+        };
+        let beside = Placed {
+            x: 400.0,
+            y: 0.0,
+            width: 40.0,
+            height: 60.0,
+        };
 
         let down = route(&above, &below);
         assert!(axis_aligned(&down), "{down:?}");
         assert_eq!(down[0], (50.0, 20.0), "leaves the source's bottom border");
-        assert_eq!(*down.last().unwrap(), (330.0, 200.0), "enters the target's top border");
-        assert!(down[1..3].iter().all(|p| p.1 == 110.0), "jogs across between the two: {down:?}");
+        assert_eq!(
+            *down.last().unwrap(),
+            (330.0, 200.0),
+            "enters the target's top border"
+        );
+        assert!(
+            down[1..3].iter().all(|p| p.1 == 110.0),
+            "jogs across between the two: {down:?}"
+        );
 
         let up = route(&below, &above);
         assert!(axis_aligned(&up), "{up:?}");
         assert_eq!(up[0], (330.0, 200.0), "leaves the source's top border");
-        assert_eq!(*up.last().unwrap(), (50.0, 20.0), "enters the target's bottom border");
+        assert_eq!(
+            *up.last().unwrap(),
+            (50.0, 20.0),
+            "enters the target's bottom border"
+        );
 
         // Overlapping rows leave no vertical gap, so the route runs sideways.
         let across = route(&above, &beside);
         assert!(axis_aligned(&across), "{across:?}");
         assert_eq!(across[0], (100.0, 10.0), "leaves the source's right border");
-        assert_eq!(*across.last().unwrap(), (400.0, 30.0), "enters the target's left border");
+        assert_eq!(
+            *across.last().unwrap(),
+            (400.0, 30.0),
+            "enters the target's left border"
+        );
     }
 
     #[test]
     fn boxes_facing_each_other_head_on_take_one_leg() {
-        let above = Placed { x: 0.0, y: 0.0, width: 100.0, height: 20.0 };
-        let below = Placed { x: 20.0, y: 200.0, width: 60.0, height: 40.0 };
+        let above = Placed {
+            x: 0.0,
+            y: 0.0,
+            width: 100.0,
+            height: 20.0,
+        };
+        let below = Placed {
+            x: 20.0,
+            y: 200.0,
+            width: 60.0,
+            height: 40.0,
+        };
         assert_eq!(route(&above, &below), vec![(50.0, 20.0), (50.0, 200.0)]);
     }
 
     #[test]
     fn boxes_sharing_a_center_still_get_a_segment() {
-        let square = Placed { x: 0.0, y: 0.0, width: 100.0, height: 100.0 };
-        let inside = Placed { x: 40.0, y: 40.0, width: 20.0, height: 20.0 };
+        let square = Placed {
+            x: 0.0,
+            y: 0.0,
+            width: 100.0,
+            height: 100.0,
+        };
+        let inside = Placed {
+            x: 40.0,
+            y: 40.0,
+            width: 20.0,
+            height: 20.0,
+        };
         let points = route(&square, &inside);
-        assert!(points.iter().all(|p| p.0.is_finite() && p.1.is_finite()), "{points:?}");
+        assert!(
+            points.iter().all(|p| p.0.is_finite() && p.1.is_finite()),
+            "{points:?}"
+        );
         assert_ne!(points[0], *points.last().unwrap());
     }
 
@@ -813,7 +945,10 @@ mod tests {
         let outer = finest.boxes.iter().find(|b| b.id == root).unwrap();
         for kid in [first, second] {
             let inner = finest.boxes.iter().find(|b| b.id == kid).unwrap();
-            assert!(inner.x >= outer.x && inner.y >= outer.y, "a child sits outside its container");
+            assert!(
+                inner.x >= outer.x && inner.y >= outer.y,
+                "a child sits outside its container"
+            );
         }
     }
 }

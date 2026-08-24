@@ -8,7 +8,7 @@ pub use registry::{ThemeRegistry, built_in_themes, init, theme};
 pub use schema::ThemeFamilyContent;
 pub use theme::{Appearance, DataColors, TerminalColors, Theme, ThemeColors};
 
-use gpui::{hsla, Hsla, Rgba};
+use gpui::{Hsla, Rgba, hsla};
 use std::f32::consts::TAU;
 
 /// Linearly blend `a` toward `b` by `t` in [0, 1].
@@ -78,9 +78,7 @@ pub fn distance(a: impl Into<Rgba>, b: impl Into<Rgba>) -> f32 {
     let (a, b) = (a.into(), b.into());
     let mean_red = (a.r + b.r) / 2.0;
     let (dr, dg, db) = (a.r - b.r, a.g - b.g, a.b - b.b);
-    255.0
-        * ((2.0 + mean_red) * dr * dr + 4.0 * dg * dg + (3.0 - mean_red) * db * db)
-            .sqrt()
+    255.0 * ((2.0 + mean_red) * dr * dr + 4.0 * dg * dg + (3.0 - mean_red) * db * db).sqrt()
 }
 
 /// The smallest distance at which two fills shown side by side still read as
@@ -113,12 +111,20 @@ fn relative_luminance(c: impl Into<Rgba>) -> f32 {
 /// The light the gamma-encoded sRGB channel `u` stands for: the transfer
 /// function of IEC 61966-2-1, which [`from_linear`] undoes.
 fn to_linear(u: f32) -> f32 {
-    if u <= 0.04045 { u / 12.92 } else { ((u + 0.055) / 1.055).powf(2.4) }
+    if u <= 0.04045 {
+        u / 12.92
+    } else {
+        ((u + 0.055) / 1.055).powf(2.4)
+    }
 }
 
 /// The gamma-encoded sRGB channel standing for the linear-light value `u`.
 fn from_linear(u: f32) -> f32 {
-    if u <= 0.003_130_8 { 12.92 * u } else { 1.055 * u.max(0.0).powf(1.0 / 2.4) - 0.055 }
+    if u <= 0.003_130_8 {
+        12.92 * u
+    } else {
+        1.055 * u.max(0.0).powf(1.0 / 2.4) - 0.055
+    }
 }
 
 /// A color in the polar form of the Oklab space Björn Ottosson gives in "A
@@ -140,7 +146,11 @@ pub struct Oklch {
 /// `color` in [`Oklch`].
 pub fn oklch(color: impl Into<Rgba>) -> Oklch {
     let (l, a, b) = oklab(color.into());
-    Oklch { lightness: l, chroma: a.hypot(b), hue: b.atan2(a).rem_euclid(TAU) / TAU }
+    Oklch {
+        lightness: l,
+        chroma: a.hypot(b),
+        hue: b.atan2(a).rem_euclid(TAU) / TAU,
+    }
 }
 
 /// `color` carried `step` along the lightness of [`Oklch`] — toward white for a
@@ -155,7 +165,10 @@ pub fn lighten(color: impl Into<Rgba>, step: f32) -> Rgba {
     let (mut held, mut beyond) = (0.0, 1.0);
     for _ in 0..GAMUT_HALVINGS {
         let part = (held + beyond) / 2.0;
-        match oklab_to_linear(l, a * part, b * part).iter().all(displayable) {
+        match oklab_to_linear(l, a * part, b * part)
+            .iter()
+            .all(displayable)
+        {
             true => held = part,
             false => beyond = part,
         }
@@ -230,7 +243,11 @@ pub fn opaque(color: Hsla) -> Hsla {
 pub fn label_on(fill: impl Into<Rgba>) -> Hsla {
     let fill = fill.into();
     let (black, white) = (hsla(0.0, 0.0, 0.0, 1.0), hsla(0.0, 0.0, 1.0, 1.0));
-    if contrast_ratio(white, fill) > contrast_ratio(black, fill) { white } else { black }
+    if contrast_ratio(white, fill) > contrast_ratio(black, fill) {
+        white
+    } else {
+        black
+    }
 }
 
 /// A stable hue in [0, 1) for `s`: FNV-1a over the bytes folded onto the wheel.
@@ -258,8 +275,14 @@ mod tests {
 
     /// Colors spanning the wheel and the lightness range, each written the way a
     /// theme file writes one and each carrying a hue of its own.
-    const HUED: [&str; 6] =
-        ["#73ade9ff", "#6eb4bfff", "#bf956aff", "#a1c181ff", "#b477cfff", "#282c33ff"];
+    const HUED: [&str; 6] = [
+        "#73ade9ff",
+        "#6eb4bfff",
+        "#bf956aff",
+        "#a1c181ff",
+        "#b477cfff",
+        "#282c33ff",
+    ];
 
     /// Colors carrying no hue, at both ends of the lightness range and between
     /// them, for which a lift has nothing to hold but the lightness.
@@ -339,11 +362,17 @@ mod tests {
     fn a_lift_parts_with_only_the_chroma_the_gamut_takes() {
         let vivid = sample("#0000ffff");
         let held = oklch(lighten(vivid, 0.25));
-        assert!(held.chroma < oklch(vivid).chroma, "a lightened pure blue keeps all its chroma");
+        assert!(
+            held.chroma < oklch(vivid).chroma,
+            "a lightened pure blue keeps all its chroma"
+        );
         let angle = held.hue * TAU;
         let asking = held.chroma * (1.0 + 2.0 * COORDINATE_SLACK);
         let linear = oklab_to_linear(held.lightness, asking * angle.cos(), asking * angle.sin());
-        assert!(!linear.iter().all(displayable), "there was chroma left to keep: {linear:?}");
+        assert!(
+            !linear.iter().all(displayable),
+            "there was chroma left to keep: {linear:?}"
+        );
     }
 
     /// A step past the end of the lightness range leaves nothing of a color but
@@ -354,7 +383,10 @@ mod tests {
             for (step, end) in [(1.0, 1.0), (-1.0, 0.0)] {
                 let lifted = lighten(sample(hex), step);
                 for channel in [lifted.r, lifted.g, lifted.b] {
-                    assert!((channel - end).abs() < CHANNEL_SLACK, "{hex} by {step}: {channel}");
+                    assert!(
+                        (channel - end).abs() < CHANNEL_SLACK,
+                        "{hex} by {step}: {channel}"
+                    );
                 }
             }
         }
@@ -364,7 +396,10 @@ mod tests {
     /// of what color the paint is, so a lift leaves it alone.
     #[test]
     fn a_lift_leaves_the_opacity_alone() {
-        let translucent = Rgba { a: 0.4, ..sample("#73ade9ff") };
+        let translucent = Rgba {
+            a: 0.4,
+            ..sample("#73ade9ff")
+        };
         assert_eq!(lighten(translucent, 0.2).a, translucent.a);
     }
 }

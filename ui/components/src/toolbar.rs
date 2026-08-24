@@ -13,7 +13,10 @@ pub struct Toolbar {
 
 impl Toolbar {
     pub fn new() -> Self {
-        Self { leading: Vec::new(), trailing: Vec::new() }
+        Self {
+            leading: Vec::new(),
+            trailing: Vec::new(),
+        }
     }
 
     /// Add to the group held against the left edge.
@@ -51,5 +54,10 @@ impl RenderOnce for Toolbar {
 }
 
 fn group(items: Vec<AnyElement>) -> Div {
-    div().flex().flex_row().items_center().gap_2().children(items)
+    div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap_2()
+        .children(items)
 }

@@ -15,12 +15,12 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 
 use bazel_query_proto::analysis::{ConfiguredTarget, CqueryResult};
-use bazel_query_proto::blaze_query::target::Discriminator;
 use bazel_query_proto::blaze_query::Rule;
+use bazel_query_proto::blaze_query::target::Discriminator;
 
 use crate::graph::{EdgeKind, Graph, Kind};
 use crate::intern::{Id, Names};
-use crate::label::{self, label_and_kind, PackageHierarchy};
+use crate::label::{self, PackageHierarchy, label_and_kind};
 use crate::query;
 
 #[cfg(test)]
@@ -218,7 +218,10 @@ fn wire_edges(b: &mut Builder, cts: &[&ConfiguredTarget], index: &NodeIndex) {
         let Some(target) = ct.target.as_ref() else {
             continue;
         };
-        if !matches!(Discriminator::try_from(target.r#type), Ok(Discriminator::Rule)) {
+        if !matches!(
+            Discriminator::try_from(target.r#type),
+            Ok(Discriminator::Rule)
+        ) {
             continue;
         }
         let Some(rule) = target.rule.as_ref() else {
@@ -270,7 +273,11 @@ impl Edges<'_, '_> {
         match dep_config {
             Some(config_id) if config_id != 0 => {
                 let key = self.b.config_key(config_id);
-                if self.index.ct_ids.contains(&(dep_label.to_string(), key.clone())) {
+                if self
+                    .index
+                    .ct_ids
+                    .contains(&(dep_label.to_string(), key.clone()))
+                {
                     Some(self.b.names.intern(&label::ct_node_id(dep_label, &key)))
                 } else {
                     self.index.target_box.get(dep_label).copied()
@@ -393,8 +400,14 @@ mod tests {
         let ct1 = find(&graph, &names, "ct://foo:app#ck1");
         assert_eq!(ct1.kind, Kind::ConfiguredTarget);
         assert_eq!(ct1.label, "k8-fastbuild");
-        assert_eq!(ct1.parent.map(|p| names.resolve(p)), Some("target://foo:app"));
-        assert_eq!(find(&graph, &names, "ct://foo:app#ck2").label, "local_gnu-opt-exec");
+        assert_eq!(
+            ct1.parent.map(|p| names.resolve(p)),
+            Some("target://foo:app")
+        );
+        assert_eq!(
+            find(&graph, &names, "ct://foo:app#ck2").label,
+            "local_gnu-opt-exec"
+        );
     }
 
     #[test]
@@ -453,7 +466,12 @@ mod tests {
             vec![config(1, "target")],
         )]);
 
-        assert!(!graph.nodes.iter().any(|n| names.resolve(n.id) == "ct://foo:lib#cfg2"));
+        assert!(
+            !graph
+                .nodes
+                .iter()
+                .any(|n| names.resolve(n.id) == "ct://foo:lib#cfg2")
+        );
         assert!(edges(&graph, &names).contains(&("target://foo:lib", "ct://foo:app#ck1")));
     }
 

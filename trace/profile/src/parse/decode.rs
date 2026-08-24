@@ -3,7 +3,7 @@ use std::io::{Read, Seek, SeekFrom};
 
 use flate2::read::MultiGzDecoder;
 
-use super::{timed, GZIP_MAGIC, LoadError};
+use super::{GZIP_MAGIC, LoadError, timed};
 
 pub(crate) fn decode(bytes: &[u8]) -> Result<String, LoadError> {
     let raw = if bytes.starts_with(&GZIP_MAGIC) {
@@ -66,7 +66,10 @@ pub(crate) fn gzip_isize_from_file(file: &mut std::fs::File) -> std::io::Result<
     if file.metadata().map_or(0, |m| m.len()) < GZIP_FRAMING_MIN as u64 {
         return Ok(None);
     }
-    if file.seek(SeekFrom::End(-(GZIP_ISIZE_BYTES as i64))).is_err() {
+    if file
+        .seek(SeekFrom::End(-(GZIP_ISIZE_BYTES as i64)))
+        .is_err()
+    {
         return Ok(None);
     }
     let mut trailer = [0u8; GZIP_ISIZE_BYTES];

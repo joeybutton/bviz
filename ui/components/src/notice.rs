@@ -46,7 +46,12 @@ pub fn centered_spinner(label: impl Into<SharedString>, colors: &ThemeColors) ->
         .items_center()
         .gap_3()
         .child(spinner("spinner", px(36.), colors.text))
-        .child(div().text_sm().text_color(colors.text_muted).child(label.into()))
+        .child(
+            div()
+                .text_sm()
+                .text_color(colors.text_muted)
+                .child(label.into()),
+        )
 }
 
 /// Shown in place of a document that could not be loaded, as the body of the view

@@ -177,7 +177,11 @@ mod tests {
             let (fg, bg) = (theme.colors.text, theme.colors.background);
             let faint = mix(fg, bg, DIM_PULL);
             let contrast = contrast_ratio(faint, bg);
-            assert!(contrast >= MIN_TEXT_CONTRAST, "{}: {contrast}:1", theme.name);
+            assert!(
+                contrast >= MIN_TEXT_CONTRAST,
+                "{}: {contrast}:1",
+                theme.name
+            );
             let step = level_step(faint, fg);
             assert!(step >= MIN_VISIBLE_STEP, "{}: {step} levels", theme.name);
         }

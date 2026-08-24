@@ -60,7 +60,9 @@ fn evicting(sel: &TimeSelection) -> TimeSelection {
 fn main() {
     bviz_alloc::retain_freed_memory_across_load();
     bviz_trace_layout::init_thread_pool();
-    let path = std::env::args().nth(1).expect("usage: bench_tracks <profile>");
+    let path = std::env::args()
+        .nth(1)
+        .expect("usage: bench_tracks <profile>");
     let iters = std::env::var("BVIZ_BENCH_ITERS")
         .ok()
         .and_then(|s| s.parse().ok())
@@ -129,7 +131,10 @@ fn main() {
     let all_inverted = min_secs(iters, || {
         std::hint::black_box(ScopeAggregate::build_for_tracks_reusing(
             &scan,
-            FlameMode { direction: FlameDirection::BottomUp, ..mode },
+            FlameMode {
+                direction: FlameDirection::BottomUp,
+                ..mode
+            },
             &window,
             |i| threads[i].lane_class != LaneClass::CriticalPath,
         ));
@@ -137,7 +142,10 @@ fn main() {
 
     let bottom_up_agg = ScopeAggregate::build_for_tracks_reusing(
         &scan,
-        FlameMode { direction: FlameDirection::BottomUp, ..mode },
+        FlameMode {
+            direction: FlameDirection::BottomUp,
+            ..mode
+        },
         &window,
         |i| threads[i].lane_class != LaneClass::CriticalPath,
     );

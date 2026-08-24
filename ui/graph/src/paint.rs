@@ -1,8 +1,8 @@
-use crate::camera::{to_screen, visible_rect, Camera, Rect};
-use crate::neighborhood::{compute_neighborhood, Neighborhood};
+use crate::camera::{Camera, Rect, to_screen, visible_rect};
 use crate::drag::track_gesture;
 use crate::model::{Drawn, Expandable};
 use crate::morph::Frame;
+use crate::neighborhood::{Neighborhood, compute_neighborhood};
 use crate::scroll::paint_scrollbars;
 use crate::{GraphView, Palette};
 use bviz_graph_layout::layout::{CARET_RESERVE, LABEL_BAND};
@@ -127,14 +127,24 @@ pub(crate) fn canvas_body(
             .iter()
             .map(|b| {
                 let (rect, alpha) = morph.as_ref().map_or((Rect::of(b), 1.0), |m| m.place(b));
-                Placed { b, rect, alpha, leaving: false }
+                Placed {
+                    b,
+                    rect,
+                    alpha,
+                    leaving: false,
+                }
             })
-            .chain(morph.iter().flat_map(Frame::leaving).map(|(b, rect, alpha)| Placed {
-                b,
-                rect,
-                alpha,
-                leaving: true,
-            }))
+            .chain(
+                morph
+                    .iter()
+                    .flat_map(Frame::leaving)
+                    .map(|(b, rect, alpha)| Placed {
+                        b,
+                        rect,
+                        alpha,
+                        leaving: true,
+                    }),
+            )
             .filter(|p| visible.overlaps(&p.rect))
             .map(|p| {
                 let b = PaintBox::of(&p, &scene, &neighborhood);
@@ -145,7 +155,11 @@ pub(crate) fn canvas_body(
             .collect();
         let edges = morph.as_ref().map_or(1.0, |m| m.connectors);
         if edges > 0.0 {
-            for c in g.connectors.iter().filter(|c| visible.crossed_by(&c.points)) {
+            for c in g
+                .connectors
+                .iter()
+                .filter(|c| visible.crossed_by(&c.points))
+            {
                 let marked = neighborhood.edges.contains(&(c.from, c.to));
                 paint_lanes(c, marked, edges, bounds, camera, &scene.palette, window);
             }
@@ -153,12 +167,25 @@ pub(crate) fn canvas_body(
         let mut floated: Vec<Bounds<Pixels>> = Vec::new();
         let mut titles: Vec<TitleTarget> = Vec::new();
         for (b, rect) in &drawn {
-            let target =
-                paint_box_label(b, *rect, camera.zoom, &scene.palette, &mut floated, window, cx);
+            let target = paint_box_label(
+                b,
+                *rect,
+                camera.zoom,
+                &scene.palette,
+                &mut floated,
+                window,
+                cx,
+            );
             titles.extend(target);
         }
         entity.update(cx, |view, _| view.titles = titles);
-        paint_scrollbars(bounds, scene.drawn.content(), camera, &scene.palette, window);
+        paint_scrollbars(
+            bounds,
+            scene.drawn.content(),
+            camera,
+            &scene.palette,
+            window,
+        );
         track_gesture(&entity, window, cx);
     }
 }
@@ -166,7 +193,10 @@ pub(crate) fn canvas_body(
 /// `c` at `alpha` of its own opacity, by which a box a morph is fading in or out
 /// takes its whole appearance — fill, border, label — down together.
 fn faded(c: Rgba, alpha: f32) -> Rgba {
-    Rgba { a: c.a * alpha, ..c }
+    Rgba {
+        a: c.a * alpha,
+        ..c
+    }
 }
 
 impl Palette {
@@ -230,7 +260,10 @@ impl Palette {
     /// The wash a marked box's fill is painted over, at `strength` of the full
     /// mark.
     fn highlight_wash(&self, strength: f32) -> Rgba {
-        Rgba { a: HIGHLIGHT_WASH * strength, ..self.highlight }
+        Rgba {
+            a: HIGHLIGHT_WASH * strength,
+            ..self.highlight
+        }
     }
 }
 
@@ -367,7 +400,14 @@ fn paint_box(
 ) {
     let corner = px(6. * zoom);
     let ((border_w, border_c), mark) = box_emphasis(b, zoom, palette, rect, corner);
-    window.paint_quad(quad(rect, corner, b.fill, border_w, border_c, BorderStyle::Solid));
+    window.paint_quad(quad(
+        rect,
+        corner,
+        b.fill,
+        border_w,
+        border_c,
+        BorderStyle::Solid,
+    ));
     mark(window);
 }
 
@@ -385,8 +425,14 @@ fn box_emphasis(
     let (border_w, border_c) = if b.highlight > 0.0 {
         let normal = px(1.);
         let thick = px((2. * zoom).max(2.));
-        let accent = Rgba { a: b.highlight, ..palette.highlight };
-        (normal + (thick - normal) * b.highlight, Hsla::from(faded(accent, b.alpha)))
+        let accent = Rgba {
+            a: b.highlight,
+            ..palette.highlight
+        };
+        (
+            normal + (thick - normal) * b.highlight,
+            Hsla::from(faded(accent, b.alpha)),
+        )
     } else {
         (px(1.), Hsla::from(faded(palette.border, b.alpha)))
     };
@@ -443,9 +489,17 @@ impl LabelPlacement {
             true => (LABEL_PAD, true),
             false => ((h - size) / 2., false),
         };
-        let caret = b.expandable.then(|| size * (CARET_RESERVE / LABEL_SIZE) as f32);
+        let caret = b
+            .expandable
+            .then(|| size * (CARET_RESERVE / LABEL_SIZE) as f32);
         let avail = w - 2. * LABEL_PAD - caret.unwrap_or(0.);
-        (avail >= LABEL_MIN_WIDTH).then_some(LabelPlacement { size, top, caret, avail, floats })
+        (avail >= LABEL_MIN_WIDTH).then_some(LabelPlacement {
+            size,
+            top,
+            caret,
+            avail,
+            floats,
+        })
     }
 
     /// Width the caret takes out of the plate, zero where the box carries none.
@@ -459,7 +513,10 @@ impl LabelPlacement {
         let unit = self.reserved() + text;
         let left = f32::from(rect.origin.x) + (f32::from(rect.size.width) - unit) / 2.;
         Bounds::new(
-            point(px(left - LABEL_PAD), px(f32::from(rect.origin.y) + self.top - LABEL_PAD)),
+            point(
+                px(left - LABEL_PAD),
+                px(f32::from(rect.origin.y) + self.top - LABEL_PAD),
+            ),
             size(px(unit + 2. * LABEL_PAD), px(self.size + 2. * LABEL_PAD)),
         )
     }
@@ -467,7 +524,10 @@ impl LabelPlacement {
     /// Where the caret sits in `plate`: its left edge, at the label's vertical
     /// center.
     fn caret_at(&self, plate: Bounds<Pixels>) -> Point<Pixels> {
-        point(plate.origin.x + px(LABEL_PAD), plate.origin.y + px(LABEL_PAD + self.size / 2.))
+        point(
+            plate.origin.x + px(LABEL_PAD),
+            plate.origin.y + px(LABEL_PAD + self.size / 2.),
+        )
     }
 
     /// The handle box `id`'s label is, once drawn on `plate`; `None` for a box
@@ -544,7 +604,14 @@ fn paint_box_label(
     if let Some(caret) = placement.caret {
         // Phosphor icons render as `svg()` elements, which cannot be painted
         // inside this canvas, so the caret is a small filled triangle.
-        paint_caret(placement.caret_at(plate), px(caret), px(fs), b.compound, label_color, window);
+        paint_caret(
+            placement.caret_at(plate),
+            px(caret),
+            px(fs),
+            b.compound,
+            label_color,
+            window,
+        );
     }
     placement.title(plate, b.id)
 }
@@ -798,7 +865,12 @@ mod tests {
             .iter()
             .map(|b| {
                 let (rect, alpha) = morph.map_or((Rect::of(b), 1.0), |m| m.place(b));
-                Placed { b, rect, alpha, leaving: false }
+                Placed {
+                    b,
+                    rect,
+                    alpha,
+                    leaving: false,
+                }
             })
             .collect()
     }
@@ -880,7 +952,10 @@ mod tests {
         let g = covered_container();
         let (mut floating, mut banded, mut covered) = (0, 0, 0);
         for zoom in ZOOMS {
-            let camera = Camera { zoom, pan: (0.0, 0.0) };
+            let camera = Camera {
+                zoom,
+                pan: (0.0, 0.0),
+            };
             let (titles, carets) = drawn_titles(&placed(&g, None), expandable, viewport(), camera);
             for caret in carets {
                 let DrawnCaret { id, at, floats } = caret;
@@ -902,13 +977,17 @@ mod tests {
                     "zoom {zoom}: the caret drawn for {id:?} toggles nothing"
                 );
                 let (gx, gy) = from_screen(at, viewport().origin, camera);
-                covered += (crate::hit_box(&g.boxes, None, gx, gy).map(|b| b.id) != Some(id)) as u32;
+                covered +=
+                    (crate::hit_box(&g.boxes, None, gx, gy).map(|b| b.id) != Some(id)) as u32;
             }
         }
         assert!(floating > 0, "no zoom floated a title out of its band");
         assert!(banded > 0, "no zoom left a title in its band");
-        assert!(covered > 0, "no caret fell on a box other than its own, so the boxes alone \
-            would have resolved every gesture and the case this pins never arose");
+        assert!(
+            covered > 0,
+            "no caret fell on a box other than its own, so the boxes alone \
+            would have resolved every gesture and the case this pins never arose"
+        );
     }
 
     /// How far a relayout slides [`covered_container`] for the mid-morph frame:
@@ -930,7 +1009,10 @@ mod tests {
 
         let (mut floating, mut covered) = (0, 0);
         for zoom in ZOOMS {
-            let camera = Camera { zoom, pan: (0.0, 0.0) };
+            let camera = Camera {
+                zoom,
+                pan: (0.0, 0.0),
+            };
             let boxes = placed(&g, Some(&frame));
             let (titles, carets) = drawn_titles(&boxes, &expandable, viewport(), camera);
             for DrawnCaret { id, at, floats } in carets {
@@ -941,14 +1023,16 @@ mod tests {
                     "zoom {zoom}: the caret a morph drew for {id:?} resolves to another box"
                 );
                 let (gx, gy) = from_screen(at, viewport().origin, camera);
-                covered +=
-                    (crate::hit_box(&g.boxes, Some(&frame), gx, gy).map(|b| b.id) != Some(id))
-                        as u32;
+                covered += (crate::hit_box(&g.boxes, Some(&frame), gx, gy).map(|b| b.id)
+                    != Some(id)) as u32;
             }
         }
         assert!(floating > 0, "no zoom floated a title out of its band");
-        assert!(covered > 0, "no caret fell on a box other than its own, so the boxes alone \
-            would have resolved every gesture and the case this pins never arose");
+        assert!(
+            covered > 0,
+            "no caret fell on a box other than its own, so the boxes alone \
+            would have resolved every gesture and the case this pins never arose"
+        );
     }
 
     #[test]
@@ -956,7 +1040,12 @@ mod tests {
         let g = covered_container();
         let expandable = Expandable::Containers(Arc::new(HashSet::from([Id(0)])));
         let b = &g.boxes[0];
-        let held = |leaving| Placed { b, rect: Rect::of(b), alpha: 1.0, leaving };
+        let held = |leaving| Placed {
+            b,
+            rect: Rect::of(b),
+            alpha: 1.0,
+            leaving,
+        };
         assert!(
             held(false).expandable(&expandable),
             "the container the layout opens and closes carries no caret",
@@ -989,7 +1078,17 @@ mod tests {
             boxes: g
                 .boxes
                 .iter()
-                .map(|b| lbox(b.id.0, &b.label, b.x + dx, b.y, b.width, b.height, b.compound))
+                .map(|b| {
+                    lbox(
+                        b.id.0,
+                        &b.label,
+                        b.x + dx,
+                        b.y,
+                        b.width,
+                        b.height,
+                        b.compound,
+                    )
+                })
                 .collect(),
             ..Default::default()
         }
@@ -999,7 +1098,10 @@ mod tests {
     fn a_title_the_layout_has_moved_out_from_under_resolves_to_the_box_now_there() {
         let g = side_by_side();
         let expandable = Expandable::Containers(Arc::new(HashSet::from([Id(0), Id(1)])));
-        let camera = Camera { zoom: 0.2, pan: (0.0, 0.0) };
+        let camera = Camera {
+            zoom: 0.2,
+            pan: (0.0, 0.0),
+        };
         let (titles, carets) = drawn_titles(&placed(&g, None), &expandable, viewport(), camera);
         let left = carets.iter().find(|c| c.id == Id(0));
         let at = left.expect("the left container drew no title").at;
@@ -1098,10 +1200,16 @@ mod colors {
             for (i, kind) in ACCENTED_KINDS.iter().enumerate() {
                 let fill = p.leaf_fill(*kind);
                 let over_canvas = distance(fill, p.background);
-                assert!(over_canvas >= MIN_DISTINCT_COLOR, "{theme} {kind:?}: {over_canvas}");
+                assert!(
+                    over_canvas >= MIN_DISTINCT_COLOR,
+                    "{theme} {kind:?}: {over_canvas}"
+                );
                 for other in &ACCENTED_KINDS[i + 1..] {
                     let apart = distance(fill, p.leaf_fill(*other));
-                    assert!(apart >= MIN_DISTINCT_COLOR, "{theme} {kind:?}/{other:?}: {apart}");
+                    assert!(
+                        apart >= MIN_DISTINCT_COLOR,
+                        "{theme} {kind:?}/{other:?}: {apart}"
+                    );
                 }
             }
         }
@@ -1238,9 +1346,11 @@ mod colors {
             let against = box_fills(&p)
                 .into_iter()
                 .chain([p.background, p.border])
-                .chain(EDGE_KINDS.iter().flat_map(|kind| {
-                    [p.edge_color(*kind, false), p.edge_color(*kind, true)]
-                }));
+                .chain(
+                    EDGE_KINDS
+                        .iter()
+                        .flat_map(|kind| [p.edge_color(*kind, false), p.edge_color(*kind, true)]),
+                );
             for color in against {
                 let apart = distance(p.highlight, color);
                 assert!(apart >= MIN_DISTINCT_COLOR, "{theme}: {apart}");
@@ -1275,7 +1385,10 @@ mod colors {
             let off_canvas = level_step(plain, p.background);
             assert!(off_canvas >= MIN_EDGED_STEP, "{theme}: {off_canvas} levels");
             let off_container = level_step(p.container_fill(Kind::Package), plain);
-            assert!(off_container >= MIN_EDGED_STEP, "{theme}: {off_container} levels");
+            assert!(
+                off_container >= MIN_EDGED_STEP,
+                "{theme}: {off_container} levels"
+            );
         }
     }
 
@@ -1306,6 +1419,3 @@ mod colors {
         }
     }
 }
-
-
-

@@ -7,9 +7,9 @@ use alacritty_terminal::event::VoidListener;
 use alacritty_terminal::grid::{Dimensions, Scroll};
 use alacritty_terminal::index::{Column, Direction, Line, Point, Side};
 use alacritty_terminal::selection::{Selection, SelectionType};
+use alacritty_terminal::term::Term;
 use alacritty_terminal::term::cell::Cell;
 use alacritty_terminal::term::search::{Match, RegexIter, RegexSearch};
-use alacritty_terminal::term::Term;
 
 /// URLs to detect in the terminal text, by scheme. Mirrors the set Zed's
 /// terminal recognizes; the body excludes control characters, whitespace, and
@@ -326,7 +326,11 @@ mod tests {
         let output = BuildOutput::from_bytes(40, b"alpha\nbeta\ngamma\n".to_vec());
         let mut terminal = Terminal::new(&output, 40, 10);
         // Select "lph": from the left of column 1 to the right of column 3.
-        terminal.begin_selection(SelectionType::Simple, CellPos { column: 1, row: 0 }, Side::Left);
+        terminal.begin_selection(
+            SelectionType::Simple,
+            CellPos { column: 1, row: 0 },
+            Side::Left,
+        );
         terminal.extend_selection(CellPos { column: 3, row: 0 }, Side::Right);
         assert_eq!(terminal.selection_text().as_deref(), Some("lph"));
         let spans = terminal.selection_spans();
@@ -343,7 +347,11 @@ mod tests {
         // Select "beta" on the second line of an early frame.
         let early = BuildOutput::from_bytes(40, b"alpha\nbeta\ngamma\n".to_vec());
         let mut terminal = Terminal::new(&early, 40, 10);
-        terminal.begin_selection(SelectionType::Simple, CellPos { column: 0, row: 1 }, Side::Left);
+        terminal.begin_selection(
+            SelectionType::Simple,
+            CellPos { column: 0, row: 1 },
+            Side::Left,
+        );
         terminal.extend_selection(CellPos { column: 3, row: 1 }, Side::Right);
         assert_eq!(terminal.selection_text().as_deref(), Some("beta"));
         let span = terminal.selection_span().expect("a captured selection");
@@ -467,11 +475,19 @@ mod tests {
         let mut terminal = Terminal::new(&output, 40, 10);
 
         // A word selection anchored inside "beta" expands to the whole word.
-        terminal.begin_selection(SelectionType::Semantic, CellPos { column: 7, row: 0 }, Side::Left);
+        terminal.begin_selection(
+            SelectionType::Semantic,
+            CellPos { column: 7, row: 0 },
+            Side::Left,
+        );
         assert_eq!(terminal.selection_text().as_deref(), Some("beta"));
 
         // A line selection takes the whole line regardless of the column.
-        terminal.begin_selection(SelectionType::Lines, CellPos { column: 2, row: 0 }, Side::Left);
+        terminal.begin_selection(
+            SelectionType::Lines,
+            CellPos { column: 2, row: 0 },
+            Side::Left,
+        );
         assert_eq!(
             terminal.selection_text().as_deref().map(str::trim_end),
             Some("alpha beta")

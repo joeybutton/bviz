@@ -11,9 +11,9 @@ use bviz_ui_components::{
     track_drag,
 };
 use gpui::{
-    AnyElement, App, Bounds, Context, Entity, IntoElement, MouseButton, MouseDownEvent,
-    Pixels, Point, Render, Rgba, ScrollHandle, SharedString,
-    Subscription, WeakEntity, Window, deferred, div, point, prelude::*, px, size,
+    AnyElement, App, Bounds, Context, Entity, IntoElement, MouseButton, MouseDownEvent, Pixels,
+    Point, Render, Rgba, ScrollHandle, SharedString, Subscription, WeakEntity, Window, deferred,
+    div, point, prelude::*, px, size,
 };
 
 /// What a left-button drag over the tracks menu is currently moving.
@@ -170,7 +170,10 @@ impl TracksMenu {
                 .filter(|&t| threads[t].lane_class == class)
                 .filter(|&t| {
                     filter.is_empty()
-                        || profile.str(threads[t].name).to_lowercase().contains(&filter)
+                        || profile
+                            .str(threads[t].name)
+                            .to_lowercase()
+                            .contains(&filter)
                 })
                 .collect();
             if tracks.is_empty() {
@@ -187,9 +190,16 @@ impl TracksMenu {
             }
             for i in tracks {
                 let name = profile.str(threads[i].name);
-                let visible = self.model.read(cx).visible_tracks().get(i).copied().unwrap_or(true);
+                let visible = self
+                    .model
+                    .read(cx)
+                    .visible_tracks()
+                    .get(i)
+                    .copied()
+                    .unwrap_or(true);
                 rows.push(
-                    self.track_row(i, name, visible, palette, cx).into_any_element(),
+                    self.track_row(i, name, visible, palette, cx)
+                        .into_any_element(),
                 );
             }
         }
@@ -247,7 +257,8 @@ impl TracksMenu {
                     .hover(move |s| s.bg(palette.hover))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         cx.stop_propagation();
-                        this.model.update(cx, |m, _| m.set_group_visible(group, !group_all_visible));
+                        this.model
+                            .update(cx, |m, _| m.set_group_visible(group, !group_all_visible));
                         this.reflow_timeline(cx);
                         cx.notify();
                     }))
@@ -271,7 +282,9 @@ impl TracksMenu {
             .rounded_sm()
             .border_1()
             .border_color(palette.label)
-            .when(visible, |c| c.bg(palette.accent).border_color(palette.accent));
+            .when(visible, |c| {
+                c.bg(palette.accent).border_color(palette.accent)
+            });
         div()
             .id(SharedString::from(format!("track-row-{i}")))
             .flex()
@@ -352,7 +365,8 @@ impl TracksMenu {
                     .border_color(palette.border)
                     .hover(move |s| s.bg(palette.hover))
                     .on_click(cx.listener(move |this, _, _, cx| {
-                        this.model.update(cx, |m, _| m.set_all_visible(!all_visible));
+                        this.model
+                            .update(cx, |m, _| m.set_all_visible(!all_visible));
                         this.reflow_timeline(cx);
                         cx.notify();
                     }))
@@ -395,7 +409,11 @@ impl TracksMenu {
 
     /// A backdrop the size of the viewport, behind the menu, closing it on an
     /// outside click.
-    fn backdrop(&self, viewport: Bounds<Pixels>, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+    fn backdrop(
+        &self,
+        viewport: Bounds<Pixels>,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
         div()
             .absolute()
             .left_0()
@@ -439,12 +457,19 @@ impl Render for TracksMenu {
             .bg(palette.header_band)
             .hover(move |s| s.bg(palette.hover))
             // Keep the press off the chart handlers underneath.
-            .on_mouse_down(MouseButton::Left, |_, _, cx: &mut App| cx.stop_propagation())
+            .on_mouse_down(MouseButton::Left, |_, _, cx: &mut App| {
+                cx.stop_propagation()
+            })
             .on_click(cx.listener(|this, _, _, cx| {
                 this.open = !this.open;
                 cx.notify();
             }))
-            .child(div().overflow_hidden().whitespace_nowrap().child(format!("{nvis}/{ntot} tracks")))
+            .child(
+                div()
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .child(format!("{nvis}/{ntot} tracks")),
+            )
             .child(
                 bviz_ui_assets::icon("caret-down")
                     .size(px(12.))

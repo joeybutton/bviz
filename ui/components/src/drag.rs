@@ -59,6 +59,8 @@ pub fn track_drag<V: 'static>(
             return;
         }
         ended.set(true);
-        ending.update(cx, |view, cx| on_end(view, event.position, DragEnd::Released, cx));
+        ending.update(cx, |view, cx| {
+            on_end(view, event.position, DragEnd::Released, cx)
+        });
     });
 }

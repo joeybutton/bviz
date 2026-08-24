@@ -85,8 +85,16 @@ impl RowKind {
         match (self, other) {
             (RowKind::Band { group: a }, RowKind::Band { group: b }) => a == b,
             (
-                RowKind::Lane { group: g0, track: t0, .. },
-                RowKind::Lane { group: g1, track: t1, .. },
+                RowKind::Lane {
+                    group: g0,
+                    track: t0,
+                    ..
+                },
+                RowKind::Lane {
+                    group: g1,
+                    track: t1,
+                    ..
+                },
             ) => (g0, t0) == (g1, t1),
             _ => false,
         }
@@ -110,7 +118,11 @@ pub(crate) fn chart_rows<'a>(
             let lane = lanes.next()?;
             return Some(ChartRow {
                 top: lane.top,
-                kind: RowKind::Lane { group, track: lane.track, rank },
+                kind: RowKind::Lane {
+                    group,
+                    track: lane.track,
+                    rank,
+                },
             });
         }
         let band = bands.next()?;
@@ -182,7 +194,11 @@ pub(crate) enum GroupHit {
 
 /// Orders `tracks` (indices into `threads`) busiest first — most slices first,
 /// ties broken by tid so the order is stable frame to frame.
-pub(crate) fn sort_tracks_by_activity(profile: &Profile, threads: &[ThreadTrack], tracks: &mut [usize]) {
+pub(crate) fn sort_tracks_by_activity(
+    profile: &Profile,
+    threads: &[ThreadTrack],
+    tracks: &mut [usize],
+) {
     tracks.sort_by(|&a, &b| {
         profile
             .slices(&threads[b])
@@ -211,9 +227,7 @@ pub(crate) fn build_grouped_layout(
     let mut top = 0.0;
     for (group, &class) in GROUP_ORDER.iter().enumerate() {
         let mut tracks: Vec<usize> = (0..threads.len())
-            .filter(|&t| {
-                threads[t].lane_class == class && visible.get(t).copied().unwrap_or(true)
-            })
+            .filter(|&t| threads[t].lane_class == class && visible.get(t).copied().unwrap_or(true))
             .collect();
         if tracks.is_empty() {
             continue;
@@ -377,11 +391,19 @@ mod tests {
                 },
                 ChartRow {
                     top: GROUP_BAND_HEIGHT + gap,
-                    kind: RowKind::Lane { group: 0, track: 7, rank: 0 },
+                    kind: RowKind::Lane {
+                        group: 0,
+                        track: 7,
+                        rank: 0
+                    },
                 },
                 ChartRow {
                     top: GROUP_BAND_HEIGHT + 20.0 + 2.0 * gap,
-                    kind: RowKind::Lane { group: 0, track: 3, rank: 1 },
+                    kind: RowKind::Lane {
+                        group: 0,
+                        track: 3,
+                        rank: 1
+                    },
                 },
                 ChartRow {
                     top: second_band_top,
@@ -389,7 +411,11 @@ mod tests {
                 },
                 ChartRow {
                     top: second_band_top + GROUP_BAND_HEIGHT + gap,
-                    kind: RowKind::Lane { group: 1, track: 5, rank: 0 },
+                    kind: RowKind::Lane {
+                        group: 1,
+                        track: 5,
+                        rank: 0
+                    },
                 },
             ]
         );
@@ -399,7 +425,14 @@ mod tests {
     fn a_collapsed_group_contributes_a_band_and_no_lanes() {
         let (layout, chrome) = stack(&[&[(1, 20.0)], &[], &[(2, 40.0)]]);
         let kinds: Vec<RowKind> = chart_rows(&layout, &chrome).map(|r| r.kind).collect();
-        assert!(matches!(kinds[1], RowKind::Lane { group: 0, track: 1, .. }));
+        assert!(matches!(
+            kinds[1],
+            RowKind::Lane {
+                group: 0,
+                track: 1,
+                ..
+            }
+        ));
         assert!(matches!(kinds[2], RowKind::Band { group: 1 }));
         assert!(matches!(kinds[3], RowKind::Band { group: 2 }));
         assert_eq!(kinds.len(), 5);
@@ -415,7 +448,13 @@ mod tests {
         visible: &[bool],
         collapsed: &[bool; GROUP_ORDER.len()],
     ) -> (LaneLayout, GroupChrome) {
-        build_grouped_layout(profile, full, visible, collapsed, &[false; GROUP_ORDER.len()])
+        build_grouped_layout(
+            profile,
+            full,
+            visible,
+            collapsed,
+            &[false; GROUP_ORDER.len()],
+        )
     }
 
     /// The first lane row that has another lane of its group above it, so a
@@ -628,7 +667,10 @@ mod tests {
         // is out of reach while its group is folded and back in reach after.
         let viewport_h = 3.0 * GROUP_BAND_HEIGHT;
         let ceiling = |l: &LaneLayout| (flame_total_height(l) - viewport_h).max(0.0);
-        assert!(ceiling(&layout) > anchored.top, "the lane is reachable unfolded");
+        assert!(
+            ceiling(&layout) > anchored.top,
+            "the lane is reachable unfolded"
+        );
 
         let mut collapsed = expanded;
         collapsed[execution] = true;
@@ -636,7 +678,10 @@ mod tests {
         let folded: Vec<ChartRow> = chart_rows(&folded_layout, &folded_chrome).collect();
         let folded_ceiling = ceiling(&folded_layout);
         let held = anchor_offset(folded.iter().copied(), anchor);
-        assert!(held > folded_ceiling, "the folded chart draws it at the ceiling");
+        assert!(
+            held > folded_ceiling,
+            "the folded chart draws it at the ceiling"
+        );
 
         // A wheel notch down while the folded chart already shows its last row.
         let request = drawn_scroll(held, folded_ceiling) + LINE_SCROLL_PX;
@@ -665,7 +710,10 @@ mod tests {
             .find(|b| b.group == group)
             .expect("a collapsed group keeps its band")
             .top;
-        assert_eq!(anchor_offset(chart_rows(&layout, &chrome), anchor), band_top);
+        assert_eq!(
+            anchor_offset(chart_rows(&layout, &chrome), anchor),
+            band_top
+        );
     }
 
     #[test]
@@ -705,7 +753,10 @@ mod tests {
             .iter()
             .find(|l| l.track == main)
             .expect("the main lane");
-        assert_eq!(anchor_offset(chart_rows(&layout, &chrome), anchor), main_lane.top);
+        assert_eq!(
+            anchor_offset(chart_rows(&layout, &chrome), anchor),
+            main_lane.top
+        );
     }
 
     #[test]
@@ -715,7 +766,13 @@ mod tests {
         let (layout, chrome) = built_rows(&profile, &full, &visible, &expanded);
         let rows: Vec<ChartRow> = chart_rows(&layout, &chrome).collect();
         let anchor = anchor_at(rows.iter().copied(), 0.0);
-        assert_eq!(anchor, RowAnchor::Row { row: rows[0].kind, below_top: 0.0 });
+        assert_eq!(
+            anchor,
+            RowAnchor::Row {
+                row: rows[0].kind,
+                below_top: 0.0
+            }
+        );
         assert_eq!(anchor_offset(rows.iter().copied(), anchor), 0.0);
 
         // The anchored row gone with every other, and a chart with no rows at all.
@@ -723,8 +780,14 @@ mod tests {
         let (layout, chrome) = built_rows(&profile, &full, &nothing_visible, &expanded);
         assert_eq!(chart_rows(&layout, &chrome).count(), 0);
         assert_eq!(anchor_offset(chart_rows(&layout, &chrome), anchor), 0.0);
-        assert_eq!(anchor_at(chart_rows(&layout, &chrome), 100.0), RowAnchor::Start);
-        assert_eq!(anchor_offset(chart_rows(&layout, &chrome), RowAnchor::Start), 0.0);
+        assert_eq!(
+            anchor_at(chart_rows(&layout, &chrome), 100.0),
+            RowAnchor::Start
+        );
+        assert_eq!(
+            anchor_offset(chart_rows(&layout, &chrome), RowAnchor::Start),
+            0.0
+        );
     }
 
     #[test]
@@ -747,7 +810,10 @@ mod tests {
         );
         assert_eq!(
             anchor,
-            RowAnchor::Row { row: last_row, below_top: past - last_lane.top }
+            RowAnchor::Row {
+                row: last_row,
+                below_top: past - last_lane.top
+            }
         );
         assert_eq!(anchor_offset(rows.iter().copied(), anchor), past);
     }
@@ -815,8 +881,14 @@ mod tests {
                 RowKind::Band { .. } => None,
             })
             .collect();
-        assert_eq!(bands, chrome.bands.iter().map(|b| b.group).collect::<Vec<_>>());
-        assert_eq!(lanes, layout.lanes.iter().map(|l| l.track).collect::<Vec<_>>());
+        assert_eq!(
+            bands,
+            chrome.bands.iter().map(|b| b.group).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            lanes,
+            layout.lanes.iter().map(|l| l.track).collect::<Vec<_>>()
+        );
         assert!(rows.windows(2).all(|w| w[0].top <= w[1].top), "{rows:?}");
     }
 
@@ -824,7 +896,13 @@ mod tests {
     fn flame_total_height_ends_at_the_last_row() {
         let (profile, full, visible) = fixture();
         let build = |visible: &[bool], collapsed: &[bool; GROUP_ORDER.len()]| {
-            build_grouped_layout(&profile, &full, visible, collapsed, &[false; GROUP_ORDER.len()])
+            build_grouped_layout(
+                &profile,
+                &full,
+                visible,
+                collapsed,
+                &[false; GROUP_ORDER.len()],
+            )
         };
         let expanded = [false; GROUP_ORDER.len()];
         let middle_collapsed = default_collapsed_groups();
@@ -861,18 +939,12 @@ mod tests {
                 &last_collapsed,
                 |c| c.bands.len() > 1 && c.bands.last().is_some_and(|b| b.collapsed),
             ),
-            (
-                "every group collapsed",
-                &visible[..],
-                &all_collapsed,
-                |c| !c.bands.is_empty() && c.bands.iter().all(|b| b.collapsed),
-            ),
-            (
-                "no non-empty group",
-                &nothing_visible[..],
-                &expanded,
-                |c| c.bands.is_empty(),
-            ),
+            ("every group collapsed", &visible[..], &all_collapsed, |c| {
+                !c.bands.is_empty() && c.bands.iter().all(|b| b.collapsed)
+            }),
+            ("no non-empty group", &nothing_visible[..], &expanded, |c| {
+                c.bands.is_empty()
+            }),
         ] {
             let (layout, chrome) = build(visible, collapsed);
             assert!(shape(&chrome), "{label}");

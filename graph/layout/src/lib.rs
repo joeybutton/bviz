@@ -26,5 +26,5 @@ mod test_support;
 pub use graph::{EdgeKind, Graph, Kind};
 pub use intern::{Id, Names};
 pub use joint::build_joint;
-pub use layout::{layout, layout_pinned, Anchor, Box, Connector, LaidOut};
-pub use map::{map_layout, MapLayout};
+pub use layout::{Anchor, Box, Connector, LaidOut, layout, layout_pinned};
+pub use map::{MapLayout, map_layout};

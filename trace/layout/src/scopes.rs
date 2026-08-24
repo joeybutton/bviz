@@ -233,7 +233,10 @@ mod tests {
         let p = full_profile();
         // Either direction: there is no frame for the inversion to walk out of.
         for direction in [FlameDirection::TopDown, FlameDirection::BottomUp] {
-            let mode = FlameMode { direction, ..FlameMode::default() };
+            let mode = FlameMode {
+                direction,
+                ..FlameMode::default()
+            };
             let agg =
                 ScopeAggregate::build_for_tracks(&p, mode, &TimeSelection::default(), |_| false);
             // Only the synthetic root, no frames and no rows.

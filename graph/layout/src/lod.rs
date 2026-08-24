@@ -115,7 +115,11 @@ impl Forest {
                 None => roots.push(node.id),
             }
         }
-        Self { children, roots, visible: RefCell::new(HashMap::new()) }
+        Self {
+            children,
+            roots,
+            visible: RefCell::new(HashMap::new()),
+        }
     }
 
     /// The nearest multi-child container at or below `n`, walking through
@@ -134,7 +138,10 @@ impl Forest {
     /// How many nodes expanding `container` puts on screen. `container` must
     /// have children.
     pub fn reveal_count(&self, container: Id) -> usize {
-        self.children[&container].iter().map(|&c| self.visible_subtree(c)).sum()
+        self.children[&container]
+            .iter()
+            .map(|&c| self.visible_subtree(c))
+            .sum()
     }
 
     /// `n` plus the chain of singleton descendants that auto-expands below it.
@@ -158,7 +165,11 @@ impl Forest {
 /// keeps each prefix step small, so a search over the prefixes settles close to
 /// a size cap.
 fn expansion_order(forest: &Forest) -> Vec<Id> {
-    let candidates = forest.children.values().filter(|kids| kids.len() >= 2).count();
+    let candidates = forest
+        .children
+        .values()
+        .filter(|kids| kids.len() >= 2)
+        .count();
     let mut order: Vec<Id> = Vec::with_capacity(candidates);
     let mut seen: HashSet<Id> = HashSet::with_capacity(candidates);
     let mut heap: BinaryHeap<Reverse<(usize, Id)>> = BinaryHeap::with_capacity(forest.roots.len());
@@ -236,8 +247,17 @@ impl IndexedGraph {
             parent[i] = node.parent.map(|p| p.0);
             singleton[i] = child_counts.get(&node.id) == Some(&1);
         }
-        let edges = graph.edges.iter().map(|e| (e.from.0, e.to.0, e.kind)).collect();
-        Self { parent, singleton, edges, node_count }
+        let edges = graph
+            .edges
+            .iter()
+            .map(|e| (e.from.0, e.to.0, e.kind))
+            .collect();
+        Self {
+            parent,
+            singleton,
+            edges,
+            node_count,
+        }
     }
 
     /// The indices of the `expanded` ids that name a node in this graph.
@@ -368,7 +388,11 @@ mod tests {
     fn empty_expanded_folds_each_tower_to_its_root() {
         let (mut g, names) = two_towers();
         // Cross-tower edge between leaves of the two folded roots.
-        g.add_edge(names.get("A.x").unwrap(), names.get("B.y").unwrap(), EdgeKind::Aquery);
+        g.add_edge(
+            names.get("A.x").unwrap(),
+            names.get("B.y").unwrap(),
+            EdgeKind::Aquery,
+        );
 
         let out = collapse(&g, &HashSet::new());
 
@@ -427,7 +451,10 @@ mod tests {
         assert_eq!(expandable_containers(&g), expanded(&names, &["R"]));
 
         // Folded: R alone (its children are singletons but R is the boundary).
-        assert_eq!(node_ids(&collapse(&g, &HashSet::new()), &names), set(&["R"]));
+        assert_eq!(
+            node_ids(&collapse(&g, &HashSet::new()), &names),
+            set(&["R"])
+        );
 
         // Expanded: R, both children, and each child's auto-expanded chain.
         let out = collapse(&g, &expanded(&names, &["R"]));
@@ -453,8 +480,16 @@ mod tests {
             }
         }
         // Internal to c1 (self-loop once folded), and cross-child c1 -> c2.
-        g.add_edge(names.get("c1.a").unwrap(), names.get("c1.b").unwrap(), EdgeKind::Aquery);
-        g.add_edge(names.get("c1.a").unwrap(), names.get("c2.a").unwrap(), EdgeKind::Aquery);
+        g.add_edge(
+            names.get("c1.a").unwrap(),
+            names.get("c1.b").unwrap(),
+            EdgeKind::Aquery,
+        );
+        g.add_edge(
+            names.get("c1.a").unwrap(),
+            names.get("c2.a").unwrap(),
+            EdgeKind::Aquery,
+        );
 
         let out = collapse(&g, &expanded(&names, &["R"]));
 
@@ -486,14 +521,21 @@ mod tests {
             .filter(|e| e.from == a && e.to == b)
             .map(|e| e.kind)
             .collect();
-        assert_eq!(kinds, [EdgeKind::Aquery, EdgeKind::Query].into_iter().collect());
+        assert_eq!(
+            kinds,
+            [EdgeKind::Aquery, EdgeKind::Query].into_iter().collect()
+        );
         assert_eq!(out.edges.len(), 2);
     }
 
     #[test]
     fn default_expansion_honors_caps() {
         let (mut g, names) = two_towers();
-        g.add_edge(names.get("A.x").unwrap(), names.get("B.y").unwrap(), EdgeKind::Aquery);
+        g.add_edge(
+            names.get("A.x").unwrap(),
+            names.get("B.y").unwrap(),
+            EdgeKind::Aquery,
+        );
 
         // Caps that only the root view (2 nodes, 1 edge) fits: no root expands.
         let tiny = default_expansion(&g, 2, 1);
@@ -514,7 +556,11 @@ mod tests {
         let (mut g, names) = two_towers();
         // A single folded edge between the towers, so the minimal (root) view of
         // 2 nodes and 1 edge always fits these caps.
-        g.add_edge(names.get("A.x").unwrap(), names.get("B.y").unwrap(), EdgeKind::Aquery);
+        g.add_edge(
+            names.get("A.x").unwrap(),
+            names.get("B.y").unwrap(),
+            EdgeKind::Aquery,
+        );
 
         for (max_nodes, max_edges) in [(2, 1), (4, 1), (4, 2), (6, 2), (100, 100)] {
             let view = collapse(&g, &default_expansion(&g, max_nodes, max_edges));
@@ -541,7 +587,10 @@ mod tests {
         // singleton, so generous caps expand `b` alone.
         let all = default_expansion(&g, 100, 100);
         assert_eq!(all, expanded(&names, &["b"]));
-        assert_eq!(node_ids(&collapse(&g, &all), &names), set(&["A", "b", "x", "y"]));
+        assert_eq!(
+            node_ids(&collapse(&g, &all), &names),
+            set(&["A", "b", "x", "y"])
+        );
     }
 
     #[test]

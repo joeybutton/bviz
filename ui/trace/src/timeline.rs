@@ -19,9 +19,8 @@ use bviz_trace_profile::{Profile, Slice, SliceDetail, TimeSpan};
 use bviz_ui_components::{DragEnd, Scrollbar, cached_layer, overlay_canvas, track_drag};
 use gpui::{
     App, Bounds, ContentMask, Context, Div, Entity, FocusHandle, IntoElement, KeyBinding,
-    MouseButton, MouseDownEvent, MouseMoveEvent, Pixels, Point, Render, Rgba,
-    ScrollWheelEvent, Stateful, WeakEntity, Window, canvas, div,
-    fill, point, prelude::*, px, size,
+    MouseButton, MouseDownEvent, MouseMoveEvent, Pixels, Point, Render, Rgba, ScrollWheelEvent,
+    Stateful, WeakEntity, Window, canvas, div, fill, point, prelude::*, px, size,
 };
 use std::rc::Rc;
 use std::sync::Arc;
@@ -76,9 +75,20 @@ impl SliceDrawCache {
         let slices = Rc::new(visible_slices(
             &profile,
             &lanes,
-            Cull { view: &view, viewport: &viewport, metrics: &METRICS, min_px: MIN_SLICE_PX },
+            Cull {
+                view: &view,
+                viewport: &viewport,
+                metrics: &METRICS,
+                min_px: MIN_SLICE_PX,
+            },
         ));
-        Self { profile, lanes, view, viewport, slices }
+        Self {
+            profile,
+            lanes,
+            view,
+            viewport,
+            slices,
+        }
     }
 
     /// The slice drawn at flame-content-relative `(x, y)`, which the caller has
@@ -128,7 +138,12 @@ pub(crate) enum RegionEdit {
     Resize { index: usize },
     /// Move the region at `index` whole, keeping `width_us`; the press took hold
     /// of it `grab_us` past its start, within the profile span `bounds`.
-    Slide { index: usize, width_us: i64, grab_us: i64, bounds: TimeSpan },
+    Slide {
+        index: usize,
+        width_us: i64,
+        grab_us: i64,
+        bounds: TimeSpan,
+    },
     /// Drop the region at `index`, keeping the rest of the selection.
     Remove { index: usize },
 }
@@ -184,9 +199,16 @@ impl RegionDrag {
     /// out.
     pub(crate) fn span(&self) -> Option<TimeRegion> {
         match self.edit {
-            RegionEdit::Slide { width_us, grab_us, bounds, .. } => {
+            RegionEdit::Slide {
+                width_us,
+                grab_us,
+                bounds,
+                ..
+            } => {
                 let last_start_us = bounds.end_us - width_us;
-                let start_us = (self.cursor_us - grab_us).min(last_start_us).max(bounds.start_us);
+                let start_us = (self.cursor_us - grab_us)
+                    .min(last_start_us)
+                    .max(bounds.start_us);
                 span_between(start_us, start_us + width_us)
             }
             RegionEdit::Replace | RegionEdit::Union | RegionEdit::Resize { .. } => {
@@ -265,7 +287,8 @@ impl TimelineDrag {
 
     /// The selection to paint over `standing` while the drag runs.
     fn preview(&self, standing: &TimeSelection) -> TimeSelection {
-        self.region().map_or_else(|| standing.clone(), |drag| drag.applied(standing))
+        self.region()
+            .map_or_else(|| standing.clone(), |drag| drag.applied(standing))
     }
 
     /// Abandons a region drag under way, reporting whether there was one. It
@@ -342,7 +365,10 @@ impl TimelinePanel {
             content_focus,
             model,
             shell,
-            view: TimeView { start_us: 0.0, px_per_us: 1.0 },
+            view: TimeView {
+                start_us: 0.0,
+                px_per_us: 1.0,
+            },
             scroll: RowAnchor::Start,
             viewport: Bounds::default(),
             fitted: false,
@@ -379,7 +405,11 @@ impl TimelinePanel {
                 let s = shell.read(cx);
                 (s.bottom_tab, s.panel_height, s.gutter_width)
             }
-            None => (BottomTab::Counters, DEFAULT_PANEL_HEIGHT, DEFAULT_GUTTER_WIDTH),
+            None => (
+                BottomTab::Counters,
+                DEFAULT_PANEL_HEIGHT,
+                DEFAULT_GUTTER_WIDTH,
+            ),
         }
     }
 
@@ -404,7 +434,13 @@ impl TimelinePanel {
             (n_counters, flame_total)
         };
         let (_, panel_height, gutter_width) = self.shell_layout(cx);
-        Regions::new(self.viewport, n_counters, panel_height, gutter_width, flame_total)
+        Regions::new(
+            self.viewport,
+            n_counters,
+            panel_height,
+            gutter_width,
+            flame_total,
+        )
     }
 
     /// The lane and time bars for the panel's view state; both `None` while no
@@ -418,7 +454,13 @@ impl TimelinePanel {
             };
             (profile.span(), flame_total_height(&lanes))
         };
-        scrollbar_geom(span, self.view, flame_total, self.regions(cx), self.lane_scroll(cx))
+        scrollbar_geom(
+            span,
+            self.view,
+            flame_total,
+            self.regions(cx),
+            self.lane_scroll(cx),
+        )
     }
 
     fn vbar(&self, cx: &App) -> Option<Scrollbar> {
@@ -437,7 +479,12 @@ impl TimelinePanel {
         let (lanes, chrome) = (model.lane_layout()?, model.group_chrome()?);
         let held = anchor_offset(chart_rows(&lanes, &chrome), self.scroll);
         let ceiling = max_lane_scroll(&lanes, &self.regions(cx));
-        Some(AnchoredChart { lanes, chrome, held, ceiling })
+        Some(AnchoredChart {
+            lanes,
+            chrome,
+            held,
+            ceiling,
+        })
     }
 
     /// How far the lanes are scrolled up, in pixels. The sole reading of the
@@ -576,7 +623,9 @@ impl TimelinePanel {
         cx: &mut Context<Self>,
     ) {
         let backed_out = self.drag.cancel_region()
-            || self.model.update(cx, |m, cx| m.set_time_selection(TimeSelection::default(), cx));
+            || self.model.update(cx, |m, cx| {
+                m.set_time_selection(TimeSelection::default(), cx)
+            });
         if backed_out {
             cx.notify();
         }
@@ -637,7 +686,8 @@ impl TimelinePanel {
             DragEnd::Released => drag.released(standing),
             DragEnd::Abandoned => drag.applied(standing),
         };
-        self.model.update(cx, |m, cx| m.set_time_selection(selection, cx));
+        self.model
+            .update(cx, |m, cx| m.set_time_selection(selection, cx));
     }
 
     /// Begins a timeline drag at `pos`: the lane vertical or time horizontal
@@ -710,7 +760,8 @@ impl TimelinePanel {
         if e.modifiers.control || e.modifiers.platform {
             let rel_x = f32::from(e.position.x) - content_left;
             let dy_lines = dy / LINE_SCROLL_PX;
-            self.view.zoom_at(rel_x, ZOOM_PER_NOTCH.powf(dy_lines as f64));
+            self.view
+                .zoom_at(rel_x, ZOOM_PER_NOTCH.powf(dy_lines as f64));
             self.view.px_per_us = self
                 .view
                 .px_per_us
@@ -782,8 +833,9 @@ impl TimelinePanel {
                     }
                     if let Some(track) = this.track_label_at(e.position, cx) {
                         let ctrl = e.modifiers.control || e.modifiers.platform;
-                        this.model
-                            .update(cx, |m, cx| m.select_track(track, e.modifiers.shift, ctrl, cx));
+                        this.model.update(cx, |m, cx| {
+                            m.select_track(track, e.modifiers.shift, ctrl, cx)
+                        });
                         this.invalidate_canvas(cx);
                         return;
                     }
@@ -919,7 +971,13 @@ impl Render for SliceCanvas {
             (profile.clone(), lanes, chrome, panel_height, gutter_width)
         };
         let palette = Palette::from_theme(&bviz_ui_theme::theme(window, cx));
-        let prepaint = fit_prepaint(profile.clone(), lanes.clone(), parent.clone(), panel_height, gutter_width);
+        let prepaint = fit_prepaint(
+            profile.clone(),
+            lanes.clone(),
+            parent.clone(),
+            panel_height,
+            gutter_width,
+        );
         let paint = slice_paint(profile, lanes, chrome, parent, palette);
         canvas(prepaint, paint)
             .absolute()
@@ -944,7 +1002,13 @@ fn fit_prepaint(
         let old_bounds = parent.read(cx).viewport;
         let flame_total = flame_total_height(&lanes);
         let regions_of = |b| {
-            Regions::new(b, profile.counters().len(), panel_height, gutter_width, flame_total)
+            Regions::new(
+                b,
+                profile.counters().len(),
+                panel_height,
+                gutter_width,
+                flame_total,
+            )
         };
         let regions = regions_of(bounds);
         let time_w = regions.time_w;
@@ -955,15 +1019,16 @@ fn fit_prepaint(
             if !panel.fitted {
                 panel.view = TimeView::fit(span, time_w, EDGE_MARGIN_PX);
                 panel.fitted = true;
-            } else if old_bounds.size.width > px(0.)
-                && (old_time_w - time_w).abs() > f32::EPSILON
-            {
-                panel.view.rescale_to_width(span, old_time_w, time_w, EDGE_MARGIN_PX);
+            } else if old_bounds.size.width > px(0.) && (old_time_w - time_w).abs() > f32::EPSILON {
+                panel
+                    .view
+                    .rescale_to_width(span, old_time_w, time_w, EDGE_MARGIN_PX);
             }
-            panel.view.px_per_us = panel
-                .view
-                .px_per_us
-                .max(fit_px_per_us(span, time_w, EDGE_MARGIN_PX));
+            panel.view.px_per_us =
+                panel
+                    .view
+                    .px_per_us
+                    .max(fit_px_per_us(span, time_w, EDGE_MARGIN_PX));
             panel.view.clamp_to(span, time_w, EDGE_MARGIN_PX);
         });
     }
@@ -989,7 +1054,12 @@ fn cached_slices(
         }
     }
     cache
-        .insert(SliceDrawCache::new(profile.clone(), lanes.clone(), view, viewport))
+        .insert(SliceDrawCache::new(
+            profile.clone(),
+            lanes.clone(),
+            view,
+            viewport,
+        ))
         .slices
         .clone()
 }
@@ -1014,15 +1084,22 @@ fn slice_paint(
             let scroll = panel.lane_scroll(cx);
             let (tab, panel_height, gutter_width) = panel.shell_layout(cx);
             let selected = panel.model.read(cx).selected_tracks().to_vec();
-            let regions =
-                Regions::new(bounds, n_counters, panel_height, gutter_width, flame_total);
+            let regions = Regions::new(bounds, n_counters, panel_height, gutter_width, flame_total);
             let vp = Viewport {
                 width: regions.time_w,
                 height: regions.flame_h(),
                 scroll_y: scroll,
             };
             let show_counters = regions.has_graph && tab == BottomTab::Counters;
-            (tv, scroll, gutter_width, selected, regions, show_counters, vp)
+            (
+                tv,
+                scroll,
+                gutter_width,
+                selected,
+                regions,
+                show_counters,
+                vp,
+            )
         };
         let slices = parent.update(cx, |panel, _| {
             cached_slices(&mut panel.slice_draw, &profile, &lanes, tv, vp)
@@ -1048,7 +1125,9 @@ fn slice_paint(
             );
         }
 
-        let flame_mask = ContentMask { bounds: regions.flame_rect() };
+        let flame_mask = ContentMask {
+            bounds: regions.flame_rect(),
+        };
         window.with_content_mask(Some(flame_mask), |window| {
             for lane in layout.lanes.iter().skip(1) {
                 let ry = regions.flame_top + lane.top - METRICS.lane_gap / 2.0 - scroll;
@@ -1151,7 +1230,11 @@ impl RegionPixels {
 /// outside it.
 fn selection_pixels(sel: &TimeSelection, tv: TimeView, regions: Regions) -> Vec<RegionPixels> {
     let mut out = Vec::with_capacity(sel.len());
-    out.extend(sel.spans().iter().filter_map(|s| RegionPixels::of(*s, tv, regions)));
+    out.extend(
+        sel.spans()
+            .iter()
+            .filter_map(|s| RegionPixels::of(*s, tv, regions)),
+    );
     out
 }
 
@@ -1258,14 +1341,34 @@ fn paint_time_selection(
         if w <= 0.0 || h <= 0.0 {
             return;
         }
-        window.paint_quad(fill(Bounds::new(point(px(x), px(top)), size(px(w), px(h))), color));
+        window.paint_quad(fill(
+            Bounds::new(point(px(x), px(top)), size(px(w), px(h))),
+            color,
+        ));
     };
 
-    let veil = Rgba { a: VEIL_ALPHA, ..palette.background };
+    let veil = Rgba {
+        a: VEIL_ALPHA,
+        ..palette.background
+    };
     let veil_span = |from: f32, to: f32, window: &mut Window| {
-        quad(from, to - from, regions.flame_top, regions.flame_h(), veil, window);
+        quad(
+            from,
+            to - from,
+            regions.flame_top,
+            regions.flame_h(),
+            veil,
+            window,
+        );
         if show_counters {
-            quad(from, to - from, regions.panel_top, regions.panel_h(), veil, window);
+            quad(
+                from,
+                to - from,
+                regions.panel_top,
+                regions.panel_h(),
+                veil,
+                window,
+            );
         }
     };
     let mut unselected_from = regions.content_left;
@@ -1278,7 +1381,10 @@ fn paint_time_selection(
     let band = regions.ruler_rect();
     let band_top = f32::from(band.origin.y);
     let band_h = f32::from(band.size.height);
-    let tint = Rgba { a: RULER_BAND_ALPHA, ..palette.accent };
+    let tint = Rgba {
+        a: RULER_BAND_ALPHA,
+        ..palette.accent
+    };
     for r in &painted {
         quad(r.left, r.right - r.left, band_top, band_h, tint, window);
     }
@@ -1296,11 +1402,32 @@ fn paint_time_selection(
                 continue;
             }
             let line_x = edge_x - line_inset;
-            quad(line_x, EDGE_LINE_PX, band_top, regions.flame_bottom - band_top, accent, window);
+            quad(
+                line_x,
+                EDGE_LINE_PX,
+                band_top,
+                regions.flame_bottom - band_top,
+                accent,
+                window,
+            );
             if show_counters {
-                quad(line_x, EDGE_LINE_PX, regions.panel_top, regions.panel_h(), accent, window);
+                quad(
+                    line_x,
+                    EDGE_LINE_PX,
+                    regions.panel_top,
+                    regions.panel_h(),
+                    accent,
+                    window,
+                );
             }
-            quad(edge_x - EDGE_GRAB_PX, GRIP_WIDTH, grip_top, grip_h, accent, window);
+            quad(
+                edge_x - EDGE_GRAB_PX,
+                GRIP_WIDTH,
+                grip_top,
+                grip_h,
+                accent,
+                window,
+            );
         }
     }
 }
@@ -1320,7 +1447,9 @@ fn overlay_paint(
             let panel = parent.read(cx);
             let tv = panel.view;
             let (tab, panel_height, gutter_width) = panel.shell_layout(cx);
-            let hovered = panel.hover.and_then(|at| Some((at, panel.slice_at(at, cx)?)));
+            let hovered = panel
+                .hover
+                .and_then(|at| Some((at, panel.slice_at(at, cx)?)));
             let selection = panel.drag.preview(panel.model.read(cx).time_selection());
             (
                 tv,
@@ -1339,7 +1468,16 @@ fn overlay_paint(
         paint_time_selection(&selection, tv, regions, show_counters, &palette, window);
         if let Some(at) = crosshair {
             if f32::from(at.x) >= regions.content_left {
-                paint_crosshair(&profile, tv, regions, at, show_counters, &palette, window, cx);
+                paint_crosshair(
+                    &profile,
+                    tv,
+                    regions,
+                    at,
+                    show_counters,
+                    &palette,
+                    window,
+                    cx,
+                );
             }
         }
         if let Some((at, drawn)) = hovered {
@@ -1357,8 +1495,15 @@ mod tests {
     use bviz_trace_layout::lay_out_lanes;
 
     const TEST_TIDS: [i64; 2] = [1, 2];
-    const TEST_VIEW: TimeView = TimeView { start_us: 0.0, px_per_us: 0.1 };
-    const TEST_VIEWPORT: Viewport = Viewport { width: 1000.0, height: 500.0, scroll_y: 0.0 };
+    const TEST_VIEW: TimeView = TimeView {
+        start_us: 0.0,
+        px_per_us: 0.1,
+    };
+    const TEST_VIEWPORT: Viewport = Viewport {
+        width: 1000.0,
+        height: 500.0,
+        scroll_y: 0.0,
+    };
 
     /// One thread's name metadata followed by its `spans`, each `(start_us,
     /// dur_us)`, as `X` events named `t{tid}s{i}` in category `c{tid}s{i}` —
@@ -1400,7 +1545,10 @@ mod tests {
     /// depth.
     fn profile_of_overlapping_boxes() -> Arc<Profile> {
         let sub_pixel_us = (f64::from(MIN_SLICE_PX) / TEST_VIEW.px_per_us) as i64 - 1;
-        profile_of_events(thread_events(TEST_TIDS[0], [(0, sub_pixel_us), (sub_pixel_us, 1000)]))
+        profile_of_events(thread_events(
+            TEST_TIDS[0],
+            [(0, sub_pixel_us), (sub_pixel_us, 1000)],
+        ))
     }
 
     /// A draw list culled from `profile` over a viewport holding all of it.
@@ -1426,12 +1574,23 @@ mod tests {
                 .hit(vs.x + vs.w / 2.0, vs.y + vs.h / 2.0)
                 .expect("the slice at its own center");
             assert_eq!(hit.profile().str(hit.slice().name), profile.str(drawn.name));
-            assert_eq!(hit.profile().str(hit.detail().category), profile.str(detail.category));
+            assert_eq!(
+                hit.profile().str(hit.detail().category),
+                profile.str(detail.category)
+            );
         }
 
-        let below_every_box = cache.slices.iter().map(|vs| vs.y + vs.h).fold(0.0, f32::max);
+        let below_every_box = cache
+            .slices
+            .iter()
+            .map(|vs| vs.y + vs.h)
+            .fold(0.0, f32::max);
         let first = cache.slices.first().expect("a culled slice");
-        assert!(cache.hit(first.x + first.w / 2.0, below_every_box).is_none());
+        assert!(
+            cache
+                .hit(first.x + first.w / 2.0, below_every_box)
+                .is_none()
+        );
     }
 
     #[test]
@@ -1439,11 +1598,17 @@ mod tests {
         let profile = profile_of_overlapping_boxes();
         let cache = draw_cache(&profile);
         let [under, over] = cache.slices[..] else {
-            panic!("expected the fixture's two boxes, got {}", cache.slices.len());
+            panic!(
+                "expected the fixture's two boxes, got {}",
+                cache.slices.len()
+            );
         };
         let overlap_end = under.x + under.w;
         assert_eq!(under.y, over.y, "the fixture's boxes must share a row");
-        assert!(over.x < overlap_end, "the fixture's boxes must cover a common point");
+        assert!(
+            over.x < overlap_end,
+            "the fixture's boxes must cover a common point"
+        );
 
         let hit = cache
             .hit((over.x + overlap_end) / 2.0, over.y + over.h / 2.0)
@@ -1470,22 +1635,42 @@ mod tests {
     /// A drag that has passed the click threshold, anchored at `anchor_us` with
     /// its cursor on `cursor_us`.
     fn drag(edit: RegionEdit, anchor_us: i64, cursor_us: i64) -> RegionDrag {
-        RegionDrag { edit, anchor_us, cursor_us, press_x: 0.0, moved: true }
+        RegionDrag {
+            edit,
+            anchor_us,
+            cursor_us,
+            press_x: 0.0,
+            moved: true,
+        }
     }
 
     /// The profile a slide is dragged over.
-    const TEST_SPAN: TimeSpan = TimeSpan { start_us: 0, end_us: 40_000 };
+    const TEST_SPAN: TimeSpan = TimeSpan {
+        start_us: 0,
+        end_us: 40_000,
+    };
 
     /// A slide bounded to [`TEST_SPAN`].
     fn slide(index: usize, width_us: i64, grab_us: i64) -> RegionEdit {
-        RegionEdit::Slide { index, width_us, grab_us, bounds: TEST_SPAN }
+        RegionEdit::Slide {
+            index,
+            width_us,
+            grab_us,
+            bounds: TEST_SPAN,
+        }
     }
 
     #[test]
     fn a_replacing_drag_spans_its_press_and_its_cursor() {
-        assert_eq!(drag(RegionEdit::Replace, 100, 400).span(), span_between(100, 400));
+        assert_eq!(
+            drag(RegionEdit::Replace, 100, 400).span(),
+            span_between(100, 400)
+        );
         // Dragged leftward, the ends arrive the other way round.
-        assert_eq!(drag(RegionEdit::Union, 400, 100).span(), span_between(100, 400));
+        assert_eq!(
+            drag(RegionEdit::Union, 400, 100).span(),
+            span_between(100, 400)
+        );
     }
 
     #[test]
@@ -1497,7 +1682,10 @@ mod tests {
 
     #[test]
     fn a_slide_carries_the_region_width_to_the_cursor() {
-        assert_eq!(drag(slide(0, 100, 30), 0, 500).span(), span_between(470, 570));
+        assert_eq!(
+            drag(slide(0, 100, 30), 0, 500).span(),
+            span_between(470, 570)
+        );
     }
 
     #[test]
@@ -1550,21 +1738,30 @@ mod tests {
     #[test]
     fn a_drag_under_the_click_threshold_leaves_the_selection_alone() {
         let base = selection(&[(0, 100)]);
-        let held = RegionDrag { moved: false, ..drag(RegionEdit::Replace, 500, 501) };
+        let held = RegionDrag {
+            moved: false,
+            ..drag(RegionEdit::Replace, 500, 501)
+        };
         assert_eq!(held.applied(&base), base);
     }
 
     #[test]
     fn a_resize_released_under_the_click_threshold_keeps_every_region() {
         let base = selection(&[(0, 100), (200, 300), (400, 500)]);
-        let held = RegionDrag { moved: false, ..drag(RegionEdit::Resize { index: 1 }, 300, 202) };
+        let held = RegionDrag {
+            moved: false,
+            ..drag(RegionEdit::Resize { index: 1 }, 300, 202)
+        };
         assert_eq!(regions(&held.released(&base)), regions(&base));
     }
 
     #[test]
     fn a_slide_released_under_the_click_threshold_keeps_every_region() {
         let base = selection(&[(0, 100), (200, 300), (400, 500)]);
-        let held = RegionDrag { moved: false, ..drag(slide(1, 100, 50), 250, 252) };
+        let held = RegionDrag {
+            moved: false,
+            ..drag(slide(1, 100, 50), 250, 252)
+        };
         assert_eq!(regions(&held.released(&base)), regions(&base));
     }
 
@@ -1577,7 +1774,11 @@ mod tests {
     fn cancelling_a_replacing_drag_leaves_the_standing_selection() {
         let base = selection(&[(0, 100), (200, 300)]);
         let mut gesture = live(RegionEdit::Replace, 500, 700);
-        assert_eq!(regions(&gesture.preview(&base)), [(500, 700)], "the drag previews a region");
+        assert_eq!(
+            regions(&gesture.preview(&base)),
+            [(500, 700)],
+            "the drag previews a region"
+        );
         assert!(gesture.cancel_region());
         assert_eq!(regions(&gesture.preview(&base)), regions(&base));
     }
@@ -1594,7 +1795,10 @@ mod tests {
     fn a_release_after_a_cancel_commits_nothing() {
         let mut gesture = live(RegionEdit::Replace, 500, 700);
         gesture.cancel_region();
-        assert!(gesture.region().is_none(), "the release finds no drag to commit");
+        assert!(
+            gesture.region().is_none(),
+            "the release finds no drag to commit"
+        );
     }
 
     #[test]
@@ -1617,20 +1821,42 @@ mod tests {
 
     /// A view whose window opens well after the profile start, so a region can
     /// reach off either end of the axis.
-    const TEST_SELECTION_VIEW: TimeView = TimeView { start_us: 5000.0, px_per_us: 0.1 };
+    const TEST_SELECTION_VIEW: TimeView = TimeView {
+        start_us: 5000.0,
+        px_per_us: 0.1,
+    };
     const TEST_GUTTER: f32 = 200.0;
 
     #[test]
     fn a_region_is_clipped_to_the_axis_and_keeps_only_the_edges_on_it() {
         let axis = test_axis();
-        assert_eq!((axis.content_left, axis.time_right), (200.0, 1000.0), "the fixture's axis");
+        assert_eq!(
+            (axis.content_left, axis.time_right),
+            (200.0, 1000.0),
+            "the fixture's axis"
+        );
         let sel = selection(&[(4000, 6000), (6500, 8000), (12000, 20000)]);
         assert_eq!(
             selection_pixels(&sel, TEST_SELECTION_VIEW, axis),
             [
-                RegionPixels { left: 200.0, right: 300.0, starts: false, ends: true },
-                RegionPixels { left: 350.0, right: 500.0, starts: true, ends: true },
-                RegionPixels { left: 900.0, right: 1000.0, starts: true, ends: false },
+                RegionPixels {
+                    left: 200.0,
+                    right: 300.0,
+                    starts: false,
+                    ends: true
+                },
+                RegionPixels {
+                    left: 350.0,
+                    right: 500.0,
+                    starts: true,
+                    ends: true
+                },
+                RegionPixels {
+                    left: 900.0,
+                    right: 1000.0,
+                    starts: true,
+                    ends: false
+                },
             ]
         );
     }
@@ -1648,7 +1874,12 @@ mod tests {
         let sel = selection(&[(10_000, 13_000)]);
         assert_eq!(
             selection_pixels(&sel, TEST_SELECTION_VIEW, axis),
-            [RegionPixels { left: 700.0, right: 1000.0, starts: true, ends: true }]
+            [RegionPixels {
+                left: 700.0,
+                right: 1000.0,
+                starts: true,
+                ends: true
+            }]
         );
     }
 
@@ -1658,7 +1889,10 @@ mod tests {
         let band = axis.ruler_rect();
         assert_eq!(f32::from(band.origin.x), axis.content_left);
         assert_eq!(f32::from(band.size.width), axis.time_w);
-        assert_eq!(f32::from(band.origin.y) + f32::from(band.size.height), axis.flame_top);
+        assert_eq!(
+            f32::from(band.origin.y) + f32::from(band.size.height),
+            axis.flame_top
+        );
     }
 
     #[test]
@@ -1667,9 +1901,18 @@ mod tests {
         let band = axis.ruler_rect();
         let mid_y = px(f32::from(band.origin.y) + f32::from(band.size.height) / 2.0);
         assert!(axis.in_ruler(point(px(axis.content_left), mid_y)));
-        assert!(!axis.in_ruler(point(px(axis.content_left - 1.0), mid_y)), "over the gutter");
-        assert!(!axis.in_ruler(point(px(axis.time_right), mid_y)), "past the time axis");
-        assert!(!axis.in_ruler(point(px(axis.content_left), px(axis.flame_top))), "in the lanes");
+        assert!(
+            !axis.in_ruler(point(px(axis.content_left - 1.0), mid_y)),
+            "over the gutter"
+        );
+        assert!(
+            !axis.in_ruler(point(px(axis.time_right), mid_y)),
+            "past the time axis"
+        );
+        assert!(
+            !axis.in_ruler(point(px(axis.content_left), px(axis.flame_top))),
+            "in the lanes"
+        );
     }
 
     /// The press instant `x` maps to, as the ruler's own handler derives it.
@@ -1686,7 +1929,14 @@ mod tests {
         let drawn = selection_pixels(&sel, TEST_SELECTION_VIEW, axis);
         assert!(!drawn[0].starts, "the fixture's start edge is off the axis");
         let x = axis.content_left;
-        let grabbed = region_grab(&sel, TEST_SELECTION_VIEW, axis, TEST_SPAN, press_at(x, axis), x);
+        let grabbed = region_grab(
+            &sel,
+            TEST_SELECTION_VIEW,
+            axis,
+            TEST_SPAN,
+            press_at(x, axis),
+            x,
+        );
         assert!(
             matches!(grabbed, Some((RegionEdit::Slide { .. }, _))),
             "the press takes hold of the drawn body, not the hidden edge"
@@ -1698,9 +1948,19 @@ mod tests {
         let axis = test_axis();
         let sel = selection(&[(6500, 8000)]);
         let x = axis.content_left + TEST_SELECTION_VIEW.x_of(6500);
-        let grabbed = region_grab(&sel, TEST_SELECTION_VIEW, axis, TEST_SPAN, press_at(x, axis), x);
+        let grabbed = region_grab(
+            &sel,
+            TEST_SELECTION_VIEW,
+            axis,
+            TEST_SPAN,
+            press_at(x, axis),
+            x,
+        );
         assert_eq!(grabbed.map(|(_, anchor)| anchor), Some(8000));
-        assert!(matches!(grabbed, Some((RegionEdit::Resize { index: 0 }, _))));
+        assert!(matches!(
+            grabbed,
+            Some((RegionEdit::Resize { index: 0 }, _))
+        ));
     }
 
     /// Window x of the instant `t_us` on the test axis.
@@ -1713,13 +1973,23 @@ mod tests {
     fn ruler_press(sel: &TimeSelection, x: f32, ctrl: bool) -> (RegionEdit, i64) {
         let axis = test_axis();
         let at = press_at(x, axis);
-        let grab = Grab::Ruler(region_grab(sel, TEST_SELECTION_VIEW, axis, TEST_SPAN, at, x));
+        let grab = Grab::Ruler(region_grab(
+            sel,
+            TEST_SELECTION_VIEW,
+            axis,
+            TEST_SPAN,
+            at,
+            x,
+        ));
         region_press(sel, at, ctrl, grab)
     }
 
     /// A press released without ever passing the click threshold.
     fn click(edit: RegionEdit, anchor_us: i64) -> RegionDrag {
-        RegionDrag { moved: false, ..drag(edit, anchor_us, anchor_us) }
+        RegionDrag {
+            moved: false,
+            ..drag(edit, anchor_us, anchor_us)
+        }
     }
 
     /// Three regions the removal gestures pick from, each wide enough that a
@@ -1733,7 +2003,10 @@ mod tests {
         let base = three_regions();
         let (edit, at) = ruler_press(&base, ruler_x(8500), true);
         assert!(matches!(edit, RegionEdit::Remove { index: 1 }));
-        assert_eq!(regions(&click(edit, at).released(&base)), [(6000, 7000), (10_000, 11_000)]);
+        assert_eq!(
+            regions(&click(edit, at).released(&base)),
+            [(6000, 7000), (10_000, 11_000)]
+        );
     }
 
     #[test]
@@ -1758,15 +2031,28 @@ mod tests {
     /// grip is grabbable at `x`, and ctrl agrees on which region it belongs to.
     fn assert_grip_removes_region_1(x: f32) {
         let base = three_regions();
-        assert!(matches!(ruler_press(&base, x, false).0, RegionEdit::Resize { index: 1 }), "{x}");
+        assert!(
+            matches!(
+                ruler_press(&base, x, false).0,
+                RegionEdit::Resize { index: 1 }
+            ),
+            "{x}"
+        );
         let (edit, at) = ruler_press(&base, x, true);
         assert!(matches!(edit, RegionEdit::Remove { index: 1 }), "at x={x}");
-        assert_eq!(regions(&click(edit, at).released(&base)), [(6000, 7000), (10_000, 11_000)]);
+        assert_eq!(
+            regions(&click(edit, at).released(&base)),
+            [(6000, 7000), (10_000, 11_000)]
+        );
     }
 
     #[test]
     fn a_ctrl_press_in_a_grips_outer_half_removes_its_region() {
-        assert_eq!((ruler_x(8000), ruler_x(9000)), REGION_1_EDGES_PX, "the fixture's drawn edges");
+        assert_eq!(
+            (ruler_x(8000), ruler_x(9000)),
+            REGION_1_EDGES_PX,
+            "the fixture's drawn edges"
+        );
         let (left, right) = REGION_1_EDGES_PX;
         // Outside the region's own stretch of time, so only the grip holds them.
         assert_grip_removes_region_1(left - 2.0);
@@ -1791,11 +2077,18 @@ mod tests {
     fn a_ctrl_press_beyond_a_grips_reach_leaves_the_selection_untouched() {
         let base = three_regions();
         let (left, right) = REGION_1_EDGES_PX;
-        assert_eq!(EDGE_GRAB_PX, 4.0, "the reach the probes below are placed just outside");
+        assert_eq!(
+            EDGE_GRAB_PX, 4.0,
+            "the reach the probes below are placed just outside"
+        );
         for x in [left - 5.0, right + 5.0] {
             let (edit, at) = ruler_press(&base, x, true);
             assert!(matches!(edit, RegionEdit::Union), "at x={x}");
-            assert_eq!(regions(&click(edit, at).released(&base)), regions(&base), "at x={x}");
+            assert_eq!(
+                regions(&click(edit, at).released(&base)),
+                regions(&base),
+                "at x={x}"
+            );
         }
     }
 
@@ -1803,7 +2096,10 @@ mod tests {
     fn a_removal_that_passes_the_click_threshold_still_removes_its_region() {
         let base = three_regions();
         let dragged = drag(RegionEdit::Remove { index: 1 }, 8500, 12_000);
-        assert_eq!(regions(&dragged.released(&base)), [(6000, 7000), (10_000, 11_000)]);
+        assert_eq!(
+            regions(&dragged.released(&base)),
+            [(6000, 7000), (10_000, 11_000)]
+        );
     }
 
     /// The instant of the gap between the first two of [`three_regions`], far
@@ -1822,7 +2118,10 @@ mod tests {
     fn a_ctrl_click_outside_every_region_leaves_the_selection_untouched() {
         let base = three_regions();
         let (edit, at) = ruler_press(&base, ruler_x(IN_THE_GAP_US), true);
-        assert!(matches!(edit, RegionEdit::Union), "it found no region to take away");
+        assert!(
+            matches!(edit, RegionEdit::Union),
+            "it found no region to take away"
+        );
         assert_eq!(regions(&click(edit, at).released(&base)), regions(&base));
     }
 
@@ -1840,7 +2139,10 @@ mod tests {
         let (edit, at) = ruler_press(&base, ruler_x(IN_THE_GAP_US), true);
         assert!(matches!(edit, RegionEdit::Union));
         let sel = drag(edit, at, 7800).released(&base);
-        assert_eq!(regions(&sel), [(6000, 7000), (7500, 7800), (8000, 9000), (10_000, 11_000)]);
+        assert_eq!(
+            regions(&sel),
+            [(6000, 7000), (7500, 7800), (8000, 9000), (10_000, 11_000)]
+        );
     }
 
     #[test]
@@ -1864,7 +2166,10 @@ mod tests {
         let base = three_regions();
         let (edit, at) = region_press(&base, 8500, true, Grab::Lanes);
         assert!(matches!(edit, RegionEdit::Remove { index: 1 }));
-        assert_eq!(regions(&click(edit, at).released(&base)), [(6000, 7000), (10_000, 11_000)]);
+        assert_eq!(
+            regions(&click(edit, at).released(&base)),
+            [(6000, 7000), (10_000, 11_000)]
+        );
     }
 
     #[test]
@@ -1881,7 +2186,11 @@ mod tests {
         // The edge margin the pan reaches into lies outside the profile.
         assert_eq!(time_at_x(TEST_VIEW, span, -EDGE_MARGIN_PX), span.start_us);
         assert_eq!(
-            time_at_x(TEST_VIEW, span, TEST_VIEW.x_of(span.end_us) + EDGE_MARGIN_PX),
+            time_at_x(
+                TEST_VIEW,
+                span,
+                TEST_VIEW.x_of(span.end_us) + EDGE_MARGIN_PX
+            ),
             span.end_us
         );
         let inside = (span.start_us + span.end_us) / 2;

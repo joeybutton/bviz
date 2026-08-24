@@ -3,8 +3,8 @@ use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 
 use bviz_parallel::worker_count;
 use bviz_trace_profile::{
-    encloses, occupied_span, Profile, Slice, SliceDetail, Span32, SpanRole, Str, ThreadTrack,
-    TimeSpan, Workload,
+    Profile, Slice, SliceDetail, Span32, SpanRole, Str, ThreadTrack, TimeSpan, Workload, encloses,
+    occupied_span,
 };
 use rayon::iter::{IntoParallelRefIterator, IntoParallelRefMutIterator, ParallelIterator};
 use rayon::slice::{ParallelSlice, ParallelSliceMut};
@@ -142,10 +142,7 @@ fn scan(
     });
 
     let (by_text, mnemonics) = merge_shards(shards);
-    (
-        build_ranks(&by_text),
-        build_index(&by_text, &mnemonics),
-    )
+    (build_ranks(&by_text), build_index(&by_text, &mnemonics))
 }
 
 /// Merge the per-worker scan shards into one text→handle map and one
@@ -200,10 +197,7 @@ fn build_ranks<'p>(by_text: &FxHashMap<&'p str, Str>) -> Ranks {
 /// handle. A name seen only on unadmitted lanes has no noted handle and needs
 /// no handle-keyed entry: only a walked — hence noted — slice's name is ever
 /// looked up by handle, while text-keyed lookups cover every name.
-fn build_index(
-    by_text: &FxHashMap<&str, Str>,
-    mnemonics: &FxHashMap<&str, &str>,
-) -> MnemonicIndex {
+fn build_index(by_text: &FxHashMap<&str, Str>, mnemonics: &FxHashMap<&str, &str>) -> MnemonicIndex {
     let name_to_mnemonic: Vec<(&str, Str)> =
         mnemonics.iter().map(|(&n, &m)| (n, by_text[m])).collect();
     let by_name = name_to_mnemonic
@@ -758,7 +752,10 @@ impl TrackFlamer {
             for (node_idx, node) in table.nodes.iter().enumerate() {
                 elems.push(KeyRef {
                     key: &table.key_pool[node.key.range()],
-                    src: Src { lane: i as u32, node: node_idx as u32 },
+                    src: Src {
+                        lane: i as u32,
+                        node: node_idx as u32,
+                    },
                 });
             }
         }
@@ -830,7 +827,10 @@ fn build_lane_tables(
             tables[i] = Some(table);
         }
     }
-    tables.into_iter().map(|t| t.expect("every lane built")).collect()
+    tables
+        .into_iter()
+        .map(|t| t.expect("every lane built"))
+        .collect()
 }
 
 /// Reduce lane `lane_index` to its [`LaneTable`]: emit one keyed row per span,
@@ -948,7 +948,10 @@ impl Arena {
             ArenaNode {
                 name: ROOT_LABEL,
                 rank: 0,
-                role: SpanRole { workload: Workload::Other, payload: false },
+                role: SpanRole {
+                    workload: Workload::Other,
+                    payload: false,
+                },
                 detail: false,
                 total_us: 0,
                 count: 0,
@@ -1264,7 +1267,15 @@ fn sort_child_ranges(kids: &mut ArenaChildren, n: usize, arena: &Arena) {
 fn seal_arena(profile: &Arc<Profile>, arena: Arena, mut kids: ArenaChildren) -> FlameGraph {
     let n = arena.len();
     sort_child_ranges(&mut kids, n, &arena);
-    let Arena { name, rank, role, detail, total_us, count, parents } = arena;
+    let Arena {
+        name,
+        rank,
+        role,
+        detail,
+        total_us,
+        count,
+        parents,
+    } = arena;
 
     let mut depth = vec![0u32; n];
     let mut max_depth = 0u32;
@@ -1337,7 +1348,10 @@ fn reconstruct(elems: &[KeyRef], node_of: impl Fn(&[KeyRef]) -> ArenaNode) -> Ar
     // One node per maximal run of equal keys, and the root.
     let nodes = 1
         + usize::from(!elems.is_empty())
-        + elems.par_windows(2).filter(|w| w[0].key != w[1].key).count();
+        + elems
+            .par_windows(2)
+            .filter(|w| w[0].key != w[1].key)
+            .count();
     let mut arena = Arena::with_capacity(nodes);
     // `stack[d]` holds the arena index of the current path's depth-`d` node; the
     // root seeds depth 0. A node at depth `d` finds its parent at `stack[d - 1]`,
@@ -1543,7 +1557,11 @@ fn reconstruct_chains(
     }
     // The synthetic root spans no frame, so it carries the summed time alone.
     arena.count[0] = 0;
-    debug_assert_eq!(arena.len(), nodes, "the prefix scan's node count must be exact");
+    debug_assert_eq!(
+        arena.len(),
+        nodes,
+        "the prefix scan's node count must be exact"
+    );
     arena
 }
 
@@ -1576,7 +1594,10 @@ pub(crate) fn invert(graph: FlameGraph) -> FlameGraph {
     let mut elems: Vec<ChainRef> = Vec::with_capacity(contributors);
     for i in 1..n {
         if contributes(&graph, i) {
-            elems.push(ChainRef { key: keys.key(i), src: i as u32 });
+            elems.push(ChainRef {
+                key: keys.key(i),
+                src: i as u32,
+            });
         }
     }
     elems.par_sort_by(|a, b| a.key.cmp(b.key));
@@ -1630,13 +1651,29 @@ pub(crate) fn invert(graph: FlameGraph) -> FlameGraph {
 /// the proportional division holds precision at deep zoom, and each box is
 /// clamped to a viewport-sized margin so no huge value reaches its `f32` fields.
 /// Boxes come back in paint order, parents before children.
-pub fn lay_out_flame(graph: &FlameGraph, content_w: f64, placement: FlamePlacement) -> Vec<FlameBox> {
+pub fn lay_out_flame(
+    graph: &FlameGraph,
+    content_w: f64,
+    placement: FlamePlacement,
+) -> Vec<FlameBox> {
     let mut out = Vec::new();
     let mut covered = vec![f64::NEG_INFINITY; graph.max_depth as usize + 1];
-    let content = Span { x: 0.0, w: content_w };
+    let content = Span {
+        x: 0.0,
+        w: content_w,
+    };
     let root = in_view(content, placement.scroll_x);
     if let Some(paint) = painted(root, covered[0], placement.min_px as f64) {
-        place(graph, 0, 0, content, paint, placement, &mut covered, &mut out);
+        place(
+            graph,
+            0,
+            0,
+            content,
+            paint,
+            placement,
+            &mut covered,
+            &mut out,
+        );
     }
     out
 }
@@ -1653,7 +1690,10 @@ pub struct FlamePlacement<'a> {
 
 /// A content-pixel span in viewport coordinates.
 fn in_view(content: Span, scroll_x: f64) -> Span {
-    Span { x: content.x - scroll_x, w: content.w }
+    Span {
+        x: content.x - scroll_x,
+        w: content.w,
+    }
 }
 
 /// Emit `idx`'s box at `paint`, the viewport span it is drawn at — for a marker,
@@ -1670,7 +1710,12 @@ fn place(
     covered: &mut [f64],
     out: &mut Vec<FlameBox>,
 ) {
-    let FlamePlacement { scroll_x, view_w, metrics, min_px } = placement;
+    let FlamePlacement {
+        scroll_x,
+        view_w,
+        metrics,
+        min_px,
+    } = placement;
     let (min, view_w) = (min_px as f64, view_w as f64);
     if paint.end() <= 0.0 || paint.x >= view_w {
         return;
@@ -1681,7 +1726,14 @@ fn place(
     // small.
     let px = paint.x.max(-view_w);
     let pr = paint.end().min(2.0 * view_w);
-    out.push(box_of(graph, idx, depth, px as f32, (pr - px) as f32, metrics));
+    out.push(box_of(
+        graph,
+        idx,
+        depth,
+        px as f32,
+        (pr - px) as f32,
+        metrics,
+    ));
     let width = graph.width_us(idx);
     if width == 0 {
         return;
@@ -1692,7 +1744,10 @@ fn place(
     let mut i = 0;
     while i < graph.child_count(idx) {
         let child = graph.child_id(idx, i);
-        let cc = Span { x: cursor, w: child_w(child) };
+        let cc = Span {
+            x: cursor,
+            w: child_w(child),
+        };
         let Some(slot) = painted(in_view(cc, scroll_x), covered[row], min) else {
             cursor = cc.end();
             i += 1;
@@ -1705,7 +1760,16 @@ fn place(
             continue;
         }
         let run = deepest_in_slot(graph, idx, i, cc, slot, scroll_x, min, &child_w);
-        place(graph, run.best, depth + 1, run.content, slot, placement, covered, out);
+        place(
+            graph,
+            run.best,
+            depth + 1,
+            run.content,
+            slot,
+            placement,
+            covered,
+            out,
+        );
         cursor = run.cursor;
         i = run.next;
     }
@@ -1744,7 +1808,10 @@ fn deepest_in_slot(
     let mut next = start + 1;
     while next < graph.child_count(parent) {
         let child = graph.child_id(parent, next);
-        let cc = Span { x: cursor, w: child_w(child) };
+        let cc = Span {
+            x: cursor,
+            w: child_w(child),
+        };
         if painted(in_view(cc, scroll_x), slot.end(), min).is_some() {
             break;
         }
@@ -1754,7 +1821,12 @@ fn deepest_in_slot(
         cursor = cc.end();
         next += 1;
     }
-    Run { best, content, cursor, next }
+    Run {
+        best,
+        content,
+        cursor,
+        next,
+    }
 }
 
 fn box_of(
@@ -2003,7 +2075,10 @@ mod tests {
         )]);
         let named = flame_as(&p, FlameLabels::Name);
         assert_eq!(named.children(&named.root()).len(), 2);
-        assert_eq!(child(&named, &named.root(), "Compiling //a:a").total_us, 100);
+        assert_eq!(
+            child(&named, &named.root(), "Compiling //a:a").total_us,
+            100
+        );
         assert_eq!(child(&named, &named.root(), "Compiling //b:b").total_us, 40);
         let merged = flame_as(&p, FlameLabels::Mnemonic);
         assert_eq!(merged.children(&merged.root()).len(), 1);
@@ -2105,16 +2180,19 @@ mod tests {
         };
         let analysis = class(LaneClass::Analysis);
         assert_eq!(analysis.root().total_us, 20);
-        assert!(analysis
-            .children(&analysis.root())
-            .iter()
-            .all(|c| analysis.str(c.name) == "CppCompile"));
+        assert!(
+            analysis
+                .children(&analysis.root())
+                .iter()
+                .all(|c| analysis.str(c.name) == "CppCompile")
+        );
         let exec = class(LaneClass::Execution);
         assert_eq!(exec.root().total_us, 40);
-        assert!(exec
-            .children(&exec.root())
-            .iter()
-            .all(|c| exec.str(c.name) == "Rustc"));
+        assert!(
+            exec.children(&exec.root())
+                .iter()
+                .all(|c| exec.str(c.name) == "Rustc")
+        );
         let loading = class(LaneClass::RepoFetch);
         assert_eq!(loading.root().total_us, 5);
         // Every real lane, the three classes unioned.
@@ -2143,7 +2221,11 @@ mod tests {
         let p = clipping_profile();
         for labels in [FlameLabels::Mnemonic, FlameLabels::Name] {
             let whole = flame_within(&p, labels, &window(&[(0, 250)]));
-            assert_eq!(resolved(&whole), resolved(&flame_as(&p, labels)), "{labels:?}");
+            assert_eq!(
+                resolved(&whole),
+                resolved(&flame_as(&p, labels)),
+                "{labels:?}"
+            );
         }
     }
 
@@ -2162,7 +2244,11 @@ mod tests {
         let span = p.span();
         for labels in [FlameLabels::Mnemonic, FlameLabels::Name] {
             let whole = flame_within(&p, labels, &window(&[(span.start_us, span.end_us)]));
-            assert_eq!(resolved(&whole), resolved(&flame_as(&p, labels)), "{labels:?}");
+            assert_eq!(
+                resolved(&whole),
+                resolved(&flame_as(&p, labels)),
+                "{labels:?}"
+            );
         }
     }
 
@@ -2311,7 +2397,10 @@ mod tests {
         let apart = flame(&lane(92));
         assert_eq!(
             child_totals(&apart, &apart.root()),
-            [("_cc_library_impl".to_owned(), 100), ("_compile".to_owned(), 92)]
+            [
+                ("_cc_library_impl".to_owned(), 100),
+                ("_compile".to_owned(), 92)
+            ]
         );
     }
 
@@ -2642,10 +2731,21 @@ mod tests {
                 })
                 .collect::<Vec<_>>()
         };
-        let a = flame(&profile(vec![track(1, LaneClass::Execution, slices(false))]));
+        let a = flame(&profile(vec![track(
+            1,
+            LaneClass::Execution,
+            slices(false),
+        )]));
         let b = flame(&profile(vec![track(1, LaneClass::Execution, slices(true))]));
-        let c = flame(&profile(vec![track(1, LaneClass::Execution, slices(false))]));
-        assert!(a.nodes().len() > (1 << 13), "profile must cross the parallel threshold");
+        let c = flame(&profile(vec![track(
+            1,
+            LaneClass::Execution,
+            slices(false),
+        )]));
+        assert!(
+            a.nodes().len() > (1 << 13),
+            "profile must cross the parallel threshold"
+        );
         assert_eq!(resolved(&a), resolved(&b), "independent of input order");
         assert_eq!(resolved(&a), resolved(&c), "deterministic across builds");
     }
@@ -2665,7 +2765,10 @@ mod tests {
         let node = |total_us: i64| ArenaNode {
             name: ROOT_LABEL,
             rank: 0,
-            role: SpanRole { workload: Workload::Other, payload: false },
+            role: SpanRole {
+                workload: Workload::Other,
+                payload: false,
+            },
             detail: false,
             total_us,
             count: 0,
@@ -2771,12 +2874,18 @@ mod tests {
             [
                 (
                     "x".to_owned(),
-                    SpanRole { workload: Workload::Subprocess, payload: true },
+                    SpanRole {
+                        workload: Workload::Subprocess,
+                        payload: true
+                    },
                     50
                 ),
                 (
                     "x".to_owned(),
-                    SpanRole { workload: Workload::Scheduling, payload: false },
+                    SpanRole {
+                        workload: Workload::Scheduling,
+                        payload: false
+                    },
                     50
                 )
             ]
@@ -2795,12 +2904,20 @@ mod tests {
         let boxes = lay_out_flame(
             &g,
             300.0,
-            FlamePlacement { scroll_x: 0.0, view_w: 300.0, metrics: &METRICS, min_px: 0.0 },
+            FlamePlacement {
+                scroll_x: 0.0,
+                view_w: 300.0,
+                metrics: &METRICS,
+                min_px: 0.0,
+            },
         );
         let root_box = &boxes[0];
         assert_eq!(root_box.w, 300.0);
         assert_eq!(root_box.y, 0.0);
-        let a = boxes.iter().find(|b| g.str(b.name) == "CppCompile").unwrap();
+        let a = boxes
+            .iter()
+            .find(|b| g.str(b.name) == "CppCompile")
+            .unwrap();
         let b = boxes.iter().find(|b| g.str(b.name) == "Rustc").unwrap();
         assert_eq!(a.w, 200.0);
         assert_eq!(b.w, 100.0);
@@ -2829,7 +2946,12 @@ mod tests {
         let boxes = lay_out_flame(
             &g,
             100.0,
-            FlamePlacement { scroll_x: 0.0, view_w: 100.0, metrics: &METRICS, min_px: 1.0 },
+            FlamePlacement {
+                scroll_x: 0.0,
+                view_w: 100.0,
+                metrics: &METRICS,
+                min_px: 1.0,
+            },
         );
         let wide = boxes.iter().find(|b| g.str(b.name) == "wide").unwrap();
         // Wide keeps its proportional slot at the left.
@@ -2862,7 +2984,12 @@ mod tests {
         let boxes = lay_out_flame(
             &g,
             100.0,
-            FlamePlacement { scroll_x: 0.0, view_w: 100.0, metrics: &METRICS, min_px: 1.0 },
+            FlamePlacement {
+                scroll_x: 0.0,
+                view_w: 100.0,
+                metrics: &METRICS,
+                min_px: 1.0,
+            },
         );
         assert!(boxes.iter().any(|b| g.str(b.name) == "pad"));
         assert!(boxes.iter().any(|b| g.str(b.name) == "deep"));
@@ -2895,7 +3022,12 @@ mod tests {
         let boxes = lay_out_flame(
             &g,
             content_w,
-            FlamePlacement { scroll_x: 0.0, view_w: 100.0, metrics: &METRICS, min_px: 1.0 },
+            FlamePlacement {
+                scroll_x: 0.0,
+                view_w: 100.0,
+                metrics: &METRICS,
+                min_px: 1.0,
+            },
         );
         assert_gapless(&painted_row(&boxes, 1), 0.0, content_w as f32);
     }
@@ -2927,7 +3059,12 @@ mod tests {
         let boxes = lay_out_flame(
             &g,
             6.625,
-            FlamePlacement { scroll_x: 0.0, view_w: 100.0, metrics: &METRICS, min_px: 1.0 },
+            FlamePlacement {
+                scroll_x: 0.0,
+                view_w: 100.0,
+                metrics: &METRICS,
+                min_px: 1.0,
+            },
         );
         assert_gapless(&painted_row(&boxes, 2), 0.0, 6.5);
     }
@@ -2947,7 +3084,12 @@ mod tests {
         let boxes = lay_out_flame(
             &g,
             1000.0,
-            FlamePlacement { scroll_x: 600.0, view_w: 400.0, metrics: &METRICS, min_px: 1.0 },
+            FlamePlacement {
+                scroll_x: 600.0,
+                view_w: 400.0,
+                metrics: &METRICS,
+                min_px: 1.0,
+            },
         );
         assert!(!boxes.iter().any(|b| g.str(b.name) == "left"));
         let right = boxes.iter().find(|b| g.str(b.name) == "right").unwrap();
@@ -2989,9 +3131,15 @@ mod tests {
             ],
         )]);
         let g = flame(&p);
-        assert_eq!(child(&g, &child(&g, &g.root(), "Rustc"), "Action.execute").depth, 2);
+        assert_eq!(
+            child(&g, &child(&g, &g.root(), "Rustc"), "Action.execute").depth,
+            2
+        );
         assert_eq!(flame_height(&g, &METRICS), 40.0);
-        assert_eq!(flame_height(&flame_as(&p, FlameLabels::Name), &METRICS), 30.0);
+        assert_eq!(
+            flame_height(&flame_as(&p, FlameLabels::Name), &METRICS),
+            30.0
+        );
     }
 
     #[test]
@@ -3160,10 +3308,7 @@ mod tests {
         assert!(g.children(&target).is_empty());
         // The action frame's own time ends on the same target one level up.
         let own = child(&g, &g.root(), "Rustc");
-        assert_eq!(
-            child_totals(&g, &own),
-            [("Compiling //x:y".to_owned(), 20)]
-        );
+        assert_eq!(child_totals(&g, &own), [("Compiling //x:y".to_owned(), 20)]);
     }
 
     #[test]
@@ -3313,7 +3458,10 @@ mod tests {
         let a = invert_of(false);
         let b = invert_of(true);
         let c = invert_of(false);
-        assert!(a.nodes().len() > (1 << 13), "graph must cross the parallel threshold");
+        assert!(
+            a.nodes().len() > (1 << 13),
+            "graph must cross the parallel threshold"
+        );
         assert_eq!(resolved(&a), resolved(&b), "independent of input order");
         assert_eq!(resolved(&a), resolved(&c), "deterministic across builds");
         // A mis-ordered sort would break the run of equal keys apart, so the one

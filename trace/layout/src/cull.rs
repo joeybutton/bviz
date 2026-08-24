@@ -70,7 +70,15 @@ pub fn visible_slices(profile: &Profile, layout: &LaneLayout, cull: Cull) -> Vec
         let end_maxes = profile.end_maxes(track);
         let lower = end_maxes[..upper].partition_point(|&e| (e as f64) < view_start_us);
         for (i, s) in slices[lower..upper].iter().enumerate() {
-            emit_slice(s, lane.track, lower + i, cull, rows_top, &mut covered, &mut out);
+            emit_slice(
+                s,
+                lane.track,
+                lower + i,
+                cull,
+                rows_top,
+                &mut covered,
+                &mut out,
+            );
         }
     }
     out

@@ -1,4 +1,4 @@
-use crate::camera::{clamp_pan, pan_range, Camera};
+use crate::camera::{Camera, clamp_pan, pan_range};
 use crate::drag::Drag;
 use crate::{GraphView, Palette};
 use bviz_ui_components::{Axis, DEFAULT_MIN_THUMB, SCROLLBAR_THICKNESS, Scrollbar};
@@ -28,7 +28,10 @@ impl PanAxis {
             Axis::Vertical => (f32::from(viewport.height), content.1 * zoom),
             Axis::Horizontal => (f32::from(viewport.width), content.0 * zoom),
         };
-        PanAxis { viewport_len, content_len }
+        PanAxis {
+            viewport_len,
+            content_len,
+        }
     }
 
     fn range(&self) -> RangeInclusive<f32> {
@@ -85,8 +88,12 @@ fn scrollbar_geom(
     };
     // Where the crossing axis overflows too, stop the track short of its bar so the
     // two don't overlap in the corner.
-    let track_len =
-        along.viewport_len - if across.overflows() { SCROLLBAR_THICKNESS } else { 0.0 };
+    let track_len = along.viewport_len
+        - if across.overflows() {
+            SCROLLBAR_THICKNESS
+        } else {
+            0.0
+        };
     let thickness = px(SCROLLBAR_THICKNESS);
     let track = match axis {
         Axis::Vertical => Bounds::new(
@@ -133,9 +140,9 @@ fn current_scrollbar(view: &GraphView, axis: Axis) -> Option<Scrollbar> {
 /// The axis of the scroll bar whose track a press at `position` (window px) landed
 /// on, or `None` when the press is over the content.
 pub(crate) fn scrollbar_hit(view: &GraphView, position: Point<Pixels>) -> Option<Axis> {
-    [Axis::Vertical, Axis::Horizontal].into_iter().find(|&axis| {
-        current_scrollbar(view, axis).is_some_and(|bar| bar.track_hit(position))
-    })
+    [Axis::Vertical, Axis::Horizontal]
+        .into_iter()
+        .find(|&axis| current_scrollbar(view, axis).is_some_and(|bar| bar.track_hit(position)))
 }
 
 /// Pan `axis` to where its bar's thumb reports `offset`.
@@ -143,14 +150,20 @@ fn scroll_to(view: &mut GraphView, axis: Axis, offset: f32, cx: &mut Context<Gra
     let Some(content) = view.drawn().map(|d| d.content()) else {
         return;
     };
-    let Camera { zoom, pan: (px, py) } = view.camera();
+    let Camera {
+        zoom,
+        pan: (px, py),
+    } = view.camera();
     let vp = view.framing.viewport().size;
     let panc = PanAxis::of(axis, vp, content, zoom).pan_at(offset);
     let pan = match axis {
         Axis::Vertical => (px, panc),
         Axis::Horizontal => (panc, py),
     };
-    view.framing.move_to(Camera { zoom, pan: clamp_pan(pan, zoom, vp, content) });
+    view.framing.move_to(Camera {
+        zoom,
+        pan: clamp_pan(pan, zoom, vp, content),
+    });
     cx.notify();
 }
 
@@ -228,7 +241,10 @@ mod tests {
 
     /// The bar `axis` draws with the pan along it at `pan`.
     fn bar(axis: Axis, zoom: f32, pan: f32) -> Scrollbar {
-        let camera = Camera { zoom, pan: full_pan(axis, pan) };
+        let camera = Camera {
+            zoom,
+            pan: full_pan(axis, pan),
+        };
         scrollbar_geom(axis, viewport(), CONTENT, camera).expect("an overflowing axis draws a bar")
     }
 
@@ -264,7 +280,10 @@ mod tests {
         let zoom = 0.1;
         for axis in [Axis::Vertical, Axis::Horizontal] {
             assert!(!along_axis(axis, zoom).overflows());
-            let camera = Camera { zoom, pan: (0.0, 0.0) };
+            let camera = Camera {
+                zoom,
+                pan: (0.0, 0.0),
+            };
             assert!(scrollbar_geom(axis, viewport(), CONTENT, camera).is_none());
         }
     }
@@ -278,7 +297,10 @@ mod tests {
                 // The bound admits pan past the flush positions, so a bar that
                 // stopped at those would leave the ends below unreachable.
                 let flush = pans.viewport_len - pans.content_len;
-                assert!(*range.end() > 0.0 && *range.start() < flush, "no play to reach");
+                assert!(
+                    *range.end() > 0.0 && *range.start() < flush,
+                    "no play to reach"
+                );
 
                 let bar = bar(axis, zoom, 0.0);
                 let (start, end) = ends(axis, bar.track());
@@ -331,7 +353,10 @@ mod tests {
                 for step in 0..=40 {
                     let along = start + (end - start) * step as f32 / 40.;
                     let pan = dragged_pan(axis, zoom, &bar, along, 0.0);
-                    assert!(pan <= prev + TOL, "zoom {zoom}: the pan turned back at {along}");
+                    assert!(
+                        pan <= prev + TOL,
+                        "zoom {zoom}: the pan turned back at {along}"
+                    );
                     prev = pan;
                 }
             }
@@ -351,7 +376,10 @@ mod tests {
                     // the last grip is the pixel inside that edge.
                     for along in [thumb_start, (thumb_start + thumb_end) / 2., thumb_end - 1.] {
                         let at = cursor(axis, &bar, along);
-                        assert!(bar.thumb_hit(at), "zoom {zoom}: {along} missed its own thumb");
+                        assert!(
+                            bar.thumb_hit(at),
+                            "zoom {zoom}: {along} missed its own thumb"
+                        );
                         let held = dragged_pan(axis, zoom, &bar, along, bar.grab(at));
                         assert!(
                             (held - pan).abs() < TOL,

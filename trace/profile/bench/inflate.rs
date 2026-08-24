@@ -34,7 +34,9 @@ fn isize_trailer(bytes: &[u8]) -> usize {
 }
 
 fn main() {
-    let path = std::env::args().nth(1).expect("usage: bench_inflate <profile.gz>");
+    let path = std::env::args()
+        .nth(1)
+        .expect("usage: bench_inflate <profile.gz>");
     let bytes = std::fs::read(&path).expect("read input");
     let mut buf = vec![0u8; STREAM_BUF_BYTES];
     for round in 0..ROUNDS {

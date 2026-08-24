@@ -15,8 +15,21 @@ use std::ops::Range;
 gpui::actions!(
     text_input,
     [
-        Backspace, Delete, Left, Right, SelectLeft, SelectRight, SelectAll, Home, End, SelectHome,
-        SelectEnd, Copy, Cut, Paste, ShowCharacterPalette
+        Backspace,
+        Delete,
+        Left,
+        Right,
+        SelectLeft,
+        SelectRight,
+        SelectAll,
+        Home,
+        End,
+        SelectHome,
+        SelectEnd,
+        Copy,
+        Cut,
+        Paste,
+        ShowCharacterPalette
     ]
 );
 
@@ -55,7 +68,11 @@ pub struct TextInput {
 }
 
 impl TextInput {
-    pub fn new(cx: &mut Context<Self>, placeholder: impl Into<SharedString>, tab_index: isize) -> Self {
+    pub fn new(
+        cx: &mut Context<Self>,
+        placeholder: impl Into<SharedString>,
+        tab_index: isize,
+    ) -> Self {
         Self {
             focus_handle: cx.focus_handle().tab_index(tab_index).tab_stop(true),
             content: "".into(),
@@ -314,7 +331,8 @@ impl TextInput {
 
     fn splice(&mut self, range: &Range<usize>, new_text: &str) {
         self.content =
-            (self.content[0..range.start].to_owned() + new_text + &self.content[range.end..]).into();
+            (self.content[0..range.start].to_owned() + new_text + &self.content[range.end..])
+                .into();
     }
 }
 
@@ -382,7 +400,8 @@ impl EntityInputHandler for TextInput {
     ) {
         let range = self.replacement_range(range_utf16);
         self.splice(&range, new_text);
-        self.marked_range = (!new_text.is_empty()).then(|| range.start..range.start + new_text.len());
+        self.marked_range =
+            (!new_text.is_empty()).then(|| range.start..range.start + new_text.len());
         self.selected_range = new_selected_range
             .as_ref()
             .map(|r| self.range_from_utf16(r))
@@ -525,8 +544,14 @@ fn cursor_selection_quads(
             None,
             Some(fill(
                 Bounds::from_corners(
-                    point(bounds.left() + line.x_for_index(selected.start), bounds.top()),
-                    point(bounds.left() + line.x_for_index(selected.end), bounds.bottom()),
+                    point(
+                        bounds.left() + line.x_for_index(selected.start),
+                        bounds.top(),
+                    ),
+                    point(
+                        bounds.left() + line.x_for_index(selected.end),
+                        bounds.bottom(),
+                    ),
                 ),
                 selection_color,
             )),
@@ -581,10 +606,18 @@ impl Element for TextElement {
         };
         let runs = ime_marked_runs(text.len(), style.font(), color, input.marked_range.as_ref());
         let font_size = style.font_size.to_pixels(window.rem_size());
-        let line = window.text_system().shape_line(text, font_size, &runs, None);
+        let line = window
+            .text_system()
+            .shape_line(text, font_size, &runs, None);
 
-        let (cursor_quad, selection_quad) =
-            cursor_selection_quads(&line, &selected, cursor, bounds, colors.text, colors.selection);
+        let (cursor_quad, selection_quad) = cursor_selection_quads(
+            &line,
+            &selected,
+            cursor,
+            bounds,
+            colors.text,
+            colors.selection,
+        );
         TextPrepaint {
             line: Some(line),
             cursor: cursor_quad,
@@ -612,8 +645,15 @@ impl Element for TextElement {
             window.paint_quad(selection);
         }
         let line = prepaint.line.take().unwrap();
-        line.paint(bounds.origin, window.line_height(), gpui::TextAlign::Left, None, window, cx)
-            .unwrap();
+        line.paint(
+            bounds.origin,
+            window.line_height(),
+            gpui::TextAlign::Left,
+            None,
+            window,
+            cx,
+        )
+        .unwrap();
         if focus_handle.is_focused(window)
             && let Some(cursor) = prepaint.cursor.take()
         {
@@ -657,7 +697,11 @@ impl Render for TextInput {
             .rounded_md()
             .bg(colors.background)
             .border_1()
-            .border_color(if focused { colors.border_focused } else { colors.border })
+            .border_color(if focused {
+                colors.border_focused
+            } else {
+                colors.border
+            })
             .child(TextElement { input: cx.entity() })
     }
 }

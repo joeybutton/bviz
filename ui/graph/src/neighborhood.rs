@@ -11,7 +11,10 @@ pub(crate) struct Neighborhood {
 
 impl Neighborhood {
     fn none() -> Self {
-        Self { boxes: HashSet::new(), edges: HashSet::new() }
+        Self {
+            boxes: HashSet::new(),
+            edges: HashSet::new(),
+        }
     }
 }
 
@@ -160,7 +163,11 @@ mod tests {
     }
 
     fn leaf(id: u32) -> Box {
-        lbox(id, rect(f64::from(id) * LEAF_PITCH, 0.0, LEAF_WIDTH, LEAF_HEIGHT), false)
+        lbox(
+            id,
+            rect(f64::from(id) * LEAF_PITCH, 0.0, LEAF_WIDTH, LEAF_HEIGHT),
+            false,
+        )
     }
 
     /// A drawing of `boxes` over the connectivity `full`, of which `drawn` is the

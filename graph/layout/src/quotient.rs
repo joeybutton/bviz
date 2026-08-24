@@ -55,7 +55,8 @@ pub fn quotient(
     // Sort by resolved name, not interned id: the integer id depends on the
     // order names were interned, so name-keyed sorting is what makes the output
     // independent of the input order.
-    out.nodes.sort_by(|a, b| names.resolve(a.id).cmp(names.resolve(b.id)));
+    out.nodes
+        .sort_by(|a, b| names.resolve(a.id).cmp(names.resolve(b.id)));
     out.edges.sort_by(|a, b| {
         (names.resolve(a.from), names.resolve(a.to), a.kind).cmp(&(
             names.resolve(b.from),
@@ -139,7 +140,12 @@ fn partition_groups(
 
 /// Emits the quotient's nodes from the [`Partition`]: kept nodes, group leaves,
 /// and group containers with their reparented members.
-fn emit_nodes(out: &mut Graph, graph: &Graph, mergeable: &impl Fn(&Node) -> bool, part: &Partition) {
+fn emit_nodes(
+    out: &mut Graph,
+    graph: &Graph,
+    mergeable: &impl Fn(&Node) -> bool,
+    part: &Partition,
+) {
     let mut emitted: BTreeMap<Id, ()> = BTreeMap::new();
     for node in &graph.nodes {
         if !mergeable(node) {
@@ -324,7 +330,14 @@ mod tests {
     fn sources_with_one_shared_consumer_merge() {
         let mut graph = Graph::new();
         let mut names = Names::default();
-        node(&mut graph, &mut names, "action0", "Compile", Kind::Action, None);
+        node(
+            &mut graph,
+            &mut names,
+            "action0",
+            "Compile",
+            Kind::Action,
+            None,
+        );
         for id in ["source1", "source2", "source3"] {
             leaf(&mut graph, &mut names, id, Kind::Source, None);
             edge(&mut graph, &mut names, id, "action0", EdgeKind::Aquery);
@@ -348,25 +361,74 @@ mod tests {
         node(&mut graph, &mut names, "action1", "B", Kind::Action, None);
         leaf(&mut graph, &mut names, "source1", Kind::Source, None);
         leaf(&mut graph, &mut names, "source2", Kind::Source, None);
-        edge(&mut graph, &mut names, "source1", "action0", EdgeKind::Aquery);
-        edge(&mut graph, &mut names, "source2", "action1", EdgeKind::Aquery);
+        edge(
+            &mut graph,
+            &mut names,
+            "source1",
+            "action0",
+            EdgeKind::Aquery,
+        );
+        edge(
+            &mut graph,
+            &mut names,
+            "source2",
+            "action1",
+            EdgeKind::Aquery,
+        );
 
         let out = collapsed(&graph, &mut names);
 
         assert!(node_ids(&out, &names).contains(&"source1"));
         assert!(node_ids(&out, &names).contains(&"source2"));
-        assert!(!node_ids(&out, &names).iter().any(|id| id.starts_with("group:")));
+        assert!(
+            !node_ids(&out, &names)
+                .iter()
+                .any(|id| id.starts_with("group:"))
+        );
     }
 
     #[test]
     fn artifacts_sharing_producer_and_consumers_merge() {
         let mut graph = Graph::new();
         let mut names = Names::default();
-        node(&mut graph, &mut names, "action0", "Produce", Kind::Action, None);
-        node(&mut graph, &mut names, "action1", "Link", Kind::Action, None);
-        leaf(&mut graph, &mut names, "artifact1", Kind::Artifact, Some("ct"));
-        leaf(&mut graph, &mut names, "artifact2", Kind::Artifact, Some("ct"));
-        node(&mut graph, &mut names, "ct", "cfg", Kind::ConfiguredTarget, None);
+        node(
+            &mut graph,
+            &mut names,
+            "action0",
+            "Produce",
+            Kind::Action,
+            None,
+        );
+        node(
+            &mut graph,
+            &mut names,
+            "action1",
+            "Link",
+            Kind::Action,
+            None,
+        );
+        leaf(
+            &mut graph,
+            &mut names,
+            "artifact1",
+            Kind::Artifact,
+            Some("ct"),
+        );
+        leaf(
+            &mut graph,
+            &mut names,
+            "artifact2",
+            Kind::Artifact,
+            Some("ct"),
+        );
+        node(
+            &mut graph,
+            &mut names,
+            "ct",
+            "cfg",
+            Kind::ConfiguredTarget,
+            None,
+        );
         for id in ["artifact1", "artifact2"] {
             edge(&mut graph, &mut names, "action0", id, EdgeKind::Aquery);
             edge(&mut graph, &mut names, id, "action1", EdgeKind::Aquery);
@@ -393,38 +455,103 @@ mod tests {
         let mut names = Names::default();
         node(&mut graph, &mut names, "action0", "P0", Kind::Action, None);
         node(&mut graph, &mut names, "action1", "P1", Kind::Action, None);
-        node(&mut graph, &mut names, "action2", "Consume", Kind::Action, None);
+        node(
+            &mut graph,
+            &mut names,
+            "action2",
+            "Consume",
+            Kind::Action,
+            None,
+        );
         leaf(&mut graph, &mut names, "artifact1", Kind::Artifact, None);
         leaf(&mut graph, &mut names, "artifact2", Kind::Artifact, None);
-        edge(&mut graph, &mut names, "action0", "artifact1", EdgeKind::Aquery);
-        edge(&mut graph, &mut names, "action1", "artifact2", EdgeKind::Aquery);
-        edge(&mut graph, &mut names, "artifact1", "action2", EdgeKind::Aquery);
-        edge(&mut graph, &mut names, "artifact2", "action2", EdgeKind::Aquery);
+        edge(
+            &mut graph,
+            &mut names,
+            "action0",
+            "artifact1",
+            EdgeKind::Aquery,
+        );
+        edge(
+            &mut graph,
+            &mut names,
+            "action1",
+            "artifact2",
+            EdgeKind::Aquery,
+        );
+        edge(
+            &mut graph,
+            &mut names,
+            "artifact1",
+            "action2",
+            EdgeKind::Aquery,
+        );
+        edge(
+            &mut graph,
+            &mut names,
+            "artifact2",
+            "action2",
+            EdgeKind::Aquery,
+        );
 
         let out = collapsed(&graph, &mut names);
 
         assert!(node_ids(&out, &names).contains(&"artifact1"));
         assert!(node_ids(&out, &names).contains(&"artifact2"));
-        assert!(!node_ids(&out, &names).iter().any(|id| id.starts_with("group:")));
+        assert!(
+            !node_ids(&out, &names)
+                .iter()
+                .any(|id| id.starts_with("group:"))
+        );
     }
 
     #[test]
     fn artifact_container_is_not_merged() {
         let mut graph = Graph::new();
         let mut names = Names::default();
-        node(&mut graph, &mut names, "action0", "Produce", Kind::Action, None);
+        node(
+            &mut graph,
+            &mut names,
+            "action0",
+            "Produce",
+            Kind::Action,
+            None,
+        );
         // Two artifact leaves with identical neighbors would normally merge,
         // but artifact2 is a container (a promoted labeled output holds a
         // configured-target child), which blocks the merge.
         leaf(&mut graph, &mut names, "artifact1", Kind::Artifact, None);
         leaf(&mut graph, &mut names, "artifact2", Kind::Artifact, None);
-        edge(&mut graph, &mut names, "artifact1", "action0", EdgeKind::Aquery);
-        edge(&mut graph, &mut names, "artifact2", "action0", EdgeKind::Aquery);
-        node(&mut graph, &mut names, "ct1", "cfg", Kind::ConfiguredTarget, Some("artifact2"));
+        edge(
+            &mut graph,
+            &mut names,
+            "artifact1",
+            "action0",
+            EdgeKind::Aquery,
+        );
+        edge(
+            &mut graph,
+            &mut names,
+            "artifact2",
+            "action0",
+            EdgeKind::Aquery,
+        );
+        node(
+            &mut graph,
+            &mut names,
+            "ct1",
+            "cfg",
+            Kind::ConfiguredTarget,
+            Some("artifact2"),
+        );
 
         let out = collapsed(&graph, &mut names);
 
-        assert!(!node_ids(&out, &names).iter().any(|id| id.starts_with("group:")));
+        assert!(
+            !node_ids(&out, &names)
+                .iter()
+                .any(|id| id.starts_with("group:"))
+        );
         for id in ["artifact1", "artifact2", "ct1"] {
             assert!(node_ids(&out, &names).contains(&id), "{id} missing");
         }
@@ -434,24 +561,54 @@ mod tests {
     fn source_and_artifact_never_merge() {
         let mut graph = Graph::new();
         let mut names = Names::default();
-        node(&mut graph, &mut names, "action0", "Consume", Kind::Action, None);
+        node(
+            &mut graph,
+            &mut names,
+            "action0",
+            "Consume",
+            Kind::Action,
+            None,
+        );
         leaf(&mut graph, &mut names, "source1", Kind::Source, None);
         leaf(&mut graph, &mut names, "artifact1", Kind::Artifact, None);
-        edge(&mut graph, &mut names, "source1", "action0", EdgeKind::Aquery);
-        edge(&mut graph, &mut names, "artifact1", "action0", EdgeKind::Aquery);
+        edge(
+            &mut graph,
+            &mut names,
+            "source1",
+            "action0",
+            EdgeKind::Aquery,
+        );
+        edge(
+            &mut graph,
+            &mut names,
+            "artifact1",
+            "action0",
+            EdgeKind::Aquery,
+        );
 
         let out = collapsed(&graph, &mut names);
 
         assert!(node_ids(&out, &names).contains(&"source1"));
         assert!(node_ids(&out, &names).contains(&"artifact1"));
-        assert!(!node_ids(&out, &names).iter().any(|id| id.starts_with("group:")));
+        assert!(
+            !node_ids(&out, &names)
+                .iter()
+                .any(|id| id.starts_with("group:"))
+        );
     }
 
     #[test]
     fn output_is_independent_of_insertion_order() {
         let mut a = Graph::new();
         let mut names_a = Names::default();
-        node(&mut a, &mut names_a, "action0", "Compile", Kind::Action, None);
+        node(
+            &mut a,
+            &mut names_a,
+            "action0",
+            "Compile",
+            Kind::Action,
+            None,
+        );
         for id in ["source1", "source2", "source3"] {
             leaf(&mut a, &mut names_a, id, Kind::Source, None);
             edge(&mut a, &mut names_a, id, "action0", EdgeKind::Aquery);
@@ -462,7 +619,14 @@ mod tests {
         for id in ["source3", "source1", "source2"] {
             leaf(&mut b, &mut names_b, id, Kind::Source, None);
         }
-        node(&mut b, &mut names_b, "action0", "Compile", Kind::Action, None);
+        node(
+            &mut b,
+            &mut names_b,
+            "action0",
+            "Compile",
+            Kind::Action,
+            None,
+        );
         edge(&mut b, &mut names_b, "source2", "action0", EdgeKind::Aquery);
         edge(&mut b, &mut names_b, "source3", "action0", EdgeKind::Aquery);
         edge(&mut b, &mut names_b, "source1", "action0", EdgeKind::Aquery);
@@ -478,11 +642,38 @@ mod tests {
     fn containers_and_actions_pass_through() {
         let mut graph = Graph::new();
         let mut names = Names::default();
-        node(&mut graph, &mut names, "target1", "//:t", Kind::Target, None);
-        node(&mut graph, &mut names, "ct", "cfg", Kind::ConfiguredTarget, Some("target1"));
-        node(&mut graph, &mut names, "action0", "Compile", Kind::Action, Some("ct"));
+        node(
+            &mut graph,
+            &mut names,
+            "target1",
+            "//:t",
+            Kind::Target,
+            None,
+        );
+        node(
+            &mut graph,
+            &mut names,
+            "ct",
+            "cfg",
+            Kind::ConfiguredTarget,
+            Some("target1"),
+        );
+        node(
+            &mut graph,
+            &mut names,
+            "action0",
+            "Compile",
+            Kind::Action,
+            Some("ct"),
+        );
         leaf(&mut graph, &mut names, "source1", Kind::Source, None);
-        edge(&mut graph, &mut names, "source1", "action0", EdgeKind::Aquery);
+        edge(
+            &mut graph,
+            &mut names,
+            "source1",
+            "action0",
+            EdgeKind::Aquery,
+        );
 
         let out = collapsed(&graph, &mut names);
 
@@ -496,7 +687,14 @@ mod tests {
     fn expanded_group_becomes_container_holding_its_members() {
         let mut graph = Graph::new();
         let mut names = Names::default();
-        node(&mut graph, &mut names, "action0", "Compile", Kind::Action, None);
+        node(
+            &mut graph,
+            &mut names,
+            "action0",
+            "Compile",
+            Kind::Action,
+            None,
+        );
         for id in ["source1", "source2", "source3"] {
             leaf(&mut graph, &mut names, id, Kind::Source, None);
             edge(&mut graph, &mut names, id, "action0", EdgeKind::Aquery);
@@ -514,7 +712,10 @@ mod tests {
         for id in ["source1", "source2", "source3"] {
             let member = find(&out, &names, id);
             assert_eq!(member.kind, Kind::Source);
-            assert_eq!(member.parent.map(|p| names.resolve(p)), Some("group:source1"));
+            assert_eq!(
+                member.parent.map(|p| names.resolve(p)),
+                Some("group:source1")
+            );
         }
         // Member edges keep their original endpoints (no group: remap).
         assert_eq!(
@@ -531,7 +732,14 @@ mod tests {
     fn expanded_set_naming_a_non_group_leaves_collapse_unchanged() {
         let mut graph = Graph::new();
         let mut names = Names::default();
-        node(&mut graph, &mut names, "action0", "Compile", Kind::Action, None);
+        node(
+            &mut graph,
+            &mut names,
+            "action0",
+            "Compile",
+            Kind::Action,
+            None,
+        );
         for id in ["source1", "source2", "source3"] {
             leaf(&mut graph, &mut names, id, Kind::Source, None);
             edge(&mut graph, &mut names, id, "action0", EdgeKind::Aquery);
@@ -569,11 +777,15 @@ mod tests {
         // First group is a container with its members.
         assert_eq!(find(&out, &names, "group:source1").kind, Kind::Group);
         assert_eq!(
-            find(&out, &names, "source1").parent.map(|p| names.resolve(p)),
+            find(&out, &names, "source1")
+                .parent
+                .map(|p| names.resolve(p)),
             Some("group:source1")
         );
         assert_eq!(
-            find(&out, &names, "source2").parent.map(|p| names.resolve(p)),
+            find(&out, &names, "source2")
+                .parent
+                .map(|p| names.resolve(p)),
             Some("group:source1")
         );
         // Second group collapses to a single source leaf.
@@ -594,7 +806,14 @@ mod tests {
     fn expanded_output_is_independent_of_insertion_order() {
         let mut a = Graph::new();
         let mut names_a = Names::default();
-        node(&mut a, &mut names_a, "action0", "Compile", Kind::Action, None);
+        node(
+            &mut a,
+            &mut names_a,
+            "action0",
+            "Compile",
+            Kind::Action,
+            None,
+        );
         for id in ["source1", "source2", "source3"] {
             leaf(&mut a, &mut names_a, id, Kind::Source, None);
             edge(&mut a, &mut names_a, id, "action0", EdgeKind::Aquery);
@@ -605,7 +824,14 @@ mod tests {
         for id in ["source3", "source1", "source2"] {
             leaf(&mut b, &mut names_b, id, Kind::Source, None);
         }
-        node(&mut b, &mut names_b, "action0", "Compile", Kind::Action, None);
+        node(
+            &mut b,
+            &mut names_b,
+            "action0",
+            "Compile",
+            Kind::Action,
+            None,
+        );
         edge(&mut b, &mut names_b, "source2", "action0", EdgeKind::Aquery);
         edge(&mut b, &mut names_b, "source3", "action0", EdgeKind::Aquery);
         edge(&mut b, &mut names_b, "source1", "action0", EdgeKind::Aquery);

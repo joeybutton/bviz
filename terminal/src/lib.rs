@@ -46,7 +46,7 @@ pub use alacritty_terminal::grid::Scroll;
 pub use alacritty_terminal::index::Side;
 pub use alacritty_terminal::selection::SelectionType;
 pub use display::{CellPos, DisplaySource, SelectionSpan, Terminal, Url};
-pub use output::{parse, BuildOutput};
+pub use output::{BuildOutput, parse};
 pub use replay::Replay;
 
 /// The terminal cell and its styling vocabulary, re-exported from

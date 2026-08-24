@@ -355,13 +355,23 @@ impl TerminalView {
 
     /// Grabbing the thumb keeps the cursor at the same spot on it, while
     /// clicking the track jumps the thumb's center to the cursor.
-    fn begin_scrollbar_drag(&mut self, bar: Scrollbar, position: Point<Pixels>, cx: &mut Context<Self>) {
+    fn begin_scrollbar_drag(
+        &mut self,
+        bar: Scrollbar,
+        position: Point<Pixels>,
+        cx: &mut Context<Self>,
+    ) {
         self.drag_grab = Some(bar.grab(position));
         self.drag_to(position, cx);
     }
 
     /// A press on the content focuses it and begins a text selection.
-    fn begin_selection(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+    fn begin_selection(
+        &mut self,
+        event: &MouseDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.body_focus.focus(window, cx);
         let Some((column, row, side)) = self.cell_at(event.position) else {
             return;
@@ -978,12 +988,7 @@ impl TerminalView {
                 .icon("skip-forward"),
             )
             .child(self.render_scrubber(fraction, colors, cx))
-            .child(
-                div()
-                    .w(px(128.))
-                    .text_size(px(12.))
-                    .child(readout),
-            )
+            .child(div().w(px(128.)).text_size(px(12.)).child(readout))
             .child(self.speed_dropdown.clone())
             .into_any_element()
     }

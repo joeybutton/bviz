@@ -17,7 +17,12 @@ pub(crate) struct Rect {
 impl Rect {
     /// The rect a laid-out box spans.
     pub(crate) fn of(b: &bviz_graph_layout::Box) -> Rect {
-        Rect { x: b.x, y: b.y, w: b.width, h: b.height }
+        Rect {
+            x: b.x,
+            y: b.y,
+            w: b.width,
+            h: b.height,
+        }
     }
 
     /// Whether the two rectangles meet, counting a shared edge.
@@ -44,7 +49,9 @@ impl Rect {
 
     /// Whether any leg of the polyline `points` runs through this rectangle.
     pub(crate) fn crossed_by(&self, points: &[(f64, f64)]) -> bool {
-        points.windows(2).any(|leg| self.crossed_by_leg(leg[0], leg[1]))
+        points
+            .windows(2)
+            .any(|leg| self.crossed_by_leg(leg[0], leg[1]))
     }
 
     /// Liang–Barsky: the segment reaches the rectangle while the stretch of it
@@ -82,7 +89,12 @@ impl Rect {
 pub(crate) fn visible_rect(bounds: Bounds<Pixels>, camera: Camera) -> Rect {
     let (x0, y0) = from_screen(bounds.origin, bounds.origin, camera);
     let (x1, y1) = from_screen(bounds.bottom_right(), bounds.origin, camera);
-    Rect { x: x0 as f64, y: y0 as f64, w: (x1 - x0) as f64, h: (y1 - y0) as f64 }
+    Rect {
+        x: x0 as f64,
+        y: y0 as f64,
+        w: (x1 - x0) as f64,
+        h: (y1 - y0) as f64,
+    }
 }
 
 /// An in-flight ease of the view from one zoom/pan to another, so a toggle's
@@ -117,7 +129,11 @@ pub(crate) fn to_screen(x: f64, y: f64, bounds: Bounds<Pixels>, camera: Camera) 
 }
 
 /// Inverse of [`to_screen`]: maps a window-space point back to layout space.
-pub(crate) fn from_screen(screen: Point<Pixels>, origin: Point<Pixels>, camera: Camera) -> (f32, f32) {
+pub(crate) fn from_screen(
+    screen: Point<Pixels>,
+    origin: Point<Pixels>,
+    camera: Camera,
+) -> (f32, f32) {
     let Camera { zoom, pan } = camera;
     (
         (f32::from(screen.x) - f32::from(origin.x) - pan.0) / zoom - MARGIN as f32,
@@ -159,7 +175,12 @@ pub(crate) fn pan_range(vp: f32, extent: f32) -> RangeInclusive<f32> {
 /// Clamps `pan` into the range each axis admits, so the graph can never be moved
 /// out of view — the panning counterpart to the fit-zoom floor that bounds
 /// zoom-out.
-pub(crate) fn clamp_pan(pan: (f32, f32), zoom: f32, viewport: Size<Pixels>, content: (f32, f32)) -> (f32, f32) {
+pub(crate) fn clamp_pan(
+    pan: (f32, f32),
+    zoom: f32,
+    viewport: Size<Pixels>,
+    content: (f32, f32),
+) -> (f32, f32) {
     let axis = |p: f32, vp: f32, extent: f32| {
         let range = pan_range(vp, extent);
         p.clamp(*range.start(), *range.end())
@@ -187,15 +208,25 @@ pub(crate) fn zoom_step(
     let ly = f32::from(cursor.y) - f32::from(viewport.origin.y);
     let scaled =
         (zoom * ZOOM_PER_NOTCH.powf(notches)).clamp(fit_zoom(viewport.size, content), MAX_ZOOM);
-    let anchored = (lx - (lx - pan.0) / zoom * scaled, ly - (ly - pan.1) / zoom * scaled);
-    Camera { zoom: scaled, pan: clamp_pan(anchored, scaled, viewport.size, content) }
+    let anchored = (
+        lx - (lx - pan.0) / zoom * scaled,
+        ly - (ly - pan.1) / zoom * scaled,
+    );
+    Camera {
+        zoom: scaled,
+        pan: clamp_pan(anchored, scaled, viewport.size, content),
+    }
 }
 
 /// Ids of the boxes the viewport fully encloses at the given zoom and pan. The
 /// view-settling that follows a toggle keeps these in frame; a partly-clipped
 /// box (or one larger than the viewport) is left out, so a big container the
 /// user only saw part of does not force the whole graph back into view.
-pub(crate) fn enclosed_boxes(boxes: &[bviz_graph_layout::Box], viewport: Size<Pixels>, camera: Camera) -> Vec<Id> {
+pub(crate) fn enclosed_boxes(
+    boxes: &[bviz_graph_layout::Box],
+    viewport: Size<Pixels>,
+    camera: Camera,
+) -> Vec<Id> {
     let Camera { zoom, pan } = camera;
     let (vw, vh) = (f32::from(viewport.width), f32::from(viewport.height));
     boxes
@@ -241,14 +272,25 @@ pub(crate) fn settle_view(
     pan: (f32, f32),
 ) -> (f32, (f32, f32)) {
     let (vw, vh) = (f32::from(viewport.width), f32::from(viewport.height));
-    let (bx, by, bw, bh) = (target.x as f32, target.y as f32, target.w as f32, target.h as f32);
+    let (bx, by, bw, bh) = (
+        target.x as f32,
+        target.y as f32,
+        target.w as f32,
+        target.h as f32,
+    );
     let z = zoom.min(fit_rect_zoom(target, viewport).unwrap_or(zoom));
     let z = z.clamp(fit_zoom(viewport, content), MAX_ZOOM);
     let (cx, cy) = (bx + bw / 2. + MARGIN as f32, by + bh / 2. + MARGIN as f32);
     let mut panx = cx * zoom + pan.0 - cx * z;
     let mut pany = cy * zoom + pan.1 - cy * z;
-    let (sx0, sx1) = ((bx + MARGIN as f32) * z + panx, (bx + bw + MARGIN as f32) * z + panx);
-    let (sy0, sy1) = ((by + MARGIN as f32) * z + pany, (by + bh + MARGIN as f32) * z + pany);
+    let (sx0, sx1) = (
+        (bx + MARGIN as f32) * z + panx,
+        (bx + bw + MARGIN as f32) * z + panx,
+    );
+    let (sy0, sy1) = (
+        (by + MARGIN as f32) * z + pany,
+        (by + bh + MARGIN as f32) * z + pany,
+    );
     if sx0 < RECENTER_PAD {
         panx += RECENTER_PAD - sx0;
     } else if sx1 > vw - RECENTER_PAD {
@@ -294,5 +336,10 @@ pub(crate) fn recenter_rect(g: &LaidOut, emphasis: &Emphasis) -> Option<Rect> {
             Some((ax0, ay0, ax1, ay1)) => (ax0.min(x0), ay0.min(y0), ax1.max(x1), ay1.max(y1)),
         });
     }
-    rect.map(|(x0, y0, x1, y1)| Rect { x: x0, y: y0, w: x1 - x0, h: y1 - y0 })
+    rect.map(|(x0, y0, x1, y1)| Rect {
+        x: x0,
+        y: y0,
+        w: x1 - x0,
+        h: y1 - y0,
+    })
 }

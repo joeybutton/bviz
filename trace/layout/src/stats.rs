@@ -167,7 +167,10 @@ mod tests {
         assert_eq!(c.max_us, 150);
         assert_eq!(
             c.role,
-            SpanRole { workload: Workload::Subprocess, payload: true }
+            SpanRole {
+                workload: Workload::Subprocess,
+                payload: true
+            }
         );
         assert_eq!(row(&g, &rows, "CppLink").total_us, 30);
         // Self time partitions the root total (180), no double-count.
@@ -209,7 +212,10 @@ mod tests {
             ],
         )]);
         let g = flame(&p);
-        assert!((0..g.len()).any(|i| g.is_detail(i)), "no detail frame to fold");
+        assert!(
+            (0..g.len()).any(|i| g.is_detail(i)),
+            "no detail frame to fold"
+        );
         let rows = stats_from_flame(&g);
         assert_eq!(rows.len(), 2);
         let rustc = row(&g, &rows, "Rustc");
@@ -250,8 +256,14 @@ mod tests {
         )]);
         let gd = flame(&detailed);
         let gp = flame(&plain);
-        assert!((0..gd.len()).any(|i| gd.is_detail(i)), "no detail frame to fold");
-        assert!((0..gp.len()).all(|i| !gp.is_detail(i)), "the reference must have none");
+        assert!(
+            (0..gd.len()).any(|i| gd.is_detail(i)),
+            "no detail frame to fold"
+        );
+        assert!(
+            (0..gp.len()).all(|i| !gp.is_detail(i)),
+            "the reference must have none"
+        );
         let resolved = |g: &FlameGraph| -> Vec<(String, u32, i64, i64)> {
             let mut rows: Vec<_> = stats_from_flame(g)
                 .iter()

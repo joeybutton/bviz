@@ -3,7 +3,11 @@ use crate::intern::Names;
 use std::collections::HashSet;
 
 pub(crate) fn find<'a>(graph: &'a Graph, names: &Names, id: &str) -> &'a Node {
-    graph.nodes.iter().find(|n| names.resolve(n.id) == id).unwrap()
+    graph
+        .nodes
+        .iter()
+        .find(|n| names.resolve(n.id) == id)
+        .unwrap()
 }
 
 pub(crate) fn parent_of<'a>(graph: &Graph, names: &'a Names, id: &str) -> Option<&'a str> {
