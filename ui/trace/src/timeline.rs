@@ -5,7 +5,7 @@ use crate::model::TraceModel;
 use crate::regions::{Regions, flame_total_height, max_lane_scroll};
 use crate::theme::Palette;
 use crate::{
-    BottomTab, ClearTimeSelection, DEFAULT_GUTTER_WIDTH, DEFAULT_PANEL_HEIGHT, EDGE_MARGIN_PX,
+    ClearTimeSelection, DEFAULT_COUNTERS_HEIGHT, DEFAULT_GUTTER_WIDTH, EDGE_MARGIN_PX,
     GROUP_BAND_HEIGHT, GROUP_ICON, LINE_SCROLL_PX, MAX_PX_PER_US, METRICS, MIN_SLICE_PX,
     SLICE_TEXT_PAD, SelectAllTracks, Source, TIMELINE_KEY_CONTEXT, TracePanel, ZOOM_PER_NOTCH,
     drawn_scroll, paint_gridlines, paint_gutter, paint_markers, paint_ruler, paint_slice,
@@ -20,7 +20,7 @@ use bviz_ui_components::{DragEnd, Scrollbar, cached_layer, overlay_canvas, track
 use gpui::{
     App, Bounds, ContentMask, Context, Div, Entity, FocusHandle, Focusable, IntoElement,
     MouseButton, MouseDownEvent, MouseMoveEvent, Pixels, Point, Render, Rgba, ScrollWheelEvent,
-    Stateful, WeakEntity, Window, canvas, div, fill, point, prelude::*, px, size,
+    Stateful, Subscription, WeakEntity, Window, canvas, div, fill, point, prelude::*, px, size,
 };
 use std::rc::Rc;
 use std::sync::Arc;
@@ -324,19 +324,19 @@ impl TimelineDrag {
 }
 
 /// The flame-chart timeline: time on the x axis, stacked thread lanes on the y
-/// axis, the counter plots (Counters tab), the ruler, gutter, phase markers, and
-/// scroll bars. Owns the timeline's view state, reading the document and
-/// selection from [`TraceModel`] and the panel/gutter layout from
-/// [`TracePanel`]. The slices are painted by [`SliceCanvas`], the time selection,
-/// crosshair, and tooltip by an overlay above it.
+/// axis, the counter plots, the ruler, gutter, phase markers, and scroll bars.
+/// Owns the timeline's view state, reading the document and selection from
+/// [`TraceModel`] and the strip/gutter layout from [`TracePanel`]. The slices are
+/// painted by [`SliceCanvas`], the time selection, crosshair, and tooltip by an
+/// overlay above it.
 pub(crate) struct Timeline {
     /// Focus for the trace content, so [`SelectAllTracks`] dispatches here; a
     /// descendant of the window focus, so the window's own actions fire.
     content_focus: FocusHandle,
     /// Read for the document and lanes, written for selection and grouping.
     model: Entity<TraceModel>,
-    /// The owning view, read for the panel and gutter layout the timeline shares
-    /// with the bottom panel and the tab bar.
+    /// The owning view, read for the counters-strip and gutter layout its
+    /// divider and gutter handle drag.
     shell: WeakEntity<TracePanel>,
     /// Horizontal time-to-pixel mapping (pan and zoom). Prepaint settles it
     /// against the painted width — the fit, the resize rescale, and the zoom
@@ -365,6 +365,10 @@ pub(crate) struct Timeline {
     /// The layer painting the slices, gutter, ruler, markers, scroll bars, and
     /// counter plots; notified through [`Self::invalidate_canvas`].
     canvas: Entity<SliceCanvas>,
+    /// Repaints the overlay for a selection change made in another pane. Only
+    /// the overlay draws from the model's selection state that the timeline does
+    /// not itself move, so the slice scene replays rather than rebuilding.
+    _model_observer: Subscription,
 }
 
 impl Timeline {
@@ -376,6 +380,7 @@ impl Timeline {
         let content_focus = cx.focus_handle();
         let parent = cx.entity().downgrade();
         let canvas = cx.new(|_| SliceCanvas { parent });
+        let model_observer = cx.observe(&model, |_, _, cx| cx.notify());
         Self {
             content_focus,
             model,
@@ -393,6 +398,7 @@ impl Timeline {
             drag: TimelineDrag::None,
             last_mouse: Point::default(),
             canvas,
+            _model_observer: model_observer,
         }
     }
 
@@ -412,19 +418,15 @@ impl Timeline {
         self.drag = TimelineDrag::None;
     }
 
-    /// The bottom-tab selection, panel height, and gutter width the timeline
-    /// shares with the bottom panel, read from the owning view.
-    fn shell_layout(&self, cx: &App) -> (BottomTab, f32, f32) {
+    /// The counters-strip height and gutter width the timeline is split by, held
+    /// by the owning view because its divider and gutter handle drag them.
+    fn shell_layout(&self, cx: &App) -> (f32, f32) {
         match self.shell.upgrade() {
             Some(shell) => {
                 let s = shell.read(cx);
-                (s.bottom_tab, s.panel_height, s.gutter_width)
+                (s.counters_height, s.gutter_width)
             }
-            None => (
-                BottomTab::Counters,
-                DEFAULT_PANEL_HEIGHT,
-                DEFAULT_GUTTER_WIDTH,
-            ),
+            None => (DEFAULT_COUNTERS_HEIGHT, DEFAULT_GUTTER_WIDTH),
         }
     }
 
@@ -433,7 +435,7 @@ impl Timeline {
         self.viewport
     }
 
-    /// [`Regions`] for the current viewport, panel and gutter sizes, the loaded
+    /// [`Regions`] for the current viewport, strip and gutter sizes, the loaded
     /// profile's counter count, and the flame lanes' total height.
     fn regions(&self, cx: &App) -> Regions {
         let (n_counters, flame_total) = {
@@ -448,11 +450,11 @@ impl Timeline {
                 .unwrap_or(0.0);
             (n_counters, flame_total)
         };
-        let (_, panel_height, gutter_width) = self.shell_layout(cx);
+        let (counters_height, gutter_width) = self.shell_layout(cx);
         Regions::new(
             self.viewport,
             n_counters,
-            panel_height,
+            counters_height,
             gutter_width,
             flame_total,
         )
@@ -534,21 +536,19 @@ impl Timeline {
     }
 
     /// Whether `pos` lies over a time-axis region the crosshair shows on: the
-    /// flame lanes always, and the counter panel when it is the shown tab.
+    /// flame lanes, and the counters strip where the profile has counters.
     fn in_content(&self, pos: Point<Pixels>, cx: &App) -> bool {
         if self.model.read(cx).lane_layout().is_none() {
             return false;
         }
         let regions = self.regions(cx);
-        let (tab, _, _) = self.shell_layout(cx);
         let x = f32::from(pos.x);
         let y = f32::from(pos.y);
-        let in_counters = tab == BottomTab::Counters
-            && regions.has_graph
+        let in_counters = regions.has_graph
             && x >= regions.content_left
             && x < regions.time_right
-            && y >= regions.panel_top
-            && y < regions.panel_bottom;
+            && y >= regions.counters_top
+            && y < regions.counters_top + regions.counters_h();
         regions.in_flame(pos) || in_counters
     }
 
@@ -574,7 +574,7 @@ impl Timeline {
         model.lane_layout()?;
         let chrome = model.group_chrome()?;
         let regions = self.regions(cx);
-        let (_, _, gutter_width) = self.shell_layout(cx);
+        let (_, gutter_width) = self.shell_layout(cx);
         let x = f32::from(pos.x);
         let y = f32::from(pos.y);
         let gutter_left = regions.content_left - gutter_width;
@@ -601,7 +601,7 @@ impl Timeline {
     fn track_label_at(&self, pos: Point<Pixels>, cx: &App) -> Option<usize> {
         let layout = self.model.read(cx).lane_layout()?;
         let regions = self.regions(cx);
-        let (_, _, gutter_width) = self.shell_layout(cx);
+        let (_, gutter_width) = self.shell_layout(cx);
         let x = f32::from(pos.x);
         let y = f32::from(pos.y);
         let gutter_left = regions.content_left - gutter_width;
@@ -975,7 +975,7 @@ impl Render for SliceCanvas {
         let Some(parent) = self.parent.upgrade() else {
             return div().into_any_element();
         };
-        let (profile, lanes, chrome, panel_height, gutter_width) = {
+        let (profile, lanes, chrome, counters_height, gutter_width) = {
             let timeline = parent.read(cx);
             let model = timeline.model.read(cx);
             let Source::Loaded(profile) = model.source() else {
@@ -984,15 +984,21 @@ impl Render for SliceCanvas {
             let (Some(lanes), Some(chrome)) = (model.lane_layout(), model.group_chrome()) else {
                 return div().into_any_element();
             };
-            let (_, panel_height, gutter_width) = timeline.shell_layout(cx);
-            (profile.clone(), lanes, chrome, panel_height, gutter_width)
+            let (counters_height, gutter_width) = timeline.shell_layout(cx);
+            (
+                profile.clone(),
+                lanes,
+                chrome,
+                counters_height,
+                gutter_width,
+            )
         };
         let palette = Palette::from_theme(&bviz_ui_theme::theme(window, cx));
         let prepaint = fit_prepaint(
             profile.clone(),
             lanes.clone(),
             parent.clone(),
-            panel_height,
+            counters_height,
             gutter_width,
         );
         let paint = slice_paint(profile, lanes, chrome, parent, palette);
@@ -1012,7 +1018,7 @@ fn fit_prepaint(
     profile: Arc<Profile>,
     lanes: Rc<LaneLayout>,
     parent: Entity<Timeline>,
-    panel_height: f32,
+    counters_height: f32,
     gutter_width: f32,
 ) -> impl FnOnce(Bounds<Pixels>, &mut Window, &mut App) {
     move |bounds: Bounds<Pixels>, _: &mut Window, cx: &mut App| {
@@ -1022,7 +1028,7 @@ fn fit_prepaint(
             Regions::new(
                 b,
                 profile.counters().len(),
-                panel_height,
+                counters_height,
                 gutter_width,
                 flame_total,
             )
@@ -1081,8 +1087,8 @@ fn cached_slices(
 }
 
 /// The slice layer's paint closure: the flame timeline — gridlines, lanes and
-/// slices, phase markers, gutter, scroll bars, ruler, and (for the Counters tab)
-/// the counter plots — reading the live view state through `parent`.
+/// slices, phase markers, gutter, scroll bars, ruler, and the counter plots —
+/// reading the live view state through `parent`.
 fn slice_paint(
     profile: Arc<Profile>,
     lanes: Rc<LaneLayout>,
@@ -1098,16 +1104,22 @@ fn slice_paint(
             let timeline = parent.read(cx);
             let tv = timeline.view;
             let scroll = timeline.lane_scroll(cx);
-            let (tab, panel_height, gutter_width) = timeline.shell_layout(cx);
+            let (counters_height, gutter_width) = timeline.shell_layout(cx);
             let selected = timeline.model.read(cx).selected_tracks().to_vec();
             let shared_names = timeline.model.read(cx).shared_track_names().to_vec();
-            let regions = Regions::new(bounds, n_counters, panel_height, gutter_width, flame_total);
+            let regions = Regions::new(
+                bounds,
+                n_counters,
+                counters_height,
+                gutter_width,
+                flame_total,
+            );
             let vp = Viewport {
                 width: regions.time_w,
                 height: regions.flame_h(),
                 scroll_y: scroll,
             };
-            let show_counters = regions.has_graph && tab == BottomTab::Counters;
+            let show_counters = regions.has_graph;
             (
                 tv,
                 scroll,
@@ -1136,8 +1148,8 @@ fn slice_paint(
             paint_gridlines(
                 &ticks,
                 regions.content_left,
-                regions.panel_top,
-                regions.panel_bottom,
+                regions.counters_top,
+                regions.counters_top + regions.counters_h(),
                 &palette,
                 window,
             );
@@ -1383,8 +1395,8 @@ fn paint_time_selection(
             quad(
                 from,
                 to - from,
-                regions.panel_top,
-                regions.panel_h(),
+                regions.counters_top,
+                regions.counters_h(),
                 veil,
                 window,
             );
@@ -1433,8 +1445,8 @@ fn paint_time_selection(
                 quad(
                     line_x,
                     EDGE_LINE_PX,
-                    regions.panel_top,
-                    regions.panel_h(),
+                    regions.counters_top,
+                    regions.counters_h(),
                     accent,
                     window,
                 );
@@ -1462,10 +1474,10 @@ fn overlay_paint(
 ) -> impl FnOnce(Bounds<Pixels>, &mut Window, &mut App) {
     move |bounds, window, cx| {
         let n_counters = profile.counters().len();
-        let (tv, tab, panel_height, gutter_width, selection, crosshair, hovered, dragging) = {
+        let (tv, counters_height, gutter_width, selection, crosshair, hovered, dragging) = {
             let timeline = parent.read(cx);
             let tv = timeline.view;
-            let (tab, panel_height, gutter_width) = timeline.shell_layout(cx);
+            let (counters_height, gutter_width) = timeline.shell_layout(cx);
             let hovered = timeline
                 .hover
                 .and_then(|at| Some((at, timeline.slice_at(at, cx)?)));
@@ -1474,8 +1486,7 @@ fn overlay_paint(
                 .preview(timeline.model.read(cx).time_selection());
             (
                 tv,
-                tab,
-                panel_height,
+                counters_height,
                 gutter_width,
                 selection,
                 timeline.crosshair,
@@ -1484,8 +1495,14 @@ fn overlay_paint(
             )
         };
         let flame_total = flame_total_height(&lanes);
-        let regions = Regions::new(bounds, n_counters, panel_height, gutter_width, flame_total);
-        let show_counters = regions.has_graph && tab == BottomTab::Counters;
+        let regions = Regions::new(
+            bounds,
+            n_counters,
+            counters_height,
+            gutter_width,
+            flame_total,
+        );
+        let show_counters = regions.has_graph;
         paint_time_selection(&selection, tv, regions, show_counters, &palette, window);
         if let Some(at) = crosshair
             && f32::from(at.x) >= regions.content_left
@@ -1884,7 +1901,7 @@ mod tests {
         Regions::new(
             Bounds::new(point(px(0.), px(0.)), size(px(1000.), px(800.))),
             0,
-            DEFAULT_PANEL_HEIGHT,
+            DEFAULT_COUNTERS_HEIGHT,
             TEST_GUTTER,
             0.0,
         )

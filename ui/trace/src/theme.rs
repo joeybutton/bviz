@@ -160,7 +160,7 @@ pub(crate) struct Palette {
     /// Fill for a row or control that marks the cursor by lifting off its surface.
     pub(crate) hover: Rgba,
     /// The line at a seam between two of the view's surfaces: the gutter's right
-    /// edge and the tab bar's top.
+    /// edge and the counters divider.
     pub(crate) divider: Rgba,
     /// Opaque fill of a panel drawn over the chart.
     pub(crate) panel: Rgba,
@@ -344,7 +344,7 @@ mod tests {
         }
     }
 
-    /// The gutter's right edge and the tab bar's top are drawn where the header
+    /// The gutter's right edge and the counters divider are drawn where the header
     /// band meets the chart canvas, so the line has to be seen against both of the
     /// surfaces it parts and not only against the one it is nearer in tone.
     #[test]

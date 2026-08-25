@@ -24,20 +24,20 @@ use chart::{format_duration, format_time, nice_step, span_seconds};
 use flame_panel::FlamePanel;
 use groups::{GroupChrome, group_label, lanes_headed_by_pool};
 use model::TraceModel;
-use regions::{Regions, clamp_gutter_width, clamp_panel_height, flame_total_height, graph_lanes};
+use regions::{
+    Regions, clamp_counters_height, clamp_gutter_width, flame_total_height, graph_lanes,
+};
 use stats_panel::StatsPanel;
 use theme::Palette;
 use timeline::{HoveredSlice, Timeline};
 use track_label::{pool_member_label, track_label};
 use tracks_menu::TracksMenu;
 
-use bviz_trace_layout::{
-    FlameDirection, FlameLabels, FlameMode, LaneLayout, LaneMetrics, TimeSelection, TimeView,
-};
+use bviz_trace_layout::{LaneLayout, LaneMetrics, TimeSelection, TimeView};
 use bviz_trace_profile::{Profile, Slice, TimeSpan};
 use bviz_ui_components::{
     Axis, Button, DEFAULT_MIN_THUMB, Divider, DragEnd, Pending, SCROLLBAR_THICKNESS, Scrollbar,
-    centered_spinner, load_in_background, overlay_canvas, paint_tooltip_box, track_drag,
+    load_in_background, overlay_canvas, paint_tooltip_box, track_drag,
 };
 use bviz_ui_trace_args::{TraceArgs, TraceSource};
 use bviz_ui_workspace::{
@@ -48,9 +48,9 @@ use clap::{CommandFactory, Parser};
 use gpui::{
     AnyElement, App, AvailableSpace, Bounds, ContentMask, Context, Div, Edges, Element, ElementId,
     Entity, EventEmitter, FocusHandle, Focusable, GlobalElementId, Hsla, InspectorElementId,
-    IntoElement, KeyBinding, LayoutId, MouseButton, MouseDownEvent, Pixels, Point, Position,
-    Render, ScrollHandle, SharedString, Stateful, Style, Subscription, Task, TextAlign,
-    TransformationMatrix, Window, div, fill, point, prelude::*, px, relative, size,
+    IntoElement, KeyBinding, LayoutId, MouseDownEvent, Pixels, Point, Position, Render,
+    ScrollHandle, SharedString, Style, Subscription, Task, TextAlign, TransformationMatrix, Window,
+    div, fill, point, prelude::*, px, relative, size,
 };
 use std::sync::Arc;
 
@@ -124,14 +124,20 @@ const MIN_GUTTER: f32 = 80.0;
 /// Width of the vertical drag handle at the gutter's right edge.
 const GUTTER_HANDLE_WIDTH: f32 = 6.0;
 
-/// Smallest height the flame section keeps when the splitter is dragged down.
+/// Smallest height the flame section keeps when the divider is dragged down.
 const FLAME_MIN_HEIGHT: f32 = 60.0;
 
-/// Initial height of the bottom panel before the tab-bar splitter is dragged.
-const DEFAULT_PANEL_HEIGHT: f32 = 280.0;
+/// Initial height of the counters strip, chosen before the profile is read and
+/// so sized for a handful of counter lanes; the divider resizes it, and its
+/// clamp raises it to fit however many lanes the loaded profile has.
+const DEFAULT_COUNTERS_HEIGHT: f32 = 160.0;
+
+/// Share of the trace window the timeline takes, the flame graph and stats
+/// sharing the pane below it.
+const TIMELINE_SHARE: f32 = 0.65;
 
 /// Smallest chart area kept below a counter lane's header, so dragging the
-/// splitter down squishes the graphs to a readable sliver rather than to nothing.
+/// divider down squishes the graphs to a readable sliver rather than to nothing.
 const MIN_CHART_HEIGHT: f32 = 12.0;
 
 /// Height of the time ruler band at the top of the timeline.
@@ -143,9 +149,15 @@ const RULER_TARGET_TICK_PX: f64 = 120.0;
 /// Font size of a phase-marker label.
 const MARKER_LABEL_SIZE: f32 = 11.0;
 
-/// Height of the tab bar between the flame chart and the bottom panel, which
-/// doubles as the resize splitter for the panel.
-const TAB_BAR_HEIGHT: f32 = 28.0;
+/// Height of the band between the flame chart and the counters strip that a
+/// press takes hold of to resize the strip, wide enough to aim a press at where
+/// the line down its middle alone would be a pixel high.
+const COUNTERS_DIVIDER_HEIGHT: f32 = 7.0;
+const COUNTERS_DIVIDER_LINE: f32 = 1.0;
+
+/// Height of a panel's toolbar band, giving its chips and controls a line to sit
+/// on with room around them.
+const PANEL_TOOLBAR_HEIGHT: f32 = 28.0;
 
 /// Width of the open tracks visibility menu and the tallest its track list grows
 /// before it scrolls.
@@ -173,31 +185,12 @@ const CROSSHAIR_DOT_RADIUS: f32 = 3.0;
 const CROSSHAIR_VALUE_SIZE: f32 = 11.0;
 const CROSSHAIR_LABEL_GAP: f32 = 5.0;
 
-/// Which panel the tab bar below the flame chart shows. The counter plots share
-/// the flame chart's time axis; the flame graph and stats aggregate the selected
-/// tracks.
-#[derive(Clone, Copy, PartialEq)]
-enum BottomTab {
-    Counters,
-    FlameGraph,
-    Stats,
-}
-
-impl BottomTab {
-    /// The tabs in bar order, with their labels.
-    const ALL: [(BottomTab, &'static str); 3] = [
-        (BottomTab::Counters, "Counters"),
-        (BottomTab::FlameGraph, "Flame Graph"),
-        (BottomTab::Stats, "Stats"),
-    ];
-}
-
 /// What a left-button drag is currently moving.
 #[derive(Clone, Copy)]
 enum Drag {
     None,
-    /// A press on the tab bar resizes the bottom panel.
-    Splitter,
+    /// A press on the divider resizes the counters strip.
+    Divider,
     /// A press on the gutter handle resizes the gutter.
     Gutter,
 }
@@ -216,58 +209,49 @@ const TOP_N_PER_GROUP: usize = 12;
 
 pub(crate) type Source = bviz_ui_components::Source<Arc<Profile>>;
 
-/// Loads and renders a Bazel trace profile as a flame chart.
-///
-/// The flame-chart timeline lives in [`Timeline`] and the aggregated
-/// flame-graph panel in [`FlamePanel`]; each owns its own view state, reading the
-/// document and selection from the shared [`TraceModel`].
+/// The trace document's timeline: the flame chart with its gutter, ruler and
+/// counters strip, the divider that resizes the strip, and the tracks menu over
+/// them. The chart itself is drawn by [`Timeline`]; this view holds the
+/// splits the two of them are laid out by and reads the loaded document from the
+/// shared [`TraceModel`].
 struct TracePanel {
     /// Names the document shown, labelling this panel's tab.
     title: SharedString,
-    /// The one instance the four panels each hold a handle to.
+    /// The one instance the document's panels each hold a handle to.
     model: Entity<TraceModel>,
     timeline: Entity<Timeline>,
-    flame: Entity<FlamePanel>,
-    stats: Entity<StatsPanel>,
     drag: Drag,
-    last_mouse: Point<Pixels>,
-    /// Height of the bottom panel, set by the tab-bar splitter; clamped on use.
-    panel_height: f32,
+    /// Height of the counters strip, set by the divider; clamped on use.
+    counters_height: f32,
     /// Width of the left label gutter, set by its drag handle; clamped on use.
     gutter_width: f32,
-    /// Which panel the tab bar shows.
-    bottom_tab: BottomTab,
     tracks_menu: Entity<TracksMenu>,
-    /// Rebuilds the timeline's and flame-graph panel's cached scenes on a system
-    /// appearance change so they repaint in the new palette.
+    /// Rebuilds the timeline's cached scene on a system appearance change so it
+    /// repaints in the new palette.
     _appearance_observer: Subscription,
     /// Holds the background load task so it isn't cancelled on drop.
     _load_task: Task<()>,
 }
 
 impl TracePanel {
-    fn new(load: Load, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    fn new(
+        load: Load,
+        model: Entity<TraceModel>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let load_task = load_in_background(
             cx,
             move || load.profile.join(),
             |view, result, cx| view.on_profile_loaded(result, cx),
         );
         let title = load.title;
-        let model = cx.new(|_| TraceModel::new());
-        // A panel that reaches back here takes a weak handle, so the shell's own
+        // A view that reaches back here takes a weak handle, so this panel's own
         // handle to it is what keeps it alive.
         let timeline = {
             let shell = cx.entity().downgrade();
             let model = model.clone();
             cx.new(|cx| Timeline::new(model, shell, cx))
-        };
-        let flame = {
-            let model = model.clone();
-            cx.new(|cx| FlamePanel::new(model, cx))
-        };
-        let stats = {
-            let model = model.clone();
-            cx.new(|cx| StatsPanel::new(model, cx))
         };
         let tracks_menu = {
             let shell = cx.entity().downgrade();
@@ -276,32 +260,24 @@ impl TracePanel {
         };
         let appearance_observer = window.observe_window_appearance({
             let timeline = timeline.clone();
-            let flame = flame.clone();
-            move |_, cx| {
-                timeline.update(cx, |t, cx| t.invalidate_canvas(cx));
-                flame.update(cx, |f, cx| f.invalidate_canvas(cx));
-            }
+            move |_, cx| timeline.update(cx, |t, cx| t.invalidate_canvas(cx))
         });
         Self {
             title,
             model,
             timeline,
-            flame,
-            stats,
             drag: Drag::None,
-            last_mouse: Point::default(),
-            panel_height: DEFAULT_PANEL_HEIGHT,
+            counters_height: DEFAULT_COUNTERS_HEIGHT,
             gutter_width: DEFAULT_GUTTER_WIDTH,
-            bottom_tab: BottomTab::Counters,
             tracks_menu,
             _appearance_observer: appearance_observer,
             _load_task: load_task,
         }
     }
 
-    /// Rebuilds the timeline's cached scene and re-renders this view (so the tab
-    /// bar, bottom panel, and gutter handle reposition). A change to the timeline
-    /// content, the panel/gutter layout, or the shown tab uses this.
+    /// Rebuilds the timeline's cached scene and re-renders this view (so the
+    /// divider and gutter handle reposition). A change to the timeline content or
+    /// to the strip/gutter layout uses this.
     fn invalidate_timeline(&self, cx: &mut Context<Self>) {
         self.timeline.update(cx, |t, cx| t.invalidate_canvas(cx));
         cx.notify();
@@ -309,10 +285,6 @@ impl TracePanel {
 
     fn on_profile_loaded(&mut self, result: Result<Profile, String>, cx: &mut Context<Self>) {
         self.timeline.update(cx, |t, _| t.reset_for_new_profile());
-        self.flame.update(cx, |f, _| f.reset_view());
-        // The aggregate-derived panel caches: dropped up front so a new profile
-        // shows the spinner rather than the prior graph until its build lands.
-        self.stats.update(cx, |s, _| s.reset_for_new_profile());
         let source = match result {
             Ok(profile) => Source::Loaded(Arc::new(profile)),
             Err(err) => Source::Failed(err),
@@ -321,10 +293,7 @@ impl TracePanel {
         // model seeds, is view-local, so reset it here for a freshly loaded
         // profile.
         let loaded = matches!(source, Source::Loaded(_));
-        self.model.update(cx, |m, cx| {
-            m.invalidate_aggregates();
-            m.set_source(source, cx);
-        });
+        self.model.update(cx, |m, cx| m.set_source(source, cx));
         if loaded {
             self.tracks_menu
                 .update(cx, |m, _| m.reset_for_new_profile());
@@ -334,41 +303,37 @@ impl TracePanel {
 
     /// The whole trace body: the [`Timeline`] filling the viewport (it paints
     /// the flame chart and counter plots and owns the timeline's mouse/scroll/
-    /// hover wiring), a drag overlay that keeps the panel-resize and gutter drags
-    /// tracking the cursor, then the tab bar, the selected bottom panel, the
-    /// gutter handle, and the tracks menu over it.
+    /// hover wiring), a drag overlay that keeps the strip-resize and gutter drags
+    /// tracking the cursor, then the divider, the gutter handle, and the tracks
+    /// menu over it.
     fn trace_body(&self, palette: Palette, cx: &mut Context<Self>) -> impl IntoElement {
         let timeline = div()
             .absolute()
             .inset_0()
             .size_full()
             .child(self.timeline.clone());
-        // The panel-resize and gutter drags live on this view; while one runs, a
+        // The strip-resize and gutter drags live on this view; while one runs, a
         // full-bounds canvas re-installs their window-global handlers each frame.
         // It is non-interactive, so it does not intercept the timeline's presses.
         let drag_overlay = {
             let entity = cx.entity();
             overlay_canvas(move |_, window, cx| {
-                if matches!(entity.read(cx).drag, Drag::Splitter | Drag::Gutter) {
+                if matches!(entity.read(cx).drag, Drag::Divider | Drag::Gutter) {
                     track_drag(window, &entity, on_drag, end_drag);
                 }
             })
         };
 
-        // The tab bar spans the content column between the flame chart and the
-        // bottom panel, doubling as the panel's resize splitter. The selected
-        // panel sits over the content column of the bottom region; the counter
-        // plots are drawn by the timeline instead.
-        let mut overlays = RegionOverlays::new(self.region_inputs(cx));
-        if let Some(panel) = self.bottom_panel(palette, cx) {
-            overlays = overlays.child(panel, panel_rect);
+        let inputs = self.region_inputs(cx);
+        let mut overlays = RegionOverlays::new(inputs);
+        // A profile with no counters has no strip, and so nothing to resize.
+        if inputs.n_counters > 0 {
+            overlays = overlays.child(counters_divider(palette, cx), divider_rect);
         }
-        // The gutter handle spans the full height and so crosses both, and must
-        // take a press over either: it is placed last, and hit-testing follows
-        // paint order.
-        let overlays = overlays
-            .child(self.tab_bar(palette, cx), tab_bar_rect)
-            .child(gutter_handle(cx), gutter_handle_rect);
+        // The gutter handle spans the full height and so crosses both the chart
+        // and the strip, and must take a press over either: it is placed last,
+        // and hit-testing follows paint order.
+        let overlays = overlays.child(gutter_handle(cx), gutter_handle_rect);
         div()
             .id("trace-viewport")
             .relative()
@@ -380,253 +345,7 @@ impl TracePanel {
             .child(self.tracks_menu.clone())
     }
 
-    /// The tab bar between the flame chart and the bottom panel: a row of tab
-    /// buttons filling the rect [`RegionOverlays`] places it in. A press on its
-    /// background begins a panel-resize drag (double-click resets the panel
-    /// height); a tab button switches the panel.
-    fn tab_bar(&self, palette: Palette, cx: &mut Context<Self>) -> Stateful<Div> {
-        let active = self.bottom_tab;
-        let tabs: Vec<_> = BottomTab::ALL
-            .into_iter()
-            .map(|(tab, label)| {
-                let is_active = tab == active;
-                let hover = palette.hover;
-                div()
-                    .id(SharedString::from(format!("trace-tab-{label}")))
-                    .flex()
-                    .items_center()
-                    .flex_shrink_0()
-                    .px_3()
-                    .h_full()
-                    .cursor_pointer()
-                    .text_size(px(STATS_TEXT_SIZE))
-                    .text_color(if is_active {
-                        palette.label
-                    } else {
-                        palette.muted_label
-                    })
-                    .when(is_active, |t| {
-                        t.bg(palette.background)
-                            .border_t_2()
-                            .border_color(palette.accent)
-                    })
-                    .hover(move |t| t.bg(hover))
-                    // A press on a tab must switch it, not begin a panel resize.
-                    .on_mouse_down(MouseButton::Left, |_, _, cx: &mut App| {
-                        cx.stop_propagation()
-                    })
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.set_bottom_tab(tab, cx);
-                        this.invalidate_timeline(cx);
-                    }))
-                    .child(label)
-            })
-            .collect();
-        div()
-            .id("trace-tab-bar")
-            .size_full()
-            .flex()
-            .flex_row()
-            .items_stretch()
-            .overflow_hidden()
-            .bg(palette.header_band)
-            .border_t_1()
-            .border_color(palette.divider)
-            .cursor_row_resize()
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|this, e: &MouseDownEvent, _, cx| {
-                    if e.click_count == 2 {
-                        this.panel_height = DEFAULT_PANEL_HEIGHT;
-                    } else {
-                        this.drag = Drag::Splitter;
-                        this.last_mouse = e.position;
-                    }
-                    cx.stop_propagation();
-                    this.invalidate_timeline(cx);
-                }),
-            )
-            .children(tabs)
-            .children(self.time_window_chip(palette, cx))
-            .child(div().flex_1())
-            .children((active == BottomTab::FlameGraph).then(|| {
-                div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap_4()
-                    .pr_2()
-                    .child(self.flame_mode_controls(cx))
-                    .child(theme::role_legend(&palette, STATS_TEXT_SIZE))
-            }))
-    }
-
-    /// The window the shown flame graph and stats cover, as a chip carrying
-    /// [`Self::clear_time_selection`].
-    fn time_window_chip(
-        &self,
-        palette: Palette,
-        cx: &mut Context<Self>,
-    ) -> Option<impl IntoElement> {
-        let summary = {
-            let model = self.model.read(cx);
-            let Source::Loaded(profile) = model.source() else {
-                return None;
-            };
-            let span = profile.span();
-            let shown = model.aggregates();
-            time_window_summary(
-                shown.as_deref().map(|a| &a.window),
-                span.end_us - span.start_us,
-            )?
-        };
-        let view = cx.entity();
-        Some(
-            div()
-                .id("trace-time-window")
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap_1()
-                .ml_2()
-                .my_1()
-                .pl_2()
-                .flex_shrink_0()
-                .rounded_md()
-                .bg(palette.selection)
-                .border_1()
-                .border_color(palette.accent)
-                .text_size(px(STATS_TEXT_SIZE))
-                .text_color(palette.label)
-                // A press on the chip must not also begin a panel resize.
-                .on_mouse_down(MouseButton::Left, |_, _, cx: &mut App| {
-                    cx.stop_propagation()
-                })
-                .child(summary)
-                .child(
-                    Button::new("trace-time-window-clear", move |_, _, cx| {
-                        view.update(cx, |this, cx| this.clear_time_selection(cx));
-                    })
-                    .ghost()
-                    .compact()
-                    .icon("x"),
-                ),
-        )
-    }
-
-    /// Widens the next aggregate build back to the whole timeline.
-    fn clear_time_selection(&mut self, cx: &mut Context<Self>) {
-        if !self.model.update(cx, |m, cx| {
-            m.set_time_selection(TimeSelection::default(), cx)
-        }) {
-            return;
-        }
-        cx.notify();
-    }
-
-    /// The flame graph's mode controls: the two directions as an exclusive pair,
-    /// and the labelling as a toggle that holds across both.
-    fn flame_mode_controls(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let mode = self.model.read(cx).flame_mode();
-        let mnemonics = mode.labels == FlameLabels::Mnemonic;
-        let button = |id: &'static str, label: &'static str, on: bool, to: FlameMode| {
-            let view = cx.entity();
-            div()
-                .id(SharedString::from(format!("{id}-press")))
-                // A press on a control must not also begin a panel resize.
-                .on_mouse_down(MouseButton::Left, |_, _, cx: &mut App| {
-                    cx.stop_propagation()
-                })
-                .child(
-                    Button::new(id, move |_, _, cx| {
-                        view.update(cx, |this, cx| this.set_flame_mode(to, cx));
-                    })
-                    .ghost()
-                    .compact()
-                    .selected(on)
-                    .label(label),
-                )
-        };
-        div()
-            .flex()
-            .flex_row()
-            .items_center()
-            .flex_shrink_0()
-            .gap_1()
-            .text_size(px(STATS_TEXT_SIZE))
-            .child(button(
-                "flame-top-down",
-                "Top-down",
-                mode.direction == FlameDirection::TopDown,
-                FlameMode {
-                    direction: FlameDirection::TopDown,
-                    ..mode
-                },
-            ))
-            .child(button(
-                "flame-bottom-up",
-                "Bottom-up",
-                mode.direction == FlameDirection::BottomUp,
-                FlameMode {
-                    direction: FlameDirection::BottomUp,
-                    ..mode
-                },
-            ))
-            .child(button(
-                "flame-mnemonics",
-                "Mnemonics",
-                mnemonics,
-                FlameMode {
-                    labels: if mnemonics {
-                        FlameLabels::Name
-                    } else {
-                        FlameLabels::Mnemonic
-                    },
-                    ..mode
-                },
-            ))
-    }
-
-    /// Applies a mode chosen in the tab bar, leaving the panel's view alone for a
-    /// click that re-chooses the standing mode.
-    fn set_flame_mode(&mut self, mode: FlameMode, cx: &mut Context<Self>) {
-        if !self.model.update(cx, |m, cx| m.set_flame_mode(mode, cx)) {
-            return;
-        }
-        self.flame.update(cx, |f, cx| {
-            f.reset_view();
-            f.invalidate_canvas(cx);
-        });
-    }
-
-    /// The bottom-panel overlay for the active tab, positioned over the content
-    /// column of the panel region. The Counters tab draws on the flame chart's
-    /// canvas, so it needs no overlay.
-    fn bottom_panel(&self, palette: Palette, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let content: AnyElement = match self.bottom_tab {
-            BottomTab::Counters => return None,
-            BottomTab::FlameGraph => match self.model.read(cx).aggregates() {
-                Some(_) => self.flame.clone().into_any_element(),
-                None => {
-                    centered_spinner("Building flame graph…", &palette.colors).into_any_element()
-                }
-            },
-            BottomTab::Stats => self.stats.clone().into_any_element(),
-        };
-        Some(
-            div()
-                .id("trace-panel")
-                .size_full()
-                .flex()
-                .flex_col()
-                .overflow_hidden()
-                .bg(palette.background)
-                .child(content)
-                .into_any_element(),
-        )
-    }
-
-    /// [`Regions`] for the current viewport (captured by the timeline), panel and
+    /// [`Regions`] for the current viewport (captured by the timeline), strip and
     /// gutter sizes, the loaded profile's counter count, and the flame lanes'
     /// total height.
     fn region_inputs(&self, cx: &App) -> RegionInputs {
@@ -636,25 +355,13 @@ impl TracePanel {
                 Source::Loaded(p) => p.counters().len(),
                 _ => 0,
             },
-            panel_height: self.panel_height,
+            counters_height: self.counters_height,
             gutter_width: self.gutter_width,
             flame_total: model
                 .lane_layout()
                 .map(|l| flame_total_height(&l))
                 .unwrap_or(0.0),
         }
-    }
-
-    /// Switches the bottom panel tab, dropping the flame-graph and timeline hover
-    /// tooltips and the timeline crosshair (the newly shown panel picks its own
-    /// up on the next move).
-    fn set_bottom_tab(&mut self, tab: BottomTab, cx: &mut Context<Self>) {
-        if self.bottom_tab == tab {
-            return;
-        }
-        self.bottom_tab = tab;
-        self.flame.update(cx, |f, _| f.clear_hover());
-        self.timeline.update(cx, |t, _| t.clear_hover());
     }
 }
 
@@ -676,6 +383,25 @@ fn gutter_handle(cx: &mut Context<TracePanel>) -> Divider {
     )
 }
 
+/// The band between the flame chart and the counters strip. A press on it begins
+/// a strip-resize drag; a double-click resets the strip to its default height.
+fn counters_divider(palette: Palette, cx: &mut Context<TracePanel>) -> Divider {
+    Divider::new(
+        "trace-counters-divider",
+        gpui::Axis::Vertical,
+        cx.listener(|this, e: &MouseDownEvent, _, cx| {
+            if e.click_count == 2 {
+                this.counters_height = DEFAULT_COUNTERS_HEIGHT;
+            } else {
+                this.drag = Drag::Divider;
+            }
+            cx.stop_propagation();
+            this.invalidate_timeline(cx);
+        }),
+    )
+    .line(px(COUNTERS_DIVIDER_LINE), palette.divider)
+}
+
 /// The chip's label for the `window` a shown aggregate covers, of a build
 /// spanning `span_us`. Absent while no aggregate is shown, or the shown one
 /// covers the whole build.
@@ -691,6 +417,90 @@ fn time_window_summary(window: Option<&TimeSelection>, span_us: i64) -> Option<S
         text.push_str(&format!(" · {regions} regions"));
     }
     Some(text)
+}
+
+/// The window the flame graph and stats cover, as a chip carrying the control
+/// that widens the next aggregate back to the whole timeline. Absent while no
+/// aggregate is shown, or the shown one covers the whole build.
+pub(crate) fn time_window_chip(
+    model: &Entity<TraceModel>,
+    palette: Palette,
+    cx: &App,
+) -> Option<Div> {
+    let summary = {
+        let m = model.read(cx);
+        let Source::Loaded(profile) = m.source() else {
+            return None;
+        };
+        let span = profile.span();
+        let shown = m.aggregates();
+        time_window_summary(
+            shown.as_deref().map(|a| &a.window),
+            span.end_us - span.start_us,
+        )?
+    };
+    let clearing = model.clone();
+    Some(
+        div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_1()
+            .my_1()
+            .pl_2()
+            .flex_shrink_0()
+            .rounded_md()
+            .bg(palette.selection)
+            .border_1()
+            .border_color(palette.accent)
+            .text_size(px(STATS_TEXT_SIZE))
+            .text_color(palette.label)
+            .child(summary)
+            .child(
+                Button::new("trace-time-window-clear", move |_, _, cx| {
+                    clearing.update(cx, |m, cx| {
+                        m.set_time_selection(TimeSelection::default(), cx);
+                    });
+                })
+                .ghost()
+                .compact()
+                .icon("x"),
+            ),
+    )
+}
+
+/// The bar a panel of the trace document carries its chips and controls on.
+pub(crate) fn panel_toolbar(palette: Palette) -> Div {
+    div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .flex_shrink_0()
+        .gap_4()
+        .px_2()
+        .h(px(PANEL_TOOLBAR_HEIGHT))
+        .overflow_hidden()
+        .bg(palette.header_band)
+        .border_b_1()
+        .border_color(palette.divider)
+}
+
+/// What the window chrome says about the loaded document, the same from whichever
+/// of its panels is on show.
+pub(crate) fn profile_status(model: &Entity<TraceModel>, cx: &App) -> SharedString {
+    model
+        .read(cx)
+        .source()
+        .status("No profile", |p| {
+            let slices: usize = p.threads().iter().map(|t| t.slices.len()).sum();
+            format!(
+                "{} threads · {} slices · {:.3}s",
+                p.threads().len(),
+                slices,
+                span_seconds(p.span()),
+            )
+        })
+        .into()
 }
 
 impl EventEmitter<PanelEvent> for TracePanel {}
@@ -714,26 +524,15 @@ impl Panel for TracePanel {
     }
 
     fn status(&self, cx: &App) -> Option<SharedString> {
-        Some(
-            self.model
-                .read(cx)
-                .source()
-                .status("No profile", |p| {
-                    let slices: usize = p.threads().iter().map(|t| t.slices.len()).sum();
-                    format!(
-                        "{} threads · {} slices · {:.3}s",
-                        p.threads().len(),
-                        slices,
-                        span_seconds(p.span()),
-                    )
-                })
-                .into(),
-        )
+        Some(profile_status(&self.model, cx))
     }
 
     fn set_active(&mut self, active: bool, window: &mut Window, cx: &mut Context<Self>) {
-        if active {
-            self.focus_handle(cx).focus(window, cx);
+        match active {
+            true => self.focus_handle(cx).focus(window, cx),
+            // The tooltip and crosshair anchor to a cursor that is no longer over
+            // the chart.
+            false => self.timeline.update(cx, |t, _| t.clear_hover()),
         }
     }
 }
@@ -763,7 +562,7 @@ impl Render for TracePanel {
 #[derive(Clone, Copy)]
 struct RegionInputs {
     n_counters: usize,
-    panel_height: f32,
+    counters_height: f32,
     gutter_width: f32,
     flame_total: f32,
 }
@@ -773,7 +572,7 @@ impl RegionInputs {
         Regions::new(
             bounds,
             self.n_counters,
-            self.panel_height,
+            self.counters_height,
             self.gutter_width,
             self.flame_total,
         )
@@ -783,24 +582,8 @@ impl RegionInputs {
 /// Where an overlay sits within the split, given the body's own bounds.
 type PlaceInRegions = fn(&Regions, Bounds<Pixels>) -> Bounds<Pixels>;
 
-fn tab_bar_rect(r: &Regions, _: Bounds<Pixels>) -> Bounds<Pixels> {
-    Bounds::new(
-        point(px(r.content_left), px(r.tab_top)),
-        size(
-            px((r.content_right - r.content_left).max(0.0)),
-            px(TAB_BAR_HEIGHT),
-        ),
-    )
-}
-
-fn panel_rect(r: &Regions, _: Bounds<Pixels>) -> Bounds<Pixels> {
-    Bounds::new(
-        point(px(r.content_left), px(r.panel_top)),
-        size(
-            px((r.content_right - r.content_left).max(0.0)),
-            px(r.panel_h()),
-        ),
-    )
+fn divider_rect(r: &Regions, _: Bounds<Pixels>) -> Bounds<Pixels> {
+    r.divider_rect()
 }
 
 fn gutter_handle_rect(r: &Regions, body: Bounds<Pixels>) -> Bounds<Pixels> {
@@ -813,11 +596,11 @@ fn gutter_handle_rect(r: &Regions, body: Bounds<Pixels>) -> Bounds<Pixels> {
     )
 }
 
-/// The trace body's overlays — the tab bar, the bottom panel, and the gutter
-/// handle — laid out from the body's own bounds. Each belongs at a pixel offset
-/// within the [`Regions`] split, which is defined only once the body has a size,
-/// so the split is resolved here during prepaint and each child placed against
-/// it. Styling the children from a size measured elsewhere would put them a frame
+/// The trace body's overlays — the counters divider and the gutter handle —
+/// laid out from the body's own bounds. Each belongs at a pixel offset within the
+/// [`Regions`] split, which is defined only once the body has a size, so the
+/// split is resolved here during prepaint and each child placed against it.
+/// Styling the children from a size measured elsewhere would put them a frame
 /// behind the body they overlay, since that size is known only after a paint.
 struct RegionOverlays {
     inputs: RegionInputs,
@@ -911,24 +694,24 @@ impl Element for RegionOverlays {
     }
 }
 
-/// Routes an in-progress drag to its target: resizing the bottom panel or the
+/// Routes an in-progress drag to its target: resizing the counters strip or the
 /// gutter. The flame-chart timeline's, flame-graph panel's, and tracks menu's own
 /// drags are routed inside [`Timeline`], [`FlamePanel`], and [`TracksMenu`].
 fn on_drag(view: &mut TracePanel, position: Point<Pixels>, cx: &mut Context<TracePanel>) {
     match view.drag {
-        Drag::Splitter => {
+        Drag::Divider => {
             let profile = match view.model.read(cx).source() {
                 Source::Loaded(p) => p.clone(),
                 _ => return,
             };
             let vp = view.timeline.read(cx).viewport();
             let vh = f32::from(vp.size.height);
-            // The panel's top follows the cursor: the panel spans from just below
-            // the tab bar down to the window bottom. Clamped to keep the flame
-            // region and the panel content usable.
-            let panel_bottom = f32::from(vp.origin.y) + vh;
-            view.panel_height = clamp_panel_height(
-                panel_bottom - f32::from(position.y) - TAB_BAR_HEIGHT,
+            // The strip's top follows the cursor: the strip spans from just below
+            // the divider down to the timeline's bottom. Clamped to keep the flame
+            // region and every counter lane usable.
+            let counters_bottom = f32::from(vp.origin.y) + vh;
+            view.counters_height = clamp_counters_height(
+                counters_bottom - f32::from(position.y) - COUNTERS_DIVIDER_HEIGHT,
                 profile.counters().len(),
                 vh,
             );
@@ -942,7 +725,7 @@ fn on_drag(view: &mut TracePanel, position: Point<Pixels>, cx: &mut Context<Trac
         }
         Drag::None => {}
     }
-    // Panel and gutter resizes move the timeline's split, so they rebuild it.
+    // Strip and gutter resizes move the timeline's split, so they rebuild it.
     view.invalidate_timeline(cx);
 }
 
@@ -1039,13 +822,13 @@ fn paint_markers(
             Bounds::new(point(px(lx), px(top)), size(px(1.), px(height))),
             palette.marker,
         ));
-        // Continue the marker line through the counter panel, which shares the
+        // Continue the marker line through the counters strip, which shares the
         // time axis, so a phase boundary reads across both.
         if show_counters {
             window.paint_quad(fill(
                 Bounds::new(
-                    point(px(lx), px(regions.panel_top)),
-                    size(px(1.), px(regions.panel_h())),
+                    point(px(lx), px(regions.counters_top)),
+                    size(px(1.), px(regions.counters_h())),
                 ),
                 palette.marker,
             ));
@@ -1209,10 +992,10 @@ struct GutterPaint<'a> {
 }
 
 /// Paints the opaque left gutter — a single column spanning the flame chart and
-/// the bottom panel — over any content that panned or scrolled under it, then the
-/// names left-aligned within it: thread names track the flame lanes' vertical
-/// scroll (clipped to their band), and, for the Counters tab, counter names sit
-/// at their fitted panel lanes. Other tabs leave the gutter empty.
+/// the counters strip — over any content that panned or scrolled under it, then
+/// the names left-aligned within it: thread names track the flame lanes' vertical
+/// scroll (clipped to their band), and counter names sit at their fitted strip
+/// lanes.
 #[allow(clippy::too_many_arguments)]
 fn paint_gutter(
     profile: &Profile,
@@ -1229,7 +1012,7 @@ fn paint_gutter(
     cx: &mut App,
 ) {
     let gutter_left = regions.content_left - gutter_width;
-    let gutter_bottom = regions.panel_bottom;
+    let gutter_bottom = regions.counters_bottom;
     paint_gutter_frame(
         regions,
         gutter_left,
@@ -1278,7 +1061,7 @@ fn paint_gutter(
 
 /// Fills the gutter's opaque background and draws a divider at its right edge,
 /// under the drag handle, spanning the full height so the resizable line reads as
-/// one across the flame chart, the tab bar, and the panel.
+/// one across the flame chart and the counters strip.
 fn paint_gutter_frame(
     regions: Regions,
     gutter_left: f32,
@@ -1548,8 +1331,8 @@ fn paint_counter_labels(
 ) {
     for gl in graph_lanes(
         profile.counters().len(),
-        regions.panel_top,
-        regions.panel_h(),
+        regions.counters_top,
+        regions.counters_h(),
     ) {
         let lane_bottom = gl.top + METRICS.header_height + gl.chart_h;
         let ty = lane_bottom - GUTTER_LABEL_SIZE - SLICE_TEXT_PAD;
@@ -1645,13 +1428,21 @@ impl From<TraceSource> for Load {
     }
 }
 
-/// The document rendering the profile `load` reads.
+/// The document rendering the profile `load` reads, as the timeline above the
+/// flame graph and stats that aggregate whatever tracks it has selected.
 pub fn open(load: impl Into<Load>, window: &mut Window, cx: &mut App) -> Document {
     let load = load.into();
     let label = load.title.clone();
-    let panels = PanelGroup::one(AnyPanel::new(
-        cx.new(|cx| TracePanel::new(load, window, cx)),
-    ))
+    let model = cx.new(|_| TraceModel::new());
+    let timeline = cx.new(|cx| TracePanel::new(load, model.clone(), window, cx));
+    let flame = cx.new(|cx| FlamePanel::new(model.clone(), window, cx));
+    let stats = cx.new(|cx| StatsPanel::new(model, cx));
+    let panels = PanelGroup::split(
+        gpui::Axis::Vertical,
+        TIMELINE_SHARE,
+        PanelGroup::one(AnyPanel::new(timeline)),
+        PanelGroup::tabs(AnyPanel::new(flame), vec![AnyPanel::new(stats)]),
+    )
     .with_weight(Weight::CHART);
     Document::new(label, panels)
 }
@@ -1689,17 +1480,25 @@ mod tests {
     use super::*;
 
     #[test]
-    fn clamp_panel_height_bounds_both_sections() {
+    fn clamp_counters_height_bounds_both_sections() {
         // A tall window: clamps to the requested height, untouched.
-        assert_eq!(clamp_panel_height(220.0, 3, 800.0), 220.0);
+        assert_eq!(clamp_counters_height(220.0, 3, 800.0), 220.0);
         // The floor: never below n lanes of header band plus minimum chart.
         let min = 3.0 * (METRICS.header_height + MIN_CHART_HEIGHT);
-        assert_eq!(clamp_panel_height(0.0, 3, 800.0), min);
+        assert_eq!(clamp_counters_height(0.0, 3, 800.0), min);
         // The flame-region ceiling: leaves FLAME_MIN_HEIGHT for the flame chart,
-        // plus the ruler, time bar, and tab bar.
+        // plus the ruler, time bar, and divider.
         let vh = 260.0;
-        let max = vh - RULER_HEIGHT - SCROLLBAR_THICKNESS - TAB_BAR_HEIGHT - FLAME_MIN_HEIGHT;
-        assert_eq!(clamp_panel_height(1000.0, 1, vh), max);
+        let max =
+            vh - RULER_HEIGHT - SCROLLBAR_THICKNESS - COUNTERS_DIVIDER_HEIGHT - FLAME_MIN_HEIGHT;
+        assert_eq!(clamp_counters_height(1000.0, 1, vh), max);
+    }
+
+    /// A profile with no counters has no strip, so no height is kept for one
+    /// however the divider was last dragged for a profile that had them.
+    #[test]
+    fn a_profile_with_no_counters_has_no_strip() {
+        assert_eq!(clamp_counters_height(220.0, 0, 800.0), 0.0);
     }
 
     #[test]
@@ -1727,7 +1526,7 @@ mod tests {
         let regions = Regions::new(
             window,
             0,
-            DEFAULT_PANEL_HEIGHT,
+            DEFAULT_COUNTERS_HEIGHT,
             DEFAULT_GUTTER_WIDTH,
             flame_total,
         );

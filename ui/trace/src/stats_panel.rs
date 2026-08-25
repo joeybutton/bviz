@@ -1,21 +1,26 @@
 use crate::chart::format_duration;
-use crate::model::TraceModel;
+use crate::model::{SourceReplaced, TraceModel};
 use crate::rebuild::Rebuild;
 use crate::theme::Palette;
 use crate::{
     STATS_CELL_PAD, STATS_HEADER_HEIGHT, STATS_NUM_COL_WIDTH, STATS_ROW_HEIGHT, STATS_TEXT_SIZE,
-    set_list_thumb, thumb_offset,
+    panel_toolbar, profile_status, set_list_thumb, thumb_offset, time_window_chip,
 };
 use bviz_trace_layout::{FlameLabels, ScopeAggregate, StatRow};
 use bviz_ui_components::{
     Axis, DEFAULT_MIN_THUMB, DragEnd, SCROLLBAR_THICKNESS, Scrollbar, centered_spinner,
     load_in_background, overlay_canvas, track_drag,
 };
+use bviz_ui_workspace::{Panel, PanelEvent, PanelKind};
 use gpui::{
-    App, Bounds, Context, Div, Entity, IntoElement, MouseButton, MouseDownEvent, Pixels, Point,
-    Render, Rgba, SharedString, Subscription, UniformListScrollHandle, Window, div, point,
-    prelude::*, px, size, uniform_list,
+    App, Bounds, Context, Div, Entity, EventEmitter, FocusHandle, Focusable, IntoElement,
+    MouseButton, MouseDownEvent, Pixels, Point, Render, Rgba, SharedString, Subscription,
+    UniformListScrollHandle, Window, div, point, prelude::*, px, size, uniform_list,
 };
+
+/// The key context scoping the stats table's own bindings, so a key pressed here
+/// reaches this panel and no other.
+const STATS_KEY_CONTEXT: &str = "TraceStats";
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -199,6 +204,9 @@ enum StatsDrag {
 /// group, reading the aggregate from [`TraceModel`]. Owns its sort, scroll, and
 /// drag state as plain fields.
 pub(crate) struct StatsPanel {
+    /// Focus for the panel, so the window's own actions dispatch while it is the
+    /// panel on show.
+    focus: FocusHandle,
     /// Read for the current selection's aggregate and the version its sort keys
     /// on.
     model: Entity<TraceModel>,
@@ -220,6 +228,8 @@ pub(crate) struct StatsPanel {
     /// Rebuilds the sort order when the model swaps in a freshly built aggregate:
     /// the order derives from the aggregate, which lands asynchronously.
     _model_observer: Subscription,
+    /// Drops the order built over the document being replaced.
+    _source_replaced: Subscription,
 }
 
 impl StatsPanel {
@@ -232,7 +242,12 @@ impl StatsPanel {
             this.ensure_stats_order(cx);
             cx.notify();
         });
+        let source_replaced = cx.subscribe(&model, |this, _, _: &SourceReplaced, cx| {
+            this.reset_for_new_profile();
+            cx.notify();
+        });
         Self {
+            focus: cx.focus_handle(),
             model,
             stats_sort: DEFAULT_STATS_SORT.0,
             stats_desc: DEFAULT_STATS_SORT.1,
@@ -242,13 +257,14 @@ impl StatsPanel {
             picked: None,
             drag: StatsDrag::None,
             _model_observer: model_observer,
+            _source_replaced: source_replaced,
         }
     }
 
     /// Drops the shown order and abandons any in-flight sort, so a freshly loaded
     /// profile shows the sort spinner rather than the prior selection's rows until
     /// its aggregate lands, and returns the body to the first row.
-    pub(crate) fn reset_for_new_profile(&mut self) {
+    fn reset_for_new_profile(&mut self) {
         self.stats_order = None;
         self.stats_build.invalidate();
         self.picked = None;
@@ -532,28 +548,74 @@ impl StatsPanel {
     }
 }
 
+impl EventEmitter<PanelEvent> for StatsPanel {}
+
+impl Focusable for StatsPanel {
+    fn focus_handle(&self, _cx: &App) -> FocusHandle {
+        self.focus.clone()
+    }
+}
+
+impl Panel for StatsPanel {
+    fn kind() -> PanelKind {
+        PanelKind {
+            name: "trace-stats",
+            key_context: STATS_KEY_CONTEXT,
+        }
+    }
+
+    fn title(&self, _cx: &App) -> SharedString {
+        "Stats".into()
+    }
+
+    fn status(&self, cx: &App) -> Option<SharedString> {
+        Some(profile_status(&self.model, cx))
+    }
+
+    fn set_active(&mut self, active: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if active {
+            self.focus.focus(window, cx);
+        }
+    }
+}
+
 impl Render for StatsPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // Re-sort off the UI thread when the aggregates or sort change; sorting
         // ~2M rows on the paint thread would freeze it.
         self.ensure_stats_order(cx);
         let palette = Palette::from_theme(&bviz_ui_theme::theme(window, cx));
+        let toolbar = time_window_chip(&self.model, palette, cx)
+            .map(|chip| panel_toolbar(palette).child(chip));
         div()
+            .key_context(STATS_KEY_CONTEXT)
+            .track_focus(&self.focus)
+            .flex()
+            .flex_col()
             .size_full()
             .overflow_hidden()
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|this, e: &MouseDownEvent, _, cx| {
-                    // A press on the scroll thumb/track drives the bar; the canvas
-                    // paint re-installs the drag handlers while the drag is set, so
-                    // repaint now.
-                    this.press(e.position);
-                    cx.stop_propagation();
-                    cx.notify();
-                }),
+            .children(toolbar)
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .min_h(px(0.))
+                    .overflow_hidden()
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, e: &MouseDownEvent, _, cx| {
+                            // A press on the scroll thumb/track drives the bar; the
+                            // canvas paint re-installs the drag handlers while the
+                            // drag is set, so repaint now.
+                            this.press(e.position);
+                            cx.stop_propagation();
+                            cx.notify();
+                        }),
+                    )
+                    .on_scroll_wheel(|_, _, cx: &mut App| cx.stop_propagation())
+                    .child(self.stats_table(&palette, cx)),
             )
-            .on_scroll_wheel(|_, _, cx: &mut App| cx.stop_propagation())
-            .child(self.stats_table(&palette, cx))
     }
 }
 

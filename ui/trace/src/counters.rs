@@ -43,7 +43,7 @@ impl CounterYScale {
     }
 }
 
-/// Paints the bottom graph section: every counter lane fitted to the section
+/// Paints the counters strip: every counter lane fitted to the strip's
 /// height. Each lane is a header band over a chart area that holds the lane's
 /// series as a filled step area scaled to the chart height and the series' peak.
 /// Charts are confined to the content column. Work per lane is bounded by the
@@ -62,12 +62,12 @@ pub(crate) fn paint_graph(
         return;
     }
     let counters = profile.counters();
-    let lanes = graph_lanes(counters.len(), regions.panel_top, regions.panel_h());
+    let lanes = graph_lanes(counters.len(), regions.counters_top, regions.counters_h());
     let edge_slack = COUNTER_EDGE_SLACK_PX / window.scale_factor();
     let content_mask = ContentMask {
         bounds: Bounds::new(
-            point(px(regions.content_left), px(regions.panel_top)),
-            size(px(regions.time_w), px(regions.panel_h())),
+            point(px(regions.content_left), px(regions.counters_top)),
+            size(px(regions.time_w), px(regions.counters_h())),
         ),
     };
     for gl in lanes {
@@ -162,9 +162,9 @@ pub(crate) fn paint_crosshair(
         ));
     };
     crosshair_line(regions.flame_top, regions.flame_h(), window);
-    // The counter panel shares the time axis, so the crosshair continues into it.
+    // The counters strip shares the time axis, so the crosshair continues into it.
     if show_counters {
-        crosshair_line(regions.panel_top, regions.panel_h(), window);
+        crosshair_line(regions.counters_top, regions.counters_h(), window);
     }
 
     let font = bviz_ui_assets::text_metrics(window).font;
@@ -210,7 +210,7 @@ fn paint_counter_readouts(
     cx: &mut App,
 ) {
     let counters = profile.counters();
-    let lanes = graph_lanes(counters.len(), regions.panel_top, regions.panel_h());
+    let lanes = graph_lanes(counters.len(), regions.counters_top, regions.counters_h());
     for gl in lanes {
         if gl.chart_h <= 0.0 {
             continue;

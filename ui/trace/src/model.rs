@@ -23,6 +23,12 @@ use std::sync::Arc;
 /// moved.
 pub(crate) struct AggregateBuildStarted;
 
+/// A different document is now loaded. Carried as an event because the state it
+/// calls for dropping is view-local — a zoom held over the old graph, a sort
+/// order over its rows — and a panel must drop it exactly once, on the swap,
+/// rather than on every notification the model sends.
+pub(crate) struct SourceReplaced;
+
 /// The shared trace document and the selection and visibility state derived from
 /// it, plus the layouts and aggregates cached from those. Held by
 /// [`crate::TracePanel`] as an entity so every panel reads one source of truth; a
@@ -93,6 +99,7 @@ pub(crate) struct TraceModel {
 }
 
 impl EventEmitter<AggregateBuildStarted> for TraceModel {}
+impl EventEmitter<SourceReplaced> for TraceModel {}
 
 impl TraceModel {
     pub(crate) fn new() -> Self {
@@ -150,19 +157,25 @@ impl TraceModel {
         }
         self.time_selection = selection;
         self.aggregate_key += 1;
+        // The regions are drawn on the timeline and named by the panels the
+        // aggregate covers, each in a pane of its own, so the new window has to
+        // reach every observer rather than only the view the gesture landed in.
+        cx.notify();
         self.ensure_aggregates(cx);
         true
     }
 
     /// Replaces the loaded document, dropping the lane layouts (which depend only
-    /// on the profile) and the time selection (whose instants address the old
-    /// profile's timeline) and, for a loaded profile, seeding the default track
-    /// selection.
+    /// on the profile), the aggregate built over the old document, and the time
+    /// selection (whose instants address the old profile's timeline) and, for a
+    /// loaded profile, seeding the default track selection.
     pub(crate) fn set_source(&mut self, source: Source, cx: &mut Context<Self>) {
         self.lanes.borrow_mut().take();
         self.visible_lanes.borrow_mut().take();
+        self.invalidate_aggregates();
         self.time_selection.clear();
         self.source = source;
+        cx.emit(SourceReplaced);
         if let Source::Loaded(profile) = &self.source {
             let profile = profile.clone();
             self.init_tracks(&profile, cx);
@@ -532,10 +545,9 @@ impl TraceModel {
     }
 
     /// Drops the cached flame graph and abandons any in-flight build, so the next
-    /// [`Self::ensure_aggregates`] rebuilds from scratch. Called when a new
-    /// profile loads — unlike a mere selection change, the old graph is no longer
-    /// a valid thing to keep showing.
-    pub(crate) fn invalidate_aggregates(&mut self) {
+    /// [`Self::ensure_aggregates`] rebuilds from scratch: unlike a mere selection
+    /// change, a replaced document leaves the old graph nothing to describe.
+    fn invalidate_aggregates(&mut self) {
         self.aggregates = None;
         self.flame_scan = None;
         self.agg.invalidate();

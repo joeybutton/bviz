@@ -1,24 +1,31 @@
 use crate::chart::format_duration;
-use crate::model::{AggregateBuildStarted, TraceModel};
-use crate::theme::Palette;
+use crate::model::{AggregateBuildStarted, SourceReplaced, TraceModel};
+use crate::theme::{self, Palette};
 use crate::{
     LINE_SCROLL_PX, METRICS, MIN_SLICE_PX, STATS_TEXT_SIZE, ZOOM_PER_NOTCH, drawn_scroll,
-    scroll_request, thumb_offset,
+    panel_toolbar, profile_status, scroll_request, thumb_offset, time_window_chip,
 };
 use bviz_trace_layout::{
-    FlameBox, FlameMetrics, FlamePlacement, FlameView, ScopeAggregate, flame_height, lay_out_flame,
+    FlameBox, FlameDirection, FlameLabels, FlameMetrics, FlameMode, FlamePlacement, FlameView,
+    ScopeAggregate, flame_height, lay_out_flame,
 };
 use bviz_ui_components::{
-    Axis, DEFAULT_MIN_THUMB, DragEnd, SCROLLBAR_THICKNESS, Scrollbar, cached_layer, overlay_canvas,
-    paint_labeled_box, paint_tooltip_box, spinner, track_drag,
+    Axis, Button, DEFAULT_MIN_THUMB, DragEnd, SCROLLBAR_THICKNESS, Scrollbar, cached_layer,
+    centered_spinner, overlay_canvas, paint_labeled_box, paint_tooltip_box, spinner, track_drag,
 };
+use bviz_ui_workspace::{Panel, PanelEvent, PanelKind};
 use gpui::{
-    App, Bounds, ContentMask, Context, Div, Entity, IntoElement, MouseButton, MouseDownEvent,
-    MouseMoveEvent, Pixels, Point, Render, ScrollWheelEvent, Stateful, Subscription, WeakEntity,
-    Window, canvas, div, point, prelude::*, px, size,
+    AnyElement, App, Bounds, ContentMask, Context, Div, Entity, EventEmitter, FocusHandle,
+    Focusable, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, Pixels, Point, Render,
+    ScrollWheelEvent, SharedString, Stateful, Subscription, WeakEntity, Window, canvas, div, point,
+    prelude::*, px, size,
 };
 use std::rc::Rc;
 use std::sync::Arc;
+
+/// The key context scoping the flame graph's own bindings, so a key pressed here
+/// reaches this panel and no other.
+const FLAME_KEY_CONTEXT: &str = "TraceFlameGraph";
 
 /// The flame graph's laid-out boxes together with the inputs that determine
 /// them, so a paint reuses them unless one changed. The retained
@@ -260,8 +267,11 @@ fn paint_flame_tooltip(
 /// reading the aggregate from [`TraceModel`]. The boxes are painted by
 /// [`FlameCanvas`], the tooltip by an overlay above it.
 pub(crate) struct FlamePanel {
+    /// Focus for the panel, so the window's own actions dispatch while it is the
+    /// panel on show.
+    focus: FocusHandle,
     /// Read for the current selection's aggregate and whether a rebuild is
-    /// running.
+    /// running, and written by the mode controls on its toolbar.
     model: Entity<TraceModel>,
     /// Horizontal window into the aggregated flame graph's normalized width (the
     /// panel's zoom and pan); a fraction so a resize stays invertible.
@@ -289,10 +299,20 @@ pub(crate) struct FlamePanel {
     /// Raises the rebuild pill when a build starts, which no state the panel
     /// renders from would otherwise reveal.
     _build_start: Subscription,
+    /// Returns the panel to the fit-to-window view when a different document
+    /// loads, whose graph a zoom held over the old one addresses nothing in.
+    _source_replaced: Subscription,
+    /// Rebuilds the box scene on a system appearance change so it repaints in the
+    /// new palette.
+    _appearance_observer: Subscription,
 }
 
 impl FlamePanel {
-    pub(crate) fn new(model: Entity<TraceModel>, cx: &mut Context<Self>) -> Self {
+    pub(crate) fn new(
+        model: Entity<TraceModel>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let parent = cx.entity().downgrade();
         let canvas = cx.new(|_| FlameCanvas { parent });
         let model_observer = cx.observe(&model, |this, _, cx| {
@@ -302,7 +322,18 @@ impl FlamePanel {
         // The boxes still address the shown graph; only the pill above them needs
         // the frame.
         let build_start = cx.subscribe(&model, |_, _, _: &AggregateBuildStarted, cx| cx.notify());
+        let source_replaced = cx.subscribe(&model, |this, _, _: &SourceReplaced, cx| {
+            this.reset_view();
+            this.invalidate_canvas(cx);
+        });
+        let appearance_observer = {
+            let panel = cx.entity().downgrade();
+            window.observe_window_appearance(move |_, cx| {
+                panel.update(cx, |p, cx| p.invalidate_canvas(cx)).ok();
+            })
+        };
         Self {
+            focus: cx.focus_handle(),
             model,
             flame_view: FlameView::FIT,
             flame_scroll_y: 0.0,
@@ -314,6 +345,8 @@ impl FlamePanel {
             canvas,
             _model_observer: model_observer,
             _build_start: build_start,
+            _source_replaced: source_replaced,
+            _appearance_observer: appearance_observer,
         }
     }
 
@@ -338,10 +371,88 @@ impl FlamePanel {
         self.reset_aggregate_derived();
     }
 
-    /// Clears the box tooltip, so a tab switch drops it instead of leaving it until
-    /// the next mouse move.
-    pub(crate) fn clear_hover(&mut self) {
+    /// Clears the box tooltip, so a pane bringing another panel forward drops it
+    /// instead of leaving it until the next mouse move.
+    fn clear_hover(&mut self) {
         self.flame_hover = None;
+    }
+
+    /// The panel's toolbar: the window the graph covers, then the controls that
+    /// choose which graph is aggregated and the legend for the colours it is
+    /// drawn in.
+    fn toolbar(&self, palette: Palette, cx: &mut Context<Self>) -> Div {
+        panel_toolbar(palette)
+            .children(time_window_chip(&self.model, palette, cx))
+            .child(div().flex_1())
+            .child(self.mode_controls(cx))
+            .child(theme::role_legend(&palette, STATS_TEXT_SIZE))
+    }
+
+    /// The graph's mode controls: the two directions as an exclusive pair, and
+    /// the labelling as a toggle that holds across both.
+    fn mode_controls(&self, cx: &mut Context<Self>) -> Div {
+        let mode = self.model.read(cx).flame_mode();
+        let mnemonics = mode.labels == FlameLabels::Mnemonic;
+        let button = |id: &'static str, label: &'static str, on: bool, to: FlameMode| {
+            let view = cx.entity();
+            Button::new(id, move |_, _, cx| {
+                view.update(cx, |this, cx| this.set_mode(to, cx));
+            })
+            .ghost()
+            .compact()
+            .selected(on)
+            .label(label)
+        };
+        div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .flex_shrink_0()
+            .gap_1()
+            .text_size(px(STATS_TEXT_SIZE))
+            .child(button(
+                "flame-top-down",
+                "Top-down",
+                mode.direction == FlameDirection::TopDown,
+                FlameMode {
+                    direction: FlameDirection::TopDown,
+                    ..mode
+                },
+            ))
+            .child(button(
+                "flame-bottom-up",
+                "Bottom-up",
+                mode.direction == FlameDirection::BottomUp,
+                FlameMode {
+                    direction: FlameDirection::BottomUp,
+                    ..mode
+                },
+            ))
+            .child(button(
+                "flame-mnemonics",
+                "Mnemonics",
+                mnemonics,
+                FlameMode {
+                    labels: if mnemonics {
+                        FlameLabels::Name
+                    } else {
+                        FlameLabels::Mnemonic
+                    },
+                    ..mode
+                },
+            ))
+    }
+
+    /// Applies a mode chosen on the toolbar, leaving the view alone for a click
+    /// that re-chooses the standing mode. The graph the next aggregate lays out
+    /// has a geometry unrelated to the one a zoom and scroll were held over, so
+    /// they return to the fit.
+    fn set_mode(&mut self, mode: FlameMode, cx: &mut Context<Self>) {
+        if !self.model.update(cx, |m, cx| m.set_flame_mode(mode, cx)) {
+            return;
+        }
+        self.reset_view();
+        self.invalidate_canvas(cx);
     }
 
     /// The current panel geometry, or `None` until the graph exists and the panel
@@ -555,12 +666,63 @@ impl FlamePanel {
     }
 }
 
+impl EventEmitter<PanelEvent> for FlamePanel {}
+
+impl Focusable for FlamePanel {
+    fn focus_handle(&self, _cx: &App) -> FocusHandle {
+        self.focus.clone()
+    }
+}
+
+impl Panel for FlamePanel {
+    fn kind() -> PanelKind {
+        PanelKind {
+            name: "trace-flame-graph",
+            key_context: FLAME_KEY_CONTEXT,
+        }
+    }
+
+    fn title(&self, _cx: &App) -> SharedString {
+        "Flame Graph".into()
+    }
+
+    fn status(&self, cx: &App) -> Option<SharedString> {
+        Some(profile_status(&self.model, cx))
+    }
+
+    fn set_active(&mut self, active: bool, window: &mut Window, cx: &mut Context<Self>) {
+        match active {
+            true => self.focus.focus(window, cx),
+            // The tooltip anchors to a cursor that is no longer over the graph.
+            false => self.clear_hover(),
+        }
+    }
+}
+
 impl Render for FlamePanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        if self.model.read(cx).aggregates().is_none() {
-            return div().into_any_element();
-        }
         let palette = Palette::from_theme(&bviz_ui_theme::theme(window, cx));
+        let toolbar = self.toolbar(palette, cx);
+        let body = self.graph_body(palette, cx);
+        div()
+            .key_context(FLAME_KEY_CONTEXT)
+            .track_focus(&self.focus)
+            .flex()
+            .flex_col()
+            .size_full()
+            .overflow_hidden()
+            .child(toolbar)
+            .child(body)
+    }
+}
+
+impl FlamePanel {
+    /// The graph itself, or the spinner standing in for it while the first
+    /// aggregate for the loaded document is still being built.
+    fn graph_body(&mut self, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
+        if self.model.read(cx).aggregates().is_none() {
+            return centered_spinner("Building flame graph…", &palette.colors).into_any_element();
+        }
         let entity = cx.entity();
         let boxes = cached_layer(self.canvas.clone());
         let overlay = overlay_canvas(move |bounds, window, cx| {
@@ -609,7 +771,8 @@ impl Render for FlamePanel {
             div()
                 .id("flame-graph-panel")
                 .relative()
-                .size_full()
+                .flex_1()
+                .min_h(px(0.))
                 .overflow_hidden()
                 .child(boxes)
                 .child(overlay)

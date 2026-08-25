@@ -1,16 +1,15 @@
 use crate::{
-    FLAME_MIN_HEIGHT, METRICS, MIN_CHART_HEIGHT, MIN_GUTTER, RULER_HEIGHT, STATS_HEADER_HEIGHT,
-    STATS_ROW_HEIGHT, TAB_BAR_HEIGHT,
+    COUNTERS_DIVIDER_HEIGHT, FLAME_MIN_HEIGHT, METRICS, MIN_CHART_HEIGHT, MIN_GUTTER, RULER_HEIGHT,
 };
 use bviz_trace_layout::LaneLayout;
 use bviz_ui_components::SCROLLBAR_THICKNESS;
 use gpui::{Bounds, Pixels, Point, point, px, size};
 
-/// The window content split into the flame chart region on top, the tab bar,
-/// and the bottom panel, plus the gutter/time-axis columns shared across them.
-/// Derived once per frame from the viewport bounds, the counter count, the panel
-/// height, the gutter width, and the flame lanes' total height (to decide whether
-/// a vertical bar column must be reserved). Both paint and the mouse handlers
+/// The timeline split into the flame chart region on top, the divider, and the
+/// counters strip, plus the gutter/time-axis columns shared across them. Derived
+/// once per frame from the viewport bounds, the counter count, the strip height,
+/// the gutter width, and the flame lanes' total height (to decide whether a
+/// vertical bar column must be reserved). Both paint and the mouse handlers
 /// compute the same regions so hit-testing matches what was drawn.
 #[derive(Clone, Copy)]
 pub(crate) struct Regions {
@@ -30,24 +29,26 @@ pub(crate) struct Regions {
     pub(crate) flame_top: f32,
     /// Bottom of the scrollable flame lanes; the time horizontal bar sits below.
     pub(crate) flame_bottom: f32,
-    /// Top of the tab bar (below the flame region and its horizontal bar).
-    pub(crate) tab_top: f32,
-    /// Bottom of the tab bar, which is the bottom panel's top.
-    pub(crate) panel_top: f32,
-    /// Bottom of the bottom panel (window bottom).
-    pub(crate) panel_bottom: f32,
-    /// Whether the profile has counters (so the Counters tab has content).
+    /// Top of the divider (below the flame region and its horizontal bar).
+    divider_top: f32,
+    /// Top of the counters strip, which is the divider's bottom.
+    pub(crate) counters_top: f32,
+    /// Bottom of the counters strip, which is the viewport's bottom edge and so
+    /// the bottom of the gutter column running the whole height.
+    pub(crate) counters_bottom: f32,
+    /// Whether the profile has counters, and so whether the strip and the
+    /// divider that resizes it are drawn at all.
     pub(crate) has_graph: bool,
 }
 
 impl Regions {
-    /// Splits `bounds` given the counter count, the panel's stored height, the
-    /// gutter width, and the flame lanes' total height (to decide whether a
-    /// vertical bar shows and so a column must be reserved for it).
+    /// Splits `bounds` given the counter count, the counters strip's stored
+    /// height, the gutter width, and the flame lanes' total height (to decide
+    /// whether a vertical bar shows and so a column must be reserved for it).
     pub(crate) fn new(
         bounds: Bounds<Pixels>,
         n_counters: usize,
-        panel_height: f32,
+        counters_height: f32,
         gutter_width: f32,
         flame_total: f32,
     ) -> Self {
@@ -55,14 +56,18 @@ impl Regions {
         let oy = f32::from(bounds.origin.y);
         let w = f32::from(bounds.size.width);
         let vh = f32::from(bounds.size.height);
-        let panel_bottom = oy + vh;
-        let panel_h = clamp_panel_height(panel_height, n_counters, vh);
-        let panel_top = (panel_bottom - panel_h).max(oy);
-        let tab_top = (panel_top - TAB_BAR_HEIGHT).max(oy);
+        let has_graph = n_counters > 0;
+        let counters_bottom = oy + vh;
+        let counters_h = clamp_counters_height(counters_height, n_counters, vh);
+        let counters_top = (counters_bottom - counters_h).max(oy);
+        let divider_top = match has_graph {
+            true => (counters_top - COUNTERS_DIVIDER_HEIGHT).max(oy),
+            false => counters_top,
+        };
         // The flame region: ruler at the top, scrollable lanes, then a strip for
-        // the time horizontal bar always reserved above the tab bar.
+        // the time horizontal bar always reserved above the divider.
         let flame_top = oy + RULER_HEIGHT;
-        let flame_bottom = (tab_top - SCROLLBAR_THICKNESS).max(flame_top);
+        let flame_bottom = (divider_top - SCROLLBAR_THICKNESS).max(flame_top);
         // Clamp the stored gutter width to the current window: a widened gutter
         // shrunk under by a later window resize must still leave the time axis
         // its share rather than collapsing it.
@@ -86,11 +91,23 @@ impl Regions {
             ruler_top: oy,
             flame_top,
             flame_bottom,
-            tab_top,
-            panel_top,
-            panel_bottom,
-            has_graph: n_counters > 0,
+            divider_top,
+            counters_top,
+            counters_bottom,
+            has_graph,
         }
+    }
+
+    /// The band between the flame lanes and the counters strip that a press
+    /// takes hold of to resize the strip.
+    pub(crate) fn divider_rect(&self) -> Bounds<Pixels> {
+        Bounds::new(
+            point(px(self.content_left), px(self.divider_top)),
+            size(
+                px((self.content_right - self.content_left).max(0.0)),
+                px(COUNTERS_DIVIDER_HEIGHT),
+            ),
+        )
     }
 
     /// The ruler band over the time axis: the strip the selection's regions are
@@ -125,22 +142,25 @@ impl Regions {
         (self.flame_bottom - self.flame_top).max(0.0)
     }
 
-    /// Height of the bottom panel below the tab bar.
-    pub(crate) fn panel_h(&self) -> f32 {
-        (self.panel_bottom - self.panel_top).max(0.0)
+    /// Height of the counters strip below the divider.
+    pub(crate) fn counters_h(&self) -> f32 {
+        (self.counters_bottom - self.counters_top).max(0.0)
     }
 }
 
-/// The bottom panel's height bounded to leave the flame region at least
-/// `FLAME_MIN_HEIGHT` and to keep the panel tall enough for its content — every
-/// counter lane at least a header band plus `MIN_CHART_HEIGHT` of chart, or at
-/// least a stats header plus one row — so no tab collapses to nothing.
-pub(crate) fn clamp_panel_height(panel_height: f32, n_counters: usize, vh: f32) -> f32 {
-    let counter_floor = n_counters as f32 * (METRICS.header_height + MIN_CHART_HEIGHT);
-    let min = counter_floor.max(STATS_HEADER_HEIGHT + STATS_ROW_HEIGHT);
+/// The counters strip's height bounded to leave the flame region at least
+/// `FLAME_MIN_HEIGHT` and to keep every counter lane a header band plus
+/// `MIN_CHART_HEIGHT` of chart, so no lane collapses to nothing. A profile with
+/// no counters has no strip, whatever height was dragged for another one.
+pub(crate) fn clamp_counters_height(counters_height: f32, n_counters: usize, vh: f32) -> f32 {
+    if n_counters == 0 {
+        return 0.0;
+    }
+    let min = n_counters as f32 * (METRICS.header_height + MIN_CHART_HEIGHT);
     let max =
-        (vh - RULER_HEIGHT - SCROLLBAR_THICKNESS - TAB_BAR_HEIGHT - FLAME_MIN_HEIGHT).max(min);
-    panel_height.clamp(min, max)
+        (vh - RULER_HEIGHT - SCROLLBAR_THICKNESS - COUNTERS_DIVIDER_HEIGHT - FLAME_MIN_HEIGHT)
+            .max(min);
+    counters_height.clamp(min, max)
 }
 
 /// The gutter width bounded to stay legible yet never claim more than half the
@@ -152,7 +172,7 @@ pub(crate) fn clamp_gutter_width(gutter_width: f32, window_w: f32) -> f32 {
 
 /// Total height the flame section's rows occupy — thread lanes and the group
 /// bands they hang under, which share one coordinate space — ignoring the
-/// layout's counter lanes (the graph section places those itself).
+/// layout's counter lanes (the counters strip places those itself).
 pub(crate) fn flame_total_height(layout: &LaneLayout) -> f32 {
     layout.total_height
 }
@@ -163,7 +183,7 @@ pub(crate) fn max_lane_scroll(layout: &LaneLayout, regions: &Regions) -> f32 {
     (flame_total_height(layout) - regions.flame_h()).max(0.0)
 }
 
-/// One fitted counter lane in the panel: its top (window y) and the height of
+/// One fitted counter lane in the strip: its top (window y) and the height of
 /// its chart area below the header band.
 #[derive(Clone, Copy)]
 pub(crate) struct GraphLane {
@@ -172,7 +192,7 @@ pub(crate) struct GraphLane {
     pub(crate) chart_h: f32,
 }
 
-/// Distributes the graph section's height evenly across its `n` counter lanes:
+/// Distributes the counters strip's height evenly across its `n` counter lanes:
 /// each lane is a header band plus a chart area that shrinks to zero as the
 /// section collapses toward the label-only minimum.
 pub(crate) fn graph_lanes(n: usize, graph_top: f32, graph_h: f32) -> Vec<GraphLane> {
