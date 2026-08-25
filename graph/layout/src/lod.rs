@@ -88,6 +88,21 @@ pub fn collapse_edges(graph: &Graph, expanded: &HashSet<Id>) -> HashSet<(Id, Id)
     pairs
 }
 
+/// Caps the nodes the first layered view opens with. A layered drawing spreads
+/// sideways faster than it gains boxes, so beyond this size the fitted view is a
+/// smear of boxes too small to carry a label; the reader opens the containers
+/// that interest them out of a legible starting point instead.
+pub const DEFAULT_MAX_NODES: usize = 2000;
+
+/// Caps the edges the first layered view opens with. On a dense graph an
+/// expansion multiplies the connectors among the boxes already drawn without
+/// adding many, and it is the connectors, not the boxes, that decide how far the
+/// drawing spreads — so the first view is held to both counts. A view of this
+/// density has long since crossed into the cheaper placement strategy, which
+/// buys its speed in width, so what this count bounds is the wait rather than
+/// how wide the drawing lands.
+pub const DEFAULT_MAX_EDGES: usize = 20000;
+
 /// A startup expansion set: the containers to expand for the largest collapsed
 /// view that fits both `max_nodes` and `max_edges`.
 pub fn default_expansion(graph: &Graph, max_nodes: usize, max_edges: usize) -> HashSet<Id> {

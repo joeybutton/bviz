@@ -4,26 +4,12 @@ use crate::mode::LayoutMode;
 use crate::morph;
 use crate::{GraphView, MARGIN};
 use bviz_graph_layout::graph::Graph;
+use bviz_graph_layout::lod::{DEFAULT_MAX_EDGES, DEFAULT_MAX_NODES};
 use bviz_graph_layout::{Id, LaidOut, MapLayout, Names};
 use bviz_ui_components::load_in_background;
 use gpui::{Context, Task};
 use std::collections::HashSet;
 use std::sync::Arc;
-
-/// Caps the nodes the layered mode's first view opens with. A layered drawing
-/// spreads sideways faster than it gains boxes, so beyond this size the fitted
-/// view is a smear of boxes too small to carry a label; the reader opens the
-/// containers that interest them out of a legible starting point instead.
-const MAX_VISIBLE_NODES: usize = 2000;
-
-/// Caps the edges the layered mode's first view opens with. On a dense graph an
-/// expansion multiplies the connectors among the boxes already drawn without
-/// adding many, and it is the connectors, not the boxes, that decide how far the
-/// drawing spreads — so the first view is held to both counts. A view of this
-/// density has long since crossed into the cheaper placement strategy, which
-/// buys its speed in width, so what this count bounds is the wait rather than
-/// how wide the drawing lands.
-const MAX_VISIBLE_EDGES: usize = 20000;
 
 /// The layered drawing on screen, and how many relayouts had landed when it was
 /// made, by which it is told from the drawing that replaces it.
@@ -189,8 +175,8 @@ impl Model {
                 let (graph, reduced_base, names) = build_graph(&inputs)?;
                 let expanded = bviz_graph_layout::lod::default_expansion(
                     &graph,
-                    MAX_VISIBLE_NODES,
-                    MAX_VISIBLE_EDGES,
+                    DEFAULT_MAX_NODES,
+                    DEFAULT_MAX_EDGES,
                 );
                 let containers = bviz_graph_layout::lod::expandable_containers(&graph);
                 // The map derives each of its views against these, so it holds a

@@ -29,15 +29,8 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use bviz_graph_layout::graph::{Containment, Graph};
+use bviz_graph_layout::lod::{DEFAULT_MAX_EDGES, DEFAULT_MAX_NODES};
 use bviz_graph_layout::{Id, LaidOut, Names, layout, lod, quotient, reduce, streamed_proto};
-
-/// The node cap `--max-nodes` defaults to: the cap the application's first
-/// layered view opens with.
-const DEFAULT_MAX_NODES: usize = 600;
-
-/// The edge cap `--max-edges` defaults to: the cap the application's first
-/// layered view opens with.
-const DEFAULT_MAX_EDGES: usize = 6000;
 
 const USAGE: &str = "usage: bench_relayout [--query FILE] [--cquery FILE] [--aquery FILE] \
                      [--max-nodes N] [--max-edges N] (at least one input); \
