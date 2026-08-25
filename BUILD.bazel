@@ -1,8 +1,8 @@
 load("@buildifier_prebuilt//:rules.bzl", "buildifier", "buildifier_test")
 
 alias(
-    name = "bazel_viz",
-    actual = "//bazel_viz",
+    name = "bviz",
+    actual = "//bviz",
 )
 
 buildifier(

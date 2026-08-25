@@ -711,7 +711,7 @@ impl Render for TraceView {
                 .child(self.trace_body(palette, cx)),
         };
         Chrome::new(&self.window_focus)
-            .title("bazel_viz trace")
+            .title("bviz trace")
             .status(self.status(cx))
             .child(body)
     }
@@ -1600,7 +1600,7 @@ impl From<TraceSource> for Load {
 pub fn open_window(load: impl Into<Load>) {
     let load = load.into();
     bviz_ui_shell::run(
-        "bazel_viz trace",
+        "bviz trace",
         size(px(1280.), px(820.)),
         move |window, cx| cx.new(|cx| TraceView::new(load, window, cx)),
     );

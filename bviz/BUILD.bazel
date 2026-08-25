@@ -1,9 +1,9 @@
 load("@rules_rs//rs:rust_binary.bzl", "rust_binary")
 
 rust_binary(
-    name = "bazel_viz",
+    name = "bviz",
     srcs = ["src/main.rs"],
-    crate_name = "bazel_viz",
+    crate_name = "bviz",
     visibility = ["//:__pkg__"],
     deps = [
         "//alloc",

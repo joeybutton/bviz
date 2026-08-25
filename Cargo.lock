@@ -696,18 +696,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
 
 [[package]]
-name = "bazel_viz"
-version = "0.1.0"
-dependencies = [
- "bviz_alloc",
- "bviz_cli",
- "bviz_ui_graph",
- "bviz_ui_terminal",
- "bviz_ui_trace",
- "clap",
-]
-
-[[package]]
 name = "bindgen"
 version = "0.71.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -867,6 +855,18 @@ name = "bumpalo"
 version = "3.20.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "72f5acc6cb2ba439de613abc23857ec3d78374d8ed5ac84e9d11336e87da8649"
+
+[[package]]
+name = "bviz"
+version = "0.1.0"
+dependencies = [
+ "bviz_alloc",
+ "bviz_cli",
+ "bviz_ui_graph",
+ "bviz_ui_terminal",
+ "bviz_ui_trace",
+ "clap",
+]
 
 [[package]]
 name = "bviz_alloc"

@@ -1,7 +1,7 @@
 [workspace]
 members = [
     "alloc",
-    "bazel_viz",
+    "bviz",
     "cli",
     "graph/layout",
     "terminal",

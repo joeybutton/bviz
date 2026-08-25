@@ -40,7 +40,7 @@ impl From<ConsoleSource> for Load {
 pub fn open_window(load: impl Into<Load>) {
     let load = load.into();
     bviz_ui_shell::run(
-        "bazel_term",
+        "bviz console",
         size(px(1100.), px(720.)),
         move |window, cx| cx.new(|cx| TerminalView::new(load, window, cx)),
     );

@@ -1,4 +1,4 @@
-# bazel_viz
+# bviz
 
 Interactive visualization and inspection tool for Bazel builds.
 

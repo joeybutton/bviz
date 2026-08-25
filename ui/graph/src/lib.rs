@@ -454,7 +454,7 @@ impl Render for GraphView {
             }
         };
         Chrome::new(&self.focus_handle)
-            .title("bazel_viz graph")
+            .title("bviz graph")
             .status(self.model.status(self.mode, self.camera().zoom))
             .child(body)
     }
@@ -592,7 +592,7 @@ impl From<GraphSource> for Load {
 pub fn open_window(load: impl Into<Load>) {
     let load = load.into();
     bviz_ui_shell::run(
-        "bazel_viz graph",
+        "bviz graph",
         size(px(1280.), px(820.)),
         move |window, cx| cx.new(|cx| GraphView::new(load, window, cx)),
     );

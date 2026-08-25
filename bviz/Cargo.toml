@@ -1,10 +1,10 @@
 [package]
-name = "bazel_viz"
+name = "bviz"
 version = "0.1.0"
 edition = "2024"
 
 [[bin]]
-name = "bazel_viz"
+name = "bviz"
 path = "src/main.rs"
 
 [dependencies]

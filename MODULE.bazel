@@ -1,5 +1,5 @@
 module(
-    name = "bazel_viz",
+    name = "bviz",
     version = "0.0.0",
 )
 

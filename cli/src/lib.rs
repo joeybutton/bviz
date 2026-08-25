@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 ///
 /// A window shows one document, so an invocation names one.
 #[derive(Parser, Debug)]
-#[command(name = "bviz", version, about)]
+#[command(name = "bviz", bin_name = "bviz", version, about)]
 pub struct Cli {
     #[command(flatten)]
     pub graph: GraphArgs,

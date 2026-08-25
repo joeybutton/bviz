@@ -5,7 +5,7 @@ rust_library(
     name = "cli",
     srcs = glob(["src/**/*.rs"]),
     crate_name = "bviz_cli",
-    visibility = ["//bazel_viz:__pkg__"],
+    visibility = ["//bviz:__pkg__"],
     deps = [
         "//ui/graph/args",
         "//ui/terminal/args",

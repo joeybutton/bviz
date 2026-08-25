@@ -8,7 +8,7 @@ timeline, scrub back through the console output.
 
 ## Viewers
 
-`//bazel_viz` is the application: it takes the input of any viewer and opens the
+`//bviz` is the application: it takes the input of any viewer and opens the
 one that reads it. Each viewer also builds as a binary of its own, for work on
 that viewer alone.
 
@@ -93,11 +93,11 @@ replay interpolates its timing between the events that do carry a clock.
 
 ## Running bviz
 
-`//bazel_viz` takes the inputs of all three viewers, and opens the viewer whose
+`//bviz` takes the inputs of all three viewers, and opens the viewer whose
 input it is given.
 
 ```sh
-bazel run -c opt //bazel_viz -- --profile /tmp/build.profile.gz
+bazel run -c opt //bviz -- --profile /tmp/build.profile.gz
 ```
 
 A window shows one document, so exactly one is named per invocation, except that

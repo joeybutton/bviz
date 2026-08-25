@@ -1,6 +1,6 @@
 ---
 name: gpui
-description: How to write, build, and run gpui (Zed's GPU-accelerated UI framework) code in the bazel_viz repo — opening an application window, defining views and elements/widgets, styling with the div() builder, wiring click/keyboard interaction, and running work off the UI thread (background tasks, bridging tokio async runtimes, and rayon data parallelism). Use this whenever a task involves gpui, a `Render` view, `div()` element styling, the desktop UI layer, or the eventual Rust visualization frontend — even if "gpui" is not named explicitly. Also use it when wiring tokio, reqwest/gRPC/SDK async, rayon, or any off-UI-thread background/parallel work into a gpui app, since gpui's executor is not tokio and needs an explicit bridge.
+description: How to write, build, and run gpui (Zed's GPU-accelerated UI framework) code in the bviz repo — opening an application window, defining views and elements/widgets, styling with the div() builder, wiring click/keyboard interaction, and running work off the UI thread (background tasks, bridging tokio async runtimes, and rayon data parallelism). Use this whenever a task involves gpui, a `Render` view, `div()` element styling, the desktop UI layer, or the eventual Rust visualization frontend — even if "gpui" is not named explicitly. Also use it when wiring tokio, reqwest/gRPC/SDK async, rayon, or any off-UI-thread background/parallel work into a gpui app, since gpui's executor is not tokio and needs an explicit bridge.
 ---
 
 # Writing gpui apps
@@ -197,8 +197,8 @@ any server-drawn title bar):
 
 ```rust
 WindowOptions {
-    titlebar: Some(TitlebarOptions { title: Some("bazel_viz".into()), ..Default::default() }),
-    app_id: Some("bazel_viz".into()),
+    titlebar: Some(TitlebarOptions { title: Some("bviz".into()), ..Default::default() }),
+    app_id: Some("bviz".into()),
     window_decorations: Some(WindowDecorations::Server), // prefer the compositor's chrome
     ..Default::default()
 }
@@ -621,7 +621,7 @@ through the `crate.from_cargo` extension in `MODULE.bazel`.
 To add a dependency: add it under `[workspace.dependencies]` in the root `Cargo.toml` and
 the consuming crate's `Cargo.toml`, repin with the Bazel-provided cargo (never system
 cargo), commit `Cargo.lock`, then list it in the target's `deps` (e.g. `@crates//:gpui`).
-Run with `bazel run //bazel_viz`.
+Run with `bazel run //bviz`.
 
 ## Screenshots (visual verification)
 
