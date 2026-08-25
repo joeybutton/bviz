@@ -4,7 +4,7 @@ use bviz_ui_theme::{ThemeColors, mix};
 use gpui::{
     AnyElement, App, Bounds, BoxShadow, CursorStyle, Decorations, Div, Entity, FocusHandle,
     HitboxBehavior, Hsla, IntoElement, MouseButton, Pixels, Point, RenderOnce, ResizeEdge, Rgba,
-    SharedString, Size, Stateful, Tiling, Window, canvas, div, point, prelude::*, px, size,
+    SharedString, Size, Stateful, Tiling, Window, canvas, div, point, prelude::*, px,
     transparent_black,
 };
 
@@ -93,7 +93,7 @@ impl RenderOnce for Chrome {
         } else {
             colors.shadow.opacity(UNFOCUSED_SHADOW)
         };
-        let should_move = window.use_keyed_state("chrome-window-move", cx, |_, _| false);
+        let move_latch = MoveLatch::keyed(window, cx);
 
         let inner = div()
             .flex()
@@ -103,7 +103,7 @@ impl RenderOnce for Chrome {
             .text_color(colors.text)
             .when(client, |this| decorate(this, &colors, tiling, shadow))
             .when(client, |this| {
-                this.child(title_bar(&colors, radius, band, self.title, should_move))
+                this.child(title_bar(&colors, radius, band, self.title, move_latch))
             })
             .child(self.body.unwrap_or_else(|| div().into_any_element()))
             .child(status_bar(&colors, radius, band, self.status));
@@ -123,6 +123,13 @@ impl RenderOnce for Chrome {
     }
 }
 
+/// The radius of one window corner, given whether either of the two edges
+/// meeting there is tiled. A corner flush against the screen has nothing to
+/// round off against, so it stays square.
+fn corner_rounding(tiled: bool) -> Pixels {
+    if tiled { px(0.) } else { ROUNDING }
+}
+
 /// Per-tiling window decoration: a border and rounded corner on each non-tiled
 /// side, plus a drop shadow while the window floats free of the screen edges.
 fn decorate(this: Div, colors: &ThemeColors, tiling: Tiling, shadow: Hsla) -> Div {
@@ -131,10 +138,10 @@ fn decorate(this: Div, colors: &ThemeColors, tiling: Tiling, shadow: Hsla) -> Di
         .when(!tiling.bottom, |d| d.border_b(BORDER))
         .when(!tiling.left, |d| d.border_l(BORDER))
         .when(!tiling.right, |d| d.border_r(BORDER))
-        .when(!tiling.top && !tiling.left, |d| d.rounded_tl(ROUNDING))
-        .when(!tiling.top && !tiling.right, |d| d.rounded_tr(ROUNDING))
-        .when(!tiling.bottom && !tiling.left, |d| d.rounded_bl(ROUNDING))
-        .when(!tiling.bottom && !tiling.right, |d| d.rounded_br(ROUNDING))
+        .rounded_tl(corner_rounding(tiling.top || tiling.left))
+        .rounded_tr(corner_rounding(tiling.top || tiling.right))
+        .rounded_bl(corner_rounding(tiling.bottom || tiling.left))
+        .rounded_br(corner_rounding(tiling.bottom || tiling.right))
         .when(!tiling.is_tiled(), |d| {
             d.shadow(vec![BoxShadow {
                 color: shadow,
@@ -169,11 +176,43 @@ fn resize_backdrop(this: Stateful<Div>, tiling: Tiling) -> Stateful<Div> {
         })
         .on_mouse_down(MouseButton::Left, move |e, window, _| {
             let size = window.window_bounds().get_bounds().size;
-            if let Some(edge) = resize_edge(e.position, SHADOW, size, tiling) {
+            if let Some(edge) = resize_grip(e.position, size, SHADOW, tiling) {
                 window.start_window_resize(edge);
             }
         })
         .child(resize_cursor(tiling))
+}
+
+/// A title-bar press outstanding across frames, waiting for the motion that
+/// turns it into a window move. Holding the move back until the pointer actually
+/// travels leaves a press the compositor takes for an edge resize — one landing
+/// in a corner of the title bar — to be only that.
+#[derive(Clone)]
+struct MoveLatch(Entity<bool>);
+
+impl MoveLatch {
+    fn keyed(window: &mut Window, cx: &mut App) -> Self {
+        Self(window.use_keyed_state("chrome-title-bar-move", cx, |_, _| false))
+    }
+
+    fn press(&self, cx: &mut App) {
+        self.0.update(cx, |outstanding, _| *outstanding = true);
+    }
+
+    fn abandon(&self, cx: &mut App) {
+        self.0.update(cx, |outstanding, _| *outstanding = false);
+    }
+
+    /// Whether a press is outstanding, clearing it either way: one motion is all
+    /// a press gets, and a motion under no button says the press ended out of
+    /// this element's sight.
+    fn claim(&self, cx: &mut App) -> bool {
+        self.0.update(cx, |outstanding, _| {
+            let claimed = *outstanding;
+            *outstanding = false;
+            claimed
+        })
+    }
 }
 
 /// A title bar: draggable to move the window, with minimize/maximize/close controls.
@@ -182,7 +221,7 @@ fn title_bar(
     radius: Pixels,
     band: Rgba,
     title: SharedString,
-    should_move: Entity<bool>,
+    latch: MoveLatch,
 ) -> impl IntoElement {
     div()
         .id("title-bar")
@@ -197,25 +236,22 @@ fn title_bar(
         .bg(band)
         .border_b_1()
         .border_color(colors.border)
-        // Start the move on the first drag, not the press, so an edge resize wins.
         .on_mouse_down(MouseButton::Left, {
-            let should_move = should_move.clone();
-            move |_, _, cx| should_move.update(cx, |m, _| *m = true)
+            let latch = latch.clone();
+            move |_, _, cx| latch.press(cx)
         })
         .on_mouse_up(MouseButton::Left, {
-            let should_move = should_move.clone();
-            move |_, _, cx| should_move.update(cx, |m, _| *m = false)
+            let latch = latch.clone();
+            move |_, _, cx| latch.abandon(cx)
         })
         // A press anywhere else belongs to a different gesture, and the drag it
         // may grow into must not be taken for the title bar's own.
         .on_mouse_down_out({
-            let should_move = should_move.clone();
-            move |_, _, cx| should_move.update(cx, |m, _| *m = false)
+            let latch = latch.clone();
+            move |_, _, cx| latch.abandon(cx)
         })
-        // A move with no button held means the press that armed the latch is
-        // over, wherever it was released, so consume it either way.
         .on_mouse_move(move |e, window, cx| {
-            if should_move.update(cx, |m, _| std::mem::replace(m, false)) && e.dragging() {
+            if latch.claim(cx) && e.dragging() {
                 window.start_window_move();
             }
         })
@@ -290,7 +326,7 @@ fn resize_cursor(tiling: Tiling) -> impl IntoElement {
         },
         move |_, hitbox, window, _| {
             let size = window.window_bounds().get_bounds().size;
-            let Some(edge) = resize_edge(window.mouse_position(), SHADOW, size, tiling) else {
+            let Some(edge) = resize_grip(window.mouse_position(), size, SHADOW, tiling) else {
                 return;
             };
             window.set_cursor_style(
@@ -312,55 +348,72 @@ fn resize_cursor(tiling: Tiling) -> impl IntoElement {
     .size_full()
 }
 
-/// Which resize edge or corner the position is on, within `shadow_size` of the window border.
-fn resize_edge(
-    pos: Point<Pixels>,
-    shadow_size: Pixels,
-    window_size: Size<Pixels>,
-    tiling: Tiling,
-) -> Option<ResizeEdge> {
-    let bounds = Bounds::new(Point::default(), window_size).inset(shadow_size * 1.5);
-    if bounds.contains(&pos) {
-        return None;
-    }
+/// Which end of one axis a position is gripped by.
+#[derive(Clone, Copy)]
+enum Grip {
+    Start,
+    End,
+}
 
-    let corner = size(shadow_size * 1.5, shadow_size * 1.5);
-    if !tiling.top && Bounds::new(point(px(0.), px(0.)), corner).contains(&pos) {
-        return Some(ResizeEdge::TopLeft);
-    }
-    if !tiling.top
-        && Bounds::new(point(window_size.width - corner.width, px(0.)), corner).contains(&pos)
-    {
-        return Some(ResizeEdge::TopRight);
-    }
-    if !tiling.bottom
-        && Bounds::new(point(px(0.), window_size.height - corner.height), corner).contains(&pos)
-    {
-        return Some(ResizeEdge::BottomLeft);
-    }
-    if !tiling.bottom
-        && Bounds::new(
-            point(
-                window_size.width - corner.width,
-                window_size.height - corner.height,
-            ),
-            corner,
-        )
-        .contains(&pos)
-    {
-        return Some(ResizeEdge::BottomRight);
-    }
-
-    if !tiling.top && pos.y < shadow_size {
-        Some(ResizeEdge::Top)
-    } else if !tiling.bottom && pos.y > window_size.height - shadow_size {
-        Some(ResizeEdge::Bottom)
-    } else if !tiling.left && pos.x < shadow_size {
-        Some(ResizeEdge::Left)
-    } else if !tiling.right && pos.x > window_size.width - shadow_size {
-        Some(ResizeEdge::Right)
+/// Where `along` sits on an axis of length `extent`: gripped by an end when it
+/// lies within `band` measured inward from that end, loose in between.
+fn grip(along: Pixels, extent: Pixels, band: Pixels) -> Option<Grip> {
+    if along < band {
+        Some(Grip::Start)
+    } else if along >= extent - band {
+        Some(Grip::End)
     } else {
         None
+    }
+}
+
+/// A corner grip's band as a multiple of an edge grip's. A diagonal drag is the
+/// hardest of the eight to aim at, so it gets the largest target.
+const CORNER_REACH: f32 = 1.5;
+
+/// The ends of each axis a `cursor` grips within `band` of the window's edges,
+/// vertical first.
+fn grips(cursor: Point<Pixels>, frame: Size<Pixels>, band: Pixels) -> (Option<Grip>, Option<Grip>) {
+    (
+        grip(cursor.y, frame.height, band),
+        grip(cursor.x, frame.width, band),
+    )
+}
+
+/// The resize edge or corner a `cursor` offset from the window's top-left grips.
+/// A corner is a grip on both axes and reaches `CORNER_REACH` times `band` in
+/// from each of its edges; a single edge reaches `band` in from itself. An edge
+/// the compositor has tiled against the screen cannot be dragged, so it gives up
+/// its grip and a corner that meets it resizes from its other edge alone.
+fn resize_grip(
+    cursor: Point<Pixels>,
+    frame: Size<Pixels>,
+    band: Pixels,
+    tiling: Tiling,
+) -> Option<ResizeEdge> {
+    let corner = grips(cursor, frame, band * CORNER_REACH);
+    let (vertical, horizontal) = match corner {
+        (Some(_), Some(_)) => corner,
+        _ => grips(cursor, frame, band),
+    };
+    let free = |grip, start, end| match grip {
+        Some(Grip::Start) if start => None,
+        Some(Grip::End) if end => None,
+        grip => grip,
+    };
+    match (
+        free(vertical, tiling.top, tiling.bottom),
+        free(horizontal, tiling.left, tiling.right),
+    ) {
+        (Some(Grip::Start), None) => Some(ResizeEdge::Top),
+        (Some(Grip::End), None) => Some(ResizeEdge::Bottom),
+        (None, Some(Grip::Start)) => Some(ResizeEdge::Left),
+        (None, Some(Grip::End)) => Some(ResizeEdge::Right),
+        (Some(Grip::Start), Some(Grip::Start)) => Some(ResizeEdge::TopLeft),
+        (Some(Grip::Start), Some(Grip::End)) => Some(ResizeEdge::TopRight),
+        (Some(Grip::End), Some(Grip::Start)) => Some(ResizeEdge::BottomLeft),
+        (Some(Grip::End), Some(Grip::End)) => Some(ResizeEdge::BottomRight),
+        (None, None) => None,
     }
 }
 
@@ -368,6 +421,7 @@ fn resize_edge(
 mod tests {
     use super::*;
     use bviz_ui_theme::{MIN_EDGED_STEP, MIN_VISIBLE_STEP, ThemeRegistry, level_step};
+    use gpui::size;
 
     /// Dimming the bands is what says the window is no longer the active one, and
     /// once a compositor tiles the window — taking the rounded corners and the
@@ -389,6 +443,157 @@ mod tests {
                 framed >= MIN_EDGED_STEP,
                 "{name}: {framed} levels off the canvas"
             );
+        }
+    }
+
+    const FRAME_WIDTH: f32 = 400.0;
+    const FRAME_HEIGHT: f32 = 300.0;
+    const BAND: f32 = 8.0;
+    const CORNER_BAND: f32 = BAND * CORNER_REACH;
+
+    /// An offset that lies within the band of the start of an axis, and the
+    /// offsets that lie within it of the end of each axis.
+    const NEAR_START: f32 = BAND / 4.0;
+    const NEAR_END_X: f32 = FRAME_WIDTH - NEAR_START;
+    const NEAR_END_Y: f32 = FRAME_HEIGHT - NEAR_START;
+
+    /// An offset a corner reaches but an edge does not.
+    const CORNER_ONLY: f32 = (BAND + CORNER_BAND) / 2.0;
+
+    const MID_X: f32 = FRAME_WIDTH / 2.0;
+    const MID_Y: f32 = FRAME_HEIGHT / 2.0;
+
+    fn tiled(top: bool, bottom: bool, left: bool, right: bool) -> Tiling {
+        Tiling {
+            top,
+            bottom,
+            left,
+            right,
+        }
+    }
+
+    fn grip_at(x: f32, y: f32, tiling: Tiling) -> Option<ResizeEdge> {
+        resize_grip(
+            point(px(x), px(y)),
+            size(px(FRAME_WIDTH), px(FRAME_HEIGHT)),
+            px(BAND),
+            tiling,
+        )
+    }
+
+    #[test]
+    fn a_free_window_resizes_from_each_edge_and_each_corner() {
+        let free = Tiling::default();
+        assert_eq!(grip_at(MID_X, NEAR_START, free), Some(ResizeEdge::Top));
+        assert_eq!(grip_at(MID_X, NEAR_END_Y, free), Some(ResizeEdge::Bottom));
+        assert_eq!(grip_at(NEAR_START, MID_Y, free), Some(ResizeEdge::Left));
+        assert_eq!(grip_at(NEAR_END_X, MID_Y, free), Some(ResizeEdge::Right));
+        assert_eq!(
+            grip_at(NEAR_START, NEAR_START, free),
+            Some(ResizeEdge::TopLeft)
+        );
+        assert_eq!(
+            grip_at(NEAR_END_X, NEAR_START, free),
+            Some(ResizeEdge::TopRight)
+        );
+        assert_eq!(
+            grip_at(NEAR_START, NEAR_END_Y, free),
+            Some(ResizeEdge::BottomLeft)
+        );
+        assert_eq!(
+            grip_at(NEAR_END_X, NEAR_END_Y, free),
+            Some(ResizeEdge::BottomRight)
+        );
+    }
+
+    #[test]
+    fn a_corner_claims_the_band_along_each_edge_that_only_it_reaches() {
+        let free = Tiling::default();
+        assert_eq!(
+            grip_at(CORNER_ONLY, NEAR_START, free),
+            Some(ResizeEdge::TopLeft)
+        );
+        assert_eq!(
+            grip_at(NEAR_START, CORNER_ONLY, free),
+            Some(ResizeEdge::TopLeft)
+        );
+        assert_eq!(
+            grip_at(CORNER_BAND + 1.0, NEAR_START, free),
+            Some(ResizeEdge::Top)
+        );
+    }
+
+    #[test]
+    fn the_interior_within_the_band_of_no_edge_does_not_resize() {
+        let free = Tiling::default();
+        assert_eq!(grip_at(MID_X, MID_Y, free), None);
+        assert_eq!(grip_at(BAND, MID_Y, free), None);
+        assert_eq!(grip_at(CORNER_BAND, CORNER_BAND, free), None);
+        assert_eq!(
+            grip_at(
+                FRAME_WIDTH - CORNER_BAND - 1.0,
+                FRAME_HEIGHT - CORNER_BAND - 1.0,
+                free
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn a_tiled_edge_gives_up_its_grip_and_leaves_its_corners_the_free_one() {
+        let left = tiled(false, false, true, false);
+        assert_eq!(grip_at(NEAR_START, MID_Y, left), None);
+        assert_eq!(grip_at(NEAR_START, NEAR_START, left), Some(ResizeEdge::Top));
+        assert_eq!(
+            grip_at(NEAR_START, CORNER_ONLY, left),
+            Some(ResizeEdge::Top)
+        );
+        assert_eq!(
+            grip_at(NEAR_START, NEAR_END_Y, left),
+            Some(ResizeEdge::Bottom)
+        );
+        assert_eq!(grip_at(MID_X, NEAR_START, left), Some(ResizeEdge::Top));
+        assert_eq!(
+            grip_at(NEAR_END_X, NEAR_START, left),
+            Some(ResizeEdge::TopRight)
+        );
+        assert_eq!(grip_at(NEAR_END_X, MID_Y, left), Some(ResizeEdge::Right));
+
+        let top = tiled(true, false, false, false);
+        assert_eq!(grip_at(MID_X, NEAR_START, top), None);
+        assert_eq!(grip_at(NEAR_START, NEAR_START, top), Some(ResizeEdge::Left));
+        assert_eq!(
+            grip_at(CORNER_ONLY, NEAR_START, top),
+            Some(ResizeEdge::Left)
+        );
+        assert_eq!(
+            grip_at(NEAR_END_X, NEAR_START, top),
+            Some(ResizeEdge::Right)
+        );
+
+        let bottom_right = tiled(false, true, false, true);
+        assert_eq!(grip_at(NEAR_END_X, NEAR_END_Y, bottom_right), None);
+        assert_eq!(
+            grip_at(NEAR_START, NEAR_END_Y, bottom_right),
+            Some(ResizeEdge::Left)
+        );
+        assert_eq!(
+            grip_at(NEAR_END_X, NEAR_START, bottom_right),
+            Some(ResizeEdge::Top)
+        );
+    }
+
+    #[test]
+    fn a_window_tiled_on_every_side_does_not_resize() {
+        let all = tiled(true, true, true, true);
+        for (x, y) in [
+            (NEAR_START, NEAR_START),
+            (MID_X, NEAR_START),
+            (NEAR_END_X, NEAR_END_Y),
+            (NEAR_START, MID_Y),
+            (CORNER_ONLY, NEAR_START),
+        ] {
+            assert_eq!(grip_at(x, y, all), None, "at ({x}, {y})");
         }
     }
 }
