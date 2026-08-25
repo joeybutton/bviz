@@ -15,6 +15,7 @@ actions!(
         NextTab,
         PreviousTab,
         ClosePanel,
+        DetachPanel,
         SplitHorizontal,
         SplitVertical
     ]
@@ -39,6 +40,7 @@ pub fn register_keys(cx: &mut App) {
         KeyBinding::new("ctrl-tab", NextTab, Some(KEY_CONTEXT)),
         KeyBinding::new("ctrl-shift-tab", PreviousTab, Some(KEY_CONTEXT)),
         KeyBinding::new("secondary-shift-w", ClosePanel, Some(KEY_CONTEXT)),
+        KeyBinding::new("secondary-shift-n", DetachPanel, Some(KEY_CONTEXT)),
         KeyBinding::new("secondary-shift-h", SplitHorizontal, Some(KEY_CONTEXT)),
         KeyBinding::new("secondary-shift-v", SplitVertical, Some(KEY_CONTEXT)),
     ]);
@@ -142,6 +144,27 @@ impl Workspace {
         }
     }
 
+    /// Takes the panel the active pane shows into a window of its own, framed by
+    /// a workspace of the same application at this window's size, and focused
+    /// there. A pane left with no panel leaves the arrangement, and a window
+    /// left framing no pane closes.
+    pub fn detach_active_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let panel = self
+            .active
+            .update(cx, |pane, cx| pane.remove_active(window, cx));
+        let app_name = self.app_name.clone();
+        let size = window.viewport_size();
+        // The panel is out of this window's arrangement before the new window
+        // draws it, so it is live in one window throughout. The pane it left
+        // reaches this workspace only on the next flush, by which time the new
+        // window is open — so a source window that closes for want of panes is
+        // never the last one, whose closing quits the application.
+        bviz_ui_shell::open_window(&self.app_name, size, cx, move |window, cx| {
+            cx.new(|cx| Self::new(app_name, panel, window, cx))
+        })
+        .expect("a window opens for the detached panel");
+    }
+
     fn watch(&mut self, pane: &Entity<Pane>, window: &Window, cx: &mut Context<Self>) {
         let events = cx.subscribe_in(
             pane,
@@ -159,6 +182,10 @@ impl Workspace {
                     cx.notify();
                 }
                 PaneEvent::Closed => workspace.close_pane(pane, window, cx),
+                PaneEvent::Detach => {
+                    workspace.activate_pane(pane.clone(), window, cx);
+                    workspace.detach_active_panel(window, cx);
+                }
             },
         );
         self.pane_events.insert(pane.entity_id(), events);
@@ -387,6 +414,9 @@ impl Render for Workspace {
                 workspace
                     .active
                     .update(cx, |pane, cx| pane.close_active(window, cx));
+            }))
+            .on_action(cx.listener(|workspace, _: &DetachPanel, window, cx| {
+                workspace.detach_active_panel(window, cx);
             }))
             .on_action(cx.listener(|workspace, _: &SplitHorizontal, window, cx| {
                 workspace.split_active(Axis::Horizontal, window, cx);
