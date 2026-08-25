@@ -24,30 +24,26 @@ interactivity, so all three accessors are live there too.
 The consequence worth internalizing: for anything backed by a handle you already
 have the model. Mirroring it on the view is duplication, not caching.
 
-## Zed's three layers
+## Three questions a scroll model must answer
 
-Worth reading before designing a scroll model, because each layer answers a
-different question.
+Settle these before designing one; they are what separate the shapes a scroll
+model can take.
 
-1. **gpui `ScrollHandle`** — pixels, one shared cell, clamped every prepaint.
-2. **`ui` `Scrollbar`** (`crates/ui/src/components/scrollbar.rs`) — owns *no*
-   offset. It holds a `T: ScrollableHandle` whose entire trait is
-   `max_offset / set_offset / offset / viewport`, and asks per frame. Thumb math:
-   a 25px minimum, a `viewport/content` fraction, `start = (offset/max) ·
-   (viewport − thumb)`; `compute_click_offset` is that inverted, with the grab
-   and a clamp. Geometry it does persist (`last_prepaint_state`) lives on the
-   **scrollbar's own entity** and is used only for hit-testing — every click and
-   drag recomputes the offset from the handle's live `max_offset` and writes back
-   through `set_offset`. The content view holds no scroll-bar field.
-3. **Editor** (`crates/editor/src/scroll.rs`) — the closest analogue to a
-   custom-painted panel. Truth is `ScrollAnchor { anchor: Anchor, offset }`: an
-   anchor *into the buffer* plus a sub-line offset, in **lines, not pixels**, so
-   the position survives edits, wraps and folds that change content height. Every
-   mutation funnels through one `set_scroll_position`, which is where clamping
-   policy lives; wheel, keyboard and the bar are all just callers. The bar's
-   layout is frame-local; only interaction state (which axis is dragging)
-   persists. Its thumb drag is *incremental* — mouse delta ÷ `text_unit_size`
-   added to the current position — with no stored grab at all.
+1. **Who owns the offset?** For anything backed by a gpui handle, the handle
+   does — pixels in one shared cell, clamped every prepaint. For a
+   custom-painted panel the view owns it, and must hold it unclamped and bound
+   it at the read; see the rules below.
+2. **Does the bar own anything?** It must not. A bar that asks its handle for
+   the extents and the offset every frame cannot disagree with what actually
+   scrolls; a bar that caches them can, and does, the first time content
+   reflows between frames. Geometry the bar itself persists is for hit-testing
+   only, and every click and drag recomputes the offset from the live extents
+   and writes it back through the one setter.
+3. **What unit survives a reflow?** Not pixels. Content that reflows — rows
+   collapsing, filtering, reordering, wrapping — needs an anchor in *content*
+   units: an identity into the content plus a sub-unit offset. Every mutation
+   then funnels through one setter, which is the only place clamping policy
+   lives, and wheel, keyboard and the bar are all just callers of it.
 
 ## Rules that follow
 
@@ -63,8 +59,8 @@ extents. `ui/graph/src/scroll.rs` (`scrollbar_geom` / `current_scrollbar`) is th
 original; every trace panel now follows it.
 
 For a list, derive straight from the handle — `bounds()`, `max_offset()`,
-`offset()`. That is Zed's `ScrollableHandle` by another name, and it means the
-bar cannot disagree with what actually scrolls.
+`offset()`. Asking the handle every frame is what keeps the bar from
+disagreeing with what actually scrolls.
 
 ### Hold the position unclamped; bound it where it is used
 
@@ -115,7 +111,9 @@ frame:
 - Make resolution **total**. Define what a row the layout no longer draws
   resolves to — the lane that took over its rank in its group, then the group's
   band, then the nearest preceding row, then the start — rather than guarding a
-  case you believe cannot happen. Zed spends its `Anchor` `Bias` on exactly this.
+  case you believe cannot happen. An anchor into reflowing content needs a
+  stated bias for exactly this reason: the position it names can fall between
+  two units after an edit, and which side it lands on has to be a decision.
   Landing on the group header instead of the neighbouring lane is a visible
   regression: hiding one track should shift the view by a row, not by a screen.
 - **Round-trip exactly**: `offset_of(anchor_at(y)) == y` for every `y`, including

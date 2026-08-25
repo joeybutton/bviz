@@ -15,10 +15,9 @@ foreign work therefore need an explicit bridge:
   and needs no runtime, but a parallel iterator **blocks the calling thread**
   until the whole job finishes, so calling it on the UI thread freezes the frame.
 
-The reference implementations live in Zed at **v1.6.3**:
-`crates/gpui_tokio/src/gpui_tokio.rs` (the whole tokio bridge, ~100 lines) and
-the rayon call sites in `crates/project_panel/src/project_panel.rs`
-(`par_sort_worktree_entries`) and `crates/sum_tree/src/sum_tree.rs`
+The reference implementations live in Zed at **v1.6.3**, in two Apache-licensed
+crates: `crates/gpui_tokio/src/gpui_tokio.rs` (the whole tokio bridge, ~100
+lines) and the rayon call site in `crates/sum_tree/src/sum_tree.rs`
 (`from_par_iter`). Read them at the tag this repo targets — the gpui method
 names (`background_spawn`, `read_global`) shift between versions.
 
@@ -91,8 +90,7 @@ let _guard = Tokio::handle(cx).enter();
 let client = SdkClient::new();   // now sees a current runtime
 ```
 
-The guard must stay in scope across the call. Zed's `eval_cli`/`edit_prediction_cli`
-`headless.rs` do exactly this.
+The guard must stay in scope across the call.
 
 ### Where init goes
 
@@ -132,16 +130,13 @@ cx.spawn(async move |this, cx| {
 ```
 
 The rayon call occupies one gpui background thread while rayon's own pool does
-the parallel work; the UI thread stays free to render. This is exactly how
-`par_sort_worktree_entries` is invoked inside a `cx.background_spawn` in
-`project_panel.rs`.
+the parallel work; the UI thread stays free to render.
 
 ### Gate parallelism by input size
 
-Rayon's fan-out overhead loses to a serial pass on small inputs. Zed's rope
-(`rope.rs`) and sum-tree only take the `par_*` path above a `PARALLEL_THRESHOLD`
-element count and run serially below it. Match that: branch on length rather
-than always going parallel.
+Rayon's fan-out overhead loses to a serial pass on small inputs. Branch on
+length: take the `par_*` path above a threshold element count and run serially
+below it.
 
 ### Size rayon's pool to physical cores
 

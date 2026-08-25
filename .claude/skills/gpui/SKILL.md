@@ -13,9 +13,20 @@ it over fetching online; confirm its tag matches the version this repo targets.
 
 - Runnable examples: https://github.com/zed-industries/zed/tree/v1.6.3/crates/gpui/examples
 - Framework source: https://github.com/zed-industries/zed/tree/v1.6.3/crates/gpui/src
-- Reusable components (Button, Label, …): https://github.com/zed-industries/zed/tree/v1.6.3/crates/ui/src
 
 See `references/examples.md` for which example demonstrates what.
+
+**Only part of the Zed tree may be used as a reference.** bviz targets a permissive
+licence. `gpui`, `gpui_platform`, `gpui_linux`, `gpui_wgpu`, `gpui_tokio`, `gpui_macros`,
+`util`, `collections`, `sum_tree`, `refineable` and `scheduler` are Apache-2.0 and are
+open to read and adapt. Everything else — `ui`, `ui_input`, `theme`, `settings`, `menu`,
+`zed_actions`, `workspace`, `cli`, `editor`, `project_panel`, `title_bar` and the rest —
+is GPL-3.0-or-later and must not be opened for design or implementation guidance, because
+what is written afterwards from a fresh memory of it is a derived work just the same. Each
+crate states its own licence in its `Cargo.toml`, and its `LICENSE-APACHE` or `LICENSE-GPL`
+symlink says which. Check before reading, not after. Widgets that only the GPL half
+provides — buttons, scroll bars, tabs, docks, tables — get written here from the gpui
+primitives and the platform documentation.
 
 ## Shared crates in this repo — reach for these first
 
@@ -299,17 +310,15 @@ one (and a `Button` lives alongside it); `examples/input.rs` is the full version
 
 gpui gives you scroll *state* and clipping, not a scroll bar. `ScrollHandle` with
 `.overflow_y_scroll()` / `.track_scroll(handle)`, and `uniform_list` /
-`UniformListScrollHandle`, move and clip content but draw no bar. The reusable
-`Scrollbar` component lives in Zed's `ui` crate (`crates/ui/src/components/scrollbar.rs`),
-which is heavy (pulls `theme`, `editor`, …) and not a dependency here, so render the bar
-yourself with `bviz_ui_components::Scrollbar` — a geometry/hit-test/drag-mapping helper
-that owns no scroll state. Make it interactive: a scroll bar drags and its track clicks,
+`UniformListScrollHandle`, move and clip content but draw no bar. gpui ships no scroll-bar
+element, so render one with `bviz_ui_components::Scrollbar` — a geometry/hit-test/drag-mapping
+helper that owns no scroll state. Make it interactive: a scroll bar drags and its track clicks,
 not just a drawn thumb. Drive the drag with `track_drag` (see Interactivity) so it keeps
 following the cursor past the window edge and ends wherever the button is let go.
 
 Four rules carry most of the weight. **`references/scroll-model.md` has the reasoning,
-Zed's three layers, and the verification method — read it before designing or changing a
-scroll model.**
+the three questions it turns on, and the verification method — read it before
+designing or changing a scroll model.**
 
 - **The offset is the model; the bar is a rendering of it.** Build the bar in one accessor
   that the paint *and* the mouse handlers both call. Do not keep an `Option<Scrollbar>` on
@@ -318,8 +327,8 @@ scroll model.**
   than repainted. `ui/graph/src/scroll.rs` is the model; every trace panel follows it.
 - **For a list, derive the bar from the handle itself** — `bounds()`, `max_offset()`,
   `offset()` are all live on `ScrollHandle`/`UniformListScrollHandle`, rewritten every
-  prepaint. That is Zed's own `ScrollableHandle` shape, and it means the bar cannot
-  disagree with what actually scrolls.
+  prepaint. Asking the handle every frame is what keeps the bar from disagreeing
+  with what actually scrolls.
 - **Hold your own offset unclamped and bound it where it is used**, in one accessor every
   reader goes through. Clamping into stored state destroys what it truncates, so a resize
   or a reflow silently discards where the user was. (gpui's div clamps in prepaint — fine
@@ -360,8 +369,7 @@ truncates values that fit (you'll see `467…` next to a wider value rendered in
 such a column to its longest value and let it clip only on true overflow. Virtualize many fixed-height rows with `uniform_list(id, count, |range,
 window, cx| -> Vec<_>)` + a `UniformListScrollHandle` (renders only visible rows; requires
 uniform row height), keeping the header a separate non-scrolling row above it; drive a scroll
-bar from the handle's `base_handle` offset/extents as above. Zed's
-`crates/ui/src/components/data_table.rs` is the reference. The stats table in
+bar from the handle's `base_handle` offset/extents as above. The stats table in
 `ui/trace/src/main.rs` (`stats_cell`, `stats_table`) is the worked example here.
 
 ## Stateful views vs stateless components
@@ -369,8 +377,8 @@ bar from the handle's `base_handle` offset/extents as above. Zed's
 - **`impl Render for Foo`** — a stateful view (`fn render(&mut self, ..)`), held as an
   `Entity<Foo>`. Use for anything with its own state.
 - **`#[derive(IntoElement)]` + `impl RenderOnce`** — a stateless, reusable component
-  (`fn render(self, window, cx) -> impl IntoElement`, consumes `self`). This is how the
-  `ui` crate builds Button/Label/Avatar. Use for parameterized, stateless widgets.
+  (`fn render(self, window, cx) -> impl IntoElement`, consumes `self`). Use for
+  parameterized, stateless widgets — a button, a label, a badge.
 
 For the first widgets, plain `div()` trees inside a `Render` view are enough; reach for
 `RenderOnce` only once you're repeating a widget shape.

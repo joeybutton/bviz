@@ -35,6 +35,7 @@ the relevant one before writing similar code. Grouped by what they teach.
 - `image*.rs`, `gif_viewer.rs` — images. `opacity.rs`, `shadow.rs` — visual effects.
 
 ## Reusable components
-For higher-level widgets (Button, Label, Icon, Checkbox, …), read the Zed `ui` crate
-(`crates/ui/src/`, https://github.com/zed-industries/zed/tree/v1.6.3/crates/ui/src) — these
-show the `#[derive(IntoElement)]` + `impl RenderOnce` component idiom.
+gpui itself ships no widget library, and Zed's is GPL-licensed (see the licence boundary in
+`SKILL.md`), so higher-level widgets are built here. `//ui/components` holds them; the
+`#[derive(IntoElement)]` + `impl RenderOnce` component idiom is shown by `Button` and
+`Toolbar` there, and `examples/input.rs` covers a focusable, IME-aware field.
