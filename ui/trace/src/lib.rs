@@ -40,7 +40,7 @@ use bviz_ui_components::{
     centered_spinner, load_in_background, overlay_canvas, paint_tooltip_box, track_drag,
 };
 use bviz_ui_trace_args::{TraceArgs, TraceSource};
-use bviz_ui_workspace::{AnyPanel, Panel, PanelEvent, PanelKind, document_label};
+use bviz_ui_workspace::{AnyPanel, Panel, PanelEvent, PanelGroup, PanelKind, document_label};
 use clap::error::ErrorKind;
 use clap::{CommandFactory, Parser};
 use gpui::{
@@ -1644,9 +1644,11 @@ impl From<TraceSource> for Load {
 }
 
 /// A panel rendering the profile `load` reads.
-pub fn open(load: impl Into<Load>, window: &mut Window, cx: &mut App) -> AnyPanel {
+pub fn open(load: impl Into<Load>, window: &mut Window, cx: &mut App) -> PanelGroup {
     let load = load.into();
-    AnyPanel::new(cx.new(|cx| TracePanel::new(load, window, cx)))
+    PanelGroup::One(AnyPanel::new(
+        cx.new(|cx| TracePanel::new(load, window, cx)),
+    ))
 }
 
 /// Renders a Bazel `--profile` trace as a flame-chart timeline. Each profile

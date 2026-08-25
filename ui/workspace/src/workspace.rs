@@ -1,5 +1,5 @@
 use crate::panel::number_shared_titles;
-use crate::{AnyPanel, Layout, Pane, PaneEvent, Removal, Split, SplitId};
+use crate::{AnyPanel, Layout, Pane, PaneEvent, PanelGroup, Removal, Split, SplitId};
 use bviz_ui_components::{Divider, DragEnd, overlay_canvas, track_drag};
 use bviz_ui_shell::Chrome;
 use bviz_ui_theme::ThemeColors;
@@ -63,40 +63,69 @@ pub struct Workspace {
 }
 
 impl Workspace {
+    /// Builds a workspace framing the arrangement `group` describes, showing and
+    /// focusing its leading panel.
     pub fn new(
         app_name: impl Into<SharedString>,
-        panel: AnyPanel,
+        group: PanelGroup,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let app_name = app_name.into();
-        set_window_title(&app_name, &panel, window, cx);
-        let pane = cx.new(|cx| Pane::new(panel, window, cx));
+        let mut panes = Vec::new();
+        let layout = group.arrange(&mut |panel, tabbed| {
+            let pane = cx.new(|cx| Pane::new(panel, window, cx));
+            pane.update(cx, |pane, cx| {
+                for tab in tabbed {
+                    pane.add(tab, window, cx);
+                }
+                pane.activate(0, window, cx);
+            });
+            panes.push(pane.clone());
+            pane
+        });
+        let active = layout.first_pane().clone();
         let mut workspace = Self {
-            app_name,
+            app_name: app_name.into(),
             window_focus: cx.focus_handle(),
-            layout: Layout::Pane(pane.clone()),
-            active: pane.clone(),
+            layout,
+            active,
             pane_events: HashMap::new(),
             divider_drag: None,
         };
-        workspace.watch(&pane, window, cx);
+        for pane in panes {
+            workspace.watch(&pane, window, cx);
+        }
+        // Every pane took focus as it was built, so the last one built holds it;
+        // the window opens on the leading panel instead.
+        let panel = workspace.active_panel(cx);
+        window.focus(&panel.focus_handle(cx), cx);
+        set_window_title(&workspace.app_name, &panel, window, cx);
         workspace
     }
 
-    /// Builds a workspace whose one pane holds `panel` and `others` as tabs, in
-    /// that order, showing `panel`, with those that share a title numbered.
-    pub fn with_panels(
+    /// Builds a workspace laid out as `first` describes, with the panels of each
+    /// of `others` tabbed into the pane holding `first`'s leading panel — so
+    /// documents sharing a window are tabs of one pane whatever arrangement each
+    /// asked for, and only the first document's arrangement lays the window out.
+    /// Panels that share a title are numbered.
+    pub fn with_groups(
         app_name: impl Into<SharedString>,
-        mut panel: AnyPanel,
-        mut others: Vec<AnyPanel>,
+        mut first: PanelGroup,
+        mut others: Vec<PanelGroup>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        number_shared_titles(std::iter::once(&mut panel).chain(&mut others), cx);
-        let mut workspace = Self::new(app_name, panel, window, cx);
-        for other in others {
-            workspace.add_panel(other, window, cx);
+        number_shared_titles(
+            std::iter::once(&mut first)
+                .chain(&mut others)
+                .flat_map(PanelGroup::panels_mut),
+            cx,
+        );
+        let mut workspace = Self::new(app_name, first, window, cx);
+        for group in others {
+            for panel in group.panels() {
+                workspace.add_panel(panel, window, cx);
+            }
         }
         let pane = workspace.active.clone();
         pane.update(cx, |pane, cx| pane.activate(0, window, cx));
@@ -159,7 +188,7 @@ impl Workspace {
         // window is open — so a source window that closes for want of panes is
         // never the last one, whose closing quits the application.
         bviz_ui_shell::open_window(&self.app_name, size, cx, move |window, cx| {
-            cx.new(|cx| Self::new(app_name, panel, window, cx))
+            cx.new(|cx| Self::new(app_name, PanelGroup::One(panel), window, cx))
         })
         .expect("a window opens for the detached panel");
     }

@@ -1,7 +1,7 @@
 //! The bviz window: one panel per document named on the command line.
 
 use bviz_cli::{Cli, Source};
-use bviz_ui_workspace::AnyPanel;
+use bviz_ui_workspace::PanelGroup;
 use clap::Parser;
 use gpui::{App, Pixels, Size, Window, px};
 
@@ -31,7 +31,7 @@ impl Load {
         }
     }
 
-    fn open(self, window: &mut Window, cx: &mut App) -> AnyPanel {
+    fn open(self, window: &mut Window, cx: &mut App) -> PanelGroup {
         match self {
             Self::Graph(load) => bviz_ui_graph::open(load, window, cx),
             Self::Trace(load) => bviz_ui_trace::open(load, window, cx),

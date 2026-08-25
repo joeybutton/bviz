@@ -6,7 +6,7 @@ use bviz_graph_layout::Id;
 use bviz_ui_components::{DragEnd, Dropdown, DropdownEvent, Pending, ScrollbarColors};
 use bviz_ui_graph_args::{GraphArgs, GraphSource};
 use bviz_ui_theme::{DataColors, Theme, ThemeColors};
-use bviz_ui_workspace::{AnyPanel, Panel, PanelEvent, PanelKind, document_label};
+use bviz_ui_workspace::{AnyPanel, Panel, PanelEvent, PanelGroup, PanelKind, document_label};
 use clap::error::ErrorKind;
 use clap::{CommandFactory, Parser};
 use gpui::{
@@ -646,9 +646,9 @@ fn title(source: &GraphSource) -> SharedString {
 }
 
 /// A panel drawing the graph `load` reads.
-pub fn open(load: impl Into<Load>, _window: &mut Window, cx: &mut App) -> AnyPanel {
+pub fn open(load: impl Into<Load>, _window: &mut Window, cx: &mut App) -> PanelGroup {
     let load = load.into();
-    AnyPanel::new(cx.new(|cx| GraphPanel::new(load, cx)))
+    PanelGroup::One(AnyPanel::new(cx.new(|cx| GraphPanel::new(load, cx))))
 }
 
 /// Renders a Bazel build graph from one or more `--output=streamed_proto`
@@ -671,11 +671,12 @@ pub fn run() {
             )
             .exit()
     });
-    let load = Load::from(source);
-    bviz_ui_workspace::run(
+    bviz_ui_workspace::run_panels(
         "bviz graph",
         size(px(1280.), px(820.)),
-        move |window, cx| open(load, window, cx),
+        Load::from(source),
+        Vec::new(),
+        open,
         &[register_keys],
     );
 }

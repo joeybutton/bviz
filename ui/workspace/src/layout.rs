@@ -7,6 +7,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 /// divider still within reach.
 const MIN_PANE_SHARE: f32 = 0.05;
 
+/// The share a split gives its first side when nothing asks for another.
+const EVEN_SHARE: f32 = 0.5;
+
 /// Identity of one split, by which a divider names the split it belongs to
 /// across the frames of a drag and in its element id.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -51,11 +54,11 @@ pub struct Split<P = Entity<Pane>> {
 }
 
 impl<P> Split<P> {
-    fn new(axis: Axis, first: Layout<P>, second: Layout<P>) -> Self {
+    fn new(axis: Axis, ratio: f32, first: Layout<P>, second: Layout<P>) -> Self {
         Self {
             id: SplitId::next(),
             axis,
-            ratio: 0.5,
+            ratio,
             first: Box::new(first),
             second: Box::new(second),
         }
@@ -97,6 +100,20 @@ pub enum Removal {
 }
 
 impl<P> Layout<P> {
+    /// `first` and `second` either side of a divider along `axis`, the first
+    /// side laid out at `ratio` of the extent they share.
+    pub fn split_at(axis: Axis, ratio: f32, first: Layout<P>, second: Layout<P>) -> Self {
+        Layout::Split(Split::new(axis, ratio, first, second))
+    }
+
+    /// The pane laid out first, which a window opens showing.
+    pub fn first_pane(&self) -> &P {
+        match self {
+            Layout::Pane(pane) => pane,
+            Layout::Split(split) => split.first.first_pane(),
+        }
+    }
+
     /// The panes, in the order they are laid out.
     pub fn panes(&self) -> Panes<'_, P> {
         Panes {
@@ -132,7 +149,7 @@ impl<P: Clone + PartialEq> Layout<P> {
                     return false;
                 }
                 let pane = Layout::Pane(pane.clone());
-                *self = Layout::Split(Split::new(axis, pane, Layout::Pane(new)));
+                *self = Layout::split_at(axis, EVEN_SHARE, pane, Layout::Pane(new));
                 true
             }
             Layout::Split(split) => match split.first.contains(target) {
@@ -190,25 +207,26 @@ impl<'a, P> Iterator for Panes<'a, P> {
     }
 }
 
+/// An arrangement written out: a pane as its name, a split as its two sides in
+/// parentheses around `|` where it lays them out left to right and `/` where it
+/// lays them out one above the other.
+#[cfg(test)]
+pub(crate) fn shape<P: std::fmt::Display>(layout: &Layout<P>) -> String {
+    match layout {
+        Layout::Pane(pane) => pane.to_string(),
+        Layout::Split(split) => {
+            let between = match split.axis {
+                Axis::Horizontal => '|',
+                Axis::Vertical => '/',
+            };
+            format!("({}{between}{})", shape(&split.first), shape(&split.second))
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// An arrangement written out: a pane as its name, a split as its two sides
-    /// in parentheses around `|` where it lays them out left to right and `/`
-    /// where it lays them out one above the other.
-    fn shape(layout: &Layout<char>) -> String {
-        match layout {
-            Layout::Pane(pane) => pane.to_string(),
-            Layout::Split(split) => {
-                let between = match split.axis {
-                    Axis::Horizontal => '|',
-                    Axis::Vertical => '/',
-                };
-                format!("({}{between}{})", shape(&split.first), shape(&split.second))
-            }
-        }
-    }
 
     /// A pane and the two more it is split into, laid out left to right.
     fn three_panes() -> Layout<char> {
