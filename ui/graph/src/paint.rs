@@ -304,8 +304,11 @@ struct PaintBox<'a> {
     h: f64,
     compound: bool,
     /// Whether this box can be opened or closed, so the renderer draws a
-    /// disclosure caret: down when open (compound), right when collapsed.
+    /// disclosure caret.
     expandable: bool,
+    /// Which way that caret points: down where what the box holds is there to be
+    /// reached, right where it is folded away.
+    open: bool,
     /// The themed fill, which the quad and the plate a label sits on are both
     /// painted in.
     fill: Rgba,
@@ -340,6 +343,7 @@ impl<'a> PaintBox<'a> {
             h: rect.h,
             compound: b.compound,
             expandable: p.expandable(&scene.expandable),
+            open: scene.expandable.open(b),
             fill: faded(fill, alpha),
             label: &b.label,
             highlight: toggled,
@@ -608,7 +612,7 @@ fn paint_box_label(
             placement.caret_at(plate),
             px(caret),
             px(fs),
-            b.compound,
+            b.open,
             label_color,
             window,
         );
@@ -850,6 +854,7 @@ mod tests {
             h: p.rect.h,
             compound: p.b.compound,
             expandable: p.expandable(expandable),
+            open: expandable.open(p.b),
             fill: rgb(0),
             label: &p.b.label,
             highlight: 0.0,

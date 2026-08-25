@@ -72,7 +72,7 @@ fn reduce_view(
     expanded: &HashSet<Id>,
     remap: &BTreeMap<Id, Id>,
 ) -> Graph {
-    let skeleton = bviz_graph_layout::lod::collapse(reduced_base, expanded);
+    let skeleton = bviz_graph_layout::lod::collapse(reduced_base, expanded, &HashSet::new());
     let box_of = |id: Id| remap.get(&id).copied().unwrap_or(id);
     let kept: HashSet<(Id, Id)> = skeleton
         .edges
@@ -103,7 +103,7 @@ pub(crate) fn relayout(
     reduced: bool,
     pinned: Option<&HashMap<Id, Anchor>>,
 ) -> LaidOut {
-    let visible = bviz_graph_layout::lod::collapse(base, expanded);
+    let visible = bviz_graph_layout::lod::collapse(base, expanded, &HashSet::new());
     let (mut view, remap) = quotient::quotient(&visible, expanded, names);
     let full_edges: Vec<(Id, Id)> = view
         .edges

@@ -26,7 +26,19 @@ const OPEN_PX: f64 = 55.0;
 /// factor whatever the graph's containers happen to measure.
 const LEVEL_SCALE_STEP: f64 = 2.0;
 
-/// Places every node once and derives the zoom pyramid of views over it.
+/// How many edges one frame is laid out along at most.
+///
+/// A frame's edges only settle the order its boxes are placed in: the map routes
+/// every connector itself, between boxes already placed, so the layout engine's
+/// own routing is never drawn. The engine nonetheless materializes a dummy node
+/// for each layer an edge spans, so a frame holding a dense tangle costs memory
+/// super-linearly in its edges while buying an order no reader can make out. Past
+/// this many the frame is laid out along a subset, which orders its boxes by as
+/// much of the tangle as stays affordable and leaves what is drawn unchanged.
+const MAX_FRAME_EDGES: usize = 2000;
+
+/// Places every node once and derives the zoom pyramid of views over it, with
+/// nothing folded away.
 ///
 /// `base`'s node ids must be a dense permutation of `0..nodes.len()`, every
 /// `parent` must name another of its nodes, and containment must be acyclic.
@@ -35,10 +47,71 @@ pub fn map_layout(base: &Graph, reduced: &Graph) -> MapLayout {
     let containment = Containment::new(base);
     // The reduction reaches as far as the base, so it stacks the boxes the same
     // way for a fraction of the routing work.
-    let drawing = place(base, &frame_edges(reduced, &containment), &containment);
-    let expandable = lod::expandable_containers(base);
+    let placement = Placement::new(base, &containment, frame_edges(reduced, &containment));
+    views(base, reduced, containment, placement, HashSet::new())
+}
 
-    let view = |open: &HashSet<Id>| level(base, reduced, open, &drawing, &containment, &expandable);
+/// Folds `container` away where the map draws it open, and unfolds it where the
+/// map has it folded, re-placing what that resizing reaches and deriving the
+/// pyramid afresh.
+///
+/// `container` must be one of [`MapLayout::foldable`]; `base` and `reduced` must
+/// be the graphs `previous` was built from.
+pub fn fold(previous: &MapLayout, base: &Graph, reduced: &Graph, container: Id) -> MapLayout {
+    let mut folded = previous.folded.clone();
+    if !folded.remove(&container) {
+        folded.insert(container);
+    }
+    let mut placement = previous.placement.clone();
+    placement.refit(base, &previous.containment, &folded, container);
+    views(
+        base,
+        reduced,
+        previous.containment.clone(),
+        placement,
+        folded,
+    )
+}
+
+/// The pyramid over one placement, together with the state a further fold starts
+/// from.
+fn views(
+    base: &Graph,
+    reduced: &Graph,
+    containment: Containment,
+    placement: Placement,
+    folded: HashSet<Id>,
+) -> MapLayout {
+    let hidden = hidden_under(base, &containment, &folded);
+    let drawing = placement.drawing(base, &containment, &hidden);
+    // A folded container never opens, and nothing inside one is placed at all,
+    // so neither is a container the zoom can reveal. The zoom reveals only
+    // multi-child containers: a single-child one is transparent to it, its child
+    // standing in the same place whether or not the zoom has reached it.
+    let expandable: HashSet<Id> = lod::expandable_containers(base)
+        .into_iter()
+        .filter(|c| !hidden.contains(c) && !folded.contains(c))
+        .collect();
+    // A fold, unlike the zoom, reaches every container the drawing holds,
+    // single-child ones included: the reader picks a box by what it is, not by
+    // how many children it turned out to have. A folded one is still offered,
+    // since clicking it again is what brings its subtree back.
+    let foldable: HashSet<Id> = lod::containers(base)
+        .into_iter()
+        .filter(|c| !hidden.contains(c))
+        .collect();
+
+    let view = |open: &HashSet<Id>| {
+        level(
+            base,
+            reduced,
+            open,
+            &folded,
+            &drawing,
+            &containment,
+            &expandable,
+        )
+    };
     let mut open: HashSet<Id> = HashSet::new();
     let coarsest = view(&open);
 
@@ -48,10 +121,18 @@ pub fn map_layout(base: &Graph, reduced: &Graph) -> MapLayout {
         let opened = open_at(&expandable, &drawing, scale);
         if opened != open {
             open = opened;
-            finer.push((scale, view(&open)));
+            let v = view(&open);
+            finer.push((scale, v));
         }
     }
-    MapLayout { coarsest, finer }
+    MapLayout {
+        coarsest,
+        finer,
+        placement,
+        containment,
+        folded,
+        foldable,
+    }
 }
 
 /// The views of one drawing at rising zoom, coarsest first.
@@ -59,6 +140,12 @@ pub struct MapLayout {
     coarsest: LaidOut,
     /// Ascending by the scale each view takes over from.
     finer: Vec<(f64, LaidOut)>,
+    /// Where the drawing put every box, kept so a fold can close the frames it
+    /// reaches up around the change without laying them out again.
+    placement: Placement,
+    containment: Containment,
+    folded: HashSet<Id>,
+    foldable: HashSet<Id>,
 }
 
 impl MapLayout {
@@ -86,6 +173,40 @@ impl MapLayout {
     pub fn height(&self) -> f64 {
         self.coarsest.height
     }
+
+    /// The containers [`fold`] takes: those drawn open that it can fold away,
+    /// and those already folded that it can bring back.
+    pub fn foldable(&self) -> &HashSet<Id> {
+        &self.foldable
+    }
+
+    /// The containers currently folded away, drawn as leaves in place of their
+    /// subtrees.
+    pub fn folded(&self) -> &HashSet<Id> {
+        &self.folded
+    }
+}
+
+/// Every node with a folded strict ancestor, which the placement leaves out
+/// entirely: its position would be the one it held inside a container that no
+/// longer spans it.
+fn hidden_under(base: &Graph, containment: &Containment, folded: &HashSet<Id>) -> HashSet<Id> {
+    if folded.is_empty() {
+        return HashSet::new();
+    }
+    let mut by_depth: Vec<Id> = base.nodes.iter().map(|n| n.id).collect();
+    by_depth.sort_by_key(|&id| containment.depth(id));
+    let mut hidden: HashSet<Id> = HashSet::new();
+    for id in by_depth {
+        // A node is reached only after its parent, so the parent's own verdict
+        // is already in.
+        if let Some(parent) = containment.parent(id)
+            && (folded.contains(&parent) || hidden.contains(&parent))
+        {
+            hidden.insert(id);
+        }
+    }
+    hidden
 }
 
 /// A node's box in the one absolute frame every level draws in.
@@ -121,61 +242,340 @@ struct Drawing {
     height: f64,
 }
 
-/// Lays out the whole containment forest with every container open: each frame
-/// (a container, or the top frame holding the roots) places only its own
-/// children, deepest frames first so a container is sized before the frame that
-/// places it.
-fn place(
-    graph: &Graph,
-    frames: &HashMap<Option<Id>, Vec<(Id, Id)>>,
-    containment: &Containment,
-) -> Drawing {
-    let children_of = layout::children_by_parent(graph);
-    let label_of: HashMap<Id, &str> = graph
-        .nodes
-        .iter()
-        .map(|n| (n.id, n.label.as_str()))
-        .collect();
-    let no_edges: Vec<(Id, Id)> = Vec::new();
-    let edges_of = |frame: Option<Id>| frames.get(&frame).unwrap_or(&no_edges).as_slice();
+/// One global placement: where every node sits within the frame that placed it,
+/// and what every box measures.
+///
+/// A frame is named by the container whose children it places, the top frame
+/// holding the roots being `None`. The layout engine runs once, when the
+/// placement is built. A fold afterwards never moves a box: it changes the
+/// measure of the container it acts on, and the frames above that one take in
+/// whatever their members now span. Nothing is re-laid-out, so no box can end up
+/// on the other side of a box it was beside — the price is that a folded
+/// subtree's space is left standing rather than closed up.
+#[derive(Clone)]
+struct Placement {
+    /// The boxes each frame places.
+    members: HashMap<Option<Id>, Vec<Id>>,
+    /// The space each container keeps to the left and right of its children,
+    /// held fixed so a container that changes measure does not shift them.
+    pad: HashMap<Id, f64>,
+    /// Each node's box measure; a folded container measures as a leaf.
+    size: HashMap<Id, (f64, f64)>,
+    /// Each node's top-left within the frame that placed it, settled once.
+    offset: HashMap<Id, (f64, f64)>,
+    /// What the top frame spans, and so the extent every level covers.
+    width: f64,
+    height: f64,
+}
 
-    let mut size = leaf_sizes(graph, &children_of);
-    let mut offset: HashMap<Id, (f64, f64)> = HashMap::with_capacity(graph.nodes.len());
-    for stratum in strata(&children_of, containment).iter_mut().rev() {
-        // Frames of one stratum share no boxes, so they place in any order; the
-        // sort only keeps that order the same from run to run.
-        stratum.sort_unstable();
-        let members = |c: &Id| -> Vec<Id> { children_of[c].iter().map(|n| n.id).collect() };
-        let laid = in_parallel(stratum, |c| {
-            lay_out_frame(&members(c), edges_of(Some(*c)), &size)
-        });
-        for (container, frame) in laid {
-            fit_container(
-                container,
-                label_of[&container],
-                frame,
-                &mut size,
-                &mut offset,
-            );
+impl Placement {
+    /// Lays out the whole containment forest with every container open: each
+    /// frame places only its own children, deepest frames first so a container
+    /// is sized before the frame that places it.
+    fn new(
+        graph: &Graph,
+        containment: &Containment,
+        edges: HashMap<Option<Id>, Vec<(Id, Id)>>,
+    ) -> Self {
+        let children_of = layout::children_by_parent(graph);
+        let mut placement = Self {
+            members: members_by_frame(graph, &children_of),
+            pad: HashMap::with_capacity(children_of.len()),
+            size: leaf_sizes(graph, &children_of),
+            offset: HashMap::with_capacity(graph.nodes.len()),
+            width: 0.0,
+            height: 0.0,
+        };
+
+        let label_of = labels(graph);
+        let no_edges: Vec<(Id, Id)> = Vec::new();
+        let edges_of = |frame: Option<Id>| edges.get(&frame).unwrap_or(&no_edges).as_slice();
+        for stratum in strata(&children_of, containment).iter_mut().rev() {
+            // Frames of one stratum share no boxes, so they place in any order;
+            // the sort only keeps that order the same from run to run.
+            stratum.sort_unstable();
+            let laid = in_parallel(stratum, |c| {
+                lay_out_frame(
+                    &placement.members[&Some(*c)],
+                    edges_of(Some(*c)),
+                    &placement.size,
+                )
+            });
+            for (container, frame) in laid {
+                placement.adopt(Some(container), &label_of, frame);
+            }
+        }
+        let top =
+            on_worker(|| lay_out_frame(&placement.members[&None], edges_of(None), &placement.size));
+        placement.adopt(None, &label_of, top);
+        placement
+    }
+
+    /// Takes in that `toggled` has been folded away or brought back: its box
+    /// takes a leaf's measure or its own again, the frame holding it closes up
+    /// around the change, and each container above it in turn does the same. The
+    /// walk stops at the first container that comes back the measure it already
+    /// had, since one of unchanged measure leaves the frame holding it as it was.
+    ///
+    /// `toggled` must have no folded ancestor.
+    fn refit(
+        &mut self,
+        graph: &Graph,
+        containment: &Containment,
+        folded: &HashSet<Id>,
+        toggled: Id,
+    ) {
+        let label_of = labels(graph);
+        let mut changed = toggled;
+        let mut measure = match folded.contains(&toggled) {
+            true => (layout::leaf_width(label_of[&toggled]), LEAF_HEIGHT),
+            false => self.fitted(toggled, label_of[&toggled]),
+        };
+        let mut frame = containment.parent(toggled);
+        loop {
+            self.reflow(frame, changed, measure);
+            let Some(container) = frame else {
+                (self.width, self.height) = self.spanned(None);
+                return;
+            };
+            let fitted = self.fitted(container, label_of[&container]);
+            if self.size[&container] == fitted {
+                return;
+            }
+            (changed, measure) = (container, fitted);
+            frame = containment.parent(container);
         }
     }
 
-    let mut roots: Vec<Id> = Vec::with_capacity(graph.nodes.len());
-    roots.extend(
+    /// Closes `frame` up around `changed` taking the measure `measure`.
+    ///
+    /// The frame is read as rows of boxes whose vertical spans overlap, and each
+    /// row keeps the gap it had to the row above. Space a change frees down the
+    /// frame is therefore taken up, and space it needs is made, without any row
+    /// passing another.
+    ///
+    /// Only the rows move. Closing a row up along its own axis as well would
+    /// reclaim the width a narrowed box frees, but each row would have to close
+    /// independently, and two boxes of different rows have no gap between them to
+    /// keep — so one could come back on the other side of the other, which is the
+    /// one thing this must never do.
+    ///
+    /// `changed` itself does not move: its column is untouched, and the rows its
+    /// own row is measured against are all above the change, so its row resolves
+    /// to the top it already had. That holds at every frame on the walk, so the
+    /// box the reader clicked stays put.
+    fn reflow(&mut self, frame: Option<Id>, changed: Id, measure: (f64, f64)) {
+        let rows = self.rows(frame);
+        // The spans the new ones keep the gaps of, read before the change lands
+        // so that the gaps are the ones the reader has been looking at.
+        let was: HashMap<Id, (f64, f64)> = self.members[&frame]
+            .iter()
+            .map(|&id| (id, (self.offset[&id].1, self.size[&id].1)))
+            .collect();
+        let spans: Vec<(f64, f64)> = rows.iter().map(|row| span(row, &was)).collect();
+        self.size.insert(changed, measure);
+
+        let mut bottom = 0.0f64;
+        for (i, row) in rows.iter().enumerate() {
+            let top = match i {
+                0 => spans[0].0,
+                _ => bottom + (spans[i].0 - spans[i - 1].1),
+            };
+            for id in row {
+                self.offset.get_mut(id).expect("a placed box").1 = was[id].0 + top - spans[i].0;
+            }
+            bottom = row
+                .iter()
+                .fold(0.0f64, |b, id| b.max(self.offset[id].1 + self.size[id].1));
+        }
+    }
+
+    /// The rows `frame`'s boxes read as: boxes whose vertical spans overlap sit
+    /// side by side and make one row, and the rows run down the frame in order.
+    fn rows(&self, frame: Option<Id>) -> Vec<Vec<Id>> {
+        let mut by_top = self.members[&frame].clone();
+        // Ties broken by id, so one geometry always reads as the same rows.
+        by_top.sort_by(|a, b| {
+            self.offset[a]
+                .1
+                .total_cmp(&self.offset[b].1)
+                .then(a.0.cmp(&b.0))
+        });
+        let mut rows: Vec<Vec<Id>> = Vec::new();
+        let mut bottom = f64::NEG_INFINITY;
+        for id in by_top {
+            let (top, height) = (self.offset[&id].1, self.size[&id].1);
+            match rows.last_mut() {
+                Some(row) if top < bottom => {
+                    row.push(id);
+                    bottom = bottom.max(top + height);
+                }
+                _ => {
+                    rows.push(vec![id]);
+                    bottom = top + height;
+                }
+            }
+        }
+        rows
+    }
+
+    /// What `container` measures around the children it holds where they stand:
+    /// far enough to cover them, keeping the space it set aside for its title and
+    /// the padding it was built with.
+    fn fitted(&self, container: Id, label: &str) -> (f64, f64) {
+        let (right, bottom) = self.spanned(Some(container));
+        (
+            (right + self.pad[&container]).max(layout::title_width(label)),
+            bottom + BORDER,
+        )
+    }
+
+    /// How far the boxes of `frame` reach from its origin.
+    fn spanned(&self, frame: Option<Id>) -> (f64, f64) {
+        self.members[&frame]
+            .iter()
+            .fold((0.0f64, 0.0f64), |(right, bottom), id| {
+                let ((x, y), (width, height)) = (self.offset[id], self.size[id]);
+                (right.max(x + width), bottom.max(y + height))
+            })
+    }
+
+    /// Takes on a freshly laid-out frame: where it leaves its boxes, and the
+    /// measure it gives the container that heads it.
+    fn adopt(&mut self, frame: Option<Id>, label_of: &HashMap<Id, &str>, laid: FlatFrame) {
+        // Where the frame's top-left corner sits in the box heading it. The top
+        // frame heads none and is the drawing's own origin.
+        let (fx, fy) = match frame {
+            Some(container) => {
+                let (size, pad) = container_size(label_of[&container], (laid.width, laid.height));
+                self.size.insert(container, size);
+                self.pad.insert(container, pad);
+                (pad, LABEL_BAND)
+            }
+            None => {
+                (self.width, self.height) = (laid.width, laid.height);
+                (0.0, 0.0)
+            }
+        };
+        self.offset.extend(
+            laid.offsets
+                .into_iter()
+                .map(|(id, (x, y))| (id, (x + fx, y + fy))),
+        );
+    }
+
+    /// Resolves every drawn node's offset within its own frame against the
+    /// frames holding it, into the one absolute frame the pyramid draws in.
+    /// Nodes `hidden` names sit inside a folded container and are left out.
+    fn drawing(&self, graph: &Graph, containment: &Containment, hidden: &HashSet<Id>) -> Drawing {
+        let mut by_depth: Vec<&Node> = graph
+            .nodes
+            .iter()
+            .filter(|n| !hidden.contains(&n.id))
+            .collect();
+        by_depth.sort_by_key(|n| containment.depth(n.id));
+        let mut placed: HashMap<Id, Placed> = HashMap::with_capacity(by_depth.len());
+        for node in by_depth {
+            let (dx, dy) = self.offset[&node.id];
+            let (x, y) = match node.parent {
+                Some(parent) => {
+                    let outer = placed[&parent];
+                    (outer.x + dx, outer.y + dy)
+                }
+                None => (dx, dy),
+            };
+            let (width, height) = self.size[&node.id];
+            placed.insert(
+                node.id,
+                Placed {
+                    x,
+                    y,
+                    width,
+                    height,
+                },
+            );
+        }
+        Drawing {
+            placed,
+            width: self.width,
+            height: self.height,
+        }
+    }
+}
+
+/// What `row` spanned down its frame, from the tops and heights its boxes had
+/// before the reflow.
+fn span(row: &[Id], was: &HashMap<Id, (f64, f64)>) -> (f64, f64) {
+    row.iter()
+        .fold((f64::INFINITY, 0.0f64), |(top, bottom), id| {
+            let (y, height) = was[id];
+            (top.min(y), bottom.max(y + height))
+        })
+}
+
+/// One frame's own coordinate system: every offset is measured from its
+/// top-left corner, and the extent is what its boxes span from there.
+struct FlatFrame {
+    offsets: Vec<(Id, (f64, f64))>,
+    width: f64,
+    height: f64,
+}
+
+fn lay_out_frame(members: &[Id], edges: &[(Id, Id)], size: &HashMap<Id, (f64, f64)>) -> FlatFrame {
+    let boxes: Vec<(Id, f64, f64)> = members
+        .iter()
+        .map(|&id| {
+            let (width, height) = size[&id];
+            (id, width, height)
+        })
+        .collect();
+    let (placements, width, height) = layout::layout_flat(&boxes, edges);
+    FlatFrame {
+        offsets: placements.into_iter().map(|p| (p.id, (p.x, p.y))).collect(),
+        width,
+        height,
+    }
+}
+
+/// The box a container measures around the frame holding its children, and the
+/// inset that leaves each child within it. The box holds its title even where
+/// that is wider than the frame, which then sits centred in the width the title
+/// asks for.
+fn container_size(label: &str, frame: (f64, f64)) -> ((f64, f64), f64) {
+    let width = (frame.0 + 2.0 * BORDER).max(layout::title_width(label));
+    (
+        (width, frame.1 + LABEL_BAND + BORDER),
+        (width - frame.0) / 2.0,
+    )
+}
+
+fn labels(graph: &Graph) -> HashMap<Id, &str> {
+    graph
+        .nodes
+        .iter()
+        .map(|n| (n.id, n.label.as_str()))
+        .collect()
+}
+
+/// The boxes each frame places, the roots standing under `None`.
+fn members_by_frame(
+    graph: &Graph,
+    children_of: &HashMap<Id, Vec<&Node>>,
+) -> HashMap<Option<Id>, Vec<Id>> {
+    let mut members: HashMap<Option<Id>, Vec<Id>> = HashMap::with_capacity(children_of.len() + 1);
+    for (&container, kids) in children_of {
+        members.insert(Some(container), kids.iter().map(|n| n.id).collect());
+    }
+    members.insert(
+        None,
         graph
             .nodes
             .iter()
             .filter(|n| n.parent.is_none())
-            .map(|n| n.id),
+            .map(|n| n.id)
+            .collect(),
     );
-    let top = on_worker(|| lay_out_frame(&roots, edges_of(None), &size));
-    offset.extend(top.offsets);
-
-    Drawing {
-        placed: absolute(graph, containment, &size, &offset),
-        width: top.width,
-        height: top.height,
-    }
+    members
 }
 
 /// Box sizes for the leaves, whose extent follows from their label alone and so
@@ -202,85 +602,6 @@ fn strata(children_of: &HashMap<Id, Vec<&Node>>, containment: &Containment) -> V
         strata[containment.depth(container) as usize].push(container);
     }
     strata
-}
-
-/// Sizes `container` around the frame holding its children and settles where
-/// each of them sits within it. The box holds its title even where that is wider
-/// than the frame, which then sits centred in the width the title asks for.
-fn fit_container(
-    container: Id,
-    label: &str,
-    frame: Frame,
-    size: &mut HashMap<Id, (f64, f64)>,
-    offset: &mut HashMap<Id, (f64, f64)>,
-) {
-    let width = (frame.width + 2.0 * BORDER).max(layout::title_width(label));
-    let inset = (width - frame.width) / 2.0;
-    size.insert(container, (width, frame.height + LABEL_BAND + BORDER));
-    offset.extend(
-        frame
-            .offsets
-            .into_iter()
-            .map(|(id, (x, y))| (id, (x + inset, y + LABEL_BAND))),
-    );
-}
-
-/// Resolves every node's offset within its own frame against the frames holding
-/// it, into the one absolute frame the pyramid draws in.
-fn absolute(
-    graph: &Graph,
-    containment: &Containment,
-    size: &HashMap<Id, (f64, f64)>,
-    offset: &HashMap<Id, (f64, f64)>,
-) -> HashMap<Id, Placed> {
-    let mut by_depth: Vec<&Node> = graph.nodes.iter().collect();
-    by_depth.sort_by_key(|n| containment.depth(n.id));
-    let mut placed: HashMap<Id, Placed> = HashMap::with_capacity(graph.nodes.len());
-    for node in by_depth {
-        let (dx, dy) = offset[&node.id];
-        let (x, y) = match node.parent {
-            Some(parent) => {
-                let outer = placed[&parent];
-                (outer.x + dx, outer.y + dy)
-            }
-            None => (dx, dy),
-        };
-        let (width, height) = size[&node.id];
-        placed.insert(
-            node.id,
-            Placed {
-                x,
-                y,
-                width,
-                height,
-            },
-        );
-    }
-    placed
-}
-
-/// One frame's own coordinate system: every offset is measured from its top-left
-/// corner, and the extent is what its boxes span from there.
-struct Frame {
-    offsets: Vec<(Id, (f64, f64))>,
-    width: f64,
-    height: f64,
-}
-
-fn lay_out_frame(members: &[Id], edges: &[(Id, Id)], size: &HashMap<Id, (f64, f64)>) -> Frame {
-    let boxes: Vec<(Id, f64, f64)> = members
-        .iter()
-        .map(|&id| {
-            let (width, height) = size[&id];
-            (id, width, height)
-        })
-        .collect();
-    let (placements, width, height) = layout::layout_flat(&boxes, edges);
-    Frame {
-        offsets: placements.into_iter().map(|p| (p.id, (p.x, p.y))).collect(),
-        width,
-        height,
-    }
 }
 
 /// Applies `job` to every id, spreading the work over the machine's cores and
@@ -328,7 +649,7 @@ fn frame_edges(graph: &Graph, containment: &Containment) -> HashMap<Option<Id>, 
     }
     frames
         .into_iter()
-        .map(|(frame, edges)| (frame, edges.into_iter().collect()))
+        .map(|(frame, edges)| (frame, edges.into_iter().take(MAX_FRAME_EDGES).collect()))
         .collect()
 }
 
@@ -368,15 +689,16 @@ fn level(
     base: &Graph,
     reduced: &Graph,
     open: &HashSet<Id>,
+    folded: &HashSet<Id>,
     drawing: &Drawing,
     containment: &Containment,
     expandable: &HashSet<Id>,
 ) -> LaidOut {
-    let visible = lod::collapse(base, open);
+    let visible = lod::collapse(base, open, folded);
     let mut connected: HashSet<(Id, Id)> = HashSet::with_capacity(visible.edges.len());
     connected.extend(visible.edges.iter().map(|e| (e.from, e.to)));
     let boxes = boxes(&visible, drawing, containment);
-    let drawn = drawn_edges(visible, reduced, open, expandable);
+    let drawn = drawn_edges(visible, reduced, open, folded, expandable);
     LaidOut {
         boxes,
         connectors: connectors(&drawn, drawing),
@@ -396,11 +718,15 @@ fn drawn_edges(
     mut visible: Graph,
     reduced: &Graph,
     open: &HashSet<Id>,
+    folded: &HashSet<Id>,
     expandable: &HashSet<Id>,
 ) -> Graph {
-    let kept = lod::collapse_edges(reduced, open);
+    let kept = lod::collapse_edges(reduced, open, folded);
     visible.edges.retain(|e| kept.contains(&(e.from, e.to)));
-    match expandable.iter().all(|c| open.contains(c)) {
+    // A view that folds nothing away — every container the zoom can open is
+    // open, and the reader has folded none shut — draws each edge between the
+    // nodes it already ran between, so the base's reduction still describes it.
+    match folded.is_empty() && expandable.iter().all(|c| open.contains(c)) {
         true => visible,
         false => reduce::reduced(visible),
     }
@@ -574,6 +900,26 @@ mod tests {
 
     fn mapped(base: &Graph) -> MapLayout {
         map_layout(base, &reduce::transitive_reduction(base))
+    }
+
+    /// `map` with `container` folded, or unfolded where it already was folded.
+    fn folded(map: &MapLayout, base: &Graph, container: Id) -> MapLayout {
+        fold(map, base, &reduce::transitive_reduction(base), container)
+    }
+
+    /// Every box the whole pyramid draws, by the level it first appears on, so a
+    /// fold's effect on both what is drawn and where can be read off one table.
+    fn drawn_boxes<'a>(
+        map: &MapLayout,
+        names: &'a Names,
+    ) -> HashMap<&'a str, (f64, f64, f64, f64)> {
+        let mut all: HashMap<&str, (f64, f64, f64, f64)> = HashMap::new();
+        for i in 0..map.level_count() {
+            for b in &map.level(i).boxes {
+                all.insert(names.resolve(b.id), (b.x, b.y, b.width, b.height));
+            }
+        }
+        all
     }
 
     fn built() -> (MapLayout, Names) {
@@ -923,6 +1269,198 @@ mod tests {
             "{points:?}"
         );
         assert_ne!(points[0], *points.last().unwrap());
+    }
+
+    #[test]
+    fn a_folded_container_measures_as_a_leaf_and_draws_nothing_inside() {
+        let (base, names) = towers();
+        let wide = names.get("wide").unwrap();
+        let map = folded(&mapped(&base), &base, wide);
+
+        let drawn = drawn_boxes(&map, &names);
+        let (_, _, width, height) = drawn["wide"];
+        assert_eq!(
+            (width, height),
+            (layout::leaf_width("wide"), LEAF_HEIGHT),
+            "a folded container keeps a container's measure"
+        );
+        for child in ["wide.0", "wide.5"] {
+            assert!(
+                !drawn.contains_key(child),
+                "{child} is drawn inside a folded container"
+            );
+        }
+        // The towers beside it are untouched by the fold and still open up.
+        assert!(drawn.contains_key("mid.0") && drawn.contains_key("narrow.0"));
+    }
+
+    #[test]
+    fn folding_closes_the_gap_the_container_leaves() {
+        let (base, names) = towers();
+        let map = mapped(&base);
+        let open = (map.width(), map.height());
+        let folded = folded(&map, &base, names.get("wide").unwrap());
+        assert!(
+            folded.width() * folded.height() < open.0 * open.1,
+            "the drawing spans {}x{} folded, no less than the {}x{} it spanned open",
+            folded.width(),
+            folded.height(),
+            open.0,
+            open.1,
+        );
+    }
+
+    #[test]
+    fn unfolding_puts_every_box_back_where_it_was() {
+        let (base, names) = towers();
+        let map = mapped(&base);
+        let before = drawn_boxes(&map, &names);
+
+        let wide = names.get("wide").unwrap();
+        let there_and_back = folded(&folded(&map, &base, wide), &base, wide);
+
+        assert_eq!(
+            (there_and_back.width(), there_and_back.height()),
+            (map.width(), map.height())
+        );
+        let after = drawn_boxes(&there_and_back, &names);
+        let moved: Vec<&str> = before
+            .keys()
+            .filter(|id| before[*id] != after.get(*id).copied().unwrap_or_default())
+            .copied()
+            .collect();
+        assert!(moved.is_empty(), "boxes did not come back: {moved:?}");
+    }
+
+    /// Each fold re-lays out the frames holding it, and those frames' members
+    /// include containers folded earlier. Their measure is an input to that
+    /// layout, not something it derives, so an earlier fold survives a later
+    /// one.
+    #[test]
+    fn folding_a_second_container_leaves_the_first_folded() {
+        let (base, names) = towers();
+        let (wide, mid) = (names.get("wide").unwrap(), names.get("mid").unwrap());
+
+        let both = folded(&folded(&mapped(&base), &base, wide), &base, mid);
+
+        assert_eq!(*both.folded(), [wide, mid].into_iter().collect());
+        let drawn = drawn_boxes(&both, &names);
+        for (container, label) in [(wide, "wide"), (mid, "mid")] {
+            let (_, _, width, height) = drawn[names.resolve(container)];
+            assert_eq!(
+                (width, height),
+                (layout::leaf_width(label), LEAF_HEIGHT),
+                "{label} did not stay folded",
+            );
+        }
+        for child in ["wide.0", "mid.0"] {
+            assert!(!drawn.contains_key(child), "{child} came back");
+        }
+        // The one tower left open still opens up.
+        assert!(drawn.contains_key("narrow.0"));
+    }
+
+    /// The box the reader clicked stays under the cursor. Everything its own
+    /// place is measured against is untouched by the fold, so it resolves to the
+    /// place it already held, at its own frame and at every frame above.
+    #[test]
+    fn a_fold_leaves_the_box_it_acts_on_where_it_stood() {
+        let (base, names) = towers();
+        for target in ["wide", "mid", "narrow"] {
+            let map = mapped(&base);
+            let before = drawn_boxes(&map, &names);
+            let id = names.get(target).unwrap();
+            let after = drawn_boxes(&folded(&map, &base, id), &names);
+            assert_eq!(
+                (before[target].0, before[target].1),
+                (after[target].0, after[target].1),
+                "{target} moved when it was folded",
+            );
+        }
+    }
+
+    /// Every pair of boxes one frame places keeps the way it reads: a fold takes
+    /// up the space it frees by closing the frame's rows and their boxes up, and
+    /// closing up never lets one box past another.
+    #[test]
+    fn a_fold_reorders_nothing() {
+        let (base, names) = towers();
+        let map = mapped(&base);
+        let before = drawn_boxes(&map, &names);
+        let wide = names.get("wide").unwrap();
+        let after = drawn_boxes(&folded(&map, &base, wide), &names);
+
+        let mut compared = 0;
+        for one in &base.nodes {
+            for other in &base.nodes {
+                if one.id == other.id || one.parent != other.parent {
+                    continue;
+                }
+                let (a, b) = (names.resolve(one.id), names.resolve(other.id));
+                let (Some(wa), Some(wb), Some(na), Some(nb)) =
+                    (before.get(a), before.get(b), after.get(a), after.get(b))
+                else {
+                    continue;
+                };
+                compared += 1;
+                assert_eq!(
+                    wa.0.total_cmp(&wb.0),
+                    na.0.total_cmp(&nb.0),
+                    "{a}/{b} swapped sides"
+                );
+                assert_eq!(
+                    wa.1.total_cmp(&wb.1),
+                    na.1.total_cmp(&nb.1),
+                    "{a}/{b} swapped rows"
+                );
+            }
+        }
+        assert!(compared > 0);
+    }
+
+    /// The space a fold frees is taken up rather than left standing: the boxes
+    /// below the folded one close up over it.
+    #[test]
+    fn a_fold_pulls_what_follows_it_into_the_space_freed() {
+        let (base, names) = towers();
+        let map = mapped(&base);
+        let before = drawn_boxes(&map, &names);
+        let wide = names.get("wide").unwrap();
+        let after = drawn_boxes(&folded(&map, &base, wide), &names);
+
+        // Some root below or right of the folded tower came back nearer to it.
+        let closed_up = ["mid", "narrow", "lone"]
+            .into_iter()
+            .any(|id| after[id].0 < before[id].0 || after[id].1 < before[id].1);
+        assert!(closed_up, "nothing moved into the space the fold freed");
+    }
+
+    #[test]
+    fn folding_offers_the_container_back_and_takes_its_subtree_out_of_reach() {
+        let mut g = Graph::new();
+        let mut names = Names::default();
+        let outer = names.intern("outer");
+        g.add_node(outer, "outer", Kind::Package, None);
+        let inner = names.intern("inner");
+        g.add_node(inner, "inner", Kind::Package, Some(outer));
+        let sibling = names.intern("sibling");
+        g.add_node(sibling, "sibling", Kind::Action, Some(outer));
+        for kid in ["a", "b"] {
+            let id = names.intern(kid);
+            g.add_node(id, kid, Kind::Action, Some(inner));
+        }
+
+        let map = mapped(&g);
+        assert_eq!(*map.foldable(), [outer, inner].into_iter().collect());
+        assert!(map.folded().is_empty());
+
+        let map = folded(&map, &g, outer);
+        assert_eq!(*map.folded(), [outer].into_iter().collect());
+        assert_eq!(
+            *map.foldable(),
+            [outer].into_iter().collect(),
+            "a container inside a folded one is still offered a handle",
+        );
     }
 
     #[test]

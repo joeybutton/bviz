@@ -259,9 +259,9 @@ fn decode<T, E: std::fmt::Display>(
 /// already reduced, so a collapsed box draws the reduction of its hidden
 /// subtree's edges.
 fn view_at(base: &Graph, reduced_base: &Graph, expanded: &HashSet<Id>, names: &mut Names) -> Graph {
-    let visible = lod::collapse(base, expanded);
+    let visible = lod::collapse(base, expanded, &HashSet::new());
     let (mut view, remap) = quotient::quotient(&visible, expanded, names);
-    let skeleton = lod::collapse(reduced_base, expanded);
+    let skeleton = lod::collapse(reduced_base, expanded, &HashSet::new());
     let box_of = |id: Id| remap.get(&id).copied().unwrap_or(id);
     let kept: HashSet<(Id, Id)> = skeleton
         .edges
@@ -278,7 +278,7 @@ fn view_at(base: &Graph, reduced_base: &Graph, expanded: &HashSet<Id>, names: &m
 /// interchangeable leaves merge, so the boxes the view gains are fewer. Ties go
 /// to the lower id, so a graph always picks the same container.
 fn densest_collapsed_container(base: &Graph, expanded: &HashSet<Id>) -> Option<(Id, usize)> {
-    let drawn: HashSet<Id> = lod::collapse(base, expanded)
+    let drawn: HashSet<Id> = lod::collapse(base, expanded, &HashSet::new())
         .nodes
         .iter()
         .map(|n| n.id)

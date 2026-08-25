@@ -465,7 +465,14 @@ fn click_box_at(view: &mut GraphView, pos: Point<Pixels>, cx: &mut Context<Graph
     let Some(id) = hit.map(|b| b.id) else {
         return;
     };
-    let enclosed = enclosed_boxes(&g.boxes, vp.size, camera);
+    // The boxes to keep in frame, which only a layered relayout settles onto: it
+    // places the whole view afresh, so the box just toggled has to be found
+    // again. A map fold re-places only the frames above that box and leaves the
+    // camera where the reader put it, so there is nothing to settle onto.
+    let enclosed = match view.mode {
+        LayoutMode::Map => Vec::new(),
+        LayoutMode::Layered => enclosed_boxes(&g.boxes, vp.size, camera),
+    };
     // The relayout places the boxes afresh, so the box resolved here need not be
     // the one the cursor ends up over.
     view.hovered = None;

@@ -96,6 +96,7 @@ impl Graph {
 /// the graph mentions carries a parent and a depth, an id the graph never names
 /// standing as a root. Containment must be acyclic, since every query walks
 /// towards the roots.
+#[derive(Clone)]
 pub struct Containment {
     parent: Vec<Option<Id>>,
     depth: Vec<u32>,

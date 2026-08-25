@@ -41,19 +41,25 @@ fn child_counts(graph: &Graph) -> HashMap<Id, usize> {
 }
 
 /// Collapses `graph` to the view in which only the descendants of *effectively
-/// expanded* containers are shown — a container is effectively expanded when it
-/// is in `expanded` or is a singleton (exactly one child), so single-child
-/// chains always reveal their descendants. Every node folds to its
-/// "representative": the shallowest node on its root->node path that is neither
-/// in `expanded` nor a singleton (or the node itself when its whole ancestor
-/// chain is effectively expanded). Each distinct representative becomes one node
-/// (keeping that node's label/kind/parent), so a collapsed container renders as
-/// a leaf. Edges are remapped to their endpoints' representatives, self-loops
-/// (both endpoints in the same collapsed subtree) dropped, and duplicates merged
-/// keeping their `EdgeKind`.
-pub fn collapse(graph: &Graph, expanded: &HashSet<Id>) -> Graph {
+/// expanded* containers are shown. A container reveals its children when it is
+/// in `expanded`, and a singleton (exactly one child) reveals them anyway, so a
+/// single-child chain is transparent. `shut` overrides both: a container it
+/// names folds its subtree away whatever would otherwise have revealed it, which
+/// is what lets one a single child would hold open be closed like any other.
+///
+/// Every node folds to its "representative": the shallowest node on its
+/// root->node path that reveals no children, or the node itself where every node
+/// on that path does. Each distinct representative becomes one node, keeping that
+/// node's label, kind and parent, so a collapsed container renders as a leaf.
+/// Edges are remapped to their endpoints' representatives, self-loops (both ends
+/// in one collapsed subtree) dropped, and duplicates merged keeping their
+/// `EdgeKind`.
+pub fn collapse(graph: &Graph, expanded: &HashSet<Id>, shut: &HashSet<Id>) -> Graph {
     let indexed = IndexedGraph::new(graph);
-    let rep = indexed.reps(&indexed.expanded_indices(expanded));
+    let rep = indexed.reps(
+        &indexed.expanded_indices(expanded),
+        &indexed.expanded_indices(shut),
+    );
 
     let mut out = Graph::new();
     for node in &graph.nodes {
@@ -74,9 +80,16 @@ pub fn collapse(graph: &Graph, expanded: &HashSet<Id>) -> Graph {
 
 /// The node pairs [`collapse`] would leave, without materializing the folded
 /// nodes, for a caller that needs only which boxes stay connected.
-pub fn collapse_edges(graph: &Graph, expanded: &HashSet<Id>) -> HashSet<(Id, Id)> {
+pub fn collapse_edges(
+    graph: &Graph,
+    expanded: &HashSet<Id>,
+    shut: &HashSet<Id>,
+) -> HashSet<(Id, Id)> {
     let indexed = IndexedGraph::new(graph);
-    let rep = indexed.reps(&indexed.expanded_indices(expanded));
+    let rep = indexed.reps(
+        &indexed.expanded_indices(expanded),
+        &indexed.expanded_indices(shut),
+    );
 
     let mut pairs: HashSet<(Id, Id)> = HashSet::with_capacity(indexed.edges.len());
     for &(from, to, _) in &indexed.edges {
@@ -269,15 +282,18 @@ impl IndexedGraph {
             .collect()
     }
 
-    /// The representative each index folds to under `expanded`: the shallowest
-    /// node on its root->node chain that is neither expanded nor a singleton
-    /// (both always reveal their children), or the node itself when its whole
-    /// chain is. A node is its own representative exactly when [`collapse`]
-    /// emits it.
-    fn reps(&self, expanded: &[u32]) -> Vec<u32> {
+    /// The representative each index folds to under `expanded` and `shut`: the
+    /// shallowest node on its root->node chain that reveals no children, or the
+    /// node itself when every node on its chain does. A node reveals its children
+    /// when it is expanded or a singleton, and `shut` overrides both. A node is
+    /// its own representative exactly when [`collapse`] emits it.
+    fn reps(&self, expanded: &[u32], shut: &[u32]) -> Vec<u32> {
         let mut eff = self.singleton.clone();
         for &i in expanded {
             eff[i as usize] = true;
+        }
+        for &i in shut {
+            eff[i as usize] = false;
         }
         (0..self.parent.len() as u32)
             .map(|i| {
@@ -299,7 +315,7 @@ impl IndexedGraph {
     /// that are graph nodes, and edges remapped to representatives, self-loops
     /// dropped, deduped by `(from, to, kind)`.
     fn counts(&self, expanded: &[u32]) -> (usize, usize) {
-        let rep = self.reps(expanded);
+        let rep = self.reps(expanded, &[]);
         let nodes = (0..self.node_count).filter(|&i| rep[i] == i as u32).count();
         let mut seen: HashSet<(u32, u32, EdgeKind)> = HashSet::new();
         for &(from, to, kind) in &self.edges {
@@ -394,12 +410,38 @@ mod tests {
             EdgeKind::Aquery,
         );
 
-        let out = collapse(&g, &HashSet::new());
+        let out = collapse(&g, &HashSet::new(), &HashSet::new());
 
         assert_eq!(node_ids(&out, &names), set(&["A", "B"]));
         assert_eq!(edges(&out, &names), [("A", "B")].into_iter().collect());
         // The folded root keeps its own kind and renders as a leaf (below).
         assert_eq!(find(&out, &names, "A").kind, Kind::Package);
+    }
+
+    /// A singleton reveals its child on its own, but not against the reader:
+    /// shutting one folds its whole chain away, which is what lets a container
+    /// that happens to have one child be closed like any other.
+    #[test]
+    fn a_shut_singleton_folds_its_chain_away() {
+        let (g, names) = singleton_chain();
+        let shut: HashSet<Id> = [names.get("b").unwrap()].into_iter().collect();
+
+        let out = collapse(&g, &HashSet::new(), &shut);
+
+        assert_eq!(node_ids(&out, &names), set(&["A", "b"]));
+    }
+
+    /// Shutting a container settles it whatever else would have revealed it, so
+    /// a reader's fold is not undone by the expansion the view was opened with.
+    #[test]
+    fn shutting_a_container_overrides_expanding_it() {
+        let (g, names) = two_towers();
+        let a = names.get("A").unwrap();
+        let both: HashSet<Id> = [a].into_iter().collect();
+
+        let out = collapse(&g, &both, &both);
+
+        assert_eq!(node_ids(&out, &names), set(&["A", "B"]));
     }
 
     #[test]
@@ -409,7 +451,7 @@ mod tests {
         // expanded, every singleton auto-expands down to the leaf.
         assert!(expandable_containers(&g).is_empty());
 
-        let out = collapse(&g, &HashSet::new());
+        let out = collapse(&g, &HashSet::new(), &HashSet::new());
 
         assert_eq!(node_ids(&out, &names), set(&["A", "b", "c", "leaf"]));
     }
@@ -427,7 +469,7 @@ mod tests {
 
         // R is multi-child, so it is the only expand handle and a fold boundary.
         assert_eq!(expandable_containers(&g), expanded(&names, &["R"]));
-        let out = collapse(&g, &HashSet::new());
+        let out = collapse(&g, &HashSet::new(), &HashSet::new());
         assert_eq!(node_ids(&out, &names), set(&["R"]));
     }
 
@@ -452,12 +494,12 @@ mod tests {
 
         // Folded: R alone (its children are singletons but R is the boundary).
         assert_eq!(
-            node_ids(&collapse(&g, &HashSet::new()), &names),
+            node_ids(&collapse(&g, &HashSet::new(), &HashSet::new()), &names),
             set(&["R"])
         );
 
         // Expanded: R, both children, and each child's auto-expanded chain.
-        let out = collapse(&g, &expanded(&names, &["R"]));
+        let out = collapse(&g, &expanded(&names, &["R"]), &HashSet::new());
         assert_eq!(
             node_ids(&out, &names),
             set(&["R", "p", "p.mid", "p.leaf", "q", "q.mid", "q.leaf"]),
@@ -491,7 +533,7 @@ mod tests {
             EdgeKind::Aquery,
         );
 
-        let out = collapse(&g, &expanded(&names, &["R"]));
+        let out = collapse(&g, &expanded(&names, &["R"]), &HashSet::new());
 
         // The expanded root and its two children are shown; grandchildren fold
         // into their child.
@@ -512,7 +554,7 @@ mod tests {
         // A different kind between the same folded pair survives separately.
         g.add_edge(ax, by, EdgeKind::Query);
 
-        let out = collapse(&g, &HashSet::new());
+        let out = collapse(&g, &HashSet::new(), &HashSet::new());
 
         let (a, b) = (names.get("A").unwrap(), names.get("B").unwrap());
         let kinds: HashSet<EdgeKind> = out
@@ -540,12 +582,12 @@ mod tests {
         // Caps that only the root view (2 nodes, 1 edge) fits: no root expands.
         let tiny = default_expansion(&g, 2, 1);
         assert!(tiny.is_empty());
-        let v = collapse(&g, &tiny);
+        let v = collapse(&g, &tiny, &HashSet::new());
         assert!(v.nodes.len() <= 2 && v.edges.len() <= 1);
 
         // Generous caps expand every multi-child container: the full graph shows.
         let all = default_expansion(&g, 100, 100);
-        let v = collapse(&g, &all);
+        let v = collapse(&g, &all, &HashSet::new());
         assert_eq!(v.nodes.len(), g.nodes.len());
         assert!(v.nodes.len() <= 100 && v.edges.len() <= 100);
         assert_eq!(all, expandable_containers(&g));
@@ -563,7 +605,11 @@ mod tests {
         );
 
         for (max_nodes, max_edges) in [(2, 1), (4, 1), (4, 2), (6, 2), (100, 100)] {
-            let view = collapse(&g, &default_expansion(&g, max_nodes, max_edges));
+            let view = collapse(
+                &g,
+                &default_expansion(&g, max_nodes, max_edges),
+                &HashSet::new(),
+            );
             assert!(view.nodes.len() <= max_nodes);
             assert!(view.edges.len() <= max_edges);
         }
@@ -588,7 +634,7 @@ mod tests {
         let all = default_expansion(&g, 100, 100);
         assert_eq!(all, expanded(&names, &["b"]));
         assert_eq!(
-            node_ids(&collapse(&g, &all), &names),
+            node_ids(&collapse(&g, &all, &HashSet::new()), &names),
             set(&["A", "b", "x", "y"])
         );
     }
@@ -596,7 +642,7 @@ mod tests {
     #[test]
     fn collapsed_container_is_emitted_as_a_leaf() {
         let (g, names) = two_towers();
-        let out = collapse(&g, &HashSet::new());
+        let out = collapse(&g, &HashSet::new(), &HashSet::new());
         let a = names.get("A").unwrap();
         // A is a container in the source graph but, folded, nothing names it as
         // parent in the collapsed view.

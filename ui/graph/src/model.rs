@@ -99,12 +99,16 @@ impl Drawn {
 /// ignores a click.
 #[derive(Clone)]
 pub(crate) enum Expandable {
-    /// No box at all: a map draws whichever level its camera calls for, so what
-    /// a container holds is reached by zooming in on it.
+    /// No box at all, which is what a layout still being computed offers.
     Nothing,
     /// The multi-child containers of the base graph, plus every collapsed group
     /// — a leaf holds nothing to open, and a singleton container opens itself.
     Containers(Arc<HashSet<Id>>),
+    /// A map's folds: every container the placement lets the reader fold away,
+    /// which is every multi-child container it draws. The handle does not come
+    /// and go with the zoom — a container carries it at every level it appears
+    /// on, whether or not that level is fine enough to draw what it holds.
+    Folds(Arc<MapLayout>),
 }
 
 impl Expandable {
@@ -112,6 +116,20 @@ impl Expandable {
         match self {
             Self::Nothing => false,
             Self::Containers(ids) => ids.contains(&b.id) || b.group,
+            Self::Folds(map) => map.foldable().contains(&b.id),
+        }
+    }
+
+    /// Whether the box's disclosure caret points down, saying what it holds is
+    /// there to be reached, rather than right, saying it is folded away.
+    pub(crate) fn open(&self, b: &bviz_graph_layout::Box) -> bool {
+        match self {
+            // A map container stands open until the reader folds it. One drawn
+            // at a zoom too coarse for its members still spans them, and zooming
+            // in reveals them without a handle being touched, so it is the fold
+            // and not the level that the caret reports.
+            Self::Folds(map) => !map.folded().contains(&b.id),
+            _ => b.compound,
         }
     }
 }
@@ -196,9 +214,10 @@ impl Model {
 
     /// The boxes `mode`'s layout lets the user open or close.
     pub(crate) fn expandable(&self, mode: LayoutMode) -> Expandable {
-        match mode {
-            LayoutMode::Map => Expandable::Nothing,
-            LayoutMode::Layered => Expandable::Containers(Arc::clone(&self.containers)),
+        match (mode, &self.source) {
+            (LayoutMode::Map, Source::Loaded(loaded)) => Expandable::Folds(Arc::clone(&loaded.map)),
+            (LayoutMode::Map, _) => Expandable::Nothing,
+            (LayoutMode::Layered, _) => Expandable::Containers(Arc::clone(&self.containers)),
         }
     }
 
@@ -227,12 +246,49 @@ impl Model {
     }
 }
 
-/// Flips whether `id` is expanded and lays the graph out at the new expansion.
+/// Opens or closes the box `id` names in whichever way the drawn mode does it: a
+/// layered layout relays out at the new expansion, a map folds the container
+/// away or brings it back.
 pub(crate) fn toggle_expansion(view: &mut GraphView, id: Id, cx: &mut Context<GraphView>) {
-    if !view.model.expanded.remove(&id) {
-        view.model.expanded.insert(id);
+    match view.mode {
+        LayoutMode::Map => fold(view, id, cx),
+        LayoutMode::Layered => {
+            if !view.model.expanded.remove(&id) {
+                view.model.expanded.insert(id);
+            }
+            relayout(view, cx);
+        }
     }
-    relayout(view, cx);
+}
+
+/// Folds `container` away where the map draws it open and brings it back where
+/// the map has it folded, re-placing off the UI thread so the map already drawn
+/// stays interactive while that runs.
+///
+/// The camera is left exactly where the reader put it. A fold re-places only the
+/// frames above the container it acts on, so the drawing the reader is looking
+/// at is otherwise the one they had, and a settle onto the toggled box would
+/// answer an unfolding — whose box comes back at the extent its whole subtree
+/// asks for — by zooming out far enough to hold all of it.
+fn fold(view: &mut GraphView, container: Id, cx: &mut Context<GraphView>) {
+    let Source::Loaded(loaded) = &view.model.source else {
+        return;
+    };
+    let map = Arc::clone(&loaded.map);
+    let base = Arc::clone(&loaded.base);
+    let reduced_base = Arc::clone(&loaded.reduced_base);
+    view.model.relaying = true;
+    view.model._task = load_in_background(
+        cx,
+        move || bviz_graph_layout::fold(&map, &base, &reduced_base, container),
+        |view, folded, cx| {
+            if let Source::Loaded(loaded) = &mut view.model.source {
+                loaded.map = Arc::new(folded);
+            }
+            view.model.relaying = false;
+            emphasis::begin_fade(view, cx);
+        },
+    );
 }
 
 /// Lays the cached base graph out at the current expansion off the UI thread,
