@@ -26,7 +26,10 @@ rust_binary(
     name = "trace",
     srcs = ["src/main.rs"],
     crate_name = "bviz_ui_trace_bin",
-    deps = [":trace_lib"],
+    deps = [
+        ":trace_lib",
+        "//alloc",
+    ],
 )
 
 rust_test(

@@ -3,9 +3,6 @@
 //! flame-chart timeline: time on the x axis, stacked call depth on the y axis,
 //! with horizontal zoom/pan and vertical scroll.
 
-#[global_allocator]
-static GLOBAL: bviz_alloc::MiMalloc = bviz_alloc::MiMalloc;
-
 mod chart;
 mod counters;
 mod flame_panel;
