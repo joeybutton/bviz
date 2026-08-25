@@ -9,7 +9,7 @@ path = "src/lib.rs"
 
 [dependencies]
 gpui = { workspace = true }
-gpui_platform = { workspace = true }
+gpui_platform = { workspace = true, features = ["wayland"] }
 bviz_ui_assets = { path = "../assets" }
 bviz_ui_components = { path = "../components" }
 bviz_ui_theme = { path = "../theme" }

@@ -10,7 +10,6 @@ path = "src/main.rs"
 [dependencies]
 clap = { workspace = true }
 gpui = { workspace = true, features = ["inspector"] }
-gpui_platform = { workspace = true, features = ["wayland"] }
 bviz_graph_layout = { path = "../../graph/layout" }
 bviz_ui_assets = { path = "../assets" }
 bviz_ui_components = { path = "../components" }
