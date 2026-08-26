@@ -302,17 +302,10 @@ pub(crate) struct FlamePanel {
     /// Returns the panel to the fit-to-window view when a different document
     /// loads, whose graph a zoom held over the old one addresses nothing in.
     _source_replaced: Subscription,
-    /// Rebuilds the box scene on a system appearance change so it repaints in the
-    /// new palette.
-    _appearance_observer: Subscription,
 }
 
 impl FlamePanel {
-    pub(crate) fn new(
-        model: Entity<TraceModel>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Self {
+    pub(crate) fn new(model: Entity<TraceModel>, cx: &mut Context<Self>) -> Self {
         let parent = cx.entity().downgrade();
         let canvas = cx.new(|_| FlameCanvas { parent });
         let model_observer = cx.observe(&model, |this, _, cx| {
@@ -326,12 +319,6 @@ impl FlamePanel {
             this.reset_view();
             this.invalidate_canvas(cx);
         });
-        let appearance_observer = {
-            let panel = cx.entity().downgrade();
-            window.observe_window_appearance(move |_, cx| {
-                panel.update(cx, |p, cx| p.invalidate_canvas(cx)).ok();
-            })
-        };
         Self {
             focus: cx.focus_handle(),
             model,
@@ -346,7 +333,6 @@ impl FlamePanel {
             _model_observer: model_observer,
             _build_start: build_start,
             _source_replaced: source_replaced,
-            _appearance_observer: appearance_observer,
         }
     }
 

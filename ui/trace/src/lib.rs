@@ -49,8 +49,8 @@ use gpui::{
     AnyElement, App, AvailableSpace, Bounds, ContentMask, Context, Div, Edges, Element, ElementId,
     Entity, EventEmitter, FocusHandle, Focusable, GlobalElementId, Hsla, InspectorElementId,
     IntoElement, KeyBinding, LayoutId, MouseDownEvent, Pixels, Point, Position, Render,
-    ScrollHandle, SharedString, Style, Subscription, Task, TextAlign, TransformationMatrix, Window,
-    div, fill, point, prelude::*, px, relative, size,
+    ScrollHandle, SharedString, Style, Task, TextAlign, TransformationMatrix, Window, div, fill,
+    point, prelude::*, px, relative, size,
 };
 use std::sync::Arc;
 
@@ -226,20 +226,12 @@ struct TracePanel {
     /// Width of the left label gutter, set by its drag handle; clamped on use.
     gutter_width: f32,
     tracks_menu: Entity<TracksMenu>,
-    /// Rebuilds the timeline's cached scene on a system appearance change so it
-    /// repaints in the new palette.
-    _appearance_observer: Subscription,
     /// Holds the background load task so it isn't cancelled on drop.
     _load_task: Task<()>,
 }
 
 impl TracePanel {
-    fn new(
-        load: Load,
-        model: Entity<TraceModel>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Self {
+    fn new(load: Load, model: Entity<TraceModel>, cx: &mut Context<Self>) -> Self {
         let load_task = load_in_background(
             cx,
             move || load.profile.join(),
@@ -258,10 +250,6 @@ impl TracePanel {
             let model = model.clone();
             cx.new(|cx| TracksMenu::new(model, shell, cx))
         };
-        let appearance_observer = window.observe_window_appearance({
-            let timeline = timeline.clone();
-            move |_, cx| timeline.update(cx, |t, cx| t.invalidate_canvas(cx))
-        });
         Self {
             title,
             model,
@@ -270,7 +258,6 @@ impl TracePanel {
             counters_height: DEFAULT_COUNTERS_HEIGHT,
             gutter_width: DEFAULT_GUTTER_WIDTH,
             tracks_menu,
-            _appearance_observer: appearance_observer,
             _load_task: load_task,
         }
     }
@@ -1430,12 +1417,12 @@ impl From<TraceSource> for Load {
 
 /// The document rendering the profile `load` reads, as the timeline above the
 /// flame graph and stats that aggregate whatever tracks it has selected.
-pub fn open(load: impl Into<Load>, window: &mut Window, cx: &mut App) -> Document {
+pub fn open(load: impl Into<Load>, _window: &mut Window, cx: &mut App) -> Document {
     let load = load.into();
     let label = load.title.clone();
     let model = cx.new(|_| TraceModel::new());
-    let timeline = cx.new(|cx| TracePanel::new(load, model.clone(), window, cx));
-    let flame = cx.new(|cx| FlamePanel::new(model.clone(), window, cx));
+    let timeline = cx.new(|cx| TracePanel::new(load, model.clone(), cx));
+    let flame = cx.new(|cx| FlamePanel::new(model.clone(), cx));
     let stats = cx.new(|cx| StatsPanel::new(model, cx));
     let panels = PanelGroup::split(
         gpui::Axis::Vertical,
