@@ -1,12 +1,12 @@
 use crate::panel::number_shared_titles;
 use crate::{AnyPanel, Layout, Pane, PaneEvent, Removal, Split, SplitId};
-use bviz_ui_components::{DragEnd, overlay_canvas, track_drag};
+use bviz_ui_components::{Divider, DragEnd, overlay_canvas, track_drag};
 use bviz_ui_shell::Chrome;
 use bviz_ui_theme::ThemeColors;
 use gpui::{
     AnyElement, App, Axis, Bounds, Div, ElementId, Entity, EntityId, FocusHandle, IntoElement,
-    KeyBinding, MouseButton, Pixels, Point, Render, SharedString, Subscription, Window, actions,
-    div, prelude::*, px,
+    KeyBinding, Pixels, Point, Render, SharedString, Subscription, Window, actions, div,
+    prelude::*, px,
 };
 use std::collections::HashMap;
 
@@ -286,8 +286,9 @@ impl Workspace {
     }
 }
 
-/// The grip between a split's two sides: a hairline down the middle of a band
-/// wide enough to aim a press at.
+/// The grab band between a split's two sides, [`DIVIDER_GRIP`] across. That
+/// extent is room the sides do not get, so [`grabbed_share`] subtracts it from
+/// the split before mapping the cursor to a ratio.
 fn divider(
     id: SplitId,
     axis: Axis,
@@ -300,31 +301,16 @@ fn divider(
     } else {
         colors.border
     };
-    let grip = div()
-        .id(ElementId::NamedInteger("split-divider".into(), id.as_u64()))
-        .flex()
-        .flex_shrink_0()
-        .items_center()
-        .justify_center()
-        .on_mouse_down(
-            MouseButton::Left,
-            cx.listener(move |workspace, _, _, cx| {
-                workspace.divider_drag = Some(id);
-                cx.notify();
-            }),
-        );
-    match axis {
-        Axis::Horizontal => grip
-            .w(DIVIDER_GRIP)
-            .h_full()
-            .cursor_col_resize()
-            .child(div().w(DIVIDER_LINE).h_full().bg(line)),
-        Axis::Vertical => grip
-            .h(DIVIDER_GRIP)
-            .w_full()
-            .cursor_row_resize()
-            .child(div().h(DIVIDER_LINE).w_full().bg(line)),
-    }
+    Divider::new(
+        ElementId::NamedInteger("split-divider".into(), id.as_u64()),
+        axis,
+        cx.listener(move |workspace, _, _, cx| {
+            workspace.divider_drag = Some(id);
+            cx.notify();
+        }),
+    )
+    .band(DIVIDER_GRIP)
+    .line(DIVIDER_LINE, line)
 }
 
 /// One side of a split, taking `share` of the room the divider leaves it and its

@@ -36,7 +36,7 @@ use bviz_trace_layout::{
 };
 use bviz_trace_profile::{Profile, Slice, TimeSpan};
 use bviz_ui_components::{
-    Axis, Button, DEFAULT_MIN_THUMB, DragEnd, Pending, SCROLLBAR_THICKNESS, Scrollbar,
+    Axis, Button, DEFAULT_MIN_THUMB, Divider, DragEnd, Pending, SCROLLBAR_THICKNESS, Scrollbar,
     centered_spinner, load_in_background, overlay_canvas, paint_tooltip_box, track_drag,
 };
 use bviz_ui_trace_args::{TraceArgs, TraceSource};
@@ -366,7 +366,7 @@ impl TracePanel {
         // paint order.
         let overlays = overlays
             .child(self.tab_bar(palette, cx), tab_bar_rect)
-            .child(self.gutter_handle(cx), gutter_handle_rect);
+            .child(gutter_handle(cx), gutter_handle_rect);
         div()
             .id("trace-viewport")
             .relative()
@@ -376,30 +376,6 @@ impl TracePanel {
             .child(drag_overlay)
             .child(overlays)
             .child(self.tracks_menu.clone())
-    }
-
-    /// A thin overlay strip at the gutter's right edge that begins a width drag;
-    /// a double-click resets the gutter to its default width.
-    fn gutter_handle(&self, cx: &mut Context<Self>) -> Stateful<Div> {
-        let drag_entity = cx.entity();
-        div()
-            .id("trace-gutter-handle")
-            .size_full()
-            .cursor_col_resize()
-            .on_mouse_down(
-                MouseButton::Left,
-                move |e: &MouseDownEvent, _: &mut Window, cx: &mut App| {
-                    drag_entity.update(cx, |this, cx| {
-                        if e.click_count == 2 {
-                            this.gutter_width = DEFAULT_GUTTER_WIDTH;
-                        } else {
-                            this.drag = Drag::Gutter;
-                        }
-                        this.invalidate_timeline(cx);
-                    });
-                    cx.stop_propagation();
-                },
-            )
     }
 
     /// The tab bar between the flame chart and the bottom panel: a row of tab
@@ -678,6 +654,24 @@ impl TracePanel {
         self.flame.update(cx, |f, _| f.clear_hover());
         self.timeline.update(cx, |t, _| t.clear_hover());
     }
+}
+
+/// A thin overlay strip at the gutter's right edge that begins a width drag; a
+/// double-click resets the gutter to its default width.
+fn gutter_handle(cx: &mut Context<TracePanel>) -> Divider {
+    Divider::new(
+        "trace-gutter-handle",
+        gpui::Axis::Horizontal,
+        cx.listener(|this, e: &MouseDownEvent, _, cx| {
+            if e.click_count == 2 {
+                this.gutter_width = DEFAULT_GUTTER_WIDTH;
+            } else {
+                this.drag = Drag::Gutter;
+            }
+            cx.stop_propagation();
+            this.invalidate_timeline(cx);
+        }),
+    )
 }
 
 /// The chip's label for the `window` a shown aggregate covers, of a build
