@@ -58,7 +58,7 @@ pub(crate) fn paint_graph(
     palette: &Palette,
     window: &mut Window,
 ) {
-    if !regions.has_graph {
+    if !regions.shows_counters() {
         return;
     }
     let counters = profile.counters();

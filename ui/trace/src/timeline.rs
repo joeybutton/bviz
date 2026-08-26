@@ -2,14 +2,14 @@ use crate::chart::fit_px_per_us;
 use crate::counters::paint_crosshair;
 use crate::groups::{GroupChrome, GroupHit, RowAnchor, anchor_at, anchor_offset, chart_rows};
 use crate::model::TraceModel;
-use crate::regions::{Regions, flame_total_height, max_lane_scroll};
+use crate::regions::{CountersStrip, Regions, flame_total_height, max_lane_scroll};
 use crate::theme::Palette;
 use crate::{
     ClearTimeSelection, DEFAULT_COUNTERS_HEIGHT, DEFAULT_GUTTER_WIDTH, EDGE_MARGIN_PX,
-    GROUP_BAND_HEIGHT, GROUP_ICON, LINE_SCROLL_PX, MAX_PX_PER_US, METRICS, MIN_SLICE_PX,
-    SLICE_TEXT_PAD, SelectAllTracks, Source, TIMELINE_KEY_CONTEXT, TracePanel, ZOOM_PER_NOTCH,
-    drawn_scroll, paint_gridlines, paint_gutter, paint_markers, paint_ruler, paint_slice,
-    paint_tooltip, ruler_ticks, scroll_request, scrollbar_geom, thumb_offset,
+    GROUP_BAND_HEIGHT, GROUP_ICON, LINE_SCROLL_PX, MAX_PX_PER_US, METRICS, MIN_DRAG_PX,
+    MIN_SLICE_PX, SLICE_TEXT_PAD, SelectAllTracks, Source, TIMELINE_KEY_CONTEXT, TracePanel,
+    ZOOM_PER_NOTCH, drawn_scroll, paint_gridlines, paint_gutter, paint_markers, paint_ruler,
+    paint_slice, paint_tooltip, ruler_ticks, scroll_request, scrollbar_geom, thumb_offset,
 };
 use bviz_trace_layout::{
     Cull, LaneLayout, TimeRegion, TimeSelection, TimeView, Viewport, VisibleSlice, span_between,
@@ -143,9 +143,6 @@ struct AnchoredChart {
 
 /// How near a region's edge in the ruler a press must land to take hold of it.
 const EDGE_GRAB_PX: f32 = 4.0;
-
-/// How far a press must travel before it is read as a drag rather than a click.
-const MIN_DRAG_PX: f32 = 3.0;
 
 /// What a time-region drag makes of the selection.
 #[derive(Clone, Copy)]
@@ -418,15 +415,18 @@ impl Timeline {
         self.drag = TimelineDrag::None;
     }
 
-    /// The counters-strip height and gutter width the timeline is split by, held
-    /// by the owning view because its divider and gutter handle drag them.
-    fn shell_layout(&self, cx: &App) -> (f32, f32) {
+    /// The counters strip and gutter width the timeline is split by, held by the
+    /// owning view because its divider and gutter handle drag them.
+    fn shell_layout(&self, cx: &App) -> (CountersStrip, f32) {
         match self.shell.upgrade() {
             Some(shell) => {
                 let s = shell.read(cx);
-                (s.counters_height, s.gutter_width)
+                (s.counters, s.gutter_width)
             }
-            None => (DEFAULT_COUNTERS_HEIGHT, DEFAULT_GUTTER_WIDTH),
+            None => (
+                CountersStrip::Open(DEFAULT_COUNTERS_HEIGHT),
+                DEFAULT_GUTTER_WIDTH,
+            ),
         }
     }
 
@@ -450,11 +450,11 @@ impl Timeline {
                 .unwrap_or(0.0);
             (n_counters, flame_total)
         };
-        let (counters_height, gutter_width) = self.shell_layout(cx);
+        let (counters, gutter_width) = self.shell_layout(cx);
         Regions::new(
             self.viewport,
             n_counters,
-            counters_height,
+            counters,
             gutter_width,
             flame_total,
         )
@@ -544,7 +544,7 @@ impl Timeline {
         let regions = self.regions(cx);
         let x = f32::from(pos.x);
         let y = f32::from(pos.y);
-        let in_counters = regions.has_graph
+        let in_counters = regions.shows_counters()
             && x >= regions.content_left
             && x < regions.time_right
             && y >= regions.counters_top
@@ -975,7 +975,7 @@ impl Render for SliceCanvas {
         let Some(parent) = self.parent.upgrade() else {
             return div().into_any_element();
         };
-        let (profile, lanes, chrome, counters_height, gutter_width) = {
+        let (profile, lanes, chrome, counters, gutter_width) = {
             let timeline = parent.read(cx);
             let model = timeline.model.read(cx);
             let Source::Loaded(profile) = model.source() else {
@@ -984,21 +984,15 @@ impl Render for SliceCanvas {
             let (Some(lanes), Some(chrome)) = (model.lane_layout(), model.group_chrome()) else {
                 return div().into_any_element();
             };
-            let (counters_height, gutter_width) = timeline.shell_layout(cx);
-            (
-                profile.clone(),
-                lanes,
-                chrome,
-                counters_height,
-                gutter_width,
-            )
+            let (counters, gutter_width) = timeline.shell_layout(cx);
+            (profile.clone(), lanes, chrome, counters, gutter_width)
         };
         let palette = Palette::from_theme(&bviz_ui_theme::theme(window, cx));
         let prepaint = fit_prepaint(
             profile.clone(),
             lanes.clone(),
             parent.clone(),
-            counters_height,
+            counters,
             gutter_width,
         );
         let paint = slice_paint(profile, lanes, chrome, parent, palette);
@@ -1018,7 +1012,7 @@ fn fit_prepaint(
     profile: Arc<Profile>,
     lanes: Rc<LaneLayout>,
     parent: Entity<Timeline>,
-    counters_height: f32,
+    counters: CountersStrip,
     gutter_width: f32,
 ) -> impl FnOnce(Bounds<Pixels>, &mut Window, &mut App) {
     move |bounds: Bounds<Pixels>, _: &mut Window, cx: &mut App| {
@@ -1028,7 +1022,7 @@ fn fit_prepaint(
             Regions::new(
                 b,
                 profile.counters().len(),
-                counters_height,
+                counters,
                 gutter_width,
                 flame_total,
             )
@@ -1104,22 +1098,16 @@ fn slice_paint(
             let timeline = parent.read(cx);
             let tv = timeline.view;
             let scroll = timeline.lane_scroll(cx);
-            let (counters_height, gutter_width) = timeline.shell_layout(cx);
+            let (counters, gutter_width) = timeline.shell_layout(cx);
             let selected = timeline.model.read(cx).selected_tracks().to_vec();
             let shared_names = timeline.model.read(cx).shared_track_names().to_vec();
-            let regions = Regions::new(
-                bounds,
-                n_counters,
-                counters_height,
-                gutter_width,
-                flame_total,
-            );
+            let regions = Regions::new(bounds, n_counters, counters, gutter_width, flame_total);
             let vp = Viewport {
                 width: regions.time_w,
                 height: regions.flame_h(),
                 scroll_y: scroll,
             };
-            let show_counters = regions.has_graph;
+            let show_counters = regions.shows_counters();
             (
                 tv,
                 scroll,
@@ -1474,10 +1462,10 @@ fn overlay_paint(
 ) -> impl FnOnce(Bounds<Pixels>, &mut Window, &mut App) {
     move |bounds, window, cx| {
         let n_counters = profile.counters().len();
-        let (tv, counters_height, gutter_width, selection, crosshair, hovered, dragging) = {
+        let (tv, counters, gutter_width, selection, crosshair, hovered, dragging) = {
             let timeline = parent.read(cx);
             let tv = timeline.view;
-            let (counters_height, gutter_width) = timeline.shell_layout(cx);
+            let (counters, gutter_width) = timeline.shell_layout(cx);
             let hovered = timeline
                 .hover
                 .and_then(|at| Some((at, timeline.slice_at(at, cx)?)));
@@ -1486,7 +1474,7 @@ fn overlay_paint(
                 .preview(timeline.model.read(cx).time_selection());
             (
                 tv,
-                counters_height,
+                counters,
                 gutter_width,
                 selection,
                 timeline.crosshair,
@@ -1495,14 +1483,8 @@ fn overlay_paint(
             )
         };
         let flame_total = flame_total_height(&lanes);
-        let regions = Regions::new(
-            bounds,
-            n_counters,
-            counters_height,
-            gutter_width,
-            flame_total,
-        );
-        let show_counters = regions.has_graph;
+        let regions = Regions::new(bounds, n_counters, counters, gutter_width, flame_total);
+        let show_counters = regions.shows_counters();
         paint_time_selection(&selection, tv, regions, show_counters, &palette, window);
         if let Some(at) = crosshair
             && f32::from(at.x) >= regions.content_left
@@ -1901,7 +1883,7 @@ mod tests {
         Regions::new(
             Bounds::new(point(px(0.), px(0.)), size(px(1000.), px(800.))),
             0,
-            DEFAULT_COUNTERS_HEIGHT,
+            CountersStrip::Open(DEFAULT_COUNTERS_HEIGHT),
             TEST_GUTTER,
             0.0,
         )

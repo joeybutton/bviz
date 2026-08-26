@@ -25,7 +25,8 @@ use flame_panel::FlamePanel;
 use groups::{GroupChrome, group_label, lanes_headed_by_pool};
 use model::TraceModel;
 use regions::{
-    Regions, clamp_counters_height, clamp_gutter_width, flame_total_height, graph_lanes,
+    CountersStrip, DividerGrab, DividerPress, Regions, clamp_gutter_width, flame_total_height,
+    graph_lanes,
 };
 use stats_panel::StatsPanel;
 use theme::Palette;
@@ -36,8 +37,8 @@ use tracks_menu::TracksMenu;
 use bviz_trace_layout::{LaneLayout, LaneMetrics, TimeSelection, TimeView};
 use bviz_trace_profile::{Profile, Slice, TimeSpan};
 use bviz_ui_components::{
-    Axis, Button, DEFAULT_MIN_THUMB, Divider, DragEnd, Pending, SCROLLBAR_THICKNESS, Scrollbar,
-    load_in_background, overlay_canvas, paint_tooltip_box, track_drag,
+    Axis, Button, DEFAULT_MIN_THUMB, Divider, DividerSide, DragEnd, Pending, SCROLLBAR_THICKNESS,
+    Scrollbar, load_in_background, overlay_canvas, paint_tooltip_box, track_drag,
 };
 use bviz_ui_trace_args::{TraceArgs, TraceSource};
 use bviz_ui_workspace::{
@@ -136,6 +137,9 @@ const DEFAULT_COUNTERS_HEIGHT: f32 = 160.0;
 /// sharing the pane below it.
 const TIMELINE_SHARE: f32 = 0.65;
 
+/// How far a press must travel before it is read as a drag rather than a click.
+const MIN_DRAG_PX: f32 = 3.0;
+
 /// Smallest chart area kept below a counter lane's header, so dragging the
 /// divider down squishes the graphs to a readable sliver rather than to nothing.
 const MIN_CHART_HEIGHT: f32 = 12.0;
@@ -154,6 +158,15 @@ const MARKER_LABEL_SIZE: f32 = 11.0;
 /// the line down its middle alone would be a pixel high.
 const COUNTERS_DIVIDER_HEIGHT: f32 = 7.0;
 const COUNTERS_DIVIDER_LINE: f32 = 1.0;
+/// Height the band stands at while the strip is shut: room to hold the caret
+/// that marks a shut side, and to aim a press at.
+const COUNTERS_COLLAPSED_HEIGHT: f32 = 14.0;
+/// How far past its resting edge the cursor must be pulled for the counters
+/// strip to shut or spring open — past the floor its lanes need to shut, past
+/// where it sits shut to open. A fixed distance, so the pull asked for is the
+/// same whatever the floor, and far enough that neither happens under an
+/// unsteady hand.
+const COUNTERS_SNAP_SLOP: f32 = 16.0;
 
 /// Height of a panel's toolbar band, giving its chips and controls a line to sit
 /// on with room around them.
@@ -189,8 +202,8 @@ const CROSSHAIR_LABEL_GAP: f32 = 5.0;
 #[derive(Clone, Copy)]
 enum Drag {
     None,
-    /// A press on the divider resizes the counters strip.
-    Divider,
+    /// A press on the divider, resizing the counters strip while it travels.
+    Divider(DividerGrab),
     /// A press on the gutter handle resizes the gutter.
     Gutter,
 }
@@ -221,8 +234,8 @@ struct TracePanel {
     model: Entity<TraceModel>,
     timeline: Entity<Timeline>,
     drag: Drag,
-    /// Height of the counters strip, set by the divider; clamped on use.
-    counters_height: f32,
+    /// The counters strip as the divider has left it; clamped on use.
+    counters: CountersStrip,
     /// Width of the left label gutter, set by its drag handle; clamped on use.
     gutter_width: f32,
     tracks_menu: Entity<TracksMenu>,
@@ -255,7 +268,7 @@ impl TracePanel {
             model,
             timeline,
             drag: Drag::None,
-            counters_height: DEFAULT_COUNTERS_HEIGHT,
+            counters: CountersStrip::Open(DEFAULT_COUNTERS_HEIGHT),
             gutter_width: DEFAULT_GUTTER_WIDTH,
             tracks_menu,
             _load_task: load_task,
@@ -305,7 +318,7 @@ impl TracePanel {
         let drag_overlay = {
             let entity = cx.entity();
             overlay_canvas(move |_, window, cx| {
-                if matches!(entity.read(cx).drag, Drag::Divider | Drag::Gutter) {
+                if matches!(entity.read(cx).drag, Drag::Divider(_) | Drag::Gutter) {
                     track_drag(window, &entity, on_drag, end_drag);
                 }
             })
@@ -315,12 +328,24 @@ impl TracePanel {
         let mut overlays = RegionOverlays::new(inputs);
         // A profile with no counters has no strip, and so nothing to resize.
         if inputs.n_counters > 0 {
-            overlays = overlays.child(counters_divider(palette, cx), divider_rect);
+            let panel = cx.entity();
+            overlays = overlays.child(move |regions, _, window| {
+                (
+                    counters_divider(regions, palette, &panel, window).into_any_element(),
+                    regions.divider_rect(),
+                )
+            });
         }
         // The gutter handle spans the full height and so crosses both the chart
         // and the strip, and must take a press over either: it is placed last,
         // and hit-testing follows paint order.
-        let overlays = overlays.child(gutter_handle(cx), gutter_handle_rect);
+        let panel = cx.entity();
+        let overlays = overlays.child(move |regions, body, window| {
+            (
+                gutter_handle(&panel, window).into_any_element(),
+                gutter_handle_rect(regions, body),
+            )
+        });
         div()
             .id("trace-viewport")
             .relative()
@@ -342,7 +367,7 @@ impl TracePanel {
                 Source::Loaded(p) => p.counters().len(),
                 _ => 0,
             },
-            counters_height: self.counters_height,
+            counters: self.counters,
             gutter_width: self.gutter_width,
             flame_total: model
                 .lane_layout()
@@ -350,15 +375,22 @@ impl TracePanel {
                 .unwrap_or(0.0),
         }
     }
+
+    /// The split as the timeline last laid it out, which the divider's presses
+    /// are aimed at and its drags measured against.
+    fn regions(&self, cx: &App) -> Regions {
+        self.region_inputs(cx)
+            .split(self.timeline.read(cx).viewport())
+    }
 }
 
 /// A thin overlay strip at the gutter's right edge that begins a width drag; a
 /// double-click resets the gutter to its default width.
-fn gutter_handle(cx: &mut Context<TracePanel>) -> Divider {
+fn gutter_handle(panel: &Entity<TracePanel>, window: &Window) -> Divider {
     Divider::new(
         "trace-gutter-handle",
         gpui::Axis::Horizontal,
-        cx.listener(|this, e: &MouseDownEvent, _, cx| {
+        window.listener_for(panel, |this, e: &MouseDownEvent, _, cx| {
             if e.click_count == 2 {
                 this.gutter_width = DEFAULT_GUTTER_WIDTH;
             } else {
@@ -372,21 +404,36 @@ fn gutter_handle(cx: &mut Context<TracePanel>) -> Divider {
 
 /// The band between the flame chart and the counters strip. A press on it begins
 /// a strip-resize drag; a double-click resets the strip to its default height.
-fn counters_divider(palette: Palette, cx: &mut Context<TracePanel>) -> Divider {
-    Divider::new(
+fn counters_divider(
+    regions: &Regions,
+    palette: Palette,
+    panel: &Entity<TracePanel>,
+    window: &Window,
+) -> Divider {
+    let divider = Divider::new(
         "trace-counters-divider",
         gpui::Axis::Vertical,
-        cx.listener(|this, e: &MouseDownEvent, _, cx| {
-            if e.click_count == 2 {
-                this.counters_height = DEFAULT_COUNTERS_HEIGHT;
-            } else {
-                this.drag = Drag::Divider;
+        window.listener_for(panel, |this, e: &MouseDownEvent, _, cx| {
+            let counters_top = this.regions(cx).counters_top;
+            match this
+                .counters
+                .press(e.click_count, f32::from(e.position.y), counters_top)
+            {
+                DividerPress::Reset(strip) => {
+                    this.counters = strip;
+                    this.drag = Drag::None;
+                }
+                DividerPress::Grab(grab) => this.drag = Drag::Divider(grab),
             }
             cx.stop_propagation();
             this.invalidate_timeline(cx);
         }),
     )
-    .line(px(COUNTERS_DIVIDER_LINE), palette.divider)
+    .line(px(COUNTERS_DIVIDER_LINE), palette.divider);
+    match regions.shows_counters() {
+        true => divider,
+        false => divider.collapsed(DividerSide::End, palette.muted_label),
+    }
 }
 
 /// The chip's label for the `window` a shown aggregate covers, of a build
@@ -549,7 +596,7 @@ impl Render for TracePanel {
 #[derive(Clone, Copy)]
 struct RegionInputs {
     n_counters: usize,
-    counters_height: f32,
+    counters: CountersStrip,
     gutter_width: f32,
     flame_total: f32,
 }
@@ -559,19 +606,18 @@ impl RegionInputs {
         Regions::new(
             bounds,
             self.n_counters,
-            self.counters_height,
+            self.counters,
             self.gutter_width,
             self.flame_total,
         )
     }
 }
 
-/// Where an overlay sits within the split, given the body's own bounds.
-type PlaceInRegions = fn(&Regions, Bounds<Pixels>) -> Bounds<Pixels>;
-
-fn divider_rect(r: &Regions, _: Bounds<Pixels>) -> Bounds<Pixels> {
-    r.divider_rect()
-}
+/// Builds an overlay against the split it belongs to and the body's own bounds,
+/// giving the element together with the rect it stands in, so what an overlay
+/// shows and where it sits are read from one split.
+type OverlayInRegions =
+    Box<dyn Fn(&Regions, Bounds<Pixels>, &Window) -> (AnyElement, Bounds<Pixels>)>;
 
 fn gutter_handle_rect(r: &Regions, body: Bounds<Pixels>) -> Bounds<Pixels> {
     Bounds::new(
@@ -586,12 +632,12 @@ fn gutter_handle_rect(r: &Regions, body: Bounds<Pixels>) -> Bounds<Pixels> {
 /// The trace body's overlays — the counters divider and the gutter handle —
 /// laid out from the body's own bounds. Each belongs at a pixel offset within the
 /// [`Regions`] split, which is defined only once the body has a size, so the
-/// split is resolved here during prepaint and each child placed against it.
-/// Styling the children from a size measured elsewhere would put them a frame
-/// behind the body they overlay, since that size is known only after a paint.
+/// split is resolved here during prepaint and each child built against it. A
+/// size measured elsewhere is known only after a paint, and would put both what
+/// the children show and where they sit a frame behind the body they overlay.
 struct RegionOverlays {
     inputs: RegionInputs,
-    children: Vec<(AnyElement, PlaceInRegions)>,
+    children: Vec<OverlayInRegions>,
 }
 
 impl RegionOverlays {
@@ -602,8 +648,11 @@ impl RegionOverlays {
         }
     }
 
-    fn child(mut self, element: impl IntoElement, place: PlaceInRegions) -> Self {
-        self.children.push((element.into_any_element(), place));
+    fn child(
+        mut self,
+        build: impl Fn(&Regions, Bounds<Pixels>, &Window) -> (AnyElement, Bounds<Pixels>) + 'static,
+    ) -> Self {
+        self.children.push(Box::new(build));
         self
     }
 }
@@ -618,7 +667,7 @@ impl IntoElement for RegionOverlays {
 
 impl Element for RegionOverlays {
     type RequestLayoutState = ();
-    type PrepaintState = ();
+    type PrepaintState = Vec<AnyElement>;
 
     fn id(&self) -> Option<ElementId> {
         None
@@ -653,16 +702,19 @@ impl Element for RegionOverlays {
         _: &mut (),
         window: &mut Window,
         cx: &mut App,
-    ) {
+    ) -> Vec<AnyElement> {
         let regions = self.inputs.split(bounds);
-        for (child, place) in &mut self.children {
-            let rect = place(&regions, bounds);
+        let mut children = Vec::with_capacity(self.children.len());
+        for build in &self.children {
+            let (mut child, rect) = build(&regions, bounds, window);
             let space = size(
                 AvailableSpace::Definite(rect.size.width),
                 AvailableSpace::Definite(rect.size.height),
             );
             child.prepaint_as_root(rect.origin, space, window, cx);
+            children.push(child);
         }
+        children
     }
 
     fn paint(
@@ -671,11 +723,11 @@ impl Element for RegionOverlays {
         _: Option<&InspectorElementId>,
         _: Bounds<Pixels>,
         _: &mut (),
-        _: &mut (),
+        children: &mut Vec<AnyElement>,
         window: &mut Window,
         cx: &mut App,
     ) {
-        for (child, _) in &mut self.children {
+        for child in children {
             child.paint(window, cx);
         }
     }
@@ -686,22 +738,13 @@ impl Element for RegionOverlays {
 /// drags are routed inside [`Timeline`], [`FlamePanel`], and [`TracksMenu`].
 fn on_drag(view: &mut TracePanel, position: Point<Pixels>, cx: &mut Context<TracePanel>) {
     match view.drag {
-        Drag::Divider => {
-            let profile = match view.model.read(cx).source() {
-                Source::Loaded(p) => p.clone(),
-                _ => return,
-            };
+        Drag::Divider(mut grab) => {
+            let n_counters = view.region_inputs(cx).n_counters;
             let vp = view.timeline.read(cx).viewport();
             let vh = f32::from(vp.size.height);
-            // The strip's top follows the cursor: the strip spans from just below
-            // the divider down to the timeline's bottom. Clamped to keep the flame
-            // region and every counter lane usable.
             let counters_bottom = f32::from(vp.origin.y) + vh;
-            view.counters_height = clamp_counters_height(
-                counters_bottom - f32::from(position.y) - COUNTERS_DIVIDER_HEIGHT,
-                profile.counters().len(),
-                vh,
-            );
+            view.counters = grab.dragged_to(f32::from(position.y), counters_bottom, n_counters, vh);
+            view.drag = Drag::Divider(grab);
         }
         Drag::Gutter => {
             let vp = view.timeline.read(cx).viewport();
@@ -717,6 +760,9 @@ fn on_drag(view: &mut TracePanel, position: Point<Pixels>, cx: &mut Context<Trac
 }
 
 fn end_drag(view: &mut TracePanel, _: Point<Pixels>, _: DragEnd, cx: &mut Context<TracePanel>) {
+    if let Drag::Divider(grab) = view.drag {
+        view.counters = grab.released(view.counters);
+    }
     view.drag = Drag::None;
     view.invalidate_timeline(cx);
 }
@@ -1467,28 +1513,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn clamp_counters_height_bounds_both_sections() {
-        // A tall window: clamps to the requested height, untouched.
-        assert_eq!(clamp_counters_height(220.0, 3, 800.0), 220.0);
-        // The floor: never below n lanes of header band plus minimum chart.
-        let min = 3.0 * (METRICS.header_height + MIN_CHART_HEIGHT);
-        assert_eq!(clamp_counters_height(0.0, 3, 800.0), min);
-        // The flame-region ceiling: leaves FLAME_MIN_HEIGHT for the flame chart,
-        // plus the ruler, time bar, and divider.
-        let vh = 260.0;
-        let max =
-            vh - RULER_HEIGHT - SCROLLBAR_THICKNESS - COUNTERS_DIVIDER_HEIGHT - FLAME_MIN_HEIGHT;
-        assert_eq!(clamp_counters_height(1000.0, 1, vh), max);
-    }
-
-    /// A profile with no counters has no strip, so no height is kept for one
-    /// however the divider was last dragged for a profile that had them.
-    #[test]
-    fn a_profile_with_no_counters_has_no_strip() {
-        assert_eq!(clamp_counters_height(220.0, 0, 800.0), 0.0);
-    }
-
-    #[test]
     fn clamp_gutter_width_bounds_to_half_window() {
         // A comfortable request in a wide window is left untouched.
         assert_eq!(clamp_gutter_width(170.0, 1280.0), 170.0);
@@ -1513,7 +1537,7 @@ mod tests {
         let regions = Regions::new(
             window,
             0,
-            DEFAULT_COUNTERS_HEIGHT,
+            CountersStrip::Open(DEFAULT_COUNTERS_HEIGHT),
             DEFAULT_GUTTER_WIDTH,
             flame_total,
         );
@@ -1532,6 +1556,36 @@ mod tests {
         // Clear of the region on either axis: in the gutter, and in the ruler.
         assert!(!regions.in_flame(at(regions.content_left - 1.0, regions.flame_top)));
         assert!(!regions.in_flame(at(right - 1.0, regions.flame_top - 1.0)));
+    }
+
+    /// The divider stands for as long as there are counters to resize, shut or
+    /// open; a profile with none has neither strip nor divider.
+    #[test]
+    fn only_a_profile_with_counters_has_a_divider() {
+        let window = Bounds::new(point(px(0.0), px(0.0)), size(px(1000.0), px(600.0)));
+        let split = |n, strip| Regions::new(window, n, strip, DEFAULT_GUTTER_WIDTH, 0.0);
+
+        let none = split(0, CountersStrip::Open(DEFAULT_COUNTERS_HEIGHT));
+        assert_eq!(none.divider_rect().size.height, px(0.0));
+        assert_eq!(none.counters_h(), 0.0);
+
+        let shut = split(3, CountersStrip::Collapsed { restore: 220.0 });
+        assert!(!shut.shows_counters());
+        assert_eq!(
+            shut.divider_rect().size.height,
+            px(COUNTERS_COLLAPSED_HEIGHT)
+        );
+        // The band spans the content column, so it is there to be pressed
+        // wherever the cursor crosses it right of the gutter.
+        assert_eq!(
+            shut.divider_rect().size.width,
+            window.size.width - px(DEFAULT_GUTTER_WIDTH)
+        );
+        // An open strip leaves a band sized for its line alone, and the flame
+        // region gives up the room the strip takes.
+        let open = split(3, CountersStrip::Open(DEFAULT_COUNTERS_HEIGHT));
+        assert_eq!(open.divider_rect().size.height, px(COUNTERS_DIVIDER_HEIGHT));
+        assert!(shut.flame_bottom > open.flame_bottom);
     }
 
     #[test]
