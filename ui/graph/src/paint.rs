@@ -155,13 +155,11 @@ pub(crate) fn canvas_body(
             .collect();
         let edges = morph.as_ref().map_or(1.0, |m| m.connectors);
         if edges > 0.0 {
-            for c in g
-                .connectors
-                .iter()
-                .filter(|c| visible.crossed_by(&c.points))
-            {
-                let marked = neighborhood.edges.contains(&(c.from, c.to));
-                paint_lanes(c, marked, edges, bounds, camera, &scene.palette, window);
+            for c in &g.connectors {
+                if drawn_route(c, &visible) {
+                    let marked = neighborhood.edges.contains(&(c.from, c.to));
+                    paint_lanes(c, marked, edges, bounds, camera, &scene.palette, window);
+                }
             }
         }
         let mut floated: Vec<Bounds<Pixels>> = Vec::new();
@@ -188,6 +186,18 @@ pub(crate) fn canvas_body(
         );
         track_gesture(&entity, window, cx);
     }
+}
+
+/// Whether a frame draws the route `c`: where it crosses the view, and the view
+/// could hold the whole of it.
+///
+/// What the hover marks has no bearing on it. Marking a box picks out every
+/// route that meets it, which in a dense graph reaches most of the drawing, so
+/// exempting those would lay back over the view exactly the grid the reach test
+/// is here to take off it — and would do so under the pointer, where the reader
+/// is trying to read.
+fn drawn_route(c: &Connector, visible: &Rect) -> bool {
+    visible.could_hold(&c.points) && visible.crossed_by(&c.points)
 }
 
 /// `c` at `alpha` of its own opacity, by which a box a morph is fading in or out
@@ -789,6 +799,36 @@ fn arrowhead(tip: Point<Pixels>, dir: (f32, f32), zoom: f32) -> [Point<Pixels>; 
 
 #[cfg(test)]
 mod tests {
+    /// A route the view could not show whole is left out, so a zoom deep into a
+    /// dense graph is not laid over with routes leaving for somewhere the reader
+    /// cannot see.
+    #[test]
+    fn a_route_too_long_to_follow_is_left_out() {
+        let view = Rect {
+            x: 0.0,
+            y: 0.0,
+            w: 100.0,
+            h: 100.0,
+        };
+        let route = |points: Vec<(f64, f64)>| Connector {
+            points,
+            kinds: vec![EdgeKind::Query],
+            from: Id(0),
+            to: Id(1),
+        };
+
+        let local = route(vec![(10.0, 10.0), (40.0, 40.0)]);
+        assert!(drawn_route(&local, &view));
+
+        // Crosses the view, but runs far past what it can show.
+        let far = route(vec![(-5000.0, 50.0), (5000.0, 50.0)]);
+        assert!(!drawn_route(&far, &view));
+
+        // Short enough to follow, but nowhere near the view.
+        let elsewhere = route(vec![(9000.0, 9000.0), (9030.0, 9030.0)]);
+        assert!(!drawn_route(&elsewhere, &view));
+    }
+
     use super::*;
     use crate::camera::from_screen;
     use crate::morph::Transition;

@@ -39,6 +39,29 @@ impl Rect {
         self.x <= x && x <= self.x + self.w && self.y <= y && y <= self.y + self.h
     }
 
+    /// Whether a view this size could hold the whole of the polyline `points`,
+    /// wherever it happens to be panned.
+    ///
+    /// A connector is read by following it from one end to the other. One
+    /// reaching further than the view can show is followed to the edge of the
+    /// window and no further: what it draws is a line leaving for somewhere the
+    /// reader cannot see, and a drawing zoomed far into a dense graph is mostly
+    /// those, laid across it in a grid that hides the boxes behind it.
+    ///
+    /// The test is against the view's extent rather than its position, so what a
+    /// zoom admits does not then come and go as the reader pans across it.
+    pub(crate) fn could_hold(&self, points: &[(f64, f64)]) -> bool {
+        let (mut left, mut right) = (f64::INFINITY, f64::NEG_INFINITY);
+        let (mut top, mut bottom) = (f64::INFINITY, f64::NEG_INFINITY);
+        for &(x, y) in points {
+            left = left.min(x);
+            right = right.max(x);
+            top = top.min(y);
+            bottom = bottom.max(y);
+        }
+        right - left <= self.w && bottom - top <= self.h
+    }
+
     /// Whether `other` lies wholly within this rectangle, counting a shared edge.
     pub(crate) fn encloses(&self, other: &Rect) -> bool {
         self.x <= other.x
@@ -342,4 +365,35 @@ pub(crate) fn recenter_rect(g: &LaidOut, emphasis: &Emphasis) -> Option<Rect> {
         w: x1 - x0,
         h: y1 - y0,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A route reaching further than the view can show cannot be followed to its
+    /// far end, and a zoom deep into a dense graph draws mostly those.
+    #[test]
+    fn a_view_holds_only_a_route_no_larger_than_itself() {
+        let view = Rect {
+            x: 100.0,
+            y: 100.0,
+            w: 50.0,
+            h: 20.0,
+        };
+        assert!(view.could_hold(&[(0.0, 0.0), (40.0, 15.0)]));
+        assert!(!view.could_hold(&[(0.0, 0.0), (60.0, 15.0)]), "too wide");
+        assert!(!view.could_hold(&[(0.0, 0.0), (40.0, 25.0)]), "too tall");
+        // A route of exactly the view's own extent still fits it.
+        assert!(view.could_hold(&[(0.0, 0.0), (50.0, 20.0)]));
+        // What is judged is the route's extent, not where it sits: the same
+        // route far outside the view reads the same, since a pan brings it in
+        // without the zoom changing.
+        assert!(view.could_hold(&[(9000.0, 9000.0), (9040.0, 9015.0)]));
+        // A bend counts toward the extent.
+        assert!(
+            !view.could_hold(&[(0.0, 0.0), (0.0, 30.0), (10.0, 30.0)]),
+            "the bend reaches past the view's height",
+        );
+    }
 }
