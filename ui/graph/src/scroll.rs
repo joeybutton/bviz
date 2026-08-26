@@ -160,10 +160,7 @@ fn scroll_to(view: &mut GraphView, axis: Axis, offset: f32, cx: &mut Context<Gra
         Axis::Vertical => (px, panc),
         Axis::Horizontal => (panc, py),
     };
-    view.framing.move_to(Camera {
-        zoom,
-        pan: clamp_pan(pan, zoom, vp, content),
-    });
+    view.framing.pan_to(clamp_pan(pan, zoom, vp, content));
     cx.notify();
 }
 

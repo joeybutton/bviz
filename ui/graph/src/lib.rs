@@ -30,7 +30,7 @@ mod scroll;
 mod toolbar;
 
 use build::{Input, InputKind};
-use camera::{Camera, Rect, enclosed_boxes, from_screen, recenter_rect, zoom_step};
+use camera::{Camera, Rect, from_screen, recenter_rect, zoom_step};
 use drag::{Drag, end_drag, start_pan};
 use emphasis::Emphasis;
 use framing::{Framing, build_prepaint};
@@ -465,12 +465,11 @@ fn click_box_at(view: &mut GraphView, pos: Point<Pixels>, cx: &mut Context<Graph
     let Some(id) = hit.map(|b| b.id) else {
         return;
     };
-    let enclosed = enclosed_boxes(&g.boxes, vp.size, camera);
     // The relayout places the boxes afresh, so the box resolved here need not be
     // the one the cursor ends up over.
     view.hovered = None;
     model::toggle_expansion(view, id, cx);
-    view.emphasis.toggled(id, enclosed);
+    view.emphasis.toggled(id);
 }
 
 /// Where `b` is drawn: its own layout rect at rest, and the rect `morph` has
@@ -599,14 +598,41 @@ mod tests {
         // resolves against the one switched to — and would settle the fresh view
         // onto it. Clearing it, as a mode switch does, leaves nothing to settle.
         let mut emphasis = Emphasis::none();
-        emphasis.toggled(bviz_graph_layout::Id(7), vec![bviz_graph_layout::Id(1)]);
+        emphasis.toggled(bviz_graph_layout::Id(7));
         let g = bviz_graph_layout::LaidOut {
-            boxes: vec![lbox(1, 10.0, 20.0, 30.0, 40.0)],
+            boxes: vec![lbox(7, 10.0, 20.0, 30.0, 40.0)],
             ..Default::default()
         };
         assert!(recenter_rect(&g, &emphasis).is_some());
         emphasis.clear();
         assert!(recenter_rect(&g, &emphasis).is_none());
+    }
+
+    #[test]
+    fn a_settle_frames_the_toggled_box_and_not_what_sits_around_it() {
+        // A toggled box with a neighbour far off to the side. Framing the pair
+        // would bound a rect wide enough to force a zoom-out, and an expansion
+        // parts neighbours like this every time; the settle takes the toggled
+        // box alone.
+        let mut emphasis = Emphasis::none();
+        emphasis.toggled(bviz_graph_layout::Id(7));
+        let g = bviz_graph_layout::LaidOut {
+            boxes: vec![
+                lbox(7, 10.0, 20.0, 30.0, 40.0),
+                lbox(1, 5000.0, 4000.0, 30.0, 40.0),
+            ],
+            ..Default::default()
+        };
+        let rect = recenter_rect(&g, &emphasis).expect("the toggled box is drawn");
+        assert_eq!(
+            (rect.x, rect.y, rect.w, rect.h),
+            (10.0, 20.0, 30.0, 40.0),
+            "the settle reached past the toggled box"
+        );
+        // And so the settle that rect feeds leaves the reader's zoom alone, where
+        // one bounding the neighbour too would have to zoom out to enclose it.
+        let (z, _) = settle_view(rect, vp(800., 600.), CONTENT, 1.0, (0.0, 0.0), 1.0);
+        assert!((z - 1.0).abs() < 1e-4, "the toggle moved the zoom to {z}");
     }
 
     #[test]
@@ -735,7 +761,7 @@ mod tests {
             w: 50.0,
             h: 40.0,
         };
-        let (z, p) = settle_view(target, vp(800., 600.), CONTENT, 1.0, (0.0, 0.0));
+        let (z, p) = settle_view(target, vp(800., 600.), CONTENT, 1.0, (0.0, 0.0), 1.0);
         assert!((z - 1.0).abs() < 1e-4, "zoom moved: {z}");
         assert!(p.0.abs() < 1e-3 && p.1.abs() < 1e-3, "pan moved: {p:?}");
     }
@@ -750,7 +776,7 @@ mod tests {
             w: 2000.0,
             h: 1500.0,
         };
-        let (z, p) = settle_view(target, vp(800., 600.), CONTENT, 1.0, (0.0, 0.0));
+        let (z, p) = settle_view(target, vp(800., 600.), CONTENT, 1.0, (0.0, 0.0), 1.0);
         assert!(z < 1.0, "expected zoom-out, got {z}");
         assert!(
             z >= fit_zoom(vp(800., 600.), CONTENT) - 1e-4,
@@ -760,17 +786,85 @@ mod tests {
     }
 
     #[test]
-    fn settle_view_never_zooms_in_on_a_small_target() {
-        // A node opening smaller than the current zoom keeps the zoom — the
-        // disorienting blow-up-to-fill case is gone.
+    fn settle_view_never_zooms_in_past_the_readers_own_zoom() {
+        // A box far smaller than the window does not blow up to fill it: the
+        // settle rises no further than the zoom the reader set.
         let target = Rect {
             x: 100.0,
             y: 100.0,
             w: 30.0,
             h: 20.0,
         };
-        let (z, _) = settle_view(target, vp(800., 600.), CONTENT, 0.5, (0.0, 0.0));
+        let (z, _) = settle_view(target, vp(800., 600.), CONTENT, 0.5, (0.0, 0.0), 0.5);
         assert!(z <= 0.5 + 1e-4, "zoomed in: {z}");
+    }
+
+    #[test]
+    fn opening_one_box_after_another_leaves_the_zoom_alone_while_each_one_fits() {
+        // A run of expansions, each landing a box that still fits the window. The
+        // view holds the reader's zoom throughout: it is the boxes around the
+        // toggled one that an expansion spreads out, so chasing those would step
+        // the zoom further out at every toggle.
+        let chosen = 1.0;
+        let mut camera = (chosen, (0.0, 0.0));
+        for (i, along) in [200.0, 900.0, 1600.0, 2300.0].into_iter().enumerate() {
+            let opened = Rect {
+                x: along,
+                y: along / 2.,
+                w: 300.0,
+                h: 220.0,
+            };
+            camera = settle_view(opened, vp(800., 600.), CONTENT, camera.0, camera.1, chosen);
+            assert!(
+                (camera.0 - chosen).abs() < 1e-4,
+                "expansion {i} moved the zoom to {}",
+                camera.0
+            );
+        }
+    }
+
+    #[test]
+    fn settling_over_and_over_neither_walks_the_zoom_out_nor_strands_it() {
+        // Expanding grows the toggled box past the window, so the view relaxes to
+        // show it whole; collapsing shrinks it back within the window, so the view
+        // returns to the zoom the reader set. Every repetition of the pair settles
+        // at the same two zooms rather than starting from where the last left off.
+        let chosen = 1.0;
+        let opened = Rect {
+            x: 0.0,
+            y: 0.0,
+            w: 2000.0,
+            h: 1500.0,
+        };
+        let shut = Rect {
+            x: 375.0,
+            y: 280.0,
+            w: 50.0,
+            h: 40.0,
+        };
+        let mut camera = (chosen, (0.0, 0.0));
+        let mut settled = Vec::new();
+        for _ in 0..4 {
+            camera = settle_view(opened, vp(800., 600.), CONTENT, camera.0, camera.1, chosen);
+            let relaxed = camera.0;
+            camera = settle_view(shut, vp(800., 600.), CONTENT, camera.0, camera.1, chosen);
+            settled.push((relaxed, camera.0));
+        }
+        assert!(
+            settled[0].0 < chosen,
+            "the open target did not relax the view"
+        );
+        for (i, &(relaxed, back)) in settled.iter().enumerate() {
+            assert!(
+                (back - chosen).abs() < 1e-4,
+                "toggle {i} came back to {back}, not to the reader's {chosen}"
+            );
+            assert!(
+                (relaxed - settled[0].0).abs() < 1e-4,
+                "toggle {i} relaxed to {relaxed}, not to {} as the first did",
+                settled[0].0
+            );
+        }
     }
 
     #[test]
@@ -783,7 +877,7 @@ mod tests {
             w: 50.0,
             h: 40.0,
         };
-        let (z, p) = settle_view(target, vp(800., 600.), CONTENT, 1.0, (0.0, 0.0));
+        let (z, p) = settle_view(target, vp(800., 600.), CONTENT, 1.0, (0.0, 0.0), 1.0);
         assert!((z - 1.0).abs() < 1e-4, "zoom moved: {z}");
         assert!(p.0 < 0.0, "expected a leftward pan, got {p:?}");
         assert_enclosed(target, 800., 600., z, p);
@@ -842,29 +936,6 @@ mod tests {
             assert!(e >= prev, "not monotonic at {i}: {e} < {prev}");
             prev = e;
         }
-    }
-
-    #[test]
-    fn enclosed_boxes_keeps_only_fully_visible() {
-        let boxes = vec![
-            lbox(0, 100.0, 100.0, 50.0, 40.0),  // fully inside
-            lbox(1, 760.0, 100.0, 100.0, 40.0), // spills past the right edge
-            lbox(2, 100.0, 580.0, 50.0, 40.0),  // spills past the bottom edge
-            lbox(3, 200.0, 200.0, 30.0, 30.0),  // fully inside
-        ];
-        let mut ids = enclosed_boxes(
-            &boxes,
-            vp(800., 600.),
-            Camera {
-                zoom: 1.0,
-                pan: (0.0, 0.0),
-            },
-        );
-        ids.sort_by_key(|id| id.0);
-        assert_eq!(
-            ids,
-            vec![bviz_graph_layout::Id(0), bviz_graph_layout::Id(3)]
-        );
     }
 
     /// The slack `clamp_pan` allows past the flush position on an axis.

@@ -1,6 +1,6 @@
 use crate::emphasis::Emphasis;
 use crate::{FIT_MARGIN, MARGIN, MAX_ZOOM, RECENTER_PAD, ZOOM_PER_NOTCH};
-use bviz_graph_layout::{Id, LaidOut};
+use bviz_graph_layout::LaidOut;
 use gpui::{Bounds, Pixels, Point, Size, point, px};
 use std::ops::RangeInclusive;
 use std::time::Instant;
@@ -241,30 +241,6 @@ pub(crate) fn zoom_step(
     }
 }
 
-/// Ids of the boxes the viewport fully encloses at the given zoom and pan. The
-/// view-settling that follows a toggle keeps these in frame; a partly-clipped
-/// box (or one larger than the viewport) is left out, so a big container the
-/// user only saw part of does not force the whole graph back into view.
-pub(crate) fn enclosed_boxes(
-    boxes: &[bviz_graph_layout::Box],
-    viewport: Size<Pixels>,
-    camera: Camera,
-) -> Vec<Id> {
-    let Camera { zoom, pan } = camera;
-    let (vw, vh) = (f32::from(viewport.width), f32::from(viewport.height));
-    boxes
-        .iter()
-        .filter(|b| {
-            let x0 = (b.x as f32 + MARGIN as f32) * zoom + pan.0;
-            let y0 = (b.y as f32 + MARGIN as f32) * zoom + pan.1;
-            let x1 = ((b.x + b.width) as f32 + MARGIN as f32) * zoom + pan.0;
-            let y1 = ((b.y + b.height) as f32 + MARGIN as f32) * zoom + pan.1;
-            x0 >= 0. && y0 >= 0. && x1 <= vw && y1 <= vh
-        })
-        .map(|b| b.id)
-        .collect()
-}
-
 /// Ease-out cubic over `t` in `0..=1`: quick to start, decelerating into place,
 /// so a settle arrives gently rather than stopping abruptly.
 pub(crate) fn ease_out_cubic(t: f32) -> f32 {
@@ -280,19 +256,16 @@ pub(crate) fn smoothstep(t: f32) -> f32 {
     t * t * (3.0 - 2.0 * t)
 }
 
-/// The zoom and pan that keep `target` (a layout-space rect `(x, y, w, h)`) fully
-/// in view after a toggle, disturbing the view as little as that allows. The zoom
-/// only ever drops: it stays put when `target` already fits, and falls just far
-/// enough to enclose it otherwise — never zooming in to fill the view with one
-/// box, nor below the whole-graph fit. The rect's center is held on screen across
-/// any zoom change so the content does not lurch, then the pan shifts the minimum
-/// needed to seat the rect inside with `RECENTER_PAD` of breathing room.
+/// The zoom and pan that bring `target` — the layout-space rect of the box a
+/// toggle just opened or closed — fully into view, disturbing the view as little
+/// as that allows.
 pub(crate) fn settle_view(
     target: Rect,
     viewport: Size<Pixels>,
     content: (f32, f32),
     zoom: f32,
     pan: (f32, f32),
+    ceiling: f32,
 ) -> (f32, (f32, f32)) {
     let (vw, vh) = (f32::from(viewport.width), f32::from(viewport.height));
     let (bx, by, bw, bh) = (
@@ -301,7 +274,7 @@ pub(crate) fn settle_view(
         target.w as f32,
         target.h as f32,
     );
-    let z = zoom.min(fit_rect_zoom(target, viewport).unwrap_or(zoom));
+    let z = ceiling.min(fit_rect_zoom(target, viewport).unwrap_or(ceiling));
     let z = z.clamp(fit_zoom(viewport, content), MAX_ZOOM);
     let (cx, cy) = (bx + bw / 2. + MARGIN as f32, by + bh / 2. + MARGIN as f32);
     let mut panx = cx * zoom + pan.0 - cx * z;
@@ -345,26 +318,11 @@ pub(crate) fn fit_view(viewport: Size<Pixels>, content: (f32, f32)) -> (f32, (f3
     (zoom, ((vw - gw * zoom) / 2., (vh - gh * zoom) / 2.))
 }
 
-/// Smallest layout rect covering the boxes the emphasis keeps framed that
-/// survived the relayout.
+/// Where the emphasized box is drawn in `g`; `None` when nothing is emphasized
+/// or the relayout dropped the box.
 pub(crate) fn recenter_rect(g: &LaidOut, emphasis: &Emphasis) -> Option<Rect> {
-    let mut rect: Option<(f64, f64, f64, f64)> = None;
-    for bid in emphasis.framed() {
-        let Some(b) = g.boxes.iter().find(|b| b.id == bid) else {
-            continue;
-        };
-        let (x0, y0, x1, y1) = (b.x, b.y, b.x + b.width, b.y + b.height);
-        rect = Some(match rect {
-            None => (x0, y0, x1, y1),
-            Some((ax0, ay0, ax1, ay1)) => (ax0.min(x0), ay0.min(y0), ax1.max(x1), ay1.max(y1)),
-        });
-    }
-    rect.map(|(x0, y0, x1, y1)| Rect {
-        x: x0,
-        y: y0,
-        w: x1 - x0,
-        h: y1 - y0,
-    })
+    let id = emphasis.framed()?;
+    g.boxes.iter().find(|b| b.id == id).map(Rect::of)
 }
 
 #[cfg(test)]

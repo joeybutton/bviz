@@ -10,6 +10,12 @@ use std::time::Instant;
 /// so none of them needs the entity or the window.
 pub(crate) struct Framing {
     camera: Camera,
+    /// The zoom the reader put the view at, by the fit to the window or by
+    /// working the wheel. A settle may relax the camera below this to show a
+    /// toggled box that outgrew the window, and comes back to it once a toggle
+    /// leaves that box fitting again, so it is the one part of the framing a
+    /// settle never writes.
+    chosen_zoom: f32,
     /// Whether the fit-to-window view has been established.
     fitted: bool,
     /// Canvas bounds captured at the last prepaint, so hit-testing and the
@@ -28,6 +34,7 @@ impl Framing {
                 zoom: 1.0,
                 pan: (0.0, 0.0),
             },
+            chosen_zoom: 1.0,
             fitted: false,
             viewport: Bounds::default(),
             recenter: false,
@@ -43,10 +50,20 @@ impl Framing {
         self.viewport
     }
 
-    /// Moves the camera, abandoning any settle in flight: a manual pan, zoom or
-    /// scroll takes the view over from an ease still running.
+    /// Moves the camera to a zoom the reader picked, abandoning any settle in
+    /// flight: a manual zoom takes the view over from an ease still running. The
+    /// zoom becomes the one settles come back to.
     pub(crate) fn move_to(&mut self, camera: Camera) {
         self.camera = camera;
+        self.chosen_zoom = camera.zoom;
+        self.anim = None;
+    }
+
+    /// Slides the camera across the graph, abandoning any settle in flight. The
+    /// zoom a settle returns to is left alone: carrying the view sideways is not
+    /// the reader asking to be shown the graph at a different size.
+    pub(crate) fn pan_to(&mut self, pan: (f32, f32)) {
+        self.camera.pan = pan;
         self.anim = None;
     }
 
@@ -99,6 +116,7 @@ impl Framing {
         if !self.fitted {
             let (z, p) = fit_view(bounds.size, content);
             self.camera = Camera { zoom: z, pan: p };
+            self.chosen_zoom = z;
             self.fitted = true;
         } else if prev.size != bounds.size {
             self.anim = None;
@@ -110,6 +128,7 @@ impl Framing {
             let center_y = (f32::from(prev.size.height) / 2. - pan_y) / z_old;
             let z = (z_old * new_fit / old_fit).clamp(new_fit, MAX_ZOOM);
             self.camera.zoom = z;
+            self.chosen_zoom = (self.chosen_zoom * new_fit / old_fit).clamp(new_fit, MAX_ZOOM);
             self.camera.pan = clamp_pan(
                 (
                     f32::from(bounds.size.width) / 2. - center_x * z,
@@ -131,7 +150,14 @@ impl Framing {
         }
         if let Some(target) = target {
             let (zoom, pan) = (self.camera.zoom, self.camera.pan);
-            let (to_zoom, to_pan) = settle_view(target, self.viewport.size, content, zoom, pan);
+            let (to_zoom, to_pan) = settle_view(
+                target,
+                self.viewport.size,
+                content,
+                zoom,
+                pan,
+                self.chosen_zoom,
+            );
             self.ease_to(to_zoom, to_pan);
         }
         self.recenter = false;
@@ -205,6 +231,7 @@ mod tests {
     fn framed(zoom: f32, pan: (f32, f32), bounds: Bounds<Pixels>) -> Framing {
         Framing {
             camera: Camera { zoom, pan },
+            chosen_zoom: zoom,
             viewport: bounds,
             fitted: true,
             recenter: false,
@@ -299,6 +326,31 @@ mod tests {
     }
 
     #[test]
+    fn arming_measures_from_the_readers_zoom_not_from_where_a_settle_left_the_camera() {
+        // A camera an earlier settle relaxed to 0.25 to take in content a toggle
+        // had spread apart, under a reader's zoom of 1.0 that the settle left
+        // alone. A target that fits again brings the view back up to it rather
+        // than stranding it at the relaxed zoom.
+        let target = Rect {
+            x: 375.0,
+            y: 280.0,
+            w: 50.0,
+            h: 40.0,
+        };
+        let mut f = framed(1.0, (0.0, 0.0), canvas_bounds(800., 600.));
+        f.camera.zoom = 0.25;
+        f.recenter = true;
+        f.arm_settle(CONTENT, Some(target));
+        let a = f.anim.expect("no settle armed");
+        assert!(
+            (a.to_zoom - 1.0).abs() < 1e-4,
+            "settled to {}, not back to the reader's 1.0",
+            a.to_zoom
+        );
+        assert_eq!(f.chosen_zoom, 1.0, "the settle wrote the reader's zoom");
+    }
+
+    #[test]
     fn arming_on_an_offscreen_target_eases_onto_it() {
         let target = Rect {
             x: 1000.0,
@@ -309,7 +361,7 @@ mod tests {
         let mut f = framed(1.0, (0.0, 0.0), canvas_bounds(800., 600.));
         f.recenter = true;
         f.arm_settle(CONTENT, Some(target));
-        let (tz, tp) = settle_view(target, vp(800., 600.), CONTENT, 1.0, (0.0, 0.0));
+        let (tz, tp) = settle_view(target, vp(800., 600.), CONTENT, 1.0, (0.0, 0.0), 1.0);
         let a = f.anim.expect("no settle armed");
         assert_eq!((a.from_zoom, a.from_pan), (1.0, (0.0, 0.0)));
         assert_eq!((a.to_zoom, a.to_pan), (tz, tp));
@@ -448,7 +500,14 @@ mod tests {
         );
         assert_eq!(
             (a.to_zoom, a.to_pan),
-            settle_view(target, bounds.size, CONTENT, a.from_zoom, a.from_pan)
+            settle_view(
+                target,
+                bounds.size,
+                CONTENT,
+                a.from_zoom,
+                a.from_pan,
+                f.chosen_zoom
+            )
         );
         let travelled = |v: f32, from: f32, to: f32| (from.min(to)..=from.max(to)).contains(&v);
         assert!(

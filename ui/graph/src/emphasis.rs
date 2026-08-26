@@ -13,8 +13,6 @@ const FADE_TICK: Duration = Duration::from_millis(33);
 /// A toggled box, held until its emphasis has faded.
 struct Toggled {
     id: Id,
-    /// Boxes the viewport fully enclosed when the toggle fired.
-    enclosed: Vec<Id>,
     /// When the highlight began fading; `None` until the relayout lands, so the
     /// linger runs from the moment the box becomes visible and a relayout slower
     /// than the linger cannot surface an already-faded box.
@@ -46,12 +44,10 @@ impl Emphasis {
         }
     }
 
-    /// Emphasizes the box `id`, framed together with the boxes `enclosed` by the
-    /// viewport.
-    pub(crate) fn toggled(&mut self, id: Id, enclosed: Vec<Id>) {
+    /// Emphasizes the box `id`.
+    pub(crate) fn toggled(&mut self, id: Id) {
         self.current = Some(Toggled {
             id,
-            enclosed,
             fading_since: None,
         });
         self.generation = self.generation.wrapping_add(1);
@@ -75,13 +71,12 @@ impl Emphasis {
         Some((toggled.id, alpha))
     }
 
-    /// The boxes a settling relayout keeps in frame: the toggled box together
-    /// with the boxes that shared the screen with it, so the view tracks what
-    /// the user was looking at rather than snapping to the toggled box alone.
-    pub(crate) fn framed(&self) -> impl Iterator<Item = Id> + '_ {
-        self.current
-            .iter()
-            .flat_map(|t| std::iter::once(t.id).chain(t.enclosed.iter().copied()))
+    /// The box a settling relayout keeps in view, and the only one it chases.
+    /// What surrounded the box before the relayout is deliberately left out: a
+    /// toggle spreads those boxes apart, and framing them would drag the zoom
+    /// out after them every time one is opened.
+    pub(crate) fn framed(&self) -> Option<Id> {
+        Some(self.current.as_ref()?.id)
     }
 
     /// Starts the fade of the emphasized box, yielding the generation its timer
