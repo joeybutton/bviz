@@ -52,6 +52,10 @@ fn main() {
         first,
         rest,
         Load::open,
-        &[bviz_ui_graph::register_keys],
+        &[
+            bviz_ui_graph::register_keys,
+            bviz_ui_trace::register_keys,
+            bviz_ui_terminal::register_keys,
+        ],
     );
 }

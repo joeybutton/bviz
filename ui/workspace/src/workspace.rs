@@ -33,10 +33,7 @@ const DIVIDER_LINE: Pixels = px(1.);
 /// line alone would be a pixel wide.
 const DIVIDER_GRIP: Pixels = px(7.);
 
-/// Register the key bindings the workspace's panel and pane actions answer to.
-/// Call once at startup, before any window opens: binding keys refreshes every
-/// window, which drops what each has cached of its last frame.
-pub fn register_keys(cx: &mut App) {
+pub(crate) fn register_keys(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new("ctrl-tab", NextTab, Some(KEY_CONTEXT)),
         KeyBinding::new("ctrl-shift-tab", PreviousTab, Some(KEY_CONTEXT)),

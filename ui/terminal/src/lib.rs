@@ -11,6 +11,8 @@
 mod color;
 mod terminal;
 
+pub use terminal::register_keys;
+
 use bviz_terminal::Replay;
 use bviz_ui_components::Pending;
 use bviz_ui_terminal_args::{ConsoleArgs, ConsoleSource};
@@ -86,6 +88,6 @@ pub fn run() {
         first,
         loads.collect(),
         open,
-        &[],
+        &[terminal::register_keys],
     );
 }

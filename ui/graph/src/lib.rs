@@ -52,9 +52,6 @@ actions!(bviz_graph, [ToggleNeighborhood, ToggleReduce, ClearSelection]);
 /// reaches this panel and no other.
 const KEY_CONTEXT: &str = "Graph";
 
-/// Register the key bindings the graph's own actions answer to. Call once at
-/// startup, before any window opens: binding keys refreshes every window, which
-/// drops what each has cached of its last frame.
 pub fn register_keys(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new("h", ToggleNeighborhood, Some(KEY_CONTEXT)),

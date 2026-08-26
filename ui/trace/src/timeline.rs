@@ -19,8 +19,8 @@ use bviz_trace_profile::{Profile, Slice, SliceDetail, TimeSpan};
 use bviz_ui_components::{DragEnd, Scrollbar, cached_layer, overlay_canvas, track_drag};
 use gpui::{
     App, Bounds, ContentMask, Context, Div, Entity, FocusHandle, Focusable, IntoElement,
-    KeyBinding, MouseButton, MouseDownEvent, MouseMoveEvent, Pixels, Point, Render, Rgba,
-    ScrollWheelEvent, Stateful, WeakEntity, Window, canvas, div, fill, point, prelude::*, px, size,
+    MouseButton, MouseDownEvent, MouseMoveEvent, Pixels, Point, Render, Rgba, ScrollWheelEvent,
+    Stateful, WeakEntity, Window, canvas, div, fill, point, prelude::*, px, size,
 };
 use std::rc::Rc;
 use std::sync::Arc;
@@ -374,10 +374,6 @@ impl TimelinePanel {
         cx: &mut Context<Self>,
     ) -> Self {
         let content_focus = cx.focus_handle();
-        cx.bind_keys([
-            KeyBinding::new("secondary-a", SelectAllTracks, Some(TIMELINE_KEY_CONTEXT)),
-            KeyBinding::new("escape", ClearTimeSelection, Some(TIMELINE_KEY_CONTEXT)),
-        ]);
         let parent = cx.entity().downgrade();
         let canvas = cx.new(|_| SliceCanvas { parent });
         Self {

@@ -10,7 +10,9 @@ mod workspace;
 pub use layout::{Layout, Panes, Removal, Split, SplitId};
 pub use pane::{Pane, PaneEvent};
 pub use panel::{AnyPanel, Panel, PanelEvent, PanelKind, document_label};
-pub use workspace::{Workspace, register_keys};
+pub use workspace::Workspace;
+
+use workspace::register_keys;
 
 use gpui::{App, AppContext, Pixels, Size, Window};
 
@@ -54,7 +56,9 @@ pub fn run_panels<T, F>(
 /// The application shell's own setup, this crate's key bindings, one call per
 /// entry in `panel_keys` to register the bindings of one panel kind the app can
 /// show, and the window the panels `build_panels` makes are framed in. The
-/// registrations run before the first window opens.
+/// registrations run before the first window opens, and each runs exactly once
+/// per process: `cx.bind_keys` refreshes every window, which drops what each has
+/// cached of its last frame.
 fn run_with<F>(
     app_id: impl Into<String>,
     window_size: Size<Pixels>,

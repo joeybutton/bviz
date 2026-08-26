@@ -46,13 +46,20 @@ use clap::{CommandFactory, Parser};
 use gpui::{
     AnyElement, App, AvailableSpace, Bounds, ContentMask, Context, Div, Edges, Element, ElementId,
     Entity, EventEmitter, FocusHandle, Focusable, GlobalElementId, Hsla, InspectorElementId,
-    IntoElement, LayoutId, MouseButton, MouseDownEvent, Pixels, Point, Position, Render,
-    ScrollHandle, SharedString, Stateful, Style, Subscription, Task, TextAlign,
+    IntoElement, KeyBinding, LayoutId, MouseButton, MouseDownEvent, Pixels, Point, Position,
+    Render, ScrollHandle, SharedString, Stateful, Style, Subscription, Task, TextAlign,
     TransformationMatrix, Window, div, fill, point, prelude::*, px, relative, size,
 };
 use std::sync::Arc;
 
 gpui::actions!(bviz_trace, [SelectAllTracks, ClearTimeSelection]);
+
+pub fn register_keys(cx: &mut App) {
+    cx.bind_keys([
+        KeyBinding::new("secondary-a", SelectAllTracks, Some(TIMELINE_KEY_CONTEXT)),
+        KeyBinding::new("escape", ClearTimeSelection, Some(TIMELINE_KEY_CONTEXT)),
+    ]);
+}
 
 /// The key context of the trace panel, enclosing every sub-surface's.
 const TRACE_KEY_CONTEXT: &str = "Trace";
@@ -1668,7 +1675,7 @@ pub fn run() {
         first,
         loads.collect(),
         open,
-        &[],
+        &[register_keys],
     );
 }
 
