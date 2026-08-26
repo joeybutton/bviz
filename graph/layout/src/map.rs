@@ -26,6 +26,9 @@ const OPEN_PX: f64 = 55.0;
 /// factor whatever the graph's containers happen to measure.
 const LEVEL_SCALE_STEP: f64 = 2.0;
 
+/// How many edges one frame is laid out along at most.
+const MAX_FRAME_EDGES: usize = 2000;
+
 /// Places every node once and derives the zoom pyramid of views over it.
 ///
 /// `base`'s node ids must be a dense permutation of `0..nodes.len()`, every
@@ -35,7 +38,10 @@ pub fn map_layout(base: &Graph, reduced: &Graph) -> MapLayout {
     let containment = Containment::new(base);
     // The reduction reaches as far as the base, so it stacks the boxes the same
     // way for a fraction of the routing work.
-    let drawing = place(base, &frame_edges(reduced, &containment), &containment);
+    let drawing = {
+        let fe = frame_edges(reduced, &containment);
+        place(base, &fe, &containment)
+    };
     let expandable = lod::expandable_containers(base);
 
     let view = |open: &HashSet<Id>| level(base, reduced, open, &drawing, &containment, &expandable);
@@ -326,9 +332,10 @@ fn frame_edges(graph: &Graph, containment: &Containment) -> HashMap<Option<Id>, 
             frames.entry(frame).or_default().insert((from, to));
         }
     }
+    let cap = MAX_FRAME_EDGES;
     frames
         .into_iter()
-        .map(|(frame, edges)| (frame, edges.into_iter().collect()))
+        .map(|(frame, edges)| (frame, edges.into_iter().take(cap).collect()))
         .collect()
 }
 
@@ -379,7 +386,7 @@ fn level(
     let drawn = drawn_edges(visible, reduced, open, expandable);
     LaidOut {
         boxes,
-        connectors: connectors(&drawn, drawing),
+        connectors: { connectors(&drawn, drawing) },
         // The frames are laid out by layout_flat, which numbers no node.
         anchors: HashMap::new(),
         full_edges: connected.into_iter().collect(),
@@ -923,6 +930,58 @@ mod tests {
             "{points:?}"
         );
         assert_ne!(points[0], *points.last().unwrap());
+    }
+
+    /// A frame holding a tangle is laid out along a subset of it. The edges of a
+    /// frame settle only the order its boxes take, and the layout engine spends
+    /// a dummy node on every layer each one spans, so an uncapped tangle costs
+    /// more than the ordering it buys is worth.
+    #[test]
+    fn a_frame_denser_than_the_cap_is_laid_out_along_part_of_it() {
+        let mut g = Graph::new();
+        let mut names = Names::default();
+        let root = names.intern("root");
+        g.add_node(root, "root", Kind::Package, None);
+        let members: Vec<Id> = (0..80)
+            .map(|i| {
+                let id = names.intern(&format!("m{i}"));
+                g.add_node(id, "m", Kind::Action, Some(root));
+                id
+            })
+            .collect();
+        for (i, &from) in members.iter().enumerate() {
+            for &to in &members[i + 1..] {
+                g.add_edge(from, to, EdgeKind::Aquery);
+            }
+        }
+        assert!(
+            g.edges.len() > MAX_FRAME_EDGES,
+            "the fixture holds {} edges, within the cap",
+            g.edges.len(),
+        );
+
+        let frames = frame_edges(&g, &Containment::new(&g));
+        assert_eq!(frames[&Some(root)].len(), MAX_FRAME_EDGES);
+    }
+
+    /// A frame within the cap keeps every edge it has, so the cap costs the
+    /// ordering of nothing it does not have to.
+    #[test]
+    fn a_frame_within_the_cap_keeps_every_edge() {
+        let (base, names) = towers();
+        let reduced = reduce::transitive_reduction(&base);
+        let containment = Containment::new(&reduced);
+        let frames = frame_edges(&reduced, &containment);
+        let wide = names.get("wide").unwrap();
+
+        let held: usize = frames.values().map(Vec::len).sum();
+        let sided = reduced
+            .edges
+            .iter()
+            .filter(|e| containment.sibling_pair(e.from, e.to).is_some())
+            .count();
+        assert!(held > 0 && held <= sided);
+        assert!(frames[&Some(wide)].len() < MAX_FRAME_EDGES);
     }
 
     #[test]
