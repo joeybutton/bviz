@@ -7,8 +7,8 @@ rust_library(
     crate_name = "bviz_cli",
     visibility = ["//bviz:__pkg__"],
     deps = [
+        "//ui/console/args",
         "//ui/graph/args",
-        "//ui/terminal/args",
         "//ui/trace/args",
         "@crates//:clap",
     ],

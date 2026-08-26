@@ -46,7 +46,7 @@ behaves consistently:
 - `bviz_ui_theme::{theme, mix}` — the appearance-aware theme a window paints with, and a
   blend helper.
 
-The sections below cover each in context. `ui/terminal/src/terminal/` and
+The sections below cover each in context. `ui/console/src/console/` and
 `ui/graph/src/` are the worked examples for everything here; read them rather
 than reinventing a pattern they already show.
 
@@ -347,7 +347,7 @@ offset cannot survive it; anchor to a row identity instead. That is the second h
 `references/scroll-model.md`.
 
 For a line-based terminal, bridge the drag fraction to alacritty's `display_offset`
-(`ui/terminal/src/terminal/mod.rs`), which also implements auto-hide: reveal on scroll /
+(`ui/console/src/console/mod.rs`), which also implements auto-hide: reveal on scroll /
 drag / gutter-hover, hide after an idle delay with `cx.spawn` +
 `cx.background_executor().timer(..)`, guarding the hide with a reveal counter so a later
 reveal isn't undone by an earlier timer firing.
@@ -429,7 +429,7 @@ state types and three methods:
 - `paint(.., bounds, &mut RequestLayoutState, &mut PrepaintState, ..)` — drain those
   quads and lines onto the window.
 
-`id()` / `source_location()` return `None`. The terminal (`ui/terminal/src/terminal/element.rs`:
+`id()` / `source_location()` return `None`. The terminal (`ui/console/src/console/element.rs`:
 `TerminalElement`) is the worked example; the text field's `TextElement` is another.
 
 **Hit-testing.** A `canvas`/`Element` paints one surface, so gpui's per-`div`
@@ -590,7 +590,7 @@ in a view field**, or dropping it cancels the work.
 
 Pair it with a load-state enum (`Loading` / `Loaded(T)` / `Error(String)`) the view matches
 on in `render`, showing a spinner while loading (`bviz_ui_assets::icon("circle-notch")`
-with `.with_animation(..)`). `GraphPanel` and `TerminalPanel` both follow this shape. For
+with `.with_animation(..)`). `GraphPanel` and `ConsolePanel` both follow this shape. For
 a one-shot *delay* rather than background work (e.g. an auto-hiding scroll bar), use
 `cx.spawn` + `cx.background_executor().timer(..)` directly instead.
 

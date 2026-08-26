@@ -3,8 +3,8 @@
 //! documents an invocation resolves to. It names no window and draws nothing,
 //! so a parse can be exercised without a display.
 
+use bviz_ui_console_args::{ConsoleArgs, ConsoleSource};
 use bviz_ui_graph_args::{GraphArgs, GraphSource};
-use bviz_ui_terminal_args::{ConsoleArgs, ConsoleSource};
 use bviz_ui_trace_args::{TraceArgs, TraceSource};
 use clap::error::ErrorKind;
 use clap::{CommandFactory, Parser};

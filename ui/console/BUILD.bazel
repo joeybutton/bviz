@@ -3,18 +3,18 @@ load("@rules_rs//rs:rust_library.bzl", "rust_library")
 load("@rules_rs//rs:rust_test.bzl", "rust_test")
 
 rust_library(
-    name = "terminal_lib",
+    name = "console_lib",
     srcs = glob(
         ["src/**/*.rs"],
         exclude = ["src/main.rs"],
     ),
-    crate_name = "bviz_ui_terminal",
+    crate_name = "bviz_ui_console",
     visibility = ["//bviz:__pkg__"],
     deps = [
         "//terminal",
         "//ui/assets",
         "//ui/components",
-        "//ui/terminal/args",
+        "//ui/console/args",
         "//ui/theme",
         "//ui/workspace",
         "@crates//:clap",
@@ -23,13 +23,13 @@ rust_library(
 )
 
 rust_binary(
-    name = "terminal",
+    name = "console",
     srcs = ["src/main.rs"],
-    crate_name = "bviz_ui_terminal_bin",
-    deps = [":terminal_lib"],
+    crate_name = "bviz_ui_console_bin",
+    deps = [":console_lib"],
 )
 
 rust_test(
-    name = "terminal_test",
-    crate = ":terminal_lib",
+    name = "console_test",
+    crate = ":console_lib",
 )

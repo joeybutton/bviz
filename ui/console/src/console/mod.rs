@@ -123,8 +123,8 @@ struct ContentLayout {
 
 type Source = bviz_ui_components::Source<Replay>;
 
-/// A build's captured terminal output, replayed under playback controls.
-pub struct TerminalPanel {
+/// A build's captured console output, replayed under playback controls.
+pub struct ConsolePanel {
     /// Names the document shown, labelling this panel's tab.
     title: SharedString,
     /// The playback timeline, loaded off the UI thread.
@@ -198,7 +198,7 @@ pub struct TerminalPanel {
     find_observation: Option<Subscription>,
 }
 
-impl TerminalPanel {
+impl ConsolePanel {
     pub fn new(load: crate::Load, cx: &mut Context<Self>) -> Self {
         let crate::Load { replay, title } = load;
         // Tab cycles focus through the regions (handled by the shell's tab action
@@ -780,15 +780,15 @@ impl TerminalPanel {
     }
 }
 
-impl EventEmitter<PanelEvent> for TerminalPanel {}
+impl EventEmitter<PanelEvent> for ConsolePanel {}
 
-impl Focusable for TerminalPanel {
+impl Focusable for ConsolePanel {
     fn focus_handle(&self, _cx: &App) -> FocusHandle {
         self.body_focus.clone()
     }
 }
 
-impl Panel for TerminalPanel {
+impl Panel for ConsolePanel {
     fn kind() -> PanelKind {
         PanelKind {
             name: "console",
@@ -807,7 +807,7 @@ impl Panel for TerminalPanel {
     }
 }
 
-impl Render for TerminalPanel {
+impl Render for ConsolePanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // Advance the timeline if playing, pacing playback by the frame loop.
         self.advance_playback(window);
@@ -882,7 +882,7 @@ impl Render for TerminalPanel {
     }
 }
 
-impl TerminalPanel {
+impl ConsolePanel {
     /// The find box overlaid at the top-right of the terminal: the query field,
     /// a match counter, and previous/next/close controls. `None` before the field
     /// has been created (i.e. the box has never been opened).

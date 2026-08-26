@@ -15,7 +15,7 @@ rust_library(
         exclude = ["src/display/mod.rs"],
     ) + [":display_src"],
     crate_name = "bviz_terminal",
-    visibility = ["//ui/terminal:__pkg__"],
+    visibility = ["//ui/console:__pkg__"],
     deps = [
         "@bazel_build_event_proto//:bazel_build_event_rust_proto",
         "@crates//:alacritty_terminal",

@@ -1,14 +1,14 @@
 [package]
-name = "bviz_ui_terminal"
+name = "bviz_ui_console"
 version = "0.1.0"
 edition = "2024"
 
 [[bin]]
-name = "terminal"
+name = "console"
 path = "src/main.rs"
 
 [lib]
-name = "bviz_ui_terminal"
+name = "bviz_ui_console"
 path = "src/lib.rs"
 
 [dependencies]
@@ -17,6 +17,6 @@ gpui = { workspace = true }
 bviz_terminal = { path = "../../terminal" }
 bviz_ui_assets = { path = "../assets" }
 bviz_ui_components = { path = "../components" }
+bviz_ui_console_args = { path = "args" }
 bviz_ui_theme = { path = "../theme" }
-bviz_ui_terminal_args = { path = "args" }
 bviz_ui_workspace = { path = "../workspace" }

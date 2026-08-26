@@ -9,6 +9,6 @@ path = "src/lib.rs"
 
 [dependencies]
 clap = { workspace = true }
+bviz_ui_console_args = { path = "../ui/console/args" }
 bviz_ui_graph_args = { path = "../ui/graph/args" }
-bviz_ui_terminal_args = { path = "../ui/terminal/args" }
 bviz_ui_trace_args = { path = "../ui/trace/args" }

@@ -38,7 +38,7 @@ mod tests {
     }
 
     fn sources(args: &[&str]) -> Vec<ConsoleSource> {
-        Cli::try_parse_from(std::iter::once("terminal").chain(args.iter().copied()))
+        Cli::try_parse_from(std::iter::once("console").chain(args.iter().copied()))
             .expect("the flags parse")
             .console
             .sources()

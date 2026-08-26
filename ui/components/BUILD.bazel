@@ -17,9 +17,9 @@ rust_library(
     ) + [":text_input_src"],
     crate_name = "bviz_ui_components",
     visibility = [
+        "//ui/console:__pkg__",
         "//ui/graph:__pkg__",
         "//ui/shell:__pkg__",
-        "//ui/terminal:__pkg__",
         "//ui/trace:__pkg__",
         "//ui/workspace:__pkg__",
     ],

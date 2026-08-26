@@ -11,8 +11,8 @@ rust_binary(
     deps = [
         "//alloc",
         "//cli",
+        "//ui/console:console_lib",
         "//ui/graph:graph_lib",
-        "//ui/terminal:terminal_lib",
         "//ui/trace:trace_lib",
         "//ui/workspace",
         "@crates//:clap",

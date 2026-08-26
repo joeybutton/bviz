@@ -16,7 +16,7 @@ builds as a binary of its own, for work on that viewer alone.
 | --- | --- |
 | `//ui/graph:graph` | the build and dependency graph |
 | `//ui/trace:trace` | the action timeline: thread lanes, counters, flame graph, stats |
-| `//ui/terminal:terminal` | the console output, replayed against its clock |
+| `//ui/console:console` | the console output, replayed against its clock |
 
 All are gpui desktop applications, and need Wayland and a GPU.
 
@@ -93,7 +93,7 @@ bazel run -c opt //ui/trace:trace -- --profile /tmp/build.profile.gz
 
 ```sh
 bazel build --show_timestamps --build_event_binary_file=/tmp/build.bep //...
-bazel run -c opt //ui/terminal:terminal -- /tmp/build.bep
+bazel run -c opt //ui/console:console -- /tmp/build.bep
 ```
 
 Bazel does not timestamp its progress output, so without `--show_timestamps` the

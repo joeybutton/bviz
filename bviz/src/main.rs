@@ -19,7 +19,7 @@ const WINDOW_SIZE: Size<Pixels> = Size {
 enum Load {
     Graph(bviz_ui_graph::Load),
     Trace(bviz_ui_trace::Load),
-    Console(bviz_ui_terminal::Load),
+    Console(bviz_ui_console::Load),
 }
 
 impl Load {
@@ -35,7 +35,7 @@ impl Load {
         match self {
             Self::Graph(load) => bviz_ui_graph::open(load, window, cx),
             Self::Trace(load) => bviz_ui_trace::open(load, window, cx),
-            Self::Console(load) => bviz_ui_terminal::open(load, window, cx),
+            Self::Console(load) => bviz_ui_console::open(load, window, cx),
         }
     }
 }
@@ -55,7 +55,7 @@ fn main() {
         &[
             bviz_ui_graph::register_keys,
             bviz_ui_trace::register_keys,
-            bviz_ui_terminal::register_keys,
+            bviz_ui_console::register_keys,
         ],
     );
 }
