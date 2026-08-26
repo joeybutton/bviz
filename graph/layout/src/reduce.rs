@@ -5,14 +5,16 @@
 //! Edges are reduced on their `(from, to)` pair, ignoring provenance, so a pair
 //! is kept or dropped as a whole and a kept pair keeps all its edges.
 //!
-//! A dependency graph is acyclic, so the fast path reduces it in one pass over an
-//! integer-indexed reachability bitset (the only feasible way on the whole base
-//! graph). A graph left cyclic by node merging falls back to removing a
-//! connection only when its endpoints stay linked through the others — checked
-//! one removal at a time, so reachability survives a cycle (where the reduction
-//! is not unique).
+//! An acyclic graph reduces in one pass over an integer-indexed reachability
+//! bitset, the only feasible way on the whole base graph. Folding a subtree into
+//! one box leaves graphs that are not acyclic — two packages each depending on
+//! the other through different members become a pair of boxes pointing both
+//! ways — so a cyclic graph is reduced by condensing each cycle to a node,
+//! reducing the acyclic graph that leaves, and keeping every edge inside a
+//! cycle. Reachability survives, and no edge of a cycle is redundant anyway,
+//! since each of its nodes already reaches every other.
 
-use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet};
 
 use crate::graph::Graph;
 use crate::intern::Id;
@@ -28,7 +30,7 @@ pub fn transitive_reduction(graph: &Graph) -> Graph {
 pub fn reduced(graph: Graph) -> Graph {
     match dag_reduction(graph) {
         Ok(reduced) => reduced,
-        Err(cyclic) => iterative_reduction(cyclic),
+        Err(cyclic) => condensed_reduction(cyclic),
     }
 }
 
@@ -125,48 +127,183 @@ fn redundant_pairs(order: &[u32], succ: &[Vec<u32>]) -> HashSet<(u32, u32)> {
 /// Cycle-tolerant reduction: drop a pair only while its endpoints stay linked
 /// through the pairs kept so far, visiting pairs in a fixed order for a
 /// deterministic result.
-fn iterative_reduction(graph: Graph) -> Graph {
-    let mut pairs: BTreeSet<(Id, Id)> = graph
+fn condensed_reduction(graph: Graph) -> Graph {
+    let mut index: HashMap<Id, u32> = HashMap::with_capacity(graph.nodes.len());
+    for node in &graph.nodes {
+        let next = index.len() as u32;
+        index.entry(node.id).or_insert(next);
+    }
+    let n = index.len();
+    let pairs: HashSet<(u32, u32)> = graph
         .edges
         .iter()
         .filter(|e| e.from != e.to)
-        .map(|e| (e.from, e.to))
+        .filter_map(|e| Some((*index.get(&e.from)?, *index.get(&e.to)?)))
         .collect();
-    let mut succ: HashMap<Id, HashSet<Id>> = HashMap::new();
+    let mut succ: Vec<Vec<u32>> = vec![Vec::new(); n];
     for &(u, v) in &pairs {
-        succ.entry(u).or_default().insert(v);
+        succ[u as usize].push(v);
     }
-    for (u, v) in pairs.iter().copied().collect::<Vec<_>>() {
-        succ.get_mut(&u).unwrap().remove(&v);
-        if reachable(&succ, u, v) {
-            pairs.remove(&(u, v));
-        } else {
-            succ.get_mut(&u).unwrap().insert(v);
+
+    let comp = components(&succ, n);
+    let count = comp.iter().copied().max().map_or(0, |c| c as usize + 1);
+    let mut condensed: HashSet<(u32, u32)> = HashSet::with_capacity(pairs.len());
+    let mut csucc: Vec<Vec<u32>> = vec![Vec::new(); count];
+    let mut cindeg: Vec<u32> = vec![0; count];
+    for &(u, v) in &pairs {
+        let (a, b) = (comp[u as usize], comp[v as usize]);
+        if a != b && condensed.insert((a, b)) {
+            csucc[a as usize].push(b);
+            cindeg[b as usize] += 1;
         }
     }
+    let order = topo_order(&csucc, cindeg).expect("a condensation holds no cycle");
+    let redundant = redundant_pairs(&order, &csucc);
+
+    let mut within: HashMap<u32, Vec<(u32, u32)>> = HashMap::new();
+    // One edge into a cycle reaches all of it, and one out of a cycle leaves
+    // from all of it, so a pair of cycles the reduction keeps joined needs only
+    // the one edge between them; the lowest is taken so a graph always keeps the
+    // same one.
+    let mut between: HashMap<(u32, u32), (u32, u32)> = HashMap::new();
+    for &(u, v) in &pairs {
+        let (a, b) = (comp[u as usize], comp[v as usize]);
+        match a == b {
+            true => within.entry(a).or_default().push((u, v)),
+            false => {
+                let lowest = between.entry((a, b)).or_insert((u, v));
+                *lowest = (*lowest).min((u, v));
+            }
+        }
+    }
+    let mut held: HashSet<(u32, u32)> = HashSet::new();
+    for cycle in within.values() {
+        held.extend(thin(cycle));
+    }
+    held.extend(
+        between
+            .iter()
+            .filter(|(pair, _)| !redundant.contains(pair))
+            .map(|(_, &edge)| edge),
+    );
+
     let mut out = graph;
-    out.edges
-        .retain(|e| e.from == e.to || pairs.contains(&(e.from, e.to)));
+    out.edges.retain(|e| {
+        e.from == e.to
+            || match (index.get(&e.from), index.get(&e.to)) {
+                (Some(&u), Some(&v)) => held.contains(&(u, v)),
+                _ => true,
+            }
+    });
     out
 }
 
-/// Whether `dst` is reachable from `src` over the current successor adjacency.
-fn reachable(succ: &HashMap<Id, HashSet<Id>>, src: Id, dst: Id) -> bool {
-    let mut seen: HashSet<Id> = HashSet::new();
-    let mut queue: VecDeque<Id> = VecDeque::new();
-    queue.push_back(src);
-    while let Some(u) = queue.pop_front() {
+/// The edges of one cycle that hold it together. Each is dropped in turn where
+/// the rest still carry its source to its target, leaving every node of the
+/// cycle reaching every other over fewer edges than it began with. A cycle has
+/// no unique reduction, so which edges survive follows the order they are tried
+/// in; that order is by index, so one graph always reduces the same way.
+///
+/// Every path between two nodes of a cycle stays inside it, so the search needs
+/// none of the graph around it and costs the cycle's own size rather than the
+/// whole view's.
+fn thin(cycle: &[(u32, u32)]) -> HashSet<(u32, u32)> {
+    let mut succ: HashMap<u32, HashSet<u32>> = HashMap::with_capacity(cycle.len());
+    for &(u, v) in cycle {
+        succ.entry(u).or_default().insert(v);
+    }
+    let mut order = cycle.to_vec();
+    order.sort_unstable();
+    let mut kept: HashSet<(u32, u32)> = order.iter().copied().collect();
+    for (u, v) in order {
+        let outs = succ
+            .get_mut(&u)
+            .expect("the source of one of its own edges");
+        outs.remove(&v);
+        if reaches(&succ, u, v) {
+            kept.remove(&(u, v));
+        } else {
+            succ.entry(u).or_default().insert(v);
+        }
+    }
+    kept
+}
+
+/// Whether `dst` is reachable from `src` over `succ`.
+fn reaches(succ: &HashMap<u32, HashSet<u32>>, src: u32, dst: u32) -> bool {
+    let mut seen: HashSet<u32> = HashSet::new();
+    let mut walk = vec![src];
+    while let Some(u) = walk.pop() {
         let Some(outs) = succ.get(&u) else { continue };
         for &w in outs {
             if w == dst {
                 return true;
             }
             if seen.insert(w) {
-                queue.push_back(w);
+                walk.push(w);
             }
         }
     }
     false
+}
+
+/// The strongly connected component each index belongs to — two indices share
+/// one exactly when each reaches the other — numbered densely from zero.
+fn components(succ: &[Vec<u32>], n: usize) -> Vec<u32> {
+    // The order the search finishes with each index, which is the order the
+    // second walk has to reach them in, reversed.
+    let mut seen = vec![false; n];
+    let mut finished: Vec<u32> = Vec::with_capacity(n);
+    let mut walk: Vec<(u32, usize)> = Vec::new();
+    for start in 0..n as u32 {
+        if seen[start as usize] {
+            continue;
+        }
+        seen[start as usize] = true;
+        walk.push((start, 0));
+        while let Some((u, next)) = walk.pop() {
+            match succ[u as usize].get(next) {
+                Some(&w) => {
+                    walk.push((u, next + 1));
+                    if !seen[w as usize] {
+                        seen[w as usize] = true;
+                        walk.push((w, 0));
+                    }
+                }
+                None => finished.push(u),
+            }
+        }
+    }
+
+    let mut pred: Vec<Vec<u32>> = vec![Vec::new(); n];
+    for (u, forward) in succ.iter().enumerate() {
+        for &w in forward {
+            pred[w as usize].push(u as u32);
+        }
+    }
+
+    /// Stands in the component table for an index no component has claimed.
+    const UNCLAIMED: u32 = u32::MAX;
+
+    let mut comp = vec![UNCLAIMED; n];
+    let mut next = 0;
+    for &root in finished.iter().rev() {
+        if comp[root as usize] != UNCLAIMED {
+            continue;
+        }
+        comp[root as usize] = next;
+        let mut walk = vec![root];
+        while let Some(u) = walk.pop() {
+            for &w in &pred[u as usize] {
+                if comp[w as usize] == UNCLAIMED {
+                    comp[w as usize] = next;
+                    walk.push(w);
+                }
+            }
+        }
+        next += 1;
+    }
+    comp
 }
 
 #[cfg(test)]
@@ -297,6 +434,136 @@ mod tests {
         assert_eq!(e, chain);
     }
 
+    /// Every pair one graph links the other must link too, which is what a
+    /// reduction is allowed to trade edges for.
+    fn reaches_alike(before: &Graph, after: &Graph, n: &Names) {
+        let out = |g: &Graph| {
+            let mut m: HashMap<Id, Vec<Id>> = HashMap::new();
+            for e in &g.edges {
+                m.entry(e.from).or_default().push(e.to);
+            }
+            m
+        };
+        let (was, now) = (out(before), out(after));
+        let seen_from = |m: &HashMap<Id, Vec<Id>>, src: Id| {
+            let mut seen: HashSet<Id> = HashSet::new();
+            let mut walk = vec![src];
+            while let Some(u) = walk.pop() {
+                for &w in m.get(&u).map(Vec::as_slice).unwrap_or(&[]) {
+                    if seen.insert(w) {
+                        walk.push(w);
+                    }
+                }
+            }
+            seen
+        };
+        for node in &before.nodes {
+            let (a, b) = (seen_from(&was, node.id), seen_from(&now, node.id));
+            for target in a {
+                assert!(
+                    b.contains(&target),
+                    "{} no longer reaches {}",
+                    n.resolve(node.id),
+                    n.resolve(target),
+                );
+            }
+        }
+    }
+
+    /// A cycle keeps its nodes reaching one another, but the edges that do more
+    /// than that are still dropped: a chord across a cycle is implied by the way
+    /// round.
+    #[test]
+    fn a_cycle_drops_a_chord_it_already_implies() {
+        let (g, n) = build(&[
+            ("a", "b"),
+            ("b", "c"),
+            ("c", "d"),
+            ("d", "a"),
+            // Implied by b -> c -> d.
+            ("b", "d"),
+        ]);
+        let r = transitive_reduction(&g);
+        let e = kept(&r, &n);
+        assert!(!e.contains(&("b".into(), "d".into())), "the chord survived");
+        assert_eq!(e.len(), 4, "the cycle itself lost an edge: {e:?}");
+        reaches_alike(&g, &r, &n);
+    }
+
+    /// An edge into a cycle that another edge into the same cycle already
+    /// implies is dropped: reaching any node of a cycle reaches all of them.
+    #[test]
+    fn one_edge_into_a_cycle_stands_for_the_rest() {
+        let (g, n) = build(&[
+            ("a", "b"),
+            ("b", "c"),
+            ("c", "a"),
+            ("d", "a"),
+            // d already reaches b through a.
+            ("d", "b"),
+        ]);
+        let r = transitive_reduction(&g);
+        let e = kept(&r, &n);
+        assert_eq!(
+            e.iter().filter(|(from, _)| from == "d").count(),
+            1,
+            "d keeps more than one way into the cycle: {e:?}",
+        );
+        reaches_alike(&g, &r, &n);
+    }
+
+    /// Two cycles joined by several edges keep one of them; the rest are what
+    /// that one already implies.
+    #[test]
+    fn cycles_joined_many_ways_keep_one_way() {
+        let (g, n) = build(&[
+            ("a1", "a2"),
+            ("a2", "a1"),
+            ("b1", "b2"),
+            ("b2", "b1"),
+            ("a1", "b1"),
+            ("a1", "b2"),
+            ("a2", "b1"),
+            ("a2", "b2"),
+        ]);
+        let r = transitive_reduction(&g);
+        let e = kept(&r, &n);
+        let crossing = e
+            .iter()
+            .filter(|(from, to)| from.starts_with('a') && to.starts_with('b'))
+            .count();
+        assert_eq!(crossing, 1, "more than one crossing edge kept: {e:?}");
+        reaches_alike(&g, &r, &n);
+    }
+
+    /// A graph a fold leaves cyclic still reduces in one pass over the acyclic
+    /// graph its cycles condense to, so its cost follows its size rather than
+    /// the product of its edges and its nodes.
+    #[test]
+    fn a_graph_of_many_cycles_reduces() {
+        // Twenty cycles of five, chained so the condensation is a long path,
+        // and every chain step doubled so the reduction has something to drop.
+        let mut edges: Vec<(String, String)> = Vec::new();
+        for c in 0..20 {
+            for i in 0..5 {
+                edges.push((format!("c{c}n{i}"), format!("c{c}n{}", (i + 1) % 5)));
+            }
+            if c > 0 {
+                edges.push((format!("c{}n0", c - 1), format!("c{c}n0")));
+                edges.push((format!("c{}n1", c - 1), format!("c{c}n1")));
+            }
+        }
+        let refs: Vec<(&str, &str)> = edges
+            .iter()
+            .map(|(a, b)| (a.as_str(), b.as_str()))
+            .collect();
+        let (g, n) = build(&refs);
+        let r = transitive_reduction(&g);
+        reaches_alike(&g, &r, &n);
+        // Each pair of neighbouring cycles is joined two ways and needs one.
+        assert_eq!(kept(&r, &n).len(), 20 * 5 + 19);
+    }
+
     #[test]
     fn the_two_reductions_agree_on_a_dag() {
         // On a DAG the reduction is unique, so the fast bitset path and the
@@ -309,7 +576,7 @@ mod tests {
         let (g, n) = build(&refs);
         assert_eq!(
             kept(&dag_reduction(g.clone()).ok().unwrap(), &n),
-            kept(&iterative_reduction(g), &n),
+            kept(&condensed_reduction(g), &n),
         );
     }
 }

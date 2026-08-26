@@ -42,6 +42,24 @@ pub(crate) struct Loaded {
     names: Names,
 }
 
+/// Derives every view of `map` off the UI thread, coarsest first.
+///
+/// A map derives a view the first time a camera calls for one, which is what
+/// keeps the wait before the first frame to the single view that frame draws.
+/// The reader reaches the rest by zooming, and a view derived under that gesture
+/// would hold the frame it was made for; deriving them in the background instead
+/// leaves the zoom nothing to wait on. A view already derived costs nothing to
+/// ask for again, so this races the camera harmlessly.
+fn derive_levels(map: Arc<MapLayout>, cx: &mut Context<GraphView>) {
+    cx.background_executor()
+        .spawn(async move {
+            for level in 0..map.level_count() {
+                map.level(level);
+            }
+        })
+        .detach();
+}
+
 /// Where a map's zoom stands in its pyramid.
 #[derive(Clone, Copy)]
 pub(crate) struct Level {
@@ -143,25 +161,31 @@ impl Model {
             cx,
             move || {
                 let (graph, reduced_base, names) = build_graph(&inputs)?;
-                let map = bviz_graph_layout::map_layout(&graph, &reduced_base);
                 let expanded = bviz_graph_layout::lod::default_expansion(
                     &graph,
                     MAX_VISIBLE_NODES,
                     MAX_VISIBLE_EDGES,
                 );
-                Ok::<_, String>((graph, reduced_base, names, expanded, map))
+                let containers = bviz_graph_layout::lod::expandable_containers(&graph);
+                // The map derives each of its views against these, so it holds a
+                // share in them rather than a copy.
+                let (base, reduced_base) = (Arc::new(graph), Arc::new(reduced_base));
+                let map =
+                    bviz_graph_layout::map_layout(Arc::clone(&base), Arc::clone(&reduced_base));
+                Ok::<_, String>((base, reduced_base, names, expanded, containers, map))
             },
-            |view, result, _| {
+            |view, result, cx| {
                 view.model.source = match result {
-                    Ok((graph, reduced_base, names, expanded, map)) => {
-                        view.model.containers =
-                            Arc::new(bviz_graph_layout::lod::expandable_containers(&graph));
+                    Ok((base, reduced_base, names, expanded, containers, map)) => {
+                        view.model.containers = Arc::new(containers);
                         view.model.expanded = expanded;
+                        let map = Arc::new(map);
+                        derive_levels(Arc::clone(&map), cx);
                         Source::Loaded(Loaded {
-                            map: Arc::new(map),
+                            map,
                             layered: None,
-                            base: Arc::new(graph),
-                            reduced_base: Arc::new(reduced_base),
+                            base,
+                            reduced_base,
                             names,
                         })
                     }
