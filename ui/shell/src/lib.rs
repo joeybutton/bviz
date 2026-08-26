@@ -82,18 +82,3 @@ where
         },
     )
 }
-
-/// Run an app: install the asset source, run [`setup`], and open its first
-/// window through [`open_window`].
-pub fn run<V, F>(app_id: impl Into<String>, window_size: Size<Pixels>, build_root: F)
-where
-    V: 'static + Render,
-    F: 'static + FnOnce(&mut Window, &mut App) -> Entity<V>,
-{
-    let app_id = app_id.into();
-    application().run(move |cx: &mut App| {
-        setup(cx);
-        open_window(&app_id, window_size, cx, build_root).unwrap();
-        cx.activate(true);
-    });
-}

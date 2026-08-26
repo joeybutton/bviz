@@ -34,9 +34,10 @@ Common gpui mechanics are factored into shared `//ui` crates. Before re-deriving
 gpui for one of these, use the wrapper, so every view stays visually coherent and
 behaves consistently:
 
-- `bviz_ui_shell::{run, open_window, Chrome}` — window bootstrap + client-side decorations.
-- `bviz_ui_workspace::{Workspace, Panel, AnyPanel}` — the window root view, and the
-  trait a view implements to be the thing it frames.
+- `bviz_ui_shell::{application, setup, open_window, Chrome}` — window bootstrap + client-side decorations.
+- `bviz_ui_workspace::{run_panels, Workspace, Panel, AnyPanel}` — the app entry point
+  that boots the shell and opens the first window, the window root view, and the trait
+  a view implements to be the thing it frames.
 - `bviz_ui_components::{Button, TextInput}` — a button and a focusable text field.
 - `bviz_ui_components::track_drag` — a drag that follows the cursor past the window.
 - `bviz_ui_components::load_in_background` — run work off the UI thread, then apply it.
