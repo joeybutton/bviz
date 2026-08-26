@@ -21,6 +21,8 @@ filegroup(
         "assets/regular/caret-double-down.svg",
         "assets/regular/caret-double-up.svg",
         "assets/regular/caret-down.svg",
+        "assets/regular/caret-left.svg",
+        "assets/regular/caret-right.svg",
         "assets/regular/caret-up.svg",
         "assets/regular/circle-notch.svg",
         "assets/regular/minus.svg",

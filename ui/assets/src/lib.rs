@@ -85,6 +85,8 @@ fn icon_svg(file: &str) -> Option<&'static [u8]> {
         "caret-double-down.svg" => embedded!("caret-double-down.svg"),
         "caret-double-up.svg" => embedded!("caret-double-up.svg"),
         "caret-down.svg" => embedded!("caret-down.svg"),
+        "caret-left.svg" => embedded!("caret-left.svg"),
+        "caret-right.svg" => embedded!("caret-right.svg"),
         "caret-up.svg" => embedded!("caret-up.svg"),
         "circle-notch.svg" => embedded!("circle-notch.svg"),
         "minus.svg" => embedded!("minus.svg"),

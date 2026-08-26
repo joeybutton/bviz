@@ -18,7 +18,7 @@ mod tooltip;
 pub use background::{Pending, load_in_background};
 pub use button::Button;
 pub use canvas::{LabelBoxStyle, paint_labeled_box, shape_truncated};
-pub use divider::Divider;
+pub use divider::{Divider, DividerSide};
 pub use drag::{DragEnd, track_drag};
 pub use dropdown::{Dropdown, DropdownEvent};
 pub use layer::{cached_layer, overlay_canvas};
