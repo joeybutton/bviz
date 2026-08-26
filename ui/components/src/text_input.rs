@@ -13,7 +13,7 @@ use gpui::{
 use std::ops::Range;
 
 gpui::actions!(
-    text_input,
+    bviz_text_input,
     [
         Backspace,
         Delete,
@@ -33,9 +33,13 @@ gpui::actions!(
     ]
 );
 
-/// Register the text field's key bindings; only active inside the `TextInput` context.
+/// The key context scoping the text field's own bindings, so a key pressed
+/// while it has focus edits the text rather than reaching an enclosing panel.
+const KEY_CONTEXT: &str = "TextInput";
+
+/// Register the text field's key bindings.
 pub fn bind_keys(cx: &mut App) {
-    let ctx = Some("TextInput");
+    let ctx = Some(KEY_CONTEXT);
     cx.bind_keys([
         KeyBinding::new("backspace", Backspace, ctx),
         KeyBinding::new("delete", Delete, ctx),
@@ -672,7 +676,7 @@ impl Render for TextInput {
         let colors = bviz_ui_theme::theme(window, cx).colors;
         let focused = self.focus_handle.is_focused(window);
         div()
-            .key_context("TextInput")
+            .key_context(KEY_CONTEXT)
             .track_focus(&self.focus_handle)
             .cursor(CursorStyle::IBeam)
             .on_action(cx.listener(Self::backspace))

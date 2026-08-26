@@ -46,5 +46,12 @@ fn main() {
     let (first, rest) = sources.into_parts();
     let first = Load::start(first);
     let rest: Vec<Load> = rest.into_iter().map(Load::start).collect();
-    bviz_ui_workspace::run_panels("bviz", WINDOW_SIZE, first, rest, Load::open);
+    bviz_ui_workspace::run_panels(
+        "bviz",
+        WINDOW_SIZE,
+        first,
+        rest,
+        Load::open,
+        &[bviz_ui_graph::register_keys],
+    );
 }

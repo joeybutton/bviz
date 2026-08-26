@@ -9,7 +9,7 @@ use gpui::{
     Window, WindowBounds, WindowDecorations, WindowHandle, WindowOptions, actions, px,
 };
 
-actions!(ui_shell, [Quit, CloseWindow, Tab, TabPrev]);
+actions!(bviz_window, [Quit, CloseWindow, Tab, TabPrev]);
 
 /// The smallest the window may be resized to, so its chrome and content can't be
 /// crushed to nothing. Smaller than every app's opening size.

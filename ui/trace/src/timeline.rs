@@ -5,9 +5,9 @@ use crate::model::TraceModel;
 use crate::regions::{Regions, flame_total_height, max_lane_scroll};
 use crate::theme::Palette;
 use crate::{
-    BottomTab, CHART_KEY_CONTEXT, ClearTimeSelection, DEFAULT_GUTTER_WIDTH, DEFAULT_PANEL_HEIGHT,
-    EDGE_MARGIN_PX, GROUP_BAND_HEIGHT, GROUP_ICON, LINE_SCROLL_PX, MAX_PX_PER_US, METRICS,
-    MIN_SLICE_PX, SLICE_TEXT_PAD, SelectAllTracks, Source, TracePanel, ZOOM_PER_NOTCH,
+    BottomTab, ClearTimeSelection, DEFAULT_GUTTER_WIDTH, DEFAULT_PANEL_HEIGHT, EDGE_MARGIN_PX,
+    GROUP_BAND_HEIGHT, GROUP_ICON, LINE_SCROLL_PX, MAX_PX_PER_US, METRICS, MIN_SLICE_PX,
+    SLICE_TEXT_PAD, SelectAllTracks, Source, TIMELINE_KEY_CONTEXT, TracePanel, ZOOM_PER_NOTCH,
     drawn_scroll, paint_gridlines, paint_gutter, paint_markers, paint_ruler, paint_slice,
     paint_tooltip, ruler_ticks, scroll_request, scrollbar_geom, thumb_offset,
 };
@@ -375,8 +375,8 @@ impl TimelinePanel {
     ) -> Self {
         let content_focus = cx.focus_handle();
         cx.bind_keys([
-            KeyBinding::new("secondary-a", SelectAllTracks, Some(CHART_KEY_CONTEXT)),
-            KeyBinding::new("escape", ClearTimeSelection, Some(CHART_KEY_CONTEXT)),
+            KeyBinding::new("secondary-a", SelectAllTracks, Some(TIMELINE_KEY_CONTEXT)),
+            KeyBinding::new("escape", ClearTimeSelection, Some(TIMELINE_KEY_CONTEXT)),
         ]);
         let parent = cx.entity().downgrade();
         let canvas = cx.new(|_| SliceCanvas { parent });
@@ -832,7 +832,7 @@ impl TimelinePanel {
     /// tracks and [`ClearTimeSelection`] widens the aggregate to the whole
     /// timeline.
     fn content_handlers(&self, root: Stateful<Div>, cx: &mut Context<Self>) -> Stateful<Div> {
-        root.key_context(CHART_KEY_CONTEXT)
+        root.key_context(TIMELINE_KEY_CONTEXT)
             .track_focus(&self.content_focus)
             .on_action(cx.listener(Self::select_all_visible))
             .on_action(cx.listener(Self::clear_time_selection))

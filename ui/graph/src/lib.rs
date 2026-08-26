@@ -11,8 +11,8 @@ use clap::error::ErrorKind;
 use clap::{CommandFactory, Parser};
 use gpui::{
     AnyElement, App, Bounds, Context, Entity, EventEmitter, FocusHandle, Focusable, IntoElement,
-    KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Render,
-    Rgba, ScrollDelta, ScrollWheelEvent, SharedString, Subscription, Window, canvas, div,
+    KeyBinding, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Render,
+    Rgba, ScrollDelta, ScrollWheelEvent, SharedString, Subscription, Window, actions, canvas, div,
     prelude::*, px, size,
 };
 use std::time::{Duration, Instant};
@@ -45,6 +45,23 @@ use paint::{Scene, TitleTarget, canvas_body};
 use relation::Relation;
 use scroll::{scrollbar_hit, start_scroll_drag};
 use selection::Selection;
+
+actions!(bviz_graph, [ToggleNeighborhood, ToggleReduce, ClearSelection]);
+
+/// The key context scoping the graph's own bindings, so a key pressed here
+/// reaches this panel and no other.
+const KEY_CONTEXT: &str = "Graph";
+
+/// Register the key bindings the graph's own actions answer to. Call once at
+/// startup, before any window opens: binding keys refreshes every window, which
+/// drops what each has cached of its last frame.
+pub fn register_keys(cx: &mut App) {
+    cx.bind_keys([
+        KeyBinding::new("h", ToggleNeighborhood, Some(KEY_CONTEXT)),
+        KeyBinding::new("r", ToggleReduce, Some(KEY_CONTEXT)),
+        KeyBinding::new("escape", ClearSelection, Some(KEY_CONTEXT)),
+    ]);
+}
 
 /// Padding around the graph, in layout pixels.
 const MARGIN: f64 = 16.0;
@@ -408,17 +425,6 @@ impl GraphPanel {
         model::relayout(self, cx);
         cx.notify();
     }
-
-    fn on_key_down(&mut self, e: &KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
-        if e.keystroke.key == "h" {
-            self.toggle_neighborhood(cx);
-        } else if e.keystroke.key == "r" {
-            self.toggle_reduce(cx);
-        } else if e.keystroke.key == "escape" {
-            self.selection.clear();
-            cx.notify();
-        }
-    }
 }
 
 impl EventEmitter<PanelEvent> for GraphPanel {}
@@ -433,7 +439,7 @@ impl Panel for GraphPanel {
     fn kind() -> PanelKind {
         PanelKind {
             name: "graph",
-            key_context: "Graph",
+            key_context: KEY_CONTEXT,
         }
     }
 
@@ -467,15 +473,22 @@ impl Render for GraphPanel {
                     relaying: self.model.relaying(),
                 };
                 div()
+                    // Above the strip as well as the canvas, so a key reaches the
+                    // view from wherever the focus sits — a control on the strip
+                    // holds it from the moment it is clicked.
                     .key_context(Self::kind().key_context)
+                    .on_action(cx.listener(|view, _: &ToggleNeighborhood, _, cx| {
+                        view.toggle_neighborhood(cx)
+                    }))
+                    .on_action(cx.listener(|view, _: &ToggleReduce, _, cx| view.toggle_reduce(cx)))
+                    .on_action(cx.listener(|view, _: &ClearSelection, _, cx| {
+                        view.selection.clear();
+                        cx.notify();
+                    }))
                     .flex_1()
                     .flex()
                     .flex_col()
                     .overflow_hidden()
-                    // Above the strip as well as the canvas, so a key reaches the
-                    // view from wherever the focus sits — a control on the strip
-                    // holds it from the moment it is clicked.
-                    .on_key_down(cx.listener(Self::on_key_down))
                     .child(toolbar::toolbar(controls, &palette, cx))
                     .child(
                         div()
@@ -665,6 +678,7 @@ pub fn run() {
         "bviz graph",
         size(px(1280.), px(820.)),
         move |window, cx| open(load, window, cx),
+        &[register_keys],
     );
 }
 

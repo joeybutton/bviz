@@ -11,7 +11,7 @@ use gpui::{
 use std::collections::HashMap;
 
 actions!(
-    ui_workspace,
+    bviz_workspace,
     [
         NextTab,
         PreviousTab,

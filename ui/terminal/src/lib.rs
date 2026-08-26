@@ -86,5 +86,6 @@ pub fn run() {
         first,
         loads.collect(),
         open,
+        &[],
     );
 }

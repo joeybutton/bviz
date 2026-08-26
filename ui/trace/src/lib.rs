@@ -54,10 +54,13 @@ use std::sync::Arc;
 
 gpui::actions!(bviz_trace, [SelectAllTracks, ClearTimeSelection]);
 
-/// The key context scoping the chart's own bindings. The chart element carries
-/// it, so a key pressed in the tracks menu's filter field types there instead of
-/// dispatching one of them.
-const CHART_KEY_CONTEXT: &str = "TraceContent";
+/// The key context of the trace panel, enclosing every sub-surface's.
+const TRACE_KEY_CONTEXT: &str = "Trace";
+
+/// The key context scoping the timeline's own bindings, narrowing
+/// [`TRACE_KEY_CONTEXT`]. The timeline element carries it, so a key pressed in
+/// the tracks menu's filter field types there instead of dispatching one of them.
+const TIMELINE_KEY_CONTEXT: &str = "TraceTimeline";
 
 /// Vertical sizing of the stacked thread and counter lanes, in pixels. The lane
 /// header is a thin top margin above the depth rows — the names live in the
@@ -699,7 +702,7 @@ impl Panel for TracePanel {
     fn kind() -> PanelKind {
         PanelKind {
             name: "trace",
-            key_context: CHART_KEY_CONTEXT,
+            key_context: TRACE_KEY_CONTEXT,
         }
     }
 
@@ -1665,6 +1668,7 @@ pub fn run() {
         first,
         loads.collect(),
         open,
+        &[],
     );
 }
 

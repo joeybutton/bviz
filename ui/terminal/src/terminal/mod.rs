@@ -21,7 +21,7 @@ mod element;
 use element::TerminalElement;
 
 actions!(
-    bazel_terminal,
+    bviz_console,
     [
         PlayPause,
         StepBack,
@@ -43,6 +43,19 @@ actions!(
         FindClose
     ]
 );
+
+/// The key context scoping the console's own bindings, so a key pressed in this
+/// panel reaches it and no other.
+const CONSOLE_KEY_CONTEXT: &str = "Console";
+
+/// The key context of the region the scrollback grid is painted in.
+const GRID_KEY_CONTEXT: &str = "ConsoleGrid";
+
+/// The key context of the bar the find box opens as.
+const FIND_KEY_CONTEXT: &str = "ConsoleFind";
+
+/// The key context of the playback bar.
+const PLAYBACK_KEY_CONTEXT: &str = "ConsolePlayback";
 
 /// Lines moved per arrow-key press while the terminal is focused.
 const SCROLL_STEP: i32 = 3;
@@ -205,35 +218,42 @@ impl TerminalPanel {
     }
 
     fn bind_keys(cx: &mut Context<Self>) {
+        let console_unless_find = format!("{CONSOLE_KEY_CONTEXT} && !{FIND_KEY_CONTEXT}");
+        let console_unless_find = Some(console_unless_find.as_str());
+        let grid_unless_find = format!("{GRID_KEY_CONTEXT} && !{FIND_KEY_CONTEXT}");
+        let grid_unless_find = Some(grid_unless_find.as_str());
+        let console = Some(CONSOLE_KEY_CONTEXT);
+        let find = Some(FIND_KEY_CONTEXT);
+        let playback = Some(PLAYBACK_KEY_CONTEXT);
         cx.bind_keys([
             // Keys that don't collide with terminal scrolling work in either region,
             // but stay inert while the find field has focus so they don't hijack
             // typing and cursor movement there.
-            KeyBinding::new("space", PlayPause, Some("BazelTerm && !Find")),
-            KeyBinding::new("left", StepBack, Some("BazelTerm && !Find")),
-            KeyBinding::new("right", StepForward, Some("BazelTerm && !Find")),
-            KeyBinding::new("]", SpeedUp, Some("BazelTerm && !Find")),
-            KeyBinding::new("[", SpeedDown, Some("BazelTerm && !Find")),
+            KeyBinding::new("space", PlayPause, console_unless_find),
+            KeyBinding::new("left", StepBack, console_unless_find),
+            KeyBinding::new("right", StepForward, console_unless_find),
+            KeyBinding::new("]", SpeedUp, console_unless_find),
+            KeyBinding::new("[", SpeedDown, console_unless_find),
             // The arrows and home/end collide: they scroll the focused terminal but
             // drive playback when the playback bar holds focus.
-            KeyBinding::new("up", ScrollLineUp, Some("Terminal && !Find")),
-            KeyBinding::new("down", ScrollLineDown, Some("Terminal && !Find")),
-            KeyBinding::new("home", ScrollToTop, Some("Terminal && !Find")),
-            KeyBinding::new("end", ScrollToBottom, Some("Terminal && !Find")),
-            KeyBinding::new("up", SpeedUp, Some("Playback")),
-            KeyBinding::new("down", SpeedDown, Some("Playback")),
-            KeyBinding::new("home", SeekStart, Some("Playback")),
-            KeyBinding::new("end", SeekEnd, Some("Playback")),
+            KeyBinding::new("up", ScrollLineUp, grid_unless_find),
+            KeyBinding::new("down", ScrollLineDown, grid_unless_find),
+            KeyBinding::new("home", ScrollToTop, grid_unless_find),
+            KeyBinding::new("end", ScrollToBottom, grid_unless_find),
+            KeyBinding::new("up", SpeedUp, playback),
+            KeyBinding::new("down", SpeedDown, playback),
+            KeyBinding::new("home", SeekStart, playback),
+            KeyBinding::new("end", SeekEnd, playback),
             // Paging and the commands work regardless of which region has focus.
-            KeyBinding::new("pageup", ScrollPageUp, Some("BazelTerm")),
-            KeyBinding::new("pagedown", ScrollPageDown, Some("BazelTerm")),
-            KeyBinding::new("cmd-c", Copy, Some("BazelTerm")),
-            KeyBinding::new("ctrl-c", Copy, Some("BazelTerm")),
-            KeyBinding::new("cmd-f", Find, Some("BazelTerm")),
-            KeyBinding::new("ctrl-f", Find, Some("BazelTerm")),
-            KeyBinding::new("enter", FindNext, Some("Find")),
-            KeyBinding::new("shift-enter", FindPrev, Some("Find")),
-            KeyBinding::new("escape", FindClose, Some("Find")),
+            KeyBinding::new("pageup", ScrollPageUp, console),
+            KeyBinding::new("pagedown", ScrollPageDown, console),
+            KeyBinding::new("cmd-c", Copy, console),
+            KeyBinding::new("ctrl-c", Copy, console),
+            KeyBinding::new("cmd-f", Find, console),
+            KeyBinding::new("ctrl-f", Find, console),
+            KeyBinding::new("enter", FindNext, find),
+            KeyBinding::new("shift-enter", FindPrev, find),
+            KeyBinding::new("escape", FindClose, find),
         ]);
     }
 
@@ -766,8 +786,8 @@ impl Focusable for TerminalPanel {
 impl Panel for TerminalPanel {
     fn kind() -> PanelKind {
         PanelKind {
-            name: "terminal",
-            key_context: "BazelTerm",
+            name: "console",
+            key_context: CONSOLE_KEY_CONTEXT,
         }
     }
 
@@ -832,7 +852,7 @@ impl Render for TerminalPanel {
                     .child(controls)
                     .child(
                         div()
-                            .key_context("Terminal")
+                            .key_context(GRID_KEY_CONTEXT)
                             .track_focus(&self.body_focus)
                             .relative()
                             .flex_1()
@@ -884,7 +904,7 @@ impl TerminalPanel {
         let close_view = view;
         Some(
             div()
-                .key_context("Find")
+                .key_context(FIND_KEY_CONTEXT)
                 .occlude()
                 .absolute()
                 .top_2()
@@ -951,7 +971,7 @@ impl TerminalPanel {
         let end_view = view;
 
         div()
-            .key_context("Playback")
+            .key_context(PLAYBACK_KEY_CONTEXT)
             .track_focus(&self.playback_focus)
             .relative()
             .flex()
