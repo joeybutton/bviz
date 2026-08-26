@@ -749,12 +749,16 @@ impl Render for TracePanel {
         // Take the placeholder before the `&mut self` build calls below, so the
         // model borrow it is read through ends first.
         let placeholder = self.model.read(cx).source().placeholder(&theme.colors);
+        let chrome = div()
+            .key_context(Self::kind().key_context)
+            .track_focus(&self.focus_handle(cx))
+            .flex_1()
+            .flex()
+            .flex_col()
+            .overflow_hidden();
         match placeholder {
-            Some(placeholder) => placeholder,
-            None => div()
-                .flex_1()
-                .overflow_hidden()
-                .child(self.trace_body(palette, cx)),
+            Some(placeholder) => chrome.child(placeholder),
+            None => chrome.child(self.trace_body(palette, cx)),
         }
     }
 }

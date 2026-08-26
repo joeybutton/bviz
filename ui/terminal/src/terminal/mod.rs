@@ -550,6 +550,12 @@ impl TerminalPanel {
 
     /// Open the find box, creating and focusing its text field on first use.
     fn find(&mut self, _: &Find, window: &mut Window, cx: &mut Context<Self>) {
+        // The field is drawn beside the scrollback grid, which stands only over a
+        // loaded replay; opening it before then would focus a field no rendered
+        // element carries, leaving the window answering no key at all.
+        if !matches!(self.source, Source::Loaded(_)) {
+            return;
+        }
         self.find_active = true;
         if self.find_input.is_none() {
             // Tab index 2: after the playback bar (0) and terminal (1) in the cycle.
@@ -808,8 +814,32 @@ impl Render for TerminalPanel {
         self.autoscroll_selection(window, cx);
         let theme = bviz_ui_theme::theme(window, cx);
         let colors = &theme.colors;
+        let chrome = div()
+            .key_context(Self::kind().key_context)
+            .on_action(cx.listener(Self::on_play_pause))
+            .on_action(cx.listener(Self::on_step_back))
+            .on_action(cx.listener(Self::on_step_forward))
+            .on_action(cx.listener(Self::on_seek_start))
+            .on_action(cx.listener(Self::on_seek_end))
+            .on_action(cx.listener(Self::on_speed_up))
+            .on_action(cx.listener(Self::on_speed_down))
+            .on_action(cx.listener(Self::scroll_line_up))
+            .on_action(cx.listener(Self::scroll_line_down))
+            .on_action(cx.listener(Self::scroll_page_up))
+            .on_action(cx.listener(Self::scroll_page_down))
+            .on_action(cx.listener(Self::scroll_to_top))
+            .on_action(cx.listener(Self::scroll_to_bottom))
+            .on_action(cx.listener(Self::copy))
+            .on_action(cx.listener(Self::find))
+            .flex()
+            .flex_col()
+            .size_full();
         match self.source.placeholder(colors) {
-            Some(placeholder) => placeholder.into_any_element(),
+            // One element tracks the body focus per frame: the grid where it is
+            // drawn, and the chrome standing in for it where it is not. Tracking
+            // it twice enters it in the tab order twice, and the pair then step
+            // to each other instead of on to the next region.
+            Some(placeholder) => chrome.track_focus(&self.body_focus).child(placeholder),
             None => {
                 let find_box = if self.find_active {
                     self.render_find_box(colors, cx)
@@ -828,47 +858,25 @@ impl Render for TerminalPanel {
                 } else {
                     colors.background
                 };
-                div()
-                    .key_context(Self::kind().key_context)
-                    .on_action(cx.listener(Self::on_play_pause))
-                    .on_action(cx.listener(Self::on_step_back))
-                    .on_action(cx.listener(Self::on_step_forward))
-                    .on_action(cx.listener(Self::on_seek_start))
-                    .on_action(cx.listener(Self::on_seek_end))
-                    .on_action(cx.listener(Self::on_speed_up))
-                    .on_action(cx.listener(Self::on_speed_down))
-                    .on_action(cx.listener(Self::scroll_line_up))
-                    .on_action(cx.listener(Self::scroll_line_down))
-                    .on_action(cx.listener(Self::scroll_page_up))
-                    .on_action(cx.listener(Self::scroll_page_down))
-                    .on_action(cx.listener(Self::scroll_to_top))
-                    .on_action(cx.listener(Self::scroll_to_bottom))
-                    .on_action(cx.listener(Self::copy))
-                    .on_action(cx.listener(Self::find))
-                    .flex()
-                    .flex_col()
-                    .size_full()
-                    .child(controls)
-                    .child(
-                        div()
-                            .key_context(GRID_KEY_CONTEXT)
-                            .track_focus(&self.body_focus)
-                            .relative()
-                            .flex_1()
-                            .overflow_hidden()
-                            .border_l_2()
-                            .border_color(terminal_accent)
-                            .on_scroll_wheel(cx.listener(Self::on_scroll_wheel))
-                            .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
-                            .on_mouse_move(cx.listener(Self::on_mouse_move))
-                            .when(self.hovered_url.is_some(), |body| body.cursor_pointer())
-                            .font_family(bviz_ui_assets::MONO)
-                            .text_size(px(13.))
-                            .text_color(colors.text)
-                            .child(TerminalElement { view: cx.entity() })
-                            .children(find_box),
-                    )
-                    .into_any_element()
+                chrome.child(controls).child(
+                    div()
+                        .key_context(GRID_KEY_CONTEXT)
+                        .track_focus(&self.body_focus)
+                        .relative()
+                        .flex_1()
+                        .overflow_hidden()
+                        .border_l_2()
+                        .border_color(terminal_accent)
+                        .on_scroll_wheel(cx.listener(Self::on_scroll_wheel))
+                        .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
+                        .on_mouse_move(cx.listener(Self::on_mouse_move))
+                        .when(self.hovered_url.is_some(), |body| body.cursor_pointer())
+                        .font_family(bviz_ui_assets::MONO)
+                        .text_size(px(13.))
+                        .text_color(colors.text)
+                        .child(TerminalElement { view: cx.entity() })
+                        .children(find_box),
+                )
             }
         }
     }

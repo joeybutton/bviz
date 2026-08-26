@@ -458,8 +458,23 @@ impl Panel for GraphPanel {
 impl Render for GraphPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let palette = Palette::from_theme(&bviz_ui_theme::theme(window, cx));
+        let chrome = div()
+            .key_context(Self::kind().key_context)
+            .on_action(
+                cx.listener(|view, _: &ToggleNeighborhood, _, cx| view.toggle_neighborhood(cx)),
+            )
+            .on_action(cx.listener(|view, _: &ToggleReduce, _, cx| view.toggle_reduce(cx)))
+            .on_action(cx.listener(|view, _: &ClearSelection, _, cx| {
+                view.selection.clear();
+                cx.notify();
+            }))
+            .track_focus(&self.focus_handle)
+            .flex_1()
+            .flex()
+            .flex_col()
+            .overflow_hidden();
         match self.model.source().placeholder(&palette.colors) {
-            Some(placeholder) => placeholder.into_any_element(),
+            Some(placeholder) => chrome.child(placeholder),
             None => {
                 let controls = Controls {
                     mode: self.mode,
@@ -469,23 +484,7 @@ impl Render for GraphPanel {
                     reduced: self.reduced,
                     relaying: self.model.relaying(),
                 };
-                div()
-                    // Above the strip as well as the canvas, so a key reaches the
-                    // view from wherever the focus sits — a control on the strip
-                    // holds it from the moment it is clicked.
-                    .key_context(Self::kind().key_context)
-                    .on_action(cx.listener(|view, _: &ToggleNeighborhood, _, cx| {
-                        view.toggle_neighborhood(cx)
-                    }))
-                    .on_action(cx.listener(|view, _: &ToggleReduce, _, cx| view.toggle_reduce(cx)))
-                    .on_action(cx.listener(|view, _: &ClearSelection, _, cx| {
-                        view.selection.clear();
-                        cx.notify();
-                    }))
-                    .flex_1()
-                    .flex()
-                    .flex_col()
-                    .overflow_hidden()
+                chrome
                     .child(toolbar::toolbar(controls, &palette, cx))
                     .child(
                         div()
@@ -494,7 +493,6 @@ impl Render for GraphPanel {
                             .overflow_hidden()
                             .child(self.viewport(palette, cx)),
                     )
-                    .into_any_element()
             }
         }
     }
