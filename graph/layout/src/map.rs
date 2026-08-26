@@ -5,7 +5,7 @@
 //! zooming reveals and hides boxes, and never moves one.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
 use bviz_parallel::worker_count;
 use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
@@ -34,37 +34,66 @@ const MAX_FRAME_EDGES: usize = 2000;
 /// `base`'s node ids must be a dense permutation of `0..nodes.len()`, every
 /// `parent` must name another of its nodes, and containment must be acyclic.
 /// `reduced` must be the transitive reduction of `base`, whose nodes it shares.
-pub fn map_layout(base: &Graph, reduced: &Graph) -> MapLayout {
-    let containment = Containment::new(base);
+pub fn map_layout(base: Arc<Graph>, reduced: Arc<Graph>) -> MapLayout {
+    let containment = Containment::new(&base);
     // The reduction reaches as far as the base, so it stacks the boxes the same
     // way for a fraction of the routing work.
-    let drawing = {
-        let fe = frame_edges(reduced, &containment);
-        place(base, &fe, &containment)
-    };
-    let expandable = lod::expandable_containers(base);
+    let drawing = place(&base, &frame_edges(&reduced, &containment), &containment);
+    let expandable = lod::expandable_containers(&base);
 
-    let view = |open: &HashSet<Id>| level(base, reduced, open, &drawing, &containment, &expandable);
+    // Which containers each level opens, settled here because a level takes
+    // over from the one below it: a threshold that opens nothing further is not
+    // a level of its own.
     let mut open: HashSet<Id> = HashSet::new();
-    let coarsest = view(&open);
-
-    let scales = thresholds(&expandable, &drawing);
-    let mut finer: Vec<(f64, LaidOut)> = Vec::with_capacity(scales.len());
-    for scale in scales {
-        let opened = open_at(&expandable, &drawing, scale);
+    let mut finer: Vec<(f64, Level)> = Vec::new();
+    for from in thresholds(&expandable, &drawing) {
+        let opened = open_at(&expandable, &drawing, from);
         if opened != open {
             open = opened;
-            finer.push((scale, view(&open)));
+            finer.push((
+                from,
+                Level {
+                    open: open.clone(),
+                    view: OnceLock::new(),
+                },
+            ));
         }
     }
-    MapLayout { coarsest, finer }
+    MapLayout {
+        base,
+        reduced,
+        containment,
+        drawing,
+        expandable,
+        coarsest: Level {
+            open: HashSet::new(),
+            view: OnceLock::new(),
+        },
+        finer,
+    }
+}
+
+/// One view of the drawing, derived when a camera first calls for it.
+///
+/// Deriving one costs a fold of the whole graph and a reduction of what that
+/// leaves, and a camera reads exactly one of them, so a pyramid built in full is
+/// mostly work for a zoom the reader never reaches. What a level needs to derive
+/// itself is held by the [`MapLayout`] around it.
+struct Level {
+    open: HashSet<Id>,
+    view: OnceLock<LaidOut>,
 }
 
 /// The views of one drawing at rising zoom, coarsest first.
 pub struct MapLayout {
-    coarsest: LaidOut,
+    base: Arc<Graph>,
+    reduced: Arc<Graph>,
+    containment: Containment,
+    drawing: Drawing,
+    expandable: HashSet<Id>,
+    coarsest: Level,
     /// Ascending by the scale each view takes over from.
-    finer: Vec<(f64, LaidOut)>,
+    finer: Vec<(f64, Level)>,
 }
 
 impl MapLayout {
@@ -74,23 +103,36 @@ impl MapLayout {
             .partition_point(|&(from, _)| from <= scale as f64)
     }
 
+    /// The view at `index`, deriving it if this is the first call for it.
     pub fn level(&self, index: usize) -> &LaidOut {
-        match index.checked_sub(1) {
+        let level = match index.checked_sub(1) {
             Some(finer) => &self.finer[finer].1,
             None => &self.coarsest,
-        }
+        };
+        level.view.get_or_init(|| {
+            view_of(
+                &self.base,
+                &self.reduced,
+                &level.open,
+                &self.drawing,
+                &self.containment,
+                &self.expandable,
+            )
+        })
     }
 
     pub fn level_count(&self) -> usize {
         1 + self.finer.len()
     }
 
+    /// The extent every level spans, which follows from the placement they share
+    /// and so needs none of them derived.
     pub fn width(&self) -> f64 {
-        self.coarsest.width
+        self.drawing.width
     }
 
     pub fn height(&self) -> f64 {
-        self.coarsest.height
+        self.drawing.height
     }
 }
 
@@ -371,7 +413,7 @@ fn open_at(expandable: &HashSet<Id>, drawing: &Drawing, scale: f64) -> HashSet<I
 }
 
 /// The view of `base` with `open` opened, drawn at its nodes' global positions.
-fn level(
+fn view_of(
     base: &Graph,
     reduced: &Graph,
     open: &HashSet<Id>,
@@ -580,7 +622,8 @@ mod tests {
     }
 
     fn mapped(base: &Graph) -> MapLayout {
-        map_layout(base, &reduce::transitive_reduction(base))
+        let reduced = reduce::transitive_reduction(base);
+        map_layout(Arc::new(base.clone()), Arc::new(reduced))
     }
 
     fn built() -> (MapLayout, Names) {
@@ -636,6 +679,39 @@ mod tests {
         for scale in [0.0, 1e-9, 1e-4] {
             assert_eq!(map.level_for_scale(scale), 0);
         }
+    }
+
+    /// A view of every level a camera might reach costs a fold of the whole
+    /// graph apiece, and the extent follows from the placement they share, so
+    /// framing the map derives none of them.
+    #[test]
+    fn framing_the_map_derives_no_view() {
+        let (map, _) = built();
+        assert!(map.width() > 0.0 && map.height() > 0.0);
+        assert!(map.level_count() > 1, "the fixture holds one level only");
+        assert!(
+            std::iter::once(&map.coarsest)
+                .chain(map.finer.iter().map(|(_, level)| level))
+                .all(|level| level.view.get().is_none()),
+            "a view was derived before a camera called for one",
+        );
+    }
+
+    /// A level derives its view once and keeps it, so a camera resting on one
+    /// costs the fold only the first time it draws.
+    #[test]
+    fn a_level_derives_its_view_once() {
+        let (map, _) = built();
+        let first: *const LaidOut = map.level(1);
+        assert!(map.finer[0].1.view.get().is_some());
+        assert!(
+            std::ptr::eq(first, map.level(1)),
+            "the level derived its view a second time",
+        );
+        assert!(
+            map.coarsest.view.get().is_none(),
+            "drawing one level derived another",
+        );
     }
 
     #[test]
