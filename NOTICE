@@ -1,0 +1,81 @@
+bviz bundles and derives from the third-party work listed here. Each entry
+gives what the work is, where it came from, and where its terms are recorded.
+Every file in LICENSES/ is named for the work it covers; none of them states
+bviz's own terms, which are not settled, and nothing below grants any.
+
+## Compiled into the binaries
+
+The fonts and the icon set are embedded with `include_bytes!` by //ui/assets,
+so every binary built against it redistributes them and is bound by their
+terms. Each is fetched with its own licence text, which the archive's BUILD
+overlay in 3rd-party/ points its licence declaration at.
+
+Inter 4.1 — SIL Open Font License 1.1
+    Copyright (c) 2016 The Inter Project Authors
+    https://github.com/rsms/inter
+
+JetBrains Mono 2.304 — SIL Open Font License 1.1
+    Copyright 2020 The JetBrains Mono Project Authors
+    https://github.com/JetBrains/JetBrainsMono
+
+Phosphor Icons 2.0.8 — MIT
+    Copyright (c) 2023 Phosphor Icons
+    https://github.com/phosphor-icons/core
+
+## Derived source
+
+Two source files were written from Apache-2.0 examples in the gpui crate of
+the Zed editor (https://github.com/zed-industries/zed, tag v1.6.3,
+crates/gpui), and both have been modified. The upstream distribution carries
+no NOTICE file of its own.
+
+    ui/components/src/text_input.rs   from examples/input.rs
+    ui/shell/src/chrome.rs            from examples/window_shadow.rs
+
+Apache License 2.0: LICENSES/gpui.txt
+
+The URL pattern in terminal/src/display/mod.rs is alacritty's own hint regex,
+taken as it stands from alacritty/src/config/ui_config.rs
+(https://github.com/alacritty/alacritty, tag v0.17.0). Alacritty carries no
+NOTICE file of its own.
+
+Apache License 2.0: LICENSES/alacritty.txt
+
+## Patched dependency source
+
+A patch carries the lines it replaces and those around them, so a patch under
+patches/ that reshapes more than a line or two both copies and modifies the
+source it applies to.
+
+Eclipse Layout Kernel, Rust port 0.11.0+rs.2 — Eclipse Public License 2.0
+    Content of the Eclipse Layout Kernel project, ported to Rust by
+    openedges. The content is the property of its respective authors or their
+    employers; Eclipse Layout Kernel is a trademark of the Eclipse Foundation.
+    https://projects.eclipse.org/projects/modeling.elk
+    https://github.com/openedges/elk-rs
+    patches/elk-rs-reentrant-external-port-lock.patch
+    LICENSES/elk-rs.txt
+
+That patch carries some fifty lines of Eclipse Public License 2.0 source and
+rewrites them, so the patch is itself available under that licence.
+
+The patches against gpui_linux carry Apache-2.0 lines from the same Zed tree
+the derived files above come from, under the terms in LICENSES/gpui.txt. The
+xkbcommon patch carries a module declaration, a cfg attribute and six lines
+around them — too little to attribute.
+
+## Colour values
+
+The palette in ui/theme/themes/one.json is data, not code, and its own terms
+sit beside it in ui/theme/themes/LICENSE.
+
+The Oklab conversion in ui/theme/src/lib.rs uses the reference constants Björn
+Ottosson publishes with "A perceptual color space for image processing"
+(https://bottosson.github.io/posts/oklab/). They are cited at the point they
+are used; the entry is here to record where they came from.
+
+## Dependencies
+
+Crates, Bazel modules and toolchains that bviz builds against are pinned in
+MODULE.bazel and Cargo.lock and carry their own terms; they are not restated
+here.
