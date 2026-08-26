@@ -19,12 +19,11 @@ use workspace::register_keys;
 use gpui::{App, AppContext, Pixels, Size, Window};
 
 /// Runs an app whose one window frames a document per panel group, `open`
-/// building each: `first` lays the window out, and the panels of each of `rest`
-/// are tabbed into the pane holding `first`'s leading panel. Each of
-/// `panel_keys` registers the bindings of one panel kind the app can show, and
-/// runs before the first window opens. Each runs exactly once per process:
-/// `cx.bind_keys` refreshes every window, which drops what each has cached of
-/// its last frame.
+/// building each from `first` and then `rest` and [`Workspace::with_groups`]
+/// arranging them in the window. Each of `panel_keys` registers the bindings of
+/// one panel kind the app can show, and runs before the first window opens. Each
+/// runs exactly once per process: `cx.bind_keys` refreshes every window, which
+/// drops what each has cached of its last frame.
 pub fn run_panels<T, F>(
     app_id: impl Into<String>,
     window_size: Size<Pixels>,

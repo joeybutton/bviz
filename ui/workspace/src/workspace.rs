@@ -103,33 +103,20 @@ impl Workspace {
         workspace
     }
 
-    /// Builds a workspace laid out as `first` describes, with the panels of each
-    /// of `others` tabbed into the pane holding `first`'s leading panel — so
-    /// documents sharing a window are tabs of one pane whatever arrangement each
-    /// asked for, and only the first document's arrangement lays the window out.
-    /// Panels that share a title are numbered.
+    /// Builds a workspace framing a region of the window per document: `first`
+    /// across the top and each of `others` under it in the order given, every
+    /// region an even share of the height and laid out as its own group
+    /// describes. Panels that share a title are numbered.
     pub fn with_groups(
         app_name: impl Into<SharedString>,
-        mut first: PanelGroup,
-        mut others: Vec<PanelGroup>,
+        first: PanelGroup,
+        others: Vec<PanelGroup>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        number_shared_titles(
-            std::iter::once(&mut first)
-                .chain(&mut others)
-                .flat_map(PanelGroup::panels_mut),
-            cx,
-        );
-        let mut workspace = Self::new(app_name, first, window, cx);
-        for group in others {
-            for panel in group.panels() {
-                workspace.add_panel(panel, window, cx);
-            }
-        }
-        let pane = workspace.active.clone();
-        pane.update(cx, |pane, cx| pane.activate(0, window, cx));
-        workspace
+        let mut group = PanelGroup::stack(first, others);
+        number_shared_titles(group.panels_mut(), cx);
+        Self::new(app_name, group, window, cx)
     }
 
     pub fn active_pane(&self) -> &Entity<Pane> {

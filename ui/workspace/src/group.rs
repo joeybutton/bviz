@@ -59,28 +59,29 @@ impl<T> PanelGroup<T> {
         }
     }
 
-    /// The panels, in the order they are laid out.
-    pub fn panels(self) -> Vec<T> {
-        let mut panels = Vec::new();
-        self.push_panels(&mut panels);
-        panels
+    /// The groups one above the other in the order given, each spanning the
+    /// width and laid out at the same share of the height they divide.
+    pub fn stack(first: Self, rest: Vec<Self>) -> Self {
+        Self::stacked(first, rest.into_iter())
     }
 
-    fn push_panels(self, out: &mut Vec<T>) {
-        match self {
-            Self::One(panel) => out.push(panel),
-            Self::Tabs { first, rest } => {
-                out.push(first);
-                out.extend(rest);
-            }
-            Self::Split { first, second, .. } => {
-                first.push_panels(out);
-                second.push_panels(out);
-            }
+    /// Even shares out of splits that divide in two: `first` is given one share
+    /// of the extent and the stack of the groups below it the remaining
+    /// `rest.len()`, which that stack divides the same way.
+    fn stacked(first: Self, mut rest: std::vec::IntoIter<Self>) -> Self {
+        let below = rest.len();
+        match rest.next() {
+            None => first,
+            Some(next) => Self::split(
+                Axis::Vertical,
+                1.0 / (below + 1) as f32,
+                first,
+                Self::stacked(next, rest),
+            ),
         }
     }
 
-    /// The panels borrowed, in the order they are laid out.
+    /// The panels, in the order they are laid out.
     pub fn panels_mut(&mut self) -> Vec<&mut T> {
         let mut panels = Vec::new();
         self.push_panels_mut(&mut panels);
@@ -105,6 +106,7 @@ impl<T> PanelGroup<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Removal;
     use crate::layout::shape;
 
     /// The arrangement `group` describes, each pane written as the panels it
@@ -181,6 +183,121 @@ mod tests {
         assert_eq!(layout.first_pane(), "ab");
     }
 
+    /// A share is divided out through the ratios of nested splits, so an even
+    /// share is even to within the rounding of a few divisions — far under a
+    /// pixel of any window.
+    const SHARE_ROUNDING: f32 = 1e-6;
+
+    /// The regions a stack of `count` groups is laid out in, each as the share
+    /// of the height it takes and the arrangement it holds.
+    fn regions(layout: &Layout<String>, count: usize) -> Vec<(f32, String)> {
+        let mut regions = Vec::with_capacity(count);
+        let mut remaining = layout;
+        let mut left = 1.0;
+        for _ in 1..count {
+            let Layout::Split(split) = remaining else {
+                panic!(
+                    "a stack of {count} groups divides the height {} times",
+                    count - 1
+                );
+            };
+            assert_eq!(split.axis(), Axis::Vertical);
+            regions.push((left * split.ratio(), shape(split.first())));
+            left *= 1.0 - split.ratio();
+            remaining = split.second();
+        }
+        regions.push((left, shape(remaining)));
+        regions
+    }
+
+    /// The stack of `count` panels 'a', 'b', ..., each in a pane of its own.
+    fn stack_of(count: usize) -> PanelGroup<char> {
+        let panel = |index: usize| PanelGroup::One((b'a' + index as u8) as char);
+        PanelGroup::stack(panel(0), (1..count).map(panel).collect())
+    }
+
+    /// A window holding one document is laid out by that document alone, so a
+    /// stack of one is the arrangement it was given.
+    #[test]
+    fn a_stack_of_one_group_is_that_group() {
+        let group = PanelGroup::split(
+            Axis::Vertical,
+            0.65,
+            PanelGroup::One('a'),
+            PanelGroup::tabs('b', vec!['c']),
+        );
+        let stacked = PanelGroup::stack(group, Vec::new());
+        assert_eq!(shape(&arrange(stacked)), "(a/bc)");
+    }
+
+    #[test]
+    fn a_stack_lays_its_groups_out_in_the_order_given() {
+        assert_eq!(shape(&arrange(stack_of(2))), "(a/b)");
+        assert_eq!(shape(&arrange(stack_of(3))), "(a/(b/c))");
+        assert_eq!(shape(&arrange(stack_of(5))), "(a/(b/(c/(d/e))))");
+    }
+
+    #[test]
+    fn every_group_of_a_stack_takes_the_same_share_of_the_height() {
+        for count in 1..=8 {
+            let layout = arrange(stack_of(count));
+            let even = 1.0 / count as f32;
+            for (share, pane) in regions(&layout, count) {
+                assert!(
+                    (share - even).abs() < SHARE_ROUNDING,
+                    "a stack of {count} lays {pane} out at {share}, not {even}"
+                );
+            }
+        }
+    }
+
+    /// Stacking documents does not disturb what each asked for: a region holds
+    /// the arrangement its own group describes, splits, tabs and all.
+    #[test]
+    fn a_stacked_group_keeps_the_arrangement_it_asked_for() {
+        let layout = arrange(PanelGroup::stack(
+            PanelGroup::One('a'),
+            vec![
+                PanelGroup::split(
+                    Axis::Vertical,
+                    0.6,
+                    PanelGroup::One('b'),
+                    PanelGroup::tabs('c', vec!['d']),
+                ),
+                PanelGroup::tabs('e', vec!['f']),
+            ],
+        ));
+        let held: Vec<String> = regions(&layout, 3)
+            .into_iter()
+            .map(|(_, arrangement)| arrangement)
+            .collect();
+        assert_eq!(held, ["a", "(b/cd)", "ef"]);
+    }
+
+    /// A pane leaves the arrangement as its last panel closes, and the region a
+    /// document held closes with its last pane while the documents stacked
+    /// around it stand.
+    #[test]
+    fn closing_every_pane_of_a_stacked_group_leaves_the_others_stacked() {
+        let mut layout = arrange(PanelGroup::stack(
+            PanelGroup::One('a'),
+            vec![
+                PanelGroup::split(
+                    Axis::Horizontal,
+                    0.5,
+                    PanelGroup::One('b'),
+                    PanelGroup::One('c'),
+                ),
+                PanelGroup::One('d'),
+            ],
+        ));
+        assert_eq!(shape(&layout), "(a/((b|c)/d))");
+        assert_eq!(layout.remove(&"b".to_string()), Removal::Removed);
+        assert_eq!(shape(&layout), "(a/(c/d))");
+        assert_eq!(layout.remove(&"c".to_string()), Removal::Removed);
+        assert_eq!(shape(&layout), "(a/d)");
+    }
+
     #[test]
     fn the_panels_read_in_the_order_they_are_laid_out() {
         let mut group = PanelGroup::split(
@@ -196,6 +313,5 @@ mod tests {
         );
         let borrowed: Vec<char> = group.panels_mut().into_iter().map(|panel| *panel).collect();
         assert_eq!(borrowed, ['a', 'b', 'c', 'd']);
-        assert_eq!(group.panels(), ['a', 'b', 'c', 'd']);
     }
 }
