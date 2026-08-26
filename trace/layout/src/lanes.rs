@@ -20,19 +20,13 @@ pub struct Lane {
     pub depth_rows: u32,
 }
 
-/// A counter lane's vertical placement; `lane` indexes `Profile::counters`.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct CounterPos {
-    pub lane: usize,
-    pub top: f32,
-    pub height: f32,
-}
-
-/// Thread lanes stacked first, then the counter lanes below them.
+/// A chart's stacked rows, in one coordinate space rooted at the first row's
+/// top edge. Rows other than lanes take room in it too, so the stack can reach
+/// past the last lane.
 #[derive(Debug, Clone, PartialEq)]
 pub struct LaneLayout {
     pub lanes: Vec<Lane>,
-    pub counters: Vec<CounterPos>,
+    /// Bottom edge of the last row, carrying no trailing gap.
     pub total_height: f32,
 }
 
@@ -50,26 +44,9 @@ pub fn lay_out_lanes(profile: &Profile, metrics: &LaneMetrics) -> LaneLayout {
         });
         top += height + metrics.lane_gap;
     }
-    let counter_height = metrics.header_height + metrics.counter_height;
-    let counters = (0..profile.counters().len())
-        .map(|lane| {
-            let pos = CounterPos {
-                lane,
-                top,
-                height: counter_height,
-            };
-            top += counter_height + metrics.lane_gap;
-            pos
-        })
-        .collect::<Vec<_>>();
-    let total_height = counters
-        .last()
-        .map(|c| c.top + c.height)
-        .or_else(|| lanes.last().map(|l| l.top + l.height))
-        .unwrap_or(0.0);
+    let total_height = lanes.last().map(|l| l.top + l.height).unwrap_or(0.0);
     LaneLayout {
         lanes,
-        counters,
         total_height,
     }
 }

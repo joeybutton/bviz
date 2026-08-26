@@ -370,17 +370,10 @@ pub(crate) fn clamp_gutter_width(gutter_width: f32, window_w: f32) -> f32 {
     gutter_width.clamp(MIN_GUTTER, max)
 }
 
-/// Total height the flame section's rows occupy — thread lanes and the group
-/// bands they hang under, which share one coordinate space — ignoring the
-/// layout's counter lanes (the counters strip places those itself).
-pub(crate) fn flame_total_height(layout: &LaneLayout) -> f32 {
-    layout.total_height
-}
-
-/// The pixel ceiling for the lane scroll: the thread-lane height past the flame
-/// region's on-screen height.
+/// The pixel ceiling for the lane scroll: the stacked rows' height past the
+/// flame region's on-screen height.
 pub(crate) fn max_lane_scroll(layout: &LaneLayout, regions: &Regions) -> f32 {
-    (flame_total_height(layout) - regions.flame_h()).max(0.0)
+    (layout.total_height - regions.flame_h()).max(0.0)
 }
 
 /// One counter lane as drawn: its top in window y, already carrying the strip's
@@ -395,6 +388,7 @@ pub(crate) struct GraphLane {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bviz_trace_layout::Lane;
 
     /// The window the tests split: at the origin and tall enough that the strip
     /// is held by its own floor rather than by the room the flame region keeps.
@@ -488,6 +482,36 @@ mod tests {
             .expect("the strip shows lanes");
         assert_eq!(first.lane, 0);
         assert_eq!(first.top, regions.counters_top);
+    }
+
+    /// Counter lanes stand in the strip, not the flame region, so however far
+    /// the strip's own lanes overflow it they leave nothing to scroll to in a
+    /// flame region its rows fit.
+    #[test]
+    fn rows_that_fit_the_flame_region_leave_nothing_to_scroll() {
+        let n_counters = 10;
+        let strip = CountersStrip::Open(DEFAULT_COUNTERS_HEIGHT);
+        let layout = {
+            let height = split(n_counters, strip, TALL).flame_h();
+            LaneLayout {
+                lanes: vec![Lane {
+                    track: 0,
+                    top: 0.0,
+                    height,
+                    depth_rows: 1,
+                }],
+                total_height: height,
+            }
+        };
+        let regions = Regions::new(
+            window(TALL),
+            n_counters,
+            strip,
+            MIN_GUTTER,
+            layout.total_height,
+        );
+        assert!(regions.max_counter_scroll() > 0.0);
+        assert_eq!(max_lane_scroll(&layout, &regions), 0.0);
     }
 
     /// Lanes that fit leave nothing to scroll to, and so no bar to scroll with.

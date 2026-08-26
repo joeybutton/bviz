@@ -414,7 +414,6 @@ pub(crate) fn build_grouped_layout(
     }
     let layout = LaneLayout {
         lanes,
-        counters: full.counters.clone(),
         // Each row leaves a trailing gap, so the accumulator sits one gap below
         // the last row's bottom edge, where the stack ends.
         total_height: (top - METRICS.lane_gap).max(0.0),
@@ -447,7 +446,6 @@ pub(crate) fn group_label(class: LaneClass) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::regions::flame_total_height;
     use crate::test_profile::profile_of;
     use crate::{LINE_SCROLL_PX, drawn_scroll, scroll_request};
     use bviz_trace_layout::lay_out_lanes;
@@ -495,7 +493,6 @@ mod tests {
         }
         let layout = LaneLayout {
             lanes,
-            counters: Vec::new(),
             total_height: (top - METRICS.lane_gap).max(0.0),
         };
         (
@@ -822,7 +819,7 @@ mod tests {
         // A viewport the folded chart barely fills, so the anchored lane's place
         // is out of reach while its group is folded and back in reach after.
         let viewport_h = 3.0 * GROUP_BAND_HEIGHT;
-        let ceiling = |l: &LaneLayout| (flame_total_height(l) - viewport_h).max(0.0);
+        let ceiling = |l: &LaneLayout| (l.total_height - viewport_h).max(0.0);
         assert!(
             ceiling(&layout) > anchored.top,
             "the lane is reachable unfolded"
@@ -1589,7 +1586,7 @@ mod tests {
     }
 
     #[test]
-    fn flame_total_height_ends_at_the_last_row() {
+    fn the_stack_ends_at_the_last_row() {
         let (profile, full, visible) = fixture();
         let build = |visible: &[bool], collapsed: &[bool; GROUP_ORDER.len()]| {
             built_rows(&profile, &full, visible, collapsed)
@@ -1641,7 +1638,7 @@ mod tests {
             let last_band = chrome.bands.last().map(|b| b.top + GROUP_BAND_HEIGHT);
             let last_lane = layout.lanes.last().map(|l| l.top + l.height);
             let last_bottom = last_band.into_iter().chain(last_lane).fold(0.0, f32::max);
-            assert_eq!(flame_total_height(&layout), last_bottom, "{label}");
+            assert_eq!(layout.total_height, last_bottom, "{label}");
         }
     }
 }

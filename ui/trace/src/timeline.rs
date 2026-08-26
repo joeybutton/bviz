@@ -2,7 +2,7 @@ use crate::chart::fit_px_per_us;
 use crate::counters::paint_crosshair;
 use crate::groups::{GroupChrome, GroupHit, RowAnchor, anchor_at, anchor_offset, chart_rows};
 use crate::model::TraceModel;
-use crate::regions::{CountersStrip, Regions, flame_total_height, max_lane_scroll};
+use crate::regions::{CountersStrip, Regions, max_lane_scroll};
 use crate::theme::Palette;
 use crate::{
     ClearTimeSelection, DEFAULT_COUNTERS_HEIGHT, DEFAULT_GUTTER_WIDTH, EDGE_MARGIN_PX,
@@ -452,10 +452,7 @@ impl Timeline {
                 Source::Loaded(p) => p.counters().len(),
                 _ => 0,
             };
-            let flame_total = model
-                .lane_layout()
-                .map(|l| flame_total_height(&l))
-                .unwrap_or(0.0);
+            let flame_total = model.lane_layout().map(|l| l.total_height).unwrap_or(0.0);
             (n_counters, flame_total)
         };
         let (counters, gutter_width) = self.shell_layout(cx);
@@ -477,7 +474,7 @@ impl Timeline {
             else {
                 return TimelineBars::default();
             };
-            (profile.span(), flame_total_height(&lanes))
+            (profile.span(), lanes.total_height)
         };
         scrollbar_geom(
             span,
@@ -1054,7 +1051,7 @@ fn fit_prepaint(
 ) -> impl FnOnce(Bounds<Pixels>, &mut Window, &mut App) {
     move |bounds: Bounds<Pixels>, _: &mut Window, cx: &mut App| {
         let old_bounds = parent.read(cx).viewport;
-        let flame_total = flame_total_height(&lanes);
+        let flame_total = lanes.total_height;
         let regions_of = |b| {
             Regions::new(
                 b,
@@ -1130,7 +1127,7 @@ fn slice_paint(
     move |bounds, _, window, cx| {
         let layout = &*lanes;
         let n_counters = profile.counters().len();
-        let flame_total = flame_total_height(layout);
+        let flame_total = layout.total_height;
         let (
             tv,
             scroll,
@@ -1539,7 +1536,7 @@ fn overlay_paint(
                 !matches!(timeline.drag, TimelineDrag::None),
             )
         };
-        let flame_total = flame_total_height(&lanes);
+        let flame_total = lanes.total_height;
         let regions = Regions::new(bounds, n_counters, counters, gutter_width, flame_total);
         let show_counters = regions.shows_counters();
         paint_time_selection(&selection, tv, regions, show_counters, &palette, window);

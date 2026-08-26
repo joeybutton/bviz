@@ -24,9 +24,7 @@ use chart::{format_duration, format_time, nice_step, span_seconds};
 use flame_panel::FlamePanel;
 use groups::{GroupChrome, group_label, lanes_headed_by_pool};
 use model::TraceModel;
-use regions::{
-    CountersStrip, DividerGrab, DividerPress, Regions, clamp_gutter_width, flame_total_height,
-};
+use regions::{CountersStrip, DividerGrab, DividerPress, Regions, clamp_gutter_width};
 use stats_panel::StatsPanel;
 use theme::Palette;
 use timeline::{HoveredSlice, Timeline};
@@ -370,10 +368,7 @@ impl TracePanel {
             },
             counters: self.counters,
             gutter_width: self.gutter_width,
-            flame_total: model
-                .lane_layout()
-                .map(|l| flame_total_height(&l))
-                .unwrap_or(0.0),
+            flame_total: model.lane_layout().map(|l| l.total_height).unwrap_or(0.0),
         }
     }
 

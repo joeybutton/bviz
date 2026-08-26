@@ -15,7 +15,7 @@ pub use flame::{
     FlameBox, FlameDirection, FlameGraph, FlameLabels, FlameMetrics, FlameMode, FlameNode,
     FlamePlacement, TrackFlamer, flame_height, lay_out_flame,
 };
-pub use lanes::{CounterPos, Lane, LaneLayout, LaneMetrics, lay_out_lanes};
+pub use lanes::{Lane, LaneLayout, LaneMetrics, lay_out_lanes};
 pub use scopes::ScopeAggregate;
 pub use selection::{TimeRegion, TimeSelection, span_between};
 pub use stats::{StatRow, stats_from_flame};
@@ -156,16 +156,20 @@ mod tests {
         assert_eq!(layout.total_height, 39.0);
     }
 
+    /// The stack ends at the last thread lane. The counters strip stands apart
+    /// from the flame chart and places its own lanes, so a profile's counters
+    /// leave the stack exactly as a profile without them lays it out.
     #[test]
-    fn counter_lanes_stack_below_threads() {
-        let p = profile_with_counters(vec![track_rows(1, 1)], &[counter("cpu", vec![(0, 1.0)])]);
-        let layout = lay_out_lanes(&p, &METRICS);
-        // Thread lane: top 0, height 10 + 5 = 15; then a 4px gap.
-        assert_eq!(layout.lanes[0].height, 15.0);
-        assert_eq!(layout.counters.len(), 1);
-        assert_eq!(layout.counters[0].top, 19.0);
-        assert_eq!(layout.counters[0].height, 30.0);
-        assert_eq!(layout.total_height, 49.0);
+    fn counters_leave_the_lane_stack_alone() {
+        let tracks = || vec![track_rows(1, 1), track_rows(2, 2)];
+        let bare = lay_out_lanes(&profile(tracks()), &METRICS);
+        let with_counters = lay_out_lanes(
+            &profile_with_counters(tracks(), &[counter("cpu", vec![(0, 1.0)])]),
+            &METRICS,
+        );
+        assert_eq!(with_counters.lanes, bare.lanes);
+        assert_eq!(with_counters.total_height, bare.total_height);
+        assert_eq!(bare.total_height, bare.lanes[1].top + bare.lanes[1].height);
     }
 
     #[test]
