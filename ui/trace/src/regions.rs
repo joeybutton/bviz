@@ -1,7 +1,6 @@
 use crate::{
-    COUNTERS_COLLAPSED_HEIGHT, COUNTERS_DIVIDER_HEIGHT, COUNTERS_SNAP_SLOP,
-    DEFAULT_COUNTERS_HEIGHT, FLAME_MIN_HEIGHT, METRICS, MIN_CHART_HEIGHT, MIN_DRAG_PX, MIN_GUTTER,
-    RULER_HEIGHT,
+    COUNTER_LANE_HEIGHT, COUNTERS_COLLAPSED_HEIGHT, COUNTERS_DIVIDER_HEIGHT, COUNTERS_SNAP_SLOP,
+    DEFAULT_COUNTERS_HEIGHT, FLAME_MIN_HEIGHT, METRICS, MIN_DRAG_PX, MIN_GUTTER, RULER_HEIGHT,
 };
 use bviz_trace_layout::LaneLayout;
 use bviz_ui_components::SCROLLBAR_THICKNESS;
@@ -39,13 +38,13 @@ impl CountersStrip {
     }
 
     /// Where a drag asking for a strip `height` tall leaves the strip that stood
-    /// as `self` when the divider was pressed, in a window `vh` tall showing
-    /// `n_counters` counters. An open strip shuts once the drag is pulled
-    /// [`COUNTERS_SNAP_SLOP`] below the floor its lanes need; a shut one opens
-    /// once pulled that far above where it sits shut, and from there follows the
-    /// cursor within the heights the strip is held between.
-    pub(crate) fn dragged_to(self, height: f32, n_counters: usize, vh: f32) -> Self {
-        let (min, max) = counters_bounds(n_counters, vh);
+    /// as `self` when the divider was pressed, in a window `vh` tall. An open
+    /// strip shuts once the drag is pulled [`COUNTERS_SNAP_SLOP`] below its
+    /// floor; a shut one opens once pulled that far above where it sits shut,
+    /// and from there follows the cursor within the heights the strip is held
+    /// between.
+    pub(crate) fn dragged_to(self, height: f32, vh: f32) -> Self {
+        let (min, max) = counters_bounds(vh);
         match self {
             CountersStrip::Open(standing) => match height < min - COUNTERS_SNAP_SLOP {
                 true => CountersStrip::Collapsed { restore: standing },
@@ -88,22 +87,15 @@ pub(crate) struct DividerGrab {
 
 impl DividerGrab {
     /// Where the strip stands with the cursor at window y `y`, the timeline
-    /// ending at `counters_bottom` in a window `vh` tall showing `n_counters`
-    /// counters. A press that has not travelled far enough to be a drag is still
-    /// a click, and leaves the strip as it was pressed.
-    pub(crate) fn dragged_to(
-        &mut self,
-        y: f32,
-        counters_bottom: f32,
-        n_counters: usize,
-        vh: f32,
-    ) -> CountersStrip {
+    /// ending at `counters_bottom` in a window `vh` tall. A press that has not
+    /// travelled far enough to be a drag is still a click, and leaves the strip
+    /// as it was pressed.
+    pub(crate) fn dragged_to(&mut self, y: f32, counters_bottom: f32, vh: f32) -> CountersStrip {
         self.moved |= (y - self.press_y).abs() > MIN_DRAG_PX;
         if !self.moved {
             return self.pressed;
         }
-        self.pressed
-            .dragged_to(counters_bottom - y - self.grab, n_counters, vh)
+        self.pressed.dragged_to(counters_bottom - y - self.grab, vh)
     }
 
     /// Where `strip` stands once the press is let go: a drag leaves it where it
@@ -145,12 +137,16 @@ pub(crate) struct Regions {
     /// Bottom of the counters strip, which is the viewport's bottom edge and so
     /// the bottom of the gutter column running the whole height.
     pub(crate) counters_bottom: f32,
+    /// How the strip's counter lanes are fitted into it, which its lane geometry
+    /// and its scroll ceiling are read from.
+    counters: CounterFit,
 }
 
 impl Regions {
     /// Splits `bounds` given the counter count, the counters strip, the gutter
-    /// width, and the flame lanes' total height (to decide whether a vertical bar
-    /// shows and so a column must be reserved for it).
+    /// width, and the flame lanes' total height. The last two decide whether
+    /// either section overflows and so whether a column must be reserved for the
+    /// vertical bar.
     pub(crate) fn new(
         bounds: Bounds<Pixels>,
         n_counters: usize,
@@ -164,6 +160,7 @@ impl Regions {
         let vh = f32::from(bounds.size.height);
         let counters_bottom = oy + vh;
         let counters_h = clamp_counters_height(strip, n_counters, vh);
+        let counters = CounterFit::new(n_counters, counters_h);
         let counters_top = (counters_bottom - counters_h).max(oy);
         let band = match counters_h > 0.0 {
             true => COUNTERS_DIVIDER_HEIGHT,
@@ -185,12 +182,13 @@ impl Regions {
         let content_w = (w - gutter_width).max(0.0);
         let content_right = ox + w;
         let flame_h = flame_bottom - flame_top;
-        // Reserve a column for the vertical bar when the flame lanes overflow it,
-        // so slices and charts end left of the bar rather than under it.
-        let vbar_reserve = if flame_total > flame_h.max(0.0) {
-            SCROLLBAR_THICKNESS
-        } else {
-            0.0
+        // Reserve a column for the vertical bar when either section overflows the
+        // room it has, so slices and charts end left of the bar rather than under
+        // it. The two bars share the column, each over its own section.
+        let overflows = flame_total > flame_h.max(0.0) || counters.total() > counters_h;
+        let vbar_reserve = match overflows {
+            true => SCROLLBAR_THICKNESS,
+            false => 0.0,
         };
         Regions {
             content_left,
@@ -203,6 +201,7 @@ impl Regions {
             divider_top,
             counters_top,
             counters_bottom,
+            counters,
         }
     }
 
@@ -255,24 +254,96 @@ impl Regions {
         (self.counters_bottom - self.counters_top).max(0.0)
     }
 
+    /// The counters strip's time content, which its lanes are masked to and its
+    /// hover and wheel are tested against.
+    pub(crate) fn counters_rect(&self) -> Bounds<Pixels> {
+        Bounds::new(
+            point(px(self.content_left), px(self.counters_top)),
+            size(px(self.time_w), px(self.counters_h())),
+        )
+    }
+
+    pub(crate) fn in_counters(&self, pos: Point<Pixels>) -> bool {
+        self.counters_rect().contains(&pos)
+    }
+
     /// Whether the counters strip stands open, and so whether its lanes, their
     /// gutter labels, and the time-axis furniture crossing them are drawn.
     pub(crate) fn shows_counters(&self) -> bool {
         self.counters_h() > 0.0
     }
+
+    /// Total height the counter lanes occupy, which exceeds the strip's own
+    /// whenever the strip is too short to hold them all.
+    pub(crate) fn counters_total(&self) -> f32 {
+        self.counters.total()
+    }
+
+    /// The pixel ceiling for the counters strip's scroll: the lane height past
+    /// the strip's own.
+    pub(crate) fn max_counter_scroll(&self) -> f32 {
+        (self.counters_total() - self.counters_h()).max(0.0)
+    }
+
+    /// The counter lanes meeting the strip with it scrolled up by `scroll`
+    /// pixels, in lane order. The sole derivation of lane geometry, so the plots,
+    /// their gutter names, and the crosshair readouts stand at one place.
+    pub(crate) fn counter_lanes(self, scroll: f32) -> impl Iterator<Item = GraphLane> {
+        let lane_h = self.counters.lane_h;
+        let first_top = self.counters_top - scroll;
+        self.counters
+            .shown(scroll, self.counters_h())
+            .map(move |lane| GraphLane {
+                lane,
+                top: first_top + lane as f32 * lane_h,
+                chart_h: lane_h - METRICS.header_height,
+            })
+    }
 }
 
-/// The heights an open counters strip is held between: enough for every counter
-/// lane to keep a header band plus `MIN_CHART_HEIGHT` of chart, so no lane
-/// collapses to nothing, and never more than leaves the flame region
-/// `FLAME_MIN_HEIGHT`. A window too short for both floors squeezes the strip:
-/// the flame chart is the timeline's subject and keeps its own.
-fn counters_bounds(n_counters: usize, vh: f32) -> (f32, f32) {
+/// How the counter lanes are fitted into the strip. Every lane stands the same
+/// height — an even share of the strip, but never less than
+/// [`COUNTER_LANE_HEIGHT`] — so a strip too short for its counters overflows and
+/// is scrolled through rather than squeezing every plot below reading.
+#[derive(Clone, Copy)]
+struct CounterFit {
+    n: usize,
+    lane_h: f32,
+}
+
+impl CounterFit {
+    fn new(n: usize, strip_h: f32) -> Self {
+        let lane_h = match n {
+            0 => COUNTER_LANE_HEIGHT,
+            n => (strip_h / n as f32).max(COUNTER_LANE_HEIGHT),
+        };
+        CounterFit { n, lane_h }
+    }
+
+    fn total(self) -> f32 {
+        self.n as f32 * self.lane_h
+    }
+
+    /// The lanes meeting a strip `strip_h` tall scrolled up by `scroll` pixels,
+    /// so a lane crossing either edge is drawn and clipped rather than dropped.
+    fn shown(self, scroll: f32, strip_h: f32) -> std::ops::Range<usize> {
+        let lane_at = |y: f32| y / self.lane_h;
+        let first = (lane_at(scroll).floor().max(0.0) as usize).min(self.n);
+        let last = (lane_at(scroll + strip_h).ceil().max(0.0) as usize).min(self.n);
+        first..last
+    }
+}
+
+/// The heights an open counters strip is held between: enough to show one whole
+/// counter lane, whatever the count — the lanes past it are reached by scrolling
+/// the strip — and never more than leaves the flame region `FLAME_MIN_HEIGHT`. A
+/// window too short for both floors squeezes the strip: the flame chart is the
+/// timeline's subject and keeps its own.
+fn counters_bounds(vh: f32) -> (f32, f32) {
     let max =
         (vh - RULER_HEIGHT - SCROLLBAR_THICKNESS - COUNTERS_DIVIDER_HEIGHT - FLAME_MIN_HEIGHT)
             .max(0.0);
-    let min = (n_counters as f32 * (METRICS.header_height + MIN_CHART_HEIGHT)).min(max);
-    (min, max)
+    (COUNTER_LANE_HEIGHT.min(max), max)
 }
 
 /// The height the counters strip stands at, bounded by [`counters_bounds`]. It
@@ -286,7 +357,7 @@ fn clamp_counters_height(strip: CountersStrip, n_counters: usize, vh: f32) -> f3
     match strip {
         CountersStrip::Collapsed { .. } => 0.0,
         CountersStrip::Open(height) => {
-            let (min, max) = counters_bounds(n_counters, vh);
+            let (min, max) = counters_bounds(vh);
             height.clamp(min, max)
         }
     }
@@ -312,31 +383,13 @@ pub(crate) fn max_lane_scroll(layout: &LaneLayout, regions: &Regions) -> f32 {
     (flame_total_height(layout) - regions.flame_h()).max(0.0)
 }
 
-/// One fitted counter lane in the strip: its top (window y) and the height of
-/// its chart area below the header band.
+/// One counter lane as drawn: its top in window y, already carrying the strip's
+/// scroll, and the height of its chart area below the header band.
 #[derive(Clone, Copy)]
 pub(crate) struct GraphLane {
     pub(crate) lane: usize,
     pub(crate) top: f32,
     pub(crate) chart_h: f32,
-}
-
-/// Distributes the counters strip's height evenly across its `n` counter lanes:
-/// each lane is a header band plus a chart area that shrinks to zero as the
-/// section collapses toward the label-only minimum.
-pub(crate) fn graph_lanes(n: usize, graph_top: f32, graph_h: f32) -> Vec<GraphLane> {
-    if n == 0 {
-        return Vec::new();
-    }
-    let chart_h = ((graph_h - n as f32 * METRICS.header_height) / n as f32).max(0.0);
-    let lane_h = METRICS.header_height + chart_h;
-    (0..n)
-        .map(|lane| GraphLane {
-            lane,
-            top: graph_top + lane as f32 * lane_h,
-            chart_h,
-        })
-        .collect()
 }
 
 #[cfg(test)]
@@ -369,7 +422,7 @@ mod tests {
 
     /// Where the strip stands with the drag's cursor at window y `y`.
     fn dragged(grab: &mut DividerGrab, y: f32) -> CountersStrip {
-        grab.dragged_to(y, TALL, COUNTERS, TALL)
+        grab.dragged_to(y, TALL, TALL)
     }
 
     #[test]
@@ -380,14 +433,69 @@ mod tests {
         );
     }
 
-    /// The strip's floor is the room its lanes need: every chart keeps a
-    /// readable sliver below its header band rather than collapsing to nothing.
+    /// The strip's floor is one whole lane, whatever the count: the lanes past
+    /// it are reached by scrolling rather than by reserving room for them.
     #[test]
-    fn the_strip_floor_keeps_every_chart_readable() {
-        let floor = clamp_counters_height(CountersStrip::Open(0.0), COUNTERS, TALL);
-        for lane in graph_lanes(COUNTERS, 0.0, floor) {
-            assert_eq!(lane.chart_h, MIN_CHART_HEIGHT);
+    fn the_strip_floor_is_one_lane_whatever_the_count() {
+        for n in [1, COUNTERS, 20] {
+            assert_eq!(
+                clamp_counters_height(CountersStrip::Open(0.0), n, TALL),
+                COUNTER_LANE_HEIGHT
+            );
         }
+    }
+
+    /// A lane keeps its height however many share the strip: a strip too short
+    /// for them all overflows, and the lanes past its bottom edge are scrolled
+    /// to rather than squeezed in.
+    #[test]
+    fn a_lane_never_shrinks_below_its_minimum() {
+        for n in [1, COUNTERS, 20] {
+            let regions = split(n, CountersStrip::Open(DEFAULT_COUNTERS_HEIGHT), TALL);
+            for lane in regions.counter_lanes(0.0) {
+                assert_eq!(
+                    lane.chart_h + METRICS.header_height,
+                    (regions.counters_h() / n as f32).max(COUNTER_LANE_HEIGHT)
+                );
+                assert!(lane.chart_h >= METRICS.counter_height);
+            }
+        }
+    }
+
+    /// The strip scrolls exactly as far as its lanes stand past its bottom edge,
+    /// and no further in either direction.
+    #[test]
+    fn the_strip_scrolls_the_lane_height_past_its_own() {
+        let n = 10;
+        let regions = split(n, CountersStrip::Open(DEFAULT_COUNTERS_HEIGHT), TALL);
+        let overflow = regions.counters_total() - regions.counters_h();
+        assert!(overflow > 0.0);
+        assert_eq!(regions.max_counter_scroll(), overflow);
+        // Scrolled to the ceiling the last lane's bottom edge meets the strip's.
+        let last = regions
+            .counter_lanes(overflow)
+            .last()
+            .expect("the strip shows lanes");
+        assert_eq!(last.lane, n - 1);
+        assert_eq!(
+            last.top + METRICS.header_height + last.chart_h,
+            regions.counters_bottom
+        );
+        // At the floor the first lane's top edge meets the strip's.
+        let first = regions
+            .counter_lanes(0.0)
+            .next()
+            .expect("the strip shows lanes");
+        assert_eq!(first.lane, 0);
+        assert_eq!(first.top, regions.counters_top);
+    }
+
+    /// Lanes that fit leave nothing to scroll to, and so no bar to scroll with.
+    #[test]
+    fn lanes_that_fit_the_strip_leave_nothing_to_scroll() {
+        let regions = split(2, CountersStrip::Open(DEFAULT_COUNTERS_HEIGHT), TALL);
+        assert_eq!(regions.counters_total(), regions.counters_h());
+        assert_eq!(regions.max_counter_scroll(), 0.0);
     }
 
     /// A strip squeezed to nothing by a short window stands under a collapsed
@@ -427,14 +535,18 @@ mod tests {
     }
 
     /// The flame chart is the timeline's subject, so where the window is too
-    /// short to floor both sections it is the counters strip that gives way.
+    /// short to floor both sections it is the counters strip that gives way —
+    /// and the lane it can no longer hold whole is scrolled through instead of
+    /// being squeezed.
     #[test]
     fn a_window_too_short_for_both_floors_squeezes_the_counters() {
-        let n = 10;
-        let regions = split(n, CountersStrip::Open(220.0), 120.0);
+        let regions = split(10, CountersStrip::Open(220.0), 120.0);
         assert_eq!(regions.flame_h(), FLAME_MIN_HEIGHT);
-        let squeezed = graph_lanes(n, regions.counters_top, regions.counters_h());
-        assert!(squeezed[0].chart_h < MIN_CHART_HEIGHT);
+        assert!(regions.counters_h() < COUNTER_LANE_HEIGHT);
+        for lane in regions.counter_lanes(0.0) {
+            assert_eq!(lane.chart_h, METRICS.counter_height);
+        }
+        assert!(regions.max_counter_scroll() > 0.0);
     }
 
     /// A profile with no counters has no strip, so no height is kept for one
@@ -456,22 +568,19 @@ mod tests {
         assert_eq!(shut.opened(), CountersStrip::Open(220.0));
     }
 
-    /// The pull that shuts the strip is a fixed distance past its floor, so it
-    /// asks the same of a profile with one counter and of one with twenty.
+    /// The pull that shuts the strip is a fixed distance past its floor.
     #[test]
-    fn the_same_pull_past_the_floor_shuts_the_strip_whatever_its_floor() {
-        for n in [1, 20] {
-            let (floor, _) = counters_bounds(n, TALL);
-            let open = CountersStrip::Open(300.0);
-            assert_eq!(
-                open.dragged_to(floor - COUNTERS_SNAP_SLOP + 1.0, n, TALL),
-                CountersStrip::Open(floor)
-            );
-            assert_eq!(
-                open.dragged_to(floor - COUNTERS_SNAP_SLOP - 1.0, n, TALL),
-                CountersStrip::Collapsed { restore: 300.0 }
-            );
-        }
+    fn a_pull_past_the_floor_shuts_the_strip() {
+        let (floor, _) = counters_bounds(TALL);
+        let open = CountersStrip::Open(300.0);
+        assert_eq!(
+            open.dragged_to(floor - COUNTERS_SNAP_SLOP + 1.0, TALL),
+            CountersStrip::Open(floor)
+        );
+        assert_eq!(
+            open.dragged_to(floor - COUNTERS_SNAP_SLOP - 1.0, TALL),
+            CountersStrip::Collapsed { restore: 300.0 }
+        );
     }
 
     /// A press that never travels is a click: it leaves the strip standing where
@@ -499,7 +608,7 @@ mod tests {
     #[test]
     fn a_drag_up_the_shut_band_opens_the_strip_where_the_cursor_asks() {
         let shut = CountersStrip::Collapsed { restore: 220.0 };
-        let (floor, _) = counters_bounds(COUNTERS, TALL);
+        let (floor, _) = counters_bounds(TALL);
         let held = 7.0;
         let mut grab = grabbed(shut, TALL - held, TALL);
         // Short of the slop the strip stays shut; a pixel past it the strip

@@ -7,16 +7,17 @@ use crate::theme::Palette;
 use crate::{
     ClearTimeSelection, DEFAULT_COUNTERS_HEIGHT, DEFAULT_GUTTER_WIDTH, EDGE_MARGIN_PX,
     GROUP_BAND_HEIGHT, GROUP_ICON, LINE_SCROLL_PX, MAX_PX_PER_US, METRICS, MIN_DRAG_PX,
-    MIN_SLICE_PX, SLICE_TEXT_PAD, SelectAllTracks, Source, TIMELINE_KEY_CONTEXT, TracePanel,
-    ZOOM_PER_NOTCH, drawn_scroll, paint_gridlines, paint_gutter, paint_markers, paint_ruler,
-    paint_slice, paint_tooltip, ruler_ticks, scroll_request, scrollbar_geom, thumb_offset,
+    MIN_SLICE_PX, SLICE_TEXT_PAD, SelectAllTracks, Source, TIMELINE_KEY_CONTEXT, TimelineBars,
+    TracePanel, ZOOM_PER_NOTCH, drawn_scroll, paint_gridlines, paint_gutter, paint_markers,
+    paint_ruler, paint_slice, paint_tooltip, ruler_ticks, scroll_request, scrollbar_geom,
+    thumb_offset,
 };
 use bviz_trace_layout::{
     Cull, LaneLayout, TimeRegion, TimeSelection, TimeView, Viewport, VisibleSlice, span_between,
     visible_slices,
 };
 use bviz_trace_profile::{Profile, Slice, SliceDetail, TimeSpan};
-use bviz_ui_components::{DragEnd, Scrollbar, cached_layer, overlay_canvas, track_drag};
+use bviz_ui_components::{DragEnd, cached_layer, overlay_canvas, track_drag};
 use gpui::{
     App, Bounds, ContentMask, Context, Div, Entity, FocusHandle, Focusable, IntoElement,
     MouseButton, MouseDownEvent, MouseMoveEvent, Pixels, Point, Render, Rgba, ScrollWheelEvent,
@@ -284,10 +285,11 @@ enum TimelineDrag {
     None,
     /// A press on the flame chart pans the timeline (and scrolls its lanes).
     Pan,
-    /// A press on the lane vertical or time horizontal scroll thumb/track,
-    /// holding the grab offset from the thumb's leading edge.
+    /// A press on the lane vertical, time horizontal, or counters vertical
+    /// scroll thumb/track, holding the grab offset from the thumb's leading edge.
     VThumb(f32),
     HThumb(f32),
+    CountersThumb(f32),
     /// A press on the ruler, or a shift-press on the flame lanes, selecting the
     /// time the flame graph and stats aggregate over.
     TimeRegion(RegionDrag),
@@ -343,6 +345,10 @@ pub(crate) struct Timeline {
     /// Which chart row the flame region's top edge sits in, and where within it;
     /// [`Self::lane_scroll`] turns it into the pixel offset the frame draws at.
     scroll: RowAnchor,
+    /// How far the counters strip is scrolled up, in pixels, held past its
+    /// ceiling so a strip resized shorter and back returns to where it stood;
+    /// [`Self::counter_scroll`] is the offset the frame draws at.
+    counter_scroll_held: f32,
     /// Viewport bounds captured during canvas paint, so handlers can map a window
     /// cursor to viewport space and bound the zoom to a fit.
     viewport: Bounds<Pixels>,
@@ -387,6 +393,7 @@ impl Timeline {
                 px_per_us: 1.0,
             },
             scroll: RowAnchor::Start,
+            counter_scroll_held: 0.0,
             viewport: Bounds::default(),
             fitted: false,
             slice_draw: None,
@@ -412,6 +419,7 @@ impl Timeline {
     pub(crate) fn reset_for_new_profile(&mut self) {
         self.slice_draw = None;
         self.scroll = RowAnchor::Start;
+        self.counter_scroll_held = 0.0;
         self.drag = TimelineDrag::None;
     }
 
@@ -460,14 +468,14 @@ impl Timeline {
         )
     }
 
-    /// The lane and time bars for the timeline's view state; both `None` while no
-    /// profile with a lane layout is loaded.
-    fn scroll_bars(&self, cx: &App) -> (Option<Scrollbar>, Option<Scrollbar>) {
+    /// The bars for the timeline's view state; all `None` while no profile with a
+    /// lane layout is loaded.
+    fn scroll_bars(&self, cx: &App) -> TimelineBars {
         let (span, flame_total) = {
             let model = self.model.read(cx);
             let (Source::Loaded(profile), Some(lanes)) = (model.source(), model.lane_layout())
             else {
-                return (None, None);
+                return TimelineBars::default();
             };
             (profile.span(), flame_total_height(&lanes))
         };
@@ -477,15 +485,8 @@ impl Timeline {
             flame_total,
             self.regions(cx),
             self.lane_scroll(cx),
+            self.counter_scroll(cx),
         )
-    }
-
-    fn vbar(&self, cx: &App) -> Option<Scrollbar> {
-        self.scroll_bars(cx).0
-    }
-
-    fn hbar(&self, cx: &App) -> Option<Scrollbar> {
-        self.scroll_bars(cx).1
     }
 
     /// The chart the lane scroll addresses; `None` while no profile with a lane
@@ -528,6 +529,28 @@ impl Timeline {
         self.scroll_to(self.lane_scroll(cx) - dy, cx);
     }
 
+    /// How far the counters strip is scrolled up, in pixels. The sole reading of
+    /// the strip's offset, so its plots, their gutter names, and its bar agree.
+    fn counter_scroll(&self, cx: &App) -> f32 {
+        drawn_scroll(
+            self.counter_scroll_held,
+            self.regions(cx).max_counter_scroll(),
+        )
+    }
+
+    /// Moves the counters strip to a gesture asking for `y` pixels down its lanes.
+    fn scroll_counters_to(&mut self, y: f32, cx: &App) {
+        let ceiling = self.regions(cx).max_counter_scroll();
+        if let Some(target) = scroll_request(self.counter_scroll_held, ceiling, y) {
+            self.counter_scroll_held = target;
+        }
+    }
+
+    /// Scrolls the counters strip down by a gesture's `dy` pixels.
+    fn scroll_counters_by(&mut self, dy: f32, cx: &App) {
+        self.scroll_counters_to(self.counter_scroll(cx) - dy, cx);
+    }
+
     /// Clears the slice tooltip and crosshair, so a tab switch drops them
     /// instead of leaving them until the next mouse move.
     pub(crate) fn clear_hover(&mut self) {
@@ -542,14 +565,7 @@ impl Timeline {
             return false;
         }
         let regions = self.regions(cx);
-        let x = f32::from(pos.x);
-        let y = f32::from(pos.y);
-        let in_counters = regions.shows_counters()
-            && x >= regions.content_left
-            && x < regions.time_right
-            && y >= regions.counters_top
-            && y < regions.counters_top + regions.counters_h();
-        regions.in_flame(pos) || in_counters
+        regions.in_flame(pos) || regions.in_counters(pos)
     }
 
     /// The slice under a window-space cursor: the box the last paint drew there,
@@ -708,8 +724,8 @@ impl Timeline {
     /// scroll thumb/track if the press hit one, otherwise a pan.
     fn press(&mut self, pos: Point<Pixels>, cx: &App) {
         self.crosshair = None;
-        let (vbar, hbar) = self.scroll_bars(cx);
-        if let Some(bar) = vbar
+        let bars = self.scroll_bars(cx);
+        if let Some(bar) = bars.flame
             && bar.track_hit(pos)
         {
             let grab = bar.grab(pos);
@@ -717,12 +733,20 @@ impl Timeline {
             self.scroll_thumb_to(pos, grab, cx);
             return;
         }
-        if let Some(bar) = hbar
+        if let Some(bar) = bars.time
             && bar.track_hit(pos)
         {
             let grab = bar.grab(pos);
             self.drag = TimelineDrag::HThumb(grab);
             self.pan_thumb_to(pos, grab, cx);
+            return;
+        }
+        if let Some(bar) = bars.counters
+            && bar.track_hit(pos)
+        {
+            let grab = bar.grab(pos);
+            self.drag = TimelineDrag::CountersThumb(grab);
+            self.counters_thumb_to(pos, grab, cx);
             return;
         }
         self.drag = TimelineDrag::Pan;
@@ -731,8 +755,15 @@ impl Timeline {
 
     /// Maps the lane vertical thumb drag back to a scroll offset.
     fn scroll_thumb_to(&mut self, pos: Point<Pixels>, grab: f32, cx: &App) {
-        if let Some(offset) = thumb_offset(self.vbar(cx), pos, grab) {
+        if let Some(offset) = thumb_offset(self.scroll_bars(cx).flame, pos, grab) {
             self.scroll_to(offset, cx);
+        }
+    }
+
+    /// Maps the counters vertical thumb drag back to a scroll offset.
+    fn counters_thumb_to(&mut self, pos: Point<Pixels>, grab: f32, cx: &App) {
+        if let Some(offset) = thumb_offset(self.scroll_bars(cx).counters, pos, grab) {
+            self.scroll_counters_to(offset, cx);
         }
     }
 
@@ -747,7 +778,7 @@ impl Timeline {
         };
         let span = profile.span();
         let regions = self.regions(cx);
-        let Some(offset) = thumb_offset(self.hbar(cx), pos, grab) else {
+        let Some(offset) = thumb_offset(self.scroll_bars(cx).time, pos, grab) else {
             return;
         };
         // The bar's offset is measured from the span start less the reachable
@@ -787,7 +818,12 @@ impl Timeline {
             } else {
                 (dx, dy)
             };
-            self.scroll_by(scroll_dy, cx);
+            // Both sections share the time axis, so a wheel pans either; the
+            // vertical half goes to whichever the cursor is over.
+            match regions.in_counters(e.position) {
+                true => self.scroll_counters_by(scroll_dy, cx),
+                false => self.scroll_by(scroll_dy, cx),
+            }
             self.view.pan_px(pan_dx);
             self.view.clamp_to(span, time_w, EDGE_MARGIN_PX);
         }
@@ -932,6 +968,7 @@ fn timeline_on_drag(timeline: &mut Timeline, position: Point<Pixels>, cx: &mut C
         }
         TimelineDrag::VThumb(grab) => timeline.scroll_thumb_to(position, grab, cx),
         TimelineDrag::HThumb(grab) => timeline.pan_thumb_to(position, grab, cx),
+        TimelineDrag::CountersThumb(grab) => timeline.counters_thumb_to(position, grab, cx),
         TimelineDrag::TimeRegion(mut drag) => {
             if let Some(at) = timeline.time_at(position, cx) {
                 drag.cursor_us = at;
@@ -1094,10 +1131,21 @@ fn slice_paint(
         let layout = &*lanes;
         let n_counters = profile.counters().len();
         let flame_total = flame_total_height(layout);
-        let (tv, scroll, gutter_width, selected, shared_names, regions, show_counters, vp) = {
+        let (
+            tv,
+            scroll,
+            counter_scroll,
+            gutter_width,
+            selected,
+            shared_names,
+            regions,
+            show_counters,
+            vp,
+        ) = {
             let timeline = parent.read(cx);
             let tv = timeline.view;
             let scroll = timeline.lane_scroll(cx);
+            let counter_scroll = timeline.counter_scroll(cx);
             let (counters, gutter_width) = timeline.shell_layout(cx);
             let selected = timeline.model.read(cx).selected_tracks().to_vec();
             let shared_names = timeline.model.read(cx).shared_track_names().to_vec();
@@ -1111,6 +1159,7 @@ fn slice_paint(
             (
                 tv,
                 scroll,
+                counter_scroll,
                 gutter_width,
                 selected,
                 shared_names,
@@ -1186,13 +1235,18 @@ fn slice_paint(
         });
 
         if show_counters {
-            crate::counters::paint_graph(&profile, tv, regions, &palette, window);
+            crate::counters::paint_graph(&profile, tv, regions, counter_scroll, &palette, window);
         }
         paint_markers(&profile, tv, regions, show_counters, &palette, window, cx);
-        let (vbar, hbar) = scrollbar_geom(profile.span(), tv, flame_total, regions, scroll);
-        for bar in vbar.into_iter().chain(hbar) {
-            bar.paint(palette.scroll.track, palette.scroll.thumb, window);
-        }
+        scrollbar_geom(
+            profile.span(),
+            tv,
+            flame_total,
+            regions,
+            scroll,
+            counter_scroll,
+        )
+        .paint(&palette, window);
 
         paint_gutter(
             &profile,
@@ -1201,6 +1255,7 @@ fn slice_paint(
             regions,
             gutter_width,
             scroll,
+            counter_scroll,
             show_counters,
             &selected,
             &shared_names,
@@ -1462,9 +1517,10 @@ fn overlay_paint(
 ) -> impl FnOnce(Bounds<Pixels>, &mut Window, &mut App) {
     move |bounds, window, cx| {
         let n_counters = profile.counters().len();
-        let (tv, counters, gutter_width, selection, crosshair, hovered, dragging) = {
+        let (tv, counters, counter_scroll, gutter_width, selection, crosshair, hovered, dragging) = {
             let timeline = parent.read(cx);
             let tv = timeline.view;
+            let counter_scroll = timeline.counter_scroll(cx);
             let (counters, gutter_width) = timeline.shell_layout(cx);
             let hovered = timeline
                 .hover
@@ -1475,6 +1531,7 @@ fn overlay_paint(
             (
                 tv,
                 counters,
+                counter_scroll,
                 gutter_width,
                 selection,
                 timeline.crosshair,
@@ -1495,6 +1552,7 @@ fn overlay_paint(
                 regions,
                 at,
                 show_counters,
+                counter_scroll,
                 &palette,
                 window,
                 cx,

@@ -26,7 +26,6 @@ use groups::{GroupChrome, group_label, lanes_headed_by_pool};
 use model::TraceModel;
 use regions::{
     CountersStrip, DividerGrab, DividerPress, Regions, clamp_gutter_width, flame_total_height,
-    graph_lanes,
 };
 use stats_panel::StatsPanel;
 use theme::Palette;
@@ -129,8 +128,8 @@ const GUTTER_HANDLE_WIDTH: f32 = 6.0;
 const FLAME_MIN_HEIGHT: f32 = 60.0;
 
 /// Initial height of the counters strip, chosen before the profile is read and
-/// so sized for a handful of counter lanes; the divider resizes it, and its
-/// clamp raises it to fit however many lanes the loaded profile has.
+/// so sized for a handful of counter lanes; the divider resizes it, and a
+/// profile with more lanes than fit is scrolled through.
 const DEFAULT_COUNTERS_HEIGHT: f32 = 160.0;
 
 /// Share of the trace window the timeline takes, the flame graph and stats
@@ -140,9 +139,11 @@ const TIMELINE_SHARE: f32 = 0.65;
 /// How far a press must travel before it is read as a drag rather than a click.
 const MIN_DRAG_PX: f32 = 3.0;
 
-/// Smallest chart area kept below a counter lane's header, so dragging the
-/// divider down squishes the graphs to a readable sliver rather than to nothing.
-const MIN_CHART_HEIGHT: f32 = 12.0;
+/// Height a counter lane stands at: its header band over a chart area of the
+/// height [`METRICS`] declares a counter chart to be. Every lane keeps it
+/// however short the strip is, so a strip that cannot hold them all scrolls
+/// instead of shrinking each plot until none of them can be read.
+const COUNTER_LANE_HEIGHT: f32 = METRICS.header_height + METRICS.counter_height;
 
 /// Height of the time ruler band at the top of the timeline.
 const RULER_HEIGHT: f32 = 20.0;
@@ -739,11 +740,10 @@ impl Element for RegionOverlays {
 fn on_drag(view: &mut TracePanel, position: Point<Pixels>, cx: &mut Context<TracePanel>) {
     match view.drag {
         Drag::Divider(mut grab) => {
-            let n_counters = view.region_inputs(cx).n_counters;
             let vp = view.timeline.read(cx).viewport();
             let vh = f32::from(vp.size.height);
             let counters_bottom = f32::from(vp.origin.y) + vh;
-            view.counters = grab.dragged_to(f32::from(position.y), counters_bottom, n_counters, vh);
+            view.counters = grab.dragged_to(f32::from(position.y), counters_bottom, vh);
             view.drag = Drag::Divider(grab);
         }
         Drag::Gutter => {
@@ -964,18 +964,38 @@ fn paint_ruler(
     }
 }
 
-/// The flame section's vertical bar and the content column's horizontal bar,
-/// each `None` on an axis that fits. The vertical bar maps to the flame lanes'
-/// pixel scroll; the horizontal to the view's start time within the profile
-/// span.
+/// The timeline's scroll bars, each `None` where its content fits and so has
+/// nothing to scroll.
+#[derive(Clone, Copy, Default)]
+struct TimelineBars {
+    /// Maps to the flame lanes' pixel scroll.
+    flame: Option<Scrollbar>,
+    /// Maps to the view's start time within the profile span.
+    time: Option<Scrollbar>,
+    /// Maps to the counters strip's pixel scroll.
+    counters: Option<Scrollbar>,
+}
+
+impl TimelineBars {
+    fn paint(&self, palette: &Palette, window: &mut Window) {
+        for bar in [self.flame, self.time, self.counters].into_iter().flatten() {
+            bar.paint(palette.scroll.track, palette.scroll.thumb, window);
+        }
+    }
+}
+
+/// Places the timeline's bars for its view state. The two vertical bars share
+/// the column reserved at the content's right edge, each over its own section.
 fn scrollbar_geom(
     span: TimeSpan,
     tv: TimeView,
     flame_total: f32,
     regions: Regions,
     scroll_y: f32,
-) -> (Option<Scrollbar>, Option<Scrollbar>) {
+    counter_scroll: f32,
+) -> TimelineBars {
     let flame_h = regions.flame_h();
+    let vbar_left = px(regions.content_right - SCROLLBAR_THICKNESS);
 
     let span_us = (span.end_us - span.start_us) as f32;
     let visible_us = regions.time_w / tv.px_per_us as f32;
@@ -984,13 +1004,10 @@ fn scrollbar_geom(
     // padded start, letting the thumb reach the same margins.
     let margin_us = EDGE_MARGIN_PX / tv.px_per_us as f32;
 
-    let vlayout = Scrollbar::new(
+    let flame = Scrollbar::new(
         Axis::Vertical,
         Bounds::new(
-            point(
-                px(regions.content_right - SCROLLBAR_THICKNESS),
-                px(regions.flame_top),
-            ),
+            point(vbar_left, px(regions.flame_top)),
             size(px(SCROLLBAR_THICKNESS), px(flame_h)),
         ),
         flame_total,
@@ -998,9 +1015,20 @@ fn scrollbar_geom(
         scroll_y,
         DEFAULT_MIN_THUMB,
     );
+    let counters = Scrollbar::new(
+        Axis::Vertical,
+        Bounds::new(
+            point(vbar_left, px(regions.counters_top)),
+            size(px(SCROLLBAR_THICKNESS), px(regions.counters_h())),
+        ),
+        regions.counters_total(),
+        regions.counters_h(),
+        counter_scroll,
+        DEFAULT_MIN_THUMB,
+    );
     // The time horizontal track runs the full time axis in the strip below the
     // flame lanes, ending left of the reserved vertical-bar column.
-    let hlayout = Scrollbar::new(
+    let time = Scrollbar::new(
         Axis::Horizontal,
         Bounds::new(
             point(px(regions.content_left), px(regions.flame_bottom)),
@@ -1012,7 +1040,11 @@ fn scrollbar_geom(
         DEFAULT_MIN_THUMB,
     );
 
-    (vlayout, hlayout)
+    TimelineBars {
+        flame,
+        time,
+        counters,
+    }
 }
 
 struct GutterPaint<'a> {
@@ -1026,9 +1058,9 @@ struct GutterPaint<'a> {
 
 /// Paints the opaque left gutter — a single column spanning the flame chart and
 /// the counters strip — over any content that panned or scrolled under it, then
-/// the names left-aligned within it: thread names track the flame lanes' vertical
-/// scroll (clipped to their band), and counter names sit at their fitted strip
-/// lanes.
+/// the names left-aligned within it, each clipped to the band it scrolls in:
+/// thread names track the flame lanes' vertical scroll, counter names the
+/// strip's.
 #[allow(clippy::too_many_arguments)]
 fn paint_gutter(
     profile: &Profile,
@@ -1037,6 +1069,7 @@ fn paint_gutter(
     regions: Regions,
     gutter_width: f32,
     scroll_y: f32,
+    counter_scroll: f32,
     show_counters: bool,
     selected: &[bool],
     shared_names: &[bool],
@@ -1088,7 +1121,15 @@ fn paint_gutter(
     });
 
     if show_counters {
-        paint_counter_labels(&g, profile, regions, window, cx);
+        let counters_mask = ContentMask {
+            bounds: Bounds::new(
+                point(px(gutter_left), px(regions.counters_top)),
+                size(px(gutter_width), px(regions.counters_h())),
+            ),
+        };
+        window.with_content_mask(Some(counters_mask), |window| {
+            paint_counter_labels(&g, profile, regions, counter_scroll, window, cx);
+        });
     }
 }
 
@@ -1353,20 +1394,17 @@ fn paint_family_bands(
     }
 }
 
-/// Paints each counter's name at its panel lane's chart baseline, so it associates
-/// with low values rather than floating at the top.
+/// Paints each counter's name at its strip lane's chart baseline, so it
+/// associates with low values rather than floating at the top.
 fn paint_counter_labels(
     g: &GutterPaint,
     profile: &Profile,
     regions: Regions,
+    counter_scroll: f32,
     window: &mut Window,
     cx: &mut App,
 ) {
-    for gl in graph_lanes(
-        profile.counters().len(),
-        regions.counters_top,
-        regions.counters_h(),
-    ) {
+    for gl in regions.counter_lanes(counter_scroll) {
         let lane_bottom = gl.top + METRICS.header_height + gl.chart_h;
         let ty = lane_bottom - GUTTER_LABEL_SIZE - SLICE_TEXT_PAD;
         paint_gutter_label(
@@ -1512,6 +1550,27 @@ pub fn run() {
 mod tests {
     use super::*;
 
+    /// A window tall enough that the strip stands at the height it is opened to,
+    /// split for a profile with `n` counters and lanes short enough that the
+    /// flame region never asks for a bar of its own.
+    fn counters_split(n: usize, strip: CountersStrip) -> Regions {
+        let window = Bounds::new(point(px(0.0), px(0.0)), size(px(1000.0), px(800.0)));
+        Regions::new(window, n, strip, DEFAULT_GUTTER_WIDTH, 0.0)
+    }
+
+    /// The counters strip's bar for a split scrolled to its top.
+    fn counter_bar(regions: Regions) -> Option<Scrollbar> {
+        let span = TimeSpan {
+            start_us: 0,
+            end_us: 1_000,
+        };
+        let tv = TimeView {
+            start_us: 0.0,
+            px_per_us: 1.0,
+        };
+        scrollbar_geom(span, tv, 0.0, regions, 0.0, 0.0).counters
+    }
+
     #[test]
     fn clamp_gutter_width_bounds_to_half_window() {
         // A comfortable request in a wide window is left untouched.
@@ -1588,19 +1647,20 @@ mod tests {
         assert!(shut.flame_bottom > open.flame_bottom);
     }
 
+    /// Lanes with room to spare share the strip evenly, each a header band over
+    /// its chart.
     #[test]
-    fn graph_lanes_split_height_evenly() {
+    fn counter_lanes_share_a_roomy_strip_evenly() {
         let n = 2;
-        let graph_top = 100.0;
-        let graph_h = 2.0 * METRICS.header_height + 80.0;
-        let lanes = graph_lanes(n, graph_top, graph_h);
+        let strip = 4.0 * COUNTER_LANE_HEIGHT;
+        let regions = counters_split(n, CountersStrip::Open(strip));
+        let lanes: Vec<_> = regions.counter_lanes(0.0).collect();
         assert_eq!(lanes.len(), n);
-        // Each chart gets an even share of the height past the header bands.
-        assert_eq!(lanes[0].chart_h, 40.0);
-        assert_eq!(lanes[1].chart_h, 40.0);
-        // Lanes stack from graph_top, header band plus chart tall.
-        assert_eq!(lanes[0].top, graph_top);
-        assert_eq!(lanes[1].top, graph_top + METRICS.header_height + 40.0);
+        let lane_h = strip / n as f32;
+        for (i, lane) in lanes.iter().enumerate() {
+            assert_eq!(lane.chart_h, lane_h - METRICS.header_height);
+            assert_eq!(lane.top, regions.counters_top + i as f32 * lane_h);
+        }
     }
 
     #[test]
@@ -1713,12 +1773,30 @@ mod tests {
         assert_eq!(time_window_summary(None, BUILD_US), None);
     }
 
+    /// A strip with more lanes than it can hold shows a bar over its own band,
+    /// in the column reserved at the content's right edge; one whose lanes fit
+    /// shows none, and reserves no column for one.
     #[test]
-    fn graph_lanes_collapse_to_labels() {
-        // At the label-only minimum the charts squish to zero, leaving headers.
-        let lanes = graph_lanes(2, 0.0, 2.0 * METRICS.header_height);
-        assert_eq!(lanes[0].chart_h, 0.0);
-        assert_eq!(lanes[1].chart_h, 0.0);
-        assert!(graph_lanes(0, 0.0, 0.0).is_empty());
+    fn the_counters_bar_stands_only_while_the_lanes_overflow() {
+        let n = 10;
+        let overflowing = counters_split(n, CountersStrip::Open(DEFAULT_COUNTERS_HEIGHT));
+        assert!(overflowing.max_counter_scroll() > 0.0);
+        let bar = counter_bar(overflowing).expect("the overflowing lanes are scrolled by a bar");
+        assert_eq!(bar.track().origin.y, px(overflowing.counters_top));
+        assert_eq!(bar.track().size.height, px(overflowing.counters_h()));
+        assert_eq!(
+            bar.track().origin.x,
+            px(overflowing.content_right - SCROLLBAR_THICKNESS)
+        );
+        // The plots end left of the bar rather than running under it.
+        assert_eq!(
+            overflowing.time_right,
+            overflowing.content_right - SCROLLBAR_THICKNESS
+        );
+
+        let roomy = counters_split(n, CountersStrip::Open(n as f32 * COUNTER_LANE_HEIGHT));
+        assert_eq!(roomy.max_counter_scroll(), 0.0);
+        assert!(counter_bar(roomy).is_none());
+        assert_eq!(roomy.time_right, roomy.content_right);
     }
 }
