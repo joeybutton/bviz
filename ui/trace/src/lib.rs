@@ -27,7 +27,7 @@ use model::TraceModel;
 use regions::{Regions, clamp_gutter_width, clamp_panel_height, flame_total_height, graph_lanes};
 use stats_panel::StatsPanel;
 use theme::Palette;
-use timeline::{HoveredSlice, TimelinePanel};
+use timeline::{HoveredSlice, Timeline};
 use track_label::{pool_member_label, track_label};
 use tracks_menu::TracksMenu;
 
@@ -216,7 +216,7 @@ pub(crate) type Source = bviz_ui_components::Source<Arc<Profile>>;
 
 /// Loads and renders a Bazel trace profile as a flame chart.
 ///
-/// The flame-chart timeline lives in [`TimelinePanel`] and the aggregated
+/// The flame-chart timeline lives in [`Timeline`] and the aggregated
 /// flame-graph panel in [`FlamePanel`]; each owns its own view state, reading the
 /// document and selection from the shared [`TraceModel`].
 struct TracePanel {
@@ -224,7 +224,7 @@ struct TracePanel {
     title: SharedString,
     /// The one instance the four panels each hold a handle to.
     model: Entity<TraceModel>,
-    timeline: Entity<TimelinePanel>,
+    timeline: Entity<Timeline>,
     flame: Entity<FlamePanel>,
     stats: Entity<StatsPanel>,
     drag: Drag,
@@ -257,7 +257,7 @@ impl TracePanel {
         let timeline = {
             let shell = cx.entity().downgrade();
             let model = model.clone();
-            cx.new(|cx| TimelinePanel::new(model, shell, cx))
+            cx.new(|cx| Timeline::new(model, shell, cx))
         };
         let flame = {
             let model = model.clone();
@@ -330,7 +330,7 @@ impl TracePanel {
         self.invalidate_timeline(cx);
     }
 
-    /// The whole trace body: the [`TimelinePanel`] filling the viewport (it paints
+    /// The whole trace body: the [`Timeline`] filling the viewport (it paints
     /// the flame chart and counter plots and owns the timeline's mouse/scroll/
     /// hover wiring), a drag overlay that keeps the panel-resize and gutter drags
     /// tracking the cursor, then the tab bar, the selected bottom panel, the
@@ -917,7 +917,7 @@ impl Element for RegionOverlays {
 
 /// Routes an in-progress drag to its target: resizing the bottom panel or the
 /// gutter. The flame-chart timeline's, flame-graph panel's, and tracks menu's own
-/// drags are routed inside [`TimelinePanel`], [`FlamePanel`], and [`TracksMenu`].
+/// drags are routed inside [`Timeline`], [`FlamePanel`], and [`TracksMenu`].
 fn on_drag(view: &mut TracePanel, position: Point<Pixels>, cx: &mut Context<TracePanel>) {
     match view.drag {
         Drag::Splitter => {

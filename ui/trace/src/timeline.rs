@@ -329,7 +329,7 @@ impl TimelineDrag {
 /// selection from [`TraceModel`] and the panel/gutter layout from
 /// [`TracePanel`]. The slices are painted by [`SliceCanvas`], the time selection,
 /// crosshair, and tooltip by an overlay above it.
-pub(crate) struct TimelinePanel {
+pub(crate) struct Timeline {
     /// Focus for the trace content, so [`SelectAllTracks`] dispatches here; a
     /// descendant of the window focus, so the window's own actions fire.
     content_focus: FocusHandle,
@@ -340,8 +340,8 @@ pub(crate) struct TimelinePanel {
     shell: WeakEntity<TracePanel>,
     /// Horizontal time-to-pixel mapping (pan and zoom). Prepaint settles it
     /// against the painted width — the fit, the resize rescale, and the zoom
-    /// floor all need a width the panel learns only there — and the same frame's
-    /// paint then reads the result.
+    /// floor all need a width the timeline learns only there — and the same
+    /// frame's paint then reads the result.
     view: TimeView,
     /// Which chart row the flame region's top edge sits in, and where within it;
     /// [`Self::lane_scroll`] turns it into the pixel offset the frame draws at.
@@ -367,7 +367,7 @@ pub(crate) struct TimelinePanel {
     canvas: Entity<SliceCanvas>,
 }
 
-impl TimelinePanel {
+impl Timeline {
     pub(crate) fn new(
         model: Entity<TraceModel>,
         shell: WeakEntity<TracePanel>,
@@ -458,7 +458,7 @@ impl TimelinePanel {
         )
     }
 
-    /// The lane and time bars for the panel's view state; both `None` while no
+    /// The lane and time bars for the timeline's view state; both `None` while no
     /// profile with a lane layout is loaded.
     fn scroll_bars(&self, cx: &App) -> (Option<Scrollbar>, Option<Scrollbar>) {
         let (span, flame_total) = {
@@ -875,13 +875,13 @@ impl TimelinePanel {
     }
 }
 
-impl Focusable for TimelinePanel {
+impl Focusable for Timeline {
     fn focus_handle(&self, _cx: &App) -> FocusHandle {
         self.content_focus.clone()
     }
 }
 
-impl Render for TimelinePanel {
+impl Render for Timeline {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let (profile, lanes) = {
             let model = self.model.read(cx);
@@ -910,68 +910,64 @@ impl Render for TimelinePanel {
 
 /// Routes an in-progress timeline drag to its target: panning the chart, moving
 /// a scroll thumb, or stretching a time region.
-fn timeline_on_drag(
-    panel: &mut TimelinePanel,
-    position: Point<Pixels>,
-    cx: &mut Context<TimelinePanel>,
-) {
-    let moves_slices = !matches!(panel.drag, TimelineDrag::TimeRegion(_));
-    match panel.drag {
+fn timeline_on_drag(timeline: &mut Timeline, position: Point<Pixels>, cx: &mut Context<Timeline>) {
+    let moves_slices = !matches!(timeline.drag, TimelineDrag::TimeRegion(_));
+    match timeline.drag {
         TimelineDrag::Pan => {
-            let dx = f32::from(position.x) - f32::from(panel.last_mouse.x);
-            let dy = f32::from(position.y) - f32::from(panel.last_mouse.y);
-            if panel.model.read(cx).lane_layout().is_none() {
+            let dx = f32::from(position.x) - f32::from(timeline.last_mouse.x);
+            let dy = f32::from(position.y) - f32::from(timeline.last_mouse.y);
+            if timeline.model.read(cx).lane_layout().is_none() {
                 return;
             }
-            let profile = match panel.model.read(cx).source() {
+            let profile = match timeline.model.read(cx).source() {
                 Source::Loaded(p) => p.clone(),
                 _ => return,
             };
             let span = profile.span();
-            let regions = panel.regions(cx);
-            panel.view.pan_px(dx);
-            panel.view.clamp_to(span, regions.time_w, EDGE_MARGIN_PX);
-            panel.scroll_by(dy, cx);
-            panel.last_mouse = position;
+            let regions = timeline.regions(cx);
+            timeline.view.pan_px(dx);
+            timeline.view.clamp_to(span, regions.time_w, EDGE_MARGIN_PX);
+            timeline.scroll_by(dy, cx);
+            timeline.last_mouse = position;
         }
-        TimelineDrag::VThumb(grab) => panel.scroll_thumb_to(position, grab, cx),
-        TimelineDrag::HThumb(grab) => panel.pan_thumb_to(position, grab, cx),
+        TimelineDrag::VThumb(grab) => timeline.scroll_thumb_to(position, grab, cx),
+        TimelineDrag::HThumb(grab) => timeline.pan_thumb_to(position, grab, cx),
         TimelineDrag::TimeRegion(mut drag) => {
-            if let Some(at) = panel.time_at(position, cx) {
+            if let Some(at) = timeline.time_at(position, cx) {
                 drag.cursor_us = at;
                 drag.moved |= (f32::from(position.x) - drag.press_x).abs() > MIN_DRAG_PX;
-                panel.drag = TimelineDrag::TimeRegion(drag);
+                timeline.drag = TimelineDrag::TimeRegion(drag);
             }
         }
         TimelineDrag::None => {}
     }
-    panel.update_hover(position, cx);
+    timeline.update_hover(position, cx);
     if moves_slices {
-        panel.invalidate_canvas(cx);
+        timeline.invalidate_canvas(cx);
     } else {
         cx.notify();
     }
 }
 
 fn timeline_end_drag(
-    panel: &mut TimelinePanel,
+    timeline: &mut Timeline,
     _: Point<Pixels>,
     end: DragEnd,
-    cx: &mut Context<TimelinePanel>,
+    cx: &mut Context<Timeline>,
 ) {
-    match std::mem::replace(&mut panel.drag, TimelineDrag::None).region() {
+    match std::mem::replace(&mut timeline.drag, TimelineDrag::None).region() {
         Some(drag) => {
-            panel.commit_time_region(drag, end, cx);
+            timeline.commit_time_region(drag, end, cx);
             cx.notify();
         }
-        None => panel.invalidate_canvas(cx),
+        None => timeline.invalidate_canvas(cx),
     }
 }
 
 /// The layer painting the timeline's slices and chrome, from the view state,
 /// document, and lanes it reads through `parent`.
 struct SliceCanvas {
-    parent: WeakEntity<TimelinePanel>,
+    parent: WeakEntity<Timeline>,
 }
 
 impl Render for SliceCanvas {
@@ -980,15 +976,15 @@ impl Render for SliceCanvas {
             return div().into_any_element();
         };
         let (profile, lanes, chrome, panel_height, gutter_width) = {
-            let panel = parent.read(cx);
-            let model = panel.model.read(cx);
+            let timeline = parent.read(cx);
+            let model = timeline.model.read(cx);
             let Source::Loaded(profile) = model.source() else {
                 return div().into_any_element();
             };
             let (Some(lanes), Some(chrome)) = (model.lane_layout(), model.group_chrome()) else {
                 return div().into_any_element();
             };
-            let (_, panel_height, gutter_width) = panel.shell_layout(cx);
+            let (_, panel_height, gutter_width) = timeline.shell_layout(cx);
             (profile.clone(), lanes, chrome, panel_height, gutter_width)
         };
         let palette = Palette::from_theme(&bviz_ui_theme::theme(window, cx));
@@ -1015,7 +1011,7 @@ impl Render for SliceCanvas {
 fn fit_prepaint(
     profile: Arc<Profile>,
     lanes: Rc<LaneLayout>,
-    parent: Entity<TimelinePanel>,
+    parent: Entity<Timeline>,
     panel_height: f32,
     gutter_width: f32,
 ) -> impl FnOnce(Bounds<Pixels>, &mut Window, &mut App) {
@@ -1035,22 +1031,22 @@ fn fit_prepaint(
         let time_w = regions.time_w;
         let old_time_w = regions_of(old_bounds).time_w;
         let span = profile.span();
-        parent.update(cx, |panel, _| {
-            panel.viewport = bounds;
-            if !panel.fitted {
-                panel.view = TimeView::fit(span, time_w, EDGE_MARGIN_PX);
-                panel.fitted = true;
+        parent.update(cx, |timeline, _| {
+            timeline.viewport = bounds;
+            if !timeline.fitted {
+                timeline.view = TimeView::fit(span, time_w, EDGE_MARGIN_PX);
+                timeline.fitted = true;
             } else if old_bounds.size.width > px(0.) && (old_time_w - time_w).abs() > f32::EPSILON {
-                panel
+                timeline
                     .view
                     .rescale_to_width(span, old_time_w, time_w, EDGE_MARGIN_PX);
             }
-            panel.view.px_per_us =
-                panel
+            timeline.view.px_per_us =
+                timeline
                     .view
                     .px_per_us
                     .max(fit_px_per_us(span, time_w, EDGE_MARGIN_PX));
-            panel.view.clamp_to(span, time_w, EDGE_MARGIN_PX);
+            timeline.view.clamp_to(span, time_w, EDGE_MARGIN_PX);
         });
     }
 }
@@ -1091,7 +1087,7 @@ fn slice_paint(
     profile: Arc<Profile>,
     lanes: Rc<LaneLayout>,
     chrome: Rc<GroupChrome>,
-    parent: Entity<TimelinePanel>,
+    parent: Entity<Timeline>,
     palette: Palette,
 ) -> impl FnOnce(Bounds<Pixels>, (), &mut Window, &mut App) {
     move |bounds, _, window, cx| {
@@ -1099,12 +1095,12 @@ fn slice_paint(
         let n_counters = profile.counters().len();
         let flame_total = flame_total_height(layout);
         let (tv, scroll, gutter_width, selected, shared_names, regions, show_counters, vp) = {
-            let panel = parent.read(cx);
-            let tv = panel.view;
-            let scroll = panel.lane_scroll(cx);
-            let (tab, panel_height, gutter_width) = panel.shell_layout(cx);
-            let selected = panel.model.read(cx).selected_tracks().to_vec();
-            let shared_names = panel.model.read(cx).shared_track_names().to_vec();
+            let timeline = parent.read(cx);
+            let tv = timeline.view;
+            let scroll = timeline.lane_scroll(cx);
+            let (tab, panel_height, gutter_width) = timeline.shell_layout(cx);
+            let selected = timeline.model.read(cx).selected_tracks().to_vec();
+            let shared_names = timeline.model.read(cx).shared_track_names().to_vec();
             let regions = Regions::new(bounds, n_counters, panel_height, gutter_width, flame_total);
             let vp = Viewport {
                 width: regions.time_w,
@@ -1123,8 +1119,8 @@ fn slice_paint(
                 vp,
             )
         };
-        let slices = parent.update(cx, |panel, _| {
-            cached_slices(&mut panel.slice_draw, &profile, &lanes, tv, vp)
+        let slices = parent.update(cx, |timeline, _| {
+            cached_slices(&mut timeline.slice_draw, &profile, &lanes, tv, vp)
         });
 
         let ticks = ruler_ticks(tv, regions.time_w);
@@ -1461,28 +1457,30 @@ fn paint_time_selection(
 fn overlay_paint(
     profile: Arc<Profile>,
     lanes: Rc<LaneLayout>,
-    parent: Entity<TimelinePanel>,
+    parent: Entity<Timeline>,
     palette: Palette,
 ) -> impl FnOnce(Bounds<Pixels>, &mut Window, &mut App) {
     move |bounds, window, cx| {
         let n_counters = profile.counters().len();
         let (tv, tab, panel_height, gutter_width, selection, crosshair, hovered, dragging) = {
-            let panel = parent.read(cx);
-            let tv = panel.view;
-            let (tab, panel_height, gutter_width) = panel.shell_layout(cx);
-            let hovered = panel
+            let timeline = parent.read(cx);
+            let tv = timeline.view;
+            let (tab, panel_height, gutter_width) = timeline.shell_layout(cx);
+            let hovered = timeline
                 .hover
-                .and_then(|at| Some((at, panel.slice_at(at, cx)?)));
-            let selection = panel.drag.preview(panel.model.read(cx).time_selection());
+                .and_then(|at| Some((at, timeline.slice_at(at, cx)?)));
+            let selection = timeline
+                .drag
+                .preview(timeline.model.read(cx).time_selection());
             (
                 tv,
                 tab,
                 panel_height,
                 gutter_width,
                 selection,
-                panel.crosshair,
+                timeline.crosshair,
                 hovered,
-                !matches!(panel.drag, TimelineDrag::None),
+                !matches!(timeline.drag, TimelineDrag::None),
             )
         };
         let flame_total = flame_total_height(&lanes);

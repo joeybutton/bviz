@@ -529,7 +529,7 @@ with `&mut View`, so it needs neither the `Rc` nor the cell.
 
 **What the cell costs.** Dynamic borrow checking on a field nothing shares, a `RefCell`
 that can panic at runtime, and read-modify-write (`let mut v = f.get(); …; f.set(v)`) where
-in-place mutation would do. `TimelinePanel` in `ui/trace/src/timeline.rs` holds its time
+in-place mutation would do. `Timeline` in `ui/trace/src/timeline.rs` holds its time
 view, viewport, fit latch, scroll anchor, and memoized cull list as plain fields, and
 `fit_prepaint` / `slice_paint` are the worked examples of the read-then-commit shape.
 
