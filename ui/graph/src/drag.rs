@@ -66,7 +66,7 @@ pub(crate) fn drag_pan(view: &mut GraphView, position: Point<Pixels>, cx: &mut C
     };
     pan.last = position;
     view.drag = Drag::Pan(pan);
-    view.framing.move_to(Camera { zoom, pan: panned });
+    view.framing.pan_to(panned);
     cx.notify();
 }
 

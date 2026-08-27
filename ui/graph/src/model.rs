@@ -14,16 +14,16 @@ use std::sync::Arc;
 /// spreads sideways faster than it gains boxes, so beyond this size the fitted
 /// view is a smear of boxes too small to carry a label; the reader opens the
 /// containers that interest them out of a legible starting point instead.
-const MAX_VISIBLE_NODES: usize = 600;
+const MAX_VISIBLE_NODES: usize = 2000;
 
 /// Caps the edges the layered mode's first view opens with. On a dense graph an
 /// expansion multiplies the connectors among the boxes already drawn without
 /// adding many, and it is the connectors, not the boxes, that decide how far the
-/// drawing spreads — so the first view is held to both counts. The spread is not
-/// gradual either: a drawing routing enough edges is placed by the cheaper
-/// strategy, which buys its speed in width, so a first view sized past that goes
-/// abruptly wide.
-const MAX_VISIBLE_EDGES: usize = 6000;
+/// drawing spreads — so the first view is held to both counts. A view of this
+/// density has long since crossed into the cheaper placement strategy, which
+/// buys its speed in width, so what this count bounds is the wait rather than
+/// how wide the drawing lands.
+const MAX_VISIBLE_EDGES: usize = 20000;
 
 /// A graph that finished loading, in the form every later relayout starts from.
 pub(crate) struct Loaded {
