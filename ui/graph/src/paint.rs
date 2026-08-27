@@ -3,6 +3,7 @@ use crate::drag::track_gesture;
 use crate::model::{Drawn, Expandable};
 use crate::morph::Frame;
 use crate::neighborhood::{Neighborhood, compute_neighborhood};
+use crate::relation::{Direction, Relation};
 use crate::scroll::paint_scrollbars;
 use crate::{GraphView, Palette};
 use bviz_graph_layout::layout::{CARET_RESERVE, LABEL_BAND};
@@ -11,6 +12,7 @@ use gpui::{
     App, BorderStyle, Bounds, Entity, Hsla, PathBuilder, Pixels, Point, Rgba, TextAlign, Window,
     point, px, quad, size,
 };
+use std::rc::Rc;
 
 /// Box label font size in layout pixels.
 const LABEL_SIZE: f64 = 13.0;
@@ -38,12 +40,12 @@ const ARROW_OVERDRAW: f64 = 1.0;
 /// Stroke width (pre-zoom px) of the line a connector's provenance is drawn in.
 const CONNECTOR_WIDTH: f32 = 1.5;
 
-/// Stroke width (pre-zoom px) of that line where the hover marks the connector.
+/// Stroke width (pre-zoom px) of that line where a marking picks the connector out.
 /// A doubling is the smallest step that reads as a heavier line rather than as
 /// an artifact of antialiasing.
 const MARKED_WIDTH: f32 = 2.0 * CONNECTOR_WIDTH;
 
-/// How far a hover mark carries a connector's color in perceptual lightness,
+/// How far a mark carries a connector's color in perceptual lightness,
 /// away from the canvas. Bounded below by a marked line standing
 /// [`bviz_ui_theme::MIN_DISTINCT_COLOR`] off the unmarked line of its own query,
 /// and above by the three provenances holding that distance from one another
@@ -81,16 +83,58 @@ const GROUP_TINT: f32 = 0.17;
 /// the ground the wash makes of it.
 const HIGHLIGHT_WASH: f32 = 0.155;
 
+/// The share of its own opacity a box or connector is drawn at where a standing
+/// selection leaves it unmarked, so what the selection picks out reads against a
+/// graph that has receded rather than against one drawn just as strongly. Low
+/// enough that the marked part carries the eye on its own, and above zero so the
+/// rest still says where in the graph that part sits.
+const UNMARKED_FADE: f32 = 0.2;
+
 /// Everything the canvas draws from, owned so the `'static` paint closure holds
 /// no borrow of the view.
 pub(crate) struct Scene {
     pub(crate) drawn: Drawn,
     pub(crate) expandable: Expandable,
     pub(crate) palette: Palette,
-    /// The box whose neighborhood the hover marks; `None` when none is marked.
-    pub(crate) neighborhood: Option<Id>,
+    /// The box the pointer rests on, whose direct neighbors it marks for as long
+    /// as it does; `None` when the pointer is off the boxes or the marking is
+    /// switched off.
+    pub(crate) hovered: Option<Id>,
+    /// The selected box, which wears the accent border; what it marks besides is
+    /// the selection's to say.
+    pub(crate) selected: Option<Id>,
     /// The emphasized box and the alpha its highlight paints at.
     pub(crate) highlight: Option<(Id, f32)>,
+}
+
+/// Everything a frame draws marked. A box or a connector either marking picks
+/// out is drawn marked, so a selection holds its marks under a hover passing
+/// over another part of the graph.
+struct Marks {
+    hover: Neighborhood,
+    selection: Rc<Neighborhood>,
+}
+
+impl Marks {
+    fn marks_box(&self, id: Id) -> bool {
+        self.hover.boxes.contains(&id) || self.selection.boxes.contains(&id)
+    }
+
+    fn marks_edge(&self, edge: (Id, Id)) -> bool {
+        self.hover.edges.contains(&edge) || self.selection.edges.contains(&edge)
+    }
+
+    /// The share of its own opacity something standing at `marked` is drawn at:
+    /// all of it wherever the selection marks nothing in this drawing — because
+    /// none is made, or because the view folds the selected box away — and
+    /// [`UNMARKED_FADE`] of it for whatever a selection that does mark something
+    /// here leaves out.
+    fn strength(&self, marked: bool) -> f32 {
+        match marked || self.selection.boxes.is_empty() {
+            true => 1.0,
+            false => UNMARKED_FADE,
+        }
+    }
 }
 
 /// The canvas paint pass: box fills parent-before-child so children sit over
@@ -121,7 +165,15 @@ pub(crate) fn canvas_body(
         };
         let g = scene.drawn.view(camera.zoom);
         let visible = visible_rect(bounds, camera);
-        let neighborhood = compute_neighborhood(g, scene.neighborhood);
+        // A hover is gone the moment the pointer moves, so its marking is derived
+        // afresh; a selection outlives the frames that draw it, so it holds its
+        // own and hands out a share in it.
+        let marks = Marks {
+            hover: compute_neighborhood(g, scene.hovered, Relation::Direct(Direction::Both)),
+            selection: entity.update(cx, |view, _| {
+                view.selection.marking(g, scene.drawn.view_key(camera.zoom))
+            }),
+        };
         let drawn: Vec<(PaintBox, Bounds<Pixels>)> = g
             .boxes
             .iter()
@@ -147,7 +199,7 @@ pub(crate) fn canvas_body(
             )
             .filter(|p| visible.overlaps(&p.rect))
             .map(|p| {
-                let b = PaintBox::of(&p, &scene, &neighborhood);
+                let b = PaintBox::of(&p, &scene, &marks);
                 let rect = screen_rect(&b, bounds, camera);
                 paint_box(&b, rect, camera.zoom, &scene.palette, window);
                 (b, rect)
@@ -157,8 +209,9 @@ pub(crate) fn canvas_body(
         if edges > 0.0 {
             for c in &g.connectors {
                 if drawn_route(c, &visible) {
-                    let marked = neighborhood.edges.contains(&(c.from, c.to));
-                    paint_lanes(c, marked, edges, bounds, camera, &scene.palette, window);
+                    let marked = marks.marks_edge((c.from, c.to));
+                    let alpha = edges * marks.strength(marked);
+                    paint_lanes(c, marked, alpha, bounds, camera, &scene.palette, window);
                 }
             }
         }
@@ -191,7 +244,7 @@ pub(crate) fn canvas_body(
 /// Whether a frame draws the route `c`: where it crosses the view, and the view
 /// could hold the whole of it.
 ///
-/// What the hover marks has no bearing on it. Marking a box picks out every
+/// What a marking picks out has no bearing on it. Marking a box picks out every
 /// route that meets it, which in a dense graph reaches most of the drawing, so
 /// exempting those would lay back over the view exactly the grid the reach test
 /// is here to take off it — and would do so under the pointer, where the reader
@@ -200,8 +253,8 @@ fn drawn_route(c: &Connector, visible: &Rect) -> bool {
     visible.could_hold(&c.points) && visible.crossed_by(&c.points)
 }
 
-/// `c` at `alpha` of its own opacity, by which a box a morph is fading in or out
-/// takes its whole appearance — fill, border, label — down together.
+/// `c` at `alpha` of its own opacity, by which a box takes its whole appearance
+/// — fill, border, label — down together.
 fn faded(c: Rgba, alpha: f32) -> Rgba {
     Rgba {
         a: c.a * alpha,
@@ -320,19 +373,24 @@ struct PaintBox<'a> {
     /// painted in.
     fill: Rgba,
     label: &'a str,
-    /// How strongly the box wears the just-toggled emphasis, from 0 for none to
-    /// 1, scaling its accent border.
+    /// How strongly the box wears the accent border, from 0 for none to 1: full
+    /// while it is the selected box, and falling away as the emphasis on a
+    /// just-toggled box fades.
     highlight: f32,
-    /// Whether the hover marks this box, which the wash over its fill says.
+    /// Whether a marking picks this box out, which the wash over its fill says.
     marked: bool,
-    /// Opacity the whole box paints at, which a morph fades from zero for a box
-    /// only the new drawing holds and to zero for one only the old one held.
+    /// Opacity the whole box paints at: a morph fades it up from zero for a box
+    /// only the new drawing holds and down to zero for one only the old one
+    /// held, and a standing selection holds it down for a box its marking leaves
+    /// out.
     alpha: f32,
 }
 
 impl<'a> PaintBox<'a> {
-    fn of(p: &Placed<'a>, scene: &Scene, neighborhood: &Neighborhood) -> Self {
+    fn of(p: &Placed<'a>, scene: &Scene, marks: &Marks) -> Self {
         let Placed { b, rect, alpha, .. } = *p;
+        let marked = marks.marks_box(b.id);
+        let alpha = alpha * marks.strength(marked);
         let palette = &scene.palette;
         let fill = match b.compound {
             true => palette.container_fill(b.kind),
@@ -341,6 +399,12 @@ impl<'a> PaintBox<'a> {
         let toggled = match scene.highlight {
             Some((id, alpha)) if id == b.id => alpha,
             _ => 0.0,
+        };
+        // A selection outlasts the fade, so the box it holds keeps the border at
+        // full whatever the emphasis on it has come down to.
+        let accent = match scene.selected == Some(b.id) {
+            true => 1.0,
+            false => toggled,
         };
         PaintBox {
             id: b.id,
@@ -352,21 +416,21 @@ impl<'a> PaintBox<'a> {
             expandable: p.expandable(&scene.expandable),
             fill: faded(fill, alpha),
             label: &b.label,
-            highlight: toggled,
-            marked: neighborhood.boxes.contains(&b.id),
+            highlight: accent,
+            marked,
             alpha,
         }
     }
 
-    /// The wash the hover mark lays over this box's fill, transparent where the
-    /// box is unmarked.
+    /// The wash a marking lays over this box's fill, transparent where the box
+    /// is unmarked.
     fn wash(&self, palette: &Palette) -> Rgba {
         palette.highlight_wash(if self.marked { self.alpha } else { 0.0 })
     }
 }
 
 /// Paints a connector's provenances as evenly spaced parallel lanes centered on
-/// its route, `marked` where the hover has picked the connector out.
+/// its route, `marked` where a marking has picked the connector out.
 fn paint_lanes(
     c: &Connector,
     marked: bool,
@@ -400,7 +464,7 @@ fn screen_rect(b: &PaintBox, bounds: Bounds<Pixels>, camera: Camera) -> Bounds<P
     Bounds::new(origin, size(px(b.w as f32 * zoom), px(b.h as f32 * zoom)))
 }
 
-/// Paints a box's filled quad, over which the hover mark's wash goes.
+/// Paints a box's filled quad, over which a marking's wash goes.
 fn paint_box(
     b: &PaintBox,
     rect: Bounds<Pixels>,
@@ -422,9 +486,9 @@ fn paint_box(
 }
 
 /// A box's two emphases, told apart by the channel each takes: the quad border
-/// to stroke, which the just-toggled emphasis fades from the themed border to
-/// the accent and from a normal to a thick stroke, and a deferred paint of the
-/// hover mark's wash, which the fill alone carries.
+/// to stroke, which the accent carries from the themed border to itself and from
+/// a normal to a thick stroke, and a deferred paint of a marking's wash, which
+/// the fill alone carries.
 fn box_emphasis(
     b: &PaintBox,
     zoom: f32,

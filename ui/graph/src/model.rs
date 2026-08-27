@@ -25,12 +25,19 @@ const MAX_VISIBLE_NODES: usize = 600;
 /// abruptly wide.
 const MAX_VISIBLE_EDGES: usize = 6000;
 
+/// The layered drawing on screen, and how many relayouts had landed when it was
+/// made, by which it is told from the drawing that replaces it.
+struct Layered {
+    view: Arc<LaidOut>,
+    relayouts: u64,
+}
+
 /// A graph that finished loading, in the form every later relayout starts from.
 pub(crate) struct Loaded {
     map: Arc<MapLayout>,
     /// The layered layout of the expanded view; absent until that mode is first
     /// selected, and replaced by each relayout.
-    layered: Option<Arc<LaidOut>>,
+    layered: Option<Layered>,
     /// The built (pre-quotient) graph, cached so toggling a group re-lays-out
     /// without re-reading or re-parsing the proto.
     base: Arc<Graph>,
@@ -67,12 +74,23 @@ pub(crate) struct Level {
     pub(crate) count: usize,
 }
 
+/// Identifies the view a [`Drawn`] resolves to, by which work derived from that
+/// view is redone exactly when the view moves under it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ViewKey {
+    /// A layered drawing, told from the one the next relayout puts in its place
+    /// by the count of relayouts that had landed when it was made.
+    Layered(u64),
+    /// A map level, which a map derives once and never replaces.
+    Map(usize),
+}
+
 /// A share in the layout a mode draws, cheap to clone into a `'static` paint
 /// closure. A map resolves to a view only once the camera is known, so the level
 /// a frame draws is picked at the same scale it paints at.
 #[derive(Clone)]
 pub(crate) enum Drawn {
-    Layered(Arc<LaidOut>),
+    Layered { view: Arc<LaidOut>, relayouts: u64 },
     Map(Arc<MapLayout>),
 }
 
@@ -80,8 +98,16 @@ impl Drawn {
     /// The view drawn at `zoom` screen pixels per layout unit.
     pub(crate) fn view(&self, zoom: f32) -> &LaidOut {
         match self {
-            Self::Layered(view) => view,
+            Self::Layered { view, .. } => view,
             Self::Map(map) => map.level(map.level_for_scale(zoom)),
+        }
+    }
+
+    /// Identifies the view [`view`](Self::view) returns at `zoom`.
+    pub(crate) fn view_key(&self, zoom: f32) -> ViewKey {
+        match self {
+            Self::Layered { relayouts, .. } => ViewKey::Layered(*relayouts),
+            Self::Map(map) => ViewKey::Map(map.level_for_scale(zoom)),
         }
     }
 
@@ -89,7 +115,7 @@ impl Drawn {
     /// layered layout, which has no pyramid.
     pub(crate) fn level(&self, zoom: f32) -> Option<Level> {
         match self {
-            Self::Layered(_) => None,
+            Self::Layered { .. } => None,
             Self::Map(map) => Some(Level {
                 index: map.level_for_scale(zoom),
                 count: map.level_count(),
@@ -102,7 +128,7 @@ impl Drawn {
     /// holds still as the zoom changes level.
     pub(crate) fn content(&self) -> (f32, f32) {
         let (width, height) = match self {
-            Self::Layered(view) => (view.width, view.height),
+            Self::Layered { view, .. } => (view.width, view.height),
             Self::Map(map) => (map.width(), map.height()),
         };
         (
@@ -214,7 +240,10 @@ impl Model {
         };
         match mode {
             LayoutMode::Map => Some(Drawn::Map(Arc::clone(&loaded.map))),
-            LayoutMode::Layered => loaded.layered.clone().map(Drawn::Layered),
+            LayoutMode::Layered => loaded.layered.as_ref().map(|l| Drawn::Layered {
+                view: Arc::clone(&l.view),
+                relayouts: l.relayouts,
+            }),
         }
     }
 
@@ -271,7 +300,7 @@ pub(crate) fn relayout(view: &mut GraphView, cx: &mut Context<GraphView>) {
     // The relayout mints group ids against the interned-name table, so it
     // extends a clone and hands it back for the view to adopt.
     let mut names = loaded.names.clone();
-    let previous = loaded.layered.clone();
+    let previous = loaded.layered.as_ref().map(|l| Arc::clone(&l.view));
     let expanded = view.model.expanded.clone();
     let reduced = view.reduced;
     view.model.relaying = true;
@@ -293,7 +322,14 @@ pub(crate) fn relayout(view: &mut GraphView, cx: &mut Context<GraphView>) {
             let replaced = match &mut view.model.source {
                 Source::Loaded(loaded) => {
                     loaded.names = names;
-                    loaded.layered.replace(Arc::clone(&laid_out))
+                    let relayouts = loaded.layered.as_ref().map_or(0, |l| l.relayouts) + 1;
+                    loaded
+                        .layered
+                        .replace(Layered {
+                            view: Arc::clone(&laid_out),
+                            relayouts,
+                        })
+                        .map(|l| l.view)
                 }
                 _ => None,
             };
