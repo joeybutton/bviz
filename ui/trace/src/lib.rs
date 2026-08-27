@@ -19,7 +19,7 @@ mod track_label;
 mod track_order;
 mod tracks_menu;
 
-use chart::{format_duration, format_time, nice_step, span_seconds};
+use chart::{fit_px_per_us, format_duration, format_time, nice_step, span_seconds};
 
 use flame_panel::FlamePanel;
 use groups::{GroupChrome, group_label, lanes_headed_by_pool};
@@ -1022,21 +1022,26 @@ fn scrollbar_geom(
         DEFAULT_MIN_THUMB,
     );
     // The time horizontal track runs the full time axis along the flame lanes'
-    // bottom edge, ending left of the reserved vertical-bar column.
-    let time = Scrollbar::new(
-        Axis::Horizontal,
-        Bounds::new(
-            point(
-                px(regions.content_left),
-                px(regions.flame_bottom - SCROLLBAR_THICKNESS),
+    // bottom edge, ending left of the reserved vertical-bar column. Rounding the
+    // extents to microseconds can leave a view sitting on the zoom floor a hair
+    // wider than its own span, so the bar is gated on the floor itself.
+    let time = match tv.px_per_us > fit_px_per_us(span, regions.time_w, EDGE_MARGIN_PX) {
+        true => Scrollbar::new(
+            Axis::Horizontal,
+            Bounds::new(
+                point(
+                    px(regions.content_left),
+                    px(regions.flame_bottom - SCROLLBAR_THICKNESS),
+                ),
+                size(px(regions.time_w), px(SCROLLBAR_THICKNESS)),
             ),
-            size(px(regions.time_w), px(SCROLLBAR_THICKNESS)),
+            span_us + 2.0 * margin_us,
+            visible_us,
+            tv.start_us as f32 - (span.start_us as f32 - margin_us),
+            DEFAULT_MIN_THUMB,
         ),
-        span_us + 2.0 * margin_us,
-        visible_us,
-        tv.start_us as f32 - (span.start_us as f32 - margin_us),
-        DEFAULT_MIN_THUMB,
-    );
+        false => None,
+    };
 
     TimelineBars {
         flame,
@@ -1547,7 +1552,6 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::chart::fit_px_per_us;
 
     /// A window tall enough that the strip stands at the height it is opened to,
     /// split for a profile with `n` counters and lanes short enough that the
@@ -1637,6 +1641,23 @@ mod tests {
         assert_eq!(track.size.height, px(SCROLLBAR_THICKNESS));
         assert_eq!(track.origin.y + track.size.height, px(regions.flame_bottom));
         assert!(regions.in_flame(track.origin));
+    }
+
+    /// A view sitting on the zoom floor holds the whole span in sight, so there
+    /// is nothing to pan to and no time bar.
+    #[test]
+    fn a_view_at_the_zoom_floor_has_no_time_bar() {
+        let regions = counters_split(3, CountersStrip::Open(DEFAULT_COUNTERS_HEIGHT));
+        let span = TimeSpan {
+            start_us: 0,
+            end_us: 1_000_000,
+        };
+        let tv = TimeView::fit(span, regions.time_w, EDGE_MARGIN_PX);
+        assert!(
+            scrollbar_geom(span, tv, 0.0, regions, 0.0, 0.0)
+                .time
+                .is_none()
+        );
     }
 
     /// The divider stands for as long as there are counters to resize, shut or
