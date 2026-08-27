@@ -209,11 +209,14 @@ enum Drag {
 
 /// Height of a group header band and of a group's "show more" row.
 const GROUP_BAND_HEIGHT: f32 = 18.0;
-/// Side of the show-all icon at a group band's gutter edge.
+/// Side of a group band's fold and show-all icons.
 const GROUP_ICON: f32 = 12.0;
-/// Indent of a pool header's gutter label under its group band's label, one
-/// nesting step in.
-const FAMILY_LABEL_INDENT: f32 = 10.0;
+/// Indent of a group band's gutter label, clearing the fold icon at the gutter's
+/// leading edge.
+const GROUP_LABEL_INDENT: f32 = GROUP_ICON + SLICE_TEXT_PAD;
+/// Indent of a pool header's gutter label, one nesting step inside the column
+/// its group band's label starts at.
+const FAMILY_LABEL_INDENT: f32 = GROUP_LABEL_INDENT + 10.0;
 /// Least gap kept between a header row's name and the count at its trailing edge.
 const HEADER_COUNT_GAP: f32 = 6.0;
 /// Lanes shown per group before the rest fold behind the band's show-all toggle.
@@ -1260,7 +1263,7 @@ struct HeaderRow<'a> {
     top: f32,
     name: &'a str,
     count: &'a str,
-    /// Inset of the name from the gutter's text inset, one nesting step per level.
+    /// Width held at the row's leading edge, ahead of the name.
     indent: f32,
     /// Width held at the row's trailing edge for an icon drawn over it.
     reserved: f32,
@@ -1307,7 +1310,7 @@ fn paint_header_row(
     Some(top)
 }
 
-/// Paints each group header band's chevron, class name, and shown/total lane
+/// Paints each group header band's caret, class name, and shown/total lane
 /// count; a capped, expanded group shows a caret-double icon at the gutter's right
 /// edge — down to show every lane, up to show only the leading ones.
 fn paint_group_bands(
@@ -1323,8 +1326,6 @@ fn paint_group_bands(
     let palette = g.palette;
     for band in &chrome.bands {
         let show_icon = band.capped && !band.collapsed;
-        let chevron = if band.collapsed { "▸" } else { "▾" };
-        let name = format!("{chevron} {}", group_label(band.class));
         let count = header_count((!band.collapsed).then_some(band.shown), band.total);
         let Some(top) = paint_header_row(
             g,
@@ -1332,9 +1333,9 @@ fn paint_group_bands(
             scroll_y,
             HeaderRow {
                 top: band.top,
-                name: &name,
+                name: group_label(band.class),
                 count: &count,
-                indent: 0.0,
+                indent: GROUP_LABEL_INDENT,
                 reserved: if show_icon {
                     GROUP_ICON + SLICE_TEXT_PAD
                 } else {
@@ -1347,24 +1348,58 @@ fn paint_group_bands(
         ) else {
             continue;
         };
+        paint_band_icon(
+            if band.collapsed {
+                "caret-right"
+            } else {
+                "caret-down"
+            },
+            gutter_left + SLICE_TEXT_PAD,
+            top,
+            palette.label.into(),
+            window,
+            cx,
+        );
         if show_icon {
             let name = if band.show_all {
                 "caret-double-up"
             } else {
                 "caret-double-down"
             };
-            let ix = gutter_left + gutter_width - GROUP_ICON - SLICE_TEXT_PAD;
-            let iy = top + (GROUP_BAND_HEIGHT - GROUP_ICON) / 2.0;
-            let _ = window.paint_svg(
-                Bounds::new(point(px(ix), px(iy)), size(px(GROUP_ICON), px(GROUP_ICON))),
-                SharedString::from(format!("assets/regular/{name}.svg")),
-                None,
-                TransformationMatrix::default(),
+            paint_band_icon(
+                name,
+                gutter_left + gutter_width - GROUP_ICON - SLICE_TEXT_PAD,
+                top,
                 palette.marker.into(),
+                window,
                 cx,
             );
         }
     }
+}
+
+/// Paints one of a group band's icons, square and vertically centred in the band
+/// whose screen-space top is `top`.
+fn paint_band_icon(
+    name: &str,
+    left: f32,
+    top: f32,
+    color: Hsla,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let iy = top + (GROUP_BAND_HEIGHT - GROUP_ICON) / 2.0;
+    let _ = window.paint_svg(
+        Bounds::new(
+            point(px(left), px(iy)),
+            size(px(GROUP_ICON), px(GROUP_ICON)),
+        ),
+        SharedString::from(format!("assets/regular/{name}.svg")),
+        None,
+        TransformationMatrix::default(),
+        color,
+        cx,
+    );
 }
 
 /// Paints each pool header's name and shown/total lane count, indented under the

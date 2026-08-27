@@ -174,16 +174,17 @@ fn sort_stats(rows: &[StatRow], column: StatsColumn, desc: bool) -> Vec<u32> {
 /// key column ellipsizes: a right-aligned numeric cell with `text_ellipsis`
 /// truncates values that already fit, so its fixed width is just sized to hold
 /// the longest value instead.
-fn stats_cell(spec: &StatsColumnSpec, text: impl Into<SharedString>) -> Div {
+fn stats_cell(spec: &StatsColumnSpec, content: impl IntoIterator<Item = impl IntoElement>) -> Div {
     let cell = div()
         .flex()
         .flex_row()
         .items_center()
+        .gap_1()
         .h_full()
         .px(px(STATS_CELL_PAD))
         .overflow_hidden()
         .whitespace_nowrap()
-        .child(text.into());
+        .children(content);
     match spec.width {
         Some(w) => cell.w(px(w)).flex_shrink_0().justify_end(),
         None => cell.flex_1().min_w_0().text_ellipsis(),
@@ -304,23 +305,28 @@ impl StatsPanel {
             .text_color(palette.label)
             .children(STATS_COLUMNS.iter().enumerate().map(|(i, spec)| {
                 let column = spec.column;
-                let glyph = if self.stats_sort != column {
-                    None
-                } else if self.stats_desc {
-                    Some('▾')
-                } else {
-                    Some('▴')
-                };
-                let label = column_header(column, labels);
+                let caret = (self.stats_sort == column).then(|| {
+                    let name = if self.stats_desc {
+                        "caret-down"
+                    } else {
+                        "caret-up"
+                    };
+                    bviz_ui_assets::icon(name)
+                        .size(px(STATS_TEXT_SIZE))
+                        .flex_shrink_0()
+                        .text_color(palette.label)
+                        .into_any_element()
+                });
+                let label = column_header(column, labels).into_any_element();
                 // Place the caret on the side away from the text's anchor so the
                 // label can't shift as the sort indicator moves: left of a
                 // right-aligned numeric value, right of the left-aligned key.
-                let text = match (glyph, spec.width.is_some()) {
-                    (Some(g), true) => format!("{g} {label}"),
-                    (Some(g), false) => format!("{label} {g}"),
-                    (None, _) => label.to_string(),
+                let content = match (caret, spec.width.is_some()) {
+                    (Some(caret), true) => vec![caret, label],
+                    (Some(caret), false) => vec![label, caret],
+                    (None, _) => vec![label],
                 };
-                stats_cell(spec, text)
+                stats_cell(spec, content)
                     .id(SharedString::from(format!("stats-h-{i}")))
                     .cursor_pointer()
                     .hover(|s| s.bg(palette.hover))
@@ -376,7 +382,7 @@ impl StatsPanel {
                             StatsColumn::Max => format_duration(row.max_us).into(),
                             StatsColumn::Percent => format!("{pct:.1}%").into(),
                         };
-                        stats_cell(spec, text)
+                        stats_cell(spec, [text])
                     });
                     // The row's fill runs under the reserved scroll-bar strip
                     // as well as under the cells, and only the cells take a

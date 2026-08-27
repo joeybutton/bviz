@@ -18,6 +18,9 @@ use gpui::{
     div, point, prelude::*, px, size,
 };
 
+/// Side of the menu's caret icons.
+const MENU_ICON: Pixels = px(12.);
+
 /// What a left-button drag over the tracks menu is currently moving.
 #[derive(Clone, Copy)]
 enum MenuDrag {
@@ -218,7 +221,7 @@ impl TracksMenu {
         rows
     }
 
-    /// A group header: a chevron and how many of the tracks listed under it are
+    /// A group header: a caret and how many of the tracks listed under it are
     /// visible, folding the group's track list on click. Its trailing control
     /// toggles the whole group's visibility without also folding.
     fn group_row(
@@ -239,7 +242,6 @@ impl TracksMenu {
         };
         let group_all_visible = n_visible == tracks.len();
         let listed = tracks.len();
-        let chevron = if folded { "▸" } else { "▾" };
         div()
             .id(SharedString::from(format!("track-group-{group}")))
             .flex()
@@ -256,12 +258,24 @@ impl TracksMenu {
                 this.toggle_group_folded(group, listed);
                 cx.notify();
             }))
-            .child(format!(
-                "{chevron} {}  {}/{} visible",
-                group_label(class),
-                n_visible,
-                tracks.len()
-            ))
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_1()
+                    .child(
+                        bviz_ui_assets::icon(if folded { "caret-right" } else { "caret-down" })
+                            .size(MENU_ICON)
+                            .text_color(palette.label),
+                    )
+                    .child(format!(
+                        "{}  {}/{} visible",
+                        group_label(class),
+                        n_visible,
+                        tracks.len()
+                    )),
+            )
             .child(
                 div()
                     .id(SharedString::from(format!("track-group-vis-{group}")))
@@ -526,7 +540,7 @@ impl Render for TracksMenu {
             )
             .child(
                 bviz_ui_assets::icon("caret-down")
-                    .size(px(12.))
+                    .size(MENU_ICON)
                     .text_color(palette.label),
             );
         // An anchor at the corner holds the trigger and, below it, the popover.
