@@ -181,10 +181,17 @@ through the app's `AssetSource` (`application().with_assets(MyAssets)`) and tint
 with the text color (so single-color icon sets like Phosphor just work). In this repo the
 Phosphor SVGs come from an `http_archive` and are embedded the same way; the `AssetSource`
 serves them from the baked-in bytes — see the `//ui/assets` library and the `phosphor` archive.
+`Svg::paint` reads that colour from the element's **own** `StyleRefinement`, not from the
+inherited text cascade, so an icon under a `text_color`ed ancestor draws nothing until it
+carries its own `.text_color(…)`.
+
 Reach for a Phosphor icon (`bviz_ui_assets::icon("name")`) before drawing a shape by hand:
 the set is large and consistent, and an icon rotated/animated (e.g. `circle-notch` for a
-spinner) beats a bespoke `canvas` path. Only fall back to hand-drawn
-`canvas`/`PathBuilder` graphics when no icon fits.
+spinner) beats a bespoke `canvas` path. Prefer one over a Unicode shape glyph too — the
+embedded Inter carries `U+25B2/25B6/25BC/25C0` (`▲▶▼◀`) but none of the small
+`U+25B4/25B8/25BE/25C2` (`▴▸▾◂`), so those resolve through whatever the host offers, in
+another typeface or not at all. Only fall back to hand-drawn `canvas`/`PathBuilder` graphics
+when no icon fits.
 
 Only an explicit allowlist of icons is embedded, not the whole Phosphor set (which is
 thousands of files). To use a new icon, add it to the allowlist — that is the right move, not
