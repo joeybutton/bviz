@@ -128,9 +128,9 @@ pub(crate) struct Regions {
     ruler_top: f32,
     /// Top of the flame lanes (ruler bottom).
     pub(crate) flame_top: f32,
-    /// Bottom of the scrollable flame lanes; the time horizontal bar sits below.
+    /// Bottom of the scrollable flame lanes, which meet the divider.
     pub(crate) flame_bottom: f32,
-    /// Top of the divider (below the flame region and its horizontal bar).
+    /// Top of the divider band.
     divider_top: f32,
     /// Top of the counters strip, which is the divider's bottom.
     pub(crate) counters_top: f32,
@@ -170,10 +170,8 @@ impl Regions {
             true => (counters_top - band).max(oy),
             false => counters_top,
         };
-        // The flame region: ruler at the top, scrollable lanes, then a strip for
-        // the time horizontal bar always reserved above the divider.
         let flame_top = oy + RULER_HEIGHT;
-        let flame_bottom = (divider_top - SCROLLBAR_THICKNESS).max(flame_top);
+        let flame_bottom = divider_top.max(flame_top);
         // Clamp the stored gutter width to the current window: a widened gutter
         // shrunk under by a later window resize must still leave the time axis
         // its share rather than collapsing it.
@@ -340,9 +338,7 @@ impl CounterFit {
 /// window too short for both floors squeezes the strip: the flame chart is the
 /// timeline's subject and keeps its own.
 fn counters_bounds(vh: f32) -> (f32, f32) {
-    let max =
-        (vh - RULER_HEIGHT - SCROLLBAR_THICKNESS - COUNTERS_DIVIDER_HEIGHT - FLAME_MIN_HEIGHT)
-            .max(0.0);
+    let max = (vh - RULER_HEIGHT - COUNTERS_DIVIDER_HEIGHT - FLAME_MIN_HEIGHT).max(0.0);
     (COUNTER_LANE_HEIGHT.min(max), max)
 }
 
@@ -522,16 +518,32 @@ mod tests {
         assert_eq!(regions.max_counter_scroll(), 0.0);
     }
 
+    /// The flame lanes run down to the divider's top edge, so nothing stands
+    /// between the two but the divider band itself.
+    #[test]
+    fn the_flame_lanes_reach_the_divider() {
+        for strip in [
+            CountersStrip::Open(DEFAULT_COUNTERS_HEIGHT),
+            CountersStrip::Collapsed { restore: 220.0 },
+        ] {
+            let regions = split(COUNTERS, strip, TALL);
+            assert_eq!(regions.flame_bottom, regions.divider_top);
+        }
+        // A profile with no counters has no divider either, and its lanes reach
+        // the viewport's bottom edge.
+        let none = split(0, CountersStrip::Open(DEFAULT_COUNTERS_HEIGHT), TALL);
+        assert_eq!(none.flame_bottom, none.counters_bottom);
+    }
+
     /// A strip squeezed to nothing by a short window stands under a collapsed
     /// band, so the caret that brings it back is drawn across the band that is
     /// all the room it has left.
     #[test]
     fn a_strip_squeezed_to_nothing_stands_under_a_collapsed_band() {
         let strip = CountersStrip::Open(DEFAULT_COUNTERS_HEIGHT);
-        // The height that floors the ruler, the time bar, the divider band and
-        // the flame region together, leaving the strip nothing.
-        let floored =
-            RULER_HEIGHT + SCROLLBAR_THICKNESS + COUNTERS_DIVIDER_HEIGHT + FLAME_MIN_HEIGHT;
+        // The height that floors the ruler, the divider band and the flame
+        // region together, leaving the strip nothing.
+        let floored = RULER_HEIGHT + COUNTERS_DIVIDER_HEIGHT + FLAME_MIN_HEIGHT;
         for vh in [TALL, floored + 1.0] {
             let regions = split(COUNTERS, strip, vh);
             assert!(regions.shows_counters());

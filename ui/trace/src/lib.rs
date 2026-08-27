@@ -1021,12 +1021,15 @@ fn scrollbar_geom(
         counter_scroll,
         DEFAULT_MIN_THUMB,
     );
-    // The time horizontal track runs the full time axis in the strip below the
-    // flame lanes, ending left of the reserved vertical-bar column.
+    // The time horizontal track runs the full time axis along the flame lanes'
+    // bottom edge, ending left of the reserved vertical-bar column.
     let time = Scrollbar::new(
         Axis::Horizontal,
         Bounds::new(
-            point(px(regions.content_left), px(regions.flame_bottom)),
+            point(
+                px(regions.content_left),
+                px(regions.flame_bottom - SCROLLBAR_THICKNESS),
+            ),
             size(px(regions.time_w), px(SCROLLBAR_THICKNESS)),
         ),
         span_us + 2.0 * margin_us,
@@ -1544,6 +1547,7 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::chart::fit_px_per_us;
 
     /// A window tall enough that the strip stands at the height it is opened to,
     /// split for a profile with `n` counters and lanes short enough that the
@@ -1610,6 +1614,29 @@ mod tests {
         // Clear of the region on either axis: in the gutter, and in the ruler.
         assert!(!regions.in_flame(at(regions.content_left - 1.0, regions.flame_top)));
         assert!(!regions.in_flame(at(right - 1.0, regions.flame_top - 1.0)));
+    }
+
+    /// The time bar lies along the bottom edge of the flame lanes, inside the
+    /// region it pans, with its far edge on the divider.
+    #[test]
+    fn the_time_bar_lies_along_the_bottom_of_the_flame_lanes() {
+        let regions = counters_split(3, CountersStrip::Open(DEFAULT_COUNTERS_HEIGHT));
+        let span = TimeSpan {
+            start_us: 0,
+            end_us: 1_000_000,
+        };
+        // Zoomed well past the width the span fits, so there is time to pan to.
+        let tv = TimeView {
+            start_us: 0.0,
+            px_per_us: 2.0 * fit_px_per_us(span, regions.time_w, EDGE_MARGIN_PX),
+        };
+        let track = scrollbar_geom(span, tv, 0.0, regions, 0.0, 0.0)
+            .time
+            .expect("a zoomed view has time to pan to")
+            .track();
+        assert_eq!(track.size.height, px(SCROLLBAR_THICKNESS));
+        assert_eq!(track.origin.y + track.size.height, px(regions.flame_bottom));
+        assert!(regions.in_flame(track.origin));
     }
 
     /// The divider stands for as long as there are counters to resize, shut or
