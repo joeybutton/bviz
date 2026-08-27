@@ -16,7 +16,7 @@ pub use console::register_keys;
 use bviz_terminal::Replay;
 use bviz_ui_components::Pending;
 use bviz_ui_console_args::{ConsoleArgs, ConsoleSource};
-use bviz_ui_workspace::{AnyPanel, PanelGroup, document_label};
+use bviz_ui_workspace::{AnyPanel, PanelGroup, Weight, document_label};
 use clap::error::ErrorKind;
 use clap::{CommandFactory, Parser};
 use console::ConsolePanel;
@@ -49,7 +49,8 @@ impl From<ConsoleSource> for Load {
 /// A panel replaying the build `load` reads.
 pub fn open(load: impl Into<Load>, _window: &mut Window, cx: &mut App) -> PanelGroup {
     let load = load.into();
-    PanelGroup::One(AnyPanel::new(cx.new(|cx| ConsolePanel::new(load, cx))))
+    PanelGroup::one(AnyPanel::new(cx.new(|cx| ConsolePanel::new(load, cx))))
+        .with_weight(Weight::LOG)
 }
 
 /// Replays the console output of a Bazel build. Each file given opens a replay

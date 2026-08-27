@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 /// The share of a split's extent neither side may be squeezed below, so a
 /// divider dragged to one end leaves the pane it shrinks visible and its own
 /// divider still within reach.
-const MIN_PANE_SHARE: f32 = 0.05;
+pub(crate) const MIN_PANE_SHARE: f32 = 0.05;
 
 /// The share a split gives its first side when nothing asks for another.
 const EVEN_SHARE: f32 = 0.5;

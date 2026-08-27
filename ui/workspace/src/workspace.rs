@@ -105,8 +105,8 @@ impl Workspace {
 
     /// Builds a workspace framing a region of the window per document: `first`
     /// across the top and each of `others` under it in the order given, every
-    /// region an even share of the height and laid out as its own group
-    /// describes. Panels that share a title are numbered.
+    /// region laid out as its own group describes. Panels that share a title are
+    /// numbered.
     pub fn with_groups(
         app_name: impl Into<SharedString>,
         first: PanelGroup,
@@ -175,7 +175,7 @@ impl Workspace {
         // window is open — so a source window that closes for want of panes is
         // never the last one, whose closing quits the application.
         bviz_ui_shell::open_window(&self.app_name, size, cx, move |window, cx| {
-            cx.new(|cx| Self::new(app_name, PanelGroup::One(panel), window, cx))
+            cx.new(|cx| Self::new(app_name, PanelGroup::one(panel), window, cx))
         })
         .expect("a window opens for the detached panel");
     }

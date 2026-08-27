@@ -8,7 +8,7 @@ mod pane;
 mod panel;
 mod workspace;
 
-pub use group::PanelGroup;
+pub use group::{PanelGroup, Weight};
 pub use layout::{Layout, Panes, Removal, Split, SplitId};
 pub use pane::{Pane, PaneEvent};
 pub use panel::{AnyPanel, Panel, PanelEvent, PanelKind, document_label};
