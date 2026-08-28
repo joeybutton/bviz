@@ -566,12 +566,13 @@ impl Panel for StatsPanel {
     fn kind() -> PanelKind {
         PanelKind {
             view: ViewKind::new("trace-stats"),
+            label: "Stats",
             key_context: STATS_KEY_CONTEXT,
         }
     }
 
     fn title(&self, _cx: &App) -> SharedString {
-        "Stats".into()
+        Self::kind().label.into()
     }
 
     fn status(&self, cx: &App) -> Option<SharedString> {

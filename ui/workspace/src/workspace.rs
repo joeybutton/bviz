@@ -1,3 +1,4 @@
+use crate::documents_menu::DocumentsMenu;
 use crate::{
     AnyPanel, Document, Documents, Layout, Pane, PaneEvent, PanelGroup, Removal, Split, SplitId,
 };
@@ -19,7 +20,8 @@ actions!(
         ClosePanel,
         DetachPanel,
         SplitHorizontal,
-        SplitVertical
+        SplitVertical,
+        ToggleDocuments
     ]
 );
 
@@ -42,6 +44,7 @@ pub(crate) fn register_keys(cx: &mut App) {
         KeyBinding::new("secondary-shift-n", DetachPanel, Some(KEY_CONTEXT)),
         KeyBinding::new("secondary-shift-h", SplitHorizontal, Some(KEY_CONTEXT)),
         KeyBinding::new("secondary-shift-v", SplitVertical, Some(KEY_CONTEXT)),
+        KeyBinding::new("secondary-shift-d", ToggleDocuments, Some(KEY_CONTEXT)),
     ]);
 }
 
@@ -60,6 +63,9 @@ pub struct Workspace {
     window: AnyWindowHandle,
     layout: Layout,
     active: Entity<Pane>,
+    /// The status bar's list of the session's documents, through which a view
+    /// closed here or shown in another window is brought into this one.
+    documents_menu: Entity<DocumentsMenu>,
     /// The events of every pane of `layout`, each retired as its pane leaves.
     pane_events: HashMap<EntityId, Subscription>,
     /// The split whose divider is being dragged, while one is.
@@ -88,19 +94,21 @@ impl Workspace {
             pane
         });
         let active = layout.first_pane().clone();
+        let this = cx.weak_entity();
+        let documents_menu = cx.new(|cx| DocumentsMenu::new(this.clone(), window, cx));
         let mut workspace = Self {
             app_name: app_name.into(),
             window_focus: cx.focus_handle(),
             window: window.window_handle(),
             layout,
             active,
+            documents_menu,
             pane_events: HashMap::new(),
             divider_drag: None,
         };
         for pane in panes {
             workspace.watch(&pane, window, cx);
         }
-        let this = cx.weak_entity();
         Documents::global(cx).update(cx, |documents, _| documents.watch_workspace(this));
         // Every pane took focus as it was built, so the last one built holds it;
         // the window opens on the leading panel instead.
@@ -443,6 +451,7 @@ impl Render for Workspace {
         };
         let chrome = Chrome::new(&self.window_focus)
             .title(window_title(&self.app_name, &panel, cx))
+            .menu(self.documents_menu.clone())
             .child(body);
         let chrome = match panel.status(cx) {
             Some(status) => chrome.status(status),
@@ -475,6 +484,13 @@ impl Render for Workspace {
             .on_action(cx.listener(|workspace, _: &SplitVertical, window, cx| {
                 workspace.split_active(Axis::Vertical, window, cx);
             }))
+            // Not a listener: `toggle` reads this workspace.
+            .on_action({
+                let menu = self.documents_menu.clone();
+                move |_: &ToggleDocuments, window, cx| {
+                    menu.update(cx, |menu, cx| menu.toggle(window, cx));
+                }
+            })
             .child(chrome)
     }
 }

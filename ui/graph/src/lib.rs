@@ -441,6 +441,7 @@ impl Panel for GraphPanel {
     fn kind() -> PanelKind {
         PanelKind {
             view: ViewKind::new("graph"),
+            label: "Graph",
             key_context: KEY_CONTEXT,
         }
     }

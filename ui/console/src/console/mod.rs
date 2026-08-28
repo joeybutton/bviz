@@ -792,6 +792,7 @@ impl Panel for ConsolePanel {
     fn kind() -> PanelKind {
         PanelKind {
             view: ViewKind::new("console"),
+            label: "Console",
             key_context: CONSOLE_KEY_CONTEXT,
         }
     }

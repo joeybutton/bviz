@@ -664,12 +664,13 @@ impl Panel for FlamePanel {
     fn kind() -> PanelKind {
         PanelKind {
             view: ViewKind::new("trace-flame-graph"),
+            label: "Flame Graph",
             key_context: FLAME_KEY_CONTEXT,
         }
     }
 
     fn title(&self, _cx: &App) -> SharedString {
-        "Flame Graph".into()
+        Self::kind().label.into()
     }
 
     fn status(&self, cx: &App) -> Option<SharedString> {

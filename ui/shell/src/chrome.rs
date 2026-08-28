@@ -36,6 +36,7 @@ pub struct Chrome {
     /// The root view's focus handle, so the lifecycle/tab actions dispatch here.
     focus_handle: FocusHandle,
     title: SharedString,
+    menu: Option<AnyElement>,
     status: Option<AnyElement>,
     body: Option<AnyElement>,
 }
@@ -45,6 +46,7 @@ impl Chrome {
         Self {
             focus_handle: focus_handle.clone(),
             title: SharedString::default(),
+            menu: None,
             status: None,
             body: None,
         }
@@ -52,6 +54,13 @@ impl Chrome {
 
     pub fn title(mut self, title: impl Into<SharedString>) -> Self {
         self.title = title.into();
+        self
+    }
+
+    /// A window-wide control at the leading edge of the status bar, ahead of the
+    /// panel's status.
+    pub fn menu(mut self, menu: impl IntoElement) -> Self {
+        self.menu = Some(menu.into_any_element());
         self
     }
 
@@ -106,7 +115,7 @@ impl RenderOnce for Chrome {
                 this.child(title_bar(&colors, radius, band, self.title, move_latch))
             })
             .child(self.body.unwrap_or_else(|| div().into_any_element()))
-            .child(status_bar(&colors, radius, band, self.status));
+            .child(status_bar(&colors, radius, band, self.menu, self.status));
 
         div()
             .id("window-backdrop")
@@ -293,12 +302,14 @@ fn status_bar(
     colors: &ThemeColors,
     radius: Pixels,
     band: Rgba,
+    menu: Option<AnyElement>,
     status: Option<AnyElement>,
 ) -> impl IntoElement {
     div()
         .flex()
         .flex_row()
         .items_center()
+        .gap_2()
         .h(px(24.))
         .px_2()
         .rounded_bl(radius)
@@ -308,8 +319,8 @@ fn status_bar(
         .border_color(colors.border)
         .text_color(colors.text_muted)
         .text_sm()
-        .font_family(bviz_ui_assets::MONO)
-        .children(status)
+        .children(menu)
+        .child(div().font_family(bviz_ui_assets::MONO).children(status))
 }
 
 /// A behind-the-content canvas that updates the resize cursor near the edges.

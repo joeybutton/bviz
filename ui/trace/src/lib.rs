@@ -538,6 +538,7 @@ impl Panel for TracePanel {
     fn kind() -> PanelKind {
         PanelKind {
             view: ViewKind::new("trace"),
+            label: "Timeline",
             key_context: TRACE_KEY_CONTEXT,
         }
     }

@@ -1,9 +1,11 @@
 //! The window's root: a [`Workspace`] framing an arrangement of [`Pane`]s in the
 //! application chrome, the panels ([`AnyPanel`]) each pane holds and shows one
-//! of, the [`Documents`] registry of what every window's panels show views of,
-//! and [`run_panels`] for an app whose window frames them.
+//! of, the [`Documents`] registry of what every window's panels show views of
+//! and the menu listing it, and [`run_panels`] for an app whose window frames
+//! them.
 
 mod documents;
+mod documents_menu;
 mod group;
 mod layout;
 mod pane;

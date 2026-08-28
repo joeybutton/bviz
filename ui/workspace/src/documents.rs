@@ -10,6 +10,14 @@ use std::rc::Rc;
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct DocumentId(u64);
 
+impl DocumentId {
+    /// An identity for a test that stands in for the registry minting them.
+    #[cfg(test)]
+    pub(crate) const fn for_test(id: u64) -> Self {
+        Self(id)
+    }
+}
+
 /// Builds a panel showing one view of a document. Takes no window, so a view can
 /// be minted wherever the reader asks for it.
 type Mint = Rc<dyn Fn(&mut App) -> AnyPanel>;
@@ -17,6 +25,7 @@ type Mint = Rc<dyn Fn(&mut App) -> AnyPanel>;
 /// One view a document can show, and how to build a panel showing it.
 pub struct ViewSpec {
     kind: ViewKind,
+    label: &'static str,
     mint: Mint,
 }
 
@@ -24,8 +33,10 @@ impl ViewSpec {
     /// The view panels of type `T` show, `mint` building one over whatever the
     /// document holds its content in.
     pub fn new<T: Panel>(mint: impl Fn(&mut App) -> Entity<T> + 'static) -> Self {
+        let kind = T::kind();
         Self {
-            kind: T::kind().view,
+            kind: kind.view,
+            label: kind.label,
             mint: Rc::new(move |cx| AnyPanel::new(mint(cx))),
         }
     }
@@ -53,6 +64,9 @@ pub struct OpenDocument {
 
 pub struct OpenView {
     pub kind: ViewKind,
+    /// How this view reads where it is listed among the ones its document can
+    /// show.
+    pub label: &'static str,
     pub state: ViewState,
 }
 
@@ -76,6 +90,7 @@ struct Registered {
 
 struct View {
     kind: ViewKind,
+    label: &'static str,
     mint: Mint,
     live: Option<Live>,
 }
@@ -178,6 +193,7 @@ impl Documents {
             for view in &document.views {
                 views.push(OpenView {
                     kind: view.kind,
+                    label: view.label,
                     state: state(view, &workspaces, cx),
                 });
             }
@@ -280,6 +296,7 @@ impl Documents {
                 .into_iter()
                 .map(|spec| View {
                     kind: spec.kind,
+                    label: spec.label,
                     mint: spec.mint,
                     live: None,
                 })
@@ -339,6 +356,7 @@ mod tests {
     fn spec(kind: ViewKind) -> ViewSpec {
         ViewSpec {
             kind,
+            label: kind.as_str(),
             mint: Rc::new(move |_| panic!("{} mints no panel here", kind.as_str())),
         }
     }

@@ -40,6 +40,8 @@ impl ViewKind {
 #[derive(Clone, Copy)]
 pub struct PanelKind {
     pub view: ViewKind,
+    /// The name the view goes by among the views its document can show.
+    pub label: &'static str,
     /// The gpui key context this panel's own key bindings are scoped to; unique
     /// across kinds, so such a binding reaches only this panel.
     pub key_context: &'static str,
