@@ -23,7 +23,7 @@ use chart::{fit_px_per_us, format_duration, format_time, nice_step, span_seconds
 
 pub use flame_panel::FlamePanel;
 use groups::{GroupChrome, group_label, lanes_headed_by_pool};
-use model::TraceModel;
+use model::{SourceReplaced, TraceModel};
 use regions::{CountersStrip, DividerGrab, DividerPress, Regions, clamp_gutter_width};
 pub use stats_panel::StatsPanel;
 use theme::Palette;
@@ -35,11 +35,12 @@ use bviz_trace_layout::{LaneLayout, LaneMetrics, TimeSelection, TimeView};
 use bviz_trace_profile::{Profile, Slice, TimeSpan};
 use bviz_ui_components::{
     Axis, Button, DEFAULT_MIN_THUMB, Divider, DividerSide, DragEnd, Pending, SCROLLBAR_THICKNESS,
-    Scrollbar, load_in_background, overlay_canvas, paint_tooltip_box, track_drag,
+    Scrollbar, overlay_canvas, paint_tooltip_box, track_drag,
 };
 use bviz_ui_trace_args::{TraceArgs, TraceSource};
 use bviz_ui_workspace::{
-    AnyPanel, Document, Panel, PanelEvent, PanelGroup, PanelKind, ViewKind, Weight, document_label,
+    Document, Documents, Panel, PanelEvent, PanelGroup, PanelKind, ViewKind, ViewSpec, Weight,
+    document_label,
 };
 use clap::error::ErrorKind;
 use clap::{CommandFactory, Parser};
@@ -47,8 +48,8 @@ use gpui::{
     AnyElement, App, AvailableSpace, Bounds, ContentMask, Context, Div, Edges, Element, ElementId,
     Entity, EventEmitter, FocusHandle, Focusable, GlobalElementId, Hsla, InspectorElementId,
     IntoElement, KeyBinding, LayoutId, MouseDownEvent, Pixels, Point, Position, Render,
-    ScrollHandle, SharedString, Style, Task, TextAlign, TransformationMatrix, Window, div, fill,
-    point, prelude::*, px, relative, size,
+    ScrollHandle, SharedString, Style, Subscription, TextAlign, TransformationMatrix, Window, div,
+    fill, point, prelude::*, px, relative, size,
 };
 use std::sync::Arc;
 
@@ -241,18 +242,25 @@ pub struct TracePanel {
     /// Width of the left label gutter, set by its drag handle; clamped on use.
     gutter_width: f32,
     tracks_menu: Entity<TracksMenu>,
-    /// Holds the background load task so it isn't cancelled on drop.
-    _load_task: Task<()>,
+    /// Drops the view-local state a freshly loaded document leaves addressing
+    /// nothing: the timeline's scroll and cached scene, and the tracks-menu fold
+    /// state the model does not seed.
+    _source_replaced: Subscription,
 }
 
 impl TracePanel {
-    fn new(load: Load, model: Entity<TraceModel>, cx: &mut Context<Self>) -> Self {
-        let load_task = load_in_background(
-            cx,
-            move || load.profile.join(),
-            |view, result, cx| view.on_profile_loaded(result, cx),
-        );
-        let title = load.title;
+    pub(crate) fn new(
+        title: SharedString,
+        model: Entity<TraceModel>,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let source_replaced = cx.subscribe(&model, |panel, _, _: &SourceReplaced, cx| {
+            panel.timeline.update(cx, |t, _| t.reset_for_new_profile());
+            panel
+                .tracks_menu
+                .update(cx, |m, _| m.reset_for_new_profile());
+            panel.invalidate_timeline(cx);
+        });
         // A view that reaches back here takes a weak handle, so this panel's own
         // handle to it is what keeps it alive.
         let timeline = {
@@ -273,7 +281,7 @@ impl TracePanel {
             counters: CountersStrip::Open(DEFAULT_COUNTERS_HEIGHT),
             gutter_width: DEFAULT_GUTTER_WIDTH,
             tracks_menu,
-            _load_task: load_task,
+            _source_replaced: source_replaced,
         }
     }
 
@@ -283,24 +291,6 @@ impl TracePanel {
     fn invalidate_timeline(&self, cx: &mut Context<Self>) {
         self.timeline.update(cx, |t, cx| t.invalidate_canvas(cx));
         cx.notify();
-    }
-
-    fn on_profile_loaded(&mut self, result: Result<Profile, String>, cx: &mut Context<Self>) {
-        self.timeline.update(cx, |t, _| t.reset_for_new_profile());
-        let source = match result {
-            Ok(profile) => Source::Loaded(Arc::new(profile)),
-            Err(err) => Source::Failed(err),
-        };
-        // The tracks-menu fold state, unlike the document-derived selection the
-        // model seeds, is view-local, so reset it here for a freshly loaded
-        // profile.
-        let loaded = matches!(source, Source::Loaded(_));
-        self.model.update(cx, |m, cx| m.set_source(source, cx));
-        if loaded {
-            self.tracks_menu
-                .update(cx, |m, _| m.reset_for_new_profile());
-        }
-        self.invalidate_timeline(cx);
     }
 
     /// The whole trace body: the [`Timeline`] filling the viewport (it paints
@@ -1541,16 +1531,27 @@ impl From<TraceSource> for Load {
 /// flame graph and stats that aggregate whatever tracks it has selected.
 pub fn open(load: impl Into<Load>, _window: &mut Window, cx: &mut App) -> Document {
     let load = load.into();
-    let label = load.title.clone();
-    let model = cx.new(|_| TraceModel::new());
-    let timeline = cx.new(|cx| TracePanel::new(load, model.clone(), cx));
-    let flame = cx.new(|cx| FlamePanel::new(model.clone(), cx));
-    let stats = cx.new(|cx| StatsPanel::new(model, cx));
+    let label = load.title;
+    let model = cx.new(|cx| TraceModel::reading(load.profile, cx));
+    let views = [
+        ViewSpec::new({
+            let (label, model) = (label.clone(), model.clone());
+            move |cx| cx.new(|cx| TracePanel::new(label.clone(), model.clone(), cx))
+        }),
+        ViewSpec::new({
+            let model = model.clone();
+            move |cx| cx.new(|cx| FlamePanel::new(model.clone(), cx))
+        }),
+        ViewSpec::new(move |cx| cx.new(|cx| StatsPanel::new(model.clone(), cx))),
+    ];
+    let documents = Documents::global(cx);
+    let (_, [timeline, flame, stats]) =
+        documents.update(cx, |documents, cx| documents.open(label.clone(), views, cx));
     let panels = PanelGroup::split(
         gpui::Axis::Vertical,
         TIMELINE_SHARE,
-        PanelGroup::one(AnyPanel::new(timeline)),
-        PanelGroup::tabs(AnyPanel::new(flame), vec![AnyPanel::new(stats)]),
+        PanelGroup::one(timeline),
+        PanelGroup::tabs(flame, vec![stats]),
     )
     .with_weight(Weight::CHART);
     Document::new(label, panels)

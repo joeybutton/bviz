@@ -9,7 +9,8 @@ use bviz_trace_layout::{
     FlameMode, LaneLayout, ScopeAggregate, TimeSelection, TrackFlamer, lay_out_lanes,
 };
 use bviz_trace_profile::{LaneClass, Profile};
-use gpui::{Context, EventEmitter};
+use bviz_ui_components::{Pending, load_in_background};
+use gpui::{Context, EventEmitter, Task};
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -30,9 +31,9 @@ pub(crate) struct AggregateBuildStarted;
 pub(crate) struct SourceReplaced;
 
 /// The shared trace document and the selection and visibility state derived from
-/// it, plus the layouts and aggregates cached from those. Held by
-/// [`crate::TracePanel`] as an entity so every panel reads one source of truth; a
-/// panel's own view state stays on the panel.
+/// it, plus the layouts and aggregates cached from those. Shared as an entity by
+/// every view of one profile, so each reads one source of truth; a view's own
+/// state stays on its panel.
 pub(crate) struct TraceModel {
     source: Source,
     /// The full thread/counter lane layout for the loaded profile, built on first
@@ -96,13 +97,31 @@ pub(crate) struct TraceModel {
     /// Background-build bookkeeping for `aggregates`, keyed on
     /// `aggregate_key`.
     agg: Rebuild<u64>,
+    /// The read that fills `source`, held so that it is not cancelled.
+    _load: Task<()>,
 }
 
 impl EventEmitter<AggregateBuildStarted> for TraceModel {}
 impl EventEmitter<SourceReplaced> for TraceModel {}
 
 impl TraceModel {
-    pub(crate) fn new() -> Self {
+    /// The document `profile` is being read into, loaded once the read finishes
+    /// and failed where it does not.
+    pub(crate) fn reading(profile: Pending<Profile>, cx: &mut Context<Self>) -> Self {
+        Self::new(load_in_background(
+            cx,
+            move || profile.join(),
+            |model, result, cx| {
+                let source = match result {
+                    Ok(profile) => Source::Loaded(Arc::new(profile)),
+                    Err(err) => Source::Failed(err),
+                };
+                model.set_source(source, cx);
+            },
+        ))
+    }
+
+    fn new(load: Task<()>) -> Self {
         Self {
             source: Source::Loading,
             lanes: RefCell::new(None),
@@ -121,6 +140,7 @@ impl TraceModel {
             aggregates: None,
             flame_scan: None,
             agg: Rebuild::new(),
+            _load: load,
         }
     }
 
@@ -569,10 +589,17 @@ mod tests {
     use super::TraceModel;
     use crate::track_order::TrackSort;
     use bviz_trace_layout::{FlameDirection, FlameLabels, FlameMode};
+    use gpui::Task;
+
+    /// A document whose read has not finished, for exercising the state a panel
+    /// drives it through.
+    fn model() -> TraceModel {
+        TraceModel::new(Task::ready(()))
+    }
 
     #[test]
     fn re_choosing_the_standing_flame_mode_keys_no_rebuild() {
-        let mut model = TraceModel::new();
+        let mut model = model();
         let key = model.aggregate_key;
         let standing = model.flame_mode();
         assert!(!model.adopt_flame_mode(standing));
@@ -581,7 +608,7 @@ mod tests {
 
     #[test]
     fn re_choosing_the_standing_track_order_restacks_nothing() {
-        let mut model = TraceModel::new();
+        let mut model = model();
         assert!(!model.set_track_sort(model.track_sort()));
         assert!(model.set_track_sort(TrackSort::Weight));
         assert_eq!(model.track_sort(), TrackSort::Weight);
@@ -590,7 +617,7 @@ mod tests {
 
     #[test]
     fn each_half_of_the_flame_mode_keys_a_rebuild_of_its_own() {
-        let mut model = TraceModel::new();
+        let mut model = model();
         let key = model.aggregate_key;
 
         let inverted = FlameMode {

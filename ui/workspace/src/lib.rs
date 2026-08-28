@@ -1,13 +1,16 @@
 //! The window's root: a [`Workspace`] framing an arrangement of [`Pane`]s in the
 //! application chrome, the panels ([`AnyPanel`]) each pane holds and shows one
-//! of, and [`run_panels`] for an app whose window frames them.
+//! of, the [`Documents`] registry of what every window's panels show views of,
+//! and [`run_panels`] for an app whose window frames them.
 
+mod documents;
 mod group;
 mod layout;
 mod pane;
 mod panel;
 mod workspace;
 
+pub use documents::{DocumentId, Documents, OpenDocument, OpenView, ViewSpec, ViewState};
 pub use group::{PanelGroup, Weight};
 pub use layout::{Layout, Panes, Removal, Split, SplitId};
 pub use pane::{Pane, PaneEvent};

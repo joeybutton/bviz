@@ -72,6 +72,18 @@ impl Pane {
         &self.tabs[self.active].panel
     }
 
+    /// Which tab holds `panel`, if this pane holds it at all.
+    pub(crate) fn index_of(&self, panel: EntityId) -> Option<usize> {
+        self.tabs
+            .iter()
+            .position(|tab| tab.panel.entity_id() == panel)
+    }
+
+    /// The tab the pane shows.
+    pub(crate) fn showing(&self) -> usize {
+        self.active
+    }
+
     /// Shows the panel at `index` in place of the one on show.
     pub fn activate(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         if index == self.active || index >= self.tabs.len() {
@@ -121,16 +133,31 @@ impl Pane {
         self.detach(self.active, window, cx)
     }
 
-    /// Hands the panel on show to a caller that re-homes it in another window,
-    /// whether or not the pane holds others. Giving up its only panel leaves the
-    /// pane with nothing to show, so it is done ([`PaneEvent::Closed`]) just as
-    /// closing that panel leaves it.
     pub(crate) fn remove_active(
         &mut self,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyPanel {
-        if let Some(panel) = self.detach(self.active, window, cx) {
+        self.give_up(self.active, window, cx)
+    }
+
+    /// Hands `panel` over where this pane holds it, `None` where it does not.
+    pub(crate) fn remove(
+        &mut self,
+        panel: EntityId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyPanel> {
+        let index = self.index_of(panel)?;
+        Some(self.give_up(index, window, cx))
+    }
+
+    /// Hands the panel at `index` to a caller that re-homes it in another
+    /// window, whether or not the pane holds others. Giving up its only panel
+    /// leaves the pane with nothing to show, so it is done
+    /// ([`PaneEvent::Closed`]) just as closing that panel leaves it.
+    fn give_up(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) -> AnyPanel {
+        if let Some(panel) = self.detach(index, window, cx) {
             return panel;
         }
         let panel = self.active_panel().clone();
@@ -146,11 +173,7 @@ impl Pane {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(index) = self
-            .tabs
-            .iter()
-            .position(|tab| tab.panel.entity_id() == panel)
-        else {
+        let Some(index) = self.index_of(panel) else {
             return;
         };
         match event {

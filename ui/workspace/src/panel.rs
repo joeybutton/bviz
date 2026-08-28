@@ -136,6 +136,12 @@ impl AnyPanel {
         self.panel.view().entity_id()
     }
 
+    /// Calls `released` once this panel is dropped, which is the last pane
+    /// holding it letting go: a pane is a panel's only owner.
+    pub fn on_release(&self, cx: &App, released: impl FnOnce(&mut App) + 'static) -> Subscription {
+        self.panel.on_release(cx, Box::new(released))
+    }
+
     /// Marks the panel for a repaint of its own, which its pane owes it after
     /// frames that left it out.
     pub fn notify(&self, cx: &mut App) {
@@ -221,6 +227,7 @@ trait PanelOps {
     fn focus_handle(&self, cx: &App) -> FocusHandle;
     fn set_active(&self, active: bool, window: &mut Window, cx: &mut App);
     fn notify(&self, cx: &mut App);
+    fn on_release(&self, cx: &App, released: Box<dyn FnOnce(&mut App)>) -> Subscription;
     fn view(&self) -> AnyView;
     fn subscribe(&self, window: &Window, cx: &mut Context<Pane>) -> Subscription;
 }
@@ -252,6 +259,10 @@ impl<T: Panel> PanelOps for Entity<T> {
 
     fn notify(&self, cx: &mut App) {
         self.update(cx, |_, cx| cx.notify());
+    }
+
+    fn on_release(&self, cx: &App, released: Box<dyn FnOnce(&mut App)>) -> Subscription {
+        cx.observe_release(self, move |_, cx| released(cx))
     }
 
     fn view(&self) -> AnyView {

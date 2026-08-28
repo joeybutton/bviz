@@ -1,11 +1,13 @@
-use crate::{AnyPanel, Document, Layout, Pane, PaneEvent, PanelGroup, Removal, Split, SplitId};
+use crate::{
+    AnyPanel, Document, Documents, Layout, Pane, PaneEvent, PanelGroup, Removal, Split, SplitId,
+};
 use bviz_ui_components::{Divider, DragEnd, overlay_canvas, track_drag};
 use bviz_ui_shell::Chrome;
 use bviz_ui_theme::ThemeColors;
 use gpui::{
-    AnyElement, App, Axis, Bounds, Div, ElementId, Entity, EntityId, FocusHandle, IntoElement,
-    KeyBinding, Pixels, Point, Render, SharedString, Subscription, Window, actions, div,
-    prelude::*, px,
+    AnyElement, AnyWindowHandle, App, Axis, Bounds, Div, ElementId, Entity, EntityId, FocusHandle,
+    IntoElement, KeyBinding, Pixels, Point, Render, SharedString, Subscription, Window, actions,
+    div, prelude::*, px,
 };
 use std::collections::HashMap;
 
@@ -53,6 +55,9 @@ pub struct Workspace {
     /// Focus for the chrome, so the shell's window actions (quit, close, tab)
     /// dispatch here; the ancestor of every panel's own focus.
     window_focus: FocusHandle,
+    /// The window this workspace is the root of, through which a panel of
+    /// another window is taken out of the panes here.
+    window: AnyWindowHandle,
     layout: Layout,
     active: Entity<Pane>,
     /// The events of every pane of `layout`, each retired as its pane leaves.
@@ -86,6 +91,7 @@ impl Workspace {
         let mut workspace = Self {
             app_name: app_name.into(),
             window_focus: cx.focus_handle(),
+            window: window.window_handle(),
             layout,
             active,
             pane_events: HashMap::new(),
@@ -94,6 +100,8 @@ impl Workspace {
         for pane in panes {
             workspace.watch(&pane, window, cx);
         }
+        let this = cx.weak_entity();
+        Documents::global(cx).update(cx, |documents, _| documents.watch_workspace(this));
         // Every pane took focus as it was built, so the last one built holds it;
         // the window opens on the leading panel instead.
         let panel = workspace.active_panel(cx);
@@ -117,6 +125,52 @@ impl Workspace {
 
     pub fn active_pane(&self) -> &Entity<Pane> {
         &self.active
+    }
+
+    pub(crate) fn window(&self) -> AnyWindowHandle {
+        self.window
+    }
+
+    /// Whether the pane holding `panel` shows it; `None` where no pane here
+    /// holds it at all.
+    pub(crate) fn shows(&self, panel: EntityId, cx: &App) -> Option<bool> {
+        let (pane, index) = self.holder(panel, cx)?;
+        Some(pane.read(cx).showing() == index)
+    }
+
+    /// Brings `panel` forward in the pane holding it and makes that the active
+    /// pane, reporting whether this workspace holds it.
+    pub(crate) fn reveal(
+        &mut self,
+        panel: EntityId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some((pane, index)) = self.holder(panel, cx) else {
+            return false;
+        };
+        pane.update(cx, |pane, cx| pane.activate(index, window, cx));
+        self.activate_pane(pane, window, cx);
+        true
+    }
+
+    /// Takes `panel` out of the pane holding it, for a caller that re-homes it
+    /// in another window. `None` where no pane here holds it.
+    pub(crate) fn take_panel(
+        &mut self,
+        panel: EntityId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyPanel> {
+        let (pane, _) = self.holder(panel, cx)?;
+        pane.update(cx, |pane, cx| pane.remove(panel, window, cx))
+    }
+
+    /// The pane holding `panel` and the tab it holds it at.
+    fn holder(&self, panel: EntityId, cx: &App) -> Option<(Entity<Pane>, usize)> {
+        self.layout
+            .panes()
+            .find_map(|pane| pane.read(cx).index_of(panel).map(|at| (pane.clone(), at)))
     }
 
     pub fn active_panel(&self, cx: &App) -> AnyPanel {
