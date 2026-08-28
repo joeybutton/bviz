@@ -1,16 +1,18 @@
+use crate::relation::{Direction, Relation};
 use bviz_graph_layout::{Id, LaidOut};
 use std::collections::{HashMap, HashSet, VecDeque};
 
-/// What a hover marks out of the graph, empty where nothing is marked.
+/// What a marking picks out of the graph, empty where nothing is marked.
 pub(crate) struct Neighborhood {
-    /// The hovered node's subtree and its direct neighbors.
+    /// The marked node's subtree, together with the nodes the relation reaches
+    /// from it.
     pub(crate) boxes: HashSet<Id>,
-    /// The drawn connectors that reach those neighbors from the subtree.
+    /// The drawn connectors tying those together.
     pub(crate) edges: HashSet<(Id, Id)>,
 }
 
 impl Neighborhood {
-    fn none() -> Self {
+    pub(crate) fn none() -> Self {
         Self {
             boxes: HashSet::new(),
             edges: HashSet::new(),
@@ -18,14 +20,18 @@ impl Neighborhood {
     }
 }
 
-/// What hovering `hovered` marks. Its subtree is derived geometrically, the
-/// layout nesting a box's children within its own rect, so the boxes falling
-/// inside it are exactly its descendants.
-pub(crate) fn compute_neighborhood(g: &LaidOut, hovered: Option<Id>) -> Neighborhood {
-    let Some(hovered) = hovered else {
+/// What marking `of` under `relation` picks out. Its subtree is derived
+/// geometrically, the layout nesting a box's children within its own rect, so the
+/// boxes falling inside it are exactly its descendants.
+pub(crate) fn compute_neighborhood(
+    g: &LaidOut,
+    of: Option<Id>,
+    relation: Relation,
+) -> Neighborhood {
+    let Some(of) = of else {
         return Neighborhood::none();
     };
-    let Some(h) = g.boxes.iter().find(|b| b.id == hovered) else {
+    let Some(h) = g.boxes.iter().find(|b| b.id == of) else {
         return Neighborhood::none();
     };
     let subtree: HashSet<Id> = g
@@ -39,55 +45,155 @@ pub(crate) fn compute_neighborhood(g: &LaidOut, hovered: Option<Id>) -> Neighbor
         })
         .map(|b| b.id)
         .collect();
+    // A route drawn within the subtree runs between two marked boxes however far
+    // the relation reaches past it.
+    let edges: HashSet<(Id, Id)> = g
+        .connectors
+        .iter()
+        .filter(|c| subtree.contains(&c.from) && subtree.contains(&c.to))
+        .map(|c| (c.from, c.to))
+        .collect();
+    let mut marked = Neighborhood {
+        boxes: subtree.clone(),
+        edges,
+    };
+    match relation {
+        Relation::None => {}
+        Relation::Direct(direction) => mark_direct(g, &subtree, direction, &mut marked),
+        Relation::Transitive(direction) => mark_transitive(g, &subtree, direction, &mut marked),
+    }
+    marked
+}
+
+/// Marks the nodes one edge from `subtree`, and the drawn connectors reaching
+/// them.
+///
+/// Every drawn edge incident to the subtree is a surviving direct-neighbor edge
+/// — the drawn graph is a subset of the full connectivity — so mark them all; a
+/// compound box thus marks every member's neighbor edge in one go. A neighbor
+/// whose direct edge reduction dropped is reached by no such edge; for it alone,
+/// trace the shortest drawn path so it is not left floating. That path
+/// contributes edges only: its interior nodes are conduits, so the marked boxes
+/// hold the direct neighbors alone.
+fn mark_direct(
+    g: &LaidOut,
+    subtree: &HashSet<Id>,
+    direction: Direction,
+    marked: &mut Neighborhood,
+) {
     // The far endpoints are split by direction so the path tracing below follows
     // the dependency edges the right way.
-    let mut boxes: HashSet<Id> = subtree.clone();
     let mut out_targets: HashSet<Id> = HashSet::new();
     let mut in_targets: HashSet<Id> = HashSet::new();
     for &(from, to) in &g.full_edges {
         let (f_in, t_in) = (subtree.contains(&from), subtree.contains(&to));
-        if f_in && !t_in {
-            boxes.insert(to);
+        if f_in && !t_in && direction.outward() {
             out_targets.insert(to);
-        } else if t_in && !f_in {
-            boxes.insert(from);
+        } else if t_in && !f_in && direction.inward() {
             in_targets.insert(from);
         }
     }
-    // Every drawn edge incident to the subtree is a surviving direct-neighbor
-    // edge — the drawn graph is a subset of the full connectivity — so mark them
-    // all; a compound box thus marks every member's neighbor edge in one go. A
-    // neighbor whose direct edge reduction dropped is reached by no such edge;
-    // for it alone, trace the shortest drawn path so it is not left floating.
-    // That path contributes edges only: its interior nodes are conduits, so
-    // `boxes` holds the direct neighbors alone.
-    let mut edges: HashSet<(Id, Id)> = HashSet::new();
+    marked.boxes.extend(out_targets.iter().copied());
+    marked.boxes.extend(in_targets.iter().copied());
     for c in &g.connectors {
-        if subtree.contains(&c.from) || subtree.contains(&c.to) {
-            edges.insert((c.from, c.to));
+        if (subtree.contains(&c.from) && out_targets.contains(&c.to))
+            || (subtree.contains(&c.to) && in_targets.contains(&c.from))
+        {
+            marked.edges.insert((c.from, c.to));
         }
     }
     // Neighbors a drawn edge already reaches need no path.
-    let reached: HashSet<Id> = edges
+    let reached: HashSet<Id> = marked
+        .edges
         .iter()
         .flat_map(|&(f, t)| [f, t])
         .filter(|n| !subtree.contains(n))
         .collect();
     let out_missing: HashSet<Id> = out_targets.difference(&reached).copied().collect();
     let in_missing: HashSet<Id> = in_targets.difference(&reached).copied().collect();
-    // Indexing the connectors costs an entry per drawn edge, so build the
-    // adjacency only where a path has to be traced through it.
-    if !out_missing.is_empty() || !in_missing.is_empty() {
-        let mut out_adj: HashMap<Id, Vec<Id>> = HashMap::new();
-        let mut in_adj: HashMap<Id, Vec<Id>> = HashMap::new();
-        for c in &g.connectors {
-            out_adj.entry(c.from).or_default().push(c.to);
-            in_adj.entry(c.to).or_default().push(c.from);
-        }
-        trace_paths(&subtree, &out_missing, &out_adj, true, &mut edges);
-        trace_paths(&subtree, &in_missing, &in_adj, false, &mut edges);
+    if !out_missing.is_empty() {
+        let adj = adjacency(drawn_edges(g), true);
+        trace_paths(subtree, &out_missing, &adj, true, &mut marked.edges);
     }
-    Neighborhood { boxes, edges }
+    if !in_missing.is_empty() {
+        let adj = adjacency(drawn_edges(g), false);
+        trace_paths(subtree, &in_missing, &adj, false, &mut marked.edges);
+    }
+}
+
+/// Marks every node a path of edges reaches from `subtree`, and the drawn
+/// connectors running between marked nodes along the direction walked.
+///
+/// No path is traced here, unlike in a direct marking: a node a drawn path
+/// reaches is reachable over the full connectivity too — the drawn graph being a
+/// subset of it — and so is itself marked, which leaves every edge of that path
+/// running between two marked nodes and thus marked with them.
+fn mark_transitive(
+    g: &LaidOut,
+    subtree: &HashSet<Id>,
+    direction: Direction,
+    marked: &mut Neighborhood,
+) {
+    let outward = match direction.outward() {
+        true => reachable(&g.full_edges, subtree, true),
+        false => HashSet::new(),
+    };
+    let inward = match direction.inward() {
+        true => reachable(&g.full_edges, subtree, false),
+        false => HashSet::new(),
+    };
+    marked.boxes.extend(outward.iter().copied());
+    marked.boxes.extend(inward.iter().copied());
+    for c in &g.connectors {
+        let along =
+            outward.contains(&c.to) && (subtree.contains(&c.from) || outward.contains(&c.from));
+        let against =
+            inward.contains(&c.from) && (subtree.contains(&c.to) || inward.contains(&c.to));
+        if along || against {
+            marked.edges.insert((c.from, c.to));
+        }
+    }
+}
+
+/// Every node `edges` carries a walk from `subtree` to, following each edge from
+/// its source when `forward` and from its target otherwise. The subtree's own
+/// nodes are left out, so what comes back is what lies beyond it.
+fn reachable(edges: &[(Id, Id)], subtree: &HashSet<Id>, forward: bool) -> HashSet<Id> {
+    let adj = adjacency(edges.iter().copied(), forward);
+    let mut seen = subtree.clone();
+    let mut queue: VecDeque<Id> = subtree.iter().copied().collect();
+    let mut beyond = HashSet::new();
+    while let Some(u) = queue.pop_front() {
+        for &w in adj.get(&u).into_iter().flatten() {
+            if seen.insert(w) {
+                beyond.insert(w);
+                queue.push_back(w);
+            }
+        }
+    }
+    beyond
+}
+
+/// The node pairs the connectors of `g` are routed for.
+fn drawn_edges(g: &LaidOut) -> impl ExactSizeIterator<Item = (Id, Id)> + '_ {
+    g.connectors.iter().map(|c| (c.from, c.to))
+}
+
+/// Indexes `edges` by their source when `forward` and by their target otherwise,
+/// so a walk following them that way reads each node's successors in one lookup.
+fn adjacency(
+    edges: impl ExactSizeIterator<Item = (Id, Id)>,
+    forward: bool,
+) -> HashMap<Id, Vec<Id>> {
+    let mut adj: HashMap<Id, Vec<Id>> = HashMap::with_capacity(edges.len());
+    for (from, to) in edges {
+        let (at, reaches) = match forward {
+            true => (from, to),
+            false => (to, from),
+        };
+        adj.entry(at).or_default().push(reaches);
+    }
+    adj
 }
 
 /// Marks the shortest drawn path from `subtree` to each target. A breadth-first
@@ -198,6 +304,11 @@ mod tests {
         drawing((0..=last).map(leaf).collect(), &drawn, &full)
     }
 
+    /// What hovering `id` marks.
+    fn hover(g: &LaidOut, id: u32) -> Neighborhood {
+        compute_neighborhood(g, Some(Id(id)), Relation::Direct(Direction::Both))
+    }
+
     fn ids(of: &[u32]) -> HashSet<Id> {
         of.iter().map(|&id| Id(id)).collect()
     }
@@ -219,7 +330,7 @@ mod tests {
             &[(2, 3)],
             &[(2, 3)],
         );
-        let n = compute_neighborhood(&g, Some(Id(0)));
+        let n = hover(&g, 0);
         assert_eq!(n.boxes, ids(&[0, 1]));
         assert!(n.edges.is_empty());
     }
@@ -235,27 +346,26 @@ mod tests {
             &[],
             &[],
         );
-        let n = compute_neighborhood(&g, Some(Id(0)));
-        assert_eq!(n.boxes, ids(&[0, 1]));
+        assert_eq!(hover(&g, 0).boxes, ids(&[0, 1]));
     }
 
     #[test]
     fn a_reduced_out_neighbor_is_marked_along_the_drawn_path() {
-        let n = compute_neighborhood(&reduced_chain(2), Some(Id(0)));
+        let n = hover(&reduced_chain(2), 0);
         assert_eq!(n.boxes, ids(&[0, 1, 2]));
         assert_eq!(n.edges, pairs(&[(0, 1), (1, 2)]));
     }
 
     #[test]
     fn a_reduced_in_neighbor_is_marked_along_the_drawn_path() {
-        let n = compute_neighborhood(&reduced_chain(2), Some(Id(2)));
+        let n = hover(&reduced_chain(2), 2);
         assert_eq!(n.boxes, ids(&[0, 1, 2]));
         assert_eq!(n.edges, pairs(&[(0, 1), (1, 2)]));
     }
 
     #[test]
     fn a_traced_path_marks_its_edges_but_not_its_interior_nodes() {
-        let n = compute_neighborhood(&reduced_chain(3), Some(Id(0)));
+        let n = hover(&reduced_chain(3), 0);
         assert_eq!(n.boxes, ids(&[0, 1, 3]));
         assert_eq!(n.edges, pairs(&[(0, 1), (1, 2), (2, 3)]));
     }
@@ -277,9 +387,9 @@ mod tests {
             &[(1, 3), (2, 4), (3, 5), (4, 5)],
             &[(1, 3), (2, 4), (3, 5), (4, 5), (1, 5)],
         );
-        let first = compute_neighborhood(&g, Some(Id(0)));
+        let first = hover(&g, 0);
         for _ in 0..REPEATS {
-            let again = compute_neighborhood(&g, Some(Id(0)));
+            let again = hover(&g, 0);
             assert_eq!(again.boxes, first.boxes);
             assert_eq!(again.edges, first.edges);
         }
@@ -287,16 +397,122 @@ mod tests {
 
     #[test]
     fn a_hover_on_an_id_no_box_carries_marks_nothing() {
-        let no_such_box = Id(9);
-        let n = compute_neighborhood(&reduced_chain(2), Some(no_such_box));
+        let no_such_box = 9;
+        let n = hover(&reduced_chain(2), no_such_box);
         assert!(n.boxes.is_empty());
         assert!(n.edges.is_empty());
     }
 
     #[test]
     fn no_hover_marks_nothing() {
-        let n = compute_neighborhood(&reduced_chain(2), None);
+        let n = compute_neighborhood(&reduced_chain(2), None, Relation::Direct(Direction::Both));
         assert!(n.boxes.is_empty());
         assert!(n.edges.is_empty());
+    }
+
+    /// A row of leaves the middle one has an input and an output in, so a
+    /// directed marking from it takes one and leaves the other.
+    fn one_in_one_out() -> LaidOut {
+        drawing(
+            (0..=2).map(leaf).collect(),
+            &[(0, 1), (1, 2)],
+            &[(0, 1), (1, 2)],
+        )
+    }
+
+    #[test]
+    fn marking_no_relation_marks_the_selected_node_alone() {
+        let n = compute_neighborhood(&one_in_one_out(), Some(Id(1)), Relation::None);
+        assert_eq!(n.boxes, ids(&[1]));
+        assert!(n.edges.is_empty());
+    }
+
+    #[test]
+    fn a_direct_marking_takes_only_the_direction_it_runs_in() {
+        let g = one_in_one_out();
+        let inputs = compute_neighborhood(&g, Some(Id(1)), Relation::Direct(Direction::In));
+        assert_eq!(inputs.boxes, ids(&[0, 1]));
+        assert_eq!(inputs.edges, pairs(&[(0, 1)]));
+        let outputs = compute_neighborhood(&g, Some(Id(1)), Relation::Direct(Direction::Out));
+        assert_eq!(outputs.boxes, ids(&[1, 2]));
+        assert_eq!(outputs.edges, pairs(&[(1, 2)]));
+    }
+
+    #[test]
+    fn a_direct_marking_stops_one_edge_out() {
+        // A chain long enough that the node two edges along is left unmarked.
+        let g = drawing(
+            (0..=3).map(leaf).collect(),
+            &[(0, 1), (1, 2), (2, 3)],
+            &[(0, 1), (1, 2), (2, 3)],
+        );
+        let n = compute_neighborhood(&g, Some(Id(0)), Relation::Direct(Direction::Out));
+        assert_eq!(n.boxes, ids(&[0, 1]));
+        assert_eq!(n.edges, pairs(&[(0, 1)]));
+    }
+
+    #[test]
+    fn a_transitive_marking_runs_the_whole_chain_the_direction_it_takes() {
+        let g = drawing(
+            (0..=3).map(leaf).collect(),
+            &[(0, 1), (1, 2), (2, 3)],
+            &[(0, 1), (1, 2), (2, 3)],
+        );
+        let outputs = compute_neighborhood(&g, Some(Id(1)), Relation::Transitive(Direction::Out));
+        assert_eq!(outputs.boxes, ids(&[1, 2, 3]));
+        assert_eq!(outputs.edges, pairs(&[(1, 2), (2, 3)]));
+        let inputs = compute_neighborhood(&g, Some(Id(2)), Relation::Transitive(Direction::In));
+        assert_eq!(inputs.boxes, ids(&[0, 1, 2]));
+        assert_eq!(inputs.edges, pairs(&[(0, 1), (1, 2)]));
+        let both = compute_neighborhood(&g, Some(Id(1)), Relation::Transitive(Direction::Both));
+        assert_eq!(both.boxes, ids(&[0, 1, 2, 3]));
+        assert_eq!(both.edges, pairs(&[(0, 1), (1, 2), (2, 3)]));
+    }
+
+    /// A node whose only outputs branch off a sibling stays clear of a marking
+    /// running the other branch.
+    #[test]
+    fn a_transitive_marking_leaves_a_branch_it_does_not_reach() {
+        let g = drawing(
+            (0..=3).map(leaf).collect(),
+            &[(0, 1), (0, 2), (2, 3)],
+            &[(0, 1), (0, 2), (2, 3)],
+        );
+        let n = compute_neighborhood(&g, Some(Id(2)), Relation::Transitive(Direction::Out));
+        assert_eq!(n.boxes, ids(&[2, 3]));
+        assert_eq!(n.edges, pairs(&[(2, 3)]));
+    }
+
+    /// A transitive marking spans itself with drawn connectors, so a node whose
+    /// direct edge reduction dropped is still tied to what marked it.
+    #[test]
+    fn a_transitive_marking_needs_no_path_traced_to_a_reduced_neighbor() {
+        let n = compute_neighborhood(
+            &reduced_chain(3),
+            Some(Id(0)),
+            Relation::Transitive(Direction::Out),
+        );
+        assert_eq!(n.boxes, ids(&[0, 1, 2, 3]));
+        assert_eq!(n.edges, pairs(&[(0, 1), (1, 2), (2, 3)]));
+    }
+
+    /// A container marks what its members are related to, not what they are to
+    /// one another: an edge inside it is drawn between marked boxes either way.
+    #[test]
+    fn a_container_marks_the_relations_of_every_member() {
+        let g = drawing(
+            vec![
+                lbox(0, rect(0.0, 0.0, 400.0, 200.0), true),
+                lbox(1, rect(20.0, 40.0, 100.0, 40.0), false),
+                lbox(2, rect(200.0, 40.0, 100.0, 40.0), false),
+                leaf(3),
+                leaf(4),
+            ],
+            &[(1, 2), (3, 1), (2, 4)],
+            &[(1, 2), (3, 1), (2, 4)],
+        );
+        let n = compute_neighborhood(&g, Some(Id(0)), Relation::Direct(Direction::Out));
+        assert_eq!(n.boxes, ids(&[0, 1, 2, 4]));
+        assert_eq!(n.edges, pairs(&[(1, 2), (2, 4)]));
     }
 }

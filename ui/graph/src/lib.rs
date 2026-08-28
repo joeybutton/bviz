@@ -26,7 +26,9 @@ mod model;
 mod morph;
 mod neighborhood;
 mod paint;
+mod relation;
 mod scroll;
+mod selection;
 mod toolbar;
 
 use build::{Input, InputKind};
@@ -39,7 +41,9 @@ use mode::LayoutMode;
 use model::{Drawn, Expandable, Model};
 use morph::{Frame, Morph};
 use paint::{Scene, TitleTarget, canvas_body};
+use relation::Relation;
 use scroll::{scrollbar_hit, start_scroll_drag};
+use selection::Selection;
 
 /// Padding around the graph, in layout pixels.
 const MARGIN: f64 = 16.0;
@@ -88,8 +92,8 @@ struct Palette {
     /// canvas than `container` so nesting reads outermost first.
     package: Rgba,
     background: Rgba,
-    /// Accent every emphasis is drawn in: the border picking out the
-    /// just-toggled box and the wash over a marked box's fill.
+    /// Accent every emphasis is drawn in: the border picking out the selected
+    /// box and the just-toggled one, and the wash over a marked box's fill.
     highlight: Rgba,
     /// The slots the node kinds and the edge provenances are colored from.
     data: DataColors,
@@ -131,6 +135,14 @@ struct GraphView {
     _mode_choices: Subscription,
     /// Box under the cursor.
     hovered: Option<Id>,
+    /// The box whose related nodes stay marked, and how far that marking reaches;
+    /// set by a secondary click and offered by the toolbar's relation picker.
+    selection: Selection,
+    /// Outlives the stretches where the strip leaves it out, so the option it
+    /// stands on is still the one chosen when the next selection brings it back.
+    relation_picker: Entity<Dropdown>,
+    /// Carries the picker's selections into [`GraphView::set_relation`].
+    _relation_choices: Subscription,
     /// Whether hovering a box marks its neighborhood; flipped by the `h` key or
     /// the toolbar toggle so the marking can be turned off when it is more noise
     /// than help.
@@ -187,6 +199,21 @@ impl GraphView {
                 view.set_mode(mode, cx);
             }
         });
+        let selection = Selection::none();
+        let relation_picker = cx.new(|cx| {
+            Dropdown::new(
+                "selection-relation",
+                Relation::ALL.map(Relation::label),
+                selection.relation().index(),
+                cx,
+            )
+        });
+        let relations = cx.subscribe(&relation_picker, |view, _, event, cx| {
+            let DropdownEvent::Changed(index) = event;
+            if let Some(relation) = Relation::at(*index) {
+                view.set_relation(relation, cx);
+            }
+        });
         Self {
             focus_handle,
             model: Model::loading(inputs, cx),
@@ -198,6 +225,9 @@ impl GraphView {
             mode_picker,
             _mode_choices: choices,
             hovered: None,
+            selection,
+            relation_picker,
+            _relation_choices: relations,
             neighborhood_enabled: true,
             reduced: true,
             titles: Vec::new(),
@@ -218,7 +248,8 @@ impl GraphView {
         let scene = Scene {
             expandable: self.expandable(),
             palette,
-            neighborhood: self.hovered.filter(|_| self.neighborhood_enabled),
+            hovered: self.hovered.filter(|_| self.neighborhood_enabled),
+            selected: self.selection.node(),
             highlight: self.emphasis.highlight(),
             drawn,
         };
@@ -238,15 +269,16 @@ impl GraphView {
             )
             .children(edge_legend)
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
+            .on_mouse_down(MouseButton::Right, cx.listener(Self::on_secondary_down))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_move(cx.listener(Self::on_mouse_move))
             .on_hover(cx.listener(Self::on_hover))
             .on_scroll_wheel(cx.listener(Self::on_scroll_wheel))
             // Track the shared focus handle here too (the chrome already tracks
-            // it on an ancestor) so this deepest focused element receives key
-            // events. Events still bubble up to the chrome's own key bindings.
+            // it on an ancestor) so a press on the canvas brings the focus back
+            // here from whichever control last took it. Key events bubble from
+            // here up through the strip's own bindings to the chrome's.
             .track_focus(&self.focus_handle)
-            .on_key_down(cx.listener(Self::on_key_down))
             .into_any_element()
     }
 
@@ -282,6 +314,12 @@ impl GraphView {
             return;
         }
         start_pan(self, e.position, cx);
+    }
+
+    /// Picks the box under the cursor out for as long as it stays selected, or
+    /// drops the selection where the press lands on no box.
+    fn on_secondary_down(&mut self, e: &MouseDownEvent, _: &mut Window, cx: &mut Context<Self>) {
+        select_box_at(self, e.position, cx);
     }
 
     /// Ends the drag on the release the element receives directly, which the
@@ -354,6 +392,12 @@ impl GraphView {
         cx.notify();
     }
 
+    /// Widens or narrows what the selected box marks.
+    fn set_relation(&mut self, relation: Relation, cx: &mut Context<Self>) {
+        self.selection.set_relation(relation);
+        cx.notify();
+    }
+
     fn toggle_reduce(&mut self, cx: &mut Context<Self>) {
         if !self.mode.honors_reduce() {
             return;
@@ -368,6 +412,9 @@ impl GraphView {
             self.toggle_neighborhood(cx);
         } else if e.keystroke.key == "r" {
             self.toggle_reduce(cx);
+        } else if e.keystroke.key == "escape" {
+            self.selection.clear();
+            cx.notify();
         }
     }
 }
@@ -381,6 +428,7 @@ impl Render for GraphView {
                 let controls = Controls {
                     mode: self.mode,
                     picker: self.mode_picker.clone(),
+                    relation_picker: self.selection.node().map(|_| self.relation_picker.clone()),
                     neighborhood_enabled: self.neighborhood_enabled,
                     reduced: self.reduced,
                     relaying: self.model.relaying(),
@@ -390,6 +438,10 @@ impl Render for GraphView {
                     .flex()
                     .flex_col()
                     .overflow_hidden()
+                    // Above the strip as well as the canvas, so a key reaches the
+                    // view from wherever the focus sits — a control on the strip
+                    // holds it from the moment it is clicked.
+                    .on_key_down(cx.listener(Self::on_key_down))
                     .child(toolbar::toolbar(controls, &palette, cx))
                     .child(
                         div()
@@ -412,6 +464,9 @@ impl Render for GraphView {
 struct Controls {
     mode: LayoutMode,
     picker: Entity<Dropdown>,
+    /// The picker naming what the selected box marks, offered only while a box
+    /// is selected: with none there is no marking for it to widen or narrow.
+    relation_picker: Option<Entity<Dropdown>>,
     neighborhood_enabled: bool,
     reduced: bool,
     relaying: bool,
@@ -470,6 +525,34 @@ fn click_box_at(view: &mut GraphView, pos: Point<Pixels>, cx: &mut Context<Graph
     view.hovered = None;
     model::toggle_expansion(view, id, cx);
     view.emphasis.toggled(id);
+}
+
+/// Selects the box under `pos` (window px), or drops the selection where `pos`
+/// lands on no box or off the canvas. Selecting the already-selected box drops it
+/// too, so the same gesture puts the marking away.
+fn select_box_at(view: &mut GraphView, pos: Point<Pixels>, cx: &mut Context<GraphView>) {
+    let vp = view.framing.viewport();
+    let camera = view.camera();
+    let morph = view.morph_frame();
+    let hit = view
+        .drawn()
+        .filter(|_| vp.contains(&pos))
+        .and_then(|drawn| {
+            box_at(
+                &view.titles,
+                drawn.view(camera.zoom),
+                morph.as_ref(),
+                vp,
+                camera,
+                pos,
+            )
+            .map(|b| b.id)
+        });
+    match hit {
+        Some(id) => view.selection.toggle(id),
+        None => view.selection.clear(),
+    }
+    cx.notify();
 }
 
 /// Where `b` is drawn: its own layout rect at rest, and the rect `morph` has

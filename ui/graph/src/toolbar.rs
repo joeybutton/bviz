@@ -27,6 +27,11 @@ pub(crate) fn toolbar(
             .selected(controls.reduced),
         );
     }
+    // Last, past the controls that are always up, so the strip's standing shape
+    // holds still as a selection comes and goes.
+    if let Some(picker) = controls.relation_picker {
+        bar = bar.child(picker);
+    }
     bar.when(controls.relaying, |bar| {
         bar.trailing(relaying_indicator(palette))
     })
