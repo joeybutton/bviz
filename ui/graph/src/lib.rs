@@ -7,7 +7,7 @@ use bviz_ui_components::{DragEnd, Dropdown, DropdownEvent, Pending, ScrollbarCol
 use bviz_ui_graph_args::{GraphArgs, GraphSource};
 use bviz_ui_theme::{DataColors, Theme, ThemeColors};
 use bviz_ui_workspace::{
-    AnyPanel, Document, Panel, PanelEvent, PanelGroup, PanelKind, Weight, document_label,
+    AnyPanel, Document, Panel, PanelEvent, PanelGroup, PanelKind, ViewKind, Weight, document_label,
 };
 use clap::error::ErrorKind;
 use clap::{CommandFactory, Parser};
@@ -142,7 +142,7 @@ impl Palette {
 }
 
 /// Loads, lays out, and renders a Bazel build graph.
-struct GraphPanel {
+pub struct GraphPanel {
     /// Names the document shown, labelling this panel's tab.
     title: SharedString,
     focus_handle: FocusHandle,
@@ -440,7 +440,7 @@ impl Focusable for GraphPanel {
 impl Panel for GraphPanel {
     fn kind() -> PanelKind {
         PanelKind {
-            name: "graph",
+            view: ViewKind::new("graph"),
             key_context: KEY_CONTEXT,
         }
     }

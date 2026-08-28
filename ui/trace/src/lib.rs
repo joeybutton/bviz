@@ -21,11 +21,11 @@ mod tracks_menu;
 
 use chart::{fit_px_per_us, format_duration, format_time, nice_step, span_seconds};
 
-use flame_panel::FlamePanel;
+pub use flame_panel::FlamePanel;
 use groups::{GroupChrome, group_label, lanes_headed_by_pool};
 use model::TraceModel;
 use regions::{CountersStrip, DividerGrab, DividerPress, Regions, clamp_gutter_width};
-use stats_panel::StatsPanel;
+pub use stats_panel::StatsPanel;
 use theme::Palette;
 use timeline::{HoveredSlice, Timeline};
 use track_label::{pool_member_label, track_label};
@@ -39,7 +39,7 @@ use bviz_ui_components::{
 };
 use bviz_ui_trace_args::{TraceArgs, TraceSource};
 use bviz_ui_workspace::{
-    AnyPanel, Document, Panel, PanelEvent, PanelGroup, PanelKind, Weight, document_label,
+    AnyPanel, Document, Panel, PanelEvent, PanelGroup, PanelKind, ViewKind, Weight, document_label,
 };
 use clap::error::ErrorKind;
 use clap::{CommandFactory, Parser};
@@ -229,7 +229,7 @@ pub(crate) type Source = bviz_ui_components::Source<Arc<Profile>>;
 /// them. The chart itself is drawn by [`Timeline`]; this view holds the
 /// splits the two of them are laid out by and reads the loaded document from the
 /// shared [`TraceModel`].
-struct TracePanel {
+pub struct TracePanel {
     /// Names the document shown, labelling this panel's tab.
     title: SharedString,
     /// The one instance the document's panels each hold a handle to.
@@ -547,7 +547,7 @@ impl Focusable for TracePanel {
 impl Panel for TracePanel {
     fn kind() -> PanelKind {
         PanelKind {
-            name: "trace",
+            view: ViewKind::new("trace"),
             key_context: TRACE_KEY_CONTEXT,
         }
     }

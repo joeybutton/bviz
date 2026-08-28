@@ -11,7 +11,7 @@ use bviz_ui_components::{
     Axis, DEFAULT_MIN_THUMB, DragEnd, SCROLLBAR_THICKNESS, Scrollbar, centered_spinner,
     load_in_background, overlay_canvas, track_drag,
 };
-use bviz_ui_workspace::{Panel, PanelEvent, PanelKind};
+use bviz_ui_workspace::{Panel, PanelEvent, PanelKind, ViewKind};
 use gpui::{
     App, Bounds, Context, Div, Entity, EventEmitter, FocusHandle, Focusable, IntoElement,
     MouseButton, MouseDownEvent, Pixels, Point, Render, Rgba, SharedString, Subscription,
@@ -204,7 +204,7 @@ enum StatsDrag {
 /// clickable, sortable columns over a scrollable, virtualized body of one row per
 /// group, reading the aggregate from [`TraceModel`]. Owns its sort, scroll, and
 /// drag state as plain fields.
-pub(crate) struct StatsPanel {
+pub struct StatsPanel {
     /// Focus for the panel, so the window's own actions dispatch while it is the
     /// panel on show.
     focus: FocusHandle,
@@ -565,7 +565,7 @@ impl Focusable for StatsPanel {
 impl Panel for StatsPanel {
     fn kind() -> PanelKind {
         PanelKind {
-            name: "trace-stats",
+            view: ViewKind::new("trace-stats"),
             key_context: STATS_KEY_CONTEXT,
         }
     }
@@ -594,7 +594,7 @@ impl Render for StatsPanel {
         let toolbar = time_window_chip(&self.model, palette, cx)
             .map(|chip| panel_toolbar(palette).child(chip));
         div()
-            .key_context(STATS_KEY_CONTEXT)
+            .key_context(Self::kind().key_context)
             .track_focus(&self.focus)
             .flex()
             .flex_col()

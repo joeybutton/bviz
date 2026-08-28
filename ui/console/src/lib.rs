@@ -11,7 +11,7 @@
 mod color;
 mod console;
 
-pub use console::register_keys;
+pub use console::{ConsolePanel, register_keys};
 
 use bviz_terminal::Replay;
 use bviz_ui_components::Pending;
@@ -19,7 +19,6 @@ use bviz_ui_console_args::{ConsoleArgs, ConsoleSource};
 use bviz_ui_workspace::{AnyPanel, Document, PanelGroup, Weight, document_label};
 use clap::error::ErrorKind;
 use clap::{CommandFactory, Parser};
-use console::ConsolePanel;
 use gpui::{App, SharedString, Window, prelude::*, px, size};
 use std::path::PathBuf;
 

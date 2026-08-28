@@ -13,7 +13,7 @@ use bviz_ui_components::{
     Axis, Button, DEFAULT_MIN_THUMB, DragEnd, SCROLLBAR_THICKNESS, Scrollbar, cached_layer,
     centered_spinner, overlay_canvas, paint_labeled_box, paint_tooltip_box, spinner, track_drag,
 };
-use bviz_ui_workspace::{Panel, PanelEvent, PanelKind};
+use bviz_ui_workspace::{Panel, PanelEvent, PanelKind, ViewKind};
 use gpui::{
     AnyElement, App, Bounds, ContentMask, Context, Div, Entity, EventEmitter, FocusHandle,
     Focusable, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, Pixels, Point, Render,
@@ -266,7 +266,7 @@ fn paint_flame_tooltip(
 /// scroll bars and a hover tooltip. Owns its view state as plain fields,
 /// reading the aggregate from [`TraceModel`]. The boxes are painted by
 /// [`FlameCanvas`], the tooltip by an overlay above it.
-pub(crate) struct FlamePanel {
+pub struct FlamePanel {
     /// Focus for the panel, so the window's own actions dispatch while it is the
     /// panel on show.
     focus: FocusHandle,
@@ -663,7 +663,7 @@ impl Focusable for FlamePanel {
 impl Panel for FlamePanel {
     fn kind() -> PanelKind {
         PanelKind {
-            name: "trace-flame-graph",
+            view: ViewKind::new("trace-flame-graph"),
             key_context: FLAME_KEY_CONTEXT,
         }
     }
@@ -691,7 +691,7 @@ impl Render for FlamePanel {
         let toolbar = self.toolbar(palette, cx);
         let body = self.graph_body(palette, cx);
         div()
-            .key_context(FLAME_KEY_CONTEXT)
+            .key_context(Self::kind().key_context)
             .track_focus(&self.focus)
             .flex()
             .flex_col()

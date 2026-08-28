@@ -1,4 +1,5 @@
 load("@rules_rs//rs:rust_binary.bzl", "rust_binary")
+load("@rules_rs//rs:rust_test.bzl", "rust_test")
 
 rust_binary(
     name = "bviz",
@@ -18,4 +19,9 @@ rust_binary(
         "@crates//:clap",
         "@crates//:gpui",
     ],
+)
+
+rust_test(
+    name = "bviz_test",
+    crate = ":bviz",
 )

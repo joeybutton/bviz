@@ -10,7 +10,7 @@ use bviz_ui_components::{
     load_in_background, scrubber,
 };
 use bviz_ui_theme::ThemeColors;
-use bviz_ui_workspace::{Panel, PanelEvent, PanelKind};
+use bviz_ui_workspace::{Panel, PanelEvent, PanelKind, ViewKind};
 use gpui::{
     App, ClipboardItem, Context, Entity, EventEmitter, FocusHandle, Focusable, IntoElement,
     KeyBinding, MouseButton, MouseDownEvent, MouseMoveEvent, Pixels, Point, Render,
@@ -791,7 +791,7 @@ impl Focusable for ConsolePanel {
 impl Panel for ConsolePanel {
     fn kind() -> PanelKind {
         PanelKind {
-            name: "console",
+            view: ViewKind::new("console"),
             key_context: CONSOLE_KEY_CONTEXT,
         }
     }

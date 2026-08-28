@@ -11,7 +11,7 @@ mod workspace;
 pub use group::{PanelGroup, Weight};
 pub use layout::{Layout, Panes, Removal, Split, SplitId};
 pub use pane::{Pane, PaneEvent};
-pub use panel::{AnyPanel, Document, Panel, PanelEvent, PanelKind, document_label};
+pub use panel::{AnyPanel, Document, Panel, PanelEvent, PanelKind, ViewKind, document_label};
 pub use workspace::Workspace;
 
 use workspace::register_keys;

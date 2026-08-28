@@ -20,10 +20,26 @@ pub fn document_label(path: &Path) -> SharedString {
         .into()
 }
 
+/// Which of a document's views a panel shows — its timeline, its flame graph,
+/// its stats table. Distinct across panel types, so a view of an open document
+/// can be named whether or not a panel showing it exists.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub struct ViewKind(&'static str);
+
+impl ViewKind {
+    pub const fn new(name: &'static str) -> Self {
+        Self(name)
+    }
+
+    pub fn as_str(self) -> &'static str {
+        self.0
+    }
+}
+
 /// Stable identity of a panel type.
 #[derive(Clone, Copy)]
 pub struct PanelKind {
-    pub name: &'static str,
+    pub view: ViewKind,
     /// The gpui key context this panel's own key bindings are scoped to; unique
     /// across kinds, so such a binding reaches only this panel.
     pub key_context: &'static str,
@@ -77,8 +93,8 @@ impl AnyPanel {
         }
     }
 
-    pub fn kind(&self) -> PanelKind {
-        self.panel.kind()
+    pub fn view_kind(&self) -> ViewKind {
+        self.panel.view_kind()
     }
 
     /// The title the panel gives itself.
@@ -198,7 +214,7 @@ fn ordinal_suffix(ordinal: NonZeroUsize) -> SharedString {
 /// [`Panel`] with its type parameter discharged, so a workspace can hold panels
 /// of differing kinds. Implemented once, for the entity holding the panel.
 trait PanelOps {
-    fn kind(&self) -> PanelKind;
+    fn view_kind(&self) -> ViewKind;
     fn title(&self, cx: &App) -> SharedString;
     fn status(&self, cx: &App) -> Option<SharedString>;
     fn icon(&self, cx: &App) -> Option<&'static str>;
@@ -210,8 +226,8 @@ trait PanelOps {
 }
 
 impl<T: Panel> PanelOps for Entity<T> {
-    fn kind(&self) -> PanelKind {
-        T::kind()
+    fn view_kind(&self) -> ViewKind {
+        T::kind().view
     }
 
     fn title(&self, cx: &App) -> SharedString {

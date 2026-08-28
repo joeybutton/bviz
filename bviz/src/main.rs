@@ -59,3 +59,30 @@ fn main() {
         ],
     );
 }
+
+#[cfg(test)]
+mod tests {
+    use bviz_ui_workspace::{Panel, ViewKind};
+    use std::collections::HashMap;
+
+    fn view_kind<T: Panel>() -> (&'static str, ViewKind) {
+        (std::any::type_name::<T>(), T::kind().view)
+    }
+
+    #[test]
+    fn no_two_panels_share_a_view_kind() {
+        let panels = [
+            view_kind::<bviz_ui_graph::GraphPanel>(),
+            view_kind::<bviz_ui_trace::TracePanel>(),
+            view_kind::<bviz_ui_trace::FlamePanel>(),
+            view_kind::<bviz_ui_trace::StatsPanel>(),
+            view_kind::<bviz_ui_console::ConsolePanel>(),
+        ];
+        let mut claimed: HashMap<ViewKind, &'static str> = HashMap::new();
+        for (panel, view) in panels {
+            if let Some(first) = claimed.insert(view, panel) {
+                panic!("{first} and {panel} both call themselves {}", view.as_str());
+            }
+        }
+    }
+}
