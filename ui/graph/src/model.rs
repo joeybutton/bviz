@@ -1,14 +1,12 @@
+use crate::MARGIN;
 use crate::build::{self, build_graph};
-use crate::emphasis;
 use crate::mode::LayoutMode;
-use crate::morph;
-use crate::{GraphPanel, MARGIN};
 use bviz_graph_layout::graph::Graph;
 use bviz_graph_layout::lod::{DEFAULT_MAX_EDGES, DEFAULT_MAX_NODES};
 use bviz_graph_layout::{Id, LaidOut, MapLayout, Names};
 use bviz_ui_components::{Pending, load_in_background};
 use bviz_ui_graph_args::Input;
-use gpui::{Context, Task};
+use gpui::{Context, EventEmitter, Task};
 use std::collections::HashSet;
 use std::sync::Arc;
 
@@ -34,6 +32,18 @@ pub(crate) struct Loaded {
     /// The interned node-id table the base graph keys on, threaded into each
     /// relayout so the quotient pass can mint group ids.
     names: Names,
+    /// Container and group ids expanded in the layered layout last requested;
+    /// every other container folds its subtree away so the layered layout only
+    /// processes the visible view.
+    expanded: HashSet<Id>,
+    /// The set a layered layout's [`Expandable`] is built from.
+    containers: Arc<HashSet<Id>>,
+    /// Whether the layered layout last requested draws the transitive reduction
+    /// of the edges rather than every edge.
+    reduced: bool,
+    /// Whether a layered layout is running, so a view can show a progress
+    /// indicator while the prior layout stays interactive.
+    relaying: bool,
 }
 
 /// Derives every view of `map` off the UI thread, coarsest first.
@@ -44,7 +54,7 @@ pub(crate) struct Loaded {
 /// would hold the frame it was made for; deriving them in the background instead
 /// leaves the zoom nothing to wait on. A view already derived costs nothing to
 /// ask for again, so this races the camera harmlessly.
-fn derive_levels(map: Arc<MapLayout>, cx: &mut Context<GraphPanel>) {
+fn derive_levels(map: Arc<MapLayout>, cx: &mut Context<GraphModel>) {
     cx.background_executor()
         .spawn(async move {
             for level in 0..map.level_count() {
@@ -147,15 +157,8 @@ impl Expandable {
     }
 }
 
-/// A graph read and prepared for viewing.
-pub(crate) struct Built {
-    loaded: Loaded,
-    containers: Arc<HashSet<Id>>,
-    expanded: HashSet<Id>,
-}
-
 /// Reads `inputs`, builds the graph and derives the map pyramid.
-pub(crate) fn build(inputs: Vec<Input>) -> Result<Built, String> {
+pub(crate) fn build(inputs: Vec<Input>) -> Result<Loaded, String> {
     let (graph, reduced_base, names) = build_graph(&inputs)?;
     let expanded =
         bviz_graph_layout::lod::default_expansion(&graph, DEFAULT_MAX_NODES, DEFAULT_MAX_EDGES);
@@ -164,67 +167,72 @@ pub(crate) fn build(inputs: Vec<Input>) -> Result<Built, String> {
     // them rather than a copy.
     let (base, reduced_base) = (Arc::new(graph), Arc::new(reduced_base));
     let map = bviz_graph_layout::map_layout(Arc::clone(&base), Arc::clone(&reduced_base));
-    Ok(Built {
-        loaded: Loaded {
-            map: Arc::new(map),
-            layered: None,
-            base,
-            reduced_base,
-            names,
-        },
-        containers,
+    Ok(Loaded {
+        map: Arc::new(map),
+        layered: None,
+        base,
+        reduced_base,
+        names,
         expanded,
+        containers,
+        reduced: true,
+        relaying: false,
     })
 }
 
 pub(crate) type Source = bviz_ui_components::Source<Loaded>;
 
-/// The graph being viewed: the layouts on screen and the expansion the next
-/// relayout starts from, every layout produced off the UI thread.
-pub(crate) struct Model {
-    source: Source,
-    /// Container and group ids currently expanded; every other container folds
-    /// its subtree away so the layered layout only processes the visible view.
-    expanded: HashSet<Id>,
-    /// The set a layered layout's [`Expandable`] is built from.
-    containers: Arc<HashSet<Id>>,
-    /// Whether a layered layout is running, so the view shows a progress
-    /// indicator while the prior layout stays interactive.
-    relaying: bool,
-    /// Holds the background load/relayout task so it isn't cancelled on drop.
-    _task: Task<()>,
+/// The read has landed, loaded or failed. Carried as an event because what it
+/// calls for turns on the layout mode a view has selected, which the graph does
+/// not hold.
+pub(crate) struct SourceReplaced;
+
+/// A layered layout has landed. Carried as an event because what it calls for is
+/// view-local — easing the drawing on screen onto the new one, settling the
+/// camera onto what the reader was looking at — and owed once per landing.
+pub(crate) struct LayoutLanded {
+    /// The drawing this one takes the place of; absent for the first layered
+    /// layout of a graph.
+    pub(crate) replaced: Option<Arc<LaidOut>>,
+    pub(crate) current: Arc<LaidOut>,
 }
 
-impl Model {
-    /// Shows the graph `load` is reading, once it has been read.
-    pub(crate) fn loading(load: Pending<Built>, cx: &mut Context<GraphPanel>) -> Self {
-        let task = load_in_background(
+/// A graph read for viewing, held apart from the panels drawing it so a view of
+/// it can close and be shown again without the graph being read or laid out
+/// afresh. Every layout it holds is produced off the UI thread.
+pub(crate) struct GraphModel {
+    source: Source,
+    /// The read or relayout in flight, held so that it is not cancelled.
+    _work: Task<()>,
+}
+
+impl EventEmitter<SourceReplaced> for GraphModel {}
+impl EventEmitter<LayoutLanded> for GraphModel {}
+
+impl GraphModel {
+    /// The graph `load` is reading, viewable once the read finishes and failed
+    /// where it does not.
+    pub(crate) fn reading(load: Pending<Loaded>, cx: &mut Context<Self>) -> Self {
+        Self::new(load_in_background(
             cx,
             move || load.join(),
-            |view, result, cx| {
-                view.model.source = match result {
-                    Ok(built) => {
-                        view.model.containers = built.containers;
-                        view.model.expanded = built.expanded;
-                        derive_levels(Arc::clone(&built.loaded.map), cx);
-                        Source::Loaded(built.loaded)
+            |model, result, cx| {
+                model.source = match result {
+                    Ok(loaded) => {
+                        derive_levels(Arc::clone(&loaded.map), cx);
+                        Source::Loaded(loaded)
                     }
                     Err(err) => Source::Failed(err),
                 };
-                // A layered layout can only be derived from a loaded graph, so
-                // the mode selected while the read was in flight gets its first
-                // one as the read lands.
-                if view.mode == LayoutMode::Layered {
-                    relayout(view, cx);
-                }
+                cx.emit(SourceReplaced);
             },
-        );
+        ))
+    }
+
+    fn new(work: Task<()>) -> Self {
         Self {
             source: Source::Loading,
-            expanded: HashSet::new(),
-            containers: Arc::new(HashSet::new()),
-            relaying: false,
-            _task: task,
+            _work: work,
         }
     }
 
@@ -232,12 +240,17 @@ impl Model {
         &self.source
     }
 
+    fn loaded(&self) -> Option<&Loaded> {
+        match &self.source {
+            Source::Loaded(loaded) => Some(loaded),
+            _ => None,
+        }
+    }
+
     /// The layout `mode` draws, or `None` while the graph or that mode's layout
     /// is still being computed.
     pub(crate) fn drawn(&self, mode: LayoutMode) -> Option<Drawn> {
-        let Source::Loaded(loaded) = &self.source else {
-            return None;
-        };
+        let loaded = self.loaded()?;
         match mode {
             LayoutMode::Map => Some(Drawn::Map(Arc::clone(&loaded.map))),
             LayoutMode::Layered => loaded.layered.as_ref().map(|l| Drawn::Layered {
@@ -249,14 +262,20 @@ impl Model {
 
     /// The boxes `mode`'s layout lets the user open or close.
     pub(crate) fn expandable(&self, mode: LayoutMode) -> Expandable {
-        match mode {
-            LayoutMode::Map => Expandable::Nothing,
-            LayoutMode::Layered => Expandable::Containers(Arc::clone(&self.containers)),
+        match (mode, self.loaded()) {
+            (LayoutMode::Layered, Some(loaded)) => {
+                Expandable::Containers(Arc::clone(&loaded.containers))
+            }
+            _ => Expandable::Nothing,
         }
     }
 
     pub(crate) fn relaying(&self) -> bool {
-        self.relaying
+        self.loaded().is_some_and(|loaded| loaded.relaying)
+    }
+
+    pub(crate) fn reduced(&self) -> bool {
+        self.loaded().is_some_and(|loaded| loaded.reduced)
     }
 
     pub(crate) fn status(&self, mode: LayoutMode, zoom: f32) -> String {
@@ -278,71 +297,185 @@ impl Model {
             }
         })
     }
-}
 
-/// Flips whether `id` is expanded and lays the graph out at the new expansion.
-pub(crate) fn toggle_expansion(view: &mut GraphPanel, id: Id, cx: &mut Context<GraphPanel>) {
-    if !view.model.expanded.remove(&id) {
-        view.model.expanded.insert(id);
+    /// Lays `mode` out where it has no layout yet and none is already running.
+    pub(crate) fn ensure_layout(&mut self, mode: LayoutMode, cx: &mut Context<Self>) {
+        if self.drawn(mode).is_none() && !self.relaying() {
+            self.relayout(cx);
+        }
     }
-    relayout(view, cx);
+
+    /// Flips whether `id` is expanded and lays the graph out at the new expansion.
+    pub(crate) fn toggle_expansion(&mut self, id: Id, cx: &mut Context<Self>) {
+        let Source::Loaded(loaded) = &mut self.source else {
+            return;
+        };
+        if !loaded.expanded.remove(&id) {
+            loaded.expanded.insert(id);
+        }
+        self.relayout(cx);
+    }
+
+    /// Flips whether the layered layout keeps every edge or only the transitive
+    /// reduction, and lays the graph out over the edge set that leaves.
+    pub(crate) fn toggle_reduce(&mut self, cx: &mut Context<Self>) {
+        let Source::Loaded(loaded) = &mut self.source else {
+            return;
+        };
+        loaded.reduced = !loaded.reduced;
+        self.relayout(cx);
+    }
+
+    /// Lays the cached base graph out at the current expansion off the UI thread
+    /// and adopts the result as the layered layout, announcing it with
+    /// [`LayoutLanded`] so the views showing it can ease onto it.
+    fn relayout(&mut self, cx: &mut Context<Self>) {
+        let Source::Loaded(loaded) = &mut self.source else {
+            return;
+        };
+        let base = Arc::clone(&loaded.base);
+        let reduced_base = Arc::clone(&loaded.reduced_base);
+        // The relayout mints group ids against the interned-name table, so it
+        // extends a clone and hands it back to be adopted.
+        let mut names = loaded.names.clone();
+        let previous = loaded.layered.as_ref().map(|l| Arc::clone(&l.view));
+        let expanded = loaded.expanded.clone();
+        let reduced = loaded.reduced;
+        loaded.relaying = true;
+        cx.notify();
+        self._work = load_in_background(
+            cx,
+            move || {
+                let laid_out = build::relayout(
+                    &base,
+                    &reduced_base,
+                    &expanded,
+                    &mut names,
+                    reduced,
+                    previous.as_deref().map(|previous| &previous.anchors),
+                );
+                (laid_out, names)
+            },
+            |model, (laid_out, names), cx| {
+                let Source::Loaded(loaded) = &mut model.source else {
+                    return;
+                };
+                let current = Arc::new(laid_out);
+                loaded.names = names;
+                let relayouts = loaded.layered.as_ref().map_or(0, |l| l.relayouts) + 1;
+                let replaced = loaded
+                    .layered
+                    .replace(Layered {
+                        view: Arc::clone(&current),
+                        relayouts,
+                    })
+                    .map(|l| l.view);
+                loaded.relaying = false;
+                cx.emit(LayoutLanded { replaced, current });
+            },
+        );
+    }
 }
 
-/// Lays the cached base graph out at the current expansion off the UI thread,
-/// adopts the result as the layered layout, and asks the framing to settle onto
-/// it.
-pub(crate) fn relayout(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
-    let Source::Loaded(loaded) = &view.model.source else {
-        return;
-    };
-    let base = Arc::clone(&loaded.base);
-    let reduced_base = Arc::clone(&loaded.reduced_base);
-    // The relayout mints group ids against the interned-name table, so it
-    // extends a clone and hands it back for the view to adopt.
-    let mut names = loaded.names.clone();
-    let previous = loaded.layered.as_ref().map(|l| Arc::clone(&l.view));
-    let expanded = view.model.expanded.clone();
-    let reduced = view.reduced;
-    view.model.relaying = true;
-    view.model._task = load_in_background(
-        cx,
-        move || {
-            let laid_out = build::relayout(
-                &base,
-                &reduced_base,
-                &expanded,
-                &mut names,
-                reduced,
-                previous.as_deref().map(|previous| &previous.anchors),
-            );
-            (laid_out, names)
-        },
-        |view, (laid_out, names), cx| {
-            let laid_out = Arc::new(laid_out);
-            let replaced = match &mut view.model.source {
-                Source::Loaded(loaded) => {
-                    loaded.names = names;
-                    let relayouts = loaded.layered.as_ref().map_or(0, |l| l.relayouts) + 1;
-                    loaded
-                        .layered
-                        .replace(Layered {
-                            view: Arc::clone(&laid_out),
-                            relayouts,
-                        })
-                        .map(|l| l.view)
-                }
-                _ => None,
-            };
-            // A morph eases one layered drawing onto its successor, so it says
-            // nothing about a map's levels, which the camera alone selects
-            // between: armed while the map is on screen it would pump repaints
-            // of a canvas that draws none of it.
-            if let Some(replaced) = replaced.filter(|_| view.mode == LayoutMode::Layered) {
-                morph::begin(view, replaced, &laid_out, cx);
-            }
-            view.framing.request_recenter();
-            view.model.relaying = false;
-            emphasis::begin_fade(view, cx);
-        },
-    );
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bviz_graph_layout::{EdgeKind, Kind};
+
+    /// A graph whose read has not finished, for exercising what a view reads
+    /// off it before one has.
+    fn reading() -> GraphModel {
+        GraphModel::new(Task::ready(()))
+    }
+
+    /// A two-node graph with one dependency between them, prepared the way
+    /// [`build`] prepares a graph read from a proto.
+    fn loaded() -> GraphModel {
+        let mut names = Names::default();
+        let (from, to) = (names.intern("//a"), names.intern("//b"));
+        let mut base = Graph::new();
+        base.add_node(from, "a", Kind::Target, None);
+        base.add_node(to, "b", Kind::Target, None);
+        base.add_edge(from, to, EdgeKind::Query);
+        let reduced_base = bviz_graph_layout::reduce::transitive_reduction(&base);
+        let (base, reduced_base) = (Arc::new(base), Arc::new(reduced_base));
+        let map = bviz_graph_layout::map_layout(Arc::clone(&base), Arc::clone(&reduced_base));
+        let containers = Arc::new(bviz_graph_layout::lod::expandable_containers(&base));
+        let mut model = reading();
+        model.source = Source::Loaded(Loaded {
+            map: Arc::new(map),
+            layered: None,
+            base,
+            reduced_base,
+            names,
+            expanded: HashSet::new(),
+            containers,
+            reduced: true,
+            relaying: false,
+        });
+        model
+    }
+
+    /// The status line is drawn from the graph alone, so it reads the same
+    /// whether or not a panel is showing one.
+    #[test]
+    fn a_graph_still_being_read_says_so() {
+        assert_eq!(reading().status(LayoutMode::Map, 1.0), "Loading…");
+    }
+
+    #[test]
+    fn a_graph_that_could_not_be_read_names_what_is_absent() {
+        let mut model = reading();
+        model.source = Source::Failed("aquery.pb: no such file".into());
+        assert_eq!(model.status(LayoutMode::Map, 1.0), "No graph");
+    }
+
+    /// Two leaves with nothing to open stand at the one map level, so the whole
+    /// graph is described whatever the zoom. The extent trailing the counts is
+    /// the layout engine's to decide.
+    #[test]
+    fn a_loaded_graph_describes_the_map_it_draws() {
+        let status = loaded().status(LayoutMode::Map, 1.0);
+        assert!(
+            status.starts_with("level 1/1 · 2 boxes · 1 connectors · "),
+            "{status}"
+        );
+    }
+
+    /// The map is derived as the graph is read and the layered layout only on
+    /// demand, so a graph holds one and not the other until a view asks for
+    /// the layered mode. Which of the two a view has selected does not move
+    /// either.
+    #[test]
+    fn a_loaded_graph_holds_the_map_before_it_holds_a_layered_layout() {
+        let model = loaded();
+        assert!(model.drawn(LayoutMode::Map).is_some());
+        assert!(model.drawn(LayoutMode::Layered).is_none());
+        assert_eq!(model.status(LayoutMode::Layered, 1.0), "Laying out…");
+    }
+
+    /// A map is opened by zooming rather than by clicking a box, so it offers
+    /// nothing to open; the layered layout offers the containers of the graph
+    /// read.
+    #[test]
+    fn only_the_layered_layout_offers_boxes_to_open() {
+        let model = loaded();
+        assert!(matches!(
+            model.expandable(LayoutMode::Map),
+            Expandable::Nothing
+        ));
+        assert!(matches!(
+            model.expandable(LayoutMode::Layered),
+            Expandable::Containers(_)
+        ));
+    }
+
+    /// Nothing is expandable until there is a graph to expand, whichever mode a
+    /// view has selected.
+    #[test]
+    fn a_graph_still_being_read_offers_nothing_to_open() {
+        for mode in LayoutMode::ALL {
+            assert!(matches!(reading().expandable(mode), Expandable::Nothing));
+        }
+    }
 }

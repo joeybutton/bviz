@@ -7,7 +7,8 @@ use bviz_ui_components::{DragEnd, Dropdown, DropdownEvent, Pending, ScrollbarCol
 use bviz_ui_graph_args::{GraphArgs, GraphSource};
 use bviz_ui_theme::{DataColors, Theme, ThemeColors};
 use bviz_ui_workspace::{
-    AnyPanel, Document, Panel, PanelEvent, PanelGroup, PanelKind, ViewKind, Weight, document_label,
+    Document, Documents, Panel, PanelEvent, PanelGroup, PanelKind, ViewKind, ViewSpec, Weight,
+    document_label,
 };
 use clap::error::ErrorKind;
 use clap::{CommandFactory, Parser};
@@ -41,7 +42,7 @@ use emphasis::Emphasis;
 use framing::{Framing, build_prepaint};
 use legend::legend;
 use mode::LayoutMode;
-use model::{Drawn, Expandable, Model};
+use model::{Drawn, Expandable, GraphModel, LayoutLanded, SourceReplaced};
 use morph::{Frame, Morph};
 use paint::{Scene, TitleTarget, canvas_body};
 use relation::Relation;
@@ -141,12 +142,14 @@ impl Palette {
     }
 }
 
-/// Loads, lays out, and renders a Bazel build graph.
+/// A view of a Bazel build graph, drawn under a layout mode and camera of its
+/// own.
 pub struct GraphPanel {
     /// Names the document shown, labelling this panel's tab.
     title: SharedString,
     focus_handle: FocusHandle,
-    model: Model,
+    /// The graph drawn here, shared with every other view of it.
+    model: Entity<GraphModel>,
     framing: Framing,
     drag: Drag,
     emphasis: Emphasis,
@@ -155,6 +158,13 @@ pub struct GraphPanel {
     mode_picker: Entity<Dropdown>,
     /// Carries the picker's selections into [`GraphPanel::set_mode`].
     _mode_choices: Subscription,
+    /// Redraws as the graph is read and as its layouts land.
+    _changed: Subscription,
+    /// Asks for the selected mode's layout as the read lands: one requested while
+    /// the graph was still being read could not start.
+    _source_replaced: Subscription,
+    /// Eases this drawing onto each layered layout the graph lands.
+    _landings: Subscription,
     /// Box under the cursor.
     hovered: Option<Id>,
     /// The box whose related nodes stay marked, and how far that marking reaches;
@@ -169,10 +179,6 @@ pub struct GraphPanel {
     /// the toolbar toggle so the marking can be turned off when it is more noise
     /// than help.
     neighborhood_enabled: bool,
-    /// Whether the layered layout draws the transitive reduction of the edges
-    /// (the default) rather than every edge; flipped by the `r` key or the
-    /// toolbar toggle, which relays out.
-    reduced: bool,
     /// The titles the canvas drew, rewritten by every paint and resolved against
     /// a pointer by [`box_at`].
     titles: Vec<TitleTarget>,
@@ -184,13 +190,13 @@ impl GraphPanel {
     }
 
     /// The layout the selected mode draws, or `None` while it is being computed.
-    fn drawn(&self) -> Option<Drawn> {
-        self.model.drawn(self.mode)
+    fn drawn(&self, cx: &App) -> Option<Drawn> {
+        self.model.read(cx).drawn(self.mode)
     }
 
     /// The boxes the selected mode's layout lets the user open or close.
-    fn expandable(&self) -> Expandable {
-        self.model.expandable(self.mode)
+    fn expandable(&self, cx: &App) -> Expandable {
+        self.model.read(cx).expandable(self.mode)
     }
 
     /// How far the drawing being eased onto its successor has travelled at this
@@ -201,7 +207,7 @@ impl GraphPanel {
         self.morph.at(Instant::now())
     }
 
-    fn new(load: Load, cx: &mut Context<Self>) -> Self {
+    fn new(title: SharedString, model: Entity<GraphModel>, cx: &mut Context<Self>) -> Self {
         let mode = LayoutMode::default();
         let mode_picker = cx.new(|cx| {
             Dropdown::new(
@@ -234,10 +240,18 @@ impl GraphPanel {
                 view.set_relation(relation, cx);
             }
         });
+        let changed = cx.observe(&model, |_, _, cx| cx.notify());
+        let source_replaced = cx.subscribe(&model, |view, model, _: &SourceReplaced, cx| {
+            let mode = view.mode;
+            model.update(cx, |model, cx| model.ensure_layout(mode, cx));
+        });
+        let landings = cx.subscribe(&model, |view, _, landed: &LayoutLanded, cx| {
+            view.settle_onto(landed, cx);
+        });
         Self {
             focus_handle: cx.focus_handle(),
-            title: load.title,
-            model: Model::loading(load.built, cx),
+            title,
+            model,
             framing: Framing::new(),
             drag: Drag::None,
             emphasis: Emphasis::none(),
@@ -245,20 +259,40 @@ impl GraphPanel {
             mode,
             mode_picker,
             _mode_choices: choices,
+            _changed: changed,
+            _source_replaced: source_replaced,
+            _landings: landings,
             hovered: None,
             selection,
             relation_picker,
             _relation_choices: relations,
             neighborhood_enabled: true,
-            reduced: true,
             titles: Vec::new(),
         }
+    }
+
+    /// Brings this drawing onto a layered layout the graph has landed.
+    ///
+    /// A morph eases one layered drawing onto its successor, so it says nothing
+    /// about a map's levels, which the camera alone selects between: armed while
+    /// the map is on screen it would pump repaints of a canvas that draws none of
+    /// it.
+    fn settle_onto(&mut self, landed: &LayoutLanded, cx: &mut Context<Self>) {
+        let replaced = landed
+            .replaced
+            .clone()
+            .filter(|_| self.mode == LayoutMode::Layered);
+        if let Some(replaced) = replaced {
+            morph::begin(self, replaced, &landed.current, cx);
+        }
+        self.framing.request_recenter();
+        emphasis::begin_fade(self, cx);
     }
 
     /// Draws the selected mode's layout, or a spinner while it is still being
     /// computed — the toolbar stays above either, so the picker remains reachable.
     fn viewport(&mut self, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
-        let Some(drawn) = self.drawn() else {
+        let Some(drawn) = self.drawn(cx) else {
             return bviz_ui_components::centered_spinner("Laying out…", &palette.colors)
                 .into_any_element();
         };
@@ -267,7 +301,7 @@ impl GraphPanel {
         let content = drawn.content();
         let recenter_target = recenter_rect(g, &self.emphasis);
         let scene = Scene {
-            expandable: self.expandable(),
+            expandable: self.expandable(cx),
             palette,
             hovered: self.hovered.filter(|_| self.neighborhood_enabled),
             selected: self.selection.node(),
@@ -321,16 +355,15 @@ impl GraphPanel {
         self.emphasis.clear();
         self.morph.clear();
         self.framing.refit();
-        if self.drawn().is_none() && !self.model.relaying() {
-            model::relayout(self, cx);
-        }
+        self.model
+            .update(cx, |model, cx| model.ensure_layout(mode, cx));
         cx.notify();
     }
 
     fn on_mouse_down(&mut self, e: &MouseDownEvent, _: &mut Window, cx: &mut Context<Self>) {
         // A press on a scroll-bar gutter drives the thumb instead of panning the
         // content under it.
-        if let Some(axis) = scrollbar_hit(self, e.position) {
+        if let Some(axis) = scrollbar_hit(self, e.position, cx) {
             start_scroll_drag(self, axis, e.position, cx);
             return;
         }
@@ -357,7 +390,7 @@ impl GraphPanel {
         if matches!(self.drag, Drag::Pan(_)) {
             return;
         }
-        let Some(drawn) = self.drawn() else {
+        let Some(drawn) = self.drawn(cx) else {
             return;
         };
         let camera = self.camera();
@@ -390,7 +423,7 @@ impl GraphPanel {
     }
 
     fn on_scroll_wheel(&mut self, e: &ScrollWheelEvent, _: &mut Window, cx: &mut Context<Self>) {
-        let Some(content) = self.drawn().map(|d| d.content()) else {
+        let Some(content) = self.drawn(cx).map(|d| d.content()) else {
             return;
         };
         let notches = match e.delta {
@@ -423,9 +456,7 @@ impl GraphPanel {
         if !self.mode.honors_reduce() {
             return;
         }
-        self.reduced = !self.reduced;
-        model::relayout(self, cx);
-        cx.notify();
+        self.model.update(cx, |model, cx| model.toggle_reduce(cx));
     }
 }
 
@@ -450,8 +481,13 @@ impl Panel for GraphPanel {
         self.title.clone()
     }
 
-    fn status(&self, _cx: &App) -> Option<SharedString> {
-        Some(self.model.status(self.mode, self.camera().zoom).into())
+    fn status(&self, cx: &App) -> Option<SharedString> {
+        Some(
+            self.model
+                .read(cx)
+                .status(self.mode, self.camera().zoom)
+                .into(),
+        )
     }
 
     fn set_active(&mut self, active: bool, window: &mut Window, cx: &mut Context<Self>) {
@@ -479,16 +515,18 @@ impl Render for GraphPanel {
             .flex()
             .flex_col()
             .overflow_hidden();
-        match self.model.source().placeholder(&palette.colors) {
+        let placeholder = self.model.read(cx).source().placeholder(&palette.colors);
+        match placeholder {
             Some(placeholder) => chrome.child(placeholder),
             None => {
+                let graph = self.model.read(cx);
                 let controls = Controls {
                     mode: self.mode,
                     picker: self.mode_picker.clone(),
                     relation_picker: self.selection.node().map(|_| self.relation_picker.clone()),
                     neighborhood_enabled: self.neighborhood_enabled,
-                    reduced: self.reduced,
-                    relaying: self.model.relaying(),
+                    reduced: graph.reduced(),
+                    relaying: graph.relaying(),
                 };
                 chrome
                     .child(toolbar::toolbar(controls, &palette, cx))
@@ -554,20 +592,22 @@ fn click_box_at(view: &mut GraphPanel, pos: Point<Pixels>, cx: &mut Context<Grap
         return;
     }
     let camera = view.camera();
-    let Some(drawn) = view.drawn() else {
+    let Some(drawn) = view.drawn(cx) else {
         return;
     };
     let g = drawn.view(camera.zoom);
     let morph = view.morph_frame();
-    let hit = box_at(&view.titles, g, morph.as_ref(), vp, camera, pos)
-        .filter(|b| view.expandable().holds(b));
+    let expandable = view.expandable(cx);
+    let hit =
+        box_at(&view.titles, g, morph.as_ref(), vp, camera, pos).filter(|b| expandable.holds(b));
     let Some(id) = hit.map(|b| b.id) else {
         return;
     };
     // The relayout places the boxes afresh, so the box resolved here need not be
     // the one the cursor ends up over.
     view.hovered = None;
-    model::toggle_expansion(view, id, cx);
+    view.model
+        .update(cx, |model, cx| model.toggle_expansion(id, cx));
     view.emphasis.toggled(id);
 }
 
@@ -579,7 +619,7 @@ fn select_box_at(view: &mut GraphPanel, pos: Point<Pixels>, cx: &mut Context<Gra
     let camera = view.camera();
     let morph = view.morph_frame();
     let hit = view
-        .drawn()
+        .drawn(cx)
         .filter(|_| vp.contains(&pos))
         .and_then(|drawn| {
             box_at(
@@ -625,7 +665,7 @@ fn hit_box<'a>(
 
 /// A joint graph being read and laid out.
 pub struct Load {
-    built: Pending<model::Built>,
+    built: Pending<model::Loaded>,
     title: SharedString,
 }
 
@@ -651,10 +691,16 @@ fn title(source: &GraphSource) -> SharedString {
 /// The document drawing the graph `load` reads.
 pub fn open(load: impl Into<Load>, _window: &mut Window, cx: &mut App) -> Document {
     let load = load.into();
-    let label = load.title.clone();
-    let panels = PanelGroup::one(AnyPanel::new(cx.new(|cx| GraphPanel::new(load, cx))))
-        .with_weight(Weight::CHART);
-    Document::new(label, panels)
+    let label = load.title;
+    let model = cx.new(|cx| GraphModel::reading(load.built, cx));
+    let views = [ViewSpec::new({
+        let (label, model) = (label.clone(), model.clone());
+        move |cx| cx.new(|cx| GraphPanel::new(label.clone(), model.clone(), cx))
+    })];
+    let documents = Documents::global(cx);
+    let (_, [graph]) =
+        documents.update(cx, |documents, cx| documents.open(label.clone(), views, cx));
+    Document::new(label, PanelGroup::one(graph).with_weight(Weight::CHART))
 }
 
 /// Renders a Bazel build graph from one or more `--output=streamed_proto`

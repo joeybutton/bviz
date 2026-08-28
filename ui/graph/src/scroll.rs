@@ -2,7 +2,7 @@ use crate::camera::{Camera, clamp_pan, pan_range};
 use crate::drag::Drag;
 use crate::{GraphPanel, Palette};
 use bviz_ui_components::{Axis, DEFAULT_MIN_THUMB, SCROLLBAR_THICKNESS, Scrollbar};
-use gpui::{Bounds, Context, Pixels, Point, Size, Window, point, px, size};
+use gpui::{App, Bounds, Context, Pixels, Point, Size, Window, point, px, size};
 use std::ops::RangeInclusive;
 
 /// An in-progress scroll-bar drag: which bar holds it and the grab offset down the
@@ -132,22 +132,22 @@ pub(crate) fn paint_scrollbars(
 }
 
 /// The scroll bar for `axis` built from the loaded graph's current view state.
-fn current_scrollbar(view: &GraphPanel, axis: Axis) -> Option<Scrollbar> {
-    let content = view.drawn()?.content();
+fn current_scrollbar(view: &GraphPanel, axis: Axis, cx: &App) -> Option<Scrollbar> {
+    let content = view.drawn(cx)?.content();
     scrollbar_geom(axis, view.framing.viewport(), content, view.camera())
 }
 
 /// The axis of the scroll bar whose track a press at `position` (window px) landed
 /// on, or `None` when the press is over the content.
-pub(crate) fn scrollbar_hit(view: &GraphPanel, position: Point<Pixels>) -> Option<Axis> {
+pub(crate) fn scrollbar_hit(view: &GraphPanel, position: Point<Pixels>, cx: &App) -> Option<Axis> {
     [Axis::Vertical, Axis::Horizontal]
         .into_iter()
-        .find(|&axis| current_scrollbar(view, axis).is_some_and(|bar| bar.track_hit(position)))
+        .find(|&axis| current_scrollbar(view, axis, cx).is_some_and(|bar| bar.track_hit(position)))
 }
 
 /// Pan `axis` to where its bar's thumb reports `offset`.
 fn scroll_to(view: &mut GraphPanel, axis: Axis, offset: f32, cx: &mut Context<GraphPanel>) {
-    let Some(content) = view.drawn().map(|d| d.content()) else {
+    let Some(content) = view.drawn(cx).map(|d| d.content()) else {
         return;
     };
     let Camera {
@@ -174,7 +174,7 @@ pub(crate) fn start_scroll_drag(
     position: Point<Pixels>,
     cx: &mut Context<GraphPanel>,
 ) {
-    let Some(bar) = current_scrollbar(view, axis) else {
+    let Some(bar) = current_scrollbar(view, axis, cx) else {
         return;
     };
     let grab = bar.grab(position);
@@ -197,7 +197,7 @@ pub(crate) fn scroll_drag_move(
     let Drag::Scrollbar(drag) = view.drag else {
         return;
     };
-    let Some(bar) = current_scrollbar(view, drag.axis) else {
+    let Some(bar) = current_scrollbar(view, drag.axis, cx) else {
         return;
     };
     scroll_to(view, drag.axis, bar.offset_at(position, drag.grab), cx);

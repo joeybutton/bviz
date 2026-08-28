@@ -64,7 +64,7 @@ pub(crate) fn drag_pan(
     let dx = f32::from(position.x) - f32::from(pan.last.x);
     let dy = f32::from(position.y) - f32::from(pan.last.y);
     let panned = (px + dx, py + dy);
-    let panned = match view.drawn().map(|d| d.content()) {
+    let panned = match view.drawn(cx).map(|d| d.content()) {
         Some(content) => clamp_pan(panned, zoom, view.framing.viewport().size, content),
         None => panned,
     };
