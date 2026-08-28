@@ -9,7 +9,7 @@ use gpui::{
     relative, size,
 };
 
-use super::{ConsolePanel, ContentLayout, Source};
+use super::{ConsolePanel, ContentLayout};
 use crate::color::{CellStyle, Defaults, style_key};
 
 /// Width of the scroll bar gutter reserved on the right edge. The bar is an
@@ -73,47 +73,47 @@ impl TerminalElement {
         self.view.update(cx, |view, cx| {
             let frame = view.current_frame;
             if view.terminal.is_none() || view.terminal_frame != Some(frame) {
-                if let Source::Loaded(replay) = &view.source {
-                    let source = replay.display_at(frame);
-                    let mut terminal = Terminal::from_display(&source, cols, rows);
-                    // Restore the user's remembered scroll. If the held line lies
-                    // beyond the output at this frame, scroll_to_top_line clamps to
-                    // the bottom without forgetting it, so scrubbing forward returns.
-                    if view.follow_bottom {
-                        terminal.scroll(Scroll::Bottom);
-                    } else {
-                        terminal.scroll_to_top_line(view.scroll_top);
-                    }
-                    // Carry an active search onto the rebuilt content, keeping the
-                    // focused match rather than resetting it to the first.
-                    if view.find_active
-                        && let Some(input) = view.find_input.as_ref()
-                    {
-                        let query = input.read(cx).content().to_string();
-                        let current = view
-                            .terminal
-                            .as_ref()
-                            .and_then(Terminal::current_match_index);
-                        terminal.restore_search(&query, current);
-                    }
-                    // Carry the text selection onto the rebuilt content. A live drag
-                    // keeps its anchor on its text but lets the far end follow the
-                    // cursor's cell, so it grows as playback scrolls under a held
-                    // cursor; a settled selection just re-applies its range.
-                    if let (true, Some(anchor), Some(cursor)) =
-                        (view.selecting, view.selection_anchor, view.selection_drag)
-                    {
-                        if let Some(end) = view.cell_at(cursor) {
-                            terminal.drag_select(anchor, end);
-                        }
-                    } else if let Some(span) =
-                        view.terminal.as_ref().and_then(Terminal::selection_span)
-                    {
-                        terminal.restore_selection(span);
-                    }
-                    view.terminal = Some(terminal);
-                    view.terminal_frame = Some(frame);
+                let Some(replay) = view.replay(cx) else {
+                    return;
+                };
+                let source = replay.display_at(frame);
+                let mut terminal = Terminal::from_display(&source, cols, rows);
+                // Restore the user's remembered scroll. If the held line lies
+                // beyond the output at this frame, scroll_to_top_line clamps to
+                // the bottom without forgetting it, so scrubbing forward returns.
+                if view.follow_bottom {
+                    terminal.scroll(Scroll::Bottom);
+                } else {
+                    terminal.scroll_to_top_line(view.scroll_top);
                 }
+                // Carry an active search onto the rebuilt content, keeping the
+                // focused match rather than resetting it to the first.
+                if view.find_active
+                    && let Some(input) = view.find_input.as_ref()
+                {
+                    let query = input.read(cx).content().to_string();
+                    let current = view
+                        .terminal
+                        .as_ref()
+                        .and_then(Terminal::current_match_index);
+                    terminal.restore_search(&query, current);
+                }
+                // Carry the text selection onto the rebuilt content. A live drag
+                // keeps its anchor on its text but lets the far end follow the
+                // cursor's cell, so it grows as playback scrolls under a held
+                // cursor; a settled selection just re-applies its range.
+                if let (true, Some(anchor), Some(cursor)) =
+                    (view.selecting, view.selection_anchor, view.selection_drag)
+                {
+                    if let Some(end) = view.cell_at(cursor) {
+                        terminal.drag_select(anchor, end);
+                    }
+                } else if let Some(span) = view.terminal.as_ref().and_then(Terminal::selection_span)
+                {
+                    terminal.restore_selection(span);
+                }
+                view.terminal = Some(terminal);
+                view.terminal_frame = Some(frame);
             } else if let Some(terminal) = view.terminal.as_mut() {
                 terminal.resize(cols, rows);
             }

@@ -10,13 +10,15 @@
 
 mod color;
 mod console;
+mod model;
 
 pub use console::{ConsolePanel, register_keys};
+use model::ConsoleModel;
 
 use bviz_terminal::Replay;
 use bviz_ui_components::Pending;
 use bviz_ui_console_args::{ConsoleArgs, ConsoleSource};
-use bviz_ui_workspace::{AnyPanel, Document, PanelGroup, Weight, document_label};
+use bviz_ui_workspace::{Document, Documents, PanelGroup, ViewSpec, Weight, document_label};
 use clap::error::ErrorKind;
 use clap::{CommandFactory, Parser};
 use gpui::{App, SharedString, Window, prelude::*, px, size};
@@ -48,10 +50,16 @@ impl From<ConsoleSource> for Load {
 /// The document replaying the build `load` reads.
 pub fn open(load: impl Into<Load>, _window: &mut Window, cx: &mut App) -> Document {
     let load = load.into();
-    let label = load.title.clone();
-    let panels = PanelGroup::one(AnyPanel::new(cx.new(|cx| ConsolePanel::new(load, cx))))
-        .with_weight(Weight::LOG);
-    Document::new(label, panels)
+    let label = load.title;
+    let model = cx.new(|cx| ConsoleModel::reading(load.replay, cx));
+    let views = [ViewSpec::new({
+        let (label, model) = (label.clone(), model.clone());
+        move |cx| cx.new(|cx| ConsolePanel::new(label.clone(), model.clone(), cx))
+    })];
+    let documents = Documents::global(cx);
+    let (_, [console]) =
+        documents.update(cx, |documents, cx| documents.open(label.clone(), views, cx));
+    Document::new(label, PanelGroup::one(console).with_weight(Weight::LOG))
 }
 
 /// Replays the console output of a Bazel build. Each file given opens a replay

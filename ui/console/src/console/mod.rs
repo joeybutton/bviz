@@ -4,17 +4,17 @@
 
 use std::time::{Duration, Instant};
 
+use crate::model::{ConsoleModel, SourceReplaced};
 use bviz_terminal::{CellPos, Replay, Scroll, SelectionType, Side, Terminal, Url};
 use bviz_ui_components::{
-    Button, Dropdown, Pending, Scrollbar, ScrubberColors, ScrubberState, TextInput,
-    load_in_background, scrubber,
+    Button, Dropdown, Scrollbar, ScrubberColors, ScrubberState, TextInput, scrubber,
 };
 use bviz_ui_theme::ThemeColors;
 use bviz_ui_workspace::{Panel, PanelEvent, PanelKind, ViewKind};
 use gpui::{
     App, ClipboardItem, Context, Entity, EventEmitter, FocusHandle, Focusable, IntoElement,
     KeyBinding, MouseButton, MouseDownEvent, MouseMoveEvent, Pixels, Point, Render,
-    ScrollWheelEvent, SharedString, Subscription, Task, Window, actions, div, prelude::*, px,
+    ScrollWheelEvent, SharedString, Subscription, Window, actions, div, prelude::*, px,
 };
 
 mod element;
@@ -121,17 +121,17 @@ struct ContentLayout {
     rows: usize,
 }
 
-type Source = bviz_ui_components::Source<Replay>;
-
-/// A build's captured console output, replayed under playback controls.
+/// A view replaying a build's captured console output under playback controls.
 pub struct ConsolePanel {
     /// Names the document shown, labelling this panel's tab.
     title: SharedString,
-    /// The playback timeline, loaded off the UI thread.
-    source: Source,
-    /// Holds the background load task so it isn't cancelled on drop.
-    _load_task: Task<()>,
-    /// The frame currently shown; an index into the loaded [`Replay`]'s frames.
+    /// The build replayed here, shared with every other view of it.
+    model: Entity<ConsoleModel>,
+    /// Redraws as the build is read.
+    _changed: Subscription,
+    /// Puts the playhead on the build as its read lands.
+    _source_replaced: Subscription,
+    /// The frame currently shown; an index into the build's [`Replay`] frames.
     current_frame: usize,
     /// Whether the timeline is advancing on its own.
     playing: bool,
@@ -199,8 +199,11 @@ pub struct ConsolePanel {
 }
 
 impl ConsolePanel {
-    pub fn new(load: crate::Load, cx: &mut Context<Self>) -> Self {
-        let crate::Load { replay, title } = load;
+    pub(crate) fn new(
+        title: SharedString,
+        model: Entity<ConsoleModel>,
+        cx: &mut Context<Self>,
+    ) -> Self {
         // Tab cycles focus through the regions (handled by the shell's tab action
         // via window.focus_next), in this order: playback bar, terminal, then the
         // find field when it is open (its tab index is set on creation).
@@ -217,10 +220,15 @@ impl ConsolePanel {
             }
             cx.notify();
         });
+        let changed = cx.observe(&model, |_, _, cx| cx.notify());
+        let source_replaced = cx.subscribe(&model, |view, _, _: &SourceReplaced, cx| {
+            view.show_completed_build(cx);
+        });
         let mut view = Self {
             title,
-            source: Source::Loading,
-            _load_task: Task::ready(()),
+            model,
+            _changed: changed,
+            _source_replaced: source_replaced,
             current_frame: 0,
             playing: false,
             speed: SPEEDS[0],
@@ -252,29 +260,24 @@ impl ConsolePanel {
         // Show the bar briefly on launch so the scrollable extent is visible,
         // then let it auto-hide.
         view.reveal_scrollbar(cx);
-        view.spawn_load(replay, cx);
+        view.show_completed_build(cx);
         view
     }
 
-    /// Read and reconstruct the build off the UI thread so a large log never
-    /// blocks startup or the first frame.
-    fn spawn_load(&mut self, replay: Pending<Replay>, cx: &mut Context<Self>) {
-        self._load_task = load_in_background(
-            cx,
-            move || replay.join(),
-            |view, result, _| {
-                view.source = match result {
-                    Ok(replay) => {
-                        // Open on the completed build, the playhead at its end, ready
-                        // to replay from the start.
-                        view.current_frame = replay.frame_count().saturating_sub(1);
-                        view.position = replay.duration();
-                        Source::Loaded(replay)
-                    }
-                    Err(err) => Source::Failed(err),
-                };
-            },
-        );
+    /// The timeline this view plays, and `None` while the build's read has
+    /// landed none.
+    fn replay<'a>(&self, cx: &'a App) -> Option<&'a Replay> {
+        self.model.read(cx).replay()
+    }
+
+    /// Put the playhead at the end of the build: a view opens on the completed
+    /// output, ready to replay it from the start.
+    fn show_completed_build(&mut self, cx: &App) {
+        let Some(replay) = self.replay(cx) else {
+            return;
+        };
+        self.current_frame = replay.frame_count().saturating_sub(1);
+        self.position = replay.duration();
     }
 
     /// Show the scroll bar and schedule it to hide after a period of no further
@@ -553,7 +556,7 @@ impl ConsolePanel {
         // The field is drawn beside the scrollback grid, which stands only over a
         // loaded replay; opening it before then would focus a field no rendered
         // element carries, leaving the window answering no key at all.
-        if !matches!(self.source, Source::Loaded(_)) {
+        if self.replay(cx).is_none() {
             return;
         }
         self.find_active = true;
@@ -655,9 +658,9 @@ impl ConsolePanel {
     /// playing, each frame maps the elapsed real time to a timeline position and
     /// requests the next frame (see [`advance_playback`](Self::advance_playback)).
     fn play(&mut self, cx: &mut Context<Self>) {
-        let last = match &self.source {
-            Source::Loaded(replay) => replay.frame_count().saturating_sub(1),
-            _ => return,
+        let last = match self.replay(cx) {
+            Some(replay) => replay.frame_count().saturating_sub(1),
+            None => return,
         };
         if last == 0 {
             return;
@@ -689,7 +692,7 @@ impl ConsolePanel {
     /// frame so playback keeps running; stop at the end. Called each render so
     /// playback is paced by the window's frame loop rather than a detached timer,
     /// which a quiescent window stops pumping.
-    fn advance_playback(&mut self, window: &mut Window) {
+    fn advance_playback(&mut self, window: &mut Window, cx: &App) {
         if !self.playing {
             return;
         }
@@ -697,13 +700,13 @@ impl ConsolePanel {
             return;
         };
         let target = base + started.elapsed().as_secs_f64() * self.speed as f64;
-        let (frame, last, duration) = match &self.source {
-            Source::Loaded(replay) => (
+        let (frame, last, duration) = match self.replay(cx) {
+            Some(replay) => (
                 replay.frame_at(target),
                 replay.frame_count().saturating_sub(1),
                 replay.duration(),
             ),
-            _ => return,
+            None => return,
         };
         if frame >= last {
             self.current_frame = last;
@@ -720,12 +723,12 @@ impl ConsolePanel {
     /// Show a frame, clamped to the timeline, moving the playhead to its time and
     /// keeping playback running from there.
     fn seek_frame(&mut self, frame: usize, cx: &mut Context<Self>) {
-        let (frame, time) = match &self.source {
-            Source::Loaded(replay) => {
+        let (frame, time) = match self.replay(cx) {
+            Some(replay) => {
                 let frame = frame.min(replay.frame_count().saturating_sub(1));
                 (frame, replay.time_of(frame))
             }
-            _ => return,
+            None => return,
         };
         self.current_frame = frame;
         self.position = time;
@@ -767,12 +770,12 @@ impl ConsolePanel {
             self.playing = false;
             self.play_anchor = None;
         }
-        let (frame, position) = match &self.source {
-            Source::Loaded(replay) => {
+        let (frame, position) = match self.replay(cx) {
+            Some(replay) => {
                 let position = fraction as f64 * replay.duration();
                 (replay.frame_at(position), position)
             }
-            _ => return,
+            None => return,
         };
         self.current_frame = frame;
         self.position = position;
@@ -811,7 +814,7 @@ impl Panel for ConsolePanel {
 impl Render for ConsolePanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // Advance the timeline if playing, pacing playback by the frame loop.
-        self.advance_playback(window);
+        self.advance_playback(window, cx);
         self.autoscroll_selection(window, cx);
         let theme = bviz_ui_theme::theme(window, cx);
         let colors = &theme.colors;
@@ -835,7 +838,7 @@ impl Render for ConsolePanel {
             .flex()
             .flex_col()
             .size_full();
-        match self.source.placeholder(colors) {
+        match self.model.read(cx).source().placeholder(colors) {
             // One element tracks the body focus per frame: the grid where it is
             // drawn, and the chrome standing in for it where it is not. Tracking
             // it twice enters it in the tab order twice, and the pair then step
@@ -971,7 +974,7 @@ impl ConsolePanel {
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let playing = self.playing;
-        let (fraction, readout) = self.playback_readout();
+        let (fraction, readout) = self.playback_readout(cx);
 
         let view = cx.entity();
         let start_view = view.clone();
@@ -1043,10 +1046,10 @@ impl ConsolePanel {
 
     /// The played fraction (0..=1) positioning the playhead, and the
     /// `current / total` readout text.
-    fn playback_readout(&self) -> (f32, SharedString) {
-        let (duration, real_time) = match &self.source {
-            Source::Loaded(replay) => (replay.duration(), replay.real_time()),
-            _ => (0.0, true),
+    fn playback_readout(&self, cx: &App) -> (f32, SharedString) {
+        let (duration, real_time) = match self.replay(cx) {
+            Some(replay) => (replay.duration(), replay.real_time()),
+            None => (0.0, true),
         };
         // The playhead tracks the playback clock, so it glides smoothly even when
         // the shown frame jumps across a coarse timeline's large gaps.
