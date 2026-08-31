@@ -1590,9 +1590,6 @@ pub struct Load(Pending<Profile>);
 
 impl From<TraceSource> for Load {
     fn from(source: TraceSource) -> Self {
-        // rayon's global pool takes the size of the first build_global to win,
-        // so it is sized here, ahead of any layout pass that runs on it.
-        bviz_trace_layout::init_thread_pool();
         Self(Pending::start(move || {
             Profile::from_path(&source.path).map_err(|e| e.to_string())
         }))

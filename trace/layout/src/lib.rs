@@ -21,15 +21,6 @@ pub use selection::{TimeRegion, TimeSelection, span_between};
 pub use stats::{StatRow, stats_from_flame};
 pub use view::{FlameView, TimeView};
 
-/// Sizes rayon's global thread pool to the physical worker count. Call once at
-/// startup, before any parallel layout pass; a no-op if the pool already exists.
-pub fn init_thread_pool() {
-    rayon::ThreadPoolBuilder::new()
-        .num_threads(bviz_parallel::worker_count())
-        .build_global()
-        .ok();
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

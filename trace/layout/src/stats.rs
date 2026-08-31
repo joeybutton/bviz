@@ -1,3 +1,4 @@
+use bviz_parallel::workers;
 use rayon::slice::ParallelSliceMut;
 
 use bviz_trace_profile::{SpanRole, Str};
@@ -110,7 +111,7 @@ pub(crate) fn default_order(stats: &[StatRow]) -> Vec<u32> {
             ((self_desc as u128) << SELF_SHIFT) | ((r.rank as u128) << RANK_SHIFT) | i as u128
         })
         .collect();
-    keyed.par_sort_unstable();
+    workers().install(|| keyed.par_sort_unstable());
     keyed.into_iter().map(|k| k as u32).collect()
 }
 

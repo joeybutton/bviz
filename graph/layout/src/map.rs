@@ -7,7 +7,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::{Arc, OnceLock};
 
-use bviz_parallel::worker_count;
+use bviz_parallel::workers;
 use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 
 use crate::graph::{Containment, EdgeKind, Graph, Node};
@@ -332,34 +332,15 @@ fn lay_out_frame(members: &[Id], edges: &[(Id, Id)], size: &HashMap<Id, (f64, f6
 }
 
 /// Applies `job` to every id, spreading the work over the machine's cores and
-/// returning each result beside the id it came from, in the order given.
+/// returning each result beside the id it came from, in the order given. Frame
+/// costs run orders of magnitude apart, so the ids are stolen rather than dealt
+/// out in equal shares.
 fn in_parallel<T: Send>(ids: &[Id], job: impl Fn(&Id) -> T + Send + Sync) -> Vec<(Id, T)> {
     workers().install(|| ids.par_iter().map(|&id| (id, job(&id))).collect())
 }
 
 fn on_worker<T: Send>(job: impl FnOnce() -> T + Send) -> T {
     workers().install(job)
-}
-
-/// Stack for a layout worker: the engine recurses over the frame it is given, so
-/// the depth follows the frame's size, and placing a whole graph hands it far
-/// larger frames than laying out one view does. Sized well clear of what the
-/// largest frames of a whole-repository build graph reach.
-const WORKER_STACK: usize = 8 << 20;
-
-/// The pool every frame is laid out on. Frame costs run orders of magnitude
-/// apart, so the work is stolen rather than dealt out in equal shares, and the
-/// pool outlives one stratum so the deepest strata of trivial frames cost no
-/// thread of their own.
-fn workers() -> &'static rayon::ThreadPool {
-    static POOL: OnceLock<rayon::ThreadPool> = OnceLock::new();
-    POOL.get_or_init(|| {
-        rayon::ThreadPoolBuilder::new()
-            .num_threads(worker_count())
-            .stack_size(WORKER_STACK)
-            .build()
-            .expect("build the frame layout pool")
-    })
 }
 
 /// The edges each frame lays out: an edge between two nodes becomes one edge

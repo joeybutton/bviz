@@ -59,7 +59,6 @@ fn evicting(sel: &TimeSelection) -> TimeSelection {
 
 fn main() {
     bviz_alloc::retain_freed_memory_across_load();
-    bviz_trace_layout::init_thread_pool();
     let path = std::env::args()
         .nth(1)
         .expect("usage: bench_tracks <profile>");

@@ -1,7 +1,7 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 
-use bviz_parallel::worker_count;
+use bviz_parallel::{worker_count, workers};
 use bviz_trace_profile::{
     Profile, Slice, SliceDetail, Span32, SpanRole, Str, ThreadTrack, TimeSpan, Workload, encloses,
     occupied_span,
@@ -254,7 +254,7 @@ fn sort_pairs_by_text(pairs: &mut [(&str, Str)]) {
     if pairs.len() < PARALLEL_MIN {
         pairs.sort_unstable_by_key(|&(t, _)| t);
     } else {
-        pairs.par_sort_unstable_by_key(|&(t, _)| t);
+        workers().install(|| pairs.par_sort_unstable_by_key(|&(t, _)| t));
     }
 }
 
@@ -759,7 +759,7 @@ impl TrackFlamer {
                 });
             }
         }
-        elems.par_sort_by(|a, b| a.key.cmp(b.key));
+        workers().install(|| elems.par_sort_by(|a, b| a.key.cmp(b.key)));
         let node_of = |src: Src| &tables[src.lane as usize].nodes[src.node as usize];
         let arena = reconstruct(&elems, |run| {
             let head = node_of(run[0].src);
@@ -1232,16 +1232,18 @@ fn sort_child_ranges(kids: &mut ArenaChildren, n: usize, arena: &Arena) {
             tiles.push(head);
         }
     }
-    for tile in &mut wide {
-        let mut buf: Vec<(ChildOrder, u32)> = tile
-            .par_iter()
-            .map(|&c| (child_order(arena, c as usize), c))
-            .collect();
-        buf.par_sort_unstable();
-        for (dst, &(_, c)) in tile.iter_mut().zip(buf.iter()) {
-            *dst = c;
+    workers().install(|| {
+        for tile in &mut wide {
+            let mut buf: Vec<(ChildOrder, u32)> = tile
+                .par_iter()
+                .map(|&c| (child_order(arena, c as usize), c))
+                .collect();
+            buf.par_sort_unstable();
+            for (dst, &(_, c)) in tile.iter_mut().zip(buf.iter()) {
+                *dst = c;
+            }
         }
-    }
+    });
     let sort_tile = |buf: &mut Vec<(ChildOrder, u32)>, tile: &mut [u32]| {
         buf.clear();
         buf.extend(tile.iter().map(|&c| (child_order(arena, c as usize), c)));
@@ -1256,9 +1258,11 @@ fn sort_child_ranges(kids: &mut ArenaChildren, n: usize, arena: &Arena) {
             sort_tile(&mut buf, tile);
         }
     } else {
-        tiles
-            .par_iter_mut()
-            .for_each_init(Vec::new, |buf, tile| sort_tile(buf, tile));
+        workers().install(|| {
+            tiles
+                .par_iter_mut()
+                .for_each_init(Vec::new, |buf, tile| sort_tile(buf, tile));
+        });
     }
 }
 
@@ -1345,13 +1349,14 @@ struct Src {
 /// maximal run of equal keys is one node, built by `node_of` from the run. The
 /// root's total is the summed total of the depth-1 nodes.
 fn reconstruct(elems: &[KeyRef], node_of: impl Fn(&[KeyRef]) -> ArenaNode) -> Arena {
-    // One node per maximal run of equal keys, and the root.
-    let nodes = 1
-        + usize::from(!elems.is_empty())
-        + elems
+    let run_breaks = workers().install(|| {
+        elems
             .par_windows(2)
             .filter(|w| w[0].key != w[1].key)
-            .count();
+            .count()
+    });
+    // One node per maximal run of equal keys, and the root.
+    let nodes = 1 + usize::from(!elems.is_empty()) + run_breaks;
     let mut arena = Arena::with_capacity(nodes);
     // `stack[d]` holds the arena index of the current path's depth-`d` node; the
     // root seeds depth 0. A node at depth `d` finds its parent at `stack[d - 1]`,
@@ -1600,7 +1605,7 @@ pub(crate) fn invert(graph: FlameGraph) -> FlameGraph {
             });
         }
     }
-    elems.par_sort_by(|a, b| a.key.cmp(b.key));
+    workers().install(|| elems.par_sort_by(|a, b| a.key.cmp(b.key)));
 
     // Each key opens one node per segment past the prefix it shares with the key
     // before it, so the scan recording those prefixes also counts the nodes.

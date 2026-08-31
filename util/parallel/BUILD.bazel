@@ -9,5 +9,8 @@ rust_library(
         "//trace/layout:__pkg__",
         "//trace/profile:__pkg__",
     ],
-    deps = ["@crates//:num_cpus"],
+    deps = [
+        "@crates//:num_cpus",
+        "@crates//:rayon",
+    ],
 )
