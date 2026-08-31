@@ -1624,17 +1624,14 @@ impl From<TraceSource> for Load {
     }
 }
 
-/// Opens a window rendering the profile `load` reads.
-pub fn open_window(load: impl Into<Load>) {
+/// A panel rendering the profile `load` reads.
+pub fn open(load: impl Into<Load>, window: &mut Window, cx: &mut App) -> AnyPanel {
     let load = load.into();
-    bviz_ui_workspace::run(
-        "bviz trace",
-        size(px(1280.), px(820.)),
-        move |window, cx| AnyPanel::new(cx.new(|cx| TracePanel::new(load, window, cx))),
-    );
+    AnyPanel::new(cx.new(|cx| TracePanel::new(load, window, cx)))
 }
 
-/// Renders a Bazel `--profile` trace as a flame-chart timeline.
+/// Renders a Bazel `--profile` trace as a flame-chart timeline. Each profile
+/// given opens a timeline of its own.
 #[derive(Parser)]
 #[command(name = "trace", version, about)]
 struct Cli {
@@ -1645,21 +1642,19 @@ struct Cli {
 /// Parses `--profile` and opens the trace-viewer window.
 pub fn run() {
     bviz_alloc::retain_freed_memory_across_load();
-    let mut sources = Cli::parse().trace.sources();
-    let Some(source) = sources.next() else {
+    let mut loads = Cli::parse().trace.sources().map(Load::from);
+    let Some(first) = loads.next() else {
         Cli::command()
             .error(ErrorKind::MissingRequiredArgument, "--profile is required")
             .exit()
     };
-    if sources.next().is_some() {
-        Cli::command()
-            .error(
-                ErrorKind::TooManyValues,
-                "a window shows one document, so one is opened per invocation",
-            )
-            .exit()
-    }
-    open_window(source);
+    bviz_ui_workspace::run_panels(
+        "bviz trace",
+        size(px(1280.), px(820.)),
+        first,
+        loads.collect(),
+        open,
+    );
 }
 
 #[cfg(test)]

@@ -865,7 +865,9 @@ dependencies = [
  "bviz_ui_graph",
  "bviz_ui_terminal",
  "bviz_ui_trace",
+ "bviz_ui_workspace",
  "clap",
+ "gpui",
 ]
 
 [[package]]

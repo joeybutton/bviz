@@ -1,6 +1,6 @@
 //! The command line of the window that shows every kind of Bazel build
 //! document: the three viewers' flag fragments joined into one parser, and the
-//! document an invocation resolves to. It names no window and draws nothing,
+//! documents an invocation resolves to. It names no window and draws nothing,
 //! so a parse can be exercised without a display.
 
 use bviz_ui_graph_args::{GraphArgs, GraphSource};
@@ -12,7 +12,8 @@ use clap::{CommandFactory, Parser};
 /// Opens Bazel build documents: the dependency graph, the action timeline, the
 /// console replay.
 ///
-/// A window shows one document, so an invocation names one.
+/// Every document named on the command line becomes a panel of the one window,
+/// and several of them share a pane as tabs.
 #[derive(Parser, Debug)]
 #[command(name = "bviz", bin_name = "bviz", version, about)]
 pub struct Cli {
@@ -28,32 +29,28 @@ pub struct Cli {
 const SOURCE_FLAGS: &str = "--aquery, --cquery, --query, --profile or --bep";
 
 impl Cli {
-    /// The document this invocation names.
+    /// The documents this invocation names, graph first and each repeatable
+    /// flag's in the order given.
     ///
     /// The rejection of an invocation naming none is written out here rather
     /// than left to a clap argument group, because these fragments are shared
     /// with the per-viewer binaries, where a different flag is the required one.
-    pub fn source(self) -> Result<Source, clap::Error> {
-        let mut named = self
-            .graph
-            .source()
-            .map(Source::Graph)
-            .into_iter()
-            .chain(self.trace.sources().map(Source::Trace))
-            .chain(self.console.sources().map(Source::Console));
-        let Some(source) = named.next() else {
+    pub fn sources(self) -> Result<Sources, clap::Error> {
+        let mut named = Vec::with_capacity(1 + self.trace.profile.len() + self.console.bep.len());
+        named.extend(self.graph.source().map(Source::Graph));
+        named.extend(self.trace.sources().map(Source::Trace));
+        named.extend(self.console.sources().map(Source::Console));
+        let mut named = named.into_iter();
+        let Some(first) = named.next() else {
             return Err(Self::command().error(
                 ErrorKind::MissingRequiredArgument,
                 format!("one of {SOURCE_FLAGS} is required"),
             ));
         };
-        if named.next().is_some() {
-            return Err(Self::command().error(
-                ErrorKind::TooManyValues,
-                "a window shows one document, so one is opened per invocation",
-            ));
-        }
-        Ok(source)
+        Ok(Sources {
+            first,
+            rest: named.collect(),
+        })
     }
 }
 
@@ -65,13 +62,31 @@ pub enum Source {
     Console(ConsoleSource),
 }
 
+/// The documents an invocation names, in the order a window shows them. Holding
+/// the first apart from the rest is what makes it at least one: a window with no
+/// document to show is a usage mistake, refused before any window opens.
+#[derive(Clone, Debug)]
+pub struct Sources {
+    first: Source,
+    rest: Vec<Source>,
+}
+
+impl Sources {
+    /// The document the window shows, and those tabbed behind it.
+    pub fn into_parts(self) -> (Source, Vec<Source>) {
+        (self.first, self.rest)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use bviz_ui_graph_args::{Input, InputKind};
 
-    fn source(args: &[&str]) -> Result<Source, clap::Error> {
-        Cli::try_parse_from(std::iter::once("bviz").chain(args.iter().copied()))?.source()
+    fn sources(args: &[&str]) -> Result<Vec<Source>, clap::Error> {
+        let cli = Cli::try_parse_from(std::iter::once("bviz").chain(args.iter().copied()))?;
+        let (first, rest) = cli.sources()?.into_parts();
+        Ok(std::iter::once(first).chain(rest).collect())
     }
 
     fn graph(inputs: &[(InputKind, &str)]) -> Source {
@@ -98,7 +113,7 @@ mod tests {
     /// sees.
     #[test]
     fn an_invocation_naming_no_document_is_a_usage_error() {
-        let err = source(&[]).expect_err("no document was named");
+        let err = sources(&[]).expect_err("no document was named");
         assert_eq!(err.kind(), ErrorKind::MissingRequiredArgument);
         assert!(
             err.to_string().contains(SOURCE_FLAGS),
@@ -109,32 +124,37 @@ mod tests {
     #[test]
     fn each_flag_names_a_document_of_its_own_kind() {
         assert_eq!(
-            source(&["--aquery", "a.pb"]).unwrap(),
-            graph(&[(InputKind::Aquery, "a.pb")])
+            sources(&["--aquery", "a.pb"]).unwrap(),
+            [graph(&[(InputKind::Aquery, "a.pb")])]
         );
         assert_eq!(
-            source(&["--cquery", "c.pb"]).unwrap(),
-            graph(&[(InputKind::Cquery, "c.pb")])
+            sources(&["--cquery", "c.pb"]).unwrap(),
+            [graph(&[(InputKind::Cquery, "c.pb")])]
         );
         assert_eq!(
-            source(&["--query", "q.pb"]).unwrap(),
-            graph(&[(InputKind::Query, "q.pb")])
+            sources(&["--query", "q.pb"]).unwrap(),
+            [graph(&[(InputKind::Query, "q.pb")])]
         );
-        assert_eq!(source(&["--profile", "p.gz"]).unwrap(), trace("p.gz"));
-        assert_eq!(source(&["--bep", "b.bep"]).unwrap(), console("b.bep"));
+        assert_eq!(sources(&["--profile", "p.gz"]).unwrap(), [trace("p.gz")]);
+        assert_eq!(sources(&["--bep", "b.bep"]).unwrap(), [console("b.bep")]);
+        assert_eq!(
+            sources(&["--profile", "one.gz", "--profile", "two.gz"]).unwrap(),
+            [trace("one.gz"), trace("two.gz")]
+        );
     }
 
-    /// Documents of several kinds and a repeated flag's documents are both
-    /// several, refused in the terms clap refuses a value too many.
+    /// Documents of every kind open together.
     #[test]
-    fn an_invocation_naming_several_documents_is_a_usage_error() {
-        for args in [
-            &["--profile", "p.gz", "--bep", "b.bep", "--aquery", "a.pb"][..],
-            &["--profile", "one.gz", "--profile", "two.gz"][..],
-        ] {
-            let err = source(args).expect_err("several documents were named");
-            assert_eq!(err.kind(), ErrorKind::TooManyValues, "{args:?}");
-        }
+    fn a_graph_a_profile_and_a_bep_are_three_documents() {
+        let named = sources(&["--profile", "p.gz", "--bep", "b.bep", "--aquery", "a.pb"]).unwrap();
+        assert_eq!(
+            named,
+            [
+                graph(&[(InputKind::Aquery, "a.pb")]),
+                trace("p.gz"),
+                console("b.bep"),
+            ]
+        );
     }
 
     /// The flags are the surface users' scripts are written against, so their

@@ -17,7 +17,7 @@ use bviz_ui_terminal_args::{ConsoleArgs, ConsoleSource};
 use bviz_ui_workspace::AnyPanel;
 use clap::error::ErrorKind;
 use clap::{CommandFactory, Parser};
-use gpui::{prelude::*, px, size};
+use gpui::{App, Window, prelude::*, px, size};
 use std::path::PathBuf;
 use terminal::TerminalPanel;
 
@@ -37,17 +37,14 @@ impl From<ConsoleSource> for Load {
     }
 }
 
-/// Opens a window replaying the build `load` reads.
-pub fn open_window(load: impl Into<Load>) {
+/// A panel replaying the build `load` reads.
+pub fn open(load: impl Into<Load>, _window: &mut Window, cx: &mut App) -> AnyPanel {
     let load = load.into();
-    bviz_ui_workspace::run(
-        "bviz console",
-        size(px(1100.), px(720.)),
-        move |_window, cx| AnyPanel::new(cx.new(|cx| TerminalPanel::new(load, cx))),
-    );
+    AnyPanel::new(cx.new(|cx| TerminalPanel::new(load, cx)))
 }
 
-/// Replays the console output of a Bazel build.
+/// Replays the console output of a Bazel build. Each file given opens a replay
+/// of its own.
 #[derive(Parser)]
 #[command(name = "terminal", version, about)]
 struct Cli {
@@ -65,10 +62,10 @@ impl Cli {
     }
 }
 
-/// Parses the build event stream and opens the console-replay window.
+/// Parses the build event streams and opens the console-replay window.
 pub fn run() {
-    let mut sources = Cli::parse().sources();
-    let Some(source) = sources.next() else {
+    let mut loads = Cli::parse().sources().map(Load::from);
+    let Some(first) = loads.next() else {
         Cli::command()
             .error(
                 ErrorKind::MissingRequiredArgument,
@@ -76,13 +73,11 @@ pub fn run() {
             )
             .exit()
     };
-    if sources.next().is_some() {
-        Cli::command()
-            .error(
-                ErrorKind::TooManyValues,
-                "a window shows one document, so one is opened per invocation",
-            )
-            .exit()
-    }
-    open_window(source);
+    bviz_ui_workspace::run_panels(
+        "bviz console",
+        size(px(1100.), px(720.)),
+        first,
+        loads.collect(),
+        open,
+    );
 }

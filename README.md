@@ -8,9 +8,9 @@ timeline, scrub back through the console output.
 
 ## Viewers
 
-`//bviz` is the application: it takes the input of any viewer and opens the
-one that reads it. Each viewer also builds as a binary of its own, for work on
-that viewer alone.
+`//bviz` is the application: one window holding a panel per document named
+on its command line, several of them tabbed into one pane. Each viewer also
+builds as a binary of its own, for work on that viewer alone.
 
 | Target | Shows |
 | --- | --- |
@@ -101,12 +101,15 @@ replay interpolates its timing between the events that do carry a clock.
 
 ## Running bviz
 
-`//bviz` takes the inputs of all three viewers, and opens the viewer whose
-input it is given.
+`//bviz` takes the inputs of all three viewers at once and opens a panel
+per document.
 
 ```sh
-bazel run -c opt //bviz -- --profile /tmp/build.profile.gz
+bazel run -c opt //bviz -- \
+    --aquery /tmp/aquery.pb --cquery /tmp/cquery.pb --query /tmp/query.pb \
+    --profile /tmp/build.profile.gz --bep /tmp/build.bep
 ```
 
-A window shows one document, so exactly one is named per invocation, except that
-the query files merge into a single joint graph and count as one.
+At least one document is required. The query files merge into a single joint
+graph, so each of `--aquery`, `--cquery` and `--query` names at most one file per
+invocation; `--profile` and `--bep` each open a panel per occurrence.

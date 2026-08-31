@@ -7,7 +7,7 @@ use std::path::PathBuf;
 
 /// The build event streams a console replay is read from.
 #[derive(Args, Debug)]
-#[command(next_help_heading = "Console replays")]
+#[command(next_help_heading = "Console replays (one panel per file)")]
 pub struct ConsoleArgs {
     /// `bazel build --build_event_binary_file=FILE` output.
     #[arg(long, value_name = "FILE")]

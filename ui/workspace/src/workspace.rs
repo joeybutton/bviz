@@ -74,6 +74,23 @@ impl Workspace {
         workspace
     }
 
+    /// Builds a workspace whose one pane holds `panel` and `others` as tabs, in
+    /// that order, showing `panel`.
+    pub fn with_panels(
+        panel: AnyPanel,
+        others: Vec<AnyPanel>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let mut workspace = Self::new(panel, window, cx);
+        for other in others {
+            workspace.add_panel(other, window, cx);
+        }
+        let pane = workspace.active.clone();
+        pane.update(cx, |pane, cx| pane.activate(0, window, cx));
+        workspace
+    }
+
     pub fn active_pane(&self) -> &Entity<Pane> {
         &self.active
     }

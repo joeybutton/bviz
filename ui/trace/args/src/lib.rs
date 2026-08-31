@@ -7,7 +7,7 @@ use std::path::PathBuf;
 
 /// The profiles an action timeline is read from.
 #[derive(Args, Debug)]
-#[command(next_help_heading = "Timelines")]
+#[command(next_help_heading = "Timelines (one panel per file)")]
 pub struct TraceArgs {
     /// `bazel build --profile=FILE` output (`.profile.gz` or `.json`).
     #[arg(long, value_name = "FILE")]

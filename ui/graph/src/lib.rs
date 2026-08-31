@@ -615,14 +615,10 @@ impl From<GraphSource> for Load {
     }
 }
 
-/// Opens a window drawing the graph `load` reads.
-pub fn open_window(load: impl Into<Load>) {
+/// A panel drawing the graph `load` reads.
+pub fn open(load: impl Into<Load>, _window: &mut Window, cx: &mut App) -> AnyPanel {
     let load = load.into();
-    bviz_ui_workspace::run(
-        "bviz graph",
-        size(px(1280.), px(820.)),
-        move |_window, cx| AnyPanel::new(cx.new(|cx| GraphPanel::new(load, cx))),
-    );
+    AnyPanel::new(cx.new(|cx| GraphPanel::new(load, cx)))
 }
 
 /// Renders a Bazel build graph from one or more `--output=streamed_proto`
@@ -645,7 +641,12 @@ pub fn run() {
             )
             .exit()
     });
-    open_window(source);
+    let load = Load::from(source);
+    bviz_ui_workspace::run(
+        "bviz graph",
+        size(px(1280.), px(820.)),
+        move |window, cx| open(load, window, cx),
+    );
 }
 
 #[cfg(test)]
