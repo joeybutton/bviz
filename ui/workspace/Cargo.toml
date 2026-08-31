@@ -1,0 +1,12 @@
+[package]
+name = "bviz_ui_workspace"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "bviz_ui_workspace"
+path = "src/lib.rs"
+
+[dependencies]
+gpui = { workspace = true }
+bviz_ui_shell = { path = "../shell" }

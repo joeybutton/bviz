@@ -9,12 +9,12 @@ use bviz_ui_components::{
     Button, Dropdown, Scrollbar, ScrubberColors, ScrubberState, TextInput, load_in_background,
     scrubber,
 };
-use bviz_ui_shell::Chrome;
 use bviz_ui_theme::ThemeColors;
+use bviz_ui_workspace::{Panel, PanelEvent, PanelKind};
 use gpui::{
-    ClipboardItem, Context, Entity, FocusHandle, Focusable, IntoElement, KeyBinding, MouseButton,
-    MouseDownEvent, MouseMoveEvent, Pixels, Point, Render, ScrollWheelEvent, SharedString,
-    Subscription, Task, Window, actions, div, prelude::*, px,
+    App, ClipboardItem, Context, Entity, EventEmitter, FocusHandle, Focusable, IntoElement,
+    KeyBinding, MouseButton, MouseDownEvent, MouseMoveEvent, Pixels, Point, Render,
+    ScrollWheelEvent, SharedString, Subscription, Task, Window, actions, div, prelude::*, px,
 };
 
 mod element;
@@ -70,8 +70,8 @@ struct ContentLayout {
 
 type Source = bviz_ui_components::Source<Replay>;
 
-/// The root view: the rendered build terminal inside the window chrome.
-pub struct TerminalView {
+/// A build's captured terminal output, replayed under playback controls.
+pub struct TerminalPanel {
     /// The playback timeline, loaded off the UI thread.
     source: Source,
     /// Holds the background load task so it isn't cancelled on drop.
@@ -130,8 +130,6 @@ pub struct TerminalView {
     scrollbar_visible: bool,
     /// Bumped on each reveal so a stale hide timer does not hide a re-revealed bar.
     reveal_seq: u64,
-    /// The chrome's handle, for the window controls and tab navigation.
-    focus_handle: FocusHandle,
     /// The terminal body's handle, focused so its scroll keys dispatch.
     body_focus: FocusHandle,
     /// The playback bar's handle; when it holds focus the shared arrow and
@@ -145,14 +143,13 @@ pub struct TerminalView {
     find_observation: Option<Subscription>,
 }
 
-impl TerminalView {
-    pub fn new(load: crate::Load, window: &mut Window, cx: &mut Context<Self>) -> Self {
+impl TerminalPanel {
+    pub fn new(load: crate::Load, cx: &mut Context<Self>) -> Self {
         Self::bind_keys(cx);
         // Tab cycles focus through the regions (handled by the shell's tab action
         // via window.focus_next), in this order: playback bar, terminal, then the
         // find field when it is open (its tab index is set on creation).
         let body_focus = cx.focus_handle().tab_index(1).tab_stop(true);
-        body_focus.focus(window, cx);
         let playback_focus = cx.focus_handle().tab_index(0).tab_stop(true);
         // The speed dropdown is the source of truth for the speed index; applying
         // its selection keeps the numeric multiplier and the playback clock in sync.
@@ -190,7 +187,6 @@ impl TerminalView {
             drag_grab: None,
             scrollbar_visible: false,
             reveal_seq: 0,
-            focus_handle: cx.focus_handle(),
             body_focus,
             playback_focus,
             find_active: false,
@@ -755,14 +751,41 @@ impl TerminalView {
     }
 }
 
-impl Render for TerminalView {
+impl EventEmitter<PanelEvent> for TerminalPanel {}
+
+impl Focusable for TerminalPanel {
+    fn focus_handle(&self, _cx: &App) -> FocusHandle {
+        self.body_focus.clone()
+    }
+}
+
+impl Panel for TerminalPanel {
+    fn kind() -> PanelKind {
+        PanelKind {
+            name: "terminal",
+            key_context: "BazelTerm",
+        }
+    }
+
+    fn title(&self, _cx: &App) -> SharedString {
+        "bazel_term".into()
+    }
+
+    fn set_active(&mut self, active: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if active {
+            self.body_focus.focus(window, cx);
+        }
+    }
+}
+
+impl Render for TerminalPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // Advance the timeline if playing, pacing playback by the frame loop.
         self.advance_playback(window);
         self.autoscroll_selection(window, cx);
         let theme = bviz_ui_theme::theme(window, cx);
         let colors = &theme.colors;
-        let body = match self.source.placeholder(colors) {
+        match self.source.placeholder(colors) {
             Some(placeholder) => placeholder.into_any_element(),
             None => {
                 let find_box = if self.find_active {
@@ -783,7 +806,7 @@ impl Render for TerminalView {
                     colors.background
                 };
                 div()
-                    .key_context("BazelTerm")
+                    .key_context(Self::kind().key_context)
                     .on_action(cx.listener(Self::on_play_pause))
                     .on_action(cx.listener(Self::on_step_back))
                     .on_action(cx.listener(Self::on_step_forward))
@@ -824,14 +847,11 @@ impl Render for TerminalView {
                     )
                     .into_any_element()
             }
-        };
-        Chrome::new(&self.focus_handle)
-            .title("bazel_term")
-            .child(body)
+        }
     }
 }
 
-impl TerminalView {
+impl TerminalPanel {
     /// The find box overlaid at the top-right of the terminal: the query field,
     /// a match counter, and previous/next/close controls. `None` before the field
     /// has been created (i.e. the box has never been opened).

@@ -14,11 +14,12 @@ mod terminal;
 use bviz_terminal::Replay;
 use bviz_ui_components::Pending;
 use bviz_ui_terminal_args::{ConsoleArgs, ConsoleSource};
+use bviz_ui_workspace::{AnyPanel, Workspace};
 use clap::error::ErrorKind;
 use clap::{CommandFactory, Parser};
 use gpui::{prelude::*, px, size};
 use std::path::PathBuf;
-use terminal::TerminalView;
+use terminal::TerminalPanel;
 
 /// A build's console output being read and reconstructed.
 pub struct Load(Pending<Replay>);
@@ -42,7 +43,10 @@ pub fn open_window(load: impl Into<Load>) {
     bviz_ui_shell::run(
         "bviz console",
         size(px(1100.), px(720.)),
-        move |window, cx| cx.new(|cx| TerminalView::new(load, window, cx)),
+        move |window, cx| {
+            let panel = cx.new(|cx| TerminalPanel::new(load, cx));
+            cx.new(|cx| Workspace::new(AnyPanel::new(panel), window, cx))
+        },
     );
 }
 

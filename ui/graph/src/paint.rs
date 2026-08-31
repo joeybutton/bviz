@@ -5,7 +5,7 @@ use crate::morph::Frame;
 use crate::neighborhood::{Neighborhood, compute_neighborhood};
 use crate::relation::{Direction, Relation};
 use crate::scroll::paint_scrollbars;
-use crate::{GraphView, Palette};
+use crate::{GraphPanel, Palette};
 use bviz_graph_layout::layout::{CARET_RESERVE, LABEL_BAND};
 use bviz_graph_layout::{Connector, EdgeKind, Id, Kind};
 use gpui::{
@@ -184,7 +184,7 @@ impl Marks {
 /// thousands of boxes paintable.
 pub(crate) fn canvas_body(
     scene: Scene,
-    entity: Entity<GraphView>,
+    entity: Entity<GraphPanel>,
 ) -> impl FnOnce(Bounds<Pixels>, (), &mut Window, &mut App) {
     move |bounds, _, window, cx| {
         let (camera, morph) = {

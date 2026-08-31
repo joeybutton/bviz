@@ -1,11 +1,11 @@
-use crate::{Controls, GraphView, Palette};
+use crate::{Controls, GraphPanel, Palette};
 use bviz_ui_components::{Button, Toolbar, spinner};
 use gpui::{ClickEvent, Context, IntoElement, div, prelude::*, px};
 
 pub(crate) fn toolbar(
     controls: Controls,
     palette: &Palette,
-    cx: &mut Context<GraphView>,
+    cx: &mut Context<GraphPanel>,
 ) -> Toolbar {
     let mut bar = Toolbar::new().child(controls.picker).child(
         Button::new(

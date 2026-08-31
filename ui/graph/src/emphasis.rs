@@ -1,4 +1,4 @@
-use crate::GraphView;
+use crate::GraphPanel;
 use bviz_graph_layout::Id;
 use gpui::Context;
 use std::time::{Duration, Instant};
@@ -105,7 +105,7 @@ impl Emphasis {
 
 /// Fades the emphasis out, repainting as it goes and clearing it at the end.
 /// Called as the relayout lands.
-pub(crate) fn begin_fade(view: &mut GraphView, cx: &mut Context<GraphView>) {
+pub(crate) fn begin_fade(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
     let Some(generation) = view.emphasis.begin() else {
         return;
     };

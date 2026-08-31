@@ -19,6 +19,7 @@ rust_library(
         "//ui/shell",
         "//ui/theme",
         "//ui/trace/args",
+        "//ui/workspace",
         "@crates//:clap",
         "@crates//:gpui",
     ],

@@ -18,6 +18,7 @@ members = [
     "ui/theme",
     "ui/trace",
     "ui/trace/args",
+    "ui/workspace",
     "util/parallel",
 ]
 resolver = "2"

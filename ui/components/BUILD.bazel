@@ -21,6 +21,7 @@ rust_library(
         "//ui/shell:__pkg__",
         "//ui/terminal:__pkg__",
         "//ui/trace:__pkg__",
+        "//ui/workspace:__pkg__",
     ],
     deps = [
         "//ui/assets",

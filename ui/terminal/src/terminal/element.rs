@@ -9,7 +9,7 @@ use gpui::{
     relative, size,
 };
 
-use super::{ContentLayout, Source, TerminalView};
+use super::{ContentLayout, Source, TerminalPanel};
 use crate::color::{CellStyle, Defaults, style_key};
 
 /// Width of the scroll bar gutter reserved on the right edge. The bar is an
@@ -29,7 +29,7 @@ const FOCUSED_MATCH_TINT: f32 = 0.31;
 /// Custom element that sizes the terminal to its bounds, then shapes the visible
 /// viewport and paints background fills and glyphs.
 pub(super) struct TerminalElement {
-    pub(super) view: Entity<TerminalView>,
+    pub(super) view: Entity<TerminalPanel>,
 }
 
 /// Font metrics resolved once per layout from the inherited monospace text style.

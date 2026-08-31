@@ -34,7 +34,9 @@ Common gpui mechanics are factored into shared `//ui` crates. Before re-deriving
 gpui for one of these, use the wrapper, so every view stays visually coherent and
 behaves consistently:
 
-- `bviz_ui_shell::{run, Chrome}` — window bootstrap + client-side decorations.
+- `bviz_ui_shell::{run, open_window, Chrome}` — window bootstrap + client-side decorations.
+- `bviz_ui_workspace::{Workspace, Panel, AnyPanel}` — the window root view, and the
+  trait a view implements to be the thing it frames.
 - `bviz_ui_components::{Button, TextInput}` — a button and a focusable text field.
 - `bviz_ui_components::track_drag` — a drag that follows the cursor past the window.
 - `bviz_ui_components::load_in_background` — run work off the UI thread, then apply it.
@@ -410,7 +412,7 @@ content to the viewport on the first frame); the paint closure draws with
 `window.paint_quad(quad(..))`, `window.paint_path(..)`, and a shaped line's
 `.paint(origin, ..)`. Both closures are `'static`, so capture **owned snapshots** of what
 you paint — a `Vec` of boxes, a `Palette` of theme-resolved colors — not borrows of the
-view. The graph viewer (`ui/graph/src/main.rs`: `GraphView::graph`, `paint_box`,
+view. The graph viewer (`ui/graph/src/main.rs`: `GraphPanel::graph`, `paint_box`,
 `paint_connector`) is the worked example.
 
 **A custom `Element`** is heavier, for when you also need a typed layout → prepaint →
@@ -586,7 +588,7 @@ in a view field**, or dropping it cancels the work.
 
 Pair it with a load-state enum (`Loading` / `Loaded(T)` / `Error(String)`) the view matches
 on in `render`, showing a spinner while loading (`bviz_ui_assets::icon("circle-notch")`
-with `.with_animation(..)`). `GraphView` and `TerminalView` both follow this shape. For
+with `.with_animation(..)`). `GraphPanel` and `TerminalPanel` both follow this shape. For
 a one-shot *delay* rather than background work (e.g. an auto-hiding scroll bar), use
 `cx.spawn` + `cx.background_executor().timer(..)` directly instead.
 

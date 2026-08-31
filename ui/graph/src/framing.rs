@@ -1,7 +1,7 @@
 use crate::camera::{
     Camera, Rect, Settle, clamp_pan, ease_out_cubic, fit_view, fit_zoom, settle_view,
 };
-use crate::{GraphView, MAX_ZOOM, SETTLE_DURATION, SETTLE_MIN_PAN_STEP, SETTLE_MIN_ZOOM_STEP};
+use crate::{GraphPanel, MAX_ZOOM, SETTLE_DURATION, SETTLE_MIN_PAN_STEP, SETTLE_MIN_ZOOM_STEP};
 use gpui::{App, Bounds, Entity, Pixels, Window};
 use std::time::Instant;
 
@@ -191,7 +191,7 @@ impl Framing {
 /// canvas prepaint because the fit needs the viewport size, known only once laid
 /// out.
 pub(crate) fn build_prepaint(
-    parent: Entity<GraphView>,
+    parent: Entity<GraphPanel>,
     content: (f32, f32),
     recenter_target: Option<Rect>,
 ) -> impl FnOnce(Bounds<Pixels>, &mut Window, &mut App) {

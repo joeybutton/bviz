@@ -1,6 +1,6 @@
 use crate::camera::{Camera, clamp_pan, pan_range};
 use crate::drag::Drag;
-use crate::{GraphView, Palette};
+use crate::{GraphPanel, Palette};
 use bviz_ui_components::{Axis, DEFAULT_MIN_THUMB, SCROLLBAR_THICKNESS, Scrollbar};
 use gpui::{Bounds, Context, Pixels, Point, Size, Window, point, px, size};
 use std::ops::RangeInclusive;
@@ -132,21 +132,21 @@ pub(crate) fn paint_scrollbars(
 }
 
 /// The scroll bar for `axis` built from the loaded graph's current view state.
-fn current_scrollbar(view: &GraphView, axis: Axis) -> Option<Scrollbar> {
+fn current_scrollbar(view: &GraphPanel, axis: Axis) -> Option<Scrollbar> {
     let content = view.drawn()?.content();
     scrollbar_geom(axis, view.framing.viewport(), content, view.camera())
 }
 
 /// The axis of the scroll bar whose track a press at `position` (window px) landed
 /// on, or `None` when the press is over the content.
-pub(crate) fn scrollbar_hit(view: &GraphView, position: Point<Pixels>) -> Option<Axis> {
+pub(crate) fn scrollbar_hit(view: &GraphPanel, position: Point<Pixels>) -> Option<Axis> {
     [Axis::Vertical, Axis::Horizontal]
         .into_iter()
         .find(|&axis| current_scrollbar(view, axis).is_some_and(|bar| bar.track_hit(position)))
 }
 
 /// Pan `axis` to where its bar's thumb reports `offset`.
-fn scroll_to(view: &mut GraphView, axis: Axis, offset: f32, cx: &mut Context<GraphView>) {
+fn scroll_to(view: &mut GraphPanel, axis: Axis, offset: f32, cx: &mut Context<GraphPanel>) {
     let Some(content) = view.drawn().map(|d| d.content()) else {
         return;
     };
@@ -169,10 +169,10 @@ fn scroll_to(view: &mut GraphView, axis: Axis, offset: f32, cx: &mut Context<Gra
 /// one on the thumb itself picks it up where it stands, leaving the view where
 /// the user put it until the cursor moves.
 pub(crate) fn start_scroll_drag(
-    view: &mut GraphView,
+    view: &mut GraphPanel,
     axis: Axis,
     position: Point<Pixels>,
-    cx: &mut Context<GraphView>,
+    cx: &mut Context<GraphPanel>,
 ) {
     let Some(bar) = current_scrollbar(view, axis) else {
         return;
@@ -190,9 +190,9 @@ pub(crate) fn start_scroll_drag(
 
 /// Track a held scroll thumb to the cursor.
 pub(crate) fn scroll_drag_move(
-    view: &mut GraphView,
+    view: &mut GraphPanel,
     position: Point<Pixels>,
-    cx: &mut Context<GraphView>,
+    cx: &mut Context<GraphPanel>,
 ) {
     let Drag::Scrollbar(drag) = view.drag else {
         return;

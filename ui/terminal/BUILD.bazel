@@ -17,6 +17,7 @@ rust_library(
         "//ui/shell",
         "//ui/terminal/args",
         "//ui/theme",
+        "//ui/workspace",
         "@crates//:clap",
         "@crates//:gpui",
     ],

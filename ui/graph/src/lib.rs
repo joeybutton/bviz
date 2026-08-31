@@ -5,14 +5,15 @@
 use bviz_graph_layout::Id;
 use bviz_ui_components::{DragEnd, Dropdown, DropdownEvent, Pending, ScrollbarColors};
 use bviz_ui_graph_args::{GraphArgs, GraphSource};
-use bviz_ui_shell::Chrome;
 use bviz_ui_theme::{DataColors, Theme, ThemeColors};
+use bviz_ui_workspace::{AnyPanel, Panel, PanelEvent, PanelKind, Workspace};
 use clap::error::ErrorKind;
 use clap::{CommandFactory, Parser};
 use gpui::{
-    AnyElement, Bounds, Context, Entity, FocusHandle, IntoElement, KeyDownEvent, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Render, Rgba, ScrollDelta,
-    ScrollWheelEvent, Subscription, Window, canvas, div, prelude::*, px, size,
+    AnyElement, App, Bounds, Context, Entity, EventEmitter, FocusHandle, Focusable, IntoElement,
+    KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Render,
+    Rgba, ScrollDelta, ScrollWheelEvent, SharedString, Subscription, Window, canvas, div,
+    prelude::*, px, size,
 };
 use std::time::{Duration, Instant};
 
@@ -122,7 +123,7 @@ impl Palette {
 }
 
 /// Loads, lays out, and renders a Bazel build graph.
-struct GraphView {
+struct GraphPanel {
     focus_handle: FocusHandle,
     model: Model,
     framing: Framing,
@@ -131,7 +132,7 @@ struct GraphView {
     morph: Morph,
     mode: LayoutMode,
     mode_picker: Entity<Dropdown>,
-    /// Carries the picker's selections into [`GraphView::set_mode`].
+    /// Carries the picker's selections into [`GraphPanel::set_mode`].
     _mode_choices: Subscription,
     /// Box under the cursor.
     hovered: Option<Id>,
@@ -141,7 +142,7 @@ struct GraphView {
     /// Outlives the stretches where the strip leaves it out, so the option it
     /// stands on is still the one chosen when the next selection brings it back.
     relation_picker: Entity<Dropdown>,
-    /// Carries the picker's selections into [`GraphView::set_relation`].
+    /// Carries the picker's selections into [`GraphPanel::set_relation`].
     _relation_choices: Subscription,
     /// Whether hovering a box marks its neighborhood; flipped by the `h` key or
     /// the toolbar toggle so the marking can be turned off when it is more noise
@@ -156,7 +157,7 @@ struct GraphView {
     titles: Vec<TitleTarget>,
 }
 
-impl GraphView {
+impl GraphPanel {
     fn camera(&self) -> Camera {
         self.framing.camera()
     }
@@ -179,9 +180,7 @@ impl GraphView {
         self.morph.at(Instant::now())
     }
 
-    fn new(load: Load, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let focus_handle = cx.focus_handle();
-        focus_handle.focus(window, cx);
+    fn new(load: Load, cx: &mut Context<Self>) -> Self {
         let mode = LayoutMode::default();
         let mode_picker = cx.new(|cx| {
             Dropdown::new(
@@ -215,7 +214,7 @@ impl GraphView {
             }
         });
         Self {
-            focus_handle,
+            focus_handle: cx.focus_handle(),
             model: Model::loading(load.0, cx),
             framing: Framing::new(),
             drag: Drag::None,
@@ -419,10 +418,41 @@ impl GraphView {
     }
 }
 
-impl Render for GraphView {
+impl EventEmitter<PanelEvent> for GraphPanel {}
+
+impl Focusable for GraphPanel {
+    fn focus_handle(&self, _cx: &App) -> FocusHandle {
+        self.focus_handle.clone()
+    }
+}
+
+impl Panel for GraphPanel {
+    fn kind() -> PanelKind {
+        PanelKind {
+            name: "graph",
+            key_context: "Graph",
+        }
+    }
+
+    fn title(&self, _cx: &App) -> SharedString {
+        "bviz graph".into()
+    }
+
+    fn status(&self, _cx: &App) -> Option<SharedString> {
+        Some(self.model.status(self.mode, self.camera().zoom).into())
+    }
+
+    fn set_active(&mut self, active: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if active {
+            self.focus_handle.focus(window, cx);
+        }
+    }
+}
+
+impl Render for GraphPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let palette = Palette::from_theme(&bviz_ui_theme::theme(window, cx));
-        let body = match self.model.source().placeholder(&palette.colors) {
+        match self.model.source().placeholder(&palette.colors) {
             Some(placeholder) => placeholder.into_any_element(),
             None => {
                 let controls = Controls {
@@ -434,6 +464,7 @@ impl Render for GraphView {
                     relaying: self.model.relaying(),
                 };
                 div()
+                    .key_context(Self::kind().key_context)
                     .flex_1()
                     .flex()
                     .flex_col()
@@ -452,11 +483,7 @@ impl Render for GraphView {
                     )
                     .into_any_element()
             }
-        };
-        Chrome::new(&self.focus_handle)
-            .title("bviz graph")
-            .status(self.model.status(self.mode, self.camera().zoom))
-            .child(body)
+        }
     }
 }
 
@@ -504,7 +531,7 @@ fn box_at<'a>(
 /// Opens or closes the box under `pos` (window px) and settles the view to keep
 /// it in frame. A box the drawn layout holds no handle on, or a `pos` off the
 /// canvas, is left alone.
-fn click_box_at(view: &mut GraphView, pos: Point<Pixels>, cx: &mut Context<GraphView>) {
+fn click_box_at(view: &mut GraphPanel, pos: Point<Pixels>, cx: &mut Context<GraphPanel>) {
     let vp = view.framing.viewport();
     if !vp.contains(&pos) {
         return;
@@ -530,7 +557,7 @@ fn click_box_at(view: &mut GraphView, pos: Point<Pixels>, cx: &mut Context<Graph
 /// Selects the box under `pos` (window px), or drops the selection where `pos`
 /// lands on no box or off the canvas. Selecting the already-selected box drops it
 /// too, so the same gesture puts the marking away.
-fn select_box_at(view: &mut GraphView, pos: Point<Pixels>, cx: &mut Context<GraphView>) {
+fn select_box_at(view: &mut GraphPanel, pos: Point<Pixels>, cx: &mut Context<GraphPanel>) {
     let vp = view.framing.viewport();
     let camera = view.camera();
     let morph = view.morph_frame();
@@ -594,7 +621,10 @@ pub fn open_window(load: impl Into<Load>) {
     bviz_ui_shell::run(
         "bviz graph",
         size(px(1280.), px(820.)),
-        move |window, cx| cx.new(|cx| GraphView::new(load, window, cx)),
+        move |window, cx| {
+            let panel = cx.new(|cx| GraphPanel::new(load, cx));
+            cx.new(|cx| Workspace::new(AnyPanel::new(panel), window, cx))
+        },
     );
 }
 

@@ -25,7 +25,7 @@ pub(crate) struct AggregateBuildStarted;
 
 /// The shared trace document and the selection and visibility state derived from
 /// it, plus the layouts and aggregates cached from those. Held by
-/// [`crate::TraceView`] as an entity so every panel reads one source of truth; a
+/// [`crate::TracePanel`] as an entity so every panel reads one source of truth; a
 /// panel's own view state stays on the panel.
 pub(crate) struct TraceModel {
     source: Source,

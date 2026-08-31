@@ -5,11 +5,11 @@ use crate::model::TraceModel;
 use crate::regions::{Regions, flame_total_height, max_lane_scroll};
 use crate::theme::Palette;
 use crate::{
-    BottomTab, ClearTimeSelection, DEFAULT_GUTTER_WIDTH, DEFAULT_PANEL_HEIGHT, EDGE_MARGIN_PX,
-    GROUP_BAND_HEIGHT, GROUP_ICON, LINE_SCROLL_PX, MAX_PX_PER_US, METRICS, MIN_SLICE_PX,
-    SLICE_TEXT_PAD, SelectAllTracks, Source, TraceView, ZOOM_PER_NOTCH, drawn_scroll,
-    paint_gridlines, paint_gutter, paint_markers, paint_ruler, paint_slice, paint_tooltip,
-    ruler_ticks, scroll_request, scrollbar_geom, thumb_offset,
+    BottomTab, CHART_KEY_CONTEXT, ClearTimeSelection, DEFAULT_GUTTER_WIDTH, DEFAULT_PANEL_HEIGHT,
+    EDGE_MARGIN_PX, GROUP_BAND_HEIGHT, GROUP_ICON, LINE_SCROLL_PX, MAX_PX_PER_US, METRICS,
+    MIN_SLICE_PX, SLICE_TEXT_PAD, SelectAllTracks, Source, TracePanel, ZOOM_PER_NOTCH,
+    drawn_scroll, paint_gridlines, paint_gutter, paint_markers, paint_ruler, paint_slice,
+    paint_tooltip, ruler_ticks, scroll_request, scrollbar_geom, thumb_offset,
 };
 use bviz_trace_layout::{
     Cull, LaneLayout, TimeRegion, TimeSelection, TimeView, Viewport, VisibleSlice, span_between,
@@ -18,9 +18,9 @@ use bviz_trace_layout::{
 use bviz_trace_profile::{Profile, Slice, SliceDetail, TimeSpan};
 use bviz_ui_components::{DragEnd, Scrollbar, cached_layer, overlay_canvas, track_drag};
 use gpui::{
-    App, Bounds, ContentMask, Context, Div, Entity, FocusHandle, IntoElement, KeyBinding,
-    MouseButton, MouseDownEvent, MouseMoveEvent, Pixels, Point, Render, Rgba, ScrollWheelEvent,
-    Stateful, WeakEntity, Window, canvas, div, fill, point, prelude::*, px, size,
+    App, Bounds, ContentMask, Context, Div, Entity, FocusHandle, Focusable, IntoElement,
+    KeyBinding, MouseButton, MouseDownEvent, MouseMoveEvent, Pixels, Point, Render, Rgba,
+    ScrollWheelEvent, Stateful, WeakEntity, Window, canvas, div, fill, point, prelude::*, px, size,
 };
 use std::rc::Rc;
 use std::sync::Arc;
@@ -327,7 +327,7 @@ impl TimelineDrag {
 /// axis, the counter plots (Counters tab), the ruler, gutter, phase markers, and
 /// scroll bars. Owns the timeline's view state, reading the document and
 /// selection from [`TraceModel`] and the panel/gutter layout from
-/// [`TraceView`]. The slices are painted by [`SliceCanvas`], the time selection,
+/// [`TracePanel`]. The slices are painted by [`SliceCanvas`], the time selection,
 /// crosshair, and tooltip by an overlay above it.
 pub(crate) struct TimelinePanel {
     /// Focus for the trace content, so Ctrl-A (select all tracks) dispatches
@@ -337,7 +337,7 @@ pub(crate) struct TimelinePanel {
     model: Entity<TraceModel>,
     /// The owning view, read for the panel and gutter layout the timeline shares
     /// with the bottom panel and the tab bar.
-    shell: WeakEntity<TraceView>,
+    shell: WeakEntity<TracePanel>,
     /// Horizontal time-to-pixel mapping (pan and zoom). Prepaint settles it
     /// against the painted width — the fit, the resize rescale, and the zoom
     /// floor all need a width the panel learns only there — and the same frame's
@@ -370,15 +370,13 @@ pub(crate) struct TimelinePanel {
 impl TimelinePanel {
     pub(crate) fn new(
         model: Entity<TraceModel>,
-        shell: WeakEntity<TraceView>,
-        window: &mut Window,
+        shell: WeakEntity<TracePanel>,
         cx: &mut Context<Self>,
     ) -> Self {
         let content_focus = cx.focus_handle();
-        content_focus.focus(window, cx);
         cx.bind_keys([
-            KeyBinding::new("secondary-a", SelectAllTracks, Some("TraceContent")),
-            KeyBinding::new("escape", ClearTimeSelection, Some("TraceContent")),
+            KeyBinding::new("secondary-a", SelectAllTracks, Some(CHART_KEY_CONTEXT)),
+            KeyBinding::new("escape", ClearTimeSelection, Some(CHART_KEY_CONTEXT)),
         ]);
         let parent = cx.entity().downgrade();
         let canvas = cx.new(|_| SliceCanvas { parent });
@@ -833,7 +831,7 @@ impl TimelinePanel {
     /// the chart's actions, so a press here makes Ctrl-A select all tracks and
     /// Escape widen the aggregate to the whole timeline.
     fn content_handlers(&self, root: Stateful<Div>, cx: &mut Context<Self>) -> Stateful<Div> {
-        root.key_context("TraceContent")
+        root.key_context(CHART_KEY_CONTEXT)
             .track_focus(&self.content_focus)
             .on_action(cx.listener(Self::select_all_visible))
             .on_action(cx.listener(Self::clear_time_selection))
@@ -877,6 +875,12 @@ impl TimelinePanel {
                     }
                 }
             }))
+    }
+}
+
+impl Focusable for TimelinePanel {
+    fn focus_handle(&self, _cx: &App) -> FocusHandle {
+        self.content_focus.clone()
     }
 }
 

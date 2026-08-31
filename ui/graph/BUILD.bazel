@@ -17,6 +17,7 @@ rust_library(
         "//ui/graph/args",
         "//ui/shell",
         "//ui/theme",
+        "//ui/workspace",
         "@crates//:clap",
         "@crates//:gpui",
     ],

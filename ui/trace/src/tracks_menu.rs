@@ -5,7 +5,7 @@ use crate::track_label::track_label;
 use crate::track_order::TrackSort;
 use crate::{
     GUTTER_LABEL_SIZE, RULER_HEIGHT, Source, TRACKS_MENU_FOLD_ABOVE, TRACKS_MENU_MAX_LIST,
-    TRACKS_MENU_WIDTH, TraceView, set_list_thumb, thumb_offset,
+    TRACKS_MENU_WIDTH, TracePanel, set_list_thumb, thumb_offset,
 };
 use bviz_trace_profile::{LaneClass, Profile};
 use bviz_ui_components::{
@@ -32,7 +32,7 @@ enum MenuDrag {
 /// filter field over a checklist of track names grouped by lane class. Owns its
 /// open, fold, filter, scroll, and drag state as plain fields. Reads the visible
 /// tracks from [`TraceModel`] and writes visibility
-/// there; reflows the timeline through the owning [`TraceView`].
+/// there; reflows the timeline through the owning [`TracePanel`].
 pub(crate) struct TracksMenu {
     /// Whether the menu is open.
     open: bool,
@@ -53,13 +53,13 @@ pub(crate) struct TracksMenu {
     model: Entity<TraceModel>,
     /// The owning view, read for the gutter width and viewport that position the
     /// popover, and updated to reflow the timeline after a visibility change.
-    shell: WeakEntity<TraceView>,
+    shell: WeakEntity<TracePanel>,
 }
 
 impl TracksMenu {
     pub(crate) fn new(
         model: Entity<TraceModel>,
-        shell: WeakEntity<TraceView>,
+        shell: WeakEntity<TracePanel>,
         cx: &mut Context<Self>,
     ) -> Self {
         let filter = cx.new(|cx| TextInput::new(cx, "Filter tracks…", 0));

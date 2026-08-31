@@ -39,20 +39,25 @@ use bviz_ui_components::{
     Axis, Button, DEFAULT_MIN_THUMB, DragEnd, Pending, SCROLLBAR_THICKNESS, Scrollbar,
     centered_spinner, load_in_background, overlay_canvas, paint_tooltip_box, track_drag,
 };
-use bviz_ui_shell::Chrome;
 use bviz_ui_trace_args::{TraceArgs, TraceSource};
+use bviz_ui_workspace::{AnyPanel, Panel, PanelEvent, PanelKind, Workspace};
 use clap::error::ErrorKind;
 use clap::{CommandFactory, Parser};
 use gpui::{
     AnyElement, App, AvailableSpace, Bounds, ContentMask, Context, Div, Edges, Element, ElementId,
-    Entity, FocusHandle, GlobalElementId, Hsla, InspectorElementId, IntoElement, LayoutId,
-    MouseButton, MouseDownEvent, Pixels, Point, Position, Render, ScrollHandle, SharedString,
-    Stateful, Style, Subscription, Task, TextAlign, TransformationMatrix, Window, div, fill, point,
-    prelude::*, px, relative, size,
+    Entity, EventEmitter, FocusHandle, Focusable, GlobalElementId, Hsla, InspectorElementId,
+    IntoElement, LayoutId, MouseButton, MouseDownEvent, Pixels, Point, Position, Render,
+    ScrollHandle, SharedString, Stateful, Style, Subscription, Task, TextAlign,
+    TransformationMatrix, Window, div, fill, point, prelude::*, px, relative, size,
 };
 use std::sync::Arc;
 
 gpui::actions!(bviz_trace, [SelectAllTracks, ClearTimeSelection]);
+
+/// The key context scoping the chart's own bindings. The chart element carries
+/// it, so a key pressed in the tracks menu's filter field types there instead of
+/// dispatching one of them.
+const CHART_KEY_CONTEXT: &str = "TraceContent";
 
 /// Vertical sizing of the stacked thread and counter lanes, in pixels. The lane
 /// header is a thin top margin above the depth rows — the names live in the
@@ -204,11 +209,7 @@ pub(crate) type Source = bviz_ui_components::Source<Arc<Profile>>;
 /// The flame-chart timeline lives in [`TimelinePanel`] and the aggregated
 /// flame-graph panel in [`FlamePanel`]; each owns its own view state, reading the
 /// document and selection from the shared [`TraceModel`].
-struct TraceView {
-    /// Focus for the window chrome, held by [`Chrome`] so the window's own
-    /// actions (quit, close, tab) dispatch to it; the ancestor of the timeline's
-    /// content focus in the focus tree.
-    window_focus: FocusHandle,
+struct TracePanel {
     /// The one instance the four panels each hold a handle to.
     model: Entity<TraceModel>,
     timeline: Entity<TimelinePanel>,
@@ -230,9 +231,8 @@ struct TraceView {
     _load_task: Task<()>,
 }
 
-impl TraceView {
+impl TracePanel {
     fn new(load: Load, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let window_focus = cx.focus_handle();
         let load_task = load_in_background(
             cx,
             move || load.0.join(),
@@ -244,7 +244,7 @@ impl TraceView {
         let timeline = {
             let shell = cx.entity().downgrade();
             let model = model.clone();
-            cx.new(|cx| TimelinePanel::new(model, shell, window, cx))
+            cx.new(|cx| TimelinePanel::new(model, shell, cx))
         };
         let flame = {
             let model = model.clone();
@@ -268,7 +268,6 @@ impl TraceView {
             }
         });
         Self {
-            window_focus,
             model,
             timeline,
             flame,
@@ -635,18 +634,6 @@ impl TraceView {
         )
     }
 
-    fn status(&self, cx: &App) -> String {
-        self.model.read(cx).source().status("No profile", |p| {
-            let slices: usize = p.threads().iter().map(|t| t.slices.len()).sum();
-            format!(
-                "{} threads · {} slices · {:.3}s",
-                p.threads().len(),
-                slices,
-                span_seconds(p.span()),
-            )
-        })
-    }
-
     /// [`Regions`] for the current viewport (captured by the timeline), panel and
     /// gutter sizes, the loaded profile's counter count, and the flame lanes'
     /// total height.
@@ -696,24 +683,65 @@ fn time_window_summary(window: Option<&TimeSelection>, span_us: i64) -> Option<S
     Some(text)
 }
 
-impl Render for TraceView {
+impl EventEmitter<PanelEvent> for TracePanel {}
+
+impl Focusable for TracePanel {
+    fn focus_handle(&self, cx: &App) -> FocusHandle {
+        self.timeline.focus_handle(cx)
+    }
+}
+
+impl Panel for TracePanel {
+    fn kind() -> PanelKind {
+        PanelKind {
+            name: "trace",
+            key_context: CHART_KEY_CONTEXT,
+        }
+    }
+
+    fn title(&self, _cx: &App) -> SharedString {
+        "bviz trace".into()
+    }
+
+    fn status(&self, cx: &App) -> Option<SharedString> {
+        Some(
+            self.model
+                .read(cx)
+                .source()
+                .status("No profile", |p| {
+                    let slices: usize = p.threads().iter().map(|t| t.slices.len()).sum();
+                    format!(
+                        "{} threads · {} slices · {:.3}s",
+                        p.threads().len(),
+                        slices,
+                        span_seconds(p.span()),
+                    )
+                })
+                .into(),
+        )
+    }
+
+    fn set_active(&mut self, active: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if active {
+            self.focus_handle(cx).focus(window, cx);
+        }
+    }
+}
+
+impl Render for TracePanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = bviz_ui_theme::theme(window, cx);
         let palette = Palette::from_theme(&theme);
         // Take the placeholder before the `&mut self` build calls below, so the
         // model borrow it is read through ends first.
         let placeholder = self.model.read(cx).source().placeholder(&theme.colors);
-        let body = match placeholder {
+        match placeholder {
             Some(placeholder) => placeholder,
             None => div()
                 .flex_1()
                 .overflow_hidden()
                 .child(self.trace_body(palette, cx)),
-        };
-        Chrome::new(&self.window_focus)
-            .title("bviz trace")
-            .status(self.status(cx))
-            .child(body)
+        }
     }
 }
 
@@ -872,7 +900,7 @@ impl Element for RegionOverlays {
 /// Routes an in-progress drag to its target: resizing the bottom panel or the
 /// gutter. The flame-chart timeline's, flame-graph panel's, and tracks menu's own
 /// drags are routed inside [`TimelinePanel`], [`FlamePanel`], and [`TracksMenu`].
-fn on_drag(view: &mut TraceView, position: Point<Pixels>, cx: &mut Context<TraceView>) {
+fn on_drag(view: &mut TracePanel, position: Point<Pixels>, cx: &mut Context<TracePanel>) {
     match view.drag {
         Drag::Splitter => {
             let profile = match view.model.read(cx).source() {
@@ -904,7 +932,7 @@ fn on_drag(view: &mut TraceView, position: Point<Pixels>, cx: &mut Context<Trace
     view.invalidate_timeline(cx);
 }
 
-fn end_drag(view: &mut TraceView, _: Point<Pixels>, _: DragEnd, cx: &mut Context<TraceView>) {
+fn end_drag(view: &mut TracePanel, _: Point<Pixels>, _: DragEnd, cx: &mut Context<TracePanel>) {
     view.drag = Drag::None;
     view.invalidate_timeline(cx);
 }
@@ -1602,7 +1630,10 @@ pub fn open_window(load: impl Into<Load>) {
     bviz_ui_shell::run(
         "bviz trace",
         size(px(1280.), px(820.)),
-        move |window, cx| cx.new(|cx| TraceView::new(load, window, cx)),
+        move |window, cx| {
+            let panel = cx.new(|cx| TracePanel::new(load, window, cx));
+            cx.new(|cx| Workspace::new(AnyPanel::new(panel), window, cx))
+        },
     );
 }
 

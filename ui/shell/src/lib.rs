@@ -5,8 +5,8 @@ mod chrome;
 pub use chrome::Chrome;
 
 use gpui::{
-    App, Application, Bounds, KeyBinding, Pixels, Render, Size, TitlebarOptions, WindowBounds,
-    WindowDecorations, WindowOptions, actions, px,
+    App, Application, Bounds, Entity, KeyBinding, Pixels, Render, Result, Size, TitlebarOptions,
+    Window, WindowBounds, WindowDecorations, WindowHandle, WindowOptions, actions, px,
 };
 
 actions!(ui_shell, [Quit, CloseWindow, Tab, TabPrev]);
@@ -43,43 +43,57 @@ pub fn setup(cx: &mut App) {
     .detach();
 }
 
-/// Run an app: install the asset source, run `setup`, and open a single decorated
-/// floating window of `window_size` whose root view comes from `build_root`. Wrap
-/// the view's body in [`Chrome`] to get the decorations.
+/// Open a decorated floating window of `window_size` whose root view comes from
+/// `build_root`. Wrap the view's body in [`Chrome`] to get the decorations.
+/// Callable any number of times once [`setup`] has run.
+pub fn open_window<V, F>(
+    app_id: &str,
+    window_size: Size<Pixels>,
+    cx: &mut App,
+    build_root: F,
+) -> Result<WindowHandle<V>>
+where
+    V: 'static + Render,
+    F: FnOnce(&mut Window, &mut App) -> Entity<V>,
+{
+    // Centered on the active display, at an absolute size rather than a fraction
+    // of the resolution, so it works even on Wayland, where the display list is
+    // still empty at startup.
+    let bounds = Bounds::centered(None, window_size, cx);
+    cx.open_window(
+        WindowOptions {
+            window_bounds: Some(WindowBounds::Windowed(bounds)),
+            titlebar: Some(TitlebarOptions {
+                title: Some(app_id.to_string().into()),
+                ..Default::default()
+            }),
+            app_id: Some(app_id.to_string()),
+            window_min_size: Some(MIN_WINDOW_SIZE),
+            // Prefer the compositor's decorations; Chrome draws our own when
+            // only client-side is supported (e.g. GNOME).
+            window_decorations: Some(WindowDecorations::Server),
+            ..Default::default()
+        },
+        |window, cx| {
+            window
+                .observe_window_appearance(|window, _cx| window.refresh())
+                .detach();
+            build_root(window, cx)
+        },
+    )
+}
+
+/// Run an app: install the asset source, run [`setup`], and open its first
+/// window through [`open_window`].
 pub fn run<V, F>(app_id: impl Into<String>, window_size: Size<Pixels>, build_root: F)
 where
     V: 'static + Render,
-    F: 'static + FnOnce(&mut gpui::Window, &mut App) -> gpui::Entity<V>,
+    F: 'static + FnOnce(&mut Window, &mut App) -> Entity<V>,
 {
     let app_id = app_id.into();
     application().run(move |cx: &mut App| {
         setup(cx);
-        // A floating window of the requested size, centered on the active display.
-        // The size is absolute rather than a fraction of the resolution, so it
-        // works even on Wayland, where the display list is still empty at startup.
-        let bounds = Bounds::centered(None, window_size, cx);
-        cx.open_window(
-            WindowOptions {
-                window_bounds: Some(WindowBounds::Windowed(bounds)),
-                titlebar: Some(TitlebarOptions {
-                    title: Some(app_id.clone().into()),
-                    ..Default::default()
-                }),
-                app_id: Some(app_id.clone()),
-                window_min_size: Some(MIN_WINDOW_SIZE),
-                // Prefer the compositor's decorations; Chrome draws our own when
-                // only client-side is supported (e.g. GNOME).
-                window_decorations: Some(WindowDecorations::Server),
-                ..Default::default()
-            },
-            |window, cx| {
-                window
-                    .observe_window_appearance(|window, _cx| window.refresh())
-                    .detach();
-                build_root(window, cx)
-            },
-        )
-        .unwrap();
+        open_window(&app_id, window_size, cx, build_root).unwrap();
         cx.activate(true);
     });
 }

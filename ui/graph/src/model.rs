@@ -2,7 +2,7 @@ use crate::build::{self, build_graph};
 use crate::emphasis;
 use crate::mode::LayoutMode;
 use crate::morph;
-use crate::{GraphView, MARGIN};
+use crate::{GraphPanel, MARGIN};
 use bviz_graph_layout::graph::Graph;
 use bviz_graph_layout::lod::{DEFAULT_MAX_EDGES, DEFAULT_MAX_NODES};
 use bviz_graph_layout::{Id, LaidOut, MapLayout, Names};
@@ -44,7 +44,7 @@ pub(crate) struct Loaded {
 /// would hold the frame it was made for; deriving them in the background instead
 /// leaves the zoom nothing to wait on. A view already derived costs nothing to
 /// ask for again, so this races the camera harmlessly.
-fn derive_levels(map: Arc<MapLayout>, cx: &mut Context<GraphView>) {
+fn derive_levels(map: Arc<MapLayout>, cx: &mut Context<GraphPanel>) {
     cx.background_executor()
         .spawn(async move {
             for level in 0..map.level_count() {
@@ -197,7 +197,7 @@ pub(crate) struct Model {
 
 impl Model {
     /// Shows the graph `load` is reading, once it has been read.
-    pub(crate) fn loading(load: Pending<Built>, cx: &mut Context<GraphView>) -> Self {
+    pub(crate) fn loading(load: Pending<Built>, cx: &mut Context<GraphPanel>) -> Self {
         let task = load_in_background(
             cx,
             move || load.join(),
@@ -281,7 +281,7 @@ impl Model {
 }
 
 /// Flips whether `id` is expanded and lays the graph out at the new expansion.
-pub(crate) fn toggle_expansion(view: &mut GraphView, id: Id, cx: &mut Context<GraphView>) {
+pub(crate) fn toggle_expansion(view: &mut GraphPanel, id: Id, cx: &mut Context<GraphPanel>) {
     if !view.model.expanded.remove(&id) {
         view.model.expanded.insert(id);
     }
@@ -291,7 +291,7 @@ pub(crate) fn toggle_expansion(view: &mut GraphView, id: Id, cx: &mut Context<Gr
 /// Lays the cached base graph out at the current expansion off the UI thread,
 /// adopts the result as the layered layout, and asks the framing to settle onto
 /// it.
-pub(crate) fn relayout(view: &mut GraphView, cx: &mut Context<GraphView>) {
+pub(crate) fn relayout(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
     let Source::Loaded(loaded) = &view.model.source else {
         return;
     };

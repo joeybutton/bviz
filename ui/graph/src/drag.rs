@@ -1,6 +1,6 @@
 use crate::camera::{Camera, clamp_pan};
 use crate::scroll::{ScrollDrag, scroll_drag_move};
-use crate::{GraphView, click_box_at};
+use crate::{GraphPanel, click_box_at};
 use bviz_ui_components::{DragEnd, track_drag};
 use gpui::{App, Context, Entity, Pixels, Point, Window};
 
@@ -30,9 +30,9 @@ pub(crate) struct Pan {
 /// Begin panning from a press at `position`, repainting so the canvas installs
 /// the window-global handlers that carry the gesture past the window edge.
 pub(crate) fn start_pan(
-    view: &mut GraphView,
+    view: &mut GraphPanel,
     position: Point<Pixels>,
-    cx: &mut Context<GraphView>,
+    cx: &mut Context<GraphPanel>,
 ) {
     view.drag = Drag::Pan(Pan {
         press: position,
@@ -44,7 +44,11 @@ pub(crate) fn start_pan(
 
 /// Pan the graph by the cursor delta during a drag, latching `moved` once the
 /// cursor has travelled past the click threshold.
-pub(crate) fn drag_pan(view: &mut GraphView, position: Point<Pixels>, cx: &mut Context<GraphView>) {
+pub(crate) fn drag_pan(
+    view: &mut GraphPanel,
+    position: Point<Pixels>,
+    cx: &mut Context<GraphPanel>,
+) {
     let Drag::Pan(mut pan) = view.drag else {
         return;
     };
@@ -76,10 +80,10 @@ pub(crate) fn drag_pan(view: &mut GraphView, position: Point<Pixels>, cx: &mut C
 /// release handler and the window-global handlers installed during a drag can
 /// end one gesture.
 pub(crate) fn end_drag(
-    view: &mut GraphView,
+    view: &mut GraphPanel,
     position: Point<Pixels>,
     end: DragEnd,
-    cx: &mut Context<GraphView>,
+    cx: &mut Context<GraphPanel>,
 ) {
     match std::mem::take(&mut view.drag) {
         Drag::None => {}
@@ -94,7 +98,7 @@ pub(crate) fn end_drag(
 
 /// Installs the window-global handlers that advance and end whichever gesture is
 /// in progress.
-pub(crate) fn track_gesture(entity: &Entity<GraphView>, window: &mut Window, cx: &App) {
+pub(crate) fn track_gesture(entity: &Entity<GraphPanel>, window: &mut Window, cx: &App) {
     match entity.read(cx).drag {
         Drag::None => {}
         Drag::Pan(_) => track_drag(window, entity, drag_pan, end_drag),

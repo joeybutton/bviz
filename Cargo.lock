@@ -974,6 +974,7 @@ dependencies = [
  "bviz_ui_graph_args",
  "bviz_ui_shell",
  "bviz_ui_theme",
+ "bviz_ui_workspace",
  "clap",
  "gpui",
 ]
@@ -1006,6 +1007,7 @@ dependencies = [
  "bviz_ui_shell",
  "bviz_ui_terminal_args",
  "bviz_ui_theme",
+ "bviz_ui_workspace",
  "clap",
  "gpui",
 ]
@@ -1038,6 +1040,7 @@ dependencies = [
  "bviz_ui_shell",
  "bviz_ui_theme",
  "bviz_ui_trace_args",
+ "bviz_ui_workspace",
  "clap",
  "gpui",
 ]
@@ -1047,6 +1050,14 @@ name = "bviz_ui_trace_args"
 version = "0.1.0"
 dependencies = [
  "clap",
+]
+
+[[package]]
+name = "bviz_ui_workspace"
+version = "0.1.0"
+dependencies = [
+ "bviz_ui_shell",
+ "gpui",
 ]
 
 [[package]]

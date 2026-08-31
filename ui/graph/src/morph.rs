@@ -1,5 +1,5 @@
 use crate::camera::{Rect, ease_out_cubic, smoothstep};
-use crate::{GraphView, SETTLE_DURATION};
+use crate::{GraphPanel, SETTLE_DURATION};
 use bviz_graph_layout::{Box, Id, LaidOut};
 use gpui::Context;
 use std::collections::HashMap;
@@ -330,10 +330,10 @@ impl Morph {
 /// new one, repainting as they travel and retiring at the end. Called as the
 /// relayout lands.
 pub(crate) fn begin(
-    view: &mut GraphView,
+    view: &mut GraphPanel,
     previous: Arc<LaidOut>,
     current: &LaidOut,
-    cx: &mut Context<GraphView>,
+    cx: &mut Context<GraphPanel>,
 ) {
     let Some(generation) = view.morph.arm(previous, current) else {
         return;
