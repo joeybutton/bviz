@@ -4,8 +4,8 @@ use bviz_ui_shell::Chrome;
 use bviz_ui_theme::ThemeColors;
 use gpui::{
     AnyElement, App, Axis, Bounds, Div, ElementId, Entity, EntityId, FocusHandle, IntoElement,
-    KeyBinding, MouseButton, Pixels, Point, Render, Subscription, Window, actions, div, prelude::*,
-    px,
+    KeyBinding, MouseButton, Pixels, Point, Render, SharedString, Subscription, Window, actions,
+    div, prelude::*, px,
 };
 use std::collections::HashMap;
 
@@ -48,6 +48,9 @@ pub fn register_keys(cx: &mut App) {
 /// frames. One pane is the active one, which the panel actions act on and whose
 /// panel titles the window.
 pub struct Workspace {
+    /// The application, named ahead of the active panel in the window title
+    /// so a task list tells a bviz window from any other.
+    app_name: SharedString,
     /// Focus for the chrome, so the shell's window actions (quit, close, tab)
     /// dispatch here; the ancestor of every panel's own focus.
     window_focus: FocusHandle,
@@ -60,10 +63,17 @@ pub struct Workspace {
 }
 
 impl Workspace {
-    pub fn new(panel: AnyPanel, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        set_window_title(&panel, window, cx);
+    pub fn new(
+        app_name: impl Into<SharedString>,
+        panel: AnyPanel,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let app_name = app_name.into();
+        set_window_title(&app_name, &panel, window, cx);
         let pane = cx.new(|cx| Pane::new(panel, window, cx));
         let mut workspace = Self {
+            app_name,
             window_focus: cx.focus_handle(),
             layout: Layout::Pane(pane.clone()),
             active: pane.clone(),
@@ -77,12 +87,13 @@ impl Workspace {
     /// Builds a workspace whose one pane holds `panel` and `others` as tabs, in
     /// that order, showing `panel`.
     pub fn with_panels(
+        app_name: impl Into<SharedString>,
         panel: AnyPanel,
         others: Vec<AnyPanel>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let mut workspace = Self::new(panel, window, cx);
+        let mut workspace = Self::new(app_name, panel, window, cx);
         for other in others {
             workspace.add_panel(other, window, cx);
         }
@@ -138,7 +149,12 @@ impl Workspace {
             |workspace, pane, event, window, cx| match event {
                 PaneEvent::Changed => {
                     if *pane == workspace.active {
-                        set_window_title(&workspace.active_panel(cx), window, cx);
+                        set_window_title(
+                            &workspace.app_name,
+                            &workspace.active_panel(cx),
+                            window,
+                            cx,
+                        );
                     }
                     cx.notify();
                 }
@@ -169,7 +185,7 @@ impl Workspace {
         self.active = pane;
         let panel = self.active_panel(cx);
         window.focus(&panel.focus_handle(cx), cx);
-        set_window_title(&panel, window, cx);
+        set_window_title(&self.app_name, &panel, window, cx);
         cx.notify();
     }
 
@@ -348,7 +364,7 @@ impl Render for Workspace {
             layout => self.arrangement(layout, &colors, cx),
         };
         let chrome = Chrome::new(&self.window_focus)
-            .title(panel.title(cx))
+            .title(window_title(&self.app_name, &panel, cx))
             .child(body);
         let chrome = match panel.status(cx) {
             Some(status) => chrome.status(status),
@@ -382,10 +398,13 @@ impl Render for Workspace {
     }
 }
 
-/// Retitles the OS window, which under server-side decorations is what the
-/// compositor's own title bar shows.
-fn set_window_title(panel: &AnyPanel, window: &mut Window, cx: &App) {
-    window.set_window_title(&panel.title(cx));
+/// What names the window: the application, then the document on show.
+fn window_title(app_name: &str, panel: &AnyPanel, cx: &App) -> String {
+    format!("{app_name} \u{2014} {}", panel.title(cx))
+}
+
+fn set_window_title(app_name: &str, panel: &AnyPanel, window: &mut Window, cx: &App) {
+    window.set_window_title(&window_title(app_name, panel, cx));
 }
 
 #[cfg(test)]

@@ -40,7 +40,7 @@ use bviz_ui_components::{
     centered_spinner, load_in_background, overlay_canvas, paint_tooltip_box, track_drag,
 };
 use bviz_ui_trace_args::{TraceArgs, TraceSource};
-use bviz_ui_workspace::{AnyPanel, Panel, PanelEvent, PanelKind};
+use bviz_ui_workspace::{AnyPanel, Panel, PanelEvent, PanelKind, document_label};
 use clap::error::ErrorKind;
 use clap::{CommandFactory, Parser};
 use gpui::{
@@ -210,6 +210,8 @@ pub(crate) type Source = bviz_ui_components::Source<Arc<Profile>>;
 /// flame-graph panel in [`FlamePanel`]; each owns its own view state, reading the
 /// document and selection from the shared [`TraceModel`].
 struct TracePanel {
+    /// Names the document shown, labelling this panel's tab.
+    title: SharedString,
     /// The one instance the four panels each hold a handle to.
     model: Entity<TraceModel>,
     timeline: Entity<TimelinePanel>,
@@ -235,9 +237,10 @@ impl TracePanel {
     fn new(load: Load, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let load_task = load_in_background(
             cx,
-            move || load.0.join(),
+            move || load.profile.join(),
             |view, result, cx| view.on_profile_loaded(result, cx),
         );
+        let title = load.title;
         let model = cx.new(|_| TraceModel::new());
         // A panel that reaches back here takes a weak handle, so the shell's own
         // handle to it is what keeps it alive.
@@ -268,6 +271,7 @@ impl TracePanel {
             }
         });
         Self {
+            title,
             model,
             timeline,
             flame,
@@ -700,7 +704,7 @@ impl Panel for TracePanel {
     }
 
     fn title(&self, _cx: &App) -> SharedString {
-        "bviz trace".into()
+        self.title.clone()
     }
 
     fn status(&self, cx: &App) -> Option<SharedString> {
@@ -1614,13 +1618,20 @@ fn paint_tooltip(
 }
 
 /// A profile being decoded and parsed.
-pub struct Load(Pending<Profile>);
+pub struct Load {
+    profile: Pending<Profile>,
+    title: SharedString,
+}
 
 impl From<TraceSource> for Load {
     fn from(source: TraceSource) -> Self {
-        Self(Pending::start(move || {
-            Profile::from_path(&source.path).map_err(|e| e.to_string())
-        }))
+        let title = document_label(&source.path);
+        Self {
+            profile: Pending::start(move || {
+                Profile::from_path(&source.path).map_err(|e| e.to_string())
+            }),
+            title,
+        }
     }
 }
 

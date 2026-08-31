@@ -3,7 +3,18 @@ use gpui::{
     AnyView, App, Context, Entity, EntityId, EventEmitter, FocusHandle, Focusable, Render,
     SharedString, Subscription, Window,
 };
+use std::path::Path;
 use std::rc::Rc;
+
+/// How a path reads as a panel title: its file name, or the whole path when it
+/// has none.
+pub fn document_label(path: &Path) -> SharedString {
+    path.file_name()
+        .unwrap_or(path.as_os_str())
+        .to_string_lossy()
+        .into_owned()
+        .into()
+}
 
 /// Stable identity of a panel type.
 #[derive(Clone, Copy)]
@@ -149,5 +160,26 @@ impl<T: Panel> PanelOps for Entity<T> {
         cx.subscribe_in(self, window, |pane, panel, event, window, cx| {
             pane.on_panel_event(panel.entity_id(), event, window, cx);
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_document_is_labelled_by_its_file_name() {
+        assert_eq!(
+            document_label(Path::new("/tmp/build.profile.gz")),
+            "build.profile.gz"
+        );
+        assert_eq!(document_label(Path::new("aquery.pb")), "aquery.pb");
+    }
+
+    /// A path ending in `..` or in the root has no file name, and reads whole.
+    #[test]
+    fn a_path_with_no_file_name_is_its_own_label() {
+        assert_eq!(document_label(Path::new("/tmp/..")), "/tmp/..");
+        assert_eq!(document_label(Path::new("/")), "/");
     }
 }

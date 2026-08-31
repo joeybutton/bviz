@@ -9,7 +9,7 @@ mod workspace;
 
 pub use layout::{Layout, Panes, Removal, Split, SplitId};
 pub use pane::{Pane, PaneEvent};
-pub use panel::{AnyPanel, Panel, PanelEvent, PanelKind};
+pub use panel::{AnyPanel, Panel, PanelEvent, PanelKind, document_label};
 pub use workspace::{Workspace, register_keys};
 
 use gpui::{App, AppContext, Pixels, Size, Window};
@@ -58,7 +58,7 @@ where
         register_keys(cx);
         bviz_ui_shell::open_window(&app_id, window_size, cx, |window, cx| {
             let (panel, others) = build_panels(window, cx);
-            cx.new(|cx| Workspace::with_panels(panel, others, window, cx))
+            cx.new(|cx| Workspace::with_panels(app_id.clone(), panel, others, window, cx))
         })
         .unwrap();
         cx.activate(true);

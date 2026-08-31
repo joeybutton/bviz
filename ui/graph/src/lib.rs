@@ -6,7 +6,7 @@ use bviz_graph_layout::Id;
 use bviz_ui_components::{DragEnd, Dropdown, DropdownEvent, Pending, ScrollbarColors};
 use bviz_ui_graph_args::{GraphArgs, GraphSource};
 use bviz_ui_theme::{DataColors, Theme, ThemeColors};
-use bviz_ui_workspace::{AnyPanel, Panel, PanelEvent, PanelKind};
+use bviz_ui_workspace::{AnyPanel, Panel, PanelEvent, PanelKind, document_label};
 use clap::error::ErrorKind;
 use clap::{CommandFactory, Parser};
 use gpui::{
@@ -124,6 +124,8 @@ impl Palette {
 
 /// Loads, lays out, and renders a Bazel build graph.
 struct GraphPanel {
+    /// Names the document shown, labelling this panel's tab.
+    title: SharedString,
     focus_handle: FocusHandle,
     model: Model,
     framing: Framing,
@@ -215,7 +217,8 @@ impl GraphPanel {
         });
         Self {
             focus_handle: cx.focus_handle(),
-            model: Model::loading(load.0, cx),
+            title: load.title,
+            model: Model::loading(load.built, cx),
             framing: Framing::new(),
             drag: Drag::None,
             emphasis: Emphasis::none(),
@@ -435,7 +438,7 @@ impl Panel for GraphPanel {
     }
 
     fn title(&self, _cx: &App) -> SharedString {
-        "bviz graph".into()
+        self.title.clone()
     }
 
     fn status(&self, _cx: &App) -> Option<SharedString> {
@@ -607,11 +610,27 @@ fn hit_box<'a>(
 }
 
 /// A joint graph being read and laid out.
-pub struct Load(Pending<model::Built>);
+pub struct Load {
+    built: Pending<model::Built>,
+    title: SharedString,
+}
 
 impl From<GraphSource> for Load {
     fn from(source: GraphSource) -> Self {
-        Self(Pending::start(move || model::build(source.inputs())))
+        let title = title(&source);
+        Self {
+            built: Pending::start(move || model::build(source.inputs())),
+            title,
+        }
+    }
+}
+
+/// Names the file the graph was read from, and how many more it merges.
+fn title(source: &GraphSource) -> SharedString {
+    let (first, rest) = source.first_and_rest();
+    match rest.len() {
+        0 => document_label(&first.path),
+        more => format!("{} +{more}", document_label(&first.path)).into(),
     }
 }
 
@@ -1277,6 +1296,36 @@ mod tests {
         assert!(
             dx.abs() < ANCHOR_TOLERANCE && dy.abs() < ANCHOR_TOLERANCE,
             "({dx}, {dy}) px"
+        );
+    }
+
+    fn source(paths: &[&str]) -> GraphSource {
+        let inputs = paths
+            .iter()
+            .map(|path| bviz_ui_graph_args::Input {
+                kind: bviz_ui_graph_args::InputKind::Aquery,
+                path: path.into(),
+            })
+            .collect();
+        GraphSource::new(inputs).expect("the paths name a graph")
+    }
+
+    /// One graph is drawn however many files it merges, so its title names the
+    /// first and counts the rest.
+    #[test]
+    fn a_graph_of_several_files_is_titled_by_the_first_and_a_count() {
+        assert_eq!(title(&source(&["/tmp/aquery.pb"])), "aquery.pb");
+        assert_eq!(
+            title(&source(&["/tmp/aquery.pb", "/tmp/cquery.pb"])),
+            "aquery.pb +1"
+        );
+        assert_eq!(
+            title(&source(&[
+                "/tmp/aquery.pb",
+                "/tmp/cquery.pb",
+                "/tmp/query.pb"
+            ])),
+            "aquery.pb +2"
         );
     }
 }

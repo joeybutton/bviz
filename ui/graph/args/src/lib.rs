@@ -67,6 +67,10 @@ impl GraphSource {
     pub fn inputs(self) -> Vec<Input> {
         self.inputs
     }
+
+    pub fn first_and_rest(&self) -> (&Input, &[Input]) {
+        (&self.inputs[0], &self.inputs[1..])
+    }
 }
 
 #[cfg(test)]

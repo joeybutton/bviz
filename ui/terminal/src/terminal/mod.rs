@@ -6,8 +6,8 @@ use std::time::{Duration, Instant};
 
 use bviz_terminal::{CellPos, Replay, Scroll, SelectionType, Side, Terminal, Url};
 use bviz_ui_components::{
-    Button, Dropdown, Scrollbar, ScrubberColors, ScrubberState, TextInput, load_in_background,
-    scrubber,
+    Button, Dropdown, Pending, Scrollbar, ScrubberColors, ScrubberState, TextInput,
+    load_in_background, scrubber,
 };
 use bviz_ui_theme::ThemeColors;
 use bviz_ui_workspace::{Panel, PanelEvent, PanelKind};
@@ -72,6 +72,8 @@ type Source = bviz_ui_components::Source<Replay>;
 
 /// A build's captured terminal output, replayed under playback controls.
 pub struct TerminalPanel {
+    /// Names the document shown, labelling this panel's tab.
+    title: SharedString,
     /// The playback timeline, loaded off the UI thread.
     source: Source,
     /// Holds the background load task so it isn't cancelled on drop.
@@ -145,6 +147,7 @@ pub struct TerminalPanel {
 
 impl TerminalPanel {
     pub fn new(load: crate::Load, cx: &mut Context<Self>) -> Self {
+        let crate::Load { replay, title } = load;
         Self::bind_keys(cx);
         // Tab cycles focus through the regions (handled by the shell's tab action
         // via window.focus_next), in this order: playback bar, terminal, then the
@@ -163,6 +166,7 @@ impl TerminalPanel {
             cx.notify();
         });
         let mut view = Self {
+            title,
             source: Source::Loading,
             _load_task: Task::ready(()),
             current_frame: 0,
@@ -196,7 +200,7 @@ impl TerminalPanel {
         // Show the bar briefly on launch so the scrollable extent is visible,
         // then let it auto-hide.
         view.reveal_scrollbar(cx);
-        view.spawn_load(load, cx);
+        view.spawn_load(replay, cx);
         view
     }
 
@@ -235,10 +239,10 @@ impl TerminalPanel {
 
     /// Read and reconstruct the build off the UI thread so a large log never
     /// blocks startup or the first frame.
-    fn spawn_load(&mut self, load: crate::Load, cx: &mut Context<Self>) {
+    fn spawn_load(&mut self, replay: Pending<Replay>, cx: &mut Context<Self>) {
         self._load_task = load_in_background(
             cx,
-            move || load.0.join(),
+            move || replay.join(),
             |view, result, _| {
                 view.source = match result {
                     Ok(replay) => {
@@ -768,7 +772,7 @@ impl Panel for TerminalPanel {
     }
 
     fn title(&self, _cx: &App) -> SharedString {
-        "bazel_term".into()
+        self.title.clone()
     }
 
     fn set_active(&mut self, active: bool, window: &mut Window, cx: &mut Context<Self>) {

@@ -14,26 +14,33 @@ mod terminal;
 use bviz_terminal::Replay;
 use bviz_ui_components::Pending;
 use bviz_ui_terminal_args::{ConsoleArgs, ConsoleSource};
-use bviz_ui_workspace::AnyPanel;
+use bviz_ui_workspace::{AnyPanel, document_label};
 use clap::error::ErrorKind;
 use clap::{CommandFactory, Parser};
-use gpui::{App, Window, prelude::*, px, size};
+use gpui::{App, SharedString, Window, prelude::*, px, size};
 use std::path::PathBuf;
 use terminal::TerminalPanel;
 
 /// A build's console output being read and reconstructed.
-pub struct Load(Pending<Replay>);
+pub struct Load {
+    replay: Pending<Replay>,
+    title: SharedString,
+}
 
 impl From<ConsoleSource> for Load {
     fn from(source: ConsoleSource) -> Self {
-        Self(Pending::start(move || {
-            let path = source.path.display();
-            let bytes =
-                std::fs::read(&source.path).map_err(|e| format!("cannot read {path}: {e}"))?;
-            let output = bviz_terminal::parse(&bytes)
-                .map_err(|e| format!("cannot parse build event stream: {e}"))?;
-            Ok(Replay::from_output(output))
-        }))
+        let title = document_label(&source.path);
+        Self {
+            replay: Pending::start(move || {
+                let path = source.path.display();
+                let bytes =
+                    std::fs::read(&source.path).map_err(|e| format!("cannot read {path}: {e}"))?;
+                let output = bviz_terminal::parse(&bytes)
+                    .map_err(|e| format!("cannot parse build event stream: {e}"))?;
+                Ok(Replay::from_output(output))
+            }),
+            title,
+        }
     }
 }
 
