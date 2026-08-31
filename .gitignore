@@ -4,6 +4,7 @@ user.bazelrc
 .envrc.user
 .workspaces/
 .zed/
+.claude/settings.local.json
 
 rust-project.json
 .rules_rust_analyzer/
