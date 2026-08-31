@@ -9,12 +9,15 @@ rust_library(
         exclude = ["src/main.rs"],
     ),
     crate_name = "bviz_ui_terminal",
+    visibility = ["//bazel_viz:__pkg__"],
     deps = [
         "//terminal",
         "//ui/assets",
         "//ui/components",
         "//ui/shell",
+        "//ui/terminal/args",
         "//ui/theme",
+        "@crates//:clap",
         "@crates//:gpui",
     ],
 )

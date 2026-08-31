@@ -6,7 +6,11 @@ rust_binary(
     crate_name = "bazel_viz",
     visibility = ["//:__pkg__"],
     deps = [
-        "//greeting",
+        "//alloc",
+        "//cli",
+        "//ui/graph:graph_lib",
+        "//ui/terminal:terminal_lib",
+        "//ui/trace:trace_lib",
         "@crates//:clap",
     ],
 )

@@ -2,18 +2,21 @@
 members = [
     "alloc",
     "bazel_viz",
+    "cli",
     "graph/layout",
-    "greeting",
     "terminal",
     "trace/layout",
     "trace/profile",
     "ui/assets",
     "ui/components",
     "ui/graph",
+    "ui/graph/args",
     "ui/shell",
     "ui/terminal",
+    "ui/terminal/args",
     "ui/theme",
     "ui/trace",
+    "ui/trace/args",
     "util/parallel",
 ]
 resolver = "2"

@@ -3,16 +3,17 @@
 //! rendering the result.
 
 use bviz_graph_layout::Id;
-use bviz_ui_components::{DragEnd, Dropdown, DropdownEvent, ScrollbarColors};
+use bviz_ui_components::{DragEnd, Dropdown, DropdownEvent, Pending, ScrollbarColors};
+use bviz_ui_graph_args::{GraphArgs, GraphSource};
 use bviz_ui_shell::Chrome;
 use bviz_ui_theme::{DataColors, Theme, ThemeColors};
-use clap::Parser;
+use clap::error::ErrorKind;
+use clap::{CommandFactory, Parser};
 use gpui::{
     AnyElement, Bounds, Context, Entity, FocusHandle, IntoElement, KeyDownEvent, MouseButton,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Render, Rgba, ScrollDelta,
     ScrollWheelEvent, Subscription, Window, canvas, div, prelude::*, px, size,
 };
-use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 mod build;
@@ -31,7 +32,6 @@ mod scroll;
 mod selection;
 mod toolbar;
 
-use build::{Input, InputKind};
 use camera::{Camera, Rect, from_screen, recenter_rect, zoom_step};
 use drag::{Drag, end_drag, start_pan};
 use emphasis::Emphasis;
@@ -179,7 +179,7 @@ impl GraphView {
         self.morph.at(Instant::now())
     }
 
-    fn new(inputs: Vec<Input>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    fn new(load: Load, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let focus_handle = cx.focus_handle();
         focus_handle.focus(window, cx);
         let mode = LayoutMode::default();
@@ -216,7 +216,7 @@ impl GraphView {
         });
         Self {
             focus_handle,
-            model: Model::loading(inputs, cx),
+            model: Model::loading(load.0, cx),
             framing: Framing::new(),
             drag: Drag::None,
             emphasis: Emphasis::none(),
@@ -579,60 +579,46 @@ fn hit_box<'a>(
         .map(|(b, _)| b)
 }
 
+/// A joint graph being read and laid out.
+pub struct Load(Pending<model::Built>);
+
+impl From<GraphSource> for Load {
+    fn from(source: GraphSource) -> Self {
+        Self(Pending::start(move || model::build(source.inputs)))
+    }
+}
+
+/// Opens a window drawing the graph `load` reads.
+pub fn open_window(load: impl Into<Load>) {
+    let load = load.into();
+    bviz_ui_shell::run(
+        "bazel_viz graph",
+        size(px(1280.), px(820.)),
+        move |window, cx| cx.new(|cx| GraphView::new(load, window, cx)),
+    );
+}
+
 /// Renders a Bazel build graph from one or more `--output=streamed_proto`
 /// files. Each flag selects a file and the query that produced it; passing
 /// several merges them into one joint graph, with shared entities collapsed.
 #[derive(Parser)]
-#[command(group(
-    clap::ArgGroup::new("input").required(true).multiple(true).args(["aquery", "cquery", "query"])
-))]
+#[command(name = "graph", version, about)]
 struct Cli {
-    /// `bazel aquery --output=streamed_proto` file.
-    #[arg(long, value_name = "FILE")]
-    aquery: Option<PathBuf>,
-    /// `bazel cquery --output=streamed_proto` file (run cquery with
-    /// `--transitions=lite` for configuration-resolved edges).
-    #[arg(long, value_name = "FILE")]
-    cquery: Option<PathBuf>,
-    /// `bazel query --output=streamed_proto` file.
-    #[arg(long, value_name = "FILE")]
-    query: Option<PathBuf>,
-}
-
-impl Cli {
-    /// Every provided input flag, in a stable order: aquery, cquery, query.
-    fn inputs(self) -> Vec<Input> {
-        let mut inputs = Vec::new();
-        if let Some(path) = self.aquery {
-            inputs.push(Input {
-                kind: InputKind::Aquery,
-                path,
-            });
-        }
-        if let Some(path) = self.cquery {
-            inputs.push(Input {
-                kind: InputKind::Cquery,
-                path,
-            });
-        }
-        if let Some(path) = self.query {
-            inputs.push(Input {
-                kind: InputKind::Query,
-                path,
-            });
-        }
-        inputs
-    }
+    #[command(flatten)]
+    graph: GraphArgs,
 }
 
 /// Parses the query inputs and opens the graph-viewer window.
 pub fn run() {
-    let inputs = Cli::parse().inputs();
-    bviz_ui_shell::run(
-        "bazel_viz graph",
-        size(px(1280.), px(820.)),
-        move |window, cx| cx.new(|cx| GraphView::new(inputs, window, cx)),
-    );
+    let source = Cli::parse().graph.source().unwrap_or_else(|| {
+        Cli::command()
+            .error(
+                ErrorKind::MissingRequiredArgument,
+                "one of --aquery, --cquery or --query is required",
+            )
+            .exit()
+    });
+    open_window(source);
 }
 
 #[cfg(test)]

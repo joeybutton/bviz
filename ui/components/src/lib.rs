@@ -14,7 +14,7 @@ pub mod text_input;
 mod toolbar;
 mod tooltip;
 
-pub use background::load_in_background;
+pub use background::{Pending, load_in_background};
 pub use button::Button;
 pub use canvas::{LabelBoxStyle, paint_labeled_box, shape_truncated};
 pub use drag::{DragEnd, track_drag};

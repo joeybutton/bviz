@@ -699,13 +699,13 @@ checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
 name = "bazel_viz"
 version = "0.1.0"
 dependencies = [
- "bazel_viz_greeting",
+ "bviz_alloc",
+ "bviz_cli",
+ "bviz_ui_graph",
+ "bviz_ui_terminal",
+ "bviz_ui_trace",
  "clap",
 ]
-
-[[package]]
-name = "bazel_viz_greeting"
-version = "0.1.0"
 
 [[package]]
 name = "bindgen"
@@ -876,6 +876,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "bviz_cli"
+version = "0.1.0"
+dependencies = [
+ "bviz_ui_graph_args",
+ "bviz_ui_terminal_args",
+ "bviz_ui_trace_args",
+ "clap",
+ "serde",
+]
+
+[[package]]
 name = "bviz_graph_layout"
 version = "0.1.0"
 dependencies = [
@@ -953,11 +964,20 @@ dependencies = [
  "bviz_graph_layout",
  "bviz_ui_assets",
  "bviz_ui_components",
+ "bviz_ui_graph_args",
  "bviz_ui_shell",
  "bviz_ui_theme",
  "clap",
  "gpui",
  "gpui_platform",
+]
+
+[[package]]
+name = "bviz_ui_graph_args"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "serde",
 ]
 
 [[package]]
@@ -979,8 +999,18 @@ dependencies = [
  "bviz_ui_assets",
  "bviz_ui_components",
  "bviz_ui_shell",
+ "bviz_ui_terminal_args",
  "bviz_ui_theme",
+ "clap",
  "gpui",
+]
+
+[[package]]
+name = "bviz_ui_terminal_args"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "serde",
 ]
 
 [[package]]
@@ -1003,9 +1033,18 @@ dependencies = [
  "bviz_ui_components",
  "bviz_ui_shell",
  "bviz_ui_theme",
+ "bviz_ui_trace_args",
  "clap",
  "gpui",
  "gpui_platform",
+]
+
+[[package]]
+name = "bviz_ui_trace_args"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "serde",
 ]
 
 [[package]]

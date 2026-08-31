@@ -1,23 +1,7 @@
 use bviz_graph_layout::graph::Graph;
 use bviz_graph_layout::{Anchor, Id, LaidOut, Names, layout, quotient, streamed_proto};
+use bviz_ui_graph_args::{Input, InputKind};
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::path::PathBuf;
-
-/// Which Bazel query produced a `--output=streamed_proto` file, selecting the
-/// reader and builder used to turn it into a graph.
-#[derive(Clone, Copy)]
-pub(crate) enum InputKind {
-    Aquery,
-    Cquery,
-    Query,
-}
-
-/// A graph input: a streamed_proto file and the query kind that produced it.
-#[derive(Clone)]
-pub(crate) struct Input {
-    pub(crate) kind: InputKind,
-    pub(crate) path: PathBuf,
-}
 
 /// Reads every input's streamed_proto file and merges them into one joint graph,
 /// before any group quotienting. Cached so toggling a group needn't re-read or

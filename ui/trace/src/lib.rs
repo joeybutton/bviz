@@ -36,11 +36,13 @@ use bviz_trace_layout::{
 };
 use bviz_trace_profile::{Profile, Slice, TimeSpan};
 use bviz_ui_components::{
-    Axis, Button, DEFAULT_MIN_THUMB, DragEnd, SCROLLBAR_THICKNESS, Scrollbar, centered_spinner,
-    load_in_background, overlay_canvas, paint_tooltip_box, track_drag,
+    Axis, Button, DEFAULT_MIN_THUMB, DragEnd, Pending, SCROLLBAR_THICKNESS, Scrollbar,
+    centered_spinner, load_in_background, overlay_canvas, paint_tooltip_box, track_drag,
 };
 use bviz_ui_shell::Chrome;
-use clap::Parser;
+use bviz_ui_trace_args::{TraceArgs, TraceSource};
+use clap::error::ErrorKind;
+use clap::{CommandFactory, Parser};
 use gpui::{
     AnyElement, App, AvailableSpace, Bounds, ContentMask, Context, Div, Edges, Element, ElementId,
     Entity, FocusHandle, GlobalElementId, Hsla, InspectorElementId, IntoElement, LayoutId,
@@ -48,7 +50,6 @@ use gpui::{
     Stateful, Style, Subscription, Task, TextAlign, TransformationMatrix, Window, div, fill, point,
     prelude::*, px, relative, size,
 };
-use std::path::PathBuf;
 use std::sync::Arc;
 
 gpui::actions!(bviz_trace, [SelectAllTracks, ClearTimeSelection]);
@@ -230,18 +231,11 @@ struct TraceView {
 }
 
 impl TraceView {
-    fn new(
-        load: std::thread::JoinHandle<Result<Profile, String>>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Self {
+    fn new(load: Load, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let window_focus = cx.focus_handle();
         let load_task = load_in_background(
             cx,
-            move || {
-                load.join()
-                    .unwrap_or_else(|_| Err("profile loader thread panicked".into()))
-            },
+            move || load.0.join(),
             |view, result, cx| view.on_profile_loaded(result, cx),
         );
         let model = cx.new(|_| TraceModel::new());
@@ -1591,28 +1585,56 @@ fn paint_tooltip(
     paint_tooltip_box(&lines, at, bounds, palette.tooltip, window, cx);
 }
 
-/// Renders a Bazel `--profile` trace as a flame-chart timeline.
-#[derive(Parser)]
-struct Cli {
-    /// `bazel build --profile=FILE` output (`.profile.gz` or `.json`).
-    #[arg(long, value_name = "FILE")]
-    profile: PathBuf,
+/// A profile being decoded and parsed.
+pub struct Load(Pending<Profile>);
+
+impl From<TraceSource> for Load {
+    fn from(source: TraceSource) -> Self {
+        // rayon's global pool takes the size of the first build_global to win,
+        // so it is sized here, ahead of any layout pass that runs on it.
+        bviz_trace_layout::init_thread_pool();
+        Self(Pending::start(move || {
+            Profile::from_path(&source.path).map_err(|e| e.to_string())
+        }))
+    }
 }
 
-/// Parses `--profile` and opens the trace-viewer window.
-pub fn run() {
-    bviz_alloc::retain_freed_memory_across_load();
-    bviz_trace_layout::init_thread_pool();
-    let path = Cli::parse().profile;
-    // Loading from process entry overlaps the decode and parse with the app
-    // shell's startup (font-database scan, window and GPU-surface setup); the
-    // view joins this thread from its background task.
-    let load = std::thread::spawn(move || Profile::from_path(&path).map_err(|e| e.to_string()));
+/// Opens a window rendering the profile `load` reads.
+pub fn open_window(load: impl Into<Load>) {
+    let load = load.into();
     bviz_ui_shell::run(
         "bazel_viz trace",
         size(px(1280.), px(820.)),
         move |window, cx| cx.new(|cx| TraceView::new(load, window, cx)),
     );
+}
+
+/// Renders a Bazel `--profile` trace as a flame-chart timeline.
+#[derive(Parser)]
+#[command(name = "trace", version, about)]
+struct Cli {
+    #[command(flatten)]
+    trace: TraceArgs,
+}
+
+/// Parses `--profile` and opens the trace-viewer window.
+pub fn run() {
+    bviz_alloc::retain_freed_memory_across_load();
+    let mut sources = Cli::parse().trace.sources();
+    let Some(source) = sources.next() else {
+        Cli::command()
+            .error(ErrorKind::MissingRequiredArgument, "--profile is required")
+            .exit()
+    };
+    if sources.next().is_some() {
+        Cli::command()
+            .error(
+                ErrorKind::TooManyValues,
+                "a window shows one document, so one is opened per invocation",
+            )
+            .exit()
+    }
+    open_window(source);
 }
 
 #[cfg(test)]

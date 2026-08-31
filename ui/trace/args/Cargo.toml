@@ -1,0 +1,12 @@
+[package]
+name = "bviz_ui_trace_args"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "bviz_ui_trace_args"
+path = "src/lib.rs"
+
+[dependencies]
+clap = { workspace = true }
+serde = { workspace = true }

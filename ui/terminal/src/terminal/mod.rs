@@ -146,7 +146,7 @@ pub struct TerminalView {
 }
 
 impl TerminalView {
-    pub fn new(path: String, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(load: crate::Load, window: &mut Window, cx: &mut Context<Self>) -> Self {
         Self::bind_keys(cx);
         // Tab cycles focus through the regions (handled by the shell's tab action
         // via window.focus_next), in this order: playback bar, terminal, then the
@@ -200,7 +200,7 @@ impl TerminalView {
         // Show the bar briefly on launch so the scrollable extent is visible,
         // then let it auto-hide.
         view.reveal_scrollbar(cx);
-        view.spawn_load(path, cx);
+        view.spawn_load(load, cx);
         view
     }
 
@@ -239,15 +239,10 @@ impl TerminalView {
 
     /// Read and reconstruct the build off the UI thread so a large log never
     /// blocks startup or the first frame.
-    fn spawn_load(&mut self, path: String, cx: &mut Context<Self>) {
+    fn spawn_load(&mut self, load: crate::Load, cx: &mut Context<Self>) {
         self._load_task = load_in_background(
             cx,
-            move || {
-                let bytes = std::fs::read(&path).map_err(|e| format!("cannot read {path}: {e}"))?;
-                let output = bviz_terminal::parse(&bytes)
-                    .map_err(|e| format!("cannot parse build event stream: {e}"))?;
-                Ok::<_, String>(bviz_terminal::Replay::from_output(output))
-            },
+            move || load.0.join(),
             |view, result, _| {
                 view.source = match result {
                     Ok(replay) => {

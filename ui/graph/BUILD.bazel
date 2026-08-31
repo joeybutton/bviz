@@ -9,10 +9,12 @@ rust_library(
         exclude = ["src/main.rs"],
     ),
     crate_name = "bviz_ui_graph",
+    visibility = ["//bazel_viz:__pkg__"],
     deps = [
         "//graph/layout",
         "//ui/assets",
         "//ui/components",
+        "//ui/graph/args",
         "//ui/shell",
         "//ui/theme",
         "@crates//:clap",

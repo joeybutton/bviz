@@ -1,4 +1,4 @@
-use crate::build::{self, Input, build_graph};
+use crate::build::{self, build_graph};
 use crate::emphasis;
 use crate::mode::LayoutMode;
 use crate::morph;
@@ -6,7 +6,8 @@ use crate::{GraphView, MARGIN};
 use bviz_graph_layout::graph::Graph;
 use bviz_graph_layout::lod::{DEFAULT_MAX_EDGES, DEFAULT_MAX_NODES};
 use bviz_graph_layout::{Id, LaidOut, MapLayout, Names};
-use bviz_ui_components::load_in_background;
+use bviz_ui_components::{Pending, load_in_background};
+use bviz_ui_graph_args::Input;
 use gpui::{Context, Task};
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -146,6 +147,38 @@ impl Expandable {
     }
 }
 
+/// A graph read and prepared for viewing: the layouts a first frame draws, and
+/// the expansion and container set the view opens at.
+pub(crate) struct Built {
+    loaded: Loaded,
+    containers: Arc<HashSet<Id>>,
+    expanded: HashSet<Id>,
+}
+
+/// Reads `inputs`, builds the graph and derives the map pyramid. Runs off the UI
+/// thread, so window appearance and interactivity are never blocked.
+pub(crate) fn build(inputs: Vec<Input>) -> Result<Built, String> {
+    let (graph, reduced_base, names) = build_graph(&inputs)?;
+    let expanded =
+        bviz_graph_layout::lod::default_expansion(&graph, DEFAULT_MAX_NODES, DEFAULT_MAX_EDGES);
+    let containers = Arc::new(bviz_graph_layout::lod::expandable_containers(&graph));
+    // The map derives each of its views against these, so it holds a share in
+    // them rather than a copy.
+    let (base, reduced_base) = (Arc::new(graph), Arc::new(reduced_base));
+    let map = bviz_graph_layout::map_layout(Arc::clone(&base), Arc::clone(&reduced_base));
+    Ok(Built {
+        loaded: Loaded {
+            map: Arc::new(map),
+            layered: None,
+            base,
+            reduced_base,
+            names,
+        },
+        containers,
+        expanded,
+    })
+}
+
 pub(crate) type Source = bviz_ui_components::Source<Loaded>;
 
 /// The graph being viewed: the layouts on screen and the expansion the next
@@ -165,41 +198,18 @@ pub(crate) struct Model {
 }
 
 impl Model {
-    /// Reads `inputs`, builds the graph and derives the map pyramid on the
-    /// background executor, so window appearance and interactivity are never
-    /// blocked.
-    pub(crate) fn loading(inputs: Vec<Input>, cx: &mut Context<GraphView>) -> Self {
+    /// Shows the graph `load` is reading, once it has been read.
+    pub(crate) fn loading(load: Pending<Built>, cx: &mut Context<GraphView>) -> Self {
         let task = load_in_background(
             cx,
-            move || {
-                let (graph, reduced_base, names) = build_graph(&inputs)?;
-                let expanded = bviz_graph_layout::lod::default_expansion(
-                    &graph,
-                    DEFAULT_MAX_NODES,
-                    DEFAULT_MAX_EDGES,
-                );
-                let containers = bviz_graph_layout::lod::expandable_containers(&graph);
-                // The map derives each of its views against these, so it holds a
-                // share in them rather than a copy.
-                let (base, reduced_base) = (Arc::new(graph), Arc::new(reduced_base));
-                let map =
-                    bviz_graph_layout::map_layout(Arc::clone(&base), Arc::clone(&reduced_base));
-                Ok::<_, String>((base, reduced_base, names, expanded, containers, map))
-            },
+            move || load.join(),
             |view, result, cx| {
                 view.model.source = match result {
-                    Ok((base, reduced_base, names, expanded, containers, map)) => {
-                        view.model.containers = Arc::new(containers);
-                        view.model.expanded = expanded;
-                        let map = Arc::new(map);
-                        derive_levels(Arc::clone(&map), cx);
-                        Source::Loaded(Loaded {
-                            map,
-                            layered: None,
-                            base,
-                            reduced_base,
-                            names,
-                        })
+                    Ok(built) => {
+                        view.model.containers = built.containers;
+                        view.model.expanded = built.expanded;
+                        derive_levels(Arc::clone(&built.loaded.map), cx);
+                        Source::Loaded(built.loaded)
                     }
                     Err(err) => Source::Failed(err),
                 };

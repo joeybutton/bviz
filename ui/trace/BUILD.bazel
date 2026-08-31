@@ -9,6 +9,7 @@ rust_library(
         exclude = ["src/main.rs"],
     ),
     crate_name = "bviz_ui_trace",
+    visibility = ["//bazel_viz:__pkg__"],
     deps = [
         "//alloc",
         "//trace/layout",
@@ -17,6 +18,7 @@ rust_library(
         "//ui/components",
         "//ui/shell",
         "//ui/theme",
+        "//ui/trace/args",
         "@crates//:clap",
         "@crates//:gpui",
     ],

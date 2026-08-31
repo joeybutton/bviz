@@ -8,13 +8,17 @@ timeline, scrub back through the console output.
 
 ## Viewers
 
-Each is a gpui desktop application, and needs Wayland and a GPU.
+`//bazel_viz` is the application: it takes the input of any viewer and opens the
+one that reads it. Each viewer also builds as a binary of its own, for work on
+that viewer alone.
 
 | Target | Shows |
 | --- | --- |
 | `//ui/graph:graph` | the build and dependency graph |
 | `//ui/trace:trace` | the action timeline: thread lanes, counters, flame graph, stats |
 | `//ui/terminal:terminal` | the console output, replayed against its clock |
+
+All are gpui desktop applications, and need Wayland and a GPU.
 
 ## Setup
 
@@ -86,3 +90,15 @@ bazel run -c opt //ui/terminal:terminal -- /tmp/build.bep
 
 Bazel does not timestamp its progress output, so without `--show_timestamps` the
 replay interpolates its timing between the events that do carry a clock.
+
+## Running bviz
+
+`//bazel_viz` takes the inputs of all three viewers, and opens the viewer whose
+input it is given.
+
+```sh
+bazel run -c opt //bazel_viz -- --profile /tmp/build.profile.gz
+```
+
+A window shows one document, so exactly one is named per invocation, except that
+the query files merge into a single joint graph and count as one.
