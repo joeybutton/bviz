@@ -11,7 +11,10 @@ rust_library(
         "//ui/trace:__pkg__",
     ],
     deps = [
+        "//ui/assets",
+        "//ui/components",
         "//ui/shell",
+        "//ui/theme",
         "@crates//:gpui",
     ],
 )

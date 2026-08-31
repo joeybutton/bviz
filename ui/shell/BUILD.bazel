@@ -16,12 +16,7 @@ rust_library(
         exclude = ["src/chrome.rs"],
     ) + [":chrome_src"],
     crate_name = "bviz_ui_shell",
-    visibility = [
-        "//ui/graph:__pkg__",
-        "//ui/terminal:__pkg__",
-        "//ui/trace:__pkg__",
-        "//ui/workspace:__pkg__",
-    ],
+    visibility = ["//ui/workspace:__pkg__"],
     deps = [
         "//ui/assets",
         "//ui/components",

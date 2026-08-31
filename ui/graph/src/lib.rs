@@ -6,7 +6,7 @@ use bviz_graph_layout::Id;
 use bviz_ui_components::{DragEnd, Dropdown, DropdownEvent, Pending, ScrollbarColors};
 use bviz_ui_graph_args::{GraphArgs, GraphSource};
 use bviz_ui_theme::{DataColors, Theme, ThemeColors};
-use bviz_ui_workspace::{AnyPanel, Panel, PanelEvent, PanelKind, Workspace};
+use bviz_ui_workspace::{AnyPanel, Panel, PanelEvent, PanelKind};
 use clap::error::ErrorKind;
 use clap::{CommandFactory, Parser};
 use gpui::{
@@ -618,13 +618,10 @@ impl From<GraphSource> for Load {
 /// Opens a window drawing the graph `load` reads.
 pub fn open_window(load: impl Into<Load>) {
     let load = load.into();
-    bviz_ui_shell::run(
+    bviz_ui_workspace::run(
         "bviz graph",
         size(px(1280.), px(820.)),
-        move |window, cx| {
-            let panel = cx.new(|cx| GraphPanel::new(load, cx));
-            cx.new(|cx| Workspace::new(AnyPanel::new(panel), window, cx))
-        },
+        move |_window, cx| AnyPanel::new(cx.new(|cx| GraphPanel::new(load, cx))),
     );
 }
 

@@ -1,0 +1,292 @@
+use crate::{AnyPanel, PanelEvent};
+use bviz_ui_components::Button;
+use bviz_ui_theme::ThemeColors;
+use gpui::{
+    AnyElement, ElementId, EntityId, EventEmitter, IntoElement, MouseButton, Pixels, Render,
+    Subscription, Window, div, prelude::*, px,
+};
+
+/// Height of the tab strip, giving a tab's icon, label and close control a line
+/// to sit on with room around them.
+const TAB_STRIP_HEIGHT: Pixels = px(30.);
+
+/// How wide a tab may grow before its label is cut, so one long title cannot
+/// push its neighbours off the strip.
+const MAX_TAB_WIDTH: Pixels = px(200.);
+
+const TAB_ICON_SIZE: Pixels = px(14.);
+
+/// A panel of a pane, and the subscription carrying that panel's events to the
+/// pane. Taking the panel out of the pane retires the subscription with it.
+struct Tab {
+    panel: AnyPanel,
+    _events: Subscription,
+}
+
+/// Panels sharing one place in a window, of which the pane shows one and lists
+/// the rest in a tab strip above it. A pane holds at least one panel, `active`
+/// indexes the one it shows, and closing the last panel closes the pane itself
+/// ([`PaneEvent::Closed`]) rather than leaving an empty one in the window.
+pub struct Pane {
+    tabs: Vec<Tab>,
+    active: usize,
+}
+
+/// What a [`Pane`] tells its workspace about itself.
+pub enum PaneEvent {
+    /// The panel on show changed, or changed what it says about itself.
+    Changed,
+    /// The last panel closed, so the pane is done.
+    Closed,
+}
+
+impl EventEmitter<PaneEvent> for Pane {}
+
+impl Pane {
+    pub fn new(panel: AnyPanel, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let events = panel.subscribe(window, cx);
+        panel.set_active(true, window, cx);
+        Self {
+            tabs: vec![Tab {
+                panel,
+                _events: events,
+            }],
+            active: 0,
+        }
+    }
+
+    /// Adds `panel` to the pane and shows it.
+    pub fn add(&mut self, panel: AnyPanel, window: &mut Window, cx: &mut Context<Self>) {
+        let events = panel.subscribe(window, cx);
+        self.tabs.push(Tab {
+            panel,
+            _events: events,
+        });
+        self.activate(self.tabs.len() - 1, window, cx);
+    }
+
+    pub fn active_panel(&self) -> &AnyPanel {
+        &self.tabs[self.active].panel
+    }
+
+    /// Shows the panel at `index` in place of the one on show.
+    pub fn activate(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if index == self.active || index >= self.tabs.len() {
+            return;
+        }
+        self.tabs[self.active].panel.set_active(false, window, cx);
+        self.active = index;
+        self.show_active(window, cx);
+    }
+
+    /// Shows the panel after the one on show, wrapping round to the first.
+    pub fn activate_next(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.activate((self.active + 1) % self.tabs.len(), window, cx);
+    }
+
+    /// Shows the panel before the one on show, wrapping round to the last.
+    pub fn activate_previous(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let last = self.tabs.len() - 1;
+        self.activate(self.active.checked_sub(1).unwrap_or(last), window, cx);
+    }
+
+    /// Closes the panel at `index`, or the whole pane where that panel is the
+    /// only one it holds.
+    pub fn close(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if index >= self.tabs.len() {
+            return;
+        }
+        if self.tabs.len() == 1 {
+            cx.emit(PaneEvent::Closed);
+            return;
+        }
+        drop(self.detach(index, window, cx));
+    }
+
+    pub fn close_active(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.close(self.active, window, cx);
+    }
+
+    /// Hands the panel on show to a caller that gives it a place of its own,
+    /// leaving the pane showing another. `None` where it is the pane's only
+    /// panel, which cannot leave without emptying the pane.
+    pub(crate) fn take_active(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyPanel> {
+        self.detach(self.active, window, cx)
+    }
+
+    pub(crate) fn on_panel_event(
+        &mut self,
+        panel: EntityId,
+        event: &PanelEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(index) = self
+            .tabs
+            .iter()
+            .position(|tab| tab.panel.entity_id() == panel)
+        else {
+            return;
+        };
+        match event {
+            PanelEvent::TitleChanged | PanelEvent::StatusChanged => {
+                if index == self.active {
+                    cx.emit(PaneEvent::Changed);
+                }
+                cx.notify();
+            }
+            PanelEvent::Close => self.close(index, window, cx),
+        }
+    }
+
+    /// Takes the panel at `index` out of the pane, moving on to another panel
+    /// where it was the one on show. `None` where the pane does not hold such a
+    /// panel, or holds only it.
+    fn detach(
+        &mut self,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyPanel> {
+        if index >= self.tabs.len() || self.tabs.len() == 1 {
+            return None;
+        }
+        let taken = self.tabs.remove(index).panel;
+        if index == self.active {
+            taken.set_active(false, window, cx);
+            self.active = index.min(self.tabs.len() - 1);
+            self.show_active(window, cx);
+        } else {
+            if index < self.active {
+                self.active -= 1;
+            }
+            cx.notify();
+        }
+        Some(taken)
+    }
+
+    /// Brings the panel `active` indexes forward, and tells the workspace what
+    /// the pane is showing.
+    fn show_active(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let panel = self.active_panel().clone();
+        panel.set_active(true, window, cx);
+        // A repaint the panel marked while its pane showed another was consumed
+        // by a frame that left it out, so the frame bringing it forward records
+        // the scene it draws only if it is marked again here.
+        panel.notify(cx);
+        cx.emit(PaneEvent::Changed);
+        cx.notify();
+    }
+
+    fn tab_strip(&self, colors: &ThemeColors, cx: &mut Context<Self>) -> impl IntoElement {
+        let mut tabs = Vec::with_capacity(self.tabs.len());
+        for index in 0..self.tabs.len() {
+            tabs.push(self.tab(index, colors, cx));
+        }
+        div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .flex_shrink_0()
+            .w_full()
+            .h(TAB_STRIP_HEIGHT)
+            .overflow_hidden()
+            .bg(colors.surface)
+            .border_b_1()
+            .border_color(colors.border)
+            .text_sm()
+            .children(tabs)
+    }
+
+    fn tab(&self, index: usize, colors: &ThemeColors, cx: &mut Context<Self>) -> AnyElement {
+        let panel = self.tabs[index].panel.clone();
+        let showing = index == self.active;
+        let ink = if showing {
+            colors.text
+        } else {
+            colors.text_muted
+        };
+        let hover = colors.element_hover;
+        let pane = cx.entity();
+        div()
+            .id(ElementId::NamedInteger(
+                "pane-tab".into(),
+                panel.entity_id().as_u64(),
+            ))
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_1()
+            .h_full()
+            .px_2()
+            .max_w(MAX_TAB_WIDTH)
+            .border_r_1()
+            .border_color(colors.border)
+            .bg(if showing {
+                colors.background
+            } else {
+                colors.surface
+            })
+            .text_color(ink)
+            .cursor_pointer()
+            .when(!showing, |tab| tab.hover(move |s| s.bg(hover)))
+            .on_click(cx.listener(move |pane, _, window, cx| pane.activate(index, window, cx)))
+            .children(panel.icon(cx).map(|name| {
+                bviz_ui_assets::icon(name)
+                    .size(TAB_ICON_SIZE)
+                    .text_color(ink)
+            }))
+            .child(
+                div()
+                    .min_w(px(0.))
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_ellipsis()
+                    .child(panel.title(cx)),
+            )
+            .child(
+                div()
+                    // A press on the close control must not also reach the tab
+                    // and bring forward the panel it is about to close.
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .child(
+                        Button::new(
+                            ElementId::NamedInteger(
+                                "pane-tab-close".into(),
+                                panel.entity_id().as_u64(),
+                            ),
+                            move |_, window, cx| {
+                                pane.update(cx, |pane, cx| pane.close(index, window, cx));
+                            },
+                        )
+                        .ghost()
+                        .icon("x")
+                        .compact(),
+                    ),
+            )
+            .into_any_element()
+    }
+}
+
+impl Render for Pane {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let body = self.active_panel().view();
+        // One panel is the pane: there is nothing to pick between, and a strip
+        // of one tab would only take room from the panel.
+        if self.tabs.len() == 1 {
+            return body.into_any_element();
+        }
+        let colors = bviz_ui_theme::theme(window, cx).colors;
+        div()
+            .flex()
+            .flex_col()
+            .size_full()
+            .child(self.tab_strip(&colors, cx))
+            .child(div().flex().flex_col().flex_1().min_h(px(0.)).child(body))
+            .into_any_element()
+    }
+}

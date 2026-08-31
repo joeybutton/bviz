@@ -16,7 +16,6 @@ rust_library(
         "//trace/profile",
         "//ui/assets",
         "//ui/components",
-        "//ui/shell",
         "//ui/theme",
         "//ui/trace/args",
         "//ui/workspace",

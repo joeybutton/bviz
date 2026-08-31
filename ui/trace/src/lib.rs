@@ -40,7 +40,7 @@ use bviz_ui_components::{
     centered_spinner, load_in_background, overlay_canvas, paint_tooltip_box, track_drag,
 };
 use bviz_ui_trace_args::{TraceArgs, TraceSource};
-use bviz_ui_workspace::{AnyPanel, Panel, PanelEvent, PanelKind, Workspace};
+use bviz_ui_workspace::{AnyPanel, Panel, PanelEvent, PanelKind};
 use clap::error::ErrorKind;
 use clap::{CommandFactory, Parser};
 use gpui::{
@@ -1627,13 +1627,10 @@ impl From<TraceSource> for Load {
 /// Opens a window rendering the profile `load` reads.
 pub fn open_window(load: impl Into<Load>) {
     let load = load.into();
-    bviz_ui_shell::run(
+    bviz_ui_workspace::run(
         "bviz trace",
         size(px(1280.), px(820.)),
-        move |window, cx| {
-            let panel = cx.new(|cx| TracePanel::new(load, window, cx));
-            cx.new(|cx| Workspace::new(AnyPanel::new(panel), window, cx))
-        },
+        move |window, cx| AnyPanel::new(cx.new(|cx| TracePanel::new(load, window, cx))),
     );
 }
 

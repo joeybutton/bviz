@@ -1,4 +1,4 @@
-use crate::Workspace;
+use crate::Pane;
 use gpui::{
     AnyView, App, Context, Entity, EntityId, EventEmitter, FocusHandle, Focusable, Render,
     SharedString, Subscription, Window,
@@ -82,12 +82,18 @@ impl AnyPanel {
         self.0.view().entity_id()
     }
 
+    /// Marks the panel for a repaint of its own, which its pane owes it after
+    /// frames that left it out.
+    pub fn notify(&self, cx: &mut App) {
+        self.0.notify(cx)
+    }
+
     pub fn view(&self) -> AnyView {
         self.0.view()
     }
 
-    /// Forward this panel's [`PanelEvent`]s to the workspace `cx` belongs to.
-    pub fn subscribe(&self, window: &Window, cx: &mut Context<Workspace>) -> Subscription {
+    /// Forward this panel's [`PanelEvent`]s to the pane `cx` belongs to.
+    pub fn subscribe(&self, window: &Window, cx: &mut Context<Pane>) -> Subscription {
         self.0.subscribe(window, cx)
     }
 }
@@ -101,8 +107,9 @@ trait PanelOps {
     fn icon(&self, cx: &App) -> Option<&'static str>;
     fn focus_handle(&self, cx: &App) -> FocusHandle;
     fn set_active(&self, active: bool, window: &mut Window, cx: &mut App);
+    fn notify(&self, cx: &mut App);
     fn view(&self) -> AnyView;
-    fn subscribe(&self, window: &Window, cx: &mut Context<Workspace>) -> Subscription;
+    fn subscribe(&self, window: &Window, cx: &mut Context<Pane>) -> Subscription;
 }
 
 impl<T: Panel> PanelOps for Entity<T> {
@@ -130,13 +137,17 @@ impl<T: Panel> PanelOps for Entity<T> {
         self.update(cx, |panel, cx| panel.set_active(active, window, cx));
     }
 
+    fn notify(&self, cx: &mut App) {
+        self.update(cx, |_, cx| cx.notify());
+    }
+
     fn view(&self) -> AnyView {
         self.clone().into()
     }
 
-    fn subscribe(&self, window: &Window, cx: &mut Context<Workspace>) -> Subscription {
-        cx.subscribe_in(self, window, |workspace, _, event, window, cx| {
-            workspace.on_panel_event(event, window, cx);
+    fn subscribe(&self, window: &Window, cx: &mut Context<Pane>) -> Subscription {
+        cx.subscribe_in(self, window, |pane, panel, event, window, cx| {
+            pane.on_panel_event(panel.entity_id(), event, window, cx);
         })
     }
 }

@@ -972,7 +972,6 @@ dependencies = [
  "bviz_ui_assets",
  "bviz_ui_components",
  "bviz_ui_graph_args",
- "bviz_ui_shell",
  "bviz_ui_theme",
  "bviz_ui_workspace",
  "clap",
@@ -1004,7 +1003,6 @@ dependencies = [
  "bviz_terminal",
  "bviz_ui_assets",
  "bviz_ui_components",
- "bviz_ui_shell",
  "bviz_ui_terminal_args",
  "bviz_ui_theme",
  "bviz_ui_workspace",
@@ -1037,7 +1035,6 @@ dependencies = [
  "bviz_trace_profile",
  "bviz_ui_assets",
  "bviz_ui_components",
- "bviz_ui_shell",
  "bviz_ui_theme",
  "bviz_ui_trace_args",
  "bviz_ui_workspace",
@@ -1056,7 +1053,10 @@ dependencies = [
 name = "bviz_ui_workspace"
 version = "0.1.0"
 dependencies = [
+ "bviz_ui_assets",
+ "bviz_ui_components",
  "bviz_ui_shell",
+ "bviz_ui_theme",
  "gpui",
 ]
 

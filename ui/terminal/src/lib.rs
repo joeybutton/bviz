@@ -14,7 +14,7 @@ mod terminal;
 use bviz_terminal::Replay;
 use bviz_ui_components::Pending;
 use bviz_ui_terminal_args::{ConsoleArgs, ConsoleSource};
-use bviz_ui_workspace::{AnyPanel, Workspace};
+use bviz_ui_workspace::AnyPanel;
 use clap::error::ErrorKind;
 use clap::{CommandFactory, Parser};
 use gpui::{prelude::*, px, size};
@@ -40,13 +40,10 @@ impl From<ConsoleSource> for Load {
 /// Opens a window replaying the build `load` reads.
 pub fn open_window(load: impl Into<Load>) {
     let load = load.into();
-    bviz_ui_shell::run(
+    bviz_ui_workspace::run(
         "bviz console",
         size(px(1100.), px(720.)),
-        move |window, cx| {
-            let panel = cx.new(|cx| TerminalPanel::new(load, cx));
-            cx.new(|cx| Workspace::new(AnyPanel::new(panel), window, cx))
-        },
+        move |_window, cx| AnyPanel::new(cx.new(|cx| TerminalPanel::new(load, cx))),
     );
 }
 
