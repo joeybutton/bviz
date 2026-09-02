@@ -39,11 +39,12 @@ impl Terminal {
         None
     }
 
-    /// Trailing sentence punctuation usually belongs to the prose, not the URL;
-    /// drop it from both the opened text and the highlighted span's end column.
+    /// Trailing sentence punctuation, and the closing half of a pair the URL was
+    /// written inside, belong to the prose rather than the URL; drop them from
+    /// both the opened text and the highlighted span's end column.
     fn trim_trailing_punctuation(full: &str, end: Point) -> (String, Point) {
         let kept = full
-            .trim_end_matches(['.', ',', ';', ':', '!', '?', ')'])
+            .trim_end_matches(['.', ',', ';', ':', '!', '?', ')', '\''])
             .chars()
             .count();
         let removed = full.chars().count() - kept;

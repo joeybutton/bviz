@@ -11,11 +11,12 @@ use alacritty_terminal::term::Term;
 use alacritty_terminal::term::cell::Cell;
 use alacritty_terminal::term::search::{Match, RegexIter, RegexSearch};
 
-/// URLs to detect in the terminal text, by scheme. Mirrors the set Zed's
-/// terminal recognizes; the body excludes control characters, whitespace, and
-/// delimiters that cannot appear unescaped in a URL.
+/// URLs to detect in the terminal text: the hint pattern alacritty highlights
+/// with, matching a scheme then a run up to the first character a URL is not
+/// written with — a control character, whitespace, a quote or bracket, or one
+/// of `^`, `|`, `\`.
 const URL_REGEX: &str = "(ipfs:|ipns:|magnet:|mailto:|gemini://|gopher://|https://|http://|news:|file:|git://|ssh:|ftp://)\
-    [^\u{0000}-\u{001F}\u{007F}-\u{009F}<>\"\\s{-}\\^⟨⟩`']+";
+    [^\u{0000}-\u{001F}\u{007F}-\u{009F}<>\"\\s{-}\\^⟨⟩`\\\\]+";
 
 /// A URL found in the terminal: its text and, per visible row, the inclusive
 /// column span it covers for highlighting.
@@ -467,6 +468,19 @@ mod tests {
         let mut terminal = Terminal::new(&output, 80, 10);
         let url = terminal.url_at(8, 0).expect("url under the link");
         assert_eq!(url.text(), "http://example.com");
+    }
+
+    /// A URL may contain an apostrophe, so the pattern matches through one and
+    /// the quotes a tool writes around a URL land in the match.
+    #[test]
+    fn trims_the_quotes_a_tool_writes_around_a_url() {
+        let output = BuildOutput::from_bytes(
+            80,
+            b"fatal: repository 'http://example.com/foo' not found\n".to_vec(),
+        );
+        let mut terminal = Terminal::new(&output, 80, 10);
+        let url = terminal.url_at(25, 0).expect("url under the link");
+        assert_eq!(url.text(), "http://example.com/foo");
     }
 
     #[test]
