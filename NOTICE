@@ -1,7 +1,12 @@
 bviz bundles and derives from the third-party work listed here. Each entry
-gives what the work is, where it came from, and where its terms are recorded.
-Every file in LICENSES/ is named for the work it covers; none of them states
-bviz's own terms, which are not settled, and nothing below grants any.
+gives what the work is, where it came from, and which licence declaration
+records its terms. Every declaration names an SPDX kind and the text it
+governs, so this file adds only what a declaration cannot state: which part of
+bviz a work reached, and how. None of the terms below are bviz's own, which
+are not settled, and nothing here grants any.
+
+LICENSES/ holds the text of work bviz carries in its own tree. Work Bazel
+fetches arrives with its own text, and its declaration points there.
 
 ## Compiled into the binaries
 
@@ -32,14 +37,14 @@ no NOTICE file of its own.
     ui/components/src/text_input.rs   from examples/input.rs
     ui/shell/src/chrome.rs            from examples/window_shadow.rs
 
-Apache License 2.0: LICENSES/gpui.txt
+Apache License 2.0: //LICENSES:gpui
 
 The URL pattern in terminal/src/display/mod.rs is alacritty's own hint regex,
 taken as it stands from alacritty/src/config/ui_config.rs
 (https://github.com/alacritty/alacritty, tag v0.17.0). Alacritty carries no
 NOTICE file of its own.
 
-Apache License 2.0: LICENSES/alacritty.txt
+Apache License 2.0: //LICENSES:alacritty
 
 ## Patched dependency source
 
@@ -53,16 +58,16 @@ Eclipse Layout Kernel, Rust port 0.11.0+rs.2 — Eclipse Public License 2.0
     employers; Eclipse Layout Kernel is a trademark of the Eclipse Foundation.
     https://projects.eclipse.org/projects/modeling.elk
     https://github.com/openedges/elk-rs
-    patches/elk-rs-reentrant-external-port-lock.patch
-    LICENSES/elk-rs.txt
+    patches/elk-rs/elk-rs-reentrant-external-port-lock.patch
+    //LICENSES:elk_rs
 
 That patch carries some fifty lines of Eclipse Public License 2.0 source and
 rewrites them, so the patch is itself available under that licence.
 
 The patches against gpui_linux carry Apache-2.0 lines from the same Zed tree
-the derived files above come from, under the terms in LICENSES/gpui.txt. The
-xkbcommon patch carries a module declaration, a cfg attribute and six lines
-around them — too little to attribute.
+the derived files above come from, under //LICENSES:gpui. The xkbcommon patch
+carries a module declaration, a cfg attribute and six lines around them — too
+little to attribute, and it is the one patch with no declaration.
 
 ## Colour values
 

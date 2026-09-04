@@ -1,0 +1,50 @@
+load("@package_metadata//licenses/rules:license.bzl", "license")
+load("@package_metadata//rules:package_metadata.bzl", "package_metadata")
+
+# The terms of work bviz carries in its own tree rather than fetching: source
+# written from an upstream example, a constant taken verbatim, a patch that
+# ships the lines it replaces. Work Bazel fetches declares its own terms from
+# the archive it arrives in.
+
+package_metadata(
+    name = "gpui",
+    attributes = [":gpui_license"],
+    purl = "pkg:github/zed-industries/zed@v1.6.3",
+    visibility = [
+        "//patches/gpui_linux:__pkg__",
+        "//ui/components:__pkg__",
+        "//ui/shell:__pkg__",
+    ],
+)
+
+license(
+    name = "gpui_license",
+    kind = "@package_metadata//licenses/spdx:Apache-2.0",
+    text = "gpui.txt",
+)
+
+package_metadata(
+    name = "alacritty",
+    attributes = [":alacritty_license"],
+    purl = "pkg:github/alacritty/alacritty@v0.17.0",
+    visibility = ["//terminal:__pkg__"],
+)
+
+license(
+    name = "alacritty_license",
+    kind = "@package_metadata//licenses/spdx:Apache-2.0",
+    text = "alacritty.txt",
+)
+
+package_metadata(
+    name = "elk_rs",
+    attributes = [":elk_rs_license"],
+    purl = "pkg:github/openedges/elk-rs@v0.11.0+rs.2",
+    visibility = ["//patches/elk-rs:__pkg__"],
+)
+
+license(
+    name = "elk_rs_license",
+    kind = "@package_metadata//licenses/spdx:EPL-2.0",
+    text = "elk-rs.txt",
+)

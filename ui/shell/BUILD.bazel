@@ -1,9 +1,20 @@
 load("@rules_rs//rs:rust_library.bzl", "rust_library")
 load("@rules_rs//rs:rust_test.bzl", "rust_test")
 
+# chrome.rs was written from gpui's window_shadow example, so it carries that
+# example's terms rather than the crate's own.
+filegroup(
+    name = "chrome_src",
+    srcs = ["src/chrome.rs"],
+    package_metadata = ["//LICENSES:gpui"],
+)
+
 rust_library(
     name = "shell",
-    srcs = glob(["src/**/*.rs"]),
+    srcs = glob(
+        ["src/**/*.rs"],
+        exclude = ["src/chrome.rs"],
+    ) + [":chrome_src"],
     crate_name = "bviz_ui_shell",
     visibility = [
         "//ui/graph:__pkg__",
