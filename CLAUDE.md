@@ -270,6 +270,22 @@ Everything is pinned and Bazel-managed. No system toolchains, no system tools.
   with pnpm — repin via `bazel run -- @pnpm --dir $PWD install --lockfile-only`
   and commit `pnpm-lock.yaml`. Generate protobuf bindings with protobuf-es.
 
+## Third-party licences
+
+Declare them to Bazel with `package_metadata` + `license`; never copy a licence
+text that Bazel already fetches.
+
+- Fetched work: declare in its BUILD overlay, `text` pointing at the file in the
+  archive (see `3rd-party/*.BUILD`).
+- Work carried in-tree — source written from an upstream example, a constant
+  taken verbatim, a patch shipping the lines it replaces — keeps its text in
+  `LICENSES/`, declared there and attached to a `filegroup` of just those files
+  so the claim does not cover the whole library.
+- Patches are resolved when a crate repository is fetched, so their labels must
+  be source files: declare per package, one package per upstream.
+- `NOTICE` adds only what a declaration cannot state — which part of bviz a work
+  reached, and how.
+
 ## Bazel conventions
 
 - Prefer specific visibility (`//pkg:__pkg__`) over `//visibility:public`.
