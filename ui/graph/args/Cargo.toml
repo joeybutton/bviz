@@ -9,4 +9,3 @@ path = "src/lib.rs"
 
 [dependencies]
 clap = { workspace = true }
-serde = { workspace = true }

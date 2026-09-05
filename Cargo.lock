@@ -883,7 +883,6 @@ dependencies = [
  "bviz_ui_terminal_args",
  "bviz_ui_trace_args",
  "clap",
- "serde",
 ]
 
 [[package]]
@@ -978,7 +977,6 @@ name = "bviz_ui_graph_args"
 version = "0.1.0"
 dependencies = [
  "clap",
- "serde",
 ]
 
 [[package]]
@@ -1011,7 +1009,6 @@ name = "bviz_ui_terminal_args"
 version = "0.1.0"
 dependencies = [
  "clap",
- "serde",
 ]
 
 [[package]]
@@ -1045,7 +1042,6 @@ name = "bviz_ui_trace_args"
 version = "0.1.0"
 dependencies = [
  "clap",
- "serde",
 ]
 
 [[package]]

@@ -3,7 +3,6 @@
 //! parse can be exercised without a display.
 
 use clap::Args;
-use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 /// The build event streams a console replay is read from.
@@ -22,7 +21,7 @@ impl ConsoleArgs {
 }
 
 /// One console replay.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ConsoleSource {
     pub path: PathBuf,
 }

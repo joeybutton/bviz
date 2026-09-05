@@ -3,7 +3,6 @@
 //! exercised without a display.
 
 use clap::Args;
-use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 /// The files a joint build graph is read from.
@@ -39,7 +38,7 @@ impl GraphArgs {
 
 /// Which Bazel query produced a `--output=streamed_proto` file, selecting the
 /// reader and builder used to turn it into a graph.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum InputKind {
     Aquery,
     Cquery,
@@ -47,14 +46,14 @@ pub enum InputKind {
 }
 
 /// A graph input: a streamed_proto file and the query kind that produced it.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Input {
     pub kind: InputKind,
     pub path: PathBuf,
 }
 
 /// One build graph, merged from every input given for it.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GraphSource {
     pub inputs: Vec<Input>,
 }

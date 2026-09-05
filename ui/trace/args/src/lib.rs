@@ -3,7 +3,6 @@
 //! can be exercised without a display.
 
 use clap::Args;
-use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 /// The profiles an action timeline is read from.
@@ -22,7 +21,7 @@ impl TraceArgs {
 }
 
 /// One action timeline.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TraceSource {
     pub path: PathBuf,
 }

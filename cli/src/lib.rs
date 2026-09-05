@@ -8,7 +8,6 @@ use bviz_ui_terminal_args::{ConsoleArgs, ConsoleSource};
 use bviz_ui_trace_args::{TraceArgs, TraceSource};
 use clap::error::ErrorKind;
 use clap::{CommandFactory, Parser};
-use serde::{Deserialize, Serialize};
 
 /// Opens Bazel build documents: the dependency graph, the action timeline, the
 /// console replay.
@@ -59,7 +58,7 @@ impl Cli {
 }
 
 /// A document to open, whichever viewer shows it.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Source {
     Graph(GraphSource),
     Trace(TraceSource),
