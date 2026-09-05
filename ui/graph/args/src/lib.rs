@@ -45,7 +45,7 @@ pub enum InputKind {
     Query,
 }
 
-/// A graph input: a streamed_proto file and the query kind that produced it.
+/// One file a joint graph is read from.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Input {
     pub kind: InputKind,

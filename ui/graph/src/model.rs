@@ -147,8 +147,7 @@ impl Expandable {
     }
 }
 
-/// A graph read and prepared for viewing: the layouts a first frame draws, and
-/// the expansion and container set the view opens at.
+/// A graph read and prepared for viewing.
 pub(crate) struct Built {
     loaded: Loaded,
     containers: Arc<HashSet<Id>>,
