@@ -595,7 +595,7 @@ a one-shot *delay* rather than background work (e.g. an auto-hiding scroll bar),
 gpui runs its own executor (a UI-thread foreground queue plus a background thread pool).
 It is **neither a tokio runtime nor rayon**, so two kinds of foreign work need an explicit
 bridge. `references/async-tokio-rayon.md` has the full patterns, the bridge source to
-adapt, and sizing/gotchas; the essentials:
+adapt, and the rules for gating parallel work and keeping the pools apart; the essentials:
 
 - **tokio** — futures from libraries that need tokio's reactor (`reqwest`, `tonic`, cloud
   SDKs, `tokio::net`/`time`) panic *"there is no reactor running"* on gpui's executor. Own
@@ -606,11 +606,10 @@ adapt, and sizing/gotchas; the essentials:
 - **rayon** — a parallel iterator (`par_iter`, `par_sort`) blocks its calling thread until
   the whole job finishes, so it must **only** run inside a background task (e.g. the `work`
   closure of `load_in_background`, or `cx.background_executor().spawn(..)`), never on the UI
-  thread. Gate the parallel path by input size, and if you adopt rayon size its global pool
-  with `bviz_parallel::worker_count()` (physical cores) — the repo's heavy passes are
-  memory-bandwidth bound, so widening past physical cores adds overhead for no gain. For a
-  few coarse chunks, `cx.background_executor().scoped(..)` (or the existing
-  `std::thread::scope` pattern) avoids pulling in rayon at all.
+  thread. Gate the parallel path by input size, and run it inside
+  `bviz_parallel::workers().install(..)`, the process's one pool. For a few coarse chunks,
+  `cx.background_executor().scoped(..)` (or the existing `std::thread::scope` pattern)
+  avoids pulling in rayon at all.
 
 ## Building and running in this repo
 
@@ -685,4 +684,4 @@ actually moves the bound.
 - An element's mouse handlers stop at its own bounds — use `track_drag` for a drag that must follow the cursor past them, and past the window's edge.
 - A drag ended only on `MouseUpEvent` sticks when the compositor takes the pointer away mid-gesture — also end it on a move whose `dragging()` is false.
 - gpui's executor is not tokio — a `reqwest`/`tonic`/SDK future run directly on it panics "no reactor running"; bridge it through a tokio runtime (see the tokio/rayon section).
-- A rayon `par_iter`/`par_sort` on the UI thread freezes the frame — it blocks its caller; run it inside a background task and size rayon's pool by physical cores.
+- A rayon `par_iter`/`par_sort` on the UI thread freezes the frame — it blocks its caller; run it inside a background task, inside `bviz_parallel::workers().install(..)`.

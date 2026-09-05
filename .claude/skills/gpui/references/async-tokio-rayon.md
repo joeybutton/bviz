@@ -11,9 +11,9 @@ foreign work therefore need an explicit bridge:
   running, must be called from the context of a Tokio runtime"*, or fail the
   moment they call `tokio::runtime::Handle::current()`.
 - **rayon** — CPU-bound *data parallelism* (parallel iterators, `par_sort`) over
-  a large in-memory collection. Rayon owns a global work-stealing thread pool
-  and needs no runtime, but a parallel iterator **blocks the calling thread**
-  until the whole job finishes, so calling it on the UI thread freezes the frame.
+  a large in-memory collection. Rayon owns a work-stealing thread pool and needs
+  no runtime, but a parallel iterator **blocks the calling thread** until the
+  whole job finishes, so calling it on the UI thread freezes the frame.
 
 The reference implementations live in Zed at **v1.6.3**, in two Apache-licensed
 crates: `crates/gpui_tokio/src/gpui_tokio.rs` (the whole tokio bridge, ~100
@@ -34,7 +34,7 @@ Drop-guard):
 ```rust
 pub fn init(cx: &mut App) {
     let runtime = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(worker_count())   // see "Sizing" — not a hardcoded 2
+        .worker_threads(bviz_parallel::worker_count())
         .enable_all()
         .build()
         .expect("build tokio runtime");
@@ -109,7 +109,10 @@ executor:
 ```rust
 self.task = load_in_background(
     cx,
-    move || graph.into_par_iter().map(layout_node).collect::<Vec<_>>(),
+    move || {
+        bviz_parallel::workers()
+            .install(|| graph.into_par_iter().map(layout_node).collect::<Vec<_>>())
+    },
     |view, laid_out, cx| { view.nodes = laid_out; /* helper calls cx.notify() */ },
 );
 ```
@@ -121,7 +124,8 @@ cx.spawn(async move |this, cx| {
     let sorted = cx
         .background_executor()
         .spawn(async move {
-            entries.par_sort_by(cmp);   // blocks THIS background thread; rayon fans out across its pool
+            // blocks THIS background thread
+            bviz_parallel::workers().install(|| entries.par_sort_by(cmp));
             entries
         })
         .await;
@@ -129,7 +133,7 @@ cx.spawn(async move |this, cx| {
 })
 ```
 
-The rayon call occupies one gpui background thread while rayon's own pool does
+The rayon call occupies one gpui background thread while the worker pool does
 the parallel work; the UI thread stays free to render.
 
 ### Gate parallelism by input size
@@ -138,26 +142,16 @@ Rayon's fan-out overhead loses to a serial pass on small inputs. Branch on
 length: take the `par_*` path above a threshold element count and run serially
 below it.
 
-### Size rayon's pool to physical cores
+### Run rayon work on `bviz_parallel::workers()`
 
-Rayon's global pool defaults to the machine's *logical* (SMT) thread count. This
-repo's heavy passes are memory-bandwidth bound and saturate at the physical
-cores that own the memory channels — the reason `bviz_parallel::worker_count()`
-exists (physical cores, clamped to granted parallelism). If you adopt rayon,
-size its global pool the same way, once at startup, so it matches the existing
-`std::thread::scope` passes and doesn't oversubscribe:
+Every rayon entry point in the repo runs inside
+`bviz_parallel::workers().install(..)`: the process's one pool, `worker_count()`
+(physical cores) wide. A parallel iterator left outside it runs on rayon's
+implicit global pool — a second set of workers, sized by logical threads, whose
+threads contend with the first pool's for the same cores.
 
-```rust
-rayon::ThreadPoolBuilder::new()
-    .num_threads(bviz_parallel::worker_count())
-    .build_global()
-    .ok();
-```
-
-A memory-bandwidth-bound stage already saturates at that width; widening it
-further with rayon adds scheduling overhead for no wall-time gain and can run
-*slower*. Reach for rayon on genuinely CPU-bound fan-out (independent per-item
-compute), not to parallelize a pass that is already bandwidth-limited.
+Reach for rayon on genuinely CPU-bound fan-out (independent per-item compute),
+not to parallelize a pass that is already bandwidth-limited.
 
 ### gpui's own `scoped` — often enough without rayon
 
