@@ -75,15 +75,14 @@ mod tests {
     }
 
     fn graph(inputs: &[(InputKind, &str)]) -> Source {
-        Source::Graph(GraphSource {
-            inputs: inputs
-                .iter()
-                .map(|&(kind, path)| Input {
-                    kind,
-                    path: path.into(),
-                })
-                .collect(),
-        })
+        let inputs = inputs
+            .iter()
+            .map(|&(kind, path)| Input {
+                kind,
+                path: path.into(),
+            })
+            .collect();
+        Source::Graph(GraphSource::new(inputs).expect("the inputs name a graph"))
     }
 
     fn trace(path: &str) -> Source {

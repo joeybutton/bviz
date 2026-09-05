@@ -32,7 +32,7 @@ impl GraphArgs {
         .into_iter()
         .filter_map(|(kind, path)| path.map(|path| Input { kind, path }))
         .collect();
-        (!inputs.is_empty()).then_some(GraphSource { inputs })
+        GraphSource::new(inputs)
     }
 }
 
@@ -55,7 +55,18 @@ pub struct Input {
 /// One build graph, merged from every input given for it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GraphSource {
-    pub inputs: Vec<Input>,
+    inputs: Vec<Input>,
+}
+
+impl GraphSource {
+    /// A graph is read from at least one file.
+    pub fn new(inputs: Vec<Input>) -> Option<Self> {
+        (!inputs.is_empty()).then_some(Self { inputs })
+    }
+
+    pub fn inputs(self) -> Vec<Input> {
+        self.inputs
+    }
 }
 
 #[cfg(test)]
@@ -97,7 +108,7 @@ mod tests {
         assert_eq!(
             source(&["--query", "q.pb", "--aquery", "a.pb", "--cquery", "c.pb"])
                 .expect("three files name a graph")
-                .inputs,
+                .inputs(),
             inputs(&[
                 (InputKind::Aquery, "a.pb"),
                 (InputKind::Cquery, "c.pb"),

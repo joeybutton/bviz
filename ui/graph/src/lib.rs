@@ -584,7 +584,7 @@ pub struct Load(Pending<model::Built>);
 
 impl From<GraphSource> for Load {
     fn from(source: GraphSource) -> Self {
-        Self(Pending::start(move || model::build(source.inputs)))
+        Self(Pending::start(move || model::build(source.inputs())))
     }
 }
 
