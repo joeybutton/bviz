@@ -1,7 +1,7 @@
 //! Interleaved A/B benchmark of the two gzip decode shapes the loader uses:
 //! inflating into one whole-profile buffer (the fallback path) against
-//! streaming into a reused chunk-sized buffer (what the pipelined parse
-//! consumes), printing per-round wall time and output throughput. Alternating
+//! streaming into a reused buffer the size the pipelined parse would pick for
+//! this input, printing per-round wall time and output throughput. Alternating
 //! the shapes within one process keeps background-load drift out of the
 //! comparison. The whole-buffer side pays the first touch of a full-size
 //! output allocation each round; the streaming side never holds more than one
@@ -12,9 +12,7 @@ static GLOBAL: bviz_alloc::MiMalloc = bviz_alloc::MiMalloc;
 
 use std::io::Read;
 
-const STREAM_BUF_BYTES: usize = 32 << 20;
 const ROUNDS: usize = 4;
-const GZIP_ISIZE_BYTES: usize = 4;
 
 fn report(label: &str, round: usize, start: std::time::Instant, out_bytes: usize) {
     let dt = start.elapsed().as_secs_f64();
@@ -24,24 +22,19 @@ fn report(label: &str, round: usize, start: std::time::Instant, out_bytes: usize
     );
 }
 
-/// The gzip ISIZE trailer, from which the whole-buffer side reserves its
-/// output like the loader's fallback decode does.
-fn isize_trailer(bytes: &[u8]) -> usize {
-    if bytes.len() < GZIP_ISIZE_BYTES {
-        return 0;
-    }
-    u32::from_le_bytes(bytes[bytes.len() - GZIP_ISIZE_BYTES..].try_into().unwrap()) as usize
-}
-
 fn main() {
     let path = std::env::args()
         .nth(1)
         .expect("usage: bench_inflate <profile.gz>");
     let bytes = std::fs::read(&path).expect("read input");
-    let mut buf = vec![0u8; STREAM_BUF_BYTES];
+    let decoded = bviz_trace_profile::gzip_isize(&bytes)
+        .expect("input is not a gzip stream declaring its uncompressed size");
+    let chunk_bytes = bviz_trace_profile::pipeline_chunk_bytes(decoded);
+    eprintln!("streaming buffer: {chunk_bytes} bytes");
+    let mut buf = vec![0u8; chunk_bytes];
     for round in 0..ROUNDS {
         let start = std::time::Instant::now();
-        let mut out = Vec::with_capacity(isize_trailer(&bytes));
+        let mut out = Vec::with_capacity(decoded);
         flate2::read::MultiGzDecoder::new(&bytes[..])
             .read_to_end(&mut out)
             .expect("whole-buffer inflate");

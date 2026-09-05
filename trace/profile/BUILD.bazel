@@ -32,6 +32,7 @@ rust_binary(
     srcs = ["bench/inflate.rs"],
     crate_name = "bench_inflate",
     deps = [
+        ":profile",
         "//alloc",
         "@crates//:flate2",
     ],

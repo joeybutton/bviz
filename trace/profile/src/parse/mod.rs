@@ -23,6 +23,9 @@ use pipeline::{
 use scanner::object_end;
 use serde_events::{ArgEntry, ProfileVisitor, RawEventSeed};
 
+pub use decode::gzip_isize;
+pub use pipeline::pipeline_chunk_bytes;
+
 /// Estimated distinct-string density of a Bazel profile — about one interned
 /// string per this many decoded bytes — used to pre-size the shared interner's
 /// dedup index. Measured near one distinct string per 167 bytes on a large

@@ -305,6 +305,13 @@ pub(crate) fn parse_gz_pipelined_reader(
     parse_gz_stream_from(reader, workers, chunk_bytes, decoded_size)
 }
 
+/// The buffer a pipelined decode reads into, for a stream declaring
+/// `decoded_size` uncompressed bytes.
+pub fn pipeline_chunk_bytes(decoded_size: usize) -> usize {
+    (decoded_size / (worker_count() * CHUNKS_PER_WORKER))
+        .clamp(MIN_CHUNK_BYTES, PIPELINE_MAX_CHUNK_BYTES)
+}
+
 /// Worker count and per-chunk byte target for a pipelined decode of a stream
 /// declaring `decoded_size` uncompressed bytes, or `None` when the pipeline
 /// declines — a single core, or a stream under the parallel threshold.
@@ -313,9 +320,7 @@ pub(crate) fn pipeline_params(decoded_size: usize) -> Option<(usize, usize)> {
     if workers < 2 || decoded_size < MIN_PARALLEL_BYTES {
         return None;
     }
-    let chunk_bytes = (decoded_size / (workers * CHUNKS_PER_WORKER))
-        .clamp(MIN_CHUNK_BYTES, PIPELINE_MAX_CHUNK_BYTES);
-    Some((workers, chunk_bytes))
+    Some((workers, pipeline_chunk_bytes(decoded_size)))
 }
 
 /// One newline-aligned run of decoded profile bytes, numbered so builders can
