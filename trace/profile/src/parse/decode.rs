@@ -44,10 +44,10 @@ fn isize_from_trailer(trailer: &[u8; GZIP_ISIZE_BYTES]) -> Option<usize> {
 }
 
 /// The uncompressed length a gzip stream declares in its ISIZE trailer (the
-/// length mod 2^32, exact under 4 GiB). `None` for input too short to frame or
-/// a zero trailer.
+/// length mod 2^32, exact under 4 GiB). `None` for input that is not gzip, is
+/// too short to frame, or carries a zero trailer.
 pub(crate) fn gzip_isize(bytes: &[u8]) -> Option<usize> {
-    if bytes.len() < GZIP_FRAMING_MIN {
+    if !bytes.starts_with(&GZIP_MAGIC) || bytes.len() < GZIP_FRAMING_MIN {
         return None;
     }
     isize_from_trailer(&bytes[bytes.len() - GZIP_ISIZE_BYTES..].try_into().ok()?)
