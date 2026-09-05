@@ -969,7 +969,6 @@ dependencies = [
  "bviz_ui_theme",
  "clap",
  "gpui",
- "gpui_platform",
 ]
 
 [[package]]
@@ -1034,7 +1033,6 @@ dependencies = [
  "bviz_ui_trace_args",
  "clap",
  "gpui",
- "gpui_platform",
 ]
 
 [[package]]
