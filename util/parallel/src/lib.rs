@@ -5,8 +5,9 @@
 /// memory-bandwidth bound, so threads past the cores that own the memory
 /// channels mostly stall on bandwidth, burning CPU for a wall-time gain that has
 /// flattened. Clamped to the parallelism the process is actually granted, so a
-/// CPU quota or affinity mask is honored.
+/// CPU quota or affinity mask is honored, and to at least one worker, so a
+/// caller may size, multiply or divide by it unguarded.
 pub fn worker_count() -> usize {
     let granted = std::thread::available_parallelism().map_or(1, |n| n.get());
-    num_cpus::get_physical().min(granted)
+    num_cpus::get_physical().min(granted).max(1)
 }
