@@ -154,8 +154,7 @@ pub(crate) struct Built {
     expanded: HashSet<Id>,
 }
 
-/// Reads `inputs`, builds the graph and derives the map pyramid. Runs off the UI
-/// thread, so window appearance and interactivity are never blocked.
+/// Reads `inputs`, builds the graph and derives the map pyramid.
 pub(crate) fn build(inputs: Vec<Input>) -> Result<Built, String> {
     let (graph, reduced_base, names) = build_graph(&inputs)?;
     let expanded =
