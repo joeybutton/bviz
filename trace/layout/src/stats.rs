@@ -4,13 +4,12 @@ use bviz_trace_profile::{SpanRole, Str};
 
 use crate::flame::FlameGraph;
 
-/// One aggregated group of frames, summed across the flame graph. `total_us` is
-/// the summed self time of every frame keyed here, so the rows partition the
-/// root's total and a group's share `total_us / Σ(all groups' total_us)` sums to
-/// 100% without double-counting nested time. `max_us` is the peak single-frame
-/// self time, `count` the number of merged span occurrences. `key` is a [`Str`]
-/// handle into the profile held by the [`FlameGraph`] the row was derived from;
-/// resolve it with that graph's [`str`](FlameGraph::str).
+/// One aggregated group of frames, summed across the flame graph. The rows
+/// partition the root's total, so a group's share `self_us / Σ(all groups'
+/// self_us)` sums to 100% without double-counting nested time. `max_us` is the
+/// peak single-frame self time, `count` the number of merged span occurrences.
+/// `key` is a [`Str`] handle into the profile held by the [`FlameGraph`] the row
+/// was derived from; resolve it with that graph's [`str`](FlameGraph::str).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StatRow {
     pub key: Str,
@@ -22,7 +21,7 @@ pub struct StatRow {
     pub rank: u32,
     pub role: SpanRole,
     pub count: u32,
-    pub total_us: i64,
+    pub self_us: i64,
     pub max_us: i64,
 }
 
@@ -30,7 +29,7 @@ impl StatRow {
     /// Mean self time per merged span occurrence in the group.
     pub fn avg_us(&self) -> i64 {
         if self.count > 0 {
-            self.total_us / self.count as i64
+            self.self_us / self.count as i64
         } else {
             0
         }
@@ -62,7 +61,7 @@ pub fn stats_from_flame(graph: &FlameGraph) -> Vec<StatRow> {
         match &mut rows[rank as usize] {
             Some(row) => {
                 row.count += graph.count(i);
-                row.total_us += self_us;
+                row.self_us += self_us;
                 row.max_us = row.max_us.max(self_us);
             }
             None => {
@@ -71,7 +70,7 @@ pub fn stats_from_flame(graph: &FlameGraph) -> Vec<StatRow> {
                     rank,
                     role: graph.role(i),
                     count: graph.count(i),
-                    total_us: self_us,
+                    self_us,
                     max_us: self_us,
                 });
             }
@@ -92,23 +91,23 @@ fn self_us_without_details(graph: &FlameGraph, i: usize) -> i64 {
     (graph.total_us(i) - spanned).max(0)
 }
 
-/// Indices into `stats` in the default display order: `total_us` descending,
+/// Indices into `stats` in the default display order: `self_us` descending,
 /// ties broken by key rank ascending — which orders exactly as the key text
 /// does — then by row index. Each row decorate-sorts on one packed integer key:
-/// the total in the high bits as an order-preserving `i64`→`u64` bias inverted
-/// for descending, above the rank, above the index. No two rows share an index,
-/// so the order is total, and no comparison resolves a string or chases a row
-/// pointer.
+/// the self time in the high bits as an order-preserving `i64`→`u64` bias
+/// inverted for descending, above the rank, above the index. No two rows share
+/// an index, so the order is total, and no comparison resolves a string or
+/// chases a row pointer.
 pub(crate) fn default_order(stats: &[StatRow]) -> Vec<u32> {
     const RANK_SHIFT: u32 = u32::BITS;
-    const TOTAL_SHIFT: u32 = 2 * u32::BITS;
+    const SELF_SHIFT: u32 = 2 * u32::BITS;
     const SIGN_BIT: u64 = 1 << (u64::BITS - 1);
     let mut keyed: Vec<u128> = stats
         .iter()
         .enumerate()
         .map(|(i, r)| {
-            let total_desc = !((r.total_us as u64) ^ SIGN_BIT);
-            ((total_desc as u128) << TOTAL_SHIFT) | ((r.rank as u128) << RANK_SHIFT) | i as u128
+            let self_desc = !((r.self_us as u64) ^ SIGN_BIT);
+            ((self_desc as u128) << SELF_SHIFT) | ((r.rank as u128) << RANK_SHIFT) | i as u128
         })
         .collect();
     keyed.par_sort_unstable();
@@ -133,9 +132,9 @@ mod tests {
         })
     }
 
-    /// Sum of every row's self-time total — must equal the root's total.
-    fn total(rows: &[StatRow]) -> i64 {
-        rows.iter().map(|r| r.total_us).sum()
+    /// Sum of every row's self time — must equal the root's total.
+    fn self_sum(rows: &[StatRow]) -> i64 {
+        rows.iter().map(|r| r.self_us).sum()
     }
 
     fn row<'a>(graph: &FlameGraph, rows: &'a [StatRow], key: &str) -> &'a StatRow {
@@ -145,7 +144,7 @@ mod tests {
     }
 
     #[test]
-    fn mnemonic_grouping_sums_count_total_and_max() {
+    fn mnemonic_grouping_sums_count_self_and_max() {
         // Two disjoint CppCompile actions merge into one frame (no nesting), so
         // its self time sums both durations and the row counts both occurrences.
         let p = profile(vec![track(
@@ -162,7 +161,7 @@ mod tests {
         assert_eq!(rows.len(), 2);
         let c = row(&g, &rows, "CppCompile");
         assert_eq!(c.count, 2);
-        assert_eq!(c.total_us, 150);
+        assert_eq!(c.self_us, 150);
         // One merged frame; its peak self time is the merged total.
         assert_eq!(c.max_us, 150);
         assert_eq!(
@@ -172,9 +171,9 @@ mod tests {
                 payload: true
             }
         );
-        assert_eq!(row(&g, &rows, "CppLink").total_us, 30);
+        assert_eq!(row(&g, &rows, "CppLink").self_us, 30);
         // Self time partitions the root total (180), no double-count.
-        assert_eq!(total(&rows), 180);
+        assert_eq!(self_sum(&rows), 180);
     }
 
     #[test]
@@ -192,9 +191,9 @@ mod tests {
         )]);
         let g = flame(&p);
         let rows = stats_from_flame(&g);
-        assert_eq!(row(&g, &rows, "Rustc").total_us, 20);
-        assert_eq!(row(&g, &rows, "subprocess.run").total_us, 80);
-        assert_eq!(total(&rows), 100);
+        assert_eq!(row(&g, &rows, "Rustc").self_us, 20);
+        assert_eq!(row(&g, &rows, "subprocess.run").self_us, 80);
+        assert_eq!(self_sum(&rows), 100);
     }
 
     #[test]
@@ -219,9 +218,9 @@ mod tests {
         let rows = stats_from_flame(&g);
         assert_eq!(rows.len(), 2);
         let rustc = row(&g, &rows, "Rustc");
-        assert_eq!((rustc.count, rustc.total_us, rustc.max_us), (1, 20, 20));
-        assert_eq!(row(&g, &rows, "subprocess.run").total_us, 80);
-        assert_eq!(total(&rows), 100);
+        assert_eq!((rustc.count, rustc.self_us, rustc.max_us), (1, 20, 20));
+        assert_eq!(row(&g, &rows, "subprocess.run").self_us, 80);
+        assert_eq!(self_sum(&rows), 100);
     }
 
     #[test]
@@ -267,7 +266,7 @@ mod tests {
         let resolved = |g: &FlameGraph| -> Vec<(String, u32, i64, i64)> {
             let mut rows: Vec<_> = stats_from_flame(g)
                 .iter()
-                .map(|r| (g.str(r.key).to_owned(), r.count, r.total_us, r.max_us))
+                .map(|r| (g.str(r.key).to_owned(), r.count, r.self_us, r.max_us))
                 .collect();
             rows.sort();
             rows
@@ -297,7 +296,7 @@ mod tests {
         let rows = stats_from_flame(&g);
         assert_eq!(rows.len(), 1);
         assert_eq!(g.str(rows[0].key), "Rustc");
-        assert_eq!(rows[0].total_us, 50);
+        assert_eq!(rows[0].self_us, 50);
     }
 
     #[test]
@@ -314,7 +313,7 @@ mod tests {
         let g = flame(&p);
         let rows = stats_from_flame(&g);
         assert_eq!(rows.len(), 2);
-        assert_eq!(row(&g, &rows, "checkOutputs").total_us, 30);
+        assert_eq!(row(&g, &rows, "checkOutputs").self_us, 30);
         assert_eq!(row(&g, &rows, "CppCompile").count, 1);
     }
 
@@ -337,14 +336,14 @@ mod tests {
         // profiles, so equal names need not share a handle across them.
         let resolved = |g: &FlameGraph, rows: &[StatRow]| -> Vec<(String, u32, i64, i64)> {
             rows.iter()
-                .map(|r| (g.str(r.key).to_owned(), r.count, r.total_us, r.max_us))
+                .map(|r| (g.str(r.key).to_owned(), r.count, r.self_us, r.max_us))
                 .collect()
         };
         assert_eq!(resolved(&ga, &ra), resolved(&gb, &rb));
         let a = row(&ga, &ra, "CppCompile");
         assert_eq!(a.count, 2);
         // Both disjoint CppCompile spans merge into one frame: self time 160.
-        assert_eq!(a.total_us, 160);
+        assert_eq!(a.self_us, 160);
         assert_eq!(a.max_us, 160);
     }
 }

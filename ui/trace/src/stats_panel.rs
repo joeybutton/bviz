@@ -24,7 +24,7 @@ use std::sync::Arc;
 pub(crate) enum StatsColumn {
     Key,
     Count,
-    Total,
+    SelfTime,
     Avg,
     Max,
     Percent,
@@ -49,7 +49,7 @@ const STATS_COLUMNS: [StatsColumnSpec; 6] = [
         width: Some(STATS_NUM_COL_WIDTH),
     },
     StatsColumnSpec {
-        column: StatsColumn::Total,
+        column: StatsColumn::SelfTime,
         width: Some(STATS_NUM_COL_WIDTH),
     },
     StatsColumnSpec {
@@ -75,7 +75,7 @@ fn column_header(column: StatsColumn, labels: FlameLabels) -> &'static str {
             FlameLabels::Name => "Name",
         },
         StatsColumn::Count => "Count",
-        StatsColumn::Total => "Total",
+        StatsColumn::SelfTime => "Self",
         StatsColumn::Avg => "Avg",
         StatsColumn::Max => "Max",
         StatsColumn::Percent => "%",
@@ -84,7 +84,7 @@ fn column_header(column: StatsColumn, labels: FlameLabels) -> &'static str {
 
 /// The sort the stats table opens with. Every aggregate ships this order
 /// precomputed ([`ScopeAggregate::default_order`]), so serving it costs no sort.
-const DEFAULT_STATS_SORT: (StatsColumn, bool) = (StatsColumn::Total, true);
+const DEFAULT_STATS_SORT: (StatsColumn, bool) = (StatsColumn::SelfTime, true);
 
 /// The stats rows in sorted display order, as indices into `aggregates.stats`.
 /// Holds its own `Arc<ScopeAggregate>` so the table renders consistent rows even
@@ -137,7 +137,7 @@ fn sort_stats(rows: &[StatRow], column: StatsColumn, desc: bool) -> Vec<u32> {
     let primary = |r: &StatRow| match column {
         StatsColumn::Key => r.rank as u64,
         StatsColumn::Count => r.count as u64,
-        StatsColumn::Total | StatsColumn::Percent => bias(r.total_us),
+        StatsColumn::SelfTime | StatsColumn::Percent => bias(r.self_us),
         StatsColumn::Avg => bias(r.avg_us()),
         StatsColumn::Max => bias(r.max_us),
     };
@@ -259,7 +259,7 @@ impl StatsPanel {
     /// over a scrollable, virtualized body of one row per group, themed like the
     /// rest of the view. The rows are aggregated over the same scope as the
     /// flame graph and sorted by the active column; the percent column is each
-    /// group's share of the summed group durations (so it totals 100%).
+    /// group's share of the summed self times (so it totals 100%).
     ///
     /// Header and body cells are laid out from the one [`STATS_COLUMNS`] spec
     /// through [`stats_cell`], so their widths cannot disagree at any window
@@ -347,7 +347,7 @@ impl StatsPanel {
                     let row = order.aggregates.stats[index as usize];
                     let key = graph.str(row.key);
                     let pct =
-                        100.0 * row.total_us as f64 / order.aggregates.grand_total.max(1) as f64;
+                        100.0 * row.self_us as f64 / order.aggregates.grand_total.max(1) as f64;
                     let entity = entity.clone();
                     let is_picked = picked == Some(index);
                     let hover_fill = if is_picked { row_pick_hover } else { row_hover };
@@ -355,7 +355,7 @@ impl StatsPanel {
                         let text: SharedString = match spec.column {
                             StatsColumn::Key => key.to_string().into(),
                             StatsColumn::Count => row.count.to_string().into(),
-                            StatsColumn::Total => format_duration(row.total_us).into(),
+                            StatsColumn::SelfTime => format_duration(row.self_us).into(),
                             StatsColumn::Avg => format_duration(row.avg_us()).into(),
                             StatsColumn::Max => format_duration(row.max_us).into(),
                             StatsColumn::Percent => format!("{pct:.1}%").into(),

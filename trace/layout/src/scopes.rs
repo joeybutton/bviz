@@ -23,7 +23,7 @@ pub struct ScopeAggregate {
     /// Indices into `stats` in the default display order (see
     /// [`default_order`]).
     pub default_order: Vec<u32>,
-    /// Summed `total_us` over `stats` — the denominator of a row's share.
+    /// Summed `self_us` over `stats` — the denominator of a row's share.
     pub grand_total: i64,
 }
 
@@ -67,7 +67,7 @@ impl ScopeAggregate {
     fn from_graph(flame: FlameGraph, mode: FlameMode, window: &TimeSelection) -> ScopeAggregate {
         let stats = stats_from_flame(&flame);
         let default_order = default_order(&stats);
-        let grand_total = stats.iter().map(|r| r.total_us).sum();
+        let grand_total = stats.iter().map(|r| r.self_us).sum();
         let flame = match mode.direction {
             FlameDirection::TopDown => flame,
             FlameDirection::BottomUp => invert(flame),
@@ -155,7 +155,7 @@ mod tests {
     fn resolved_rows(g: &FlameGraph, rows: &[StatRow]) -> Vec<(String, u32, i64, i64)> {
         let mut rows: Vec<_> = rows
             .iter()
-            .map(|r| (g.str(r.key).to_owned(), r.count, r.total_us, r.max_us))
+            .map(|r| (g.str(r.key).to_owned(), r.count, r.self_us, r.max_us))
             .collect();
         rows.sort();
         rows
@@ -197,7 +197,7 @@ mod tests {
         let self_sum: i64 = g.nodes().iter().map(|n| n.self_us).sum();
         assert_eq!(self_sum, root_total);
         // The stats rows are that same self-time partition, grouped by name.
-        let rows_total: i64 = agg.stats.iter().map(|r| r.total_us).sum();
+        let rows_total: i64 = agg.stats.iter().map(|r| r.self_us).sum();
         assert_eq!(rows_total, root_total);
         assert_eq!(agg.grand_total, root_total);
 
@@ -437,7 +437,7 @@ mod tests {
             texts
         };
         assert_eq!(by_rank, by_text);
-        // All rows tie on total, so the default order is pure key order:
+        // All rows tie on self time, so the default order is pure key order:
         // strictly ascending by text.
         let ordered: Vec<String> = agg
             .default_order
@@ -450,7 +450,7 @@ mod tests {
     }
 
     #[test]
-    fn default_order_is_total_desc_then_key_text() {
+    fn default_order_is_self_desc_then_key_text() {
         let p = full_profile();
         let t = p.threads();
         let selections: Vec<Box<dyn Fn(usize) -> bool + Sync>> = vec![
@@ -470,13 +470,13 @@ mod tests {
                 .iter()
                 .map(|&i| {
                     let r = &agg.stats[i as usize];
-                    (-r.total_us, agg.flame.str(r.key))
+                    (-r.self_us, agg.flame.str(r.key))
                 })
                 .collect();
             assert!(keys.windows(2).all(|w| w[0] <= w[1]), "{keys:?}");
             assert_eq!(
                 agg.grand_total,
-                agg.stats.iter().map(|r| r.total_us).sum::<i64>()
+                agg.stats.iter().map(|r| r.self_us).sum::<i64>()
             );
         }
     }
