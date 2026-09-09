@@ -1573,6 +1573,9 @@ fn paint_tooltip(
             format_duration(slice.dur_us)
         ),
     ];
+    if let Some(self_us) = hovered.self_us() {
+        lines.push(format!("self: {}", format_duration(self_us)));
+    }
     if let Some(target) = profile.opt_str(detail.target) {
         lines.push(format!("target: {target}"));
     }

@@ -46,6 +46,7 @@ pub(crate) struct HoveredSlice {
     profile: Arc<Profile>,
     slice: Slice,
     detail: SliceDetail,
+    self_us: Option<i64>,
 }
 
 impl HoveredSlice {
@@ -59,6 +60,14 @@ impl HoveredSlice {
 
     pub(crate) fn detail(&self) -> &SliceDetail {
         &self.detail
+    }
+
+    /// The part of the span's duration its directly nested spans leave
+    /// unaccounted for, floored at zero because a child may overrun its parent
+    /// and siblings may overlap. `None` for a span nothing nests in, whose self
+    /// time is its whole duration.
+    pub(crate) fn self_us(&self) -> Option<i64> {
+        self.self_us
     }
 }
 
@@ -102,10 +111,23 @@ impl SliceDrawCache {
             .rev()
             .find(|v| x >= v.x && x < v.x + v.w && y >= v.y && y < v.y + v.h)?;
         let track = &self.profile.threads()[vs.track];
+        let slices = self.profile.slices(track);
+        let slice = slices[vs.slice];
+        // Lane order puts a slice's descendants in the run that follows it, so
+        // the entries one level deeper in that run are its direct children.
+        let mut nested_us: Option<i64> = None;
+        for child in slices[vs.slice + 1..]
+            .iter()
+            .take_while(|s| s.depth > slice.depth)
+            .filter(|s| s.depth == slice.depth + 1)
+        {
+            *nested_us.get_or_insert(0) += child.dur_us;
+        }
         Some(HoveredSlice {
             profile: self.profile.clone(),
-            slice: self.profile.slices(track)[vs.slice],
+            slice,
             detail: self.profile.details(track)[vs.slice],
+            self_us: nested_us.map(|nested| (slice.dur_us - nested).max(0)),
         })
     }
 }
@@ -1616,6 +1638,56 @@ mod tests {
         let track = &profile.threads()[over.track];
         let drawn = profile.slices(track)[over.slice];
         assert_eq!(hit.profile().str(hit.slice().name), profile.str(drawn.name));
+    }
+
+    /// The self time a hover reports for the slice named `name`, hit at the
+    /// center of the box drawn for it.
+    fn hovered_self_us(profile: &Arc<Profile>, cache: &SliceDrawCache, name: &str) -> Option<i64> {
+        let vs = cache
+            .slices
+            .iter()
+            .find(|vs| {
+                let track = &profile.threads()[vs.track];
+                profile.str(profile.slices(track)[vs.slice].name) == name
+            })
+            .unwrap_or_else(|| panic!("{name} is drawn"));
+        let hit = cache
+            .hit(vs.x + vs.w / 2.0, vs.y + vs.h / 2.0)
+            .expect("the slice at its own center");
+        assert_eq!(hit.profile().str(hit.slice().name), name);
+        hit.self_us()
+    }
+
+    #[test]
+    fn a_hit_reports_what_its_nested_spans_leave_unaccounted() {
+        // A span, a child of it, a child of that, and a second child of the
+        // span.
+        let profile = profile_of_events(thread_events(
+            TEST_TIDS[0],
+            [(0, 1000), (100, 600), (200, 100), (800, 100)],
+        ));
+        let cache = draw_cache(&profile);
+        let self_us = |i| hovered_self_us(&profile, &cache, &format!("t{}s{i}", TEST_TIDS[0]));
+        // Only the two direct children count against the outer span; the
+        // grandchild counts against the child it nests in.
+        assert_eq!(self_us(0), Some(1000 - 600 - 100));
+        assert_eq!(self_us(1), Some(600 - 100));
+        // A span nothing nests in accounts for its whole duration.
+        assert_eq!(self_us(2), None);
+        assert_eq!(self_us(3), None);
+    }
+
+    #[test]
+    fn a_hit_floors_self_time_at_zero_when_nested_spans_overrun() {
+        // Two children of one span, overlapping each other so their durations
+        // sum past the span that encloses them.
+        let profile = profile_of_events(thread_events(
+            TEST_TIDS[0],
+            [(0, 1000), (100, 300), (200, 799)],
+        ));
+        let cache = draw_cache(&profile);
+        let outer = format!("t{}s0", TEST_TIDS[0]);
+        assert_eq!(hovered_self_us(&profile, &cache, &outer), Some(0));
     }
 
     /// A selection of the given regions, built the way a sequence of union drags
