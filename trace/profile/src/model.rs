@@ -238,7 +238,7 @@ pub enum Workload {
     /// RPC, credential acquisition, and repository fetching.
     RemoteCache,
     /// Scheduling and contention: resource locks, throttle semaphores, queuing,
-    /// and thread waits.
+    /// thread waits, and the gaps between a remote spawn's reported phases.
     Scheduling,
     /// Skyframe graph evaluation and its action-execution envelopes.
     Skyframe,
@@ -277,9 +277,7 @@ pub fn span_role(category: &str, name: &str) -> SpanRole {
         "Starlark repository function call" => starlark_repository_role(name),
         "Conflict checking" => conflict_checking_role(name),
         "remote action execution" => remote_execution_role(name),
-        "Remote execution setup"
-        | "Remote execution upload time"
-        | "action dependency checking" => remote_cache_role(name),
+        "Remote execution upload time" | "action dependency checking" => remote_cache_role(name),
 
         "action processing"
         | "local action execution"
@@ -331,6 +329,7 @@ pub fn span_role(category: &str, name: &str) -> SpanRole {
         | "Fetching repository" => (RemoteCache, false),
 
         "Remote execution queuing time"
+        | "Remote execution setup"
         | "thread wait"
         | "action resource lock"
         | "Acquiring dynamic execution output lock"
@@ -906,18 +905,29 @@ mod tests {
             role("calling credential helper", "calling credential helper"),
             overhead(Workload::RemoteCache)
         );
-        // The throttle wait splits away from the transfer it gates.
+        // Every span the remote-execution setup category carries is the action
+        // waiting: on the local throttle, or on the executor to reach the next
+        // phase of the spawn.
         assert_eq!(
             role("Remote execution setup", "acquiring semaphore"),
             overhead(Workload::Scheduling)
         );
         assert_eq!(
-            role("Remote execution upload time", "acquiring semaphore"),
+            role("Remote execution setup", "pre-fetch"),
             overhead(Workload::Scheduling)
         );
         assert_eq!(
-            role("Remote execution setup", "pre-fetch"),
-            overhead(Workload::RemoteCache)
+            role("Remote execution setup", "pre-execute"),
+            overhead(Workload::Scheduling)
+        );
+        assert_eq!(
+            role("Remote execution setup", "pre-upload"),
+            overhead(Workload::Scheduling)
+        );
+        // The throttle wait splits away from the transfer it gates.
+        assert_eq!(
+            role("Remote execution upload time", "acquiring semaphore"),
+            overhead(Workload::Scheduling)
         );
         assert_eq!(
             role("Remote execution upload time", "upload outputs"),
