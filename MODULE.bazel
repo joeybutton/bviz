@@ -56,9 +56,12 @@ crate.annotation(
 )
 
 # Load libfontconfig at runtime (dlopen) instead of linking it via pkg-config.
-crate.annotation(
+# On Apple platforms zed-font-kit draws its fonts from Core Text and never binds
+# fontconfig, so the feature is only meaningful for Linux.
+crate.annotation_select(
     crate = "zed-font-kit",
     crate_features = ["source-fontconfig-dlopen"],
+    triples = LINUX_TRIPLES,
 )
 
 # Fixes and startup tuning for gpui's Linux backend:
@@ -136,13 +139,15 @@ crate.annotation(
 # wgpu's `vulkan` feature does not propagate to wgpu-core/wgpu-hal through wgpu's
 # platform shim under rules_rs resolution, so no GPU backend gets compiled and
 # surface creation fails. Enable the Vulkan backend on the crates that gate it.
-crate.annotation(
+crate.annotation_select(
     crate = "wgpu-core",
     crate_features = ["vulkan"],
+    triples = LINUX_TRIPLES,
 )
-crate.annotation(
+crate.annotation_select(
     crate = "wgpu-hal",
     crate_features = ["vulkan"],
+    triples = LINUX_TRIPLES,
 )
 
 # objc-sys locates its ObjFW compatibility headers through a build-time
