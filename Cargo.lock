@@ -908,6 +908,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "bviz_scene_header_gen"
+version = "0.1.0"
+dependencies = [
+ "cbindgen",
+]
+
+[[package]]
 name = "bviz_terminal"
 version = "0.1.0"
 dependencies = [

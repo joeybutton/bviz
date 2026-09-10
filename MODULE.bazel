@@ -118,6 +118,58 @@ crate.annotation(
     ],
 )
 
+# gpui_macos's build script generates the C header its Metal shaders share with
+# Rust by running cbindgen over gpui's sources. rules_rs does not surface a git
+# crate's build-dependencies, so //tools/scene_header generates the header and the
+# build script takes its path from GPUI_SCENE_HEADER. The runtime_shaders feature
+# stitches that header into the shader source for the app to compile at run time;
+# the other path shells out to `xcrun metal`, which only macOS has.
+#
+# rustc compiles against an absolute CARGO_MANIFEST_DIR, and gpui retains that
+# value in GPUI_MANIFEST_DIR, which bakes the exec root into every build of the
+# crate. Point it at the manifest's path within gpui's source tree so the
+# compiled output stays independent of where the build ran.
+crate.annotation(
+    additive_build_file_content = """filegroup(
+    name = "scene_src",
+    srcs = ["src/scene.rs"],
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "shader_type_srcs",
+    srcs = glob(["src/**/*.rs"]),
+    visibility = ["//visibility:public"],
+)""",
+    crate = "gpui",
+    extra_aliased_targets = {
+        "gpui_scene_src": "scene_src",
+        "gpui_shader_type_srcs": "shader_type_srcs",
+    },
+    rustc_env = {"CARGO_MANIFEST_DIR": "crates/gpui"},
+)
+crate.annotation(
+    additive_build_file_content = """filegroup(
+    name = "metal_renderer_src",
+    srcs = ["src/metal_renderer.rs"],
+    visibility = ["//visibility:public"],
+)""",
+    build_script_data = ["//tools/scene_header:scene_h"],
+    # buildifier: disable=canonical-repository
+    # Location expressions resolve in the crate repository, which has no apparent
+    # name for bviz's own.
+    build_script_env = {"GPUI_SCENE_HEADER": "$(execpath @@//tools/scene_header:scene_h)"},
+    crate = "gpui_macos",
+    extra_aliased_targets = {"gpui_macos_metal_renderer_src": "metal_renderer_src"},
+    patch_args = ["-p1"],
+    patches = ["//patches/gpui_macos:gpui_macos-prebuilt-scene-header.patch"],
+)
+crate.annotation_select(
+    crate = "gpui_macos",
+    crate_features = ["runtime_shaders"],
+    triples = DARWIN_TRIPLES,
+)
+
 # Link the BCR system libraries (aliased under //third_party) into the -sys crates
 # that bind them.
 #
@@ -138,15 +190,6 @@ crate.annotation(
         "//third_party:wayland_client",
         "//third_party:wayland_cursor",
     ],
-)
-
-# rustc compiles against an absolute CARGO_MANIFEST_DIR, and gpui retains that
-# value in GPUI_MANIFEST_DIR, which bakes the exec root into every build of the
-# crate. Point it at the manifest's path within gpui's source tree so the
-# compiled output stays independent of where the build ran.
-crate.annotation(
-    crate = "gpui",
-    rustc_env = {"CARGO_MANIFEST_DIR": "crates/gpui"},
 )
 
 # rav1e records its build environment through the built crate, whose RUSTC entry

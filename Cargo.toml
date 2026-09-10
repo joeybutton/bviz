@@ -5,6 +5,7 @@ members = [
     "cli",
     "graph/layout",
     "terminal",
+    "tools/scene_header",
     "trace/layout",
     "trace/profile",
     "ui/assets",

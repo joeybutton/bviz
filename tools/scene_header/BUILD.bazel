@@ -1,0 +1,40 @@
+load("@rules_rs//rs:rust_binary.bzl", "rust_binary")
+
+# The exported-type list is transcribed from gpui_macos's build script, so the
+# generator carries that crate's terms rather than bviz's own.
+filegroup(
+    name = "scene_header_gen_src",
+    srcs = ["scene_header_gen.rs"],
+    package_metadata = ["//LICENSES:gpui"],
+)
+
+rust_binary(
+    name = "scene_header_gen",
+    srcs = [":scene_header_gen_src"],
+    crate_name = "bviz_scene_header_gen",
+    deps = ["@crates//:cbindgen"],
+)
+
+# cbindgen opens the modules each root declares, so gpui's whole source tree is an
+# input while only the roots holding shader types are named.
+genrule(
+    name = "scene_h",
+    srcs = [
+        "@crates//:gpui_macos_metal_renderer_src",
+        "@crates//:gpui_scene_src",
+        "@crates//:gpui_shader_type_srcs",
+    ],
+    outs = ["scene.h"],
+    cmd = """gpui_src="$$(dirname $(execpath @crates//:gpui_scene_src))"
+$(execpath :scene_header_gen) $@ \\
+    $$gpui_src/scene.rs \\
+    $$gpui_src/geometry.rs \\
+    $$gpui_src/color.rs \\
+    $$gpui_src/window.rs \\
+    $$gpui_src/platform.rs \\
+    $(execpath @crates//:gpui_macos_metal_renderer_src)
+""",
+    tools = [":scene_header_gen"],
+    # gpui_macos's build script consumes this from its own generated repository.
+    visibility = ["//visibility:public"],
+)

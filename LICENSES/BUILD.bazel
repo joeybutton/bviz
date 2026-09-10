@@ -12,7 +12,9 @@ package_metadata(
     purl = "pkg:github/zed-industries/zed@v1.6.3",
     visibility = [
         "//patches/gpui_linux:__pkg__",
+        "//patches/gpui_macos:__pkg__",
         "//patches/media:__pkg__",
+        "//tools/scene_header:__pkg__",
         "//ui/components:__pkg__",
         "//ui/shell:__pkg__",
     ],

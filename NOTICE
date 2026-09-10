@@ -29,13 +29,16 @@ Phosphor Icons 2.0.8 — MIT
 
 ## Derived source
 
-Two source files were written from Apache-2.0 examples in the gpui crate of
-the Zed editor (https://github.com/zed-industries/zed, tag v1.6.3,
-crates/gpui), and both have been modified. The upstream distribution carries
-no NOTICE file of its own.
+Three source files were written from Apache-2.0 source in the Zed editor
+(https://github.com/zed-industries/zed, tag v1.6.3), and all have been
+modified. The upstream distribution carries no NOTICE file of its own.
 
-    ui/components/src/text_input.rs   from examples/input.rs
-    ui/shell/src/chrome.rs            from examples/window_shadow.rs
+    ui/components/src/text_input.rs
+        from crates/gpui/examples/input.rs
+    ui/shell/src/chrome.rs
+        from crates/gpui/examples/window_shadow.rs
+    tools/scene_header/scene_header_gen.rs
+        from crates/gpui_macos/build.rs
 
 Apache License 2.0: //LICENSES:gpui
 
@@ -65,9 +68,9 @@ That patch carries some fifty lines of Eclipse Public License 2.0 source and
 rewrites them, so the patch is itself available under that licence.
 
 The patches against the Zed crates carry Apache-2.0 lines from the same Zed
-tree the derived files above come from, under //LICENSES:gpui. The xkbcommon patch
-carries a module declaration, a cfg attribute and six lines around them — too
-little to attribute, and it is the one patch with no declaration.
+tree the derived files above come from, under //LICENSES:gpui. The xkbcommon
+patch carries a module declaration, a cfg attribute and six lines around them
+— too little to attribute, and it is the one patch with no declaration.
 
 ## Colour values
 
