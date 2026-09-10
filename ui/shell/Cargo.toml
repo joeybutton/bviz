@@ -9,7 +9,12 @@ path = "src/lib.rs"
 
 [dependencies]
 gpui = { workspace = true }
-gpui_platform = { workspace = true, features = ["wayland"] }
 bviz_ui_assets = { path = "../assets" }
 bviz_ui_components = { path = "../components" }
 bviz_ui_theme = { path = "../theme" }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+gpui_platform = { workspace = true, features = ["wayland"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+gpui_platform = { workspace = true, features = ["font-kit"] }
