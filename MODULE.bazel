@@ -162,6 +162,15 @@ crate.annotation(
     crate = "rav1e",
 )
 
+# media generates its CoreMedia declarations with bindgen, which the patch
+# removes; turning the build script off keeps bindgen out of the build.
+crate.annotation(
+    crate = "media",
+    gen_build_script = "off",
+    patch_args = ["-p1"],
+    patches = ["//patches/media:media-drop-the-generated-core-media-bindings.patch"],
+)
+
 # freetype-sys compiles in C++ mode, so the cc crate would link GNU libstdc++.
 # The hermetic toolchain ships libc++ instead, so emit no explicit C++ stdlib and
 # let freetype's symbols resolve against the toolchain's libc++.
