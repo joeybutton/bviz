@@ -3,7 +3,7 @@ module(
     version = "0.0.0",
 )
 
-bazel_dep(name = "llvm", version = "0.7.0")
+bazel_dep(name = "llvm", version = "0.8.9")
 bazel_dep(name = "package_metadata", version = "0.0.13")
 bazel_dep(name = "platforms", version = "1.0.0")
 bazel_dep(name = "protobuf", version = "35.0", repo_name = "com_google_protobuf")
@@ -25,6 +25,40 @@ register_toolchains("@default_rust_toolchains//...")
 
 # Link Rust binaries with llvm/lld rather than the autodetected system cc.
 register_toolchains("@llvm//toolchain:all")
+
+# The macOS sysroot the llvm module fetches carries a small default set of
+# frameworks, which this tag replaces wholesale; the defaults are therefore
+# repeated alongside the ones gpui's macOS backend and the media crate bind.
+# ColorSync, FontServices and ImageIO come from the sysroot itself:
+# ApplicationServices symlinks into them, and Bazel refuses to act on a dangling
+# symlink. CFNetwork, CoreImage and CoreServices are re-exported by stub
+# libraries lld has to resolve; OpenGL is what the cgl crate binds.
+osx = use_extension("@llvm//extensions:osx.bzl", "osx")
+osx.frameworks(names = [
+    "AppKit",
+    "ApplicationServices",
+    "Carbon",
+    "CFNetwork",
+    "ColorSync",
+    "CoreFoundation",
+    "CoreGraphics",
+    "CoreImage",
+    "CoreMedia",
+    "CoreServices",
+    "CoreText",
+    "CoreVideo",
+    "FontServices",
+    "Foundation",
+    "ImageIO",
+    "Kernel",
+    "Metal",
+    "MetalPerformanceShaders",
+    "OSLog",
+    "OpenGL",
+    "QuartzCore",
+    "Security",
+    "SystemConfiguration",
+])
 
 DARWIN_TRIPLES = [
     "aarch64-apple-darwin",
