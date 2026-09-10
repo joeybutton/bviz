@@ -377,7 +377,7 @@ impl TimelinePanel {
         let content_focus = cx.focus_handle();
         content_focus.focus(window, cx);
         cx.bind_keys([
-            KeyBinding::new("ctrl-a", SelectAllTracks, Some("TraceContent")),
+            KeyBinding::new("secondary-a", SelectAllTracks, Some("TraceContent")),
             KeyBinding::new("escape", ClearTimeSelection, Some("TraceContent")),
         ]);
         let parent = cx.entity().downgrade();
