@@ -26,9 +26,16 @@ register_toolchains("@default_rust_toolchains//...")
 # Link Rust binaries with llvm/lld rather than the autodetected system cc.
 register_toolchains("@llvm//toolchain:all")
 
-PLATFORM_TRIPLES = [
+DARWIN_TRIPLES = [
+    "aarch64-apple-darwin",
+    "x86_64-apple-darwin",
+]
+
+LINUX_TRIPLES = [
     "x86_64-unknown-linux-gnu",
 ]
+
+PLATFORM_TRIPLES = DARWIN_TRIPLES + LINUX_TRIPLES
 
 crate = use_extension("@rules_rs//rs:extensions.bzl", "crate")
 crate.from_cargo(
@@ -136,6 +143,16 @@ crate.annotation(
 crate.annotation(
     crate = "wgpu-hal",
     crate_features = ["vulkan"],
+)
+
+# objc-sys locates its ObjFW compatibility headers through a build-time
+# env!("CARGO_MANIFEST_DIR"), which bakes the exec root into the compiled build
+# script. Only the ObjFW runtime reads those headers and this build targets
+# Apple's, so a relative manifest dir leaves the output independent of where the
+# build ran.
+crate.annotation(
+    crate = "objc-sys",
+    rustc_env = {"CARGO_MANIFEST_DIR": "."},
 )
 crate.annotation(
     crate = "protoc-gen-prost",
