@@ -1,0 +1,56 @@
+name: Nightly
+
+on:
+  schedule:
+    # Off the hour: scheduled runs are delayed most at the top of the hour.
+    - cron: '23 4 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v7
+      - uses: bazel-contrib/setup-bazel@0.19.0
+        with:
+          bazelisk-cache: true
+          disk-cache: ${{ github.workflow }}
+          repository-cache: true
+
+      # --keep_going so one platform's failure still yields the others' tarballs.
+      - run: bazel build -c opt --keep_going //dist
+
+      # GitHub implies success() on an `if:` that names no status function, so
+      # without !cancelled() a failed build would skip the uploads that report
+      # which platform is missing.
+      - uses: actions/upload-artifact@v7
+        if: ${{ !cancelled() }}
+        with:
+          path: bazel-bin/dist/bviz-linux-x86_64.tar.gz
+          archive: false
+          retention-days: 14
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@v7
+        if: ${{ !cancelled() }}
+        with:
+          path: bazel-bin/dist/bviz-macos-arm64.tar.gz
+          archive: false
+          retention-days: 14
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@v7
+        if: ${{ !cancelled() }}
+        with:
+          path: bazel-bin/dist/bviz-macos-x86_64.tar.gz
+          archive: false
+          retention-days: 14
+          if-no-files-found: error
