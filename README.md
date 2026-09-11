@@ -20,6 +20,14 @@ that viewer alone.
 
 All are gpui desktop applications, and need Wayland and a GPU.
 
+## Nightly builds
+
+Every night a binary is built for x86_64 Linux, arm64 macOS and x86_64
+macOS, and attached to the run as an artifact. Take one from the
+[Nightly workflow](../../actions/workflows/nightly.yaml), whose "Run
+workflow" button also builds the set on demand. Each artifact is a
+`.tar.gz` holding the `bviz` executable.
+
 ## Setup
 
 The build targets x86_64 Linux.
