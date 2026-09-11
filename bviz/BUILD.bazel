@@ -4,7 +4,10 @@ rust_binary(
     name = "bviz",
     srcs = ["src/main.rs"],
     crate_name = "bviz",
-    visibility = ["//:__pkg__"],
+    visibility = [
+        "//:__pkg__",
+        "//dist:__pkg__",
+    ],
     deps = [
         "//alloc",
         "//cli",

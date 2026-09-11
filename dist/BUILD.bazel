@@ -1,0 +1,40 @@
+load("@bazel_lib//lib:transitions.bzl", "platform_transition_filegroup")
+load("@tar.bzl", "tar")
+
+# Fixed entry timestamp, so an archive's bytes depend only on its contents.
+MTIME = 1672560000
+
+TARGET_PLATFORMS = {
+    "linux-x86_64": "//platforms:linux_x86_64",
+    "macos-arm64": "//platforms:macos_arm64",
+    "macos-x86_64": "//platforms:macos_x86_64",
+}
+
+[
+    platform_transition_filegroup(
+        name = "bviz_{}".format(suffix),
+        srcs = ["//bviz"],
+        target_platform = platform,
+    )
+    for suffix, platform in TARGET_PLATFORMS.items()
+]
+
+# Only the sources carry the platform transition: these rules stay in the
+# baseline configuration, so each archive lands at a fixed bazel-bin/dist path
+# that the nightly workflow can name.
+[
+    tar(
+        name = "bviz-{}".format(suffix),
+        srcs = [":bviz_{}".format(suffix)],
+        compress = "gzip",
+        mtree = [
+            "bviz uid=0 gid=0 time={} mode=0755 type=file content=$(execpath :bviz_{})".format(MTIME, suffix),
+        ],
+    )
+    for suffix in TARGET_PLATFORMS
+]
+
+filegroup(
+    name = "dist",
+    srcs = [":bviz-{}".format(suffix) for suffix in TARGET_PLATFORMS],
+)

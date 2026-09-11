@@ -3,12 +3,14 @@ module(
     version = "0.0.0",
 )
 
+bazel_dep(name = "bazel_lib", version = "3.2.2")
 bazel_dep(name = "llvm", version = "0.8.9")
 bazel_dep(name = "package_metadata", version = "0.0.13")
 bazel_dep(name = "platforms", version = "1.0.0")
 bazel_dep(name = "protobuf", version = "35.0", repo_name = "com_google_protobuf")
 bazel_dep(name = "rules_proto", version = "7.1.0")
 bazel_dep(name = "rules_rs", version = "0.0.110")
+bazel_dep(name = "tar.bzl", version = "0.10.4")
 
 # System libraries for gpui's Wayland backend, provided via the BCR.
 bazel_dep(name = "wayland", version = "1.24.0.bcr.1")
