@@ -42,12 +42,6 @@ impl Rect {
     /// Whether a view this size could hold the whole of the polyline `points`,
     /// wherever it happens to be panned.
     ///
-    /// A connector is read by following it from one end to the other. One
-    /// reaching further than the view can show is followed to the edge of the
-    /// window and no further: what it draws is a line leaving for somewhere the
-    /// reader cannot see, and a drawing zoomed far into a dense graph is mostly
-    /// those, laid across it in a grid that hides the boxes behind it.
-    ///
     /// The test is against the view's extent rather than its position, so what a
     /// zoom admits does not then come and go as the reader pans across it.
     pub(crate) fn could_hold(&self, points: &[(f64, f64)]) -> bool {

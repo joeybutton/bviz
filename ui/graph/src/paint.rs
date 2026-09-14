@@ -12,6 +12,7 @@ use gpui::{
     App, BorderStyle, Bounds, Entity, Hsla, PathBuilder, Pixels, Point, Rgba, TextAlign, Window,
     point, px, quad, size,
 };
+use std::collections::HashSet;
 use std::rc::Rc;
 
 /// Box label font size in layout pixels.
@@ -207,8 +208,9 @@ pub(crate) fn canvas_body(
             .collect();
         let edges = morph.as_ref().map_or(1.0, |m| m.connectors);
         if edges > 0.0 {
+            let on_screen: HashSet<Id> = drawn.iter().map(|(b, _)| b.id).collect();
             for c in &g.connectors {
-                if drawn_route(c, &visible) {
+                if drawn_route(c, &visible, &on_screen) {
                     let marked = marks.marks_edge((c.from, c.to));
                     let alpha = edges * marks.strength(marked);
                     paint_lanes(c, marked, alpha, bounds, camera, &scene.palette, window);
@@ -241,16 +243,23 @@ pub(crate) fn canvas_body(
     }
 }
 
-/// Whether a frame draws the route `c`: where it crosses the view, and the view
-/// could hold the whole of it.
+/// Whether a frame draws the route `c`: it crosses the view, and either the
+/// view could hold the whole of it or `on_screen` — the boxes this frame drew —
+/// holds a box at one of its ends. A route anchored to a box in sight is worth
+/// following wherever its far end lies, and how far it reaches says nothing
+/// about that: a connector meets its boxes at their borders, and a box wider
+/// than the view is ordinary at a deep zoom. Left out is the route with neither
+/// end in sight, which only crosses the view on its way between two places the
+/// reader cannot see.
 ///
-/// What a marking picks out has no bearing on it. Marking a box picks out every
-/// route that meets it, which in a dense graph reaches most of the drawing, so
-/// exempting those would lay back over the view exactly the grid the reach test
-/// is here to take off it — and would do so under the pointer, where the reader
-/// is trying to read.
-fn drawn_route(c: &Connector, visible: &Rect) -> bool {
-    visible.could_hold(&c.points) && visible.crossed_by(&c.points)
+/// What a marking picks out has no bearing on it. A mark reaches routes whose
+/// boxes are both off screen, and exempting those would lay back over the view
+/// exactly the grid the reach test is here to take off it.
+fn drawn_route(c: &Connector, visible: &Rect, on_screen: &HashSet<Id>) -> bool {
+    visible.crossed_by(&c.points)
+        && (visible.could_hold(&c.points)
+            || on_screen.contains(&c.from)
+            || on_screen.contains(&c.to))
 }
 
 /// `c` at `alpha` of its own opacity, by which a box takes its whole appearance
@@ -863,34 +872,81 @@ fn arrowhead(tip: Point<Pixels>, dir: (f32, f32), zoom: f32) -> [Point<Pixels>; 
 
 #[cfg(test)]
 mod tests {
+    /// The view the route tests cull against.
+    const VIEW: Rect = Rect {
+        x: 0.0,
+        y: 0.0,
+        w: 100.0,
+        h: 100.0,
+    };
+
+    /// A route along `points`, running between the boxes `Id(0)` and `Id(1)`.
+    fn route(points: Vec<(f64, f64)>) -> Connector {
+        Connector {
+            points,
+            kinds: vec![EdgeKind::Query],
+            from: Id(0),
+            to: Id(1),
+        }
+    }
+
     /// A route the view could not show whole is left out, so a zoom deep into a
     /// dense graph is not laid over with routes leaving for somewhere the reader
     /// cannot see.
     #[test]
     fn a_route_too_long_to_follow_is_left_out() {
-        let view = Rect {
-            x: 0.0,
-            y: 0.0,
-            w: 100.0,
-            h: 100.0,
-        };
-        let route = |points: Vec<(f64, f64)>| Connector {
-            points,
-            kinds: vec![EdgeKind::Query],
-            from: Id(0),
-            to: Id(1),
-        };
+        let none_drawn = HashSet::new();
 
         let local = route(vec![(10.0, 10.0), (40.0, 40.0)]);
-        assert!(drawn_route(&local, &view));
+        assert!(drawn_route(&local, &VIEW, &none_drawn));
 
         // Crosses the view, but runs far past what it can show.
         let far = route(vec![(-5000.0, 50.0), (5000.0, 50.0)]);
-        assert!(!drawn_route(&far, &view));
+        assert!(!drawn_route(&far, &VIEW, &none_drawn));
 
         // Short enough to follow, but nowhere near the view.
         let elsewhere = route(vec![(9000.0, 9000.0), (9030.0, 9030.0)]);
-        assert!(!drawn_route(&elsewhere, &view));
+        assert!(!drawn_route(&elsewhere, &VIEW, &none_drawn));
+    }
+
+    /// A box on screen at either end carries a route past the reach test, which
+    /// alone would leave it out. A zoom that shrinks the view below the route's
+    /// reach must not take the route with it while the box it leaves is still
+    /// there to be read.
+    #[test]
+    fn a_route_is_drawn_from_a_box_on_screen_however_far_it_reaches() {
+        let far = route(vec![(-5000.0, 50.0), (5000.0, 50.0)]);
+        for anchored in [
+            HashSet::from([Id(0)]),
+            HashSet::from([Id(1)]),
+            HashSet::from([Id(0), Id(1)]),
+        ] {
+            assert!(drawn_route(&far, &VIEW, &anchored));
+        }
+        assert!(!drawn_route(&far, &VIEW, &HashSet::new()));
+    }
+
+    /// The exemption spares a route the reach test, not the view: one that never
+    /// touches the view has nothing to draw there whoever its boxes are.
+    #[test]
+    fn a_route_missing_the_view_is_left_out_though_its_boxes_are_on_screen() {
+        let both = HashSet::from([Id(0), Id(1)]);
+        let past = route(vec![(-5000.0, 9000.0), (5000.0, 9000.0)]);
+        assert!(!drawn_route(&past, &VIEW, &both));
+    }
+
+    /// An orthogonal route can detour well outside the boxes it joins, so its
+    /// extent overruns the view even with both ends inside it.
+    #[test]
+    fn a_route_that_bends_outside_the_view_is_drawn_from_a_box_on_screen() {
+        let both = HashSet::from([Id(0), Id(1)]);
+        let detour = route(vec![
+            (10.0, 10.0),
+            (10.0, 5000.0),
+            (90.0, 5000.0),
+            (90.0, 90.0),
+        ]);
+        assert!(drawn_route(&detour, &VIEW, &both));
     }
 
     use super::*;
