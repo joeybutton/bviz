@@ -390,11 +390,11 @@ impl Wiring<'_> {
     }
 
     /// The leaf node `artifact_id` wires from: a generated input through its
-    /// producing artifact node, a source through a deduped source node, applying
-    /// the `external_sources` filter. `None` for a dropped input (external when
-    /// `external_sources` is off, or generated outside the queried scope, which
-    /// has no producer node). The result depends only on the artifact, so it is
-    /// memoized across the many consumers a shared input feeds.
+    /// producing artifact node, a source through a deduped source node. `None`
+    /// for a dropped input: an external source when `external_sources` is off,
+    /// or a generated input produced outside the queried scope, which has no
+    /// producer node. The result depends only on the artifact, so it is memoized
+    /// across the many consumers a shared input feeds.
     fn resolve_member(
         &mut self,
         artifact_id: ArtifactId,
@@ -416,12 +416,12 @@ impl Wiring<'_> {
         names: &mut Names,
     ) -> Option<Id> {
         let path = self.paths.full_path(artifact_id);
-        if !self.external_sources && is_external(&path) {
-            return None;
-        }
         if is_generated(&path) {
             // A generated input with no in-scope producer has no node to connect from.
             return self.producer_node_id.get(&artifact_id).copied();
+        }
+        if !self.external_sources && is_external_source(&path) {
+            return None;
         }
         let dir = path.rsplit_once('/').map(|(d, _)| d).unwrap_or("");
         let node_id = match self.hierarchy.enclosing_package(dir) {
@@ -532,9 +532,8 @@ fn is_generated(path: &str) -> bool {
     generated_suffix(path).is_some()
 }
 
-fn is_external(path: &str) -> bool {
+fn is_external_source(path: &str) -> bool {
     path.starts_with("external/")
-        || generated_suffix(path).is_some_and(|rest| rest.starts_with("external/"))
 }
 
 #[cfg(test)]
@@ -679,7 +678,7 @@ mod tests {
     }
 
     #[test]
-    fn external_members_are_dropped() {
+    fn external_source_members_are_dropped() {
         let (a1, f1) = source_artifact(1, "local.c");
         let (a2, f2) = source_artifact(2, "external/repo/dep.c");
         let container = ActionGraphContainer {
@@ -696,7 +695,7 @@ mod tests {
         // The local member flattens onto both consumers.
         assert!(edges.contains(&("source1", "action0")));
         assert!(edges.contains(&("source1", "action1")));
-        // The external member never becomes a node or edge.
+        // The external source never becomes a node or edge.
         assert!(!graph.nodes.iter().any(|n| names.resolve(n.id) == "source2"));
     }
 
@@ -730,6 +729,34 @@ mod tests {
         assert!(edges.contains(&("action0", "artifact1")));
         assert!(edges.contains(&("artifact1", "action1")));
         assert!(edges.contains(&("artifact1", "action2")));
+    }
+
+    #[test]
+    fn external_generated_member_flattens_through_its_producer() {
+        let (artifact, gen_frags) = generated_artifact(1, 100, "external/repo/lib.so");
+        let producer = Action {
+            target_id: 9,
+            mnemonic: "Produce".to_string(),
+            configuration_id: 1,
+            output_ids: vec![1],
+            ..Default::default()
+        };
+        let container = ActionGraphContainer {
+            artifacts: vec![artifact],
+            path_fragments: gen_frags,
+            dep_set_of_files: vec![dep_set(10, &[1], &[])],
+            actions: vec![producer, action(1, "Link", &[10])],
+            ..Default::default()
+        };
+
+        let (graph, names) = build(&[container], false);
+
+        let edges = edges(&graph, &names);
+        // An output of an external repository's action is in scope through its
+        // producer, so the `external_sources` filter leaves it wired. Producer is
+        // action0; the consumer action1.
+        assert!(edges.contains(&("action0", "artifact1")));
+        assert!(edges.contains(&("artifact1", "action1")));
     }
 
     #[test]
