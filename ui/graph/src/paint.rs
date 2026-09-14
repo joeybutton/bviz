@@ -41,6 +41,12 @@ const ARROW_OVERDRAW: f64 = 1.0;
 /// Stroke width (pre-zoom px) of the line a connector's provenance is drawn in.
 const CONNECTOR_WIDTH: f32 = 1.5;
 
+/// Screen width the thinnest connector line is never drawn below. A band
+/// narrower than a pixel can pass between the rasterizer's samples entirely, so
+/// whether the line is drawn at all turns on where the pan happens to leave it;
+/// a pixel across, it meets a sample wherever it falls.
+const CONNECTOR_FLOOR: f32 = 1.0;
+
 /// Stroke width (pre-zoom px) of that line where a marking picks the connector out.
 /// A doubling is the smallest step that reads as a heavier line rather than as
 /// an artifact of antialiasing.
@@ -817,7 +823,7 @@ fn paint_connector(
         true => MARKED_WIDTH,
         false => CONNECTOR_WIDTH,
     };
-    let mut line = PathBuilder::stroke(px(width * zoom));
+    let mut line = PathBuilder::stroke(stroke_width(width, zoom));
     line.move_to(pts[0]);
     for p in &pts[1..n - 1] {
         line.line_to(*p);
@@ -827,6 +833,16 @@ fn paint_connector(
         window.paint_path(path, color);
     }
     paint_arrowhead(tip, dir, zoom, color, window);
+}
+
+/// The screen width a line of pre-zoom `width` is stroked at under `zoom`. The
+/// floor lands on the zoom, which every width shares, so the widths hold their
+/// ratio to one another and a marked line goes on reading as the heavier one. It
+/// reaches the stroke alone: a route's course, the arrowhead capping it and the
+/// spacing of a bundle's lanes all follow the camera, so a route goes on meeting
+/// its boxes where the layout puts it.
+fn stroke_width(width: f32, zoom: f32) -> Pixels {
+    px(width * zoom.max(CONNECTOR_FLOOR / CONNECTOR_WIDTH))
 }
 
 /// The unit vector from `a` to `b`, and how far apart they are.
@@ -1548,6 +1564,46 @@ mod colors {
             assert!(
                 off_container >= MIN_EDGED_STEP,
                 "{theme}: {off_container} levels"
+            );
+        }
+    }
+
+    /// The zooms the stroke invariants are checked over, spanning both sides of
+    /// the zoom at which the thinnest line reaches the floor.
+    const STROKE_ZOOMS: [f32; 8] = [1e-4, 1e-3, 0.01, 0.1, 0.5, 0.9, 1.0, 4.0];
+
+    /// A line thinner than a pixel is drawn or not according to where the pan
+    /// leaves it, so the zoom-out that shrinks a graph to a map must not take
+    /// the routes off it.
+    #[test]
+    fn a_connector_holds_a_pixel_of_width_however_far_the_zoom_is_out() {
+        for zoom in STROKE_ZOOMS {
+            let w = stroke_width(CONNECTOR_WIDTH, zoom);
+            assert!(w >= px(CONNECTOR_FLOOR), "zoom {zoom}: {w:?}");
+        }
+    }
+
+    /// A mark says which route it picks out by the heavier line it draws it in,
+    /// which it has to go on saying at a zoom holding the thinnest line up.
+    #[test]
+    fn a_marked_connector_stays_the_heavier_line_at_every_zoom() {
+        for zoom in STROKE_ZOOMS {
+            let (marked, bare) = (
+                stroke_width(MARKED_WIDTH, zoom),
+                stroke_width(CONNECTOR_WIDTH, zoom),
+            );
+            assert!(marked > bare, "zoom {zoom}: {marked:?} over {bare:?}");
+        }
+    }
+
+    /// The floor is what a zoom-out runs into, and nothing a line wider than it
+    /// meets: above the floor the camera alone says how wide a line is drawn.
+    #[test]
+    fn a_line_the_zoom_keeps_above_the_floor_follows_the_camera() {
+        for zoom in [0.7, 1.0, 4.0] {
+            assert_eq!(
+                stroke_width(CONNECTOR_WIDTH, zoom),
+                px(CONNECTOR_WIDTH * zoom)
             );
         }
     }
