@@ -211,6 +211,12 @@ impl Model {
                     }
                     Err(err) => Source::Failed(err),
                 };
+                // A layered layout can only be derived from a loaded graph, so
+                // the mode selected while the read was in flight gets its first
+                // one as the read lands.
+                if view.mode == LayoutMode::Layered {
+                    relayout(view, cx);
+                }
             },
         );
         Self {
