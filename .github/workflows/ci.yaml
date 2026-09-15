@@ -20,7 +20,8 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/free-disk-space
-      - uses: bazel-contrib/setup-bazel@0.19.0
+      - id: setup
+        uses: bazel-contrib/setup-bazel@0.19.0
         with:
           bazelrc: build --platforms=//platforms:linux_x86_64
           bazelisk-cache: true
@@ -30,11 +31,11 @@ jobs:
       - run: bazel build //... //dist:bviz-linux-x86_64
       # Report every check's verdict, not only the first failure's.
       - run: bazel test --test_output=errors //...
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
       - run: bazel build --config=rustfmt //...
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
       - run: bazel build --config=clippy //...
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
       - name: Report disk usage
         run: |
           df -h /
