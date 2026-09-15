@@ -1,0 +1,29 @@
+name: Free disk space
+description: Remove preinstalled software to free the root filesystem.
+
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: |
+        df -h /
+        sudo rm -rf \
+          /usr/local/lib/android \
+          /usr/share/dotnet \
+          /usr/local/.ghcup \
+          /opt/hostedtoolcache/CodeQL \
+          /usr/share/swift
+        docker image prune --all --force
+        df -h /
+        # The image still exports these, naming the removed directories, and
+        # rules_android's SDK repository rule fails on a directory that no longer
+        # exists but treats an empty value as unset.
+        printf '%s=\n' \
+          ANDROID_HOME \
+          ANDROID_SDK_ROOT \
+          ANDROID_NDK \
+          ANDROID_NDK_HOME \
+          ANDROID_NDK_ROOT \
+          ANDROID_NDK_LATEST_HOME \
+          SWIFT_PATH \
+          >> "$GITHUB_ENV"
