@@ -47,6 +47,17 @@ const CONNECTOR_WIDTH: f32 = 1.5;
 /// a pixel across, it meets a sample wherever it falls.
 const CONNECTOR_FLOOR: f32 = 1.0;
 
+/// The zoom at which the thinnest line reaches [`CONNECTOR_FLOOR`]: at and above
+/// it the camera sets every stroke's width, below it the floor does.
+const FLOORED_BELOW: f32 = CONNECTOR_FLOOR / CONNECTOR_WIDTH;
+
+/// The share of its own opacity a connector is never drawn below, however far
+/// the zoom is out: a route a map draws too faint to find is off the map. Set
+/// where a line thinned to that share still stands a
+/// [`bviz_ui_theme::MIN_DISTINCT_COLOR`] off every ground it crosses, which is
+/// the distance the unthinned line is held to.
+const TAPER_FLOOR: f32 = 0.3;
+
 /// Stroke width (pre-zoom px) of that line where a marking picks the connector out.
 /// A doubling is the smallest step that reads as a heavier line rather than as
 /// an artifact of antialiasing.
@@ -142,6 +153,16 @@ impl Marks {
             false => UNMARKED_FADE,
         }
     }
+
+    /// What a connector standing at `marked` is drawn at, `edges` being the share
+    /// a morph in flight leaves its routes at. A mark buys no exemption from
+    /// [`ink_taper`]: how much of a drawn band is the line's own is the camera's
+    /// to answer, and a marked line meets the camera on the same terms as the
+    /// rest, so a selection stands its routes off the graph by as much at every
+    /// zoom.
+    fn connector_alpha(&self, marked: bool, edges: f32, zoom: f32) -> f32 {
+        edges * self.strength(marked) * ink_taper(zoom)
+    }
 }
 
 /// The canvas paint pass: box fills parent-before-child so children sit over
@@ -218,7 +239,7 @@ pub(crate) fn canvas_body(
             for c in &g.connectors {
                 if drawn_route(c, &visible, &on_screen) {
                     let marked = marks.marks_edge((c.from, c.to));
-                    let alpha = edges * marks.strength(marked);
+                    let alpha = marks.connector_alpha(marked, edges, camera.zoom);
                     paint_lanes(c, marked, alpha, bounds, camera, &scene.palette, window);
                 }
             }
@@ -842,7 +863,15 @@ fn paint_connector(
 /// spacing of a bundle's lanes all follow the camera, so a route goes on meeting
 /// its boxes where the layout puts it.
 fn stroke_width(width: f32, zoom: f32) -> Pixels {
-    px(width * zoom.max(CONNECTOR_FLOOR / CONNECTOR_WIDTH))
+    px(width * zoom.max(FLOORED_BELOW))
+}
+
+/// The share of its own opacity a connector is drawn at, standing for the share
+/// of the drawn band the line itself accounts for: [`stroke_width`] holds the
+/// stroke while the graph goes on shrinking under it, so the ink is taken back
+/// down by as much as the held width adds. Bounded below by [`TAPER_FLOOR`].
+fn ink_taper(zoom: f32) -> f32 {
+    (zoom / FLOORED_BELOW).clamp(TAPER_FLOOR, 1.0)
 }
 
 /// The unit vector from `a` to `b`, and how far apart they are.
@@ -1605,6 +1634,99 @@ mod colors {
                 stroke_width(CONNECTOR_WIDTH, zoom),
                 px(CONNECTOR_WIDTH * zoom)
             );
+        }
+    }
+
+    /// Above the floor a line is drawn at the width the camera asks for, so all
+    /// of the band drawn is its own and none of the ink is taken back. The taper
+    /// meets the floor at the zoom the floor begins at, leaving no step in a line
+    /// as the zoom carries it across.
+    #[test]
+    fn a_line_the_zoom_keeps_above_the_floor_is_drawn_whole() {
+        for zoom in STROKE_ZOOMS.iter().filter(|z| **z >= FLOORED_BELOW) {
+            assert_eq!(ink_taper(*zoom), 1.0, "zoom {zoom}");
+        }
+        assert_eq!(ink_taper(FLOORED_BELOW), 1.0);
+        let approaching = ink_taper(FLOORED_BELOW * (1.0 - CONTINUITY_STEP));
+        assert!(
+            (1.0 - approaching) <= CONTINUITY_STEP,
+            "the taper steps to {approaching} as the floor is met"
+        );
+    }
+
+    /// How far below [`FLOORED_BELOW`] the taper is read to check it meets the
+    /// floor continuously, which bounds the step it may take there as well.
+    const CONTINUITY_STEP: f32 = 1e-3;
+
+    /// A map fits a whole graph into a window, taking the zoom as far out as the
+    /// reader ever sees it; the routes drawn there are thinned but never thinned
+    /// away.
+    #[test]
+    fn the_taper_holds_its_floor_however_far_the_zoom_is_out() {
+        let zooms = STROKE_ZOOMS
+            .iter()
+            .copied()
+            .chain([0.0, f32::MIN_POSITIVE, 1e-30]);
+        for zoom in zooms {
+            let taper = ink_taper(zoom);
+            assert!((TAPER_FLOOR..=1.0).contains(&taper), "zoom {zoom}: {taper}");
+        }
+    }
+
+    /// The thinning is what a route drawn on a map is seen through, so a line
+    /// held at the floor has to stand off every ground it crosses just as the
+    /// unthinned line does.
+    #[test]
+    fn a_connector_held_at_the_taper_floor_is_told_from_what_it_crosses() {
+        for (theme, p) in palettes() {
+            let grounds = edge_grounds(&p);
+            for kind in EDGE_KINDS {
+                for marked in [false, true] {
+                    let color = faded(p.edge_color(kind, marked), TAPER_FLOOR);
+                    for ground in &grounds {
+                        let apart = distance(over(color, *ground), *ground);
+                        assert!(
+                            apart >= MIN_DISTINCT_COLOR,
+                            "{theme} {kind:?} marked {marked} on a ground: {apart}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// A selection says which routes the reader is following and how far the rest
+    /// falls back; the zoom says how much of a drawn band is the line's own. The
+    /// two answer different questions, so each takes its share of what the other
+    /// leaves and a selection reads the same at every zoom.
+    #[test]
+    fn a_selection_stands_a_connector_off_the_graph_by_as_much_at_every_zoom() {
+        let marks = Marks {
+            hover: Neighborhood::none(),
+            selection: Rc::new(Neighborhood {
+                boxes: HashSet::from([Id(0)]),
+                edges: HashSet::new(),
+            }),
+        };
+        for zoom in STROKE_ZOOMS {
+            let marked = marks.connector_alpha(true, 1.0, zoom);
+            let unmarked = marks.connector_alpha(false, 1.0, zoom);
+            assert_eq!(marked, ink_taper(zoom), "zoom {zoom}");
+            assert_eq!(unmarked, marked * UNMARKED_FADE, "zoom {zoom}");
+        }
+    }
+
+    /// A morph fades its routes out and back as the layout it draws them from is
+    /// replaced, which the taper has to leave whole: a route at the turn is gone,
+    /// not merely faint.
+    #[test]
+    fn a_morph_takes_its_routes_all_the_way_out_at_every_zoom() {
+        let marks = Marks {
+            hover: Neighborhood::none(),
+            selection: Rc::new(Neighborhood::none()),
+        };
+        for zoom in STROKE_ZOOMS {
+            assert_eq!(marks.connector_alpha(true, 0.0, zoom), 0.0, "zoom {zoom}");
         }
     }
 
