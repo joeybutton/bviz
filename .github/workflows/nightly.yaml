@@ -54,3 +54,9 @@ jobs:
           archive: false
           retention-days: 14
           if-no-files-found: error
+
+      - name: Report disk usage
+        run: |
+          df -h /
+          du -sh ~/.cache/bazel-disk ~/.cache/bazel-repo ~/.cache/bazelisk ~/.bazel || true
+        if: ${{ !cancelled() }}
