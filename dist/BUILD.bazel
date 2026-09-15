@@ -14,6 +14,7 @@ TARGET_PLATFORMS = {
     platform_transition_filegroup(
         name = "bviz_{}".format(suffix),
         srcs = ["//bviz"],
+        tags = ["manual"],
         target_platform = platform,
     )
     for suffix, platform in TARGET_PLATFORMS.items()
@@ -30,6 +31,7 @@ TARGET_PLATFORMS = {
         mtree = [
             "bviz uid=0 gid=0 time={} mode=0755 type=file content=$(execpath :bviz_{})".format(MTIME, suffix),
         ],
+        tags = ["manual"],
     )
     for suffix in TARGET_PLATFORMS
 ]
@@ -37,4 +39,5 @@ TARGET_PLATFORMS = {
 filegroup(
     name = "dist",
     srcs = [":bviz-{}".format(suffix) for suffix in TARGET_PLATFORMS],
+    tags = ["manual"],
 )
