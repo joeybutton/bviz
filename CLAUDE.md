@@ -30,7 +30,10 @@ Interactive visualization and inspection tool for Bazel builds.
   or the body is a bulleted list of independent changes — in either case, split
   it, one commit per bullet. When unsure whether two changes are one concern,
   default to splitting; over-splitting is cheap to read, under-splitting is not.
-- Commit only verified work: build and run/test it first. For toolchain changes,
+- Commit only verified work: build and run/test it first, and pass the format
+  and lint checks CI enforces — `bazel build --config=rustfmt //...` and
+  `bazel build --config=clippy //...`; apply formatting with
+  `bazel run @rules_rs_rules_rust//:rustfmt`. For toolchain changes,
   confirm with `--toolchain_resolution_debug`. Report outcomes honestly; flag
   side effects.
 - A change to visual output is verified by viewing the rendered result on real
