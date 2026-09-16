@@ -1,5 +1,4 @@
-use crate::panel::number_shared_titles;
-use crate::{AnyPanel, Layout, Pane, PaneEvent, PanelGroup, Removal, Split, SplitId};
+use crate::{AnyPanel, Document, Layout, Pane, PaneEvent, PanelGroup, Removal, Split, SplitId};
 use bviz_ui_components::{Divider, DragEnd, overlay_canvas, track_drag};
 use bviz_ui_shell::Chrome;
 use bviz_ui_theme::ThemeColors;
@@ -105,18 +104,15 @@ impl Workspace {
 
     /// Builds a workspace framing a region of the window per document: `first`
     /// across the top and each of `others` under it in the order given, every
-    /// region laid out as its own group describes. Panels that share a title are
-    /// numbered.
-    pub fn with_groups(
+    /// region laid out as its document's group describes.
+    pub fn with_documents(
         app_name: impl Into<SharedString>,
-        first: PanelGroup,
-        others: Vec<PanelGroup>,
+        first: Document,
+        others: Vec<Document>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let mut group = PanelGroup::stack(first, others);
-        number_shared_titles(group.panels_mut(), cx);
-        Self::new(app_name, group, window, cx)
+        Self::new(app_name, Document::stack(first, others), window, cx)
     }
 
     pub fn active_pane(&self) -> &Entity<Pane> {

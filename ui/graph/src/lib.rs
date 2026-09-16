@@ -7,7 +7,7 @@ use bviz_ui_components::{DragEnd, Dropdown, DropdownEvent, Pending, ScrollbarCol
 use bviz_ui_graph_args::{GraphArgs, GraphSource};
 use bviz_ui_theme::{DataColors, Theme, ThemeColors};
 use bviz_ui_workspace::{
-    AnyPanel, Panel, PanelEvent, PanelGroup, PanelKind, Weight, document_label,
+    AnyPanel, Document, Panel, PanelEvent, PanelGroup, PanelKind, Weight, document_label,
 };
 use clap::error::ErrorKind;
 use clap::{CommandFactory, Parser};
@@ -647,11 +647,13 @@ fn title(source: &GraphSource) -> SharedString {
     }
 }
 
-/// A panel drawing the graph `load` reads.
-pub fn open(load: impl Into<Load>, _window: &mut Window, cx: &mut App) -> PanelGroup {
+/// The document drawing the graph `load` reads.
+pub fn open(load: impl Into<Load>, _window: &mut Window, cx: &mut App) -> Document {
     let load = load.into();
-    PanelGroup::one(AnyPanel::new(cx.new(|cx| GraphPanel::new(load, cx))))
-        .with_weight(Weight::CHART)
+    let label = load.title.clone();
+    let panels = PanelGroup::one(AnyPanel::new(cx.new(|cx| GraphPanel::new(load, cx))))
+        .with_weight(Weight::CHART);
+    Document::new(label, panels)
 }
 
 /// Renders a Bazel build graph from one or more `--output=streamed_proto`

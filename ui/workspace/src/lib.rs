@@ -11,19 +11,19 @@ mod workspace;
 pub use group::{PanelGroup, Weight};
 pub use layout::{Layout, Panes, Removal, Split, SplitId};
 pub use pane::{Pane, PaneEvent};
-pub use panel::{AnyPanel, Panel, PanelEvent, PanelKind, document_label};
+pub use panel::{AnyPanel, Document, Panel, PanelEvent, PanelKind, document_label};
 pub use workspace::Workspace;
 
 use workspace::register_keys;
 
 use gpui::{App, AppContext, Pixels, Size, Window};
 
-/// Runs an app whose one window frames a document per panel group, `open`
-/// building each from `first` and then `rest` and [`Workspace::with_groups`]
-/// arranging them in the window. Each of `panel_keys` registers the bindings of
-/// one panel kind the app can show, and runs before the first window opens. Each
-/// runs exactly once per process: `cx.bind_keys` refreshes every window, which
-/// drops what each has cached of its last frame.
+/// Runs an app whose one window frames the [`Document`]s `open` builds from
+/// `first` and then `rest`, [`Workspace::with_documents`] arranging them in the
+/// window. Each of `panel_keys` registers the bindings of one panel kind the app
+/// can show, and runs before the first window opens. Each runs exactly once per
+/// process: `cx.bind_keys` refreshes every window, which drops what each has
+/// cached of its last frame.
 pub fn run_panels<T, F>(
     app_id: impl Into<String>,
     window_size: Size<Pixels>,
@@ -33,7 +33,7 @@ pub fn run_panels<T, F>(
     panel_keys: &'static [fn(&mut App)],
 ) where
     T: 'static,
-    F: 'static + Fn(T, &mut Window, &mut App) -> PanelGroup,
+    F: 'static + Fn(T, &mut Window, &mut App) -> Document,
 {
     let app_id = app_id.into();
     bviz_ui_shell::application().run(move |cx: &mut App| {
@@ -44,12 +44,12 @@ pub fn run_panels<T, F>(
         }
         let (first, rest) = (first, rest);
         bviz_ui_shell::open_window(&app_id, window_size, cx, |window, cx| {
-            let group = open(first, window, cx);
+            let first = open(first, window, cx);
             let mut others = Vec::with_capacity(rest.len());
             for document in rest {
                 others.push(open(document, window, cx));
             }
-            cx.new(|cx| Workspace::with_groups(app_id.clone(), group, others, window, cx))
+            cx.new(|cx| Workspace::with_documents(app_id.clone(), first, others, window, cx))
         })
         .unwrap();
         cx.activate(true);

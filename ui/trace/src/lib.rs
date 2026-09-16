@@ -41,7 +41,7 @@ use bviz_ui_components::{
 };
 use bviz_ui_trace_args::{TraceArgs, TraceSource};
 use bviz_ui_workspace::{
-    AnyPanel, Panel, PanelEvent, PanelGroup, PanelKind, Weight, document_label,
+    AnyPanel, Document, Panel, PanelEvent, PanelGroup, PanelKind, Weight, document_label,
 };
 use clap::error::ErrorKind;
 use clap::{CommandFactory, Parser};
@@ -1645,13 +1645,15 @@ impl From<TraceSource> for Load {
     }
 }
 
-/// A panel rendering the profile `load` reads.
-pub fn open(load: impl Into<Load>, window: &mut Window, cx: &mut App) -> PanelGroup {
+/// The document rendering the profile `load` reads.
+pub fn open(load: impl Into<Load>, window: &mut Window, cx: &mut App) -> Document {
     let load = load.into();
-    PanelGroup::one(AnyPanel::new(
+    let label = load.title.clone();
+    let panels = PanelGroup::one(AnyPanel::new(
         cx.new(|cx| TracePanel::new(load, window, cx)),
     ))
-    .with_weight(Weight::CHART)
+    .with_weight(Weight::CHART);
+    Document::new(label, panels)
 }
 
 /// Renders a Bazel `--profile` trace as a flame-chart timeline. Each profile

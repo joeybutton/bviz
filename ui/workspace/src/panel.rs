@@ -1,16 +1,17 @@
-use crate::Pane;
+use crate::{Pane, PanelGroup};
 use gpui::{
     AnyView, App, Context, Entity, EntityId, EventEmitter, FocusHandle, Focusable, Render,
     SharedString, Subscription, Window,
 };
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
+use std::iter;
 use std::num::NonZeroUsize;
 use std::path::Path;
 use std::rc::Rc;
 
-/// How a path reads as a panel title: its file name, or the whole path when it
-/// has none.
+/// How a path reads as a document's label: its file name, or the whole path
+/// when it has none.
 pub fn document_label(path: &Path) -> SharedString {
     path.file_name()
         .unwrap_or(path.as_os_str())
@@ -80,12 +81,12 @@ impl AnyPanel {
         self.panel.kind()
     }
 
-    /// The title the panel gives itself, which panels opened together may share.
+    /// The title the panel gives itself.
     pub fn plain_title(&self, cx: &App) -> SharedString {
         self.panel.title(cx)
     }
 
-    /// What follows the plain title to tell this panel from others sharing it.
+    /// The number following the plain title, if the panel's document has one.
     pub fn title_suffix(&self) -> Option<SharedString> {
         self.ordinal.map(ordinal_suffix)
     }
@@ -135,27 +136,47 @@ impl AnyPanel {
     }
 }
 
-/// Sets the ordinal of every one of `panels` from their plain titles.
-pub(crate) fn number_shared_titles<'a>(
-    panels: impl IntoIterator<Item = &'a mut AnyPanel>,
-    cx: &App,
-) {
-    let panels: Vec<&mut AnyPanel> = panels.into_iter().collect();
-    let titles: Vec<SharedString> = panels.iter().map(|panel| panel.plain_title(cx)).collect();
-    for (panel, ordinal) in panels.into_iter().zip(shared_title_ordinals(&titles)) {
-        panel.ordinal = ordinal;
+/// A document as a viewer opens it into a window. Its label tells it apart from
+/// the other documents the window opens with: every panel of a document whose
+/// label another shares is numbered, counting in the order the window stacks the
+/// documents.
+pub struct Document {
+    label: SharedString,
+    panels: PanelGroup,
+}
+
+impl Document {
+    pub fn new(label: SharedString, panels: PanelGroup) -> Self {
+        Self { label, panels }
+    }
+
+    /// The panels of `first` and `others` stacked as [`PanelGroup::stack`]
+    /// stacks them, and numbered.
+    pub(crate) fn stack(mut first: Self, mut others: Vec<Self>) -> PanelGroup {
+        let labels: Vec<SharedString> = iter::once(&first)
+            .chain(&others)
+            .map(|document| document.label.clone())
+            .collect();
+        let documents = iter::once(&mut first).chain(&mut others);
+        for (document, ordinal) in documents.zip(shared_label_ordinals(&labels)) {
+            for panel in document.panels.panels_mut() {
+                panel.ordinal = ordinal;
+            }
+        }
+        let others = others.into_iter().map(|document| document.panels).collect();
+        PanelGroup::stack(first.panels, others)
     }
 }
 
-/// The ordinal of each of `titles` within the titles equal to it, or `None` for
-/// a title no other one equals.
-fn shared_title_ordinals(titles: &[SharedString]) -> Vec<Option<NonZeroUsize>> {
-    let mut ordinals = vec![None; titles.len()];
-    // Each title's first index, and how many of it have been seen.
+/// The ordinal of each of `labels` within the labels equal to it, or `None` for
+/// a label no other one equals.
+fn shared_label_ordinals(labels: &[SharedString]) -> Vec<Option<NonZeroUsize>> {
+    let mut ordinals = vec![None; labels.len()];
+    // Each label's first index, and how many of it have been seen.
     let mut groups: HashMap<&SharedString, (usize, NonZeroUsize)> =
-        HashMap::with_capacity(titles.len());
-    for (index, title) in titles.iter().enumerate() {
-        match groups.entry(title) {
+        HashMap::with_capacity(labels.len());
+    for (index, label) in labels.iter().enumerate() {
+        match groups.entry(label) {
             Entry::Vacant(group) => {
                 group.insert((index, NonZeroUsize::MIN));
             }
@@ -248,22 +269,22 @@ mod tests {
         assert_eq!(document_label(Path::new("/")), "/");
     }
 
-    fn ordinals(titles: &[&'static str]) -> Vec<Option<usize>> {
-        let titles: Vec<SharedString> = titles.iter().copied().map(SharedString::from).collect();
-        shared_title_ordinals(&titles)
+    fn ordinals(labels: &[&'static str]) -> Vec<Option<usize>> {
+        let labels: Vec<SharedString> = labels.iter().copied().map(SharedString::from).collect();
+        shared_label_ordinals(&labels)
             .into_iter()
             .map(|ordinal| ordinal.map(NonZeroUsize::get))
             .collect()
     }
 
     #[test]
-    fn distinct_titles_are_not_numbered() {
+    fn distinct_labels_are_not_numbered() {
         assert_eq!(ordinals(&[]), []);
         assert_eq!(ordinals(&["a.bep", "b.bep"]), [None, None]);
     }
 
     #[test]
-    fn a_shared_title_numbers_every_panel_bearing_it_from_one() {
+    fn a_shared_label_numbers_every_document_bearing_it_from_one() {
         assert_eq!(ordinals(&["x", "x"]), [Some(1), Some(2)]);
         assert_eq!(
             ordinals(&["x", "y", "x", "x"]),
@@ -272,7 +293,7 @@ mod tests {
     }
 
     #[test]
-    fn each_shared_title_counts_on_its_own() {
+    fn each_shared_label_counts_on_its_own() {
         assert_eq!(
             ordinals(&["x", "y", "y", "x", "z"]),
             [Some(1), Some(1), Some(2), Some(2), None]

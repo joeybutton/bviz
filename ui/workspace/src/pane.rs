@@ -273,8 +273,8 @@ impl Pane {
                     .flex_row()
                     .min_w(px(0.))
                     .child(div().min_w(px(0.)).truncate().child(panel.plain_title(cx)))
-                    // A cut-off title must still show which of its namesakes the
-                    // tab is.
+                    // A cut-off title must still show which document the tab
+                    // belongs to.
                     .children(
                         panel
                             .title_suffix()
