@@ -434,8 +434,8 @@ impl TraceModel {
         true
     }
 
-    /// Sets the selection to every visible track (the Ctrl-A gesture), returning
-    /// whether the set changed.
+    /// Sets the selection to every visible track (the select-all gesture),
+    /// returning whether the set changed.
     pub(crate) fn select_all_visible(&mut self, cx: &mut Context<Self>) -> bool {
         let changed = if self.selected_tracks != self.visible_tracks {
             self.selected_tracks = self.visible_tracks.clone();

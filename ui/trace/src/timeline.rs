@@ -330,8 +330,8 @@ impl TimelineDrag {
 /// [`TracePanel`]. The slices are painted by [`SliceCanvas`], the time selection,
 /// crosshair, and tooltip by an overlay above it.
 pub(crate) struct TimelinePanel {
-    /// Focus for the trace content, so Ctrl-A (select all tracks) dispatches
-    /// here; a descendant of the window focus, so the window's own actions fire.
+    /// Focus for the trace content, so [`SelectAllTracks`] dispatches here; a
+    /// descendant of the window focus, so the window's own actions fire.
     content_focus: FocusHandle,
     /// Read for the document and lanes, written for selection and grouping.
     model: Entity<TraceModel>,
@@ -624,16 +624,16 @@ impl TimelinePanel {
             .map(|l| l.track)
     }
 
-    /// Selects every currently visible track (the Ctrl-A gesture).
+    /// Answers [`SelectAllTracks`] by selecting every currently visible track.
     fn select_all_visible(&mut self, _: &SelectAllTracks, _: &mut Window, cx: &mut Context<Self>) {
         if self.model.update(cx, |m, cx| m.select_all_visible(cx)) {
             self.invalidate_canvas(cx);
         }
     }
 
-    /// Backs out of the innermost gesture (the Escape gesture): a region drag
-    /// under way is abandoned, and failing that the aggregate widens back to the
-    /// whole timeline.
+    /// Answers [`ClearTimeSelection`] by backing out of the innermost gesture: a
+    /// region drag under way is abandoned, and failing that the aggregate widens
+    /// back to the whole timeline.
     fn clear_time_selection(
         &mut self,
         _: &ClearTimeSelection,
@@ -828,8 +828,9 @@ impl TimelinePanel {
     /// thumb/track drives that bar, on the ruler (or with shift on the lanes)
     /// selects time regions, anywhere else pans; the wheel zooms/pans/scrolls,
     /// and a move updates the crosshair and hover. Holds the content focus and
-    /// the chart's actions, so a press here makes Ctrl-A select all tracks and
-    /// Escape widen the aggregate to the whole timeline.
+    /// the chart's actions, so after a press here [`SelectAllTracks`] selects all
+    /// tracks and [`ClearTimeSelection`] widens the aggregate to the whole
+    /// timeline.
     fn content_handlers(&self, root: Stateful<Div>, cx: &mut Context<Self>) -> Stateful<Div> {
         root.key_context(CHART_KEY_CONTEXT)
             .track_focus(&self.content_focus)
@@ -838,8 +839,8 @@ impl TimelinePanel {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, e: &MouseDownEvent, window, cx| {
-                    // Take content focus so Ctrl-A selects tracks after a chart
-                    // interaction (a click may have moved focus to the filter).
+                    // Take content focus so `SelectAllTracks` dispatches here after
+                    // a chart interaction (a click may have moved focus to the filter).
                     this.content_focus.focus(window, cx);
                     if let Some(hit) = this.group_row_at(e.position, cx) {
                         this.model.update(cx, |m, _| match hit {
