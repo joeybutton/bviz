@@ -43,10 +43,11 @@ behaves consistently:
 - `bviz_ui_components::load_in_background` — run work off the UI thread, then apply it.
 - `bviz_ui_assets::{text_metrics, shape_line, icon, UI, MONO, load_fonts}` — fonts,
   text metrics, single-run line shaping, Phosphor icons.
-- `bviz_ui_theme::{colors, mix}` — appearance-aware palette and a blend helper.
+- `bviz_ui_theme::{theme, mix}` — the appearance-aware theme a window paints with, and a
+  blend helper.
 
 The sections below cover each in context. `ui/terminal/src/terminal/` and
-`ui/graph/src/main.rs` are the worked examples for everything here; read them rather
+`ui/graph/src/` are the worked examples for everything here; read them rather
 than reinventing a pattern they already show.
 
 ## Mental model: retained state, immediate element tree
@@ -275,7 +276,7 @@ therefore ordinary, and each caller bounds it for itself.
 carries the contract.
 
 Equally, do not take every delivered move for a drag move. Leaving a window synthesizes
-an off-screen move to clear hover (`patches/gpui_linux-clear-hover-on-leave.patch`),
+an off-screen move to clear hover (`patches/gpui_linux/gpui_linux-clear-hover-on-leave.patch`),
 which lands just after a release out there: a handler that reads it as a position seeks
 to the corner, and one that re-arms its own drag flag on the way keeps the gesture alive
 for good. That move reports no button held, which also ends a drag the compositor takes
@@ -373,7 +374,7 @@ such a column to its longest value and let it clip only on true overflow. Virtua
 window, cx| -> Vec<_>)` + a `UniformListScrollHandle` (renders only visible rows; requires
 uniform row height), keeping the header a separate non-scrolling row above it; drive a scroll
 bar from the handle's `base_handle` offset/extents as above. The stats table in
-`ui/trace/src/main.rs` (`stats_cell`, `stats_table`) is the worked example here.
+`ui/trace/src/stats_panel.rs` (`stats_cell`, `stats_table`) is the worked example here.
 
 ## Stateful views vs stateless components
 
@@ -413,8 +414,8 @@ content to the viewport on the first frame); the paint closure draws with
 `window.paint_quad(quad(..))`, `window.paint_path(..)`, and a shaped line's
 `.paint(origin, ..)`. Both closures are `'static`, so capture **owned snapshots** of what
 you paint — a `Vec` of boxes, a `Palette` of theme-resolved colors — not borrows of the
-view. The graph viewer (`ui/graph/src/main.rs`: `GraphPanel::graph`, `paint_box`,
-`paint_connector`) is the worked example.
+view. The graph viewer is the worked example: `ui/graph/src/paint.rs` (`Scene`,
+`canvas_body`, `paint_box`, `paint_connector`).
 
 **A custom `Element`** is heavier, for when you also need a typed layout → prepaint →
 paint pipeline. Implement `Element` (plus a trivial `IntoElement`) with two associated
