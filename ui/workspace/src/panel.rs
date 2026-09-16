@@ -3,6 +3,9 @@ use gpui::{
     AnyView, App, Context, Entity, EntityId, EventEmitter, FocusHandle, Focusable, Render,
     SharedString, Subscription, Window,
 };
+use std::collections::HashMap;
+use std::collections::hash_map::Entry;
+use std::num::NonZeroUsize;
 use std::path::Path;
 use std::rc::Rc;
 
@@ -58,55 +61,117 @@ pub enum PanelEvent {
 /// A panel of any kind, holding it through operations resolved once for its
 /// concrete type. Cloning shares the one panel.
 #[derive(Clone)]
-pub struct AnyPanel(Rc<dyn PanelOps>);
+pub struct AnyPanel {
+    panel: Rc<dyn PanelOps>,
+    /// Fixed for the panel's lifetime, so a panel keeps its number when it moves
+    /// to another pane or another window.
+    ordinal: Option<NonZeroUsize>,
+}
 
 impl AnyPanel {
     pub fn new<T: Panel>(panel: Entity<T>) -> Self {
-        Self(Rc::new(panel))
+        Self {
+            panel: Rc::new(panel),
+            ordinal: None,
+        }
     }
 
     pub fn kind(&self) -> PanelKind {
-        self.0.kind()
+        self.panel.kind()
     }
 
-    pub fn title(&self, cx: &App) -> SharedString {
-        self.0.title(cx)
+    /// The title the panel gives itself, which panels opened together may share.
+    pub fn plain_title(&self, cx: &App) -> SharedString {
+        self.panel.title(cx)
+    }
+
+    /// What follows the plain title to tell this panel from others sharing it.
+    pub fn title_suffix(&self) -> Option<SharedString> {
+        self.ordinal.map(ordinal_suffix)
+    }
+
+    /// The plain title followed by its suffix, for a place that shows the title
+    /// as one string.
+    pub fn display_title(&self, cx: &App) -> SharedString {
+        match self.title_suffix() {
+            Some(suffix) => format!("{}{suffix}", self.plain_title(cx)).into(),
+            None => self.plain_title(cx),
+        }
     }
 
     pub fn status(&self, cx: &App) -> Option<SharedString> {
-        self.0.status(cx)
+        self.panel.status(cx)
     }
 
     pub fn icon(&self, cx: &App) -> Option<&'static str> {
-        self.0.icon(cx)
+        self.panel.icon(cx)
     }
 
     pub fn focus_handle(&self, cx: &App) -> FocusHandle {
-        self.0.focus_handle(cx)
+        self.panel.focus_handle(cx)
     }
 
     pub fn set_active(&self, active: bool, window: &mut Window, cx: &mut App) {
-        self.0.set_active(active, window, cx)
+        self.panel.set_active(active, window, cx)
     }
 
     pub fn entity_id(&self) -> EntityId {
-        self.0.view().entity_id()
+        self.panel.view().entity_id()
     }
 
     /// Marks the panel for a repaint of its own, which its pane owes it after
     /// frames that left it out.
     pub fn notify(&self, cx: &mut App) {
-        self.0.notify(cx)
+        self.panel.notify(cx)
     }
 
     pub fn view(&self) -> AnyView {
-        self.0.view()
+        self.panel.view()
     }
 
     /// Forward this panel's [`PanelEvent`]s to the pane `cx` belongs to.
     pub fn subscribe(&self, window: &Window, cx: &mut Context<Pane>) -> Subscription {
-        self.0.subscribe(window, cx)
+        self.panel.subscribe(window, cx)
     }
+}
+
+/// Sets the ordinal of every one of `panels` from their plain titles.
+pub(crate) fn number_shared_titles<'a>(
+    panels: impl IntoIterator<Item = &'a mut AnyPanel>,
+    cx: &App,
+) {
+    let panels: Vec<&mut AnyPanel> = panels.into_iter().collect();
+    let titles: Vec<SharedString> = panels.iter().map(|panel| panel.plain_title(cx)).collect();
+    for (panel, ordinal) in panels.into_iter().zip(shared_title_ordinals(&titles)) {
+        panel.ordinal = ordinal;
+    }
+}
+
+/// The ordinal of each of `titles` within the titles equal to it, or `None` for
+/// a title no other one equals.
+fn shared_title_ordinals(titles: &[SharedString]) -> Vec<Option<NonZeroUsize>> {
+    let mut ordinals = vec![None; titles.len()];
+    // Each title's first index, and how many of it have been seen.
+    let mut groups: HashMap<&SharedString, (usize, NonZeroUsize)> =
+        HashMap::with_capacity(titles.len());
+    for (index, title) in titles.iter().enumerate() {
+        match groups.entry(title) {
+            Entry::Vacant(group) => {
+                group.insert((index, NonZeroUsize::MIN));
+            }
+            Entry::Occupied(mut group) => {
+                let (first, seen) = group.get_mut();
+                ordinals[*first] = Some(NonZeroUsize::MIN);
+                *seen = seen.saturating_add(1);
+                ordinals[index] = Some(*seen);
+            }
+        }
+    }
+    ordinals
+}
+
+fn ordinal_suffix(ordinal: NonZeroUsize) -> SharedString {
+    format!(" ({ordinal})").into()
 }
 
 /// [`Panel`] with its type parameter discharged, so a workspace can hold panels
@@ -181,5 +246,45 @@ mod tests {
     fn a_path_with_no_file_name_is_its_own_label() {
         assert_eq!(document_label(Path::new("/tmp/..")), "/tmp/..");
         assert_eq!(document_label(Path::new("/")), "/");
+    }
+
+    fn ordinals(titles: &[&'static str]) -> Vec<Option<usize>> {
+        let titles: Vec<SharedString> = titles.iter().copied().map(SharedString::from).collect();
+        shared_title_ordinals(&titles)
+            .into_iter()
+            .map(|ordinal| ordinal.map(NonZeroUsize::get))
+            .collect()
+    }
+
+    #[test]
+    fn distinct_titles_are_not_numbered() {
+        assert_eq!(ordinals(&[]), []);
+        assert_eq!(ordinals(&["a.bep", "b.bep"]), [None, None]);
+    }
+
+    #[test]
+    fn a_shared_title_numbers_every_panel_bearing_it_from_one() {
+        assert_eq!(ordinals(&["x", "x"]), [Some(1), Some(2)]);
+        assert_eq!(
+            ordinals(&["x", "y", "x", "x"]),
+            [Some(1), None, Some(2), Some(3)]
+        );
+    }
+
+    #[test]
+    fn each_shared_title_counts_on_its_own() {
+        assert_eq!(
+            ordinals(&["x", "y", "y", "x", "z"]),
+            [Some(1), Some(1), Some(2), Some(2), None]
+        );
+    }
+
+    #[test]
+    fn an_ordinal_reads_as_a_parenthesized_suffix() {
+        assert_eq!(ordinal_suffix(NonZeroUsize::MIN), " (1)");
+        assert_eq!(
+            NonZeroUsize::new(12).map(ordinal_suffix),
+            Some(" (12)".into())
+        );
     }
 }

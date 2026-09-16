@@ -1,3 +1,4 @@
+use crate::panel::number_shared_titles;
 use crate::{AnyPanel, Layout, Pane, PaneEvent, Removal, Split, SplitId};
 use bviz_ui_components::{DragEnd, overlay_canvas, track_drag};
 use bviz_ui_shell::Chrome;
@@ -87,14 +88,15 @@ impl Workspace {
     }
 
     /// Builds a workspace whose one pane holds `panel` and `others` as tabs, in
-    /// that order, showing `panel`.
+    /// that order, showing `panel`, with those that share a title numbered.
     pub fn with_panels(
         app_name: impl Into<SharedString>,
-        panel: AnyPanel,
-        others: Vec<AnyPanel>,
+        mut panel: AnyPanel,
+        mut others: Vec<AnyPanel>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        number_shared_titles(std::iter::once(&mut panel).chain(&mut others), cx);
         let mut workspace = Self::new(app_name, panel, window, cx);
         for other in others {
             workspace.add_panel(other, window, cx);
@@ -430,7 +432,7 @@ impl Render for Workspace {
 
 /// What names the window: the application, then the document on show.
 fn window_title(app_name: &str, panel: &AnyPanel, cx: &App) -> String {
-    format!("{app_name} \u{2014} {}", panel.title(cx))
+    format!("{app_name} \u{2014} {}", panel.display_title(cx))
 }
 
 fn set_window_title(app_name: &str, panel: &AnyPanel, window: &mut Window, cx: &App) {

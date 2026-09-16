@@ -269,11 +269,17 @@ impl Pane {
             }))
             .child(
                 div()
+                    .flex()
+                    .flex_row()
                     .min_w(px(0.))
-                    .overflow_hidden()
-                    .whitespace_nowrap()
-                    .text_ellipsis()
-                    .child(panel.title(cx)),
+                    .child(div().min_w(px(0.)).truncate().child(panel.plain_title(cx)))
+                    // A cut-off title must still show which of its namesakes the
+                    // tab is.
+                    .children(
+                        panel
+                            .title_suffix()
+                            .map(|suffix| div().flex_shrink_0().whitespace_nowrap().child(suffix)),
+                    ),
             )
             .child(
                 div()
