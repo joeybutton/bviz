@@ -1,6 +1,6 @@
 //! The window's root: a [`Workspace`] framing an arrangement of [`Pane`]s in the
 //! application chrome, the panels ([`AnyPanel`]) each pane holds and shows one
-//! of, and [`run`] for an app whose window frames them.
+//! of, and [`run_panels`] for an app whose window frames them.
 
 mod group;
 mod layout;
