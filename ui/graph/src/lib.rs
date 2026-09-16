@@ -46,7 +46,10 @@ use relation::Relation;
 use scroll::{scrollbar_hit, start_scroll_drag};
 use selection::Selection;
 
-actions!(bviz_graph, [ToggleNeighborhood, ToggleReduce, ClearSelection]);
+actions!(
+    bviz_graph,
+    [ToggleNeighborhood, ToggleReduce, ClearSelection]
+);
 
 /// The key context scoping the graph's own bindings, so a key pressed here
 /// reaches this panel and no other.
