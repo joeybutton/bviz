@@ -8,9 +8,9 @@ timeline, scrub back through the console output.
 
 ## Viewers
 
-`//bviz` is the application: one window holding a panel per document named
-on its command line, several of them tabbed into one pane. Each viewer also
-builds as a binary of its own, for work on that viewer alone.
+`//bviz` is the application: one window stacking the documents named on its
+command line, each in a region of its own. Each viewer also builds as a binary
+of its own, for work on that viewer alone.
 
 | Target | Shows |
 | --- | --- |

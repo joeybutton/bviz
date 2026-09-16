@@ -12,8 +12,8 @@ use clap::{CommandFactory, Parser};
 /// Opens Bazel build documents: the dependency graph, the action timeline, the
 /// console replay.
 ///
-/// Every document named on the command line becomes a panel of the one window,
-/// and several of them share a pane as tabs.
+/// Every document named on the command line takes a region of the one window,
+/// the regions stacked one above another.
 #[derive(Parser, Debug)]
 #[command(name = "bviz", bin_name = "bviz", version, about)]
 pub struct Cli {
@@ -72,7 +72,7 @@ pub struct Sources {
 }
 
 impl Sources {
-    /// The document the window shows, and those tabbed behind it.
+    /// The document the window shows at the top, and those stacked below it.
     pub fn into_parts(self) -> (Source, Vec<Source>) {
         (self.first, self.rest)
     }
