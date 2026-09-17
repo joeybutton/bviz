@@ -39,8 +39,7 @@ use bviz_ui_components::{
 };
 use bviz_ui_trace_args::{TraceArgs, TraceSource};
 use bviz_ui_workspace::{
-    Document, Documents, Panel, PanelEvent, PanelGroup, PanelKind, ViewKind, ViewSpec, Weight,
-    document_label,
+    Document, Panel, PanelEvent, PanelGroup, PanelKind, ViewKind, ViewSpec, Weight, document_label,
 };
 use clap::error::ErrorKind;
 use clap::{CommandFactory, Parser};
@@ -1534,28 +1533,25 @@ pub fn open(load: impl Into<Load>, _window: &mut Window, cx: &mut App) -> Docume
     let load = load.into();
     let label = load.title;
     let model = cx.new(|cx| TraceModel::reading(load.profile, cx));
-    let views = [
-        ViewSpec::new({
-            let (label, model) = (label.clone(), model.clone());
-            move |cx| cx.new(|cx| TracePanel::new(label.clone(), model.clone(), cx))
-        }),
-        ViewSpec::new({
-            let model = model.clone();
-            move |cx| cx.new(|cx| FlamePanel::new(model.clone(), cx))
-        }),
-        ViewSpec::new(move |cx| cx.new(|cx| StatsPanel::new(model.clone(), cx))),
-    ];
-    let documents = Documents::global(cx);
-    let (_, [timeline, flame, stats]) =
-        documents.update(cx, |documents, cx| documents.open(label.clone(), views, cx));
-    let panels = PanelGroup::split(
+    let views = PanelGroup::split(
         gpui::Axis::Vertical,
         TIMELINE_SHARE,
-        PanelGroup::one(timeline),
-        PanelGroup::tabs(flame, vec![stats]),
+        PanelGroup::one(ViewSpec::new({
+            let (label, model) = (label.clone(), model.clone());
+            move |cx| cx.new(|cx| TracePanel::new(label.clone(), model.clone(), cx))
+        })),
+        PanelGroup::tabs(
+            ViewSpec::new({
+                let model = model.clone();
+                move |cx| cx.new(|cx| FlamePanel::new(model.clone(), cx))
+            }),
+            vec![ViewSpec::new(move |cx| {
+                cx.new(|cx| StatsPanel::new(model.clone(), cx))
+            })],
+        ),
     )
     .with_weight(Weight::CHART);
-    Document::new(label, panels)
+    Document::new(label, views)
 }
 
 /// Renders a Bazel `--profile` trace as a flame-chart timeline. Each profile

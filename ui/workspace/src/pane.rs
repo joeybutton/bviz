@@ -46,7 +46,7 @@ pub enum PaneEvent {
 impl EventEmitter<PaneEvent> for Pane {}
 
 impl Pane {
-    pub fn new(panel: AnyPanel, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub(crate) fn new(panel: AnyPanel, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let events = panel.subscribe(window, cx);
         panel.set_active(true, window, cx);
         Self {
@@ -59,7 +59,7 @@ impl Pane {
     }
 
     /// Adds `panel` to the pane and shows it.
-    pub fn add(&mut self, panel: AnyPanel, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn add(&mut self, panel: AnyPanel, window: &mut Window, cx: &mut Context<Self>) {
         let events = panel.subscribe(window, cx);
         self.tabs.push(Tab {
             panel,

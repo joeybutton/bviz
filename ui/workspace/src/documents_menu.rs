@@ -320,7 +320,7 @@ impl Render for DocumentsMenu {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::OpenView;
+    use crate::documents::OpenView;
     use bviz_ui_theme::{
         MIN_SECONDARY_CONTRAST, MIN_TEXT_CONTRAST, MIN_VISIBLE_STEP, built_in_themes,
         contrast_ratio, level_step,

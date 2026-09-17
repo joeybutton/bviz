@@ -1,8 +1,7 @@
 //! The window's root: a [`Workspace`] framing an arrangement of [`Pane`]s in the
 //! application chrome, the panels ([`AnyPanel`]) each pane holds and shows one
-//! of, the [`Documents`] registry of what every window's panels show views of
-//! and the menu listing it, and [`run_panels`] for an app whose window frames
-//! them.
+//! of, the registry of what every window's panels show views of and the menu
+//! listing it, and [`run_panels`] for an app whose window frames them.
 
 mod documents;
 mod documents_menu;
@@ -12,7 +11,8 @@ mod pane;
 mod panel;
 mod workspace;
 
-pub use documents::{DocumentId, Documents, OpenDocument, OpenView, ViewSpec, ViewState};
+pub use documents::ViewSpec;
+pub(crate) use documents::{DocumentId, Documents, OpenDocument, ViewState};
 pub use group::{PanelGroup, Weight};
 pub use layout::{Layout, Panes, Removal, Split, SplitId};
 pub use pane::{Pane, PaneEvent};
@@ -24,11 +24,11 @@ use workspace::register_keys;
 use gpui::{App, AppContext, Pixels, Size, Window};
 
 /// Runs an app whose one window frames the [`Document`]s `open` builds from
-/// `first` and then `rest`, [`Workspace::with_documents`] arranging them in the
-/// window. Each of `panel_keys` registers the bindings of one panel kind the app
-/// can show, and runs before the first window opens. Each runs exactly once per
-/// process: `cx.bind_keys` refreshes every window, which drops what each has
-/// cached of its last frame.
+/// `first` and then `rest`, stacked top to bottom in that order. Each of
+/// `panel_keys` registers the bindings of one panel kind the app can show, and
+/// runs before the first window opens. Each runs exactly once per process:
+/// `cx.bind_keys` refreshes every window, which drops what each has cached of
+/// its last frame.
 pub fn run_panels<T, F>(
     app_id: impl Into<String>,
     window_size: Size<Pixels>,

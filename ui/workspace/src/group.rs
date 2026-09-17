@@ -143,6 +143,15 @@ impl<T> PanelGroup<T> {
         }
     }
 
+    /// The same arrangement and weight over what `panel` makes of each panel,
+    /// visiting them in the order they are laid out.
+    pub(crate) fn map<U>(self, panel: &mut impl FnMut(T) -> U) -> PanelGroup<U> {
+        PanelGroup {
+            arrangement: self.arrangement.map(panel),
+            weight: self.weight,
+        }
+    }
+
     /// The panels, in the order they are laid out.
     pub fn panels_mut(&mut self) -> Vec<&mut T> {
         let mut panels = Vec::new();
@@ -162,6 +171,27 @@ impl<T> Arrangement<T> {
                 first,
                 second,
             } => Layout::split_at(axis, ratio, first.arrange(pane), second.arrange(pane)),
+        }
+    }
+
+    fn map<U>(self, panel: &mut impl FnMut(T) -> U) -> Arrangement<U> {
+        match self {
+            Self::One(one) => Arrangement::One(panel(one)),
+            Self::Tabs { first, rest } => Arrangement::Tabs {
+                first: panel(first),
+                rest: rest.into_iter().map(panel).collect(),
+            },
+            Self::Split {
+                axis,
+                ratio,
+                first,
+                second,
+            } => Arrangement::Split {
+                axis,
+                ratio,
+                first: Box::new(first.map(panel)),
+                second: Box::new(second.map(panel)),
+            },
         }
     }
 
@@ -475,5 +505,26 @@ mod tests {
         );
         let borrowed: Vec<char> = group.panels_mut().into_iter().map(|panel| *panel).collect();
         assert_eq!(borrowed, ['a', 'b', 'c', 'd']);
+    }
+
+    /// Mapping a group keeps where each panel stands and what the group weighs,
+    /// and meets the panels in the order they are laid out.
+    #[test]
+    fn a_mapped_group_keeps_its_arrangement_and_weight() {
+        let group = PanelGroup::split(
+            Axis::Vertical,
+            0.5,
+            PanelGroup::one('a'),
+            PanelGroup::tabs('b', vec!['c']),
+        )
+        .with_weight(Weight::CHART);
+        let mut met = Vec::new();
+        let mapped = group.map(&mut |panel| {
+            met.push(panel);
+            panel.to_ascii_uppercase()
+        });
+        assert_eq!(met, ['a', 'b', 'c']);
+        assert_eq!(mapped.weight(), Weight::CHART);
+        assert_eq!(shape(&arrange(mapped)), "(A/BC)");
     }
 }

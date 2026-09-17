@@ -7,8 +7,7 @@ use bviz_ui_components::{DragEnd, Dropdown, DropdownEvent, Pending, ScrollbarCol
 use bviz_ui_graph_args::{GraphArgs, GraphSource};
 use bviz_ui_theme::{DataColors, Theme, ThemeColors};
 use bviz_ui_workspace::{
-    Document, Documents, Panel, PanelEvent, PanelGroup, PanelKind, ViewKind, ViewSpec, Weight,
-    document_label,
+    Document, Panel, PanelEvent, PanelGroup, PanelKind, ViewKind, ViewSpec, Weight, document_label,
 };
 use clap::error::ErrorKind;
 use clap::{CommandFactory, Parser};
@@ -693,13 +692,10 @@ pub fn open(load: impl Into<Load>, _window: &mut Window, cx: &mut App) -> Docume
     let load = load.into();
     let label = load.title;
     let model = cx.new(|cx| GraphModel::reading(load.built, cx));
-    let views = [ViewSpec::new({
-        let (label, model) = (label.clone(), model.clone());
+    let graph = ViewSpec::new({
+        let label = label.clone();
         move |cx| cx.new(|cx| GraphPanel::new(label.clone(), model.clone(), cx))
-    })];
-    let documents = Documents::global(cx);
-    let (_, [graph]) =
-        documents.update(cx, |documents, cx| documents.open(label.clone(), views, cx));
+    });
     Document::new(label, PanelGroup::one(graph).with_weight(Weight::CHART))
 }
 

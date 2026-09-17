@@ -18,7 +18,7 @@ use model::ConsoleModel;
 use bviz_terminal::Replay;
 use bviz_ui_components::Pending;
 use bviz_ui_console_args::{ConsoleArgs, ConsoleSource};
-use bviz_ui_workspace::{Document, Documents, PanelGroup, ViewSpec, Weight, document_label};
+use bviz_ui_workspace::{Document, PanelGroup, ViewSpec, Weight, document_label};
 use clap::error::ErrorKind;
 use clap::{CommandFactory, Parser};
 use gpui::{App, SharedString, Window, prelude::*, px, size};
@@ -52,13 +52,10 @@ pub fn open(load: impl Into<Load>, _window: &mut Window, cx: &mut App) -> Docume
     let load = load.into();
     let label = load.title;
     let model = cx.new(|cx| ConsoleModel::reading(load.replay, cx));
-    let views = [ViewSpec::new({
-        let (label, model) = (label.clone(), model.clone());
+    let console = ViewSpec::new({
+        let label = label.clone();
         move |cx| cx.new(|cx| ConsolePanel::new(label.clone(), model.clone(), cx))
-    })];
-    let documents = Documents::global(cx);
-    let (_, [console]) =
-        documents.update(cx, |documents, cx| documents.open(label.clone(), views, cx));
+    });
     Document::new(label, PanelGroup::one(console).with_weight(Weight::LOG))
 }
 

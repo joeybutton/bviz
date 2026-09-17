@@ -1,4 +1,4 @@
-use crate::{AnyPanel, Panel, ViewKind, Workspace};
+use crate::{AnyPanel, Panel, PanelGroup, ViewKind, Workspace};
 use gpui::{
     App, AppContext, Context, Entity, EntityId, Global, SharedString, Subscription, WeakEntity,
     Window,
@@ -128,21 +128,28 @@ impl Documents {
     }
 
     /// Registers a document labelled `label` showing `views`, and mints a panel
-    /// for each in the order given. The caller arranges those panels in a
-    /// window; the registry keeps only what it takes to mint them again.
-    pub fn open<const N: usize>(
+    /// for each where the group places it. The registry keeps only what it takes
+    /// to mint them again.
+    pub(crate) fn open(
         &mut self,
-        label: impl Into<SharedString>,
-        views: [ViewSpec; N],
+        label: SharedString,
+        views: PanelGroup<ViewSpec>,
         cx: &mut Context<Self>,
-    ) -> (DocumentId, [AnyPanel; N]) {
-        let panels = views.each_ref().map(|view| (view.mint)(cx));
-        let id = self.register(label.into(), Vec::from(views));
-        for panel in &panels {
+    ) -> PanelGroup {
+        let mut specs = Vec::new();
+        let mut minted = Vec::new();
+        let panels = views.map(&mut |spec: ViewSpec| {
+            let panel = (spec.mint)(cx);
+            specs.push(spec);
+            minted.push(panel.clone());
+            panel
+        });
+        let id = self.register(label, specs);
+        for panel in &minted {
             self.watch(id, panel.view_kind(), panel, cx);
         }
         cx.notify();
-        (id, panels)
+        panels
     }
 
     /// Shows `view` of `document` in `workspace`: the panel already showing it,
@@ -176,7 +183,8 @@ impl Documents {
     }
 
     /// Which panel shows `view` of `document`, if one does.
-    pub fn panel(&self, document: DocumentId, view: ViewKind) -> Option<EntityId> {
+    #[cfg(test)]
+    fn panel(&self, document: DocumentId, view: ViewKind) -> Option<EntityId> {
         self.view(document, view)?
             .live
             .as_ref()

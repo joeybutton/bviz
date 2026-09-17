@@ -1,4 +1,4 @@
-use crate::{Pane, PanelGroup};
+use crate::{Documents, Pane, PanelGroup, ViewSpec};
 use gpui::{
     AnyView, App, Context, Entity, EntityId, EventEmitter, FocusHandle, Focusable, Render,
     SharedString, Subscription, Window,
@@ -88,7 +88,7 @@ pub struct AnyPanel {
 }
 
 impl AnyPanel {
-    pub fn new<T: Panel>(panel: Entity<T>) -> Self {
+    pub(crate) fn new<T: Panel>(panel: Entity<T>) -> Self {
         Self {
             panel: Rc::new(panel),
             ordinal: None,
@@ -166,29 +166,39 @@ impl AnyPanel {
 /// documents.
 pub struct Document {
     label: SharedString,
-    panels: PanelGroup,
+    views: PanelGroup<ViewSpec>,
 }
 
 impl Document {
-    pub fn new(label: SharedString, panels: PanelGroup) -> Self {
-        Self { label, panels }
+    pub fn new(label: SharedString, views: PanelGroup<ViewSpec>) -> Self {
+        Self { label, views }
     }
 
-    /// The panels of `first` and `others` stacked as [`PanelGroup::stack`]
-    /// stacks them, and numbered.
-    pub(crate) fn stack(mut first: Self, mut others: Vec<Self>) -> PanelGroup {
+    /// The panels of `first` and `others`, each document registered with the
+    /// session's [`Documents`], stacked as [`PanelGroup::stack`] stacks them, and
+    /// numbered.
+    pub(crate) fn stack(first: Self, others: Vec<Self>, cx: &mut App) -> PanelGroup {
         let labels: Vec<SharedString> = iter::once(&first)
             .chain(&others)
             .map(|document| document.label.clone())
             .collect();
-        let documents = iter::once(&mut first).chain(&mut others);
-        for (document, ordinal) in documents.zip(shared_label_ordinals(&labels)) {
-            for panel in document.panels.panels_mut() {
-                panel.ordinal = ordinal;
-            }
-        }
-        let others = others.into_iter().map(|document| document.panels).collect();
-        PanelGroup::stack(first.panels, others)
+        let ordinals = shared_label_ordinals(&labels);
+        Documents::global(cx).update(cx, |documents, cx| {
+            let mut open = |document: Self, ordinal| {
+                let mut panels = documents.open(document.label, document.views, cx);
+                for panel in panels.panels_mut() {
+                    panel.ordinal = ordinal;
+                }
+                panels
+            };
+            let first = open(first, ordinals[0]);
+            let others = others
+                .into_iter()
+                .zip(&ordinals[1..])
+                .map(|(document, &ordinal)| open(document, ordinal))
+                .collect();
+            PanelGroup::stack(first, others)
+        })
     }
 }
 

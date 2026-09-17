@@ -75,7 +75,7 @@ pub struct Workspace {
 impl Workspace {
     /// Builds a workspace framing the arrangement `group` describes, showing and
     /// focusing its leading panel.
-    pub fn new(
+    pub(crate) fn new(
         app_name: impl Into<SharedString>,
         group: PanelGroup,
         window: &mut Window,
@@ -121,14 +121,14 @@ impl Workspace {
     /// Builds a workspace framing a region of the window per document: `first`
     /// across the top and each of `others` under it in the order given, every
     /// region laid out as its document's group describes.
-    pub fn with_documents(
+    pub(crate) fn with_documents(
         app_name: impl Into<SharedString>,
         first: Document,
         others: Vec<Document>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        Self::new(app_name, Document::stack(first, others), window, cx)
+        Self::new(app_name, Document::stack(first, others, cx), window, cx)
     }
 
     pub fn active_pane(&self) -> &Entity<Pane> {
@@ -186,14 +186,19 @@ impl Workspace {
     }
 
     /// Adds `panel` to the active pane and shows it.
-    pub fn add_panel(&mut self, panel: AnyPanel, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn add_panel(
+        &mut self,
+        panel: AnyPanel,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.active
             .update(cx, |pane, cx| pane.add(panel, window, cx));
     }
 
     /// Puts `panel` in a pane of its own beside the active pane, along `axis`,
     /// and makes that the active pane.
-    pub fn split(
+    pub(crate) fn split(
         &mut self,
         axis: Axis,
         panel: AnyPanel,
