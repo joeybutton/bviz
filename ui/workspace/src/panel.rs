@@ -112,10 +112,7 @@ impl AnyPanel {
     /// The plain title followed by its suffix, for a place that shows the title
     /// as one string.
     pub fn display_title(&self, cx: &App) -> SharedString {
-        match self.title_suffix() {
-            Some(suffix) => format!("{}{suffix}", self.plain_title(cx)).into(),
-            None => self.plain_title(cx),
-        }
+        numbered(self.plain_title(cx), self.ordinal)
     }
 
     pub fn status(&self, cx: &App) -> Option<SharedString> {
@@ -223,6 +220,14 @@ fn shared_label_ordinals(labels: &[SharedString]) -> Vec<Option<NonZeroUsize>> {
 
 fn ordinal_suffix(ordinal: NonZeroUsize) -> SharedString {
     format!(" ({ordinal})").into()
+}
+
+/// `name` followed by the suffix `ordinal` reads as, if there is one.
+pub(crate) fn numbered(name: SharedString, ordinal: Option<NonZeroUsize>) -> SharedString {
+    match ordinal {
+        Some(ordinal) => format!("{name}{}", ordinal_suffix(ordinal)).into(),
+        None => name,
+    }
 }
 
 /// [`Panel`] with its type parameter discharged, so a workspace can hold panels

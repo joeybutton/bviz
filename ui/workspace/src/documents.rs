@@ -1,3 +1,4 @@
+use crate::panel::numbered;
 use crate::{AnyPanel, Panel, PanelGroup, ViewKind, Workspace};
 use gpui::{
     App, AppContext, Context, Entity, EntityId, Global, SharedString, Subscription, WeakEntity,
@@ -59,6 +60,7 @@ pub enum ViewState {
 /// among what is open.
 pub struct OpenDocument {
     pub id: DocumentId,
+    /// How the document reads, number included.
     pub label: SharedString,
     pub views: Vec<OpenView>,
 }
@@ -92,6 +94,10 @@ struct Registered {
 }
 
 impl Registered {
+    fn name(&self) -> SharedString {
+        numbered(self.label.clone(), self.ordinal)
+    }
+
     fn view(&self, kind: ViewKind) -> Option<&View> {
         self.views.iter().find(|held| held.kind == kind)
     }
@@ -226,7 +232,7 @@ impl Documents {
             }
             open.push(OpenDocument {
                 id: document.id,
-                label: document.label.clone(),
+                label: document.name(),
                 views,
             });
         }
@@ -408,6 +414,25 @@ mod tests {
     /// application installs.
     fn opened(documents: &mut Documents, document: DocumentId, view: ViewKind, panel: EntityId) {
         documents.opened(document, view, panel, Subscription::new(|| {}));
+    }
+
+    /// A document given a number is listed with it, and one given none under its
+    /// bare label.
+    #[test]
+    fn a_document_is_listed_under_its_number() {
+        let mut documents = Documents::new();
+        for (label, ordinal) in [
+            ("build.profile.gz", NonZeroUsize::new(1)),
+            ("build.bep", None),
+            ("build.profile.gz", NonZeroUsize::new(2)),
+        ] {
+            documents.register(label.into(), ordinal, vec![spec(TIMELINE)]);
+        }
+        let names: Vec<SharedString> = documents.documents.iter().map(Registered::name).collect();
+        assert_eq!(
+            names,
+            ["build.profile.gz (1)", "build.bep", "build.profile.gz (2)"]
+        );
     }
 
     #[test]
