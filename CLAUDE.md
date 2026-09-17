@@ -31,11 +31,12 @@ Interactive visualization and inspection tool for Bazel builds.
   it, one commit per bullet. When unsure whether two changes are one concern,
   default to splitting; over-splitting is cheap to read, under-splitting is not.
 - Commit only verified work: build and run/test it first, and pass the format
-  and lint checks CI enforces — `bazel build --config=rustfmt //...` and
-  `bazel build --config=clippy //...`; apply formatting with
-  `bazel run @rules_rs_rules_rust//:rustfmt`. For toolchain changes,
-  confirm with `--toolchain_resolution_debug`. Report outcomes honestly; flag
-  side effects.
+  and lint checks CI enforces — `bazel build --config=rustfmt //...`,
+  `bazel build --config=clippy //...`, and `bazel test //:buildifier_test`
+  for BUILD, `.bzl`, and `MODULE.bazel` files; apply formatting with
+  `bazel run @rules_rs_rules_rust//:rustfmt` and `bazel run //:buildifier`.
+  For toolchain changes, confirm with `--toolchain_resolution_debug`. Report
+  outcomes honestly; flag side effects.
 - A change to visual output is verified by viewing the rendered result on real
   input, not just by checking that the output is structurally well-formed —
   visual faults (overlaps, mis-routed or detached connectors, clipping) do not
