@@ -151,13 +151,6 @@ impl<T> PanelGroup<T> {
             weight: self.weight,
         }
     }
-
-    /// The panels, in the order they are laid out.
-    pub fn panels_mut(&mut self) -> Vec<&mut T> {
-        let mut panels = Vec::new();
-        self.arrangement.push_panels_mut(&mut panels);
-        panels
-    }
 }
 
 impl<T> Arrangement<T> {
@@ -192,20 +185,6 @@ impl<T> Arrangement<T> {
                 first: Box::new(first.map(panel)),
                 second: Box::new(second.map(panel)),
             },
-        }
-    }
-
-    fn push_panels_mut<'a>(&'a mut self, out: &mut Vec<&'a mut T>) {
-        match self {
-            Self::One(panel) => out.push(panel),
-            Self::Tabs { first, rest } => {
-                out.push(first);
-                out.extend(rest);
-            }
-            Self::Split { first, second, .. } => {
-                first.push_panels_mut(out);
-                second.push_panels_mut(out);
-            }
         }
     }
 }
@@ -488,23 +467,6 @@ mod tests {
         assert_eq!(shape(&layout), "(a/(c/d))");
         assert_eq!(layout.remove(&"c".to_string()), Removal::Removed);
         assert_eq!(shape(&layout), "(a/d)");
-    }
-
-    #[test]
-    fn the_panels_read_in_the_order_they_are_laid_out() {
-        let mut group = PanelGroup::split(
-            Axis::Vertical,
-            0.5,
-            PanelGroup::tabs('a', vec!['b']),
-            PanelGroup::split(
-                Axis::Horizontal,
-                0.5,
-                PanelGroup::one('c'),
-                PanelGroup::one('d'),
-            ),
-        );
-        let borrowed: Vec<char> = group.panels_mut().into_iter().map(|panel| *panel).collect();
-        assert_eq!(borrowed, ['a', 'b', 'c', 'd']);
     }
 
     /// Mapping a group keeps where each panel stands and what the group weighs,

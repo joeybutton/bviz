@@ -3,6 +3,7 @@ use gpui::{
     App, AppContext, Context, Entity, EntityId, Global, SharedString, Subscription, WeakEntity,
     Window,
 };
+use std::num::NonZeroUsize;
 use std::rc::Rc;
 
 /// Identity of a document the session holds open. Two readings of one file are
@@ -20,7 +21,7 @@ impl DocumentId {
 
 /// Builds a panel showing one view of a document. Takes no window, so a view can
 /// be minted wherever the reader asks for it.
-type Mint = Rc<dyn Fn(&mut App) -> AnyPanel>;
+type Mint = Rc<dyn Fn(Option<NonZeroUsize>, &mut App) -> AnyPanel>;
 
 /// One view a document can show, and how to build a panel showing it.
 pub struct ViewSpec {
@@ -37,7 +38,7 @@ impl ViewSpec {
         Self {
             kind: kind.view,
             label: kind.label,
-            mint: Rc::new(move |cx| AnyPanel::new(mint(cx))),
+            mint: Rc::new(move |ordinal, cx| AnyPanel::new(mint(cx), ordinal)),
         }
     }
 }
@@ -85,7 +86,19 @@ pub struct Documents {
 struct Registered {
     id: DocumentId,
     label: SharedString,
+    /// The number the window gave this document.
+    ordinal: Option<NonZeroUsize>,
     views: Vec<View>,
+}
+
+impl Registered {
+    fn view(&self, kind: ViewKind) -> Option<&View> {
+        self.views.iter().find(|held| held.kind == kind)
+    }
+
+    fn view_mut(&mut self, kind: ViewKind) -> Option<&mut View> {
+        self.views.iter_mut().find(|held| held.kind == kind)
+    }
 }
 
 struct View {
@@ -127,24 +140,25 @@ impl Documents {
         }
     }
 
-    /// Registers a document labelled `label` showing `views`, and mints a panel
-    /// for each where the group places it. The registry keeps only what it takes
-    /// to mint them again.
+    /// Registers a document labelled `label` and numbered `ordinal` showing
+    /// `views`, and mints a panel for each where the group places it. The
+    /// registry keeps only what it takes to mint them again.
     pub(crate) fn open(
         &mut self,
         label: SharedString,
+        ordinal: Option<NonZeroUsize>,
         views: PanelGroup<ViewSpec>,
         cx: &mut Context<Self>,
     ) -> PanelGroup {
         let mut specs = Vec::new();
         let mut minted = Vec::new();
         let panels = views.map(&mut |spec: ViewSpec| {
-            let panel = (spec.mint)(cx);
+            let panel = (spec.mint)(ordinal, cx);
             specs.push(spec);
             minted.push(panel.clone());
             panel
         });
-        let id = self.register(label, specs);
+        let id = self.register(label, ordinal, specs);
         for panel in &minted {
             self.watch(id, panel.view_kind(), panel, cx);
         }
@@ -164,15 +178,19 @@ impl Documents {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(found) = self.view(document, view) else {
+        let Some(held) = self.registered(document) else {
             return;
         };
+        let Some(found) = held.view(view) else {
+            return;
+        };
+        let ordinal = held.ordinal;
         let live = found.live.as_ref().map(|live| live.panel);
         let mint = found.mint.clone();
         match live {
             Some(panel) => self.reveal(panel, workspace, window, cx),
             None => {
-                let panel = mint(cx);
+                let panel = mint(ordinal, cx);
                 self.watch(document, view, &panel, cx);
                 workspace.update(cx, |workspace, cx| {
                     workspace.add_panel(panel, window, cx);
@@ -185,7 +203,8 @@ impl Documents {
     /// Which panel shows `view` of `document`, if one does.
     #[cfg(test)]
     fn panel(&self, document: DocumentId, view: ViewKind) -> Option<EntityId> {
-        self.view(document, view)?
+        self.registered(document)?
+            .view(view)?
             .live
             .as_ref()
             .map(|live| live.panel)
@@ -294,12 +313,18 @@ impl Documents {
         }
     }
 
-    fn register(&mut self, label: SharedString, views: Vec<ViewSpec>) -> DocumentId {
+    fn register(
+        &mut self,
+        label: SharedString,
+        ordinal: Option<NonZeroUsize>,
+        views: Vec<ViewSpec>,
+    ) -> DocumentId {
         let id = DocumentId(self.next);
         self.next += 1;
         self.documents.push(Registered {
             id,
             label,
+            ordinal,
             views: views
                 .into_iter()
                 .map(|spec| View {
@@ -313,22 +338,16 @@ impl Documents {
         id
     }
 
-    fn view(&self, document: DocumentId, view: ViewKind) -> Option<&View> {
-        self.documents
-            .iter()
-            .find(|held| held.id == document)?
-            .views
-            .iter()
-            .find(|held| held.kind == view)
+    fn registered(&self, document: DocumentId) -> Option<&Registered> {
+        self.documents.iter().find(|held| held.id == document)
+    }
+
+    fn registered_mut(&mut self, document: DocumentId) -> Option<&mut Registered> {
+        self.documents.iter_mut().find(|held| held.id == document)
     }
 
     fn view_mut(&mut self, document: DocumentId, view: ViewKind) -> Option<&mut View> {
-        self.documents
-            .iter_mut()
-            .find(|held| held.id == document)?
-            .views
-            .iter_mut()
-            .find(|held| held.kind == view)
+        self.registered_mut(document)?.view_mut(view)
     }
 
     fn workspaces(&self) -> Vec<Entity<Workspace>> {
@@ -365,7 +384,7 @@ mod tests {
         ViewSpec {
             kind,
             label: kind.as_str(),
-            mint: Rc::new(move |_| panic!("{} mints no panel here", kind.as_str())),
+            mint: Rc::new(move |_, _| panic!("{} mints no panel here", kind.as_str())),
         }
     }
 
@@ -373,8 +392,8 @@ mod tests {
     /// flame graph.
     fn registry(labels: [&str; 2]) -> (Documents, [DocumentId; 2]) {
         let mut documents = Documents::new();
-        let ids =
-            labels.map(|label| documents.register(label.into(), vec![spec(TIMELINE), spec(FLAME)]));
+        let ids = labels
+            .map(|label| documents.register(label.into(), None, vec![spec(TIMELINE), spec(FLAME)]));
         (documents, ids)
     }
 

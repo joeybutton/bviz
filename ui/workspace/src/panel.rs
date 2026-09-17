@@ -88,10 +88,10 @@ pub struct AnyPanel {
 }
 
 impl AnyPanel {
-    pub(crate) fn new<T: Panel>(panel: Entity<T>) -> Self {
+    pub(crate) fn new<T: Panel>(panel: Entity<T>, ordinal: Option<NonZeroUsize>) -> Self {
         Self {
             panel: Rc::new(panel),
-            ordinal: None,
+            ordinal,
         }
     }
 
@@ -174,9 +174,9 @@ impl Document {
         Self { label, views }
     }
 
-    /// The panels of `first` and `others`, each document registered with the
-    /// session's [`Documents`], stacked as [`PanelGroup::stack`] stacks them, and
-    /// numbered.
+    /// The panels of `first` and `others`, each document numbered and registered
+    /// with the session's [`Documents`], stacked as [`PanelGroup::stack`] stacks
+    /// them.
     pub(crate) fn stack(first: Self, others: Vec<Self>, cx: &mut App) -> PanelGroup {
         let labels: Vec<SharedString> = iter::once(&first)
             .chain(&others)
@@ -185,11 +185,7 @@ impl Document {
         let ordinals = shared_label_ordinals(&labels);
         Documents::global(cx).update(cx, |documents, cx| {
             let mut open = |document: Self, ordinal| {
-                let mut panels = documents.open(document.label, document.views, cx);
-                for panel in panels.panels_mut() {
-                    panel.ordinal = ordinal;
-                }
-                panels
+                documents.open(document.label, ordinal, document.views, cx)
             };
             let first = open(first, ordinals[0]);
             let others = others
