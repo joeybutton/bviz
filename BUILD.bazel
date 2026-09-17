@@ -17,5 +17,8 @@ buildifier_test(
     lint_mode = "warn",
     mode = "diff",
     no_sandbox = True,
+    # It checks the source tree, which a remote worker does not have, so a
+    # remote run passes without checking anything.
+    tags = ["no-remote-exec"],
     workspace = "//:MODULE.bazel",
 )
