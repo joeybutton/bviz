@@ -11,7 +11,7 @@ use std::cell::RefCell;
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashMap, HashSet};
 
-use crate::graph::{Edge, EdgeKind, Graph, id_span};
+use crate::graph::{EdgeKind, Graph, id_span};
 use crate::intern::Id;
 
 /// The ids of nodes that are containers (named as some node's `parent`).
@@ -118,9 +118,11 @@ pub struct Overflow {
 ///
 /// `reduced` is `graph` with its transitively-redundant edges removed where the
 /// view being sized draws the reduction, and `None` where it draws every edge.
-/// It decides which edges a candidate view is measured by, since a cap is only
-/// worth anything if it counts what the layout engine is handed. Its nodes must
-/// be `graph`'s, which a transitive reduction leaves untouched.
+/// A view keeps an edge by the pair of boxes it runs between, so the reduction
+/// decides which pairs a candidate is measured over while the count itself is of
+/// `graph`'s own edges across those pairs — a cap is only worth anything if it
+/// counts what the layout engine is handed. Its nodes must be `graph`'s, which a
+/// transitive reduction leaves untouched.
 pub fn default_expansion(
     graph: &Graph,
     reduced: Option<&Graph>,
@@ -171,7 +173,7 @@ fn largest_fitting(
     max_nodes: usize,
     max_edges: usize,
 ) -> Result<HashSet<Id>, Overflow> {
-    let drawn = IndexedGraph::drawing(graph, &reduced.unwrap_or(graph).edges);
+    let drawn = IndexedGraph::drawing(graph, reduced);
     let fitting = largest_fitting_prefix(&drawn, &order, max_nodes, max_edges)?;
     Ok(order[..fitting].iter().copied().collect())
 }
@@ -327,17 +329,20 @@ struct IndexedGraph {
     /// Whether each id names a node of the graph.
     present: Vec<bool>,
     edges: Vec<(u32, u32, EdgeKind)>,
+    /// The edges deciding which box pairs a view keeps, absent where it keeps
+    /// every pair.
+    skeleton: Option<Vec<(u32, u32)>>,
 }
 
 impl IndexedGraph {
     fn new(graph: &Graph) -> Self {
-        Self::drawing(graph, &graph.edges)
+        Self::drawing(graph, None)
     }
 
-    /// `graph`'s containment forest over `edges` in place of its own, for sizing
-    /// a view that draws a subset of the graph's edges — every id `edges` names
-    /// must be one `graph` names.
-    fn drawing(graph: &Graph, edges: &[Edge]) -> Self {
+    /// `graph`'s containment forest over its own edges, of which a view keeps
+    /// those folding onto a pair `skeleton` also folds onto — every id
+    /// `skeleton` names must be one `graph` names.
+    fn drawing(graph: &Graph, skeleton: Option<&Graph>) -> Self {
         let child_counts = child_counts(graph);
         let span = id_span(graph);
         let mut present: Vec<bool> = vec![false; span];
@@ -351,12 +356,24 @@ impl IndexedGraph {
             parent[i] = node.parent.map(|p| p.0).filter(|&p| present[p as usize]);
             singleton[i] = child_counts.get(&node.id) == Some(&1);
         }
-        let edges = edges.iter().map(|e| (e.from.0, e.to.0, e.kind)).collect();
+        let edges = graph
+            .edges
+            .iter()
+            .map(|e| (e.from.0, e.to.0, e.kind))
+            .collect();
+        let skeleton = skeleton.map(|skeleton| {
+            skeleton
+                .edges
+                .iter()
+                .map(|e| (e.from.0, e.to.0))
+                .collect::<Vec<(u32, u32)>>()
+        });
         Self {
             parent,
             singleton,
             present,
             edges,
+            skeleton,
         }
     }
 
@@ -407,7 +424,8 @@ impl IndexedGraph {
     /// The (node, edge) counts of the view collapsing every container outside
     /// `expanded` (given as indices), without materializing it: representatives
     /// that are graph nodes, and edges remapped to representatives, self-loops
-    /// dropped, deduped by `(from, to, kind)`.
+    /// dropped, those over a pair the view leaves out dropped, and the rest
+    /// deduped by `(from, to, kind)`.
     fn counts(&self, expanded: &[u32]) -> (usize, usize) {
         let rep = self.reps(expanded);
         let nodes = rep
@@ -415,13 +433,28 @@ impl IndexedGraph {
             .enumerate()
             .filter(|&(i, &r)| r == i as u32)
             .count();
+        let kept = self.kept_pairs(&rep);
         let mut seen: HashSet<(u32, u32, EdgeKind)> = HashSet::with_capacity(self.edges.len());
         for &(from, to, kind) in &self.edges {
-            if let Some((from, to)) = Self::folded(&rep, from, to) {
-                seen.insert((from, to, kind));
+            if let Some(pair) = Self::folded(&rep, from, to)
+                && kept.as_ref().is_none_or(|kept| kept.contains(&pair))
+            {
+                seen.insert((pair.0, pair.1, kind));
             }
         }
         (nodes, seen.len())
+    }
+
+    /// The box pairs a view over `rep` keeps, or `None` where it keeps every
+    /// pair its edges fold onto.
+    fn kept_pairs(&self, rep: &[u32]) -> Option<HashSet<(u32, u32)>> {
+        let skeleton = self.skeleton.as_ref()?;
+        Some(
+            skeleton
+                .iter()
+                .filter_map(|&(from, to)| Self::folded(rep, from, to))
+                .collect(),
+        )
     }
 }
 
@@ -824,6 +857,40 @@ mod tests {
         assert_eq!(
             default_expansion(&g, Some(&reduced), 100, between_the_two),
             Ok(open)
+        );
+    }
+
+    /// A view keeps an edge by the pair of boxes it runs between, so a pair the
+    /// reduction leaves brings with it every edge the graph has between those
+    /// two, one per query that found the dependency. The budget counts them all.
+    #[test]
+    fn a_reduced_view_is_sized_on_every_kind_over_a_pair_it_keeps() {
+        let mut g = Graph::new();
+        let mut names = Names::default();
+        let source = names.intern("source");
+        g.add_node(source, "source", Kind::Action, None);
+        let container = names.intern("C");
+        g.add_node(container, "C", Kind::Package, None);
+        let (near, far) = (names.intern("C.near"), names.intern("C.far"));
+        for leaf in [near, far] {
+            g.add_node(leaf, "leaf", Kind::Action, Some(container));
+        }
+        // `source -> far` is implied by `source -> near -> far`, so the
+        // reduction drops it while the fold takes both to one pair of boxes.
+        g.add_edge(source, near, EdgeKind::Query);
+        g.add_edge(near, far, EdgeKind::Query);
+        g.add_edge(source, far, EdgeKind::Cquery);
+        let reduced = crate::reduce::transitive_reduction(&g);
+
+        // The root view is `source` beside the folded `C`, joined by the two
+        // edges into it, whose kinds differ.
+        assert_eq!(
+            default_expansion(&g, Some(&reduced), 100, 1),
+            Err(Overflow { nodes: 2, edges: 2 }),
+        );
+        assert!(
+            default_expansion(&g, Some(&reduced), 100, 2).is_ok(),
+            "two edges over one kept pair are past a cap of two",
         );
     }
 
