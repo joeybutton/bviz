@@ -5,20 +5,28 @@
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 
-use bazel_query_proto::blaze_query::Target;
+use bazel_query_proto::blaze_query::{Attribute, Target, attribute::Tristate};
 
+#[cfg(test)]
+use crate::facets::Facets;
+use crate::facets::{FacetsBuilder, Tri};
 use crate::graph::{EdgeKind, Graph, Kind};
 use crate::intern::{Id, Names};
 use crate::label::{self, PackageHierarchy, RepoMapping, label_and_kind};
 
 #[cfg(test)]
-fn build(targets: &[Target]) -> (Graph, Names) {
+fn build(targets: &[Target]) -> (Graph, Names, Facets) {
+    build_in(targets, &RepoMapping::default())
+}
+
+#[cfg(test)]
+fn build_in(targets: &[Target], repos: &RepoMapping) -> (Graph, Names, Facets) {
     let refs: Vec<&Target> = targets.iter().collect();
-    let repos = RepoMapping::default();
-    let packages = package_keys(targets, &repos);
+    let packages = package_keys(targets, repos);
     let mut names = Names::default();
-    let graph = build_with_packages(&refs, &packages, &repos, &mut names);
-    (graph, names)
+    let mut facets = FacetsBuilder::default();
+    let graph = build_with_packages(&refs, &packages, repos, &mut names, &mut facets);
+    (graph, names, facets.seal())
 }
 
 /// Every label this query names.
@@ -57,6 +65,7 @@ pub(crate) fn build_with_packages(
     packages: &BTreeSet<(String, String)>,
     repos: &RepoMapping,
     names: &mut Names,
+    facets: &mut FacetsBuilder,
 ) -> Graph {
     let mut graph = Graph::new();
     // Node id per label, so a label seen more than once maps to one node.
@@ -66,16 +75,17 @@ pub(crate) fn build_with_packages(
 
     // Pass 1: one leaf node per target under its package container.
     for target in targets {
-        let Some((label, kind)) = label_and_kind(target) else {
+        let Some((written, kind)) = label_and_kind(target) else {
             continue;
         };
-        let label = repos.canonicalize_label(label);
+        let label = repos.canonicalize_label(written);
         if node_by_label.contains_key(label.as_ref()) {
             continue;
         }
         let node_id = names.intern(&format!("target:{label}"));
         let parent = hierarchy.package_box(&label);
         graph.add_node(node_id, label::target_label(&label), kind, parent);
+        describe_target(facets, target, node_id, parent, &label, written);
         node_by_label.insert(label.into_owned(), node_id);
     }
 
@@ -102,22 +112,135 @@ pub(crate) fn build_with_packages(
     graph
 }
 
+/// Records what `target` states about the node it became: the `canonical` label
+/// placing it in `package`, and, where the target is a rule, how it was
+/// declared. `written` is the label as the input printed it, whose repository
+/// part is the apparent name `canonical`'s repository was reached by.
+///
+/// A rule's attributes reach the proto only under `--proto:output_rule_attrs`,
+/// so a rule stating none is as ordinary as one stating all of them.
+fn describe_target(
+    facets: &mut FacetsBuilder,
+    target: &Target,
+    node: Id,
+    package: Option<Id>,
+    canonical: &str,
+    written: &str,
+) {
+    facets.facets().set_label(node, node);
+    if let Some(package) = package {
+        facets.facets().set_package(node, package);
+    }
+    if let Some(canonical_repo) = label::label_repo(canonical) {
+        let apparent = label::label_repo(written).filter(|&name| name != canonical_repo);
+        let repo = facets.facets().intern_repo(canonical_repo, apparent);
+        facets.facets().set_repo(node, Some(repo));
+    }
+    let Some(rule) = target.rule.as_ref() else {
+        return;
+    };
+    let rule_class = facets.facets().intern_rule_class(&rule.rule_class);
+    facets.facets().set_rule_class(node, Some(rule_class));
+    for attribute in &rule.attribute {
+        match attribute.name.as_str() {
+            "tags" => facets.set_tags(node, attribute.string_list_value.iter().map(String::as_str)),
+            "testonly" => facets.facets().set_testonly(node, yes_or_no(attribute)),
+            _ => {}
+        }
+    }
+}
+
+/// The value of an attribute that says yes or no, which the proto states as a
+/// boolean, or as a tristate for an attribute declared tristate, whose `AUTO`
+/// says neither. An attribute whose value is a `select` states none of the
+/// three, so it too says neither.
+fn yes_or_no(attribute: &Attribute) -> Tri {
+    if let Some(value) = attribute.boolean_value {
+        return if value { Tri::Yes } else { Tri::No };
+    }
+    match attribute
+        .tristate_value
+        .and_then(|v| Tristate::try_from(v).ok())
+    {
+        Some(Tristate::Yes) => Tri::Yes,
+        Some(Tristate::No) => Tri::No,
+        Some(Tristate::Auto) | None => Tri::Unknown,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::facets::{Origin, RuleCategory};
     use crate::test_support::{edges, find, parent_of};
-    use bazel_query_proto::blaze_query::{GeneratedFile, Rule, SourceFile, target::Discriminator};
+    use bazel_query_proto::blaze_query::{
+        GeneratedFile, Rule, SourceFile, attribute::Discriminator as AttributeType,
+        target::Discriminator,
+    };
 
     fn rule(name: &str, inputs: &[&str]) -> Target {
         Target {
             r#type: Discriminator::Rule as i32,
             rule: Some(Rule {
                 name: name.to_string(),
+                rule_class: "cc_library".to_string(),
                 rule_input: inputs.iter().map(|s| s.to_string()).collect(),
                 ..Default::default()
             }),
             ..Default::default()
         }
+    }
+
+    fn declared(name: &str, rule_class: &str, attributes: Vec<Attribute>) -> Target {
+        Target {
+            r#type: Discriminator::Rule as i32,
+            rule: Some(Rule {
+                name: name.to_string(),
+                rule_class: rule_class.to_string(),
+                attribute: attributes,
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    fn string_list(name: &str, values: &[&str]) -> Attribute {
+        Attribute {
+            name: name.to_string(),
+            r#type: AttributeType::StringList as i32,
+            string_list_value: values.iter().map(|v| v.to_string()).collect(),
+            ..Default::default()
+        }
+    }
+
+    fn boolean(name: &str, value: bool) -> Attribute {
+        Attribute {
+            name: name.to_string(),
+            r#type: AttributeType::Boolean as i32,
+            boolean_value: Some(value),
+            ..Default::default()
+        }
+    }
+
+    fn tristate(name: &str, value: Tristate) -> Attribute {
+        Attribute {
+            name: name.to_string(),
+            r#type: AttributeType::Tristate as i32,
+            tristate_value: Some(value as i32),
+            ..Default::default()
+        }
+    }
+
+    /// The tags `facets` records for `node`, in a stable order.
+    fn tags_of(facets: &Facets, node: Id) -> Vec<&str> {
+        let mut tags: Vec<&str> = facets
+            .tags()
+            .values(node)
+            .iter()
+            .map(|&tag| facets.strings().resolve(tag))
+            .collect();
+        tags.sort_unstable();
+        tags
     }
 
     fn source(name: &str) -> Target {
@@ -144,7 +267,7 @@ mod tests {
 
     #[test]
     fn rule_nests_in_its_package_container() {
-        let (graph, names) = build(&[rule("//foo:app", &[])]);
+        let (graph, names, _) = build(&[rule("//foo:app", &[])]);
 
         assert_eq!(find(&graph, &names, "pkg:foo").kind, Kind::Package);
         assert_eq!(find(&graph, &names, "pkg:foo").label, "//foo");
@@ -159,7 +282,7 @@ mod tests {
 
     #[test]
     fn source_and_generated_files_get_their_kinds() {
-        let (graph, names) = build(&[source("//foo:in.c"), generated("//foo:out.o")]);
+        let (graph, names, _) = build(&[source("//foo:in.c"), generated("//foo:out.o")]);
 
         assert_eq!(find(&graph, &names, "target://foo:in.c").kind, Kind::Source);
         assert_eq!(
@@ -171,14 +294,14 @@ mod tests {
     #[test]
     fn rule_input_to_present_target_is_an_edge() {
         // Input -> dependent: the producer is `from`, the consuming rule is `to`.
-        let (graph, names) = build(&[source("//foo:in.c"), rule("//foo:app", &["//foo:in.c"])]);
+        let (graph, names, _) = build(&[source("//foo:in.c"), rule("//foo:app", &["//foo:in.c"])]);
 
         assert!(edges(&graph, &names).contains(&("target://foo:in.c", "target://foo:app")));
     }
 
     #[test]
     fn rule_input_to_absent_label_is_dropped() {
-        let (graph, names) = build(&[rule("//foo:app", &["//bar:missing"])]);
+        let (graph, names, _) = build(&[rule("//foo:app", &["//bar:missing"])]);
 
         assert!(
             !graph
@@ -190,8 +313,91 @@ mod tests {
     }
 
     #[test]
+    fn a_rules_facets_state_how_it_was_declared_and_where_it_sits() {
+        let (_, names, facets) = build(&[declared(
+            "//foo:app",
+            "cc_test",
+            vec![
+                string_list("tags", &["manual", "flaky"]),
+                boolean("testonly", true),
+            ],
+        )]);
+
+        let node = names.get("target://foo:app").unwrap();
+        let rule_class = facets.rule_class(node).unwrap();
+        assert_eq!(facets.strings().resolve(rule_class.sym()), "cc_test");
+        assert_eq!(facets.rule_category(rule_class), Some(RuleCategory::Test));
+        assert_eq!(tags_of(&facets, node), ["flaky", "manual"]);
+        assert_eq!(facets.testonly(node), Tri::Yes);
+        assert_eq!(facets.package(node), names.get("pkg:foo"));
+        assert_eq!(facets.label(node), Some(node));
+        let repo = facets.repo(node).unwrap();
+        assert_eq!(facets.strings().resolve(repo.sym()), "");
+        assert_eq!(facets.repo_entry(repo).unwrap().origin, Origin::Main);
+    }
+
+    #[test]
+    fn a_testonly_attribute_written_as_a_tristate_reads_the_same() {
+        let cases = [
+            (Tristate::Yes, Tri::Yes),
+            (Tristate::No, Tri::No),
+            (Tristate::Auto, Tri::Unknown),
+        ];
+
+        for (written, expected) in cases {
+            let (_, names, facets) = build(&[declared(
+                "//foo:app",
+                "cc_library",
+                vec![tristate("testonly", written)],
+            )]);
+
+            let node = names.get("target://foo:app").unwrap();
+            assert_eq!(facets.testonly(node), expected, "{written:?}");
+        }
+    }
+
+    #[test]
+    fn a_file_target_carries_no_rule_class_but_is_still_placed() {
+        let (_, names, facets) = build(&[source("//foo:in.c")]);
+
+        let node = names.get("target://foo:in.c").unwrap();
+        assert_eq!(facets.rule_class(node), None);
+        assert_eq!(facets.testonly(node), Tri::Unknown);
+        assert!(tags_of(&facets, node).is_empty());
+        assert_eq!(facets.package(node), names.get("pkg:foo"));
+        assert_eq!(facets.label(node), Some(node));
+        assert!(facets.repo(node).is_some());
+    }
+
+    #[test]
+    fn a_rule_printed_without_its_attributes_states_no_tags_or_testonly() {
+        let (_, names, facets) = build(&[declared("//foo:app", "cc_library", vec![])]);
+
+        let node = names.get("target://foo:app").unwrap();
+        assert!(facets.rule_class(node).is_some());
+        assert!(tags_of(&facets, node).is_empty());
+        assert_eq!(facets.testonly(node), Tri::Unknown);
+    }
+
+    #[test]
+    fn an_apparent_label_records_the_canonical_repository_it_reaches() {
+        let repos = RepoMapping::infer(["somerepo+"].into_iter());
+
+        let (_, names, facets) = build_in(&[rule("@somerepo//foo:lib", &[])], &repos);
+
+        let node = names.get("target:@@somerepo+//foo:lib").unwrap();
+        let repo = facets.repo(node).unwrap();
+        assert_eq!(facets.strings().resolve(repo.sym()), "somerepo+");
+        let apparent = facets.repo_entry(repo).unwrap().apparent;
+        assert_eq!(
+            apparent.map(|name| facets.strings().resolve(name)),
+            Some("somerepo")
+        );
+    }
+
+    #[test]
     fn external_target_nests_in_repo_qualified_package() {
-        let (graph, names) = build(&[rule("//foo:x", &[]), rule("@somerepo//foo:y", &[])]);
+        let (graph, names, _) = build(&[rule("//foo:x", &[]), rule("@somerepo//foo:y", &[])]);
 
         assert_eq!(parent_of(&graph, &names, "target://foo:x"), Some("pkg:foo"));
         assert_eq!(find(&graph, &names, "pkg:foo").label, "//foo");

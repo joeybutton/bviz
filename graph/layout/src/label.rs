@@ -33,6 +33,13 @@ pub(crate) fn canonical_repo(label: &str) -> Option<&str> {
     (!canonical.is_empty()).then_some(canonical)
 }
 
+/// The repository a label names, with any sigil stripped: `@@r+//a:b` -> `r+`,
+/// `@r//a:b` -> `r`, and the main repository's empty name for `//a:b`. `None`
+/// where the label names no package.
+pub(crate) fn label_repo(label: &str) -> Option<&str> {
+    parse_package(label).map(|(repo, _)| repo.trim_start_matches('@'))
+}
+
 /// The owned (repository, package path) key of a canonical label's package.
 fn package_key(label: &str) -> Option<(String, String)> {
     parse_package(label).map(|(repo, path)| (repo.to_string(), path.to_string()))
@@ -584,6 +591,15 @@ mod tests {
         assert_eq!(canonical_repo("@somerepo//foo:bar"), None);
         assert_eq!(canonical_repo("//foo:bar"), None);
         assert_eq!(canonical_repo("@@//foo:bar"), None);
+    }
+
+    #[test]
+    fn label_repo_strips_the_sigil_off_the_repository_part() {
+        assert_eq!(label_repo("@@somerepo+//foo:bar"), Some("somerepo+"));
+        assert_eq!(label_repo("@somerepo//foo:bar"), Some("somerepo"));
+        assert_eq!(label_repo("//foo:bar"), Some(""));
+        assert_eq!(label_repo("@@//foo:bar"), Some(""));
+        assert_eq!(label_repo("bar"), None);
     }
 
     #[test]

@@ -14,7 +14,7 @@ use std::collections::{BTreeSet, HashSet};
 use bazel_query_proto::analysis::{ActionGraphContainer, CqueryResult};
 use bazel_query_proto::blaze_query::Target;
 
-use crate::facets::Facets;
+use crate::facets::{Facets, FacetsBuilder};
 use crate::graph::Graph;
 use crate::intern::{Id, Names};
 use crate::label::{RepoMapping, canonical_repo};
@@ -30,6 +30,7 @@ pub fn build_joint(
     let union = package_union(aquery, cquery, query, &repos);
     let labeled_outputs = labeled_outputs(cquery, query, &repos);
     let mut names = Names::default();
+    let mut facets = FacetsBuilder::default();
     let graphs = build_inputs(
         aquery,
         cquery,
@@ -39,8 +40,9 @@ pub fn build_joint(
         &labeled_outputs,
         &repos,
         &mut names,
+        &mut facets,
     );
-    canonicalize(merge(graphs), &names, Facets::default())
+    canonicalize(merge(graphs), &names, facets.seal())
 }
 
 /// The apparent-to-canonical repository mapping inferred from every canonical
@@ -106,6 +108,7 @@ fn build_inputs(
     labeled_outputs: &HashSet<String>,
     repos: &RepoMapping,
     names: &mut Names,
+    facets: &mut FacetsBuilder,
 ) -> Vec<Graph> {
     let mut graphs: Vec<Graph> = Vec::new();
     if let Some(a) = aquery {
@@ -123,7 +126,9 @@ fn build_inputs(
     }
     if let Some(q) = query {
         let refs: Vec<&Target> = q.iter().collect();
-        graphs.push(query::build_with_packages(&refs, union, repos, names));
+        graphs.push(query::build_with_packages(
+            &refs, union, repos, names, facets,
+        ));
     }
     graphs
 }

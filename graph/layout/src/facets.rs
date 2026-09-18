@@ -6,7 +6,7 @@
 //! is the filter's own; node ids keep theirs, whose indices double as positions
 //! in the node arrays.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::num::NonZeroU32;
 
 use crate::intern::Id;
@@ -318,6 +318,11 @@ impl SparseFacetBuilder {
 /// The package and label facets hold the id of the node whose name already
 /// spells them out, the package box and the target, so that neither costs a
 /// second copy of the label text the graph's `Names` holds.
+///
+/// A facet is filled only where the node carries none, so the first input to
+/// state one wins and a later input leaves it as it stands. Several inputs
+/// describing one node then settle its facets the way the graph settles the node
+/// itself, by first arrival, with no reconciliation pass over the merged result.
 #[derive(Default, Clone)]
 pub struct Facets {
     strings: FacetStrings,
@@ -502,12 +507,49 @@ impl Facets {
     }
 }
 
+/// Collects a graph's facets while its inputs are read. A dense facet fills the
+/// [`Facets`] as it is stated; a set-valued one gathers its pairs here and is
+/// sealed into a [`SparseFacet`] once every input has been read.
+#[derive(Default)]
+pub struct FacetsBuilder {
+    facets: Facets,
+    tags: SparseFacetBuilder,
+    /// The nodes a `tags` value has been recorded for.
+    tagged: HashSet<Id>,
+}
+
+impl FacetsBuilder {
+    /// The facets filled so far, which an input reads as well as writes: a node
+    /// standing for another inherits the facets already recorded for it.
+    pub fn facets(&mut self) -> &mut Facets {
+        &mut self.facets
+    }
+
+    pub fn set_tags<'a>(&mut self, id: Id, tags: impl IntoIterator<Item = &'a str>) {
+        if !self.tagged.insert(id) {
+            return;
+        }
+        for tag in tags {
+            let tag = self.facets.strings.intern(tag);
+            self.tags.push(id, tag);
+        }
+    }
+
+    pub fn seal(mut self) -> Facets {
+        self.facets.set_tags(self.tags.seal());
+        self.facets
+    }
+}
+
 fn at<T: Copy + Default>(column: &[T], id: Id) -> T {
     column.get(id.0 as usize).copied().unwrap_or_default()
 }
 
-fn put<T: Copy + Default>(column: &mut Vec<T>, id: Id, value: T) {
+fn put<T: Copy + Default + PartialEq>(column: &mut Vec<T>, id: Id, value: T) {
     let index = id.0 as usize;
+    if value == T::default() || at(column, id) != T::default() {
+        return;
+    }
     if column.len() <= index {
         column.resize(index + 1, T::default());
     }
@@ -614,6 +656,53 @@ mod tests {
         assert_eq!(facets.testonly(Id(0)), Tri::Unknown);
         assert_eq!(facets.package(Id(9_999)), None);
         assert_eq!(facets.testonly(Id(9_999)), Tri::Unknown);
+    }
+
+    #[test]
+    fn the_first_value_a_node_is_given_is_the_one_it_keeps() {
+        let mut facets = Facets::default();
+        let first = facets.intern_repo("rules_foo+", None);
+        let second = facets.intern_repo("rules_bar+", None);
+
+        facets.set_repo(Id(0), Some(first));
+        facets.set_repo(Id(0), Some(second));
+        facets.set_testonly(Id(0), Tri::Yes);
+        facets.set_testonly(Id(0), Tri::No);
+        facets.set_package(Id(0), Id(3));
+        facets.set_package(Id(0), Id(4));
+
+        assert_eq!(facets.repo(Id(0)), Some(first));
+        assert_eq!(facets.testonly(Id(0)), Tri::Yes);
+        assert_eq!(facets.package(Id(0)), Some(Id(3)));
+    }
+
+    #[test]
+    fn a_facet_given_no_value_leaves_the_node_undescribed() {
+        let mut facets = Facets::default();
+
+        facets.set_repo(Id(7), None);
+        facets.set_testonly(Id(7), Tri::Unknown);
+
+        assert!(facets.repo.is_empty());
+        assert!(facets.testonly.is_empty());
+    }
+
+    #[test]
+    fn a_nodes_tags_are_the_ones_it_was_first_given() {
+        let mut builder = FacetsBuilder::default();
+
+        builder.set_tags(Id(1), ["manual", "flaky"]);
+        builder.set_tags(Id(1), ["local"]);
+
+        let facets = builder.seal();
+        let mut tags: Vec<&str> = facets
+            .tags()
+            .values(Id(1))
+            .iter()
+            .map(|&tag| facets.strings().resolve(tag))
+            .collect();
+        tags.sort_unstable();
+        assert_eq!(tags, ["flaky", "manual"]);
     }
 
     #[test]
