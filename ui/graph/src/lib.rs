@@ -74,8 +74,8 @@ const KEY_CONTEXT: &str = "Graph";
 pub fn register_keys(cx: &mut App) {
     // A bare letter types into the search field rather than dispatching, so the
     // panel's own bindings stand down inside it.
-    let outside_search = format!("{KEY_CONTEXT} && !{}", search::KEY_CONTEXT);
-    let outside_search = Some(outside_search.as_str());
+    let predicate = format!("{KEY_CONTEXT} && !{}", search::KEY_CONTEXT);
+    let outside_search = Some(predicate.as_str());
     cx.bind_keys([
         KeyBinding::new("h", ToggleNeighborhood, outside_search),
         KeyBinding::new("r", ToggleReduce, outside_search),
