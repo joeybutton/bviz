@@ -6,7 +6,7 @@
 //! is the filter's own; node ids keep theirs, whose indices double as positions
 //! in the node arrays.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::num::NonZeroU32;
 
 use bazel_query_proto::analysis::Configuration;
@@ -293,6 +293,10 @@ impl SparseFacetBuilder {
         Self {
             pairs: Vec::with_capacity(values),
         }
+    }
+
+    pub fn reserve(&mut self, values: usize) {
+        self.pairs.reserve(values);
     }
 
     pub fn push(&mut self, id: Id, value: Sym) {
@@ -623,11 +627,19 @@ impl FacetsBuilder {
         self.observe(Axis::Repo, label::is_canonical(canonical));
     }
 
-    pub fn set_tags<'a>(&mut self, id: Id, tags: impl IntoIterator<Item = &'a str>) {
+    pub fn set_tags<'a>(
+        &mut self,
+        id: Id,
+        tags: impl IntoIterator<Item = &'a str, IntoIter: ExactSizeIterator>,
+    ) {
         self.tags.fill(&mut self.facets.strings, id, tags);
     }
 
-    pub fn set_aspects<'a>(&mut self, id: Id, aspects: impl IntoIterator<Item = &'a str>) {
+    pub fn set_aspects<'a>(
+        &mut self,
+        id: Id,
+        aspects: impl IntoIterator<Item = &'a str, IntoIter: ExactSizeIterator>,
+    ) {
         self.aspects.fill(&mut self.facets.strings, id, aspects);
     }
 
@@ -647,7 +659,7 @@ impl FacetsBuilder {
 struct SparseFill {
     values: SparseFacetBuilder,
     /// The nodes a value has been recorded for.
-    filled: HashSet<Id>,
+    filled: NodeSet,
 }
 
 impl SparseFill {
@@ -655,15 +667,38 @@ impl SparseFill {
         &mut self,
         strings: &mut FacetStrings,
         id: Id,
-        values: impl IntoIterator<Item = &'a str>,
+        values: impl IntoIterator<Item = &'a str, IntoIter: ExactSizeIterator>,
     ) {
         if !self.filled.insert(id) {
             return;
         }
+        let values = values.into_iter();
+        self.values.reserve(values.len());
         for value in values {
             let value = strings.intern(value);
             self.values.push(id, value);
         }
+    }
+}
+
+/// A set of node ids held one bit per id, the ids being dense and counted from
+/// zero.
+#[derive(Default)]
+struct NodeSet {
+    words: Vec<u64>,
+}
+
+impl NodeSet {
+    /// Adds `id`, reporting whether it was absent.
+    fn insert(&mut self, id: Id) -> bool {
+        let word = (id.0 / u64::BITS) as usize;
+        let bit = 1u64 << (id.0 % u64::BITS);
+        if self.words.len() <= word {
+            self.words.resize(word + 1, 0);
+        }
+        let absent = self.words[word] & bit == 0;
+        self.words[word] |= bit;
+        absent
     }
 }
 
@@ -829,6 +864,28 @@ mod tests {
             .collect();
         tags.sort_unstable();
         assert_eq!(tags, ["flaky", "manual"]);
+    }
+
+    /// Ids past the first 64 exercise the word a node's fill bit sits in.
+    #[test]
+    fn nodes_far_apart_in_id_are_filled_independently() {
+        let mut builder = FacetsBuilder::default();
+
+        builder.set_tags(Id(0), ["manual"]);
+        builder.set_tags(Id(200), ["local"]);
+        builder.set_tags(Id(200), ["flaky"]);
+
+        let (facets, _) = builder.seal();
+        let tags = |id| {
+            facets
+                .tags()
+                .values(id)
+                .iter()
+                .map(|&tag| facets.strings().resolve(tag))
+                .collect::<Vec<&str>>()
+        };
+        assert_eq!(tags(Id(0)), ["manual"]);
+        assert_eq!(tags(Id(200)), ["local"]);
     }
 
     #[test]
