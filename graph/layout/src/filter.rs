@@ -8,6 +8,12 @@
 //! itself. To keep the dependency structure legible, a pair of surviving nodes
 //! whose only original connection ran through dropped nodes gets a synthetic
 //! [`EdgeKind::Transitive`] edge in place of the path that no longer exists.
+//!
+//! A survivor keeps the id it carried in the whole graph, so the restriction's
+//! id space is the whole graph's with holes in it. That is what lets a filter
+//! apply to one view without disturbing the rest: the expansion set, the
+//! selection, the layout's pinning anchors and the name table all key on the
+//! id, and all of them go on meaning what they meant.
 
 use std::collections::{HashMap, HashSet};
 
@@ -130,6 +136,8 @@ fn kept_frontiers(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::*;
     use crate::graph::Kind;
     use crate::intern::Names;
@@ -307,6 +315,103 @@ mod tests {
         let out = filter(&g, &ids(&n, &["leaf"]));
         assert_eq!(out.nodes.len(), 1);
         assert_eq!(out.nodes[0].parent, None);
+    }
+
+    /// Two packages, each holding two targets, each holding two actions, with a
+    /// dependency from each action to the next, so a restriction of it has both
+    /// containment and edges to carry over. Each node's label is the name it is
+    /// interned under, so resolving an id says which node it names.
+    fn forest() -> (Graph, Names) {
+        let mut g = Graph::new();
+        let mut n = Names::default();
+        let mut actions: Vec<Id> = Vec::new();
+        for p in 0..2 {
+            let package = format!("//p{p}");
+            g.add_node(n.intern(&package), &package, Kind::Package, None);
+            for t in 0..2 {
+                let target = format!("{package}:t{t}");
+                let parent = n.get(&package);
+                g.add_node(n.intern(&target), &target, Kind::Target, parent);
+                for a in 0..2 {
+                    let action = format!("{target}#a{a}");
+                    let parent = n.get(&target);
+                    g.add_node(n.intern(&action), &action, Kind::Action, parent);
+                    actions.push(n.get(&action).unwrap());
+                }
+            }
+        }
+        for pair in actions.windows(2) {
+            g.add_edge(pair[0], pair[1], EdgeKind::Aquery);
+        }
+        (g, n)
+    }
+
+    /// Every other id of [`forest`], which drops some containers whose children
+    /// survive and carries the largest surviving id well past the survivors'
+    /// count.
+    fn every_other(graph: &Graph) -> HashSet<Id> {
+        graph
+            .nodes
+            .iter()
+            .map(|node| node.id)
+            .filter(|id| id.0 % 2 == 0)
+            .collect()
+    }
+
+    #[test]
+    fn a_survivor_keeps_the_id_it_carried_in_the_whole_graph() {
+        let (g, _) = forest();
+        let keep = every_other(&g);
+
+        let out = filter(&g, &keep);
+
+        assert!(out.nodes.len() < g.nodes.len(), "nothing was dropped");
+        assert_eq!(
+            out.nodes
+                .iter()
+                .map(|node| node.id)
+                .collect::<HashSet<Id>>(),
+            keep,
+        );
+        assert!(
+            out.nodes
+                .iter()
+                .any(|node| node.id.0 as usize >= out.nodes.len()),
+            "every surviving id fits within the survivors' count",
+        );
+    }
+
+    /// The name table is built over the whole graph and never rebuilt, so a
+    /// restriction's ids have to go on resolving through it.
+    #[test]
+    fn a_survivor_resolves_through_the_whole_graph_name_table() {
+        let (g, n) = forest();
+        let out = filter(&g, &every_other(&g));
+        for node in &out.nodes {
+            assert_eq!(n.resolve(node.id), node.label);
+        }
+    }
+
+    /// The passes downstream of a restriction index by id, so they have to take
+    /// an id space with holes in it.
+    #[test]
+    fn a_restricted_graph_feeds_the_fold_the_reduction_and_the_map() {
+        let (g, _) = forest();
+        let keep = every_other(&g);
+        let out = filter(&g, &keep);
+
+        let folded = crate::lod::collapse(&out, &crate::lod::expandable_containers(&out));
+        assert!(folded.nodes.iter().all(|node| keep.contains(&node.id)));
+
+        let reduced = crate::reduce::transitive_reduction(&out);
+        assert!(reduced.edges.len() <= out.edges.len());
+
+        let map = crate::map::map_layout(Arc::new(out.clone()), Arc::new(reduced));
+        let finest = map.level(map.level_count() - 1);
+        assert_eq!(
+            finest.boxes.iter().map(|b| b.id).collect::<HashSet<Id>>(),
+            keep,
+        );
     }
 
     #[test]
