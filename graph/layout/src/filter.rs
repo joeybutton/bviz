@@ -17,7 +17,7 @@
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 
-use crate::graph::{EdgeKind, Graph};
+use crate::graph::{EdgeKind, Graph, Node};
 use crate::intern::Id;
 use crate::reduce::Condensation;
 
@@ -59,7 +59,10 @@ pub fn filter(graph: &Graph, reduced: &Graph, keep: &HashSet<Id>) -> Graph {
             }
             parent = parent_of.get(&p).copied().flatten();
         }
-        out.add_node(node.id, node.label.clone(), node.kind, parent);
+        out.nodes.push(Node {
+            parent,
+            ..node.clone()
+        });
     }
 
     let mut direct: HashSet<(Id, Id)> = HashSet::with_capacity(graph.edges.len());
@@ -470,6 +473,40 @@ mod tests {
             finest.boxes.iter().map(|b| b.id).collect::<HashSet<Id>>(),
             keep,
         );
+    }
+
+    /// A merge group's container is told from an ordinary box by its `group`
+    /// marker and not by its kind, so a restriction that drops the marker leaves
+    /// a container the reader can no longer open or close.
+    #[test]
+    fn a_kept_group_container_keeps_its_marker() {
+        let mut g = Graph::new();
+        let mut n = Names::default();
+        let action = n.intern("action0");
+        g.add_node(action, "Compile", Kind::Action, None);
+        for source in ["source1", "source2"] {
+            let id = n.intern(source);
+            g.add_node(id, source, Kind::Source, None);
+            g.add_edge(id, action, EdgeKind::Aquery);
+        }
+        let other = n.intern("other");
+        g.add_node(other, "other", Kind::Action, None);
+        let group = n.intern("group:source1");
+        let (view, _) = crate::quotient::quotient(&g, &[group].into_iter().collect(), &mut n);
+        assert!(
+            crate::test_support::find(&view, &n, "group:source1").group,
+            "the fixture's quotient minted no group container",
+        );
+
+        let keep: HashSet<Id> = view
+            .nodes
+            .iter()
+            .map(|node| node.id)
+            .filter(|&id| id != other)
+            .collect();
+        let out = filter(&view, &reduce::transitive_reduction(&view), &keep);
+
+        assert!(crate::test_support::find(&out, &n, "group:source1").group);
     }
 
     #[test]
