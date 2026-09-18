@@ -759,6 +759,23 @@ mod tests {
         assert_eq!(capabilities.support(Axis::RuleClass), Support::Available);
     }
 
+    /// `--proto:output_rule_attrs` names the attributes to print, so a rule can
+    /// carry one axis's attribute while carrying nothing for the other.
+    #[test]
+    fn an_attribute_list_holding_tags_alone_leaves_only_testonly_unfilterable() {
+        let query_targets = vec![attributed("//foo:app", vec![tags(&["manual"])])];
+
+        let (_, _, _, capabilities) = build_joint(None, None, Some(&query_targets), false);
+
+        assert_eq!(capabilities.support(Axis::Tags), Support::Available);
+        assert_eq!(
+            capabilities.support(Axis::Testonly),
+            Support::Unavailable {
+                flag: "--proto:output_rule_attrs"
+            }
+        );
+    }
+
     #[test]
     fn an_axis_only_some_targets_state_is_reported_with_its_reach() {
         let query_targets = vec![

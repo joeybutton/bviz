@@ -137,18 +137,23 @@ pub(crate) fn describe_target(
     facets.observe(Axis::RuleCategory, declared);
     let rule_class = facets.facets().intern_rule_class(&rule.rule_class);
     facets.facets().set_rule_class(node, Some(rule_class));
-    // The attributes arrive as one list, so any one of them standing there
-    // shows that the list was printed.
-    let attributed = !rule.attribute.is_empty();
-    facets.observe(Axis::Tags, attributed);
-    facets.observe(Axis::Testonly, attributed);
+    let mut tagged = false;
+    let mut testonly = false;
     for attribute in &rule.attribute {
         match attribute.name.as_str() {
-            "tags" => facets.set_tags(node, attribute.string_list_value.iter().map(String::as_str)),
-            "testonly" => facets.facets().set_testonly(node, yes_or_no(attribute)),
+            "tags" => {
+                tagged = true;
+                facets.set_tags(node, attribute.string_list_value.iter().map(String::as_str));
+            }
+            "testonly" => {
+                testonly = true;
+                facets.facets().set_testonly(node, yes_or_no(attribute));
+            }
             _ => {}
         }
     }
+    facets.observe(Axis::Tags, tagged);
+    facets.observe(Axis::Testonly, testonly);
 }
 
 /// The value of an attribute that says yes or no, which the proto states as a
