@@ -32,7 +32,7 @@ const MAX_FRAME_EDGES: usize = 2000;
 /// Places every node once and derives the zoom pyramid of views over it.
 ///
 /// Every `parent` of `base` must name another of its nodes and containment must
-/// be acyclic; its ids are otherwise free, and need not run without gaps.
+/// be acyclic; its ids are otherwise free.
 /// `reduced` must be the transitive reduction of `base`, whose nodes it shares.
 pub fn map_layout(base: Arc<Graph>, reduced: Arc<Graph>) -> MapLayout {
     let containment = Containment::new(&base);

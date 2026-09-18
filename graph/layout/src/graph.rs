@@ -108,9 +108,7 @@ impl Graph {
 
 /// One past the largest id `graph` mentions anywhere — as a node, a parent, or
 /// an edge endpoint — and so the length an array indexed by id must have for
-/// every id the graph can hand it to be in range. A graph need not hold a node
-/// for each id below it: restricting a graph to a chosen set of nodes leaves the
-/// survivors' original ids and holes where the rest were.
+/// every id the graph can hand it to be in range.
 pub fn id_span(graph: &Graph) -> usize {
     let mentioned = graph
         .nodes

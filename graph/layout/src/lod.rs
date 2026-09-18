@@ -307,19 +307,15 @@ fn largest_fitting_prefix(
     Ok(lo)
 }
 
-/// Stands in a representative table for an id the graph holds no node of: a
-/// hole left where a restriction dropped a node, or an edge endpoint naming no
-/// node at all. Such an id folds to nothing, so nothing is drawn for it and no
-/// edge is drawn to it.
+/// Stands in a representative table for an id the graph holds no node of. Such
+/// an id folds to nothing, so nothing is drawn for it and no edge is drawn to
+/// it.
 const ABSENT: u32 = u32::MAX;
 
 /// An integer-indexed copy of a graph's containment forest and of the edges a
 /// view of it draws, so a collapsed view can be computed (by [`collapse`]) or
 /// merely sized (by [`Self::counts`], for the startup search) without re-walking
 /// string ids.
-/// Each array spans the graph's id space rather than its node count, so a graph
-/// holding no node for some of the ids below its largest indexes as directly as
-/// a gap-free one.
 struct IndexedGraph {
     /// Containment parent of each id, or `None` for a root, an id the graph
     /// holds no node of, and a node whose parent is such an id.

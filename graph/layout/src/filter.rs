@@ -1,13 +1,10 @@
 //! Restricts a graph to a chosen set of nodes.
 //!
 //! Every node outside the set is dropped, along with its containment position
-//! and its edges. To keep the containment forest well-formed for the layout
-//! engine (which only ever descends from a `parent == None` root, so a node
-//! whose parent was dropped would never be reached), each surviving node
-//! reparents to the nearest ancestor that also survives, or becomes a root
-//! itself. To keep the dependency structure legible, a pair of surviving nodes
-//! the graph joins only through dropped ones gets a synthetic
-//! [`EdgeKind::Transitive`] bridge in place of the path that no longer exists.
+//! and its edges. A survivor reparents to the nearest ancestor that also
+//! survives, or becomes a root itself, because the layout engine only ever
+//! descends from a `parent == None` root and would never reach a node whose
+//! parent was dropped.
 //!
 //! A survivor keeps the id it carried in the whole graph, so the restriction's
 //! id space is the whole graph's with holes in it. That is what lets a filter
@@ -37,7 +34,9 @@ pub const MAX_BRIDGE_FAN_OUT: usize = 32;
 /// surviving ancestor; every edge `graph` had between two kept nodes, with the
 /// query provenance it came with; and one [`EdgeKind::Transitive`] bridge for
 /// each kept pair joined only through dropped nodes that keeps no direct edge
-/// of its own. An id in `keep` that names no node in `graph` is ignored.
+/// of its own — a pair the whole graph joins outright keeps the provenance it
+/// was found with rather than being restated as a path through nodes the reader
+/// cannot see. An id in `keep` that names no node in `graph` is ignored.
 ///
 /// `reduced` supplies the paths the bridges stand for, and must reach among
 /// `graph`'s nodes exactly as `graph` does — the transitive reduction is the
@@ -86,10 +85,6 @@ pub fn filter(graph: &Graph, reduced: &Graph, keep: &HashSet<Id>) -> Graph {
 /// The kept pairs `graph` joins through dropped nodes and `direct` does not
 /// already join, a source reaching at most [`MAX_BRIDGE_FAN_OUT`] targets
 /// through each run it enters.
-///
-/// A pair `direct` holds is left out rather than bridged, so a dependency the
-/// whole graph draws keeps the provenance it was found with instead of being
-/// restated as a path through nodes the reader cannot see.
 fn bridges(graph: &Graph, keep: &HashSet<Id>, direct: &HashSet<(Id, Id)>) -> Vec<(Id, Id)> {
     let runs = DroppedRuns::new(graph, keep);
     let frontier = runs.frontiers();
