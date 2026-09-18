@@ -110,8 +110,8 @@ impl Trie {
 /// targets, and resolves the box a source file nests under.
 pub(crate) struct PackageHierarchy {
     box_id: HashMap<(String, String), Id>,
-    /// Real main-repo package paths, sorted, for the source-enclosing lookup.
-    main_paths: Vec<String>,
+    /// The real package paths of each repository, for the source-enclosing lookup.
+    repo_paths: HashMap<String, Vec<String>>,
 }
 
 impl PackageHierarchy {
@@ -128,17 +128,18 @@ impl PackageHierarchy {
         }
         let mut hierarchy = Self {
             box_id: HashMap::new(),
-            main_paths: Vec::new(),
+            repo_paths: HashMap::new(),
         };
         for (repo, trie) in &tries {
             hierarchy.emit_root(trie, repo, graph, names);
         }
-        hierarchy.main_paths = packages
-            .iter()
-            .filter(|(repo, _)| repo.is_empty())
-            .map(|(_, path)| path.clone())
-            .collect();
-        hierarchy.main_paths.sort();
+        for (repo, path) in packages {
+            hierarchy
+                .repo_paths
+                .entry(repo.clone())
+                .or_default()
+                .push(path.clone());
+        }
         hierarchy
     }
 
@@ -222,10 +223,11 @@ impl PackageHierarchy {
             .copied()
     }
 
-    /// The path of the deepest real main-repo package enclosing directory `dir`,
-    /// or `None` when none does.
-    pub(crate) fn enclosing_package(&self, dir: &str) -> Option<&str> {
-        self.main_paths
+    /// The path of the deepest real package of repository `repo` enclosing
+    /// directory `dir`, or `None` when none does.
+    pub(crate) fn enclosing_package(&self, repo: &str, dir: &str) -> Option<&str> {
+        self.repo_paths
+            .get(repo)?
             .iter()
             .filter(|pkg| encloses(pkg, dir))
             .max_by_key(|pkg| pkg.len())
@@ -390,9 +392,21 @@ mod tests {
         let (_graph, hierarchy, _names) = build(&[("", "foo"), ("", "foo/bar")]);
 
         // A source under foo/bar/sub belongs to the deeper foo/bar.
-        assert_eq!(hierarchy.enclosing_package("foo/bar/sub"), Some("foo/bar"));
-        assert_eq!(hierarchy.enclosing_package("foo/other"), Some("foo"));
-        assert_eq!(hierarchy.enclosing_package("elsewhere"), None);
+        assert_eq!(
+            hierarchy.enclosing_package("", "foo/bar/sub"),
+            Some("foo/bar")
+        );
+        assert_eq!(hierarchy.enclosing_package("", "foo/other"), Some("foo"));
+        assert_eq!(hierarchy.enclosing_package("", "elsewhere"), None);
+    }
+
+    #[test]
+    fn enclosing_package_searches_only_the_named_repository() {
+        let (_graph, hierarchy, _names) = build(&[("", "foo"), ("@@r", "bar")]);
+
+        assert_eq!(hierarchy.enclosing_package("@@r", "bar/sub"), Some("bar"));
+        assert_eq!(hierarchy.enclosing_package("@@r", "foo/sub"), None);
+        assert_eq!(hierarchy.enclosing_package("", "bar/sub"), None);
     }
 
     #[test]

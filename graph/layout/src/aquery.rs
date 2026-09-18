@@ -422,18 +422,26 @@ impl Wiring<'_> {
         if is_derived(&path) {
             return None;
         }
-        if !self.external_sources && is_external_source(&path) {
-            return None;
-        }
-        let dir = path.rsplit_once('/').map(|(d, _)| d).unwrap_or("");
-        let node_id = match self.hierarchy.enclosing_package(dir) {
+        let (repo, repo_path) = match external_source(&path) {
+            Some((repo, repo_path)) => {
+                if !self.external_sources {
+                    return None;
+                }
+                (format!("@@{repo}"), repo_path)
+            }
+            None => (String::new(), path.as_str()),
+        };
+        let dir = repo_path.rsplit_once('/').map(|(d, _)| d).unwrap_or("");
+        let node_id = match self.hierarchy.enclosing_package(&repo, dir) {
             Some(pkg) => {
                 let rel = if pkg.is_empty() {
-                    path.as_str()
+                    repo_path
                 } else {
-                    path.strip_prefix(&format!("{pkg}/")).unwrap_or(&path)
+                    repo_path
+                        .strip_prefix(&format!("{pkg}/"))
+                        .unwrap_or(repo_path)
                 };
-                let label = format!("//{pkg}:{rel}");
+                let label = format!("{repo}//{pkg}:{rel}");
                 let node_id = names.intern(&format!("target:{label}"));
                 if self.source_nodes.insert(node_id) {
                     let parent = self.hierarchy.package_box(&label);
@@ -467,7 +475,7 @@ impl Wiring<'_> {
 fn generated_label(hierarchy: &PackageHierarchy, path: &str) -> Option<String> {
     let suffix = generated_suffix(path)?;
     let dir = suffix.rsplit_once('/').map(|(d, _)| d).unwrap_or("");
-    let pkg = hierarchy.enclosing_package(dir)?;
+    let pkg = hierarchy.enclosing_package("", dir)?;
     let rel = if pkg.is_empty() {
         suffix
     } else {
@@ -535,8 +543,13 @@ fn is_derived(path: &str) -> bool {
     path.starts_with("bazel-out/")
 }
 
-fn is_external_source(path: &str) -> bool {
-    path.starts_with("external/")
+/// The repository and repository-relative path of a source in an external
+/// repository: `external/<repo>/<rest>`, or `../<repo>/<rest>` under
+/// `--experimental_sibling_repository_layout`.
+fn external_source(path: &str) -> Option<(&str, &str)> {
+    path.strip_prefix("external/")
+        .or_else(|| path.strip_prefix("../"))?
+        .split_once('/')
 }
 
 #[cfg(test)]
@@ -704,6 +717,53 @@ mod tests {
         assert!(edges.contains(&("source1", "action1")));
         // The external source never becomes a node or edge.
         assert!(!graph.nodes.iter().any(|n| names.resolve(n.id) == "source2"));
+    }
+
+    #[test]
+    fn external_source_members_carry_their_repository_package() {
+        let (a1, f1) = source_artifact(1, "external/somerepo+/foo/dep.c");
+        // The sibling repository layout puts the same file beside the exec root.
+        let (a2, f2) = source_artifact(2, "../somerepo+/foo/sub/other.c");
+        let container = ActionGraphContainer {
+            artifacts: vec![a1, a2],
+            path_fragments: vec![f1, f2],
+            targets: vec![target(1, "@@somerepo+//foo:lib")],
+            dep_set_of_files: vec![dep_set(10, &[1, 2], &[])],
+            actions: vec![action(1, "Compile", &[10])],
+            ..Default::default()
+        };
+
+        let (graph, names) = build(&[container], true);
+
+        let dep = find(&graph, &names, "target:@@somerepo+//foo:dep.c");
+        assert_eq!(dep.kind, Kind::Source);
+        assert_eq!(dep.label, ":dep.c");
+        let pkg = parent_of(&graph, &names, "target:@@somerepo+//foo:dep.c").unwrap();
+        assert_eq!(find(&graph, &names, pkg).label, "@@somerepo+//foo");
+        assert_eq!(
+            find(&graph, &names, "target:@@somerepo+//foo:sub/other.c").label,
+            ":sub/other.c"
+        );
+        let edges = edges(&graph, &names);
+        assert!(edges.contains(&("target:@@somerepo+//foo:dep.c", "action0")));
+        assert!(edges.contains(&("target:@@somerepo+//foo:sub/other.c", "action0")));
+    }
+
+    #[test]
+    fn external_source_in_no_known_package_stays_at_root() {
+        let (a1, f1) = source_artifact(1, "external/somerepo+/foo/dep.c");
+        let container = ActionGraphContainer {
+            artifacts: vec![a1],
+            path_fragments: vec![f1],
+            targets: vec![target(1, "//app:main")],
+            dep_set_of_files: vec![dep_set(10, &[1], &[])],
+            actions: vec![action(1, "Compile", &[10])],
+            ..Default::default()
+        };
+
+        let (graph, names) = build(&[container], true);
+
+        assert_eq!(parent_of(&graph, &names, "source1"), None);
     }
 
     #[test]
