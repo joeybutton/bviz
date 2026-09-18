@@ -555,9 +555,12 @@ fn restrict(
     reduced: bool,
 ) -> (Slice, Restricted) {
     let verdicts = filter.evaluate(&shared.base, &shared.names, &shared.facets);
-    let mut keep: HashSet<Id> = HashSet::with_capacity(shared.base.nodes.len());
-    let mut dropped: HashSet<Id> = HashSet::new();
-    let mut faded: HashSet<Id> = HashSet::new();
+    // Every node lands in `keep` or in `dropped`, and `faded` is a part of what
+    // `keep` holds, so the node count bounds all three.
+    let nodes = shared.base.nodes.len();
+    let mut keep: HashSet<Id> = HashSet::with_capacity(nodes);
+    let mut dropped: HashSet<Id> = HashSet::with_capacity(nodes);
+    let mut faded: HashSet<Id> = HashSet::with_capacity(nodes);
     for node in &shared.base.nodes {
         match verdicts.get(node.id) {
             Verdict::Hidden => {
@@ -614,11 +617,8 @@ fn keeping(
     dropped: HashSet<Id>,
     reduced: bool,
 ) -> Restricted {
-    let surviving: HashSet<Id> = expanded
-        .iter()
-        .copied()
-        .filter(|id| !dropped.contains(id))
-        .collect();
+    let mut surviving: HashSet<Id> = HashSet::with_capacity(expanded.len());
+    surviving.extend(expanded.iter().copied().filter(|id| !dropped.contains(id)));
     match bviz_graph_layout::lod::fitting_expansion(
         &slice.base,
         reduced.then_some(slice.reduced.as_ref()),
