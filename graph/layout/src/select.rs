@@ -8,6 +8,7 @@
 //! the ids in such a set would not.
 
 mod eval;
+pub mod labels;
 pub mod pattern;
 
 use std::borrow::Borrow;

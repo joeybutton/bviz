@@ -237,7 +237,7 @@ pub(crate) fn restate(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
 
 /// Draws the graph through `filter` from here on and restates the checklists
 /// over it, so a rule and the checkmark reading it move together.
-fn set_filter(view: &mut GraphPanel, filter: Filter, cx: &mut Context<GraphPanel>) {
+pub(crate) fn set_filter(view: &mut GraphPanel, filter: Filter, cx: &mut Context<GraphPanel>) {
     derive::set_filter(view, filter, cx);
     restate(view, cx);
 }

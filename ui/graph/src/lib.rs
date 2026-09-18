@@ -2,6 +2,7 @@
 //! through `bviz_graph_layout`, lays the graph out, and opens a window
 //! rendering the result.
 
+use bviz_graph_layout::select::labels::LabelIndex;
 use bviz_graph_layout::{Id, Kind};
 use bviz_ui_components::{
     DragEnd, Dropdown, DropdownEvent, MultiSelect, MultiSelectEvent, Pending, ScrollbarColors,
@@ -19,6 +20,7 @@ use gpui::{
     Rgba, ScrollDelta, ScrollWheelEvent, SharedString, Subscription, Window, actions, canvas, div,
     prelude::*, px, size,
 };
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 mod build;
@@ -38,6 +40,7 @@ mod preset;
 mod relation;
 mod rules;
 mod scroll;
+mod search;
 mod selection;
 mod toolbar;
 
@@ -54,6 +57,7 @@ use morph::{Frame, Morph};
 use paint::{Scene, TitleTarget, canvas_body};
 use relation::Relation;
 use scroll::{scrollbar_hit, start_scroll_drag};
+use search::Search;
 use selection::Selection;
 
 actions!(
@@ -66,10 +70,14 @@ actions!(
 const KEY_CONTEXT: &str = "Graph";
 
 pub fn register_keys(cx: &mut App) {
+    // A bare letter types into the search field rather than dispatching, so the
+    // panel's own bindings stand down inside it.
+    let outside_search = format!("{KEY_CONTEXT} && !{}", search::KEY_CONTEXT);
+    let outside_search = Some(outside_search.as_str());
     cx.bind_keys([
-        KeyBinding::new("h", ToggleNeighborhood, Some(KEY_CONTEXT)),
-        KeyBinding::new("r", ToggleReduce, Some(KEY_CONTEXT)),
-        KeyBinding::new("escape", ClearSelection, Some(KEY_CONTEXT)),
+        KeyBinding::new("h", ToggleNeighborhood, outside_search),
+        KeyBinding::new("r", ToggleReduce, outside_search),
+        KeyBinding::new("escape", ClearSelection, outside_search),
     ]);
 }
 
@@ -185,6 +193,10 @@ pub struct GraphPanel {
     preset_filter: Entity<MultiSelect>,
     /// Carries a toggled preset row into the panel's filter.
     _preset_choices: Subscription,
+    /// The label search, whose pattern shows or hides the nodes it names.
+    search: Search,
+    /// Carries what is typed into the search field into the search.
+    _search_typing: Subscription,
     /// Redraws as the graph is read.
     _changed: Subscription,
     /// Derives what the selected mode draws as the read lands: a derivation
@@ -217,6 +229,15 @@ impl GraphPanel {
     /// The layout the selected mode draws, or `None` while it is being derived.
     fn drawn(&self) -> Option<Drawn> {
         self.derived.drawn(self.mode)
+    }
+
+    /// The canonical labels the loaded graph's nodes belong to, which a search
+    /// pattern is matched over; `None` until the read lands.
+    fn labels(&self, cx: &App) -> Option<Arc<LabelIndex>> {
+        self.model
+            .read(cx)
+            .loaded()
+            .map(|loaded| Arc::clone(&loaded.shared.labels))
     }
 
     /// The boxes the selected mode's layout lets the user open or close.
@@ -282,6 +303,11 @@ impl GraphPanel {
             cx.subscribe(&preset_filter, |view, _, event: &MultiSelectEvent, cx| {
                 checklist::toggle_preset(view, event.index, event.checked, cx);
             });
+        let search = Search::new(cx);
+        // The field notifies on every repaint it makes, so what it holds is
+        // compared with what the search last took up rather than taken for an
+        // edit.
+        let search_typing = cx.observe(search.field(), |view, _, cx| search::typed(view, cx));
         let changed = cx.observe(&model, |_, _, cx| cx.notify());
         let source_replaced = cx.subscribe(&model, |view, _, _: &SourceReplaced, cx| {
             derive::opened(view, cx);
@@ -308,6 +334,8 @@ impl GraphPanel {
             presets: Vec::new(),
             preset_filter,
             _preset_choices: preset_choices,
+            search,
+            _search_typing: search_typing,
             _changed: changed,
             _source_replaced: source_replaced,
             hovered: None,
@@ -372,6 +400,7 @@ impl GraphPanel {
                     .size_full(),
             )
             .children(edge_legend)
+            .children(search::results(self, &palette, cx))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
             .on_mouse_down(MouseButton::Right, cx.listener(Self::on_secondary_down))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
@@ -572,6 +601,7 @@ impl Render for GraphPanel {
             None => {
                 let controls = Controls {
                     mode: self.mode,
+                    search: search::field(&self.search, cx).into_any_element(),
                     picker: self.mode_picker.clone(),
                     class_filter: (!self.classes.is_empty()).then(|| self.class_filter.clone()),
                     origin_filter: (!self.origins.is_empty()).then(|| self.origin_filter.clone()),
@@ -598,6 +628,8 @@ impl Render for GraphPanel {
 /// What the toolbar's controls show.
 struct Controls {
     mode: LayoutMode,
+    /// The field a label pattern is typed into, with the button that empties it.
+    search: AnyElement,
     picker: Entity<Dropdown>,
     /// The checklists over the facets the loaded graph carries, each offered
     /// only where that graph carries a value on its axis.

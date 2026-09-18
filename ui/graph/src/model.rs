@@ -2,6 +2,7 @@ use crate::build::build_graph;
 use crate::derive::derive_levels;
 use bviz_graph_layout::graph::Graph;
 use bviz_graph_layout::lod::{DEFAULT_MAX_EDGES, DEFAULT_MAX_NODES, Overflow};
+use bviz_graph_layout::select::labels::LabelIndex;
 use bviz_graph_layout::{Capabilities, Facets, Id, MapLayout, Names};
 use bviz_ui_components::{Pending, load_in_background};
 use bviz_ui_graph_args::Input;
@@ -28,6 +29,9 @@ pub(crate) struct Shared {
     /// The facets of the base graph's nodes, keyed by the same ids, which a
     /// panel's filter selects on.
     pub(crate) facets: Arc<Facets>,
+    /// The canonical labels those nodes belong to, gathered as the graph is read
+    /// so that a search matches a pattern over them without walking the graph.
+    pub(crate) labels: Arc<LabelIndex>,
     /// The multi-child containers of the base graph, which a layered view offers
     /// to open.
     pub(crate) containers: Arc<HashSet<Id>>,
@@ -73,6 +77,7 @@ pub(crate) fn build(inputs: Vec<Input>) -> Result<Loaded, String> {
         Err(overflow) => (HashSet::new(), Some(overflow)),
     };
     let containers = Arc::new(bviz_graph_layout::lod::expandable_containers(&graph));
+    let labels = Arc::new(LabelIndex::of(&graph, &names, &facets));
     // The map derives each of its views against these, so it holds a share in
     // them rather than a copy.
     let (base, reduced_base) = (Arc::new(graph), Arc::new(reduced_base));
@@ -84,6 +89,7 @@ pub(crate) fn build(inputs: Vec<Input>) -> Result<Loaded, String> {
             map: Arc::new(map),
             names,
             facets: Arc::new(facets),
+            labels,
             containers,
             capabilities,
         },

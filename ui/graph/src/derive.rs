@@ -637,6 +637,7 @@ mod tests {
     use crate::model::Opening;
     use crate::selection::Selection;
     use bviz_graph_layout::graph::Node;
+    use bviz_graph_layout::select::labels::LabelIndex;
     use bviz_graph_layout::select::{Predicate, Rule, Values, Visibility};
     use bviz_graph_layout::{EdgeKind, Facets, Kind};
 
@@ -664,6 +665,8 @@ mod tests {
         let reduced_base = bviz_graph_layout::reduce::transitive_reduction(&base);
         let containers = Arc::new(bviz_graph_layout::lod::expandable_containers(&base));
         let (base, reduced_base) = (Arc::new(base), Arc::new(reduced_base));
+        let facets = Arc::new(Facets::default());
+        let labels = Arc::new(LabelIndex::of(&base, &names, &facets));
         let map = bviz_graph_layout::map_layout(Arc::clone(&base), Arc::clone(&reduced_base));
         Loaded {
             shared: Shared {
@@ -671,7 +674,8 @@ mod tests {
                 reduced_base,
                 map: Arc::new(map),
                 names,
-                facets: Arc::new(Facets::default()),
+                facets,
+                labels,
                 containers,
                 capabilities: bviz_graph_layout::capability::CapabilitiesBuilder::default().seal(),
             },
