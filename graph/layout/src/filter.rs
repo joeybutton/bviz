@@ -28,7 +28,9 @@ use crate::reduce::Condensation;
 /// — its actions, say, or its artifacts — towards the graph's transitive
 /// closure. Past the cap the lowest ids stand for the run and the rest of what
 /// it reaches goes undrawn, so the reader still sees that a dependency leads on
-/// without the drawing spending its whole edge budget on where.
+/// without reading in full where it leads. What this bounds is that one pair of
+/// a kept node and a run: a restriction can emit as many bridges again for
+/// every further kept node entering a run, so it is no bound on the drawing.
 pub const MAX_BRIDGE_FAN_OUT: usize = 32;
 
 /// `graph` restricted to `keep`: every kept node, reparented to its nearest
@@ -82,7 +84,8 @@ pub fn filter(graph: &Graph, reduced: &Graph, keep: &HashSet<Id>) -> Graph {
 }
 
 /// The kept pairs `graph` joins through dropped nodes and `direct` does not
-/// already join, each capped at [`MAX_BRIDGE_FAN_OUT`] targets per source.
+/// already join, a source reaching at most [`MAX_BRIDGE_FAN_OUT`] targets
+/// through each run it enters.
 ///
 /// A pair `direct` holds is left out rather than bridged, so a dependency the
 /// whole graph draws keeps the provenance it was found with instead of being
