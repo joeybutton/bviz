@@ -324,7 +324,7 @@ impl Palette {
     fn container_fill(&self, kind: Kind) -> Rgba {
         match kind {
             Kind::Package => self.package,
-            Kind::Group => {
+            Kind::MergeGroup => {
                 bviz_ui_theme::mix(self.container, self.kind_accent(Kind::Artifact), GROUP_TINT)
             }
             _ => self.container,
@@ -1351,7 +1351,7 @@ mod colors {
 
     /// One node kind per container fill: the two that carry a fill of their own,
     /// and one standing for every kind that takes the plain one.
-    const CONTAINER_KINDS: [Kind; 3] = [Kind::Package, Kind::Group, Kind::Target];
+    const CONTAINER_KINDS: [Kind; 3] = [Kind::Package, Kind::MergeGroup, Kind::Target];
 
     /// Every provenance a connector is drawn in.
     const EDGE_KINDS: [EdgeKind; 4] = [
@@ -1743,7 +1743,7 @@ mod colors {
     #[test]
     fn a_group_reads_as_a_container_of_the_files_it_holds() {
         for (theme, p) in palettes() {
-            let group = p.container_fill(Kind::Group);
+            let group = p.container_fill(Kind::MergeGroup);
             let off_plain = distance(group, p.container_fill(Kind::Target));
             assert!(off_plain >= MIN_DISTINCT_COLOR, "{theme}: {off_plain}");
             let off_file = distance(group, p.leaf_fill(Kind::Artifact));

@@ -78,9 +78,11 @@ pub(crate) fn label_and_kind(target: &Target) -> Option<(&str, Kind)> {
         Discriminator::GeneratedFile => {
             Some((&target.generated_file.as_ref()?.name, Kind::Artifact))
         }
-        Discriminator::PackageGroup => Some((&target.package_group.as_ref()?.name, Kind::Group)),
+        Discriminator::PackageGroup => {
+            Some((&target.package_group.as_ref()?.name, Kind::TargetGroup))
+        }
         Discriminator::EnvironmentGroup => {
-            Some((&target.environment_group.as_ref()?.name, Kind::Group))
+            Some((&target.environment_group.as_ref()?.name, Kind::TargetGroup))
         }
     }
 }
@@ -407,6 +409,25 @@ mod tests {
         assert_eq!(hierarchy.enclosing_package("@@r", "bar/sub"), Some("bar"));
         assert_eq!(hierarchy.enclosing_package("@@r", "foo/sub"), None);
         assert_eq!(hierarchy.enclosing_package("", "bar/sub"), None);
+    }
+
+    /// A `package_group` is a Bazel target, told apart from the group a merge
+    /// pass synthesizes.
+    #[test]
+    fn a_package_group_target_carries_the_group_target_kind() {
+        let target = Target {
+            r#type: Discriminator::PackageGroup as i32,
+            package_group: Some(bazel_query_proto::blaze_query::PackageGroup {
+                name: "//foo:visible".to_string(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            label_and_kind(&target),
+            Some(("//foo:visible", Kind::TargetGroup))
+        );
     }
 
     #[test]

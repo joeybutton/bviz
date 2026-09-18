@@ -8,8 +8,7 @@
 use crate::intern::Id;
 
 /// A coarse node category, used to pick a fill when rendering and to decide
-/// which leaves may merge. `Group` is a Bazel `package_group`/`environment_group`
-/// target and also the kind of the container an expanded merge-group renders as.
+/// which leaves may merge.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Kind {
     Package,
@@ -18,7 +17,10 @@ pub enum Kind {
     Action,
     Artifact,
     Source,
-    Group,
+    /// A Bazel `package_group` or `environment_group` target.
+    TargetGroup,
+    /// The container an expanded merge group renders as.
+    MergeGroup,
 }
 
 /// A box in the graph. A node is a container if any other node names it as
