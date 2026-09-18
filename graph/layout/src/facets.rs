@@ -211,6 +211,103 @@ impl RuleCategory {
     }
 }
 
+/// A facet whose value is a set the nodes carrying it may state several of,
+/// held as compressed sparse rows: the ids that carry a value in ascending
+/// order, and every node's values end to end in one array, which `starts` cuts
+/// into one run per id and so runs one entry longer than `ids`.
+#[derive(Clone)]
+pub struct SparseFacet {
+    ids: Vec<Id>,
+    starts: Vec<u32>,
+    values: Vec<Sym>,
+}
+
+impl Default for SparseFacet {
+    fn default() -> Self {
+        SparseFacetBuilder::default().seal()
+    }
+}
+
+impl SparseFacet {
+    /// The values `id` carries, empty where it carries none.
+    pub fn values(&self, id: Id) -> &[Sym] {
+        match self.ids.binary_search(&id) {
+            Ok(row) => self.row(row),
+            Err(_) => &[],
+        }
+    }
+
+    pub fn contains(&self, id: Id, value: Sym) -> bool {
+        self.values(id).contains(&value)
+    }
+
+    /// Every node carrying a value, in ascending id order.
+    pub fn rows(&self) -> impl Iterator<Item = (Id, &[Sym])> {
+        self.ids
+            .iter()
+            .enumerate()
+            .map(|(row, &id)| (id, self.row(row)))
+    }
+
+    /// Moves every value to the node id `remap` gives its node, under the same
+    /// terms as [`Facets::renumber`].
+    pub fn renumber(&mut self, remap: &[Id]) {
+        let mut renumbered = SparseFacetBuilder::with_capacity(self.values.len());
+        for (id, values) in self.rows() {
+            for &value in values {
+                renumbered.push(remap[id.0 as usize], value);
+            }
+        }
+        *self = renumbered.seal();
+    }
+
+    fn row(&self, row: usize) -> &[Sym] {
+        &self.values[self.starts[row] as usize..self.starts[row + 1] as usize]
+    }
+}
+
+/// Collects a [`SparseFacet`]'s values as the inputs state them, in any order.
+#[derive(Default)]
+pub struct SparseFacetBuilder {
+    pairs: Vec<(Id, Sym)>,
+}
+
+impl SparseFacetBuilder {
+    pub fn with_capacity(values: usize) -> Self {
+        Self {
+            pairs: Vec::with_capacity(values),
+        }
+    }
+
+    pub fn push(&mut self, id: Id, value: Sym) {
+        self.pairs.push((id, value));
+    }
+
+    /// The facet the collected pairs make, sorted into the order it is read
+    /// in. A node carries each of its values once, however many times it was
+    /// given one.
+    pub fn seal(mut self) -> SparseFacet {
+        self.pairs.sort_unstable();
+        self.pairs.dedup();
+        let carrying = |a: &(Id, Sym), b: &(Id, Sym)| a.0 == b.0;
+        let rows = self.pairs.chunk_by(carrying).count();
+        let mut ids = Vec::with_capacity(rows);
+        let mut starts = Vec::with_capacity(rows + 1);
+        let mut values = Vec::with_capacity(self.pairs.len());
+        starts.push(0);
+        for row in self.pairs.chunk_by(carrying) {
+            ids.push(row[0].0);
+            values.extend(row.iter().map(|&(_, value)| value));
+            starts.push(u32::try_from(values.len()).expect("more than u32::MAX facet values"));
+        }
+        SparseFacet {
+            ids,
+            starts,
+            values,
+        }
+    }
+}
+
 /// The facets of every node of one graph, each held in its own array indexed by
 /// node id.
 ///
@@ -231,6 +328,8 @@ pub struct Facets {
     testonly: Vec<Tri>,
     package: Vec<Option<NodeRef>>,
     label: Vec<Option<NodeRef>>,
+    tags: SparseFacet,
+    aspects: SparseFacet,
     repos: HashMap<RepoRef, RepoEntry>,
     configs: HashMap<ConfigRef, ConfigEntry>,
     rule_classes: HashMap<RuleClassRef, RuleCategory>,
@@ -293,6 +392,24 @@ impl Facets {
 
     pub fn set_label(&mut self, id: Id, label: Id) {
         put(&mut self.label, id, Some(NodeRef::of(label)));
+    }
+
+    /// The tags the node's target sets.
+    pub fn tags(&self) -> &SparseFacet {
+        &self.tags
+    }
+
+    pub fn set_tags(&mut self, tags: SparseFacet) {
+        self.tags = tags;
+    }
+
+    /// The aspects that took part in producing the node.
+    pub fn aspects(&self) -> &SparseFacet {
+        &self.aspects
+    }
+
+    pub fn set_aspects(&mut self, aspects: SparseFacet) {
+        self.aspects = aspects;
     }
 
     /// The strings every handle these facets carry resolves through.
@@ -368,6 +485,8 @@ impl Facets {
         self.testonly = permuted(&self.testonly, remap);
         self.package = permuted_nodes(&self.package, remap);
         self.label = permuted_nodes(&self.label, remap);
+        self.tags.renumber(remap);
+        self.aspects.renumber(remap);
     }
 
     fn origin(&mut self, canonical: &str) -> Origin {
@@ -590,6 +709,72 @@ mod tests {
         assert_eq!(facets.package(Id(0)), Some(Id(2)));
         assert_eq!(facets.label(Id(0)), Some(Id(0)));
         assert_eq!(facets.package(Id(2)), None);
+    }
+
+    /// A sparse facet over ids `2` and `0`, given in neither id nor value
+    /// order, alongside the strings its values resolve to.
+    fn sparse() -> (SparseFacet, FacetStrings) {
+        let mut strings = FacetStrings::default();
+        let (manual, flaky, local) = (
+            strings.intern("manual"),
+            strings.intern("flaky"),
+            strings.intern("local"),
+        );
+        let mut builder = SparseFacetBuilder::with_capacity(3);
+        builder.push(Id(2), local);
+        builder.push(Id(0), manual);
+        builder.push(Id(2), flaky);
+        builder.push(Id(0), manual);
+        (builder.seal(), strings)
+    }
+
+    #[test]
+    fn sealing_puts_the_nodes_carrying_a_value_in_ascending_order() {
+        let (facet, strings) = sparse();
+
+        let read: Vec<(Id, Vec<&str>)> = facet
+            .rows()
+            .map(|(id, values)| {
+                (
+                    id,
+                    values.iter().map(|&value| strings.resolve(value)).collect(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            read,
+            [(Id(0), vec!["manual"]), (Id(2), vec!["flaky", "local"])]
+        );
+    }
+
+    #[test]
+    fn a_node_carries_the_values_it_was_given_and_no_others() {
+        let (facet, mut strings) = sparse();
+        let (manual, local) = (strings.intern("manual"), strings.intern("local"));
+
+        assert!(facet.contains(Id(0), manual));
+        assert!(!facet.contains(Id(0), local));
+        assert!(!facet.contains(Id(1), manual));
+        assert!(facet.values(Id(1)).is_empty());
+        assert!(facet.values(Id(9_999)).is_empty());
+    }
+
+    #[test]
+    fn renumbering_re_sorts_the_nodes_and_keeps_each_ones_values() {
+        let (mut facet, mut strings) = sparse();
+        let (manual, flaky, local) = (
+            strings.intern("manual"),
+            strings.intern("flaky"),
+            strings.intern("local"),
+        );
+
+        facet.renumber(&rotated());
+
+        let read: Vec<(Id, Vec<Sym>)> = facet
+            .rows()
+            .map(|(id, values)| (id, values.to_vec()))
+            .collect();
+        assert_eq!(read, [(Id(1), vec![flaky, local]), (Id(2), vec![manual])]);
     }
 
     #[test]
