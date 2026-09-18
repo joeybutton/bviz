@@ -266,8 +266,8 @@ impl Edges<'_, '_> {
 
     /// The node a configuration-resolved dependency lands on: the dependency's
     /// configured target when that configuration is present, its source/generated
-    /// leaf when the dependency carries no configuration, and the dependency's
-    /// target container as a fallback. `None` when the dependency is outside the
+    /// leaf when the dependency carries no configuration, and the label-only
+    /// resolution as a fallback. `None` when the dependency is outside the
     /// queried set.
     fn configured_dep(&mut self, dep_label: &str, dep_config: Option<u32>) -> Option<Id> {
         match dep_config {
@@ -280,7 +280,7 @@ impl Edges<'_, '_> {
                 {
                     Some(self.b.names.intern(&label::ct_node_id(dep_label, &key)))
                 } else {
-                    self.index.target_box.get(dep_label).copied()
+                    self.label_dep(dep_label)
                 }
             }
             _ => self
@@ -318,7 +318,9 @@ mod tests {
     use super::*;
     use crate::test_support::{edges, find};
     use bazel_query_proto::analysis::Configuration;
-    use bazel_query_proto::blaze_query::{ConfiguredRuleInput, Rule, SourceFile, Target};
+    use bazel_query_proto::blaze_query::{
+        ConfiguredRuleInput, GeneratedFile, Rule, SourceFile, Target,
+    };
 
     fn rule_ct(name: &str, config_id: u32) -> ConfiguredTarget {
         ConfiguredTarget {
@@ -360,6 +362,20 @@ mod tests {
             target: Some(Target {
                 r#type: Discriminator::SourceFile as i32,
                 source_file: Some(SourceFile {
+                    name: name.to_string(),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    fn generated_ct(name: &str) -> ConfiguredTarget {
+        ConfiguredTarget {
+            target: Some(Target {
+                r#type: Discriminator::GeneratedFile as i32,
+                generated_file: Some(GeneratedFile {
                     name: name.to_string(),
                     ..Default::default()
                 }),
@@ -488,6 +504,25 @@ mod tests {
         let leaf = find(&graph, &names, "target://foo:in.c");
         assert_eq!(leaf.kind, Kind::Source);
         assert!(edges(&graph, &names).contains(&("target://foo:in.c", "ct://foo:app#ck1")));
+    }
+
+    #[test]
+    fn configured_dependency_on_a_generated_file_lands_on_its_leaf() {
+        // A file dependency carries the consumer's configuration id but has no
+        // configured target of its own, so the edge reaches its leaf.
+        let (graph, names) = build(&[result(
+            vec![
+                with_inputs(rule_ct("//foo:app", 1), &[], &[("//foo:gen.out", Some(1))]),
+                generated_ct("//foo:gen.out"),
+            ],
+            vec![config(1, "target")],
+        )]);
+
+        assert_eq!(
+            find(&graph, &names, "target://foo:gen.out").kind,
+            Kind::Artifact
+        );
+        assert!(edges(&graph, &names).contains(&("target://foo:gen.out", "ct://foo:app#ck1")));
     }
 
     #[test]
