@@ -11,7 +11,7 @@ use std::cell::RefCell;
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashMap, HashSet};
 
-use crate::graph::{EdgeKind, Graph, id_span};
+use crate::graph::{Edge, EdgeKind, Graph, id_span};
 use crate::intern::Id;
 
 /// The ids of nodes that are containers (named as some node's `parent`).
@@ -115,13 +115,21 @@ pub struct Overflow {
 /// A startup expansion set: the containers to expand for the largest collapsed
 /// view that fits both `max_nodes` and `max_edges`, or the [`Overflow`] of a
 /// graph no expansion of which fits.
+///
+/// `reduced` is `graph` with its transitively-redundant edges removed where the
+/// view being sized draws the reduction, and `None` where it draws every edge.
+/// It decides which edges a candidate view is measured by, since a cap is only
+/// worth anything if it counts what the layout engine is handed. Its nodes must
+/// be `graph`'s, which a transitive reduction leaves untouched.
 pub fn default_expansion(
     graph: &Graph,
+    reduced: Option<&Graph>,
     max_nodes: usize,
     max_edges: usize,
 ) -> Result<HashSet<Id>, Overflow> {
     let order = expansion_order(&Forest::new(graph));
-    let fitting = largest_fitting_prefix(&IndexedGraph::new(graph), &order, max_nodes, max_edges)?;
+    let drawn = IndexedGraph::drawing(graph, &reduced.unwrap_or(graph).edges);
+    let fitting = largest_fitting_prefix(&drawn, &order, max_nodes, max_edges)?;
     Ok(order[..fitting].iter().copied().collect())
 }
 
@@ -260,9 +268,10 @@ fn largest_fitting_prefix(
 /// edge is drawn to it.
 const ABSENT: u32 = u32::MAX;
 
-/// An integer-indexed copy of a graph's containment forest and edges, so a
-/// collapsed view can be computed (by [`collapse`]) or merely sized (by
-/// [`Self::counts`], for the startup search) without re-walking string ids.
+/// An integer-indexed copy of a graph's containment forest and of the edges a
+/// view of it draws, so a collapsed view can be computed (by [`collapse`]) or
+/// merely sized (by [`Self::counts`], for the startup search) without re-walking
+/// string ids.
 /// Each array spans the graph's id space rather than its node count, so a graph
 /// holding no node for some of the ids below its largest indexes as directly as
 /// a gap-free one.
@@ -279,6 +288,13 @@ struct IndexedGraph {
 
 impl IndexedGraph {
     fn new(graph: &Graph) -> Self {
+        Self::drawing(graph, &graph.edges)
+    }
+
+    /// `graph`'s containment forest over `edges` in place of its own, for sizing
+    /// a view that draws a subset of the graph's edges — every id `edges` names
+    /// must be one `graph` names.
+    fn drawing(graph: &Graph, edges: &[Edge]) -> Self {
         let child_counts = child_counts(graph);
         let span = id_span(graph);
         let mut present: Vec<bool> = vec![false; span];
@@ -292,11 +308,7 @@ impl IndexedGraph {
             parent[i] = node.parent.map(|p| p.0).filter(|&p| present[p as usize]);
             singleton[i] = child_counts.get(&node.id) == Some(&1);
         }
-        let edges = graph
-            .edges
-            .iter()
-            .map(|e| (e.from.0, e.to.0, e.kind))
-            .collect();
+        let edges = edges.iter().map(|e| (e.from.0, e.to.0, e.kind)).collect();
         Self {
             parent,
             singleton,
@@ -611,13 +623,13 @@ mod tests {
         );
 
         // Caps that only the root view (2 nodes, 1 edge) fits: no root expands.
-        let tiny = default_expansion(&g, 2, 1).expect("the root view fits these caps");
+        let tiny = default_expansion(&g, None, 2, 1).expect("the root view fits these caps");
         assert!(tiny.is_empty());
         let v = collapse(&g, &tiny);
         assert!(v.nodes.len() <= 2 && v.edges.len() <= 1);
 
         // Generous caps expand every multi-child container: the full graph shows.
-        let all = default_expansion(&g, 100, 100).expect("the whole graph fits these caps");
+        let all = default_expansion(&g, None, 100, 100).expect("the whole graph fits these caps");
         let v = collapse(&g, &all);
         assert_eq!(v.nodes.len(), g.nodes.len());
         assert!(v.nodes.len() <= 100 && v.edges.len() <= 100);
@@ -636,7 +648,7 @@ mod tests {
         );
 
         for (max_nodes, max_edges) in [(2, 1), (4, 1), (4, 2), (6, 2), (100, 100)] {
-            let expansion = default_expansion(&g, max_nodes, max_edges)
+            let expansion = default_expansion(&g, None, max_nodes, max_edges)
                 .unwrap_or_else(|over| panic!("{max_nodes}/{max_edges} fits nothing: {over:?}"));
             let view = collapse(&g, &expansion);
             assert!(view.nodes.len() <= max_nodes);
@@ -659,13 +671,69 @@ mod tests {
         // Each tower folds to its root and the one edge between their leaves
         // folds with them, so the root view is two nodes and one edge.
         let root_view = Overflow { nodes: 2, edges: 1 };
-        assert_eq!(default_expansion(&g, 1, 1), Err(root_view));
-        assert_eq!(default_expansion(&g, 2, 0), Err(root_view));
+        assert_eq!(default_expansion(&g, None, 1, 1), Err(root_view));
+        assert_eq!(default_expansion(&g, None, 2, 0), Err(root_view));
 
         // Meeting both caps exactly is fitting, and expands nothing.
-        assert_eq!(default_expansion(&g, 2, 1), Ok(HashSet::new()));
+        assert_eq!(default_expansion(&g, None, 2, 1), Ok(HashSet::new()));
         // Room for one tower's two leaves opens the tower that reveals cheapest.
-        assert_eq!(default_expansion(&g, 4, 1), Ok(expanded(&names, &["A"])));
+        assert_eq!(
+            default_expansion(&g, None, 4, 1),
+            Ok(expanded(&names, &["A"]))
+        );
+    }
+
+    /// One container over a chain of leaves carrying every forward edge the
+    /// chain implies, so its transitive reduction is a small fraction of the
+    /// edges drawn: `len` leaves, `len - 1` steps out of `len * (len - 1) / 2`.
+    fn chain_with_skips(len: u32) -> (Graph, Names) {
+        let mut g = Graph::new();
+        let mut names = Names::default();
+        let root = names.intern("R");
+        g.add_node(root, "R", Kind::Package, None);
+        let leaves: Vec<Id> = (0..len)
+            .map(|i| {
+                let id = names.intern(&format!("n{i:03}"));
+                g.add_node(id, "leaf", Kind::Action, Some(root));
+                id
+            })
+            .collect();
+        for (i, &from) in leaves.iter().enumerate() {
+            for &to in &leaves[i + 1..] {
+                g.add_edge(from, to, EdgeKind::Aquery);
+            }
+        }
+        (g, names)
+    }
+
+    /// A view drawing the reduction is sized by the edges the reduction leaves,
+    /// so a graph whose redundant edges alone would break the cap still opens.
+    #[test]
+    fn a_reduced_view_is_sized_on_the_edges_the_reduction_leaves() {
+        let (g, names) = chain_with_skips(8);
+        let reduced = crate::reduce::transitive_reduction(&g);
+        let open = expanded(&names, &["R"]);
+        assert_eq!(collapse(&g, &open).edges.len(), 28);
+        assert_eq!(collapse(&reduced, &open).edges.len(), 7);
+
+        let between_the_two = 10;
+        assert_eq!(
+            default_expansion(&g, Some(&reduced), 100, between_the_two),
+            Ok(open)
+        );
+    }
+
+    /// A view drawing every edge is sized by every edge, so the same cap holds
+    /// the same container shut.
+    #[test]
+    fn an_unreduced_view_is_sized_on_every_edge_it_draws() {
+        let (g, _) = chain_with_skips(8);
+
+        let between_the_two = 10;
+        assert_eq!(
+            default_expansion(&g, None, 100, between_the_two),
+            Ok(HashSet::new())
+        );
     }
 
     #[test]
@@ -684,7 +752,7 @@ mod tests {
 
         // `b` is the reachable multi-child container; A is a transparent
         // singleton, so generous caps expand `b` alone.
-        let all = default_expansion(&g, 100, 100).expect("the whole graph fits these caps");
+        let all = default_expansion(&g, None, 100, 100).expect("the whole graph fits these caps");
         assert_eq!(all, expanded(&names, &["b"]));
         assert_eq!(
             node_ids(&collapse(&g, &all), &names),
@@ -721,8 +789,10 @@ mod tests {
         }
 
         for caps in [(2, 1), (4, 1), (6, 2), (100, 100)] {
-            let a = default_expansion(&dense, caps.0, caps.1).expect("the dense fixture fits");
-            let b = default_expansion(&gapped, caps.0, caps.1).expect("the gapped fixture fits");
+            let a =
+                default_expansion(&dense, None, caps.0, caps.1).expect("the dense fixture fits");
+            let b =
+                default_expansion(&gapped, None, caps.0, caps.1).expect("the gapped fixture fits");
             assert_eq!(
                 node_ids(&collapse(&dense, &a), &dense_names),
                 node_ids(&collapse(&gapped, &b), &gapped_names),

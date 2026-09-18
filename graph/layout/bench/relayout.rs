@@ -295,15 +295,20 @@ fn main() {
     let (base, mut names) = args.build_joint();
     let reduced_base = reduce::transitive_reduction(&base);
 
-    let opening =
-        lod::default_expansion(&base, args.max_nodes, args.max_edges).unwrap_or_else(|over| {
-            eprintln!(
-                "[bench] collapsed to its roots the graph is still {} nodes / {} edges, past the \
+    let opening = lod::default_expansion(
+        &base,
+        Some(&reduced_base),
+        args.max_nodes,
+        args.max_edges,
+    )
+    .unwrap_or_else(|over| {
+        eprintln!(
+            "[bench] collapsed to its roots the graph is still {} nodes / {} edges, past the \
                  caps {}/{}: the view the toggle happens inside is the whole of it",
-                over.nodes, over.edges, args.max_nodes, args.max_edges,
-            );
-            HashSet::new()
-        });
+            over.nodes, over.edges, args.max_nodes, args.max_edges,
+        );
+        HashSet::new()
+    });
     let start_view = view_at(&base, &reduced_base, &opening, &mut names);
     let start = layout::layout(&start_view);
 

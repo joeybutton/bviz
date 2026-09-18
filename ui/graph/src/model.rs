@@ -171,6 +171,11 @@ impl Expandable {
     }
 }
 
+/// Whether a graph's layered view starts out drawing the transitive reduction of
+/// its edges rather than every edge. The opening expansion is sized against the
+/// edges that view draws, so the two are read from one place.
+const OPENS_REDUCED: bool = true;
+
 /// Reads `inputs`, builds the graph and derives the map pyramid.
 pub(crate) fn build(inputs: Vec<Input>) -> Result<Loaded, String> {
     let (graph, reduced_base, names, facets) = build_graph(&inputs)?;
@@ -178,6 +183,7 @@ pub(crate) fn build(inputs: Vec<Input>) -> Result<Loaded, String> {
     // unexpanded view is the smallest drawing of it there is.
     let (expanded, over_budget) = match bviz_graph_layout::lod::default_expansion(
         &graph,
+        OPENS_REDUCED.then_some(&reduced_base),
         DEFAULT_MAX_NODES,
         DEFAULT_MAX_EDGES,
     ) {
@@ -199,7 +205,7 @@ pub(crate) fn build(inputs: Vec<Input>) -> Result<Loaded, String> {
         expanded,
         over_budget,
         containers,
-        reduced: true,
+        reduced: OPENS_REDUCED,
         relaying: false,
     })
 }
