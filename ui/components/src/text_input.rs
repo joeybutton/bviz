@@ -470,7 +470,7 @@ impl TextElement {
                     let ix = input.index_for_mouse_position(position);
                     input.select_to(ix, cx);
                 },
-                |input, _, _, _| input.is_selecting = false,
+                |input, _, _, _, _| input.is_selecting = false,
             );
         }
     }

@@ -734,7 +734,7 @@ fn divider_drag(
                     workspace.move_divider(id, share, cx);
                 }
             },
-            move |workspace, _, _: DragEnd, cx| {
+            move |workspace, _, _: DragEnd, _, cx| {
                 workspace.divider_drag = None;
                 cx.notify();
             },

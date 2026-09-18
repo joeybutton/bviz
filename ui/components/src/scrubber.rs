@@ -125,7 +125,7 @@ pub fn scrubber<V: 'static>(
                                     move_scrub(view, fraction, cx);
                                 }
                             },
-                            move |view, _, _, cx| {
+                            move |view, _, _, _, cx| {
                                 end_slot(view).held = false;
                                 cx.notify();
                             },

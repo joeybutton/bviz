@@ -589,6 +589,7 @@ fn menu_end_drag(
     menu: &mut TracksMenu,
     _: Point<Pixels>,
     _: DragEnd,
+    _: &mut Window,
     cx: &mut Context<TracksMenu>,
 ) {
     menu.drag = MenuDrag::None;

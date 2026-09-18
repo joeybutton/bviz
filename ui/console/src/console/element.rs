@@ -318,7 +318,7 @@ impl TerminalElement {
                 window,
                 &self.view,
                 |view, position, cx| view.drag_to(position, cx),
-                |view, _, _, cx| {
+                |view, _, _, _, cx| {
                     if view.drag_grab.take().is_some() {
                         view.reveal_scrollbar(cx);
                     }
@@ -333,7 +333,7 @@ impl TerminalElement {
                 window,
                 &self.view,
                 |view, position, cx| view.selection_drag_to(position, cx),
-                |view, _, end, cx| {
+                |view, _, end, _, cx| {
                     if view.selecting {
                         view.selecting = false;
                         view.selection_drag = None;

@@ -797,6 +797,7 @@ fn flame_end_drag(
     panel: &mut FlamePanel,
     _: Point<Pixels>,
     _: DragEnd,
+    _: &mut Window,
     cx: &mut Context<FlamePanel>,
 ) {
     panel.drag = FlameDrag::None;

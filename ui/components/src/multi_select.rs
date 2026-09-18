@@ -663,6 +663,7 @@ fn end_drag(
     control: &mut MultiSelect,
     _: Point<Pixels>,
     _: DragEnd,
+    _: &mut Window,
     cx: &mut Context<MultiSelect>,
 ) {
     control.thumb_grab = None;

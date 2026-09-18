@@ -656,6 +656,7 @@ fn stats_end_drag(
     panel: &mut StatsPanel,
     _: Point<Pixels>,
     _: DragEnd,
+    _: &mut Window,
     cx: &mut Context<StatsPanel>,
 ) {
     panel.drag = StatsDrag::None;

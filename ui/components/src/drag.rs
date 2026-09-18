@@ -31,7 +31,7 @@ pub fn track_drag<V: 'static>(
     window: &mut Window,
     view: &Entity<V>,
     on_move: impl Fn(&mut V, Point<Pixels>, &mut Context<V>) + 'static,
-    on_end: impl Fn(&mut V, Point<Pixels>, DragEnd, &mut Context<V>) + 'static,
+    on_end: impl Fn(&mut V, Point<Pixels>, DragEnd, &mut Window, &mut Context<V>) + 'static,
 ) {
     let on_end = Rc::new(on_end);
     let ended = Rc::new(Cell::new(false));
@@ -39,7 +39,7 @@ pub fn track_drag<V: 'static>(
     let moving = view.clone();
     let move_end = on_end.clone();
     let move_ended = ended.clone();
-    window.on_mouse_event(move |event: &MouseMoveEvent, phase, _, cx| {
+    window.on_mouse_event(move |event: &MouseMoveEvent, phase, window, cx| {
         if phase != DispatchPhase::Bubble || move_ended.get() {
             return;
         }
@@ -48,19 +48,19 @@ pub fn track_drag<V: 'static>(
         } else {
             move_ended.set(true);
             moving.update(cx, |view, cx| {
-                move_end(view, event.position, DragEnd::Abandoned, cx)
+                move_end(view, event.position, DragEnd::Abandoned, window, cx)
             });
         }
     });
 
     let ending = view.clone();
-    window.on_mouse_event(move |event: &MouseUpEvent, phase, _, cx| {
+    window.on_mouse_event(move |event: &MouseUpEvent, phase, window, cx| {
         if phase != DispatchPhase::Bubble || ended.get() || event.button != MouseButton::Left {
             return;
         }
         ended.set(true);
         ending.update(cx, |view, cx| {
-            on_end(view, event.position, DragEnd::Released, cx)
+            on_end(view, event.position, DragEnd::Released, window, cx)
         });
     });
 }

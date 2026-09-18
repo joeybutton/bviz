@@ -987,6 +987,7 @@ fn timeline_end_drag(
     timeline: &mut Timeline,
     _: Point<Pixels>,
     end: DragEnd,
+    _: &mut Window,
     cx: &mut Context<Timeline>,
 ) {
     match std::mem::replace(&mut timeline.drag, TimelineDrag::None).region() {

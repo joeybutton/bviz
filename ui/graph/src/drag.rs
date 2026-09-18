@@ -83,6 +83,7 @@ pub(crate) fn end_drag(
     view: &mut GraphPanel,
     position: Point<Pixels>,
     end: DragEnd,
+    _: &mut Window,
     cx: &mut Context<GraphPanel>,
 ) {
     match std::mem::take(&mut view.drag) {

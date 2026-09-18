@@ -304,7 +304,13 @@ fn on_drag(view: &mut GraphPanel, position: Point<Pixels>, cx: &mut Context<Grap
     cx.notify();
 }
 
-fn end_drag(view: &mut GraphPanel, _: Point<Pixels>, _: DragEnd, cx: &mut Context<GraphPanel>) {
+fn end_drag(
+    view: &mut GraphPanel,
+    _: Point<Pixels>,
+    _: DragEnd,
+    _: &mut Window,
+    cx: &mut Context<GraphPanel>,
+) {
     view.pins.thumb_grab = None;
     cx.notify();
 }
