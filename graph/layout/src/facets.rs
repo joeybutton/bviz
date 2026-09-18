@@ -417,8 +417,6 @@ impl Facets {
 
     /// Copies into `child` the facets of the `owner` it is part of: what the
     /// owner's label and declaration say, and the configuration it is built in.
-    /// A facet `child` already states is the one it keeps, so a node that names
-    /// its own target or configuration is not overwritten by its owner's.
     pub fn inherit(&mut self, child: Id, owner: Id) {
         let (repo, rule_class, config, testonly, package, label) = (
             self.repo(owner),
@@ -644,8 +642,7 @@ impl FacetsBuilder {
     }
 }
 
-/// Collects one sparse facet under the fill-if-empty rule the dense facets
-/// follow: the values a node is first given are the ones it keeps.
+/// Collects one sparse facet under the fill-if-empty rule [`Facets`] states.
 #[derive(Default)]
 struct SparseFill {
     values: SparseFacetBuilder,
