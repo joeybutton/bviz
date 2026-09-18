@@ -7,7 +7,16 @@ pub(crate) fn toolbar(
     palette: &Palette,
     cx: &mut Context<GraphPanel>,
 ) -> Toolbar {
-    let mut bar = Toolbar::new().child(controls.picker).child(
+    let mut bar = Toolbar::new().child(controls.picker);
+    // The facet checklists sit beside the layout picker: both say what the panel
+    // draws, where the toggles past them say how it is drawn.
+    for checklist in [controls.class_filter, controls.origin_filter]
+        .into_iter()
+        .flatten()
+    {
+        bar = bar.child(checklist);
+    }
+    bar = bar.child(
         Button::new(
             "neighborhood-toggle",
             cx.listener(|view, _: &ClickEvent, _, cx| view.toggle_neighborhood(cx)),

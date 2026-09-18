@@ -324,6 +324,12 @@ impl Derived {
         self.reduced
     }
 
+    /// The filter this panel draws its share of the document's graph through,
+    /// which is where the toolbar's controls read their state from.
+    pub(crate) fn filter(&self) -> &Filter {
+        &self.filter
+    }
+
     /// The boxes the filter draws as no part of what it selects.
     pub(crate) fn faded(&self) -> Arc<HashSet<Id>> {
         self.slice.as_ref().map_or_else(
@@ -450,10 +456,6 @@ pub(crate) fn toggle_reduce(view: &mut GraphPanel, cx: &mut Context<GraphPanel>)
 /// as the surviving nodes and the budget allow, the camera, the edge set and —
 /// the panel's own to keep — the selection. The drawing on screen stays until
 /// the one this asks for lands.
-#[expect(
-    dead_code,
-    reason = "the filter a panel draws through has no control setting it yet"
-)]
 pub(crate) fn set_filter(view: &mut GraphPanel, filter: Filter, cx: &mut Context<GraphPanel>) {
     if view.derived.filter == filter {
         return;

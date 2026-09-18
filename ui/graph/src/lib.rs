@@ -2,8 +2,10 @@
 //! through `bviz_graph_layout`, lays the graph out, and opens a window
 //! rendering the result.
 
-use bviz_graph_layout::Id;
-use bviz_ui_components::{DragEnd, Dropdown, DropdownEvent, Pending, ScrollbarColors};
+use bviz_graph_layout::{Id, Kind};
+use bviz_ui_components::{
+    DragEnd, Dropdown, DropdownEvent, MultiSelect, MultiSelectEvent, Pending, ScrollbarColors,
+};
 use bviz_ui_graph_args::{GraphArgs, GraphSource};
 use bviz_ui_theme::{DataColors, Theme, ThemeColors};
 use bviz_ui_workspace::{
@@ -21,6 +23,7 @@ use std::time::{Duration, Instant};
 
 mod build;
 mod camera;
+mod checklist;
 mod derive;
 mod drag;
 mod emphasis;
@@ -32,11 +35,13 @@ mod morph;
 mod neighborhood;
 mod paint;
 mod relation;
+mod rules;
 mod scroll;
 mod selection;
 mod toolbar;
 
 use camera::{Camera, Rect, from_screen, recenter_rect, zoom_step};
+use checklist::OriginRow;
 use derive::{Derived, Drawn, Expandable, LayoutLanded};
 use drag::{Drag, end_drag, start_pan};
 use emphasis::Emphasis;
@@ -161,6 +166,18 @@ pub struct GraphPanel {
     mode_picker: Entity<Dropdown>,
     /// Carries the picker's selections into [`GraphPanel::set_mode`].
     _mode_choices: Subscription,
+    /// The node classes the loaded graph holds boxes for, in the order the class
+    /// checklist's rows stand.
+    classes: Vec<Kind>,
+    class_filter: Entity<MultiSelect>,
+    /// Carries a toggled class row into the panel's filter.
+    _class_choices: Subscription,
+    /// The repository origins and repositories the loaded graph names, in the
+    /// order the repository checklist's rows stand.
+    origins: Vec<OriginRow>,
+    origin_filter: Entity<MultiSelect>,
+    /// Carries a toggled repository row into the panel's filter.
+    _origin_choices: Subscription,
     /// Redraws as the graph is read.
     _changed: Subscription,
     /// Derives what the selected mode draws as the read lands: a derivation
@@ -241,9 +258,21 @@ impl GraphPanel {
                 view.set_relation(relation, cx);
             }
         });
+        let class_filter =
+            cx.new(|cx| MultiSelect::new("graph-classes", "classes", Vec::new(), cx));
+        let class_choices = cx.subscribe(&class_filter, |view, _, event: &MultiSelectEvent, cx| {
+            checklist::toggle_class(view, event.index, !event.checked, cx);
+        });
+        let origin_filter =
+            cx.new(|cx| MultiSelect::new("graph-origins", "repositories", Vec::new(), cx));
+        let origin_choices =
+            cx.subscribe(&origin_filter, |view, _, event: &MultiSelectEvent, cx| {
+                checklist::toggle_origin(view, event.index, !event.checked, cx);
+            });
         let changed = cx.observe(&model, |_, _, cx| cx.notify());
         let source_replaced = cx.subscribe(&model, |view, _, _: &SourceReplaced, cx| {
             derive::opened(view, cx);
+            checklist::adopt(view, cx);
         });
         Self {
             focus_handle: cx.focus_handle(),
@@ -257,6 +286,12 @@ impl GraphPanel {
             mode,
             mode_picker,
             _mode_choices: choices,
+            classes: Vec::new(),
+            class_filter,
+            _class_choices: class_choices,
+            origins: Vec::new(),
+            origin_filter,
+            _origin_choices: origin_choices,
             _changed: changed,
             _source_replaced: source_replaced,
             hovered: None,
@@ -522,6 +557,8 @@ impl Render for GraphPanel {
                 let controls = Controls {
                     mode: self.mode,
                     picker: self.mode_picker.clone(),
+                    class_filter: (!self.classes.is_empty()).then(|| self.class_filter.clone()),
+                    origin_filter: (!self.origins.is_empty()).then(|| self.origin_filter.clone()),
                     relation_picker: self.selection.node().map(|_| self.relation_picker.clone()),
                     neighborhood_enabled: self.neighborhood_enabled,
                     reduced: self.derived.reduced(),
@@ -545,6 +582,10 @@ impl Render for GraphPanel {
 struct Controls {
     mode: LayoutMode,
     picker: Entity<Dropdown>,
+    /// The checklists over the facets the loaded graph carries, each offered
+    /// only where that graph carries a value on its axis.
+    class_filter: Option<Entity<MultiSelect>>,
+    origin_filter: Option<Entity<MultiSelect>>,
     /// The picker naming what the selected box marks, offered only while a box
     /// is selected: with none there is no marking for it to widen or narrow.
     relation_picker: Option<Entity<Dropdown>>,
@@ -735,7 +776,7 @@ mod tests {
         Rect, clamp_pan, ease_out_cubic, fit_view, fit_zoom, settle_view, to_screen,
     };
     use crate::paint::lane_polyline;
-    use bviz_graph_layout::{Box, Kind};
+    use bviz_graph_layout::Box;
     use gpui::{Bounds, Size, point};
 
     fn lbox(id: u32, x: f64, y: f64, w: f64, h: f64) -> Box {
