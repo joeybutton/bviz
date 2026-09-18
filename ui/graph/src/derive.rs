@@ -184,8 +184,6 @@ impl Slice {
 
 /// What re-evaluating a filter left of the graph a panel was drawing.
 struct Restricted {
-    /// The nodes the filter takes out of the graph, which nothing keyed on a
-    /// node — an expansion, a selection — can go on naming.
     dropped: HashSet<Id>,
     expanded: HashSet<Id>,
     over_budget: Option<Overflow>,
@@ -232,7 +230,7 @@ struct Adopted {
 /// answer for.
 struct Restriction {
     /// The nodes the filter took out of the graph, which nothing keyed on a
-    /// node can go on naming.
+    /// node — an expansion, a selection — can go on naming.
     dropped: HashSet<Id>,
     /// The graph that leaves, placed; no camera has called for a level of it.
     map: Arc<MapLayout>,
