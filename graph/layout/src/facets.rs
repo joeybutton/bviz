@@ -9,7 +9,10 @@
 use std::collections::{HashMap, HashSet};
 use std::num::NonZeroU32;
 
+use bazel_query_proto::analysis::Configuration;
+
 use crate::intern::Id;
+use crate::label;
 use crate::repo::{self, RepoOrigin};
 
 /// A string interned in a [`FacetStrings`] table. The index is stored biased
@@ -399,6 +402,29 @@ impl Facets {
         put(&mut self.label, id, Some(NodeRef::of(label)));
     }
 
+    /// Records what the label of the node `node` names outright: itself as a
+    /// target, the `package` box it sits in, and its repository. `canonical` is
+    /// the label in the form node ids are keyed by and `written` the form the
+    /// input printed, whose repository part is the apparent name that
+    /// repository was reached by.
+    pub fn describe_label(
+        &mut self,
+        node: Id,
+        package: Option<Id>,
+        canonical: &str,
+        written: &str,
+    ) {
+        self.set_label(node, node);
+        if let Some(package) = package {
+            self.set_package(node, package);
+        }
+        if let Some(canonical_repo) = label::label_repo(canonical) {
+            let apparent = label::label_repo(written).filter(|&name| name != canonical_repo);
+            let repo = self.intern_repo(canonical_repo, apparent);
+            self.set_repo(node, Some(repo));
+        }
+    }
+
     /// The tags the node's target sets.
     pub fn tags(&self) -> &SparseFacet {
         &self.tags
@@ -459,6 +485,22 @@ impl Facets {
         handle
     }
 
+    /// The handle for the configuration `config` describes. `None` for one
+    /// stating no checksum, which leaves it with no name a filter can hold on to.
+    pub fn intern_configuration(&mut self, config: &Configuration) -> Option<ConfigRef> {
+        if config.checksum.is_empty() {
+            return None;
+        }
+        let mnemonic = (!config.mnemonic.is_empty()).then_some(config.mnemonic.as_str());
+        let is_tool = if config.is_tool { Tri::Yes } else { Tri::No };
+        Some(self.intern_config(&config.checksum, mnemonic, is_tool))
+    }
+
+    /// The handle for the mnemonic `name` of an action.
+    pub fn intern_mnemonic(&mut self, name: &str) -> Sym {
+        self.strings.intern(name)
+    }
+
     /// The handle for the rule class `name`, categorizing it by that name.
     pub fn intern_rule_class(&mut self, name: &str) -> RuleClassRef {
         let handle = RuleClassRef::of(self.strings.intern(name));
@@ -513,9 +555,8 @@ impl Facets {
 #[derive(Default)]
 pub struct FacetsBuilder {
     facets: Facets,
-    tags: SparseFacetBuilder,
-    /// The nodes a `tags` value has been recorded for.
-    tagged: HashSet<Id>,
+    tags: SparseFill,
+    aspects: SparseFill,
 }
 
 impl FacetsBuilder {
@@ -526,18 +567,43 @@ impl FacetsBuilder {
     }
 
     pub fn set_tags<'a>(&mut self, id: Id, tags: impl IntoIterator<Item = &'a str>) {
-        if !self.tagged.insert(id) {
-            return;
-        }
-        for tag in tags {
-            let tag = self.facets.strings.intern(tag);
-            self.tags.push(id, tag);
-        }
+        self.tags.fill(&mut self.facets.strings, id, tags);
+    }
+
+    pub fn set_aspects<'a>(&mut self, id: Id, aspects: impl IntoIterator<Item = &'a str>) {
+        self.aspects.fill(&mut self.facets.strings, id, aspects);
     }
 
     pub fn seal(mut self) -> Facets {
-        self.facets.set_tags(self.tags.seal());
+        self.facets.set_tags(self.tags.values.seal());
+        self.facets.set_aspects(self.aspects.values.seal());
         self.facets
+    }
+}
+
+/// Collects one sparse facet under the fill-if-empty rule the dense facets
+/// follow: the values a node is first given are the ones it keeps.
+#[derive(Default)]
+struct SparseFill {
+    values: SparseFacetBuilder,
+    /// The nodes a value has been recorded for.
+    filled: HashSet<Id>,
+}
+
+impl SparseFill {
+    fn fill<'a>(
+        &mut self,
+        strings: &mut FacetStrings,
+        id: Id,
+        values: impl IntoIterator<Item = &'a str>,
+    ) {
+        if !self.filled.insert(id) {
+            return;
+        }
+        for value in values {
+            let value = strings.intern(value);
+            self.values.push(id, value);
+        }
     }
 }
 

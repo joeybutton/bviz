@@ -20,7 +20,7 @@ use bazel_query_proto::blaze_query::{Rule, Target};
 
 #[cfg(test)]
 use crate::facets::Facets;
-use crate::facets::{ConfigRef, FacetsBuilder, Tri};
+use crate::facets::{ConfigRef, FacetsBuilder};
 use crate::graph::{EdgeKind, Graph, Kind};
 use crate::intern::{Id, Names};
 use crate::label::{self, PackageHierarchy, RepoMapping, label_and_kind};
@@ -124,22 +124,10 @@ impl Builder<'_> {
     }
 
     /// The handle for the configuration `config_id` names, absent for a target
-    /// carrying no configuration, which names id `0`, and for a configuration
-    /// stating no checksum. The checksum is the only key that identifies a
-    /// configuration across queries, since cquery numbers its configuration ids
-    /// independently of aquery's.
+    /// carrying no configuration, which names id `0`.
     fn intern_config(&mut self, config_id: u32) -> Option<ConfigRef> {
         let config = *self.configurations.get(&config_id)?;
-        if config.checksum.is_empty() {
-            return None;
-        }
-        let mnemonic = (!config.mnemonic.is_empty()).then_some(config.mnemonic.as_str());
-        let is_tool = if config.is_tool { Tri::Yes } else { Tri::No };
-        Some(
-            self.facets
-                .facets()
-                .intern_config(&config.checksum, mnemonic, is_tool),
-        )
+        self.facets.facets().intern_configuration(config)
     }
 
     /// Records for the configured-target node `node` the configuration it is
@@ -386,7 +374,7 @@ impl Edges<'_, '_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::facets::RuleCategory;
+    use crate::facets::{RuleCategory, Tri};
     use crate::test_support::{edges, find};
     use bazel_query_proto::blaze_query::{
         Attribute, ConfiguredRuleInput, GeneratedFile, Rule, SourceFile,

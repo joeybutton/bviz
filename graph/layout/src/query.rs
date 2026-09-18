@@ -127,15 +127,9 @@ pub(crate) fn describe_target(
     canonical: &str,
     written: &str,
 ) {
-    facets.facets().set_label(node, node);
-    if let Some(package) = package {
-        facets.facets().set_package(node, package);
-    }
-    if let Some(canonical_repo) = label::label_repo(canonical) {
-        let apparent = label::label_repo(written).filter(|&name| name != canonical_repo);
-        let repo = facets.facets().intern_repo(canonical_repo, apparent);
-        facets.facets().set_repo(node, Some(repo));
-    }
+    facets
+        .facets()
+        .describe_label(node, package, canonical, written);
     let Some(rule) = target.rule.as_ref() else {
         return;
     };

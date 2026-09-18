@@ -119,6 +119,7 @@ fn build_inputs(
             labeled_outputs,
             repos,
             names,
+            facets,
         ));
     }
     if let Some(c) = cquery {
@@ -195,9 +196,9 @@ mod tests {
     use super::*;
     use crate::graph::EdgeKind;
     use crate::test_support::find;
-    use bazel_query_proto::analysis::Configuration;
     use bazel_query_proto::analysis::{
-        Action, Artifact, DepSetOfFiles, PathFragment, Target as ActionTarget,
+        Action, Artifact, Configuration, ConfiguredTarget, DepSetOfFiles, PathFragment,
+        Target as ActionTarget,
     };
     use bazel_query_proto::blaze_query::{GeneratedFile, Rule, SourceFile, target::Discriminator};
 
@@ -554,6 +555,74 @@ mod tests {
         assert_eq!(
             node_count(&graph, &names, "target:@@somerepo+2.0//foo:lib"),
             1
+        );
+    }
+
+    #[test]
+    fn a_configuration_both_an_aquery_and_a_cquery_name_is_one_entry() {
+        // The two layers number their configuration ids independently — here 4
+        // and 1 for the one configuration — so only the checksum joins them.
+        let cquery_results = vec![CqueryResult {
+            results: vec![ConfiguredTarget {
+                target: Some(Target {
+                    r#type: Discriminator::Rule as i32,
+                    rule: Some(Rule {
+                        name: "//foo:app".into(),
+                        rule_class: "cc_binary".into(),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }),
+                configuration_id: 4,
+                ..Default::default()
+            }],
+            configurations: vec![Configuration {
+                id: 4,
+                mnemonic: "k8-fastbuild".into(),
+                checksum: "shared".into(),
+                ..Default::default()
+            }],
+        }];
+        let aquery_container = ActionGraphContainer {
+            targets: vec![ActionTarget {
+                id: 1,
+                label: "//bar:lib".into(),
+                ..Default::default()
+            }],
+            configuration: vec![Configuration {
+                id: 1,
+                mnemonic: "k8-fastbuild".into(),
+                checksum: "shared".into(),
+                ..Default::default()
+            }],
+            actions: vec![Action {
+                target_id: 1,
+                mnemonic: "CppCompile".into(),
+                configuration_id: 1,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        let (_, names, facets) = build_joint(
+            Some(&[aquery_container]),
+            Some(&cquery_results),
+            None,
+            false,
+        );
+
+        let from_cquery = facets.config(names.get("ct://foo:app#shared").unwrap());
+        let from_aquery = facets.config(names.get("ct://bar:lib#shared").unwrap());
+        assert_eq!(from_cquery, from_aquery);
+        let config = from_cquery.unwrap();
+        assert_eq!(facets.strings().resolve(config.sym()), "shared");
+        assert_eq!(
+            facets
+                .config_entry(config)
+                .unwrap()
+                .mnemonic
+                .map(|name| facets.strings().resolve(name)),
+            Some("k8-fastbuild")
         );
     }
 

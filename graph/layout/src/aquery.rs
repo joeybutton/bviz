@@ -22,9 +22,13 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 
 use bazel_query_proto::analysis::{
-    Action, ActionGraphContainer, Artifact, Configuration, DepSetOfFiles, PathFragment, Target,
+    Action, ActionGraphContainer, Artifact, AspectDescriptor, Configuration, DepSetOfFiles,
+    PathFragment, RuleClass, Target,
 };
 
+#[cfg(test)]
+use crate::facets::Facets;
+use crate::facets::{ConfigRef, FacetsBuilder};
 use crate::graph::{EdgeKind, Graph, Kind};
 use crate::intern::{Id, Names};
 use crate::label::{self, PackageHierarchy, RepoMapping};
@@ -35,19 +39,30 @@ struct ArtifactId(u32);
 struct ConfigId(u32);
 
 #[cfg(test)]
-fn build(containers: &[ActionGraphContainer], external_sources: bool) -> (Graph, Names) {
+fn build(containers: &[ActionGraphContainer], external_sources: bool) -> (Graph, Names, Facets) {
+    build_promoting(containers, external_sources, &HashSet::new())
+}
+
+#[cfg(test)]
+fn build_promoting(
+    containers: &[ActionGraphContainer],
+    external_sources: bool,
+    labeled_outputs: &HashSet<String>,
+) -> (Graph, Names, Facets) {
     let repos = RepoMapping::default();
     let packages = package_keys(containers, &repos);
     let mut names = Names::default();
+    let mut facets = FacetsBuilder::default();
     let graph = build_with_packages(
         containers,
         external_sources,
         &packages,
-        &HashSet::new(),
+        labeled_outputs,
         &repos,
         &mut names,
+        &mut facets,
     );
-    (graph, names)
+    (graph, names, facets.seal())
 }
 
 /// Every target label this aquery names.
@@ -74,6 +89,7 @@ pub(crate) fn package_keys(
 /// whose label is among them is promoted to its own `target -> configured-target`
 /// box (the concrete file nesting inside) so it merges with that target, rather
 /// than sitting as a bare artifact under its producing rule.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn build_with_packages(
     containers: &[ActionGraphContainer],
     external_sources: bool,
@@ -81,6 +97,7 @@ pub(crate) fn build_with_packages(
     labeled_outputs: &HashSet<String>,
     repos: &RepoMapping,
     names: &mut Names,
+    facets: &mut FacetsBuilder,
 ) -> Graph {
     let index = Index::build(containers);
 
@@ -94,6 +111,7 @@ pub(crate) fn build_with_packages(
         repos,
         &mut graph,
         names,
+        facets,
     );
     wire_action_inputs(
         index,
@@ -102,6 +120,7 @@ pub(crate) fn build_with_packages(
         external_sources,
         &mut graph,
         names,
+        facets,
     );
 
     graph
@@ -110,6 +129,7 @@ pub(crate) fn build_with_packages(
 /// Creates the box of the configured target each action belongs to, the action's
 /// own node, and a node per artifact it outputs, returning the node that
 /// represents each produced artifact.
+#[allow(clippy::too_many_arguments)]
 fn build_action_boxes(
     index: &Index,
     hierarchy: &PackageHierarchy,
@@ -117,11 +137,13 @@ fn build_action_boxes(
     repos: &RepoMapping,
     graph: &mut Graph,
     names: &mut Names,
+    facets: &mut FacetsBuilder,
 ) -> HashMap<ArtifactId, Id> {
     let mut producer_node_id: HashMap<ArtifactId, Id> = HashMap::new();
     let mut boxes = Boxes {
         graph,
         names,
+        facets,
         hierarchy,
         index,
         labeled_outputs,
@@ -130,12 +152,19 @@ fn build_action_boxes(
     };
     for (i, action) in index.actions.iter().enumerate() {
         let config_id = ConfigId(action.configuration_id);
-        let rule_label = index
-            .target_by_id
-            .get(&action.target_id)
-            .map(|t| repos.canonicalize_label(&t.label).into_owned())
-            .unwrap_or_else(|| format!("target {}", action.target_id));
-        let ct_id = boxes.target_ct(&rule_label, Kind::Target, config_id);
+        let target = index.target_by_id.get(&action.target_id).copied();
+        let unnamed = format!("target {}", action.target_id);
+        let written = target.map_or(unnamed.as_str(), |t| t.label.as_str());
+        let canonical = repos.canonicalize_label(written).into_owned();
+        let ct_id = boxes.target_ct(
+            &TargetBox {
+                canonical: &canonical,
+                written,
+                kind: Kind::Target,
+                rule_class: target.and_then(|t| index.rule_class(t)),
+            },
+            config_id,
+        );
         let action_id = boxes.names.intern(&format!("action{i}"));
         boxes.graph.add_node(
             action_id,
@@ -143,6 +172,7 @@ fn build_action_boxes(
             Kind::Action,
             Some(ct_id),
         );
+        boxes.describe_action(action_id, action);
         for &out in &action.output_ids {
             let out = ArtifactId(out);
             let art_id = boxes.output_artifact(out, ct_id, config_id);
@@ -162,6 +192,7 @@ fn wire_action_inputs(
     external_sources: bool,
     graph: &mut Graph,
     names: &mut Names,
+    facets: &mut FacetsBuilder,
 ) {
     let Index {
         actions,
@@ -173,6 +204,7 @@ fn wire_action_inputs(
         seen_edge: HashSet::new(),
         source_nodes: HashSet::new(),
         hierarchy,
+        facets,
         producer_node_id,
         depset_by_id,
         paths,
@@ -203,6 +235,8 @@ struct Index<'a> {
     target_by_id: HashMap<u32, &'a Target>,
     config_by_id: HashMap<ConfigId, &'a Configuration>,
     depset_by_id: HashMap<u32, &'a DepSetOfFiles>,
+    rule_class_by_id: HashMap<u32, &'a RuleClass>,
+    aspect_by_id: HashMap<u32, &'a AspectDescriptor>,
 }
 
 impl<'a> Index<'a> {
@@ -213,6 +247,8 @@ impl<'a> Index<'a> {
         let mut dep_sets: Vec<&DepSetOfFiles> = Vec::new();
         let mut configurations: Vec<&Configuration> = Vec::new();
         let mut path_fragments: Vec<&PathFragment> = Vec::new();
+        let mut rule_classes: Vec<&RuleClass> = Vec::new();
+        let mut aspects: Vec<&AspectDescriptor> = Vec::new();
         for c in containers {
             artifacts.extend(c.artifacts.iter());
             actions.extend(c.actions.iter());
@@ -220,6 +256,8 @@ impl<'a> Index<'a> {
             dep_sets.extend(c.dep_set_of_files.iter());
             configurations.extend(c.configuration.iter());
             path_fragments.extend(c.path_fragments.iter());
+            rule_classes.extend(c.rule_classes.iter());
+            aspects.extend(c.aspect_descriptors.iter());
         }
         Index {
             paths: Paths {
@@ -232,8 +270,30 @@ impl<'a> Index<'a> {
                 .map(|c| (ConfigId(c.id), *c))
                 .collect(),
             depset_by_id: dep_sets.iter().map(|d| (d.id, *d)).collect(),
+            rule_class_by_id: rule_classes.iter().map(|r| (r.id, *r)).collect(),
+            aspect_by_id: aspects.iter().map(|a| (a.id, *a)).collect(),
             actions,
         }
+    }
+
+    /// The name of the rule class `target` was declared by, absent for a target
+    /// naming none — every interned id is positive, so id `0` names no entry.
+    fn rule_class(&self, target: &Target) -> Option<&'a str> {
+        Some(
+            self.rule_class_by_id
+                .get(&target.rule_class_id)?
+                .name
+                .as_str(),
+        )
+    }
+
+    /// The names of the aspects that produced `action`, in the order the action
+    /// lists their descriptor ids.
+    fn aspect_names(&self, action: &Action) -> impl Iterator<Item = &'a str> {
+        action
+            .aspect_descriptor_ids
+            .iter()
+            .filter_map(|id| Some(self.aspect_by_id.get(id)?.name.as_str()))
     }
 }
 
@@ -243,11 +303,24 @@ impl<'a> Index<'a> {
 struct Boxes<'a> {
     graph: &'a mut Graph,
     names: &'a mut Names,
+    facets: &'a mut FacetsBuilder,
     hierarchy: &'a PackageHierarchy,
     index: &'a Index<'a>,
     labeled_outputs: &'a HashSet<String>,
     targets: HashSet<Id>,
     configured: HashSet<Id>,
+}
+
+/// The target a configured-target box belongs to, as one aquery input names it.
+struct TargetBox<'a> {
+    /// The label in the canonical form node ids are keyed by.
+    canonical: &'a str,
+    /// The label as the input printed it.
+    written: &'a str,
+    kind: Kind,
+    /// The rule class the target was declared by, absent for a target the
+    /// action graph names no rule class for, such as a promoted output file.
+    rule_class: Option<&'a str>,
 }
 
 impl Boxes<'_> {
@@ -261,6 +334,21 @@ impl Boxes<'_> {
         )
     }
 
+    fn intern_config(&mut self, config_id: ConfigId) -> Option<ConfigRef> {
+        let config = *self.index.config_by_id.get(&config_id)?;
+        self.facets.facets().intern_configuration(config)
+    }
+
+    /// Records what `action` states about the node it became.
+    fn describe_action(&mut self, node: Id, action: &Action) {
+        if !action.mnemonic.is_empty() {
+            let mnemonic = self.facets.facets().intern_mnemonic(&action.mnemonic);
+            self.facets.facets().set_mnemonic(node, Some(mnemonic));
+        }
+        let aspects: Vec<&str> = self.index.aspect_names(action).collect();
+        self.facets.set_aspects(node, aspects);
+    }
+
     /// The leaf node for one output artifact `out` of an action whose box is
     /// `producing_ct`. A labeled generated output nests under its own target's
     /// per-config box; an unlabeled one sits directly under the producing rule's box.
@@ -270,7 +358,15 @@ impl Boxes<'_> {
             .filter(|label| self.labeled_outputs.contains(label))
         {
             Some(out_label) => {
-                let out_ct = self.target_ct(&out_label, Kind::Artifact, config_id);
+                let out_ct = self.target_ct(
+                    &TargetBox {
+                        canonical: &out_label,
+                        written: &out_label,
+                        kind: Kind::Artifact,
+                        rule_class: None,
+                    },
+                    config_id,
+                );
                 let config_key = self.config_key(config_id);
                 let id = self
                     .names
@@ -296,29 +392,35 @@ impl Boxes<'_> {
         }
     }
 
-    /// The configured-target box `ct:{full_label}#{checksum}` for a target in one
-    /// configuration, creating the `target:{full_label}` box (of kind `target_kind`)
-    /// above it on first use and returning the configured-target id. Used both for a
-    /// rule (a `target` box holding actions) and for a labeled generated output (an
-    /// `artifact` box holding the concrete file).
-    fn target_ct(&mut self, full_label: &str, target_kind: Kind, config_id: ConfigId) -> Id {
+    /// The configured-target box `ct:{label}#{checksum}` for `target` in one
+    /// configuration, creating the `target:{label}` box above it on first use and
+    /// returning the configured-target id. Used both for a rule (a `target` box
+    /// holding actions) and for a labeled generated output (an `artifact` box
+    /// holding the concrete file).
+    fn target_ct(&mut self, target: &TargetBox, config_id: ConfigId) -> Id {
         let config_key = self.config_key(config_id);
         let ct_node_id = self
             .names
-            .intern(&label::ct_node_id(full_label, &config_key));
+            .intern(&label::ct_node_id(target.canonical, &config_key));
         if !self.configured.insert(ct_node_id) {
             return ct_node_id;
         }
 
-        let target_node_id = self.names.intern(&format!("target:{full_label}"));
+        let target_node_id = self.names.intern(&format!("target:{}", target.canonical));
         if self.targets.insert(target_node_id) {
-            let package = self.hierarchy.package_box(full_label);
+            let package = self.hierarchy.package_box(target.canonical);
             self.graph.add_node(
                 target_node_id,
-                label::target_label(full_label),
-                target_kind,
+                label::target_label(target.canonical),
+                target.kind,
                 package,
             );
+            let facets = self.facets.facets();
+            facets.describe_label(target_node_id, package, target.canonical, target.written);
+            if let Some(name) = target.rule_class {
+                let rule_class = facets.intern_rule_class(name);
+                facets.set_rule_class(target_node_id, Some(rule_class));
+            }
         }
 
         let mnemonic = label::config_mnemonic(
@@ -334,18 +436,22 @@ impl Boxes<'_> {
             Kind::ConfiguredTarget,
             Some(target_node_id),
         );
+        if let Some(config) = self.intern_config(config_id) {
+            self.facets.facets().set_config(ct_node_id, Some(config));
+        }
         ct_node_id
     }
 }
 
 /// Mutable state threaded through the recursive input wiring.
-struct Wiring<'a> {
+struct Wiring<'a, 'f> {
     /// Input edges already wired, deduped by their endpoints' ids. An artifact
     /// reachable through several of one action's depsets, or the same source
     /// feeding an action twice, is wired once.
     seen_edge: HashSet<(Id, Id)>,
     source_nodes: HashSet<Id>,
     hierarchy: &'a PackageHierarchy,
+    facets: &'f mut FacetsBuilder,
     producer_node_id: HashMap<ArtifactId, Id>,
     depset_by_id: HashMap<u32, &'a DepSetOfFiles>,
     paths: Paths<'a>,
@@ -356,7 +462,7 @@ struct Wiring<'a> {
     resolved: HashMap<ArtifactId, Option<Id>>,
 }
 
-impl Wiring<'_> {
+impl Wiring<'_, '_> {
     /// Flattens the inputs reachable from `dep_set_id` onto `consumer_id`: each
     /// direct artifact is wired straight to the consumer and each transitive
     /// depset is recursed into. `visited` holds the dep-set ids already walked
@@ -453,6 +559,9 @@ impl Wiring<'_> {
                 if self.source_nodes.insert(node_id) {
                     let parent = self.hierarchy.package_box(&label);
                     graph.add_node(node_id, label::target_label(&label), Kind::Source, parent);
+                    self.facets
+                        .facets()
+                        .describe_label(node_id, parent, &label, &label);
                 }
                 node_id
             }
@@ -588,6 +697,7 @@ fn external_repo_path(path: &str) -> Option<(&str, &str)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::facets::{RuleCategory, Tri};
     use crate::graph::Node;
     use crate::test_support::{edges, find, parent_of};
 
@@ -663,6 +773,51 @@ mod tests {
         }
     }
 
+    /// A target declared by the rule class the `rule_classes` table gives
+    /// `rule_class_id`.
+    fn declared_target(id: u32, label: &str, rule_class_id: u32) -> Target {
+        Target {
+            rule_class_id,
+            ..target(id, label)
+        }
+    }
+
+    fn rule_class(id: u32, name: &str) -> RuleClass {
+        RuleClass {
+            id,
+            name: name.to_string(),
+        }
+    }
+
+    fn aspect(id: u32, name: &str) -> AspectDescriptor {
+        AspectDescriptor {
+            id,
+            name: name.to_string(),
+            ..Default::default()
+        }
+    }
+
+    /// An action of `target_id` produced by the aspects `aspects` names, in the
+    /// reverse order Bazel writes them.
+    fn aspect_action(target_id: u32, mnemonic: &str, aspects: &[u32]) -> Action {
+        Action {
+            aspect_descriptor_ids: aspects.iter().rev().copied().collect(),
+            ..action(target_id, mnemonic, &[])
+        }
+    }
+
+    /// The aspects `facets` records for `node`, in a stable order.
+    fn aspects_of(facets: &Facets, node: Id) -> Vec<&str> {
+        let mut aspects: Vec<&str> = facets
+            .aspects()
+            .values(node)
+            .iter()
+            .map(|&aspect| facets.strings().resolve(aspect))
+            .collect();
+        aspects.sort_unstable();
+        aspects
+    }
+
     #[test]
     fn shared_input_flattens_to_each_consumer() {
         let (a1, f1) = source_artifact(1, "one.c");
@@ -676,7 +831,7 @@ mod tests {
             ..Default::default()
         };
 
-        let (graph, names) = build(&[container], false);
+        let (graph, names, _) = build(&[container], false);
 
         let edges = edges(&graph, &names);
         assert!(edges.contains(&("source1", "action0")));
@@ -698,7 +853,7 @@ mod tests {
             ..Default::default()
         };
 
-        let (graph, names) = build(&[container], false);
+        let (graph, names, _) = build(&[container], false);
 
         let edges = edges(&graph, &names);
         assert!(edges.contains(&("source1", "action0")));
@@ -722,7 +877,7 @@ mod tests {
             ..Default::default()
         };
 
-        let (graph, names) = build(&[container], false);
+        let (graph, names, _) = build(&[container], false);
 
         let edges = edges(&graph, &names);
         assert!(edges.contains(&("source1", "action0")));
@@ -742,7 +897,7 @@ mod tests {
             ..Default::default()
         };
 
-        let (graph, names) = build(&[container], false);
+        let (graph, names, _) = build(&[container], false);
 
         let edges = edges(&graph, &names);
         // The local member flattens onto both consumers.
@@ -766,7 +921,7 @@ mod tests {
             ..Default::default()
         };
 
-        let (graph, names) = build(&[container], true);
+        let (graph, names, _) = build(&[container], true);
 
         let dep = find(&graph, &names, "target:@@somerepo+//foo:dep.c");
         assert_eq!(dep.kind, Kind::Source);
@@ -794,7 +949,7 @@ mod tests {
             ..Default::default()
         };
 
-        let (graph, names) = build(&[container], true);
+        let (graph, names, _) = build(&[container], true);
 
         assert_eq!(parent_of(&graph, &names, "source1"), None);
     }
@@ -821,7 +976,7 @@ mod tests {
             ..Default::default()
         };
 
-        let (graph, names) = build(&[container], false);
+        let (graph, names, _) = build(&[container], false);
 
         let edges = edges(&graph, &names);
         // The producing action feeds its artifact node, which flattens directly
@@ -849,7 +1004,7 @@ mod tests {
             ..Default::default()
         };
 
-        let (graph, names) = build(&[container], false);
+        let (graph, names, _) = build(&[container], false);
 
         let edges = edges(&graph, &names);
         // An output of an external repository's action is in scope through its
@@ -871,7 +1026,7 @@ mod tests {
             ..Default::default()
         };
 
-        let (graph, names) = build(&[container], false);
+        let (graph, names, _) = build(&[container], false);
 
         // The member cannot be wired, so it produces no node and no edge.
         assert!(
@@ -901,7 +1056,7 @@ mod tests {
             ..Default::default()
         };
 
-        let (graph, names) = build(&[container], false);
+        let (graph, names, _) = build(&[container], false);
 
         let edges = edges(&graph, &names);
         assert!(edges.contains(&("action0", "artifact1")));
@@ -920,7 +1075,7 @@ mod tests {
             ..Default::default()
         };
 
-        let (graph, names) = build(&[container], false);
+        let (graph, names, _) = build(&[container], false);
 
         assert!(!graph.nodes.iter().any(|n| n.kind == Kind::Source));
         assert!(edges(&graph, &names).is_empty());
@@ -940,7 +1095,7 @@ mod tests {
             ..Default::default()
         };
 
-        let (graph, names) = build(&[container], false);
+        let (graph, names, _) = build(&[container], false);
 
         assert_eq!(find(&graph, &names, "pkg:foo").kind, Kind::Package);
         assert_eq!(find(&graph, &names, "pkg:foo").label, "//foo");
@@ -979,7 +1134,7 @@ mod tests {
             ..Default::default()
         };
 
-        let (graph, names) = build(&[container], false);
+        let (graph, names, _) = build(&[container], false);
 
         assert_eq!(
             parent_of(&graph, &names, "target://foo/bar:sub/deep.c"),
@@ -999,7 +1154,7 @@ mod tests {
             ..Default::default()
         };
 
-        let (graph, names) = build(&[container], false);
+        let (graph, names, _) = build(&[container], false);
 
         assert_eq!(parent_of(&graph, &names, "source1"), None);
     }
@@ -1016,7 +1171,7 @@ mod tests {
             ..Default::default()
         };
 
-        let (graph, names) = build(&[container], false);
+        let (graph, names, _) = build(&[container], false);
 
         assert_eq!(find(&graph, &names, "pkg:").label, "//");
         assert_eq!(parent_of(&graph, &names, "target://:root"), Some("pkg:"));
@@ -1042,7 +1197,7 @@ mod tests {
             ..Default::default()
         };
 
-        let (graph, mut names) = build(&[container], false);
+        let (graph, mut names, _) = build(&[container], false);
         let quotiented =
             crate::quotient::quotient(&graph, &std::collections::HashSet::new(), &mut names).0;
 
@@ -1089,18 +1244,8 @@ mod tests {
             ..Default::default()
         };
 
-        let containers = vec![container];
         let labeled = HashSet::from(["//pkg:gen.out".to_string()]);
-        let repos = RepoMapping::default();
-        let mut names = Names::default();
-        let graph = build_with_packages(
-            &containers,
-            false,
-            &package_keys(&containers, &repos),
-            &labeled,
-            &repos,
-            &mut names,
-        );
+        let (graph, names, _) = build_promoting(&[container], false, &labeled);
 
         // The output is promoted to its own target box, nesting its per-config
         // box and the concrete artifact, instead of sitting under the rule.
@@ -1145,18 +1290,7 @@ mod tests {
             ..Default::default()
         };
 
-        let containers = vec![container];
-        let labeled = HashSet::new();
-        let repos = RepoMapping::default();
-        let mut names = Names::default();
-        let graph = build_with_packages(
-            &containers,
-            false,
-            &package_keys(&containers, &repos),
-            &labeled,
-            &repos,
-            &mut names,
-        );
+        let (graph, names, _) = build(&[container], false);
 
         // No promotion: the output is a bare artifact under the genrule's box.
         assert!(
@@ -1175,7 +1309,7 @@ mod tests {
     /// `@@somerepo+//pkg:gen.out` by another input, lies at exec path `path`.
     fn external_genrule(path: &str) -> (Graph, Names) {
         let (artifact, frags) = artifact_at(1, 100, path);
-        let containers = vec![ActionGraphContainer {
+        let container = ActionGraphContainer {
             artifacts: vec![artifact],
             path_fragments: frags,
             targets: vec![target(9, "@@somerepo+//pkg:gen")],
@@ -1193,18 +1327,9 @@ mod tests {
                 ..Default::default()
             }],
             ..Default::default()
-        }];
+        };
         let labeled = HashSet::from(["@@somerepo+//pkg:gen.out".to_string()]);
-        let repos = RepoMapping::default();
-        let mut names = Names::default();
-        let graph = build_with_packages(
-            &containers,
-            false,
-            &package_keys(&containers, &repos),
-            &labeled,
-            &repos,
-            &mut names,
-        );
+        let (graph, names, _) = build_promoting(&[container], false, &labeled);
         (graph, names)
     }
 
@@ -1253,7 +1378,7 @@ mod tests {
             ..Default::default()
         };
 
-        let (graph, names) = build(&[container], false);
+        let (graph, names, _) = build(&[container], false);
 
         let pkg = parent_of(&graph, &names, "target:@somerepo//foo:bar").unwrap();
         assert_ne!(pkg, "pkg:foo");
@@ -1268,7 +1393,7 @@ mod tests {
             ..Default::default()
         };
 
-        let (graph, names) = build(&[container], false);
+        let (graph, names, _) = build(&[container], false);
 
         // Main-repo package keeps its historical id and label.
         assert_eq!(parent_of(&graph, &names, "target://foo:x"), Some("pkg:foo"));
@@ -1278,5 +1403,160 @@ mod tests {
         let external = parent_of(&graph, &names, "target:@somerepo//foo:y").unwrap();
         assert_ne!(external, "pkg:foo");
         assert_eq!(find(&graph, &names, external).label, "@somerepo//foo");
+    }
+
+    #[test]
+    fn an_actions_mnemonic_facet_names_the_work_it_runs() {
+        let container = ActionGraphContainer {
+            targets: vec![target(1, "//foo:app")],
+            actions: vec![action(1, "CppCompile", &[])],
+            ..Default::default()
+        };
+
+        let (_, names, facets) = build(&[container], false);
+
+        let node = names.get("action0").unwrap();
+        let mnemonic = facets.mnemonic(node).unwrap();
+        assert_eq!(facets.strings().resolve(mnemonic), "CppCompile");
+        assert!(facets.aspects().values(node).is_empty());
+    }
+
+    #[test]
+    fn an_aspect_action_carries_the_names_its_descriptors_give() {
+        // A Starlark aspect is named `<bzl label>%<name>`, a native one by its
+        // Java class; both reach the facet as Bazel writes them.
+        let container = ActionGraphContainer {
+            targets: vec![target(1, "//foo:app")],
+            aspect_descriptors: vec![
+                aspect(1, "//aspects:rust.bzl%rust_analyzer_aspect"),
+                aspect(
+                    2,
+                    "com.google.devtools.build.lib.rules.java.JavaSourceJarsAspect",
+                ),
+            ],
+            actions: vec![aspect_action(1, "Compile", &[1, 2])],
+            ..Default::default()
+        };
+
+        let (_, names, facets) = build(&[container], false);
+
+        assert_eq!(
+            aspects_of(&facets, names.get("action0").unwrap()),
+            [
+                "//aspects:rust.bzl%rust_analyzer_aspect",
+                "com.google.devtools.build.lib.rules.java.JavaSourceJarsAspect",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_target_box_is_declared_by_the_rule_class_its_id_names() {
+        let container = ActionGraphContainer {
+            targets: vec![declared_target(1, "//foo:app", 7)],
+            rule_classes: vec![rule_class(7, "cc_test")],
+            actions: vec![action(1, "Compile", &[])],
+            ..Default::default()
+        };
+
+        let (_, names, facets) = build(&[container], false);
+
+        let node = names.get("target://foo:app").unwrap();
+        let rule_class = facets.rule_class(node).unwrap();
+        assert_eq!(facets.strings().resolve(rule_class.sym()), "cc_test");
+        assert_eq!(facets.rule_category(rule_class), Some(RuleCategory::Test));
+        assert_eq!(facets.label(node), Some(node));
+        assert_eq!(facets.package(node), names.get("pkg:foo"));
+        assert!(facets.repo(node).is_some());
+    }
+
+    #[test]
+    fn a_target_naming_no_rule_class_carries_none() {
+        let container = ActionGraphContainer {
+            targets: vec![target(1, "//foo:app")],
+            actions: vec![action(1, "Compile", &[])],
+            ..Default::default()
+        };
+
+        let (_, names, facets) = build(&[container], false);
+
+        let node = names.get("target://foo:app").unwrap();
+        assert_eq!(facets.rule_class(node), None);
+        assert_eq!(facets.label(node), Some(node));
+    }
+
+    #[test]
+    fn a_configured_target_box_is_built_in_the_configuration_its_actions_run_in() {
+        let container = ActionGraphContainer {
+            targets: vec![target(1, "//foo:app")],
+            configuration: vec![Configuration {
+                id: 1,
+                mnemonic: "k8-opt-exec".into(),
+                checksum: "ck1".into(),
+                is_tool: true,
+                ..Default::default()
+            }],
+            actions: vec![action(1, "Compile", &[])],
+            ..Default::default()
+        };
+
+        let (_, names, facets) = build(&[container], false);
+
+        let config = facets
+            .config(names.get("ct://foo:app#ck1").unwrap())
+            .unwrap();
+        assert_eq!(facets.strings().resolve(config.sym()), "ck1");
+        let entry = facets.config_entry(config).unwrap();
+        assert_eq!(
+            entry.mnemonic.map(|name| facets.strings().resolve(name)),
+            Some("k8-opt-exec")
+        );
+        assert_eq!(entry.is_tool, Tri::Yes);
+    }
+
+    #[test]
+    fn a_table_entry_written_after_the_action_naming_it_still_resolves() {
+        // Each interned entry reaches the stream the first time it is seen, so
+        // an action can name an id whose entry arrives in a later container.
+        let naming = ActionGraphContainer {
+            targets: vec![declared_target(1, "//foo:app", 7)],
+            actions: vec![aspect_action(1, "Compile", &[3])],
+            ..Default::default()
+        };
+        let describing = ActionGraphContainer {
+            rule_classes: vec![rule_class(7, "cc_library")],
+            aspect_descriptors: vec![aspect(3, "//aspects:a.bzl%tag_aspect")],
+            ..Default::default()
+        };
+
+        let (_, names, facets) = build(&[naming, describing], false);
+
+        let rule_class = facets
+            .rule_class(names.get("target://foo:app").unwrap())
+            .unwrap();
+        assert_eq!(facets.strings().resolve(rule_class.sym()), "cc_library");
+        assert_eq!(
+            aspects_of(&facets, names.get("action0").unwrap()),
+            ["//aspects:a.bzl%tag_aspect"]
+        );
+    }
+
+    #[test]
+    fn a_source_leaf_carries_the_label_its_package_gives_it() {
+        let (a1, f1) = source_artifact(1, "foo/in.c");
+        let container = ActionGraphContainer {
+            artifacts: vec![a1],
+            path_fragments: vec![f1],
+            targets: vec![target(1, "//foo:app")],
+            dep_set_of_files: vec![dep_set(10, &[1], &[])],
+            actions: vec![action(1, "Compile", &[10])],
+            ..Default::default()
+        };
+
+        let (_, names, facets) = build(&[container], false);
+
+        let node = names.get("target://foo:in.c").unwrap();
+        assert_eq!(facets.label(node), Some(node));
+        assert_eq!(facets.package(node), names.get("pkg:foo"));
+        assert!(facets.repo(node).is_some());
     }
 }
