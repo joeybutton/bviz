@@ -131,27 +131,12 @@ impl Builder<'_> {
     }
 
     /// Records for the configured-target node `node` the configuration it is
-    /// built in, and the description its target container `container` already
-    /// carries, so that a filter selecting on a target reaches it here too.
+    /// built in, and what its target container `container` states.
     fn describe_configured(&mut self, node: Id, container: Id, config_id: u32) {
         if let Some(config) = self.intern_config(config_id) {
             self.facets.facets().set_config(node, Some(config));
         }
-        let facets = self.facets.facets();
-        let (repo, package, label, rule_class) = (
-            facets.repo(container),
-            facets.package(container),
-            facets.label(container),
-            facets.rule_class(container),
-        );
-        facets.set_repo(node, repo);
-        facets.set_rule_class(node, rule_class);
-        if let Some(package) = package {
-            facets.set_package(node, package);
-        }
-        if let Some(label) = label {
-            facets.set_label(node, label);
-        }
+        self.facets.facets().inherit(node, container);
     }
 
     fn canonical(&self, label: &str) -> String {

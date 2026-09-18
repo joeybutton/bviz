@@ -425,6 +425,29 @@ impl Facets {
         }
     }
 
+    /// Copies into `child` the facets of the `owner` it is part of: what the
+    /// owner's label and declaration say, and the configuration it is built in.
+    /// A facet `child` already states is the one it keeps, so a node that names
+    /// its own target or configuration is not overwritten by its owner's.
+    pub fn inherit(&mut self, child: Id, owner: Id) {
+        let (repo, rule_class, config, package, label) = (
+            self.repo(owner),
+            self.rule_class(owner),
+            self.config(owner),
+            self.package(owner),
+            self.label(owner),
+        );
+        self.set_repo(child, repo);
+        self.set_rule_class(child, rule_class);
+        self.set_config(child, config);
+        if let Some(package) = package {
+            self.set_package(child, package);
+        }
+        if let Some(label) = label {
+            self.set_label(child, label);
+        }
+    }
+
     /// The tags the node's target sets.
     pub fn tags(&self) -> &SparseFacet {
         &self.tags
@@ -829,6 +852,27 @@ mod tests {
             let rule_class = facets.intern_rule_class(name);
             assert_eq!(facets.rule_category(rule_class), Some(expected), "{name}");
         }
+    }
+
+    #[test]
+    fn inheriting_fills_what_a_node_leaves_unsaid_and_no_more() {
+        let mut facets = Facets::default();
+        let rule_class = facets.intern_rule_class("cc_library");
+        let (owners, own) = (
+            facets.intern_config("owners", None, Tri::Unknown),
+            facets.intern_config("own", None, Tri::Unknown),
+        );
+        facets.set_rule_class(Id(0), Some(rule_class));
+        facets.set_config(Id(0), Some(owners));
+        facets.set_label(Id(0), Id(0));
+        facets.set_config(Id(1), Some(own));
+        facets.set_label(Id(1), Id(1));
+
+        facets.inherit(Id(1), Id(0));
+
+        assert_eq!(facets.rule_class(Id(1)), Some(rule_class));
+        assert_eq!(facets.config(Id(1)), Some(own));
+        assert_eq!(facets.label(Id(1)), Some(Id(1)));
     }
 
     /// Ids `0`, `1`, `2` renumbered to `2`, `0`, `1`.

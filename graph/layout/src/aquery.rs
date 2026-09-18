@@ -172,7 +172,7 @@ fn build_action_boxes(
             Kind::Action,
             Some(ct_id),
         );
-        boxes.describe_action(action_id, action);
+        boxes.describe_action(action_id, ct_id, action);
         for &out in &action.output_ids {
             let out = ArtifactId(out);
             let art_id = boxes.output_artifact(out, ct_id, config_id);
@@ -339,14 +339,16 @@ impl Boxes<'_> {
         self.facets.facets().intern_configuration(config)
     }
 
-    /// Records what `action` states about the node it became.
-    fn describe_action(&mut self, node: Id, action: &Action) {
+    /// Records what `action` states about the node it became, and what the
+    /// configured-target box `owner` it runs under states.
+    fn describe_action(&mut self, node: Id, owner: Id, action: &Action) {
         if !action.mnemonic.is_empty() {
             let mnemonic = self.facets.facets().intern_mnemonic(&action.mnemonic);
             self.facets.facets().set_mnemonic(node, Some(mnemonic));
         }
         let aspects: Vec<&str> = self.index.aspect_names(action).collect();
         self.facets.set_aspects(node, aspects);
+        self.facets.facets().inherit(node, owner);
     }
 
     /// The leaf node for one output artifact `out` of an action whose box is
@@ -377,6 +379,7 @@ impl Boxes<'_> {
                     Kind::Artifact,
                     Some(out_ct),
                 );
+                self.facets.facets().inherit(id, out_ct);
                 id
             }
             None => {
@@ -387,6 +390,7 @@ impl Boxes<'_> {
                     Kind::Artifact,
                     Some(producing_ct),
                 );
+                self.facets.facets().inherit(id, producing_ct);
                 id
             }
         }
@@ -439,6 +443,7 @@ impl Boxes<'_> {
         if let Some(config) = self.intern_config(config_id) {
             self.facets.facets().set_config(ct_node_id, Some(config));
         }
+        self.facets.facets().inherit(ct_node_id, target_node_id);
         ct_node_id
     }
 }
@@ -1558,5 +1563,106 @@ mod tests {
         assert_eq!(facets.label(node), Some(node));
         assert_eq!(facets.package(node), names.get("pkg:foo"));
         assert!(facets.repo(node).is_some());
+    }
+
+    #[test]
+    fn one_rule_class_reaches_a_targets_whole_subtree() {
+        let (artifact, frags) = generated_artifact(1, 100, "foo/app.o");
+        let container = ActionGraphContainer {
+            artifacts: vec![artifact],
+            path_fragments: frags,
+            targets: vec![declared_target(1, "//foo:app", 7)],
+            rule_classes: vec![rule_class(7, "cc_binary")],
+            configuration: vec![Configuration {
+                id: 1,
+                mnemonic: "k8-fastbuild".into(),
+                checksum: "ck1".into(),
+                ..Default::default()
+            }],
+            actions: vec![Action {
+                target_id: 1,
+                mnemonic: "CppCompile".into(),
+                configuration_id: 1,
+                output_ids: vec![1],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        let (_, names, facets) = build(&[container], false);
+
+        let declared = facets
+            .rule_class(names.get("target://foo:app").unwrap())
+            .unwrap();
+        assert_eq!(facets.strings().resolve(declared.sym()), "cc_binary");
+        for node in ["ct://foo:app#ck1", "action0", "artifact1"] {
+            let id = names.get(node).unwrap();
+            assert_eq!(facets.rule_class(id), Some(declared), "{node}");
+        }
+    }
+
+    #[test]
+    fn an_action_belongs_to_its_targets_repository_and_configuration() {
+        let container = ActionGraphContainer {
+            targets: vec![target(1, "@@somerepo+//foo:app")],
+            configuration: vec![Configuration {
+                id: 1,
+                mnemonic: "k8-opt-exec".into(),
+                checksum: "ck1".into(),
+                is_tool: true,
+                ..Default::default()
+            }],
+            actions: vec![action(1, "CppCompile", &[])],
+            ..Default::default()
+        };
+
+        let (_, names, facets) = build(&[container], false);
+
+        let node = names.get("action0").unwrap();
+        let repo = facets.repo(node).unwrap();
+        assert_eq!(facets.strings().resolve(repo.sym()), "somerepo+");
+        let config = facets.config(node).unwrap();
+        assert_eq!(facets.strings().resolve(config.sym()), "ck1");
+        assert_eq!(facets.config_entry(config).unwrap().is_tool, Tri::Yes);
+        assert_eq!(facets.label(node), names.get("target:@@somerepo+//foo:app"));
+        assert_eq!(facets.package(node), names.get("pkg:@@somerepo+//foo"));
+    }
+
+    #[test]
+    fn a_promoted_output_belongs_to_its_own_target_not_the_rule_producing_it() {
+        let (artifact, gen_frags) = generated_artifact(1, 100, "pkg/gen.out");
+        let container = ActionGraphContainer {
+            artifacts: vec![artifact],
+            path_fragments: gen_frags,
+            targets: vec![declared_target(9, "//pkg:gen", 7)],
+            rule_classes: vec![rule_class(7, "genrule")],
+            configuration: vec![Configuration {
+                id: 1,
+                mnemonic: "k8".into(),
+                checksum: "ck1".into(),
+                ..Default::default()
+            }],
+            actions: vec![Action {
+                target_id: 9,
+                mnemonic: "Genrule".to_string(),
+                configuration_id: 1,
+                output_ids: vec![1],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let labeled = HashSet::from(["//pkg:gen.out".to_string()]);
+
+        let (_, names, facets) = build_promoting(&[container], false, &labeled);
+
+        let concrete = names.get("artifact://pkg:gen.out#ck1").unwrap();
+        assert_eq!(facets.label(concrete), names.get("target://pkg:gen.out"));
+        // The output file is not itself declared by a rule, so nothing states a
+        // rule class for it; the genrule's does not reach across.
+        assert_eq!(facets.rule_class(concrete), None);
+        assert_eq!(
+            facets.config(concrete),
+            facets.config(names.get("ct://pkg:gen#ck1").unwrap())
+        );
     }
 }
