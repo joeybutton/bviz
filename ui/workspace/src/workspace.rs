@@ -1,18 +1,19 @@
 use crate::documents_menu::DocumentsMenu;
 use crate::drop::{PaneGeometry, Preview};
 use crate::pane::Handover;
+use crate::panel_menu::{Deed, Standing};
 use crate::{
     AnyPanel, Arrangement, DividerId, Document, Documents, Framing, Layout, Maximize, Pane,
-    PaneEvent, PanelGroup, Removal, Side, Split, SplitSide, drop,
+    PaneEvent, PanelGroup, Removal, Side, Split, SplitSide, drop, panel_menu,
 };
-use bviz_ui_components::{Divider, DragEnd, overlay_canvas, track_drag};
+use bviz_ui_components::{Divider, DragEnd, Menu, MenuEvent, overlay_canvas, track_drag};
 use bviz_ui_shell::Chrome;
 use bviz_ui_theme::ThemeColors;
 use gpui::{
     Action, AnyElement, AnyWindowHandle, App, Axis, Bounds, Canvas, Div, ElementId, Entity,
     EntityId, FocusHandle, IntoElement, KeyBinding, MouseDownEvent, Pixels, Point, Render,
-    SharedString, Size, Stateful, Subscription, Window, actions, deferred, div, point, prelude::*,
-    px,
+    SharedString, Size, Stateful, Subscription, WeakEntity, Window, actions, deferred, div, point,
+    prelude::*, px,
 };
 use std::collections::HashMap;
 
@@ -84,6 +85,11 @@ const DRAG_EDGE: Pixels = px(2.);
 /// against either theme, light enough to read what it covers through.
 const MARK_FILL: f32 = 0.3;
 
+/// The layer a panel's menu is drawn in, above the overlay a drag of a panel
+/// puts over the window, so that the menu stands over everything the window
+/// holds.
+const MENU_LAYER: usize = 1;
+
 pub(crate) fn register_keys(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new("ctrl-tab", NextTab, Some(KEY_CONTEXT)),
@@ -115,6 +121,7 @@ pub(crate) fn register_keys(cx: &mut App) {
 ///
 /// The pane is a type parameter, as an arrangement's is, so that where a drag
 /// lands can be worked out on plain values away from the window real panes need.
+#[derive(Clone, PartialEq, Debug)]
 pub(crate) enum Destination<P = Entity<Pane>> {
     /// Among that pane's tabs, at `index` of them or at the end where it holds
     /// fewer.
@@ -126,6 +133,13 @@ pub(crate) enum Destination<P = Entity<Pane>> {
     /// A window of its own, framed by a workspace of the same application at
     /// this window's size.
     NewWindow,
+}
+
+/// The menu of rearrangements a panel offers, while it stands over the window.
+struct PanelMenu {
+    menu: Entity<Menu>,
+    /// Lets the menu go once it has closed itself.
+    _dismissed: Subscription,
 }
 
 /// A press on the tab naming a panel, and how far it has been carried since.
@@ -204,6 +218,8 @@ pub struct Workspace {
     divider_drag: Option<DividerId>,
     /// The press on a panel's tab being carried, while one is.
     panel_drag: Option<PanelDrag>,
+    /// The menu a panel was asked for, while it stands.
+    panel_menu: Option<PanelMenu>,
 }
 
 impl Workspace {
@@ -241,6 +257,7 @@ impl Workspace {
             body: None,
             divider_drag: None,
             panel_drag: None,
+            panel_menu: None,
         };
         for pane in panes {
             workspace.watch(&pane, window, cx);
@@ -394,25 +411,11 @@ impl Workspace {
         self.activate_pane(landed, window, cx);
     }
 
-    /// Whether moving a panel to `to` would lay it out anywhere other than where
-    /// the pane `from` holding it already stands. A destination has to name a
-    /// pane this arrangement lays out; and where `from` holds that one panel
-    /// alone it is already the panel's own pane, so a destination asking for a
-    /// pane of its own where that one stands — `from` itself, or an edge of the
-    /// window `from` already spans — is refused: the move would take that pane
-    /// out and build an equivalent one at an even share of its split, putting
-    /// the dividers around it back where a drag had moved them from.
+    /// [`re_homes`] for a pane this workspace frames, read for how many panels
+    /// it holds.
     fn re_homes(&self, to: &Destination, from: &Entity<Pane>, cx: &App) -> bool {
         let alone = from.read(cx).tab_count() == 1;
-        match to {
-            Destination::Tab { pane, .. } | Destination::Beside { pane, .. } => {
-                self.arrangement.layout().contains(pane) && !(alone && pane == from)
-            }
-            Destination::WindowEdge(side) => {
-                !(alone && self.arrangement.layout().spans_edge(from, *side))
-            }
-            Destination::NewWindow => true,
-        }
+        re_homes(to, from, alone, self.arrangement.layout())
     }
 
     /// Takes `panel` out of `from` for a caller re-homing it, and takes `from`
@@ -452,6 +455,139 @@ impl Workspace {
             cx.new(|cx| Self::new(app_name, PanelGroup::one(panel), window, cx))
         })
         .expect("a window opens for the panel moved out of this one");
+    }
+
+    /// Puts up the menu of rearrangements `panel` offers, opening at `at` in
+    /// the window. The menu is built from where the panel stands as it is asked
+    /// for, so it offers what that moment's arrangement can carry out.
+    fn open_panel_menu(
+        &mut self,
+        panel: EntityId,
+        at: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((pane, _)) = self.holder(panel, cx) else {
+            return;
+        };
+        let windows = self.other_windows(cx);
+        let items = panel_menu::items(
+            panel,
+            &cx.weak_entity(),
+            &Standing {
+                arrangement: &self.arrangement,
+                pane: &pane,
+                alone: pane.read(cx).tab_count() == 1,
+            },
+            &windows,
+        );
+        let menu = cx.new(|cx| Menu::new(items, at, window, cx));
+        let dismissed = cx.subscribe_in(
+            &menu,
+            window,
+            |workspace, _, event: &MenuEvent, window, cx| {
+                let MenuEvent::Dismissed { holding_focus } = event;
+                workspace.panel_menu = None;
+                if *holding_focus {
+                    workspace.focus_active_panel(window, cx);
+                }
+                cx.notify();
+            },
+        );
+        self.panel_menu = Some(PanelMenu {
+            menu,
+            _dismissed: dismissed,
+        });
+        cx.notify();
+    }
+
+    /// Hands focus to the panel the active pane shows. Which panel that is is
+    /// read here and not before: a menu names rows that close a panel and that
+    /// move one to another window, so the panel a gesture was opened over may
+    /// be gone by the time focus is to be given back, and a focus handle naming
+    /// nothing this window draws leaves every one of the window's own key
+    /// bindings unreachable until something is clicked.
+    fn focus_active_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let panel = self.active_panel(cx);
+        window.focus(&panel.focus_handle(cx), cx);
+    }
+
+    /// The session's other open windows, each named as another window's menu
+    /// lists it. This workspace is left out rather than read: a menu is opened
+    /// from a press this workspace is answering, which has it leased.
+    fn other_windows(&self, cx: &mut Context<Self>) -> Vec<(WeakEntity<Self>, SharedString)> {
+        let here = cx.entity_id();
+        let open = Documents::global(cx).read(cx).workspaces();
+        let mut named = Vec::with_capacity(open.len());
+        for (place, workspace) in open.iter().enumerate() {
+            if workspace.entity_id() != here {
+                let shown = workspace.read(cx).active_panel(cx).display_title(cx);
+                named.push((workspace.downgrade(), window_name(place + 1, &shown)));
+            }
+        }
+        named
+    }
+
+    /// Carries `deed` out on `panel`, which is what choosing a row of that
+    /// panel's menu comes to.
+    pub(crate) fn take_deed(
+        &mut self,
+        panel: EntityId,
+        deed: Deed,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match deed {
+            Deed::Move(to) => self.move_panel(panel, to, window, cx),
+            Deed::ToWindow(into) => {
+                if let Some(into) = into.upgrade() {
+                    self.move_panel_to_window(panel, &into, window, cx);
+                }
+            }
+            Deed::Maximize => {
+                if let Some((pane, _)) = self.holder(panel, cx) {
+                    self.toggle_maximize(&pane, cx);
+                }
+            }
+            Deed::EvenSplit => {
+                if let Some((pane, _)) = self.holder(panel, cx) {
+                    self.even_pane_split(&pane, cx);
+                }
+            }
+            Deed::Close => {
+                if let Some((pane, at)) = self.holder(panel, cx) {
+                    pane.update(cx, |pane, cx| pane.close(at, window, cx));
+                }
+            }
+        }
+    }
+
+    /// Takes `panel` out of this window and shows it in the window `into`
+    /// frames, where it takes focus. The panel itself moves — a panel is
+    /// rendered in one window at a time — so what it has scrolled to, zoomed in
+    /// on and selected moves with it.
+    fn move_panel_to_window(
+        &mut self,
+        panel: EntityId,
+        into: &Entity<Self>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // The panel comes out of its pane only once the window it is going to
+        // answers: a window that has closed since the menu listed it would
+        // leave the panel held by nothing at all.
+        let handle = into.read(cx).window;
+        if handle.update(cx, |_, _, _| ()).is_err() {
+            return;
+        }
+        let Some(taken) = self.take_panel(panel, window, cx) else {
+            return;
+        };
+        handle
+            .update(cx, |_, window, cx| {
+                into.update(cx, |workspace, cx| workspace.add_panel(taken, window, cx));
+            })
+            .ok();
     }
 
     /// Takes up a press that landed on the tab naming `panel`, which becomes a
@@ -677,6 +813,9 @@ impl Workspace {
                 PaneEvent::Maximize => workspace.toggle_maximize(pane, cx),
                 PaneEvent::Pressed { panel, at } => workspace.press_panel(*panel, *at, cx),
                 PaneEvent::Released { at } => workspace.drop_panel(*at, window, cx),
+                PaneEvent::Menu { panel, at } => {
+                    workspace.open_panel_menu(*panel, *at, window, cx);
+                }
             },
         );
         self.panes.insert(
@@ -743,13 +882,12 @@ impl Workspace {
         cx.notify();
     }
 
-    /// Gives every side of the innermost split laying the active pane out the
-    /// same share of that split's extent. A window of one pane lays it out in no
-    /// split, and there is nothing to even.
-    fn even_active_split(&mut self, cx: &mut Context<Self>) {
-        let active = self.active.clone();
+    /// Gives every side of the innermost split laying `pane` out the same share
+    /// of that split's extent. A window of one pane lays it out in no split,
+    /// and there is nothing to even.
+    fn even_pane_split(&mut self, pane: &Entity<Pane>, cx: &mut Context<Self>) {
         let layout = self.rearrange(cx);
-        if let Some(divider) = layout.innermost_divider(&active) {
+        if let Some(divider) = layout.innermost_divider(pane) {
             layout.even_split(divider);
             cx.notify();
         }
@@ -969,6 +1107,29 @@ fn beside_cursor(at: Point<Pixels>, viewport: Size<Pixels>) -> Div {
     match at.y + GHOST_OFFSET + GHOST_HEIGHT > viewport.height {
         true => ghost.bottom(viewport.height - at.y + GHOST_OFFSET),
         false => ghost.top(at.y + GHOST_OFFSET),
+    }
+}
+
+/// Whether moving a panel to `to` would lay it out anywhere other than where
+/// the pane `from` holding it already stands, `alone` saying whether that pane
+/// holds it and no other. A destination has to name a pane the arrangement lays
+/// out; and a pane holding one panel is already that panel's own pane, so a
+/// destination asking for a pane of its own where that one stands — `from`
+/// itself, or an edge of the window `from` already spans — is refused: the move
+/// would take that pane out and build an equivalent one at an even share of its
+/// split, putting the dividers around it back where a drag had moved them from.
+pub(crate) fn re_homes<P: Clone + PartialEq>(
+    to: &Destination<P>,
+    from: &P,
+    alone: bool,
+    layout: &Layout<P>,
+) -> bool {
+    match to {
+        Destination::Tab { pane, .. } | Destination::Beside { pane, .. } => {
+            layout.contains(pane) && !(alone && pane == from)
+        }
+        Destination::WindowEdge(side) => !(alone && layout.spans_edge(from, *side)),
+        Destination::NewWindow => true,
     }
 }
 
@@ -1284,7 +1445,8 @@ impl Render for Workspace {
                 workspace.toggle_maximize(&pane, cx);
             }))
             .on_action(cx.listener(|workspace, _: &EvenSplit, _, cx| {
-                workspace.even_active_split(cx);
+                let pane = workspace.active.clone();
+                workspace.even_pane_split(&pane, cx);
             }))
             // Not a listener: `toggle` reads this workspace.
             .on_action({
@@ -1298,7 +1460,11 @@ impl Render for Workspace {
         let body = towards::<FocusUp, MovePanelUp, SplitUp>(body, Side::Top, cx);
         let body = towards::<FocusDown, MovePanelDown, SplitDown>(body, Side::Bottom, cx);
         let dragging = self.panel_drag_overlay(&colors, window, cx);
-        body.child(chrome).children(dragging)
+        let menu = self
+            .panel_menu
+            .as_ref()
+            .map(|open| deferred(open.menu.clone()).with_priority(MENU_LAYER));
+        body.child(chrome).children(dragging).children(menu)
     }
 }
 
@@ -1322,6 +1488,15 @@ fn towards<Focus: Action, Move: Action, SplitOff: Action>(
 /// What names the window: the application, then the document on show.
 fn window_title(app_name: &str, panel: &AnyPanel, cx: &App) -> String {
     format!("{app_name} \u{2014} {}", panel.display_title(cx))
+}
+
+/// How a window reads where another window's menu offers a move into it: what
+/// it shows, headed by its `place` among the session's open windows in the
+/// order they opened. Two windows can show panels that read exactly alike, so
+/// the place is what tells one row from another; the application's own name,
+/// which every window shares, is left off.
+fn window_name(place: usize, shown: &str) -> SharedString {
+    format!("{place}. {shown}").into()
 }
 
 fn set_window_title(app_name: &str, panel: &AnyPanel, window: &mut Window, cx: &App) {
@@ -1664,5 +1839,15 @@ mod tests {
         let over = ("over", at(0.0, 0.0, 101.0, 100.0));
         assert_eq!(nearest(from, Side::Left, [level]), Some("level"));
         assert_eq!(nearest(from, Side::Left, [over]), None);
+    }
+
+    /// A row of a menu names the window a move would put the panel in, so two
+    /// windows showing panels that read exactly alike still read apart.
+    #[test]
+    fn two_windows_showing_the_same_thing_are_named_apart() {
+        let first = window_name(1, "build.profile.gz");
+        let second = window_name(2, "build.profile.gz");
+        assert_ne!(first, second);
+        assert!(first.contains("build.profile.gz"), "{first}");
     }
 }

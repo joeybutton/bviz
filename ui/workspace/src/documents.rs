@@ -358,7 +358,9 @@ impl Documents {
         self.registered_mut(document)?.view_mut(view)
     }
 
-    fn workspaces(&self) -> Vec<Entity<Workspace>> {
+    /// The workspaces framing the session's open windows, in the order their
+    /// windows opened.
+    pub(crate) fn workspaces(&self) -> Vec<Entity<Workspace>> {
         let mut open = Vec::with_capacity(self.windows.len());
         open.extend(self.windows.iter().filter_map(WeakEntity::upgrade));
         open

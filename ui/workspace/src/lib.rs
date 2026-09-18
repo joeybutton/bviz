@@ -11,6 +11,7 @@ mod group;
 mod layout;
 mod pane;
 mod panel;
+mod panel_menu;
 mod workspace;
 
 pub(crate) use arrangement::{Arrangement, Maximize};

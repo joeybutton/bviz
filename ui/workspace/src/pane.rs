@@ -27,6 +27,8 @@ const HANDLE_ICON_SIZE: Pixels = px(12.);
 
 const RESTORE_ICON: &str = "arrows-in";
 
+const MENU_ICON: &str = "dots-three-vertical";
+
 /// How a window frames a pane, as its workspace last laid the arrangement out.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Framing {
@@ -97,6 +99,10 @@ pub enum PaneEvent {
     /// and a release inside one frame never reach them; the release the tab
     /// itself takes ends the gesture in that case.
     Released { at: Point<Pixels> },
+    /// The menu of rearrangements that panel offers was asked for, to stand at
+    /// that point of the window. What the menu offers takes the whole window's
+    /// arrangement to tell, which only the workspace knows.
+    Menu { panel: EntityId, at: Point<Pixels> },
 }
 
 impl EventEmitter<PaneEvent> for Pane {}
@@ -334,6 +340,7 @@ impl Pane {
                     .on_children_prepainted(tabs_laid_out(cx)),
             )
             .children(self.restore_control(cx))
+            .child(self.menu_control(cx))
     }
 
     /// The control that gives the window's body back to every pane, put up by
@@ -346,26 +353,39 @@ impl Pane {
         }
         let pane = cx.entity();
         let id = pane.entity_id().as_u64();
-        Some(
-            div()
-                .flex_shrink_0()
-                // A handle reads a press on it as the start of a drag of its
-                // panel, which a press on a control it carries is not.
-                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                .child(
-                    Button::new(
-                        ElementId::NamedInteger("pane-restore".into(), id),
-                        move |_, _, cx| {
-                            pane.update(cx, |pane, cx| {
-                                pane.restore_clicked = true;
-                                cx.emit(PaneEvent::Maximize);
-                            });
-                        },
-                    )
-                    .ghost()
-                    .icon(RESTORE_ICON)
-                    .compact(),
-                ),
+        Some(control(
+            Button::new(
+                ElementId::NamedInteger("pane-restore".into(), id),
+                move |_, _, cx| {
+                    pane.update(cx, |pane, cx| {
+                        pane.restore_clicked = true;
+                        cx.emit(PaneEvent::Maximize);
+                    });
+                },
+            )
+            .ghost()
+            .icon(RESTORE_ICON)
+            .compact(),
+        ))
+    }
+
+    /// The control that puts up the menu of rearrangements the panel on show
+    /// offers, so the menu is there to be found without knowing that a press of
+    /// the secondary button over a tab or a handle opens it too.
+    fn menu_control(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let pane = cx.entity();
+        let panel = self.active_panel().entity_id();
+        control(
+            Button::new(
+                ElementId::NamedInteger("pane-menu".into(), panel.as_u64()),
+                move |event: &ClickEvent, _, cx| {
+                    let at = event.position();
+                    pane.update(cx, |_, cx| cx.emit(PaneEvent::Menu { panel, at }));
+                },
+            )
+            .ghost()
+            .icon(MENU_ICON)
+            .compact(),
         )
     }
 
@@ -410,6 +430,7 @@ impl Pane {
             .text_color(ink)
             .cursor_pointer()
             .on_mouse_down(MouseButton::Left, pressed(panel.entity_id(), cx))
+            .on_mouse_down(MouseButton::Right, menu_asked(panel.entity_id(), cx))
             .on_mouse_up(MouseButton::Left, released(cx))
             .on_click(cx.listener(|pane, event: &ClickEvent, _, cx| {
                 pane.maximize_on_second_click(event, cx);
@@ -420,14 +441,16 @@ impl Pane {
                     .text_color(ink)
             }))
             .child(title(&panel, cx))
-            .children(self.restore_control(cx).map(|control| {
+            .child(
                 div()
                     .flex()
                     .flex_row()
+                    .items_center()
                     .flex_1()
                     .justify_end()
-                    .child(control)
-            }))
+                    .children(self.restore_control(cx))
+                    .child(self.menu_control(cx)),
+            )
     }
 
     fn tab(&self, index: usize, colors: &ThemeColors, cx: &mut Context<Self>) -> AnyElement {
@@ -463,6 +486,7 @@ impl Pane {
             .cursor_pointer()
             .when(!showing, |tab| tab.hover(move |s| s.bg(hover)))
             .on_mouse_down(MouseButton::Left, pressed(panel.entity_id(), cx))
+            .on_mouse_down(MouseButton::Right, menu_asked(panel.entity_id(), cx))
             .on_mouse_up(MouseButton::Left, released(cx))
             .on_click(cx.listener(move |pane, event: &ClickEvent, window, cx| {
                 pane.activate(index, window, cx);
@@ -498,6 +522,16 @@ impl Pane {
     }
 }
 
+/// A control of the strip or handle a pane puts up over the panel it shows. A
+/// handle reads a press on it as the start of a drag of its panel, which a
+/// press on a control it carries is not.
+fn control(button: Button) -> Div {
+    div()
+        .flex_shrink_0()
+        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .child(button)
+}
+
 /// Tells the pane a press landed on the tab naming `panel`, which the workspace
 /// reads as the start of a drag of that panel.
 fn pressed(
@@ -517,6 +551,21 @@ fn pressed(
 fn released(cx: &mut Context<Pane>) -> impl Fn(&MouseUpEvent, &mut Window, &mut App) + 'static {
     cx.listener(|_, event: &MouseUpEvent, _, cx| {
         cx.emit(PaneEvent::Released { at: event.position });
+    })
+}
+
+/// Tells the pane the menu of `panel` was asked for where the press landed,
+/// which the workspace puts up over the window.
+fn menu_asked(
+    panel: EntityId,
+    cx: &mut Context<Pane>,
+) -> impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static {
+    cx.listener(move |_, event: &MouseDownEvent, _, cx| {
+        cx.stop_propagation();
+        cx.emit(PaneEvent::Menu {
+            panel,
+            at: event.position,
+        });
     })
 }
 

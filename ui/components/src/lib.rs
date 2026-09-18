@@ -8,6 +8,7 @@ mod drag;
 mod dropdown;
 mod dropdown_chrome;
 mod layer;
+mod menu;
 mod multi_select;
 mod notice;
 mod scrollbar;
@@ -24,6 +25,7 @@ pub use divider::{Divider, DividerSide};
 pub use drag::{DragEnd, track_drag};
 pub use dropdown::{Dropdown, DropdownEvent};
 pub use layer::{cached_layer, overlay_canvas};
+pub use menu::{Menu, MenuEvent, MenuItem, SubmenuItem};
 pub use multi_select::{MultiOption, MultiSelect, MultiSelectEvent};
 pub use notice::{Source, centered_notice, centered_spinner};
 pub use scrollbar::{Axis, DEFAULT_MIN_THUMB, SCROLLBAR_THICKNESS, Scrollbar, ScrollbarColors};
@@ -37,6 +39,16 @@ use gpui::{App, Pixels, px};
 
 /// Height every control renders at, so controls sharing a row line up.
 pub(crate) const CONTROL_HEIGHT: Pixels = px(28.);
+
+/// Room added past a measured text width, so that sub-pixel rounding between
+/// measuring a line and laying the glyph run out cannot push it onto a second
+/// line.
+const TEXT_SLACK: Pixels = px(6.);
+
+/// The width to lay a line of text out at, from the width it measured.
+pub(crate) fn laid_out_width(measured: Pixels) -> Pixels {
+    px(f32::from(measured).ceil()) + TEXT_SLACK
+}
 
 /// Register the key bindings the components rely on (currently the text field's).
 pub fn register_keys(cx: &mut App) {

@@ -28,6 +28,7 @@ filegroup(
         "assets/regular/check.svg",
         "assets/regular/circle.svg",
         "assets/regular/circle-notch.svg",
+        "assets/regular/dots-three-vertical.svg",
         "assets/regular/minus.svg",
         "assets/regular/pause.svg",
         "assets/regular/play.svg",

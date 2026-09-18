@@ -52,6 +52,17 @@ impl<P: Clone + PartialEq> Arrangement<P> {
         self.maximized.as_ref().is_some_and(|drawn| drawn != pane) && self.layout.contains(pane)
     }
 
+    /// Whether asking for `pane` would draw it in place of the whole
+    /// arrangement: the arrangement has to lay that pane out, beside at least
+    /// one other pane for it to be drawn in place of. An arrangement already
+    /// drawing a pane in place of the rest answers an ask by putting them back,
+    /// so it draws none in place of them afresh.
+    pub(crate) fn maximizes(&self, pane: &P) -> bool {
+        self.maximized.is_none()
+            && self.layout.contains(pane)
+            && self.layout.panes().nth(1).is_some()
+    }
+
     /// Draws `pane` in place of the whole arrangement, or puts every pane back
     /// where one is drawn in place of them already. Asking is the only way to
     /// either, so a pane is drawn in place of the rest only from an arrangement
@@ -61,7 +72,7 @@ impl<P: Clone + PartialEq> Arrangement<P> {
         if self.maximized.is_some() {
             return Maximize::Restored(self.restore());
         }
-        if !self.layout.contains(pane) || self.layout.panes().nth(1).is_none() {
+        if !self.maximizes(pane) {
             return Maximize::Unchanged;
         }
         self.maximized = Some(pane.clone());

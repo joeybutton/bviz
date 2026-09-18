@@ -1,7 +1,7 @@
 //! The chrome a control that opens a menu under a trigger is drawn from, so the
 //! controls built on it read alike wherever they sit.
 
-use crate::CONTROL_HEIGHT;
+use crate::{CONTROL_HEIGHT, laid_out_width};
 use bviz_ui_theme::{ThemeColors, over};
 use gpui::{
     Div, ElementId, Hsla, MouseButton, Pixels, SharedString, Stateful, Svg, Window, div,
@@ -17,11 +17,6 @@ const MENU_ICON: Pixels = px(12.);
 /// Side of the square a group's fold mark is given, wider than the mark itself
 /// so that what folds a group is no harder to hit than what checks it.
 const MENU_FOLD: Pixels = px(18.);
-
-/// Slack added to a measured label width. At the exact measured width, sub-pixel
-/// rounding between measuring and laying out the glyph run can push the longest
-/// label onto a second line.
-const MEASURE_SLACK: f32 = 6.0;
 
 /// Room a row leaves above and below its label.
 const ROW_PADDING: Pixels = px(4.);
@@ -103,7 +98,7 @@ pub(crate) fn widest(window: &mut Window, labels: impl Iterator<Item = SharedStr
         .width;
         measured = measured.max(width);
     }
-    px(f32::from(measured).ceil() + MEASURE_SLACK)
+    laid_out_width(measured)
 }
 
 /// The sheet a menu's rows sit on, anchored under the trigger. The caller defers

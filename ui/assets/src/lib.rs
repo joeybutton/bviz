@@ -92,6 +92,7 @@ fn icon_svg(file: &str) -> Option<&'static [u8]> {
         "check.svg" => embedded!("check.svg"),
         "circle-notch.svg" => embedded!("circle-notch.svg"),
         "circle.svg" => embedded!("circle.svg"),
+        "dots-three-vertical.svg" => embedded!("dots-three-vertical.svg"),
         "minus.svg" => embedded!("minus.svg"),
         "pause.svg" => embedded!("pause.svg"),
         "play.svg" => embedded!("play.svg"),
