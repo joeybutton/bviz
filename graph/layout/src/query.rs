@@ -119,7 +119,7 @@ pub(crate) fn build_with_packages(
 ///
 /// A rule's attributes reach the proto only under `--proto:output_rule_attrs`,
 /// so a rule stating none is as ordinary as one stating all of them.
-fn describe_target(
+pub(crate) fn describe_target(
     facets: &mut FacetsBuilder,
     target: &Target,
     node: Id,

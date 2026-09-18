@@ -122,7 +122,7 @@ fn build_inputs(
         ));
     }
     if let Some(c) = cquery {
-        graphs.push(cquery::build_with_packages(c, union, repos, names));
+        graphs.push(cquery::build_with_packages(c, union, repos, names, facets));
     }
     if let Some(q) = query {
         let refs: Vec<&Target> = q.iter().collect();
