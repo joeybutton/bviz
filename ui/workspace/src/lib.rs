@@ -12,6 +12,8 @@ mod layout;
 mod pane;
 mod panel;
 mod panel_menu;
+#[cfg(test)]
+mod testing;
 mod workspace;
 
 pub(crate) use arrangement::{Arrangement, Maximize};

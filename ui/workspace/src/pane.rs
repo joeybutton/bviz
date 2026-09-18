@@ -170,6 +170,11 @@ impl Pane {
         &self.tab_bounds
     }
 
+    /// The panels the pane holds, in the order it holds them.
+    pub(crate) fn panels(&self) -> impl Iterator<Item = &AnyPanel> {
+        self.tabs.iter().map(|tab| &tab.panel)
+    }
+
     /// The panel the pane holds at `index` of its tabs.
     pub(crate) fn panel_at(&self, index: usize) -> Option<&AnyPanel> {
         Some(&self.tabs.get(index)?.panel)

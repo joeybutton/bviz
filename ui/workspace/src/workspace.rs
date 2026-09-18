@@ -16,6 +16,7 @@ use gpui::{
     prelude::*, px,
 };
 use std::collections::HashMap;
+use std::iter;
 
 actions!(
     bviz_workspace,
@@ -38,7 +39,8 @@ actions!(
         SplitRight,
         SplitUp,
         SplitDown,
-        EvenSplit
+        EvenSplit,
+        ResetArrangement
     ]
 );
 
@@ -99,6 +101,7 @@ pub(crate) fn register_keys(cx: &mut App) {
         KeyBinding::new("secondary-shift-d", ToggleDocuments, Some(KEY_CONTEXT)),
         KeyBinding::new("secondary-k m", ToggleMaximize, Some(KEY_CONTEXT)),
         KeyBinding::new("secondary-k =", EvenSplit, Some(KEY_CONTEXT)),
+        KeyBinding::new("secondary-k 0", ResetArrangement, Some(KEY_CONTEXT)),
         KeyBinding::new("secondary-k left", FocusLeft, Some(KEY_CONTEXT)),
         KeyBinding::new("secondary-k right", FocusRight, Some(KEY_CONTEXT)),
         KeyBinding::new("secondary-k up", FocusUp, Some(KEY_CONTEXT)),
@@ -231,18 +234,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let mut panes = Vec::new();
-        let layout = group.arrange(&mut |panel, tabbed| {
-            let pane = cx.new(|cx| Pane::new(panel, window, cx));
-            pane.update(cx, |pane, cx| {
-                for tab in tabbed {
-                    pane.add(tab, window, cx);
-                }
-                pane.activate(0, window, cx);
-            });
-            panes.push(pane.clone());
-            pane
-        });
+        let (layout, panes) = framed_panes(group, window, cx);
         let active = layout.first_pane().clone();
         let this = cx.weak_entity();
         let documents_menu = cx.new(|cx| DocumentsMenu::new(this.clone(), window, cx));
@@ -330,6 +322,93 @@ impl Workspace {
     fn rearrange(&mut self, cx: &mut Context<Self>) -> &mut Layout {
         self.restore(cx);
         self.arrangement.rearrange()
+    }
+
+    /// Lays the window out as the documents it holds described when they
+    /// opened: each of them as its own group arranges the panels showing its
+    /// views, the documents stacked in the order they opened and at the weights
+    /// they asked for. A view whose panel is closed, and one whose panel
+    /// another window holds, take no place in the arrangement.
+    ///
+    /// The panels themselves are laid out again — each keeps what it has
+    /// scrolled to, zoomed in on and selected, and goes on being the panel the
+    /// registry records for its view — and every one the window holds keeps a
+    /// place in it ([`put_back`]).
+    pub(crate) fn reset_arrangement(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let (leading, others) = self.held_panels(cx);
+        let mut unplaced: HashMap<EntityId, AnyPanel> = iter::once(&leading)
+            .chain(&others)
+            .map(|panel| (panel.entity_id(), panel.clone()))
+            .collect();
+        let described = Documents::global(cx)
+            .read(cx)
+            .opening_arrangement(&mut |panel| unplaced.remove(&panel));
+        let group = put_back(described, leading, others, |panel| {
+            unplaced.contains_key(&panel.entity_id())
+        });
+        self.reframe(group, window, cx);
+    }
+
+    /// Frames `group` in place of the arrangement the window lays out, making
+    /// the pane holding its leading panel the active one.
+    ///
+    /// The panels move from the panes that held them to the panes built for
+    /// them, and are held by both while the new panes are being built, so
+    /// everything the old panes answer for is let go of first: the gestures
+    /// aimed at them, the panels they tell they are on show, and the
+    /// subscriptions carrying their events here.
+    fn reframe(&mut self, group: PanelGroup, window: &mut Window, cx: &mut Context<Self>) {
+        self.end_gestures();
+        self.hide_shown_panels(window, cx);
+        self.panes.clear();
+        let (layout, panes) = framed_panes(group, window, cx);
+        self.arrangement = Arrangement::new(layout);
+        for pane in panes {
+            self.watch(&pane, window, cx);
+        }
+        let first = self.arrangement.layout().first_pane().clone();
+        self.activate_pane(first, window, cx);
+    }
+
+    /// Lets go of every gesture the window is holding over the arrangement it
+    /// lays out. Each of them is aimed at a pane or at a boundary between two,
+    /// and answers for nothing once other panes stand in their place: a drag
+    /// would move a panel against panes no frame has measured, and a menu holds
+    /// the panes its rows would move a panel to.
+    fn end_gestures(&mut self) {
+        self.divider_drag = None;
+        self.panel_drag = None;
+        self.panel_menu = None;
+    }
+
+    /// Tells the panel every pane shows that it is on show no longer, for a
+    /// caller about to frame the panels afresh: the panes built in their place
+    /// tell the panels they go on to show, and one left behind another's tab
+    /// would otherwise go on drawing what it draws over the cursor.
+    fn hide_shown_panels(&self, window: &mut Window, cx: &mut Context<Self>) {
+        for pane in self.arrangement.layout().panes() {
+            let showing = pane.read(cx).active_panel().clone();
+            showing.set_active(false, window, cx);
+        }
+    }
+
+    /// Every panel the window holds, in the order the arrangement lays them
+    /// out: the one its leading pane shows, and then the rest. A window frames
+    /// at least one pane and a pane holds at least one panel, so there is
+    /// always that leading one.
+    fn held_panels(&self, cx: &App) -> (AnyPanel, Vec<AnyPanel>) {
+        let layout = self.arrangement.layout();
+        let leading = layout.first_pane().read(cx).active_panel().clone();
+        let mut others = Vec::with_capacity(layout.panes().count());
+        for pane in layout.panes() {
+            others.extend(
+                pane.read(cx)
+                    .panels()
+                    .filter(|panel| panel.entity_id() != leading.entity_id())
+                    .cloned(),
+            );
+        }
+        (leading, others)
     }
 
     /// Brings `panel` forward in the pane holding it and makes that the active
@@ -1110,6 +1189,55 @@ fn beside_cursor(at: Point<Pixels>, viewport: Size<Pixels>) -> Div {
     }
 }
 
+/// The arrangement a window holding `leading` and then `others` is put back to:
+/// `described` — what the session's documents make of the panels among them
+/// they lay out — with a pane of its own stacked under it for each panel
+/// `unplaced` still answers for, in the order the window held them. Every panel
+/// takes exactly one place, so a window put back goes on framing all of them
+/// however the documents describe themselves. Where the documents lay out none
+/// of them, each stands in a pane of its own.
+fn put_back<T: Clone>(
+    described: Option<PanelGroup<T>>,
+    leading: T,
+    others: Vec<T>,
+    unplaced: impl Fn(&T) -> bool,
+) -> PanelGroup<T> {
+    let alone = |panel: &T| PanelGroup::one(panel.clone());
+    match described {
+        Some(described) => PanelGroup::stack(
+            described,
+            iter::once(&leading)
+                .chain(&others)
+                .filter(|panel| unplaced(panel))
+                .map(alone)
+                .collect(),
+        ),
+        None => PanelGroup::stack(alone(&leading), others.iter().map(alone).collect()),
+    }
+}
+
+/// The panes `group` describes, each holding the panels the group gives it and
+/// showing the first of them, and every pane among them for the caller to watch.
+fn framed_panes(
+    group: PanelGroup,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) -> (Layout, Vec<Entity<Pane>>) {
+    let mut panes = Vec::new();
+    let layout = group.arrange(&mut |panel, tabbed| {
+        let pane = cx.new(|cx| Pane::new(panel, window, cx));
+        pane.update(cx, |pane, cx| {
+            for tab in tabbed {
+                pane.add(tab, window, cx);
+            }
+            pane.activate(0, window, cx);
+        });
+        panes.push(pane.clone());
+        pane
+    });
+    (layout, panes)
+}
+
 /// Whether moving a panel to `to` would lay it out anywhere other than where
 /// the pane `from` holding it already stands, `alone` saying whether that pane
 /// holds it and no other. A destination has to name a pane the arrangement lays
@@ -1447,6 +1575,9 @@ impl Render for Workspace {
             .on_action(cx.listener(|workspace, _: &EvenSplit, _, cx| {
                 let pane = workspace.active.clone();
                 workspace.even_pane_split(&pane, cx);
+            }))
+            .on_action(cx.listener(|workspace, _: &ResetArrangement, window, cx| {
+                workspace.reset_arrangement(window, cx);
             }))
             // Not a listener: `toggle` reads this workspace.
             .on_action({
@@ -1839,6 +1970,61 @@ mod tests {
         let over = ("over", at(0.0, 0.0, 101.0, 100.0));
         assert_eq!(nearest(from, Side::Left, [level]), Some("level"));
         assert_eq!(nearest(from, Side::Left, [over]), None);
+    }
+
+    /// The arrangement a window holding the panels 'a' to `held` is put back
+    /// to, `described` being what the documents make of the ones they lay out.
+    fn put_back_shape(described: Option<PanelGroup<char>>, held: &str) -> String {
+        let placed: Vec<char> = match &described {
+            Some(described) => described.panels().copied().collect(),
+            None => Vec::new(),
+        };
+        let mut held = held.chars();
+        let leading = held.next().expect("a window holds a panel");
+        let group = put_back(described, leading, held.collect(), |panel| {
+            !placed.contains(panel)
+        });
+        crate::layout::shape(
+            &group.arrange(&mut |first, rest| iter::once(first).chain(rest).collect::<String>()),
+        )
+    }
+
+    /// A window put back frames every panel it was framing: a panel the
+    /// documents lay out nowhere keeps a pane of its own under what they do lay
+    /// out, rather than going with the panes that held it.
+    #[test]
+    fn a_panel_the_documents_lay_out_nowhere_keeps_a_pane_of_its_own() {
+        let described = PanelGroup::split(
+            Axis::Vertical,
+            0.5,
+            PanelGroup::one('a'),
+            PanelGroup::tabs('b', vec!['c']),
+        );
+        assert_eq!(put_back_shape(Some(described), "abcd"), "(a/bc/d)");
+        let beside = PanelGroup::split(
+            Axis::Horizontal,
+            0.5,
+            PanelGroup::one('a'),
+            PanelGroup::one('b'),
+        );
+        assert_eq!(put_back_shape(Some(beside), "abc"), "((a|b)/c)");
+    }
+
+    /// Nothing is laid out twice: a panel the documents place is not also given
+    /// a pane of its own.
+    #[test]
+    fn a_window_put_back_lays_every_panel_it_holds_out_once() {
+        let described = PanelGroup::tabs('a', vec!['b']);
+        assert_eq!(put_back_shape(Some(described), "ab"), "ab");
+    }
+
+    /// Documents that lay out none of the window's panels leave every one of
+    /// them standing in a pane of its own, so putting a window back is never
+    /// putting it back to nothing.
+    #[test]
+    fn a_window_no_document_lays_out_keeps_each_panel_in_a_pane_of_its_own() {
+        assert_eq!(put_back_shape(None, "abc"), "(a/b/c)");
+        assert_eq!(put_back_shape(None, "a"), "a");
     }
 
     /// A row of a menu names the window a move would put the panel in, so two

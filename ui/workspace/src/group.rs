@@ -88,13 +88,11 @@ impl<T> PanelGroup<T> {
         Self::of(Arrangement::One(panel))
     }
 
-    /// `first` on show with `rest` tabbed behind it in one pane. One panel is
-    /// [`PanelGroup::one`].
+    /// `first` on show with `rest` tabbed behind it in one pane. A pane frames
+    /// a lone panel without a tab strip, so a group of one panel is
+    /// [`PanelGroup::one`] however it was asked for.
     pub fn tabs(first: T, rest: Vec<T>) -> Self {
-        match rest.is_empty() {
-            true => Self::one(first),
-            false => Self::of(Arrangement::Tabs { first, rest }),
-        }
+        Self::of(Arrangement::tabbed(first, rest))
     }
 
     /// `first` and `second` either side of a divider along `axis`, the first at
@@ -151,15 +149,51 @@ impl<T> PanelGroup<T> {
 
     /// The same arrangement and weight over what `panel` makes of each panel,
     /// visiting them in the order they are laid out.
-    pub(crate) fn map<U>(self, panel: &mut impl FnMut(T) -> U) -> PanelGroup<U> {
+    pub(crate) fn map<U>(&self, panel: &mut impl FnMut(&T) -> U) -> PanelGroup<U> {
         PanelGroup {
             arrangement: self.arrangement.map(panel),
             weight: self.weight,
         }
     }
+
+    /// The panels, in the order they are laid out.
+    pub(crate) fn panels(&self) -> Panels<'_, T> {
+        Panels {
+            unvisited: vec![&self.arrangement],
+            tabbed: &[],
+        }
+    }
+
+    /// The panels to change, in the order they are laid out.
+    pub(crate) fn panels_mut(&mut self) -> PanelsMut<'_, T> {
+        PanelsMut {
+            unvisited: vec![&mut self.arrangement],
+            tabbed: &mut [],
+        }
+    }
+}
+
+impl<T> PanelGroup<Option<T>> {
+    /// The same arrangement and weight over the panels that are there, the
+    /// empty places taking no part: a pane is framed around the tabs left to
+    /// it, and the sides left to a split divide its extent in proportion to
+    /// what each asked for. `None` where no panel is there at all.
+    pub(crate) fn compact(self) -> Option<PanelGroup<T>> {
+        Some(PanelGroup {
+            arrangement: self.arrangement.compact()?,
+            weight: self.weight,
+        })
+    }
 }
 
 impl<T> Arrangement<T> {
+    fn tabbed(first: T, rest: Vec<T>) -> Self {
+        match rest.is_empty() {
+            true => Self::One(first),
+            false => Self::Tabs { first, rest },
+        }
+    }
+
     fn arrange<P>(self, pane: &mut impl FnMut(T, Vec<T>) -> P) -> Layout<P> {
         match self {
             Self::One(panel) => Layout::Pane(pane(panel, Vec::new())),
@@ -176,28 +210,124 @@ impl<T> Arrangement<T> {
         }
     }
 
-    fn map<U>(self, panel: &mut impl FnMut(T) -> U) -> Arrangement<U> {
+    fn map<U>(&self, panel: &mut impl FnMut(&T) -> U) -> Arrangement<U> {
         match self {
             Self::One(one) => Arrangement::One(panel(one)),
             Self::Tabs { first, rest } => Arrangement::Tabs {
                 first: panel(first),
-                rest: rest.into_iter().map(panel).collect(),
+                rest: rest.iter().map(panel).collect(),
             },
+            Self::Split { axis, first, rest } => Arrangement::Split {
+                axis: *axis,
+                first: Box::new(first.map(panel)),
+                rest: rest.iter().map(|side| side.map(panel)).collect(),
+            },
+        }
+    }
+}
+
+impl<T> Flexed<T> {
+    fn map<U>(&self, panel: &mut impl FnMut(&T) -> U) -> Flexed<U> {
+        Flexed {
+            arrangement: self.arrangement.map(panel),
+            flex: self.flex,
+        }
+    }
+}
+
+impl<T> Arrangement<Option<T>> {
+    fn compact(self) -> Option<Arrangement<T>> {
+        match self {
+            Self::One(one) => Some(Arrangement::One(one?)),
+            Self::Tabs { first, rest } => {
+                let mut left = first.into_iter().chain(rest.into_iter().flatten());
+                Some(Arrangement::tabbed(left.next()?, left.collect()))
+            }
             Self::Split { axis, first, rest } => {
-                let first = *first;
-                Arrangement::Split {
-                    axis,
-                    first: Box::new(Flexed {
-                        arrangement: first.arrangement.map(panel),
-                        flex: first.flex,
-                    }),
-                    rest: rest
-                        .into_iter()
-                        .map(|side| Flexed {
-                            arrangement: side.arrangement.map(panel),
-                            flex: side.flex,
-                        })
-                        .collect(),
+                let mut left = std::iter::once(*first)
+                    .chain(rest)
+                    .filter_map(Flexed::compact);
+                let first = left.next()?;
+                let rest: Vec<Flexed<T>> = left.collect();
+                Some(match rest.is_empty() {
+                    true => first.arrangement,
+                    false => Arrangement::Split {
+                        axis,
+                        first: Box::new(first),
+                        rest,
+                    },
+                })
+            }
+        }
+    }
+}
+
+impl<T> Flexed<Option<T>> {
+    fn compact(self) -> Option<Flexed<T>> {
+        Some(Flexed {
+            arrangement: self.arrangement.compact()?,
+            flex: self.flex,
+        })
+    }
+}
+
+/// The panels of a group, in the order they are laid out.
+pub(crate) struct Panels<'a, T> {
+    unvisited: Vec<&'a Arrangement<T>>,
+    /// The tabs of the pane being visited that are still to come.
+    tabbed: &'a [T],
+}
+
+impl<'a, T> Iterator for Panels<'a, T> {
+    type Item = &'a T;
+
+    fn next(&mut self) -> Option<&'a T> {
+        loop {
+            if let Some((tab, rest)) = self.tabbed.split_first() {
+                self.tabbed = rest;
+                return Some(tab);
+            }
+            match self.unvisited.pop()? {
+                Arrangement::One(panel) => return Some(panel),
+                Arrangement::Tabs { first, rest } => {
+                    self.tabbed = rest;
+                    return Some(first);
+                }
+                Arrangement::Split { first, rest, .. } => {
+                    self.unvisited
+                        .extend(rest.iter().rev().map(|side| &side.arrangement));
+                    self.unvisited.push(&first.arrangement);
+                }
+            }
+        }
+    }
+}
+
+/// The panels of a group to change, in the order they are laid out.
+pub(crate) struct PanelsMut<'a, T> {
+    unvisited: Vec<&'a mut Arrangement<T>>,
+    tabbed: &'a mut [T],
+}
+
+impl<'a, T> Iterator for PanelsMut<'a, T> {
+    type Item = &'a mut T;
+
+    fn next(&mut self) -> Option<&'a mut T> {
+        loop {
+            if let Some((tab, rest)) = std::mem::take(&mut self.tabbed).split_first_mut() {
+                self.tabbed = rest;
+                return Some(tab);
+            }
+            match self.unvisited.pop()? {
+                Arrangement::One(panel) => return Some(panel),
+                Arrangement::Tabs { first, rest } => {
+                    self.tabbed = rest;
+                    return Some(first);
+                }
+                Arrangement::Split { first, rest, .. } => {
+                    self.unvisited
+                        .extend(rest.iter_mut().rev().map(|side| &mut side.arrangement));
+                    self.unvisited.push(&mut first.arrangement);
                 }
             }
         }
@@ -209,6 +339,7 @@ mod tests {
     use super::*;
     use crate::Removal;
     use crate::layout::{MIN_PANE_SHARE, shape};
+    use crate::testing::{SHARE_ROUNDING, letter};
 
     /// The arrangement `group` describes, each pane written as the panels it
     /// holds in tab order.
@@ -221,8 +352,6 @@ mod tests {
         assert_eq!(shape(&arrange(PanelGroup::one('a'))), "a");
     }
 
-    /// A pane frames a lone panel with no tab strip, so a group of one is the
-    /// same arrangement however it was asked for.
     #[test]
     fn a_group_of_one_tab_is_that_panel_alone() {
         let group = PanelGroup::tabs('a', Vec::new());
@@ -301,10 +430,6 @@ mod tests {
         assert_eq!(Weight::new(0), Weight::new(1));
     }
 
-    /// A share is divided out of a stack's weights, so an even share is even to
-    /// within one division's rounding — far under a pixel of any window.
-    const SHARE_ROUNDING: f32 = 1e-6;
-
     /// The `count` regions a stack is laid out in, each as the share of the
     /// height it takes and the arrangement it holds.
     fn regions(layout: &Layout<String>, count: usize) -> Vec<(f32, String)> {
@@ -327,9 +452,8 @@ mod tests {
     /// The stack of a panel per weight, 'a', 'b', ..., each in a pane of its own
     /// asking for the weight given for it.
     fn stack_weighing(weights: &[Weight]) -> PanelGroup<char> {
-        let panel = |(index, weight): (usize, &Weight)| {
-            PanelGroup::one((b'a' + index as u8) as char).with_weight(*weight)
-        };
+        let panel =
+            |(index, weight): (usize, &Weight)| PanelGroup::one(letter(index)).with_weight(*weight);
         let mut groups = weights.iter().enumerate().map(panel);
         let first = groups.next().expect("a stack holds a group");
         PanelGroup::stack(first, groups.collect())
@@ -533,12 +657,172 @@ mod tests {
         )
         .with_weight(Weight::CHART);
         let mut met = Vec::new();
-        let mapped = group.map(&mut |panel| {
-            met.push(panel);
+        let mapped = group.map(&mut |panel: &char| {
+            met.push(*panel);
             panel.to_ascii_uppercase()
         });
         assert_eq!(met, ['a', 'b', 'c']);
         assert_eq!(mapped.weight(), Weight::CHART);
         assert_eq!(shape(&arrange(mapped)), "(A/BC)");
+    }
+
+    /// The group of panels 'a' to 'f': 'a' over a pane of 'b' and 'c' tabbed,
+    /// beside 'd' over 'e' and 'f' tabbed.
+    fn six() -> PanelGroup<char> {
+        PanelGroup::split(
+            Axis::Horizontal,
+            0.25,
+            PanelGroup::split(
+                Axis::Vertical,
+                0.5,
+                PanelGroup::one('a'),
+                PanelGroup::tabs('b', vec!['c']),
+            ),
+            PanelGroup::split(
+                Axis::Vertical,
+                0.5,
+                PanelGroup::one('d'),
+                PanelGroup::tabs('e', vec!['f']),
+            ),
+        )
+    }
+
+    /// A group visits its panels in the order they are laid out, tabs included,
+    /// however deeply it nests them.
+    #[test]
+    fn a_group_lists_its_panels_in_the_order_they_are_laid_out() {
+        let mut group = six();
+        let listed: Vec<char> = group.panels().copied().collect();
+        assert_eq!(listed, ['a', 'b', 'c', 'd', 'e', 'f']);
+        let to_change: Vec<char> = group.panels_mut().map(|panel| *panel).collect();
+        assert_eq!(to_change, listed);
+        assert_eq!(PanelGroup::one('z').panels().copied().count(), 1);
+    }
+
+    /// A group is changed through the panels it hands over, which are its own
+    /// and not copies of them.
+    #[test]
+    fn a_change_to_a_listed_panel_lands_on_the_group() {
+        let mut group = six();
+        for panel in group.panels_mut() {
+            *panel = panel.to_ascii_uppercase();
+        }
+        assert_eq!(shape(&arrange(group)), "((A/BC)|(D/EF))");
+    }
+
+    /// The group of `kept` out of `six`, the panels it leaves out taking no
+    /// place in it.
+    fn compacted(kept: &str) -> Option<PanelGroup<char>> {
+        let kept: Vec<char> = kept.chars().collect();
+        six()
+            .map(&mut |panel: &char| kept.contains(panel).then_some(*panel))
+            .compact()
+    }
+
+    /// The shape of the group of `kept`, which has to hold panels at all.
+    fn compacted_shape(kept: &str) -> String {
+        shape(&arrange(compacted(kept).expect("a group of panels")))
+    }
+
+    #[test]
+    fn a_group_of_every_panel_is_the_group_itself() {
+        assert_eq!(compacted_shape("abcdef"), "((a/bc)|(d/ef))");
+    }
+
+    /// A pane goes on framing the tabs left to it, and shows the first of them.
+    #[test]
+    fn a_pane_keeps_the_tabs_left_to_it() {
+        assert_eq!(compacted_shape("abdef"), "((a/b)|(d/ef))");
+        assert_eq!(compacted_shape("acdef"), "((a/c)|(d/ef))");
+    }
+
+    /// The shape of the pane of 'a', 'b' and 'c' tabbed when only `kept` are
+    /// left to it.
+    fn tabs_kept(kept: &str) -> String {
+        let kept: Vec<char> = kept.chars().collect();
+        let pane = PanelGroup::tabs('a', vec!['b', 'c'])
+            .map(&mut |panel: &char| kept.contains(panel).then_some(*panel))
+            .compact()
+            .expect("a pane of tabs");
+        shape(&arrange(pane))
+    }
+
+    /// A pane holding more than two tabs keeps whichever are left to it in the
+    /// order it held them, whether what closes is the tab it shows or one
+    /// behind it, and shows the first of those left.
+    #[test]
+    fn a_pane_of_several_tabs_keeps_the_order_it_held_them_in() {
+        assert_eq!(tabs_kept("abc"), "abc");
+        assert_eq!(tabs_kept("bc"), "bc");
+        assert_eq!(tabs_kept("ac"), "ac");
+    }
+
+    /// The sides left to a split divide its extent, and a side left on its own
+    /// takes the whole of it — the split that parted it from the rest being gone
+    /// with them.
+    #[test]
+    fn the_sides_left_to_a_split_divide_its_extent() {
+        assert_eq!(compacted_shape("abc"), "(a/bc)");
+        assert_eq!(compacted_shape("def"), "(d/ef)");
+        assert_eq!(compacted_shape("bcdef"), "(bc|(d/ef))");
+        assert_eq!(compacted_shape("ad"), "(a|d)");
+        assert_eq!(compacted_shape("e"), "e");
+    }
+
+    /// A split none of whose sides is left goes with them, and the group around
+    /// it is laid out as though it had never been there.
+    #[test]
+    fn a_split_losing_every_side_goes_with_them() {
+        assert_eq!(compacted_shape("a"), "a");
+        assert_eq!(compacted_shape("bc"), "bc");
+    }
+
+    /// A group none of whose panels is kept is no group at all, so a window it
+    /// would be stacked in lays out nothing for it.
+    #[test]
+    fn a_group_of_no_panels_at_all_is_nothing() {
+        assert!(compacted("").is_none());
+    }
+
+    /// What a group weighs is what its document asked for, whatever its panels
+    /// have closed since, so a document does not shrink as its views close.
+    #[test]
+    fn a_compacted_group_weighs_what_it_asked_for() {
+        let group = PanelGroup::tabs('a', vec!['b']).with_weight(Weight::CHART);
+        let kept = group
+            .map(&mut |panel: &char| (*panel == 'b').then_some(*panel))
+            .compact()
+            .expect("a group of one panel");
+        assert_eq!(kept.weight(), Weight::CHART);
+        assert_eq!(shape(&arrange(kept)), "b");
+    }
+
+    /// The sides left to a split divide its extent in proportion to what each
+    /// asked for, so dropping one leaves those left in the proportions they
+    /// held against each other.
+    #[test]
+    fn the_sides_left_to_a_split_hold_the_proportions_they_asked_for() {
+        let group = PanelGroup::stack(
+            PanelGroup::one('a').with_weight(Weight::new(1)),
+            vec![
+                PanelGroup::one('b').with_weight(Weight::new(3)),
+                PanelGroup::one('c').with_weight(Weight::new(6)),
+            ],
+        );
+        let kept = group
+            .map(&mut |panel: &char| (*panel != 'a').then_some(*panel))
+            .compact()
+            .expect("a group of two panels");
+        let layout = arrange(kept);
+        let shares: Vec<f32> = regions(&layout, 2)
+            .into_iter()
+            .map(|(share, _)| share)
+            .collect();
+        for (share, want) in shares.into_iter().zip([1.0 / 3.0, 2.0 / 3.0]) {
+            assert!(
+                (share - want).abs() < SHARE_ROUNDING,
+                "{share} is not {want}"
+            );
+        }
     }
 }

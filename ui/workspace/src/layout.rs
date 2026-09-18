@@ -594,11 +594,7 @@ pub(crate) fn shape<P: std::fmt::Display>(layout: &Layout<P>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// A share is divided out of a split's flexes, so shares that divide evenly
-    /// in the rationals are even to within one division's rounding — far under a
-    /// pixel of any window.
-    const SHARE_ROUNDING: f32 = 1e-6;
+    use crate::testing::{SHARE_ROUNDING, letter};
 
     /// A pane and the two more it is split off to the right of, all three laid
     /// out side by side.
@@ -611,7 +607,7 @@ mod tests {
 
     /// The pane named by its index into the alphabet, 'a' first.
     fn pane(index: usize) -> Layout<char> {
-        Layout::Pane((b'a' + index as u8) as char)
+        Layout::Pane(letter(index))
     }
 
     /// Panes 'a', 'b', ... one after another along `axis`, the one at each index
@@ -861,7 +857,7 @@ mod tests {
         }
         // Every pane is named for its place in the alphabet, and a seed names
         // them from 'a' with none skipped, so the pane after the last is free.
-        let new = (b'a' + panes.len() as u8) as char;
+        let new = letter(panes.len());
         for side in [Side::Left, Side::Right, Side::Top, Side::Bottom] {
             let mut edged = layout.clone();
             edged.insert_at_edge(side, new);

@@ -35,30 +35,36 @@ struct RowStyle {
     fill: Hsla,
 }
 
+/// What the menu itself rests on, which is the fill of any row carrying none of
+/// its own.
+fn surface(colors: &ThemeColors) -> Hsla {
+    colors.panel
+}
+
 fn row_style(state: ViewState, colors: &ThemeColors) -> RowStyle {
     match state {
         ViewState::Visible => RowStyle {
             mark: "check",
             mark_ink: colors.text,
-            fill: Hsla::from(over(colors.selection, colors.panel)),
+            fill: Hsla::from(over(colors.selection, surface(colors))),
         },
         ViewState::Open => RowStyle {
             mark: "circle",
             mark_ink: colors.text,
-            fill: colors.panel,
+            fill: surface(colors),
         },
         ViewState::Closed => RowStyle {
             mark: "plus",
             mark_ink: colors.text_muted,
-            fill: colors.panel,
+            fill: surface(colors),
         },
     }
 }
 
-/// The fill a row takes under the cursor, composited over the one it already
-/// rests on so a row saying a pane shows its view goes on saying it.
-fn hovered(style: &RowStyle, colors: &ThemeColors) -> Hsla {
-    Hsla::from(over(colors.element_hover, style.fill))
+/// The fill a row resting on `fill` takes under the cursor, composited over it
+/// so a row saying a pane shows its view goes on saying it.
+fn hovered(fill: Hsla, colors: &ThemeColors) -> Hsla {
+    Hsla::from(over(colors.element_hover, fill))
 }
 
 /// A view a click shows, and how its row reads.
@@ -177,6 +183,18 @@ impl DocumentsMenu {
         }
     }
 
+    /// Lays this menu's own window out as the documents it holds described when
+    /// they opened, closing the menu over it.
+    fn reset_arrangement(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.close(cx);
+        let Some(workspace) = self.workspace.upgrade() else {
+            return;
+        };
+        workspace.update(cx, |workspace, cx| {
+            workspace.reset_arrangement(window, cx);
+        });
+    }
+
     /// Shows `view` of `document` in this menu's own window, closing the menu
     /// over it.
     fn show(
@@ -226,13 +244,14 @@ impl DocumentsMenu {
                         .py_1()
                         .max_h(MAX_LIST_HEIGHT)
                         .overflow_y_scroll()
-                        .bg(colors.panel)
+                        .bg(surface(colors))
                         .border_1()
                         .border_color(colors.border)
                         .rounded_md()
                         .shadow_lg()
                         .text_color(colors.text)
-                        .children(rows),
+                        .children(rows)
+                        .child(self.reset_row(colors, cx)),
                 ),
         )
     }
@@ -258,6 +277,32 @@ impl DocumentsMenu {
         rows
     }
 
+    /// The row that lays the window out as its documents described themselves.
+    /// It acts on the window rather than on any one view, so it carries no mark
+    /// and is ruled off from the rows naming views.
+    fn reset_row(&self, colors: &ThemeColors, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let hovered = hovered(surface(colors), colors);
+        div()
+            .id("documents-menu-reset")
+            .flex()
+            .flex_row()
+            .items_center()
+            .px(ROW_PAD)
+            .pt_1()
+            .pb_0p5()
+            .mt_1()
+            .border_t_1()
+            .border_color(colors.border)
+            .cursor_pointer()
+            .hover(move |s| s.bg(hovered))
+            .on_click(cx.listener(|this, _, window, cx| this.reset_arrangement(window, cx)))
+            .child(
+                div()
+                    .whitespace_nowrap()
+                    .child("Reset to Opening Arrangement"),
+            )
+    }
+
     /// A view's row, `at` its place in the list: its mark, its label set in `by`
     /// from the menu's leading edge, and a click showing it here.
     fn view_row(
@@ -269,7 +314,7 @@ impl DocumentsMenu {
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
         let style = row_style(view.state, colors);
-        let hovered = hovered(&style, colors);
+        let hovered = hovered(style.fill, colors);
         let (document, kind) = (view.document, view.kind);
         div()
             .id(ElementId::NamedInteger(
@@ -452,7 +497,7 @@ mod tests {
             let colors = &theme.colors;
             for state in STATES {
                 let style = row_style(state, colors);
-                for fill in [style.fill, hovered(&style, colors)] {
+                for fill in [style.fill, hovered(style.fill, colors)] {
                     let contrast = contrast_ratio(colors.text, fill);
                     assert!(
                         contrast >= MIN_TEXT_CONTRAST,
@@ -460,6 +505,23 @@ mod tests {
                         theme.name
                     );
                 }
+            }
+        }
+    }
+
+    /// The row that puts the window back rests on the menu's own surface, and
+    /// its label has to be read there at rest and under the cursor both.
+    #[test]
+    fn the_row_that_puts_the_window_back_keeps_its_label() {
+        for theme in built_in_themes() {
+            let colors = &theme.colors;
+            for fill in [surface(colors), hovered(surface(colors), colors)] {
+                let contrast = contrast_ratio(colors.text, fill);
+                assert!(
+                    contrast >= MIN_TEXT_CONTRAST,
+                    "{}: {contrast}:1",
+                    theme.name
+                );
             }
         }
     }
@@ -472,7 +534,7 @@ mod tests {
             let colors = &theme.colors;
             for state in STATES {
                 let style = row_style(state, colors);
-                for fill in [style.fill, hovered(&style, colors)] {
+                for fill in [style.fill, hovered(style.fill, colors)] {
                     let contrast = contrast_ratio(style.mark_ink, fill);
                     assert!(
                         contrast >= MIN_SECONDARY_CONTRAST,
