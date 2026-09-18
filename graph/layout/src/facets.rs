@@ -11,6 +11,7 @@ use std::num::NonZeroU32;
 
 use bazel_query_proto::analysis::Configuration;
 
+use crate::capability::{Axis, Capabilities, CapabilitiesBuilder};
 use crate::intern::Id;
 use crate::label;
 use crate::repo::{self, RepoOrigin};
@@ -402,29 +403,6 @@ impl Facets {
         put(&mut self.label, id, Some(NodeRef::of(label)));
     }
 
-    /// Records what the label of the node `node` names outright: itself as a
-    /// target, the `package` box it sits in, and its repository. `canonical` is
-    /// the label in the form node ids are keyed by and `written` the form the
-    /// input printed, whose repository part is the apparent name that
-    /// repository was reached by.
-    pub fn describe_label(
-        &mut self,
-        node: Id,
-        package: Option<Id>,
-        canonical: &str,
-        written: &str,
-    ) {
-        self.set_label(node, node);
-        if let Some(package) = package {
-            self.set_package(node, package);
-        }
-        if let Some(canonical_repo) = label::label_repo(canonical) {
-            let apparent = label::label_repo(written).filter(|&name| name != canonical_repo);
-            let repo = self.intern_repo(canonical_repo, apparent);
-            self.set_repo(node, Some(repo));
-        }
-    }
-
     /// Copies into `child` the facets of the `owner` it is part of: what the
     /// owner's label and declaration say, and the configuration it is built in.
     /// A facet `child` already states is the one it keeps, so a node that names
@@ -580,6 +558,7 @@ pub struct FacetsBuilder {
     facets: Facets,
     tags: SparseFill,
     aspects: SparseFill,
+    capabilities: CapabilitiesBuilder,
 }
 
 impl FacetsBuilder {
@@ -587,6 +566,32 @@ impl FacetsBuilder {
     /// standing for another inherits the facets already recorded for it.
     pub fn facets(&mut self) -> &mut Facets {
         &mut self.facets
+    }
+
+    /// Records what the label of the node `node` names outright: itself as a
+    /// target, the `package` box it sits in, and its repository. `canonical` is
+    /// the label in the form node ids are keyed by and `written` the form the
+    /// input printed, whose repository part is the apparent name that
+    /// repository was reached by.
+    pub fn describe_label(
+        &mut self,
+        node: Id,
+        package: Option<Id>,
+        canonical: &str,
+        written: &str,
+    ) {
+        self.facets.set_label(node, node);
+        self.observe(Axis::Label, true);
+        if let Some(package) = package {
+            self.facets.set_package(node, package);
+        }
+        self.observe(Axis::Package, package.is_some());
+        if let Some(canonical_repo) = label::label_repo(canonical) {
+            let apparent = label::label_repo(written).filter(|&name| name != canonical_repo);
+            let repo = self.facets.intern_repo(canonical_repo, apparent);
+            self.facets.set_repo(node, Some(repo));
+        }
+        self.observe(Axis::Repo, label::is_canonical(canonical));
     }
 
     pub fn set_tags<'a>(&mut self, id: Id, tags: impl IntoIterator<Item = &'a str>) {
@@ -597,10 +602,14 @@ impl FacetsBuilder {
         self.aspects.fill(&mut self.facets.strings, id, aspects);
     }
 
-    pub fn seal(mut self) -> Facets {
+    pub fn observe(&mut self, axis: Axis, carried: bool) {
+        self.capabilities.observe(axis, carried);
+    }
+
+    pub fn seal(mut self) -> (Facets, Capabilities) {
         self.facets.set_tags(self.tags.values.seal());
         self.facets.set_aspects(self.aspects.values.seal());
-        self.facets
+        (self.facets, self.capabilities.seal())
     }
 }
 
@@ -783,7 +792,7 @@ mod tests {
         builder.set_tags(Id(1), ["manual", "flaky"]);
         builder.set_tags(Id(1), ["local"]);
 
-        let facets = builder.seal();
+        let (facets, _) = builder.seal();
         let mut tags: Vec<&str> = facets
             .tags()
             .values(Id(1))

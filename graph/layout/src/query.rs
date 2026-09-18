@@ -7,6 +7,7 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 
 use bazel_query_proto::blaze_query::{Attribute, Target, attribute::Tristate};
 
+use crate::capability::Axis;
 #[cfg(test)]
 use crate::facets::Facets;
 use crate::facets::{FacetsBuilder, Tri};
@@ -26,7 +27,7 @@ fn build_in(targets: &[Target], repos: &RepoMapping) -> (Graph, Names, Facets) {
     let mut names = Names::default();
     let mut facets = FacetsBuilder::default();
     let graph = build_with_packages(&refs, &packages, repos, &mut names, &mut facets);
-    (graph, names, facets.seal())
+    (graph, names, facets.seal().0)
 }
 
 /// Every label this query names.
@@ -127,14 +128,20 @@ pub(crate) fn describe_target(
     canonical: &str,
     written: &str,
 ) {
-    facets
-        .facets()
-        .describe_label(node, package, canonical, written);
+    facets.describe_label(node, package, canonical, written);
     let Some(rule) = target.rule.as_ref() else {
         return;
     };
+    let declared = !rule.rule_class.is_empty();
+    facets.observe(Axis::RuleClass, declared);
+    facets.observe(Axis::RuleCategory, declared);
     let rule_class = facets.facets().intern_rule_class(&rule.rule_class);
     facets.facets().set_rule_class(node, Some(rule_class));
+    // The attributes arrive as one list, so any one of them standing there
+    // shows that the list was printed.
+    let attributed = !rule.attribute.is_empty();
+    facets.observe(Axis::Tags, attributed);
+    facets.observe(Axis::Testonly, attributed);
     for attribute in &rule.attribute {
         match attribute.name.as_str() {
             "tags" => facets.set_tags(node, attribute.string_list_value.iter().map(String::as_str)),

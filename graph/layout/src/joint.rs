@@ -14,18 +14,21 @@ use std::collections::{BTreeSet, HashSet};
 use bazel_query_proto::analysis::{ActionGraphContainer, CqueryResult};
 use bazel_query_proto::blaze_query::Target;
 
+use crate::capability::Capabilities;
 use crate::facets::{Facets, FacetsBuilder};
 use crate::graph::Graph;
 use crate::intern::{Id, Names};
 use crate::label::{RepoMapping, canonical_repo};
 use crate::{aquery, cquery, query};
 
+/// The joint graph, the names its ids resolve through, the facets a filter
+/// selects on, and which axes those facets let it select by.
 pub fn build_joint(
     aquery: Option<&[ActionGraphContainer]>,
     cquery: Option<&[CqueryResult]>,
     query: Option<&[Target]>,
     external_sources: bool,
-) -> (Graph, Names, Facets) {
+) -> (Graph, Names, Facets, Capabilities) {
     let repos = repo_mapping(aquery, cquery, query);
     let union = package_union(aquery, cquery, query, &repos);
     let labeled_outputs = labeled_outputs(cquery, query, &repos);
@@ -42,7 +45,9 @@ pub fn build_joint(
         &mut names,
         &mut facets,
     );
-    canonicalize(merge(graphs), &names, facets.seal())
+    let (facets, capabilities) = facets.seal();
+    let (graph, names, facets) = canonicalize(merge(graphs), &names, facets);
+    (graph, names, facets, capabilities)
 }
 
 /// The apparent-to-canonical repository mapping inferred from every canonical
@@ -194,13 +199,17 @@ fn merge(graphs: Vec<Graph>) -> Graph {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::capability::{Axis, Support};
     use crate::graph::EdgeKind;
     use crate::test_support::find;
     use bazel_query_proto::analysis::{
         Action, Artifact, Configuration, ConfiguredTarget, DepSetOfFiles, PathFragment,
         Target as ActionTarget,
     };
-    use bazel_query_proto::blaze_query::{GeneratedFile, Rule, SourceFile, target::Discriminator};
+    use bazel_query_proto::blaze_query::{
+        Attribute, GeneratedFile, Rule, SourceFile, attribute::Discriminator as AttributeType,
+        target::Discriminator,
+    };
 
     fn rule(name: &str, inputs: &[&str]) -> Target {
         Target {
@@ -271,7 +280,7 @@ mod tests {
             ..Default::default()
         };
 
-        let (graph, names, _) =
+        let (graph, names, _, _) =
             build_joint(Some(&[aquery_container]), None, Some(&query_targets), false);
 
         // The target //foo:lib appears once though both inputs name it.
@@ -361,7 +370,7 @@ mod tests {
             ..Default::default()
         };
 
-        let (graph, names, _) =
+        let (graph, names, _, _) =
             build_joint(Some(&[aquery_container]), None, Some(&query_targets), false);
 
         // The promoted target node is shared by query and aquery: it appears once.
@@ -450,7 +459,7 @@ mod tests {
             ..Default::default()
         };
 
-        let (graph, names, _) =
+        let (graph, names, _, _) =
             build_joint(Some(&[aquery_container]), None, Some(&query_targets), false);
 
         assert_eq!(
@@ -503,7 +512,7 @@ mod tests {
         // where aquery writes the same target as `//foo:app`.
         let query_targets = vec![rule("@@//foo:app", &[])];
 
-        let (graph, names, _) = build_joint(
+        let (graph, names, _, _) = build_joint(
             Some(&[aquery_target(1, "//foo:app")]),
             None,
             Some(&query_targets),
@@ -522,7 +531,7 @@ mod tests {
         // name one target.
         let query_targets = vec![rule("@somerepo//foo:lib", &[])];
 
-        let (graph, names, _) = build_joint(
+        let (graph, names, _, _) = build_joint(
             Some(&[aquery_target(1, "@@somerepo+//foo:lib")]),
             None,
             Some(&query_targets),
@@ -545,7 +554,7 @@ mod tests {
             aquery_target(2, "@@somerepo+2.0//foo:lib"),
         ];
 
-        let (graph, names, _) = build_joint(Some(&aquery), None, Some(&query_targets), false);
+        let (graph, names, _, _) = build_joint(Some(&aquery), None, Some(&query_targets), false);
 
         assert_eq!(node_count(&graph, &names, "target:@somerepo//foo:lib"), 1);
         assert_eq!(
@@ -604,7 +613,7 @@ mod tests {
             ..Default::default()
         };
 
-        let (_, names, facets) = build_joint(
+        let (_, names, facets, _) = build_joint(
             Some(&[aquery_container]),
             Some(&cquery_results),
             None,
@@ -647,12 +656,123 @@ mod tests {
             ..Default::default()
         };
 
-        let (graph, names, _) =
+        let (graph, names, _, _) =
             build_joint(Some(&[aquery_container]), None, Some(&query_targets), false);
 
         assert_eq!(find(&graph, &names, "pkg:a").label, "//a");
         let nested = find(&graph, &names, "pkg:a/b");
         assert_eq!(nested.label, "b");
         assert_eq!(nested.parent.map(|p| names.resolve(p)), Some("pkg:a"));
+    }
+
+    /// A rule target with the attributes `attributes` printed for it.
+    fn attributed(name: &str, attributes: Vec<Attribute>) -> Target {
+        Target {
+            r#type: Discriminator::Rule as i32,
+            rule: Some(Rule {
+                name: name.to_string(),
+                rule_class: "cc_library".to_string(),
+                attribute: attributes,
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    fn tags(values: &[&str]) -> Attribute {
+        Attribute {
+            name: "tags".to_string(),
+            r#type: AttributeType::StringList as i32,
+            string_list_value: values.iter().map(|v| v.to_string()).collect(),
+            ..Default::default()
+        }
+    }
+
+    /// A cquery result for the rule `name` in the configuration `config_id`,
+    /// alongside the configurations the result declares.
+    fn cquery_rule(name: &str, config_id: u32, configurations: Vec<Configuration>) -> CqueryResult {
+        CqueryResult {
+            results: vec![ConfiguredTarget {
+                target: Some(rule(name, &[])),
+                configuration_id: config_id,
+                ..Default::default()
+            }],
+            configurations,
+        }
+    }
+
+    #[test]
+    fn a_cquery_printed_without_configurations_cannot_filter_on_them() {
+        let cquery_results = vec![cquery_rule("//foo:app", 0, Vec::new())];
+
+        let (_, _, _, capabilities) = build_joint(None, Some(&cquery_results), None, false);
+
+        assert_eq!(
+            capabilities.support(Axis::Configuration),
+            Support::Unavailable {
+                flag: "--proto:include_configurations"
+            }
+        );
+    }
+
+    #[test]
+    fn an_aquery_whose_actions_ran_under_no_aspect_still_filters_on_aspects() {
+        // Every action lists the aspects that produced it, so a build that ran
+        // none supports the axis with nothing in it: no flag is missing.
+        let aquery_container = ActionGraphContainer {
+            targets: vec![ActionTarget {
+                id: 1,
+                label: "//foo:app".into(),
+                ..Default::default()
+            }],
+            actions: vec![Action {
+                target_id: 1,
+                mnemonic: "CppCompile".into(),
+                configuration_id: 1,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        let (_, names, facets, capabilities) =
+            build_joint(Some(&[aquery_container]), None, None, false);
+
+        assert_eq!(capabilities.support(Axis::Aspect), Support::Available);
+        let action = names.get("action0").unwrap();
+        assert!(facets.aspects().values(action).is_empty());
+    }
+
+    #[test]
+    fn a_query_printed_without_attributes_cannot_filter_on_tags_or_testonly() {
+        let query_targets = vec![attributed("//foo:app", Vec::new())];
+
+        let (_, _, _, capabilities) = build_joint(None, None, Some(&query_targets), false);
+
+        let missing = Support::Unavailable {
+            flag: "--proto:output_rule_attrs",
+        };
+        assert_eq!(capabilities.support(Axis::Tags), missing);
+        assert_eq!(capabilities.support(Axis::Testonly), missing);
+        // The rule class reaches the proto whatever the attributes do.
+        assert_eq!(capabilities.support(Axis::RuleClass), Support::Available);
+    }
+
+    #[test]
+    fn an_axis_only_some_targets_state_is_reported_with_its_reach() {
+        let query_targets = vec![
+            attributed("//foo:app", vec![tags(&["manual"])]),
+            attributed("//foo:lib", Vec::new()),
+        ];
+
+        let (_, _, _, capabilities) = build_joint(None, None, Some(&query_targets), false);
+
+        assert_eq!(
+            capabilities.support(Axis::Tags),
+            Support::Partial {
+                covered: 1,
+                relevant: 2,
+                flag: Some("--proto:output_rule_attrs"),
+            }
+        );
     }
 }

@@ -18,6 +18,7 @@ use bazel_query_proto::analysis::{Configuration, ConfiguredTarget, CqueryResult}
 use bazel_query_proto::blaze_query::target::Discriminator;
 use bazel_query_proto::blaze_query::{Rule, Target};
 
+use crate::capability::Axis;
 #[cfg(test)]
 use crate::facets::Facets;
 use crate::facets::{ConfigRef, FacetsBuilder};
@@ -33,7 +34,7 @@ fn build(results: &[CqueryResult]) -> (Graph, Names, Facets) {
     let mut names = Names::default();
     let mut facets = FacetsBuilder::default();
     let graph = build_with_packages(results, &packages, &repos, &mut names, &mut facets);
-    (graph, names, facets.seal())
+    (graph, names, facets.seal().0)
 }
 
 /// Every label this cquery names. A rule contributes its rule name, any other
@@ -133,7 +134,9 @@ impl Builder<'_> {
     /// Records for the configured-target node `node` the configuration it is
     /// built in, and what its target container `container` states.
     fn describe_configured(&mut self, node: Id, container: Id, config_id: u32) {
-        if let Some(config) = self.intern_config(config_id) {
+        let config = self.intern_config(config_id);
+        self.facets.observe(Axis::Configuration, config.is_some());
+        if let Some(config) = config {
             self.facets.facets().set_config(node, Some(config));
         }
         self.facets.facets().inherit(node, container);
@@ -284,6 +287,10 @@ impl Edges<'_, '_> {
     /// An edge from each dependency `rule` consumes to its configured target in
     /// `config_id`.
     fn wire_rule(&mut self, rule: &Rule, config_id: u32) {
+        if !rule.rule_input.is_empty() || !rule.configured_rule_input.is_empty() {
+            let resolved = !rule.configured_rule_input.is_empty();
+            self.b.facets.observe(Axis::ExecConfiguration, resolved);
+        }
         let key = self.b.config_key(config_id);
         let name = self.b.canonical(&rule.name);
         let consumer = self.b.names.intern(&label::ct_node_id(&name, &key));

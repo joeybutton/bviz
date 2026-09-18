@@ -7,6 +7,7 @@
 //! configured-target hierarchy; query yields one node per target. Edges run
 //! from each dependency to the target that consumes it.
 pub mod aquery;
+pub mod capability;
 pub mod cquery;
 pub mod facets;
 pub mod filter;
@@ -26,6 +27,7 @@ pub mod streamed_proto;
 #[cfg(test)]
 mod test_support;
 
+pub use capability::{Axis, Capabilities, Support};
 pub use facets::Facets;
 pub use graph::{EdgeKind, Graph, Kind};
 pub use intern::{Id, Names};

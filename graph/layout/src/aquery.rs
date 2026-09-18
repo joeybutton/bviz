@@ -26,6 +26,7 @@ use bazel_query_proto::analysis::{
     PathFragment, RuleClass, Target,
 };
 
+use crate::capability::Axis;
 #[cfg(test)]
 use crate::facets::Facets;
 use crate::facets::{ConfigRef, FacetsBuilder};
@@ -62,7 +63,7 @@ fn build_promoting(
         &mut names,
         &mut facets,
     );
-    (graph, names, facets.seal())
+    (graph, names, facets.seal().0)
 }
 
 /// Every target label this aquery names.
@@ -342,12 +343,24 @@ impl Boxes<'_> {
     /// Records what `action` states about the node it became, and what the
     /// configured-target box `owner` it runs under states.
     fn describe_action(&mut self, node: Id, owner: Id, action: &Action) {
+        self.facets
+            .observe(Axis::Mnemonic, !action.mnemonic.is_empty());
         if !action.mnemonic.is_empty() {
             let mnemonic = self.facets.facets().intern_mnemonic(&action.mnemonic);
             self.facets.facets().set_mnemonic(node, Some(mnemonic));
         }
+        // An action lists the aspects that produced it whether or not any did,
+        // so every action carries the field the aspect axis reads.
+        self.facets.observe(Axis::Aspect, true);
         let aspects: Vec<&str> = self.index.aspect_names(action).collect();
         self.facets.set_aspects(node, aspects);
+        let files = !action.output_ids.is_empty() || !action.input_dep_set_ids.is_empty();
+        self.facets.observe(Axis::Artifacts, files);
+        let configured = self
+            .index
+            .config_by_id
+            .contains_key(&ConfigId(action.configuration_id));
+        self.facets.observe(Axis::ExecConfiguration, configured);
         self.facets.facets().inherit(node, owner);
     }
 
@@ -419,9 +432,17 @@ impl Boxes<'_> {
                 target.kind,
                 package,
             );
-            let facets = self.facets.facets();
-            facets.describe_label(target_node_id, package, target.canonical, target.written);
+            self.facets
+                .describe_label(target_node_id, package, target.canonical, target.written);
+            if target.kind == Kind::Target {
+                // Only a rule is declared by a rule class; the box a promoted
+                // output file gets is a file, which no rule class describes.
+                let declared = target.rule_class.is_some();
+                self.facets.observe(Axis::RuleClass, declared);
+                self.facets.observe(Axis::RuleCategory, declared);
+            }
             if let Some(name) = target.rule_class {
+                let facets = self.facets.facets();
                 let rule_class = facets.intern_rule_class(name);
                 facets.set_rule_class(target_node_id, Some(rule_class));
             }
@@ -440,7 +461,9 @@ impl Boxes<'_> {
             Kind::ConfiguredTarget,
             Some(target_node_id),
         );
-        if let Some(config) = self.intern_config(config_id) {
+        let config = self.intern_config(config_id);
+        self.facets.observe(Axis::Configuration, config.is_some());
+        if let Some(config) = config {
             self.facets.facets().set_config(ct_node_id, Some(config));
         }
         self.facets.facets().inherit(ct_node_id, target_node_id);
@@ -564,9 +587,7 @@ impl Wiring<'_, '_> {
                 if self.source_nodes.insert(node_id) {
                     let parent = self.hierarchy.package_box(&label);
                     graph.add_node(node_id, label::target_label(&label), Kind::Source, parent);
-                    self.facets
-                        .facets()
-                        .describe_label(node_id, parent, &label, &label);
+                    self.facets.describe_label(node_id, parent, &label, &label);
                 }
                 node_id
             }

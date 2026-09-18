@@ -34,7 +34,7 @@ pub(crate) fn build_graph(inputs: &[Input]) -> Result<(Graph, Graph, Names, Face
             }
         }
     }
-    let (base, names, facets) =
+    let (base, names, facets, _capabilities) =
         bviz_graph_layout::build_joint(aq.as_deref(), cq.as_deref(), q.as_deref(), false);
     // Transitively reduce the whole base once: a collapsed box then draws the
     // reduction of its hidden subtree's edges, so its edge count is stable under

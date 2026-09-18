@@ -33,6 +33,14 @@ pub(crate) fn canonical_repo(label: &str) -> Option<&str> {
     (!canonical.is_empty()).then_some(canonical)
 }
 
+/// Whether `label` names its repository canonically: `@@name//...`, or with no
+/// repository part at all, which is how the main repository's labels read. A
+/// label that reached bviz by an apparent name no input pinned to a canonical
+/// one keeps its single `@` and names a repository bviz cannot identify.
+pub(crate) fn is_canonical(label: &str) -> bool {
+    !label.starts_with('@') || label.starts_with("@@")
+}
+
 /// The repository a label names, with any sigil stripped: `@@r+//a:b` -> `r+`,
 /// `@r//a:b` -> `r`, and the main repository's empty name for `//a:b`. `None`
 /// where the label names no package.
