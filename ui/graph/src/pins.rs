@@ -143,6 +143,7 @@ pub(crate) fn panel(
             .right_2()
             .top_2()
             .w(PANEL_WIDTH)
+            .occlude()
             .flex()
             .flex_col()
             .gap_1()

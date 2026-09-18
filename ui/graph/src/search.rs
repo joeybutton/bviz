@@ -309,6 +309,7 @@ pub(crate) fn results(
             .left_2()
             .top_2()
             .w(RESULTS_WIDTH)
+            .occlude()
             .flex()
             .flex_col()
             .gap_1()
