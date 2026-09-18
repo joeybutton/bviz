@@ -11,7 +11,8 @@ pub fn cached_layer(view: impl Into<AnyView>) -> AnyView {
 }
 
 /// A canvas filling its parent from the parent's origin, so it paints over any
-/// sibling declared before it. `paint` is handed the canvas's own bounds.
+/// sibling declared before it. `paint` is handed the canvas's own bounds. It
+/// takes no press, so what it covers goes on hit-testing as it would without it.
 pub fn overlay_canvas(
     paint: impl 'static + FnOnce(Bounds<Pixels>, &mut Window, &mut App),
 ) -> Canvas<()> {

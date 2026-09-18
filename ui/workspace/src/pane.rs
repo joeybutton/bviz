@@ -33,6 +33,19 @@ pub struct Pane {
     active: usize,
 }
 
+/// What handing a panel over left of the pane that held it. The panel is
+/// reached only through this, so a caller taking a pane's last panel is handed
+/// the pane's own fate along with it.
+#[must_use]
+pub(crate) enum Handover {
+    /// The pane holds other panels and shows one of them.
+    Kept(AnyPanel),
+    /// That was the pane's only panel, so the pane has nothing of its own left
+    /// to show: it goes on holding the panel until its workspace takes it out of
+    /// the arrangement, which the workspace does as part of the move.
+    Emptied(AnyPanel),
+}
+
 /// What a [`Pane`] tells its workspace about itself.
 pub enum PaneEvent {
     /// The panel on show changed, or changed what it says about itself.
@@ -48,28 +61,53 @@ impl EventEmitter<PaneEvent> for Pane {}
 impl Pane {
     pub(crate) fn new(panel: AnyPanel, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let events = panel.subscribe(window, cx);
-        panel.set_active(true, window, cx);
-        Self {
+        let mut pane = Self {
             tabs: vec![Tab {
                 panel,
                 _events: events,
             }],
             active: 0,
-        }
+        };
+        pane.show_active(window, cx);
+        pane
     }
 
     /// Adds `panel` to the pane and shows it.
     pub(crate) fn add(&mut self, panel: AnyPanel, window: &mut Window, cx: &mut Context<Self>) {
+        self.insert(self.tabs.len(), panel, window, cx);
+    }
+
+    /// Adds `panel` at `index` among the tabs — at the end where the pane holds
+    /// fewer — and shows it.
+    pub(crate) fn insert(
+        &mut self,
+        index: usize,
+        panel: AnyPanel,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let events = panel.subscribe(window, cx);
-        self.tabs.push(Tab {
-            panel,
-            _events: events,
-        });
-        self.activate(self.tabs.len() - 1, window, cx);
+        let showing = self.active_panel().clone();
+        let index = index.min(self.tabs.len());
+        self.tabs.insert(
+            index,
+            Tab {
+                panel,
+                _events: events,
+            },
+        );
+        showing.set_active(false, window, cx);
+        self.active = index;
+        self.show_active(window, cx);
     }
 
     pub fn active_panel(&self) -> &AnyPanel {
         &self.tabs[self.active].panel
+    }
+
+    /// How many panels the pane holds, one of which it shows.
+    pub(crate) fn tab_count(&self) -> usize {
+        self.tabs.len()
     }
 
     /// Which tab holds `panel`, if this pane holds it at all.
@@ -122,48 +160,21 @@ impl Pane {
         self.close(self.active, window, cx);
     }
 
-    /// Hands the panel on show to a caller that gives it a place of its own,
-    /// leaving the pane showing another. `None` where it is the pane's only
-    /// panel, which cannot leave without emptying the pane.
-    pub(crate) fn take_active(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Option<AnyPanel> {
-        self.detach(self.active, window, cx)
-    }
-
-    pub(crate) fn remove_active(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> AnyPanel {
-        self.give_up(self.active, window, cx)
-    }
-
-    /// Hands `panel` over where this pane holds it, `None` where it does not.
+    /// Hands `panel` to a caller that re-homes it, whether or not the pane holds
+    /// others. `None` where this pane does not hold it.
     pub(crate) fn remove(
         &mut self,
         panel: EntityId,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> Option<AnyPanel> {
+    ) -> Option<Handover> {
         let index = self.index_of(panel)?;
-        Some(self.give_up(index, window, cx))
-    }
-
-    /// Hands the panel at `index` to a caller that re-homes it in another
-    /// window, whether or not the pane holds others. Giving up its only panel
-    /// leaves the pane with nothing to show, so it is done
-    /// ([`PaneEvent::Closed`]) just as closing that panel leaves it.
-    fn give_up(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) -> AnyPanel {
-        if let Some(panel) = self.detach(index, window, cx) {
-            return panel;
+        if let Some(taken) = self.detach(index, window, cx) {
+            return Some(Handover::Kept(taken));
         }
-        let panel = self.active_panel().clone();
-        panel.set_active(false, window, cx);
-        cx.emit(PaneEvent::Closed);
-        panel
+        let only = self.active_panel().clone();
+        only.set_active(false, window, cx);
+        Some(Handover::Emptied(only))
     }
 
     pub(crate) fn on_panel_event(

@@ -135,6 +135,11 @@ impl DocumentsMenu {
         let focus_handle = cx.focus_handle();
         let dismiss = cx.on_focus_out(&focus_handle, window, |this, _, _, cx| this.close(cx));
         Self {
+            // A window can be opened from an update of the workspace opening it
+            // and is drawn before that update unwinds, with that workspace
+            // leased; the open menu reads every workspace of the session, and
+            // reading a leased one panics. A menu opens on a press, never on the
+            // frame its window is built in.
             open: false,
             workspace,
             documents,

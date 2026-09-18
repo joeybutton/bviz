@@ -58,16 +58,8 @@ impl Side {
         }
     }
 
-    /// The side a pane laid out after another along `axis` is on.
-    pub fn trailing(axis: Axis) -> Self {
-        match axis {
-            Axis::Horizontal => Side::Right,
-            Axis::Vertical => Side::Bottom,
-        }
-    }
-
     /// Whether what is put here is laid out ahead of what it is put beside.
-    fn leads(self) -> bool {
+    pub(crate) fn leads(self) -> bool {
         matches!(self, Side::Left | Side::Top)
     }
 }
@@ -339,6 +331,24 @@ impl<P: PartialEq> Layout<P> {
     fn is_pane(&self, target: &P) -> bool {
         matches!(self, Layout::Pane(pane) if pane == target)
     }
+
+    /// Whether `target` is already laid out spanning `side` of the whole
+    /// arrangement, which is the place [`Layout::insert_at_edge`] puts a pane:
+    /// the arrangement is that pane, or its outermost split lays its sides out
+    /// along that side's axis and lays that pane out at that end of them.
+    pub fn spans_edge(&self, target: &P, side: Side) -> bool {
+        match self {
+            Layout::Pane(pane) => pane == target,
+            Layout::Split(split) => {
+                split.axis == side.axis()
+                    && match side.leads() {
+                        true => split.children.first(),
+                        false => split.children.last(),
+                    }
+                    .is_some_and(|child| child.layout.is_pane(target))
+            }
+        }
+    }
 }
 
 impl<P: Clone + PartialEq> Layout<P> {
@@ -379,6 +389,31 @@ impl<P: Clone + PartialEq> Layout<P> {
             .children
             .insert(at, Child::new(Layout::Pane(new), half));
         true
+    }
+
+    /// Puts `new` in a pane of its own spanning `side` of the whole
+    /// arrangement. Where the arrangement is a split laying its sides out along
+    /// that side's axis, `new` joins it asking for what its sides ask for
+    /// between them on average, so that `new` takes an even share of the split
+    /// and every other side goes on asking for what it asked for; across that
+    /// axis, the whole arrangement is parted from `new` by a split of two.
+    pub fn insert_at_edge(&mut self, side: Side, new: P) {
+        if let Layout::Split(split) = self
+            && split.axis == side.axis()
+        {
+            let asked: f32 = split.children.iter().map(|child| child.flex.shares()).sum();
+            let even = Flex::new(asked / split.children.len() as f32);
+            let at = match side.leads() {
+                true => 0,
+                false => split.children.len(),
+            };
+            split
+                .children
+                .insert(at, Child::new(Layout::Pane(new), even));
+            return;
+        }
+        let held = std::mem::replace(self, Layout::Pane(new.clone()));
+        *self = Layout::parted(side, held, Layout::Pane(new));
     }
 
     /// `held` and `new` either side of a divider, `new` on `side` of `held`,
@@ -494,13 +529,23 @@ mod tests {
         Layout::Pane((b'a' + index as u8) as char)
     }
 
-    /// Panes 'a', 'b', ... side by side, the one at each index asking for the
-    /// flex given for it.
-    fn row(flexes: &[f32]) -> Layout<char> {
+    /// Panes 'a', 'b', ... one after another along `axis`, the one at each index
+    /// asking for the flex given for it.
+    fn along(axis: Axis, flexes: &[f32]) -> Layout<char> {
         let sided = |(index, flex): (usize, &f32)| (pane(index), *flex);
         let mut sides = flexes.iter().enumerate().map(sided);
-        let first = sides.next().expect("a row holds a pane");
-        Layout::divided(Axis::Horizontal, first, sides.collect())
+        let first = sides.next().expect("a split holds a pane");
+        Layout::divided(axis, first, sides.collect())
+    }
+
+    /// Panes 'a', 'b', ... side by side.
+    fn row(flexes: &[f32]) -> Layout<char> {
+        along(Axis::Horizontal, flexes)
+    }
+
+    /// Panes 'a', 'b', ... one above another.
+    fn column(flexes: &[f32]) -> Layout<char> {
+        along(Axis::Vertical, flexes)
     }
 
     /// `count` panes 'a', 'b', ... side by side, each asking for as much as the
@@ -553,6 +598,77 @@ mod tests {
         assert_shares(root(&layout), &[0.5, 0.25, 0.25]);
     }
 
+    /// A pane put against an edge the arrangement is already laid out along
+    /// joins it as the side laid out first or last, at an even share of the
+    /// extent — which is a share of the split, not half of it — and the sides it
+    /// joins go on asking for exactly what they asked for, so what they held is
+    /// divided between them as it was.
+    #[test]
+    fn a_pane_put_against_an_edge_of_a_split_along_it_takes_an_even_share() {
+        let mut leading = row(&[1.0, 1.0, 2.0]);
+        leading.insert_at_edge(Side::Left, 'z');
+        assert_eq!(shape(&leading), "(z|a|b|c)");
+        assert_shares(root(&leading), &[0.25, 0.1875, 0.1875, 0.375]);
+
+        let mut trailing = column(&[1.0, 1.0, 2.0]);
+        trailing.insert_at_edge(Side::Bottom, 'z');
+        assert_eq!(shape(&trailing), "(a/b/c/z)");
+        assert_shares(root(&trailing), &[0.1875, 0.1875, 0.375, 0.25]);
+    }
+
+    /// The pane a move would put against an edge is the pane already there when
+    /// the arrangement is that pane alone, or lays it out at that end of a split
+    /// along that edge's own axis.
+    #[test]
+    fn a_pane_spans_an_edge_where_a_pane_put_there_would_stand() {
+        let lone = Layout::Pane('a');
+        assert!(lone.spans_edge(&'a', Side::Left));
+        assert!(lone.spans_edge(&'a', Side::Bottom));
+
+        let row = row(&[1.0, 1.0, 1.0]);
+        assert!(row.spans_edge(&'a', Side::Left));
+        assert!(row.spans_edge(&'c', Side::Right));
+        assert!(!row.spans_edge(&'b', Side::Left));
+        assert!(!row.spans_edge(&'b', Side::Right));
+    }
+
+    /// A pane at the end of a split laid out across an edge reaches only part of
+    /// that edge, and so does one the split at that end lays out among others.
+    #[test]
+    fn a_pane_the_arrangement_lays_out_across_an_edge_does_not_span_it() {
+        let row = row(&[1.0, 1.0]);
+        assert!(!row.spans_edge(&'a', Side::Top));
+        assert!(!row.spans_edge(&'b', Side::Bottom));
+
+        let mut nested = row;
+        assert!(nested.insert_beside(&'b', Side::Bottom, 'c'));
+        assert_eq!(shape(&nested), "(a|(b/c))");
+        assert!(!nested.spans_edge(&'b', Side::Right));
+        assert!(!nested.spans_edge(&'c', Side::Right));
+        assert!(nested.spans_edge(&'a', Side::Left));
+    }
+
+    /// Across the axis the arrangement is laid out along, every pane of it is
+    /// parted from the new one by the one divider, which halves the window.
+    #[test]
+    fn a_pane_put_against_an_edge_across_the_arrangement_parts_all_of_it() {
+        let mut row = row(&[1.0, 3.0]);
+        row.insert_at_edge(Side::Top, 'z');
+        assert_eq!(shape(&row), "(z/(a|b))");
+        assert_shares(root(&row), &[0.5, 0.5]);
+        assert_shares(nested(root(&row), 1), &[0.25, 0.75]);
+    }
+
+    /// A lone pane is laid out along no axis, so a pane put against any edge of
+    /// it is parted from it by a split of two.
+    #[test]
+    fn a_pane_put_against_an_edge_of_a_lone_one_parts_it_from_it() {
+        let mut layout = Layout::Pane('a');
+        layout.insert_at_edge(Side::Bottom, 'z');
+        assert_eq!(shape(&layout), "(a/z)");
+        assert_shares(root(&layout), &[0.5, 0.5]);
+    }
+
     #[test]
     fn putting_a_pane_beside_one_no_arrangement_holds_changes_nothing() {
         let mut layout = three_panes();
@@ -581,9 +697,9 @@ mod tests {
     }
 
     /// The normal form is a property of every arrangement that can be built and
-    /// of every one a pane can be put into, not of the ones a close happens to
-    /// pass through: no split anywhere lays out a side that is a split along its
-    /// own axis.
+    /// of every one a pane can be put into or taken out of, not of the ones a
+    /// close happens to pass through: no split anywhere lays out a side that is
+    /// a split along its own axis.
     #[test]
     fn no_arrangement_lays_out_a_side_split_along_its_own_axis() {
         let nested_row = Layout::split_at(
@@ -606,8 +722,8 @@ mod tests {
     }
 
     /// Asserts the normal form of `layout` and of every arrangement reached from
-    /// it by putting a pane beside one of its panes, or closing one of them,
-    /// within `depth` further changes.
+    /// it by putting a pane beside one of its panes or against one of its edges,
+    /// or closing one of them, within `depth` further changes.
     fn explore(layout: &Layout<char>, depth: usize) {
         assert_normal_form(layout);
         let panes: Vec<char> = layout.panes().copied().collect();
@@ -622,8 +738,11 @@ mod tests {
         // Every pane is named for its place in the alphabet, and a seed names
         // them from 'a' with none skipped, so the pane after the last is free.
         let new = (b'a' + panes.len() as u8) as char;
-        for target in &panes {
-            for side in [Side::Left, Side::Right, Side::Top, Side::Bottom] {
+        for side in [Side::Left, Side::Right, Side::Top, Side::Bottom] {
+            let mut edged = layout.clone();
+            edged.insert_at_edge(side, new);
+            explore(&edged, depth - 1);
+            for target in &panes {
                 let mut wider = layout.clone();
                 assert!(wider.insert_beside(target, side, new));
                 explore(&wider, depth - 1);
