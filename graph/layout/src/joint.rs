@@ -717,6 +717,33 @@ mod tests {
         );
     }
 
+    /// aquery names no configuration per dependency, so the axis has nothing to
+    /// be short of rather than a cquery flag to ask for.
+    #[test]
+    fn an_aquery_alone_asks_for_no_dependency_configuration_flag() {
+        let aquery_container = ActionGraphContainer {
+            targets: vec![ActionTarget {
+                id: 1,
+                label: "//foo:app".into(),
+                ..Default::default()
+            }],
+            actions: vec![Action {
+                target_id: 1,
+                mnemonic: "CppCompile".into(),
+                configuration_id: 1,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        let (_, _, _, capabilities) = build_joint(Some(&[aquery_container]), None, None, false);
+
+        assert_eq!(
+            capabilities.support(Axis::ExecConfiguration),
+            Support::Available
+        );
+    }
+
     #[test]
     fn an_aquery_whose_actions_ran_under_no_aspect_still_filters_on_aspects() {
         // Every action lists the aspects that produced it, so a build that ran

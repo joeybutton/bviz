@@ -21,9 +21,10 @@ pub enum Axis {
     RuleCategory,
     /// The configuration a node is built in.
     Configuration,
-    /// Whether a dependency is consumed in an exec configuration, which takes
-    /// the configuration each dependency is built in, not only the ones the
-    /// queried targets are built in.
+    /// Whether a dependency is consumed in an exec configuration, which a
+    /// dependency edge carries only where it names the configuration that
+    /// dependency is built in. The configuration a node is itself built in is
+    /// [`Axis::Configuration`].
     ExecConfiguration,
     Mnemonic,
     Aspect,

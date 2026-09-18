@@ -359,11 +359,6 @@ impl Boxes<'_> {
         self.facets.set_aspects(node, aspects);
         let files = !action.output_ids.is_empty() || !action.input_dep_set_ids.is_empty();
         self.facets.observe(Axis::Artifacts, files);
-        let configured = self
-            .index
-            .config_by_id
-            .contains_key(&ConfigId(action.configuration_id));
-        self.facets.observe(Axis::ExecConfiguration, configured);
         self.facets.facets().inherit(node, owner);
     }
 
