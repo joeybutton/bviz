@@ -226,6 +226,8 @@ pub struct GraphPanel {
     /// Whether the card naming what the inputs cannot be filtered on is unfolded
     /// past its one-line reading.
     missing_open: bool,
+    /// How the card listing the overrides in force is scrolled.
+    pins: pins::Pins,
     /// The titles the canvas drew, rewritten by every paint and resolved against
     /// a pointer by [`box_at`].
     titles: Vec<TitleTarget>,
@@ -354,6 +356,7 @@ impl GraphPanel {
             _relation_choices: relations,
             neighborhood_enabled: true,
             missing_open: false,
+            pins: pins::Pins::new(),
             titles: Vec::new(),
         }
     }
