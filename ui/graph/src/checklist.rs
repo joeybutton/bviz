@@ -242,6 +242,17 @@ pub(crate) fn set_filter(view: &mut GraphPanel, filter: Filter, cx: &mut Context
     restate(view, cx);
 }
 
+/// As [`set_filter`], for a filter set by a gesture that named what to look at:
+/// the camera moves onto what the filter leaves drawn.
+pub(crate) fn set_filter_framed(
+    view: &mut GraphPanel,
+    filter: Filter,
+    cx: &mut Context<GraphPanel>,
+) {
+    derive::set_filter_framed(view, filter, cx);
+    restate(view, cx);
+}
+
 /// Hides or shows the node class the class checklist's row `index` stands for.
 pub(crate) fn toggle_class(
     view: &mut GraphPanel,

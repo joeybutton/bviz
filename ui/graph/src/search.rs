@@ -194,11 +194,20 @@ fn found_by(view: &mut GraphPanel, found: Found, cx: &mut Context<GraphPanel>) {
 /// Acts on every node the pattern in the field names, or takes the search back
 /// off where `act` is the one already in force.
 fn act_on_matches(view: &mut GraphPanel, act: Act, cx: &mut Context<GraphPanel>) {
-    let filter = match acting(view.derived.filter()) == Some(act) {
-        true => cleared(view.derived.filter()),
-        false => applying(view.derived.filter(), &view.search.pattern(), act),
-    };
-    checklist::set_filter(view, filter, cx);
+    if acting(view.derived.filter()) == Some(act) {
+        let filter = cleared(view.derived.filter());
+        checklist::set_filter(view, filter, cx);
+        return;
+    }
+    let filter = applying(view.derived.filter(), &view.search.pattern(), act);
+    match act {
+        // The matches are drawn where the document places them, so narrowing to
+        // them alone can leave them anywhere in the extent the whole graph
+        // spans; the view moves onto them rather than onto the space the rest
+        // of the graph occupied.
+        Act::Only => checklist::set_filter_framed(view, filter, cx),
+        Act::Hide => checklist::set_filter(view, filter, cx),
+    }
 }
 
 /// Empties the field, which restores the rules the search displaced.

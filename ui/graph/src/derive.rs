@@ -221,6 +221,8 @@ struct Adopted {
     /// Absent where the derivation left the restriction the panel held
     /// standing.
     restriction: Option<Restriction>,
+    /// Whether the camera is to be moved onto what the derivation left drawn.
+    frame: bool,
     /// The layered drawing to ease the one it replaces onto, where this
     /// derivation laid one out.
     landing: Option<LayoutLanded>,
@@ -260,6 +262,10 @@ pub(crate) struct Derived {
     /// Counts the derivations adopted, by which the drawing on screen is told
     /// from the one it replaced.
     landed: u64,
+    /// Whether the filter awaiting a restriction was set by a gesture naming
+    /// what to look at, which is answered by moving the camera onto what that
+    /// restriction leaves drawn.
+    frame_on_landing: bool,
     /// The derivation in flight, held so that it is not cancelled.
     _work: Task<()>,
 }
@@ -276,6 +282,7 @@ impl Derived {
             over_budget: None,
             in_flight: None,
             landed: 0,
+            frame_on_landing: false,
             _work: Task::ready(()),
         }
     }
@@ -373,10 +380,12 @@ impl Derived {
                 map: Arc::clone(&landed.slice.map),
             }
         });
+        let frame = std::mem::take(&mut self.frame_on_landing) && restriction.is_some();
         self.slice = Some(landed.slice);
         let replaced = std::mem::replace(&mut self.layered, landed.layered.clone());
         Adopted {
             restriction,
+            frame,
             landing: landed
                 .layered
                 .map(|current| LayoutLanded { replaced, current }),
@@ -467,10 +476,27 @@ pub(crate) fn toggle_reduce(view: &mut GraphPanel, cx: &mut Context<GraphPanel>)
 /// the panel's own to keep — the selection. The drawing on screen stays until
 /// the one this asks for lands.
 pub(crate) fn set_filter(view: &mut GraphPanel, filter: Filter, cx: &mut Context<GraphPanel>) {
+    apply_filter(view, filter, false, cx);
+}
+
+/// Draws the graph through `filter` from here on and moves the camera onto what
+/// that leaves drawn, for a gesture that named the part of the graph to look at.
+/// What survives stays where the document places it, so on a graph whose extent
+/// the rest of it still spans the named part need not be anywhere near the view.
+pub(crate) fn set_filter_framed(
+    view: &mut GraphPanel,
+    filter: Filter,
+    cx: &mut Context<GraphPanel>,
+) {
+    apply_filter(view, filter, true, cx);
+}
+
+fn apply_filter(view: &mut GraphPanel, filter: Filter, frame: bool, cx: &mut Context<GraphPanel>) {
     if view.derived.filter == filter {
         return;
     }
     view.derived.filter = filter;
+    view.derived.frame_on_landing = frame;
     request(view, cx);
 }
 
@@ -528,11 +554,15 @@ fn request(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
         |view, landed, cx| {
             let Adopted {
                 restriction,
+                frame,
                 landing,
             } = view.derived.adopt(landed);
             if let Some(restriction) = restriction {
                 view.selection.forget(&restriction.dropped);
                 derive_levels(restriction.map, cx);
+            }
+            if frame {
+                crate::framing::frame_drawing(view);
             }
             if let Some(landing) = landing {
                 view.settle_onto(&landing, cx);

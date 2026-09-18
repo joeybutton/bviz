@@ -294,6 +294,47 @@ pub(crate) fn settle_view(
     (z, (panx, pany))
 }
 
+/// The zoom and pan that put `target` on screen centered and at the size it
+/// fills the viewport to, held between the whole-graph fit and [`MAX_ZOOM`].
+///
+/// Where a settle disturbs the view as little as bringing its target into frame
+/// allows, this moves the view onto `target` outright: it answers a gesture that
+/// named what to look at rather than one that happened to move a box.
+pub(crate) fn frame_view(
+    target: Rect,
+    viewport: Size<Pixels>,
+    content: (f32, f32),
+) -> (f32, (f32, f32)) {
+    let zoom = fit_rect_zoom(target, viewport)
+        .unwrap_or(MAX_ZOOM)
+        .clamp(fit_zoom(viewport, content), MAX_ZOOM);
+    let (vw, vh) = (f32::from(viewport.width), f32::from(viewport.height));
+    let center = |near: f64, extent: f64| (near + extent / 2.) as f32 + MARGIN as f32;
+    let (cx, cy) = (center(target.x, target.w), center(target.y, target.h));
+    let pan = (vw / 2. - cx * zoom, vh / 2. - cy * zoom);
+    (zoom, clamp_pan(pan, zoom, viewport, content))
+}
+
+/// The rect enclosing every box `g` draws; `None` for a drawing holding none.
+pub(crate) fn drawn_rect(g: &LaidOut) -> Option<Rect> {
+    let mut boxes = g.boxes.iter();
+    let first = Rect::of(boxes.next()?);
+    let (mut left, mut top) = (first.x, first.y);
+    let (mut right, mut bottom) = (first.x + first.w, first.y + first.h);
+    for b in boxes {
+        left = left.min(b.x);
+        top = top.min(b.y);
+        right = right.max(b.x + b.width);
+        bottom = bottom.max(b.y + b.height);
+    }
+    Some(Rect {
+        x: left,
+        y: top,
+        w: right - left,
+        h: bottom - top,
+    })
+}
+
 /// The zoom at which `target` spans `viewport` with the fit margin's breathing
 /// room around it; `None` for a rect with no extent, which no zoom fills.
 fn fit_rect_zoom(target: Rect, viewport: Size<Pixels>) -> Option<f32> {
@@ -322,6 +363,101 @@ pub(crate) fn recenter_rect(g: &LaidOut, emphasis: &Emphasis) -> Option<Rect> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gpui::size;
+
+    /// A graph whose extent dwarfs the part a filter leaves of it.
+    const WIDE_CONTENT: (f32, f32) = (66_000.0, 36_000.0);
+
+    fn vp(w: f32, h: f32) -> Size<Pixels> {
+        size(px(w), px(h))
+    }
+
+    /// Where `target`'s corners land on screen under `(zoom, pan)`.
+    fn on_screen(target: Rect, zoom: f32, pan: (f32, f32)) -> (f32, f32, f32, f32) {
+        let along = |near: f64, extent: f64| {
+            (
+                (near as f32 + MARGIN as f32) * zoom,
+                ((near + extent) as f32 + MARGIN as f32) * zoom,
+            )
+        };
+        let (x0, x1) = along(target.x, target.w);
+        let (y0, y1) = along(target.y, target.h);
+        (x0 + pan.0, x1 + pan.0, y0 + pan.1, y1 + pan.1)
+    }
+
+    /// A filter leaving a couple of boxes in the far corner of an extent the
+    /// whole graph still spans: framing them puts them in the middle of the
+    /// window at a zoom that fills it, where the whole-graph fit draws them as a
+    /// speck.
+    #[test]
+    fn framing_moves_the_view_onto_a_small_target_in_a_large_extent() {
+        let target = Rect {
+            x: 50_000.0,
+            y: 30_000.0,
+            w: 400.0,
+            h: 240.0,
+        };
+        let (zoom, pan) = frame_view(target, vp(800., 600.), WIDE_CONTENT);
+
+        assert!(
+            zoom > fit_zoom(vp(800., 600.), WIDE_CONTENT) * 10.,
+            "framing stayed near the whole-graph fit: {zoom}"
+        );
+        let (x0, x1, y0, y1) = on_screen(target, zoom, pan);
+        assert!(
+            ((x0 + x1) / 2. - 400.).abs() < 0.5 && ((y0 + y1) / 2. - 300.).abs() < 0.5,
+            "off center: {x0}..{x1}, {y0}..{y1}"
+        );
+        assert!(
+            x0 >= 0. && x1 <= 800. && y0 >= 0. && y1 <= 600.,
+            "not wholly on screen: {x0}..{x1}, {y0}..{y1}"
+        );
+    }
+
+    #[test]
+    fn framing_holds_between_the_whole_graph_fit_and_the_zoom_cap() {
+        let speck = Rect {
+            x: 10.0,
+            y: 10.0,
+            w: 1.0,
+            h: 1.0,
+        };
+        assert_eq!(frame_view(speck, vp(800., 600.), WIDE_CONTENT).0, MAX_ZOOM);
+
+        let whole = Rect {
+            x: 0.0,
+            y: 0.0,
+            w: WIDE_CONTENT.0 as f64,
+            h: WIDE_CONTENT.1 as f64,
+        };
+        let fit = fit_zoom(vp(800., 600.), WIDE_CONTENT);
+        assert!(frame_view(whole, vp(800., 600.), WIDE_CONTENT).0 >= fit);
+    }
+
+    fn lbox(x: f64, y: f64, w: f64, h: f64) -> bviz_graph_layout::Box {
+        bviz_graph_layout::Box {
+            id: bviz_graph_layout::Id(0),
+            label: String::new(),
+            kind: bviz_graph_layout::Kind::Source,
+            x,
+            y,
+            width: w,
+            height: h,
+            compound: false,
+            group: false,
+        }
+    }
+
+    #[test]
+    fn the_drawn_rect_encloses_every_box_and_nothing_is_drawn_without_one() {
+        let g = LaidOut {
+            boxes: vec![lbox(100.0, 50.0, 20.0, 10.0), lbox(300.0, 20.0, 40.0, 80.0)],
+            ..Default::default()
+        };
+        let rect = drawn_rect(&g).expect("a drawing holding boxes");
+        assert_eq!((rect.x, rect.y, rect.w, rect.h), (100.0, 20.0, 240.0, 80.0));
+        assert!(drawn_rect(&LaidOut::default()).is_none());
+    }
 
     /// A route reaching further than the view can show cannot be followed to its
     /// far end, and a zoom deep into a dense graph draws mostly those.
