@@ -1,10 +1,11 @@
 //! Which nodes of a graph a filter shows, stated as rules over their facets.
 //!
-//! A node's verdict is the visibility of the last [`Rule`] matching it, the
-//! filter's [`Base`] where no rule does, and its pin where it carries one. The
-//! set of shown nodes is therefore a result the rules reach rather than state of
-//! its own, and survives a graph being rebuilt, which the ids in such a set
-//! would not.
+//! A node is read by the last [`Rule`] matching it, by the filter's [`Base`]
+//! where no rule does, and by its pin where it carries one; [`Verdict`] names
+//! what those readings, taken with where the node sits in the containment
+//! forest, leave of it. The set of shown nodes is therefore a result the rules
+//! reach rather than state of its own, and survives a graph being rebuilt, which
+//! the ids in such a set would not.
 
 mod eval;
 pub mod pattern;
@@ -17,7 +18,7 @@ use crate::graph::{Kind, Node};
 use crate::intern::{Id, Names};
 use crate::label;
 use crate::repo::RepoCategory;
-pub use eval::Verdicts;
+pub use eval::{Verdict, Verdicts};
 use pattern::{PackagePrefix, Pattern};
 
 /// What a filter says is to become of one node.

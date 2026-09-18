@@ -11,8 +11,8 @@ use crate::label;
 use crate::select::{Aspects, Filter, Predicate, Rule, Values, Visibility, stating};
 
 impl Filter {
-    /// The visibility of every node of `graph`, whose facets are `facets` and
-    /// whose labels resolve through `names`.
+    /// The verdict on every node of `graph`, whose facets are `facets` and whose
+    /// labels resolve through `names`.
     pub fn evaluate(&self, graph: &Graph, names: &Names, facets: &Facets) -> Verdicts {
         let ids = graph
             .nodes
@@ -26,33 +26,103 @@ impl Filter {
             .map(|rule| Resolved::of(rule, names, facets, ids))
             .collect();
 
-        let unmatched = self.base.visibility();
-        let mut by_id = vec![unmatched; ids];
+        let mut stated: Vec<Option<Visibility>> = vec![None; ids];
         for node in &graph.nodes {
             if let Some(rule) = rules.iter().rev().find(|rule| rule.matches(node, facets)) {
-                by_id[node.id.0 as usize] = rule.visibility;
+                stated[node.id.0 as usize] = Some(rule.visibility);
             }
         }
         for (&id, &pinned) in &self.pins {
-            if let Some(verdict) = by_id.get_mut(id.0 as usize) {
-                *verdict = pinned;
+            if let Some(stated) = stated.get_mut(id.0 as usize) {
+                *stated = Some(pinned);
             }
         }
+
+        let unmatched = Verdict::from(self.base.visibility());
+        let mut by_id: Vec<Verdict> = stated
+            .iter()
+            .map(|stated| stated.map_or(unmatched, Verdict::from))
+            .collect();
+        frame_drawn_nodes(graph, &stated, &mut by_id);
         Verdicts { by_id, unmatched }
+    }
+}
+
+/// What a filter makes of one node.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum Verdict {
+    Shown,
+    Hidden,
+    Faded,
+    /// A containment ancestor of a drawn node that no rule or pin of the filter
+    /// decided, so only the filter's base hid it. Keeping it is what leaves the
+    /// node below it placed: reparented to the root, a box states its own name
+    /// and nothing of the package and target it sits in, which is the very
+    /// orientation a reader filters in order to find. A filter that names such a
+    /// container itself is obeyed instead — a rule hiding packages unwraps
+    /// package boxes wherever they stand.
+    ///
+    /// It is drawn as an ordinary container: what it restores is exactly what a
+    /// container box says, and an appearance of its own would spend a visual
+    /// channel on the difference between a frame the reader asked for and one
+    /// the drawing owed them.
+    Context,
+}
+
+impl Verdict {
+    /// Whether the drawing holds a box for the node.
+    pub fn drawn(self) -> bool {
+        !matches!(self, Verdict::Hidden)
+    }
+}
+
+impl From<Visibility> for Verdict {
+    fn from(visibility: Visibility) -> Self {
+        match visibility {
+            Visibility::Shown => Verdict::Shown,
+            Visibility::Hidden => Verdict::Hidden,
+            Visibility::Faded => Verdict::Faded,
+        }
+    }
+}
+
+/// Turns into a [`Verdict::Context`] frame every containment ancestor of a drawn
+/// node that `stated` leaves to the base and `by_id` therefore hides. Each
+/// ancestor is decided on its own, so a rule hiding one of them unwraps that one
+/// while the frames above and below it stand.
+fn frame_drawn_nodes(graph: &Graph, stated: &[Option<Visibility>], by_id: &mut [Verdict]) {
+    let mut parent: Vec<Option<Id>> = vec![None; by_id.len()];
+    for node in &graph.nodes {
+        parent[node.id.0 as usize] = node.parent;
+    }
+
+    for node in &graph.nodes {
+        if !by_id[node.id.0 as usize].drawn() {
+            continue;
+        }
+        let mut at = node.parent;
+        // An ancestor past the table is one the graph holds no node of, which
+        // leaves nothing to frame with and nothing above it to reach.
+        while let Some(ancestor) = at.map(|id| id.0 as usize).filter(|&i| i < by_id.len()) {
+            if stated[ancestor].is_none() && !by_id[ancestor].drawn() {
+                by_id[ancestor] = Verdict::Context;
+            }
+            at = parent[ancestor];
+        }
     }
 }
 
 /// What a filter made of every node of one graph, by node id.
 #[derive(Clone, Debug)]
 pub struct Verdicts {
-    by_id: Vec<Visibility>,
-    unmatched: Visibility,
+    by_id: Vec<Verdict>,
+    unmatched: Verdict,
 }
 
 impl Verdicts {
     /// The verdict for the node `id` names. An id the evaluated graph does not
     /// name reads as the verdict of a node no rule reached.
-    pub fn get(&self, id: Id) -> Visibility {
+    pub fn get(&self, id: Id) -> Verdict {
         self.by_id
             .get(id.0 as usize)
             .copied()
@@ -381,13 +451,13 @@ mod tests {
             self.names.get(name).expect("an interned node")
         }
 
-        /// The nodes `filter` gives `visibility`, by name.
-        fn nodes(&self, filter: &Filter, visibility: Visibility) -> BTreeSet<&str> {
+        /// The nodes `filter` leaves with `verdict`, by name.
+        fn nodes(&self, filter: &Filter, verdict: Verdict) -> BTreeSet<&str> {
             let verdicts = self.evaluate(filter);
             self.graph
                 .nodes
                 .iter()
-                .filter(|node| verdicts.get(node.id) == visibility)
+                .filter(|node| verdicts.get(node.id) == verdict)
                 .map(|node| self.names.resolve(node.id))
                 .collect()
         }
@@ -422,13 +492,10 @@ mod tests {
         });
 
         assert_eq!(
-            fixture.nodes(&main, Visibility::Shown),
+            fixture.nodes(&main, Verdict::Shown),
             named([APP, CONFIGURED, ACTION, OUTPUT, SOURCE])
         );
-        assert_eq!(
-            fixture.nodes(&main, Visibility::Hidden),
-            named([LIB, GROUP])
-        );
+        assert_eq!(fixture.nodes(&main, Verdict::Hidden), named([LIB, GROUP]));
     }
 
     #[test]
@@ -439,7 +506,7 @@ mod tests {
             ..Predicate::default()
         });
 
-        assert!(fixture.nodes(&elsewhere, Visibility::Shown).is_empty());
+        assert!(fixture.nodes(&elsewhere, Verdict::Shown).is_empty());
     }
 
     /// A configured target, an action, and an output artifact inherit the rule
@@ -454,7 +521,7 @@ mod tests {
         });
 
         assert_eq!(
-            fixture.nodes(&tests, Visibility::Shown),
+            fixture.nodes(&tests, Verdict::Shown),
             named([APP, CONFIGURED, ACTION, OUTPUT])
         );
     }
@@ -468,7 +535,7 @@ mod tests {
         });
 
         assert_eq!(
-            fixture.nodes(&foo, Visibility::Shown),
+            fixture.nodes(&foo, Verdict::Shown),
             named([APP, CONFIGURED, ACTION, OUTPUT, SOURCE])
         );
     }
@@ -486,19 +553,16 @@ mod tests {
             label: Some(Pattern::parse("//foo/...")),
             ..Predicate::default()
         });
-        assert_eq!(
-            fixture.evaluate(&over_facets).get(group),
-            Visibility::Hidden
-        );
+        assert_eq!(fixture.evaluate(&over_facets).get(group), Verdict::Hidden);
 
         let unaspected = showing(Predicate {
             aspects: Some(Aspects::None),
             ..Predicate::default()
         });
-        assert_eq!(fixture.evaluate(&unaspected).get(group), Visibility::Shown);
+        assert_eq!(fixture.evaluate(&unaspected).get(group), Verdict::Shown);
 
         let everything = showing(Predicate::default());
-        assert_eq!(fixture.evaluate(&everything).get(group), Visibility::Shown);
+        assert_eq!(fixture.evaluate(&everything).get(group), Verdict::Shown);
     }
 
     #[test]
@@ -506,7 +570,7 @@ mod tests {
         let fixture = Fixture::new();
         let verdicts = fixture.evaluate(&showing(Predicate::default()));
 
-        assert_eq!(verdicts.get(Id(9_999)), Visibility::Hidden);
+        assert_eq!(verdicts.get(Id(9_999)), Verdict::Hidden);
     }
 
     #[test]
@@ -520,10 +584,10 @@ mod tests {
         filter.pins.insert(fixture.id(SOURCE), Visibility::Shown);
 
         let verdicts = fixture.evaluate(&filter);
-        assert_eq!(verdicts.get(fixture.id(APP)), Visibility::Faded);
-        assert_eq!(verdicts.get(fixture.id(SOURCE)), Visibility::Shown);
-        assert_eq!(verdicts.get(fixture.id(LIB)), Visibility::Shown);
-        assert_eq!(verdicts.get(fixture.id(ACTION)), Visibility::Hidden);
+        assert_eq!(verdicts.get(fixture.id(APP)), Verdict::Faded);
+        assert_eq!(verdicts.get(fixture.id(SOURCE)), Verdict::Shown);
+        assert_eq!(verdicts.get(fixture.id(LIB)), Verdict::Shown);
+        assert_eq!(verdicts.get(fixture.id(ACTION)), Verdict::Hidden);
     }
 
     /// A filter whose rules overlap, so that the order they are read in decides
@@ -597,19 +661,22 @@ mod tests {
         let filter = layered(&fixture);
 
         assert_eq!(
-            fixture.nodes(&filter, Visibility::Shown),
+            fixture.nodes(&filter, Verdict::Shown),
             named([ACTION, SOURCE, GROUP])
         );
         assert_eq!(
-            fixture.nodes(&filter, Visibility::Faded),
+            fixture.nodes(&filter, Verdict::Faded),
             named([APP, CONFIGURED, OUTPUT])
         );
-        assert_eq!(fixture.nodes(&filter, Visibility::Hidden), named([LIB]));
+        assert_eq!(fixture.nodes(&filter, Verdict::Hidden), named([LIB]));
     }
 
     /// The scan resolves the rules into handle sets and columns before reading a
     /// node, where reading a node rule by rule resolves nothing; the two must
-    /// reach the same verdict for every node.
+    /// read every node the same way. A frame the scan keeps for a node it draws
+    /// comes from the containment forest rather than the rules, which is beyond
+    /// what reading one node can reach, and this filter draws every container it
+    /// has anyway.
     #[test]
     fn the_scan_agrees_with_reading_the_rules_node_by_node() {
         let fixture = Fixture::new();
@@ -619,10 +686,141 @@ mod tests {
         for node in &fixture.graph.nodes {
             assert_eq!(
                 verdicts.get(node.id),
-                filter.visibility(node, &fixture.facets, &fixture.names),
+                Verdict::from(filter.visibility(node, &fixture.facets, &fixture.names)),
                 "{}",
                 fixture.names.resolve(node.id)
             );
         }
+    }
+
+    /// Two packages, each holding a target, the first holding two actions and the
+    /// second one, so a filter that shows a single action leaves ancestors to
+    /// keep, a sibling to leave out, and a second package to leave untouched.
+    struct Nested {
+        graph: Graph,
+        names: Names,
+        facets: Facets,
+    }
+
+    const PACKAGE: &str = "//foo";
+    const TARGET: &str = "//foo:app";
+    const COMPILE: &str = "//foo:app#compile";
+    const LINK: &str = "//foo:app#link";
+    const OTHER_PACKAGE: &str = "//bar";
+    const OTHER_TARGET: &str = "//bar:lib";
+    const OTHER_ACTION: &str = "//bar:lib#compile";
+
+    impl Nested {
+        fn new() -> Self {
+            let mut graph = Graph::new();
+            let mut names = Names::default();
+            for (package, target, actions) in [
+                (PACKAGE, TARGET, [COMPILE, LINK].as_slice()),
+                (OTHER_PACKAGE, OTHER_TARGET, [OTHER_ACTION].as_slice()),
+            ] {
+                let package_id = names.intern(package);
+                graph.add_node(package_id, package, Kind::Package, None);
+                let target_id = names.intern(target);
+                graph.add_node(target_id, target, Kind::Target, Some(package_id));
+                for &action in actions {
+                    let action_id = names.intern(action);
+                    graph.add_node(action_id, action, Kind::Action, Some(target_id));
+                }
+            }
+            let (facets, _) = FacetsBuilder::default().seal();
+            Nested {
+                graph,
+                names,
+                facets,
+            }
+        }
+
+        fn id(&self, name: &str) -> Id {
+            self.names.get(name).expect("an interned node")
+        }
+
+        fn evaluate(&self, filter: &Filter) -> Verdicts {
+            filter.evaluate(&self.graph, &self.names, &self.facets)
+        }
+
+        /// A filter that draws nothing of its own accord and shows `name` alone.
+        fn showing_one(&self, name: &str) -> Filter {
+            Filter {
+                base: Base::HideAll,
+                pins: [(self.id(name), Visibility::Shown)].into_iter().collect(),
+                ..Filter::default()
+            }
+        }
+    }
+
+    #[test]
+    fn a_shown_node_keeps_the_ancestors_only_the_base_hides() {
+        let fixture = Nested::new();
+        let verdicts = fixture.evaluate(&fixture.showing_one(COMPILE));
+
+        assert_eq!(verdicts.get(fixture.id(COMPILE)), Verdict::Shown);
+        assert_eq!(verdicts.get(fixture.id(TARGET)), Verdict::Context);
+        assert_eq!(verdicts.get(fixture.id(PACKAGE)), Verdict::Context);
+    }
+
+    #[test]
+    fn a_context_frame_keeps_none_of_its_other_children() {
+        let fixture = Nested::new();
+        let verdicts = fixture.evaluate(&fixture.showing_one(COMPILE));
+
+        assert_eq!(verdicts.get(fixture.id(LINK)), Verdict::Hidden);
+        for elsewhere in [OTHER_PACKAGE, OTHER_TARGET, OTHER_ACTION] {
+            assert_eq!(verdicts.get(fixture.id(elsewhere)), Verdict::Hidden);
+        }
+    }
+
+    /// Each ancestor is decided on its own, so a rule naming one unwraps that
+    /// box while the frame between it and the shown node stands.
+    #[test]
+    fn a_rule_hiding_a_kind_unwraps_it_even_around_a_shown_node() {
+        let fixture = Nested::new();
+        let mut filter = fixture.showing_one(COMPILE);
+        filter.rules.push(Rule {
+            predicate: Predicate {
+                kinds: Values::new([Kind::Package]),
+                ..Predicate::default()
+            },
+            visibility: Visibility::Hidden,
+        });
+
+        let verdicts = fixture.evaluate(&filter);
+
+        assert_eq!(verdicts.get(fixture.id(PACKAGE)), Verdict::Hidden);
+        assert_eq!(verdicts.get(fixture.id(TARGET)), Verdict::Context);
+        assert_eq!(verdicts.get(fixture.id(COMPILE)), Verdict::Shown);
+    }
+
+    /// Only a node the drawing holds calls for a frame, so one a rule hides
+    /// leaves its ancestors as hidden as the base left them — while a node the
+    /// same filter shows keeps its own.
+    #[test]
+    fn a_node_a_rule_hides_keeps_no_ancestor() {
+        let fixture = Nested::new();
+        let filter = Filter {
+            base: Base::HideAll,
+            rules: vec![Rule {
+                predicate: Predicate {
+                    kinds: Values::new([Kind::Action]),
+                    ..Predicate::default()
+                },
+                visibility: Visibility::Shown,
+            }],
+            pins: [(fixture.id(OTHER_ACTION), Visibility::Hidden)]
+                .into_iter()
+                .collect(),
+        };
+
+        let verdicts = fixture.evaluate(&filter);
+
+        assert_eq!(verdicts.get(fixture.id(OTHER_ACTION)), Verdict::Hidden);
+        assert_eq!(verdicts.get(fixture.id(OTHER_TARGET)), Verdict::Hidden);
+        assert_eq!(verdicts.get(fixture.id(OTHER_PACKAGE)), Verdict::Hidden);
+        assert_eq!(verdicts.get(fixture.id(TARGET)), Verdict::Context);
+        assert_eq!(verdicts.get(fixture.id(PACKAGE)), Verdict::Context);
     }
 }
