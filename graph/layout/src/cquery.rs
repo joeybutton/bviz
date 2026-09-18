@@ -20,42 +20,50 @@ use bazel_query_proto::blaze_query::target::Discriminator;
 
 use crate::graph::{EdgeKind, Graph, Kind};
 use crate::intern::{Id, Names};
-use crate::label::{self, PackageHierarchy, label_and_kind};
+use crate::label::{self, PackageHierarchy, RepoMapping, label_and_kind};
 use crate::query;
 
 #[cfg(test)]
 fn build(results: &[CqueryResult]) -> (Graph, Names) {
-    let packages = package_keys(results);
+    let repos = RepoMapping::default();
+    let packages = package_keys(results, &repos);
     let mut names = Names::default();
-    let graph = build_with_packages(results, &packages, &mut names);
+    let graph = build_with_packages(results, &packages, &repos, &mut names);
     (graph, names)
 }
 
-/// The (repository, package path) keys of every configured target this cquery
-/// names, for the package hierarchy. A rule contributes its rule name's package,
-/// any other target the package of its `label_and_kind` label.
-pub(crate) fn package_keys(results: &[CqueryResult]) -> BTreeSet<(String, String)> {
-    label::package_keys(
-        results
-            .iter()
-            .flat_map(|r| r.results.iter())
-            .filter_map(|ct| ct.target.as_ref())
-            .filter_map(|target| {
-                if let Ok(Discriminator::Rule) = Discriminator::try_from(target.r#type) {
-                    Some(target.rule.as_ref()?.name.as_str())
-                } else {
-                    label_and_kind(target).map(|(label, _)| label)
-                }
-            }),
-    )
+/// Every label this cquery names. A rule contributes its rule name, any other
+/// target its `label_and_kind` label.
+pub(crate) fn labels(results: &[CqueryResult]) -> impl Iterator<Item = &str> {
+    results
+        .iter()
+        .flat_map(|r| r.results.iter())
+        .filter_map(|ct| ct.target.as_ref())
+        .filter_map(|target| {
+            if let Ok(Discriminator::Rule) = Discriminator::try_from(target.r#type) {
+                Some(target.rule.as_ref()?.name.as_str())
+            } else {
+                label_and_kind(target).map(|(label, _)| label)
+            }
+        })
 }
 
-pub(crate) fn generated_labels(results: &[CqueryResult]) -> HashSet<String> {
+/// The (repository, package path) keys of every configured target this cquery
+/// names, for the package hierarchy.
+pub(crate) fn package_keys(
+    results: &[CqueryResult],
+    repos: &RepoMapping,
+) -> BTreeSet<(String, String)> {
+    label::package_keys(labels(results), repos)
+}
+
+pub(crate) fn generated_labels(results: &[CqueryResult], repos: &RepoMapping) -> HashSet<String> {
     query::generated_labels(
         results
             .iter()
             .flat_map(|r| r.results.iter())
             .filter_map(|ct| ct.target.as_ref()),
+        repos,
     )
 }
 
@@ -65,6 +73,7 @@ pub(crate) fn generated_labels(results: &[CqueryResult]) -> HashSet<String> {
 pub(crate) fn build_with_packages(
     results: &[CqueryResult],
     packages: &BTreeSet<(String, String)>,
+    repos: &RepoMapping,
     names: &mut Names,
 ) -> Graph {
     let cts: Vec<&ConfiguredTarget> = results.iter().flat_map(|r| r.results.iter()).collect();
@@ -72,6 +81,7 @@ pub(crate) fn build_with_packages(
     let mut b = Builder {
         graph: Graph::new(),
         names,
+        repos,
         config_checksum: config_checksums(results),
     };
     let index = build_nodes(&mut b, &cts, packages, config_mnemonics(results));
@@ -83,6 +93,7 @@ pub(crate) fn build_with_packages(
 struct Builder<'a> {
     graph: Graph,
     names: &'a mut Names,
+    repos: &'a RepoMapping,
     config_checksum: HashMap<u32, String>,
 }
 
@@ -92,6 +103,10 @@ impl Builder<'_> {
             config_id,
             self.config_checksum.get(&config_id).map(String::as_str),
         )
+    }
+
+    fn canonical(&self, label: &str) -> String {
+        self.repos.canonicalize_label(label).into_owned()
     }
 }
 
@@ -170,39 +185,41 @@ impl Nodes<'_, '_> {
     /// Creates the rule's target container the first time its label is seen, and
     /// a configured-target leaf the first time it is built in `config_id`.
     fn add_rule_nodes(&mut self, label: &str, config_id: u32) {
-        if !self.index.target_box.contains_key(label) {
-            let parent = self.hierarchy.package_box(label);
+        let label = self.b.canonical(label);
+        if !self.index.target_box.contains_key(&label) {
+            let parent = self.hierarchy.package_box(&label);
             let id = self.b.names.intern(&format!("target:{label}"));
             self.b
                 .graph
-                .add_node(id, label::target_label(label), Kind::Target, parent);
-            self.index.target_box.insert(label.to_string(), id);
+                .add_node(id, label::target_label(&label), Kind::Target, parent);
+            self.index.target_box.insert(label.clone(), id);
         }
         let key = self.b.config_key(config_id);
-        if self.index.ct_ids.insert((label.to_string(), key.clone())) {
+        if self.index.ct_ids.insert((label.clone(), key.clone())) {
             let mnemonic = label::config_mnemonic(
                 config_id,
                 self.config_mnemonic.get(&config_id).map(String::as_str),
             );
-            let id = self.b.names.intern(&label::ct_node_id(label, &key));
+            let id = self.b.names.intern(&label::ct_node_id(&label, &key));
             self.b.graph.add_node(
                 id,
                 mnemonic,
                 Kind::ConfiguredTarget,
-                Some(self.index.target_box[label]),
+                Some(self.index.target_box[&label]),
             );
         }
     }
 
     /// Creates the leaf a non-rule target becomes, the first time its label is seen.
     fn add_leaf_node(&mut self, label: &str, kind: Kind) {
-        if !self.index.leaf_id.contains_key(label) {
-            let parent = self.hierarchy.package_box(label);
+        let label = self.b.canonical(label);
+        if !self.index.leaf_id.contains_key(&label) {
+            let parent = self.hierarchy.package_box(&label);
             let id = self.b.names.intern(&format!("target:{label}"));
             self.b
                 .graph
-                .add_node(id, label::target_label(label), kind, parent);
-            self.index.leaf_id.insert(label.to_string(), id);
+                .add_node(id, label::target_label(&label), kind, parent);
+            self.index.leaf_id.insert(label, id);
         }
     }
 }
@@ -245,10 +262,12 @@ impl Edges<'_, '_> {
     /// `config_id`.
     fn wire_rule(&mut self, rule: &Rule, config_id: u32) {
         let key = self.b.config_key(config_id);
-        let consumer = self.b.names.intern(&label::ct_node_id(&rule.name, &key));
+        let name = self.b.canonical(&rule.name);
+        let consumer = self.b.names.intern(&label::ct_node_id(&name, &key));
         if rule.configured_rule_input.is_empty() {
             for dep_label in &rule.rule_input {
-                if let Some(dep) = self.label_dep(dep_label) {
+                let dep_label = self.b.canonical(dep_label);
+                if let Some(dep) = self.label_dep(&dep_label) {
                     self.add_edge(dep, consumer);
                 }
             }
@@ -257,7 +276,8 @@ impl Edges<'_, '_> {
                 let Some(dep_label) = input.label.as_deref() else {
                     continue;
                 };
-                if let Some(dep) = self.configured_dep(dep_label, input.configuration_id) {
+                let dep_label = self.b.canonical(dep_label);
+                if let Some(dep) = self.configured_dep(&dep_label, input.configuration_id) {
                     self.add_edge(dep, consumer);
                 }
             }

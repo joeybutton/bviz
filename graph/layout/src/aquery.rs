@@ -27,7 +27,7 @@ use bazel_query_proto::analysis::{
 
 use crate::graph::{EdgeKind, Graph, Kind};
 use crate::intern::{Id, Names};
-use crate::label::{self, PackageHierarchy};
+use crate::label::{self, PackageHierarchy, RepoMapping};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct ArtifactId(u32);
@@ -36,27 +36,35 @@ struct ConfigId(u32);
 
 #[cfg(test)]
 fn build(containers: &[ActionGraphContainer], external_sources: bool) -> (Graph, Names) {
-    let packages = package_keys(containers);
+    let repos = RepoMapping::default();
+    let packages = package_keys(containers, &repos);
     let mut names = Names::default();
     let graph = build_with_packages(
         containers,
         external_sources,
         &packages,
         &HashSet::new(),
+        &repos,
         &mut names,
     );
     (graph, names)
 }
 
+/// Every target label this aquery names.
+pub(crate) fn labels(containers: &[ActionGraphContainer]) -> impl Iterator<Item = &str> {
+    containers
+        .iter()
+        .flat_map(|c| c.targets.iter())
+        .map(|t| t.label.as_str())
+}
+
 /// The (repository, package path) keys of every target this aquery names, for
 /// the package hierarchy.
-pub(crate) fn package_keys(containers: &[ActionGraphContainer]) -> BTreeSet<(String, String)> {
-    label::package_keys(
-        containers
-            .iter()
-            .flat_map(|c| c.targets.iter())
-            .map(|t| t.label.as_str()),
-    )
+pub(crate) fn package_keys(
+    containers: &[ActionGraphContainer],
+    repos: &RepoMapping,
+) -> BTreeSet<(String, String)> {
+    label::package_keys(labels(containers), repos)
 }
 
 /// Builds the aquery graph attaching its boxes to the `packages` hierarchy,
@@ -71,6 +79,7 @@ pub(crate) fn build_with_packages(
     external_sources: bool,
     packages: &BTreeSet<(String, String)>,
     labeled_outputs: &HashSet<String>,
+    repos: &RepoMapping,
     names: &mut Names,
 ) -> Graph {
     let index = Index::build(containers);
@@ -78,8 +87,14 @@ pub(crate) fn build_with_packages(
     let mut graph = Graph::new();
     let hierarchy = PackageHierarchy::build(packages, &mut graph, names);
 
-    let producer_node_id =
-        build_action_boxes(&index, &hierarchy, labeled_outputs, &mut graph, names);
+    let producer_node_id = build_action_boxes(
+        &index,
+        &hierarchy,
+        labeled_outputs,
+        repos,
+        &mut graph,
+        names,
+    );
     wire_action_inputs(
         index,
         producer_node_id,
@@ -99,6 +114,7 @@ fn build_action_boxes(
     index: &Index,
     hierarchy: &PackageHierarchy,
     labeled_outputs: &HashSet<String>,
+    repos: &RepoMapping,
     graph: &mut Graph,
     names: &mut Names,
 ) -> HashMap<ArtifactId, Id> {
@@ -117,7 +133,7 @@ fn build_action_boxes(
         let rule_label = index
             .target_by_id
             .get(&action.target_id)
-            .map(|t| t.label.clone())
+            .map(|t| repos.canonicalize_label(&t.label).into_owned())
             .unwrap_or_else(|| format!("target {}", action.target_id));
         let ct_id = boxes.target_ct(&rule_label, Kind::Target, config_id);
         let action_id = boxes.names.intern(&format!("action{i}"));
@@ -1075,12 +1091,14 @@ mod tests {
 
         let containers = vec![container];
         let labeled = HashSet::from(["//pkg:gen.out".to_string()]);
+        let repos = RepoMapping::default();
         let mut names = Names::default();
         let graph = build_with_packages(
             &containers,
             false,
-            &package_keys(&containers),
+            &package_keys(&containers, &repos),
             &labeled,
+            &repos,
             &mut names,
         );
 
@@ -1129,12 +1147,14 @@ mod tests {
 
         let containers = vec![container];
         let labeled = HashSet::new();
+        let repos = RepoMapping::default();
         let mut names = Names::default();
         let graph = build_with_packages(
             &containers,
             false,
-            &package_keys(&containers),
+            &package_keys(&containers, &repos),
             &labeled,
+            &repos,
             &mut names,
         );
 
@@ -1175,12 +1195,14 @@ mod tests {
             ..Default::default()
         }];
         let labeled = HashSet::from(["@@somerepo+//pkg:gen.out".to_string()]);
+        let repos = RepoMapping::default();
         let mut names = Names::default();
         let graph = build_with_packages(
             &containers,
             false,
-            &package_keys(&containers),
+            &package_keys(&containers, &repos),
             &labeled,
+            &repos,
             &mut names,
         );
         (graph, names)

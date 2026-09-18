@@ -9,38 +9,43 @@ use bazel_query_proto::blaze_query::Target;
 
 use crate::graph::{EdgeKind, Graph, Kind};
 use crate::intern::{Id, Names};
-use crate::label::{self, PackageHierarchy, label_and_kind};
+use crate::label::{self, PackageHierarchy, RepoMapping, label_and_kind};
 
 #[cfg(test)]
 fn build(targets: &[Target]) -> (Graph, Names) {
     let refs: Vec<&Target> = targets.iter().collect();
-    let packages = package_keys(targets);
+    let repos = RepoMapping::default();
+    let packages = package_keys(targets, &repos);
     let mut names = Names::default();
-    let graph = build_with_packages(&refs, &packages, &mut names);
+    let graph = build_with_packages(&refs, &packages, &repos, &mut names);
     (graph, names)
+}
+
+/// Every label this query names.
+pub(crate) fn labels(targets: &[Target]) -> impl Iterator<Item = &str> {
+    targets
+        .iter()
+        .filter_map(label_and_kind)
+        .map(|(label, _)| label)
 }
 
 /// The (repository, package path) keys of every target this query names, for the
 /// package hierarchy.
-pub(crate) fn package_keys(targets: &[Target]) -> BTreeSet<(String, String)> {
-    label::package_keys(
-        targets
-            .iter()
-            .filter_map(label_and_kind)
-            .map(|(label, _)| label),
-    )
+pub(crate) fn package_keys(targets: &[Target], repos: &RepoMapping) -> BTreeSet<(String, String)> {
+    label::package_keys(labels(targets), repos)
 }
 
 /// The labels of generated-file targets among `targets`, which a joint graph
 /// uses to recognize aquery output artifacts that are also targets.
 pub(crate) fn generated_labels<'a>(
     targets: impl IntoIterator<Item = &'a Target>,
+    repos: &RepoMapping,
 ) -> HashSet<String> {
     targets
         .into_iter()
         .filter_map(label_and_kind)
         .filter(|(_, kind)| *kind == Kind::Artifact)
-        .map(|(label, _)| label.to_string())
+        .map(|(label, _)| repos.canonicalize_label(label).into_owned())
         .collect()
 }
 
@@ -50,6 +55,7 @@ pub(crate) fn generated_labels<'a>(
 pub(crate) fn build_with_packages(
     targets: &[&Target],
     packages: &BTreeSet<(String, String)>,
+    repos: &RepoMapping,
     names: &mut Names,
 ) -> Graph {
     let mut graph = Graph::new();
@@ -63,13 +69,14 @@ pub(crate) fn build_with_packages(
         let Some((label, kind)) = label_and_kind(target) else {
             continue;
         };
-        if node_by_label.contains_key(label) {
+        let label = repos.canonicalize_label(label);
+        if node_by_label.contains_key(label.as_ref()) {
             continue;
         }
         let node_id = names.intern(&format!("target:{label}"));
-        let parent = hierarchy.package_box(label);
-        graph.add_node(node_id, label::target_label(label), kind, parent);
-        node_by_label.insert(label.to_string(), node_id);
+        let parent = hierarchy.package_box(&label);
+        graph.add_node(node_id, label::target_label(&label), kind, parent);
+        node_by_label.insert(label.into_owned(), node_id);
     }
 
     // Pass 2: edges from each rule's inputs (dependency -> dependent).
@@ -78,11 +85,12 @@ pub(crate) fn build_with_packages(
         let Some(rule) = target.rule.as_ref() else {
             continue;
         };
-        let Some(&to) = node_by_label.get(&rule.name) else {
+        let Some(&to) = node_by_label.get(repos.canonicalize_label(&rule.name).as_ref()) else {
             continue;
         };
         for input_label in &rule.rule_input {
-            let Some(&from) = node_by_label.get(input_label) else {
+            let Some(&from) = node_by_label.get(repos.canonicalize_label(input_label).as_ref())
+            else {
                 continue;
             };
             if seen_edge.insert((from, to)) {

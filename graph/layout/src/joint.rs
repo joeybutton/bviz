@@ -16,6 +16,7 @@ use bazel_query_proto::blaze_query::Target;
 
 use crate::graph::Graph;
 use crate::intern::{Id, Names};
+use crate::label::{RepoMapping, canonical_repo};
 use crate::{aquery, cquery, query};
 
 pub fn build_joint(
@@ -24,8 +25,9 @@ pub fn build_joint(
     query: Option<&[Target]>,
     external_sources: bool,
 ) -> (Graph, Names) {
-    let union = package_union(aquery, cquery, query);
-    let labeled_outputs = labeled_outputs(cquery, query);
+    let repos = repo_mapping(aquery, cquery, query);
+    let union = package_union(aquery, cquery, query, &repos);
+    let labeled_outputs = labeled_outputs(cquery, query, &repos);
     let mut names = Names::default();
     let graphs = build_inputs(
         aquery,
@@ -34,42 +36,66 @@ pub fn build_joint(
         external_sources,
         &union,
         &labeled_outputs,
+        &repos,
         &mut names,
     );
     canonicalize(merge(graphs), &names)
+}
+
+/// The apparent-to-canonical repository mapping inferred from every canonical
+/// repository name the inputs state outright. aquery always writes them, and
+/// query and cquery do under `--consistent_labels`.
+fn repo_mapping(
+    aquery: Option<&[ActionGraphContainer]>,
+    cquery: Option<&[CqueryResult]>,
+    query: Option<&[Target]>,
+) -> RepoMapping {
+    let observed = aquery
+        .into_iter()
+        .flat_map(aquery::labels)
+        .chain(cquery.into_iter().flat_map(cquery::labels))
+        .chain(query.into_iter().flat_map(query::labels))
+        .filter_map(canonical_repo);
+    RepoMapping::infer(observed)
 }
 
 fn package_union(
     aquery: Option<&[ActionGraphContainer]>,
     cquery: Option<&[CqueryResult]>,
     query: Option<&[Target]>,
+    repos: &RepoMapping,
 ) -> BTreeSet<(String, String)> {
     let mut union: BTreeSet<(String, String)> = BTreeSet::new();
     if let Some(a) = aquery {
-        union.extend(aquery::package_keys(a));
+        union.extend(aquery::package_keys(a, repos));
     }
     if let Some(c) = cquery {
-        union.extend(cquery::package_keys(c));
+        union.extend(cquery::package_keys(c, repos));
     }
     if let Some(q) = query {
-        union.extend(query::package_keys(q));
+        union.extend(query::package_keys(q, repos));
     }
     union
 }
 
 /// Labels of generated files that query or cquery knows as targets, so aquery
 /// promotes the matching output artifacts to merge with those target nodes.
-fn labeled_outputs(cquery: Option<&[CqueryResult]>, query: Option<&[Target]>) -> HashSet<String> {
+fn labeled_outputs(
+    cquery: Option<&[CqueryResult]>,
+    query: Option<&[Target]>,
+    repos: &RepoMapping,
+) -> HashSet<String> {
     let mut labeled_outputs: HashSet<String> = HashSet::new();
     if let Some(c) = cquery {
-        labeled_outputs.extend(cquery::generated_labels(c));
+        labeled_outputs.extend(cquery::generated_labels(c, repos));
     }
     if let Some(q) = query {
-        labeled_outputs.extend(query::generated_labels(q));
+        labeled_outputs.extend(query::generated_labels(q, repos));
     }
     labeled_outputs
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_inputs(
     aquery: Option<&[ActionGraphContainer]>,
     cquery: Option<&[CqueryResult]>,
@@ -77,6 +103,7 @@ fn build_inputs(
     external_sources: bool,
     union: &BTreeSet<(String, String)>,
     labeled_outputs: &HashSet<String>,
+    repos: &RepoMapping,
     names: &mut Names,
 ) -> Vec<Graph> {
     let mut graphs: Vec<Graph> = Vec::new();
@@ -86,15 +113,16 @@ fn build_inputs(
             external_sources,
             union,
             labeled_outputs,
+            repos,
             names,
         ));
     }
     if let Some(c) = cquery {
-        graphs.push(cquery::build_with_packages(c, union, names));
+        graphs.push(cquery::build_with_packages(c, union, repos, names));
     }
     if let Some(q) = query {
         let refs: Vec<&Target> = q.iter().collect();
-        graphs.push(query::build_with_packages(&refs, union, names));
+        graphs.push(query::build_with_packages(&refs, union, repos, names));
     }
     graphs
 }
@@ -429,6 +457,96 @@ mod tests {
         assert_eq!(
             concrete.parent.map(|p| names.resolve(p)),
             Some("ct:@@somerepo+//pkg:gen.out#ck1")
+        );
+    }
+
+    /// An aquery container whose one target is `label` under target id `id`,
+    /// with a single action so the target reaches the graph. Target ids are
+    /// shared across containers, so containers combined in one query need
+    /// distinct ones.
+    fn aquery_target(id: u32, label: &str) -> ActionGraphContainer {
+        ActionGraphContainer {
+            targets: vec![ActionTarget {
+                id,
+                label: label.to_string(),
+                ..Default::default()
+            }],
+            actions: vec![Action {
+                target_id: id,
+                mnemonic: "Compile".to_string(),
+                configuration_id: 1,
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+    }
+
+    fn node_count(graph: &Graph, names: &Names, id: &str) -> usize {
+        graph
+            .nodes
+            .iter()
+            .filter(|n| names.resolve(n.id) == id)
+            .count()
+    }
+
+    #[test]
+    fn the_main_repositorys_two_label_forms_are_one_node() {
+        // `--consistent_labels` writes the main repository as `@@//foo:app`,
+        // where aquery writes the same target as `//foo:app`.
+        let query_targets = vec![rule("@@//foo:app", &[])];
+
+        let (graph, names) = build_joint(
+            Some(&[aquery_target(1, "//foo:app")]),
+            None,
+            Some(&query_targets),
+            false,
+        );
+
+        assert_eq!(node_count(&graph, &names, "target://foo:app"), 1);
+        assert_eq!(node_count(&graph, &names, "target:@@//foo:app"), 0);
+        assert_eq!(node_count(&graph, &names, "pkg:foo"), 1);
+    }
+
+    #[test]
+    fn an_apparent_repository_name_joins_the_canonical_node_it_stands_for() {
+        // query prints the apparent `@somerepo//`, aquery the canonical
+        // `@@somerepo+//`; the module repository is the only candidate, so both
+        // name one target.
+        let query_targets = vec![rule("@somerepo//foo:lib", &[])];
+
+        let (graph, names) = build_joint(
+            Some(&[aquery_target(1, "@@somerepo+//foo:lib")]),
+            None,
+            Some(&query_targets),
+            false,
+        );
+
+        assert_eq!(node_count(&graph, &names, "target:@@somerepo+//foo:lib"), 1);
+        assert_eq!(node_count(&graph, &names, "target:@somerepo//foo:lib"), 0);
+        assert_eq!(node_count(&graph, &names, "pkg:@@somerepo+//foo"), 1);
+    }
+
+    #[test]
+    fn an_ambiguous_apparent_repository_name_keeps_its_own_node() {
+        // Two versions of one module are in the graph, so `@somerepo//` could
+        // mean either. The apparent label stays as it is: showing the target
+        // twice beats attaching it to the wrong repository.
+        let query_targets = vec![rule("@somerepo//foo:lib", &[])];
+        let aquery = [
+            aquery_target(1, "@@somerepo+1.0//foo:lib"),
+            aquery_target(2, "@@somerepo+2.0//foo:lib"),
+        ];
+
+        let (graph, names) = build_joint(Some(&aquery), None, Some(&query_targets), false);
+
+        assert_eq!(node_count(&graph, &names, "target:@somerepo//foo:lib"), 1);
+        assert_eq!(
+            node_count(&graph, &names, "target:@@somerepo+1.0//foo:lib"),
+            1
+        );
+        assert_eq!(
+            node_count(&graph, &names, "target:@@somerepo+2.0//foo:lib"),
+            1
         );
     }
 

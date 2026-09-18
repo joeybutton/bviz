@@ -7,12 +7,14 @@
 //! start their own box. Every builder attaches its targets to the same boxes,
 //! so the three render with an identical package structure.
 
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use bazel_query_proto::blaze_query::{Target, target::Discriminator};
 
 use crate::graph::{Graph, Kind};
 use crate::intern::{Id, Names};
+use crate::repo::module_name;
 
 /// The repository and package path a label names: `//a/b:c` -> `("", "a/b")`,
 /// `//:c` -> `("", "")`, `@r//a:c` -> `("@r", "a")`. A label with no `//` names
@@ -23,16 +25,101 @@ pub(crate) fn parse_package(label: &str) -> Option<(&str, &str)> {
     Some((repo, path))
 }
 
-/// The owned (repository, package path) key of a label's package.
-pub(crate) fn package_key(label: &str) -> Option<(String, String)> {
+/// The canonical repository name a label states outright, or `None` when it
+/// names the main repository, an apparent repository, or no package at all.
+pub(crate) fn canonical_repo(label: &str) -> Option<&str> {
+    let (repo, _) = parse_package(label)?;
+    let canonical = repo.strip_prefix("@@")?;
+    (!canonical.is_empty()).then_some(canonical)
+}
+
+/// The owned (repository, package path) key of a canonical label's package.
+fn package_key(label: &str) -> Option<(String, String)> {
     parse_package(label).map(|(repo, path)| (repo.to_string(), path.to_string()))
 }
 
-/// The distinct package keys of `labels`, dropping any label with no package.
+/// The distinct package keys of `labels` in canonical form, dropping any label
+/// with no package.
 pub(crate) fn package_keys<'a>(
     labels: impl Iterator<Item = &'a str>,
+    repos: &RepoMapping,
 ) -> BTreeSet<(String, String)> {
-    labels.filter_map(package_key).collect()
+    labels
+        .filter_map(|label| package_key(&repos.canonicalize_label(label)))
+        .collect()
+}
+
+/// Rewrites a label into the form aquery emits, so one target carries one node
+/// id whichever input names it.
+///
+/// aquery stringifies labels canonically. query and cquery print the apparent
+/// form `@repo//pkg:t` by default and, under `--consistent_labels`, the
+/// canonical form plus `@@//pkg:t` for the main repository. Only the apparent
+/// form needs this map, which resolves it to the canonical name it stands for.
+#[derive(Default)]
+pub(crate) struct RepoMapping {
+    canonical: HashMap<String, String>,
+}
+
+impl RepoMapping {
+    /// Infers the mapping from the canonical repository names `observed` across
+    /// the inputs, a repository resolving an apparent name when it is the only
+    /// observed candidate for it. Zero or several candidates leave the apparent
+    /// name alone: a target shown twice is a far smaller fault than two
+    /// repositories' targets merged into one node.
+    pub(crate) fn infer<'a>(observed: impl Iterator<Item = &'a str>) -> Self {
+        let mut candidates: HashMap<&str, Option<&str>> = HashMap::new();
+        for canonical in observed {
+            for apparent in apparent_names(canonical) {
+                candidates
+                    .entry(apparent)
+                    .and_modify(|resolved| {
+                        if *resolved != Some(canonical) {
+                            *resolved = None;
+                        }
+                    })
+                    .or_insert(Some(canonical));
+            }
+        }
+        RepoMapping {
+            canonical: candidates
+                .into_iter()
+                .filter_map(|(apparent, resolved)| {
+                    Some((apparent.to_string(), resolved?.to_string()))
+                })
+                .collect(),
+        }
+    }
+
+    pub(crate) fn canonicalize_label<'a>(&self, label: &'a str) -> Cow<'a, str> {
+        let Some(repo) = label.strip_prefix('@') else {
+            return Cow::Borrowed(label);
+        };
+        if let Some(canonical) = repo.strip_prefix('@') {
+            // `@@//pkg:t` is the main repository, whose canonical labels carry
+            // no repository part at all.
+            if canonical.starts_with("//") {
+                return Cow::Borrowed(canonical);
+            }
+            return Cow::Borrowed(label);
+        }
+        let Some((apparent, package)) = repo.split_once("//") else {
+            return Cow::Borrowed(label);
+        };
+        match self.canonical.get(apparent) {
+            Some(canonical) => Cow::Owned(format!("@@{canonical}//{package}")),
+            None => Cow::Borrowed(label),
+        }
+    }
+}
+
+/// The apparent repository names a canonical name can stand for: the canonical
+/// name itself, and the module name of a module repository, since `@rules_foo`
+/// is how a module's own repository is written before mapping. An extension
+/// repository's name contributes only itself — the name its extension gave it
+/// bears no relation to the module it is generated under.
+fn apparent_names(canonical: &str) -> impl Iterator<Item = &str> {
+    std::iter::once(canonical).chain(module_name(canonical))
 }
 
 /// The `:name` shown on a target box: the portion of a label after its last `:`
@@ -428,6 +515,75 @@ mod tests {
             label_and_kind(&target),
             Some(("//foo:visible", Kind::TargetGroup))
         );
+    }
+
+    fn mapping(observed: &[&str]) -> RepoMapping {
+        RepoMapping::infer(observed.iter().copied())
+    }
+
+    #[test]
+    fn the_main_repositorys_canonical_form_loses_its_repository_part() {
+        let repos = RepoMapping::default();
+
+        assert_eq!(repos.canonicalize_label("@@//foo:app"), "//foo:app");
+        assert_eq!(repos.canonicalize_label("//foo:app"), "//foo:app");
+    }
+
+    #[test]
+    fn an_apparent_name_resolves_to_the_module_repository_it_stands_for() {
+        let repos = mapping(&["rules_foo+"]);
+
+        assert_eq!(
+            repos.canonicalize_label("@rules_foo//bar:baz"),
+            "@@rules_foo+//bar:baz"
+        );
+        assert_eq!(
+            repos.canonicalize_label("@@rules_foo+//bar:baz"),
+            "@@rules_foo+//bar:baz"
+        );
+    }
+
+    /// The repositories a module's extensions generate carry the module's name
+    /// as a prefix, but stand for apparent names of their own, so they are no
+    /// rival candidate for the module's own name.
+    #[test]
+    fn an_extension_repository_does_not_contest_its_modules_name() {
+        let repos = mapping(&["rules_foo+", "rules_foo++ext+generated"]);
+
+        assert_eq!(
+            repos.canonicalize_label("@rules_foo//bar:baz"),
+            "@@rules_foo+//bar:baz"
+        );
+    }
+
+    #[test]
+    fn an_apparent_name_with_two_candidates_stays_unresolved() {
+        // A multiple_version_override keeps two versions of one module, and
+        // nothing in the inputs says which one an apparent name reaches.
+        let repos = mapping(&["somerepo+1.0", "somerepo+2.0"]);
+
+        assert_eq!(
+            repos.canonicalize_label("@somerepo//bar:baz"),
+            "@somerepo//bar:baz"
+        );
+    }
+
+    #[test]
+    fn an_apparent_name_with_no_candidate_stays_unresolved() {
+        let repos = mapping(&["rules_foo+"]);
+
+        assert_eq!(
+            repos.canonicalize_label("@somerepo//bar:baz"),
+            "@somerepo//bar:baz"
+        );
+    }
+
+    #[test]
+    fn canonical_repo_reads_only_a_canonical_repository_part() {
+        assert_eq!(canonical_repo("@@somerepo+//foo:bar"), Some("somerepo+"));
+        assert_eq!(canonical_repo("@somerepo//foo:bar"), None);
+        assert_eq!(canonical_repo("//foo:bar"), None);
+        assert_eq!(canonical_repo("@@//foo:bar"), None);
     }
 
     #[test]

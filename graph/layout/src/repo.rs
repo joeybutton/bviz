@@ -42,10 +42,7 @@ const ISOLATED_USAGE_MARK: char = '_';
 /// [`RepoOrigin::WorkspaceOrUnknown`], so an unfamiliar Bazel release degrades
 /// to an unresolved origin rather than a failure.
 pub fn classify(name: &str) -> RepoOrigin<'_> {
-    let name = name
-        .strip_prefix("@@")
-        .or_else(|| name.strip_prefix('@'))
-        .unwrap_or(name);
+    let name = strip_sigil(name);
     if name.is_empty() {
         return RepoOrigin::Main;
     }
@@ -71,6 +68,25 @@ pub fn classify(name: &str) -> RepoOrigin<'_> {
                 .starts_with(ISOLATED_USAGE_MARK),
         },
     }
+}
+
+/// The name of the module whose repository `name` is, or `None` when `name`
+/// names no module repository.
+pub fn module_name(name: &str) -> Option<&str> {
+    let name = strip_sigil(name);
+    match classify(name) {
+        RepoOrigin::Module { .. } => Some(
+            name.split_once(separator(name))
+                .map_or(name, |(module, _)| module),
+        ),
+        _ => None,
+    }
+}
+
+fn strip_sigil(name: &str) -> &str {
+    name.strip_prefix("@@")
+        .or_else(|| name.strip_prefix('@'))
+        .unwrap_or(name)
 }
 
 /// The separator joining a canonical name's components: `+` in Bazel 8 and
