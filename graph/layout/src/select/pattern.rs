@@ -83,7 +83,7 @@ impl Pattern {
             Some((path, name)) => (path, Some(Target::Named(name.to_string()))),
             None => (rest, None),
         };
-        let package: Vec<Segment> = components(path)
+        let mut package: Vec<Segment> = components(path)
             .iter()
             .map(|&component| match component {
                 "..." => Some(Segment::Any),
@@ -91,6 +91,10 @@ impl Pattern {
                 named => Some(Segment::Named(named.to_string())),
             })
             .collect::<Option<_>>()?;
+        // One any-segment already stands for a run of any length, and matching
+        // a second beside it costs a search over the ways to split that run
+        // between them.
+        package.dedup_by(|next, held| *next == Segment::Any && *held == Segment::Any);
         // A path ending in `...` leaves the target free, and one written with no
         // colon at all names the target its last component names, as Bazel reads
         // both.
@@ -277,6 +281,22 @@ mod tests {
         assert!(pattern.matches("//foo:baz"));
         assert!(!pattern.matches("//foobar:baz"));
         assert!(!pattern.matches("//bar/foo:baz"));
+    }
+
+    /// Matching walks the any-segments by backtracking, so a run of them costs
+    /// a search over the ways to divide the path between them. A run says no
+    /// more than a single one does, and is parsed as one.
+    #[test]
+    fn a_run_of_ellipses_parses_as_a_single_one() {
+        assert_eq!(
+            segments(&Pattern::parse("//.../.../.../rules/.../...")),
+            [
+                Segment::Any,
+                Segment::Named("rules".to_string()),
+                Segment::Any,
+            ],
+        );
+        assert_eq!(Pattern::parse("//.../..."), Pattern::parse("//..."));
     }
 
     #[test]
