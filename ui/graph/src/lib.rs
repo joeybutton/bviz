@@ -300,6 +300,7 @@ impl GraphPanel {
         let scene = Scene {
             expandable: self.expandable(),
             palette,
+            faded: self.derived.faded(),
             hovered: self.hovered.filter(|_| self.neighborhood_enabled),
             selected: self.selection.node(),
             highlight: self.emphasis.highlight(),

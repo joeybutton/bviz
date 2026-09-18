@@ -15,7 +15,7 @@ use crate::model::{Loaded, OPENS_REDUCED, Shared, Source};
 use crate::{GraphPanel, MARGIN, build};
 use bviz_graph_layout::graph::Graph;
 use bviz_graph_layout::lod::{DEFAULT_MAX_EDGES, DEFAULT_MAX_NODES, Overflow};
-use bviz_graph_layout::select::Filter;
+use bviz_graph_layout::select::{Filter, Verdict};
 use bviz_graph_layout::{Id, LaidOut, MapLayout, Names};
 use bviz_ui_components::load_in_background;
 use gpui::{Context, Task};
@@ -154,6 +154,9 @@ struct Slice {
     /// leaves holes rather than moving what survives.
     map: Arc<MapLayout>,
     containers: Arc<HashSet<Id>>,
+    /// The nodes the filter draws as no part of what it selects, which the
+    /// drawing fades rather than leaving out.
+    faded: Arc<HashSet<Id>>,
     /// Extended by each layered layout over this graph, whose quotient pass
     /// mints group ids against it.
     names: Names,
@@ -169,6 +172,7 @@ impl Slice {
             reduced: Arc::clone(&shared.reduced_base),
             map: Arc::clone(&shared.map),
             containers: Arc::clone(&shared.containers),
+            faded: Arc::new(HashSet::new()),
             names: shared.names.clone(),
         }
     }
@@ -318,6 +322,14 @@ impl Derived {
 
     pub(crate) fn reduced(&self) -> bool {
         self.reduced
+    }
+
+    /// The boxes the filter draws as no part of what it selects.
+    pub(crate) fn faded(&self) -> Arc<HashSet<Id>> {
+        self.slice.as_ref().map_or_else(
+            || Arc::new(HashSet::new()),
+            |slice| Arc::clone(&slice.faded),
+        )
     }
 
     /// Whether a derivation is running, so a view can show a progress indicator
@@ -509,14 +521,26 @@ fn restrict(
     let verdicts = filter.evaluate(&shared.base, &shared.names, &shared.facets);
     let mut keep: HashSet<Id> = HashSet::with_capacity(shared.base.nodes.len());
     let mut dropped: HashSet<Id> = HashSet::new();
+    let mut faded: HashSet<Id> = HashSet::new();
     for node in &shared.base.nodes {
-        match verdicts.get(node.id).drawn() {
-            true => keep.insert(node.id),
-            false => dropped.insert(node.id),
-        };
+        match verdicts.get(node.id) {
+            Verdict::Hidden => {
+                dropped.insert(node.id);
+            }
+            verdict => {
+                keep.insert(node.id);
+                if verdict == Verdict::Faded {
+                    faded.insert(node.id);
+                }
+            }
+        }
     }
+    let faded = Arc::new(faded);
     let slice = match dropped.is_empty() {
-        true => Slice::whole(shared),
+        true => Slice {
+            faded,
+            ..Slice::whole(shared)
+        },
         false => {
             let base = bviz_graph_layout::filter::filter(&shared.base, &shared.reduced_base, &keep);
             let reduction = bviz_graph_layout::reduce::transitive_reduction(&base);
@@ -531,6 +555,7 @@ fn restrict(
                 base,
                 reduced: reduction,
                 containers,
+                faded,
                 names: shared.names.clone(),
             }
         }
