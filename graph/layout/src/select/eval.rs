@@ -63,17 +63,9 @@ pub enum Verdict {
     Hidden,
     Faded,
     /// A containment ancestor of a drawn node that no rule or pin of the filter
-    /// decided, so only the filter's base hid it. Keeping it is what leaves the
-    /// node below it placed: reparented to the root, a box states its own name
-    /// and nothing of the package and target it sits in, which is the very
-    /// orientation a reader filters in order to find. A filter that names such a
-    /// container itself is obeyed instead — a rule hiding packages unwraps
-    /// package boxes wherever they stand.
-    ///
-    /// It is drawn as an ordinary container: what it restores is exactly what a
-    /// container box says, and an appearance of its own would spend a visual
-    /// channel on the difference between a frame the reader asked for and one
-    /// the drawing owed them.
+    /// decided, so only the filter's base hid it. It is drawn as an ordinary
+    /// container, which is what leaves the node below it stating the package
+    /// and target it sits in instead of standing at the root of the drawing.
     Context,
 }
 
