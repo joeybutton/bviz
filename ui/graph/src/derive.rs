@@ -187,10 +187,8 @@ struct Restricted {
     over_budget: Option<Overflow>,
 }
 
-/// One derivation's result, adopted only where no later derivation has
-/// superseded it.
+/// One derivation's result.
 struct Landed {
-    generation: u64,
     slice: Slice,
     /// Absent where the derivation drew on the restriction the panel already
     /// held, which leaves the expansion and the selection as they were.
@@ -216,20 +214,14 @@ pub(crate) struct LayoutLanded {
     pub(crate) current: Arc<LaidOut>,
 }
 
-/// What became of a derivation's result.
-enum Adopted {
-    /// A later derivation was requested while this one ran, so its result says
-    /// nothing about what the panel now draws and is dropped.
-    Superseded,
-    /// Adopted, leaving the panel what only it can follow up on.
-    Taken {
-        /// Absent where the derivation left the restriction the panel held
-        /// standing.
-        restriction: Option<Restriction>,
-        /// The layered drawing to ease the one it replaces onto, where this
-        /// derivation laid one out.
-        landing: Option<LayoutLanded>,
-    },
+/// What adopting a derivation's result leaves the panel to follow up on.
+struct Adopted {
+    /// Absent where the derivation left the restriction the panel held
+    /// standing.
+    restriction: Option<Restriction>,
+    /// The layered drawing to ease the one it replaces onto, where this
+    /// derivation laid one out.
+    landing: Option<LayoutLanded>,
 }
 
 /// What a derivation that evaluated the filter afresh leaves for the panel to
@@ -259,13 +251,11 @@ pub(crate) struct Derived {
     /// The size of the view the panel last restricted to where it is past the
     /// caps that bound it, absent where it fits.
     over_budget: Option<Overflow>,
-    /// The generation of the derivation last asked for, carried by its result so
-    /// that a result a later request has superseded is dropped instead of
-    /// adopted. Dropping a superseded result is all the coalescing there is: a
-    /// derivation already running is not interrupted and runs to completion.
-    requested: u64,
-    /// The generation of the derivation last adopted, which identifies the
-    /// drawing on screen.
+    /// Whether a derivation is running. A request cancels the one it replaces,
+    /// so at most one runs at a time and its result is the panel's.
+    deriving: bool,
+    /// Counts the derivations adopted, by which the drawing on screen is told
+    /// from the one it replaced.
     landed: u64,
     /// The derivation in flight, held so that it is not cancelled.
     _work: Task<()>,
@@ -281,7 +271,7 @@ impl Derived {
             slice: None,
             layered: None,
             over_budget: None,
-            requested: 0,
+            deriving: false,
             landed: 0,
             _work: Task::ready(()),
         }
@@ -341,20 +331,17 @@ impl Derived {
     /// Whether a derivation is running, so a view can show a progress indicator
     /// while the drawing it will replace stays on screen and interactive.
     pub(crate) fn deriving(&self) -> bool {
-        self.requested > self.landed
+        self.deriving
     }
 
     pub(crate) fn over_budget(&self) -> Option<Overflow> {
         self.over_budget
     }
 
-    /// Takes `landed` as what this panel draws, unless a later derivation has
-    /// superseded it.
+    /// Takes `landed` as what this panel draws.
     fn adopt(&mut self, landed: Landed) -> Adopted {
-        if landed.generation != self.requested {
-            return Adopted::Superseded;
-        }
-        self.landed = landed.generation;
+        self.deriving = false;
+        self.landed += 1;
         let restriction = landed.restricted.map(|restricted| {
             self.expanded = restricted.expanded;
             self.over_budget = restricted.over_budget;
@@ -365,7 +352,7 @@ impl Derived {
         });
         self.slice = Some(landed.slice);
         let replaced = std::mem::replace(&mut self.layered, landed.layered.clone());
-        Adopted::Taken {
+        Adopted {
             restriction,
             landing: landed
                 .layered
@@ -478,8 +465,7 @@ fn request(view: &mut GraphPanel, redo: Redo, cx: &mut Context<GraphPanel>) {
     let lays_out =
         redo == Redo::Drawing || view.mode == LayoutMode::Layered || view.derived.layered.is_some();
     let derived = &mut view.derived;
-    derived.requested += 1;
-    let generation = derived.requested;
+    derived.deriving = true;
     let (filter, reduced) = (derived.filter.clone(), derived.reduced);
     let expanded = derived.expanded.clone();
     let held = derived.layered.clone();
@@ -509,20 +495,16 @@ fn request(view: &mut GraphPanel, redo: Redo, cx: &mut Context<GraphPanel>) {
                 ))
             });
             Landed {
-                generation,
                 slice,
                 restricted,
                 layered,
             }
         },
         |view, landed, cx| {
-            let Adopted::Taken {
+            let Adopted {
                 restriction,
                 landing,
-            } = view.derived.adopt(landed)
-            else {
-                return;
-            };
+            } = view.derived.adopt(landed);
             if let Some(restriction) = restriction {
                 view.selection.forget(&restriction.dropped);
                 derive_levels(restriction.map, cx);
@@ -832,64 +814,27 @@ mod tests {
         })
     }
 
-    fn landed(generation: u64, loaded: &Loaded, width: f64) -> Landed {
+    fn landed(loaded: &Loaded, width: f64) -> Landed {
         Landed {
-            generation,
             slice: Slice::whole(&loaded.shared),
             restricted: None,
             layered: Some(drawing(width)),
         }
     }
 
-    /// A derivation whose result a later request has superseded says nothing
-    /// about what the panel now draws, so it is dropped rather than painted over
-    /// the newer one.
+    /// Each drawing adopted is told from the one it replaced, so work derived
+    /// from a drawing — a camera's fit, a morph's anchors — is redone exactly
+    /// when a derivation lands.
     #[test]
-    fn a_superseded_derivation_leaves_the_newer_drawing_standing() {
+    fn each_derivation_adopted_identifies_the_drawing_it_leaves() {
         let loaded = document();
         let mut derived = opened(&loaded);
-        // Two derivations asked for, the later of which lands first.
-        derived.requested = 2;
-        assert!(derived.deriving());
+        let first = derived.drawn(LayoutMode::Map).expect("a map").view_key(1.0);
 
-        assert!(matches!(
-            derived.adopt(landed(2, &loaded, 20.0)),
-            Adopted::Taken { .. }
-        ));
-        assert!(matches!(
-            derived.adopt(landed(1, &loaded, 10.0)),
-            Adopted::Superseded
-        ));
+        derived.adopt(landed(&loaded, 10.0));
 
-        let drawn = derived
-            .drawn(LayoutMode::Layered)
-            .expect("a layered drawing");
-        assert_eq!(drawn.view(1.0).width, 20.0);
-        assert!(!derived.deriving());
-    }
-
-    /// The expansion a superseded derivation settled on is as stale as its
-    /// drawing, so adopting it would leave the panel opening boxes the filter it
-    /// was derived for called for.
-    #[test]
-    fn a_superseded_derivation_leaves_the_expansion_alone() {
-        let loaded = document();
-        let mut derived = opened(&loaded);
-        derived.expanded = [id(&loaded, "//a:t")].into_iter().collect();
-        derived.requested = 2;
-
-        let mut stale = landed(1, &loaded, 10.0);
-        stale.restricted = Some(Restricted {
-            dropped: HashSet::new(),
-            expanded: HashSet::new(),
-            over_budget: None,
-        });
-        derived.adopt(stale);
-
-        assert_eq!(
-            derived.expanded,
-            [id(&loaded, "//a:t")].into_iter().collect()
-        );
+        let second = derived.drawn(LayoutMode::Map).expect("a map").view_key(1.0);
+        assert!(first != second);
     }
 
     /// The drawing on screen is the panel's until a derivation lands, so a
@@ -898,9 +843,9 @@ mod tests {
     fn a_running_derivation_leaves_the_drawing_it_will_replace_on_screen() {
         let loaded = document();
         let mut derived = opened(&loaded);
-        derived.adopt(landed(0, &loaded, 10.0));
+        derived.adopt(landed(&loaded, 10.0));
 
-        derived.requested += 1;
+        derived.deriving = true;
 
         assert!(derived.deriving());
         let drawn = derived
