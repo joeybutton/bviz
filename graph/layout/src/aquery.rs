@@ -19,6 +19,7 @@
 //! transitive member is wired straight to the consuming action as a
 //! `member -> consumer` edge.
 
+use std::borrow::Cow;
 use std::collections::{BTreeSet, HashMap, HashSet};
 
 use bazel_query_proto::analysis::{
@@ -154,13 +155,15 @@ fn build_action_boxes(
     for (i, action) in index.actions.iter().enumerate() {
         let config_id = ConfigId(action.configuration_id);
         let target = index.target_by_id.get(&action.target_id).copied();
-        let unnamed = format!("target {}", action.target_id);
-        let written = target.map_or(unnamed.as_str(), |t| t.label.as_str());
-        let canonical = repos.canonicalize_label(written).into_owned();
+        let written = target.map_or_else(
+            || Cow::Owned(format!("target {}", action.target_id)),
+            |t| Cow::Borrowed(t.label.as_str()),
+        );
+        let canonical = repos.canonicalize_label(&written);
         let ct_id = boxes.target_ct(
             &TargetBox {
                 canonical: &canonical,
-                written,
+                written: &written,
                 kind: Kind::Target,
                 rule_class: target.and_then(|t| index.rule_class(t)),
             },

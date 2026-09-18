@@ -12,6 +12,7 @@
 //! label-only `rule_input` and lands on the dependency's target container, since
 //! the configuration of each dependency is then unknown.
 
+use std::borrow::Cow;
 use std::collections::{BTreeSet, HashMap, HashSet};
 
 use bazel_query_proto::analysis::{Configuration, ConfiguredTarget, CqueryResult};
@@ -142,8 +143,8 @@ impl Builder<'_> {
         self.facets.facets().inherit(node, container);
     }
 
-    fn canonical(&self, label: &str) -> String {
-        self.repos.canonicalize_label(label).into_owned()
+    fn canonical<'l>(&self, label: &'l str) -> Cow<'l, str> {
+        self.repos.canonicalize_label(label)
     }
 }
 
@@ -213,18 +214,18 @@ impl Nodes<'_, '_> {
     /// `written` is the label as the input printed it.
     fn add_rule_nodes(&mut self, target: &Target, written: &str, config_id: u32) {
         let label = self.b.canonical(written);
-        if !self.index.target_box.contains_key(&label) {
+        if !self.index.target_box.contains_key(label.as_ref()) {
             let parent = self.hierarchy.package_box(&label);
             let id = self.b.names.intern(&label::target_node_id(&label));
             self.b
                 .graph
                 .add_node(id, label::target_label(&label), Kind::Target, parent);
             query::describe_target(self.b.facets, target, id, parent, &label, written);
-            self.index.target_box.insert(label.clone(), id);
+            self.index.target_box.insert(label.to_string(), id);
         }
-        let container = self.index.target_box[&label];
+        let container = self.index.target_box[label.as_ref()];
         let key = self.b.config_key(config_id);
-        if self.index.ct_ids.insert((label.clone(), key.clone())) {
+        if self.index.ct_ids.insert((label.to_string(), key.clone())) {
             let mnemonic = self.b.config_mnemonic(config_id);
             let id = self.b.names.intern(&label::ct_node_id(&label, &key));
             self.b
@@ -238,14 +239,14 @@ impl Nodes<'_, '_> {
     /// seen. `written` is the label as the input printed it.
     fn add_leaf_node(&mut self, target: &Target, written: &str, kind: Kind) {
         let label = self.b.canonical(written);
-        if !self.index.leaf_id.contains_key(&label) {
+        if !self.index.leaf_id.contains_key(label.as_ref()) {
             let parent = self.hierarchy.package_box(&label);
             let id = self.b.names.intern(&label::target_node_id(&label));
             self.b
                 .graph
                 .add_node(id, label::target_label(&label), kind, parent);
             query::describe_target(self.b.facets, target, id, parent, &label, written);
-            self.index.leaf_id.insert(label, id);
+            self.index.leaf_id.insert(label.into_owned(), id);
         }
     }
 }
