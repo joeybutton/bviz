@@ -65,7 +65,9 @@ pub fn filter(graph: &Graph, reduced: &Graph, keep: &HashSet<Id>) -> Graph {
         });
     }
 
-    let mut direct: HashSet<(Id, Id)> = HashSet::with_capacity(graph.edges.len());
+    // A pair enters this only where both its ends are kept, so what bounds it is
+    // the keep set and not the whole graph's edge list.
+    let mut direct: HashSet<(Id, Id)> = HashSet::with_capacity(keep.len());
     for edge in &graph.edges {
         if keep.contains(&edge.from) && keep.contains(&edge.to) {
             direct.insert((edge.from, edge.to));
@@ -85,18 +87,20 @@ pub fn filter(graph: &Graph, reduced: &Graph, keep: &HashSet<Id>) -> Graph {
 /// A pair `direct` holds is left out rather than bridged, so a dependency the
 /// whole graph draws keeps the provenance it was found with instead of being
 /// restated as a path through nodes the reader cannot see.
-fn bridges(graph: &Graph, keep: &HashSet<Id>, direct: &HashSet<(Id, Id)>) -> BTreeSet<(Id, Id)> {
+fn bridges(graph: &Graph, keep: &HashSet<Id>, direct: &HashSet<(Id, Id)>) -> Vec<(Id, Id)> {
     let runs = DroppedRuns::new(graph, keep);
     let frontier = runs.frontiers();
 
-    let mut bridges: BTreeSet<(Id, Id)> = BTreeSet::new();
-    for &(from, into) in &runs.entries {
-        for &to in &frontier[runs.condensation.of[into as usize] as usize] {
+    let mut bridges: Vec<(Id, Id)> = Vec::with_capacity(runs.entries.len());
+    for &(from, run) in &runs.entries {
+        for &to in &frontier[run as usize] {
             if from != to && !direct.contains(&(from, to)) {
-                bridges.insert((from, to));
+                bridges.push((from, to));
             }
         }
     }
+    bridges.sort_unstable();
+    bridges.dedup();
     bridges
 }
 
@@ -108,7 +112,9 @@ struct DroppedRuns {
     condensation: Condensation,
     /// The kept nodes each dropped index leads straight to.
     exits: Vec<Vec<Id>>,
-    /// Each kept node beside a dropped index it leads straight into.
+    /// Each kept node beside a component of dropped nodes it leads straight
+    /// into, sorted and deduplicated: two edges into one run reach the same
+    /// frontier, and scanning it twice bridges nothing the first pass missed.
     entries: Vec<(Id, u32)>,
 }
 
@@ -126,7 +132,9 @@ impl DroppedRuns {
 
         let mut succ: Vec<Vec<u32>> = vec![Vec::new(); index.len()];
         let mut exits: Vec<Vec<Id>> = vec![Vec::new(); index.len()];
-        let mut entries: Vec<(Id, u32)> = Vec::new();
+        // A run entered from one kept node is the shape most of them have, so
+        // one entry per dropped node reserves for it.
+        let mut entries: Vec<(Id, u32)> = Vec::with_capacity(index.len());
         for edge in &graph.edges {
             match (index.get(&edge.from), index.get(&edge.to)) {
                 (Some(&u), Some(&v)) if u != v => succ[u as usize].push(v),
@@ -136,8 +144,15 @@ impl DroppedRuns {
             }
         }
 
+        let condensation = Condensation::new(&succ);
+        for (_, run) in &mut entries {
+            *run = condensation.of[*run as usize];
+        }
+        entries.sort_unstable();
+        entries.dedup();
+
         Self {
-            condensation: Condensation::new(&succ),
+            condensation,
             exits,
             entries,
         }
