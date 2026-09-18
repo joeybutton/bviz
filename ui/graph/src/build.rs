@@ -1,12 +1,12 @@
 use bviz_graph_layout::graph::Graph;
-use bviz_graph_layout::{Anchor, Id, LaidOut, Names, layout, quotient, streamed_proto};
+use bviz_graph_layout::{Anchor, Facets, Id, LaidOut, Names, layout, quotient, streamed_proto};
 use bviz_ui_graph_args::{Input, InputKind};
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 /// Reads every input's streamed_proto file and merges them into one joint graph,
 /// before any group quotienting. Cached so toggling a group needn't re-read or
 /// re-parse.
-pub(crate) fn build_graph(inputs: &[Input]) -> Result<(Graph, Graph, Names), String> {
+pub(crate) fn build_graph(inputs: &[Input]) -> Result<(Graph, Graph, Names, Facets), String> {
     let mut aq = None;
     let mut cq = None;
     let mut q = None;
@@ -34,13 +34,13 @@ pub(crate) fn build_graph(inputs: &[Input]) -> Result<(Graph, Graph, Names), Str
             }
         }
     }
-    let (base, names) =
+    let (base, names, facets) =
         bviz_graph_layout::build_joint(aq.as_deref(), cq.as_deref(), q.as_deref(), false);
     // Transitively reduce the whole base once: a collapsed box then draws the
     // reduction of its hidden subtree's edges, so its edge count is stable under
     // expansion rather than re-derived (differently) from each view.
     let reduced = bviz_graph_layout::reduce::transitive_reduction(&base);
-    Ok((base, reduced, names))
+    Ok((base, reduced, names, facets))
 }
 
 /// The transitive reduction `view` draws. `reduced_base` collapses to the same

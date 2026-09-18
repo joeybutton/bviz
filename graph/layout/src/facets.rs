@@ -9,6 +9,9 @@
 use std::collections::HashMap;
 use std::num::NonZeroU32;
 
+use crate::intern::Id;
+use crate::repo::{self, RepoOrigin};
+
 /// A string interned in a [`FacetStrings`] table. The index is stored biased
 /// off one, so the handle is never zero and `Option<Sym>` is as wide as `Sym`
 /// without spending an index on a sentinel.
@@ -111,6 +114,310 @@ impl FacetStrings {
     }
 }
 
+/// A node id held in a facet array, stored biased off one so that an entry
+/// naming no node is as wide as one that does.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+struct NodeRef(NonZeroU32);
+
+impl NodeRef {
+    fn of(id: Id) -> Self {
+        NodeRef(
+            NonZeroU32::MIN
+                .checked_add(id.0)
+                .expect("more than u32::MAX node ids"),
+        )
+    }
+
+    fn id(self) -> Id {
+        Id(self.0.get() - 1)
+    }
+}
+
+/// [`RepoOrigin`] with the parts it borrows from a repository name interned, so
+/// that a table of repositories carries no lifetime.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Origin {
+    Main,
+    Module { version: Option<Sym> },
+    ModuleExtension { isolated: bool },
+    Builtin,
+    WorkspaceOrUnknown,
+}
+
+/// What is known about one repository beyond the canonical name its
+/// [`RepoRef`] resolves to.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct RepoEntry {
+    /// The apparent name a label reached the repository by, where an input
+    /// wrote one; a canonical label states no apparent name.
+    pub apparent: Option<Sym>,
+    pub origin: Origin,
+    /// The Bzlmod module the repository belongs to.
+    pub module: Option<Sym>,
+}
+
+/// What is known about one configuration beyond the checksum its [`ConfigRef`]
+/// resolves to.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct ConfigEntry {
+    /// The short name Bazel gives the configuration, which names its output
+    /// directory.
+    pub mnemonic: Option<Sym>,
+    /// Whether the configuration builds a tool the build runs rather than an
+    /// artifact it produces.
+    pub is_tool: Tri,
+}
+
+/// The role a rule class plays, so that a filter can offer the tests, the
+/// aliases, or the build's own plumbing without naming each rule class that
+/// qualifies.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum RuleCategory {
+    Test,
+    Alias,
+    Filegroup,
+    /// A rule that states part of how the build is configured rather than
+    /// something the build produces.
+    Plumbing,
+    Other,
+}
+
+/// The rule classes [`RuleCategory::Plumbing`] covers.
+const PLUMBING_RULES: [&str; 6] = [
+    "config_setting",
+    "constraint_setting",
+    "constraint_value",
+    "platform",
+    "toolchain",
+    "toolchain_type",
+];
+
+/// The suffix every Bazel test rule's class name carries, `test_suite` apart.
+const TEST_SUFFIX: &str = "_test";
+
+impl RuleCategory {
+    /// The category the rule class `name` falls in. A rule class bviz knows no
+    /// role for is [`RuleCategory::Other`], so a Starlark rule and an unfamiliar
+    /// native one land there rather than being mistaken for a category.
+    pub fn of(name: &str) -> Self {
+        match name {
+            "alias" => Self::Alias,
+            "filegroup" => Self::Filegroup,
+            "test_suite" => Self::Test,
+            _ if name.ends_with(TEST_SUFFIX) => Self::Test,
+            _ if PLUMBING_RULES.contains(&name) => Self::Plumbing,
+            _ => Self::Other,
+        }
+    }
+}
+
+/// The facets of every node of one graph, each held in its own array indexed by
+/// node id.
+///
+/// An id no input described reads as absent, as does one past the end of an
+/// array — the quotient pass mints group ids above every id the inputs named,
+/// and those name nothing a filter selects on.
+///
+/// The package and label facets hold the id of the node whose name already
+/// spells them out, the package box and the target, so that neither costs a
+/// second copy of the label text the graph's `Names` holds.
+#[derive(Default, Clone)]
+pub struct Facets {
+    strings: FacetStrings,
+    repo: Vec<Option<RepoRef>>,
+    rule_class: Vec<Option<RuleClassRef>>,
+    config: Vec<Option<ConfigRef>>,
+    mnemonic: Vec<Option<Sym>>,
+    testonly: Vec<Tri>,
+    package: Vec<Option<NodeRef>>,
+    label: Vec<Option<NodeRef>>,
+    repos: HashMap<RepoRef, RepoEntry>,
+    configs: HashMap<ConfigRef, ConfigEntry>,
+    rule_classes: HashMap<RuleClassRef, RuleCategory>,
+}
+
+/// Declares one facet array: the accessor and setter a node id reaches its
+/// value by.
+macro_rules! dense_facet {
+    ($(#[$doc:meta])* $name:ident, $set:ident: $value:ty) => {
+        $(#[$doc])*
+        pub fn $name(&self, id: Id) -> $value {
+            at(&self.$name, id)
+        }
+
+        pub fn $set(&mut self, id: Id, value: $value) {
+            put(&mut self.$name, id, value);
+        }
+    };
+}
+
+impl Facets {
+    dense_facet! {
+        /// The repository the node's label names.
+        repo, set_repo: Option<RepoRef>
+    }
+
+    dense_facet! {
+        /// The Bazel rule class the node's target was declared by.
+        rule_class, set_rule_class: Option<RuleClassRef>
+    }
+
+    dense_facet! {
+        /// The configuration the node is built in.
+        config, set_config: Option<ConfigRef>
+    }
+
+    dense_facet! {
+        /// The mnemonic of the action the node runs.
+        mnemonic, set_mnemonic: Option<Sym>
+    }
+
+    dense_facet! {
+        /// Whether the node's target is marked `testonly`.
+        testonly, set_testonly: Tri
+    }
+
+    /// The package box holding the node.
+    pub fn package(&self, id: Id) -> Option<Id> {
+        at(&self.package, id).map(NodeRef::id)
+    }
+
+    pub fn set_package(&mut self, id: Id, package: Id) {
+        put(&mut self.package, id, Some(NodeRef::of(package)));
+    }
+
+    /// The target the node belongs to, which for a target is itself.
+    pub fn label(&self, id: Id) -> Option<Id> {
+        at(&self.label, id).map(NodeRef::id)
+    }
+
+    pub fn set_label(&mut self, id: Id, label: Id) {
+        put(&mut self.label, id, Some(NodeRef::of(label)));
+    }
+
+    /// The strings every handle these facets carry resolves through.
+    pub fn strings(&self) -> &FacetStrings {
+        &self.strings
+    }
+
+    /// The handle for the repository whose canonical name is `canonical`,
+    /// deriving its origin from that name. `apparent` is recorded by the call
+    /// that first names the repository, since every later call describes the
+    /// repository the first one already did.
+    pub fn intern_repo(&mut self, canonical: &str, apparent: Option<&str>) -> RepoRef {
+        let handle = RepoRef::of(self.strings.intern(canonical));
+        if !self.repos.contains_key(&handle) {
+            let entry = RepoEntry {
+                apparent: apparent.map(|name| self.strings.intern(name)),
+                origin: self.origin(canonical),
+                module: repo::module_name(canonical).map(|name| self.strings.intern(name)),
+            };
+            self.repos.insert(handle, entry);
+        }
+        handle
+    }
+
+    /// The handle for the configuration whose checksum is `checksum`. The rest
+    /// is recorded by the call that first names the configuration, as
+    /// [`intern_repo`](Self::intern_repo) records a repository's.
+    pub fn intern_config(
+        &mut self,
+        checksum: &str,
+        mnemonic: Option<&str>,
+        is_tool: Tri,
+    ) -> ConfigRef {
+        let handle = ConfigRef::of(self.strings.intern(checksum));
+        if !self.configs.contains_key(&handle) {
+            let entry = ConfigEntry {
+                mnemonic: mnemonic.map(|name| self.strings.intern(name)),
+                is_tool,
+            };
+            self.configs.insert(handle, entry);
+        }
+        handle
+    }
+
+    /// The handle for the rule class `name`, categorizing it by that name.
+    pub fn intern_rule_class(&mut self, name: &str) -> RuleClassRef {
+        let handle = RuleClassRef::of(self.strings.intern(name));
+        self.rule_classes
+            .entry(handle)
+            .or_insert_with(|| RuleCategory::of(name));
+        handle
+    }
+
+    pub fn repo_entry(&self, repo: RepoRef) -> Option<&RepoEntry> {
+        self.repos.get(&repo)
+    }
+
+    pub fn config_entry(&self, config: ConfigRef) -> Option<&ConfigEntry> {
+        self.configs.get(&config)
+    }
+
+    pub fn rule_category(&self, rule_class: RuleClassRef) -> Option<RuleCategory> {
+        self.rule_classes.get(&rule_class).copied()
+    }
+
+    /// Moves every facet to the node id `remap` gives its node, which must map
+    /// each id of `0..remap.len()` to a distinct id of that same range.
+    pub fn renumber(&mut self, remap: &[Id]) {
+        self.repo = permuted(&self.repo, remap);
+        self.rule_class = permuted(&self.rule_class, remap);
+        self.config = permuted(&self.config, remap);
+        self.mnemonic = permuted(&self.mnemonic, remap);
+        self.testonly = permuted(&self.testonly, remap);
+        self.package = permuted_nodes(&self.package, remap);
+        self.label = permuted_nodes(&self.label, remap);
+    }
+
+    fn origin(&mut self, canonical: &str) -> Origin {
+        match repo::classify(canonical) {
+            RepoOrigin::Main => Origin::Main,
+            RepoOrigin::Module { version } => Origin::Module {
+                version: version.map(|version| self.strings.intern(version)),
+            },
+            RepoOrigin::ModuleExtension { isolated } => Origin::ModuleExtension { isolated },
+            RepoOrigin::Builtin => Origin::Builtin,
+            RepoOrigin::WorkspaceOrUnknown => Origin::WorkspaceOrUnknown,
+        }
+    }
+}
+
+fn at<T: Copy + Default>(column: &[T], id: Id) -> T {
+    column.get(id.0 as usize).copied().unwrap_or_default()
+}
+
+fn put<T: Copy + Default>(column: &mut Vec<T>, id: Id, value: T) {
+    let index = id.0 as usize;
+    if column.len() <= index {
+        column.resize(index + 1, T::default());
+    }
+    column[index] = value;
+}
+
+fn permuted<T: Copy + Default>(column: &[T], remap: &[Id]) -> Vec<T> {
+    // A facet no input stated holds nothing to move, and every id reads absent
+    // from an empty array as it would from a permuted one.
+    if column.is_empty() {
+        return Vec::new();
+    }
+    let mut permuted = vec![T::default(); remap.len()];
+    for (old, &new) in remap.iter().enumerate() {
+        permuted[new.0 as usize] = at(column, Id(old as u32));
+    }
+    permuted
+}
+
+/// [`permuted`] for an array of node ids, whose values name nodes and so are
+/// renumbered along with the positions they sit at.
+fn permuted_nodes(column: &[Option<NodeRef>], remap: &[Id]) -> Vec<Option<NodeRef>> {
+    let mut permuted = permuted(column, remap);
+    for entry in &mut permuted {
+        *entry = entry.map(|node| NodeRef::of(remap[node.id().0 as usize]));
+    }
+    permuted
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -169,5 +476,130 @@ mod tests {
         let repo = RepoRef::of(facets.intern("rules_java+"));
 
         assert_eq!(facets.resolve(repo.sym()), "rules_java+");
+    }
+
+    /// What a facet array costs per node, which is what keeps the facets out of
+    /// `Node` and beside the graph instead.
+    #[test]
+    fn a_facet_array_entry_is_four_bytes_at_most() {
+        assert_eq!(size_of::<Option<NodeRef>>(), 4);
+        assert_eq!(size_of::<Tri>(), 1);
+    }
+
+    #[test]
+    fn an_id_the_facets_never_described_reads_absent() {
+        let mut facets = Facets::default();
+        facets.set_testonly(Id(1), Tri::Yes);
+
+        assert_eq!(facets.repo(Id(0)), None);
+        assert_eq!(facets.testonly(Id(0)), Tri::Unknown);
+        assert_eq!(facets.package(Id(9_999)), None);
+        assert_eq!(facets.testonly(Id(9_999)), Tri::Unknown);
+    }
+
+    #[test]
+    fn interning_one_value_twice_yields_one_entry() {
+        let mut facets = Facets::default();
+
+        let repo = facets.intern_repo("rules_foo+", Some("foo"));
+        let config = facets.intern_config("ck1", Some("k8-fastbuild"), Tri::No);
+        let rule_class = facets.intern_rule_class("cc_library");
+
+        assert_eq!(facets.intern_repo("rules_foo+", None), repo);
+        assert_eq!(facets.intern_config("ck1", None, Tri::Unknown), config);
+        assert_eq!(facets.intern_rule_class("cc_library"), rule_class);
+        // The description the repeat call carried does not displace the first.
+        let apparent = facets.repo_entry(repo).unwrap().apparent;
+        assert_eq!(
+            apparent.map(|name| facets.strings().resolve(name)),
+            Some("foo")
+        );
+        assert_eq!(facets.config_entry(config).unwrap().is_tool, Tri::No);
+        assert_eq!(facets.repos.len(), 1);
+        assert_eq!(facets.configs.len(), 1);
+        assert_eq!(facets.rule_classes.len(), 1);
+    }
+
+    #[test]
+    fn a_repository_entry_states_the_origin_its_canonical_name_encodes() {
+        let mut facets = Facets::default();
+
+        let repo = facets.intern_repo("rules_foo+1.2.3", None);
+
+        let entry = *facets.repo_entry(repo).unwrap();
+        let resolve = |sym: Option<Sym>| sym.map(|sym| facets.strings().resolve(sym));
+        assert_eq!(resolve(entry.module), Some("rules_foo"));
+        let Origin::Module { version } = entry.origin else {
+            panic!(
+                "a module repository's origin is a module, not {:?}",
+                entry.origin
+            )
+        };
+        assert_eq!(resolve(version), Some("1.2.3"));
+    }
+
+    #[test]
+    fn a_rule_class_name_states_the_role_its_rule_plays() {
+        let cases = [
+            ("cc_test", RuleCategory::Test),
+            ("test_suite", RuleCategory::Test),
+            ("alias", RuleCategory::Alias),
+            ("filegroup", RuleCategory::Filegroup),
+            ("config_setting", RuleCategory::Plumbing),
+            ("toolchain_type", RuleCategory::Plumbing),
+            ("cc_library", RuleCategory::Other),
+        ];
+
+        let mut facets = Facets::default();
+        for (name, expected) in cases {
+            let rule_class = facets.intern_rule_class(name);
+            assert_eq!(facets.rule_category(rule_class), Some(expected), "{name}");
+        }
+    }
+
+    /// Ids `0`, `1`, `2` renumbered to `2`, `0`, `1`.
+    fn rotated() -> Vec<Id> {
+        vec![Id(2), Id(0), Id(1)]
+    }
+
+    #[test]
+    fn renumbering_moves_each_nodes_facets_to_its_new_id() {
+        let mut facets = Facets::default();
+        let repo = facets.intern_repo("rules_foo+", None);
+        facets.set_repo(Id(0), Some(repo));
+        facets.set_testonly(Id(1), Tri::Yes);
+        facets.set_testonly(Id(2), Tri::No);
+
+        facets.renumber(&rotated());
+
+        assert_eq!(facets.repo(Id(2)), Some(repo));
+        assert_eq!(facets.repo(Id(0)), None);
+        assert_eq!(facets.testonly(Id(0)), Tri::Yes);
+        assert_eq!(facets.testonly(Id(1)), Tri::No);
+        assert_eq!(facets.testonly(Id(2)), Tri::Unknown);
+    }
+
+    #[test]
+    fn renumbering_rewrites_the_node_ids_a_facet_stores() {
+        let mut facets = Facets::default();
+        facets.set_package(Id(1), Id(0));
+        facets.set_label(Id(1), Id(1));
+
+        facets.renumber(&rotated());
+
+        assert_eq!(facets.package(Id(0)), Some(Id(2)));
+        assert_eq!(facets.label(Id(0)), Some(Id(0)));
+        assert_eq!(facets.package(Id(2)), None);
+    }
+
+    #[test]
+    fn renumbering_a_facet_no_input_stated_leaves_it_empty() {
+        let mut facets = Facets::default();
+        facets.set_testonly(Id(1), Tri::Yes);
+
+        facets.renumber(&rotated());
+
+        assert!(facets.repo.is_empty());
+        assert_eq!(facets.testonly.len(), 3);
     }
 }

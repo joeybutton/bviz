@@ -3,7 +3,7 @@ use crate::build::{self, build_graph};
 use crate::mode::LayoutMode;
 use bviz_graph_layout::graph::Graph;
 use bviz_graph_layout::lod::{DEFAULT_MAX_EDGES, DEFAULT_MAX_NODES};
-use bviz_graph_layout::{Id, LaidOut, MapLayout, Names};
+use bviz_graph_layout::{Facets, Id, LaidOut, MapLayout, Names};
 use bviz_ui_components::{Pending, load_in_background};
 use bviz_ui_graph_args::Input;
 use gpui::{Context, EventEmitter, Task};
@@ -32,6 +32,13 @@ pub(crate) struct Loaded {
     /// The interned node-id table the base graph keys on, threaded into each
     /// relayout so the quotient pass can mint group ids.
     names: Names,
+    /// The facets of the base graph's nodes, keyed by the same ids, which a
+    /// filter of the view selects on.
+    #[expect(
+        dead_code,
+        reason = "held with the graph it describes; no view selects on a facet"
+    )]
+    facets: Arc<Facets>,
     /// Container and group ids expanded in the layered layout last requested;
     /// every other container folds its subtree away so the layered layout only
     /// processes the visible view.
@@ -159,7 +166,7 @@ impl Expandable {
 
 /// Reads `inputs`, builds the graph and derives the map pyramid.
 pub(crate) fn build(inputs: Vec<Input>) -> Result<Loaded, String> {
-    let (graph, reduced_base, names) = build_graph(&inputs)?;
+    let (graph, reduced_base, names, facets) = build_graph(&inputs)?;
     let expanded =
         bviz_graph_layout::lod::default_expansion(&graph, DEFAULT_MAX_NODES, DEFAULT_MAX_EDGES);
     let containers = Arc::new(bviz_graph_layout::lod::expandable_containers(&graph));
@@ -173,6 +180,7 @@ pub(crate) fn build(inputs: Vec<Input>) -> Result<Loaded, String> {
         base,
         reduced_base,
         names,
+        facets: Arc::new(facets),
         expanded,
         containers,
         reduced: true,
@@ -408,6 +416,7 @@ mod tests {
             base,
             reduced_base,
             names,
+            facets: Arc::new(Facets::default()),
             expanded: HashSet::new(),
             containers,
             reduced: true,

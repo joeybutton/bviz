@@ -14,6 +14,7 @@ use std::collections::{BTreeSet, HashSet};
 use bazel_query_proto::analysis::{ActionGraphContainer, CqueryResult};
 use bazel_query_proto::blaze_query::Target;
 
+use crate::facets::Facets;
 use crate::graph::Graph;
 use crate::intern::{Id, Names};
 use crate::label::{RepoMapping, canonical_repo};
@@ -24,7 +25,7 @@ pub fn build_joint(
     cquery: Option<&[CqueryResult]>,
     query: Option<&[Target]>,
     external_sources: bool,
-) -> (Graph, Names) {
+) -> (Graph, Names, Facets) {
     let repos = repo_mapping(aquery, cquery, query);
     let union = package_union(aquery, cquery, query, &repos);
     let labeled_outputs = labeled_outputs(cquery, query, &repos);
@@ -39,7 +40,7 @@ pub fn build_joint(
         &repos,
         &mut names,
     );
-    canonicalize(merge(graphs), &names)
+    canonicalize(merge(graphs), &names, Facets::default())
 }
 
 /// The apparent-to-canonical repository mapping inferred from every canonical
@@ -133,7 +134,7 @@ fn build_inputs(
 /// ties between candidate containers by id, so without a name-ordered id the
 /// startup view would vary run to run. Each node also then sits at the position of
 /// its own id (`nodes[i].id == Id(i)`), the dense indexing that pass relies on.
-fn canonicalize(graph: Graph, names: &Names) -> (Graph, Names) {
+fn canonicalize(graph: Graph, names: &Names, mut facets: Facets) -> (Graph, Names, Facets) {
     let mut order: Vec<u32> = (0..names.len() as u32).collect();
     order.sort_by(|&a, &b| names.resolve(Id(a)).cmp(names.resolve(Id(b))));
     let mut remap = vec![Id(0); names.len()];
@@ -160,7 +161,8 @@ fn canonicalize(graph: Graph, names: &Names) -> (Graph, Names) {
     for edge in &graph.edges {
         out.add_edge(map(edge.from), map(edge.to), edge.kind);
     }
-    (out, canon)
+    facets.renumber(&remap);
+    (out, canon, facets)
 }
 
 /// Unions the graphs into one. Nodes are deduped by id: a package, target,
@@ -263,7 +265,7 @@ mod tests {
             ..Default::default()
         };
 
-        let (graph, names) =
+        let (graph, names, _) =
             build_joint(Some(&[aquery_container]), None, Some(&query_targets), false);
 
         // The target //foo:lib appears once though both inputs name it.
@@ -353,7 +355,7 @@ mod tests {
             ..Default::default()
         };
 
-        let (graph, names) =
+        let (graph, names, _) =
             build_joint(Some(&[aquery_container]), None, Some(&query_targets), false);
 
         // The promoted target node is shared by query and aquery: it appears once.
@@ -442,7 +444,7 @@ mod tests {
             ..Default::default()
         };
 
-        let (graph, names) =
+        let (graph, names, _) =
             build_joint(Some(&[aquery_container]), None, Some(&query_targets), false);
 
         assert_eq!(
@@ -495,7 +497,7 @@ mod tests {
         // where aquery writes the same target as `//foo:app`.
         let query_targets = vec![rule("@@//foo:app", &[])];
 
-        let (graph, names) = build_joint(
+        let (graph, names, _) = build_joint(
             Some(&[aquery_target(1, "//foo:app")]),
             None,
             Some(&query_targets),
@@ -514,7 +516,7 @@ mod tests {
         // name one target.
         let query_targets = vec![rule("@somerepo//foo:lib", &[])];
 
-        let (graph, names) = build_joint(
+        let (graph, names, _) = build_joint(
             Some(&[aquery_target(1, "@@somerepo+//foo:lib")]),
             None,
             Some(&query_targets),
@@ -537,7 +539,7 @@ mod tests {
             aquery_target(2, "@@somerepo+2.0//foo:lib"),
         ];
 
-        let (graph, names) = build_joint(Some(&aquery), None, Some(&query_targets), false);
+        let (graph, names, _) = build_joint(Some(&aquery), None, Some(&query_targets), false);
 
         assert_eq!(node_count(&graph, &names, "target:@somerepo//foo:lib"), 1);
         assert_eq!(
@@ -571,7 +573,7 @@ mod tests {
             ..Default::default()
         };
 
-        let (graph, names) =
+        let (graph, names, _) =
             build_joint(Some(&[aquery_container]), None, Some(&query_targets), false);
 
         assert_eq!(find(&graph, &names, "pkg:a").label, "//a");

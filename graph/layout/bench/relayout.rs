@@ -220,12 +220,13 @@ impl Args {
             .query
             .as_deref()
             .map(|p| decode(p, streamed_proto::read_query_targets));
-        bviz_graph_layout::build_joint(
+        let (graph, names, _facets) = bviz_graph_layout::build_joint(
             aquery.as_deref(),
             cquery.as_deref(),
             query.as_deref(),
             false,
-        )
+        );
+        (graph, names)
     }
 }
 
