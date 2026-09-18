@@ -31,6 +31,7 @@ mod drag;
 mod emphasis;
 mod framing;
 mod legend;
+mod missing;
 mod mode;
 mod model;
 mod morph;
@@ -217,6 +218,9 @@ pub struct GraphPanel {
     /// the toolbar toggle so the marking can be turned off when it is more noise
     /// than help.
     neighborhood_enabled: bool,
+    /// Whether the card naming what the inputs cannot be filtered on is unfolded
+    /// past its one-line reading.
+    missing_open: bool,
     /// The titles the canvas drew, rewritten by every paint and resolved against
     /// a pointer by [`box_at`].
     titles: Vec<TitleTarget>,
@@ -344,6 +348,7 @@ impl GraphPanel {
             relation_picker,
             _relation_choices: relations,
             neighborhood_enabled: true,
+            missing_open: false,
             titles: Vec::new(),
         }
     }
@@ -400,7 +405,20 @@ impl GraphPanel {
                     .top_0()
                     .size_full(),
             )
-            .children(edge_legend)
+            .child(
+                // What the drawing itself cannot state, held clear of the graph
+                // at the foot of the canvas.
+                div()
+                    .absolute()
+                    .left_2()
+                    .bottom_2()
+                    .flex()
+                    .flex_col()
+                    .items_start()
+                    .gap_2()
+                    .children(missing::card(self, &palette, cx))
+                    .children(edge_legend),
+            )
             .children(search::results(self, &palette, cx))
             .children(pins::panel(self, &palette, cx))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))

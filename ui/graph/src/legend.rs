@@ -31,7 +31,8 @@ fn swatch(kind: EdgeKind, palette: &Palette) -> Div {
 }
 
 /// Lists the edge kinds actually drawn, in enum order, so it explains only the
-/// kinds present in this graph. `None` when none are drawn.
+/// kinds present in this graph; the caller places it. `None` when none are
+/// drawn.
 pub(crate) fn legend(g: &LaidOut, palette: &Palette) -> Option<Div> {
     let present: Vec<EdgeKind> = [
         EdgeKind::Query,
@@ -44,9 +45,6 @@ pub(crate) fn legend(g: &LaidOut, palette: &Palette) -> Option<Div> {
     .collect();
     (!present.is_empty()).then(|| {
         div()
-            .absolute()
-            .left_2()
-            .bottom_2()
             .flex()
             .flex_col()
             .gap_1()
