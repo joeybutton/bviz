@@ -25,6 +25,21 @@ const TAB_ICON_SIZE: Pixels = px(14.);
 
 const HANDLE_ICON_SIZE: Pixels = px(12.);
 
+const RESTORE_ICON: &str = "arrows-in";
+
+/// How a window frames a pane, as its workspace last laid the arrangement out.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Framing {
+    /// The window lays out no pane besides this one, so this one has the
+    /// window's body to itself.
+    Lone,
+    /// The window lays other panes out beside this one.
+    Beside,
+    /// The window draws this pane in place of the whole arrangement, holding
+    /// the panes it lays out besides this one back until it is restored.
+    Maximized,
+}
+
 /// A panel of a pane, and the subscription carrying that panel's events to the
 /// pane. Taking the panel out of the pane retires the subscription with it.
 struct Tab {
@@ -39,9 +54,10 @@ struct Tab {
 pub struct Pane {
     tabs: Vec<Tab>,
     active: usize,
-    /// Whether the window lays out panes besides this one, as its workspace last
-    /// laid the arrangement out.
-    shares_window: bool,
+    framing: Framing,
+    /// Whether the click the pane last took was on the control that gives the
+    /// window's body back.
+    restore_clicked: bool,
     /// Where the last frame laid out the tab naming each panel the pane holds,
     /// in the order it holds them. Read between frames, to tell where a drag
     /// over the tabs would join them. Empty until a frame has laid a tab out,
@@ -68,8 +84,9 @@ pub enum PaneEvent {
     Changed,
     /// The last panel closed, so the pane is done.
     Closed,
-    /// The panel on show is asking for a window of its own.
-    Detach,
+    /// The pane is asking for the whole of the window's body, or to give it
+    /// back where it already has it.
+    Maximize,
     /// A press landed on the tab naming that panel, at that point of the
     /// window. The press is a drag of the panel from there if it is carried far
     /// enough, which only the workspace can tell, the drag running across the
@@ -93,7 +110,8 @@ impl Pane {
                 _events: events,
             }],
             active: 0,
-            shares_window: false,
+            framing: Framing::Lone,
+            restore_clicked: false,
             tab_bounds: Vec::new(),
         };
         pane.show_active(window, cx);
@@ -138,8 +156,8 @@ impl Pane {
         self.tabs.len()
     }
 
-    pub(crate) fn set_shares_window(&mut self, shares: bool) {
-        self.shares_window = shares;
+    pub(crate) fn set_framing(&mut self, framing: Framing) {
+        self.framing = framing;
     }
 
     pub(crate) fn tab_bounds(&self) -> &[Bounds<Pixels>] {
@@ -268,11 +286,18 @@ impl Pane {
     fn show_active(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let panel = self.active_panel().clone();
         panel.set_active(true, window, cx);
-        // A repaint the panel marked while its pane showed another was consumed
-        // by a frame that left it out, so the frame bringing it forward records
-        // the scene it draws only if it is marked again here.
-        panel.notify(cx);
+        self.mark_shown(cx);
         cx.emit(PaneEvent::Changed);
+    }
+
+    /// Marks the panel on show for a repaint of its own, which a caller that
+    /// brings it back into the frames the window draws owes it: a repaint that
+    /// panel marked while no frame drew it — because its pane showed another,
+    /// or because no frame drew its pane at all — was consumed by a frame that
+    /// left it out, so a frame drawing it again records the scene it draws only
+    /// if it is marked afresh.
+    pub(crate) fn mark_shown(&self, cx: &mut Context<Self>) {
+        self.active_panel().notify(cx);
         cx.notify();
     }
 
@@ -293,8 +318,70 @@ impl Pane {
             .border_b_1()
             .border_color(colors.border)
             .text_sm()
-            .children(tabs)
-            .on_children_prepainted(tabs_laid_out(cx))
+            // The tabs are measured through a container of their own, so that
+            // what a drag reads as the boundaries between them is the tabs and
+            // nothing else the strip carries.
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .flex_1()
+                    .min_w(px(0.))
+                    .h_full()
+                    .overflow_hidden()
+                    .children(tabs)
+                    .on_children_prepainted(tabs_laid_out(cx)),
+            )
+            .children(self.restore_control(cx))
+    }
+
+    /// The control that gives the window's body back to every pane, put up by
+    /// the pane drawn in place of them. No other pane puts one up: a control on
+    /// every pane would crowd both the close controls of a tab strip and the
+    /// single line a handle is.
+    fn restore_control(&self, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
+        if self.framing != Framing::Maximized {
+            return None;
+        }
+        let pane = cx.entity();
+        let id = pane.entity_id().as_u64();
+        Some(
+            div()
+                .flex_shrink_0()
+                // A handle reads a press on it as the start of a drag of its
+                // panel, which a press on a control it carries is not.
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .child(
+                    Button::new(
+                        ElementId::NamedInteger("pane-restore".into(), id),
+                        move |_, _, cx| {
+                            pane.update(cx, |pane, cx| {
+                                pane.restore_clicked = true;
+                                cx.emit(PaneEvent::Maximize);
+                            });
+                        },
+                    )
+                    .ghost()
+                    .icon(RESTORE_ICON)
+                    .compact(),
+                ),
+        )
+    }
+
+    /// Asks for the whole of the window's body where `event` is the second
+    /// click of a double click on one of the pane's own tabs or on its handle,
+    /// which is the gesture that asks for it. A click on the control that gives
+    /// that body back is neither of the two: it leaves the pane restored, and
+    /// the click the platform counts after it would otherwise ask for the body
+    /// straight back.
+    fn maximize_on_second_click(&mut self, event: &ClickEvent, cx: &mut Context<Self>) {
+        if std::mem::take(&mut self.restore_clicked) {
+            return;
+        }
+        if event.click_count() == 2 {
+            cx.emit(PaneEvent::Maximize);
+        }
     }
 
     /// The grip over a pane holding one panel, naming that panel as a tab strip
@@ -324,12 +411,23 @@ impl Pane {
             .cursor_pointer()
             .on_mouse_down(MouseButton::Left, pressed(panel.entity_id(), cx))
             .on_mouse_up(MouseButton::Left, released(cx))
+            .on_click(cx.listener(|pane, event: &ClickEvent, _, cx| {
+                pane.maximize_on_second_click(event, cx);
+            }))
             .children(panel.icon(cx).map(|name| {
                 bviz_ui_assets::icon(name)
                     .size(HANDLE_ICON_SIZE)
                     .text_color(ink)
             }))
             .child(title(&panel, cx))
+            .children(self.restore_control(cx).map(|control| {
+                div()
+                    .flex()
+                    .flex_row()
+                    .flex_1()
+                    .justify_end()
+                    .child(control)
+            }))
     }
 
     fn tab(&self, index: usize, colors: &ThemeColors, cx: &mut Context<Self>) -> AnyElement {
@@ -366,14 +464,9 @@ impl Pane {
             .when(!showing, |tab| tab.hover(move |s| s.bg(hover)))
             .on_mouse_down(MouseButton::Left, pressed(panel.entity_id(), cx))
             .on_mouse_up(MouseButton::Left, released(cx))
-            // A second click on a tab sends its panel to a window of its own. The
-            // workspace detaches whichever panel the pane is showing, so the tab
-            // is brought forward either way.
             .on_click(cx.listener(move |pane, event: &ClickEvent, window, cx| {
                 pane.activate(index, window, cx);
-                if event.click_count() == 2 {
-                    cx.emit(PaneEvent::Detach);
-                }
+                pane.maximize_on_second_click(event, cx);
             }))
             .children(panel.icon(cx).map(|name| {
                 bviz_ui_assets::icon(name)
@@ -468,7 +561,7 @@ impl Render for Pane {
         // The window's one pane holding its one panel is that panel: nothing to
         // pick between and nothing to tell it apart from, so anything drawn over
         // it would only take room from it.
-        if self.tabs.len() == 1 && !self.shares_window {
+        if self.tabs.len() == 1 && self.framing == Framing::Lone {
             self.tab_bounds.clear();
             return body.into_any_element();
         }

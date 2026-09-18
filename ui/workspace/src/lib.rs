@@ -3,6 +3,7 @@
 //! of, the registry of what every window's panels show views of and the menu
 //! listing it, and [`run_panels`] for an app whose window frames them.
 
+mod arrangement;
 mod documents;
 mod documents_menu;
 mod drop;
@@ -12,10 +13,12 @@ mod pane;
 mod panel;
 mod workspace;
 
+pub(crate) use arrangement::{Arrangement, Maximize};
 pub use documents::ViewSpec;
 pub(crate) use documents::{DocumentId, Documents, OpenDocument, ViewState};
 pub use group::{PanelGroup, Weight};
 pub use layout::{AtEdge, DividerId, Layout, Panes, Removal, Side, Split, SplitSide};
+pub(crate) use pane::Framing;
 pub use pane::{Pane, PaneEvent};
 pub use panel::{AnyPanel, Document, Panel, PanelEvent, PanelKind, ViewKind, document_label};
 pub use workspace::Workspace;

@@ -50,7 +50,9 @@ impl ViewSpec {
 pub enum ViewState {
     /// No panel shows this view.
     Closed,
-    /// A pane holds a panel showing this view, behind the panel that pane shows.
+    /// A pane holds a panel showing this view, but no frame draws it: the pane
+    /// shows another of its tabs, or the window draws another pane in place of
+    /// the one holding it.
     Open,
     /// The pane holding this view's panel shows it.
     Visible,
