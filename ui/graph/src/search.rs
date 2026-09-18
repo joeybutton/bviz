@@ -11,14 +11,15 @@
 //! that list samples the matches so a reader can see what the pattern reached,
 //! and the count beside it covers all of them.
 
-use crate::{GraphPanel, Palette, checklist};
+use crate::{GraphPanel, Palette, checklist, pins};
 use bviz_graph_layout::Id;
 use bviz_graph_layout::select::labels::LabelIndex;
 use bviz_graph_layout::select::pattern::Pattern;
 use bviz_graph_layout::select::{Base, Filter, Predicate, Rule, Visibility};
 use bviz_ui_components::{Button, TextInput};
 use gpui::{
-    ClickEvent, Context, Div, Entity, IntoElement, Pixels, SharedString, Task, div, prelude::*, px,
+    ClickEvent, Context, Div, Entity, IntoElement, Pixels, SharedString, Stateful, Task, div,
+    prelude::*, px,
 };
 use std::time::Duration;
 
@@ -344,16 +345,40 @@ pub(crate) fn results(
                             })),
                     ),
             )
-            .children(sample.map(|matched| {
-                div()
-                    .text_xs()
-                    .text_color(palette.label)
-                    .overflow_hidden()
-                    .whitespace_nowrap()
-                    .text_ellipsis()
-                    .child(SharedString::from(matched.label.clone()))
-            })),
+            .children(sample.map(|matched| row(matched, view.derived.filter(), palette, cx))),
     )
+}
+
+/// One match, which a click pins so that it is drawn whatever the rules say.
+fn row(
+    matched: &Match,
+    filter: &Filter,
+    palette: &Palette,
+    cx: &mut Context<GraphPanel>,
+) -> Stateful<Div> {
+    let target = matched.target;
+    let kept = pins::pinned(filter, target) == Some(Visibility::Shown);
+    div()
+        .id(("search-match", target.0 as usize))
+        .flex()
+        .items_center()
+        .gap_1()
+        .cursor_pointer()
+        .text_xs()
+        .text_color(palette.label)
+        .on_click(cx.listener(move |view, _: &ClickEvent, _, cx| {
+            pins::set(view, target, Visibility::Shown, cx)
+        }))
+        .child(pins::mark(kept, palette))
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .text_ellipsis()
+                .child(SharedString::from(matched.label.clone())),
+        )
 }
 
 /// How many labels the pattern names, and what the list below it leaves out.

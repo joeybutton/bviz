@@ -43,6 +43,9 @@ pub(crate) fn toolbar(
     if let Some(picker) = controls.relation_picker {
         bar = bar.child(picker);
     }
+    if let Some(pin) = controls.pin_control {
+        bar = bar.child(pin);
+    }
     bar.when(controls.relaying, |bar| {
         bar.trailing(relaying_indicator(palette))
     })

@@ -7,6 +7,12 @@ use crate::intern::{Id, Names};
 use crate::label::target_node_label;
 use crate::select::pattern::Pattern;
 
+/// The canonical label of the target the node `id` belongs to, which for a
+/// target is its own; `None` for a node belonging to none.
+pub fn carried_label<'a>(names: &'a Names, facets: &Facets, id: Id) -> Option<&'a str> {
+    target_node_label(names.resolve(facets.label(id)?))
+}
+
 /// Every target the nodes of one graph belong to: the id of the node naming the
 /// target, and the canonical label it carries, ordered by that label.
 pub struct LabelIndex(Vec<(Id, String)>);

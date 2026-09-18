@@ -36,6 +36,7 @@ mod model;
 mod morph;
 mod neighborhood;
 mod paint;
+mod pins;
 mod preset;
 mod relation;
 mod rules;
@@ -401,6 +402,7 @@ impl GraphPanel {
             )
             .children(edge_legend)
             .children(search::results(self, &palette, cx))
+            .children(pins::panel(self, &palette, cx))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
             .on_mouse_down(MouseButton::Right, cx.listener(Self::on_secondary_down))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
@@ -607,6 +609,7 @@ impl Render for GraphPanel {
                     origin_filter: (!self.origins.is_empty()).then(|| self.origin_filter.clone()),
                     preset_filter: self.preset_filter.clone(),
                     relation_picker: self.selection.node().map(|_| self.relation_picker.clone()),
+                    pin_control: pins::control(self, cx).map(IntoElement::into_any_element),
                     neighborhood_enabled: self.neighborhood_enabled,
                     reduced: self.derived.reduced(),
                     relaying: self.derived.deriving(),
@@ -641,6 +644,9 @@ struct Controls {
     /// The picker naming what the selected box marks, offered only while a box
     /// is selected: with none there is no marking for it to widen or narrow.
     relation_picker: Option<Entity<Dropdown>>,
+    /// The override offered on the selected box, which stands beside that
+    /// picker.
+    pin_control: Option<AnyElement>,
     neighborhood_enabled: bool,
     reduced: bool,
     relaying: bool,
