@@ -146,6 +146,9 @@ impl Expandable {
 /// throughout.
 #[derive(Clone)]
 struct Slice {
+    /// The filter this was derived from, which a panel drawing through another
+    /// must restrict the document's graph afresh to leave behind.
+    filter: Filter,
     base: Arc<Graph>,
     /// The restriction with its transitively-redundant edges removed, which the
     /// collapsed views are projected through.
@@ -163,11 +166,12 @@ struct Slice {
 }
 
 impl Slice {
-    /// The whole graph, which is what a filter that hides nothing leaves; it is
-    /// already placed and reduced, so such a filter costs nothing to draw
+    /// The whole graph, which is what `filter` leaves where it hides nothing; it
+    /// is already placed and reduced, so such a filter costs nothing to draw
     /// through.
-    fn whole(shared: &Shared) -> Self {
+    fn whole(shared: &Shared, filter: Filter) -> Self {
         Slice {
+            filter,
             base: Arc::clone(&shared.base),
             reduced: Arc::clone(&shared.reduced_base),
             map: Arc::clone(&shared.map),
@@ -196,15 +200,6 @@ struct Landed {
     /// The layered drawing, absent where this derivation laid none out — a
     /// panel drawing a map that holds no layered drawing to keep current.
     layered: Option<Arc<LaidOut>>,
-}
-
-/// What a derivation has to redo. Restricting the graph afresh is the filter's
-/// cost alone, so a change to the expansion or to the edge set is laid out over
-/// the restriction the panel already holds.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Redo {
-    Restriction,
-    Drawing,
 }
 
 /// A layered drawing that has landed, and the one it takes the place of, which
@@ -281,7 +276,7 @@ impl Derived {
     fn opened_on(&mut self, loaded: &Loaded) {
         self.expanded = loaded.opening.expanded.clone();
         self.over_budget = loaded.opening.over_budget;
-        self.slice = Some(Slice::whole(&loaded.shared));
+        self.slice = Some(Slice::whole(&loaded.shared, Filter::default()));
     }
 
     /// The layout `mode` draws, or `None` while the graph or that mode's layout
@@ -332,6 +327,16 @@ impl Derived {
     /// while the drawing it will replace stays on screen and interactive.
     pub(crate) fn deriving(&self) -> bool {
         self.deriving
+    }
+
+    /// Whether a derivation has to restrict the document's graph afresh rather
+    /// than lay out over the restriction the panel holds, which it must wherever
+    /// that restriction was derived from another filter — as it is for every
+    /// request made before a filter change has landed.
+    fn restricting(&self) -> bool {
+        self.slice
+            .as_ref()
+            .is_some_and(|slice| slice.filter != self.filter)
     }
 
     pub(crate) fn over_budget(&self) -> Option<Overflow> {
@@ -418,7 +423,7 @@ pub(crate) fn opened(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
 /// derivation is already running.
 pub(crate) fn ensure_layout(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
     if view.derived.drawn(view.mode).is_none() && !view.derived.deriving() {
-        request(view, Redo::Drawing, cx);
+        request(view, cx);
     }
 }
 
@@ -427,14 +432,14 @@ pub(crate) fn toggle_expansion(view: &mut GraphPanel, id: Id, cx: &mut Context<G
     if !view.derived.expanded.remove(&id) {
         view.derived.expanded.insert(id);
     }
-    request(view, Redo::Drawing, cx);
+    request(view, cx);
 }
 
 /// Flips whether the layered layout keeps every edge or only the transitive
 /// reduction, and lays the graph out over the edge set that leaves.
 pub(crate) fn toggle_reduce(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
     view.derived.reduced = !view.derived.reduced;
-    request(view, Redo::Drawing, cx);
+    request(view, cx);
 }
 
 /// Draws the graph through `filter` from here on.
@@ -448,22 +453,24 @@ pub(crate) fn set_filter(view: &mut GraphPanel, filter: Filter, cx: &mut Context
         return;
     }
     view.derived.filter = filter;
-    request(view, Redo::Restriction, cx);
+    request(view, cx);
 }
 
 /// Derives what the panel draws off the UI thread and adopts the result.
-fn request(view: &mut GraphPanel, redo: Redo, cx: &mut Context<GraphPanel>) {
+fn request(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
     let Some(shared) = view.model.read(cx).loaded().map(|l| l.shared.clone()) else {
         return;
     };
     let Some(slice) = view.derived.slice.clone() else {
         return;
     };
-    // A layered drawing is laid out for the panel showing one, and for the panel
-    // holding one it would otherwise go on drawing over a graph the filter has
-    // moved out from under it; a map needs none.
+    let restricting = view.derived.restricting();
+    // A derivation that leaves the restriction standing was asked for to
+    // redraw. One that restricts afresh lays a drawing out for the panel showing
+    // one, and for the panel holding one, which would otherwise go on drawing
+    // over a graph the filter has moved out from under it; a map needs none.
     let lays_out =
-        redo == Redo::Drawing || view.mode == LayoutMode::Layered || view.derived.layered.is_some();
+        !restricting || view.mode == LayoutMode::Layered || view.derived.layered.is_some();
     let derived = &mut view.derived;
     derived.deriving = true;
     let (filter, reduced) = (derived.filter.clone(), derived.reduced);
@@ -473,12 +480,12 @@ fn request(view: &mut GraphPanel, redo: Redo, cx: &mut Context<GraphPanel>) {
     derived._work = load_in_background(
         cx,
         move || {
-            let (mut slice, restricted) = match redo {
-                Redo::Restriction => {
+            let (mut slice, restricted) = match restricting {
+                true => {
                     let (slice, restricted) = restrict(&shared, &filter, &expanded, reduced);
                     (slice, Some(restricted))
                 }
-                Redo::Drawing => (slice, None),
+                false => (slice, None),
             };
             let expanded = match &restricted {
                 Some(restricted) => &restricted.expanded,
@@ -548,7 +555,7 @@ fn restrict(
     let slice = match dropped.is_empty() {
         true => Slice {
             faded,
-            ..Slice::whole(shared)
+            ..Slice::whole(shared, filter.clone())
         },
         false => {
             let base = bviz_graph_layout::filter::filter(&shared.base, &shared.reduced_base, &keep);
@@ -556,6 +563,7 @@ fn restrict(
             let containers = Arc::new(bviz_graph_layout::lod::expandable_containers(&base));
             let (base, reduction) = (Arc::new(base), Arc::new(reduction));
             Slice {
+                filter: filter.clone(),
                 map: Arc::new(
                     shared
                         .map
@@ -806,6 +814,34 @@ mod tests {
         assert_eq!(selection.node(), None);
     }
 
+    /// A filter set while a derivation runs is owed a restriction that nothing
+    /// else records, so every request made before it lands — an expansion, a
+    /// change of edge set — restricts afresh rather than laying out the graph
+    /// the superseded filter left.
+    #[test]
+    fn a_request_made_before_a_filter_change_lands_restricts_afresh() {
+        let loaded = document();
+        let mut derived = opened(&loaded);
+        assert!(!derived.restricting());
+
+        derived.filter = hiding(Kind::Action);
+        assert!(derived.restricting());
+
+        let (slice, restricted) = restrict(
+            &loaded.shared,
+            &derived.filter,
+            &derived.expanded,
+            derived.reduced,
+        );
+        derived.adopt(Landed {
+            slice,
+            restricted: Some(restricted),
+            layered: None,
+        });
+
+        assert!(!derived.restricting());
+    }
+
     /// A drawing whose extent says which derivation produced it.
     fn drawing(width: f64) -> Arc<LaidOut> {
         Arc::new(LaidOut {
@@ -816,7 +852,7 @@ mod tests {
 
     fn landed(loaded: &Loaded, width: f64) -> Landed {
         Landed {
-            slice: Slice::whole(&loaded.shared),
+            slice: Slice::whole(&loaded.shared, Filter::default()),
             restricted: None,
             layered: Some(drawing(width)),
         }
