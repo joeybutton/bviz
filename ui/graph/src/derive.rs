@@ -673,6 +673,7 @@ mod tests {
                 names,
                 facets: Arc::new(Facets::default()),
                 containers,
+                capabilities: bviz_graph_layout::capability::CapabilitiesBuilder::default().seal(),
             },
             opening: Opening {
                 expanded: HashSet::new(),

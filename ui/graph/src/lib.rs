@@ -34,6 +34,7 @@ mod model;
 mod morph;
 mod neighborhood;
 mod paint;
+mod preset;
 mod relation;
 mod rules;
 mod scroll;
@@ -178,6 +179,12 @@ pub struct GraphPanel {
     origin_filter: Entity<MultiSelect>,
     /// Carries a toggled repository row into the panel's filter.
     _origin_choices: Subscription,
+    /// The reductions the loaded inputs can answer, in the order the preset
+    /// checklist's rows stand.
+    presets: Vec<preset::Offer>,
+    preset_filter: Entity<MultiSelect>,
+    /// Carries a toggled preset row into the panel's filter.
+    _preset_choices: Subscription,
     /// Redraws as the graph is read.
     _changed: Subscription,
     /// Derives what the selected mode draws as the read lands: a derivation
@@ -269,6 +276,12 @@ impl GraphPanel {
             cx.subscribe(&origin_filter, |view, _, event: &MultiSelectEvent, cx| {
                 checklist::toggle_origin(view, event.index, !event.checked, cx);
             });
+        let preset_filter =
+            cx.new(|cx| MultiSelect::new("graph-presets", "presets", Vec::new(), cx));
+        let preset_choices =
+            cx.subscribe(&preset_filter, |view, _, event: &MultiSelectEvent, cx| {
+                checklist::toggle_preset(view, event.index, event.checked, cx);
+            });
         let changed = cx.observe(&model, |_, _, cx| cx.notify());
         let source_replaced = cx.subscribe(&model, |view, _, _: &SourceReplaced, cx| {
             derive::opened(view, cx);
@@ -292,6 +305,9 @@ impl GraphPanel {
             origins: Vec::new(),
             origin_filter,
             _origin_choices: origin_choices,
+            presets: Vec::new(),
+            preset_filter,
+            _preset_choices: preset_choices,
             _changed: changed,
             _source_replaced: source_replaced,
             hovered: None,
@@ -559,6 +575,7 @@ impl Render for GraphPanel {
                     picker: self.mode_picker.clone(),
                     class_filter: (!self.classes.is_empty()).then(|| self.class_filter.clone()),
                     origin_filter: (!self.origins.is_empty()).then(|| self.origin_filter.clone()),
+                    preset_filter: self.preset_filter.clone(),
                     relation_picker: self.selection.node().map(|_| self.relation_picker.clone()),
                     neighborhood_enabled: self.neighborhood_enabled,
                     reduced: self.derived.reduced(),
@@ -586,6 +603,9 @@ struct Controls {
     /// only where that graph carries a value on its axis.
     class_filter: Option<Entity<MultiSelect>>,
     origin_filter: Option<Entity<MultiSelect>>,
+    /// The reductions offered as one click, listed whether or not the loaded
+    /// inputs can answer each, so that one they cannot says why.
+    preset_filter: Entity<MultiSelect>,
     /// The picker naming what the selected box marks, offered only while a box
     /// is selected: with none there is no marking for it to widen or narrow.
     relation_picker: Option<Entity<Dropdown>>,

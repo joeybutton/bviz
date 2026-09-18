@@ -7,7 +7,7 @@
 //! [`crate::rules`].
 
 use crate::rules::{self, Term, Value};
-use crate::{GraphPanel, derive};
+use crate::{GraphPanel, derive, preset};
 use bviz_graph_layout::graph::Graph;
 use bviz_graph_layout::repo::RepoCategory;
 use bviz_graph_layout::select::Filter;
@@ -214,6 +214,11 @@ pub(crate) fn adopt(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
     };
     view.classes = carried_classes(&loaded.shared.base);
     view.origins = carried_origins(&loaded.shared.facets);
+    view.presets = preset::offers(
+        &loaded.shared.base,
+        &loaded.shared.facets,
+        &loaded.shared.capabilities,
+    );
     restate(view, cx);
 }
 
@@ -221,10 +226,13 @@ pub(crate) fn adopt(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
 pub(crate) fn restate(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
     let classes = class_options(view.derived.filter(), &view.classes);
     let origins = origin_options(view.derived.filter(), &view.origins);
+    let presets = preset::options(view.derived.filter(), &view.presets);
     view.class_filter
         .update(cx, |control, cx| control.set_options(classes, cx));
     view.origin_filter
         .update(cx, |control, cx| control.set_options(origins, cx));
+    view.preset_filter
+        .update(cx, |control, cx| control.set_options(presets, cx));
 }
 
 /// Draws the graph through `filter` from here on and restates the checklists
@@ -260,6 +268,21 @@ pub(crate) fn toggle_origin(
         return;
     };
     let filter = set_origin_hidden(view.derived.filter(), &view.origins, &row, hidden);
+    set_filter(view, filter, cx);
+}
+
+/// Applies the preset the preset checklist's row `index` stands for, or takes it
+/// back off.
+pub(crate) fn toggle_preset(
+    view: &mut GraphPanel,
+    index: usize,
+    applied: bool,
+    cx: &mut Context<GraphPanel>,
+) {
+    let Some(preset) = preset::offered(&view.presets, index) else {
+        return;
+    };
+    let filter = preset::set_applied(view.derived.filter(), preset, applied);
     set_filter(view, filter, cx);
 }
 

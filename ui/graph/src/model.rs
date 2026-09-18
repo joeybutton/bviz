@@ -2,7 +2,7 @@ use crate::build::build_graph;
 use crate::derive::derive_levels;
 use bviz_graph_layout::graph::Graph;
 use bviz_graph_layout::lod::{DEFAULT_MAX_EDGES, DEFAULT_MAX_NODES, Overflow};
-use bviz_graph_layout::{Facets, Id, MapLayout, Names};
+use bviz_graph_layout::{Capabilities, Facets, Id, MapLayout, Names};
 use bviz_ui_components::{Pending, load_in_background};
 use bviz_ui_graph_args::Input;
 use gpui::{Context, EventEmitter, Task};
@@ -31,6 +31,9 @@ pub(crate) struct Shared {
     /// The multi-child containers of the base graph, which a layered view offers
     /// to open.
     pub(crate) containers: Arc<HashSet<Id>>,
+    /// Which filter axes the inputs this graph was read from support, by which
+    /// the toolbar tells a control the inputs cannot answer from one they can.
+    pub(crate) capabilities: Capabilities,
 }
 
 /// The view a panel opens a freshly read graph at.
@@ -57,7 +60,7 @@ pub(crate) const OPENS_REDUCED: bool = true;
 
 /// Reads `inputs`, builds the graph and derives the map pyramid.
 pub(crate) fn build(inputs: Vec<Input>) -> Result<Loaded, String> {
-    let (graph, reduced_base, names, facets) = build_graph(&inputs)?;
+    let (graph, reduced_base, names, facets, capabilities) = build_graph(&inputs)?;
     // A graph no expansion of which fits still has to open at something, and the
     // unexpanded view is the smallest drawing of it there is.
     let (expanded, over_budget) = match bviz_graph_layout::lod::default_expansion(
@@ -82,6 +85,7 @@ pub(crate) fn build(inputs: Vec<Input>) -> Result<Loaded, String> {
             names,
             facets: Arc::new(facets),
             containers,
+            capabilities,
         },
         opening: Opening {
             expanded,

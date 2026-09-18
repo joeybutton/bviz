@@ -16,7 +16,7 @@ pub(crate) fn toolbar(
     {
         bar = bar.child(checklist);
     }
-    bar = bar.child(
+    bar = bar.child(controls.preset_filter).child(
         Button::new(
             "neighborhood-toggle",
             cx.listener(|view, _: &ClickEvent, _, cx| view.toggle_neighborhood(cx)),
