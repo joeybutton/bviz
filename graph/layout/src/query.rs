@@ -135,8 +135,10 @@ pub(crate) fn describe_target(
     let declared = !rule.rule_class.is_empty();
     facets.observe(Axis::RuleClass, declared);
     facets.observe(Axis::RuleCategory, declared);
-    let rule_class = facets.facets().intern_rule_class(&rule.rule_class);
-    facets.facets().set_rule_class(node, Some(rule_class));
+    if declared {
+        let rule_class = facets.facets().intern_rule_class(&rule.rule_class);
+        facets.facets().set_rule_class(node, Some(rule_class));
+    }
     let mut tagged = false;
     let mut testonly = false;
     for attribute in &rule.attribute {
@@ -373,6 +375,15 @@ mod tests {
         assert_eq!(facets.package(node), names.get("pkg:foo"));
         assert_eq!(facets.label(node), Some(node));
         assert!(facets.repo(node).is_some());
+    }
+
+    #[test]
+    fn a_rule_stating_no_class_offers_the_filter_no_rule_class() {
+        let (_, names, facets) = build(&[declared("//foo:app", "", vec![])]);
+
+        let node = names.get("target://foo:app").unwrap();
+        assert_eq!(facets.rule_class(node), None);
+        assert_eq!(facets.rule_classes().count(), 0);
     }
 
     #[test]
