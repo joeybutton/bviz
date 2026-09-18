@@ -287,11 +287,22 @@ impl Derived {
         }
     }
 
-    /// Draws `loaded`'s graph whole, at the expansion its read sized.
+    /// Draws `loaded`'s graph whole, at the expansion its read sized, through no
+    /// filter.
+    ///
+    /// A filter selects within one graph — its rules over that graph's
+    /// repositories, classes and labels, its pins over that graph's node ids —
+    /// so it does not carry to the graph that takes its place. Every drawing of
+    /// the graph left behind goes with it, and so does the derivation that was
+    /// producing one.
     fn opened_on(&mut self, loaded: &Loaded) {
+        self.filter = Filter::default();
         self.expanded = loaded.opening.expanded.clone();
         self.over_budget = loaded.opening.over_budget;
         self.slice = Some(Slice::whole(&loaded.shared, Filter::default()));
+        self.layered = None;
+        self.in_flight = None;
+        self._work = Task::ready(());
     }
 
     /// The layout `mode` draws, or `None` while the graph or that mode's layout
@@ -443,6 +454,7 @@ pub(crate) fn opened(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
         return;
     };
     view.derived.opened_on(loaded);
+    crate::search::reset(view, cx);
     ensure_layout(view, cx);
 }
 
@@ -910,6 +922,27 @@ mod tests {
         });
 
         assert!(!derived.restricting());
+    }
+
+    /// The controls read the filter and the drawing is derived from it, so a
+    /// filter the panel held over a graph that has been replaced would have the
+    /// two describing different graphs — and a drawing already in hand answers
+    /// the request for one, so nothing would re-derive it.
+    #[test]
+    fn a_document_opened_into_a_panel_is_drawn_through_no_filter() {
+        let loaded = document();
+        let mut derived = opened(&loaded);
+        derived.filter = hiding(Kind::Action);
+        derived.layered = Some(drawing(10.0));
+
+        derived.opened_on(&document());
+
+        assert_eq!(derived.filter(), &Filter::default());
+        assert!(
+            !derived.restricting(),
+            "the drawing was derived from another filter than the controls read"
+        );
+        assert!(derived.drawn(LayoutMode::Layered).is_none());
     }
 
     /// A drawing whose extent says which derivation produced it.

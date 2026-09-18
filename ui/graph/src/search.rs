@@ -210,6 +210,16 @@ fn act_on_matches(view: &mut GraphPanel, act: Act, cx: &mut Context<GraphPanel>)
     }
 }
 
+/// Takes the search back to what it holds over a graph nothing has been typed
+/// against: a pattern and the labels it named describe the graph they were
+/// matched over, so neither outlives it.
+pub(crate) fn reset(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
+    view.search.text = SharedString::default();
+    view.search.found = None;
+    view.search._matching = Task::ready(());
+    clear(view, cx);
+}
+
 /// Empties the field, which restores the rules the search displaced.
 fn clear(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
     view.search
