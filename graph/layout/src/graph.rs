@@ -99,10 +99,24 @@ impl Graph {
     }
 }
 
-/// A graph's containment forest, indexed by node id: every id up to the largest
-/// the graph mentions carries a parent and a depth, an id the graph never names
-/// standing as a root. Containment must be acyclic, since every query walks
-/// towards the roots.
+/// One past the largest id `graph` mentions anywhere — as a node, a parent, or
+/// an edge endpoint — and so the length an array indexed by id must have for
+/// every id the graph can hand it to be in range. A graph need not hold a node
+/// for each id below it: restricting a graph to a chosen set of nodes leaves the
+/// survivors' original ids and holes where the rest were.
+pub fn id_span(graph: &Graph) -> usize {
+    let mentioned = graph
+        .nodes
+        .iter()
+        .flat_map(|n| [Some(n.id), n.parent])
+        .flatten()
+        .chain(graph.edges.iter().flat_map(|e| [e.from, e.to]));
+    mentioned.map(|id| id.0 as usize + 1).max().unwrap_or(0)
+}
+
+/// A graph's containment forest, indexed by node id: every id in its id space
+/// carries a parent and a depth, an id the graph never names standing as a root.
+/// Containment must be acyclic, since every query walks towards the roots.
 pub struct Containment {
     parent: Vec<Option<Id>>,
     depth: Vec<u32>,
@@ -110,12 +124,7 @@ pub struct Containment {
 
 impl Containment {
     pub fn new(graph: &Graph) -> Self {
-        let mentioned = graph
-            .nodes
-            .iter()
-            .flat_map(|n| [Some(n.id), n.parent])
-            .flatten();
-        let len = mentioned.map(|id| id.0 as usize + 1).max().unwrap_or(0);
+        let len = id_span(graph);
         let mut parent: Vec<Option<Id>> = vec![None; len];
         for node in &graph.nodes {
             parent[node.id.0 as usize] = node.parent;
