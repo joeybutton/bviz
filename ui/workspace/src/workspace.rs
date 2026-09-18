@@ -778,6 +778,16 @@ impl Render for Workspace {
             Layout::Pane(pane) => pane.clone().into_any_element(),
             layout => self.arrangement(layout, &colors, cx),
         };
+        let body = div()
+            .flex()
+            .flex_col()
+            // The room the chrome's bands leave, asked for as the room left
+            // rather than as the whole of the window, which would squeeze those
+            // bands out of the height each of them asks for.
+            .flex_1()
+            .min_h(px(0.))
+            .w_full()
+            .child(body);
         let chrome = Chrome::new(&self.window_focus)
             .title(window_title(&self.app_name, &panel, cx))
             .menu(self.documents_menu.clone())
