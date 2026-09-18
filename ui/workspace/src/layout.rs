@@ -10,6 +10,11 @@ pub(crate) const MIN_PANE_SHARE: f32 = 0.05;
 /// The share a split gives its leading side when nothing asks for another.
 const EVEN_SHARE: f32 = 0.5;
 
+/// The share of what a pane asked for that it keeps when
+/// [`Layout::insert_beside`] lays another beside it, the two of them dividing
+/// what it held between them.
+pub(crate) const BESIDE_SHARE: f32 = 0.5;
+
 /// The least a side of a split can ask for, so that the flexes of a split
 /// always add up to something positive to divide a share out of.
 const LEAST_FLEX: f32 = f32::MIN_POSITIVE;
@@ -62,6 +67,15 @@ impl Side {
     pub(crate) fn leads(self) -> bool {
         matches!(self, Side::Left | Side::Top)
     }
+}
+
+/// What an arrangement lays a pane put against one of its edges out at: the
+/// share it takes of the room the dividers leave the sides of the split it
+/// joins, and how many dividers that split then lays out.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct AtEdge {
+    pub share: f32,
+    pub dividers: usize,
 }
 
 /// What one side of a split asks for of the split's extent, against what its
@@ -299,6 +313,22 @@ impl<P> Layout<P> {
         }
     }
 
+    /// What [`Layout::insert_at_edge`] lays a pane put against `side` of the
+    /// whole arrangement out at: an even share of the split it joins, or half
+    /// of the arrangement it is parted from.
+    pub fn at_edge(&self, side: Side) -> AtEdge {
+        match self {
+            Layout::Split(split) if split.axis == side.axis() => AtEdge {
+                share: 1.0 / (split.children.len() + 1) as f32,
+                dividers: split.children.len(),
+            },
+            _ => AtEdge {
+                share: EVEN_SHARE,
+                dividers: 1,
+            },
+        }
+    }
+
     /// The panes, in the order they are laid out.
     pub fn panes(&self) -> Panes<'_, P> {
         Panes {
@@ -379,7 +409,7 @@ impl<P: Clone + PartialEq> Layout<P> {
         if split.axis != side.axis() || !split.children[at].layout.is_pane(target) {
             return split.children[at].layout.insert_beside(target, side, new);
         }
-        let half = Flex::new(split.children[at].flex.shares() / 2.0);
+        let half = Flex::new(split.children[at].flex.shares() * BESIDE_SHARE);
         split.children[at].flex = half;
         let at = match side.leads() {
             true => at,
@@ -614,6 +644,45 @@ mod tests {
         trailing.insert_at_edge(Side::Bottom, 'z');
         assert_eq!(shape(&trailing), "(a/b/c/z)");
         assert_shares(root(&trailing), &[0.1875, 0.1875, 0.375, 0.25]);
+    }
+
+    /// A pane put against an edge takes the share of the arrangement that
+    /// [`Layout::at_edge`] reports, over a split laying out as many dividers as
+    /// it reports — which together mark the region a drop there would fill
+    /// before it is dropped.
+    #[test]
+    fn what_a_pane_put_against_an_edge_takes_is_told_ahead_of_the_move() {
+        let mut leading = row(&[1.0, 1.0, 2.0]);
+        let at = leading.at_edge(Side::Left);
+        leading.insert_at_edge(Side::Left, 'z');
+        assert_shares(root(&leading), &[at.share, 0.1875, 0.1875, 0.375]);
+        assert_eq!(at.dividers, dividers(&leading));
+
+        let mut across = row(&[1.0, 3.0]);
+        let at = across.at_edge(Side::Top);
+        across.insert_at_edge(Side::Top, 'z');
+        assert_shares(root(&across), &[at.share, 1.0 - at.share]);
+        assert_eq!(at.dividers, dividers(&across));
+
+        let mut lone = Layout::Pane('a');
+        let at = lone.at_edge(Side::Bottom);
+        lone.insert_at_edge(Side::Bottom, 'z');
+        assert_shares(root(&lone), &[1.0 - at.share, at.share]);
+        assert_eq!(at.dividers, dividers(&lone));
+    }
+
+    /// A pane put beside another keeps [`BESIDE_SHARE`] of what that one asked
+    /// for, which is what marks the region a drop there would fill before it is
+    /// dropped.
+    #[test]
+    fn what_a_pane_put_beside_another_takes_is_the_share_told_ahead_of_the_move() {
+        let mut row = row(&[1.0, 1.0]);
+        assert!(row.insert_beside(&'a', Side::Right, 'z'));
+        assert_shares(root(&row), &[0.5 * BESIDE_SHARE, 0.5 * BESIDE_SHARE, 0.5]);
+
+        let mut across = Layout::Pane('a');
+        assert!(across.insert_beside(&'a', Side::Bottom, 'z'));
+        assert_shares(root(&across), &[1.0 - BESIDE_SHARE, BESIDE_SHARE]);
     }
 
     /// The pane a move would put against an edge is the pane already there when
@@ -971,6 +1040,11 @@ mod tests {
             (whole - 1.0).abs() < SHARE_ROUNDING,
             "{shares:?} take {whole} of the extent between them, not all of it"
         );
+    }
+
+    /// How many dividers the outermost split of `layout` parts its sides by.
+    fn dividers(layout: &Layout<char>) -> usize {
+        root(layout).children.len() - 1
     }
 
     /// The outermost split of `layout`.

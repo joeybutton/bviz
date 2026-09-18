@@ -2,8 +2,9 @@ use crate::{AnyPanel, PanelEvent};
 use bviz_ui_components::Button;
 use bviz_ui_theme::ThemeColors;
 use gpui::{
-    AnyElement, App, ClickEvent, Div, ElementId, EntityId, EventEmitter, IntoElement, MouseButton,
-    Pixels, Render, Subscription, Window, div, prelude::*, px,
+    AnyElement, App, Bounds, ClickEvent, Div, ElementId, EntityId, EventEmitter, IntoElement,
+    MouseButton, MouseDownEvent, MouseUpEvent, Pixels, Point, Render, Subscription, Window, div,
+    prelude::*, px,
 };
 use std::cmp::Ordering;
 
@@ -41,6 +42,11 @@ pub struct Pane {
     /// Whether the window lays out panes besides this one, as its workspace last
     /// laid the arrangement out.
     shares_window: bool,
+    /// Where the last frame laid out the tab naming each panel the pane holds,
+    /// in the order it holds them. Read between frames, to tell where a drag
+    /// over the tabs would join them. Empty until a frame has laid a tab out,
+    /// and while the pane names its panels not at all.
+    tab_bounds: Vec<Bounds<Pixels>>,
 }
 
 /// What handing a panel over left of the pane that held it. The panel is
@@ -64,6 +70,16 @@ pub enum PaneEvent {
     Closed,
     /// The panel on show is asking for a window of its own.
     Detach,
+    /// A press landed on the tab naming that panel, at that point of the
+    /// window. The press is a drag of the panel from there if it is carried far
+    /// enough, which only the workspace can tell, the drag running across the
+    /// whole window.
+    Pressed { panel: EntityId, at: Point<Pixels> },
+    /// The button came up over a tab, at that point of the window. The handlers
+    /// carrying a drag across the window are installed by a paint, so a press
+    /// and a release inside one frame never reach them; the release the tab
+    /// itself takes ends the gesture in that case.
+    Released { at: Point<Pixels> },
 }
 
 impl EventEmitter<PaneEvent> for Pane {}
@@ -78,6 +94,7 @@ impl Pane {
             }],
             active: 0,
             shares_window: false,
+            tab_bounds: Vec::new(),
         };
         pane.show_active(window, cx);
         pane
@@ -123,6 +140,15 @@ impl Pane {
 
     pub(crate) fn set_shares_window(&mut self, shares: bool) {
         self.shares_window = shares;
+    }
+
+    pub(crate) fn tab_bounds(&self) -> &[Bounds<Pixels>] {
+        &self.tab_bounds
+    }
+
+    /// The panel the pane holds at `index` of its tabs.
+    pub(crate) fn panel_at(&self, index: usize) -> Option<&AnyPanel> {
+        Some(&self.tabs.get(index)?.panel)
     }
 
     /// Which tab holds `panel`, if this pane holds it at all.
@@ -268,12 +294,13 @@ impl Pane {
             .border_color(colors.border)
             .text_sm()
             .children(tabs)
+            .on_children_prepainted(tabs_laid_out(cx))
     }
 
     /// The grip over a pane holding one panel, naming that panel as a tab strip
     /// names the several a pane picks between.
-    fn handle(&self, colors: &ThemeColors, cx: &App) -> impl IntoElement {
-        let panel = self.active_panel();
+    fn handle(&self, colors: &ThemeColors, cx: &mut Context<Self>) -> impl IntoElement {
+        let panel = self.active_panel().clone();
         let ink = colors.text_muted;
         div()
             .id(ElementId::NamedInteger(
@@ -295,12 +322,14 @@ impl Pane {
             .text_sm()
             .text_color(ink)
             .cursor_pointer()
+            .on_mouse_down(MouseButton::Left, pressed(panel.entity_id(), cx))
+            .on_mouse_up(MouseButton::Left, released(cx))
             .children(panel.icon(cx).map(|name| {
                 bviz_ui_assets::icon(name)
                     .size(HANDLE_ICON_SIZE)
                     .text_color(ink)
             }))
-            .child(title(panel, cx))
+            .child(title(&panel, cx))
     }
 
     fn tab(&self, index: usize, colors: &ThemeColors, cx: &mut Context<Self>) -> AnyElement {
@@ -335,6 +364,8 @@ impl Pane {
             .text_color(ink)
             .cursor_pointer()
             .when(!showing, |tab| tab.hover(move |s| s.bg(hover)))
+            .on_mouse_down(MouseButton::Left, pressed(panel.entity_id(), cx))
+            .on_mouse_up(MouseButton::Left, released(cx))
             // A second click on a tab sends its panel to a window of its own. The
             // workspace detaches whichever panel the pane is showing, so the tab
             // is brought forward either way.
@@ -374,6 +405,36 @@ impl Pane {
     }
 }
 
+/// Tells the pane a press landed on the tab naming `panel`, which the workspace
+/// reads as the start of a drag of that panel.
+fn pressed(
+    panel: EntityId,
+    cx: &mut Context<Pane>,
+) -> impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static {
+    cx.listener(move |_, event: &MouseDownEvent, _, cx| {
+        cx.emit(PaneEvent::Pressed {
+            panel,
+            at: event.position,
+        });
+    })
+}
+
+/// Tells the pane the button came up over a tab, which the workspace reads as
+/// the end of the gesture that press began.
+fn released(cx: &mut Context<Pane>) -> impl Fn(&MouseUpEvent, &mut Window, &mut App) + 'static {
+    cx.listener(|_, event: &MouseUpEvent, _, cx| {
+        cx.emit(PaneEvent::Released { at: event.position });
+    })
+}
+
+/// Records where a frame laid the tabs out, for a drag over them to read.
+fn tabs_laid_out(
+    cx: &Context<Pane>,
+) -> impl Fn(Vec<Bounds<Pixels>>, &mut Window, &mut App) + 'static {
+    let pane = cx.entity();
+    move |tabs, _, cx| pane.update(cx, |pane, _| pane.tab_bounds = tabs)
+}
+
 /// A panel's name as the pane holding it puts it up: cut short where there is
 /// no room for it, keeping the number of the document it belongs to in view.
 fn title(panel: &AnyPanel, cx: &App) -> Div {
@@ -408,11 +469,19 @@ impl Render for Pane {
         // pick between and nothing to tell it apart from, so anything drawn over
         // it would only take room from it.
         if self.tabs.len() == 1 && !self.shares_window {
+            self.tab_bounds.clear();
             return body.into_any_element();
         }
         let colors = bviz_ui_theme::theme(window, cx).colors;
         let above = match self.tabs.len() {
-            1 => self.handle(&colors, cx).into_any_element(),
+            // The handle is the one tab the pane puts up, and reports itself as
+            // such through the container that measures its children.
+            1 => div()
+                .flex_shrink_0()
+                .w_full()
+                .child(self.handle(&colors, cx))
+                .on_children_prepainted(tabs_laid_out(cx))
+                .into_any_element(),
             _ => self.tab_strip(&colors, cx).into_any_element(),
         };
         div()
