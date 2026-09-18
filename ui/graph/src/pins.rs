@@ -6,12 +6,14 @@
 //! be taken back, or an override would be a state a reader could reach and not
 //! leave.
 
-use crate::{GraphPanel, Palette, checklist};
+use crate::{CARD_MAX_SHARE, GraphPanel, Palette, checklist};
 use bviz_graph_layout::select::labels::carried_label;
 use bviz_graph_layout::select::{Filter, Visibility};
 use bviz_graph_layout::{Facets, Id, Names};
 use bviz_ui_components::Button;
-use gpui::{ClickEvent, Context, Div, Pixels, SharedString, Stateful, div, prelude::*, px};
+use gpui::{
+    ClickEvent, Context, Div, Pixels, SharedString, Stateful, div, prelude::*, px, relative,
+};
 use std::collections::HashMap;
 
 /// Width the list of pins is drawn at, over the drawing it names boxes of.
@@ -143,6 +145,7 @@ pub(crate) fn panel(
             .right_2()
             .top_2()
             .w(PANEL_WIDTH)
+            .max_w(relative(CARD_MAX_SHARE))
             .occlude()
             .flex()
             .flex_col()

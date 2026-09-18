@@ -86,6 +86,11 @@ pub fn register_keys(cx: &mut App) {
 /// Padding around the graph, in layout pixels.
 const MARGIN: f64 = 16.0;
 
+/// The share of the canvas a card floating over it may span. The cards sit at
+/// opposite corners, so a share leaving a gap between two of them keeps either
+/// from covering the other however narrow the canvas.
+const CARD_MAX_SHARE: f32 = 0.45;
+
 /// Largest zoom-in factor. The smallest is computed per graph so the whole graph
 /// always fits the viewport.
 const MAX_ZOOM: f32 = 4.0;

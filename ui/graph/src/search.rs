@@ -11,7 +11,7 @@
 //! that list samples the matches so a reader can see what the pattern reached,
 //! and the count beside it covers all of them.
 
-use crate::{GraphPanel, Palette, checklist, pins};
+use crate::{CARD_MAX_SHARE, GraphPanel, Palette, checklist, pins};
 use bviz_graph_layout::Id;
 use bviz_graph_layout::select::labels::LabelIndex;
 use bviz_graph_layout::select::pattern::Pattern;
@@ -19,7 +19,7 @@ use bviz_graph_layout::select::{Base, Filter, Predicate, Rule, Visibility};
 use bviz_ui_components::{Button, TextInput};
 use gpui::{
     ClickEvent, Context, Div, Entity, IntoElement, Pixels, SharedString, Stateful, Task, div,
-    prelude::*, px,
+    prelude::*, px, relative,
 };
 use std::time::Duration;
 
@@ -309,6 +309,7 @@ pub(crate) fn results(
             .left_2()
             .top_2()
             .w(RESULTS_WIDTH)
+            .max_w(relative(CARD_MAX_SHARE))
             .occlude()
             .flex()
             .flex_col()
