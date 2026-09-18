@@ -535,6 +535,23 @@ impl Facets {
         self.rule_classes.get(&rule_class).copied()
     }
 
+    /// Every repository the nodes name, in no particular order.
+    pub fn repos(&self) -> impl Iterator<Item = (RepoRef, &RepoEntry)> {
+        self.repos.iter().map(|(&repo, entry)| (repo, entry))
+    }
+
+    /// Every configuration the nodes are built in, in no particular order.
+    pub fn configs(&self) -> impl Iterator<Item = (ConfigRef, &ConfigEntry)> {
+        self.configs.iter().map(|(&config, entry)| (config, entry))
+    }
+
+    /// Every rule class the nodes were declared by, in no particular order.
+    pub fn rule_classes(&self) -> impl Iterator<Item = (RuleClassRef, RuleCategory)> {
+        self.rule_classes
+            .iter()
+            .map(|(&rule_class, &category)| (rule_class, category))
+    }
+
     /// Moves every facet to the node id `remap` gives its node, which must map
     /// each id of `0..remap.len()` to a distinct id of that same range.
     pub fn renumber(&mut self, remap: &[Id]) {

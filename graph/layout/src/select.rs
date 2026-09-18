@@ -6,6 +6,7 @@
 //! its own, and survives a graph being rebuilt, which the ids in such a set
 //! would not.
 
+mod eval;
 pub mod pattern;
 
 use std::borrow::Borrow;
@@ -16,6 +17,7 @@ use crate::graph::{Kind, Node};
 use crate::intern::{Id, Names};
 use crate::label;
 use crate::repo::RepoCategory;
+pub use eval::Verdicts;
 use pattern::{PackagePrefix, Pattern};
 
 /// What a filter says is to become of one node.
@@ -269,7 +271,7 @@ impl Predicate {
 
 /// The [`Tri`] a node must carry to answer `yes`, an unstated facet answering
 /// neither.
-fn stating(yes: bool) -> Tri {
+pub(crate) fn stating(yes: bool) -> Tri {
     if yes { Tri::Yes } else { Tri::No }
 }
 
