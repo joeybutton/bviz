@@ -389,10 +389,10 @@ impl Wiring<'_> {
         }
     }
 
-    /// The leaf node `artifact_id` wires from: a generated input through its
+    /// The leaf node `artifact_id` wires from: a derived input through its
     /// producing artifact node, a source through a deduped source node. `None`
     /// for a dropped input: an external source when `external_sources` is off,
-    /// or a generated input produced outside the queried scope, which has no
+    /// or a derived input produced outside the queried scope, which has no
     /// producer node. The result depends only on the artifact, so it is memoized
     /// across the many consumers a shared input feeds.
     fn resolve_member(
@@ -415,10 +415,12 @@ impl Wiring<'_> {
         graph: &mut Graph,
         names: &mut Names,
     ) -> Option<Id> {
+        if let Some(&producer) = self.producer_node_id.get(&artifact_id) {
+            return Some(producer);
+        }
         let path = self.paths.full_path(artifact_id);
-        if is_generated(&path) {
-            // A generated input with no in-scope producer has no node to connect from.
-            return self.producer_node_id.get(&artifact_id).copied();
+        if is_derived(&path) {
+            return None;
         }
         if !self.external_sources && is_external_source(&path) {
             return None;
@@ -528,8 +530,9 @@ fn generated_suffix(path: &str) -> Option<&str> {
     rest.strip_prefix("bin/")
 }
 
-fn is_generated(path: &str) -> bool {
-    generated_suffix(path).is_some()
+/// Whether `path` names an output tree, which no source file lives in.
+fn is_derived(path: &str) -> bool {
+    path.starts_with("bazel-out/")
 }
 
 fn is_external_source(path: &str) -> bool {
@@ -559,29 +562,33 @@ mod tests {
         )
     }
 
-    /// A generated artifact at `bazel-out/k8-fastbuild/bin/<name>`, built from a
-    /// chain of path fragments rooted at fragment id `base` (its four fragments
-    /// take ids `base..base+4`); the artifact id is `i`.
-    fn generated_artifact(i: u32, base: u32, name: &str) -> (Artifact, Vec<PathFragment>) {
-        let frag = |id: u32, label: &str, parent_id: u32| PathFragment {
-            id,
-            label: label.to_string(),
-            parent_id,
-        };
-        let fragments = vec![
-            frag(base, "bazel-out", 0),
-            frag(base + 1, "k8-fastbuild", base),
-            frag(base + 2, "bin", base + 1),
-            frag(base + 3, name, base + 2),
-        ];
+    /// An artifact with id `i` at exec path `path`, built from one path fragment
+    /// per component, the fragments taking consecutive ids from `base`.
+    fn artifact_at(i: u32, base: u32, path: &str) -> (Artifact, Vec<PathFragment>) {
+        let mut fragments = Vec::new();
+        let mut parent_id = 0;
+        for (n, component) in path.split('/').enumerate() {
+            let id = base + n as u32;
+            fragments.push(PathFragment {
+                id,
+                label: component.to_string(),
+                parent_id,
+            });
+            parent_id = id;
+        }
         (
             Artifact {
                 id: i,
-                path_fragment_id: base + 3,
+                path_fragment_id: parent_id,
                 is_tree_artifact: false,
             },
             fragments,
         )
+    }
+
+    /// A generated artifact at `bazel-out/k8-fastbuild/bin/<name>`.
+    fn generated_artifact(i: u32, base: u32, name: &str) -> (Artifact, Vec<PathFragment>) {
+        artifact_at(i, base, &format!("bazel-out/k8-fastbuild/bin/{name}"))
     }
 
     fn dep_set(id: u32, directs: &[u32], transitives: &[u32]) -> DepSetOfFiles {
@@ -780,6 +787,49 @@ mod tests {
                 .iter()
                 .any(|n| names.resolve(n.id) == "artifact1")
         );
+        assert!(edges(&graph, &names).is_empty());
+    }
+
+    #[test]
+    fn derived_member_outside_the_bin_tree_flattens_through_its_producer() {
+        let (artifact, frags) = artifact_at(1, 100, "bazel-out/k8-fastbuild/genfiles/gen.h");
+        let producer = Action {
+            target_id: 9,
+            mnemonic: "Produce".to_string(),
+            configuration_id: 1,
+            output_ids: vec![1],
+            ..Default::default()
+        };
+        let container = ActionGraphContainer {
+            artifacts: vec![artifact],
+            path_fragments: frags,
+            dep_set_of_files: vec![dep_set(10, &[1], &[])],
+            actions: vec![producer, action(1, "Compile", &[10])],
+            ..Default::default()
+        };
+
+        let (graph, names) = build(&[container], false);
+
+        let edges = edges(&graph, &names);
+        assert!(edges.contains(&("action0", "artifact1")));
+        assert!(edges.contains(&("artifact1", "action1")));
+        assert!(!graph.nodes.iter().any(|n| n.kind == Kind::Source));
+    }
+
+    #[test]
+    fn derived_member_outside_the_bin_tree_without_producer_is_skipped() {
+        let (artifact, frags) = artifact_at(1, 100, "bazel-out/stable-status.txt");
+        let container = ActionGraphContainer {
+            artifacts: vec![artifact],
+            path_fragments: frags,
+            dep_set_of_files: vec![dep_set(10, &[1], &[])],
+            actions: vec![action(1, "Compile", &[10])],
+            ..Default::default()
+        };
+
+        let (graph, names) = build(&[container], false);
+
+        assert!(!graph.nodes.iter().any(|n| n.kind == Kind::Source));
         assert!(edges(&graph, &names).is_empty());
     }
 
