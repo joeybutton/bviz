@@ -59,8 +59,12 @@ impl Axis {
             // the repository unidentified.
             Axis::Repo => Some("--consistent_labels"),
             Axis::Package | Axis::Label | Axis::Mnemonic | Axis::Aspect => None,
-            Axis::RuleClass | Axis::RuleCategory => Some("--proto:rule_classes"),
-            Axis::Configuration => Some("--proto:include_configurations"),
+            // Every query writes the class a rule was declared by whatever else
+            // it is asked for.
+            Axis::RuleClass | Axis::RuleCategory => None,
+            // A cquery asked for no configurations writes query's message type
+            // instead, which is no longer cquery output at all.
+            Axis::Configuration => None,
             Axis::ExecConfiguration => Some("--transitions=lite"),
             Axis::Tags | Axis::Testonly => Some("--proto:output_rule_attrs"),
             Axis::Artifacts => Some("--include_artifacts"),
@@ -183,11 +187,18 @@ mod tests {
     #[test]
     fn an_axis_a_flag_governs_and_nothing_states_is_unavailable() {
         assert_eq!(
-            support(Axis::Configuration, 0, 7),
+            support(Axis::Repo, 0, 7),
             Support::Unavailable {
-                flag: "--proto:include_configurations"
+                flag: "--consistent_labels"
             }
         );
+    }
+
+    #[test]
+    fn an_axis_every_output_states_offers_no_flag() {
+        for axis in [Axis::RuleClass, Axis::RuleCategory, Axis::Configuration] {
+            assert_eq!(axis.flag(), None, "{axis:?}");
+        }
     }
 
     #[test]

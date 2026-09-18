@@ -702,15 +702,17 @@ mod tests {
     }
 
     #[test]
-    fn a_cquery_printed_without_configurations_cannot_filter_on_them() {
+    fn a_configured_target_naming_no_configuration_leaves_the_axis_short() {
         let cquery_results = vec![cquery_rule("//foo:app", 0, Vec::new())];
 
         let (_, _, _, capabilities) = build_joint(None, Some(&cquery_results), None, false);
 
         assert_eq!(
             capabilities.support(Axis::Configuration),
-            Support::Unavailable {
-                flag: "--proto:include_configurations"
+            Support::Partial {
+                covered: 0,
+                relevant: 1,
+                flag: None
             }
         );
     }
