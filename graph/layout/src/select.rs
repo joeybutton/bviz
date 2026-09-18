@@ -477,7 +477,7 @@ mod tests {
                     testonly: Some(true),
                     ..Predicate::default()
                 },
-                vec![app],
+                vec![app, action],
             ),
             (
                 Predicate {

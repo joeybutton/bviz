@@ -598,11 +598,11 @@ mod tests {
 
         assert_eq!(
             fixture.nodes(&filter, Visibility::Shown),
-            named([CONFIGURED, ACTION, SOURCE, GROUP])
+            named([ACTION, SOURCE, GROUP])
         );
         assert_eq!(
             fixture.nodes(&filter, Visibility::Faded),
-            named([APP, OUTPUT])
+            named([APP, CONFIGURED, OUTPUT])
         );
         assert_eq!(fixture.nodes(&filter, Visibility::Hidden), named([LIB]));
     }

@@ -420,16 +420,18 @@ impl Facets {
     /// A facet `child` already states is the one it keeps, so a node that names
     /// its own target or configuration is not overwritten by its owner's.
     pub fn inherit(&mut self, child: Id, owner: Id) {
-        let (repo, rule_class, config, package, label) = (
+        let (repo, rule_class, config, testonly, package, label) = (
             self.repo(owner),
             self.rule_class(owner),
             self.config(owner),
+            self.testonly(owner),
             self.package(owner),
             self.label(owner),
         );
         self.set_repo(child, repo);
         self.set_rule_class(child, rule_class);
         self.set_config(child, config);
+        self.set_testonly(child, testonly);
         if let Some(package) = package {
             self.set_package(child, package);
         }
@@ -902,6 +904,7 @@ mod tests {
         );
         facets.set_rule_class(Id(0), Some(rule_class));
         facets.set_config(Id(0), Some(owners));
+        facets.set_testonly(Id(0), Tri::Yes);
         facets.set_label(Id(0), Id(0));
         facets.set_config(Id(1), Some(own));
         facets.set_label(Id(1), Id(1));
@@ -909,6 +912,7 @@ mod tests {
         facets.inherit(Id(1), Id(0));
 
         assert_eq!(facets.rule_class(Id(1)), Some(rule_class));
+        assert_eq!(facets.testonly(Id(1)), Tri::Yes);
         assert_eq!(facets.config(Id(1)), Some(own));
         assert_eq!(facets.label(Id(1)), Some(Id(1)));
     }
