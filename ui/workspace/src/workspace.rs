@@ -10,8 +10,9 @@ use bviz_ui_shell::Chrome;
 use bviz_ui_theme::ThemeColors;
 use gpui::{
     Action, AnyElement, AnyWindowHandle, App, Axis, Bounds, Canvas, Div, ElementId, Entity,
-    EntityId, FocusHandle, IntoElement, KeyBinding, Pixels, Point, Render, SharedString, Size,
-    Stateful, Subscription, Window, actions, deferred, div, point, prelude::*, px,
+    EntityId, FocusHandle, IntoElement, KeyBinding, MouseDownEvent, Pixels, Point, Render,
+    SharedString, Size, Stateful, Subscription, Window, actions, deferred, div, point, prelude::*,
+    px,
 };
 use std::collections::HashMap;
 
@@ -35,7 +36,8 @@ actions!(
         SplitLeft,
         SplitRight,
         SplitUp,
-        SplitDown
+        SplitDown,
+        EvenSplit
     ]
 );
 
@@ -90,6 +92,7 @@ pub(crate) fn register_keys(cx: &mut App) {
         KeyBinding::new("secondary-shift-n", DetachPanel, Some(KEY_CONTEXT)),
         KeyBinding::new("secondary-shift-d", ToggleDocuments, Some(KEY_CONTEXT)),
         KeyBinding::new("secondary-k m", ToggleMaximize, Some(KEY_CONTEXT)),
+        KeyBinding::new("secondary-k =", EvenSplit, Some(KEY_CONTEXT)),
         KeyBinding::new("secondary-k left", FocusLeft, Some(KEY_CONTEXT)),
         KeyBinding::new("secondary-k right", FocusRight, Some(KEY_CONTEXT)),
         KeyBinding::new("secondary-k up", FocusUp, Some(KEY_CONTEXT)),
@@ -731,6 +734,27 @@ impl Workspace {
         }
     }
 
+    /// Gives every side of the split `divider` parts the same share of that
+    /// split's extent, and lets go of whatever boundary a drag is holding, so
+    /// that the press ahead of this one leaves no drag running behind it.
+    fn even_split(&mut self, divider: DividerId, cx: &mut Context<Self>) {
+        self.divider_drag = None;
+        self.rearrange(cx).even_split(divider);
+        cx.notify();
+    }
+
+    /// Gives every side of the innermost split laying the active pane out the
+    /// same share of that split's extent. A window of one pane lays it out in no
+    /// split, and there is nothing to even.
+    fn even_active_split(&mut self, cx: &mut Context<Self>) {
+        let active = self.active.clone();
+        let layout = self.rearrange(cx);
+        if let Some(divider) = layout.innermost_divider(&active) {
+            layout.even_split(divider);
+            cx.notify();
+        }
+    }
+
     /// Tells every pane how the window frames it. The arrangement is the
     /// workspace's to know, and a frame draws a window from its root, so every
     /// pane hears this before it draws itself.
@@ -1114,7 +1138,8 @@ fn span(bounds: Bounds<Pixels>, axis: Axis) -> (f32, f32) {
 }
 
 /// The grab band at one boundary between a split's sides, [`DIVIDER_GRIP`]
-/// across.
+/// across. A press takes hold of the boundary to drag it; a double click evens
+/// the split it parts instead, taking hold of nothing.
 fn divider(
     id: DividerId,
     axis: Axis,
@@ -1130,7 +1155,11 @@ fn divider(
     Divider::new(
         ElementId::NamedInteger("split-divider".into(), id.as_u64()),
         axis,
-        cx.listener(move |workspace, _, _, cx| {
+        cx.listener(move |workspace, event: &MouseDownEvent, _, cx| {
+            if event.click_count > 1 {
+                workspace.even_split(id, cx);
+                return;
+            }
             workspace.divider_drag = Some(id);
             cx.notify();
         }),
@@ -1253,6 +1282,9 @@ impl Render for Workspace {
             .on_action(cx.listener(|workspace, _: &ToggleMaximize, _, cx| {
                 let pane = workspace.active.clone();
                 workspace.toggle_maximize(&pane, cx);
+            }))
+            .on_action(cx.listener(|workspace, _: &EvenSplit, _, cx| {
+                workspace.even_active_split(cx);
             }))
             // Not a listener: `toggle` reads this workspace.
             .on_action({

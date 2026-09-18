@@ -19,6 +19,11 @@ pub(crate) const BESIDE_SHARE: f32 = 0.5;
 /// always add up to something positive to divide a share out of.
 const LEAST_FLEX: f32 = f32::MIN_POSITIVE;
 
+/// What every side of an evened split asks for. A share is divided out of what
+/// the sides ask for between them, so any one flex they all hold divides the
+/// extent evenly and which one it is does not matter.
+const EVEN_FLEX: f32 = 1.0;
+
 /// Identity of one side of a split, minted where the side is laid out and kept
 /// by it wherever the arrangement lays it out afterwards.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -246,6 +251,14 @@ impl<P> Split<P> {
         self.children[boundary + 1].flex = Flex::new(parted * (between - leading) / between);
     }
 
+    /// Leaves every side asking for as much as every other, so that the split
+    /// lays them all out at the same share of its extent.
+    fn even(&mut self) {
+        for child in &mut self.children {
+            child.flex = Flex::new(EVEN_FLEX);
+        }
+    }
+
     /// Brings the side at `at` into normal form.
     fn splice(&mut self, at: usize) {
         let Child { id, layout, flex } = self.children.remove(at);
@@ -339,17 +352,42 @@ impl<P> Layout<P> {
     /// Hands the split the divider belongs to the share of its extent a drag
     /// has moved that divider to, reporting whether the arrangement holds it.
     pub fn move_divider(&mut self, divider: DividerId, share: f32) -> bool {
-        let Layout::Split(split) = self else {
-            return false;
-        };
-        if let Some(boundary) = split.boundary_at(divider) {
-            split.divide_at(boundary, share);
-            return true;
+        match self.parted_by(divider) {
+            Some((split, boundary)) => {
+                split.divide_at(boundary, share);
+                true
+            }
+            None => false,
         }
-        split
-            .children
-            .iter_mut()
-            .any(|child| child.layout.move_divider(divider, share))
+    }
+
+    /// Gives every side of the split the divider belongs to the same share of
+    /// that split's extent, reporting whether the arrangement holds it. The
+    /// sides that are splits themselves go on dividing what they are given
+    /// exactly as they did.
+    pub fn even_split(&mut self, divider: DividerId) -> bool {
+        match self.parted_by(divider) {
+            Some((split, _)) => {
+                split.even();
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// The split `divider` belongs to, and the boundary between that split's
+    /// sides it parts. `None` where the arrangement parts no sides by it.
+    fn parted_by(&mut self, divider: DividerId) -> Option<(&mut Split<P>, usize)> {
+        let Layout::Split(split) = self else {
+            return None;
+        };
+        match split.boundary_at(divider) {
+            Some(boundary) => Some((split, boundary)),
+            None => split
+                .children
+                .iter_mut()
+                .find_map(|child| child.layout.parted_by(divider)),
+        }
     }
 }
 
@@ -360,6 +398,23 @@ impl<P: PartialEq> Layout<P> {
 
     fn is_pane(&self, target: &P) -> bool {
         matches!(self, Layout::Pane(pane) if pane == target)
+    }
+
+    /// A divider of the innermost split laying `target` out, which is how that
+    /// split is named to [`Layout::even_split`]: every divider of a split names
+    /// that same split, so which of them this is does not matter. `None` where
+    /// no split lays `target` out, the arrangement being that pane alone.
+    pub fn innermost_divider(&self, target: &P) -> Option<DividerId> {
+        let Layout::Split(split) = self else {
+            return None;
+        };
+        let side = split
+            .children
+            .iter()
+            .find(|child| child.layout.contains(target))?;
+        side.layout
+            .innermost_divider(target)
+            .or_else(|| split.children.get(1).map(|child| DividerId(child.id)))
     }
 
     /// Whether `target` is already laid out spanning `side` of the whole
@@ -991,6 +1046,88 @@ mod tests {
 
         assert_eq!(layout.remove(&'c'), Removal::Removed);
         assert!(!layout.move_divider(divider, 0.5));
+    }
+
+    /// However far the sides of a split have been dragged apart, evening it
+    /// leaves every one of them at the same share of its extent.
+    #[test]
+    fn evening_a_split_lays_every_side_out_at_the_same_share() {
+        let mut layout = row(&[1.0, 7.0, 2.0]);
+        assert_shares(root(&layout), &[0.1, 0.7, 0.2]);
+        assert!(layout.even_split(divider_at(root(&layout), 1)));
+        assert_shares(root(&layout), &[1.0 / 3.0; 3]);
+    }
+
+    /// A divider belongs to the split that lays out the side it is against, at
+    /// whatever depth that split is, and evens that split alone.
+    #[test]
+    fn a_split_is_evened_by_a_divider_of_its_own_at_any_depth() {
+        let column = Layout::divided(Axis::Vertical, (pane(1), 1.0), vec![(pane(2), 3.0)]);
+        let mut layout = Layout::divided(Axis::Horizontal, (pane(0), 1.0), vec![(column, 3.0)]);
+        assert_eq!(shape(&layout), "(a|(b/c))");
+        let inner = divider_at(nested(root(&layout), 1), 0);
+        assert!(layout.even_split(inner));
+        assert_shares(root(&layout), &[0.25, 0.75]);
+        assert_shares(nested(root(&layout), 1), &[0.5, 0.5]);
+    }
+
+    /// Evening reaches the sides of one split: the splits laid out beside it and
+    /// the splits it lays out go on dividing what they are given as they did.
+    #[test]
+    fn evening_a_split_leaves_the_splits_around_it_as_they_were() {
+        let held = Layout::divided(Axis::Horizontal, (pane(2), 1.0), vec![(pane(3), 4.0)]);
+        let evened = Layout::divided(Axis::Vertical, (pane(1), 1.0), vec![(held, 3.0)]);
+        let beside = Layout::divided(Axis::Vertical, (pane(4), 1.0), vec![(pane(5), 4.0)]);
+        let mut layout = Layout::divided(
+            Axis::Horizontal,
+            (pane(0), 1.0),
+            vec![(evened, 7.0), (beside, 2.0)],
+        );
+        assert_eq!(shape(&layout), "(a|(b/(c|d))|(e/f))");
+        assert!(layout.even_split(divider_at(nested(root(&layout), 1), 0)));
+        assert_shares(root(&layout), &[0.1, 0.7, 0.2]);
+        assert_shares(nested(root(&layout), 1), &[0.5, 0.5]);
+        assert_shares(nested(nested(root(&layout), 1), 1), &[0.2, 0.8]);
+        assert_shares(nested(root(&layout), 2), &[0.2, 0.8]);
+    }
+
+    #[test]
+    fn evening_a_split_no_arrangement_holds_changes_nothing() {
+        let mut layout = three_panes();
+        let elsewhere = even_row(3);
+        assert!(!layout.even_split(divider_at(root(&elsewhere), 1)));
+        assert_shares(root(&layout), &[0.5, 0.25, 0.25]);
+    }
+
+    /// The split a gesture on a pane evens is the innermost one laying that pane
+    /// out, which is named by any divider that split lays out; a pane laid out
+    /// in no split at all is parted from nothing and names none.
+    #[test]
+    fn a_pane_names_the_innermost_split_laying_it_out() {
+        let mut layout = Layout::Pane('a');
+        assert_eq!(layout.innermost_divider(&'a'), None);
+
+        assert!(layout.insert_beside(&'a', Side::Right, 'b'));
+        assert!(layout.insert_beside(&'b', Side::Bottom, 'c'));
+        assert_eq!(shape(&layout), "(a|(b/c))");
+        assert_eq!(layout.innermost_divider(&'z'), None);
+
+        let outer = layout
+            .innermost_divider(&'a')
+            .expect("a split lays 'a' out");
+        let inner = layout
+            .innermost_divider(&'b')
+            .expect("a split lays 'b' out");
+        assert!(layout.move_divider(outer, 0.25));
+        assert!(layout.move_divider(inner, 0.75));
+
+        // 'b' names the split parting it from 'c', which is the only one evened.
+        assert!(layout.even_split(inner));
+        assert_shares(root(&layout), &[0.25, 0.75]);
+        assert_shares(nested(root(&layout), 1), &[0.5, 0.5]);
+
+        assert!(layout.even_split(outer));
+        assert_shares(root(&layout), &[0.5, 0.5]);
     }
 
     #[test]
