@@ -1,7 +1,8 @@
-use crate::model::ViewKey;
+use crate::derive::ViewKey;
 use crate::neighborhood::{Neighborhood, compute_neighborhood};
 use crate::relation::Relation;
 use bviz_graph_layout::{Id, LaidOut};
+use std::collections::HashSet;
 use std::rc::Rc;
 
 /// The node whose related nodes stay marked until another is picked, and which
@@ -54,6 +55,14 @@ impl Selection {
 
     pub(crate) fn clear(&mut self) {
         self.node = None;
+    }
+
+    /// Drops the selection where `gone` holds the node it stands on, which a
+    /// drawing no longer holding that node leaves nothing to mark from.
+    pub(crate) fn forget(&mut self, gone: &HashSet<Id>) {
+        if self.node.is_some_and(|node| gone.contains(&node)) {
+            self.clear();
+        }
     }
 
     pub(crate) fn set_relation(&mut self, relation: Relation) {
@@ -119,7 +128,14 @@ mod tests {
         }
     }
 
-    const VIEW: ViewKey = ViewKey::Map(0);
+    const VIEW: ViewKey = ViewKey::Map {
+        derivation: 0,
+        level: 0,
+    };
+    const NEXT_LEVEL: ViewKey = ViewKey::Map {
+        derivation: 0,
+        level: 1,
+    };
 
     #[test]
     fn nothing_selected_marks_nothing() {
@@ -146,12 +162,25 @@ mod tests {
         let first = selection.marking(&g, VIEW);
         assert!(Rc::ptr_eq(&first, &selection.marking(&g, VIEW)));
         // Each of the three things a marking is derived from retires it.
-        assert!(!Rc::ptr_eq(&first, &selection.marking(&g, ViewKey::Map(1))));
+        assert!(!Rc::ptr_eq(&first, &selection.marking(&g, NEXT_LEVEL)));
         selection.set_relation(Relation::Transitive(Direction::Out));
         let widened = selection.marking(&g, VIEW);
         assert!(!Rc::ptr_eq(&first, &widened));
         selection.toggle(Id(1));
         assert!(!Rc::ptr_eq(&widened, &selection.marking(&g, VIEW)));
+    }
+
+    /// A node the drawing no longer holds has nothing to mark, so a filter that
+    /// takes it out takes the selection with it and leaves one on any other node
+    /// standing.
+    #[test]
+    fn a_selection_on_a_node_a_filter_drops_goes_with_it() {
+        let mut selection = Selection::none();
+        selection.toggle(Id(0));
+        selection.forget(&[Id(1)].into_iter().collect());
+        assert_eq!(selection.node(), Some(Id(0)));
+        selection.forget(&[Id(0)].into_iter().collect());
+        assert_eq!(selection.node(), None);
     }
 
     /// The relation is the reader's standing answer to what a selection should

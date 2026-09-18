@@ -127,7 +127,50 @@ pub fn default_expansion(
     max_nodes: usize,
     max_edges: usize,
 ) -> Result<HashSet<Id>, Overflow> {
-    let order = expansion_order(&Forest::new(graph));
+    largest_fitting(
+        graph,
+        reduced,
+        expansion_order(&Forest::new(graph)),
+        max_nodes,
+        max_edges,
+    )
+}
+
+/// As much of `expanded` as `graph` can draw within `max_nodes` and
+/// `max_edges`, the containers revealing most giving way first; the
+/// [`Overflow`] of a graph no expansion of which fits, as for
+/// [`default_expansion`], whose `reduced` this shares.
+///
+/// This holds an expansion a reader built up to a graph that has since changed
+/// under it — the same graph filtered, say — so what it keeps is a part of what
+/// it was given and never a container the reader did not open. An id naming no
+/// container of `graph` is kept untouched: a group id the quotient pass mints
+/// names no node of the graph laid out from, so nothing here can size it.
+pub fn fitting_expansion(
+    graph: &Graph,
+    reduced: Option<&Graph>,
+    expanded: &HashSet<Id>,
+    max_nodes: usize,
+    max_edges: usize,
+) -> Result<HashSet<Id>, Overflow> {
+    let order: Vec<Id> = expansion_order(&Forest::new(graph))
+        .into_iter()
+        .filter(|id| expanded.contains(id))
+        .collect();
+    let sized: HashSet<Id> = order.iter().copied().collect();
+    let mut kept = largest_fitting(graph, reduced, order, max_nodes, max_edges)?;
+    kept.extend(expanded.iter().copied().filter(|id| !sized.contains(id)));
+    Ok(kept)
+}
+
+/// The longest prefix of `order` that fits both caps, as a set.
+fn largest_fitting(
+    graph: &Graph,
+    reduced: Option<&Graph>,
+    order: Vec<Id>,
+    max_nodes: usize,
+    max_edges: usize,
+) -> Result<HashSet<Id>, Overflow> {
     let drawn = IndexedGraph::drawing(graph, &reduced.unwrap_or(graph).edges);
     let fitting = largest_fitting_prefix(&drawn, &order, max_nodes, max_edges)?;
     Ok(order[..fitting].iter().copied().collect())
@@ -680,6 +723,67 @@ mod tests {
         assert_eq!(
             default_expansion(&g, None, 4, 1),
             Ok(expanded(&names, &["A"]))
+        );
+    }
+
+    /// An expansion within the caps is the reader's to keep, whichever
+    /// containers they opened and whichever a fresh search would have picked.
+    #[test]
+    fn an_expansion_that_fits_is_kept_whole() {
+        let (g, names) = two_towers();
+        let opened = expanded(&names, &["B"]);
+
+        assert_eq!(
+            fitting_expansion(&g, None, &opened, 100, 100),
+            Ok(opened.clone())
+        );
+        assert_ne!(
+            default_expansion(&g, None, 100, 100),
+            Ok(opened),
+            "the fixture's fresh search picks the same containers, so keeping \
+             them proves nothing",
+        );
+    }
+
+    /// Past the caps the expansion gives way container by container, so what is
+    /// left is part of what the reader had opened rather than a fresh view.
+    #[test]
+    fn an_expansion_past_the_caps_gives_way_a_container_at_a_time() {
+        let (mut g, names) = two_towers();
+        g.add_edge(
+            names.get("A.x").unwrap(),
+            names.get("B.y").unwrap(),
+            EdgeKind::Aquery,
+        );
+        let both = expanded(&names, &["A", "B"]);
+
+        // Room for one tower's leaves beside the other's folded root.
+        let kept = fitting_expansion(&g, None, &both, 4, 1).expect("the root view fits");
+        assert_eq!(kept.len(), 1);
+        assert!(kept.is_subset(&both));
+
+        assert_eq!(fitting_expansion(&g, None, &both, 2, 1), Ok(HashSet::new()));
+        assert_eq!(
+            fitting_expansion(&g, None, &both, 1, 1),
+            Err(Overflow { nodes: 2, edges: 1 }),
+        );
+    }
+
+    /// The quotient pass mints group ids past every node of the graph it laid
+    /// out, so an expansion naming one is sized against nothing and kept.
+    #[test]
+    fn an_expanded_id_the_graph_holds_no_container_for_is_kept() {
+        let (g, names) = two_towers();
+        let group = Id(names.len() as u32 + 7);
+        let opened: HashSet<Id> = [names.get("A").unwrap(), group].into_iter().collect();
+
+        assert_eq!(
+            fitting_expansion(&g, None, &opened, 100, 100),
+            Ok(opened.clone())
+        );
+        assert_eq!(
+            fitting_expansion(&g, None, &opened, 2, 0),
+            Ok([group].into_iter().collect()),
         );
     }
 

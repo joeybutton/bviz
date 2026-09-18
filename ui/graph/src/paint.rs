@@ -1,6 +1,6 @@
 use crate::camera::{Camera, Rect, to_screen, visible_rect};
+use crate::derive::{Drawn, Expandable};
 use crate::drag::track_gesture;
-use crate::model::{Drawn, Expandable};
 use crate::morph::Frame;
 use crate::neighborhood::{Neighborhood, compute_neighborhood};
 use crate::relation::{Direction, Relation};

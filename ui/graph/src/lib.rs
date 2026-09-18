@@ -21,6 +21,7 @@ use std::time::{Duration, Instant};
 
 mod build;
 mod camera;
+mod derive;
 mod drag;
 mod emphasis;
 mod framing;
@@ -36,12 +37,13 @@ mod selection;
 mod toolbar;
 
 use camera::{Camera, Rect, from_screen, recenter_rect, zoom_step};
+use derive::{Derived, Drawn, Expandable, LayoutLanded};
 use drag::{Drag, end_drag, start_pan};
 use emphasis::Emphasis;
 use framing::{Framing, build_prepaint};
 use legend::legend;
 use mode::LayoutMode;
-use model::{Drawn, Expandable, GraphModel, LayoutLanded, SourceReplaced};
+use model::{GraphModel, SourceReplaced};
 use morph::{Frame, Morph};
 use paint::{Scene, TitleTarget, canvas_body};
 use relation::Relation;
@@ -149,6 +151,8 @@ pub struct GraphPanel {
     focus_handle: FocusHandle,
     /// The graph drawn here, shared with every other view of it.
     model: Entity<GraphModel>,
+    /// The part of that graph this panel draws, and the state it draws it at.
+    derived: Derived,
     framing: Framing,
     drag: Drag,
     emphasis: Emphasis,
@@ -157,13 +161,11 @@ pub struct GraphPanel {
     mode_picker: Entity<Dropdown>,
     /// Carries the picker's selections into [`GraphPanel::set_mode`].
     _mode_choices: Subscription,
-    /// Redraws as the graph is read and as its layouts land.
+    /// Redraws as the graph is read.
     _changed: Subscription,
-    /// Asks for the selected mode's layout as the read lands: one requested while
-    /// the graph was still being read could not start.
+    /// Derives what the selected mode draws as the read lands: a derivation
+    /// asked for while the graph was still being read could not start.
     _source_replaced: Subscription,
-    /// Eases this drawing onto each layered layout the graph lands.
-    _landings: Subscription,
     /// Box under the cursor.
     hovered: Option<Id>,
     /// The box whose related nodes stay marked, and how far that marking reaches;
@@ -188,14 +190,14 @@ impl GraphPanel {
         self.framing.camera()
     }
 
-    /// The layout the selected mode draws, or `None` while it is being computed.
-    fn drawn(&self, cx: &App) -> Option<Drawn> {
-        self.model.read(cx).drawn(self.mode)
+    /// The layout the selected mode draws, or `None` while it is being derived.
+    fn drawn(&self) -> Option<Drawn> {
+        self.derived.drawn(self.mode)
     }
 
     /// The boxes the selected mode's layout lets the user open or close.
-    fn expandable(&self, cx: &App) -> Expandable {
-        self.model.read(cx).expandable(self.mode)
+    fn expandable(&self) -> Expandable {
+        self.derived.expandable(self.mode)
     }
 
     /// How far the drawing being eased onto its successor has travelled at this
@@ -240,17 +242,14 @@ impl GraphPanel {
             }
         });
         let changed = cx.observe(&model, |_, _, cx| cx.notify());
-        let source_replaced = cx.subscribe(&model, |view, model, _: &SourceReplaced, cx| {
-            let mode = view.mode;
-            model.update(cx, |model, cx| model.ensure_layout(mode, cx));
-        });
-        let landings = cx.subscribe(&model, |view, _, landed: &LayoutLanded, cx| {
-            view.settle_onto(landed, cx);
+        let source_replaced = cx.subscribe(&model, |view, _, _: &SourceReplaced, cx| {
+            derive::opened(view, cx);
         });
         Self {
             focus_handle: cx.focus_handle(),
             title,
             model,
+            derived: Derived::new(),
             framing: Framing::new(),
             drag: Drag::None,
             emphasis: Emphasis::none(),
@@ -260,7 +259,6 @@ impl GraphPanel {
             _mode_choices: choices,
             _changed: changed,
             _source_replaced: source_replaced,
-            _landings: landings,
             hovered: None,
             selection,
             relation_picker,
@@ -276,7 +274,7 @@ impl GraphPanel {
     /// about a map's levels, which the camera alone selects between: armed while
     /// the map is on screen it would pump repaints of a canvas that draws none of
     /// it.
-    fn settle_onto(&mut self, landed: &LayoutLanded, cx: &mut Context<Self>) {
+    pub(crate) fn settle_onto(&mut self, landed: &LayoutLanded, cx: &mut Context<Self>) {
         let replaced = landed
             .replaced
             .clone()
@@ -291,7 +289,7 @@ impl GraphPanel {
     /// Draws the selected mode's layout, or a spinner while it is still being
     /// computed — the toolbar stays above either, so the picker remains reachable.
     fn viewport(&mut self, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
-        let Some(drawn) = self.drawn(cx) else {
+        let Some(drawn) = self.drawn() else {
             return bviz_ui_components::centered_spinner("Laying out…", &palette.colors)
                 .into_any_element();
         };
@@ -300,7 +298,7 @@ impl GraphPanel {
         let content = drawn.content();
         let recenter_target = recenter_rect(g, &self.emphasis);
         let scene = Scene {
-            expandable: self.expandable(cx),
+            expandable: self.expandable(),
             palette,
             hovered: self.hovered.filter(|_| self.neighborhood_enabled),
             selected: self.selection.node(),
@@ -354,15 +352,14 @@ impl GraphPanel {
         self.emphasis.clear();
         self.morph.clear();
         self.framing.refit();
-        self.model
-            .update(cx, |model, cx| model.ensure_layout(mode, cx));
+        derive::ensure_layout(self, cx);
         cx.notify();
     }
 
     fn on_mouse_down(&mut self, e: &MouseDownEvent, _: &mut Window, cx: &mut Context<Self>) {
         // A press on a scroll-bar gutter drives the thumb instead of panning the
         // content under it.
-        if let Some(axis) = scrollbar_hit(self, e.position, cx) {
+        if let Some(axis) = scrollbar_hit(self, e.position) {
             start_scroll_drag(self, axis, e.position, cx);
             return;
         }
@@ -389,7 +386,7 @@ impl GraphPanel {
         if matches!(self.drag, Drag::Pan(_)) {
             return;
         }
-        let Some(drawn) = self.drawn(cx) else {
+        let Some(drawn) = self.drawn() else {
             return;
         };
         let camera = self.camera();
@@ -422,7 +419,7 @@ impl GraphPanel {
     }
 
     fn on_scroll_wheel(&mut self, e: &ScrollWheelEvent, _: &mut Window, cx: &mut Context<Self>) {
-        let Some(content) = self.drawn(cx).map(|d| d.content()) else {
+        let Some(content) = self.drawn().map(|d| d.content()) else {
             return;
         };
         let notches = match e.delta {
@@ -455,7 +452,7 @@ impl GraphPanel {
         if !self.mode.honors_reduce() {
             return;
         }
-        self.model.update(cx, |model, cx| model.toggle_reduce(cx));
+        derive::toggle_reduce(self, cx);
     }
 }
 
@@ -482,10 +479,12 @@ impl Panel for GraphPanel {
 
     fn status(&self, cx: &App) -> Option<SharedString> {
         Some(
-            self.model
-                .read(cx)
-                .status(self.mode, self.camera().zoom)
-                .into(),
+            derive::status(
+                self.model.read(cx).source(),
+                self.drawn(),
+                self.camera().zoom,
+            )
+            .into(),
         )
     }
 
@@ -518,14 +517,13 @@ impl Render for GraphPanel {
         match placeholder {
             Some(placeholder) => chrome.child(placeholder),
             None => {
-                let graph = self.model.read(cx);
                 let controls = Controls {
                     mode: self.mode,
                     picker: self.mode_picker.clone(),
                     relation_picker: self.selection.node().map(|_| self.relation_picker.clone()),
                     neighborhood_enabled: self.neighborhood_enabled,
-                    reduced: graph.reduced(),
-                    relaying: graph.relaying(),
+                    reduced: self.derived.reduced(),
+                    relaying: self.derived.deriving(),
                 };
                 chrome
                     .child(toolbar::toolbar(controls, &palette, cx))
@@ -591,12 +589,12 @@ fn click_box_at(view: &mut GraphPanel, pos: Point<Pixels>, cx: &mut Context<Grap
         return;
     }
     let camera = view.camera();
-    let Some(drawn) = view.drawn(cx) else {
+    let Some(drawn) = view.drawn() else {
         return;
     };
     let g = drawn.view(camera.zoom);
     let morph = view.morph_frame();
-    let expandable = view.expandable(cx);
+    let expandable = view.expandable();
     let hit =
         box_at(&view.titles, g, morph.as_ref(), vp, camera, pos).filter(|b| expandable.holds(b));
     let Some(id) = hit.map(|b| b.id) else {
@@ -605,8 +603,7 @@ fn click_box_at(view: &mut GraphPanel, pos: Point<Pixels>, cx: &mut Context<Grap
     // The relayout places the boxes afresh, so the box resolved here need not be
     // the one the cursor ends up over.
     view.hovered = None;
-    view.model
-        .update(cx, |model, cx| model.toggle_expansion(id, cx));
+    derive::toggle_expansion(view, id, cx);
     view.emphasis.toggled(id);
 }
 
@@ -618,7 +615,7 @@ fn select_box_at(view: &mut GraphPanel, pos: Point<Pixels>, cx: &mut Context<Gra
     let camera = view.camera();
     let morph = view.morph_frame();
     let hit = view
-        .drawn(cx)
+        .drawn()
         .filter(|_| vp.contains(&pos))
         .and_then(|drawn| {
             box_at(

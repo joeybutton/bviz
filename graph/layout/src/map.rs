@@ -50,25 +50,16 @@ pub fn map_layout(base: Arc<Graph>, reduced: Arc<Graph>) -> MapLayout {
         let opened = open_at(&expandable, &drawing, from);
         if opened != open {
             open = opened;
-            finer.push((
-                from,
-                Level {
-                    open: open.clone(),
-                    view: OnceLock::new(),
-                },
-            ));
+            finer.push((from, Level::opening(Arc::new(open.clone()))));
         }
     }
     MapLayout {
         base,
         reduced,
-        containment,
-        drawing,
-        expandable,
-        coarsest: Level {
-            open: HashSet::new(),
-            view: OnceLock::new(),
-        },
+        containment: Arc::new(containment),
+        drawing: Arc::new(drawing),
+        expandable: Arc::new(expandable),
+        coarsest: Level::opening(Arc::new(HashSet::new())),
         finer,
     }
 }
@@ -80,17 +71,32 @@ pub fn map_layout(base: Arc<Graph>, reduced: Arc<Graph>) -> MapLayout {
 /// mostly work for a zoom the reader never reaches. What a level needs to derive
 /// itself is held by the [`MapLayout`] around it.
 struct Level {
-    open: HashSet<Id>,
+    open: Arc<HashSet<Id>>,
     view: OnceLock<LaidOut>,
 }
 
+impl Level {
+    /// The level opening `open`, with nothing derived yet.
+    fn opening(open: Arc<HashSet<Id>>) -> Self {
+        Level {
+            open,
+            view: OnceLock::new(),
+        }
+    }
+}
+
 /// The views of one drawing at rising zoom, coarsest first.
+///
+/// The placement, the containment forest it was read from and the scales the
+/// levels take over at are shared with every [`restricted`](Self::restricted)
+/// map derived from this one, so a restriction draws its boxes exactly where
+/// this map draws them.
 pub struct MapLayout {
     base: Arc<Graph>,
     reduced: Arc<Graph>,
-    containment: Containment,
-    drawing: Drawing,
-    expandable: HashSet<Id>,
+    containment: Arc<Containment>,
+    drawing: Arc<Drawing>,
+    expandable: Arc<HashSet<Id>>,
     coarsest: Level,
     /// Ascending by the scale each view takes over from.
     finer: Vec<(f64, Level)>,
@@ -123,6 +129,30 @@ impl MapLayout {
 
     pub fn level_count(&self) -> usize {
         1 + self.finer.len()
+    }
+
+    /// The levels `base` leaves of this map, each drawn at the positions this
+    /// map places its nodes at: a node this map places and `base` does not hold
+    /// leaves a hole where it stood, and everything else stays put.
+    ///
+    /// `base`'s nodes must be a subset of the placed graph's, keyed by the same
+    /// ids; `reduced` must be its transitive reduction. Which containers a level
+    /// opens is the placement's to say, so it is carried over unchanged and a
+    /// container `base` drops simply goes undrawn.
+    pub fn restricted(&self, base: Arc<Graph>, reduced: Arc<Graph>) -> MapLayout {
+        MapLayout {
+            base,
+            reduced,
+            containment: Arc::clone(&self.containment),
+            drawing: Arc::clone(&self.drawing),
+            expandable: Arc::clone(&self.expandable),
+            coarsest: Level::opening(Arc::clone(&self.coarsest.open)),
+            finer: self
+                .finer
+                .iter()
+                .map(|(from, level)| (*from, Level::opening(Arc::clone(&level.open))))
+                .collect(),
+        }
     }
 
     /// The extent every level spans, which follows from the placement they share
@@ -789,6 +819,56 @@ mod tests {
                 "level {i} differs",
             );
         }
+    }
+
+    /// A restriction is drawn into the holes its dropped nodes leave: what
+    /// survives is drawn where the whole graph draws it, at every level, and the
+    /// extent the camera pans over is the one the placement fixed.
+    #[test]
+    fn a_restriction_draws_what_survives_where_the_whole_graph_draws_it() {
+        let (base, names) = towers();
+        let map = mapped(&base);
+        let dropped: HashSet<Id> = ["mid", "mid.0", "mid.1", "mid.2", "wide.2"]
+            .into_iter()
+            .map(|id| names.get(id).unwrap())
+            .collect();
+        let keep: HashSet<Id> = base
+            .nodes
+            .iter()
+            .map(|node| node.id)
+            .filter(|id| !dropped.contains(id))
+            .collect();
+
+        let restricted = crate::filter::filter(&base, &map.reduced, &keep);
+        let reduced = reduce::transitive_reduction(&restricted);
+        let sliced = map.restricted(Arc::new(restricted), Arc::new(reduced));
+
+        assert_eq!(sliced.level_count(), map.level_count());
+        assert_eq!(
+            (sliced.width(), sliced.height()),
+            (map.width(), map.height())
+        );
+        for i in 0..map.level_count() {
+            let placed = |view: &LaidOut| -> BTreeMap<Id, (u64, u64)> {
+                view.boxes
+                    .iter()
+                    .map(|b| (b.id, (b.x.to_bits(), b.y.to_bits())))
+                    .collect()
+            };
+            let (whole, slice) = (placed(map.level(i)), placed(sliced.level(i)));
+            assert!(
+                slice.keys().all(|id| keep.contains(id)),
+                "level {i} draws a dropped box",
+            );
+            for (id, at) in &slice {
+                assert_eq!(whole.get(id), Some(at), "level {i} moved a kept box");
+            }
+        }
+        let finest = sliced.level(sliced.level_count() - 1);
+        assert!(
+            box_of(finest, &names, "wide.5").is_some() && box_of(finest, &names, "mid.0").is_none(),
+            "the fixture's restriction drops nothing the finest level drew",
+        );
     }
 
     #[test]
