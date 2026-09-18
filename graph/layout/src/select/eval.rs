@@ -736,28 +736,6 @@ mod tests {
         assert_eq!(fixture.nodes(&filter, Verdict::Hidden), named([LIB]));
     }
 
-    /// The scan resolves the rules into handle sets and columns before reading a
-    /// node, where reading a node rule by rule resolves nothing; the two must
-    /// read every node the same way. A frame the scan keeps for a node it draws
-    /// comes from the containment forest rather than the rules, which is beyond
-    /// what reading one node can reach, and this filter draws every container it
-    /// has anyway.
-    #[test]
-    fn the_scan_agrees_with_reading_the_rules_node_by_node() {
-        let fixture = Fixture::new();
-        let filter = layered(&fixture);
-        let verdicts = fixture.evaluate(&filter);
-
-        for node in &fixture.graph.nodes {
-            assert_eq!(
-                verdicts.get(node.id),
-                Verdict::from(filter.visibility(node, &fixture.facets, &fixture.names)),
-                "{}",
-                fixture.names.resolve(node.id)
-            );
-        }
-    }
-
     /// Two packages, each holding a target, the first holding two actions and the
     /// second one, so a filter that shows a single action leaves ancestors to
     /// keep, a sibling to leave out, and a second package to leave untouched.

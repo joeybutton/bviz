@@ -13,10 +13,9 @@ pub mod pattern;
 use std::borrow::Borrow;
 use std::collections::HashMap;
 
-use crate::facets::{Facets, RuleCategory, Tri};
-use crate::graph::{Kind, Node};
-use crate::intern::{Id, Names};
-use crate::label;
+use crate::facets::{RuleCategory, Tri};
+use crate::graph::Kind;
+use crate::intern::Id;
 use crate::repo::RepoCategory;
 pub use eval::{Verdict, Verdicts};
 use pattern::{PackagePrefix, Pattern};
@@ -66,21 +65,6 @@ pub struct Filter {
     pub base: Base,
     pub rules: Vec<Rule>,
     pub pins: HashMap<Id, Visibility>,
-}
-
-impl Filter {
-    /// The visibility of `node`, whose facets are `facets` and whose labels
-    /// resolve through `names`.
-    pub fn visibility(&self, node: &Node, facets: &Facets, names: &Names) -> Visibility {
-        if let Some(&pinned) = self.pins.get(&node.id) {
-            return pinned;
-        }
-        self.rules
-            .iter()
-            .rev()
-            .find(|rule| rule.predicate.matches(node, facets, names))
-            .map_or(self.base.visibility(), |rule| rule.visibility)
-    }
 }
 
 /// The values one term admits, of which a node's facet must carry one.
@@ -158,135 +142,18 @@ pub struct Predicate {
     pub package: Option<PackagePrefix>,
 }
 
-impl Predicate {
-    /// Whether every term this predicate sets holds of `node`.
-    pub fn matches(&self, node: &Node, facets: &Facets, names: &Names) -> bool {
-        let id = node.id;
-        let strings = facets.strings();
-        if let Some(kinds) = &self.kinds
-            && !kinds.contains(&node.kind)
-        {
-            return false;
-        }
-        if let Some(categories) = &self.repo_categories {
-            let category = facets
-                .repo(id)
-                .and_then(|repo| facets.repo_entry(repo))
-                .map(|entry| entry.origin.category());
-            if !category.is_some_and(|category| categories.contains(&category)) {
-                return false;
-            }
-        }
-        if let Some(repos) = &self.repos {
-            let name = facets.repo(id).map(|repo| strings.resolve(repo.sym()));
-            if !name.is_some_and(|name| repos.contains(name)) {
-                return false;
-            }
-        }
-        if let Some(rule_classes) = &self.rule_classes {
-            let name = facets
-                .rule_class(id)
-                .map(|rule_class| strings.resolve(rule_class.sym()));
-            if !name.is_some_and(|name| rule_classes.contains(name)) {
-                return false;
-            }
-        }
-        if let Some(categories) = &self.rule_categories {
-            let category = facets
-                .rule_class(id)
-                .and_then(|rule_class| facets.rule_category(rule_class));
-            if !category.is_some_and(|category| categories.contains(&category)) {
-                return false;
-            }
-        }
-        if let Some(configs) = &self.configs {
-            let checksum = facets
-                .config(id)
-                .map(|config| strings.resolve(config.sym()));
-            if !checksum.is_some_and(|checksum| configs.contains(checksum)) {
-                return false;
-            }
-        }
-        if let Some(is_tool) = self.is_tool {
-            let stated = facets
-                .config(id)
-                .and_then(|config| facets.config_entry(config))
-                .map(|entry| entry.is_tool);
-            if stated != Some(stating(is_tool)) {
-                return false;
-            }
-        }
-        if let Some(mnemonics) = &self.mnemonics {
-            let name = facets
-                .mnemonic(id)
-                .map(|mnemonic| strings.resolve(mnemonic));
-            if !name.is_some_and(|name| mnemonics.contains(name)) {
-                return false;
-            }
-        }
-        if let Some(aspects) = &self.aspects {
-            let carried = facets.aspects().values(id);
-            let holds = match aspects {
-                Aspects::Any => !carried.is_empty(),
-                Aspects::None => carried.is_empty(),
-                Aspects::Named(named) => carried
-                    .iter()
-                    .any(|&aspect| named.contains(strings.resolve(aspect))),
-            };
-            if !holds {
-                return false;
-            }
-        }
-        if let Some(tags) = &self.tags
-            && !facets
-                .tags()
-                .values(id)
-                .iter()
-                .any(|&tag| tags.contains(strings.resolve(tag)))
-        {
-            return false;
-        }
-        if let Some(testonly) = self.testonly
-            && facets.testonly(id) != stating(testonly)
-        {
-            return false;
-        }
-        if self.label.is_some() || self.package.is_some() {
-            let Some(label) = canonical_label(facets, names, id) else {
-                return false;
-            };
-            if let Some(pattern) = &self.label
-                && !pattern.matches(label)
-            {
-                return false;
-            }
-            if let Some(package) = &self.package
-                && !package.matches(label)
-            {
-                return false;
-            }
-        }
-        true
-    }
-}
-
 /// The [`Tri`] a node must carry to answer `yes`, an unstated facet answering
 /// neither.
 pub(crate) fn stating(yes: bool) -> Tri {
     if yes { Tri::Yes } else { Tri::No }
 }
 
-/// The canonical label of the target `id` belongs to, absent where the node
-/// belongs to no target.
-pub(crate) fn canonical_label<'a>(facets: &Facets, names: &'a Names, id: Id) -> Option<&'a str> {
-    label::target_node_label(names.resolve(facets.label(id)?))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::facets::FacetsBuilder;
+    use crate::facets::{Facets, FacetsBuilder};
     use crate::graph::Graph;
+    use crate::intern::Names;
 
     /// A graph of one `cc_test` target in the main repository with an action
     /// below it, one `cc_library` target in an external repository, and one
@@ -344,20 +211,29 @@ mod tests {
             }
         }
 
-        fn node(&self, name: &str) -> &Node {
-            let id = self.names.get(name).expect("an interned node");
-            self.graph
-                .nodes
-                .iter()
-                .find(|node| node.id == id)
-                .expect("a node of the graph")
+        fn id(&self, name: &str) -> Id {
+            self.names.get(name).expect("an interned node")
         }
 
+        /// What `filter` makes of the node `name`.
+        fn verdict(&self, filter: &Filter, name: &str) -> Verdict {
+            filter
+                .evaluate(&self.graph, &self.names, &self.facets)
+                .get(self.id(name))
+        }
+
+        /// The nodes a filter showing `predicate` alone draws as selected.
         fn matching(&self, predicate: &Predicate) -> Vec<&str> {
+            let showing = Filter {
+                base: Base::HideAll,
+                rules: vec![rule(predicate.clone(), Visibility::Shown)],
+                ..Filter::default()
+            };
+            let verdicts = showing.evaluate(&self.graph, &self.names, &self.facets);
             self.graph
                 .nodes
                 .iter()
-                .filter(|node| predicate.matches(node, &self.facets, &self.names))
+                .filter(|node| verdicts.get(node.id) == Verdict::Shown)
                 .map(|node| self.names.resolve(node.id))
                 .collect()
         }
@@ -530,7 +406,7 @@ mod tests {
     #[test]
     fn a_node_carrying_no_such_facet_matches_no_term_over_it() {
         let fixture = Fixture::new();
-        let source = fixture.node("target://foo:main.c");
+        let source = "target://foo:main.c";
         let terms = [
             Predicate {
                 rule_classes: values(&["cc_test"]),
@@ -564,7 +440,7 @@ mod tests {
 
         for predicate in terms {
             assert!(
-                !predicate.matches(source, &fixture.facets, &fixture.names),
+                !fixture.matching(&predicate).contains(&source),
                 "{predicate:?}"
             );
         }
@@ -584,11 +460,11 @@ mod tests {
             label: Some(Pattern::parse("//foo/...")),
             ..Predicate::default()
         };
-        assert!(!predicate.matches(
-            fixture.node("group:target://foo:app"),
-            &fixture.facets,
-            &fixture.names
-        ));
+        assert!(
+            !fixture
+                .matching(&predicate)
+                .contains(&"group:target://foo:app")
+        );
     }
 
     fn rule(predicate: Predicate, visibility: Visibility) -> Rule {
@@ -621,64 +497,45 @@ mod tests {
     #[test]
     fn a_node_no_rule_matches_takes_the_base_verdict() {
         let fixture = Fixture::new();
-        let source = fixture.node("target://foo:main.c");
+        let source = "target://foo:main.c";
         let mut filter = Filter {
             rules: vec![hide_targets()],
             ..Filter::default()
         };
-        assert_eq!(
-            filter.visibility(source, &fixture.facets, &fixture.names),
-            Visibility::Shown
-        );
+        assert_eq!(fixture.verdict(&filter, source), Verdict::Shown);
 
         filter.base = Base::HideAll;
-        assert_eq!(
-            filter.visibility(source, &fixture.facets, &fixture.names),
-            Visibility::Hidden
-        );
+        assert_eq!(fixture.verdict(&filter, source), Verdict::Hidden);
     }
 
     #[test]
     fn the_last_rule_matching_a_node_decides_it() {
         let fixture = Fixture::new();
-        let app = fixture.node("target://foo:app");
+        let app = "target://foo:app";
         let first = Filter {
             rules: vec![hide_targets(), fade_tests()],
             ..Filter::default()
         };
-        assert_eq!(
-            first.visibility(app, &fixture.facets, &fixture.names),
-            Visibility::Faded
-        );
+        assert_eq!(fixture.verdict(&first, app), Verdict::Faded);
 
         let reversed = Filter {
             rules: vec![fade_tests(), hide_targets()],
             ..Filter::default()
         };
-        assert_eq!(
-            reversed.visibility(app, &fixture.facets, &fixture.names),
-            Visibility::Hidden
-        );
+        assert_eq!(fixture.verdict(&reversed, app), Verdict::Hidden);
     }
 
     #[test]
     fn a_pin_decides_the_node_it_names_whatever_the_rules_say() {
         let fixture = Fixture::new();
-        let app = fixture.node("target://foo:app");
-        let lib = fixture.node("target:@@rules_foo+//bar:lib");
+        let (app, lib) = ("target://foo:app", "target:@@rules_foo+//bar:lib");
         let filter = Filter {
             base: Base::HideAll,
             rules: vec![hide_targets()],
-            pins: [(app.id, Visibility::Shown)].into_iter().collect(),
+            pins: [(fixture.id(app), Visibility::Shown)].into_iter().collect(),
         };
 
-        assert_eq!(
-            filter.visibility(app, &fixture.facets, &fixture.names),
-            Visibility::Shown
-        );
-        assert_eq!(
-            filter.visibility(lib, &fixture.facets, &fixture.names),
-            Visibility::Hidden
-        );
+        assert_eq!(fixture.verdict(&filter, app), Verdict::Shown);
+        assert_eq!(fixture.verdict(&filter, lib), Verdict::Hidden);
     }
 }
