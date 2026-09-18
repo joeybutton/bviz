@@ -2,7 +2,7 @@ use crate::MARGIN;
 use crate::build::{self, build_graph};
 use crate::mode::LayoutMode;
 use bviz_graph_layout::graph::Graph;
-use bviz_graph_layout::lod::{DEFAULT_MAX_EDGES, DEFAULT_MAX_NODES};
+use bviz_graph_layout::lod::{DEFAULT_MAX_EDGES, DEFAULT_MAX_NODES, Overflow};
 use bviz_graph_layout::{Facets, Id, LaidOut, MapLayout, Names};
 use bviz_ui_components::{Pending, load_in_background};
 use bviz_ui_graph_args::Input;
@@ -43,6 +43,13 @@ pub(crate) struct Loaded {
     /// every other container folds its subtree away so the layered layout only
     /// processes the visible view.
     expanded: HashSet<Id>,
+    /// The size of the view the graph opened with where it was past the caps
+    /// that bound it, absent where it fit.
+    #[expect(
+        dead_code,
+        reason = "recorded with the graph it measures; no view reports the opening size"
+    )]
+    over_budget: Option<Overflow>,
     /// The set a layered layout's [`Expandable`] is built from.
     containers: Arc<HashSet<Id>>,
     /// Whether the layered layout last requested draws the transitive reduction
@@ -167,8 +174,16 @@ impl Expandable {
 /// Reads `inputs`, builds the graph and derives the map pyramid.
 pub(crate) fn build(inputs: Vec<Input>) -> Result<Loaded, String> {
     let (graph, reduced_base, names, facets) = build_graph(&inputs)?;
-    let expanded =
-        bviz_graph_layout::lod::default_expansion(&graph, DEFAULT_MAX_NODES, DEFAULT_MAX_EDGES);
+    // A graph no expansion of which fits still has to open at something, and the
+    // unexpanded view is the smallest drawing of it there is.
+    let (expanded, over_budget) = match bviz_graph_layout::lod::default_expansion(
+        &graph,
+        DEFAULT_MAX_NODES,
+        DEFAULT_MAX_EDGES,
+    ) {
+        Ok(expanded) => (expanded, None),
+        Err(overflow) => (HashSet::new(), Some(overflow)),
+    };
     let containers = Arc::new(bviz_graph_layout::lod::expandable_containers(&graph));
     // The map derives each of its views against these, so it holds a share in
     // them rather than a copy.
@@ -182,6 +197,7 @@ pub(crate) fn build(inputs: Vec<Input>) -> Result<Loaded, String> {
         names,
         facets: Arc::new(facets),
         expanded,
+        over_budget,
         containers,
         reduced: true,
         relaying: false,
@@ -418,6 +434,7 @@ mod tests {
             names,
             facets: Arc::new(Facets::default()),
             expanded: HashSet::new(),
+            over_budget: None,
             containers,
             reduced: true,
             relaying: false,

@@ -103,12 +103,26 @@ pub const DEFAULT_MAX_NODES: usize = 2000;
 /// how wide the drawing lands.
 pub const DEFAULT_MAX_EDGES: usize = 20000;
 
+/// The view with every container collapsed, which is the smallest a fold
+/// reaches, measured where it is itself past the caps. No expansion of such a
+/// graph fits, so these counts are the least a caller can be given.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Overflow {
+    pub nodes: usize,
+    pub edges: usize,
+}
+
 /// A startup expansion set: the containers to expand for the largest collapsed
-/// view that fits both `max_nodes` and `max_edges`.
-pub fn default_expansion(graph: &Graph, max_nodes: usize, max_edges: usize) -> HashSet<Id> {
+/// view that fits both `max_nodes` and `max_edges`, or the [`Overflow`] of a
+/// graph no expansion of which fits.
+pub fn default_expansion(
+    graph: &Graph,
+    max_nodes: usize,
+    max_edges: usize,
+) -> Result<HashSet<Id>, Overflow> {
     let order = expansion_order(&Forest::new(graph));
-    let fitting = largest_fitting_prefix(&IndexedGraph::new(graph), &order, max_nodes, max_edges);
-    order[..fitting].iter().copied().collect()
+    let fitting = largest_fitting_prefix(&IndexedGraph::new(graph), &order, max_nodes, max_edges)?;
+    Ok(order[..fitting].iter().copied().collect())
 }
 
 /// A graph's containment forest indexed by children, answering how much of the
@@ -212,28 +226,32 @@ fn expansion_order(forest: &Forest) -> Vec<Id> {
 /// The length of the longest prefix of `order` whose expansion collapses to a
 /// view fitting both caps. Both counts rise monotonically with the prefix
 /// length — more expansion only reveals nodes and de-aggregates edges — so the
-/// answer is a binary search.
+/// empty prefix decides whether any prefix fits at all, and the rest is a binary
+/// search.
 fn largest_fitting_prefix(
     indexed: &IndexedGraph,
     order: &[Id],
     max_nodes: usize,
     max_edges: usize,
-) -> usize {
+) -> Result<usize, Overflow> {
     let order_idx: Vec<u32> = order.iter().map(|id| id.0).collect();
-    let fits = |k: usize| {
-        let (nodes, edges) = indexed.counts(&order_idx[..k]);
-        nodes <= max_nodes && edges <= max_edges
-    };
+    let fits = |(nodes, edges): (usize, usize)| nodes <= max_nodes && edges <= max_edges;
+
+    let (nodes, edges) = indexed.counts(&[]);
+    if !fits((nodes, edges)) {
+        return Err(Overflow { nodes, edges });
+    }
+
     let (mut lo, mut hi) = (0usize, order.len());
     while lo < hi {
         let mid = lo + (hi - lo).div_ceil(2);
-        if fits(mid) {
+        if fits(indexed.counts(&order_idx[..mid])) {
             lo = mid;
         } else {
             hi = mid - 1;
         }
     }
-    lo
+    Ok(lo)
 }
 
 /// Stands in a representative table for an id the graph holds no node of: a
@@ -593,13 +611,13 @@ mod tests {
         );
 
         // Caps that only the root view (2 nodes, 1 edge) fits: no root expands.
-        let tiny = default_expansion(&g, 2, 1);
+        let tiny = default_expansion(&g, 2, 1).expect("the root view fits these caps");
         assert!(tiny.is_empty());
         let v = collapse(&g, &tiny);
         assert!(v.nodes.len() <= 2 && v.edges.len() <= 1);
 
         // Generous caps expand every multi-child container: the full graph shows.
-        let all = default_expansion(&g, 100, 100);
+        let all = default_expansion(&g, 100, 100).expect("the whole graph fits these caps");
         let v = collapse(&g, &all);
         assert_eq!(v.nodes.len(), g.nodes.len());
         assert!(v.nodes.len() <= 100 && v.edges.len() <= 100);
@@ -618,10 +636,36 @@ mod tests {
         );
 
         for (max_nodes, max_edges) in [(2, 1), (4, 1), (4, 2), (6, 2), (100, 100)] {
-            let view = collapse(&g, &default_expansion(&g, max_nodes, max_edges));
+            let expansion = default_expansion(&g, max_nodes, max_edges)
+                .unwrap_or_else(|over| panic!("{max_nodes}/{max_edges} fits nothing: {over:?}"));
+            let view = collapse(&g, &expansion);
             assert!(view.nodes.len() <= max_nodes);
             assert!(view.edges.len() <= max_edges);
         }
+    }
+
+    /// The search settles the empty prefix before searching the rest, so a graph
+    /// already past a cap with every container collapsed is reported as such
+    /// rather than answered with a prefix that fits no better.
+    #[test]
+    fn a_root_view_past_a_cap_overflows_instead_of_reporting_a_prefix() {
+        let (mut g, names) = two_towers();
+        g.add_edge(
+            names.get("A.x").unwrap(),
+            names.get("B.y").unwrap(),
+            EdgeKind::Aquery,
+        );
+
+        // Each tower folds to its root and the one edge between their leaves
+        // folds with them, so the root view is two nodes and one edge.
+        let root_view = Overflow { nodes: 2, edges: 1 };
+        assert_eq!(default_expansion(&g, 1, 1), Err(root_view));
+        assert_eq!(default_expansion(&g, 2, 0), Err(root_view));
+
+        // Meeting both caps exactly is fitting, and expands nothing.
+        assert_eq!(default_expansion(&g, 2, 1), Ok(HashSet::new()));
+        // Room for one tower's two leaves opens the tower that reveals cheapest.
+        assert_eq!(default_expansion(&g, 4, 1), Ok(expanded(&names, &["A"])));
     }
 
     #[test]
@@ -640,7 +684,7 @@ mod tests {
 
         // `b` is the reachable multi-child container; A is a transparent
         // singleton, so generous caps expand `b` alone.
-        let all = default_expansion(&g, 100, 100);
+        let all = default_expansion(&g, 100, 100).expect("the whole graph fits these caps");
         assert_eq!(all, expanded(&names, &["b"]));
         assert_eq!(
             node_ids(&collapse(&g, &all), &names),
@@ -677,8 +721,8 @@ mod tests {
         }
 
         for caps in [(2, 1), (4, 1), (6, 2), (100, 100)] {
-            let a = default_expansion(&dense, caps.0, caps.1);
-            let b = default_expansion(&gapped, caps.0, caps.1);
+            let a = default_expansion(&dense, caps.0, caps.1).expect("the dense fixture fits");
+            let b = default_expansion(&gapped, caps.0, caps.1).expect("the gapped fixture fits");
             assert_eq!(
                 node_ids(&collapse(&dense, &a), &dense_names),
                 node_ids(&collapse(&gapped, &b), &gapped_names),
