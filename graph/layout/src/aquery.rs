@@ -422,26 +422,17 @@ impl Wiring<'_> {
         if is_derived(&path) {
             return None;
         }
-        let (repo, repo_path) = match external_source(&path) {
+        let (repo, repo_path) = match external_repo_path(&path) {
             Some((repo, repo_path)) => {
                 if !self.external_sources {
                     return None;
                 }
-                (format!("@@{repo}"), repo_path)
+                (repo_label(repo), repo_path)
             }
             None => (String::new(), path.as_str()),
         };
-        let dir = repo_path.rsplit_once('/').map(|(d, _)| d).unwrap_or("");
-        let node_id = match self.hierarchy.enclosing_package(&repo, dir) {
-            Some(pkg) => {
-                let rel = if pkg.is_empty() {
-                    repo_path
-                } else {
-                    repo_path
-                        .strip_prefix(&format!("{pkg}/"))
-                        .unwrap_or(repo_path)
-                };
-                let label = format!("{repo}//{pkg}:{rel}");
+        let node_id = match package_label(self.hierarchy, &repo, repo_path) {
+            Some(label) => {
                 let node_id = names.intern(&format!("target:{label}"));
                 if self.source_nodes.insert(node_id) {
                     let parent = self.hierarchy.package_box(&label);
@@ -467,21 +458,35 @@ impl Wiring<'_> {
     }
 }
 
-/// The label of a generated output at exec path `path`: its `bazel-out/<cfg>/bin`
-/// prefix stripped, then the rest split into the enclosing package and a
-/// package-relative remainder (`bazel-out/k8/bin/src/main/native/jni.h` ->
+/// The label of a generated output at exec path `path`, resolved within the
+/// repository that owns it (`bazel-out/k8/bin/src/main/native/jni.h` ->
 /// `//src/main/native:jni.h`; a subdir output keeps the subdir in the name).
 /// `None` when the path is not a `bin` output or no known package encloses it.
 fn generated_label(hierarchy: &PackageHierarchy, path: &str) -> Option<String> {
-    let suffix = generated_suffix(path)?;
-    let dir = suffix.rsplit_once('/').map(|(d, _)| d).unwrap_or("");
-    let pkg = hierarchy.enclosing_package("", dir)?;
-    let rel = if pkg.is_empty() {
-        suffix
+    let (repo, repo_path) = generated_bin_path(path)?;
+    package_label(hierarchy, &repo_label(repo), repo_path)
+}
+
+/// The `{repo}//{pkg}:{rel}` label of the file at repository-relative path
+/// `repo_path` in the repository labelled `repo`, split on the deepest package
+/// of that repository enclosing it. `None` when no known package does.
+fn package_label(hierarchy: &PackageHierarchy, repo: &str, repo_path: &str) -> Option<String> {
+    let dir = repo_path.rsplit_once('/').map(|(d, _)| d).unwrap_or("");
+    let pkg = hierarchy.enclosing_package(repo, dir)?;
+    let rel = repo_path
+        .strip_prefix(&format!("{pkg}/"))
+        .unwrap_or(repo_path);
+    Some(format!("{repo}//{pkg}:{rel}"))
+}
+
+/// The repository part of a label naming a file of repository `repo`: `@@<repo>`,
+/// or empty for the main repository, whose labels carry no repository part.
+fn repo_label(repo: &str) -> String {
+    if repo.is_empty() {
+        String::new()
     } else {
-        suffix.strip_prefix(&format!("{pkg}/")).unwrap_or(suffix)
-    };
-    Some(format!("//{pkg}:{rel}"))
+        format!("@@{repo}")
+    }
 }
 
 /// A source artifact that no known package encloses: a root-level node keyed by
@@ -531,11 +536,23 @@ impl Paths<'_> {
     }
 }
 
-/// `bazel-out/<config>/bin/<rest>`: returns `<rest>` for generated paths.
-fn generated_suffix(path: &str) -> Option<&str> {
-    let rest = path.strip_prefix("bazel-out/")?;
-    let (_config, rest) = rest.split_once('/')?;
-    rest.strip_prefix("bin/")
+/// The repository and repository-relative path of a `bazel-out/<config>/bin/`
+/// output, the repository empty for one of the main repository. An external
+/// repository is named either by a segment ahead of the configuration
+/// (`bazel-out/<repo>/<config>/bin/<rest>`, the layout
+/// `--experimental_sibling_repository_layout` selects) or by an `external/<repo>/`
+/// prefix on the path below `bin/`. `None` when `path` is not a `bin` output.
+fn generated_bin_path(path: &str) -> Option<(&str, &str)> {
+    let derived = path.strip_prefix("bazel-out/")?;
+    let (first, after_first) = derived.split_once('/')?;
+    let (sibling_repo, suffix) = match after_first.strip_prefix("bin/") {
+        Some(suffix) => ("", suffix),
+        None => {
+            let (_config, after_config) = after_first.split_once('/')?;
+            (first, after_config.strip_prefix("bin/")?)
+        }
+    };
+    Some(external_repo_path(suffix).unwrap_or((sibling_repo, suffix)))
 }
 
 /// Whether `path` names an output tree, which no source file lives in.
@@ -543,10 +560,10 @@ fn is_derived(path: &str) -> bool {
     path.starts_with("bazel-out/")
 }
 
-/// The repository and repository-relative path of a source in an external
+/// The repository and repository-relative remainder of a path inside an external
 /// repository: `external/<repo>/<rest>`, or `../<repo>/<rest>` under
 /// `--experimental_sibling_repository_layout`.
-fn external_source(path: &str) -> Option<(&str, &str)> {
+fn external_repo_path(path: &str) -> Option<(&str, &str)> {
     path.strip_prefix("external/")
         .or_else(|| path.strip_prefix("../"))?
         .split_once('/')
@@ -1131,6 +1148,78 @@ mod tests {
         assert_eq!(
             parent_of(&graph, &names, "artifact1"),
             Some("ct://pkg:gen#ck1")
+        );
+    }
+
+    /// The graph of a genrule `@@somerepo+//pkg:gen` whose one output, labelled
+    /// `@@somerepo+//pkg:gen.out` by another input, lies at exec path `path`.
+    fn external_genrule(path: &str) -> (Graph, Names) {
+        let (artifact, frags) = artifact_at(1, 100, path);
+        let containers = vec![ActionGraphContainer {
+            artifacts: vec![artifact],
+            path_fragments: frags,
+            targets: vec![target(9, "@@somerepo+//pkg:gen")],
+            configuration: vec![Configuration {
+                id: 1,
+                mnemonic: "k8".into(),
+                checksum: "ck1".into(),
+                ..Default::default()
+            }],
+            actions: vec![Action {
+                target_id: 9,
+                mnemonic: "Genrule".to_string(),
+                configuration_id: 1,
+                output_ids: vec![1],
+                ..Default::default()
+            }],
+            ..Default::default()
+        }];
+        let labeled = HashSet::from(["@@somerepo+//pkg:gen.out".to_string()]);
+        let mut names = Names::default();
+        let graph = build_with_packages(
+            &containers,
+            false,
+            &package_keys(&containers),
+            &labeled,
+            &mut names,
+        );
+        (graph, names)
+    }
+
+    #[test]
+    fn external_labeled_output_is_promoted_within_its_repository() {
+        let (graph, names) =
+            external_genrule("bazel-out/k8-fastbuild/bin/external/somerepo+/pkg/gen.out");
+
+        assert_eq!(
+            find(&graph, &names, "target:@@somerepo+//pkg:gen.out").kind,
+            Kind::Artifact
+        );
+        assert_eq!(
+            parent_of(&graph, &names, "target:@@somerepo+//pkg:gen.out"),
+            Some("pkg:@@somerepo+//pkg")
+        );
+        assert_eq!(
+            parent_of(&graph, &names, "artifact:@@somerepo+//pkg:gen.out#ck1"),
+            Some("ct:@@somerepo+//pkg:gen.out#ck1")
+        );
+        assert!(
+            edges(&graph, &names).contains(&("action0", "artifact:@@somerepo+//pkg:gen.out#ck1"))
+        );
+    }
+
+    #[test]
+    fn sibling_layout_output_is_promoted_within_its_repository() {
+        // `--experimental_sibling_repository_layout` names the repository ahead
+        // of the configuration instead of below the output tree.
+        let (graph, names) = external_genrule("bazel-out/somerepo+/k8-fastbuild/bin/pkg/gen.out");
+
+        assert_eq!(
+            parent_of(&graph, &names, "target:@@somerepo+//pkg:gen.out"),
+            Some("pkg:@@somerepo+//pkg")
+        );
+        assert!(
+            edges(&graph, &names).contains(&("action0", "artifact:@@somerepo+//pkg:gen.out#ck1"))
         );
     }
 

@@ -353,6 +353,86 @@ mod tests {
     }
 
     #[test]
+    fn external_repository_output_merges_across_query_and_aquery() {
+        // query knows @@somerepo+//pkg:gen.out as a generated-file target;
+        // aquery produces it under that repository's output tree.
+        let query_targets = vec![Target {
+            r#type: Discriminator::GeneratedFile as i32,
+            generated_file: Some(GeneratedFile {
+                name: "@@somerepo+//pkg:gen.out".into(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }];
+
+        let aquery_container = ActionGraphContainer {
+            artifacts: vec![Artifact {
+                id: 1,
+                path_fragment_id: 103,
+                is_tree_artifact: false,
+            }],
+            path_fragments: vec![
+                PathFragment {
+                    id: 100,
+                    label: "bazel-out".into(),
+                    parent_id: 0,
+                },
+                PathFragment {
+                    id: 101,
+                    label: "k8-fastbuild".into(),
+                    parent_id: 100,
+                },
+                PathFragment {
+                    id: 102,
+                    label: "bin".into(),
+                    parent_id: 101,
+                },
+                PathFragment {
+                    id: 103,
+                    label: "external/somerepo+/pkg/gen.out".into(),
+                    parent_id: 102,
+                },
+            ],
+            targets: vec![ActionTarget {
+                id: 9,
+                label: "@@somerepo+//pkg:gen".into(),
+                ..Default::default()
+            }],
+            configuration: vec![Configuration {
+                id: 1,
+                mnemonic: "k8".into(),
+                checksum: "ck1".into(),
+                ..Default::default()
+            }],
+            actions: vec![Action {
+                target_id: 9,
+                mnemonic: "Genrule".into(),
+                configuration_id: 1,
+                output_ids: vec![1],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        let (graph, names) =
+            build_joint(Some(&[aquery_container]), None, Some(&query_targets), false);
+
+        assert_eq!(
+            graph
+                .nodes
+                .iter()
+                .filter(|n| names.resolve(n.id) == "target:@@somerepo+//pkg:gen.out")
+                .count(),
+            1
+        );
+        let concrete = find(&graph, &names, "artifact:@@somerepo+//pkg:gen.out#ck1");
+        assert_eq!(
+            concrete.parent.map(|p| names.resolve(p)),
+            Some("ct:@@somerepo+//pkg:gen.out#ck1")
+        );
+    }
+
+    #[test]
     fn union_folds_packages_consistently_across_inputs() {
         // query knows a/b and a/c (so a branches); aquery knows only a/b. Built
         // from the union, aquery's lone a/b must still nest under the //a box
