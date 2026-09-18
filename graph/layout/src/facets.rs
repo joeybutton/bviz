@@ -14,7 +14,7 @@ use bazel_query_proto::analysis::Configuration;
 use crate::capability::{Axis, Capabilities, CapabilitiesBuilder};
 use crate::intern::Id;
 use crate::label;
-use crate::repo::{self, RepoOrigin};
+use crate::repo::{self, RepoCategory, RepoOrigin};
 
 /// A string interned in a [`FacetStrings`] table. The index is stored biased
 /// off one, so the handle is never zero and `Option<Sym>` is as wide as `Sym`
@@ -148,6 +148,18 @@ pub enum Origin {
     WorkspaceOrUnknown,
 }
 
+impl Origin {
+    pub fn category(self) -> RepoCategory {
+        match self {
+            Origin::Main => RepoCategory::Main,
+            Origin::Module { .. } => RepoCategory::Module,
+            Origin::ModuleExtension { .. } => RepoCategory::ModuleExtension,
+            Origin::Builtin => RepoCategory::Builtin,
+            Origin::WorkspaceOrUnknown => RepoCategory::WorkspaceOrUnknown,
+        }
+    }
+}
+
 /// What is known about one repository beyond the canonical name its
 /// [`RepoRef`] resolves to.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -175,7 +187,7 @@ pub struct ConfigEntry {
 /// The role a rule class plays, so that a filter can offer the tests, the
 /// aliases, or the build's own plumbing without naming each rule class that
 /// qualifies.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub enum RuleCategory {
     Test,
     Alias,

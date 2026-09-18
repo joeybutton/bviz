@@ -83,7 +83,7 @@ pub(crate) fn build_with_packages(
         if node_by_label.contains_key(label.as_ref()) {
             continue;
         }
-        let node_id = names.intern(&format!("target:{label}"));
+        let node_id = names.intern(&label::target_node_id(&label));
         let parent = hierarchy.package_box(&label);
         graph.add_node(node_id, label::target_label(&label), kind, parent);
         describe_target(facets, target, node_id, parent, &label, written);

@@ -165,6 +165,21 @@ pub(crate) fn config_mnemonic(config_id: u32, mnemonic: Option<&str>) -> String 
         .unwrap_or_else(|| format!("config {config_id}"))
 }
 
+/// The node id of the target `label` names.
+pub(crate) fn target_node_id(label: &str) -> String {
+    format!("{TARGET_PREFIX}{label}")
+}
+
+/// The canonical label the target node id `node_id` names, or `None` where it
+/// names a node that is no target.
+pub(crate) fn target_node_label(node_id: &str) -> Option<&str> {
+    node_id.strip_prefix(TARGET_PREFIX)
+}
+
+/// What sets a target's node id apart from the package box, configured target,
+/// and output artifact that the same label also names.
+const TARGET_PREFIX: &str = "target:";
+
 /// The node id of a configured target: `ct:{label}#{config_key}`. Keyed by
 /// `config_key` so the aquery and cquery builders emit the same id and merge.
 pub(crate) fn ct_node_id(label: &str, config_key: &str) -> String {
@@ -362,7 +377,7 @@ fn box_node_id(repo: &str, path: &str) -> String {
 /// Whether package path `pkg` encloses directory `dir`: they are equal, or `dir`
 /// lies under `pkg` at a path-segment boundary. The root package `""` encloses
 /// every directory.
-fn encloses(pkg: &str, dir: &str) -> bool {
+pub(crate) fn encloses(pkg: &str, dir: &str) -> bool {
     pkg.is_empty()
         || dir == pkg
         || dir

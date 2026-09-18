@@ -423,7 +423,7 @@ impl Boxes<'_> {
             return ct_node_id;
         }
 
-        let target_node_id = self.names.intern(&format!("target:{}", target.canonical));
+        let target_node_id = self.names.intern(&label::target_node_id(target.canonical));
         if self.targets.insert(target_node_id) {
             let package = self.hierarchy.package_box(target.canonical);
             self.graph.add_node(
@@ -583,7 +583,7 @@ impl Wiring<'_, '_> {
         };
         let node_id = match package_label(self.hierarchy, &repo, repo_path) {
             Some(label) => {
-                let node_id = names.intern(&format!("target:{label}"));
+                let node_id = names.intern(&label::target_node_id(&label));
                 if self.source_nodes.insert(node_id) {
                     let parent = self.hierarchy.package_box(&label);
                     graph.add_node(node_id, label::target_label(&label), Kind::Source, parent);

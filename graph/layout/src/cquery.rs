@@ -215,7 +215,7 @@ impl Nodes<'_, '_> {
         let label = self.b.canonical(written);
         if !self.index.target_box.contains_key(&label) {
             let parent = self.hierarchy.package_box(&label);
-            let id = self.b.names.intern(&format!("target:{label}"));
+            let id = self.b.names.intern(&label::target_node_id(&label));
             self.b
                 .graph
                 .add_node(id, label::target_label(&label), Kind::Target, parent);
@@ -240,7 +240,7 @@ impl Nodes<'_, '_> {
         let label = self.b.canonical(written);
         if !self.index.leaf_id.contains_key(&label) {
             let parent = self.hierarchy.package_box(&label);
-            let id = self.b.names.intern(&format!("target:{label}"));
+            let id = self.b.names.intern(&label::target_node_id(&label));
             self.b
                 .graph
                 .add_node(id, label::target_label(&label), kind, parent);

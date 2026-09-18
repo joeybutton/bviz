@@ -22,6 +22,7 @@ pub mod query;
 pub mod quotient;
 pub mod reduce;
 pub mod repo;
+pub mod select;
 pub mod streamed_proto;
 
 #[cfg(test)]

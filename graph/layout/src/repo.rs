@@ -27,6 +27,17 @@ pub enum RepoOrigin<'a> {
     WorkspaceOrUnknown,
 }
 
+/// A [`RepoOrigin`] with what it says about the one repository dropped, which
+/// is the grain a filter selects repositories at.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+pub enum RepoCategory {
+    Main,
+    Module,
+    ModuleExtension,
+    Builtin,
+    WorkspaceOrUnknown,
+}
+
 /// The modules Bazel gives a bare canonical name, carrying neither separator
 /// nor version.
 const WELL_KNOWN_MODULES: [&str; 2] = ["bazel_tools", "platforms"];
