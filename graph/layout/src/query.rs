@@ -412,6 +412,19 @@ mod tests {
         );
     }
 
+    /// A genuine repository whose canonical name is `somerepo` would share the
+    /// handle, so a repository filter would cover both under one name.
+    #[test]
+    fn an_unresolved_apparent_repository_name_is_recorded_as_no_repository() {
+        let repos = RepoMapping::infer(["rules_foo+"].into_iter());
+
+        let (_, names, facets) = build_in(&[rule("@somerepo//foo:lib", &[])], &repos);
+
+        let node = names.get("target:@somerepo//foo:lib").unwrap();
+        assert_eq!(facets.repo(node), None);
+        assert_eq!(facets.repos().count(), 0);
+    }
+
     #[test]
     fn external_target_nests_in_repo_qualified_package() {
         let (graph, names, _) = build(&[rule("//foo:x", &[]), rule("@somerepo//foo:y", &[])]);

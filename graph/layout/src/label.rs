@@ -48,6 +48,14 @@ pub(crate) fn label_repo(label: &str) -> Option<&str> {
     parse_package(label).map(|(repo, _)| repo.trim_start_matches('@'))
 }
 
+/// The repository `label` identifies, as the canonical name it is keyed by:
+/// `@@r+//a:b` -> `r+`, and the main repository's empty name for `//a:b`. A
+/// label still carrying an apparent name identifies no repository, since the
+/// name could stand for any of them, and neither does one naming no package.
+pub(crate) fn identified_repo(label: &str) -> Option<&str> {
+    label_repo(label).filter(|_| is_canonical(label))
+}
+
 /// The owned (repository, package path) key of a canonical label's package.
 fn package_key(label: &str) -> Option<(String, String)> {
     parse_package(label).map(|(repo, path)| (repo.to_string(), path.to_string()))

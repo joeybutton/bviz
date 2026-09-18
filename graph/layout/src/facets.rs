@@ -615,7 +615,7 @@ impl FacetsBuilder {
             self.facets.set_package(node, package);
         }
         self.observe(Axis::Package, package.is_some());
-        if let Some(canonical_repo) = label::label_repo(canonical) {
+        if let Some(canonical_repo) = label::identified_repo(canonical) {
             let apparent = label::label_repo(written).filter(|&name| name != canonical_repo);
             let repo = self.facets.intern_repo(canonical_repo, apparent);
             self.facets.set_repo(node, Some(repo));
