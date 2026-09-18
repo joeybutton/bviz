@@ -5,11 +5,12 @@ use crate::drag::{DragEnd, track_drag};
 use crate::layer::overlay_canvas;
 use crate::menu;
 use crate::scrollbar::{Axis, DEFAULT_MIN_THUMB, SCROLLBAR_THICKNESS, Scrollbar};
+use bviz_ui_assets::TextMetrics;
 use bviz_ui_theme::ThemeColors;
 use gpui::{
-    App, Bounds, ClickEvent, Context, ElementId, Entity, EventEmitter, FocusHandle, IntoElement,
-    KeyDownEvent, MouseButton, MouseDownEvent, Pixels, Point, Render, Rgba, ScrollHandle,
-    SharedString, Subscription, Window, deferred, div, point, prelude::*, px, size,
+    App, Bounds, ClickEvent, Context, ElementId, Entity, EventEmitter, FocusHandle, Font,
+    IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, Pixels, Point, Render, Rgba,
+    ScrollHandle, SharedString, Subscription, Window, deferred, div, point, prelude::*, px, size,
 };
 
 /// How tall the menu's row list grows before it scrolls. A facet can carry
@@ -53,16 +54,66 @@ pub struct MultiSelectEvent {
     pub checked: bool,
 }
 
-/// The values a [`MultiSelect`] offers and whether its menu is open — everything
-/// a click on the control decides — held apart from the gpui handles so that
-/// what a click leaves can be read without a window.
+/// What a [`MultiSelect`] draws its menu from, held apart from the gpui handles
+/// so that what a click leaves can be read without a window.
 #[derive(Default)]
 struct Rows {
     options: Vec<MultiOption>,
     open: bool,
+    /// The last measurement over `options`, absent until one is taken and
+    /// whenever the options replaced leave it describing labels no row holds.
+    measured: Option<Measured>,
+}
+
+/// The widths a menu's chrome is laid out to.
+#[derive(Clone, Copy, PartialEq, Debug)]
+struct Widths {
+    /// The widest tally the trigger can read, so what it reads does not change
+    /// how wide it is drawn.
+    trigger: Pixels,
+    /// The widest label the rows hold, so the menu fits its content without a
+    /// row wrapping and without the sheet shrinking one to nothing.
+    label: Pixels,
+}
+
+/// [`Widths`] and the text style they were shaped in. Measuring them shapes
+/// every label, which is a text layout apiece, and a child view re-renders
+/// whenever its parent notifies — so a measurement is reused for as long as
+/// both the labels and the style it was taken in stand.
+struct Measured {
+    font: Font,
+    font_size: Pixels,
+    widths: Widths,
 }
 
 impl Rows {
+    /// The widths already measured in `metrics`' text style; `None` where they
+    /// have to be measured.
+    fn measured(&self, metrics: &TextMetrics) -> Option<Widths> {
+        let measured = self.measured.as_ref()?;
+        (measured.font == metrics.font && measured.font_size == metrics.font_size)
+            .then_some(measured.widths)
+    }
+
+    fn remember(&mut self, metrics: &TextMetrics, widths: Widths) {
+        self.measured = Some(Measured {
+            font: metrics.font.clone(),
+            font_size: metrics.font_size,
+            widths,
+        });
+    }
+
+    /// Restates the values offered; `false` where they are the ones already
+    /// held.
+    fn set_options(&mut self, options: Vec<MultiOption>) -> bool {
+        if self.options == options {
+            return false;
+        }
+        self.options = options;
+        self.measured = None;
+        true
+    }
+
     /// What a click on the row at `index` asks of whoever gave the options: the
     /// value to flip. The menu stays open, since a multi-select is visited to
     /// check several values in one go, and the options stand as they were given.
@@ -115,6 +166,7 @@ impl MultiSelect {
             rows: Rows {
                 options,
                 open: false,
+                measured: None,
             },
             focus_handle: cx.focus_handle(),
             dismiss: None,
@@ -125,8 +177,7 @@ impl MultiSelect {
 
     /// Restates the values the control offers and which of them are checked.
     pub fn set_options(&mut self, options: Vec<MultiOption>, cx: &mut Context<Self>) {
-        if self.rows.options != options {
-            self.rows.options = options;
+        if self.rows.set_options(options) {
             cx.notify();
         }
     }
@@ -184,6 +235,18 @@ impl MultiSelect {
             let mut offset = self.scroll.offset();
             offset.y = px(-bar.offset_at(pos, grab));
             self.scroll.set_offset(offset);
+        }
+    }
+
+    /// Shapes the labels the menu's chrome is sized from.
+    fn measure(&self, window: &mut Window) -> Widths {
+        let total = self.rows.options.len();
+        Widths {
+            trigger: menu::widest(
+                window,
+                std::iter::once(format!("{} {total}/{total}", self.label).into()),
+            ),
+            label: menu::widest(window, self.rows.options.iter().map(|o| o.label.clone())),
         }
     }
 
@@ -312,17 +375,18 @@ impl Render for MultiSelect {
         }
 
         let colors = bviz_ui_theme::theme(window, cx).colors;
-        // The trigger reads a tally, so its width is measured at the widest
-        // tally it can read rather than at the one standing.
-        let total = self.rows.options.len();
-        let widest = menu::widest(
-            window,
-            std::iter::once(format!("{} {total}/{total}", self.label).into()),
-        );
-        let trigger = self.trigger(&colors, widest, cx);
-        // Every row is held to the widest label, so the menu fits its content
-        // without a row wrapping and without the sheet shrinking one to nothing.
-        let label_width = menu::widest(window, self.rows.options.iter().map(|o| o.label.clone()))
+        let metrics = bviz_ui_assets::text_metrics(window);
+        let widths = match self.rows.measured(&metrics) {
+            Some(widths) => widths,
+            None => {
+                let widths = self.measure(window);
+                self.rows.remember(&metrics, widths);
+                widths
+            }
+        };
+        let trigger = self.trigger(&colors, widths.trigger, cx);
+        let label_width = widths
+            .label
             .min(window.viewport_size().width * MENU_LABEL_MAX_SHARE);
         let menu = match self.rows.open {
             true => Some(self.menu(&colors, label_width, cx)),
@@ -385,6 +449,7 @@ mod tests {
                 .map(|(i, checked)| MultiOption::new(format!("value {i}"), checked))
                 .collect(),
             open: true,
+            measured: None,
         }
     }
 
@@ -441,9 +506,57 @@ mod tests {
                 available: false,
             }],
             open: true,
+            measured: None,
         };
 
         assert_eq!(rows.clicked(0), None);
+    }
+
+    fn style(family: &str, size: f32) -> TextMetrics {
+        TextMetrics {
+            font: gpui::font(family),
+            font_size: px(size),
+            line_height: px(size * 1.5),
+        }
+    }
+
+    /// A measurement stands until what it measured moves, so a control
+    /// re-rendered — which a parent's notify does, open or closed — shapes no
+    /// label again.
+    #[test]
+    fn a_measurement_is_reused_until_the_options_or_the_text_style_move() {
+        let ui = style("Inter", 14.);
+        let widths = Widths {
+            trigger: px(80.),
+            label: px(120.),
+        };
+        let mut rows = rows([false, true, false]);
+        assert_eq!(rows.measured(&ui), None);
+
+        rows.remember(&ui, widths);
+        assert_eq!(rows.measured(&ui), Some(widths));
+        assert_eq!(rows.measured(&style("Inter", 16.)), None);
+        assert_eq!(rows.measured(&style("JetBrains Mono", 14.)), None);
+
+        rows.remember(&ui, widths);
+        assert!(rows.set_options(vec![MultiOption::new("another value", true)]));
+        assert_eq!(rows.measured(&ui), None);
+    }
+
+    /// Restating the values the control already holds leaves the measurement
+    /// over them standing, since it describes those very labels.
+    #[test]
+    fn restating_the_values_already_held_keeps_the_measurement() {
+        let ui = style("Inter", 14.);
+        let widths = Widths {
+            trigger: px(80.),
+            label: px(120.),
+        };
+        let mut rows = rows([false, true, false]);
+        rows.remember(&ui, widths);
+
+        assert!(!rows.set_options(rows.options.clone()));
+        assert_eq!(rows.measured(&ui), Some(widths));
     }
 
     /// The trigger reads the values it was given, so restating them is the only
