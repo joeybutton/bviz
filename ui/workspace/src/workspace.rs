@@ -491,6 +491,16 @@ impl Workspace {
         }
     }
 
+    /// Tells every pane whether the window lays out others beside it. The
+    /// arrangement is the workspace's to know, and a frame draws a window from
+    /// its root, so every pane hears this before it draws itself.
+    fn tell_panes_of_neighbours(&self, cx: &mut App) {
+        let neighbours = self.layout.panes().count() > 1;
+        for pane in self.layout.panes() {
+            pane.update(cx, |pane, _| pane.set_shares_window(neighbours));
+        }
+    }
+
     /// The arrangement laid out: panes side by side or one above the other, each
     /// side of a split at the share of it the split gives that side.
     fn arrangement(
@@ -760,6 +770,7 @@ impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = bviz_ui_theme::theme(window, cx).colors;
         let panel = self.active_panel(cx);
+        self.tell_panes_of_neighbours(cx);
         let body = match &self.layout {
             // A lone pane is framed by the window itself: there is no room to
             // divide, and with no other pane to pick between, no direction out

@@ -2,8 +2,8 @@ use crate::{AnyPanel, PanelEvent};
 use bviz_ui_components::Button;
 use bviz_ui_theme::ThemeColors;
 use gpui::{
-    AnyElement, ClickEvent, ElementId, EntityId, EventEmitter, IntoElement, MouseButton, Pixels,
-    Render, Subscription, Window, div, prelude::*, px,
+    AnyElement, App, ClickEvent, Div, ElementId, EntityId, EventEmitter, IntoElement, MouseButton,
+    Pixels, Render, Subscription, Window, div, prelude::*, px,
 };
 use std::cmp::Ordering;
 
@@ -11,11 +11,18 @@ use std::cmp::Ordering;
 /// to sit on with room around them.
 const TAB_STRIP_HEIGHT: Pixels = px(30.);
 
+/// Height of the handle over a pane holding one panel: a line for the panel's
+/// name and nothing besides, so that naming a pane costs the panel as little of
+/// the window as it can.
+const HANDLE_HEIGHT: Pixels = px(24.);
+
 /// How wide a tab may grow before its label is cut, so one long title cannot
 /// push its neighbours off the strip.
 const MAX_TAB_WIDTH: Pixels = px(200.);
 
 const TAB_ICON_SIZE: Pixels = px(14.);
+
+const HANDLE_ICON_SIZE: Pixels = px(12.);
 
 /// A panel of a pane, and the subscription carrying that panel's events to the
 /// pane. Taking the panel out of the pane retires the subscription with it.
@@ -31,6 +38,9 @@ struct Tab {
 pub struct Pane {
     tabs: Vec<Tab>,
     active: usize,
+    /// Whether the window lays out panes besides this one, as its workspace last
+    /// laid the arrangement out.
+    shares_window: bool,
 }
 
 /// What handing a panel over left of the pane that held it. The panel is
@@ -67,6 +77,7 @@ impl Pane {
                 _events: events,
             }],
             active: 0,
+            shares_window: false,
         };
         pane.show_active(window, cx);
         pane
@@ -108,6 +119,10 @@ impl Pane {
     /// How many panels the pane holds, one of which it shows.
     pub(crate) fn tab_count(&self) -> usize {
         self.tabs.len()
+    }
+
+    pub(crate) fn set_shares_window(&mut self, shares: bool) {
+        self.shares_window = shares;
     }
 
     /// Which tab holds `panel`, if this pane holds it at all.
@@ -255,6 +270,39 @@ impl Pane {
             .children(tabs)
     }
 
+    /// The grip over a pane holding one panel, naming that panel as a tab strip
+    /// names the several a pane picks between.
+    fn handle(&self, colors: &ThemeColors, cx: &App) -> impl IntoElement {
+        let panel = self.active_panel();
+        let ink = colors.text_muted;
+        div()
+            .id(ElementId::NamedInteger(
+                "pane-handle".into(),
+                panel.entity_id().as_u64(),
+            ))
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_1()
+            .flex_shrink_0()
+            .w_full()
+            .h(HANDLE_HEIGHT)
+            .px_2()
+            .overflow_hidden()
+            .bg(colors.surface)
+            .border_b_1()
+            .border_color(colors.border)
+            .text_sm()
+            .text_color(ink)
+            .cursor_pointer()
+            .children(panel.icon(cx).map(|name| {
+                bviz_ui_assets::icon(name)
+                    .size(HANDLE_ICON_SIZE)
+                    .text_color(ink)
+            }))
+            .child(title(panel, cx))
+    }
+
     fn tab(&self, index: usize, colors: &ThemeColors, cx: &mut Context<Self>) -> AnyElement {
         let panel = self.tabs[index].panel.clone();
         let showing = index == self.active;
@@ -301,20 +349,7 @@ impl Pane {
                     .size(TAB_ICON_SIZE)
                     .text_color(ink)
             }))
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .min_w(px(0.))
-                    .child(div().min_w(px(0.)).truncate().child(panel.plain_title(cx)))
-                    // A cut-off title must still show which document the tab
-                    // belongs to.
-                    .children(
-                        panel
-                            .title_suffix()
-                            .map(|suffix| div().flex_shrink_0().whitespace_nowrap().child(suffix)),
-                    ),
-            )
+            .child(title(&panel, cx))
             .child(
                 div()
                     // A press on the close control must not also reach the tab
@@ -339,6 +374,21 @@ impl Pane {
     }
 }
 
+/// A panel's name as the pane holding it puts it up: cut short where there is
+/// no room for it, keeping the number of the document it belongs to in view.
+fn title(panel: &AnyPanel, cx: &App) -> Div {
+    div()
+        .flex()
+        .flex_row()
+        .min_w(px(0.))
+        .child(div().min_w(px(0.)).truncate().child(panel.plain_title(cx)))
+        .children(
+            panel
+                .title_suffix()
+                .map(|suffix| div().flex_shrink_0().whitespace_nowrap().child(suffix)),
+        )
+}
+
 /// Which of the `remaining` tabs a pane shows once the tab at `removed` has left
 /// it and the tab at `showing` was the one on show: the tab that moves up into
 /// the gap, or the last tab where the gap is past the end; and otherwise the
@@ -354,17 +404,22 @@ fn showing_after(showing: usize, removed: usize, remaining: usize) -> usize {
 impl Render for Pane {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let body = self.active_panel().view();
-        // One panel is the pane: there is nothing to pick between, and a strip
-        // of one tab would only take room from the panel.
-        if self.tabs.len() == 1 {
+        // The window's one pane holding its one panel is that panel: nothing to
+        // pick between and nothing to tell it apart from, so anything drawn over
+        // it would only take room from it.
+        if self.tabs.len() == 1 && !self.shares_window {
             return body.into_any_element();
         }
         let colors = bviz_ui_theme::theme(window, cx).colors;
+        let above = match self.tabs.len() {
+            1 => self.handle(&colors, cx).into_any_element(),
+            _ => self.tab_strip(&colors, cx).into_any_element(),
+        };
         div()
             .flex()
             .flex_col()
             .size_full()
-            .child(self.tab_strip(&colors, cx))
+            .child(above)
             .child(div().flex().flex_col().flex_1().min_h(px(0.)).child(body))
             .into_any_element()
     }
