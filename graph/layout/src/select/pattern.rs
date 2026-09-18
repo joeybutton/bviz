@@ -97,12 +97,17 @@ impl Pattern {
         package.dedup_by(|next, held| *next == Segment::Any && *held == Segment::Any);
         // A path ending in `...` leaves the target free, and one written with no
         // colon at all names the target its last component names, as Bazel reads
-        // both.
+        // both. A repository written with neither a package nor a colon names
+        // every package of it.
         let target = match written {
             Some(target) => target,
-            None => match package.last()? {
-                Segment::Any => Target::All,
-                Segment::Named(name) => Target::Named(name.clone()),
+            None => match package.last() {
+                None => {
+                    package.push(Segment::Any);
+                    Target::All
+                }
+                Some(Segment::Any) => Target::All,
+                Some(Segment::Named(name)) => Target::Named(name.clone()),
             },
         };
         Some(Pattern::Label {
@@ -258,7 +263,7 @@ mod tests {
 
     #[test]
     fn text_that_is_no_label_is_a_substring() {
-        for text in ["cpp", "foo:bar", "//foo:", "//foo//bar:baz", "//"] {
+        for text in ["cpp", "foo:bar", "//foo:", "//foo//bar:baz"] {
             assert_eq!(
                 Pattern::parse(text),
                 Pattern::Substring(text.to_string()),
@@ -329,6 +334,24 @@ mod tests {
         assert!(pattern.matches("//:app"));
         assert!(!pattern.matches("//foo:app"));
         assert!(Pattern::parse("//...").matches("//:app"));
+    }
+
+    /// Naming a repository and nothing else is what a reader has typed as soon
+    /// as they have named it, and covers all of it — where a substring match on
+    /// the same text would reach no canonical label at all.
+    #[test]
+    fn a_repository_written_with_no_package_covers_every_package_of_it() {
+        assert_eq!(
+            Pattern::parse("@rules_foo//"),
+            Pattern::parse("@rules_foo//...")
+        );
+
+        let pattern = Pattern::parse("@rules_foo//");
+        assert!(pattern.matches("@@rules_foo+//foo/bar:app"));
+        assert!(pattern.matches("@@rules_foo+//:app"));
+        assert!(!pattern.matches("//foo:app"));
+
+        assert!(Pattern::parse("//").matches("//foo:app"));
     }
 
     #[test]
