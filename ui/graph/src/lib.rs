@@ -484,6 +484,7 @@ impl Panel for GraphPanel {
                 self.model.read(cx).source(),
                 self.drawn(),
                 self.camera().zoom,
+                self.derived.over_budget(),
             )
             .into(),
         )

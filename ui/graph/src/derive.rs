@@ -338,6 +338,10 @@ impl Derived {
         self.requested > self.landed
     }
 
+    pub(crate) fn over_budget(&self) -> Option<Overflow> {
+        self.over_budget
+    }
+
     /// Takes `landed` as what this panel draws, unless a later derivation has
     /// superseded it.
     fn adopt(&mut self, landed: Landed) -> Adopted {
@@ -365,8 +369,14 @@ impl Derived {
 }
 
 /// The status line describing what a panel draws: what the read left where it
-/// left no graph, and the size of the drawing `drawn` otherwise.
-pub(crate) fn status(source: &Source, drawn: Option<Drawn>, zoom: f32) -> String {
+/// left no graph, and the size of the drawing `drawn` otherwise, followed by
+/// `over_budget` where the panel's view is past the caps on an opening view.
+pub(crate) fn status(
+    source: &Source,
+    drawn: Option<Drawn>,
+    zoom: f32,
+    over_budget: Option<Overflow>,
+) -> String {
     source.status("No graph", |_| match drawn {
         None => "Laying out…".into(),
         Some(drawn) => {
@@ -376,14 +386,29 @@ pub(crate) fn status(source: &Source, drawn: Option<Drawn>, zoom: f32) -> String
                 .map(|l| format!("level {}/{} · ", l.index + 1, l.count))
                 .unwrap_or_default();
             format!(
-                "{level}{} boxes · {} connectors · {}×{}",
+                "{level}{} boxes · {} connectors · {}×{}{}",
                 g.boxes.len(),
                 g.connectors.len(),
                 g.width.round() as i64,
                 g.height.round() as i64,
+                over_budget.map(past_the_caps).unwrap_or_default(),
             )
         }
     })
+}
+
+/// What a view no fold brings within the caps is past them by, so that a graph
+/// drawn fully collapsed says why it is.
+fn past_the_caps(over: Overflow) -> String {
+    let past: Vec<String> = [
+        (over.nodes, DEFAULT_MAX_NODES, "boxes"),
+        (over.edges, DEFAULT_MAX_EDGES, "connectors"),
+    ]
+    .into_iter()
+    .filter(|&(reached, cap, _)| reached > cap)
+    .map(|(reached, cap, what)| format!("{reached} {what} over {cap}"))
+    .collect();
+    format!(" · fully folded and still {}", past.join(" and "))
 }
 
 /// Adopts the graph the document has finished reading, opening at the expansion
@@ -880,13 +905,13 @@ mod tests {
     /// reads the same whether or not a panel is showing one.
     #[test]
     fn a_graph_still_being_read_says_so() {
-        assert_eq!(status(&Source::Loading, None, 1.0), "Loading…");
+        assert_eq!(status(&Source::Loading, None, 1.0, None), "Loading…");
     }
 
     #[test]
     fn a_graph_that_could_not_be_read_names_what_is_absent() {
         let failed = Source::Failed("aquery.pb: no such file".into());
-        assert_eq!(status(&failed, None, 1.0), "No graph");
+        assert_eq!(status(&failed, None, 1.0, None), "No graph");
     }
 
     #[test]
@@ -896,12 +921,36 @@ mod tests {
         let drawn = derived.drawn(LayoutMode::Map).expect("a map");
         let level = drawn.level(1.0).expect("a map draws one of its levels");
         let boxes = drawn.view(1.0).boxes.len();
-        let status = status(&Source::Loaded(document()), Some(drawn), 1.0);
+        let status = status(&Source::Loaded(document()), Some(drawn), 1.0, None);
         assert!(
             status.starts_with(&format!(
                 "level {}/{} · {boxes} boxes · ",
                 level.index + 1,
                 level.count
+            )),
+            "{status}",
+        );
+    }
+
+    /// A graph too large to draw within the caps opens fully collapsed, which
+    /// looks like a graph that needed no folding, so the status line says which
+    /// count the view is past its cap on.
+    #[test]
+    fn a_view_no_fold_brings_within_the_caps_says_what_it_is_past() {
+        let loaded = document();
+        let derived = opened(&loaded);
+        let drawn = derived.drawn(LayoutMode::Map).expect("a map");
+        let over = Overflow {
+            nodes: DEFAULT_MAX_NODES,
+            edges: DEFAULT_MAX_EDGES + 5,
+        };
+
+        let status = status(&Source::Loaded(document()), Some(drawn), 1.0, Some(over));
+
+        assert!(
+            status.ends_with(&format!(
+                " · fully folded and still {} connectors over {DEFAULT_MAX_EDGES}",
+                over.edges
             )),
             "{status}",
         );
@@ -917,7 +966,7 @@ mod tests {
         assert!(derived.drawn(LayoutMode::Map).is_some());
         assert!(derived.drawn(LayoutMode::Layered).is_none());
         assert_eq!(
-            status(&Source::Loaded(document()), None, 1.0),
+            status(&Source::Loaded(document()), None, 1.0, None),
             "Laying out…"
         );
     }
