@@ -3,9 +3,9 @@
 //!
 //! The search owns one rule of the filter — the one constraining the label term
 //! and nothing else — and the base, which nothing else writes. Every other rule
-//! belongs to a control of its own and is left where it stands, so a search laid
-//! over a checklist's reductions narrows them and emptying the field leaves them
-//! as they were.
+//! belongs to a control of its own and is left where it stands, so a search
+//! narrows a checklist's reductions and emptying the field leaves them as they
+//! were.
 //!
 //! What a rule selects is the pattern, never the labels the result list shows:
 //! that list samples the matches so a reader can see what the pattern reached,
@@ -211,13 +211,6 @@ fn clear(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
 /// `filter` with everything `pattern` names acted on by `act`.
 pub(crate) fn applying(filter: &Filter, pattern: &Pattern, act: Act) -> Filter {
     let mut rules: Vec<Rule> = Vec::with_capacity(filter.rules.len() + 1);
-    rules.extend(
-        filter
-            .rules
-            .iter()
-            .filter(|rule| written(rule).is_none())
-            .cloned(),
-    );
     rules.push(Rule {
         predicate: Predicate {
             label: Some(pattern.clone()),
@@ -225,6 +218,13 @@ pub(crate) fn applying(filter: &Filter, pattern: &Pattern, act: Act) -> Filter {
         },
         visibility: act.visibility(),
     });
+    rules.extend(
+        filter
+            .rules
+            .iter()
+            .filter(|rule| written(rule).is_none())
+            .cloned(),
+    );
     Filter {
         base: act.base(),
         rules,
@@ -464,8 +464,8 @@ mod tests {
 
     /// A filter a control other than the search wrote, which the search must
     /// leave standing.
-    fn hiding_sources() -> Filter {
-        rules::set_hidden(&Filter::default(), &Value::Kind(Kind::Source), true)
+    fn hiding(kind: Kind) -> Filter {
+        rules::set_hidden(&Filter::default(), &Value::Kind(kind), true)
     }
 
     #[test]
@@ -505,21 +505,40 @@ mod tests {
     /// narrows what those hide and taking it off gives that filter back whole.
     #[test]
     fn a_search_taken_off_leaves_the_rules_it_was_laid_over_as_they_were() {
-        let held = hiding_sources();
+        let held = hiding(Kind::Source);
 
         for act in Act::ALL {
             let searching = applying(&held, &pattern("//deep/..."), act);
-            assert_eq!(searching.rules[..held.rules.len()], held.rules[..]);
+            assert_eq!(searching.rules[1..], held.rules[..]);
             assert_eq!(acting(&searching), Some(act));
             assert_eq!(cleared(&searching), held, "{act:?}");
         }
+    }
+
+    /// The pattern's rule stands ahead of the rules over a node's other facets,
+    /// so showing only the matches selects within what a checklist leaves rather
+    /// than drawing back what it hid — whichever of the two controls acted last.
+    #[test]
+    fn a_pattern_never_draws_back_what_another_rule_hides() {
+        let fixture = Fixture::new();
+        let deep = pattern("//deep/...");
+
+        let searched_last = applying(&hiding(Kind::Target), &deep, Act::Only);
+        let hidden_last = rules::set_hidden(
+            &applying(&Filter::default(), &deep, Act::Only),
+            &Value::Kind(Kind::Target),
+            true,
+        );
+
+        assert_eq!(searched_last.rules, hidden_last.rules);
+        assert!(fixture.shown(&searched_last).is_empty());
     }
 
     /// Emptying the field where no action was taken leaves the filter untouched,
     /// so typing alone never moves what is drawn.
     #[test]
     fn a_pattern_typed_and_no_action_taken_leaves_the_filter_alone() {
-        let held = hiding_sources();
+        let held = hiding(Kind::Source);
 
         assert_eq!(acting(&held), None);
         assert_eq!(cleared(&held), held);

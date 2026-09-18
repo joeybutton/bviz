@@ -58,8 +58,11 @@ pub struct Rule {
 ///
 /// The rules are read in order and the last one matching a node decides it, as
 /// a gitignore file's patterns do, so a rule narrows or widens the ones before
-/// it without either being rewritten. `pins` decide the nodes they name whatever
-/// the rules say, which is what lets a node shown or hidden on its own outlast a
+/// it without either being rewritten. A rule constraining [`Predicate::label`]
+/// and nothing besides stands first, ahead of every rule over a node's other
+/// facets, so that a label pattern selects within what those leave rather than
+/// drawing back what they hide. `pins` decide the nodes they name whatever the
+/// rules say, which is what lets a node shown or hidden on its own outlast a
 /// change to a rule that has nothing to do with it.
 #[derive(Clone, Default, PartialEq, Eq, Debug)]
 pub struct Filter {
