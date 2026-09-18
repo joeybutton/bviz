@@ -202,6 +202,15 @@ struct Landed {
     layered: Option<Arc<LaidOut>>,
 }
 
+/// What the derivation in flight will produce.
+#[derive(Clone, Copy)]
+struct InFlight {
+    /// Whether it lays a layered drawing out, which is settled when the
+    /// derivation is requested and so says nothing about the mode the panel has
+    /// selected since.
+    lays_out: bool,
+}
+
 /// A layered drawing that has landed, and the one it takes the place of, which
 /// the view eases onto it.
 pub(crate) struct LayoutLanded {
@@ -246,9 +255,10 @@ pub(crate) struct Derived {
     /// The size of the view the panel last restricted to where it is past the
     /// caps that bound it, absent where it fits.
     over_budget: Option<Overflow>,
-    /// Whether a derivation is running. A request cancels the one it replaces,
-    /// so at most one runs at a time and its result is the panel's.
-    deriving: bool,
+    /// What the derivation running will produce, absent while none is. A
+    /// request cancels the one it replaces, so at most one runs at a time and
+    /// its result is the panel's.
+    in_flight: Option<InFlight>,
     /// Counts the derivations adopted, by which the drawing on screen is told
     /// from the one it replaced.
     landed: u64,
@@ -266,7 +276,7 @@ impl Derived {
             slice: None,
             layered: None,
             over_budget: None,
-            deriving: false,
+            in_flight: None,
             landed: 0,
             _work: Task::ready(()),
         }
@@ -326,7 +336,17 @@ impl Derived {
     /// Whether a derivation is running, so a view can show a progress indicator
     /// while the drawing it will replace stays on screen and interactive.
     pub(crate) fn deriving(&self) -> bool {
-        self.deriving
+        self.in_flight.is_some()
+    }
+
+    /// Whether the derivation in flight will produce what `mode` draws, by which
+    /// a mode selected while one runs waits on it only where it will answer for
+    /// that mode.
+    fn deriving_for(&self, mode: LayoutMode) -> bool {
+        self.in_flight.is_some_and(|in_flight| match mode {
+            LayoutMode::Map => true,
+            LayoutMode::Layered => in_flight.lays_out,
+        })
     }
 
     /// Whether a derivation has to restrict the document's graph afresh rather
@@ -345,7 +365,7 @@ impl Derived {
 
     /// Takes `landed` as what this panel draws.
     fn adopt(&mut self, landed: Landed) -> Adopted {
-        self.deriving = false;
+        self.in_flight = None;
         self.landed += 1;
         let restriction = landed.restricted.map(|restricted| {
             self.expanded = restricted.expanded;
@@ -420,9 +440,9 @@ pub(crate) fn opened(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
 }
 
 /// Derives what `mode` draws where the panel has no drawing of it yet and no
-/// derivation is already running.
+/// derivation that will produce one is already running.
 pub(crate) fn ensure_layout(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
-    if view.derived.drawn(view.mode).is_none() && !view.derived.deriving() {
+    if view.derived.drawn(view.mode).is_none() && !view.derived.deriving_for(view.mode) {
         request(view, cx);
     }
 }
@@ -472,7 +492,7 @@ fn request(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
     let lays_out =
         !restricting || view.mode == LayoutMode::Layered || view.derived.layered.is_some();
     let derived = &mut view.derived;
-    derived.deriving = true;
+    derived.in_flight = Some(InFlight { lays_out });
     let (filter, reduced) = (derived.filter.clone(), derived.reduced);
     let expanded = derived.expanded.clone();
     let held = derived.layered.clone();
@@ -814,6 +834,28 @@ mod tests {
         assert_eq!(selection.node(), None);
     }
 
+    /// A derivation laying no layered drawing out settles nothing for a panel
+    /// that switches to the layered mode while it runs, which must therefore
+    /// ask for a drawing of its own rather than wait on that derivation.
+    #[test]
+    fn a_derivation_laying_out_no_drawing_answers_for_the_map_alone() {
+        let loaded = document();
+        let mut derived = opened(&loaded);
+        derived.in_flight = Some(InFlight { lays_out: false });
+
+        assert!(derived.deriving_for(LayoutMode::Map));
+        assert!(!derived.deriving_for(LayoutMode::Layered));
+
+        derived.adopt(Landed {
+            slice: Slice::whole(&loaded.shared, Filter::default()),
+            restricted: None,
+            layered: None,
+        });
+
+        assert!(derived.drawn(LayoutMode::Layered).is_none());
+        assert!(!derived.deriving_for(LayoutMode::Layered));
+    }
+
     /// A filter set while a derivation runs is owed a restriction that nothing
     /// else records, so every request made before it lands — an expansion, a
     /// change of edge set — restricts afresh rather than laying out the graph
@@ -881,7 +923,7 @@ mod tests {
         let mut derived = opened(&loaded);
         derived.adopt(landed(&loaded, 10.0));
 
-        derived.deriving = true;
+        derived.in_flight = Some(InFlight { lays_out: true });
 
         assert!(derived.deriving());
         let drawn = derived
