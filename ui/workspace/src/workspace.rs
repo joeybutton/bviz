@@ -1,6 +1,7 @@
 use crate::documents_menu::DocumentsMenu;
 use crate::{
-    AnyPanel, Document, Documents, Layout, Pane, PaneEvent, PanelGroup, Removal, Split, SplitId,
+    AnyPanel, DividerId, Document, Documents, Layout, Pane, PaneEvent, PanelGroup, Removal, Side,
+    Split, SplitSide,
 };
 use bviz_ui_components::{Divider, DragEnd, overlay_canvas, track_drag};
 use bviz_ui_shell::Chrome;
@@ -29,7 +30,7 @@ actions!(
 /// window this crate frames and no other.
 const KEY_CONTEXT: &str = "Workspace";
 
-/// The hairline drawn between a split's two sides.
+/// The hairline drawn between two sides of a split.
 const DIVIDER_LINE: Pixels = px(1.);
 
 /// The band the divider is grabbed by, wide enough to aim a press at where the
@@ -68,8 +69,8 @@ pub struct Workspace {
     documents_menu: Entity<DocumentsMenu>,
     /// The events of every pane of `layout`, each retired as its pane leaves.
     pane_events: HashMap<EntityId, Subscription>,
-    /// The split whose divider is being dragged, while one is.
-    divider_drag: Option<SplitId>,
+    /// The divider being dragged, while one is.
+    divider_drag: Option<DividerId>,
 }
 
 impl Workspace {
@@ -206,7 +207,9 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         let pane = cx.new(|cx| Pane::new(panel, window, cx));
-        self.layout.split(&self.active.clone(), axis, pane.clone());
+        let beside = self.active.clone();
+        self.layout
+            .insert_beside(&beside, Side::trailing(axis), pane.clone());
         self.watch(&pane, window, cx);
         self.activate_pane(pane, window, cx);
     }
@@ -276,6 +279,9 @@ impl Workspace {
             Removal::Emptied => window.remove_window(),
             Removal::Removed => {
                 self.pane_events.remove(&pane.entity_id());
+                // A close can take away the boundary a drag is holding, and the
+                // overlay that carries the drag goes with it.
+                self.divider_drag = None;
                 if *pane == self.active
                     && let Some(next) = self.layout.panes().next().cloned()
                 {
@@ -294,14 +300,14 @@ impl Workspace {
         cx.notify();
     }
 
-    fn move_divider(&mut self, id: SplitId, ratio: f32, cx: &mut Context<Self>) {
-        if self.layout.move_divider(id, ratio) {
+    fn move_divider(&mut self, divider: DividerId, share: f32, cx: &mut Context<Self>) {
+        if self.layout.move_divider(divider, share) {
             cx.notify();
         }
     }
 
     /// The arrangement laid out: panes side by side or one above the other, each
-    /// split's two sides sized by its own ratio.
+    /// side of a split at the share of it the split gives that side.
     fn arrangement(
         &self,
         layout: &Layout,
@@ -344,32 +350,44 @@ impl Workspace {
         colors: &ThemeColors,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let (axis, id, ratio) = (split.axis(), split.id(), split.ratio());
-        let dragging = self.divider_drag == Some(id);
-        let first = self.arrangement(split.first(), colors, cx);
-        let second = self.arrangement(split.second(), colors, cx);
-        let container = match axis {
+        let axis = split.axis();
+        let mut container = match axis {
             Axis::Horizontal => div().flex_row(),
             Axis::Vertical => div().flex_col(),
-        };
+        }
+        .flex()
+        .size_full();
+        let mut boundaries = 0;
+        let mut dragged = None;
+        for SplitSide {
+            divider: against,
+            layout,
+            share,
+        } in split.sides()
+        {
+            if let Some(id) = against {
+                let dragging = self.divider_drag == Some(id);
+                container = container.child(divider(id, axis, dragging, colors, cx));
+                if dragging {
+                    dragged = Some((id, boundaries));
+                }
+                boundaries += 1;
+            }
+            let held = self.arrangement(layout, colors, cx);
+            container = container.child(side(held, share, axis));
+        }
         container
-            .flex()
-            .size_full()
-            .child(side(first, ratio, axis))
-            .child(divider(id, axis, dragging, colors, cx))
-            .child(side(second, 1.0 - ratio, axis))
-            .when(dragging, |container| {
-                container.child(divider_drag(id, axis, cx))
+            .when_some(dragged, |container, (id, boundary)| {
+                container.child(divider_drag(id, axis, boundary, boundaries, cx))
             })
             .into_any_element()
     }
 }
 
-/// The grab band between a split's two sides, [`DIVIDER_GRIP`] across. That
-/// extent is room the sides do not get, so [`grabbed_share`] subtracts it from
-/// the split before mapping the cursor to a ratio.
+/// The grab band at one boundary between a split's sides, [`DIVIDER_GRIP`]
+/// across.
 fn divider(
-    id: SplitId,
+    id: DividerId,
     axis: Axis,
     dragging: bool,
     colors: &ThemeColors,
@@ -392,8 +410,8 @@ fn divider(
     .line(DIVIDER_LINE, line)
 }
 
-/// One side of a split, taking `share` of the room the divider leaves it and its
-/// opposite, and clipping whatever it holds to the room it is given.
+/// One side of a split, taking `share` of the room the split's dividers leave
+/// its sides, and clipping whatever it holds to the room it is given.
 fn side(content: AnyElement, share: f32, axis: Axis) -> Div {
     let side = div()
         .flex_basis(px(0.))
@@ -406,19 +424,25 @@ fn side(content: AnyElement, share: f32, axis: Axis) -> Div {
     }
 }
 
-/// A canvas over the split, rendered while its divider is being dragged, which
-/// re-installs the window-global handlers that carry the drag past the divider
-/// and past the window's own edge. It draws nothing and takes no press, so the
-/// panes under it go on hit-testing as they were.
-fn divider_drag(id: SplitId, axis: Axis, cx: &mut Context<Workspace>) -> impl IntoElement {
+/// A canvas over the split, rendered while one of its dividers is being dragged,
+/// which re-installs the window-global handlers that carry the drag past the
+/// divider and past the window's own edge. It draws nothing and takes no press,
+/// so the panes under it go on hit-testing as they were.
+fn divider_drag(
+    id: DividerId,
+    axis: Axis,
+    boundary: usize,
+    boundaries: usize,
+    cx: &mut Context<Workspace>,
+) -> impl IntoElement {
     let workspace = cx.entity();
     overlay_canvas(move |bounds, window, _| {
         track_drag(
             window,
             &workspace,
             move |workspace, position, cx| {
-                if let Some(ratio) = grabbed_share(bounds, position, axis) {
-                    workspace.move_divider(id, ratio, cx);
+                if let Some(share) = grabbed_share(bounds, position, axis, boundary, boundaries) {
+                    workspace.move_divider(id, share, cx);
                 }
             },
             move |workspace, _, _: DragEnd, cx| {
@@ -429,19 +453,28 @@ fn divider_drag(id: SplitId, axis: Axis, cx: &mut Context<Workspace>) -> impl In
     })
 }
 
-/// The share of `bounds` a divider dragged to `position` leaves its first side,
-/// measured over the room the two sides share; `None` for a split with no room
-/// to divide.
-fn grabbed_share(bounds: Bounds<Pixels>, position: Point<Pixels>, axis: Axis) -> Option<f32> {
+/// The share of `bounds` the divider at `boundary` leaves the sides ahead of it
+/// when dragged to `position`, measured over the room the sides share — what is
+/// left of the split once each of its `boundaries` bands has taken its own
+/// extent, and what the bands ahead of this one push it past. `None` for a split
+/// with no room to divide.
+fn grabbed_share(
+    bounds: Bounds<Pixels>,
+    position: Point<Pixels>,
+    axis: Axis,
+    boundary: usize,
+    boundaries: usize,
+) -> Option<f32> {
     let (along, extent) = match axis {
         Axis::Horizontal => (position.x - bounds.origin.x, bounds.size.width),
         Axis::Vertical => (position.y - bounds.origin.y, bounds.size.height),
     };
-    let room = f32::from(extent) - f32::from(DIVIDER_GRIP);
+    let grip = f32::from(DIVIDER_GRIP);
+    let room = f32::from(extent) - grip * boundaries as f32;
     if room <= 0.0 {
         return None;
     }
-    Some((f32::from(along) - f32::from(DIVIDER_GRIP) / 2.0) / room)
+    Some((f32::from(along) - grip * (boundary as f32 + 0.5)) / room)
 }
 
 impl Render for Workspace {
@@ -528,26 +561,46 @@ mod tests {
         Bounds::new(origin, extent)
     }
 
-    /// The share a divider grabbed `along` from the start of the split leaves
-    /// its first side.
-    fn share(along: f32, axis: Axis) -> Option<f32> {
+    /// The share a divider at `boundary`, one of `boundaries` in the split,
+    /// leaves the sides ahead of it when grabbed `along` from the split's start.
+    fn share(along: f32, axis: Axis, boundary: usize, boundaries: usize) -> Option<f32> {
         let bounds = split_bounds(axis);
         let position = match axis {
             Axis::Horizontal => point(bounds.origin.x + px(along), bounds.origin.y + px(50.)),
             Axis::Vertical => point(bounds.origin.x + px(50.), bounds.origin.y + px(along)),
         };
-        grabbed_share(bounds, position, axis)
+        grabbed_share(bounds, position, axis, boundary, boundaries)
     }
 
-    /// The share is of the room the two sides share, which is what a side is
-    /// laid out at: a divider dragged to the middle of that room halves it, and
-    /// one dragged to either end leaves the whole of it to one side.
+    /// The share is of the room the sides share, which is what a side is laid
+    /// out at: a divider dragged to the middle of that room halves it, and one
+    /// dragged to either end leaves the whole of it to one side of itself.
     #[test]
     fn a_divider_leaves_the_share_it_is_dragged_to() {
         for axis in [Axis::Horizontal, Axis::Vertical] {
-            assert_eq!(share(GRIP / 2.0, axis), Some(0.0));
-            assert_eq!(share(EXTENT / 2.0, axis), Some(0.5));
-            assert_eq!(share(EXTENT - GRIP / 2.0, axis), Some(1.0));
+            assert_eq!(share(GRIP / 2.0, axis, 0, 1), Some(0.0));
+            assert_eq!(share(EXTENT / 2.0, axis, 0, 1), Some(0.5));
+            assert_eq!(share(EXTENT - GRIP / 2.0, axis, 0, 1), Some(1.0));
+        }
+    }
+
+    /// Every band takes its extent out of the room the sides divide, and the
+    /// bands ahead of a divider push it that much further along the split, so a
+    /// later divider reads its share from the same room measured from the same
+    /// place.
+    #[test]
+    fn a_later_divider_reads_its_share_over_the_room_every_band_leaves() {
+        let boundaries = 3;
+        let room = EXTENT - GRIP * boundaries as f32;
+        for boundary in 0..boundaries {
+            let start = GRIP * (boundary as f32 + 0.5);
+            let axis = Axis::Horizontal;
+            assert_eq!(share(start, axis, boundary, boundaries), Some(0.0));
+            assert_eq!(share(start + room, axis, boundary, boundaries), Some(1.0));
+            assert_eq!(
+                share(start + room / 2.0, axis, boundary, boundaries),
+                Some(0.5)
+            );
         }
     }
 
@@ -556,15 +609,18 @@ mod tests {
     /// the layout rather than here.
     #[test]
     fn a_divider_dragged_past_the_split_asks_for_a_share_past_its_end() {
-        assert!(share(-100.0, Axis::Horizontal).is_some_and(|share| share < 0.0));
-        assert!(share(EXTENT + 100.0, Axis::Horizontal).is_some_and(|share| share > 1.0));
+        assert!(share(-100.0, Axis::Horizontal, 0, 1).is_some_and(|share| share < 0.0));
+        assert!(share(EXTENT + 100.0, Axis::Horizontal, 0, 1).is_some_and(|share| share > 1.0));
     }
 
-    /// A split with no more room than its own divider has no room to divide.
+    /// A split with no more room than its own dividers has no room to divide.
     #[test]
-    fn a_split_with_no_room_for_either_side_has_no_share_to_give() {
+    fn a_split_with_no_room_for_any_side_has_no_share_to_give() {
         let bounds = Bounds::new(point(px(0.), px(0.)), size(px(GRIP), px(100.)));
         let position = point(px(3.), px(50.));
-        assert_eq!(grabbed_share(bounds, position, Axis::Horizontal), None);
+        assert_eq!(
+            grabbed_share(bounds, position, Axis::Horizontal, 0, 1),
+            None
+        );
     }
 }

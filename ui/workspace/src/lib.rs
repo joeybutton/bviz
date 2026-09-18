@@ -14,7 +14,7 @@ mod workspace;
 pub use documents::ViewSpec;
 pub(crate) use documents::{DocumentId, Documents, OpenDocument, ViewState};
 pub use group::{PanelGroup, Weight};
-pub use layout::{Layout, Panes, Removal, Split, SplitId};
+pub use layout::{DividerId, Layout, Panes, Removal, Side, Split, SplitSide};
 pub use pane::{Pane, PaneEvent};
 pub use panel::{AnyPanel, Document, Panel, PanelEvent, PanelKind, ViewKind, document_label};
 pub use workspace::Workspace;

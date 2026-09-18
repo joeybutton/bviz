@@ -26,8 +26,9 @@ impl Weight {
         })
     }
 
-    /// Widened to add up with the weights of a stack without overflowing.
-    fn shares(self) -> u32 {
+    /// The weight widened, so that a stack's weights add up to what it divides
+    /// between its groups without overflowing what one weight holds.
+    fn shares(self) -> f32 {
         self.0.get().into()
     }
 }
@@ -51,8 +52,8 @@ pub struct PanelGroup<T = AnyPanel> {
     weight: Weight,
 }
 
-/// One panel with a pane to itself, several sharing a pane as tabs, or two
-/// arrangements either side of a divider.
+/// One panel with a pane to itself, several sharing a pane as tabs, or several
+/// arrangements parted by dividers.
 enum Arrangement<T> {
     One(T),
     /// Panels sharing one pane, `first` on show and `rest` tabbed behind it.
@@ -60,14 +61,18 @@ enum Arrangement<T> {
         first: T,
         rest: Vec<T>,
     },
-    /// Two arrangements laid out along `axis`, the first at `ratio` of the
-    /// extent they share.
+    /// `first` and then each of `rest` laid out one after another along `axis`.
     Split {
         axis: Axis,
-        ratio: f32,
-        first: Box<Arrangement<T>>,
-        second: Box<Arrangement<T>>,
+        first: Box<Flexed<T>>,
+        rest: Vec<Flexed<T>>,
     },
+}
+
+/// One side of a split.
+struct Flexed<T> {
+    arrangement: Arrangement<T>,
+    flex: f32,
 }
 
 impl<T> PanelGroup<T> {
@@ -97,9 +102,14 @@ impl<T> PanelGroup<T> {
     pub fn split(axis: Axis, ratio: f32, first: Self, second: Self) -> Self {
         Self::of(Arrangement::Split {
             axis,
-            ratio,
-            first: Box::new(first.arrangement),
-            second: Box::new(second.arrangement),
+            first: Box::new(Flexed {
+                arrangement: first.arrangement,
+                flex: ratio,
+            }),
+            rest: vec![Flexed {
+                arrangement: second.arrangement,
+                flex: 1.0 - ratio,
+            }],
         })
     }
 
@@ -120,27 +130,23 @@ impl<T> PanelGroup<T> {
     }
 
     /// The groups one above the other in the order given, each spanning the
-    /// width and taking the share of the height its weight asks for.
+    /// width and taking the share of the height its weight asks for. The stack
+    /// is one split and a group laid out along its axis joins it, so every
+    /// divider between two panes stacked this way is a sibling of the rest and
+    /// is grabbed over the whole height.
     pub fn stack(first: Self, rest: Vec<Self>) -> Self {
-        Self::stacked(first, rest.into_iter())
-    }
-
-    /// Weighted shares out of splits that divide in two: `first` is given its
-    /// own weight out of what the whole stack weighs, and the stack of the
-    /// groups below it divides the rest the same way.
-    fn stacked(first: Self, mut rest: std::vec::IntoIter<Self>) -> Self {
-        let below: u32 = rest
-            .as_slice()
-            .iter()
-            .map(|group| group.weight.shares())
-            .sum();
-        match rest.next() {
-            None => first,
-            Some(next) => {
-                let share = first.weight.shares() as f32 / (first.weight.shares() + below) as f32;
-                Self::split(Axis::Vertical, share, first, Self::stacked(next, rest))
-            }
+        if rest.is_empty() {
+            return first;
         }
+        let flexed = |group: Self| Flexed {
+            flex: group.weight.shares(),
+            arrangement: group.arrangement,
+        };
+        Self::of(Arrangement::Split {
+            axis: Axis::Vertical,
+            first: Box::new(flexed(first)),
+            rest: rest.into_iter().map(flexed).collect(),
+        })
     }
 
     /// The same arrangement and weight over what `panel` makes of each panel,
@@ -158,12 +164,15 @@ impl<T> Arrangement<T> {
         match self {
             Self::One(panel) => Layout::Pane(pane(panel, Vec::new())),
             Self::Tabs { first, rest } => Layout::Pane(pane(first, rest)),
-            Self::Split {
-                axis,
-                ratio,
-                first,
-                second,
-            } => Layout::split_at(axis, ratio, first.arrange(pane), second.arrange(pane)),
+            Self::Split { axis, first, rest } => {
+                let first = *first;
+                let leading = (first.arrangement.arrange(pane), first.flex);
+                let mut sides = Vec::with_capacity(rest.len());
+                for side in rest {
+                    sides.push((side.arrangement.arrange(pane), side.flex));
+                }
+                Layout::divided(axis, leading, sides)
+            }
         }
     }
 
@@ -174,17 +183,23 @@ impl<T> Arrangement<T> {
                 first: panel(first),
                 rest: rest.into_iter().map(panel).collect(),
             },
-            Self::Split {
-                axis,
-                ratio,
-                first,
-                second,
-            } => Arrangement::Split {
-                axis,
-                ratio,
-                first: Box::new(first.map(panel)),
-                second: Box::new(second.map(panel)),
-            },
+            Self::Split { axis, first, rest } => {
+                let first = *first;
+                Arrangement::Split {
+                    axis,
+                    first: Box::new(Flexed {
+                        arrangement: first.arrangement.map(panel),
+                        flex: first.flex,
+                    }),
+                    rest: rest
+                        .into_iter()
+                        .map(|side| Flexed {
+                            arrangement: side.arrangement.map(panel),
+                            flex: side.flex,
+                        })
+                        .collect(),
+                }
+            }
         }
     }
 }
@@ -245,7 +260,8 @@ mod tests {
         let Layout::Split(split) = arrange(group) else {
             panic!("a split group arranges into a split");
         };
-        assert_eq!(split.ratio(), 0.3);
+        let shares: Vec<f32> = split.sides().into_iter().map(|side| side.share).collect();
+        assert_eq!(shares, [0.3, 0.7]);
         assert_eq!(split.axis(), Axis::Horizontal);
     }
 
@@ -285,30 +301,26 @@ mod tests {
         assert_eq!(Weight::new(0), Weight::new(1));
     }
 
-    /// A share is divided out through the ratios of nested splits, so an even
-    /// share is even to within the rounding of a few divisions — far under a
-    /// pixel of any window.
+    /// A share is divided out of a stack's weights, so an even share is even to
+    /// within one division's rounding — far under a pixel of any window.
     const SHARE_ROUNDING: f32 = 1e-6;
 
-    /// The regions a stack of `count` groups is laid out in, each as the share
-    /// of the height it takes and the arrangement it holds.
+    /// The `count` regions a stack is laid out in, each as the share of the
+    /// height it takes and the arrangement it holds.
     fn regions(layout: &Layout<String>, count: usize) -> Vec<(f32, String)> {
-        let mut regions = Vec::with_capacity(count);
-        let mut remaining = layout;
-        let mut left = 1.0;
-        for _ in 1..count {
-            let Layout::Split(split) = remaining else {
-                panic!(
-                    "a stack of {count} groups divides the height {} times",
-                    count - 1
-                );
-            };
-            assert_eq!(split.axis(), Axis::Vertical);
-            regions.push((left * split.ratio(), shape(split.first())));
-            left *= 1.0 - split.ratio();
-            remaining = split.second();
+        if count == 1 {
+            return vec![(1.0, shape(layout))];
         }
-        regions.push((left, shape(remaining)));
+        let Layout::Split(split) = layout else {
+            panic!("a stack of {count} regions is the one split parting them");
+        };
+        assert_eq!(split.axis(), Axis::Vertical);
+        let regions: Vec<(f32, String)> = split
+            .sides()
+            .into_iter()
+            .map(|side| (side.share, shape(side.layout)))
+            .collect();
+        assert_eq!(regions.len(), count, "a region per side of the stack");
         regions
     }
 
@@ -330,15 +342,23 @@ mod tests {
     }
 
     /// Asserts a stack of `weights` lays its groups out at `expected` shares of
-    /// the height, top to bottom.
+    /// the height, top to bottom, which between them are the whole of it: shares
+    /// that add up to less leave the window room no pane is laid out in.
     fn assert_shares(weights: &[Weight], expected: &[f32]) {
+        assert_eq!(expected.len(), weights.len(), "a share per group stacked");
         let layout = arrange(stack_weighing(weights));
-        for ((share, pane), want) in regions(&layout, weights.len()).into_iter().zip(expected) {
+        let regions = regions(&layout, weights.len());
+        let whole: f32 = regions.iter().map(|(share, _)| share).sum();
+        for ((share, pane), want) in regions.into_iter().zip(expected) {
             assert!(
                 (share - want).abs() < SHARE_ROUNDING,
                 "{weights:?} lays {pane} out at {share}, not {want}"
             );
         }
+        assert!(
+            (whole - 1.0).abs() < SHARE_ROUNDING,
+            "{weights:?} lays its groups out over {whole} of the height, not all of it"
+        );
     }
 
     /// A window holding one document is laid out by that document alone, so a
@@ -364,11 +384,14 @@ mod tests {
         }
     }
 
+    /// Every group of a stack is a side of the one split, so however many
+    /// documents a window holds, each region's divider is a sibling of the rest
+    /// and parts the whole height.
     #[test]
-    fn a_stack_lays_its_groups_out_in_the_order_given() {
+    fn a_stack_lays_its_groups_out_side_by_side_in_the_order_given() {
         assert_eq!(shape(&arrange(stack_of(2))), "(a/b)");
-        assert_eq!(shape(&arrange(stack_of(3))), "(a/(b/c))");
-        assert_eq!(shape(&arrange(stack_of(5))), "(a/(b/(c/(d/e))))");
+        assert_eq!(shape(&arrange(stack_of(3))), "(a/b/c)");
+        assert_eq!(shape(&arrange(stack_of(5))), "(a/b/c/d/e)");
     }
 
     #[test]
@@ -422,10 +445,12 @@ mod tests {
         );
     }
 
-    /// Stacking documents does not disturb what each asked for: a region holds
-    /// the arrangement its own group describes, splits, tabs and all.
+    /// Stacking documents does not disturb what each asked for: the panes of a
+    /// document split along the stack's own axis are laid out as sides of the
+    /// stack, in the order and at the shares of the document's own region its
+    /// group divided that region into.
     #[test]
-    fn a_stacked_group_keeps_the_arrangement_it_asked_for() {
+    fn a_stacked_group_keeps_the_order_and_the_proportions_it_asked_for() {
         let layout = arrange(PanelGroup::stack(
             PanelGroup::one('a'),
             vec![
@@ -438,11 +463,38 @@ mod tests {
                 PanelGroup::tabs('e', vec!['f']),
             ],
         ));
-        let held: Vec<String> = regions(&layout, 3)
-            .into_iter()
-            .map(|(_, arrangement)| arrangement)
-            .collect();
-        assert_eq!(held, ["a", "(b/cd)", "ef"]);
+        let region = 1.0 / 3.0;
+        let expected = [
+            (region, "a"),
+            (region * 0.6, "b"),
+            (region * 0.4, "cd"),
+            (region, "ef"),
+        ];
+        for ((share, held), (want, want_held)) in
+            regions(&layout, expected.len()).into_iter().zip(expected)
+        {
+            assert_eq!(held, want_held);
+            assert!(
+                (share - want).abs() < SHARE_ROUNDING,
+                "{held} is laid out at {share} of the height, not {want}"
+            );
+        }
+    }
+
+    /// A document that is a split across the stack's axis keeps a region of its
+    /// own, which its own divider parts.
+    #[test]
+    fn a_stacked_group_split_across_the_stack_keeps_a_region_of_its_own() {
+        let layout = arrange(PanelGroup::stack(
+            PanelGroup::one('a'),
+            vec![PanelGroup::split(
+                Axis::Horizontal,
+                0.25,
+                PanelGroup::one('b'),
+                PanelGroup::tabs('c', vec!['d']),
+            )],
+        ));
+        assert_eq!(shape(&layout), "(a/(b|cd))");
     }
 
     /// A pane leaves the arrangement as its last panel closes, and the region a
@@ -462,9 +514,9 @@ mod tests {
                 PanelGroup::one('d'),
             ],
         ));
-        assert_eq!(shape(&layout), "(a/((b|c)/d))");
+        assert_eq!(shape(&layout), "(a/(b|c)/d)");
         assert_eq!(layout.remove(&"b".to_string()), Removal::Removed);
-        assert_eq!(shape(&layout), "(a/(c/d))");
+        assert_eq!(shape(&layout), "(a/c/d)");
         assert_eq!(layout.remove(&"c".to_string()), Removal::Removed);
         assert_eq!(shape(&layout), "(a/d)");
     }
