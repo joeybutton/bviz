@@ -16,7 +16,7 @@ use bazel_query_proto::blaze_query::Target;
 
 use crate::capability::Capabilities;
 use crate::facets::{Facets, FacetsBuilder};
-use crate::graph::Graph;
+use crate::graph::{Graph, Node};
 use crate::intern::{Id, Names};
 use crate::label::{RepoMapping, canonical_repo};
 use crate::{aquery, cquery, query};
@@ -162,12 +162,12 @@ fn canonicalize(graph: Graph, names: &Names, mut facets: Facets) -> (Graph, Name
     let mut out = Graph::new();
     for &old in &order {
         let node = by_id[old as usize].expect("every id names a node");
-        out.add_node(
+        out.add_node(Node::new(
             map(node.id),
             node.label.clone(),
             node.kind,
             node.parent.map(map),
-        );
+        ));
     }
     for edge in &graph.edges {
         out.add_edge(map(edge.from), map(edge.to), edge.kind);

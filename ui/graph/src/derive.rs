@@ -634,6 +634,7 @@ mod tests {
     use super::*;
     use crate::model::Opening;
     use crate::selection::Selection;
+    use bviz_graph_layout::graph::Node;
     use bviz_graph_layout::select::{Predicate, Rule, Values, Visibility};
     use bviz_graph_layout::{EdgeKind, Facets, Kind};
 
@@ -646,12 +647,12 @@ mod tests {
         let mut actions: Vec<Id> = Vec::new();
         for package in ["a", "b"] {
             let package_id = names.intern(&format!("//{package}"));
-            base.add_node(package_id, package, Kind::Package, None);
+            base.add_node(Node::new(package_id, package, Kind::Package, None));
             let target = names.intern(&format!("//{package}:t"));
-            base.add_node(target, "t", Kind::Target, Some(package_id));
+            base.add_node(Node::new(target, "t", Kind::Target, Some(package_id)));
             for action in ["compile", "link"] {
                 let id = names.intern(&format!("//{package}:t#{action}"));
-                base.add_node(id, action, Kind::Action, Some(target));
+                base.add_node(Node::new(id, action, Kind::Action, Some(target)));
                 actions.push(id);
             }
         }

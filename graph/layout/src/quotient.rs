@@ -294,7 +294,7 @@ mod tests {
     ) {
         let parent = parent.map(|p| names.intern(p));
         let id = names.intern(id);
-        graph.add_node(id, label, kind, parent);
+        graph.add_node(Node::new(id, label, kind, parent));
     }
 
     fn edge(graph: &mut Graph, names: &mut Names, from: &str, to: &str, kind: EdgeKind) {

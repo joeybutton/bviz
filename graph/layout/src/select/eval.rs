@@ -425,7 +425,7 @@ mod tests {
             let mut builder = FacetsBuilder::default();
 
             let app = names.intern(APP);
-            graph.add_node(app, ":app", Kind::Target, None);
+            graph.add_node(Node::new(app, ":app", Kind::Target, None));
             builder.describe_label(app, None, "//foo:app", "//foo:app");
             builder.set_tags(app, ["manual"]);
             builder.set_aspects(app, ["//tools:coverage.bzl%instrument"]);
@@ -442,7 +442,7 @@ mod tests {
                 (OUTPUT, Kind::Artifact, ":app.o"),
             ] {
                 let id = names.intern(name);
-                graph.add_node(id, label, kind, Some(app));
+                graph.add_node(Node::new(id, label, kind, Some(app)));
                 builder.facets().inherit(id, app);
             }
             let action = names.get(ACTION).expect("the action just interned");
@@ -451,7 +451,7 @@ mod tests {
             facets.set_mnemonic(action, Some(mnemonic));
 
             let lib = names.intern(LIB);
-            graph.add_node(lib, ":lib", Kind::Target, None);
+            graph.add_node(Node::new(lib, ":lib", Kind::Target, None));
             builder.describe_label(lib, None, "@@rules_foo+//bar:lib", "@rules_foo//bar:lib");
             let facets = builder.facets();
             let rule_class = facets.intern_rule_class("cc_library");
@@ -460,12 +460,12 @@ mod tests {
             facets.set_config(lib, Some(exec));
 
             let source = names.intern(SOURCE);
-            graph.add_node(source, ":main.c", Kind::Source, None);
+            graph.add_node(Node::new(source, ":main.c", Kind::Source, None));
             builder.describe_label(source, None, "//foo:main.c", "//foo:main.c");
 
             let (facets, _) = builder.seal();
             let group = names.intern(GROUP);
-            graph.add_node(group, "2 sources", Kind::Source, None);
+            graph.add_node(Node::new(group, "2 sources", Kind::Source, None));
 
             Fixture {
                 graph,
@@ -762,12 +762,12 @@ mod tests {
                 (OTHER_PACKAGE, OTHER_TARGET, [OTHER_ACTION].as_slice()),
             ] {
                 let package_id = names.intern(package);
-                graph.add_node(package_id, package, Kind::Package, None);
+                graph.add_node(Node::new(package_id, package, Kind::Package, None));
                 let target_id = names.intern(target);
-                graph.add_node(target_id, target, Kind::Target, Some(package_id));
+                graph.add_node(Node::new(target_id, target, Kind::Target, Some(package_id)));
                 for &action in actions {
                     let action_id = names.intern(action);
-                    graph.add_node(action_id, action, Kind::Action, Some(target_id));
+                    graph.add_node(Node::new(action_id, action, Kind::Action, Some(target_id)));
                 }
             }
             let (facets, _) = FacetsBuilder::default().seal();

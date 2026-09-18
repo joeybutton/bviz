@@ -31,7 +31,7 @@ use crate::capability::Axis;
 #[cfg(test)]
 use crate::facets::Facets;
 use crate::facets::{ConfigRef, FacetsBuilder};
-use crate::graph::{EdgeKind, Graph, Kind};
+use crate::graph::{EdgeKind, Graph, Kind, Node};
 use crate::intern::{Id, Names};
 use crate::label::{self, PackageHierarchy, RepoMapping};
 
@@ -170,12 +170,12 @@ fn build_action_boxes(
             config_id,
         );
         let action_id = boxes.names.intern(&format!("action{i}"));
-        boxes.graph.add_node(
+        boxes.graph.add_node(Node::new(
             action_id,
             action.mnemonic.clone(),
             Kind::Action,
             Some(ct_id),
-        );
+        ));
         boxes.describe_action(action_id, ct_id, action);
         for &out in &action.output_ids {
             let out = ArtifactId(out);
@@ -384,23 +384,23 @@ impl Boxes<'_> {
                 let id = self
                     .names
                     .intern(&format!("artifact:{out_label}#{config_key}"));
-                self.graph.add_node(
+                self.graph.add_node(Node::new(
                     id,
                     self.index.paths.basename(out),
                     Kind::Artifact,
                     Some(out_ct),
-                );
+                ));
                 self.facets.facets().inherit(id, out_ct);
                 id
             }
             None => {
                 let id = self.names.intern(&format!("artifact{}", out.0));
-                self.graph.add_node(
+                self.graph.add_node(Node::new(
                     id,
                     self.index.paths.basename(out),
                     Kind::Artifact,
                     Some(producing_ct),
-                );
+                ));
                 self.facets.facets().inherit(id, producing_ct);
                 id
             }
@@ -424,12 +424,12 @@ impl Boxes<'_> {
         let target_node_id = self.names.intern(&label::target_node_id(target.canonical));
         if self.targets.insert(target_node_id) {
             let package = self.hierarchy.package_box(target.canonical);
-            self.graph.add_node(
+            self.graph.add_node(Node::new(
                 target_node_id,
                 label::target_label(target.canonical),
                 target.kind,
                 package,
-            );
+            ));
             self.facets
                 .describe_label(target_node_id, package, target.canonical, target.written);
             if target.kind == Kind::Target {
@@ -453,12 +453,12 @@ impl Boxes<'_> {
                 .get(&config_id)
                 .map(|c| c.mnemonic.as_str()),
         );
-        self.graph.add_node(
+        self.graph.add_node(Node::new(
             ct_node_id,
             mnemonic,
             Kind::ConfiguredTarget,
             Some(target_node_id),
-        );
+        ));
         let config = self.intern_config(config_id);
         self.facets.observe(Axis::Configuration, config.is_some());
         if let Some(config) = config {
@@ -584,7 +584,12 @@ impl Wiring<'_, '_> {
                 let node_id = names.intern(&label::target_node_id(&label));
                 if self.source_nodes.insert(node_id) {
                     let parent = self.hierarchy.package_box(&label);
-                    graph.add_node(node_id, label::target_label(&label), Kind::Source, parent);
+                    graph.add_node(Node::new(
+                        node_id,
+                        label::target_label(&label),
+                        Kind::Source,
+                        parent,
+                    ));
                     self.facets.describe_label(node_id, parent, &label, &label);
                 }
                 node_id
@@ -649,7 +654,12 @@ fn root_source_node(
 ) -> Id {
     let node_id = names.intern(&format!("source{}", artifact_id.0));
     if source_nodes.insert(node_id) {
-        graph.add_node(node_id, paths.basename(artifact_id), Kind::Source, None);
+        graph.add_node(Node::new(
+            node_id,
+            paths.basename(artifact_id),
+            Kind::Source,
+            None,
+        ));
     }
     node_id
 }

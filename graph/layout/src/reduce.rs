@@ -340,7 +340,7 @@ fn components(succ: &[Vec<u32>]) -> Vec<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::graph::{EdgeKind, Kind};
+    use crate::graph::{EdgeKind, Kind, Node};
     use crate::intern::Names;
 
     fn build(edges: &[(&str, &str)]) -> (Graph, Names) {
@@ -350,7 +350,7 @@ mod tests {
         for &(a, b) in edges {
             for id in [a, b] {
                 if seen.insert(id) {
-                    g.add_node(n.intern(id), id, Kind::Action, None);
+                    g.add_node(Node::new(n.intern(id), id, Kind::Action, None));
                 }
             }
         }

@@ -152,7 +152,7 @@ pub(crate) fn stating(yes: bool) -> Tri {
 mod tests {
     use super::*;
     use crate::facets::{Facets, FacetsBuilder};
-    use crate::graph::Graph;
+    use crate::graph::{Graph, Node};
     use crate::intern::Names;
 
     /// A graph of one `cc_test` target in the main repository with an action
@@ -171,7 +171,7 @@ mod tests {
             let mut builder = FacetsBuilder::default();
 
             let app = names.intern("target://foo:app");
-            graph.add_node(app, ":app", Kind::Target, None);
+            graph.add_node(Node::new(app, ":app", Kind::Target, None));
             builder.describe_label(app, None, "//foo:app", "//foo:app");
             builder.set_tags(app, ["manual", "flaky"]);
             builder.set_aspects(app, ["//tools:coverage.bzl%instrument"]);
@@ -183,14 +183,14 @@ mod tests {
             facets.set_testonly(app, Tri::Yes);
 
             let action = names.intern("action0");
-            graph.add_node(action, "CppCompile", Kind::Action, Some(app));
+            graph.add_node(Node::new(action, "CppCompile", Kind::Action, Some(app)));
             let facets = builder.facets();
             let mnemonic = facets.intern_mnemonic("CppCompile");
             facets.set_mnemonic(action, Some(mnemonic));
             facets.inherit(action, app);
 
             let lib = names.intern("target:@@rules_foo+//bar:lib");
-            graph.add_node(lib, ":lib", Kind::Target, None);
+            graph.add_node(Node::new(lib, ":lib", Kind::Target, None));
             builder.describe_label(lib, None, "@@rules_foo+//bar:lib", "@rules_foo//bar:lib");
             let facets = builder.facets();
             let rule_class = facets.intern_rule_class("cc_library");
@@ -200,7 +200,7 @@ mod tests {
             facets.set_testonly(lib, Tri::No);
 
             let source = names.intern("target://foo:main.c");
-            graph.add_node(source, ":main.c", Kind::Source, None);
+            graph.add_node(Node::new(source, ":main.c", Kind::Source, None));
             builder.describe_label(source, None, "//foo:main.c", "//foo:main.c");
 
             let (facets, _) = builder.seal();
@@ -454,7 +454,7 @@ mod tests {
         let group = fixture.names.intern("group:target://foo:app");
         fixture
             .graph
-            .add_node(group, "2 sources", Kind::Source, None);
+            .add_node(Node::new(group, "2 sources", Kind::Source, None));
 
         let predicate = Predicate {
             label: Some(Pattern::parse("//foo/...")),

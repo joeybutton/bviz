@@ -110,6 +110,7 @@ pub(crate) fn relayout(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bviz_graph_layout::graph::Node;
     use bviz_graph_layout::{EdgeKind, Kind};
     use std::cmp::Ordering;
 
@@ -131,7 +132,7 @@ mod tests {
             let mut base = Graph::new();
             let mut add = |base: &mut Graph, name: &str, kind: Kind, parent: Option<Id>| {
                 let id = names.intern(name);
-                base.add_node(id, name, kind, parent);
+                base.add_node(Node::new(id, name, kind, parent));
                 id
             };
 

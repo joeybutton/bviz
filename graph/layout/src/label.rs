@@ -12,7 +12,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use bazel_query_proto::blaze_query::{Target, target::Discriminator};
 
-use crate::graph::{Graph, Kind};
+use crate::graph::{Graph, Kind, Node};
 use crate::intern::{Id, Names};
 use crate::repo::module_name;
 
@@ -276,7 +276,7 @@ impl PackageHierarchy {
     fn emit_root(&mut self, root: &Trie, repo: &str, graph: &mut Graph, names: &mut Names) {
         let parent = if root.real {
             let id = names.intern(&box_node_id(repo, ""));
-            graph.add_node(id, repo_prefix(repo), Kind::Package, None);
+            graph.add_node(Node::new(id, repo_prefix(repo), Kind::Package, None));
             self.box_id.insert((repo.to_string(), String::new()), id);
             Some(id)
         } else {
@@ -322,7 +322,7 @@ impl PackageHierarchy {
             Some(_) => pending.join("/"),
         };
         let id = names.intern(&box_node_id(repo, full_path));
-        graph.add_node(id, label, Kind::Package, parent_box);
+        graph.add_node(Node::new(id, label, Kind::Package, parent_box));
         if node.real {
             self.box_id
                 .insert((repo.to_string(), full_path.to_string()), id);

@@ -46,9 +46,9 @@ fn child_counts(graph: &Graph) -> HashMap<Id, usize> {
 /// chains always reveal their descendants. Every node folds to its
 /// "representative": the shallowest node on its root->node path that is neither
 /// in `expanded` nor a singleton (or the node itself when its whole ancestor
-/// chain is effectively expanded). Each distinct representative becomes one node
-/// (keeping that node's label/kind/parent), so a collapsed container renders as
-/// a leaf. Edges are remapped to their endpoints' representatives, self-loops
+/// chain is effectively expanded). Each distinct representative is emitted as
+/// the node it is, so a collapsed container renders as a leaf. Edges are
+/// remapped to their endpoints' representatives, self-loops
 /// (both endpoints in the same collapsed subtree) dropped, and duplicates merged
 /// keeping their `EdgeKind`.
 pub fn collapse(graph: &Graph, expanded: &HashSet<Id>) -> Graph {
@@ -58,7 +58,7 @@ pub fn collapse(graph: &Graph, expanded: &HashSet<Id>) -> Graph {
     let mut out = Graph::new();
     for node in &graph.nodes {
         if rep[node.id.0 as usize] == node.id.0 {
-            out.add_node(node.id, node.label.clone(), node.kind, node.parent);
+            out.add_node(node.clone());
         }
     }
 
@@ -461,7 +461,7 @@ impl IndexedGraph {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::graph::Kind;
+    use crate::graph::{Kind, Node};
     use crate::intern::Names;
     use crate::test_support::{edges, find};
 
@@ -502,10 +502,10 @@ mod tests {
         let mut names = Names::default();
         for root in ["A", "B"] {
             let root_id = spaced(&mut names, spacing, root);
-            g.add_node(root_id, root, Kind::Package, None);
+            g.add_node(Node::new(root_id, root, Kind::Package, None));
             for kid in ["x", "y"] {
                 let child = spaced(&mut names, spacing, &format!("{root}.{kid}"));
-                g.add_node(child, "leaf", Kind::Action, Some(root_id));
+                g.add_node(Node::new(child, "leaf", Kind::Action, Some(root_id)));
             }
         }
         (g, names)
@@ -520,10 +520,10 @@ mod tests {
         let b = names.intern("b");
         let c = names.intern("c");
         let leaf = names.intern("leaf");
-        g.add_node(a, "A", Kind::Package, None);
-        g.add_node(b, "b", Kind::Target, Some(a));
-        g.add_node(c, "c", Kind::Target, Some(b));
-        g.add_node(leaf, "leaf", Kind::Action, Some(c));
+        g.add_node(Node::new(a, "A", Kind::Package, None));
+        g.add_node(Node::new(b, "b", Kind::Target, Some(a)));
+        g.add_node(Node::new(c, "c", Kind::Target, Some(b)));
+        g.add_node(Node::new(leaf, "leaf", Kind::Action, Some(c)));
         (g, names)
     }
 
@@ -539,7 +539,7 @@ mod tests {
         // Make `b` a two-child container; its other child is a leaf.
         let b = names.get("b").unwrap();
         let extra = names.intern("b.extra");
-        g.add_node(extra, "leaf", Kind::Action, Some(b));
+        g.add_node(Node::new(extra, "leaf", Kind::Action, Some(b)));
 
         // The singleton-only ancestors (A) and leaves never qualify; `b` does.
         assert_eq!(expandable_containers(&g), expanded(&names, &["b"]));
@@ -582,9 +582,9 @@ mod tests {
         let r = names.intern("R");
         let x = names.intern("x");
         let y = names.intern("y");
-        g.add_node(r, "R", Kind::Package, None);
-        g.add_node(x, "leaf", Kind::Action, Some(r));
-        g.add_node(y, "leaf", Kind::Action, Some(r));
+        g.add_node(Node::new(r, "R", Kind::Package, None));
+        g.add_node(Node::new(x, "leaf", Kind::Action, Some(r)));
+        g.add_node(Node::new(y, "leaf", Kind::Action, Some(r)));
 
         // R is multi-child, so it is the only expand handle and a fold boundary.
         assert_eq!(expandable_containers(&g), expanded(&names, &["R"]));
@@ -597,15 +597,15 @@ mod tests {
         let mut g = Graph::new();
         let mut names = Names::default();
         let r = names.intern("R");
-        g.add_node(r, "R", Kind::Package, None);
+        g.add_node(Node::new(r, "R", Kind::Package, None));
         // Each of R's two children is the head of a singleton chain to a leaf.
         for c in ["p", "q"] {
             let c_id = names.intern(c);
-            g.add_node(c_id, c, Kind::Target, Some(r));
+            g.add_node(Node::new(c_id, c, Kind::Target, Some(r)));
             let mid = names.intern(&format!("{c}.mid"));
             let leaf = names.intern(&format!("{c}.leaf"));
-            g.add_node(mid, "mid", Kind::Target, Some(c_id));
-            g.add_node(leaf, "leaf", Kind::Action, Some(mid));
+            g.add_node(Node::new(mid, "mid", Kind::Target, Some(c_id)));
+            g.add_node(Node::new(leaf, "leaf", Kind::Action, Some(mid)));
         }
 
         // R is the sole expand handle; its singleton descendants are transparent.
@@ -630,14 +630,14 @@ mod tests {
         let mut g = Graph::new();
         let mut names = Names::default();
         let r = names.intern("R");
-        g.add_node(r, "R", Kind::Package, None);
+        g.add_node(Node::new(r, "R", Kind::Package, None));
         for c in ["c1", "c2"] {
             let c_id = names.intern(c);
-            g.add_node(c_id, c, Kind::Target, Some(r));
+            g.add_node(Node::new(c_id, c, Kind::Target, Some(r)));
             // Two leaves keep each child a multi-child fold boundary.
             for leaf in ["a", "b"] {
                 let id = names.intern(&format!("{c}.{leaf}"));
-                g.add_node(id, "leaf", Kind::Action, Some(c_id));
+                g.add_node(Node::new(id, "leaf", Kind::Action, Some(c_id)));
             }
         }
         // Internal to c1 (self-loop once folded), and cross-child c1 -> c2.
@@ -827,11 +827,11 @@ mod tests {
         let mut g = Graph::new();
         let mut names = Names::default();
         let root = names.intern("R");
-        g.add_node(root, "R", Kind::Package, None);
+        g.add_node(Node::new(root, "R", Kind::Package, None));
         let leaves: Vec<Id> = (0..len)
             .map(|i| {
                 let id = names.intern(&format!("n{i:03}"));
-                g.add_node(id, "leaf", Kind::Action, Some(root));
+                g.add_node(Node::new(id, "leaf", Kind::Action, Some(root)));
                 id
             })
             .collect();
@@ -868,12 +868,12 @@ mod tests {
         let mut g = Graph::new();
         let mut names = Names::default();
         let source = names.intern("source");
-        g.add_node(source, "source", Kind::Action, None);
+        g.add_node(Node::new(source, "source", Kind::Action, None));
         let container = names.intern("C");
-        g.add_node(container, "C", Kind::Package, None);
+        g.add_node(Node::new(container, "C", Kind::Package, None));
         let (near, far) = (names.intern("C.near"), names.intern("C.far"));
         for leaf in [near, far] {
-            g.add_node(leaf, "leaf", Kind::Action, Some(container));
+            g.add_node(Node::new(leaf, "leaf", Kind::Action, Some(container)));
         }
         // `source -> far` is implied by `source -> near -> far`, so the
         // reduction drops it while the fold takes both to one pair of boxes.
@@ -914,11 +914,11 @@ mod tests {
         let mut names = Names::default();
         let a = names.intern("A");
         let b = names.intern("b");
-        g.add_node(a, "A", Kind::Package, None);
-        g.add_node(b, "b", Kind::Target, Some(a));
+        g.add_node(Node::new(a, "A", Kind::Package, None));
+        g.add_node(Node::new(b, "b", Kind::Target, Some(a)));
         for leaf in ["x", "y"] {
             let id = names.intern(leaf);
-            g.add_node(id, "leaf", Kind::Action, Some(b));
+            g.add_node(Node::new(id, "leaf", Kind::Action, Some(b)));
         }
 
         // `b` is the reachable multi-child container; A is a transparent
@@ -999,6 +999,31 @@ mod tests {
         assert_eq!(node_ids(&out, &names), set(&["A", "B"]));
         assert!(out.edges.is_empty());
         assert!(collapse_edges(&g, &HashSet::new()).is_empty());
+    }
+
+    /// A merge group's container is told from an ordinary box by its `group`
+    /// marker and not by its kind, so a fold that drops the marker leaves a box
+    /// the reader can no longer open or close.
+    #[test]
+    fn a_folded_group_keeps_its_marker() {
+        let mut g = Graph::new();
+        let mut n = Names::default();
+        let action = n.intern("action0");
+        g.add_node(Node::new(action, "Compile", Kind::Action, None));
+        for source in ["source1", "source2"] {
+            let id = n.intern(source);
+            g.add_node(Node::new(id, source, Kind::Source, None));
+            g.add_edge(id, action, EdgeKind::Aquery);
+        }
+        let (merged, _) = crate::quotient::quotient(&g, &HashSet::new(), &mut n);
+        assert!(
+            find(&merged, &n, "group:source1").group,
+            "the fixture's merge minted no group",
+        );
+
+        let folded = collapse(&merged, &HashSet::new());
+
+        assert!(find(&folded, &n, "group:source1").group);
     }
 
     #[test]

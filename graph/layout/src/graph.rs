@@ -38,6 +38,19 @@ pub struct Node {
     pub parent: Option<Id>,
 }
 
+impl Node {
+    /// A node no other graph holds, and so no merge group.
+    pub fn new(id: Id, label: impl Into<String>, kind: Kind, parent: Option<Id>) -> Self {
+        Node {
+            id,
+            label: label.into(),
+            kind,
+            group: false,
+            parent,
+        }
+    }
+}
+
 /// Which Bazel query an edge came from, so the renderer can style the static
 /// (query), configured (cquery), and execution-phase (aquery) dependencies
 /// distinctly when several are drawn in one joint graph. `Transitive` marks an
@@ -84,14 +97,8 @@ impl Graph {
         Self::default()
     }
 
-    pub fn add_node(&mut self, id: Id, label: impl Into<String>, kind: Kind, parent: Option<Id>) {
-        self.nodes.push(Node {
-            id,
-            label: label.into(),
-            kind,
-            group: false,
-            parent,
-        });
+    pub fn add_node(&mut self, node: Node) {
+        self.nodes.push(node);
     }
 
     pub fn add_edge(&mut self, from: Id, to: Id, kind: EdgeKind) {
@@ -207,7 +214,7 @@ mod tests {
         let mut graph = Graph::new();
         let parents = [None, Some(0), Some(0), Some(1), None, Some(4), Some(9)];
         for (id, parent) in parents.into_iter().enumerate() {
-            graph.add_node(Id(id as u32), "n", Kind::Target, parent.map(Id));
+            graph.add_node(Node::new(Id(id as u32), "n", Kind::Target, parent.map(Id)));
         }
         graph
     }

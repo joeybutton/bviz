@@ -192,7 +192,7 @@ mod tests {
         for &(a, b) in edges {
             for id in [a, b] {
                 if seen.insert(id) {
-                    g.add_node(n.intern(id), id, Kind::Action, None);
+                    g.add_node(Node::new(n.intern(id), id, Kind::Action, None));
                 }
             }
         }
@@ -288,7 +288,7 @@ mod tests {
         let mut g = Graph::new();
         let mut n = Names::default();
         for id in ["a", "d1", "d2", "b"] {
-            g.add_node(n.intern(id), id, Kind::Action, None);
+            g.add_node(Node::new(n.intern(id), id, Kind::Action, None));
         }
         for (from, to) in [("a", "d1"), ("d1", "d2"), ("d2", "d1"), ("d2", "b")] {
             g.add_edge(n.intern(from), n.intern(to), EdgeKind::Query);
@@ -314,7 +314,7 @@ mod tests {
         let mut g = Graph::new();
         let mut n = Names::default();
         for id in ["a", "x", "d1", "d2", "b", "c"] {
-            g.add_node(n.intern(id), id, Kind::Action, None);
+            g.add_node(Node::new(n.intern(id), id, Kind::Action, None));
         }
         for (from, to) in [
             ("a", "d1"),
@@ -349,11 +349,11 @@ mod tests {
         let mut g = Graph::new();
         let mut n = Names::default();
         let root = n.intern("root");
-        g.add_node(root, "root", Kind::Package, None);
+        g.add_node(Node::new(root, "root", Kind::Package, None));
         let mid = n.intern("mid");
-        g.add_node(mid, "mid", Kind::Package, Some(root));
+        g.add_node(Node::new(mid, "mid", Kind::Package, Some(root)));
         let leaf = n.intern("leaf");
-        g.add_node(leaf, "leaf", Kind::Target, Some(mid));
+        g.add_node(Node::new(leaf, "leaf", Kind::Target, Some(mid)));
 
         let out = filter(
             &g,
@@ -369,9 +369,9 @@ mod tests {
         let mut g = Graph::new();
         let mut n = Names::default();
         let mid = n.intern("mid");
-        g.add_node(mid, "mid", Kind::Package, None);
+        g.add_node(Node::new(mid, "mid", Kind::Package, None));
         let leaf = n.intern("leaf");
-        g.add_node(leaf, "leaf", Kind::Target, Some(mid));
+        g.add_node(Node::new(leaf, "leaf", Kind::Target, Some(mid)));
 
         let out = filter(&g, &reduce::transitive_reduction(&g), &ids(&n, &["leaf"]));
         assert_eq!(out.nodes.len(), 1);
@@ -388,15 +388,15 @@ mod tests {
         let mut actions: Vec<Id> = Vec::new();
         for p in 0..2 {
             let package = format!("//p{p}");
-            g.add_node(n.intern(&package), &package, Kind::Package, None);
+            g.add_node(Node::new(n.intern(&package), &package, Kind::Package, None));
             for t in 0..2 {
                 let target = format!("{package}:t{t}");
                 let parent = n.get(&package);
-                g.add_node(n.intern(&target), &target, Kind::Target, parent);
+                g.add_node(Node::new(n.intern(&target), &target, Kind::Target, parent));
                 for a in 0..2 {
                     let action = format!("{target}#a{a}");
                     let parent = n.get(&target);
-                    g.add_node(n.intern(&action), &action, Kind::Action, parent);
+                    g.add_node(Node::new(n.intern(&action), &action, Kind::Action, parent));
                     actions.push(n.get(&action).unwrap());
                 }
             }
@@ -483,14 +483,14 @@ mod tests {
         let mut g = Graph::new();
         let mut n = Names::default();
         let action = n.intern("action0");
-        g.add_node(action, "Compile", Kind::Action, None);
+        g.add_node(Node::new(action, "Compile", Kind::Action, None));
         for source in ["source1", "source2"] {
             let id = n.intern(source);
-            g.add_node(id, source, Kind::Source, None);
+            g.add_node(Node::new(id, source, Kind::Source, None));
             g.add_edge(id, action, EdgeKind::Aquery);
         }
         let other = n.intern("other");
-        g.add_node(other, "other", Kind::Action, None);
+        g.add_node(Node::new(other, "other", Kind::Action, None));
         let group = n.intern("group:source1");
         let (view, _) = crate::quotient::quotient(&g, &[group].into_iter().collect(), &mut n);
         assert!(

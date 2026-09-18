@@ -729,7 +729,7 @@ mod tests {
         let mut graph = Graph::new();
         let mut add = |graph: &mut Graph, name: &str, kind: Kind, parent: Option<Id>| {
             let id = names.intern(name);
-            graph.add_node(id, name, kind, parent);
+            graph.add_node(Node::new(id, name, kind, parent));
             id
         };
 
@@ -788,7 +788,7 @@ mod tests {
         let mut graph = Graph::new();
         let mut add = |graph: &mut Graph, name: &str, kind: Kind, parent: Option<Id>| {
             let id = names.intern(name);
-            graph.add_node(id, name, kind, parent);
+            graph.add_node(Node::new(id, name, kind, parent));
             id
         };
 

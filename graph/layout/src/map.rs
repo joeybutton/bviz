@@ -635,11 +635,11 @@ mod tests {
         ];
         for (tower, count, label) in plan {
             let root = spaced(&mut names, spacing, tower);
-            g.add_node(root, tower, Kind::Package, None);
+            g.add_node(Node::new(root, tower, Kind::Package, None));
             let kids: Vec<Id> = (0..count)
                 .map(|i| {
                     let id = spaced(&mut names, spacing, &format!("{tower}.{i}"));
-                    g.add_node(id, label, Kind::Action, Some(root));
+                    g.add_node(Node::new(id, label, Kind::Action, Some(root)));
                     id
                 })
                 .collect();
@@ -648,7 +648,7 @@ mod tests {
             }
         }
         let lone = spaced(&mut names, spacing, "lone");
-        g.add_node(lone, "lone", Kind::Target, None);
+        g.add_node(Node::new(lone, "lone", Kind::Target, None));
         g.add_edge(
             names.get("wide.5").unwrap(),
             names.get("narrow.0").unwrap(),
@@ -965,13 +965,13 @@ mod tests {
         let mut g = Graph::new();
         let mut names = Names::default();
         let outer = names.intern("outer");
-        g.add_node(outer, "outer", Kind::Package, None);
+        g.add_node(Node::new(outer, "outer", Kind::Package, None));
         for kid in ["a", "b"] {
             let id = names.intern(kid);
-            g.add_node(id, kid, Kind::Action, Some(outer));
+            g.add_node(Node::new(id, kid, Kind::Action, Some(outer)));
         }
         let other = names.intern("other");
-        g.add_node(other, "other", Kind::Target, None);
+        g.add_node(Node::new(other, "other", Kind::Target, None));
         g.add_edge(outer, names.get("a").unwrap(), EdgeKind::Aquery);
         g.add_edge(names.get("b").unwrap(), other, EdgeKind::Aquery);
         (g, names)
@@ -983,11 +983,11 @@ mod tests {
         let mut g = Graph::new();
         let mut names = Names::default();
         let outer = names.intern("outer");
-        g.add_node(outer, "outer", Kind::Package, None);
+        g.add_node(Node::new(outer, "outer", Kind::Package, None));
         let only = names.intern("only");
-        g.add_node(only, "only", Kind::Action, Some(outer));
+        g.add_node(Node::new(only, "only", Kind::Action, Some(outer)));
         let other = names.intern("other");
-        g.add_node(other, "other", Kind::Target, None);
+        g.add_node(Node::new(other, "other", Kind::Target, None));
         g.add_edge(outer, only, EdgeKind::Aquery);
         g.add_edge(only, other, EdgeKind::Aquery);
         (g, names)
@@ -1153,11 +1153,11 @@ mod tests {
         let mut g = Graph::new();
         let mut names = Names::default();
         let root = names.intern("root");
-        g.add_node(root, "root", Kind::Package, None);
+        g.add_node(Node::new(root, "root", Kind::Package, None));
         let members: Vec<Id> = (0..80)
             .map(|i| {
                 let id = names.intern(&format!("m{i}"));
-                g.add_node(id, "m", Kind::Action, Some(root));
+                g.add_node(Node::new(id, "m", Kind::Action, Some(root)));
                 id
             })
             .collect();
@@ -1205,9 +1205,9 @@ mod tests {
         let first = names.intern("first");
         let root = names.intern("root");
         let second = names.intern("second");
-        g.add_node(first, "first", Kind::Action, Some(root));
-        g.add_node(root, "root", Kind::Package, None);
-        g.add_node(second, "second", Kind::Action, Some(root));
+        g.add_node(Node::new(first, "first", Kind::Action, Some(root)));
+        g.add_node(Node::new(root, "root", Kind::Package, None));
+        g.add_node(Node::new(second, "second", Kind::Action, Some(root)));
         g.add_edge(first, second, EdgeKind::Aquery);
 
         let finest = mapped(&g);

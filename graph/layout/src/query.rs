@@ -11,7 +11,7 @@ use crate::capability::Axis;
 #[cfg(test)]
 use crate::facets::Facets;
 use crate::facets::{FacetsBuilder, Tri};
-use crate::graph::{EdgeKind, Graph, Kind};
+use crate::graph::{EdgeKind, Graph, Kind, Node};
 use crate::intern::{Id, Names};
 use crate::label::{self, PackageHierarchy, RepoMapping, label_and_kind};
 
@@ -85,7 +85,12 @@ pub(crate) fn build_with_packages(
         }
         let node_id = names.intern(&label::target_node_id(&label));
         let parent = hierarchy.package_box(&label);
-        graph.add_node(node_id, label::target_label(&label), kind, parent);
+        graph.add_node(Node::new(
+            node_id,
+            label::target_label(&label),
+            kind,
+            parent,
+        ));
         describe_target(facets, target, node_id, parent, &label, written);
         node_by_label.insert(label.into_owned(), node_id);
     }

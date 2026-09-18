@@ -23,7 +23,7 @@ use crate::capability::Axis;
 #[cfg(test)]
 use crate::facets::Facets;
 use crate::facets::{ConfigRef, FacetsBuilder};
-use crate::graph::{EdgeKind, Graph, Kind};
+use crate::graph::{EdgeKind, Graph, Kind, Node};
 use crate::intern::{Id, Names};
 use crate::label::{self, PackageHierarchy, RepoMapping, label_and_kind};
 use crate::query;
@@ -217,9 +217,12 @@ impl Nodes<'_, '_> {
         if !self.index.target_box.contains_key(label.as_ref()) {
             let parent = self.hierarchy.package_box(&label);
             let id = self.b.names.intern(&label::target_node_id(&label));
-            self.b
-                .graph
-                .add_node(id, label::target_label(&label), Kind::Target, parent);
+            self.b.graph.add_node(Node::new(
+                id,
+                label::target_label(&label),
+                Kind::Target,
+                parent,
+            ));
             query::describe_target(self.b.facets, target, id, parent, &label, written);
             self.index.target_box.insert(label.to_string(), id);
         }
@@ -228,9 +231,12 @@ impl Nodes<'_, '_> {
         if self.index.ct_ids.insert((label.to_string(), key.clone())) {
             let mnemonic = self.b.config_mnemonic(config_id);
             let id = self.b.names.intern(&label::ct_node_id(&label, &key));
-            self.b
-                .graph
-                .add_node(id, mnemonic, Kind::ConfiguredTarget, Some(container));
+            self.b.graph.add_node(Node::new(
+                id,
+                mnemonic,
+                Kind::ConfiguredTarget,
+                Some(container),
+            ));
             self.b.describe_configured(id, container, config_id);
         }
     }
@@ -244,7 +250,7 @@ impl Nodes<'_, '_> {
             let id = self.b.names.intern(&label::target_node_id(&label));
             self.b
                 .graph
-                .add_node(id, label::target_label(&label), kind, parent);
+                .add_node(Node::new(id, label::target_label(&label), kind, parent));
             query::describe_target(self.b.facets, target, id, parent, &label, written);
             self.index.leaf_id.insert(label.into_owned(), id);
         }
