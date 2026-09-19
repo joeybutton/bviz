@@ -56,8 +56,8 @@ impl Axis {
     pub fn flag(self) -> Option<&'static str> {
         match self {
             // query and cquery print apparent repository names unless asked for
-            // canonical ones, and an apparent name bviz cannot resolve leaves
-            // the repository unidentified.
+            // canonical ones, and only a canonical name states where its
+            // repository comes from.
             Axis::Repo => Some("--consistent_labels"),
             Axis::Package | Axis::Label | Axis::Mnemonic | Axis::Aspect => None,
             // Every query writes the class a rule was declared by whatever else

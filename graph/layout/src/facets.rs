@@ -1,9 +1,10 @@
 //! The per-node metadata a graph filter selects on, held as interned handles.
 //!
-//! Facet values — a canonical repository name, a configuration key, a rule
-//! class — are strings shared by many nodes, so they are interned once into a
-//! [`FacetStrings`] table and carried per node as a four-byte handle. The table
-//! is the filter's own; node ids keep theirs, whose indices double as positions
+//! Facet values — a configuration key, a rule class — are strings shared by
+//! many nodes, so they are interned once into a [`FacetStrings`] table and
+//! carried per node as a four-byte handle; a repository is carried the same
+//! way, by a handle into the table of repositories the inputs named. The tables
+//! are the filter's own; node ids keep theirs, whose indices double as positions
 //! in the node arrays.
 
 use std::collections::HashMap;
@@ -14,7 +15,7 @@ use bazel_query_proto::analysis::Configuration;
 use crate::capability::{Axis, Capabilities, CapabilitiesBuilder};
 use crate::intern::Id;
 use crate::label;
-use crate::repo::{self, RepoCategory, RepoOrigin};
+use crate::repo::{self, RepoCategory, RepoName, RepoOrigin};
 
 /// A string interned in a [`FacetStrings`] table. The index is stored biased
 /// off one, so the handle is never zero and `Option<Sym>` is as wide as `Sym`
@@ -57,9 +58,26 @@ macro_rules! facet_handle {
     };
 }
 
-facet_handle! {
-    /// The canonical name of the repository a node's label names.
-    RepoRef
+/// The repository a node's label names, as a position in the table of
+/// repositories a [`Facets`] holds. Stored biased off one, so the handle is
+/// never zero and `Option<RepoRef>` is as wide as `RepoRef`.
+///
+/// A repository is reached by position rather than by one of its names because
+/// which name identifies it is itself something the table records.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
+pub struct RepoRef(NonZeroU32);
+
+impl RepoRef {
+    fn at(index: usize) -> Self {
+        let handle = u32::try_from(index)
+            .ok()
+            .and_then(|index| NonZeroU32::MIN.checked_add(index));
+        RepoRef(handle.expect("more than u32::MAX repositories"))
+    }
+
+    fn index(self) -> usize {
+        self.0.get() as usize - 1
+    }
 }
 
 facet_handle! {
@@ -160,16 +178,44 @@ impl Origin {
     }
 }
 
-/// What is known about one repository beyond the canonical name its
-/// [`RepoRef`] resolves to.
+/// What is known about one repository.
+///
+/// Only [`Facets::intern_repo`] and [`Facets::intern_apparent_repo`] mint an
+/// entry, so a repository an apparent name identifies cannot be given an
+/// origin, a module, or a second apparent name: its name encodes none of them.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct RepoEntry {
-    /// The apparent name a label reached the repository by, where an input
-    /// wrote one; a canonical label states no apparent name.
-    pub apparent: Option<Sym>,
-    pub origin: Origin,
+    name: RepoName<Sym>,
+    apparent: Option<Sym>,
+    origin: Origin,
+    module: Option<Sym>,
+}
+
+impl RepoEntry {
+    /// The name identifying the repository, which is what tells it from every
+    /// other the inputs named.
+    pub fn name(&self) -> RepoName<Sym> {
+        self.name
+    }
+
+    /// Where the repository comes from. A canonical name encodes this and an
+    /// apparent name encodes nothing, so a repository identified apparently
+    /// reports [`Origin::WorkspaceOrUnknown`] as any other unresolved name
+    /// does.
+    pub fn origin(&self) -> Origin {
+        self.origin
+    }
+
+    /// The apparent name a label reached the repository by, where a label
+    /// wrote one beside the canonical name identifying it.
+    pub fn apparent(&self) -> Option<Sym> {
+        self.apparent
+    }
+
     /// The Bzlmod module the repository belongs to.
-    pub module: Option<Sym>,
+    pub fn module(&self) -> Option<Sym> {
+        self.module
+    }
 }
 
 /// What is known about one configuration beyond the checksum its [`ConfigRef`]
@@ -355,7 +401,10 @@ pub struct Facets {
     label: Vec<Option<NodeRef>>,
     tags: SparseFacet,
     aspects: SparseFacet,
-    repos: HashMap<RepoRef, RepoEntry>,
+    repos: Vec<RepoEntry>,
+    /// The repository each name identifies, which is how a repository already
+    /// named is found again.
+    repo_ids: HashMap<RepoName<Sym>, RepoRef>,
     configs: HashMap<ConfigRef, ConfigEntry>,
     rule_classes: HashMap<RuleClassRef, RuleCategory>,
 }
@@ -470,15 +519,41 @@ impl Facets {
     /// that first names the repository, since every later call describes the
     /// repository the first one already did.
     pub fn intern_repo(&mut self, canonical: &str, apparent: Option<&str>) -> RepoRef {
-        let handle = RepoRef::of(self.strings.intern(canonical));
-        if !self.repos.contains_key(&handle) {
-            let entry = RepoEntry {
-                apparent: apparent.map(|name| self.strings.intern(name)),
-                origin: self.origin(canonical),
-                module: repo::module_name(canonical).map(|name| self.strings.intern(name)),
-            };
-            self.repos.insert(handle, entry);
+        let name = RepoName::Canonical(self.strings.intern(canonical));
+        if let Some(&handle) = self.repo_ids.get(&name) {
+            return handle;
         }
+        let entry = RepoEntry {
+            name,
+            apparent: apparent.map(|name| self.strings.intern(name)),
+            origin: self.origin(canonical),
+            module: repo::module_name(canonical).map(|name| self.strings.intern(name)),
+        };
+        self.push_repo(entry)
+    }
+
+    /// The handle for the repository a label named `@apparent`, which no input
+    /// named canonically. It is a repository of its own however it reads: the
+    /// name resolves only through the repository mapping of the module that
+    /// wrote it, which no dump carries.
+    pub fn intern_apparent_repo(&mut self, apparent: &str) -> RepoRef {
+        let name = RepoName::Apparent(self.strings.intern(apparent));
+        if let Some(&handle) = self.repo_ids.get(&name) {
+            return handle;
+        }
+        let entry = RepoEntry {
+            name,
+            apparent: None,
+            origin: Origin::WorkspaceOrUnknown,
+            module: None,
+        };
+        self.push_repo(entry)
+    }
+
+    fn push_repo(&mut self, entry: RepoEntry) -> RepoRef {
+        let handle = RepoRef::at(self.repos.len());
+        self.repos.push(entry);
+        self.repo_ids.insert(entry.name, handle);
         handle
     }
 
@@ -527,8 +602,15 @@ impl Facets {
         handle
     }
 
-    pub fn repo_entry(&self, repo: RepoRef) -> Option<&RepoEntry> {
-        self.repos.get(&repo)
+    pub fn repo_entry(&self, repo: RepoRef) -> &RepoEntry {
+        &self.repos[repo.index()]
+    }
+
+    /// The name identifying `repo`, resolved to its text.
+    pub fn repo_name(&self, repo: RepoRef) -> RepoName<&str> {
+        self.repo_entry(repo)
+            .name()
+            .map(|name| self.strings.resolve(name))
     }
 
     /// The repository part a reader writes `repo` by, sigil and all: the
@@ -538,12 +620,19 @@ impl Facets {
     /// stating neither is written by its canonical name, and the main
     /// repository, whose labels carry no repository part, by nothing at all.
     pub fn repo_written(&self, repo: RepoRef) -> String {
-        let canonical = self.strings.resolve(repo.sym());
         let entry = self.repo_entry(repo);
-        match entry.and_then(|entry| entry.apparent.or(entry.module)) {
+        let canonical = match entry.name {
+            RepoName::Apparent(apparent) => {
+                return format!("@{}", self.strings.resolve(apparent));
+            }
+            RepoName::Canonical(canonical) => canonical,
+        };
+        match entry.apparent.or(entry.module) {
             Some(name) => format!("@{}", self.strings.resolve(name)),
-            None if canonical.is_empty() => String::new(),
-            None => format!("@@{canonical}"),
+            None => match self.strings.resolve(canonical) {
+                "" => String::new(),
+                canonical => format!("@@{canonical}"),
+            },
         }
     }
 
@@ -555,9 +644,12 @@ impl Facets {
         self.rule_classes.get(&rule_class).copied()
     }
 
-    /// Every repository the nodes name, in no particular order.
+    /// Every repository the nodes name, in the order they were first named.
     pub fn repos(&self) -> impl Iterator<Item = (RepoRef, &RepoEntry)> {
-        self.repos.iter().map(|(&repo, entry)| (repo, entry))
+        self.repos
+            .iter()
+            .enumerate()
+            .map(|(index, entry)| (RepoRef::at(index), entry))
     }
 
     /// Every configuration the nodes are built in, in no particular order.
@@ -635,9 +727,15 @@ impl FacetsBuilder {
             self.facets.set_package(node, package);
         }
         self.observe(Axis::Package, package.is_some());
-        if let Some(canonical_repo) = label::identified_repo(canonical) {
-            let apparent = label::label_repo(written).filter(|&name| name != canonical_repo);
-            let repo = self.facets.intern_repo(canonical_repo, apparent);
+        if let Some(name) = label::identified_repo(canonical) {
+            let repo = match name {
+                RepoName::Canonical(canonical_repo) => {
+                    let apparent =
+                        label::label_repo(written).filter(|&name| name != canonical_repo);
+                    self.facets.intern_repo(canonical_repo, apparent)
+                }
+                RepoName::Apparent(apparent) => self.facets.intern_apparent_repo(apparent),
+            };
             self.facets.set_repo(node, Some(repo));
         }
         self.observe(Axis::Repo, label::is_canonical(canonical));
@@ -811,9 +909,9 @@ mod tests {
     fn a_facet_handle_carries_the_string_it_tags() {
         let mut facets = FacetStrings::default();
 
-        let repo = RepoRef::of(facets.intern("rules_java+"));
+        let rule_class = RuleClassRef::of(facets.intern("rust_library"));
 
-        assert_eq!(facets.resolve(repo.sym()), "rules_java+");
+        assert_eq!(facets.resolve(rule_class.sym()), "rust_library");
     }
 
     /// What a facet array costs per node, which is what keeps the facets out of
@@ -916,7 +1014,7 @@ mod tests {
         assert_eq!(facets.intern_config("ck1", None, Tri::Unknown), config);
         assert_eq!(facets.intern_rule_class("cc_library"), rule_class);
         // The description the repeat call carried does not displace the first.
-        let apparent = facets.repo_entry(repo).unwrap().apparent;
+        let apparent = facets.repo_entry(repo).apparent();
         assert_eq!(
             apparent.map(|name| facets.strings().resolve(name)),
             Some("foo")
@@ -927,19 +1025,51 @@ mod tests {
         assert_eq!(facets.rule_classes.len(), 1);
     }
 
+    /// An apparent name is one module's own word for a repository, which only
+    /// that module's repository mapping resolves, so it names a repository of
+    /// its own rather than the one Bazel gave that canonical name.
+    #[test]
+    fn an_apparent_name_identifies_a_repository_apart_from_the_canonical_one() {
+        let mut facets = Facets::default();
+
+        let apparent = facets.intern_apparent_repo("somerepo");
+        let canonical = facets.intern_repo("somerepo", None);
+
+        assert_ne!(apparent, canonical);
+        assert_eq!(facets.repo_name(apparent), RepoName::Apparent("somerepo"));
+        assert_eq!(facets.repo_name(canonical), RepoName::Canonical("somerepo"));
+        assert_eq!(facets.intern_apparent_repo("somerepo"), apparent);
+        assert_eq!(facets.repos.len(), 2);
+    }
+
+    /// Where a repository comes from is encoded in its canonical name alone, so
+    /// a repository identified apparently reports the unresolved origin rather
+    /// than one read off a name that happens to look like a module's.
+    #[test]
+    fn a_repository_identified_apparently_states_no_origin_and_no_module() {
+        let mut facets = Facets::default();
+
+        let repo = facets.intern_apparent_repo("rules_foo");
+
+        let entry = *facets.repo_entry(repo);
+        assert_eq!(entry.origin(), Origin::WorkspaceOrUnknown);
+        assert_eq!(entry.module(), None);
+        assert_eq!(facets.repo_written(repo), "@rules_foo");
+    }
+
     #[test]
     fn a_repository_entry_states_the_origin_its_canonical_name_encodes() {
         let mut facets = Facets::default();
 
         let repo = facets.intern_repo("rules_foo+1.2.3", None);
 
-        let entry = *facets.repo_entry(repo).unwrap();
+        let entry = *facets.repo_entry(repo);
         let resolve = |sym: Option<Sym>| sym.map(|sym| facets.strings().resolve(sym));
-        assert_eq!(resolve(entry.module), Some("rules_foo"));
-        let Origin::Module { version } = entry.origin else {
+        assert_eq!(resolve(entry.module()), Some("rules_foo"));
+        let Origin::Module { version } = entry.origin() else {
             panic!(
                 "a module repository's origin is a module, not {:?}",
-                entry.origin
+                entry.origin()
             )
         };
         assert_eq!(resolve(version), Some("1.2.3"));

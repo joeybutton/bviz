@@ -7,6 +7,38 @@
 //! repository appends the defining repository, the extension, and the name the
 //! extension gave it.
 
+/// Which of a repository's names identifies it.
+///
+/// A canonical name names one repository outright and states its origin. An
+/// apparent name is one module's own word for a repository, resolved through
+/// that module's repository mapping, which a dump does not carry; so it
+/// identifies a repository only among those no input named canonically, and a
+/// repository so identified stands apart from every canonically named one
+/// however the two names compare.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
+pub enum RepoName<T> {
+    Canonical(T),
+    Apparent(T),
+}
+
+impl<T> RepoName<T> {
+    pub fn map<U>(self, name: impl FnOnce(T) -> U) -> RepoName<U> {
+        match self {
+            RepoName::Canonical(held) => RepoName::Canonical(name(held)),
+            RepoName::Apparent(held) => RepoName::Apparent(name(held)),
+        }
+    }
+}
+
+impl RepoName<String> {
+    pub fn as_deref(&self) -> RepoName<&str> {
+        match self {
+            RepoName::Canonical(name) => RepoName::Canonical(name),
+            RepoName::Apparent(name) => RepoName::Apparent(name),
+        }
+    }
+}
+
 /// The origin a canonical repository name encodes.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum RepoOrigin<'a> {

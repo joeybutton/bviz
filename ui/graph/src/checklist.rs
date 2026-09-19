@@ -9,7 +9,7 @@
 use crate::rules::{self, Term, Value};
 use crate::{GraphPanel, derive, preset};
 use bviz_graph_layout::graph::Graph;
-use bviz_graph_layout::repo::RepoCategory;
+use bviz_graph_layout::repo::{RepoCategory, RepoName};
 use bviz_graph_layout::select::Filter;
 use bviz_graph_layout::{Facets, Kind};
 use bviz_ui_components::MultiOption;
@@ -76,8 +76,8 @@ fn origin_label(origin: RepoCategory) -> &'static str {
 /// One repository a loaded graph names.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub(crate) struct Repository {
-    /// The canonical name a rule names the repository by.
-    canonical: String,
+    /// The name a rule names the repository by, which is what identifies it.
+    name: RepoName<String>,
     /// The name a reader knows it by, as a box of that repository also reads.
     label: String,
     origin: RepoCategory,
@@ -101,9 +101,9 @@ pub(crate) fn carried_origins(facets: &Facets) -> Vec<OriginRow> {
     let mut repos: Vec<Repository> = facets
         .repos()
         .map(|(repo, entry)| Repository {
-            canonical: strings.resolve(repo.sym()).to_string(),
+            name: entry.name().map(|name| strings.resolve(name).to_string()),
             label: facets.repo_written(repo),
-            origin: entry.origin.category(),
+            origin: entry.origin().category(),
         })
         .collect();
     repos.sort_by(|a, b| a.label.cmp(&b.label));
@@ -159,13 +159,13 @@ pub(crate) fn set_origin_hidden(
         }
         OriginRow::Repo(repo) => {
             let filter = spelled_out(filter, rows, repo.origin);
-            rules::set_hidden(&filter, &Value::Repo(repo.canonical.clone()), hidden)
+            rules::set_hidden(&filter, &Value::Repo(repo.name.clone()), hidden)
         }
     }
 }
 
 fn hides_repo(filter: &Filter, repo: &Repository) -> bool {
-    rules::hides(filter, &Value::Repo(repo.canonical.clone()))
+    rules::hides(filter, &Value::Repo(repo.name.clone()))
 }
 
 /// The repositories `rows` carries under `origin`.
@@ -180,7 +180,7 @@ fn under(rows: &[OriginRow], origin: RepoCategory) -> impl Iterator<Item = &Repo
 fn showing<'a>(filter: &Filter, repos: impl Iterator<Item = &'a Repository>) -> Filter {
     let mut hidden = rules::hidden(filter, Term::Repo);
     for repo in repos {
-        hidden.remove(&Value::Repo(repo.canonical.clone()));
+        hidden.remove(&Value::Repo(repo.name.clone()));
     }
     rules::hiding(filter, Term::Repo, hidden)
 }
@@ -194,7 +194,7 @@ fn spelled_out(filter: &Filter, rows: &[OriginRow], origin: RepoCategory) -> Fil
         return filter.clone();
     }
     let mut hidden = rules::hidden(filter, Term::Repo);
-    hidden.extend(under(rows, origin).map(|repo| Value::Repo(repo.canonical.clone())));
+    hidden.extend(under(rows, origin).map(|repo| Value::Repo(repo.name.clone())));
     let filter = rules::hiding(filter, Term::Repo, hidden);
     rules::set_hidden(&filter, &category, false)
 }
@@ -380,6 +380,49 @@ mod tests {
                 "module-extension repositories",
                 "@@rules_foo++ext+generated",
             ]
+        );
+    }
+
+    /// A repository the inputs named only apparently is offered like any other.
+    /// Its name states nothing of where it comes from, so it stands under the
+    /// origin that says exactly that rather than one guessed from the name.
+    #[test]
+    fn a_repository_named_only_apparently_is_offered_under_an_unknown_origin() {
+        let mut facets = Facets::default();
+        facets.intern_repo("", None);
+        facets.intern_apparent_repo("rules_foo");
+
+        let rows = carried_origins(&facets);
+
+        assert_eq!(
+            labels(&origin_options(&Filter::default(), &rows)),
+            [
+                "the main repository",
+                "repositories of unknown origin",
+                "@rules_foo",
+            ]
+        );
+    }
+
+    /// An apparent name and a canonical one reading alike are two repositories,
+    /// so each has its own row and hiding one leaves the other drawn.
+    #[test]
+    fn a_repository_row_hides_only_the_repository_it_names() {
+        let mut facets = Facets::default();
+        facets.intern_apparent_repo("somerepo");
+        facets.intern_repo("somerepo", None);
+
+        let rows = carried_origins(&facets);
+        assert_eq!(
+            labels(&origin_options(&Filter::default(), &rows)),
+            ["repositories of unknown origin", "@@somerepo", "@somerepo"]
+        );
+
+        let hiding = set_origin_hidden(&Filter::default(), &rows, &rows[2], true);
+
+        assert_eq!(
+            checked(&origin_options(&hiding, &rows)),
+            [false, true, false]
         );
     }
 

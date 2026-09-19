@@ -17,7 +17,7 @@ use std::collections::HashMap;
 use crate::facets::{RuleCategory, Tri};
 use crate::graph::Kind;
 use crate::intern::Id;
-use crate::repo::RepoCategory;
+use crate::repo::{RepoCategory, RepoName};
 pub use eval::{Verdict, Verdicts};
 use pattern::{PackagePrefix, Pattern};
 
@@ -127,8 +127,8 @@ pub enum Aspects {
 pub struct Predicate {
     pub kinds: Option<Values<Kind>>,
     pub repo_categories: Option<Values<RepoCategory>>,
-    /// Canonical repository names.
-    pub repos: Option<Values<String>>,
+    /// Repositories, each by the name identifying it.
+    pub repos: Option<Values<RepoName<String>>>,
     pub rule_classes: Option<Values<String>>,
     pub rule_categories: Option<Values<RuleCategory>>,
     /// Configuration checksums.
@@ -243,6 +243,10 @@ mod tests {
         }
     }
 
+    fn repos(repos: &[RepoName<&str>]) -> Option<Values<RepoName<String>>> {
+        Values::new(repos.iter().map(|repo| repo.map(str::to_string)))
+    }
+
     fn values(values: &[&str]) -> Option<Values<String>> {
         Values::new(values.iter().map(|&value| value.to_string()))
     }
@@ -283,7 +287,7 @@ mod tests {
             ),
             (
                 Predicate {
-                    repos: values(&["rules_foo+"]),
+                    repos: repos(&[RepoName::Canonical("rules_foo+")]),
                     ..Predicate::default()
                 },
                 vec![lib],

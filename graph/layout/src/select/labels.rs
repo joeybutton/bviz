@@ -69,8 +69,8 @@ mod tests {
     use crate::graph::{Kind, Node};
 
     /// A graph whose boxes read as short names — the leaf of a label, or an
-    /// action's mnemonic — over targets in two packages and an external
-    /// repository, plus a group box belonging to no target.
+    /// action's mnemonic — over targets in two packages and three external
+    /// repositories, plus a group box belonging to no target.
     struct Fixture {
         graph: Graph,
         names: Names,
@@ -100,6 +100,7 @@ mod tests {
                     "@com_google_protobuf//src:lib",
                     ":lib",
                 ),
+                ("@crates//serde:lib", "@crates//serde:lib", ":lib"),
             ] {
                 let id = names.intern(&format!("target:{canonical}"));
                 graph.add_node(Node::new(id, reads, Kind::Target, None));
@@ -200,6 +201,16 @@ mod tests {
         );
     }
 
+    /// A repository no input named canonically is reached by the apparent name
+    /// its labels carry, which is both what a reader has to hand and what
+    /// identifies the repository.
+    #[test]
+    fn a_repository_pattern_reaches_a_repository_named_only_apparently() {
+        let fixture = Fixture::new();
+
+        assert_eq!(fixture.matching("@crates//..."), ["@crates//serde:lib"]);
+    }
+
     /// Every node of a target answers through the one label it carries, so the
     /// index holds one entry per target however many nodes the graph draws for
     /// it, and none for a node belonging to no target.
@@ -207,7 +218,7 @@ mod tests {
     fn the_index_holds_one_entry_per_target() {
         let fixture = Fixture::new();
 
-        assert_eq!(fixture.index().len(), 5);
-        assert_eq!(fixture.graph.nodes.len(), 7);
+        assert_eq!(fixture.index().len(), 6);
+        assert_eq!(fixture.graph.nodes.len(), 8);
     }
 }

@@ -4,7 +4,7 @@
 //! scanned, so that a term over strings becomes a set of handles or a column
 //! read by id and testing one node costs a few integer lookups.
 
-use crate::facets::{Facets, SparseFacet, Sym, Tri};
+use crate::facets::{Facets, RepoRef, SparseFacet, Sym, Tri};
 use crate::graph::{Graph, Kind, Node};
 use crate::intern::{Id, Names};
 use crate::label;
@@ -140,10 +140,10 @@ impl Verdicts {
 struct Resolved<'a> {
     kinds: Option<&'a Values<Kind>>,
     testonly: Option<Tri>,
-    repos: Option<Syms>,
-    rule_classes: Option<Syms>,
-    configs: Option<Syms>,
-    mnemonics: Option<Syms>,
+    repos: Option<Admits<RepoRef>>,
+    rule_classes: Option<Admits<Sym>>,
+    configs: Option<Admits<Sym>>,
+    mnemonics: Option<Admits<Sym>>,
     tags: Option<Column>,
     aspects: Option<Column>,
     /// The labels the term admits, named by the id of the target carrying each,
@@ -196,7 +196,7 @@ impl<'a> Resolved<'a> {
             && self
                 .repos
                 .as_ref()
-                .is_none_or(|repos| facets.repo(id).is_some_and(|repo| repos.holds(repo.sym())))
+                .is_none_or(|repos| facets.repo(id).is_some_and(|repo| repos.holds(repo)))
             && self.rule_classes.as_ref().is_none_or(|rule_classes| {
                 facets
                     .rule_class(id)
@@ -224,20 +224,20 @@ impl<'a> Resolved<'a> {
     }
 }
 
-/// The facet strings a term admits, by handle. Empty where every value the term
-/// names is one this graph never interned, which admits no node at all.
-struct Syms(Vec<Sym>);
+/// The handles a term admits. Empty where every value the term names is one
+/// this graph never interned, which admits no node at all.
+struct Admits<T>(Vec<T>);
 
-impl Syms {
-    fn of(syms: impl Iterator<Item = Sym>) -> Self {
-        let mut syms: Vec<Sym> = syms.collect();
-        syms.sort_unstable();
-        syms.dedup();
-        Syms(syms)
+impl<T: Copy + Ord> Admits<T> {
+    fn of(handles: impl Iterator<Item = T>) -> Self {
+        let mut handles: Vec<T> = handles.collect();
+        handles.sort_unstable();
+        handles.dedup();
+        Admits(handles)
     }
 
-    fn holds(&self, sym: Sym) -> bool {
-        self.0.binary_search(&sym).is_ok()
+    fn holds(&self, handle: T) -> bool {
+        self.0.binary_search(&handle).is_ok()
     }
 }
 
@@ -267,8 +267,8 @@ impl Column {
 
 /// The handles of the values `values` names, dropping every name this graph
 /// never interned.
-fn interned(values: &Values<String>, facets: &Facets) -> Syms {
-    Syms::of(
+fn interned(values: &Values<String>, facets: &Facets) -> Admits<Sym> {
+    Admits::of(
         values
             .as_slice()
             .iter()
@@ -276,24 +276,29 @@ fn interned(values: &Values<String>, facets: &Facets) -> Syms {
     )
 }
 
-fn repos(predicate: &Predicate, facets: &Facets) -> Option<Syms> {
+fn repos(predicate: &Predicate, facets: &Facets) -> Option<Admits<RepoRef>> {
     let (names, categories) = (predicate.repos.as_ref(), predicate.repo_categories.as_ref());
     if names.is_none() && categories.is_none() {
         return None;
     }
-    Some(Syms::of(
+    Some(Admits::of(
         facets
             .repos()
-            .filter(|(repo, entry)| {
-                names.is_none_or(|names| names.contains(facets.strings().resolve(repo.sym())))
-                    && categories
-                        .is_none_or(|categories| categories.contains(&entry.origin.category()))
+            .filter(|(_, entry)| {
+                let name = entry.name().map(|name| facets.strings().resolve(name));
+                names.is_none_or(|names| {
+                    names
+                        .as_slice()
+                        .iter()
+                        .any(|named| named.as_deref() == name)
+                }) && categories
+                    .is_none_or(|categories| categories.contains(&entry.origin().category()))
             })
-            .map(|(repo, _)| repo.sym()),
+            .map(|(repo, _)| repo),
     ))
 }
 
-fn rule_classes(predicate: &Predicate, facets: &Facets) -> Option<Syms> {
+fn rule_classes(predicate: &Predicate, facets: &Facets) -> Option<Admits<Sym>> {
     let (names, categories) = (
         predicate.rule_classes.as_ref(),
         predicate.rule_categories.as_ref(),
@@ -301,7 +306,7 @@ fn rule_classes(predicate: &Predicate, facets: &Facets) -> Option<Syms> {
     if names.is_none() && categories.is_none() {
         return None;
     }
-    Some(Syms::of(
+    Some(Admits::of(
         facets
             .rule_classes()
             .filter(|(rule_class, category)| {
@@ -312,12 +317,12 @@ fn rule_classes(predicate: &Predicate, facets: &Facets) -> Option<Syms> {
     ))
 }
 
-fn configs(predicate: &Predicate, facets: &Facets) -> Option<Syms> {
+fn configs(predicate: &Predicate, facets: &Facets) -> Option<Admits<Sym>> {
     let (checksums, is_tool) = (predicate.configs.as_ref(), predicate.is_tool);
     if checksums.is_none() && is_tool.is_none() {
         return None;
     }
-    Some(Syms::of(
+    Some(Admits::of(
         facets
             .configs()
             .filter(|(config, entry)| {
@@ -406,7 +411,7 @@ mod tests {
 
     use super::*;
     use crate::facets::{FacetsBuilder, RuleCategory};
-    use crate::repo::RepoCategory;
+    use crate::repo::{RepoCategory, RepoName};
     use crate::select::Base;
     use crate::select::pattern::{PackagePrefix, Pattern};
 
@@ -526,6 +531,10 @@ mod tests {
         Values::new(values.iter().map(|&value| value.to_string()))
     }
 
+    fn repos(repos: &[RepoName<&str>]) -> Option<Values<RepoName<String>>> {
+        Values::new(repos.iter().map(|repo| repo.map(str::to_string)))
+    }
+
     #[test]
     fn a_repository_term_keeps_the_nodes_of_the_repositories_it_names() {
         let fixture = Fixture::new();
@@ -541,11 +550,50 @@ mod tests {
         assert_eq!(fixture.nodes(&main, Verdict::Hidden), named([LIB, GROUP]));
     }
 
+    /// A repository term reads the name identifying each repository, so a rule
+    /// naming one written canonically leaves a repository the inputs named only
+    /// apparently drawn, however alike the two names read.
+    #[test]
+    fn a_repository_term_tells_an_apparent_name_from_a_canonical_one() {
+        const APPARENT: &str = "target:@somerepo//foo:lib";
+        const CANONICAL: &str = "target:@@somerepo//bar:lib";
+
+        let mut graph = Graph::new();
+        let mut names = Names::default();
+        let mut builder = FacetsBuilder::default();
+        for (node, label) in [
+            (APPARENT, "@somerepo//foo:lib"),
+            (CANONICAL, "@@somerepo//bar:lib"),
+        ] {
+            let id = names.intern(node);
+            graph.add_node(Node::new(id, ":lib", Kind::Target, None));
+            builder.describe_label(id, None, label, label);
+        }
+        let (facets, _) = builder.seal();
+
+        let shown = |named: RepoName<&str>| {
+            let filter = showing(Predicate {
+                repos: repos(&[named]),
+                ..Predicate::default()
+            });
+            let verdicts = filter.evaluate(&graph, &names, &facets);
+            graph
+                .nodes
+                .iter()
+                .filter(|node| verdicts.get(node.id) == Verdict::Shown)
+                .map(|node| names.resolve(node.id))
+                .collect::<BTreeSet<&str>>()
+        };
+
+        assert_eq!(shown(RepoName::Apparent("somerepo")), named([APPARENT]));
+        assert_eq!(shown(RepoName::Canonical("somerepo")), named([CANONICAL]));
+    }
+
     #[test]
     fn a_repository_the_graph_never_saw_keeps_nothing() {
         let fixture = Fixture::new();
         let elsewhere = showing(Predicate {
-            repos: values(&["rules_bar+"]),
+            repos: repos(&[RepoName::Canonical("rules_bar+")]),
             ..Predicate::default()
         });
 
@@ -696,7 +744,7 @@ mod tests {
                 ),
                 rule(
                     Predicate {
-                        repos: values(&["rules_foo+"]),
+                        repos: repos(&[RepoName::Canonical("rules_foo+")]),
                         is_tool: Some(true),
                         ..Predicate::default()
                     },

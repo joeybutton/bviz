@@ -733,6 +733,7 @@ mod tests {
     use super::*;
     use crate::facets::{RuleCategory, Tri};
     use crate::graph::Node;
+    use crate::repo::RepoName;
     use crate::test_support::{edges, find, parent_of};
 
     /// A single-fragment source artifact whose path is `<label>`; id `i` gets
@@ -1649,7 +1650,7 @@ mod tests {
 
         let node = names.get("action0").unwrap();
         let repo = facets.repo(node).unwrap();
-        assert_eq!(facets.strings().resolve(repo.sym()), "somerepo+");
+        assert_eq!(facets.repo_name(repo), RepoName::Canonical("somerepo+"));
         let config = facets.config(node).unwrap();
         assert_eq!(facets.strings().resolve(config.sym()), "ck1");
         assert_eq!(facets.config_entry(config).unwrap().is_tool, Tri::Yes);

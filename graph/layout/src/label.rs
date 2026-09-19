@@ -15,7 +15,7 @@ use bazel_query_proto::blaze_query::{Target, target::Discriminator};
 use crate::facets::{Facets, FacetsBuilder, RepoRef};
 use crate::graph::{Graph, Kind, Node};
 use crate::intern::{Id, Names};
-use crate::repo::module_name;
+use crate::repo::{RepoName, module_name};
 
 /// The repository and package path a label names: `//a/b:c` -> `("", "a/b")`,
 /// `//:c` -> `("", "")`, `@r//a:c` -> `("@r", "a")`. A label with no `//` names
@@ -37,7 +37,8 @@ pub(crate) fn canonical_repo(label: &str) -> Option<&str> {
 /// Whether `label` names its repository canonically: `@@name//...`, or with no
 /// repository part at all, which is how the main repository's labels read. A
 /// label that reached bviz by an apparent name no input pinned to a canonical
-/// one keeps its single `@` and names a repository bviz cannot identify.
+/// one keeps its single `@`, which states nothing of where its repository comes
+/// from.
 pub(crate) fn is_canonical(label: &str) -> bool {
     !label.starts_with('@') || label.starts_with("@@")
 }
@@ -49,21 +50,24 @@ pub(crate) fn label_repo(label: &str) -> Option<&str> {
     parse_package(label).map(|(repo, _)| repo.trim_start_matches('@'))
 }
 
-/// The repository `label` identifies, as the canonical name it is keyed by:
-/// `@@r+//a:b` -> `r+`, and the main repository's empty name for `//a:b`. A
-/// label still carrying an apparent name identifies no repository, since the
-/// name could stand for any of them, and neither does one naming no package.
-pub(crate) fn identified_repo(label: &str) -> Option<&str> {
-    parse_package(label).and_then(|(repo, _)| identified_repo_name(repo))
+/// The repository `label` identifies, and which of its names does so:
+/// `@@r+//a:b` -> canonical `r+`, `//a:b` -> the main repository's canonical
+/// empty name, and `@r//a:b` -> apparent `r`. `None` where the label names no
+/// package.
+pub(crate) fn identified_repo(label: &str) -> Option<RepoName<&str>> {
+    parse_package(label).map(|(repo, _)| identified_repo_name(repo))
 }
 
 /// [`identified_repo`] for a label's repository part on its own, as a package
-/// key holds it: `@@r+` -> `r+`, `@r` -> `None`, and the main repository's empty
-/// name for the empty part.
-pub(crate) fn identified_repo_name(repo: &str) -> Option<&str> {
+/// key holds it: `@@r+` -> canonical `r+`, `@r` -> apparent `r`, and the main
+/// repository's canonical empty name for the empty part.
+pub(crate) fn identified_repo_name(repo: &str) -> RepoName<&str> {
     match repo.strip_prefix('@') {
-        None => Some(repo),
-        Some(canonical) => canonical.strip_prefix('@'),
+        None => RepoName::Canonical(repo),
+        Some(apparent) => match apparent.strip_prefix('@') {
+            Some(canonical) => RepoName::Canonical(canonical),
+            None => RepoName::Apparent(apparent),
+        },
     }
 }
 
@@ -260,7 +264,7 @@ struct Emit<'a> {
     facets: &'a mut FacetsBuilder,
     /// The repository part the boxes are keyed and labeled by.
     written: &'a str,
-    repo: Option<RepoRef>,
+    repo: RepoRef,
 }
 
 impl Emit<'_> {
@@ -268,7 +272,7 @@ impl Emit<'_> {
     fn r#box(&mut self, id: Id, label: String, parent: Option<Id>) {
         self.graph
             .add_node(Node::new(id, label, Kind::Package, parent));
-        self.facets.facets().set_repo(id, self.repo);
+        self.facets.facets().set_repo(id, Some(self.repo));
     }
 }
 
@@ -290,8 +294,10 @@ impl PackageHierarchy {
             repo_paths: HashMap::new(),
         };
         for (repo, trie) in &tries {
-            let carried = identified_repo_name(repo)
-                .map(|canonical| facets.facets().intern_repo(canonical, None));
+            let carried = match identified_repo_name(repo) {
+                RepoName::Canonical(canonical) => facets.facets().intern_repo(canonical, None),
+                RepoName::Apparent(apparent) => facets.facets().intern_apparent_repo(apparent),
+            };
             let mut out = Emit {
                 graph,
                 names,
@@ -588,14 +594,12 @@ mod tests {
 
         let repo_of = |id: &str| {
             let node = names.get(id).expect("a box");
-            facets
-                .repo(node)
-                .map(|repo| facets.strings().resolve(repo.sym()).to_string())
+            facets.repo(node).map(|repo| facets.repo_name(repo))
         };
-        assert_eq!(repo_of("pkg:@@r+//a"), Some("r+".to_string()));
-        assert_eq!(repo_of("pkg:@@r+//a/b"), Some("r+".to_string()));
-        assert_eq!(repo_of("pkg:@@r+//a/c"), Some("r+".to_string()));
-        assert_eq!(repo_of("pkg:a"), Some(String::new()));
+        assert_eq!(repo_of("pkg:@@r+//a"), Some(RepoName::Canonical("r+")));
+        assert_eq!(repo_of("pkg:@@r+//a/b"), Some(RepoName::Canonical("r+")));
+        assert_eq!(repo_of("pkg:@@r+//a/c"), Some(RepoName::Canonical("r+")));
+        assert_eq!(repo_of("pkg:a"), Some(RepoName::Canonical("")));
         assert_eq!(graph.nodes.len(), 4);
     }
 
@@ -623,21 +627,44 @@ mod tests {
         assert_eq!(label("pkg:a"), "//a");
     }
 
-    /// An apparent name stands for any repository, so a box keyed by one names
-    /// none, exactly as a target keyed by one does.
+    /// The boxes of a repository no input named canonically still belong to a
+    /// repository, so a rule over repositories reaches them. It is identified by
+    /// the apparent name, which is all the input stated.
     #[test]
-    fn a_box_of_an_unresolved_apparent_repository_names_no_repository() {
+    fn a_box_of_an_apparent_repository_is_identified_by_the_apparent_name() {
         let (_, _, names, facets) = build_facets(&[("@r", "a")]);
 
-        assert_eq!(facets.repo(names.get("pkg:@r//a").expect("a box")), None);
-        assert_eq!(facets.repos().count(), 0);
+        let repo = facets
+            .repo(names.get("pkg:@r//a").expect("a box"))
+            .expect("the repository the box belongs to");
+        assert_eq!(facets.repo_name(repo), RepoName::Apparent("r"));
+        assert_eq!(facets.repos().count(), 1);
+    }
+
+    /// Two repositories whose names read alike are one repository only where
+    /// the names are of one kind: an apparent name is whatever the module that
+    /// wrote it maps it to, which need not be the repository Bazel gave that
+    /// canonical name.
+    #[test]
+    fn an_apparent_repository_is_not_the_canonical_one_reading_the_same() {
+        let (_, _, names, facets) = build_facets(&[("@r", "a"), ("@@r", "b")]);
+
+        let repo_of = |id: &str| facets.repo(names.get(id).expect("a box"));
+        assert_ne!(repo_of("pkg:@r//a"), repo_of("pkg:@@r//b"));
+        assert_eq!(facets.repos().count(), 2);
     }
 
     #[test]
-    fn a_repository_part_identifies_a_repository_only_written_canonically() {
-        assert_eq!(identified_repo_name("@@somerepo+"), Some("somerepo+"));
-        assert_eq!(identified_repo_name(""), Some(""));
-        assert_eq!(identified_repo_name("@somerepo"), None);
+    fn a_repository_part_states_which_of_its_names_identifies_it() {
+        assert_eq!(
+            identified_repo_name("@@somerepo+"),
+            RepoName::Canonical("somerepo+")
+        );
+        assert_eq!(identified_repo_name(""), RepoName::Canonical(""));
+        assert_eq!(
+            identified_repo_name("@somerepo"),
+            RepoName::Apparent("somerepo")
+        );
     }
 
     #[test]

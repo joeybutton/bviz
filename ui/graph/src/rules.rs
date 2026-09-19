@@ -11,7 +11,7 @@
 
 use bviz_graph_layout::Kind;
 use bviz_graph_layout::facets::RuleCategory;
-use bviz_graph_layout::repo::RepoCategory;
+use bviz_graph_layout::repo::{RepoCategory, RepoName};
 use bviz_graph_layout::select::{Filter, Predicate, Rule, Values, Visibility};
 use std::collections::BTreeSet;
 
@@ -42,8 +42,8 @@ impl Term {
 pub(crate) enum Value {
     Kind(Kind),
     RepoCategory(RepoCategory),
-    /// A repository by its canonical name.
-    Repo(String),
+    /// A repository by the name identifying it.
+    Repo(RepoName<String>),
     RuleCategory(RuleCategory),
     /// An action by its mnemonic.
     Mnemonic(String),
@@ -135,36 +135,15 @@ fn written(rule: &Rule) -> Option<(Term, Vec<Value>)> {
 /// The values `predicate` names on `term`; `None` where it leaves the term unset,
 /// or sets it to something no control writes.
 fn named(predicate: &Predicate, term: Term) -> Option<Vec<Value>> {
-    let named = |values: &Values<String>, of: fn(String) -> Value| {
+    fn listed<T: Clone>(values: &Values<T>, of: fn(T) -> Value) -> Vec<Value> {
         values.as_slice().iter().cloned().map(of).collect()
-    };
+    }
     Some(match term {
-        Term::Kind => predicate
-            .kinds
-            .as_ref()?
-            .as_slice()
-            .iter()
-            .copied()
-            .map(Value::Kind)
-            .collect(),
-        Term::RepoCategory => predicate
-            .repo_categories
-            .as_ref()?
-            .as_slice()
-            .iter()
-            .copied()
-            .map(Value::RepoCategory)
-            .collect(),
-        Term::Repo => named(predicate.repos.as_ref()?, Value::Repo),
-        Term::RuleCategory => predicate
-            .rule_categories
-            .as_ref()?
-            .as_slice()
-            .iter()
-            .copied()
-            .map(Value::RuleCategory)
-            .collect(),
-        Term::Mnemonic => named(predicate.mnemonics.as_ref()?, Value::Mnemonic),
+        Term::Kind => listed(predicate.kinds.as_ref()?, Value::Kind),
+        Term::RepoCategory => listed(predicate.repo_categories.as_ref()?, Value::RepoCategory),
+        Term::Repo => listed(predicate.repos.as_ref()?, Value::Repo),
+        Term::RuleCategory => listed(predicate.rule_categories.as_ref()?, Value::RuleCategory),
+        Term::Mnemonic => listed(predicate.mnemonics.as_ref()?, Value::Mnemonic),
         // A term over the configurations that are not a tool's names none of
         // the values a control offers.
         Term::ToolConfiguration => match predicate.is_tool? {
@@ -177,40 +156,41 @@ fn named(predicate: &Predicate, term: Term) -> Option<Vec<Value>> {
 /// The predicate matching the nodes carrying any of `values`, all of which must
 /// be of `term`; `None` where they are empty, which constrains nothing.
 fn predicate(term: Term, values: &[Value]) -> Option<Predicate> {
-    let strings =
-        |of: fn(&Value) -> Option<&String>| Values::new(values.iter().filter_map(of).cloned());
+    fn listed<T: Ord>(values: &[Value], of: impl FnMut(&Value) -> Option<T>) -> Option<Values<T>> {
+        Values::new(values.iter().filter_map(of))
+    }
     let predicate = match term {
         Term::Kind => Predicate {
-            kinds: Values::new(values.iter().filter_map(|value| match value {
+            kinds: listed(values, |value| match value {
                 Value::Kind(kind) => Some(*kind),
                 _ => None,
-            })),
+            }),
             ..Predicate::default()
         },
         Term::RepoCategory => Predicate {
-            repo_categories: Values::new(values.iter().filter_map(|value| match value {
+            repo_categories: listed(values, |value| match value {
                 Value::RepoCategory(category) => Some(*category),
                 _ => None,
-            })),
+            }),
             ..Predicate::default()
         },
         Term::Repo => Predicate {
-            repos: strings(|value| match value {
-                Value::Repo(name) => Some(name),
+            repos: listed(values, |value| match value {
+                Value::Repo(name) => Some(name.clone()),
                 _ => None,
             }),
             ..Predicate::default()
         },
         Term::RuleCategory => Predicate {
-            rule_categories: Values::new(values.iter().filter_map(|value| match value {
+            rule_categories: listed(values, |value| match value {
                 Value::RuleCategory(category) => Some(*category),
                 _ => None,
-            })),
+            }),
             ..Predicate::default()
         },
         Term::Mnemonic => Predicate {
-            mnemonics: strings(|value| match value {
-                Value::Mnemonic(name) => Some(name),
+            mnemonics: listed(values, |value| match value {
+                Value::Mnemonic(name) => Some(name.clone()),
                 _ => None,
             }),
             ..Predicate::default()
@@ -274,13 +254,17 @@ mod tests {
     #[test]
     fn a_rule_is_written_over_one_term_alone() {
         let filter = set_hidden(&Filter::default(), &Value::Kind(Kind::Action), true);
-        let filter = set_hidden(&filter, &Value::Repo("rules_foo+".into()), true);
+        let filter = set_hidden(
+            &filter,
+            &Value::Repo(RepoName::Canonical("rules_foo+".into())),
+            true,
+        );
 
         assert_eq!(filter.rules.len(), 2);
         assert_eq!(values(&filter, Term::Kind), [Value::Kind(Kind::Action)]);
         assert_eq!(
             values(&filter, Term::Repo),
-            [Value::Repo("rules_foo+".into())]
+            [Value::Repo(RepoName::Canonical("rules_foo+".into()))]
         );
     }
 
@@ -291,7 +275,7 @@ mod tests {
         let cases = [
             Value::Kind(Kind::Package),
             Value::RepoCategory(RepoCategory::Module),
-            Value::Repo("rules_foo+".into()),
+            Value::Repo(RepoName::Canonical("rules_foo+".into())),
             Value::RuleCategory(RuleCategory::Plumbing),
             Value::Mnemonic("SymlinkTree".into()),
             Value::ToolConfiguration,

@@ -4,8 +4,9 @@
 //! `//foo:bar` names one target and `//foo:all` every target of one package.
 //! `...` stands for any run of path segments wherever it appears, so `//foo/...`
 //! reaches `//foo` and every package below it while `//.../cpp/...` reaches
-//! every package with a `cpp` segment. A repository part matches a canonical
-//! repository name outright and a module's own repository by the module name as
+//! every package with a `cpp` segment. A repository part matches the name a
+//! label carries outright — canonical, or apparent where no input named the
+//! repository canonically — and a module's own repository by the module name as
 //! well, since `@rules_foo//...` is how that repository is written before a
 //! repository mapping resolves it; any other apparent name reaches its
 //! repository only through the [`WrittenRepos`] of the graph being matched.
@@ -15,7 +16,7 @@ use std::collections::HashMap;
 
 use crate::facets::Facets;
 use crate::label::encloses;
-use crate::repo::module_name;
+use crate::repo::{RepoName, module_name};
 
 /// The apparent repository names one graph's inputs wrote, by the canonical name
 /// each stands for.
@@ -24,18 +25,21 @@ use crate::repo::module_name;
 /// the module name that name encodes without any of this, since both follow from
 /// a label; an apparent name follows from neither and is known only from what the
 /// inputs printed. An apparent name several repositories were written by stands
-/// for none of them, as it does when a label is canonicalized.
+/// for none of them, as it does when a label is canonicalized. A repository an
+/// apparent name identifies is already reached by that name, which its labels
+/// carry, so only a repository named canonically is held here.
 #[derive(Default, Clone)]
 pub struct WrittenRepos(HashMap<String, String>);
 
 impl WrittenRepos {
     pub fn of(facets: &Facets) -> Self {
         let mut candidates: HashMap<&str, Option<&str>> = HashMap::new();
-        for (repo, entry) in facets.repos() {
-            let Some(apparent) = entry.apparent else {
+        for (_, entry) in facets.repos() {
+            let (RepoName::Canonical(canonical), Some(apparent)) = (entry.name(), entry.apparent())
+            else {
                 continue;
             };
-            let canonical = facets.strings().resolve(repo.sym());
+            let canonical = facets.strings().resolve(canonical);
             candidates
                 .entry(facets.strings().resolve(apparent))
                 .and_modify(|resolved| {

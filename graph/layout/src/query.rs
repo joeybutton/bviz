@@ -185,6 +185,7 @@ fn yes_or_no(attribute: &Attribute) -> Tri {
 mod tests {
     use super::*;
     use crate::facets::{Origin, RuleCategory};
+    use crate::repo::RepoName;
     use crate::test_support::{edges, find, parent_of};
     use bazel_query_proto::blaze_query::{
         GeneratedFile, Rule, SourceFile, attribute::Discriminator as AttributeType,
@@ -345,8 +346,8 @@ mod tests {
         assert_eq!(facets.package(node), names.get("pkg:foo"));
         assert_eq!(facets.label(node), Some(node));
         let repo = facets.repo(node).unwrap();
-        assert_eq!(facets.strings().resolve(repo.sym()), "");
-        assert_eq!(facets.repo_entry(repo).unwrap().origin, Origin::Main);
+        assert_eq!(facets.repo_name(repo), RepoName::Canonical(""));
+        assert_eq!(facets.repo_entry(repo).origin(), Origin::Main);
     }
 
     #[test]
@@ -409,20 +410,66 @@ mod tests {
 
         let node = names.get("target:@@somerepo+//foo:lib").unwrap();
         let repo = facets.repo(node).unwrap();
-        assert_eq!(facets.strings().resolve(repo.sym()), "somerepo+");
+        assert_eq!(facets.repo_name(repo), RepoName::Canonical("somerepo+"));
     }
 
-    /// A genuine repository whose canonical name is `somerepo` would share the
-    /// handle, so a repository filter would cover both under one name.
+    /// A repository no input names canonically is still a repository a reader
+    /// filters on, so it is identified by the apparent name, which is all the
+    /// inputs said about it. Nothing in that name says where it comes from.
     #[test]
-    fn an_unresolved_apparent_repository_name_is_recorded_as_no_repository() {
+    fn an_unresolved_apparent_repository_name_identifies_a_repository_of_its_own() {
         let repos = RepoMapping::infer(["rules_foo+"].into_iter());
 
         let (_, names, facets) = build_in(&[rule("@somerepo//foo:lib", &[])], &repos);
 
         let node = names.get("target:@somerepo//foo:lib").unwrap();
-        assert_eq!(facets.repo(node), None);
-        assert_eq!(facets.repos().count(), 0);
+        let repo = facets.repo(node).expect("the repository the label names");
+        assert_eq!(facets.repo_name(repo), RepoName::Apparent("somerepo"));
+        assert_eq!(facets.repo_entry(repo).origin(), Origin::WorkspaceOrUnknown);
+        assert_eq!(facets.repos().count(), 1);
+    }
+
+    /// An apparent name stands for whichever repository the module that wrote
+    /// it maps it to, which need not be the one Bazel gave that canonical name,
+    /// so the two are two repositories a filter takes away one at a time.
+    #[test]
+    fn an_apparent_name_and_a_canonical_one_reading_alike_are_two_repositories() {
+        let repos = RepoMapping::infer(["rules_foo+"].into_iter());
+
+        let (_, names, facets) = build_in(
+            &[
+                rule("@somerepo//foo:lib", &[]),
+                rule("@@somerepo//bar:lib", &[]),
+            ],
+            &repos,
+        );
+
+        let apparent = facets.repo(names.get("target:@somerepo//foo:lib").unwrap());
+        let canonical = facets.repo(names.get("target:@@somerepo//bar:lib").unwrap());
+        assert_ne!(apparent, canonical);
+        assert_eq!(facets.repos().count(), 2);
+    }
+
+    /// The repository mapping is inferred from every canonical name the inputs
+    /// state before a node id is minted, so a label an input wrote apparently
+    /// is already canonical by the time its repository is recorded and lands
+    /// under the one identity rather than beside it.
+    #[test]
+    fn an_apparent_name_a_canonical_one_resolves_lands_under_that_repository() {
+        let repos = RepoMapping::infer(["somerepo+"].into_iter());
+
+        let (_, names, facets) = build_in(
+            &[
+                rule("@somerepo//foo:lib", &[]),
+                rule("@@somerepo+//bar:lib", &[]),
+            ],
+            &repos,
+        );
+
+        let one = facets.repo(names.get("target:@@somerepo+//foo:lib").unwrap());
+        let other = facets.repo(names.get("target:@@somerepo+//bar:lib").unwrap());
+        assert_eq!(one, other);
+        assert_eq!(facets.repos().count(), 1);
     }
 
     /// A box belongs to its repository as much as the targets inside it do, so a
@@ -439,7 +486,7 @@ mod tests {
         let filter = Filter {
             rules: vec![crate::select::Rule {
                 predicate: Predicate {
-                    repos: Values::new(["somerepo+".to_string()]),
+                    repos: Values::new([RepoName::Canonical("somerepo+".to_string())]),
                     ..Predicate::default()
                 },
                 visibility: Visibility::Hidden,
