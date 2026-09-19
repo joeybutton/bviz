@@ -18,8 +18,8 @@ use bviz_graph_layout::select::pattern::Pattern;
 use bviz_graph_layout::select::{Base, Filter, Predicate, Rule, Visibility};
 use bviz_ui_components::{Button, TextInput};
 use gpui::{
-    ClickEvent, Context, Div, Entity, Focusable, IntoElement, Pixels, SharedString, Stateful,
-    Subscription, Task, Window, actions, div, prelude::*, px, relative,
+    ClickEvent, Context, Div, Entity, Focusable, IntoElement, MouseButton, MouseDownEvent, Pixels,
+    SharedString, Stateful, Subscription, Task, Window, actions, div, prelude::*, px, relative,
 };
 use std::time::Duration;
 
@@ -250,6 +250,15 @@ pub(crate) fn dismiss(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
     cx.notify();
 }
 
+/// Brings the card back where a press on the field lands while it is away. A
+/// press that lands on the field holding focus moves no focus, so the field's
+/// own focus says nothing about it.
+fn pressed(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
+    if view.search.card.dismissed {
+        reveal(view, cx);
+    }
+}
+
 /// Brings the card back, matching the pattern afresh: the graph it names boxes
 /// of may have been drawn over since the last pass. What that pass found stays
 /// listed until the new matches land.
@@ -389,6 +398,10 @@ pub(crate) fn field(search: &Search, cx: &mut Context<GraphPanel>) -> impl IntoE
             div()
                 .key_context(KEY_CONTEXT)
                 .on_action(cx.listener(|view, _: &DismissResults, _, cx| dismiss(view, cx)))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|view, _: &MouseDownEvent, _, cx| pressed(view, cx)),
+                )
                 .w(FIELD_WIDTH)
                 .flex_none()
                 .child(search.field.clone()),
