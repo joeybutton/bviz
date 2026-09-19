@@ -144,13 +144,15 @@ pub(crate) fn offers(graph: &Graph, facets: &Facets, capabilities: &Capabilities
 pub(crate) fn options(filter: &Filter, offers: &[Offer]) -> Vec<MultiOption> {
     offers
         .iter()
-        .map(|offer| MultiOption {
-            label: match &offer.withheld {
-                Some(why) => format!("{} — {why}", offer.preset.label()).into(),
-                None => offer.preset.label().into(),
-            },
-            checked: applied(filter, offer.preset),
-            available: offer.withheld.is_none(),
+        .map(|offer| {
+            let label = match &offer.withheld {
+                Some(why) => format!("{} — {why}", offer.preset.label()),
+                None => offer.preset.label().to_string(),
+            };
+            MultiOption {
+                available: offer.withheld.is_none(),
+                ..MultiOption::new(label, applied(filter, offer.preset))
+            }
         })
         .collect()
 }

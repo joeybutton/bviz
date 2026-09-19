@@ -301,19 +301,19 @@ impl GraphPanel {
         let class_filter =
             cx.new(|cx| MultiSelect::new("graph-classes", "classes", Vec::new(), cx));
         let class_choices = cx.subscribe(&class_filter, |view, _, event: &MultiSelectEvent, cx| {
-            checklist::toggle_class(view, event.index, !event.checked, cx);
+            checklist::choose_classes(view, event, cx);
         });
         let origin_filter =
             cx.new(|cx| MultiSelect::new("graph-origins", "repositories", Vec::new(), cx));
         let origin_choices =
             cx.subscribe(&origin_filter, |view, _, event: &MultiSelectEvent, cx| {
-                checklist::toggle_origin(view, event.index, !event.checked, cx);
+                checklist::choose_origins(view, event, cx);
             });
         let preset_filter =
             cx.new(|cx| MultiSelect::new("graph-presets", "presets", Vec::new(), cx));
         let preset_choices =
             cx.subscribe(&preset_filter, |view, _, event: &MultiSelectEvent, cx| {
-                checklist::toggle_preset(view, event.index, event.checked, cx);
+                checklist::choose_presets(view, event, cx);
             });
         let search = Search::new(cx);
         // The field notifies on every repaint it makes, so what it holds is

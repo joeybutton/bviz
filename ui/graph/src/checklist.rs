@@ -12,7 +12,7 @@ use bviz_graph_layout::graph::Graph;
 use bviz_graph_layout::repo::{RepoCategory, RepoName};
 use bviz_graph_layout::select::Filter;
 use bviz_graph_layout::{Facets, Kind};
-use bviz_ui_components::MultiOption;
+use bviz_ui_components::{MultiOption, MultiSelectEvent};
 use gpui::Context;
 
 /// The node classes `graph` holds boxes for, in the order the kinds are
@@ -132,7 +132,8 @@ pub(crate) fn origin_options(filter: &Filter, rows: &[OriginRow]) -> Vec<MultiOp
                 origin_label(*origin),
                 !rules::hides(filter, &Value::RepoCategory(*origin))
                     && under(rows, *origin).all(|repo| !hides_repo(filter, repo)),
-            ),
+            )
+            .heading(),
             OriginRow::Repo(repo) => MultiOption::new(
                 repo.label.clone(),
                 !hides_repo(filter, repo)
@@ -246,47 +247,102 @@ pub(crate) fn set_filter_framed(
     restate(view, cx);
 }
 
-/// Hides or shows the node class the class checklist's row `index` stands for.
-pub(crate) fn toggle_class(
+/// The filter a click on a checklist leaves, `row` writing the one the row at an
+/// index stands at when asked to become checked or unchecked.
+///
+/// A click over a range writes every row it covers through that same writer, so
+/// it leaves the rules the run of single clicks would have left — including the
+/// rules no control wrote, which each of those writes carries through untouched.
+fn chosen(
+    filter: &Filter,
+    event: &MultiSelectEvent,
+    row: impl Fn(&Filter, usize, bool) -> Filter,
+) -> Filter {
+    match event {
+        MultiSelectEvent::Toggled { index, checked } => row(filter, *index, *checked),
+        MultiSelectEvent::SetAll { range, checked } => {
+            range.clone().fold(filter.clone(), |filter, index| {
+                row(&filter, index, *checked)
+            })
+        }
+    }
+}
+
+/// `filter` with the node classes the class checklist's `event` names drawn, or
+/// left out.
+pub(crate) fn classes_chosen(
+    filter: &Filter,
+    classes: &[Kind],
+    event: &MultiSelectEvent,
+) -> Filter {
+    chosen(filter, event, |filter, index, checked| {
+        match classes.get(index) {
+            Some(&kind) => rules::set_hidden(filter, &Value::Kind(kind), !checked),
+            None => filter.clone(),
+        }
+    })
+}
+
+/// `filter` with the repositories the repository checklist's `event` names
+/// drawn, or left out.
+pub(crate) fn origins_chosen(
+    filter: &Filter,
+    rows: &[OriginRow],
+    event: &MultiSelectEvent,
+) -> Filter {
+    chosen(filter, event, |filter, index, checked| {
+        match rows.get(index) {
+            Some(row) => set_origin_hidden(filter, rows, row, !checked),
+            None => filter.clone(),
+        }
+    })
+}
+
+/// `filter` with the reductions the preset checklist's `event` names applied, or
+/// taken back off. A preset the loaded inputs cannot answer is left alone, so a
+/// click over every row reaches exactly the rows that report one.
+pub(crate) fn presets_chosen(
+    filter: &Filter,
+    offers: &[preset::Offer],
+    event: &MultiSelectEvent,
+) -> Filter {
+    chosen(
+        filter,
+        event,
+        |filter, index, applied| match preset::offered(offers, index) {
+            Some(preset) => preset::set_applied(filter, preset, applied),
+            None => filter.clone(),
+        },
+    )
+}
+
+/// Draws the graph as the class checklist's click leaves it.
+pub(crate) fn choose_classes(
     view: &mut GraphPanel,
-    index: usize,
-    hidden: bool,
+    event: &MultiSelectEvent,
     cx: &mut Context<GraphPanel>,
 ) {
-    let Some(&kind) = view.classes.get(index) else {
-        return;
-    };
-    let filter = rules::set_hidden(view.derived.filter(), &Value::Kind(kind), hidden);
+    let filter = classes_chosen(view.derived.filter(), &view.classes, event);
     set_filter(view, filter, cx);
 }
 
-/// Hides or shows the repositories the repository checklist's row `index` stands
-/// for.
-pub(crate) fn toggle_origin(
+/// Draws the graph as the repository checklist's click leaves it.
+pub(crate) fn choose_origins(
     view: &mut GraphPanel,
-    index: usize,
-    hidden: bool,
+    event: &MultiSelectEvent,
     cx: &mut Context<GraphPanel>,
 ) {
-    let Some(row) = view.origins.get(index).cloned() else {
-        return;
-    };
-    let filter = set_origin_hidden(view.derived.filter(), &view.origins, &row, hidden);
+    let filter = origins_chosen(view.derived.filter(), &view.origins, event);
     set_filter(view, filter, cx);
 }
 
-/// Applies the preset the preset checklist's row `index` stands for, or takes it
-/// back off.
-pub(crate) fn toggle_preset(
+/// Draws the graph as the preset checklist's click leaves it.
+pub(crate) fn choose_presets(
     view: &mut GraphPanel,
-    index: usize,
-    applied: bool,
+    event: &MultiSelectEvent,
     cx: &mut Context<GraphPanel>,
 ) {
-    let Some(preset) = preset::offered(&view.presets, index) else {
-        return;
-    };
-    let filter = preset::set_applied(view.derived.filter(), preset, applied);
+    let filter = presets_chosen(view.derived.filter(), &view.presets, event);
     set_filter(view, filter, cx);
 }
 
@@ -295,6 +351,8 @@ mod tests {
     use super::*;
     use bviz_graph_layout::graph::Node;
     use bviz_graph_layout::intern::Id;
+    use bviz_graph_layout::select::pattern::Pattern;
+    use bviz_graph_layout::select::{Predicate, Rule, Visibility};
 
     /// A graph of one package holding one target, with a source file beside it.
     fn graph() -> Graph {
@@ -459,6 +517,105 @@ mod tests {
         assert_eq!(
             checked(&origin_options(&one_back, &rows)),
             [true, false, true, false, true, true]
+        );
+    }
+
+    fn set_all(range: std::ops::Range<usize>, checked: bool) -> MultiSelectEvent {
+        MultiSelectEvent::SetAll { range, checked }
+    }
+
+    /// Clearing the menu leaves nothing drawn, and checking one repository after
+    /// it brings back that repository alone — which is how a graph naming
+    /// hundreds is narrowed to the one being looked at.
+    #[test]
+    fn clearing_every_repository_and_checking_one_draws_that_one_alone() {
+        let rows = carried_origins(&facets());
+        let cleared = origins_chosen(&Filter::default(), &rows, &set_all(0..rows.len(), false));
+        assert_eq!(checked(&origin_options(&cleared, &rows)), [false; 6]);
+
+        let one = origins_chosen(
+            &cleared,
+            &rows,
+            &MultiSelectEvent::Toggled {
+                index: 3,
+                checked: true,
+            },
+        );
+
+        assert_eq!(
+            checked(&origin_options(&one, &rows)),
+            [false, false, false, true, false, false]
+        );
+    }
+
+    /// A group's own actions reach the repositories under it and no others, so
+    /// one origin is cleared while the rest stay drawn.
+    #[test]
+    fn clearing_a_group_leaves_the_repositories_of_every_other_origin_drawn() {
+        let rows = carried_origins(&facets());
+        let modules = rows
+            .iter()
+            .position(|row| *row == OriginRow::Origin(RepoCategory::Module))
+            .expect("the fixture carries module repositories");
+
+        let cleared = origins_chosen(
+            &Filter::default(),
+            &rows,
+            &set_all(modules..modules + 3, false),
+        );
+
+        assert_eq!(
+            checked(&origin_options(&cleared, &rows)),
+            [true, false, false, false, true, true]
+        );
+    }
+
+    /// A rule no control wrote is none of a checklist's business, so a click
+    /// over every row carries it through exactly as one row's click does.
+    #[test]
+    fn checking_and_clearing_every_row_leaves_a_rule_no_control_wrote_standing() {
+        let untouched = Rule {
+            predicate: Predicate {
+                label: Some(Pattern::parse("//foo/...")),
+                ..Predicate::default()
+            },
+            visibility: Visibility::Hidden,
+        };
+        let filter = Filter {
+            rules: vec![untouched.clone()],
+            ..Filter::default()
+        };
+        let rows = carried_origins(&facets());
+
+        for checked in [false, true] {
+            let acted = origins_chosen(&filter, &rows, &set_all(0..rows.len(), checked));
+            assert!(acted.rules.contains(&untouched), "checked: {checked}");
+        }
+    }
+
+    /// The preset checklist's rows are reductions rather than values, so its
+    /// menu-wide actions apply and take back off every reduction the loaded
+    /// inputs can answer, and leave the rest alone.
+    #[test]
+    fn applying_every_preset_reaches_the_ones_the_inputs_can_answer() {
+        let mut graph = Graph::new();
+        graph.add_node(Node::new(Id(0), ":lib", Kind::Target, None));
+        let mut facets = Facets::default();
+        facets.intern_rule_class("cc_library");
+        let mut capabilities = bviz_graph_layout::capability::CapabilitiesBuilder::default();
+        for axis in bviz_graph_layout::Axis::ALL {
+            capabilities.observe(axis, true);
+        }
+        let offers = preset::offers(&graph, &facets, &capabilities.seal());
+        let all = set_all(0..offers.len(), true);
+
+        let applied = presets_chosen(&Filter::default(), &offers, &all);
+
+        let options = preset::options(&applied, &offers);
+        assert_eq!(checked(&options), [true, false, false, false]);
+        assert_eq!(
+            presets_chosen(&applied, &offers, &set_all(0..offers.len(), false)),
+            Filter::default()
         );
     }
 

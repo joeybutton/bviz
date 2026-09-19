@@ -1,6 +1,7 @@
 //! A multi-select: a trigger reading how many of its values are checked, and a
 //! menu of rows that stays open as they are toggled.
 
+use crate::button::Button;
 use crate::drag::{DragEnd, track_drag};
 use crate::layer::overlay_canvas;
 use crate::menu;
@@ -12,6 +13,7 @@ use gpui::{
     IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, Pixels, Point, Render, Rgba,
     ScrollHandle, SharedString, Subscription, Window, deferred, div, point, prelude::*, px, size,
 };
+use std::ops::Range;
 
 /// How tall the menu's row list grows before it scrolls. A facet can carry
 /// hundreds of values, so the list is bounded and the rest reached by scrolling.
@@ -33,6 +35,9 @@ pub struct MultiOption {
     /// data cannot answer for is drawn greyed and reports nothing, so that it
     /// says it can do nothing rather than silently doing nothing.
     pub available: bool,
+    /// Whether the value heads the values stated after it, up to the next that
+    /// does: the menu offers such a run as a group, and acts on it as one.
+    pub heads_group: bool,
 }
 
 impl MultiOption {
@@ -42,16 +47,24 @@ impl MultiOption {
             label: label.into(),
             checked,
             available: true,
+            heads_group: false,
         }
+    }
+
+    /// The value as the head of the group of values stated after it.
+    pub fn heading(mut self) -> Self {
+        self.heads_group = true;
+        self
     }
 }
 
-/// Emitted when the user clicks an available row: the value at `index` is asked
-/// to become `checked`.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub struct MultiSelectEvent {
-    pub index: usize,
-    pub checked: bool,
+/// What a click on the menu asks of the state behind the values.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum MultiSelectEvent {
+    /// The value at `index` is asked to become `checked`.
+    Toggled { index: usize, checked: bool },
+    /// Every value `range` covers is asked to become `checked`.
+    SetAll { range: Range<usize>, checked: bool },
 }
 
 /// What a [`MultiSelect`] draws its menu from, held apart from the gpui handles
@@ -119,10 +132,26 @@ impl Rows {
     /// check several values in one go, and the options stand as they were given.
     fn clicked(&mut self, index: usize) -> Option<MultiSelectEvent> {
         let option = self.options.get(index).filter(|option| option.available)?;
-        Some(MultiSelectEvent {
+        Some(MultiSelectEvent::Toggled {
             index,
             checked: !option.checked,
         })
+    }
+
+    /// Every value the menu offers.
+    fn all(&self) -> Range<usize> {
+        0..self.options.len()
+    }
+
+    /// The values the row at `head` heads: that row and the rows after it, up to
+    /// the next row heading a group.
+    fn group(&self, head: usize) -> Range<usize> {
+        let under = &self.options[head + 1..];
+        let len = under
+            .iter()
+            .position(|option| option.heads_group)
+            .unwrap_or(under.len());
+        head..head + 1 + len
     }
 
     /// How many values are checked, of how many are offered.
@@ -286,9 +315,43 @@ impl MultiSelect {
                     cx.notify();
                 }),
             )
+            .child(self.header(colors, cx))
             .child(self.list(colors, label_width, cx));
         // Defer the menu so it paints over the content below the trigger.
         deferred(sheet)
+    }
+
+    /// The actions over every value the menu holds, lined up with the actions a
+    /// group's own row carries by leaving the same room for the scroll bar the
+    /// list does.
+    fn header(&self, colors: &ThemeColors, cx: &Context<Self>) -> impl IntoElement + use<> {
+        menu::header(colors).child(div().pr(px(SCROLLBAR_THICKNESS)).child(self.bulk(
+            "multi-select-all".into(),
+            "multi-select-none".into(),
+            self.rows.all(),
+            cx,
+        )))
+    }
+
+    /// The pair checking and clearing every value `range` covers, by which a
+    /// menu of hundreds is narrowed to the few being looked for.
+    fn bulk(
+        &self,
+        check: ElementId,
+        clear: ElementId,
+        range: Range<usize>,
+        cx: &Context<Self>,
+    ) -> impl IntoElement + use<> {
+        div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_1()
+            // Keep the press off the row behind it, whose own click would
+            // toggle the value that row names.
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .child(set_all(check, "all", range.clone(), true, cx))
+            .child(set_all(clear, "none", range, false, cx))
     }
 
     /// The scrollable rows with a scroll bar over their right edge, which the
@@ -338,6 +401,12 @@ impl MultiSelect {
         label_width: Pixels,
         cx: &Context<Self>,
     ) -> impl IntoElement + use<> {
+        // A group holding nothing under the row heading it offers nothing that
+        // row's own checkmark does not.
+        let group = option
+            .heads_group
+            .then(|| self.rows.group(index))
+            .filter(|group| group.len() > 1);
         menu::row(
             ("multi-select-option", index).into(),
             colors,
@@ -354,7 +423,38 @@ impl MultiSelect {
         }))
         .child(menu::check(colors, option.checked))
         .child(menu::reading(label_width, option.label.clone()))
+        .children(group.map(|group| {
+            self.bulk(
+                ("multi-select-group-all", index).into(),
+                ("multi-select-group-none", index).into(),
+                group,
+                cx,
+            )
+        }))
     }
+}
+
+/// The button asking for every value `range` covers to become `checked`.
+fn set_all(
+    id: ElementId,
+    label: &'static str,
+    range: Range<usize>,
+    checked: bool,
+    cx: &Context<MultiSelect>,
+) -> Button {
+    Button::new(
+        id,
+        cx.listener(move |_, _: &ClickEvent, _, cx| {
+            cx.emit(MultiSelectEvent::SetAll {
+                range: range.clone(),
+                checked,
+            });
+            cx.notify();
+        }),
+    )
+    .ghost()
+    .compact()
+    .label(label)
 }
 
 impl EventEmitter<MultiSelectEvent> for MultiSelect {}
@@ -462,14 +562,14 @@ mod tests {
 
         assert_eq!(
             rows.clicked(1),
-            Some(MultiSelectEvent {
+            Some(MultiSelectEvent::Toggled {
                 index: 1,
                 checked: false
             })
         );
         assert_eq!(
             rows.clicked(2),
-            Some(MultiSelectEvent {
+            Some(MultiSelectEvent::Toggled {
                 index: 2,
                 checked: true
             })
@@ -501,15 +601,41 @@ mod tests {
     fn a_click_on_an_unavailable_value_reports_nothing() {
         let mut rows = Rows {
             options: vec![MultiOption {
-                label: "needs --transitions=lite".into(),
-                checked: false,
                 available: false,
+                ..MultiOption::new("needs --transitions=lite", false)
             }],
             open: true,
             measured: None,
         };
 
         assert_eq!(rows.clicked(0), None);
+    }
+
+    /// A group reaches from the value heading it to the one heading the next,
+    /// so acting on it leaves the groups around it alone; a menu no value heads
+    /// a group of holds one run, which the whole-menu action covers.
+    #[test]
+    fn a_group_runs_from_its_head_to_the_next() {
+        let grouped = Rows {
+            options: vec![
+                MultiOption::new("loose", true),
+                MultiOption::new("first group", true).heading(),
+                MultiOption::new("under the first", true),
+                MultiOption::new("also under the first", true),
+                MultiOption::new("last group", true).heading(),
+                MultiOption::new("under the last", true),
+            ],
+            open: true,
+            measured: None,
+        };
+
+        assert_eq!(grouped.group(1), 1..4);
+        assert_eq!(grouped.group(4), 4..6);
+        assert_eq!(grouped.all(), 0..6);
+
+        let flat = rows([true, true, true]);
+        assert_eq!(flat.all(), 0..3);
+        assert_eq!(flat.group(0), 0..3);
     }
 
     fn style(family: &str, size: f32) -> TextMetrics {

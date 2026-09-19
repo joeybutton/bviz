@@ -111,6 +111,21 @@ pub(crate) fn sheet(colors: &ThemeColors) -> Div {
         .rounded_md()
 }
 
+/// The row a menu's own actions stand on, above the values they act on and out
+/// of the list those values scroll in. It is laid out like a row, so what it
+/// holds lines up with what the rows hold.
+pub(crate) fn header(colors: &ThemeColors) -> Div {
+    div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .justify_end()
+        .px_2()
+        .py_1()
+        .border_b_1()
+        .border_color(colors.border)
+}
+
 /// One row of a menu, `chosen` filling in the value it names as one that stands.
 pub(crate) fn row(id: ElementId, colors: &ThemeColors, chosen: bool) -> Stateful<Div> {
     let hover = if chosen {
