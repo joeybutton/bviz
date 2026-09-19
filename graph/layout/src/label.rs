@@ -8,14 +8,14 @@
 //! so the three render with an identical package structure.
 
 use std::borrow::Cow;
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use bazel_query_proto::blaze_query::{Target, target::Discriminator};
 
 use crate::facets::{Facets, FacetsBuilder, RepoRef};
 use crate::graph::{Graph, Kind, Node};
 use crate::intern::{Id, Names};
-use crate::repo::{RepoName, module_name};
+use crate::repo::RepoName;
 
 /// The repository and package path a label names: `//a/b:c` -> `("", "a/b")`,
 /// `//:c` -> `("", "")`, `@r//a:c` -> `("@r", "a")`. A label with no `//` names
@@ -93,39 +93,26 @@ pub(crate) fn package_keys<'a>(
 /// aquery stringifies labels canonically. query and cquery print the apparent
 /// form `@repo//pkg:t` by default and, under `--consistent_labels`, the
 /// canonical form plus `@@//pkg:t` for the main repository. Only the apparent
-/// form needs this map, which resolves it to the canonical name it stands for.
+/// form needs this map.
 #[derive(Default)]
 pub(crate) struct RepoMapping {
-    canonical: HashMap<String, String>,
+    canonical: HashSet<String>,
 }
 
 impl RepoMapping {
-    /// Infers the mapping from the canonical repository names `observed` across
-    /// the inputs, a repository resolving an apparent name when it is the only
-    /// observed candidate for it. Zero or several candidates leave the apparent
-    /// name alone: a target shown twice is a far smaller fault than two
-    /// repositories' targets merged into one node.
+    /// The canonical repository names `observed` across the inputs, to which an
+    /// apparent name reading the same resolves.
+    ///
+    /// Such a name is one its repository carries in its own right — a
+    /// WORKSPACE-era repository, a module Bazel names bare — and so is the name
+    /// a repository mapping resolves to it. Every other apparent name is one
+    /// module's own word for a repository, stated by that module's repository
+    /// mapping alone, which no dump carries; leaving it unresolved shows one
+    /// repository's targets under two names, while resolving it wrongly merges
+    /// two repositories' targets into one node.
     pub(crate) fn infer<'a>(observed: impl Iterator<Item = &'a str>) -> Self {
-        let mut candidates: HashMap<&str, Option<&str>> = HashMap::new();
-        for canonical in observed {
-            for apparent in apparent_names(canonical) {
-                candidates
-                    .entry(apparent)
-                    .and_modify(|resolved| {
-                        if *resolved != Some(canonical) {
-                            *resolved = None;
-                        }
-                    })
-                    .or_insert(Some(canonical));
-            }
-        }
         RepoMapping {
-            canonical: candidates
-                .into_iter()
-                .filter_map(|(apparent, resolved)| {
-                    Some((apparent.to_string(), resolved?.to_string()))
-                })
-                .collect(),
+            canonical: observed.map(str::to_string).collect(),
         }
     }
 
@@ -144,20 +131,12 @@ impl RepoMapping {
         let Some((apparent, package)) = repo.split_once("//") else {
             return Cow::Borrowed(label);
         };
-        match self.canonical.get(apparent) {
-            Some(canonical) => Cow::Owned(format!("@@{canonical}//{package}")),
-            None => Cow::Borrowed(label),
+        if self.canonical.contains(apparent) {
+            Cow::Owned(format!("@@{apparent}//{package}"))
+        } else {
+            Cow::Borrowed(label)
         }
     }
-}
-
-/// The apparent repository names a canonical name can stand for: the canonical
-/// name itself, and the module name of a module repository, since `@rules_foo`
-/// is how a module's own repository is written before mapping. An extension
-/// repository's name contributes only itself — the name its extension gave it
-/// bears no relation to the module it is generated under.
-fn apparent_names(canonical: &str) -> impl Iterator<Item = &str> {
-    std::iter::once(canonical).chain(module_name(canonical))
 }
 
 /// The `:name` shown on a target box: the portion of a label after its last `:`
@@ -721,46 +700,36 @@ mod tests {
     }
 
     #[test]
-    fn an_apparent_name_resolves_to_the_module_repository_it_stands_for() {
-        let repos = mapping(&["rules_foo+"]);
-
-        assert_eq!(
-            repos.canonicalize_label("@rules_foo//bar:baz"),
-            "@@rules_foo+//bar:baz"
-        );
-        assert_eq!(
-            repos.canonicalize_label("@@rules_foo+//bar:baz"),
-            "@@rules_foo+//bar:baz"
-        );
-    }
-
-    /// The repositories a module's extensions generate carry the module's name
-    /// as a prefix, but stand for apparent names of their own, so they are no
-    /// rival candidate for the module's own name.
-    #[test]
-    fn an_extension_repository_does_not_contest_its_modules_name() {
-        let repos = mapping(&["rules_foo+", "rules_foo++ext+generated"]);
-
-        assert_eq!(
-            repos.canonicalize_label("@rules_foo//bar:baz"),
-            "@@rules_foo+//bar:baz"
-        );
-    }
-
-    #[test]
-    fn an_apparent_name_with_two_candidates_stays_unresolved() {
-        // A multiple_version_override keeps two versions of one module, and
-        // nothing in the inputs says which one an apparent name reaches.
-        let repos = mapping(&["somerepo+1.0", "somerepo+2.0"]);
+    fn an_apparent_name_resolves_to_the_repository_whose_canonical_name_it_is() {
+        let repos = mapping(&["somerepo"]);
 
         assert_eq!(
             repos.canonicalize_label("@somerepo//bar:baz"),
-            "@somerepo//bar:baz"
+            "@@somerepo//bar:baz"
+        );
+        assert_eq!(
+            repos.canonicalize_label("@@somerepo//bar:baz"),
+            "@@somerepo//bar:baz"
         );
     }
 
+    /// A module name is the word the module's own mapping gives its repository,
+    /// and any module depending on another under that word gives it the same
+    /// one, so a label writing it states which repository it reaches only for
+    /// the module that wrote the label.
     #[test]
-    fn an_apparent_name_with_no_candidate_stays_unresolved() {
+    fn an_apparent_name_a_module_also_bears_reaches_neither_repository() {
+        // `bazel_dep(name = "foo", repo_name = "bar")` makes `@bar` the writing
+        // module's word for `foo+`, while the module named `bar` is in the
+        // graph under a canonical name of its own.
+        let repos = mapping(&["foo+", "bar+"]);
+
+        assert_eq!(repos.canonicalize_label("@bar//pkg:t"), "@bar//pkg:t");
+        assert_eq!(repos.canonicalize_label("@@bar+//pkg:t"), "@@bar+//pkg:t");
+    }
+
+    #[test]
+    fn an_apparent_name_no_repository_bears_stays_unresolved() {
         let repos = mapping(&["rules_foo+"]);
 
         assert_eq!(

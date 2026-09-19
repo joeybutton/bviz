@@ -404,13 +404,32 @@ mod tests {
 
     #[test]
     fn an_apparent_label_records_the_canonical_repository_it_reaches() {
-        let repos = RepoMapping::infer(["somerepo+"].into_iter());
+        let repos = RepoMapping::infer(["somerepo"].into_iter());
 
         let (_, names, facets) = build_in(&[rule("@somerepo//foo:lib", &[])], &repos);
 
-        let node = names.get("target:@@somerepo+//foo:lib").unwrap();
+        let node = names.get("target:@@somerepo//foo:lib").unwrap();
         let repo = facets.repo(node).unwrap();
-        assert_eq!(facets.repo_name(repo), RepoName::Canonical("somerepo+"));
+        assert_eq!(facets.repo_name(repo), RepoName::Canonical("somerepo"));
+    }
+
+    /// A module name is the word that module's own mapping gives its
+    /// repository, and a module depending on another under that word gives it
+    /// the same one, so a label writing it identifies a repository of its own
+    /// beside the module bearing the name.
+    #[test]
+    fn a_label_writing_a_module_name_lands_beside_the_module_bearing_it() {
+        let repos = RepoMapping::infer(["foo+", "bar+"].into_iter());
+
+        let (_, names, facets) = build_in(
+            &[rule("@bar//pkg:t", &[]), rule("@@bar+//pkg:u", &[])],
+            &repos,
+        );
+
+        let written = facets.repo(names.get("target:@bar//pkg:t").unwrap());
+        let module = facets.repo(names.get("target:@@bar+//pkg:u").unwrap());
+        assert_ne!(written, module);
+        assert_eq!(facets.repos().count(), 2);
     }
 
     /// A repository no input names canonically is still a repository a reader
@@ -456,18 +475,18 @@ mod tests {
     /// under the one identity rather than beside it.
     #[test]
     fn an_apparent_name_a_canonical_one_resolves_lands_under_that_repository() {
-        let repos = RepoMapping::infer(["somerepo+"].into_iter());
+        let repos = RepoMapping::infer(["somerepo"].into_iter());
 
         let (_, names, facets) = build_in(
             &[
                 rule("@somerepo//foo:lib", &[]),
-                rule("@@somerepo+//bar:lib", &[]),
+                rule("@@somerepo//bar:lib", &[]),
             ],
             &repos,
         );
 
-        let one = facets.repo(names.get("target:@@somerepo+//foo:lib").unwrap());
-        let other = facets.repo(names.get("target:@@somerepo+//bar:lib").unwrap());
+        let one = facets.repo(names.get("target:@@somerepo//foo:lib").unwrap());
+        let other = facets.repo(names.get("target:@@somerepo//bar:lib").unwrap());
         assert_eq!(one, other);
         assert_eq!(facets.repos().count(), 1);
     }

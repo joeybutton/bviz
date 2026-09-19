@@ -527,9 +527,28 @@ mod tests {
 
     #[test]
     fn an_apparent_repository_name_joins_the_canonical_node_it_stands_for() {
-        // query prints the apparent `@somerepo//`, aquery the canonical
-        // `@@somerepo+//`; the module repository is the only candidate, so both
-        // name one target.
+        // query prints the apparent `@somerepo//` and aquery the canonical
+        // `@@somerepo//` of the repository bearing that very name, so both name
+        // one target.
+        let query_targets = vec![rule("@somerepo//foo:lib", &[])];
+
+        let (graph, names, _, _) = build_joint(
+            Some(&[aquery_target(1, "@@somerepo//foo:lib")]),
+            None,
+            Some(&query_targets),
+            false,
+        );
+
+        assert_eq!(node_count(&graph, &names, "target:@@somerepo//foo:lib"), 1);
+        assert_eq!(node_count(&graph, &names, "target:@somerepo//foo:lib"), 0);
+        assert_eq!(node_count(&graph, &names, "pkg:@@somerepo//foo"), 1);
+    }
+
+    #[test]
+    fn a_module_name_an_apparent_label_wrote_keeps_its_own_node() {
+        // `@somerepo//` is whatever the module that printed it maps that name
+        // to, which need not be the module named `somerepo` the aquery names.
+        // Showing the target twice beats attaching it to the wrong repository.
         let query_targets = vec![rule("@somerepo//foo:lib", &[])];
 
         let (graph, names, _, _) = build_joint(
@@ -539,33 +558,8 @@ mod tests {
             false,
         );
 
-        assert_eq!(node_count(&graph, &names, "target:@@somerepo+//foo:lib"), 1);
-        assert_eq!(node_count(&graph, &names, "target:@somerepo//foo:lib"), 0);
-        assert_eq!(node_count(&graph, &names, "pkg:@@somerepo+//foo"), 1);
-    }
-
-    #[test]
-    fn an_ambiguous_apparent_repository_name_keeps_its_own_node() {
-        // Two versions of one module are in the graph, so `@somerepo//` could
-        // mean either. The apparent label stays as it is: showing the target
-        // twice beats attaching it to the wrong repository.
-        let query_targets = vec![rule("@somerepo//foo:lib", &[])];
-        let aquery = [
-            aquery_target(1, "@@somerepo+1.0//foo:lib"),
-            aquery_target(2, "@@somerepo+2.0//foo:lib"),
-        ];
-
-        let (graph, names, _, _) = build_joint(Some(&aquery), None, Some(&query_targets), false);
-
         assert_eq!(node_count(&graph, &names, "target:@somerepo//foo:lib"), 1);
-        assert_eq!(
-            node_count(&graph, &names, "target:@@somerepo+1.0//foo:lib"),
-            1
-        );
-        assert_eq!(
-            node_count(&graph, &names, "target:@@somerepo+2.0//foo:lib"),
-            1
-        );
+        assert_eq!(node_count(&graph, &names, "target:@@somerepo+//foo:lib"), 1);
     }
 
     #[test]
