@@ -49,7 +49,6 @@ const RUNFILES_MNEMONICS: [&str; 10] = [
 /// its terms, so it may only add to what they hide. A label asserting what is
 /// left — "the main repository only" — promises the whole of its terms, which
 /// is reached only by stating them.
-#[derive(Clone, PartialEq, Eq, Debug)]
 enum Reduction {
     /// Hides these values, leaving everything else hidden on their terms as it
     /// stands, and shows these again when taken off.
