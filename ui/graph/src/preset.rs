@@ -369,12 +369,11 @@ mod tests {
     /// names Bazel has given it, so a dump from either release reduces alike.
     #[test]
     fn the_runfiles_preset_names_the_runfiles_tree_action_of_either_release() {
-        let Reduction::Adds(hidden) = Preset::RunfilesPlumbing.reduction() else {
-            panic!("the runfiles preset names what it removes");
-        };
+        let reduced = set_applied(&Filter::default(), Preset::RunfilesPlumbing, true);
+
         for mnemonic in ["RunfilesTree", "Middleman"] {
             assert!(
-                hidden.contains(&Value::Mnemonic(mnemonic.to_string())),
+                rules::hides(&reduced, &Value::Mnemonic(mnemonic.to_string())),
                 "{mnemonic}"
             );
         }
