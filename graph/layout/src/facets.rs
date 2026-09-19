@@ -7,6 +7,7 @@
 //! are the filter's own; node ids keep theirs, whose indices double as positions
 //! in the node arrays.
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::num::NonZeroU32;
 
@@ -679,6 +680,9 @@ pub struct WrittenRepos {
     /// The canonical name an apparent name written here stands for, which is
     /// the name labels carry.
     canonical: HashMap<String, String>,
+    /// The name written for the repository part a label carries, sigil and all,
+    /// where the two read differently.
+    rewritten: HashMap<String, String>,
 }
 
 impl WrittenRepos {
@@ -692,6 +696,7 @@ impl WrittenRepos {
         let mut repos = WrittenRepos {
             written: Vec::with_capacity(facets.repos().len()),
             canonical: HashMap::new(),
+            rewritten: HashMap::new(),
         };
         let resolve = |name: Sym| facets.strings().resolve(name);
         for (_, entry) in facets.repos() {
@@ -702,11 +707,14 @@ impl WrittenRepos {
                 // is written alike.
                 (RepoName::Apparent(name), _) => format!("@{}", resolve(name)),
                 (RepoName::Canonical(canonical), Some(apparent)) => {
-                    repos.canonical.insert(
-                        resolve(apparent).to_string(),
-                        resolve(canonical).to_string(),
-                    );
-                    format!("@{}", resolve(apparent))
+                    let (canonical, apparent) = (resolve(canonical), resolve(apparent));
+                    repos
+                        .canonical
+                        .insert(apparent.to_string(), canonical.to_string());
+                    repos
+                        .rewritten
+                        .insert(format!("@@{canonical}"), format!("@{apparent}"));
+                    format!("@{apparent}")
                 }
                 (RepoName::Canonical(canonical), None) => match resolve(canonical) {
                     "" => String::new(),
@@ -726,6 +734,18 @@ impl WrittenRepos {
     /// labels, or `None` where that name is what its labels already carry.
     pub fn canonical(&self, written: &str) -> Option<&str> {
         self.canonical.get(written).map(String::as_str)
+    }
+
+    /// The canonical label `label` as a reader writes it, which is by the
+    /// repository name the same graph's boxes and checklists read.
+    pub fn written_label<'a>(&self, label: &'a str) -> Cow<'a, str> {
+        let Some((repo, rest)) = label.split_once("//") else {
+            return Cow::Borrowed(label);
+        };
+        match self.rewritten.get(repo) {
+            Some(written) => Cow::Owned(format!("{written}//{rest}")),
+            None => Cow::Borrowed(label),
+        }
     }
 }
 
@@ -1120,6 +1140,36 @@ mod tests {
         assert_eq!(written.written(versioned), "@rules_bar");
         assert_eq!(written.written(generated), "@@rules_foo++ext+gen");
         assert_eq!(written.written(named_apparently), "@crates");
+    }
+
+    /// A label is written by the name its repository is written by, so a label
+    /// listed beside a box of that repository reads as that box is captioned.
+    /// The main repository's labels and a repository's own canonical name are
+    /// what a reader writes already.
+    #[test]
+    fn a_label_is_written_by_the_name_its_repository_is_written_by() {
+        let mut facets = Facets::default();
+        facets.intern_repo("");
+        facets.intern_repo("rules_foo+1.2.3");
+        facets.intern_repo("rules_foo++ext+gen");
+        facets.intern_apparent_repo("crates");
+
+        let written = WrittenRepos::of(&facets);
+
+        assert_eq!(
+            written.written_label("@@rules_foo+1.2.3//bar:lib"),
+            "@rules_foo//bar:lib"
+        );
+        assert_eq!(written.written_label("//foo:app"), "//foo:app");
+        assert_eq!(
+            written.written_label("@@rules_foo++ext+gen//bar:lib"),
+            "@@rules_foo++ext+gen//bar:lib"
+        );
+        assert_eq!(
+            written.written_label("@crates//serde:lib"),
+            "@crates//serde:lib"
+        );
+        assert_eq!(written.written_label("action7"), "action7");
     }
 
     /// A name two repositories would be written by says which of them a reader

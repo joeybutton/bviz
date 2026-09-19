@@ -90,6 +90,9 @@ impl Act {
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub(crate) struct Match {
     pub(crate) target: Id,
+    /// The label as a reader writes it, which is how the same target's box is
+    /// captioned; the pattern is matched and the target pinned by the canonical
+    /// form instead.
     pub(crate) label: String,
 }
 
@@ -265,7 +268,7 @@ fn matched(index: &LabelIndex, pattern: &Pattern) -> Found {
         if sample.len() < PREVIEW {
             sample.push(Match {
                 target,
-                label: label.to_string(),
+                label: index.written(label).into_owned(),
             });
         }
     }
@@ -522,7 +525,8 @@ mod tests {
     use bviz_graph_layout::{Facets, Kind, Names};
 
     /// A graph of one target per package, in packages enough that the matches
-    /// run well past the sample the result list holds.
+    /// run well past the sample the result list holds, plus one target of a
+    /// module repository, which a reader writes by the module name.
     struct Fixture {
         graph: Graph,
         names: Names,
@@ -547,6 +551,7 @@ mod tests {
                 describe(&format!("//deep/pkg{i}:lib"), ":lib");
             }
             describe("//app:main", ":main");
+            describe("@@rules_foo+//bar:lib", ":lib");
             let (facets, _) = builder.seal();
             Fixture {
                 graph,
@@ -605,13 +610,36 @@ mod tests {
         assert_eq!(fixture.shown(&filter).len(), DEEP);
     }
 
+    /// A row names a box of the drawing, so it reads the name that box is
+    /// captioned by; what the row pins is the target the canonical label
+    /// identifies.
+    #[test]
+    fn a_result_row_reads_the_label_as_a_reader_writes_it() {
+        let fixture = Fixture::new();
+        let found = matched(&fixture.index(), &pattern("@rules_foo//..."));
+
+        assert_eq!(
+            found.sample,
+            [Match {
+                target: fixture
+                    .names
+                    .get("target:@@rules_foo+//bar:lib")
+                    .expect("the module repository's target"),
+                label: "@rules_foo//bar:lib".to_string(),
+            }]
+        );
+    }
+
     #[test]
     fn hiding_the_matches_leaves_every_other_node_drawn() {
         let fixture = Fixture::new();
         let filter = applying(&Filter::default(), &pattern("//deep/..."), Act::Hide);
 
         assert_eq!(filter.base, Base::ShowAll);
-        assert_eq!(fixture.shown(&filter), ["target://app:main"]);
+        assert_eq!(
+            fixture.shown(&filter),
+            ["target://app:main", "target:@@rules_foo+//bar:lib"]
+        );
     }
 
     /// Every rule but the search's own belongs to another control, so a search

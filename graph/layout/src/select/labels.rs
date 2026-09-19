@@ -6,6 +6,7 @@ use crate::graph::Graph;
 use crate::intern::{Id, Names};
 use crate::label::target_node_label;
 use crate::select::pattern::Pattern;
+use std::borrow::Cow;
 
 /// The canonical label of the target the node `id` belongs to, which for a
 /// target is its own; `None` for a node belonging to none.
@@ -50,6 +51,11 @@ impl LabelIndex {
 
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
+    }
+
+    /// The canonical label `label` as a reader writes it.
+    pub fn written<'a>(&self, label: &'a str) -> Cow<'a, str> {
+        self.repos.written_label(label)
     }
 
     /// The targets `pattern` names, by label.
