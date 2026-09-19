@@ -8,6 +8,7 @@
 
 use crate::rules::{self, Term, Value};
 use crate::{GraphPanel, derive, preset};
+use bviz_graph_layout::facets::WrittenRepos;
 use bviz_graph_layout::graph::Graph;
 use bviz_graph_layout::repo::{RepoCategory, RepoName};
 use bviz_graph_layout::select::Filter;
@@ -98,11 +99,12 @@ pub(crate) enum OriginRow {
 /// a second row would say the same thing twice.
 pub(crate) fn carried_origins(facets: &Facets) -> Vec<OriginRow> {
     let strings = facets.strings();
+    let written = WrittenRepos::of(facets);
     let mut repos: Vec<Repository> = facets
         .repos()
         .map(|(repo, entry)| Repository {
             name: entry.name().map(|name| strings.resolve(name).to_string()),
-            label: facets.repo_written(repo),
+            label: written.written(repo).to_string(),
             origin: entry.origin().category(),
         })
         .collect();

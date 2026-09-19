@@ -12,7 +12,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use bazel_query_proto::blaze_query::{Target, target::Discriminator};
 
-use crate::facets::{Facets, FacetsBuilder, RepoRef};
+use crate::facets::{Facets, FacetsBuilder, RepoRef, WrittenRepos};
 use crate::graph::{Graph, Kind, Node};
 use crate::intern::{Id, Names};
 use crate::repo::RepoName;
@@ -398,6 +398,7 @@ fn repo_prefix(repo: &str) -> String {
 /// only be written once every input has been read, since which name a
 /// repository is reached by is whatever one of them printed.
 pub(crate) fn show_written_repositories(graph: &mut Graph, facets: &Facets) {
+    let written = WrittenRepos::of(facets);
     for node in &mut graph.nodes {
         if node.kind != Kind::Package || node.parent.is_some() {
             continue;
@@ -406,7 +407,7 @@ pub(crate) fn show_written_repositories(graph: &mut Graph, facets: &Facets) {
             continue;
         };
         if let Some((_, path)) = node.label.split_once("//") {
-            node.label = format!("{}{path}", repo_prefix(&facets.repo_written(repo)));
+            node.label = format!("{}{path}", repo_prefix(written.written(repo)));
         }
     }
 }

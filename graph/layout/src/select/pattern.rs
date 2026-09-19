@@ -12,57 +12,10 @@
 //! repository only through the [`WrittenRepos`] of the graph being matched.
 
 use std::borrow::Cow;
-use std::collections::HashMap;
 
-use crate::facets::Facets;
+use crate::facets::WrittenRepos;
 use crate::label::encloses;
-use crate::repo::{RepoName, module_name};
-
-/// The apparent repository names one graph's inputs wrote, by the canonical name
-/// each stands for.
-///
-/// A pattern's repository part reaches a repository by its canonical name and by
-/// the module name that name encodes without any of this, since both follow from
-/// a label; an apparent name follows from neither and is known only from what the
-/// inputs printed. An apparent name several repositories were written by stands
-/// for none of them, as it does when a label is canonicalized. A repository an
-/// apparent name identifies is already reached by that name, which its labels
-/// carry, so only a repository named canonically is held here.
-#[derive(Default, Clone)]
-pub struct WrittenRepos(HashMap<String, String>);
-
-impl WrittenRepos {
-    pub fn of(facets: &Facets) -> Self {
-        let mut candidates: HashMap<&str, Option<&str>> = HashMap::new();
-        for (_, entry) in facets.repos() {
-            let (RepoName::Canonical(canonical), Some(apparent)) = (entry.name(), entry.apparent())
-            else {
-                continue;
-            };
-            let canonical = facets.strings().resolve(canonical);
-            candidates
-                .entry(facets.strings().resolve(apparent))
-                .and_modify(|resolved| {
-                    if *resolved != Some(canonical) {
-                        *resolved = None;
-                    }
-                })
-                .or_insert(Some(canonical));
-        }
-        WrittenRepos(
-            candidates
-                .into_iter()
-                .filter_map(|(apparent, resolved)| {
-                    Some((apparent.to_string(), resolved?.to_string()))
-                })
-                .collect(),
-        )
-    }
-
-    fn canonical(&self, written: &str) -> Option<&str> {
-        self.0.get(written).map(String::as_str)
-    }
-}
+use crate::repo::module_name;
 
 /// A pattern a node's canonical label is selected by.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -298,6 +251,7 @@ fn segments_match(pattern: &[Segment], path: &[&str]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::facets::Facets;
 
     fn segments(pattern: &Pattern) -> &[Segment] {
         match pattern {
@@ -499,6 +453,31 @@ mod tests {
 
         assert!(!pattern.resolved(&written).matches("@@one+//src:lib"));
         assert!(!pattern.resolved(&written).matches("@@two+//src:lib"));
+    }
+
+    /// A repository is drawn and listed under the name it is written by, so
+    /// that name has to be one a reader can type: an apparent name two
+    /// repositories share leaves each written by the canonical name it is
+    /// identified by, and a pattern reaches a repository by either.
+    #[test]
+    fn a_repository_is_reached_by_the_name_it_is_written_by() {
+        let mut facets = Facets::default();
+        let one = facets.intern_repo("one+", Some("shared"));
+        let two = facets.intern_repo("two+", Some("shared"));
+        let renamed = facets.intern_repo("protobuf+", Some("com_google_protobuf"));
+        let written = WrittenRepos::of(&facets);
+
+        let reaches = |repo, label| {
+            Pattern::parse(&format!("{}//...", written.written(repo)))
+                .resolved(&written)
+                .matches(label)
+        };
+        assert_eq!(written.written(one), "@@one+");
+        assert!(reaches(one, "@@one+//src:lib"));
+        assert!(!reaches(one, "@@two+//src:lib"));
+        assert!(reaches(two, "@@two+//src:lib"));
+        assert_eq!(written.written(renamed), "@com_google_protobuf");
+        assert!(reaches(renamed, "@@protobuf+//src:lib"));
     }
 
     #[test]

@@ -4,11 +4,10 @@
 //! scanned, so that a term over strings becomes a set of handles or a column
 //! read by id and testing one node costs a few integer lookups.
 
-use crate::facets::{Facets, RepoRef, SparseFacet, Sym, Tri};
+use crate::facets::{Facets, RepoRef, SparseFacet, Sym, Tri, WrittenRepos};
 use crate::graph::{Graph, Kind, Node};
 use crate::intern::{Id, Names};
 use crate::label;
-use crate::select::pattern::WrittenRepos;
 use crate::select::{Aspects, Filter, Predicate, Rule, Values, Visibility, stating};
 
 impl Filter {

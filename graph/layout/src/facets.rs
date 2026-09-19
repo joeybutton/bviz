@@ -618,33 +618,6 @@ impl Facets {
             .map(|name| self.strings.resolve(name))
     }
 
-    /// The repository part a reader writes `repo` by, sigil and all: the
-    /// apparent name an input wrote for it, and failing that the name of the
-    /// module whose repository it is, since `@rules_foo` is how that repository
-    /// is written before a repository mapping resolves the name. A repository
-    /// stating neither is written by its canonical name, and the main
-    /// repository, whose labels carry no repository part, by nothing at all.
-    pub fn repo_written(&self, repo: RepoRef) -> String {
-        let (canonical, written) = match *self.repo_entry(repo) {
-            RepoEntry::Apparent { name } => {
-                return format!("@{}", self.strings.resolve(name));
-            }
-            RepoEntry::Canonical {
-                name,
-                apparent,
-                module,
-                ..
-            } => (name, apparent.or(module)),
-        };
-        match written {
-            Some(name) => format!("@{}", self.strings.resolve(name)),
-            None => match self.strings.resolve(canonical) {
-                "" => String::new(),
-                canonical => format!("@@{canonical}"),
-            },
-        }
-    }
-
     pub fn config_entry(&self, config: ConfigRef) -> Option<&ConfigEntry> {
         self.configs.get(&config)
     }
@@ -654,7 +627,7 @@ impl Facets {
     }
 
     /// Every repository the nodes name, in the order they were first named.
-    pub fn repos(&self) -> impl Iterator<Item = (RepoRef, &RepoEntry)> {
+    pub fn repos(&self) -> impl ExactSizeIterator<Item = (RepoRef, &RepoEntry)> {
         self.repos
             .iter()
             .enumerate()
@@ -697,6 +670,88 @@ impl Facets {
             RepoOrigin::Builtin => Origin::Builtin,
             RepoOrigin::WorkspaceOrUnknown => Origin::WorkspaceOrUnknown,
         }
+    }
+}
+
+/// The repository part a reader writes each of one graph's repositories by,
+/// sigil and all, which is both the name drawn for it and the name a pattern
+/// reaches it by.
+///
+/// A repository is written by the apparent name an input wrote for it, and
+/// failing that by the name of the module whose repository it is, since
+/// `@rules_foo` is how that repository is written before a repository mapping
+/// resolves the name. A name several repositories would be written by says
+/// which of them a reader means no more than a dump says which one an apparent
+/// name reaches, so each of those holding a canonical name is written by that
+/// instead. The main repository, whose labels carry no repository part, is
+/// written by nothing at all.
+#[derive(Default, Clone)]
+pub struct WrittenRepos {
+    /// The name each repository is written by, at the position its [`RepoRef`]
+    /// names.
+    written: Vec<String>,
+    /// The canonical name an apparent name written here stands for, which is
+    /// the name labels carry.
+    canonical: HashMap<String, String>,
+}
+
+impl WrittenRepos {
+    pub fn of(facets: &Facets) -> Self {
+        let mut claims: HashMap<Sym, usize> = HashMap::with_capacity(facets.repos().len());
+        for (_, entry) in facets.repos() {
+            if let Some(name) = written_apparently(entry) {
+                *claims.entry(name).or_default() += 1;
+            }
+        }
+        let mut repos = WrittenRepos {
+            written: Vec::with_capacity(facets.repos().len()),
+            canonical: HashMap::new(),
+        };
+        let resolve = |name: Sym| facets.strings().resolve(name);
+        for (_, entry) in facets.repos() {
+            let unshared = written_apparently(entry).filter(|name| claims[name] == 1);
+            repos.written.push(match (entry.name(), unshared) {
+                // The name identifying a repository is the only one its labels
+                // carry, so it is written by that even where another repository
+                // is written alike.
+                (RepoName::Apparent(name), _) => format!("@{}", resolve(name)),
+                (RepoName::Canonical(canonical), Some(apparent)) => {
+                    repos.canonical.insert(
+                        resolve(apparent).to_string(),
+                        resolve(canonical).to_string(),
+                    );
+                    format!("@{}", resolve(apparent))
+                }
+                (RepoName::Canonical(canonical), None) => match resolve(canonical) {
+                    "" => String::new(),
+                    canonical => format!("@@{canonical}"),
+                },
+            });
+        }
+        repos
+    }
+
+    /// The name `repo` is written by.
+    pub fn written(&self, repo: RepoRef) -> &str {
+        &self.written[repo.index()]
+    }
+
+    /// The canonical name the repository written `written` carries in its
+    /// labels, or `None` where that name is what its labels already carry.
+    pub fn canonical(&self, written: &str) -> Option<&str> {
+        self.canonical.get(written).map(String::as_str)
+    }
+}
+
+/// The name a repository is written by short of a canonical one: the apparent
+/// name an input wrote for it, the module name its canonical name encodes, or
+/// the apparent name identifying it.
+fn written_apparently(entry: &RepoEntry) -> Option<Sym> {
+    match *entry {
+        RepoEntry::Canonical {
+            apparent, module, ..
+        } => apparent.or(module),
+        RepoEntry::Apparent { name } => Some(name),
     }
 }
 
@@ -1063,7 +1118,6 @@ mod tests {
         let entry = *facets.repo_entry(repo);
         assert_eq!(entry.origin(), Origin::WorkspaceOrUnknown);
         assert_eq!(entry.module(), None);
-        assert_eq!(facets.repo_written(repo), "@rules_foo");
     }
 
     #[test]
@@ -1091,11 +1145,35 @@ mod tests {
         let module = facets.intern_repo("rules_foo+", None);
         let renamed = facets.intern_repo("rules_bar+", Some("bar"));
         let generated = facets.intern_repo("rules_foo++ext+gen", None);
+        let named_apparently = facets.intern_apparent_repo("crates");
 
-        assert_eq!(facets.repo_written(main), "");
-        assert_eq!(facets.repo_written(module), "@rules_foo");
-        assert_eq!(facets.repo_written(renamed), "@bar");
-        assert_eq!(facets.repo_written(generated), "@@rules_foo++ext+gen");
+        let written = WrittenRepos::of(&facets);
+
+        assert_eq!(written.written(main), "");
+        assert_eq!(written.written(module), "@rules_foo");
+        assert_eq!(written.written(renamed), "@bar");
+        assert_eq!(written.written(generated), "@@rules_foo++ext+gen");
+        assert_eq!(written.written(named_apparently), "@crates");
+    }
+
+    /// A name two repositories would be written by says which of them a reader
+    /// means no more than a dump does, so each falls back to the canonical name
+    /// identifying it. A repository an apparent name identifies has no name to
+    /// fall back on and keeps that one, which its labels carry outright.
+    #[test]
+    fn a_name_two_repositories_would_be_written_by_is_written_by_neither() {
+        let mut facets = Facets::default();
+        let one = facets.intern_repo("one+", Some("shared"));
+        let two = facets.intern_repo("two+", Some("shared"));
+        let module = facets.intern_repo("rules_foo+", None);
+        let named_apparently = facets.intern_apparent_repo("rules_foo");
+
+        let written = WrittenRepos::of(&facets);
+
+        assert_eq!(written.written(one), "@@one+");
+        assert_eq!(written.written(two), "@@two+");
+        assert_eq!(written.written(module), "@@rules_foo+");
+        assert_eq!(written.written(named_apparently), "@rules_foo");
     }
 
     #[test]

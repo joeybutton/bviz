@@ -1,11 +1,11 @@
 //! The canonical labels one graph's nodes belong to, gathered so that a
 //! [`Pattern`] is matched over each label once however many nodes carry it.
 
-use crate::facets::Facets;
+use crate::facets::{Facets, WrittenRepos};
 use crate::graph::Graph;
 use crate::intern::{Id, Names};
 use crate::label::target_node_label;
-use crate::select::pattern::{Pattern, WrittenRepos};
+use crate::select::pattern::Pattern;
 
 /// The canonical label of the target the node `id` belongs to, which for a
 /// target is its own; `None` for a node belonging to none.
