@@ -1,8 +1,8 @@
 use crate::panel::numbered;
 use crate::{AnyPanel, Panel, PanelGroup, ViewKind, Workspace};
 use gpui::{
-    App, AppContext, Context, Entity, EntityId, Global, SharedString, Subscription, WeakEntity,
-    Window,
+    App, AppContext, Context, Entity, EntityId, EventEmitter, Global, SharedString, Subscription,
+    WeakEntity, Window,
 };
 use std::num::NonZeroUsize;
 use std::rc::Rc;
@@ -92,10 +92,26 @@ pub struct OpenView {
 pub struct Documents {
     next: u64,
     documents: Vec<Registered>,
-    /// The workspace framing each open window, weakly held so one whose window
-    /// has closed drops out rather than being re-shown into.
-    windows: Vec<WeakEntity<Workspace>>,
+    /// The session's open windows, in the order they opened.
+    windows: Vec<OpenWindow>,
 }
+
+/// A window the session holds open, named by the workspace framing it. A
+/// workspace belongs to the window it is the root view of, so it is named
+/// weakly here rather than held alive by the registry. The subscription drops
+/// this record when that workspace is released, and is the one writer that
+/// drops it, so no closed window is offered as a place to show a view or to
+/// move a panel to.
+struct OpenWindow {
+    workspace: WeakEntity<Workspace>,
+    _closed: Subscription,
+}
+
+/// That the session has opened or closed a window, so where the panels of the
+/// windows still open can be moved to has changed.
+pub(crate) struct WindowsChanged;
+
+impl EventEmitter<WindowsChanged> for Documents {}
 
 struct Registered {
     id: DocumentId,
@@ -267,11 +283,32 @@ impl Documents {
         Some(PanelGroup::stack(first, stacked.collect()))
     }
 
-    /// Takes `workspace` as a place a view can be shown, for as long as the
-    /// window it frames is open.
-    pub(crate) fn watch_workspace(&mut self, workspace: WeakEntity<Workspace>) {
-        self.windows.retain(|window| window.upgrade().is_some());
-        self.windows.push(workspace);
+    /// Takes `workspace` as a place a view can be shown and a panel can be
+    /// moved to, for as long as the window it frames is open.
+    pub(crate) fn watch_workspace(
+        &mut self,
+        workspace: &Entity<Workspace>,
+        cx: &mut Context<Self>,
+    ) {
+        let opened = workspace.entity_id();
+        let closed = cx.observe_release(workspace, move |documents, _, cx| {
+            documents
+                .windows
+                .retain(|held| held.workspace.entity_id() != opened);
+            cx.emit(WindowsChanged);
+        });
+        self.windows.push(OpenWindow {
+            workspace: workspace.downgrade(),
+            _closed: closed,
+        });
+        cx.emit(WindowsChanged);
+    }
+
+    /// Whether the session holds a window open besides the one `workspace`
+    /// frames.
+    pub(crate) fn holds_another_window(&self, workspace: EntityId) -> bool {
+        self.open_windows()
+            .any(|held| held.entity_id() != workspace)
     }
 
     /// Brings `panel` forward where `into` holds it, and otherwise moves it
@@ -380,8 +417,14 @@ impl Documents {
     /// windows opened.
     pub(crate) fn workspaces(&self) -> Vec<Entity<Workspace>> {
         let mut open = Vec::with_capacity(self.windows.len());
-        open.extend(self.windows.iter().filter_map(WeakEntity::upgrade));
+        open.extend(self.open_windows());
         open
+    }
+
+    fn open_windows(&self) -> impl Iterator<Item = Entity<Workspace>> {
+        self.windows
+            .iter()
+            .filter_map(|held| held.workspace.upgrade())
     }
 }
 

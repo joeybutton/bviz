@@ -4,7 +4,7 @@ use crate::pane::Handover;
 use crate::panel_menu::{Deed, Standing};
 use crate::{
     AnyPanel, Arrangement, DividerId, Document, Documents, Framing, Layout, Maximize, Pane,
-    PaneEvent, PanelGroup, Removal, Side, Split, SplitSide, drop, panel_menu,
+    PaneEvent, PanelGroup, Removal, Side, Split, SplitSide, WindowsChanged, drop, panel_menu,
 };
 use bviz_ui_components::{Divider, DragEnd, Menu, MenuEvent, overlay_canvas, track_drag};
 use bviz_ui_shell::Chrome;
@@ -223,6 +223,9 @@ pub struct Workspace {
     panel_drag: Option<PanelDrag>,
     /// The menu a panel was asked for, while it stands.
     panel_menu: Option<PanelMenu>,
+    /// Draws the window afresh as the session's windows open and close, which
+    /// changes where a panel of this one can be carried to.
+    _windows_changed: Subscription,
 }
 
 impl Workspace {
@@ -237,7 +240,9 @@ impl Workspace {
         let (layout, panes) = framed_panes(group, window, cx);
         let active = layout.first_pane().clone();
         let this = cx.weak_entity();
-        let documents_menu = cx.new(|cx| DocumentsMenu::new(this.clone(), window, cx));
+        let documents_menu = cx.new(|cx| DocumentsMenu::new(this, window, cx));
+        let documents = Documents::global(cx);
+        let windows_changed = cx.subscribe(&documents, |_, _, _: &WindowsChanged, cx| cx.notify());
         let mut workspace = Self {
             app_name: app_name.into(),
             window_focus: cx.focus_handle(),
@@ -250,11 +255,15 @@ impl Workspace {
             divider_drag: None,
             panel_drag: None,
             panel_menu: None,
+            _windows_changed: windows_changed,
         };
         for pane in panes {
             workspace.watch(&pane, window, cx);
         }
-        Documents::global(cx).update(cx, |documents, _| documents.watch_workspace(this));
+        let framed = cx.entity();
+        documents.update(cx, |documents, cx| {
+            documents.watch_workspace(&framed, cx);
+        });
         // Every pane took focus as it was built, so the last one built holds it;
         // the window opens on the leading panel instead.
         let panel = workspace.active_panel(cx);
@@ -975,14 +984,16 @@ impl Workspace {
     /// Tells every pane how the window frames it. The arrangement is the
     /// workspace's to know, and a frame draws a window from its root, so every
     /// pane hears this before it draws itself.
-    fn tell_panes_how_they_are_framed(&self, cx: &mut App) {
+    fn tell_panes_how_they_are_framed(&self, cx: &mut Context<Self>) {
+        let here = cx.entity_id();
+        let elsewhere = Documents::global(cx).read(cx).holds_another_window(here);
         let layout = self.arrangement.layout();
         let lone = layout.panes().nth(1).is_none();
         for pane in layout.panes() {
             let framing = if self.arrangement.maximized() == Some(pane) {
                 Framing::Maximized
             } else if lone {
-                Framing::Lone
+                Framing::Lone { elsewhere }
             } else {
                 Framing::Beside
             };

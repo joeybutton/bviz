@@ -30,11 +30,13 @@ const RESTORE_ICON: &str = "arrows-in";
 const MENU_ICON: &str = "dots-three-vertical";
 
 /// How a window frames a pane, as its workspace last laid the arrangement out.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum Framing {
     /// The window lays out no pane besides this one, so this one has the
-    /// window's body to itself.
-    Lone,
+    /// window's body to itself. `elsewhere` tells whether the session holds
+    /// another window open, which is the only place left to carry a panel this
+    /// pane holds alone.
+    Lone { elsewhere: bool },
     /// The window lays other panes out beside this one.
     Beside,
     /// The window draws this pane in place of the whole arrangement, holding
@@ -116,7 +118,7 @@ impl Pane {
                 _events: events,
             }],
             active: 0,
-            framing: Framing::Lone,
+            framing: Framing::Lone { elsewhere: false },
             restore_clicked: false,
             tab_bounds: Vec::new(),
         };
@@ -597,6 +599,16 @@ fn title(panel: &AnyPanel, cx: &App) -> Div {
         )
 }
 
+/// Whether a pane holding `tabs` panels, framed as `framing`, names them: a tab
+/// strip where it holds several, and a handle where the one it holds could be
+/// carried somewhere else — to another pane of its window, or to another of the
+/// session's windows. The one panel of a window's one pane with nowhere to go
+/// is the window itself: nothing to pick between and nothing to carry it to, so
+/// anything drawn over it would only take room from it.
+fn names_its_panels(tabs: usize, framing: Framing) -> bool {
+    tabs > 1 || !matches!(framing, Framing::Lone { elsewhere: false })
+}
+
 /// Which of the `remaining` tabs a pane shows once the tab at `removed` has left
 /// it and the tab at `showing` was the one on show: the tab that moves up into
 /// the gap, or the last tab where the gap is past the end; and otherwise the
@@ -612,10 +624,7 @@ fn showing_after(showing: usize, removed: usize, remaining: usize) -> usize {
 impl Render for Pane {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let body = self.active_panel().view();
-        // The window's one pane holding its one panel is that panel: nothing to
-        // pick between and nothing to tell it apart from, so anything drawn over
-        // it would only take room from it.
-        if self.tabs.len() == 1 && self.framing == Framing::Lone {
+        if !names_its_panels(self.tabs.len(), self.framing) {
             self.tab_bounds.clear();
             return body.into_any_element();
         }
@@ -644,6 +653,37 @@ impl Render for Pane {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Several panels are picked between by their tabs, wherever the window
+    /// lays the pane holding them out.
+    #[test]
+    fn a_pane_holding_several_panels_names_them_however_it_is_framed() {
+        for framing in [
+            Framing::Lone { elsewhere: false },
+            Framing::Lone { elsewhere: true },
+            Framing::Beside,
+            Framing::Maximized,
+        ] {
+            assert!(names_its_panels(2, framing), "{framing:?}");
+        }
+    }
+
+    /// A lone panel is named by the handle that carries it wherever it could
+    /// go: to another pane of its window, or to another of the session's
+    /// windows.
+    #[test]
+    fn a_lone_panel_is_named_wherever_it_could_be_carried() {
+        assert!(names_its_panels(1, Framing::Beside));
+        assert!(names_its_panels(1, Framing::Maximized));
+        assert!(names_its_panels(1, Framing::Lone { elsewhere: true }));
+    }
+
+    /// The one panel of the one pane of the session's one window has nowhere to
+    /// be carried to, so nothing is drawn over it.
+    #[test]
+    fn the_lone_panel_of_a_lone_window_is_named_by_nothing() {
+        assert!(!names_its_panels(1, Framing::Lone { elsewhere: false }));
+    }
 
     /// The panel handed over is the one on show, so the tab left showing is the
     /// one that moves up into the gap it leaves.
