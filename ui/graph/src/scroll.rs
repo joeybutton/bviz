@@ -192,6 +192,7 @@ pub(crate) fn start_scroll_drag(
 pub(crate) fn scroll_drag_move(
     view: &mut GraphPanel,
     position: Point<Pixels>,
+    _window: &mut Window,
     cx: &mut Context<GraphPanel>,
 ) {
     let Drag::Scrollbar(drag) = view.drag else {

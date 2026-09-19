@@ -26,11 +26,12 @@ pub enum DragEnd {
 /// Call this from an element's `paint` (or a `canvas` paint closure) while the
 /// drag is active. The handlers serve every event until the next paint replaces
 /// them, which may never come; a latch retires them once the drag has ended.
-/// Both callbacks receive the cursor position in window coordinates.
+/// Both callbacks receive the cursor position in window coordinates and the
+/// window the press landed in.
 pub fn track_drag<V: 'static>(
     window: &mut Window,
     view: &Entity<V>,
-    on_move: impl Fn(&mut V, Point<Pixels>, &mut Context<V>) + 'static,
+    on_move: impl Fn(&mut V, Point<Pixels>, &mut Window, &mut Context<V>) + 'static,
     on_end: impl Fn(&mut V, Point<Pixels>, DragEnd, &mut Window, &mut Context<V>) + 'static,
 ) {
     let on_end = Rc::new(on_end);
@@ -44,7 +45,7 @@ pub fn track_drag<V: 'static>(
             return;
         }
         if event.dragging() {
-            moving.update(cx, |view, cx| on_move(view, event.position, cx));
+            moving.update(cx, |view, cx| on_move(view, event.position, window, cx));
         } else {
             move_ended.set(true);
             moving.update(cx, |view, cx| {

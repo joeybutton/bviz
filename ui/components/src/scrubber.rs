@@ -119,7 +119,7 @@ pub fn scrubber<V: 'static>(
                         track_drag(
                             window,
                             &entity,
-                            move |view, position, cx| {
+                            move |view, position, _, cx| {
                                 if let Some(geom) = move_slot(view).track {
                                     let fraction = geom.fraction_at(f32::from(position.x));
                                     move_scrub(view, fraction, cx);

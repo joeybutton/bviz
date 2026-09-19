@@ -645,7 +645,12 @@ fn stats_scrollbar(
 }
 
 /// Routes an in-progress thumb drag to the list's scroll offset.
-fn stats_on_drag(panel: &mut StatsPanel, position: Point<Pixels>, cx: &mut Context<StatsPanel>) {
+fn stats_on_drag(
+    panel: &mut StatsPanel,
+    position: Point<Pixels>,
+    _window: &mut Window,
+    cx: &mut Context<StatsPanel>,
+) {
     if let StatsDrag::Thumb(grab) = panel.drag {
         panel.thumb_to(position, grab);
     }

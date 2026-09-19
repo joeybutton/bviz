@@ -725,7 +725,12 @@ impl Element for RegionOverlays {
 /// Routes an in-progress drag to its target: resizing the counters strip or the
 /// gutter. The flame-chart timeline's, flame-graph panel's, and tracks menu's own
 /// drags are routed inside [`Timeline`], [`FlamePanel`], and [`TracksMenu`].
-fn on_drag(view: &mut TracePanel, position: Point<Pixels>, cx: &mut Context<TracePanel>) {
+fn on_drag(
+    view: &mut TracePanel,
+    position: Point<Pixels>,
+    _window: &mut Window,
+    cx: &mut Context<TracePanel>,
+) {
     match view.drag {
         Drag::Divider(mut grab) => {
             let vp = view.timeline.read(cx).viewport();

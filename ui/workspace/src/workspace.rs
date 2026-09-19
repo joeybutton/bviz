@@ -1404,7 +1404,7 @@ fn panel_drag_handlers(cx: &mut Context<Workspace>) -> Canvas<()> {
         track_drag(
             window,
             &workspace,
-            |workspace, at, cx| workspace.drag_panel(at, cx),
+            |workspace, at, _, cx| workspace.drag_panel(at, cx),
             |workspace, at, end, window, cx| match end {
                 DragEnd::Released => workspace.drop_panel(at, window, cx),
                 // An abandoned gesture reports only where the cursor was, not
@@ -1558,7 +1558,7 @@ fn divider_drag(
         track_drag(
             window,
             &workspace,
-            move |workspace, position, cx| {
+            move |workspace, position, _, cx| {
                 if let Some(share) = grabbed_share(bounds, position, axis, boundary, boundaries) {
                     workspace.move_divider(id, share, cx);
                 }

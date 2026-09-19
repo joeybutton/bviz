@@ -297,7 +297,12 @@ fn scrollbar(panel: Entity<GraphPanel>, dragging: bool, palette: Palette) -> imp
     })
 }
 
-fn on_drag(view: &mut GraphPanel, position: Point<Pixels>, cx: &mut Context<GraphPanel>) {
+fn on_drag(
+    view: &mut GraphPanel,
+    position: Point<Pixels>,
+    _window: &mut Window,
+    cx: &mut Context<GraphPanel>,
+) {
     if let Some(grab) = view.pins.thumb_grab {
         view.pins.thumb_to(position, grab);
     }

@@ -578,7 +578,12 @@ fn menu_scrollbar(
 }
 
 /// Routes an in-progress thumb drag to the list's scroll offset.
-fn menu_on_drag(menu: &mut TracksMenu, position: Point<Pixels>, cx: &mut Context<TracksMenu>) {
+fn menu_on_drag(
+    menu: &mut TracksMenu,
+    position: Point<Pixels>,
+    _window: &mut Window,
+    cx: &mut Context<TracksMenu>,
+) {
     if let MenuDrag::Thumb(grab) = menu.drag {
         menu.thumb_to(position, grab);
     }

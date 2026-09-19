@@ -943,7 +943,12 @@ impl Render for Timeline {
 
 /// Routes an in-progress timeline drag to its target: panning the chart, moving
 /// a scroll thumb, or stretching a time region.
-fn timeline_on_drag(timeline: &mut Timeline, position: Point<Pixels>, cx: &mut Context<Timeline>) {
+fn timeline_on_drag(
+    timeline: &mut Timeline,
+    position: Point<Pixels>,
+    _window: &mut Window,
+    cx: &mut Context<Timeline>,
+) {
     let moves_slices = !matches!(timeline.drag, TimelineDrag::TimeRegion(_));
     match timeline.drag {
         TimelineDrag::Pan => {

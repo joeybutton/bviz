@@ -47,6 +47,7 @@ pub(crate) fn start_pan(
 pub(crate) fn drag_pan(
     view: &mut GraphPanel,
     position: Point<Pixels>,
+    _window: &mut Window,
     cx: &mut Context<GraphPanel>,
 ) {
     let Drag::Pan(mut pan) = view.drag else {

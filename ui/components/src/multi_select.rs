@@ -655,7 +655,12 @@ fn list_scrollbar(
     })
 }
 
-fn on_drag(control: &mut MultiSelect, position: Point<Pixels>, cx: &mut Context<MultiSelect>) {
+fn on_drag(
+    control: &mut MultiSelect,
+    position: Point<Pixels>,
+    _window: &mut Window,
+    cx: &mut Context<MultiSelect>,
+) {
     if let Some(grab) = control.thumb_grab {
         control.thumb_to(position, grab);
     }
