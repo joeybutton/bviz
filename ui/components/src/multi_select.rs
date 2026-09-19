@@ -13,6 +13,7 @@ use gpui::{
     IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, Pixels, Point, Render, Rgba,
     ScrollHandle, SharedString, Subscription, Window, deferred, div, point, prelude::*, px, size,
 };
+use std::collections::HashSet;
 use std::ops::Range;
 
 /// How tall the menu's row list grows before it scrolls. A facet can carry
@@ -23,6 +24,12 @@ const MENU_MAX_HEIGHT: Pixels = px(320.);
 /// A canonical repository name can run far wider than anything else a menu
 /// holds, and the menu is a transient sheet over the content it acts on.
 const MENU_LABEL_MAX_SHARE: f32 = 0.5;
+
+/// How many rows a group may run to — its own row and the values under it — and
+/// still be listed when the menu is first stated over it, which is about as many
+/// as the bounded list shows at once. A longer group has to be scrolled past
+/// before the group after it can be read, so it opens folded.
+const GROUP_LISTED_ROWS: usize = 12;
 
 /// One value a [`MultiSelect`] offers.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -76,6 +83,11 @@ struct Rows {
     /// The last measurement over `options`, absent until one is taken and
     /// whenever the options replaced leave it describing labels no row holds.
     measured: Option<Measured>,
+    /// The groups whose values the menu leaves unlisted, by the label of the
+    /// value heading each. Which groups are folded is the menu's own doing and
+    /// says nothing of what is checked, so it outlives the options being
+    /// restated over the same groups.
+    folded: HashSet<SharedString>,
 }
 
 /// The widths a menu's chrome is laid out to.
@@ -122,9 +134,44 @@ impl Rows {
         if self.options == options {
             return false;
         }
+        // Values restated over the groups already listed are the same menu seen
+        // again — a checkmark has moved — and it is left folded as the reader
+        // has it. Other groups are another menu, which opens at its own folds.
+        if !heads(&options).eq(heads(&self.options)) {
+            self.folded = folded_at_rest(&options);
+        }
         self.options = options;
         self.measured = None;
         true
+    }
+
+    /// Whether the group headed by `option` is folded away.
+    fn folds(&self, option: &MultiOption) -> bool {
+        self.folded.contains(&option.label)
+    }
+
+    /// Folds the group headed by the value labelled `head` away, or lists it
+    /// again.
+    fn fold(&mut self, head: SharedString) {
+        if !self.folded.remove(&head) {
+            self.folded.insert(head);
+        }
+    }
+
+    /// Whether any of the values heads a group.
+    fn grouped(&self) -> bool {
+        self.options.iter().any(|option| option.heads_group)
+    }
+
+    /// The rows the menu lists: every value, less those of a folded group.
+    fn listed(&self) -> impl Iterator<Item = (usize, &MultiOption)> {
+        let mut folded = false;
+        self.options.iter().enumerate().filter(move |(_, option)| {
+            if option.heads_group {
+                folded = self.folds(option);
+            }
+            option.heads_group || !folded
+        })
     }
 
     /// What a click on the row at `index` asks of whoever gave the options: the
@@ -146,12 +193,7 @@ impl Rows {
     /// The values the row at `head` heads: that row and the rows after it, up to
     /// the next row heading a group.
     fn group(&self, head: usize) -> Range<usize> {
-        let under = &self.options[head + 1..];
-        let len = under
-            .iter()
-            .position(|option| option.heads_group)
-            .unwrap_or(under.len());
-        head..head + 1 + len
+        group(&self.options, head)
     }
 
     /// How many values are checked, of how many are offered.
@@ -159,6 +201,38 @@ impl Rows {
         let checked = self.options.iter().filter(|option| option.checked).count();
         (checked, self.options.len())
     }
+}
+
+/// The values the row at `head` heads: that row and the rows after it, up to the
+/// next row heading a group.
+fn group(options: &[MultiOption], head: usize) -> Range<usize> {
+    let under = &options[head + 1..];
+    let len = under
+        .iter()
+        .position(|option| option.heads_group)
+        .unwrap_or(under.len());
+    head..head + 1 + len
+}
+
+/// The labels of the values heading a group, in the order they are stated.
+fn heads(options: &[MultiOption]) -> impl Iterator<Item = &SharedString> {
+    options
+        .iter()
+        .filter(|option| option.heads_group)
+        .map(|option| &option.label)
+}
+
+/// The groups a menu stated over `options` folds away until a reader says
+/// otherwise: those holding more values than the list shows at once.
+fn folded_at_rest(options: &[MultiOption]) -> HashSet<SharedString> {
+    options
+        .iter()
+        .enumerate()
+        .filter(|(head, option)| {
+            option.heads_group && group(options, *head).len() > GROUP_LISTED_ROWS
+        })
+        .map(|(_, option)| option.label.clone())
+        .collect()
 }
 
 /// A checklist over a list of values, as a trigger that opens a menu.
@@ -193,6 +267,7 @@ impl MultiSelect {
             id: id.into(),
             label: label.into(),
             rows: Rows {
+                folded: folded_at_rest(&options),
                 options,
                 open: false,
                 measured: None,
@@ -333,6 +408,29 @@ impl MultiSelect {
         )))
     }
 
+    /// The mark folding the group headed by `option` away, or listing it again.
+    fn fold_mark(
+        &self,
+        index: usize,
+        option: &MultiOption,
+        colors: &ThemeColors,
+        cx: &Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let head = option.label.clone();
+        menu::fold(
+            ("multi-select-fold", index).into(),
+            colors,
+            self.rows.folds(option),
+        )
+        // Keep the press off the row behind it, whose own click would toggle
+        // the value that row names.
+        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+            this.rows.fold(head.clone());
+            cx.notify();
+        }))
+    }
+
     /// The pair checking and clearing every value `range` covers, by which a
     /// menu of hundreds is narrowed to the few being looked for.
     fn bulk(
@@ -364,9 +462,7 @@ impl MultiSelect {
     ) -> impl IntoElement + use<> {
         let rows = self
             .rows
-            .options
-            .iter()
-            .enumerate()
+            .listed()
             .map(|(index, option)| self.row(index, option, colors, label_width, cx));
         let list = div()
             .id("multi-select-list")
@@ -401,12 +497,13 @@ impl MultiSelect {
         label_width: Pixels,
         cx: &Context<Self>,
     ) -> impl IntoElement + use<> {
-        // A group holding nothing under the row heading it offers nothing that
-        // row's own checkmark does not.
+        // A row heading a group holding nothing under it has nothing to fold
+        // and nothing its own checkmark does not already act on.
         let group = option
             .heads_group
             .then(|| self.rows.group(index))
             .filter(|group| group.len() > 1);
+        let heads_values = group.is_some();
         menu::row(
             ("multi-select-option", index).into(),
             colors,
@@ -420,6 +517,10 @@ impl MultiSelect {
                 cx.emit(event);
             }
             cx.notify();
+        }))
+        .children(self.rows.grouped().then(|| match heads_values {
+            true => self.fold_mark(index, option, colors, cx).into_any_element(),
+            false => menu::gutter().into_any_element(),
         }))
         .child(menu::check(colors, option.checked))
         .child(menu::reading(label_width, option.label.clone()))
@@ -541,16 +642,24 @@ fn end_drag(
 mod tests {
     use super::*;
 
-    fn rows(checked: [bool; 3]) -> Rows {
+    /// The open menu a control states `options` over.
+    fn listing(options: Vec<MultiOption>) -> Rows {
         Rows {
-            options: checked
+            folded: folded_at_rest(&options),
+            options,
+            open: true,
+            measured: None,
+        }
+    }
+
+    fn rows(checked: [bool; 3]) -> Rows {
+        listing(
+            checked
                 .into_iter()
                 .enumerate()
                 .map(|(i, checked)| MultiOption::new(format!("value {i}"), checked))
                 .collect(),
-            open: true,
-            measured: None,
-        }
+        )
     }
 
     /// The control reports the flip and changes nothing: the checked state it
@@ -599,14 +708,10 @@ mod tests {
     /// it is not on offer, and reports nothing when clicked.
     #[test]
     fn a_click_on_an_unavailable_value_reports_nothing() {
-        let mut rows = Rows {
-            options: vec![MultiOption {
-                available: false,
-                ..MultiOption::new("needs --transitions=lite", false)
-            }],
-            open: true,
-            measured: None,
-        };
+        let mut rows = listing(vec![MultiOption {
+            available: false,
+            ..MultiOption::new("needs --transitions=lite", false)
+        }]);
 
         assert_eq!(rows.clicked(0), None);
     }
@@ -616,18 +721,14 @@ mod tests {
     /// a group of holds one run, which the whole-menu action covers.
     #[test]
     fn a_group_runs_from_its_head_to_the_next() {
-        let grouped = Rows {
-            options: vec![
-                MultiOption::new("loose", true),
-                MultiOption::new("first group", true).heading(),
-                MultiOption::new("under the first", true),
-                MultiOption::new("also under the first", true),
-                MultiOption::new("last group", true).heading(),
-                MultiOption::new("under the last", true),
-            ],
-            open: true,
-            measured: None,
-        };
+        let grouped = listing(vec![
+            MultiOption::new("loose", true),
+            MultiOption::new("first group", true).heading(),
+            MultiOption::new("under the first", true),
+            MultiOption::new("also under the first", true),
+            MultiOption::new("last group", true).heading(),
+            MultiOption::new("under the last", true),
+        ]);
 
         assert_eq!(grouped.group(1), 1..4);
         assert_eq!(grouped.group(4), 4..6);
@@ -636,6 +737,80 @@ mod tests {
         let flat = rows([true, true, true]);
         assert_eq!(flat.all(), 0..3);
         assert_eq!(flat.group(0), 0..3);
+    }
+
+    /// A group of `under` values headed by a row named `head`.
+    fn group_of(head: &str, under: usize) -> Vec<MultiOption> {
+        let mut options = vec![MultiOption::new(head, true).heading()];
+        options.extend((0..under).map(|i| MultiOption::new(format!("{head} {i}"), true)));
+        options
+    }
+
+    fn labels(rows: &Rows) -> Vec<&str> {
+        rows.listed()
+            .map(|(_, option)| option.label.as_ref())
+            .collect()
+    }
+
+    /// A long group buries every group after it, so it opens folded; a short one
+    /// is read at a glance and opens listed.
+    #[test]
+    fn a_group_longer_than_the_list_opens_folded() {
+        let mut options = group_of("short", GROUP_LISTED_ROWS - 1);
+        options.extend(group_of("long", GROUP_LISTED_ROWS));
+        let rows = listing(options);
+
+        assert_eq!(labels(&rows)[..2], ["short", "short 0"]);
+        assert_eq!(*labels(&rows).last().expect("the long group's row"), "long");
+        assert_eq!(labels(&rows).len(), GROUP_LISTED_ROWS + 1);
+    }
+
+    /// Folding a group takes away the values under it and nothing else: the row
+    /// heading it stays, as do the groups around it.
+    #[test]
+    fn folding_a_group_leaves_every_other_group_listed() {
+        let mut options = group_of("first", 2);
+        options.extend(group_of("second", 2));
+        let mut rows = listing(options);
+        assert_eq!(
+            labels(&rows),
+            [
+                "first", "first 0", "first 1", "second", "second 0", "second 1"
+            ]
+        );
+
+        rows.fold("first".into());
+        assert_eq!(labels(&rows), ["first", "second", "second 0", "second 1"]);
+
+        rows.fold("first".into());
+        assert_eq!(labels(&rows).len(), 6);
+    }
+
+    /// A menu restated as a checkmark moves is the menu the reader is looking
+    /// at, so what they folded stays folded; one stated over other groups is
+    /// another menu, which opens at its own folds.
+    #[test]
+    fn a_fold_outlives_the_values_being_restated_over_the_same_groups() {
+        let mut rows = listing(group_of("group", 2));
+        rows.fold("group".into());
+
+        assert!(
+            rows.set_options(
+                group_of("group", 2)
+                    .into_iter()
+                    .map(|option| MultiOption {
+                        checked: false,
+                        ..option
+                    })
+                    .collect()
+            )
+        );
+        assert_eq!(labels(&rows), ["group"]);
+
+        assert!(rows.set_options(group_of("another group", GROUP_LISTED_ROWS)));
+        assert_eq!(labels(&rows), ["another group"]);
+        assert!(rows.set_options(group_of("a third group", 1)));
+        assert_eq!(labels(&rows), ["a third group", "a third group 0"]);
     }
 
     fn style(family: &str, size: f32) -> TextMetrics {

@@ -14,6 +14,10 @@ const MENU_GAP: Pixels = px(2.);
 /// Side of the caret and check marks a menu's chrome draws.
 const MENU_ICON: Pixels = px(12.);
 
+/// Side of the square a group's fold mark is given, wider than the mark itself
+/// so that what folds a group is no harder to hit than what checks it.
+const MENU_FOLD: Pixels = px(18.);
+
 /// Slack added to a measured label width. At the exact measured width, sub-pixel
 /// rounding between measuring and laying out the glyph run can push the longest
 /// label onto a second line.
@@ -145,6 +149,33 @@ pub(crate) fn row(id: ElementId, colors: &ThemeColors, chosen: bool) -> Stateful
         .text_color(colors.text)
         .when(chosen, |row| row.bg(colors.selection))
         .hover(move |style| style.bg(hover))
+}
+
+/// The mark a group's row carries saying whether the values under it are listed
+/// or folded away, which the caller hangs the gesture folding them on.
+pub(crate) fn fold(id: ElementId, colors: &ThemeColors, folded: bool) -> Stateful<Div> {
+    let hover = colors.element_hover;
+    div()
+        .id(id)
+        .size(MENU_FOLD)
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded_sm()
+        .cursor_pointer()
+        .hover(move |mark| mark.bg(hover))
+        .child(
+            bviz_ui_assets::icon(if folded { "caret-right" } else { "caret-down" })
+                .size(MENU_ICON)
+                .text_color(colors.text),
+        )
+}
+
+/// The room a row leaves where it heads no group, so that in a menu holding
+/// groups the values line up under the rows heading them.
+pub(crate) fn gutter() -> Div {
+    div().size(MENU_FOLD).flex_none()
 }
 
 /// The check mark a row carries while the value it names is chosen, and the
