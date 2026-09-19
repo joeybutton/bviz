@@ -54,8 +54,31 @@ enum Reduction {
     /// stands, and shows these again when taken off.
     Adds(Vec<Value>),
     /// Hides on each term exactly the values given and nothing else, and leaves
-    /// each term hiding nothing at all when taken off.
-    States(Vec<(Term, BTreeSet<Value>)>),
+    /// each term hiding nothing at all when taken off. A term is stated by at
+    /// most one preset, or the end it stands at would be settled by whichever
+    /// row was written last rather than by what either label promises.
+    States(Vec<Stated>),
+}
+
+/// One term and the whole of what a preset leaves it hiding.
+struct Stated {
+    term: Term,
+    values: BTreeSet<Value>,
+}
+
+impl Stated {
+    /// `term` left hiding those of `values` that are of it. A value of another
+    /// term names nothing a rule over `term` can hide, so it would read back as
+    /// a difference the preset's own click could never close.
+    fn new(term: Term, values: impl IntoIterator<Item = Value>) -> Self {
+        Stated {
+            term,
+            values: values
+                .into_iter()
+                .filter(|value| value.term() == term)
+                .collect(),
+        }
+    }
 }
 
 /// A reduction offered as one click.
@@ -93,14 +116,11 @@ impl Preset {
             // name, so both have to be stated for the main repository to be the
             // whole of what is drawn.
             Preset::MainRepositoryOnly => Reduction::States(vec![
-                (
+                Stated::new(
                     Term::RepoCategory,
-                    EXTERNAL_ORIGINS
-                        .into_iter()
-                        .map(Value::RepoCategory)
-                        .collect(),
+                    EXTERNAL_ORIGINS.into_iter().map(Value::RepoCategory),
                 ),
-                (Term::Repo, BTreeSet::new()),
+                Stated::new(Term::Repo, []),
             ]),
             Preset::ToolConfigurations => Reduction::Adds(vec![Value::ToolConfiguration]),
             Preset::RunfilesPlumbing => Reduction::Adds(
@@ -189,7 +209,7 @@ pub(crate) fn applied(filter: &Filter, preset: Preset) -> bool {
         Reduction::Adds(values) => values.iter().all(|value| rules::hides(filter, value)),
         Reduction::States(terms) => terms
             .into_iter()
-            .all(|(term, values)| rules::hidden(filter, term) == values),
+            .all(|stated| rules::hidden(filter, stated.term) == stated.values),
     }
 }
 
@@ -207,14 +227,14 @@ pub(crate) fn set_applied(filter: &Filter, preset: Preset, applied: bool) -> Fil
         Reduction::Adds(values) => values.iter().fold(filter.clone(), |filter, value| {
             rules::set_hidden(&filter, value, applied)
         }),
-        Reduction::States(terms) => {
-            terms
-                .into_iter()
-                .fold(filter.clone(), |filter, (term, values)| {
-                    let values = if applied { values } else { BTreeSet::new() };
-                    rules::hiding(&filter, term, values)
-                })
-        }
+        Reduction::States(terms) => terms.into_iter().fold(filter.clone(), |filter, stated| {
+            let values = if applied {
+                stated.values
+            } else {
+                BTreeSet::new()
+            };
+            rules::hiding(&filter, stated.term, values)
+        }),
     }
 }
 
@@ -420,6 +440,44 @@ mod tests {
             rules::set_hidden(&filter, &Value::RepoCategory(RepoCategory::Builtin), false);
 
         assert!(!applied(&one_back, preset));
+    }
+
+    /// A preset naming an end state claims the whole of each term it states, so
+    /// two of them over one term would promise ends that cannot both hold and
+    /// settle it by whichever row a menu-wide action wrote last.
+    #[test]
+    fn no_two_presets_state_an_end_for_one_term() {
+        let stated: Vec<Term> = Preset::ALL
+            .into_iter()
+            .filter_map(|preset| match preset.reduction() {
+                Reduction::States(terms) => Some(terms),
+                Reduction::Adds(_) => None,
+            })
+            .flatten()
+            .map(|stated| stated.term)
+            .collect();
+
+        for (index, term) in stated.iter().enumerate() {
+            assert!(!stated[index + 1..].contains(term), "{term:?}");
+        }
+    }
+
+    /// A preset states only values of the term it names, so a term reads back
+    /// exactly what the preset wrote and its row closes the difference.
+    #[test]
+    fn a_term_a_preset_states_holds_only_its_own_values() {
+        let stated = Stated::new(
+            Term::RepoCategory,
+            [
+                Value::RepoCategory(RepoCategory::Module),
+                Value::Kind(Kind::Action),
+            ],
+        );
+
+        assert_eq!(
+            stated.values,
+            BTreeSet::from([Value::RepoCategory(RepoCategory::Module)])
+        );
     }
 
     /// A preset is taken off only where it stands. One naming an end state
