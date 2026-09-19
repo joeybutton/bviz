@@ -135,18 +135,19 @@ fn middle(tab: Bounds<Pixels>, band: Bounds<Pixels>) -> Pixels {
     (tab.left().max(band.left()) + tab.right().min(band.right())) * 0.5
 }
 
-/// Where a drag holding the panel that pane `from` holds over `cursor` would put
-/// it: `window` is the whole window, `body` the region of it the panes are
-/// arranged across, and `panes` where the last frame laid each of those panes
-/// out. `re_homes` answers whether a destination would move the panel at all,
-/// and one that would not resolves to nothing, so that a drag marks nothing a
-/// drop would then leave as it was.
+/// Where a drag holding a panel over `cursor` would put it: `window` is the
+/// whole window, `body` the region of it the panes are arranged across, and
+/// `panes` where the last frame laid each of those panes out. `from` is the pane
+/// holding the panel, and nothing at all where the drag carries it in from
+/// another window. `re_homes` answers whether a destination would move the panel
+/// at all, and one that would not resolves to nothing, so that a drag marks
+/// nothing a drop would then leave as it was.
 pub(crate) fn dropped_at<P: Clone + PartialEq>(
     cursor: Point<Pixels>,
     window: Bounds<Pixels>,
     body: Bounds<Pixels>,
     panes: &[PaneGeometry<P>],
-    from: &P,
+    from: Option<&P>,
     re_homes: impl Fn(&Destination<P>) -> bool,
 ) -> Option<Destination<P>> {
     let to = landing(cursor, window, body, panes, from)?;
@@ -169,7 +170,7 @@ fn landing<P: Clone + PartialEq>(
     window: Bounds<Pixels>,
     body: Bounds<Pixels>,
     panes: &[PaneGeometry<P>],
-    from: &P,
+    from: Option<&P>,
 ) -> Option<Destination<P>> {
     if tears_out(cursor, window) {
         return Some(Destination::NewWindow);
@@ -196,7 +197,7 @@ fn landing<P: Clone + PartialEq>(
         // The middle of the pane the panel is already in asks for the tabs it
         // is already among; which boundary of them it takes is what the caret
         // in the strip answers, so there is nothing to aim at here.
-        None if pane == *from => None,
+        None if from == Some(&pane) => None,
         None => Some(Destination::Tab {
             pane,
             index: over.tab_count,
@@ -478,7 +479,21 @@ mod tests {
     /// destination accepted.
     fn dropped_from(from: &'static str, x: f32, y: f32) -> Option<Destination<&'static str>> {
         let (window, body) = window();
-        dropped_at(point(px(x), px(y)), window, body, &panes(), &from, |_| true)
+        dropped_at(
+            point(px(x), px(y)),
+            window,
+            body,
+            &panes(),
+            Some(&from),
+            |_| true,
+        )
+    }
+
+    /// Where a drag carrying a panel in from another window at (`x`, `y`) of
+    /// the window lands, with every destination accepted.
+    fn carried_in(x: f32, y: f32) -> Option<Destination<&'static str>> {
+        let (window, body) = window();
+        dropped_at(point(px(x), px(y)), window, body, &panes(), None, |_| true)
     }
 
     /// A drop within the band along the body's own edge spans that edge of the
@@ -582,6 +597,36 @@ mod tests {
         ));
     }
 
+    /// A drag carried in from another window holds a panel no pane here holds,
+    /// so the middle of every pane takes it among that pane's tabs — the very
+    /// middle that refuses a drag of a panel already there.
+    #[test]
+    fn a_drag_from_another_window_lands_in_the_middle_of_any_pane() {
+        assert!(matches!(
+            carried_in(450.0, 400.0),
+            Some(Destination::Tab {
+                pane: "wide",
+                index: 3
+            })
+        ));
+        assert!(matches!(
+            carried_in(1050.0, 400.0),
+            Some(Destination::Tab {
+                pane: "tall",
+                index: 1
+            })
+        ));
+    }
+
+    /// Everything else is aimed at exactly as a drag within the window aims at
+    /// it: the panel's own pane is the only thing the two readings differ over.
+    #[test]
+    fn a_drag_from_another_window_reads_the_rest_as_any_other_does() {
+        for (x, y) in [(30.0, 400.0), (260.0, 50.0), (600.0, 45.0), (4.0, 400.0)] {
+            assert_eq!(carried_in(x, y), dropped(x, y));
+        }
+    }
+
     /// A pane's band is capped in pixels, so the wider the pane the smaller the
     /// share of it the band takes.
     #[test]
@@ -612,7 +657,7 @@ mod tests {
                 window,
                 body,
                 &panes,
-                &ELSEWHERE,
+                Some(&ELSEWHERE),
                 |_| true,
             )
         };
@@ -648,7 +693,7 @@ mod tests {
                 window,
                 body,
                 &panes,
-                &ELSEWHERE,
+                Some(&ELSEWHERE),
                 |_| true,
             )
         };
@@ -682,7 +727,7 @@ mod tests {
                 window,
                 body,
                 &panes,
-                &ELSEWHERE,
+                Some(&ELSEWHERE),
                 |_| true,
             )
         };
@@ -810,7 +855,7 @@ mod tests {
                 window,
                 body,
                 &panes,
-                &ELSEWHERE,
+                Some(&ELSEWHERE),
                 |_| true,
             )
         };
@@ -851,7 +896,7 @@ mod tests {
             window,
             body,
             &panes,
-            &ELSEWHERE,
+            Some(&ELSEWHERE),
             |_| true,
         ) {
             Some(Destination::Tab { index, .. }) => index,
@@ -876,7 +921,7 @@ mod tests {
             window,
             body,
             &panes,
-            &ELSEWHERE,
+            Some(&ELSEWHERE),
             |_| true,
         ) {
             Some(Destination::Tab { index, .. }) => index,
@@ -907,7 +952,7 @@ mod tests {
             window,
             body,
             &panes,
-            &ELSEWHERE,
+            Some(&ELSEWHERE),
             |_| true,
         ) {
             Some(Destination::Tab { index, .. }) => index,
@@ -942,7 +987,7 @@ mod tests {
         for geometry in [handle, row] {
             assert!(
                 matches!(
-                    dropped_at(foot, window, body, &[geometry], &ELSEWHERE, |_| true),
+                    dropped_at(foot, window, body, &[geometry], Some(&ELSEWHERE), |_| true),
                     Some(Destination::Tab { pane: "lone", .. })
                 ),
                 "a drop on the foot of the band"
@@ -970,7 +1015,7 @@ mod tests {
             window,
             body,
             &panes,
-            &ELSEWHERE,
+            Some(&ELSEWHERE),
             |_| true,
         ) {
             Some(Destination::Tab { index, .. }) => index,
@@ -1010,7 +1055,7 @@ mod tests {
                 window,
                 body,
                 &[strip(top)],
-                &ELSEWHERE,
+                Some(&ELSEWHERE),
                 |_| true,
             )
         };
@@ -1065,9 +1110,14 @@ mod tests {
     fn an_arrangement_with_no_tabs_or_no_panes_is_read_without_them() {
         let (window, body) = window();
         let aimed = |panes: &[PaneGeometry<&'static str>], x: f32, y: f32| {
-            dropped_at(point(px(x), px(y)), window, body, panes, &ELSEWHERE, |_| {
-                true
-            })
+            dropped_at(
+                point(px(x), px(y)),
+                window,
+                body,
+                panes,
+                Some(&ELSEWHERE),
+                |_| true,
+            )
         };
         assert!(aimed(&[], 600.0, 400.0).is_none());
         let bare = vec![pane("lone", at(0.0, 40.0, 1200.0, 720.0), 0)];
@@ -1097,7 +1147,7 @@ mod tests {
                 window,
                 body,
                 &panes,
-                &ELSEWHERE,
+                Some(&ELSEWHERE),
                 |_| true,
             )
         };
@@ -1127,7 +1177,7 @@ mod tests {
                 window,
                 body,
                 &panes(),
-                &ELSEWHERE,
+                Some(&ELSEWHERE),
                 refuse_the_tall_pane,
             )
         };
@@ -1273,7 +1323,7 @@ mod tests {
             (900.0, 50.0),
         ] {
             let cursor = point(px(x), px(y));
-            let to = dropped_at(cursor, window, body, &panes, &ELSEWHERE, |_| true)
+            let to = dropped_at(cursor, window, body, &panes, Some(&ELSEWHERE), |_| true)
                 .unwrap_or_else(|| panic!("({x}, {y}) lands somewhere"));
             let marked = preview(&to, cursor, body, &panes, halved)
                 .unwrap_or_else(|| panic!("({x}, {y}) is marked"));

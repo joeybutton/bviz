@@ -324,20 +324,11 @@ impl Documents {
         if into.update(cx, |workspace, cx| workspace.reveal(panel, window, cx)) {
             return;
         }
-        for elsewhere in self.workspaces() {
-            if elsewhere == *into {
-                continue;
-            }
-            let handle = elsewhere.read(cx).window();
-            let taken = handle.update(cx, |_, window, cx| {
-                elsewhere.update(cx, |workspace, cx| workspace.take_panel(panel, window, cx))
+        let elsewhere = take_panel_from(self.workspaces(), panel, into.entity_id(), cx);
+        if let Some(taken) = elsewhere {
+            into.update(cx, |workspace, cx| {
+                workspace.add_panel(taken, window, cx);
             });
-            if let Ok(Some(taken)) = taken {
-                into.update(cx, |workspace, cx| {
-                    workspace.add_panel(taken, window, cx);
-                });
-                return;
-            }
         }
     }
 
@@ -426,6 +417,31 @@ impl Documents {
             .iter()
             .filter_map(|held| held.workspace.upgrade())
     }
+}
+
+/// Takes `panel` out of whichever of `open` holds it, for a caller re-homing it
+/// in the window it frames. The workspace `here` names is left alone: it is the
+/// caller's own, which takes the panel out for itself. `None` where none of the
+/// others holds it, and where the window framing the one that does has closed.
+pub(crate) fn take_panel_from(
+    open: Vec<Entity<Workspace>>,
+    panel: EntityId,
+    here: EntityId,
+    cx: &mut App,
+) -> Option<AnyPanel> {
+    for elsewhere in open {
+        if elsewhere.entity_id() == here {
+            continue;
+        }
+        let handle = elsewhere.read(cx).window();
+        let taken = handle.update(cx, |_, window, cx| {
+            elsewhere.update(cx, |workspace, cx| workspace.take_panel(panel, window, cx))
+        });
+        if let Ok(Some(taken)) = taken {
+            return Some(taken);
+        }
+    }
+    None
 }
 
 /// Where `view`'s panel stands in the windows `workspaces` frame.

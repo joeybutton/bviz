@@ -4,8 +4,10 @@
 //! listing it, and [`run_panels`] for an app whose window frames them.
 
 mod arrangement;
+mod carry;
 mod documents;
 mod documents_menu;
+mod drag_icon;
 mod drop;
 mod group;
 mod layout;

@@ -97,7 +97,7 @@ pub(crate) fn offered<P: Clone + PartialEq, W: Clone>(
             pane: pane.clone(),
             side,
         };
-        if re_homes(&to, pane, alone, layout) {
+        if re_homes(&to, Some(pane), alone, layout) {
             rows.push(offer(
                 format!("Split {}", split_name(side)),
                 Offer::Split(side),
@@ -106,7 +106,7 @@ pub(crate) fn offered<P: Clone + PartialEq, W: Clone>(
     }
     let edges: Vec<Under<W>> = SIDES
         .into_iter()
-        .filter(|&side| re_homes(&Destination::WindowEdge(side), pane, alone, layout))
+        .filter(|&side| re_homes(&Destination::WindowEdge(side), Some(pane), alone, layout))
         .map(|side| Under {
             label: edge_name(side).into(),
             offer: Offer::Edge(side),
@@ -451,13 +451,13 @@ mod tests {
                         let beside = Destination::Beside { pane, side };
                         assert_eq!(
                             read.contains(&format!("Split {}", split_name(side))),
-                            re_homes(&beside, &pane, alone, layout),
+                            re_homes(&beside, Some(&pane), alone, layout),
                             "{pane} {alone} split {side:?}"
                         );
                         let edge = read.contains(&format!("  {}", edge_name(side)));
                         assert_eq!(
                             edge,
-                            re_homes(&Destination::WindowEdge(side), &pane, alone, layout),
+                            re_homes(&Destination::WindowEdge(side), Some(&pane), alone, layout),
                             "{pane} {alone} edge {side:?}"
                         );
                     }

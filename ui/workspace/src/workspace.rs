@@ -1,22 +1,25 @@
+use crate::carry::{Carrying, Reported, Taken};
 use crate::documents_menu::DocumentsMenu;
 use crate::drop::{PaneGeometry, Preview};
 use crate::pane::Handover;
 use crate::panel_menu::{Deed, Standing};
 use crate::{
     AnyPanel, Arrangement, DividerId, Document, Documents, Framing, Layout, Maximize, Pane,
-    PaneEvent, PanelGroup, Removal, Side, Split, SplitSide, WindowsChanged, drop, panel_menu,
+    PaneEvent, PanelGroup, Removal, Side, Split, SplitSide, WindowsChanged, documents, drag_icon,
+    drop, panel_menu,
 };
 use bviz_ui_components::{Divider, DragEnd, Menu, MenuEvent, overlay_canvas, track_drag};
 use bviz_ui_shell::Chrome;
 use bviz_ui_theme::ThemeColors;
 use gpui::{
     Action, AnyElement, AnyWindowHandle, App, Axis, Bounds, Canvas, Div, ElementId, Entity,
-    EntityId, FocusHandle, IntoElement, KeyBinding, MouseDownEvent, Pixels, Point, Render,
-    SharedString, Size, Stateful, Subscription, WeakEntity, Window, actions, deferred, div, point,
-    prelude::*, px,
+    EntityId, FocusHandle, IconScale, IntoElement, KeyBinding, MouseDownEvent, Pixels,
+    PlatformDragEvent, Point, Rems, Render, SharedString, Size, Stateful, Subscription, WeakEntity,
+    Window, actions, deferred, div, point, prelude::*, px,
 };
 use std::collections::HashMap;
 use std::iter;
+use std::sync::OnceLock;
 
 actions!(
     bviz_workspace,
@@ -76,6 +79,17 @@ const GHOST_HEIGHT: Pixels = px(26.);
 /// long title cannot cover what the drag is aimed at.
 const GHOST_MAX_WIDTH: Pixels = px(220.);
 
+/// How much room the ghost gives the name it carries, either side of it.
+const GHOST_PADDING: Rems = Rems(0.5);
+
+/// How far the ghost's corners are rounded off.
+const GHOST_RADIUS: Rems = Rems(0.375);
+
+/// The type the dragged panel's name is set in.
+const GHOST_TEXT: Rems = Rems(0.875);
+
+/// How large the icon naming the dragged panel's kind is drawn in the ghost,
+/// beside its name.
 const GHOST_ICON_SIZE: Pixels = px(14.);
 
 /// The edge around what a drag puts up — the ghost, and the mark over where it
@@ -158,6 +172,10 @@ struct PanelDrag {
     /// does. `None` where that frame marked nothing, and until a frame has
     /// marked anything at all.
     to: Option<Destination>,
+    /// Whether the window system has refused to take this gesture over, which
+    /// it answers the same way for the rest of it — so it is asked once, and
+    /// the drag goes on being drawn and ended here.
+    refused: bool,
     /// Cancels the gesture on `escape` for as long as it runs. Panels bind
     /// `escape` in their own key contexts, which lie deeper in the focus path
     /// than this workspace's and take the keystroke first, so the cancel
@@ -237,6 +255,9 @@ pub struct Workspace {
     divider_drag: Option<DividerId>,
     /// The press on a panel's tab being carried, while one is.
     panel_drag: Option<PanelDrag>,
+    /// The drags the window system is carrying for this window: the one this
+    /// window handed it, and the one it carries over this window.
+    carrying: Carrying<EntityId, Destination>,
     /// The menu a panel was asked for, while it stands.
     panel_menu: Option<PanelMenu>,
     /// Draws the window afresh as the session's windows open and close, which
@@ -270,12 +291,22 @@ impl Workspace {
             body: None,
             divider_drag: None,
             panel_drag: None,
+            carrying: Carrying::new(),
             panel_menu: None,
             _windows_changed: windows_changed,
         };
         for pane in panes {
             workspace.watch(&pane, window, cx);
         }
+        window.accept_platform_drag(panel_mime());
+        let carried = cx.weak_entity();
+        window.on_platform_drag(move |event, window, cx| {
+            carried
+                .update(cx, |workspace, cx| {
+                    workspace.platform_drag(event, window, cx);
+                })
+                .ok();
+        });
         let framed = cx.entity();
         documents.update(cx, |documents, cx| {
             documents.watch_workspace(&framed, cx);
@@ -404,6 +435,11 @@ impl Workspace {
         self.divider_drag = None;
         self.panel_drag = None;
         self.panel_menu = None;
+        // A drag the window system carries is the window system's to end, and
+        // letting go of it here would leave the gesture out there with nothing
+        // to report to. Where it is aimed is let go of instead: a destination
+        // names a pane the panes built here stand in place of.
+        self.carrying.aim(None);
     }
 
     /// Tells the panel every pane shows that it is on show no longer, for a
@@ -480,15 +516,30 @@ impl Workspace {
         let Some((from, at)) = self.holder(panel, cx) else {
             return;
         };
-        if !self.re_homes(&to, &from, cx) {
+        if !self.re_homes(&to, Some(&from), cx) {
             return;
         }
         let Some(panel) = self.vacate(&from, panel, window, cx) else {
             return;
         };
+        self.land(panel, to, Some((from, at)), window, cx);
+    }
+
+    /// Lays `panel` out at `to` and makes the pane it lands in the active one.
+    /// `taken` says which pane of this window it came out of and which tab of
+    /// that pane it was, and is nothing where it comes from another window.
+    fn land(
+        &mut self,
+        panel: AnyPanel,
+        to: Destination,
+        taken: Option<(Entity<Pane>, usize)>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let landed = match to {
             Destination::Tab { pane, index } => {
-                let index = landing_index(index, (pane == from).then_some(at));
+                let taken = taken.and_then(|(from, at)| (from == pane).then_some(at));
+                let index = landing_index(index, taken);
                 pane.update(cx, |pane, cx| pane.insert(index, panel, window, cx));
                 pane
             }
@@ -517,8 +568,8 @@ impl Workspace {
 
     /// [`re_homes`] for a pane this workspace frames, read for how many panels
     /// it holds.
-    fn re_homes(&self, to: &Destination, from: &Entity<Pane>, cx: &App) -> bool {
-        let alone = from.read(cx).tab_count() == 1;
+    fn re_homes(&self, to: &Destination, from: Option<&Entity<Pane>>, cx: &App) -> bool {
+        let alone = from.is_some_and(|pane| pane.read(cx).tab_count() == 1);
         re_homes(to, from, alone, self.arrangement.layout())
     }
 
@@ -697,6 +748,9 @@ impl Workspace {
     /// Takes up a press that landed on the tab naming `panel`, which becomes a
     /// drag of that panel once it is carried [`DRAG_THRESHOLD`] from `at`.
     fn press_panel(&mut self, panel: EntityId, at: Point<Pixels>, cx: &mut Context<Self>) {
+        if !self.carrying.takes_a_press() {
+            return;
+        }
         let workspace = cx.weak_entity();
         let here = self.window;
         let cancel = cx.intercept_keystrokes(move |event, window, cx| {
@@ -722,6 +776,7 @@ impl Workspace {
             panel,
             carried: Carried::Pressed(at),
             to: None,
+            refused: false,
             _cancel: cancel,
         });
         cx.notify();
@@ -734,16 +789,23 @@ impl Workspace {
         cx.notify();
     }
 
+    /// The panel the drag this window handed to the window system is carrying,
+    /// while it is out there. Read by whichever window the drag is carried
+    /// over, which is what tells that window what a drop of it would move.
+    pub(crate) fn handed_over(&self) -> Option<EntityId> {
+        self.carrying.handed_panel()
+    }
+
     /// Carries the press to `at`, which becomes a drag of the panel once it is
-    /// far enough from where it landed.
-    fn drag_panel(&mut self, at: Point<Pixels>, cx: &mut Context<Self>) {
+    /// far enough from where it landed, and is offered to the window system
+    /// once it is carried far enough out of the window.
+    fn drag_panel(&mut self, at: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
         let Some(drag) = &self.panel_drag else {
             return;
         };
-        let (panel, carried) = (drag.panel, drag.carried);
-        if let Carried::Pressed(from) = carried
-            && !past_threshold(from, at)
-        {
+        let (panel, carried, refused) = (drag.panel, drag.carried, drag.refused);
+        let carry = carried_to(carried, refused, at, viewport(window));
+        if carry == Carry::Holds {
             return;
         }
         // A drag reads where the frame laid the panes out to tell where a drop
@@ -757,6 +819,59 @@ impl Workspace {
             ..drag
         });
         cx.notify();
+        if carry == Carry::Over
+            && !self.hand_over(window, cx)
+            && let Some(drag) = self.panel_drag.as_mut()
+        {
+            drag.refused = true;
+        }
+    }
+
+    /// Offers the drag to the window system and reports whether it took it. A
+    /// window system that takes it draws the panel where the pointer carries
+    /// it and tells every window it reaches — this application's own among
+    /// them — where it goes and where it is dropped, and the gesture stops
+    /// being this window's: the pointer is the window system's, and a drag
+    /// carried back over this window arrives as one carried over any other. A
+    /// window system that refuses leaves the press being carried here, drawn
+    /// under the cursor and ended by the release.
+    ///
+    /// Offered where a release would ask for a window of its own
+    /// ([`drop::tears_out`]), so that a drag flicked past the edge and back in
+    /// is carried here as ever.
+    fn hand_over(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let Some(drag) = self.panel_drag.as_ref() else {
+            return false;
+        };
+        let carried = drag.panel;
+        let Some((pane, index)) = self.holder(carried, cx) else {
+            return false;
+        };
+        let Some(panel) = pane.read(cx).panel_at(index).cloned() else {
+            return false;
+        };
+        let colors = bviz_ui_theme::theme(window, cx).colors;
+        let chip = drag_icon::Chip {
+            title: panel.display_title(cx),
+            font_size: GHOST_TEXT.to_pixels(window.rem_size()),
+            height: GHOST_HEIGHT,
+            max_width: GHOST_MAX_WIDTH,
+            padding: GHOST_PADDING.to_pixels(window.rem_size()),
+            radius: GHOST_RADIUS.to_pixels(window.rem_size()),
+            edge: DRAG_EDGE,
+            fill: colors.surface,
+            edge_color: colors.accent,
+            ink: colors.text,
+            scale: IconScale::for_display(window.scale_factor()),
+        };
+        let icon = drag_icon::rasterize(&chip, window);
+        if !window.start_platform_drag(panel_mime(), icon) {
+            return false;
+        }
+        self.panel_drag = None;
+        self.carrying.hand_over(carried);
+        cx.notify();
+        true
     }
 
     /// Ends the press where the button was let go: the panel goes where the
@@ -777,8 +892,7 @@ impl Workspace {
         // The release is spent on the move; it is not also a click on the tab
         // the drag started from, which would bring another panel forward.
         cx.stop_propagation();
-        let viewport = Bounds::new(point(px(0.), px(0.)), window.viewport_size());
-        let to = match drop::tears_out(at, viewport) {
+        let to = match drop::tears_out(at, viewport(window)) {
             true => Some(Destination::NewWindow),
             false => drag.to,
         };
@@ -787,21 +901,91 @@ impl Workspace {
         }
     }
 
-    /// Where a drag of `panel` holding the cursor at `at` would put it, out of
-    /// `geometry`: where the last frame laid the window's panes out.
-    fn dragged_to(
-        &self,
+    /// Takes up what the window system reports of a drag it carries: one it
+    /// carries over this window, which the window marks and takes a drop of,
+    /// and the end of the one this window handed it.
+    fn platform_drag(
+        &mut self,
+        event: PlatformDragEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let report = match event {
+            PlatformDragEvent::Entered(at) => {
+                // A drag reads where the frame laid the panes out, so every
+                // pane is on screen before one is aimed at.
+                self.restore(cx);
+                Reported::Entered {
+                    panel: self.carried_panel(cx),
+                    at,
+                }
+            }
+            PlatformDragEvent::Moved(at) => Reported::Moved(at),
+            PlatformDragEvent::Left => Reported::Left,
+            PlatformDragEvent::Dropped(at) => Reported::Dropped {
+                aimed: self
+                    .carrying
+                    .unaimed()
+                    .and_then(|panel| self.destination_at(at, panel, window, cx)),
+            },
+            PlatformDragEvent::Ended(end) => Reported::Ended(end),
+        };
+        match self.carrying.reports(report) {
+            Taken::Nothing => {}
+            Taken::Land { panel, to } => self.take_in(panel, to, window, cx),
+            Taken::Ended { panel, detach } => {
+                if detach {
+                    self.move_panel(panel, Destination::NewWindow, window, cx);
+                }
+            }
+        }
+        cx.notify();
+    }
+
+    /// Puts `panel`, which the window system was carrying, at `to`: out of a
+    /// pane of this window where the drag started here, so that a drag carried
+    /// back into the window it left lands exactly as one that never left it,
+    /// and out of whichever other window of the session holds it otherwise.
+    fn take_in(
+        &mut self,
         panel: EntityId,
-        at: Point<Pixels>,
-        geometry: &[PaneGeometry<Entity<Pane>>],
-        window: &Window,
-        cx: &App,
-    ) -> Option<Destination> {
-        let (from, _) = self.holder(panel, cx)?;
-        let bounds = Bounds::new(point(px(0.), px(0.)), window.viewport_size());
-        drop::dropped_at(at, bounds, self.body?, geometry, &from, |to| {
-            self.re_homes(to, &from, cx)
-        })
+        to: Destination,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.holder(panel, cx).is_some() {
+            self.move_panel(panel, to, window, cx);
+        } else {
+            let here = cx.entity_id();
+            let open = Documents::global(cx).read(cx).workspaces();
+            let Some(taken) = documents::take_panel_from(open, panel, here, cx) else {
+                return;
+            };
+            self.land(taken, to, None, window, cx);
+        }
+        // The panel was carried to this window, so this window comes forward
+        // with it rather than leaving it behind the one it came from.
+        window.activate_window();
+    }
+
+    /// The panel the drag the window system is carrying over this window holds:
+    /// the one a window of the session handed over. The window system carries
+    /// one drag of this application at a time — a window offers another only
+    /// once the first is reported over — and the type the drag offers names
+    /// this process, so the one window with a drag out there is the window this
+    /// drag came from. `None` where no window of the session has one out there,
+    /// and a drop then moves nothing.
+    fn carried_panel(&self, cx: &mut Context<Self>) -> Option<EntityId> {
+        if let Some(panel) = self.handed_over() {
+            return Some(panel);
+        }
+        // This workspace is left out of the session's rather than read: it is
+        // the one the report reached, and so is leased.
+        let here = cx.entity_id();
+        let open = Documents::global(cx).read(cx).workspaces();
+        open.iter()
+            .filter(|workspace| workspace.entity_id() != here)
+            .find_map(|workspace| workspace.read(cx).handed_over())
     }
 
     /// Where the last frame laid each pane of the arrangement out. A pane no
@@ -1036,19 +1220,57 @@ impl Workspace {
             let joins = joined_pane(to.as_ref()) == Some(pane);
             pane.update(cx, |pane, _| pane.set_joined_by_drag(joins));
         }
-        if let Some(drag) = self.panel_drag.as_mut() {
-            drag.to = to;
+        match self.carrying.incoming().is_some() {
+            true => self.carrying.aim(to),
+            false => {
+                if let Some(drag) = self.panel_drag.as_mut() {
+                    drag.to = to;
+                }
+            }
         }
     }
 
-    /// Where a drop of the panel the drag is carrying would put it, as the
-    /// geometry the last frame laid out reads the cursor it holds. `None` while
-    /// no press is being carried and while the press is not yet a drag.
+    /// Where a drop of the panel a drag over the window is holding would put
+    /// it, as the geometry the last frame laid out reads where that drag is.
+    /// The drag the window system carries over the window is read ahead of the
+    /// press this window carries: a press the window system took over is no
+    /// longer carried here, so a window holding both is the one a handed-over
+    /// drag has come back to, and the window system's reading of it is the live
+    /// one. `None` while no drag is over the window, while a press is not yet a
+    /// drag of the panel it landed on, and where the drag is aimed at nowhere
+    /// the panel could land.
     fn drag_destination(&self, window: &Window, cx: &App) -> Option<Destination> {
-        let drag = self.panel_drag.as_ref()?;
-        let at = drag.carried.dragging()?;
+        let (panel, at) = match self.carrying.incoming() {
+            Some(incoming) => (incoming.panel, incoming.at),
+            None => {
+                let drag = self.panel_drag.as_ref()?;
+                (drag.panel, drag.carried.dragging()?)
+            }
+        };
+        self.destination_at(at, panel, window, cx)
+    }
+
+    /// Where a drop of `panel` at `at` of the window would put it. The pane it
+    /// comes out of is a pane of this window only where the drag started here;
+    /// one carried in from another window comes out of none of them, and every
+    /// destination re-homes it.
+    fn destination_at(
+        &self,
+        at: Point<Pixels>,
+        panel: EntityId,
+        window: &Window,
+        cx: &App,
+    ) -> Option<Destination> {
+        let from = self.holder(panel, cx).map(|(pane, _)| pane);
         let geometry = self.pane_geometry(cx);
-        self.dragged_to(drag.panel, at, &geometry, window, cx)
+        drop::dropped_at(
+            at,
+            viewport(window),
+            self.body?,
+            &geometry,
+            from.as_ref(),
+            |to| self.re_homes(to, from.as_ref(), cx),
+        )
     }
 
     /// What the window's body draws: the pane given the whole of it, or every
@@ -1147,17 +1369,25 @@ impl Workspace {
             .into_any_element()
     }
 
-    /// What a press on a panel's tab puts over the window while it is held: the
-    /// handlers that carry it, and — once it is a drag — the panel's ghost under
-    /// the cursor and a mark over where a drop would put it. Drawn over the
-    /// panes, and moved by notifying this workspace alone, so that every panel's
-    /// cached layer replays through the drag instead of repainting per frame.
+    /// What a drag of a panel puts over the window while it runs: for the press
+    /// this window is carrying, the handlers that carry it and — once it is a
+    /// drag — the panel's ghost under the cursor and a mark over where a drop
+    /// would put it; for a drag the window system carries over the window, the
+    /// mark alone, the window system drawing the panel and holding the pointer
+    /// that ends the gesture. Drawn over the panes, and moved by notifying this
+    /// workspace alone, so that every panel's cached layer replays through the
+    /// drag instead of repainting per frame.
     fn panel_drag_overlay(
         &self,
         colors: &ThemeColors,
         window: &Window,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
+        if let Some(incoming) = self.carrying.incoming() {
+            let to = incoming.to.as_ref()?;
+            let mark = self.marked(to, incoming.at, colors, cx)?;
+            return Some(deferred(mark).into_any_element());
+        }
         let drag = self.panel_drag.as_ref()?;
         let mut over = div().absolute().inset_0().child(panel_drag_handlers(cx));
         if let Some(at) = drag.carried.dragging() {
@@ -1213,16 +1443,16 @@ impl Workspace {
                 .flex_row()
                 .items_center()
                 .gap_1()
-                .px_2()
+                .px(GHOST_PADDING)
                 .overflow_hidden()
-                .rounded_md()
+                .rounded(GHOST_RADIUS)
                 .bg(colors.surface)
                 .border(DRAG_EDGE)
                 .border_color(colors.accent)
                 // The ghost is drawn over the window rather than in the chrome,
                 // so it starts a text cascade of its own.
                 .font_family(bviz_ui_assets::UI)
-                .text_sm()
+                .text_size(GHOST_TEXT)
                 .text_color(ink)
                 .children(panel.icon(cx).map(|name| {
                     bviz_ui_assets::icon(name)
@@ -1301,23 +1531,27 @@ fn framed_panes(
 
 /// Whether moving a panel to `to` would lay it out anywhere other than where
 /// the pane `from` holding it already stands, `alone` saying whether that pane
-/// holds it and no other. A destination has to name a pane the arrangement lays
-/// out; and a pane holding one panel is already that panel's own pane, so a
-/// destination asking for a pane of its own where that one stands — `from`
-/// itself, or an edge of the window `from` already spans — is refused: the move
-/// would take that pane out and build an equivalent one at an even share of its
-/// split, putting the dividers around it back where a drag had moved them from.
+/// holds it and no other, and both saying nothing at all where the panel comes
+/// from another window and every destination re-homes it. A destination has to
+/// name a pane the arrangement lays out; and a pane holding one panel is already
+/// that panel's own pane, so a destination asking for a pane of its own where
+/// that one stands — `from` itself, or an edge of the window `from` already
+/// spans — is refused: the move would take that pane out and build an equivalent
+/// one at an even share of its split, putting the dividers around it back where
+/// a drag had moved them from.
 pub(crate) fn re_homes<P: Clone + PartialEq>(
     to: &Destination<P>,
-    from: &P,
+    from: Option<&P>,
     alone: bool,
     layout: &Layout<P>,
 ) -> bool {
     match to {
         Destination::Tab { pane, .. } | Destination::Beside { pane, .. } => {
-            layout.contains(pane) && !(alone && pane == from)
+            layout.contains(pane) && !(alone && Some(pane) == from)
         }
-        Destination::WindowEdge(side) => !(alone && layout.spans_edge(from, *side)),
+        Destination::WindowEdge(side) => {
+            !(alone && from.is_some_and(|from| layout.spans_edge(from, *side)))
+        }
         Destination::NewWindow => true,
     }
 }
@@ -1355,6 +1589,54 @@ fn placed(bounds: Bounds<Pixels>) -> Div {
         .top(bounds.top())
         .w(bounds.size.width)
         .h(bounds.size.height)
+}
+
+/// What a move to `at` does to a press being carried in a window of `viewport`.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Carry {
+    /// Nothing: the press has not travelled far enough from where it landed to
+    /// be a drag of the panel under it.
+    Holds,
+    /// Carries the drag on within the window.
+    Here,
+    /// Offers the drag to the window system, the cursor having left the window
+    /// by as much as a release out there needs to ask for a window of its own
+    /// ([`drop::tears_out`]), so that a drag flicked past the edge and back in
+    /// is carried here as ever.
+    Over,
+}
+
+/// `refused` says the window system has already turned this gesture down, which
+/// it answers the same way for the rest of it.
+fn carried_to(
+    carried: Carried,
+    refused: bool,
+    at: Point<Pixels>,
+    viewport: Bounds<Pixels>,
+) -> Carry {
+    match carried {
+        Carried::Pressed(from) if !past_threshold(from, at) => Carry::Holds,
+        _ if refused => Carry::Here,
+        _ => match drop::tears_out(at, viewport) {
+            true => Carry::Over,
+            false => Carry::Here,
+        },
+    }
+}
+
+/// The whole of the window, which a drag reads its own edges against.
+fn viewport(window: &Window) -> Bounds<Pixels> {
+    Bounds::new(point(px(0.), px(0.)), window.viewport_size())
+}
+
+/// The mime type a drag of a panel offers. A panel is a view the process the
+/// drag started in holds, which no other process — another of this application
+/// among them — could make anything of, so the type names the process as well
+/// as the application: a window of another bviz then finds nothing it takes on
+/// offer, and refuses the drop rather than accepting one it cannot carry out.
+fn panel_mime() -> &'static str {
+    static MIME: OnceLock<String> = OnceLock::new();
+    MIME.get_or_init(|| format!("application/x-bviz-panel;pid={}", std::process::id()))
 }
 
 /// Whether a press carried from `pressed` to `at` has travelled far enough to be
@@ -1404,7 +1686,7 @@ fn panel_drag_handlers(cx: &mut Context<Workspace>) -> Canvas<()> {
         track_drag(
             window,
             &workspace,
-            |workspace, at, _, cx| workspace.drag_panel(at, cx),
+            |workspace, at, window, cx| workspace.drag_panel(at, window, cx),
             |workspace, at, end, window, cx| match end {
                 DragEnd::Released => workspace.drop_panel(at, window, cx),
                 // An abandoned gesture reports only where the cursor was, not
@@ -1851,6 +2133,76 @@ mod tests {
         assert!(carried(threshold + 1.0, threshold));
     }
 
+    /// The window a drag is read against, wide enough that the tear-out margin
+    /// around it stands clear of its middle.
+    fn dragged_in() -> Bounds<Pixels> {
+        Bounds::new(point(px(0.), px(0.)), size(px(800.), px(600.)))
+    }
+
+    /// A press not yet carried far enough to be a drag of the panel under it is
+    /// carried nowhere, so a press that slips past the window's edge is still
+    /// the click the tab under it makes of one.
+    #[test]
+    fn a_press_below_the_threshold_is_carried_nowhere() {
+        let pressed = Carried::Pressed(point(px(400.), px(4.)));
+        for at in [point(px(400.), px(2.)), point(px(404.), px(0.))] {
+            assert_eq!(carried_to(pressed, false, at, dragged_in()), Carry::Holds);
+        }
+    }
+
+    /// A drag is carried within the window right up to the margin a release
+    /// past the edge needs to ask for a window of its own, so that one flicked
+    /// just past the edge and back in never leaves this window's hands.
+    #[test]
+    fn a_drag_within_the_tear_out_margin_stays_in_the_window() {
+        let carried = |x: f32, y: f32| {
+            let at = point(px(x), px(y));
+            carried_to(Carried::Dragging(at), false, at, dragged_in())
+        };
+        assert_eq!(carried(400.0, 300.0), Carry::Here);
+        assert_eq!(carried(0.0, 300.0), Carry::Here);
+        assert_eq!(carried(-20.0, 300.0), Carry::Here);
+        assert_eq!(carried(820.0, 300.0), Carry::Here);
+    }
+
+    /// A drag carried further out than that offers the gesture to the window
+    /// system, on every side of the window.
+    #[test]
+    fn a_drag_past_the_tear_out_margin_offers_the_gesture_over() {
+        let carried = |x: f32, y: f32| {
+            let at = point(px(x), px(y));
+            carried_to(Carried::Dragging(at), false, at, dragged_in())
+        };
+        assert_eq!(carried(-40.0, 300.0), Carry::Over);
+        assert_eq!(carried(840.0, 300.0), Carry::Over);
+        assert_eq!(carried(400.0, -40.0), Carry::Over);
+        assert_eq!(carried(400.0, 640.0), Carry::Over);
+    }
+
+    /// One move can both carry a press past the threshold and take it out past
+    /// the tear-out margin, and the gesture is offered to the window system on
+    /// that one move rather than waiting for another.
+    #[test]
+    fn one_move_can_both_start_a_drag_and_offer_it_over() {
+        let pressed = Carried::Pressed(point(px(400.), px(300.)));
+        let at = point(px(-40.), px(300.));
+        assert!(past_threshold(point(px(400.), px(300.)), at));
+        assert_eq!(carried_to(pressed, false, at, dragged_in()), Carry::Over);
+    }
+
+    /// A window system that has turned the gesture down is not asked again: the
+    /// drag goes on being carried here, however far out it is taken.
+    #[test]
+    fn a_refused_gesture_is_carried_on_here() {
+        let carried = |x: f32, y: f32| {
+            let at = point(px(x), px(y));
+            carried_to(Carried::Dragging(at), true, at, dragged_in())
+        };
+        assert_eq!(carried(400.0, 300.0), Carry::Here);
+        assert_eq!(carried(-400.0, 300.0), Carry::Here);
+        assert_eq!(carried(400.0, 1200.0), Carry::Here);
+    }
+
     /// A window shows a panel where the pane holding it shows it among its tabs
     /// and the window draws that pane: a panel behind another of its pane's
     /// tabs is not shown, nor is one in a pane the window draws another in
@@ -2164,8 +2516,8 @@ mod tests {
             at(0.0, 0.0, 1200.0, 800.0),
             bounds,
             &[lone],
-            &"lone",
-            |to| re_homes(to, &"lone", true, &layout),
+            Some(&"lone"),
+            |to| re_homes(to, Some(&"lone"), true, &layout),
         );
         assert_eq!(to, None);
         assert_eq!(joined_pane(to.as_ref()), None);
