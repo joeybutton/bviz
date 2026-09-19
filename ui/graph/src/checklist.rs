@@ -104,7 +104,7 @@ pub(crate) fn carried_origins(facets: &Facets) -> Vec<OriginRow> {
         .map(|(repo, entry)| Repository {
             name: entry.name().map(|name| strings.resolve(name).to_string()),
             label: written.written(repo).to_string(),
-            origin: entry.origin().category(),
+            origin: facets.repo_category(repo),
         })
         .collect();
     repos.sort_by(|a, b| a.label.cmp(&b.label));
@@ -511,6 +511,30 @@ mod tests {
                 "the main repository",
                 "repositories of unknown origin",
                 "@rules_foo",
+            ]
+        );
+    }
+
+    /// A canonical name in the same graph naming the module an apparent name
+    /// reads as is evidence that the module exists, which lists the repository
+    /// under the module origin while leaving it a row of its own.
+    #[test]
+    fn a_repository_named_apparently_after_a_module_the_graph_names_is_listed_under_it() {
+        let mut facets = Facets::default();
+        facets.intern_repo("");
+        facets.intern_apparent_repo("llvm");
+        facets.intern_repo("llvm++llvm+llvm-project");
+
+        let rows = carried_origins(&facets);
+
+        assert_eq!(
+            labels(&origin_options(&Filter::default(), &rows)),
+            [
+                "the main repository",
+                "module repositories",
+                "@llvm",
+                "module-extension repositories",
+                "@@llvm++llvm+llvm-project",
             ]
         );
     }

@@ -283,7 +283,7 @@ fn repos(predicate: &Predicate, facets: &Facets) -> Option<Admits<RepoRef>> {
     Some(Admits::of(
         facets
             .repos()
-            .filter(|(_, entry)| {
+            .filter(|(repo, entry)| {
                 let name = entry.name().map(|name| facets.strings().resolve(name));
                 names.is_none_or(|names| {
                     names
@@ -291,7 +291,7 @@ fn repos(predicate: &Predicate, facets: &Facets) -> Option<Admits<RepoRef>> {
                         .iter()
                         .any(|named| named.as_deref() == name)
                 }) && categories
-                    .is_none_or(|categories| categories.contains(&entry.origin().category()))
+                    .is_none_or(|categories| categories.contains(&facets.repo_category(*repo)))
             })
             .map(|(repo, _)| repo),
     ))
@@ -586,6 +586,44 @@ mod tests {
 
         assert_eq!(shown(RepoName::Apparent("somerepo")), named([APPARENT]));
         assert_eq!(shown(RepoName::Canonical("somerepo")), named([CANONICAL]));
+    }
+
+    /// A repository named only apparently after a module the graph names
+    /// canonically is selected as a module repository, so the origin a checklist
+    /// lists it under reaches it.
+    #[test]
+    fn a_repository_term_over_modules_reaches_an_apparently_named_module_repository() {
+        const APPARENT: &str = "target:@llvm//lib:core";
+        const GENERATED: &str = "target:@@llvm++llvm+llvm-project//lib:support";
+
+        let mut graph = Graph::new();
+        let mut names = Names::default();
+        let mut builder = FacetsBuilder::default();
+        for (node, label) in [
+            (APPARENT, "@llvm//lib:core"),
+            (GENERATED, "@@llvm++llvm+llvm-project//lib:support"),
+        ] {
+            let id = names.intern(node);
+            graph.add_node(Node::new(id, ":lib", Kind::Target, None));
+            builder.describe_label(id, None, label);
+        }
+        let (facets, _) = builder.seal();
+
+        let modules = showing(Predicate {
+            repo_categories: Values::new([RepoCategory::Module]),
+            ..Predicate::default()
+        });
+        let verdicts = modules.evaluate(&graph, &names, &facets);
+
+        assert_eq!(
+            graph
+                .nodes
+                .iter()
+                .filter(|node| verdicts.get(node.id) == Verdict::Shown)
+                .map(|node| names.resolve(node.id))
+                .collect::<BTreeSet<&str>>(),
+            named([APPARENT])
+        );
     }
 
     #[test]

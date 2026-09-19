@@ -8,7 +8,7 @@
 //! in the node arrays.
 
 use std::borrow::Cow;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::num::NonZeroU32;
 
 use bazel_query_proto::analysis::Configuration;
@@ -168,7 +168,7 @@ pub enum Origin {
 }
 
 impl Origin {
-    pub fn category(self) -> RepoCategory {
+    pub(crate) fn category(self) -> RepoCategory {
         match self {
             Origin::Main => RepoCategory::Main,
             Origin::Module { .. } => RepoCategory::Module,
@@ -409,6 +409,9 @@ pub struct Facets {
     /// The repository each name identifies, which is how a repository already
     /// named is found again.
     repo_ids: HashMap<RepoName<Sym>, RepoRef>,
+    /// Every module a canonical name is evidence of, which is what an apparent
+    /// name is read against where it states no origin of its own.
+    modules: HashSet<Sym>,
     configs: HashMap<ConfigRef, ConfigEntry>,
     rule_classes: HashMap<RuleClassRef, RuleCategory>,
 }
@@ -525,6 +528,10 @@ impl Facets {
         if let Some(&handle) = self.repo_ids.get(&RepoName::Canonical(name)) {
             return handle;
         }
+        if let Some(module) = repo::evidenced_module(canonical) {
+            let module = self.strings.intern(module);
+            self.modules.insert(module);
+        }
         let entry = RepoEntry::Canonical {
             name,
             origin: self.origin(canonical),
@@ -597,6 +604,23 @@ impl Facets {
 
     pub fn repo_entry(&self, repo: RepoRef) -> &RepoEntry {
         &self.repos[repo.index()]
+    }
+
+    /// Where `repo` comes from, at the grain a checklist groups repositories
+    /// by and a filter selects them at.
+    ///
+    /// A canonical name states its origin outright. An apparent name states
+    /// none, but any canonical name in the same graph naming a module of that
+    /// name is evidence such a module exists — a module repository names its
+    /// own, a generated one the module whose extension made it — which places
+    /// the repository with that module's while leaving the two the separate
+    /// repositories [`RepoName`] holds them to be.
+    pub fn repo_category(&self, repo: RepoRef) -> RepoCategory {
+        let entry = self.repo_entry(repo);
+        match entry.name() {
+            RepoName::Apparent(name) if self.modules.contains(&name) => RepoCategory::Module,
+            _ => entry.origin().category(),
+        }
     }
 
     /// The name identifying `repo`, resolved to its text.
@@ -1104,6 +1128,61 @@ mod tests {
         let entry = *facets.repo_entry(repo);
         assert_eq!(entry.origin(), Origin::WorkspaceOrUnknown);
         assert_eq!(entry.module(), None);
+    }
+
+    /// A canonical name naming the module an apparent name reads as is evidence
+    /// that such a module exists, which is enough to group the repository with
+    /// that module's — a module repository's own name and a generated
+    /// repository's defining module both serve as that evidence.
+    #[test]
+    fn a_repository_named_apparently_after_a_module_the_graph_names_is_a_module_repository() {
+        for canonical in ["llvm+", "llvm++llvm+llvm-project"] {
+            let mut facets = Facets::default();
+            let apparent = facets.intern_apparent_repo("llvm");
+            facets.intern_repo(canonical);
+
+            assert_eq!(
+                facets.repo_category(apparent),
+                RepoCategory::Module,
+                "against {canonical}"
+            );
+        }
+    }
+
+    /// Grouping a repository with a module reads its name against the modules
+    /// the graph names and nothing more: the repository keeps the apparent name
+    /// identifying it, apart from every canonically named one.
+    #[test]
+    fn grouping_a_repository_with_a_module_leaves_the_two_repositories_apart() {
+        let mut facets = Facets::default();
+
+        let apparent = facets.intern_apparent_repo("rules_foo");
+        let canonical = facets.intern_repo("rules_foo+");
+
+        assert_ne!(apparent, canonical);
+        assert_eq!(facets.repo_name(apparent), RepoName::Apparent("rules_foo"));
+        assert_eq!(
+            facets.repo_entry(apparent).origin(),
+            Origin::WorkspaceOrUnknown
+        );
+        assert_eq!(facets.repos.len(), 2);
+    }
+
+    /// A name no canonical name is evidence for states no origin, so it keeps
+    /// the unresolved one rather than one guessed from how the name reads.
+    #[test]
+    fn a_repository_named_apparently_after_no_module_keeps_the_unresolved_origin() {
+        let mut facets = Facets::default();
+
+        let apparent = facets.intern_apparent_repo("bazel_lib");
+        facets.intern_repo("aspect_bazel_lib+");
+        // An extension the main repository declares names no module.
+        facets.intern_repo("+http_archive+bazel_lib");
+
+        assert_eq!(
+            facets.repo_category(apparent),
+            RepoCategory::WorkspaceOrUnknown
+        );
     }
 
     #[test]
