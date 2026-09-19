@@ -484,9 +484,10 @@ pub(crate) fn toggle_reduce(view: &mut GraphPanel, cx: &mut Context<GraphPanel>)
 /// Draws the graph through `filter` from here on.
 ///
 /// The view keeps what it can of where the reader had it: the expansion as far
-/// as the surviving nodes and the budget allow, the camera, the edge set and —
-/// the panel's own to keep — the selection. The drawing on screen stays until
-/// the one this asks for lands.
+/// as the surviving nodes and the budget allow, the camera — save where
+/// [`crate::framing::drawing_escapes_the_view`] finds nothing left under it —
+/// the edge set and, the panel's own to keep, the selection. The drawing on
+/// screen stays until the one this asks for lands.
 pub(crate) fn set_filter(view: &mut GraphPanel, filter: Filter, cx: &mut Context<GraphPanel>) {
     apply_filter(view, filter, false, cx);
 }
@@ -569,11 +570,12 @@ fn request(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
                 frame,
                 landing,
             } = view.derived.adopt(landed);
+            let restricted = restriction.is_some();
             if let Some(restriction) = restriction {
                 view.selection.forget(&restriction.dropped);
                 derive_levels(restriction.map, cx);
             }
-            if frame {
+            if frame || (restricted && crate::framing::drawing_escapes_the_view(view)) {
                 crate::framing::frame_drawing(view);
             }
             if let Some(landing) = landing {

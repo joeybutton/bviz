@@ -1,6 +1,6 @@
 use crate::camera::{
     Camera, Rect, Settle, clamp_pan, drawn_rect, ease_out_cubic, fit_view, fit_zoom, frame_view,
-    settle_view,
+    settle_view, visible_rect,
 };
 use crate::{GraphPanel, MAX_ZOOM, SETTLE_DURATION, SETTLE_MIN_PAN_STEP, SETTLE_MIN_ZOOM_STEP};
 use gpui::{App, Bounds, Entity, Pixels, Window};
@@ -212,6 +212,41 @@ impl Framing {
     }
 }
 
+/// The share of the view the drawing must cover for the camera to be worth
+/// holding. A filter change leaves the camera alone so that what survives stays
+/// under the same window; below this share nothing is left under the window to
+/// hold still, and holding it would spend the whole view on empty canvas.
+const READABLE_SHARE: f32 = 0.01;
+
+/// Whether what `view` draws covers so little of its window that the camera has
+/// nothing left to hold onto.
+pub(crate) fn drawing_escapes_the_view(view: &GraphPanel) -> bool {
+    let Some(drawn) = view.drawn() else {
+        return false;
+    };
+    let camera = view.framing.camera();
+    escapes(
+        visible_rect(view.framing.viewport(), camera),
+        &drawn.view(camera.zoom).boxes,
+    )
+}
+
+/// [`drawing_escapes_the_view`] over the layout-space `window` and the `boxes`
+/// drawn in it.
+///
+/// Each box is measured whole, boxes nested in one another included, so the
+/// share is an upper bound on what the drawing actually covers and the answer
+/// errs toward leaving the camera where it stands. A window of no extent is one
+/// no prepaint has sized yet, which the first fit answers for.
+fn escapes(window: Rect, boxes: &[bviz_graph_layout::Box]) -> bool {
+    let area = window.w * window.h;
+    if area <= 0.0 {
+        return false;
+    }
+    let covered: f64 = boxes.iter().map(|b| window.overlap(&Rect::of(b))).sum();
+    covered / area < READABLE_SHARE as f64
+}
+
 /// Moves the view onto what the panel draws. Framing is a camera move, so every
 /// box stays where the layout put it; it is what a gesture narrowing the drawing
 /// to a named part of the graph asks for, since what survives such a gesture is
@@ -294,6 +329,53 @@ mod tests {
             to_pan: pan,
             start,
         }
+    }
+
+    fn lbox(x: f64, y: f64, w: f64, h: f64) -> bviz_graph_layout::Box {
+        bviz_graph_layout::Box {
+            id: bviz_graph_layout::Id(0),
+            label: String::new(),
+            kind: bviz_graph_layout::Kind::Source,
+            x,
+            y,
+            width: w,
+            height: h,
+            compound: false,
+            group: false,
+        }
+    }
+
+    /// The window a view fitted to the whole graph shows, in layout units.
+    const WINDOW: Rect = Rect {
+        x: 0.0,
+        y: 0.0,
+        w: CONTENT.0 as f64,
+        h: CONTENT.1 as f64,
+    };
+
+    /// A filter leaving boxes that fill the window leaves the camera where the
+    /// reader put it; one leaving a speck in a window the whole graph's extent
+    /// still spans leaves nothing to hold still.
+    #[test]
+    fn a_drawing_escapes_the_view_only_once_it_covers_next_to_none_of_it() {
+        assert!(!escapes(WINDOW, &[lbox(0.0, 0.0, 2000.0, 1500.0)]));
+        assert!(escapes(WINDOW, &[lbox(1000.0, 1000.0, 40.0, 30.0)]));
+        assert!(escapes(WINDOW, &[]));
+        // A box off the window covers none of it however large it is.
+        assert!(escapes(WINDOW, &[lbox(90_000.0, 0.0, 4000.0, 3000.0)]));
+    }
+
+    /// A window no prepaint has sized is one the first fit answers for, so it
+    /// asks for no move of its own.
+    #[test]
+    fn a_window_of_no_extent_moves_nothing() {
+        let unsized_yet = Rect {
+            x: 0.0,
+            y: 0.0,
+            w: 0.0,
+            h: 0.0,
+        };
+        assert!(!escapes(unsized_yet, &[]));
     }
 
     #[test]

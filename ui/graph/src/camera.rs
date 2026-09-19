@@ -33,6 +33,14 @@ impl Rect {
             && other.y <= self.y + self.h
     }
 
+    /// The area the two rectangles share, zero where they miss each other.
+    pub(crate) fn overlap(&self, other: &Rect) -> f64 {
+        let along = |near: f64, extent: f64, other_near: f64, other_extent: f64| {
+            ((near + extent).min(other_near + other_extent) - near.max(other_near)).max(0.0)
+        };
+        along(self.x, self.w, other.x, other.w) * along(self.y, self.h, other.y, other.h)
+    }
+
     /// Whether this rectangle covers `(x, y)`, counting its edges.
     pub(crate) fn covers(&self, x: f32, y: f32) -> bool {
         let (x, y) = (x as f64, y as f64);
@@ -457,6 +465,40 @@ mod tests {
         let rect = drawn_rect(&g).expect("a drawing holding boxes");
         assert_eq!((rect.x, rect.y, rect.w, rect.h), (100.0, 20.0, 240.0, 80.0));
         assert!(drawn_rect(&LaidOut::default()).is_none());
+    }
+
+    #[test]
+    fn the_overlap_is_the_area_two_rectangles_share() {
+        let view = Rect {
+            x: 100.0,
+            y: 100.0,
+            w: 50.0,
+            h: 20.0,
+        };
+        let within = Rect {
+            x: 110.0,
+            y: 105.0,
+            w: 10.0,
+            h: 4.0,
+        };
+        assert_eq!(view.overlap(&within), 40.0);
+        assert_eq!(within.overlap(&view), 40.0);
+        // Clipped to the part that falls inside.
+        let across = Rect {
+            x: 90.0,
+            y: 100.0,
+            w: 20.0,
+            h: 20.0,
+        };
+        assert_eq!(view.overlap(&across), 200.0);
+        // Apart on one axis is apart.
+        let beyond = Rect {
+            x: 200.0,
+            y: 100.0,
+            w: 10.0,
+            h: 20.0,
+        };
+        assert_eq!(view.overlap(&beyond), 0.0);
     }
 
     /// A route reaching further than the view can show cannot be followed to its
