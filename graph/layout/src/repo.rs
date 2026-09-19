@@ -233,11 +233,13 @@ mod tests {
                 RepoOrigin::ModuleExtension { isolated: false },
             ),
             (
-                "rules_foo+_ext+mod+1.0+usage+repo",
+                "rules_foo++_ext+mod+1.0+usage+repo",
                 RepoOrigin::ModuleExtension { isolated: true },
             ),
+            // A well-known module's canonical name carries no separator, so an
+            // extension it defines puts the isolation mark straight after it.
             (
-                "rules_foo++_ext+mod+1.0+usage+repo",
+                "bazel_tools+_ext+mod+1.0+usage+repo",
                 RepoOrigin::ModuleExtension { isolated: true },
             ),
             // A repository declared in WORKSPACE has a plain name.
@@ -264,7 +266,8 @@ mod tests {
             ("bazel_tools", Some("bazel_tools")),
             ("llvm++llvm+llvm-project", Some("llvm")),
             ("rules_foo+1.2.3+ext+repo", Some("rules_foo")),
-            ("rules_foo+_ext+mod+1.0+usage+repo", Some("rules_foo")),
+            ("rules_foo++_ext+mod+1.0+usage+repo", Some("rules_foo")),
+            ("bazel_tools+_ext+mod+1.0+usage+repo", Some("bazel_tools")),
             // An extension the main repository declares names no module.
             ("+http_archive+foo", None),
             ("", None),
