@@ -1,19 +1,18 @@
 //! One-click reductions: the rules a reader would otherwise have to assemble by
 //! hand, each naming the rule classes, origins or mnemonics that qualify.
 //!
-//! A preset is a set of values on the [`crate::rules`] terms, so it reads back
-//! out of the filter exactly as a checklist's rows do: it stands applied while
-//! everything it names is hidden, and clicking it hides or shows that lot. The
-//! terms are shared, so a preset and a checklist over the same term move each
-//! other.
+//! A preset is written over the [`crate::rules`] terms, so it reads back out of
+//! the filter exactly as a checklist's rows do, and the terms are shared, so a
+//! preset and a checklist over the same term move each other.
 
-use crate::rules::{self, Value};
+use crate::rules::{self, Term, Value};
 use bviz_graph_layout::facets::RuleCategory;
 use bviz_graph_layout::graph::Graph;
 use bviz_graph_layout::repo::RepoCategory;
 use bviz_graph_layout::select::Filter;
 use bviz_graph_layout::{Axis, Capabilities, Facets, Kind, Support};
 use bviz_ui_components::MultiOption;
+use std::collections::BTreeSet;
 
 /// Every repository origin outside the one the build runs in.
 const EXTERNAL_ORIGINS: [RepoCategory; 4] = [
@@ -43,6 +42,23 @@ const RUNFILES_MNEMONICS: [&str; 10] = [
     "Middleman",
 ];
 
+/// What a preset leaves on the terms it is written over, which is what its
+/// label promises a reader.
+///
+/// A label naming what the preset removes promises nothing about the rest of
+/// its terms, so it may only add to what they hide. A label asserting what is
+/// left — "the main repository only" — promises the whole of its terms, which
+/// is reached only by stating them.
+#[derive(Clone, PartialEq, Eq, Debug)]
+enum Reduction {
+    /// Hides these values, leaving everything else hidden on their terms as it
+    /// stands, and shows these again when taken off.
+    Adds(Vec<Value>),
+    /// Hides on each term exactly the values given and nothing else, and leaves
+    /// each term hiding nothing at all when taken off.
+    States(Vec<(Term, BTreeSet<Value>)>),
+}
+
 /// A reduction offered as one click.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum Preset {
@@ -70,19 +86,30 @@ impl Preset {
         }
     }
 
-    /// The values the preset hides.
-    pub(crate) fn hides(self) -> Vec<Value> {
+    /// What the preset leaves on the terms it is written over.
+    fn reduction(self) -> Reduction {
         match self {
-            Preset::Plumbing => vec![Value::RuleCategory(RuleCategory::Plumbing)],
-            Preset::MainRepositoryOnly => EXTERNAL_ORIGINS
-                .into_iter()
-                .map(Value::RepoCategory)
-                .collect(),
-            Preset::ToolConfigurations => vec![Value::ToolConfiguration],
-            Preset::RunfilesPlumbing => RUNFILES_MNEMONICS
-                .into_iter()
-                .map(|mnemonic| Value::Mnemonic(mnemonic.to_string()))
-                .collect(),
+            Preset::Plumbing => Reduction::Adds(vec![Value::RuleCategory(RuleCategory::Plumbing)]),
+            // A repository is selected on two terms at once, its origin and its
+            // name, so both have to be stated for the main repository to be the
+            // whole of what is drawn.
+            Preset::MainRepositoryOnly => Reduction::States(vec![
+                (
+                    Term::RepoCategory,
+                    EXTERNAL_ORIGINS
+                        .into_iter()
+                        .map(Value::RepoCategory)
+                        .collect(),
+                ),
+                (Term::Repo, BTreeSet::new()),
+            ]),
+            Preset::ToolConfigurations => Reduction::Adds(vec![Value::ToolConfiguration]),
+            Preset::RunfilesPlumbing => Reduction::Adds(
+                RUNFILES_MNEMONICS
+                    .into_iter()
+                    .map(|mnemonic| Value::Mnemonic(mnemonic.to_string()))
+                    .collect(),
+            ),
         }
     }
 
@@ -157,19 +184,31 @@ pub(crate) fn options(filter: &Filter, offers: &[Offer]) -> Vec<MultiOption> {
         .collect()
 }
 
-/// Whether `filter` hides everything `preset` names.
+/// Whether `filter` stands where `preset` leaves it.
 pub(crate) fn applied(filter: &Filter, preset: Preset) -> bool {
-    preset
-        .hides()
-        .iter()
-        .all(|value| rules::hides(filter, value))
+    match preset.reduction() {
+        Reduction::Adds(values) => values.iter().all(|value| rules::hides(filter, value)),
+        Reduction::States(terms) => terms
+            .into_iter()
+            .all(|(term, values)| rules::hidden(filter, term) == values),
+    }
 }
 
-/// `filter` with `preset` applied, or with everything it names shown again.
+/// `filter` with `preset` applied, or taken back off.
 pub(crate) fn set_applied(filter: &Filter, preset: Preset, applied: bool) -> Filter {
-    preset.hides().iter().fold(filter.clone(), |filter, value| {
-        rules::set_hidden(&filter, value, applied)
-    })
+    match preset.reduction() {
+        Reduction::Adds(values) => values.iter().fold(filter.clone(), |filter, value| {
+            rules::set_hidden(&filter, value, applied)
+        }),
+        Reduction::States(terms) => {
+            terms
+                .into_iter()
+                .fold(filter.clone(), |filter, (term, values)| {
+                    let values = if applied { values } else { BTreeSet::new() };
+                    rules::hiding(&filter, term, values)
+                })
+        }
+    }
 }
 
 /// The preset `offers[index]` names, and `None` where the inputs cannot answer
@@ -200,6 +239,7 @@ mod tests {
     use bviz_graph_layout::capability::CapabilitiesBuilder;
     use bviz_graph_layout::graph::Node;
     use bviz_graph_layout::intern::Id;
+    use bviz_graph_layout::repo::RepoName;
     use bviz_graph_layout::select::{Predicate, Rule, Values, Visibility};
 
     /// A graph of one target in an external repository, with the action that
@@ -302,13 +342,65 @@ mod tests {
     /// names Bazel has given it, so a dump from either release reduces alike.
     #[test]
     fn the_runfiles_preset_names_the_runfiles_tree_action_of_either_release() {
-        let hidden = Preset::RunfilesPlumbing.hides();
+        let Reduction::Adds(hidden) = Preset::RunfilesPlumbing.reduction() else {
+            panic!("the runfiles preset names what it removes");
+        };
         for mnemonic in ["RunfilesTree", "Middleman"] {
             assert!(
                 hidden.contains(&Value::Mnemonic(mnemonic.to_string())),
                 "{mnemonic}"
             );
         }
+    }
+
+    /// A preset asserting what is left states its terms, so what it keeps is
+    /// drawn again however they were left — a repository checklist cleared to
+    /// nothing included, which is the state the preset would otherwise add to
+    /// and leave empty.
+    #[test]
+    fn a_preset_naming_an_end_state_shows_again_what_it_keeps() {
+        let cleared = [
+            Value::RepoCategory(RepoCategory::Main),
+            Value::Repo(RepoName::Canonical("rules_foo+".into())),
+        ]
+        .iter()
+        .fold(Filter::default(), |filter, value| {
+            rules::set_hidden(&filter, value, true)
+        });
+
+        let only_main = set_applied(&cleared, Preset::MainRepositoryOnly, true);
+
+        assert!(applied(&only_main, Preset::MainRepositoryOnly));
+        assert!(!rules::hides(
+            &only_main,
+            &Value::RepoCategory(RepoCategory::Main)
+        ));
+        assert!(rules::hidden(&only_main, Term::Repo).is_empty());
+        assert_eq!(
+            set_applied(&only_main, Preset::MainRepositoryOnly, false),
+            Filter::default()
+        );
+    }
+
+    /// A preset naming what it removes adds to its terms and takes back only
+    /// its own, so what a bulk clear hid there stands through both.
+    #[test]
+    fn a_preset_naming_what_it_removes_leaves_the_rest_of_its_term_hidden() {
+        let others = [RuleCategory::Test, RuleCategory::Alias];
+        let cleared = others.iter().fold(Filter::default(), |filter, &category| {
+            rules::set_hidden(&filter, &Value::RuleCategory(category), true)
+        });
+
+        let reduced = set_applied(&cleared, Preset::Plumbing, true);
+
+        assert!(applied(&reduced, Preset::Plumbing));
+        for category in others {
+            assert!(
+                rules::hides(&reduced, &Value::RuleCategory(category)),
+                "{category:?}"
+            );
+        }
+        assert_eq!(set_applied(&reduced, Preset::Plumbing, false), cleared);
     }
 
     /// Everything a preset names is hidden together, so a preset stands applied

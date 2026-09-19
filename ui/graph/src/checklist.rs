@@ -604,6 +604,47 @@ mod tests {
         );
     }
 
+    /// The preset naming the main repository draws it however the checklist was
+    /// left, so clearing every repository and then asking for that repository
+    /// alone leaves it drawn and the checklist reading it. Taking the preset
+    /// back off lifts the restriction it stated rather than half of it.
+    #[test]
+    fn clearing_every_repository_and_applying_the_main_repository_preset_draws_it() {
+        let rows = carried_origins(&facets());
+        let cleared = origins_chosen(&Filter::default(), &rows, &set_all(0..rows.len(), false));
+
+        let only_main = preset::set_applied(&cleared, preset::Preset::MainRepositoryOnly, true);
+
+        assert_eq!(
+            checked(&origin_options(&only_main, &rows)),
+            [true, false, false, false, false, false]
+        );
+        assert_eq!(
+            checked(&origin_options(
+                &preset::set_applied(&only_main, preset::Preset::MainRepositoryOnly, false),
+                &rows
+            )),
+            [true; 6]
+        );
+    }
+
+    /// The checklist acts on whatever the preset left, so clearing every row
+    /// after the preset leaves nothing drawn and the preset no longer applied.
+    #[test]
+    fn clearing_every_repository_after_the_main_repository_preset_leaves_nothing_drawn() {
+        let rows = carried_origins(&facets());
+        let only_main =
+            preset::set_applied(&Filter::default(), preset::Preset::MainRepositoryOnly, true);
+
+        let cleared = origins_chosen(&only_main, &rows, &set_all(0..rows.len(), false));
+
+        assert_eq!(checked(&origin_options(&cleared, &rows)), [false; 6]);
+        assert!(!preset::applied(
+            &cleared,
+            preset::Preset::MainRepositoryOnly
+        ));
+    }
+
     /// A group's own actions reach the repositories under it and no others, so
     /// one origin is cleared while the rest stay drawn.
     #[test]
