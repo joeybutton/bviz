@@ -15,6 +15,7 @@ use bviz_graph_layout::select::Filter;
 use bviz_graph_layout::{Facets, Kind};
 use bviz_ui_components::{MultiOption, MultiSelectEvent};
 use gpui::Context;
+use std::collections::BTreeSet;
 
 /// The node classes `graph` holds boxes for, in the order the kinds are
 /// declared, which runs from the outermost box a drawing nests to the leaves
@@ -46,12 +47,10 @@ fn class_label(kind: Kind) -> &'static str {
 
 /// The options a class checklist draws for `classes` under `filter`.
 pub(crate) fn class_options(filter: &Filter, classes: &[Kind]) -> Vec<MultiOption> {
+    let hidden = rules::hidden(filter, Term::Kind);
     classes
         .iter()
-        .map(|&kind| {
-            let hidden = rules::hides(filter, &Value::Kind(kind));
-            MultiOption::new(class_label(kind), !hidden)
-        })
+        .map(|&kind| MultiOption::new(class_label(kind), !hidden.contains(&Value::Kind(kind))))
         .collect()
 }
 
@@ -124,51 +123,108 @@ pub(crate) fn carried_origins(facets: &Facets) -> Vec<OriginRow> {
     rows
 }
 
+/// What a filter hides of the two terms a repository checklist's rows span.
+///
+/// Reading either out of a filter walks every rule and rebuilds the predicate
+/// each states, so a checklist over hundreds of repositories reads both once and
+/// answers for every row from these sets.
+struct HiddenOrigins {
+    repos: BTreeSet<RepoName<String>>,
+    origins: BTreeSet<RepoCategory>,
+}
+
+impl HiddenOrigins {
+    fn of(filter: &Filter) -> Self {
+        HiddenOrigins {
+            repos: rules::hidden(filter, Term::Repo)
+                .into_iter()
+                .filter_map(|value| match value {
+                    Value::Repo(name) => Some(name),
+                    _ => None,
+                })
+                .collect(),
+            origins: rules::hidden(filter, Term::RepoCategory)
+                .into_iter()
+                .filter_map(|value| match value {
+                    Value::RepoCategory(origin) => Some(origin),
+                    _ => None,
+                })
+                .collect(),
+        }
+    }
+
+    fn hides_repo(&self, repo: &Repository) -> bool {
+        self.repos.contains(&repo.name)
+    }
+
+    fn hides_origin(&self, origin: RepoCategory) -> bool {
+        self.origins.contains(&origin)
+    }
+
+    /// Hides the repository checklist's `row`, or shows it where `hidden` is
+    /// false, holding the two terms it spans in step.
+    fn set(&mut self, rows: &[OriginRow], row: &OriginRow, hidden: bool) {
+        match row {
+            OriginRow::Origin(origin) => {
+                // The origin's own rule covers its repositories, so what the
+                // repository rule said about them adds nothing either way.
+                for repo in under(rows, *origin) {
+                    self.repos.remove(&repo.name);
+                }
+                set_in(&mut self.origins, *origin, hidden);
+            }
+            OriginRow::Repo(repo) => {
+                self.spell_out(rows, repo.origin);
+                set_in(&mut self.repos, repo.name.clone(), hidden);
+            }
+        }
+    }
+
+    /// Restates a hidden `origin` as the repositories it covers, so that one of
+    /// them can be shown again without the rest coming back with it.
+    fn spell_out(&mut self, rows: &[OriginRow], origin: RepoCategory) {
+        if !self.origins.remove(&origin) {
+            return;
+        }
+        self.repos
+            .extend(under(rows, origin).map(|repo| repo.name.clone()));
+    }
+
+    /// `filter` with its rules over the two terms restated over these sets.
+    fn written(self, filter: &Filter) -> Filter {
+        let repos = self.repos.into_iter().map(Value::Repo).collect();
+        let origins = self.origins.into_iter().map(Value::RepoCategory).collect();
+        let filter = rules::hiding(filter, Term::Repo, repos);
+        rules::hiding(&filter, Term::RepoCategory, origins)
+    }
+}
+
+fn set_in<T: Ord>(values: &mut BTreeSet<T>, value: T, held: bool) {
+    match held {
+        true => values.insert(value),
+        false => values.remove(&value),
+    };
+}
+
 /// The options a repository checklist draws for `rows` under `filter`. An origin
 /// is checked only while every repository it covers is drawn, so no row stands
 /// checked over something the drawing leaves out.
 pub(crate) fn origin_options(filter: &Filter, rows: &[OriginRow]) -> Vec<MultiOption> {
+    let hidden = HiddenOrigins::of(filter);
     rows.iter()
         .map(|row| match row {
             OriginRow::Origin(origin) => MultiOption::new(
                 origin_label(*origin),
-                !rules::hides(filter, &Value::RepoCategory(*origin))
-                    && under(rows, *origin).all(|repo| !hides_repo(filter, repo)),
+                !hidden.hides_origin(*origin)
+                    && under(rows, *origin).all(|repo| !hidden.hides_repo(repo)),
             )
             .heading(),
             OriginRow::Repo(repo) => MultiOption::new(
                 repo.label.clone(),
-                !hides_repo(filter, repo)
-                    && !rules::hides(filter, &Value::RepoCategory(repo.origin)),
+                !hidden.hides_repo(repo) && !hidden.hides_origin(repo.origin),
             ),
         })
         .collect()
-}
-
-/// `filter` with the repository checklist's `row` hidden, or shown where
-/// `hidden` is false, holding the two terms it spans in step.
-pub(crate) fn set_origin_hidden(
-    filter: &Filter,
-    rows: &[OriginRow],
-    row: &OriginRow,
-    hidden: bool,
-) -> Filter {
-    match row {
-        OriginRow::Origin(origin) => {
-            // The origin's own rule covers its repositories, so what the
-            // repository rule said about them adds nothing either way.
-            let filter = showing(filter, under(rows, *origin));
-            rules::set_hidden(&filter, &Value::RepoCategory(*origin), hidden)
-        }
-        OriginRow::Repo(repo) => {
-            let filter = spelled_out(filter, rows, repo.origin);
-            rules::set_hidden(&filter, &Value::Repo(repo.name.clone()), hidden)
-        }
-    }
-}
-
-fn hides_repo(filter: &Filter, repo: &Repository) -> bool {
-    rules::hides(filter, &Value::Repo(repo.name.clone()))
 }
 
 /// The repositories `rows` carries under `origin`.
@@ -177,29 +233,6 @@ fn under(rows: &[OriginRow], origin: RepoCategory) -> impl Iterator<Item = &Repo
         OriginRow::Repo(repo) if repo.origin == origin => Some(repo),
         _ => None,
     })
-}
-
-/// `filter` with each of `repos` dropped from what the repository term hides.
-fn showing<'a>(filter: &Filter, repos: impl Iterator<Item = &'a Repository>) -> Filter {
-    let mut hidden = rules::hidden(filter, Term::Repo);
-    for repo in repos {
-        hidden.remove(&Value::Repo(repo.name.clone()));
-    }
-    rules::hiding(filter, Term::Repo, hidden)
-}
-
-/// `filter` with a hidden `origin` restated as the repositories it covers, so
-/// that one of them can be shown again without the rest coming back with it;
-/// `filter` itself where the origin is not hidden.
-fn spelled_out(filter: &Filter, rows: &[OriginRow], origin: RepoCategory) -> Filter {
-    let category = Value::RepoCategory(origin);
-    if !rules::hides(filter, &category) {
-        return filter.clone();
-    }
-    let mut hidden = rules::hidden(filter, Term::Repo);
-    hidden.extend(under(rows, origin).map(|repo| Value::Repo(repo.name.clone())));
-    let filter = rules::hiding(filter, Term::Repo, hidden);
-    rules::set_hidden(&filter, &category, false)
 }
 
 /// Takes up what a freshly read graph carries on each axis and states the
@@ -260,14 +293,18 @@ fn chosen(
     event: &MultiSelectEvent,
     row: impl Fn(&Filter, usize, bool) -> Filter,
 ) -> Filter {
-    match event {
-        MultiSelectEvent::Toggled { index, checked } => row(filter, *index, *checked),
-        MultiSelectEvent::SetAll { range, checked } => {
-            range.clone().fold(filter.clone(), |filter, index| {
-                row(&filter, index, *checked)
-            })
-        }
-    }
+    acted(event).fold(filter.clone(), |filter, (index, checked)| {
+        row(&filter, index, checked)
+    })
+}
+
+/// The rows `event` acts on, each with what it asks that row to become.
+fn acted(event: &MultiSelectEvent) -> impl Iterator<Item = (usize, bool)> {
+    let (rows, checked) = match event {
+        MultiSelectEvent::Toggled { index, checked } => (*index..*index + 1, *checked),
+        MultiSelectEvent::SetAll { range, checked } => (range.clone(), *checked),
+    };
+    rows.map(move |index| (index, checked))
 }
 
 /// `filter` with the node classes the class checklist's `event` names drawn, or
@@ -292,12 +329,13 @@ pub(crate) fn origins_chosen(
     rows: &[OriginRow],
     event: &MultiSelectEvent,
 ) -> Filter {
-    chosen(filter, event, |filter, index, checked| {
-        match rows.get(index) {
-            Some(row) => set_origin_hidden(filter, rows, row, !checked),
-            None => filter.clone(),
+    let mut hiding = HiddenOrigins::of(filter);
+    for (index, checked) in acted(event) {
+        if let Some(row) = rows.get(index) {
+            hiding.set(rows, row, !checked);
         }
-    })
+    }
+    hiding.written(filter)
 }
 
 /// `filter` with the reductions the preset checklist's `event` names applied, or
@@ -374,6 +412,19 @@ mod tests {
         facets.intern_repo("rules_bar+");
         facets.intern_repo("rules_foo++ext+generated");
         facets
+    }
+
+    /// `filter` with the repository checklist's `row` hidden, or shown where
+    /// `hidden` is false, which is what one click on that row leaves.
+    fn set_origin_hidden(
+        filter: &Filter,
+        rows: &[OriginRow],
+        row: &OriginRow,
+        hidden: bool,
+    ) -> Filter {
+        let mut hiding = HiddenOrigins::of(filter);
+        hiding.set(rows, row, hidden);
+        hiding.written(filter)
     }
 
     fn labels(options: &[MultiOption]) -> Vec<&str> {
