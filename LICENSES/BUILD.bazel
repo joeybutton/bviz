@@ -11,6 +11,7 @@ package_metadata(
     attributes = [":gpui_license"],
     purl = "pkg:github/zed-industries/zed@v1.6.3",
     visibility = [
+        "//patches/gpui:__pkg__",
         "//patches/gpui_linux:__pkg__",
         "//patches/gpui_macos:__pkg__",
         "//patches/media:__pkg__",

@@ -110,6 +110,11 @@ crate.annotation_select(
 # - embedded-fonts-only: construct the text system with an empty font DB to skip
 #   the ~700ms startup enumeration of every system font on the main thread; the
 #   app registers its own embedded faces, which cover its ASCII/Latin-1 labels.
+# - platform-drag: gpui's Wayland backend binds wl_data_device for the clipboard
+#   and for incoming file drops alone; carry a drag the application offers over
+#   on a wl_data_source with an icon surface of its own, and report a drag
+#   carrying the mime type the application takes to whichever window it is
+#   carried over.
 crate.annotation(
     crate = "gpui_linux",
     patch_args = ["-p1"],
@@ -117,6 +122,7 @@ crate.annotation(
         "//patches/gpui_linux:gpui_linux-untile-restore.patch",
         "//patches/gpui_linux:gpui_linux-clear-hover-on-leave.patch",
         "//patches/gpui_linux:gpui_linux-embedded-fonts-only.patch",
+        "//patches/gpui_linux:gpui_linux-platform-drag.patch",
     ],
 )
 
@@ -131,6 +137,16 @@ crate.annotation(
 # value in GPUI_MANIFEST_DIR, which bakes the exec root into every build of the
 # crate. Point it at the manifest's path within gpui's source tree so the
 # compiled output stays independent of where the build ran.
+#
+# gpui carries a drag to its own views and never to the window system, so
+# nothing outside the window a gesture started in hears of one, and nothing it
+# draws is reachable past that window's edge. The platform-drag patch gives a
+# window the requests to offer a gesture to the window system, to say which mime
+# type it takes a drag under, and to hear what a drag the window system carries
+# does; a backend that implements none of them takes no gesture and says so.
+# Rasterizing a glyph goes with them: what a window system draws for a drag is
+# an image, and gpui's text system is where the application's own faces are
+# loaded.
 crate.annotation(
     additive_build_file_content = """filegroup(
     name = "scene_src",
@@ -148,6 +164,8 @@ filegroup(
         "gpui_scene_src": "scene_src",
         "gpui_shader_type_srcs": "shader_type_srcs",
     },
+    patch_args = ["-p1"],
+    patches = ["//patches/gpui:gpui-platform-drag.patch"],
     rustc_env = {"CARGO_MANIFEST_DIR": "crates/gpui"},
 )
 crate.annotation(
