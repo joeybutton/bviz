@@ -15,6 +15,15 @@
 /// identifies a repository only among those no input named canonically, and a
 /// repository so identified stands apart from every canonically named one
 /// however the two names compare.
+///
+/// One repository therefore occupies two identities wherever the inputs write
+/// it both ways — an aquery printing the canonical name while a query prints
+/// the apparent one a dependent renamed it to — and is listed twice, drawing
+/// its targets under each. That the two names meet is what the repository
+/// mapping states and the files do not, and a name one module coined binds no
+/// other module, so taking two names for one repository on the strength of how
+/// they read would draw two repositories' targets onto one node, which nothing
+/// downstream can tell apart again.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
 pub enum RepoName<T> {
     Canonical(T),

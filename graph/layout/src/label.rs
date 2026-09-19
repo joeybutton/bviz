@@ -106,10 +106,8 @@ impl RepoMapping {
     /// Such a name is one its repository carries in its own right — a
     /// WORKSPACE-era repository, a module Bazel names bare — and so is the name
     /// a repository mapping resolves to it. Every other apparent name is one
-    /// module's own word for a repository, stated by that module's repository
-    /// mapping alone, which no dump carries; leaving it unresolved shows one
-    /// repository's targets under two names, while resolving it wrongly merges
-    /// two repositories' targets into one node.
+    /// module's own word for a repository, which that module's repository
+    /// mapping alone states and [`RepoName`] identifies a repository by.
     pub(crate) fn infer<'a>(observed: impl Iterator<Item = &'a str>) -> Self {
         RepoMapping {
             canonical: observed.map(str::to_string).collect(),

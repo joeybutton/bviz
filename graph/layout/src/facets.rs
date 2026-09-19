@@ -533,9 +533,7 @@ impl Facets {
     }
 
     /// The handle for the repository a label named `@apparent`, which no input
-    /// named canonically. It is a repository of its own however it reads: the
-    /// name resolves only through the repository mapping of the module that
-    /// wrote it, which no dump carries.
+    /// named canonically.
     pub fn intern_apparent_repo(&mut self, apparent: &str) -> RepoRef {
         let name = RepoName::Apparent(self.strings.intern(apparent));
         if let Some(&handle) = self.repo_ids.get(&name) {
