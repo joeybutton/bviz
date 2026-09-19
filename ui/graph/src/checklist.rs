@@ -604,6 +604,24 @@ mod tests {
         }
     }
 
+    /// The capabilities of inputs stating every axis a preset reads.
+    fn stating_every_axis() -> bviz_graph_layout::Capabilities {
+        let mut capabilities = bviz_graph_layout::capability::CapabilitiesBuilder::default();
+        for axis in bviz_graph_layout::Axis::ALL {
+            capabilities.observe(axis, true);
+        }
+        capabilities.seal()
+    }
+
+    /// The presets offered over the fixtures, which carry repositories and one
+    /// rule class but no configuration and no action — so the presets over the
+    /// first two axes are on offer and the other two are withheld.
+    fn offered_presets() -> Vec<preset::Offer> {
+        let mut facets = facets();
+        facets.intern_rule_class("cc_library");
+        preset::offers(&graph(), &facets, &stating_every_axis())
+    }
+
     /// Clearing the menu leaves nothing drawn, and checking one repository after
     /// it brings back that repository alone — which is how a graph naming
     /// hundreds is narrowed to the one being looked at.
@@ -719,24 +737,51 @@ mod tests {
     /// inputs can answer, and leave the rest alone.
     #[test]
     fn applying_every_preset_reaches_the_ones_the_inputs_can_answer() {
-        let mut graph = Graph::new();
-        graph.add_node(Node::new(Id(0), ":lib", Kind::Target, None));
-        let mut facets = Facets::default();
-        facets.intern_rule_class("cc_library");
-        let mut capabilities = bviz_graph_layout::capability::CapabilitiesBuilder::default();
-        for axis in bviz_graph_layout::Axis::ALL {
-            capabilities.observe(axis, true);
-        }
-        let offers = preset::offers(&graph, &facets, &capabilities.seal());
+        let offers = offered_presets();
         let all = set_all(0..offers.len(), true);
 
         let applied = presets_chosen(&Filter::default(), &offers, &all);
 
-        let options = preset::options(&applied, &offers);
-        assert_eq!(checked(&options), [true, false, false, false]);
+        assert_eq!(
+            checked(&preset::options(&applied, &offers)),
+            [true, true, false, false]
+        );
         assert_eq!(
             presets_chosen(&applied, &offers, &set_all(0..offers.len(), false)),
             Filter::default()
+        );
+    }
+
+    /// A menu-wide clear over the presets takes off the presets standing and
+    /// nothing else. A preset the reader never applied owns none of the rules
+    /// over the terms it would state, so the repositories the repository
+    /// checklist left out stay out through it.
+    #[test]
+    fn clearing_every_preset_leaves_what_the_repository_checklist_hid() {
+        let rows = carried_origins(&facets());
+        let extensions = rows
+            .iter()
+            .position(|row| *row == OriginRow::Origin(RepoCategory::ModuleExtension))
+            .expect("the fixture carries module-extension repositories");
+        let hiding = origins_chosen(
+            &Filter::default(),
+            &rows,
+            &MultiSelectEvent::Toggled {
+                index: extensions,
+                checked: false,
+            },
+        );
+        let offers = offered_presets();
+        assert!(!preset::applied(
+            &hiding,
+            preset::Preset::MainRepositoryOnly
+        ));
+
+        let cleared = presets_chosen(&hiding, &offers, &set_all(0..offers.len(), false));
+
+        assert_eq!(
+            checked(&origin_options(&cleared, &rows)),
+            [true, true, true, true, false, false]
         );
     }
 

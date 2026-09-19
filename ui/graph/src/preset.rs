@@ -194,8 +194,16 @@ pub(crate) fn applied(filter: &Filter, preset: Preset) -> bool {
     }
 }
 
-/// `filter` with `preset` applied, or taken back off.
+/// `filter` with `preset` applied, or taken back off; `filter` as it stands
+/// where it already reads as asked.
+///
+/// A preset naming an end state takes itself off by clearing the whole of every
+/// term it states, so acting on one that does not stand would drop rules the
+/// preset never wrote — among them whatever another control hid on those terms.
 pub(crate) fn set_applied(filter: &Filter, preset: Preset, applied: bool) -> Filter {
+    if self::applied(filter, preset) == applied {
+        return filter.clone();
+    }
     match preset.reduction() {
         Reduction::Adds(values) => values.iter().fold(filter.clone(), |filter, value| {
             rules::set_hidden(&filter, value, applied)
@@ -413,6 +421,24 @@ mod tests {
             rules::set_hidden(&filter, &Value::RepoCategory(RepoCategory::Builtin), false);
 
         assert!(!applied(&one_back, preset));
+    }
+
+    /// A preset is taken off only where it stands. One naming an end state
+    /// clears the whole of the terms it states, so taking off a preset that was
+    /// never applied would drop what another control wrote over those terms.
+    #[test]
+    fn taking_off_a_preset_that_does_not_stand_leaves_the_filter_alone() {
+        let hiding_extensions = rules::set_hidden(
+            &Filter::default(),
+            &Value::RepoCategory(RepoCategory::ModuleExtension),
+            true,
+        );
+        assert!(!applied(&hiding_extensions, Preset::MainRepositoryOnly));
+
+        assert_eq!(
+            set_applied(&hiding_extensions, Preset::MainRepositoryOnly, false),
+            hiding_extensions
+        );
     }
 
     #[test]
