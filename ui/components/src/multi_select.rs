@@ -467,10 +467,11 @@ impl MultiSelect {
         label_width: Pixels,
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
+        let grouped = self.rows.grouped();
         let rows = self
             .rows
             .listed()
-            .map(|(index, option)| self.row(index, option, colors, label_width, cx));
+            .map(|(index, option)| self.row(index, option, grouped, colors, label_width, cx));
         let list = div()
             .id("multi-select-list")
             .flex()
@@ -496,10 +497,13 @@ impl MultiSelect {
             .child(bar)
     }
 
+    /// One row of the menu. `grouped` says whether any of the menu's values
+    /// heads a group, which is what the rows under one are indented past.
     fn row(
         &self,
         index: usize,
         option: &MultiOption,
+        grouped: bool,
         colors: &ThemeColors,
         label_width: Pixels,
         cx: &Context<Self>,
@@ -525,7 +529,7 @@ impl MultiSelect {
             }
             cx.notify();
         }))
-        .children(self.rows.grouped().then(|| match heads_values {
+        .children(grouped.then(|| match heads_values {
             true => self.fold_mark(index, option, colors, cx).into_any_element(),
             false => menu::gutter().into_any_element(),
         }))
