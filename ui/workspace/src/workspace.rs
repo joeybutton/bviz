@@ -153,6 +153,11 @@ struct PanelDrag {
     /// whatever is left where it stood.
     panel: EntityId,
     carried: Carried,
+    /// Where the last frame drawn marked the panel landing, which is where the
+    /// release ending the drag puts it, so that what the drag shows is what it
+    /// does. `None` where that frame marked nothing, and until a frame has
+    /// marked anything at all.
+    to: Option<Destination>,
     /// Cancels the gesture on `escape` for as long as it runs. Panels bind
     /// `escape` in their own key contexts, which lie deeper in the focus path
     /// than this workspace's and take the keystroke first, so the cancel
@@ -169,6 +174,17 @@ enum Carried {
     Pressed(Point<Pixels>),
     /// Far enough: where the cursor is.
     Dragging(Point<Pixels>),
+}
+
+impl Carried {
+    /// Where the press is holding the panel it carries, which is nowhere at all
+    /// until it is a drag of that panel.
+    fn dragging(self) -> Option<Point<Pixels>> {
+        match self {
+            Self::Pressed(_) => None,
+            Self::Dragging(at) => Some(at),
+        }
+    }
 }
 
 /// Which pane lies on one side of another, as far as the last frame says.
@@ -705,6 +721,7 @@ impl Workspace {
         self.panel_drag = Some(PanelDrag {
             panel,
             carried: Carried::Pressed(at),
+            to: None,
             _cancel: cancel,
         });
         cx.notify();
@@ -742,24 +759,30 @@ impl Workspace {
         cx.notify();
     }
 
-    /// Ends the press where the button was let go, moving the panel to wherever
-    /// a drag of it had reached. Both the release the tab under the cursor takes
-    /// and the one the window-global handlers take come here, so that whichever
-    /// arrives first ends the one gesture. A press that never became a drag is
-    /// left to the tab under it to make a click of.
+    /// Ends the press where the button was let go: the panel goes where the
+    /// drag last marked it landing, so that what the drag showed is what it
+    /// does, and a release past the window's own edge — past every mark in the
+    /// window — asks for a window of its own instead. Both the release the tab
+    /// under the cursor takes and the one the window-global handlers take come
+    /// here, so that whichever arrives first ends the one gesture. A press that
+    /// never became a drag is left to the tab under it to make a click of.
     fn drop_panel(&mut self, at: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
         let Some(drag) = self.panel_drag.take() else {
             return;
         };
         cx.notify();
-        let Carried::Dragging(_) = drag.carried else {
+        if drag.carried.dragging().is_none() {
             return;
-        };
+        }
         // The release is spent on the move; it is not also a click on the tab
         // the drag started from, which would bring another panel forward.
         cx.stop_propagation();
-        let geometry = self.pane_geometry(cx);
-        if let Some(to) = self.dragged_to(drag.panel, at, &geometry, window, cx) {
+        let viewport = Bounds::new(point(px(0.), px(0.)), window.viewport_size());
+        let to = match drop::tears_out(at, viewport) {
+            true => Some(Destination::NewWindow),
+            false => drag.to,
+        };
+        if let Some(to) = to {
             self.move_panel(drag.panel, to, window, cx);
         }
     }
@@ -794,7 +817,7 @@ impl Workspace {
                 pane: pane.clone(),
                 bounds: self.pane_bounds(pane)?,
                 tab_count: held.tab_count(),
-                tabs: held.tab_bounds().to_vec(),
+                band: held.band(),
             })
         }));
         geometry
@@ -1001,6 +1024,33 @@ impl Workspace {
         }
     }
 
+    /// Settles where a drop of the panel being dragged would put it, once for
+    /// the frame about to be drawn: the pane that would take it among its tabs
+    /// is told so, the mark this frame draws stands there, and the release
+    /// ending the drag lands there. Told rather than read back: only the
+    /// workspace knows the drag, and only it knows the whole arrangement the
+    /// drag is aimed across.
+    fn aim_panel_drag(&mut self, window: &Window, cx: &mut Context<Self>) {
+        let to = self.drag_destination(window, cx);
+        for pane in self.arrangement.layout().panes() {
+            let joins = joined_pane(to.as_ref()) == Some(pane);
+            pane.update(cx, |pane, _| pane.set_joined_by_drag(joins));
+        }
+        if let Some(drag) = self.panel_drag.as_mut() {
+            drag.to = to;
+        }
+    }
+
+    /// Where a drop of the panel the drag is carrying would put it, as the
+    /// geometry the last frame laid out reads the cursor it holds. `None` while
+    /// no press is being carried and while the press is not yet a drag.
+    fn drag_destination(&self, window: &Window, cx: &App) -> Option<Destination> {
+        let drag = self.panel_drag.as_ref()?;
+        let at = drag.carried.dragging()?;
+        let geometry = self.pane_geometry(cx);
+        self.dragged_to(drag.panel, at, &geometry, window, cx)
+    }
+
     /// What the window's body draws: the pane given the whole of it, or every
     /// pane as the arrangement lays them out. A pane given the whole body is
     /// drawn somewhere other than where the arrangement lays it out, so that
@@ -1109,31 +1159,31 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         let drag = self.panel_drag.as_ref()?;
-        let (panel, carried) = (drag.panel, drag.carried);
         let mut over = div().absolute().inset_0().child(panel_drag_handlers(cx));
-        if let Carried::Dragging(at) = carried {
-            let geometry = self.pane_geometry(cx);
+        if let Some(at) = drag.carried.dragging() {
+            let marked = drag
+                .to
+                .as_ref()
+                .and_then(|to| self.marked(to, at, colors, cx));
             over = over
-                .children(self.marked(panel, at, &geometry, colors, window, cx))
-                .children(self.ghost(panel, at, colors, window, cx));
+                .children(marked)
+                .children(self.ghost(drag.panel, at, colors, window, cx));
         }
         Some(deferred(over).into_any_element())
     }
 
-    /// The mark over where a drop at `at` would put `panel`: a fill over the
-    /// region it would take, or a caret at the boundary between tabs it would
-    /// join. Nothing where the drag has reached nowhere it could be dropped.
+    /// The mark over where a drop of the panel being dragged would put it: a
+    /// fill over the region `to` would give it, or a caret at the boundary
+    /// between tabs it would join.
     fn marked(
         &self,
-        panel: EntityId,
+        to: &Destination,
         at: Point<Pixels>,
-        geometry: &[PaneGeometry<Entity<Pane>>],
         colors: &ThemeColors,
-        window: &Window,
         cx: &App,
     ) -> Option<Div> {
-        let to = self.dragged_to(panel, at, geometry, window, cx)?;
-        let mark = drop::preview(&to, at, self.body?, geometry, |side| {
+        let geometry = self.pane_geometry(cx);
+        let mark = drop::preview(to, at, self.body?, &geometry, |side| {
             self.arrangement.layout().at_edge(side)
         })?;
         Some(match mark {
@@ -1269,6 +1319,17 @@ pub(crate) fn re_homes<P: Clone + PartialEq>(
         }
         Destination::WindowEdge(side) => !(alone && layout.spans_edge(from, *side)),
         Destination::NewWindow => true,
+    }
+}
+
+/// The pane a drop at `to` would put the panel among the tabs of. Nothing where
+/// the drop would put it anywhere else — a pane of its own, an edge of the
+/// window, a window of its own — and nothing where the drag is aimed at nowhere
+/// the panel could be dropped at all.
+fn joined_pane<P>(to: Option<&Destination<P>>) -> Option<&P> {
+    match to? {
+        Destination::Tab { pane, .. } => Some(pane),
+        Destination::Beside { .. } | Destination::WindowEdge(_) | Destination::NewWindow => None,
     }
 }
 
@@ -1539,6 +1600,7 @@ impl Render for Workspace {
         let colors = bviz_ui_theme::theme(window, cx).colors;
         let panel = self.active_panel(cx);
         self.tell_panes_how_they_are_framed(cx);
+        self.aim_panel_drag(window, cx);
         let panes = div()
             .flex()
             .flex_col()
@@ -1648,6 +1710,7 @@ fn set_window_title(app_name: &str, panel: &AnyPanel, window: &mut Window, cx: &
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::drop::Band;
     use gpui::{point, size};
 
     const EXTENT: f32 = 407.0;
@@ -2036,6 +2099,76 @@ mod tests {
     fn a_window_no_document_lays_out_keeps_each_panel_in_a_pane_of_its_own() {
         assert_eq!(put_back_shape(None, "abc"), "(a/b/c)");
         assert_eq!(put_back_shape(None, "a"), "a");
+    }
+
+    /// A press is holding the panel nowhere until it is a drag of it, so what a
+    /// drop would do is asked only of a gesture that has become one.
+    #[test]
+    fn a_press_holds_the_panel_nowhere_until_it_is_a_drag() {
+        let at = point(px(120.), px(48.));
+        assert_eq!(Carried::Pressed(at).dragging(), None);
+        assert_eq!(Carried::Dragging(at).dragging(), Some(at));
+    }
+
+    /// A drop among a pane's tabs is the one destination a pane is told of, and
+    /// exactly one pane of the arrangement is told of it. A drop that puts the
+    /// panel in a pane of its own, against an edge of the window or in a window
+    /// of its own joins no tabs, so every pane is told of nothing.
+    #[test]
+    fn one_pane_is_told_a_drop_would_join_it_and_only_for_a_drop_among_its_tabs() {
+        let panes = ["left", "right"];
+        let told = |to: Option<Destination<&'static str>>| {
+            panes
+                .iter()
+                .filter(|pane| joined_pane(to.as_ref()) == Some(*pane))
+                .count()
+        };
+        assert_eq!(
+            told(Some(Destination::Tab {
+                pane: "right",
+                index: 1
+            })),
+            1
+        );
+        assert_eq!(
+            told(Some(Destination::Beside {
+                pane: "right",
+                side: Side::Left
+            })),
+            0
+        );
+        assert_eq!(told(Some(Destination::WindowEdge(Side::Top))), 0);
+        assert_eq!(told(Some(Destination::NewWindow)), 0);
+        assert_eq!(told(None), 0);
+    }
+
+    /// The one panel of a window's one pane is already in a pane of its own, so
+    /// a drag of it over that pane's own band re-homes it nowhere: no pane is
+    /// told a drop would join it, and the pane goes on naming the panel as it
+    /// did.
+    #[test]
+    fn a_drag_of_a_lone_panel_over_its_own_band_tells_no_pane() {
+        let bounds = at(0.0, 40.0, 1200.0, 720.0);
+        let lone = PaneGeometry {
+            pane: "lone",
+            bounds,
+            tab_count: 1,
+            band: Some(Band {
+                bounds: at(0.0, 40.0, 1200.0, 24.0),
+                tabs: vec![at(0.0, 40.0, 120.0, 23.0)],
+            }),
+        };
+        let layout = Layout::Pane("lone");
+        let to = drop::dropped_at(
+            point(px(60.), px(50.)),
+            at(0.0, 0.0, 1200.0, 800.0),
+            bounds,
+            &[lone],
+            &"lone",
+            |to| re_homes(to, &"lone", true, &layout),
+        );
+        assert_eq!(to, None);
+        assert_eq!(joined_pane(to.as_ref()), None);
     }
 
     /// A row of a menu names the window a move would put the panel in, so two

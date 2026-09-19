@@ -1,3 +1,4 @@
+use crate::drop::Band;
 use crate::{AnyPanel, PanelEvent};
 use bviz_ui_components::Button;
 use bviz_ui_theme::ThemeColors;
@@ -44,6 +45,44 @@ pub(crate) enum Framing {
     Maximized,
 }
 
+/// What a pane puts up over the panel it shows to name the panels it holds.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Naming {
+    /// A tab for each of the several panels the pane holds, to pick between.
+    Strip,
+    /// A line naming the one panel the pane holds, and nothing besides.
+    Handle,
+    /// The strip a drop joining the pane would make of its handle: a tab for
+    /// the panel the pane holds, so that the boundaries a drag is aimed at are
+    /// the boundaries of the row it would land in.
+    Row,
+}
+
+impl Naming {
+    /// How tall the band is drawn. A handle and the row put up in its place
+    /// stand at one height, so that the region a drag over a pane holding one
+    /// panel is aimed at is the same whichever of them the pane puts up, and
+    /// the panel below keeps the room it had.
+    fn height(self) -> Pixels {
+        match self {
+            Self::Strip => TAB_STRIP_HEIGHT,
+            Self::Handle | Self::Row => HANDLE_HEIGHT,
+        }
+    }
+}
+
+/// The band a frame drew over the panels a pane holds, as that frame laid it
+/// out.
+struct DrawnBand {
+    /// Which band it drew, so that one the pane has since put up in its place
+    /// is told from it.
+    naming: Naming,
+    bounds: Bounds<Pixels>,
+    /// Where it laid out the tab naming each panel, in the order the pane held
+    /// them. Empty for a band that puts up no tabs of its own.
+    tabs: Vec<Bounds<Pixels>>,
+}
+
 /// A panel of a pane, and the subscription carrying that panel's events to the
 /// pane. Taking the panel out of the pane retires the subscription with it.
 struct Tab {
@@ -62,11 +101,19 @@ pub struct Pane {
     /// Whether the click the pane last took was on the control that gives the
     /// window's body back.
     restore_clicked: bool,
-    /// Where the last frame laid out the tab naming each panel the pane holds,
-    /// in the order it holds them. Read between frames, to tell where a drag
-    /// over the tabs would join them. Empty until a frame has laid a tab out,
-    /// and while the pane names its panels not at all.
-    tab_bounds: Vec<Bounds<Pixels>>,
+    /// Whether a drop where a drag is holding the panel it carries would join
+    /// this pane's tabs, which takes the whole window's arrangement and the
+    /// drag across it to tell, so the workspace tells it.
+    joined_by_drag: bool,
+    /// The band the last frame drew over the panels the pane holds, which a
+    /// gesture between frames reads to tell where a drop joining them lands.
+    /// `None` until a frame has drawn one, and while the pane names its panels
+    /// not at all.
+    band: Option<DrawnBand>,
+    /// Where the frame being laid out has measured the tabs of the band it is
+    /// drawing. The band takes them as it is laid out itself, so that a band
+    /// carries the tabs of its own frame and no other.
+    laid_out_tabs: Vec<Bounds<Pixels>>,
 }
 
 /// What handing a panel over left of the pane that held it. The panel is
@@ -120,7 +167,9 @@ impl Pane {
             active: 0,
             framing: Framing::Lone { elsewhere: false },
             restore_clicked: false,
-            tab_bounds: Vec::new(),
+            joined_by_drag: false,
+            band: None,
+            laid_out_tabs: Vec::new(),
         };
         pane.show_active(window, cx);
         pane
@@ -168,8 +217,27 @@ impl Pane {
         self.framing = framing;
     }
 
-    pub(crate) fn tab_bounds(&self) -> &[Bounds<Pixels>] {
-        &self.tab_bounds
+    pub(crate) fn set_joined_by_drag(&mut self, joined: bool) {
+        self.joined_by_drag = joined;
+    }
+
+    /// The band the pane puts up over its panels, as the last frame laid it
+    /// out. Its tabs come with it only where that frame drew the band the pane
+    /// puts up now, the boundaries within a band being known to the frame that
+    /// draws it and no earlier one.
+    pub(crate) fn band(&self) -> Option<Band> {
+        let drawn = self.band.as_ref()?;
+        Some(Band {
+            bounds: drawn.bounds,
+            tabs: match self.naming() == Some(drawn.naming) {
+                true => drawn.tabs.clone(),
+                false => Vec::new(),
+            },
+        })
+    }
+
+    fn naming(&self) -> Option<Naming> {
+        naming(self.tabs.len(), self.framing, self.joined_by_drag)
     }
 
     /// The panels the pane holds, in the order it holds them.
@@ -314,7 +382,12 @@ impl Pane {
         cx.notify();
     }
 
-    fn tab_strip(&self, colors: &ThemeColors, cx: &mut Context<Self>) -> impl IntoElement {
+    fn tab_strip(
+        &self,
+        naming: Naming,
+        colors: &ThemeColors,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let mut tabs = Vec::with_capacity(self.tabs.len());
         for index in 0..self.tabs.len() {
             tabs.push(self.tab(index, colors, cx));
@@ -325,7 +398,7 @@ impl Pane {
             .items_center()
             .flex_shrink_0()
             .w_full()
-            .h(TAB_STRIP_HEIGHT)
+            .h(naming.height())
             .overflow_hidden()
             .bg(colors.surface)
             .border_b_1()
@@ -576,12 +649,43 @@ fn menu_asked(
     })
 }
 
-/// Records where a frame laid the tabs out, for a drag over them to read.
+/// Records where the frame being laid out put the tabs of the band it is
+/// drawing, for the band itself to take as it is laid out.
 fn tabs_laid_out(
     cx: &Context<Pane>,
 ) -> impl Fn(Vec<Bounds<Pixels>>, &mut Window, &mut App) + 'static {
     let pane = cx.entity();
-    move |tabs, _, cx| pane.update(cx, |pane, _| pane.tab_bounds = tabs)
+    move |tabs, _, cx| pane.update(cx, |pane, _| pane.laid_out_tabs = tabs)
+}
+
+/// Records where a frame laid the `naming` band out, for a drag over the pane
+/// to read. A band drawn in place of another draws boundaries no frame has
+/// read yet, so drawing one asks for a frame that aims the drag at them.
+fn band_laid_out(
+    naming: Naming,
+    cx: &Context<Pane>,
+) -> impl Fn(Vec<Bounds<Pixels>>, &mut Window, &mut App) + 'static {
+    let pane = cx.entity();
+    move |band, window, cx| {
+        let Some(&bounds) = band.first() else {
+            return;
+        };
+        let replaced = pane.update(cx, |pane, _| {
+            let replaced = pane.band.as_ref().map(|band| band.naming) != Some(naming);
+            pane.band = Some(DrawnBand {
+                naming,
+                bounds,
+                tabs: std::mem::take(&mut pane.laid_out_tabs),
+            });
+            replaced
+        });
+        if replaced {
+            // A notify from within the frame being drawn schedules nothing, so
+            // the frame reading them is asked for from the one after this.
+            let pane = pane.clone();
+            window.on_next_frame(move |_, cx| pane.update(cx, |_, cx| cx.notify()));
+        }
+    }
 }
 
 /// A panel's name as the pane holding it puts it up: cut short where there is
@@ -599,14 +703,25 @@ fn title(panel: &AnyPanel, cx: &App) -> Div {
         )
 }
 
-/// Whether a pane holding `tabs` panels, framed as `framing`, names them: a tab
-/// strip where it holds several, and a handle where the one it holds could be
-/// carried somewhere else — to another pane of its window, or to another of the
-/// session's windows. The one panel of a window's one pane with nowhere to go
-/// is the window itself: nothing to pick between and nothing to carry it to, so
-/// anything drawn over it would only take room from it.
-fn names_its_panels(tabs: usize, framing: Framing) -> bool {
-    tabs > 1 || !matches!(framing, Framing::Lone { elsewhere: false })
+/// How a pane holding `tabs` panels, framed as `framing`, names them: a tab
+/// strip where it holds several; a [`Naming::Row`] where `joined_by_drag` says
+/// a drop is aimed at joining the one panel it holds; and a handle where that
+/// panel could be carried somewhere else — to another pane of its window, or to
+/// another of the session's windows. `None` where it names them not at all: the
+/// one panel of a window's one pane with nowhere to go is the window itself,
+/// nothing to pick between and nothing to carry it to, so anything drawn over
+/// it would only take room from it.
+fn naming(tabs: usize, framing: Framing, joined_by_drag: bool) -> Option<Naming> {
+    if tabs > 1 {
+        return Some(Naming::Strip);
+    }
+    if matches!(framing, Framing::Lone { elsewhere: false }) {
+        return None;
+    }
+    Some(match joined_by_drag {
+        true => Naming::Row,
+        false => Naming::Handle,
+    })
 }
 
 /// Which of the `remaining` tabs a pane shows once the tab at `removed` has left
@@ -624,22 +739,24 @@ fn showing_after(showing: usize, removed: usize, remaining: usize) -> usize {
 impl Render for Pane {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let body = self.active_panel().view();
-        if !names_its_panels(self.tabs.len(), self.framing) {
-            self.tab_bounds.clear();
+        let Some(naming) = self.naming() else {
+            self.band = None;
+            self.laid_out_tabs.clear();
             return body.into_any_element();
-        }
-        let colors = bviz_ui_theme::theme(window, cx).colors;
-        let above = match self.tabs.len() {
-            // The handle is the one tab the pane puts up, and reports itself as
-            // such through the container that measures its children.
-            1 => div()
-                .flex_shrink_0()
-                .w_full()
-                .child(self.handle(&colors, cx))
-                .on_children_prepainted(tabs_laid_out(cx))
-                .into_any_element(),
-            _ => self.tab_strip(&colors, cx).into_any_element(),
         };
+        let colors = bviz_ui_theme::theme(window, cx).colors;
+        let named = match naming {
+            Naming::Handle => self.handle(&colors, cx).into_any_element(),
+            Naming::Strip | Naming::Row => self.tab_strip(naming, &colors, cx).into_any_element(),
+        };
+        // The band is measured through a container of its own, so that what a
+        // drag is aimed at is the band the pane draws rather than anything laid
+        // out within it.
+        let above = div()
+            .flex_shrink_0()
+            .w_full()
+            .child(named)
+            .on_children_prepainted(band_laid_out(naming, cx));
         div()
             .flex()
             .flex_col()
@@ -655,7 +772,7 @@ mod tests {
     use super::*;
 
     /// Several panels are picked between by their tabs, wherever the window
-    /// lays the pane holding them out.
+    /// lays the pane holding them out and whatever a drag is aimed at.
     #[test]
     fn a_pane_holding_several_panels_names_them_however_it_is_framed() {
         for framing in [
@@ -664,8 +781,34 @@ mod tests {
             Framing::Beside,
             Framing::Maximized,
         ] {
-            assert!(names_its_panels(2, framing), "{framing:?}");
+            for joined in [false, true] {
+                assert_eq!(
+                    naming(2, framing, joined),
+                    Some(Naming::Strip),
+                    "{framing:?}"
+                );
+            }
         }
+    }
+
+    /// A drag aimed at joining the one panel a pane holds is answered by a
+    /// [`Naming::Row`] in place of the handle naming it, wherever the window
+    /// lays that pane out.
+    #[test]
+    fn a_pane_a_drop_would_join_puts_up_the_row_it_would_make() {
+        assert_eq!(naming(1, Framing::Beside, true), Some(Naming::Row));
+        assert_eq!(
+            naming(1, Framing::Lone { elsewhere: true }, true),
+            Some(Naming::Row)
+        );
+    }
+
+    /// A pane holding one panel names it at one height however it names it, and
+    /// the strip naming several stands taller than both.
+    #[test]
+    fn the_row_a_drop_would_make_is_as_tall_as_the_handle_it_replaces() {
+        assert_eq!(Naming::Row.height(), Naming::Handle.height());
+        assert_ne!(Naming::Strip.height(), Naming::Handle.height());
     }
 
     /// A lone panel is named by the handle that carries it wherever it could
@@ -673,16 +816,22 @@ mod tests {
     /// windows.
     #[test]
     fn a_lone_panel_is_named_wherever_it_could_be_carried() {
-        assert!(names_its_panels(1, Framing::Beside));
-        assert!(names_its_panels(1, Framing::Maximized));
-        assert!(names_its_panels(1, Framing::Lone { elsewhere: true }));
+        assert_eq!(naming(1, Framing::Beside, false), Some(Naming::Handle));
+        assert_eq!(naming(1, Framing::Maximized, false), Some(Naming::Handle));
+        assert_eq!(
+            naming(1, Framing::Lone { elsewhere: true }, false),
+            Some(Naming::Handle)
+        );
     }
 
     /// The one panel of the one pane of the session's one window has nowhere to
-    /// be carried to, so nothing is drawn over it.
+    /// be carried to, so nothing is drawn over it — and no drag of a panel can
+    /// be running in a window whose one panel is the one being carried.
     #[test]
     fn the_lone_panel_of_a_lone_window_is_named_by_nothing() {
-        assert!(!names_its_panels(1, Framing::Lone { elsewhere: false }));
+        let alone = Framing::Lone { elsewhere: false };
+        assert_eq!(naming(1, alone, false), None);
+        assert_eq!(naming(1, alone, true), None);
     }
 
     /// The panel handed over is the one on show, so the tab left showing is the

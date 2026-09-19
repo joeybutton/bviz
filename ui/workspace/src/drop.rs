@@ -43,39 +43,66 @@ pub(crate) struct PaneGeometry<P> {
     /// How many panels the pane holds, which is where a drop on its body puts
     /// the dragged one: after all of them.
     pub tab_count: usize,
+    /// The band the pane puts up over the panels it holds, as the last frame
+    /// laid it out. `None` where the pane names its panels not at all, and
+    /// until a frame has laid a band out.
+    pub band: Option<Band>,
+}
+
+/// The band a frame drew over the panels a pane holds, which a drag over the
+/// window is aimed at to join them.
+pub(crate) struct Band {
+    pub bounds: Bounds<Pixels>,
+    /// Where that frame laid the tab naming each panel out, in the order the
+    /// pane holds them. A tab for every panel the pane holds draws the
+    /// boundaries between them; anything else — a band that puts up no tabs of
+    /// its own, or one drawn for panels the pane has since stopped holding —
+    /// leaves the band aimed at as ever, with a drop anywhere in it joining the
+    /// pane after the panels it holds, as a drop on its body does.
     pub tabs: Vec<Bounds<Pixels>>,
 }
 
 impl<P> PaneGeometry<P> {
-    /// The band of tabs above the pane's body, which reaches across the whole
-    /// pane: a cursor past the last tab is still over the band. `None` where no
-    /// frame has laid a tab out.
-    fn band(&self) -> Option<Bounds<Pixels>> {
-        let tab = self.tabs.first()?;
+    /// The region a drop joining the pane's panels is aimed at: the band above
+    /// the pane's body, reaching across the whole pane, so that a cursor past
+    /// the last tab is still over it. `None` where the pane puts up no band.
+    fn band_region(&self) -> Option<Bounds<Pixels>> {
+        let band = self.band.as_ref()?;
         Some(Bounds::new(
-            point(self.bounds.origin.x, tab.origin.y),
-            size(self.bounds.size.width, tab.size.height),
+            point(self.bounds.origin.x, band.bounds.origin.y),
+            size(self.bounds.size.width, band.bounds.size.height),
         ))
     }
 
-    /// The pane less the tabs it puts up along its top: what its own side bands
-    /// are measured in from, the tabs being aimed at ahead of those bands.
+    /// The tabs of the band, where they draw the boundaries a drop is read
+    /// against ([`Band::tabs`]).
+    fn boundaries(&self) -> Option<&[Bounds<Pixels>]> {
+        let tabs = &self.band.as_ref()?.tabs;
+        (tabs.len() == self.tab_count).then_some(tabs.as_slice())
+    }
+
+    /// The pane less the band it puts up along its top: what its own side bands
+    /// are measured in from, the band being aimed at ahead of those bands.
     fn aim(&self) -> Bounds<Pixels> {
-        below(self.bounds, self.band())
+        below(self.bounds, self.band_region())
     }
 
     /// Where among the pane's tabs a drop at `cursor` joins them: ahead of the
     /// tab whose leading half it is over, and after the last where it is past
-    /// them all. `None` where the cursor is not over the band of tabs.
+    /// them all or where the band draws no boundaries. `None` where the cursor
+    /// is not over the band.
     fn insertion(&self, cursor: Point<Pixels>) -> Option<usize> {
-        if !self.band()?.contains(&cursor) {
+        let band = self.band_region()?;
+        if !band.contains(&cursor) {
             return None;
         }
+        let Some(tabs) = self.boundaries() else {
+            return Some(self.tab_count);
+        };
         Some(
-            self.tabs
-                .iter()
-                .position(|tab| cursor.x < tab.center().x)
-                .unwrap_or(self.tabs.len()),
+            tabs.iter()
+                .position(|tab| cursor.x < middle(*tab, band))
+                .unwrap_or(tabs.len()),
         )
     }
 
@@ -84,10 +111,11 @@ impl<P> PaneGeometry<P> {
     /// within the band, so that the boundary at either end of the strip is
     /// marked by a whole caret rather than half of one.
     fn caret(&self, index: usize) -> Option<Bounds<Pixels>> {
-        let band = self.band()?;
-        let at = match self.tabs.get(index) {
+        let band = self.band_region()?;
+        let tabs = self.boundaries().unwrap_or_default();
+        let at = match tabs.get(index) {
             Some(tab) => tab.left(),
-            None => self.tabs.last()?.right(),
+            None => tabs.last().map_or(band.right(), |tab| tab.right()),
         };
         let left = (at - CARET_WIDTH * 0.5)
             .min(band.right() - CARET_WIDTH)
@@ -97,6 +125,14 @@ impl<P> PaneGeometry<P> {
             size(CARET_WIDTH, band.size.height),
         ))
     }
+}
+
+/// The middle of what `band` shows of `tab`, which parts that tab between the
+/// boundary ahead of it and the one after it. A tab wider than the band it is
+/// laid out in — a long title on a narrow pane — is parted at the middle of
+/// what is on screen of it, so that both of its boundaries can be aimed at.
+fn middle(tab: Bounds<Pixels>, band: Bounds<Pixels>) -> Pixels {
+    (tab.left().max(band.left()) + tab.right().min(band.right())) * 0.5
 }
 
 /// Where a drag holding the panel that pane `from` holds over `cursor` would put
@@ -117,6 +153,12 @@ pub(crate) fn dropped_at<P: Clone + PartialEq>(
     re_homes(&to).then_some(to)
 }
 
+/// Whether a cursor at `cursor` has left `window` far enough to ask for a
+/// window of its own, per [`TEAR_OUT_MARGIN`].
+pub(crate) fn tears_out(cursor: Point<Pixels>, window: Bounds<Pixels>) -> bool {
+    !window.dilate(TEAR_OUT_MARGIN).contains(&cursor)
+}
+
 /// The zone `cursor` is in, before the move it asks for is put to `re_homes`.
 /// A pane's tabs are the narrowest aim of the three and are taken first; the
 /// window's edge is taken ahead of the pane's own bands, which is what puts a
@@ -129,7 +171,7 @@ fn landing<P: Clone + PartialEq>(
     panes: &[PaneGeometry<P>],
     from: &P,
 ) -> Option<Destination<P>> {
-    if !window.dilate(TEAR_OUT_MARGIN).contains(&cursor) {
+    if tears_out(cursor, window) {
         return Some(Destination::NewWindow);
     }
     if !body.contains(&cursor) {
@@ -145,7 +187,7 @@ fn landing<P: Clone + PartialEq>(
     }
     let aim = over.aim();
     let bands = band_depth(aim);
-    if let Some(side) = near_edge(below(body, over.band()), cursor, window_band(bands)) {
+    if let Some(side) = near_edge(below(body, over.band_region()), cursor, window_band(bands)) {
         return Some(Destination::WindowEdge(side));
     }
     let pane = over.pane.clone();
@@ -333,30 +375,81 @@ mod tests {
         Bounds::new(point(px(x), px(y)), size(px(width), px(height)))
     }
 
-    const TAB_HEIGHT: f32 = 30.0;
+    /// How tall a pane draws the strip naming several panels, and the handle —
+    /// or the row put up in its place — naming one.
+    const STRIP_HEIGHT: f32 = 30.0;
+    const HANDLE_HEIGHT: f32 = 24.0;
+
+    /// The line along the foot of a band, which the tabs within it stand clear
+    /// of, so that each of them is this much shorter than the band it is in.
+    const BAND_BORDER: f32 = 1.0;
+
     const TAB_WIDTH: f32 = 100.0;
 
     /// The pane a drag starts from in a test that is not about the pane it
     /// starts from, named so that no pane of the arrangement is it.
     const ELSEWHERE: &str = "elsewhere";
 
-    /// A pane of `tabs` panels, laid out at `bounds` with a tab of `TAB_WIDTH`
-    /// for each of them across the top of it.
+    /// The band a pane laid out at `bounds` puts up along its top, `height`
+    /// tall.
+    fn band_at(bounds: Bounds<Pixels>, height: f32) -> Bounds<Pixels> {
+        at(
+            f32::from(bounds.origin.x),
+            f32::from(bounds.origin.y),
+            f32::from(bounds.size.width),
+            height,
+        )
+    }
+
+    /// The tab at `index` of a band of `height` along the top of `bounds`, as
+    /// wide as `TAB_WIDTH` and standing clear of the band's own foot.
+    fn tab_at(bounds: Bounds<Pixels>, height: f32, index: usize) -> Bounds<Pixels> {
+        at(
+            f32::from(bounds.origin.x) + index as f32 * TAB_WIDTH,
+            f32::from(bounds.origin.y),
+            TAB_WIDTH,
+            height - BAND_BORDER,
+        )
+    }
+
+    /// A pane of `tabs` panels, laid out at `bounds` with the strip naming them
+    /// across the top of it. A pane holding none puts up no band at all.
     fn pane(name: &'static str, bounds: Bounds<Pixels>, tabs: usize) -> PaneGeometry<&'static str> {
         PaneGeometry {
             pane: name,
             bounds,
             tab_count: tabs,
-            tabs: (0..tabs)
-                .map(|at| {
-                    self::at(
-                        f32::from(bounds.origin.x) + at as f32 * TAB_WIDTH,
-                        f32::from(bounds.origin.y),
-                        TAB_WIDTH,
-                        TAB_HEIGHT,
-                    )
-                })
-                .collect(),
+            band: (tabs > 0).then(|| Band {
+                bounds: band_at(bounds, STRIP_HEIGHT),
+                tabs: (0..tabs)
+                    .map(|at| tab_at(bounds, STRIP_HEIGHT, at))
+                    .collect(),
+            }),
+        }
+    }
+
+    /// A pane holding one panel, whose band the last frame drew as the handle
+    /// naming that panel: a band across the whole pane with no tabs of its own.
+    fn handle(name: &'static str, bounds: Bounds<Pixels>) -> PaneGeometry<&'static str> {
+        PaneGeometry {
+            band: Some(Band {
+                bounds: band_at(bounds, HANDLE_HEIGHT),
+                tabs: Vec::new(),
+            }),
+            ..pane(name, bounds, 1)
+        }
+    }
+
+    /// The same pane once a frame has drawn the row a drop joining it would
+    /// make: the band the handle stood at, with the one tab naming the panel
+    /// within it.
+    fn row(name: &'static str, bounds: Bounds<Pixels>) -> PaneGeometry<&'static str> {
+        PaneGeometry {
+            band: Some(Band {
+                bounds: band_at(bounds, HANDLE_HEIGHT),
+                tabs: vec![tab_at(bounds, HANDLE_HEIGHT, 0)],
+            }),
+            ..pane(name, bounds, 1)
         }
     }
 
@@ -699,6 +792,194 @@ mod tests {
         ));
     }
 
+    /// The row a pane holding one panel puts up while a drop is aimed at
+    /// joining it is read as any other strip: the leading half of its one tab
+    /// takes the panel in ahead of the one already there, and the trailing half
+    /// — along with the whole of the band past the tab, which is most of it —
+    /// takes it in after.
+    #[test]
+    fn a_drop_over_a_rows_one_tab_joins_it_on_the_side_the_cursor_is_over() {
+        let (window, body) = window();
+        let panes = vec![
+            pane("rest", at(0.0, 40.0, 600.0, 720.0), 3),
+            row("row", at(600.0, 40.0, 600.0, 720.0)),
+        ];
+        let over_the_row = |x: f32| {
+            dropped_at(
+                point(px(x), px(50.)),
+                window,
+                body,
+                &panes,
+                &ELSEWHERE,
+                |_| true,
+            )
+        };
+        assert!(matches!(
+            over_the_row(620.0),
+            Some(Destination::Tab {
+                pane: "row",
+                index: 0
+            })
+        ));
+        for x in [680.0, 720.0, 900.0, 1190.0] {
+            assert!(
+                matches!(
+                    over_the_row(x),
+                    Some(Destination::Tab {
+                        pane: "row",
+                        index: 1
+                    })
+                ),
+                "a drop at {x} lands at {:?}",
+                over_the_row(x)
+            );
+        }
+        // The boundary after the row's one tab stands where that tab ends, well
+        // within the band, rather than against the far edge of the pane.
+        let caret = panes[1].caret(1).expect("the row has a boundary after it");
+        assert_eq!(caret.center().x, px(600.0 + TAB_WIDTH));
+    }
+
+    /// A row of two tabs is read as a row of three is: each boundary between
+    /// them is aimed at by the halves of the tabs either side of it.
+    #[test]
+    fn a_row_of_two_is_parted_at_the_boundary_between_them() {
+        let (window, body) = window();
+        let panes = vec![pane("two", at(0.0, 40.0, 1200.0, 720.0), 2)];
+        let joined = |x: f32| match dropped_at(
+            point(px(x), px(50.)),
+            window,
+            body,
+            &panes,
+            &ELSEWHERE,
+            |_| true,
+        ) {
+            Some(Destination::Tab { index, .. }) => index,
+            other => panic!("a drop at {x} lands at {other:?}"),
+        };
+        assert_eq!(joined(40.0), 0);
+        assert_eq!(joined(60.0), 1);
+        assert_eq!(joined(140.0), 1);
+        assert_eq!(joined(160.0), 2);
+        assert_eq!(joined(900.0), 2);
+    }
+
+    /// A band with no tabs of its own draws no boundaries, so a drop anywhere
+    /// in it joins the pane after the panels it holds, and the caret marking
+    /// that end stands at the end of the band.
+    #[test]
+    fn a_band_with_no_tabs_of_its_own_joins_the_pane_after_its_panels() {
+        let (window, body) = window();
+        let panes = vec![handle("lone", at(0.0, 40.0, 1200.0, 720.0))];
+        let joined = |x: f32| match dropped_at(
+            point(px(x), px(50.)),
+            window,
+            body,
+            &panes,
+            &ELSEWHERE,
+            |_| true,
+        ) {
+            Some(Destination::Tab { index, .. }) => index,
+            other => panic!("a drop at {x} lands at {other:?}"),
+        };
+        for x in [4.0, 40.0, 300.0, 600.0, 900.0, 1196.0] {
+            assert_eq!(joined(x), 1, "a drop at {x}");
+        }
+        let caret = panes[0].caret(1).expect("the band has an end");
+        assert_eq!(caret.right(), px(1200.));
+    }
+
+    /// A pane a panel left mid-drag — closed from another window, or carried
+    /// out of it — holds fewer panels than the last frame laid tabs out for, so
+    /// the boundaries that frame drew are gone: the band is aimed at as ever
+    /// and a drop in it joins the pane after the panels it is left holding,
+    /// marked at the end of the band rather than at a boundary no longer drawn.
+    #[test]
+    fn a_band_drawn_for_panels_the_pane_no_longer_holds_joins_after_them() {
+        let (window, body) = window();
+        let bounds = at(0.0, 40.0, 1200.0, 720.0);
+        let panes = vec![PaneGeometry {
+            tab_count: 2,
+            ..pane("closed", bounds, 3)
+        }];
+        let joined = |x: f32| match dropped_at(
+            point(px(x), px(50.)),
+            window,
+            body,
+            &panes,
+            &ELSEWHERE,
+            |_| true,
+        ) {
+            Some(Destination::Tab { index, .. }) => index,
+            other => panic!("a drop at {x} lands at {other:?}"),
+        };
+        for x in [4.0, 40.0, 140.0, 260.0, 900.0] {
+            assert_eq!(joined(x), 2, "a drop at {x}");
+        }
+        let caret = panes[0].caret(2).expect("the band has an end");
+        assert_eq!(caret.right(), px(1200.));
+    }
+
+    /// The band a drag is aimed at is the band itself rather than the tabs
+    /// within it, which stand clear of the line along its foot. So the row a
+    /// pane puts up in place of its handle is aimed at over exactly the region
+    /// the handle was: a cursor held against the foot of the band is over it
+    /// whichever of the two the last frame drew, and the drop it is aimed at
+    /// stands still as the pane answers the drag.
+    #[test]
+    fn the_row_and_the_handle_it_replaces_are_aimed_at_over_one_band() {
+        let (window, body) = window();
+        let bounds = at(0.0, 40.0, 600.0, 720.0);
+        let (handle, row) = (handle("lone", bounds), row("lone", bounds));
+        assert_eq!(handle.band_region(), row.band_region());
+        let band = row.band_region().expect("the row stands in a band");
+        assert!(
+            row.band
+                .as_ref()
+                .is_some_and(|band| band.tabs[0].size.height < band.bounds.size.height)
+        );
+        let foot = point(px(300.), band.bottom() - px(0.5));
+        for geometry in [handle, row] {
+            assert!(
+                matches!(
+                    dropped_at(foot, window, body, &[geometry], &ELSEWHERE, |_| true),
+                    Some(Destination::Tab { pane: "lone", .. })
+                ),
+                "a drop on the foot of the band"
+            );
+        }
+    }
+
+    /// A tab wider than the pane it is laid out in — a long title on a narrow
+    /// pane — is parted at the middle of what the band shows of it, so that the
+    /// boundary after it is aimed at by the trailing half of the band rather
+    /// than by nothing at all.
+    #[test]
+    fn a_tab_wider_than_its_band_is_parted_at_the_middle_of_what_shows() {
+        let (window, body) = window();
+        let bounds = at(0.0, 40.0, 160.0, 720.0);
+        let panes = vec![PaneGeometry {
+            band: Some(Band {
+                bounds: band_at(bounds, HANDLE_HEIGHT),
+                tabs: vec![at(0.0, 40.0, 300.0, HANDLE_HEIGHT - BAND_BORDER)],
+            }),
+            ..pane("narrow", bounds, 1)
+        }];
+        let joined = |x: f32| match dropped_at(
+            point(px(x), px(50.)),
+            window,
+            body,
+            &panes,
+            &ELSEWHERE,
+            |_| true,
+        ) {
+            Some(Destination::Tab { index, .. }) => index,
+            other => panic!("a drop at {x} lands at {other:?}"),
+        };
+        assert_eq!(joined(40.0), 0);
+        assert_eq!(joined(120.0), 1);
+    }
+
     /// The tabs of a pane at the top of the window lie right against the body's
     /// own top edge, so a drop there joins them; the band spanning the window's
     /// top edge begins where they end, and both can be aimed at.
@@ -750,9 +1031,9 @@ mod tests {
                 })
             ));
         }
-        assert_eq!(below(body, strip(40.0).band()).top(), px(70.));
-        assert_eq!(below(body, strip(40.4).band()).top(), px(70.4));
-        assert_eq!(below(body, strip(400.0).band()), body);
+        assert_eq!(below(body, strip(40.0).band_region()).top(), px(70.));
+        assert_eq!(below(body, strip(40.4).band_region()).top(), px(70.4));
+        assert_eq!(below(body, strip(400.0).band_region()), body);
     }
 
     /// A release well past the window asks for a window of its own; one just
@@ -968,10 +1249,11 @@ mod tests {
     fn a_preview_marks_what_the_same_cursor_would_drop_onto() {
         let (window, body) = window();
         // The two panes of `panes` with a divider's grip between them, so that
-        // the cursors below take in one standing in that gap.
+        // the cursors below take in one standing in that gap. The narrow pane
+        // is named by a handle, whose band draws no boundaries to mark.
         let panes = vec![
             pane("wide", at(0.0, 40.0, 896.5, 720.0), 3),
-            pane("tall", at(903.5, 40.0, 296.5, 720.0), 1),
+            handle("tall", at(903.5, 40.0, 296.5, 720.0)),
         ];
         for (x, y) in [
             (450.0, 400.0),
@@ -985,6 +1267,7 @@ mod tests {
             (700.0, 50.0),
             (940.0, 400.0),
             (1000.0, 50.0),
+            (1190.0, 50.0),
             (899.0, 400.0),
             (902.0, 400.0),
             (900.0, 50.0),
@@ -1001,7 +1284,7 @@ mod tests {
                         .find(|geometry| geometry.pane == *pane)
                         .unwrap();
                     assert_eq!(over.insertion(pinned(cursor, over.bounds)), Some(*index));
-                    assert!(over.band().unwrap().contains(&caret.origin));
+                    assert!(over.band_region().unwrap().contains(&caret.origin));
                 }
                 (Destination::Tab { pane, .. }, Preview::Region(region)) => {
                     let over = panes
