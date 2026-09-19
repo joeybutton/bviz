@@ -8,6 +8,7 @@ use crate::facets::{Facets, SparseFacet, Sym, Tri};
 use crate::graph::{Graph, Kind, Node};
 use crate::intern::{Id, Names};
 use crate::label;
+use crate::select::pattern::WrittenRepos;
 use crate::select::{Aspects, Filter, Predicate, Rule, Values, Visibility, stating};
 
 impl Filter {
@@ -28,10 +29,11 @@ impl Filter {
             true => carried_labels(graph, facets),
             false => Vec::new(),
         };
+        let written = WrittenRepos::of(facets);
         let rules: Vec<Resolved> = self
             .rules
             .iter()
-            .map(|rule| Resolved::of(rule, names, facets, &labels, ids))
+            .map(|rule| Resolved::of(rule, names, facets, &written, &labels, ids))
             .collect();
 
         let mut stated: Vec<Option<Visibility>> = vec![None; ids];
@@ -151,7 +153,14 @@ struct Resolved<'a> {
 }
 
 impl<'a> Resolved<'a> {
-    fn of(rule: &'a Rule, names: &Names, facets: &Facets, labels: &[Id], ids: usize) -> Self {
+    fn of(
+        rule: &'a Rule,
+        names: &Names,
+        facets: &Facets,
+        written: &WrittenRepos,
+        labels: &[Id],
+        ids: usize,
+    ) -> Self {
         let predicate = &rule.predicate;
         Resolved {
             kinds: predicate.kinds.as_ref(),
@@ -173,7 +182,7 @@ impl<'a> Resolved<'a> {
                 .aspects
                 .as_ref()
                 .map(|aspects| aspect_column(aspects, facets, ids)),
-            labels: admitted_labels(predicate, names, labels),
+            labels: admitted_labels(predicate, names, written, labels),
             visibility: rule.visibility,
         }
     }
@@ -361,19 +370,30 @@ fn carried_labels(graph: &Graph, facets: &Facets) -> Vec<Id> {
 /// Those of `carried` whose canonical label the label terms hold of, matched
 /// once per label rather than once per node carrying it. A name that is no
 /// target's node id names no label, and so answers no label term.
-fn admitted_labels(predicate: &Predicate, names: &Names, carried: &[Id]) -> Option<Labels> {
+fn admitted_labels(
+    predicate: &Predicate,
+    names: &Names,
+    written: &WrittenRepos,
+    carried: &[Id],
+) -> Option<Labels> {
     let (pattern, package) = (predicate.label.as_ref(), predicate.package.as_ref());
     if pattern.is_none() && package.is_none() {
         return None;
     }
+    let pattern = pattern.map(|pattern| pattern.resolved(written));
+    let package = package.map(|package| package.resolved(written));
     Some(Labels(
         carried
             .iter()
             .copied()
             .filter(|&id| {
                 label::target_node_label(names.resolve(id)).is_some_and(|label| {
-                    pattern.is_none_or(|pattern| pattern.matches(label))
-                        && package.is_none_or(|package| package.matches(label))
+                    pattern
+                        .as_ref()
+                        .is_none_or(|pattern| pattern.matches(label))
+                        && package
+                            .as_ref()
+                            .is_none_or(|package| package.matches(label))
                 })
             })
             .collect(),
@@ -579,6 +599,7 @@ mod tests {
                 ..Predicate::default()
             },
             &fixture.names,
+            &WrittenRepos::of(&fixture.facets),
             &carried,
         )
         .expect("a label term");

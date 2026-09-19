@@ -7,10 +7,58 @@
 //! every package with a `cpp` segment. A repository part matches a canonical
 //! repository name outright and a module's own repository by the module name as
 //! well, since `@rules_foo//...` is how that repository is written before a
-//! repository mapping resolves it.
+//! repository mapping resolves it; any other apparent name reaches its
+//! repository only through the [`WrittenRepos`] of the graph being matched.
 
+use std::borrow::Cow;
+use std::collections::HashMap;
+
+use crate::facets::Facets;
 use crate::label::encloses;
 use crate::repo::module_name;
+
+/// The apparent repository names one graph's inputs wrote, by the canonical name
+/// each stands for.
+///
+/// A pattern's repository part reaches a repository by its canonical name and by
+/// the module name that name encodes without any of this, since both follow from
+/// a label; an apparent name follows from neither and is known only from what the
+/// inputs printed. An apparent name several repositories were written by stands
+/// for none of them, as it does when a label is canonicalized.
+#[derive(Default, Clone)]
+pub struct WrittenRepos(HashMap<String, String>);
+
+impl WrittenRepos {
+    pub fn of(facets: &Facets) -> Self {
+        let mut candidates: HashMap<&str, Option<&str>> = HashMap::new();
+        for (repo, entry) in facets.repos() {
+            let Some(apparent) = entry.apparent else {
+                continue;
+            };
+            let canonical = facets.strings().resolve(repo.sym());
+            candidates
+                .entry(facets.strings().resolve(apparent))
+                .and_modify(|resolved| {
+                    if *resolved != Some(canonical) {
+                        *resolved = None;
+                    }
+                })
+                .or_insert(Some(canonical));
+        }
+        WrittenRepos(
+            candidates
+                .into_iter()
+                .filter_map(|(apparent, resolved)| {
+                    Some((apparent.to_string(), resolved?.to_string()))
+                })
+                .collect(),
+        )
+    }
+
+    fn canonical(&self, written: &str) -> Option<&str> {
+        self.0.get(written).map(String::as_str)
+    }
+}
 
 /// A pattern a node's canonical label is selected by.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -54,6 +102,27 @@ impl Pattern {
     /// rather than by nothing.
     pub fn parse(text: &str) -> Self {
         Self::label(text).unwrap_or_else(|| Pattern::Substring(text.to_string()))
+    }
+
+    /// `self` with a repository part that is an apparent name `repos` resolves
+    /// read as the canonical name it stands for, which is the name labels carry.
+    pub fn resolved<'a>(&'a self, repos: &WrittenRepos) -> Cow<'a, Self> {
+        let Pattern::Label {
+            repo,
+            package,
+            target,
+        } = self
+        else {
+            return Cow::Borrowed(self);
+        };
+        match repos.canonical(repo) {
+            Some(canonical) => Cow::Owned(Pattern::Label {
+                repo: canonical.to_string(),
+                package: package.clone(),
+                target: target.clone(),
+            }),
+            None => Cow::Borrowed(self),
+        }
     }
 
     /// Whether `label`, a canonical label, is one this pattern names.
@@ -145,6 +214,17 @@ impl PackagePrefix {
             repo: strip_sigil(repo).to_string(),
             path: path.trim_end_matches('/').to_string(),
         })
+    }
+
+    /// [`Pattern::resolved`] for a package prefix's repository part.
+    pub fn resolved<'a>(&'a self, repos: &WrittenRepos) -> Cow<'a, Self> {
+        match repos.canonical(&self.repo) {
+            Some(canonical) => Cow::Owned(PackagePrefix {
+                repo: canonical.to_string(),
+                path: self.path.clone(),
+            }),
+            None => Cow::Borrowed(self),
+        }
     }
 
     /// Whether the canonical label `label` sits in this package or one below
@@ -375,6 +455,46 @@ mod tests {
     #[test]
     fn a_module_name_does_not_reach_its_extensions_repositories() {
         assert!(!Pattern::parse("@rules_foo//foo/...").matches("@@rules_foo++ext+gen//foo:app"));
+    }
+
+    /// The repositories `written` names, each as (canonical, apparent).
+    fn repos(written: &[(&str, &str)]) -> WrittenRepos {
+        let mut facets = Facets::default();
+        for &(canonical, apparent) in written {
+            facets.intern_repo(canonical, Some(apparent));
+        }
+        WrittenRepos::of(&facets)
+    }
+
+    /// A repository renamed by the module depending on it is written by neither
+    /// its canonical name nor its module name, so only what the inputs printed
+    /// says that the name reaches it.
+    #[test]
+    fn a_pattern_reaches_a_repository_by_the_name_an_input_wrote_for_it() {
+        let written = repos(&[("protobuf+", "com_google_protobuf")]);
+        let pattern = Pattern::parse("@com_google_protobuf//src/...");
+
+        assert!(!pattern.matches("@@protobuf+//src:lib"));
+        assert!(pattern.resolved(&written).matches("@@protobuf+//src:lib"));
+        assert!(!pattern.resolved(&written).matches("@@other+//src:lib"));
+        assert!(
+            PackagePrefix::parse("@com_google_protobuf//src")
+                .expect("a package prefix")
+                .resolved(&written)
+                .matches("@@protobuf+//src:lib")
+        );
+    }
+
+    /// Nothing says which repository an apparent name two of them were written
+    /// by reaches, and merging them under one name would draw a pattern over
+    /// both.
+    #[test]
+    fn an_apparent_name_two_repositories_were_written_by_reaches_neither() {
+        let written = repos(&[("one+", "shared"), ("two+", "shared")]);
+        let pattern = Pattern::parse("@shared//src/...");
+
+        assert!(!pattern.resolved(&written).matches("@@one+//src:lib"));
+        assert!(!pattern.resolved(&written).matches("@@two+//src:lib"));
     }
 
     #[test]

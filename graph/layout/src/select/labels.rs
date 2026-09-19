@@ -5,7 +5,7 @@ use crate::facets::Facets;
 use crate::graph::Graph;
 use crate::intern::{Id, Names};
 use crate::label::target_node_label;
-use crate::select::pattern::Pattern;
+use crate::select::pattern::{Pattern, WrittenRepos};
 
 /// The canonical label of the target the node `id` belongs to, which for a
 /// target is its own; `None` for a node belonging to none.
@@ -15,7 +15,12 @@ pub fn carried_label<'a>(names: &'a Names, facets: &Facets, id: Id) -> Option<&'
 
 /// Every target the nodes of one graph belong to: the id of the node naming the
 /// target, and the canonical label it carries, ordered by that label.
-pub struct LabelIndex(Vec<(Id, String)>);
+pub struct LabelIndex {
+    entries: Vec<(Id, String)>,
+    /// The names the graph's repositories were written by, which a pattern's
+    /// repository part is read against.
+    repos: WrittenRepos,
+}
 
 impl LabelIndex {
     /// The targets `graph`'s nodes belong to, whose names resolve through
@@ -33,20 +38,24 @@ impl LabelIndex {
                 .filter_map(|id| Some((id, target_node_label(names.resolve(id))?.to_string()))),
         );
         entries.sort_unstable_by(|(_, one), (_, other)| one.cmp(other));
-        LabelIndex(entries)
+        LabelIndex {
+            entries,
+            repos: WrittenRepos::of(facets),
+        }
     }
 
     pub fn len(&self) -> usize {
-        self.0.len()
+        self.entries.len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
+        self.entries.is_empty()
     }
 
     /// The targets `pattern` names, by label.
     pub fn matching<'a>(&'a self, pattern: &'a Pattern) -> impl Iterator<Item = (Id, &'a str)> {
-        self.0
+        let pattern = pattern.resolved(&self.repos);
+        self.entries
             .iter()
             .filter(move |(_, label)| pattern.matches(label))
             .map(|(id, label)| (*id, label.as_str()))
@@ -86,6 +95,11 @@ mod tests {
                 ),
                 ("//app:main", "//app:main", ":main"),
                 ("@@rules_foo+//bar:lib", "@rules_foo//bar:lib", ":lib"),
+                (
+                    "@@protobuf+//src:lib",
+                    "@com_google_protobuf//src:lib",
+                    ":lib",
+                ),
             ] {
                 let id = names.intern(&format!("target:{canonical}"));
                 graph.add_node(Node::new(id, reads, Kind::Target, None));
@@ -173,6 +187,19 @@ mod tests {
         );
     }
 
+    /// A repository the module depending on it renamed is written by neither its
+    /// canonical name nor its module name, so the name a reader has to hand
+    /// reaches it only through what the inputs printed.
+    #[test]
+    fn a_repository_pattern_reaches_a_repository_renamed_by_its_dependent() {
+        let fixture = Fixture::new();
+
+        assert_eq!(
+            fixture.matching("@com_google_protobuf//..."),
+            ["@@protobuf+//src:lib"]
+        );
+    }
+
     /// Every node of a target answers through the one label it carries, so the
     /// index holds one entry per target however many nodes the graph draws for
     /// it, and none for a node belonging to no target.
@@ -180,7 +207,7 @@ mod tests {
     fn the_index_holds_one_entry_per_target() {
         let fixture = Fixture::new();
 
-        assert_eq!(fixture.index().len(), 4);
-        assert_eq!(fixture.graph.nodes.len(), 6);
+        assert_eq!(fixture.index().len(), 5);
+        assert_eq!(fixture.graph.nodes.len(), 7);
     }
 }
