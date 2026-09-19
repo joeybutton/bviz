@@ -613,6 +613,12 @@ impl Facets {
     /// none, so it is placed with the repositories of a module some canonical
     /// name in the same graph is [evidence of](repo::evidenced_module), while
     /// staying the separate repository [`RepoName`] holds it to be.
+    ///
+    /// That evidence says a module of the name exists, not that the apparent
+    /// name resolves to it, so a `use_repo` binding a module's own name to one
+    /// of its extension's repositories groups that repository with the modules
+    /// — a slip in grouping alone, since the repository stays its own either
+    /// way.
     pub fn repo_category(&self, repo: RepoRef) -> RepoCategory {
         let entry = self.repo_entry(repo);
         match entry.name() {
