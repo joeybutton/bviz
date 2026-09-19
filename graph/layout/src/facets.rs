@@ -409,8 +409,8 @@ pub struct Facets {
     /// The repository each name identifies, which is how a repository already
     /// named is found again.
     repo_ids: HashMap<RepoName<Sym>, RepoRef>,
-    /// Every module a canonical name is evidence of, which is what an apparent
-    /// name is read against where it states no origin of its own.
+    /// Every module some canonical name here is [evidence
+    /// of](repo::evidenced_module).
     modules: HashSet<Sym>,
     configs: HashMap<ConfigRef, ConfigEntry>,
     rule_classes: HashMap<RuleClassRef, RuleCategory>,
@@ -610,11 +610,9 @@ impl Facets {
     /// by and a filter selects them at.
     ///
     /// A canonical name states its origin outright. An apparent name states
-    /// none, but any canonical name in the same graph naming a module of that
-    /// name is evidence such a module exists — a module repository names its
-    /// own, a generated one the module whose extension made it — which places
-    /// the repository with that module's while leaving the two the separate
-    /// repositories [`RepoName`] holds them to be.
+    /// none, so it is placed with the repositories of a module some canonical
+    /// name in the same graph is [evidence of](repo::evidenced_module), while
+    /// staying the separate repository [`RepoName`] holds it to be.
     pub fn repo_category(&self, repo: RepoRef) -> RepoCategory {
         let entry = self.repo_entry(repo);
         match entry.name() {
