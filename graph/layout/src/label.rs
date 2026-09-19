@@ -393,10 +393,10 @@ fn repo_prefix(repo: &str) -> String {
 /// Rewrites the boxes that name a repository to name it the way a reader writes
 /// it, which only the outermost box of each repository does.
 ///
-/// A box's label is the text the drawing measures and shows, so the name has to
-/// stand in it rather than be projected over it where it is drawn; and it can
-/// only be written once every input has been read, since which name a
-/// repository is reached by is whatever one of them printed.
+/// A box's label is the text the layout measures and the drawing shows, so the
+/// name a reader reads stands in the label itself; and it can only be written
+/// once every input has been read, since which name a repository is reached by
+/// is whatever one of them printed.
 pub(crate) fn show_written_repositories(graph: &mut Graph, facets: &Facets) {
     let written = WrittenRepos::of(facets);
     for node in &mut graph.nodes {
