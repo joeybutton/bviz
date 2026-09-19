@@ -80,6 +80,9 @@ pub fn register_keys(cx: &mut App) {
         KeyBinding::new("h", ToggleNeighborhood, outside_search),
         KeyBinding::new("r", ToggleReduce, outside_search),
         KeyBinding::new("escape", ClearSelection, outside_search),
+        // Escape acts on the innermost thing holding focus: in the field that
+        // is the card the typed pattern put up over the drawing.
+        KeyBinding::new("escape", search::DismissResults, Some(search::KEY_CONTEXT)),
     ]);
 }
 
@@ -427,7 +430,7 @@ impl GraphPanel {
                     .children(missing::card(self, &palette, cx))
                     .children(edge_legend),
             )
-            .children(search::results(self, &palette, cx))
+            .children(search::card(self, &palette, cx))
             .children(pins::panel(self, &palette, cx))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
             .on_mouse_down(MouseButton::Right, cx.listener(Self::on_secondary_down))
@@ -466,6 +469,9 @@ impl GraphPanel {
     }
 
     fn on_mouse_down(&mut self, e: &MouseDownEvent, _: &mut Window, cx: &mut Context<Self>) {
+        // The card occludes the canvas, so a press reaching here landed outside
+        // it.
+        search::dismiss(self, cx);
         // A press on a scroll-bar gutter drives the thumb instead of panning the
         // content under it.
         if let Some(axis) = scrollbar_hit(self, e.position) {
@@ -478,6 +484,7 @@ impl GraphPanel {
     /// Picks the box under the cursor out for as long as it stays selected, or
     /// drops the selection where the press lands on no box.
     fn on_secondary_down(&mut self, e: &MouseDownEvent, _: &mut Window, cx: &mut Context<Self>) {
+        search::dismiss(self, cx);
         select_box_at(self, e.position, cx);
     }
 
@@ -607,6 +614,7 @@ impl Panel for GraphPanel {
 
 impl Render for GraphPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        search::watch_field(self, window, cx);
         let palette = Palette::from_theme(&bviz_ui_theme::theme(window, cx));
         let chrome = div()
             .key_context(Self::kind().key_context)
