@@ -23,6 +23,17 @@ const MENU_FOLD: Pixels = px(18.);
 /// label onto a second line.
 const MEASURE_SLACK: f32 = 6.0;
 
+/// Room a row leaves above and below its label.
+const ROW_PADDING: Pixels = px(4.);
+
+/// `bound` cut down to the whole rows it holds, by which a list that scrolls
+/// within it ends on a row entire rather than through the glyphs of one. A bound
+/// shorter than a row holds the one row the list must still show.
+pub(crate) fn whole_rows(window: &Window, bound: Pixels) -> Pixels {
+    let row = bviz_ui_assets::text_metrics(window).line_height + ROW_PADDING * 2.;
+    row * (f32::from(bound) / f32::from(row)).floor().max(1.)
+}
+
 /// The fill under the cursor on a row already chosen, composited so that row
 /// keeps its accent while the cursor is on it.
 pub(crate) fn chosen_hover(colors: &ThemeColors) -> Hsla {
@@ -144,7 +155,7 @@ pub(crate) fn row(id: ElementId, colors: &ThemeColors, chosen: bool) -> Stateful
         .items_center()
         .gap_1()
         .px_2()
-        .py_1()
+        .py(ROW_PADDING)
         .cursor_pointer()
         .text_color(colors.text)
         .when(chosen, |row| row.bg(colors.selection))

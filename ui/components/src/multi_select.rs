@@ -406,6 +406,7 @@ impl MultiSelect {
         &self,
         colors: &ThemeColors,
         label_width: Pixels,
+        window: &Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
         let sheet = menu::sheet(colors)
@@ -420,7 +421,7 @@ impl MultiSelect {
                 }),
             )
             .child(self.header(colors, cx))
-            .child(self.list(colors, label_width, cx));
+            .child(self.list(colors, label_width, window, cx));
         // Defer the menu so it paints over the content below the trigger.
         deferred(sheet)
     }
@@ -486,6 +487,7 @@ impl MultiSelect {
         &self,
         colors: &ThemeColors,
         label_width: Pixels,
+        window: &Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
         let grouped = self.rows.grouped();
@@ -499,7 +501,7 @@ impl MultiSelect {
             .flex_col()
             .w_full()
             .pr(px(SCROLLBAR_THICKNESS))
-            .max_h(MENU_MAX_HEIGHT)
+            .max_h(menu::whole_rows(window, MENU_MAX_HEIGHT))
             .overflow_y_scroll()
             .track_scroll(&self.scroll)
             .children(rows);
@@ -619,7 +621,7 @@ impl Render for MultiSelect {
             .label
             .min(window.viewport_size().width * MENU_LABEL_MAX_SHARE);
         let menu = match self.rows.open {
-            true => Some(self.menu(&colors, label_width, cx)),
+            true => Some(self.menu(&colors, label_width, window, cx)),
             false => None,
         };
 
