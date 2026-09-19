@@ -209,7 +209,7 @@ mod tests {
         graph.add_node(Node::new(Id(0), ":lib", Kind::Target, None));
         graph.add_node(Node::new(Id(1), "SymlinkTree", Kind::Action, Some(Id(0))));
         let mut facets = Facets::default();
-        facets.intern_repo("rules_foo+", None);
+        facets.intern_repo("rules_foo+");
         facets.intern_rule_class("cc_library");
         facets.intern_config(
             "ck1",

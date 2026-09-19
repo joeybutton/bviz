@@ -69,7 +69,7 @@ mod tests {
     use crate::graph::{Kind, Node};
 
     /// A graph whose boxes read as short names — the leaf of a label, or an
-    /// action's mnemonic — over targets in two packages and three external
+    /// action's mnemonic — over targets in two packages and two external
     /// repositories, plus a group box belonging to no target.
     struct Fixture {
         graph: Graph,
@@ -82,29 +82,16 @@ mod tests {
             let mut graph = Graph::new();
             let mut names = Names::default();
             let mut builder = FacetsBuilder::default();
-            for (canonical, written, reads) in [
-                (
-                    "//tools/rules/cpp:toolchain",
-                    "//tools/rules/cpp:toolchain",
-                    ":toolchain",
-                ),
-                (
-                    "//tools/rules/java:toolchain",
-                    "//tools/rules/java:toolchain",
-                    ":toolchain",
-                ),
-                ("//app:main", "//app:main", ":main"),
-                ("@@rules_foo+//bar:lib", "@rules_foo//bar:lib", ":lib"),
-                (
-                    "@@protobuf+//src:lib",
-                    "@com_google_protobuf//src:lib",
-                    ":lib",
-                ),
-                ("@crates//serde:lib", "@crates//serde:lib", ":lib"),
+            for (canonical, reads) in [
+                ("//tools/rules/cpp:toolchain", ":toolchain"),
+                ("//tools/rules/java:toolchain", ":toolchain"),
+                ("//app:main", ":main"),
+                ("@@rules_foo+//bar:lib", ":lib"),
+                ("@crates//serde:lib", ":lib"),
             ] {
                 let id = names.intern(&format!("target:{canonical}"));
                 graph.add_node(Node::new(id, reads, Kind::Target, None));
-                builder.describe_label(id, None, canonical, written);
+                builder.describe_label(id, None, canonical);
             }
             let owner = names
                 .get("target://app:main")
@@ -188,19 +175,6 @@ mod tests {
         );
     }
 
-    /// A repository the module depending on it renamed is written by neither its
-    /// canonical name nor its module name, so the name a reader has to hand
-    /// reaches it only through what the inputs printed.
-    #[test]
-    fn a_repository_pattern_reaches_a_repository_renamed_by_its_dependent() {
-        let fixture = Fixture::new();
-
-        assert_eq!(
-            fixture.matching("@com_google_protobuf//..."),
-            ["@@protobuf+//src:lib"]
-        );
-    }
-
     /// A repository no input named canonically is reached by the apparent name
     /// its labels carry, which is both what a reader has to hand and what
     /// identifies the repository.
@@ -218,7 +192,7 @@ mod tests {
     fn the_index_holds_one_entry_per_target() {
         let fixture = Fixture::new();
 
-        assert_eq!(fixture.index().len(), 6);
-        assert_eq!(fixture.graph.nodes.len(), 8);
+        assert_eq!(fixture.index().len(), 5);
+        assert_eq!(fixture.graph.nodes.len(), 7);
     }
 }

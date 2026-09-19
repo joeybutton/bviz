@@ -8,8 +8,7 @@
 //! label carries outright — canonical, or apparent where no input named the
 //! repository canonically — and a module's own repository by the module name as
 //! well, since `@rules_foo//...` is how that repository is written before a
-//! repository mapping resolves it; any other apparent name reaches its
-//! repository only through the [`WrittenRepos`] of the graph being matched.
+//! repository mapping resolves it.
 
 use std::borrow::Cow;
 
@@ -415,56 +414,17 @@ mod tests {
         assert!(!Pattern::parse("@rules_foo//foo/...").matches("@@rules_foo++ext+gen//foo:app"));
     }
 
-    /// The repositories `written` names, each as (canonical, apparent).
-    fn repos(written: &[(&str, &str)]) -> WrittenRepos {
-        let mut facets = Facets::default();
-        for &(canonical, apparent) in written {
-            facets.intern_repo(canonical, Some(apparent));
-        }
-        WrittenRepos::of(&facets)
-    }
-
-    /// A repository renamed by the module depending on it is written by neither
-    /// its canonical name nor its module name, so only what the inputs printed
-    /// says that the name reaches it.
-    #[test]
-    fn a_pattern_reaches_a_repository_by_the_name_an_input_wrote_for_it() {
-        let written = repos(&[("protobuf+", "com_google_protobuf")]);
-        let pattern = Pattern::parse("@com_google_protobuf//src/...");
-
-        assert!(!pattern.matches("@@protobuf+//src:lib"));
-        assert!(pattern.resolved(&written).matches("@@protobuf+//src:lib"));
-        assert!(!pattern.resolved(&written).matches("@@other+//src:lib"));
-        assert!(
-            PackagePrefix::parse("@com_google_protobuf//src")
-                .expect("a package prefix")
-                .resolved(&written)
-                .matches("@@protobuf+//src:lib")
-        );
-    }
-
-    /// Nothing says which repository an apparent name two of them were written
-    /// by reaches, and merging them under one name would draw a pattern over
-    /// both.
-    #[test]
-    fn an_apparent_name_two_repositories_were_written_by_reaches_neither() {
-        let written = repos(&[("one+", "shared"), ("two+", "shared")]);
-        let pattern = Pattern::parse("@shared//src/...");
-
-        assert!(!pattern.resolved(&written).matches("@@one+//src:lib"));
-        assert!(!pattern.resolved(&written).matches("@@two+//src:lib"));
-    }
-
     /// A repository is drawn and listed under the name it is written by, so
-    /// that name has to be one a reader can type: an apparent name two
-    /// repositories share leaves each written by the canonical name it is
-    /// identified by, and a pattern reaches a repository by either.
+    /// that name has to be one a reader can type: two versions of one module
+    /// would be written by the same module name, so each is written by the
+    /// canonical name identifying it, and a pattern reaches a repository by the
+    /// name it is written by whichever of the two that is.
     #[test]
     fn a_repository_is_reached_by_the_name_it_is_written_by() {
         let mut facets = Facets::default();
-        let one = facets.intern_repo("one+", Some("shared"));
-        let two = facets.intern_repo("two+", Some("shared"));
-        let renamed = facets.intern_repo("protobuf+", Some("com_google_protobuf"));
+        let one = facets.intern_repo("rules_bar+1.2.3");
+        let two = facets.intern_repo("rules_bar+2.0.0");
+        let sole = facets.intern_repo("protobuf+");
         let written = WrittenRepos::of(&facets);
 
         let reaches = |repo, label| {
@@ -472,12 +432,18 @@ mod tests {
                 .resolved(&written)
                 .matches(label)
         };
-        assert_eq!(written.written(one), "@@one+");
-        assert!(reaches(one, "@@one+//src:lib"));
-        assert!(!reaches(one, "@@two+//src:lib"));
-        assert!(reaches(two, "@@two+//src:lib"));
-        assert_eq!(written.written(renamed), "@com_google_protobuf");
-        assert!(reaches(renamed, "@@protobuf+//src:lib"));
+        assert_eq!(written.written(one), "@@rules_bar+1.2.3");
+        assert!(reaches(one, "@@rules_bar+1.2.3//src:lib"));
+        assert!(!reaches(one, "@@rules_bar+2.0.0//src:lib"));
+        assert!(reaches(two, "@@rules_bar+2.0.0//src:lib"));
+        assert_eq!(written.written(sole), "@protobuf");
+        assert!(reaches(sole, "@@protobuf+//src:lib"));
+        assert!(
+            PackagePrefix::parse("@protobuf//src")
+                .expect("a package prefix")
+                .resolved(&written)
+                .matches("@@protobuf+//src:lib")
+        );
     }
 
     #[test]

@@ -91,7 +91,7 @@ pub(crate) fn build_with_packages(
             kind,
             parent,
         ));
-        describe_target(facets, target, node_id, parent, &label, written);
+        describe_target(facets, target, node_id, parent, &label);
         node_by_label.insert(label.into_owned(), node_id);
     }
 
@@ -120,8 +120,7 @@ pub(crate) fn build_with_packages(
 
 /// Records what `target` states about the node it became: the `canonical` label
 /// placing it in `package`, and, where the target is a rule, how it was
-/// declared. `written` is the label as the input printed it, whose repository
-/// part is the apparent name `canonical`'s repository was reached by.
+/// declared.
 ///
 /// A rule's attributes reach the proto only under `--proto:output_rule_attrs`,
 /// so a rule stating none is as ordinary as one stating all of them.
@@ -131,9 +130,8 @@ pub(crate) fn describe_target(
     node: Id,
     package: Option<Id>,
     canonical: &str,
-    written: &str,
 ) {
-    facets.describe_label(node, package, canonical, written);
+    facets.describe_label(node, package, canonical);
     let Some(rule) = target.rule.as_ref() else {
         return;
     };

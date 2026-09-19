@@ -541,7 +541,7 @@ mod tests {
             let mut describe = |label: &str, reads: &str| {
                 let id = names.intern(&format!("target:{label}"));
                 graph.add_node(Node::new(id, reads, Kind::Target, None));
-                builder.describe_label(id, None, label, label);
+                builder.describe_label(id, None, label);
             };
             for i in 0..DEEP {
                 describe(&format!("//deep/pkg{i}:lib"), ":lib");

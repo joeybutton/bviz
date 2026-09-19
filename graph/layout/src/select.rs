@@ -176,7 +176,7 @@ mod tests {
 
             let app = names.intern("target://foo:app");
             graph.add_node(Node::new(app, ":app", Kind::Target, None));
-            builder.describe_label(app, None, "//foo:app", "//foo:app");
+            builder.describe_label(app, None, "//foo:app");
             builder.set_tags(app, ["manual", "flaky"]);
             builder.set_aspects(app, ["//tools:coverage.bzl%instrument"]);
             let facets = builder.facets();
@@ -195,7 +195,7 @@ mod tests {
 
             let lib = names.intern("target:@@rules_foo+//bar:lib");
             graph.add_node(Node::new(lib, ":lib", Kind::Target, None));
-            builder.describe_label(lib, None, "@@rules_foo+//bar:lib", "@rules_foo//bar:lib");
+            builder.describe_label(lib, None, "@@rules_foo+//bar:lib");
             let facets = builder.facets();
             let rule_class = facets.intern_rule_class("cc_library");
             facets.set_rule_class(lib, Some(rule_class));
@@ -205,7 +205,7 @@ mod tests {
 
             let source = names.intern("target://foo:main.c");
             graph.add_node(Node::new(source, ":main.c", Kind::Source, None));
-            builder.describe_label(source, None, "//foo:main.c", "//foo:main.c");
+            builder.describe_label(source, None, "//foo:main.c");
 
             let (facets, _) = builder.seal();
             Fixture {

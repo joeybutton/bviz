@@ -43,13 +43,6 @@ pub(crate) fn is_canonical(label: &str) -> bool {
     !label.starts_with('@') || label.starts_with("@@")
 }
 
-/// The repository a label names, with any sigil stripped: `@@r+//a:b` -> `r+`,
-/// `@r//a:b` -> `r`, and the main repository's empty name for `//a:b`. `None`
-/// where the label names no package.
-pub(crate) fn label_repo(label: &str) -> Option<&str> {
-    parse_package(label).map(|(repo, _)| repo.trim_start_matches('@'))
-}
-
 /// The repository `label` identifies, and which of its names does so:
 /// `@@r+//a:b` -> canonical `r+`, `//a:b` -> the main repository's canonical
 /// empty name, and `@r//a:b` -> apparent `r`. `None` where the label names no
@@ -272,7 +265,7 @@ impl PackageHierarchy {
         };
         for (repo, trie) in &tries {
             let carried = match identified_repo_name(repo) {
-                RepoName::Canonical(canonical) => facets.facets().intern_repo(canonical, None),
+                RepoName::Canonical(canonical) => facets.facets().intern_repo(canonical),
                 RepoName::Apparent(apparent) => facets.facets().intern_apparent_repo(apparent),
             };
             let mut out = Emit {
@@ -743,15 +736,6 @@ mod tests {
         assert_eq!(canonical_repo("@somerepo//foo:bar"), None);
         assert_eq!(canonical_repo("//foo:bar"), None);
         assert_eq!(canonical_repo("@@//foo:bar"), None);
-    }
-
-    #[test]
-    fn label_repo_strips_the_sigil_off_the_repository_part() {
-        assert_eq!(label_repo("@@somerepo+//foo:bar"), Some("somerepo+"));
-        assert_eq!(label_repo("@somerepo//foo:bar"), Some("somerepo"));
-        assert_eq!(label_repo("//foo:bar"), Some(""));
-        assert_eq!(label_repo("@@//foo:bar"), Some(""));
-        assert_eq!(label_repo("bar"), None);
     }
 
     #[test]

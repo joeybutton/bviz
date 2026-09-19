@@ -185,9 +185,6 @@ impl Origin {
 pub enum RepoEntry {
     Canonical {
         name: Sym,
-        /// The apparent name a label reached the repository by, where a label
-        /// wrote one beside the canonical name.
-        apparent: Option<Sym>,
         origin: Origin,
         module: Option<Sym>,
     },
@@ -212,13 +209,6 @@ impl RepoEntry {
         match *self {
             RepoEntry::Canonical { origin, .. } => origin,
             RepoEntry::Apparent { .. } => Origin::WorkspaceOrUnknown,
-        }
-    }
-
-    pub fn apparent(&self) -> Option<Sym> {
-        match *self {
-            RepoEntry::Canonical { apparent, .. } => apparent,
-            RepoEntry::Apparent { .. } => None,
         }
     }
 
@@ -528,17 +518,14 @@ impl Facets {
     }
 
     /// The handle for the repository whose canonical name is `canonical`,
-    /// deriving its origin from that name. `apparent` is recorded by the call
-    /// that first names the repository, since every later call describes the
-    /// repository the first one already did.
-    pub fn intern_repo(&mut self, canonical: &str, apparent: Option<&str>) -> RepoRef {
+    /// deriving its origin and its module from that name.
+    pub fn intern_repo(&mut self, canonical: &str) -> RepoRef {
         let name = self.strings.intern(canonical);
         if let Some(&handle) = self.repo_ids.get(&RepoName::Canonical(name)) {
             return handle;
         }
         let entry = RepoEntry::Canonical {
             name,
-            apparent: apparent.map(|name| self.strings.intern(name)),
             origin: self.origin(canonical),
             module: repo::module_name(canonical).map(|name| self.strings.intern(name)),
         };
@@ -563,8 +550,8 @@ impl Facets {
     }
 
     /// The handle for the configuration whose checksum is `checksum`. The rest
-    /// is recorded by the call that first names the configuration, as
-    /// [`intern_repo`](Self::intern_repo) records a repository's.
+    /// is recorded by the call that first names the configuration, every later
+    /// call describing the configuration that one already did.
     pub fn intern_config(
         &mut self,
         checksum: &str,
@@ -677,14 +664,13 @@ impl Facets {
 /// sigil and all, which is both the name drawn for it and the name a pattern
 /// reaches it by.
 ///
-/// A repository is written by the apparent name an input wrote for it, and
-/// failing that by the name of the module whose repository it is, since
-/// `@rules_foo` is how that repository is written before a repository mapping
-/// resolves the name. A name several repositories would be written by says
-/// which of them a reader means no more than a dump says which one an apparent
-/// name reaches, so each of those holding a canonical name is written by that
-/// instead. The main repository, whose labels carry no repository part, is
-/// written by nothing at all.
+/// A repository is written by the name of the module whose repository it is,
+/// since `@rules_foo` is how that repository is written before a repository
+/// mapping resolves the name. A name several repositories would be written by
+/// says which of them a reader means no more than a dump says which one an
+/// apparent name reaches, so each of those holding a canonical name is written
+/// by that instead. The main repository, whose labels carry no repository part,
+/// is written by nothing at all.
 #[derive(Default, Clone)]
 pub struct WrittenRepos {
     /// The name each repository is written by, at the position its [`RepoRef`]
@@ -743,14 +729,11 @@ impl WrittenRepos {
     }
 }
 
-/// The name a repository is written by short of a canonical one: the apparent
-/// name an input wrote for it, the module name its canonical name encodes, or
-/// the apparent name identifying it.
+/// The name a repository is written by short of a canonical one: the module
+/// name its canonical name encodes, or the apparent name identifying it.
 fn written_apparently(entry: &RepoEntry) -> Option<Sym> {
     match *entry {
-        RepoEntry::Canonical {
-            apparent, module, ..
-        } => apparent.or(module),
+        RepoEntry::Canonical { module, .. } => module,
         RepoEntry::Apparent { name } => Some(name),
     }
 }
@@ -775,16 +758,8 @@ impl FacetsBuilder {
 
     /// Records what the label of the node `node` names outright: itself as a
     /// target, the `package` box it sits in, and its repository. `canonical` is
-    /// the label in the form node ids are keyed by and `written` the form the
-    /// input printed, whose repository part is the apparent name that
-    /// repository was reached by.
-    pub fn describe_label(
-        &mut self,
-        node: Id,
-        package: Option<Id>,
-        canonical: &str,
-        written: &str,
-    ) {
+    /// the label in the form node ids are keyed by.
+    pub fn describe_label(&mut self, node: Id, package: Option<Id>, canonical: &str) {
         self.facets.set_label(node, node);
         self.observe(Axis::Label, true);
         if let Some(package) = package {
@@ -793,11 +768,7 @@ impl FacetsBuilder {
         self.observe(Axis::Package, package.is_some());
         if let Some(name) = label::identified_repo(canonical) {
             let repo = match name {
-                RepoName::Canonical(canonical_repo) => {
-                    let apparent =
-                        label::label_repo(written).filter(|&name| name != canonical_repo);
-                    self.facets.intern_repo(canonical_repo, apparent)
-                }
+                RepoName::Canonical(canonical_repo) => self.facets.intern_repo(canonical_repo),
                 RepoName::Apparent(apparent) => self.facets.intern_apparent_repo(apparent),
             };
             self.facets.set_repo(node, Some(repo));
@@ -1000,8 +971,8 @@ mod tests {
     #[test]
     fn the_first_value_a_node_is_given_is_the_one_it_keeps() {
         let mut facets = Facets::default();
-        let first = facets.intern_repo("rules_foo+", None);
-        let second = facets.intern_repo("rules_bar+", None);
+        let first = facets.intern_repo("rules_foo+");
+        let second = facets.intern_repo("rules_bar+");
 
         facets.set_repo(Id(0), Some(first));
         facets.set_repo(Id(0), Some(second));
@@ -1070,19 +1041,14 @@ mod tests {
     fn interning_one_value_twice_yields_one_entry() {
         let mut facets = Facets::default();
 
-        let repo = facets.intern_repo("rules_foo+", Some("foo"));
+        let repo = facets.intern_repo("rules_foo+");
         let config = facets.intern_config("ck1", Some("k8-fastbuild"), Tri::No);
         let rule_class = facets.intern_rule_class("cc_library");
 
-        assert_eq!(facets.intern_repo("rules_foo+", None), repo);
+        assert_eq!(facets.intern_repo("rules_foo+"), repo);
         assert_eq!(facets.intern_config("ck1", None, Tri::Unknown), config);
         assert_eq!(facets.intern_rule_class("cc_library"), rule_class);
         // The description the repeat call carried does not displace the first.
-        let apparent = facets.repo_entry(repo).apparent();
-        assert_eq!(
-            apparent.map(|name| facets.strings().resolve(name)),
-            Some("foo")
-        );
         assert_eq!(facets.config_entry(config).unwrap().is_tool, Tri::No);
         assert_eq!(facets.repos.len(), 1);
         assert_eq!(facets.configs.len(), 1);
@@ -1097,7 +1063,7 @@ mod tests {
         let mut facets = Facets::default();
 
         let apparent = facets.intern_apparent_repo("somerepo");
-        let canonical = facets.intern_repo("somerepo", None);
+        let canonical = facets.intern_repo("somerepo");
 
         assert_ne!(apparent, canonical);
         assert_eq!(facets.repo_name(apparent), RepoName::Apparent("somerepo"));
@@ -1124,7 +1090,7 @@ mod tests {
     fn a_repository_entry_states_the_origin_its_canonical_name_encodes() {
         let mut facets = Facets::default();
 
-        let repo = facets.intern_repo("rules_foo+1.2.3", None);
+        let repo = facets.intern_repo("rules_foo+1.2.3");
 
         let entry = *facets.repo_entry(repo);
         let resolve = |sym: Option<Sym>| sym.map(|sym| facets.strings().resolve(sym));
@@ -1141,37 +1107,39 @@ mod tests {
     #[test]
     fn a_repository_is_written_by_the_name_a_reader_reaches_it_by() {
         let mut facets = Facets::default();
-        let main = facets.intern_repo("", None);
-        let module = facets.intern_repo("rules_foo+", None);
-        let renamed = facets.intern_repo("rules_bar+", Some("bar"));
-        let generated = facets.intern_repo("rules_foo++ext+gen", None);
+        let main = facets.intern_repo("");
+        let module = facets.intern_repo("rules_foo+");
+        let versioned = facets.intern_repo("rules_bar+1.2.3");
+        let generated = facets.intern_repo("rules_foo++ext+gen");
         let named_apparently = facets.intern_apparent_repo("crates");
 
         let written = WrittenRepos::of(&facets);
 
         assert_eq!(written.written(main), "");
         assert_eq!(written.written(module), "@rules_foo");
-        assert_eq!(written.written(renamed), "@bar");
+        assert_eq!(written.written(versioned), "@rules_bar");
         assert_eq!(written.written(generated), "@@rules_foo++ext+gen");
         assert_eq!(written.written(named_apparently), "@crates");
     }
 
     /// A name two repositories would be written by says which of them a reader
     /// means no more than a dump does, so each falls back to the canonical name
-    /// identifying it. A repository an apparent name identifies has no name to
-    /// fall back on and keeps that one, which its labels carry outright.
+    /// identifying it — which is how the two versions a
+    /// `multiple_version_override` puts in one graph are told apart. A
+    /// repository an apparent name identifies has no name to fall back on and
+    /// keeps that one, which its labels carry outright.
     #[test]
     fn a_name_two_repositories_would_be_written_by_is_written_by_neither() {
         let mut facets = Facets::default();
-        let one = facets.intern_repo("one+", Some("shared"));
-        let two = facets.intern_repo("two+", Some("shared"));
-        let module = facets.intern_repo("rules_foo+", None);
+        let one = facets.intern_repo("rules_bar+1.2.3");
+        let two = facets.intern_repo("rules_bar+2.0.0");
+        let module = facets.intern_repo("rules_foo+");
         let named_apparently = facets.intern_apparent_repo("rules_foo");
 
         let written = WrittenRepos::of(&facets);
 
-        assert_eq!(written.written(one), "@@one+");
-        assert_eq!(written.written(two), "@@two+");
+        assert_eq!(written.written(one), "@@rules_bar+1.2.3");
+        assert_eq!(written.written(two), "@@rules_bar+2.0.0");
         assert_eq!(written.written(module), "@@rules_foo+");
         assert_eq!(written.written(named_apparently), "@rules_foo");
     }
@@ -1226,7 +1194,7 @@ mod tests {
     #[test]
     fn renumbering_moves_each_nodes_facets_to_its_new_id() {
         let mut facets = Facets::default();
-        let repo = facets.intern_repo("rules_foo+", None);
+        let repo = facets.intern_repo("rules_foo+");
         facets.set_repo(Id(0), Some(repo));
         facets.set_testonly(Id(1), Tri::Yes);
         facets.set_testonly(Id(2), Tri::No);

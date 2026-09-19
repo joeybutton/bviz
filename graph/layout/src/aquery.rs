@@ -163,7 +163,6 @@ fn build_action_boxes(
         let ct_id = boxes.target_ct(
             &TargetBox {
                 canonical: &canonical,
-                written: &written,
                 kind: Kind::Target,
                 rule_class: target.and_then(|t| index.rule_class(t)),
             },
@@ -319,8 +318,6 @@ struct Boxes<'a> {
 struct TargetBox<'a> {
     /// The label in the canonical form node ids are keyed by.
     canonical: &'a str,
-    /// The label as the input printed it.
-    written: &'a str,
     kind: Kind,
     /// The rule class the target was declared by, absent for a target the
     /// action graph names no rule class for, such as a promoted output file.
@@ -374,7 +371,6 @@ impl Boxes<'_> {
                 let out_ct = self.target_ct(
                     &TargetBox {
                         canonical: &out_label,
-                        written: &out_label,
                         kind: Kind::Artifact,
                         rule_class: None,
                     },
@@ -431,7 +427,7 @@ impl Boxes<'_> {
                 package,
             ));
             self.facets
-                .describe_label(target_node_id, package, target.canonical, target.written);
+                .describe_label(target_node_id, package, target.canonical);
             if target.kind == Kind::Target {
                 // Only a rule is declared by a rule class; the box a promoted
                 // output file gets is a file, which no rule class describes.
@@ -590,7 +586,7 @@ impl Wiring<'_, '_> {
                         Kind::Source,
                         parent,
                     ));
-                    self.facets.describe_label(node_id, parent, &label, &label);
+                    self.facets.describe_label(node_id, parent, &label);
                 }
                 node_id
             }

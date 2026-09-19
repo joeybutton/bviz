@@ -369,10 +369,10 @@ mod tests {
     /// repository a module extension generated.
     fn facets() -> Facets {
         let mut facets = Facets::default();
-        facets.intern_repo("", None);
-        facets.intern_repo("rules_foo+", Some("rules_foo"));
-        facets.intern_repo("rules_bar+", None);
-        facets.intern_repo("rules_foo++ext+generated", None);
+        facets.intern_repo("");
+        facets.intern_repo("rules_foo+");
+        facets.intern_repo("rules_bar+");
+        facets.intern_repo("rules_foo++ext+generated");
         facets
     }
 
@@ -449,7 +449,7 @@ mod tests {
     #[test]
     fn a_repository_named_only_apparently_is_offered_under_an_unknown_origin() {
         let mut facets = Facets::default();
-        facets.intern_repo("", None);
+        facets.intern_repo("");
         facets.intern_apparent_repo("rules_foo");
 
         let rows = carried_origins(&facets);
@@ -470,7 +470,7 @@ mod tests {
     fn a_repository_row_hides_only_the_repository_it_names() {
         let mut facets = Facets::default();
         facets.intern_apparent_repo("somerepo");
-        facets.intern_repo("somerepo", None);
+        facets.intern_repo("somerepo");
 
         let rows = carried_origins(&facets);
         assert_eq!(

@@ -442,7 +442,7 @@ mod tests {
 
             let app = names.intern(APP);
             graph.add_node(Node::new(app, ":app", Kind::Target, None));
-            builder.describe_label(app, None, "//foo:app", "//foo:app");
+            builder.describe_label(app, None, "//foo:app");
             builder.set_tags(app, ["manual"]);
             builder.set_aspects(app, ["//tools:coverage.bzl%instrument"]);
             let facets = builder.facets();
@@ -468,7 +468,7 @@ mod tests {
 
             let lib = names.intern(LIB);
             graph.add_node(Node::new(lib, ":lib", Kind::Target, None));
-            builder.describe_label(lib, None, "@@rules_foo+//bar:lib", "@rules_foo//bar:lib");
+            builder.describe_label(lib, None, "@@rules_foo+//bar:lib");
             let facets = builder.facets();
             let rule_class = facets.intern_rule_class("cc_library");
             facets.set_rule_class(lib, Some(rule_class));
@@ -477,7 +477,7 @@ mod tests {
 
             let source = names.intern(SOURCE);
             graph.add_node(Node::new(source, ":main.c", Kind::Source, None));
-            builder.describe_label(source, None, "//foo:main.c", "//foo:main.c");
+            builder.describe_label(source, None, "//foo:main.c");
 
             let (facets, _) = builder.seal();
             let group = names.intern(GROUP);
@@ -566,7 +566,7 @@ mod tests {
         ] {
             let id = names.intern(node);
             graph.add_node(Node::new(id, ":lib", Kind::Target, None));
-            builder.describe_label(id, None, label, label);
+            builder.describe_label(id, None, label);
         }
         let (facets, _) = builder.seal();
 

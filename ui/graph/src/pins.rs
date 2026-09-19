@@ -357,7 +357,7 @@ mod tests {
                 let label = format!("//{package}:main");
                 let target = names.intern(&format!("target:{label}"));
                 graph.add_node(Node::new(target, ":main", Kind::Target, None));
-                builder.describe_label(target, None, &label, &label);
+                builder.describe_label(target, None, &label);
                 let action = names.intern(&format!("{label}#compile"));
                 graph.add_node(Node::new(action, "CppCompile", Kind::Action, Some(target)));
                 builder.facets().inherit(action, target);

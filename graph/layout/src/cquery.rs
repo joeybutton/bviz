@@ -223,7 +223,7 @@ impl Nodes<'_, '_> {
                 Kind::Target,
                 parent,
             ));
-            query::describe_target(self.b.facets, target, id, parent, &label, written);
+            query::describe_target(self.b.facets, target, id, parent, &label);
             self.index.target_box.insert(label.to_string(), id);
         }
         let container = self.index.target_box[label.as_ref()];
@@ -251,7 +251,7 @@ impl Nodes<'_, '_> {
             self.b
                 .graph
                 .add_node(Node::new(id, label::target_label(&label), kind, parent));
-            query::describe_target(self.b.facets, target, id, parent, &label, written);
+            query::describe_target(self.b.facets, target, id, parent, &label);
             self.index.leaf_id.insert(label.into_owned(), id);
         }
     }
