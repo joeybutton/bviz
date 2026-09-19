@@ -178,43 +178,56 @@ impl Origin {
     }
 }
 
-/// What is known about one repository.
-///
-/// Only [`Facets::intern_repo`] and [`Facets::intern_apparent_repo`] mint an
-/// entry, so a repository an apparent name identifies cannot be given an
-/// origin, a module, or a second apparent name: its name encodes none of them.
+/// What is known about one repository, which is what the name identifying it
+/// encodes: a canonical name states where the repository comes from and which
+/// module it belongs to, an apparent name neither.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub struct RepoEntry {
-    name: RepoName<Sym>,
-    apparent: Option<Sym>,
-    origin: Origin,
-    module: Option<Sym>,
+pub enum RepoEntry {
+    Canonical {
+        name: Sym,
+        /// The apparent name a label reached the repository by, where a label
+        /// wrote one beside the canonical name.
+        apparent: Option<Sym>,
+        origin: Origin,
+        module: Option<Sym>,
+    },
+    Apparent {
+        name: Sym,
+    },
 }
 
 impl RepoEntry {
     /// The name identifying the repository, which is what tells it from every
     /// other the inputs named.
     pub fn name(&self) -> RepoName<Sym> {
-        self.name
+        match *self {
+            RepoEntry::Canonical { name, .. } => RepoName::Canonical(name),
+            RepoEntry::Apparent { name } => RepoName::Apparent(name),
+        }
     }
 
-    /// Where the repository comes from. A canonical name encodes this and an
-    /// apparent name encodes nothing, so a repository identified apparently
-    /// reports [`Origin::WorkspaceOrUnknown`] as any other unresolved name
-    /// does.
+    /// Where the repository comes from, [`Origin::WorkspaceOrUnknown`] where
+    /// the identifying name encodes no origin, as any unresolved name reads.
     pub fn origin(&self) -> Origin {
-        self.origin
+        match *self {
+            RepoEntry::Canonical { origin, .. } => origin,
+            RepoEntry::Apparent { .. } => Origin::WorkspaceOrUnknown,
+        }
     }
 
-    /// The apparent name a label reached the repository by, where a label
-    /// wrote one beside the canonical name identifying it.
     pub fn apparent(&self) -> Option<Sym> {
-        self.apparent
+        match *self {
+            RepoEntry::Canonical { apparent, .. } => apparent,
+            RepoEntry::Apparent { .. } => None,
+        }
     }
 
     /// The Bzlmod module the repository belongs to.
     pub fn module(&self) -> Option<Sym> {
-        self.module
+        match *self {
+            RepoEntry::Canonical { module, .. } => module,
+            RepoEntry::Apparent { .. } => None,
+        }
     }
 }
 
@@ -519,11 +532,11 @@ impl Facets {
     /// that first names the repository, since every later call describes the
     /// repository the first one already did.
     pub fn intern_repo(&mut self, canonical: &str, apparent: Option<&str>) -> RepoRef {
-        let name = RepoName::Canonical(self.strings.intern(canonical));
-        if let Some(&handle) = self.repo_ids.get(&name) {
+        let name = self.strings.intern(canonical);
+        if let Some(&handle) = self.repo_ids.get(&RepoName::Canonical(name)) {
             return handle;
         }
-        let entry = RepoEntry {
+        let entry = RepoEntry::Canonical {
             name,
             apparent: apparent.map(|name| self.strings.intern(name)),
             origin: self.origin(canonical),
@@ -535,23 +548,17 @@ impl Facets {
     /// The handle for the repository a label named `@apparent`, which no input
     /// named canonically.
     pub fn intern_apparent_repo(&mut self, apparent: &str) -> RepoRef {
-        let name = RepoName::Apparent(self.strings.intern(apparent));
-        if let Some(&handle) = self.repo_ids.get(&name) {
+        let name = self.strings.intern(apparent);
+        if let Some(&handle) = self.repo_ids.get(&RepoName::Apparent(name)) {
             return handle;
         }
-        let entry = RepoEntry {
-            name,
-            apparent: None,
-            origin: Origin::WorkspaceOrUnknown,
-            module: None,
-        };
-        self.push_repo(entry)
+        self.push_repo(RepoEntry::Apparent { name })
     }
 
     fn push_repo(&mut self, entry: RepoEntry) -> RepoRef {
         let handle = RepoRef::at(self.repos.len());
         self.repos.push(entry);
-        self.repo_ids.insert(entry.name, handle);
+        self.repo_ids.insert(entry.name(), handle);
         handle
     }
 
@@ -618,14 +625,18 @@ impl Facets {
     /// stating neither is written by its canonical name, and the main
     /// repository, whose labels carry no repository part, by nothing at all.
     pub fn repo_written(&self, repo: RepoRef) -> String {
-        let entry = self.repo_entry(repo);
-        let canonical = match entry.name {
-            RepoName::Apparent(apparent) => {
-                return format!("@{}", self.strings.resolve(apparent));
+        let (canonical, written) = match *self.repo_entry(repo) {
+            RepoEntry::Apparent { name } => {
+                return format!("@{}", self.strings.resolve(name));
             }
-            RepoName::Canonical(canonical) => canonical,
+            RepoEntry::Canonical {
+                name,
+                apparent,
+                module,
+                ..
+            } => (name, apparent.or(module)),
         };
-        match entry.apparent.or(entry.module) {
+        match written {
             Some(name) => format!("@{}", self.strings.resolve(name)),
             None => match self.strings.resolve(canonical) {
                 "" => String::new(),
