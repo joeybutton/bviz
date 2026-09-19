@@ -161,7 +161,7 @@ fn scroll_to(view: &mut GraphPanel, axis: Axis, offset: f32, cx: &mut Context<Gr
         Axis::Horizontal => (panc, py),
     };
     view.framing.pan_to(clamp_pan(pan, zoom, vp, content));
-    cx.notify();
+    view.invalidate_canvas(cx);
 }
 
 /// Begin a scroll-bar drag, recording which thumb is held and where along it the

@@ -581,6 +581,7 @@ fn request(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
             if let Some(landing) = landing {
                 view.settle_onto(&landing, cx);
             }
+            view.invalidate_canvas(cx);
         },
     );
 }

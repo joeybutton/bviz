@@ -6,6 +6,7 @@ use bviz_graph_layout::select::labels::LabelIndex;
 use bviz_graph_layout::{Id, Kind};
 use bviz_ui_components::{
     DragEnd, Dropdown, DropdownEvent, MultiSelect, MultiSelectEvent, Pending, ScrollbarColors,
+    cached_layer, overlay_canvas,
 };
 use bviz_ui_graph_args::{GraphArgs, GraphSource};
 use bviz_ui_theme::{DataColors, Theme, ThemeColors};
@@ -17,8 +18,8 @@ use clap::{CommandFactory, Parser};
 use gpui::{
     AnyElement, App, Bounds, Context, Entity, EventEmitter, FocusHandle, Focusable, IntoElement,
     KeyBinding, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Render,
-    Rgba, ScrollDelta, ScrollWheelEvent, SharedString, Subscription, Window, actions, canvas, div,
-    prelude::*, px, size,
+    Rgba, ScrollDelta, ScrollWheelEvent, SharedString, Subscription, WeakEntity, Window, actions,
+    canvas, div, prelude::*, px, size,
 };
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -49,7 +50,7 @@ mod toolbar;
 use camera::{Camera, Rect, from_screen, recenter_rect, zoom_step};
 use checklist::OriginRow;
 use derive::{Derived, Drawn, Expandable, LayoutLanded};
-use drag::{Drag, end_drag, start_pan};
+use drag::{Drag, end_drag, start_pan, track_gesture};
 use emphasis::Emphasis;
 use framing::{Framing, build_prepaint};
 use legend::legend;
@@ -234,6 +235,9 @@ pub struct GraphPanel {
     /// The titles the canvas drew, rewritten by every paint and resolved against
     /// a pointer by [`box_at`].
     titles: Vec<TitleTarget>,
+    /// The layer drawing the graph; notified through
+    /// [`GraphPanel::invalidate_canvas`].
+    canvas: Entity<GraphCanvas>,
 }
 
 impl GraphPanel {
@@ -323,7 +327,9 @@ impl GraphPanel {
         // compared with what the search last took up rather than taken for an
         // edit.
         let search_typing = cx.observe(search.field(), |view, _, cx| search::typed(view, cx));
-        let changed = cx.observe(&model, |_, _, cx| cx.notify());
+        let parent = cx.entity().downgrade();
+        let canvas = cx.new(|_| GraphCanvas { parent });
+        let changed = cx.observe(&model, |view, _, cx| view.invalidate_canvas(cx));
         let source_replaced = cx.subscribe(&model, |view, _, _: &SourceReplaced, cx| {
             derive::opened(view, cx);
             checklist::adopt(view, cx);
@@ -361,7 +367,16 @@ impl GraphPanel {
             missing_open: false,
             pins: pins::Pins::new(),
             titles: Vec::new(),
+            canvas,
         }
+    }
+
+    /// Rebuilds the graph scene along with the frame around it; every change to
+    /// what the canvas draws routes through here, and a change that leaves the
+    /// drawing alone notifies alone, so the scene replays from its cache.
+    pub(crate) fn invalidate_canvas(&self, cx: &mut Context<Self>) {
+        self.canvas.update(cx, |_, cx| cx.notify());
+        cx.notify();
     }
 
     /// Brings this drawing onto a layered layout the graph has landed.
@@ -382,40 +397,22 @@ impl GraphPanel {
         emphasis::begin_fade(self, cx);
     }
 
-    /// Draws the selected mode's layout, or a spinner while it is still being
-    /// computed — the toolbar stays above either, so the picker remains reachable.
-    fn viewport(&mut self, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
+    /// Frames the layer drawing the selected mode's layout, or a spinner while
+    /// that layout is still being computed — the toolbar stays above either, so
+    /// the picker remains reachable.
+    fn viewport(&self, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
         let Some(drawn) = self.drawn() else {
             return bviz_ui_components::centered_spinner("Laying out…", &palette.colors)
                 .into_any_element();
         };
-        let g = drawn.view(self.camera().zoom);
-        let edge_legend = legend(g, &palette);
-        let content = drawn.content();
-        let recenter_target = recenter_rect(g, &self.emphasis);
-        let scene = Scene {
-            expandable: self.expandable(),
-            palette,
-            faded: self.derived.faded(),
-            hovered: self.hovered.filter(|_| self.neighborhood_enabled),
-            selected: self.selection.node(),
-            highlight: self.emphasis.highlight(),
-            drawn,
-        };
+        let edge_legend = legend(drawn.view(self.camera().zoom), &palette);
         let entity = cx.entity();
-        let prepaint = build_prepaint(entity.clone(), content, recenter_target);
         div()
             .id("graph-viewport")
             .relative()
             .size_full()
             .overflow_hidden()
-            .child(
-                canvas(prepaint, canvas_body(scene, entity))
-                    .absolute()
-                    .left_0()
-                    .top_0()
-                    .size_full(),
-            )
+            .child(cached_layer(self.canvas.clone()))
             .child(
                 // What the drawing itself cannot state, held clear of the graph
                 // at the foot of the canvas.
@@ -432,6 +429,12 @@ impl GraphPanel {
             )
             .children(search::card(self, &palette, cx))
             .children(pins::panel(self, &palette, cx))
+            // A replayed scene installs the handlers recorded with it, which a
+            // press's own frame has yet to make; the panel's own paint is what
+            // installs them for the gesture that press begins.
+            .child(overlay_canvas(move |_, window, cx| {
+                track_gesture(&entity, window, cx)
+            }))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
             .on_mouse_down(MouseButton::Right, cx.listener(Self::on_secondary_down))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
@@ -465,7 +468,7 @@ impl GraphPanel {
         self.morph.clear();
         self.framing.refit();
         derive::ensure_layout(self, cx);
-        cx.notify();
+        self.invalidate_canvas(cx);
     }
 
     fn on_mouse_down(&mut self, e: &MouseDownEvent, _: &mut Window, cx: &mut Context<Self>) {
@@ -519,7 +522,7 @@ impl GraphPanel {
         .map(|b| b.id);
         if hit != self.hovered {
             self.hovered = hit;
-            cx.notify();
+            self.invalidate_canvas(cx);
         }
     }
 
@@ -530,7 +533,7 @@ impl GraphPanel {
     /// keeps a pan from dropping the marked set it started with.
     fn on_hover(&mut self, over: &bool, _: &mut Window, cx: &mut Context<Self>) {
         if !over && matches!(self.drag, Drag::None) && self.hovered.take().is_some() {
-            cx.notify();
+            self.invalidate_canvas(cx);
         }
     }
 
@@ -550,18 +553,18 @@ impl GraphPanel {
             viewport,
             content,
         ));
-        cx.notify();
+        self.invalidate_canvas(cx);
     }
 
     fn toggle_neighborhood(&mut self, cx: &mut Context<Self>) {
         self.neighborhood_enabled = !self.neighborhood_enabled;
-        cx.notify();
+        self.invalidate_canvas(cx);
     }
 
     /// Widens or narrows what the selected box marks.
     fn set_relation(&mut self, relation: Relation, cx: &mut Context<Self>) {
         self.selection.set_relation(relation);
-        cx.notify();
+        self.invalidate_canvas(cx);
     }
 
     fn toggle_reduce(&mut self, cx: &mut Context<Self>) {
@@ -624,7 +627,7 @@ impl Render for GraphPanel {
             .on_action(cx.listener(|view, _: &ToggleReduce, _, cx| view.toggle_reduce(cx)))
             .on_action(cx.listener(|view, _: &ClearSelection, _, cx| {
                 view.selection.clear();
-                cx.notify();
+                view.invalidate_canvas(cx);
             }))
             .track_focus(&self.focus_handle)
             .flex_1()
@@ -659,6 +662,43 @@ impl Render for GraphPanel {
                     )
             }
         }
+    }
+}
+
+/// The layer the graph is drawn in, so that a frame drawn for any other reason
+/// replays it rather than laying the drawing out again.
+struct GraphCanvas {
+    /// What the drawing is made from, and what its prepaint and paint write
+    /// back through.
+    parent: WeakEntity<GraphPanel>,
+}
+
+impl Render for GraphCanvas {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let Some(parent) = self.parent.upgrade() else {
+            return div().into_any_element();
+        };
+        let palette = Palette::from_theme(&bviz_ui_theme::theme(window, cx));
+        let view = parent.read(cx);
+        let Some(drawn) = view.drawn() else {
+            return div().into_any_element();
+        };
+        let g = drawn.view(view.camera().zoom);
+        let content = drawn.content();
+        let recenter_target = recenter_rect(g, &view.emphasis);
+        let scene = Scene {
+            expandable: view.expandable(),
+            palette,
+            faded: view.derived.faded(),
+            hovered: view.hovered.filter(|_| view.neighborhood_enabled),
+            selected: view.selection.node(),
+            highlight: view.emphasis.highlight(),
+            drawn,
+        };
+        let prepaint = build_prepaint(parent.clone(), content, recenter_target);
+        canvas(prepaint, canvas_body(scene, parent))
+            .size_full()
+            .into_any_element()
     }
 }
 
@@ -740,6 +780,7 @@ fn click_box_at(view: &mut GraphPanel, pos: Point<Pixels>, cx: &mut Context<Grap
     view.hovered = None;
     derive::toggle_expansion(view, id, cx);
     view.emphasis.toggled(id);
+    view.invalidate_canvas(cx);
 }
 
 /// Selects the box under `pos` (window px), or drops the selection where `pos`
@@ -767,7 +808,7 @@ fn select_box_at(view: &mut GraphPanel, pos: Point<Pixels>, cx: &mut Context<Gra
         Some(id) => view.selection.toggle(id),
         None => view.selection.clear(),
     }
-    cx.notify();
+    view.invalidate_canvas(cx);
 }
 
 /// Where `b` is drawn: its own layout rect at rest, and the rect `morph` has

@@ -1,6 +1,5 @@
 use crate::camera::{Camera, Rect, to_screen, visible_rect};
 use crate::derive::{Drawn, Expandable};
-use crate::drag::track_gesture;
 use crate::morph::Frame;
 use crate::neighborhood::{Neighborhood, compute_neighborhood};
 use crate::relation::{Direction, Relation};
@@ -321,7 +320,6 @@ pub(crate) fn canvas_body(
             &scene.palette,
             window,
         );
-        track_gesture(&entity, window, cx);
     }
 }
 

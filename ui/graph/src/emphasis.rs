@@ -115,11 +115,11 @@ pub(crate) fn begin_fade(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
             let done = this.update(cx, |this, cx| match this.emphasis.tick(generation) {
                 Fade::Superseded => true,
                 Fade::Fading => {
-                    cx.notify();
+                    this.invalidate_canvas(cx);
                     false
                 }
                 Fade::Faded => {
-                    cx.notify();
+                    this.invalidate_canvas(cx);
                     true
                 }
             });
