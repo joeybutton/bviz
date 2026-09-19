@@ -12,6 +12,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use bazel_query_proto::blaze_query::{Target, target::Discriminator};
 
+use crate::facets::{FacetsBuilder, RepoRef};
 use crate::graph::{Graph, Kind, Node};
 use crate::intern::{Id, Names};
 use crate::repo::module_name;
@@ -53,7 +54,17 @@ pub(crate) fn label_repo(label: &str) -> Option<&str> {
 /// label still carrying an apparent name identifies no repository, since the
 /// name could stand for any of them, and neither does one naming no package.
 pub(crate) fn identified_repo(label: &str) -> Option<&str> {
-    label_repo(label).filter(|_| is_canonical(label))
+    parse_package(label).and_then(|(repo, _)| identified_repo_name(repo))
+}
+
+/// [`identified_repo`] for a label's repository part on its own, as a package
+/// key holds it: `@@r+` -> `r+`, `@r` -> `None`, and the main repository's empty
+/// name for the empty part.
+pub(crate) fn identified_repo_name(repo: &str) -> Option<&str> {
+    match repo.strip_prefix('@') {
+        None => Some(repo),
+        Some(canonical) => canonical.strip_prefix('@'),
+    }
 }
 
 /// The owned (repository, package path) key of a canonical label's package.
@@ -241,6 +252,26 @@ pub(crate) struct PackageHierarchy {
     repo_paths: HashMap<String, Vec<String>>,
 }
 
+/// What a run of box emissions writes to, and the repository the boxes of that
+/// run belong to.
+struct Emit<'a> {
+    graph: &'a mut Graph,
+    names: &'a mut Names,
+    facets: &'a mut FacetsBuilder,
+    /// The repository part the boxes are keyed and labeled by.
+    written: &'a str,
+    repo: Option<RepoRef>,
+}
+
+impl Emit<'_> {
+    /// Emits one box, which belongs to the repository this run is emitting.
+    fn r#box(&mut self, id: Id, label: String, parent: Option<Id>) {
+        self.graph
+            .add_node(Node::new(id, label, Kind::Package, parent));
+        self.facets.facets().set_repo(id, self.repo);
+    }
+}
+
 impl PackageHierarchy {
     /// Builds the boxes for every real package and the folded ancestors that
     /// reach them, emitting one `package` container node per box into `graph`.
@@ -248,6 +279,7 @@ impl PackageHierarchy {
         packages: &BTreeSet<(String, String)>,
         graph: &mut Graph,
         names: &mut Names,
+        facets: &mut FacetsBuilder,
     ) -> Self {
         let mut tries: BTreeMap<&str, Trie> = BTreeMap::new();
         for (repo, path) in packages {
@@ -258,7 +290,16 @@ impl PackageHierarchy {
             repo_paths: HashMap::new(),
         };
         for (repo, trie) in &tries {
-            hierarchy.emit_root(trie, repo, graph, names);
+            let carried = identified_repo_name(repo)
+                .map(|canonical| facets.facets().intern_repo(canonical, None));
+            let mut out = Emit {
+                graph,
+                names,
+                facets,
+                written: repo,
+                repo: carried,
+            };
+            hierarchy.emit_root(trie, &mut out);
         }
         for (repo, path) in packages {
             hierarchy
@@ -273,11 +314,12 @@ impl PackageHierarchy {
     /// Emits a repository's boxes. The repository root becomes a `//` (or
     /// `@repo//`) box only when it is itself a package; otherwise each top-level
     /// subtree is its own outermost box.
-    fn emit_root(&mut self, root: &Trie, repo: &str, graph: &mut Graph, names: &mut Names) {
+    fn emit_root(&mut self, root: &Trie, out: &mut Emit) {
         let parent = if root.real {
-            let id = names.intern(&box_node_id(repo, ""));
-            graph.add_node(Node::new(id, repo_prefix(repo), Kind::Package, None));
-            self.box_id.insert((repo.to_string(), String::new()), id);
+            let id = out.names.intern(&box_node_id(out.written, ""));
+            out.r#box(id, repo_prefix(out.written), None);
+            self.box_id
+                .insert((out.written.to_string(), String::new()), id);
             Some(id)
         } else {
             None
@@ -285,26 +327,21 @@ impl PackageHierarchy {
         for (component, child) in &root.children {
             self.emit(
                 child,
-                repo,
                 component,
                 std::slice::from_ref(component),
                 parent,
-                graph,
-                names,
+                out,
             );
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn emit(
         &mut self,
         node: &Trie,
-        repo: &str,
         full_path: &str,
         pending: &[String],
         parent_box: Option<Id>,
-        graph: &mut Graph,
-        names: &mut Names,
+        out: &mut Emit,
     ) {
         // Fold a single-child intermediate into its child; a package with
         // content or a branch point anchors its own box.
@@ -313,30 +350,28 @@ impl PackageHierarchy {
             let child_path = format!("{full_path}/{component}");
             let mut chain = pending.to_vec();
             chain.push(component.clone());
-            self.emit(child, repo, &child_path, &chain, parent_box, graph, names);
+            self.emit(child, &child_path, &chain, parent_box, out);
             return;
         }
 
         let label = match parent_box {
-            None => format!("{}{}", repo_prefix(repo), pending.join("/")),
+            None => format!("{}{}", repo_prefix(out.written), pending.join("/")),
             Some(_) => pending.join("/"),
         };
-        let id = names.intern(&box_node_id(repo, full_path));
-        graph.add_node(Node::new(id, label, Kind::Package, parent_box));
+        let id = out.names.intern(&box_node_id(out.written, full_path));
+        out.r#box(id, label, parent_box);
         if node.real {
             self.box_id
-                .insert((repo.to_string(), full_path.to_string()), id);
+                .insert((out.written.to_string(), full_path.to_string()), id);
         }
         for (component, child) in &node.children {
             let child_path = format!("{full_path}/{component}");
             self.emit(
                 child,
-                repo,
                 &child_path,
                 std::slice::from_ref(component),
                 Some(id),
-                graph,
-                names,
+                out,
             );
         }
     }
@@ -398,14 +433,22 @@ mod tests {
     use super::*;
 
     fn build(packages: &[(&str, &str)]) -> (Graph, PackageHierarchy, Names) {
+        let (graph, hierarchy, names, _) = build_facets(packages);
+        (graph, hierarchy, names)
+    }
+
+    fn build_facets(
+        packages: &[(&str, &str)],
+    ) -> (Graph, PackageHierarchy, Names, crate::facets::Facets) {
         let set: BTreeSet<(String, String)> = packages
             .iter()
             .map(|(repo, path)| (repo.to_string(), path.to_string()))
             .collect();
         let mut graph = Graph::new();
         let mut names = Names::default();
-        let hierarchy = PackageHierarchy::build(&set, &mut graph, &mut names);
-        (graph, hierarchy, names)
+        let mut facets = FacetsBuilder::default();
+        let hierarchy = PackageHierarchy::build(&set, &mut graph, &mut names, &mut facets);
+        (graph, hierarchy, names, facets.seal().0)
     }
 
     fn node<'a>(graph: &'a Graph, names: &Names, id: &str) -> &'a crate::graph::Node {
@@ -512,6 +555,44 @@ mod tests {
         assert_eq!(node(&graph, &names, "pkg:a/b").label, "//a/b");
         assert_eq!(hierarchy.package_box("@r//a/b:t"), names.get("pkg:@r//a/b"));
         assert_eq!(hierarchy.package_box("//a/b:t"), names.get("pkg:a/b"));
+    }
+
+    /// A rule over repositories reaches a box through this facet alone, so every
+    /// box of a repository carries it — the branch points and folded chains that
+    /// hold no package of their own as much as the packages themselves.
+    #[test]
+    fn every_box_of_a_repository_carries_that_repository() {
+        let (graph, _, names, facets) =
+            build_facets(&[("@@r+", "a/b"), ("@@r+", "a/c"), ("", "a")]);
+
+        let repo_of = |id: &str| {
+            let node = names.get(id).expect("a box");
+            facets
+                .repo(node)
+                .map(|repo| facets.strings().resolve(repo.sym()).to_string())
+        };
+        assert_eq!(repo_of("pkg:@@r+//a"), Some("r+".to_string()));
+        assert_eq!(repo_of("pkg:@@r+//a/b"), Some("r+".to_string()));
+        assert_eq!(repo_of("pkg:@@r+//a/c"), Some("r+".to_string()));
+        assert_eq!(repo_of("pkg:a"), Some(String::new()));
+        assert_eq!(graph.nodes.len(), 4);
+    }
+
+    /// An apparent name stands for any repository, so a box keyed by one names
+    /// none, exactly as a target keyed by one does.
+    #[test]
+    fn a_box_of_an_unresolved_apparent_repository_names_no_repository() {
+        let (_, _, names, facets) = build_facets(&[("@r", "a")]);
+
+        assert_eq!(facets.repo(names.get("pkg:@r//a").expect("a box")), None);
+        assert_eq!(facets.repos().count(), 0);
+    }
+
+    #[test]
+    fn a_repository_part_identifies_a_repository_only_written_canonically() {
+        assert_eq!(identified_repo_name("@@somerepo+"), Some("somerepo+"));
+        assert_eq!(identified_repo_name(""), Some(""));
+        assert_eq!(identified_repo_name("@somerepo"), None);
     }
 
     #[test]

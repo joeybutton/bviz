@@ -177,7 +177,7 @@ fn build_nodes(
     cts: &[&ConfiguredTarget],
     packages: &BTreeSet<(String, String)>,
 ) -> NodeIndex {
-    let hierarchy = PackageHierarchy::build(packages, &mut b.graph, b.names);
+    let hierarchy = PackageHierarchy::build(packages, &mut b.graph, b.names, b.facets);
     let mut nodes = Nodes {
         b,
         hierarchy,

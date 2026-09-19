@@ -104,7 +104,7 @@ pub(crate) fn build_with_packages(
     let index = Index::build(containers);
 
     let mut graph = Graph::new();
-    let hierarchy = PackageHierarchy::build(packages, &mut graph, names);
+    let hierarchy = PackageHierarchy::build(packages, &mut graph, names, facets);
 
     let producer_node_id = build_action_boxes(
         &index,

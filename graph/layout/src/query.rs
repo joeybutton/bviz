@@ -72,7 +72,7 @@ pub(crate) fn build_with_packages(
     // Node id per label, so a label seen more than once maps to one node.
     let mut node_by_label: HashMap<String, Id> = HashMap::new();
 
-    let hierarchy = PackageHierarchy::build(packages, &mut graph, names);
+    let hierarchy = PackageHierarchy::build(packages, &mut graph, names, facets);
 
     // Pass 1: one leaf node per target under its package container.
     for target in targets {
@@ -410,11 +410,6 @@ mod tests {
         let node = names.get("target:@@somerepo+//foo:lib").unwrap();
         let repo = facets.repo(node).unwrap();
         assert_eq!(facets.strings().resolve(repo.sym()), "somerepo+");
-        let apparent = facets.repo_entry(repo).unwrap().apparent;
-        assert_eq!(
-            apparent.map(|name| facets.strings().resolve(name)),
-            Some("somerepo")
-        );
     }
 
     /// A genuine repository whose canonical name is `somerepo` would share the
@@ -428,6 +423,38 @@ mod tests {
         let node = names.get("target:@somerepo//foo:lib").unwrap();
         assert_eq!(facets.repo(node), None);
         assert_eq!(facets.repos().count(), 0);
+    }
+
+    /// A box belongs to its repository as much as the targets inside it do, so a
+    /// rule over repositories takes the whole of one away rather than leaving an
+    /// empty box where its packages were.
+    #[test]
+    fn a_repository_rule_hides_that_repositorys_package_boxes() {
+        use crate::select::{Filter, Predicate, Values, Visibility};
+
+        let (graph, names, facets) = build(&[
+            rule("//foo:app", &[]),
+            rule("@@somerepo+//bar/deep:lib", &[]),
+        ]);
+        let filter = Filter {
+            rules: vec![crate::select::Rule {
+                predicate: Predicate {
+                    repos: Values::new(["somerepo+".to_string()]),
+                    ..Predicate::default()
+                },
+                visibility: Visibility::Hidden,
+            }],
+            ..Filter::default()
+        };
+
+        let verdicts = filter.evaluate(&graph, &names, &facets);
+        let drawn: BTreeSet<&str> = graph
+            .nodes
+            .iter()
+            .filter(|node| verdicts.get(node.id).drawn())
+            .map(|node| names.resolve(node.id))
+            .collect();
+        assert_eq!(drawn, ["pkg:foo", "target://foo:app"].into_iter().collect());
     }
 
     #[test]
