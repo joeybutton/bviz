@@ -140,8 +140,10 @@ impl Rows {
         if !heads(&options).eq(heads(&self.options)) {
             self.folded = folded_at_rest(&options);
         }
+        if !labels(&options).eq(labels(&self.options)) {
+            self.measured = None;
+        }
         self.options = options;
-        self.measured = None;
         true
     }
 
@@ -220,6 +222,11 @@ fn heads(options: &[MultiOption]) -> impl Iterator<Item = &SharedString> {
         .iter()
         .filter(|option| option.heads_group)
         .map(|option| &option.label)
+}
+
+/// Every value's label, in the order they are stated.
+fn labels(options: &[MultiOption]) -> impl Iterator<Item = &SharedString> {
+    options.iter().map(|option| &option.label)
 }
 
 /// The groups a menu stated over `options` folds away until a reader says
@@ -842,6 +849,32 @@ mod tests {
         rows.remember(&ui, widths);
         assert!(rows.set_options(vec![MultiOption::new("another value", true)]));
         assert_eq!(rows.measured(&ui), None);
+    }
+
+    /// A measurement describes the labels it shaped, so the values being
+    /// restated with a checkmark moved — which is what every toggle does —
+    /// leaves it standing rather than shaping every label again.
+    #[test]
+    fn a_measurement_outlives_a_checkmark_moving() {
+        let ui = style("Inter", 14.);
+        let widths = Widths {
+            trigger: px(80.),
+            label: px(120.),
+        };
+        let mut rows = rows([false, true, false]);
+        rows.remember(&ui, widths);
+
+        let flipped: Vec<MultiOption> = rows
+            .options
+            .iter()
+            .map(|option| MultiOption {
+                checked: !option.checked,
+                ..option.clone()
+            })
+            .collect();
+        assert!(rows.set_options(flipped));
+
+        assert_eq!(rows.measured(&ui), Some(widths));
     }
 
     /// Restating the values the control already holds leaves the measurement
