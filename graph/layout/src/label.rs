@@ -12,7 +12,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use bazel_query_proto::blaze_query::{Target, target::Discriminator};
 
-use crate::facets::{FacetsBuilder, RepoRef};
+use crate::facets::{Facets, FacetsBuilder, RepoRef};
 use crate::graph::{Graph, Kind, Node};
 use crate::intern::{Id, Names};
 use crate::repo::module_name;
@@ -407,6 +407,27 @@ fn repo_prefix(repo: &str) -> String {
     }
 }
 
+/// Rewrites the boxes that name a repository to name it the way a reader writes
+/// it, which only the outermost box of each repository does.
+///
+/// A box's label is the text the drawing measures and shows, so the name has to
+/// stand in it rather than be projected over it where it is drawn; and it can
+/// only be written once every input has been read, since which name a
+/// repository is reached by is whatever one of them printed.
+pub(crate) fn show_written_repositories(graph: &mut Graph, facets: &Facets) {
+    for node in &mut graph.nodes {
+        if node.kind != Kind::Package || node.parent.is_some() {
+            continue;
+        }
+        let Some(repo) = facets.repo(node.id) else {
+            continue;
+        };
+        if let Some((_, path)) = node.label.split_once("//") {
+            node.label = format!("{}{path}", repo_prefix(&facets.repo_written(repo)));
+        }
+    }
+}
+
 /// Container node id for a package path, keeping external repos distinct from a
 /// same-named main-repo path: main `pkg:a/b`, external `pkg:@repo//a/b`.
 fn box_node_id(repo: &str, path: &str) -> String {
@@ -576,6 +597,30 @@ mod tests {
         assert_eq!(repo_of("pkg:@@r+//a/c"), Some("r+".to_string()));
         assert_eq!(repo_of("pkg:a"), Some(String::new()));
         assert_eq!(graph.nodes.len(), 4);
+    }
+
+    /// Only the box that carries a repository part is rewritten, and only that
+    /// part of it: the boxes nested below read their own path component, and a
+    /// repository a reader has no other name for keeps its canonical one.
+    #[test]
+    fn the_box_naming_a_repository_reads_it_the_way_a_reader_writes_it() {
+        let (mut graph, _, names, facets) = build_facets(&[
+            ("@@rules_foo+", "bar/baz"),
+            ("@@rules_foo+", "bar/qux"),
+            ("@@rules_foo++ext+gen", "a"),
+            ("", "a"),
+        ]);
+
+        show_written_repositories(&mut graph, &facets);
+
+        let label = |id: &str| node(&graph, &names, id).label.clone();
+        assert_eq!(label("pkg:@@rules_foo+//bar"), "@rules_foo//bar");
+        assert_eq!(label("pkg:@@rules_foo+//bar/baz"), "baz");
+        assert_eq!(
+            label("pkg:@@rules_foo++ext+gen//a"),
+            "@@rules_foo++ext+gen//a"
+        );
+        assert_eq!(label("pkg:a"), "//a");
     }
 
     /// An apparent name stands for any repository, so a box keyed by one names

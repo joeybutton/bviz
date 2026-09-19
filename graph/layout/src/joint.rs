@@ -18,7 +18,7 @@ use crate::capability::Capabilities;
 use crate::facets::{Facets, FacetsBuilder};
 use crate::graph::{Graph, Node};
 use crate::intern::{Id, Names};
-use crate::label::{RepoMapping, canonical_repo};
+use crate::label::{self, RepoMapping, canonical_repo};
 use crate::{aquery, cquery, query};
 
 /// The joint graph, the names its ids resolve through, the facets a filter
@@ -46,7 +46,8 @@ pub fn build_joint(
         &mut facets,
     );
     let (facets, capabilities) = facets.seal();
-    let (graph, names, facets) = canonicalize(merge(graphs), &names, facets);
+    let (mut graph, names, facets) = canonicalize(merge(graphs), &names, facets);
+    label::show_written_repositories(&mut graph, &facets);
     (graph, names, facets, capabilities)
 }
 

@@ -531,6 +531,22 @@ impl Facets {
         self.repos.get(&repo)
     }
 
+    /// The repository part a reader writes `repo` by, sigil and all: the
+    /// apparent name an input wrote for it, and failing that the name of the
+    /// module whose repository it is, since `@rules_foo` is how that repository
+    /// is written before a repository mapping resolves the name. A repository
+    /// stating neither is written by its canonical name, and the main
+    /// repository, whose labels carry no repository part, by nothing at all.
+    pub fn repo_written(&self, repo: RepoRef) -> String {
+        let canonical = self.strings.resolve(repo.sym());
+        let entry = self.repo_entry(repo);
+        match entry.and_then(|entry| entry.apparent.or(entry.module)) {
+            Some(name) => format!("@{}", self.strings.resolve(name)),
+            None if canonical.is_empty() => String::new(),
+            None => format!("@@{canonical}"),
+        }
+    }
+
     pub fn config_entry(&self, config: ConfigRef) -> Option<&ConfigEntry> {
         self.configs.get(&config)
     }
@@ -927,6 +943,20 @@ mod tests {
             )
         };
         assert_eq!(resolve(version), Some("1.2.3"));
+    }
+
+    #[test]
+    fn a_repository_is_written_by_the_name_a_reader_reaches_it_by() {
+        let mut facets = Facets::default();
+        let main = facets.intern_repo("", None);
+        let module = facets.intern_repo("rules_foo+", None);
+        let renamed = facets.intern_repo("rules_bar+", Some("bar"));
+        let generated = facets.intern_repo("rules_foo++ext+gen", None);
+
+        assert_eq!(facets.repo_written(main), "");
+        assert_eq!(facets.repo_written(module), "@rules_foo");
+        assert_eq!(facets.repo_written(renamed), "@bar");
+        assert_eq!(facets.repo_written(generated), "@@rules_foo++ext+gen");
     }
 
     #[test]

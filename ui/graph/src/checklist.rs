@@ -78,8 +78,7 @@ fn origin_label(origin: RepoCategory) -> &'static str {
 pub(crate) struct Repository {
     /// The canonical name a rule names the repository by.
     canonical: String,
-    /// The name a reader knows it by: the apparent name where an input wrote
-    /// one, and the canonical name otherwise.
+    /// The name a reader knows it by, as a box of that repository also reads.
     label: String,
     origin: RepoCategory,
 }
@@ -101,16 +100,10 @@ pub(crate) fn carried_origins(facets: &Facets) -> Vec<OriginRow> {
     let strings = facets.strings();
     let mut repos: Vec<Repository> = facets
         .repos()
-        .map(|(repo, entry)| {
-            let canonical = strings.resolve(repo.sym()).to_string();
-            Repository {
-                label: match entry.apparent {
-                    Some(apparent) => format!("@{}", strings.resolve(apparent)),
-                    None => format!("@@{canonical}"),
-                },
-                canonical,
-                origin: entry.origin.category(),
-            }
+        .map(|(repo, entry)| Repository {
+            canonical: strings.resolve(repo.sym()).to_string(),
+            label: facets.repo_written(repo),
+            origin: entry.origin.category(),
         })
         .collect();
     repos.sort_by(|a, b| a.label.cmp(&b.label));
@@ -370,7 +363,9 @@ mod tests {
     }
 
     /// An origin with no repository behind it is nothing to offer, and neither
-    /// is a repository no input named.
+    /// is a repository no input named. A repository is named the way a reader
+    /// writes it, which for a module is its module name whether or not an input
+    /// wrote that name, and a canonical name only where nothing else is known.
     #[test]
     fn only_the_repositories_the_graph_carries_are_offered() {
         let rows = carried_origins(&facets());
@@ -380,7 +375,7 @@ mod tests {
             [
                 "the main repository",
                 "module repositories",
-                "@@rules_bar+",
+                "@rules_bar",
                 "@rules_foo",
                 "module-extension repositories",
                 "@@rules_foo++ext+generated",
