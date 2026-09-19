@@ -70,8 +70,8 @@ impl MultiOption {
 pub enum MultiSelectEvent {
     /// The value at `index` is asked to become `checked`.
     Toggled { index: usize, checked: bool },
-    /// Every value `range` covers is asked to become `checked`.
-    SetAll { range: Range<usize>, checked: bool },
+    /// Every value `rows` names is asked to become `checked`.
+    SetAll { rows: Vec<usize>, checked: bool },
 }
 
 /// What a [`MultiSelect`] draws its menu from, held apart from the gpui handles
@@ -180,11 +180,29 @@ impl Rows {
     /// value to flip. The menu stays open, since a multi-select is visited to
     /// check several values in one go, and the options stand as they were given.
     fn clicked(&mut self, index: usize) -> Option<MultiSelectEvent> {
-        let option = self.options.get(index).filter(|option| option.available)?;
+        let option = self.options.get(index).filter(|_| self.reports(index))?;
         Some(MultiSelectEvent::Toggled {
             index,
             checked: !option.checked,
         })
+    }
+
+    /// Whether a click on the row at `index` reports anything, which a row
+    /// naming a value the loaded data cannot answer for does not.
+    fn reports(&self, index: usize) -> bool {
+        self.options
+            .get(index)
+            .is_some_and(|option| option.available)
+    }
+
+    /// What a click on a menu-wide action over `range` asks: the rows it covers
+    /// that report, so such an action leaves what a click on each row in turn
+    /// would.
+    fn set_all(&self, range: Range<usize>, checked: bool) -> MultiSelectEvent {
+        MultiSelectEvent::SetAll {
+            rows: range.filter(|&index| self.reports(index)).collect(),
+            checked,
+        }
     }
 
     /// Every value the menu offers.
@@ -556,11 +574,8 @@ fn set_all(
 ) -> Button {
     Button::new(
         id,
-        cx.listener(move |_, _: &ClickEvent, _, cx| {
-            cx.emit(MultiSelectEvent::SetAll {
-                range: range.clone(),
-                checked,
-            });
+        cx.listener(move |this, _: &ClickEvent, _, cx| {
+            cx.emit(this.rows.set_all(range.clone(), checked));
             cx.notify();
         }),
     )
@@ -725,6 +740,28 @@ mod tests {
         }]);
 
         assert_eq!(rows.clicked(0), None);
+    }
+
+    /// A menu-wide action leaves what clicking each row in turn would, so it
+    /// passes over the values a click reports nothing for.
+    #[test]
+    fn a_menu_wide_action_names_the_rows_a_click_would_report() {
+        let rows = listing(vec![
+            MultiOption::new("answerable", false),
+            MultiOption {
+                available: false,
+                ..MultiOption::new("needs --transitions=lite", false)
+            },
+            MultiOption::new("answerable too", false),
+        ]);
+
+        assert_eq!(
+            rows.set_all(rows.all(), true),
+            MultiSelectEvent::SetAll {
+                rows: vec![0, 2],
+                checked: true,
+            }
+        );
     }
 
     /// A group reaches from the value heading it to the one heading the next,

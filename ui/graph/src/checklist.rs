@@ -301,10 +301,10 @@ fn chosen(
 /// The rows `event` acts on, each with what it asks that row to become.
 fn acted(event: &MultiSelectEvent) -> impl Iterator<Item = (usize, bool)> {
     let (rows, checked) = match event {
-        MultiSelectEvent::Toggled { index, checked } => (*index..*index + 1, *checked),
-        MultiSelectEvent::SetAll { range, checked } => (range.clone(), *checked),
+        MultiSelectEvent::Toggled { index, checked } => (std::slice::from_ref(index), *checked),
+        MultiSelectEvent::SetAll { rows, checked } => (rows.as_slice(), *checked),
     };
-    rows.map(move |index| (index, checked))
+    rows.iter().map(move |&index| (index, checked))
 }
 
 /// `filter` with the node classes the class checklist's `event` names drawn, or
@@ -573,8 +573,11 @@ mod tests {
         );
     }
 
-    fn set_all(range: std::ops::Range<usize>, checked: bool) -> MultiSelectEvent {
-        MultiSelectEvent::SetAll { range, checked }
+    fn set_all(rows: std::ops::Range<usize>, checked: bool) -> MultiSelectEvent {
+        MultiSelectEvent::SetAll {
+            rows: rows.collect(),
+            checked,
+        }
     }
 
     /// Clearing the menu leaves nothing drawn, and checking one repository after
