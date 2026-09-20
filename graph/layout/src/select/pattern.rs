@@ -114,9 +114,7 @@ impl Pattern {
     /// reaches it by covering that package rather than by matching a label.
     pub fn covers_package(&self, named: Package<'_>) -> bool {
         match self {
-            Pattern::Substring(text) => {
-                format!("{}//{}", named.repo, named.path).contains(text.as_str())
-            }
+            Pattern::Substring(text) => named.label_contains(text),
             Pattern::Label {
                 repo,
                 package,
@@ -235,6 +233,34 @@ impl<'a> Package<'a> {
     /// a label spells it, sigil and all.
     pub fn written(repo: &'a str, path: &'a str) -> Self {
         Package { repo, path }
+    }
+
+    /// Whether `text` occurs in this package's own label, `{repo}//{path}`,
+    /// read part by part so that testing a rule against a box builds no label
+    /// to hold it.
+    fn label_contains(self, text: &str) -> bool {
+        // A match sits within one part, or runs over the `//` joining them and
+        // so splits into a suffix of `{repo}//` and a prefix of the path —
+        // unless it stops between the two separator characters, which no such
+        // split states.
+        let over_the_join = (0..=text.len())
+            .filter(|&split| text.is_char_boundary(split))
+            .any(|split| {
+                let (head, tail) = text.split_at(split);
+                ends_the_repository(self.repo, head) && self.path.starts_with(tail)
+            });
+        let within_the_join = text
+            .strip_suffix('/')
+            .is_some_and(|head| self.repo.ends_with(head));
+        self.repo.contains(text) || self.path.contains(text) || over_the_join || within_the_join
+    }
+}
+
+/// Whether `head` is a suffix of `{repo}//`.
+fn ends_the_repository(repo: &str, head: &str) -> bool {
+    match head.strip_suffix("//") {
+        Some(head) => repo.ends_with(head),
+        None => "//".ends_with(head),
     }
 }
 
@@ -552,6 +578,30 @@ mod tests {
         assert!(pattern.covers_package(Package::written("", "tools/cpp")));
         assert!(pattern.covers_package(Package::written("@@rules_foo+", "tools/cpp/toolchain")));
         assert!(!pattern.covers_package(Package::written("", "tools/java")));
+    }
+
+    /// The label a package is written by is never built, so what a substring
+    /// is tested against has to read exactly as that label would — including
+    /// for text that runs over or stops inside the `//` joining the two parts.
+    #[test]
+    fn a_substring_reads_a_package_label_as_if_it_were_spelled_out() {
+        let texts = [
+            "", "/", "//", "///", "o//f", "foo", "+//", "@@", "x", "//foo", "o/", "r//foo/b", "zz",
+            "ö",
+        ];
+        for repo in ["", "@@rules_foo+", "@r", "a/b", "ö"] {
+            for path in ["", "foo", "foo/bar", "//x", "/", "ö"] {
+                let named = Package::written(repo, path);
+                let label = format!("{repo}//{path}");
+                for text in texts {
+                    assert_eq!(
+                        named.label_contains(text),
+                        label.contains(text),
+                        "{text:?} in {label:?}",
+                    );
+                }
+            }
+        }
     }
 
     #[test]
