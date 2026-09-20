@@ -12,7 +12,17 @@ diff --git a/crates/gpui_linux/src/linux/wayland/client.rs b/crates/gpui_linux/s
      path::PathBuf,
      rc::{Rc, Weak},
      time::{Duration, Instant},
-@@ -92,12 +94,12 @@ use crate::linux::{
+@@ -59,6 +61,9 @@ use wayland_protocols::xdg::decoration::
+ };
+ use wayland_protocols::xdg::shell::client::{xdg_surface, xdg_toplevel, xdg_wm_base};
+ use wayland_protocols::xdg::system_bell::v1::client::xdg_system_bell_v1;
++use wayland_protocols::xdg::toplevel_drag::v1::client::{
++    xdg_toplevel_drag_manager_v1, xdg_toplevel_drag_v1,
++};
+ use wayland_protocols::{
+     wp::cursor_shape::v1::client::{wp_cursor_shape_device_v1, wp_cursor_shape_manager_v1},
+     xdg::dialog::v1::client::xdg_wm_dialog_v1::{self, XdgWmDialogV1},
+@@ -92,12 +97,12 @@ use crate::linux::{
      xdg_desktop_portal::{Event as XDPEvent, XDPEventSource},
  };
  use gpui::{
@@ -31,7 +41,23 @@ diff --git a/crates/gpui_linux/src/linux/wayland/client.rs b/crates/gpui_linux/s
  };
  use gpui_wgpu::{CompositorGpuHint, GpuContext};
  use wayland_protocols::wp::linux_dmabuf::zv1::client::{
-@@ -260,6 +262,12 @@ pub(crate) struct WaylandClientState {
+@@ -131,6 +136,7 @@ pub struct Globals {
+     pub gesture_manager: Option<zwp_pointer_gestures_v1::ZwpPointerGesturesV1>,
+     pub dialog: Option<xdg_wm_dialog_v1::XdgWmDialogV1>,
+     pub system_bell: Option<xdg_system_bell_v1::XdgSystemBellV1>,
++    pub toplevel_drag_manager: Option<xdg_toplevel_drag_manager_v1::XdgToplevelDragManagerV1>,
+     pub executor: ForegroundExecutor,
+ }
+ 
+@@ -173,6 +179,7 @@ impl Globals {
+             gesture_manager: globals.bind(&qh, 1..=3, ()).ok(),
+             dialog: globals.bind(&qh, dialog_v..=dialog_v, ()).ok(),
+             system_bell: globals.bind(&qh, 1..=1, ()).ok(),
++            toplevel_drag_manager: globals.bind(&qh, 1..=1, ()).ok(),
+             executor,
+             qh,
+         }
+@@ -260,6 +267,12 @@ pub(crate) struct WaylandClientState {
      clipboard: Clipboard,
      data_offers: Vec<DataOffer<WlDataOffer>>,
      primary_data_offer: Option<DataOffer<ZwpPrimarySelectionOfferV1>>,
@@ -44,7 +70,7 @@ diff --git a/crates/gpui_linux/src/linux/wayland/client.rs b/crates/gpui_linux/s
      cursor: Cursor,
      pending_activation: Option<PendingActivation>,
      event_loop: Option<EventLoop<'static, WaylandClientStatePtr>>,
-@@ -270,6 +278,91 @@ pub struct DragState {
+@@ -270,6 +283,118 @@ pub struct DragState {
      data_offer: Option<wl_data_offer::WlDataOffer>,
      window: Option<WaylandWindowStatePtr>,
      position: Point<Pixels>,
@@ -60,16 +86,26 @@ diff --git a/crates/gpui_linux/src/linux/wayland/client.rs b/crates/gpui_linux/s
 +
 +/// A drag handed to the compositor, held from the `start_drag` request until
 +/// the compositor reports the gesture over.
++///
++/// A `wl_data_source` reports a release over a surface that takes nothing
++/// exactly as it reports a gesture called off, so `dropped` is what parts the
++/// two; how far it parts them rests on `toplevel_drag`, since a compositor
++/// that honours the object reports such a release as a drop, and one that has
++/// none to give leaves `dropped` marking only a release something took.
 +struct OutgoingDrag {
++    /// The source the compositor carries the drag on, which its events name.
++    source: wl_data_source::WlDataSource,
 +    /// What the compositor draws where the pointer carries the drag, and the
 +    /// pixels behind it, both let go of with the drag.
 +    icon: wl_surface::WlSurface,
 +    buffer: wl_buffer::WlBuffer,
 +    /// The window the drag started from, which hears how it ended.
 +    origin: WaylandWindowStatePtr,
-+    /// Whether the compositor has reported the drag dropped, which parts a
-+    /// gesture the user let go of from one that was called off.
++    /// Whether the compositor has reported the drag dropped.
 +    dropped: bool,
++    /// Held for the length of the drag with no toplevel ever attached to it.
++    /// `None` where the compositor offers no `xdg_toplevel_drag_manager_v1`.
++    toplevel_drag: Option<xdg_toplevel_drag_v1::XdgToplevelDragV1>,
 +}
 +
 +/// Marks a [`wl_data_source::WlDataSource`] as a drag's, so that its events
@@ -133,10 +169,27 @@ diff --git a/crates/gpui_linux/src/linux/wayland/client.rs b/crates/gpui_linux/s
 +        .data_offers
 +        .iter()
 +        .any(|held| held.inner.id() == offer.id() && held.has_mime_type(mime_type))
++}
++
++/// The drag this client handed over on `source`, where that is the drag it
++/// still has out. A compositor reports a gesture over more than once — GNOME's
++/// Mutter sends `cancelled` trailing `dnd_finished` — and the window hearing
++/// the first report may hand over a fresh drag before the later ones arrive,
++/// so an event is answered by the drag whose own source it names and by no
++/// other: the objects of a drag still running are not a spent source's to let
++/// go of.
++fn drag_carried_on<'a>(
++    state: &'a mut WaylandClientState,
++    source: &wl_data_source::WlDataSource,
++) -> Option<&'a mut OutgoingDrag> {
++    state
++        .outgoing_drag
++        .as_mut()
++        .filter(|drag| drag.source.id() == source.id())
  }
  
  pub struct ClickState {
-@@ -316,6 +409,67 @@ impl WaylandClientStatePtr {
+@@ -316,6 +441,76 @@ impl WaylandClientStatePtr {
              Some(PendingActivation::Window(window));
      }
  
@@ -159,7 +212,7 @@ diff --git a/crates/gpui_linux/src/linux/wayland/client.rs b/crates/gpui_linux/s
 +        if state.outgoing_drag.is_some() {
 +            return false;
 +        }
-+        let (Some(manager), Some(data_device)) = (
++        let (Some(data_device_manager), Some(data_device)) = (
 +            state.globals.data_device_manager.clone(),
 +            state.data_device.clone(),
 +        ) else {
@@ -174,9 +227,16 @@ diff --git a/crates/gpui_linux/src/linux/wayland/client.rs b/crates/gpui_linux/s
 +        let Some((icon_surface, buffer)) = drag_icon(&state.globals, &icon) else {
 +            return false;
 +        };
-+        let source = manager.create_data_source(&state.globals.qh, DragSourceData);
++        let source = data_device_manager.create_data_source(&state.globals.qh, DragSourceData);
 +        source.offer(mime_type.to_string());
 +        source.set_actions(DND_ACTIONS);
++        // The request is allowed only on a source that is still to be dragged,
++        // so it has to precede `start_drag`.
++        let toplevel_drag = state
++            .globals
++            .toplevel_drag_manager
++            .as_ref()
++            .map(|manager| manager.get_xdg_toplevel_drag(&source, &state.globals.qh, ()));
 +        // The surface takes its role from this request, so what it shows is
 +        // attached only once the compositor knows what it is for.
 +        data_device.start_drag(Some(&source), surface, Some(&icon_surface), serial);
@@ -186,10 +246,12 @@ diff --git a/crates/gpui_linux/src/linux/wayland/client.rs b/crates/gpui_linux/s
 +        icon_surface.damage(0, 0, size.width.0 / scale, size.height.0 / scale);
 +        icon_surface.commit();
 +        state.outgoing_drag = Some(OutgoingDrag {
++            source,
 +            icon: icon_surface,
 +            buffer,
 +            origin: origin.clone(),
 +            dropped: false,
++            toplevel_drag,
 +        });
 +        true
 +    }
@@ -204,7 +266,7 @@ diff --git a/crates/gpui_linux/src/linux/wayland/client.rs b/crates/gpui_linux/s
      pub fn enable_ime(&self) {
          let client = self.get_client();
          let mut state = client.borrow_mut();
-@@ -682,6 +836,7 @@ impl WaylandClient {
+@@ -682,6 +877,7 @@ impl WaylandClient {
                  data_offer: None,
                  window: None,
                  position: Point::default(),
@@ -212,7 +274,7 @@ diff --git a/crates/gpui_linux/src/linux/wayland/client.rs b/crates/gpui_linux/s
              },
              click: ClickState {
                  last_click: Instant::now(),
-@@ -720,6 +875,8 @@ impl WaylandClient {
+@@ -720,6 +916,8 @@ impl WaylandClient {
              clipboard: Clipboard::new(conn.clone(), handle.clone()),
              data_offers: Vec::new(),
              primary_data_offer: None,
@@ -221,7 +283,16 @@ diff --git a/crates/gpui_linux/src/linux/wayland/client.rs b/crates/gpui_linux/s
              cursor,
              pending_activation: None,
              event_loop: Some(event_loop),
-@@ -2278,6 +2435,21 @@ impl Dispatch<wl_data_device::WlDataDevi
+@@ -1150,6 +1348,8 @@ delegate_noop!(WaylandClientStatePtr: ig
+ delegate_noop!(WaylandClientStatePtr: ignore org_kde_kwin_blur::OrgKdeKwinBlur);
+ delegate_noop!(WaylandClientStatePtr: ignore wp_viewporter::WpViewporter);
+ delegate_noop!(WaylandClientStatePtr: ignore wp_viewport::WpViewport);
++delegate_noop!(WaylandClientStatePtr: ignore xdg_toplevel_drag_manager_v1::XdgToplevelDragManagerV1);
++delegate_noop!(WaylandClientStatePtr: ignore xdg_toplevel_drag_v1::XdgToplevelDragV1);
+ 
+ impl Dispatch<WlCallback, ObjectId> for WaylandClientStatePtr {
+     fn event(
+@@ -2278,6 +2478,21 @@ impl Dispatch<wl_data_device::WlDataDevi
                          return;
                      };
  
@@ -243,7 +314,7 @@ diff --git a/crates/gpui_linux/src/linux/wayland/client.rs b/crates/gpui_linux/s
                      const ACTIONS: DndAction = DndAction::Copy;
                      data_offer.set_actions(ACTIONS, ACTIONS);
  
-@@ -2336,6 +2508,7 @@ impl Dispatch<wl_data_device::WlDataDevi
+@@ -2336,6 +2551,7 @@ impl Dispatch<wl_data_device::WlDataDevi
                              state.drag.data_offer = Some(data_offer);
                              state.drag.window = Some(drag_window.clone());
                              state.drag.position = position;
@@ -251,7 +322,7 @@ diff --git a/crates/gpui_linux/src/linux/wayland/client.rs b/crates/gpui_linux/s
  
                              drop(state);
                              drag_window.handle_input(input);
-@@ -2350,7 +2523,10 @@ impl Dispatch<wl_data_device::WlDataDevi
+@@ -2350,7 +2566,10 @@ impl Dispatch<wl_data_device::WlDataDevi
                  let position = Point::new(x.into(), y.into());
                  state.drag.position = position;
  
@@ -263,7 +334,7 @@ diff --git a/crates/gpui_linux/src/linux/wayland/client.rs b/crates/gpui_linux/s
                  drop(state);
                  drag_window.handle_input(input);
              }
-@@ -2359,12 +2535,16 @@ impl Dispatch<wl_data_device::WlDataDevi
+@@ -2359,12 +2578,16 @@ impl Dispatch<wl_data_device::WlDataDevi
                      return;
                  };
                  let data_offer = state.drag.data_offer.clone().unwrap();
@@ -281,7 +352,7 @@ diff --git a/crates/gpui_linux/src/linux/wayland/client.rs b/crates/gpui_linux/s
                  drop(state);
                  drag_window.handle_input(input);
              }
-@@ -2373,17 +2553,23 @@ impl Dispatch<wl_data_device::WlDataDevi
+@@ -2373,17 +2596,23 @@ impl Dispatch<wl_data_device::WlDataDevi
                      return;
                  };
                  let data_offer = state.drag.data_offer.clone().unwrap();
@@ -310,7 +381,7 @@ diff --git a/crates/gpui_linux/src/linux/wayland/client.rs b/crates/gpui_linux/s
              }
              _ => {}
          }
-@@ -2450,6 +2636,55 @@ impl Dispatch<wl_data_source::WlDataSour
+@@ -2450,6 +2679,68 @@ impl Dispatch<wl_data_source::WlDataSour
      }
  }
  
@@ -326,7 +397,7 @@ diff --git a/crates/gpui_linux/src/linux/wayland/client.rs b/crates/gpui_linux/s
 +        let client = this.get_client();
 +        let mut state = client.borrow_mut();
 +
-+        let ended = match event {
++        let cancelled = match event {
 +            // What the drag carries is a view this process holds, which no
 +            // reader outside it could make anything of, so the pipe is closed
 +            // with nothing written to it.
@@ -335,31 +406,44 @@ diff --git a/crates/gpui_linux/src/linux/wayland/client.rs b/crates/gpui_linux/s
 +                return;
 +            }
 +            wl_data_source::Event::DndDropPerformed => {
-+                if let Some(drag) = state.outgoing_drag.as_mut() {
++                if let Some(drag) = drag_carried_on(&mut state, data_source) {
 +                    drag.dropped = true;
 +                }
 +                return;
 +            }
-+            wl_data_source::Event::DndFinished => PlatformDragEnd::Taken,
-+            wl_data_source::Event::Cancelled => {
-+                match state.outgoing_drag.as_ref().is_some_and(|drag| drag.dropped) {
-+                    true => PlatformDragEnd::Released,
-+                    false => PlatformDragEnd::Cancelled,
-+                }
-+            }
++            wl_data_source::Event::DndFinished => false,
++            wl_data_source::Event::Cancelled => true,
 +            _ => return,
 +        };
 +
-+        data_source.destroy();
-+        let Some(drag) = state.outgoing_drag.take() else {
++        let Some(drag) = drag_carried_on(&mut state, data_source) else {
++            // Nothing of the drag this source carried is left to let go of
++            // but the source.
++            data_source.destroy();
 +            return;
 +        };
++
++        let ended = match (cancelled, drag.dropped) {
++            (false, _) => PlatformDragEnd::Taken,
++            (true, true) => PlatformDragEnd::Released,
++            (true, false) => PlatformDragEnd::Cancelled,
++        };
++        // An xdg_toplevel_drag_v1 destroyed before the compositor has reported
++        // the drag over raises `ongoing_drag`, and the reports it takes as
++        // that are `dnd_drop_performed` and `cancelled`.
++        if (drag.dropped || cancelled)
++            && let Some(toplevel_drag) = &drag.toplevel_drag
++        {
++            toplevel_drag.destroy();
++        }
++        data_source.destroy();
 +        drag.icon.destroy();
 +        drag.buffer.destroy();
++        let origin = drag.origin.clone();
++        state.outgoing_drag = None;
 +
 +        drop(state);
-+        drag.origin
-+            .handle_input(PlatformInput::PlatformDrag(PlatformDragEvent::Ended(ended)));
++        origin.handle_input(PlatformInput::PlatformDrag(PlatformDragEvent::Ended(ended)));
 +    }
 +}
 +
