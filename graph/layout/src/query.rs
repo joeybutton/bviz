@@ -184,6 +184,7 @@ mod tests {
     use super::*;
     use crate::facets::{Origin, RuleCategory};
     use crate::repo::RepoName;
+    use crate::select::{Filter, Visibility};
     use crate::test_support::{edges, find, parent_of};
     use bazel_query_proto::blaze_query::{
         GeneratedFile, Rule, SourceFile, attribute::Discriminator as AttributeType,
@@ -494,7 +495,7 @@ mod tests {
     /// empty box where its packages were.
     #[test]
     fn a_repository_rule_hides_that_repositorys_package_boxes() {
-        use crate::select::{Filter, Predicate, Values, Visibility};
+        use crate::select::{Predicate, Values};
 
         let (graph, names, facets) = build(&[
             rule("//foo:app", &[]),
@@ -519,6 +520,121 @@ mod tests {
             .map(|node| names.resolve(node.id))
             .collect();
         assert_eq!(drawn, ["pkg:foo", "target://foo:app"].into_iter().collect());
+    }
+
+    /// The nodes `filter` draws a box for, by name.
+    fn drawn<'a>(
+        filter: &Filter,
+        graph: &Graph,
+        names: &'a Names,
+        facets: &Facets,
+    ) -> BTreeSet<&'a str> {
+        let verdicts = filter.evaluate(graph, names, facets);
+        graph
+            .nodes
+            .iter()
+            .filter(|node| verdicts.get(node.id).drawn())
+            .map(|node| names.resolve(node.id))
+            .collect()
+    }
+
+    /// A filter whose one rule acts on everything `text` names.
+    fn searching(text: &str, visibility: Visibility) -> Filter {
+        use crate::select::{Base, Predicate, Rule, pattern::Pattern};
+        Filter {
+            base: match visibility {
+                Visibility::Shown => Base::HideAll,
+                _ => Base::ShowAll,
+            },
+            rules: vec![Rule {
+                predicate: Predicate {
+                    label: Some(Pattern::parse(text)),
+                    ..Predicate::default()
+                },
+                visibility,
+            }],
+            ..Filter::default()
+        }
+    }
+
+    /// A box stands for a package, so a pattern covering every package of a
+    /// repository takes its boxes along with the targets in them — and hiding a
+    /// container unwraps it, so nothing of those packages is left drawn.
+    #[test]
+    fn a_pattern_over_a_whole_repository_hides_its_package_boxes() {
+        let (graph, names, facets) = build(&[
+            rule("//:root", &[]),
+            rule("//foo/bar:app", &[]),
+            rule("@@somerepo+//baz:lib", &[]),
+        ]);
+
+        assert_eq!(
+            drawn(
+                &searching("//...", Visibility::Hidden),
+                &graph,
+                &names,
+                &facets
+            ),
+            ["pkg:@@somerepo+//baz", "target:@@somerepo+//baz:lib"]
+                .into_iter()
+                .collect()
+        );
+    }
+
+    /// A pattern and a package path are split at a component boundary, so a
+    /// directory pattern reaches the boxes below it and not the box whose name
+    /// merely starts with the same letters.
+    #[test]
+    fn a_directory_pattern_covers_the_boxes_below_it_alone() {
+        let (graph, names, facets) =
+            build(&[rule("//foo/bar:app", &[]), rule("//foobar:lib", &[])]);
+
+        assert_eq!(
+            drawn(
+                &searching("//foo/...", Visibility::Hidden),
+                &graph,
+                &names,
+                &facets
+            ),
+            ["pkg:foobar", "target://foobar:lib"].into_iter().collect()
+        );
+    }
+
+    /// An explicit target pattern names one target of a package and no package,
+    /// so the box holding that target goes on framing what is left of it.
+    #[test]
+    fn a_pattern_naming_one_target_leaves_its_package_box_drawn() {
+        let (graph, names, facets) = build(&[rule("//foo:app", &[]), rule("//foo:lib", &[])]);
+
+        assert_eq!(
+            drawn(
+                &searching("//foo:app", Visibility::Hidden),
+                &graph,
+                &names,
+                &facets
+            ),
+            ["pkg:foo", "target://foo:lib"].into_iter().collect()
+        );
+    }
+
+    /// Drawing the matches alone keeps the boxes of the packages the pattern
+    /// covers, which is what leaves each match stating the package it sits in,
+    /// and leaves out every package it covers nothing of.
+    #[test]
+    fn showing_only_a_patterns_matches_keeps_the_boxes_around_them() {
+        let (graph, names, facets) = build(&[rule("//foo/bar:app", &[]), rule("//baz:lib", &[])]);
+
+        assert_eq!(
+            drawn(
+                &searching("//foo/...", Visibility::Shown),
+                &graph,
+                &names,
+                &facets
+            ),
+            ["pkg:foo/bar", "target://foo/bar:app"]
+                .into_iter()
+                .collect()
+        );
     }
 
     #[test]

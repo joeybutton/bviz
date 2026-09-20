@@ -24,15 +24,15 @@ impl Filter {
             .rules
             .iter()
             .any(|rule| rule.predicate.label.is_some() || rule.predicate.package.is_some());
-        let labels = match reads_labels {
-            true => carried_labels(graph, facets),
-            false => Vec::new(),
+        let carried = match reads_labels {
+            true => Carried::of(graph, facets),
+            false => Carried::default(),
         };
         let written = WrittenRepos::of(facets);
         let rules: Vec<Resolved> = self
             .rules
             .iter()
-            .map(|rule| Resolved::of(rule, names, facets, &written, &labels, ids))
+            .map(|rule| Resolved::of(rule, names, facets, &written, &carried, ids))
             .collect();
 
         let mut stated: Vec<Option<Visibility>> = vec![None; ids];
@@ -145,9 +145,7 @@ struct Resolved<'a> {
     mnemonics: Option<Admits<Sym>>,
     tags: Option<Column>,
     aspects: Option<Column>,
-    /// The labels the term admits, named by the id of the target carrying each,
-    /// which several nodes share.
-    labels: Option<Labels>,
+    admitted: Option<Admitted>,
     visibility: Visibility,
 }
 
@@ -157,7 +155,7 @@ impl<'a> Resolved<'a> {
         names: &Names,
         facets: &Facets,
         written: &WrittenRepos,
-        labels: &[Id],
+        carried: &Carried,
         ids: usize,
     ) -> Self {
         let predicate = &rule.predicate;
@@ -181,7 +179,7 @@ impl<'a> Resolved<'a> {
                 .aspects
                 .as_ref()
                 .map(|aspects| aspect_column(aspects, facets, ids)),
-            labels: admitted_labels(predicate, names, written, labels),
+            admitted: Admitted::of(predicate, names, written, carried),
             visibility: rule.visibility,
         }
     }
@@ -217,9 +215,9 @@ impl<'a> Resolved<'a> {
                 .as_ref()
                 .is_none_or(|aspects| aspects.holds(id))
             && self
-                .labels
+                .admitted
                 .as_ref()
-                .is_none_or(|labels| facets.label(id).is_some_and(|label| labels.holds(label)))
+                .is_none_or(|admitted| admitted.holds(node, facets))
     }
 }
 
@@ -240,13 +238,97 @@ impl<T: Copy + Ord> Admits<T> {
     }
 }
 
-/// The targets a label term admits, by the node id naming each. Sorted, as the
-/// labels it is built from are.
-struct Labels(Vec<Id>);
+/// What the terms over labels are resolved against, gathered once for a whole
+/// filter: the targets its graph's nodes belong to, and the boxes standing for
+/// its packages, each sorted and stated once.
+#[derive(Default)]
+struct Carried {
+    targets: Vec<Id>,
+    packages: Vec<Id>,
+}
 
-impl Labels {
-    fn holds(&self, label: Id) -> bool {
-        self.0.binary_search(&label).is_ok()
+impl Carried {
+    fn of(graph: &Graph, facets: &Facets) -> Self {
+        let mut targets: Vec<Id> = Vec::with_capacity(graph.nodes.len());
+        let mut packages: Vec<Id> = Vec::with_capacity(graph.nodes.len());
+        for node in &graph.nodes {
+            if let Some(target) = facets.label(node.id) {
+                targets.push(target);
+            }
+            if node.kind == Kind::Package {
+                packages.push(node.id);
+            }
+        }
+        targets.sort_unstable();
+        targets.dedup();
+        packages.sort_unstable();
+        Carried { targets, packages }
+    }
+}
+
+/// What the terms over labels admit, each by the id the node answering it is
+/// found under: a node belonging to a target by that target, which several
+/// nodes share, and a package box by itself. Sorted, as the [`Carried`] ids
+/// they are drawn from are.
+struct Admitted {
+    targets: Vec<Id>,
+    packages: Vec<Id>,
+}
+
+impl Admitted {
+    /// What the terms over labels of `predicate` admit of `carried`, matched
+    /// once per target and once per package rather than once per node; `None`
+    /// where the predicate states neither term.
+    fn of(
+        predicate: &Predicate,
+        names: &Names,
+        written: &WrittenRepos,
+        carried: &Carried,
+    ) -> Option<Self> {
+        let (pattern, package) = (predicate.label.as_ref(), predicate.package.as_ref());
+        if pattern.is_none() && package.is_none() {
+            return None;
+        }
+        let pattern = pattern.map(|pattern| pattern.resolved(written));
+        let package = package.map(|package| package.resolved(written));
+        let targets = carried
+            .targets
+            .iter()
+            .copied()
+            .filter(|&id| {
+                label::target_node_label(names.resolve(id)).is_some_and(|label| {
+                    pattern
+                        .as_ref()
+                        .is_none_or(|pattern| pattern.matches(label))
+                        && package
+                            .as_ref()
+                            .is_none_or(|package| package.matches(label))
+                })
+            })
+            .collect();
+        let packages = carried
+            .packages
+            .iter()
+            .copied()
+            .filter(|&id| {
+                label::package_node_parts(names.resolve(id)).is_some_and(|(repo, path)| {
+                    pattern
+                        .as_ref()
+                        .is_none_or(|pattern| pattern.covers_package(repo, path))
+                        && package
+                            .as_ref()
+                            .is_none_or(|package| package.covers_package(repo, path))
+                })
+            })
+            .collect();
+        Some(Admitted { targets, packages })
+    }
+
+    fn holds(&self, node: &Node, facets: &Facets) -> bool {
+        match facets.label(node.id) {
+            Some(target) => self.targets.binary_search(&target).is_ok(),
+            None => self.packages.binary_search(&node.id).is_ok(),
+        }
     }
 }
 
@@ -356,52 +438,6 @@ fn column(facet: &SparseFacet, ids: usize, bare: bool, carried: impl Fn(&[Sym]) 
         }
     }
     Column { held, beyond: bare }
-}
-
-/// The distinct targets the nodes of `graph` belong to, sorted, which is what a
-/// label term is matched over. A node belonging to no target names none.
-fn carried_labels(graph: &Graph, facets: &Facets) -> Vec<Id> {
-    let mut labels: Vec<Id> = graph
-        .nodes
-        .iter()
-        .filter_map(|node| facets.label(node.id))
-        .collect();
-    labels.sort_unstable();
-    labels.dedup();
-    labels
-}
-
-/// Those of `carried` whose canonical label the label terms hold of, matched
-/// once per label rather than once per node carrying it. A name that is no
-/// target's node id names no label, and so answers no label term.
-fn admitted_labels(
-    predicate: &Predicate,
-    names: &Names,
-    written: &WrittenRepos,
-    carried: &[Id],
-) -> Option<Labels> {
-    let (pattern, package) = (predicate.label.as_ref(), predicate.package.as_ref());
-    if pattern.is_none() && package.is_none() {
-        return None;
-    }
-    let pattern = pattern.map(|pattern| pattern.resolved(written));
-    let package = package.map(|package| package.resolved(written));
-    Some(Labels(
-        carried
-            .iter()
-            .copied()
-            .filter(|&id| {
-                label::target_node_label(names.resolve(id)).is_some_and(|label| {
-                    pattern
-                        .as_ref()
-                        .is_none_or(|pattern| pattern.matches(label))
-                        && package
-                            .as_ref()
-                            .is_none_or(|package| package.matches(label))
-                })
-            })
-            .collect(),
-    ))
 }
 
 #[cfg(test)]
@@ -677,8 +713,8 @@ mod tests {
         let mut fixture = Fixture::new();
         let unbuilt = fixture.names.intern("target://foo:unbuilt");
 
-        let carried = carried_labels(&fixture.graph, &fixture.facets);
-        let admitted = admitted_labels(
+        let carried = Carried::of(&fixture.graph, &fixture.facets);
+        let admitted = Admitted::of(
             &Predicate {
                 label: Some(Pattern::parse("//foo/...")),
                 ..Predicate::default()
@@ -691,14 +727,14 @@ mod tests {
 
         // Every node of the target answers through the one label it carries.
         assert_eq!(
-            carried.len(),
+            carried.targets.len(),
             3,
             "one label per target the fixture describes"
         );
-        assert!(admitted.holds(fixture.id(APP)));
-        assert!(admitted.holds(fixture.id(SOURCE)));
+        assert!(admitted.targets.contains(&fixture.id(APP)));
+        assert!(admitted.targets.contains(&fixture.id(SOURCE)));
         assert!(
-            !admitted.holds(unbuilt),
+            !admitted.targets.contains(&unbuilt),
             "a name the graph holds no node for was matched",
         );
     }

@@ -409,10 +409,22 @@ pub(crate) fn show_written_repositories(graph: &mut Graph, facets: &Facets) {
 /// same-named main-repo path: main `pkg:a/b`, external `pkg:@repo//a/b`.
 fn box_node_id(repo: &str, path: &str) -> String {
     if repo.is_empty() {
-        format!("pkg:{path}")
+        format!("{PACKAGE_PREFIX}{path}")
     } else {
-        format!("pkg:{repo}//{path}")
+        format!("{PACKAGE_PREFIX}{repo}//{path}")
     }
+}
+
+/// What sets a package box's node id apart from the target, configured target,
+/// and output artifact that the same package's labels also name.
+const PACKAGE_PREFIX: &str = "pkg:";
+
+/// The repository part and package path of the package the box node id
+/// `node_id` names, read as [`parse_package`] reads them from a label, or
+/// `None` where `node_id` names a node that is no package box.
+pub(crate) fn package_node_parts(node_id: &str) -> Option<(&str, &str)> {
+    let written = node_id.strip_prefix(PACKAGE_PREFIX)?;
+    Some(written.split_once("//").unwrap_or(("", written)))
 }
 
 /// Whether package path `pkg` encloses directory `dir`: they are equal, or `dir`
@@ -736,6 +748,17 @@ mod tests {
         assert_eq!(canonical_repo("@somerepo//foo:bar"), None);
         assert_eq!(canonical_repo("//foo:bar"), None);
         assert_eq!(canonical_repo("@@//foo:bar"), None);
+    }
+
+    #[test]
+    fn a_box_node_id_reads_back_as_the_package_it_was_written_for() {
+        for (repo, path) in [("", ""), ("", "a/b"), ("@r", "a/b"), ("@@r+", "")] {
+            assert_eq!(
+                package_node_parts(&box_node_id(repo, path)),
+                Some((repo, path))
+            );
+        }
+        assert_eq!(package_node_parts("target://foo:app"), None);
     }
 
     #[test]

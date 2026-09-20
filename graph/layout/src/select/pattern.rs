@@ -93,10 +93,29 @@ impl Pattern {
                 let Some(parts) = Parts::of(label) else {
                     return false;
                 };
-                repo_matches(repo, parts.repo)
-                    && target.matches(parts.name)
-                    && segments_match(package, &components(parts.package))
+                target.matches(parts.name)
+                    && names_package(repo, package, parts.repo, parts.package)
             }
+        }
+    }
+
+    /// Whether this pattern covers the whole of the package `repo` and `path`
+    /// name, `repo` being the repository part as a label spells it, sigil and
+    /// all.
+    ///
+    /// A package is covered by a pattern that leaves the target free and by no
+    /// other, which is the line Bazel's own target patterns draw: `//foo/...`
+    /// covers `//foo` and every package below it, `//foo:all` covers `//foo`,
+    /// and `//foo:bar` names one target of a package and so covers none. Text
+    /// that is no label covers every package whose own label it occurs in.
+    pub fn covers_package(&self, repo: &str, path: &str) -> bool {
+        match self {
+            Pattern::Substring(text) => format!("{repo}//{path}").contains(text.as_str()),
+            Pattern::Label {
+                repo: written,
+                package,
+                target,
+            } => *target == Target::All && names_package(written, package, repo, path),
         }
     }
 
@@ -183,18 +202,22 @@ impl PackagePrefix {
         }
     }
 
-    /// Whether the canonical label `label` sits in this package or one below
-    /// it, the two split at a path component boundary so that `//foo` covers
-    /// `//foo/bar:t` and not `//foobar:t`.
+    /// Whether the canonical label `label` sits in a package this prefix
+    /// covers.
     pub fn matches(&self, label: &str) -> bool {
-        let Some(parts) = Parts::of(label) else {
-            return false;
-        };
-        repo_matches(&self.repo, parts.repo) && encloses(&self.path, parts.package)
+        Parts::of(label).is_some_and(|parts| self.covers_package(parts.repo, parts.package))
+    }
+
+    /// Whether the package `repo` and `path` name is this one or one below it,
+    /// the two split at a path component boundary so that `//foo` covers
+    /// `//foo/bar` and not `//foobar`.
+    pub fn covers_package(&self, repo: &str, path: &str) -> bool {
+        repo_matches(&self.repo, strip_sigil(repo)) && encloses(&self.path, path)
     }
 }
 
-/// A canonical label split into the parts a pattern matches one by one.
+/// A canonical label split into the parts a pattern matches one by one, the
+/// repository part written as the label spells it, sigil and all.
 struct Parts<'a> {
     repo: &'a str,
     package: &'a str,
@@ -208,11 +231,17 @@ impl<'a> Parts<'a> {
         let (repo, rest) = label.split_once("//")?;
         let (package, name) = rest.split_once(':')?;
         Some(Parts {
-            repo: strip_sigil(repo),
+            repo,
             package,
             name,
         })
     }
+}
+
+/// Whether the package part of a label pattern — the repository `written` and
+/// the segments `package` — names the package `repo` and `path` give.
+fn names_package(written: &str, package: &[Segment], repo: &str, path: &str) -> bool {
+    repo_matches(written, strip_sigil(repo)) && segments_match(package, &components(path))
 }
 
 fn strip_sigil(repo: &str) -> &str {
@@ -449,6 +478,63 @@ mod tests {
     #[test]
     fn a_string_that_is_no_label_matches_no_label_pattern() {
         assert!(!Pattern::parse("//foo/...").matches("action7"));
+    }
+
+    /// A trailing ellipsis stands for a directory and everything under it, so
+    /// it covers the package it names and every package below that one.
+    #[test]
+    fn an_ellipsis_covers_the_packages_it_reaches() {
+        let pattern = Pattern::parse("//foo/...");
+        assert!(pattern.covers_package("", "foo"));
+        assert!(pattern.covers_package("", "foo/bar"));
+        assert!(!pattern.covers_package("", "foobar"));
+        assert!(!pattern.covers_package("", "bar/foo"));
+        assert!(!pattern.covers_package("@@rules_foo+", "foo"));
+
+        let everything = Pattern::parse("//...");
+        assert!(everything.covers_package("", ""));
+        assert!(everything.covers_package("", "foo/bar"));
+    }
+
+    #[test]
+    fn all_covers_the_one_package_it_names() {
+        let pattern = Pattern::parse("//foo:all");
+        assert!(pattern.covers_package("", "foo"));
+        assert!(!pattern.covers_package("", "foo/bar"));
+    }
+
+    /// A pattern naming a target names one target of a package, which says
+    /// nothing of the package itself — and a pattern written with no colon
+    /// names a target just the same.
+    #[test]
+    fn a_named_target_covers_no_package() {
+        for written in ["//foo/bar:app", "//foo/bar"] {
+            let pattern = Pattern::parse(written);
+            assert!(!pattern.covers_package("", "foo/bar"), "{written}");
+            assert!(!pattern.covers_package("", "foo"), "{written}");
+        }
+    }
+
+    /// A package's own label is the head of every label of a target in it, so
+    /// text found in one is found in the other.
+    #[test]
+    fn a_substring_covers_the_packages_whose_label_holds_it() {
+        let pattern = Pattern::parse("tools/cpp");
+        assert!(pattern.covers_package("", "tools/cpp"));
+        assert!(pattern.covers_package("@@rules_foo+", "tools/cpp/toolchain"));
+        assert!(!pattern.covers_package("", "tools/java"));
+    }
+
+    #[test]
+    fn a_repository_is_covered_by_its_canonical_name_or_its_module_name() {
+        for written in ["@@rules_foo+1.2.3//...", "@rules_foo//..."] {
+            let pattern = Pattern::parse(written);
+            assert!(
+                pattern.covers_package("@@rules_foo+1.2.3", "foo"),
+                "{written}"
+            );
+            assert!(!pattern.covers_package("", "foo"), "{written}");
+        }
     }
 
     #[test]
