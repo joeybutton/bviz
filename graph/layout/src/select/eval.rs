@@ -244,19 +244,21 @@ impl<T: Copy + Ord> Admits<T> {
 #[derive(Default)]
 struct Carried {
     targets: Vec<Id>,
-    packages: Vec<Id>,
+    /// Each package box beside the box holding it, by which a term's answer for
+    /// a box is read together with its answer for the boxes below it.
+    packages: Vec<(Id, Option<Id>)>,
 }
 
 impl Carried {
     fn of(graph: &Graph, facets: &Facets) -> Self {
         let mut targets: Vec<Id> = Vec::with_capacity(graph.nodes.len());
-        let mut packages: Vec<Id> = Vec::with_capacity(graph.nodes.len());
+        let mut packages: Vec<(Id, Option<Id>)> = Vec::with_capacity(graph.nodes.len());
         for node in &graph.nodes {
             if let Some(target) = facets.label(node.id) {
                 targets.push(target);
             }
             if node.kind == Kind::Package {
-                packages.push(node.id);
+                packages.push((node.id, node.parent));
             }
         }
         targets.sort_unstable();
@@ -306,11 +308,10 @@ impl Admitted {
                 })
             })
             .collect();
-        let packages = carried
+        let covered: Vec<bool> = carried
             .packages
             .iter()
-            .copied()
-            .filter(|&id| {
+            .map(|&(id, _)| {
                 label::package_node_parts(names.resolve(id)).is_some_and(|(repo, path)| {
                     pattern
                         .as_ref()
@@ -321,7 +322,10 @@ impl Admitted {
                 })
             })
             .collect();
-        Some(Admitted { targets, packages })
+        Some(Admitted {
+            targets,
+            packages: covered_throughout(&carried.packages, covered),
+        })
     }
 
     fn holds(&self, node: &Node, facets: &Facets) -> bool {
@@ -330,6 +334,42 @@ impl Admitted {
             None => self.packages.binary_search(&node.id).is_ok(),
         }
     }
+}
+
+/// The boxes of `packages` — each beside the box holding it — that `covered`
+/// holds and holds for every box below them, in the order `packages` is sorted
+/// in.
+///
+/// A box is the frame its sub-packages are drawn in as much as it is the frame
+/// its own targets are drawn in, and a term reaching it unwraps that frame
+/// whole. Admitting a box the term covers without covering the boxes below it
+/// would leave those standing at the root of the drawing, away from the
+/// packages that enclose them.
+fn covered_throughout(packages: &[(Id, Option<Id>)], mut covered: Vec<bool>) -> Vec<Id> {
+    for below in 0..covered.len() {
+        if covered[below] {
+            continue;
+        }
+        let mut at = packages[below].1;
+        // Each box is struck out at most once, and each walk stops at the first
+        // box already struck out, so this costs one step per box.
+        while let Some(parent) = at {
+            let Ok(above) = packages.binary_search_by_key(&parent, |&(id, _)| id) else {
+                break;
+            };
+            if !covered[above] {
+                break;
+            }
+            covered[above] = false;
+            at = packages[above].1;
+        }
+    }
+    packages
+        .iter()
+        .zip(covered)
+        .filter(|&(_, covered)| covered)
+        .map(|(&(id, _), _)| id)
+        .collect()
 }
 
 /// A term's answer for each id, settled before the nodes are scanned.

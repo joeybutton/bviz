@@ -600,6 +600,72 @@ mod tests {
         );
     }
 
+    /// ':all' names the targets of one package, so the box standing for that
+    /// package goes on framing the packages below it — which the pattern names
+    /// nothing of, and which would stand at the root of the drawing were their
+    /// frame unwrapped.
+    #[test]
+    fn an_all_pattern_leaves_the_box_above_a_package_it_does_not_name() {
+        let (graph, names, facets) = build(&[rule("//foo:app", &[]), rule("//foo/bar:lib", &[])]);
+
+        assert_eq!(
+            drawn(
+                &searching("//foo:all", Visibility::Hidden),
+                &graph,
+                &names,
+                &facets
+            ),
+            ["pkg:foo", "pkg:foo/bar", "target://foo/bar:lib"]
+                .into_iter()
+                .collect()
+        );
+    }
+
+    /// A directory holding packages without being one itself is drawn as a box
+    /// all the same, so that the packages under it are framed together. Bazel
+    /// rejects ':all' over such a directory, and the box is left framing the
+    /// packages below it whichever way the pattern is read.
+    #[test]
+    fn an_all_pattern_leaves_the_box_of_a_directory_that_is_no_package() {
+        let (graph, names, facets) = build(&[rule("//a/b:x", &[]), rule("//a/c:y", &[])]);
+
+        assert_eq!(
+            drawn(
+                &searching("//a:all", Visibility::Hidden),
+                &graph,
+                &names,
+                &facets
+            ),
+            [
+                "pkg:a",
+                "pkg:a/b",
+                "pkg:a/c",
+                "target://a/b:x",
+                "target://a/c:y"
+            ]
+            .into_iter()
+            .collect()
+        );
+    }
+
+    /// A trailing '...' reaches a directory and everything under it, so it
+    /// covers a box together with every box below that one and unwraps the
+    /// whole nest.
+    #[test]
+    fn a_directory_pattern_covers_a_box_and_the_boxes_below_it() {
+        let (graph, names, facets) = build(&[rule("//foo:app", &[]), rule("//foo/bar:lib", &[])]);
+
+        assert!(
+            drawn(
+                &searching("//foo/...", Visibility::Hidden),
+                &graph,
+                &names,
+                &facets
+            )
+            .is_empty()
+        );
+    }
+
     /// An explicit target pattern names one target of a package and no package,
     /// so the box holding that target goes on framing what is left of it.
     #[test]
