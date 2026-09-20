@@ -303,8 +303,13 @@ struct Carried {
 
 impl Carried {
     fn of(graph: &Graph, facets: &Facets) -> Self {
+        let boxes = graph
+            .nodes
+            .iter()
+            .filter(|node| node.kind == Kind::Package)
+            .count();
         let mut targets: Vec<Id> = Vec::with_capacity(graph.nodes.len());
-        let mut packages: Vec<(Id, Option<Id>)> = Vec::with_capacity(graph.nodes.len());
+        let mut packages: Vec<(Id, Option<Id>)> = Vec::with_capacity(boxes);
         for node in &graph.nodes {
             if let Some(target) = facets.label(node.id) {
                 targets.push(target);
