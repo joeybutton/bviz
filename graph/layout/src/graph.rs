@@ -23,6 +23,15 @@ pub enum Kind {
     MergeGroup,
 }
 
+impl Kind {
+    /// Whether a node of this kind stands for nothing beyond the nodes it
+    /// holds, so that it is a frame around a part of the build rather than a
+    /// part of the build itself.
+    pub(crate) fn is_frame(self) -> bool {
+        matches!(self, Kind::Package | Kind::MergeGroup)
+    }
+}
+
 /// A box in the graph. A node is a container if any other node names it as
 /// parent, and a leaf otherwise.
 #[derive(Clone)]

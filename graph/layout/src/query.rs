@@ -683,6 +683,29 @@ mod tests {
         );
     }
 
+    /// A pattern discriminating on a target name covers no package, so what it
+    /// takes out of a package is taken out while the box stands — and a box
+    /// left holding nothing is a box around empty space.
+    #[test]
+    fn a_pattern_emptying_a_package_leaves_no_box_around_it() {
+        let (graph, names, facets) = build(&[rule("//foo:lib", &[]), rule("//bar:app", &[])]);
+
+        // The text is one a reader half way through typing `//foo:lib` has
+        // entered, which is read as a substring and names the same target.
+        for text in ["//foo:lib", "lib"] {
+            assert_eq!(
+                drawn(
+                    &searching(text, Visibility::Hidden),
+                    &graph,
+                    &names,
+                    &facets
+                ),
+                ["pkg:bar", "target://bar:app"].into_iter().collect(),
+                "hiding {text}",
+            );
+        }
+    }
+
     /// Drawing the matches alone keeps the boxes of the packages the pattern
     /// covers, which is what leaves each match stating the package it sits in,
     /// and leaves out every package it covers nothing of.

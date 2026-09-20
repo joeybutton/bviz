@@ -832,6 +832,28 @@ mod tests {
         );
     }
 
+    /// The level-of-detail fold collapses a container's descendants into it,
+    /// which leaves the container standing for them rather than standing
+    /// empty, so a coarse view draws every container the filter keeps.
+    #[test]
+    fn a_container_whose_descendants_are_folded_is_still_drawn() {
+        let loaded = document();
+        let (slice, _) = restrict(&loaded.shared, &hiding(Kind::Target), &HashSet::new(), true);
+
+        let coarsest = slice.map.level(0);
+        assert!(
+            coarsest.boxes.iter().any(|b| b.id == id(&loaded, "//a")),
+            "the container the fold collapses into",
+        );
+        assert!(
+            !coarsest
+                .boxes
+                .iter()
+                .any(|b| b.id == id(&loaded, "//a:t#compile")),
+            "the coarsest view folded nothing into that container",
+        );
+    }
+
     /// A restriction places what survives where the whole graph places it, so a
     /// filter change leaves the view looking at the same place rather than at a
     /// graph redrawn under it.

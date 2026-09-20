@@ -52,7 +52,9 @@ impl Filter {
             .iter()
             .map(|stated| stated.map_or(unmatched, Verdict::from))
             .collect();
-        frame_drawn_nodes(graph, &stated, &mut by_id);
+        let parents = Parents::of(graph, ids);
+        hide_empty_frames(graph, &parents, &mut by_id);
+        frame_drawn_nodes(graph, &parents, &stated, &mut by_id);
         Verdicts { by_id, unmatched }
     }
 }
@@ -87,28 +89,77 @@ impl From<Visibility> for Verdict {
     }
 }
 
+/// One graph's containment forest by node id, for the passes that walk from a
+/// node towards its root.
+struct Parents(Vec<Option<Id>>);
+
+impl Parents {
+    fn of(graph: &Graph, ids: usize) -> Self {
+        let mut parent: Vec<Option<Id>> = vec![None; ids];
+        for node in &graph.nodes {
+            parent[node.id.0 as usize] = node.parent;
+        }
+        Parents(parent)
+    }
+
+    /// Where the node at `id` sits, `None` for a root and for a node whose
+    /// parent the graph holds no node of, which leaves nothing above it to
+    /// reach.
+    fn above(&self, id: usize) -> Option<usize> {
+        let parent = self.0[id]?.0 as usize;
+        (parent < self.0.len()).then_some(parent)
+    }
+}
+
+/// Hides every frame left with nothing to frame: a box standing for no more
+/// than the nodes under it, none of which the drawing keeps, is a box drawn
+/// around empty space. A filter discriminating on a target name leaves one —
+/// a pattern naming one target, and text a reader is part way through typing,
+/// each cover no package at all.
+fn hide_empty_frames(graph: &Graph, parents: &Parents, by_id: &mut [Verdict]) {
+    let mut framing: Vec<bool> = vec![false; by_id.len()];
+    for node in &graph.nodes {
+        let id = node.id.0 as usize;
+        if node.kind.is_frame() || !by_id[id].drawn() {
+            continue;
+        }
+        // Each frame is marked once and each walk stops at the first frame
+        // already marked, so the whole forest costs one step per node.
+        let mut at = parents.above(id);
+        while let Some(ancestor) = at.filter(|&ancestor| !framing[ancestor]) {
+            framing[ancestor] = true;
+            at = parents.above(ancestor);
+        }
+    }
+    for node in &graph.nodes {
+        let id = node.id.0 as usize;
+        if node.kind.is_frame() && !framing[id] {
+            by_id[id] = Verdict::Hidden;
+        }
+    }
+}
+
 /// Turns into a [`Verdict::Context`] frame every containment ancestor of a drawn
 /// node that `stated` leaves to the base and `by_id` therefore hides. Each
 /// ancestor is decided on its own, so a rule hiding one of them unwraps that one
 /// while the frames above and below it stand.
-fn frame_drawn_nodes(graph: &Graph, stated: &[Option<Visibility>], by_id: &mut [Verdict]) {
-    let mut parent: Vec<Option<Id>> = vec![None; by_id.len()];
+fn frame_drawn_nodes(
+    graph: &Graph,
+    parents: &Parents,
+    stated: &[Option<Visibility>],
+    by_id: &mut [Verdict],
+) {
     for node in &graph.nodes {
-        parent[node.id.0 as usize] = node.parent;
-    }
-
-    for node in &graph.nodes {
-        if !by_id[node.id.0 as usize].drawn() {
+        let id = node.id.0 as usize;
+        if !by_id[id].drawn() {
             continue;
         }
-        let mut at = node.parent;
-        // An ancestor past the table is one the graph holds no node of, which
-        // leaves nothing to frame with and nothing above it to reach.
-        while let Some(ancestor) = at.map(|id| id.0 as usize).filter(|&i| i < by_id.len()) {
+        let mut at = parents.above(id);
+        while let Some(ancestor) = at {
             if stated[ancestor].is_none() && !by_id[ancestor].drawn() {
                 by_id[ancestor] = Verdict::Context;
             }
-            at = parent[ancestor];
+            at = parents.above(ancestor);
         }
     }
 }
@@ -1010,6 +1061,52 @@ mod tests {
         assert_eq!(verdicts.get(fixture.id(PACKAGE)), Verdict::Hidden);
         assert_eq!(verdicts.get(fixture.id(TARGET)), Verdict::Context);
         assert_eq!(verdicts.get(fixture.id(COMPILE)), Verdict::Shown);
+    }
+
+    /// A box stands for nothing beyond the nodes it holds, so a filter taking
+    /// every one of them out leaves no box around the space they were in,
+    /// however far up the containment the emptying reaches.
+    #[test]
+    fn a_container_the_filter_empties_is_not_drawn() {
+        let fixture = Nested::new();
+        let filter = Filter {
+            rules: vec![Rule {
+                predicate: Predicate {
+                    kinds: Values::new([Kind::Target, Kind::Action]),
+                    ..Predicate::default()
+                },
+                visibility: Visibility::Hidden,
+            }],
+            ..Filter::default()
+        };
+
+        let verdicts = fixture.evaluate(&filter);
+
+        for package in [PACKAGE, OTHER_PACKAGE] {
+            assert_eq!(verdicts.get(fixture.id(package)), Verdict::Hidden);
+        }
+    }
+
+    /// A target stands for a target of the build whether or not the filter
+    /// keeps what it was built from, so emptying one leaves it drawn.
+    #[test]
+    fn a_target_the_filter_empties_is_still_drawn() {
+        let fixture = Nested::new();
+        let filter = Filter {
+            rules: vec![Rule {
+                predicate: Predicate {
+                    kinds: Values::new([Kind::Action]),
+                    ..Predicate::default()
+                },
+                visibility: Visibility::Hidden,
+            }],
+            ..Filter::default()
+        };
+
+        let verdicts = fixture.evaluate(&filter);
+
+        assert_eq!(verdicts.get(fixture.id(TARGET)), Verdict::Shown);
+        assert_eq!(verdicts.get(fixture.id(PACKAGE)), Verdict::Shown);
     }
 
     /// Only a node the drawing holds calls for a frame, so one a rule hides
