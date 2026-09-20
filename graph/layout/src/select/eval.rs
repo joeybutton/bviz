@@ -319,19 +319,20 @@ impl Carried {
     }
 }
 
-/// What the terms over labels admit, each by the id the node answering it is
-/// found under: a node belonging to a target by that target, which several
-/// nodes share, and a package box by itself. Sorted, as the [`Carried`] ids
-/// they are drawn from are.
+/// What the terms over labels admit, by the id a node answers through: the
+/// target it belongs to, which several nodes share, or the box itself where it
+/// belongs to none — see
+/// [`Pattern::covers_package`](crate::select::pattern::Pattern::covers_package).
+/// Sorted, as the [`Carried`] ids they are drawn from are.
 struct Admitted {
     targets: Vec<Id>,
     packages: Vec<Id>,
 }
 
 impl Admitted {
-    /// What the terms over labels of `predicate` admit of `carried`, matched
-    /// once per target and once per package rather than once per node; `None`
-    /// where the predicate states neither term.
+    /// What the terms over labels of `predicate` admit of `carried`: one match
+    /// per target and one per package box, whatever number of nodes answer
+    /// through each. `None` where the predicate states neither term.
     fn of(
         predicate: &Predicate,
         names: &Names,

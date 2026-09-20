@@ -122,9 +122,7 @@ pub enum Aspects {
 ///
 /// A term reading a facet the node does not carry never holds: a source file
 /// states no rule class, and a term over rule classes must take that for no rule
-/// class rather than for one of its own. The terms over labels read what a node
-/// names rather than a facet, and each states for itself what it makes of a node
-/// that belongs to no target.
+/// class rather than for one of its own.
 #[derive(Clone, Default, PartialEq, Eq, Debug)]
 pub struct Predicate {
     pub kinds: Option<Values<Kind>>,
@@ -143,12 +141,11 @@ pub struct Predicate {
     /// Tags, of which the node's target must carry one.
     pub tags: Option<Values<String>>,
     pub testonly: Option<bool>,
-    /// A pattern over the canonical label of the target the node belongs to,
-    /// and over the package a box stands for, which belongs to none — see
-    /// [`Pattern::covers_package`].
+    /// A pattern over the canonical label of the target the node belongs to —
+    /// see [`Pattern::covers_package`] for what a node belonging to none
+    /// answers through.
     pub label: Option<Pattern>,
-    /// A package and everything below it, over the package of the target the
-    /// node belongs to and over the package a box stands for.
+    /// A package and everything below it, read against the same label.
     pub package: Option<PackagePrefix>,
 }
 

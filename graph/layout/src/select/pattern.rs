@@ -111,6 +111,10 @@ impl Pattern {
     /// covers `//foo` and every package below it, `//foo:all` covers `//foo`,
     /// and `//foo:bar` names one target of a package and so covers none. Text
     /// that is no label covers every package whose own label it occurs in.
+    ///
+    /// This is what a box answers a pattern through. A box belongs to no
+    /// target — it is drawn for the package it is captioned by — so a pattern
+    /// reaches it by covering that package rather than by matching a label.
     pub fn covers_package(&self, repo: &str, path: &str) -> bool {
         match self {
             Pattern::Substring(text) => format!("{repo}//{path}").contains(text.as_str()),
