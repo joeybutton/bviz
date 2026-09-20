@@ -45,9 +45,12 @@ pub enum Segment {
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Target {
     Named(String),
-    /// `:all`, or a package path ending in `...`, both of which leave the
-    /// target free. A target genuinely named `all` cannot be written, as it
-    /// cannot in a Bazel command line either.
+    /// A package path ending in `...`, or one of the wildcard target parts
+    /// Bazel reads: `:all` over a package's rules, `:*` and `:all-targets`
+    /// over every target in it. A pattern here is matched over labels alone,
+    /// which say nothing of whether a target is a rule, so all three leave the
+    /// target equally free. A target genuinely named `all` cannot be written,
+    /// as it cannot in a Bazel command line either.
     All,
 }
 
@@ -122,7 +125,7 @@ impl Pattern {
     fn label(text: &str) -> Option<Self> {
         let (repo, rest) = text.split_once("//")?;
         let (path, written) = match rest.split_once(':') {
-            Some((path, "all" | "*")) => (path, Some(Target::All)),
+            Some((path, "all" | "*" | "all-targets")) => (path, Some(Target::All)),
             Some((_, "")) => return None,
             Some((path, name)) => (path, Some(Target::Named(name.to_string()))),
             None => (rest, None),
@@ -313,6 +316,9 @@ mod tests {
                 target: Target::All,
             }
         );
+        for wildcard in ["//foo:*", "//foo:all-targets"] {
+            assert_eq!(Pattern::parse(wildcard), Pattern::parse("//foo:all"));
+        }
         assert_eq!(
             segments(&Pattern::parse("//foo/...")).last(),
             Some(&Segment::Any)
