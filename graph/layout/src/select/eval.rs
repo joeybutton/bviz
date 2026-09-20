@@ -8,6 +8,7 @@ use crate::facets::{Facets, RepoRef, SparseFacet, Sym, Tri, WrittenRepos};
 use crate::graph::{Graph, Kind, Node};
 use crate::intern::{Id, Names};
 use crate::label;
+use crate::select::pattern::Package;
 use crate::select::{Aspects, Filter, Predicate, Rule, Values, Visibility, stating};
 
 impl Filter {
@@ -365,12 +366,13 @@ impl Admitted {
             .iter()
             .map(|&(id, _)| {
                 label::package_node_parts(names.resolve(id)).is_some_and(|(repo, path)| {
+                    let named = Package::written(repo, path);
                     pattern
                         .as_ref()
-                        .is_none_or(|pattern| pattern.covers_package(repo, path))
+                        .is_none_or(|pattern| pattern.covers_package(named))
                         && package
                             .as_ref()
-                            .is_none_or(|package| package.covers_package(repo, path))
+                            .is_none_or(|package| package.covers_package(named))
                 })
             })
             .collect();

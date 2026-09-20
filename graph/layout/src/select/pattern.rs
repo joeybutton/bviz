@@ -96,15 +96,12 @@ impl Pattern {
                 let Some(parts) = Parts::of(label) else {
                     return false;
                 };
-                target.matches(parts.name)
-                    && names_package(repo, package, parts.repo, parts.package)
+                target.matches(parts.name) && names_package(repo, package, parts.package)
             }
         }
     }
 
-    /// Whether this pattern covers the whole of the package `repo` and `path`
-    /// name, `repo` being the repository part as a label spells it, sigil and
-    /// all.
+    /// Whether this pattern covers the whole of the package `named`.
     ///
     /// A package is covered by a pattern that leaves the target free and by no
     /// other, which is the line Bazel's own target patterns draw: `//foo/...`
@@ -115,14 +112,16 @@ impl Pattern {
     /// This is what a box answers a pattern through. A box belongs to no
     /// target — it is drawn for the package it is captioned by — so a pattern
     /// reaches it by covering that package rather than by matching a label.
-    pub fn covers_package(&self, repo: &str, path: &str) -> bool {
+    pub fn covers_package(&self, named: Package<'_>) -> bool {
         match self {
-            Pattern::Substring(text) => format!("{repo}//{path}").contains(text.as_str()),
+            Pattern::Substring(text) => {
+                format!("{}//{}", named.repo, named.path).contains(text.as_str())
+            }
             Pattern::Label {
-                repo: written,
+                repo,
                 package,
                 target,
-            } => *target == Target::All && names_package(written, package, repo, path),
+            } => *target == Target::All && names_package(repo, package, named),
         }
     }
 
@@ -212,22 +211,36 @@ impl PackagePrefix {
     /// Whether the canonical label `label` sits in a package this prefix
     /// covers.
     pub fn matches(&self, label: &str) -> bool {
-        Parts::of(label).is_some_and(|parts| self.covers_package(parts.repo, parts.package))
+        Parts::of(label).is_some_and(|parts| self.covers_package(parts.package))
     }
 
-    /// Whether the package `repo` and `path` name is this one or one below it,
-    /// the two split at a path component boundary so that `//foo` covers
-    /// `//foo/bar` and not `//foobar`.
-    pub fn covers_package(&self, repo: &str, path: &str) -> bool {
-        repo_matches(&self.repo, strip_sigil(repo)) && encloses(&self.path, path)
+    /// Whether the package `named` is this one or one below it, the two split
+    /// at a path component boundary so that `//foo` covers `//foo/bar` and not
+    /// `//foobar`.
+    pub fn covers_package(&self, named: Package<'_>) -> bool {
+        repo_matches(&self.repo, strip_sigil(named.repo)) && encloses(&self.path, named.path)
     }
 }
 
-/// A canonical label split into the parts a pattern matches one by one, the
-/// repository part written as the label spells it, sigil and all.
-struct Parts<'a> {
+/// The package a label names or a box stands for, as a pattern is matched
+/// against it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Package<'a> {
     repo: &'a str,
-    package: &'a str,
+    path: &'a str,
+}
+
+impl<'a> Package<'a> {
+    /// The package `repo` and `path` name, `repo` being the repository part as
+    /// a label spells it, sigil and all.
+    pub fn written(repo: &'a str, path: &'a str) -> Self {
+        Package { repo, path }
+    }
+}
+
+/// A canonical label split into the parts a pattern matches one by one.
+struct Parts<'a> {
+    package: Package<'a>,
     name: &'a str,
 }
 
@@ -236,19 +249,19 @@ impl<'a> Parts<'a> {
     /// after a colon, a target.
     fn of(label: &'a str) -> Option<Self> {
         let (repo, rest) = label.split_once("//")?;
-        let (package, name) = rest.split_once(':')?;
+        let (path, name) = rest.split_once(':')?;
         Some(Parts {
-            repo,
-            package,
+            package: Package::written(repo, path),
             name,
         })
     }
 }
 
 /// Whether the package part of a label pattern — the repository `written` and
-/// the segments `package` — names the package `repo` and `path` give.
-fn names_package(written: &str, package: &[Segment], repo: &str, path: &str) -> bool {
-    repo_matches(written, strip_sigil(repo)) && segments_match(package, &components(path))
+/// the segments `package` — names the package `named`.
+fn names_package(written: &str, package: &[Segment], named: Package<'_>) -> bool {
+    repo_matches(written, strip_sigil(named.repo))
+        && segments_match(package, &components(named.path))
 }
 
 fn strip_sigil(repo: &str) -> &str {
@@ -495,22 +508,22 @@ mod tests {
     #[test]
     fn an_ellipsis_covers_the_packages_it_reaches() {
         let pattern = Pattern::parse("//foo/...");
-        assert!(pattern.covers_package("", "foo"));
-        assert!(pattern.covers_package("", "foo/bar"));
-        assert!(!pattern.covers_package("", "foobar"));
-        assert!(!pattern.covers_package("", "bar/foo"));
-        assert!(!pattern.covers_package("@@rules_foo+", "foo"));
+        assert!(pattern.covers_package(Package::written("", "foo")));
+        assert!(pattern.covers_package(Package::written("", "foo/bar")));
+        assert!(!pattern.covers_package(Package::written("", "foobar")));
+        assert!(!pattern.covers_package(Package::written("", "bar/foo")));
+        assert!(!pattern.covers_package(Package::written("@@rules_foo+", "foo")));
 
         let everything = Pattern::parse("//...");
-        assert!(everything.covers_package("", ""));
-        assert!(everything.covers_package("", "foo/bar"));
+        assert!(everything.covers_package(Package::written("", "")));
+        assert!(everything.covers_package(Package::written("", "foo/bar")));
     }
 
     #[test]
     fn all_covers_the_one_package_it_names() {
         let pattern = Pattern::parse("//foo:all");
-        assert!(pattern.covers_package("", "foo"));
-        assert!(!pattern.covers_package("", "foo/bar"));
+        assert!(pattern.covers_package(Package::written("", "foo")));
+        assert!(!pattern.covers_package(Package::written("", "foo/bar")));
     }
 
     /// A pattern naming a target names one target of a package, which says
@@ -520,8 +533,14 @@ mod tests {
     fn a_named_target_covers_no_package() {
         for written in ["//foo/bar:app", "//foo/bar"] {
             let pattern = Pattern::parse(written);
-            assert!(!pattern.covers_package("", "foo/bar"), "{written}");
-            assert!(!pattern.covers_package("", "foo"), "{written}");
+            assert!(
+                !pattern.covers_package(Package::written("", "foo/bar")),
+                "{written}"
+            );
+            assert!(
+                !pattern.covers_package(Package::written("", "foo")),
+                "{written}"
+            );
         }
     }
 
@@ -530,9 +549,9 @@ mod tests {
     #[test]
     fn a_substring_covers_the_packages_whose_label_holds_it() {
         let pattern = Pattern::parse("tools/cpp");
-        assert!(pattern.covers_package("", "tools/cpp"));
-        assert!(pattern.covers_package("@@rules_foo+", "tools/cpp/toolchain"));
-        assert!(!pattern.covers_package("", "tools/java"));
+        assert!(pattern.covers_package(Package::written("", "tools/cpp")));
+        assert!(pattern.covers_package(Package::written("@@rules_foo+", "tools/cpp/toolchain")));
+        assert!(!pattern.covers_package(Package::written("", "tools/java")));
     }
 
     #[test]
@@ -540,10 +559,13 @@ mod tests {
         for written in ["@@rules_foo+1.2.3//...", "@rules_foo//..."] {
             let pattern = Pattern::parse(written);
             assert!(
-                pattern.covers_package("@@rules_foo+1.2.3", "foo"),
+                pattern.covers_package(Package::written("@@rules_foo+1.2.3", "foo")),
                 "{written}"
             );
-            assert!(!pattern.covers_package("", "foo"), "{written}");
+            assert!(
+                !pattern.covers_package(Package::written("", "foo")),
+                "{written}"
+            );
         }
     }
 
