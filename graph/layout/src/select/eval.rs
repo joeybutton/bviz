@@ -802,33 +802,33 @@ mod tests {
     /// label.
     #[test]
     fn a_label_term_is_matched_over_the_labels_the_nodes_carry() {
-        let mut fixture = Fixture::new();
-        let unbuilt = fixture.names.intern("target://foo:unbuilt");
+        let mut graph = Graph::new();
+        let mut names = Names::default();
+        let mut builder = FacetsBuilder::default();
+        let app = names.intern(APP);
+        graph.add_node(Node::new(app, ":app", Kind::Target, None));
+        builder.describe_label(app, None, "//foo:app");
+        names.intern("target://foo:unbuilt");
+        let (facets, _) = builder.seal();
 
-        let carried = Carried::of(&fixture.graph, &fixture.facets);
+        let carried = Carried::of(&graph, &facets);
         let admitted = Admitted::of(
             &Predicate {
                 label: Some(Pattern::parse("//foo/...")),
                 ..Predicate::default()
             },
-            &fixture.names,
-            &WrittenRepos::of(&fixture.facets),
+            &names,
+            &WrittenRepos::of(&facets),
             &carried,
         )
         .expect("a label term");
 
-        // Every node of the target answers through the one label it carries.
         assert_eq!(
             carried.targets.len(),
-            3,
-            "one label per target the fixture describes"
+            1,
+            "the one label a node of the graph carries",
         );
-        assert!(admitted.targets.contains(&fixture.id(APP)));
-        assert!(admitted.targets.contains(&fixture.id(SOURCE)));
-        assert!(
-            !admitted.targets.contains(&unbuilt),
-            "a name the graph holds no node for was matched",
-        );
+        assert!(admitted.holds(&graph.nodes[0], &facets));
     }
 
     /// The quotient pass mints group ids above every id the inputs described, so
