@@ -512,10 +512,11 @@ fn list_width<'a>(
 
 /// How tall a list of `rows` rows each `row` tall is laid out in a window of
 /// `viewport`: as tall as its rows, and no taller than it can stand and still
-/// be reached whole, past which it scrolls.
+/// be reached whole, past which it scrolls and ends on a whole row.
 fn list_height(rows: usize, row: Pixels, viewport: Size<Pixels>) -> Pixels {
-    let held = row * rows as f32 + LIST_PAD * 2. + SHEET_BORDER * 2.;
-    held.min(MAX_LIST_HEIGHT).min(viewport.height)
+    let frame = LIST_PAD * 2. + SHEET_BORDER * 2.;
+    let room = MAX_LIST_HEIGHT.min(viewport.height) - frame;
+    frame + (row * rows as f32).min(dropdown_chrome::whole_rows(row, room))
 }
 
 /// The face a menu's rows read in, set by the menu itself so they read in the
@@ -648,6 +649,9 @@ mod tests {
     /// How tall a row of the lists laid out here stands.
     const ROW: Pixels = px(24.);
 
+    /// A row height that neither height a list is held to divides evenly.
+    const UNEVEN_ROW: Pixels = px(34.);
+
     const WINDOW: Size<Pixels> = Size {
         width: px(1000.),
         height: px(800.),
@@ -709,6 +713,21 @@ mod tests {
             let opened = opened(asked, asked, extent, viewport);
             assert!(opened.top() >= px(0.), "{viewport:?}");
             assert!(opened.bottom() <= viewport.height, "{viewport:?}");
+        }
+    }
+
+    /// A list too long to stand whole scrolls within a height of whole rows,
+    /// so its last row in view is shown entire rather than cut through.
+    #[test]
+    fn a_scrolling_list_ends_on_a_whole_row() {
+        let frame = LIST_PAD * 2. + SHEET_BORDER * 2.;
+        for row in [ROW, UNEVEN_ROW] {
+            for viewport in [WINDOW, size(px(400.), px(160.))] {
+                let height = list_height(200, row, viewport);
+                let rows = f32::from(height - frame) / f32::from(row);
+                assert_eq!(rows, rows.floor(), "{row:?} {viewport:?}");
+                assert!(height <= viewport.height, "{row:?} {viewport:?}");
+            }
         }
     }
 

@@ -504,7 +504,10 @@ impl MultiSelect {
             .flex_col()
             .w_full()
             .pr(px(SCROLLBAR_THICKNESS))
-            .max_h(dropdown_chrome::whole_rows(window, MENU_MAX_HEIGHT))
+            .max_h(dropdown_chrome::whole_rows(
+                dropdown_chrome::row_height(window),
+                MENU_MAX_HEIGHT,
+            ))
             .overflow_y_scroll()
             .track_scroll(&self.scroll)
             .children(rows);

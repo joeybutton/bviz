@@ -33,11 +33,10 @@ pub(crate) fn row_height(window: &Window) -> Pixels {
     bviz_ui_assets::text_metrics(window).line_height + ROW_PADDING * 2.
 }
 
-/// `bound` cut down to the whole rows it holds, by which a list that scrolls
-/// within it ends on a row entire rather than through the glyphs of one. A bound
-/// shorter than a row holds the one row the list must still show.
-pub(crate) fn whole_rows(window: &Window, bound: Pixels) -> Pixels {
-    let row = row_height(window);
+/// `bound` cut down to the whole rows `row` tall it holds, by which a list that
+/// scrolls within it ends on a row entire rather than through the glyphs of one.
+/// A bound shorter than a row holds the one row the list must still show.
+pub(crate) fn whole_rows(row: Pixels, bound: Pixels) -> Pixels {
     row * (f32::from(bound) / f32::from(row)).floor().max(1.)
 }
 
