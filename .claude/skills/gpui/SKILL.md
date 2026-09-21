@@ -569,6 +569,14 @@ Reach for a cell only for a writer with no path to `&mut App` or `&mut self` at 
   hover crosshair, a tooltip, an in-progress drag) in the parent above it. Notify the **parent**
   for a cheap overlay change — the child scene replays and only the overlay repaints; notify the
   **child** for any change to what it paints — it rebuilds its scene.
+- **A refresh suspends caching for the whole window, and gpui's own drag calls one per mouse
+  move.** The refreshing flag is a conjunct of the replay condition itself, so while it is set no
+  cached view in the window replays, and a cached view that misses sets it again for its own
+  subtree — nesting an expensive layer deeper shields nothing. A gesture driven through
+  `cx.active_drag` (the `on_drag` / `on_drop` API) refreshes on every mouse move, which makes
+  every frame it lasts a full uncached redraw of every panel. Drive a gesture over expensive
+  content with `track_drag` and a parent-only notify instead, and the cached scenes go on
+  replaying; only the press and release frames are full ones, which `div` refreshes anyway.
 - **The stale-cache gate.** The one real bug class: a state change that alters what the cached
   child paints but leaves the child un-notified shows stale content until the next child notify —
   and a static screenshot won't reveal it. Route every content-mutating handler through one helper
@@ -693,6 +701,7 @@ actually moves the bound.
 - Styling an element from bounds a paint measured puts it a frame behind, and at the origin on the first frame — place children from a custom `Element`'s prepaint instead.
 - A background `Task` you don't store is cancelled on drop — keep it in a view field.
 - An element's mouse handlers stop at its own bounds — use `track_drag` for a drag that must follow the cursor past them, and past the window's edge.
+- A drag through `on_drag`/`on_drop` refreshes the window on every mouse move, so nothing `.cached(..)` replays for as long as it lasts.
 - A drag ended only on `MouseUpEvent` sticks when the compositor takes the pointer away mid-gesture — also end it on a move whose `dragging()` is false.
 - gpui's executor is not tokio — a `reqwest`/`tonic`/SDK future run directly on it panics "no reactor running"; bridge it through a tokio runtime (see the tokio/rayon section).
 - A rayon `par_iter`/`par_sort` on the UI thread freezes the frame — it blocks its caller; run it inside a background task, inside `bviz_parallel::workers().install(..)`.

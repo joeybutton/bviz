@@ -98,6 +98,7 @@ pub(crate) fn card(
     Some(
         div()
             .id("missing-data")
+            .block_mouse_except_scroll()
             .flex()
             .flex_col()
             .gap_1()

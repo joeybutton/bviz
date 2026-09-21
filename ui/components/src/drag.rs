@@ -26,12 +26,13 @@ pub enum DragEnd {
 /// Call this from an element's `paint` (or a `canvas` paint closure) while the
 /// drag is active. The handlers serve every event until the next paint replaces
 /// them, which may never come; a latch retires them once the drag has ended.
-/// Both callbacks receive the cursor position in window coordinates.
+/// Both callbacks receive the cursor position in window coordinates and the
+/// window the press landed in.
 pub fn track_drag<V: 'static>(
     window: &mut Window,
     view: &Entity<V>,
-    on_move: impl Fn(&mut V, Point<Pixels>, &mut Context<V>) + 'static,
-    on_end: impl Fn(&mut V, Point<Pixels>, DragEnd, &mut Context<V>) + 'static,
+    on_move: impl Fn(&mut V, Point<Pixels>, &mut Window, &mut Context<V>) + 'static,
+    on_end: impl Fn(&mut V, Point<Pixels>, DragEnd, &mut Window, &mut Context<V>) + 'static,
 ) {
     let on_end = Rc::new(on_end);
     let ended = Rc::new(Cell::new(false));
@@ -39,28 +40,28 @@ pub fn track_drag<V: 'static>(
     let moving = view.clone();
     let move_end = on_end.clone();
     let move_ended = ended.clone();
-    window.on_mouse_event(move |event: &MouseMoveEvent, phase, _, cx| {
+    window.on_mouse_event(move |event: &MouseMoveEvent, phase, window, cx| {
         if phase != DispatchPhase::Bubble || move_ended.get() {
             return;
         }
         if event.dragging() {
-            moving.update(cx, |view, cx| on_move(view, event.position, cx));
+            moving.update(cx, |view, cx| on_move(view, event.position, window, cx));
         } else {
             move_ended.set(true);
             moving.update(cx, |view, cx| {
-                move_end(view, event.position, DragEnd::Abandoned, cx)
+                move_end(view, event.position, DragEnd::Abandoned, window, cx)
             });
         }
     });
 
     let ending = view.clone();
-    window.on_mouse_event(move |event: &MouseUpEvent, phase, _, cx| {
+    window.on_mouse_event(move |event: &MouseUpEvent, phase, window, cx| {
         if phase != DispatchPhase::Bubble || ended.get() || event.button != MouseButton::Left {
             return;
         }
         ended.set(true);
         ending.update(cx, |view, cx| {
-            on_end(view, event.position, DragEnd::Released, cx)
+            on_end(view, event.position, DragEnd::Released, window, cx)
         });
     });
 }

@@ -1,8 +1,8 @@
 use crate::panel::numbered;
 use crate::{AnyPanel, Panel, PanelGroup, ViewKind, Workspace};
 use gpui::{
-    App, AppContext, Context, Entity, EntityId, Global, SharedString, Subscription, WeakEntity,
-    Window,
+    App, AppContext, Context, Entity, EntityId, EventEmitter, Global, SharedString, Subscription,
+    WeakEntity, Window,
 };
 use std::num::NonZeroUsize;
 use std::rc::Rc;
@@ -42,6 +42,16 @@ impl ViewSpec {
             mint: Rc::new(move |ordinal, cx| AnyPanel::new(mint(cx), ordinal)),
         }
     }
+
+    /// The registry's record of this view, which no panel shows yet.
+    fn registered(&self) -> View {
+        View {
+            kind: self.kind,
+            label: self.label,
+            mint: self.mint.clone(),
+            live: None,
+        }
+    }
 }
 
 /// What a document's view has on screen. A pane draws only the panel it shows,
@@ -50,7 +60,9 @@ impl ViewSpec {
 pub enum ViewState {
     /// No panel shows this view.
     Closed,
-    /// A pane holds a panel showing this view, behind the panel that pane shows.
+    /// A pane holds a panel showing this view, but no frame draws it: the pane
+    /// shows another of its tabs, or the window draws another pane in place of
+    /// the one holding it.
     Open,
     /// The pane holding this view's panel shows it.
     Visible,
@@ -80,17 +92,35 @@ pub struct OpenView {
 pub struct Documents {
     next: u64,
     documents: Vec<Registered>,
-    /// The workspace framing each open window, weakly held so one whose window
-    /// has closed drops out rather than being re-shown into.
-    windows: Vec<WeakEntity<Workspace>>,
+    /// The session's open windows, in the order they opened.
+    windows: Vec<OpenWindow>,
 }
+
+/// A window the session holds open, named by the workspace framing it. A
+/// workspace belongs to the window it is the root view of, so it is named
+/// weakly here rather than held alive by the registry. The subscription drops
+/// this record when that workspace is released, and is the one writer that
+/// drops it, so no closed window is offered as a place to show a view or to
+/// move a panel to.
+struct OpenWindow {
+    workspace: WeakEntity<Workspace>,
+    _closed: Subscription,
+}
+
+/// That the session has opened or closed a window, so where the panels of the
+/// windows still open can be moved to has changed.
+pub(crate) struct WindowsChanged;
+
+impl EventEmitter<WindowsChanged> for Documents {}
 
 struct Registered {
     id: DocumentId,
     label: SharedString,
     /// The number the window gave this document.
     ordinal: Option<NonZeroUsize>,
-    views: Vec<View>,
+    /// The views the document can show, arranged as the viewer opening it asked
+    /// for them to be.
+    views: PanelGroup<View>,
 }
 
 impl Registered {
@@ -99,11 +129,11 @@ impl Registered {
     }
 
     fn view(&self, kind: ViewKind) -> Option<&View> {
-        self.views.iter().find(|held| held.kind == kind)
+        self.views.panels().find(|held| held.kind == kind)
     }
 
     fn view_mut(&mut self, kind: ViewKind) -> Option<&mut View> {
-        self.views.iter_mut().find(|held| held.kind == kind)
+        self.views.panels_mut().find(|held| held.kind == kind)
     }
 }
 
@@ -148,7 +178,8 @@ impl Documents {
 
     /// Registers a document labelled `label` and numbered `ordinal` showing
     /// `views`, and mints a panel for each where the group places it. The
-    /// registry keeps only what it takes to mint them again.
+    /// registry keeps what it takes to mint them again, and the arrangement
+    /// they were asked for.
     pub(crate) fn open(
         &mut self,
         label: SharedString,
@@ -156,16 +187,10 @@ impl Documents {
         views: PanelGroup<ViewSpec>,
         cx: &mut Context<Self>,
     ) -> PanelGroup {
-        let mut specs = Vec::new();
-        let mut minted = Vec::new();
-        let panels = views.map(&mut |spec: ViewSpec| {
-            let panel = (spec.mint)(ordinal, cx);
-            specs.push(spec);
-            minted.push(panel.clone());
-            panel
-        });
-        let id = self.register(label, ordinal, specs);
-        for panel in &minted {
+        let views = views.map(&mut ViewSpec::registered);
+        let panels = views.map(&mut |view: &View| (view.mint)(ordinal, cx));
+        let id = self.register(label, ordinal, views);
+        for panel in panels.panels() {
             self.watch(id, panel.view_kind(), panel, cx);
         }
         cx.notify();
@@ -222,28 +247,68 @@ impl Documents {
         let workspaces = self.workspaces();
         let mut open = Vec::with_capacity(self.documents.len());
         for document in &self.documents {
-            let mut views = Vec::with_capacity(document.views.len());
-            for view in &document.views {
-                views.push(OpenView {
-                    kind: view.kind,
-                    label: view.label,
-                    state: state(view, &workspaces, cx),
-                });
-            }
             open.push(OpenDocument {
                 id: document.id,
                 label: document.name(),
-                views,
+                views: document
+                    .views
+                    .panels()
+                    .map(|view| OpenView {
+                        kind: view.kind,
+                        label: view.label,
+                        state: state(view, &workspaces, cx),
+                    })
+                    .collect(),
             });
         }
         open
     }
 
-    /// Takes `workspace` as a place a view can be shown, for as long as the
-    /// window it frames is open.
-    pub(crate) fn watch_workspace(&mut self, workspace: WeakEntity<Workspace>) {
-        self.windows.retain(|window| window.upgrade().is_some());
-        self.windows.push(workspace);
+    /// The arrangement the session's documents described when they opened, over
+    /// what `panel` makes of the panel showing each view: every document's own
+    /// group [compacted](PanelGroup::compact) to the views `panel` makes
+    /// something of, stacked in the order the documents opened. `None` where it
+    /// makes nothing of any view of any document.
+    pub(crate) fn opening_arrangement<T>(
+        &self,
+        panel: &mut impl FnMut(EntityId) -> Option<T>,
+    ) -> Option<PanelGroup<T>> {
+        let mut stacked = Vec::with_capacity(self.documents.len());
+        for document in &self.documents {
+            let mut shown = |view: &View| view.live.as_ref().and_then(|live| panel(live.panel));
+            stacked.extend(document.views.map(&mut shown).compact());
+        }
+        let mut stacked = stacked.into_iter();
+        let first = stacked.next()?;
+        Some(PanelGroup::stack(first, stacked.collect()))
+    }
+
+    /// Takes `workspace` as a place a view can be shown and a panel can be
+    /// moved to, for as long as the window it frames is open.
+    pub(crate) fn watch_workspace(
+        &mut self,
+        workspace: &Entity<Workspace>,
+        cx: &mut Context<Self>,
+    ) {
+        let opened = workspace.entity_id();
+        let closed = cx.observe_release(workspace, move |documents, _, cx| {
+            documents
+                .windows
+                .retain(|held| held.workspace.entity_id() != opened);
+            cx.emit(WindowsChanged);
+        });
+        self.windows.push(OpenWindow {
+            workspace: workspace.downgrade(),
+            _closed: closed,
+        });
+        cx.emit(WindowsChanged);
+    }
+
+    /// Whether the session holds a window open besides the one `workspace`
+    /// frames.
+    pub(crate) fn holds_another_window(&self, workspace: EntityId) -> bool {
+        self.open_windows()
+            .any(|held| held.entity_id() != workspace)
     }
 
     /// Brings `panel` forward where `into` holds it, and otherwise moves it
@@ -259,20 +324,11 @@ impl Documents {
         if into.update(cx, |workspace, cx| workspace.reveal(panel, window, cx)) {
             return;
         }
-        for elsewhere in self.workspaces() {
-            if elsewhere == *into {
-                continue;
-            }
-            let handle = elsewhere.read(cx).window();
-            let taken = handle.update(cx, |_, window, cx| {
-                elsewhere.update(cx, |workspace, cx| workspace.take_panel(panel, window, cx))
+        let elsewhere = take_panel_from(self.workspaces(), panel, into.entity_id(), cx);
+        if let Some(taken) = elsewhere {
+            into.update(cx, |workspace, cx| {
+                workspace.add_panel(taken, window, cx);
             });
-            if let Ok(Some(taken)) = taken {
-                into.update(cx, |workspace, cx| {
-                    workspace.add_panel(taken, window, cx);
-                });
-                return;
-            }
         }
     }
 
@@ -323,7 +379,7 @@ impl Documents {
         &mut self,
         label: SharedString,
         ordinal: Option<NonZeroUsize>,
-        views: Vec<ViewSpec>,
+        views: PanelGroup<View>,
     ) -> DocumentId {
         let id = DocumentId(self.next);
         self.next += 1;
@@ -331,15 +387,7 @@ impl Documents {
             id,
             label,
             ordinal,
-            views: views
-                .into_iter()
-                .map(|spec| View {
-                    kind: spec.kind,
-                    label: spec.label,
-                    mint: spec.mint,
-                    live: None,
-                })
-                .collect(),
+            views,
         });
         id
     }
@@ -356,11 +404,44 @@ impl Documents {
         self.registered_mut(document)?.view_mut(view)
     }
 
-    fn workspaces(&self) -> Vec<Entity<Workspace>> {
+    /// The workspaces framing the session's open windows, in the order their
+    /// windows opened.
+    pub(crate) fn workspaces(&self) -> Vec<Entity<Workspace>> {
         let mut open = Vec::with_capacity(self.windows.len());
-        open.extend(self.windows.iter().filter_map(WeakEntity::upgrade));
+        open.extend(self.open_windows());
         open
     }
+
+    fn open_windows(&self) -> impl Iterator<Item = Entity<Workspace>> {
+        self.windows
+            .iter()
+            .filter_map(|held| held.workspace.upgrade())
+    }
+}
+
+/// Takes `panel` out of whichever of `open` holds it, for a caller re-homing it
+/// in the window it frames. The workspace `here` names is left alone: it is the
+/// caller's own, which takes the panel out for itself. `None` where none of the
+/// others holds it, and where the window framing the one that does has closed.
+pub(crate) fn take_panel_from(
+    open: Vec<Entity<Workspace>>,
+    panel: EntityId,
+    here: EntityId,
+    cx: &mut App,
+) -> Option<AnyPanel> {
+    for elsewhere in open {
+        if elsewhere.entity_id() == here {
+            continue;
+        }
+        let handle = elsewhere.read(cx).window();
+        let taken = handle.update(cx, |_, window, cx| {
+            elsewhere.update(cx, |workspace, cx| workspace.take_panel(panel, window, cx))
+        });
+        if let Ok(Some(taken)) = taken {
+            return Some(taken);
+        }
+    }
+    None
 }
 
 /// Where `view`'s panel stands in the windows `workspaces` frame.
@@ -381,25 +462,49 @@ fn state(view: &View, workspaces: &[Entity<Workspace>], cx: &App) -> ViewState {
 mod tests {
     use super::*;
 
+    use crate::layout::shape;
+    use crate::testing::{SHARE_ROUNDING, letter};
+    use crate::{Layout, Weight};
+    use gpui::Axis;
+    use std::collections::HashMap;
+
     const TIMELINE: ViewKind = ViewKind::new("timeline");
     const FLAME: ViewKind = ViewKind::new("flame");
+    const STATS: ViewKind = ViewKind::new("stats");
 
     /// A view registered for its kind alone. Minting a panel takes a running
     /// application, which the bookkeeping exercised here stands apart from.
-    fn spec(kind: ViewKind) -> ViewSpec {
+    fn view(kind: ViewKind) -> View {
         ViewSpec {
             kind,
             label: kind.as_str(),
             mint: Rc::new(move |_, _| panic!("{} mints no panel here", kind.as_str())),
         }
+        .registered()
+    }
+
+    /// A timeline over a pane of a flame graph and a stats table tabbed behind
+    /// it, which is how a profile's viewer arranges its views.
+    fn profile_views() -> PanelGroup<View> {
+        PanelGroup::split(
+            Axis::Vertical,
+            0.5,
+            PanelGroup::one(view(TIMELINE)),
+            PanelGroup::tabs(view(FLAME), vec![view(STATS)]),
+        )
     }
 
     /// A registry holding a document per label, each showing a timeline and a
     /// flame graph.
     fn registry(labels: [&str; 2]) -> (Documents, [DocumentId; 2]) {
         let mut documents = Documents::new();
-        let ids = labels
-            .map(|label| documents.register(label.into(), None, vec![spec(TIMELINE), spec(FLAME)]));
+        let ids = labels.map(|label| {
+            documents.register(
+                label.into(),
+                None,
+                PanelGroup::tabs(view(TIMELINE), vec![view(FLAME)]),
+            )
+        });
         (documents, ids)
     }
 
@@ -426,7 +531,7 @@ mod tests {
             ("build.bep", None),
             ("build.profile.gz", NonZeroUsize::new(2)),
         ] {
-            documents.register(label.into(), ordinal, vec![spec(TIMELINE)]);
+            documents.register(label.into(), ordinal, PanelGroup::one(view(TIMELINE)));
         }
         let names: Vec<SharedString> = documents.documents.iter().map(Registered::name).collect();
         assert_eq!(
@@ -495,8 +600,187 @@ mod tests {
     #[test]
     fn a_view_a_document_does_not_show_is_not_its_own() {
         let (mut documents, [profile, _]) = registry(["a.profile.gz", "b.profile.gz"]);
-        let stats = ViewKind::new("stats");
-        opened(&mut documents, profile, stats, panel(1));
-        assert_eq!(documents.panel(profile, stats), None);
+        let graph = ViewKind::new("graph");
+        opened(&mut documents, profile, graph, panel(1));
+        assert_eq!(documents.panel(profile, graph), None);
+    }
+
+    /// A registry holding a document per label, each showing a profile's views
+    /// with a panel open for every one of them. The panels are named by letter
+    /// in the order the documents registered and their groups lay their views
+    /// out.
+    fn shown(labels: &[&str]) -> (Documents, Vec<(EntityId, char)>) {
+        let mut documents = Documents::new();
+        let mut panels = Vec::new();
+        for label in labels {
+            let id = documents.register((*label).into(), None, profile_views());
+            for kind in [TIMELINE, FLAME, STATS] {
+                let named = (panel(panels.len() as u64), letter(panels.len()));
+                opened(&mut documents, id, kind, named.0);
+                panels.push(named);
+            }
+        }
+        (documents, panels)
+    }
+
+    /// The arrangement `documents` describes for a window holding the panels
+    /// `here` names, over the letters naming those panels. Each panel is taken
+    /// as it is laid out, exactly as a window's rebuild takes it, so a registry
+    /// naming one panel from two places is handed it once.
+    fn rebuilt(
+        documents: &Documents,
+        panels: &[(EntityId, char)],
+        here: &str,
+    ) -> Option<PanelGroup<char>> {
+        let mut held: HashMap<EntityId, char> = panels
+            .iter()
+            .filter(|(_, letter)| here.contains(*letter))
+            .copied()
+            .collect();
+        documents.opening_arrangement(&mut |panel| held.remove(&panel))
+    }
+
+    /// That arrangement written out, each pane as the panels it holds in tab
+    /// order. A panel is laid out in one place: a window holds it in one.
+    fn rebuilt_shape(documents: &Documents, panels: &[(EntityId, char)], here: &str) -> String {
+        let group = rebuilt(documents, panels, here).expect("an arrangement of panels");
+        let written =
+            shape(&group.arrange(&mut |first, rest| {
+                std::iter::once(first).chain(rest).collect::<String>()
+            }));
+        let mut laid_out: Vec<char> = written.chars().filter(char::is_ascii_alphabetic).collect();
+        let places = laid_out.len();
+        laid_out.sort_unstable();
+        laid_out.dedup();
+        assert_eq!(laid_out.len(), places, "{written} lays a panel out twice");
+        written
+    }
+
+    /// A window holding every panel of its document is laid out exactly as that
+    /// document's viewer asked for.
+    #[test]
+    fn a_window_holding_every_view_is_laid_out_as_its_document_asked() {
+        let (documents, panels) = shown(&["build.profile.gz"]);
+        assert_eq!(rebuilt_shape(&documents, &panels, "abc"), "(a/bc)");
+    }
+
+    /// A view whose panel closed takes no place in the arrangement, and the
+    /// panes left divide what they were laid out in.
+    #[test]
+    fn a_closed_view_takes_no_place_in_the_arrangement() {
+        let (mut documents, panels) = shown(&["build.profile.gz"]);
+        documents.closed(documents.documents[0].id, FLAME);
+        assert_eq!(rebuilt_shape(&documents, &panels, "abc"), "(a/c)");
+        documents.closed(documents.documents[0].id, TIMELINE);
+        assert_eq!(rebuilt_shape(&documents, &panels, "abc"), "c");
+    }
+
+    /// A view another window holds goes on being open there: putting this window
+    /// back leaves that panel where it is and lays out the rest.
+    #[test]
+    fn a_view_another_window_holds_stays_there() {
+        let (documents, panels) = shown(&["build.profile.gz"]);
+        assert_eq!(rebuilt_shape(&documents, &panels, "ac"), "(a/c)");
+        assert_eq!(
+            documents.panel(documents.documents[0].id, FLAME),
+            Some(panels[1].0)
+        );
+    }
+
+    /// A document none of whose panels the window holds is laid out nowhere in
+    /// it, and a window holding none at all has no arrangement to be put back
+    /// to.
+    #[test]
+    fn a_document_the_window_holds_nothing_of_is_left_out() {
+        let (documents, panels) = shown(&["a.profile.gz", "b.profile.gz"]);
+        assert_eq!(rebuilt_shape(&documents, &panels, "abcdef"), "(a/bc/d/ef)");
+        assert_eq!(rebuilt_shape(&documents, &panels, "def"), "(d/ef)");
+        assert_eq!(rebuilt_shape(&documents, &panels, "b"), "b");
+        assert!(rebuilt(&documents, &panels, "").is_none());
+    }
+
+    /// Putting a window back settles it: the arrangement described for the
+    /// panels it holds once it has been put back is the one it was put into.
+    #[test]
+    fn putting_a_window_back_twice_lays_it_out_the_same_way() {
+        let (documents, panels) = shown(&["a.profile.gz", "b.profile.gz"]);
+        let once = rebuilt_shape(&documents, &panels, "abcdef");
+        assert_eq!(rebuilt_shape(&documents, &panels, "abcdef"), once);
+    }
+
+    /// A document whose group asks twice for a view of one kind keeps the one
+    /// record that kind is looked up by, so its second panel is one no document
+    /// lays out and the window holding it has to keep a place for it itself.
+    #[test]
+    fn a_kind_a_document_asks_for_twice_is_laid_out_once() {
+        let mut documents = Documents::new();
+        let id = documents.register(
+            "build.profile.gz".into(),
+            None,
+            PanelGroup::tabs(view(TIMELINE), vec![view(TIMELINE)]),
+        );
+        opened(&mut documents, id, TIMELINE, panel(0));
+        opened(&mut documents, id, TIMELINE, panel(1));
+        assert_eq!(
+            rebuilt_shape(&documents, &[(panel(0), 'a'), (panel(1), 'b')], "ab"),
+            "b"
+        );
+    }
+
+    /// A registry holding a document per weight, each showing a timeline with a
+    /// panel open for it. The panels are named by letter in the order the
+    /// documents registered.
+    fn weighed(weights: &[Weight]) -> (Documents, Vec<(EntityId, char)>) {
+        let mut documents = Documents::new();
+        let mut panels = Vec::with_capacity(weights.len());
+        for (at, weight) in weights.iter().enumerate() {
+            let id = documents.register(
+                format!("d{at}").into(),
+                None,
+                PanelGroup::one(view(TIMELINE)).with_weight(*weight),
+            );
+            let named = (panel(at as u64), letter(at));
+            opened(&mut documents, id, TIMELINE, named.0);
+            panels.push(named);
+        }
+        (documents, panels)
+    }
+
+    /// Asserts the documents of `weights`, in a window holding the panels
+    /// `here` names, are laid out at `expected` shares of it, top to bottom.
+    fn assert_rebuilt_shares(weights: &[Weight], here: &str, expected: &[f32]) {
+        let (documents, panels) = weighed(weights);
+        let group = rebuilt(&documents, &panels, here).expect("an arrangement of panels");
+        let Layout::Split(split) = group.arrange(&mut |first, _| first) else {
+            panic!("documents stacked in a window are parted by a split");
+        };
+        assert_eq!(split.axis(), Axis::Vertical);
+        let shares: Vec<f32> = split.sides().into_iter().map(|side| side.share).collect();
+        assert_eq!(shares.len(), expected.len(), "a share per document stacked");
+        for (share, want) in shares.into_iter().zip(expected) {
+            assert!(
+                (share - want).abs() < SHARE_ROUNDING,
+                "{weights:?} lays a document out at {share} of the window, not {want}"
+            );
+        }
+    }
+
+    /// Documents are stacked in the order they opened, each taking the share of
+    /// the window its own group asked to weigh.
+    #[test]
+    fn stacked_documents_take_the_shares_their_weights_ask_for() {
+        assert_rebuilt_shares(&[Weight::CHART, Weight::LOG], "ab", &[2.0 / 3.0, 1.0 / 3.0]);
+    }
+
+    /// A document the window holds no panel of takes no place in the stack, and
+    /// what it would have weighed is not divided out: the documents left hold
+    /// the proportions they asked for against each other.
+    #[test]
+    fn a_document_the_window_holds_nothing_of_leaves_the_rest_their_proportions() {
+        assert_rebuilt_shares(
+            &[Weight::CHART, Weight::LOG, Weight::CHART],
+            "ac",
+            &[0.5, 0.5],
+        );
     }
 }

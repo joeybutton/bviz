@@ -129,11 +129,11 @@ mod tests {
     }
 
     const VIEW: ViewKey = ViewKey::Map {
-        derivation: 0,
+        drawing: 0,
         level: 0,
     };
     const NEXT_LEVEL: ViewKey = ViewKey::Map {
-        derivation: 0,
+        drawing: 0,
         level: 1,
     };
 

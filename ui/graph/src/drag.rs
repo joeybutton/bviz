@@ -27,7 +27,7 @@ pub(crate) struct Pan {
     moved: bool,
 }
 
-/// Begin panning from a press at `position`, repainting so the canvas installs
+/// Begin panning from a press at `position`, repainting so the frame installs
 /// the window-global handlers that carry the gesture past the window edge.
 pub(crate) fn start_pan(
     view: &mut GraphPanel,
@@ -47,6 +47,7 @@ pub(crate) fn start_pan(
 pub(crate) fn drag_pan(
     view: &mut GraphPanel,
     position: Point<Pixels>,
+    _window: &mut Window,
     cx: &mut Context<GraphPanel>,
 ) {
     let Drag::Pan(mut pan) = view.drag else {
@@ -71,7 +72,7 @@ pub(crate) fn drag_pan(
     pan.last = position;
     view.drag = Drag::Pan(pan);
     view.framing.pan_to(panned);
-    cx.notify();
+    view.invalidate_canvas(cx);
 }
 
 /// End whatever gesture is in progress. A pan release that never travelled past
@@ -83,6 +84,7 @@ pub(crate) fn end_drag(
     view: &mut GraphPanel,
     position: Point<Pixels>,
     end: DragEnd,
+    _: &mut Window,
     cx: &mut Context<GraphPanel>,
 ) {
     match std::mem::take(&mut view.drag) {

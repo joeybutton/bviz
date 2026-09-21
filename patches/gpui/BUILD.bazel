@@ -1,0 +1,8 @@
+# The patches carry lines from the same Zed tree the derived source files come
+# from, under those terms.
+package(default_package_metadata = ["//LICENSES:gpui"])
+
+exports_files(
+    glob(["*.patch"]),
+    visibility = ["//visibility:public"],
+)

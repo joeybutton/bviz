@@ -772,7 +772,12 @@ impl FlamePanel {
 
 /// Routes an in-progress panel drag to its target: panning the panel, or moving a
 /// scroll thumb.
-fn flame_on_drag(panel: &mut FlamePanel, position: Point<Pixels>, cx: &mut Context<FlamePanel>) {
+fn flame_on_drag(
+    panel: &mut FlamePanel,
+    position: Point<Pixels>,
+    _window: &mut Window,
+    cx: &mut Context<FlamePanel>,
+) {
     match panel.drag {
         FlameDrag::Pan => {
             let dx = f32::from(position.x) - f32::from(panel.last_mouse.x);
@@ -797,6 +802,7 @@ fn flame_end_drag(
     panel: &mut FlamePanel,
     _: Point<Pixels>,
     _: DragEnd,
+    _: &mut Window,
     cx: &mut Context<FlamePanel>,
 ) {
     panel.drag = FlameDrag::None;
