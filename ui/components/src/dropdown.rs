@@ -1,7 +1,7 @@
 //! A single-select dropdown: a trigger showing the chosen option and a menu that
 //! opens beneath it.
 
-use crate::menu;
+use crate::dropdown_chrome;
 use bviz_ui_theme::ThemeColors;
 use gpui::{
     ClickEvent, Context, ElementId, EventEmitter, FocusHandle, IntoElement, Pixels, Render,
@@ -83,7 +83,7 @@ impl Dropdown {
         cx: &Context<Self>,
     ) -> impl IntoElement {
         let label = self.options.get(self.selected).cloned().unwrap_or_default();
-        menu::trigger(self.id.clone(), colors)
+        dropdown_chrome::trigger(self.id.clone(), colors)
             .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                 this.open = !this.open;
                 // Hold focus while open so an outside click dismisses the menu.
@@ -92,13 +92,13 @@ impl Dropdown {
                 }
                 cx.notify();
             }))
-            .child(menu::reading(option_width, label))
-            .child(menu::caret(colors))
+            .child(dropdown_chrome::reading(option_width, label))
+            .child(dropdown_chrome::caret(colors))
     }
 
     fn menu(&self, colors: &ThemeColors, cx: &Context<Self>) -> impl IntoElement {
         let rows = self.options.iter().enumerate().map(|(index, option)| {
-            menu::row(
+            dropdown_chrome::row(
                 ("dropdown-option", index).into(),
                 colors,
                 index == self.selected,
@@ -107,7 +107,7 @@ impl Dropdown {
             .child(div().whitespace_nowrap().child(option.clone()))
         });
         // Defer the menu so it paints over the content below the trigger.
-        deferred(menu::sheet(colors).children(rows))
+        deferred(dropdown_chrome::sheet(colors).children(rows))
     }
 }
 
@@ -129,7 +129,7 @@ impl Render for Dropdown {
         }
 
         let colors = bviz_ui_theme::theme(window, cx).colors;
-        let option_width = menu::widest(window, self.options.iter().cloned());
+        let option_width = dropdown_chrome::widest(window, self.options.iter().cloned());
 
         div()
             .relative()

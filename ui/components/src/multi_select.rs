@@ -3,8 +3,8 @@
 
 use crate::button::Button;
 use crate::drag::{DragEnd, track_drag};
+use crate::dropdown_chrome;
 use crate::layer::overlay_canvas;
-use crate::menu;
 use crate::scrollbar::{Axis, DEFAULT_MIN_THUMB, SCROLLBAR_THICKNESS, Scrollbar};
 use bviz_ui_assets::TextMetrics;
 use bviz_ui_theme::ThemeColors;
@@ -375,11 +375,14 @@ impl MultiSelect {
     fn measure(&self, window: &mut Window) -> Widths {
         let total = self.rows.options.len();
         Widths {
-            trigger: menu::widest(
+            trigger: dropdown_chrome::widest(
                 window,
                 std::iter::once(format!("{} {total}/{total}", self.label).into()),
             ),
-            label: menu::widest(window, self.rows.options.iter().map(|o| o.label.clone())),
+            label: dropdown_chrome::widest(
+                window,
+                self.rows.options.iter().map(|o| o.label.clone()),
+            ),
         }
     }
 
@@ -390,16 +393,16 @@ impl MultiSelect {
         cx: &Context<Self>,
     ) -> impl IntoElement + use<> {
         let (checked, total) = self.rows.tally();
-        menu::trigger(self.id.clone(), colors)
+        dropdown_chrome::trigger(self.id.clone(), colors)
             .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                 let open = !this.rows.open;
                 this.set_open(open, window, cx);
             }))
-            .child(menu::reading(
+            .child(dropdown_chrome::reading(
                 reading_width,
                 format!("{} {checked}/{total}", self.label).into(),
             ))
-            .child(menu::caret(colors))
+            .child(dropdown_chrome::caret(colors))
     }
 
     fn menu(
@@ -409,7 +412,7 @@ impl MultiSelect {
         window: &Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
-        let sheet = menu::sheet(colors)
+        let sheet = dropdown_chrome::sheet(colors)
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, e: &MouseDownEvent, _, cx| {
@@ -430,7 +433,7 @@ impl MultiSelect {
     /// group's own row carries by leaving the same room for the scroll bar the
     /// list does.
     fn header(&self, colors: &ThemeColors, cx: &Context<Self>) -> impl IntoElement + use<> {
-        menu::header(colors).child(div().pr(px(SCROLLBAR_THICKNESS)).child(self.bulk(
+        dropdown_chrome::header(colors).child(div().pr(px(SCROLLBAR_THICKNESS)).child(self.bulk(
             "multi-select-all".into(),
             "multi-select-none".into(),
             self.rows.all(),
@@ -446,7 +449,7 @@ impl MultiSelect {
         colors: &ThemeColors,
         cx: &Context<Self>,
     ) -> impl IntoElement + use<> {
-        menu::fold(
+        dropdown_chrome::fold(
             ("multi-select-fold", head).into(),
             colors,
             self.rows.folds(head),
@@ -501,7 +504,7 @@ impl MultiSelect {
             .flex_col()
             .w_full()
             .pr(px(SCROLLBAR_THICKNESS))
-            .max_h(menu::whole_rows(window, MENU_MAX_HEIGHT))
+            .max_h(dropdown_chrome::whole_rows(window, MENU_MAX_HEIGHT))
             .overflow_y_scroll()
             .track_scroll(&self.scroll)
             .children(rows);
@@ -538,7 +541,7 @@ impl MultiSelect {
             .then(|| self.rows.group(index))
             .filter(|group| group.len() > 1);
         let heads_values = group.is_some();
-        menu::row(
+        dropdown_chrome::row(
             ("multi-select-option", index).into(),
             colors,
             option.checked,
@@ -554,10 +557,10 @@ impl MultiSelect {
         }))
         .children(grouped.then(|| match heads_values {
             true => self.fold_mark(index, colors, cx).into_any_element(),
-            false => menu::gutter().into_any_element(),
+            false => dropdown_chrome::gutter().into_any_element(),
         }))
-        .child(menu::check(colors, option.checked))
-        .child(menu::reading(label_width, option.label.clone()))
+        .child(dropdown_chrome::check(colors, option.checked))
+        .child(dropdown_chrome::reading(label_width, option.label.clone()))
         .children(group.map(|group| {
             self.bulk(
                 ("multi-select-group-all", index).into(),
