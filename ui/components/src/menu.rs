@@ -1,7 +1,7 @@
 //! A menu of labelled rows standing over the window at the point it was asked
 //! for, some of its rows opening a submenu beside them.
 
-use crate::dropdown_chrome::{self, MENU_ICON, ROW_INSET, SHEET_BORDER};
+use crate::dropdown_chrome::{self, MENU_ICON, ROW_INSET, SHEET_BORDER, SHEET_PADDING};
 use bviz_ui_theme::ThemeColors;
 use gpui::{
     AnyWindowHandle, App, Bounds, Context, Div, EventEmitter, FocusHandle, IntoElement, Keystroke,
@@ -9,9 +9,6 @@ use gpui::{
     Subscription, TextStyleRefinement, Window, div, point, prelude::*, px, size,
 };
 use std::rc::Rc;
-
-/// Room above the first row of a list and below its last.
-const LIST_PAD: Pixels = px(4.);
 
 /// Room between a row's label and the mark at the end of it.
 const LABEL_GAP: Pixels = px(16.);
@@ -296,7 +293,7 @@ impl Menu {
         which: Which,
         colors: &ThemeColors,
         cx: &Context<Self>,
-    ) -> Stateful<Div> {
+    ) -> Div {
         let (id, scroll, aimed) = match which {
             Which::Menu => ("menu-list", &self.list_scroll, self.aim.on_menu()),
             Which::Submenu => ("menu-submenu", &self.submenu_scroll, self.aim.in_submenu()),
@@ -305,8 +302,18 @@ impl Menu {
             .iter()
             .enumerate()
             .map(|(row, laid)| self.row(laid, row, aimed == Some(row), colors, cx));
+        // The list scrolls inside the sheet's inset, which stays in place
+        // around it.
         let list = div()
             .id(id)
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .track_scroll(scroll)
+            .children(laid);
+        let sheet = div()
             .absolute()
             .left(frame.left())
             .top(frame.top())
@@ -314,15 +321,11 @@ impl Menu {
             .h(frame.size.height)
             .flex()
             .flex_col()
-            .py(LIST_PAD)
-            .overflow_y_scroll()
-            .track_scroll(scroll)
-            .shadow_lg()
             // A press on a row is not also the press outside the menu that
             // closes it, which would take the row away before its release.
             .on_any_mouse_down(|_, _, cx| cx.stop_propagation())
-            .children(laid);
-        dropdown_chrome::surface(list, colors)
+            .child(list);
+        dropdown_chrome::surface(sheet, colors)
     }
 
     /// The `row`th row of a list.
@@ -514,9 +517,9 @@ fn list_width<'a>(
 /// `viewport`: as tall as its rows, and no taller than it can stand and still
 /// be reached whole, past which it scrolls and ends on a whole row.
 fn list_height(rows: usize, row: Pixels, viewport: Size<Pixels>) -> Pixels {
-    let frame = LIST_PAD * 2. + SHEET_BORDER * 2.;
-    let room = MAX_LIST_HEIGHT.min(viewport.height) - frame;
-    frame + (row * rows as f32).min(dropdown_chrome::whole_rows(row, room))
+    let inset = SHEET_PADDING * 2. + SHEET_BORDER * 2.;
+    let room = MAX_LIST_HEIGHT.min(viewport.height) - inset;
+    inset + (row * rows as f32).min(dropdown_chrome::whole_rows(row, room))
 }
 
 /// The face a menu's rows read in, set by the menu itself so they read in the
@@ -572,7 +575,7 @@ fn beside(
     extent: Size<Pixels>,
     viewport: Size<Pixels>,
 ) -> Bounds<Pixels> {
-    let top = frame.top() + SHEET_BORDER + LIST_PAD + row_height * row as f32 + scrolled;
+    let top = frame.top() + SHEET_BORDER + SHEET_PADDING + row_height * row as f32 + scrolled;
     opened(
         point(frame.right(), top),
         point(frame.left(), top + row_height),
@@ -720,11 +723,11 @@ mod tests {
     /// so its last row in view is shown entire rather than cut through.
     #[test]
     fn a_scrolling_list_ends_on_a_whole_row() {
-        let frame = LIST_PAD * 2. + SHEET_BORDER * 2.;
+        let inset = SHEET_PADDING * 2. + SHEET_BORDER * 2.;
         for row in [ROW, UNEVEN_ROW] {
             for viewport in [WINDOW, size(px(400.), px(160.))] {
                 let height = list_height(200, row, viewport);
-                let rows = f32::from(height - frame) / f32::from(row);
+                let rows = f32::from(height - inset) / f32::from(row);
                 assert_eq!(rows, rows.floor(), "{row:?} {viewport:?}");
                 assert!(height <= viewport.height, "{row:?} {viewport:?}");
             }
@@ -740,7 +743,7 @@ mod tests {
         assert_eq!(beside.left(), frame.right());
         assert_eq!(
             beside.top(),
-            frame.top() + SHEET_BORDER + LIST_PAD + ROW * 2.
+            frame.top() + SHEET_BORDER + SHEET_PADDING + ROW * 2.
         );
     }
 
@@ -760,7 +763,7 @@ mod tests {
         let frame = at(100.0, 400.0);
         let extent = size(px(120.), px(300.));
         let beside = beside(frame, 5, ROW, px(0.), extent, WINDOW);
-        let row = frame.top() + SHEET_BORDER + LIST_PAD + ROW * 5.;
+        let row = frame.top() + SHEET_BORDER + SHEET_PADDING + ROW * 5.;
         assert_eq!(beside.bottom(), row + ROW);
         assert!(beside.bottom() <= WINDOW.height);
     }

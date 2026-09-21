@@ -28,6 +28,10 @@ pub(crate) const ROW_INSET: Pixels = px(8.);
 /// The line drawn around a sheet.
 pub(crate) const SHEET_BORDER: Pixels = px(1.);
 
+/// Room a sheet leaves above its first row and below its last, so the fill of
+/// either stays clear of the sheet's rounded corners.
+pub(crate) const SHEET_PADDING: Pixels = px(4.);
+
 /// How tall a row stands under the window's inherited text style.
 pub(crate) fn row_height(window: &Window) -> Pixels {
     bviz_ui_assets::text_metrics(window).line_height + ROW_PADDING * 2.
@@ -147,6 +151,8 @@ pub(crate) fn surface<E: Styled>(element: E, colors: &ThemeColors) -> E {
         .border(SHEET_BORDER)
         .border_color(colors.border)
         .rounded_md()
+        .py(SHEET_PADDING)
+        .shadow_lg()
 }
 
 /// The row a menu's own actions stand on, above the values they act on and out
