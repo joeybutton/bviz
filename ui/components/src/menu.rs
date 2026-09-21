@@ -1,7 +1,7 @@
 //! A menu of labelled rows standing over the window at the point it was asked
 //! for, some of its rows opening a submenu beside them.
 
-use crate::dropdown_chrome::{self, MENU_ICON, ROW_INSET, SHEET_BORDER, SHEET_PADDING};
+use crate::menu_chrome::{self, MENU_ICON, ROW_INSET, SHEET_BORDER, SHEET_PADDING};
 use bviz_ui_theme::ThemeColors;
 use gpui::{
     AnyWindowHandle, App, Bounds, Context, Div, EventEmitter, FocusHandle, IntoElement, Keystroke,
@@ -325,7 +325,7 @@ impl Menu {
             // closes it, which would take the row away before its release.
             .on_any_mouse_down(|_, _, cx| cx.stop_propagation())
             .child(list);
-        dropdown_chrome::surface(sheet, colors)
+        menu_chrome::surface(sheet, colors)
     }
 
     /// The `row`th row of a list.
@@ -338,7 +338,7 @@ impl Menu {
         cx: &Context<Self>,
     ) -> Stateful<Div> {
         let aim = laid.aim;
-        dropdown_chrome::aimed_row(("menu-row", row).into(), colors, aimed)
+        menu_chrome::aimed_row(("menu-row", row).into(), colors, aimed)
             .justify_between()
             .flex_none()
             .gap(LABEL_GAP)
@@ -347,7 +347,7 @@ impl Menu {
             }))
             .on_click(cx.listener(move |this, _, window, cx| this.take(aim, window, cx)))
             .child(div().whitespace_nowrap().child(laid.label.clone()))
-            .child(dropdown_chrome::submenu_mark(colors, laid.opens_submenu))
+            .child(menu_chrome::submenu_mark(colors, laid.opens_submenu))
     }
 }
 
@@ -508,7 +508,7 @@ fn list_width<'a>(
     window: &mut Window,
 ) -> Pixels {
     let widest = in_face(window, |window| {
-        dropdown_chrome::widest(window, labels.into_iter().cloned())
+        menu_chrome::widest(window, labels.into_iter().cloned())
     });
     widest + ROW_INSET * 2. + LABEL_GAP + MENU_ICON + SHEET_BORDER * 2.
 }
@@ -519,7 +519,7 @@ fn list_width<'a>(
 fn list_height(rows: usize, row: Pixels, viewport: Size<Pixels>) -> Pixels {
     let inset = SHEET_PADDING * 2. + SHEET_BORDER * 2.;
     let room = MAX_LIST_HEIGHT.min(viewport.height) - inset;
-    inset + (row * rows as f32).min(dropdown_chrome::whole_rows(row, room))
+    inset + (row * rows as f32).min(menu_chrome::whole_rows(row, room))
 }
 
 /// The face a menu's rows read in, set by the menu itself so they read in the
@@ -588,7 +588,7 @@ impl Render for Menu {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = bviz_ui_theme::theme(window, cx).colors;
         let viewport = window.viewport_size();
-        let row_height = in_face(window, |window| dropdown_chrome::row_height(window));
+        let row_height = in_face(window, |window| menu_chrome::row_height(window));
         let extent = size(
             list_width(self.items.iter().map(|item| &item.label), window),
             list_height(self.items.len(), row_height, viewport),

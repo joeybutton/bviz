@@ -1,7 +1,7 @@
 //! A single-select dropdown: a trigger showing the chosen option and a menu that
 //! opens beneath it.
 
-use crate::dropdown_chrome;
+use crate::menu_chrome;
 use bviz_ui_theme::ThemeColors;
 use gpui::{
     ClickEvent, Context, ElementId, EventEmitter, FocusHandle, IntoElement, Pixels, Render,
@@ -83,7 +83,7 @@ impl Dropdown {
         cx: &Context<Self>,
     ) -> impl IntoElement {
         let label = self.options.get(self.selected).cloned().unwrap_or_default();
-        dropdown_chrome::trigger(self.id.clone(), colors)
+        menu_chrome::trigger(self.id.clone(), colors)
             .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                 this.open = !this.open;
                 // Hold focus while open so an outside click dismisses the menu.
@@ -92,13 +92,13 @@ impl Dropdown {
                 }
                 cx.notify();
             }))
-            .child(dropdown_chrome::reading(option_width, label))
-            .child(dropdown_chrome::caret(colors))
+            .child(menu_chrome::reading(option_width, label))
+            .child(menu_chrome::caret(colors))
     }
 
     fn menu(&self, colors: &ThemeColors, cx: &Context<Self>) -> impl IntoElement {
         let rows = self.options.iter().enumerate().map(|(index, option)| {
-            dropdown_chrome::row(
+            menu_chrome::row(
                 ("dropdown-option", index).into(),
                 colors,
                 index == self.selected,
@@ -107,7 +107,7 @@ impl Dropdown {
             .child(div().whitespace_nowrap().child(option.clone()))
         });
         // Defer the menu so it paints over the content below the trigger.
-        deferred(dropdown_chrome::sheet(colors).children(rows))
+        deferred(menu_chrome::sheet(colors).children(rows))
     }
 }
 
@@ -129,7 +129,7 @@ impl Render for Dropdown {
         }
 
         let colors = bviz_ui_theme::theme(window, cx).colors;
-        let option_width = dropdown_chrome::widest(window, self.options.iter().cloned());
+        let option_width = menu_chrome::widest(window, self.options.iter().cloned());
 
         div()
             .relative()

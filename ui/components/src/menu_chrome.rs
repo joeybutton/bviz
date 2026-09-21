@@ -1,5 +1,6 @@
-//! The chrome a control that opens a menu under a trigger is drawn from, so the
-//! controls built on it read alike wherever they sit.
+//! The chrome the component library's menus are drawn from — the dropdown and
+//! the multi-select opening under a trigger, and the context menu standing over
+//! the window at a point — so they read alike wherever they sit.
 
 use crate::{CONTROL_HEIGHT, laid_out_width};
 use bviz_ui_theme::{ThemeColors, over};
