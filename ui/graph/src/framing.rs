@@ -1,5 +1,6 @@
 use crate::camera::{
-    Camera, Rect, Settle, clamp_pan, ease_out_cubic, fit_view, fit_zoom, settle_view,
+    Camera, Rect, Settle, clamp_pan, drawn_rect, ease_out_cubic, fit_view, fit_zoom, frame_view,
+    settle_view, visible_rect,
 };
 use crate::{GraphPanel, MAX_ZOOM, SETTLE_DURATION, SETTLE_MIN_PAN_STEP, SETTLE_MIN_ZOOM_STEP};
 use gpui::{App, Bounds, Entity, Pixels, Window};
@@ -22,6 +23,9 @@ pub(crate) struct Framing {
     /// pan/zoom handlers can work in the same frame the canvas painted.
     viewport: Bounds<Pixels>,
     recenter: bool,
+    /// The rect the next prepaint moves the view onto outright, where a gesture
+    /// has named what to look at; `None` where none has.
+    frame: Option<Rect>,
     /// The settle ease in flight, stepped once per frame; `None` at rest.
     anim: Option<Settle>,
 }
@@ -38,6 +42,7 @@ impl Framing {
             fitted: false,
             viewport: Bounds::default(),
             recenter: false,
+            frame: None,
             anim: None,
         }
     }
@@ -70,6 +75,11 @@ impl Framing {
     /// Asks the next prepaint to settle the view onto the reframed content.
     pub(crate) fn request_recenter(&mut self) {
         self.recenter = true;
+    }
+
+    /// Asks the next prepaint to move the view onto `target`.
+    pub(crate) fn request_frame(&mut self, target: Rect) {
+        self.frame = Some(target);
     }
 
     /// Drops the established framing, so the next prepaint fits the content
@@ -142,6 +152,21 @@ impl Framing {
         (before.zoom, before.pan) != (self.camera.zoom, self.camera.pan)
     }
 
+    /// Answers a pending frame request by arming an ease onto what it named. The
+    /// zoom it lands at becomes the one settles come back to, since it is the
+    /// view a gesture asked for, and it drops a pending recenter, which would
+    /// otherwise pull the view off what was named onto whatever a relayout
+    /// emphasized.
+    fn arm_frame(&mut self, content: (f32, f32)) {
+        let Some(target) = self.frame.take() else {
+            return;
+        };
+        self.recenter = false;
+        let (zoom, pan) = frame_view(target, self.viewport.size, content);
+        self.chosen_zoom = zoom;
+        self.ease_to(zoom, pan);
+    }
+
     /// Answers a pending recenter request by arming an ease onto `target`; the
     /// request is consumed whether or not one is armed.
     fn arm_settle(&mut self, content: (f32, f32), target: Option<Rect>) {
@@ -187,6 +212,55 @@ impl Framing {
     }
 }
 
+/// The share of the view the drawing must cover for the camera to be worth
+/// holding. A filter change leaves the camera alone so that what survives stays
+/// under the same window; below this share nothing is left under the window to
+/// hold still, and holding it would spend the whole view on empty canvas.
+const READABLE_SHARE: f32 = 0.01;
+
+/// Whether what `view` draws covers so little of its window that the camera has
+/// nothing left to hold onto.
+pub(crate) fn drawing_escapes_the_view(view: &GraphPanel) -> bool {
+    let Some(drawn) = view.drawn() else {
+        return false;
+    };
+    let camera = view.framing.camera();
+    escapes(
+        visible_rect(view.framing.viewport(), camera),
+        &drawn.view(camera.zoom).boxes,
+    )
+}
+
+/// [`drawing_escapes_the_view`] over the layout-space `window` and the `boxes`
+/// drawn in it.
+///
+/// Each box is measured whole, boxes nested in one another included, so the
+/// share is an upper bound on what the drawing actually covers and the answer
+/// errs toward leaving the camera where it stands. A window of no extent is one
+/// no prepaint has sized yet, which the first fit answers for.
+fn escapes(window: Rect, boxes: &[bviz_graph_layout::Box]) -> bool {
+    let area = window.w * window.h;
+    if area <= 0.0 {
+        return false;
+    }
+    let covered: f64 = boxes.iter().map(|b| window.overlap(&Rect::of(b))).sum();
+    covered / area < READABLE_SHARE as f64
+}
+
+/// Moves the view onto what the panel draws. Framing is a camera move, so every
+/// box stays where the layout put it; it is what a gesture narrowing the drawing
+/// to a named part of the graph asks for, since what survives such a gesture is
+/// left wherever the document places it.
+pub(crate) fn frame_drawing(view: &mut GraphPanel) {
+    let Some(drawn) = view.drawn() else {
+        return;
+    };
+    let Some(target) = drawn_rect(drawn.view(view.framing.camera().zoom)) else {
+        return;
+    };
+    view.framing.request_frame(target);
+}
+
 /// Steers the view's framing from the bounds the canvas was laid out at. Runs at
 /// canvas prepaint because the fit needs the viewport size, known only once laid
 /// out.
@@ -198,6 +272,7 @@ pub(crate) fn build_prepaint(
     move |bounds: Bounds<Pixels>, window: &mut Window, cx: &mut App| {
         let redraw = parent.update(cx, |view, _| {
             let moved = view.framing.fit_or_rescale(bounds, content);
+            view.framing.arm_frame(content);
             view.framing.arm_settle(content, recenter_target);
             // A moved camera leaves the frame that was rendered from the old one
             // (its status line, its legend) describing a view that is no longer
@@ -235,6 +310,7 @@ mod tests {
             viewport: bounds,
             fitted: true,
             recenter: false,
+            frame: None,
             anim: None,
         }
     }
@@ -253,6 +329,53 @@ mod tests {
             to_pan: pan,
             start,
         }
+    }
+
+    fn lbox(x: f64, y: f64, w: f64, h: f64) -> bviz_graph_layout::Box {
+        bviz_graph_layout::Box {
+            id: bviz_graph_layout::Id(0),
+            label: String::new(),
+            kind: bviz_graph_layout::Kind::Source,
+            x,
+            y,
+            width: w,
+            height: h,
+            compound: false,
+            group: false,
+        }
+    }
+
+    /// The window a view fitted to the whole graph shows, in layout units.
+    const WINDOW: Rect = Rect {
+        x: 0.0,
+        y: 0.0,
+        w: CONTENT.0 as f64,
+        h: CONTENT.1 as f64,
+    };
+
+    /// A filter leaving boxes that fill the window leaves the camera where the
+    /// reader put it; one leaving a speck in a window the whole graph's extent
+    /// still spans leaves nothing to hold still.
+    #[test]
+    fn a_drawing_escapes_the_view_only_once_it_covers_next_to_none_of_it() {
+        assert!(!escapes(WINDOW, &[lbox(0.0, 0.0, 2000.0, 1500.0)]));
+        assert!(escapes(WINDOW, &[lbox(1000.0, 1000.0, 40.0, 30.0)]));
+        assert!(escapes(WINDOW, &[]));
+        // A box off the window covers none of it however large it is.
+        assert!(escapes(WINDOW, &[lbox(90_000.0, 0.0, 4000.0, 3000.0)]));
+    }
+
+    /// A window no prepaint has sized is one the first fit answers for, so it
+    /// asks for no move of its own.
+    #[test]
+    fn a_window_of_no_extent_moves_nothing() {
+        let unsized_yet = Rect {
+            x: 0.0,
+            y: 0.0,
+            w: 0.0,
+            h: 0.0,
+        };
+        assert!(!escapes(unsized_yet, &[]));
     }
 
     #[test]
@@ -368,6 +491,61 @@ mod tests {
         // Arming alone leaves the camera put; the ease moves it.
         assert_eq!((f.camera.zoom, f.camera.pan), (1.0, (0.0, 0.0)));
         assert!(!f.recenter);
+    }
+
+    /// The rect a frame request names, far off the fitted view and small enough
+    /// that framing it has to zoom well in.
+    const NAMED: Rect = Rect {
+        x: 3000.0,
+        y: 2400.0,
+        w: 120.0,
+        h: 90.0,
+    };
+
+    #[test]
+    fn a_frame_request_eases_onto_what_it_named_and_leaves_settles_coming_back_there() {
+        let mut f = framed(1.0, (0.0, 0.0), canvas_bounds(800., 600.));
+        f.request_frame(NAMED);
+        f.arm_frame(CONTENT);
+
+        let a = f.anim.expect("the frame request armed no ease");
+        assert_eq!(
+            (a.to_zoom, a.to_pan),
+            frame_view(NAMED, vp(800., 600.), CONTENT)
+        );
+        assert_eq!(
+            f.chosen_zoom, a.to_zoom,
+            "a settle would pull the view off what was named"
+        );
+        assert!(f.frame.is_none());
+    }
+
+    /// A filter change that names what to look at also lands a layered drawing,
+    /// whose settle would otherwise carry the view onto whatever that relayout
+    /// emphasized.
+    #[test]
+    fn a_frame_request_supersedes_a_recenter_pending_with_it() {
+        let mut f = framed(1.0, (0.0, 0.0), canvas_bounds(800., 600.));
+        f.request_recenter();
+        f.request_frame(NAMED);
+
+        f.arm_frame(CONTENT);
+        let framed_at = f.anim.expect("the frame request armed no ease");
+        f.arm_settle(
+            CONTENT,
+            Some(Rect {
+                x: 0.0,
+                y: 0.0,
+                w: 50.0,
+                h: 40.0,
+            }),
+        );
+
+        let still = f.anim.expect("the settle dropped the frame's ease");
+        assert_eq!(
+            (still.to_zoom, still.to_pan),
+            (framed_at.to_zoom, framed_at.to_pan)
+        );
     }
 
     #[test]

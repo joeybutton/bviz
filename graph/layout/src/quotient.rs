@@ -159,7 +159,7 @@ fn emit_nodes(
                 out.nodes.push(Node {
                     id: gid,
                     label: group_label(node.kind, part.group_sizes[&gid]),
-                    kind: Kind::Group,
+                    kind: Kind::MergeGroup,
                     group: true,
                     parent: node.parent,
                 });
@@ -294,7 +294,7 @@ mod tests {
     ) {
         let parent = parent.map(|p| names.intern(p));
         let id = names.intern(id);
-        graph.add_node(id, label, kind, parent);
+        graph.add_node(Node::new(id, label, kind, parent));
     }
 
     fn edge(graph: &mut Graph, names: &mut Names, from: &str, to: &str, kind: EdgeKind) {
@@ -705,7 +705,7 @@ mod tests {
 
         // The group is a container; the collapsed leaf is gone.
         let group = find(&out, &names, "group:source1");
-        assert_eq!(group.kind, Kind::Group);
+        assert_eq!(group.kind, Kind::MergeGroup);
         assert_eq!(group.label, "3 sources");
         assert_eq!(group.parent, None);
         // Each member survives with its own id, reparented to the group.
@@ -775,7 +775,7 @@ mod tests {
         let out = quotient(&graph, &set, &mut names).0;
 
         // First group is a container with its members.
-        assert_eq!(find(&out, &names, "group:source1").kind, Kind::Group);
+        assert_eq!(find(&out, &names, "group:source1").kind, Kind::MergeGroup);
         assert_eq!(
             find(&out, &names, "source1")
                 .parent

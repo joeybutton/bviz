@@ -8,8 +8,7 @@
 use crate::intern::Id;
 
 /// A coarse node category, used to pick a fill when rendering and to decide
-/// which leaves may merge. `Group` is a Bazel `package_group`/`environment_group`
-/// target and also the kind of the container an expanded merge-group renders as.
+/// which leaves may merge.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Kind {
     Package,
@@ -18,7 +17,19 @@ pub enum Kind {
     Action,
     Artifact,
     Source,
-    Group,
+    /// A Bazel `package_group` or `environment_group` target.
+    TargetGroup,
+    /// The container an expanded merge group renders as.
+    MergeGroup,
+}
+
+impl Kind {
+    /// Whether a node of this kind stands for nothing beyond the nodes it
+    /// holds, so that it is a frame around a part of the build rather than a
+    /// part of the build itself.
+    pub(crate) fn is_frame(self) -> bool {
+        matches!(self, Kind::Package | Kind::MergeGroup)
+    }
 }
 
 /// A box in the graph. A node is a container if any other node names it as
@@ -36,14 +47,31 @@ pub struct Node {
     pub parent: Option<Id>,
 }
 
+impl Node {
+    /// A node no other graph holds, and so no merge group.
+    pub fn new(id: Id, label: impl Into<String>, kind: Kind, parent: Option<Id>) -> Self {
+        Node {
+            id,
+            label: label.into(),
+            kind,
+            group: false,
+            parent,
+        }
+    }
+}
+
 /// Which Bazel query an edge came from, so the renderer can style the static
 /// (query), configured (cquery), and execution-phase (aquery) dependencies
-/// distinctly when several are drawn in one joint graph.
+/// distinctly when several are drawn in one joint graph. `Transitive` marks an
+/// edge the `filter` pass synthesizes to stand in for a path the original graph
+/// only had through a node the filter dropped, so it carries no single query's
+/// provenance.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum EdgeKind {
     Query,
     Cquery,
     Aquery,
+    Transitive,
 }
 
 impl EdgeKind {
@@ -53,6 +81,7 @@ impl EdgeKind {
             EdgeKind::Query => "query",
             EdgeKind::Cquery => "cquery",
             EdgeKind::Aquery => "aquery",
+            EdgeKind::Transitive => "transitive",
         }
     }
 }
@@ -77,14 +106,8 @@ impl Graph {
         Self::default()
     }
 
-    pub fn add_node(&mut self, id: Id, label: impl Into<String>, kind: Kind, parent: Option<Id>) {
-        self.nodes.push(Node {
-            id,
-            label: label.into(),
-            kind,
-            group: false,
-            parent,
-        });
+    pub fn add_node(&mut self, node: Node) {
+        self.nodes.push(node);
     }
 
     pub fn add_edge(&mut self, from: Id, to: Id, kind: EdgeKind) {
@@ -92,10 +115,22 @@ impl Graph {
     }
 }
 
-/// A graph's containment forest, indexed by node id: every id up to the largest
-/// the graph mentions carries a parent and a depth, an id the graph never names
-/// standing as a root. Containment must be acyclic, since every query walks
-/// towards the roots.
+/// One past the largest id `graph` mentions anywhere — as a node, a parent, or
+/// an edge endpoint — and so the length an array indexed by id must have for
+/// every id the graph can hand it to be in range.
+pub fn id_span(graph: &Graph) -> usize {
+    let mentioned = graph
+        .nodes
+        .iter()
+        .flat_map(|n| [Some(n.id), n.parent])
+        .flatten()
+        .chain(graph.edges.iter().flat_map(|e| [e.from, e.to]));
+    mentioned.map(|id| id.0 as usize + 1).max().unwrap_or(0)
+}
+
+/// A graph's containment forest, indexed by node id: every id in its id space
+/// carries a parent and a depth, an id the graph never names standing as a root.
+/// Containment must be acyclic, since every query walks towards the roots.
 pub struct Containment {
     parent: Vec<Option<Id>>,
     depth: Vec<u32>,
@@ -103,12 +138,7 @@ pub struct Containment {
 
 impl Containment {
     pub fn new(graph: &Graph) -> Self {
-        let mentioned = graph
-            .nodes
-            .iter()
-            .flat_map(|n| [Some(n.id), n.parent])
-            .flatten();
-        let len = mentioned.map(|id| id.0 as usize + 1).max().unwrap_or(0);
+        let len = id_span(graph);
         let mut parent: Vec<Option<Id>> = vec![None; len];
         for node in &graph.nodes {
             parent[node.id.0 as usize] = node.parent;
@@ -191,7 +221,7 @@ mod tests {
         let mut graph = Graph::new();
         let parents = [None, Some(0), Some(0), Some(1), None, Some(4), Some(9)];
         for (id, parent) in parents.into_iter().enumerate() {
-            graph.add_node(Id(id as u32), "n", Kind::Target, parent.map(Id));
+            graph.add_node(Node::new(Id(id as u32), "n", Kind::Target, parent.map(Id)));
         }
         graph
     }

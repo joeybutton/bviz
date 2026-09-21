@@ -11,7 +11,7 @@ use std::cell::RefCell;
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashMap, HashSet};
 
-use crate::graph::{EdgeKind, Graph};
+use crate::graph::{EdgeKind, Graph, id_span};
 use crate::intern::Id;
 
 /// The ids of nodes that are containers (named as some node's `parent`).
@@ -46,9 +46,9 @@ fn child_counts(graph: &Graph) -> HashMap<Id, usize> {
 /// chains always reveal their descendants. Every node folds to its
 /// "representative": the shallowest node on its root->node path that is neither
 /// in `expanded` nor a singleton (or the node itself when its whole ancestor
-/// chain is effectively expanded). Each distinct representative becomes one node
-/// (keeping that node's label/kind/parent), so a collapsed container renders as
-/// a leaf. Edges are remapped to their endpoints' representatives, self-loops
+/// chain is effectively expanded). Each distinct representative is emitted as
+/// the node it is, so a collapsed container renders as a leaf. Edges are
+/// remapped to their endpoints' representatives, self-loops
 /// (both endpoints in the same collapsed subtree) dropped, and duplicates merged
 /// keeping their `EdgeKind`.
 pub fn collapse(graph: &Graph, expanded: &HashSet<Id>) -> Graph {
@@ -58,14 +58,15 @@ pub fn collapse(graph: &Graph, expanded: &HashSet<Id>) -> Graph {
     let mut out = Graph::new();
     for node in &graph.nodes {
         if rep[node.id.0 as usize] == node.id.0 {
-            out.add_node(node.id, node.label.clone(), node.kind, node.parent);
+            out.add_node(node.clone());
         }
     }
 
-    let mut seen: HashSet<(u32, u32, EdgeKind)> = HashSet::new();
+    let mut seen: HashSet<(u32, u32, EdgeKind)> = HashSet::with_capacity(indexed.edges.len());
     for &(from, to, kind) in &indexed.edges {
-        let (from, to) = (rep[from as usize], rep[to as usize]);
-        if from != to && seen.insert((from, to, kind)) {
+        if let Some((from, to)) = IndexedGraph::folded(&rep, from, to)
+            && seen.insert((from, to, kind))
+        {
             out.add_edge(Id(from), Id(to), kind);
         }
     }
@@ -80,8 +81,7 @@ pub fn collapse_edges(graph: &Graph, expanded: &HashSet<Id>) -> HashSet<(Id, Id)
 
     let mut pairs: HashSet<(Id, Id)> = HashSet::with_capacity(indexed.edges.len());
     for &(from, to, _) in &indexed.edges {
-        let (from, to) = (rep[from as usize], rep[to as usize]);
-        if from != to {
+        if let Some((from, to)) = IndexedGraph::folded(&rep, from, to) {
             pairs.insert((Id(from), Id(to)));
         }
     }
@@ -103,12 +103,79 @@ pub const DEFAULT_MAX_NODES: usize = 2000;
 /// how wide the drawing lands.
 pub const DEFAULT_MAX_EDGES: usize = 20000;
 
+/// The view with every container collapsed, which is the smallest a fold
+/// reaches, measured where it is itself past the caps. No expansion of such a
+/// graph fits, so these counts are the least a caller can be given.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Overflow {
+    pub nodes: usize,
+    pub edges: usize,
+}
+
 /// A startup expansion set: the containers to expand for the largest collapsed
-/// view that fits both `max_nodes` and `max_edges`.
-pub fn default_expansion(graph: &Graph, max_nodes: usize, max_edges: usize) -> HashSet<Id> {
-    let order = expansion_order(&Forest::new(graph));
-    let fitting = largest_fitting_prefix(&IndexedGraph::new(graph), &order, max_nodes, max_edges);
-    order[..fitting].iter().copied().collect()
+/// view that fits both `max_nodes` and `max_edges`, or the [`Overflow`] of a
+/// graph no expansion of which fits.
+///
+/// `reduced` is `graph` with its transitively-redundant edges removed where the
+/// view being sized draws the reduction, and `None` where it draws every edge.
+/// A view keeps an edge by the pair of boxes it runs between, so the reduction
+/// decides which pairs a candidate is measured over while the count itself is of
+/// `graph`'s own edges across those pairs — a cap is only worth anything if it
+/// counts what the layout engine is handed. Its nodes must be `graph`'s, which a
+/// transitive reduction leaves untouched.
+pub fn default_expansion(
+    graph: &Graph,
+    reduced: Option<&Graph>,
+    max_nodes: usize,
+    max_edges: usize,
+) -> Result<HashSet<Id>, Overflow> {
+    largest_fitting(
+        graph,
+        reduced,
+        expansion_order(&Forest::new(graph)),
+        max_nodes,
+        max_edges,
+    )
+}
+
+/// As much of `expanded` as `graph` can draw within `max_nodes` and
+/// `max_edges`, the containers revealing most giving way first; the
+/// [`Overflow`] of a graph no expansion of which fits, as for
+/// [`default_expansion`], whose `reduced` this shares.
+///
+/// This holds an expansion a reader built up to a graph that has since changed
+/// under it — the same graph filtered, say — so what it keeps is a part of what
+/// it was given and never a container the reader did not open. An id naming no
+/// container of `graph` is kept untouched: a group id the quotient pass mints
+/// names no node of the graph laid out from, so nothing here can size it.
+pub fn fitting_expansion(
+    graph: &Graph,
+    reduced: Option<&Graph>,
+    expanded: &HashSet<Id>,
+    max_nodes: usize,
+    max_edges: usize,
+) -> Result<HashSet<Id>, Overflow> {
+    let order: Vec<Id> = expansion_order(&Forest::new(graph))
+        .into_iter()
+        .filter(|id| expanded.contains(id))
+        .collect();
+    let sized: HashSet<Id> = order.iter().copied().collect();
+    let mut kept = largest_fitting(graph, reduced, order, max_nodes, max_edges)?;
+    kept.extend(expanded.iter().copied().filter(|id| !sized.contains(id)));
+    Ok(kept)
+}
+
+/// The longest prefix of `order` that fits both caps, as a set.
+fn largest_fitting(
+    graph: &Graph,
+    reduced: Option<&Graph>,
+    order: Vec<Id>,
+    max_nodes: usize,
+    max_edges: usize,
+) -> Result<HashSet<Id>, Overflow> {
+    let drawn = IndexedGraph::drawing(graph, reduced);
+    let fitting = largest_fitting_prefix(&drawn, &order, max_nodes, max_edges)?;
+    Ok(order[..fitting].iter().copied().collect())
 }
 
 /// A graph's containment forest indexed by children, answering how much of the
@@ -212,54 +279,77 @@ fn expansion_order(forest: &Forest) -> Vec<Id> {
 /// The length of the longest prefix of `order` whose expansion collapses to a
 /// view fitting both caps. Both counts rise monotonically with the prefix
 /// length — more expansion only reveals nodes and de-aggregates edges — so the
-/// answer is a binary search.
+/// empty prefix decides whether any prefix fits at all, and the rest is a binary
+/// search.
 fn largest_fitting_prefix(
     indexed: &IndexedGraph,
     order: &[Id],
     max_nodes: usize,
     max_edges: usize,
-) -> usize {
+) -> Result<usize, Overflow> {
     let order_idx: Vec<u32> = order.iter().map(|id| id.0).collect();
-    let fits = |k: usize| {
-        let (nodes, edges) = indexed.counts(&order_idx[..k]);
-        nodes <= max_nodes && edges <= max_edges
-    };
+    let fits = |(nodes, edges): (usize, usize)| nodes <= max_nodes && edges <= max_edges;
+
+    let (nodes, edges) = indexed.counts(&[]);
+    if !fits((nodes, edges)) {
+        return Err(Overflow { nodes, edges });
+    }
+
     let (mut lo, mut hi) = (0usize, order.len());
     while lo < hi {
         let mid = lo + (hi - lo).div_ceil(2);
-        if fits(mid) {
+        if fits(indexed.counts(&order_idx[..mid])) {
             lo = mid;
         } else {
             hi = mid - 1;
         }
     }
-    lo
+    Ok(lo)
 }
 
-/// An integer-indexed copy of a graph's containment forest and edges, so a
-/// collapsed view can be computed (by [`collapse`]) or merely sized (by
-/// [`Self::counts`], for the startup search) without re-walking string ids.
-/// A base graph's ids are a dense permutation of `0..nodes.len()` and every edge
-/// endpoint is one of those nodes, so each array is sized to the node count and
-/// indexed directly by `Id` (which is *not* the node's position in `nodes`).
+/// Stands in a representative table for an id the graph holds no node of. Such
+/// an id folds to nothing, so nothing is drawn for it and no edge is drawn to
+/// it.
+const ABSENT: u32 = u32::MAX;
+
+/// An integer-indexed copy of a graph's containment forest and of the edges a
+/// view of it draws, so a collapsed view can be computed (by [`collapse`]) or
+/// merely sized (by [`Self::counts`], for the startup search) without re-walking
+/// string ids.
 struct IndexedGraph {
-    /// Containment parent of each id, or `None` for a root.
+    /// Containment parent of each id, or `None` for a root, an id the graph
+    /// holds no node of, and a node whose parent is such an id.
     parent: Vec<Option<u32>>,
     /// Whether each id is a singleton container, which always auto-expands.
     singleton: Vec<bool>,
+    /// Whether each id names a node of the graph.
+    present: Vec<bool>,
     edges: Vec<(u32, u32, EdgeKind)>,
-    node_count: usize,
+    /// The edges deciding which box pairs a view keeps, absent where it keeps
+    /// every pair.
+    skeleton: Option<Vec<(u32, u32)>>,
 }
 
 impl IndexedGraph {
     fn new(graph: &Graph) -> Self {
+        Self::drawing(graph, None)
+    }
+
+    /// `graph`'s containment forest over its own edges, of which a view keeps
+    /// those folding onto a pair `skeleton` also folds onto — every id
+    /// `skeleton` names must be one `graph` names.
+    fn drawing(graph: &Graph, skeleton: Option<&Graph>) -> Self {
         let child_counts = child_counts(graph);
-        let node_count = graph.nodes.len();
-        let mut parent: Vec<Option<u32>> = vec![None; node_count];
-        let mut singleton: Vec<bool> = vec![false; node_count];
+        let span = id_span(graph);
+        let mut present: Vec<bool> = vec![false; span];
+        for node in &graph.nodes {
+            present[node.id.0 as usize] = true;
+        }
+        let mut parent: Vec<Option<u32>> = vec![None; span];
+        let mut singleton: Vec<bool> = vec![false; span];
         for node in &graph.nodes {
             let i = node.id.0 as usize;
-            parent[i] = node.parent.map(|p| p.0);
+            parent[i] = node.parent.map(|p| p.0).filter(|&p| present[p as usize]);
             singleton[i] = child_counts.get(&node.id) == Some(&1);
         }
         let edges = graph
@@ -267,11 +357,19 @@ impl IndexedGraph {
             .iter()
             .map(|e| (e.from.0, e.to.0, e.kind))
             .collect();
+        let skeleton = skeleton.map(|skeleton| {
+            skeleton
+                .edges
+                .iter()
+                .map(|e| (e.from.0, e.to.0))
+                .collect::<Vec<(u32, u32)>>()
+        });
         Self {
             parent,
             singleton,
+            present,
             edges,
-            node_count,
+            skeleton,
         }
     }
 
@@ -280,15 +378,15 @@ impl IndexedGraph {
         expanded
             .iter()
             .map(|id| id.0)
-            .filter(|&i| (i as usize) < self.parent.len())
+            .filter(|&i| self.present.get(i as usize) == Some(&true))
             .collect()
     }
 
     /// The representative each index folds to under `expanded`: the shallowest
     /// node on its root->node chain that is neither expanded nor a singleton
     /// (both always reveal their children), or the node itself when its whole
-    /// chain is. A node is its own representative exactly when [`collapse`]
-    /// emits it.
+    /// chain is, or [`ABSENT`] where the graph holds no node of that id. A node
+    /// is its own representative exactly when [`collapse`] emits it.
     fn reps(&self, expanded: &[u32]) -> Vec<u32> {
         let mut eff = self.singleton.clone();
         for &i in expanded {
@@ -296,6 +394,9 @@ impl IndexedGraph {
         }
         (0..self.parent.len() as u32)
             .map(|i| {
+                if !self.present[i as usize] {
+                    return ABSENT;
+                }
                 let mut best = if eff[i as usize] { None } else { Some(i) };
                 let mut cur = i;
                 while let Some(p) = self.parent[cur as usize] {
@@ -309,28 +410,54 @@ impl IndexedGraph {
             .collect()
     }
 
+    /// The pair of representatives an edge folds to, or `None` where either end
+    /// folds to nothing or the two fold together into one box.
+    fn folded(rep: &[u32], from: u32, to: u32) -> Option<(u32, u32)> {
+        let (from, to) = (rep[from as usize], rep[to as usize]);
+        (from != to && from != ABSENT && to != ABSENT).then_some((from, to))
+    }
+
     /// The (node, edge) counts of the view collapsing every container outside
     /// `expanded` (given as indices), without materializing it: representatives
     /// that are graph nodes, and edges remapped to representatives, self-loops
-    /// dropped, deduped by `(from, to, kind)`.
+    /// dropped, those over a pair the view leaves out dropped, and the rest
+    /// deduped by `(from, to, kind)`.
     fn counts(&self, expanded: &[u32]) -> (usize, usize) {
         let rep = self.reps(expanded);
-        let nodes = (0..self.node_count).filter(|&i| rep[i] == i as u32).count();
-        let mut seen: HashSet<(u32, u32, EdgeKind)> = HashSet::new();
+        let nodes = rep
+            .iter()
+            .enumerate()
+            .filter(|&(i, &r)| r == i as u32)
+            .count();
+        let kept = self.kept_pairs(&rep);
+        let mut seen: HashSet<(u32, u32, EdgeKind)> = HashSet::with_capacity(self.edges.len());
         for &(from, to, kind) in &self.edges {
-            let (from, to) = (rep[from as usize], rep[to as usize]);
-            if from != to {
-                seen.insert((from, to, kind));
+            if let Some(pair) = Self::folded(&rep, from, to)
+                && kept.as_ref().is_none_or(|kept| kept.contains(&pair))
+            {
+                seen.insert((pair.0, pair.1, kind));
             }
         }
         (nodes, seen.len())
+    }
+
+    /// The box pairs a view over `rep` keeps, or `None` where it keeps every
+    /// pair its edges fold onto.
+    fn kept_pairs(&self, rep: &[u32]) -> Option<HashSet<(u32, u32)>> {
+        let skeleton = self.skeleton.as_ref()?;
+        Some(
+            skeleton
+                .iter()
+                .filter_map(|&(from, to)| Self::folded(rep, from, to))
+                .collect(),
+        )
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::graph::Kind;
+    use crate::graph::{Kind, Node};
     use crate::intern::Names;
     use crate::test_support::{edges, find};
 
@@ -349,17 +476,32 @@ mod tests {
         graph.nodes.iter().map(|n| names.resolve(n.id)).collect()
     }
 
+    /// Interns `name` after burning `spacing - 1` ids on nothing, so a fixture
+    /// built with `spacing > 1` leaves holes in its id space.
+    fn spaced(names: &mut Names, spacing: usize, name: &str) -> Id {
+        for i in 1..spacing {
+            names.intern(&format!("{name}/hole{i}"));
+        }
+        names.intern(name)
+    }
+
     /// Two roots A and B, each a multi-child container holding `x`/`y`
     /// grandchild leaves, so each is a fold boundary.
     fn two_towers() -> (Graph, Names) {
+        two_towers_spaced(1)
+    }
+
+    /// [`two_towers`] over an id space `spacing` times as wide, so its nodes
+    /// carry the ids they would after a restriction dropped the rest.
+    fn two_towers_spaced(spacing: usize) -> (Graph, Names) {
         let mut g = Graph::new();
         let mut names = Names::default();
         for root in ["A", "B"] {
-            let root_id = names.intern(root);
-            g.add_node(root_id, root, Kind::Package, None);
+            let root_id = spaced(&mut names, spacing, root);
+            g.add_node(Node::new(root_id, root, Kind::Package, None));
             for kid in ["x", "y"] {
-                let child = names.intern(&format!("{root}.{kid}"));
-                g.add_node(child, "leaf", Kind::Action, Some(root_id));
+                let child = spaced(&mut names, spacing, &format!("{root}.{kid}"));
+                g.add_node(Node::new(child, "leaf", Kind::Action, Some(root_id)));
             }
         }
         (g, names)
@@ -374,10 +516,10 @@ mod tests {
         let b = names.intern("b");
         let c = names.intern("c");
         let leaf = names.intern("leaf");
-        g.add_node(a, "A", Kind::Package, None);
-        g.add_node(b, "b", Kind::Target, Some(a));
-        g.add_node(c, "c", Kind::Target, Some(b));
-        g.add_node(leaf, "leaf", Kind::Action, Some(c));
+        g.add_node(Node::new(a, "A", Kind::Package, None));
+        g.add_node(Node::new(b, "b", Kind::Target, Some(a)));
+        g.add_node(Node::new(c, "c", Kind::Target, Some(b)));
+        g.add_node(Node::new(leaf, "leaf", Kind::Action, Some(c)));
         (g, names)
     }
 
@@ -393,7 +535,7 @@ mod tests {
         // Make `b` a two-child container; its other child is a leaf.
         let b = names.get("b").unwrap();
         let extra = names.intern("b.extra");
-        g.add_node(extra, "leaf", Kind::Action, Some(b));
+        g.add_node(Node::new(extra, "leaf", Kind::Action, Some(b)));
 
         // The singleton-only ancestors (A) and leaves never qualify; `b` does.
         assert_eq!(expandable_containers(&g), expanded(&names, &["b"]));
@@ -436,9 +578,9 @@ mod tests {
         let r = names.intern("R");
         let x = names.intern("x");
         let y = names.intern("y");
-        g.add_node(r, "R", Kind::Package, None);
-        g.add_node(x, "leaf", Kind::Action, Some(r));
-        g.add_node(y, "leaf", Kind::Action, Some(r));
+        g.add_node(Node::new(r, "R", Kind::Package, None));
+        g.add_node(Node::new(x, "leaf", Kind::Action, Some(r)));
+        g.add_node(Node::new(y, "leaf", Kind::Action, Some(r)));
 
         // R is multi-child, so it is the only expand handle and a fold boundary.
         assert_eq!(expandable_containers(&g), expanded(&names, &["R"]));
@@ -451,15 +593,15 @@ mod tests {
         let mut g = Graph::new();
         let mut names = Names::default();
         let r = names.intern("R");
-        g.add_node(r, "R", Kind::Package, None);
+        g.add_node(Node::new(r, "R", Kind::Package, None));
         // Each of R's two children is the head of a singleton chain to a leaf.
         for c in ["p", "q"] {
             let c_id = names.intern(c);
-            g.add_node(c_id, c, Kind::Target, Some(r));
+            g.add_node(Node::new(c_id, c, Kind::Target, Some(r)));
             let mid = names.intern(&format!("{c}.mid"));
             let leaf = names.intern(&format!("{c}.leaf"));
-            g.add_node(mid, "mid", Kind::Target, Some(c_id));
-            g.add_node(leaf, "leaf", Kind::Action, Some(mid));
+            g.add_node(Node::new(mid, "mid", Kind::Target, Some(c_id)));
+            g.add_node(Node::new(leaf, "leaf", Kind::Action, Some(mid)));
         }
 
         // R is the sole expand handle; its singleton descendants are transparent.
@@ -484,14 +626,14 @@ mod tests {
         let mut g = Graph::new();
         let mut names = Names::default();
         let r = names.intern("R");
-        g.add_node(r, "R", Kind::Package, None);
+        g.add_node(Node::new(r, "R", Kind::Package, None));
         for c in ["c1", "c2"] {
             let c_id = names.intern(c);
-            g.add_node(c_id, c, Kind::Target, Some(r));
+            g.add_node(Node::new(c_id, c, Kind::Target, Some(r)));
             // Two leaves keep each child a multi-child fold boundary.
             for leaf in ["a", "b"] {
                 let id = names.intern(&format!("{c}.{leaf}"));
-                g.add_node(id, "leaf", Kind::Action, Some(c_id));
+                g.add_node(Node::new(id, "leaf", Kind::Action, Some(c_id)));
             }
         }
         // Internal to c1 (self-loop once folded), and cross-child c1 -> c2.
@@ -553,13 +695,13 @@ mod tests {
         );
 
         // Caps that only the root view (2 nodes, 1 edge) fits: no root expands.
-        let tiny = default_expansion(&g, 2, 1);
+        let tiny = default_expansion(&g, None, 2, 1).expect("the root view fits these caps");
         assert!(tiny.is_empty());
         let v = collapse(&g, &tiny);
         assert!(v.nodes.len() <= 2 && v.edges.len() <= 1);
 
         // Generous caps expand every multi-child container: the full graph shows.
-        let all = default_expansion(&g, 100, 100);
+        let all = default_expansion(&g, None, 100, 100).expect("the whole graph fits these caps");
         let v = collapse(&g, &all);
         assert_eq!(v.nodes.len(), g.nodes.len());
         assert!(v.nodes.len() <= 100 && v.edges.len() <= 100);
@@ -578,10 +720,187 @@ mod tests {
         );
 
         for (max_nodes, max_edges) in [(2, 1), (4, 1), (4, 2), (6, 2), (100, 100)] {
-            let view = collapse(&g, &default_expansion(&g, max_nodes, max_edges));
+            let expansion = default_expansion(&g, None, max_nodes, max_edges)
+                .unwrap_or_else(|over| panic!("{max_nodes}/{max_edges} fits nothing: {over:?}"));
+            let view = collapse(&g, &expansion);
             assert!(view.nodes.len() <= max_nodes);
             assert!(view.edges.len() <= max_edges);
         }
+    }
+
+    /// The search settles the empty prefix before searching the rest, so a graph
+    /// already past a cap with every container collapsed is reported as such
+    /// rather than answered with a prefix that fits no better.
+    #[test]
+    fn a_root_view_past_a_cap_overflows_instead_of_reporting_a_prefix() {
+        let (mut g, names) = two_towers();
+        g.add_edge(
+            names.get("A.x").unwrap(),
+            names.get("B.y").unwrap(),
+            EdgeKind::Aquery,
+        );
+
+        // Each tower folds to its root and the one edge between their leaves
+        // folds with them, so the root view is two nodes and one edge.
+        let root_view = Overflow { nodes: 2, edges: 1 };
+        assert_eq!(default_expansion(&g, None, 1, 1), Err(root_view));
+        assert_eq!(default_expansion(&g, None, 2, 0), Err(root_view));
+
+        // Meeting both caps exactly is fitting, and expands nothing.
+        assert_eq!(default_expansion(&g, None, 2, 1), Ok(HashSet::new()));
+        // Room for one tower's two leaves opens the tower that reveals cheapest.
+        assert_eq!(
+            default_expansion(&g, None, 4, 1),
+            Ok(expanded(&names, &["A"]))
+        );
+    }
+
+    /// An expansion within the caps is the reader's to keep, whichever
+    /// containers they opened and whichever a fresh search would have picked.
+    #[test]
+    fn an_expansion_that_fits_is_kept_whole() {
+        let (g, names) = two_towers();
+        let opened = expanded(&names, &["B"]);
+
+        assert_eq!(
+            fitting_expansion(&g, None, &opened, 100, 100),
+            Ok(opened.clone())
+        );
+        assert_ne!(
+            default_expansion(&g, None, 100, 100),
+            Ok(opened),
+            "the fixture's fresh search picks the same containers, so keeping \
+             them proves nothing",
+        );
+    }
+
+    /// Past the caps the expansion gives way container by container, so what is
+    /// left is part of what the reader had opened rather than a fresh view.
+    #[test]
+    fn an_expansion_past_the_caps_gives_way_a_container_at_a_time() {
+        let (mut g, names) = two_towers();
+        g.add_edge(
+            names.get("A.x").unwrap(),
+            names.get("B.y").unwrap(),
+            EdgeKind::Aquery,
+        );
+        let both = expanded(&names, &["A", "B"]);
+
+        // Room for one tower's leaves beside the other's folded root.
+        let kept = fitting_expansion(&g, None, &both, 4, 1).expect("the root view fits");
+        assert_eq!(kept.len(), 1);
+        assert!(kept.is_subset(&both));
+
+        assert_eq!(fitting_expansion(&g, None, &both, 2, 1), Ok(HashSet::new()));
+        assert_eq!(
+            fitting_expansion(&g, None, &both, 1, 1),
+            Err(Overflow { nodes: 2, edges: 1 }),
+        );
+    }
+
+    /// The quotient pass mints group ids past every node of the graph it laid
+    /// out, so an expansion naming one is sized against nothing and kept.
+    #[test]
+    fn an_expanded_id_the_graph_holds_no_container_for_is_kept() {
+        let (g, names) = two_towers();
+        let group = Id(names.len() as u32 + 7);
+        let opened: HashSet<Id> = [names.get("A").unwrap(), group].into_iter().collect();
+
+        assert_eq!(
+            fitting_expansion(&g, None, &opened, 100, 100),
+            Ok(opened.clone())
+        );
+        assert_eq!(
+            fitting_expansion(&g, None, &opened, 2, 0),
+            Ok([group].into_iter().collect()),
+        );
+    }
+
+    /// One container over a chain of leaves carrying every forward edge the
+    /// chain implies, so its transitive reduction is a small fraction of the
+    /// edges drawn: `len` leaves, `len - 1` steps out of `len * (len - 1) / 2`.
+    fn chain_with_skips(len: u32) -> (Graph, Names) {
+        let mut g = Graph::new();
+        let mut names = Names::default();
+        let root = names.intern("R");
+        g.add_node(Node::new(root, "R", Kind::Package, None));
+        let leaves: Vec<Id> = (0..len)
+            .map(|i| {
+                let id = names.intern(&format!("n{i:03}"));
+                g.add_node(Node::new(id, "leaf", Kind::Action, Some(root)));
+                id
+            })
+            .collect();
+        for (i, &from) in leaves.iter().enumerate() {
+            for &to in &leaves[i + 1..] {
+                g.add_edge(from, to, EdgeKind::Aquery);
+            }
+        }
+        (g, names)
+    }
+
+    /// A view drawing the reduction is sized by the edges the reduction leaves,
+    /// so a graph whose redundant edges alone would break the cap still opens.
+    #[test]
+    fn a_reduced_view_is_sized_on_the_edges_the_reduction_leaves() {
+        let (g, names) = chain_with_skips(8);
+        let reduced = crate::reduce::transitive_reduction(&g);
+        let open = expanded(&names, &["R"]);
+        assert_eq!(collapse(&g, &open).edges.len(), 28);
+        assert_eq!(collapse(&reduced, &open).edges.len(), 7);
+
+        let between_the_two = 10;
+        assert_eq!(
+            default_expansion(&g, Some(&reduced), 100, between_the_two),
+            Ok(open)
+        );
+    }
+
+    /// A view keeps an edge by the pair of boxes it runs between, so a pair the
+    /// reduction leaves brings with it every edge the graph has between those
+    /// two, one per query that found the dependency. The budget counts them all.
+    #[test]
+    fn a_reduced_view_is_sized_on_every_kind_over_a_pair_it_keeps() {
+        let mut g = Graph::new();
+        let mut names = Names::default();
+        let source = names.intern("source");
+        g.add_node(Node::new(source, "source", Kind::Action, None));
+        let container = names.intern("C");
+        g.add_node(Node::new(container, "C", Kind::Package, None));
+        let (near, far) = (names.intern("C.near"), names.intern("C.far"));
+        for leaf in [near, far] {
+            g.add_node(Node::new(leaf, "leaf", Kind::Action, Some(container)));
+        }
+        // `source -> far` is implied by `source -> near -> far`, so the
+        // reduction drops it while the fold takes both to one pair of boxes.
+        g.add_edge(source, near, EdgeKind::Query);
+        g.add_edge(near, far, EdgeKind::Query);
+        g.add_edge(source, far, EdgeKind::Cquery);
+        let reduced = crate::reduce::transitive_reduction(&g);
+
+        // The root view is `source` beside the folded `C`, joined by the two
+        // edges into it, whose kinds differ.
+        assert_eq!(
+            default_expansion(&g, Some(&reduced), 100, 1),
+            Err(Overflow { nodes: 2, edges: 2 }),
+        );
+        assert!(
+            default_expansion(&g, Some(&reduced), 100, 2).is_ok(),
+            "two edges over one kept pair are past a cap of two",
+        );
+    }
+
+    /// A view drawing every edge is sized by every edge, so the same cap holds
+    /// the same container shut.
+    #[test]
+    fn an_unreduced_view_is_sized_on_every_edge_it_draws() {
+        let (g, _) = chain_with_skips(8);
+
+        let between_the_two = 10;
+        assert_eq!(
+            default_expansion(&g, None, 100, between_the_two),
+            Ok(HashSet::new())
+        );
     }
 
     #[test]
@@ -591,21 +910,116 @@ mod tests {
         let mut names = Names::default();
         let a = names.intern("A");
         let b = names.intern("b");
-        g.add_node(a, "A", Kind::Package, None);
-        g.add_node(b, "b", Kind::Target, Some(a));
+        g.add_node(Node::new(a, "A", Kind::Package, None));
+        g.add_node(Node::new(b, "b", Kind::Target, Some(a)));
         for leaf in ["x", "y"] {
             let id = names.intern(leaf);
-            g.add_node(id, "leaf", Kind::Action, Some(b));
+            g.add_node(Node::new(id, "leaf", Kind::Action, Some(b)));
         }
 
         // `b` is the reachable multi-child container; A is a transparent
         // singleton, so generous caps expand `b` alone.
-        let all = default_expansion(&g, 100, 100);
+        let all = default_expansion(&g, None, 100, 100).expect("the whole graph fits these caps");
         assert_eq!(all, expanded(&names, &["b"]));
         assert_eq!(
             node_ids(&collapse(&g, &all), &names),
             set(&["A", "b", "x", "y"])
         );
+    }
+
+    /// A graph's ids need not run without gaps, and its largest may sit well
+    /// past its node count, so the fold reaches the same view either way.
+    #[test]
+    fn a_gapped_id_space_folds_to_the_same_view() {
+        let (mut dense, dense_names) = two_towers_spaced(1);
+        let (mut gapped, gapped_names) = two_towers_spaced(3);
+        assert!(
+            gapped
+                .nodes
+                .iter()
+                .any(|n| n.id.0 as usize >= gapped.nodes.len()),
+            "the fixture's ids stay within its node count",
+        );
+        for (g, names) in [(&mut dense, &dense_names), (&mut gapped, &gapped_names)] {
+            g.add_edge(
+                names.get("A.x").unwrap(),
+                names.get("B.y").unwrap(),
+                EdgeKind::Aquery,
+            );
+        }
+
+        for open in [vec![], vec!["A"], vec!["A", "B"]] {
+            let a = collapse(&dense, &expanded(&dense_names, &open));
+            let b = collapse(&gapped, &expanded(&gapped_names, &open));
+            assert_eq!(node_ids(&a, &dense_names), node_ids(&b, &gapped_names));
+            assert_eq!(edges(&a, &dense_names), edges(&b, &gapped_names));
+        }
+
+        for caps in [(2, 1), (4, 1), (6, 2), (100, 100)] {
+            let a =
+                default_expansion(&dense, None, caps.0, caps.1).expect("the dense fixture fits");
+            let b =
+                default_expansion(&gapped, None, caps.0, caps.1).expect("the gapped fixture fits");
+            assert_eq!(
+                node_ids(&collapse(&dense, &a), &dense_names),
+                node_ids(&collapse(&gapped, &b), &gapped_names),
+            );
+        }
+    }
+
+    /// Expanding an id the graph holds no node of leaves the view it would have
+    /// had, rather than reading past the end of the tables indexed by id.
+    #[test]
+    fn expanding_an_id_the_graph_holds_no_node_of_changes_nothing() {
+        let (g, names) = two_towers();
+        let past = Id(g.nodes.len() as u32 + 100);
+        assert_eq!(
+            node_ids(&collapse(&g, &[past].into_iter().collect()), &names),
+            node_ids(&collapse(&g, &HashSet::new()), &names),
+        );
+    }
+
+    /// An edge to an id the graph holds no node of has no box at its far end,
+    /// so the fold drops it instead of drawing to nothing.
+    #[test]
+    fn an_edge_to_an_id_the_graph_holds_no_node_of_is_dropped() {
+        let (mut g, names) = two_towers();
+        g.add_edge(
+            names.get("A.x").unwrap(),
+            Id(g.nodes.len() as u32 + 100),
+            EdgeKind::Aquery,
+        );
+
+        let out = collapse(&g, &HashSet::new());
+
+        assert_eq!(node_ids(&out, &names), set(&["A", "B"]));
+        assert!(out.edges.is_empty());
+        assert!(collapse_edges(&g, &HashSet::new()).is_empty());
+    }
+
+    /// A merge group's container is told from an ordinary box by its `group`
+    /// marker and not by its kind, so a fold that drops the marker leaves a box
+    /// the reader can no longer open or close.
+    #[test]
+    fn a_folded_group_keeps_its_marker() {
+        let mut g = Graph::new();
+        let mut n = Names::default();
+        let action = n.intern("action0");
+        g.add_node(Node::new(action, "Compile", Kind::Action, None));
+        for source in ["source1", "source2"] {
+            let id = n.intern(source);
+            g.add_node(Node::new(id, source, Kind::Source, None));
+            g.add_edge(id, action, EdgeKind::Aquery);
+        }
+        let (merged, _) = crate::quotient::quotient(&g, &HashSet::new(), &mut n);
+        assert!(
+            find(&merged, &n, "group:source1").group,
+            "the fixture's merge minted no group",
+        );
+
+        let folded = collapse(&merged, &HashSet::new());
+
+        assert!(find(&folded, &n, "group:source1").group);
     }
 
     #[test]

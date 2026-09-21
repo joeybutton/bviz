@@ -10,7 +10,7 @@ use std::sync::{Arc, OnceLock};
 use bviz_parallel::workers;
 use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 
-use crate::graph::{Containment, EdgeKind, Graph, Node};
+use crate::graph::{Containment, EdgeKind, Graph, Node, id_span};
 use crate::intern::Id;
 use crate::layout::{self, BORDER, Box, Connector, LABEL_BAND, LEAF_HEIGHT, LaidOut};
 use crate::{lod, reduce};
@@ -31,8 +31,8 @@ const MAX_FRAME_EDGES: usize = 2000;
 
 /// Places every node once and derives the zoom pyramid of views over it.
 ///
-/// `base`'s node ids must be a dense permutation of `0..nodes.len()`, every
-/// `parent` must name another of its nodes, and containment must be acyclic.
+/// Every `parent` of `base` must name another of its nodes and containment must
+/// be acyclic; its ids are otherwise free.
 /// `reduced` must be the transitive reduction of `base`, whose nodes it shares.
 pub fn map_layout(base: Arc<Graph>, reduced: Arc<Graph>) -> MapLayout {
     let containment = Containment::new(&base);
@@ -50,25 +50,16 @@ pub fn map_layout(base: Arc<Graph>, reduced: Arc<Graph>) -> MapLayout {
         let opened = open_at(&expandable, &drawing, from);
         if opened != open {
             open = opened;
-            finer.push((
-                from,
-                Level {
-                    open: open.clone(),
-                    view: OnceLock::new(),
-                },
-            ));
+            finer.push((from, Level::opening(Arc::new(open.clone()))));
         }
     }
     MapLayout {
         base,
         reduced,
-        containment,
-        drawing,
-        expandable,
-        coarsest: Level {
-            open: HashSet::new(),
-            view: OnceLock::new(),
-        },
+        containment: Arc::new(containment),
+        drawing: Arc::new(drawing),
+        expandable: Arc::new(expandable),
+        coarsest: Level::opening(Arc::new(HashSet::new())),
         finer,
     }
 }
@@ -80,17 +71,32 @@ pub fn map_layout(base: Arc<Graph>, reduced: Arc<Graph>) -> MapLayout {
 /// mostly work for a zoom the reader never reaches. What a level needs to derive
 /// itself is held by the [`MapLayout`] around it.
 struct Level {
-    open: HashSet<Id>,
+    open: Arc<HashSet<Id>>,
     view: OnceLock<LaidOut>,
 }
 
+impl Level {
+    /// The level opening `open`, with nothing derived yet.
+    fn opening(open: Arc<HashSet<Id>>) -> Self {
+        Level {
+            open,
+            view: OnceLock::new(),
+        }
+    }
+}
+
 /// The views of one drawing at rising zoom, coarsest first.
+///
+/// The placement, the containment forest it was read from and the scales the
+/// levels take over at are shared with every [`restricted`](Self::restricted)
+/// map derived from this one, so a restriction draws its boxes exactly where
+/// this map draws them.
 pub struct MapLayout {
     base: Arc<Graph>,
     reduced: Arc<Graph>,
-    containment: Containment,
-    drawing: Drawing,
-    expandable: HashSet<Id>,
+    containment: Arc<Containment>,
+    drawing: Arc<Drawing>,
+    expandable: Arc<HashSet<Id>>,
     coarsest: Level,
     /// Ascending by the scale each view takes over from.
     finer: Vec<(f64, Level)>,
@@ -123,6 +129,30 @@ impl MapLayout {
 
     pub fn level_count(&self) -> usize {
         1 + self.finer.len()
+    }
+
+    /// The levels `base` leaves of this map, each drawn at the positions this
+    /// map places its nodes at: a node this map places and `base` does not hold
+    /// leaves a hole where it stood, and everything else stays put.
+    ///
+    /// `base`'s nodes must be a subset of the placed graph's, keyed by the same
+    /// ids; `reduced` must be its transitive reduction. Which containers a level
+    /// opens is the placement's to say, so it is carried over unchanged and a
+    /// container `base` drops simply goes undrawn.
+    pub fn restricted(&self, base: Arc<Graph>, reduced: Arc<Graph>) -> MapLayout {
+        MapLayout {
+            base,
+            reduced,
+            containment: Arc::clone(&self.containment),
+            drawing: Arc::clone(&self.drawing),
+            expandable: Arc::clone(&self.expandable),
+            coarsest: Level::opening(Arc::clone(&self.coarsest.open)),
+            finer: self
+                .finer
+                .iter()
+                .map(|(from, level)| (*from, Level::opening(Arc::clone(&level.open))))
+                .collect(),
+        }
     }
 
     /// The extent every level spans, which follows from the placement they share
@@ -164,9 +194,17 @@ impl Placed {
 /// The one placement the whole pyramid shares: a node drawn on several levels is
 /// drawn at the same coordinates on each.
 struct Drawing {
-    placed: HashMap<Id, Placed>,
+    /// Each id's box, indexed by id over the placed graph's id space, `None`
+    /// where that graph holds no node of the id.
+    placed: Vec<Option<Placed>>,
     width: f64,
     height: f64,
+}
+
+impl Drawing {
+    fn placed(&self, id: Id) -> Option<Placed> {
+        self.placed.get(id.0 as usize).copied().flatten()
+    }
 }
 
 /// Lays out the whole containment forest with every container open: each frame
@@ -280,29 +318,25 @@ fn absolute(
     containment: &Containment,
     size: &HashMap<Id, (f64, f64)>,
     offset: &HashMap<Id, (f64, f64)>,
-) -> HashMap<Id, Placed> {
+) -> Vec<Option<Placed>> {
     let mut by_depth: Vec<&Node> = graph.nodes.iter().collect();
     by_depth.sort_by_key(|n| containment.depth(n.id));
-    let mut placed: HashMap<Id, Placed> = HashMap::with_capacity(graph.nodes.len());
+    let mut placed: Vec<Option<Placed>> = vec![None; id_span(graph)];
     for node in by_depth {
         let (dx, dy) = offset[&node.id];
-        let (x, y) = match node.parent {
-            Some(parent) => {
-                let outer = placed[&parent];
-                (outer.x + dx, outer.y + dy)
-            }
+        // Containment is acyclic and the walk runs shallowest first, so a
+        // container is placed before anything it holds.
+        let (x, y) = match node.parent.and_then(|p| placed[p.0 as usize]) {
+            Some(outer) => (outer.x + dx, outer.y + dy),
             None => (dx, dy),
         };
         let (width, height) = size[&node.id];
-        placed.insert(
-            node.id,
-            Placed {
-                x,
-                y,
-                width,
-                height,
-            },
-        );
+        placed[node.id.0 as usize] = Some(Placed {
+            x,
+            y,
+            width,
+            height,
+        });
     }
     placed
 }
@@ -366,8 +400,10 @@ fn frame_edges(graph: &Graph, containment: &Containment) -> HashMap<Option<Id>, 
 /// [`LEVEL_SCALE_STEP`] from the first container to open through to the last.
 fn thresholds(expandable: &HashSet<Id>, drawing: &Drawing) -> Vec<f64> {
     let (mut first, mut last) = (f64::INFINITY, 0.0f64);
-    for container in expandable {
-        let scale = drawing.placed[container].open_scale();
+    for scale in expandable
+        .iter()
+        .filter_map(|&c| Some(drawing.placed(c)?.open_scale()))
+    {
         first = first.min(scale);
         last = last.max(scale);
     }
@@ -389,7 +425,7 @@ fn open_at(expandable: &HashSet<Id>, drawing: &Drawing, scale: f64) -> HashSet<I
     expandable
         .iter()
         .copied()
-        .filter(|c| drawing.placed[c].open_scale() <= scale)
+        .filter(|&c| drawing.placed(c).is_some_and(|p| p.open_scale() <= scale))
         .collect()
 }
 
@@ -442,7 +478,9 @@ fn boxes(visible: &Graph, drawing: &Drawing, containment: &Containment) -> Vec<B
     parents.extend(visible.nodes.iter().filter_map(|n| n.parent));
     let mut boxes: Vec<(u32, Box)> = Vec::with_capacity(visible.nodes.len());
     for node in &visible.nodes {
-        let placed = drawing.placed[&node.id];
+        let Some(placed) = drawing.placed(node.id) else {
+            continue;
+        };
         boxes.push((
             containment.depth(node.id),
             Box {
@@ -474,7 +512,9 @@ fn connectors(drawn: &Graph, drawing: &Drawing) -> Vec<Connector> {
     let mut connectors: Vec<Connector> = Vec::with_capacity(kinds_of.len());
     for ((from, to), mut kinds) in kinds_of {
         kinds.sort_unstable();
-        let (tail, head) = (drawing.placed[&from], drawing.placed[&to]);
+        let (Some(tail), Some(head)) = (drawing.placed(from), drawing.placed(to)) else {
+            continue;
+        };
         connectors.push(Connector {
             points: route(&tail, &head),
             kinds,
@@ -571,6 +611,21 @@ mod tests {
     /// long-labelled leaves, a chain of three, and a pair of short ones, plus a
     /// bare leaf root. Edges run within each container and between two of them.
     fn towers() -> (Graph, Names) {
+        towers_spaced(1)
+    }
+
+    /// [`towers`] over an id space `spacing` times as wide, so its nodes carry
+    /// the ids they would after a restriction dropped the rest.
+    fn towers_spaced(spacing: usize) -> (Graph, Names) {
+        /// Interns `name` after burning `spacing - 1` ids on nothing, so a
+        /// fixture built with `spacing > 1` leaves holes in its id space.
+        fn spaced(names: &mut Names, spacing: usize, name: &str) -> Id {
+            for i in 1..spacing {
+                names.intern(&format!("{name}/hole{i}"));
+            }
+            names.intern(name)
+        }
+
         let mut g = Graph::new();
         let mut names = Names::default();
         let plan = [
@@ -579,12 +634,12 @@ mod tests {
             ("narrow", 2, "x"),
         ];
         for (tower, count, label) in plan {
-            let root = names.intern(tower);
-            g.add_node(root, tower, Kind::Package, None);
+            let root = spaced(&mut names, spacing, tower);
+            g.add_node(Node::new(root, tower, Kind::Package, None));
             let kids: Vec<Id> = (0..count)
                 .map(|i| {
-                    let id = names.intern(&format!("{tower}.{i}"));
-                    g.add_node(id, label, Kind::Action, Some(root));
+                    let id = spaced(&mut names, spacing, &format!("{tower}.{i}"));
+                    g.add_node(Node::new(id, label, Kind::Action, Some(root)));
                     id
                 })
                 .collect();
@@ -592,8 +647,8 @@ mod tests {
                 g.add_edge(pair[0], pair[1], EdgeKind::Aquery);
             }
         }
-        let lone = names.intern("lone");
-        g.add_node(lone, "lone", Kind::Target, None);
+        let lone = spaced(&mut names, spacing, "lone");
+        g.add_node(Node::new(lone, "lone", Kind::Target, None));
         g.add_edge(
             names.get("wide.5").unwrap(),
             names.get("narrow.0").unwrap(),
@@ -728,6 +783,106 @@ mod tests {
         }
     }
 
+    /// A graph's ids need not run without gaps, and its largest may sit well
+    /// past its node count, so the placement lands the same drawing either way.
+    #[test]
+    fn a_gapped_id_space_places_the_same_drawing() {
+        let (dense, dense_names) = towers_spaced(1);
+        let (gapped, gapped_names) = towers_spaced(3);
+        assert!(
+            gapped
+                .nodes
+                .iter()
+                .any(|n| n.id.0 as usize >= gapped.nodes.len()),
+            "the fixture's ids stay within its node count",
+        );
+
+        let (a, b) = (mapped(&dense), mapped(&gapped));
+        assert_eq!(a.level_count(), b.level_count());
+        assert_eq!((a.width(), a.height()), (b.width(), b.height()));
+        let named = |view: &LaidOut, names: &Names| -> BTreeSet<(String, u64, u64)> {
+            view.boxes
+                .iter()
+                .map(|b| {
+                    (
+                        names.resolve(b.id).to_string(),
+                        b.x.to_bits(),
+                        b.y.to_bits(),
+                    )
+                })
+                .collect()
+        };
+        for i in 0..a.level_count() {
+            assert_eq!(
+                named(a.level(i), &dense_names),
+                named(b.level(i), &gapped_names),
+                "level {i} differs",
+            );
+        }
+    }
+
+    /// A restriction is drawn into the holes its dropped nodes leave: what
+    /// survives is drawn where the whole graph draws it, at every level, and the
+    /// extent the camera pans over is the one the placement fixed.
+    #[test]
+    fn a_restriction_draws_what_survives_where_the_whole_graph_draws_it() {
+        let (base, names) = towers();
+        let map = mapped(&base);
+        let dropped: HashSet<Id> = ["mid", "mid.0", "mid.1", "mid.2", "wide.2"]
+            .into_iter()
+            .map(|id| names.get(id).unwrap())
+            .collect();
+        let keep: HashSet<Id> = base
+            .nodes
+            .iter()
+            .map(|node| node.id)
+            .filter(|id| !dropped.contains(id))
+            .collect();
+
+        let restricted = crate::filter::filter(&base, &map.reduced, &keep);
+        let reduced = reduce::transitive_reduction(&restricted);
+        let sliced = map.restricted(Arc::new(restricted), Arc::new(reduced));
+
+        assert_eq!(sliced.level_count(), map.level_count());
+        assert_eq!(
+            (sliced.width(), sliced.height()),
+            (map.width(), map.height())
+        );
+        for i in 0..map.level_count() {
+            let placed = |view: &LaidOut| -> BTreeMap<Id, (u64, u64)> {
+                view.boxes
+                    .iter()
+                    .map(|b| (b.id, (b.x.to_bits(), b.y.to_bits())))
+                    .collect()
+            };
+            let (whole, slice) = (placed(map.level(i)), placed(sliced.level(i)));
+            assert!(
+                slice.keys().all(|id| keep.contains(id)),
+                "level {i} draws a dropped box",
+            );
+            for (id, at) in &slice {
+                assert_eq!(whole.get(id), Some(at), "level {i} moved a kept box");
+            }
+        }
+        let finest = sliced.level(sliced.level_count() - 1);
+        assert!(
+            box_of(finest, &names, "wide.5").is_some() && box_of(finest, &names, "mid.0").is_none(),
+            "the fixture's restriction drops nothing the finest level drew",
+        );
+    }
+
+    #[test]
+    fn an_id_the_drawing_holds_no_box_for_reads_absent() {
+        let (base, names) = towers();
+        let map = mapped(&base);
+        assert!(map.drawing.placed(names.get("wide").unwrap()).is_some());
+        assert!(
+            map.drawing
+                .placed(Id(base.nodes.len() as u32 + 100))
+                .is_none()
+        );
+    }
+
     #[test]
     fn every_level_spans_the_same_extent() {
         let (map, _) = built();
@@ -810,13 +965,13 @@ mod tests {
         let mut g = Graph::new();
         let mut names = Names::default();
         let outer = names.intern("outer");
-        g.add_node(outer, "outer", Kind::Package, None);
+        g.add_node(Node::new(outer, "outer", Kind::Package, None));
         for kid in ["a", "b"] {
             let id = names.intern(kid);
-            g.add_node(id, kid, Kind::Action, Some(outer));
+            g.add_node(Node::new(id, kid, Kind::Action, Some(outer)));
         }
         let other = names.intern("other");
-        g.add_node(other, "other", Kind::Target, None);
+        g.add_node(Node::new(other, "other", Kind::Target, None));
         g.add_edge(outer, names.get("a").unwrap(), EdgeKind::Aquery);
         g.add_edge(names.get("b").unwrap(), other, EdgeKind::Aquery);
         (g, names)
@@ -828,11 +983,11 @@ mod tests {
         let mut g = Graph::new();
         let mut names = Names::default();
         let outer = names.intern("outer");
-        g.add_node(outer, "outer", Kind::Package, None);
+        g.add_node(Node::new(outer, "outer", Kind::Package, None));
         let only = names.intern("only");
-        g.add_node(only, "only", Kind::Action, Some(outer));
+        g.add_node(Node::new(only, "only", Kind::Action, Some(outer)));
         let other = names.intern("other");
-        g.add_node(other, "other", Kind::Target, None);
+        g.add_node(Node::new(other, "other", Kind::Target, None));
         g.add_edge(outer, only, EdgeKind::Aquery);
         g.add_edge(only, other, EdgeKind::Aquery);
         (g, names)
@@ -998,11 +1153,11 @@ mod tests {
         let mut g = Graph::new();
         let mut names = Names::default();
         let root = names.intern("root");
-        g.add_node(root, "root", Kind::Package, None);
+        g.add_node(Node::new(root, "root", Kind::Package, None));
         let members: Vec<Id> = (0..80)
             .map(|i| {
                 let id = names.intern(&format!("m{i}"));
-                g.add_node(id, "m", Kind::Action, Some(root));
+                g.add_node(Node::new(id, "m", Kind::Action, Some(root)));
                 id
             })
             .collect();
@@ -1050,9 +1205,9 @@ mod tests {
         let first = names.intern("first");
         let root = names.intern("root");
         let second = names.intern("second");
-        g.add_node(first, "first", Kind::Action, Some(root));
-        g.add_node(root, "root", Kind::Package, None);
-        g.add_node(second, "second", Kind::Action, Some(root));
+        g.add_node(Node::new(first, "first", Kind::Action, Some(root)));
+        g.add_node(Node::new(root, "root", Kind::Package, None));
+        g.add_node(Node::new(second, "second", Kind::Action, Some(root)));
         g.add_edge(first, second, EdgeKind::Aquery);
 
         let finest = mapped(&g);

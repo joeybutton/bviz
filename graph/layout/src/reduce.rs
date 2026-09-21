@@ -145,20 +145,9 @@ fn condensed_reduction(graph: Graph) -> Graph {
         succ[u as usize].push(v);
     }
 
-    let comp = components(&succ, n);
-    let count = comp.iter().copied().max().map_or(0, |c| c as usize + 1);
-    let mut condensed: HashSet<(u32, u32)> = HashSet::with_capacity(pairs.len());
-    let mut csucc: Vec<Vec<u32>> = vec![Vec::new(); count];
-    let mut cindeg: Vec<u32> = vec![0; count];
-    for &(u, v) in &pairs {
-        let (a, b) = (comp[u as usize], comp[v as usize]);
-        if a != b && condensed.insert((a, b)) {
-            csucc[a as usize].push(b);
-            cindeg[b as usize] += 1;
-        }
-    }
-    let order = topo_order(&csucc, cindeg).expect("a condensation holds no cycle");
-    let redundant = redundant_pairs(&order, &csucc);
+    let condensation = Condensation::new(&succ);
+    let comp = &condensation.of;
+    let redundant = redundant_pairs(&condensation.order, &condensation.succ);
 
     let mut within: HashMap<u32, Vec<(u32, u32)>> = HashMap::new();
     // One edge into a cycle reaches all of it, and one out of a cycle leaves
@@ -247,9 +236,51 @@ fn reaches(succ: &HashMap<u32, HashSet<u32>>, src: u32, dst: u32) -> bool {
     false
 }
 
+/// The acyclic graph a graph's strongly connected components leave: each cycle
+/// of the original is one index here. A cyclic graph admits no topological
+/// order, so a question settled by a single walk over a DAG has to be asked of
+/// this instead — sound for any answer every node of a cycle shares, such as
+/// what it reaches.
+pub(crate) struct Condensation {
+    /// The component each index of the original graph belongs to.
+    pub(crate) of: Vec<u32>,
+    /// Successors of each component, deduplicated.
+    pub(crate) succ: Vec<Vec<u32>>,
+    /// The components with every one ahead of its successors, so a walk needing
+    /// its successors settled first takes this in reverse.
+    pub(crate) order: Vec<u32>,
+}
+
+impl Condensation {
+    /// Condenses the graph `succ` holds over the indices `0..succ.len()`.
+    pub(crate) fn new(succ: &[Vec<u32>]) -> Self {
+        let of = components(succ);
+        let count = of.iter().copied().max().map_or(0, |c| c as usize + 1);
+        let mut seen: HashSet<(u32, u32)> = HashSet::with_capacity(succ.iter().map(Vec::len).sum());
+        let mut condensed: Vec<Vec<u32>> = vec![Vec::new(); count];
+        let mut indeg: Vec<u32> = vec![0; count];
+        for (u, forward) in succ.iter().enumerate() {
+            for &v in forward {
+                let (a, b) = (of[u], of[v as usize]);
+                if a != b && seen.insert((a, b)) {
+                    condensed[a as usize].push(b);
+                    indeg[b as usize] += 1;
+                }
+            }
+        }
+        let order = topo_order(&condensed, indeg).expect("a condensation holds no cycle");
+        Self {
+            of,
+            succ: condensed,
+            order,
+        }
+    }
+}
+
 /// The strongly connected component each index belongs to — two indices share
 /// one exactly when each reaches the other — numbered densely from zero.
-fn components(succ: &[Vec<u32>], n: usize) -> Vec<u32> {
+fn components(succ: &[Vec<u32>]) -> Vec<u32> {
+    let n = succ.len();
     // The order the search finishes with each index, which is the order the
     // second walk has to reach them in, reversed.
     let mut seen = vec![false; n];
@@ -309,7 +340,7 @@ fn components(succ: &[Vec<u32>], n: usize) -> Vec<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::graph::{EdgeKind, Kind};
+    use crate::graph::{EdgeKind, Kind, Node};
     use crate::intern::Names;
 
     fn build(edges: &[(&str, &str)]) -> (Graph, Names) {
@@ -319,7 +350,7 @@ mod tests {
         for &(a, b) in edges {
             for id in [a, b] {
                 if seen.insert(id) {
-                    g.add_node(n.intern(id), id, Kind::Action, None);
+                    g.add_node(Node::new(n.intern(id), id, Kind::Action, None));
                 }
             }
         }

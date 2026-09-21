@@ -1,6 +1,6 @@
 use crate::camera::{Camera, Rect, to_screen, visible_rect};
+use crate::derive::{Drawn, Expandable};
 use crate::drag::track_gesture;
-use crate::model::{Drawn, Expandable};
 use crate::morph::Frame;
 use crate::neighborhood::{Neighborhood, compute_neighborhood};
 use crate::relation::{Direction, Relation};
@@ -14,6 +14,7 @@ use gpui::{
 };
 use std::collections::HashSet;
 use std::rc::Rc;
+use std::sync::Arc;
 
 /// Box label font size in layout pixels.
 const LABEL_SIZE: f64 = 13.0;
@@ -57,6 +58,29 @@ const FLOORED_BELOW: f32 = CONNECTOR_FLOOR / CONNECTOR_WIDTH;
 /// [`bviz_ui_theme::MIN_DISTINCT_COLOR`] off every ground it crosses, which is
 /// the distance the unthinned line is held to.
 const TAPER_FLOOR: f32 = 0.3;
+
+/// Length (pre-zoom px) of one dash of a bridged route and of the gap after it,
+/// the gap wide enough that the dashes read as separate marks at the widths a
+/// bundle of lanes can reach.
+const BRIDGE_DASH: f32 = 7.0;
+const BRIDGE_GAP: f32 = 5.0;
+
+/// Screen length a dash or a gap of a bridged route is never drawn below. Path
+/// coverage is sampled rather than computed, so a pattern the camera has shrunk
+/// toward a pixel is drawn or dropped by where the pan happens to leave each
+/// dash, and the route flickers between a dotted line and a solid one; several
+/// pixels long, every dash and every gap meets samples wherever it falls.
+const BRIDGE_PATTERN_FLOOR: f32 = 3.0;
+
+/// How far a bridged route's ink is carried toward the canvas in perceptual
+/// lightness. A bridge stands for a path through boxes the drawing does not
+/// hold, which is a weaker claim than a dependency the graph states, and the
+/// zoom that floors the dashes goes on to close them up into a solid line — so
+/// the distinction is carried in lightness as well, which no zoom takes away.
+/// Bounded above by the dimmed line, thinned by the taper, holding
+/// [`bviz_ui_theme::MIN_DISTINCT_COLOR`] off every ground it crosses and every
+/// ink it runs beside, which is the distance every route is held to.
+const BRIDGE_DIM: f32 = 0.035;
 
 /// Stroke width (pre-zoom px) of that line where a marking picks the connector out.
 /// A doubling is the smallest step that reads as a heavier line rather than as
@@ -114,6 +138,9 @@ pub(crate) struct Scene {
     pub(crate) drawn: Drawn,
     pub(crate) expandable: Expandable,
     pub(crate) palette: Palette,
+    /// The boxes the filter draws as no part of what it selects, which it fades
+    /// rather than leaving out so the reader sees what hiding them would do.
+    pub(crate) faded: Arc<HashSet<Id>>,
     /// The box the pointer rests on, whose direct neighbors it marks for as long
     /// as it does; `None` when the pointer is off the boxes or the marking is
     /// switched off.
@@ -123,6 +150,24 @@ pub(crate) struct Scene {
     pub(crate) selected: Option<Id>,
     /// The emphasized box and the alpha its highlight paints at.
     pub(crate) highlight: Option<(Id, f32)>,
+}
+
+impl Scene {
+    /// The share of its own opacity the filter leaves whatever `id` names: all
+    /// of it, and [`UNMARKED_FADE`] of it where the filter draws `id` as no part
+    /// of what it selects.
+    fn filter_strength(&self, id: Id) -> f32 {
+        match self.faded.contains(&id) {
+            true => UNMARKED_FADE,
+            false => 1.0,
+        }
+    }
+
+    /// What a connector between `from` and `to` is left at by the filter, which
+    /// fades a route into or out of a box it fades along with the box.
+    fn edge_strength(&self, from: Id, to: Id) -> f32 {
+        self.filter_strength(from).min(self.filter_strength(to))
+    }
 }
 
 /// Everything a frame draws marked. A box or a connector either marking picks
@@ -154,15 +199,24 @@ impl Marks {
         }
     }
 
-    /// What a connector standing at `marked` is drawn at, `edges` being the share
-    /// a morph in flight leaves its routes at. A mark buys no exemption from
-    /// [`ink_taper`]: how much of a drawn band is the line's own is the camera's
-    /// to answer, and a marked line meets the camera on the same terms as the
-    /// rest, so a selection stands its routes off the graph by as much at every
-    /// zoom.
-    fn connector_alpha(&self, marked: bool, edges: f32, zoom: f32) -> f32 {
-        edges * self.strength(marked) * ink_taper(zoom)
+    /// What a connector standing at `marked` and left at `filtered` by the
+    /// filter is drawn at, `edges` being the share a morph in flight leaves its
+    /// routes at. A mark buys no exemption from [`ink_taper`]: how much of a
+    /// drawn band is the line's own is the camera's to answer, and a marked line
+    /// meets the camera on the same terms as the rest, so a selection stands its
+    /// routes off the graph by as much at every zoom.
+    fn connector_alpha(&self, marked: bool, filtered: f32, edges: f32, zoom: f32) -> f32 {
+        edges * receded(self.strength(marked), filtered) * ink_taper(zoom)
     }
+}
+
+/// The share of its own opacity something the selection leaves at `marked` and
+/// the filter at `filtered` is drawn at. Both say the same thing — this is no
+/// part of what the reader picked out — so the fainter of the two decides;
+/// multiplied together they would take a box both leave out past the point of
+/// being seen at all.
+fn receded(marked: f32, filtered: f32) -> f32 {
+    marked.min(filtered)
 }
 
 /// The canvas paint pass: box fills parent-before-child so children sit over
@@ -239,7 +293,8 @@ pub(crate) fn canvas_body(
             for c in &g.connectors {
                 if drawn_route(c, &visible, &on_screen) {
                     let marked = marks.marks_edge((c.from, c.to));
-                    let alpha = marks.connector_alpha(marked, edges, camera.zoom);
+                    let filtered = scene.edge_strength(c.from, c.to);
+                    let alpha = marks.connector_alpha(marked, filtered, edges, camera.zoom);
                     paint_lanes(c, marked, alpha, bounds, camera, &scene.palette, window);
                 }
             }
@@ -324,7 +379,7 @@ impl Palette {
     fn container_fill(&self, kind: Kind) -> Rgba {
         match kind {
             Kind::Package => self.package,
-            Kind::Group => {
+            Kind::MergeGroup => {
                 bviz_ui_theme::mix(self.container, self.kind_accent(Kind::Artifact), GROUP_TINT)
             }
             _ => self.container,
@@ -333,17 +388,23 @@ impl Palette {
 
     /// Connector color, keyed by the query an edge came from, so static (query),
     /// configured (cquery), and execution-phase (aquery) dependencies read
-    /// distinctly. `marked` carries the color by [`MARK_LIFT`], which leaves
-    /// untouched the hue that names the query.
+    /// distinctly; a filter's synthetic transitive edges take a fourth hue of
+    /// their own. `marked` carries the color by [`MARK_LIFT`], which leaves
+    /// untouched the hue that names the kind.
     pub(crate) fn edge_color(&self, kind: EdgeKind, marked: bool) -> Rgba {
         let slot = match kind {
             EdgeKind::Query => self.data.blue,
             EdgeKind::Cquery => self.data.cyan,
             EdgeKind::Aquery => self.data.orange,
+            EdgeKind::Transitive => self.data.red,
         };
-        match marked {
+        let color = match marked {
             false => slot.into(),
             true => bviz_ui_theme::lighten(slot, self.mark_lift()),
+        };
+        match kind {
+            EdgeKind::Transitive => bviz_ui_theme::lighten(color, self.bridge_dim()),
+            _ => color,
         }
     }
 
@@ -354,6 +415,12 @@ impl Palette {
             true => MARK_LIFT,
             false => -MARK_LIFT,
         }
+    }
+
+    /// [`BRIDGE_DIM`] signed to point toward the canvas, which is the way a mark
+    /// does not carry a connector.
+    fn bridge_dim(&self) -> f32 {
+        -BRIDGE_DIM.copysign(self.mark_lift())
     }
 
     /// The wash a marked box's fill is painted over, at `strength` of the full
@@ -426,7 +493,7 @@ impl<'a> PaintBox<'a> {
     fn of(p: &Placed<'a>, scene: &Scene, marks: &Marks) -> Self {
         let Placed { b, rect, alpha, .. } = *p;
         let marked = marks.marks_box(b.id);
-        let alpha = alpha * marks.strength(marked);
+        let alpha = alpha * receded(marks.strength(marked), scene.filter_strength(b.id));
         let palette = &scene.palette;
         let fill = match b.compound {
             true => palette.container_fill(b.kind),
@@ -845,6 +912,10 @@ fn paint_connector(
         false => CONNECTOR_WIDTH,
     };
     let mut line = PathBuilder::stroke(stroke_width(width, zoom));
+    if kind == EdgeKind::Transitive {
+        let (dash, gap) = bridge_pattern(zoom);
+        line = line.dash_array(&[dash, gap]);
+    }
     line.move_to(pts[0]);
     for p in &pts[1..n - 1] {
         line.line_to(*p);
@@ -864,6 +935,17 @@ fn paint_connector(
 /// its boxes where the layout puts it.
 fn stroke_width(width: f32, zoom: f32) -> Pixels {
     px(width * zoom.max(FLOORED_BELOW))
+}
+
+/// The dash and the gap a bridged route is drawn in at `zoom`, each held to
+/// [`BRIDGE_PATTERN_FLOOR`] however far the camera is out. The arrowhead capping
+/// the route is filled whole, so the direction it reports is not a dash the
+/// pattern might have left out.
+fn bridge_pattern(zoom: f32) -> (Pixels, Pixels) {
+    (
+        px((BRIDGE_DASH * zoom).max(BRIDGE_PATTERN_FLOOR)),
+        px((BRIDGE_GAP * zoom).max(BRIDGE_PATTERN_FLOOR)),
+    )
 }
 
 /// The share of its own opacity a connector is drawn at, standing for the share
@@ -1349,10 +1431,15 @@ mod colors {
 
     /// One node kind per container fill: the two that carry a fill of their own,
     /// and one standing for every kind that takes the plain one.
-    const CONTAINER_KINDS: [Kind; 3] = [Kind::Package, Kind::Group, Kind::Target];
+    const CONTAINER_KINDS: [Kind; 3] = [Kind::Package, Kind::MergeGroup, Kind::Target];
 
     /// Every provenance a connector is drawn in.
-    const EDGE_KINDS: [EdgeKind; 3] = [EdgeKind::Query, EdgeKind::Cquery, EdgeKind::Aquery];
+    const EDGE_KINDS: [EdgeKind; 4] = [
+        EdgeKind::Query,
+        EdgeKind::Cquery,
+        EdgeKind::Aquery,
+        EdgeKind::Transitive,
+    ];
 
     /// Every theme's palette, under the name it answers to, for a rule that has
     /// to hold whichever one a window paints with.
@@ -1625,6 +1712,34 @@ mod colors {
         }
     }
 
+    /// A dash the camera has shrunk toward a pixel is kept or dropped by where
+    /// the pan leaves it, so a bridge zoomed out to a map reads as a dotted line
+    /// rather than flickering between one and a solid line; zoomed in, the
+    /// pattern follows the camera like the route it runs along.
+    #[test]
+    fn a_bridge_holds_its_pattern_however_far_the_zoom_is_out() {
+        for zoom in STROKE_ZOOMS {
+            let (dash, gap) = bridge_pattern(zoom);
+            assert!(dash >= px(BRIDGE_PATTERN_FLOOR), "zoom {zoom}: {dash:?}");
+            assert!(gap >= px(BRIDGE_PATTERN_FLOOR), "zoom {zoom}: {gap:?}");
+        }
+        assert_eq!(
+            bridge_pattern(4.0),
+            (px(BRIDGE_DASH * 4.0), px(BRIDGE_GAP * 4.0))
+        );
+    }
+
+    /// A box the selection leaves out and the filter fades is left out by both
+    /// for the same reason, so it recedes once: taking both fades would leave it
+    /// too faint to say where in the graph the marked part sits.
+    #[test]
+    fn a_faded_box_the_selection_also_leaves_out_recedes_no_further() {
+        assert_eq!(receded(1.0, 1.0), 1.0);
+        assert_eq!(receded(UNMARKED_FADE, 1.0), UNMARKED_FADE);
+        assert_eq!(receded(1.0, UNMARKED_FADE), UNMARKED_FADE);
+        assert_eq!(receded(UNMARKED_FADE, UNMARKED_FADE), UNMARKED_FADE);
+    }
+
     /// The floor is what a zoom-out runs into, and nothing a line wider than it
     /// meets: above the floor the camera alone says how wide a line is drawn.
     #[test]
@@ -1709,8 +1824,8 @@ mod colors {
             }),
         };
         for zoom in STROKE_ZOOMS {
-            let marked = marks.connector_alpha(true, 1.0, zoom);
-            let unmarked = marks.connector_alpha(false, 1.0, zoom);
+            let marked = marks.connector_alpha(true, 1.0, 1.0, zoom);
+            let unmarked = marks.connector_alpha(false, 1.0, 1.0, zoom);
             assert_eq!(marked, ink_taper(zoom), "zoom {zoom}");
             assert_eq!(unmarked, marked * UNMARKED_FADE, "zoom {zoom}");
         }
@@ -1726,7 +1841,11 @@ mod colors {
             selection: Rc::new(Neighborhood::none()),
         };
         for zoom in STROKE_ZOOMS {
-            assert_eq!(marks.connector_alpha(true, 0.0, zoom), 0.0, "zoom {zoom}");
+            assert_eq!(
+                marks.connector_alpha(true, 1.0, 0.0, zoom),
+                0.0,
+                "zoom {zoom}"
+            );
         }
     }
 
@@ -1736,7 +1855,7 @@ mod colors {
     #[test]
     fn a_group_reads_as_a_container_of_the_files_it_holds() {
         for (theme, p) in palettes() {
-            let group = p.container_fill(Kind::Group);
+            let group = p.container_fill(Kind::MergeGroup);
             let off_plain = distance(group, p.container_fill(Kind::Target));
             assert!(off_plain >= MIN_DISTINCT_COLOR, "{theme}: {off_plain}");
             let off_file = distance(group, p.leaf_fill(Kind::Artifact));

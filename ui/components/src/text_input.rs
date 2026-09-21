@@ -94,6 +94,16 @@ impl TextInput {
         self.content.clone()
     }
 
+    /// Replaces what the field holds, leaving the cursor at the end of it.
+    pub fn set_content(&mut self, content: impl Into<SharedString>, cx: &mut Context<Self>) {
+        self.content = content.into();
+        let end = self.content.len();
+        self.selected_range = end..end;
+        self.selection_reversed = false;
+        self.marked_range = None;
+        cx.notify();
+    }
+
     fn left(&mut self, _: &Left, _: &mut Window, cx: &mut Context<Self>) {
         let to = if self.selected_range.is_empty() {
             self.previous_boundary(self.cursor_offset())
