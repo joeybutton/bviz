@@ -53,7 +53,7 @@ use derive::{Derived, Drawn, Expandable, LayoutLanded};
 use drag::{Drag, end_drag, start_pan, track_gesture};
 use emphasis::Emphasis;
 use framing::{Framing, build_prepaint};
-use legend::legend;
+use legend::Legend;
 use mode::LayoutMode;
 use model::{GraphModel, SourceReplaced};
 use morph::{Frame, Morph};
@@ -238,6 +238,7 @@ pub struct GraphPanel {
     /// The layer drawing the graph; notified through
     /// [`GraphPanel::invalidate_canvas`].
     canvas: Entity<GraphCanvas>,
+    edge_legend: Legend,
 }
 
 impl GraphPanel {
@@ -368,6 +369,7 @@ impl GraphPanel {
             pins: pins::Pins::new(),
             titles: Vec::new(),
             canvas,
+            edge_legend: Legend::default(),
         }
     }
 
@@ -400,12 +402,13 @@ impl GraphPanel {
     /// Frames the layer drawing the selected mode's layout, or a spinner while
     /// that layout is still being computed — the toolbar stays above either, so
     /// the picker remains reachable.
-    fn viewport(&self, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
+    fn viewport(&mut self, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
         let Some(drawn) = self.drawn() else {
             return bviz_ui_components::centered_spinner("Laying out…", &palette.colors)
                 .into_any_element();
         };
-        let edge_legend = legend(drawn.view(self.camera().zoom), &palette);
+        let zoom = self.camera().zoom;
+        let edge_legend = self.edge_legend.card(&drawn, zoom, &palette);
         let entity = cx.entity();
         div()
             .id("graph-viewport")
