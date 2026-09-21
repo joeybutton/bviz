@@ -1319,15 +1319,24 @@ impl Workspace {
             .flex()
             .flex_col()
             .size_full()
+            .child(pane.clone())
             // A press anywhere in a pane aims the panel actions at it. Taken in
             // the capture phase, so a panel that makes something of the press
-            // itself does not keep it from reaching here.
-            .capture_any_mouse_down(cx.listener(move |workspace, _, window, cx| {
-                if workspace.active != handle {
-                    workspace.activate_pane(handle.clone(), window, cx);
-                }
-            }))
-            .child(pane.clone())
+            // itself does not keep it from reaching here; and on a layer over
+            // the panel, so a part of the panel that blocks the mouse from what
+            // lies under it does not either. A deferred draw lands above every
+            // such layer, so a popup that blocks the mouse where it overhangs a
+            // neighbouring pane does not activate the neighbour.
+            .child(
+                div()
+                    .absolute()
+                    .inset_0()
+                    .capture_any_mouse_down(cx.listener(move |workspace, _, window, cx| {
+                        if workspace.active != handle {
+                            workspace.activate_pane(handle.clone(), window, cx);
+                        }
+                    })),
+            )
     }
 
     fn split_element(
