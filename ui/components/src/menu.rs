@@ -1,33 +1,17 @@
 //! A menu of labelled rows standing over the window at the point it was asked
 //! for, some of its rows opening a submenu beside them.
 
-use crate::laid_out_width;
-use bviz_ui_theme::{ThemeColors, over};
+use crate::dropdown_chrome::{self, MENU_ICON, ROW_INSET, SHEET_BORDER};
+use bviz_ui_theme::ThemeColors;
 use gpui::{
-    AnyWindowHandle, App, Bounds, Context, Div, EventEmitter, FocusHandle, Hsla, IntoElement,
-    Keystroke, MouseMoveEvent, Pixels, Point, Render, ScrollHandle, SharedString, Size, Stateful,
-    Subscription, Window, div, point, prelude::*, px, size,
+    AnyWindowHandle, App, Bounds, Context, Div, EventEmitter, FocusHandle, IntoElement, Keystroke,
+    MouseMoveEvent, Pixels, Point, Render, ScrollHandle, SharedString, Size, Stateful,
+    Subscription, TextStyleRefinement, Window, div, point, prelude::*, px, size,
 };
 use std::rc::Rc;
 
-/// Height of a row, giving its label a line to sit on with room to aim at.
-const ROW_HEIGHT: Pixels = px(24.);
-
-/// Room kept between a row's ends and what it holds.
-const ROW_PAD: Pixels = px(10.);
-
 /// Room above the first row of a list and below its last.
 const LIST_PAD: Pixels = px(4.);
-
-/// The line drawn around a list.
-const BORDER: Pixels = px(1.);
-
-/// Size the rows are set at, which their labels are measured against.
-const LABEL_SIZE: Pixels = px(13.);
-
-/// The mark at the trailing end of a row that opens a submenu. Every row keeps
-/// room for one, so the labels of a list line up whether or not they open one.
-const MARK_SIZE: Pixels = px(12.);
 
 /// Room between a row's label and the mark at the end of it.
 const LABEL_GAP: Pixels = px(16.);
@@ -321,7 +305,7 @@ impl Menu {
             .iter()
             .enumerate()
             .map(|(row, laid)| self.row(laid, row, aimed == Some(row), colors, cx));
-        div()
+        let list = div()
             .id(id)
             .absolute()
             .left(frame.left())
@@ -333,16 +317,12 @@ impl Menu {
             .py(LIST_PAD)
             .overflow_y_scroll()
             .track_scroll(scroll)
-            .bg(colors.panel)
-            .border(BORDER)
-            .border_color(colors.border)
-            .rounded_md()
             .shadow_lg()
-            .text_color(colors.text)
             // A press on a row is not also the press outside the menu that
             // closes it, which would take the row away before its release.
             .on_any_mouse_down(|_, _, cx| cx.stop_propagation())
-            .children(laid)
+            .children(laid);
+        dropdown_chrome::surface(list, colors)
     }
 
     /// The `row`th row of a list.
@@ -355,33 +335,16 @@ impl Menu {
         cx: &Context<Self>,
     ) -> Stateful<Div> {
         let aim = laid.aim;
-        div()
-            .id(("menu-row", row))
-            .flex()
-            .flex_row()
-            .items_center()
+        dropdown_chrome::aimed_row(("menu-row", row).into(), colors, aimed)
             .justify_between()
             .flex_none()
-            .h(ROW_HEIGHT)
-            .px(ROW_PAD)
             .gap(LABEL_GAP)
-            .cursor_pointer()
-            .when(aimed, |row| row.bg(aimed_fill(colors)))
             .on_mouse_move(cx.listener(move |this, event: &MouseMoveEvent, _, cx| {
                 this.aim_at_cursor(aim, event.position, cx);
             }))
             .on_click(cx.listener(move |this, _, window, cx| this.take(aim, window, cx)))
             .child(div().whitespace_nowrap().child(laid.label.clone()))
-            .child(
-                div()
-                    .w(MARK_SIZE)
-                    .flex_none()
-                    .children(laid.opens_submenu.then(|| {
-                        bviz_ui_assets::icon("caret-right")
-                            .size(MARK_SIZE)
-                            .text_color(colors.text_muted)
-                    })),
-            )
+            .child(dropdown_chrome::submenu_mark(colors, laid.opens_submenu))
     }
 }
 
@@ -487,12 +450,6 @@ fn walked(aim: Aim, by: isize, shape: &[Option<usize>]) -> Aim {
     }
 }
 
-/// The fill under the row a menu is aimed at, over the surface the menu itself
-/// rests on.
-fn aimed_fill(colors: &ThemeColors) -> Hsla {
-    Hsla::from(over(colors.element_hover, colors.panel))
-}
-
 /// The row `by` steps from `row` of a list of `rows` rows, wrapping at either
 /// end; from no row at all, the first row stepping forward and the last
 /// stepping back. `None` for a list with no rows to stand on.
@@ -541,28 +498,39 @@ fn within(at: Point<Pixels>, a: Point<Pixels>, b: Point<Pixels>, c: Point<Pixels
 }
 
 /// How wide the rows reading `labels` are laid out: room for the widest of
-/// them, for what a row keeps at its ends, and for the mark a row opening a
-/// submenu carries.
+/// them in the menu's own face, for what a row keeps at its ends, and for the
+/// mark a row opening a submenu carries.
 fn list_width<'a>(
     labels: impl IntoIterator<Item = &'a SharedString>,
     window: &mut Window,
 ) -> Pixels {
-    let font = gpui::font(bviz_ui_assets::UI);
-    let ink = window.text_style().color;
-    let mut widest = px(0.);
-    for label in labels {
-        let line = bviz_ui_assets::shape_line(window, label.clone(), font.clone(), LABEL_SIZE, ink);
-        widest = widest.max(line.width);
-    }
-    laid_out_width(widest) + ROW_PAD * 2. + LABEL_GAP + MARK_SIZE + BORDER * 2.
+    let widest = in_face(window, |window| {
+        dropdown_chrome::widest(window, labels.into_iter().cloned())
+    });
+    widest + ROW_INSET * 2. + LABEL_GAP + MENU_ICON + SHEET_BORDER * 2.
 }
 
-/// How tall a list of `rows` rows is laid out in a window of `viewport`: as
-/// tall as its rows, and no taller than it can stand and still be reached
-/// whole, past which it scrolls.
-fn list_height(rows: usize, viewport: Size<Pixels>) -> Pixels {
-    let held = ROW_HEIGHT * rows as f32 + LIST_PAD * 2. + BORDER * 2.;
+/// How tall a list of `rows` rows each `row` tall is laid out in a window of
+/// `viewport`: as tall as its rows, and no taller than it can stand and still
+/// be reached whole, past which it scrolls.
+fn list_height(rows: usize, row: Pixels, viewport: Size<Pixels>) -> Pixels {
+    let held = row * rows as f32 + LIST_PAD * 2. + SHEET_BORDER * 2.;
     held.min(MAX_LIST_HEIGHT).min(viewport.height)
+}
+
+/// The face a menu's rows read in, set by the menu itself so they read in the
+/// UI face whatever the menu is mounted under.
+fn face() -> TextStyleRefinement {
+    TextStyleRefinement {
+        font_family: Some(bviz_ui_assets::UI.into()),
+        ..Default::default()
+    }
+}
+
+/// Runs `measure` under the face the menu's rows read in, so what it measures
+/// is what they render at.
+fn in_face<R>(window: &mut Window, measure: impl FnOnce(&mut Window) -> R) -> R {
+    window.with_text_style(Some(face()), measure)
 }
 
 /// Where a list of `extent` opens for a menu asked at `from`: down and to the
@@ -592,19 +560,21 @@ fn opened(
 }
 
 /// Where the submenu the row at `row` opens is laid out: beside the list
-/// `frame` lays that row out in, level with the row itself, `scrolled` giving
-/// how far that list has carried its rows from where it starts.
+/// `frame` lays that row out in, level with the row itself, each row of that
+/// list standing `row_height` tall and `scrolled` giving how far the list has
+/// carried its rows from where it starts.
 fn beside(
     frame: Bounds<Pixels>,
     row: usize,
+    row_height: Pixels,
     scrolled: Pixels,
     extent: Size<Pixels>,
     viewport: Size<Pixels>,
 ) -> Bounds<Pixels> {
-    let top = frame.top() + BORDER + LIST_PAD + ROW_HEIGHT * row as f32 + scrolled;
+    let top = frame.top() + SHEET_BORDER + LIST_PAD + row_height * row as f32 + scrolled;
     opened(
         point(frame.right(), top),
-        point(frame.left(), top + ROW_HEIGHT),
+        point(frame.left(), top + row_height),
         extent,
         viewport,
     )
@@ -614,19 +584,23 @@ impl Render for Menu {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = bviz_ui_theme::theme(window, cx).colors;
         let viewport = window.viewport_size();
+        let row_height = in_face(window, |window| dropdown_chrome::row_height(window));
         let extent = size(
             list_width(self.items.iter().map(|item| &item.label), window),
-            list_height(self.items.len(), viewport),
+            list_height(self.items.len(), row_height, viewport),
         );
         let frame = opened(self.at, self.at, extent, viewport);
         let open = self.aim.on_menu().and_then(|under| {
             let items = self.submenu(under)?;
             let extent = size(
                 list_width(items.iter().map(|item| &item.label), window),
-                list_height(items.len(), viewport),
+                list_height(items.len(), row_height, viewport),
             );
             let scrolled = self.list_scroll.offset().y;
-            Some((under, beside(frame, under, scrolled, extent, viewport)))
+            Some((
+                under,
+                beside(frame, under, row_height, scrolled, extent, viewport),
+            ))
         });
         self.submenu_frame = open.map(|(_, beside)| beside);
         let rows: Vec<Laid<'_>> = self
@@ -652,8 +626,9 @@ impl Render for Menu {
                 .collect();
             Some(self.list(&rows, beside, Which::Submenu, &colors, cx))
         });
-        div()
-            .absolute()
+        let mut menu = div();
+        *menu.text_style() = face();
+        menu.absolute()
             .inset_0()
             .occlude()
             .track_focus(&self.focus_handle)
@@ -661,8 +636,6 @@ impl Render for Menu {
                 cx.stop_propagation();
                 this.close(window, cx);
             }))
-            .font_family(bviz_ui_assets::UI)
-            .text_size(LABEL_SIZE)
             .child(self.list(&rows, frame, Which::Menu, &colors, cx))
             .children(submenu)
     }
@@ -671,9 +644,9 @@ impl Render for Menu {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bviz_ui_theme::{
-        MIN_TEXT_CONTRAST, MIN_VISIBLE_STEP, built_in_themes, contrast_ratio, level_step,
-    };
+
+    /// How tall a row of the lists laid out here stands.
+    const ROW: Pixels = px(24.);
 
     const WINDOW: Size<Pixels> = Size {
         width: px(1000.),
@@ -729,8 +702,8 @@ mod tests {
     fn a_list_of_many_rows_is_held_inside_the_window() {
         let rows = 200;
         for viewport in [WINDOW, size(px(400.), px(160.))] {
-            let extent = size(px(200.), list_height(rows, viewport));
-            assert!(extent.height < ROW_HEIGHT * rows as f32, "{viewport:?}");
+            let extent = size(px(200.), list_height(rows, ROW, viewport));
+            assert!(extent.height < ROW * rows as f32, "{viewport:?}");
             assert!(extent.height <= viewport.height, "{viewport:?}");
             let asked = point(px(10.), px(10.));
             let opened = opened(asked, asked, extent, viewport);
@@ -744,11 +717,11 @@ mod tests {
     #[test]
     fn a_submenu_opens_beside_the_row_that_opens_it() {
         let frame = at(100.0, 100.0);
-        let beside = beside(frame, 2, px(0.), size(px(120.), px(80.)), WINDOW);
+        let beside = beside(frame, 2, ROW, px(0.), size(px(120.), px(80.)), WINDOW);
         assert_eq!(beside.left(), frame.right());
         assert_eq!(
             beside.top(),
-            frame.top() + BORDER + LIST_PAD + ROW_HEIGHT * 2.
+            frame.top() + SHEET_BORDER + LIST_PAD + ROW * 2.
         );
     }
 
@@ -757,7 +730,7 @@ mod tests {
     #[test]
     fn a_submenu_with_no_room_beside_its_list_opens_the_other_way() {
         let frame = at(780.0, 100.0);
-        let beside = beside(frame, 0, px(0.), size(px(120.), px(80.)), WINDOW);
+        let beside = beside(frame, 0, ROW, px(0.), size(px(120.), px(80.)), WINDOW);
         assert_eq!(beside.right(), frame.left());
     }
 
@@ -767,9 +740,9 @@ mod tests {
     fn a_submenu_with_no_room_below_its_row_opens_upward() {
         let frame = at(100.0, 400.0);
         let extent = size(px(120.), px(300.));
-        let beside = beside(frame, 5, px(0.), extent, WINDOW);
-        let row = frame.top() + BORDER + LIST_PAD + ROW_HEIGHT * 5.;
-        assert_eq!(beside.bottom(), row + ROW_HEIGHT);
+        let beside = beside(frame, 5, ROW, px(0.), extent, WINDOW);
+        let row = frame.top() + SHEET_BORDER + LIST_PAD + ROW * 5.;
+        assert_eq!(beside.bottom(), row + ROW);
         assert!(beside.bottom() <= WINDOW.height);
     }
 
@@ -779,7 +752,7 @@ mod tests {
     fn a_submenu_that_fits_on_neither_side_is_held_inside_the_window() {
         let frame = at(400.0, 100.0);
         let extent = size(WINDOW.width + px(200.), px(80.));
-        let beside = beside(frame, 0, px(0.), extent, WINDOW);
+        let beside = beside(frame, 0, ROW, px(0.), extent, WINDOW);
         assert_eq!(beside.left(), px(0.));
     }
 
@@ -791,8 +764,8 @@ mod tests {
         let extent = size(px(120.), px(80.));
         let scrolled = px(-60.);
         assert_eq!(
-            beside(frame, 4, scrolled, extent, WINDOW).top(),
-            beside(frame, 4, px(0.), extent, WINDOW).top() + scrolled
+            beside(frame, 4, ROW, scrolled, extent, WINDOW).top(),
+            beside(frame, 4, ROW, px(0.), extent, WINDOW).top() + scrolled
         );
     }
 
@@ -933,31 +906,5 @@ mod tests {
         let from = point(px(200.), px(110.));
         assert!(travelling_into(from, point(px(170.), px(140.)), submenu));
         assert!(!travelling_into(from, point(px(240.), px(140.)), submenu));
-    }
-
-    /// A row names what choosing it does, so its label has to be read on the
-    /// fill the row carries while the menu is aimed at it.
-    #[test]
-    fn the_aimed_row_keeps_its_label() {
-        for theme in built_in_themes() {
-            let colors = &theme.colors;
-            let contrast = contrast_ratio(colors.text, aimed_fill(colors));
-            assert!(
-                contrast >= MIN_TEXT_CONTRAST,
-                "{}: {contrast}:1",
-                theme.name
-            );
-        }
-    }
-
-    /// Which row the menu is aimed at is said by the fill under it alone, so
-    /// that fill has to stand off the menu's own surface.
-    #[test]
-    fn the_aimed_row_stands_off_the_rows_around_it() {
-        for theme in built_in_themes() {
-            let colors = &theme.colors;
-            let step = level_step(aimed_fill(colors), colors.panel);
-            assert!(step >= MIN_VISIBLE_STEP, "{}: {step} levels", theme.name);
-        }
     }
 }
