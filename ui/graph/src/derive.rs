@@ -48,13 +48,13 @@ pub(crate) struct Level {
 }
 
 /// Identifies the view a [`Drawn`] resolves to, by which work derived from that
-/// view is redone exactly when the view moves under it. A derivation replaces
-/// both the layered drawing and the map, so the generation that produced them
-/// tells either from what took its place.
-#[derive(Clone, Copy, PartialEq, Eq)]
+/// view is redone exactly when the view moves under it. Every drawing a panel
+/// takes up is numbered afresh, so a view is never taken for one of the drawing
+/// it replaced.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum ViewKey {
     Layered(u64),
-    Map { derivation: u64, level: usize },
+    Map { drawing: u64, level: usize },
 }
 
 /// A share in the layout a mode draws, cheap to clone into a `'static` paint
@@ -62,14 +62,8 @@ pub(crate) enum ViewKey {
 /// a frame draws is picked at the same scale it paints at.
 #[derive(Clone)]
 pub(crate) enum Drawn {
-    Layered {
-        view: Arc<LaidOut>,
-        derivation: u64,
-    },
-    Map {
-        map: Arc<MapLayout>,
-        derivation: u64,
-    },
+    Layered { view: Arc<LaidOut>, drawing: u64 },
+    Map { map: Arc<MapLayout>, drawing: u64 },
 }
 
 impl Drawn {
@@ -84,9 +78,9 @@ impl Drawn {
     /// Identifies the view [`view`](Self::view) returns at `zoom`.
     pub(crate) fn view_key(&self, zoom: f32) -> ViewKey {
         match self {
-            Self::Layered { derivation, .. } => ViewKey::Layered(*derivation),
-            Self::Map { map, derivation } => ViewKey::Map {
-                derivation: *derivation,
+            Self::Layered { drawing, .. } => ViewKey::Layered(*drawing),
+            Self::Map { map, drawing } => ViewKey::Map {
+                drawing: *drawing,
                 level: map.level_for_scale(zoom),
             },
         }
@@ -259,9 +253,8 @@ pub(crate) struct Derived {
     /// request cancels the one it replaces, so at most one runs at a time and
     /// its result is the panel's.
     in_flight: Option<InFlight>,
-    /// Counts the derivations adopted, by which the drawing on screen is told
-    /// from the one it replaced.
-    landed: u64,
+    /// Counts the drawings taken up, numbering each for its [`ViewKey`].
+    drawings: u64,
     /// Whether the filter awaiting a restriction was set by a gesture naming
     /// what to look at, which is answered by moving the camera onto what that
     /// restriction leaves drawn.
@@ -281,7 +274,7 @@ impl Derived {
             layered: None,
             over_budget: None,
             in_flight: None,
-            landed: 0,
+            drawings: 0,
             frame_on_landing: false,
             _work: Task::ready(()),
         }
@@ -300,6 +293,7 @@ impl Derived {
         self.expanded = loaded.opening.expanded.clone();
         self.over_budget = loaded.opening.over_budget;
         self.slice = Some(Slice::whole(&loaded.shared, Filter::default()));
+        self.drawings += 1;
         self.layered = None;
         self.in_flight = None;
         self._work = Task::ready(());
@@ -312,11 +306,11 @@ impl Derived {
         match mode {
             LayoutMode::Map => Some(Drawn::Map {
                 map: Arc::clone(&slice.map),
-                derivation: self.landed,
+                drawing: self.drawings,
             }),
             LayoutMode::Layered => self.layered.as_ref().map(|view| Drawn::Layered {
                 view: Arc::clone(view),
-                derivation: self.landed,
+                drawing: self.drawings,
             }),
         }
     }
@@ -382,7 +376,7 @@ impl Derived {
     /// Takes `landed` as what this panel draws.
     fn adopt(&mut self, landed: Landed) -> Adopted {
         self.in_flight = None;
-        self.landed += 1;
+        self.drawings += 1;
         let restriction = landed.restricted.map(|restricted| {
             self.expanded = restricted.expanded;
             self.over_budget = restricted.over_budget;
@@ -986,9 +980,22 @@ mod tests {
         }
     }
 
-    /// Each drawing adopted is told from the one it replaced, so work derived
-    /// from a drawing — a camera's fit, a morph's anchors — is redone exactly
-    /// when a derivation lands.
+    /// A graph opened in place of another is told from it even where no
+    /// derivation has landed on either, so work keyed on the old graph's view
+    /// is not taken for the new one's.
+    #[test]
+    fn a_document_opened_into_a_panel_identifies_the_drawing_it_leaves() {
+        let mut derived = opened(&document());
+        let first = derived.drawn(LayoutMode::Map).expect("a map").view_key(1.0);
+
+        derived.opened_on(&document());
+
+        let second = derived.drawn(LayoutMode::Map).expect("a map").view_key(1.0);
+        assert_ne!(first, second);
+    }
+
+    /// A derivation adopted is told from the drawing it replaced, so work keyed
+    /// on the view is redone when it lands.
     #[test]
     fn each_derivation_adopted_identifies_the_drawing_it_leaves() {
         let loaded = document();
@@ -998,7 +1005,7 @@ mod tests {
         derived.adopt(landed(&loaded, 10.0));
 
         let second = derived.drawn(LayoutMode::Map).expect("a map").view_key(1.0);
-        assert!(first != second);
+        assert_ne!(first, second);
     }
 
     /// The drawing on screen is the panel's until a derivation lands, so a
