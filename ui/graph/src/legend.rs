@@ -45,6 +45,7 @@ pub(crate) fn legend(g: &LaidOut, palette: &Palette) -> Option<Div> {
     .collect();
     (!present.is_empty()).then(|| {
         div()
+            .block_mouse_except_scroll()
             .flex()
             .flex_col()
             .gap_1()
