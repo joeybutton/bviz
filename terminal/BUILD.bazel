@@ -5,7 +5,10 @@ load("@rules_rs//rs:rust_test.bzl", "rust_test")
 filegroup(
     name = "display_src",
     srcs = ["src/display/mod.rs"],
-    package_metadata = ["//LICENSES:alacritty"],
+    package_metadata = [
+        "//:package_metadata",
+        "//LICENSES:alacritty",
+    ],
 )
 
 rust_library(

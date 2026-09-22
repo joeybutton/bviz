@@ -1,6 +1,9 @@
 # The patch replaces most of the build script, so it carries those lines from
 # the Zed tree under that tree's terms.
-package(default_package_metadata = ["//LICENSES:gpui"])
+package(default_package_metadata = [
+    "//:package_metadata",
+    "//LICENSES:gpui",
+])
 
 exports_files(
     ["gpui_macos-prebuilt-scene-header.patch"],
