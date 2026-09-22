@@ -113,3 +113,9 @@ bazel run -c opt //bviz -- \
 At least one document is required. The query files merge into a single joint
 graph, so each of `--aquery`, `--cquery` and `--query` names at most one file per
 invocation; `--profile` and `--bep` each open a panel per occurrence.
+
+## License
+
+bviz is licensed under the Apache License 2.0; see [LICENSE](LICENSE). The
+third-party works it bundles or derives from, and their terms, are listed in
+[NOTICE](NOTICE).

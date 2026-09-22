@@ -1,9 +1,11 @@
+bviz
+Copyright 2026 Yume Technologies AG
+
 bviz bundles and derives from the third-party work listed here. Each entry
 gives what the work is, where it came from, and which licence declaration
 records its terms. Every declaration names an SPDX kind and the text it
 governs, so this file adds only what a declaration cannot state: which part of
-bviz a work reached, and how. None of the terms below are bviz's own, which
-are not settled, and nothing here grants any.
+bviz a work reached, and how. None of the terms below are bviz's own.
 
 LICENSES/ holds the text of work bviz carries in its own tree. Work Bazel
 fetches arrives with its own text, and its declaration points there.
