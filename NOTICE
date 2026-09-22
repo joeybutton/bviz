@@ -80,9 +80,9 @@ Each of those patches carries blocks of Eclipse Public License 2.0 source and
 rewrites them, so the patches are themselves available under that licence.
 
 The patches against the Zed crates carry Apache-2.0 lines from the same Zed
-tree the derived files above come from, under //LICENSES:gpui. The xkbcommon
-patch carries a module declaration, a cfg attribute and six lines around them
-— too little to attribute, and it is the one patch with no declaration.
+tree the derived files above come from, under //LICENSES:gpui. Every other
+patch reshapes too little of what it applies to for attribution, and carries no
+declaration.
 
 ## Colour values
 

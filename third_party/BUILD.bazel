@@ -1,3 +1,7 @@
+load("@package_metadata//licenses/rules:license.bzl", "license")
+load("@package_metadata//licenses/rules:license_kind.bzl", "license_kind")
+load("@package_metadata//rules:package_metadata.bzl", "package_metadata")
+
 # rules_rs's generated crate repositories can't resolve the root module's bazel_dep
 # apparent names, and canonical repo names must not be hardcoded. Alias the BCR
 # system libraries here so MODULE.bazel crate annotations can reference them as
@@ -19,4 +23,48 @@ alias(
     name = "wayland_cursor",
     actual = "@wayland//:wayland_cursor",
     visibility = ["//visibility:public"],
+)
+
+package_metadata(
+    name = "xkbcommon_package_metadata",
+    attributes = [":xkbcommon_license"],
+    purl = "pkg:bazel/xkbcommon",
+)
+
+license(
+    name = "xkbcommon_license",
+    kind = ":xkbcommon_license_kind",
+    text = "@xkbcommon//:LICENSE",
+)
+
+# The LICENSE file collects the notices of several source files, each under its
+# own terms.
+license_kind(
+    name = "xkbcommon_license_kind",
+    full_name = "libxkbcommon licences",
+    identifier = "MIT AND MIT-open-group AND HPND AND HPND-sell-variant AND DEC-3-Clause",
+)
+
+package_metadata(
+    name = "wayland_package_metadata",
+    attributes = [":wayland_license"],
+    purl = "pkg:bazel/wayland",
+)
+
+license(
+    name = "wayland_license",
+    kind = "@package_metadata//licenses/spdx:MIT",
+    text = "@wayland//:COPYING",
+)
+
+package_metadata(
+    name = "libffi_package_metadata",
+    attributes = [":libffi_license"],
+    purl = "pkg:bazel/libffi",
+)
+
+license(
+    name = "libffi_license",
+    kind = "@package_metadata//licenses/spdx:MIT",
+    text = "@libffi//:LICENSE",
 )
