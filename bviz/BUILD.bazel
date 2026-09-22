@@ -1,5 +1,6 @@
 load("@rules_rs//rs:rust_binary.bzl", "rust_binary")
 load("@rules_rs//rs:rust_test.bzl", "rust_test")
+load("//tools/notices:notices.bzl", "third_party_notices")
 
 rust_binary(
     name = "bviz",
@@ -24,4 +25,26 @@ rust_binary(
 rust_test(
     name = "bviz_test",
     crate = ":bviz",
+)
+
+third_party_notices(
+    name = "third_party_notices",
+    binary = ":bviz",
+    denied_licences = [
+        "AGPL-",
+        "GPL-",
+        "LGPL-",
+    ],
+    own_package_metadata = "//:package_metadata",
+    preferred_licences = ["Apache-2.0"],
+    repository_package_metadata = [
+        "//third_party:libffi_package_metadata",
+        "//third_party:protobuf_package_metadata",
+        "//third_party:rules_rust_package_metadata",
+        "//third_party:wayland_package_metadata",
+        "//third_party:xkbcommon_package_metadata",
+        "//third_party:zed_package_metadata",
+    ],
+    toolchain_package_metadata = ["//third_party:rust_std_package_metadata"],
+    visibility = ["//dist:__pkg__"],
 )

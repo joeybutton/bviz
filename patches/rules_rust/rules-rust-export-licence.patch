@@ -1,0 +1,15 @@
+Export the licence text
+
+The archive ships its licence as LICENSE.txt, which the BUILD file leaves out
+of its exported files, so no licence declaration can point at it.
+
+--- a/BUILD.bazel
++++ b/BUILD.bazel
+@@ -2,6 +2,7 @@
+     ".clippy.toml",
+     ".rustfmt.toml",
+     "LICENSE",
++    "LICENSE.txt",
+     "MODULE.bazel",
+     "version.bzl",
+ ])

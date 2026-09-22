@@ -5,6 +5,7 @@ members = [
     "cli",
     "graph/layout",
     "terminal",
+    "tools/notices",
     "tools/scene_header",
     "trace/layout",
     "trace/profile",
@@ -39,10 +40,13 @@ hashbrown = { version = "0.16", default-features = false }
 libmimalloc-sys = "0.1"
 mimalloc = "0.1"
 num_cpus = "1"
+packageurl = "0.7"
 rayon = "1"
 rustc-hash = "2"
+semver = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+spdx = "0.13"
 org-eclipse-elk-alg-layered = { git = "https://github.com/openedges/elk-rs", tag = "v0.11.0+rs.2" }
 org-eclipse-elk-core = { git = "https://github.com/openedges/elk-rs", tag = "v0.11.0+rs.2" }
 org-eclipse-elk-graph = { git = "https://github.com/openedges/elk-rs", tag = "v0.11.0+rs.2" }

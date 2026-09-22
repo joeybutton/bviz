@@ -29,6 +29,18 @@ Phosphor Icons 2.0.8 — MIT
     Copyright (c) 2023 Phosphor Icons
     https://github.com/phosphor-icons/core
 
+## Copied into the generated notices
+
+THIRD_PARTY_NOTICES, written by //bviz:third_party_notices and shipped in the
+release archives, quotes the SPDX License List's vetted text for any licence a
+component is taken under but ships no text of its own for. Those texts are
+copied verbatim out of the archive the declaration below points at, so the
+generated file redistributes them.
+
+SPDX License List data 3.29.0 — Creative Commons Attribution 3.0 Unported
+    Copyright The Linux Foundation and its contributors
+    https://github.com/spdx/license-list-data
+
 ## Derived source
 
 Three source files were written from Apache-2.0 source in the Zed editor
@@ -93,6 +105,24 @@ The Oklab conversion in ui/theme/src/lib.rs uses the reference constants Björn
 Ottosson publishes with "A perceptual color space for image processing"
 (https://bottosson.github.io/posts/oklab/). They are cited at the point they
 are used; the entry is here to record where they came from.
+
+## Linked under the LGPL
+
+gpui's Wayland backend binds KDE's org_kde_kwin_blur protocol, so the Linux
+binaries link Rust bindings that wayland-protocols-plasma generates from KDE
+Plasma's protocol definitions. Sixteen of those definitions are
+LGPL-2.1-or-later, and the crate ships their text at
+plasma-wayland-protocols/COPYING.LIB. bviz takes them under LGPL-3.0, which "or
+later" permits and which Apache-2.0 is compatible with.
+
+wayland-protocols-plasma 0.3.12 — GNU Lesser General Public License 3.0
+    https://crates.io/crates/wayland-protocols-plasma/0.3.12
+
+Whoever redistributes a Linux binary owes what LGPL-3.0 section 4 asks of a
+work that links the library, and both are already in hand: the library's
+complete source is the release above, and the binary can be relinked against a
+modified version of it by rebuilding bviz from source with that version in
+place.
 
 ## Dependencies
 

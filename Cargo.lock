@@ -904,6 +904,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "bviz_notices"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "packageurl",
+ "semver",
+ "serde",
+ "serde_json",
+ "spdx",
+]
+
+[[package]]
 name = "bviz_parallel"
 version = "0.1.0"
 dependencies = [
@@ -4337,6 +4349,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "packageurl"
+version = "0.7.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e7719f5f3fc6fbf28f1b6b3d1cddd43958116db8f2e6c97e520757fbb490fcbf"
+dependencies = [
+ "percent-encoding",
+ "thiserror 2.0.19",
+]
+
+[[package]]
 name = "parking"
 version = "2.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5704,6 +5726,15 @@ checksum = "4aaa7368fcf4852a4c2dd92df0cace6a71f2091ca0a23391ce7f3a31833f1523"
 dependencies = [
  "borsh",
  "serde_core",
+]
+
+[[package]]
+name = "spdx"
+version = "0.13.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "081670c233dfbed55690cc0cd38424e0e24ac1b2673d0b408b3f7b684738dfa9"
+dependencies = [
+ "smallvec",
 ]
 
 [[package]]

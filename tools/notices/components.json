@@ -1,0 +1,59 @@
+{
+  "declared_licences": {
+    "gpui_shared_string": {
+      "licence": "Apache-2.0",
+      "reason": "A crate of the Zed tree, whose Cargo manifests carry no license field; the crate ships the LICENSE-APACHE that governs it."
+    },
+    "gpui_util": {
+      "licence": "Apache-2.0",
+      "reason": "A crate of the Zed tree, whose Cargo manifests carry no license field; the crate ships the LICENSE-APACHE that governs it."
+    }
+  },
+  "copyright_holders": {
+    "rust-lang/rust": {
+      "holders": [
+        "The Rust Project Contributors"
+      ],
+      "reason": "The standard library reaches the binary through the toolchain rather than a fetched archive, so no licence text travels with it; https://github.com/rust-lang/rust/blob/master/LICENSE-MIT names this holder."
+    },
+    "harfrust": {
+      "holders": [
+        "HarfBuzz developers",
+        "Yevhenii Reizner"
+      ],
+      "reason": "The published crate carries no licence file and its Cargo manifest no authors; https://github.com/harfbuzz/harfrust/blob/main/LICENSE names these holders."
+    },
+    "zune-core": {
+      "holders": [
+        "zune-image developers"
+      ],
+      "reason": "The published crate carries no licence file and its Cargo manifest no authors; https://github.com/etemesi254/zune-image/blob/dev/LICENSE-MIT names this holder."
+    },
+    "zune-inflate": {
+      "holders": [
+        "zune-image developers"
+      ],
+      "reason": "The published crate carries no licence file and its Cargo manifest no authors; https://github.com/etemesi254/zune-image/blob/dev/LICENSE-MIT names this holder."
+    },
+    "objc2-app-kit": {
+      "holders": [
+        "Mads Marquart"
+      ],
+      "reason": "The published crate carries no licence file and its Cargo manifest no authors; https://github.com/madsmtm/objc2/blob/master/LICENSE-MIT.txt names this holder."
+    },
+    "objc2-foundation": {
+      "holders": [
+        "Mads Marquart"
+      ],
+      "reason": "The published crate carries no licence file and its Cargo manifest no authors; https://github.com/madsmtm/objc2/blob/master/LICENSE-MIT.txt names this holder."
+    }
+  },
+  "accepted_texts": {
+    "wayland-protocols-plasma": {
+      "plasma-wayland-protocols/COPYING.LIB": {
+        "terms": "LGPL-3.0",
+        "reason": "The crate generates its Rust protocol bindings from the KDE Plasma protocol definitions beside this text, sixteen of which are LGPL-2.1-or-later, so the terms do reach what bviz links. bviz accepts them under the terms this entry names, which \"or later\" permits and which Apache-2.0 is compatible with; the obligations that follow for anyone redistributing a bviz binary are discharged in NOTICE."
+      }
+    }
+  }
+}

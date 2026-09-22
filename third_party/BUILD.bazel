@@ -29,6 +29,7 @@ package_metadata(
     name = "xkbcommon_package_metadata",
     attributes = [":xkbcommon_license"],
     purl = "pkg:bazel/xkbcommon",
+    visibility = ["//bviz:__pkg__"],
 )
 
 license(
@@ -49,6 +50,7 @@ package_metadata(
     name = "wayland_package_metadata",
     attributes = [":wayland_license"],
     purl = "pkg:bazel/wayland",
+    visibility = ["//bviz:__pkg__"],
 )
 
 license(
@@ -61,10 +63,69 @@ package_metadata(
     name = "libffi_package_metadata",
     attributes = [":libffi_license"],
     purl = "pkg:bazel/libffi",
+    visibility = ["//bviz:__pkg__"],
 )
 
 license(
     name = "libffi_license",
     kind = "@package_metadata//licenses/spdx:MIT",
     text = "@libffi//:LICENSE",
+)
+
+package_metadata(
+    name = "protobuf_package_metadata",
+    attributes = [":protobuf_license"],
+    purl = "pkg:bazel/protobuf",
+    visibility = ["//bviz:__pkg__"],
+)
+
+license(
+    name = "protobuf_license",
+    kind = "@package_metadata//licenses/spdx:BSD-3-Clause",
+    text = "@com_google_protobuf//:LICENSE",
+)
+
+package_metadata(
+    name = "zed_package_metadata",
+    attributes = [":zed_license"],
+    purl = "pkg:github/zed-industries/zed@v1.6.3",
+    visibility = ["//bviz:__pkg__"],
+)
+
+license(
+    name = "zed_license",
+    kind = "@package_metadata//licenses/spdx:Apache-2.0",
+    text = "@crates//:gpui_licence",
+)
+
+package_metadata(
+    name = "rules_rust_package_metadata",
+    attributes = [":rules_rust_license"],
+    purl = "pkg:bazel/rules_rust",
+    visibility = ["//bviz:__pkg__"],
+)
+
+license(
+    name = "rules_rust_license",
+    kind = "@package_metadata//licenses/spdx:Apache-2.0",
+    text = "@rules_rs_rules_rust//:LICENSE.txt",
+)
+
+# The Rust standard library, which the Rust toolchain links into every binary.
+package_metadata(
+    name = "rust_std_package_metadata",
+    attributes = [":rust_std_license"],
+    purl = "pkg:github/rust-lang/rust",
+    visibility = ["//bviz:__pkg__"],
+)
+
+license(
+    name = "rust_std_license",
+    kind = ":rust_std_license_kind",
+)
+
+license_kind(
+    name = "rust_std_license_kind",
+    full_name = "MIT License or Apache License 2.0",
+    identifier = "MIT OR Apache-2.0",
 )
