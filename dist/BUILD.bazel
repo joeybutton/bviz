@@ -12,12 +12,16 @@ TARGET_PLATFORMS = {
 
 [
     platform_transition_filegroup(
-        name = "bviz_{}".format(suffix),
-        srcs = ["//bviz"],
+        name = "{}_{}".format(name, suffix),
+        srcs = [src],
         tags = ["manual"],
         target_platform = platform,
     )
     for suffix, platform in TARGET_PLATFORMS.items()
+    for name, src in {
+        "bviz": "//bviz",
+        "notices": "//bviz:third_party_notices",
+    }.items()
 ]
 
 # Only the sources carry the platform transition: these rules stay in the
@@ -26,10 +30,18 @@ TARGET_PLATFORMS = {
 [
     tar(
         name = "bviz-{}".format(suffix),
-        srcs = [":bviz_{}".format(suffix)],
+        srcs = [
+            ":bviz_{}".format(suffix),
+            ":notices_{}".format(suffix),
+            "//:LICENSE",
+            "//:NOTICE",
+        ],
         compress = "gzip",
         mtree = [
             "bviz uid=0 gid=0 time={} mode=0755 type=file content=$(execpath :bviz_{})".format(MTIME, suffix),
+            "LICENSE uid=0 gid=0 time={} mode=0644 type=file content=$(execpath //:LICENSE)".format(MTIME),
+            "NOTICE uid=0 gid=0 time={} mode=0644 type=file content=$(execpath //:NOTICE)".format(MTIME),
+            "THIRD_PARTY_NOTICES uid=0 gid=0 time={} mode=0644 type=file content=$(execpath :notices_{})".format(MTIME, suffix),
         ],
         tags = ["manual"],
     )

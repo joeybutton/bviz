@@ -2,6 +2,14 @@ load("@buildifier_prebuilt//:rules.bzl", "buildifier", "buildifier_test")
 load("@package_metadata//licenses/rules:license.bzl", "license")
 load("@package_metadata//rules:package_metadata.bzl", "package_metadata")
 
+exports_files(
+    [
+        "LICENSE",
+        "NOTICE",
+    ],
+    visibility = ["//dist:__pkg__"],
+)
+
 package_metadata(
     name = "package_metadata",
     attributes = [":license"],
