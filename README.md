@@ -9,16 +9,9 @@ timeline, scrub back through the console output.
 ## Viewers
 
 `//bviz` is the application: one window stacking the documents named on its
-command line, each in a region of its own. Each viewer also builds as a binary
-of its own, for work on that viewer alone.
+command line, each in a region of its own.
 
-| Target | Shows |
-| --- | --- |
-| `//ui/graph:graph` | the build and dependency graph |
-| `//ui/trace:trace` | the action timeline: thread lanes, counters, flame graph, stats |
-| `//ui/console:console` | the console output, replayed against its clock |
-
-All are gpui desktop applications, and need Wayland and a GPU.
+It is a gpui desktop application, and needs Wayland and a GPU.
 
 ## Nightly builds
 
@@ -30,44 +23,10 @@ workflow" button also builds the set on demand. Each artifact is a
 `THIRD_PARTY_NOTICES` with the licences of the third-party work built into
 that executable.
 
-## Setup
+## Building from source
 
-The build targets x86_64 Linux.
-[bazelisk](https://github.com/bazelbuild/bazelisk) picks up the Bazel version
-`.bazelversion` pins, and Bazel fetches and builds everything else — the Rust
-and C++ toolchains and the Wayland libraries included. Nothing comes from the
-host, and nothing needs `rustup`.
-
-Machine-local Bazel settings, opting into a remote cache among them, belong in
-`user.bazelrc`, which is untracked. A fresh clone builds without credentials.
-
-For an editor environment — `cargo`, `rustc`, `rustfmt` and `rust-analyzer` on
-`PATH` through [direnv](https://direnv.net):
-
-```sh
-bazel run //tools:bazel_env
-direnv allow
-bazel run //tools/rust_analyzer:gen_rust_project
-```
-
-## Build, test, check
-
-```sh
-bazel build //...
-bazel test //...                      # Starlark style is one of these tests
-bazel build --config=rustfmt //...
-bazel build --config=clippy //...
-```
-
-The tests need neither a display nor a GPU.
-
-Rust formatting and Starlark style have fixers; clippy findings are yours to
-resolve.
-
-```sh
-bazel run @rules_rs_rules_rust//tools/rustfmt
-bazel run //:buildifier
-```
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the build setup, the per-viewer
+binaries, and the checks CI runs.
 
 ## Running a viewer
 
@@ -121,3 +80,5 @@ invocation; `--profile` and `--bep` each open a panel per occurrence.
 bviz is licensed under the Apache License 2.0; see [LICENSE](LICENSE). The
 third-party works it bundles or derives from, and their terms, are listed in
 [NOTICE](NOTICE).
+
+To contribute, see [CONTRIBUTING.md](CONTRIBUTING.md).
