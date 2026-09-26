@@ -1,0 +1,125 @@
+Read elk-rs's clone registry without a shared lock
+
+ElkReflect looks up the function that clones a property's default under
+one global mutex, and every read of an unset property does so; with
+frames laid out in parallel the layout threads spend most of their time
+contending for it.
+
+diff --git a/plugins/org.eclipse.elk.graph/src/org/eclipse/elk/graph/util/mod.rs b/plugins/org.eclipse.elk.graph/src/org/eclipse/elk/graph/util/mod.rs
+index 1dedb7d..6ce6da7 100644
+--- a/plugins/org.eclipse.elk.graph/src/org/eclipse/elk/graph/util/mod.rs
++++ b/plugins/org.eclipse.elk.graph/src/org/eclipse/elk/graph/util/mod.rs
+@@ -1,7 +1,11 @@
+ use std::any::{Any, TypeId};
++use std::cell::RefCell;
+ use std::collections::HashMap;
++use std::sync::atomic::{AtomicU64, Ordering};
+ use std::sync::OnceLock;
+ 
++use rustc_hash::FxHashMap;
++
+ use crate::org::eclipse::elk::graph::{
+     ElkConnectableShapeRef, ElkEdgeRef, ElkGraphElementRef, ElkGraphFactory, ElkLabelRef,
+     ElkNodeRef, ElkPortRef,
+@@ -17,10 +21,46 @@ pub use graph_identifier_generator::GraphIdentifierGenerator;
+ pub struct ElkReflect;
+ 
+ type NewInstanceFn = Box<dyn Fn() -> Box<dyn Any + Send + Sync> + Send + Sync>;
+-type CloneFn = Box<dyn Fn(&dyn Any) -> Option<Box<dyn Any + Send + Sync>> + Send + Sync>;
++type CloneFn = dyn Fn(&dyn Any) -> Option<Box<dyn Any + Send + Sync>> + Send + Sync;
+ 
+ static NEW_REGISTRY: OnceLock<Mutex<HashMap<TypeId, NewInstanceFn>>> = OnceLock::new();
+-static CLONE_REGISTRY: OnceLock<Mutex<HashMap<TypeId, CloneFn>>> = OnceLock::new();
++/// A clone function is leaked on registration, so a lookup hands it out without
++/// holding the lock or counting references to it.
++static CLONE_REGISTRY: OnceLock<Mutex<HashMap<TypeId, &'static CloneFn>>> = OnceLock::new();
++/// Advanced by every clone registration, invalidating every `CLONE_CACHE`.
++static CLONE_REGISTRY_GENERATION: AtomicU64 = AtomicU64::new(0);
++
++thread_local! {
++    /// This thread's lookups in `CLONE_REGISTRY`, misses included, as of the
++    /// generation beside them.
++    static CLONE_CACHE: RefCell<(u64, FxHashMap<TypeId, Option<&'static CloneFn>>)> =
++        RefCell::new((0, FxHashMap::default()));
++}
++
++fn clone_registry() -> &'static Mutex<HashMap<TypeId, &'static CloneFn>> {
++    CLONE_REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
++}
++
++fn registered_clone_fn(type_id: TypeId) -> Option<&'static CloneFn> {
++    clone_registry().lock().get(&type_id).copied()
++}
++
++fn lookup_clone_fn(type_id: TypeId) -> Option<&'static CloneFn> {
++    let generation = CLONE_REGISTRY_GENERATION.load(Ordering::Acquire);
++    CLONE_CACHE
++        .try_with(|cache| {
++            let mut cache = cache.borrow_mut();
++            let (cached_generation, fns) = &mut *cache;
++            if *cached_generation != generation {
++                fns.clear();
++                *cached_generation = generation;
++            }
++            *fns
++                .entry(type_id)
++                .or_insert_with(|| registered_clone_fn(type_id))
++        })
++        .unwrap_or_else(|_| registered_clone_fn(type_id))
++}
+ 
+ impl ElkReflect {
+     pub fn register<T: Send + Sync + 'static>(
+@@ -35,15 +75,13 @@ impl ElkReflect {
+             );
+         }
+         if let Some(clone_fn) = clone_fn {
+-            let registry = CLONE_REGISTRY.get_or_init(|| Mutex::new(HashMap::new()));
+-            registry.lock().insert(
+-                TypeId::of::<T>(),
+-                Box::new(move |value: &dyn Any| {
+-                    value
+-                        .downcast_ref::<T>()
+-                        .map(|typed| Box::new(clone_fn(typed)) as Box<dyn Any + Send + Sync>)
+-                }),
+-            );
++            let erased: &'static CloneFn = Box::leak(Box::new(move |value: &dyn Any| {
++                value
++                    .downcast_ref::<T>()
++                    .map(|typed| Box::new(clone_fn(typed)) as Box<dyn Any + Send + Sync>)
++            }));
++            clone_registry().lock().insert(TypeId::of::<T>(), erased);
++            CLONE_REGISTRY_GENERATION.fetch_add(1, Ordering::Release);
+         }
+     }
+ 
+@@ -69,26 +107,18 @@ impl ElkReflect {
+     }
+ 
+     pub fn clone_value<T: Send + Sync + 'static>(value: &T) -> Option<T> {
+-        let registry = CLONE_REGISTRY.get_or_init(|| Mutex::new(HashMap::new()));
+-        registry
+-            .lock()
+-            .get(&TypeId::of::<T>())
++        lookup_clone_fn(TypeId::of::<T>())
+             .and_then(|clone_fn| clone_fn(value as &dyn Any))
+             .and_then(|boxed| boxed.downcast::<T>().ok())
+             .map(|boxed| *boxed)
+     }
+ 
+     pub fn clone_any(value: &dyn Any) -> Option<Box<dyn Any + Send + Sync>> {
+-        let registry = CLONE_REGISTRY.get_or_init(|| Mutex::new(HashMap::new()));
+-        registry
+-            .lock()
+-            .get(&value.type_id())
+-            .and_then(|clone_fn| clone_fn(value))
++        lookup_clone_fn(value.type_id()).and_then(|clone_fn| clone_fn(value))
+     }
+ 
+     pub fn has_clone<T: Send + Sync + 'static>() -> bool {
+-        let registry = CLONE_REGISTRY.get_or_init(|| Mutex::new(HashMap::new()));
+-        registry.lock().contains_key(&TypeId::of::<T>())
++        lookup_clone_fn(TypeId::of::<T>()).is_some()
+     }
+ }
+ 
