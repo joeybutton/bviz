@@ -199,44 +199,84 @@ fn condensed_reduction(graph: Graph) -> Graph {
 /// none of the graph around it and costs the cycle's own size rather than the
 /// whole view's.
 fn thin(cycle: &[(u32, u32)]) -> FxHashSet<(u32, u32)> {
-    let mut succ: FxHashMap<u32, FxHashSet<u32>> =
-        FxHashMap::with_capacity_and_hasher(cycle.len(), Default::default());
-    for &(u, v) in cycle {
-        succ.entry(u).or_default().insert(v);
-    }
     let mut order = cycle.to_vec();
     order.sort_unstable();
-    let mut kept: FxHashSet<(u32, u32)> = order.iter().copied().collect();
-    for (u, v) in order {
-        let outs = succ
-            .get_mut(&u)
-            .expect("the source of one of its own edges");
-        outs.remove(&v);
-        if reaches(&succ, u, v) {
-            kept.remove(&(u, v));
-        } else {
-            succ.entry(u).or_default().insert(v);
-        }
-    }
-    kept
+    let thinned = ThinnedCycle::new(&order);
+    order
+        .into_iter()
+        .zip(thinned.kept)
+        .filter_map(|(edge, kept)| kept.then_some(edge))
+        .collect()
 }
 
-/// Whether `dst` is reachable from `src` over `succ`.
-fn reaches(succ: &FxHashMap<u32, FxHashSet<u32>>, src: u32, dst: u32) -> bool {
-    let mut seen: FxHashSet<u32> = FxHashSet::default();
-    let mut walk = vec![src];
-    while let Some(u) = walk.pop() {
-        let Some(outs) = succ.get(&u) else { continue };
-        for &w in outs {
-            if w == dst {
-                return true;
-            }
-            if seen.insert(w) {
-                walk.push(w);
+/// One cycle's edges over its own nodes, numbered densely so a search over them
+/// indexes arrays, with which of the edges [`thin`] keeps.
+struct ThinnedCycle {
+    /// By node, the edges leaving it, as indices into the edge list.
+    leaving: Vec<Vec<u32>>,
+    /// By edge, the node it enters.
+    target: Vec<u32>,
+    /// By edge, whether it is still part of the cycle.
+    kept: Vec<bool>,
+    /// By node, the search that last reached it, so a search starts clean
+    /// without clearing the table.
+    reached_by: Vec<u32>,
+    search: u32,
+    /// The nodes a search has reached and not yet walked on from.
+    walk: Vec<u32>,
+}
+
+impl ThinnedCycle {
+    /// Thins `edges`, trying each in the order given.
+    fn new(edges: &[(u32, u32)]) -> Self {
+        let mut node: FxHashMap<u32, u32> =
+            FxHashMap::with_capacity_and_hasher(edges.len(), Default::default());
+        let mut dense = |id: u32| {
+            let next = node.len() as u32;
+            *node.entry(id).or_insert(next)
+        };
+        let ends: Vec<(u32, u32)> = edges.iter().map(|&(u, v)| (dense(u), dense(v))).collect();
+        let mut leaving: Vec<Vec<u32>> = vec![Vec::new(); node.len()];
+        for (edge, &(u, _)) in ends.iter().enumerate() {
+            leaving[u as usize].push(edge as u32);
+        }
+        let mut cycle = ThinnedCycle {
+            leaving,
+            target: ends.iter().map(|&(_, v)| v).collect(),
+            kept: vec![true; ends.len()],
+            reached_by: vec![0; node.len()],
+            search: 0,
+            walk: Vec::with_capacity(node.len()),
+        };
+        for (edge, &(u, v)) in ends.iter().enumerate() {
+            cycle.kept[edge] = false;
+            cycle.kept[edge] = !cycle.reaches(u, v);
+        }
+        cycle
+    }
+
+    /// Whether `dst` is reachable from `src` over the edges still kept.
+    fn reaches(&mut self, src: u32, dst: u32) -> bool {
+        self.search += 1;
+        self.walk.clear();
+        self.walk.push(src);
+        while let Some(u) = self.walk.pop() {
+            for &edge in &self.leaving[u as usize] {
+                if !self.kept[edge as usize] {
+                    continue;
+                }
+                let w = self.target[edge as usize];
+                if w == dst {
+                    return true;
+                }
+                if self.reached_by[w as usize] != self.search {
+                    self.reached_by[w as usize] = self.search;
+                    self.walk.push(w);
+                }
             }
         }
+        false
     }
-    false
 }
 
 /// The acyclic graph a graph's strongly connected components leave: each cycle
