@@ -88,7 +88,10 @@ crate.annotation(
 crate.annotation(
     crate = "org-eclipse-elk-alg-common",
     patch_args = ["-p1"],
-    patches = ["//patches/elk-rs:elk-rs-incremental-cut-values.patch"],
+    patches = [
+        "//patches/elk-rs:elk-rs-incremental-cut-values.patch",
+        "//patches/elk-rs:elk-rs-network-simplex-layer-cache.patch",
+    ],
 )
 crate.annotation(
     crate = "org-eclipse-elk-graph",

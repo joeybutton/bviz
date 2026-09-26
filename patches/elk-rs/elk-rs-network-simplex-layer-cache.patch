@@ -1,0 +1,68 @@
+Keep network simplex layers off the node locks until the run ends
+
+A pivot writes the shifted layer of up to every node through the node's
+lock, though the simplex reads layers only from its own array. The nodes
+end up with the same layers.
+
+diff --git a/plugins/org.eclipse.elk.alg.common/src/org/eclipse/elk/alg/common/networksimplex/network_simplex.rs b/plugins/org.eclipse.elk.alg.common/src/org/eclipse/elk/alg/common/networksimplex/network_simplex.rs
+index ba9d99b..6fcdedc 100644
+--- a/plugins/org.eclipse.elk.alg.common/src/org/eclipse/elk/alg/common/networksimplex/network_simplex.rs
++++ b/plugins/org.eclipse.elk.alg.common/src/org/eclipse/elk/alg/common/networksimplex/network_simplex.rs
+@@ -68,7 +68,8 @@ pub struct NetworkSimplex<'a> {
+     e_tree: Vec<bool>,
+     // Per-node adjacency: connected edge internal_ids (incoming first, then outgoing)
+     node_edges: Vec<Vec<usize>>,
+-    // Cached node properties (indexed by node internal_id, synced during algorithm)
++    // Node properties indexed by node internal_id; the simplex works on these
++    // alone, and `store_layers` writes the resulting layers to the nodes
+     n_layer: Vec<i32>,
+     n_tree_node: Vec<bool>,
+     // Reusable stack for iterative postorder traversal (nid, adj_cursor, lowest, entry edge)
+@@ -166,6 +167,7 @@ impl<'a> NetworkSimplex<'a> {
+             leave_opt = self.leave_edge();
+             iter += 1;
+         }
++        self.store_layers();
+ 
+         if remove_subtrees {
+             self.reattach_subtrees();
+@@ -306,10 +308,8 @@ impl<'a> NetworkSimplex<'a> {
+             if tgt_tree {
+                 slack = -slack;
+             }
+-            for (i, node) in self.graph.nodes.iter().enumerate() {
++            for i in 0..self.n_layer.len() {
+                 if self.n_tree_node[i] {
+-                    let mut node_guard = node.lock();
+-                    node_guard.layer += slack;
+                     self.n_layer[i] += slack;
+                 }
+             }
+@@ -357,10 +357,11 @@ impl<'a> NetworkSimplex<'a> {
+                 }
+             }
+         }
+-        // Sync n_layer cache to underlying nodes
+-        for (i, node) in self.graph.nodes.iter().enumerate() {
+-            let mut node_guard = node.lock();
+-            node_guard.layer = self.n_layer[i];
++    }
++
++    fn store_layers(&self) {
++        for (node, &layer) in self.graph.nodes.iter().zip(&self.n_layer) {
++            node.lock().layer = layer;
+         }
+     }
+ 
+@@ -742,10 +743,8 @@ impl<'a> NetworkSimplex<'a> {
+             delta = -delta;
+         }
+ 
+-        for (nid, node) in self.graph.nodes.iter().enumerate() {
++        for nid in 0..self.n_layer.len() {
+             if !self.is_in_head_by_id(nid, leave_src_id, leave_tgt_id) {
+-                let mut node_guard = node.lock();
+-                node_guard.layer += delta;
+                 self.n_layer[nid] += delta;
+             }
+         }
