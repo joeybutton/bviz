@@ -401,15 +401,15 @@ impl Derived {
 /// The status line describing what a panel draws: what the read left where it
 /// left no graph, and the size of the drawing `drawn` otherwise, followed by
 /// `over_budget` where the panel's view is past the caps on an opening view.
+/// `drawn` pairs the drawing with the zoom its view is resolved at, where one is.
 pub(crate) fn status(
     source: &Source,
-    drawn: Option<Drawn>,
-    zoom: f32,
+    drawn: Option<(Drawn, f32)>,
     over_budget: Option<Overflow>,
 ) -> String {
     source.status("No graph", |_| match drawn {
         None => "Laying out…".into(),
-        Some(drawn) => {
+        Some((drawn, zoom)) => {
             let g = drawn.view(zoom);
             let level = drawn
                 .level(zoom)
@@ -1029,13 +1029,13 @@ mod tests {
     /// reads the same whether or not a panel is showing one.
     #[test]
     fn a_graph_still_being_read_says_so() {
-        assert_eq!(status(&Source::Loading, None, 1.0, None), "Loading…");
+        assert_eq!(status(&Source::Loading, None, None), "Loading…");
     }
 
     #[test]
     fn a_graph_that_could_not_be_read_names_what_is_absent() {
         let failed = Source::Failed("aquery.pb: no such file".into());
-        assert_eq!(status(&failed, None, 1.0, None), "No graph");
+        assert_eq!(status(&failed, None, None), "No graph");
     }
 
     #[test]
@@ -1045,7 +1045,7 @@ mod tests {
         let drawn = derived.drawn(LayoutMode::Map).expect("a map");
         let level = drawn.level(1.0).expect("a map draws one of its levels");
         let boxes = drawn.view(1.0).boxes.len();
-        let status = status(&Source::Loaded(document()), Some(drawn), 1.0, None);
+        let status = status(&Source::Loaded(document()), Some((drawn, 1.0)), None);
         assert!(
             status.starts_with(&format!(
                 "level {}/{} · {boxes} boxes · ",
@@ -1069,7 +1069,7 @@ mod tests {
             edges: DEFAULT_MAX_EDGES + 5,
         };
 
-        let status = status(&Source::Loaded(document()), Some(drawn), 1.0, Some(over));
+        let status = status(&Source::Loaded(document()), Some((drawn, 1.0)), Some(over));
 
         assert!(
             status.ends_with(&format!(
@@ -1090,7 +1090,7 @@ mod tests {
         assert!(derived.drawn(LayoutMode::Map).is_some());
         assert!(derived.drawn(LayoutMode::Layered).is_none());
         assert_eq!(
-            status(&Source::Loaded(document()), None, 1.0, None),
+            status(&Source::Loaded(document()), None, None),
             "Laying out…"
         );
     }

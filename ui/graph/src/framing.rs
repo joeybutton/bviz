@@ -51,6 +51,12 @@ impl Framing {
         self.camera
     }
 
+    /// Whether the camera has been fitted to the window since the framing was
+    /// made or last [`refit`](Self::refit); until then its zoom is no view's.
+    pub(crate) fn fitted(&self) -> bool {
+        self.fitted
+    }
+
     pub(crate) fn viewport(&self) -> Bounds<Pixels> {
         self.viewport
     }
@@ -110,8 +116,10 @@ impl Framing {
     }
 
     /// Records the canvas bounds and establishes the framing they call for: the
-    /// first prepaint fits the graph to the window. Reports whether the camera
-    /// moved.
+    /// first prepaint fits the graph to the window. Reports whether the frame
+    /// rendered before it is stale, describing a view that is not drawn (its
+    /// status line, its legend): the camera moved, or the fit gave a map's view
+    /// the zoom it is resolved at.
     ///
     /// A later prepaint whose bounds changed size keeps the view stable at any
     /// zoom level instead, holding the graph point under the viewport center
@@ -122,8 +130,9 @@ impl Framing {
     fn fit_or_rescale(&mut self, bounds: Bounds<Pixels>, content: (f32, f32)) -> bool {
         let prev = self.viewport;
         let before = self.camera;
+        let fitting = !self.fitted;
         self.viewport = bounds;
-        if !self.fitted {
+        if fitting {
             let (z, p) = fit_view(bounds.size, content);
             self.camera = Camera { zoom: z, pan: p };
             self.chosen_zoom = z;
@@ -149,7 +158,7 @@ impl Framing {
                 content,
             );
         }
-        (before.zoom, before.pan) != (self.camera.zoom, self.camera.pan)
+        fitting || (before.zoom, before.pan) != (self.camera.zoom, self.camera.pan)
     }
 
     /// Answers a pending frame request by arming an ease onto what it named. The
@@ -271,13 +280,10 @@ pub(crate) fn build_prepaint(
 ) -> impl FnOnce(Bounds<Pixels>, &mut Window, &mut App) {
     move |bounds: Bounds<Pixels>, window: &mut Window, cx: &mut App| {
         let redraw = parent.update(cx, |view, _| {
-            let moved = view.framing.fit_or_rescale(bounds, content);
+            let stale = view.framing.fit_or_rescale(bounds, content);
             view.framing.arm_frame(content);
             view.framing.arm_settle(content, recenter_target);
-            // A moved camera leaves the frame that was rendered from the old one
-            // (its status line, its legend) describing a view that is no longer
-            // drawn, so ask for one more.
-            moved | view.framing.step_settle()
+            stale | view.framing.step_settle()
         });
         if redraw {
             window.request_animation_frame();
@@ -386,6 +392,16 @@ mod tests {
         assert_eq!((f.camera.zoom, f.camera.pan), (z, p));
         assert!(f.fitted);
         assert_eq!(f.viewport.size, vp(800., 600.));
+    }
+
+    #[test]
+    fn a_fit_that_moves_nothing_still_asks_for_a_frame() {
+        let bounds = canvas_bounds(800., 600.);
+        let (zoom, pan) = fit_view(bounds.size, CONTENT);
+        let mut f = framed(zoom, pan, bounds);
+        f.refit();
+        assert!(f.fit_or_rescale(bounds, CONTENT));
+        assert!(!f.fit_or_rescale(bounds, CONTENT));
     }
 
     #[test]

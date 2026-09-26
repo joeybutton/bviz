@@ -251,6 +251,16 @@ impl GraphPanel {
         self.derived.drawn(self.mode)
     }
 
+    /// The zoom a frame resolves `drawn`'s view at, `None` where that is a map
+    /// whose camera awaits its fit: the fit picks the level, and a level
+    /// resolved at the zoom before it would be derived for nothing.
+    fn view_zoom(&self, drawn: &Drawn) -> Option<f32> {
+        match drawn {
+            Drawn::Map { .. } if !self.framing.fitted() => None,
+            _ => Some(self.camera().zoom),
+        }
+    }
+
     /// The canonical labels the loaded graph's nodes belong to, which a search
     /// pattern is matched over; `None` until the read lands.
     fn labels(&self, cx: &App) -> Option<Arc<LabelIndex>> {
@@ -407,8 +417,9 @@ impl GraphPanel {
             return bviz_ui_components::centered_spinner("Laying out…", &palette.colors)
                 .into_any_element();
         };
-        let zoom = self.camera().zoom;
-        let edge_legend = self.edge_legend.card(&drawn, zoom, &palette);
+        let edge_legend = self
+            .view_zoom(&drawn)
+            .and_then(|zoom| self.edge_legend.card(&drawn, zoom, &palette));
         let entity = cx.entity();
         div()
             .id("graph-viewport")
@@ -603,8 +614,8 @@ impl Panel for GraphPanel {
         Some(
             derive::status(
                 self.model.read(cx).source(),
-                self.drawn(),
-                self.camera().zoom,
+                self.drawn()
+                    .and_then(|drawn| self.view_zoom(&drawn).map(|zoom| (drawn, zoom))),
                 self.derived.over_budget(),
             )
             .into(),
@@ -686,9 +697,10 @@ impl Render for GraphCanvas {
         let Some(drawn) = view.drawn() else {
             return div().into_any_element();
         };
-        let g = drawn.view(view.camera().zoom);
         let content = drawn.content();
-        let recenter_target = recenter_rect(g, &view.emphasis);
+        let recenter_target = view
+            .view_zoom(&drawn)
+            .and_then(|zoom| recenter_rect(drawn.view(zoom), &view.emphasis));
         let scene = Scene {
             expandable: view.expandable(),
             palette,
