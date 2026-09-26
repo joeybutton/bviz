@@ -522,6 +522,12 @@ fn request(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
     // over a graph the filter has moved out from under it; a map needs none.
     let lays_out =
         !restricting || view.mode == LayoutMode::Layered || view.derived.layered.is_some();
+    // A restriction's map derives the level on screen with the rest of the
+    // restriction, so adopting and painting it on the UI thread find it ready.
+    let map_zoom = view
+        .drawn()
+        .filter(|drawn| matches!(drawn, Drawn::Map { .. }))
+        .and_then(|drawn| view.view_zoom(&drawn));
     let derived = &mut view.derived;
     derived.in_flight = Some(InFlight { lays_out });
     let (filter, reduced) = (derived.filter.clone(), derived.reduced);
@@ -534,6 +540,9 @@ fn request(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
             let (mut slice, restricted) = match restricting {
                 true => {
                     let (slice, restricted) = restrict(&shared, &filter, &expanded, reduced);
+                    if let Some(zoom) = map_zoom {
+                        slice.map.level(slice.map.level_for_scale(zoom));
+                    }
                     (slice, Some(restricted))
                 }
                 false => (slice, None),
