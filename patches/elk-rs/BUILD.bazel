@@ -1,8 +1,8 @@
-# The patch reshapes a block of some fifty lines, so it carries that much
-# Eclipse Public License 2.0 source and is a modification of it.
+# The patches reshape whole blocks of Eclipse Public License 2.0 source, so they
+# carry that source and are modifications of it.
 package(default_package_metadata = ["//LICENSES:elk_rs"])
 
 exports_files(
-    ["elk-rs-reentrant-external-port-lock.patch"],
+    glob(["*.patch"]),
     visibility = ["//visibility:public"],
 )
