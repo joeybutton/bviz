@@ -160,7 +160,13 @@ pub fn fitting_expansion(
         .filter(|id| expanded.contains(id))
         .collect();
     let sized: HashSet<Id> = order.iter().copied().collect();
-    let mut kept = largest_fitting(graph, reduced, order, max_nodes, max_edges)?;
+    let drawn = IndexedGraph::drawing(graph, reduced);
+    let whole: Vec<u32> = order.iter().map(|id| id.0).collect();
+    let fitting = match within(drawn.counts(&whole), max_nodes, max_edges) {
+        true => order.len(),
+        false => largest_fitting_prefix(&drawn, &order, max_nodes, max_edges)?,
+    };
+    let mut kept: HashSet<Id> = order[..fitting].iter().copied().collect();
     kept.extend(expanded.iter().copied().filter(|id| !sized.contains(id)));
     Ok(kept)
 }
@@ -288,7 +294,7 @@ fn largest_fitting_prefix(
     max_edges: usize,
 ) -> Result<usize, Overflow> {
     let order_idx: Vec<u32> = order.iter().map(|id| id.0).collect();
-    let fits = |(nodes, edges): (usize, usize)| nodes <= max_nodes && edges <= max_edges;
+    let fits = |counts| within(counts, max_nodes, max_edges);
 
     let (nodes, edges) = indexed.counts(&[]);
     if !fits((nodes, edges)) {
@@ -305,6 +311,11 @@ fn largest_fitting_prefix(
         }
     }
     Ok(lo)
+}
+
+/// Whether a view of `(nodes, edges)` fits both caps.
+fn within((nodes, edges): (usize, usize), max_nodes: usize, max_edges: usize) -> bool {
+    nodes <= max_nodes && edges <= max_edges
 }
 
 /// Stands in a representative table for an id the graph holds no node of. Such
