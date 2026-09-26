@@ -19,6 +19,7 @@ use bviz_graph_layout::select::{Filter, Verdict};
 use bviz_graph_layout::{Id, LaidOut, MapLayout, Names};
 use bviz_ui_components::load_in_background;
 use gpui::{Context, Task};
+use rustc_hash::FxHashSet;
 use std::collections::HashSet;
 use std::sync::Arc;
 
@@ -604,7 +605,7 @@ fn restrict(
     // Every node lands in `keep` or in `dropped`, and `faded` is a part of what
     // `keep` holds, so the node count bounds all three.
     let nodes = shared.base.nodes.len();
-    let mut keep: HashSet<Id> = HashSet::with_capacity(nodes);
+    let mut keep: FxHashSet<Id> = FxHashSet::with_capacity_and_hasher(nodes, Default::default());
     let mut dropped: HashSet<Id> = HashSet::with_capacity(nodes);
     let mut faded: HashSet<Id> = HashSet::with_capacity(nodes);
     for node in &shared.base.nodes {

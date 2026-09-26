@@ -14,7 +14,7 @@
 //! cycle. Reachability survives, and no edge of a cycle is redundant anyway,
 //! since each of its nodes already reaches every other.
 
-use std::collections::{HashMap, HashSet};
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::graph::Graph;
 use crate::intern::Id;
@@ -38,13 +38,14 @@ pub fn reduced(graph: Graph) -> Graph {
 /// reachable from another of the source's successors. A cycle leaves no
 /// topological order, and hands `graph` back for the caller to fall back with.
 fn dag_reduction(graph: Graph) -> Result<Graph, Graph> {
-    let mut index: HashMap<Id, u32> = HashMap::with_capacity(graph.nodes.len());
+    let mut index: FxHashMap<Id, u32> =
+        FxHashMap::with_capacity_and_hasher(graph.nodes.len(), Default::default());
     for node in &graph.nodes {
         let next = index.len() as u32;
         index.entry(node.id).or_insert(next);
     }
     let n = index.len();
-    let pairs: HashSet<(u32, u32)> = graph
+    let pairs: FxHashSet<(u32, u32)> = graph
         .edges
         .iter()
         .filter(|e| e.from != e.to)
@@ -94,11 +95,11 @@ fn topo_order(succ: &[Vec<u32>], mut indeg: Vec<u32>) -> Option<Vec<u32>> {
 /// The `(u, v)` pairs whose direct edge a longer path already implies.
 /// Reachability is held in per-node bitsets over the compact node index, filled
 /// in reverse topological `order` so a node's successors are already resolved.
-fn redundant_pairs(order: &[u32], succ: &[Vec<u32>]) -> HashSet<(u32, u32)> {
+fn redundant_pairs(order: &[u32], succ: &[Vec<u32>]) -> FxHashSet<(u32, u32)> {
     let n = succ.len();
     let words = n.div_ceil(64);
     let mut reach = vec![0u64; n * words]; // reach[u]: every node reachable from u
-    let mut redundant: HashSet<(u32, u32)> = HashSet::new();
+    let mut redundant: FxHashSet<(u32, u32)> = FxHashSet::default();
     for &u in order.iter().rev() {
         let ui = u as usize;
         // The union of the successors' reach: a target found here is reachable by
@@ -128,13 +129,14 @@ fn redundant_pairs(order: &[u32], succ: &[Vec<u32>]) -> HashSet<(u32, u32)> {
 /// through the pairs kept so far, visiting pairs in a fixed order for a
 /// deterministic result.
 fn condensed_reduction(graph: Graph) -> Graph {
-    let mut index: HashMap<Id, u32> = HashMap::with_capacity(graph.nodes.len());
+    let mut index: FxHashMap<Id, u32> =
+        FxHashMap::with_capacity_and_hasher(graph.nodes.len(), Default::default());
     for node in &graph.nodes {
         let next = index.len() as u32;
         index.entry(node.id).or_insert(next);
     }
     let n = index.len();
-    let pairs: HashSet<(u32, u32)> = graph
+    let pairs: FxHashSet<(u32, u32)> = graph
         .edges
         .iter()
         .filter(|e| e.from != e.to)
@@ -149,12 +151,12 @@ fn condensed_reduction(graph: Graph) -> Graph {
     let comp = &condensation.of;
     let redundant = redundant_pairs(&condensation.order, &condensation.succ);
 
-    let mut within: HashMap<u32, Vec<(u32, u32)>> = HashMap::new();
+    let mut within: FxHashMap<u32, Vec<(u32, u32)>> = FxHashMap::default();
     // One edge into a cycle reaches all of it, and one out of a cycle leaves
     // from all of it, so a pair of cycles the reduction keeps joined needs only
     // the one edge between them; the lowest is taken so a graph always keeps the
     // same one.
-    let mut between: HashMap<(u32, u32), (u32, u32)> = HashMap::new();
+    let mut between: FxHashMap<(u32, u32), (u32, u32)> = FxHashMap::default();
     for &(u, v) in &pairs {
         let (a, b) = (comp[u as usize], comp[v as usize]);
         match a == b {
@@ -165,7 +167,7 @@ fn condensed_reduction(graph: Graph) -> Graph {
             }
         }
     }
-    let mut held: HashSet<(u32, u32)> = HashSet::new();
+    let mut held: FxHashSet<(u32, u32)> = FxHashSet::default();
     for cycle in within.values() {
         held.extend(thin(cycle));
     }
@@ -196,14 +198,15 @@ fn condensed_reduction(graph: Graph) -> Graph {
 /// Every path between two nodes of a cycle stays inside it, so the search needs
 /// none of the graph around it and costs the cycle's own size rather than the
 /// whole view's.
-fn thin(cycle: &[(u32, u32)]) -> HashSet<(u32, u32)> {
-    let mut succ: HashMap<u32, HashSet<u32>> = HashMap::with_capacity(cycle.len());
+fn thin(cycle: &[(u32, u32)]) -> FxHashSet<(u32, u32)> {
+    let mut succ: FxHashMap<u32, FxHashSet<u32>> =
+        FxHashMap::with_capacity_and_hasher(cycle.len(), Default::default());
     for &(u, v) in cycle {
         succ.entry(u).or_default().insert(v);
     }
     let mut order = cycle.to_vec();
     order.sort_unstable();
-    let mut kept: HashSet<(u32, u32)> = order.iter().copied().collect();
+    let mut kept: FxHashSet<(u32, u32)> = order.iter().copied().collect();
     for (u, v) in order {
         let outs = succ
             .get_mut(&u)
@@ -219,8 +222,8 @@ fn thin(cycle: &[(u32, u32)]) -> HashSet<(u32, u32)> {
 }
 
 /// Whether `dst` is reachable from `src` over `succ`.
-fn reaches(succ: &HashMap<u32, HashSet<u32>>, src: u32, dst: u32) -> bool {
-    let mut seen: HashSet<u32> = HashSet::new();
+fn reaches(succ: &FxHashMap<u32, FxHashSet<u32>>, src: u32, dst: u32) -> bool {
+    let mut seen: FxHashSet<u32> = FxHashSet::default();
     let mut walk = vec![src];
     while let Some(u) = walk.pop() {
         let Some(outs) = succ.get(&u) else { continue };
@@ -256,7 +259,10 @@ impl Condensation {
     pub(crate) fn new(succ: &[Vec<u32>]) -> Self {
         let of = components(succ);
         let count = of.iter().copied().max().map_or(0, |c| c as usize + 1);
-        let mut seen: HashSet<(u32, u32)> = HashSet::with_capacity(succ.iter().map(Vec::len).sum());
+        let mut seen: FxHashSet<(u32, u32)> = FxHashSet::with_capacity_and_hasher(
+            succ.iter().map(Vec::len).sum(),
+            Default::default(),
+        );
         let mut condensed: Vec<Vec<u32>> = vec![Vec::new(); count];
         let mut indeg: Vec<u32> = vec![0; count];
         for (u, forward) in succ.iter().enumerate() {
@@ -342,6 +348,7 @@ mod tests {
     use super::*;
     use crate::graph::{EdgeKind, Kind, Node};
     use crate::intern::Names;
+    use std::collections::{HashMap, HashSet};
 
     fn build(edges: &[(&str, &str)]) -> (Graph, Names) {
         let mut g = Graph::new();

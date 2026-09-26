@@ -9,6 +9,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 
 use bviz_parallel::workers;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::graph::{Containment, EdgeKind, Graph, Node, id_span};
 use crate::intern::Id;
@@ -267,7 +268,8 @@ fn place(
         lay_out_frame(&roots, forest.edges_of(None), |id| forest.size(id))
     });
 
-    let mut offset: HashMap<Id, (f64, f64)> = HashMap::with_capacity(graph.nodes.len());
+    let mut offset: FxHashMap<Id, (f64, f64)> =
+        FxHashMap::with_capacity_and_hasher(graph.nodes.len(), Default::default());
     offset.extend(top.offsets);
     for fitted in forest.fitted.iter().filter_map(OnceLock::get) {
         offset.extend(fitted.offsets.iter().copied());
@@ -306,10 +308,10 @@ fn rank(
 /// innermost containers out.
 struct Forest<'a> {
     children_of: &'a HashMap<Id, Vec<&'a Node>>,
-    label_of: HashMap<Id, &'a str>,
+    label_of: FxHashMap<Id, &'a str>,
     frames: &'a HashMap<Option<Id>, Vec<(Id, Id)>>,
     containment: &'a Containment,
-    leaves: HashMap<Id, (f64, f64)>,
+    leaves: FxHashMap<Id, (f64, f64)>,
     rank: Vec<usize>,
     /// By container id, how many of its children are containers not yet
     /// fitted: the child that brings it to zero queues the container.
@@ -372,8 +374,9 @@ impl<'a> Forest<'a> {
 
 /// Box sizes for the leaves, whose extent follows from their label alone and so
 /// is known before any frame is laid out.
-fn leaf_sizes(graph: &Graph, children_of: &HashMap<Id, Vec<&Node>>) -> HashMap<Id, (f64, f64)> {
-    let mut size: HashMap<Id, (f64, f64)> = HashMap::with_capacity(graph.nodes.len());
+fn leaf_sizes(graph: &Graph, children_of: &HashMap<Id, Vec<&Node>>) -> FxHashMap<Id, (f64, f64)> {
+    let mut size: FxHashMap<Id, (f64, f64)> =
+        FxHashMap::with_capacity_and_hasher(graph.nodes.len(), Default::default());
     for node in &graph.nodes {
         if !children_of.contains_key(&node.id) {
             size.insert(node.id, (layout::leaf_width(&node.label), LEAF_HEIGHT));
@@ -411,7 +414,7 @@ fn absolute(
     graph: &Graph,
     containment: &Containment,
     size: impl Fn(Id) -> (f64, f64),
-    offset: &HashMap<Id, (f64, f64)>,
+    offset: &FxHashMap<Id, (f64, f64)>,
 ) -> Vec<Option<Placed>> {
     let mut by_depth: Vec<&Node> = graph.nodes.iter().collect();
     by_depth.sort_by_key(|n| containment.depth(n.id));
@@ -525,7 +528,8 @@ fn view_of(
     expandable: &HashSet<Id>,
 ) -> LaidOut {
     let visible = lod::collapse(base, open);
-    let mut connected: HashSet<(Id, Id)> = HashSet::with_capacity(visible.edges.len());
+    let mut connected: FxHashSet<(Id, Id)> =
+        FxHashSet::with_capacity_and_hasher(visible.edges.len(), Default::default());
     connected.extend(visible.edges.iter().map(|e| (e.from, e.to)));
     let boxes = boxes(&visible, drawing, containment);
     let drawn = drawn_edges(visible, reduced, open, expandable);
@@ -560,7 +564,8 @@ fn drawn_edges(
 
 /// Reads each visible node's global box.
 fn boxes(visible: &Graph, drawing: &Drawing, containment: &Containment) -> Vec<Box> {
-    let mut parents: HashSet<Id> = HashSet::with_capacity(visible.nodes.len());
+    let mut parents: FxHashSet<Id> =
+        FxHashSet::with_capacity_and_hasher(visible.nodes.len(), Default::default());
     parents.extend(visible.nodes.iter().filter_map(|n| n.parent));
     let mut boxes: Vec<(u32, Box)> = Vec::with_capacity(visible.nodes.len());
     for node in &visible.nodes {

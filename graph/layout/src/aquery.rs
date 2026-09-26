@@ -20,7 +20,9 @@
 //! `member -> consumer` edge.
 
 use std::borrow::Cow;
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeSet, HashSet};
+
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use bazel_query_proto::analysis::{
     Action, ActionGraphContainer, Artifact, AspectDescriptor, Configuration, DepSetOfFiles,
@@ -140,8 +142,8 @@ fn build_action_boxes(
     graph: &mut Graph,
     names: &mut Names,
     facets: &mut FacetsBuilder,
-) -> HashMap<ArtifactId, Id> {
-    let mut producer_node_id: HashMap<ArtifactId, Id> = HashMap::new();
+) -> FxHashMap<ArtifactId, Id> {
+    let mut producer_node_id: FxHashMap<ArtifactId, Id> = FxHashMap::default();
     let mut boxes = Boxes {
         graph,
         names,
@@ -149,8 +151,8 @@ fn build_action_boxes(
         hierarchy,
         index,
         labeled_outputs,
-        targets: HashSet::new(),
-        configured: HashSet::new(),
+        targets: FxHashSet::default(),
+        configured: FxHashSet::default(),
     };
     for (i, action) in index.actions.iter().enumerate() {
         let config_id = ConfigId(action.configuration_id);
@@ -190,7 +192,7 @@ fn build_action_boxes(
 /// depsets into direct edges.
 fn wire_action_inputs(
     index: Index,
-    producer_node_id: HashMap<ArtifactId, Id>,
+    producer_node_id: FxHashMap<ArtifactId, Id>,
     hierarchy: &PackageHierarchy,
     external_sources: bool,
     graph: &mut Graph,
@@ -204,19 +206,19 @@ fn wire_action_inputs(
         ..
     } = index;
     let mut wiring = Wiring {
-        seen_edge: HashSet::new(),
-        source_nodes: HashSet::new(),
+        seen_edge: FxHashSet::default(),
+        source_nodes: FxHashSet::default(),
         hierarchy,
         facets,
         producer_node_id,
         depset_by_id,
         paths,
         external_sources,
-        resolved: HashMap::new(),
+        resolved: FxHashMap::default(),
     };
     for (i, action) in actions.iter().enumerate() {
         let action_id = names.intern(&format!("action{i}"));
-        let mut visited: HashSet<u32> = HashSet::new();
+        let mut visited: FxHashSet<u32> = FxHashSet::default();
         for &dep_set_id in &action.input_dep_set_ids {
             wiring.wire(dep_set_id, action_id, &mut visited, graph, names);
         }
@@ -226,8 +228,8 @@ fn wire_action_inputs(
 /// The by-id artifact and path-fragment lookups, paired so an artifact's
 /// name and path can be reconstructed from one value.
 struct Paths<'a> {
-    artifact_by_id: HashMap<ArtifactId, &'a Artifact>,
-    fragment_by_id: HashMap<u32, &'a PathFragment>,
+    artifact_by_id: FxHashMap<ArtifactId, &'a Artifact>,
+    fragment_by_id: FxHashMap<u32, &'a PathFragment>,
 }
 
 /// The actions to walk plus the by-id lookups box creation and input wiring
@@ -235,11 +237,11 @@ struct Paths<'a> {
 struct Index<'a> {
     actions: Vec<&'a Action>,
     paths: Paths<'a>,
-    target_by_id: HashMap<u32, &'a Target>,
-    config_by_id: HashMap<ConfigId, &'a Configuration>,
-    depset_by_id: HashMap<u32, &'a DepSetOfFiles>,
-    rule_class_by_id: HashMap<u32, &'a RuleClass>,
-    aspect_by_id: HashMap<u32, &'a AspectDescriptor>,
+    target_by_id: FxHashMap<u32, &'a Target>,
+    config_by_id: FxHashMap<ConfigId, &'a Configuration>,
+    depset_by_id: FxHashMap<u32, &'a DepSetOfFiles>,
+    rule_class_by_id: FxHashMap<u32, &'a RuleClass>,
+    aspect_by_id: FxHashMap<u32, &'a AspectDescriptor>,
 }
 
 impl<'a> Index<'a> {
@@ -310,8 +312,8 @@ struct Boxes<'a> {
     hierarchy: &'a PackageHierarchy,
     index: &'a Index<'a>,
     labeled_outputs: &'a HashSet<String>,
-    targets: HashSet<Id>,
-    configured: HashSet<Id>,
+    targets: FxHashSet<Id>,
+    configured: FxHashSet<Id>,
 }
 
 /// The target a configured-target box belongs to, as one aquery input names it.
@@ -470,18 +472,18 @@ struct Wiring<'a, 'f> {
     /// Input edges already wired, deduped by their endpoints' ids. An artifact
     /// reachable through several of one action's depsets, or the same source
     /// feeding an action twice, is wired once.
-    seen_edge: HashSet<(Id, Id)>,
-    source_nodes: HashSet<Id>,
+    seen_edge: FxHashSet<(Id, Id)>,
+    source_nodes: FxHashSet<Id>,
     hierarchy: &'a PackageHierarchy,
     facets: &'f mut FacetsBuilder,
-    producer_node_id: HashMap<ArtifactId, Id>,
-    depset_by_id: HashMap<u32, &'a DepSetOfFiles>,
+    producer_node_id: FxHashMap<ArtifactId, Id>,
+    depset_by_id: FxHashMap<u32, &'a DepSetOfFiles>,
     paths: Paths<'a>,
     external_sources: bool,
     /// The leaf node each input artifact wires from, or `None` when it is
     /// dropped. Resolution scans the package set and rebuilds the artifact's
     /// path, so it is cached: an artifact in many actions' inputs resolves once.
-    resolved: HashMap<ArtifactId, Option<Id>>,
+    resolved: FxHashMap<ArtifactId, Option<Id>>,
 }
 
 impl Wiring<'_, '_> {
@@ -494,7 +496,7 @@ impl Wiring<'_, '_> {
         &mut self,
         dep_set_id: u32,
         consumer: Id,
-        visited: &mut HashSet<u32>,
+        visited: &mut FxHashSet<u32>,
         graph: &mut Graph,
         names: &mut Names,
     ) {
@@ -644,7 +646,7 @@ fn repo_label(repo: &str) -> String {
 fn root_source_node(
     artifact_id: ArtifactId,
     graph: &mut Graph,
-    source_nodes: &mut HashSet<Id>,
+    source_nodes: &mut FxHashSet<Id>,
     paths: &Paths,
     names: &mut Names,
 ) -> Id {
@@ -677,7 +679,7 @@ impl Paths<'_> {
             return String::new();
         };
         let mut parts: Vec<&str> = Vec::new();
-        let mut seen: HashSet<u32> = HashSet::new();
+        let mut seen: FxHashSet<u32> = FxHashSet::default();
         let mut fragment_id = artifact.path_fragment_id;
         while fragment_id != 0 && seen.insert(fragment_id) {
             let Some(fragment) = self.fragment_by_id.get(&fragment_id) else {

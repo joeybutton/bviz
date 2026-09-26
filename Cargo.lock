@@ -899,6 +899,7 @@ dependencies = [
  "prost-types",
  "protoc-gen-prost",
  "rayon",
+ "rustc-hash 2.1.3",
 ]
 
 [[package]]
@@ -999,6 +1000,7 @@ dependencies = [
  "bviz_ui_workspace",
  "clap",
  "gpui",
+ "rustc-hash 2.1.3",
 ]
 
 [[package]]
