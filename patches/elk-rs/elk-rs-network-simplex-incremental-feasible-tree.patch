@@ -1,0 +1,383 @@
+Grow the network simplex feasible tree incrementally
+
+Building the initial feasible tree searches the whole tree and every
+edge again after each edge it adds. Growing it from the edges turning
+tight, in the order that search would meet them, builds the same tree
+and layers.
+
+diff --git a/plugins/org.eclipse.elk.alg.common/src/org/eclipse/elk/alg/common/networksimplex/network_simplex.rs b/plugins/org.eclipse.elk.alg.common/src/org/eclipse/elk/alg/common/networksimplex/network_simplex.rs
+index a2b9eb4..8ca7b28 100644
+--- a/plugins/org.eclipse.elk.alg.common/src/org/eclipse/elk/alg/common/networksimplex/network_simplex.rs
++++ b/plugins/org.eclipse.elk.alg.common/src/org/eclipse/elk/alg/common/networksimplex/network_simplex.rs
+@@ -1,4 +1,4 @@
+-use std::collections::{BTreeSet, VecDeque};
++use std::collections::{BTreeSet, BinaryHeap, VecDeque};
+ use std::sync::Arc;
+ 
+ use org_eclipse_elk_core::org::eclipse::elk::core::util::elk_trace::ElkTrace;
+@@ -40,6 +40,113 @@ struct SplitScratch {
+     stacks: [Vec<usize>; 2],
+ }
+ 
++/// An edge between the tree `feasible_tree` grows and a node outside it, at
++/// its endpoint in the tree.
++#[derive(Clone, Copy)]
++struct TreeExit {
++    node: usize,
++    edge: usize,
++    /// Where the edge stands in the node's `node_edges`.
++    at: usize,
++}
++
++/// The edges between the tree `feasible_tree` grows and the nodes outside it,
++/// by slack. Only the tree's nodes move, and all by the same amount, so each
++/// edge is kept by its slack relative to how far the tree has moved in all,
++/// which stays fixed while it crosses.
++#[derive(Default)]
++struct CrossingEdges {
++    /// Edges leaving the tree, by slack plus `moved`, then index.
++    leaving: BTreeSet<(i64, usize)>,
++    /// Edges entering the tree, by slack less `moved`, then index.
++    entering: BTreeSet<(i64, usize)>,
++    /// The key each crossing edge is held by.
++    key: Vec<i64>,
++    /// Where each crossing edge stands in the `node_edges` of its endpoint in
++    /// the tree.
++    at: Vec<usize>,
++    moved: i64,
++}
++
++impl CrossingEdges {
++    fn new(edge_count: usize) -> Self {
++        CrossingEdges {
++            key: vec![0; edge_count],
++            at: vec![0; edge_count],
++            ..CrossingEdges::default()
++        }
++    }
++
++    /// Takes in edge `eid`, which runs between the tree and a node outside it
++    /// and stands at `at` in the `node_edges` of its endpoint in the tree.
++    fn insert(&mut self, simplex: &NetworkSimplex, eid: usize, at: usize) {
++        let slack = i64::from(simplex.slack(eid));
++        self.at[eid] = at;
++        if simplex.n_tree_node[simplex.e_src_id[eid]] {
++            self.key[eid] = slack + self.moved;
++            self.leaving.insert((self.key[eid], eid));
++        } else {
++            self.key[eid] = slack - self.moved;
++            self.entering.insert((self.key[eid], eid));
++        }
++    }
++
++    /// Takes in tree node `nid`: its edges to the nodes outside the tree cross,
++    /// and its edges to other tree nodes do not.
++    fn join(&mut self, simplex: &NetworkSimplex, nid: usize) {
++        for (at, &eid) in simplex.node_edges[nid].iter().enumerate() {
++            let other = simplex.opposite(eid, nid);
++            if !simplex.n_tree_node[other] {
++                self.insert(simplex, eid, at);
++            } else if simplex.e_src_id[eid] == other {
++                self.leaving.remove(&(self.key[eid], eid));
++            } else {
++                self.entering.remove(&(self.key[eid], eid));
++            }
++        }
++    }
++
++    /// The crossing edge of least slack, the lowest-indexed of those tying,
++    /// with its slack.
++    fn minimal_slack(&self) -> Option<(i32, usize)> {
++        let leaving = self.leaving.first().map(|&(key, eid)| (key - self.moved, eid));
++        let entering = self.entering.first().map(|&(key, eid)| (key + self.moved, eid));
++        let (slack, eid) = match (leaving, entering) {
++            (Some(leaving), Some(entering)) => leaving.min(entering),
++            (leaving, entering) => leaving.or(entering)?,
++        };
++        Some((slack as i32, eid))
++    }
++
++    /// Records the tree's nodes moving `shift` layers.
++    fn shift_tree(&mut self, shift: i32) {
++        self.moved += i64::from(shift);
++    }
++
++    /// The crossing edges that are tight.
++    fn tight(&self, simplex: &NetworkSimplex) -> Vec<TreeExit> {
++        let tight_leaving = self.moved;
++        let tight_entering = -self.moved;
++        let leaving = self
++            .leaving
++            .range((tight_leaving, 0)..=(tight_leaving, usize::MAX))
++            .map(|&(_, eid)| TreeExit {
++                node: simplex.e_src_id[eid],
++                edge: eid,
++                at: self.at[eid],
++            });
++        let entering = self
++            .entering
++            .range((tight_entering, 0)..=(tight_entering, usize::MAX))
++            .map(|&(_, eid)| TreeExit {
++                node: simplex.e_tgt_id[eid],
++                edge: eid,
++                at: self.at[eid],
++            });
++        leaving.chain(entering).collect()
++    }
++}
++
+ /// Scratch for recomputing the cut values an exchange invalidates, kept empty
+ /// between exchanges.
+ #[derive(Default)]
+@@ -78,7 +185,16 @@ pub struct NetworkSimplex<'a> {
+     /// The tree edges with a negative cut value, by `tree_rank`.
+     negative: BTreeSet<(u64, usize)>,
+     sources: Vec<NNodeRef>,
+-    edge_visited: Vec<bool>,
++    /// The round of `tight_tree_dfs` that last visited each edge.
++    edge_visited: Vec<u32>,
++    visit_round: u32,
++    /// Each tree node's depth below node 0, while `feasible_tree` grows the tree.
++    depth: Vec<u32>,
++    /// Where each tree node's parent edge stands in its parent's `node_edges`,
++    /// while `feasible_tree` grows the tree.
++    parent_at: Vec<usize>,
++    /// The nodes that joined the tree since `feasible_tree` last took them in.
++    joined: Vec<usize>,
+     /// Whether the spanning tree reaches every node.
+     spanning: bool,
+     /// The tree edge from each node toward node 0.
+@@ -124,6 +240,10 @@ impl<'a> NetworkSimplex<'a> {
+             negative: BTreeSet::new(),
+             sources: Vec::new(),
+             edge_visited: Vec::new(),
++            visit_round: 0,
++            depth: Vec::new(),
++            parent_at: Vec::new(),
++            joined: Vec::new(),
+             spanning: false,
+             parent_edge: Vec::new(),
+             mark: Vec::new(),
+@@ -296,10 +416,14 @@ impl<'a> NetworkSimplex<'a> {
+ 
+         if self.cutvalue.len() < num_edges {
+             self.cutvalue = vec![0.0; num_edges];
+-            self.edge_visited = vec![false; num_edges];
++            self.edge_visited = vec![0; num_edges];
+         } else {
+-            self.edge_visited.fill(false);
++            self.edge_visited.fill(0);
+         }
++        self.visit_round = 0;
++        self.depth = vec![0; num_nodes];
++        self.parent_at = vec![0; num_nodes];
++        self.joined.clear();
+ 
+         // A cut value sums each weight at most once, and a partial sum in
+         // `compute_cutvalue` adds each at most twice.
+@@ -319,6 +443,9 @@ impl<'a> NetworkSimplex<'a> {
+         self.tree_rank.clear();
+         self.negative.clear();
+         self.edge_visited.clear();
++        self.depth.clear();
++        self.parent_at.clear();
++        self.joined.clear();
+         self.e_src_id.clear();
+         self.e_tgt_id.clear();
+         self.e_delta.clear();
+@@ -343,28 +470,34 @@ impl<'a> NetworkSimplex<'a> {
+             return;
+         }
+ 
+-        self.edge_visited.fill(false);
+-        while !self.graph.nodes.is_empty() {
+-            let count = self.tight_tree_dfs(0);
+-            if count >= self.graph.nodes.len() {
+-                break;
+-            }
+-            let Some(eid) = self.minimal_slack() else {
+-                break;
+-            };
+-            let src_layer = self.n_layer[self.e_src_id[eid]];
+-            let tgt_layer = self.n_layer[self.e_tgt_id[eid]];
+-            let tgt_tree = self.n_tree_node[self.e_tgt_id[eid]];
+-            let mut slack = tgt_layer - src_layer - self.e_delta[eid];
+-            if tgt_tree {
+-                slack = -slack;
++        self.visit_round += 1;
++        let mut tree_size = self.tight_tree_dfs(0);
++        let mut tree_nodes = std::mem::take(&mut self.joined);
++        if tree_size < self.graph.nodes.len() {
++            let mut crossing = CrossingEdges::new(self.edges.len());
++            for &nid in &tree_nodes {
++                crossing.join(self, nid);
+             }
+-            for i in 0..self.n_layer.len() {
+-                if self.n_tree_node[i] {
+-                    self.n_layer[i] += slack;
++            while tree_size < self.graph.nodes.len() {
++                let Some((slack, eid)) = crossing.minimal_slack() else {
++                    break;
++                };
++                let shift = if self.n_tree_node[self.e_tgt_id[eid]] {
++                    -slack
++                } else {
++                    slack
++                };
++                for &nid in &tree_nodes {
++                    self.n_layer[nid] += shift;
++                }
++                crossing.shift_tree(shift);
++                let tight = crossing.tight(self);
++                tree_size += self.grow_tight_tree(tight);
++                for nid in std::mem::take(&mut self.joined) {
++                    crossing.join(self, nid);
++                    tree_nodes.push(nid);
+                 }
+             }
+-            self.edge_visited.fill(false);
+         }
+ 
+         if !self.graph.nodes.is_empty() {
+@@ -451,15 +584,16 @@ impl<'a> NetworkSimplex<'a> {
+     fn tight_tree_dfs(&mut self, nid: usize) -> usize {
+         let mut node_count = 1;
+         self.n_tree_node[nid] = true;
++        self.joined.push(nid);
+ 
+         // Use cached adjacency list — zero Vec alloc, zero edge locks
+         let num_adj = self.node_edges[nid].len();
+         for i in 0..num_adj {
+             let eid = self.node_edges[nid][i];
+-            if self.edge_visited[eid] {
++            if self.edge_visited[eid] == self.visit_round {
+                 continue;
+             }
+-            self.edge_visited[eid] = true;
++            self.edge_visited[eid] = self.visit_round;
+ 
+             let opp_id = if self.e_src_id[eid] == nid {
+                 self.e_tgt_id[eid]
+@@ -474,6 +608,9 @@ impl<'a> NetworkSimplex<'a> {
+                 let tgt_layer = self.n_layer[self.e_tgt_id[eid]];
+                 if self.e_delta[eid] == tgt_layer - src_layer {
+                     self.join_tree(eid);
++                    self.depth[opp_id] = self.depth[nid] + 1;
++                    self.parent_at[opp_id] = i;
++                    self.parent_edge[opp_id] = eid;
+                     node_count += self.tight_tree_dfs(opp_id);
+                 }
+             }
+@@ -482,23 +619,86 @@ impl<'a> NetworkSimplex<'a> {
+         node_count
+     }
+ 
+-    fn minimal_slack(&self) -> Option<usize> {
+-        let mut min_slack = i32::MAX;
+-        let mut min_eid: Option<usize> = None;
+-        for eid in 0..self.edges.len() {
+-            let src_tree = self.n_tree_node[self.e_src_id[eid]];
+-            let tgt_tree = self.n_tree_node[self.e_tgt_id[eid]];
+-            if src_tree ^ tgt_tree {
+-                let slack = self.n_layer[self.e_tgt_id[eid]]
+-                    - self.n_layer[self.e_src_id[eid]]
+-                    - self.e_delta[eid];
+-                if slack < min_slack {
+-                    min_slack = slack;
+-                    min_eid = Some(eid);
+-                }
++    /// Adds the tight edges `tight` holds and grows the tree on from each over
++    /// tight edges, returning how many nodes join. A search of the whole tree
++    /// from node 0 meets the edges out of the tree in the order its depth-first
++    /// traversal passes them, and those met first claim the nodes they reach, so
++    /// the edges are taken in that order.
++    fn grow_tight_tree(&mut self, tight: Vec<TreeExit>) -> usize {
++        let tight = if tight.len() > 1 {
++            self.in_traversal_order(&tight)
++        } else {
++            tight
++        };
++        self.visit_round += 1;
++        let mut joined = 0;
++        for exit in tight {
++            let outside = self.opposite(exit.edge, exit.node);
++            if self.n_tree_node[outside] {
++                continue;
+             }
++            self.edge_visited[exit.edge] = self.visit_round;
++            self.join_tree(exit.edge);
++            self.depth[outside] = self.depth[exit.node] + 1;
++            self.parent_at[outside] = exit.at;
++            self.parent_edge[outside] = exit.edge;
++            joined += self.tight_tree_dfs(outside);
+         }
+-        min_eid
++        joined
++    }
++
++    /// `exits` in the order a depth-first traversal of the tree from node 0,
++    /// taking each node's edges in `node_edges` order, passes them. Only the
++    /// paths from their nodes up to their nearest common ancestor are visited,
++    /// each node once.
++    fn in_traversal_order(&mut self, exits: &[TreeExit]) -> Vec<TreeExit> {
++        /// What the traversal meets at a position of a node's `node_edges`.
++        #[derive(Clone, Copy)]
++        enum Met {
++            Child(usize),
++            Exit(usize),
++        }
++        let mark = self.next_mark();
++        let mut met: Vec<(usize, usize, Met)> = Vec::with_capacity(2 * exits.len());
++        let mut frontier = BinaryHeap::with_capacity(exits.len());
++        for exit in exits {
++            met.push((exit.node, exit.at, Met::Exit(exit.edge)));
++            if self.mark[exit.node] != mark {
++                self.mark[exit.node] = mark;
++                frontier.push((self.depth[exit.node], exit.node));
++            }
++        }
++        // Lifting the deepest node until one is left meets every path at the
++        // nearest common ancestor.
++        let mut top = exits[0].node;
++        while let Some((_, nid)) = frontier.pop() {
++            top = nid;
++            if frontier.is_empty() {
++                break;
++            }
++            let parent = self.opposite(self.parent_edge[nid], nid);
++            met.push((parent, self.parent_at[nid], Met::Child(nid)));
++            if self.mark[parent] != mark {
++                self.mark[parent] = mark;
++                frontier.push((self.depth[parent], parent));
++            }
++        }
++        met.sort_unstable_by_key(|&(nid, at, _)| (nid, at));
++        let met_at =
++            |nid: usize| met.partition_point(|m| m.0 < nid)..met.partition_point(|m| m.0 <= nid);
++        let mut ordered = Vec::with_capacity(exits.len());
++        let mut stack = vec![met_at(top)];
++        while let Some(range) = stack.last_mut() {
++            let Some(index) = range.next() else {
++                stack.pop();
++                continue;
++            };
++            match met[index] {
++                (node, at, Met::Exit(edge)) => ordered.push(TreeExit { node, edge, at }),
++                (_, _, Met::Child(child)) => stack.push(met_at(child)),
++            }
++        }
++        ordered
+     }
+ 
+     /// Points each tree node's parent edge toward node 0, returning how many nodes
+@@ -584,6 +784,10 @@ impl<'a> NetworkSimplex<'a> {
+         self.split_scratch = SplitScratch { other, stacks };
+     }
+ 
++    fn slack(&self, eid: usize) -> i32 {
++        self.n_layer[self.e_tgt_id[eid]] - self.n_layer[self.e_src_id[eid]] - self.e_delta[eid]
++    }
++
+     #[inline]
+     fn opposite(&self, eid: usize, nid: usize) -> usize {
+         if self.e_src_id[eid] == nid {

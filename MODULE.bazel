@@ -93,6 +93,7 @@ crate.annotation(
         "//patches/elk-rs:elk-rs-network-simplex-layer-cache.patch",
         "//patches/elk-rs:elk-rs-network-simplex-pivot-on-smaller-side.patch",
         "//patches/elk-rs:elk-rs-network-simplex-cycle-cut-values.patch",
+        "//patches/elk-rs:elk-rs-network-simplex-incremental-feasible-tree.patch",
     ],
 )
 crate.annotation(
