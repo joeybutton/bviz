@@ -1,0 +1,564 @@
+Pivot network simplex on the smaller side of the leaving edge
+
+Each pivot scans every tree edge for the leaving one and every edge for
+the entering one. Searching only the smaller side of the leaving edge,
+with the tree edges of negative cut value kept ordered, picks the same
+edges.
+
+diff --git a/plugins/org.eclipse.elk.alg.common/src/org/eclipse/elk/alg/common/networksimplex/network_simplex.rs b/plugins/org.eclipse.elk.alg.common/src/org/eclipse/elk/alg/common/networksimplex/network_simplex.rs
+index 6fcdedc..1cb2f21 100644
+--- a/plugins/org.eclipse.elk.alg.common/src/org/eclipse/elk/alg/common/networksimplex/network_simplex.rs
++++ b/plugins/org.eclipse.elk.alg.common/src/org/eclipse/elk/alg/common/networksimplex/network_simplex.rs
+@@ -1,4 +1,4 @@
+-use std::collections::VecDeque;
++use std::collections::{BTreeSet, VecDeque};
+ use std::sync::Arc;
+ 
+ use org_eclipse_elk_core::org::eclipse::elk::core::util::elk_trace::ElkTrace;
+@@ -12,11 +12,31 @@ use super::n_node::NNodeRef;
+ 
+ const REMOVE_SUBTREES_THRESH: usize = 40;
+ const FUZZY_ST_ZERO: f64 = -1e-10;
+-/// Stands for no edge in an edge index: the parent and entry edge of the root of
+-/// the post-order numbering, the parent edge of a node outside the spanning tree,
+-/// and the stale edge of a node with none.
++/// Stands for no edge in an edge index: the parent edge of node 0 and of a node
++/// outside the spanning tree, and the stale edge of a node with none.
+ const NO_EDGE: usize = usize::MAX;
+ 
++/// One of the two components removing a tree edge splits the spanning tree
++/// into.
++#[derive(Default)]
++struct Split {
++    nodes: Vec<usize>,
++    /// The mark every node of `nodes`, and no other, carries.
++    mark: u64,
++    /// Whether the component holds the edge's target, which makes it the head.
++    is_head: bool,
++    /// Whether the component holds the edge's endpoint away from node 0.
++    is_below: bool,
++}
++
++/// Scratch `split_at` reuses from one pivot to the next.
++#[derive(Default)]
++struct SplitScratch {
++    /// The component `split_at` explores alongside the one it keeps.
++    other: Split,
++    stacks: [Vec<usize>; 2],
++}
++
+ /// Scratch for recomputing the cut values an exchange invalidates, kept empty
+ /// between exchanges.
+ #[derive(Default)]
+@@ -48,14 +68,24 @@ pub struct NetworkSimplex<'a> {
+     balance: bool,
+     iteration_limit: i32,
+     edges: Vec<NEdgeRef>,
+-    tree_edge_ids: Vec<usize>,
++    /// Each tree edge's rank in the order the edges joined the tree, which is
++    /// the order `leave_edge` searches them in.
++    tree_rank: Vec<u64>,
++    next_tree_rank: u64,
++    /// The tree edges with a negative cut value, by `tree_rank`.
++    negative: BTreeSet<(u64, usize)>,
+     sources: Vec<NNodeRef>,
+     edge_visited: Vec<bool>,
+-    po_id: Vec<i32>,
+-    lowest_po_id: Vec<i32>,
+-    /// The tree edge from each node toward node 0, the root of the post-order
+-    /// numbering.
++    /// Whether the spanning tree reaches every node.
++    spanning: bool,
++    /// The tree edge from each node toward node 0.
+     parent_edge: Vec<usize>,
++    /// Scratch marks telling apart the nodes of one traversal from all others:
++    /// a node visited by a traversal carries a value no earlier one used.
++    mark: Vec<u64>,
++    last_mark: u64,
++    split: Split,
++    split_scratch: SplitScratch,
+     tree_degree: Vec<u32>,
+     cutvalue: Vec<f64>,
+     stale: StaleCutvalues,
+@@ -72,8 +102,6 @@ pub struct NetworkSimplex<'a> {
+     // alone, and `store_layers` writes the resulting layers to the nodes
+     n_layer: Vec<i32>,
+     n_tree_node: Vec<bool>,
+-    // Reusable stack for iterative postorder traversal (nid, adj_cursor, lowest, entry edge)
+-    postorder_stack: Vec<(usize, usize, i32, usize)>,
+ }
+ 
+ impl<'a> NetworkSimplex<'a> {
+@@ -84,12 +112,17 @@ impl<'a> NetworkSimplex<'a> {
+             balance: false,
+             iteration_limit: i32::MAX,
+             edges: Vec::new(),
+-            tree_edge_ids: Vec::new(),
++            tree_rank: Vec::new(),
++            next_tree_rank: 0,
++            negative: BTreeSet::new(),
+             sources: Vec::new(),
+             edge_visited: Vec::new(),
+-            po_id: Vec::new(),
+-            lowest_po_id: Vec::new(),
++            spanning: false,
+             parent_edge: Vec::new(),
++            mark: Vec::new(),
++            last_mark: 0,
++            split: Split::default(),
++            split_scratch: SplitScratch::default(),
+             tree_degree: Vec::new(),
+             cutvalue: Vec::new(),
+             stale: StaleCutvalues::default(),
+@@ -102,7 +135,6 @@ impl<'a> NetworkSimplex<'a> {
+             node_edges: Vec::new(),
+             n_layer: Vec::new(),
+             n_tree_node: Vec::new(),
+-            postorder_stack: Vec::new(),
+         }
+     }
+ 
+@@ -187,9 +219,10 @@ impl<'a> NetworkSimplex<'a> {
+     fn initialize(&mut self) {
+         let num_nodes = self.graph.nodes.len();
+         // tree_node sync to underlying NNode deferred — algorithm uses SoA cache only
+-        self.po_id = vec![0; num_nodes];
+-        self.lowest_po_id = vec![0; num_nodes];
++        self.spanning = false;
+         self.parent_edge = vec![NO_EDGE; num_nodes];
++        self.mark = vec![0; num_nodes];
++        self.last_mark = 0;
+         self.tree_degree = vec![0; num_nodes];
+         self.stale.edge_up = vec![NO_EDGE; num_nodes];
+         self.stale.below = vec![0; num_nodes];
+@@ -260,14 +293,18 @@ impl<'a> NetworkSimplex<'a> {
+             self.edge_visited.fill(false);
+         }
+ 
++        self.tree_rank.clear();
++        self.tree_rank.resize(num_edges, 0);
++        self.next_tree_rank = 0;
++        self.negative.clear();
+         self.edges = edges;
+-        self.tree_edge_ids.clear();
+     }
+ 
+     fn dispose(&mut self) {
+         self.cutvalue.clear();
+         self.edges.clear();
+-        self.tree_edge_ids.clear();
++        self.tree_rank.clear();
++        self.negative.clear();
+         self.edge_visited.clear();
+         self.e_src_id.clear();
+         self.e_tgt_id.clear();
+@@ -277,9 +314,10 @@ impl<'a> NetworkSimplex<'a> {
+         self.node_edges.clear();
+         self.n_layer.clear();
+         self.n_tree_node.clear();
+-        self.lowest_po_id.clear();
+-        self.po_id.clear();
+         self.parent_edge.clear();
++        self.mark.clear();
++        self.split = Split::default();
++        self.split_scratch = SplitScratch::default();
+         self.tree_degree.clear();
+         self.stale = StaleCutvalues::default();
+         self.sources.clear();
+@@ -317,7 +355,7 @@ impl<'a> NetworkSimplex<'a> {
+         }
+ 
+         if !self.graph.nodes.is_empty() {
+-            self.postorder_traversal(0, NO_EDGE, 1);
++            self.spanning = self.orient_tree() == self.graph.nodes.len();
+             self.cutvalues();
+         }
+     }
+@@ -422,8 +460,7 @@ impl<'a> NetworkSimplex<'a> {
+                 let src_layer = self.n_layer[self.e_src_id[eid]];
+                 let tgt_layer = self.n_layer[self.e_tgt_id[eid]];
+                 if self.e_delta[eid] == tgt_layer - src_layer {
+-                    self.e_tree[eid] = true;
+-                    self.tree_edge_ids.push(eid);
++                    self.join_tree(eid);
+                     node_count += self.tight_tree_dfs(opp_id);
+                 }
+             }
+@@ -451,52 +488,88 @@ impl<'a> NetworkSimplex<'a> {
+         min_eid
+     }
+ 
+-    /// Numbers the subtree `start_nid` roots in post-order from `first`, entered
+-    /// through `entry_edge`. The subtree of a node holds the contiguous range
+-    /// `lowest_po_id..=po_id` of the numbering, so renumbering a subtree whose
+-    /// node set is unchanged from its old lowest number reproduces the numbering
+-    /// of the whole tree.
+-    fn postorder_traversal(&mut self, start_nid: usize, entry_edge: usize, first: i32) {
+-        let mut stack = std::mem::take(&mut self.postorder_stack);
+-        stack.clear();
+-        stack.push((start_nid, 0, i32::MAX, entry_edge));
+-        let mut post_order = first;
+-
+-        while let Some(frame) = stack.last_mut() {
+-            let nid = frame.0;
+-            let num_adj = self.node_edges[nid].len();
+-
+-            // Advance through adjacency list to find the next tree edge to a child
+-            let mut pushed = false;
+-            while frame.1 < num_adj {
+-                let eid = self.node_edges[nid][frame.1];
+-                frame.1 += 1;
+-                if self.e_tree[eid] && eid != frame.3 {
+-                    let opp_id = self.opposite(eid, nid);
+-                    self.parent_edge[opp_id] = eid;
+-                    stack.push((opp_id, 0, i32::MAX, eid));
+-                    pushed = true;
+-                    break;
++    /// Points each tree node's parent edge toward node 0, returning how many nodes
++    /// the tree reaches.
++    fn orient_tree(&mut self) -> usize {
++        let mut reached = 1;
++        let mut stack = Vec::with_capacity(self.graph.nodes.len());
++        stack.push(0);
++        while let Some(nid) = stack.pop() {
++            for &eid in &self.node_edges[nid] {
++                if self.e_tree[eid] && eid != self.parent_edge[nid] {
++                    let child = self.opposite(eid, nid);
++                    self.parent_edge[child] = eid;
++                    stack.push(child);
++                    reached += 1;
+                 }
+             }
++        }
++        reached
++    }
++
++    fn next_mark(&mut self) -> u64 {
++        self.last_mark += 1;
++        self.last_mark
++    }
+ 
+-            if !pushed {
+-                // Post-order: all children visited
+-                let (nid, _, lowest, _) = stack.pop().unwrap();
+-                let my_lowest = lowest.min(post_order);
+-                self.po_id[nid] = post_order;
+-                self.lowest_po_id[nid] = my_lowest;
+-                post_order += 1;
+-                // Propagate lowest to parent
+-                if let Some(parent) = stack.last_mut() {
+-                    parent.2 = parent.2.min(my_lowest);
++    /// The endpoint of tree edge `eid` away from node 0.
++    fn lower_end(&self, eid: usize) -> usize {
++        let source = self.e_src_id[eid];
++        if self.parent_edge[source] == eid {
++            source
++        } else {
++            self.e_tgt_id[eid]
++        }
++    }
++
++    /// Collects into `self.split` a component of the spanning tree less tree edge
++    /// `eid`: the smaller one when the tree spans the graph, and the one away
++    /// from node 0 otherwise. The two sides are explored in turns, so the cost
++    /// is proportional to the smaller.
++    fn split_at(&mut self, eid: usize) {
++        let below = self.lower_end(eid);
++        let above = self.opposite(eid, below);
++        let mut split = std::mem::take(&mut self.split);
++        let SplitScratch { mut other, mut stacks } = std::mem::take(&mut self.split_scratch);
++        split.nodes.clear();
++        other.nodes.clear();
++        for (stack, start) in stacks.iter_mut().zip([below, above]) {
++            stack.clear();
++            stack.push(start);
++        }
++        let mut explorers = [(below, &mut split), (above, &mut other)];
++        let explored = if self.spanning { 2 } else { 1 };
++        for (start, side) in explorers.iter_mut().take(explored) {
++            side.mark = self.next_mark();
++            self.mark[*start] = side.mark;
++        }
++        let done = 'explore: loop {
++            for turn in 0..explored {
++                let side = &mut explorers[turn].1;
++                let Some(nid) = stacks[turn].pop() else {
++                    break 'explore turn;
++                };
++                side.nodes.push(nid);
++                for &next in &self.node_edges[nid] {
++                    if self.e_tree[next] && next != eid {
++                        let opp = self.opposite(next, nid);
++                        if self.mark[opp] != side.mark {
++                            self.mark[opp] = side.mark;
++                            stacks[turn].push(opp);
++                        }
++                    }
+                 }
+             }
++        };
++        let [(_, split_side), (_, other_side)] = explorers;
++        if done == 1 {
++            std::mem::swap(split_side, other_side);
+         }
+-
+-        self.postorder_stack = stack;
++        split.is_below = done == 0;
++        split.is_head = (below == self.e_tgt_id[eid]) == split.is_below;
++        self.split = split;
++        self.split_scratch = SplitScratch { other, stacks };
+     }
+-
+     #[inline]
+     fn opposite(&self, eid: usize, nid: usize) -> usize {
+         if self.e_src_id[eid] == nid {
+@@ -506,31 +579,31 @@ impl<'a> NetworkSimplex<'a> {
+         }
+     }
+ 
+-    #[inline]
+-    fn is_ancestor(&self, ancestor: usize, nid: usize) -> bool {
+-        self.lowest_po_id[ancestor] <= self.po_id[nid] && self.po_id[nid] <= self.po_id[ancestor]
+-    }
+-
+-    fn common_ancestor(&self, a: usize, b: usize) -> usize {
+-        let mut ancestor = a;
+-        while !self.is_ancestor(ancestor, b) {
+-            ancestor = self.opposite(self.parent_edge[ancestor], ancestor);
++    /// The nearest node both `a` and `b` reach by parent edges, found by climbing
++    /// from both in turns.
++    fn common_ancestor(&mut self, a: usize, b: usize) -> usize {
++        if a == b {
++            return a;
+         }
+-        ancestor
+-    }
+-
+-    /// Check if `node` is in the head component of the spanning tree edge.
+-    /// Uses pre-extracted edge source/target internal IDs to avoid repeated locks.
+-    #[inline]
+-    fn is_in_head_by_id(&self, node_id: usize, source_id: usize, target_id: usize) -> bool {
+-        if self.lowest_po_id[source_id] <= self.po_id[node_id]
+-            && self.po_id[node_id] <= self.po_id[source_id]
+-            && self.lowest_po_id[target_id] <= self.po_id[node_id]
+-            && self.po_id[node_id] <= self.po_id[target_id]
+-        {
+-            return self.po_id[source_id] >= self.po_id[target_id];
++        let marks = [self.next_mark(), self.next_mark()];
++        let mut climbers = [a, b];
++        self.mark[a] = marks[0];
++        self.mark[b] = marks[1];
++        loop {
++            for turn in 0..2 {
++                let nid = climbers[turn];
++                let up = self.parent_edge[nid];
++                if up == NO_EDGE {
++                    continue;
++                }
++                let parent = self.opposite(up, nid);
++                if self.mark[parent] == marks[1 - turn] {
++                    return parent;
++                }
++                self.mark[parent] = marks[turn];
++                climbers[turn] = parent;
++            }
+         }
+-        self.po_id[source_id] < self.po_id[target_id]
+     }
+ 
+     /// The node the cut values are summed toward: the highest-indexed leaf of
+@@ -547,13 +620,23 @@ impl<'a> NetworkSimplex<'a> {
+             .expect("a spanning tree with an edge has a leaf")
+     }
+ 
++    fn join_tree(&mut self, eid: usize) {
++        self.e_tree[eid] = true;
++        self.tree_rank[eid] = self.next_tree_rank;
++        self.next_tree_rank += 1;
++    }
++
+     fn cutvalues(&mut self) {
+         self.tree_degree.fill(0);
+-        for &eid in &self.tree_edge_ids {
+-            self.tree_degree[self.e_src_id[eid]] += 1;
+-            self.tree_degree[self.e_tgt_id[eid]] += 1;
++        let mut tree_edges = 0;
++        for eid in 0..self.edges.len() {
++            if self.e_tree[eid] {
++                self.tree_degree[self.e_src_id[eid]] += 1;
++                self.tree_degree[self.e_tgt_id[eid]] += 1;
++                tree_edges += 1;
++            }
+         }
+-        if self.tree_edge_ids.is_empty() {
++        if tree_edges == 0 {
+             return;
+         }
+         let root = self.cutvalue_root();
+@@ -615,6 +698,12 @@ impl<'a> NetworkSimplex<'a> {
+             }
+         }
+         self.cutvalue[td_id] = cutvalue;
++        let key = (self.tree_rank[td_id], td_id);
++        if cutvalue < FUZZY_ST_ZERO {
++            self.negative.insert(key);
++        } else {
++            self.negative.remove(&key);
++        }
+     }
+ 
+     /// Recomputes the cut values an exchange invalidated. A cut value depends only
+@@ -668,42 +757,35 @@ impl<'a> NetworkSimplex<'a> {
+         }
+     }
+ 
++    /// The first tree edge to join the tree whose cut value is negative.
+     fn leave_edge(&self) -> Option<usize> {
+-        // Must iterate tree_edge_ids in insertion order (Java parity) — zero locks
+-        self.tree_edge_ids
+-            .iter()
+-            .find(|&&eid| {
+-                self.e_tree[eid]
+-                    && eid < self.cutvalue.len()
+-                    && self.cutvalue[eid] < FUZZY_ST_ZERO
+-            })
+-            .copied()
+-    }
+-
+-    fn enter_edge(&self, leave_id: usize) -> Option<usize> {
++        self.negative.first().map(|&(_, eid)| eid)
++    }
++
++    /// The non-tree edge of least slack leading from the head component of tree
++    /// edge `leave_id` to its tail, the lowest-indexed of those tying. Leaves the
++    /// split at `leave_id` in `self.split`.
++    fn enter_edge(&mut self, leave_id: usize) -> Option<usize> {
+         if !self.e_tree[leave_id] {
+             return None;
+         }
+-        let leave_src_id = self.e_src_id[leave_id];
+-        let leave_tgt_id = self.e_tgt_id[leave_id];
+-
+-        let mut replace: Option<usize> = None;
+-        let mut rep_slack = i32::MAX;
+-        for eid in 0..self.edges.len() {
+-            let src_id = self.e_src_id[eid];
+-            let tgt_id = self.e_tgt_id[eid];
+-            if self.is_in_head_by_id(src_id, leave_src_id, leave_tgt_id)
+-                && !self.is_in_head_by_id(tgt_id, leave_src_id, leave_tgt_id)
+-            {
+-                let slack = self.n_layer[tgt_id] - self.n_layer[src_id] - self.e_delta[eid];
+-                if slack < rep_slack {
+-                    rep_slack = slack;
+-                    replace = Some(eid);
++        self.split_at(leave_id);
++        let split = &self.split;
++        let in_head = |nid: usize| (self.mark[nid] == split.mark) == split.is_head;
++        let mut replace: Option<(i32, usize)> = None;
++        for &nid in &split.nodes {
++            for &eid in &self.node_edges[nid] {
++                let src_id = self.e_src_id[eid];
++                let tgt_id = self.e_tgt_id[eid];
++                if in_head(src_id) && !in_head(tgt_id) {
++                    let slack = self.n_layer[tgt_id] - self.n_layer[src_id] - self.e_delta[eid];
++                    if replace.is_none_or(|best| (slack, eid) < best) {
++                        replace = Some((slack, eid));
++                    }
+                 }
+             }
+         }
+-
+-        replace
++        replace.map(|(_, eid)| eid)
+     }
+ 
+     fn exchange(&mut self, leave_id: usize, enter_id: usize) {
+@@ -711,14 +793,9 @@ impl<'a> NetworkSimplex<'a> {
+             return;
+         }
+ 
+-        // Toggle tree membership — SoA cache only (no underlying edge sync needed)
+         self.e_tree[leave_id] = false;
+-        if let Some(pos) = self.tree_edge_ids.iter().position(|&eid| eid == leave_id) {
+-            self.tree_edge_ids.remove(pos);
+-        }
+-
+-        self.e_tree[enter_id] = true;
+-        self.tree_edge_ids.push(enter_id);
++        self.negative.remove(&(self.tree_rank[leave_id], leave_id));
++        self.join_tree(enter_id);
+ 
+         // Use cached IDs and layers — zero locks for leave/enter properties
+         let leave_src_id = self.e_src_id[leave_id];
+@@ -726,10 +803,8 @@ impl<'a> NetworkSimplex<'a> {
+         let enter_src_id = self.e_src_id[enter_id];
+         let enter_tgt_id = self.e_tgt_id[enter_id];
+ 
+-        // The numbering and the tree degrees still describe the tree before the
+-        // exchange, which replaces an edge of the tree cycle `enter_id` closes,
+-        // all of it below `cycle_top`.
+-        let cycle_top = self.common_ancestor(enter_src_id, enter_tgt_id);
++        // `self.split` and the parent edges still describe the tree before the
++        // exchange.
+         let old_root = self.cutvalue_root();
+         self.tree_degree[leave_src_id] -= 1;
+         self.tree_degree[leave_tgt_id] -= 1;
+@@ -737,23 +812,49 @@ impl<'a> NetworkSimplex<'a> {
+         self.tree_degree[enter_tgt_id] += 1;
+         let root = self.cutvalue_root();
+ 
++        let split = &self.split;
++        let in_split = |nid: usize| self.mark[nid] == split.mark;
+         let mut delta =
+             self.n_layer[enter_tgt_id] - self.n_layer[enter_src_id] - self.e_delta[enter_id];
+-        if !self.is_in_head_by_id(enter_tgt_id, leave_src_id, leave_tgt_id) {
++        if in_split(enter_tgt_id) != split.is_head {
+             delta = -delta;
+         }
+-
+-        for nid in 0..self.n_layer.len() {
+-            if !self.is_in_head_by_id(nid, leave_src_id, leave_tgt_id) {
++        if self.spanning {
++            // Only the layers' differences matter until `normalize` subtracts the
++            // lowest, so moving the head against the tail is the same move.
++            let shift = if split.is_head { -delta } else { delta };
++            for &nid in &split.nodes {
++                self.n_layer[nid] += shift;
++            }
++        } else if split.is_head {
++            for nid in 0..self.n_layer.len() {
++                if !in_split(nid) {
++                    self.n_layer[nid] += delta;
++                }
++            }
++        } else {
++            for &nid in &split.nodes {
+                 self.n_layer[nid] += delta;
+             }
+         }
+ 
+-        self.postorder_traversal(
+-            cycle_top,
+-            self.parent_edge[cycle_top],
+-            self.lowest_po_id[cycle_top],
+-        );
++        // Hang the part below the leaving edge from the entering one.
++        let below = self.lower_end(leave_id);
++        let mut nid = if in_split(enter_src_id) == split.is_below {
++            enter_src_id
++        } else {
++            enter_tgt_id
++        };
++        let mut down = enter_id;
++        loop {
++            let up = std::mem::replace(&mut self.parent_edge[nid], down);
++            if nid == below {
++                break;
++            }
++            down = up;
++            nid = self.opposite(up, nid);
++        }
++
+         let changed = [
+             leave_src_id,
+             leave_tgt_id,

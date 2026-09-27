@@ -91,6 +91,7 @@ crate.annotation(
     patches = [
         "//patches/elk-rs:elk-rs-incremental-cut-values.patch",
         "//patches/elk-rs:elk-rs-network-simplex-layer-cache.patch",
+        "//patches/elk-rs:elk-rs-network-simplex-pivot-on-smaller-side.patch",
     ],
 )
 crate.annotation(
