@@ -69,6 +69,7 @@ Eclipse Layout Kernel, Rust port 0.11.0+rs.2 — Eclipse Public License 2.0
     patches/elk-rs/elk-rs-network-simplex-incremental-feasible-tree.patch
     patches/elk-rs/elk-rs-network-simplex-layer-cache.patch
     patches/elk-rs/elk-rs-network-simplex-pivot-on-smaller-side.patch
+    patches/elk-rs/elk-rs-network-simplex-subtree-sizes.patch
     patches/elk-rs/elk-rs-property-map-copy-on-write.patch
     patches/elk-rs/elk-rs-reentrant-external-port-lock.patch
     //LICENSES:elk_rs

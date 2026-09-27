@@ -98,6 +98,7 @@ crate.annotation(
         "//patches/elk-rs:elk-rs-network-simplex-pivot-on-smaller-side.patch",
         "//patches/elk-rs:elk-rs-network-simplex-cycle-cut-values.patch",
         "//patches/elk-rs:elk-rs-network-simplex-incremental-feasible-tree.patch",
+        "//patches/elk-rs:elk-rs-network-simplex-subtree-sizes.patch",
     ],
 )
 crate.annotation(

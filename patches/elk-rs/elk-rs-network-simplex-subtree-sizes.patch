@@ -1,0 +1,254 @@
+Split a network simplex tree by subtree size
+
+A pivot finds the smaller side of the leaving edge by exploring both
+sides in turns. Which side is searched never changes the edges picked.
+
+diff --git a/plugins/org.eclipse.elk.alg.common/src/org/eclipse/elk/alg/common/networksimplex/network_simplex.rs b/plugins/org.eclipse.elk.alg.common/src/org/eclipse/elk/alg/common/networksimplex/network_simplex.rs
+index 8ca7b28..8244e70 100644
+--- a/plugins/org.eclipse.elk.alg.common/src/org/eclipse/elk/alg/common/networksimplex/network_simplex.rs
++++ b/plugins/org.eclipse.elk.alg.common/src/org/eclipse/elk/alg/common/networksimplex/network_simplex.rs
+@@ -32,14 +32,6 @@ struct Split {
+     is_below: bool,
+ }
+ 
+-/// Scratch `split_at` reuses from one pivot to the next.
+-#[derive(Default)]
+-struct SplitScratch {
+-    /// The component `split_at` explores alongside the one it keeps.
+-    other: Split,
+-    stacks: [Vec<usize>; 2],
+-}
+-
+ /// An edge between the tree `feasible_tree` grows and a node outside it, at
+ /// its endpoint in the tree.
+ #[derive(Clone, Copy)]
+@@ -199,12 +191,15 @@ pub struct NetworkSimplex<'a> {
+     spanning: bool,
+     /// The tree edge from each node toward node 0.
+     parent_edge: Vec<usize>,
++    /// How many nodes each tree node reaches away from node 0, itself included.
++    subtree_size: Vec<u32>,
+     /// Scratch marks telling apart the nodes of one traversal from all others:
+     /// a node visited by a traversal carries a value no earlier one used.
+     mark: Vec<u64>,
+     last_mark: u64,
+     split: Split,
+-    split_scratch: SplitScratch,
++    /// Scratch for `split_at`, kept from one pivot to the next.
++    split_stack: Vec<usize>,
+     tree_degree: Vec<u32>,
+     cutvalue: Vec<f64>,
+     /// Whether every cut value, and every partial sum `compute_cutvalue` forms,
+@@ -246,10 +241,11 @@ impl<'a> NetworkSimplex<'a> {
+             joined: Vec::new(),
+             spanning: false,
+             parent_edge: Vec::new(),
++            subtree_size: Vec::new(),
+             mark: Vec::new(),
+             last_mark: 0,
+             split: Split::default(),
+-            split_scratch: SplitScratch::default(),
++            split_stack: Vec::new(),
+             tree_degree: Vec::new(),
+             cutvalue: Vec::new(),
+             exact_cutvalues: false,
+@@ -349,6 +345,7 @@ impl<'a> NetworkSimplex<'a> {
+         // tree_node sync to underlying NNode deferred — algorithm uses SoA cache only
+         self.spanning = false;
+         self.parent_edge = vec![NO_EDGE; num_nodes];
++        self.subtree_size = vec![1; num_nodes];
+         self.mark = vec![0; num_nodes];
+         self.last_mark = 0;
+         self.tree_degree = vec![0; num_nodes];
+@@ -455,9 +452,10 @@ impl<'a> NetworkSimplex<'a> {
+         self.n_layer.clear();
+         self.n_tree_node.clear();
+         self.parent_edge.clear();
++        self.subtree_size.clear();
+         self.mark.clear();
+         self.split = Split::default();
+-        self.split_scratch = SplitScratch::default();
++        self.split_stack = Vec::new();
+         self.tree_degree.clear();
+         self.stale = StaleCutvalues::default();
+         self.sources.clear();
+@@ -701,23 +699,30 @@ impl<'a> NetworkSimplex<'a> {
+         ordered
+     }
+ 
+-    /// Points each tree node's parent edge toward node 0, returning how many nodes
+-    /// the tree reaches.
++    /// Points each tree node's parent edge toward node 0 and counts the nodes
++    /// below it, returning how many nodes the tree reaches.
+     fn orient_tree(&mut self) -> usize {
+-        let mut reached = 1;
+-        let mut stack = Vec::with_capacity(self.graph.nodes.len());
+-        stack.push(0);
+-        while let Some(nid) = stack.pop() {
++        let mut reached = Vec::with_capacity(self.graph.nodes.len());
++        reached.push(0);
++        let mut next = 0;
++        while let Some(&nid) = reached.get(next) {
++            next += 1;
+             for &eid in &self.node_edges[nid] {
+                 if self.e_tree[eid] && eid != self.parent_edge[nid] {
+                     let child = self.opposite(eid, nid);
+                     self.parent_edge[child] = eid;
+-                    stack.push(child);
+-                    reached += 1;
++                    reached.push(child);
+                 }
+             }
+         }
+-        reached
++        for &nid in reached.iter().rev() {
++            let up = self.parent_edge[nid];
++            if up != NO_EDGE {
++                let parent = self.opposite(up, nid);
++                self.subtree_size[parent] += self.subtree_size[nid];
++            }
++        }
++        reached.len()
+     }
+ 
+     fn next_mark(&mut self) -> u64 {
+@@ -737,51 +742,36 @@ impl<'a> NetworkSimplex<'a> {
+ 
+     /// Collects into `self.split` a component of the spanning tree less tree edge
+     /// `eid`: the smaller one when the tree spans the graph, and the one away
+-    /// from node 0 otherwise. The two sides are explored in turns, so the cost
+-    /// is proportional to the smaller.
++    /// from node 0 otherwise.
+     fn split_at(&mut self, eid: usize) {
+         let below = self.lower_end(eid);
+         let above = self.opposite(eid, below);
++        let below_is_smaller =
++            2 * self.subtree_size[below] as usize <= self.graph.nodes.len();
++        let is_below = !self.spanning || below_is_smaller;
++        let start = if is_below { below } else { above };
+         let mut split = std::mem::take(&mut self.split);
+-        let SplitScratch { mut other, mut stacks } = std::mem::take(&mut self.split_scratch);
+         split.nodes.clear();
+-        other.nodes.clear();
+-        for (stack, start) in stacks.iter_mut().zip([below, above]) {
+-            stack.clear();
+-            stack.push(start);
+-        }
+-        let mut explorers = [(below, &mut split), (above, &mut other)];
+-        let explored = if self.spanning { 2 } else { 1 };
+-        for (start, side) in explorers.iter_mut().take(explored) {
+-            side.mark = self.next_mark();
+-            self.mark[*start] = side.mark;
+-        }
+-        let done = 'explore: loop {
+-            for turn in 0..explored {
+-                let side = &mut explorers[turn].1;
+-                let Some(nid) = stacks[turn].pop() else {
+-                    break 'explore turn;
+-                };
+-                side.nodes.push(nid);
+-                for &next in &self.node_edges[nid] {
+-                    if self.e_tree[next] && next != eid {
+-                        let opp = self.opposite(next, nid);
+-                        if self.mark[opp] != side.mark {
+-                            self.mark[opp] = side.mark;
+-                            stacks[turn].push(opp);
+-                        }
++        split.mark = self.next_mark();
++        split.is_below = is_below;
++        split.is_head = (below == self.e_tgt_id[eid]) == is_below;
++        self.mark[start] = split.mark;
++        let mut stack = std::mem::take(&mut self.split_stack);
++        stack.push(start);
++        while let Some(nid) = stack.pop() {
++            split.nodes.push(nid);
++            for &next in &self.node_edges[nid] {
++                if self.e_tree[next] && next != eid {
++                    let opp = self.opposite(next, nid);
++                    if self.mark[opp] != split.mark {
++                        self.mark[opp] = split.mark;
++                        stack.push(opp);
+                     }
+                 }
+             }
+-        };
+-        let [(_, split_side), (_, other_side)] = explorers;
+-        if done == 1 {
+-            std::mem::swap(split_side, other_side);
+         }
+-        split.is_below = done == 0;
+-        split.is_head = (below == self.e_tgt_id[eid]) == split.is_below;
+         self.split = split;
+-        self.split_scratch = SplitScratch { other, stacks };
++        self.split_stack = stack;
+     }
+ 
+     fn slack(&self, eid: usize) -> i32 {
+@@ -1059,26 +1049,47 @@ impl<'a> NetworkSimplex<'a> {
+             enter_tgt_id
+         };
+ 
++        let attach_to = self.opposite(enter_id, nid);
++        let cycle_top = self.common_ancestor(enter_src_id, enter_tgt_id);
+         let roots = if self.exact_cutvalues {
+-            self.shift_cutvalues_around_cycle(leave_id, enter_id);
++            self.shift_cutvalues_around_cycle(leave_id, enter_id, cycle_top);
+             None
+         } else {
+             Some(self.cutvalue_root())
+         };
++
++        // The part below the leaving edge moves from beneath the leaving edge's
++        // upper end to beneath the entering edge's end outside it.
++        let below = self.lower_end(leave_id);
++        let moved = self.subtree_size[below];
++        let mut from = self.opposite(leave_id, below);
++        while from != cycle_top {
++            self.subtree_size[from] -= moved;
++            from = self.opposite(self.parent_edge[from], from);
++        }
++        let mut to = attach_to;
++        while to != cycle_top {
++            self.subtree_size[to] += moved;
++            to = self.opposite(self.parent_edge[to], to);
++        }
+         self.tree_degree[leave_src_id] -= 1;
+         self.tree_degree[leave_tgt_id] -= 1;
+         self.tree_degree[enter_src_id] += 1;
+         self.tree_degree[enter_tgt_id] += 1;
+         let roots = roots.map(|old_root| (old_root, self.cutvalue_root()));
+ 
+-        // Hang the part below the leaving edge from the entering one.
+-        let below = self.lower_end(leave_id);
++        // Hang the part below the leaving edge from the entering one: along the
++        // path up from the entering edge, each node comes to hold the part less
++        // what the node before it held.
+         let mut down = enter_id;
++        let mut held_before = 0;
+         loop {
+             let up = std::mem::replace(&mut self.parent_edge[nid], down);
++            let held = std::mem::replace(&mut self.subtree_size[nid], moved - held_before);
+             if nid == below {
+                 break;
+             }
++            held_before = held;
+             down = up;
+             nid = self.opposite(up, nid);
+         }
+@@ -1099,13 +1110,12 @@ impl<'a> NetworkSimplex<'a> {
+     /// makes, given the cut values of the tree before: only the edges of the
+     /// cycle `enter_id` closes change, each by the leaving edge's cut value, in
+     /// the sense it runs along the cycle (Gansner et al., "A Technique for
+-    /// Drawing Directed Graphs", IEEE TSE 19(3), 1993, section 2.4). This takes
+-    /// cut values that are exact.
+-    fn shift_cutvalues_around_cycle(&mut self, leave_id: usize, enter_id: usize) {
++    /// Drawing Directed Graphs", IEEE TSE 19(3), 1993, section 2.4). `top` is
++    /// the cycle's node nearest node 0. This takes cut values that are exact.
++    fn shift_cutvalues_around_cycle(&mut self, leave_id: usize, enter_id: usize, top: usize) {
+         let leaving = self.cutvalue[leave_id];
+         let from = self.e_src_id[enter_id];
+         let to = self.e_tgt_id[enter_id];
+-        let top = self.common_ancestor(from, to);
+         // Climbing from `from` runs the cycle toward `to`; climbing from `to`
+         // runs it the other way.
+         for (start, forward_when_climbing_from_source) in [(from, true), (to, false)] {
