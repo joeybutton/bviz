@@ -1,0 +1,162 @@
+Share a property map between clones until one changes it
+
+The layered algorithm copies the properties of every node into each
+arena it builds, most of them never read or changed there.
+
+diff --git a/plugins/org.eclipse.elk.graph/src/org/eclipse/elk/graph/properties/mod.rs b/plugins/org.eclipse.elk.graph/src/org/eclipse/elk/graph/properties/mod.rs
+index 5d0ac34..e952942 100644
+--- a/plugins/org.eclipse.elk.graph/src/org/eclipse/elk/graph/properties/mod.rs
++++ b/plugins/org.eclipse.elk.graph/src/org/eclipse/elk/graph/properties/mod.rs
+@@ -3,7 +3,7 @@ use std::borrow::Cow;
+ use std::fmt;
+ use std::hash::{Hash, Hasher};
+ use std::sync::Arc;
+-use rustc_hash::FxHashMap;
++use rustc_hash::{FxBuildHasher, FxHashMap};
+ 
+ use crate::org::eclipse::elk::graph::util::ElkReflect;
+ 
+@@ -268,16 +268,28 @@ impl<T: Clone + Send + Sync + 'static> Hash for Property<T> {
+     }
+ }
+ 
++static NO_PROPERTIES: FxHashMap<PropertyId, PropertyValue> =
++    FxHashMap::with_hasher(FxBuildHasher);
++
++/// Clones share one map until one of them changes it, so copying a holder
++/// copies no property.
+ #[derive(Clone)]
+ pub struct MapPropertyHolder {
+-    property_map: FxHashMap<PropertyId, PropertyValue>,
++    /// `None` holds no property and allocates nothing.
++    property_map: Option<Arc<FxHashMap<PropertyId, PropertyValue>>>,
+ }
+ 
+ impl MapPropertyHolder {
+     pub fn new() -> Self {
+-        MapPropertyHolder {
+-            property_map: FxHashMap::default(),
+-        }
++        MapPropertyHolder { property_map: None }
++    }
++
++    fn property_map(&self) -> &FxHashMap<PropertyId, PropertyValue> {
++        self.property_map.as_deref().unwrap_or(&NO_PROPERTIES)
++    }
++
++    fn property_map_mut(&mut self) -> &mut FxHashMap<PropertyId, PropertyValue> {
++        Arc::make_mut(self.property_map.get_or_insert_default())
+     }
+ 
+     pub fn set_property<T: Clone + Send + Sync + 'static>(
+@@ -287,13 +299,15 @@ impl MapPropertyHolder {
+     ) -> &mut Self {
+         match value {
+             Some(value) => {
+-                self.property_map.insert(
++                self.property_map_mut().insert(
+                     property.id_key(),
+                     PropertyValue::Resolved(Arc::new(value)),
+                 );
+             }
+             None => {
+-                self.property_map.remove(property.id());
++                if self.property_map().contains_key(property.id()) {
++                    self.property_map_mut().remove(property.id());
++                }
+             }
+         }
+         self
+@@ -304,7 +318,7 @@ impl MapPropertyHolder {
+         property_id: impl Into<String>,
+         proxy: Arc<dyn IPropertyValueProxy>,
+     ) -> &mut Self {
+-        self.property_map
++        self.property_map_mut()
+             .insert(PropertyId::owned(property_id), PropertyValue::Proxy(proxy));
+         self
+     }
+@@ -316,12 +330,14 @@ impl MapPropertyHolder {
+     ) -> &mut Self {
+         match value {
+             Some(value) => {
+-                self.property_map
++                self.property_map_mut()
+                     .insert(PropertyId::owned(property_id), PropertyValue::Resolved(value));
+             }
+             None => {
+                 let key: String = property_id.into();
+-                self.property_map.remove(key.as_str());
++                if self.property_map().contains_key(key.as_str()) {
++                    self.property_map_mut().remove(key.as_str());
++                }
+             }
+         }
+         self
+@@ -333,7 +349,7 @@ impl MapPropertyHolder {
+         &mut self,
+         property: &Property<T>,
+     ) -> Option<T> {
+-        if let Some(value) = self.property_map.get(property.id()) {
++        if let Some(value) = self.property_map().get(property.id()) {
+             match value {
+                 PropertyValue::Resolved(value) => {
+                     if let Some(typed_ref) = (**value).downcast_ref::<T>() {
+@@ -344,7 +360,7 @@ impl MapPropertyHolder {
+                 PropertyValue::Proxy(proxy) => {
+                     if let Some(resolved) = proxy.resolve_value(property.id()) {
+                         let typed_ref = (*resolved).downcast_ref::<T>()?.clone();
+-                        self.property_map
++                        self.property_map_mut()
+                             .insert(property.id_key(), PropertyValue::Resolved(resolved));
+                         return Some(typed_ref);
+                     }
+@@ -368,7 +384,7 @@ impl MapPropertyHolder {
+         &self,
+         property: &Property<T>,
+     ) -> Option<T> {
+-        if let Some(value) = self.property_map.get(property.id()) {
++        if let Some(value) = self.property_map().get(property.id()) {
+             match value {
+                 PropertyValue::Resolved(value) => {
+                     return (**value).downcast_ref::<T>().cloned();
+@@ -384,28 +400,33 @@ impl MapPropertyHolder {
+     }
+ 
+     pub fn has_property<T: Clone + Send + Sync + 'static>(&self, property: &Property<T>) -> bool {
+-        self.property_map.contains_key(property.id())
++        self.property_map().contains_key(property.id())
+     }
+ 
+     pub fn copy_properties(&mut self, other: &MapPropertyHolder) -> &mut Self {
+-        if self.property_map.is_empty() {
++        if self.property_map().is_empty() {
+             self.property_map = other.property_map.clone();
+         } else {
+-            self.property_map.extend(other.property_map.clone());
++            self.property_map_mut().extend(
++                other
++                    .property_map()
++                    .iter()
++                    .map(|(id, value)| (id.clone(), value.clone())),
++            );
+         }
+         self
+     }
+ 
+     pub fn get_all_properties(&self) -> &FxHashMap<PropertyId, PropertyValue> {
+-        &self.property_map
++        self.property_map()
+     }
+ 
+     pub fn has_property_id(&self, property_id: &str) -> bool {
+-        self.property_map.contains_key(property_id)
++        self.property_map().contains_key(property_id)
+     }
+ 
+     pub fn clear(&mut self) {
+-        self.property_map.clear();
++        self.property_map = None;
+     }
+ }
+ 

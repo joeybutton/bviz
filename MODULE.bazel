@@ -103,7 +103,10 @@ crate.annotation(
 crate.annotation(
     crate = "org-eclipse-elk-graph",
     patch_args = ["-p1"],
-    patches = ["//patches/elk-rs:elk-rs-lock-free-clone-lookup.patch"],
+    patches = [
+        "//patches/elk-rs:elk-rs-lock-free-clone-lookup.patch",
+        "//patches/elk-rs:elk-rs-property-map-copy-on-write.patch",
+    ],
 )
 
 # Load libfontconfig at runtime (dlopen) instead of linking it via pkg-config.
