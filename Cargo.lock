@@ -874,6 +874,7 @@ dependencies = [
 name = "bviz_alloc"
 version = "0.1.0"
 dependencies = [
+ "libmimalloc-sys",
  "mimalloc",
 ]
 
