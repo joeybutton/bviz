@@ -25,14 +25,10 @@ use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 
-/// Derives every view of `map` off the UI thread, coarsest first.
-///
-/// A map derives a view the first time a camera calls for one, which is what
-/// keeps the wait before the first frame to the single view that frame draws.
-/// The reader reaches the rest by zooming, and a view derived under that gesture
-/// would hold the frame it was made for; deriving them in the background instead
-/// leaves the zoom nothing to wait on. A view already derived costs nothing to
-/// ask for again, so this races the camera harmlessly.
+/// Derives every view of `map` off the UI thread, coarsest first, so a zoom
+/// finds the level it calls for ready rather than drawing a neighbour of it
+/// while it derives. A view already derived costs nothing to ask for again, so
+/// this races [`derive_view`] harmlessly.
 pub(crate) fn derive_levels<V: 'static>(map: Arc<MapLayout>, cx: &mut Context<V>) {
     cx.background_executor()
         .spawn(async move {
@@ -60,6 +56,14 @@ pub(crate) enum ViewKey {
     Map { drawing: u64, level: usize },
 }
 
+impl ViewKey {
+    fn drawing(self) -> u64 {
+        match self {
+            Self::Layered(drawing) | Self::Map { drawing, .. } => drawing,
+        }
+    }
+}
+
 /// A share in the layout a mode draws, cheap to clone into a `'static` paint
 /// closure. A map resolves to a view only once the camera is known, so the level
 /// a frame draws is picked at the same scale it paints at.
@@ -70,11 +74,39 @@ pub(crate) enum Drawn {
 }
 
 impl Drawn {
-    /// The view drawn at `zoom` screen pixels per layout unit.
-    pub(crate) fn view(&self, zoom: f32) -> &LaidOut {
+    /// The view a frame at `zoom` screen pixels per layout unit draws: the map
+    /// level that zoom calls for or, while that one is yet to be derived, the
+    /// derived level nearest it. Absent while a map has no level derived:
+    /// deriving one costs a fold of the whole graph, which [`derive_view`]
+    /// leaves to a background thread.
+    pub(crate) fn view(&self, zoom: f32) -> Option<&LaidOut> {
+        match self {
+            Self::Layered { view, .. } => Some(view),
+            Self::Map { map, .. } => map.derived(shown_level(map, zoom)),
+        }
+    }
+
+    /// The view a frame at `zoom` calls for, deriving a map's level where it has
+    /// yet to be.
+    fn derive_view(&self, zoom: f32) -> &LaidOut {
         match self {
             Self::Layered { view, .. } => view,
             Self::Map { map, .. } => map.level(map.level_for_scale(zoom)),
+        }
+    }
+
+    /// Identifies the view a frame at `zoom` calls for, where that is a map's
+    /// level yet to be derived.
+    fn underived(&self, zoom: f32) -> Option<ViewKey> {
+        match self {
+            Self::Layered { .. } => None,
+            Self::Map { map, drawing } => {
+                let level = map.level_for_scale(zoom);
+                map.derived(level).is_none().then_some(ViewKey::Map {
+                    drawing: *drawing,
+                    level,
+                })
+            }
         }
     }
 
@@ -84,7 +116,7 @@ impl Drawn {
             Self::Layered { drawing, .. } => ViewKey::Layered(*drawing),
             Self::Map { map, drawing } => ViewKey::Map {
                 drawing: *drawing,
-                level: map.level_for_scale(zoom),
+                level: shown_level(map, zoom),
             },
         }
     }
@@ -95,7 +127,7 @@ impl Drawn {
         match self {
             Self::Layered { .. } => None,
             Self::Map { map, .. } => Some(Level {
-                index: map.level_for_scale(zoom),
+                index: shown_level(map, zoom),
                 count: map.level_count(),
             }),
         }
@@ -114,6 +146,12 @@ impl Drawn {
             height as f32 + 2. * MARGIN as f32,
         )
     }
+}
+
+/// The level of `map` a frame at `zoom` draws, which [`Drawn::view`] describes.
+fn shown_level(map: &MapLayout, zoom: f32) -> usize {
+    let wanted = map.level_for_scale(zoom);
+    map.nearest_derived(wanted).unwrap_or(wanted)
 }
 
 /// The boxes a mode's layout lets the user open or close, cheap to clone into a
@@ -348,6 +386,9 @@ pub(crate) struct Derived {
     frame_on_landing: bool,
     /// The derivation in flight, held so that it is not cancelled.
     _work: Task<()>,
+    /// The current drawing's views a frame found underived, each with the
+    /// background derivation of it, which redraws the canvas once it lands.
+    views_asked: Vec<(ViewKey, Task<()>)>,
 }
 
 impl Derived {
@@ -364,6 +405,7 @@ impl Derived {
             drawings: 0,
             frame_on_landing: false,
             _work: Task::ready(()),
+            views_asked: Vec::new(),
         }
     }
 
@@ -525,10 +567,12 @@ pub(crate) fn status(
     drawn: Option<(Drawn, f32)>,
     over_budget: Option<Overflow>,
 ) -> String {
-    source.status("No graph", |_| match drawn {
+    let viewed = drawn
+        .as_ref()
+        .and_then(|(drawn, zoom)| Some((drawn, *zoom, drawn.view(*zoom)?)));
+    source.status("No graph", |_| match viewed {
         None => "Laying out…".into(),
-        Some((drawn, zoom)) => {
-            let g = drawn.view(zoom);
+        Some((drawn, zoom, g)) => {
             let level = drawn
                 .level(zoom)
                 .map(|l| format!("level {}/{} · ", l.index + 1, l.count))
@@ -584,6 +628,34 @@ pub(crate) fn placed(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
     if let Some(restricted) = view.derived.restricted_map_drawn() {
         restricted.derive_levels(cx);
     }
+}
+
+/// Derives the view a frame of `drawn` at `zoom` calls for off the UI thread
+/// where it has yet to be, and redraws the canvas once it lands. A view already
+/// asked for is left to the derivation under way.
+pub(crate) fn derive_view(
+    view: &mut GraphPanel,
+    drawn: &Drawn,
+    zoom: f32,
+    cx: &mut Context<GraphPanel>,
+) {
+    let Some(key) = drawn.underived(zoom) else {
+        return;
+    };
+    let asked = &mut view.derived.views_asked;
+    asked.retain(|(asked, _)| asked.drawing() == key.drawing());
+    if asked.iter().any(|(asked, _)| *asked == key) {
+        return;
+    }
+    let drawn = drawn.clone();
+    let work = load_in_background(
+        cx,
+        move || {
+            drawn.derive_view(zoom);
+        },
+        |view: &mut GraphPanel, (), cx| view.invalidate_canvas(cx),
+    );
+    view.derived.views_asked.push((key, work));
 }
 
 /// Flips whether `id` is expanded and lays the graph out at the new expansion.
@@ -1288,7 +1360,7 @@ mod tests {
         let drawn = derived
             .drawn(LayoutMode::Layered)
             .expect("a layered drawing");
-        assert_eq!(drawn.view(1.0).width, 10.0);
+        assert_eq!(drawn.view(1.0).map(|g| g.width), Some(10.0));
     }
 
     /// A graph opened in place of another is told from it even where no
@@ -1333,7 +1405,7 @@ mod tests {
         let drawn = derived
             .drawn(LayoutMode::Layered)
             .expect("a layered drawing");
-        assert_eq!(drawn.view(1.0).width, 10.0);
+        assert_eq!(drawn.view(1.0).map(|g| g.width), Some(10.0));
     }
 
     /// The status line is drawn from the read and the panel's own drawing, so it
@@ -1349,13 +1421,46 @@ mod tests {
         assert_eq!(status(&failed, None, None), "No graph");
     }
 
+    /// Describing a map's view on the UI thread derives none: with no level
+    /// derived the status line reads as still laying out, and once one is, a
+    /// zoom calling for another is described by the one drawn in its place.
+    #[test]
+    fn a_map_describes_the_derived_level_it_draws() {
+        let loaded = document();
+        let drawn = opened(&loaded).drawn(LayoutMode::Map).expect("a map");
+        let Drawn::Map { map, .. } = &drawn else {
+            panic!("a map draws a map");
+        };
+        let finest = map.level_count() - 1;
+        assert!(finest > 0, "a level finer than the coarsest");
+        let described = || {
+            status(
+                &Source::Loaded(document()),
+                Some((drawn.clone(), f32::MAX)),
+                None,
+            )
+        };
+
+        assert_eq!(described(), "Laying out…");
+
+        map.level(0);
+        assert!(
+            described().starts_with(&format!("level 1/{} · ", finest + 1)),
+            "{}",
+            described()
+        );
+        assert!(map.derived(finest).is_none());
+        assert_eq!(drawn.view_key(f32::MAX), drawn.view_key(0.0));
+        assert!(drawn.underived(f32::MAX).is_some());
+    }
+
     #[test]
     fn a_drawn_graph_describes_what_it_draws() {
         let loaded = document();
         let derived = opened(&loaded);
         let drawn = derived.drawn(LayoutMode::Map).expect("a map");
         let level = drawn.level(1.0).expect("a map draws one of its levels");
-        let boxes = drawn.view(1.0).boxes.len();
+        let boxes = drawn.derive_view(1.0).boxes.len();
         let status = status(&Source::Loaded(document()), Some((drawn, 1.0)), None);
         assert!(
             status.starts_with(&format!(
@@ -1375,6 +1480,7 @@ mod tests {
         let loaded = document();
         let derived = opened(&loaded);
         let drawn = derived.drawn(LayoutMode::Map).expect("a map");
+        drawn.derive_view(1.0);
         let over = Overflow {
             nodes: DEFAULT_MAX_NODES,
             edges: DEFAULT_MAX_EDGES + 5,

@@ -16,9 +16,10 @@ pub(crate) enum Frame {
     Escaping,
 }
 
-/// A frame request's target, as a prepaint finds it.
-enum FrameTarget {
-    /// There is no drawing yet, or no fitted camera to resolve it at.
+/// What a request to move the view resolves to, as a prepaint finds it.
+pub(crate) enum Target {
+    /// There is no view drawn yet to resolve it at: no drawing, no zoom to
+    /// pick a map's level at, or no level derived.
     Pending,
     /// The rect to move the view onto, `None` where the request is answered by
     /// leaving the camera put.
@@ -38,8 +39,9 @@ pub(crate) struct Framing {
     chosen_zoom: f32,
     /// Whether the fit-to-window view has been established.
     fitted: bool,
-    /// Canvas bounds captured at the last prepaint, so hit-testing and the
-    /// pan/zoom handlers can work in the same frame the canvas painted.
+    /// The canvas bounds as last measured, by a prepaint or by
+    /// [`measure`](Self::measure), so hit-testing and the pan/zoom handlers
+    /// can work in the same frame the canvas painted.
     viewport: Bounds<Pixels>,
     recenter: bool,
     /// What a prepaint is to move the view onto outright, once the panel has a
@@ -78,6 +80,18 @@ impl Framing {
 
     pub(crate) fn viewport(&self) -> Bounds<Pixels> {
         self.viewport
+    }
+
+    /// Records the canvas bounds while there is no drawing to fit to them, so
+    /// the fit the first drawing gets is known before a frame draws it.
+    pub(crate) fn measure(&mut self, bounds: Bounds<Pixels>) {
+        self.viewport = bounds;
+    }
+
+    /// The zoom the next prepaint fits `content` at, where the camera awaits
+    /// its fit and the canvas has been measured.
+    pub(crate) fn pending_fit(&self, content: (f32, f32)) -> Option<f32> {
+        (!self.fitted && !self.viewport.is_empty()).then(|| fit_zoom(self.viewport.size, content))
     }
 
     /// Moves the camera to a zoom the reader picked, abandoning any settle in
@@ -185,11 +199,11 @@ impl Framing {
     /// settles come back to, since it is the view a gesture asked for, and it
     /// drops a pending recenter, which would otherwise pull the view off what
     /// was named onto whatever a relayout emphasized.
-    fn arm_frame(&mut self, content: (f32, f32), target: FrameTarget) {
+    fn arm_frame(&mut self, content: (f32, f32), target: Target) {
         if self.frame.is_none() {
             return;
         }
-        let FrameTarget::Resolved(target) = target else {
+        let Target::Resolved(target) = target else {
             return;
         };
         self.frame = None;
@@ -202,12 +216,16 @@ impl Framing {
         self.ease_to(zoom, pan);
     }
 
-    /// Answers a pending recenter request by arming an ease onto `target`; the
-    /// request is consumed whether or not one is armed.
-    fn arm_settle(&mut self, content: (f32, f32), target: Option<Rect>) {
+    /// Answers a pending recenter request once `target` is resolved, by arming
+    /// an ease onto the rect it resolved to; the request is consumed whether or
+    /// not one is armed.
+    fn arm_settle(&mut self, content: (f32, f32), target: Target) {
         if !self.recenter {
             return;
         }
+        let Target::Resolved(target) = target else {
+            return;
+        };
         if let Some(target) = target {
             let (zoom, pan) = (self.camera.zoom, self.camera.pan);
             let (to_zoom, to_pan) = settle_view(
@@ -272,17 +290,16 @@ fn escapes(window: Rect, boxes: &[bviz_graph_layout::Box]) -> bool {
 /// What the frame request pending on `view` resolves to: what the panel draws
 /// at the fitted camera, where the request still wants it. Framing is a camera
 /// move, so every box stays where the layout put it.
-fn frame_target(view: &GraphPanel) -> FrameTarget {
+fn frame_target(view: &GraphPanel) -> Target {
     let Some(frame) = view.framing.frame else {
-        return FrameTarget::Resolved(None);
+        return Target::Resolved(None);
     };
     let Some(drawn) = view.drawn() else {
-        return FrameTarget::Pending;
+        return Target::Pending;
     };
-    let Some(zoom) = view.view_zoom(&drawn) else {
-        return FrameTarget::Pending;
+    let Some(laid_out) = view.view_zoom(&drawn).and_then(|zoom| drawn.view(zoom)) else {
+        return Target::Pending;
     };
-    let laid_out = drawn.view(zoom);
     let wanted = match frame {
         Frame::Drawing => true,
         Frame::Escaping => escapes(
@@ -290,7 +307,7 @@ fn frame_target(view: &GraphPanel) -> FrameTarget {
             &laid_out.boxes,
         ),
     };
-    FrameTarget::Resolved(wanted.then(|| drawn_rect(laid_out)).flatten())
+    Target::Resolved(wanted.then(|| drawn_rect(laid_out)).flatten())
 }
 
 /// Steers the view's framing from the bounds the canvas was laid out at. Runs at
@@ -299,7 +316,7 @@ fn frame_target(view: &GraphPanel) -> FrameTarget {
 pub(crate) fn build_prepaint(
     parent: Entity<GraphPanel>,
     content: (f32, f32),
-    recenter_target: Option<Rect>,
+    recenter_target: Target,
 ) -> impl FnOnce(Bounds<Pixels>, &mut Window, &mut App) {
     move |bounds: Bounds<Pixels>, window: &mut Window, cx: &mut App| {
         let redraw = parent.update(cx, |view, _| {
@@ -418,6 +435,22 @@ mod tests {
         assert_eq!(f.viewport.size, vp(800., 600.));
     }
 
+    /// The fit a measured canvas is due is the one its first prepaint makes, so
+    /// what that frame draws can be made ready before it.
+    #[test]
+    fn a_measured_canvas_foresees_its_fit() {
+        let bounds = canvas_bounds(800., 600.);
+        let mut f = Framing::new();
+        assert_eq!(f.pending_fit(CONTENT), None, "nothing measured yet");
+
+        f.measure(bounds);
+        let foreseen = f.pending_fit(CONTENT);
+        f.fit_or_rescale(bounds, CONTENT);
+
+        assert_eq!(foreseen, Some(f.camera().zoom));
+        assert_eq!(f.pending_fit(CONTENT), None, "the camera is fitted");
+    }
+
     #[test]
     fn a_fit_that_moves_nothing_still_asks_for_a_frame() {
         let bounds = canvas_bounds(800., 600.);
@@ -480,7 +513,7 @@ mod tests {
         };
         let mut f = framed(1.0, (0.0, 0.0), canvas_bounds(800., 600.));
         f.recenter = true;
-        f.arm_settle(CONTENT, Some(target));
+        f.arm_settle(CONTENT, Target::Resolved(Some(target)));
         assert!(f.anim.is_none());
         assert!(
             !f.recenter,
@@ -503,7 +536,7 @@ mod tests {
         let mut f = framed(1.0, (0.0, 0.0), canvas_bounds(800., 600.));
         f.camera.zoom = 0.25;
         f.recenter = true;
-        f.arm_settle(CONTENT, Some(target));
+        f.arm_settle(CONTENT, Target::Resolved(Some(target)));
         let a = f.anim.expect("no settle armed");
         assert!(
             (a.to_zoom - 1.0).abs() < 1e-4,
@@ -523,7 +556,7 @@ mod tests {
         };
         let mut f = framed(1.0, (0.0, 0.0), canvas_bounds(800., 600.));
         f.recenter = true;
-        f.arm_settle(CONTENT, Some(target));
+        f.arm_settle(CONTENT, Target::Resolved(Some(target)));
         let (tz, tp) = settle_view(target, vp(800., 600.), CONTENT, 1.0, (0.0, 0.0), 1.0);
         let a = f.anim.expect("no settle armed");
         assert_eq!((a.from_zoom, a.from_pan), (1.0, (0.0, 0.0)));
@@ -546,7 +579,7 @@ mod tests {
     fn a_frame_request_eases_onto_what_it_named_and_leaves_settles_coming_back_there() {
         let mut f = framed(1.0, (0.0, 0.0), canvas_bounds(800., 600.));
         f.request_frame(Frame::Drawing);
-        f.arm_frame(CONTENT, FrameTarget::Resolved(Some(NAMED)));
+        f.arm_frame(CONTENT, Target::Resolved(Some(NAMED)));
 
         let a = f.anim.expect("the frame request armed no ease");
         assert_eq!(
@@ -567,11 +600,11 @@ mod tests {
         let mut f = framed(1.0, (0.0, 0.0), canvas_bounds(800., 600.));
         f.request_frame(Frame::Drawing);
 
-        f.arm_frame(CONTENT, FrameTarget::Pending);
+        f.arm_frame(CONTENT, Target::Pending);
         assert!(f.anim.is_none());
         assert_eq!(f.frame, Some(Frame::Drawing));
 
-        f.arm_frame(CONTENT, FrameTarget::Resolved(Some(NAMED)));
+        f.arm_frame(CONTENT, Target::Resolved(Some(NAMED)));
         let a = f.anim.expect("the frame request armed no ease");
         assert_eq!(
             (a.to_zoom, a.to_pan),
@@ -589,16 +622,16 @@ mod tests {
         f.request_recenter();
         f.request_frame(Frame::Drawing);
 
-        f.arm_frame(CONTENT, FrameTarget::Resolved(Some(NAMED)));
+        f.arm_frame(CONTENT, Target::Resolved(Some(NAMED)));
         let framed_at = f.anim.expect("the frame request armed no ease");
         f.arm_settle(
             CONTENT,
-            Some(Rect {
+            Target::Resolved(Some(Rect {
                 x: 0.0,
                 y: 0.0,
                 w: 50.0,
                 h: 40.0,
-            }),
+            })),
         );
 
         let still = f.anim.expect("the settle dropped the frame's ease");
@@ -608,11 +641,33 @@ mod tests {
         );
     }
 
+    /// A recenter requested while no view is drawn, such as a map whose level
+    /// is yet to be derived, is answered by the first one that is.
+    #[test]
+    fn a_recenter_waits_for_a_view_to_resolve_it_at() {
+        let target = Rect {
+            x: 1000.0,
+            y: 100.0,
+            w: 50.0,
+            h: 40.0,
+        };
+        let mut f = framed(1.0, (0.0, 0.0), canvas_bounds(800., 600.));
+        f.request_recenter();
+
+        f.arm_settle(CONTENT, Target::Pending);
+        assert!(f.anim.is_none());
+        assert!(f.recenter);
+
+        f.arm_settle(CONTENT, Target::Resolved(Some(target)));
+        assert!(f.anim.is_some());
+        assert!(!f.recenter);
+    }
+
     #[test]
     fn arming_without_a_target_consumes_the_request() {
         let mut f = framed(1.0, (0.0, 0.0), canvas_bounds(800., 600.));
         f.recenter = true;
-        f.arm_settle(CONTENT, None);
+        f.arm_settle(CONTENT, Target::Resolved(None));
         assert!(f.anim.is_none());
         assert!(!f.recenter);
     }
@@ -706,7 +761,7 @@ mod tests {
         f.anim = Some(settle_to(4.0, (1.0, 2.0), Instant::now()));
 
         f.fit_or_rescale(bounds, CONTENT);
-        f.arm_settle(CONTENT, Some(target));
+        f.arm_settle(CONTENT, Target::Resolved(Some(target)));
         assert!(
             f.step_settle(),
             "the ease landed on the frame that armed it"

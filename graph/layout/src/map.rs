@@ -112,10 +112,7 @@ impl MapLayout {
 
     /// The view at `index`, deriving it if this is the first call for it.
     pub fn level(&self, index: usize) -> &LaidOut {
-        let level = match index.checked_sub(1) {
-            Some(finer) => &self.finer[finer].1,
-            None => &self.coarsest,
-        };
+        let level = self.level_at(index);
         level.view.get_or_init(|| {
             view_of(
                 &self.base,
@@ -126,6 +123,26 @@ impl MapLayout {
                 &self.expandable,
             )
         })
+    }
+
+    /// The view at `index`, where it has been derived.
+    pub fn derived(&self, index: usize) -> Option<&LaidOut> {
+        self.level_at(index).view.get()
+    }
+
+    /// The derived level nearest `index`, the coarser of two equally near;
+    /// `None` while no level is derived.
+    pub fn nearest_derived(&self, index: usize) -> Option<usize> {
+        (0..self.level_count())
+            .filter(|&level| self.derived(level).is_some())
+            .min_by_key(|&level| (level.abs_diff(index), level))
+    }
+
+    fn level_at(&self, index: usize) -> &Level {
+        match index.checked_sub(1) {
+            Some(finer) => &self.finer[finer].1,
+            None => &self.coarsest,
+        }
     }
 
     pub fn level_count(&self) -> usize {
@@ -839,6 +856,32 @@ mod tests {
             map.coarsest.view.get().is_none(),
             "drawing one level derived another",
         );
+    }
+
+    /// Asking whether a level is derived derives nothing, so a caller that must
+    /// not pay for the fold can look before it draws.
+    #[test]
+    fn a_level_is_derived_only_once_asked_for() {
+        let (map, _) = built();
+        assert!(map.derived(1).is_none());
+        let first: *const LaidOut = map.level(1);
+        assert!(map.derived(1).is_some_and(|view| std::ptr::eq(view, first)));
+        assert!(map.derived(0).is_none());
+    }
+
+    #[test]
+    fn a_level_yet_to_be_derived_gives_way_to_the_nearest_derived_one() {
+        let (map, _) = built();
+        assert!(map.level_count() >= 3, "levels on either side of one");
+        assert_eq!(map.nearest_derived(1), None);
+
+        map.level(0);
+        assert_eq!(map.nearest_derived(map.level_count() - 1), Some(0));
+
+        map.level(2);
+        assert_eq!(map.nearest_derived(1), Some(0), "the coarser of a tie");
+        assert_eq!(map.nearest_derived(map.level_count() - 1), Some(2));
+        assert_eq!(map.nearest_derived(2), Some(2));
     }
 
     #[test]
