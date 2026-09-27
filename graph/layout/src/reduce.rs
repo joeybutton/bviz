@@ -14,9 +14,13 @@
 //! cycle. Reachability survives, and no edge of a cycle is redundant anyway,
 //! since each of its nodes already reaches every other.
 
+use std::cmp::Reverse;
+use std::ops::Range;
+
+use rayon::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet};
 
-use crate::graph::Graph;
+use crate::graph::{Edge, Graph, Node};
 use crate::intern::Id;
 
 /// Returns `graph` with the same nodes but only the edges of a transitive
@@ -38,22 +42,22 @@ pub fn reduced(graph: Graph) -> Graph {
 /// reachable from another of the source's successors. A cycle leaves no
 /// topological order, and hands `graph` back for the caller to fall back with.
 fn dag_reduction(graph: Graph) -> Result<Graph, Graph> {
-    let mut index: FxHashMap<Id, u32> =
-        FxHashMap::with_capacity_and_hasher(graph.nodes.len(), Default::default());
-    for node in &graph.nodes {
-        let next = index.len() as u32;
-        index.entry(node.id).or_insert(next);
+    let (index, n) = DenseIds::new(&graph.nodes);
+    let dense = |e: &Edge| Some((index.get(e.from)?, index.get(e.to)?));
+    let pairs = || {
+        graph
+            .edges
+            .iter()
+            .filter(|e| e.from != e.to)
+            .filter_map(dense)
+    };
+    let mut out_degree: Vec<usize> = vec![0; n as usize];
+    for (u, _) in pairs() {
+        out_degree[u as usize] += 1;
     }
-    let n = index.len();
-    let pairs: FxHashSet<(u32, u32)> = graph
-        .edges
-        .iter()
-        .filter(|e| e.from != e.to)
-        .filter_map(|e| Some((*index.get(&e.from)?, *index.get(&e.to)?)))
-        .collect();
-    let mut succ: Vec<Vec<u32>> = vec![Vec::new(); n];
-    let mut indeg: Vec<u32> = vec![0; n];
-    for &(u, v) in &pairs {
+    let mut succ: Vec<Vec<u32>> = out_degree.into_iter().map(Vec::with_capacity).collect();
+    let mut indeg: Vec<u32> = vec![0; n as usize];
+    for (u, v) in pairs() {
         succ[u as usize].push(v);
         indeg[v as usize] += 1;
     }
@@ -61,17 +65,66 @@ fn dag_reduction(graph: Graph) -> Result<Graph, Graph> {
     let Some(order) = topo_order(&succ, indeg) else {
         return Err(graph);
     };
-    let redundant = redundant_pairs(&order, &succ);
+    let reduction = Reduction::new(&order, &succ);
 
     let mut out = graph;
     out.edges.retain(|e| {
         e.from == e.to
-            || match (index.get(&e.from), index.get(&e.to)) {
-                (Some(&u), Some(&v)) => !redundant.contains(&(u, v)),
-                _ => true,
+            || match dense(e) {
+                Some((u, v)) => reduction.keeps(u, v),
+                None => true,
             }
     });
     Ok(out)
+}
+
+/// Dense indices for a graph's distinct node ids, numbered from zero.
+enum DenseIds {
+    /// Indexed by id.
+    Table(Vec<Option<u32>>),
+    Map(FxHashMap<Id, u32>),
+}
+
+/// The most slots per node an id-indexed [`DenseIds::Table`] may take. A small
+/// view of a large graph names ids far apart, and a table reaching its largest
+/// would cost more to allocate than the view takes to reduce.
+const TABLE_SLOTS_PER_NODE: usize = 32;
+
+impl DenseIds {
+    /// Numbers `nodes`' distinct ids, returning the index and how many there are.
+    fn new(nodes: &[Node]) -> (Self, u32) {
+        let span = nodes
+            .iter()
+            .map(|node| node.id.0 as usize + 1)
+            .max()
+            .unwrap_or(0);
+        let mut count = 0;
+        let mut next = || {
+            count += 1;
+            count - 1
+        };
+        let index = if span <= TABLE_SLOTS_PER_NODE * nodes.len() {
+            let mut table = vec![None; span];
+            for node in nodes {
+                table[node.id.0 as usize].get_or_insert_with(&mut next);
+            }
+            Self::Table(table)
+        } else {
+            let mut map = FxHashMap::with_capacity_and_hasher(nodes.len(), Default::default());
+            for node in nodes {
+                map.entry(node.id).or_insert_with(&mut next);
+            }
+            Self::Map(map)
+        };
+        (index, count)
+    }
+
+    fn get(&self, id: Id) -> Option<u32> {
+        match self {
+            Self::Table(table) => table.get(id.0 as usize).copied().flatten(),
+            Self::Map(map) => map.get(&id).copied(),
+        }
+    }
 }
 
 /// Kahn's algorithm over the successor adjacency; `None` when a leftover node
@@ -92,38 +145,287 @@ fn topo_order(succ: &[Vec<u32>], mut indeg: Vec<u32>) -> Option<Vec<u32>> {
     (order.len() == n).then_some(order)
 }
 
-/// The `(u, v)` pairs whose direct edge a longer path already implies.
-/// Reachability is held in per-node bitsets over the compact node index, filled
-/// in reverse topological `order` so a node's successors are already resolved.
-fn redundant_pairs(order: &[u32], succ: &[Vec<u32>]) -> FxHashSet<(u32, u32)> {
-    let n = succ.len();
-    let words = n.div_ceil(64);
-    let mut reach = vec![0u64; n * words]; // reach[u]: every node reachable from u
-    let mut redundant: FxHashSet<(u32, u32)> = FxHashSet::default();
+/// Which edges of a DAG over dense indices its transitive reduction keeps: an
+/// edge is dropped when another of its source's successors reaches its target.
+struct Reduction {
+    /// By node, the distinct successors whose edge the reduction keeps, in
+    /// descending [`Reduction::bit`] order.
+    kept: Vec<Vec<u32>>,
+    /// By node, its bit in the reachability rows. Bits ascend with height, the
+    /// longest path from a node to a sink, so a node reaches only lower bits.
+    bit: Vec<u32>,
+}
+
+impl Reduction {
+    /// Reduces the DAG `succ` holds, `order` being a topological order of it.
+    ///
+    /// Reachability is held in one bitset row per node that is not a sink. Every
+    /// node of one height reaches only lower heights, so a height's rows are
+    /// filled together from rows already settled, in parallel where there are
+    /// enough of them.
+    fn new(order: &[u32], succ: &[Vec<u32>]) -> Self {
+        let height = node_heights(order, succ);
+        let levels = Levels::new(&height);
+        let (bit, by_bit) = levels.number(&height);
+        let mut rows = Rows::new(&levels, &height, &bit);
+        let mut kept: Vec<Vec<u32>> = vec![Vec::new(); succ.len()];
+        let mut fill_heights = || {
+            for h in 1..levels.count() {
+                let nodes = &by_bit[levels.bits(h)];
+                rows.fill_height(&levels, h, nodes, succ, &bit, &mut kept);
+            }
+        };
+        // Entering the pool queues behind whatever it is running, which a
+        // caller with nothing to split need not wait for.
+        if (1..levels.count()).any(|h| splits(levels.bits(h).len())) {
+            bviz_parallel::workers().install(fill_heights);
+        } else {
+            fill_heights();
+        }
+        Self { kept, bit }
+    }
+
+    /// Whether the reduction keeps the edge `u -> v`, one of the DAG's.
+    fn keeps(&self, u: u32, v: u32) -> bool {
+        self.kept[u as usize]
+            .binary_search_by_key(&Reverse(self.bit[v as usize]), |&w| {
+                Reverse(self.bit[w as usize])
+            })
+            .is_ok()
+    }
+}
+
+/// Each node's height in the DAG `succ` holds: the longest path from it to a
+/// sink. `order` is a topological order of the DAG.
+fn node_heights(order: &[u32], succ: &[Vec<u32>]) -> Vec<u32> {
+    let mut height = vec![0u32; succ.len()];
     for &u in order.iter().rev() {
-        let ui = u as usize;
-        // The union of the successors' reach: a target found here is reachable by
-        // a path of length >= 2, so the direct edge to it is redundant.
-        let mut via = vec![0u64; words];
-        for &w in &succ[ui] {
-            let wb = w as usize * words;
-            for k in 0..words {
-                via[k] |= reach[wb + k];
-            }
+        height[u as usize] = succ[u as usize]
+            .iter()
+            .map(|&w| height[w as usize] + 1)
+            .max()
+            .unwrap_or(0);
+    }
+    height
+}
+
+/// Where the nodes of each height sit among the bits of the reachability rows,
+/// and their rows among the words.
+struct Levels {
+    /// The nodes of height `h` hold the bits `first[h]..first[h + 1]`.
+    first: Vec<usize>,
+    /// The rows of height `h` lie together at the words
+    /// `rows_at[h]..rows_at[h + 1]`.
+    rows_at: Vec<usize>,
+}
+
+impl Levels {
+    /// Lays out the heights `height` gives by node.
+    fn new(height: &[u32]) -> Self {
+        let heights = height.iter().max().map_or(0, |&h| h as usize + 1);
+        let mut first = vec![0usize; heights + 1];
+        for &h in height {
+            first[h as usize + 1] += 1;
         }
-        for &v in &succ[ui] {
-            if via[v as usize / 64] >> (v % 64) & 1 == 1 {
-                redundant.insert((u, v));
-            }
+        for h in 0..heights {
+            first[h + 1] += first[h];
         }
-        let ub = ui * words;
-        reach[ub..ub + words].copy_from_slice(&via);
-        for &w in &succ[ui] {
-            reach[ub + w as usize / 64] |= 1u64 << (w % 64);
+        let mut levels = Self {
+            first,
+            rows_at: vec![0; heights + 1],
+        };
+        for h in 0..heights {
+            levels.rows_at[h + 1] = levels.rows_at[h] + levels.bits(h).len() * levels.width(h);
+        }
+        levels
+    }
+
+    fn count(&self) -> usize {
+        self.first.len() - 1
+    }
+
+    fn bits(&self, h: usize) -> Range<usize> {
+        self.first[h]..self.first[h + 1]
+    }
+
+    fn words(&self, h: usize) -> Range<usize> {
+        self.rows_at[h]..self.rows_at[h + 1]
+    }
+
+    /// How many words the rows of every height take together.
+    fn word_count(&self) -> usize {
+        self.rows_at[self.count()]
+    }
+
+    /// How many words a row of height `h` spans: those of the bits below the
+    /// height, so a sink's row is empty.
+    fn width(&self, h: usize) -> usize {
+        self.first[h].div_ceil(64)
+    }
+
+    /// Where the row of the node of height `h` holding bit `b` begins.
+    fn row_start(&self, h: usize, b: u32) -> usize {
+        self.rows_at[h] + (b as usize - self.first[h]) * self.width(h)
+    }
+
+    /// Gives each node of `height` a bit within its height, returning the bit
+    /// by node and the node by bit.
+    fn number(&self, height: &[u32]) -> (Vec<u32>, Vec<u32>) {
+        let n = height.len();
+        let mut bit: Vec<u32> = vec![0; n];
+        let mut by_bit: Vec<u32> = vec![0; n];
+        let mut next = self.first.clone();
+        for (u, &h) in height.iter().enumerate() {
+            bit[u] = next[h as usize] as u32;
+            by_bit[next[h as usize]] = u as u32;
+            next[h as usize] += 1;
+        }
+        (bit, by_bit)
+    }
+}
+
+/// Whether [`Settled::fill_level`] fills a height of `rows` rows in more than
+/// one task.
+fn splits(rows: usize) -> bool {
+    rows >= 2 * ROWS_PER_TASK
+}
+
+/// The reachability rows of [`Reduction::new`], by node.
+struct Rows {
+    reach: Vec<u64>,
+    /// Where each node's row begins in `reach`.
+    start: Vec<usize>,
+    /// The words `lo..hi` each row has bits in, the only ones a union reads.
+    span: Vec<(u32, u32)>,
+}
+
+impl Rows {
+    /// Empty rows where `levels` places the nodes `height` and `bit` give.
+    fn new(levels: &Levels, height: &[u32], bit: &[u32]) -> Self {
+        let start = height
+            .iter()
+            .zip(bit)
+            .map(|(&h, &b)| levels.row_start(h as usize, b))
+            .collect();
+        Self {
+            reach: vec![0u64; levels.word_count()],
+            start,
+            span: vec![(0, 0); height.len()],
         }
     }
-    redundant
+
+    /// Fills the rows of `nodes`, the nodes of height `h`, from those of the
+    /// heights below, and sets each one's `kept` successors.
+    fn fill_height(
+        &mut self,
+        levels: &Levels,
+        h: usize,
+        nodes: &[u32],
+        succ: &[Vec<u32>],
+        bit: &[u32],
+        kept: &mut [Vec<u32>],
+    ) {
+        let words = levels.words(h);
+        let (settled, level) = self.reach.split_at_mut(words.start);
+        let settled = Settled {
+            reach: settled,
+            start: &self.start,
+            span: &self.span,
+        };
+        let filled =
+            settled.fill_level(&mut level[..words.len()], levels.width(h), nodes, succ, bit);
+        for (&u, (span, keep)) in nodes.iter().zip(filled) {
+            self.span[u as usize] = span;
+            kept[u as usize] = keep;
+        }
+    }
 }
+
+/// The rows of the heights below the one being filled, which it reads.
+struct Settled<'a> {
+    reach: &'a [u64],
+    start: &'a [usize],
+    span: &'a [(u32, u32)],
+}
+
+impl Settled<'_> {
+    /// Fills `level`, the rows of `nodes` at `width` words each, returning
+    /// each node's [`Settled::fill_node`].
+    fn fill_level(
+        &self,
+        level: &mut [u64],
+        width: usize,
+        nodes: &[u32],
+        succ: &[Vec<u32>],
+        bit: &[u32],
+    ) -> Vec<((u32, u32), Vec<u32>)> {
+        if splits(nodes.len()) {
+            level
+                .par_chunks_mut(width)
+                .zip(nodes.par_iter())
+                .with_min_len(ROWS_PER_TASK)
+                .map_init(Vec::new, |highest_first, (row, &u)| {
+                    self.fill_node(highest_first, row, &succ[u as usize], bit)
+                })
+                .collect()
+        } else {
+            let mut highest_first = Vec::new();
+            level
+                .chunks_mut(width)
+                .zip(nodes)
+                .map(|(row, &u)| self.fill_node(&mut highest_first, row, &succ[u as usize], bit))
+                .collect()
+        }
+    }
+
+    /// [`Settled::fill`] with a node's distinct `successors`, returning the
+    /// words `row` has bits in and the successors it keeps. `highest_first` is
+    /// scratch.
+    fn fill_node(
+        &self,
+        highest_first: &mut Vec<u32>,
+        row: &mut [u64],
+        successors: &[u32],
+        bit: &[u32],
+    ) -> ((u32, u32), Vec<u32>) {
+        highest_first.clear();
+        highest_first.extend_from_slice(successors);
+        highest_first.sort_unstable_by_key(|&w| Reverse(bit[w as usize]));
+        highest_first.dedup();
+        let span = self.fill(row, highest_first, bit);
+        (span, highest_first.to_vec())
+    }
+
+    /// Fills `row` with what a node reaches through `successors`, given highest
+    /// bit first, leaves in `successors` only those whose edge the reduction
+    /// keeps, and returns the words `row` has bits in. A successor another one
+    /// reaches sits lower, so it is found already set, which marks its edge
+    /// redundant and leaves its row unread, being inside the union already.
+    fn fill(&self, row: &mut [u64], successors: &mut Vec<u32>, bit: &[u32]) -> (u32, u32) {
+        let (mut lo, mut hi) = (u32::MAX, 0);
+        successors.retain(|&w| {
+            let b = bit[w as usize] as usize;
+            let (word, mask) = (b / 64, 1u64 << (b % 64));
+            if row[word] & mask != 0 {
+                return false;
+            }
+            let (w_lo, w_hi) = self.span[w as usize];
+            let w_row = &self.reach[self.start[w as usize]..];
+            for k in w_lo as usize..w_hi as usize {
+                row[k] |= w_row[k];
+            }
+            row[word] |= mask;
+            lo = lo.min(w_lo).min(word as u32);
+            hi = hi.max(w_hi).max(word as u32 + 1);
+            true
+        });
+        (lo, hi)
+    }
+}
+
+/// The fewest rows one parallel task of [`Settled::fill_level`] fills, so a
+/// height of few nodes is filled on one thread.
+const ROWS_PER_TASK: usize = 64;
 
 /// Cycle-tolerant reduction: drop a pair only while its endpoints stay linked
 /// through the pairs kept so far, visiting pairs in a fixed order for a
@@ -149,7 +451,7 @@ fn condensed_reduction(graph: Graph) -> Graph {
 
     let condensation = Condensation::new(&succ);
     let comp = &condensation.of;
-    let redundant = redundant_pairs(&condensation.order, &condensation.succ);
+    let reduction = Reduction::new(&condensation.order, &condensation.succ);
 
     let mut within: FxHashMap<u32, Vec<(u32, u32)>> = FxHashMap::default();
     // One edge into a cycle reaches all of it, and one out of a cycle leaves
@@ -174,7 +476,7 @@ fn condensed_reduction(graph: Graph) -> Graph {
     held.extend(
         between
             .iter()
-            .filter(|(pair, _)| !redundant.contains(pair))
+            .filter(|&(&(a, b), _)| reduction.keeps(a, b))
             .map(|(_, &edge)| edge),
     );
 
@@ -640,6 +942,210 @@ mod tests {
         reaches_alike(&g, &r, &n);
         // Each pair of neighbouring cycles is joined two ways and needs one.
         assert_eq!(kept(&r, &n).len(), 20 * 5 + 19);
+    }
+
+    /// The edges of `g` between its nodes whose target no other successor of
+    /// their source reaches: the definition the bitset reduction must agree
+    /// with. `g`'s edges must ascend in node order, so a node's reach is settled
+    /// from the last node down.
+    fn naive_reduction(g: &Graph) -> HashSet<(Id, Id)> {
+        let nodes: HashSet<Id> = g.nodes.iter().map(|node| node.id).collect();
+        let mut succ: HashMap<Id, HashSet<Id>> = HashMap::new();
+        for e in g.edges.iter().filter(|e| e.from != e.to) {
+            if nodes.contains(&e.from) && nodes.contains(&e.to) {
+                succ.entry(e.from).or_default().insert(e.to);
+            }
+        }
+        let mut reach: HashMap<Id, HashSet<Id>> = HashMap::new();
+        for node in g.nodes.iter().rev() {
+            let mut all = HashSet::new();
+            for &w in succ.get(&node.id).into_iter().flatten() {
+                all.insert(w);
+                all.extend(&reach[&w]);
+            }
+            reach.insert(node.id, all);
+        }
+        let mut kept = HashSet::new();
+        for (&u, targets) in &succ {
+            for &v in targets {
+                if !targets.iter().any(|&w| w != v && reach[&w].contains(&v)) {
+                    kept.insert((u, v));
+                }
+            }
+        }
+        kept
+    }
+
+    /// `g`'s edges, in order, that a reduction keeping the pairs `kept` leaves:
+    /// every copy of a kept pair, every self-loop, and every edge naming an id
+    /// that is not one of `g`'s nodes.
+    fn edges_keeping(g: &Graph, kept: &HashSet<(Id, Id)>) -> Vec<(Id, Id)> {
+        let nodes: HashSet<Id> = g.nodes.iter().map(|node| node.id).collect();
+        g.edges
+            .iter()
+            .map(|e| (e.from, e.to))
+            .filter(|&(u, v)| {
+                u == v || !nodes.contains(&u) || !nodes.contains(&v) || kept.contains(&(u, v))
+            })
+            .collect()
+    }
+
+    fn pairs(g: &Graph) -> Vec<(Id, Id)> {
+        g.edges.iter().map(|e| (e.from, e.to)).collect()
+    }
+
+    /// A xorshift generator of indices below a bound, so a randomized test is
+    /// the same on every run.
+    fn random_indices() -> impl FnMut(usize) -> usize {
+        let mut state: u64 = 0x9e37_79b9_7f4a_7c15;
+        move |bound: usize| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state % bound as u64) as usize
+        }
+    }
+
+    /// A graph of `nodes` nodes and `absent` further ids that name no node, the
+    /// ids of both in that order.
+    fn with_absent_ids(nodes: usize, absent: usize) -> (Graph, Names, Vec<Id>) {
+        let mut g = Graph::new();
+        let mut n = Names::default();
+        let mut ids: Vec<Id> = (0..nodes)
+            .map(|i| {
+                let name = format!("n{i}");
+                let id = n.intern(&name);
+                g.add_node(Node::new(id, &name, Kind::Action, None));
+                id
+            })
+            .collect();
+        ids.extend((0..absent).map(|i| n.intern(&format!("absent{i}"))));
+        (g, n, ids)
+    }
+
+    /// Random DAGs wide enough that a height's rows are filled by several
+    /// parallel tasks and a row spans several words, with repeated edges,
+    /// self-loops and edges naming ids that are no node mixed in, reduce to what
+    /// the definition keeps, each copy of a kept pair kept.
+    #[test]
+    fn random_dags_reduce_as_the_definition_does() {
+        const ABSENT: usize = 5;
+        let mut next = random_indices();
+        let mut split = false;
+        for (nodes, edges) in [(40, 120), (700, 4_000), (2_000, 6_000), (2_000, 30_000)] {
+            let (mut g, _, ids) = with_absent_ids(nodes, ABSENT);
+            for _ in 0..edges {
+                let (a, b) = (next(nodes), next(nodes));
+                // Edges point from lower to higher index, so the graph is acyclic.
+                g.add_edge(ids[a.min(b)], ids[a.max(b)], EdgeKind::Aquery);
+            }
+            for _ in 0..ABSENT {
+                let absent = ids[nodes + next(ABSENT)];
+                g.add_edge(ids[next(nodes)], absent, EdgeKind::Aquery);
+                g.add_edge(absent, ids[next(nodes)], EdgeKind::Aquery);
+            }
+            let r = dag_reduction(g.clone())
+                .ok()
+                .expect("edges ascending by index form no cycle");
+            let expected = edges_keeping(&g, &naive_reduction(&g));
+            assert_eq!(pairs(&r), expected, "{nodes} nodes, {edges} edges");
+
+            let (index, count) = DenseIds::new(&g.nodes);
+            let mut succ: Vec<Vec<u32>> = vec![Vec::new(); count as usize];
+            for e in &g.edges {
+                if let (Some(u), Some(v)) = (index.get(e.from), index.get(e.to))
+                    && u != v
+                {
+                    succ[u as usize].push(v);
+                }
+            }
+            let order: Vec<u32> = (0..count).collect();
+            let mut rows = HashMap::new();
+            for h in node_heights(&order, &succ) {
+                *rows.entry(h).or_insert(0) += 1;
+            }
+            split |= rows.into_iter().any(|(h, rows)| h > 0 && splits(rows));
+        }
+        assert!(split, "no height was filled by more than one task");
+    }
+
+    /// Random graphs, most of them cyclic, reduce through the cycle-tolerant
+    /// path to a graph that reaches what they reach, over their own edges with
+    /// every copy of a kept pair, where no kept pair is implied by the rest.
+    #[test]
+    fn random_graphs_reduce_through_the_fallback_minimally() {
+        const ABSENT: usize = 3;
+        let mut next = random_indices();
+        for round in 0..200 {
+            let nodes = 2 + next(40);
+            let edges = next(4 * nodes);
+            let (mut g, n, ids) = with_absent_ids(nodes, ABSENT);
+            for _ in 0..edges {
+                g.add_edge(ids[next(nodes)], ids[next(nodes)], EdgeKind::Aquery);
+            }
+            for _ in 0..next(ABSENT) {
+                g.add_edge(
+                    ids[next(nodes)],
+                    ids[nodes + next(ABSENT)],
+                    EdgeKind::Aquery,
+                );
+            }
+            let r = condensed_reduction(g.clone());
+            let node_ids: HashSet<Id> = g.nodes.iter().map(|node| node.id).collect();
+            let kept: HashSet<(Id, Id)> = pairs(&r)
+                .into_iter()
+                .filter(|&(u, v)| u != v && node_ids.contains(&u) && node_ids.contains(&v))
+                .collect();
+            assert_eq!(pairs(&r), edges_keeping(&g, &kept), "round {round}");
+            reaches_alike(&g, &r, &n);
+            for &(u, v) in &kept {
+                let mut walk = vec![u];
+                let mut seen = HashSet::from([u]);
+                while let Some(w) = walk.pop() {
+                    for e in r
+                        .edges
+                        .iter()
+                        .filter(|e| e.from == w && (e.from, e.to) != (u, v))
+                    {
+                        if seen.insert(e.to) {
+                            walk.push(e.to);
+                        }
+                    }
+                }
+                assert!(
+                    !seen.contains(&v),
+                    "round {round}: {} -> {} is implied by the rest",
+                    n.resolve(u),
+                    n.resolve(v),
+                );
+            }
+        }
+    }
+
+    /// A small view of a large graph names ids far apart, which a map numbers
+    /// in place of a table reaching the largest.
+    #[test]
+    fn a_view_of_far_apart_ids_reduces() {
+        let mut n = Names::default();
+        for i in 0..10_000 {
+            n.intern(&format!("elsewhere{i}"));
+        }
+        let mut g = Graph::new();
+        for name in ["a", "b", "c"] {
+            g.add_node(Node::new(n.intern(name), name, Kind::Action, None));
+        }
+        for (a, b) in [("a", "b"), ("b", "c"), ("a", "c")] {
+            g.add_edge(n.intern(a), n.intern(b), EdgeKind::Aquery);
+        }
+        assert!(matches!(DenseIds::new(&g.nodes).0, DenseIds::Map(_)));
+        let r = dag_reduction(g).ok().expect("a chain is acyclic");
+        assert_eq!(
+            kept(&r, &n),
+            [("a", "b"), ("b", "c")]
+                .iter()
+                .map(|(a, b)| (a.to_string(), b.to_string()))
+                .collect()
+        );
     }
 
     #[test]
