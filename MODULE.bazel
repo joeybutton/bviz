@@ -83,7 +83,10 @@ crate.from_cargo(
 crate.annotation(
     crate = "org-eclipse-elk-alg-layered",
     patch_args = ["-p1"],
-    patches = ["//patches/elk-rs:elk-rs-reentrant-external-port-lock.patch"],
+    patches = [
+        "//patches/elk-rs:elk-rs-reentrant-external-port-lock.patch",
+        "//patches/elk-rs:elk-rs-bk-layer-neighbors-by-number.patch",
+    ],
 )
 crate.annotation(
     crate = "org-eclipse-elk-alg-common",

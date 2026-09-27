@@ -61,6 +61,7 @@ Eclipse Layout Kernel, Rust port 0.11.0+rs.2 — Eclipse Public License 2.0
     employers; Eclipse Layout Kernel is a trademark of the Eclipse Foundation.
     https://projects.eclipse.org/projects/modeling.elk
     https://github.com/openedges/elk-rs
+    patches/elk-rs/elk-rs-bk-layer-neighbors-by-number.patch
     patches/elk-rs/elk-rs-incremental-cut-values.patch
     patches/elk-rs/elk-rs-lock-free-clone-lookup.patch
     patches/elk-rs/elk-rs-network-simplex-cycle-cut-values.patch
