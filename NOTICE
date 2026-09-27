@@ -63,6 +63,7 @@ Eclipse Layout Kernel, Rust port 0.11.0+rs.2 — Eclipse Public License 2.0
     https://github.com/openedges/elk-rs
     patches/elk-rs/elk-rs-incremental-cut-values.patch
     patches/elk-rs/elk-rs-lock-free-clone-lookup.patch
+    patches/elk-rs/elk-rs-network-simplex-cycle-cut-values.patch
     patches/elk-rs/elk-rs-network-simplex-layer-cache.patch
     patches/elk-rs/elk-rs-network-simplex-pivot-on-smaller-side.patch
     patches/elk-rs/elk-rs-reentrant-external-port-lock.patch

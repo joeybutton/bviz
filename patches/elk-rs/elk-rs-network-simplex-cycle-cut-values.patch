@@ -1,0 +1,166 @@
+Update exact network simplex cut values around the pivot cycle
+
+An exchange recomputes the cut values along the paths from its
+endpoints, which run through much of a deep tree, though only those on
+the cycle it closes change.
+
+diff --git a/plugins/org.eclipse.elk.alg.common/src/org/eclipse/elk/alg/common/networksimplex/network_simplex.rs b/plugins/org.eclipse.elk.alg.common/src/org/eclipse/elk/alg/common/networksimplex/network_simplex.rs
+index 1cb2f21..a2b9eb4 100644
+--- a/plugins/org.eclipse.elk.alg.common/src/org/eclipse/elk/alg/common/networksimplex/network_simplex.rs
++++ b/plugins/org.eclipse.elk.alg.common/src/org/eclipse/elk/alg/common/networksimplex/network_simplex.rs
+@@ -12,6 +12,9 @@ use super::n_node::NNodeRef;
+ 
+ const REMOVE_SUBTREES_THRESH: usize = 40;
+ const FUZZY_ST_ZERO: f64 = -1e-10;
++/// Integers up to this magnitude, and all sums of them that stay within it, are
++/// exact in an `f64`.
++const EXACT_INTEGER_BOUND: f64 = (1u64 << f64::MANTISSA_DIGITS) as f64;
+ /// Stands for no edge in an edge index: the parent edge of node 0 and of a node
+ /// outside the spanning tree, and the stale edge of a node with none.
+ const NO_EDGE: usize = usize::MAX;
+@@ -88,6 +91,10 @@ pub struct NetworkSimplex<'a> {
+     split_scratch: SplitScratch,
+     tree_degree: Vec<u32>,
+     cutvalue: Vec<f64>,
++    /// Whether every cut value, and every partial sum `compute_cutvalue` forms,
++    /// is an integer an `f64` holds exactly, so that the cut values come out the
++    /// same whatever order their terms are summed in.
++    exact_cutvalues: bool,
+     stale: StaleCutvalues,
+     subtree_nodes_stack: Option<VecDeque<Pair<NNodeRef, NEdgeRef>>>,
+     // Cached edge properties (indexed by edge internal_id, constant after initialize)
+@@ -125,6 +132,7 @@ impl<'a> NetworkSimplex<'a> {
+             split_scratch: SplitScratch::default(),
+             tree_degree: Vec::new(),
+             cutvalue: Vec::new(),
++            exact_cutvalues: false,
+             stale: StaleCutvalues::default(),
+             subtree_nodes_stack: None,
+             e_src_id: Vec::new(),
+@@ -293,6 +301,11 @@ impl<'a> NetworkSimplex<'a> {
+             self.edge_visited.fill(false);
+         }
+ 
++        // A cut value sums each weight at most once, and a partial sum in
++        // `compute_cutvalue` adds each at most twice.
++        let total_weight: f64 = self.e_weight.iter().map(|w| w.abs()).sum();
++        self.exact_cutvalues = self.e_weight.iter().all(|w| w.fract() == 0.0)
++            && 2.0 * total_weight <= EXACT_INTEGER_BOUND;
+         self.tree_rank.clear();
+         self.tree_rank.resize(num_edges, 0);
+         self.next_tree_rank = 0;
+@@ -570,6 +583,7 @@ impl<'a> NetworkSimplex<'a> {
+         self.split = split;
+         self.split_scratch = SplitScratch { other, stacks };
+     }
++
+     #[inline]
+     fn opposite(&self, eid: usize, nid: usize) -> usize {
+         if self.e_src_id[eid] == nid {
+@@ -697,6 +711,10 @@ impl<'a> NetworkSimplex<'a> {
+                 cutvalue += e_weight;
+             }
+         }
++        self.set_cutvalue(td_id, cutvalue);
++    }
++
++    fn set_cutvalue(&mut self, td_id: usize, cutvalue: f64) {
+         self.cutvalue[td_id] = cutvalue;
+         let key = (self.tree_rank[td_id], td_id);
+         if cutvalue < FUZZY_ST_ZERO {
+@@ -805,13 +823,6 @@ impl<'a> NetworkSimplex<'a> {
+ 
+         // `self.split` and the parent edges still describe the tree before the
+         // exchange.
+-        let old_root = self.cutvalue_root();
+-        self.tree_degree[leave_src_id] -= 1;
+-        self.tree_degree[leave_tgt_id] -= 1;
+-        self.tree_degree[enter_src_id] += 1;
+-        self.tree_degree[enter_tgt_id] += 1;
+-        let root = self.cutvalue_root();
+-
+         let split = &self.split;
+         let in_split = |nid: usize| self.mark[nid] == split.mark;
+         let mut delta =
+@@ -838,13 +849,26 @@ impl<'a> NetworkSimplex<'a> {
+             }
+         }
+ 
+-        // Hang the part below the leaving edge from the entering one.
+-        let below = self.lower_end(leave_id);
+         let mut nid = if in_split(enter_src_id) == split.is_below {
+             enter_src_id
+         } else {
+             enter_tgt_id
+         };
++
++        let roots = if self.exact_cutvalues {
++            self.shift_cutvalues_around_cycle(leave_id, enter_id);
++            None
++        } else {
++            Some(self.cutvalue_root())
++        };
++        self.tree_degree[leave_src_id] -= 1;
++        self.tree_degree[leave_tgt_id] -= 1;
++        self.tree_degree[enter_src_id] += 1;
++        self.tree_degree[enter_tgt_id] += 1;
++        let roots = roots.map(|old_root| (old_root, self.cutvalue_root()));
++
++        // Hang the part below the leaving edge from the entering one.
++        let below = self.lower_end(leave_id);
+         let mut down = enter_id;
+         loop {
+             let up = std::mem::replace(&mut self.parent_edge[nid], down);
+@@ -855,14 +879,44 @@ impl<'a> NetworkSimplex<'a> {
+             nid = self.opposite(up, nid);
+         }
+ 
+-        let changed = [
+-            leave_src_id,
+-            leave_tgt_id,
+-            enter_src_id,
+-            enter_tgt_id,
+-            old_root,
+-        ];
+-        self.update_cutvalues(&changed, root);
++        if let Some((old_root, root)) = roots {
++            let changed = [
++                leave_src_id,
++                leave_tgt_id,
++                enter_src_id,
++                enter_tgt_id,
++                old_root,
++            ];
++            self.update_cutvalues(&changed, root);
++        }
++    }
++
++    /// Sets the cut values of the tree that exchanging `leave_id` for `enter_id`
++    /// makes, given the cut values of the tree before: only the edges of the
++    /// cycle `enter_id` closes change, each by the leaving edge's cut value, in
++    /// the sense it runs along the cycle (Gansner et al., "A Technique for
++    /// Drawing Directed Graphs", IEEE TSE 19(3), 1993, section 2.4). This takes
++    /// cut values that are exact.
++    fn shift_cutvalues_around_cycle(&mut self, leave_id: usize, enter_id: usize) {
++        let leaving = self.cutvalue[leave_id];
++        let from = self.e_src_id[enter_id];
++        let to = self.e_tgt_id[enter_id];
++        let top = self.common_ancestor(from, to);
++        // Climbing from `from` runs the cycle toward `to`; climbing from `to`
++        // runs it the other way.
++        for (start, forward_when_climbing_from_source) in [(from, true), (to, false)] {
++            let mut nid = start;
++            while nid != top {
++                let eid = self.parent_edge[nid];
++                if eid != leave_id {
++                    let forward = (self.e_src_id[eid] == nid) == forward_when_climbing_from_source;
++                    let shift = if forward { leaving } else { -leaving };
++                    self.set_cutvalue(eid, self.cutvalue[eid] + shift);
++                }
++                nid = self.opposite(eid, nid);
++            }
++        }
++        self.set_cutvalue(enter_id, -leaving);
+     }
+ 
+     fn normalize(&mut self) -> Vec<i32> {
