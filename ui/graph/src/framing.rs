@@ -6,6 +6,25 @@ use crate::{GraphPanel, MAX_ZOOM, SETTLE_DURATION, SETTLE_MIN_PAN_STEP, SETTLE_M
 use gpui::{App, Bounds, Entity, Pixels, Window};
 use std::time::Instant;
 
+/// What a frame request moves the view onto.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Frame {
+    /// What the panel draws, for a gesture that named what to look at.
+    Drawing,
+    /// What the panel draws, where it covers so little of the window that the
+    /// camera has nothing left to hold onto.
+    Escaping,
+}
+
+/// A frame request's target, as a prepaint finds it.
+enum FrameTarget {
+    /// There is no drawing yet, or no fitted camera to resolve it at.
+    Pending,
+    /// The rect to move the view onto, `None` where the request is answered by
+    /// leaving the camera put.
+    Resolved(Option<Rect>),
+}
+
 /// Where the graph sits in the window, and the ease that carries it from one
 /// placement to the next. Every step over it is a function of this value alone,
 /// so none of them needs the entity or the window.
@@ -23,9 +42,9 @@ pub(crate) struct Framing {
     /// pan/zoom handlers can work in the same frame the canvas painted.
     viewport: Bounds<Pixels>,
     recenter: bool,
-    /// The rect the next prepaint moves the view onto outright, where a gesture
-    /// has named what to look at; `None` where none has.
-    frame: Option<Rect>,
+    /// What a prepaint is to move the view onto outright, once the panel has a
+    /// drawing and a fitted camera to resolve it at.
+    frame: Option<Frame>,
     /// The settle ease in flight, stepped once per frame; `None` at rest.
     anim: Option<Settle>,
 }
@@ -83,9 +102,9 @@ impl Framing {
         self.recenter = true;
     }
 
-    /// Asks the next prepaint to move the view onto `target`.
-    pub(crate) fn request_frame(&mut self, target: Rect) {
-        self.frame = Some(target);
+    /// Asks a prepaint to move the view onto what `frame` names.
+    pub(crate) fn request_frame(&mut self, frame: Frame) {
+        self.frame = Some(frame);
     }
 
     /// Drops the established framing, so the next prepaint fits the content
@@ -161,13 +180,20 @@ impl Framing {
         fitting || (before.zoom, before.pan) != (self.camera.zoom, self.camera.pan)
     }
 
-    /// Answers a pending frame request by arming an ease onto what it named. The
-    /// zoom it lands at becomes the one settles come back to, since it is the
-    /// view a gesture asked for, and it drops a pending recenter, which would
-    /// otherwise pull the view off what was named onto whatever a relayout
-    /// emphasized.
-    fn arm_frame(&mut self, content: (f32, f32)) {
-        let Some(target) = self.frame.take() else {
+    /// Answers a pending frame request once `target` is resolved, by arming an
+    /// ease onto the rect it resolved to. The zoom it lands at becomes the one
+    /// settles come back to, since it is the view a gesture asked for, and it
+    /// drops a pending recenter, which would otherwise pull the view off what
+    /// was named onto whatever a relayout emphasized.
+    fn arm_frame(&mut self, content: (f32, f32), target: FrameTarget) {
+        if self.frame.is_none() {
+            return;
+        }
+        let FrameTarget::Resolved(target) = target else {
+            return;
+        };
+        self.frame = None;
+        let Some(target) = target else {
             return;
         };
         self.recenter = false;
@@ -227,21 +253,8 @@ impl Framing {
 /// hold still, and holding it would spend the whole view on empty canvas.
 const READABLE_SHARE: f32 = 0.01;
 
-/// Whether what `view` draws covers so little of its window that the camera has
-/// nothing left to hold onto.
-pub(crate) fn drawing_escapes_the_view(view: &GraphPanel) -> bool {
-    let Some(drawn) = view.drawn() else {
-        return false;
-    };
-    let camera = view.framing.camera();
-    escapes(
-        visible_rect(view.framing.viewport(), camera),
-        &drawn.view(camera.zoom).boxes,
-    )
-}
-
-/// [`drawing_escapes_the_view`] over the layout-space `window` and the `boxes`
-/// drawn in it.
+/// Whether the `boxes` drawn in the layout-space `window` cover so little of it
+/// that the camera has nothing left to hold onto.
 ///
 /// Each box is measured whole, boxes nested in one another included, so the
 /// share is an upper bound on what the drawing actually covers and the answer
@@ -256,18 +269,28 @@ fn escapes(window: Rect, boxes: &[bviz_graph_layout::Box]) -> bool {
     covered / area < READABLE_SHARE as f64
 }
 
-/// Moves the view onto what the panel draws. Framing is a camera move, so every
-/// box stays where the layout put it; it is what a gesture narrowing the drawing
-/// to a named part of the graph asks for, since what survives such a gesture is
-/// left wherever the document places it.
-pub(crate) fn frame_drawing(view: &mut GraphPanel) {
+/// What the frame request pending on `view` resolves to: what the panel draws
+/// at the fitted camera, where the request still wants it. Framing is a camera
+/// move, so every box stays where the layout put it.
+fn frame_target(view: &GraphPanel) -> FrameTarget {
+    let Some(frame) = view.framing.frame else {
+        return FrameTarget::Resolved(None);
+    };
     let Some(drawn) = view.drawn() else {
-        return;
+        return FrameTarget::Pending;
     };
-    let Some(target) = drawn_rect(drawn.view(view.framing.camera().zoom)) else {
-        return;
+    let Some(zoom) = view.view_zoom(&drawn) else {
+        return FrameTarget::Pending;
     };
-    view.framing.request_frame(target);
+    let laid_out = drawn.view(zoom);
+    let wanted = match frame {
+        Frame::Drawing => true,
+        Frame::Escaping => escapes(
+            visible_rect(view.framing.viewport(), view.framing.camera()),
+            &laid_out.boxes,
+        ),
+    };
+    FrameTarget::Resolved(wanted.then(|| drawn_rect(laid_out)).flatten())
 }
 
 /// Steers the view's framing from the bounds the canvas was laid out at. Runs at
@@ -281,7 +304,8 @@ pub(crate) fn build_prepaint(
     move |bounds: Bounds<Pixels>, window: &mut Window, cx: &mut App| {
         let redraw = parent.update(cx, |view, _| {
             let stale = view.framing.fit_or_rescale(bounds, content);
-            view.framing.arm_frame(content);
+            let target = frame_target(view);
+            view.framing.arm_frame(content, target);
             view.framing.arm_settle(content, recenter_target);
             stale | view.framing.step_settle()
         });
@@ -521,8 +545,8 @@ mod tests {
     #[test]
     fn a_frame_request_eases_onto_what_it_named_and_leaves_settles_coming_back_there() {
         let mut f = framed(1.0, (0.0, 0.0), canvas_bounds(800., 600.));
-        f.request_frame(NAMED);
-        f.arm_frame(CONTENT);
+        f.request_frame(Frame::Drawing);
+        f.arm_frame(CONTENT, FrameTarget::Resolved(Some(NAMED)));
 
         let a = f.anim.expect("the frame request armed no ease");
         assert_eq!(
@@ -536,6 +560,26 @@ mod tests {
         assert!(f.frame.is_none());
     }
 
+    /// A frame requested before there is a drawing to resolve it at, such as a
+    /// restriction whose map the document has yet to place, waits for one.
+    #[test]
+    fn a_frame_request_waits_for_a_drawing_to_frame() {
+        let mut f = framed(1.0, (0.0, 0.0), canvas_bounds(800., 600.));
+        f.request_frame(Frame::Drawing);
+
+        f.arm_frame(CONTENT, FrameTarget::Pending);
+        assert!(f.anim.is_none());
+        assert_eq!(f.frame, Some(Frame::Drawing));
+
+        f.arm_frame(CONTENT, FrameTarget::Resolved(Some(NAMED)));
+        let a = f.anim.expect("the frame request armed no ease");
+        assert_eq!(
+            (a.to_zoom, a.to_pan),
+            frame_view(NAMED, vp(800., 600.), CONTENT)
+        );
+        assert!(f.frame.is_none());
+    }
+
     /// A filter change that names what to look at also lands a layered drawing,
     /// whose settle would otherwise carry the view onto whatever that relayout
     /// emphasized.
@@ -543,9 +587,9 @@ mod tests {
     fn a_frame_request_supersedes_a_recenter_pending_with_it() {
         let mut f = framed(1.0, (0.0, 0.0), canvas_bounds(800., 600.));
         f.request_recenter();
-        f.request_frame(NAMED);
+        f.request_frame(Frame::Drawing);
 
-        f.arm_frame(CONTENT);
+        f.arm_frame(CONTENT, FrameTarget::Resolved(Some(NAMED)));
         let framed_at = f.anim.expect("the frame request armed no ease");
         f.arm_settle(
             CONTENT,

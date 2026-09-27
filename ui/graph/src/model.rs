@@ -8,7 +8,7 @@ use bviz_ui_components::{Pending, load_in_background};
 use bviz_ui_graph_args::Input;
 use gpui::{Context, EventEmitter, Task};
 use std::collections::HashSet;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 /// The graph a document holds, as it was read: whole, unfiltered, and shared by
 /// every panel drawing it. Cheap to clone into a panel's background derivation,
@@ -22,7 +22,7 @@ pub(crate) struct Shared {
     /// reduced view's edges are a stable projection of one fixed skeleton.
     pub(crate) reduced_base: Arc<Graph>,
     /// The placement every view of the whole graph is drawn in.
-    pub(crate) map: Arc<MapLayout>,
+    pub(crate) map: Placement,
     /// The interned node-id table the base graph keys on, which each layout
     /// extends with the group ids its quotient pass mints.
     pub(crate) names: Names,
@@ -38,6 +38,34 @@ pub(crate) struct Shared {
     /// Which filter axes the inputs this graph was read from support, by which
     /// the toolbar tells a control the inputs cannot answer from one they can.
     pub(crate) capabilities: Capabilities,
+}
+
+/// A graph's map, landing after the rest of the read. Every clone shares the
+/// one placement, so whatever holds one draws the map as soon as it lands.
+#[derive(Clone)]
+pub(crate) struct Placement(Arc<OnceLock<Arc<MapLayout>>>);
+
+/// The one handle that lands a [`Placement`]'s map, consumed by landing it, so a
+/// placement lands at most once.
+pub(crate) struct Landing(Placement);
+
+impl Placement {
+    /// A placement whose map has yet to land, and the handle that lands it.
+    pub(crate) fn pending() -> (Self, Landing) {
+        let placement = Placement(Arc::default());
+        (placement.clone(), Landing(placement))
+    }
+
+    /// The map, once it has landed.
+    pub(crate) fn placed(&self) -> Option<&Arc<MapLayout>> {
+        self.0.get()
+    }
+}
+
+impl Landing {
+    pub(crate) fn land(self, map: Arc<MapLayout>) {
+        self.0.0.get_or_init(|| map);
+    }
 }
 
 /// The view a panel opens a freshly read graph at.
@@ -62,13 +90,29 @@ pub(crate) struct Loaded {
 /// edges that view draws, so the two are read from one place.
 pub(crate) const OPENS_REDUCED: bool = true;
 
-/// Reads `inputs`, builds the graph and derives the map pyramid.
-pub(crate) fn build(inputs: Vec<Input>) -> Result<Loaded, String> {
+/// A read that has landed but for its map, which is still being placed.
+pub(crate) struct Read {
+    loaded: Loaded,
+    placing: Pending<Arc<MapLayout>>,
+    /// Lands what `placing` places in the read's [`Placement`].
+    landing: Landing,
+}
+
+/// Reads `inputs` and builds the graph, and starts placing its map.
+pub(crate) fn build(inputs: Vec<Input>) -> Result<Read, String> {
     let (graph, reduced_base, names, facets, capabilities) = build_graph(&inputs)?;
+    // The map derives each of its views against these, so it holds a share in
+    // them rather than a copy.
+    let (base, reduced_base) = (Arc::new(graph), Arc::new(reduced_base));
+    let (map, landing) = Placement::pending();
+    let placing = {
+        let (base, reduced_base) = (Arc::clone(&base), Arc::clone(&reduced_base));
+        Pending::start(move || Ok(Arc::new(bviz_graph_layout::map_layout(base, reduced_base))))
+    };
     // A graph no expansion of which fits still has to open at something, and the
     // unexpanded view is the smallest drawing of it there is.
     let (expanded, over_budget) = match bviz_graph_layout::lod::default_expansion(
-        &graph,
+        &base,
         OPENS_REDUCED.then_some(&reduced_base),
         DEFAULT_MAX_NODES,
         DEFAULT_MAX_EDGES,
@@ -76,27 +120,27 @@ pub(crate) fn build(inputs: Vec<Input>) -> Result<Loaded, String> {
         Ok(expanded) => (expanded, None),
         Err(overflow) => (HashSet::new(), Some(overflow)),
     };
-    let containers = Arc::new(bviz_graph_layout::lod::expandable_containers(&graph));
-    let labels = Arc::new(LabelIndex::of(&graph, &names, &facets));
-    // The map derives each of its views against these, so it holds a share in
-    // them rather than a copy.
-    let (base, reduced_base) = (Arc::new(graph), Arc::new(reduced_base));
-    let map = bviz_graph_layout::map_layout(Arc::clone(&base), Arc::clone(&reduced_base));
-    Ok(Loaded {
-        shared: Shared {
-            base,
-            reduced_base,
-            map: Arc::new(map),
-            names,
-            facets: Arc::new(facets),
-            labels,
-            containers,
-            capabilities,
+    let containers = Arc::new(bviz_graph_layout::lod::expandable_containers(&base));
+    let labels = Arc::new(LabelIndex::of(&base, &names, &facets));
+    Ok(Read {
+        loaded: Loaded {
+            shared: Shared {
+                base,
+                reduced_base,
+                map,
+                names,
+                facets: Arc::new(facets),
+                labels,
+                containers,
+                capabilities,
+            },
+            opening: Opening {
+                expanded,
+                over_budget,
+            },
         },
-        opening: Opening {
-            expanded,
-            over_budget,
-        },
+        placing,
+        landing,
     })
 }
 
@@ -107,6 +151,9 @@ pub(crate) type Source = bviz_ui_components::Source<Loaded>;
 /// graph does not hold.
 pub(crate) struct SourceReplaced;
 
+/// The loaded graph's map has landed in its [`Placement`].
+pub(crate) struct MapPlaced;
+
 /// A graph read for viewing, held apart from the panels drawing it so a view of
 /// it can close and be shown again without the graph being read or laid out
 /// afresh.
@@ -114,22 +161,26 @@ pub(crate) struct GraphModel {
     source: Source,
     /// The read in flight, held so that it is not cancelled.
     _work: Task<()>,
+    /// The placement of the map in flight once the read has landed, held so
+    /// that it is not cancelled.
+    _placing: Task<()>,
 }
 
 impl EventEmitter<SourceReplaced> for GraphModel {}
+impl EventEmitter<MapPlaced> for GraphModel {}
 
 impl GraphModel {
     /// The graph `load` is reading, viewable once the read finishes and failed
     /// where it does not.
-    pub(crate) fn reading(load: Pending<Loaded>, cx: &mut Context<Self>) -> Self {
+    pub(crate) fn reading(load: Pending<Read>, cx: &mut Context<Self>) -> Self {
         Self::new(load_in_background(
             cx,
             move || load.join(),
             |model, result, cx| {
                 model.source = match result {
-                    Ok(loaded) => {
-                        derive_levels(Arc::clone(&loaded.shared.map), cx);
-                        Source::Loaded(loaded)
+                    Ok(read) => {
+                        model._placing = Self::placing(read.placing, read.landing, cx);
+                        Source::Loaded(read.loaded)
                     }
                     Err(err) => Source::Failed(err),
                 };
@@ -138,10 +189,50 @@ impl GraphModel {
         ))
     }
 
+    /// Waits on `placing` and lands the map it places through `landing`.
+    fn placing(
+        placing: Pending<Arc<MapLayout>>,
+        landing: Landing,
+        cx: &mut Context<Self>,
+    ) -> Task<()> {
+        load_in_background(
+            cx,
+            move || placing.join(),
+            |model, placed, cx| match model.land(placed, landing) {
+                Some(map) => {
+                    derive_levels(map, cx);
+                    cx.emit(MapPlaced);
+                }
+                None => cx.emit(SourceReplaced),
+            },
+        )
+    }
+
+    /// Lands what placing the loaded graph's map came to: the map, through
+    /// `landing`, or a failed read where placing failed. Returns the map where
+    /// it landed.
+    fn land(
+        &mut self,
+        placed: Result<Arc<MapLayout>, String>,
+        landing: Landing,
+    ) -> Option<Arc<MapLayout>> {
+        match placed {
+            Ok(map) => {
+                landing.land(Arc::clone(&map));
+                Some(map)
+            }
+            Err(err) => {
+                self.source = Source::Failed(err);
+                None
+            }
+        }
+    }
+
     fn new(work: Task<()>) -> Self {
         Self {
             source: Source::Loading,
             _work: work,
+            _placing: Task::ready(()),
         }
     }
 
@@ -154,5 +245,23 @@ impl GraphModel {
             Source::Loaded(loaded) => Some(loaded),
             _ => None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Placing runs apart from the read it belongs to, so a panic there fails
+    /// the read all the same, and lands no map.
+    #[test]
+    fn a_placement_that_panics_fails_the_read() {
+        let (placement, landing) = Placement::pending();
+        let mut model = GraphModel::new(Task::ready(()));
+        let placed = Pending::<Arc<MapLayout>>::start(|| panic!("placing the map")).join();
+
+        assert!(model.land(placed, landing).is_none());
+        assert!(matches!(model.source(), Source::Failed(_)));
+        assert!(placement.placed().is_none());
     }
 }

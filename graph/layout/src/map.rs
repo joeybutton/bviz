@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, BTreeSet, BinaryHeap, HashMap, HashSet};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 
-use bviz_parallel::workers;
+use bviz_parallel::background_workers;
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::graph::{Containment, EdgeKind, Graph, Node, id_span};
@@ -463,7 +463,7 @@ fn lay_out_frame(members: &[Id], edges: &[(Id, Id)], size: impl Fn(Id) -> (f64, 
 }
 
 fn on_worker<T: Send>(job: impl FnOnce() -> T + Send) -> T {
-    workers().install(job)
+    background_workers().install(job)
 }
 
 /// The edges each frame lays out: an edge between two nodes becomes one edge

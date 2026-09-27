@@ -55,7 +55,7 @@ use emphasis::Emphasis;
 use framing::{Framing, build_prepaint};
 use legend::Legend;
 use mode::LayoutMode;
-use model::{GraphModel, SourceReplaced};
+use model::{GraphModel, MapPlaced, SourceReplaced};
 use morph::{Frame, Morph};
 use paint::{Scene, TitleTarget, canvas_body};
 use relation::Relation;
@@ -213,6 +213,8 @@ pub struct GraphPanel {
     /// Derives what the selected mode draws as the read lands: a derivation
     /// asked for while the graph was still being read could not start.
     _source_replaced: Subscription,
+    /// Derives the levels of the panel's restriction as the map lands.
+    _map_placed: Subscription,
     /// Box under the cursor.
     hovered: Option<Id>,
     /// The box whose related nodes stay marked, and how far that marking reaches;
@@ -345,6 +347,9 @@ impl GraphPanel {
             derive::opened(view, cx);
             checklist::adopt(view, cx);
         });
+        let map_placed = cx.subscribe(&model, |view, _, _: &MapPlaced, cx| {
+            derive::placed(view, cx)
+        });
         Self {
             focus_handle: cx.focus_handle(),
             title,
@@ -370,6 +375,7 @@ impl GraphPanel {
             _search_typing: search_typing,
             _changed: changed,
             _source_replaced: source_replaced,
+            _map_placed: map_placed,
             hovered: None,
             selection,
             relation_picker,
@@ -852,7 +858,7 @@ fn hit_box<'a>(
 
 /// A joint graph being read and laid out.
 pub struct Load {
-    built: Pending<model::Loaded>,
+    built: Pending<model::Read>,
     title: SharedString,
 }
 
