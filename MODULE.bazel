@@ -86,6 +86,7 @@ crate.annotation(
     patches = [
         "//patches/elk-rs:elk-rs-reentrant-external-port-lock.patch",
         "//patches/elk-rs:elk-rs-bk-layer-neighbors-by-number.patch",
+        "//patches/elk-rs:elk-rs-compaction-scanline-arrays.patch",
     ],
 )
 crate.annotation(
