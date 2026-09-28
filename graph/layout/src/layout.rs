@@ -105,6 +105,9 @@ pub struct Box {
 /// every provenance that runs between the same node pair, since ELK routes the
 /// pair once and the renderer draws those kinds along the shared route.
 pub struct Connector {
+    /// No two consecutive points coincide: the renderer offsets each
+    /// provenance's lane along its segments' normals, which a zero-length
+    /// segment lacks.
     pub points: Vec<(f64, f64)>,
     /// The distinct [`EdgeKind`]s on this pair, in enum order.
     pub kinds: Vec<EdgeKind>,
@@ -713,6 +716,9 @@ fn connector(edge: &ElkEdgeRef) -> Option<Vec<(f64, f64)>> {
         }
         points.push((section.end_x() + ox, section.end_y() + oy));
     }
+    // ELK joins the segments of an edge crossing a container boundary without
+    // dropping a bend point that one segment repeats from the last.
+    points.dedup();
     (points.len() >= 2).then_some(points)
 }
 
@@ -1194,5 +1200,54 @@ mod tests {
             }
         }
         assert!(compared > 0, "no frame holds two pinned boxes");
+    }
+
+    /// A package whose leaves feed a node outside it that feeds back into the
+    /// package, so an edge runs against the layering to cross into the package
+    /// and ELK routes it as segments joined at the boundary. Where those segments
+    /// meet depends on the box widths, which the labels set.
+    fn reentrant() -> (Graph, LaidOut) {
+        let mut names = Names::default();
+        let mut graph = Graph::new();
+        let mut add = |graph: &mut Graph, name: &str, kind: Kind, parent: Option<Id>| {
+            let id = names.intern(name);
+            graph.add_node(Node::new(id, name, kind, parent));
+            id
+        };
+
+        let pkg = add(&mut graph, "pkg", Kind::Package, None);
+        let sub = add(&mut graph, "sub", Kind::Package, Some(pkg));
+        let a1 = add(&mut graph, "a1", Kind::Target, Some(pkg));
+        let a2 = add(&mut graph, "a2", Kind::Target, Some(pkg));
+        let b1 = add(&mut graph, "b1", Kind::Target, Some(sub));
+        let up = add(&mut graph, "up", Kind::Target, None);
+        let fd = add(&mut graph, "fd", Kind::Target, Some(pkg));
+        let end = add(&mut graph, "end", Kind::Target, Some(pkg));
+
+        for (from, to) in [(a2, end), (up, end), (a2, up), (up, fd), (b1, up), (a1, up)] {
+            graph.add_edge(from, to, EdgeKind::Query);
+        }
+
+        let laid = layout(&graph);
+        (graph, laid)
+    }
+
+    /// Every turn a connector takes is a right angle between two distinct
+    /// points, the shape the renderer offsets a pair's parallel lanes from.
+    #[test]
+    fn a_connector_turns_only_at_right_angles_between_distinct_points() {
+        for (_, laid) in [compound(), cyclic(), reentrant()] {
+            for c in &laid.connectors {
+                for w in c.points.windows(2) {
+                    let (a, b) = (w[0], w[1]);
+                    assert_ne!(a, b, "a zero-length segment in {:?}", c.points);
+                    assert!(
+                        a.0 == b.0 || a.1 == b.1,
+                        "a slanted segment in {:?}",
+                        c.points
+                    );
+                }
+            }
+        }
     }
 }
