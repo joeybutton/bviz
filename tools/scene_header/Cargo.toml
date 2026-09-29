@@ -2,6 +2,8 @@
 name = "bviz_scene_header_gen"
 version = "0.1.0"
 edition = "2024"
+license.workspace = true
+repository.workspace = true
 
 [[bin]]
 name = "bviz_scene_header_gen"

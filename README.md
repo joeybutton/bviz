@@ -26,7 +26,9 @@ Every night a binary is built for x86_64 Linux, arm64 macOS and x86_64
 macOS, and attached to the run as an artifact. Take one from the
 [Nightly workflow](../../actions/workflows/nightly.yaml), whose "Run
 workflow" button also builds the set on demand. Each artifact is a
-`.tar.gz` holding the `bviz` executable.
+`.tar.gz` holding the `bviz` executable, bviz's `LICENSE` and `NOTICE`, and
+`THIRD_PARTY_NOTICES` with the licences of the third-party work built into
+that executable.
 
 ## Setup
 
@@ -113,3 +115,9 @@ bazel run -c opt //bviz -- \
 At least one document is required. The query files merge into a single joint
 graph, so each of `--aquery`, `--cquery` and `--query` names at most one file per
 invocation; `--profile` and `--bep` each open a panel per occurrence.
+
+## License
+
+bviz is licensed under the Apache License 2.0; see [LICENSE](LICENSE). The
+third-party works it bundles or derives from, and their terms, are listed in
+[NOTICE](NOTICE).

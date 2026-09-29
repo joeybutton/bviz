@@ -1,11 +1,13 @@
 load("@rules_rs//rs:rust_binary.bzl", "rust_binary")
 
-# The exported-type list is transcribed from gpui_macos's build script, so the
-# generator carries that crate's terms rather than bviz's own.
+# The exported-type list is transcribed from gpui_macos's build script.
 filegroup(
     name = "scene_header_gen_src",
     srcs = ["scene_header_gen.rs"],
-    package_metadata = ["//LICENSES:gpui"],
+    package_metadata = [
+        "//:package_metadata",
+        "//LICENSES:gpui",
+    ],
 )
 
 rust_binary(

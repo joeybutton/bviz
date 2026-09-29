@@ -13,8 +13,15 @@ bazel_dep(name = "rules_rs", version = "0.0.110")
 bazel_dep(name = "tar.bzl", version = "0.10.4")
 
 # System libraries for gpui's Wayland backend, provided via the BCR.
+bazel_dep(name = "libffi", version = "3.4.7.bcr.3")
 bazel_dep(name = "wayland", version = "1.24.0.bcr.1")
 bazel_dep(name = "xkbcommon", version = "1.9.2.bcr.beta.1")
+
+single_version_override(
+    module_name = "wayland",
+    patch_strip = 1,
+    patches = ["//patches/wayland:wayland-export-copying.patch"],
+)
 
 rs_toolchains = use_extension("@rules_rs//rs/toolchains:module_extension.bzl", "toolchains")
 rs_toolchains.toolchain(
@@ -142,6 +149,12 @@ crate.annotation(
 # compiled output stays independent of where the build ran.
 crate.annotation(
     additive_build_file_content = """filegroup(
+    name = "licence",
+    srcs = ["LICENSE-APACHE"],
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
     name = "scene_src",
     srcs = ["src/scene.rs"],
     visibility = ["//visibility:public"],
@@ -154,6 +167,7 @@ filegroup(
 )""",
     crate = "gpui",
     extra_aliased_targets = {
+        "gpui_licence": "licence",
         "gpui_scene_src": "scene_src",
         "gpui_shader_type_srcs": "shader_type_srcs",
     },
@@ -260,6 +274,10 @@ crate.annotation(
 use_repo(crate, "crates")
 
 rules_rust = use_extension("@rules_rs//rs:rules_rust.bzl", "rules_rust")
+rules_rust.patch(
+    patches = ["//patches/rules_rust:rules-rust-export-licence.patch"],
+    strip = 1,
+)
 use_repo(rules_rust, rules_rs_rules_rust = "rules_rust")
 
 rules_rust_prost = use_extension("@rules_rs//rs:rules_rust_prost.bzl", "rules_rust_prost")
@@ -294,6 +312,16 @@ http_archive(
     sha256 = "8b4dd9afb96b50c92a613f5786af6a7dcff6e416442c42c12ed831cea050a698",
     strip_prefix = "core-2.0.8",
     url = "https://github.com/phosphor-icons/core/archive/refs/tags/v2.0.8.tar.gz",
+)
+
+# The standard text of each SPDX licence, for components that name their licence
+# without shipping its text.
+http_archive(
+    name = "spdx_license_list",
+    build_file = "//3rd-party:spdx_license_list.BUILD",
+    sha256 = "d69195f5b11d4b84ffccd12d943e90732694d00fea42dc81fcc66f79d6cc8104",
+    strip_prefix = "license-list-data-3.29.0",
+    url = "https://github.com/spdx/license-list-data/archive/refs/tags/v3.29.0.tar.gz",
 )
 
 new_git_repository = use_repo_rule("@bazel_tools//tools/build_defs/repo:git.bzl", "new_git_repository")

@@ -5,6 +5,7 @@ members = [
     "cli",
     "graph/layout",
     "terminal",
+    "tools/notices",
     "tools/scene_header",
     "trace/layout",
     "trace/profile",
@@ -21,7 +22,12 @@ members = [
     "ui/workspace",
     "util/parallel",
 ]
+exclude = ["third_party/ztracing"]
 resolver = "2"
+
+[workspace.package]
+license = "Apache-2.0"
+repository = "https://github.com/yume-ag/bviz"
 
 [workspace.dependencies]
 alacritty_terminal = "0.26"
@@ -34,10 +40,13 @@ hashbrown = { version = "0.16", default-features = false }
 libmimalloc-sys = "0.1"
 mimalloc = "0.1"
 num_cpus = "1"
+packageurl = "0.7"
 rayon = "1"
 rustc-hash = "2"
+semver = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+spdx = "0.13"
 org-eclipse-elk-alg-layered = { git = "https://github.com/openedges/elk-rs", tag = "v0.11.0+rs.2" }
 org-eclipse-elk-core = { git = "https://github.com/openedges/elk-rs", tag = "v0.11.0+rs.2" }
 org-eclipse-elk-graph = { git = "https://github.com/openedges/elk-rs", tag = "v0.11.0+rs.2" }
@@ -46,3 +55,10 @@ prost-types = "0.13"
 protoc-gen-prost = "0.4"
 gpui = { git = "https://github.com/zed-industries/zed", tag = "v1.6.3" }
 gpui_platform = { git = "https://github.com/zed-industries/zed", tag = "v1.6.3" }
+
+# gpui's sum_tree depends on ztracing, which with ztracing_macro and zlog is
+# GPL-3.0-or-later; linking them would put every bviz binary under the GPL.
+# Built without the `ztracing` cfg, sum_tree uses only its no-op `instrument`
+# attribute.
+[patch."https://github.com/zed-industries/zed"]
+ztracing = { path = "third_party/ztracing" }

@@ -1,0 +1,2 @@
+# buildifier: disable=module-docstring
+repo(default_package_metadata = ["//:package_metadata"])

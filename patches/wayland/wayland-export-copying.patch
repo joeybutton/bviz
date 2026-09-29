@@ -1,0 +1,17 @@
+Export the licence text
+
+The module's BUILD file keeps its COPYING private, so no licence declaration
+can point at it.
+
+--- a/BUILD.bazel
++++ b/BUILD.bazel
+@@ -1,7 +1,9 @@
+ load("@bazel_skylib//rules:expand_template.bzl", "expand_template")
+ load("@rules_cc//cc:cc_binary.bzl", "cc_binary")
+ load("@rules_cc//cc:cc_library.bzl", "cc_library")
+ 
++exports_files(["COPYING"])
++
+ UPSTREAM_VERSION = module_version().split(".bcr.", 1)[0]
+ 
+ UPSTREAM_VERSION_MAJOR = UPSTREAM_VERSION.split(".")[0]

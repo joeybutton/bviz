@@ -1,0 +1,18 @@
+[package]
+name = "bviz_notices"
+version = "0.1.0"
+edition = "2024"
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "bviz_notices"
+path = "src/main.rs"
+
+[dependencies]
+clap = { workspace = true }
+packageurl = { workspace = true }
+semver = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+spdx = { workspace = true }
