@@ -9,15 +9,17 @@ use crate::mode::LayoutMode;
 use crate::paint::paint_diamond;
 use crate::{CARD_MAX_SHARE, GraphPanel, Palette, derive};
 use bviz_graph_layout::capability::TRANSITIONS_FLAG;
+use bviz_graph_layout::facets::{ConfigRef, Sym};
 use bviz_graph_layout::paths::{self, Paths};
 use bviz_graph_layout::select::labels::carried_label;
-use bviz_graph_layout::transition::Transitions;
+use bviz_graph_layout::transition::{Difference, Transition, Transitions};
 use bviz_graph_layout::{Axis, Capabilities, Facets, Id, Kind, Names, Support};
 use bviz_ui_components::{Button, TextTooltip, TooltipColors, load_in_background, overlay_canvas};
 use gpui::{
     ClickEvent, Context, Div, Pixels, SharedString, Stateful, Task, div, prelude::*, px, relative,
 };
 use std::collections::HashMap;
+use std::fmt::Write;
 use std::sync::Arc;
 
 /// Width the card is drawn at, wide enough for a package path and a target.
@@ -87,6 +89,7 @@ struct Named {
 /// The configuration a named node is built in.
 #[derive(Clone)]
 struct Config {
+    handle: ConfigRef,
     mnemonic: Option<SharedString>,
     checksum: SharedString,
 }
@@ -109,6 +112,7 @@ enum Answer {
 fn name(names: &Names, facets: &Facets, id: Id) -> Named {
     let label = carried_label(names, facets, id).unwrap_or_else(|| names.resolve(id));
     let config = facets.config(id).map(|config| Config {
+        handle: config,
         mnemonic: facets
             .config_entry(config)
             .and_then(|entry| entry.mnemonic)
@@ -174,6 +178,7 @@ impl Spelling {
             Some(Config {
                 mnemonic: Some(mnemonic),
                 checksum,
+                ..
             }) => format!("{} ({mnemonic}, {checksum})", named.label).into(),
             Some(Config { checksum, .. }) => format!("{} ({checksum})", named.label).into(),
             None => named.label.clone(),
@@ -196,6 +201,61 @@ fn unmarked_transitions(capabilities: &Capabilities, configured: bool) -> Option
         Support::Unavailable { .. } => "transitions unmarked",
     };
     Some(format!("{unmarked} — run the cquery with {TRANSITIONS_FLAG}").into())
+}
+
+/// How many changed options a link's hover names before it counts the rest.
+const CHANGES_SHOWN: usize = 6;
+
+/// The longest option value a link's hover writes out, beyond which it stands
+/// the value in by an ellipsis: a platform label fits, a list of flags does not.
+const VALUE_SHOWN: usize = 40;
+
+/// What a link crossing `transition` from `dependent` to `dependency` says of
+/// it on hover: the kind and, for a platform or a flag transition or a target
+/// taken in several configurations, the options it changes, each from the
+/// dependent's value to the dependency's.
+fn crossing(
+    facets: &Facets,
+    transition: Transition,
+    dependency: &Named,
+    dependent: &Named,
+) -> String {
+    let mut text = transition.label().to_string();
+    let lists_options = matches!(
+        transition,
+        Transition::Platform | Transition::Flag | Transition::Split
+    );
+    let (true, Some(to), Some(from)) = (lists_options, &dependency.config, &dependent.config)
+    else {
+        return text;
+    };
+    let Some(difference) = Difference::between(facets, to.handle, from.handle) else {
+        return text;
+    };
+    let value = |value: Option<Sym>| match value.map(|sym| facets.strings().resolve(sym)) {
+        None => "unset",
+        Some("") => "\"\"",
+        Some(value) if value.chars().count() <= VALUE_SHOWN => value,
+        Some(_) => "…",
+    };
+    for change in difference.changes.iter().take(CHANGES_SHOWN) {
+        let name = facets.strings().resolve(change.name);
+        let (was, is) = (value(change.dependent), value(change.dependency));
+        let _ = write!(text, "\n{name}: {was} → {is}");
+    }
+    let beyond = difference.changes.len().saturating_sub(CHANGES_SHOWN);
+    if beyond > 0 {
+        let _ = write!(text, "\nand {beyond} more");
+    }
+    text
+}
+
+/// One link of the shortest chain, with the transition the drawing marks on
+/// the edge it follows and what its hover says.
+struct Link<'a> {
+    named: &'a Named,
+    crossing: Option<Transition>,
+    hover: SharedString,
 }
 
 /// How many nodes the paths hold, as the card states it.
@@ -402,58 +462,78 @@ fn endpoint(
         }))
 }
 
-/// The shortest chain, from the dependent down to the dependency, each link
-/// after the first led by a mark reading as "which depends on": the badge of the
-/// transition the drawing marks on the edge the link follows, where it marks
-/// one.
-fn chain<'a>(
+/// The shortest chain's links, from the dependent down to the dependency,
+/// with the transitions `transitions` marks between them, their hovers read
+/// off `facets`.
+fn links<'a>(
     shortest: &'a [Named],
-    transitions: &'a Transitions,
-    spelling: &'a Spelling,
-    palette: &'a Palette,
-) -> impl Iterator<Item = Stateful<Div>> + 'a {
-    let tip = TooltipColors::from_colors(&palette.colors);
+    transitions: &Transitions,
+    facets: &Facets,
+    spelling: &Spelling,
+) -> Vec<Link<'a>> {
     let above = std::iter::once(None).chain(shortest.iter().map(Some));
     shortest
         .iter()
         .zip(above)
-        .enumerate()
-        .map(move |(link, (named, dependent))| {
-            let transition =
-                dependent.and_then(|dependent| transitions.get(named.id, dependent.id));
-            div()
-                .id(("why-link", link))
-                .flex()
-                .items_center()
-                .gap_1()
-                .min_w_0()
-                .tooltip(TextTooltip::builder(spelling.full(named), tip))
-                .child(
-                    div()
-                        .size(LINK_MARK)
-                        .flex_none()
-                        .relative()
-                        .children(transition.map(|transition| {
-                            let color = palette.transition_color(transition);
-                            overlay_canvas(move |bounds, window, _| {
-                                paint_diamond(
-                                    bounds.center(),
-                                    f32::from(LINK_MARK) / 2.,
-                                    color,
-                                    window,
-                                )
-                            })
-                            .into_any_element()
-                        }))
-                        .children((link > 0 && transition.is_none()).then(|| {
-                            bviz_ui_assets::icon("caret-down")
-                                .size(LINK_MARK)
-                                .text_color(palette.colors.text_muted)
-                                .into_any_element()
-                        })),
-                )
-                .child(line(spelling.name(named)))
+        .map(|(named, dependent)| {
+            let crossed = dependent.and_then(|dependent| {
+                let transition = transitions.get(named.id, dependent.id)?;
+                Some((transition, crossing(facets, transition, named, dependent)))
+            });
+            let full = spelling.full(named);
+            let (crossing, hover) = match crossed {
+                Some((transition, crossing)) => {
+                    (Some(transition), format!("{full}\n{crossing}").into())
+                }
+                None => (None, full),
+            };
+            Link {
+                named,
+                crossing,
+                hover,
+            }
         })
+        .collect()
+}
+
+/// The shortest chain, each link after the first led by a mark reading as
+/// "which depends on": the badge of the transition the drawing marks on the
+/// edge the link follows, where it marks one.
+fn chain<'a>(
+    links: &'a [Link<'a>],
+    spelling: &'a Spelling,
+    palette: &'a Palette,
+) -> impl Iterator<Item = Stateful<Div>> + 'a {
+    let tip = TooltipColors::from_colors(&palette.colors);
+    links.iter().enumerate().map(move |(position, link)| {
+        div()
+            .id(("why-link", position))
+            .flex()
+            .items_center()
+            .gap_1()
+            .min_w_0()
+            .tooltip(TextTooltip::builder(link.hover.clone(), tip))
+            .child(
+                div()
+                    .size(LINK_MARK)
+                    .flex_none()
+                    .relative()
+                    .children(link.crossing.map(|transition| {
+                        let color = palette.transition_color(transition);
+                        overlay_canvas(move |bounds, window, _| {
+                            paint_diamond(bounds.center(), f32::from(LINK_MARK) / 2., color, window)
+                        })
+                        .into_any_element()
+                    }))
+                    .children((position > 0 && link.crossing.is_none()).then(|| {
+                        bviz_ui_assets::icon("caret-down")
+                            .size(LINK_MARK)
+                            .text_color(palette.colors.text_muted)
+                            .into_any_element()
+                    })),
+            )
+            .child(line(spelling.name(link.named)))
+    })
 }
 
 /// The question asked and what answers it, floating over the drawing; `None`
@@ -479,18 +559,23 @@ pub(crate) fn card(
         answer,
         Answering::Answered(Answer::Dependents { .. } | Answer::Between { .. })
     );
-    let unmarked = match found {
-        true => view.model.read(cx).loaded().and_then(|loaded| {
+    let shared = &view.model.read(cx).loaded()?.shared;
+    let unmarked = found
+        .then(|| {
             let configured = view.classes.contains(&Kind::ConfiguredTarget);
-            unmarked_transitions(&loaded.shared.capabilities, configured)
-        }),
-        false => None,
-    };
+            unmarked_transitions(&shared.capabilities, configured)
+        })
+        .flatten();
+    let links = links(
+        shortest,
+        &view.derived.transitions(),
+        &shared.facets,
+        &spelling,
+    );
     // A map level draws the reduction of what it holds and folds edges into
     // its boxes, so it marks the transitions only of the edges it draws.
     let map_note = (found && view.mode == LayoutMode::Map)
         .then_some("the map leaves some transitions unmarked; the layered layout marks each");
-    let transitions = view.derived.transitions();
     let from = match &question.dependent {
         Some(dependent) => endpoint("why-from", "from ", dependent, &spelling, palette),
         None => div().id("why-from").child(line("from every dependent")),
@@ -538,7 +623,7 @@ pub(crate) fn card(
             .child(line(status))
             .children(unmarked.map(|unmarked| div().min_w_0().child(unmarked)))
             .children(map_note.map(|note| div().min_w_0().child(note)))
-            .children(chain(shortest, &transitions, &spelling, palette)),
+            .children(chain(&links, &spelling, palette)),
     )
 }
 
@@ -630,6 +715,43 @@ mod tests {
         assert_eq!(
             unmarked_transitions(&observed(&[]), false).as_deref(),
             Some("transitions unmarked — they need a cquery run with --transitions=lite")
+        );
+    }
+
+    /// A flag transition names the options it changes on hover, each from the
+    /// dependent's value to the dependency's: an empty value quoted, an option
+    /// set to nothing as unset, and a value too long to read at a glance
+    /// standing in by an ellipsis.
+    #[test]
+    fn a_crossing_names_the_options_it_changes() {
+        let mut names = Names::default();
+        let mut facets = Facets::default();
+        let mut node = |name: &str, checksum: &str, mode: &str, copts: &str, wrap: Option<&str>| {
+            let id = names.intern(name);
+            let config = facets.intern_config(checksum, Some(mode), Tri::No);
+            let options = [
+                ("compilation_mode", Some(mode)),
+                ("copt", Some(copts)),
+                ("run_under", wrap),
+            ];
+            facets.record_config_options(config, [("CoreOptions", options)]);
+            facets.set_config(id, Some(config));
+            id
+        };
+        let long = "-O2 ".repeat(VALUE_SHOWN);
+        let (app, tool) = (
+            node("app", "a", "fastbuild", "", None),
+            node("tool", "b", "opt", &long, Some("//:wrap")),
+        );
+        let (app, tool) = (name(&names, &facets, app), name(&names, &facets, tool));
+
+        assert_eq!(
+            crossing(&facets, Transition::Flag, &tool, &app),
+            "flag transition\ncompilation_mode: fastbuild → opt\ncopt: \"\" → …\nrun_under: unset → //:wrap"
+        );
+        assert_eq!(
+            crossing(&facets, Transition::Exec, &tool, &app),
+            "exec transition"
         );
     }
 
