@@ -1,84 +1,119 @@
 # bviz
 
-Seeing what a Bazel build actually did is hard. While it runs you get scrolling
-progress; afterwards, dumps meant for scripts.
+A graphical Bazel build visualization and inspection tool.
 
-bviz gives you a way in: walk the dependency graph, zoom into the action
-timeline, scrub back through the console output.
+Seeing what a Bazel build actually did is hard. bviz reads the outputs Bazel
+generates, such as query results, the trace profile and the build event log,
+and lets you explore them visually.
 
-## Viewers
+bviz is early in development. Expect rough edges, and expect the interface and
+command line to change.
 
-`//bviz` is the application: one window stacking the documents named on its
-command line, each in a region of its own.
+## Features
 
-It is a gpui desktop application, and needs Wayland and a GPU.
+### Build graph
 
-## Nightly builds
+The target and action graph from `query`, `cquery` and `aquery` output, merged
+into one graph to expand, search and filter.
 
-Every night a binary is built for x86_64 Linux, arm64 macOS and x86_64
-macOS, and attached to the run as an artifact. Take one from the
-[Nightly workflow](../../actions/workflows/nightly.yaml), whose "Run
-workflow" button also builds the set on demand. Each artifact is a
-`.tar.gz` holding the `bviz` executable, bviz's `LICENSE` and `NOTICE`, and
-`THIRD_PARTY_NOTICES` with the licences of the third-party work built into
-that executable.
+### Trace profile
 
-## Building from source
+The timeline of a build's trace profile: what ran when, and flame graphs of
+where the time went.
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for the build setup, the per-viewer
-binaries, and the checks CI runs.
+### Build event protocol
 
-## Running a viewer
+The console output of a build, replayed from its build event log.
 
-`bazel run` starts the binary in its runfiles directory, so give input paths in
-full. To obtain good interactive performance, run with `-c opt`.
+bviz can open several files at once.
+
+## Install
+
+Download the latest build of `main` for x86_64 Linux, or arm64 or x86_64 macOS,
+from the [nightly release](../../releases/tag/nightly).
+
+| | Linux | macOS |
+| --- | --- | --- |
+| Architecture | x86_64 | arm64, x86_64 |
+| Operating system | glibc 2.28 or newer | macOS 14 or newer |
+| Display | a Wayland session; X11 is not supported | |
+| Graphics | a Vulkan driver | Metal |
+
+The macOS binaries are cross-compiled on Linux, are not signed, and are not
+tested in CI. macOS blocks an unsigned download until you clear its quarantine
+flag: `xattr -d com.apple.quarantine bviz`.
+
+To build from source, see [CONTRIBUTING.md](CONTRIBUTING.md).
+
+## Quick start
+
+In a Bazel workspace, profile a build and open the profile:
 
 ```sh
-bazel aquery --output=streamed_proto //... > /tmp/aquery.pb
-bazel cquery --output=streamed_proto --transitions=lite //... > /tmp/cquery.pb
+bazel build --profile=/tmp/build.profile.gz //...
+bviz --profile /tmp/build.profile.gz
+```
+
+## Usage
+
+bviz opens every file named on its command line, and needs at least one.
+
+### Dependency graph
+
+```sh
 bazel query --output=streamed_proto //... > /tmp/query.pb
-bazel run -c opt //ui/graph:graph -- --aquery /tmp/aquery.pb --cquery /tmp/cquery.pb --query /tmp/query.pb
+bazel cquery --output=streamed_proto --transitions=lite //... > /tmp/cquery.pb
+bazel aquery --output=streamed_proto //... > /tmp/aquery.pb
+bviz --query /tmp/query.pb --cquery /tmp/cquery.pb --aquery /tmp/aquery.pb
 ```
 
-At least one query is required; several are merged into one joint graph. Under
-`--transitions=lite` or `full`, cquery resolves each dependency's configuration,
-so an edge reaches the exact configured target it feeds; without it the edge
-lands on the dependency's target container.
+Any one of the three is enough. bviz merges them into a single graph, so each
+flag takes one file. Under `--transitions=lite` or `full`, cquery resolves each
+dependency's configuration, so an edge reaches the exact configured target it
+feeds; without it the edge lands on the dependency's target.
+
+### Trace profile
 
 ```sh
-bazel build --config=bazel_profile --profile=/tmp/build.profile.gz //...
-bazel run -c opt //ui/trace:trace -- --profile /tmp/build.profile.gz
+bazel build --profile=/tmp/build.profile.gz //...
+bviz --profile /tmp/build.profile.gz
 ```
 
-`--config=bazel_profile` widens what the profile records.
+For a more complete profile, add `--noslim_profile --record_full_profiler_data
+--experimental_profile_include_target_label
+--experimental_profile_include_target_configuration`. The profile then keeps
+short events and names each action's target, at the cost of a larger file.
+
+### Console replay
 
 ```sh
 bazel build --show_timestamps --build_event_binary_file=/tmp/build.bep //...
-bazel run -c opt //ui/console:console -- /tmp/build.bep
+bviz --bep /tmp/build.bep
 ```
 
 Bazel does not timestamp its progress output, so without `--show_timestamps` the
 replay interpolates its timing between the events that do carry a clock.
 
-## Running bviz
+`--profile` and `--bep` can be repeated, and combined with the graph flags, to
+open several documents side by side.
 
-`//bviz` takes the inputs of all three viewers at once and opens a panel
-per document.
+## Getting help
 
-```sh
-bazel run -c opt //bviz -- \
-    --aquery /tmp/aquery.pb --cquery /tmp/cquery.pb --query /tmp/query.pb \
-    --profile /tmp/build.profile.gz --bep /tmp/build.bep
-```
+Report bugs and ask questions in the [issue tracker](../../issues).
 
-At least one document is required. The query files merge into a single joint
-graph, so each of `--aquery`, `--cquery` and `--query` names at most one file per
-invocation; `--profile` and `--bep` each open a panel per occurrence.
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md).
+
+## Acknowledgements
+
+bviz draws with [gpui](https://github.com/zed-industries/zed), the UI framework
+of the Zed editor, and lays out graphs with
+[elk-rs](https://github.com/openedges/elk-rs), a Rust port of the Eclipse
+Layout Kernel.
 
 ## License
 
 bviz is licensed under the Apache License 2.0; see [LICENSE](LICENSE). The
 third-party works it bundles or derives from, and their terms, are listed in
 [NOTICE](NOTICE).
-
-To contribute, see [CONTRIBUTING.md](CONTRIBUTING.md).
