@@ -170,6 +170,9 @@ automatically. In this repo the font files are downloaded by a Bazel `http_archi
 `data`, and **embedded into the binary** at build time — the `//ui/assets` library's build
 script copies them into `OUT_DIR` so `include_bytes!` can bake them in — so there are no runtime
 file dependencies. See `//ui/assets` and the `inter` / `jetbrains_mono` archives in `MODULE.bazel`.
+A view shown through an element's `.tooltip(...)` is drawn outside the element tree, so it inherits
+no family: its root must set `.font_family(bviz_ui_assets::UI)` itself, or gpui falls back to
+`.SystemUIFont` and panics when it cannot resolve it (see `bviz_ui_components::TextTooltip`).
 A custom element that measures or paints text should resolve its font, size, and line
 height from the *inherited* text style with `bviz_ui_assets::text_metrics(window)` (so it
 renders in the family cascaded to it — overriding to `MONO` only where it must, like
