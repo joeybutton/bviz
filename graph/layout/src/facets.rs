@@ -234,6 +234,41 @@ pub struct ConfigEntry {
     pub is_tool: Tri,
 }
 
+/// The value a cquery writes for an option set to nothing: Bazel renders each
+/// value with `String.valueOf` (`ConfigurationForOutput` in Bazel's source).
+const UNSET: &str = "null";
+
+/// One option a configuration sets, each part interned.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+pub struct OptionSetting {
+    /// The fragment options class stating the option.
+    pub fragment: Sym,
+    pub name: Sym,
+    /// `None` where the option is set to nothing.
+    pub value: Option<Sym>,
+}
+
+/// Every option one configuration sets, which is what tells two configurations
+/// apart. Both lists are sorted by handle, so two configurations of one
+/// [`Facets`] compare in one merge.
+#[derive(Clone, PartialEq, Eq, Debug, Default)]
+pub struct ConfigOptions {
+    /// Each fragment options class once, including one setting no option.
+    fragments: Vec<Sym>,
+    /// Unique by fragment and name.
+    settings: Vec<OptionSetting>,
+}
+
+impl ConfigOptions {
+    pub fn fragments(&self) -> &[Sym] {
+        &self.fragments
+    }
+
+    pub fn settings(&self) -> &[OptionSetting] {
+        &self.settings
+    }
+}
+
 /// The role a rule class plays, so that a filter can offer the tests, the
 /// aliases, or the build's own plumbing without naming each rule class that
 /// qualifies.
@@ -413,6 +448,10 @@ pub struct Facets {
     /// of](repo::evidenced_module).
     modules: HashSet<Sym>,
     configs: HashMap<ConfigRef, ConfigEntry>,
+    /// Absent for a configuration no input described with its options, which
+    /// an aquery never states and a cquery omits under
+    /// `--proto:include_configurations=false`.
+    config_options: HashMap<ConfigRef, ConfigOptions>,
     rule_classes: HashMap<RuleClassRef, RuleCategory>,
 }
 
@@ -579,13 +618,62 @@ impl Facets {
 
     /// The handle for the configuration `config` describes. `None` for one
     /// stating no checksum, which leaves it with no name a filter can hold on to.
+    /// Its options are recorded by the first description that states them.
     pub fn intern_configuration(&mut self, config: &Configuration) -> Option<ConfigRef> {
         if config.checksum.is_empty() {
             return None;
         }
         let mnemonic = (!config.mnemonic.is_empty()).then_some(config.mnemonic.as_str());
         let is_tool = if config.is_tool { Tri::Yes } else { Tri::No };
-        Some(self.intern_config(&config.checksum, mnemonic, is_tool))
+        let handle = self.intern_config(&config.checksum, mnemonic, is_tool);
+        if !config.fragment_options.is_empty() {
+            let fragments = config.fragment_options.iter().map(|fragment| {
+                let options = fragment.options.iter().map(|option| {
+                    let value = option.value.as_deref().filter(|&value| value != UNSET);
+                    (option.name(), value)
+                });
+                (fragment.name.as_str(), options)
+            });
+            self.record_config_options(handle, fragments);
+        }
+        Some(handle)
+    }
+
+    /// Records the options `config` sets, each fragment options class with the
+    /// names and values of its options, unless some are recorded already.
+    pub fn record_config_options<'a, F, O>(&mut self, config: ConfigRef, fragments: F)
+    where
+        F: IntoIterator<Item = (&'a str, O)>,
+        O: IntoIterator<Item = (&'a str, Option<&'a str>)>,
+    {
+        if self.config_options.contains_key(&config) {
+            return;
+        }
+        let fragments = fragments.into_iter();
+        let mut classes: Vec<Sym> = Vec::with_capacity(fragments.size_hint().0);
+        let mut settings: Vec<OptionSetting> = Vec::new();
+        for (class, options) in fragments {
+            let fragment = self.strings.intern(class);
+            classes.push(fragment);
+            let options = options.into_iter();
+            settings.reserve(options.size_hint().0);
+            for (name, value) in options {
+                settings.push(OptionSetting {
+                    fragment,
+                    name: self.strings.intern(name),
+                    value: value.map(|value| self.strings.intern(value)),
+                });
+            }
+        }
+        classes.sort_unstable();
+        classes.dedup();
+        settings.sort_unstable();
+        settings.dedup_by_key(|setting| (setting.fragment, setting.name));
+        let options = ConfigOptions {
+            fragments: classes,
+            settings,
+        };
+        self.config_options.insert(config, options);
     }
 
     /// The handle for the mnemonic `name` of an action.
@@ -636,6 +724,11 @@ impl Facets {
 
     pub fn config_entry(&self, config: ConfigRef) -> Option<&ConfigEntry> {
         self.configs.get(&config)
+    }
+
+    /// The options `config` sets, where an input stated them.
+    pub fn config_options(&self, config: ConfigRef) -> Option<&ConfigOptions> {
+        self.config_options.get(&config)
     }
 
     pub fn rule_category(&self, rule_class: RuleClassRef) -> Option<RuleCategory> {
@@ -1101,6 +1194,71 @@ mod tests {
         assert_eq!(facets.repos.len(), 1);
         assert_eq!(facets.configs.len(), 1);
         assert_eq!(facets.rule_classes.len(), 1);
+    }
+
+    /// The options a cquery states of a configuration, fragment by fragment,
+    /// which an aquery's description of the same configuration leaves out and
+    /// so does not displace.
+    #[test]
+    fn a_configuration_keeps_the_options_a_description_states() {
+        use bazel_query_proto::analysis::{FragmentOptions, Option as SetOption};
+
+        let setting = |name: &str, value: &str| SetOption {
+            name: Some(name.to_string()),
+            value: Some(value.to_string()),
+        };
+        let described = Configuration {
+            checksum: "ck1".to_string(),
+            mnemonic: "k8-fastbuild".to_string(),
+            fragment_options: vec![
+                FragmentOptions {
+                    name: "CoreOptions".to_string(),
+                    options: vec![
+                        setting("cpu", "k8"),
+                        setting("compilation_mode", "fastbuild"),
+                        setting("platform_suffix", ""),
+                        setting("run_under", "null"),
+                    ],
+                },
+                FragmentOptions {
+                    name: "TestOptions".to_string(),
+                    options: Vec::new(),
+                },
+            ],
+            ..Configuration::default()
+        };
+        let bare = Configuration {
+            fragment_options: Vec::new(),
+            ..described.clone()
+        };
+
+        let mut facets = Facets::default();
+        let config = facets.intern_configuration(&bare).expect("a checksum");
+        assert_eq!(facets.config_options(config), None);
+        assert_eq!(facets.intern_configuration(&described), Some(config));
+        facets.intern_configuration(&bare);
+
+        let options = facets.config_options(config).expect("the stated options");
+        let text = |sym: Sym| facets.strings().resolve(sym);
+        let mut fragments: Vec<&str> = options.fragments().iter().map(|&f| text(f)).collect();
+        fragments.sort_unstable();
+        assert_eq!(fragments, ["CoreOptions", "TestOptions"]);
+        let mut settings: Vec<(&str, Option<&str>)> = options
+            .settings()
+            .iter()
+            .map(|s| (text(s.name), s.value.map(text)))
+            .collect();
+        settings.sort_unstable();
+        assert_eq!(
+            settings,
+            [
+                ("compilation_mode", Some("fastbuild")),
+                ("cpu", Some("k8")),
+                ("platform_suffix", Some("")),
+                ("run_under", None),
+            ],
+            "an empty value is a value, and one Bazel writes as null is none"
+        );
     }
 
     /// An apparent name is one module's own word for a repository, which only
