@@ -1,3 +1,15 @@
+Offer a drag to the window system
+
+gpui carries a drag to its own views and never to the window system, so
+nothing outside the window a gesture started in hears of one, and
+nothing it draws is reachable past that window's edge. Give a window the
+requests to offer a gesture to the window system, to say which mime type
+it takes a drag under, and to hear what a drag the window system carries
+does; a backend that implements none of them takes no gesture and says
+so. Rasterizing a glyph goes with them: what a window system draws for a
+drag is an image, and gpui's text system is where the application's own
+faces are loaded.
+
 diff --git a/crates/gpui/src/interactive.rs b/crates/gpui/src/interactive.rs
 --- a/crates/gpui/src/interactive.rs
 +++ b/crates/gpui/src/interactive.rs

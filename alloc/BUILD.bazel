@@ -10,5 +10,8 @@ rust_library(
         "//trace/profile:__pkg__",
         "//ui/trace:__pkg__",
     ],
-    deps = ["@crates//:mimalloc"],
+    deps = [
+        "@crates//:libmimalloc-sys",
+        "@crates//:mimalloc",
+    ],
 )

@@ -4,11 +4,12 @@
 //! has a single absolute position that every level it appears in draws it at:
 //! zooming reveals and hides boxes, and never moves one.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
-use std::sync::{Arc, OnceLock};
+use std::collections::{BTreeMap, BTreeSet, BinaryHeap, HashMap, HashSet};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 
-use bviz_parallel::workers;
-use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
+use bviz_parallel::background_workers;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::graph::{Containment, EdgeKind, Graph, Node, id_span};
 use crate::intern::Id;
@@ -111,10 +112,7 @@ impl MapLayout {
 
     /// The view at `index`, deriving it if this is the first call for it.
     pub fn level(&self, index: usize) -> &LaidOut {
-        let level = match index.checked_sub(1) {
-            Some(finer) => &self.finer[finer].1,
-            None => &self.coarsest,
-        };
+        let level = self.level_at(index);
         level.view.get_or_init(|| {
             view_of(
                 &self.base,
@@ -125,6 +123,26 @@ impl MapLayout {
                 &self.expandable,
             )
         })
+    }
+
+    /// The view at `index`, where it has been derived.
+    pub fn derived(&self, index: usize) -> Option<&LaidOut> {
+        self.level_at(index).view.get()
+    }
+
+    /// The derived level nearest `index`, the coarser of two equally near;
+    /// `None` while no level is derived.
+    pub fn nearest_derived(&self, index: usize) -> Option<usize> {
+        (0..self.level_count())
+            .filter(|&level| self.derived(level).is_some())
+            .min_by_key(|&level| (level.abs_diff(index), level))
+    }
+
+    fn level_at(&self, index: usize) -> &Level {
+        match index.checked_sub(1) {
+            Some(finer) => &self.finer[finer].1,
+            None => &self.coarsest,
+        }
     }
 
     pub fn level_count(&self) -> usize {
@@ -209,42 +227,38 @@ impl Drawing {
 
 /// Lays out the whole containment forest with every container open: each frame
 /// (a container, or the top frame holding the roots) places only its own
-/// children, deepest frames first so a container is sized before the frame that
-/// places it.
+/// children, and is laid out as soon as the last container among them is sized.
 fn place(
     graph: &Graph,
     frames: &HashMap<Option<Id>, Vec<(Id, Id)>>,
     containment: &Containment,
 ) -> Drawing {
     let children_of = layout::children_by_parent(graph);
-    let label_of: HashMap<Id, &str> = graph
-        .nodes
-        .iter()
-        .map(|n| (n.id, n.label.as_str()))
-        .collect();
-    let no_edges: Vec<(Id, Id)> = Vec::new();
-    let edges_of = |frame: Option<Id>| frames.get(&frame).unwrap_or(&no_edges).as_slice();
-
-    let mut size = leaf_sizes(graph, &children_of);
-    let mut offset: HashMap<Id, (f64, f64)> = HashMap::with_capacity(graph.nodes.len());
-    for stratum in strata(&children_of, containment).iter_mut().rev() {
-        // Frames of one stratum share no boxes, so they place in any order; the
-        // sort only keeps that order the same from run to run.
-        stratum.sort_unstable();
-        let members = |c: &Id| -> Vec<Id> { children_of[c].iter().map(|n| n.id).collect() };
-        let laid = in_parallel(stratum, |c| {
-            lay_out_frame(&members(c), edges_of(Some(*c)), &size)
-        });
-        for (container, frame) in laid {
-            fit_container(
-                container,
-                label_of[&container],
-                frame,
-                &mut size,
-                &mut offset,
-            );
+    let span = id_span(graph);
+    let mut unsized_children: Vec<AtomicUsize> = Vec::with_capacity(span);
+    unsized_children.resize_with(span, AtomicUsize::default);
+    for &container in children_of.keys() {
+        if let Some(parent) = containment.parent(container) {
+            *unsized_children[parent.0 as usize].get_mut() += 1;
         }
     }
+    let mut fitted: Vec<OnceLock<Fitted>> = Vec::with_capacity(span);
+    fitted.resize_with(span, OnceLock::new);
+    let forest = Forest {
+        children_of: &children_of,
+        label_of: graph
+            .nodes
+            .iter()
+            .map(|n| (n.id, n.label.as_str()))
+            .collect(),
+        frames,
+        containment,
+        leaves: leaf_sizes(graph, &children_of),
+        rank: rank(&children_of, frames, containment, span),
+        unsized_children,
+        ready: Mutex::new(BinaryHeap::with_capacity(children_of.len())),
+        fitted,
+    };
 
     let mut roots: Vec<Id> = Vec::with_capacity(graph.nodes.len());
     roots.extend(
@@ -254,20 +268,132 @@ fn place(
             .filter(|n| n.parent.is_none())
             .map(|n| n.id),
     );
-    let top = on_worker(|| lay_out_frame(&roots, edges_of(None), &size));
-    offset.extend(top.offsets);
+    // Read before any frame is settled: settling counts `unsized_children` down
+    // and queues each container it brings to zero itself.
+    let innermost: Vec<Id> = children_of
+        .keys()
+        .copied()
+        .filter(|c| forest.unsized_children[c.0 as usize].load(Ordering::Relaxed) == 0)
+        .collect();
+    let top = on_worker(|| {
+        let forest = &forest;
+        rayon::scope(|scope| {
+            for &container in &innermost {
+                forest.queue(container, scope);
+            }
+        });
+        lay_out_frame(&roots, forest.edges_of(None), |id| forest.size(id))
+    });
 
+    let mut offset: FxHashMap<Id, (f64, f64)> =
+        FxHashMap::with_capacity_and_hasher(graph.nodes.len(), Default::default());
+    offset.extend(top.offsets);
+    for fitted in forest.fitted.iter().filter_map(OnceLock::get) {
+        offset.extend(fitted.offsets.iter().copied());
+    }
     Drawing {
-        placed: absolute(graph, containment, &size, &offset),
+        placed: absolute(graph, containment, |id| forest.size(id), &offset),
         width: top.width,
         height: top.height,
     }
 }
 
+/// By container id, the work that waits on its frame: its own and that of every
+/// frame above it, each counted by the boxes and edges it lays out. Frames with
+/// the most hanging on them are laid out first, so the chain of the slowest
+/// frames starts as early as it can.
+fn rank(
+    children_of: &HashMap<Id, Vec<&Node>>,
+    frames: &HashMap<Option<Id>, Vec<(Id, Id)>>,
+    containment: &Containment,
+    span: usize,
+) -> Vec<usize> {
+    let mut shallowest_first: Vec<Id> = children_of.keys().copied().collect();
+    shallowest_first.sort_unstable_by_key(|&c| containment.depth(c));
+    let mut rank = vec![0; span];
+    for container in shallowest_first {
+        let own = children_of[&container].len() + frames.get(&Some(container)).map_or(0, Vec::len);
+        let above = containment
+            .parent(container)
+            .map_or(0, |parent| rank[parent.0 as usize]);
+        rank[container.0 as usize] = own + above;
+    }
+    rank
+}
+
+/// The containment forest as [`place`] lays it out, frame by frame from the
+/// innermost containers out.
+struct Forest<'a> {
+    children_of: &'a HashMap<Id, Vec<&'a Node>>,
+    label_of: FxHashMap<Id, &'a str>,
+    frames: &'a HashMap<Option<Id>, Vec<(Id, Id)>>,
+    containment: &'a Containment,
+    leaves: FxHashMap<Id, (f64, f64)>,
+    rank: Vec<usize>,
+    /// By container id, how many of its children are containers not yet
+    /// fitted: the child that brings it to zero queues the container.
+    unsized_children: Vec<AtomicUsize>,
+    /// The containers whose children are all sized, by rank. Each is pushed
+    /// together with one job that pops the highest-ranked, so the heap always
+    /// holds a container for the job popping it.
+    ready: Mutex<BinaryHeap<(usize, Id)>>,
+    /// By container id, set once its frame is laid out.
+    fitted: Vec<OnceLock<Fitted>>,
+}
+
+impl<'a> Forest<'a> {
+    fn edges_of(&self, frame: Option<Id>) -> &'a [(Id, Id)] {
+        self.frames.get(&frame).map_or(&[], Vec::as_slice)
+    }
+
+    /// A node's box size, which a container has once its frame is laid out.
+    fn size(&self, id: Id) -> (f64, f64) {
+        match self.leaves.get(&id) {
+            Some(&size) => size,
+            None => {
+                self.fitted[id.0 as usize]
+                    .get()
+                    .expect("a frame is laid out only once the containers in it are fitted")
+                    .size
+            }
+        }
+    }
+
+    fn queue<'s>(&'s self, container: Id, scope: &rayon::Scope<'s>) {
+        self.ready_heap()
+            .push((self.rank[container.0 as usize], container));
+        scope.spawn(move |scope| self.settle_next(scope));
+    }
+
+    /// Lays out the highest-ranked ready frame and sizes its container around
+    /// it, then queues the frame holding it once that waits on nothing else.
+    fn settle_next<'s>(&'s self, scope: &rayon::Scope<'s>) {
+        let (_, container) = self
+            .ready_heap()
+            .pop()
+            .expect("every job is spawned beside a queued container");
+        let members: Vec<Id> = self.children_of[&container].iter().map(|n| n.id).collect();
+        let frame = lay_out_frame(&members, self.edges_of(Some(container)), |id| self.size(id));
+        self.fitted[container.0 as usize]
+            .get_or_init(|| fit_container(self.label_of[&container], frame));
+        let Some(parent) = self.containment.parent(container) else {
+            return;
+        };
+        if self.unsized_children[parent.0 as usize].fetch_sub(1, Ordering::AcqRel) == 1 {
+            self.queue(parent, scope);
+        }
+    }
+
+    fn ready_heap(&self) -> MutexGuard<'_, BinaryHeap<(usize, Id)>> {
+        self.ready.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
 /// Box sizes for the leaves, whose extent follows from their label alone and so
 /// is known before any frame is laid out.
-fn leaf_sizes(graph: &Graph, children_of: &HashMap<Id, Vec<&Node>>) -> HashMap<Id, (f64, f64)> {
-    let mut size: HashMap<Id, (f64, f64)> = HashMap::with_capacity(graph.nodes.len());
+fn leaf_sizes(graph: &Graph, children_of: &HashMap<Id, Vec<&Node>>) -> FxHashMap<Id, (f64, f64)> {
+    let mut size: FxHashMap<Id, (f64, f64)> =
+        FxHashMap::with_capacity_and_hasher(graph.nodes.len(), Default::default());
     for node in &graph.nodes {
         if !children_of.contains_key(&node.id) {
             size.insert(node.id, (layout::leaf_width(&node.label), LEAF_HEIGHT));
@@ -276,39 +402,27 @@ fn leaf_sizes(graph: &Graph, children_of: &HashMap<Id, Vec<&Node>>) -> HashMap<I
     size
 }
 
-/// The containers at each containment depth, so a whole stratum can be laid out
-/// once every frame under it has been.
-fn strata(children_of: &HashMap<Id, Vec<&Node>>, containment: &Containment) -> Vec<Vec<Id>> {
-    let deepest = children_of
-        .keys()
-        .map(|&c| containment.depth(c) as usize)
-        .max();
-    let mut strata: Vec<Vec<Id>> = vec![Vec::new(); deepest.map_or(0, |d| d + 1)];
-    for &container in children_of.keys() {
-        strata[containment.depth(container) as usize].push(container);
-    }
-    strata
+/// A container's box, sized around the frame holding its children, and where
+/// each of them sits within it.
+struct Fitted {
+    size: (f64, f64),
+    offsets: Vec<(Id, (f64, f64))>,
 }
 
-/// Sizes `container` around the frame holding its children and settles where
-/// each of them sits within it. The box holds its title even where that is wider
-/// than the frame, which then sits centred in the width the title asks for.
-fn fit_container(
-    container: Id,
-    label: &str,
-    frame: Frame,
-    size: &mut HashMap<Id, (f64, f64)>,
-    offset: &mut HashMap<Id, (f64, f64)>,
-) {
+/// Sizes a container titled `label` around the frame holding its children. The
+/// box holds its title even where that is wider than the frame, which then sits
+/// centred in the width the title asks for.
+fn fit_container(label: &str, frame: Frame) -> Fitted {
     let width = (frame.width + 2.0 * BORDER).max(layout::title_width(label));
     let inset = (width - frame.width) / 2.0;
-    size.insert(container, (width, frame.height + LABEL_BAND + BORDER));
-    offset.extend(
-        frame
+    Fitted {
+        size: (width, frame.height + LABEL_BAND + BORDER),
+        offsets: frame
             .offsets
             .into_iter()
-            .map(|(id, (x, y))| (id, (x + inset, y + LABEL_BAND))),
-    );
+            .map(|(id, (x, y))| (id, (x + inset, y + LABEL_BAND)))
+            .collect(),
+    }
 }
 
 /// Resolves every node's offset within its own frame against the frames holding
@@ -316,8 +430,8 @@ fn fit_container(
 fn absolute(
     graph: &Graph,
     containment: &Containment,
-    size: &HashMap<Id, (f64, f64)>,
-    offset: &HashMap<Id, (f64, f64)>,
+    size: impl Fn(Id) -> (f64, f64),
+    offset: &FxHashMap<Id, (f64, f64)>,
 ) -> Vec<Option<Placed>> {
     let mut by_depth: Vec<&Node> = graph.nodes.iter().collect();
     by_depth.sort_by_key(|n| containment.depth(n.id));
@@ -330,7 +444,7 @@ fn absolute(
             Some(outer) => (outer.x + dx, outer.y + dy),
             None => (dx, dy),
         };
-        let (width, height) = size[&node.id];
+        let (width, height) = size(node.id);
         placed[node.id.0 as usize] = Some(Placed {
             x,
             y,
@@ -349,11 +463,11 @@ struct Frame {
     height: f64,
 }
 
-fn lay_out_frame(members: &[Id], edges: &[(Id, Id)], size: &HashMap<Id, (f64, f64)>) -> Frame {
+fn lay_out_frame(members: &[Id], edges: &[(Id, Id)], size: impl Fn(Id) -> (f64, f64)) -> Frame {
     let boxes: Vec<(Id, f64, f64)> = members
         .iter()
         .map(|&id| {
-            let (width, height) = size[&id];
+            let (width, height) = size(id);
             (id, width, height)
         })
         .collect();
@@ -365,16 +479,8 @@ fn lay_out_frame(members: &[Id], edges: &[(Id, Id)], size: &HashMap<Id, (f64, f6
     }
 }
 
-/// Applies `job` to every id, spreading the work over the machine's cores and
-/// returning each result beside the id it came from, in the order given. Frame
-/// costs run orders of magnitude apart, so the ids are stolen rather than dealt
-/// out in equal shares.
-fn in_parallel<T: Send>(ids: &[Id], job: impl Fn(&Id) -> T + Send + Sync) -> Vec<(Id, T)> {
-    workers().install(|| ids.par_iter().map(|&id| (id, job(&id))).collect())
-}
-
 fn on_worker<T: Send>(job: impl FnOnce() -> T + Send) -> T {
-    workers().install(job)
+    background_workers().install(job)
 }
 
 /// The edges each frame lays out: an edge between two nodes becomes one edge
@@ -439,7 +545,8 @@ fn view_of(
     expandable: &HashSet<Id>,
 ) -> LaidOut {
     let visible = lod::collapse(base, open);
-    let mut connected: HashSet<(Id, Id)> = HashSet::with_capacity(visible.edges.len());
+    let mut connected: FxHashSet<(Id, Id)> =
+        FxHashSet::with_capacity_and_hasher(visible.edges.len(), Default::default());
     connected.extend(visible.edges.iter().map(|e| (e.from, e.to)));
     let boxes = boxes(&visible, drawing, containment);
     let drawn = drawn_edges(visible, reduced, open, expandable);
@@ -474,7 +581,8 @@ fn drawn_edges(
 
 /// Reads each visible node's global box.
 fn boxes(visible: &Graph, drawing: &Drawing, containment: &Containment) -> Vec<Box> {
-    let mut parents: HashSet<Id> = HashSet::with_capacity(visible.nodes.len());
+    let mut parents: FxHashSet<Id> =
+        FxHashSet::with_capacity_and_hasher(visible.nodes.len(), Default::default());
     parents.extend(visible.nodes.iter().filter_map(|n| n.parent));
     let mut boxes: Vec<(u32, Box)> = Vec::with_capacity(visible.nodes.len());
     for node in &visible.nodes {
@@ -748,6 +856,32 @@ mod tests {
             map.coarsest.view.get().is_none(),
             "drawing one level derived another",
         );
+    }
+
+    /// Asking whether a level is derived derives nothing, so a caller that must
+    /// not pay for the fold can look before it draws.
+    #[test]
+    fn a_level_is_derived_only_once_asked_for() {
+        let (map, _) = built();
+        assert!(map.derived(1).is_none());
+        let first: *const LaidOut = map.level(1);
+        assert!(map.derived(1).is_some_and(|view| std::ptr::eq(view, first)));
+        assert!(map.derived(0).is_none());
+    }
+
+    #[test]
+    fn a_level_yet_to_be_derived_gives_way_to_the_nearest_derived_one() {
+        let (map, _) = built();
+        assert!(map.level_count() >= 3, "levels on either side of one");
+        assert_eq!(map.nearest_derived(1), None);
+
+        map.level(0);
+        assert_eq!(map.nearest_derived(map.level_count() - 1), Some(0));
+
+        map.level(2);
+        assert_eq!(map.nearest_derived(1), Some(0), "the coarser of a tie");
+        assert_eq!(map.nearest_derived(map.level_count() - 1), Some(2));
+        assert_eq!(map.nearest_derived(2), Some(2));
     }
 
     #[test]

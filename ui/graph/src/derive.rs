@@ -10,8 +10,9 @@
 //! selection and the layout's pinning anchors go on naming what they named and
 //! carry across a filter change.
 
+use crate::framing::Frame;
 use crate::mode::LayoutMode;
-use crate::model::{Loaded, OPENS_REDUCED, Shared, Source};
+use crate::model::{Loaded, OPENS_REDUCED, Placement, Shared, Source};
 use crate::{GraphPanel, MARGIN, build};
 use bviz_graph_layout::graph::Graph;
 use bviz_graph_layout::lod::{DEFAULT_MAX_EDGES, DEFAULT_MAX_NODES, Overflow};
@@ -19,17 +20,15 @@ use bviz_graph_layout::select::{Filter, Verdict};
 use bviz_graph_layout::{Id, LaidOut, MapLayout, Names};
 use bviz_ui_components::load_in_background;
 use gpui::{Context, Task};
+use rustc_hash::FxHashSet;
 use std::collections::HashSet;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, OnceLock};
 
-/// Derives every view of `map` off the UI thread, coarsest first.
-///
-/// A map derives a view the first time a camera calls for one, which is what
-/// keeps the wait before the first frame to the single view that frame draws.
-/// The reader reaches the rest by zooming, and a view derived under that gesture
-/// would hold the frame it was made for; deriving them in the background instead
-/// leaves the zoom nothing to wait on. A view already derived costs nothing to
-/// ask for again, so this races the camera harmlessly.
+/// Derives every view of `map` off the UI thread, coarsest first, so a zoom
+/// finds the level it calls for ready rather than drawing a neighbour of it
+/// while it derives. A view already derived costs nothing to ask for again, so
+/// this races [`derive_view`] harmlessly.
 pub(crate) fn derive_levels<V: 'static>(map: Arc<MapLayout>, cx: &mut Context<V>) {
     cx.background_executor()
         .spawn(async move {
@@ -57,6 +56,14 @@ pub(crate) enum ViewKey {
     Map { drawing: u64, level: usize },
 }
 
+impl ViewKey {
+    fn drawing(self) -> u64 {
+        match self {
+            Self::Layered(drawing) | Self::Map { drawing, .. } => drawing,
+        }
+    }
+}
+
 /// A share in the layout a mode draws, cheap to clone into a `'static` paint
 /// closure. A map resolves to a view only once the camera is known, so the level
 /// a frame draws is picked at the same scale it paints at.
@@ -67,11 +74,39 @@ pub(crate) enum Drawn {
 }
 
 impl Drawn {
-    /// The view drawn at `zoom` screen pixels per layout unit.
-    pub(crate) fn view(&self, zoom: f32) -> &LaidOut {
+    /// The view a frame at `zoom` screen pixels per layout unit draws: the map
+    /// level that zoom calls for or, while that one is yet to be derived, the
+    /// derived level nearest it. Absent while a map has no level derived:
+    /// deriving one costs a fold of the whole graph, which [`derive_view`]
+    /// leaves to a background thread.
+    pub(crate) fn view(&self, zoom: f32) -> Option<&LaidOut> {
+        match self {
+            Self::Layered { view, .. } => Some(view),
+            Self::Map { map, .. } => map.derived(shown_level(map, zoom)),
+        }
+    }
+
+    /// The view a frame at `zoom` calls for, deriving a map's level where it has
+    /// yet to be.
+    fn derive_view(&self, zoom: f32) -> &LaidOut {
         match self {
             Self::Layered { view, .. } => view,
             Self::Map { map, .. } => map.level(map.level_for_scale(zoom)),
+        }
+    }
+
+    /// Identifies the view a frame at `zoom` calls for, where that is a map's
+    /// level yet to be derived.
+    fn underived(&self, zoom: f32) -> Option<ViewKey> {
+        match self {
+            Self::Layered { .. } => None,
+            Self::Map { map, drawing } => {
+                let level = map.level_for_scale(zoom);
+                map.derived(level).is_none().then_some(ViewKey::Map {
+                    drawing: *drawing,
+                    level,
+                })
+            }
         }
     }
 
@@ -81,7 +116,7 @@ impl Drawn {
             Self::Layered { drawing, .. } => ViewKey::Layered(*drawing),
             Self::Map { map, drawing } => ViewKey::Map {
                 drawing: *drawing,
-                level: map.level_for_scale(zoom),
+                level: shown_level(map, zoom),
             },
         }
     }
@@ -92,7 +127,7 @@ impl Drawn {
         match self {
             Self::Layered { .. } => None,
             Self::Map { map, .. } => Some(Level {
-                index: map.level_for_scale(zoom),
+                index: shown_level(map, zoom),
                 count: map.level_count(),
             }),
         }
@@ -111,6 +146,12 @@ impl Drawn {
             height as f32 + 2. * MARGIN as f32,
         )
     }
+}
+
+/// The level of `map` a frame at `zoom` draws, which [`Drawn::view`] describes.
+fn shown_level(map: &MapLayout, zoom: f32) -> usize {
+    let wanted = map.level_for_scale(zoom);
+    map.nearest_derived(wanted).unwrap_or(wanted)
 }
 
 /// The boxes a mode's layout lets the user open or close, cheap to clone into a
@@ -149,7 +190,7 @@ struct Slice {
     reduced: Arc<Graph>,
     /// The restriction placed where the document's map places it, so filtering
     /// leaves holes rather than moving what survives.
-    map: Arc<MapLayout>,
+    map: SliceMap,
     containers: Arc<HashSet<Id>>,
     /// The nodes the filter draws as no part of what it selects, which the
     /// drawing fades rather than leaving out.
@@ -159,19 +200,77 @@ struct Slice {
     names: Names,
 }
 
+/// The map a [`Slice`] draws: the document's placement over the slice's graph.
+#[derive(Clone)]
+enum SliceMap {
+    /// The document's own, for a slice holding the whole graph, whose levels
+    /// the document derives.
+    Whole(Placement),
+    Restricted(RestrictedMap),
+}
+
+/// A slice's graph placed where the document places it, made once the
+/// document's placement lands. Every clone shares the one map, whose levels the
+/// panel derives once.
+#[derive(Clone)]
+struct RestrictedMap {
+    placement: Placement,
+    base: Arc<Graph>,
+    reduced: Arc<Graph>,
+    map: Arc<OnceLock<Arc<MapLayout>>>,
+    /// Whether the levels of `map` have been asked for.
+    levels_asked: Arc<AtomicBool>,
+}
+
+impl RestrictedMap {
+    /// The map, absent until the document's placement lands.
+    fn placed(&self) -> Option<&Arc<MapLayout>> {
+        let whole = self.placement.placed()?;
+        Some(self.map.get_or_init(|| {
+            Arc::new(whole.restricted(Arc::clone(&self.base), Arc::clone(&self.reduced)))
+        }))
+    }
+
+    /// Derives the map's levels off the UI thread, the first time it is asked
+    /// once the document's placement has landed.
+    fn derive_levels<V: 'static>(&self, cx: &mut Context<V>) {
+        if let Some(map) = self.placed()
+            && !self.levels_asked.swap(true, Ordering::Relaxed)
+        {
+            derive_levels(Arc::clone(map), cx);
+        }
+    }
+}
+
 impl Slice {
     /// The whole graph, which is what `filter` leaves where it hides nothing; it
-    /// is already placed and reduced, so such a filter costs nothing to draw
-    /// through.
+    /// is already reduced and placed with the document, so such a filter costs
+    /// nothing to draw through.
     fn whole(shared: &Shared, filter: Filter) -> Self {
         Slice {
             filter,
             base: Arc::clone(&shared.base),
             reduced: Arc::clone(&shared.reduced_base),
-            map: Arc::clone(&shared.map),
+            map: SliceMap::Whole(shared.map.clone()),
             containers: Arc::clone(&shared.containers),
             faded: Arc::new(HashSet::new()),
             names: shared.names.clone(),
+        }
+    }
+
+    /// The map this draws, absent until the document's placement lands.
+    fn map(&self) -> Option<&Arc<MapLayout>> {
+        match &self.map {
+            SliceMap::Whole(placement) => placement.placed(),
+            SliceMap::Restricted(restricted) => restricted.placed(),
+        }
+    }
+
+    /// The map this draws where it restricts the document's.
+    fn restricted_map(&self) -> Option<&RestrictedMap> {
+        match &self.map {
+            SliceMap::Whole(_) => None,
+            SliceMap::Restricted(restricted) => Some(restricted),
         }
     }
 }
@@ -189,9 +288,34 @@ struct Landed {
     /// Absent where the derivation drew on the restriction the panel already
     /// held, which leaves the expansion and the selection as they were.
     restricted: Option<Restricted>,
-    /// The layered drawing, absent where this derivation laid none out — a
-    /// panel drawing a map that holds no layered drawing to keep current.
-    layered: Option<Arc<LaidOut>>,
+    layered: Relaid,
+}
+
+/// What a derivation did about the layered drawing.
+enum Relaid {
+    /// It laid none out: a panel drawing a map holds none to keep current.
+    Nothing,
+    /// It would have laid out what the panel's drawing is laid out from, so it
+    /// keeps that drawing as its own.
+    Held,
+    Fresh(Layered),
+}
+
+/// A layered drawing and what it was laid out from.
+#[derive(Clone)]
+struct Layered {
+    view: Arc<LaidOut>,
+    base: Arc<Graph>,
+    expanded: HashSet<Id>,
+    reduced: bool,
+}
+
+impl Layered {
+    /// Whether laying `base` out at `expanded`, over the reduced edge set where
+    /// `reduced`, is what drew this.
+    fn draws(&self, base: &Arc<Graph>, expanded: &HashSet<Id>, reduced: bool) -> bool {
+        Arc::ptr_eq(&self.base, base) && self.expanded == *expanded && self.reduced == reduced
+    }
 }
 
 /// What the derivation in flight will produce.
@@ -217,8 +341,8 @@ struct Adopted {
     restriction: Option<Restriction>,
     /// Whether the camera is to be moved onto what the derivation left drawn.
     frame: bool,
-    /// The layered drawing to ease the one it replaces onto, where this
-    /// derivation laid one out.
+    /// The layered drawing to settle onto, where this derivation laid one out
+    /// or kept the one held.
     landing: Option<LayoutLanded>,
 }
 
@@ -228,8 +352,9 @@ struct Restriction {
     /// The nodes the filter took out of the graph, which nothing keyed on a
     /// node — an expansion, a selection — can go on naming.
     dropped: HashSet<Id>,
-    /// The graph that leaves, placed; no camera has called for a level of it.
-    map: Arc<MapLayout>,
+    /// The map of the graph that leaves, where that restricts the document's;
+    /// no camera has called for a level of it.
+    map: Option<RestrictedMap>,
 }
 
 /// What a panel draws the document's graph as, and how far the derivation of it
@@ -245,7 +370,7 @@ pub(crate) struct Derived {
     reduced: bool,
     /// Absent until the document's read lands.
     slice: Option<Slice>,
-    layered: Option<Arc<LaidOut>>,
+    layered: Option<Layered>,
     /// The size of the view the panel last restricted to where it is past the
     /// caps that bound it, absent where it fits.
     over_budget: Option<Overflow>,
@@ -261,6 +386,9 @@ pub(crate) struct Derived {
     frame_on_landing: bool,
     /// The derivation in flight, held so that it is not cancelled.
     _work: Task<()>,
+    /// The current drawing's views a frame found underived, each with the
+    /// background derivation of it, which redraws the canvas once it lands.
+    views_asked: Vec<(ViewKey, Task<()>)>,
 }
 
 impl Derived {
@@ -277,6 +405,7 @@ impl Derived {
             drawings: 0,
             frame_on_landing: false,
             _work: Task::ready(()),
+            views_asked: Vec::new(),
         }
     }
 
@@ -304,12 +433,12 @@ impl Derived {
     pub(crate) fn drawn(&self, mode: LayoutMode) -> Option<Drawn> {
         let slice = self.slice.as_ref()?;
         match mode {
-            LayoutMode::Map => Some(Drawn::Map {
-                map: Arc::clone(&slice.map),
+            LayoutMode::Map => slice.map().map(|map| Drawn::Map {
+                map: Arc::clone(map),
                 drawing: self.drawings,
             }),
-            LayoutMode::Layered => self.layered.as_ref().map(|view| Drawn::Layered {
-                view: Arc::clone(view),
+            LayoutMode::Layered => self.layered.as_ref().map(|layered| Drawn::Layered {
+                view: Arc::clone(&layered.view),
                 drawing: self.drawings,
             }),
         }
@@ -349,6 +478,18 @@ impl Derived {
         self.in_flight.is_some()
     }
 
+    /// Whether what `mode` draws is on its way, so a mode selected meanwhile
+    /// waits on it: the derivation in flight will produce it, or it is a map,
+    /// which the document's placement lands.
+    fn underway(&self, mode: LayoutMode) -> bool {
+        self.deriving_for(mode)
+            || (mode == LayoutMode::Map
+                && self
+                    .slice
+                    .as_ref()
+                    .is_some_and(|slice| slice.map().is_none()))
+    }
+
     /// Whether the derivation in flight will produce what `mode` draws, by which
     /// a mode selected while one runs waits on it only where it will answer for
     /// that mode.
@@ -357,6 +498,16 @@ impl Derived {
             LayoutMode::Map => true,
             LayoutMode::Layered => in_flight.lays_out,
         })
+    }
+
+    /// The map of the restriction the panel draws through its filter, where that
+    /// restricts the document's; absent too where a derivation restricting
+    /// afresh will replace it.
+    fn restricted_map_drawn(&self) -> Option<&RestrictedMap> {
+        if self.restricting() {
+            return None;
+        }
+        self.slice.as_ref()?.restricted_map()
     }
 
     /// Whether a derivation has to restrict the document's graph afresh rather
@@ -382,18 +533,27 @@ impl Derived {
             self.over_budget = restricted.over_budget;
             Restriction {
                 dropped: restricted.dropped,
-                map: Arc::clone(&landed.slice.map),
+                map: landed.slice.restricted_map().cloned(),
             }
         });
         let frame = std::mem::take(&mut self.frame_on_landing) && restriction.is_some();
         self.slice = Some(landed.slice);
-        let replaced = std::mem::replace(&mut self.layered, landed.layered.clone());
+        let landing = match landed.layered {
+            Relaid::Nothing => None,
+            Relaid::Held => self.layered.as_ref().map(|held| LayoutLanded {
+                replaced: None,
+                current: Arc::clone(&held.view),
+            }),
+            Relaid::Fresh(layered) => {
+                let current = Arc::clone(&layered.view);
+                let replaced = self.layered.replace(layered).map(|held| held.view);
+                Some(LayoutLanded { replaced, current })
+            }
+        };
         Adopted {
             restriction,
             frame,
-            landing: landed
-                .layered
-                .map(|current| LayoutLanded { replaced, current }),
+            landing,
         }
     }
 }
@@ -401,16 +561,18 @@ impl Derived {
 /// The status line describing what a panel draws: what the read left where it
 /// left no graph, and the size of the drawing `drawn` otherwise, followed by
 /// `over_budget` where the panel's view is past the caps on an opening view.
+/// `drawn` pairs the drawing with the zoom its view is resolved at, where one is.
 pub(crate) fn status(
     source: &Source,
-    drawn: Option<Drawn>,
-    zoom: f32,
+    drawn: Option<(Drawn, f32)>,
     over_budget: Option<Overflow>,
 ) -> String {
-    source.status("No graph", |_| match drawn {
+    let viewed = drawn
+        .as_ref()
+        .and_then(|(drawn, zoom)| Some((drawn, *zoom, drawn.view(*zoom)?)));
+    source.status("No graph", |_| match viewed {
         None => "Laying out…".into(),
-        Some(drawn) => {
-            let g = drawn.view(zoom);
+        Some((drawn, zoom, g)) => {
             let level = drawn
                 .level(zoom)
                 .map(|l| format!("level {}/{} · ", l.index + 1, l.count))
@@ -455,9 +617,45 @@ pub(crate) fn opened(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
 /// Derives what `mode` draws where the panel has no drawing of it yet and no
 /// derivation that will produce one is already running.
 pub(crate) fn ensure_layout(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
-    if view.derived.drawn(view.mode).is_none() && !view.derived.deriving_for(view.mode) {
+    if view.derived.drawn(view.mode).is_none() && !view.derived.underway(view.mode) {
         request(view, cx);
     }
+}
+
+/// Derives the levels of the map the panel's restriction draws, now the
+/// document's placement it is made from has landed.
+pub(crate) fn placed(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
+    if let Some(restricted) = view.derived.restricted_map_drawn() {
+        restricted.derive_levels(cx);
+    }
+}
+
+/// Derives the view a frame of `drawn` at `zoom` calls for off the UI thread
+/// where it has yet to be, and redraws the canvas once it lands. A view already
+/// asked for is left to the derivation under way.
+pub(crate) fn derive_view(
+    view: &mut GraphPanel,
+    drawn: &Drawn,
+    zoom: f32,
+    cx: &mut Context<GraphPanel>,
+) {
+    let Some(key) = drawn.underived(zoom) else {
+        return;
+    };
+    let asked = &mut view.derived.views_asked;
+    asked.retain(|(asked, _)| asked.drawing() == key.drawing());
+    if asked.iter().any(|(asked, _)| *asked == key) {
+        return;
+    }
+    let drawn = drawn.clone();
+    let work = load_in_background(
+        cx,
+        move || {
+            drawn.derive_view(zoom);
+        },
+        |view: &mut GraphPanel, (), cx| view.invalidate_canvas(cx),
+    );
+    view.derived.views_asked.push((key, work));
 }
 
 /// Flips whether `id` is expanded and lays the graph out at the new expansion.
@@ -479,7 +677,7 @@ pub(crate) fn toggle_reduce(view: &mut GraphPanel, cx: &mut Context<GraphPanel>)
 ///
 /// The view keeps what it can of where the reader had it: the expansion as far
 /// as the surviving nodes and the budget allow, the camera — save where
-/// [`crate::framing::drawing_escapes_the_view`] finds nothing left under it —
+/// what survives leaves nothing under it ([`crate::framing::Frame::Escaping`]) —
 /// the edge set and, the panel's own to keep, the selection. The drawing on
 /// screen stays until the one this asks for lands.
 pub(crate) fn set_filter(view: &mut GraphPanel, filter: Filter, cx: &mut Context<GraphPanel>) {
@@ -522,6 +720,12 @@ fn request(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
     // over a graph the filter has moved out from under it; a map needs none.
     let lays_out =
         !restricting || view.mode == LayoutMode::Layered || view.derived.layered.is_some();
+    // A restriction's map derives the level on screen with the rest of the
+    // restriction, so adopting and painting it on the UI thread find it ready.
+    let map_zoom = view
+        .drawn()
+        .filter(|drawn| matches!(drawn, Drawn::Map { .. }))
+        .and_then(|drawn| view.view_zoom(&drawn));
     let derived = &mut view.derived;
     derived.in_flight = Some(InFlight { lays_out });
     let (filter, reduced) = (derived.filter.clone(), derived.reduced);
@@ -531,10 +735,21 @@ fn request(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
     derived._work = load_in_background(
         cx,
         move || {
+            let keeps_held = |base: &Arc<Graph>, expanded: &HashSet<Id>| {
+                held.as_ref()
+                    .is_some_and(|held| held.draws(base, expanded, reduced))
+            };
             let (mut slice, restricted) = match restricting {
                 true => {
-                    let (slice, restricted) = restrict(&shared, &filter, &expanded, reduced);
-                    (slice, Some(restricted))
+                    let (mut next, restricted) = restrict(&shared, &filter, &expanded, reduced);
+                    if let (Some(zoom), Some(map)) = (map_zoom, next.map()) {
+                        map.level(map.level_for_scale(zoom));
+                    }
+                    // The drawing kept names the groups its layout minted.
+                    if keeps_held(&next.base, &restricted.expanded) {
+                        next.names = slice.names;
+                    }
+                    (next, Some(restricted))
                 }
                 false => (slice, None),
             };
@@ -542,16 +757,23 @@ fn request(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
                 Some(restricted) => &restricted.expanded,
                 None => &expanded,
             };
-            let layered = lays_out.then(|| {
-                Arc::new(build::relayout(
-                    &slice.base,
-                    &slice.reduced,
-                    expanded,
-                    &mut slice.names,
+            let layered = match lays_out {
+                false => Relaid::Nothing,
+                true if keeps_held(&slice.base, expanded) => Relaid::Held,
+                true => Relaid::Fresh(Layered {
+                    view: Arc::new(build::relayout(
+                        &slice.base,
+                        &slice.reduced,
+                        expanded,
+                        &mut slice.names,
+                        reduced,
+                        held.as_ref().map(|held| &held.view.anchors),
+                    )),
+                    base: Arc::clone(&slice.base),
+                    expanded: expanded.clone(),
                     reduced,
-                    held.as_deref().map(|held| &held.anchors),
-                ))
-            });
+                }),
+            };
             Landed {
                 slice,
                 restricted,
@@ -567,10 +789,14 @@ fn request(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
             let restricted = restriction.is_some();
             if let Some(restriction) = restriction {
                 view.selection.forget(&restriction.dropped);
-                derive_levels(restriction.map, cx);
+                if let Some(map) = restriction.map {
+                    map.derive_levels(cx);
+                }
             }
-            if frame || (restricted && crate::framing::drawing_escapes_the_view(view)) {
-                crate::framing::frame_drawing(view);
+            if frame {
+                view.framing.request_frame(Frame::Drawing);
+            } else if restricted {
+                view.framing.request_frame(Frame::Escaping);
             }
             if let Some(landing) = landing {
                 view.settle_onto(&landing, cx);
@@ -583,8 +809,8 @@ fn request(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
 /// The graph `filter` leaves of `shared`'s, with `expanded` held to what
 /// survives it and to the caps that bound a legible drawing.
 ///
-/// A filter that hides nothing leaves the shared graph itself, which is already
-/// placed, reduced and sized.
+/// A filter that hides nothing leaves the shared graph itself, with the
+/// reduction, containers and placement the document holds for it.
 fn restrict(
     shared: &Shared,
     filter: &Filter,
@@ -595,7 +821,7 @@ fn restrict(
     // Every node lands in `keep` or in `dropped`, and `faded` is a part of what
     // `keep` holds, so the node count bounds all three.
     let nodes = shared.base.nodes.len();
-    let mut keep: HashSet<Id> = HashSet::with_capacity(nodes);
+    let mut keep: FxHashSet<Id> = FxHashSet::with_capacity_and_hasher(nodes, Default::default());
     let mut dropped: HashSet<Id> = HashSet::with_capacity(nodes);
     let mut faded: HashSet<Id> = HashSet::with_capacity(nodes);
     for node in &shared.base.nodes {
@@ -624,11 +850,13 @@ fn restrict(
             let (base, reduction) = (Arc::new(base), Arc::new(reduction));
             Slice {
                 filter: filter.clone(),
-                map: Arc::new(
-                    shared
-                        .map
-                        .restricted(Arc::clone(&base), Arc::clone(&reduction)),
-                ),
+                map: SliceMap::Restricted(RestrictedMap {
+                    placement: shared.map.clone(),
+                    base: Arc::clone(&base),
+                    reduced: Arc::clone(&reduction),
+                    map: Arc::default(),
+                    levels_asked: Arc::default(),
+                }),
                 base,
                 reduced: reduction,
                 containers,
@@ -688,10 +916,17 @@ mod tests {
     use bviz_graph_layout::select::{Predicate, Rule, Values, Visibility};
     use bviz_graph_layout::{EdgeKind, Facets, Kind};
 
+    /// [`document_placing`] with its map landed.
+    fn document() -> Loaded {
+        let (loaded, land) = document_placing();
+        land();
+        loaded
+    }
+
     /// Two packages, each holding a target with two actions under it, the
     /// actions wired in a chain, prepared the way a read prepares a document's
-    /// graph.
-    fn document() -> Loaded {
+    /// graph, and what lands the map placing it, which has yet to land.
+    fn document_placing() -> (Loaded, impl FnOnce()) {
         let mut names = Names::default();
         let mut base = Graph::new();
         let mut actions: Vec<Id> = Vec::new();
@@ -715,11 +950,12 @@ mod tests {
         let facets = Arc::new(Facets::default());
         let labels = Arc::new(LabelIndex::of(&base, &names, &facets));
         let map = bviz_graph_layout::map_layout(Arc::clone(&base), Arc::clone(&reduced_base));
-        Loaded {
+        let (placement, landing) = Placement::pending();
+        let loaded = Loaded {
             shared: Shared {
                 base,
                 reduced_base,
-                map: Arc::new(map),
+                map: placement,
                 names,
                 facets,
                 labels,
@@ -730,7 +966,8 @@ mod tests {
                 expanded: HashSet::new(),
                 over_budget: None,
             },
-        }
+        };
+        (loaded, move || landing.land(Arc::new(map)))
     }
 
     fn id(loaded: &Loaded, name: &str) -> Id {
@@ -762,7 +999,8 @@ mod tests {
         }
     }
 
-    fn finest(map: &MapLayout) -> &LaidOut {
+    fn finest(map: Option<&Arc<MapLayout>>) -> &LaidOut {
+        let map = map.expect("a placed map");
         map.level(map.level_count() - 1)
     }
 
@@ -785,7 +1023,10 @@ mod tests {
 
         assert!(Arc::ptr_eq(&slice.base, &loaded.shared.base));
         assert!(Arc::ptr_eq(&slice.reduced, &loaded.shared.reduced_base));
-        assert!(Arc::ptr_eq(&slice.map, &loaded.shared.map));
+        assert!(Arc::ptr_eq(
+            slice.map().expect("a placed map"),
+            loaded.shared.map.placed().expect("a placed map"),
+        ));
         assert!(restricted.dropped.is_empty());
         assert_eq!(restricted.expanded, expanded);
         assert_eq!(restricted.over_budget, None);
@@ -813,13 +1054,13 @@ mod tests {
                 .all(|node| node.kind != Kind::Action)
         );
         assert!(
-            finest(&slice.map)
+            finest(slice.map())
                 .boxes
                 .iter()
                 .all(|b| kind_of(&loaded, b.id) != Kind::Action),
         );
         assert!(
-            finest(&loaded.shared.map)
+            finest(loaded.shared.map.placed())
                 .boxes
                 .iter()
                 .any(|b| kind_of(&loaded, b.id) == Kind::Action),
@@ -835,7 +1076,7 @@ mod tests {
         let loaded = document();
         let (slice, _) = restrict(&loaded.shared, &hiding(Kind::Target), &HashSet::new(), true);
 
-        let coarsest = slice.map.level(0);
+        let coarsest = slice.map().expect("a placed map").level(0);
         assert!(
             coarsest.boxes.iter().any(|b| b.id == id(&loaded, "//a")),
             "the container the fold collapses into",
@@ -857,8 +1098,41 @@ mod tests {
         let loaded = document();
         let (slice, _) = restrict(&loaded.shared, &hiding(Kind::Action), &HashSet::new(), true);
 
-        let whole = finest(&loaded.shared.map);
-        for b in &finest(&slice.map).boxes {
+        let whole = finest(loaded.shared.map.placed());
+        for b in &finest(slice.map()).boxes {
+            let at = whole
+                .boxes
+                .iter()
+                .find(|whole| whole.id == b.id)
+                .expect("a surviving box the document draws");
+            assert_eq!((b.x, b.y), (at.x, at.y));
+        }
+    }
+
+    /// A filter set before the map lands is drawn in the map once it does, placed
+    /// where the document places it and shared by every clone of the
+    /// restriction, so its levels are derived once.
+    #[test]
+    fn a_restriction_made_before_the_map_lands_is_placed_where_the_document_places_it() {
+        let (loaded, land) = document_placing();
+        let (slice, _) = restrict(&loaded.shared, &hiding(Kind::Action), &HashSet::new(), true);
+        assert!(slice.map().is_none());
+
+        land();
+
+        let placed = slice
+            .map()
+            .expect("the restriction placed once the map lands");
+        assert!(!Arc::ptr_eq(
+            placed,
+            loaded.shared.map.placed().expect("a placed map")
+        ));
+        assert!(Arc::ptr_eq(
+            placed,
+            slice.clone().map().expect("a placed map")
+        ));
+        let whole = finest(loaded.shared.map.placed());
+        for b in &finest(slice.map()).boxes {
             let at = whole
                 .boxes
                 .iter()
@@ -908,7 +1182,7 @@ mod tests {
         derived.adopt(Landed {
             slice: Slice::whole(&loaded.shared, Filter::default()),
             restricted: None,
-            layered: None,
+            layered: Relaid::Nothing,
         });
 
         assert!(derived.drawn(LayoutMode::Layered).is_none());
@@ -919,6 +1193,63 @@ mod tests {
     /// else records, so every request made before it lands — an expansion, a
     /// change of edge set — restricts afresh rather than laying out the graph
     /// the superseded filter left.
+    /// A filter naming what to look at that lands before the map is placed
+    /// still asks for the camera to frame what it leaves, and hands the panel
+    /// the restriction's map, which is placed once the document's lands.
+    #[test]
+    fn a_framed_filter_landing_before_the_map_frames_the_map_once_placed() {
+        let (loaded, land) = document_placing();
+        let mut derived = opened(&loaded);
+        derived.filter = hiding(Kind::Action);
+        derived.frame_on_landing = true;
+        let (slice, restricted) = restrict(&loaded.shared, &derived.filter, &HashSet::new(), true);
+
+        let adopted = derived.adopt(Landed {
+            slice,
+            restricted: Some(restricted),
+            layered: Relaid::Nothing,
+        });
+        assert!(adopted.frame);
+        let map = adopted
+            .restriction
+            .and_then(|restriction| restriction.map)
+            .expect("the restriction's own map");
+        assert!(map.placed().is_none());
+        assert!(derived.drawn(LayoutMode::Map).is_none());
+
+        land();
+
+        let Some(Drawn::Map { map: drawn, .. }) = derived.drawn(LayoutMode::Map) else {
+            panic!("no map drawn once the document's lands");
+        };
+        assert!(Arc::ptr_eq(map.placed().expect("a placed map"), &drawn));
+    }
+
+    /// The map landing derives the levels of the restriction a panel draws, and
+    /// none of one a derivation in flight is to replace.
+    #[test]
+    fn the_map_landing_derives_only_a_restriction_that_stays() {
+        let (loaded, land) = document_placing();
+        let mut derived = opened(&loaded);
+        assert!(derived.restricted_map_drawn().is_none(), "the whole graph");
+
+        derived.filter = hiding(Kind::Action);
+        let (slice, restricted) = restrict(&loaded.shared, &derived.filter, &HashSet::new(), true);
+        derived.adopt(Landed {
+            slice,
+            restricted: Some(restricted),
+            layered: Relaid::Nothing,
+        });
+        land();
+        let drawn = derived
+            .restricted_map_drawn()
+            .expect("the restriction the panel draws");
+        assert!(drawn.placed().is_some());
+
+        derived.filter = hiding(Kind::Target);
+        assert!(derived.restricted_map_drawn().is_none());
+    }
+
     #[test]
     fn a_request_made_before_a_filter_change_lands_restricts_afresh() {
         let loaded = document();
@@ -937,7 +1268,7 @@ mod tests {
         derived.adopt(Landed {
             slice,
             restricted: Some(restricted),
-            layered: None,
+            layered: Relaid::Nothing,
         });
 
         assert!(!derived.restricting());
@@ -952,7 +1283,7 @@ mod tests {
         let loaded = document();
         let mut derived = opened(&loaded);
         derived.filter = hiding(Kind::Action);
-        derived.layered = Some(drawing(10.0));
+        derived.layered = Some(layered(&loaded, 10.0));
 
         derived.opened_on(&document());
 
@@ -972,12 +1303,64 @@ mod tests {
         })
     }
 
+    /// [`drawing`] as laid out from `loaded`'s whole graph, folded, over the
+    /// reduced edge set.
+    fn layered(loaded: &Loaded, width: f64) -> Layered {
+        Layered {
+            view: drawing(width),
+            base: Arc::clone(&loaded.shared.base),
+            expanded: HashSet::new(),
+            reduced: true,
+        }
+    }
+
     fn landed(loaded: &Loaded, width: f64) -> Landed {
         Landed {
             slice: Slice::whole(&loaded.shared, Filter::default()),
             restricted: None,
-            layered: Some(drawing(width)),
+            layered: Relaid::Fresh(layered(loaded, width)),
         }
+    }
+
+    /// A layered drawing is laid out again only where the graph, the expansion
+    /// or the edge set it would be laid out from differs from what drew it.
+    #[test]
+    fn a_drawing_answers_for_the_graph_expansion_and_edge_set_it_was_laid_out_from() {
+        let loaded = document();
+        let held = layered(&loaded, 10.0);
+        let base = &loaded.shared.base;
+        let folded = HashSet::new();
+        let package = loaded.shared.names.get("//a").expect("a package");
+
+        assert!(held.draws(base, &folded, true));
+        assert!(!held.draws(base, &folded, false));
+        assert!(!held.draws(base, &[package].into_iter().collect(), true));
+        assert!(!held.draws(&Arc::new(Graph::clone(base)), &folded, true));
+    }
+
+    /// A derivation that keeps the drawing held lands it as a relayout would,
+    /// so a toggle undone while its relayout ran still settles and fades, but
+    /// with no drawing to ease from.
+    #[test]
+    fn a_derivation_keeping_the_drawing_held_lands_it_with_nothing_to_ease_from() {
+        let loaded = document();
+        let mut derived = opened(&loaded);
+        derived.adopt(landed(&loaded, 10.0));
+        let held = Arc::clone(&derived.layered.as_ref().expect("a drawing held").view);
+
+        let adopted = derived.adopt(Landed {
+            slice: Slice::whole(&loaded.shared, Filter::default()),
+            restricted: None,
+            layered: Relaid::Held,
+        });
+
+        let landing = adopted.landing.expect("the held drawing lands");
+        assert!(landing.replaced.is_none());
+        assert!(Arc::ptr_eq(&landing.current, &held));
+        let drawn = derived
+            .drawn(LayoutMode::Layered)
+            .expect("a layered drawing");
+        assert_eq!(drawn.view(1.0).map(|g| g.width), Some(10.0));
     }
 
     /// A graph opened in place of another is told from it even where no
@@ -1022,20 +1405,53 @@ mod tests {
         let drawn = derived
             .drawn(LayoutMode::Layered)
             .expect("a layered drawing");
-        assert_eq!(drawn.view(1.0).width, 10.0);
+        assert_eq!(drawn.view(1.0).map(|g| g.width), Some(10.0));
     }
 
     /// The status line is drawn from the read and the panel's own drawing, so it
     /// reads the same whether or not a panel is showing one.
     #[test]
     fn a_graph_still_being_read_says_so() {
-        assert_eq!(status(&Source::Loading, None, 1.0, None), "Loading…");
+        assert_eq!(status(&Source::Loading, None, None), "Loading…");
     }
 
     #[test]
     fn a_graph_that_could_not_be_read_names_what_is_absent() {
         let failed = Source::Failed("aquery.pb: no such file".into());
-        assert_eq!(status(&failed, None, 1.0, None), "No graph");
+        assert_eq!(status(&failed, None, None), "No graph");
+    }
+
+    /// Describing a map's view on the UI thread derives none: with no level
+    /// derived the status line reads as still laying out, and once one is, a
+    /// zoom calling for another is described by the one drawn in its place.
+    #[test]
+    fn a_map_describes_the_derived_level_it_draws() {
+        let loaded = document();
+        let drawn = opened(&loaded).drawn(LayoutMode::Map).expect("a map");
+        let Drawn::Map { map, .. } = &drawn else {
+            panic!("a map draws a map");
+        };
+        let finest = map.level_count() - 1;
+        assert!(finest > 0, "a level finer than the coarsest");
+        let described = || {
+            status(
+                &Source::Loaded(document()),
+                Some((drawn.clone(), f32::MAX)),
+                None,
+            )
+        };
+
+        assert_eq!(described(), "Laying out…");
+
+        map.level(0);
+        assert!(
+            described().starts_with(&format!("level 1/{} · ", finest + 1)),
+            "{}",
+            described()
+        );
+        assert!(map.derived(finest).is_none());
+        assert_eq!(drawn.view_key(f32::MAX), drawn.view_key(0.0));
+        assert!(drawn.underived(f32::MAX).is_some());
     }
 
     #[test]
@@ -1044,8 +1460,8 @@ mod tests {
         let derived = opened(&loaded);
         let drawn = derived.drawn(LayoutMode::Map).expect("a map");
         let level = drawn.level(1.0).expect("a map draws one of its levels");
-        let boxes = drawn.view(1.0).boxes.len();
-        let status = status(&Source::Loaded(document()), Some(drawn), 1.0, None);
+        let boxes = drawn.derive_view(1.0).boxes.len();
+        let status = status(&Source::Loaded(document()), Some((drawn, 1.0)), None);
         assert!(
             status.starts_with(&format!(
                 "level {}/{} · {boxes} boxes · ",
@@ -1064,12 +1480,13 @@ mod tests {
         let loaded = document();
         let derived = opened(&loaded);
         let drawn = derived.drawn(LayoutMode::Map).expect("a map");
+        drawn.derive_view(1.0);
         let over = Overflow {
             nodes: DEFAULT_MAX_NODES,
             edges: DEFAULT_MAX_EDGES + 5,
         };
 
-        let status = status(&Source::Loaded(document()), Some(drawn), 1.0, Some(over));
+        let status = status(&Source::Loaded(document()), Some((drawn, 1.0)), Some(over));
 
         assert!(
             status.ends_with(&format!(
@@ -1080,7 +1497,24 @@ mod tests {
         );
     }
 
-    /// The map is derived as the graph is read and the layered layout only on
+    /// A panel drawing the map while it is being placed waits on the placement,
+    /// which no derivation produces, and draws the map as soon as it lands; the
+    /// layered mode, which needs no map, is its own to ask for.
+    #[test]
+    fn a_panel_opened_before_the_map_lands_draws_it_once_it_lands() {
+        let (loaded, land) = document_placing();
+        let derived = opened(&loaded);
+        assert!(derived.drawn(LayoutMode::Map).is_none());
+        assert!(derived.underway(LayoutMode::Map));
+        assert!(!derived.underway(LayoutMode::Layered));
+
+        land();
+
+        assert!(derived.drawn(LayoutMode::Map).is_some());
+        assert!(!derived.underway(LayoutMode::Map));
+    }
+
+    /// The map is placed as the graph is read and the layered layout only on
     /// demand, so a panel holds one and not the other until it asks for the
     /// layered mode.
     #[test]
@@ -1090,7 +1524,7 @@ mod tests {
         assert!(derived.drawn(LayoutMode::Map).is_some());
         assert!(derived.drawn(LayoutMode::Layered).is_none());
         assert_eq!(
-            status(&Source::Loaded(document()), None, 1.0, None),
+            status(&Source::Loaded(document()), None, None),
             "Laying out…"
         );
     }

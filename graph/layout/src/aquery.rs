@@ -20,7 +20,10 @@
 //! `member -> consumer` edge.
 
 use std::borrow::Cow;
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeSet, HashSet};
+use std::num::{NonZeroU32, NonZeroUsize};
+
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use bazel_query_proto::analysis::{
     Action, ActionGraphContainer, Artifact, AspectDescriptor, Configuration, DepSetOfFiles,
@@ -140,8 +143,8 @@ fn build_action_boxes(
     graph: &mut Graph,
     names: &mut Names,
     facets: &mut FacetsBuilder,
-) -> HashMap<ArtifactId, Id> {
-    let mut producer_node_id: HashMap<ArtifactId, Id> = HashMap::new();
+) -> FxHashMap<ArtifactId, Id> {
+    let mut producer_node_id: FxHashMap<ArtifactId, Id> = FxHashMap::default();
     let mut boxes = Boxes {
         graph,
         names,
@@ -149,8 +152,8 @@ fn build_action_boxes(
         hierarchy,
         index,
         labeled_outputs,
-        targets: HashSet::new(),
-        configured: HashSet::new(),
+        targets: FxHashSet::default(),
+        configured: FxHashSet::default(),
     };
     for (i, action) in index.actions.iter().enumerate() {
         let config_id = ConfigId(action.configuration_id);
@@ -190,7 +193,7 @@ fn build_action_boxes(
 /// depsets into direct edges.
 fn wire_action_inputs(
     index: Index,
-    producer_node_id: HashMap<ArtifactId, Id>,
+    producer_node_id: FxHashMap<ArtifactId, Id>,
     hierarchy: &PackageHierarchy,
     external_sources: bool,
     graph: &mut Graph,
@@ -200,34 +203,38 @@ fn wire_action_inputs(
     let Index {
         actions,
         paths,
-        depset_by_id,
+        depsets,
         ..
     } = index;
     let mut wiring = Wiring {
-        seen_edge: HashSet::new(),
-        source_nodes: HashSet::new(),
+        source_nodes: FxHashSet::default(),
         hierarchy,
         facets,
         producer_node_id,
-        depset_by_id,
         paths,
         external_sources,
-        resolved: HashMap::new(),
+        resolved: vec![Resolution::Unresolved; depsets.artifacts.len()],
+        walked: vec![None; depsets.len()],
+        wired_from: vec![None; names.len()],
+        pending: Vec::new(),
+        depsets,
     };
     for (i, action) in actions.iter().enumerate() {
         let action_id = names.intern(&format!("action{i}"));
-        let mut visited: HashSet<u32> = HashSet::new();
-        for &dep_set_id in &action.input_dep_set_ids {
-            wiring.wire(dep_set_id, action_id, &mut visited, graph, names);
-        }
+        let walk = Walk {
+            consumer: action_id,
+            stamp: NonZeroU32::try_from(NonZeroUsize::MIN.saturating_add(i))
+                .expect("an aquery holds fewer than u32::MAX actions"),
+        };
+        wiring.wire(&action.input_dep_set_ids, walk, graph, names);
     }
 }
 
 /// The by-id artifact and path-fragment lookups, paired so an artifact's
 /// name and path can be reconstructed from one value.
 struct Paths<'a> {
-    artifact_by_id: HashMap<ArtifactId, &'a Artifact>,
-    fragment_by_id: HashMap<u32, &'a PathFragment>,
+    artifact_by_id: FxHashMap<ArtifactId, &'a Artifact>,
+    fragment_by_id: FxHashMap<u32, &'a PathFragment>,
 }
 
 /// The actions to walk plus the by-id lookups box creation and input wiring
@@ -235,11 +242,11 @@ struct Paths<'a> {
 struct Index<'a> {
     actions: Vec<&'a Action>,
     paths: Paths<'a>,
-    target_by_id: HashMap<u32, &'a Target>,
-    config_by_id: HashMap<ConfigId, &'a Configuration>,
-    depset_by_id: HashMap<u32, &'a DepSetOfFiles>,
-    rule_class_by_id: HashMap<u32, &'a RuleClass>,
-    aspect_by_id: HashMap<u32, &'a AspectDescriptor>,
+    target_by_id: FxHashMap<u32, &'a Target>,
+    config_by_id: FxHashMap<ConfigId, &'a Configuration>,
+    depsets: DepSets,
+    rule_class_by_id: FxHashMap<u32, &'a RuleClass>,
+    aspect_by_id: FxHashMap<u32, &'a AspectDescriptor>,
 }
 
 impl<'a> Index<'a> {
@@ -272,7 +279,7 @@ impl<'a> Index<'a> {
                 .iter()
                 .map(|c| (ConfigId(c.id), *c))
                 .collect(),
-            depset_by_id: dep_sets.iter().map(|d| (d.id, *d)).collect(),
+            depsets: DepSets::new(&dep_sets),
             rule_class_by_id: rule_classes.iter().map(|r| (r.id, *r)).collect(),
             aspect_by_id: aspects.iter().map(|a| (a.id, *a)).collect(),
             actions,
@@ -300,6 +307,89 @@ impl<'a> Index<'a> {
     }
 }
 
+/// Every depset of the action graph over dense indices, what it holds and
+/// nests resolved to indices once, so walking an action's inputs reads arrays.
+struct DepSets {
+    /// By id, the index of the depset that id names.
+    index_of: FxHashMap<u32, u32>,
+    /// By depset, where its entries start in `members` and `nested`; one entry
+    /// past the last depset closes both.
+    starts: Vec<(u32, u32)>,
+    /// The artifacts each depset holds directly, as indices into `artifacts`,
+    /// in the order it lists them.
+    members: Vec<u32>,
+    /// The depsets each depset nests, in the order it lists them. An id naming
+    /// no depset holds nothing, and is left out.
+    nested: Vec<u32>,
+    /// By index, the artifacts depsets hold.
+    artifacts: Vec<ArtifactId>,
+}
+
+impl DepSets {
+    fn new(dep_sets: &[&DepSetOfFiles]) -> Self {
+        let index_of: FxHashMap<u32, u32> = dep_sets
+            .iter()
+            .enumerate()
+            .map(|(i, d)| (d.id, i as u32))
+            .collect();
+        let mut starts = Vec::with_capacity(dep_sets.len() + 1);
+        let mut members =
+            Vec::with_capacity(dep_sets.iter().map(|d| d.direct_artifact_ids.len()).sum());
+        let mut nested = Vec::with_capacity(
+            dep_sets
+                .iter()
+                .map(|d| d.transitive_dep_set_ids.len())
+                .sum(),
+        );
+        let mut artifact_index: FxHashMap<u32, u32> =
+            FxHashMap::with_capacity_and_hasher(members.capacity(), Default::default());
+        let mut artifacts = Vec::with_capacity(members.capacity());
+        for d in dep_sets {
+            starts.push((members.len() as u32, nested.len() as u32));
+            members.extend(d.direct_artifact_ids.iter().map(|&id| {
+                *artifact_index.entry(id).or_insert_with(|| {
+                    artifacts.push(ArtifactId(id));
+                    artifacts.len() as u32 - 1
+                })
+            }));
+            nested.extend(
+                d.transitive_dep_set_ids
+                    .iter()
+                    .filter_map(|id| index_of.get(id).copied()),
+            );
+        }
+        starts.push((members.len() as u32, nested.len() as u32));
+        DepSets {
+            index_of,
+            starts,
+            members,
+            nested,
+            artifacts,
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.starts.len() - 1
+    }
+
+    /// Where the artifacts `depset` holds directly lie in `members`.
+    fn members(&self, depset: u32) -> std::ops::Range<usize> {
+        let (from, to) = (
+            self.starts[depset as usize],
+            self.starts[depset as usize + 1],
+        );
+        from.0 as usize..to.0 as usize
+    }
+
+    fn nested(&self, depset: u32) -> &[u32] {
+        let (from, to) = (
+            self.starts[depset as usize],
+            self.starts[depset as usize + 1],
+        );
+        &self.nested[from.1 as usize..to.1 as usize]
+    }
+}
+
 /// Mutable state threaded through box creation: the ids of the boxes already
 /// added, so a target or configured target that several actions share is
 /// created once.
@@ -310,8 +400,8 @@ struct Boxes<'a> {
     hierarchy: &'a PackageHierarchy,
     index: &'a Index<'a>,
     labeled_outputs: &'a HashSet<String>,
-    targets: HashSet<Id>,
-    configured: HashSet<Id>,
+    targets: FxHashSet<Id>,
+    configured: FxHashSet<Id>,
 }
 
 /// The target a configured-target box belongs to, as one aquery input names it.
@@ -465,94 +555,99 @@ impl Boxes<'_> {
     }
 }
 
-/// Mutable state threaded through the recursive input wiring.
+/// Mutable state threaded through the input wiring.
 struct Wiring<'a, 'f> {
-    /// Input edges already wired, deduped by their endpoints' ids. An artifact
-    /// reachable through several of one action's depsets, or the same source
-    /// feeding an action twice, is wired once.
-    seen_edge: HashSet<(Id, Id)>,
-    source_nodes: HashSet<Id>,
+    source_nodes: FxHashSet<Id>,
     hierarchy: &'a PackageHierarchy,
     facets: &'f mut FacetsBuilder,
-    producer_node_id: HashMap<ArtifactId, Id>,
-    depset_by_id: HashMap<u32, &'a DepSetOfFiles>,
+    producer_node_id: FxHashMap<ArtifactId, Id>,
+    depsets: DepSets,
     paths: Paths<'a>,
     external_sources: bool,
-    /// The leaf node each input artifact wires from, or `None` when it is
-    /// dropped. Resolution scans the package set and rebuilds the artifact's
-    /// path, so it is cached: an artifact in many actions' inputs resolves once.
-    resolved: HashMap<ArtifactId, Option<Id>>,
+    /// By depset artifact, what it wires from. Resolution scans the package set
+    /// and rebuilds the artifact's path, so it is cached: an artifact in many
+    /// actions' inputs resolves once.
+    resolved: Vec<Resolution>,
+    /// By depset, the stamp of the last walk to enter it.
+    walked: Vec<Option<NonZeroU32>>,
+    /// By node id, the stamp of the last walk to wire an edge from it. A walk
+    /// has one consumer, so this dedupes the walk's edges: an artifact reachable
+    /// through several of one action's depsets, or two artifacts resolving to
+    /// one node, is wired once.
+    wired_from: Vec<Option<NonZeroU32>>,
+    /// The depsets the walk in progress has yet to enter, next on top.
+    pending: Vec<u32>,
+}
+
+/// What a depset artifact wires from.
+#[derive(Clone, Copy)]
+enum Resolution {
+    Unresolved,
+    /// Nothing: the artifact is an input the graph leaves out.
+    Dropped,
+    From(Id),
+}
+
+/// One action's input walk.
+#[derive(Clone, Copy)]
+struct Walk {
+    /// The node the action's inputs are wired to.
+    consumer: Id,
+    /// Marks what this walk has seen, distinct from every other walk's.
+    stamp: NonZeroU32,
 }
 
 impl Wiring<'_, '_> {
-    /// Flattens the inputs reachable from `dep_set_id` onto `consumer_id`: each
-    /// direct artifact is wired straight to the consumer and each transitive
-    /// depset is recursed into. `visited` holds the dep-set ids already walked
-    /// for this consumer, so a depset reachable by several paths within one
-    /// action's input tree is traversed once.
-    fn wire(
-        &mut self,
-        dep_set_id: u32,
-        consumer: Id,
-        visited: &mut HashSet<u32>,
-        graph: &mut Graph,
-        names: &mut Names,
-    ) {
-        if !visited.insert(dep_set_id) {
-            return;
-        }
-        let Some(dep_set) = self.depset_by_id.get(&dep_set_id).copied() else {
-            return;
-        };
-        let directs: Vec<ArtifactId> = dep_set
-            .direct_artifact_ids
-            .iter()
-            .copied()
-            .map(ArtifactId)
-            .collect();
-        let transitives: Vec<u32> = dep_set.transitive_dep_set_ids.clone();
-        for artifact_id in directs {
-            self.emit_member(artifact_id, consumer, graph, names);
-        }
-        for transitive in transitives {
-            self.wire(transitive, consumer, visited, graph, names);
+    /// Flattens the inputs reachable from the depsets `inputs` names onto the
+    /// walk's consumer: each depset's direct artifacts are wired straight to the
+    /// consumer before the depsets it nests are walked, and a depset reachable
+    /// by several paths is walked once.
+    fn wire(&mut self, inputs: &[u32], walk: Walk, graph: &mut Graph, names: &mut Names) {
+        self.pending.clear();
+        self.pending.extend(
+            inputs
+                .iter()
+                .rev()
+                .filter_map(|id| self.depsets.index_of.get(id).copied()),
+        );
+        while let Some(depset) = self.pending.pop() {
+            if self.walked[depset as usize].replace(walk.stamp) == Some(walk.stamp) {
+                continue;
+            }
+            for member in self.depsets.members(depset) {
+                let artifact = self.depsets.members[member];
+                if let Some(from) = self.resolve_member(artifact, graph, names) {
+                    self.add_edge(from, walk, graph);
+                }
+            }
+            let nested = self.depsets.nested(depset);
+            self.pending.extend(nested.iter().rev());
         }
     }
 
-    /// Wires one member artifact to `consumer` through the leaf node it resolves
-    /// to, creating that node on first sight and skipping a dropped input.
-    fn emit_member(
+    /// The leaf node depset artifact `artifact` wires from, memoized across the
+    /// many consumers a shared input feeds.
+    fn resolve_member(
         &mut self,
-        artifact_id: ArtifactId,
-        consumer: Id,
+        artifact: u32,
         graph: &mut Graph,
         names: &mut Names,
-    ) {
-        if let Some(from) = self.resolve_member(artifact_id, graph, names) {
-            self.add_edge(from, consumer, graph);
+    ) -> Option<Id> {
+        match self.resolved[artifact as usize] {
+            Resolution::From(from) => return Some(from),
+            Resolution::Dropped => return None,
+            Resolution::Unresolved => {}
         }
+        let from = self.compute_member(self.depsets.artifacts[artifact as usize], graph, names);
+        self.resolved[artifact as usize] = from.map_or(Resolution::Dropped, Resolution::From);
+        from
     }
 
     /// The leaf node `artifact_id` wires from: a derived input through its
     /// producing artifact node, a source through a deduped source node. `None`
     /// for a dropped input: an external source when `external_sources` is off,
     /// or a derived input produced outside the queried scope, which has no
-    /// producer node. The result depends only on the artifact, so it is memoized
-    /// across the many consumers a shared input feeds.
-    fn resolve_member(
-        &mut self,
-        artifact_id: ArtifactId,
-        graph: &mut Graph,
-        names: &mut Names,
-    ) -> Option<Id> {
-        if let Some(&cached) = self.resolved.get(&artifact_id) {
-            return cached;
-        }
-        let from = self.compute_member(artifact_id, graph, names);
-        self.resolved.insert(artifact_id, from);
-        from
-    }
-
+    /// producer node.
     fn compute_member(
         &mut self,
         artifact_id: ArtifactId,
@@ -601,9 +696,13 @@ impl Wiring<'_, '_> {
         Some(node_id)
     }
 
-    fn add_edge(&mut self, from: Id, to: Id, graph: &mut Graph) {
-        if self.seen_edge.insert((from, to)) {
-            graph.add_edge(from, to, EdgeKind::Aquery);
+    fn add_edge(&mut self, from: Id, walk: Walk, graph: &mut Graph) {
+        let at = from.0 as usize;
+        if at >= self.wired_from.len() {
+            self.wired_from.resize(at + 1, None);
+        }
+        if self.wired_from[at].replace(walk.stamp) != Some(walk.stamp) {
+            graph.add_edge(from, walk.consumer, EdgeKind::Aquery);
         }
     }
 }
@@ -644,7 +743,7 @@ fn repo_label(repo: &str) -> String {
 fn root_source_node(
     artifact_id: ArtifactId,
     graph: &mut Graph,
-    source_nodes: &mut HashSet<Id>,
+    source_nodes: &mut FxHashSet<Id>,
     paths: &Paths,
     names: &mut Names,
 ) -> Id {
@@ -677,7 +776,7 @@ impl Paths<'_> {
             return String::new();
         };
         let mut parts: Vec<&str> = Vec::new();
-        let mut seen: HashSet<u32> = HashSet::new();
+        let mut seen: FxHashSet<u32> = FxHashSet::default();
         let mut fragment_id = artifact.path_fragment_id;
         while fragment_id != 0 && seen.insert(fragment_id) {
             let Some(fragment) = self.fragment_by_id.get(&fragment_id) else {

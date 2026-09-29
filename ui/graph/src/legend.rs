@@ -47,21 +47,21 @@ struct Found {
 impl Legend {
     /// Lists the edge kinds `drawn` draws at `zoom`, so it explains only the
     /// kinds present in this view; the caller places it. `None` when none are
-    /// drawn.
+    /// drawn, or the view is yet to be derived.
     pub(crate) fn card(&mut self, drawn: &Drawn, zoom: f32, palette: &Palette) -> Option<Div> {
-        card(self.kinds(drawn, zoom), palette)
+        card(self.kinds(drawn, zoom)?, palette)
     }
 
-    fn kinds(&mut self, drawn: &Drawn, zoom: f32) -> &[EdgeKind] {
+    fn kinds(&mut self, drawn: &Drawn, zoom: f32) -> Option<&[EdgeKind]> {
         let view = drawn.view_key(zoom);
         let found = match self.found.take() {
             Some(found) if found.view == view => found,
             _ => Found {
                 view,
-                kinds: present(drawn.view(zoom)),
+                kinds: present(drawn.view(zoom)?),
             },
         };
-        &self.found.insert(found).kinds
+        Some(&self.found.insert(found).kinds)
     }
 }
 
@@ -128,7 +128,7 @@ mod tests {
     }
 
     /// A map numbered `drawing` of two packages whose actions form one chain of
-    /// `kind` edges, so it has levels to zoom between.
+    /// `kind` edges, so it has levels to zoom between, each derived.
     fn map(drawing: u64, kind: EdgeKind) -> Drawn {
         let mut base = Graph::new();
         let mut ids = (0..).map(Id);
@@ -148,8 +148,12 @@ mod tests {
             base.add_edge(pair[0], pair[1], kind);
         }
         let reduced = transitive_reduction(&base);
+        let map = map_layout(Arc::new(base), Arc::new(reduced));
+        for level in 0..map.level_count() {
+            map.level(level);
+        }
         Drawn::Map {
-            map: Arc::new(map_layout(Arc::new(base), Arc::new(reduced))),
+            map: Arc::new(map),
             drawing,
         }
     }
@@ -159,16 +163,16 @@ mod tests {
         let mut legend = Legend::default();
         assert_eq!(
             legend.kinds(&layered(1, vec![EdgeKind::Query]), 1.0),
-            [EdgeKind::Query]
+            Some(&[EdgeKind::Query][..])
         );
         assert_eq!(
             legend.kinds(&layered(1, vec![EdgeKind::Aquery]), 1.0),
-            [EdgeKind::Query],
+            Some(&[EdgeKind::Query][..]),
             "a view under an unchanged key was scanned again"
         );
         assert_eq!(
             legend.kinds(&layered(2, vec![EdgeKind::Aquery]), 1.0),
-            [EdgeKind::Aquery]
+            Some(&[EdgeKind::Aquery][..])
         );
     }
 
@@ -178,11 +182,11 @@ mod tests {
         let aquery = map(1, EdgeKind::Aquery);
         assert_ne!(aquery.view_key(COARSEST), aquery.view_key(FINEST));
         let mut legend = Legend::default();
-        let before = legend.kinds(&query, COARSEST).to_vec();
+        let before = legend.kinds(&query, COARSEST).map(<[_]>::to_vec);
 
-        let after = legend.kinds(&aquery, FINEST);
+        let after = legend.kinds(&aquery, FINEST).map(<[_]>::to_vec);
 
         assert_ne!(before, after);
-        assert_eq!(after, present(aquery.view(FINEST)));
+        assert_eq!(after, aquery.view(FINEST).map(present));
     }
 }

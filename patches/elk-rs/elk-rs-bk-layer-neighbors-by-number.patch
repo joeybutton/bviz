@@ -1,0 +1,83 @@
+Find a Brandes-Koepf layer neighbor by its number
+
+Brandes-Koepf compaction looks up a node's neighbor within its layer by
+copying the whole layer.
+
+diff --git a/plugins/org.eclipse.elk.alg.layered/src/org/eclipse/elk/alg/layered/p4nodes/bk/aligned_layout.rs b/plugins/org.eclipse.elk.alg.layered/src/org/eclipse/elk/alg/layered/p4nodes/bk/aligned_layout.rs
+index d2c4f2d..68f50bd 100644
+--- a/plugins/org.eclipse.elk.alg.layered/src/org/eclipse/elk/alg/layered/p4nodes/bk/aligned_layout.rs
++++ b/plugins/org.eclipse.elk.alg.layered/src/org/eclipse/elk/alg/layered/p4nodes/bk/aligned_layout.rs
+@@ -162,11 +162,11 @@ impl BKAlignedLayout {
+         loop {
+             current = self.align[current];
+             let min_y_current = self.min_y(current);
+-            if let Some(neighbor) = self.upper_neighbor(current, ni) {
+-                let max_y_neighbor = self.max_y(node_id(&neighbor));
++            if let Some(neighbor) = upper_neighbor(current, ni) {
++                let max_y_neighbor = self.max_y(neighbor);
+                 let spacing = self
+                     .spacings
+-                    .get_vertical_spacing(&self.nodes_by_id[current], &neighbor);
++                    .get_vertical_spacing(&self.nodes_by_id[current], &self.nodes_by_id[neighbor]);
+                 available_space = available_space.min(min_y_current - (max_y_neighbor + spacing));
+             }
+             if current == root {
+@@ -202,11 +202,11 @@ impl BKAlignedLayout {
+         loop {
+             current = self.align[current];
+             let max_y_current = self.max_y(current);
+-            if let Some(neighbor) = self.lower_neighbor(current, ni) {
+-                let min_y_neighbor = self.min_y(node_id(&neighbor));
++            if let Some(neighbor) = lower_neighbor(current, ni) {
++                let min_y_neighbor = self.min_y(neighbor);
+                 let spacing = self
+                     .spacings
+-                    .get_vertical_spacing(&self.nodes_by_id[current], &neighbor);
++                    .get_vertical_spacing(&self.nodes_by_id[current], &self.nodes_by_id[neighbor]);
+                 available_space = available_space.min(min_y_neighbor - (max_y_current + spacing));
+             }
+             if current == root {
+@@ -240,30 +240,21 @@ impl BKAlignedLayout {
+             + node_size_y_a(&self.sync, &self.nodes_by_id[node_id])
+             + node_margin_bottom_a(&self.sync, &self.nodes_by_id[node_id])
+     }
++}
+ 
+-    fn upper_neighbor(&self, node_id: usize, ni: &NeighborhoodInformation) -> Option<LNodeRef> {
+-        let node = self.nodes_by_id.get(node_id)?.clone();
+-        let layer = node.lock().layer()?;
+-        let layer_nodes = layer
+-            .lock().nodes().clone();
+-        let layer_index = *ni.node_index.get(node_id)?;
+-        if layer_index > 0 {
+-            return Some(layer_nodes[layer_index - 1].clone());
+-        }
+-        None
+-    }
++/// The node above node `node_id` in its layer. `NeighborhoodInformation`
++/// numbers the nodes layer by layer in their order, so it is the node numbered
++/// one less, unless `node_id` heads its layer.
++fn upper_neighbor(node_id: usize, ni: &NeighborhoodInformation) -> Option<usize> {
++    (*ni.node_index.get(node_id)? > 0).then(|| node_id - 1)
++}
+ 
+-    fn lower_neighbor(&self, node_id: usize, ni: &NeighborhoodInformation) -> Option<LNodeRef> {
+-        let node = self.nodes_by_id.get(node_id)?.clone();
+-        let layer = node.lock().layer()?;
+-        let layer_nodes = layer
+-            .lock().nodes().clone();
+-        let layer_index = *ni.node_index.get(node_id)?;
+-        if layer_index + 1 < layer_nodes.len() {
+-            return Some(layer_nodes[layer_index + 1].clone());
+-        }
+-        None
+-    }
++/// The node below node `node_id` in its layer: the node numbered one more, if
++/// that one is the next in the same layer.
++fn lower_neighbor(node_id: usize, ni: &NeighborhoodInformation) -> Option<usize> {
++    let index = *ni.node_index.get(node_id)?;
++    let next = node_id + 1;
++    (ni.node_index.get(next) == Some(&(index + 1))).then_some(next)
+ }
+ 
+ impl fmt::Display for BKAlignedLayout {

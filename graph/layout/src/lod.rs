@@ -9,7 +9,9 @@
 
 use std::cell::RefCell;
 use std::cmp::Reverse;
-use std::collections::{BinaryHeap, HashMap, HashSet};
+use std::collections::{BinaryHeap, HashSet};
+
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::graph::{EdgeKind, Graph, id_span};
 use crate::intern::Id;
@@ -30,8 +32,8 @@ pub fn expandable_containers(graph: &Graph) -> HashSet<Id> {
 }
 
 /// Number of nodes naming each container as their `parent`.
-fn child_counts(graph: &Graph) -> HashMap<Id, usize> {
-    let mut counts: HashMap<Id, usize> = HashMap::new();
+fn child_counts(graph: &Graph) -> FxHashMap<Id, usize> {
+    let mut counts: FxHashMap<Id, usize> = FxHashMap::default();
     for node in &graph.nodes {
         if let Some(parent) = node.parent {
             *counts.entry(parent).or_default() += 1;
@@ -62,7 +64,8 @@ pub fn collapse(graph: &Graph, expanded: &HashSet<Id>) -> Graph {
         }
     }
 
-    let mut seen: HashSet<(u32, u32, EdgeKind)> = HashSet::with_capacity(indexed.edges.len());
+    let mut seen: FxHashSet<(u32, u32, EdgeKind)> =
+        FxHashSet::with_capacity_and_hasher(indexed.edges.len(), Default::default());
     for &(from, to, kind) in &indexed.edges {
         if let Some((from, to)) = IndexedGraph::folded(&rep, from, to)
             && seen.insert((from, to, kind))
@@ -75,11 +78,12 @@ pub fn collapse(graph: &Graph, expanded: &HashSet<Id>) -> Graph {
 
 /// The node pairs [`collapse`] would leave, without materializing the folded
 /// nodes, for a caller that needs only which boxes stay connected.
-pub fn collapse_edges(graph: &Graph, expanded: &HashSet<Id>) -> HashSet<(Id, Id)> {
+pub fn collapse_edges(graph: &Graph, expanded: &HashSet<Id>) -> FxHashSet<(Id, Id)> {
     let indexed = IndexedGraph::new(graph);
     let rep = indexed.reps(&indexed.expanded_indices(expanded));
 
-    let mut pairs: HashSet<(Id, Id)> = HashSet::with_capacity(indexed.edges.len());
+    let mut pairs: FxHashSet<(Id, Id)> =
+        FxHashSet::with_capacity_and_hasher(indexed.edges.len(), Default::default());
     for &(from, to, _) in &indexed.edges {
         if let Some((from, to)) = IndexedGraph::folded(&rep, from, to) {
             pairs.insert((Id(from), Id(to)));
@@ -160,7 +164,13 @@ pub fn fitting_expansion(
         .filter(|id| expanded.contains(id))
         .collect();
     let sized: HashSet<Id> = order.iter().copied().collect();
-    let mut kept = largest_fitting(graph, reduced, order, max_nodes, max_edges)?;
+    let drawn = IndexedGraph::drawing(graph, reduced);
+    let whole: Vec<u32> = order.iter().map(|id| id.0).collect();
+    let fitting = match within(drawn.counts(&whole), max_nodes, max_edges) {
+        true => order.len(),
+        false => largest_fitting_prefix(&drawn, &order, max_nodes, max_edges)?,
+    };
+    let mut kept: HashSet<Id> = order[..fitting].iter().copied().collect();
     kept.extend(expanded.iter().copied().filter(|id| !sized.contains(id)));
     Ok(kept)
 }
@@ -181,15 +191,15 @@ fn largest_fitting(
 /// A graph's containment forest indexed by children, answering how much of the
 /// graph opening a container puts on screen.
 pub struct Forest {
-    children: HashMap<Id, Vec<Id>>,
+    children: FxHashMap<Id, Vec<Id>>,
     roots: Vec<Id>,
     /// Memoizes [`Self::visible_subtree`].
-    visible: RefCell<HashMap<Id, usize>>,
+    visible: RefCell<FxHashMap<Id, usize>>,
 }
 
 impl Forest {
     pub fn new(graph: &Graph) -> Self {
-        let mut children: HashMap<Id, Vec<Id>> = HashMap::new();
+        let mut children: FxHashMap<Id, Vec<Id>> = FxHashMap::default();
         let mut roots: Vec<Id> = Vec::new();
         for node in &graph.nodes {
             match node.parent {
@@ -200,7 +210,7 @@ impl Forest {
         Self {
             children,
             roots,
-            visible: RefCell::new(HashMap::new()),
+            visible: RefCell::new(FxHashMap::default()),
         }
     }
 
@@ -253,7 +263,8 @@ fn expansion_order(forest: &Forest) -> Vec<Id> {
         .filter(|kids| kids.len() >= 2)
         .count();
     let mut order: Vec<Id> = Vec::with_capacity(candidates);
-    let mut seen: HashSet<Id> = HashSet::with_capacity(candidates);
+    let mut seen: FxHashSet<Id> =
+        FxHashSet::with_capacity_and_hasher(candidates, Default::default());
     let mut heap: BinaryHeap<Reverse<(usize, Id)>> = BinaryHeap::with_capacity(forest.roots.len());
     for &r in &forest.roots {
         if let Some(d) = forest.descend(r) {
@@ -288,7 +299,7 @@ fn largest_fitting_prefix(
     max_edges: usize,
 ) -> Result<usize, Overflow> {
     let order_idx: Vec<u32> = order.iter().map(|id| id.0).collect();
-    let fits = |(nodes, edges): (usize, usize)| nodes <= max_nodes && edges <= max_edges;
+    let fits = |counts| within(counts, max_nodes, max_edges);
 
     let (nodes, edges) = indexed.counts(&[]);
     if !fits((nodes, edges)) {
@@ -305,6 +316,11 @@ fn largest_fitting_prefix(
         }
     }
     Ok(lo)
+}
+
+/// Whether a view of `(nodes, edges)` fits both caps.
+fn within((nodes, edges): (usize, usize), max_nodes: usize, max_edges: usize) -> bool {
+    nodes <= max_nodes && edges <= max_edges
 }
 
 /// Stands in a representative table for an id the graph holds no node of. Such
@@ -430,7 +446,8 @@ impl IndexedGraph {
             .filter(|&(i, &r)| r == i as u32)
             .count();
         let kept = self.kept_pairs(&rep);
-        let mut seen: HashSet<(u32, u32, EdgeKind)> = HashSet::with_capacity(self.edges.len());
+        let mut seen: FxHashSet<(u32, u32, EdgeKind)> =
+            FxHashSet::with_capacity_and_hasher(self.edges.len(), Default::default());
         for &(from, to, kind) in &self.edges {
             if let Some(pair) = Self::folded(&rep, from, to)
                 && kept.as_ref().is_none_or(|kept| kept.contains(&pair))
@@ -443,7 +460,7 @@ impl IndexedGraph {
 
     /// The box pairs a view over `rep` keeps, or `None` where it keeps every
     /// pair its edges fold onto.
-    fn kept_pairs(&self, rep: &[u32]) -> Option<HashSet<(u32, u32)>> {
+    fn kept_pairs(&self, rep: &[u32]) -> Option<FxHashSet<(u32, u32)>> {
         let skeleton = self.skeleton.as_ref()?;
         Some(
             skeleton

@@ -1,5 +1,5 @@
 use crate::camera::{Camera, Rect, to_screen, visible_rect};
-use crate::derive::{Drawn, Expandable};
+use crate::derive::{self, Drawn, Expandable};
 use crate::morph::Frame;
 use crate::neighborhood::{Neighborhood, compute_neighborhood};
 use crate::relation::{Direction, Relation};
@@ -244,7 +244,12 @@ pub(crate) fn canvas_body(
             let view = entity.read(cx);
             (view.camera(), view.morph_frame())
         };
-        let g = scene.drawn.view(camera.zoom);
+        entity.update(cx, |view, cx| {
+            derive::derive_view(view, &scene.drawn, camera.zoom, cx);
+        });
+        let Some(g) = scene.drawn.view(camera.zoom) else {
+            return;
+        };
         let visible = visible_rect(bounds, camera);
         // A hover is gone the moment the pointer moves, so its marking is derived
         // afresh; a selection outlives the frames that draw it, so it holds its

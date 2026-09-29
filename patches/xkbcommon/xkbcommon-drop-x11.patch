@@ -1,3 +1,10 @@
+Drop xkbcommon's X11 FFI
+
+The X11 FFI links the unavailable libxkbcommon-x11; gpui uses only
+Wayland, so it is dead code. The x11 feature cannot be turned off: it
+comes from gpui_linux's dependency spec, and rules_rs resolves features
+from unpatched metadata.
+
 diff --git a/src/xkb/mod.rs b/src/xkb/mod.rs
 index ddc88e9..815d06e 100644
 --- a/src/xkb/mod.rs

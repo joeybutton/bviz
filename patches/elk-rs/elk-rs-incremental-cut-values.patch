@@ -1,0 +1,527 @@
+Update network simplex cut values incrementally
+
+NetworkSimplex renumbers the whole spanning tree and recomputes every
+cut value after each pivot, though a pivot changes only part of the
+tree. Every cut value stays bit-identical.
+
+diff --git a/plugins/org.eclipse.elk.alg.common/src/org/eclipse/elk/alg/common/networksimplex/network_simplex.rs b/plugins/org.eclipse.elk.alg.common/src/org/eclipse/elk/alg/common/networksimplex/network_simplex.rs
+index 9161042..ba9d99b 100644
+--- a/plugins/org.eclipse.elk.alg.common/src/org/eclipse/elk/alg/common/networksimplex/network_simplex.rs
++++ b/plugins/org.eclipse.elk.alg.common/src/org/eclipse/elk/alg/common/networksimplex/network_simplex.rs
+@@ -12,6 +12,35 @@ use super::n_node::NNodeRef;
+ 
+ const REMOVE_SUBTREES_THRESH: usize = 40;
+ const FUZZY_ST_ZERO: f64 = -1e-10;
++/// Stands for no edge in an edge index: the parent and entry edge of the root of
++/// the post-order numbering, the parent edge of a node outside the spanning tree,
++/// and the stale edge of a node with none.
++const NO_EDGE: usize = usize::MAX;
++
++/// Scratch for recomputing the cut values an exchange invalidates, kept empty
++/// between exchanges.
++#[derive(Default)]
++struct StaleCutvalues {
++    /// Each stale tree edge, with its endpoint away from the cut-value root.
++    edges: Vec<(usize, usize)>,
++    /// The stale tree edge from each node toward the cut-value root, or `NO_EDGE`.
++    edge_up: Vec<usize>,
++    /// How many stale tree edges not yet recomputed reach each node from away
++    /// from the cut-value root.
++    below: Vec<u32>,
++    /// The stale edges whose cut value can be recomputed next.
++    ready: Vec<(usize, usize)>,
++}
++
++impl StaleCutvalues {
++    fn mark(&mut self, eid: usize, far: usize, near: usize) {
++        if self.edge_up[far] == NO_EDGE {
++            self.edge_up[far] = eid;
++            self.below[near] += 1;
++            self.edges.push((eid, far));
++        }
++    }
++}
+ 
+ pub struct NetworkSimplex<'a> {
+     graph: &'a mut NGraph,
+@@ -22,14 +51,16 @@ pub struct NetworkSimplex<'a> {
+     tree_edge_ids: Vec<usize>,
+     sources: Vec<NNodeRef>,
+     edge_visited: Vec<bool>,
+-    post_order: i32,
+     po_id: Vec<i32>,
+     lowest_po_id: Vec<i32>,
++    /// The tree edge from each node toward node 0, the root of the post-order
++    /// numbering.
++    parent_edge: Vec<usize>,
++    tree_degree: Vec<u32>,
+     cutvalue: Vec<f64>,
++    stale: StaleCutvalues,
+     subtree_nodes_stack: Option<VecDeque<Pair<NNodeRef, NEdgeRef>>>,
+     // Cached edge properties (indexed by edge internal_id, constant after initialize)
+-    e_src: Vec<NNodeRef>,
+-    e_tgt: Vec<NNodeRef>,
+     e_src_id: Vec<usize>,
+     e_tgt_id: Vec<usize>,
+     e_delta: Vec<i32>,
+@@ -40,8 +71,8 @@ pub struct NetworkSimplex<'a> {
+     // Cached node properties (indexed by node internal_id, synced during algorithm)
+     n_layer: Vec<i32>,
+     n_tree_node: Vec<bool>,
+-    // Reusable stack for iterative postorder traversal (nid, adj_cursor, lowest)
+-    postorder_stack: Vec<(usize, usize, i32)>,
++    // Reusable stack for iterative postorder traversal (nid, adj_cursor, lowest, entry edge)
++    postorder_stack: Vec<(usize, usize, i32, usize)>,
+ }
+ 
+ impl<'a> NetworkSimplex<'a> {
+@@ -55,13 +86,13 @@ impl<'a> NetworkSimplex<'a> {
+             tree_edge_ids: Vec::new(),
+             sources: Vec::new(),
+             edge_visited: Vec::new(),
+-            post_order: 1,
+             po_id: Vec::new(),
+             lowest_po_id: Vec::new(),
++            parent_edge: Vec::new(),
++            tree_degree: Vec::new(),
+             cutvalue: Vec::new(),
++            stale: StaleCutvalues::default(),
+             subtree_nodes_stack: None,
+-            e_src: Vec::new(),
+-            e_tgt: Vec::new(),
+             e_src_id: Vec::new(),
+             e_tgt_id: Vec::new(),
+             e_delta: Vec::new(),
+@@ -156,6 +187,10 @@ impl<'a> NetworkSimplex<'a> {
+         // tree_node sync to underlying NNode deferred — algorithm uses SoA cache only
+         self.po_id = vec![0; num_nodes];
+         self.lowest_po_id = vec![0; num_nodes];
++        self.parent_edge = vec![NO_EDGE; num_nodes];
++        self.tree_degree = vec![0; num_nodes];
++        self.stale.edge_up = vec![NO_EDGE; num_nodes];
++        self.stale.below = vec![0; num_nodes];
+         self.sources.clear();
+ 
+         let mut edges = Vec::new();
+@@ -170,15 +205,11 @@ impl<'a> NetworkSimplex<'a> {
+ 
+         // Build edge property cache (one lock per edge, all properties extracted)
+         let num_edges = edges.len();
+-        self.e_src.clear();
+-        self.e_tgt.clear();
+         self.e_src_id.clear();
+         self.e_tgt_id.clear();
+         self.e_delta.clear();
+         self.e_weight.clear();
+         self.e_tree.clear();
+-        self.e_src.reserve(num_edges);
+-        self.e_tgt.reserve(num_edges);
+         self.e_src_id.resize(num_edges, 0);
+         self.e_tgt_id.resize(num_edges, 0);
+         self.e_delta.resize(num_edges, 0);
+@@ -188,8 +219,6 @@ impl<'a> NetworkSimplex<'a> {
+         for (index, edge) in edges.iter().enumerate() {
+             let mut edge_guard = edge.lock();
+             edge_guard.internal_id = index;
+-            self.e_src.push(edge_guard.source.clone());
+-            self.e_tgt.push(edge_guard.target.clone());
+             self.e_delta[index] = edge_guard.delta;
+             self.e_weight[index] = edge_guard.weight;
+             self.e_tree[index] = false;
+@@ -231,7 +260,6 @@ impl<'a> NetworkSimplex<'a> {
+ 
+         self.edges = edges;
+         self.tree_edge_ids.clear();
+-        self.post_order = 1;
+     }
+ 
+     fn dispose(&mut self) {
+@@ -239,8 +267,6 @@ impl<'a> NetworkSimplex<'a> {
+         self.edges.clear();
+         self.tree_edge_ids.clear();
+         self.edge_visited.clear();
+-        self.e_src.clear();
+-        self.e_tgt.clear();
+         self.e_src_id.clear();
+         self.e_tgt_id.clear();
+         self.e_delta.clear();
+@@ -251,6 +277,9 @@ impl<'a> NetworkSimplex<'a> {
+         self.n_tree_node.clear();
+         self.lowest_po_id.clear();
+         self.po_id.clear();
++        self.parent_edge.clear();
++        self.tree_degree.clear();
++        self.stale = StaleCutvalues::default();
+         self.sources.clear();
+         self.subtree_nodes_stack = None;
+     }
+@@ -287,9 +316,8 @@ impl<'a> NetworkSimplex<'a> {
+             self.edge_visited.fill(false);
+         }
+ 
+-        self.edge_visited.fill(false);
+         if !self.graph.nodes.is_empty() {
+-            self.postorder_traversal(0);
++            self.postorder_traversal(0, NO_EDGE, 1);
+             self.cutvalues();
+         }
+     }
+@@ -422,29 +450,30 @@ impl<'a> NetworkSimplex<'a> {
+         min_eid
+     }
+ 
+-    fn postorder_traversal(&mut self, start_nid: usize) {
+-        // Iterative post-order DFS using explicit stack: (nid, adj_cursor, lowest)
++    /// Numbers the subtree `start_nid` roots in post-order from `first`, entered
++    /// through `entry_edge`. The subtree of a node holds the contiguous range
++    /// `lowest_po_id..=po_id` of the numbering, so renumbering a subtree whose
++    /// node set is unchanged from its old lowest number reproduces the numbering
++    /// of the whole tree.
++    fn postorder_traversal(&mut self, start_nid: usize, entry_edge: usize, first: i32) {
+         let mut stack = std::mem::take(&mut self.postorder_stack);
+         stack.clear();
+-        stack.push((start_nid, 0, i32::MAX));
++        stack.push((start_nid, 0, i32::MAX, entry_edge));
++        let mut post_order = first;
+ 
+         while let Some(frame) = stack.last_mut() {
+             let nid = frame.0;
+             let num_adj = self.node_edges[nid].len();
+ 
+-            // Advance through adjacency list to find next unvisited tree edge
++            // Advance through adjacency list to find the next tree edge to a child
+             let mut pushed = false;
+             while frame.1 < num_adj {
+                 let eid = self.node_edges[nid][frame.1];
+                 frame.1 += 1;
+-                if self.e_tree[eid] && !self.edge_visited[eid] {
+-                    self.edge_visited[eid] = true;
+-                    let opp_id = if self.e_src_id[eid] == nid {
+-                        self.e_tgt_id[eid]
+-                    } else {
+-                        self.e_src_id[eid]
+-                    };
+-                    stack.push((opp_id, 0, i32::MAX));
++                if self.e_tree[eid] && eid != frame.3 {
++                    let opp_id = self.opposite(eid, nid);
++                    self.parent_edge[opp_id] = eid;
++                    stack.push((opp_id, 0, i32::MAX, eid));
+                     pushed = true;
+                     break;
+                 }
+@@ -452,13 +481,11 @@ impl<'a> NetworkSimplex<'a> {
+ 
+             if !pushed {
+                 // Post-order: all children visited
+-                let (nid, _, lowest) = stack.pop().unwrap();
+-                let my_lowest = lowest.min(self.post_order);
+-                if nid < self.po_id.len() {
+-                    self.po_id[nid] = self.post_order;
+-                    self.lowest_po_id[nid] = my_lowest;
+-                }
+-                self.post_order += 1;
++                let (nid, _, lowest, _) = stack.pop().unwrap();
++                let my_lowest = lowest.min(post_order);
++                self.po_id[nid] = post_order;
++                self.lowest_po_id[nid] = my_lowest;
++                post_order += 1;
+                 // Propagate lowest to parent
+                 if let Some(parent) = stack.last_mut() {
+                     parent.2 = parent.2.min(my_lowest);
+@@ -469,6 +496,28 @@ impl<'a> NetworkSimplex<'a> {
+         self.postorder_stack = stack;
+     }
+ 
++    #[inline]
++    fn opposite(&self, eid: usize, nid: usize) -> usize {
++        if self.e_src_id[eid] == nid {
++            self.e_tgt_id[eid]
++        } else {
++            self.e_src_id[eid]
++        }
++    }
++
++    #[inline]
++    fn is_ancestor(&self, ancestor: usize, nid: usize) -> bool {
++        self.lowest_po_id[ancestor] <= self.po_id[nid] && self.po_id[nid] <= self.po_id[ancestor]
++    }
++
++    fn common_ancestor(&self, a: usize, b: usize) -> usize {
++        let mut ancestor = a;
++        while !self.is_ancestor(ancestor, b) {
++            ancestor = self.opposite(self.parent_edge[ancestor], ancestor);
++        }
++        ancestor
++    }
++
+     /// Check if `node` is in the head component of the spanning tree edge.
+     /// Uses pre-extracted edge source/target internal IDs to avoid repeated locks.
+     #[inline]
+@@ -483,88 +532,139 @@ impl<'a> NetworkSimplex<'a> {
+         self.po_id[source_id] < self.po_id[target_id]
+     }
+ 
++    /// The node the cut values are summed toward: the highest-indexed leaf of
++    /// the spanning tree. Each tree edge's cut value is accumulated at its
++    /// endpoint away from this node, from the cut values of the tree edges
++    /// beyond. Eclipse ELK 0.11.0's `NetworkSimplex.cutvalues` peels the tree's
++    /// leaves in node order, which accumulates every cut value at exactly that
++    /// endpoint, so the floating-point rounding, and with it every pivot, matches.
++    /// The spanning tree must hold an edge.
++    fn cutvalue_root(&self) -> usize {
++        (0..self.tree_degree.len())
++            .rev()
++            .find(|&nid| self.tree_degree[nid] == 1)
++            .expect("a spanning tree with an edge has a leaf")
++    }
++
+     fn cutvalues(&mut self) {
+-        let mut leafs: Vec<NNodeRef> = Vec::new();
+-        for node in &self.graph.nodes {
+-            let mut tree_edge_count = 0;
+-            {
+-                let mut node_guard = node.lock();
+-                let nid = node_guard.internal_id;
+-                node_guard.unknown_cutvalues.clear();
+-                // Use cached adjacency list + e_tree to avoid per-edge locks
+-                for &eid in &self.node_edges[nid] {
+-                    if self.e_tree[eid] {
+-                        node_guard.unknown_cutvalues.push(self.edges[eid].clone());
+-                        tree_edge_count += 1;
+-                    }
+-                }
+-            }
+-            if tree_edge_count == 1 {
+-                leafs.push(node.clone());
+-            }
++        self.tree_degree.fill(0);
++        for &eid in &self.tree_edge_ids {
++            self.tree_degree[self.e_src_id[eid]] += 1;
++            self.tree_degree[self.e_tgt_id[eid]] += 1;
+         }
++        if self.tree_edge_ids.is_empty() {
++            return;
++        }
++        let root = self.cutvalue_root();
+ 
+-        for mut node in leafs {
+-            loop {
+-                let to_determine = {
+-                    let guard = node.lock();
+-                    if guard.unknown_cutvalues.len() != 1 {
+-                        break;
+-                    }
+-                    guard.unknown_cutvalues[0].clone()
+-                };
+-
+-                let td_id = to_determine.lock().internal_id;
+-                if td_id >= self.cutvalue.len() {
++        // Post-order from the root: (nid, adj_cursor, entry edge)
++        let mut stack: Vec<(usize, usize, usize)> = vec![(root, 0, NO_EDGE)];
++        while let Some(frame) = stack.last_mut() {
++            let nid = frame.0;
++            let num_adj = self.node_edges[nid].len();
++            let mut child = None;
++            while frame.1 < num_adj {
++                let eid = self.node_edges[nid][frame.1];
++                frame.1 += 1;
++                if self.e_tree[eid] && eid != frame.2 {
++                    child = Some((self.opposite(eid, nid), eid));
+                     break;
+                 }
+-                // Use cached weight, source, target — zero extra locks
+-                let td_weight = self.e_weight[td_id];
+-                let source = self.e_src[td_id].clone();
+-                let target = self.e_tgt[td_id].clone();
+-                self.cutvalue[td_id] = td_weight;
+-
+-                // Use cached adjacency list for connected edges
+-                let nid = node.lock().internal_id;
+-                let num_adj = self.node_edges[nid].len();
+-                for i in 0..num_adj {
+-                    let eid = self.node_edges[nid][i];
+-                    if eid == td_id {
+-                        continue;
+-                    }
+-                    // All properties from cache — zero edge locks
+-                    let e_weight = self.e_weight[eid];
+-                    if self.e_tree[eid] {
+-                        let same_direction = Arc::ptr_eq(&self.e_src[eid], &source)
+-                            || Arc::ptr_eq(&self.e_tgt[eid], &target);
+-                        if same_direction {
+-                            self.cutvalue[td_id] -= self.cutvalue[eid] - e_weight;
+-                        } else {
+-                            self.cutvalue[td_id] += self.cutvalue[eid] - e_weight;
+-                        }
+-                    } else if Arc::ptr_eq(&node, &source) {
+-                        if Arc::ptr_eq(&self.e_src[eid], &node) {
+-                            self.cutvalue[td_id] += e_weight;
+-                        } else {
+-                            self.cutvalue[td_id] -= e_weight;
+-                        }
+-                    } else if Arc::ptr_eq(&self.e_src[eid], &node) {
+-                        self.cutvalue[td_id] -= e_weight;
+-                    } else {
+-                        self.cutvalue[td_id] += e_weight;
++            }
++            match child {
++                Some((child_id, eid)) => stack.push((child_id, 0, eid)),
++                None => {
++                    let (nid, _, entry_edge) = stack.pop().unwrap();
++                    if entry_edge != NO_EDGE {
++                        self.compute_cutvalue(entry_edge, nid);
+                     }
+                 }
++            }
++        }
++    }
+ 
+-                remove_unknown_cutvalue(&source, &to_determine);
+-                remove_unknown_cutvalue(&target, &to_determine);
+-
+-                if Arc::ptr_eq(&source, &node) {
+-                    node = target;
++    /// Sets the cut value of tree edge `td_id` from its endpoint `nid` away from
++    /// the cut-value root, whose other tree edges must hold their cut values.
++    fn compute_cutvalue(&mut self, td_id: usize, nid: usize) {
++        let source = self.e_src_id[td_id];
++        let target = self.e_tgt_id[td_id];
++        let mut cutvalue = self.e_weight[td_id];
++        for &eid in &self.node_edges[nid] {
++            if eid == td_id {
++                continue;
++            }
++            let e_weight = self.e_weight[eid];
++            if self.e_tree[eid] {
++                let same_direction = self.e_src_id[eid] == source || self.e_tgt_id[eid] == target;
++                if same_direction {
++                    cutvalue -= self.cutvalue[eid] - e_weight;
++                } else {
++                    cutvalue += self.cutvalue[eid] - e_weight;
++                }
++            } else if nid == source {
++                if self.e_src_id[eid] == nid {
++                    cutvalue += e_weight;
+                 } else {
+-                    node = source;
++                    cutvalue -= e_weight;
+                 }
++            } else if self.e_src_id[eid] == nid {
++                cutvalue -= e_weight;
++            } else {
++                cutvalue += e_weight;
++            }
++        }
++        self.cutvalue[td_id] = cutvalue;
++    }
++
++    /// Recomputes the cut values an exchange invalidated. A cut value depends only
++    /// on the tree beyond its edge's far endpoint, so it is stale exactly when
++    /// that part holds a node whose tree edges changed or the previous cut-value
++    /// root: the edges on the paths from those nodes to the current `root`.
++    fn update_cutvalues(&mut self, changed: &[usize], root: usize) {
++        for &from in changed {
++            self.collect_path_to_root(from, root);
++        }
++        // An edge is recomputed once every stale edge beyond it is.
++        let stale = &mut self.stale;
++        stale.ready.extend(
++            stale
++                .edges
++                .iter()
++                .copied()
++                .filter(|&(_, far)| stale.below[far] == 0),
++        );
++        while let Some((eid, far)) = self.stale.ready.pop() {
++            self.compute_cutvalue(eid, far);
++            let near = self.opposite(eid, far);
++            let stale = &mut self.stale;
++            stale.below[near] -= 1;
++            if stale.below[near] == 0 && stale.edge_up[near] != NO_EDGE {
++                stale.ready.push((stale.edge_up[near], near));
+             }
+         }
++        let stale = &mut self.stale;
++        for &(_, far) in &stale.edges {
++            stale.edge_up[far] = NO_EDGE;
++        }
++        stale.edges.clear();
++    }
++
++    fn collect_path_to_root(&mut self, from: usize, root: usize) {
++        let top = self.common_ancestor(from, root);
++        let mut nid = from;
++        while nid != top {
++            let eid = self.parent_edge[nid];
++            let near = self.opposite(eid, nid);
++            self.stale.mark(eid, nid, near);
++            nid = near;
++        }
++        let mut nid = root;
++        while nid != top {
++            let eid = self.parent_edge[nid];
++            let far = self.opposite(eid, nid);
++            self.stale.mark(eid, far, nid);
++            nid = far;
++        }
+     }
+ 
+     fn leave_edge(&self) -> Option<usize> {
+@@ -625,6 +725,17 @@ impl<'a> NetworkSimplex<'a> {
+         let enter_src_id = self.e_src_id[enter_id];
+         let enter_tgt_id = self.e_tgt_id[enter_id];
+ 
++        // The numbering and the tree degrees still describe the tree before the
++        // exchange, which replaces an edge of the tree cycle `enter_id` closes,
++        // all of it below `cycle_top`.
++        let cycle_top = self.common_ancestor(enter_src_id, enter_tgt_id);
++        let old_root = self.cutvalue_root();
++        self.tree_degree[leave_src_id] -= 1;
++        self.tree_degree[leave_tgt_id] -= 1;
++        self.tree_degree[enter_src_id] += 1;
++        self.tree_degree[enter_tgt_id] += 1;
++        let root = self.cutvalue_root();
++
+         let mut delta =
+             self.n_layer[enter_tgt_id] - self.n_layer[enter_src_id] - self.e_delta[enter_id];
+         if !self.is_in_head_by_id(enter_tgt_id, leave_src_id, leave_tgt_id) {
+@@ -639,12 +750,19 @@ impl<'a> NetworkSimplex<'a> {
+             }
+         }
+ 
+-        self.post_order = 1;
+-        self.edge_visited.fill(false);
+-        if !self.graph.nodes.is_empty() {
+-            self.postorder_traversal(0);
+-        }
+-        self.cutvalues();
++        self.postorder_traversal(
++            cycle_top,
++            self.parent_edge[cycle_top],
++            self.lowest_po_id[cycle_top],
++        );
++        let changed = [
++            leave_src_id,
++            leave_tgt_id,
++            enter_src_id,
++            enter_tgt_id,
++            old_root,
++        ];
++        self.update_cutvalues(&changed, root);
+     }
+ 
+     fn normalize(&mut self) -> Vec<i32> {
+@@ -807,13 +925,6 @@ fn edge_target_is(edge: &NEdgeRef, node: &NNodeRef) -> bool {
+     Arc::ptr_eq(&edge_target(edge), node)
+ }
+ 
+-fn remove_unknown_cutvalue(node: &NNodeRef, edge: &NEdgeRef) {
+-    let mut node_guard = node.lock();
+-    node_guard
+-        .unknown_cutvalues
+-        .retain(|candidate| !Arc::ptr_eq(candidate, edge));
+-}
+-
+ fn remove_edge_from_node(node: &NNodeRef, edge: &NEdgeRef, outgoing: bool) {
+     let mut node_guard = node.lock();
+     if outgoing {

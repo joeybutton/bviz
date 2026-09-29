@@ -8,4 +8,5 @@ name = "bviz_alloc"
 path = "src/lib.rs"
 
 [dependencies]
+libmimalloc-sys = { workspace = true }
 mimalloc = { workspace = true }

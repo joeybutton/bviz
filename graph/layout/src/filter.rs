@@ -12,7 +12,10 @@
 //! selection, the layout's pinning anchors and the name table all key on the
 //! id, and all of them go on meaning what they meant.
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeSet, HashSet};
+use std::hash::BuildHasher;
+
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::graph::{EdgeKind, Graph, Node};
 use crate::intern::Id;
@@ -44,8 +47,9 @@ pub const MAX_BRIDGE_FAN_OUT: usize = 32;
 /// own edges are read from `graph` itself, so this is not a reduced view: a
 /// caller that draws dependencies unreduced gets every one of them, and
 /// reducing the result is a further pass it may decline.
-pub fn filter(graph: &Graph, reduced: &Graph, keep: &HashSet<Id>) -> Graph {
-    let parent_of: HashMap<Id, Option<Id>> = graph.nodes.iter().map(|n| (n.id, n.parent)).collect();
+pub fn filter<S: BuildHasher>(graph: &Graph, reduced: &Graph, keep: &HashSet<Id, S>) -> Graph {
+    let parent_of: FxHashMap<Id, Option<Id>> =
+        graph.nodes.iter().map(|n| (n.id, n.parent)).collect();
 
     let mut out = Graph::new();
     out.nodes.reserve(keep.len());
@@ -68,7 +72,8 @@ pub fn filter(graph: &Graph, reduced: &Graph, keep: &HashSet<Id>) -> Graph {
 
     // A pair enters this only where both its ends are kept, so what bounds it is
     // the keep set and not the whole graph's edge list.
-    let mut direct: HashSet<(Id, Id)> = HashSet::with_capacity(keep.len());
+    let mut direct: FxHashSet<(Id, Id)> =
+        FxHashSet::with_capacity_and_hasher(keep.len(), Default::default());
     for edge in &graph.edges {
         if keep.contains(&edge.from) && keep.contains(&edge.to) {
             direct.insert((edge.from, edge.to));
@@ -85,7 +90,11 @@ pub fn filter(graph: &Graph, reduced: &Graph, keep: &HashSet<Id>) -> Graph {
 /// The kept pairs `graph` joins through dropped nodes and `direct` does not
 /// already join, a source reaching at most [`MAX_BRIDGE_FAN_OUT`] targets
 /// through each run it enters.
-fn bridges(graph: &Graph, keep: &HashSet<Id>, direct: &HashSet<(Id, Id)>) -> Vec<(Id, Id)> {
+fn bridges<S: BuildHasher>(
+    graph: &Graph,
+    keep: &HashSet<Id, S>,
+    direct: &FxHashSet<(Id, Id)>,
+) -> Vec<(Id, Id)> {
     let runs = DroppedRuns::new(graph, keep);
     let frontier = runs.frontiers();
 
@@ -117,10 +126,11 @@ struct DroppedRuns {
 }
 
 impl DroppedRuns {
-    fn new(graph: &Graph, keep: &HashSet<Id>) -> Self {
+    fn new<S: BuildHasher>(graph: &Graph, keep: &HashSet<Id, S>) -> Self {
         // Only a dropped node an edge reaches can carry one, so indexing the
         // edges' endpoints indexes every dropped node a bridge could run over.
-        let mut index: HashMap<Id, u32> = HashMap::with_capacity(graph.nodes.len());
+        let mut index: FxHashMap<Id, u32> =
+            FxHashMap::with_capacity_and_hasher(graph.nodes.len(), Default::default());
         for id in graph.edges.iter().flat_map(|e| [e.from, e.to]) {
             if !keep.contains(&id) {
                 let next = index.len() as u32;
@@ -195,6 +205,7 @@ mod tests {
     use crate::lod;
     use crate::map::map_layout;
     use crate::reduce;
+    use std::collections::HashMap;
 
     /// A graph built from `(from, to, EdgeKind::Query)` edges plus, for any node
     /// not otherwise named, a lone node with no parent.

@@ -3,6 +3,7 @@ use bviz_graph_layout::{
     Anchor, Capabilities, Facets, Id, LaidOut, Names, layout, quotient, streamed_proto,
 };
 use bviz_ui_graph_args::{Input, InputKind};
+use rustc_hash::FxHashSet;
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 /// Reads every input's streamed_proto file and merges them into one joint graph,
@@ -62,7 +63,7 @@ fn reduce_view(
 ) -> Graph {
     let skeleton = bviz_graph_layout::lod::collapse(reduced_base, expanded);
     let box_of = |id: Id| remap.get(&id).copied().unwrap_or(id);
-    let kept: HashSet<(Id, Id)> = skeleton
+    let kept: FxHashSet<(Id, Id)> = skeleton
         .edges
         .iter()
         .map(|e| (box_of(e.from), box_of(e.to)))
@@ -97,7 +98,7 @@ pub(crate) fn relayout(
         .edges
         .iter()
         .map(|e| (e.from, e.to))
-        .collect::<HashSet<_>>()
+        .collect::<FxHashSet<_>>()
         .into_iter()
         .collect();
     if reduced {

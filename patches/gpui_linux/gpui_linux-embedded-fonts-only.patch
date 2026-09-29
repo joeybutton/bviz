@@ -1,3 +1,9 @@
+Start the text system without the system fonts
+
+Enumerating every system font holds up startup on the main thread. The
+application registers its own embedded faces, which cover its
+ASCII/Latin-1 labels.
+
 --- a/crates/gpui_linux/src/linux/platform.rs
 +++ b/crates/gpui_linux/src/linux/platform.rs
 @@ -130,7 +130,7 @@

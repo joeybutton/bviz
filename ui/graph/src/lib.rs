@@ -52,10 +52,10 @@ use checklist::OriginRow;
 use derive::{Derived, Drawn, Expandable, LayoutLanded};
 use drag::{Drag, end_drag, start_pan, track_gesture};
 use emphasis::Emphasis;
-use framing::{Framing, build_prepaint};
+use framing::{Framing, Target, build_prepaint};
 use legend::Legend;
 use mode::LayoutMode;
-use model::{GraphModel, SourceReplaced};
+use model::{GraphModel, MapPlaced, SourceReplaced};
 use morph::{Frame, Morph};
 use paint::{Scene, TitleTarget, canvas_body};
 use relation::Relation;
@@ -213,6 +213,8 @@ pub struct GraphPanel {
     /// Derives what the selected mode draws as the read lands: a derivation
     /// asked for while the graph was still being read could not start.
     _source_replaced: Subscription,
+    /// Derives the levels of the panel's restriction as the map lands.
+    _map_placed: Subscription,
     /// Box under the cursor.
     hovered: Option<Id>,
     /// The box whose related nodes stay marked, and how far that marking reaches;
@@ -249,6 +251,18 @@ impl GraphPanel {
     /// The layout the selected mode draws, or `None` while it is being derived.
     fn drawn(&self) -> Option<Drawn> {
         self.derived.drawn(self.mode)
+    }
+
+    /// The zoom a frame resolves `drawn`'s view at. Where that is a map whose
+    /// camera awaits its fit, the fit picks the level, so this is the zoom the
+    /// fit gives, and `None` while the canvas it fits to is unmeasured.
+    fn view_zoom(&self, drawn: &Drawn) -> Option<f32> {
+        match drawn {
+            Drawn::Map { .. } if !self.framing.fitted() => {
+                self.framing.pending_fit(drawn.content())
+            }
+            _ => Some(self.camera().zoom),
+        }
     }
 
     /// The canonical labels the loaded graph's nodes belong to, which a search
@@ -335,6 +349,9 @@ impl GraphPanel {
             derive::opened(view, cx);
             checklist::adopt(view, cx);
         });
+        let map_placed = cx.subscribe(&model, |view, _, _: &MapPlaced, cx| {
+            derive::placed(view, cx)
+        });
         Self {
             focus_handle: cx.focus_handle(),
             title,
@@ -360,6 +377,7 @@ impl GraphPanel {
             _search_typing: search_typing,
             _changed: changed,
             _source_replaced: source_replaced,
+            _map_placed: map_placed,
             hovered: None,
             selection,
             relation_picker,
@@ -403,12 +421,19 @@ impl GraphPanel {
     /// that layout is still being computed — the toolbar stays above either, so
     /// the picker remains reachable.
     fn viewport(&mut self, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
+        let laying_out = || bviz_ui_components::centered_spinner("Laying out…", &palette.colors);
         let Some(drawn) = self.drawn() else {
-            return bviz_ui_components::centered_spinner("Laying out…", &palette.colors)
+            let entity = cx.entity();
+            return laying_out()
+                .relative()
+                .child(overlay_canvas(move |bounds, _, cx| {
+                    entity.update(cx, |view, _| view.framing.measure(bounds));
+                }))
                 .into_any_element();
         };
-        let zoom = self.camera().zoom;
-        let edge_legend = self.edge_legend.card(&drawn, zoom, &palette);
+        let zoom = self.view_zoom(&drawn);
+        let underived = zoom.is_some_and(|zoom| drawn.view(zoom).is_none());
+        let edge_legend = zoom.and_then(|zoom| self.edge_legend.card(&drawn, zoom, &palette));
         let entity = cx.entity();
         div()
             .id("graph-viewport")
@@ -416,6 +441,7 @@ impl GraphPanel {
             .size_full()
             .overflow_hidden()
             .child(cached_layer(self.canvas.clone()))
+            .children(underived.then(|| div().absolute().size_full().flex().child(laying_out())))
             .child(
                 // What the drawing itself cannot state, held clear of the graph
                 // at the foot of the canvas.
@@ -514,15 +540,10 @@ impl GraphPanel {
         let camera = self.camera();
         let vp = self.framing.viewport();
         let morph = self.morph_frame();
-        let hit = box_at(
-            &self.titles,
-            drawn.view(camera.zoom),
-            morph.as_ref(),
-            vp,
-            camera,
-            e.position,
-        )
-        .map(|b| b.id);
+        let hit = drawn
+            .view(camera.zoom)
+            .and_then(|g| box_at(&self.titles, g, morph.as_ref(), vp, camera, e.position))
+            .map(|b| b.id);
         if hit != self.hovered {
             self.hovered = hit;
             self.invalidate_canvas(cx);
@@ -603,8 +624,8 @@ impl Panel for GraphPanel {
         Some(
             derive::status(
                 self.model.read(cx).source(),
-                self.drawn(),
-                self.camera().zoom,
+                self.drawn()
+                    .and_then(|drawn| self.view_zoom(&drawn).map(|zoom| (drawn, zoom))),
                 self.derived.over_budget(),
             )
             .into(),
@@ -686,9 +707,11 @@ impl Render for GraphCanvas {
         let Some(drawn) = view.drawn() else {
             return div().into_any_element();
         };
-        let g = drawn.view(view.camera().zoom);
         let content = drawn.content();
-        let recenter_target = recenter_rect(g, &view.emphasis);
+        let recenter_target = match view.view_zoom(&drawn).and_then(|zoom| drawn.view(zoom)) {
+            None => Target::Pending,
+            Some(g) => Target::Resolved(recenter_rect(g, &view.emphasis)),
+        };
         let scene = Scene {
             expandable: view.expandable(),
             palette,
@@ -770,7 +793,9 @@ fn click_box_at(view: &mut GraphPanel, pos: Point<Pixels>, cx: &mut Context<Grap
     let Some(drawn) = view.drawn() else {
         return;
     };
-    let g = drawn.view(camera.zoom);
+    let Some(g) = drawn.view(camera.zoom) else {
+        return;
+    };
     let morph = view.morph_frame();
     let expandable = view.expandable();
     let hit =
@@ -797,15 +822,8 @@ fn select_box_at(view: &mut GraphPanel, pos: Point<Pixels>, cx: &mut Context<Gra
         .drawn()
         .filter(|_| vp.contains(&pos))
         .and_then(|drawn| {
-            box_at(
-                &view.titles,
-                drawn.view(camera.zoom),
-                morph.as_ref(),
-                vp,
-                camera,
-                pos,
-            )
-            .map(|b| b.id)
+            let g = drawn.view(camera.zoom)?;
+            box_at(&view.titles, g, morph.as_ref(), vp, camera, pos).map(|b| b.id)
         });
     match hit {
         Some(id) => view.selection.toggle(id),
@@ -840,7 +858,7 @@ fn hit_box<'a>(
 
 /// A joint graph being read and laid out.
 pub struct Load {
-    built: Pending<model::Loaded>,
+    built: Pending<model::Read>,
     title: SharedString,
 }
 

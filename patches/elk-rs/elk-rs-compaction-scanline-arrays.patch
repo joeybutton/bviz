@@ -1,0 +1,135 @@
+Keep the compaction scanline's crossed nodes in flat arrays
+
+The post-compaction scanline finds each node it crosses by comparing
+reference pointers and recomputing centers through RefCell borrows.
+
+diff --git a/plugins/org.eclipse.elk.alg.layered/src/org/eclipse/elk/alg/layered/intermediate/horizontal_graph_compactor.rs b/plugins/org.eclipse.elk.alg.layered/src/org/eclipse/elk/alg/layered/intermediate/horizontal_graph_compactor.rs
+index e9c75b6..411aaa7 100644
+--- a/plugins/org.eclipse.elk.alg.layered/src/org/eclipse/elk/alg/layered/intermediate/horizontal_graph_compactor.rs
++++ b/plugins/org.eclipse.elk.alg.layered/src/org/eclipse/elk/alg/layered/intermediate/horizontal_graph_compactor.rs
+@@ -1483,15 +1483,22 @@ fn edge_aware_timestamp_cmp(left: &EdgeAwareTimestamp, right: &EdgeAwareTimestam
+     cmp
+ }
+ 
++/// The nodes the scanline crosses, ordered by their horizontal centers, in
++/// vectors that run in step. A node's hitbox stays put while the scanline
++/// crosses it, so its center is taken once, as it enters.
+ struct EdgeAwareScanlineHandler {
+     intervals: Vec<CNodeRef>,
++    centers: Vec<f64>,
++    ids: Vec<usize>,
+     cand: Vec<Option<CNodeRef>>,
+ }
+ 
+ impl EdgeAwareScanlineHandler {
+     fn new(node_count: usize) -> Self {
+         Self {
+-            intervals: Vec::new(),
++            intervals: Vec::with_capacity(node_count),
++            centers: Vec::with_capacity(node_count),
++            ids: Vec::with_capacity(node_count),
+             cand: vec![None; node_count],
+         }
+     }
+@@ -1505,21 +1512,31 @@ impl EdgeAwareScanlineHandler {
+     }
+ 
+     fn insert(&mut self, node: &CNodeRef) {
+-        let position = self.insertion_pos(node);
++        let center = cnode_center_x(node);
++        let node_id = node.borrow().id as usize;
++        // The first center not below this one, a NaN included.
++        let position = self
++            .centers
++            .iter()
++            .position(|&other| !(other < center))
++            .unwrap_or(self.centers.len());
+         self.intervals.insert(position, node.clone());
++        self.centers.insert(position, center);
++        self.ids.insert(position, node_id);
+ 
+-        let node_id = node.borrow().id as usize;
+-        self.cand[node_id] = self.lower(node);
++        self.cand[node_id] = self.lower(position);
+ 
+-        if let Some(right) = self.higher(node) {
+-            let right_id = right.borrow().id as usize;
+-            self.cand[right_id] = Some(node.clone());
++        if let Some(right_id) = self.ids.get(position + 1) {
++            self.cand[*right_id] = Some(node.clone());
+         }
+     }
+ 
+     fn delete(&mut self, node: &CNodeRef) {
+-        if let Some(left) = self.lower(node) {
+-            let node_id = node.borrow().id as usize;
++        let node_id = node.borrow().id as usize;
++        let Some(position) = self.ids.iter().position(|&id| id == node_id) else {
++            return;
++        };
++        if let Some(left) = self.lower(position) {
+             if self.cand[node_id]
+                 .as_ref()
+                 .is_some_and(|candidate| Rc::ptr_eq(candidate, &left))
+@@ -1529,8 +1546,8 @@ impl EdgeAwareScanlineHandler {
+             }
+         }
+ 
+-        if let Some(right) = self.higher(node) {
+-            let right_id = right.borrow().id as usize;
++        if let Some(right) = self.higher(position) {
++            let right_id = self.ids[position + 1];
+             if self.cand[right_id]
+                 .as_ref()
+                 .is_some_and(|candidate| Rc::ptr_eq(candidate, node))
+@@ -1540,42 +1557,19 @@ impl EdgeAwareScanlineHandler {
+             }
+         }
+ 
+-        self.intervals
+-            .retain(|candidate| !Rc::ptr_eq(candidate, node));
++        self.intervals.remove(position);
++        self.centers.remove(position);
++        self.ids.remove(position);
+     }
+ 
+-    fn insertion_pos(&self, node: &CNodeRef) -> usize {
+-        let center = cnode_center_x(node);
+-        let mut position = 0usize;
+-        while position < self.intervals.len() && cnode_center_x(&self.intervals[position]) < center
+-        {
+-            position += 1;
+-        }
++    fn lower(&self, position: usize) -> Option<CNodeRef> {
+         position
++            .checked_sub(1)
++            .map(|index| self.intervals[index].clone())
+     }
+ 
+-    fn index_of(&self, node: &CNodeRef) -> Option<usize> {
+-        self.intervals
+-            .iter()
+-            .position(|candidate| Rc::ptr_eq(candidate, node))
+-    }
+-
+-    fn lower(&self, node: &CNodeRef) -> Option<CNodeRef> {
+-        let index = self.index_of(node)?;
+-        if index > 0 {
+-            Some(self.intervals[index - 1].clone())
+-        } else {
+-            None
+-        }
+-    }
+-
+-    fn higher(&self, node: &CNodeRef) -> Option<CNodeRef> {
+-        let index = self.index_of(node)?;
+-        if index + 1 < self.intervals.len() {
+-            Some(self.intervals[index + 1].clone())
+-        } else {
+-            None
+-        }
++    fn higher(&self, position: usize) -> Option<CNodeRef> {
++        self.intervals.get(position + 1).cloned()
+     }
+ }
+ 

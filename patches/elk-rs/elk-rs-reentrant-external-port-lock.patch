@@ -1,3 +1,9 @@
+Release an external port dummy's lock before searching its constraints
+
+Every layered layout that runs an interactive phase and has an edge
+crossing a container boundary hangs: InteractiveExternalPortPositioner
+holds a node's lock while calling searches that lock that same node.
+
 --- a/plugins/org.eclipse.elk.alg.layered/src/org/eclipse/elk/alg/layered/intermediate/interactive_external_port_positioner.rs
 +++ b/plugins/org.eclipse.elk.alg.layered/src/org/eclipse/elk/alg/layered/intermediate/interactive_external_port_positioner.rs
 @@ -57,57 +57,70 @@
