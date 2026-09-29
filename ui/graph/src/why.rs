@@ -6,11 +6,14 @@
 //! returns to it along with the filter.
 
 use crate::mode::LayoutMode;
+use crate::paint::paint_diamond;
 use crate::{CARD_MAX_SHARE, GraphPanel, Palette, derive};
+use bviz_graph_layout::capability::TRANSITIONS_FLAG;
 use bviz_graph_layout::paths::{self, Paths};
 use bviz_graph_layout::select::labels::carried_label;
-use bviz_graph_layout::{Facets, Id, Names};
-use bviz_ui_components::{Button, TextTooltip, TooltipColors, load_in_background};
+use bviz_graph_layout::transition::Transitions;
+use bviz_graph_layout::{Axis, Capabilities, Facets, Id, Kind, Names, Support};
+use bviz_ui_components::{Button, TextTooltip, TooltipColors, load_in_background, overlay_canvas};
 use gpui::{
     ClickEvent, Context, Div, Pixels, SharedString, Stateful, Task, div, prelude::*, px, relative,
 };
@@ -176,6 +179,23 @@ impl Spelling {
             None => named.label.clone(),
         }
     }
+}
+
+/// What the card says of the transitions the drawing cannot mark, where the
+/// inputs leave some edges without the configuration of their dependency, or
+/// hold no configured target at all where `configured` is false.
+fn unmarked_transitions(capabilities: &Capabilities, configured: bool) -> Option<SharedString> {
+    if !configured {
+        return Some(
+            format!("transitions unmarked — they need a cquery run with {TRANSITIONS_FLAG}").into(),
+        );
+    }
+    let unmarked = match capabilities.support(Axis::ExecConfiguration) {
+        Support::Available => return None,
+        Support::Partial { .. } => "some transitions unmarked",
+        Support::Unavailable { .. } => "transitions unmarked",
+    };
+    Some(format!("{unmarked} — run the cquery with {TRANSITIONS_FLAG}").into())
 }
 
 /// How many nodes the paths hold, as the card states it.
@@ -383,33 +403,57 @@ fn endpoint(
 }
 
 /// The shortest chain, from the dependent down to the dependency, each link
-/// after the first led by a mark reading as "which depends on".
+/// after the first led by a mark reading as "which depends on": the badge of the
+/// transition the drawing marks on the edge the link follows, where it marks
+/// one.
 fn chain<'a>(
     shortest: &'a [Named],
+    transitions: &'a Transitions,
     spelling: &'a Spelling,
     palette: &'a Palette,
 ) -> impl Iterator<Item = Stateful<Div>> + 'a {
     let tip = TooltipColors::from_colors(&palette.colors);
-    shortest.iter().enumerate().map(move |(link, named)| {
-        div()
-            .id(("why-link", link))
-            .flex()
-            .items_center()
-            .gap_1()
-            .min_w_0()
-            .tooltip(TextTooltip::builder(spelling.full(named), tip))
-            .child(
-                div()
-                    .size(LINK_MARK)
-                    .flex_none()
-                    .children((link > 0).then(|| {
-                        bviz_ui_assets::icon("caret-down")
-                            .size(LINK_MARK)
-                            .text_color(palette.colors.text_muted)
-                    })),
-            )
-            .child(line(spelling.name(named)))
-    })
+    let above = std::iter::once(None).chain(shortest.iter().map(Some));
+    shortest
+        .iter()
+        .zip(above)
+        .enumerate()
+        .map(move |(link, (named, dependent))| {
+            let transition =
+                dependent.and_then(|dependent| transitions.get(named.id, dependent.id));
+            div()
+                .id(("why-link", link))
+                .flex()
+                .items_center()
+                .gap_1()
+                .min_w_0()
+                .tooltip(TextTooltip::builder(spelling.full(named), tip))
+                .child(
+                    div()
+                        .size(LINK_MARK)
+                        .flex_none()
+                        .relative()
+                        .children(transition.map(|transition| {
+                            let color = palette.transition_color(transition);
+                            overlay_canvas(move |bounds, window, _| {
+                                paint_diamond(
+                                    bounds.center(),
+                                    f32::from(LINK_MARK) / 2.,
+                                    color,
+                                    window,
+                                )
+                            })
+                            .into_any_element()
+                        }))
+                        .children((link > 0 && transition.is_none()).then(|| {
+                            bviz_ui_assets::icon("caret-down")
+                                .size(LINK_MARK)
+                                .text_color(palette.colors.text_muted)
+                                .into_any_element()
+                        })),
+                )
+                .child(line(spelling.name(named)))
+        })
 }
 
 /// The question asked and what answers it, floating over the drawing; `None`
@@ -431,6 +475,22 @@ pub(crate) fn card(
         .chain(&question.dependent)
         .chain(shortest);
     let spelling = Spelling::of(shown);
+    let found = matches!(
+        answer,
+        Answering::Answered(Answer::Dependents { .. } | Answer::Between { .. })
+    );
+    let unmarked = match found {
+        true => view.model.read(cx).loaded().and_then(|loaded| {
+            let configured = view.classes.contains(&Kind::ConfiguredTarget);
+            unmarked_transitions(&loaded.shared.capabilities, configured)
+        }),
+        false => None,
+    };
+    // A map level draws the reduction of what it holds and folds edges into
+    // its boxes, so it marks the transitions only of the edges it draws.
+    let map_note = (found && view.mode == LayoutMode::Map)
+        .then_some("the map leaves some transitions unmarked; the layered layout marks each");
+    let transitions = view.derived.transitions();
     let from = match &question.dependent {
         Some(dependent) => endpoint("why-from", "from ", dependent, &spelling, palette),
         None => div().id("why-from").child(line("from every dependent")),
@@ -476,13 +536,16 @@ pub(crate) fn card(
             ))
             .child(from)
             .child(line(status))
-            .children(chain(shortest, &spelling, palette)),
+            .children(unmarked.map(|unmarked| div().min_w_0().child(unmarked)))
+            .children(map_note.map(|note| div().min_w_0().child(note)))
+            .children(chain(shortest, &transitions, &spelling, palette)),
     )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bviz_graph_layout::capability::CapabilitiesBuilder;
     use bviz_graph_layout::facets::Tri;
 
     /// The configured target `worker` in the configuration checksummed
@@ -532,6 +595,42 @@ mod tests {
         let both = Spelling::of([&one, &other].into_iter());
         assert_eq!(both.name(&one), ":worker (k8-fastbuild aaaaaa)");
         assert_eq!(both.name(&other), ":worker (k8-fastbuild bbbbbb)");
+    }
+
+    fn observed(resolved: &[bool]) -> Capabilities {
+        let mut capabilities = CapabilitiesBuilder::default();
+        for &resolved in resolved {
+            capabilities.observe(Axis::ExecConfiguration, resolved);
+        }
+        capabilities.seal()
+    }
+
+    #[test]
+    fn inputs_stating_every_dependency_configuration_mark_every_transition() {
+        assert_eq!(unmarked_transitions(&observed(&[true, true]), true), None);
+        assert_eq!(unmarked_transitions(&observed(&[]), true), None);
+    }
+
+    #[test]
+    fn inputs_lacking_dependency_configurations_name_the_flag_supplying_them() {
+        assert_eq!(
+            unmarked_transitions(&observed(&[false, false]), true).as_deref(),
+            Some("transitions unmarked — run the cquery with --transitions=lite")
+        );
+        assert_eq!(
+            unmarked_transitions(&observed(&[true, false]), true).as_deref(),
+            Some("some transitions unmarked — run the cquery with --transitions=lite")
+        );
+    }
+
+    /// A query states no configuration at all, so a graph read from one alone
+    /// holds no configured target for a transition to run between.
+    #[test]
+    fn inputs_holding_no_configured_target_need_a_cquery() {
+        assert_eq!(
+            unmarked_transitions(&observed(&[]), false).as_deref(),
+            Some("transitions unmarked — they need a cquery run with --transitions=lite")
+        );
     }
 
     #[test]

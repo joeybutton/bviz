@@ -18,6 +18,7 @@ use bviz_graph_layout::graph::Graph;
 use bviz_graph_layout::lod::{DEFAULT_MAX_EDGES, DEFAULT_MAX_NODES, Overflow};
 use bviz_graph_layout::paths::Paths;
 use bviz_graph_layout::select::{Filter, Verdict};
+use bviz_graph_layout::transition::Transitions;
 use bviz_graph_layout::{Id, LaidOut, MapLayout, Names};
 use bviz_ui_components::load_in_background;
 use gpui::{Context, Task};
@@ -204,6 +205,9 @@ struct Slice {
     /// The nodes the filter draws as no part of what it selects, which the
     /// drawing fades rather than leaving out.
     faded: Arc<HashSet<Id>>,
+    /// The configuration transitions the graph's edges cross, which the drawing
+    /// marks; found for dependency paths alone.
+    transitions: Arc<Transitions>,
     /// Extended by each layered layout over this graph, whose quotient pass
     /// mints group ids against it.
     names: Names,
@@ -226,6 +230,7 @@ struct RestrictedMap {
     placement: Placement,
     base: Arc<Graph>,
     reduced: Arc<Graph>,
+    transitions: Arc<Transitions>,
     map: Arc<OnceLock<Arc<MapLayout>>>,
     /// Whether the levels of `map` have been asked for.
     levels_asked: Arc<AtomicBool>,
@@ -236,7 +241,11 @@ impl RestrictedMap {
     fn placed(&self) -> Option<&Arc<MapLayout>> {
         let whole = self.placement.placed()?;
         Some(self.map.get_or_init(|| {
-            Arc::new(whole.restricted(Arc::clone(&self.base), Arc::clone(&self.reduced)))
+            Arc::new(whole.restricted(
+                Arc::clone(&self.base),
+                Arc::clone(&self.reduced),
+                Arc::clone(&self.transitions),
+            ))
         }))
     }
 
@@ -263,6 +272,7 @@ impl Slice {
             map: SliceMap::Whole(shared.map.clone()),
             containers: Arc::clone(&shared.containers),
             faded: Arc::new(HashSet::new()),
+            transitions: Arc::default(),
             names: Names::clone(&shared.names),
         }
     }
@@ -539,6 +549,13 @@ impl Derived {
             || Arc::new(HashSet::new()),
             |slice| Arc::clone(&slice.faded),
         )
+    }
+
+    /// The configuration transitions the drawing marks.
+    pub(crate) fn transitions(&self) -> Arc<Transitions> {
+        self.slice
+            .as_ref()
+            .map_or_else(Arc::default, |slice| Arc::clone(&slice.transitions))
     }
 
     /// Whether a derivation is running, so a view can show a progress indicator
@@ -857,6 +874,7 @@ fn request(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
                         expanded,
                         &mut slice.names,
                         reduced,
+                        &slice.transitions,
                         held.as_ref().map(|held| &held.view.anchors),
                     )),
                     base: Arc::clone(&slice.base),
@@ -935,7 +953,8 @@ fn restrict(
         },
         false => {
             let base = bviz_graph_layout::filter::filter(&shared.base, &shared.reduced_base, &keep);
-            restricted_slice(shared, Lens::Filter(filter.clone()), base, faded)
+            let lens = Lens::Filter(filter.clone());
+            restricted_slice(shared, lens, base, faded, Arc::default())
         }
     };
     let restricted = keeping(&slice, expanded, dropped, reduced);
@@ -967,7 +986,8 @@ fn restrict_to_paths(shared: &Shared, paths: &Arc<Paths>) -> (Slice, Restricted)
         Err(overflow) => (HashSet::new(), Some(overflow)),
     };
     let lens = Lens::Paths(Arc::clone(paths));
-    let slice = restricted_slice(shared, lens, base, Arc::new(HashSet::new()));
+    let transitions = Arc::new(Transitions::of(&base, &shared.facets));
+    let slice = restricted_slice(shared, lens, base, Arc::new(HashSet::new()), transitions);
     let restricted = Restricted {
         dropped,
         expanded,
@@ -977,8 +997,15 @@ fn restrict_to_paths(shared: &Shared, paths: &Arc<Paths>) -> (Slice, Restricted)
 }
 
 /// `base`, a restriction of `shared`'s graph through `lens`, with its reduction,
-/// its containers, and its map placed where the document places it.
-fn restricted_slice(shared: &Shared, lens: Lens, base: Graph, faded: Arc<HashSet<Id>>) -> Slice {
+/// its containers, and its map placed where the document places it; `faded` and
+/// `transitions` are what the drawing marks of it.
+fn restricted_slice(
+    shared: &Shared,
+    lens: Lens,
+    base: Graph,
+    faded: Arc<HashSet<Id>>,
+    transitions: Arc<Transitions>,
+) -> Slice {
     let reduction = bviz_graph_layout::reduce::transitive_reduction(&base);
     let containers = Arc::new(bviz_graph_layout::lod::expandable_containers(&base));
     let (base, reduction) = (Arc::new(base), Arc::new(reduction));
@@ -988,6 +1015,7 @@ fn restricted_slice(shared: &Shared, lens: Lens, base: Graph, faded: Arc<HashSet
             placement: shared.map.clone(),
             base: Arc::clone(&base),
             reduced: Arc::clone(&reduction),
+            transitions: Arc::clone(&transitions),
             map: Arc::default(),
             levels_asked: Arc::default(),
         }),
@@ -995,6 +1023,7 @@ fn restricted_slice(shared: &Shared, lens: Lens, base: Graph, faded: Arc<HashSet
         reduced: reduction,
         containers,
         faded,
+        transitions,
         names: Names::clone(&shared.names),
     }
 }

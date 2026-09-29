@@ -35,6 +35,7 @@ use org_eclipse_elk_graph::org::eclipse::elk::graph::{
 
 use crate::graph::{Containment, EdgeKind, Graph, Kind, Node};
 use crate::intern::Id;
+use crate::transition::Transition;
 
 /// Above this many routed node pairs the view is a dense tangle whose crossings
 /// ELK's default thoroughness spends most of the layout time refining for little
@@ -114,6 +115,10 @@ pub struct Connector {
     /// Node ids the edge runs between, for hit-testing a node's connections.
     pub from: Id,
     pub to: Id,
+    /// The configuration transition the edges drawn along this route cross,
+    /// the exec transition where several are crossed; left for the caller that
+    /// knows the transitions to state.
+    pub transition: Option<Transition>,
 }
 
 /// A node's place in the layered configuration of the frame that laid it out.
@@ -496,6 +501,7 @@ fn collect_connectors(edges: Vec<RoutedEdge>) -> Vec<Connector> {
                     kinds,
                     from,
                     to,
+                    transition: None,
                 })
             },
         )

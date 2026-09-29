@@ -122,6 +122,7 @@ mod tests {
                 kinds: vec![EdgeKind::Query],
                 from: Id(0),
                 to: Id(1),
+                transition: None,
             }],
             full_edges: vec![(Id(0), Id(1))],
             ..Default::default()

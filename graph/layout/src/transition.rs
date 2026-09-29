@@ -9,6 +9,7 @@ use rustc_hash::FxHashMap;
 use crate::facets::{Facets, Tri};
 use crate::graph::{Graph, Kind, id_span};
 use crate::intern::Id;
+use crate::layout::Connector;
 
 /// A change of configuration from a dependent to its dependency.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -67,6 +68,26 @@ impl Transitions {
     pub fn get(&self, from: Id, to: Id) -> Option<Transition> {
         self.0.get(&(from, to)).copied()
     }
+
+    /// States on each of `connectors` the transition the edges drawn along it
+    /// cross, the exec transition where several are crossed. `drawn` names the
+    /// pair of boxes an edge of the graph these were found in is drawn between,
+    /// `None` for an edge the drawing folds away.
+    pub fn mark(&self, connectors: &mut [Connector], drawn: impl Fn(Id, Id) -> Option<(Id, Id)>) {
+        let mut crossed: FxHashMap<(Id, Id), Transition> =
+            FxHashMap::with_capacity_and_hasher(self.0.len(), Default::default());
+        for (&(from, to), &transition) in &self.0 {
+            if let Some(pair) = drawn(from, to) {
+                let held = crossed.entry(pair).or_insert(transition);
+                if transition == Transition::Exec {
+                    *held = transition;
+                }
+            }
+        }
+        for connector in connectors {
+            connector.transition = crossed.get(&(connector.from, connector.to)).copied();
+        }
+    }
 }
 
 #[cfg(test)]
@@ -119,6 +140,60 @@ mod tests {
         let (graph, facets) = fixture();
         let transitions = Transitions::of(&graph, &facets);
         assert_eq!(transitions.get(Id(0), Id(2)), Some(Transition::Other));
+    }
+
+    fn connector(from: u32, to: u32) -> Connector {
+        Connector {
+            points: Vec::new(),
+            kinds: vec![EdgeKind::Cquery],
+            from: Id(from),
+            to: Id(to),
+            transition: None,
+        }
+    }
+
+    /// Nodes `2` and `3` folded into box `20`, `0` drawn as `10` and `1` as
+    /// `11`, and the rest folded away.
+    #[test]
+    fn a_connector_carries_the_transitions_folded_into_it() {
+        let (graph, facets) = fixture();
+        let drawn = |from: Id, to: Id| {
+            let box_of = |id: Id| match id.0 {
+                0 => Some(Id(10)),
+                1 => Some(Id(11)),
+                2 | 3 => Some(Id(20)),
+                _ => None,
+            };
+            Some((box_of(from)?, box_of(to)?))
+        };
+        let mut connectors = [connector(20, 10), connector(10, 20), connector(10, 11)];
+        Transitions::of(&graph, &facets).mark(&mut connectors, drawn);
+        let marked: Vec<Option<Transition>> = connectors.iter().map(|c| c.transition).collect();
+        assert_eq!(
+            marked,
+            [Some(Transition::Exec), Some(Transition::Other), None],
+            "an exec transition and another folded together, one other, none"
+        );
+    }
+
+    /// An action or an artifact takes the configuration of the configured
+    /// target holding it, and an edge between two of them joins steps inside
+    /// the build of their targets rather than a dependency one target takes on
+    /// another, so it crosses no transition however the two are configured.
+    #[test]
+    fn an_edge_between_actions_and_artifacts_crosses_nothing() {
+        let (mut graph, mut facets) = fixture();
+        let exec = facets.config(Id(2)).expect("the exec configuration");
+        let target = facets.config(Id(0)).expect("the target configuration");
+        graph.add_node(Node::new(Id(6), "tool.jar", Kind::Artifact, Some(Id(2))));
+        graph.add_node(Node::new(Id(7), "Javac", Kind::Action, Some(Id(0))));
+        facets.set_config(Id(6), Some(exec));
+        facets.set_config(Id(7), Some(target));
+        graph.add_edge(Id(6), Id(7), EdgeKind::Aquery);
+        graph.add_edge(Id(6), Id(0), EdgeKind::Aquery);
+        let transitions = Transitions::of(&graph, &facets);
+        assert_eq!(transitions.get(Id(6), Id(7)), None, "artifact to action");
+        assert_eq!(transitions.get(Id(6), Id(0)), None, "artifact to target");
     }
 
     #[test]

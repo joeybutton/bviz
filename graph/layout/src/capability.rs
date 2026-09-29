@@ -9,6 +9,10 @@
 //! A field written and empty everywhere — an action list of aspect descriptors
 //! for a build that runs no aspect action — is support with no values to offer.
 
+/// The cquery flag under which each dependency edge states the configuration
+/// its dependency is built in.
+pub const TRANSITIONS_FLAG: &str = "--transitions=lite";
+
 /// A property a filter predicate selects nodes by.
 ///
 /// The discriminants index [`Axis::ALL`], which lists them in that same order.
@@ -66,7 +70,7 @@ impl Axis {
             // A cquery asked for no configurations writes query's message type
             // instead, which is no longer cquery output at all.
             Axis::Configuration => None,
-            Axis::ExecConfiguration => Some("--transitions=lite"),
+            Axis::ExecConfiguration => Some(TRANSITIONS_FLAG),
             Axis::Tags | Axis::Testonly => Some("--proto:output_rule_attrs"),
             Axis::Artifacts => Some("--include_artifacts"),
         }

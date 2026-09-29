@@ -288,6 +288,7 @@ mod tests {
                     kinds: vec![EdgeKind::Query],
                     from: Id(from),
                     to: Id(to),
+                    transition: None,
                 })
                 .collect(),
             full_edges: full.iter().map(|&(from, to)| (Id(from), Id(to))).collect(),

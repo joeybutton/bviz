@@ -54,6 +54,11 @@ fn child_counts(graph: &Graph) -> FxHashMap<Id, usize> {
 /// (both endpoints in the same collapsed subtree) dropped, and duplicates merged
 /// keeping their `EdgeKind`.
 pub fn collapse(graph: &Graph, expanded: &HashSet<Id>) -> Graph {
+    collapse_folded(graph, expanded).0
+}
+
+/// [`collapse`], with where it folds each node of `graph`.
+pub fn collapse_folded(graph: &Graph, expanded: &HashSet<Id>) -> (Graph, Folding) {
     let indexed = IndexedGraph::new(graph);
     let rep = indexed.reps(&indexed.expanded_indices(expanded));
 
@@ -73,7 +78,20 @@ pub fn collapse(graph: &Graph, expanded: &HashSet<Id>) -> Graph {
             out.add_edge(Id(from), Id(to), kind);
         }
     }
-    out
+    (out, Folding { rep })
+}
+
+/// Where [`collapse`] folds each node of one graph.
+pub struct Folding {
+    rep: Vec<u32>,
+}
+
+impl Folding {
+    /// The boxes [`collapse`] draws an edge of the graph from `from` to `to`
+    /// between, `None` where it folds the edge away.
+    pub fn pair(&self, from: Id, to: Id) -> Option<(Id, Id)> {
+        IndexedGraph::folded(&self.rep, from.0, to.0).map(|(from, to)| (Id(from), Id(to)))
+    }
 }
 
 /// The node pairs [`collapse`] would leave, without materializing the folded

@@ -1,4 +1,5 @@
 use bviz_graph_layout::graph::Graph;
+use bviz_graph_layout::transition::Transitions;
 use bviz_graph_layout::{
     Anchor, Capabilities, Facets, Id, LaidOut, Names, layout, quotient, streamed_proto,
 };
@@ -79,6 +80,9 @@ fn reduce_view(
 /// result's `full_edges` is the visible view's unreduced connectivity, for
 /// hover.
 ///
+/// Each connector carries the transition of `transitions`, found over `base`,
+/// that the edges folded into it cross.
+///
 /// `pinned` is the configuration of the drawing this one replaces, which the
 /// layout is held to so every box the two drawings share keeps its reading
 /// order; the first layered layout of a session has no drawing to replace. A
@@ -90,9 +94,10 @@ pub(crate) fn relayout(
     expanded: &HashSet<Id>,
     names: &mut Names,
     reduced: bool,
+    transitions: &Transitions,
     pinned: Option<&HashMap<Id, Anchor>>,
 ) -> LaidOut {
-    let visible = bviz_graph_layout::lod::collapse(base, expanded);
+    let (visible, folding) = bviz_graph_layout::lod::collapse_folded(base, expanded);
     let (mut view, remap) = quotient::quotient(&visible, expanded, names);
     let full_edges: Vec<(Id, Id)> = view
         .edges
@@ -109,6 +114,11 @@ pub(crate) fn relayout(
         None => layout::layout(&view),
     };
     laid.full_edges = full_edges;
+    let box_of = |id: Id| remap.get(&id).copied().unwrap_or(id);
+    transitions.mark(&mut laid.connectors, |from, to| {
+        let (from, to) = folding.pair(from, to)?;
+        Some((box_of(from), box_of(to)))
+    });
     laid
 }
 
@@ -118,6 +128,66 @@ mod tests {
     use bviz_graph_layout::graph::Node;
     use bviz_graph_layout::{EdgeKind, Kind};
     use std::cmp::Ordering;
+
+    /// A target whose two configured targets are built as tools, one of which
+    /// the configured target `app` depends on: the connector into `app` carries
+    /// the exec transition whether the tools are drawn or folded into their
+    /// target, and the edge between the tools none.
+    #[test]
+    fn a_connector_carries_the_transitions_folded_into_it() {
+        use bviz_graph_layout::facets::Tri;
+        use bviz_graph_layout::transition::Transition;
+
+        let mut names = Names::default();
+        let mut base = Graph::new();
+        let mut facets = Facets::default();
+        let exec = facets.intern_config("ck1", Some("k8-opt-exec"), Tri::Yes);
+        let target = facets.intern_config("ck2", Some("k8-fastbuild"), Tri::No);
+        let tool = names.intern("tool");
+        base.add_node(Node::new(tool, "tool", Kind::Target, None));
+        let mut add = |name: &str, parent: Option<Id>, config| {
+            let id = names.intern(name);
+            base.add_node(Node::new(id, name, Kind::ConfiguredTarget, parent));
+            facets.set_config(id, Some(config));
+            id
+        };
+        let (built, other) = (
+            add("built", Some(tool), exec),
+            add("other", Some(tool), exec),
+        );
+        let app = add("app", None, target);
+        base.add_edge(built, app, EdgeKind::Cquery);
+        base.add_edge(other, built, EdgeKind::Cquery);
+        let transitions = Transitions::of(&base, &facets);
+        let reduced_base = bviz_graph_layout::reduce::transitive_reduction(&base);
+
+        for (expanded, from) in [(HashSet::new(), tool), ([tool].into(), built)] {
+            let laid = relayout(
+                &base,
+                &reduced_base,
+                &expanded,
+                &mut names,
+                false,
+                &transitions,
+                None,
+            );
+            let crossed: Vec<(Id, Id, Option<Transition>)> = laid
+                .connectors
+                .iter()
+                .map(|c| (c.from, c.to, c.transition))
+                .collect();
+            assert!(
+                crossed.contains(&(from, app, Some(Transition::Exec))),
+                "{crossed:?}"
+            );
+            assert!(
+                crossed
+                    .iter()
+                    .all(|&(_, to, crossed)| to == app || crossed.is_none()),
+                "{crossed:?}"
+            );
+        }
+    }
 
     /// A graph and the tables a relayout of it needs, so a test draws it at an
     /// expansion of its choosing.
@@ -183,6 +253,7 @@ mod tests {
                 expanded,
                 &mut self.names,
                 true,
+                &Transitions::default(),
                 pinned,
             )
         }
