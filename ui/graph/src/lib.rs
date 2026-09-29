@@ -46,6 +46,7 @@ mod scroll;
 mod search;
 mod selection;
 mod toolbar;
+mod why;
 
 use camera::{Camera, Rect, from_screen, recenter_rect, zoom_step};
 use checklist::OriginRow;
@@ -63,10 +64,7 @@ use scroll::{scrollbar_hit, start_scroll_drag};
 use search::Search;
 use selection::Selection;
 
-actions!(
-    bviz_graph,
-    [ToggleNeighborhood, ToggleReduce, ClearSelection]
-);
+actions!(bviz_graph, [ToggleNeighborhood, ToggleReduce, Dismiss]);
 
 /// The key context scoping the graph's own bindings, so a key pressed here
 /// reaches this panel and no other.
@@ -80,7 +78,7 @@ pub fn register_keys(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new("h", ToggleNeighborhood, outside_search),
         KeyBinding::new("r", ToggleReduce, outside_search),
-        KeyBinding::new("escape", ClearSelection, outside_search),
+        KeyBinding::new("escape", Dismiss, outside_search),
         // Escape acts on the innermost thing holding focus: in the field that
         // is the card the typed pattern put up over the drawing.
         KeyBinding::new("escape", search::DismissResults, Some(search::KEY_CONTEXT)),
@@ -234,6 +232,9 @@ pub struct GraphPanel {
     missing_open: bool,
     /// How the card listing the overrides in force is scrolled.
     pins: pins::Pins,
+    /// The dependency paths asked for, which the panel draws in place of its
+    /// filter.
+    why: why::Why,
     /// The titles the canvas drew, rewritten by every paint and resolved against
     /// a pointer by [`box_at`].
     titles: Vec<TitleTarget>,
@@ -385,6 +386,7 @@ impl GraphPanel {
             neighborhood_enabled: true,
             missing_open: false,
             pins: pins::Pins::new(),
+            why: why::Why::new(),
             titles: Vec::new(),
             canvas,
             edge_legend: Legend::default(),
@@ -458,6 +460,7 @@ impl GraphPanel {
             )
             .children(search::card(self, &palette, cx))
             .children(pins::panel(self, &palette, cx))
+            .children(why::card(self, &palette, cx))
             // A replayed scene installs the handlers recorded with it, which a
             // press's own frame has yet to make; the panel's own paint is what
             // installs them for the gesture that press begins.
@@ -479,25 +482,35 @@ impl GraphPanel {
     }
 
     /// Switches which layout is drawn, starting the newly selected one's if it
-    /// has not been computed yet. The two span different extents, so the view
-    /// refits.
+    /// has not been computed yet.
+    fn set_mode(&mut self, mode: LayoutMode, cx: &mut Context<Self>) {
+        if self.switch_mode(mode, cx) {
+            derive::ensure_layout(self, cx);
+            self.invalidate_canvas(cx);
+        }
+    }
+
+    /// Switches which layout is drawn, leaving it to the caller to derive what
+    /// that mode draws; reports whether the mode changed. The two span
+    /// different extents, so the view refits.
     ///
     /// The hover, the emphasis and the morph all describe the layout being left:
     /// an emphasis carried across would let a relayout still in flight settle the
     /// incoming view onto a box picked out in the other one, and highlight it,
     /// and a morph would ease boxes of the layout left behind over the one
     /// arriving.
-    fn set_mode(&mut self, mode: LayoutMode, cx: &mut Context<Self>) {
+    fn switch_mode(&mut self, mode: LayoutMode, cx: &mut Context<Self>) -> bool {
         if self.mode == mode {
-            return;
+            return false;
         }
         self.mode = mode;
+        self.mode_picker
+            .update(cx, |picker, cx| picker.set_selected(mode.index(), cx));
         self.hovered = None;
         self.emphasis.clear();
         self.morph.clear();
         self.framing.refit();
-        derive::ensure_layout(self, cx);
-        self.invalidate_canvas(cx);
+        true
     }
 
     fn on_mouse_down(&mut self, e: &MouseDownEvent, _: &mut Window, cx: &mut Context<Self>) {
@@ -580,6 +593,17 @@ impl GraphPanel {
         self.invalidate_canvas(cx);
     }
 
+    /// Puts away the innermost thing the reader set up: the selection, and
+    /// with none the dependency paths asked for.
+    fn dismiss(&mut self, cx: &mut Context<Self>) {
+        if self.selection.node().is_some() {
+            self.selection.clear();
+            self.invalidate_canvas(cx);
+        } else {
+            why::clear(self, cx);
+        }
+    }
+
     fn toggle_neighborhood(&mut self, cx: &mut Context<Self>) {
         self.neighborhood_enabled = !self.neighborhood_enabled;
         self.invalidate_canvas(cx);
@@ -592,7 +616,7 @@ impl GraphPanel {
     }
 
     fn toggle_reduce(&mut self, cx: &mut Context<Self>) {
-        if !self.mode.honors_reduce() {
+        if !self.mode.honors_reduce() || self.derived.reduced().is_none() {
             return;
         }
         derive::toggle_reduce(self, cx);
@@ -649,10 +673,7 @@ impl Render for GraphPanel {
                 cx.listener(|view, _: &ToggleNeighborhood, _, cx| view.toggle_neighborhood(cx)),
             )
             .on_action(cx.listener(|view, _: &ToggleReduce, _, cx| view.toggle_reduce(cx)))
-            .on_action(cx.listener(|view, _: &ClearSelection, _, cx| {
-                view.selection.clear();
-                view.invalidate_canvas(cx);
-            }))
+            .on_action(cx.listener(|view, _: &Dismiss, _, cx| view.dismiss(cx)))
             .track_focus(&self.focus_handle)
             .flex_1()
             .flex()
@@ -671,6 +692,7 @@ impl Render for GraphPanel {
                     preset_filter: self.preset_filter.clone(),
                     relation_picker: self.selection.node().map(|_| self.relation_picker.clone()),
                     pin_control: pins::control(self, cx).map(IntoElement::into_any_element),
+                    why_controls: why::controls(self, cx).map(IntoElement::into_any_element),
                     neighborhood_enabled: self.neighborhood_enabled,
                     reduced: self.derived.reduced(),
                     relaying: self.derived.deriving(),
@@ -747,8 +769,11 @@ struct Controls {
     /// The override offered on the selected box, which stands beside that
     /// picker.
     pin_control: Option<AnyElement>,
+    /// The questions asked of the selected box, which stand beside the pin.
+    why_controls: Option<AnyElement>,
     neighborhood_enabled: bool,
-    reduced: bool,
+    /// `None` where the drawing offers no choice of edge set.
+    reduced: Option<bool>,
     relaying: bool,
 }
 

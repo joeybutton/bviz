@@ -11,7 +11,7 @@
 //! that list samples the matches so a reader can see what the pattern reached,
 //! and the count beside it covers all of them.
 
-use crate::{CARD_MAX_SHARE, GraphPanel, Palette, checklist, pins};
+use crate::{CARD_MAX_SHARE, GraphPanel, Palette, checklist, pins, why};
 use bviz_graph_layout::Id;
 use bviz_graph_layout::select::labels::LabelIndex;
 use bviz_graph_layout::select::pattern::Pattern;
@@ -507,6 +507,18 @@ fn row(
                 .whitespace_nowrap()
                 .text_ellipsis()
                 .child(SharedString::from(matched.label.clone())),
+        )
+        .child(
+            Button::new(
+                ("search-why", target.0 as usize),
+                cx.listener(move |view, _: &ClickEvent, _, cx| {
+                    cx.stop_propagation();
+                    why::ask_why(view, target, cx);
+                }),
+            )
+            .ghost()
+            .label("why")
+            .compact(),
         )
 }
 
