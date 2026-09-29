@@ -18,6 +18,7 @@ mod label;
 pub mod layout;
 pub mod lod;
 pub mod map;
+pub mod paths;
 pub mod query;
 pub mod quotient;
 pub mod reduce;
