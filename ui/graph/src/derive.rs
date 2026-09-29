@@ -254,7 +254,7 @@ impl Slice {
             map: SliceMap::Whole(shared.map.clone()),
             containers: Arc::clone(&shared.containers),
             faded: Arc::new(HashSet::new()),
-            names: shared.names.clone(),
+            names: Names::clone(&shared.names),
         }
     }
 
@@ -861,7 +861,7 @@ fn restrict(
                 reduced: reduction,
                 containers,
                 faded,
-                names: shared.names.clone(),
+                names: Names::clone(&shared.names),
             }
         }
     };
@@ -956,7 +956,7 @@ mod tests {
                 base,
                 reduced_base,
                 map: placement,
-                names,
+                names: Arc::new(names),
                 facets,
                 labels,
                 containers,
