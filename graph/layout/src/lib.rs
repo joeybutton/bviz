@@ -25,6 +25,7 @@ pub mod reduce;
 pub mod repo;
 pub mod select;
 pub mod streamed_proto;
+pub mod transition;
 
 #[cfg(test)]
 mod test_support;
