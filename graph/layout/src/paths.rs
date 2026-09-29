@@ -26,6 +26,40 @@ pub struct Paths {
     pub edges: Vec<Edge>,
 }
 
+impl Paths {
+    /// `graph` cut down to these paths: their nodes with every containment
+    /// ancestor, so each still stands in the package and target holding it, and
+    /// their edges alone. Every node kept keeps its id and its parent.
+    pub fn subgraph(&self, graph: &Graph) -> Graph {
+        let ids = self
+            .nodes
+            .iter()
+            .map(|id| id.0 as usize + 1)
+            .fold(id_span(graph), usize::max);
+        let mut parent: Vec<Option<Id>> = vec![None; ids];
+        for node in &graph.nodes {
+            parent[node.id.0 as usize] = node.parent;
+        }
+        let mut kept: Vec<bool> = vec![false; ids];
+        for &id in &self.nodes {
+            let mut at = Some(id);
+            while let Some(id) = at.filter(|id| !kept[id.0 as usize]) {
+                kept[id.0 as usize] = true;
+                at = parent[id.0 as usize];
+            }
+        }
+        Graph {
+            nodes: graph
+                .nodes
+                .iter()
+                .filter(|node| kept[node.id.0 as usize])
+                .cloned()
+                .collect(),
+            edges: self.edges.clone(),
+        }
+    }
+}
+
 /// The dependency paths joining a dependent to one of its dependencies.
 #[derive(Clone)]
 pub struct Between {
@@ -672,6 +706,32 @@ mod tests {
         assert_eq!(edges(&dependents(&graph, Id(1))), [(1, 2), (12, 13)]);
         let found = between(&graph, Id(1), Id(3)).expect("a path");
         assert_eq!(edges(&found.paths), [(1, 2), (12, 13)]);
+    }
+
+    #[test]
+    fn a_subgraph_keeps_the_frames_around_the_paths_and_their_edges_alone() {
+        let mut graph = levels();
+        graph.add_edge(Id(11), Id(12), EdgeKind::Cquery);
+        let found = between(&graph, Id(12), Id(13)).expect("a path");
+        let drawn = found.paths.subgraph(&graph);
+        let mut kept: Vec<(u32, Option<u32>)> = drawn
+            .nodes
+            .iter()
+            .map(|n| (n.id.0, n.parent.map(|p| p.0)))
+            .collect();
+        kept.sort_unstable();
+        assert_eq!(
+            kept,
+            [
+                (0, None),
+                (2, Some(0)),
+                (3, Some(0)),
+                (12, Some(2)),
+                (13, Some(3))
+            ]
+        );
+        let pairs: Vec<(u32, u32)> = drawn.edges.iter().map(|e| (e.from.0, e.to.0)).collect();
+        assert_eq!(pairs, [(12, 13)]);
     }
 
     #[test]
