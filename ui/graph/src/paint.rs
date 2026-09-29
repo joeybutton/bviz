@@ -95,6 +95,10 @@ const MARKED_WIDTH: f32 = 2.0 * CONNECTOR_WIDTH;
 /// Set where the nearest of those bounds is furthest off.
 const MARK_LIFT: f32 = 0.072;
 
+/// How far a split's badge is carried from the purple slot toward the red one:
+/// halfway, to a magenta no slot holds and neither neighbour's stroke wears.
+const SPLIT_BLEND: f32 = 0.5;
+
 /// Half the diagonal (pre-zoom px) of the diamond set halfway along a connector
 /// that crosses a configuration transition, wide enough to stand across every
 /// lane of a bundle so the mark reads as the pair's rather than one lane's.
@@ -441,14 +445,19 @@ impl Palette {
         }
     }
 
-    /// The hue a transition badge is filled with, apart from every provenance's
-    /// so it does not read as one more connector.
+    /// The fill of a transition badge: each kind its own, and no badge sharing
+    /// a hue with an edge kind's stroke, so a badge never reads as a piece of
+    /// route. The slots no edge kind takes are too few for every kind, so one
+    /// kind takes a hue between two slots, and an unknown change, which says
+    /// least of what changed, wears the label ink.
     pub(crate) fn transition_color(&self, transition: Transition) -> Rgba {
         match transition {
-            Transition::Exec => self.data.yellow,
-            Transition::Other => self.data.purple,
+            Transition::Exec => self.data.yellow.into(),
+            Transition::Platform => self.data.purple.into(),
+            Transition::Flag => self.data.green.into(),
+            Transition::Split => bviz_ui_theme::mix(self.data.purple, self.data.red, SPLIT_BLEND),
+            Transition::Changed => self.label,
         }
-        .into()
     }
 
     /// [`MARK_LIFT`] signed to point away from the canvas: up on a theme dark
@@ -1598,6 +1607,33 @@ mod colors {
             }
         }
         inks
+    }
+
+    /// A badge's kind is read off its fill, so no two kinds may be taken for
+    /// each other, for the stroke of a route, or for the canvas rim around it.
+    #[test]
+    fn every_transition_badge_is_told_from_the_others_and_from_every_route() {
+        for (theme, p) in palettes() {
+            for (i, kind) in Transition::ALL.iter().enumerate() {
+                let fill = p.transition_color(*kind);
+                let rim = distance(fill, p.background);
+                assert!(rim >= MIN_DISTINCT_COLOR, "{theme} {kind:?}: {rim}");
+                for edge in EDGE_KINDS {
+                    let apart = distance(fill, p.edge_color(edge, false));
+                    assert!(
+                        apart >= MIN_DISTINCT_COLOR,
+                        "{theme} {kind:?}/{edge:?}: {apart}"
+                    );
+                }
+                for other in &Transition::ALL[i + 1..] {
+                    let apart = distance(fill, p.transition_color(*other));
+                    assert!(
+                        apart >= MIN_DISTINCT_COLOR,
+                        "{theme} {kind:?}/{other:?}: {apart}"
+                    );
+                }
+            }
+        }
     }
 
     /// A leaf's kind is read off the color of the box, so no two kinds may be
