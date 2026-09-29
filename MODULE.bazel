@@ -80,11 +80,6 @@ crate.from_cargo(
     cargo_toml = "//:Cargo.toml",
     platform_triples = PLATFORM_TRIPLES,
 )
-
-# InteractiveExternalPortPositioner holds a node's lock while calling the searches
-# that re-lock that same node, and elk-rs's node lock is a plain parking_lot mutex,
-# so the thread blocks on itself. Every layered layout that runs an interactive
-# phase and has an edge crossing a container boundary reaches it and hangs.
 crate.annotation(
     crate = "org-eclipse-elk-alg-layered",
     patch_args = ["-p1"],
@@ -99,36 +94,6 @@ crate.annotation_select(
     crate_features = ["source-fontconfig-dlopen"],
     triples = LINUX_TRIPLES,
 )
-
-# Fixes and startup tuning for gpui's Linux backend:
-# - untile-restore: gpui restores the floating window size on un-maximize but not
-#   un-tile, leaving the window stuck at the tiled size; preserve window_bounds
-#   while tiled so it restores on untile.
-# - clear-hover-on-leave: gpui recomputes hover only on mouse-move, so a pointer
-#   leaving the window leaves the last element hovered; synthesize an off-screen
-#   move on wl_pointer.leave to clear it.
-# - embedded-fonts-only: construct the text system with an empty font DB to skip
-#   the ~700ms startup enumeration of every system font on the main thread; the
-#   app registers its own embedded faces, which cover its ASCII/Latin-1 labels.
-# - platform-drag: gpui's Wayland backend binds wl_data_device for the clipboard
-#   and for incoming file drops alone; carry a drag the application offers over
-#   on a wl_data_source with an icon surface of its own, and report a drag
-#   carrying the mime type the application takes to whichever window it is
-#   carried over. A wl_data_source reports a release over a surface that takes
-#   nothing exactly as it reports a gesture called off, so the source alone
-#   cannot say whether a panel was let go of over the desktop or the gesture
-#   abandoned. Mutter reports the release of a source carrying an
-#   xdg_toplevel_drag_v1 as a drop and only then cancels the source, which the
-#   patch reads as PlatformDragEnd::Released. Neither xdg-toplevel-drag-v1 nor
-#   wl_data_source promises that ordering: it is Mutter's treatment of the
-#   object, observed on GNOME 50.4 and on no other compositor.
-#
-#   xdg-toplevel-drag-v1 is a staging protocol and adoption is uneven; the
-#   compositors built on wlroots (Sway, Hyprland, river, cage) and Weston offer
-#   no xdg_toplevel_drag_manager_v1 at all. The patch asks for the object only
-#   where the compositor advertises the global, so on such a session a release
-#   over the desktop reaches the application as PlatformDragEnd::Cancelled and
-#   tearing a panel out of its window does nothing.
 crate.annotation(
     crate = "gpui_linux",
     patch_args = ["-p1"],
@@ -151,16 +116,6 @@ crate.annotation(
 # value in GPUI_MANIFEST_DIR, which bakes the exec root into every build of the
 # crate. Point it at the manifest's path within gpui's source tree so the
 # compiled output stays independent of where the build ran.
-#
-# gpui carries a drag to its own views and never to the window system, so
-# nothing outside the window a gesture started in hears of one, and nothing it
-# draws is reachable past that window's edge. The platform-drag patch gives a
-# window the requests to offer a gesture to the window system, to say which mime
-# type it takes a drag under, and to hear what a drag the window system carries
-# does; a backend that implements none of them takes no gesture and says so.
-# Rasterizing a glyph goes with them: what a window system draws for a drag is
-# an image, and gpui's text system is where the application's own faces are
-# loaded.
 crate.annotation(
     additive_build_file_content = """filegroup(
     name = "scene_src",
@@ -206,11 +161,6 @@ crate.annotation_select(
 
 # Link the BCR system libraries (aliased under //third_party) into the -sys crates
 # that bind them.
-#
-# The patch removes xkbcommon's X11 FFI, which links the unavailable
-# libxkbcommon-x11; gpui uses only Wayland, so it is dead code. Disabling the x11
-# feature instead would not work: it comes from gpui_linux's dependency spec, and
-# rules_rs resolves features from unpatched metadata.
 crate.annotation(
     crate = "xkbcommon",
     patch_args = ["-p1"],

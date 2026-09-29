@@ -1,3 +1,8 @@
+Restore the floating window size on untile
+
+gpui restores the floating window size on un-maximize but not un-tile,
+leaving the window stuck at the tiled size.
+
 diff --git a/crates/gpui_linux/src/linux/wayland/window.rs b/crates/gpui_linux/src/linux/wayland/window.rs
 index 9d5c85b..db50a6c 100644
 --- a/crates/gpui_linux/src/linux/wayland/window.rs
