@@ -4,6 +4,7 @@
 mod paint;
 mod plot;
 
+use crate::drag::CLICK_SLOP;
 use crate::model::{GraphModel, Loaded};
 use crate::{Palette, model::SourceReplaced};
 use bviz_graph_layout::Kind;
@@ -13,8 +14,8 @@ use bviz_ui_components::{cached_layer, centered_spinner};
 use bviz_ui_workspace::{Panel, PanelEvent, PanelKind, ViewKind};
 use gpui::{
     App, Bounds, Context, Div, Entity, EventEmitter, FocusHandle, Focusable, IntoElement,
-    MouseMoveEvent, Pixels, Point, Render, Rgba, SharedString, Subscription, Window, canvas, div,
-    prelude::*, px,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Render, Rgba,
+    SharedString, Subscription, Window, canvas, div, prelude::*, px,
 };
 use plot::{MIN_RADIUS, Picked, Plotted};
 use std::sync::Arc;
@@ -38,6 +39,8 @@ pub struct ScatterPanel {
     plot: Option<Plot>,
     /// Where the plot was last laid out, which a pointer is resolved against.
     bounds: Option<Bounds<Pixels>>,
+    /// Where the button went down over the plot, until it comes up again.
+    pressed_at: Option<Point<Pixels>>,
     /// Redraws as the graph is read and measured.
     _changed: Subscription,
     _source_replaced: Subscription,
@@ -72,6 +75,7 @@ impl ScatterPanel {
             shown: false,
             plot: None,
             bounds: None,
+            pressed_at: None,
             _changed: changed,
             _source_replaced: source_replaced,
         }
@@ -106,6 +110,22 @@ impl ScatterPanel {
             })
         });
         cx.notify();
+    }
+
+    /// Shows the graph's drawing of the target under the pointer, where the
+    /// button comes up where it went down.
+    fn release_at(&mut self, at: Point<Pixels>, cx: &mut Context<Self>) {
+        let Some(from) = self.pressed_at.take() else {
+            return;
+        };
+        if f32::from(at.x - from.x).hypot(f32::from(at.y - from.y)) > CLICK_SLOP {
+            return;
+        }
+        let Some((plot, picked)) = self.plot.as_ref().zip(self.pick(at)) else {
+            return;
+        };
+        let id = plot.plotted.marks[picked.mark].target.id;
+        self.model.update(cx, |model, cx| model.reveal(id, cx));
     }
 
     /// Drops the tooltip, which names the mark under a pointer that has left.
@@ -238,10 +258,25 @@ impl Render for ScatterPanel {
                     .flex_1()
                     .min_h(px(0.))
                     .child(cached_layer(plot.canvas.clone()))
+                    .when(plot.hover.is_some() && model.reveals(), |plot| {
+                        plot.cursor_pointer()
+                    })
                     .child(hover_layer(cx.entity(), palette))
                     .on_mouse_move(cx.listener(|view, e: &MouseMoveEvent, _, cx| {
                         view.hover_at(e.position, cx);
                     }))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|view, e: &MouseDownEvent, _, _| {
+                            view.pressed_at = Some(e.position);
+                        }),
+                    )
+                    .on_mouse_up(
+                        MouseButton::Left,
+                        cx.listener(|view, e: &MouseUpEvent, _, cx| {
+                            view.release_at(e.position, cx);
+                        }),
+                    )
                     .on_hover(cx.listener(|view, hovered: &bool, _, cx| {
                         if !hovered {
                             view.clear_hover(cx);

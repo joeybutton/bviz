@@ -57,7 +57,7 @@ use emphasis::Emphasis;
 use framing::{Framing, Target, build_prepaint};
 use legend::Legend;
 use mode::LayoutMode;
-use model::{GraphModel, MapPlaced, SourceReplaced};
+use model::{GraphModel, MapPlaced, RevealRequested, SourceReplaced};
 use morph::{Frame, Morph};
 use paint::{Scene, TitleTarget, canvas_body};
 use relation::Relation;
@@ -215,6 +215,7 @@ pub struct GraphPanel {
     _source_replaced: Subscription,
     /// Derives the levels of the panel's restriction as the map lands.
     _map_placed: Subscription,
+    _reveal_requested: Subscription,
     /// Box under the cursor.
     hovered: Option<Id>,
     /// The box whose related nodes stay marked, and how far that marking reaches;
@@ -355,6 +356,13 @@ impl GraphPanel {
         let map_placed = cx.subscribe(&model, |view, _, _: &MapPlaced, cx| {
             derive::placed(view, cx)
         });
+        let reveal_requested = cx.subscribe(&model, |view, _, event: &RevealRequested, cx| {
+            if event.panel == cx.entity_id() {
+                reveal(view, event.node, cx);
+            }
+        });
+        let panel = cx.entity();
+        model.update(cx, |model, cx| model.defer_to(&panel, cx));
         Self {
             focus_handle: cx.focus_handle(),
             title,
@@ -381,6 +389,7 @@ impl GraphPanel {
             _changed: changed,
             _source_replaced: source_replaced,
             _map_placed: map_placed,
+            _reveal_requested: reveal_requested,
             hovered: None,
             selection,
             relation_picker,
@@ -661,6 +670,9 @@ impl Panel for GraphPanel {
     fn set_active(&mut self, active: bool, window: &mut Window, cx: &mut Context<Self>) {
         if active {
             self.focus_handle.focus(window, cx);
+            let panel = cx.entity();
+            self.model
+                .update(cx, |model, cx| model.defer_to(&panel, cx));
         }
     }
 }
@@ -856,6 +868,18 @@ fn select_box_at(view: &mut GraphPanel, pos: Point<Pixels>, cx: &mut Context<Gra
         Some(id) => view.selection.toggle(id),
         None => view.selection.clear(),
     }
+    view.invalidate_canvas(cx);
+}
+
+/// Selects `id` and moves the view onto it, opening what holds it in a layered
+/// drawing, and asks for the panel to be shown.
+fn reveal(view: &mut GraphPanel, id: Id, cx: &mut Context<GraphPanel>) {
+    view.selection.select(id);
+    if view.mode == LayoutMode::Layered {
+        derive::expand_to(view, id, cx);
+    }
+    view.framing.request_frame(framing::Frame::Node(id));
+    cx.emit(PanelEvent::Activate);
     view.invalidate_canvas(cx);
 }
 

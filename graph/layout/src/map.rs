@@ -195,15 +195,21 @@ impl MapLayout {
     pub fn height(&self) -> f64 {
         self.drawing.height
     }
+
+    /// Where every level drawing `id` draws it; `None` for an id the placed
+    /// graph holds no node of.
+    pub fn placed(&self, id: Id) -> Option<Placed> {
+        self.drawing.placed(id)
+    }
 }
 
 /// A node's box in the one absolute frame every level draws in.
-#[derive(Clone, Copy)]
-struct Placed {
-    x: f64,
-    y: f64,
-    width: f64,
-    height: f64,
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Placed {
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
 }
 
 impl Placed {

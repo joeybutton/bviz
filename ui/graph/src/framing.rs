@@ -2,7 +2,9 @@ use crate::camera::{
     Camera, Rect, Settle, clamp_pan, drawn_rect, ease_out_cubic, fit_view, fit_zoom, frame_view,
     settle_view, visible_rect,
 };
+use crate::derive::Drawn;
 use crate::{GraphPanel, MAX_ZOOM, SETTLE_DURATION, SETTLE_MIN_PAN_STEP, SETTLE_MIN_ZOOM_STEP};
+use bviz_graph_layout::Id;
 use gpui::{App, Bounds, Entity, Pixels, Window};
 use std::time::Instant;
 
@@ -14,6 +16,8 @@ pub(crate) enum Frame {
     /// What the panel draws, where it covers so little of the window that the
     /// camera has nothing left to hold onto.
     Escaping,
+    /// The box of one node, for a gesture that named it.
+    Node(Id),
 }
 
 /// What a request to move the view resolves to, as a prepaint finds it.
@@ -297,17 +301,33 @@ fn frame_target(view: &GraphPanel) -> Target {
     let Some(drawn) = view.drawn() else {
         return Target::Pending;
     };
+    let escaping = match frame {
+        Frame::Drawing => false,
+        Frame::Escaping => true,
+        Frame::Node(id) => return node_target(view, &drawn, id),
+    };
     let Some(laid_out) = view.view_zoom(&drawn).and_then(|zoom| drawn.view(zoom)) else {
         return Target::Pending;
     };
-    let wanted = match frame {
-        Frame::Drawing => true,
-        Frame::Escaping => escapes(
+    let wanted = !escaping
+        || escapes(
             visible_rect(view.framing.viewport(), view.framing.camera()),
             &laid_out.boxes,
-        ),
-    };
+        );
     Target::Resolved(wanted.then(|| drawn_rect(laid_out)).flatten())
+}
+
+/// Where `drawn` draws the node `id`: where the map places it, which every
+/// level drawing it shares, or where the layered drawing puts it once any
+/// derivation in flight, which may be opening what holds it, has landed.
+fn node_target(view: &GraphPanel, drawn: &Drawn, id: Id) -> Target {
+    match drawn {
+        Drawn::Map { map, .. } => Target::Resolved(map.placed(id).map(Rect::placed)),
+        Drawn::Layered { .. } if view.derived.deriving() => Target::Pending,
+        Drawn::Layered { view: laid_out, .. } => {
+            Target::Resolved(laid_out.boxes.iter().find(|b| b.id == id).map(Rect::of))
+        }
+    }
 }
 
 /// Steers the view's framing from the bounds the canvas was laid out at. Runs at

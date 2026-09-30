@@ -1,3 +1,4 @@
+use crate::GraphPanel;
 use crate::build::build_graph;
 use crate::derive::derive_levels;
 use bviz_graph_layout::graph::Graph;
@@ -7,7 +8,7 @@ use bviz_graph_layout::select::labels::LabelIndex;
 use bviz_graph_layout::{Capabilities, Facets, Id, MapLayout, Names};
 use bviz_ui_components::{Pending, load_in_background};
 use bviz_ui_graph_args::Input;
-use gpui::{Context, EventEmitter, Task};
+use gpui::{Context, Entity, EntityId, EventEmitter, Subscription, Task};
 use std::collections::HashSet;
 use std::sync::{Arc, OnceLock};
 
@@ -169,6 +170,19 @@ pub(crate) struct SourceReplaced;
 /// The loaded graph's map has landed in its [`Placement`].
 pub(crate) struct MapPlaced;
 
+/// A view of the graph named a node for the graph panel it defers to to show.
+pub(crate) struct RevealRequested {
+    pub(crate) panel: EntityId,
+    pub(crate) node: Id,
+}
+
+/// The graph panel the graph's other views defer to.
+struct Deferred {
+    panel: EntityId,
+    /// Forgets the panel once it is released.
+    _released: Subscription,
+}
+
 /// A graph's per-target metrics, a pass over the whole graph that is only
 /// taken once a view drawing them asks for it.
 enum Measure {
@@ -190,10 +204,13 @@ pub(crate) struct GraphModel {
     /// The placement of the map in flight once the read has landed, held so
     /// that it is not cancelled.
     _placing: Task<()>,
+    /// The graph panel opened or shown last, for as long as it is open.
+    deferred: Option<Deferred>,
 }
 
 impl EventEmitter<SourceReplaced> for GraphModel {}
 impl EventEmitter<MapPlaced> for GraphModel {}
+impl EventEmitter<RevealRequested> for GraphModel {}
 
 impl GraphModel {
     /// The graph `load` is reading, viewable once the read finishes and failed
@@ -259,7 +276,30 @@ impl GraphModel {
             source: Source::Loading,
             _work: work,
             _placing: Task::ready(()),
+            deferred: None,
         }
+    }
+
+    /// Takes `panel` as the graph panel the graph's other views defer to.
+    pub(crate) fn defer_to(&mut self, panel: &Entity<GraphPanel>, cx: &mut Context<Self>) {
+        let id = panel.entity_id();
+        if self.deferred.as_ref().is_some_and(|d| d.panel == id) {
+            return;
+        }
+        let released = cx.observe_release(panel, |model, _, cx| {
+            model.deferred = None;
+            cx.notify();
+        });
+        self.deferred = Some(Deferred {
+            panel: id,
+            _released: released,
+        });
+        cx.notify();
+    }
+
+    /// Whether a graph panel is open to show a node another view names.
+    pub(crate) fn reveals(&self) -> bool {
+        self.deferred.is_some()
     }
 
     /// Starts measuring the loaded graph's targets off the UI thread, notifying
@@ -293,6 +333,17 @@ impl GraphModel {
         match &self.loaded()?.measure {
             Measure::Measured(metrics) => Some(metrics),
             _ => None,
+        }
+    }
+
+    /// Asks the graph panel the graph's other views defer to to show the node
+    /// `id`, where one is open.
+    pub(crate) fn reveal(&mut self, id: Id, cx: &mut Context<Self>) {
+        if let Some(deferred) = &self.deferred {
+            cx.emit(RevealRequested {
+                panel: deferred.panel,
+                node: id,
+            });
         }
     }
 

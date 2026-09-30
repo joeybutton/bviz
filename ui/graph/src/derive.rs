@@ -23,7 +23,7 @@ use bviz_graph_layout::{Id, LaidOut, MapLayout, Names};
 use bviz_ui_components::load_in_background;
 use gpui::{Context, Task};
 use rustc_hash::FxHashSet;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 
@@ -751,6 +751,31 @@ pub(crate) fn toggle_expansion(view: &mut GraphPanel, id: Id, cx: &mut Context<G
         view.derived.expanded.insert(id);
     }
     request(view, cx);
+}
+
+/// Opens every container holding `id` in the layered layout, laying the graph
+/// out afresh where that opens any. Like a container opened by hand, what this
+/// opens is not held to the caps sizing the opening view: the node must be
+/// drawn to be shown.
+pub(crate) fn expand_to(view: &mut GraphPanel, id: Id, cx: &mut Context<GraphPanel>) {
+    let Some(slice) = &view.derived.slice else {
+        return;
+    };
+    let nodes = &slice.base.nodes;
+    let mut parents: HashMap<Id, Id> = HashMap::with_capacity(nodes.len());
+    parents.extend(
+        nodes
+            .iter()
+            .filter_map(|node| Some((node.id, node.parent?))),
+    );
+    let parent = |id: Id| parents.get(&id).copied();
+    let mut opened = false;
+    for container in std::iter::successors(parent(id), |&container| parent(container)) {
+        opened |= view.derived.expanded.insert(container);
+    }
+    if opened {
+        request(view, cx);
+    }
 }
 
 /// Flips whether the layered layout keeps every edge or only the transitive

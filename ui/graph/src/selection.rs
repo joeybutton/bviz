@@ -53,6 +53,11 @@ impl Selection {
         self.node = (self.node != Some(node)).then_some(node);
     }
 
+    /// Selects `node`, whichever node was selected before.
+    pub(crate) fn select(&mut self, node: Id) {
+        self.node = Some(node);
+    }
+
     pub(crate) fn clear(&mut self) {
         self.node = None;
     }
@@ -153,6 +158,16 @@ mod tests {
         assert_eq!(selection.node(), Some(Id(1)));
         selection.toggle(Id(1));
         assert_eq!(selection.node(), None);
+    }
+
+    #[test]
+    fn selecting_the_selected_node_keeps_it_selected() {
+        let mut selection = Selection::none();
+        selection.select(Id(0));
+        selection.select(Id(0));
+        assert_eq!(selection.node(), Some(Id(0)));
+        selection.select(Id(1));
+        assert_eq!(selection.node(), Some(Id(1)));
     }
 
     #[test]
