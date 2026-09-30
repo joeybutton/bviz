@@ -3,14 +3,15 @@ use crate::build::{build_graph, loaded_inputs};
 use crate::derive::derive_levels;
 use bviz_graph_layout::graph::Graph;
 use bviz_graph_layout::lod::{DEFAULT_MAX_EDGES, DEFAULT_MAX_NODES, Overflow};
-use bviz_graph_layout::metrics::{Measurement, Scope, Unit, measure};
+use bviz_graph_layout::metrics::{Measurement, Scope, measure};
 use bviz_graph_layout::select::Filter;
 use bviz_graph_layout::select::labels::LabelIndex;
 use bviz_graph_layout::{Capabilities, Facets, Id, InputSet, Joint, MapLayout, Names, Provenance};
 use bviz_ui_components::{Pending, load_in_background};
 use bviz_ui_graph_args::GraphSource;
 use gpui::{Context, Entity, EntityId, EventEmitter, Subscription, Task};
-use std::collections::HashSet;
+use std::collections::hash_map::Entry;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, OnceLock};
 
 /// The graph a document holds, as it was read: whole, unfiltered, and shared by
@@ -93,7 +94,7 @@ pub(crate) struct Loaded {
     pub(crate) opening: Opening,
     /// Goes with the graph it measures, so a measuring still in flight when the
     /// graph is replaced never lands.
-    measure: Measure,
+    measures: HashMap<Scope, Measure>,
 }
 
 impl Loaded {
@@ -101,7 +102,7 @@ impl Loaded {
         Self {
             shared,
             opening,
-            measure: Measure::Unasked,
+            measures: HashMap::new(),
         }
     }
 }
@@ -202,19 +203,21 @@ struct Deferred {
     _released: Subscription,
 }
 
-/// The loaded graph's per-target metrics have landed.
-pub(crate) struct MetricsLanded;
+/// The loaded graph's metrics in `scope` have landed.
+pub(crate) struct MetricsLanded {
+    pub(crate) scope: Scope,
+}
 
 /// The graph's other views may have another [`GraphModel::filter`] to draw
 /// through.
 pub(crate) struct FilterChanged;
 
-/// A graph's per-target metrics, a pass over the whole graph that is only
+/// A graph's metrics in one scope, a pass over the whole graph that is only
 /// taken once a view drawing them asks for it.
 enum Measure {
-    Unasked,
     Measuring {
-        /// Held so that the measuring is not cancelled.
+        /// Dropping it gives the measuring up: a pass not yet started never
+        /// runs, and one running lands nothing.
         _work: Task<()>,
     },
     Measured(Arc<Measurement>),
@@ -354,47 +357,44 @@ impl GraphModel {
         self.deferred.as_ref().map(|deferred| &deferred.filter)
     }
 
-    /// Starts measuring the loaded graph's targets off the UI thread, notifying
-    /// once they land. Does nothing once started, or while the graph is still
-    /// being read.
-    pub(crate) fn ensure_metrics(&mut self, cx: &mut Context<Self>) {
+    /// Has the loaded graph measured off the UI thread in each scope of
+    /// `wanted` not yet asked for, emitting [`MetricsLanded`] as each lands, and
+    /// gives up measuring any other scope, whose pass would only hold the
+    /// workers from those wanted. Metrics already measured are kept. Does
+    /// nothing while the graph is still being read.
+    pub(crate) fn want_metrics(&mut self, wanted: &[Scope], cx: &mut Context<Self>) {
         let Source::Loaded(loaded) = &mut self.source else {
             return;
         };
-        let Measure::Unasked = loaded.measure else {
-            return;
-        };
-        let shared = loaded.shared.clone();
-        let Some(scope) = Scope::new(Unit::Target, shared.inputs) else {
-            return;
-        };
-        let work = load_in_background(
-            cx,
-            move || {
-                let (base, facets) = (&shared.base, &shared.facets);
-                Arc::new(measure(
-                    base,
-                    &shared.names,
-                    facets,
-                    &shared.provenance,
-                    scope,
-                ))
-            },
-            |model, metrics, cx| {
-                if let Source::Loaded(loaded) = &mut model.source {
-                    loaded.measure = Measure::Measured(metrics);
-                    cx.emit(MetricsLanded);
-                }
-            },
-        );
-        loaded.measure = Measure::Measuring { _work: work };
+        forget_unwanted(&mut loaded.measures, wanted);
+        for &scope in wanted {
+            let Entry::Vacant(unasked) = loaded.measures.entry(scope) else {
+                continue;
+            };
+            let shared = loaded.shared.clone();
+            let work = load_in_background(
+                cx,
+                move || {
+                    let (base, facets) = (&shared.base, &shared.facets);
+                    let names = &shared.names;
+                    Arc::new(measure(base, names, facets, &shared.provenance, scope))
+                },
+                move |model, metrics, cx| {
+                    if let Source::Loaded(loaded) = &mut model.source {
+                        loaded.measures.insert(scope, Measure::Measured(metrics));
+                        cx.emit(MetricsLanded { scope });
+                    }
+                },
+            );
+            unasked.insert(Measure::Measuring { _work: work });
+        }
     }
 
-    /// The loaded graph's per-target metrics, once measured.
-    pub(crate) fn metrics(&self) -> Option<&Arc<Measurement>> {
-        match &self.loaded()?.measure {
+    /// The loaded graph's metrics in `scope`, once measured.
+    pub(crate) fn metrics(&self, scope: Scope) -> Option<&Arc<Measurement>> {
+        match self.loaded()?.measures.get(&scope)? {
             Measure::Measured(metrics) => Some(metrics),
-            _ => None,
+            Measure::Measuring { .. } => None,
         }
     }
 
@@ -421,9 +421,17 @@ impl GraphModel {
     }
 }
 
+/// Drops each measuring of `measures` whose scope `wanted` leaves out.
+fn forget_unwanted(measures: &mut HashMap<Scope, Measure>, wanted: &[Scope]) {
+    measures
+        .retain(|scope, measure| matches!(measure, Measure::Measured(_)) || wanted.contains(scope));
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bviz_graph_layout::Input;
+    use bviz_graph_layout::metrics::{Sizing, Unit};
 
     /// Placing runs apart from the read it belongs to, so a panic there fails
     /// the read all the same, and lands no map.
@@ -436,5 +444,39 @@ mod tests {
         assert!(model.land(placed, landing).is_none());
         assert!(matches!(model.source(), Source::Failed(_)));
         assert!(placement.placed().is_none());
+    }
+
+    /// A scope no longer wanted stops being measured, but what was measured of
+    /// it stays for when it is wanted again.
+    #[test]
+    fn an_unwanted_measuring_is_dropped_and_a_landed_measure_kept() {
+        let scope = |input: Input| Scope::new(Unit::Target, input.into()).unwrap();
+        let (landed, dropped, kept) = (
+            scope(Input::Query),
+            scope(Input::Cquery),
+            scope(Input::Aquery),
+        );
+        let measuring = || Measure::Measuring {
+            _work: Task::ready(()),
+        };
+        let measured = Measure::Measured(Arc::new(Measurement {
+            scope: landed,
+            points: Vec::new(),
+            sizing: Sizing::FanIn,
+        }));
+        let mut measures = HashMap::from([
+            (landed, measured),
+            (dropped, measuring()),
+            (kept, measuring()),
+        ]);
+
+        forget_unwanted(&mut measures, &[kept]);
+
+        assert!(matches!(measures.get(&landed), Some(Measure::Measured(_))));
+        assert!(!measures.contains_key(&dropped));
+        assert!(matches!(
+            measures.get(&kept),
+            Some(Measure::Measuring { .. })
+        ));
     }
 }

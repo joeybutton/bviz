@@ -9,7 +9,7 @@ use crate::drag::CLICK_SLOP;
 use crate::model::{FilterChanged, GraphModel, Loaded, MetricsLanded, SourceReplaced};
 use crate::{PIXELS_PER_NOTCH, ZOOM_PER_NOTCH};
 use bviz_graph_layout::Kind;
-use bviz_graph_layout::metrics::Metrics;
+use bviz_graph_layout::metrics::{Metrics, Scope, Unit};
 use bviz_graph_layout::select::Filter;
 use bviz_graph_layout::select::labels::carried_label;
 use bviz_ui_components::{DragEnd, cached_layer, centered_spinner, load_in_background, track_drag};
@@ -72,8 +72,10 @@ impl ScatterPanel {
                 view.measure(cx);
             }
         });
-        let metrics_landed = cx.subscribe(&model, |view, _, _: &MetricsLanded, cx| {
-            view.replot(cx);
+        let metrics_landed = cx.subscribe(&model, |view, model, landed: &MetricsLanded, cx| {
+            if plotted_scope(model.read(cx)) == Some(landed.scope) {
+                view.replot(cx);
+            }
         });
         let filter_changed = cx.subscribe(&model, |view, _, _: &FilterChanged, cx| {
             view.replot(cx);
@@ -99,7 +101,11 @@ impl ScatterPanel {
     /// Has the graph's targets measured, and brings the plot up to date where
     /// they already are.
     fn measure(&mut self, cx: &mut Context<Self>) {
-        self.model.update(cx, |model, cx| model.ensure_metrics(cx));
+        self.model.update(cx, |model, cx| {
+            if let Some(scope) = plotted_scope(model) {
+                model.want_metrics(&[scope], cx);
+            }
+        });
         self.replot(cx);
     }
 
@@ -113,7 +119,10 @@ impl ScatterPanel {
             return;
         }
         let model = self.model.read(cx);
-        let (Some(metrics), Some(loaded)) = (model.metrics(), model.loaded()) else {
+        let Some(loaded) = model.loaded() else {
+            return;
+        };
+        let Some(metrics) = plotted_scope(model).and_then(|scope| model.metrics(scope)) else {
             return;
         };
         let filter = model.filter().cloned().unwrap_or_default();
@@ -272,6 +281,12 @@ impl ScatterPanel {
             cx.notify();
         }
     }
+}
+
+/// The scope the plot measures in: every target over every input read, absent
+/// until the graph is.
+fn plotted_scope(model: &GraphModel) -> Option<Scope> {
+    Scope::new(Unit::Target, model.loaded()?.shared.inputs)
 }
 
 /// The `click_count` of the press completing a double click.
