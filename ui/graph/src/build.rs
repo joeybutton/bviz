@@ -1,7 +1,7 @@
 use bviz_graph_layout::graph::Graph;
 use bviz_graph_layout::transition::Transitions;
 use bviz_graph_layout::{
-    Anchor, Capabilities, Facets, Id, LaidOut, Names, layout, quotient, streamed_proto,
+    Anchor, Capabilities, Facets, Id, Joint, LaidOut, Names, layout, quotient, streamed_proto,
 };
 use bviz_ui_graph_args::{Input, InputKind};
 use rustc_hash::FxHashSet;
@@ -40,8 +40,13 @@ pub(crate) fn build_graph(
             }
         }
     }
-    let (base, names, facets, capabilities) =
-        bviz_graph_layout::build_joint(aq.as_deref(), cq.as_deref(), q.as_deref(), false);
+    let Joint {
+        graph: base,
+        names,
+        facets,
+        capabilities,
+        ..
+    } = bviz_graph_layout::build_joint(aq.as_deref(), cq.as_deref(), q.as_deref(), false);
     // Transitively reduce the whole base once: a collapsed box then draws the
     // reduction of its hidden subtree's edges, so its edge count is stable under
     // expansion rather than re-derived (differently) from each view.

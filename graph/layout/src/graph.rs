@@ -6,6 +6,7 @@
 //! each edge in the lowest common ancestor of its endpoints.
 
 use crate::intern::Id;
+use crate::provenance::Input;
 
 /// A coarse node category, used to pick a fill when rendering and to decide
 /// which leaves may merge.
@@ -82,6 +83,16 @@ impl EdgeKind {
             EdgeKind::Cquery => "cquery",
             EdgeKind::Aquery => "aquery",
             EdgeKind::Transitive => "transitive",
+        }
+    }
+
+    /// The input the edge was read from, absent for one standing in for a path.
+    pub fn input(self) -> Option<Input> {
+        match self {
+            EdgeKind::Query => Some(Input::Query),
+            EdgeKind::Cquery => Some(Input::Cquery),
+            EdgeKind::Aquery => Some(Input::Aquery),
+            EdgeKind::Transitive => None,
         }
     }
 }
