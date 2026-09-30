@@ -45,14 +45,22 @@ Each viewer also builds as a binary of its own, taking the same flags as
 
 ## Before you open a pull request
 
-CI runs these checks; run them locally first. The tests need neither a display
-nor a GPU.
+CI runs the full check: the build, the tests (Starlark style among them), and
+the rustfmt and clippy checks. Run it locally first. The tests need neither a
+display nor a GPU.
 
 ```sh
-bazel build //...
-bazel test //...                      # Starlark style is one of these tests
-bazel build --config=rustfmt //...
-bazel build --config=clippy //...
+bazel test --config=check //...
+```
+
+While iterating, check only the targets you are changing; it is faster. The full
+check before you commit then catches anything you broke elsewhere.
+
+```sh
+bazel test //ui/graph/...
+bazel build --config=rustfmt //ui/graph/...
+bazel build --config=clippy //ui/graph/...
+bazel test //:buildifier_test
 ```
 
 Rust formatting and Starlark style have fixers; clippy findings are yours to
