@@ -133,41 +133,56 @@ fn name(names: &Names, facets: &Facets, id: Id) -> Named {
 }
 
 /// How the card writes the configurations of the nodes it shows: by mnemonic,
-/// followed by the start of the checksum wherever another configuration the
-/// card shows shares that mnemonic.
+/// where two configurations the card shows share one marking the one carrying
+/// the test options another drops, and failing that adding the start of each
+/// one's checksum.
 struct Spelling {
-    ambiguous: Vec<SharedString>,
+    spelled: HashMap<ConfigRef, String>,
 }
 
+/// What the card adds to a mnemonic to mark the configuration carrying the
+/// test options another it shows drops.
+const TEST_SPELLING: &str = "test";
+
 impl Spelling {
-    fn of<'a>(shown: impl Iterator<Item = &'a Named>) -> Self {
-        let mut first: HashMap<&SharedString, &SharedString> = HashMap::new();
-        let mut ambiguous: Vec<SharedString> = Vec::new();
+    fn of<'a>(facets: &Facets, shown: impl Iterator<Item = &'a Named>) -> Self {
+        let mut sharing: HashMap<Option<&SharedString>, Vec<&Config>> = HashMap::new();
         for config in shown.filter_map(|named| named.config.as_ref()) {
-            let Some(mnemonic) = &config.mnemonic else {
-                continue;
-            };
-            let seen = *first.entry(mnemonic).or_insert(&config.checksum);
-            if *seen != config.checksum && !ambiguous.contains(mnemonic) {
-                ambiguous.push(mnemonic.clone());
+            let held = sharing.entry(config.mnemonic.as_ref()).or_default();
+            if !held.iter().any(|held| held.handle == config.handle) {
+                held.push(config);
             }
         }
-        Spelling { ambiguous }
-    }
-
-    fn config(&self, config: &Config) -> String {
-        let short: String = config.checksum.chars().take(CHECKSUM_SHOWN).collect();
-        match &config.mnemonic {
-            Some(mnemonic) if self.ambiguous.contains(mnemonic) => format!("{mnemonic} {short}"),
-            Some(mnemonic) => mnemonic.to_string(),
-            None => short,
+        let count = sharing.values().map(Vec::len).sum();
+        let mut spelled: HashMap<ConfigRef, String> = HashMap::with_capacity(count);
+        for (mnemonic, configs) in sharing {
+            let written: Vec<String> = match mnemonic {
+                None => configs.iter().map(|config| short(config)).collect(),
+                Some(mnemonic) => {
+                    let marked = test_marked(facets, mnemonic, &configs);
+                    let apart = marked
+                        .iter()
+                        .enumerate()
+                        .all(|(i, one)| !marked[i + 1..].contains(one));
+                    match apart {
+                        true => marked,
+                        false => configs
+                            .iter()
+                            .map(|config| format!("{mnemonic} {}", short(config)))
+                            .collect(),
+                    }
+                }
+            };
+            spelled.extend(configs.iter().map(|config| config.handle).zip(written));
         }
+        Spelling { spelled }
     }
 
-    /// `named`'s target and configuration.
+    /// `named`'s target and configuration, where `named` is one of the nodes
+    /// this was spelled for.
     fn name(&self, named: &Named) -> SharedString {
         match &named.config {
-            Some(config) => format!("{} ({})", named.target, self.config(config)).into(),
+            Some(config) => format!("{} ({})", named.target, self.spelled[&config.handle]).into(),
             None => named.target.clone(),
         }
     }
@@ -256,6 +271,32 @@ struct Link<'a> {
     named: &'a Named,
     crossing: Option<Transition>,
     hover: SharedString,
+}
+
+/// The start of `config`'s checksum the card tells configurations apart by.
+fn short(config: &Config) -> String {
+    config.checksum.chars().take(CHECKSUM_SHOWN).collect()
+}
+
+/// `configs`, which share `mnemonic`, each spelled by it and marked where it
+/// carries the test options another of them drops and differs from it by
+/// nothing else.
+fn test_marked(facets: &Facets, mnemonic: &str, configs: &[&Config]) -> Vec<String> {
+    configs
+        .iter()
+        .map(|config| {
+            let tested = configs.iter().any(|other| {
+                other.handle != config.handle
+                    && Difference::between(facets, other.handle, config.handle).is_some_and(
+                        |difference| difference.drops_test_options && difference.is_empty(),
+                    )
+            });
+            match tested {
+                true => format!("{mnemonic}, {TEST_SPELLING}"),
+                false => mnemonic.to_string(),
+            }
+        })
+        .collect()
 }
 
 /// How many nodes the paths hold, as the card states it.
@@ -554,12 +595,12 @@ pub(crate) fn card(
         .into_iter()
         .chain(&question.dependent)
         .chain(shortest);
-    let spelling = Spelling::of(shown);
+    let shared = &view.model.read(cx).loaded()?.shared;
+    let spelling = Spelling::of(&shared.facets, shown);
     let found = matches!(
         answer,
         Answering::Answered(Answer::Dependents { .. } | Answer::Between { .. })
     );
-    let shared = &view.model.read(cx).loaded()?.shared;
     let unmarked = found
         .then(|| {
             let configured = view.classes.contains(&Kind::ConfiguredTarget);
@@ -649,7 +690,7 @@ mod tests {
     fn a_node_is_named_by_its_target_and_configuration_over_its_package() {
         let (mut names, mut facets) = (Names::default(), Facets::default());
         let named = worker(&mut names, &mut facets, "0123456789", "k8-opt-exec");
-        let spelling = Spelling::of([&named].into_iter());
+        let spelling = Spelling::of(&facets, [&named].into_iter());
         assert_eq!(spelling.name(&named), ":worker (k8-opt-exec)");
         assert_eq!(
             named.package.as_deref(),
@@ -675,11 +716,60 @@ mod tests {
         let (mut names, mut facets) = (Names::default(), Facets::default());
         let one = worker(&mut names, &mut facets, "aaaaaa11", "k8-fastbuild");
         let other = worker(&mut names, &mut facets, "bbbbbb22", "k8-fastbuild");
-        let alone = Spelling::of([&one].into_iter());
+        let alone = Spelling::of(&facets, [&one].into_iter());
         assert_eq!(alone.name(&one), ":worker (k8-fastbuild)");
-        let both = Spelling::of([&one, &other].into_iter());
+        let both = Spelling::of(&facets, [&one, &other].into_iter());
         assert_eq!(both.name(&one), ":worker (k8-fastbuild aaaaaa)");
         assert_eq!(both.name(&other), ":worker (k8-fastbuild bbbbbb)");
+    }
+
+    /// The configured target `worker` in a `k8-fastbuild` configuration
+    /// checksummed `checksum`, carrying the test options where `test`, and set
+    /// to `mode`.
+    fn stated(
+        names: &mut Names,
+        facets: &mut Facets,
+        checksum: &str,
+        test: bool,
+        mode: &str,
+    ) -> Named {
+        let named = worker(names, facets, checksum, "k8-fastbuild");
+        let config = named.config.as_ref().expect("a configuration").handle;
+        let core = ("CoreOptions", vec![("compilation_mode", Some(mode))]);
+        let tests = (
+            "TestConfiguration$TestOptions",
+            vec![("test_timeout", Some("60"))],
+        );
+        let classes = match test {
+            true => vec![core, tests],
+            false => vec![core],
+        };
+        facets.record_config_options(config, classes);
+        named
+    }
+
+    /// A test's configuration and its dependency's, which differ only by the
+    /// test options Bazel drops, are told apart by naming the test's.
+    #[test]
+    fn the_configuration_carrying_the_test_options_is_named_for_them() {
+        let (mut names, mut facets) = (Names::default(), Facets::default());
+        let test = stated(&mut names, &mut facets, "aaaaaa11", true, "fastbuild");
+        let trimmed = stated(&mut names, &mut facets, "bbbbbb22", false, "fastbuild");
+        let spelling = Spelling::of(&facets, [&test, &trimmed].into_iter());
+        assert_eq!(spelling.name(&test), ":worker (k8-fastbuild, test)");
+        assert_eq!(spelling.name(&trimmed), ":worker (k8-fastbuild)");
+
+        let other = stated(&mut names, &mut facets, "cccccc33", false, "opt");
+        let spelling = Spelling::of(&facets, [&test, &trimmed, &other].into_iter());
+        assert_eq!(
+            [&test, &trimmed, &other].map(|named| spelling.name(named)),
+            [
+                ":worker (k8-fastbuild aaaaaa)",
+                ":worker (k8-fastbuild bbbbbb)",
+                ":worker (k8-fastbuild cccccc)",
+            ],
+            "configurations the test options do not tell apart fall back to checksums"
+        );
     }
 
     fn observed(resolved: &[bool]) -> Capabilities {

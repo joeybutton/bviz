@@ -107,7 +107,7 @@ impl Transition {
         let Some(difference) = Difference::between(facets, dependency, dependent) else {
             return Some(Transition::Changed);
         };
-        if difference.fragments.is_empty() && difference.changes.is_empty() {
+        if difference.is_empty() {
             return None;
         }
         let resolve = |sym: Sym| facets.strings().resolve(sym);
@@ -148,6 +148,8 @@ pub struct Difference {
     pub fragments: Vec<(Sym, Side)>,
     /// The options set differently within the classes both carry.
     pub changes: Vec<OptionChange>,
+    /// Whether the dependency drops test options the dependent carries.
+    pub drops_test_options: bool,
 }
 
 impl Difference {
@@ -176,7 +178,16 @@ impl Difference {
             fragments.remove(trimmed);
             changes.retain(|change| resolve(change.name) != RUN_UNDER);
         }
-        Some(Difference { fragments, changes })
+        Some(Difference {
+            fragments,
+            changes,
+            drops_test_options: trimmed.is_some(),
+        })
+    }
+
+    /// Whether the two configurations differ by nothing a transition makes.
+    pub fn is_empty(&self) -> bool {
+        self.fragments.is_empty() && self.changes.is_empty()
     }
 }
 
