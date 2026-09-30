@@ -1,13 +1,13 @@
 //! Painting the scatter plot: its axes and the marks placed along them.
 
-use super::plot::{DataArea, LogScale, Mark, Plotted, Tick, tick_label};
+use super::plot::{DataArea, LogScale, Mark, Plotted, Tick, Zoom, tick_label};
 use crate::Palette;
 use crate::paint::UNMARKED_FADE;
 use bviz_ui_components::{TooltipColors, paint_tooltip_box};
 use bviz_ui_theme::mix;
 use gpui::{
-    App, BorderStyle, Bounds, Hsla, Pixels, Rgba, ShapedLine, TextAlign, Window, fill, point, px,
-    quad, size,
+    App, BorderStyle, Bounds, ContentMask, Hsla, Pixels, Rgba, ShapedLine, TextAlign, Window, fill,
+    point, px, quad, size,
 };
 
 /// Room left of the axes for the vertical tick labels.
@@ -56,47 +56,57 @@ fn axes_within(bounds: Bounds<Pixels>) -> Option<Bounds<Pixels>> {
     (axes.size.width >= px(MIN_FRAME) && axes.size.height >= px(MIN_FRAME)).then_some(axes)
 }
 
-/// Where the counts of `plotted` are placed in a plot filling `bounds`, which
-/// every pointer gesture over the plot resolves through as its paint does.
-pub(crate) fn data_area(plotted: &Plotted, bounds: Bounds<Pixels>) -> Option<DataArea> {
-    Some(DataArea::within(axes_within(bounds)?, plotted.x, plotted.y))
+/// Where the counts of `plotted` are placed in a plot filling `bounds` at
+/// `zoom`, which every pointer gesture over the plot resolves through as its
+/// paint does.
+pub(crate) fn data_area(plotted: &Plotted, zoom: Zoom, bounds: Bounds<Pixels>) -> Option<DataArea> {
+    Some(DataArea::within(
+        axes_within(bounds)?,
+        plotted.x,
+        plotted.y,
+        zoom,
+    ))
 }
 
-/// Paints `plotted` filling `bounds`.
+/// Paints `plotted` filling `bounds` at `zoom`.
 pub(crate) fn paint_plot(
     plotted: &Plotted,
+    zoom: Zoom,
     palette: &Palette,
     bounds: Bounds<Pixels>,
     window: &mut Window,
     cx: &mut App,
 ) {
-    let Some(axes) = axes_within(bounds) else {
+    let Some(area) = data_area(plotted, zoom, bounds) else {
         return;
     };
-    let area = DataArea::within(axes, plotted.x, plotted.y);
+    let axes = area.frame();
     let ink = Ink::new(palette);
     paint_grid(&area, plotted, axes, &ink, window);
     paint_axes(&area, plotted, axes, &ink, window, cx);
     // One layer shares one draw order among the marks, so a mark is inserted
     // without searching what it overlaps; submission order still stacks them.
-    window.paint_layer(axes, |window| {
-        for mark in &plotted.marks {
-            let center = area.place(&mark.target);
-            let r = px(mark.radius);
-            let fade = if mark.faded { UNMARKED_FADE } else { 1.0 };
-            let color = Rgba {
-                a: MARK_ALPHA * fade,
-                ..palette.kind_accent(mark.target.kind)
-            };
-            window.paint_quad(quad(
-                Bounds::new(center - point(r, r), size(r * 2., r * 2.)),
-                r,
-                color,
-                px(0.),
-                Hsla::transparent_black(),
-                BorderStyle::Solid,
-            ));
-        }
+    let mask = ContentMask { bounds: axes };
+    window.with_content_mask(Some(mask), |window| {
+        window.paint_layer(axes, |window| {
+            for mark in &plotted.marks {
+                let center = area.place(&mark.target);
+                let r = px(mark.radius);
+                let fade = if mark.faded { UNMARKED_FADE } else { 1.0 };
+                let color = Rgba {
+                    a: MARK_ALPHA * fade,
+                    ..palette.kind_accent(mark.target.kind)
+                };
+                window.paint_quad(quad(
+                    Bounds::new(center - point(r, r), size(r * 2., r * 2.)),
+                    r,
+                    color,
+                    px(0.),
+                    Hsla::transparent_black(),
+                    BorderStyle::Solid,
+                ));
+            }
+        })
     });
 }
 
@@ -104,20 +114,17 @@ pub(crate) fn paint_plot(
 const RING_GAP: f32 = 2.0;
 const RING_WIDTH: f32 = 1.5;
 
-/// Rings the hovered `mark` of a plot filling `bounds` and sets the tooltip
-/// reading `lines` beside it.
+/// Rings the hovered `mark`, placed through `area`, and sets the tooltip
+/// reading `lines` beside it within the plot's `bounds`.
 pub(crate) fn paint_hover(
     mark: &Mark,
     lines: &[String],
-    plotted: &Plotted,
+    area: &DataArea,
     palette: &Palette,
     bounds: Bounds<Pixels>,
     window: &mut Window,
     cx: &mut App,
 ) {
-    let Some(area) = data_area(plotted, bounds) else {
-        return;
-    };
     let center = area.place(&mark.target);
     let r = px(mark.radius + RING_GAP + RING_WIDTH);
     window.paint_quad(quad(
@@ -152,7 +159,40 @@ impl Ink {
     }
 }
 
-/// A faint line across the axes at every major tick.
+/// How few major ticks in view leave an axis to be read from its minor ones.
+const MIN_LABELLED: usize = 2;
+
+/// A tick of an axis in view, where it falls along the axis, and whether it
+/// is labelled.
+struct ShownTick {
+    at: Pixels,
+    tick: Tick,
+    labelled: bool,
+}
+
+/// The ticks of `scale` in view, `visible` giving where one falls where it is.
+/// Every major tick is labelled, and every minor one too where fewer than
+/// [`MIN_LABELLED`] majors are in view, so a zoom always reads against
+/// labelled counts.
+fn shown_ticks(scale: LogScale, visible: impl Fn(u32) -> Option<Pixels>) -> Vec<ShownTick> {
+    let ticks = scale.ticks();
+    let mut shown: Vec<ShownTick> = Vec::with_capacity(ticks.len());
+    shown.extend(ticks.into_iter().filter_map(|tick| {
+        Some(ShownTick {
+            at: visible(tick.value)?,
+            tick,
+            labelled: tick.major,
+        })
+    }));
+    if shown.iter().filter(|shown| shown.labelled).count() < MIN_LABELLED {
+        for shown in &mut shown {
+            shown.labelled = true;
+        }
+    }
+    shown
+}
+
+/// A faint line across the axes at every labelled tick.
 fn paint_grid(
     area: &DataArea,
     plotted: &Plotted,
@@ -160,24 +200,24 @@ fn paint_grid(
     ink: &Ink,
     window: &mut Window,
 ) {
-    for tick in majors(plotted.x) {
-        let x = area.x_of(tick.value);
+    let labelled = |ticks: Vec<ShownTick>| {
+        ticks
+            .into_iter()
+            .filter(|shown| shown.labelled)
+            .map(|shown| shown.at)
+    };
+    for x in labelled(shown_ticks(plotted.x, |n| area.visible_x(n))) {
         window.paint_quad(fill(
             Bounds::new(point(x, axes.top()), size(px(1.), axes.size.height)),
             ink.grid,
         ));
     }
-    for tick in majors(plotted.y) {
-        let y = area.y_of(tick.value);
+    for y in labelled(shown_ticks(plotted.y, |n| area.visible_y(n))) {
         window.paint_quad(fill(
             Bounds::new(point(axes.left(), y), size(axes.size.width, px(1.))),
             ink.grid,
         ));
     }
-}
-
-fn majors(scale: LogScale) -> impl Iterator<Item = Tick> {
-    scale.ticks().into_iter().filter(|tick| tick.major)
 }
 
 /// The axis lines, their ticks and tick labels, and the axis titles.
@@ -207,13 +247,13 @@ fn paint_axes(
     let length = |tick: &Tick| px(if tick.major { MAJOR_TICK } else { MINOR_TICK });
 
     let label_top = bottom + px(MAJOR_TICK + LABEL_GAP);
-    for tick in plotted.x.ticks() {
-        let x = area.x_of(tick.value);
+    for shown in shown_ticks(plotted.x, |n| area.visible_x(n)) {
+        let (x, tick) = (shown.at, shown.tick);
         window.paint_quad(fill(
             Bounds::new(point(x, bottom), size(px(1.), length(&tick))),
             ink.axis,
         ));
-        if tick.major {
+        if shown.labelled {
             let text = tick_label(tick.value);
             paint_text(
                 &text,
@@ -227,14 +267,14 @@ fn paint_axes(
         }
     }
     let label_right = left - px(MAJOR_TICK + LABEL_GAP);
-    for tick in plotted.y.ticks() {
-        let y = area.y_of(tick.value);
+    for shown in shown_ticks(plotted.y, |n| area.visible_y(n)) {
+        let (y, tick) = (shown.at, shown.tick);
         let tick_left = left - length(&tick);
         window.paint_quad(fill(
             Bounds::new(point(tick_left, y), size(length(&tick), px(1.))),
             ink.axis,
         ));
-        if tick.major {
+        if shown.labelled {
             let text = tick_label(tick.value);
             let top = y - px(TICK_LABEL_SIZE / 2.);
             paint_text(

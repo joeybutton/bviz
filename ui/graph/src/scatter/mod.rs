@@ -7,23 +7,27 @@ mod plot;
 use crate::Palette;
 use crate::drag::CLICK_SLOP;
 use crate::model::{FilterChanged, GraphModel, Loaded, MetricsLanded, SourceReplaced};
+use crate::{PIXELS_PER_NOTCH, ZOOM_PER_NOTCH};
 use bviz_graph_layout::Kind;
 use bviz_graph_layout::metrics::TargetMetrics;
 use bviz_graph_layout::select::Filter;
 use bviz_graph_layout::select::labels::carried_label;
-use bviz_ui_components::{cached_layer, centered_spinner, load_in_background};
+use bviz_ui_components::{DragEnd, cached_layer, centered_spinner, load_in_background, track_drag};
 use bviz_ui_workspace::{Panel, PanelEvent, PanelKind, ViewKind};
 use gpui::{
     App, Bounds, Context, Div, Entity, EventEmitter, FocusHandle, Focusable, IntoElement,
     MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Render, Rgba,
-    SharedString, Subscription, Task, Window, canvas, div, prelude::*, px,
+    ScrollDelta, ScrollWheelEvent, SharedString, Subscription, Task, WeakEntity, Window, canvas,
+    div, prelude::*, px,
 };
-use plot::{MIN_RADIUS, Picked, Plotted};
+use plot::{MIN_RADIUS, Picked, Plotted, Zoom};
 use std::sync::Arc;
 
 /// The key context scoping the scatter plot's own bindings, so a key pressed
 /// here reaches this panel and no other.
-const KEY_CONTEXT: &str = "GraphScatter";
+pub(crate) const KEY_CONTEXT: &str = "GraphScatter";
+
+gpui::actions!(bviz_graph, [ShowWholePlot]);
 
 /// What the panel reads while the graph's targets are being measured.
 const MEASURING: &str = "Computing target metrics…";
@@ -38,10 +42,16 @@ pub struct ScatterPanel {
     shown: bool,
     /// The measured targets as drawn, from the time they land.
     plot: Option<Plot>,
+    /// The part of each axis the plot shows, which outlasts a replot: a filter
+    /// moves no mark.
+    zoom: Zoom,
+    /// The layer drawing the marks; notified through
+    /// [`Self::invalidate_canvas`].
+    canvas: Entity<ScatterCanvas>,
     /// Where the plot was last laid out, which a pointer is resolved against.
     bounds: Option<Bounds<Pixels>>,
-    /// Where the button went down over the plot, until it comes up again.
-    pressed_at: Option<Point<Pixels>>,
+    /// The press over the plot, until the button comes up again.
+    press: Option<Press>,
     /// Plots the targets through the graph's filter, absent while nothing is
     /// being plotted, so that one plotting runs at a time.
     plotting: Option<Task<()>>,
@@ -68,13 +78,16 @@ impl ScatterPanel {
         let filter_changed = cx.subscribe(&model, |view, _, _: &FilterChanged, cx| {
             view.replot(cx);
         });
+        let parent = cx.entity().downgrade();
         Self {
             focus: cx.focus_handle(),
             model,
             shown: false,
             plot: None,
+            zoom: Zoom::WHOLE,
+            canvas: cx.new(|_| ScatterCanvas { parent }),
             bounds: None,
-            pressed_at: None,
+            press: None,
             plotting: None,
             _changed: changed,
             _source_replaced: source_replaced,
@@ -115,26 +128,77 @@ impl ScatterPanel {
                 (Plotted::of(&metrics, |id| verdicts.get(id)), filter)
             },
             |view, (plotted, filter), cx| {
-                let plotted = Arc::new(plotted);
-                let canvas = cx.new(|_| ScatterCanvas {
-                    plotted: Arc::clone(&plotted),
-                });
                 view.plotting = None;
                 view.plot = Some(Plot {
-                    plotted,
-                    canvas,
+                    plotted: Arc::new(plotted),
                     hover: None,
                     filter,
                 });
+                view.invalidate_canvas(cx);
                 view.replot(cx);
             },
         ));
     }
 
+    /// Repaints the marks along with the layer over them; every change to what
+    /// the marks show routes through here.
+    fn invalidate_canvas(&self, cx: &mut Context<Self>) {
+        self.canvas.update(cx, |_, cx| cx.notify());
+        cx.notify();
+    }
+
+    /// Where the plot places counts, where it is drawn.
+    fn area(&self) -> Option<plot::DataArea> {
+        paint::data_area(&self.plot.as_ref()?.plotted, self.zoom, self.bounds?)
+    }
+
     /// The mark a pointer at `at` picks, where the plot is drawn.
     fn pick(&self, at: Point<Pixels>) -> Option<Picked> {
-        let plotted = &self.plot.as_ref()?.plotted;
-        paint::data_area(plotted, self.bounds?)?.pick(&plotted.marks, at)
+        let marks = &self.plot.as_ref()?.plotted.marks;
+        self.area()?.pick(marks, at)
+    }
+
+    /// Shows the plot at `zoom`, and names what the pointer at `at` is over
+    /// there unless a press is in progress, whose release names it.
+    fn zoom_to(&mut self, zoom: Zoom, at: Point<Pixels>, cx: &mut Context<Self>) {
+        if zoom == self.zoom {
+            return;
+        }
+        self.zoom = zoom;
+        self.invalidate_canvas(cx);
+        if self.press.is_none() {
+            self.hover_at(at, cx);
+        }
+    }
+
+    /// Zooms about the pointer by as many notches as the wheel turned.
+    fn on_scroll_wheel(&mut self, e: &ScrollWheelEvent, cx: &mut Context<Self>) {
+        let notches = match e.delta {
+            ScrollDelta::Lines(lines) => lines.y,
+            ScrollDelta::Pixels(pixels) => f32::from(pixels.y) / PIXELS_PER_NOTCH,
+        };
+        if let Some(area) = self.area() {
+            let zoom = area.zoomed(e.position, ZOOM_PER_NOTCH.powf(notches));
+            self.zoom_to(zoom, e.position, cx);
+        }
+    }
+
+    /// Starts a press, or shows the whole of each axis again on a double
+    /// click clear of every mark: a first click on a mark shows it in the
+    /// graph, which the second click then lands on.
+    fn on_mouse_down(&mut self, e: &MouseDownEvent, cx: &mut Context<Self>) {
+        if e.click_count == DOUBLE_CLICK && self.pick(e.position).is_none() {
+            self.press = None;
+            self.zoom_to(Zoom::WHOLE, e.position, cx);
+            return;
+        }
+        self.press = Some(Press {
+            from: e.position,
+            last: e.position,
+            dragged: false,
+        });
+        // The frame this asks for installs the handlers carrying the drag.
+        cx.notify();
     }
 
     /// Follows the pointer to the mark it picks, repainting only where that
@@ -158,13 +222,39 @@ impl ScatterPanel {
         cx.notify();
     }
 
-    /// Shows the graph's drawing of the target under the pointer, where the
-    /// button comes up where it went down.
-    fn release_at(&mut self, at: Point<Pixels>, cx: &mut Context<Self>) {
-        let Some(from) = self.pressed_at.take() else {
+    /// Carries the zoom along with a press dragged past a click's reach, which
+    /// puts away the tooltip until the release.
+    fn drag_to(&mut self, at: Point<Pixels>, cx: &mut Context<Self>) {
+        let Some(press) = &mut self.press else {
             return;
         };
-        if f32::from(at.x - from.x).hypot(f32::from(at.y - from.y)) > CLICK_SLOP {
+        let travelled = at - press.from;
+        let starts =
+            !press.dragged && f32::from(travelled.x).hypot(f32::from(travelled.y)) > CLICK_SLOP;
+        press.dragged |= starts;
+        if !press.dragged {
+            return;
+        }
+        let by = at - press.last;
+        press.last = at;
+        if starts {
+            self.clear_hover(cx);
+        }
+        if let Some(area) = self.area() {
+            self.zoom_to(area.panned(by), at, cx);
+        }
+    }
+
+    /// Ends the press, which shows the graph's drawing of the target under the
+    /// pointer where it was a click. Taking the press makes a second call for
+    /// the same release a no-op.
+    fn end_press(&mut self, at: Point<Pixels>, end: DragEnd, cx: &mut Context<Self>) {
+        let Some(press) = self.press.take() else {
+            return;
+        };
+        cx.notify();
+        self.hover_at(at, cx);
+        if press.dragged || !matches!(end, DragEnd::Released) {
             return;
         }
         let Some((plot, picked)) = self.plot.as_ref().zip(self.pick(at)) else {
@@ -184,14 +274,24 @@ impl ScatterPanel {
     }
 }
 
+/// The `click_count` of the press completing a double click.
+const DOUBLE_CLICK: usize = 2;
+
 /// The measured targets as drawn, and the mark among them under the pointer.
 struct Plot {
     plotted: Arc<Plotted>,
-    /// The layer drawing `plotted`.
-    canvas: Entity<ScatterCanvas>,
     hover: Option<Hover>,
     /// What `plotted` was drawn through.
     filter: Filter,
+}
+
+/// A press over the plot, which is a click until it is dragged past
+/// [`CLICK_SLOP`] and pans the plot from then on.
+struct Press {
+    from: Point<Pixels>,
+    /// Where the pointer was at the last step of the pan.
+    last: Point<Pixels>,
+    dragged: bool,
 }
 
 /// A mark under the pointer, by its index among the plotted marks, and what its
@@ -293,6 +393,9 @@ impl Render for ScatterPanel {
         let palette = Palette::from_theme(&bviz_ui_theme::theme(window, cx));
         let root = div()
             .key_context(Self::kind().key_context)
+            .on_action(cx.listener(|view, _: &ShowWholePlot, window, cx| {
+                view.zoom_to(Zoom::WHOLE, window.mouse_position(), cx);
+            }))
             .track_focus(&self.focus)
             .flex_1()
             .flex()
@@ -305,45 +408,56 @@ impl Render for ScatterPanel {
         }
         match &self.plot {
             None => root.child(centered_spinner(MEASURING, &palette.colors)),
-            Some(plot) => root.child(legend(&plot.plotted, &palette)).child(
-                div()
-                    .id("scatter-plot")
-                    .relative()
-                    .flex_1()
-                    .min_h(px(0.))
-                    .child(cached_layer(plot.canvas.clone()))
-                    .when(plot.hover.is_some() && model.reveals(), |plot| {
-                        plot.cursor_pointer()
-                    })
-                    .child(hover_layer(cx.entity(), palette))
-                    .on_mouse_move(cx.listener(|view, e: &MouseMoveEvent, _, cx| {
-                        view.hover_at(e.position, cx);
-                    }))
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|view, e: &MouseDownEvent, _, _| {
-                            view.pressed_at = Some(e.position);
-                        }),
-                    )
-                    .on_mouse_up(
-                        MouseButton::Left,
-                        cx.listener(|view, e: &MouseUpEvent, _, cx| {
-                            view.release_at(e.position, cx);
-                        }),
-                    )
-                    .on_hover(cx.listener(|view, hovered: &bool, _, cx| {
-                        if !hovered {
-                            view.clear_hover(cx);
-                        }
-                    })),
-            ),
+            Some(plot) => root
+                .child(legend(&plot.plotted, self.zoom, &palette))
+                .child(
+                    div()
+                        .id("scatter-plot")
+                        .relative()
+                        .flex_1()
+                        .min_h(px(0.))
+                        .child(cached_layer(self.canvas.clone()))
+                        .when(plot.hover.is_some() && model.reveals(), |plot| {
+                            plot.cursor_pointer()
+                        })
+                        .child(hover_layer(cx.entity(), palette))
+                        .on_mouse_move(cx.listener(|view, e: &MouseMoveEvent, _, cx| {
+                            if view.press.is_none() {
+                                view.hover_at(e.position, cx);
+                            }
+                        }))
+                        .on_scroll_wheel(cx.listener(|view, e: &ScrollWheelEvent, _, cx| {
+                            view.on_scroll_wheel(e, cx);
+                        }))
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|view, e: &MouseDownEvent, _, cx| {
+                                view.on_mouse_down(e, cx)
+                            }),
+                        )
+                        // The window-global handlers are installed only by a frame
+                        // painted with the press in progress, which a quick click
+                        // finishes before.
+                        .on_mouse_up(
+                            MouseButton::Left,
+                            cx.listener(|view, e: &MouseUpEvent, _, cx| {
+                                view.end_press(e.position, DragEnd::Released, cx);
+                            }),
+                        )
+                        .on_hover(cx.listener(|view, hovered: &bool, _, cx| {
+                            if !hovered {
+                                view.clear_hover(cx);
+                            }
+                        })),
+                ),
         }
     }
 }
 
 /// The layer over the marks that rings the hovered one and names it, painted
 /// apart from them so that a hover repaints none of the marks. Its layout
-/// records where the plot lies for the pointer handlers.
+/// records where the plot lies for the pointer handlers, and its paint carries
+/// a press past the plot's edge.
 fn hover_layer(view: Entity<ScatterPanel>, palette: Palette) -> impl IntoElement {
     let prepaint = {
         let view = view.clone();
@@ -352,15 +466,28 @@ fn hover_layer(view: Entity<ScatterPanel>, palette: Palette) -> impl IntoElement
         }
     };
     let paint = move |bounds: Bounds<Pixels>, (), window: &mut Window, cx: &mut App| {
-        let hovered = view.read(cx).plot.as_ref().and_then(|plot| {
+        let panel = view.read(cx);
+        let (zoom, pressed) = (panel.zoom, panel.press.is_some());
+        let hovered = panel.plot.as_ref().and_then(|plot| {
             let hover = plot.hover.as_ref()?;
             Some((Arc::clone(&plot.plotted), hover.mark, hover.lines.clone()))
         });
+        if pressed {
+            track_drag(
+                window,
+                &view,
+                |view, at, _, cx| view.drag_to(at, cx),
+                |view, at, end, _, cx| view.end_press(at, end, cx),
+            );
+        }
         let Some((plotted, mark, lines)) = hovered else {
             return;
         };
+        let Some(area) = paint::data_area(&plotted, zoom, bounds) else {
+            return;
+        };
         let mark = &plotted.marks[mark];
-        paint::paint_hover(mark, &lines, &plotted, &palette, bounds, window, cx);
+        paint::paint_hover(mark, &lines, &area, &palette, bounds, window, cx);
     };
     canvas(prepaint, paint).absolute().inset_0().size_full()
 }
@@ -391,9 +518,12 @@ const SWATCH_ALPHA: f32 = 0.7;
 /// Diameter of a legend swatch: twice the smallest mark's, so its hue reads.
 const SWATCH_DIAMETER: f32 = 4.0 * MIN_RADIUS;
 
-/// The strip naming the colour each kind of target is drawn in, and what a
-/// mark's size stands for.
-fn legend(plotted: &Plotted, palette: &Palette) -> Div {
+/// What the legend reads while the plot shows part of an axis.
+const ZOOMED: &str = "double-click empty space or press 0 to show all";
+
+/// The strip naming the colour each kind of target is drawn in, what a mark's
+/// size stands for, and how to leave a zoom.
+fn legend(plotted: &Plotted, zoom: Zoom, palette: &Palette) -> Div {
     // Kinds a reader names alike and the graph colours alike read as one.
     let mut entries: Vec<(&str, Rgba)> = Vec::with_capacity(plotted.kinds.len());
     for &kind in &plotted.kinds {
@@ -429,7 +559,10 @@ fn legend(plotted: &Plotted, palette: &Palette) -> Div {
         .child(
             div()
                 .ml_auto()
+                .flex()
+                .gap_4()
                 .text_color(palette.colors.text_muted)
+                .when(zoom != Zoom::WHOLE, |hints| hints.child(ZOOMED))
                 .child("mark size: direct dependents"),
         )
 }
@@ -437,17 +570,23 @@ fn legend(plotted: &Plotted, palette: &Palette) -> Div {
 /// The layer the targets are drawn in, cached across frames that leave the
 /// plot and zoom unchanged.
 struct ScatterCanvas {
-    plotted: Arc<Plotted>,
+    /// The panel whose plot and zoom this draws.
+    parent: WeakEntity<ScatterPanel>,
 }
 
 impl Render for ScatterCanvas {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let palette = Palette::from_theme(&bviz_ui_theme::theme(window, cx));
-        let plotted = Arc::clone(&self.plotted);
+        let drawn = self.parent.upgrade().and_then(|parent| {
+            let panel = parent.read(cx);
+            Some((Arc::clone(&panel.plot.as_ref()?.plotted), panel.zoom))
+        });
         canvas(
             |_, _, _| {},
             move |bounds: Bounds<Pixels>, (), window, cx| {
-                paint::paint_plot(&plotted, &palette, bounds, window, cx)
+                if let Some((plotted, zoom)) = drawn {
+                    paint::paint_plot(&plotted, zoom, &palette, bounds, window, cx);
+                }
             },
         )
         .size_full()

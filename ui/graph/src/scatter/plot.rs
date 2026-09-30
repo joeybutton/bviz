@@ -42,6 +42,11 @@ impl LogScale {
         (log_count(n) / log_count(self.top)) as f32
     }
 
+    /// The narrowest share of the axis a zoom shows.
+    fn narrowest(self) -> f32 {
+        (MIN_SPAN_DECADES / log_count(self.top)).min(1.0) as f32
+    }
+
     /// The ticks from zero to the far end, ascending.
     pub(crate) fn ticks(self) -> Vec<Tick> {
         let mut ticks = vec![Tick {
@@ -162,34 +167,145 @@ fn radius(fan_in: u32, largest: u32) -> f32 {
     MIN_RADIUS + (MAX_RADIUS - MIN_RADIUS) * share
 }
 
+/// The narrowest stretch of an axis a zoom shows, in decades of `1 + n`:
+/// twice the widest gap between neighbouring ticks, `log10(5 / 2)`, which the
+/// step from twice to five times a power of ten approaches, so at least two
+/// ticks are always in view.
+const MIN_SPAN_DECADES: f64 = 2.0 * (1.0 - 2.0 * std::f64::consts::LOG10_2);
+
+/// The part of an axis the plot shows, from `lo` for `len`, both as fractions
+/// of the whole axis from its origin: always within the axis.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct Span {
+    lo: f32,
+    len: f32,
+}
+
+impl Span {
+    pub(crate) const WHOLE: Span = Span { lo: 0.0, len: 1.0 };
+
+    fn new(lo: f32, len: f32) -> Self {
+        let len = len.min(1.0);
+        Span {
+            lo: lo.clamp(0.0, 1.0 - len),
+            len,
+        }
+    }
+
+    /// Where the axis fraction `f` falls across the span, from 0 at its start
+    /// to 1 at its end.
+    fn across(self, f: f32) -> f32 {
+        (f - self.lo) / self.len
+    }
+
+    /// The span `factor` times narrower, a factor below one widening it, but
+    /// no narrower than `narrowest`, about the point `at` across it, which
+    /// stays where it was.
+    fn zoomed(self, at: f32, factor: f32, narrowest: f32) -> Self {
+        let len = (self.len / factor).clamp(narrowest.min(self.len), 1.0);
+        Span::new(self.lo + at * (self.len - len), len)
+    }
+
+    /// The span slid `by` of its own length toward the axis's far end.
+    fn panned(self, by: f32) -> Self {
+        Span::new(self.lo + by * self.len, self.len)
+    }
+}
+
+/// The part of each axis the plot shows.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct Zoom {
+    pub(crate) x: Span,
+    pub(crate) y: Span,
+}
+
+impl Zoom {
+    pub(crate) const WHOLE: Zoom = Zoom {
+        x: Span::WHOLE,
+        y: Span::WHOLE,
+    };
+}
+
 /// The region counts are placed in, inset from the axes by the largest mark's
-/// radius so no mark crosses them.
+/// radius so that, at the whole of each axis, no mark crosses them.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct DataArea {
     bounds: Bounds<Pixels>,
+    /// The frame the axes are drawn along, outside which nothing is drawn.
+    frame: Bounds<Pixels>,
     x: LogScale,
     y: LogScale,
+    zoom: Zoom,
 }
 
 impl DataArea {
-    /// The data region within the frame `axes` draws its axes along.
-    pub(crate) fn within(axes: Bounds<Pixels>, x: LogScale, y: LogScale) -> Self {
+    /// The data region within the frame `axes` draws its axes along, showing
+    /// the part of each axis `zoom` names.
+    pub(crate) fn within(axes: Bounds<Pixels>, x: LogScale, y: LogScale, zoom: Zoom) -> Self {
         let inset = px(MAX_RADIUS);
         let bounds = Bounds::from_corners(
             point(axes.left() + inset, axes.top() + inset),
             point(axes.right() - inset, axes.bottom() - inset),
         );
-        Self { bounds, x, y }
+        Self {
+            bounds,
+            frame: axes,
+            x,
+            y,
+            zoom,
+        }
+    }
+
+    pub(crate) fn frame(&self) -> Bounds<Pixels> {
+        self.frame
     }
 
     /// The horizontal position of a closure of `n`.
     pub(crate) fn x_of(&self, n: u32) -> Pixels {
-        self.bounds.left() + self.bounds.size.width * self.x.fraction(n)
+        let across = self.zoom.x.across(self.x.fraction(n));
+        self.bounds.left() + self.bounds.size.width * across
     }
 
     /// The vertical position of a blast radius of `n`, rising up the plot.
     pub(crate) fn y_of(&self, n: u32) -> Pixels {
-        self.bounds.bottom() - self.bounds.size.height * self.y.fraction(n)
+        let across = self.zoom.y.across(self.y.fraction(n));
+        self.bounds.bottom() - self.bounds.size.height * across
+    }
+
+    /// Where a closure of `n` falls, where that is within the frame.
+    pub(crate) fn visible_x(&self, n: u32) -> Option<Pixels> {
+        let x = self.x_of(n);
+        (self.frame.left()..=self.frame.right())
+            .contains(&x)
+            .then_some(x)
+    }
+
+    /// Where a blast radius of `n` falls, where that is within the frame.
+    pub(crate) fn visible_y(&self, n: u32) -> Option<Pixels> {
+        let y = self.y_of(n);
+        (self.frame.top()..=self.frame.bottom())
+            .contains(&y)
+            .then_some(y)
+    }
+
+    /// The zoom `factor` times closer, a factor below one farther out, about
+    /// the point under `at`, which stays under it.
+    pub(crate) fn zoomed(&self, at: Point<Pixels>, factor: f32) -> Zoom {
+        let across_x = (at.x - self.bounds.left()) / self.bounds.size.width;
+        let across_y = (self.bounds.bottom() - at.y) / self.bounds.size.height;
+        Zoom {
+            x: self.zoom.x.zoomed(across_x, factor, self.x.narrowest()),
+            y: self.zoom.y.zoomed(across_y, factor, self.y.narrowest()),
+        }
+    }
+
+    /// The zoom carried along with a drag by `by`, so the counts under the
+    /// pointer follow it.
+    pub(crate) fn panned(&self, by: Point<Pixels>) -> Zoom {
+        Zoom {
+            x: self.zoom.x.panned(-(by.x / self.bounds.size.width)),
+            y: self.zoom.y.panned(by.y / self.bounds.size.height),
+        }
     }
 
     pub(crate) fn place(&self, target: &TargetMetrics) -> Point<Pixels> {
@@ -197,14 +313,15 @@ impl DataArea {
     }
 
     /// The mark of `marks` a pointer at `at` picks: the one whose centre is
-    /// nearest, among those whose rim lies within [`PICK_SLOP`] of it, and the
-    /// one drawn over the others among equally near ones.
+    /// nearest, among those whose rim lies within [`PICK_SLOP`] of it and whose
+    /// centre lies within the frame, and the one drawn over the others among
+    /// equally near ones.
     pub(crate) fn pick(&self, marks: &[Mark], at: Point<Pixels>) -> Option<Picked> {
         let mut nearest: Option<(usize, f32)> = None;
         for (index, mark) in marks.iter().enumerate() {
             let center = self.place(&mark.target);
             let distance = f32::from(center.x - at.x).hypot(f32::from(center.y - at.y));
-            let reaches = distance <= mark.radius + PICK_SLOP;
+            let reaches = distance <= mark.radius + PICK_SLOP && self.frame.contains(&center);
             if reaches && nearest.is_none_or(|(_, best)| distance <= best) {
                 nearest = Some((index, distance));
             }
@@ -328,7 +445,7 @@ mod tests {
         let targets = [target(0, 0, 9), target(4_000, 17, 9), target(3, 90_000, 9)];
         let plotted = shown(&targets);
         let axes = Bounds::new(point(px(40.), px(10.)), size(px(300.), px(200.)));
-        let area = DataArea::within(axes, plotted.x, plotted.y);
+        let area = DataArea::within(axes, plotted.x, plotted.y, Zoom::WHOLE);
         for mark in &plotted.marks {
             let at = area.place(&mark.target);
             let r = px(mark.radius);
@@ -348,7 +465,7 @@ mod tests {
         let targets = [target(0, 0, 0), target(100, 100, 0), target(100, 100, 5)];
         let plotted = shown(&targets);
         let axes = Bounds::new(point(px(0.), px(0.)), size(px(400.), px(300.)));
-        let area = DataArea::within(axes, plotted.x, plotted.y);
+        let area = DataArea::within(axes, plotted.x, plotted.y, Zoom::WHOLE);
         let origin = area.place(&targets[0]);
         let picked = area.pick(&plotted.marks, origin + point(px(1.), px(-1.)));
         let origin_mark = plotted.marks.iter().position(|m| m.target == targets[0]);
@@ -398,10 +515,61 @@ mod tests {
     }
 
     #[test]
+    fn a_zoom_holds_the_point_it_is_taken_about_and_stays_within_the_axis() {
+        const NARROWEST: f32 = 0.05;
+        let span = Span::WHOLE.zoomed(0.25, 4.0, NARROWEST);
+        assert!((span.len - 0.25).abs() < 1e-6);
+        assert!((span.across(0.25) - 0.25).abs() < 1e-6);
+        let wider = span.zoomed(0.5, 0.1, NARROWEST);
+        assert_eq!(wider, Span::WHOLE);
+        assert_eq!(Span::WHOLE.zoomed(0.5, 1e6, NARROWEST).len, NARROWEST);
+        assert_eq!(span.panned(-10.0).lo, 0.0);
+        assert!((span.panned(10.0).lo - 0.75).abs() < 1e-6);
+    }
+
+    #[test]
+    fn the_deepest_zoom_keeps_two_ticks_in_view_anywhere_on_the_axis() {
+        for top in [1, 7, 150, 90_000] {
+            let scale = LogScale::covering(top);
+            let values: Vec<f32> = scale
+                .ticks()
+                .iter()
+                .map(|t| scale.fraction(t.value))
+                .collect();
+            let narrowest = scale.narrowest();
+            let steps = 100;
+            for step in 0..=steps {
+                let lo = (1.0 - narrowest) * step as f32 / steps as f32;
+                let in_view = values
+                    .iter()
+                    .filter(|&&f| f >= lo - 1e-6 && f <= lo + narrowest + 1e-6)
+                    .count();
+                assert!(in_view >= 2, "top {top}, from {lo}: {in_view} ticks");
+            }
+        }
+    }
+
+    #[test]
+    fn a_zoomed_plot_keeps_the_counts_under_the_pointer_and_picks_none_it_clips() {
+        let targets = [target(0, 0, 0), target(1_000, 1_000, 0), target(30, 30, 0)];
+        let plotted = shown(&targets);
+        let axes = Bounds::new(point(px(0.), px(0.)), size(px(400.), px(300.)));
+        let whole = DataArea::within(axes, plotted.x, plotted.y, Zoom::WHOLE);
+        let at = whole.place(&targets[2]);
+        let zoom = whole.zoomed(at, 3.0);
+        let zoomed = DataArea::within(axes, plotted.x, plotted.y, zoom);
+        let moved = zoomed.place(&targets[2]) - at;
+        assert!(f32::from(moved.x).abs() < 0.01 && f32::from(moved.y).abs() < 0.01);
+        let corner = zoomed.place(&targets[1]);
+        assert!(!axes.contains(&corner));
+        assert_eq!(zoomed.pick(&plotted.marks, corner), None);
+    }
+
+    #[test]
     fn more_blast_radius_places_a_mark_higher() {
         let plotted = shown(&[target(0, 0, 0), target(0, 50, 0)]);
         let axes = Bounds::new(point(px(0.), px(0.)), size(px(100.), px(100.)));
-        let area = DataArea::within(axes, plotted.x, plotted.y);
+        let area = DataArea::within(axes, plotted.x, plotted.y, Zoom::WHOLE);
         assert!(area.y_of(50) < area.y_of(0));
         assert_eq!(area.x_of(0), axes.left() + px(MAX_RADIUS));
     }

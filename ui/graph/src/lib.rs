@@ -84,6 +84,7 @@ pub fn register_keys(cx: &mut App) {
         // Escape acts on the innermost thing holding focus: in the field that
         // is the card the typed pattern put up over the drawing.
         KeyBinding::new("escape", search::DismissResults, Some(search::KEY_CONTEXT)),
+        KeyBinding::new("0", scatter::ShowWholePlot, Some(scatter::KEY_CONTEXT)),
     ]);
 }
 
