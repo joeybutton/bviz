@@ -10,7 +10,6 @@ runs:
       shell: bash
       run: |
         cat >> user.bazelrc <<'RC'
-        startup --experimental_remote_repo_contents_cache
         common --credential_helper=yume.buildbuddy.io=%workspace%/.github/actions/buildbuddy/credential-helper
         build --config=remote
         build --build_metadata=ROLE=CI
