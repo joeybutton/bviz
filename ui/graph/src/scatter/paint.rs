@@ -2,6 +2,7 @@
 
 use super::plot::{DataArea, LogScale, Mark, Plotted, Tick, tick_label};
 use crate::Palette;
+use crate::paint::UNMARKED_FADE;
 use bviz_ui_components::{TooltipColors, paint_tooltip_box};
 use bviz_ui_theme::mix;
 use gpui::{
@@ -82,8 +83,9 @@ pub(crate) fn paint_plot(
         for mark in &plotted.marks {
             let center = area.place(&mark.target);
             let r = px(mark.radius);
+            let fade = if mark.faded { UNMARKED_FADE } else { 1.0 };
             let color = Rgba {
-                a: MARK_ALPHA,
+                a: MARK_ALPHA * fade,
                 ..palette.kind_accent(mark.target.kind)
             };
             window.paint_quad(quad(

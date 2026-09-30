@@ -361,13 +361,14 @@ impl GraphPanel {
                 reveal(view, event.node, cx);
             }
         });
-        let panel = cx.entity();
-        model.update(cx, |model, cx| model.defer_to(&panel, cx));
+        let derived = Derived::new();
+        let (panel, filter) = (cx.entity(), derived.filter().clone());
+        model.update(cx, |model, cx| model.defer_to(&panel, filter, cx));
         Self {
             focus_handle: cx.focus_handle(),
             title,
             model,
-            derived: Derived::new(),
+            derived,
             framing: Framing::new(),
             drag: Drag::None,
             emphasis: Emphasis::none(),
@@ -670,9 +671,7 @@ impl Panel for GraphPanel {
     fn set_active(&mut self, active: bool, window: &mut Window, cx: &mut Context<Self>) {
         if active {
             self.focus_handle.focus(window, cx);
-            let panel = cx.entity();
-            self.model
-                .update(cx, |model, cx| model.defer_to(&panel, cx));
+            derive::publish_filter(self, cx);
         }
     }
 }

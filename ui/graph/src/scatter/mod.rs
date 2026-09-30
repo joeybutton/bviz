@@ -4,18 +4,19 @@
 mod paint;
 mod plot;
 
+use crate::Palette;
 use crate::drag::CLICK_SLOP;
-use crate::model::{GraphModel, Loaded};
-use crate::{Palette, model::SourceReplaced};
+use crate::model::{FilterChanged, GraphModel, Loaded, MetricsLanded, SourceReplaced};
 use bviz_graph_layout::Kind;
 use bviz_graph_layout::metrics::TargetMetrics;
+use bviz_graph_layout::select::Filter;
 use bviz_graph_layout::select::labels::carried_label;
-use bviz_ui_components::{cached_layer, centered_spinner};
+use bviz_ui_components::{cached_layer, centered_spinner, load_in_background};
 use bviz_ui_workspace::{Panel, PanelEvent, PanelKind, ViewKind};
 use gpui::{
     App, Bounds, Context, Div, Entity, EventEmitter, FocusHandle, Focusable, IntoElement,
     MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Render, Rgba,
-    SharedString, Subscription, Window, canvas, div, prelude::*, px,
+    SharedString, Subscription, Task, Window, canvas, div, prelude::*, px,
 };
 use plot::{MIN_RADIUS, Picked, Plotted};
 use std::sync::Arc;
@@ -41,33 +42,31 @@ pub struct ScatterPanel {
     bounds: Option<Bounds<Pixels>>,
     /// Where the button went down over the plot, until it comes up again.
     pressed_at: Option<Point<Pixels>>,
+    /// Plots the targets through the graph's filter, absent while nothing is
+    /// being plotted, so that one plotting runs at a time.
+    plotting: Option<Task<()>>,
     /// Redraws as the graph is read and measured.
     _changed: Subscription,
     _source_replaced: Subscription,
+    _metrics_landed: Subscription,
+    _filter_changed: Subscription,
 }
 
 impl ScatterPanel {
     pub(crate) fn new(model: Entity<GraphModel>, cx: &mut Context<Self>) -> Self {
-        let changed = cx.observe(&model, |view, model, cx| {
-            if view.plot.is_none()
-                && let Some(metrics) = model.read(cx).metrics()
-            {
-                let plotted = Arc::new(Plotted::of(metrics));
-                let canvas = cx.new(|_| ScatterCanvas {
-                    plotted: Arc::clone(&plotted),
-                });
-                view.plot = Some(Plot {
-                    plotted,
-                    canvas,
-                    hover: None,
-                });
-            }
-            cx.notify();
-        });
+        let changed = cx.observe(&model, |_, _, cx| cx.notify());
         let source_replaced = cx.subscribe(&model, |view, _, _: &SourceReplaced, cx| {
+            view.plot = None;
+            view.plotting = None;
             if view.shown {
                 view.measure(cx);
             }
+        });
+        let metrics_landed = cx.subscribe(&model, |view, _, _: &MetricsLanded, cx| {
+            view.replot(cx);
+        });
+        let filter_changed = cx.subscribe(&model, |view, _, _: &FilterChanged, cx| {
+            view.replot(cx);
         });
         Self {
             focus: cx.focus_handle(),
@@ -76,13 +75,60 @@ impl ScatterPanel {
             plot: None,
             bounds: None,
             pressed_at: None,
+            plotting: None,
             _changed: changed,
             _source_replaced: source_replaced,
+            _metrics_landed: metrics_landed,
+            _filter_changed: filter_changed,
         }
     }
 
-    fn measure(&self, cx: &mut Context<Self>) {
+    /// Has the graph's targets measured, and brings the plot up to date where
+    /// they already are.
+    fn measure(&mut self, cx: &mut Context<Self>) {
         self.model.update(cx, |model, cx| model.ensure_metrics(cx));
+        self.replot(cx);
+    }
+
+    /// Plots the measured targets through the filter the graph's other views
+    /// draw through, where the plot drawn is not drawn through it. A hidden
+    /// panel waits until it is shown, and a plotting running replots once it
+    /// lands. The filter is evaluated over every node of the graph, so this
+    /// runs off the UI thread, and the plot drawn stays until the new one lands.
+    fn replot(&mut self, cx: &mut Context<Self>) {
+        if !self.shown || self.plotting.is_some() {
+            return;
+        }
+        let model = self.model.read(cx);
+        let (Some(metrics), Some(loaded)) = (model.metrics(), model.loaded()) else {
+            return;
+        };
+        let filter = model.filter().cloned().unwrap_or_default();
+        if self.plot.as_ref().is_some_and(|plot| plot.filter == filter) {
+            return;
+        }
+        let (metrics, shared) = (Arc::clone(metrics), loaded.shared.clone());
+        self.plotting = Some(load_in_background(
+            cx,
+            move || {
+                let verdicts = filter.evaluate(&shared.base, &shared.names, &shared.facets);
+                (Plotted::of(&metrics, |id| verdicts.get(id)), filter)
+            },
+            |view, (plotted, filter), cx| {
+                let plotted = Arc::new(plotted);
+                let canvas = cx.new(|_| ScatterCanvas {
+                    plotted: Arc::clone(&plotted),
+                });
+                view.plotting = None;
+                view.plot = Some(Plot {
+                    plotted,
+                    canvas,
+                    hover: None,
+                    filter,
+                });
+                view.replot(cx);
+            },
+        ));
     }
 
     /// The mark a pointer at `at` picks, where the plot is drawn.
@@ -144,6 +190,8 @@ struct Plot {
     /// The layer drawing `plotted`.
     canvas: Entity<ScatterCanvas>,
     hover: Option<Hover>,
+    /// What `plotted` was drawn through.
+    filter: Filter,
 }
 
 /// A mark under the pointer, by its index among the plotted marks, and what its
@@ -151,6 +199,14 @@ struct Plot {
 struct Hover {
     mark: usize,
     lines: Vec<String>,
+}
+
+/// How many targets the plot draws, of how many were measured.
+fn drawn_status(plotted: &Plotted) -> String {
+    match (plotted.marks.len(), plotted.measured) {
+        (drawn, measured) if drawn == measured => format!("{measured} targets"),
+        (drawn, measured) => format!("{drawn} of {measured} targets"),
+    }
 }
 
 /// What the tooltip over `target` reads, where `coincident` other targets sit
@@ -213,12 +269,10 @@ impl Panel for ScatterPanel {
 
     fn status(&self, cx: &App) -> Option<SharedString> {
         let model = self.model.read(cx);
-        let status = model
-            .source()
-            .status("No graph", |_| match model.metrics() {
-                None => MEASURING.into(),
-                Some(metrics) => format!("{} targets", metrics.len()),
-            });
+        let status = model.source().status("No graph", |_| match &self.plot {
+            None => MEASURING.into(),
+            Some(plot) => drawn_status(&plot.plotted),
+        });
         Some(status.into())
     }
 

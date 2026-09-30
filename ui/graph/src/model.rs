@@ -4,6 +4,7 @@ use crate::derive::derive_levels;
 use bviz_graph_layout::graph::Graph;
 use bviz_graph_layout::lod::{DEFAULT_MAX_EDGES, DEFAULT_MAX_NODES, Overflow};
 use bviz_graph_layout::metrics::{TargetMetrics, target_metrics};
+use bviz_graph_layout::select::Filter;
 use bviz_graph_layout::select::labels::LabelIndex;
 use bviz_graph_layout::{Capabilities, Facets, Id, MapLayout, Names};
 use bviz_ui_components::{Pending, load_in_background};
@@ -179,9 +180,18 @@ pub(crate) struct RevealRequested {
 /// The graph panel the graph's other views defer to.
 struct Deferred {
     panel: EntityId,
+    /// The filter the panel draws through.
+    filter: Filter,
     /// Forgets the panel once it is released.
     _released: Subscription,
 }
+
+/// The loaded graph's per-target metrics have landed.
+pub(crate) struct MetricsLanded;
+
+/// The graph's other views may have another [`GraphModel::filter`] to draw
+/// through.
+pub(crate) struct FilterChanged;
 
 /// A graph's per-target metrics, a pass over the whole graph that is only
 /// taken once a view drawing them asks for it.
@@ -204,13 +214,16 @@ pub(crate) struct GraphModel {
     /// The placement of the map in flight once the read has landed, held so
     /// that it is not cancelled.
     _placing: Task<()>,
-    /// The graph panel opened or shown last, for as long as it is open.
+    /// The graph panel opened, shown or filtered last, for as long as it is
+    /// open.
     deferred: Option<Deferred>,
 }
 
 impl EventEmitter<SourceReplaced> for GraphModel {}
 impl EventEmitter<MapPlaced> for GraphModel {}
 impl EventEmitter<RevealRequested> for GraphModel {}
+impl EventEmitter<MetricsLanded> for GraphModel {}
+impl EventEmitter<FilterChanged> for GraphModel {}
 
 impl GraphModel {
     /// The graph `load` is reading, viewable once the read finishes and failed
@@ -280,26 +293,49 @@ impl GraphModel {
         }
     }
 
-    /// Takes `panel` as the graph panel the graph's other views defer to.
-    pub(crate) fn defer_to(&mut self, panel: &Entity<GraphPanel>, cx: &mut Context<Self>) {
+    /// Takes `panel`, drawing through `filter`, as the graph panel the graph's
+    /// other views defer to.
+    pub(crate) fn defer_to(
+        &mut self,
+        panel: &Entity<GraphPanel>,
+        filter: Filter,
+        cx: &mut Context<Self>,
+    ) {
         let id = panel.entity_id();
-        if self.deferred.as_ref().is_some_and(|d| d.panel == id) {
-            return;
+        match &mut self.deferred {
+            Some(deferred) if deferred.panel == id => {
+                if deferred.filter == filter {
+                    return;
+                }
+                deferred.filter = filter;
+            }
+            _ => {
+                let released = cx.observe_release(panel, |model, _, cx| {
+                    model.deferred = None;
+                    cx.emit(FilterChanged);
+                    cx.notify();
+                });
+                self.deferred = Some(Deferred {
+                    panel: id,
+                    filter,
+                    _released: released,
+                });
+                cx.notify();
+            }
         }
-        let released = cx.observe_release(panel, |model, _, cx| {
-            model.deferred = None;
-            cx.notify();
-        });
-        self.deferred = Some(Deferred {
-            panel: id,
-            _released: released,
-        });
-        cx.notify();
+        cx.emit(FilterChanged);
     }
 
     /// Whether a graph panel is open to show a node another view names.
     pub(crate) fn reveals(&self) -> bool {
         self.deferred.is_some()
+    }
+
+    /// The filter the graph's other views draw their share of it through: the
+    /// one the graph panel they defer to draws through, absent where no graph
+    /// panel is open.
+    pub(crate) fn filter(&self) -> Option<&Filter> {
+        self.deferred.as_ref().map(|deferred| &deferred.filter)
     }
 
     /// Starts measuring the loaded graph's targets off the UI thread, notifying
@@ -319,9 +355,10 @@ impl GraphModel {
         let work = load_in_background(
             cx,
             move || target_metrics(&base, &facets).into(),
-            |model, metrics, _| {
+            |model, metrics, cx| {
                 if let Source::Loaded(loaded) = &mut model.source {
                     loaded.measure = Measure::Measured(metrics);
+                    cx.emit(MetricsLanded);
                 }
             },
         );

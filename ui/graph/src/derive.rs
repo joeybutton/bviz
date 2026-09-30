@@ -696,6 +696,7 @@ pub(crate) fn opened(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
         return;
     };
     view.derived.opened_on(loaded);
+    publish_filter(view, cx);
     crate::search::reset(view, cx);
     crate::why::reset(view);
     ensure_layout(view, cx);
@@ -830,8 +831,17 @@ fn apply_filter(view: &mut GraphPanel, filter: Filter, frame: bool, cx: &mut Con
     crate::why::put_away(view, cx);
     view.derived.show_paths(None);
     view.derived.filter = filter;
+    publish_filter(view, cx);
     view.derived.frame_on_landing = frame;
     request(view, cx);
+}
+
+/// Hands the filter the panel draws through to the document's graph, making
+/// the panel the one the graph's other views defer to.
+pub(crate) fn publish_filter(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
+    let (panel, filter) = (cx.entity(), view.derived.filter.clone());
+    view.model
+        .update(cx, |model, cx| model.defer_to(&panel, filter, cx));
 }
 
 /// Derives what the panel draws off the UI thread and adopts the result.

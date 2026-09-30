@@ -1,8 +1,9 @@
 //! Where the scatter plot's marks and ticks fall: counts on logarithmic axes,
 //! and a mark's size by its fan-in.
 
-use bviz_graph_layout::Kind;
 use bviz_graph_layout::metrics::TargetMetrics;
+use bviz_graph_layout::select::Verdict;
+use bviz_graph_layout::{Id, Kind};
 use gpui::{Bounds, Pixels, Point, point, px};
 
 /// A count axis scaled by `log10(1 + n)`, so a count of zero sits at the origin
@@ -92,12 +93,21 @@ pub(crate) const MAX_RADIUS: f32 = 8.0;
 pub(crate) struct Mark {
     pub(crate) target: TargetMetrics,
     pub(crate) radius: f32,
+    /// Whether the filter draws the target as no part of what it selects.
+    pub(crate) faded: bool,
 }
 
-/// The marks a set of targets draws as, and the axes that hold them.
+/// The marks a set of targets draws as, and the axes that hold them. The axes
+/// and the mark sizes are scaled to every target measured, drawn or not, so a
+/// filter changes which marks are drawn and never where one falls.
 pub(crate) struct Plotted {
-    /// Largest first, so a small mark is drawn over any large one it overlaps.
+    /// The faded before the rest, so none hides a mark the filter selects, and
+    /// largest first within each, so a small mark is drawn over any large one
+    /// it overlaps.
     pub(crate) marks: Vec<Mark>,
+    /// How many targets were measured, of which `marks` draws those the filter
+    /// does not hide.
+    pub(crate) measured: usize,
     /// Closure along the horizontal axis.
     pub(crate) x: LogScale,
     /// Blast radius along the vertical axis.
@@ -107,23 +117,34 @@ pub(crate) struct Plotted {
 }
 
 impl Plotted {
-    pub(crate) fn of(targets: &[TargetMetrics]) -> Self {
+    /// The marks of `targets` as the filter whose verdict on a node `verdict`
+    /// gives draws them.
+    pub(crate) fn of(targets: &[TargetMetrics], verdict: impl Fn(Id) -> Verdict) -> Self {
         let max = |measure: fn(&TargetMetrics) -> u32| targets.iter().map(measure).max();
         let largest_fan_in = max(|t| t.fan_in).unwrap_or(0);
-        let mut marks: Vec<Mark> = targets
-            .iter()
-            .map(|&target| Mark {
+        let mut marks: Vec<Mark> = Vec::with_capacity(targets.len());
+        marks.extend(targets.iter().filter_map(|&target| {
+            let faded = match verdict(target.id) {
+                Verdict::Hidden => return None,
+                Verdict::Faded => true,
+                // The graph draws a target kept only to frame what it holds as
+                // it draws one the filter selects.
+                Verdict::Shown | Verdict::Context => false,
+            };
+            Some(Mark {
                 target,
                 radius: radius(target.fan_in, largest_fan_in),
+                faded,
             })
-            .collect();
-        marks.sort_by_key(|mark| std::cmp::Reverse(mark.target.fan_in));
+        }));
+        marks.sort_by_key(|mark| (!mark.faded, std::cmp::Reverse(mark.target.fan_in)));
         let mut kinds: Vec<Kind> = targets.iter().map(|t| t.kind).collect();
         kinds.sort_unstable();
         kinds.dedup();
         Self {
             kinds,
             marks,
+            measured: targets.len(),
             x: LogScale::covering(max(|t| t.closure).unwrap_or(0)),
             y: LogScale::covering(max(|t| t.blast_radius).unwrap_or(0)),
         }
@@ -216,18 +237,22 @@ pub(crate) struct Picked {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bviz_graph_layout::Id;
     use gpui::size;
 
     fn target(closure: u32, blast_radius: u32, fan_in: u32) -> TargetMetrics {
         TargetMetrics {
-            id: Id(0),
+            id: Id(closure),
             kind: Kind::Target,
             closure,
             blast_radius,
             fan_in,
             fan_out: 0,
         }
+    }
+
+    /// The marks of `targets` through a filter drawing every one.
+    fn shown(targets: &[TargetMetrics]) -> Plotted {
+        Plotted::of(targets, |_| Verdict::Shown)
     }
 
     #[test]
@@ -285,7 +310,7 @@ mod tests {
 
     #[test]
     fn marks_grow_with_fan_in_within_their_bounds_and_draw_largest_first() {
-        let plotted = Plotted::of(&[target(1, 1, 0), target(1, 1, 100), target(1, 1, 3)]);
+        let plotted = shown(&[target(1, 1, 0), target(1, 1, 100), target(1, 1, 3)]);
         let radii: Vec<f32> = plotted.marks.iter().map(|m| m.radius).collect();
         assert_eq!(radii.first(), Some(&MAX_RADIUS));
         assert_eq!(radii.last(), Some(&MIN_RADIUS));
@@ -294,14 +319,14 @@ mod tests {
 
     #[test]
     fn no_fan_in_anywhere_draws_every_mark_at_the_smallest_size() {
-        let plotted = Plotted::of(&[target(0, 0, 0), target(4, 2, 0)]);
+        let plotted = shown(&[target(0, 0, 0), target(4, 2, 0)]);
         assert!(plotted.marks.iter().all(|m| m.radius == MIN_RADIUS));
     }
 
     #[test]
     fn every_mark_stays_clear_of_the_axes() {
         let targets = [target(0, 0, 9), target(4_000, 17, 9), target(3, 90_000, 9)];
-        let plotted = Plotted::of(&targets);
+        let plotted = shown(&targets);
         let axes = Bounds::new(point(px(40.), px(10.)), size(px(300.), px(200.)));
         let area = DataArea::within(axes, plotted.x, plotted.y);
         for mark in &plotted.marks {
@@ -321,7 +346,7 @@ mod tests {
     #[test]
     fn a_pointer_picks_the_nearest_mark_within_reach_and_counts_those_it_hides() {
         let targets = [target(0, 0, 0), target(100, 100, 0), target(100, 100, 5)];
-        let plotted = Plotted::of(&targets);
+        let plotted = shown(&targets);
         let axes = Bounds::new(point(px(0.), px(0.)), size(px(400.), px(300.)));
         let area = DataArea::within(axes, plotted.x, plotted.y);
         let origin = area.place(&targets[0]);
@@ -344,8 +369,37 @@ mod tests {
     }
 
     #[test]
+    fn a_filter_draws_what_it_keeps_on_axes_scaled_to_every_target() {
+        let targets = [target(3, 1, 9), target(400, 2, 0), target(7, 90, 2)];
+        let hidden = targets[1].id;
+        let faded = targets[2].id;
+        let plotted = Plotted::of(&targets, |id| match id {
+            id if id == hidden => Verdict::Hidden,
+            id if id == faded => Verdict::Faded,
+            _ => Verdict::Shown,
+        });
+        let drawn: Vec<(Id, bool)> = plotted
+            .marks
+            .iter()
+            .map(|m| (m.target.id, m.faded))
+            .collect();
+        assert_eq!(drawn, [(faded, true), (targets[0].id, false)]);
+        assert_eq!(plotted.measured, targets.len());
+        let whole = shown(&targets);
+        assert_eq!((plotted.x, plotted.y), (whole.x, whole.y));
+        let radius_of = |plotted: &Plotted, id: Id| {
+            plotted
+                .marks
+                .iter()
+                .find(|m| m.target.id == id)
+                .map(|m| m.radius)
+        };
+        assert_eq!(radius_of(&plotted, faded), radius_of(&whole, faded));
+    }
+
+    #[test]
     fn more_blast_radius_places_a_mark_higher() {
-        let plotted = Plotted::of(&[target(0, 0, 0), target(0, 50, 0)]);
+        let plotted = shown(&[target(0, 0, 0), target(0, 50, 0)]);
         let axes = Bounds::new(point(px(0.), px(0.)), size(px(100.), px(100.)));
         let area = DataArea::within(axes, plotted.x, plotted.y);
         assert!(area.y_of(50) < area.y_of(0));
