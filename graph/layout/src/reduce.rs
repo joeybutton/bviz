@@ -13,6 +13,8 @@
 //! reducing the acyclic graph that leaves, and keeping every edge inside a
 //! cycle. Reachability survives, and no edge of a cycle is redundant anyway,
 //! since each of its nodes already reaches every other.
+//!
+//! The same reachability rows count how many nodes each node reaches.
 
 use std::cmp::Reverse;
 use std::ops::Range;
@@ -151,38 +153,24 @@ struct Reduction {
     /// By node, the distinct successors whose edge the reduction keeps, in
     /// descending [`Reduction::bit`] order.
     kept: Vec<Vec<u32>>,
-    /// By node, its bit in the reachability rows. Bits ascend with height, the
-    /// longest path from a node to a sink, so a node reaches only lower bits.
+    /// By node, its [`Reach::bit`].
     bit: Vec<u32>,
 }
 
 impl Reduction {
     /// Reduces the DAG `succ` holds, `order` being a topological order of it.
-    ///
-    /// Reachability is held in one bitset row per node that is not a sink. Every
-    /// node of one height reaches only lower heights, so a height's rows are
-    /// filled together from rows already settled, in parallel where there are
-    /// enough of them.
     fn new(order: &[u32], succ: &[Vec<u32>]) -> Self {
-        let height = node_heights(order, succ);
-        let levels = Levels::new(&height);
-        let (bit, by_bit) = levels.number(&height);
-        let mut rows = Rows::new(&levels, &height, &bit);
+        let reach = Reach::new(order, succ);
         let mut kept: Vec<Vec<u32>> = vec![Vec::new(); succ.len()];
-        let mut fill_heights = || {
-            for h in 1..levels.count() {
-                let nodes = &by_bit[levels.bits(h)];
-                rows.fill_height(&levels, h, nodes, succ, &bit, &mut kept);
-            }
-        };
-        // Entering the pool queues behind whatever it is running, which a
-        // caller with nothing to split need not wait for.
-        if (1..levels.count()).any(|h| splits(levels.bits(h).len())) {
-            bviz_parallel::workers().install(fill_heights);
-        } else {
-            fill_heights();
+        reach.fill(
+            succ,
+            |_, _, keep| keep.to_vec(),
+            |u, keep| kept[u as usize] = keep,
+        );
+        Self {
+            kept,
+            bit: reach.bit,
         }
-        Self { kept, bit }
     }
 
     /// Whether the reduction keeps the edge `u -> v`, one of the DAG's.
@@ -192,6 +180,65 @@ impl Reduction {
                 Reverse(self.bit[w as usize])
             })
             .is_ok()
+    }
+}
+
+/// A DAG's nodes numbered for its reachability rows.
+struct Reach {
+    levels: Levels,
+    /// By node, its height: the longest path from it to a sink.
+    height: Vec<u32>,
+    /// By node, its bit in the reachability rows. Bits ascend with height, so a
+    /// node reaches only lower bits.
+    bit: Vec<u32>,
+    /// By bit, the node holding it.
+    by_bit: Vec<u32>,
+}
+
+impl Reach {
+    /// Numbers the DAG `succ` holds, `order` being a topological order of it.
+    fn new(order: &[u32], succ: &[Vec<u32>]) -> Self {
+        let height = node_heights(order, succ);
+        let levels = Levels::new(&height);
+        let (bit, by_bit) = levels.number(&height);
+        Self {
+            levels,
+            height,
+            bit,
+            by_bit,
+        }
+    }
+
+    /// Fills one reachability row per node that is not a sink, handing `finish`
+    /// each node's filled row — the words of it holding bits, the first of them
+    /// being the row's word `lo` — with the successors a transitive reduction
+    /// keeps of it, and `take` the node with what `finish` made of them. A sink
+    /// is handed to neither.
+    ///
+    /// Every node of one height reaches only lower heights, so a height's rows
+    /// are filled together from rows already settled, in parallel where there
+    /// are enough of them. The rows are dropped once every height is filled.
+    fn fill<T: Send>(
+        &self,
+        succ: &[Vec<u32>],
+        finish: impl Fn(usize, &[u64], &[u32]) -> T + Sync,
+        mut take: impl FnMut(u32, T) + Send,
+    ) {
+        let levels = &self.levels;
+        let mut rows = Rows::new(levels, &self.height, &self.bit);
+        let mut fill_heights = || {
+            for h in 1..levels.count() {
+                let nodes = &self.by_bit[levels.bits(h)];
+                rows.fill_height(levels, h, nodes, succ, &self.bit, &finish, &mut take);
+            }
+        };
+        // Entering the pool queues behind whatever it is running, which a
+        // caller with nothing to split need not wait for.
+        if (1..levels.count()).any(|h| splits(levels.bits(h).len())) {
+            bviz_parallel::workers().install(fill_heights);
+        } else {
+            fill_heights();
+        }
     }
 }
 
@@ -290,7 +337,7 @@ fn splits(rows: usize) -> bool {
     rows >= 2 * ROWS_PER_TASK
 }
 
-/// The reachability rows of [`Reduction::new`], by node.
+/// The reachability rows of [`Reach::fill`], by node.
 struct Rows {
     reach: Vec<u64>,
     /// Where each node's row begins in `reach`.
@@ -315,15 +362,17 @@ impl Rows {
     }
 
     /// Fills the rows of `nodes`, the nodes of height `h`, from those of the
-    /// heights below, and sets each one's `kept` successors.
-    fn fill_height(
+    /// heights below, as [`Reach::fill`] does.
+    #[allow(clippy::too_many_arguments)]
+    fn fill_height<T: Send>(
         &mut self,
         levels: &Levels,
         h: usize,
         nodes: &[u32],
         succ: &[Vec<u32>],
         bit: &[u32],
-        kept: &mut [Vec<u32>],
+        finish: &(impl Fn(usize, &[u64], &[u32]) -> T + Sync),
+        take: &mut impl FnMut(u32, T),
     ) {
         let words = levels.words(h);
         let (settled, level) = self.reach.split_at_mut(words.start);
@@ -332,11 +381,17 @@ impl Rows {
             start: &self.start,
             span: &self.span,
         };
-        let filled =
-            settled.fill_level(&mut level[..words.len()], levels.width(h), nodes, succ, bit);
-        for (&u, (span, keep)) in nodes.iter().zip(filled) {
+        let filled = settled.fill_level(
+            &mut level[..words.len()],
+            levels.width(h),
+            nodes,
+            succ,
+            bit,
+            finish,
+        );
+        for (&u, (span, finished)) in nodes.iter().zip(filled) {
             self.span[u as usize] = span;
-            kept[u as usize] = keep;
+            take(u, finished);
         }
     }
 }
@@ -351,21 +406,22 @@ struct Settled<'a> {
 impl Settled<'_> {
     /// Fills `level`, the rows of `nodes` at `width` words each, returning
     /// each node's [`Settled::fill_node`].
-    fn fill_level(
+    fn fill_level<T: Send>(
         &self,
         level: &mut [u64],
         width: usize,
         nodes: &[u32],
         succ: &[Vec<u32>],
         bit: &[u32],
-    ) -> Vec<((u32, u32), Vec<u32>)> {
+        finish: &(impl Fn(usize, &[u64], &[u32]) -> T + Sync),
+    ) -> Vec<((u32, u32), T)> {
         if splits(nodes.len()) {
             level
                 .par_chunks_mut(width)
                 .zip(nodes.par_iter())
                 .with_min_len(ROWS_PER_TASK)
                 .map_init(Vec::new, |highest_first, (row, &u)| {
-                    self.fill_node(highest_first, row, &succ[u as usize], bit)
+                    self.fill_node(highest_first, row, &succ[u as usize], bit, finish)
                 })
                 .collect()
         } else {
@@ -373,27 +429,31 @@ impl Settled<'_> {
             level
                 .chunks_mut(width)
                 .zip(nodes)
-                .map(|(row, &u)| self.fill_node(&mut highest_first, row, &succ[u as usize], bit))
+                .map(|(row, &u)| {
+                    self.fill_node(&mut highest_first, row, &succ[u as usize], bit, finish)
+                })
                 .collect()
         }
     }
 
     /// [`Settled::fill`] with a node's distinct `successors`, returning the
-    /// words `row` has bits in and the successors it keeps. `highest_first` is
-    /// scratch.
-    fn fill_node(
+    /// words `row` has bits in and what `finish` makes of the filled row and the
+    /// successors it keeps. `highest_first` is scratch.
+    fn fill_node<T>(
         &self,
         highest_first: &mut Vec<u32>,
         row: &mut [u64],
         successors: &[u32],
         bit: &[u32],
-    ) -> ((u32, u32), Vec<u32>) {
+        finish: &impl Fn(usize, &[u64], &[u32]) -> T,
+    ) -> ((u32, u32), T) {
         highest_first.clear();
         highest_first.extend_from_slice(successors);
         highest_first.sort_unstable_by_key(|&w| Reverse(bit[w as usize]));
         highest_first.dedup();
-        let span = self.fill(row, highest_first, bit);
-        (span, highest_first.to_vec())
+        let (lo, hi) = self.fill(row, highest_first, bit);
+        let words = &row[lo as usize..hi as usize];
+        ((lo, hi), finish(lo as usize, words, highest_first))
     }
 
     /// Fills `row` with what a node reaches through `successors`, given highest
@@ -578,6 +638,68 @@ impl ThinnedCycle {
             }
         }
         false
+    }
+}
+
+/// How many other nodes each node of the graph `succ` holds over the indices
+/// `0..succ.len()` reaches. Each node of a cycle reaches every other node of it
+/// and all that any of them reaches.
+pub fn reach_counts(succ: &[Vec<u32>]) -> Vec<u32> {
+    let condensation = Condensation::new(succ);
+    let mut size = vec![0u32; condensation.succ.len()];
+    for &c in &condensation.of {
+        size[c as usize] += 1;
+    }
+    let reach = Reach::new(&condensation.order, &condensation.succ);
+    let cycles = Cycles::new(&size, &reach.bit);
+    let mut reached = vec![0u32; size.len()];
+    reach.fill(
+        &condensation.succ,
+        |lo, words, _| cycles.covered(lo, words),
+        |c, count| reached[c as usize] = count,
+    );
+    condensation
+        .of
+        .iter()
+        .map(|&c| reached[c as usize] + size[c as usize] - 1)
+        .collect()
+}
+
+/// The bits of a condensation's reachability rows standing for a cycle, each
+/// counting for every node of it.
+struct Cycles {
+    /// By word, the bits standing for more than one node.
+    mask: Vec<u64>,
+    /// By bit, how many nodes past one it stands for.
+    more: Vec<u32>,
+}
+
+impl Cycles {
+    /// The cycles among components of the sizes `size` gives, each holding the
+    /// bit `bit` gives it.
+    fn new(size: &[u32], bit: &[u32]) -> Self {
+        let mut mask = vec![0u64; size.len().div_ceil(64)];
+        let mut more = vec![0u32; size.len()];
+        for (&size, &b) in size.iter().zip(bit).filter(|&(&size, _)| size > 1) {
+            mask[b as usize / 64] |= 1 << (b % 64);
+            more[b as usize] = size - 1;
+        }
+        Self { mask, more }
+    }
+
+    /// How many nodes a reachability row covers, `words` being the words of it
+    /// from its word `lo` on.
+    fn covered(&self, lo: usize, words: &[u64]) -> u32 {
+        let mut count = 0;
+        for (k, &word) in (lo..).zip(words) {
+            count += word.count_ones();
+            let mut cycles = word & self.mask[k];
+            while cycles != 0 {
+                count += self.more[k * 64 + cycles.trailing_zeros() as usize];
+                cycles &= cycles - 1;
+            }
+        }
+        count
     }
 }
 
@@ -1146,6 +1268,89 @@ mod tests {
                 .map(|(a, b)| (a.to_string(), b.to_string()))
                 .collect()
         );
+    }
+
+    #[test]
+    fn a_chain_reaches_everything_below_it() {
+        assert_eq!(reach_counts(&[vec![1], vec![2], vec![]]), [2, 1, 0]);
+    }
+
+    #[test]
+    fn a_diamond_counts_its_join_once() {
+        let succ = [vec![1, 2], vec![3], vec![3], vec![]];
+        assert_eq!(reach_counts(&succ), [3, 1, 1, 0]);
+    }
+
+    /// `0` and `1` form a cycle that reaches `2`; `3` reaches into it.
+    #[test]
+    fn a_cycle_reaches_its_other_members_and_beyond() {
+        let succ = [vec![1], vec![0, 2], vec![], vec![0]];
+        assert_eq!(reach_counts(&succ), [2, 2, 0, 3]);
+    }
+
+    /// Random graphs wide enough that a height is filled by several parallel
+    /// tasks and a row spans several words, with cycles among their nodes, count
+    /// what a walk from each node finds.
+    #[test]
+    fn random_graphs_count_what_a_walk_reaches() {
+        let mut next = random_indices();
+        for (nodes, edges) in [(40, 60), (2_000, 3_000), (2_000, 6_000)] {
+            let mut succ: Vec<Vec<u32>> = vec![Vec::new(); nodes];
+            for _ in 0..edges {
+                let (a, b) = (next(nodes), next(nodes));
+                // Mostly ascending, so the cycles stay small.
+                let (from, to) = match next(50) {
+                    0 => (a.max(b), a.min(b)),
+                    _ => (a.min(b), a.max(b)),
+                };
+                succ[from].push(to as u32);
+            }
+            assert_eq!(
+                reach_counts(&succ),
+                walked(&succ),
+                "{nodes} nodes, {edges} edges"
+            );
+        }
+    }
+
+    /// Many two-node cycles, chained so that each reaches every later one, put
+    /// cycle bits in every word of the widest rows.
+    #[test]
+    fn a_chain_of_many_small_cycles_counts_each_member() {
+        const CYCLES: u32 = 300;
+        let mut succ: Vec<Vec<u32>> = vec![Vec::new(); 2 * CYCLES as usize];
+        for c in 0..CYCLES {
+            let (a, b) = (2 * c, 2 * c + 1);
+            succ[a as usize].push(b);
+            succ[b as usize].push(a);
+            if c + 1 < CYCLES {
+                succ[b as usize].push(a + 2);
+            }
+        }
+        assert_eq!(reach_counts(&succ), walked(&succ));
+    }
+
+    /// How many other nodes a walk from each node of `succ` finds.
+    fn walked(succ: &[Vec<u32>]) -> Vec<u32> {
+        let nodes = succ.len();
+        (0..nodes)
+            .map(|start| {
+                let mut seen = vec![false; nodes];
+                seen[start] = true;
+                let mut walk = vec![start as u32];
+                let mut count = 0;
+                while let Some(u) = walk.pop() {
+                    for &w in &succ[u as usize] {
+                        if !seen[w as usize] {
+                            seen[w as usize] = true;
+                            count += 1;
+                            walk.push(w);
+                        }
+                    }
+                }
+                count
+            })
+            .collect()
     }
 
     #[test]
