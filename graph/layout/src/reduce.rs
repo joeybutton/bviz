@@ -640,64 +640,65 @@ impl ThinnedCycle {
 }
 
 /// How many other nodes each node of the graph `succ` holds over the indices
-/// `0..succ.len()` reaches. Each node of a cycle reaches every other node of it
-/// and all that any of them reaches.
-pub fn reach_counts(succ: &[Vec<u32>]) -> Vec<u32> {
+/// `0..succ.len()` reaches, of those `counts` takes by index. Each node of a
+/// cycle reaches every other node of it and all that any of them reaches.
+pub fn reach_counts(succ: &[Vec<u32>], counts: impl Fn(usize) -> bool) -> Vec<u32> {
     let condensation = Condensation::new(succ);
-    let mut size = vec![0u32; condensation.succ.len()];
-    for &c in &condensation.of {
-        size[c as usize] += 1;
+    let mut weight = vec![0u32; condensation.succ.len()];
+    for (i, &c) in condensation.of.iter().enumerate() {
+        weight[c as usize] += u32::from(counts(i));
     }
     let reach = Reach::new(&condensation.order, &condensation.succ);
-    let cycles = Cycles::new(&size, &reach.bit);
-    let mut reached = vec![0u32; size.len()];
+    let weights = Weights::new(&weight, &reach.bit);
+    let mut reached = vec![0u32; weight.len()];
     reach.fill(
         &condensation.succ,
-        |lo, words, _| cycles.covered(lo, words),
+        |lo, words, _| weights.covered(lo, words),
         |c, count| reached[c as usize] = count,
     );
     condensation
         .of
         .iter()
-        .map(|&c| reached[c as usize] + size[c as usize] - 1)
+        .enumerate()
+        .map(|(i, &c)| reached[c as usize] + weight[c as usize] - u32::from(counts(i)))
         .collect()
 }
 
-/// The bits of a condensation's reachability rows standing for a cycle, each
-/// counting for every node of it.
-struct Cycles {
-    /// By word, the bits standing for more than one node.
+/// How many counted nodes each bit of a condensation's reachability rows
+/// stands for: one, but for a cycle or an uncounted node.
+struct Weights {
+    /// By word, the bits standing for other than one node.
     mask: Vec<u64>,
-    /// By bit, how many nodes past one it stands for.
-    more: Vec<u32>,
+    /// By bit, how many counted nodes past one it stands for.
+    more: Vec<i32>,
 }
 
-impl Cycles {
-    /// The cycles among components of the sizes `size` gives, each holding the
-    /// bit `bit` gives it.
-    fn new(size: &[u32], bit: &[u32]) -> Self {
-        let mut mask = vec![0u64; size.len().div_ceil(64)];
-        let mut more = vec![0u32; size.len()];
-        for (&size, &b) in size.iter().zip(bit).filter(|&(&size, _)| size > 1) {
+impl Weights {
+    /// The components of the counted-node weights `weight` gives, each holding
+    /// the bit `bit` gives it.
+    fn new(weight: &[u32], bit: &[u32]) -> Self {
+        let mut mask = vec![0u64; weight.len().div_ceil(64)];
+        let mut more = vec![0i32; weight.len()];
+        for (&weight, &b) in weight.iter().zip(bit).filter(|&(&weight, _)| weight != 1) {
             mask[b as usize / 64] |= 1 << (b % 64);
-            more[b as usize] = size - 1;
+            more[b as usize] = weight as i32 - 1;
         }
         Self { mask, more }
     }
 
-    /// How many nodes a reachability row covers, `words` being the words of it
-    /// from its word `lo` on.
+    /// How many counted nodes a reachability row covers, `words` being the
+    /// words of it from its word `lo` on.
     fn covered(&self, lo: usize, words: &[u64]) -> u32 {
-        let mut count = 0;
+        let mut count: i64 = 0;
         for (k, &word) in (lo..).zip(words) {
-            count += word.count_ones();
-            let mut cycles = word & self.mask[k];
-            while cycles != 0 {
-                count += self.more[k * 64 + cycles.trailing_zeros() as usize];
-                cycles &= cycles - 1;
+            count += i64::from(word.count_ones());
+            let mut weighted = word & self.mask[k];
+            while weighted != 0 {
+                count += i64::from(self.more[k * 64 + weighted.trailing_zeros() as usize]);
+                weighted &= weighted - 1;
             }
         }
-        count
+        count as u32
     }
 }
 
@@ -1271,20 +1272,33 @@ mod tests {
 
     #[test]
     fn a_chain_reaches_everything_below_it() {
-        assert_eq!(reach_counts(&[vec![1], vec![2], vec![]]), [2, 1, 0]);
+        assert_eq!(
+            reach_counts(&[vec![1], vec![2], vec![]], |_| true),
+            [2, 1, 0]
+        );
     }
 
     #[test]
     fn a_diamond_counts_its_join_once() {
         let succ = [vec![1, 2], vec![3], vec![3], vec![]];
-        assert_eq!(reach_counts(&succ), [3, 1, 1, 0]);
+        assert_eq!(reach_counts(&succ, |_| true), [3, 1, 1, 0]);
     }
 
     /// `0` and `1` form a cycle that reaches `2`; `3` reaches into it.
     #[test]
     fn a_cycle_reaches_its_other_members_and_beyond() {
         let succ = [vec![1], vec![0, 2], vec![], vec![0]];
-        assert_eq!(reach_counts(&succ), [2, 2, 0, 3]);
+        assert_eq!(reach_counts(&succ, |_| true), [2, 2, 0, 3]);
+    }
+
+    /// An uncounted node is passed through but not counted, whether it stands
+    /// alone or in a cycle: `1` is uncounted, and `2` and `3` a cycle of which
+    /// `3` is uncounted.
+    #[test]
+    fn an_uncounted_node_is_passed_through() {
+        let succ = [vec![1], vec![2], vec![3], vec![2, 4], vec![]];
+        let counted = [true, false, true, false, true];
+        assert_eq!(reach_counts(&succ, |i| counted[i]), [2, 2, 1, 2, 0]);
     }
 
     /// Random graphs wide enough that a height is filled by several parallel
@@ -1304,9 +1318,10 @@ mod tests {
                 };
                 succ[from].push(to as u32);
             }
+            let counted: Vec<bool> = (0..nodes).map(|_| next(4) != 0).collect();
             assert_eq!(
-                reach_counts(&succ),
-                walked(&succ),
+                reach_counts(&succ, |i| counted[i]),
+                walked(&succ, &counted),
                 "{nodes} nodes, {edges} edges"
             );
         }
@@ -1326,11 +1341,13 @@ mod tests {
                 succ[b as usize].push(a + 2);
             }
         }
-        assert_eq!(reach_counts(&succ), walked(&succ));
+        let counted = vec![true; succ.len()];
+        assert_eq!(reach_counts(&succ, |i| counted[i]), walked(&succ, &counted));
     }
 
-    /// How many other nodes a walk from each node of `succ` finds.
-    fn walked(succ: &[Vec<u32>]) -> Vec<u32> {
+    /// How many other nodes of those `counted` marks a walk from each node of
+    /// `succ` finds.
+    fn walked(succ: &[Vec<u32>], counted: &[bool]) -> Vec<u32> {
         let nodes = succ.len();
         (0..nodes)
             .map(|start| {
@@ -1342,7 +1359,7 @@ mod tests {
                     for &w in &succ[u as usize] {
                         if !seen[w as usize] {
                             seen[w as usize] = true;
-                            count += 1;
+                            count += u32::from(counted[w as usize]);
                             walk.push(w);
                         }
                     }

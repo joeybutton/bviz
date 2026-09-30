@@ -70,8 +70,8 @@ pub fn target_metrics(
 
     let (dependents, dependencies) = adjacency(n as usize, &pairs);
     drop(pairs);
-    let blast_radius = reach_counts(&dependents);
-    let closure = reach_counts(&dependencies);
+    let blast_radius = reach_counts(&dependents, |_| true);
+    let closure = reach_counts(&dependencies, |_| true);
     targets
         .into_iter()
         .enumerate()
