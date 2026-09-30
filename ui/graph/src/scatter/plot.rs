@@ -1,7 +1,7 @@
 //! Where the scatter plot's marks and ticks fall: counts on logarithmic axes,
 //! and a mark's size by its fan-in.
 
-use bviz_graph_layout::metrics::TargetMetrics;
+use bviz_graph_layout::metrics::Metrics;
 use bviz_graph_layout::select::Verdict;
 use bviz_graph_layout::{Id, Kind};
 use gpui::{Bounds, Pixels, Point, point, px};
@@ -96,7 +96,7 @@ pub(crate) const MAX_RADIUS: f32 = 8.0;
 /// One target as the plot draws it.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Mark {
-    pub(crate) target: TargetMetrics,
+    pub(crate) target: Metrics,
     pub(crate) radius: f32,
     /// Whether the filter draws the target as no part of what it selects.
     pub(crate) faded: bool,
@@ -124,8 +124,8 @@ pub(crate) struct Plotted {
 impl Plotted {
     /// The marks of `targets` as the filter whose verdict on a node `verdict`
     /// gives draws them.
-    pub(crate) fn of(targets: &[TargetMetrics], verdict: impl Fn(Id) -> Verdict) -> Self {
-        let max = |measure: fn(&TargetMetrics) -> u32| targets.iter().map(measure).max();
+    pub(crate) fn of(targets: &[Metrics], verdict: impl Fn(Id) -> Verdict) -> Self {
+        let max = |measure: fn(&Metrics) -> u32| targets.iter().map(measure).max();
         let largest_fan_in = max(|t| t.fan_in).unwrap_or(0);
         let mut marks: Vec<Mark> = Vec::with_capacity(targets.len());
         marks.extend(targets.iter().filter_map(|&target| {
@@ -308,7 +308,7 @@ impl DataArea {
         }
     }
 
-    pub(crate) fn place(&self, target: &TargetMetrics) -> Point<Pixels> {
+    pub(crate) fn place(&self, target: &Metrics) -> Point<Pixels> {
         point(self.x_of(target.closure), self.y_of(target.blast_radius))
     }
 
@@ -356,8 +356,8 @@ mod tests {
     use super::*;
     use gpui::size;
 
-    fn target(closure: u32, blast_radius: u32, fan_in: u32) -> TargetMetrics {
-        TargetMetrics {
+    fn target(closure: u32, blast_radius: u32, fan_in: u32) -> Metrics {
+        Metrics {
             id: Id(closure),
             kind: Kind::Target,
             closure,
@@ -368,7 +368,7 @@ mod tests {
     }
 
     /// The marks of `targets` through a filter drawing every one.
-    fn shown(targets: &[TargetMetrics]) -> Plotted {
+    fn shown(targets: &[Metrics]) -> Plotted {
         Plotted::of(targets, |_| Verdict::Shown)
     }
 

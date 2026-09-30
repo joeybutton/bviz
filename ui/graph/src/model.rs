@@ -3,7 +3,7 @@ use crate::build::{build_graph, loaded_inputs};
 use crate::derive::derive_levels;
 use bviz_graph_layout::graph::Graph;
 use bviz_graph_layout::lod::{DEFAULT_MAX_EDGES, DEFAULT_MAX_NODES, Overflow};
-use bviz_graph_layout::metrics::{TargetMetrics, target_metrics};
+use bviz_graph_layout::metrics::{Metrics, Scope, Unit, measure};
 use bviz_graph_layout::select::Filter;
 use bviz_graph_layout::select::labels::LabelIndex;
 use bviz_graph_layout::{Capabilities, Facets, Id, InputSet, Joint, MapLayout, Names, Provenance};
@@ -217,7 +217,7 @@ enum Measure {
         /// Held so that the measuring is not cancelled.
         _work: Task<()>,
     },
-    Measured(Arc<[TargetMetrics]>),
+    Measured(Arc<[Metrics]>),
 }
 
 /// A graph read for viewing, held apart from the panels drawing it so a view of
@@ -365,11 +365,14 @@ impl GraphModel {
             return;
         };
         let shared = loaded.shared.clone();
+        let Some(scope) = Scope::new(Unit::Target, shared.inputs) else {
+            return;
+        };
         let work = load_in_background(
             cx,
             move || {
                 let (base, facets) = (&shared.base, &shared.facets);
-                target_metrics(base, facets, &shared.provenance, shared.inputs).into()
+                measure(base, facets, &shared.provenance, scope).into()
             },
             |model, metrics, cx| {
                 if let Source::Loaded(loaded) = &mut model.source {
@@ -382,7 +385,7 @@ impl GraphModel {
     }
 
     /// The loaded graph's per-target metrics, once measured.
-    pub(crate) fn metrics(&self) -> Option<&Arc<[TargetMetrics]>> {
+    pub(crate) fn metrics(&self) -> Option<&Arc<[Metrics]>> {
         match &self.loaded()?.measure {
             Measure::Measured(metrics) => Some(metrics),
             _ => None,

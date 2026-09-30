@@ -9,7 +9,7 @@ use crate::drag::CLICK_SLOP;
 use crate::model::{FilterChanged, GraphModel, Loaded, MetricsLanded, SourceReplaced};
 use crate::{PIXELS_PER_NOTCH, ZOOM_PER_NOTCH};
 use bviz_graph_layout::Kind;
-use bviz_graph_layout::metrics::TargetMetrics;
+use bviz_graph_layout::metrics::Metrics;
 use bviz_graph_layout::select::Filter;
 use bviz_graph_layout::select::labels::carried_label;
 use bviz_ui_components::{DragEnd, cached_layer, centered_spinner, load_in_background, track_drag};
@@ -311,7 +311,7 @@ fn drawn_status(plotted: &Plotted) -> String {
 
 /// What the tooltip over `target` reads, where `coincident` other targets sit
 /// at its place in the plot.
-fn describe(target: &TargetMetrics, coincident: usize, loaded: &Loaded) -> Vec<String> {
+fn describe(target: &Metrics, coincident: usize, loaded: &Loaded) -> Vec<String> {
     let shared = &loaded.shared;
     let label = match carried_label(&shared.names, &shared.facets, target.id) {
         Some(label) => shared.labels.written(label).into_owned(),
