@@ -293,15 +293,17 @@ impl ScatterPanel {
         let Some(plot) = &mut self.plot else {
             return;
         };
-        if plot.hover.as_ref().map(|hover| hover.mark) == picked.map(|picked| picked.mark) {
+        let named = plot.hover.as_ref().map(|hover| (hover.mark, hover.others));
+        if named == picked.as_ref().map(|picked| (picked.mark, picked.others())) {
             return;
         }
         let (unit, sizing) = (plot.scope.unit(), plot.plotted.sizing);
         plot.hover = picked.and_then(|picked| {
             let point = &plot.plotted.marks[picked.mark].target;
-            let lines = describe(point, unit, sizing, picked.coincident, model.loaded()?);
+            let lines = describe(point, unit, sizing, picked.others(), model.loaded()?);
             Some(Hover {
                 mark: picked.mark,
+                others: picked.others(),
                 lines,
             })
         });
@@ -487,6 +489,8 @@ struct Press {
 /// tooltip reads.
 struct Hover {
     mark: usize,
+    /// How many other marks are under the pointer with it.
+    others: usize,
     lines: Vec<String>,
 }
 
@@ -520,13 +524,13 @@ fn unit_names(unit: Unit) -> KindNames {
 }
 
 /// What the tooltip over `point`, a point of `unit` sized by `sizing`, reads,
-/// where `coincident` other points sit at its place in the plot: what the point
-/// is, then its counts.
+/// where a pick naming it covers `others` points besides: what the point is,
+/// then its counts.
 fn describe(
     point: &Metrics,
     unit: Unit,
     sizing: Sizing,
-    coincident: usize,
+    others: usize,
     loaded: &Loaded,
 ) -> Vec<String> {
     let shared = &loaded.shared;
@@ -583,8 +587,8 @@ fn describe(
         };
         lines.push(format!("{} {actions}", point.actions));
     }
-    if coincident > 0 {
-        lines.push(format!("+{coincident} more here"));
+    if others > 0 {
+        lines.push(format!("+{others} more here"));
     }
     lines
 }

@@ -330,30 +330,26 @@ impl DataArea {
         )
     }
 
-    /// The mark of `marks` a pointer at `at` picks: the one whose centre is
-    /// nearest, among those whose rim lies within [`PICK_SLOP`] of it and whose
-    /// centre lies within the frame, and the one drawn over the others among
-    /// equally near ones.
+    /// What a pointer at `at` over `marks` picks: every mark whose rim lies
+    /// within [`PICK_SLOP`] of it and whose centre lies within the frame, and
+    /// among those the one whose centre is nearest, the one drawn over the
+    /// others among equally near ones.
     pub(crate) fn pick(&self, marks: &[Mark], at: Point<Pixels>) -> Option<Picked> {
+        let mut covered = Vec::with_capacity(COVERED_RESERVE);
         let mut nearest: Option<(usize, f32)> = None;
         for (index, mark) in marks.iter().enumerate() {
             let center = self.place(&mark.target);
             let distance = f32::from(center.x - at.x).hypot(f32::from(center.y - at.y));
-            let reaches = distance <= mark.radius + PICK_SLOP && self.frame.contains(&center);
-            if reaches && nearest.is_none_or(|(_, best)| distance <= best) {
+            if distance > mark.radius + PICK_SLOP || !self.frame.contains(&center) {
+                continue;
+            }
+            covered.push(index);
+            if nearest.is_none_or(|(_, best)| distance <= best) {
                 nearest = Some((index, distance));
             }
         }
-        let (index, _) = nearest?;
-        let at_same_place = |mark: &Mark| {
-            let (one, other) = (&mark.target, &marks[index].target);
-            let place = |m: &Metrics| (m.closure.value(), m.blast_radius.value());
-            place(one) == place(other)
-        };
-        Some(Picked {
-            mark: index,
-            coincident: marks.iter().filter(|mark| at_same_place(mark)).count() - 1,
-        })
+        let (mark, _) = nearest?;
+        Some(Picked { mark, covered })
     }
 }
 
@@ -361,13 +357,25 @@ impl DataArea {
 /// marks are not a pixel-hunt.
 pub(crate) const PICK_SLOP: f32 = 4.0;
 
-/// The mark a pointer picks, by its index among the plotted marks.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// Room reserved for the marks under a pointer, which holds those of most
+/// crowded spots without growing.
+const COVERED_RESERVE: usize = 16;
+
+/// The marks under a pointer, by their indices among the plotted marks.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Picked {
+    /// The mark a tooltip names.
     pub(crate) mark: usize,
-    /// How many other marks stand for targets at exactly its place, which it
-    /// hides.
-    pub(crate) coincident: usize,
+    /// Every mark under the pointer, `mark` among them, in drawing order: each
+    /// point a click there could mean.
+    covered: Vec<usize>,
+}
+
+impl Picked {
+    /// How many marks under the pointer are not the one it names.
+    pub(crate) fn others(&self) -> usize {
+        self.covered.len() - 1
+    }
 }
 
 #[cfg(test)]
@@ -497,7 +505,7 @@ mod tests {
     }
 
     #[test]
-    fn a_pointer_picks_the_nearest_mark_within_reach_and_counts_those_it_hides() {
+    fn a_pointer_picks_the_nearest_mark_within_reach_and_covers_those_it_hides() {
         let targets = [target(0, 0, 0), target(100, 100, 0), target(100, 100, 5)];
         let plotted = shown(&targets);
         let axes = Bounds::new(point(px(0.), px(0.)), size(px(400.), px(300.)));
@@ -505,8 +513,8 @@ mod tests {
         let origin = area.place(&targets[0]);
         let picked = area.pick(&plotted.marks, origin + point(px(1.), px(-1.)));
         let origin_mark = plotted.marks.iter().position(|m| m.target == targets[0]);
-        assert_eq!(picked.map(|p| p.mark), origin_mark);
-        assert_eq!(picked.map(|p| p.coincident), Some(0));
+        assert_eq!(picked.as_ref().map(|p| p.mark), origin_mark);
+        assert_eq!(picked.map(|p| p.others()), Some(0));
 
         let shared = area.pick(&plotted.marks, area.place(&targets[1]));
         // The mark drawn last is the one on top.
@@ -514,11 +522,46 @@ mod tests {
             .marks
             .iter()
             .rposition(|m| (m.target.closure.value(), m.target.blast_radius.value()) == (100, 100));
-        assert_eq!(shared.map(|p| p.mark), top);
-        assert_eq!(shared.map(|p| p.coincident), Some(1));
+        assert_eq!(shared.as_ref().map(|p| p.mark), top);
+        assert_eq!(shared.map(|p| p.others()), Some(1));
 
         let far = origin + point(px(MAX_RADIUS + PICK_SLOP + 1.), px(0.));
         assert_eq!(area.pick(&plotted.marks, far), None);
+    }
+
+    /// A click can mean any mark it lands on, so the pointer covers each mark
+    /// within reach whether or not it sits at the very same counts, and none
+    /// past reach or hidden by the filter.
+    #[test]
+    fn a_pointer_covers_every_drawn_mark_within_reach() {
+        let mut targets = [
+            target(100, 100, 0),
+            target(101, 100, 0),
+            target(100, 102, 0),
+            target(100, 900, 0),
+            target(99, 100, 0),
+        ];
+        for (index, target) in targets.iter_mut().enumerate() {
+            target.id = Id(index as u32);
+        }
+        let hidden = targets[4].id;
+        let measured = measured(&targets);
+        let verdict = |id| match id == hidden {
+            true => Verdict::Hidden,
+            false => Verdict::Shown,
+        };
+        let plotted = Plotted::of(&measured, &measured, |_| true, verdict, no_hue);
+        let axes = Bounds::new(point(px(0.), px(0.)), size(px(400.), px(300.)));
+        let area = DataArea::within(axes, plotted.x, plotted.y, Zoom::WHOLE);
+        let picked = area.pick(&plotted.marks, area.place(&targets[0])).unwrap();
+        let mut covered: Vec<Id> = picked
+            .covered
+            .iter()
+            .map(|&i| plotted.marks[i].target.id)
+            .collect();
+        covered.sort();
+        assert_eq!(covered, [targets[0].id, targets[1].id, targets[2].id]);
+        assert_eq!(picked.others(), 2);
     }
 
     #[test]
