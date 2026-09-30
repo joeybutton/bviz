@@ -1111,6 +1111,12 @@ impl Workspace {
                 PaneEvent::Menu { panel, at } => {
                     workspace.open_panel_menu(*panel, *at, window, cx);
                 }
+                PaneEvent::Reveal(panel) => {
+                    // The gesture asking for it may have come from another
+                    // window.
+                    workspace.reveal(*panel, window, cx);
+                    window.activate_window();
+                }
             },
         );
         self.panes.insert(

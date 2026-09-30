@@ -152,6 +152,9 @@ pub enum PaneEvent {
     /// that point of the window. What the menu offers takes the whole window's
     /// arrangement to tell, which only the workspace knows.
     Menu { panel: EntityId, at: Point<Pixels> },
+    /// That panel asked to be shown, which takes making this the active pane,
+    /// and only the workspace can.
+    Reveal(EntityId),
 }
 
 impl EventEmitter<PaneEvent> for Pane {}
@@ -335,6 +338,7 @@ impl Pane {
                 cx.notify();
             }
             PanelEvent::Close => self.close(index, window, cx),
+            PanelEvent::Activate => cx.emit(PaneEvent::Reveal(panel)),
         }
     }
 

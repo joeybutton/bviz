@@ -75,6 +75,10 @@ pub enum PanelEvent {
     TitleChanged,
     StatusChanged,
     Close,
+    /// Asks to be brought forward in the pane holding it, and that pane made
+    /// the active one, for a gesture elsewhere that names what this panel
+    /// shows.
+    Activate,
 }
 
 /// A panel of any kind, holding it through operations resolved once for its
