@@ -8,20 +8,20 @@ use crate::Palette;
 use crate::drag::CLICK_SLOP;
 use crate::model::{FilterChanged, GraphModel, Loaded, MetricsLanded, SourceReplaced};
 use crate::{PIXELS_PER_NOTCH, ZOOM_PER_NOTCH};
-use bviz_graph_layout::Kind;
 use bviz_graph_layout::metrics::{Metrics, Scope, Sizing, Unit};
 use bviz_graph_layout::select::Filter;
 use bviz_graph_layout::select::labels::carried_label;
+use bviz_graph_layout::{Input, InputSet, Kind};
 use bviz_ui_components::{
-    DragEnd, Dropdown, DropdownEvent, Toolbar, cached_layer, centered_spinner, load_in_background,
-    spinner, track_drag,
+    Button, DragEnd, Dropdown, DropdownEvent, TextTooltip, Toolbar, TooltipColors, cached_layer,
+    centered_spinner, load_in_background, spinner, track_drag,
 };
 use bviz_ui_workspace::{Panel, PanelEvent, PanelKind, ViewKind};
 use gpui::{
-    App, Bounds, Context, Div, Entity, EventEmitter, FocusHandle, Focusable, IntoElement,
-    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Render, Rgba,
-    ScrollDelta, ScrollWheelEvent, SharedString, Subscription, Task, WeakEntity, Window, canvas,
-    div, prelude::*, px,
+    App, Bounds, ClickEvent, Context, Div, Entity, EventEmitter, FocusHandle, Focusable,
+    IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Render,
+    Rgba, ScrollDelta, ScrollWheelEvent, SharedString, Stateful, Subscription, Task, WeakEntity,
+    Window, canvas, div, prelude::*, px,
 };
 use plot::{MIN_RADIUS, Picked, Plotted, Zoom};
 use std::sync::Arc;
@@ -121,14 +121,29 @@ impl ScatterPanel {
         self.replot(cx);
     }
 
-    /// Measures the graph's points in `unit` over the inputs describing it.
+    /// Measures the graph's points in `unit` over the inputs last enabled for
+    /// it.
     fn choose_unit(&mut self, unit: Unit, cx: &mut Context<Self>) {
-        let Some(loaded) = self.model.read(cx).loaded() else {
+        let Some(choice) = &mut self.choice else {
             return;
         };
-        let (Some(choice), Some(scope)) =
-            (&mut self.choice, Scope::new(unit, loaded.shared.inputs))
-        else {
+        choice.choose(unit);
+        self.measure(cx);
+        cx.notify();
+    }
+
+    /// Enables `input` where it is disabled and disables it where it is
+    /// enabled, unless that leaves no input describing the unit plotted.
+    fn toggle_input(&mut self, input: Input, cx: &mut Context<Self>) {
+        let Some(choice) = &mut self.choice else {
+            return;
+        };
+        let inputs = choice.scope.inputs();
+        let inputs = match inputs.contains(input) {
+            true => inputs.without(input),
+            false => Some(inputs.with(input)),
+        };
+        let Some(scope) = inputs.and_then(|inputs| Scope::new(choice.scope.unit(), inputs)) else {
             return;
         };
         choice.scope = scope;
@@ -329,9 +344,14 @@ impl ScatterPanel {
 }
 
 /// What the plot measures, and the picker choosing its unit among those the
-/// graph's inputs describe.
+/// graph's inputs describe. Each unit keeps the inputs enabled for it while
+/// another is plotted.
 struct Choice {
     scope: Scope,
+    /// The scope of each unit offered but the one plotted.
+    others: Vec<Scope>,
+    /// The inputs the graph was read from.
+    loaded: InputSet,
     /// Finest first, in the picker's order.
     units: Vec<Unit>,
     picker: Entity<Dropdown>,
@@ -343,11 +363,15 @@ impl Choice {
     /// input describing it; absent until the graph is read.
     fn of(model: &Entity<GraphModel>, cx: &mut Context<ScatterPanel>) -> Option<Self> {
         let inputs = model.read(cx).loaded()?.shared.inputs;
-        let units: Vec<Unit> = Unit::ALL
+        let mut scopes = Unit::ALL
             .into_iter()
-            .filter(|&unit| Scope::new(unit, inputs).is_some())
+            .filter_map(|unit| Scope::new(unit, inputs));
+        let scope = scopes.next()?;
+        let others: Vec<Scope> = scopes.collect();
+        let units: Vec<Unit> = std::iter::once(scope)
+            .chain(others.iter().copied())
+            .map(Scope::unit)
             .collect();
-        let scope = Scope::new(*units.first()?, inputs)?;
         let names = units.iter().map(|&unit| unit_names(unit).many);
         let picker = cx.new(|cx| Dropdown::new("scatter-unit", names, 0, cx));
         let picked = cx.subscribe(&picker, |view, _, event, cx| {
@@ -362,10 +386,53 @@ impl Choice {
         });
         Some(Self {
             scope,
+            others,
+            loaded: inputs,
             units,
             picker,
             _picked: picked,
         })
+    }
+
+    /// Plots `unit`, one of those offered, in the scope it was left in.
+    fn choose(&mut self, unit: Unit) {
+        if let Some(other) = self.others.iter_mut().find(|other| other.unit() == unit) {
+            std::mem::swap(&mut self.scope, other);
+        }
+    }
+
+    /// How the toggle for the loaded input `input` stands.
+    fn toggle(&self, input: Input) -> Toggle {
+        let unit = self.scope.unit();
+        let inputs = self.scope.inputs();
+        if !unit.inputs().contains(input) {
+            Toggle::Ignored
+        } else if !inputs.contains(input) {
+            Toggle::Off
+        } else if inputs.without(input).is_none() {
+            Toggle::Lone
+        } else {
+            Toggle::On
+        }
+    }
+}
+
+/// How the toggle for one loaded input stands against the unit plotted.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Toggle {
+    On,
+    Off,
+    /// On, and the only input on describing the unit, which a measure needs.
+    Lone,
+    /// The input describes nothing of the unit plotted.
+    Ignored,
+}
+
+fn input_name(input: Input) -> &'static str {
+    match input {
+        Input::Query => "query",
+        Input::Cquery => "cquery",
+        Input::Aquery => "aquery",
     }
 }
 
@@ -529,7 +596,7 @@ impl Render for ScatterPanel {
                 .plot
                 .as_ref()
                 .is_some_and(|plot| plot.scope != choice.scope);
-            strip(choice, measuring, &palette)
+            strip(choice, measuring, &palette, cx)
         }));
         match &self.plot {
             None => root.child(centered_spinner(MEASURING, &palette.colors)),
@@ -650,27 +717,78 @@ const ZOOMED: &str = "double-click empty space or press 0 to show all";
 
 /// The strip choosing what the plot measures, which reads `measuring` while a
 /// new choice is measured over the plot drawn for the last.
-fn strip(choice: &Choice, measuring: bool, palette: &Palette) -> Toolbar {
-    let unit = div()
-        .flex()
-        .items_center()
-        .gap_2()
-        .text_sm()
-        .text_color(palette.label)
-        .child("points")
-        .child(choice.picker.clone());
-    Toolbar::new().child(unit).when(measuring, |bar| {
-        bar.trailing(
-            div()
-                .flex()
-                .items_center()
-                .gap_2()
-                .text_sm()
-                .text_color(palette.label)
-                .child(spinner("scatter-measuring", px(14.), palette.label))
-                .child("measuring…"),
-        )
-    })
+fn strip(
+    choice: &Choice,
+    measuring: bool,
+    palette: &Palette,
+    cx: &Context<ScatterPanel>,
+) -> Toolbar {
+    let group = |name: &'static str| {
+        div()
+            .flex()
+            .items_center()
+            .gap_2()
+            .text_sm()
+            .text_color(palette.label)
+            .child(name)
+    };
+    let unit = group("points").child(choice.picker.clone());
+    let toggles: Vec<_> = choice
+        .loaded
+        .inputs()
+        .map(|input| input_toggle(input, choice, palette, cx))
+        .collect();
+    let inputs = group("inputs").children(toggles);
+    Toolbar::new()
+        .child(unit)
+        .child(inputs)
+        .when(measuring, |bar| {
+            bar.trailing(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .text_sm()
+                    .text_color(palette.label)
+                    .child(spinner("scatter-measuring", px(14.), palette.label))
+                    .child("measuring…"),
+            )
+        })
+}
+
+/// Turns the loaded `input`'s share in the measure on and off, and says why
+/// where it cannot.
+fn input_toggle(
+    input: Input,
+    choice: &Choice,
+    palette: &Palette,
+    cx: &Context<ScatterPanel>,
+) -> Stateful<Div> {
+    let name = input_name(input);
+    let toggle = choice.toggle(input);
+    let many = unit_names(choice.scope.unit()).many;
+    let why = match toggle {
+        Toggle::On | Toggle::Off => None,
+        Toggle::Lone => Some(format!(
+            "{name} is the only input on describing {many}, and a plot needs one"
+        )),
+        Toggle::Ignored => Some(format!("{name} describes no {many}")),
+    };
+    let control = Button::new(
+        ("scatter-input", input as usize),
+        cx.listener(move |view, _: &ClickEvent, _, cx| view.toggle_input(input, cx)),
+    )
+    .label(name)
+    .selected(matches!(toggle, Toggle::On | Toggle::Lone))
+    .disabled(matches!(toggle, Toggle::Lone | Toggle::Ignored))
+    .compact();
+    let tip = TooltipColors::from_colors(&palette.colors);
+    div()
+        .id(("scatter-input-why", input as usize))
+        .child(control)
+        .when_some(why, |el, why| {
+            el.tooltip(TextTooltip::builder(why.into(), tip))
+        })
 }
 
 /// How the legend names what a mark's size stands for.
