@@ -30,3 +30,13 @@ jobs:
       # Report every check's verdict, not only the first failure's. The check
       # needs none of the outputs on the runner, so none are downloaded.
       - run: bazel test --config=check --remote_download_minimal --keep_going --test_output=errors //... //dist:bviz-linux-x86_64
+
+      - uses: actions/upload-artifact@v7
+        if: failure()
+        with:
+          name: remote-build-logs
+          path: |
+            bazel-remote-grpc.log
+            execution_log.binpb.zst
+          retention-days: 7
+          if-no-files-found: ignore

@@ -29,6 +29,16 @@ jobs:
       # --keep_going so one platform's failure still yields the others' tarballs.
       - run: bazel build -c opt --keep_going //dist
 
+      - uses: actions/upload-artifact@v7
+        if: failure()
+        with:
+          name: remote-build-logs
+          path: |
+            bazel-remote-grpc.log
+            execution_log.binpb.zst
+          retention-days: 7
+          if-no-files-found: ignore
+
       # GitHub implies success() on an `if:` that names no status function, so
       # without !cancelled() a failed build would skip the uploads that report
       # which platform is missing.
