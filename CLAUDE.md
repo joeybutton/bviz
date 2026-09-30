@@ -30,10 +30,15 @@ Interactive visualization and inspection tool for Bazel builds.
   or the body is a bulleted list of independent changes — in either case, split
   it, one commit per bullet. When unsure whether two changes are one concern,
   default to splitting; over-splitting is cheap to read, under-splitting is not.
-- Commit only verified work: build and run/test it first, and pass the format
-  and lint checks CI enforces — `bazel build --config=rustfmt //...`,
-  `bazel build --config=clippy //...`, and `bazel test //:buildifier_test`
-  for BUILD, `.bzl`, and `MODULE.bazel` files; apply formatting with
+- Commit only verified work. While iterating, check only the targets you are
+  changing, which is faster: `bazel test //ui/graph/...`,
+  `bazel build --config=rustfmt //ui/graph/...`,
+  `bazel build --config=clippy //ui/graph/...`, and
+  `bazel test //:buildifier_test` for BUILD, `.bzl`, and `MODULE.bazel` files.
+  Before committing, pass the full check CI enforces, which catches breakage
+  elsewhere: `bazel test --config=check //...` builds everything, runs every
+  test (buildifier among them), and runs the rustfmt and clippy checks. Apply
+  formatting with
   `bazel run @rules_rs_rules_rust//:rustfmt` and `bazel run //:buildifier`.
   For toolchain changes, confirm with `--toolchain_resolution_debug`. Report
   outcomes honestly; flag side effects.
