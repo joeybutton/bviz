@@ -80,7 +80,8 @@ impl ScatterPanel {
             }
         });
         let metrics_landed = cx.subscribe(&model, |view, _, landed: &MetricsLanded, cx| {
-            if view.scope() == Some(landed.scope) {
+            let (scope, reference) = view.scopes().unzip();
+            if [scope, reference].contains(&Some(landed.scope)) {
                 view.replot(cx);
             }
         });
@@ -106,17 +107,20 @@ impl ScatterPanel {
         }
     }
 
-    /// The scope the plot measures in, once the graph is read.
-    fn scope(&self) -> Option<Scope> {
-        self.choice.as_ref().map(|choice| choice.scope)
+    /// The scope the plot measures in, and the scope of its unit over every
+    /// input loaded that it is scaled to, once the graph is read.
+    fn scopes(&self) -> Option<(Scope, Scope)> {
+        self.choice
+            .as_ref()
+            .map(|choice| (choice.scope, choice.reference()))
     }
 
-    /// Has the graph measured in the chosen scope, and brings the plot up to
-    /// date where it already is.
+    /// Has the graph measured in the chosen scope and the one it is scaled to,
+    /// and brings the plot up to date where it already is.
     fn measure(&mut self, cx: &mut Context<Self>) {
-        if let Some(scope) = self.scope() {
+        if let Some((scope, reference)) = self.scopes() {
             self.model
-                .update(cx, |model, cx| model.want_metrics(&[scope], cx));
+                .update(cx, |model, cx| model.want_metrics(&[scope, reference], cx));
         }
         self.replot(cx);
     }
@@ -161,14 +165,15 @@ impl ScatterPanel {
         if !self.shown || self.plotting.is_some() {
             return;
         }
-        let Some(scope) = self.scope() else {
+        let Some((scope, reference)) = self.scopes() else {
             return;
         };
         let model = self.model.read(cx);
         let Some(loaded) = model.loaded() else {
             return;
         };
-        let Some(metrics) = model.metrics(scope) else {
+        let (Some(metrics), Some(reference)) = (model.metrics(scope), model.metrics(reference))
+        else {
             return;
         };
         let filter = model.filter().cloned().unwrap_or_default();
@@ -179,13 +184,14 @@ impl ScatterPanel {
         {
             return;
         }
-        let (metrics, shared) = (Arc::clone(metrics), loaded.shared.clone());
+        let (metrics, reference) = (Arc::clone(metrics), Arc::clone(reference));
+        let shared = loaded.shared.clone();
         self.plotting = Some(load_in_background(
             cx,
             move || {
                 let verdicts = filter.evaluate(&shared.base, &shared.names, &shared.facets);
                 let plots = |point: &Metrics| plotted_as(scope.unit(), point.kind);
-                let plotted = Plotted::of(&metrics, plots, |id| verdicts.get(id));
+                let plotted = Plotted::of(&metrics, &reference, plots, |id| verdicts.get(id));
                 (plotted, filter)
             },
             move |view, (plotted, filter), cx| {
@@ -392,6 +398,12 @@ impl Choice {
             picker,
             _picked: picked,
         })
+    }
+
+    /// The scope's unit over every loaded input describing it, whose measure
+    /// the plot is scaled to.
+    fn reference(&self) -> Scope {
+        self.scope.widened(self.loaded)
     }
 
     /// Plots `unit`, one of those offered, in the scope it was left in.

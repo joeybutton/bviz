@@ -103,8 +103,9 @@ pub(crate) struct Mark {
 }
 
 /// The marks a measurement's points draw as, and the axes that hold them. The
-/// axes and the mark sizes are scaled to every point plotted, drawn or not, so
-/// a filter moves no mark.
+/// axes and the mark sizes are scaled to every point plotted of it and of a
+/// reference measure, drawn or not, so neither a filter nor measuring over
+/// fewer of the inputs the reference reads moves the scale a mark is read on.
 pub(crate) struct Plotted {
     /// The faded before the rest, so none hides a mark the filter selects, and
     /// largest first within each, so a small mark is drawn over any large one
@@ -127,14 +128,16 @@ pub(crate) struct Plotted {
 
 impl Plotted {
     /// The marks of those points `measured` that `plots` takes, as the filter
-    /// whose verdict on a node `verdict` gives draws them.
+    /// whose verdict on a node `verdict` gives draws them, scaled to `measured`
+    /// and `reference` alike.
     pub(crate) fn of(
         measured: &Measurement,
+        reference: &Measurement,
         plots: impl Fn(&Metrics) -> bool,
         verdict: impl Fn(Id) -> Verdict,
     ) -> Self {
         let (targets, sizing) = (&measured.points, measured.sizing);
-        let scaled = || targets.iter().filter(|t| plots(t));
+        let scaled = || targets.iter().chain(&reference.points).filter(|t| plots(t));
         let max = |measure: &dyn Fn(&Metrics) -> u32| scaled().map(measure).max();
         let largest = max(&|t| sizing.of(t)).unwrap_or(0);
         let mut plotted = 0;
@@ -403,7 +406,8 @@ mod tests {
 
     /// The marks of `targets` through a filter drawing every one.
     fn shown(targets: &[Metrics]) -> Plotted {
-        Plotted::of(&measured(targets), |_| true, |_| Verdict::Shown)
+        let measured = measured(targets);
+        Plotted::of(&measured, &measured, |_| true, |_| Verdict::Shown)
     }
 
     #[test]
@@ -524,8 +528,10 @@ mod tests {
         let targets = [target(3, 1, 9), target(400, 2, 0), target(7, 90, 2)];
         let hidden = targets[1].id;
         let faded = targets[2].id;
+        let measured = measured(&targets);
         let plotted = Plotted::of(
-            &measured(&targets),
+            &measured,
+            &measured,
             |_| true,
             |id| match id {
                 id if id == hidden => Verdict::Hidden,
@@ -556,8 +562,10 @@ mod tests {
     fn a_point_left_unplotted_scales_neither_the_axes_nor_the_sizes() {
         let targets = [target(3, 900, 9), target(400, 2, 1)];
         let unplotted = targets[0].id;
+        let measured = measured(&targets);
         let plotted = Plotted::of(
-            &measured(&targets),
+            &measured,
+            &measured,
             |t| t.id != unplotted,
             |_| Verdict::Shown,
         );
@@ -566,6 +574,21 @@ mod tests {
         let alone = shown(&targets[1..]);
         assert_eq!((plotted.x, plotted.y), (alone.x, alone.y));
         assert_eq!(plotted.marks[0].radius, MAX_RADIUS);
+    }
+
+    /// Leaving an input out shrinks the counts, and the marks move down axes
+    /// that keep the span of the whole measure.
+    #[test]
+    fn a_narrower_measure_is_drawn_on_the_scale_of_its_reference() {
+        let whole = measured(&[target(3, 1, 1), target(400, 90, 9)]);
+        let narrower = measured(&[target(3, 1, 1), target(40, 2, 3)]);
+        let plotted = Plotted::of(&narrower, &whole, |_| true, |_| Verdict::Shown);
+        let reference = Plotted::of(&whole, &whole, |_| true, |_| Verdict::Shown);
+        assert_eq!((plotted.x, plotted.y), (reference.x, reference.y));
+        let largest =
+            |plotted: &Plotted| plotted.marks.iter().map(|m| m.radius).fold(0.0, f32::max);
+        assert_eq!(largest(&reference), MAX_RADIUS);
+        assert!(largest(&plotted) < MAX_RADIUS);
     }
 
     #[test]

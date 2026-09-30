@@ -62,6 +62,16 @@ impl Scope {
         })
     }
 
+    /// The scope over its own inputs and those of `inputs` describing its
+    /// unit.
+    pub fn widened(self, inputs: InputSet) -> Self {
+        let more = inputs.intersection(self.unit.inputs());
+        Self {
+            unit: self.unit,
+            inputs: more.map_or(self.inputs, |more| self.inputs.union(more)),
+        }
+    }
+
     pub fn unit(self) -> Unit {
         self.unit
     }
@@ -803,6 +813,18 @@ mod tests {
                 ("test", Kind::ConfiguredTarget, 3, 0, 0, 1),
             ]
         );
+    }
+
+    #[test]
+    fn a_widened_scope_takes_only_the_inputs_describing_its_unit() {
+        let actions = Scope::new(Unit::Action, InputSet::ALL).unwrap();
+        assert_eq!(actions.widened(InputSet::ALL), actions);
+        let cquery = Scope::new(Unit::ConfiguredTarget, Input::Cquery.into()).unwrap();
+        assert_eq!(
+            cquery.widened(InputSet::ALL),
+            Scope::new(Unit::ConfiguredTarget, InputSet::ALL).unwrap()
+        );
+        assert_eq!(cquery.widened(Input::Query.into()), cquery);
     }
 
     #[test]
