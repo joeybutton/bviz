@@ -26,6 +26,7 @@ pub mod quotient;
 pub mod reduce;
 pub mod repo;
 pub mod select;
+mod sketch;
 pub mod streamed_proto;
 pub mod transition;
 

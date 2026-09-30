@@ -150,8 +150,8 @@ impl Plotted {
             kinds,
             marks,
             measured: targets.len(),
-            x: LogScale::covering(max(|t| t.closure).unwrap_or(0)),
-            y: LogScale::covering(max(|t| t.blast_radius).unwrap_or(0)),
+            x: LogScale::covering(max(|t| t.closure.value()).unwrap_or(0)),
+            y: LogScale::covering(max(|t| t.blast_radius.value()).unwrap_or(0)),
         }
     }
 }
@@ -309,7 +309,10 @@ impl DataArea {
     }
 
     pub(crate) fn place(&self, target: &Metrics) -> Point<Pixels> {
-        point(self.x_of(target.closure), self.y_of(target.blast_radius))
+        point(
+            self.x_of(target.closure.value()),
+            self.y_of(target.blast_radius.value()),
+        )
     }
 
     /// The mark of `marks` a pointer at `at` picks: the one whose centre is
@@ -329,7 +332,8 @@ impl DataArea {
         let (index, _) = nearest?;
         let at_same_place = |mark: &Mark| {
             let (one, other) = (&mark.target, &marks[index].target);
-            (one.closure, one.blast_radius) == (other.closure, other.blast_radius)
+            let place = |m: &Metrics| (m.closure.value(), m.blast_radius.value());
+            place(one) == place(other)
         };
         Some(Picked {
             mark: index,
@@ -354,14 +358,15 @@ pub(crate) struct Picked {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bviz_graph_layout::metrics::Count;
     use gpui::size;
 
     fn target(closure: u32, blast_radius: u32, fan_in: u32) -> Metrics {
         Metrics {
             id: Id(closure),
             kind: Kind::Target,
-            closure,
-            blast_radius,
+            closure: Count::Exact(closure),
+            blast_radius: Count::Exact(blast_radius),
             fan_in,
             fan_out: 0,
             actions: 0,
@@ -478,7 +483,7 @@ mod tests {
         let top = plotted
             .marks
             .iter()
-            .rposition(|m| (m.target.closure, m.target.blast_radius) == (100, 100));
+            .rposition(|m| (m.target.closure.value(), m.target.blast_radius.value()) == (100, 100));
         assert_eq!(shared.map(|p| p.mark), top);
         assert_eq!(shared.map(|p| p.coincident), Some(1));
 

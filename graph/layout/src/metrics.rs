@@ -5,8 +5,9 @@ use rayon::prelude::*;
 
 use crate::facets::Facets;
 use crate::graph::{Edge, Graph, Kind, Node, id_span};
-use crate::intern::Id;
+use crate::intern::{Id, Names, stable_hash};
 use crate::provenance::{Input, InputSet, Provenance};
+pub use crate::reduce::Count;
 use crate::reduce::{DenseIds, reach_counts};
 
 /// What a point of a measure stands for.
@@ -90,10 +91,10 @@ pub struct Metrics {
     pub id: Id,
     pub kind: Kind,
     /// How many points it depends on, directly or transitively.
-    pub closure: u32,
+    pub closure: Count,
     /// How many points depend on it, directly or transitively: what a change
     /// to it can break.
-    pub blast_radius: u32,
+    pub blast_radius: Count,
     /// How many points depend on it directly.
     pub fan_in: u32,
     /// How many points it depends on directly.
@@ -121,6 +122,14 @@ pub enum Sizing {
     FanIn,
 }
 
+impl Measurement {
+    /// Whether any count of it is an estimate.
+    pub fn estimated(&self) -> bool {
+        let estimated = |m: &Metrics| m.closure.is_estimated() || m.blast_radius.is_estimated();
+        self.points.iter().any(estimated)
+    }
+}
+
 impl Sizing {
     pub fn of(self, metrics: &Metrics) -> u32 {
         match self {
@@ -135,14 +144,16 @@ impl Sizing {
 /// each input's share in the measure can be weighed by leaving it out.
 pub fn measure(
     graph: &Graph,
+    names: &Names,
     facets: &Facets,
     provenance: &Provenance,
     scope: Scope,
 ) -> Measurement {
+    let keys = SampleKeys { names, facets };
     let points = match scope.unit {
-        Unit::Action => actions(graph, provenance, scope),
-        Unit::ConfiguredTarget => configured_targets(graph, provenance, scope),
-        Unit::Target => targets(graph, facets, provenance, scope),
+        Unit::Action => actions(graph, provenance, scope, keys),
+        Unit::ConfiguredTarget => configured_targets(graph, provenance, scope, keys),
+        Unit::Target => targets(graph, facets, provenance, scope, keys),
     };
     // Decided by the graph alone, whatever inputs the scope reads, so the
     // sizes of one unit compare across scopes.
@@ -155,6 +166,23 @@ pub fn measure(
         scope,
         points,
         sizing,
+    }
+}
+
+/// What an estimate samples each node by, alike in every run of the queries
+/// read: an action's primary output, and any other node's name.
+#[derive(Clone, Copy)]
+struct SampleKeys<'a> {
+    names: &'a Names,
+    facets: &'a Facets,
+}
+
+impl SampleKeys<'_> {
+    fn of(self, id: Id) -> u64 {
+        match self.facets.primary_output_key(id) {
+            Some(key) => key.get(),
+            None => stable_hash(self.names.resolve(id)),
+        }
     }
 }
 
@@ -218,7 +246,12 @@ impl Points {
     /// The measure of these points with `pairs` between them, which run from a
     /// dependency to its dependent by index, and with the actions `actions`
     /// gives by point.
-    fn measure(self, mut pairs: Vec<(u32, u32)>, actions: Vec<u32>) -> Vec<Metrics> {
+    fn measure(
+        self,
+        mut pairs: Vec<(u32, u32)>,
+        actions: Vec<u32>,
+        keys: SampleKeys,
+    ) -> Vec<Metrics> {
         pairs.retain(|(from, to)| from != to);
         bviz_parallel::workers().install(|| pairs.par_sort_unstable());
         pairs.dedup();
@@ -226,8 +259,9 @@ impl Points {
         let (dependents, dependencies) = adjacency(points.len(), &pairs);
         drop(pairs);
         let counted = |p: usize| points[p].counted;
-        let blast_radius = reach_counts(&dependents, counted);
-        let closure = reach_counts(&dependencies, counted);
+        let key = |p: usize| keys.of(points[p].id);
+        let blast_radius = reach_counts(&dependents, counted, key);
+        let closure = reach_counts(&dependencies, counted, key);
         let counted_among = |of: &[u32]| of.iter().filter(|&&p| counted(p as usize)).count() as u32;
         points
             .iter()
@@ -247,7 +281,13 @@ impl Points {
 
 /// Every node that `facets` names as its own target, each edge between two
 /// nodes standing for one between their targets.
-fn targets(graph: &Graph, facets: &Facets, provenance: &Provenance, scope: Scope) -> Vec<Metrics> {
+fn targets(
+    graph: &Graph,
+    facets: &Facets,
+    provenance: &Provenance,
+    scope: Scope,
+    keys: SampleKeys,
+) -> Vec<Metrics> {
     let points = Points::new(
         graph
             .nodes
@@ -267,12 +307,17 @@ fn targets(graph: &Graph, facets: &Facets, provenance: &Provenance, scope: Scope
             .filter_map(|edge| Some((target_of(edge.from)?, target_of(edge.to)?))),
     );
     let actions = points.owned_actions(graph, target_of);
-    points.measure(pairs, actions)
+    points.measure(pairs, actions, keys)
 }
 
 /// Every configured target, each edge between two nodes standing for one
 /// between the configured targets holding them.
-fn configured_targets(graph: &Graph, provenance: &Provenance, scope: Scope) -> Vec<Metrics> {
+fn configured_targets(
+    graph: &Graph,
+    provenance: &Provenance,
+    scope: Scope,
+    keys: SampleKeys,
+) -> Vec<Metrics> {
     let node_of = first_by_id(graph);
     let is_configured =
         |id: Id| node_of[id.0 as usize].is_some_and(|node| node.kind == Kind::ConfiguredTarget);
@@ -300,12 +345,12 @@ fn configured_targets(graph: &Graph, provenance: &Provenance, scope: Scope) -> V
             .filter_map(|edge| Some((configured_of(edge.from)?, configured_of(edge.to)?))),
     );
     let actions = points.owned_actions(graph, configured_of);
-    points.measure(pairs, actions)
+    points.measure(pairs, actions, keys)
 }
 
 /// Every action, and every source file an action reads, each artifact standing
 /// for the actions producing it.
-fn actions(graph: &Graph, provenance: &Provenance, scope: Scope) -> Vec<Metrics> {
+fn actions(graph: &Graph, provenance: &Provenance, scope: Scope, keys: SampleKeys) -> Vec<Metrics> {
     let node_of = first_by_id(graph);
     let is_action = |id: Id| node_of[id.0 as usize].is_some_and(|node| node.kind == Kind::Action);
     let mut read: Vec<&Edge> = Vec::with_capacity(graph.edges.len());
@@ -360,7 +405,7 @@ fn actions(graph: &Graph, provenance: &Provenance, scope: Scope) -> Vec<Metrics>
         }
     }
     let actions = points.owned_actions(graph, |id| points.of(id));
-    points.measure(pairs, actions)
+    points.measure(pairs, actions, keys)
 }
 
 /// By id, the first node of `graph` holding it.
@@ -430,14 +475,14 @@ mod tests {
         inputs: InputSet,
     ) -> Vec<(String, u32, u32, u32, u32)> {
         let scope = Scope::new(Unit::Target, inputs).unwrap();
-        measure(graph, facets, provenance, scope)
+        measure(graph, names, facets, provenance, scope)
             .points
             .into_iter()
             .map(|m| {
                 (
                     names.resolve(m.id).to_string(),
-                    m.closure,
-                    m.blast_radius,
+                    m.closure.value(),
+                    m.blast_radius.value(),
                     m.fan_in,
                     m.fan_out,
                 )
@@ -599,14 +644,21 @@ mod tests {
         fn measured(&self, unit: Unit) -> Vec<(&str, Kind, u32, u32, u32, u32)> {
             let everything = Provenance::new(vec![InputSet::ALL; self.names.len()]);
             let scope = Scope::new(unit, InputSet::ALL).unwrap();
-            measure(&self.graph, &Facets::default(), &everything, scope)
-                .points
-                .into_iter()
-                .map(|m| {
-                    let name = self.names.resolve(m.id);
-                    (name, m.kind, m.closure, m.blast_radius, m.fan_in, m.fan_out)
-                })
-                .collect()
+            measure(
+                &self.graph,
+                &self.names,
+                &Facets::default(),
+                &everything,
+                scope,
+            )
+            .points
+            .into_iter()
+            .map(|m| {
+                let name = self.names.resolve(m.id);
+                let (closure, blast_radius) = (m.closure.value(), m.blast_radius.value());
+                (name, m.kind, closure, blast_radius, m.fan_in, m.fan_out)
+            })
+            .collect()
         }
     }
 
@@ -783,7 +835,7 @@ mod tests {
         let everything = Provenance::new(vec![InputSet::ALL; build.names.len()]);
         let weighed = |unit| {
             let scope = Scope::new(unit, InputSet::ALL).unwrap();
-            let measured = measure(&build.graph, &facets, &everything, scope);
+            let measured = measure(&build.graph, &build.names, &facets, &everything, scope);
             let sizes = measured.points.iter().map(|m| {
                 let name = build.names.resolve(m.id);
                 (name, m.actions, measured.sizing.of(m))
@@ -819,7 +871,7 @@ mod tests {
         let (g, f, n) = configured(&["a", "b"], &[("a", "b")]);
         let everything = Provenance::new(vec![InputSet::ALL; n.len()]);
         let scope = Scope::new(Unit::Target, InputSet::ALL).unwrap();
-        let measured = measure(&g, &f, &everything, scope);
+        let measured = measure(&g, &n, &f, &everything, scope);
         assert_eq!(measured.sizing, Sizing::FanIn);
     }
 }

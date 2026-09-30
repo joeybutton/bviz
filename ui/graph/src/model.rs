@@ -372,7 +372,13 @@ impl GraphModel {
             cx,
             move || {
                 let (base, facets) = (&shared.base, &shared.facets);
-                Arc::new(measure(base, facets, &shared.provenance, scope))
+                Arc::new(measure(
+                    base,
+                    &shared.names,
+                    facets,
+                    &shared.provenance,
+                    scope,
+                ))
             },
             |model, metrics, cx| {
                 if let Source::Loaded(loaded) = &mut model.source {

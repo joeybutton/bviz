@@ -14,7 +14,8 @@
 //! cycle. Reachability survives, and no edge of a cycle is redundant anyway,
 //! since each of its nodes already reaches every other.
 //!
-//! The same reachability rows count how many nodes each node reaches.
+//! The same reachability rows count how many nodes each node reaches, where
+//! they fit; past that the counts are estimated.
 
 use std::cmp::Reverse;
 use std::ops::Range;
@@ -639,16 +640,95 @@ impl ThinnedCycle {
     }
 }
 
+/// A count of nodes, found exactly or estimated.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Count {
+    Exact(u32),
+    Estimated(u32),
+}
+
+impl Count {
+    pub fn value(self) -> u32 {
+        match self {
+            Count::Exact(n) | Count::Estimated(n) => n,
+        }
+    }
+
+    pub fn is_estimated(self) -> bool {
+        matches!(self, Count::Estimated(_))
+    }
+
+    fn less(self, n: u32) -> Self {
+        match self {
+            Count::Exact(m) => Count::Exact(m - n),
+            Count::Estimated(m) => Count::Estimated(m.saturating_sub(n)),
+        }
+    }
+}
+
+impl std::fmt::Display for Count {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Count::Exact(n) => write!(f, "{n}"),
+            Count::Estimated(n) => write!(f, "≈{n}"),
+        }
+    }
+}
+
+/// The most words the reachability rows of an exact count may take before the
+/// counts are estimated instead. On action graphs about this size the two take
+/// alike, and past it the rows cost more time than the estimate, and memory
+/// growing with the square of the nodes where the estimate's grows with them.
+const EXACT_REACH_WORDS: usize = 1 << 22;
+
 /// How many other nodes each node of the graph `succ` holds over the indices
-/// `0..succ.len()` reaches, of those `counts` takes by index. Each node of a
-/// cycle reaches every other node of it and all that any of them reaches.
-pub fn reach_counts(succ: &[Vec<u32>], counts: impl Fn(usize) -> bool) -> Vec<u32> {
+/// `0..succ.len()` reaches, of those `counts` takes by index. An estimate
+/// samples a counted node by the key `key` gives its index, so a node keyed
+/// alike in two graphs is sampled alike in both. Each node of a cycle reaches
+/// every other node of it and all that any of them reaches.
+pub fn reach_counts(
+    succ: &[Vec<u32>],
+    counts: impl Fn(usize) -> bool,
+    key: impl Fn(usize) -> u64,
+) -> Vec<Count> {
+    counts_within(succ, counts, key, EXACT_REACH_WORDS)
+}
+
+/// [`reach_counts`], exact where the rows take at most `exact_words` words.
+fn counts_within(
+    succ: &[Vec<u32>],
+    counts: impl Fn(usize) -> bool,
+    key: impl Fn(usize) -> u64,
+    exact_words: usize,
+) -> Vec<Count> {
     let condensation = Condensation::new(succ);
+    let reach = Reach::new(&condensation.order, &condensation.succ);
+    let whole: Vec<Count> = if reach.levels.word_count() <= exact_words {
+        exact_counts(&condensation, &reach, &counts)
+    } else {
+        let Reach { height, .. } = reach;
+        crate::sketch::sketched(&condensation, &height, |i| counts(i).then(|| key(i)))
+    };
+    condensation
+        .of
+        .iter()
+        .enumerate()
+        .map(|(i, &c)| whole[c as usize].less(u32::from(counts(i))))
+        .collect()
+}
+
+/// By component of `condensation`, how many counted nodes it holds and reaches
+/// together, found through the reachability rows `reach` numbers, of the
+/// nodes `counts` takes by index.
+fn exact_counts(
+    condensation: &Condensation,
+    reach: &Reach,
+    counts: impl Fn(usize) -> bool,
+) -> Vec<Count> {
     let mut weight = vec![0u32; condensation.succ.len()];
     for (i, &c) in condensation.of.iter().enumerate() {
         weight[c as usize] += u32::from(counts(i));
     }
-    let reach = Reach::new(&condensation.order, &condensation.succ);
     let weights = Weights::new(&weight, &reach.bit);
     let mut reached = vec![0u32; weight.len()];
     reach.fill(
@@ -656,11 +736,10 @@ pub fn reach_counts(succ: &[Vec<u32>], counts: impl Fn(usize) -> bool) -> Vec<u3
         |lo, words, _| weights.covered(lo, words),
         |c, count| reached[c as usize] = count,
     );
-    condensation
-        .of
-        .iter()
-        .enumerate()
-        .map(|(i, &c)| reached[c as usize] + weight[c as usize] - u32::from(counts(i)))
+    reached
+        .into_iter()
+        .zip(weight)
+        .map(|(reached, own)| Count::Exact(reached + own))
         .collect()
 }
 
@@ -1272,23 +1351,20 @@ mod tests {
 
     #[test]
     fn a_chain_reaches_everything_below_it() {
-        assert_eq!(
-            reach_counts(&[vec![1], vec![2], vec![]], |_| true),
-            [2, 1, 0]
-        );
+        assert_eq!(exact(&[vec![1], vec![2], vec![]], &[true; 3]), [2, 1, 0]);
     }
 
     #[test]
     fn a_diamond_counts_its_join_once() {
         let succ = [vec![1, 2], vec![3], vec![3], vec![]];
-        assert_eq!(reach_counts(&succ, |_| true), [3, 1, 1, 0]);
+        assert_eq!(exact(&succ, &[true; 4]), [3, 1, 1, 0]);
     }
 
     /// `0` and `1` form a cycle that reaches `2`; `3` reaches into it.
     #[test]
     fn a_cycle_reaches_its_other_members_and_beyond() {
         let succ = [vec![1], vec![0, 2], vec![], vec![0]];
-        assert_eq!(reach_counts(&succ, |_| true), [2, 2, 0, 3]);
+        assert_eq!(exact(&succ, &[true; 4]), [2, 2, 0, 3]);
     }
 
     /// An uncounted node is passed through but not counted, whether it stands
@@ -1298,7 +1374,7 @@ mod tests {
     fn an_uncounted_node_is_passed_through() {
         let succ = [vec![1], vec![2], vec![3], vec![2, 4], vec![]];
         let counted = [true, false, true, false, true];
-        assert_eq!(reach_counts(&succ, |i| counted[i]), [2, 2, 1, 2, 0]);
+        assert_eq!(exact(&succ, &counted), [2, 2, 1, 2, 0]);
     }
 
     /// Random graphs wide enough that a height is filled by several parallel
@@ -1308,22 +1384,68 @@ mod tests {
     fn random_graphs_count_what_a_walk_reaches() {
         let mut next = random_indices();
         for (nodes, edges) in [(40, 60), (2_000, 3_000), (2_000, 6_000)] {
-            let mut succ: Vec<Vec<u32>> = vec![Vec::new(); nodes];
-            for _ in 0..edges {
-                let (a, b) = (next(nodes), next(nodes));
-                // Mostly ascending, so the cycles stay small.
-                let (from, to) = match next(50) {
-                    0 => (a.max(b), a.min(b)),
-                    _ => (a.min(b), a.max(b)),
-                };
-                succ[from].push(to as u32);
-            }
+            let succ = random_graph(&mut next, nodes, edges);
             let counted: Vec<bool> = (0..nodes).map(|_| next(4) != 0).collect();
             assert_eq!(
-                reach_counts(&succ, |i| counted[i]),
+                exact(&succ, &counted),
                 walked(&succ, &counted),
                 "{nodes} nodes, {edges} edges"
             );
+        }
+    }
+
+    /// A graph of `nodes` nodes and `edges` random edges between them, mostly
+    /// ascending so that its cycles stay small.
+    fn random_graph(
+        next: &mut impl FnMut(usize) -> usize,
+        nodes: usize,
+        edges: usize,
+    ) -> Vec<Vec<u32>> {
+        let mut succ: Vec<Vec<u32>> = vec![Vec::new(); nodes];
+        for _ in 0..edges {
+            let (a, b) = (next(nodes), next(nodes));
+            let (from, to) = match next(50) {
+                0 => (a.max(b), a.min(b)),
+                _ => (a.min(b), a.max(b)),
+            };
+            succ[from].push(to as u32);
+        }
+        succ
+    }
+
+    /// Estimated counts of random graphs, cycles and uncounted nodes among
+    /// them, are exact below the size of a sketch and near what a walk finds
+    /// above it: within [`WORST_ERROR`] of it each, and within [`MEAN_ERROR`]
+    /// on average.
+    #[test]
+    fn estimates_come_near_what_a_walk_reaches() {
+        /// Four standard errors of a sketch's estimate.
+        const WORST_ERROR: f64 = 0.35;
+        /// Two standard errors, which the counts of one graph share much of,
+        /// sampling nested sets.
+        const MEAN_ERROR: f64 = 0.2;
+
+        let mut next = random_indices();
+        for (nodes, edges) in [(3_000, 4_500), (3_000, 12_000)] {
+            let succ = random_graph(&mut next, nodes, edges);
+            let counted: Vec<bool> = (0..nodes).map(|_| next(4) != 0).collect();
+            let counts = counts_within(&succ, |i| counted[i], |i| i as u64, 0);
+            let mut errors: Vec<f64> = Vec::new();
+            for (count, truth) in counts.into_iter().zip(walked(&succ, &counted)) {
+                match count {
+                    Count::Exact(n) => assert_eq!(n, truth),
+                    Count::Estimated(n) => {
+                        assert!(truth as usize + 1 >= crate::sketch::RANKS);
+                        let error = (f64::from(n) - f64::from(truth)).abs() / f64::from(truth);
+                        assert!(error < WORST_ERROR, "{n} estimates {truth}");
+                        errors.push(error);
+                    }
+                }
+            }
+            if !errors.is_empty() {
+                let mean = errors.iter().sum::<f64>() / errors.len() as f64;
+                assert!(mean < MEAN_ERROR, "{nodes} nodes, {edges} edges: {mean}");
+            }
         }
     }
 
@@ -1342,7 +1464,19 @@ mod tests {
             }
         }
         let counted = vec![true; succ.len()];
-        assert_eq!(reach_counts(&succ, |i| counted[i]), walked(&succ, &counted));
+        assert_eq!(exact(&succ, &counted), walked(&succ, &counted));
+    }
+
+    /// The counts of [`reach_counts`] of `succ`, where `counted` marks the
+    /// nodes that count, each of which must be exact.
+    fn exact(succ: &[Vec<u32>], counted: &[bool]) -> Vec<u32> {
+        reach_counts(succ, |i| counted[i], |i| i as u64)
+            .into_iter()
+            .map(|count| match count {
+                Count::Exact(n) => n,
+                Count::Estimated(_) => panic!("an estimate of a small graph"),
+            })
+            .collect()
     }
 
     /// How many other nodes of those `counted` marks a walk from each node of
