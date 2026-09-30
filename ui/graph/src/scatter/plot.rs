@@ -213,6 +213,11 @@ impl Span {
         (f - self.lo) / self.len
     }
 
+    /// The fraction of the axis that lies `across` this span.
+    fn along(self, across: f32) -> f32 {
+        self.lo + across * self.len
+    }
+
     /// The span `factor` times narrower, a factor below one widening it, but
     /// no narrower than `narrowest`, about the point `at` across it, which
     /// stays where it was.
@@ -323,6 +328,24 @@ impl DataArea {
         }
     }
 
+    /// Where on the axes a pointer at `at` lies.
+    pub(crate) fn spot(&self, at: Point<Pixels>) -> Spot {
+        let across_x = (at.x - self.bounds.left()) / self.bounds.size.width;
+        let across_y = (self.bounds.bottom() - at.y) / self.bounds.size.height;
+        Spot {
+            x: self.zoom.x.along(across_x),
+            y: self.zoom.y.along(across_y),
+        }
+    }
+
+    /// Where `spot` is drawn.
+    pub(crate) fn at_spot(&self, spot: Spot) -> Point<Pixels> {
+        point(
+            self.bounds.left() + self.bounds.size.width * self.zoom.x.across(spot.x),
+            self.bounds.bottom() - self.bounds.size.height * self.zoom.y.across(spot.y),
+        )
+    }
+
     pub(crate) fn place(&self, target: &Metrics) -> Point<Pixels> {
         point(
             self.x_of(target.closure.value()),
@@ -353,6 +376,14 @@ impl DataArea {
     }
 }
 
+/// A place on the plot by the fraction of each axis's scale it lies at, which
+/// holds however large the plot is drawn and whatever part of it is shown.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct Spot {
+    x: f32,
+    y: f32,
+}
+
 /// How far past a mark's rim a pointer still picks it, so that the smallest
 /// marks are not a pixel-hunt.
 pub(crate) const PICK_SLOP: f32 = 4.0;
@@ -372,6 +403,10 @@ pub(crate) struct Picked {
 }
 
 impl Picked {
+    pub(crate) fn covered(&self) -> &[usize] {
+        &self.covered
+    }
+
     /// How many marks under the pointer are not the one it names.
     pub(crate) fn others(&self) -> usize {
         self.covered.len() - 1
@@ -692,5 +727,22 @@ mod tests {
         let area = DataArea::within(axes, plotted.x, plotted.y, Zoom::WHOLE);
         assert!(area.y_of(50) < area.y_of(0));
         assert_eq!(area.x_of(0), axes.left() + px(MAX_RADIUS));
+    }
+
+    /// A spot taken on a zoomed plot is drawn over the same counts once the
+    /// plot is drawn at another size.
+    #[test]
+    fn a_spot_follows_its_counts_as_the_plot_is_resized() {
+        let targets = [target(0, 0, 0), target(1_000, 1_000, 0), target(30, 7, 0)];
+        let plotted = shown(&targets);
+        let wide = Bounds::new(point(px(0.), px(0.)), size(px(800.), px(500.)));
+        let zoom = DataArea::within(wide, plotted.x, plotted.y, Zoom::WHOLE)
+            .zoomed(point(px(300.), px(200.)), 2.0);
+        let before = DataArea::within(wide, plotted.x, plotted.y, zoom);
+        let spot = before.spot(before.place(&targets[2]));
+        let narrow = Bounds::new(point(px(40.), px(60.)), size(px(320.), px(700.)));
+        let after = DataArea::within(narrow, plotted.x, plotted.y, zoom);
+        let moved = after.at_spot(spot) - after.place(&targets[2]);
+        assert!(f32::from(moved.x).abs() < 0.01 && f32::from(moved.y).abs() < 0.01);
     }
 }

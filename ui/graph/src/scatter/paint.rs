@@ -3,11 +3,10 @@
 use super::plot::{DataArea, LogScale, Mark, Plotted, Tick, Zoom, tick_label};
 use crate::Palette;
 use crate::paint::UNMARKED_FADE;
-use bviz_ui_components::{TooltipColors, paint_tooltip_box};
 use bviz_ui_theme::mix;
 use gpui::{
-    App, BorderStyle, Bounds, ContentMask, Hsla, Pixels, Rgba, ShapedLine, TextAlign, Window, fill,
-    point, px, quad, size,
+    App, BorderStyle, Bounds, ContentMask, Hsla, Pixels, Point, Rgba, ShapedLine, TextAlign,
+    Window, fill, point, px, quad, size,
 };
 
 /// Room left of the axes for the vertical tick labels.
@@ -110,21 +109,17 @@ pub(crate) fn paint_plot(
     });
 }
 
-/// Between a hovered mark's rim and the ring drawn round it.
+/// Between a ringed mark's rim and the ring drawn round it.
 const RING_GAP: f32 = 2.0;
 const RING_WIDTH: f32 = 1.5;
 
-/// Rings the hovered `mark`, placed through `area`, and sets the tooltip
-/// reading `lines` beside it within the plot's `bounds`.
-pub(crate) fn paint_hover(
+/// Rings `mark`, placed through `area`, and gives where its centre lies.
+pub(crate) fn paint_ring(
     mark: &Mark,
-    lines: &[String],
     area: &DataArea,
     palette: &Palette,
-    bounds: Bounds<Pixels>,
     window: &mut Window,
-    cx: &mut App,
-) {
+) -> Point<Pixels> {
     let center = area.place(&mark.target);
     let r = px(mark.radius + RING_GAP + RING_WIDTH);
     window.paint_quad(quad(
@@ -135,8 +130,7 @@ pub(crate) fn paint_hover(
         palette.label,
         BorderStyle::Solid,
     ));
-    let tooltip = TooltipColors::from_colors(&palette.colors);
-    paint_tooltip_box(lines, center, bounds, tooltip, window, cx);
+    center
 }
 
 /// The colours the plot's frame is drawn in.

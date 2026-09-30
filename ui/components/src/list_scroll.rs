@@ -4,17 +4,32 @@ use crate::drag::{DragEnd, track_drag};
 use crate::layer::overlay_canvas;
 use crate::scrollbar::{Axis, DEFAULT_MIN_THUMB, SCROLLBAR_THICKNESS, Scrollbar, ScrollbarColors};
 use gpui::{
-    App, Bounds, Context, Entity, IntoElement, Pixels, Point, ScrollHandle, Window, point, px, size,
+    App, Bounds, Context, Entity, IntoElement, Pixels, Point, ScrollHandle,
+    UniformListScrollHandle, Window, point, px, size,
 };
 
 /// How far a column of rows has scrolled, and the drag on its bar. The column
-/// tracks [`Self::handle`] and keeps [`SCROLLBAR_THICKNESS`] clear at its right
-/// edge, where [`list_scrollbar`] draws the bar.
-#[derive(Default)]
+/// tracks [`Self::handle`], or [`Self::uniform_handle`] where a uniform list
+/// draws it, and keeps [`SCROLLBAR_THICKNESS`] clear at its right edge, where
+/// [`list_scrollbar`] draws the bar.
 pub struct ListScroll {
     handle: ScrollHandle,
+    /// Scrolls `handle` for a uniform list, which reads its offset through it.
+    uniform: UniformListScrollHandle,
     /// The grab offset from the thumb's leading edge while the bar is dragged.
     grab: Option<f32>,
+}
+
+impl Default for ListScroll {
+    fn default() -> Self {
+        let uniform = UniformListScrollHandle::new();
+        let handle = uniform.0.borrow().base_handle.clone();
+        Self {
+            handle,
+            uniform,
+            grab: None,
+        }
+    }
 }
 
 impl ListScroll {
@@ -24,6 +39,10 @@ impl ListScroll {
 
     pub fn handle(&self) -> &ScrollHandle {
         &self.handle
+    }
+
+    pub fn uniform_handle(&self) -> &UniformListScrollHandle {
+        &self.uniform
     }
 
     /// The bar for the rows' content height against the height they are drawn

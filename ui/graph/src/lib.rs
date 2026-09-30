@@ -77,6 +77,8 @@ pub fn register_keys(cx: &mut App) {
     // panel's own bindings stand down inside it.
     let predicate = format!("{KEY_CONTEXT} && !{}", search::KEY_CONTEXT);
     let outside_search = Some(predicate.as_str());
+    let picking = format!("{} && {}", scatter::KEY_CONTEXT, scatter::PICKING);
+    let picking = Some(picking.as_str());
     cx.bind_keys([
         KeyBinding::new("h", ToggleNeighborhood, outside_search),
         KeyBinding::new("r", ToggleReduce, outside_search),
@@ -85,6 +87,10 @@ pub fn register_keys(cx: &mut App) {
         // is the card the typed pattern put up over the drawing.
         KeyBinding::new("escape", search::DismissResults, Some(search::KEY_CONTEXT)),
         KeyBinding::new("0", scatter::ShowWholePlot, Some(scatter::KEY_CONTEXT)),
+        KeyBinding::new("up", scatter::AimUp, picking),
+        KeyBinding::new("down", scatter::AimDown, picking),
+        KeyBinding::new("enter", scatter::RevealAimed, picking),
+        KeyBinding::new("escape", scatter::ClosePickList, picking),
     ]);
 }
 

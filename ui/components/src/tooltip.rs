@@ -1,8 +1,8 @@
 use bviz_ui_theme::ThemeColors;
 use gpui::{
     AnyView, App, AppContext, BorderStyle, Bounds, Context, Hsla, IntoElement, ParentElement,
-    Pixels, Point, Render, Rgba, SharedString, Size, Styled, TextAlign, Window, div, point, px,
-    quad, size,
+    Pixels, Point, Render, Rgba, ShapedLine, SharedString, Size, Styled, TextAlign, Window, div,
+    point, px, quad, size,
 };
 
 const TOOLTIP_TEXT_SIZE: f32 = 12.0;
@@ -10,6 +10,7 @@ const TOOLTIP_TEXT_SIZE: f32 = 12.0;
 const TOOLTIP_PAD: f32 = 6.0;
 /// Leading added below each line.
 const TOOLTIP_LINE_GAP: f32 = 4.0;
+const TOOLTIP_LINE_HEIGHT: f32 = TOOLTIP_TEXT_SIZE + TOOLTIP_LINE_GAP;
 /// How far from its anchor the panel is placed along each axis, clear of it.
 const TOOLTIP_OFFSET: f32 = 12.0;
 /// Corner radius of the panel.
@@ -73,6 +74,18 @@ pub fn beside_anchor(
     )
 }
 
+/// The largest extent [`beside_anchor`] places clear of an anchor at `at`
+/// inside `bounds`, on whichever side of it holds more on each axis.
+pub fn room_beside(at: Point<Pixels>, bounds: Bounds<Pixels>) -> Size<Pixels> {
+    let along = |at: Pixels, start: Pixels, end: Pixels| {
+        ((end - at).max(at - start) - px(TOOLTIP_OFFSET)).max(px(0.))
+    };
+    size(
+        along(at.x, bounds.left(), bounds.right()),
+        along(at.y, bounds.top(), bounds.bottom()),
+    )
+}
+
 /// Paints `lines` in a tooltip panel beside `at` inside `bounds`.
 pub fn paint_tooltip_box(
     lines: &[String],
@@ -91,6 +104,34 @@ pub fn paint_tooltip_box(
     );
 }
 
+/// Each of `lines` shaped as a tooltip panel reads it.
+fn shape_lines(lines: &[String], color: Hsla, window: &mut Window) -> Vec<ShapedLine> {
+    let font = bviz_ui_assets::text_metrics(window).font;
+    let fs = px(TOOLTIP_TEXT_SIZE);
+    lines
+        .iter()
+        .map(|line| bviz_ui_assets::shape_line(window, line.clone(), font.clone(), fs, color))
+        .collect()
+}
+
+/// The extent of the padded panel around `shaped`.
+fn panel_extent(shaped: &[ShapedLine]) -> Size<Pixels> {
+    let text_w = shaped
+        .iter()
+        .map(|l| f32::from(l.width()))
+        .fold(0.0_f32, f32::max);
+    size(
+        px(text_w + 2.0 * TOOLTIP_PAD),
+        px(shaped.len() as f32 * TOOLTIP_LINE_HEIGHT + 2.0 * TOOLTIP_PAD),
+    )
+}
+
+/// The extent of the panel [`paint_tooltip`] paints reading `lines`.
+pub fn tooltip_extent(lines: &[String], window: &mut Window) -> Size<Pixels> {
+    let color = window.text_style().color;
+    panel_extent(&shape_lines(lines, color, window))
+}
+
 /// Measures `lines`, sizes a padded panel around them, and paints it with its
 /// top-left corner where `place` puts a panel of that extent.
 pub fn paint_tooltip(
@@ -100,23 +141,8 @@ pub fn paint_tooltip(
     window: &mut Window,
     cx: &mut App,
 ) {
-    let font = bviz_ui_assets::text_metrics(window).font;
-    let fs = px(TOOLTIP_TEXT_SIZE);
-    let shaped: Vec<_> = lines
-        .iter()
-        .map(|line| {
-            bviz_ui_assets::shape_line(window, line.clone(), font.clone(), fs, colors.label.into())
-        })
-        .collect();
-    let text_w = shaped
-        .iter()
-        .map(|l| f32::from(l.width()))
-        .fold(0.0_f32, f32::max);
-    let line_h = TOOLTIP_TEXT_SIZE + TOOLTIP_LINE_GAP;
-    let extent = size(
-        px(text_w + 2.0 * TOOLTIP_PAD),
-        px(shaped.len() as f32 * line_h + 2.0 * TOOLTIP_PAD),
-    );
+    let shaped = shape_lines(lines, colors.label.into(), window);
+    let extent = panel_extent(&shaped);
     let origin = place(extent);
 
     window.paint_quad(quad(
@@ -127,8 +153,12 @@ pub fn paint_tooltip(
         Hsla::from(colors.border),
         BorderStyle::Solid,
     ));
+    let fs = px(TOOLTIP_TEXT_SIZE);
     for (i, line) in shaped.into_iter().enumerate() {
-        let offset = point(px(TOOLTIP_PAD), px(TOOLTIP_PAD + i as f32 * line_h));
+        let offset = point(
+            px(TOOLTIP_PAD),
+            px(TOOLTIP_PAD + i as f32 * TOOLTIP_LINE_HEIGHT),
+        );
         let _ = line.paint(origin + offset, fs, TextAlign::Left, None, window, cx);
     }
 }
@@ -184,5 +214,17 @@ mod tests {
     fn a_tooltip_neither_side_holds_is_slid_inside_the_span() {
         assert_eq!(beside(50.0, 80.0, 0.0, 100.0), 20.0);
         assert_eq!(beside(50.0, 120.0, 0.0, 100.0), 0.0);
+    }
+
+    #[test]
+    fn the_room_beside_an_anchor_is_held_clear_of_it() {
+        let bounds = Bounds::new(point(px(0.), px(0.)), size(px(100.), px(60.)));
+        for at in [point(px(10.), px(50.)), point(px(70.), px(20.))] {
+            let room = room_beside(at, bounds);
+            let placed = Bounds::new(beside_anchor(at, room, bounds), room);
+            assert!(!placed.contains(&at), "{at:?} {placed:?}");
+            assert!(placed.right() <= bounds.right() && placed.bottom() <= bounds.bottom());
+            assert!(placed.left() >= bounds.left() && placed.top() >= bounds.top());
+        }
     }
 }

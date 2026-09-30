@@ -3,11 +3,14 @@
 
 mod hue;
 mod paint;
+mod pick;
+mod placed;
 mod plot;
 
 use crate::Palette;
 use crate::drag::CLICK_SLOP;
 use crate::model::{FilterChanged, GraphModel, Loaded, MetricsLanded, SourceReplaced};
+use crate::paint::UNMARKED_FADE;
 use crate::{PIXELS_PER_NOTCH, ZOOM_PER_NOTCH};
 use bviz_graph_layout::capability::TRANSITIONS_FLAG;
 use bviz_graph_layout::facets::Tri;
@@ -16,25 +19,37 @@ use bviz_graph_layout::select::Filter;
 use bviz_graph_layout::select::labels::carried_label;
 use bviz_graph_layout::{Axis, Capabilities, Id, Input, InputSet, Kind, Support};
 use bviz_ui_components::{
-    Button, DragEnd, Dropdown, DropdownEvent, TextTooltip, Toolbar, TooltipColors, cached_layer,
-    centered_spinner, load_in_background, spinner, track_drag,
+    Button, DragEnd, Dropdown, DropdownEvent, ListScroll, SCROLLBAR_THICKNESS, TextTooltip,
+    Toolbar, TooltipColors, cached_layer, centered_spinner, list_scrollbar, load_in_background,
+    menu_chrome, paint_tooltip, paint_tooltip_box, spinner, tooltip_extent, track_drag,
 };
 use bviz_ui_workspace::{Panel, PanelEvent, PanelKind, ViewKind};
 use gpui::{
-    App, Bounds, ClickEvent, Context, Div, Entity, EventEmitter, FocusHandle, Focusable,
-    IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Render,
-    Rgba, ScrollDelta, ScrollWheelEvent, SharedString, Stateful, Subscription, Task, WeakEntity,
-    Window, canvas, div, prelude::*, px,
+    App, Bounds, ClickEvent, Context, Div, Entity, EventEmitter, FocusHandle, Focusable, Hsla,
+    IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Rems,
+    Render, Rgba, ScrollDelta, ScrollStrategy, ScrollWheelEvent, SharedString, Size, Stateful,
+    Subscription, Task, WeakEntity, Window, canvas, div, prelude::*, px, rems, uniform_list,
 };
 use hue::{Colouring, Hue};
-use plot::{MIN_RADIUS, Picked, Plotted, Zoom};
+use menu_chrome::{ROW_INSET, SHEET_BORDER};
+use pick::{Extents, PickList, PickRow};
+use placed::Placed;
+use plot::{MIN_RADIUS, Picked, Plotted, Spot, Zoom};
+use std::rc::Rc;
 use std::sync::Arc;
 
 /// The key context scoping the scatter plot's own bindings, so a key pressed
 /// here reaches this panel and no other.
 pub(crate) const KEY_CONTEXT: &str = "GraphScatter";
 
-gpui::actions!(bviz_graph, [ShowWholePlot]);
+/// The identifier the scatter plot's key context carries while a list of the
+/// points under a click is up, which the list's own bindings require.
+pub(crate) const PICKING: &str = "picking";
+
+gpui::actions!(
+    bviz_graph,
+    [ShowWholePlot, AimUp, AimDown, RevealAimed, ClosePickList]
+);
 
 /// What the panel reads while the graph is being measured.
 const MEASURING: &str = "Computing metrics…";
@@ -62,6 +77,14 @@ pub struct ScatterPanel {
     bounds: Option<Bounds<Pixels>>,
     /// The press over the plot, until the button comes up again.
     press: Option<Press>,
+    /// How far the list of the points under a click has scrolled.
+    pick_scroll: ListScroll,
+    /// Whether the last click revealed a row of the list of points, whose
+    /// double click's second press then lands on the plot the list stood over.
+    row_revealed: bool,
+    /// Closes the list of the points under a click as focus leaves the panel;
+    /// made the first time the panel is shown, where the window is in hand.
+    closes_on_blur: Option<Subscription>,
     /// Plots the points through the graph's filter, absent while nothing is
     /// being plotted, so that one plotting runs at a time.
     plotting: Option<Task<()>>,
@@ -90,6 +113,7 @@ impl ScatterPanel {
             }
         });
         let filter_changed = cx.subscribe(&model, |view, _, _: &FilterChanged, cx| {
+            view.close_pick(cx);
             view.replot(cx);
         });
         let parent = cx.entity().downgrade();
@@ -103,6 +127,9 @@ impl ScatterPanel {
             canvas: cx.new(|_| ScatterCanvas { parent }),
             bounds: None,
             press: None,
+            pick_scroll: ListScroll::new(),
+            row_revealed: false,
+            closes_on_blur: None,
             plotting: None,
             _changed: changed,
             _source_replaced: source_replaced,
@@ -122,6 +149,7 @@ impl ScatterPanel {
     /// Has the graph measured in the chosen scope and the one it is scaled to,
     /// and brings the plot up to date where it already is.
     fn measure(&mut self, cx: &mut Context<Self>) {
+        self.close_pick(cx);
         if let Some((scope, reference)) = self.scopes() {
             self.model
                 .update(cx, |model, cx| model.want_metrics(&[scope, reference], cx));
@@ -214,7 +242,7 @@ impl ScatterPanel {
                 view.plot = Some(Plot {
                     plotted: Arc::new(plotted),
                     legend,
-                    hover: None,
+                    pointer: Pointer::Away,
                     filter,
                     scope,
                 });
@@ -249,6 +277,7 @@ impl ScatterPanel {
             return;
         }
         self.zoom = zoom;
+        self.close_pick(cx);
         self.invalidate_canvas(cx);
         if self.press.is_none() {
             self.hover_at(at, cx);
@@ -269,8 +298,16 @@ impl ScatterPanel {
 
     /// Starts a press, or shows the whole of each axis again on a double
     /// click clear of every mark: a first click on a mark shows it in the
-    /// graph, which the second click then lands on.
+    /// graph, which the second click then lands on. A press beside an open
+    /// list of points closes it and goes on as a press on the plot. The second
+    /// press of a double click whose first put the list up or revealed one of
+    /// its rows goes no further.
     fn on_mouse_down(&mut self, e: &MouseDownEvent, cx: &mut Context<Self>) {
+        let row_revealed = std::mem::take(&mut self.row_revealed);
+        if e.click_count >= DOUBLE_CLICK && (row_revealed || self.picking()) {
+            return;
+        }
+        self.close_pick(cx);
         if e.click_count == DOUBLE_CLICK && self.pick(e.position).is_none() {
             self.press = None;
             self.zoom_to(Zoom::WHOLE, e.position, cx);
@@ -286,19 +323,24 @@ impl ScatterPanel {
     }
 
     /// Follows the pointer to the mark it picks, repainting only where that
-    /// changes which mark the tooltip names.
+    /// changes what the tooltip reads. An open list of points holds the
+    /// pointer, which names nothing else while it is up.
     fn hover_at(&mut self, at: Point<Pixels>, cx: &mut Context<Self>) {
         let picked = self.pick(at);
         let model = self.model.read(cx);
         let Some(plot) = &mut self.plot else {
             return;
         };
-        let named = plot.hover.as_ref().map(|hover| (hover.mark, hover.others));
+        let named = match &plot.pointer {
+            Pointer::Picking(_) => return,
+            Pointer::Away => None,
+            Pointer::Hover(hover) => Some((hover.mark, hover.others)),
+        };
         if named == picked.as_ref().map(|picked| (picked.mark, picked.others())) {
             return;
         }
         let (unit, sizing) = (plot.scope.unit(), plot.plotted.sizing);
-        plot.hover = picked.and_then(|picked| {
+        let hover = picked.and_then(|picked| {
             let point = &plot.plotted.marks[picked.mark].target;
             let lines = describe(point, unit, sizing, picked.others(), model.loaded()?);
             Some(Hover {
@@ -307,6 +349,7 @@ impl ScatterPanel {
                 lines,
             })
         });
+        plot.pointer = hover.map_or(Pointer::Away, Pointer::Hover);
         cx.notify();
     }
 
@@ -333,9 +376,10 @@ impl ScatterPanel {
         }
     }
 
-    /// Ends the press, which shows the graph's drawing of the target under the
-    /// pointer where it was a click. Taking the press makes a second call for
-    /// the same release a no-op.
+    /// Ends the press, which where it was a click shows the graph's drawing of
+    /// the point under the pointer, or lists the points there where it lands
+    /// on several. Taking the press makes a second call for the same release a
+    /// no-op.
     fn end_press(&mut self, at: Point<Pixels>, end: DragEnd, cx: &mut Context<Self>) {
         let Some(press) = self.press.take() else {
             return;
@@ -345,19 +389,149 @@ impl ScatterPanel {
         if press.dragged || !matches!(end, DragEnd::Released) {
             return;
         }
-        let Some((plot, picked)) = self.plot.as_ref().zip(self.pick(at)) else {
+        let (Some(picked), Some(area)) = (self.pick(at), self.area()) else {
             return;
         };
-        let id = plot.plotted.marks[picked.mark].target.id;
+        match picked.covered() {
+            &[mark] => self.reveal(mark, cx),
+            _ => self.open_pick(area.spot(at), picked, cx),
+        }
+    }
+
+    /// Shows the graph's drawing of the point the plotted mark `mark` stands
+    /// for.
+    fn reveal(&mut self, mark: usize, cx: &mut Context<Self>) {
+        let Some(plot) = &self.plot else {
+            return;
+        };
+        let id = plot.plotted.marks[mark].target.id;
         self.model.update(cx, |model, cx| model.reveal(id, cx));
     }
 
     /// Drops the tooltip, which names the mark under a pointer that has left.
     fn clear_hover(&mut self, cx: &mut Context<Self>) {
         if let Some(plot) = &mut self.plot
-            && plot.hover.take().is_some()
+            && let Pointer::Hover(_) = plot.pointer
         {
+            plot.pointer = Pointer::Away;
             cx.notify();
+        }
+    }
+
+    /// Whether a list of the points under a click is up.
+    fn picking(&self) -> bool {
+        self.plot
+            .as_ref()
+            .is_some_and(|plot| matches!(plot.pointer, Pointer::Picking(_)))
+    }
+
+    /// Puts up the list of every point `picked` covers under a click at `spot`.
+    fn open_pick(&mut self, spot: Spot, picked: Picked, cx: &mut Context<Self>) {
+        let model = self.model.read(cx);
+        let (Some(plot), Some(loaded)) = (&mut self.plot, model.loaded()) else {
+            return;
+        };
+        let (unit, sizing, covered) = (plot.scope.unit(), plot.plotted.sizing, picked.covered());
+        let mut named = Vec::with_capacity(covered.len());
+        let mut readings = Vec::with_capacity(covered.len());
+        for &mark in covered {
+            let (mnemonic, label, read) =
+                pick_reading(&plot.plotted.marks[mark].target, unit, loaded);
+            named.push((mark, mnemonic, label));
+            readings.push(read);
+        }
+        let keys: Vec<(Option<&str>, &str)> = named
+            .iter()
+            .map(|(_, mnemonic, label)| (*mnemonic, label.as_str()))
+            .collect();
+        let hints = pick::hints(&keys, readings);
+        let mut rows: Vec<PickRow> = named
+            .iter()
+            .zip(hints)
+            .map(|((mark, mnemonic, label), hint)| {
+                let point = &plot.plotted.marks[*mark].target;
+                let (package, name) = pick::split_label(label);
+                PickRow {
+                    mark: *mark,
+                    mnemonic: mnemonic.map(|mnemonic| mnemonic.to_owned().into()),
+                    package: package.to_owned().into(),
+                    name: name.to_owned().into(),
+                    hint: hint.map(SharedString::from),
+                    counts: format!("{} · {}", point.closure, point.blast_radius).into(),
+                    closure: point.closure,
+                    blast_radius: point.blast_radius,
+                    tooltip: describe(point, unit, sizing, 0, loaded),
+                }
+            })
+            .collect();
+        pick::order(&mut rows);
+        plot.pointer = Pointer::Picking(PickList {
+            spot,
+            rows: rows.into(),
+            aim: None,
+            extents: None,
+        });
+        self.pick_scroll.to_top();
+        cx.notify();
+    }
+
+    /// Takes down the list of the points under a click, where one is up.
+    fn close_pick(&mut self, cx: &mut Context<Self>) {
+        if let Some(plot) = &mut self.plot
+            && let Pointer::Picking(_) = plot.pointer
+        {
+            plot.pointer = Pointer::Away;
+            cx.notify();
+        }
+    }
+
+    /// Aims at the list's row `row`, which rings its mark and describes its
+    /// point beside the list.
+    fn aim_at(&mut self, row: usize, cx: &mut Context<Self>) {
+        let Some(Pointer::Picking(pick)) = self.plot.as_mut().map(|plot| &mut plot.pointer) else {
+            return;
+        };
+        if pick.aim == Some(row) || row >= pick.rows.len() {
+            return;
+        }
+        pick.aim = Some(row);
+        cx.notify();
+    }
+
+    /// Moves the aim `by` rows through the list, and brings the row it lands
+    /// on into view.
+    fn step_aim(&mut self, by: isize, cx: &mut Context<Self>) {
+        let Some(Pointer::Picking(pick)) = self.plot.as_ref().map(|plot| &plot.pointer) else {
+            return;
+        };
+        if let Some(row) = pick::stepped(pick.aim, by, pick.rows.len()) {
+            self.aim_at(row, cx);
+            let scroll = self.pick_scroll.uniform_handle();
+            scroll.scroll_to_item(row, ScrollStrategy::Nearest);
+        }
+    }
+
+    /// Shows the graph's drawing of the point on the list's row `row`, and
+    /// takes the list down.
+    fn reveal_row(&mut self, row: usize, cx: &mut Context<Self>) {
+        let Some(Pointer::Picking(pick)) = self.plot.as_ref().map(|plot| &plot.pointer) else {
+            return;
+        };
+        let Some(mark) = pick.rows.get(row).map(|listed| listed.mark) else {
+            return;
+        };
+        self.close_pick(cx);
+        self.reveal(mark, cx);
+        self.row_revealed = true;
+    }
+
+    /// Shows the graph's drawing of the point on the row aimed at.
+    fn reveal_aimed(&mut self, cx: &mut Context<Self>) {
+        let Some(Pointer::Picking(pick)) = self.plot.as_ref().map(|plot| &plot.pointer) else {
+            return;
+        };
+        if let Some(row) = pick.aim {
+            self.reveal_row(row, cx);
         }
     }
 }
@@ -464,12 +638,12 @@ fn input_name(input: Input) -> &'static str {
 /// The `click_count` of the press completing a double click.
 const DOUBLE_CLICK: usize = 2;
 
-/// The measured points as drawn, and the mark among them under the pointer.
+/// The measured points as drawn, and what among them the pointer is on.
 struct Plot {
     plotted: Arc<Plotted>,
     /// Each hue the plotted points are drawn in, and what it stands for.
     legend: Vec<(SharedString, Hue)>,
-    hover: Option<Hover>,
+    pointer: Pointer,
     /// What `plotted` was drawn through.
     filter: Filter,
     /// What `plotted` measures.
@@ -483,6 +657,15 @@ struct Press {
     /// Where the pointer was at the last step of the pan.
     last: Point<Pixels>,
     dragged: bool,
+}
+
+/// What among a plot's marks the pointer is on.
+enum Pointer {
+    Away,
+    Hover(Hover),
+    /// A click landing on several marks put up the list of their points,
+    /// which holds the pointer until it closes.
+    Picking(PickList),
 }
 
 /// A mark under the pointer, by its index among the plotted marks, and what its
@@ -534,32 +717,24 @@ fn describe(
     loaded: &Loaded,
 ) -> Vec<String> {
     let shared = &loaded.shared;
-    let (names, facets) = (&shared.names, &shared.facets);
-    let label = match carried_label(names, facets, point.id) {
-        Some(label) => shared.labels.written(label).into_owned(),
-        None => names.resolve(point.id).to_owned(),
-    };
+    let facets = &shared.facets;
+    let label = point_label(point.id, loaded);
     let mut lines = Vec::with_capacity(TOOLTIP_LINES);
     match unit {
         Unit::Action => {
-            let mnemonic = facets.mnemonic(point.id);
-            let mnemonic = mnemonic.map_or("action", |m| facets.strings().resolve(m));
-            lines.extend([mnemonic.to_owned(), format!("of {label}")]);
-            lines.extend(configuration(point.id, loaded));
+            lines.extend([mnemonic(point.id, loaded).to_owned(), format!("of {label}")]);
+            lines.extend(configuration(point.id, loaded).map(|name| format!("in {name}")));
             let aspects = facets.aspects().values(point.id);
             if !aspects.is_empty() {
                 let aspects = aspects.iter().map(|&a| facets.strings().resolve(a));
                 lines.push(format!("via {}", aspects.collect::<Vec<_>>().join(", ")));
             }
-            // The base graph holds each node at the position of its id.
-            let output = facets
-                .primary_output(point.id)
-                .and_then(|output| shared.base.nodes.get(output.0 as usize));
-            lines.extend(output.map(|node| format!("writes {}", node.label)));
+            let output = primary_output(point.id, loaded);
+            lines.extend(output.map(|output| format!("writes {output}")));
         }
         Unit::ConfiguredTarget => {
             lines.push(label);
-            lines.extend(configuration(point.id, loaded));
+            lines.extend(configuration(point.id, loaded).map(|name| format!("in {name}")));
         }
         Unit::Target => {
             let repo = match facets.repo(point.id) {
@@ -588,13 +763,69 @@ fn describe(
         lines.push(format!("{} {actions}", point.actions));
     }
     if others > 0 {
-        lines.push(format!("+{others} more here"));
+        lines.push(format!("+{others} more here · click to list"));
     }
     lines
 }
 
-/// The line naming the configuration the node `id` is built in, by its
-/// mnemonic where it has one, and marked where it builds a tool the build runs.
+/// What a row of the list of points under a click reads for `point`, a point
+/// of `unit` — for an action its mnemonic, and the label of its target — and
+/// each reading that could tell it apart from points whose rows read alike,
+/// most compact first: for an action, the name of the file it writes, its
+/// configuration, that file's path in its configuration's output tree, and the
+/// whole path; for a configured target, its configuration.
+fn pick_reading<'a>(
+    point: &Metrics,
+    unit: Unit,
+    loaded: &'a Loaded,
+) -> (Option<&'a str>, String, Vec<Option<String>>) {
+    let label = point_label(point.id, loaded);
+    let configuration = configuration(point.id, loaded);
+    match unit {
+        Unit::Action => {
+            let output = primary_output(point.id, loaded);
+            let file = output.map(|output| output.rsplit('/').next().unwrap_or(output));
+            let readings = vec![
+                file.map(str::to_owned),
+                configuration,
+                output.map(|output| pick::in_output_tree(output).to_owned()),
+                output.map(str::to_owned),
+            ];
+            (Some(mnemonic(point.id, loaded)), label, readings)
+        }
+        Unit::ConfiguredTarget => (None, label, vec![configuration]),
+        Unit::Target => (None, label, Vec::new()),
+    }
+}
+
+/// The label of the target the node `id` is or belongs to, where one is
+/// carried, and its name otherwise.
+fn point_label(id: Id, loaded: &Loaded) -> String {
+    let shared = &loaded.shared;
+    match carried_label(&shared.names, &shared.facets, id) {
+        Some(label) => shared.labels.written(label).into_owned(),
+        None => shared.names.resolve(id).to_owned(),
+    }
+}
+
+/// The mnemonic of the action `id`.
+fn mnemonic(id: Id, loaded: &Loaded) -> &str {
+    let facets = &loaded.shared.facets;
+    let mnemonic = facets.mnemonic(id);
+    mnemonic.map_or("action", |m| facets.strings().resolve(m))
+}
+
+/// The path of the file the action `id` writes first.
+fn primary_output(id: Id, loaded: &Loaded) -> Option<&str> {
+    let shared = &loaded.shared;
+    // The base graph holds each node at the position of its id.
+    let output = shared.facets.primary_output(id)?;
+    let node = shared.base.nodes.get(output.0 as usize)?;
+    Some(&node.label)
+}
+
+/// The configuration the node `id` is built in, by its mnemonic where it has
+/// one, and marked where it builds a tool the build runs.
 fn configuration(id: Id, loaded: &Loaded) -> Option<String> {
     let facets = &loaded.shared.facets;
     let config = facets.config(id)?;
@@ -604,8 +835,8 @@ fn configuration(id: Id, loaded: &Loaded) -> Option<String> {
         .unwrap_or(config.sym());
     let name = facets.strings().resolve(name);
     Some(match entry.map(|entry| entry.is_tool) {
-        Some(Tri::Yes) => format!("in {name} (exec)"),
-        _ => format!("in {name}"),
+        Some(Tri::Yes) => format!("{name} (exec)"),
+        _ => name.to_owned(),
     })
 }
 
@@ -649,10 +880,18 @@ impl Panel for ScatterPanel {
         self.shown = active;
         match active {
             true => {
+                if self.closes_on_blur.is_none() {
+                    let blurred =
+                        cx.on_focus_out(&self.focus, window, |view, _, _, cx| view.close_pick(cx));
+                    self.closes_on_blur = Some(blurred);
+                }
                 self.focus.focus(window, cx);
                 self.measure(cx);
             }
-            false => self.clear_hover(cx),
+            false => {
+                self.clear_hover(cx);
+                self.close_pick(cx);
+            }
         }
     }
 }
@@ -660,11 +899,19 @@ impl Panel for ScatterPanel {
 impl Render for ScatterPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let palette = Palette::from_theme(&bviz_ui_theme::theme(window, cx));
+        let key_context = match self.picking() {
+            true => format!("{} {PICKING}", Self::kind().key_context),
+            false => Self::kind().key_context.to_owned(),
+        };
         let root = div()
-            .key_context(Self::kind().key_context)
+            .key_context(key_context.as_str())
             .on_action(cx.listener(|view, _: &ShowWholePlot, window, cx| {
                 view.zoom_to(Zoom::WHOLE, window.mouse_position(), cx);
             }))
+            .on_action(cx.listener(|view, _: &AimUp, _, cx| view.step_aim(-1, cx)))
+            .on_action(cx.listener(|view, _: &AimDown, _, cx| view.step_aim(1, cx)))
+            .on_action(cx.listener(|view, _: &RevealAimed, _, cx| view.reveal_aimed(cx)))
+            .on_action(cx.listener(|view, _: &ClosePickList, _, cx| view.close_pick(cx)))
             .track_focus(&self.focus)
             .flex_1()
             .flex()
@@ -687,54 +934,93 @@ impl Render for ScatterPanel {
         let dropped =
             dropped.and_then(|(choice, capabilities)| dropped_edges(choice, capabilities));
         let root = root.children(dropped.map(|dropped| notice(dropped, &palette)));
-        match &self.plot {
-            None => root.child(centered_spinner(MEASURING, &palette.colors)),
-            Some(plot) => root.child(legend(plot, self.zoom, &palette)).child(
-                div()
-                    .id("scatter-plot")
-                    .relative()
-                    .flex_1()
-                    .min_h(px(0.))
-                    .child(cached_layer(self.canvas.clone()))
-                    .when(plot.hover.is_some() && model.reveals(), |plot| {
-                        plot.cursor_pointer()
-                    })
-                    .child(hover_layer(cx.entity(), palette))
-                    .on_mouse_move(cx.listener(|view, e: &MouseMoveEvent, _, cx| {
-                        if view.press.is_none() {
-                            view.hover_at(e.position, cx);
-                        }
-                    }))
-                    .on_scroll_wheel(cx.listener(|view, e: &ScrollWheelEvent, _, cx| {
-                        view.on_scroll_wheel(e, cx);
-                    }))
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|view, e: &MouseDownEvent, _, cx| view.on_mouse_down(e, cx)),
-                    )
-                    // The window-global handlers are installed only by a frame
-                    // painted with the press in progress, which a quick click
-                    // finishes before.
-                    .on_mouse_up(
-                        MouseButton::Left,
-                        cx.listener(|view, e: &MouseUpEvent, _, cx| {
-                            view.end_press(e.position, DragEnd::Released, cx);
-                        }),
-                    )
-                    .on_hover(cx.listener(|view, hovered: &bool, _, cx| {
-                        if !hovered {
-                            view.clear_hover(cx);
-                        }
-                    })),
+        let reveals = model.reveals();
+        let row = menu_chrome::row_height(window);
+        let extents = match self
+            .plot
+            .as_mut()
+            .map(|plot| (plot.scope.unit(), &mut plot.pointer))
+        {
+            Some((unit, Pointer::Picking(pick))) => Some(
+                *pick
+                    .extents
+                    .get_or_insert_with(|| pick_extents(&pick.rows, unit, window)),
             ),
-        }
+            _ => None,
+        };
+        let Some(plot) = &self.plot else {
+            return root.child(centered_spinner(MEASURING, &palette.colors));
+        };
+        let list = match (&plot.pointer, extents) {
+            (Pointer::Picking(pick), Some(extents)) => {
+                let style = PickRowStyle {
+                    row,
+                    line: window.line_height(),
+                    reveals,
+                };
+                let list = pick_list(plot, pick, &self.pick_scroll, style, palette, cx);
+                let at = PickAt {
+                    plotted: Arc::clone(&plot.plotted),
+                    zoom: self.zoom,
+                    spot: pick.spot,
+                };
+                Some(pick_layer(
+                    list,
+                    pick,
+                    at,
+                    extents,
+                    row,
+                    &self.pick_scroll,
+                    palette,
+                ))
+            }
+            _ => None,
+        };
+        let hovering = matches!(plot.pointer, Pointer::Hover(_));
+        root.child(legend(plot, self.zoom, &palette)).child(
+            div()
+                .id("scatter-plot")
+                .relative()
+                .flex_1()
+                .min_h(px(0.))
+                .child(cached_layer(self.canvas.clone()))
+                .when(hovering && reveals, |plot| plot.cursor_pointer())
+                .child(hover_layer(cx.entity(), palette))
+                .children(list)
+                .on_mouse_move(cx.listener(|view, e: &MouseMoveEvent, _, cx| {
+                    if view.press.is_none() {
+                        view.hover_at(e.position, cx);
+                    }
+                }))
+                .on_scroll_wheel(cx.listener(|view, e: &ScrollWheelEvent, _, cx| {
+                    view.on_scroll_wheel(e, cx);
+                }))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|view, e: &MouseDownEvent, _, cx| view.on_mouse_down(e, cx)),
+                )
+                // The window-global handlers are installed only by a frame
+                // painted with the press in progress, which a quick click
+                // finishes before.
+                .on_mouse_up(
+                    MouseButton::Left,
+                    cx.listener(|view, e: &MouseUpEvent, _, cx| {
+                        view.end_press(e.position, DragEnd::Released, cx);
+                    }),
+                )
+                .on_hover(cx.listener(|view, hovered: &bool, _, cx| {
+                    if !hovered {
+                        view.clear_hover(cx);
+                    }
+                })),
+        )
     }
 }
 
-/// The layer over the marks that rings the hovered one and names it, painted
-/// apart from them so that a hover repaints none of the marks. Its layout
-/// records where the plot lies for the pointer handlers, and its paint carries
-/// a press past the plot's edge.
+/// The layer over the marks that rings the one hovered or aimed at on a list
+/// of points, and describes the one hovered, painted apart from the marks so
+/// that neither repaints any of them. Its layout records where the plot lies
+/// for the pointer handlers; its paint carries a press past the plot's edge.
 fn hover_layer(view: Entity<ScatterPanel>, palette: Palette) -> impl IntoElement {
     let prepaint = {
         let view = view.clone();
@@ -745,9 +1031,13 @@ fn hover_layer(view: Entity<ScatterPanel>, palette: Palette) -> impl IntoElement
     let paint = move |bounds: Bounds<Pixels>, (), window: &mut Window, cx: &mut App| {
         let panel = view.read(cx);
         let (zoom, pressed) = (panel.zoom, panel.press.is_some());
-        let hovered = panel.plot.as_ref().and_then(|plot| {
-            let hover = plot.hover.as_ref()?;
-            Some((Arc::clone(&plot.plotted), hover.mark, hover.lines.clone()))
+        let described = panel.plot.as_ref().and_then(|plot| {
+            let (mark, lines) = match &plot.pointer {
+                Pointer::Away => return None,
+                Pointer::Hover(hover) => (hover.mark, Some(hover.lines.clone())),
+                Pointer::Picking(pick) => (pick.rows[pick.aim?].mark, None),
+            };
+            Some((Arc::clone(&plot.plotted), mark, lines))
         });
         if pressed {
             track_drag(
@@ -757,16 +1047,306 @@ fn hover_layer(view: Entity<ScatterPanel>, palette: Palette) -> impl IntoElement
                 |view, at, end, _, cx| view.end_press(at, end, cx),
             );
         }
-        let Some((plotted, mark, lines)) = hovered else {
+        let Some((plotted, mark, lines)) = described else {
             return;
         };
         let Some(area) = paint::data_area(&plotted, zoom, bounds) else {
             return;
         };
-        let mark = &plotted.marks[mark];
-        paint::paint_hover(mark, &lines, &area, &palette, bounds, window, cx);
+        let center = paint::paint_ring(&plotted.marks[mark], &area, &palette, window);
+        if let Some(lines) = lines {
+            let tooltip = TooltipColors::from_colors(&palette.colors);
+            paint_tooltip_box(&lines, center, bounds, tooltip, window, cx);
+        }
     };
     canvas(prepaint, paint).absolute().inset_0().size_full()
+}
+
+/// Where a list of points opens: beside where `spot` is drawn on `plotted` at
+/// `zoom`.
+struct PickAt {
+    plotted: Arc<Plotted>,
+    zoom: Zoom,
+    spot: Spot,
+}
+
+impl PickAt {
+    /// Where the spot is drawn in a plot filling `bounds`, or the plot's corner
+    /// where it is too small to draw the axes.
+    fn within(&self, bounds: Bounds<Pixels>) -> Point<Pixels> {
+        paint::data_area(&self.plotted, self.zoom, bounds)
+            .map_or(bounds.origin, |area| area.at_spot(self.spot))
+    }
+}
+
+/// `list`, the list of the points of `pick`, standing where `at` places it in
+/// whatever bounds the plot is drawn, with the tooltip of the row aimed at
+/// beside it.
+fn pick_layer(
+    list: impl IntoElement,
+    pick: &PickList,
+    at: PickAt,
+    extents: Extents,
+    row: Pixels,
+    scroll: &ListScroll,
+    palette: Palette,
+) -> Placed {
+    let rows = pick.rows.len();
+    let at = Rc::new(at);
+    let frame = {
+        let at = Rc::clone(&at);
+        move |bounds| pick::frame(at.within(bounds), rows, row, extents, bounds)
+    };
+    let placed = Placed::new(list, frame);
+    let Some(aimed) = pick.aim else {
+        return placed;
+    };
+    let lines = pick.rows[aimed].tooltip.clone();
+    let scroll = scroll.handle().clone();
+    placed.over(move |list, bounds, window, cx| {
+        let level = pick::row_top(scroll.bounds(), scroll.offset().y, row, aimed);
+        let at = at.within(bounds);
+        let place = |extent| pick::flank(at, list, extent, level, bounds);
+        let tooltip = TooltipColors::from_colors(&palette.colors);
+        paint_tooltip(&lines, place, tooltip, window, cx);
+    })
+}
+
+/// Room between the parts a row of the list of points under a click reads.
+const PICK_GAP: Pixels = px(8.);
+
+/// The least room the package of a row of the list of points is shown in, cut
+/// short from its start; with less, the row leaves the package out.
+const PACKAGE_MIN_WIDTH: Rems = rems(2.5);
+
+/// What the header of the list of points under a click reads over the counts.
+const PICK_COUNTS: &str = "closure · blast radius";
+
+/// What the header of a list of `rows` points of `unit` reads over the points.
+fn pick_heading(rows: usize, unit: Unit) -> String {
+    format!("{rows} {} here", unit_names(unit).many)
+}
+
+/// How large the list of points listing `rows` of `unit` and the tooltips of
+/// its rows stand, under the window's inherited text style.
+fn pick_extents(rows: &[PickRow], unit: Unit, window: &mut Window) -> Extents {
+    let tooltip = rows.iter().fold(Size::default(), |largest, row| {
+        largest.max(&tooltip_extent(&row.tooltip, window))
+    });
+    Extents {
+        list_width: pick_width(rows, unit, window),
+        tooltip,
+    }
+}
+
+/// How wide the list of points listing `rows` of `unit` stands to read each
+/// row and its header whole, under the window's inherited text style.
+fn pick_width(rows: &[PickRow], unit: Unit, window: &mut Window) -> Pixels {
+    let mut measure =
+        |text: &SharedString| menu_chrome::widest(window, std::iter::once(text.clone()));
+    let heading =
+        measure(&pick_heading(rows.len(), unit).into()) + PICK_GAP + measure(&PICK_COUNTS.into());
+    let widest = rows.iter().fold(heading, |widest, row| {
+        let label = measure(&row.package) + measure(&row.name);
+        let parts = [row.mnemonic.as_ref(), row.hint.as_ref(), Some(&row.counts)];
+        let rest = parts
+            .into_iter()
+            .flatten()
+            .map(|part| PICK_GAP + measure(part));
+        let width =
+            px(SWATCH_DIAMETER) + PICK_GAP + label + rest.fold(px(0.), |sum, part| sum + part);
+        widest.max(width)
+    });
+    widest + ROW_INSET * 2. + px(SCROLLBAR_THICKNESS) + SHEET_BORDER * 2.
+}
+
+/// How tall each row of a list of points and a line of its text stand, and
+/// whether a click on a row can reveal it.
+#[derive(Clone, Copy)]
+struct PickRowStyle {
+    row: Pixels,
+    line: Pixels,
+    reveals: bool,
+}
+
+/// The list of the points under a click, `pick`, filling the rect it is given,
+/// its rows drawing only those in view.
+fn pick_list(
+    plot: &Plot,
+    pick: &PickList,
+    scroll: &ListScroll,
+    style: PickRowStyle,
+    palette: Palette,
+    cx: &mut Context<ScatterPanel>,
+) -> impl IntoElement + use<> {
+    let colors = &palette.colors;
+    let unit = plot.scope.unit();
+    let rows = Rc::clone(&pick.rows);
+    let plotted = Arc::clone(&plot.plotted);
+    let aimed = pick.aim;
+    let view = cx.entity();
+    let listed = uniform_list("scatter-pick-rows", rows.len(), move |range, _, _| {
+        range
+            .map(|index| {
+                let aimed = aimed == Some(index);
+                pick_row(index, &rows[index], &plotted, aimed, style, &view, &palette)
+            })
+            .collect::<Vec<_>>()
+    })
+    .flex_1()
+    .w_full()
+    .pr(px(SCROLLBAR_THICKNESS))
+    .track_scroll(scroll.uniform_handle());
+    let header = menu_chrome::header(colors)
+        .flex_none()
+        .h(style.row)
+        .justify_between()
+        .gap(PICK_GAP)
+        .text_color(colors.text_muted)
+        .child(pick_heading(pick.rows.len(), unit))
+        .child(div().mr(px(SCROLLBAR_THICKNESS)).child(PICK_COUNTS));
+    let sheet = div()
+        .size_full()
+        .occlude()
+        .flex()
+        .flex_col()
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(|view, e: &MouseDownEvent, _, cx| {
+                view.pick_scroll.press(e.position);
+                cx.stop_propagation();
+                cx.notify();
+            }),
+        )
+        .child(header)
+        .child(
+            div()
+                .relative()
+                .flex()
+                .flex_col()
+                .flex_1()
+                .min_h_0()
+                .child(listed)
+                .child(list_scrollbar(
+                    cx.entity(),
+                    |view: &ScatterPanel| &view.pick_scroll,
+                    |view: &mut ScatterPanel| &mut view.pick_scroll,
+                    palette.scroll,
+                )),
+        );
+    menu_chrome::surface(sheet, colors)
+}
+
+/// A line of `text` in a row of the list of points, cut short where the row
+/// runs out of room for it.
+fn pick_part(text: SharedString) -> Div {
+    div()
+        .min_w_0()
+        .overflow_hidden()
+        .whitespace_nowrap()
+        .child(text)
+}
+
+/// The label of the row `listed`, its package and name abutting on a `line`
+/// tall, the package read in `muted`.
+///
+/// Laid out right to left and wrapping, the package goes onto a second, clipped
+/// line when less than its least room is left beside the name, and otherwise
+/// grows into what the name leaves. Its flex basis is that least room, all the
+/// label would ask of the row, so the label stands over an unseen copy of
+/// itself asking for its whole width.
+fn pick_label(listed: &PickRow, muted: Hsla, line: Pixels) -> Div {
+    let package = pick_part(listed.package.clone())
+        .flex_basis(PACKAGE_MIN_WIDTH)
+        .flex_grow_1()
+        .text_ellipsis_start()
+        // An elided line falls short of its box by up to a glyph; aligned
+        // right, that slack stands before the ellipsis, not before the name.
+        .text_right()
+        .text_color(muted);
+    let name = pick_part(listed.name.clone()).text_ellipsis();
+    let whole = div()
+        .flex()
+        .min_w_0()
+        .h(px(0.))
+        .overflow_hidden()
+        .whitespace_nowrap()
+        .child(div().min_w(PACKAGE_MIN_WIDTH).child(listed.package.clone()))
+        .child(listed.name.clone());
+    let label = div()
+        .absolute()
+        .inset_0()
+        .flex()
+        .flex_row_reverse()
+        .flex_wrap()
+        .justify_start()
+        .content_start()
+        .overflow_hidden()
+        .child(name)
+        .child(package);
+    div()
+        .relative()
+        .flex()
+        .min_w_0()
+        .mr_auto()
+        .h(line)
+        .child(whole)
+        .child(label)
+}
+
+/// The row `index` of a list of points, reading `listed`: the colour its mark
+/// is drawn in, what its point is, what tells it apart from the rows reading
+/// alike, and its counts.
+fn pick_row(
+    index: usize,
+    listed: &PickRow,
+    plotted: &Plotted,
+    aimed: bool,
+    style: PickRowStyle,
+    view: &Entity<ScatterPanel>,
+    palette: &Palette,
+) -> Stateful<Div> {
+    let colors = &palette.colors;
+    let mark = &plotted.marks[listed.mark];
+    let fade = if mark.faded { UNMARKED_FADE } else { 1.0 };
+    let swatch = Rgba {
+        a: SWATCH_ALPHA * fade,
+        ..mark.hue.color(palette)
+    };
+    let (aim, reveal) = (view.clone(), view.clone());
+    menu_chrome::aimed_row(("scatter-pick", index).into(), colors, aimed)
+        .w_full()
+        .h(style.row)
+        .gap(PICK_GAP)
+        .when(!style.reveals, |row| row.cursor_default())
+        .on_mouse_move(move |_, _, cx| aim.update(cx, |view, cx| view.aim_at(index, cx)))
+        .on_click(move |_, _, cx| reveal.update(cx, |view, cx| view.reveal_row(index, cx)))
+        .child(
+            div()
+                .flex_none()
+                .size(px(SWATCH_DIAMETER))
+                .rounded_full()
+                .bg(swatch),
+        )
+        .children(
+            listed
+                .mnemonic
+                .clone()
+                .map(|mnemonic| div().flex_none().whitespace_nowrap().child(mnemonic)),
+        )
+        .child(pick_label(listed, colors.text_muted, style.line))
+        .children(listed.hint.clone().map(|hint| {
+            pick_part(hint)
+                .text_ellipsis_start()
+                .text_color(colors.text_muted)
+        }))
+        .child(
+            div()
+                .flex_none()
+                .whitespace_nowrap()
+                .text_color(colors.text_muted)
+                .child(listed.counts.clone()),
+        )
 }
 
 /// How a reader names one target of a kind, and several.
