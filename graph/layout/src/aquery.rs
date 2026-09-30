@@ -180,10 +180,12 @@ fn build_action_boxes(
         ));
         boxes.describe_action(action_id, ct_id, action);
         for &out in &action.output_ids {
-            let out = ArtifactId(out);
-            let art_id = boxes.output_artifact(out, ct_id, config_id);
-            producer_node_id.insert(out, art_id);
+            let art_id = boxes.output_artifact(ArtifactId(out), ct_id, config_id);
+            producer_node_id.insert(ArtifactId(out), art_id);
             boxes.graph.add_edge(action_id, art_id, EdgeKind::Aquery);
+            if out == action.primary_output_id {
+                boxes.facets.facets().set_primary_output(action_id, art_id);
+            }
         }
     }
     producer_node_id
@@ -1433,6 +1435,32 @@ mod tests {
             parent_of(&graph, &names, "artifact1"),
             Some("ct://pkg:gen#ck1")
         );
+    }
+
+    #[test]
+    fn an_action_names_its_primary_output_among_those_it_writes() {
+        let (first, mut frags) = generated_artifact(1, 100, "pkg/gen.h");
+        let (second, more) = generated_artifact(2, 200, "pkg/gen.c");
+        frags.extend(more);
+        let container = ActionGraphContainer {
+            artifacts: vec![first, second],
+            path_fragments: frags,
+            targets: vec![target(9, "//pkg:gen")],
+            actions: vec![Action {
+                target_id: 9,
+                mnemonic: "Genrule".to_string(),
+                configuration_id: 1,
+                output_ids: vec![1, 2],
+                primary_output_id: 2,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        let (_, names, facets) = build(&[container], false);
+
+        let primary = facets.primary_output(names.get("action0").unwrap());
+        assert_eq!(primary.map(|id| names.resolve(id)), Some("artifact2"));
     }
 
     /// The graph of a genrule `@@somerepo+//pkg:gen` whose one output, labelled

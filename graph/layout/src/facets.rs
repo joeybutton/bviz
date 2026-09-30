@@ -438,6 +438,7 @@ pub struct Facets {
     testonly: Vec<Tri>,
     package: Vec<Option<NodeRef>>,
     label: Vec<Option<NodeRef>>,
+    primary_output: Vec<Option<NodeRef>>,
     tags: SparseFacet,
     aspects: SparseFacet,
     repos: Vec<RepoEntry>,
@@ -512,6 +513,15 @@ impl Facets {
 
     pub fn set_label(&mut self, id: Id, label: Id) {
         put(&mut self.label, id, Some(NodeRef::of(label)));
+    }
+
+    /// The file an action writes that Bazel names its primary output.
+    pub fn primary_output(&self, id: Id) -> Option<Id> {
+        at(&self.primary_output, id).map(NodeRef::id)
+    }
+
+    pub fn set_primary_output(&mut self, id: Id, output: Id) {
+        put(&mut self.primary_output, id, Some(NodeRef::of(output)));
     }
 
     /// Copies into `child` the facets of the `owner` it is part of: what the
@@ -765,6 +775,7 @@ impl Facets {
         self.testonly = permuted(&self.testonly, remap);
         self.package = permuted_nodes(&self.package, remap);
         self.label = permuted_nodes(&self.label, remap);
+        self.primary_output = permuted_nodes(&self.primary_output, remap);
         self.tags.renumber(remap);
         self.aspects.renumber(remap);
     }
