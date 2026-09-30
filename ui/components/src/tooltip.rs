@@ -1,8 +1,8 @@
 use bviz_ui_theme::ThemeColors;
 use gpui::{
     AnyView, App, AppContext, BorderStyle, Bounds, Context, Hsla, IntoElement, ParentElement,
-    Pixels, Point, Render, Rgba, SharedString, Styled, TextAlign, Window, div, point, px, quad,
-    size,
+    Pixels, Point, Render, Rgba, SharedString, Size, Styled, TextAlign, Window, div, point, px,
+    quad, size,
 };
 
 const TOOLTIP_TEXT_SIZE: f32 = 12.0;
@@ -36,10 +36,8 @@ impl TooltipColors {
     }
 }
 
-/// Where a tooltip `extent` long starts along one axis spanning `start..end`
-/// for an anchor at `at`: past the anchor by [`TOOLTIP_OFFSET`], or as far
-/// before it where that runs past `end`, so the tooltip covers nothing at the
-/// anchor; slid inside the span only where neither side holds it.
+/// Where a box `extent` long starts along one axis spanning `start..end` for an
+/// anchor at `at`, as [`beside_anchor`] places it.
 fn beside(at: f32, extent: f32, start: f32, end: f32) -> f32 {
     let after = at + TOOLTIP_OFFSET;
     let before = at - TOOLTIP_OFFSET - extent;
@@ -52,12 +50,52 @@ fn beside(at: f32, extent: f32, start: f32, end: f32) -> f32 {
     }
 }
 
-/// Measures `lines`, sizes a padded box, places it beside `at` inside `bounds`,
-/// and paints the panel background, border, and each line.
+/// Where a box of `extent` beside an anchor at `at` goes inside `bounds`: on
+/// each axis past the anchor by [`TOOLTIP_OFFSET`], or as far before it where
+/// that runs past the far edge, so the box covers nothing at the anchor; slid
+/// inside only where neither side holds it.
+pub fn beside_anchor(
+    at: Point<Pixels>,
+    extent: Size<Pixels>,
+    bounds: Bounds<Pixels>,
+) -> Point<Pixels> {
+    let along = |at: Pixels, extent: Pixels, start: Pixels, end: Pixels| {
+        px(beside(
+            f32::from(at),
+            f32::from(extent),
+            f32::from(start),
+            f32::from(end),
+        ))
+    };
+    point(
+        along(at.x, extent.width, bounds.left(), bounds.right()),
+        along(at.y, extent.height, bounds.top(), bounds.bottom()),
+    )
+}
+
+/// Paints `lines` in a tooltip panel beside `at` inside `bounds`.
 pub fn paint_tooltip_box(
     lines: &[String],
     at: Point<Pixels>,
     bounds: Bounds<Pixels>,
+    colors: TooltipColors,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    paint_tooltip(
+        lines,
+        |extent| beside_anchor(at, extent, bounds),
+        colors,
+        window,
+        cx,
+    );
+}
+
+/// Measures `lines`, sizes a padded panel around them, and paints it with its
+/// top-left corner where `place` puts a panel of that extent.
+pub fn paint_tooltip(
+    lines: &[String],
+    place: impl FnOnce(Size<Pixels>) -> Point<Pixels>,
     colors: TooltipColors,
     window: &mut Window,
     cx: &mut App,
@@ -75,18 +113,14 @@ pub fn paint_tooltip_box(
         .map(|l| f32::from(l.width()))
         .fold(0.0_f32, f32::max);
     let line_h = TOOLTIP_TEXT_SIZE + TOOLTIP_LINE_GAP;
-    let box_w = text_w + 2.0 * TOOLTIP_PAD;
-    let box_h = shaped.len() as f32 * line_h + 2.0 * TOOLTIP_PAD;
-
-    let left = f32::from(bounds.origin.x);
-    let top = f32::from(bounds.origin.y);
-    let right = left + f32::from(bounds.size.width);
-    let bottom = top + f32::from(bounds.size.height);
-    let x = beside(f32::from(at.x), box_w, left, right);
-    let y = beside(f32::from(at.y), box_h, top, bottom);
+    let extent = size(
+        px(text_w + 2.0 * TOOLTIP_PAD),
+        px(shaped.len() as f32 * line_h + 2.0 * TOOLTIP_PAD),
+    );
+    let origin = place(extent);
 
     window.paint_quad(quad(
-        Bounds::new(point(px(x), px(y)), size(px(box_w), px(box_h))),
+        Bounds::new(origin, extent),
         px(TOOLTIP_RADIUS),
         colors.panel,
         px(TOOLTIP_BORDER),
@@ -94,15 +128,8 @@ pub fn paint_tooltip_box(
         BorderStyle::Solid,
     ));
     for (i, line) in shaped.into_iter().enumerate() {
-        let ly = y + TOOLTIP_PAD + i as f32 * line_h;
-        let _ = line.paint(
-            point(px(x + TOOLTIP_PAD), px(ly)),
-            fs,
-            TextAlign::Left,
-            None,
-            window,
-            cx,
-        );
+        let offset = point(px(TOOLTIP_PAD), px(TOOLTIP_PAD + i as f32 * line_h));
+        let _ = line.paint(origin + offset, fs, TextAlign::Left, None, window, cx);
     }
 }
 
