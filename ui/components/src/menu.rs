@@ -514,12 +514,9 @@ fn list_width<'a>(
 }
 
 /// How tall a list of `rows` rows each `row` tall is laid out in a window of
-/// `viewport`: as tall as its rows, and no taller than it can stand and still
-/// be reached whole, past which it scrolls and ends on a whole row.
+/// `viewport`.
 fn list_height(rows: usize, row: Pixels, viewport: Size<Pixels>) -> Pixels {
-    let inset = SHEET_PADDING * 2. + SHEET_BORDER * 2.;
-    let room = MAX_LIST_HEIGHT.min(viewport.height) - inset;
-    inset + (row * rows as f32).min(menu_chrome::whole_rows(row, room))
+    menu_chrome::sheet_height(rows, row, px(0.), MAX_LIST_HEIGHT.min(viewport.height))
 }
 
 /// The face a menu's rows read in, set by the menu itself so they read in the

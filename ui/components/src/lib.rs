@@ -9,7 +9,7 @@ mod dropdown;
 mod layer;
 mod list_scroll;
 mod menu;
-mod menu_chrome;
+pub mod menu_chrome;
 mod multi_select;
 mod notice;
 mod scrollbar;
