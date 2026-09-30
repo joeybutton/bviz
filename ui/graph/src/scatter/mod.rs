@@ -9,10 +9,11 @@ use crate::Palette;
 use crate::drag::CLICK_SLOP;
 use crate::model::{FilterChanged, GraphModel, Loaded, MetricsLanded, SourceReplaced};
 use crate::{PIXELS_PER_NOTCH, ZOOM_PER_NOTCH};
+use bviz_graph_layout::facets::Tri;
 use bviz_graph_layout::metrics::{Metrics, Scope, Sizing, Unit};
 use bviz_graph_layout::select::Filter;
 use bviz_graph_layout::select::labels::carried_label;
-use bviz_graph_layout::{Input, InputSet, Kind};
+use bviz_graph_layout::{Id, Input, InputSet, Kind};
 use bviz_ui_components::{
     Button, DragEnd, Dropdown, DropdownEvent, TextTooltip, Toolbar, TooltipColors, cached_layer,
     centered_spinner, load_in_background, spinner, track_drag,
@@ -294,11 +295,13 @@ impl ScatterPanel {
         if plot.hover.as_ref().map(|hover| hover.mark) == picked.map(|picked| picked.mark) {
             return;
         }
+        let (unit, sizing) = (plot.scope.unit(), plot.plotted.sizing);
         plot.hover = picked.and_then(|picked| {
-            let target = &plot.plotted.marks[picked.mark].target;
+            let point = &plot.plotted.marks[picked.mark].target;
+            let lines = describe(point, unit, sizing, picked.coincident, model.loaded()?);
             Some(Hover {
                 mark: picked.mark,
-                lines: describe(target, picked.coincident, model.loaded()?),
+                lines,
             })
         });
         cx.notify();
@@ -515,39 +518,94 @@ fn unit_names(unit: Unit) -> KindNames {
     KindNames { one, many }
 }
 
-/// What the tooltip over `target` reads, where `coincident` other targets sit
-/// at its place in the plot.
-fn describe(target: &Metrics, coincident: usize, loaded: &Loaded) -> Vec<String> {
+/// What the tooltip over `point`, a point of `unit` sized by `sizing`, reads,
+/// where `coincident` other points sit at its place in the plot: what the point
+/// is, then its counts.
+fn describe(
+    point: &Metrics,
+    unit: Unit,
+    sizing: Sizing,
+    coincident: usize,
+    loaded: &Loaded,
+) -> Vec<String> {
     let shared = &loaded.shared;
-    let label = match carried_label(&shared.names, &shared.facets, target.id) {
+    let (names, facets) = (&shared.names, &shared.facets);
+    let label = match carried_label(names, facets, point.id) {
         Some(label) => shared.labels.written(label).into_owned(),
-        None => shared.names.resolve(target.id).to_owned(),
-    };
-    let repo = match shared.facets.repo(target.id) {
-        Some(repo) => match shared.labels.repos().written(repo) {
-            "" => MAIN_REPO,
-            written => written,
-        },
-        None => UNKNOWN_REPO,
+        None => names.resolve(point.id).to_owned(),
     };
     let mut lines = Vec::with_capacity(TOOLTIP_LINES);
+    match unit {
+        Unit::Action => {
+            let mnemonic = facets.mnemonic(point.id);
+            let mnemonic = mnemonic.map_or("action", |m| facets.strings().resolve(m));
+            lines.extend([mnemonic.to_owned(), format!("of {label}")]);
+            lines.extend(configuration(point.id, loaded));
+            let aspects = facets.aspects().values(point.id);
+            if !aspects.is_empty() {
+                let aspects = aspects.iter().map(|&a| facets.strings().resolve(a));
+                lines.push(format!("via {}", aspects.collect::<Vec<_>>().join(", ")));
+            }
+            // The base graph holds each node at the position of its id.
+            let output = facets
+                .primary_output(point.id)
+                .and_then(|output| shared.base.nodes.get(output.0 as usize));
+            lines.extend(output.map(|node| format!("writes {}", node.label)));
+        }
+        Unit::ConfiguredTarget => {
+            lines.push(label);
+            lines.extend(configuration(point.id, loaded));
+        }
+        Unit::Target => {
+            let repo = match facets.repo(point.id) {
+                Some(repo) => match shared.labels.repos().written(repo) {
+                    "" => MAIN_REPO,
+                    written => written,
+                },
+                None => UNKNOWN_REPO,
+            };
+            lines.extend([label, format!("{} in {repo}", kind_names(point.kind).one)]);
+        }
+    }
     lines.extend([
-        label,
         format!(
             "closure {} · blast radius {}",
-            target.closure, target.blast_radius
+            point.closure, point.blast_radius
         ),
-        format!("fan-in {} · fan-out {}", target.fan_in, target.fan_out),
-        format!("{} in {repo}", kind_names(target.kind).one),
+        format!("fan-in {} · fan-out {}", point.fan_in, point.fan_out),
     ]);
+    if sizing == Sizing::Actions {
+        let names = unit_names(Unit::Action);
+        let actions = match point.actions {
+            1 => names.one,
+            _ => names.many,
+        };
+        lines.push(format!("{} {actions}", point.actions));
+    }
     if coincident > 0 {
         lines.push(format!("+{coincident} more here"));
     }
     lines
 }
 
+/// The line naming the configuration the node `id` is built in, by its
+/// mnemonic where it has one, and marked where it builds a tool the build runs.
+fn configuration(id: Id, loaded: &Loaded) -> Option<String> {
+    let facets = &loaded.shared.facets;
+    let config = facets.config(id)?;
+    let entry = facets.config_entry(config);
+    let name = entry
+        .and_then(|entry| entry.mnemonic)
+        .unwrap_or(config.sym());
+    let name = facets.strings().resolve(name);
+    Some(match entry.map(|entry| entry.is_tool) {
+        Some(Tri::Yes) => format!("in {name} (exec)"),
+        _ => format!("in {name}"),
+    })
+}
+
 /// The most lines a tooltip reads.
-const TOOLTIP_LINES: usize = 5;
+const TOOLTIP_LINES: usize = 8;
 
 const MAIN_REPO: &str = "the main repository";
 const UNKNOWN_REPO: &str = "an unnamed repository";
