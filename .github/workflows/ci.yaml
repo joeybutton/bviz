@@ -26,8 +26,6 @@ jobs:
         with:
           bazelrc: build --platforms=//platforms:linux_x86_64
           bazelisk-cache: true
-          disk-cache: ${{ github.workflow }}
-          repository-cache: true
       - uses: ./.github/actions/buildbuddy
 
       # Report every check's verdict, not only the first failure's. The check
@@ -36,5 +34,5 @@ jobs:
       - name: Report disk usage
         run: |
           df -h /
-          du -sh ~/.cache/bazel-disk ~/.cache/bazel-repo ~/.cache/bazelisk ~/.bazel || true
+          du -sh ~/.cache/bazelisk ~/.bazel || true
         if: ${{ !cancelled() }}
