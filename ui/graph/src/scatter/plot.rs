@@ -1,7 +1,7 @@
 //! Where the scatter plot's marks and ticks fall: counts on logarithmic axes,
-//! and a mark's size by its fan-in.
+//! and a mark's size by the count its measurement sizes points by.
 
-use bviz_graph_layout::metrics::Metrics;
+use bviz_graph_layout::metrics::{Measurement, Metrics, Sizing};
 use bviz_graph_layout::select::Verdict;
 use bviz_graph_layout::{Id, Kind};
 use gpui::{Bounds, Pixels, Point, point, px};
@@ -88,9 +88,9 @@ pub(crate) fn tick_label(value: u32) -> String {
     }
 }
 
-/// The radius of the mark for a target of no fan-in.
+/// The radius of the mark for a point of size zero.
 pub(crate) const MIN_RADIUS: f32 = 2.5;
-/// The radius of the mark for the target of the largest fan-in.
+/// The radius of the mark for the largest point.
 pub(crate) const MAX_RADIUS: f32 = 8.0;
 
 /// One target as the plot draws it.
@@ -113,6 +113,8 @@ pub(crate) struct Plotted {
     /// How many targets were measured, of which `marks` draws those the filter
     /// does not hide.
     pub(crate) measured: usize,
+    /// What a mark's size stands for.
+    pub(crate) sizing: Sizing,
     /// Closure along the horizontal axis.
     pub(crate) x: LogScale,
     /// Blast radius along the vertical axis.
@@ -122,11 +124,12 @@ pub(crate) struct Plotted {
 }
 
 impl Plotted {
-    /// The marks of `targets` as the filter whose verdict on a node `verdict`
-    /// gives draws them.
-    pub(crate) fn of(targets: &[Metrics], verdict: impl Fn(Id) -> Verdict) -> Self {
-        let max = |measure: fn(&Metrics) -> u32| targets.iter().map(measure).max();
-        let largest_fan_in = max(|t| t.fan_in).unwrap_or(0);
+    /// The marks of the points `measured` as the filter whose verdict on a node
+    /// `verdict` gives draws them.
+    pub(crate) fn of(measured: &Measurement, verdict: impl Fn(Id) -> Verdict) -> Self {
+        let (targets, sizing) = (&measured.points, measured.sizing);
+        let max = |measure: &dyn Fn(&Metrics) -> u32| targets.iter().map(measure).max();
+        let largest = max(&|t| sizing.of(t)).unwrap_or(0);
         let mut marks: Vec<Mark> = Vec::with_capacity(targets.len());
         marks.extend(targets.iter().filter_map(|&target| {
             let faded = match verdict(target.id) {
@@ -138,11 +141,11 @@ impl Plotted {
             };
             Some(Mark {
                 target,
-                radius: radius(target.fan_in, largest_fan_in),
+                radius: radius(sizing.of(&target), largest),
                 faded,
             })
         }));
-        marks.sort_by_key(|mark| (!mark.faded, std::cmp::Reverse(mark.target.fan_in)));
+        marks.sort_by_key(|mark| (!mark.faded, std::cmp::Reverse(sizing.of(&mark.target))));
         let mut kinds: Vec<Kind> = targets.iter().map(|t| t.kind).collect();
         kinds.sort_unstable();
         kinds.dedup();
@@ -150,19 +153,20 @@ impl Plotted {
             kinds,
             marks,
             measured: targets.len(),
-            x: LogScale::covering(max(|t| t.closure.value()).unwrap_or(0)),
-            y: LogScale::covering(max(|t| t.blast_radius.value()).unwrap_or(0)),
+            sizing,
+            x: LogScale::covering(max(&|t| t.closure.value()).unwrap_or(0)),
+            y: LogScale::covering(max(&|t| t.blast_radius.value()).unwrap_or(0)),
         }
     }
 }
 
-/// The radius of the mark for a target of `fan_in` direct dependents, where the
-/// largest has `largest`. Its area grows with the logarithm of the fan-in, so the
-/// few heavily depended-on targets stand out without burying the rest.
-fn radius(fan_in: u32, largest: u32) -> f32 {
+/// The radius of the mark for a point of size `size`, where the largest has
+/// `largest`. Its area grows with the logarithm of the size, so the few largest
+/// points stand out without burying the rest.
+fn radius(size: u32, largest: u32) -> f32 {
     let share = match largest {
         0 => 0.0,
-        _ => (log_count(fan_in) / log_count(largest)).sqrt() as f32,
+        _ => (log_count(size) / log_count(largest)).sqrt() as f32,
     };
     MIN_RADIUS + (MAX_RADIUS - MIN_RADIUS) * share
 }
@@ -358,7 +362,8 @@ pub(crate) struct Picked {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bviz_graph_layout::metrics::Count;
+    use bviz_graph_layout::InputSet;
+    use bviz_graph_layout::metrics::{Count, Scope, Unit};
     use gpui::size;
 
     fn target(closure: u32, blast_radius: u32, fan_in: u32) -> Metrics {
@@ -373,9 +378,18 @@ mod tests {
         }
     }
 
+    /// `targets` as measured, sized by fan-in.
+    fn measured(targets: &[Metrics]) -> Measurement {
+        Measurement {
+            scope: Scope::new(Unit::Target, InputSet::ALL).unwrap(),
+            points: targets.to_vec(),
+            sizing: Sizing::FanIn,
+        }
+    }
+
     /// The marks of `targets` through a filter drawing every one.
     fn shown(targets: &[Metrics]) -> Plotted {
-        Plotted::of(targets, |_| Verdict::Shown)
+        Plotted::of(&measured(targets), |_| Verdict::Shown)
     }
 
     #[test]
@@ -496,7 +510,7 @@ mod tests {
         let targets = [target(3, 1, 9), target(400, 2, 0), target(7, 90, 2)];
         let hidden = targets[1].id;
         let faded = targets[2].id;
-        let plotted = Plotted::of(&targets, |id| match id {
+        let plotted = Plotted::of(&measured(&targets), |id| match id {
             id if id == hidden => Verdict::Hidden,
             id if id == faded => Verdict::Faded,
             _ => Verdict::Shown,

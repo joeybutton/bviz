@@ -9,7 +9,7 @@ use crate::drag::CLICK_SLOP;
 use crate::model::{FilterChanged, GraphModel, Loaded, MetricsLanded, SourceReplaced};
 use crate::{PIXELS_PER_NOTCH, ZOOM_PER_NOTCH};
 use bviz_graph_layout::Kind;
-use bviz_graph_layout::metrics::{Metrics, Scope, Unit};
+use bviz_graph_layout::metrics::{Metrics, Scope, Sizing, Unit};
 use bviz_graph_layout::select::Filter;
 use bviz_graph_layout::select::labels::carried_label;
 use bviz_ui_components::{DragEnd, cached_layer, centered_spinner, load_in_background, track_drag};
@@ -134,7 +134,7 @@ impl ScatterPanel {
             cx,
             move || {
                 let verdicts = filter.evaluate(&shared.base, &shared.names, &shared.facets);
-                (Plotted::of(&metrics.points, |id| verdicts.get(id)), filter)
+                (Plotted::of(&metrics, |id| verdicts.get(id)), filter)
             },
             |view, (plotted, filter), cx| {
                 view.plotting = None;
@@ -533,6 +533,14 @@ const SWATCH_ALPHA: f32 = 0.7;
 /// Diameter of a legend swatch: twice the smallest mark's, so its hue reads.
 const SWATCH_DIAMETER: f32 = 4.0 * MIN_RADIUS;
 
+/// How the legend names what a mark's size stands for.
+fn sizing_name(sizing: Sizing) -> &'static str {
+    match sizing {
+        Sizing::Actions => "mark size: actions",
+        Sizing::FanIn => "mark size: direct dependents",
+    }
+}
+
 /// What the legend reads while the plot shows part of an axis.
 const ZOOMED: &str = "double-click empty space or press 0 to show all";
 
@@ -578,7 +586,7 @@ fn legend(plotted: &Plotted, zoom: Zoom, palette: &Palette) -> Div {
                 .gap_4()
                 .text_color(palette.colors.text_muted)
                 .when(zoom != Zoom::WHOLE, |hints| hints.child(ZOOMED))
-                .child("mark size: direct dependents"),
+                .child(sizing_name(plotted.sizing)),
         )
 }
 
