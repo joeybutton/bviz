@@ -21,7 +21,6 @@ jobs:
       BUILDBUDDY_API_KEY: ${{ secrets.BUILDBUDDY_API_KEY }}
     steps:
       - uses: actions/checkout@v7
-      - uses: ./.github/actions/free-disk-space
       - uses: bazel-contrib/setup-bazel@0.19.0
         with:
           bazelisk-cache: true
@@ -56,12 +55,6 @@ jobs:
           archive: false
           retention-days: 14
           if-no-files-found: error
-
-      - name: Report disk usage
-        run: |
-          df -h /
-          du -sh ~/.cache/bazelisk ~/.bazel || true
-        if: ${{ !cancelled() }}
 
   # One pre-release under a fixed tag, replaced on every run, so its download
   # links stay stable and always point at the latest build of main. It is
