@@ -364,6 +364,7 @@ mod tests {
             blast_radius,
             fan_in,
             fan_out: 0,
+            actions: 0,
         }
     }
 

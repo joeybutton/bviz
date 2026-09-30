@@ -125,7 +125,7 @@ impl ScatterPanel {
             cx,
             move || {
                 let verdicts = filter.evaluate(&shared.base, &shared.names, &shared.facets);
-                (Plotted::of(&metrics, |id| verdicts.get(id)), filter)
+                (Plotted::of(&metrics.points, |id| verdicts.get(id)), filter)
             },
             |view, (plotted, filter), cx| {
                 view.plotting = None;
