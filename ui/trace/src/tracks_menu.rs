@@ -5,30 +5,17 @@ use crate::track_label::track_label;
 use crate::track_order::TrackSort;
 use crate::{
     GUTTER_LABEL_SIZE, RULER_HEIGHT, Source, TRACKS_MENU_FOLD_ABOVE, TRACKS_MENU_MAX_LIST,
-    TRACKS_MENU_WIDTH, TracePanel, set_list_thumb, thumb_offset,
+    TRACKS_MENU_WIDTH, TracePanel,
 };
 use bviz_trace_profile::{LaneClass, Profile};
-use bviz_ui_components::{
-    Axis, Button, DEFAULT_MIN_THUMB, DragEnd, SCROLLBAR_THICKNESS, Scrollbar, TextInput,
-    overlay_canvas, track_drag,
-};
+use bviz_ui_components::{Button, ListScroll, SCROLLBAR_THICKNESS, TextInput, list_scrollbar};
 use gpui::{
     AnyElement, App, Bounds, Context, Entity, IntoElement, MouseButton, MouseDownEvent, Pixels,
-    Point, Render, Rgba, ScrollHandle, SharedString, Subscription, WeakEntity, Window, deferred,
-    div, point, prelude::*, px, size,
+    Render, SharedString, Subscription, WeakEntity, Window, deferred, div, prelude::*, px,
 };
 
 /// Side of the menu's caret icons.
 const MENU_ICON: Pixels = px(12.);
-
-/// What a left-button drag over the tracks menu is currently moving.
-#[derive(Clone, Copy)]
-enum MenuDrag {
-    None,
-    /// A press on the scroll thumb/track, holding that grab offset from the
-    /// thumb's leading edge.
-    Thumb(f32),
-}
 
 /// The tracks-visibility menu as a self-contained popover: a trigger in the
 /// gutter corner where the ruler meets the track-label column, and, when open, a
@@ -50,8 +37,7 @@ pub(crate) struct TracksMenu {
     /// every edit.
     _filter_observer: Subscription,
     /// Scroll position of the track list.
-    scroll: ScrollHandle,
-    drag: MenuDrag,
+    scroll: ListScroll,
     /// Read for the visible tracks, written to toggle them.
     model: Entity<TraceModel>,
     /// The owning view, read for the gutter width and viewport that position the
@@ -72,8 +58,7 @@ impl TracksMenu {
             folded_groups: [None; GROUP_ORDER.len()],
             filter,
             _filter_observer: filter_observer,
-            scroll: ScrollHandle::new(),
-            drag: MenuDrag::None,
+            scroll: ListScroll::new(),
             model,
             shell,
         }
@@ -83,7 +68,7 @@ impl TracksMenu {
     /// profile. The document-derived visibility is seeded by the model instead.
     pub(crate) fn reset_for_new_profile(&mut self) {
         self.folded_groups = [None; GROUP_ORDER.len()];
-        set_list_thumb(&self.scroll, 0.0);
+        self.scroll.to_top();
     }
 
     /// Rebuilds the timeline's scene over the lanes as they stand, for a change
@@ -104,43 +89,6 @@ impl TracksMenu {
     /// Folds or unfolds a lane-class group's track list.
     fn toggle_group_folded(&mut self, group: usize, listed: usize) {
         self.folded_groups[group] = Some(!self.folded(group, listed));
-    }
-
-    /// The bar for the track list's content height against its visible height;
-    /// `None` while the list fits.
-    fn vbar(&self) -> Option<Scrollbar> {
-        let list = self.scroll.bounds();
-        let visible = f32::from(list.size.height);
-        Scrollbar::new(
-            Axis::Vertical,
-            Bounds::new(
-                point(list.right() - px(SCROLLBAR_THICKNESS), list.origin.y),
-                size(px(SCROLLBAR_THICKNESS), list.size.height),
-            ),
-            visible + f32::from(self.scroll.max_offset().y),
-            visible,
-            -f32::from(self.scroll.offset().y),
-            DEFAULT_MIN_THUMB,
-        )
-    }
-
-    /// Begins a scroll drag if `pos` hit the bar; otherwise leaves the press to
-    /// fall through.
-    fn press(&mut self, pos: Point<Pixels>) {
-        if let Some(bar) = self.vbar()
-            && bar.track_hit(pos)
-        {
-            let grab = bar.grab(pos);
-            self.drag = MenuDrag::Thumb(grab);
-            self.thumb_to(pos, grab);
-        }
-    }
-
-    /// Maps a thumb drag back to the list's scroll offset.
-    fn thumb_to(&mut self, pos: Point<Pixels>, grab: f32) {
-        if let Some(offset) = thumb_offset(self.vbar(), pos, grab) {
-            set_list_thumb(&self.scroll, offset);
-        }
     }
 
     /// The open menu's deferred body: a filter field over the filtered track
@@ -409,7 +357,7 @@ impl TracksMenu {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, e: &MouseDownEvent, _, cx| {
-                    this.press(e.position);
+                    this.scroll.press(e.position);
                     cx.stop_propagation();
                     cx.notify();
                 }),
@@ -456,15 +404,16 @@ impl TracksMenu {
             .flex_col()
             .w_full()
             .p_1()
+            .pr(px(SCROLLBAR_THICKNESS))
             .max_h(px(TRACKS_MENU_MAX_LIST))
             .overflow_y_scroll()
-            .track_scroll(&self.scroll)
+            .track_scroll(self.scroll.handle())
             .children(rows);
-        let bar = menu_scrollbar(
+        let bar = list_scrollbar(
             cx.entity(),
-            matches!(self.drag, MenuDrag::Thumb(_)),
-            palette.scroll.track,
-            palette.scroll.thumb,
+            |menu: &Self| &menu.scroll,
+            |menu: &mut Self| &mut menu.scroll,
+            palette.scroll,
         );
         div()
             .relative()
@@ -557,46 +506,4 @@ impl Render for TracksMenu {
             .children(self.popover(viewport, palette, cx))
             .into_any_element()
     }
-}
-
-/// The tracks menu's scroll bar, drawn over the track list once it has been
-/// laid out; keeps the drag handlers installed while `dragging`.
-fn menu_scrollbar(
-    entity: Entity<TracksMenu>,
-    dragging: bool,
-    track: Rgba,
-    thumb: Rgba,
-) -> impl IntoElement {
-    overlay_canvas(move |_, window: &mut Window, cx: &mut App| {
-        if let Some(bar) = entity.read(cx).vbar() {
-            bar.paint(track, thumb, window);
-        }
-        if dragging {
-            track_drag(window, &entity, menu_on_drag, menu_end_drag);
-        }
-    })
-}
-
-/// Routes an in-progress thumb drag to the list's scroll offset.
-fn menu_on_drag(
-    menu: &mut TracksMenu,
-    position: Point<Pixels>,
-    _window: &mut Window,
-    cx: &mut Context<TracksMenu>,
-) {
-    if let MenuDrag::Thumb(grab) = menu.drag {
-        menu.thumb_to(position, grab);
-    }
-    cx.notify();
-}
-
-fn menu_end_drag(
-    menu: &mut TracksMenu,
-    _: Point<Pixels>,
-    _: DragEnd,
-    _: &mut Window,
-    cx: &mut Context<TracksMenu>,
-) {
-    menu.drag = MenuDrag::None;
-    cx.notify();
 }
