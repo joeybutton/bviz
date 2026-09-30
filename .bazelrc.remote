@@ -31,6 +31,8 @@ build:remote-bes --bes_backend=grpcs://yume.buildbuddy.io
 build:remote-cache --remote_cache=grpcs://yume.buildbuddy.io
 # docs: https://bazel.build/reference/command-line-reference#param-no-remote-cache-compression
 build:remote-cache --remote_cache_compression
+# docs: https://bazel.build/reference/command-line-reference#param-no-experimental-remote-cache-chunking
+build:remote-cache --experimental_remote_cache_chunking
 # docs: https://bazel.build/reference/command-line-reference#param-remote-download-toplevel
 build:remote-cache --remote_download_toplevel
 # bazel_env requires sha256sum on disk
