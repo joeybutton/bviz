@@ -1,5 +1,12 @@
 build:remote --config=remote-bes --config=remote-cache --config=remote-exec
 
+# Diagnostic logs for troubleshooting remote builds.
+
+# docs: https://bazel.build/reference/command-line-reference#param-remote-grpc-log
+build:remote --remote_grpc_log=bazel-remote-grpc.log
+# docs: https://bazel.build/reference/command-line-reference#param-no-execution-log-compact-file
+build:remote --execution_log_compact_file=execution_log.binpb.zst
+
 # Build event stream setup.
 
 # docs: https://bazel.build/reference/command-line-reference#param-remote-build-event-upload
