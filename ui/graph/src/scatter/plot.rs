@@ -174,6 +174,43 @@ impl DataArea {
     pub(crate) fn place(&self, target: &TargetMetrics) -> Point<Pixels> {
         point(self.x_of(target.closure), self.y_of(target.blast_radius))
     }
+
+    /// The mark of `marks` a pointer at `at` picks: the one whose centre is
+    /// nearest, among those whose rim lies within [`PICK_SLOP`] of it, and the
+    /// one drawn over the others among equally near ones.
+    pub(crate) fn pick(&self, marks: &[Mark], at: Point<Pixels>) -> Option<Picked> {
+        let mut nearest: Option<(usize, f32)> = None;
+        for (index, mark) in marks.iter().enumerate() {
+            let center = self.place(&mark.target);
+            let distance = f32::from(center.x - at.x).hypot(f32::from(center.y - at.y));
+            let reaches = distance <= mark.radius + PICK_SLOP;
+            if reaches && nearest.is_none_or(|(_, best)| distance <= best) {
+                nearest = Some((index, distance));
+            }
+        }
+        let (index, _) = nearest?;
+        let at_same_place = |mark: &Mark| {
+            let (one, other) = (&mark.target, &marks[index].target);
+            (one.closure, one.blast_radius) == (other.closure, other.blast_radius)
+        };
+        Some(Picked {
+            mark: index,
+            coincident: marks.iter().filter(|mark| at_same_place(mark)).count() - 1,
+        })
+    }
+}
+
+/// How far past a mark's rim a pointer still picks it, so that the smallest
+/// marks are not a pixel-hunt.
+pub(crate) const PICK_SLOP: f32 = 4.0;
+
+/// The mark a pointer picks, by its index among the plotted marks.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Picked {
+    pub(crate) mark: usize,
+    /// How many other marks stand for targets at exactly its place, which it
+    /// hides.
+    pub(crate) coincident: usize,
 }
 
 #[cfg(test)]
@@ -279,6 +316,31 @@ mod tests {
                 "{at:?}"
             );
         }
+    }
+
+    #[test]
+    fn a_pointer_picks_the_nearest_mark_within_reach_and_counts_those_it_hides() {
+        let targets = [target(0, 0, 0), target(100, 100, 0), target(100, 100, 5)];
+        let plotted = Plotted::of(&targets);
+        let axes = Bounds::new(point(px(0.), px(0.)), size(px(400.), px(300.)));
+        let area = DataArea::within(axes, plotted.x, plotted.y);
+        let origin = area.place(&targets[0]);
+        let picked = area.pick(&plotted.marks, origin + point(px(1.), px(-1.)));
+        let origin_mark = plotted.marks.iter().position(|m| m.target == targets[0]);
+        assert_eq!(picked.map(|p| p.mark), origin_mark);
+        assert_eq!(picked.map(|p| p.coincident), Some(0));
+
+        let shared = area.pick(&plotted.marks, area.place(&targets[1]));
+        // The mark drawn last is the one on top.
+        let top = plotted
+            .marks
+            .iter()
+            .rposition(|m| (m.target.closure, m.target.blast_radius) == (100, 100));
+        assert_eq!(shared.map(|p| p.mark), top);
+        assert_eq!(shared.map(|p| p.coincident), Some(1));
+
+        let far = origin + point(px(MAX_RADIUS + PICK_SLOP + 1.), px(0.));
+        assert_eq!(area.pick(&plotted.marks, far), None);
     }
 
     #[test]

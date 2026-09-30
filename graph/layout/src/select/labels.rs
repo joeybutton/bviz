@@ -58,6 +58,11 @@ impl LabelIndex {
         self.repos.written_label(label)
     }
 
+    /// The names the graph's repositories are written by.
+    pub fn repos(&self) -> &WrittenRepos {
+        &self.repos
+    }
+
     /// The targets `pattern` names, by label.
     pub fn matching<'a>(&'a self, pattern: &'a Pattern) -> impl Iterator<Item = (Id, &'a str)> {
         let pattern = pattern.resolved(&self.repos);

@@ -1,7 +1,8 @@
 //! Painting the scatter plot: its axes and the marks placed along them.
 
-use super::plot::{DataArea, LogScale, Plotted, Tick, tick_label};
+use super::plot::{DataArea, LogScale, Mark, Plotted, Tick, tick_label};
 use crate::Palette;
+use bviz_ui_components::{TooltipColors, paint_tooltip_box};
 use bviz_ui_theme::mix;
 use gpui::{
     App, BorderStyle, Bounds, Hsla, Pixels, Rgba, ShapedLine, TextAlign, Window, fill, point, px,
@@ -38,14 +39,9 @@ const MARK_ALPHA: f32 = 0.5;
 const X_TITLE: &str = "closure size (transitive dependencies)";
 const Y_TITLE: &str = "blast radius (transitive dependents)";
 
-/// Paints `plotted` filling `bounds`.
-pub(crate) fn paint_plot(
-    plotted: &Plotted,
-    palette: &Palette,
-    bounds: Bounds<Pixels>,
-    window: &mut Window,
-    cx: &mut App,
-) {
+/// The frame the axes are drawn along within a plot filling `bounds`; `None`
+/// where that leaves no room worth plotting in.
+fn axes_within(bounds: Bounds<Pixels>) -> Option<Bounds<Pixels>> {
     let axes = Bounds::from_corners(
         point(
             bounds.left() + px(LEFT_MARGIN),
@@ -56,9 +52,26 @@ pub(crate) fn paint_plot(
             bounds.bottom() - px(BOTTOM_MARGIN),
         ),
     );
-    if axes.size.width < px(MIN_FRAME) || axes.size.height < px(MIN_FRAME) {
+    (axes.size.width >= px(MIN_FRAME) && axes.size.height >= px(MIN_FRAME)).then_some(axes)
+}
+
+/// Where the counts of `plotted` are placed in a plot filling `bounds`, which
+/// every pointer gesture over the plot resolves through as its paint does.
+pub(crate) fn data_area(plotted: &Plotted, bounds: Bounds<Pixels>) -> Option<DataArea> {
+    Some(DataArea::within(axes_within(bounds)?, plotted.x, plotted.y))
+}
+
+/// Paints `plotted` filling `bounds`.
+pub(crate) fn paint_plot(
+    plotted: &Plotted,
+    palette: &Palette,
+    bounds: Bounds<Pixels>,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let Some(axes) = axes_within(bounds) else {
         return;
-    }
+    };
     let area = DataArea::within(axes, plotted.x, plotted.y);
     let ink = Ink::new(palette);
     paint_grid(&area, plotted, axes, &ink, window);
@@ -83,6 +96,38 @@ pub(crate) fn paint_plot(
             ));
         }
     });
+}
+
+/// Between a hovered mark's rim and the ring drawn round it.
+const RING_GAP: f32 = 2.0;
+const RING_WIDTH: f32 = 1.5;
+
+/// Rings the hovered `mark` of a plot filling `bounds` and sets the tooltip
+/// reading `lines` beside it.
+pub(crate) fn paint_hover(
+    mark: &Mark,
+    lines: &[String],
+    plotted: &Plotted,
+    palette: &Palette,
+    bounds: Bounds<Pixels>,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let Some(area) = data_area(plotted, bounds) else {
+        return;
+    };
+    let center = area.place(&mark.target);
+    let r = px(mark.radius + RING_GAP + RING_WIDTH);
+    window.paint_quad(quad(
+        Bounds::new(center - point(r, r), size(r * 2., r * 2.)),
+        r,
+        Hsla::transparent_black(),
+        px(RING_WIDTH),
+        palette.label,
+        BorderStyle::Solid,
+    ));
+    let tooltip = TooltipColors::from_colors(&palette.colors);
+    paint_tooltip_box(lines, center, bounds, tooltip, window, cx);
 }
 
 /// The colours the plot's frame is drawn in.
