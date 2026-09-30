@@ -812,7 +812,9 @@ fn sizing_name(sizing: Sizing) -> &'static str {
 }
 
 /// The strip naming the colour each kind of point is drawn in, what a mark's
-/// size stands for, and how to leave a zoom.
+/// size stands for, and how to leave a zoom. The names wrap onto as many rows
+/// as they take, and one too long for a row is cut short; the hints wrap
+/// beneath the names where both do not fit.
 fn legend(plotted: &Plotted, zoom: Zoom, palette: &Palette) -> Div {
     // Kinds a reader names alike and the graph colours alike read as one.
     let mut entries: Vec<(&str, Rgba)> = Vec::with_capacity(plotted.kinds.len());
@@ -831,31 +833,65 @@ fn legend(plotted: &Plotted, zoom: Zoom, palette: &Palette) -> Div {
             .flex()
             .items_center()
             .gap_1()
-            .child(div().size(px(SWATCH_DIAMETER)).rounded_full().bg(color))
-            .child(name)
+            .min_w_0()
+            .child(
+                div()
+                    .flex_none()
+                    .size(px(SWATCH_DIAMETER))
+                    .rounded_full()
+                    .bg(color),
+            )
+            .child(
+                div()
+                    .min_w_0()
+                    .max_w(px(LEGEND_NAME_WIDTH))
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_ellipsis()
+                    .child(name),
+            )
     };
     div()
         .flex()
         .flex_row()
-        .items_center()
-        .gap_4()
+        .flex_wrap()
+        .items_start()
+        .gap_x_4()
         .px_3()
         .py_1()
         .text_sm()
         .text_color(palette.label)
         .border_b_1()
         .border_color(palette.border)
-        .children(entries.into_iter().map(entry))
+        .child(
+            div()
+                .flex()
+                .flex_wrap()
+                .gap_x_4()
+                .flex_1()
+                .min_w(px(LEGEND_NAMES_MIN_WIDTH))
+                .children(entries.into_iter().map(entry)),
+        )
         .child(
             div()
                 .ml_auto()
                 .flex()
-                .gap_4()
+                .flex_wrap()
+                .justify_end()
+                .gap_x_4()
                 .text_color(palette.colors.text_muted)
                 .when(zoom != Zoom::WHOLE, |hints| hints.child(ZOOMED))
                 .child(sizing_name(plotted.sizing)),
         )
 }
+
+/// The widest a legend entry's name is drawn before it is cut short, which the
+/// name of a kind is well within.
+const LEGEND_NAME_WIDTH: f32 = 220.0;
+
+/// The narrowest the legend's names are squeezed to beside its hints, which
+/// move to a row of their own where the two do not fit side by side.
+const LEGEND_NAMES_MIN_WIDTH: f32 = 160.0;
 
 /// The layer the points are drawn in, cached across frames that leave the
 /// plot and zoom unchanged.
