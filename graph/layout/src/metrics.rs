@@ -17,6 +17,11 @@ pub enum Unit {
     /// point that counts towards no other point's measure: a change to it
     /// reruns actions, but it is no work a change reruns.
     Action,
+    /// A target in one configuration, standing for its actions and the files
+    /// they write. A node no configured target holds, such as a target a query
+    /// names or the container a cquery edge falls back to without the
+    /// configuration of its dependency, takes no part.
+    ConfiguredTarget,
     /// A target, standing for every node that belongs to it — its configured
     /// targets, actions and files — so a graph read at any granularity measures
     /// alike, and an edge between two nodes of one target is no dependency of
@@ -26,12 +31,13 @@ pub enum Unit {
 
 impl Unit {
     /// Finest first.
-    pub const ALL: [Unit; 2] = [Unit::Action, Unit::Target];
+    pub const ALL: [Unit; 3] = [Unit::Action, Unit::ConfiguredTarget, Unit::Target];
 
     /// The inputs describing this unit, the only ones a measure in it reads.
     pub fn inputs(self) -> InputSet {
         match self {
             Unit::Action => Input::Aquery.into(),
+            Unit::ConfiguredTarget => InputSet::from(Input::Cquery).with(Input::Aquery),
             Unit::Target => InputSet::ALL,
         }
     }
@@ -106,6 +112,7 @@ pub fn measure(
 ) -> Vec<Metrics> {
     match scope.unit {
         Unit::Action => actions(graph, provenance, scope),
+        Unit::ConfiguredTarget => configured_targets(graph, provenance, scope),
         Unit::Target => targets(graph, facets, provenance, scope),
     }
 }
@@ -204,6 +211,38 @@ fn targets(graph: &Graph, facets: &Facets, provenance: &Provenance, scope: Scope
             .iter()
             .filter(|edge| scope.reads(edge))
             .filter_map(|edge| Some((target_of(edge.from)?, target_of(edge.to)?))),
+    );
+    points.measure(pairs)
+}
+
+/// Every configured target, each edge between two nodes standing for one
+/// between the configured targets holding them.
+fn configured_targets(graph: &Graph, provenance: &Provenance, scope: Scope) -> Vec<Metrics> {
+    let node_of = first_by_id(graph);
+    let is_configured =
+        |id: Id| node_of[id.0 as usize].is_some_and(|node| node.kind == Kind::ConfiguredTarget);
+    let holder = |id: Id| {
+        std::iter::successors(Some(id), |&at| node_of[at.0 as usize]?.parent)
+            .find(|&at| is_configured(at))
+    };
+    let held_by: Vec<Option<Id>> = (0..node_of.len() as u32).map(|id| holder(Id(id))).collect();
+    let points = Points::new(
+        graph
+            .nodes
+            .iter()
+            .filter(|node| node.kind == Kind::ConfiguredTarget)
+            .filter(|node| scope.built(provenance, node.id))
+            .map(|node| Point::of(node, true))
+            .collect(),
+    );
+    let configured_of = |id: Id| points.of(held_by[id.0 as usize]?);
+    let mut pairs: Vec<(u32, u32)> = Vec::with_capacity(graph.edges.len());
+    pairs.extend(
+        graph
+            .edges
+            .iter()
+            .filter(|edge| scope.reads(edge))
+            .filter_map(|edge| Some((configured_of(edge.from)?, configured_of(edge.to)?))),
     );
     points.measure(pairs)
 }
@@ -487,10 +526,21 @@ mod tests {
             self
         }
 
+        /// An edge of `kind` from the node `from` to the node `to`.
+        fn edge(&mut self, from: &str, to: &str, kind: EdgeKind) -> &mut Self {
+            let (from, to) = (self.names.get(from).unwrap(), self.names.get(to).unwrap());
+            self.graph.add_edge(from, to, kind);
+            self
+        }
+
         /// Each action's name, kind, closure, blast radius, fan-in and fan-out.
         fn actions(&self) -> Vec<(&str, Kind, u32, u32, u32, u32)> {
+            self.measured(Unit::Action)
+        }
+
+        fn measured(&self, unit: Unit) -> Vec<(&str, Kind, u32, u32, u32, u32)> {
             let everything = Provenance::new(vec![InputSet::ALL; self.names.len()]);
-            let scope = Scope::new(Unit::Action, InputSet::ALL).unwrap();
+            let scope = Scope::new(unit, InputSet::ALL).unwrap();
             measure(&self.graph, &Facets::default(), &everything, scope)
                 .into_iter()
                 .map(|m| {
@@ -612,5 +662,48 @@ mod tests {
         assert_eq!(scope.inputs(), Input::Aquery.into());
         let targets = Scope::new(Unit::Target, InputSet::ALL).unwrap();
         assert_eq!(targets.inputs(), InputSet::ALL);
+    }
+
+    /// aquery links `app`'s actions to `lib`'s and to a tool's built for the
+    /// exec configuration, and cquery links `app` to `test` directly and to a
+    /// `data` target only by its label, which no configured target holds.
+    #[test]
+    fn configured_targets_link_through_what_they_hold() {
+        let mut build = Build::default();
+        build
+            .action("lib cc", "lib")
+            .writes("lib cc", "lib.o")
+            .action("tool cc", "tool (exec)")
+            .writes("tool cc", "tool")
+            .action("app gen", "app")
+            .reads("app gen", "tool")
+            .action("app link", "app")
+            .reads("app link", "lib.o")
+            .action("test run", "test")
+            .edge("app", "test", EdgeKind::Cquery);
+        build.node("target data", Kind::Target, None);
+        build.edge("target data", "app", EdgeKind::Cquery);
+        assert_eq!(
+            build.measured(Unit::ConfiguredTarget),
+            [
+                ("lib", Kind::ConfiguredTarget, 0, 2, 1, 0),
+                ("tool (exec)", Kind::ConfiguredTarget, 0, 2, 1, 0),
+                ("app", Kind::ConfiguredTarget, 2, 1, 1, 2),
+                ("test", Kind::ConfiguredTarget, 3, 0, 0, 1),
+            ]
+        );
+    }
+
+    #[test]
+    fn query_describes_no_configured_target() {
+        assert_eq!(
+            Scope::new(Unit::ConfiguredTarget, Input::Query.into()),
+            None
+        );
+        let scope = Scope::new(Unit::ConfiguredTarget, InputSet::ALL).unwrap();
+        assert_eq!(
+            scope.inputs(),
+            InputSet::from(Input::Cquery).with(Input::Aquery)
+        );
     }
 }
