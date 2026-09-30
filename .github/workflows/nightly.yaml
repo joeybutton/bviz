@@ -17,6 +17,8 @@ jobs:
   build:
     runs-on: ubuntu-latest
     timeout-minutes: 180
+    env:
+      BUILDBUDDY_API_KEY: ${{ secrets.BUILDBUDDY_API_KEY }}
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/free-disk-space
@@ -25,6 +27,7 @@ jobs:
           bazelisk-cache: true
           disk-cache: ${{ github.workflow }}
           repository-cache: true
+      - uses: ./.github/actions/buildbuddy
 
       # --keep_going so one platform's failure still yields the others' tarballs.
       - run: bazel build -c opt --keep_going //dist
