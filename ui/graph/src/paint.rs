@@ -6,6 +6,7 @@ use crate::relation::{Direction, Relation};
 use crate::scroll::paint_scrollbars;
 use crate::{GraphPanel, Palette};
 use bviz_graph_layout::layout::{CARET_RESERVE, LABEL_BAND};
+use bviz_graph_layout::transition::Transition;
 use bviz_graph_layout::{Connector, EdgeKind, Id, Kind};
 use gpui::{
     App, BorderStyle, Bounds, Entity, Hsla, PathBuilder, Pixels, Point, Rgba, TextAlign, Window,
@@ -93,6 +94,23 @@ const MARKED_WIDTH: f32 = 2.0 * CONNECTOR_WIDTH;
 /// however each of a pair is marked, and from the inks a route is drawn beside.
 /// Set where the nearest of those bounds is furthest off.
 const MARK_LIFT: f32 = 0.072;
+
+/// How far a split's badge is carried from the purple slot toward the red one:
+/// halfway, to a magenta no slot holds and neither neighbour's stroke wears.
+const SPLIT_BLEND: f32 = 0.5;
+
+/// Half the diagonal (pre-zoom px) of the diamond set halfway along a connector
+/// that crosses a configuration transition, wide enough to stand across every
+/// lane of a bundle so the mark reads as the pair's rather than one lane's.
+const BADGE_HALF: f32 = 5.0;
+
+/// Screen half-diagonal a transition badge is never drawn below: it marks an
+/// edge a reader is looking for, which zooming out to find must not shrink away.
+pub(crate) const BADGE_FLOOR: f32 = 4.0;
+
+/// Screen width of the canvas-coloured rim around a transition badge, which
+/// parts the badge from the route it sits on.
+const BADGE_RIM: f32 = 1.5;
 
 /// Bare ground (pre-zoom px) left between the strokes of two adjacent lanes, so
 /// a bundle of them reads as several lines rather than as one broad one. The
@@ -205,7 +223,14 @@ impl Marks {
     /// meets the camera on the same terms as the rest, so a selection stands its
     /// routes off the graph by as much at every zoom.
     fn connector_alpha(&self, marked: bool, filtered: f32, edges: f32, zoom: f32) -> f32 {
-        edges * receded(self.strength(marked), filtered) * ink_taper(zoom)
+        self.badge_alpha(marked, filtered, edges) * ink_taper(zoom)
+    }
+
+    /// What a mark set on a connector standing at `marked`, `filtered` and
+    /// `edges` is drawn at. A badge is held to a screen size, so it keeps its
+    /// ink at every zoom.
+    fn badge_alpha(&self, marked: bool, filtered: f32, edges: f32) -> f32 {
+        edges * receded(self.strength(marked), filtered)
     }
 }
 
@@ -292,6 +317,9 @@ pub(crate) fn canvas_body(
             })
             .collect();
         let edges = morph.as_ref().map_or(1.0, |m| m.connectors);
+        // Painted over the labels, which a badge at a route's middle can fall
+        // under where the route crosses a container's title band.
+        let mut badges: Vec<(&Connector, Transition, f32)> = Vec::new();
         if edges > 0.0 {
             let on_screen: HashSet<Id> = drawn.iter().map(|(b, _)| b.id).collect();
             for c in &g.connectors {
@@ -300,6 +328,9 @@ pub(crate) fn canvas_body(
                     let filtered = scene.edge_strength(c.from, c.to);
                     let alpha = marks.connector_alpha(marked, filtered, edges, camera.zoom);
                     paint_lanes(c, marked, alpha, bounds, camera, &scene.palette, window);
+                    if let Some(transition) = c.transition {
+                        badges.push((c, transition, marks.badge_alpha(marked, filtered, edges)));
+                    }
                 }
             }
         }
@@ -318,6 +349,9 @@ pub(crate) fn canvas_body(
             titles.extend(target);
         }
         entity.update(cx, |view, _| view.titles = titles);
+        for (c, transition, alpha) in badges {
+            paint_badge(c, transition, alpha, bounds, camera, &scene.palette, window);
+        }
         paint_scrollbars(
             bounds,
             scene.drawn.content(),
@@ -408,6 +442,21 @@ impl Palette {
         match kind {
             EdgeKind::Transitive => bviz_ui_theme::lighten(color, self.bridge_dim()),
             _ => color,
+        }
+    }
+
+    /// The fill of a transition badge: each kind its own, and no badge sharing
+    /// a hue with an edge kind's stroke, so a badge never reads as a piece of
+    /// route. The slots no edge kind takes are too few for every kind, so one
+    /// kind takes a hue between two slots, and an unknown change, which says
+    /// least of what changed, wears the label ink.
+    pub(crate) fn transition_color(&self, transition: Transition) -> Rgba {
+        match transition {
+            Transition::Exec => self.data.yellow.into(),
+            Transition::Platform => self.data.purple.into(),
+            Transition::Flag => self.data.green.into(),
+            Transition::Split => bviz_ui_theme::mix(self.data.purple, self.data.red, SPLIT_BLEND),
+            Transition::Changed => self.label,
         }
     }
 
@@ -561,6 +610,65 @@ fn paint_lanes(
         let lane = lane_polyline(&screen, slot * PARALLEL_SPACING * z);
         paint_connector(&lane, *kind, marked, alpha, z, palette, window);
     }
+}
+
+/// Sets the diamond marking `transition` halfway along `c`'s route.
+fn paint_badge(
+    c: &Connector,
+    transition: Transition,
+    alpha: f32,
+    bounds: Bounds<Pixels>,
+    camera: Camera,
+    palette: &Palette,
+    window: &mut Window,
+) {
+    let Some((x, y)) = midway(&c.points) else {
+        return;
+    };
+    let center = to_screen(x, y, bounds, camera);
+    let half = (BADGE_HALF * camera.zoom).max(BADGE_FLOOR);
+    let rim = faded(palette.background, alpha);
+    paint_diamond(center, half + BADGE_RIM, rim, window);
+    let fill = faded(palette.transition_color(transition), alpha);
+    paint_diamond(center, half, fill, window);
+}
+
+/// Fills the square standing on one corner, centred on `center`, whose corners
+/// lie `half` from it.
+pub(crate) fn paint_diamond(center: Point<Pixels>, half: f32, color: Rgba, window: &mut Window) {
+    let half = px(half);
+    let corners = [
+        point(center.x, center.y - half),
+        point(center.x + half, center.y),
+        point(center.x, center.y + half),
+        point(center.x - half, center.y),
+    ];
+    let mut diamond = PathBuilder::fill();
+    diamond.add_polygon(&corners, true);
+    if let Ok(path) = diamond.build() {
+        window.paint_path(path, color);
+    }
+}
+
+/// The point halfway along the polyline `points` by length; `None` for a route
+/// with no points.
+fn midway(points: &[(f64, f64)]) -> Option<(f64, f64)> {
+    let first = *points.first()?;
+    let legs = || {
+        points.windows(2).map(|leg| {
+            let (a, b) = (leg[0], leg[1]);
+            (a, b, (b.0 - a.0).hypot(b.1 - a.1))
+        })
+    };
+    let mut left = legs().map(|(_, _, length)| length).sum::<f64>() / 2.0;
+    for (a, b, length) in legs() {
+        if left <= length && length > 0.0 {
+            let t = left / length;
+            return Some((a.0 + (b.0 - a.0) * t, a.1 + (b.1 - a.1) * t));
+        }
+        left -= length;
+    }
+    Some(first)
 }
 
 /// Where `b` falls in the window under `camera`.
@@ -1017,7 +1125,21 @@ mod tests {
             kinds: vec![EdgeKind::Query],
             from: Id(0),
             to: Id(1),
+            transition: None,
         }
+    }
+
+    /// A badge sits halfway along a route by length, whatever its bends, so a
+    /// long leg carries it rather than the bend nearest the middle point.
+    #[test]
+    fn midway_falls_halfway_along_the_route() {
+        assert_eq!(midway(&[]), None);
+        assert_eq!(midway(&[(3.0, 4.0)]), Some((3.0, 4.0)));
+        assert_eq!(midway(&[(0.0, 0.0), (10.0, 0.0)]), Some((5.0, 0.0)));
+        assert_eq!(
+            midway(&[(0.0, 0.0), (2.0, 0.0), (2.0, 2.0), (2.0, 20.0)]),
+            Some((2.0, 9.0))
+        );
     }
 
     /// A route the view could not show whole is left out, so a zoom deep into a
@@ -1485,6 +1607,33 @@ mod colors {
             }
         }
         inks
+    }
+
+    /// A badge's kind is read off its fill, so no two kinds may be taken for
+    /// each other, for the stroke of a route, or for the canvas rim around it.
+    #[test]
+    fn every_transition_badge_is_told_from_the_others_and_from_every_route() {
+        for (theme, p) in palettes() {
+            for (i, kind) in Transition::ALL.iter().enumerate() {
+                let fill = p.transition_color(*kind);
+                let rim = distance(fill, p.background);
+                assert!(rim >= MIN_DISTINCT_COLOR, "{theme} {kind:?}: {rim}");
+                for edge in EDGE_KINDS {
+                    let apart = distance(fill, p.edge_color(edge, false));
+                    assert!(
+                        apart >= MIN_DISTINCT_COLOR,
+                        "{theme} {kind:?}/{edge:?}: {apart}"
+                    );
+                }
+                for other in &Transition::ALL[i + 1..] {
+                    let apart = distance(fill, p.transition_color(*other));
+                    assert!(
+                        apart >= MIN_DISTINCT_COLOR,
+                        "{theme} {kind:?}/{other:?}: {apart}"
+                    );
+                }
+            }
+        }
     }
 
     /// A leaf's kind is read off the color of the box, so no two kinds may be

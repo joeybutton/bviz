@@ -18,12 +18,14 @@ mod label;
 pub mod layout;
 pub mod lod;
 pub mod map;
+pub mod paths;
 pub mod query;
 pub mod quotient;
 pub mod reduce;
 pub mod repo;
 pub mod select;
 pub mod streamed_proto;
+pub mod transition;
 
 #[cfg(test)]
 mod test_support;

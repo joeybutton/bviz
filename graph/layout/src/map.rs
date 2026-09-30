@@ -14,6 +14,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use crate::graph::{Containment, EdgeKind, Graph, Node, id_span};
 use crate::intern::Id;
 use crate::layout::{self, BORDER, Box, Connector, LABEL_BAND, LEAF_HEIGHT, LaidOut};
+use crate::transition::Transitions;
 use crate::{lod, reduce};
 
 /// A container opens once its smaller side covers this many screen pixels, the
@@ -57,6 +58,7 @@ pub fn map_layout(base: Arc<Graph>, reduced: Arc<Graph>) -> MapLayout {
     MapLayout {
         base,
         reduced,
+        transitions: Arc::default(),
         containment: Arc::new(containment),
         drawing: Arc::new(drawing),
         expandable: Arc::new(expandable),
@@ -95,6 +97,9 @@ impl Level {
 pub struct MapLayout {
     base: Arc<Graph>,
     reduced: Arc<Graph>,
+    /// The transitions `base`'s edges cross, which each level's connectors
+    /// carry.
+    transitions: Arc<Transitions>,
     containment: Arc<Containment>,
     drawing: Arc<Drawing>,
     expandable: Arc<HashSet<Id>>,
@@ -117,6 +122,7 @@ impl MapLayout {
             view_of(
                 &self.base,
                 &self.reduced,
+                &self.transitions,
                 &level.open,
                 &self.drawing,
                 &self.containment,
@@ -154,13 +160,20 @@ impl MapLayout {
     /// leaves a hole where it stood, and everything else stays put.
     ///
     /// `base`'s nodes must be a subset of the placed graph's, keyed by the same
-    /// ids; `reduced` must be its transitive reduction. Which containers a level
+    /// ids; `reduced` must be its transitive reduction, and `transitions` those
+    /// `base`'s edges cross. Which containers a level
     /// opens is the placement's to say, so it is carried over unchanged and a
     /// container `base` drops simply goes undrawn.
-    pub fn restricted(&self, base: Arc<Graph>, reduced: Arc<Graph>) -> MapLayout {
+    pub fn restricted(
+        &self,
+        base: Arc<Graph>,
+        reduced: Arc<Graph>,
+        transitions: Arc<Transitions>,
+    ) -> MapLayout {
         MapLayout {
             base,
             reduced,
+            transitions,
             containment: Arc::clone(&self.containment),
             drawing: Arc::clone(&self.drawing),
             expandable: Arc::clone(&self.expandable),
@@ -539,20 +552,23 @@ fn open_at(expandable: &HashSet<Id>, drawing: &Drawing, scale: f64) -> HashSet<I
 fn view_of(
     base: &Graph,
     reduced: &Graph,
+    transitions: &Transitions,
     open: &HashSet<Id>,
     drawing: &Drawing,
     containment: &Containment,
     expandable: &HashSet<Id>,
 ) -> LaidOut {
-    let visible = lod::collapse(base, open);
+    let (visible, folding) = lod::collapse_folded(base, open);
     let mut connected: FxHashSet<(Id, Id)> =
         FxHashSet::with_capacity_and_hasher(visible.edges.len(), Default::default());
     connected.extend(visible.edges.iter().map(|e| (e.from, e.to)));
     let boxes = boxes(&visible, drawing, containment);
     let drawn = drawn_edges(visible, reduced, open, expandable);
+    let mut connectors = connectors(&drawn, drawing);
+    transitions.mark(&mut connectors, |from, to| folding.pair(from, to));
     LaidOut {
         boxes,
-        connectors: { connectors(&drawn, drawing) },
+        connectors,
         // The frames are laid out by layout_flat, which numbers no node.
         anchors: HashMap::new(),
         full_edges: connected.into_iter().collect(),
@@ -628,6 +644,7 @@ fn connectors(drawn: &Graph, drawing: &Drawing) -> Vec<Connector> {
             kinds,
             from,
             to,
+            transition: None,
         });
     }
     connectors
@@ -955,6 +972,45 @@ mod tests {
         }
     }
 
+    /// A tool built in the exec configuration, held with a sibling in one
+    /// target, and the configured target depending on it: every level of a
+    /// restriction carrying the transitions marks the connector the edge is
+    /// drawn along, into the tool or into the target folding it.
+    #[test]
+    fn a_restriction_marks_the_transitions_it_carries_at_every_level() {
+        use crate::facets::{Facets, Tri};
+        use crate::transition::Transition;
+
+        let mut base = Graph::new();
+        let mut facets = Facets::default();
+        let exec = facets.intern_config("ck1", Some("k8-opt-exec"), Tri::Yes);
+        let target = facets.intern_config("ck2", Some("k8-fastbuild"), Tri::No);
+        base.add_node(Node::new(Id(0), "tool", Kind::Target, None));
+        for (id, parent, config) in [
+            (1, Some(Id(0)), exec),
+            (2, Some(Id(0)), exec),
+            (3, None, target),
+        ] {
+            base.add_node(Node::new(Id(id), "ct", Kind::ConfiguredTarget, parent));
+            facets.set_config(Id(id), Some(config));
+        }
+        base.add_edge(Id(1), Id(3), EdgeKind::Cquery);
+        let map = mapped(&base);
+        let transitions = Arc::new(Transitions::of(&base, &facets));
+        let reduced = reduce::transitive_reduction(&base);
+        let sliced = map.restricted(Arc::new(base), Arc::new(reduced), transitions);
+
+        for level in 0..sliced.level_count() {
+            let marked: Vec<Option<Transition>> = sliced
+                .level(level)
+                .connectors
+                .iter()
+                .map(|c| c.transition)
+                .collect();
+            assert_eq!(marked, [Some(Transition::Exec)], "level {level}");
+        }
+    }
+
     /// A restriction is drawn into the holes its dropped nodes leave: what
     /// survives is drawn where the whole graph draws it, at every level, and the
     /// extent the camera pans over is the one the placement fixed.
@@ -975,7 +1031,7 @@ mod tests {
 
         let restricted = crate::filter::filter(&base, &map.reduced, &keep);
         let reduced = reduce::transitive_reduction(&restricted);
-        let sliced = map.restricted(Arc::new(restricted), Arc::new(reduced));
+        let sliced = map.restricted(Arc::new(restricted), Arc::new(reduced), Arc::default());
 
         assert_eq!(sliced.level_count(), map.level_count());
         assert_eq!(

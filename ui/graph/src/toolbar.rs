@@ -28,14 +28,14 @@ pub(crate) fn toolbar(
     );
     // The strip only ever offers a control the mode's layout can answer, so
     // everything on it acts on what is drawn.
-    if controls.mode.honors_reduce() {
+    if let Some(reduced) = controls.reduced.filter(|_| controls.mode.honors_reduce()) {
         bar = bar.child(
             Button::new(
                 "reduce-toggle",
                 cx.listener(|view, _: &ClickEvent, _, cx| view.toggle_reduce(cx)),
             )
             .label("reduce")
-            .selected(controls.reduced),
+            .selected(reduced),
         );
     }
     // Last, past the controls that are always up, so the strip's standing shape
@@ -45,6 +45,9 @@ pub(crate) fn toolbar(
     }
     if let Some(pin) = controls.pin_control {
         bar = bar.child(pin);
+    }
+    if let Some(why) = controls.why_controls {
+        bar = bar.child(why);
     }
     bar.when(controls.relaying, |bar| {
         bar.trailing(relaying_indicator(palette))

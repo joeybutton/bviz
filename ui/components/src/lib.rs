@@ -33,7 +33,7 @@ pub use scrubber::{ScrubberColors, ScrubberState, scrubber};
 pub use spinner::spinner;
 pub use text_input::TextInput;
 pub use toolbar::Toolbar;
-pub use tooltip::{TooltipColors, paint_tooltip_box};
+pub use tooltip::{TextTooltip, TooltipColors, paint_tooltip_box};
 
 use gpui::{App, Pixels, px};
 

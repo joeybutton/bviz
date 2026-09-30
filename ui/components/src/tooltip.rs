@@ -1,6 +1,8 @@
 use bviz_ui_theme::ThemeColors;
 use gpui::{
-    App, BorderStyle, Bounds, Hsla, Pixels, Point, Rgba, TextAlign, Window, point, px, quad, size,
+    AnyView, App, AppContext, BorderStyle, Bounds, Context, Hsla, IntoElement, ParentElement,
+    Pixels, Point, Render, Rgba, SharedString, Styled, TextAlign, Window, div, point, px, quad,
+    size,
 };
 
 const TOOLTIP_TEXT_SIZE: f32 = 12.0;
@@ -10,6 +12,10 @@ const TOOLTIP_PAD: f32 = 6.0;
 const TOOLTIP_LINE_GAP: f32 = 4.0;
 /// How far down and right of the cursor the panel is placed, clear of it.
 const TOOLTIP_OFFSET: f32 = 12.0;
+/// Corner radius of the panel.
+const TOOLTIP_RADIUS: f32 = 4.0;
+/// Width of the panel's border.
+const TOOLTIP_BORDER: f32 = 1.0;
 
 /// A tooltip's colors. The panel fill is opaque, so text under the tooltip does
 /// not read through it.
@@ -71,9 +77,9 @@ pub fn paint_tooltip_box(
 
     window.paint_quad(quad(
         Bounds::new(point(px(x), px(y)), size(px(box_w), px(box_h))),
-        px(4.),
+        px(TOOLTIP_RADIUS),
         colors.panel,
-        px(1.),
+        px(TOOLTIP_BORDER),
         Hsla::from(colors.border),
         BorderStyle::Solid,
     ));
@@ -87,5 +93,42 @@ pub fn paint_tooltip_box(
             window,
             cx,
         );
+    }
+}
+
+/// A line of text in the panel [`paint_tooltip_box`] paints, as a view an
+/// element's own tooltip can show.
+pub struct TextTooltip {
+    text: SharedString,
+    colors: TooltipColors,
+}
+
+impl TextTooltip {
+    /// Builds the tooltip showing `text`, for an element's `tooltip`.
+    pub fn builder(
+        text: SharedString,
+        colors: TooltipColors,
+    ) -> impl Fn(&mut Window, &mut App) -> AnyView + 'static {
+        move |_, cx| {
+            let text = text.clone();
+            cx.new(|_| TextTooltip { text, colors }).into()
+        }
+    }
+}
+
+impl Render for TextTooltip {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        // A tooltip view is drawn outside the element tree that sets the UI
+        // face, so it inherits none.
+        div()
+            .font_family(bviz_ui_assets::UI)
+            .p(px(TOOLTIP_PAD))
+            .rounded(px(TOOLTIP_RADIUS))
+            .border(px(TOOLTIP_BORDER))
+            .border_color(self.colors.border)
+            .bg(self.colors.panel)
+            .text_size(px(TOOLTIP_TEXT_SIZE))
+            .text_color(self.colors.label)
+            .child(self.text.clone())
     }
 }

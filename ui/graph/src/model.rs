@@ -23,9 +23,10 @@ pub(crate) struct Shared {
     pub(crate) reduced_base: Arc<Graph>,
     /// The placement every view of the whole graph is drawn in.
     pub(crate) map: Placement,
-    /// The interned node-id table the base graph keys on, which each layout
-    /// extends with the group ids its quotient pass mints.
-    pub(crate) names: Names,
+    /// The interned node-id table the base graph keys on, of which a panel's
+    /// drawing takes a copy to extend with the group ids its quotient pass
+    /// mints.
+    pub(crate) names: Arc<Names>,
     /// The facets of the base graph's nodes, keyed by the same ids, which a
     /// panel's filter selects on.
     pub(crate) facets: Arc<Facets>,
@@ -128,7 +129,7 @@ pub(crate) fn build(inputs: Vec<Input>) -> Result<Read, String> {
                 base,
                 reduced_base,
                 map,
-                names,
+                names: Arc::new(names),
                 facets: Arc::new(facets),
                 labels,
                 containers,

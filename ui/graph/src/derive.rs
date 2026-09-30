@@ -16,7 +16,9 @@ use crate::model::{Loaded, OPENS_REDUCED, Placement, Shared, Source};
 use crate::{GraphPanel, MARGIN, build};
 use bviz_graph_layout::graph::Graph;
 use bviz_graph_layout::lod::{DEFAULT_MAX_EDGES, DEFAULT_MAX_NODES, Overflow};
+use bviz_graph_layout::paths::Paths;
 use bviz_graph_layout::select::{Filter, Verdict};
+use bviz_graph_layout::transition::Transitions;
 use bviz_graph_layout::{Id, LaidOut, MapLayout, Names};
 use bviz_ui_components::load_in_background;
 use gpui::{Context, Task};
@@ -176,14 +178,22 @@ impl Expandable {
     }
 }
 
-/// The graph one filter leaves of the document's, with everything derived from
-/// it. A derivation replaces it whole, so a frame reads one filter's graph
+/// What a panel restricts the document's graph by.
+#[derive(Clone)]
+enum Lens {
+    Filter(Filter),
+    /// Dependency paths, drawn in place of whatever the panel's filter leaves.
+    Paths(Arc<Paths>),
+}
+
+/// The graph one lens leaves of the document's, with everything derived from
+/// it. A derivation replaces it whole, so a frame reads one lens's graph
 /// throughout.
 #[derive(Clone)]
 struct Slice {
-    /// The filter this was derived from, which a panel drawing through another
+    /// The lens this was derived from, which a panel drawing through another
     /// must restrict the document's graph afresh to leave behind.
-    filter: Filter,
+    lens: Lens,
     base: Arc<Graph>,
     /// The restriction with its transitively-redundant edges removed, which the
     /// collapsed views are projected through.
@@ -195,6 +205,9 @@ struct Slice {
     /// The nodes the filter draws as no part of what it selects, which the
     /// drawing fades rather than leaving out.
     faded: Arc<HashSet<Id>>,
+    /// The configuration transitions the graph's edges cross, which the drawing
+    /// marks; found for dependency paths alone.
+    transitions: Arc<Transitions>,
     /// Extended by each layered layout over this graph, whose quotient pass
     /// mints group ids against it.
     names: Names,
@@ -217,6 +230,7 @@ struct RestrictedMap {
     placement: Placement,
     base: Arc<Graph>,
     reduced: Arc<Graph>,
+    transitions: Arc<Transitions>,
     map: Arc<OnceLock<Arc<MapLayout>>>,
     /// Whether the levels of `map` have been asked for.
     levels_asked: Arc<AtomicBool>,
@@ -227,7 +241,11 @@ impl RestrictedMap {
     fn placed(&self) -> Option<&Arc<MapLayout>> {
         let whole = self.placement.placed()?;
         Some(self.map.get_or_init(|| {
-            Arc::new(whole.restricted(Arc::clone(&self.base), Arc::clone(&self.reduced)))
+            Arc::new(whole.restricted(
+                Arc::clone(&self.base),
+                Arc::clone(&self.reduced),
+                Arc::clone(&self.transitions),
+            ))
         }))
     }
 
@@ -248,13 +266,14 @@ impl Slice {
     /// nothing to draw through.
     fn whole(shared: &Shared, filter: Filter) -> Self {
         Slice {
-            filter,
+            lens: Lens::Filter(filter),
             base: Arc::clone(&shared.base),
             reduced: Arc::clone(&shared.reduced_base),
             map: SliceMap::Whole(shared.map.clone()),
             containers: Arc::clone(&shared.containers),
             faded: Arc::new(HashSet::new()),
-            names: shared.names.clone(),
+            transitions: Arc::default(),
+            names: Names::clone(&shared.names),
         }
     }
 
@@ -357,10 +376,20 @@ struct Restriction {
     map: Option<RestrictedMap>,
 }
 
+/// Dependency paths a panel draws, and the expansion its filter's drawing had,
+/// which clearing them returns to.
+struct PathView {
+    paths: Arc<Paths>,
+    expanded_under_filter: HashSet<Id>,
+}
+
 /// What a panel draws the document's graph as, and how far the derivation of it
 /// has got.
 pub(crate) struct Derived {
     filter: Filter,
+    /// Drawn in place of what `filter` leaves, with every edge: a reduction
+    /// drops an edge a longer path implies, which is itself a path.
+    paths: Option<PathView>,
     /// Container and group ids expanded in the layered layout last requested;
     /// every other container folds its subtree away so the layered layout only
     /// processes the visible view.
@@ -396,6 +425,7 @@ impl Derived {
     pub(crate) fn new() -> Self {
         Derived {
             filter: Filter::default(),
+            paths: None,
             expanded: HashSet::new(),
             reduced: OPENS_REDUCED,
             slice: None,
@@ -419,6 +449,7 @@ impl Derived {
     /// producing one.
     fn opened_on(&mut self, loaded: &Loaded) {
         self.filter = Filter::default();
+        self.paths = None;
         self.expanded = loaded.opening.expanded.clone();
         self.over_budget = loaded.opening.over_budget;
         self.slice = Some(Slice::whole(&loaded.shared, Filter::default()));
@@ -454,8 +485,56 @@ impl Derived {
         }
     }
 
-    pub(crate) fn reduced(&self) -> bool {
-        self.reduced
+    /// Whether the layered layout draws the transitive reduction, `None` where
+    /// the drawing offers no choice.
+    pub(crate) fn reduced(&self) -> Option<bool> {
+        self.paths.is_none().then_some(self.reduced)
+    }
+
+    /// Whether the layered layout draws the transitive reduction.
+    fn draws_reduced(&self) -> bool {
+        self.reduced().unwrap_or(false)
+    }
+
+    /// Draws `paths` in place of what the filter leaves, or the filter again
+    /// where `None`, at the expansion it had; reports whether that changes what
+    /// is drawn.
+    fn show_paths(&mut self, paths: Option<Arc<Paths>>) -> bool {
+        match (paths, self.paths.take()) {
+            (Some(paths), held) => {
+                let expanded_under_filter = match held {
+                    Some(held) => held.expanded_under_filter,
+                    None => self.expanded.clone(),
+                };
+                self.paths = Some(PathView {
+                    paths,
+                    expanded_under_filter,
+                });
+                true
+            }
+            (None, Some(held)) => {
+                self.expanded = held.expanded_under_filter;
+                true
+            }
+            (None, None) => false,
+        }
+    }
+
+    /// The lens the panel draws through.
+    fn lens(&self) -> Lens {
+        match &self.paths {
+            Some(view) => Lens::Paths(Arc::clone(&view.paths)),
+            None => Lens::Filter(self.filter.clone()),
+        }
+    }
+
+    /// Whether `lens` is the one the panel draws through.
+    fn draws_through(&self, lens: &Lens) -> bool {
+        match (lens, &self.paths) {
+            (Lens::Paths(drawn), Some(view)) => Arc::ptr_eq(drawn, &view.paths),
+            (Lens::Filter(drawn), None) => *drawn == self.filter,
+            _ => false,
+        }
     }
 
     /// The filter this panel draws its share of the document's graph through,
@@ -470,6 +549,13 @@ impl Derived {
             || Arc::new(HashSet::new()),
             |slice| Arc::clone(&slice.faded),
         )
+    }
+
+    /// The configuration transitions the drawing marks.
+    pub(crate) fn transitions(&self) -> Arc<Transitions> {
+        self.slice
+            .as_ref()
+            .map_or_else(Arc::default, |slice| Arc::clone(&slice.transitions))
     }
 
     /// Whether a derivation is running, so a view can show a progress indicator
@@ -512,12 +598,12 @@ impl Derived {
 
     /// Whether a derivation has to restrict the document's graph afresh rather
     /// than lay out over the restriction the panel holds, which it must wherever
-    /// that restriction was derived from another filter — as it is for every
+    /// that restriction was derived through another lens — as it is for every
     /// request made before a filter change has landed.
     fn restricting(&self) -> bool {
         self.slice
             .as_ref()
-            .is_some_and(|slice| slice.filter != self.filter)
+            .is_some_and(|slice| !self.draws_through(&slice.lens))
     }
 
     pub(crate) fn over_budget(&self) -> Option<Overflow> {
@@ -611,6 +697,7 @@ pub(crate) fn opened(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
     };
     view.derived.opened_on(loaded);
     crate::search::reset(view, cx);
+    crate::why::reset(view);
     ensure_layout(view, cx);
 }
 
@@ -696,10 +783,27 @@ pub(crate) fn set_filter_framed(
     apply_filter(view, filter, true, cx);
 }
 
+/// Draws `paths` in place of what the filter leaves, or the filter again where
+/// `None`, and moves the camera onto the drawing that lands.
+pub(crate) fn set_paths(
+    view: &mut GraphPanel,
+    paths: Option<Arc<Paths>>,
+    cx: &mut Context<GraphPanel>,
+) {
+    if view.derived.show_paths(paths) {
+        view.derived.frame_on_landing = true;
+        request(view, cx);
+    }
+}
+
 fn apply_filter(view: &mut GraphPanel, filter: Filter, frame: bool, cx: &mut Context<GraphPanel>) {
     if view.derived.filter == filter {
         return;
     }
+    // A reader changing the filter means to see what it draws, which the
+    // dependency paths drawn in its place would hide.
+    crate::why::put_away(view, cx);
+    view.derived.show_paths(None);
     view.derived.filter = filter;
     view.derived.frame_on_landing = frame;
     request(view, cx);
@@ -728,7 +832,7 @@ fn request(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
         .and_then(|drawn| view.view_zoom(&drawn));
     let derived = &mut view.derived;
     derived.in_flight = Some(InFlight { lays_out });
-    let (filter, reduced) = (derived.filter.clone(), derived.reduced);
+    let (lens, reduced) = (derived.lens(), derived.draws_reduced());
     let expanded = derived.expanded.clone();
     let held = derived.layered.clone();
     cx.notify();
@@ -741,7 +845,10 @@ fn request(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
             };
             let (mut slice, restricted) = match restricting {
                 true => {
-                    let (mut next, restricted) = restrict(&shared, &filter, &expanded, reduced);
+                    let (mut next, restricted) = match &lens {
+                        Lens::Filter(filter) => restrict(&shared, filter, &expanded, reduced),
+                        Lens::Paths(paths) => restrict_to_paths(&shared, paths),
+                    };
                     if let (Some(zoom), Some(map)) = (map_zoom, next.map()) {
                         map.level(map.level_for_scale(zoom));
                     }
@@ -767,6 +874,7 @@ fn request(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
                         expanded,
                         &mut slice.names,
                         reduced,
+                        &slice.transitions,
                         held.as_ref().map(|held| &held.view.anchors),
                     )),
                     base: Arc::clone(&slice.base),
@@ -845,28 +953,79 @@ fn restrict(
         },
         false => {
             let base = bviz_graph_layout::filter::filter(&shared.base, &shared.reduced_base, &keep);
-            let reduction = bviz_graph_layout::reduce::transitive_reduction(&base);
-            let containers = Arc::new(bviz_graph_layout::lod::expandable_containers(&base));
-            let (base, reduction) = (Arc::new(base), Arc::new(reduction));
-            Slice {
-                filter: filter.clone(),
-                map: SliceMap::Restricted(RestrictedMap {
-                    placement: shared.map.clone(),
-                    base: Arc::clone(&base),
-                    reduced: Arc::clone(&reduction),
-                    map: Arc::default(),
-                    levels_asked: Arc::default(),
-                }),
-                base,
-                reduced: reduction,
-                containers,
-                faded,
-                names: shared.names.clone(),
-            }
+            let lens = Lens::Filter(filter.clone());
+            restricted_slice(shared, lens, base, faded, Arc::default())
         }
     };
     let restricted = keeping(&slice, expanded, dropped, reduced);
     (slice, restricted)
+}
+
+/// The graph `paths` leaves of `shared`'s, opened as far as the caps that bound
+/// a legible drawing allow: the reader named exactly what to look at.
+fn restrict_to_paths(shared: &Shared, paths: &Arc<Paths>) -> (Slice, Restricted) {
+    let base = paths.subgraph(&shared.base);
+    let kept: FxHashSet<Id> = base.nodes.iter().map(|node| node.id).collect();
+    let mut dropped: HashSet<Id> = HashSet::with_capacity(shared.base.nodes.len() - kept.len());
+    dropped.extend(
+        shared
+            .base
+            .nodes
+            .iter()
+            .map(|node| node.id)
+            .filter(|id| !kept.contains(id)),
+    );
+    let opened = bviz_graph_layout::lod::default_expansion(
+        &base,
+        None,
+        DEFAULT_MAX_NODES,
+        DEFAULT_MAX_EDGES,
+    );
+    let (expanded, over_budget) = match opened {
+        Ok(expanded) => (expanded, None),
+        Err(overflow) => (HashSet::new(), Some(overflow)),
+    };
+    let lens = Lens::Paths(Arc::clone(paths));
+    let transitions = Arc::new(Transitions::of(&base, &shared.facets));
+    let slice = restricted_slice(shared, lens, base, Arc::new(HashSet::new()), transitions);
+    let restricted = Restricted {
+        dropped,
+        expanded,
+        over_budget,
+    };
+    (slice, restricted)
+}
+
+/// `base`, a restriction of `shared`'s graph through `lens`, with its reduction,
+/// its containers, and its map placed where the document places it; `faded` and
+/// `transitions` are what the drawing marks of it.
+fn restricted_slice(
+    shared: &Shared,
+    lens: Lens,
+    base: Graph,
+    faded: Arc<HashSet<Id>>,
+    transitions: Arc<Transitions>,
+) -> Slice {
+    let reduction = bviz_graph_layout::reduce::transitive_reduction(&base);
+    let containers = Arc::new(bviz_graph_layout::lod::expandable_containers(&base));
+    let (base, reduction) = (Arc::new(base), Arc::new(reduction));
+    Slice {
+        lens,
+        map: SliceMap::Restricted(RestrictedMap {
+            placement: shared.map.clone(),
+            base: Arc::clone(&base),
+            reduced: Arc::clone(&reduction),
+            transitions: Arc::clone(&transitions),
+            map: Arc::default(),
+            levels_asked: Arc::default(),
+        }),
+        base,
+        reduced: reduction,
+        containers,
+        faded,
+        transitions,
+        names: Names::clone(&shared.names),
+    }
 }
 
 /// What `slice` leaves of an expansion built up over the graph it restricts:
@@ -956,7 +1115,7 @@ mod tests {
                 base,
                 reduced_base,
                 map: placement,
-                names,
+                names: Arc::new(names),
                 facets,
                 labels,
                 containers,
@@ -1293,6 +1452,102 @@ mod tests {
             "the drawing was derived from another filter than the controls read"
         );
         assert!(derived.drawn(LayoutMode::Layered).is_none());
+    }
+
+    /// The paths from the second action of `//a:t` to the first of `//b:t`,
+    /// which the chain joins by one edge.
+    fn across(loaded: &Loaded) -> Arc<Paths> {
+        let found = bviz_graph_layout::paths::between(
+            &loaded.shared.base,
+            id(loaded, "//a:t#link"),
+            id(loaded, "//b:t#compile"),
+        )
+        .expect("a path");
+        Arc::new(found.paths)
+    }
+
+    /// Dependency paths draw the nodes on them in the packages and targets
+    /// holding them, and no edge but theirs.
+    #[test]
+    fn paths_draw_their_nodes_their_frames_and_their_edges_alone() {
+        let loaded = document();
+        let (slice, restricted) = restrict_to_paths(&loaded.shared, &across(&loaded));
+
+        let mut drawn: Vec<&str> = slice
+            .base
+            .nodes
+            .iter()
+            .map(|node| loaded.shared.names.resolve(node.id))
+            .collect();
+        drawn.sort_unstable();
+        assert_eq!(
+            drawn,
+            [
+                "//a",
+                "//a:t",
+                "//a:t#link",
+                "//b",
+                "//b:t",
+                "//b:t#compile"
+            ]
+        );
+        let edges: Vec<(Id, Id)> = slice.base.edges.iter().map(|e| (e.from, e.to)).collect();
+        assert_eq!(
+            edges,
+            [(id(&loaded, "//a:t#link"), id(&loaded, "//b:t#compile"))]
+        );
+        let mut dropped: Vec<&str> = restricted
+            .dropped
+            .iter()
+            .map(|&id| loaded.shared.names.resolve(id))
+            .collect();
+        dropped.sort_unstable();
+        assert_eq!(dropped, ["//a:t#compile", "//b:t#link"]);
+    }
+
+    /// Paths take the filter's place without overwriting it, so clearing them
+    /// draws through the filter again at the expansion it had, and the
+    /// reduction the reader chose is offered again.
+    #[test]
+    fn clearing_paths_returns_to_the_filter_and_its_expansion() {
+        let loaded = document();
+        let mut derived = opened(&loaded);
+        derived.filter = hiding(Kind::Source);
+        let expanded: HashSet<Id> = [id(&loaded, "//a:t")].into_iter().collect();
+        derived.expanded = expanded.clone();
+        let (slice, restricted) =
+            restrict(&loaded.shared, &derived.filter, &derived.expanded, true);
+        derived.adopt(Landed {
+            slice,
+            restricted: Some(restricted),
+            layered: Relaid::Nothing,
+        });
+        assert!(!derived.restricting());
+
+        assert!(derived.show_paths(Some(across(&loaded))));
+        assert!(derived.restricting());
+        assert_eq!(derived.reduced(), None);
+        let (slice, restricted) = restrict_to_paths(&loaded.shared, &across(&loaded));
+        assert!(
+            !derived.draws_through(&slice.lens),
+            "paths found afresh are told from the ones asked for"
+        );
+        derived.adopt(Landed {
+            slice: Slice {
+                lens: derived.lens(),
+                ..slice
+            },
+            restricted: Some(restricted),
+            layered: Relaid::Nothing,
+        });
+        assert!(!derived.restricting());
+
+        assert!(derived.show_paths(None));
+        assert!(!derived.show_paths(None), "nothing left to clear");
+        assert_eq!(derived.filter(), &hiding(Kind::Source));
+        assert_eq!(derived.expanded, expanded);
+        assert_eq!(derived.reduced(), Some(derived.reduced));
+        assert!(derived.restricting());
     }
 
     /// A drawing whose extent says which derivation produced it.
