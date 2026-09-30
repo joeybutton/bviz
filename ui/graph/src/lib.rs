@@ -42,6 +42,7 @@ mod pins;
 mod preset;
 mod relation;
 mod rules;
+mod scatter;
 mod scroll;
 mod search;
 mod selection;
@@ -60,6 +61,7 @@ use model::{GraphModel, MapPlaced, SourceReplaced};
 use morph::{Frame, Morph};
 use paint::{Scene, TitleTarget, canvas_body};
 use relation::Relation;
+pub use scatter::ScatterPanel;
 use scroll::{scrollbar_hit, start_scroll_drag};
 use search::Search;
 use selection::Selection;
@@ -912,10 +914,14 @@ pub fn open(load: impl Into<Load>, _window: &mut Window, cx: &mut App) -> Docume
     let label = load.title;
     let model = cx.new(|cx| GraphModel::reading(load.built, cx));
     let graph = ViewSpec::new({
-        let label = label.clone();
+        let (label, model) = (label.clone(), model.clone());
         move |cx| cx.new(|cx| GraphPanel::new(label.clone(), model.clone(), cx))
     });
-    Document::new(label, PanelGroup::one(graph).with_weight(Weight::CHART))
+    let scatter = ViewSpec::new(move |cx| cx.new(|cx| ScatterPanel::new(model.clone(), cx)));
+    Document::new(
+        label,
+        PanelGroup::tabs(graph, vec![scatter]).with_weight(Weight::CHART),
+    )
 }
 
 /// Renders a Bazel build graph from one or more `--output=streamed_proto`

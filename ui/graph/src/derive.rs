@@ -1110,8 +1110,8 @@ mod tests {
         let labels = Arc::new(LabelIndex::of(&base, &names, &facets));
         let map = bviz_graph_layout::map_layout(Arc::clone(&base), Arc::clone(&reduced_base));
         let (placement, landing) = Placement::pending();
-        let loaded = Loaded {
-            shared: Shared {
+        let loaded = Loaded::new(
+            Shared {
                 base,
                 reduced_base,
                 map: placement,
@@ -1121,11 +1121,11 @@ mod tests {
                 containers,
                 capabilities: bviz_graph_layout::capability::CapabilitiesBuilder::default().seal(),
             },
-            opening: Opening {
+            Opening {
                 expanded: HashSet::new(),
                 over_budget: None,
             },
-        };
+        );
         (loaded, move || landing.land(Arc::new(map)))
     }
 

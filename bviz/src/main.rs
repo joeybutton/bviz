@@ -73,6 +73,7 @@ mod tests {
     fn no_two_panels_share_a_view_kind() {
         let panels = [
             view_kind::<bviz_ui_graph::GraphPanel>(),
+            view_kind::<bviz_ui_graph::ScatterPanel>(),
             view_kind::<bviz_ui_trace::TracePanel>(),
             view_kind::<bviz_ui_trace::FlamePanel>(),
             view_kind::<bviz_ui_trace::StatsPanel>(),

@@ -2,6 +2,7 @@ use crate::build::build_graph;
 use crate::derive::derive_levels;
 use bviz_graph_layout::graph::Graph;
 use bviz_graph_layout::lod::{DEFAULT_MAX_EDGES, DEFAULT_MAX_NODES, Overflow};
+use bviz_graph_layout::metrics::{TargetMetrics, target_metrics};
 use bviz_graph_layout::select::labels::LabelIndex;
 use bviz_graph_layout::{Capabilities, Facets, Id, MapLayout, Names};
 use bviz_ui_components::{Pending, load_in_background};
@@ -84,6 +85,19 @@ pub(crate) struct Opening {
 pub(crate) struct Loaded {
     pub(crate) shared: Shared,
     pub(crate) opening: Opening,
+    /// Goes with the graph it measures, so a measuring still in flight when the
+    /// graph is replaced never lands.
+    measure: Measure,
+}
+
+impl Loaded {
+    pub(crate) fn new(shared: Shared, opening: Opening) -> Self {
+        Self {
+            shared,
+            opening,
+            measure: Measure::Unasked,
+        }
+    }
 }
 
 /// Whether a graph's layered view starts out drawing the transitive reduction of
@@ -124,8 +138,8 @@ pub(crate) fn build(inputs: Vec<Input>) -> Result<Read, String> {
     let containers = Arc::new(bviz_graph_layout::lod::expandable_containers(&base));
     let labels = Arc::new(LabelIndex::of(&base, &names, &facets));
     Ok(Read {
-        loaded: Loaded {
-            shared: Shared {
+        loaded: Loaded::new(
+            Shared {
                 base,
                 reduced_base,
                 map,
@@ -135,11 +149,11 @@ pub(crate) fn build(inputs: Vec<Input>) -> Result<Read, String> {
                 containers,
                 capabilities,
             },
-            opening: Opening {
+            Opening {
                 expanded,
                 over_budget,
             },
-        },
+        ),
         placing,
         landing,
     })
@@ -154,6 +168,17 @@ pub(crate) struct SourceReplaced;
 
 /// The loaded graph's map has landed in its [`Placement`].
 pub(crate) struct MapPlaced;
+
+/// A graph's per-target metrics, a pass over the whole graph that is only
+/// taken once a view drawing them asks for it.
+enum Measure {
+    Unasked,
+    Measuring {
+        /// Held so that the measuring is not cancelled.
+        _work: Task<()>,
+    },
+    Measured(Arc<[TargetMetrics]>),
+}
 
 /// A graph read for viewing, held apart from the panels drawing it so a view of
 /// it can close and be shown again without the graph being read or laid out
@@ -234,6 +259,40 @@ impl GraphModel {
             source: Source::Loading,
             _work: work,
             _placing: Task::ready(()),
+        }
+    }
+
+    /// Starts measuring the loaded graph's targets off the UI thread, notifying
+    /// once they land. Does nothing once started, or while the graph is still
+    /// being read.
+    pub(crate) fn ensure_metrics(&mut self, cx: &mut Context<Self>) {
+        let Source::Loaded(loaded) = &mut self.source else {
+            return;
+        };
+        let Measure::Unasked = loaded.measure else {
+            return;
+        };
+        let (base, facets) = (
+            Arc::clone(&loaded.shared.base),
+            Arc::clone(&loaded.shared.facets),
+        );
+        let work = load_in_background(
+            cx,
+            move || target_metrics(&base, &facets).into(),
+            |model, metrics, _| {
+                if let Source::Loaded(loaded) = &mut model.source {
+                    loaded.measure = Measure::Measured(metrics);
+                }
+            },
+        );
+        loaded.measure = Measure::Measuring { _work: work };
+    }
+
+    /// The loaded graph's per-target metrics, once measured.
+    pub(crate) fn metrics(&self) -> Option<&Arc<[TargetMetrics]>> {
+        match &self.loaded()?.measure {
+            Measure::Measured(metrics) => Some(metrics),
+            _ => None,
         }
     }
 
