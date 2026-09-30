@@ -1,6 +1,7 @@
 //! A scatter plot of a graph's actions, configured targets or targets by how
 //! much of the build each pulls in against how much of it depends on it.
 
+mod hue;
 mod paint;
 mod plot;
 
@@ -23,6 +24,7 @@ use gpui::{
     Rgba, ScrollDelta, ScrollWheelEvent, SharedString, Stateful, Subscription, Task, WeakEntity,
     Window, canvas, div, prelude::*, px,
 };
+use hue::{Colouring, Hue};
 use plot::{MIN_RADIUS, Picked, Plotted, Zoom};
 use std::sync::Arc;
 
@@ -191,10 +193,14 @@ impl ScatterPanel {
             move || {
                 let verdicts = filter.evaluate(&shared.base, &shared.names, &shared.facets);
                 let plots = |point: &Metrics| plotted_as(scope.unit(), point.kind);
-                let plotted = Plotted::of(&metrics, &reference, plots, |id| verdicts.get(id));
-                (plotted, filter)
+                let colouring = Colouring::of(scope.unit(), &reference, &shared.facets);
+                let hue = |point: &Metrics| colouring.hue(point, &shared.facets);
+                let plotted = Plotted::of(&metrics, &reference, plots, |id| verdicts.get(id), hue);
+                let points = metrics.points.iter().filter(|point| plots(point));
+                let legend = colouring.legend(points, &shared.facets);
+                (plotted, legend, filter)
             },
-            move |view, (plotted, filter), cx| {
+            move |view, (plotted, legend, filter), cx| {
                 view.plotting = None;
                 if view
                     .plot
@@ -205,6 +211,7 @@ impl ScatterPanel {
                 }
                 view.plot = Some(Plot {
                     plotted: Arc::new(plotted),
+                    legend,
                     hover: None,
                     filter,
                     scope,
@@ -454,6 +461,8 @@ const DOUBLE_CLICK: usize = 2;
 /// The measured points as drawn, and the mark among them under the pointer.
 struct Plot {
     plotted: Arc<Plotted>,
+    /// Each hue the plotted points are drawn in, and what it stands for.
+    legend: Vec<(SharedString, Hue)>,
     hover: Option<Hover>,
     /// What `plotted` was drawn through.
     filter: Filter,
@@ -612,48 +621,44 @@ impl Render for ScatterPanel {
         }));
         match &self.plot {
             None => root.child(centered_spinner(MEASURING, &palette.colors)),
-            Some(plot) => root
-                .child(legend(&plot.plotted, self.zoom, &palette))
-                .child(
-                    div()
-                        .id("scatter-plot")
-                        .relative()
-                        .flex_1()
-                        .min_h(px(0.))
-                        .child(cached_layer(self.canvas.clone()))
-                        .when(plot.hover.is_some() && model.reveals(), |plot| {
-                            plot.cursor_pointer()
-                        })
-                        .child(hover_layer(cx.entity(), palette))
-                        .on_mouse_move(cx.listener(|view, e: &MouseMoveEvent, _, cx| {
-                            if view.press.is_none() {
-                                view.hover_at(e.position, cx);
-                            }
-                        }))
-                        .on_scroll_wheel(cx.listener(|view, e: &ScrollWheelEvent, _, cx| {
-                            view.on_scroll_wheel(e, cx);
-                        }))
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(|view, e: &MouseDownEvent, _, cx| {
-                                view.on_mouse_down(e, cx)
-                            }),
-                        )
-                        // The window-global handlers are installed only by a frame
-                        // painted with the press in progress, which a quick click
-                        // finishes before.
-                        .on_mouse_up(
-                            MouseButton::Left,
-                            cx.listener(|view, e: &MouseUpEvent, _, cx| {
-                                view.end_press(e.position, DragEnd::Released, cx);
-                            }),
-                        )
-                        .on_hover(cx.listener(|view, hovered: &bool, _, cx| {
-                            if !hovered {
-                                view.clear_hover(cx);
-                            }
-                        })),
-                ),
+            Some(plot) => root.child(legend(plot, self.zoom, &palette)).child(
+                div()
+                    .id("scatter-plot")
+                    .relative()
+                    .flex_1()
+                    .min_h(px(0.))
+                    .child(cached_layer(self.canvas.clone()))
+                    .when(plot.hover.is_some() && model.reveals(), |plot| {
+                        plot.cursor_pointer()
+                    })
+                    .child(hover_layer(cx.entity(), palette))
+                    .on_mouse_move(cx.listener(|view, e: &MouseMoveEvent, _, cx| {
+                        if view.press.is_none() {
+                            view.hover_at(e.position, cx);
+                        }
+                    }))
+                    .on_scroll_wheel(cx.listener(|view, e: &ScrollWheelEvent, _, cx| {
+                        view.on_scroll_wheel(e, cx);
+                    }))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|view, e: &MouseDownEvent, _, cx| view.on_mouse_down(e, cx)),
+                    )
+                    // The window-global handlers are installed only by a frame
+                    // painted with the press in progress, which a quick click
+                    // finishes before.
+                    .on_mouse_up(
+                        MouseButton::Left,
+                        cx.listener(|view, e: &MouseUpEvent, _, cx| {
+                            view.end_press(e.position, DragEnd::Released, cx);
+                        }),
+                    )
+                    .on_hover(cx.listener(|view, hovered: &bool, _, cx| {
+                        if !hovered {
+                            view.clear_hover(cx);
+                        }
+                    })),
+            ),
         }
     }
 }
@@ -811,23 +816,15 @@ fn sizing_name(sizing: Sizing) -> &'static str {
     }
 }
 
-/// The strip naming the colour each kind of point is drawn in, what a mark's
-/// size stands for, and how to leave a zoom. The names wrap onto as many rows
-/// as they take, and one too long for a row is cut short; the hints wrap
+/// The strip naming what each colour a mark is drawn in stands for, what a
+/// mark's size stands for, and how to leave a zoom. The names wrap onto as many
+/// rows as they take, and one too long for a row is cut short; the hints wrap
 /// beneath the names where both do not fit.
-fn legend(plotted: &Plotted, zoom: Zoom, palette: &Palette) -> Div {
-    // Kinds a reader names alike and the graph colours alike read as one.
-    let mut entries: Vec<(&str, Rgba)> = Vec::with_capacity(plotted.kinds.len());
-    for &kind in &plotted.kinds {
-        let entry = (kind_names(kind).many, palette.kind_accent(kind));
-        if !entries.contains(&entry) {
-            entries.push(entry);
-        }
-    }
-    let entry = |(name, color): (&'static str, Rgba)| {
+fn legend(plot: &Plot, zoom: Zoom, palette: &Palette) -> Div {
+    let entry = |(name, hue): &(SharedString, Hue)| {
         let color = Rgba {
             a: SWATCH_ALPHA,
-            ..color
+            ..hue.color(palette)
         };
         div()
             .flex()
@@ -848,7 +845,7 @@ fn legend(plotted: &Plotted, zoom: Zoom, palette: &Palette) -> Div {
                     .overflow_hidden()
                     .whitespace_nowrap()
                     .text_ellipsis()
-                    .child(name),
+                    .child(name.clone()),
             )
     };
     div()
@@ -870,7 +867,7 @@ fn legend(plotted: &Plotted, zoom: Zoom, palette: &Palette) -> Div {
                 .gap_x_4()
                 .flex_1()
                 .min_w(px(LEGEND_NAMES_MIN_WIDTH))
-                .children(entries.into_iter().map(entry)),
+                .children(plot.legend.iter().map(entry)),
         )
         .child(
             div()
@@ -881,12 +878,12 @@ fn legend(plotted: &Plotted, zoom: Zoom, palette: &Palette) -> Div {
                 .gap_x_4()
                 .text_color(palette.colors.text_muted)
                 .when(zoom != Zoom::WHOLE, |hints| hints.child(ZOOMED))
-                .child(sizing_name(plotted.sizing)),
+                .child(sizing_name(plot.plotted.sizing)),
         )
 }
 
-/// The widest a legend entry's name is drawn before it is cut short, which the
-/// name of a kind is well within.
+/// The widest a legend entry's name is drawn before it is cut short, which a
+/// mnemonic or kind is well within.
 const LEGEND_NAME_WIDTH: f32 = 220.0;
 
 /// The narrowest the legend's names are squeezed to beside its hints, which

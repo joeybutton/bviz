@@ -95,7 +95,7 @@ pub(crate) fn paint_plot(
                 let fade = if mark.faded { UNMARKED_FADE } else { 1.0 };
                 let color = Rgba {
                     a: MARK_ALPHA * fade,
-                    ..palette.kind_accent(mark.target.kind)
+                    ..mark.hue.color(palette)
                 };
                 window.paint_quad(quad(
                     Bounds::new(center - point(r, r), size(r * 2., r * 2.)),

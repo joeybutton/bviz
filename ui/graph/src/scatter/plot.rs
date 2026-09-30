@@ -1,9 +1,10 @@
 //! Where the scatter plot's marks and ticks fall: counts on logarithmic axes,
 //! and a mark's size by the count its measurement sizes points by.
 
+use super::hue::Hue;
+use bviz_graph_layout::Id;
 use bviz_graph_layout::metrics::{Measurement, Metrics, Sizing};
 use bviz_graph_layout::select::Verdict;
-use bviz_graph_layout::{Id, Kind};
 use gpui::{Bounds, Pixels, Point, point, px};
 
 /// A count axis scaled by `log10(1 + n)`, so a count of zero sits at the origin
@@ -100,6 +101,7 @@ pub(crate) struct Mark {
     pub(crate) radius: f32,
     /// Whether the filter draws the point as no part of what it selects.
     pub(crate) faded: bool,
+    pub(crate) hue: Hue,
 }
 
 /// The marks a measurement's points draw as, and the axes that hold them. The
@@ -122,19 +124,18 @@ pub(crate) struct Plotted {
     pub(crate) x: LogScale,
     /// Blast radius along the vertical axis.
     pub(crate) y: LogScale,
-    /// The kinds of point among the marks, in enum order.
-    pub(crate) kinds: Vec<Kind>,
 }
 
 impl Plotted {
     /// The marks of those points `measured` that `plots` takes, as the filter
-    /// whose verdict on a node `verdict` gives draws them, scaled to `measured`
-    /// and `reference` alike.
+    /// whose verdict on a node `verdict` gives draws them, in the hue `hue`
+    /// gives, scaled to `measured` and `reference` alike.
     pub(crate) fn of(
         measured: &Measurement,
         reference: &Measurement,
         plots: impl Fn(&Metrics) -> bool,
         verdict: impl Fn(Id) -> Verdict,
+        hue: impl Fn(&Metrics) -> Hue,
     ) -> Self {
         let (targets, sizing) = (&measured.points, measured.sizing);
         let scaled = || targets.iter().chain(&reference.points).filter(|t| plots(t));
@@ -155,18 +156,11 @@ impl Plotted {
                 target,
                 radius: radius(sizing.of(&target), largest),
                 faded,
+                hue: hue(&target),
             })
         }));
         marks.sort_by_key(|mark| (!mark.faded, std::cmp::Reverse(sizing.of(&mark.target))));
-        let mut kinds: Vec<Kind> = targets
-            .iter()
-            .filter(|t| plots(t))
-            .map(|t| t.kind)
-            .collect();
-        kinds.sort_unstable();
-        kinds.dedup();
         Self {
-            kinds,
             marks,
             plotted,
             estimated: measured.estimated(),
@@ -379,8 +373,8 @@ pub(crate) struct Picked {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bviz_graph_layout::InputSet;
     use bviz_graph_layout::metrics::{Count, Scope, Unit};
+    use bviz_graph_layout::{InputSet, Kind};
     use gpui::size;
 
     fn target(closure: u32, blast_radius: u32, fan_in: u32) -> Metrics {
@@ -395,6 +389,10 @@ mod tests {
         }
     }
 
+    fn no_hue(_: &Metrics) -> Hue {
+        Hue::Other
+    }
+
     /// `targets` as measured, sized by fan-in.
     fn measured(targets: &[Metrics]) -> Measurement {
         Measurement {
@@ -407,7 +405,7 @@ mod tests {
     /// The marks of `targets` through a filter drawing every one.
     fn shown(targets: &[Metrics]) -> Plotted {
         let measured = measured(targets);
-        Plotted::of(&measured, &measured, |_| true, |_| Verdict::Shown)
+        Plotted::of(&measured, &measured, |_| true, |_| Verdict::Shown, no_hue)
     }
 
     #[test]
@@ -538,6 +536,7 @@ mod tests {
                 id if id == faded => Verdict::Faded,
                 _ => Verdict::Shown,
             },
+            no_hue,
         );
         let drawn: Vec<(Id, bool)> = plotted
             .marks
@@ -568,6 +567,7 @@ mod tests {
             &measured,
             |t| t.id != unplotted,
             |_| Verdict::Shown,
+            no_hue,
         );
         assert_eq!(plotted.plotted, 1);
         assert_eq!(plotted.marks.len(), 1);
@@ -582,8 +582,8 @@ mod tests {
     fn a_narrower_measure_is_drawn_on_the_scale_of_its_reference() {
         let whole = measured(&[target(3, 1, 1), target(400, 90, 9)]);
         let narrower = measured(&[target(3, 1, 1), target(40, 2, 3)]);
-        let plotted = Plotted::of(&narrower, &whole, |_| true, |_| Verdict::Shown);
-        let reference = Plotted::of(&whole, &whole, |_| true, |_| Verdict::Shown);
+        let plotted = Plotted::of(&narrower, &whole, |_| true, |_| Verdict::Shown, no_hue);
+        let reference = Plotted::of(&whole, &whole, |_| true, |_| Verdict::Shown, no_hue);
         assert_eq!((plotted.x, plotted.y), (reference.x, reference.y));
         let largest =
             |plotted: &Plotted| plotted.marks.iter().map(|m| m.radius).fold(0.0, f32::max);
