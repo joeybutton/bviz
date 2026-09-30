@@ -61,3 +61,53 @@ jobs:
           df -h /
           du -sh ~/.cache/bazel-disk ~/.cache/bazel-repo ~/.cache/bazelisk ~/.bazel || true
         if: ${{ !cancelled() }}
+
+  # One pre-release under a fixed tag, replaced on every run, so its download
+  # links stay stable and always point at the latest build of main. It is
+  # published only when every platform built.
+  release:
+    needs: build
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      TAG: nightly
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: bviz-*.tar.gz
+          merge-multiple: true
+          path: dist
+
+      - name: Write the release notes
+        run: |
+          cat > notes.md <<'EOF'
+          Built from ${{ github.sha }}. Each nightly build replaces this release.
+
+          To install, set `platform` to `linux-x86_64`, `macos-arm64` or
+          `macos-x86_64`, and make sure `~/.local/bin` is on your `PATH`:
+
+          ```sh
+          platform=linux-x86_64
+          curl -fsSL "${{ github.server_url }}/${{ github.repository }}/releases/download/${{ env.TAG }}/bviz-$platform.tar.gz" | tar -xz bviz
+          mkdir -p ~/.local/bin
+          mv bviz ~/.local/bin/
+          ```
+
+          The requirements for each platform are listed in the [README](${{ github.server_url }}/${{ github.repository }}#install).
+          EOF
+
+      # Deleting the release together with its tag lets the new one tag this
+      # run's commit.
+      - run: |
+          if gh release view "$TAG" > /dev/null 2>&1; then
+            gh release delete "$TAG" --cleanup-tag --yes
+          fi
+          gh release create "$TAG" dist/bviz-*.tar.gz \
+            --prerelease \
+            --target "$GITHUB_SHA" \
+            --title "Nightly" \
+            --notes-file notes.md
