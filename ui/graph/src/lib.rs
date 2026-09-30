@@ -917,7 +917,7 @@ impl From<GraphSource> for Load {
     fn from(source: GraphSource) -> Self {
         let title = title(&source);
         Self {
-            built: Pending::start(move || model::build(source.inputs())),
+            built: Pending::start(move || model::build(source)),
             title,
         }
     }

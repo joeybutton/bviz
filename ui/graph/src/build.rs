@@ -1,18 +1,16 @@
 use bviz_graph_layout::graph::Graph;
 use bviz_graph_layout::transition::Transitions;
 use bviz_graph_layout::{
-    Anchor, Capabilities, Facets, Id, Joint, LaidOut, Names, layout, quotient, streamed_proto,
+    Anchor, Id, InputSet, Joint, LaidOut, Names, layout, quotient, streamed_proto,
 };
-use bviz_ui_graph_args::{Input, InputKind};
+use bviz_ui_graph_args::{GraphSource, Input, InputKind};
 use rustc_hash::FxHashSet;
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 /// Reads every input's streamed_proto file and merges them into one joint graph,
-/// before any group quotienting. Cached so toggling a group needn't re-read or
-/// re-parse.
-pub(crate) fn build_graph(
-    inputs: &[Input],
-) -> Result<(Graph, Graph, Names, Facets, Capabilities), String> {
+/// before any group quotienting, returned with its transitive reduction. Cached
+/// so toggling a group needn't re-read or re-parse.
+pub(crate) fn build_graph(inputs: &[Input]) -> Result<(Joint, Graph), String> {
     let mut aq = None;
     let mut cq = None;
     let mut q = None;
@@ -40,18 +38,28 @@ pub(crate) fn build_graph(
             }
         }
     }
-    let Joint {
-        graph: base,
-        names,
-        facets,
-        capabilities,
-        ..
-    } = bviz_graph_layout::build_joint(aq.as_deref(), cq.as_deref(), q.as_deref(), false);
+    let joint = bviz_graph_layout::build_joint(aq.as_deref(), cq.as_deref(), q.as_deref(), false);
     // Transitively reduce the whole base once: a collapsed box then draws the
     // reduction of its hidden subtree's edges, so its edge count is stable under
     // expansion rather than re-derived (differently) from each view.
-    let reduced = bviz_graph_layout::reduce::transitive_reduction(&base);
-    Ok((base, reduced, names, facets, capabilities))
+    let reduced = bviz_graph_layout::reduce::transitive_reduction(&joint.graph);
+    Ok((joint, reduced))
+}
+
+/// The inputs `source` reads.
+pub(crate) fn loaded_inputs(source: &GraphSource) -> InputSet {
+    let (first, rest) = source.first_and_rest();
+    rest.iter().fold(input_of(first.kind).into(), |set, input| {
+        set.with(input_of(input.kind))
+    })
+}
+
+fn input_of(kind: InputKind) -> bviz_graph_layout::Input {
+    match kind {
+        InputKind::Aquery => bviz_graph_layout::Input::Aquery,
+        InputKind::Cquery => bviz_graph_layout::Input::Cquery,
+        InputKind::Query => bviz_graph_layout::Input::Query,
+    }
 }
 
 /// The transitive reduction `view` draws. `reduced_base` collapses to the same
@@ -131,7 +139,7 @@ pub(crate) fn relayout(
 mod tests {
     use super::*;
     use bviz_graph_layout::graph::Node;
-    use bviz_graph_layout::{EdgeKind, Kind};
+    use bviz_graph_layout::{EdgeKind, Facets, Kind};
     use std::cmp::Ordering;
 
     /// A target whose two configured targets are built as tools, one of which

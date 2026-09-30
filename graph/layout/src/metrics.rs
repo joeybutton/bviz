@@ -10,6 +10,7 @@ use rayon::prelude::*;
 use crate::facets::Facets;
 use crate::graph::{Graph, Kind};
 use crate::intern::Id;
+use crate::provenance::{InputSet, Provenance};
 use crate::reduce::{DenseIds, reach_counts};
 
 /// What one target's dependencies come to.
@@ -28,13 +29,21 @@ pub struct TargetMetrics {
     pub fan_out: u32,
 }
 
-/// The metrics of every target of `graph`, in node order: every node that
-/// `facets` names as its own target.
-pub fn target_metrics(graph: &Graph, facets: &Facets) -> Vec<TargetMetrics> {
+/// The metrics of every target of `graph` one of `inputs` built, in node order:
+/// every such node that `facets` names as its own target. Only the edges read
+/// from one of `inputs` count, so each input's share in the measure can be
+/// weighed by leaving it out.
+pub fn target_metrics(
+    graph: &Graph,
+    facets: &Facets,
+    provenance: &Provenance,
+    inputs: InputSet,
+) -> Vec<TargetMetrics> {
     let mut targets: Vec<(Id, Kind)> = graph
         .nodes
         .iter()
         .filter(|node| facets.label(node.id) == Some(node.id))
+        .filter(|node| provenance.of(node.id).is_some_and(|p| p.intersects(inputs)))
         .map(|node| (node.id, node.kind))
         .collect();
     let (dense, n) = DenseIds::new(targets.iter().map(|&(id, _)| id));
@@ -52,6 +61,7 @@ pub fn target_metrics(graph: &Graph, facets: &Facets) -> Vec<TargetMetrics> {
         graph
             .edges
             .iter()
+            .filter(|e| e.kind.input().is_some_and(|input| inputs.contains(input)))
             .filter_map(|e| Some((target_of(e.from)?, target_of(e.to)?)))
             .filter(|(from, to)| from != to),
     );
@@ -98,6 +108,7 @@ mod tests {
     use super::*;
     use crate::graph::{EdgeKind, Node};
     use crate::intern::Names;
+    use crate::provenance::Input;
 
     /// A graph of targets, each holding one configured target, with the edges
     /// `deps` between the configured targets of the named targets.
@@ -121,7 +132,18 @@ mod tests {
     }
 
     fn by_name(graph: &Graph, facets: &Facets, names: &Names) -> Vec<(String, u32, u32, u32, u32)> {
-        target_metrics(graph, facets)
+        let everything = Provenance::new(vec![InputSet::ALL; names.len()]);
+        measured_by(graph, facets, names, &everything, InputSet::ALL)
+    }
+
+    fn measured_by(
+        graph: &Graph,
+        facets: &Facets,
+        names: &Names,
+        provenance: &Provenance,
+        inputs: InputSet,
+    ) -> Vec<(String, u32, u32, u32, u32)> {
+        target_metrics(graph, facets, provenance, inputs)
             .into_iter()
             .map(|m| {
                 (
@@ -182,6 +204,40 @@ mod tests {
                 ("a".into(), 1, 2, 1, 1),
                 ("b".into(), 1, 2, 2, 1),
                 ("c".into(), 2, 0, 0, 1),
+            ]
+        );
+    }
+
+    /// query names `lib` and `app`, and the aquery `lib` and `gen`: each input
+    /// measures only the targets it built, through only its own edges.
+    #[test]
+    fn an_input_left_out_takes_its_targets_and_edges_along() {
+        let (mut g, f, n) = configured(&["lib", "app", "gen"], &[("gen", "lib")]);
+        g.edges[0].kind = EdgeKind::Aquery;
+        let id = |name: &str| n.get(name).unwrap();
+        g.add_edge(id("lib"), id("app"), EdgeKind::Query);
+        let (query, aquery) = (InputSet::from(Input::Query), InputSet::from(Input::Aquery));
+        let mut built_by = vec![query; n.len()];
+        for name in ["gen", "gen (config)", "lib (config)"] {
+            built_by[id(name).0 as usize] = aquery;
+        }
+        built_by[id("lib").0 as usize] = query.with(Input::Aquery);
+        let provenance = Provenance::new(built_by);
+
+        assert_eq!(
+            measured_by(&g, &f, &n, &provenance, query),
+            [("lib".into(), 0, 1, 1, 0), ("app".into(), 1, 0, 0, 1)]
+        );
+        assert_eq!(
+            measured_by(&g, &f, &n, &provenance, aquery),
+            [("lib".into(), 1, 0, 0, 1), ("gen".into(), 0, 1, 1, 0)]
+        );
+        assert_eq!(
+            measured_by(&g, &f, &n, &provenance, InputSet::ALL),
+            [
+                ("lib".into(), 1, 1, 1, 1),
+                ("app".into(), 2, 0, 0, 1),
+                ("gen".into(), 0, 2, 1, 0),
             ]
         );
     }

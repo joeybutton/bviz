@@ -1155,6 +1155,8 @@ mod tests {
                 labels,
                 containers,
                 capabilities: bviz_graph_layout::capability::CapabilitiesBuilder::default().seal(),
+                provenance: Arc::default(),
+                inputs: bviz_graph_layout::Input::Aquery.into(),
             },
             Opening {
                 expanded: HashSet::new(),

@@ -1,14 +1,14 @@
 use crate::GraphPanel;
-use crate::build::build_graph;
+use crate::build::{build_graph, loaded_inputs};
 use crate::derive::derive_levels;
 use bviz_graph_layout::graph::Graph;
 use bviz_graph_layout::lod::{DEFAULT_MAX_EDGES, DEFAULT_MAX_NODES, Overflow};
 use bviz_graph_layout::metrics::{TargetMetrics, target_metrics};
 use bviz_graph_layout::select::Filter;
 use bviz_graph_layout::select::labels::LabelIndex;
-use bviz_graph_layout::{Capabilities, Facets, Id, MapLayout, Names};
+use bviz_graph_layout::{Capabilities, Facets, Id, InputSet, Joint, MapLayout, Names, Provenance};
 use bviz_ui_components::{Pending, load_in_background};
-use bviz_ui_graph_args::Input;
+use bviz_ui_graph_args::GraphSource;
 use gpui::{Context, Entity, EntityId, EventEmitter, Subscription, Task};
 use std::collections::HashSet;
 use std::sync::{Arc, OnceLock};
@@ -42,6 +42,10 @@ pub(crate) struct Shared {
     /// Which filter axes the inputs this graph was read from support, by which
     /// the toolbar tells a control the inputs cannot answer from one they can.
     pub(crate) capabilities: Capabilities,
+    /// The inputs that built each node of the base graph.
+    pub(crate) provenance: Arc<Provenance>,
+    /// The inputs the graph was read from.
+    pub(crate) inputs: InputSet,
 }
 
 /// A graph's map, landing after the rest of the read. Every clone shares the
@@ -115,9 +119,19 @@ pub(crate) struct Read {
     landing: Landing,
 }
 
-/// Reads `inputs` and builds the graph, and starts placing its map.
-pub(crate) fn build(inputs: Vec<Input>) -> Result<Read, String> {
-    let (graph, reduced_base, names, facets, capabilities) = build_graph(&inputs)?;
+/// Reads `source` and builds the graph, and starts placing its map.
+pub(crate) fn build(source: GraphSource) -> Result<Read, String> {
+    let inputs = loaded_inputs(&source);
+    let (
+        Joint {
+            graph,
+            names,
+            facets,
+            capabilities,
+            provenance,
+        },
+        reduced_base,
+    ) = build_graph(&source.inputs())?;
     // The map derives each of its views against these, so it holds a share in
     // them rather than a copy.
     let (base, reduced_base) = (Arc::new(graph), Arc::new(reduced_base));
@@ -150,6 +164,8 @@ pub(crate) fn build(inputs: Vec<Input>) -> Result<Read, String> {
                 labels,
                 containers,
                 capabilities,
+                provenance: Arc::new(provenance),
+                inputs,
             },
             Opening {
                 expanded,
@@ -348,13 +364,13 @@ impl GraphModel {
         let Measure::Unasked = loaded.measure else {
             return;
         };
-        let (base, facets) = (
-            Arc::clone(&loaded.shared.base),
-            Arc::clone(&loaded.shared.facets),
-        );
+        let shared = loaded.shared.clone();
         let work = load_in_background(
             cx,
-            move || target_metrics(&base, &facets).into(),
+            move || {
+                let (base, facets) = (&shared.base, &shared.facets);
+                target_metrics(base, facets, &shared.provenance, shared.inputs).into()
+            },
             |model, metrics, cx| {
                 if let Source::Loaded(loaded) = &mut model.source {
                     loaded.measure = Measure::Measured(metrics);
