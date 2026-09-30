@@ -10,7 +10,7 @@ const TOOLTIP_TEXT_SIZE: f32 = 12.0;
 const TOOLTIP_PAD: f32 = 6.0;
 /// Leading added below each line.
 const TOOLTIP_LINE_GAP: f32 = 4.0;
-/// How far down and right of the cursor the panel is placed, clear of it.
+/// How far from its anchor the panel is placed along each axis, clear of it.
 const TOOLTIP_OFFSET: f32 = 12.0;
 /// Corner radius of the panel.
 const TOOLTIP_RADIUS: f32 = 4.0;
@@ -36,8 +36,24 @@ impl TooltipColors {
     }
 }
 
-/// Measures `lines`, sizes a padded box, clamps it inside `bounds`, and paints the
-/// panel background, border, and each line near `at`.
+/// Where a tooltip `extent` long starts along one axis spanning `start..end`
+/// for an anchor at `at`: past the anchor by [`TOOLTIP_OFFSET`], or as far
+/// before it where that runs past `end`, so the tooltip covers nothing at the
+/// anchor; slid inside the span only where neither side holds it.
+fn beside(at: f32, extent: f32, start: f32, end: f32) -> f32 {
+    let after = at + TOOLTIP_OFFSET;
+    let before = at - TOOLTIP_OFFSET - extent;
+    if after + extent <= end {
+        after
+    } else if before >= start {
+        before
+    } else {
+        (end - extent).max(start)
+    }
+}
+
+/// Measures `lines`, sizes a padded box, places it beside `at` inside `bounds`,
+/// and paints the panel background, border, and each line.
 pub fn paint_tooltip_box(
     lines: &[String],
     at: Point<Pixels>,
@@ -66,14 +82,8 @@ pub fn paint_tooltip_box(
     let top = f32::from(bounds.origin.y);
     let right = left + f32::from(bounds.size.width);
     let bottom = top + f32::from(bounds.size.height);
-    let mut x = f32::from(at.x) + TOOLTIP_OFFSET;
-    let mut y = f32::from(at.y) + TOOLTIP_OFFSET;
-    if x + box_w > right {
-        x = (right - box_w).max(left);
-    }
-    if y + box_h > bottom {
-        y = (bottom - box_h).max(top);
-    }
+    let x = beside(f32::from(at.x), box_w, left, right);
+    let y = beside(f32::from(at.y), box_h, top, bottom);
 
     window.paint_quad(quad(
         Bounds::new(point(px(x), px(y)), size(px(box_w), px(box_h))),
@@ -130,5 +140,22 @@ impl Render for TextTooltip {
             .text_size(px(TOOLTIP_TEXT_SIZE))
             .text_color(self.colors.label)
             .child(self.text.clone())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_tooltip_flips_before_its_anchor_where_it_would_run_past_the_end() {
+        assert_eq!(beside(10.0, 50.0, 0.0, 100.0), 10.0 + TOOLTIP_OFFSET);
+        assert_eq!(beside(90.0, 50.0, 0.0, 100.0), 90.0 - TOOLTIP_OFFSET - 50.0);
+    }
+
+    #[test]
+    fn a_tooltip_neither_side_holds_is_slid_inside_the_span() {
+        assert_eq!(beside(50.0, 80.0, 0.0, 100.0), 20.0);
+        assert_eq!(beside(50.0, 120.0, 0.0, 100.0), 0.0);
     }
 }
