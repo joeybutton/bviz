@@ -22,7 +22,7 @@ use std::ops::Range;
 use rayon::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet};
 
-use crate::graph::{Edge, Graph, Node};
+use crate::graph::{Edge, Graph};
 use crate::intern::Id;
 
 /// Returns `graph` with the same nodes but only the edges of a transitive
@@ -44,7 +44,7 @@ pub fn reduced(graph: Graph) -> Graph {
 /// reachable from another of the source's successors. A cycle leaves no
 /// topological order, and hands `graph` back for the caller to fall back with.
 fn dag_reduction(graph: Graph) -> Result<Graph, Graph> {
-    let (index, n) = DenseIds::new(&graph.nodes);
+    let (index, n) = DenseIds::new(graph.nodes.iter().map(|node| node.id));
     let dense = |e: &Edge| Some((index.get(e.from)?, index.get(e.to)?));
     let pairs = || {
         graph
@@ -80,8 +80,9 @@ fn dag_reduction(graph: Graph) -> Result<Graph, Graph> {
     Ok(out)
 }
 
-/// Dense indices for a graph's distinct node ids, numbered from zero.
-enum DenseIds {
+/// Dense indices for distinct node ids, numbered from zero in the order they
+/// are first named.
+pub(crate) enum DenseIds {
     /// Indexed by id.
     Table(Vec<Option<u32>>),
     Map(FxHashMap<Id, u32>),
@@ -89,39 +90,36 @@ enum DenseIds {
 
 /// The most slots per node an id-indexed [`DenseIds::Table`] may take. A small
 /// view of a large graph names ids far apart, and a table reaching its largest
-/// would cost more to allocate than the view takes to reduce.
+/// would cost more to allocate than the view takes to process.
 const TABLE_SLOTS_PER_NODE: usize = 32;
 
 impl DenseIds {
-    /// Numbers `nodes`' distinct ids, returning the index and how many there are.
-    fn new(nodes: &[Node]) -> (Self, u32) {
-        let span = nodes
-            .iter()
-            .map(|node| node.id.0 as usize + 1)
-            .max()
-            .unwrap_or(0);
+    /// Numbers the distinct `ids`, returning the index and how many there are.
+    pub(crate) fn new(ids: impl ExactSizeIterator<Item = Id> + Clone) -> (Self, u32) {
+        let named = ids.len();
+        let span = ids.clone().map(|id| id.0 as usize + 1).max().unwrap_or(0);
         let mut count = 0;
         let mut next = || {
             count += 1;
             count - 1
         };
-        let index = if span <= TABLE_SLOTS_PER_NODE * nodes.len() {
+        let index = if span <= TABLE_SLOTS_PER_NODE * named {
             let mut table = vec![None; span];
-            for node in nodes {
-                table[node.id.0 as usize].get_or_insert_with(&mut next);
+            for id in ids {
+                table[id.0 as usize].get_or_insert_with(&mut next);
             }
             Self::Table(table)
         } else {
-            let mut map = FxHashMap::with_capacity_and_hasher(nodes.len(), Default::default());
-            for node in nodes {
-                map.entry(node.id).or_insert_with(&mut next);
+            let mut map = FxHashMap::with_capacity_and_hasher(named, Default::default());
+            for id in ids {
+                map.entry(id).or_insert_with(&mut next);
             }
             Self::Map(map)
         };
         (index, count)
     }
 
-    fn get(&self, id: Id) -> Option<u32> {
+    pub(crate) fn get(&self, id: Id) -> Option<u32> {
         match self {
             Self::Table(table) => table.get(id.0 as usize).copied().flatten(),
             Self::Map(map) => map.get(&id).copied(),
@@ -1172,7 +1170,7 @@ mod tests {
             let expected = edges_keeping(&g, &naive_reduction(&g));
             assert_eq!(pairs(&r), expected, "{nodes} nodes, {edges} edges");
 
-            let (index, count) = DenseIds::new(&g.nodes);
+            let (index, count) = DenseIds::new(g.nodes.iter().map(|node| node.id));
             let mut succ: Vec<Vec<u32>> = vec![Vec::new(); count as usize];
             for e in &g.edges {
                 if let (Some(u), Some(v)) = (index.get(e.from), index.get(e.to))
@@ -1259,7 +1257,8 @@ mod tests {
         for (a, b) in [("a", "b"), ("b", "c"), ("a", "c")] {
             g.add_edge(n.intern(a), n.intern(b), EdgeKind::Aquery);
         }
-        assert!(matches!(DenseIds::new(&g.nodes).0, DenseIds::Map(_)));
+        let ids = g.nodes.iter().map(|node| node.id);
+        assert!(matches!(DenseIds::new(ids).0, DenseIds::Map(_)));
         let r = dag_reduction(g).ok().expect("a chain is acyclic");
         assert_eq!(
             kept(&r, &n),
