@@ -31,6 +31,10 @@ pub struct Button {
     /// button that is not one.
     selected: Option<bool>,
     compact: bool,
+    /// Whether the button can do nothing in the state it acts on, which it is
+    /// drawn greyed for and reports no click in. A disabled toggle still shows
+    /// whether it is on.
+    disabled: bool,
     focus_handle: Option<FocusHandle>,
     on_click: OnClick,
 }
@@ -47,6 +51,7 @@ impl Button {
             ghost: false,
             selected: None,
             compact: false,
+            disabled: false,
             focus_handle: None,
             on_click: Box::new(on_click),
         }
@@ -81,6 +86,11 @@ impl Button {
         self
     }
 
+    pub fn disabled(mut self, disabled: bool) -> Self {
+        self.disabled = disabled;
+        self
+    }
+
     pub fn track_focus(mut self, handle: &FocusHandle) -> Self {
         self.focus_handle = Some(handle.clone());
         self
@@ -102,15 +112,18 @@ fn sized(el: Stateful<Div>, button: &Button) -> Stateful<Div> {
 
 /// Whether the button paints as a block of accent.
 fn is_filled(button: &Button) -> bool {
-    matches!(
-        (button.selected, button.ghost),
-        (Some(true), _) | (None, false)
-    )
+    !button.disabled
+        && matches!(
+            (button.selected, button.ghost),
+            (Some(true), _) | (None, false)
+        )
 }
 
 /// The ink a button's label and icon are set in, read against the fill behind them.
 fn ink(button: &Button, colors: &ThemeColors) -> Hsla {
-    if is_filled(button) {
+    if button.disabled {
+        colors.text_disabled
+    } else if is_filled(button) {
         colors.text_on_accent
     } else {
         colors.text
@@ -162,6 +175,12 @@ fn stepped(fill: Hsla, toward: Hsla, levels: f32) -> Hsla {
     Hsla::from(mix(fill, toward, (levels / reach).clamp(0.0, 1.0)))
 }
 
+/// The fill of a toggle that is on but disabled: a wash of the accent it
+/// fills with when it can be switched.
+fn disabled_fill(colors: &ThemeColors) -> Hsla {
+    colors.selection
+}
+
 /// Marks the cursor with `hovered` and the press with `pressed`, painting the
 /// press into the base while the button is `held`.
 fn stateful(el: Stateful<Div>, held: bool, hovered: Hsla, pressed: Hsla) -> Stateful<Div> {
@@ -188,6 +207,16 @@ fn styled_variant(
     colors: &ThemeColors,
 ) -> Stateful<Div> {
     let el = sized(el, button).text_color(ink).rounded_md();
+    if button.disabled {
+        // No response to the cursor, which it offers nothing to.
+        return match button.selected {
+            Some(true) => {
+                let fill = disabled_fill(colors);
+                el.bg(fill).border_2().border_color(fill)
+            }
+            _ => el.border_2().border_color(colors.border_variant),
+        };
+    }
     let (hover, active) = (colors.element_hover, colors.element_active);
     match (button.selected, button.ghost) {
         (Some(false), true) => stateful(
@@ -268,6 +297,11 @@ impl RenderOnce for Button {
         // Persist the keyboard-held state across frames so enter/space show a press
         // (gpui's `.active` only tracks the mouse).
         let pressed = window.use_keyed_state(self.id.clone(), cx, |_, _| false);
+        // A button disabled mid-press loses the key handlers that would end the
+        // press.
+        if self.disabled {
+            pressed.update(cx, |pressed, _| *pressed = false);
+        }
         let held = *pressed.read(cx);
         let ink = ink(&self, &colors);
 
@@ -281,11 +315,14 @@ impl RenderOnce for Button {
             // Hold the measured size in a flex parent (e.g. a toolbar); without
             // this the row shrinks the button and wraps its label to a second line.
             .flex_none()
-            .cursor_pointer();
+            .when(!self.disabled, |el| el.cursor_pointer());
 
         let el = styled_variant(el, &self, focused, held, ink, &colors);
-        let el = with_held_state_handlers(el, self.focus_handle.as_ref(), pressed);
-        let el = el.on_click(self.on_click);
+        let el = match self.disabled {
+            true => el,
+            false => with_held_state_handlers(el, self.focus_handle.as_ref(), pressed)
+                .on_click(self.on_click),
+        };
 
         let el = match self.label {
             Some(label) => el.child(label),
@@ -349,6 +386,19 @@ mod tests {
                     let contrast = contrast_ratio(ring, fill);
                     assert!(contrast >= MIN_SECONDARY_CONTRAST, "{contrast}:1");
                 }
+            }
+        }
+    }
+
+    /// A toggle that is on but disabled has to be told from one that is off,
+    /// which draws no fill, on every surface it can sit on.
+    #[test]
+    fn a_disabled_toggle_that_is_on_shows_a_fill() {
+        for theme in built_in_themes() {
+            let colors = &theme.colors;
+            for surface in [colors.background, colors.surface, colors.panel] {
+                let step = level_step(over(disabled_fill(colors), surface), surface);
+                assert!(step >= MIN_VISIBLE_STEP, "{step} levels");
             }
         }
     }
