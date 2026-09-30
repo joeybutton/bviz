@@ -9,11 +9,12 @@ use crate::Palette;
 use crate::drag::CLICK_SLOP;
 use crate::model::{FilterChanged, GraphModel, Loaded, MetricsLanded, SourceReplaced};
 use crate::{PIXELS_PER_NOTCH, ZOOM_PER_NOTCH};
+use bviz_graph_layout::capability::TRANSITIONS_FLAG;
 use bviz_graph_layout::facets::Tri;
 use bviz_graph_layout::metrics::{Metrics, Scope, Sizing, Unit};
 use bviz_graph_layout::select::Filter;
 use bviz_graph_layout::select::labels::carried_label;
-use bviz_graph_layout::{Id, Input, InputSet, Kind};
+use bviz_graph_layout::{Axis, Capabilities, Id, Input, InputSet, Kind, Support};
 use bviz_ui_components::{
     Button, DragEnd, Dropdown, DropdownEvent, TextTooltip, Toolbar, TooltipColors, cached_layer,
     centered_spinner, load_in_background, spinner, track_drag,
@@ -677,6 +678,11 @@ impl Render for ScatterPanel {
                 .is_some_and(|plot| plot.scope != choice.scope);
             strip(choice, measuring, &palette, cx)
         }));
+        let capabilities = model.loaded().map(|loaded| &loaded.shared.capabilities);
+        let dropped = self.choice.as_ref().zip(capabilities);
+        let dropped =
+            dropped.and_then(|(choice, capabilities)| dropped_edges(choice, capabilities));
+        let root = root.children(dropped.map(|dropped| notice(dropped, &palette)));
         match &self.plot {
             None => root.child(centered_spinner(MEASURING, &palette.colors)),
             Some(plot) => root.child(legend(plot, self.zoom, &palette)).child(
@@ -829,6 +835,40 @@ fn strip(
                     .child("measuring…"),
             )
         })
+}
+
+/// The band beneath the strip saying `text` of what the measure leaves out,
+/// wrapped to the panel's width.
+fn notice(text: String, palette: &Palette) -> Div {
+    div()
+        .flex_none()
+        .px_2()
+        .py_1()
+        .bg(palette.colors.surface)
+        .border_b_1()
+        .border_color(palette.border)
+        .text_sm()
+        .text_color(palette.colors.warning)
+        .child(text)
+}
+
+/// What a measure of configured targets over cquery says of the cquery edges
+/// it leaves out: those a cquery run without the configuration of each
+/// dependency links only to the dependency's target, which no configured
+/// target holds.
+fn dropped_edges(choice: &Choice, capabilities: &Capabilities) -> Option<String> {
+    let scope = choice.scope;
+    if scope.unit() != Unit::ConfiguredTarget || !scope.inputs().contains(Input::Cquery) {
+        return None;
+    }
+    let dropped = match capabilities.support(Axis::ExecConfiguration) {
+        Support::Available => return None,
+        Support::Partial { .. } => "some cquery edges left out",
+        Support::Unavailable { .. } => "cquery edges left out",
+    };
+    Some(format!(
+        "{dropped} — run the cquery with {TRANSITIONS_FLAG}"
+    ))
 }
 
 /// Turns the loaded `input`'s share in the measure on and off, and says why
