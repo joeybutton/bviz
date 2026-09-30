@@ -93,45 +93,54 @@ pub(crate) const MIN_RADIUS: f32 = 2.5;
 /// The radius of the mark for the largest point.
 pub(crate) const MAX_RADIUS: f32 = 8.0;
 
-/// One target as the plot draws it.
+/// One point as the plot draws it.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Mark {
     pub(crate) target: Metrics,
     pub(crate) radius: f32,
-    /// Whether the filter draws the target as no part of what it selects.
+    /// Whether the filter draws the point as no part of what it selects.
     pub(crate) faded: bool,
 }
 
-/// The marks a set of targets draws as, and the axes that hold them. The axes
-/// and the mark sizes are scaled to every target measured, drawn or not, so a
-/// filter changes which marks are drawn and never where one falls.
+/// The marks a measurement's points draw as, and the axes that hold them. The
+/// axes and the mark sizes are scaled to every point plotted, drawn or not, so
+/// a filter moves no mark.
 pub(crate) struct Plotted {
     /// The faded before the rest, so none hides a mark the filter selects, and
     /// largest first within each, so a small mark is drawn over any large one
     /// it overlaps.
     pub(crate) marks: Vec<Mark>,
-    /// How many targets were measured, of which `marks` draws those the filter
+    /// How many points are plotted, of which `marks` draws those the filter
     /// does not hide.
-    pub(crate) measured: usize,
+    pub(crate) plotted: usize,
+    /// Whether any count measured is an estimate.
+    pub(crate) estimated: bool,
     /// What a mark's size stands for.
     pub(crate) sizing: Sizing,
     /// Closure along the horizontal axis.
     pub(crate) x: LogScale,
     /// Blast radius along the vertical axis.
     pub(crate) y: LogScale,
-    /// The kinds of target among the marks, in enum order.
+    /// The kinds of point among the marks, in enum order.
     pub(crate) kinds: Vec<Kind>,
 }
 
 impl Plotted {
-    /// The marks of the points `measured` as the filter whose verdict on a node
-    /// `verdict` gives draws them.
-    pub(crate) fn of(measured: &Measurement, verdict: impl Fn(Id) -> Verdict) -> Self {
+    /// The marks of those points `measured` that `plots` takes, as the filter
+    /// whose verdict on a node `verdict` gives draws them.
+    pub(crate) fn of(
+        measured: &Measurement,
+        plots: impl Fn(&Metrics) -> bool,
+        verdict: impl Fn(Id) -> Verdict,
+    ) -> Self {
         let (targets, sizing) = (&measured.points, measured.sizing);
-        let max = |measure: &dyn Fn(&Metrics) -> u32| targets.iter().map(measure).max();
+        let scaled = || targets.iter().filter(|t| plots(t));
+        let max = |measure: &dyn Fn(&Metrics) -> u32| scaled().map(measure).max();
         let largest = max(&|t| sizing.of(t)).unwrap_or(0);
+        let mut plotted = 0;
         let mut marks: Vec<Mark> = Vec::with_capacity(targets.len());
-        marks.extend(targets.iter().filter_map(|&target| {
+        marks.extend(targets.iter().filter(|t| plots(t)).filter_map(|&target| {
+            plotted += 1;
             let faded = match verdict(target.id) {
                 Verdict::Hidden => return None,
                 Verdict::Faded => true,
@@ -146,13 +155,18 @@ impl Plotted {
             })
         }));
         marks.sort_by_key(|mark| (!mark.faded, std::cmp::Reverse(sizing.of(&mark.target))));
-        let mut kinds: Vec<Kind> = targets.iter().map(|t| t.kind).collect();
+        let mut kinds: Vec<Kind> = targets
+            .iter()
+            .filter(|t| plots(t))
+            .map(|t| t.kind)
+            .collect();
         kinds.sort_unstable();
         kinds.dedup();
         Self {
             kinds,
             marks,
-            measured: targets.len(),
+            plotted,
+            estimated: measured.estimated(),
             sizing,
             x: LogScale::covering(max(&|t| t.closure.value()).unwrap_or(0)),
             y: LogScale::covering(max(&|t| t.blast_radius.value()).unwrap_or(0)),
@@ -389,7 +403,7 @@ mod tests {
 
     /// The marks of `targets` through a filter drawing every one.
     fn shown(targets: &[Metrics]) -> Plotted {
-        Plotted::of(&measured(targets), |_| Verdict::Shown)
+        Plotted::of(&measured(targets), |_| true, |_| Verdict::Shown)
     }
 
     #[test]
@@ -510,18 +524,22 @@ mod tests {
         let targets = [target(3, 1, 9), target(400, 2, 0), target(7, 90, 2)];
         let hidden = targets[1].id;
         let faded = targets[2].id;
-        let plotted = Plotted::of(&measured(&targets), |id| match id {
-            id if id == hidden => Verdict::Hidden,
-            id if id == faded => Verdict::Faded,
-            _ => Verdict::Shown,
-        });
+        let plotted = Plotted::of(
+            &measured(&targets),
+            |_| true,
+            |id| match id {
+                id if id == hidden => Verdict::Hidden,
+                id if id == faded => Verdict::Faded,
+                _ => Verdict::Shown,
+            },
+        );
         let drawn: Vec<(Id, bool)> = plotted
             .marks
             .iter()
             .map(|m| (m.target.id, m.faded))
             .collect();
         assert_eq!(drawn, [(faded, true), (targets[0].id, false)]);
-        assert_eq!(plotted.measured, targets.len());
+        assert_eq!(plotted.plotted, targets.len());
         let whole = shown(&targets);
         assert_eq!((plotted.x, plotted.y), (whole.x, whole.y));
         let radius_of = |plotted: &Plotted, id: Id| {
@@ -532,6 +550,22 @@ mod tests {
                 .map(|m| m.radius)
         };
         assert_eq!(radius_of(&plotted, faded), radius_of(&whole, faded));
+    }
+
+    #[test]
+    fn a_point_left_unplotted_scales_neither_the_axes_nor_the_sizes() {
+        let targets = [target(3, 900, 9), target(400, 2, 1)];
+        let unplotted = targets[0].id;
+        let plotted = Plotted::of(
+            &measured(&targets),
+            |t| t.id != unplotted,
+            |_| Verdict::Shown,
+        );
+        assert_eq!(plotted.plotted, 1);
+        assert_eq!(plotted.marks.len(), 1);
+        let alone = shown(&targets[1..]);
+        assert_eq!((plotted.x, plotted.y), (alone.x, alone.y));
+        assert_eq!(plotted.marks[0].radius, MAX_RADIUS);
     }
 
     #[test]

@@ -1,5 +1,5 @@
-//! A scatter plot of a graph's targets by how much of the build each pulls in
-//! against how much of it depends on the target.
+//! A scatter plot of a graph's actions, configured targets or targets by how
+//! much of the build each pulls in against how much of it depends on it.
 
 mod paint;
 mod plot;
@@ -12,7 +12,10 @@ use bviz_graph_layout::Kind;
 use bviz_graph_layout::metrics::{Metrics, Scope, Sizing, Unit};
 use bviz_graph_layout::select::Filter;
 use bviz_graph_layout::select::labels::carried_label;
-use bviz_ui_components::{DragEnd, cached_layer, centered_spinner, load_in_background, track_drag};
+use bviz_ui_components::{
+    DragEnd, Dropdown, DropdownEvent, Toolbar, cached_layer, centered_spinner, load_in_background,
+    spinner, track_drag,
+};
 use bviz_ui_workspace::{Panel, PanelEvent, PanelKind, ViewKind};
 use gpui::{
     App, Bounds, Context, Div, Entity, EventEmitter, FocusHandle, Focusable, IntoElement,
@@ -29,21 +32,24 @@ pub(crate) const KEY_CONTEXT: &str = "GraphScatter";
 
 gpui::actions!(bviz_graph, [ShowWholePlot]);
 
-/// What the panel reads while the graph's targets are being measured.
-const MEASURING: &str = "Computing target metrics…";
+/// What the panel reads while the graph is being measured.
+const MEASURING: &str = "Computing metrics…";
 
-/// The targets of a graph, placed by their closure and blast radius.
+/// The points of a graph, placed by their closure and blast radius.
 pub struct ScatterPanel {
     focus: FocusHandle,
-    /// Measures the targets the first time this panel is shown.
+    /// Measures the graph the first time this panel is shown.
     model: Entity<GraphModel>,
     /// Whether the workspace is showing the panel, which a graph landing while
     /// it is shown is measured for at once.
     shown: bool,
-    /// The measured targets as drawn, from the time they land.
+    /// What the plot measures, from the time the graph is read.
+    choice: Option<Choice>,
+    /// The measured points as drawn, from the time they land.
     plot: Option<Plot>,
-    /// The part of each axis the plot shows, which outlasts a replot: a filter
-    /// moves no mark.
+    /// The part of each axis the plot drawn shows, which outlasts a replot in
+    /// the same unit, since a filter moves no mark, and is the whole of each
+    /// axis for the first plot of a unit.
     zoom: Zoom,
     /// The layer drawing the marks; notified through
     /// [`Self::invalidate_canvas`].
@@ -52,7 +58,7 @@ pub struct ScatterPanel {
     bounds: Option<Bounds<Pixels>>,
     /// The press over the plot, until the button comes up again.
     press: Option<Press>,
-    /// Plots the targets through the graph's filter, absent while nothing is
+    /// Plots the points through the graph's filter, absent while nothing is
     /// being plotted, so that one plotting runs at a time.
     plotting: Option<Task<()>>,
     /// Redraws as the graph is read and measured.
@@ -68,12 +74,13 @@ impl ScatterPanel {
         let source_replaced = cx.subscribe(&model, |view, _, _: &SourceReplaced, cx| {
             view.plot = None;
             view.plotting = None;
+            view.choice = Choice::of(&view.model, cx);
             if view.shown {
                 view.measure(cx);
             }
         });
-        let metrics_landed = cx.subscribe(&model, |view, model, landed: &MetricsLanded, cx| {
-            if plotted_scope(model.read(cx)) == Some(landed.scope) {
+        let metrics_landed = cx.subscribe(&model, |view, _, landed: &MetricsLanded, cx| {
+            if view.scope() == Some(landed.scope) {
                 view.replot(cx);
             }
         });
@@ -83,6 +90,7 @@ impl ScatterPanel {
         let parent = cx.entity().downgrade();
         Self {
             focus: cx.focus_handle(),
+            choice: Choice::of(&model, cx),
             model,
             shown: false,
             plot: None,
@@ -98,35 +106,62 @@ impl ScatterPanel {
         }
     }
 
-    /// Has the graph's targets measured, and brings the plot up to date where
-    /// they already are.
+    /// The scope the plot measures in, once the graph is read.
+    fn scope(&self) -> Option<Scope> {
+        self.choice.as_ref().map(|choice| choice.scope)
+    }
+
+    /// Has the graph measured in the chosen scope, and brings the plot up to
+    /// date where it already is.
     fn measure(&mut self, cx: &mut Context<Self>) {
-        self.model.update(cx, |model, cx| {
-            if let Some(scope) = plotted_scope(model) {
-                model.want_metrics(&[scope], cx);
-            }
-        });
+        if let Some(scope) = self.scope() {
+            self.model
+                .update(cx, |model, cx| model.want_metrics(&[scope], cx));
+        }
         self.replot(cx);
     }
 
-    /// Plots the measured targets through the filter the graph's other views
-    /// draw through, where the plot drawn is not drawn through it. A hidden
-    /// panel waits until it is shown, and a plotting running replots once it
-    /// lands. The filter is evaluated over every node of the graph, so this
-    /// runs off the UI thread, and the plot drawn stays until the new one lands.
+    /// Measures the graph's points in `unit` over the inputs describing it.
+    fn choose_unit(&mut self, unit: Unit, cx: &mut Context<Self>) {
+        let Some(loaded) = self.model.read(cx).loaded() else {
+            return;
+        };
+        let (Some(choice), Some(scope)) =
+            (&mut self.choice, Scope::new(unit, loaded.shared.inputs))
+        else {
+            return;
+        };
+        choice.scope = scope;
+        self.measure(cx);
+        cx.notify();
+    }
+
+    /// Plots the measured points through the filter the graph's other views
+    /// draw through, where the plot drawn is not of the chosen scope or not
+    /// drawn through that filter. A hidden panel waits until it is shown, and a
+    /// plotting running replots once it lands. The filter is evaluated over
+    /// every node of the graph, so this runs off the UI thread, and the plot
+    /// drawn stays until the new one lands.
     fn replot(&mut self, cx: &mut Context<Self>) {
         if !self.shown || self.plotting.is_some() {
             return;
         }
+        let Some(scope) = self.scope() else {
+            return;
+        };
         let model = self.model.read(cx);
         let Some(loaded) = model.loaded() else {
             return;
         };
-        let Some(metrics) = plotted_scope(model).and_then(|scope| model.metrics(scope)) else {
+        let Some(metrics) = model.metrics(scope) else {
             return;
         };
         let filter = model.filter().cloned().unwrap_or_default();
-        if self.plot.as_ref().is_some_and(|plot| plot.filter == filter) {
+        if self
+            .plot
+            .as_ref()
+            .is_some_and(|plot| plot.filter == filter && plot.scope == scope)
+        {
             return;
         }
         let (metrics, shared) = (Arc::clone(metrics), loaded.shared.clone());
@@ -134,14 +169,24 @@ impl ScatterPanel {
             cx,
             move || {
                 let verdicts = filter.evaluate(&shared.base, &shared.names, &shared.facets);
-                (Plotted::of(&metrics, |id| verdicts.get(id)), filter)
+                let plots = |point: &Metrics| plotted_as(scope.unit(), point.kind);
+                let plotted = Plotted::of(&metrics, plots, |id| verdicts.get(id));
+                (plotted, filter)
             },
-            |view, (plotted, filter), cx| {
+            move |view, (plotted, filter), cx| {
                 view.plotting = None;
+                if view
+                    .plot
+                    .as_ref()
+                    .is_none_or(|plot| plot.scope.unit() != scope.unit())
+                {
+                    view.zoom = Zoom::WHOLE;
+                }
                 view.plot = Some(Plot {
                     plotted: Arc::new(plotted),
                     hover: None,
                     filter,
+                    scope,
                 });
                 view.invalidate_canvas(cx);
                 view.replot(cx);
@@ -283,21 +328,58 @@ impl ScatterPanel {
     }
 }
 
-/// The scope the plot measures in: every target over every input read, absent
-/// until the graph is.
-fn plotted_scope(model: &GraphModel) -> Option<Scope> {
-    Scope::new(Unit::Target, model.loaded()?.shared.inputs)
+/// What the plot measures, and the picker choosing its unit among those the
+/// graph's inputs describe.
+struct Choice {
+    scope: Scope,
+    /// Finest first, in the picker's order.
+    units: Vec<Unit>,
+    picker: Entity<Dropdown>,
+    _picked: Subscription,
+}
+
+impl Choice {
+    /// The finest unit the graph `model` has read is measured in, over every
+    /// input describing it; absent until the graph is read.
+    fn of(model: &Entity<GraphModel>, cx: &mut Context<ScatterPanel>) -> Option<Self> {
+        let inputs = model.read(cx).loaded()?.shared.inputs;
+        let units: Vec<Unit> = Unit::ALL
+            .into_iter()
+            .filter(|&unit| Scope::new(unit, inputs).is_some())
+            .collect();
+        let scope = Scope::new(*units.first()?, inputs)?;
+        let names = units.iter().map(|&unit| unit_names(unit).many);
+        let picker = cx.new(|cx| Dropdown::new("scatter-unit", names, 0, cx));
+        let picked = cx.subscribe(&picker, |view, _, event, cx| {
+            let DropdownEvent::Changed(index) = event;
+            let unit = view
+                .choice
+                .as_ref()
+                .and_then(|c| c.units.get(*index).copied());
+            if let Some(unit) = unit {
+                view.choose_unit(unit, cx);
+            }
+        });
+        Some(Self {
+            scope,
+            units,
+            picker,
+            _picked: picked,
+        })
+    }
 }
 
 /// The `click_count` of the press completing a double click.
 const DOUBLE_CLICK: usize = 2;
 
-/// The measured targets as drawn, and the mark among them under the pointer.
+/// The measured points as drawn, and the mark among them under the pointer.
 struct Plot {
     plotted: Arc<Plotted>,
     hover: Option<Hover>,
     /// What `plotted` was drawn through.
     filter: Filter,
+    /// What `plotted` measures.
+    scope: Scope,
 }
 
 /// A press over the plot, which is a click until it is dragged past
@@ -316,12 +398,33 @@ struct Hover {
     lines: Vec<String>,
 }
 
-/// How many targets the plot draws, of how many were measured.
-fn drawn_status(plotted: &Plotted) -> String {
-    match (plotted.marks.len(), plotted.measured) {
-        (drawn, measured) if drawn == measured => format!("{measured} targets"),
-        (drawn, measured) => format!("{drawn} of {measured} targets"),
+/// Whether a measured point of `kind` is plotted as a point of `unit`: a
+/// source file is a point of a measure of actions, but no action.
+fn plotted_as(unit: Unit, kind: Kind) -> bool {
+    unit != Unit::Action || kind == Kind::Action
+}
+
+/// How many points of `unit` the plot draws, of how many it plots.
+fn drawn_status(plotted: &Plotted, unit: Unit) -> String {
+    let many = unit_names(unit).many;
+    let drawn = match (plotted.marks.len(), plotted.plotted) {
+        (drawn, all) if drawn == all => format!("{all} {many}"),
+        (drawn, all) => format!("{drawn} of {all} {many}"),
+    };
+    match plotted.estimated {
+        true => format!("{drawn}, counts estimated"),
+        false => drawn,
     }
+}
+
+/// How a reader names one point of `unit`, and several.
+fn unit_names(unit: Unit) -> KindNames {
+    let (one, many) = match unit {
+        Unit::Action => ("action", "actions"),
+        Unit::ConfiguredTarget => ("configured target", "configured targets"),
+        Unit::Target => ("target", "targets"),
+    };
+    KindNames { one, many }
 }
 
 /// What the tooltip over `target` reads, where `coincident` other targets sit
@@ -386,7 +489,7 @@ impl Panel for ScatterPanel {
         let model = self.model.read(cx);
         let status = model.source().status("No graph", |_| match &self.plot {
             None => MEASURING.into(),
-            Some(plot) => drawn_status(&plot.plotted),
+            Some(plot) => drawn_status(&plot.plotted, plot.scope.unit()),
         });
         Some(status.into())
     }
@@ -421,6 +524,13 @@ impl Render for ScatterPanel {
         if let Some(placeholder) = model.source().placeholder(&palette.colors) {
             return root.child(placeholder);
         }
+        let root = root.children(self.choice.as_ref().map(|choice| {
+            let measuring = self
+                .plot
+                .as_ref()
+                .is_some_and(|plot| plot.scope != choice.scope);
+            strip(choice, measuring, &palette)
+        }));
         match &self.plot {
             None => root.child(centered_spinner(MEASURING, &palette.colors)),
             Some(plot) => root
@@ -515,6 +625,8 @@ struct KindNames {
 
 fn kind_names(kind: Kind) -> KindNames {
     let (one, many) = match kind {
+        Kind::Action => ("action", "actions"),
+        Kind::ConfiguredTarget => ("configured target", "configured targets"),
         Kind::Source => ("source file", "source files"),
         Kind::Artifact => ("generated file", "generated files"),
         Kind::TargetGroup => (
@@ -533,6 +645,34 @@ const SWATCH_ALPHA: f32 = 0.7;
 /// Diameter of a legend swatch: twice the smallest mark's, so its hue reads.
 const SWATCH_DIAMETER: f32 = 4.0 * MIN_RADIUS;
 
+/// What the legend reads while the plot shows part of an axis.
+const ZOOMED: &str = "double-click empty space or press 0 to show all";
+
+/// The strip choosing what the plot measures, which reads `measuring` while a
+/// new choice is measured over the plot drawn for the last.
+fn strip(choice: &Choice, measuring: bool, palette: &Palette) -> Toolbar {
+    let unit = div()
+        .flex()
+        .items_center()
+        .gap_2()
+        .text_sm()
+        .text_color(palette.label)
+        .child("points")
+        .child(choice.picker.clone());
+    Toolbar::new().child(unit).when(measuring, |bar| {
+        bar.trailing(
+            div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .text_sm()
+                .text_color(palette.label)
+                .child(spinner("scatter-measuring", px(14.), palette.label))
+                .child("measuring…"),
+        )
+    })
+}
+
 /// How the legend names what a mark's size stands for.
 fn sizing_name(sizing: Sizing) -> &'static str {
     match sizing {
@@ -541,10 +681,7 @@ fn sizing_name(sizing: Sizing) -> &'static str {
     }
 }
 
-/// What the legend reads while the plot shows part of an axis.
-const ZOOMED: &str = "double-click empty space or press 0 to show all";
-
-/// The strip naming the colour each kind of target is drawn in, what a mark's
+/// The strip naming the colour each kind of point is drawn in, what a mark's
 /// size stands for, and how to leave a zoom.
 fn legend(plotted: &Plotted, zoom: Zoom, palette: &Palette) -> Div {
     // Kinds a reader names alike and the graph colours alike read as one.
@@ -590,7 +727,7 @@ fn legend(plotted: &Plotted, zoom: Zoom, palette: &Palette) -> Div {
         )
 }
 
-/// The layer the targets are drawn in, cached across frames that leave the
+/// The layer the points are drawn in, cached across frames that leave the
 /// plot and zoom unchanged.
 struct ScatterCanvas {
     /// The panel whose plot and zoom this draws.
