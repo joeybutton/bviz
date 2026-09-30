@@ -23,7 +23,9 @@ jobs:
       - uses: actions/checkout@v7
       - uses: bazel-contrib/setup-bazel@0.19.0
         with:
-          bazelrc: build --platforms=//platforms:linux_x86_64
+          bazelrc: |
+            common --config=ci
+            build --platforms=//platforms:linux_x86_64
           bazelisk-cache: true
       - uses: ./.github/actions/buildbuddy
 

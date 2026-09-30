@@ -27,6 +27,11 @@ common --incompatible_enable_proto_toolchain_resolution
 # find it (E0460, E0463).
 build:remote --@rules_rs_rules_rust//rust/settings:pipelined_compilation
 
+# CI's external-repository fetching and package loading wait on remote round
+# trips, not the CPU, so their concurrency is set by how many requests can be in
+# flight rather than by the runner's cores that the default derives it from.
+common:ci --loading_phase_threads=32
+
 # Style and lint checks; both report a finding rather than rewriting the source.
 build:rustfmt --aspects=@rules_rs_rules_rust//rust:defs.bzl%rustfmt_aspect
 build:rustfmt --output_groups=rustfmt_checks
