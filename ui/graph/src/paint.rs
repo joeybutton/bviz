@@ -394,7 +394,7 @@ impl Palette {
     /// Accent for a leaf box, keyed by its node kind. Actions, artifacts and
     /// source files each take a slot of their own; every other kind shares the
     /// catch-all.
-    fn kind_accent(&self, kind: Kind) -> Rgba {
+    pub(crate) fn kind_accent(&self, kind: Kind) -> Rgba {
         match kind {
             Kind::Action => self.data.orange,
             Kind::Artifact => self.data.green,
