@@ -20,11 +20,13 @@ pub(crate) struct UnitPicker {
 
 impl UnitPicker {
     /// The picker among the units `inputs` describe, each over every input of
-    /// `inputs` describing it and the finest chosen, which calls `picked` as
-    /// each unit is chosen after; absent where `inputs` describe none.
+    /// `inputs` describing it, which calls `picked` as each unit is chosen
+    /// after; absent where `inputs` describe none. The unit `opening` is
+    /// chosen first where `inputs` describe it, and the finest otherwise.
     pub(crate) fn new<V: 'static>(
         id: &'static str,
         inputs: InputSet,
+        opening: Option<Unit>,
         picked: fn(&mut V, &mut Context<V>),
         cx: &mut Context<V>,
     ) -> Option<Self> {
@@ -33,10 +35,15 @@ impl UnitPicker {
             .filter_map(|unit| Scope::new(unit, inputs));
         let finest = scopes.next()?;
         let coarser: Vec<Scope> = scopes.collect();
-        let names = std::iter::once(finest)
+        let units = std::iter::once(finest)
             .chain(coarser.iter().copied())
-            .map(|scope| unit_names(scope.unit()).many);
-        let dropdown = cx.new(|cx| Dropdown::new(id, names, 0, cx));
+            .map(Scope::unit);
+        let opened = units
+            .clone()
+            .position(|unit| Some(unit) == opening)
+            .unwrap_or(0);
+        let names = units.map(|unit| unit_names(unit).many);
+        let dropdown = cx.new(|cx| Dropdown::new(id, names, opened, cx));
         let picked = cx.subscribe(&dropdown, move |view, _, _: &DropdownEvent, cx| {
             picked(view, cx);
         });

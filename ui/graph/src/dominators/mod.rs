@@ -14,7 +14,7 @@ use crate::toolbar::{busy, group};
 use crate::unit_picker::UnitPicker;
 use bviz_graph_layout::Id;
 use bviz_graph_layout::dominators::Dominators;
-use bviz_graph_layout::metrics::Scope;
+use bviz_graph_layout::metrics::{Scope, Unit};
 use bviz_graph_layout::select::{Filter, Verdicts};
 use bviz_ui_components::{
     Toolbar, TooltipColors, cached_layer, centered_notice, centered_spinner, load_in_background,
@@ -389,14 +389,24 @@ impl DominatorsPanel {
     }
 }
 
-/// The picker among the units the graph `model` has read, the finest chosen;
-/// absent until the graph is read.
+/// The picker among the units the graph `model` has read; absent until the
+/// graph is read. It opens on configured targets: most actions produce
+/// something no other action reads, so they stand directly under the whole
+/// build, each a sliver of its row, while configured targets mostly stand
+/// under one another and leave the row to cells wide enough to name.
 fn unit_picker(
     model: &Entity<GraphModel>,
     cx: &mut Context<DominatorsPanel>,
 ) -> Option<UnitPicker> {
     let inputs = model.read(cx).loaded()?.shared.inputs;
-    UnitPicker::new("dominators-unit", inputs, DominatorsPanel::choose, cx)
+    let opening = Some(Unit::ConfiguredTarget);
+    UnitPicker::new(
+        "dominators-unit",
+        inputs,
+        opening,
+        DominatorsPanel::choose,
+        cx,
+    )
 }
 
 /// How the cells are faded, kept with the filter it was evaluated from so a
