@@ -1,6 +1,6 @@
 use crate::{Controls, GraphPanel, Palette};
 use bviz_ui_components::{Button, Toolbar, spinner};
-use gpui::{ClickEvent, Context, IntoElement, div, prelude::*, px};
+use gpui::{ClickEvent, Context, Div, IntoElement, Pixels, div, prelude::*, px};
 
 pub(crate) fn toolbar(
     controls: Controls,
@@ -57,19 +57,32 @@ pub(crate) fn toolbar(
         bar = bar.child(why);
     }
     bar.when(controls.relaying, |bar| {
-        bar.trailing(relaying_indicator(palette))
+        // The prior layout stays interactive while a relayout runs.
+        bar.trailing(busy("relaying-spinner", "laying out…", palette))
     })
 }
 
-/// Shown while a relayout runs, so the prior layout stays interactive with a
-/// visible cue that a new one is in flight.
-fn relaying_indicator(palette: &Palette) -> impl IntoElement {
+/// A strip's controls grouped under the word `name`.
+pub(crate) fn group(name: &'static str, palette: &Palette) -> Div {
+    labelled(palette).child(name)
+}
+
+/// The cue a strip shows that the work `doing` names is in flight, its spinner
+/// keyed by `id`.
+pub(crate) fn busy(id: &'static str, doing: &'static str, palette: &Palette) -> impl IntoElement {
+    labelled(palette)
+        .child(spinner(id, SPINNER_SIZE, palette.label))
+        .child(doing)
+}
+
+const SPINNER_SIZE: Pixels = px(14.);
+
+/// A row of a strip set in the strip's label text.
+fn labelled(palette: &Palette) -> Div {
     div()
         .flex()
         .items_center()
         .gap_2()
         .text_sm()
         .text_color(palette.label)
-        .child(spinner("relaying-spinner", px(14.), palette.label))
-        .child("laying out…")
 }

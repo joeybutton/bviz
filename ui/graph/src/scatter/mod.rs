@@ -16,6 +16,7 @@ use crate::model::{FilterChanged, GraphModel, Loaded, MetricsLanded, SourceRepla
 use crate::paint::UNMARKED_FADE;
 use crate::point::{configuration, identify, mnemonic, point_label, primary_output, unit_names};
 use crate::timing::{NodeTimes, Untimed};
+use crate::toolbar::{busy, group};
 use crate::unit_picker::UnitPicker;
 use crate::{PIXELS_PER_NOTCH, ZOOM_PER_NOTCH};
 use axis::{Axes, Axis, Clocks};
@@ -27,7 +28,7 @@ use bviz_invocation::Revision;
 use bviz_ui_components::{
     Button, DragEnd, Dropdown, DropdownEvent, ListScroll, SCROLLBAR_THICKNESS, TextTooltip,
     Toolbar, TooltipColors, cached_layer, centered_spinner, list_scrollbar, load_in_background,
-    menu_chrome, paint_tooltip, paint_tooltip_box, spinner, tooltip_extent, track_drag,
+    menu_chrome, paint_tooltip, paint_tooltip_box, tooltip_extent, track_drag,
 };
 use bviz_ui_workspace::{Panel, PanelEvent, PanelKind, ViewKind};
 use gpui::{
@@ -1445,16 +1446,7 @@ fn strip(
     palette: &Palette,
     cx: &Context<ScatterPanel>,
 ) -> Toolbar {
-    let group = |name: &'static str| {
-        div()
-            .flex()
-            .items_center()
-            .gap_2()
-            .text_sm()
-            .text_color(palette.label)
-            .child(name)
-    };
-    let unit = group("points").child(choice.picker.dropdown());
+    let unit = group("points", palette).child(choice.picker.dropdown());
     let tip = TooltipColors::from_colors(&palette.colors);
     let timed_picker = |id: &'static str, picker: &Entity<Dropdown>, read: &str| {
         let note = times_note(times, choice.timed, scope.unit(), read);
@@ -1464,13 +1456,14 @@ fn strip(
             .child(picker.clone())
     };
     let time_axis = "place points by their action time";
-    let across = group("across").child(timed_picker(
+    let across = group("across", palette).child(timed_picker(
         "scatter-across-why",
         &choice.across_picker,
         time_axis,
     ));
-    let up = group("up").child(timed_picker("scatter-up-why", &choice.up_picker, time_axis));
-    let colour = group("colour").child(timed_picker(
+    let up =
+        group("up", palette).child(timed_picker("scatter-up-why", &choice.up_picker, time_axis));
+    let colour = group("colour", palette).child(timed_picker(
         "scatter-colour-why",
         &choice.colour_picker,
         "colour points by where their actions ran",
@@ -1480,7 +1473,7 @@ fn strip(
         .inputs()
         .map(|input| input_toggle(input, scope, palette, cx))
         .collect();
-    let inputs = group("inputs").children(toggles);
+    let inputs = group("inputs", palette).children(toggles);
     Toolbar::new()
         .child(unit)
         .child(across)
@@ -1488,16 +1481,7 @@ fn strip(
         .child(colour)
         .child(inputs)
         .when(measuring, |bar| {
-            bar.trailing(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .text_sm()
-                    .text_color(palette.label)
-                    .child(spinner("scatter-measuring", px(14.), palette.label))
-                    .child("measuring…"),
-            )
+            bar.trailing(busy("scatter-measuring", "measuring…", palette))
         })
 }
 
