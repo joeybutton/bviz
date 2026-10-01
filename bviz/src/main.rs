@@ -64,7 +64,7 @@ impl Load {
     fn open(self, session: Option<&Entity<Session>>, window: &mut Window, cx: &mut App) -> Member {
         let session = session.cloned();
         match self {
-            Self::Graph(load) => bviz_ui_graph::open(load, window, cx),
+            Self::Graph(load) => bviz_ui_graph::open(load, session, window, cx),
             Self::Trace(load) => bviz_ui_trace::open(load, session, window, cx),
             Self::Console(load) => bviz_ui_console::open(load, session, window, cx),
         }

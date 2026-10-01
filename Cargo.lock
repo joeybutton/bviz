@@ -1015,6 +1015,7 @@ name = "bviz_ui_graph"
 version = "0.1.0"
 dependencies = [
  "bviz_graph_layout",
+ "bviz_invocation",
  "bviz_ui_assets",
  "bviz_ui_components",
  "bviz_ui_graph_args",

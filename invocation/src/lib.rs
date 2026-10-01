@@ -59,6 +59,10 @@ const CHECKSUM_SHOWN: usize = 6;
 pub struct Configurations(HashMap<String, String>);
 
 impl Configurations {
+    pub fn with_capacity(configurations: usize) -> Self {
+        Self(HashMap::with_capacity(configurations))
+    }
+
     /// Describes the configuration `checksum` names by its `mnemonic`. A
     /// checksum names the same configuration in every output, so one already
     /// described keeps the description it has.

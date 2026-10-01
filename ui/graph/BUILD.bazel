@@ -12,6 +12,7 @@ rust_library(
     visibility = ["//bviz:__pkg__"],
     deps = [
         "//graph/layout",
+        "//invocation",
         "//ui/assets",
         "//ui/components",
         "//ui/graph/args",
