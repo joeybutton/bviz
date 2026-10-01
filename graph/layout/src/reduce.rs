@@ -799,7 +799,13 @@ pub(crate) struct Condensation {
 impl Condensation {
     /// Condenses the graph `succ` holds over the indices `0..succ.len()`.
     pub(crate) fn new(succ: &[Vec<u32>]) -> Self {
-        let of = components(succ);
+        let mut pred: Vec<Vec<u32>> = vec![Vec::new(); succ.len()];
+        for (u, forward) in succ.iter().enumerate() {
+            for &w in forward {
+                pred[w as usize].push(u as u32);
+            }
+        }
+        let of = components(succ, &pred);
         let count = of.iter().copied().max().map_or(0, |c| c as usize + 1);
         let mut seen: FxHashSet<(u32, u32)> = FxHashSet::with_capacity_and_hasher(
             succ.iter().map(Vec::len).sum(),
@@ -825,9 +831,10 @@ impl Condensation {
     }
 }
 
-/// The strongly connected component each index belongs to — two indices share
-/// one exactly when each reaches the other — numbered densely from zero.
-fn components(succ: &[Vec<u32>]) -> Vec<u32> {
+/// The strongly connected component each index of the graph `succ` belongs to
+/// — two indices share one exactly when each reaches the other — numbered
+/// densely from zero. `pred` holds the same graph's edges reversed.
+pub(crate) fn components(succ: &[Vec<u32>], pred: &[Vec<u32>]) -> Vec<u32> {
     let n = succ.len();
     // The order the search finishes with each index, which is the order the
     // second walk has to reach them in, reversed.
@@ -851,13 +858,6 @@ fn components(succ: &[Vec<u32>]) -> Vec<u32> {
                 }
                 None => finished.push(u),
             }
-        }
-    }
-
-    let mut pred: Vec<Vec<u32>> = vec![Vec::new(); n];
-    for (u, forward) in succ.iter().enumerate() {
-        for &w in forward {
-            pred[w as usize].push(u as u32);
         }
     }
 

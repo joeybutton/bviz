@@ -9,6 +9,7 @@
 pub mod aquery;
 pub mod capability;
 pub mod cquery;
+pub mod dominators;
 pub mod facets;
 pub mod filter;
 pub mod graph;

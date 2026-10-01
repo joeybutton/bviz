@@ -252,6 +252,12 @@ impl Points {
         pairs.retain(|(from, to)| from != to);
         bviz_parallel::workers().install(|| pairs.par_sort_unstable());
         pairs.dedup();
+        debug_assert!(
+            pairs
+                .iter()
+                .all(|&(_, to)| self.points[to as usize].counted),
+            "an uncounted point depends on another"
+        );
         let (dependents, dependencies) = adjacency(self.points.len(), &pairs);
         UnitGraph {
             points: self.points,
@@ -263,7 +269,7 @@ impl Points {
 }
 
 /// The points of a scope and the distinct dependencies between them, each
-/// point numbered by its index.
+/// point numbered by its index. An uncounted point depends on no other point.
 pub(crate) struct UnitGraph {
     pub(crate) points: Vec<Point>,
     /// By point, the points depending on it directly.
