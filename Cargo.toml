@@ -4,6 +4,7 @@ members = [
     "bviz",
     "cli",
     "graph/layout",
+    "invocation",
     "terminal",
     "tools/notices",
     "tools/scene_header",
@@ -31,6 +32,7 @@ repository = "https://github.com/yume-ag/bviz"
 
 [workspace.dependencies]
 alacritty_terminal = "0.26"
+bviz_invocation = { path = "invocation" }
 bviz_parallel = { path = "util/parallel" }
 clap = { version = "4", features = ["derive"] }
 crossbeam-channel = "0.5"

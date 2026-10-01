@@ -317,6 +317,7 @@ mod tests {
     use super::scanner::{find_special, scan_event};
     use super::serde_events::{arg_i64, arg_str};
     use super::*;
+    use bviz_invocation::EpochMicros;
     use std::io::Write;
 
     fn parse(json: &str) -> Profile {
@@ -388,11 +389,12 @@ mod tests {
         let m = p.metadata();
         writeln!(
             out,
-            "meta {:?} {:?} {:?} {:?}",
+            "meta {:?} {:?} {:?} {:?} {:?}",
             p.opt_str(m.bazel_version),
             p.opt_str(m.build_id),
             p.opt_str(m.output_base),
-            p.opt_str(m.date)
+            p.opt_str(m.date),
+            m.epoch_origin
         )
         .unwrap();
         writeln!(out, "span {} {}", p.span().start_us, p.span().end_us).unwrap();
@@ -445,7 +447,7 @@ mod tests {
     /// a counter sampled at two times — so chunking at newlines splits a
     /// thread's slices and a counter's points across chunks, exercising merge.
     fn chunkable_profile_json() -> String {
-        "{\"otherData\":{\"bazel_version\":\"9.0.0\"},\"traceEvents\":[\n".to_string()
+        "{\"otherData\":{\"bazel_version\":\"9.0.0\",\"profile_start_ts\":1781439245231},\"traceEvents\":[\n".to_string()
             + "{\"name\":\"thread_name\",\"ph\":\"M\",\"tid\":1,\"args\":{\"name\":\"Lane A\"}},\n"
             + "{\"name\":\"thread_sort_index\",\"ph\":\"M\",\"tid\":1,\"args\":{\"sort_index\":10}},\n"
             + "{\"cat\":\"skyframe evaluator\",\"name\":\"parent\",\"ph\":\"X\",\"ts\":0,\"dur\":100,\"tid\":1,\"args\":{\"mnemonic\":\"CppCompile\",\"target\":\"//a:b\"}},\n"
@@ -764,10 +766,14 @@ mod tests {
         let json = "{\"otherData\":{\"bazel_version\":\"9.0.0\"},\"traceEvents\":[\n".to_string()
             + "{\"name\":\"thread_name\",\"ph\":\"M\",\"tid\":1,\"args\":{\"name\":\"L\"}},\n"
             + "{\"cat\":\"c\",\"name\":\"a\",\"ph\":\"X\",\"ts\":0,\"dur\":1,\"tid\":1}\n"
-            + "],\"otherData\":{\"build_id\":\"abc\",\"bazel_version\":\"0.0.0\"}}";
+            + "],\"otherData\":{\"build_id\":\"abc\",\"bazel_version\":\"0.0.0\",\"profile_start_ts\":1781439245231}}";
         let check = |p: &Profile| {
             assert_eq!(p.opt_str(p.metadata().bazel_version), Some("9.0.0"));
             assert_eq!(p.opt_str(p.metadata().build_id), Some("abc"));
+            assert_eq!(
+                p.metadata().epoch_origin,
+                Some(EpochMicros::from_millis(1_781_439_245_231))
+            );
         };
         check(&parse_streaming(&json).expect("serial"));
         check(&parse_chunks(&json, 4, 0).expect("parallel"));
@@ -780,7 +786,7 @@ mod tests {
     #[test]
     fn metadata_and_thread_order() {
         let json = r#"{
-            "otherData": {"bazel_version":"7.0.0","build_id":"abc","output_base":"/ob","date":"today"},
+            "otherData": {"bazel_version":"7.0.0","build_id":"abc","output_base":"/ob","date":"today","profile_start_ts":1781439245231},
             "traceEvents": [
                 {"name":"thread_name","ph":"M","tid":5,"args":{"name":"Lane B"}},
                 {"name":"thread_sort_index","ph":"M","tid":5,"args":{"sort_index":20}},
@@ -795,8 +801,24 @@ mod tests {
         assert_eq!(p.opt_str(p.metadata().build_id), Some("abc"));
         assert_eq!(p.opt_str(p.metadata().output_base), Some("/ob"));
         assert_eq!(p.opt_str(p.metadata().date), Some("today"));
+        assert_eq!(
+            p.metadata().epoch_origin,
+            Some(EpochMicros::from_millis(1_781_439_245_231))
+        );
         let names: Vec<_> = p.threads().iter().map(|t| p.str(t.name)).collect();
         assert_eq!(names, vec!["Lane A", "Lane B"]);
+    }
+
+    #[test]
+    fn an_epoch_origin_that_is_not_an_integer_is_absent() {
+        for origin in ["1781439245231.5", "\"1781439245231\"", "null"] {
+            let json = format!(
+                r#"{{"otherData":{{"build_id":"abc","profile_start_ts":{origin}}},"traceEvents":[]}}"#
+            );
+            let p = parse(&json);
+            assert_eq!(p.opt_str(p.metadata().build_id), Some("abc"));
+            assert_eq!(p.metadata().epoch_origin, None, "{origin}");
+        }
     }
 
     #[test]

@@ -1,6 +1,7 @@
 use std::cmp::{Ordering, Reverse};
 use std::collections::{BTreeMap, BinaryHeap, HashMap};
 
+use bviz_invocation::EpochMicros;
 use bviz_parallel::worker_count;
 use serde_json::{Map, Value};
 
@@ -817,8 +818,9 @@ fn build_counter_lanes(
 }
 
 fn build_metadata(interner: &mut Writer, other: Option<&Map<String, Value>>) -> Metadata {
+    let value = |k: &str| other.and_then(|m| m.get(k));
     let mut get = |k: &str| -> OptStr {
-        let v = other.and_then(|m| m.get(k)).and_then(Value::as_str);
+        let v = value(k).and_then(Value::as_str);
         v.map(|v| interner.intern(v)).into()
     };
     Metadata {
@@ -826,6 +828,9 @@ fn build_metadata(interner: &mut Writer, other: Option<&Map<String, Value>>) -> 
         build_id: get("build_id"),
         output_base: get("output_base"),
         date: get("date"),
+        epoch_origin: value("profile_start_ts")
+            .and_then(Value::as_i64)
+            .map(EpochMicros::from_millis),
     }
 }
 
