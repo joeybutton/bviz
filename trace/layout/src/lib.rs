@@ -8,6 +8,8 @@ mod stats;
 #[cfg(test)]
 mod test_profile;
 mod view;
+#[cfg(test)]
+mod wall_share;
 
 pub use bviz_trace_profile::{LaneClass, SpanRole, Workload};
 pub use cull::{Cull, Viewport, VisibleSlice, visible_slices};

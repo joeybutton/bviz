@@ -14,3 +14,6 @@ bviz_parallel = { workspace = true }
 bviz_trace_profile = { path = "../profile" }
 rayon = { workspace = true }
 rustc-hash = { workspace = true }
+
+[dev-dependencies]
+fastrand = { workspace = true }

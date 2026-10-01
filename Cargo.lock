@@ -952,6 +952,7 @@ version = "0.1.0"
 dependencies = [
  "bviz_parallel",
  "bviz_trace_profile",
+ "fastrand 2.5.0",
  "rayon",
  "rustc-hash 2.1.3",
 ]

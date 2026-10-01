@@ -20,6 +20,7 @@ rust_library(
 rust_test(
     name = "layout_test",
     crate = ":layout",
+    deps = ["@crates//:fastrand"],
 )
 
 rust_binary(

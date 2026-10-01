@@ -218,7 +218,7 @@ fn build_index(by_text: &FxHashMap<&str, Str>, mnemonics: &FxHashMap<&str, &str>
 /// returns the per-worker shards. Workers steal indexes one at a time through a
 /// shared cursor, since per-index work is heavily skewed (a few big evaluator
 /// lanes). A single worker runs inline.
-fn run_sharded<S: Default + Send>(
+pub(crate) fn run_sharded<S: Default + Send>(
     workers: usize,
     n: usize,
     task: impl Fn(&mut S, usize) + Sync,
