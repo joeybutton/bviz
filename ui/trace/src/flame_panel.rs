@@ -249,9 +249,32 @@ fn flame_boxes(
         .clone()
 }
 
-/// Paints a tooltip near `at` with the flame node's name and, below it, its total
-/// and self time, the number of spans whose time it accounts for, and its share
-/// of the view's aggregated total.
+/// The tooltip's lines for `hovered`: the frame's name over its figures,
+/// labelled with the weight of the aggregate the box belongs to.
+fn flame_tooltip_lines(hovered: &HoveredBox) -> [String; 2] {
+    let HoveredBox { aggregates, boxed } = hovered;
+    let root_total_us = aggregates.flame.root_total_us();
+    let pct = if root_total_us > 0 {
+        100.0 * boxed.total_us as f64 / root_total_us as f64
+    } else {
+        0.0
+    };
+    let measure = match aggregates.mode.weight {
+        FlameWeight::Duration => "summed time",
+        FlameWeight::WallShare => "share of wall time",
+    };
+    let detail = format!(
+        "{measure}: total {}, self {}, {} span{}, {:.1}% of view",
+        format_duration(boxed.total_us),
+        format_duration(boxed.self_us),
+        boxed.count,
+        if boxed.count == 1 { "" } else { "s" },
+        pct,
+    );
+    [aggregates.flame.str(boxed.name).to_string(), detail]
+}
+
+/// Paints `hovered`'s tooltip near `at`.
 fn paint_flame_tooltip(
     hovered: &HoveredBox,
     at: Point<Pixels>,
@@ -260,22 +283,7 @@ fn paint_flame_tooltip(
     window: &mut Window,
     cx: &mut App,
 ) {
-    let (graph, boxed) = (&hovered.aggregates.flame, &hovered.boxed);
-    let root_total_us = graph.root_total_us();
-    let pct = if root_total_us > 0 {
-        100.0 * boxed.total_us as f64 / root_total_us as f64
-    } else {
-        0.0
-    };
-    let detail = format!(
-        "total {}, self {}, {} span{}, {:.1}% of view",
-        format_duration(boxed.total_us),
-        format_duration(boxed.self_us),
-        boxed.count,
-        if boxed.count == 1 { "" } else { "s" },
-        pct,
-    );
-    let lines = [graph.str(boxed.name).to_string(), detail];
+    let lines = flame_tooltip_lines(hovered);
     paint_tooltip_box(&lines, at, bounds, palette.tooltip, window, cx);
 }
 
@@ -981,19 +989,41 @@ mod tests {
         Arc::new(Profile::from_bytes(json.as_bytes()).expect("parse test profile"))
     }
 
-    /// The aggregate over every track of `profile`, each frame named by its own
-    /// span's name so a box's text identifies which span it stands for.
-    fn aggregate(profile: &Arc<Profile>) -> Arc<ScopeAggregate> {
+    /// A profile of two execution lanes, "link" running alongside the first
+    /// half of "compile", so each span's share of the elapsed time differs
+    /// from its duration.
+    fn overlapping_fixture() -> Arc<Profile> {
+        let mut events = Vec::with_capacity(4);
+        for (tid, name, dur) in [(1, "compile", 1000), (2, "link", 500)] {
+            events.push(format!(
+                r#"{{"name":"thread_name","ph":"M","tid":{tid},"args":{{"name":"skyframe-evaluator-execution-{tid}"}}}}"#,
+            ));
+            events.push(format!(
+                r#"{{"cat":"general information","name":"{name}","ph":"X","ts":0,"dur":{dur},"tid":{tid}}}"#,
+            ));
+        }
+        let json = format!(r#"{{"traceEvents":[{}]}}"#, events.join(","));
+        Arc::new(Profile::from_bytes(json.as_bytes()).expect("parse test profile"))
+    }
+
+    /// The aggregate over every track of `profile` under `weight`, each frame
+    /// named by its own span's name so a box's text identifies which span it
+    /// stands for.
+    fn aggregate_weighing(profile: &Arc<Profile>, weight: FlameWeight) -> Arc<ScopeAggregate> {
         Arc::new(ScopeAggregate::build_for_tracks(
             profile,
             FlameMode {
                 direction: FlameDirection::TopDown,
                 labels: FlameLabels::Name,
-                weight: FlameWeight::Duration,
+                weight,
             },
             &TimeSelection::default(),
             |_| true,
         ))
+    }
+
+    fn aggregate(profile: &Arc<Profile>) -> Arc<ScopeAggregate> {
+        aggregate_weighing(profile, FlameWeight::Duration)
     }
 
     /// The layout of `aggregates` fitted to a [`VIEW_W`]-wide column, memoized as
@@ -1045,6 +1075,38 @@ mod tests {
                 .expect("the box at its own center");
             assert_eq!(&hovered.boxed, b);
         }
+    }
+
+    #[test]
+    fn the_tooltip_gives_its_figures_in_the_weight_of_the_graph_hovered() {
+        let profile = overlapping_fixture();
+        let lines = |weight| {
+            let aggregates = aggregate_weighing(&profile, weight);
+            let (cache, fl) = laid_out(&aggregates);
+            let compile = cache
+                .boxes
+                .iter()
+                .find(|b| aggregates.flame.str(b.name) == "compile")
+                .expect("the compile frame");
+            let hovered = cache
+                .hit(&aggregates, fl, 0.0, center_of(fl, compile))
+                .expect("the box at its own center");
+            flame_tooltip_lines(&hovered)
+        };
+        assert_eq!(
+            lines(FlameWeight::Duration),
+            [
+                "compile",
+                "summed time: total 1.00ms, self 1.00ms, 1 span, 66.7% of view"
+            ]
+        );
+        assert_eq!(
+            lines(FlameWeight::WallShare),
+            [
+                "compile",
+                "share of wall time: total 750µs, self 750µs, 1 span, 75.0% of view"
+            ]
+        );
     }
 
     #[test]
