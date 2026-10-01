@@ -5,6 +5,7 @@ load("@tar.bzl", "tar")
 MTIME = 1672560000
 
 TARGET_PLATFORMS = {
+    "linux-arm64": "//platforms:linux_arm64",
     "linux-x86_64": "//platforms:linux_x86_64",
     "macos-arm64": "//platforms:macos_arm64",
     "macos-x86_64": "//platforms:macos_x86_64",
