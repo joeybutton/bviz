@@ -18,7 +18,7 @@ use model::ConsoleModel;
 use bviz_terminal::Replay;
 use bviz_ui_components::Pending;
 use bviz_ui_console_args::{ConsoleArgs, ConsoleSource};
-use bviz_ui_workspace::{Document, PanelGroup, ViewSpec, Weight, document_label};
+use bviz_ui_workspace::{Member, PanelGroup, ViewSpec, Weight, document_label};
 use clap::error::ErrorKind;
 use clap::{CommandFactory, Parser};
 use gpui::{App, SharedString, Window, prelude::*, px, size};
@@ -47,8 +47,8 @@ impl From<ConsoleSource> for Load {
     }
 }
 
-/// The document replaying the build `load` reads.
-pub fn open(load: impl Into<Load>, _window: &mut Window, cx: &mut App) -> Document {
+/// The views replaying the build `load` reads.
+pub fn open(load: impl Into<Load>, _window: &mut Window, cx: &mut App) -> Member {
     let load = load.into();
     let label = load.title;
     let model = cx.new(|cx| ConsoleModel::reading(load.replay, cx));
@@ -56,7 +56,7 @@ pub fn open(load: impl Into<Load>, _window: &mut Window, cx: &mut App) -> Docume
         let label = label.clone();
         move |cx| cx.new(|cx| ConsolePanel::new(label.clone(), model.clone(), cx))
     });
-    Document::new(label, PanelGroup::one(console).with_weight(Weight::LOG))
+    Member::new(label, PanelGroup::one(console).with_weight(Weight::LOG))
 }
 
 /// Replays the console output of a Bazel build. Each file given opens a replay
@@ -94,7 +94,7 @@ pub fn run() {
         size(px(1100.), px(720.)),
         first,
         loads.collect(),
-        open,
+        |load, window, cx| open(load, window, cx).into(),
         &[console::register_keys],
     );
 }

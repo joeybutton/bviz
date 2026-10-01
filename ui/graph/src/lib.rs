@@ -11,7 +11,7 @@ use bviz_ui_components::{
 use bviz_ui_graph_args::{GraphArgs, GraphSource};
 use bviz_ui_theme::{DataColors, Theme, ThemeColors};
 use bviz_ui_workspace::{
-    Document, Panel, PanelEvent, PanelGroup, PanelKind, ViewKind, ViewSpec, Weight, document_label,
+    Member, Panel, PanelEvent, PanelGroup, PanelKind, ViewKind, ViewSpec, Weight, document_label,
 };
 use clap::error::ErrorKind;
 use clap::{CommandFactory, Parser};
@@ -938,8 +938,8 @@ fn title(source: &GraphSource) -> SharedString {
     }
 }
 
-/// The document drawing the graph `load` reads.
-pub fn open(load: impl Into<Load>, _window: &mut Window, cx: &mut App) -> Document {
+/// The views drawing the graph `load` reads.
+pub fn open(load: impl Into<Load>, _window: &mut Window, cx: &mut App) -> Member {
     let load = load.into();
     let label = load.title;
     let model = cx.new(|cx| GraphModel::reading(load.built, cx));
@@ -948,7 +948,7 @@ pub fn open(load: impl Into<Load>, _window: &mut Window, cx: &mut App) -> Docume
         move |cx| cx.new(|cx| GraphPanel::new(label.clone(), model.clone(), cx))
     });
     let scatter = ViewSpec::new(move |cx| cx.new(|cx| ScatterPanel::new(model.clone(), cx)));
-    Document::new(
+    Member::new(
         label,
         PanelGroup::tabs(graph, vec![scatter]).with_weight(Weight::CHART),
     )
@@ -979,7 +979,7 @@ pub fn run() {
         size(px(1280.), px(820.)),
         Load::from(source),
         Vec::new(),
-        open,
+        |load: Load, window, cx| open(load, window, cx).into(),
         &[register_keys],
     );
 }

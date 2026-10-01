@@ -33,9 +33,9 @@ impl Load {
 
     fn open(self, window: &mut Window, cx: &mut App) -> Document {
         match self {
-            Self::Graph(load) => bviz_ui_graph::open(load, window, cx),
-            Self::Trace(load) => bviz_ui_trace::open(load, window, cx),
-            Self::Console(load) => bviz_ui_console::open(load, window, cx),
+            Self::Graph(load) => bviz_ui_graph::open(load, window, cx).into(),
+            Self::Trace(load) => bviz_ui_trace::open(load, window, cx).into(),
+            Self::Console(load) => bviz_ui_console::open(load, window, cx).into(),
         }
     }
 }

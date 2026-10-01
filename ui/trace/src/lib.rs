@@ -39,7 +39,7 @@ use bviz_ui_components::{
 };
 use bviz_ui_trace_args::{TraceArgs, TraceSource};
 use bviz_ui_workspace::{
-    Document, Panel, PanelEvent, PanelGroup, PanelKind, ViewKind, ViewSpec, Weight, document_label,
+    Member, Panel, PanelEvent, PanelGroup, PanelKind, ViewKind, ViewSpec, Weight, document_label,
 };
 use clap::error::ErrorKind;
 use clap::{CommandFactory, Parser};
@@ -1538,9 +1538,9 @@ impl From<TraceSource> for Load {
     }
 }
 
-/// The document rendering the profile `load` reads, as the timeline above the
+/// The views rendering the profile `load` reads, as the timeline above the
 /// flame graph and stats that aggregate whatever tracks it has selected.
-pub fn open(load: impl Into<Load>, _window: &mut Window, cx: &mut App) -> Document {
+pub fn open(load: impl Into<Load>, _window: &mut Window, cx: &mut App) -> Member {
     let load = load.into();
     let label = load.title;
     let model = cx.new(|cx| TraceModel::reading(load.profile, cx));
@@ -1562,7 +1562,7 @@ pub fn open(load: impl Into<Load>, _window: &mut Window, cx: &mut App) -> Docume
         ),
     )
     .with_weight(Weight::CHART);
-    Document::new(label, views)
+    Member::new(label, views)
 }
 
 /// Renders a Bazel `--profile` trace as a flame-chart timeline. Each profile
@@ -1588,7 +1588,7 @@ pub fn run() {
         size(px(1280.), px(820.)),
         first,
         loads.collect(),
-        open,
+        |load, window, cx| open(load, window, cx).into(),
         &[register_keys],
     );
 }
