@@ -18,9 +18,27 @@ const MIN_WINDOW_SIZE: Size<Pixels> = Size {
     height: px(360.0),
 };
 
-/// The application builder with the bundled asset source installed.
+/// The application builder with the bundled asset source installed. Exits with
+/// an explanation when there is no display the platform can open windows on.
 pub fn application() -> Application {
+    #[cfg(target_os = "linux")]
+    exit_without_wayland();
     gpui_platform::application().with_assets(bviz_ui_assets::Assets)
+}
+
+/// gpui's Linux platform is built for Wayland alone, and without a Wayland
+/// display it falls back to a headless platform whose error names the wrong
+/// cause on an X11 session.
+#[cfg(target_os = "linux")]
+fn exit_without_wayland() {
+    if std::env::var_os("WAYLAND_DISPLAY").is_some_and(|display| !display.is_empty()) {
+        return;
+    }
+    eprintln!(
+        "error: bviz needs a Wayland session, and WAYLAND_DISPLAY is not set.\n\
+         On X11, run it inside a nested Wayland compositor, e.g. `cage -- bviz ...`."
+    );
+    std::process::exit(1);
 }
 
 /// Register fonts, the themes, global key bindings, and quit-on-last-window-close.
