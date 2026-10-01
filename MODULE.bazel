@@ -32,6 +32,12 @@ single_version_override(
     patches = ["//patches/rules_bison:rules_bison-runfiles-include-cstdlib.patch"],
 )
 
+single_version_override(
+    module_name = "rules_rs",
+    patch_strip = 1,
+    patches = ["//patches/rules_rs:rules_rs-git-crate-archive.patch"],
+)
+
 rs_toolchains = use_extension("@rules_rs//rs/toolchains:module_extension.bzl", "toolchains")
 rs_toolchains.toolchain(
     edition = "2024",
@@ -95,6 +101,15 @@ crate.from_cargo(
     cargo_lock = "//:Cargo.lock",
     cargo_toml = "//:Cargo.toml",
     platform_triples = PLATFORM_TRIPLES,
+)
+
+# elk-rs carries the Java ELK sources and models it was ported from as git
+# submodules, which none of its crates build from.
+crate.annotation(
+    crate = "org-eclipse-elk-core",
+    git_archive_sha256 = "a1cb2c23824aea36fab919d39284dfe2eb48e5aeb4bcca5c76e777e0b00330ae",
+    git_archive_strip_prefix = "elk-rs-{commit}",
+    git_archive_url = "https://github.com/openedges/elk-rs/archive/{commit}.tar.gz",
 )
 crate.annotation(
     crate = "org-eclipse-elk-alg-layered",
