@@ -604,6 +604,7 @@ impl TraceModel {
 #[cfg(test)]
 mod tests {
     use super::TraceModel;
+    use crate::flame_panel::{WEIGHT_CHOICES, weight_choice};
     use crate::track_order::TrackSort;
     use bviz_trace_layout::{FlameDirection, FlameLabels, FlameMode, FlameWeight};
     use gpui::Task;
@@ -621,6 +622,39 @@ mod tests {
         let standing = model.flame_mode();
         assert!(!model.adopt_flame_mode(standing));
         assert_eq!(model.aggregate_key, key);
+    }
+
+    /// The weights whose toolbar buttons read as chosen while `mode` stands.
+    fn chosen_weights(mode: FlameMode) -> Vec<FlameWeight> {
+        WEIGHT_CHOICES
+            .into_iter()
+            .map(|(_, _, weight)| weight)
+            .filter(|&weight| weight_choice(mode, weight).0)
+            .collect()
+    }
+
+    #[test]
+    fn a_weight_chosen_on_the_toolbar_keys_a_rebuild_and_reads_as_chosen() {
+        let mut model = model();
+        let key = model.aggregate_key;
+        let standing = model.flame_mode();
+        assert_eq!(chosen_weights(standing), [FlameWeight::Duration]);
+
+        let (_, asked) = weight_choice(standing, FlameWeight::WallShare);
+        assert_eq!(
+            asked,
+            FlameMode {
+                weight: FlameWeight::WallShare,
+                ..standing
+            }
+        );
+        assert!(model.adopt_flame_mode(asked));
+        assert_eq!(model.aggregate_key, key + 1);
+        assert_eq!(chosen_weights(model.flame_mode()), [FlameWeight::WallShare]);
+
+        let (_, again) = weight_choice(model.flame_mode(), FlameWeight::WallShare);
+        assert!(!model.adopt_flame_mode(again));
+        assert_eq!(model.aggregate_key, key + 1);
     }
 
     #[test]

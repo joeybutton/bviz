@@ -7,7 +7,7 @@ use crate::{
 };
 use bviz_trace_layout::{
     FlameBox, FlameDirection, FlameLabels, FlameMetrics, FlameMode, FlamePlacement, FlameView,
-    ScopeAggregate, flame_height, lay_out_flame,
+    FlameWeight, ScopeAggregate, flame_height, lay_out_flame,
 };
 use bviz_ui_components::{
     Axis, Button, DEFAULT_MIN_THUMB, DragEnd, SCROLLBAR_THICKNESS, Scrollbar, Toolbar,
@@ -31,6 +31,19 @@ const FLAME_KEY_CONTEXT: &str = "TraceFlameGraph";
 /// Narrowest the toolbar's legend is squeezed beside the controls; with less
 /// than this left on their row it starts the next one.
 const LEGEND_MIN_WIDTH: f32 = 144.0;
+
+/// The weights the toolbar offers, each with its button's id and label, in the
+/// order the buttons stand.
+pub(crate) const WEIGHT_CHOICES: [(&str, &str, FlameWeight); 2] = [
+    ("flame-summed-time", "Summed time", FlameWeight::Duration),
+    ("flame-wall-time", "Wall time", FlameWeight::WallShare),
+];
+
+/// Whether the toolbar's button for `weight` reads as chosen while `mode`
+/// stands, and the mode a click on it asks for.
+pub(crate) fn weight_choice(mode: FlameMode, weight: FlameWeight) -> (bool, FlameMode) {
+    (mode.weight == weight, FlameMode { weight, ..mode })
+}
 
 /// The flame graph's laid-out boxes together with the inputs that determine
 /// them, so a paint reuses them unless one changed. The retained
@@ -377,14 +390,14 @@ impl FlamePanel {
             .min_w(px(LEGEND_MIN_WIDTH));
         time_window_chip(&self.model, palette, cx)
             .into_iter()
-            .chain(self.mode_controls(cx))
+            .chain(self.mode_controls(palette, cx))
             .fold(Toolbar::new(), Toolbar::child)
             .child(legend)
     }
 
     /// The graph's mode controls, one group for each choice they offer, so that
     /// a toolbar wrapping them keeps the buttons of one choice on one row.
-    fn mode_controls(&self, cx: &mut Context<Self>) -> [Div; 2] {
+    fn mode_controls(&self, palette: Palette, cx: &mut Context<Self>) -> [Div; 3] {
         let mode = self.model.read(cx).flame_mode();
         let mnemonics = mode.labels == FlameLabels::Mnemonic;
         let button = |id: &'static str, label: &'static str, on: bool, to: FlameMode| {
@@ -405,8 +418,16 @@ impl FlamePanel {
                 .gap_1()
                 .text_size(px(STATS_TEXT_SIZE))
         };
-        [
+        // The outline holds an exclusive pair together, so two pairs side by
+        // side read as two choices.
+        let pair = || {
             group()
+                .rounded_md()
+                .border_1()
+                .border_color(palette.divider)
+        };
+        [
+            pair()
                 .child(button(
                     "flame-top-down",
                     "Top-down",
@@ -425,6 +446,10 @@ impl FlamePanel {
                         ..mode
                     },
                 )),
+            pair().children(WEIGHT_CHOICES.map(|(id, label, weight)| {
+                let (chosen, to) = weight_choice(mode, weight);
+                button(id, label, chosen, to)
+            })),
             group().child(button(
                 "flame-mnemonics",
                 "Mnemonics",
