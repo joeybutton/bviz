@@ -31,12 +31,12 @@ use timeline::{HoveredSlice, Timeline};
 use track_label::{pool_member_label, track_label};
 use tracks_menu::TracksMenu;
 
-use bviz_invocation::InvocationId;
+use bviz_invocation::{InvocationId, Session};
 use bviz_trace_layout::{LaneLayout, LaneMetrics, TimeSelection, TimeView};
 use bviz_trace_profile::{Profile, Slice, TimeSpan};
 use bviz_ui_components::{
     Axis, Button, DEFAULT_MIN_THUMB, Divider, DividerSide, DragEnd, Pending, SCROLLBAR_THICKNESS,
-    Scrollbar, overlay_canvas, paint_tooltip_box, track_drag,
+    Scrollbar, overlay_canvas, track_drag,
 };
 use bviz_ui_trace_args::{TraceArgs, TraceSource};
 use bviz_ui_workspace::{
@@ -51,6 +51,7 @@ use gpui::{
     ScrollHandle, SharedString, Style, Subscription, TextAlign, TransformationMatrix, Window, div,
     fill, point, prelude::*, px, relative, size,
 };
+use std::borrow::Cow;
 use std::sync::Arc;
 
 gpui::actions!(bviz_trace, [SelectAllTracks, ClearTimeSelection]);
@@ -1484,16 +1485,18 @@ fn paint_slice(
     );
 }
 
-/// Paints a tooltip panel near `at` with the slice's name, its category and
-/// duration, and its args, one per line. Kept inside the viewport.
-fn paint_tooltip(
-    hovered: &HoveredSlice,
-    at: Point<Pixels>,
-    bounds: Bounds<Pixels>,
-    palette: &Palette,
-    window: &mut Window,
-    cx: &mut App,
-) {
+/// How the configuration a profile names by `checksum` reads: by the name
+/// `session` knows it under, and by the checksum itself where the profile is
+/// part of no session or the session knows no configuration of that checksum.
+fn configuration_label<'a>(checksum: &'a str, session: Option<&Session>) -> Cow<'a, str> {
+    session
+        .and_then(|session| session.configurations().name(checksum))
+        .map_or(Cow::Borrowed(checksum), Cow::Owned)
+}
+
+/// The lines of the tooltip for a hovered slice: its name, its category and
+/// duration, and its args.
+fn slice_tooltip(hovered: &HoveredSlice, session: Option<&Session>) -> Vec<String> {
     let (profile, slice, detail) = (hovered.profile(), hovered.slice(), hovered.detail());
     let mut lines = vec![
         profile.str(slice.name).to_string(),
@@ -1512,13 +1515,14 @@ fn paint_tooltip(
     if let Some(mnemonic) = profile.opt_str(detail.mnemonic) {
         lines.push(format!("mnemonic: {mnemonic}"));
     }
-    if let Some(configuration) = profile.opt_str(detail.configuration) {
+    if let Some(checksum) = profile.opt_str(detail.configuration) {
+        let configuration = configuration_label(checksum, session);
         lines.push(format!("configuration: {configuration}"));
     }
     for (key, value) in profile.slice_others(detail) {
         lines.push(format!("{}: {}", profile.str(*key), profile.str(*value)));
     }
-    paint_tooltip_box(&lines, at, bounds, palette.tooltip, window, cx);
+    lines
 }
 
 /// A profile being decoded and parsed.
@@ -1546,11 +1550,18 @@ impl From<TraceSource> for Load {
 }
 
 /// The views rendering the profile `load` reads, as the timeline above the
-/// flame graph and stats that aggregate whatever tracks it has selected.
-pub fn open(load: impl Into<Load>, _window: &mut Window, cx: &mut App) -> Member {
+/// flame graph and stats that aggregate whatever tracks it has selected. Where
+/// it is opened as part of an invocation's `session`, it names what the profile
+/// holds an id of by what the session knows.
+pub fn open(
+    load: impl Into<Load>,
+    session: Option<Entity<Session>>,
+    _window: &mut Window,
+    cx: &mut App,
+) -> Member {
     let load = load.into();
     let label = load.title;
-    let model = cx.new(|cx| TraceModel::reading(load.profile, cx));
+    let model = cx.new(|cx| TraceModel::reading(load.profile, session, cx));
     let views = PanelGroup::split(
         gpui::Axis::Vertical,
         TIMELINE_SHARE,
@@ -1595,7 +1606,7 @@ pub fn run() {
         size(px(1280.), px(820.)),
         first,
         loads.collect(),
-        |load, window, cx| open(load, window, cx).into(),
+        |load, window, cx| open(load, None, window, cx).into(),
         &[register_keys],
     );
 }
@@ -1603,6 +1614,57 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bviz_invocation::Configurations;
+
+    /// A session told of a configuration per `(checksum, mnemonic)`.
+    pub(crate) fn session_knowing(described: &[(&str, &str)]) -> Session {
+        let mut configurations = Configurations::default();
+        for (checksum, mnemonic) in described {
+            configurations.insert((*checksum).into(), (*mnemonic).into());
+        }
+        let mut session = Session::default();
+        session.add_configurations(configurations);
+        session
+    }
+
+    /// A session of two configurations sharing a mnemonic and one alone in its
+    /// own.
+    fn session() -> Session {
+        session_knowing(&[
+            ("55817e2200e2", "k8-fastbuild"),
+            ("91e24984663c", "k8-fastbuild"),
+            ("0c3d9a7714be", "k8-opt-exec"),
+        ])
+    }
+
+    #[test]
+    fn a_configuration_the_session_knows_reads_by_its_name() {
+        let session = session();
+        let label = |checksum| configuration_label(checksum, Some(&session));
+        assert_eq!(label("0c3d9a7714be"), "k8-opt-exec");
+        assert_eq!(label("55817e2200e2"), "k8-fastbuild 55817e");
+    }
+
+    /// A profile names configurations the build event stream may not describe —
+    /// one it was not written with, or a word that is no checksum at all — and
+    /// a session knows none until its stream is read.
+    #[test]
+    fn a_configuration_the_session_does_not_know_reads_by_its_checksum() {
+        let session = session();
+        let label = |checksum| configuration_label(checksum, Some(&session));
+        assert_eq!(label("ffffffffffff"), "ffffffffffff");
+        assert_eq!(label("system"), "system");
+        let unread = Session::default();
+        assert_eq!(
+            configuration_label("55817e2200e2", Some(&unread)),
+            "55817e2200e2"
+        );
+    }
+
+    #[test]
+    fn a_profile_in_no_session_reads_its_configurations_by_checksum() {
+        assert_eq!(configuration_label("55817e2200e2", None), "55817e2200e2");
+    }
 
     #[test]
     fn a_source_names_the_invocation_its_profile_was_written_by() {

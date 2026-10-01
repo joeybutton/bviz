@@ -4,9 +4,10 @@
 mod group;
 
 use bviz_cli::{Cli, Source, Sources};
+use bviz_invocation::Session;
 use bviz_ui_workspace::{Document, Member};
 use clap::Parser;
-use gpui::{App, Pixels, Size, Window, px};
+use gpui::{App, AppContext, Entity, Pixels, Size, Window, px};
 use group::{File, Given, Kind, Opening};
 
 #[global_allocator]
@@ -58,11 +59,14 @@ impl Load {
         }
     }
 
-    fn open(self, window: &mut Window, cx: &mut App) -> Member {
+    /// The views of what this reads, sharing `session` with the other files of
+    /// its invocation where it is opened as one of them.
+    fn open(self, session: Option<&Entity<Session>>, window: &mut Window, cx: &mut App) -> Member {
+        let session = session.cloned();
         match self {
             Self::Graph(load) => bviz_ui_graph::open(load, window, cx),
-            Self::Trace(load) => bviz_ui_trace::open(load, window, cx),
-            Self::Console(load) => bviz_ui_console::open(load, window, cx),
+            Self::Trace(load) => bviz_ui_trace::open(load, session, window, cx),
+            Self::Console(load) => bviz_ui_console::open(load, session, window, cx),
         }
     }
 }
@@ -71,18 +75,19 @@ impl Load {
 /// joined under a label naming it.
 fn open(opening: Opening<Load>, window: &mut Window, cx: &mut App) -> Document {
     match opening {
-        Opening::Alone(load) => load.open(window, cx).into(),
+        Opening::Alone(load) => load.open(None, window, cx).into(),
         Opening::Invocation {
             id,
             first,
             second,
             rest,
         } => {
-            let first = first.open(window, cx);
-            let second = second.open(window, cx);
+            let session = cx.new(|_| Session::default());
+            let first = first.open(Some(&session), window, cx);
+            let second = second.open(Some(&session), window, cx);
             let mut others = Vec::with_capacity(rest.len());
             for load in rest {
-                others.push(load.open(window, cx));
+                others.push(load.open(Some(&session), window, cx));
             }
             Document::join(group::label(&id).into(), first, second, others)
         }

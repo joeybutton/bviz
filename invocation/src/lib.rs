@@ -66,6 +66,14 @@ impl Configurations {
         self.0.entry(checksum).or_insert(mnemonic);
     }
 
+    /// [Describes](Self::insert) every configuration `described` holds.
+    pub fn extend(&mut self, described: Configurations) {
+        self.0.reserve(described.0.len());
+        for (checksum, mnemonic) in described.0 {
+            self.insert(checksum, mnemonic);
+        }
+    }
+
     /// How to spell the configuration `checksum` names for a reader: its
     /// mnemonic, followed by the start of the checksum when another known
     /// configuration shares the mnemonic, so a name gains that suffix when a
@@ -84,6 +92,24 @@ impl Configurations {
             }
             false => mnemonic.clone(),
         })
+    }
+}
+
+/// What the views of one invocation's outputs share. Each output's reader adds
+/// what it learns of the invocation, for the views of the other outputs to read.
+#[derive(Default)]
+pub struct Session {
+    configurations: Configurations,
+}
+
+impl Session {
+    pub fn configurations(&self) -> &Configurations {
+        &self.configurations
+    }
+
+    /// Adds the configurations one of the invocation's outputs describes.
+    pub fn add_configurations(&mut self, described: Configurations) {
+        self.configurations.extend(described);
     }
 }
 
@@ -130,6 +156,39 @@ mod tests {
         assert_eq!(name("91e24984663c").as_deref(), Some("k8-fastbuild 91e249"));
         assert_eq!(name("0c3d9a7714be").as_deref(), Some("k8-opt-exec"));
         assert_eq!(name("ffffffffffff"), None);
+    }
+
+    fn configurations(described: &[(&str, &str)]) -> Configurations {
+        let mut configurations = Configurations::default();
+        for (checksum, mnemonic) in described {
+            configurations.insert((*checksum).into(), (*mnemonic).into());
+        }
+        configurations
+    }
+
+    #[test]
+    fn a_session_knows_the_configurations_every_output_described() {
+        let mut session = Session::default();
+        assert_eq!(session.configurations().name("55817e2200e2"), None);
+
+        session.add_configurations(configurations(&[("55817e2200e2", "k8-fastbuild")]));
+        session.add_configurations(configurations(&[("0c3d9a7714be", "k8-opt-exec")]));
+        let name = |checksum| session.configurations().name(checksum);
+        assert_eq!(name("55817e2200e2").as_deref(), Some("k8-fastbuild"));
+        assert_eq!(name("0c3d9a7714be").as_deref(), Some("k8-opt-exec"));
+    }
+
+    #[test]
+    fn a_configuration_a_second_output_describes_keeps_its_first_description() {
+        let mut session = Session::default();
+        session.add_configurations(configurations(&[("55817e2200e2", "k8-fastbuild")]));
+        session.add_configurations(configurations(&[
+            ("55817e2200e2", "k8-opt"),
+            ("91e24984663c", "k8-fastbuild"),
+        ]));
+        let name = |checksum| session.configurations().name(checksum);
+        assert_eq!(name("55817e2200e2").as_deref(), Some("k8-fastbuild 55817e"));
+        assert_eq!(name("91e24984663c").as_deref(), Some("k8-fastbuild 91e249"));
     }
 
     #[test]

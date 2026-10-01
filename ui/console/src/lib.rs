@@ -15,19 +15,18 @@ mod model;
 pub use console::{ConsolePanel, register_keys};
 use model::ConsoleModel;
 
-use bviz_invocation::InvocationId;
-use bviz_terminal::Replay;
+use bviz_invocation::{InvocationId, Session};
 use bviz_ui_components::Pending;
 use bviz_ui_console_args::{ConsoleArgs, ConsoleSource};
 use bviz_ui_workspace::{Member, PanelGroup, ViewSpec, Weight, document_label};
 use clap::error::ErrorKind;
 use clap::{CommandFactory, Parser};
-use gpui::{App, SharedString, Window, prelude::*, px, size};
+use gpui::{App, Entity, SharedString, Window, prelude::*, px, size};
 use std::path::PathBuf;
 
 /// A build's console output being read and reconstructed.
 pub struct Load {
-    replay: Pending<Replay>,
+    stream: Pending<model::Stream>,
     title: SharedString,
 }
 
@@ -41,24 +40,28 @@ impl From<ConsoleSource> for Load {
     fn from(source: ConsoleSource) -> Self {
         let title = document_label(&source.path);
         Self {
-            replay: Pending::start(move || {
+            stream: Pending::start(move || {
                 let path = source.path.display();
                 let bytes =
                     std::fs::read(&source.path).map_err(|e| format!("cannot read {path}: {e}"))?;
-                let output = bviz_terminal::parse(&bytes)
-                    .map_err(|e| format!("cannot parse build event stream: {e}"))?;
-                Ok(Replay::from_output(output))
+                model::Stream::parse(&bytes)
             }),
             title,
         }
     }
 }
 
-/// The views replaying the build `load` reads.
-pub fn open(load: impl Into<Load>, _window: &mut Window, cx: &mut App) -> Member {
+/// The views replaying the build `load` reads, which tells `session` what its
+/// stream knows of the invocation where it is opened as part of one.
+pub fn open(
+    load: impl Into<Load>,
+    session: Option<Entity<Session>>,
+    _window: &mut Window,
+    cx: &mut App,
+) -> Member {
     let load = load.into();
     let label = load.title;
-    let model = cx.new(|cx| ConsoleModel::reading(load.replay, cx));
+    let model = cx.new(|cx| ConsoleModel::reading(load.stream, session, cx));
     let console = ViewSpec::new({
         let label = label.clone();
         move |cx| cx.new(|cx| ConsolePanel::new(label.clone(), model.clone(), cx))
@@ -101,7 +104,7 @@ pub fn run() {
         size(px(1100.), px(720.)),
         first,
         loads.collect(),
-        |load, window, cx| open(load, window, cx).into(),
+        |load, window, cx| open(load, None, window, cx).into(),
         &[console::register_keys],
     );
 }
