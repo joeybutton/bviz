@@ -5,6 +5,7 @@ use crate::report::Report;
 use crate::status::{Nodes, Statuses};
 use crate::timecard::Timecard;
 use crate::timing::{NodeTimes, Untimed, landings};
+use bviz_graph_layout::dominators::{Dominators, dominators};
 use bviz_graph_layout::graph::Graph;
 use bviz_graph_layout::lod::{DEFAULT_MAX_EDGES, DEFAULT_MAX_NODES, Overflow};
 use bviz_graph_layout::metrics::{Measurement, Scope, measure};
@@ -115,6 +116,7 @@ pub(crate) struct Loaded {
     /// as the card over the graph lists it.
     timecard: Timecard,
     timed: Revision,
+    dominators: Passes<Dominators>,
 }
 
 impl Loaded {
@@ -129,6 +131,7 @@ impl Loaded {
             times: Err(Untimed::NoProfile),
             timecard: Timecard::default(),
             timed: Revision::default(),
+            dominators: Passes::default(),
         }
     }
 
@@ -330,6 +333,7 @@ pub(crate) struct Landed<T> {
 }
 
 pub(crate) type MetricsLanded = Landed<Measurement>;
+pub(crate) type DominatorsLanded = Landed<Dominators>;
 
 /// The graph's other views may have another [`GraphModel::filter`] to draw
 /// through.
@@ -560,6 +564,17 @@ impl GraphModel {
     /// The loaded graph's metrics in `scope`, once measured.
     pub(crate) fn metrics(&self, scope: Scope) -> Option<&Arc<Measurement>> {
         self.loaded()?.measures.done(scope)
+    }
+
+    /// Has the loaded graph's dominator tree computed off the UI thread in
+    /// each scope of `wanted`, as [`Self::want`] does.
+    pub(crate) fn want_dominators(&mut self, wanted: &[Scope], cx: &mut Context<Self>) {
+        self.want(wanted, |loaded| &mut loaded.dominators, dominators, cx);
+    }
+
+    /// The loaded graph's dominator tree in `scope`, once computed.
+    pub(crate) fn dominators(&self, scope: Scope) -> Option<&Arc<Dominators>> {
+        self.loaded()?.dominators.done(scope)
     }
 
     /// Runs `pass` over the loaded graph off the UI thread in each scope of

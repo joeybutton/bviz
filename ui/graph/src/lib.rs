@@ -31,6 +31,7 @@ mod checklist;
 mod colour;
 mod column;
 mod derive;
+mod dominators;
 mod drag;
 mod duration;
 mod emphasis;
@@ -63,6 +64,7 @@ use camera::{Camera, Rect, from_screen, recenter_rect, zoom_step};
 use checklist::OriginRow;
 use colour::Colouring;
 use derive::{Derived, Drawn, Expandable, LayoutLanded};
+pub use dominators::DominatorsPanel;
 use drag::{Drag, end_drag, start_pan, track_gesture};
 use emphasis::Emphasis;
 use framing::{Framing, Target, build_prepaint};
@@ -1027,10 +1029,14 @@ pub fn open(
         let (label, model) = (label.clone(), model.clone());
         move |cx| cx.new(|cx| GraphPanel::new(label.clone(), model.clone(), cx))
     });
-    let scatter = ViewSpec::new(move |cx| cx.new(|cx| ScatterPanel::new(model.clone(), cx)));
+    let scatter = ViewSpec::new({
+        let model = model.clone();
+        move |cx| cx.new(|cx| ScatterPanel::new(model.clone(), cx))
+    });
+    let dominators = ViewSpec::new(move |cx| cx.new(|cx| DominatorsPanel::new(model.clone(), cx)));
     Member::new(
         label,
-        PanelGroup::tabs(graph, vec![scatter]).with_weight(Weight::CHART),
+        PanelGroup::tabs(graph, vec![scatter, dominators]).with_weight(Weight::CHART),
     )
 }
 

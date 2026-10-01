@@ -47,6 +47,18 @@ pub struct LabelBoxStyle {
     pub text_pad: f32,
 }
 
+impl LabelBoxStyle {
+    /// The width a label of a box filling `rect` is drawn within, and the font
+    /// size it is drawn at.
+    pub fn label_room(&self, rect: Bounds<Pixels>) -> (f32, Pixels) {
+        let inset = 2. * self.text_pad;
+        (
+            f32::from(rect.size.width) - inset,
+            rect.size.height - px(inset),
+        )
+    }
+}
+
 /// Paints a filled box and, if it is wide enough, its name truncated to fit and
 /// centered vertically — the shared shape behind a flame-chart slice and a
 /// flame-graph node.
@@ -87,9 +99,8 @@ pub fn paint_labeled_box(
     if w < label_min_px {
         return;
     }
-    let avail = w - 2. * text_pad;
+    let (avail, fs) = style.label_room(rect);
     let font = bviz_ui_assets::text_metrics(window).font;
-    let fs = px(h - 2. * text_pad);
     let line = shape_truncated(name, avail, font, fs, label_color, window);
     let ty = rect.origin.y + px((h - f32::from(fs)) / 2.);
     let _ = line.paint(
