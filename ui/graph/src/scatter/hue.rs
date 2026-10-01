@@ -2,8 +2,8 @@
 //! those colours.
 
 use super::axis::Clocks;
-use super::kind_names;
 use crate::Palette;
+use crate::point::kind_names;
 use crate::timing::Ran;
 use bviz_graph_layout::facets::Sym;
 use bviz_graph_layout::metrics::{Measurement, Metrics, Unit};

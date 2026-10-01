@@ -14,15 +14,14 @@ use crate::colour;
 use crate::drag::CLICK_SLOP;
 use crate::model::{FilterChanged, GraphModel, Loaded, MetricsLanded, SourceReplaced};
 use crate::paint::UNMARKED_FADE;
+use crate::point::{configuration, identify, mnemonic, point_label, primary_output, unit_names};
 use crate::timing::{NodeTimes, Untimed};
 use crate::{PIXELS_PER_NOTCH, ZOOM_PER_NOTCH};
 use axis::{Axes, Axis, Clocks};
 use bviz_graph_layout::capability::TRANSITIONS_FLAG;
-use bviz_graph_layout::facets::Tri;
 use bviz_graph_layout::metrics::{Measurement, Metrics, Scope, Sizing, Unit};
 use bviz_graph_layout::select::Filter;
-use bviz_graph_layout::select::labels::carried_label;
-use bviz_graph_layout::{Capabilities, Id, Input, InputSet, Kind, Support};
+use bviz_graph_layout::{Capabilities, Input, InputSet, Kind, Support};
 use bviz_invocation::Revision;
 use bviz_ui_components::{
     Button, DragEnd, Dropdown, DropdownEvent, ListScroll, SCROLLBAR_THICKNESS, TextTooltip,
@@ -882,16 +881,6 @@ fn drawn_status(plotted: &Plotted, unit: Unit) -> String {
     }
 }
 
-/// How a reader names one point of `unit`, and several.
-fn unit_names(unit: Unit) -> KindNames {
-    let (one, many) = match unit {
-        Unit::Action => ("action", "actions"),
-        Unit::ConfiguredTarget => ("configured target", "configured targets"),
-        Unit::Target => ("target", "targets"),
-    };
-    KindNames { one, many }
-}
-
 /// What the tooltip over `mark`, a point of `unit` drawn in `plotted`, reads,
 /// where a pick naming it covers `others` points besides: what the point is,
 /// then its measures.
@@ -903,37 +892,8 @@ fn describe(
     loaded: &Loaded,
 ) -> Vec<String> {
     let (point, time) = (&mark.target, mark.time);
-    let shared = &loaded.shared;
-    let facets = &shared.facets;
-    let label = point_label(point.id, loaded);
     let mut lines = Vec::with_capacity(TOOLTIP_LINES);
-    match unit {
-        Unit::Action => {
-            lines.extend([mnemonic(point.id, loaded).to_owned(), format!("of {label}")]);
-            lines.extend(configuration(point.id, loaded).map(|name| format!("in {name}")));
-            let aspects = facets.aspects().values(point.id);
-            if !aspects.is_empty() {
-                let aspects = aspects.iter().map(|&a| facets.strings().resolve(a));
-                lines.push(format!("via {}", aspects.collect::<Vec<_>>().join(", ")));
-            }
-            let output = primary_output(point.id, loaded);
-            lines.extend(output.map(|output| format!("writes {output}")));
-        }
-        Unit::ConfiguredTarget => {
-            lines.push(label);
-            lines.extend(configuration(point.id, loaded).map(|name| format!("in {name}")));
-        }
-        Unit::Target => {
-            let repo = match facets.repo(point.id) {
-                Some(repo) => match shared.labels.repos().written(repo) {
-                    "" => MAIN_REPO,
-                    written => written,
-                },
-                None => UNKNOWN_REPO,
-            };
-            lines.extend([label, format!("{} in {repo}", kind_names(point.kind).one)]);
-        }
-    }
+    identify(point.id, point.kind, unit, &loaded.shared, &mut lines);
     lines.push(plotted.axes.readings(point, time));
     lines.extend(plotted.axes.unplaced(point, time));
     if let Hue::Ran(ran) = mark.hue {
@@ -968,11 +928,12 @@ fn pick_reading<'a>(
     unit: Unit,
     loaded: &'a Loaded,
 ) -> (Option<&'a str>, String, Vec<Option<String>>) {
-    let label = point_label(point.id, loaded);
-    let configuration = configuration(point.id, loaded);
+    let shared = &loaded.shared;
+    let label = point_label(point.id, shared);
+    let configuration = configuration(point.id, shared);
     match unit {
         Unit::Action => {
-            let output = primary_output(point.id, loaded);
+            let output = primary_output(point.id, shared);
             let file = output.map(|output| output.rsplit('/').next().unwrap_or(output));
             let readings = vec![
                 file.map(str::to_owned),
@@ -980,60 +941,15 @@ fn pick_reading<'a>(
                 output.map(|output| pick::in_output_tree(output).to_owned()),
                 output.map(str::to_owned),
             ];
-            (Some(mnemonic(point.id, loaded)), label, readings)
+            (Some(mnemonic(point.id, shared)), label, readings)
         }
         Unit::ConfiguredTarget => (None, label, vec![configuration]),
         Unit::Target => (None, label, Vec::new()),
     }
 }
 
-/// The label of the target the node `id` is or belongs to, where one is
-/// carried, and its name otherwise.
-fn point_label(id: Id, loaded: &Loaded) -> String {
-    let shared = &loaded.shared;
-    match carried_label(&shared.names, &shared.facets, id) {
-        Some(label) => shared.labels.written(label).into_owned(),
-        None => shared.names.resolve(id).to_owned(),
-    }
-}
-
-/// The mnemonic of the action `id`.
-fn mnemonic(id: Id, loaded: &Loaded) -> &str {
-    let facets = &loaded.shared.facets;
-    let mnemonic = facets.mnemonic(id);
-    mnemonic.map_or("action", |m| facets.strings().resolve(m))
-}
-
-/// The path of the file the action `id` writes first.
-fn primary_output(id: Id, loaded: &Loaded) -> Option<&str> {
-    let shared = &loaded.shared;
-    // The base graph holds each node at the position of its id.
-    let output = shared.facets.primary_output(id)?;
-    let node = shared.base.nodes.get(output.0 as usize)?;
-    Some(&node.label)
-}
-
-/// The configuration the node `id` is built in, by its mnemonic where it has
-/// one, and marked where it builds a tool the build runs.
-fn configuration(id: Id, loaded: &Loaded) -> Option<String> {
-    let facets = &loaded.shared.facets;
-    let config = facets.config(id)?;
-    let entry = facets.config_entry(config);
-    let name = entry
-        .and_then(|entry| entry.mnemonic)
-        .unwrap_or(config.sym());
-    let name = facets.strings().resolve(name);
-    Some(match entry.map(|entry| entry.is_tool) {
-        Some(Tri::Yes) => format!("{name} (exec)"),
-        _ => name.to_owned(),
-    })
-}
-
 /// The most lines a tooltip reads.
 const TOOLTIP_LINES: usize = 10;
-
-const MAIN_REPO: &str = "the main repository";
-const UNKNOWN_REPO: &str = "an unnamed repository";
 
 impl EventEmitter<PanelEvent> for ScatterPanel {}
 
@@ -1545,27 +1461,6 @@ fn pick_row(
                 .text_color(colors.text_muted)
                 .child(listed.measures.clone()),
         )
-}
-
-/// How a reader names one target of a kind, and several.
-struct KindNames {
-    one: &'static str,
-    many: &'static str,
-}
-
-fn kind_names(kind: Kind) -> KindNames {
-    let (one, many) = match kind {
-        Kind::Action => ("action", "actions"),
-        Kind::ConfiguredTarget => ("configured target", "configured targets"),
-        Kind::Source => ("source file", "source files"),
-        Kind::Artifact => ("generated file", "generated files"),
-        Kind::TargetGroup => (
-            "package or environment group",
-            "package and environment groups",
-        ),
-        _ => ("rule target", "rule targets"),
-    };
-    KindNames { one, many }
 }
 
 /// Opacity of a legend swatch, firmer than a mark's so that a lone swatch still

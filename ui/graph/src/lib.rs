@@ -43,6 +43,7 @@ mod morph;
 mod neighborhood;
 mod paint;
 mod pins;
+mod point;
 mod preset;
 mod relation;
 mod report;
