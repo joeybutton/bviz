@@ -1,13 +1,17 @@
-use crate::build::build_graph;
+use crate::GraphPanel;
+use crate::build::{build_graph, loaded_inputs};
 use crate::derive::derive_levels;
 use bviz_graph_layout::graph::Graph;
 use bviz_graph_layout::lod::{DEFAULT_MAX_EDGES, DEFAULT_MAX_NODES, Overflow};
+use bviz_graph_layout::metrics::{Measurement, Scope, measure};
+use bviz_graph_layout::select::Filter;
 use bviz_graph_layout::select::labels::LabelIndex;
-use bviz_graph_layout::{Capabilities, Facets, Id, MapLayout, Names};
+use bviz_graph_layout::{Capabilities, Facets, Id, InputSet, Joint, MapLayout, Names, Provenance};
 use bviz_ui_components::{Pending, load_in_background};
-use bviz_ui_graph_args::Input;
-use gpui::{Context, EventEmitter, Task};
-use std::collections::HashSet;
+use bviz_ui_graph_args::GraphSource;
+use gpui::{Context, Entity, EntityId, EventEmitter, Subscription, Task};
+use std::collections::hash_map::Entry;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, OnceLock};
 
 /// The graph a document holds, as it was read: whole, unfiltered, and shared by
@@ -39,6 +43,10 @@ pub(crate) struct Shared {
     /// Which filter axes the inputs this graph was read from support, by which
     /// the toolbar tells a control the inputs cannot answer from one they can.
     pub(crate) capabilities: Capabilities,
+    /// The inputs that built each node of the base graph.
+    pub(crate) provenance: Arc<Provenance>,
+    /// The inputs the graph was read from.
+    pub(crate) inputs: InputSet,
 }
 
 /// A graph's map, landing after the rest of the read. Every clone shares the
@@ -84,6 +92,19 @@ pub(crate) struct Opening {
 pub(crate) struct Loaded {
     pub(crate) shared: Shared,
     pub(crate) opening: Opening,
+    /// Goes with the graph it measures, so a measuring still in flight when the
+    /// graph is replaced never lands.
+    measures: HashMap<Scope, Measure>,
+}
+
+impl Loaded {
+    pub(crate) fn new(shared: Shared, opening: Opening) -> Self {
+        Self {
+            shared,
+            opening,
+            measures: HashMap::new(),
+        }
+    }
 }
 
 /// Whether a graph's layered view starts out drawing the transitive reduction of
@@ -99,9 +120,19 @@ pub(crate) struct Read {
     landing: Landing,
 }
 
-/// Reads `inputs` and builds the graph, and starts placing its map.
-pub(crate) fn build(inputs: Vec<Input>) -> Result<Read, String> {
-    let (graph, reduced_base, names, facets, capabilities) = build_graph(&inputs)?;
+/// Reads `source` and builds the graph, and starts placing its map.
+pub(crate) fn build(source: GraphSource) -> Result<Read, String> {
+    let inputs = loaded_inputs(&source);
+    let (
+        Joint {
+            graph,
+            names,
+            facets,
+            capabilities,
+            provenance,
+        },
+        reduced_base,
+    ) = build_graph(&source.inputs())?;
     // The map derives each of its views against these, so it holds a share in
     // them rather than a copy.
     let (base, reduced_base) = (Arc::new(graph), Arc::new(reduced_base));
@@ -124,8 +155,8 @@ pub(crate) fn build(inputs: Vec<Input>) -> Result<Read, String> {
     let containers = Arc::new(bviz_graph_layout::lod::expandable_containers(&base));
     let labels = Arc::new(LabelIndex::of(&base, &names, &facets));
     Ok(Read {
-        loaded: Loaded {
-            shared: Shared {
+        loaded: Loaded::new(
+            Shared {
                 base,
                 reduced_base,
                 map,
@@ -134,12 +165,14 @@ pub(crate) fn build(inputs: Vec<Input>) -> Result<Read, String> {
                 labels,
                 containers,
                 capabilities,
+                provenance: Arc::new(provenance),
+                inputs,
             },
-            opening: Opening {
+            Opening {
                 expanded,
                 over_budget,
             },
-        },
+        ),
         placing,
         landing,
     })
@@ -155,6 +188,41 @@ pub(crate) struct SourceReplaced;
 /// The loaded graph's map has landed in its [`Placement`].
 pub(crate) struct MapPlaced;
 
+/// A view of the graph named a node for the graph panel it defers to to show.
+pub(crate) struct RevealRequested {
+    pub(crate) panel: EntityId,
+    pub(crate) node: Id,
+}
+
+/// The graph panel the graph's other views defer to.
+struct Deferred {
+    panel: EntityId,
+    /// The filter the panel draws through.
+    filter: Filter,
+    /// Forgets the panel once it is released.
+    _released: Subscription,
+}
+
+/// The loaded graph's metrics in `scope` have landed.
+pub(crate) struct MetricsLanded {
+    pub(crate) scope: Scope,
+}
+
+/// The graph's other views may have another [`GraphModel::filter`] to draw
+/// through.
+pub(crate) struct FilterChanged;
+
+/// A graph's metrics in one scope, a pass over the whole graph that is only
+/// taken once a view drawing them asks for it.
+enum Measure {
+    Measuring {
+        /// Dropping it gives the measuring up: a pass not yet started never
+        /// runs, and one running lands nothing.
+        _work: Task<()>,
+    },
+    Measured(Arc<Measurement>),
+}
+
 /// A graph read for viewing, held apart from the panels drawing it so a view of
 /// it can close and be shown again without the graph being read or laid out
 /// afresh.
@@ -165,10 +233,16 @@ pub(crate) struct GraphModel {
     /// The placement of the map in flight once the read has landed, held so
     /// that it is not cancelled.
     _placing: Task<()>,
+    /// The graph panel opened, shown or filtered last, for as long as it is
+    /// open.
+    deferred: Option<Deferred>,
 }
 
 impl EventEmitter<SourceReplaced> for GraphModel {}
 impl EventEmitter<MapPlaced> for GraphModel {}
+impl EventEmitter<RevealRequested> for GraphModel {}
+impl EventEmitter<MetricsLanded> for GraphModel {}
+impl EventEmitter<FilterChanged> for GraphModel {}
 
 impl GraphModel {
     /// The graph `load` is reading, viewable once the read finishes and failed
@@ -234,6 +308,104 @@ impl GraphModel {
             source: Source::Loading,
             _work: work,
             _placing: Task::ready(()),
+            deferred: None,
+        }
+    }
+
+    /// Takes `panel`, drawing through `filter`, as the graph panel the graph's
+    /// other views defer to.
+    pub(crate) fn defer_to(
+        &mut self,
+        panel: &Entity<GraphPanel>,
+        filter: Filter,
+        cx: &mut Context<Self>,
+    ) {
+        let id = panel.entity_id();
+        match &mut self.deferred {
+            Some(deferred) if deferred.panel == id => {
+                if deferred.filter == filter {
+                    return;
+                }
+                deferred.filter = filter;
+            }
+            _ => {
+                let released = cx.observe_release(panel, |model, _, cx| {
+                    model.deferred = None;
+                    cx.emit(FilterChanged);
+                    cx.notify();
+                });
+                self.deferred = Some(Deferred {
+                    panel: id,
+                    filter,
+                    _released: released,
+                });
+                cx.notify();
+            }
+        }
+        cx.emit(FilterChanged);
+    }
+
+    /// Whether a graph panel is open to show a node another view names.
+    pub(crate) fn reveals(&self) -> bool {
+        self.deferred.is_some()
+    }
+
+    /// The filter the graph's other views draw their share of it through: the
+    /// one the graph panel they defer to draws through, absent where no graph
+    /// panel is open.
+    pub(crate) fn filter(&self) -> Option<&Filter> {
+        self.deferred.as_ref().map(|deferred| &deferred.filter)
+    }
+
+    /// Has the loaded graph measured off the UI thread in each scope of
+    /// `wanted` not yet asked for, emitting [`MetricsLanded`] as each lands, and
+    /// gives up measuring any other scope, whose pass would only hold the
+    /// workers from those wanted. Metrics already measured are kept. Does
+    /// nothing while the graph is still being read.
+    pub(crate) fn want_metrics(&mut self, wanted: &[Scope], cx: &mut Context<Self>) {
+        let Source::Loaded(loaded) = &mut self.source else {
+            return;
+        };
+        forget_unwanted(&mut loaded.measures, wanted);
+        for &scope in wanted {
+            let Entry::Vacant(unasked) = loaded.measures.entry(scope) else {
+                continue;
+            };
+            let shared = loaded.shared.clone();
+            let work = load_in_background(
+                cx,
+                move || {
+                    let (base, facets) = (&shared.base, &shared.facets);
+                    let names = &shared.names;
+                    Arc::new(measure(base, names, facets, &shared.provenance, scope))
+                },
+                move |model, metrics, cx| {
+                    if let Source::Loaded(loaded) = &mut model.source {
+                        loaded.measures.insert(scope, Measure::Measured(metrics));
+                        cx.emit(MetricsLanded { scope });
+                    }
+                },
+            );
+            unasked.insert(Measure::Measuring { _work: work });
+        }
+    }
+
+    /// The loaded graph's metrics in `scope`, once measured.
+    pub(crate) fn metrics(&self, scope: Scope) -> Option<&Arc<Measurement>> {
+        match self.loaded()?.measures.get(&scope)? {
+            Measure::Measured(metrics) => Some(metrics),
+            Measure::Measuring { .. } => None,
+        }
+    }
+
+    /// Asks the graph panel the graph's other views defer to to show the node
+    /// `id`, where one is open.
+    pub(crate) fn reveal(&mut self, id: Id, cx: &mut Context<Self>) {
+        if let Some(deferred) = &self.deferred {
+            cx.emit(RevealRequested {
+                panel: deferred.panel,
+                node: id,
+            });
         }
     }
 
@@ -249,9 +421,17 @@ impl GraphModel {
     }
 }
 
+/// Drops each measuring of `measures` whose scope `wanted` leaves out.
+fn forget_unwanted(measures: &mut HashMap<Scope, Measure>, wanted: &[Scope]) {
+    measures
+        .retain(|scope, measure| matches!(measure, Measure::Measured(_)) || wanted.contains(scope));
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bviz_graph_layout::Input;
+    use bviz_graph_layout::metrics::{Sizing, Unit};
 
     /// Placing runs apart from the read it belongs to, so a panic there fails
     /// the read all the same, and lands no map.
@@ -264,5 +444,39 @@ mod tests {
         assert!(model.land(placed, landing).is_none());
         assert!(matches!(model.source(), Source::Failed(_)));
         assert!(placement.placed().is_none());
+    }
+
+    /// A scope no longer wanted stops being measured, but what was measured of
+    /// it stays for when it is wanted again.
+    #[test]
+    fn an_unwanted_measuring_is_dropped_and_a_landed_measure_kept() {
+        let scope = |input: Input| Scope::new(Unit::Target, input.into()).unwrap();
+        let (landed, dropped, kept) = (
+            scope(Input::Query),
+            scope(Input::Cquery),
+            scope(Input::Aquery),
+        );
+        let measuring = || Measure::Measuring {
+            _work: Task::ready(()),
+        };
+        let measured = Measure::Measured(Arc::new(Measurement {
+            scope: landed,
+            points: Vec::new(),
+            sizing: Sizing::FanIn,
+        }));
+        let mut measures = HashMap::from([
+            (landed, measured),
+            (dropped, measuring()),
+            (kept, measuring()),
+        ]);
+
+        forget_unwanted(&mut measures, &[kept]);
+
+        assert!(matches!(measures.get(&landed), Some(Measure::Measured(_))));
+        assert!(!measures.contains_key(&dropped));
+        assert!(matches!(
+            measures.get(&kept),
+            Some(Measure::Measuring { .. })
+        ));
     }
 }

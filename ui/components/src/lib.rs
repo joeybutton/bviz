@@ -7,8 +7,9 @@ mod divider;
 mod drag;
 mod dropdown;
 mod layer;
+mod list_scroll;
 mod menu;
-mod menu_chrome;
+pub mod menu_chrome;
 mod multi_select;
 mod notice;
 mod scrollbar;
@@ -25,6 +26,7 @@ pub use divider::{Divider, DividerSide};
 pub use drag::{DragEnd, track_drag};
 pub use dropdown::{Dropdown, DropdownEvent};
 pub use layer::{cached_layer, overlay_canvas};
+pub use list_scroll::{ListScroll, list_scrollbar};
 pub use menu::{Menu, MenuEvent, MenuItem, SubmenuItem};
 pub use multi_select::{MultiOption, MultiSelect, MultiSelectEvent};
 pub use notice::{Source, centered_notice, centered_spinner};
@@ -33,7 +35,10 @@ pub use scrubber::{ScrubberColors, ScrubberState, scrubber};
 pub use spinner::spinner;
 pub use text_input::TextInput;
 pub use toolbar::Toolbar;
-pub use tooltip::{TextTooltip, TooltipColors, paint_tooltip_box};
+pub use tooltip::{
+    TextTooltip, TooltipColors, beside_anchor, paint_tooltip, paint_tooltip_box, room_beside,
+    tooltip_extent,
+};
 
 use gpui::{App, Pixels, px};
 

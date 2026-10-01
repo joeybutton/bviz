@@ -25,6 +25,16 @@ impl Rect {
         }
     }
 
+    /// The rect a map places a node at.
+    pub(crate) fn placed(p: bviz_graph_layout::map::Placed) -> Rect {
+        Rect {
+            x: p.x,
+            y: p.y,
+            w: p.width,
+            h: p.height,
+        }
+    }
+
     /// Whether the two rectangles meet, counting a shared edge.
     pub(crate) fn overlaps(&self, other: &Rect) -> bool {
         self.x <= other.x + other.w

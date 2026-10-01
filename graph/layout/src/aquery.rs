@@ -21,7 +21,7 @@
 
 use std::borrow::Cow;
 use std::collections::{BTreeSet, HashSet};
-use std::num::{NonZeroU32, NonZeroUsize};
+use std::num::{NonZeroU32, NonZeroU64, NonZeroUsize};
 
 use rustc_hash::{FxHashMap, FxHashSet};
 
@@ -35,7 +35,7 @@ use crate::capability::Axis;
 use crate::facets::Facets;
 use crate::facets::{ConfigRef, FacetsBuilder};
 use crate::graph::{EdgeKind, Graph, Kind, Node};
-use crate::intern::{Id, Names};
+use crate::intern::{Id, Names, stable_hash};
 use crate::label::{self, PackageHierarchy, RepoMapping};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -180,10 +180,16 @@ fn build_action_boxes(
         ));
         boxes.describe_action(action_id, ct_id, action);
         for &out in &action.output_ids {
-            let out = ArtifactId(out);
-            let art_id = boxes.output_artifact(out, ct_id, config_id);
-            producer_node_id.insert(out, art_id);
+            let art_id = boxes.output_artifact(ArtifactId(out), ct_id, config_id);
+            producer_node_id.insert(ArtifactId(out), art_id);
             boxes.graph.add_edge(action_id, art_id, EdgeKind::Aquery);
+            if out == action.primary_output_id {
+                let key =
+                    NonZeroU64::new(stable_hash(&boxes.index.paths.full_path(ArtifactId(out))));
+                let facets = boxes.facets.facets();
+                facets.set_primary_output(action_id, art_id);
+                facets.set_primary_output_key(action_id, key);
+            }
         }
     }
     producer_node_id
@@ -1433,6 +1439,66 @@ mod tests {
             parent_of(&graph, &names, "artifact1"),
             Some("ct://pkg:gen#ck1")
         );
+    }
+
+    #[test]
+    fn an_action_names_its_primary_output_among_those_it_writes() {
+        let (first, mut frags) = generated_artifact(1, 100, "pkg/gen.h");
+        let (second, more) = generated_artifact(2, 200, "pkg/gen.c");
+        frags.extend(more);
+        let container = ActionGraphContainer {
+            artifacts: vec![first, second],
+            path_fragments: frags,
+            targets: vec![target(9, "//pkg:gen")],
+            actions: vec![Action {
+                target_id: 9,
+                mnemonic: "Genrule".to_string(),
+                configuration_id: 1,
+                output_ids: vec![1, 2],
+                primary_output_id: 2,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        let (_, names, facets) = build(&[container], false);
+
+        let primary = facets.primary_output(names.get("action0").unwrap());
+        assert_eq!(primary.map(|id| names.resolve(id)), Some("artifact2"));
+    }
+
+    /// An action keeps its key whichever place the query lists it at, and
+    /// actions writing different files have different keys.
+    #[test]
+    fn an_action_is_keyed_by_its_primary_output_not_its_place() {
+        let (header, mut frags) = generated_artifact(1, 100, "pkg/gen.h");
+        let (source, more) = generated_artifact(2, 200, "pkg/gen.c");
+        frags.extend(more);
+        let writing = |out: u32| Action {
+            output_ids: vec![out],
+            primary_output_id: out,
+            ..action(9, "Genrule", &[])
+        };
+        let container = |actions: Vec<Action>| ActionGraphContainer {
+            artifacts: vec![header, source],
+            path_fragments: frags.clone(),
+            targets: vec![target(9, "//pkg:gen")],
+            actions,
+            ..Default::default()
+        };
+        let key_of_first = |actions: Vec<Action>| {
+            let (_, names, facets) = build(&[container(actions)], false);
+            facets.primary_output_key(names.get("action0").unwrap())
+        };
+
+        let header_first = key_of_first(vec![writing(1), writing(2)]);
+        let source_first = key_of_first(vec![writing(2), writing(1)]);
+        let (_, names, facets) = build(&[container(vec![writing(2), writing(1)])], false);
+        let header_second = facets.primary_output_key(names.get("action1").unwrap());
+
+        assert!(header_first.is_some());
+        assert_eq!(header_first, header_second);
+        assert_ne!(header_first, source_first);
     }
 
     /// The graph of a genrule `@@somerepo+//pkg:gen` whose one output, labelled

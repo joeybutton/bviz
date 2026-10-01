@@ -2,16 +2,15 @@
 //! menu of rows that stays open as they are toggled.
 
 use crate::button::Button;
-use crate::drag::{DragEnd, track_drag};
-use crate::layer::overlay_canvas;
+use crate::list_scroll::{ListScroll, list_scrollbar};
 use crate::menu_chrome;
-use crate::scrollbar::{Axis, DEFAULT_MIN_THUMB, SCROLLBAR_THICKNESS, Scrollbar};
+use crate::scrollbar::{SCROLLBAR_THICKNESS, ScrollbarColors};
 use bviz_ui_assets::TextMetrics;
 use bviz_ui_theme::ThemeColors;
 use gpui::{
-    App, Bounds, ClickEvent, Context, ElementId, Entity, EventEmitter, FocusHandle, Font,
-    IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, Pixels, Point, Render, Rgba,
-    ScrollHandle, SharedString, Subscription, Window, deferred, div, point, prelude::*, px, size,
+    ClickEvent, Context, ElementId, EventEmitter, FocusHandle, Font, IntoElement, KeyDownEvent,
+    MouseButton, MouseDownEvent, Pixels, Render, SharedString, Subscription, Window, deferred, div,
+    prelude::*, px,
 };
 use std::collections::HashSet;
 use std::ops::Range;
@@ -280,9 +279,7 @@ pub struct MultiSelect {
     /// Closes the menu when focus leaves it (an outside click); installed lazily
     /// on the first render, where the window is in hand.
     dismiss: Option<Subscription>,
-    scroll: ScrollHandle,
-    /// The grab offset from the thumb's leading edge while the bar is dragged.
-    thumb_grab: Option<f32>,
+    scroll: ListScroll,
 }
 
 impl MultiSelect {
@@ -303,8 +300,7 @@ impl MultiSelect {
             },
             focus_handle: cx.focus_handle(),
             dismiss: None,
-            scroll: ScrollHandle::new(),
-            thumb_grab: None,
+            scroll: ListScroll::new(),
         }
     }
 
@@ -329,45 +325,6 @@ impl MultiSelect {
             "escape" if self.rows.open => self.set_open(false, window, cx),
             "enter" | "space" => self.set_open(!self.rows.open, window, cx),
             _ => {}
-        }
-    }
-
-    /// The bar for the row list's content height against its visible height;
-    /// `None` while the list fits.
-    fn vbar(&self) -> Option<Scrollbar> {
-        let list = self.scroll.bounds();
-        let visible = f32::from(list.size.height);
-        Scrollbar::new(
-            Axis::Vertical,
-            Bounds::new(
-                point(list.right() - px(SCROLLBAR_THICKNESS), list.origin.y),
-                size(px(SCROLLBAR_THICKNESS), list.size.height),
-            ),
-            visible + f32::from(self.scroll.max_offset().y),
-            visible,
-            -f32::from(self.scroll.offset().y),
-            DEFAULT_MIN_THUMB,
-        )
-    }
-
-    /// Begins a scroll drag if `pos` hit the bar; otherwise leaves the press to
-    /// fall through to the row under it.
-    fn press(&mut self, pos: Point<Pixels>) {
-        if let Some(bar) = self.vbar()
-            && bar.track_hit(pos)
-        {
-            let grab = bar.grab(pos);
-            self.thumb_grab = Some(grab);
-            self.thumb_to(pos, grab);
-        }
-    }
-
-    /// Maps a thumb drag back to the list's scroll offset.
-    fn thumb_to(&mut self, pos: Point<Pixels>, grab: f32) {
-        if let Some(bar) = self.vbar() {
-            let mut offset = self.scroll.offset();
-            offset.y = px(-bar.offset_at(pos, grab));
-            self.scroll.set_offset(offset);
         }
     }
 
@@ -413,7 +370,7 @@ impl MultiSelect {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, e: &MouseDownEvent, _, cx| {
-                    this.press(e.position);
+                    this.scroll.press(e.position);
                     // Keep the press off an ancestor that focuses on mouse-down,
                     // whose blur would dismiss the menu mid-gesture.
                     cx.stop_propagation();
@@ -506,13 +463,13 @@ impl MultiSelect {
                 MENU_MAX_HEIGHT,
             ))
             .overflow_y_scroll()
-            .track_scroll(&self.scroll)
+            .track_scroll(self.scroll.handle())
             .children(rows);
         let bar = list_scrollbar(
             cx.entity(),
-            self.thumb_grab.is_some(),
-            colors.element_hover.into(),
-            colors.element_active.into(),
+            |control: &Self| &control.scroll,
+            |control: &mut Self| &mut control.scroll,
+            ScrollbarColors::from_colors(colors),
         );
         div()
             .relative()
@@ -635,47 +592,6 @@ impl Render for MultiSelect {
             .child(trigger)
             .children(menu)
     }
-}
-
-/// The menu's scroll bar, drawn over the row list once it has been laid out;
-/// keeps the drag handlers installed while `dragging`.
-fn list_scrollbar(
-    control: Entity<MultiSelect>,
-    dragging: bool,
-    track: Rgba,
-    thumb: Rgba,
-) -> impl IntoElement {
-    overlay_canvas(move |_, window: &mut Window, cx: &mut App| {
-        if let Some(bar) = control.read(cx).vbar() {
-            bar.paint(track, thumb, window);
-        }
-        if dragging {
-            track_drag(window, &control, on_drag, end_drag);
-        }
-    })
-}
-
-fn on_drag(
-    control: &mut MultiSelect,
-    position: Point<Pixels>,
-    _window: &mut Window,
-    cx: &mut Context<MultiSelect>,
-) {
-    if let Some(grab) = control.thumb_grab {
-        control.thumb_to(position, grab);
-    }
-    cx.notify();
-}
-
-fn end_drag(
-    control: &mut MultiSelect,
-    _: Point<Pixels>,
-    _: DragEnd,
-    _: &mut Window,
-    cx: &mut Context<MultiSelect>,
-) {
-    control.thumb_grab = None;
-    cx.notify();
 }
 
 #[cfg(test)]

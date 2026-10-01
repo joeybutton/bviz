@@ -6,7 +6,7 @@ use gpui::{App, Context, Entity, Pixels, Point, Window};
 
 /// A cursor must travel at least this far from the press before the gesture
 /// counts as a drag rather than a click.
-const CLICK_SLOP: f32 = 4.0;
+pub(crate) const CLICK_SLOP: f32 = 4.0;
 
 /// The pointer gesture the view is in the middle of.
 #[derive(Clone, Copy, Default)]

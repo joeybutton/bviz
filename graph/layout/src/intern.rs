@@ -2,9 +2,18 @@
 //! it to and from the string id, so graphs key on integers and resolve to the
 //! string only when one is genuinely needed (naming a new node, debugging).
 use std::collections::HashMap;
+use std::hash::Hasher;
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
 pub struct Id(pub u32);
+
+/// A hash of `text` that every run computes alike, for keying on a name where
+/// an [`Id`], numbered by the order the inputs list things in, would not do.
+pub(crate) fn stable_hash(text: &str) -> u64 {
+    let mut hasher = rustc_hash::FxHasher::default();
+    hasher.write(text.as_bytes());
+    hasher.finish()
+}
 
 #[derive(Default, Clone)]
 pub struct Names {

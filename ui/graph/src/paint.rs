@@ -147,7 +147,7 @@ const HIGHLIGHT_WASH: f32 = 0.155;
 /// graph that has receded rather than against one drawn just as strongly. Low
 /// enough that the marked part carries the eye on its own, and above zero so the
 /// rest still says where in the graph that part sits.
-const UNMARKED_FADE: f32 = 0.2;
+pub(crate) const UNMARKED_FADE: f32 = 0.2;
 
 /// Everything the canvas draws from, owned so the `'static` paint closure holds
 /// no borrow of the view.
@@ -394,7 +394,7 @@ impl Palette {
     /// Accent for a leaf box, keyed by its node kind. Actions, artifacts and
     /// source files each take a slot of their own; every other kind shares the
     /// catch-all.
-    fn kind_accent(&self, kind: Kind) -> Rgba {
+    pub(crate) fn kind_accent(&self, kind: Kind) -> Rgba {
         match kind {
             Kind::Action => self.data.orange,
             Kind::Artifact => self.data.green,

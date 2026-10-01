@@ -16,19 +16,31 @@ use bazel_query_proto::blaze_query::Target;
 
 use crate::capability::Capabilities;
 use crate::facets::{Facets, FacetsBuilder};
-use crate::graph::{Graph, Node};
+use crate::graph::{Edge, Graph, Node};
 use crate::intern::{Id, Names};
 use crate::label::{self, RepoMapping, canonical_repo};
+use crate::provenance::{Input, InputSet, Provenance};
 use crate::{aquery, cquery, query};
 
-/// The joint graph, the names its ids resolve through, the facets a filter
-/// selects on, and which axes those facets let it select by.
+/// A joint graph and what a view of it reads alongside.
+pub struct Joint {
+    pub graph: Graph,
+    /// The names the graph's ids resolve through.
+    pub names: Names,
+    /// The facets a filter selects on.
+    pub facets: Facets,
+    /// Which axes those facets let a filter select by.
+    pub capabilities: Capabilities,
+    pub provenance: Provenance,
+}
+
+/// Merges the inputs given into one joint graph.
 pub fn build_joint(
     aquery: Option<&[ActionGraphContainer]>,
     cquery: Option<&[CqueryResult]>,
     query: Option<&[Target]>,
     external_sources: bool,
-) -> (Graph, Names, Facets, Capabilities) {
+) -> Joint {
     let repos = repo_mapping(aquery, cquery, query);
     let union = package_union(aquery, cquery, query, &repos);
     let labeled_outputs = labeled_outputs(cquery, query, &repos);
@@ -46,9 +58,16 @@ pub fn build_joint(
         &mut facets,
     );
     let (facets, capabilities) = facets.seal();
-    let (mut graph, names, facets) = canonicalize(merge(graphs), &names, facets);
+    let (mut graph, names, facets, provenance) =
+        canonicalize(merge(graphs, names.len()), &names, facets);
     label::show_written_repositories(&mut graph, &facets);
-    (graph, names, facets, capabilities)
+    Joint {
+        graph,
+        names,
+        facets,
+        capabilities,
+        provenance,
+    }
 }
 
 /// The apparent-to-canonical repository mapping inferred from every canonical
@@ -115,10 +134,10 @@ fn build_inputs(
     repos: &RepoMapping,
     names: &mut Names,
     facets: &mut FacetsBuilder,
-) -> Vec<Graph> {
-    let mut graphs: Vec<Graph> = Vec::new();
+) -> Vec<(Input, Graph)> {
+    let mut graphs: Vec<(Input, Graph)> = Vec::with_capacity(Input::ALL.len());
     if let Some(a) = aquery {
-        graphs.push(aquery::build_with_packages(
+        let graph = aquery::build_with_packages(
             a,
             external_sources,
             union,
@@ -126,16 +145,17 @@ fn build_inputs(
             repos,
             names,
             facets,
-        ));
+        );
+        graphs.push((Input::Aquery, graph));
     }
     if let Some(c) = cquery {
-        graphs.push(cquery::build_with_packages(c, union, repos, names, facets));
+        let graph = cquery::build_with_packages(c, union, repos, names, facets);
+        graphs.push((Input::Cquery, graph));
     }
     if let Some(q) = query {
         let refs: Vec<&Target> = q.iter().collect();
-        graphs.push(query::build_with_packages(
-            &refs, union, repos, names, facets,
-        ));
+        let graph = query::build_with_packages(&refs, union, repos, names, facets);
+        graphs.push((Input::Query, graph));
     }
     graphs
 }
@@ -146,7 +166,11 @@ fn build_inputs(
 /// ties between candidate containers by id, so without a name-ordered id the
 /// startup view would vary run to run. Each node also then sits at the position of
 /// its own id (`nodes[i].id == Id(i)`), the dense indexing that pass relies on.
-fn canonicalize(graph: Graph, names: &Names, mut facets: Facets) -> (Graph, Names, Facets) {
+fn canonicalize(
+    merged: Merged,
+    names: &Names,
+    mut facets: Facets,
+) -> (Graph, Names, Facets, Provenance) {
     let mut order: Vec<u32> = (0..names.len() as u32).collect();
     order.sort_by(|&a, &b| names.resolve(Id(a)).cmp(names.resolve(Id(b))));
     let mut remap = vec![Id(0); names.len()];
@@ -156,40 +180,63 @@ fn canonicalize(graph: Graph, names: &Names, mut facets: Facets) -> (Graph, Name
     }
     let map = |id: Id| remap[id.0 as usize];
 
-    let mut by_id: Vec<Option<&crate::graph::Node>> = vec![None; names.len()];
-    for node in &graph.nodes {
-        by_id[node.id.0 as usize] = Some(node);
+    let mut by_id: Vec<Option<(&Node, InputSet)>> = vec![None; names.len()];
+    for (node, inputs) in &merged.nodes {
+        by_id[node.id.0 as usize] = Some((node, *inputs));
     }
     let mut out = Graph::new();
+    let mut built_by: Vec<InputSet> = Vec::with_capacity(order.len());
     for &old in &order {
-        let node = by_id[old as usize].expect("every id names a node");
+        let (node, inputs) = by_id[old as usize].expect("every id names a node");
         out.add_node(Node::new(
             map(node.id),
             node.label.clone(),
             node.kind,
             node.parent.map(map),
         ));
+        built_by.push(inputs);
     }
-    for edge in &graph.edges {
+    for edge in &merged.edges {
         out.add_edge(map(edge.from), map(edge.to), edge.kind);
     }
     facets.renumber(&remap);
-    (out, canon, facets)
+    (out, canon, facets, Provenance::new(built_by))
 }
 
-/// Unions the graphs into one. Nodes are deduped by id: a package, target,
-/// configured target, or source that several inputs name appears in each input's
-/// graph with an identical kind, label, and parent, so the first wins. Edges are
-/// concatenated without deduping: every builder already drops its own duplicate
-/// edges, and each tags its edges with its own [`EdgeKind`], so no edge from one
-/// input can equal one from another.
-fn merge(graphs: Vec<Graph>) -> Graph {
-    let mut merged = Graph::new();
-    let mut seen_node: HashSet<Id> = HashSet::new();
-    for graph in graphs {
+/// The union of the inputs' graphs.
+struct Merged {
+    /// Each node, with the inputs that built it.
+    nodes: Vec<(Node, InputSet)>,
+    edges: Vec<Edge>,
+}
+
+/// Unions the graphs into one, whose ids are all below `ids`. Nodes are deduped
+/// by id: a package, target, configured target, or source that several inputs
+/// name appears in each input's graph with an identical kind, label, and parent,
+/// so the first wins. Edges are concatenated without deduping: every builder
+/// already drops its own duplicate edges, and each tags its edges with its own
+/// [`EdgeKind`], so no edge from one input can equal one from another.
+fn merge(graphs: Vec<(Input, Graph)>, ids: usize) -> Merged {
+    let nodes = graphs.iter().map(|(_, graph)| graph.nodes.len()).sum();
+    let edges = graphs.iter().map(|(_, graph)| graph.edges.len()).sum();
+    let mut merged = Merged {
+        nodes: Vec::with_capacity(nodes),
+        edges: Vec::with_capacity(edges),
+    };
+    // By id, the node's index among the merged nodes.
+    let mut position: Vec<Option<u32>> = vec![None; ids];
+    for (input, graph) in graphs {
         for node in graph.nodes {
-            if seen_node.insert(node.id) {
-                merged.nodes.push(node);
+            let at = &mut position[node.id.0 as usize];
+            match *at {
+                Some(at) => {
+                    let (_, inputs) = &mut merged.nodes[at as usize];
+                    *inputs = inputs.with(input);
+                }
+                None => {
+                    *at = Some(merged.nodes.len() as u32);
+                    merged.nodes.push((node, input.into()));
+                }
             }
         }
         merged.edges.extend(graph.edges);
@@ -281,10 +328,15 @@ mod tests {
             ..Default::default()
         };
 
-        let (graph, names, _, _) =
-            build_joint(Some(&[aquery_container]), None, Some(&query_targets), false);
+        let Joint {
+            graph,
+            names,
+            provenance,
+            ..
+        } = build_joint(Some(&[aquery_container]), None, Some(&query_targets), false);
 
-        // The target //foo:lib appears once though both inputs name it.
+        // The target //foo:lib appears once though both inputs name it, and
+        // carries both as its provenance.
         assert_eq!(
             graph
                 .nodes
@@ -293,6 +345,13 @@ mod tests {
                 .count(),
             1
         );
+        let built_by = |name: &str| provenance.of(names.get(name).unwrap());
+        assert_eq!(
+            built_by("target://foo:lib"),
+            InputSet::of([Input::Query, Input::Aquery])
+        );
+        assert_eq!(built_by("target://foo:app"), Some(Input::Query.into()));
+        assert_eq!(built_by("action0"), Some(Input::Aquery.into()));
         // The query dependency edge and an aquery input edge both survive.
         let edges = edges(&graph, &names);
         assert!(edges.iter().any(|(_, _, k)| *k == EdgeKind::Query));
@@ -371,7 +430,7 @@ mod tests {
             ..Default::default()
         };
 
-        let (graph, names, _, _) =
+        let Joint { graph, names, .. } =
             build_joint(Some(&[aquery_container]), None, Some(&query_targets), false);
 
         // The promoted target node is shared by query and aquery: it appears once.
@@ -460,7 +519,7 @@ mod tests {
             ..Default::default()
         };
 
-        let (graph, names, _, _) =
+        let Joint { graph, names, .. } =
             build_joint(Some(&[aquery_container]), None, Some(&query_targets), false);
 
         assert_eq!(
@@ -513,7 +572,7 @@ mod tests {
         // where aquery writes the same target as `//foo:app`.
         let query_targets = vec![rule("@@//foo:app", &[])];
 
-        let (graph, names, _, _) = build_joint(
+        let Joint { graph, names, .. } = build_joint(
             Some(&[aquery_target(1, "//foo:app")]),
             None,
             Some(&query_targets),
@@ -532,7 +591,7 @@ mod tests {
         // one target.
         let query_targets = vec![rule("@somerepo//foo:lib", &[])];
 
-        let (graph, names, _, _) = build_joint(
+        let Joint { graph, names, .. } = build_joint(
             Some(&[aquery_target(1, "@@somerepo//foo:lib")]),
             None,
             Some(&query_targets),
@@ -551,7 +610,7 @@ mod tests {
         // Showing the target twice beats attaching it to the wrong repository.
         let query_targets = vec![rule("@somerepo//foo:lib", &[])];
 
-        let (graph, names, _, _) = build_joint(
+        let Joint { graph, names, .. } = build_joint(
             Some(&[aquery_target(1, "@@somerepo+//foo:lib")]),
             None,
             Some(&query_targets),
@@ -608,7 +667,7 @@ mod tests {
             ..Default::default()
         };
 
-        let (_, names, facets, _) = build_joint(
+        let Joint { names, facets, .. } = build_joint(
             Some(&[aquery_container]),
             Some(&cquery_results),
             None,
@@ -651,7 +710,7 @@ mod tests {
             ..Default::default()
         };
 
-        let (graph, names, _, _) =
+        let Joint { graph, names, .. } =
             build_joint(Some(&[aquery_container]), None, Some(&query_targets), false);
 
         assert_eq!(find(&graph, &names, "pkg:a").label, "//a");
@@ -700,7 +759,7 @@ mod tests {
     fn a_configured_target_naming_no_configuration_leaves_the_axis_short() {
         let cquery_results = vec![cquery_rule("//foo:app", 0, Vec::new())];
 
-        let (_, _, _, capabilities) = build_joint(None, Some(&cquery_results), None, false);
+        let Joint { capabilities, .. } = build_joint(None, Some(&cquery_results), None, false);
 
         assert_eq!(
             capabilities.support(Axis::Configuration),
@@ -731,7 +790,7 @@ mod tests {
             ..Default::default()
         };
 
-        let (_, _, _, capabilities) = build_joint(Some(&[aquery_container]), None, None, false);
+        let Joint { capabilities, .. } = build_joint(Some(&[aquery_container]), None, None, false);
 
         assert_eq!(
             capabilities.support(Axis::ExecConfiguration),
@@ -758,8 +817,12 @@ mod tests {
             ..Default::default()
         };
 
-        let (_, names, facets, capabilities) =
-            build_joint(Some(&[aquery_container]), None, None, false);
+        let Joint {
+            names,
+            facets,
+            capabilities,
+            ..
+        } = build_joint(Some(&[aquery_container]), None, None, false);
 
         assert_eq!(capabilities.support(Axis::Aspect), Support::Available);
         let action = names.get("action0").unwrap();
@@ -770,7 +833,7 @@ mod tests {
     fn a_query_printed_without_attributes_cannot_filter_on_tags_or_testonly() {
         let query_targets = vec![attributed("//foo:app", Vec::new())];
 
-        let (_, _, _, capabilities) = build_joint(None, None, Some(&query_targets), false);
+        let Joint { capabilities, .. } = build_joint(None, None, Some(&query_targets), false);
 
         let missing = Support::Unavailable {
             flag: "--proto:output_rule_attrs",
@@ -787,7 +850,7 @@ mod tests {
     fn an_attribute_list_holding_tags_alone_leaves_only_testonly_unfilterable() {
         let query_targets = vec![attributed("//foo:app", vec![tags(&["manual"])])];
 
-        let (_, _, _, capabilities) = build_joint(None, None, Some(&query_targets), false);
+        let Joint { capabilities, .. } = build_joint(None, None, Some(&query_targets), false);
 
         assert_eq!(capabilities.support(Axis::Tags), Support::Available);
         assert_eq!(
@@ -805,7 +868,7 @@ mod tests {
             attributed("//foo:lib", Vec::new()),
         ];
 
-        let (_, _, _, capabilities) = build_joint(None, None, Some(&query_targets), false);
+        let Joint { capabilities, .. } = build_joint(None, None, Some(&query_targets), false);
 
         assert_eq!(
             capabilities.support(Axis::Tags),

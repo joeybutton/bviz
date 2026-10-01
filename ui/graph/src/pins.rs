@@ -10,14 +10,10 @@ use crate::{CARD_MAX_SHARE, GraphPanel, Palette, checklist};
 use bviz_graph_layout::select::labels::carried_label;
 use bviz_graph_layout::select::{Filter, Visibility};
 use bviz_graph_layout::{Facets, Id, Names};
-use bviz_ui_components::{
-    Axis, Button, DEFAULT_MIN_THUMB, DragEnd, SCROLLBAR_THICKNESS, Scrollbar, overlay_canvas,
-    track_drag,
-};
+use bviz_ui_components::{Button, ListScroll, SCROLLBAR_THICKNESS, list_scrollbar};
 use gpui::{
-    App, Bounds, ClickEvent, Context, Div, Entity, IntoElement, MouseButton, MouseDownEvent,
-    Pixels, Point, ScrollHandle, SharedString, Stateful, Window, div, point, prelude::*, px,
-    relative, size,
+    ClickEvent, Context, Div, IntoElement, MouseButton, MouseDownEvent, Pixels, SharedString,
+    Stateful, div, prelude::*, px, relative,
 };
 use std::collections::HashMap;
 
@@ -70,58 +66,16 @@ pub(crate) fn cleared(filter: &Filter) -> Filter {
     }
 }
 
-/// How the card listing the overrides in force stands: how far its rows are
-/// scrolled, and the drag on its scroll bar.
+/// How far the card listing the overrides in force has scrolled, and the drag
+/// on its scroll bar.
 pub(crate) struct Pins {
-    scroll: ScrollHandle,
-    /// The grab offset from the thumb's leading edge while the bar is dragged.
-    thumb_grab: Option<f32>,
+    scroll: ListScroll,
 }
 
 impl Pins {
     pub(crate) fn new() -> Self {
         Pins {
-            scroll: ScrollHandle::new(),
-            thumb_grab: None,
-        }
-    }
-
-    /// The bar for the rows' content height against the height they are drawn
-    /// in; `None` while they all fit.
-    fn vbar(&self) -> Option<Scrollbar> {
-        let list = self.scroll.bounds();
-        let visible = f32::from(list.size.height);
-        Scrollbar::new(
-            Axis::Vertical,
-            Bounds::new(
-                point(list.right() - px(SCROLLBAR_THICKNESS), list.origin.y),
-                size(px(SCROLLBAR_THICKNESS), list.size.height),
-            ),
-            visible + f32::from(self.scroll.max_offset().y),
-            visible,
-            -f32::from(self.scroll.offset().y),
-            DEFAULT_MIN_THUMB,
-        )
-    }
-
-    /// Begins a scroll drag if `pos` hit the bar; otherwise leaves the press to
-    /// fall through to the row under it.
-    fn press(&mut self, pos: Point<Pixels>) {
-        if let Some(bar) = self.vbar()
-            && bar.track_hit(pos)
-        {
-            let grab = bar.grab(pos);
-            self.thumb_grab = Some(grab);
-            self.thumb_to(pos, grab);
-        }
-    }
-
-    /// Maps a thumb drag back to the rows' scroll offset.
-    fn thumb_to(&mut self, pos: Point<Pixels>, grab: f32) {
-        if let Some(bar) = self.vbar() {
-            let mut offset = self.scroll.offset();
-            offset.y = px(-bar.offset_at(pos, grab));
-            self.scroll.set_offset(offset);
+            scroll: ListScroll::new(),
         }
     }
 }
@@ -217,7 +171,7 @@ pub(crate) fn panel(
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|view, e: &MouseDownEvent, _, cx| {
-                    view.pins.press(e.position);
+                    view.pins.scroll.press(e.position);
                     cx.notify();
                 }),
             )
@@ -269,7 +223,7 @@ fn listed(
         .w_full()
         .pr(px(SCROLLBAR_THICKNESS))
         .overflow_y_scroll()
-        .track_scroll(&view.pins.scroll)
+        .track_scroll(view.pins.scroll.handle())
         .children(held.into_iter().map(|held| row(held, palette, cx)));
     div()
         .relative()
@@ -277,47 +231,12 @@ fn listed(
         .flex_1()
         .min_h_0()
         .child(rows)
-        .child(scrollbar(
+        .child(list_scrollbar(
             cx.entity(),
-            view.pins.thumb_grab.is_some(),
-            *palette,
+            |view: &GraphPanel| &view.pins.scroll,
+            |view: &mut GraphPanel| &mut view.pins.scroll,
+            palette.scroll,
         ))
-}
-
-/// The card's scroll bar, drawn over the rows once they have been laid out;
-/// keeps the drag handlers installed while `dragging`.
-fn scrollbar(panel: Entity<GraphPanel>, dragging: bool, palette: Palette) -> impl IntoElement {
-    overlay_canvas(move |_, window: &mut Window, cx: &mut App| {
-        if let Some(bar) = panel.read(cx).pins.vbar() {
-            bar.paint(palette.scroll.track, palette.scroll.thumb, window);
-        }
-        if dragging {
-            track_drag(window, &panel, on_drag, end_drag);
-        }
-    })
-}
-
-fn on_drag(
-    view: &mut GraphPanel,
-    position: Point<Pixels>,
-    _window: &mut Window,
-    cx: &mut Context<GraphPanel>,
-) {
-    if let Some(grab) = view.pins.thumb_grab {
-        view.pins.thumb_to(position, grab);
-    }
-    cx.notify();
-}
-
-fn end_drag(
-    view: &mut GraphPanel,
-    _: Point<Pixels>,
-    _: DragEnd,
-    _: &mut Window,
-    cx: &mut Context<GraphPanel>,
-) {
-    view.pins.thumb_grab = None;
-    cx.notify();
 }
 
 /// One listed override, which a click takes back off.

@@ -24,25 +24,34 @@ const ROW_PADDING: Pixels = px(4.);
 
 /// Room a row leaves at either end of what it holds, set in pixels like the rest
 /// of a row's spacing so it holds whatever the root font size.
-pub(crate) const ROW_INSET: Pixels = px(8.);
+pub const ROW_INSET: Pixels = px(8.);
 
 /// The line drawn around a sheet.
-pub(crate) const SHEET_BORDER: Pixels = px(1.);
+pub const SHEET_BORDER: Pixels = px(1.);
 
 /// Room a sheet leaves above its first row and below its last, so the fill of
 /// either stays clear of the sheet's rounded corners.
-pub(crate) const SHEET_PADDING: Pixels = px(4.);
+pub const SHEET_PADDING: Pixels = px(4.);
 
 /// How tall a row stands under the window's inherited text style.
-pub(crate) fn row_height(window: &Window) -> Pixels {
+pub fn row_height(window: &Window) -> Pixels {
     bviz_ui_assets::text_metrics(window).line_height + ROW_PADDING * 2.
 }
 
 /// `bound` cut down to the whole rows `row` tall it holds, by which a list that
 /// scrolls within it ends on a row entire rather than through the glyphs of one.
 /// A bound shorter than a row holds the one row the list must still show.
-pub(crate) fn whole_rows(row: Pixels, bound: Pixels) -> Pixels {
+pub fn whole_rows(row: Pixels, bound: Pixels) -> Pixels {
     row * (f32::from(bound) / f32::from(row)).floor().max(1.)
+}
+
+/// How tall a sheet of `rows` rows each `row` tall, under `above` that does not
+/// scroll with them, stands within `bound`: as tall as all it holds, and no
+/// taller than `bound`, past which its rows scroll and end on a whole row.
+pub fn sheet_height(rows: usize, row: Pixels, above: Pixels, bound: Pixels) -> Pixels {
+    let inset = SHEET_PADDING * 2. + SHEET_BORDER * 2. + above;
+    let listed = (row * rows as f32).min(whole_rows(row, bound - inset));
+    (inset + listed).min(bound)
 }
 
 /// The fill under the row the cursor or the keyboard is on, over the sheet the
@@ -109,7 +118,7 @@ pub(crate) fn reading(width: Pixels, label: SharedString) -> Div {
 }
 
 /// The width of the widest of `labels` under the window's inherited text style.
-pub(crate) fn widest(window: &mut Window, labels: impl Iterator<Item = SharedString>) -> Pixels {
+pub fn widest(window: &mut Window, labels: impl Iterator<Item = SharedString>) -> Pixels {
     let metrics = bviz_ui_assets::text_metrics(window);
     let color = window.text_style().color;
     let mut measured = px(0.);
@@ -146,7 +155,7 @@ pub(crate) fn sheet(colors: &ThemeColors) -> Div {
 
 /// `element` given the look of a sheet a menu's rows sit on, wherever it
 /// stands.
-pub(crate) fn surface<E: Styled>(element: E, colors: &ThemeColors) -> E {
+pub fn surface<E: Styled>(element: E, colors: &ThemeColors) -> E {
     element
         .bg(colors.panel)
         .border(SHEET_BORDER)
@@ -159,7 +168,7 @@ pub(crate) fn surface<E: Styled>(element: E, colors: &ThemeColors) -> E {
 /// The row a menu's own actions stand on, above the values they act on and out
 /// of the list those values scroll in. It is laid out like a row, so what it
 /// holds lines up with what the rows hold.
-pub(crate) fn header(colors: &ThemeColors) -> Div {
+pub fn header(colors: &ThemeColors) -> Div {
     div()
         .flex()
         .flex_row()
@@ -185,7 +194,7 @@ pub(crate) fn row(id: ElementId, colors: &ThemeColors, chosen: bool) -> Stateful
 
 /// One row of a menu whose fill follows an aim the caller keeps, moved by the
 /// cursor and the keys alike, so that the two never fill a row each.
-pub(crate) fn aimed_row(id: ElementId, colors: &ThemeColors, aimed: bool) -> Stateful<Div> {
+pub fn aimed_row(id: ElementId, colors: &ThemeColors, aimed: bool) -> Stateful<Div> {
     row_frame(id, colors).when(aimed, |row| row.bg(aimed_fill(colors)))
 }
 
@@ -256,6 +265,22 @@ mod tests {
     use bviz_ui_theme::{
         MIN_TEXT_CONTRAST, MIN_VISIBLE_STEP, built_in_themes, contrast_ratio, level_step,
     };
+
+    /// A sheet stands inside its bound however little room that leaves, even
+    /// where the bound is shorter than what it holds above its rows.
+    #[test]
+    fn a_sheet_stands_no_taller_than_its_bound() {
+        let row = px(24.);
+        for bound in [px(400.), px(40.), px(10.)] {
+            for above in [px(0.), row] {
+                assert!(sheet_height(100, row, above, bound) <= bound, "{bound:?}");
+            }
+        }
+        assert_eq!(
+            sheet_height(2, row, row, px(400.)),
+            SHEET_PADDING * 2. + SHEET_BORDER * 2. + row * 3.
+        );
+    }
 
     /// A row names what choosing it does, so its label has to be read on the
     /// fill the row carries while the cursor or the keyboard is on it.

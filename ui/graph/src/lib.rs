@@ -42,6 +42,7 @@ mod pins;
 mod preset;
 mod relation;
 mod rules;
+mod scatter;
 mod scroll;
 mod search;
 mod selection;
@@ -56,10 +57,11 @@ use emphasis::Emphasis;
 use framing::{Framing, Target, build_prepaint};
 use legend::Legend;
 use mode::LayoutMode;
-use model::{GraphModel, MapPlaced, SourceReplaced};
+use model::{GraphModel, MapPlaced, RevealRequested, SourceReplaced};
 use morph::{Frame, Morph};
 use paint::{Scene, TitleTarget, canvas_body};
 use relation::Relation;
+pub use scatter::ScatterPanel;
 use scroll::{scrollbar_hit, start_scroll_drag};
 use search::Search;
 use selection::Selection;
@@ -75,6 +77,8 @@ pub fn register_keys(cx: &mut App) {
     // panel's own bindings stand down inside it.
     let predicate = format!("{KEY_CONTEXT} && !{}", search::KEY_CONTEXT);
     let outside_search = Some(predicate.as_str());
+    let picking = format!("{} && {}", scatter::KEY_CONTEXT, scatter::PICKING);
+    let picking = Some(picking.as_str());
     cx.bind_keys([
         KeyBinding::new("h", ToggleNeighborhood, outside_search),
         KeyBinding::new("r", ToggleReduce, outside_search),
@@ -82,6 +86,11 @@ pub fn register_keys(cx: &mut App) {
         // Escape acts on the innermost thing holding focus: in the field that
         // is the card the typed pattern put up over the drawing.
         KeyBinding::new("escape", search::DismissResults, Some(search::KEY_CONTEXT)),
+        KeyBinding::new("0", scatter::ShowWholePlot, Some(scatter::KEY_CONTEXT)),
+        KeyBinding::new("up", scatter::AimUp, picking),
+        KeyBinding::new("down", scatter::AimDown, picking),
+        KeyBinding::new("enter", scatter::RevealAimed, picking),
+        KeyBinding::new("escape", scatter::ClosePickList, picking),
     ]);
 }
 
@@ -213,6 +222,7 @@ pub struct GraphPanel {
     _source_replaced: Subscription,
     /// Derives the levels of the panel's restriction as the map lands.
     _map_placed: Subscription,
+    _reveal_requested: Subscription,
     /// Box under the cursor.
     hovered: Option<Id>,
     /// The box whose related nodes stay marked, and how far that marking reaches;
@@ -353,11 +363,19 @@ impl GraphPanel {
         let map_placed = cx.subscribe(&model, |view, _, _: &MapPlaced, cx| {
             derive::placed(view, cx)
         });
+        let reveal_requested = cx.subscribe(&model, |view, _, event: &RevealRequested, cx| {
+            if event.panel == cx.entity_id() {
+                reveal(view, event.node, cx);
+            }
+        });
+        let derived = Derived::new();
+        let (panel, filter) = (cx.entity(), derived.filter().clone());
+        model.update(cx, |model, cx| model.defer_to(&panel, filter, cx));
         Self {
             focus_handle: cx.focus_handle(),
             title,
             model,
-            derived: Derived::new(),
+            derived,
             framing: Framing::new(),
             drag: Drag::None,
             emphasis: Emphasis::none(),
@@ -379,6 +397,7 @@ impl GraphPanel {
             _changed: changed,
             _source_replaced: source_replaced,
             _map_placed: map_placed,
+            _reveal_requested: reveal_requested,
             hovered: None,
             selection,
             relation_picker,
@@ -659,6 +678,7 @@ impl Panel for GraphPanel {
     fn set_active(&mut self, active: bool, window: &mut Window, cx: &mut Context<Self>) {
         if active {
             self.focus_handle.focus(window, cx);
+            derive::publish_filter(self, cx);
         }
     }
 }
@@ -857,6 +877,18 @@ fn select_box_at(view: &mut GraphPanel, pos: Point<Pixels>, cx: &mut Context<Gra
     view.invalidate_canvas(cx);
 }
 
+/// Selects `id` and moves the view onto it, opening what holds it in a layered
+/// drawing, and asks for the panel to be shown.
+fn reveal(view: &mut GraphPanel, id: Id, cx: &mut Context<GraphPanel>) {
+    view.selection.select(id);
+    if view.mode == LayoutMode::Layered {
+        derive::expand_to(view, id, cx);
+    }
+    view.framing.request_frame(framing::Frame::Node(id));
+    cx.emit(PanelEvent::Activate);
+    view.invalidate_canvas(cx);
+}
+
 /// Where `b` is drawn: its own layout rect at rest, and the rect `morph` has
 /// eased it to while one drawing settles onto another.
 fn placed_rect(b: &bviz_graph_layout::Box, morph: Option<&Frame>) -> Rect {
@@ -891,7 +923,7 @@ impl From<GraphSource> for Load {
     fn from(source: GraphSource) -> Self {
         let title = title(&source);
         Self {
-            built: Pending::start(move || model::build(source.inputs())),
+            built: Pending::start(move || model::build(source)),
             title,
         }
     }
@@ -912,10 +944,14 @@ pub fn open(load: impl Into<Load>, _window: &mut Window, cx: &mut App) -> Docume
     let label = load.title;
     let model = cx.new(|cx| GraphModel::reading(load.built, cx));
     let graph = ViewSpec::new({
-        let label = label.clone();
+        let (label, model) = (label.clone(), model.clone());
         move |cx| cx.new(|cx| GraphPanel::new(label.clone(), model.clone(), cx))
     });
-    Document::new(label, PanelGroup::one(graph).with_weight(Weight::CHART))
+    let scatter = ViewSpec::new(move |cx| cx.new(|cx| ScatterPanel::new(model.clone(), cx)));
+    Document::new(
+        label,
+        PanelGroup::tabs(graph, vec![scatter]).with_weight(Weight::CHART),
+    )
 }
 
 /// Renders a Bazel build graph from one or more `--output=streamed_proto`
