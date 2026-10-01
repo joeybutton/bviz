@@ -159,11 +159,7 @@ pub fn measure(
     provenance: &Provenance,
     scope: Scope,
 ) -> Measurement {
-    let points = match scope.unit {
-        Unit::Action => actions(graph, provenance, scope, names),
-        Unit::ConfiguredTarget => configured_targets(graph, provenance, scope, names),
-        Unit::Target => targets(graph, facets, provenance, scope, names),
-    };
+    let points = unit_graph(graph, facets, provenance, scope).metrics(names);
     // Decided by the graph alone, whatever inputs the scope reads, so the
     // sizes of one unit compare across scopes.
     let holds_actions = graph.nodes.iter().any(|node| node.kind == Kind::Action);
@@ -178,12 +174,26 @@ pub fn measure(
     }
 }
 
+/// The points of `graph` in `scope` and the dependencies between them.
+pub(crate) fn unit_graph(
+    graph: &Graph,
+    facets: &Facets,
+    provenance: &Provenance,
+    scope: Scope,
+) -> UnitGraph {
+    match scope.unit {
+        Unit::Action => actions(graph, provenance, scope),
+        Unit::ConfiguredTarget => configured_targets(graph, provenance, scope),
+        Unit::Target => targets(graph, facets, provenance, scope),
+    }
+}
+
 /// A node of the graph a measure takes as a point.
-struct Point {
-    id: Id,
-    kind: Kind,
+pub(crate) struct Point {
+    pub(crate) id: Id,
+    pub(crate) kind: Kind,
     /// Whether the point counts towards the measure of the points reaching it.
-    counted: bool,
+    pub(crate) counted: bool,
 }
 
 impl Point {
@@ -235,16 +245,44 @@ impl Points {
         actions
     }
 
-    /// The measure of these points with `pairs` between them, which run from a
+    /// The graph of these points with `pairs` between them, which run from a
     /// dependency to its dependent by index, and with the actions `actions`
     /// gives by point.
-    fn measure(self, mut pairs: Vec<(u32, u32)>, actions: Vec<u32>, names: &Names) -> Vec<Metrics> {
+    fn graph(self, mut pairs: Vec<(u32, u32)>, actions: Vec<u32>) -> UnitGraph {
         pairs.retain(|(from, to)| from != to);
         bviz_parallel::workers().install(|| pairs.par_sort_unstable());
         pairs.dedup();
-        let points = self.points;
-        let (dependents, dependencies) = adjacency(points.len(), &pairs);
-        drop(pairs);
+        let (dependents, dependencies) = adjacency(self.points.len(), &pairs);
+        UnitGraph {
+            points: self.points,
+            dependents,
+            dependencies,
+            actions,
+        }
+    }
+}
+
+/// The points of a scope and the distinct dependencies between them, each
+/// point numbered by its index.
+pub(crate) struct UnitGraph {
+    pub(crate) points: Vec<Point>,
+    /// By point, the points depending on it directly.
+    pub(crate) dependents: Vec<Vec<u32>>,
+    /// By point, the points it depends on directly.
+    pub(crate) dependencies: Vec<Vec<u32>>,
+    /// By point, how many actions it stands for.
+    actions: Vec<u32>,
+}
+
+impl UnitGraph {
+    /// The metrics of each point, in point order.
+    fn metrics(self, names: &Names) -> Vec<Metrics> {
+        let Self {
+            points,
+            dependents,
+            dependencies,
+            actions,
+        } = self;
         let counted = |p: usize| points[p].counted;
         let key = |p: usize| stable_hash(names.resolve(points[p].id));
         let blast_radius = reach_counts(&dependents, counted, key);
@@ -268,13 +306,7 @@ impl Points {
 
 /// Every node that `facets` names as its own target, each edge between two
 /// nodes standing for one between their targets.
-fn targets(
-    graph: &Graph,
-    facets: &Facets,
-    provenance: &Provenance,
-    scope: Scope,
-    names: &Names,
-) -> Vec<Metrics> {
+fn targets(graph: &Graph, facets: &Facets, provenance: &Provenance, scope: Scope) -> UnitGraph {
     let points = Points::new(
         graph
             .nodes
@@ -294,17 +326,12 @@ fn targets(
             .filter_map(|edge| Some((target_of(edge.from)?, target_of(edge.to)?))),
     );
     let actions = points.owned_actions(graph, target_of);
-    points.measure(pairs, actions, names)
+    points.graph(pairs, actions)
 }
 
 /// Every configured target, each edge between two nodes standing for one
 /// between the configured targets holding them.
-fn configured_targets(
-    graph: &Graph,
-    provenance: &Provenance,
-    scope: Scope,
-    names: &Names,
-) -> Vec<Metrics> {
+fn configured_targets(graph: &Graph, provenance: &Provenance, scope: Scope) -> UnitGraph {
     let node_of = first_by_id(graph);
     let is_configured =
         |id: Id| node_of[id.0 as usize].is_some_and(|node| node.kind == Kind::ConfiguredTarget);
@@ -332,12 +359,12 @@ fn configured_targets(
             .filter_map(|edge| Some((configured_of(edge.from)?, configured_of(edge.to)?))),
     );
     let actions = points.owned_actions(graph, configured_of);
-    points.measure(pairs, actions, names)
+    points.graph(pairs, actions)
 }
 
 /// Every action, and every source file an action reads, each artifact standing
 /// for the actions producing it.
-fn actions(graph: &Graph, provenance: &Provenance, scope: Scope, names: &Names) -> Vec<Metrics> {
+fn actions(graph: &Graph, provenance: &Provenance, scope: Scope) -> UnitGraph {
     let node_of = first_by_id(graph);
     let is_action = |id: Id| node_of[id.0 as usize].is_some_and(|node| node.kind == Kind::Action);
     let mut read: Vec<&Edge> = Vec::with_capacity(graph.edges.len());
@@ -392,7 +419,7 @@ fn actions(graph: &Graph, provenance: &Provenance, scope: Scope, names: &Names) 
         }
     }
     let actions = points.owned_actions(graph, |id| points.of(id));
-    points.measure(pairs, actions, names)
+    points.graph(pairs, actions)
 }
 
 /// By id, the first node of `graph` holding it.
