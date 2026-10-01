@@ -109,18 +109,28 @@ impl TimeSelection {
         self.spans.get(first).is_some_and(|s| s.start_us < end_us)
     }
 
-    /// Microseconds of `[start_us, end_us)` the selection covers. Aggregation
-    /// calls this once per profile span, so it costs a binary search plus one
-    /// step per region actually covered.
-    pub fn overlap_us(&self, start_us: i64, end_us: i64) -> i64 {
-        if start_us >= end_us {
-            return 0;
-        }
-        let first = self.spans.partition_point(|s| s.end_us <= start_us);
+    /// The stretches of `[start_us, end_us)` the selection covers, ascending.
+    /// Aggregation calls this once per profile span, so it costs a binary
+    /// search plus one step per region actually covered.
+    pub fn clipped(&self, start_us: i64, end_us: i64) -> impl Iterator<Item = TimeSpan> + '_ {
+        let first = if start_us < end_us {
+            self.spans.partition_point(|s| s.end_us <= start_us)
+        } else {
+            self.spans.len()
+        };
         self.spans[first..]
             .iter()
-            .take_while(|s| s.start_us < end_us)
-            .map(|s| s.end_us.min(end_us) - s.start_us.max(start_us))
+            .take_while(move |s| s.start_us < end_us)
+            .map(move |s| TimeSpan {
+                start_us: s.start_us.max(start_us),
+                end_us: s.end_us.min(end_us),
+            })
+    }
+
+    /// Microseconds of `[start_us, end_us)` the selection covers.
+    pub fn overlap_us(&self, start_us: i64, end_us: i64) -> i64 {
+        self.clipped(start_us, end_us)
+            .map(|held| held.end_us - held.start_us)
             .sum()
     }
 
@@ -295,6 +305,22 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn clipped_yields_what_each_region_holds_of_a_span() {
+        let sel = selection(&[(0, 100), (200, 300), (400, 410)]);
+        let clipped = |start_us, end_us| -> Vec<(i64, i64)> {
+            sel.clipped(start_us, end_us)
+                .map(|held| (held.start_us, held.end_us))
+                .collect()
+        };
+        assert_eq!(clipped(50, 405), [(50, 100), (200, 300), (400, 405)]);
+        assert_eq!(clipped(210, 250), [(210, 250)]);
+        // A span ending where a region starts, or starting where one ends,
+        // reaches into neither.
+        assert_eq!(clipped(100, 200), []);
+        assert_eq!(clipped(250, 250), []);
     }
 
     #[test]

@@ -4,12 +4,13 @@
 //! selection (walked in parallel), the two ends the interactive profile exercised,
 //! plus the all-track rebuild from a reused whole-profile scan (`TrackFlamer`),
 //! which is what the view does for every selection after the first, in both the
-//! top-down and the bottom-up presentation.
+//! top-down and the bottom-up presentation and under either weight.
 
 use std::sync::Arc;
 
 use bviz_trace_layout::{
-    FlameDirection, FlameMode, ScopeAggregate, TimeSelection, TrackFlamer, span_between,
+    FlameDirection, FlameMode, FlameWeight, ScopeAggregate, TimeSelection, TrackFlamer,
+    span_between,
 };
 use bviz_trace_profile::{LaneClass, Profile, TimeSpan};
 
@@ -139,6 +140,26 @@ fn main() {
         ));
     });
 
+    // The first wall-share build off a scan that has only weighed durations is
+    // timed apart from the ones after it, which merge what it left held.
+    let wall_share = FlameMode {
+        weight: FlameWeight::WallShare,
+        ..mode
+    };
+    let first = std::time::Instant::now();
+    let wall_agg = ScopeAggregate::build_for_tracks_reusing(&scan, wall_share, &window, |i| {
+        threads[i].lane_class != LaneClass::CriticalPath
+    });
+    let wall_first = first.elapsed().as_secs_f64();
+    let wall_reused = min_secs(iters, || {
+        std::hint::black_box(ScopeAggregate::build_for_tracks_reusing(
+            &scan,
+            wall_share,
+            &window,
+            |i| threads[i].lane_class != LaneClass::CriticalPath,
+        ));
+    });
+
     let bottom_up_agg = ScopeAggregate::build_for_tracks_reusing(
         &scan,
         FlameMode {
@@ -170,6 +191,12 @@ fn main() {
         "[bench] build_for_tracks_reusing(all, bottom-up): {all_inverted:.3}s  \
          (inversion adds {:.3}s)",
         all_inverted - all_reused,
+    );
+    eprintln!(
+        "[bench] build_for_tracks_reusing(all, wall share): first {wall_first:.3}s  \
+         then {wall_reused:.3}s  (root {:.3}s of {:.3}s summed duration)",
+        wall_agg.flame.root_total_us() as f64 / 1e6,
+        all_agg.flame.root_total_us() as f64 / 1e6,
     );
     eprintln!(
         "[bench] single: {} nodes / {} rows;  all: {} nodes / {} rows;  \
@@ -213,12 +240,28 @@ fn main() {
                 |i| threads[i].lane_class != LaneClass::CriticalPath,
             ));
         });
+        // Dragging a region out while weighing by wall share.
+        let reduced_wall = min_secs(iters, || {
+            builds += 1;
+            let w = if builds.is_multiple_of(2) {
+                &other
+            } else {
+                &win
+            };
+            std::hint::black_box(ScopeAggregate::build_for_tracks_reusing(
+                &scan,
+                wall_share,
+                w,
+                |i| threads[i].lane_class != LaneClass::CriticalPath,
+            ));
+        });
         let agg = ScopeAggregate::build_for_tracks_reusing(&scan, mode, &win, |i| {
             threads[i].lane_class != LaneClass::CriticalPath
         });
         eprintln!(
             "[bench] window {:.0}% in {parts} region(s): reduce+merge {reduced:.3}s  \
-             memo-hit merge {merged:.3}s  ({} nodes / {} rows)",
+             memo-hit merge {merged:.3}s  wall-share reduce+merge {reduced_wall:.3}s  \
+             ({} nodes / {} rows)",
             coverage * 100.0,
             agg.flame.nodes().len(),
             agg.stats.len(),

@@ -605,7 +605,7 @@ impl TraceModel {
 mod tests {
     use super::TraceModel;
     use crate::track_order::TrackSort;
-    use bviz_trace_layout::{FlameDirection, FlameLabels, FlameMode};
+    use bviz_trace_layout::{FlameDirection, FlameLabels, FlameMode, FlameWeight};
     use gpui::Task;
 
     /// A document whose read has not finished, for exercising the state a panel
@@ -633,7 +633,7 @@ mod tests {
     }
 
     #[test]
-    fn each_half_of_the_flame_mode_keys_a_rebuild_of_its_own() {
+    fn each_part_of_the_flame_mode_keys_a_rebuild_of_its_own() {
         let mut model = model();
         let key = model.aggregate_key;
 
@@ -654,5 +654,13 @@ mod tests {
         assert!(model.adopt_flame_mode(renamed));
         assert_eq!(model.flame_mode(), renamed);
         assert_eq!(model.aggregate_key, key + 2);
+
+        let reweighed = FlameMode {
+            weight: FlameWeight::WallShare,
+            ..renamed
+        };
+        assert!(model.adopt_flame_mode(reweighed));
+        assert_eq!(model.flame_mode(), reweighed);
+        assert_eq!(model.aggregate_key, key + 3);
     }
 }

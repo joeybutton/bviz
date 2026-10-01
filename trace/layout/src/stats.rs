@@ -46,6 +46,18 @@ impl StatRow {
 /// from the label it belongs to. Each is skipped, and its parent contributes
 /// [`self_us_without_details`] instead.
 pub fn stats_from_flame(graph: &FlameGraph) -> Vec<StatRow> {
+    stats_by(graph, |i| graph.total_us(i))
+}
+
+/// [`stats_from_flame`]'s rows for a graph weighed by something other than
+/// duration, from `duration_us`: each node's summed span duration,
+/// index-parallel to the graph's nodes.
+pub(crate) fn stats_from_durations(graph: &FlameGraph, duration_us: &[i64]) -> Vec<StatRow> {
+    stats_by(graph, |i| duration_us[i])
+}
+
+/// The stats rows of `graph`'s frames, timed by `total_us`, each node's total.
+fn stats_by(graph: &FlameGraph, total_us: impl Fn(usize) -> i64) -> Vec<StatRow> {
     // A node's rank is a dense `u32` bijection with its name within one build,
     // so a table indexed by rank groups by name without hashing. Node 0 is the
     // synthetic root, whose placeholder rank 0 aliases the real
@@ -58,7 +70,7 @@ pub fn stats_from_flame(graph: &FlameGraph) -> Vec<StatRow> {
             continue;
         }
         let rank = graph.rank(i);
-        let self_us = self_us_without_details(graph, i);
+        let self_us = self_us_without_details(graph, i, &total_us);
         match &mut rows[rank as usize] {
             Some(row) => {
                 row.count += graph.count(i);
@@ -83,13 +95,13 @@ pub fn stats_from_flame(graph: &FlameGraph) -> Vec<StatRow> {
 /// The self time node `i` would carry with no detail frames beneath it: its
 /// total less its span children's totals, floored at zero because a node's
 /// children can sum past it.
-fn self_us_without_details(graph: &FlameGraph, i: usize) -> i64 {
+fn self_us_without_details(graph: &FlameGraph, i: usize, total_us: &impl Fn(usize) -> i64) -> i64 {
     let spanned: i64 = (0..graph.child_count(i))
         .map(|k| graph.child_id(i, k))
         .filter(|&c| !graph.is_detail(c))
-        .map(|c| graph.total_us(c))
+        .map(total_us)
         .sum();
-    (graph.total_us(i) - spanned).max(0)
+    (total_us(i) - spanned).max(0)
 }
 
 /// Indices into `stats` in the default display order: `self_us` descending,

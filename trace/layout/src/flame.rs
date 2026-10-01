@@ -12,6 +12,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::paint::{Span, painted};
 use crate::selection::TimeSelection;
+use crate::wall_share::{LaneShare, WallShare};
 
 /// One key segment of a slice's aggregation path: a frame label — a [`Str`]
 /// handle into the source profile's text — and the work class it carries (for
@@ -260,9 +261,10 @@ fn sort_pairs_by_text(pairs: &mut [(&str, Str)]) {
 
 /// One node of the aggregated flame graph: a frame merged across every span that
 /// shares this label at the same place in the time-containment tree. `total_us`
-/// is the summed duration of the spans merged here (each counted once, at its own
-/// node); `self_us` is that minus the children's totals (`max(0, …)`); `count` is
-/// how many spans merged at this node. Under
+/// is the summed weight of the spans merged here (each counted once, at its own
+/// node), a span weighing what the graph's [`FlameWeight`] gives it; `self_us` is
+/// that minus the children's totals (`max(0, …)`); `count` is how many spans
+/// merged at this node. Under
 /// [`BottomUp`](FlameDirection::BottomUp) a node is instead one step of a caller
 /// chain, and `total_us` and `count` are summed over the contributions that
 /// passed through it — the self time and span count of the frames whose chain
@@ -393,7 +395,7 @@ impl FlameGraph {
         self.name.len()
     }
 
-    /// The root frame's summed duration (node 0's total).
+    /// The root frame's summed weight (node 0's total).
     pub fn root_total_us(&self) -> i64 {
         self.total_us[0]
     }
@@ -513,11 +515,27 @@ pub enum FlameDirection {
     BottomUp,
 }
 
+/// What a span weighs in a flame graph, and so what a frame's width measures.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum FlameWeight {
+    /// The span's own duration. Lanes run side by side, so the graph totals
+    /// the time spent across all of them, which exceeds the time that elapsed
+    /// wherever two overlap.
+    Duration,
+    /// The span's lane's share of the time that elapsed over the span (see
+    /// [`WallShare`]), so the graph of every sharing lane totals the elapsed
+    /// time any of them had a span open in, and a subset of them its share of
+    /// that, counting twice the time shared by two spans of one lane that
+    /// overlap without nesting.
+    WallShare,
+}
+
 /// How a flame graph presents its spans.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct FlameMode {
     pub direction: FlameDirection,
     pub labels: FlameLabels,
+    pub weight: FlameWeight,
 }
 
 impl Default for FlameMode {
@@ -525,6 +543,7 @@ impl Default for FlameMode {
         FlameMode {
             direction: FlameDirection::TopDown,
             labels: FlameLabels::Mnemonic,
+            weight: FlameWeight::Duration,
         }
     }
 }
@@ -609,53 +628,62 @@ impl Flamer {
 /// selection the caller later chooses.
 pub struct TrackFlamer {
     flamer: Flamer,
-    /// The path-reduced lane tables ([`LaneTable`], one per
-    /// [`Profile::threads`] entry) covering the whole timeline, filled on first
-    /// use. A lane's spans emit path keys and reduce into per-node totals that
-    /// do not depend on the selection but do key by label.
-    lane_tables: ByLabels<OnceLock<Vec<LaneTable>>>,
-    /// The lane tables last reduced under a restricting window.
+    /// The lanes reduced over the whole timeline, filled on first use. A lane's
+    /// spans emit path keys and reduce into per-node totals that do not depend
+    /// on the selection but do key by label.
+    lane_tables: ByLabels<OnceLock<Arc<LaneTables>>>,
+    /// The lanes last reduced under a restricting window.
     windowed: ByLabels<WindowMemo>,
-    /// How many times [`windowed_tables`](TrackFlamer::windowed_tables) has
-    /// reduced the lanes afresh, so a test can hold the memo to its reuse.
+    /// Built on first use, so a view weighing by duration alone never pays for
+    /// it.
+    wall_share: OnceLock<WallShare>,
+    /// How many times the lanes have been walked under a restricting window,
+    /// to reduce them or to fill their wall column, so a test can hold the memo
+    /// and the column to their reuse.
     #[cfg(test)]
     reductions: AtomicUsize,
 }
 
-struct WindowedTables {
+/// Every lane's [`LaneTable`], one per [`Profile::threads`] entry, reduced
+/// under one labelling and window. A lane never selected (a critical-path lane)
+/// still has a table, so the lanes index by thread index directly.
+struct LaneTables {
+    labels: FlameLabels,
+    /// Empty for the whole timeline.
     window: TimeSelection,
-    /// Behind an [`Arc`] so a build takes a handle of its own and merges with
-    /// the lock released.
-    tables: Arc<Vec<LaneTable>>,
+    lanes: Vec<LaneTable>,
+    /// Each node's summed wall share, per lane and index-parallel to that
+    /// lane's `nodes`; filled on first use (see [`wall_columns`]) unless the
+    /// reduction carried it.
+    wall_us: OnceLock<Vec<Vec<i64>>>,
 }
 
-/// A memo of the lane tables reduced under one window; the tables admit only
-/// what that window does, so asking under another reduces afresh. Its lock spans
-/// a read or a write alone and never a reduction, so callers that miss together
-/// each reduce and the memo keeps whichever finishes last.
+/// A memo of the lanes reduced under one window; the tables admit only what
+/// that window does, so asking under another reduces afresh. Its lock spans a
+/// read or a write alone and never a reduction, so callers that miss together
+/// each reduce and the memo keeps whichever finishes last. The tables sit
+/// behind an [`Arc`] so a build takes a handle of its own and merges with the
+/// lock released.
 #[derive(Default)]
-struct WindowMemo(Mutex<Option<WindowedTables>>);
+struct WindowMemo(Mutex<Option<Arc<LaneTables>>>);
 
 impl WindowMemo {
     /// The entry, taken up as it stands where a panic elsewhere poisoned the
     /// lock: an entry is only ever replaced wholesale by already-reduced
     /// tables, so no panic can leave one half-written.
-    fn entry(&self) -> MutexGuard<'_, Option<WindowedTables>> {
+    fn entry(&self) -> MutexGuard<'_, Option<Arc<LaneTables>>> {
         self.0.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    fn get(&self, window: &TimeSelection) -> Option<Arc<Vec<LaneTable>>> {
+    fn get(&self, window: &TimeSelection) -> Option<Arc<LaneTables>> {
         self.entry()
             .as_ref()
             .filter(|held| held.window == *window)
-            .map(|held| Arc::clone(&held.tables))
+            .map(Arc::clone)
     }
 
-    fn put(&self, window: &TimeSelection, tables: &Arc<Vec<LaneTable>>) {
-        *self.entry() = Some(WindowedTables {
-            window: window.clone(),
-            tables: Arc::clone(tables),
-        });
+    fn put(&self, tables: &Arc<LaneTables>) {
+        *self.entry() = Some(Arc::clone(tables));
     }
 }
 
@@ -683,37 +711,91 @@ impl TrackFlamer {
             flamer: Flamer::new(profile, worker_count()),
             lane_tables: ByLabels::default(),
             windowed: ByLabels::default(),
+            wall_share: OnceLock::new(),
             #[cfg(test)]
             reductions: AtomicUsize::new(0),
         }
     }
 
-    fn lane_tables(&self, labels: FlameLabels) -> &[LaneTable] {
-        self.lane_tables.of(labels).get_or_init(|| {
-            build_lane_tables(
-                &self.flamer,
-                labels,
-                &TimeSelection::default(),
-                worker_count(),
-            )
-        })
+    fn wall_share(&self) -> &WallShare {
+        self.wall_share
+            .get_or_init(|| WallShare::new(&self.flamer.profile, worker_count()))
     }
 
-    fn windowed_tables(&self, labels: FlameLabels, window: &TimeSelection) -> Arc<Vec<LaneTable>> {
+    #[cfg(test)]
+    fn count_walk(&self, window: &TimeSelection) {
+        if !window.is_empty() {
+            self.reductions.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    fn reduce_lanes<W: Weigher>(
+        &self,
+        labels: FlameLabels,
+        window: &TimeSelection,
+        weigher_of: impl Fn(usize) -> W + Sync,
+    ) -> (Vec<LaneTable>, Vec<Vec<W::Weight>>) {
+        #[cfg(test)]
+        self.count_walk(window);
+        build_lane_tables(&self.flamer, labels, window, worker_count(), weigher_of)
+    }
+
+    fn reduce(
+        &self,
+        labels: FlameLabels,
+        window: &TimeSelection,
+        weight: FlameWeight,
+    ) -> LaneTables {
+        let (lanes, wall_us) = match weight {
+            FlameWeight::Duration => {
+                let (lanes, _) = self.reduce_lanes(labels, window, |_| DurationOnly);
+                (lanes, OnceLock::new())
+            }
+            FlameWeight::WallShare => {
+                let share = self.wall_share();
+                let (lanes, wall_us) = self.reduce_lanes(labels, window, |lane| share.lane(lane));
+                (lanes, OnceLock::from(wall_us))
+            }
+        };
+        LaneTables {
+            labels,
+            window: window.clone(),
+            lanes,
+            wall_us,
+        }
+    }
+
+    /// The lanes reduced under `labels` and `window`, reduced on the first ask
+    /// and held: once per labelling for the whole timeline, and for the window
+    /// last asked for.
+    fn tables(
+        &self,
+        labels: FlameLabels,
+        window: &TimeSelection,
+        weight: FlameWeight,
+    ) -> Arc<LaneTables> {
+        if window.is_empty() {
+            let whole = self
+                .lane_tables
+                .of(labels)
+                .get_or_init(|| Arc::new(self.reduce(labels, window, weight)));
+            return Arc::clone(whole);
+        }
         let memo = self.windowed.of(labels);
         if let Some(held) = memo.get(window) {
             return held;
         }
-        #[cfg(test)]
-        self.reductions.fetch_add(1, Ordering::Relaxed);
-        let tables = Arc::new(build_lane_tables(
-            &self.flamer,
-            labels,
-            window,
-            worker_count(),
-        ));
-        memo.put(window, &tables);
+        let tables = Arc::new(self.reduce(labels, window, weight));
+        memo.put(&tables);
         tables
+    }
+
+    fn wall_us<'t>(&self, tables: &'t LaneTables) -> &'t [Vec<i64>] {
+        tables.wall_us.get_or_init(|| {
+            #[cfg(test)]
+            self.count_walk(&tables.window);
+            wall_columns(&self.flamer, tables, self.wall_share(), worker_count())
+        })
     }
 
     #[cfg(test)]
@@ -721,68 +803,108 @@ impl TrackFlamer {
         self.reductions.load(Ordering::Relaxed)
     }
 
-    /// Build the selection's flame graph by merging the selected lanes'
-    /// [`LaneTable`]s: concatenate their reduced nodes, sort the union by path
-    /// key, and reconstruct. The lanes are reduced under `window` (see
-    /// [`emit_lane_rows`]) and the reduction is held, so it is paid once per
-    /// labelling and window asked for, never for one that is not, and a change
-    /// of selection alone pays only the merge.
+    /// Build the selection's flame graph, weighed by duration, by merging the
+    /// selected lanes' [`LaneTable`]s: concatenate their reduced nodes, sort
+    /// the union by path key, and reconstruct. The lanes are reduced under
+    /// `window` (see [`emit_lane_rows`]) and the reduction is held, so it is
+    /// paid once per labelling and window asked for, never for one that is
+    /// not, and a change of selection alone pays only the merge.
     pub(crate) fn build(
         &self,
         labels: FlameLabels,
         window: &TimeSelection,
         selected: impl Fn(usize) -> bool + Sync,
     ) -> FlameGraph {
-        let restricted = (!window.is_empty()).then(|| self.windowed_tables(labels, window));
-        let tables: &[LaneTable] = match &restricted {
-            Some(tables) => tables,
-            None => self.lane_tables(labels),
-        };
-        let union_len: usize = tables
-            .iter()
-            .enumerate()
-            .filter(|&(i, _)| selected(i))
-            .map(|(_, t)| t.nodes.len())
-            .sum();
-        let mut elems: Vec<KeyRef> = Vec::with_capacity(union_len);
-        for (i, table) in tables.iter().enumerate() {
-            if !selected(i) {
-                continue;
-            }
-            for (node_idx, node) in table.nodes.iter().enumerate() {
-                elems.push(KeyRef {
-                    key: &table.key_pool[node.key.range()],
-                    src: Src {
-                        lane: i as u32,
-                        node: node_idx as u32,
-                    },
-                });
-            }
-        }
-        workers().install(|| elems.par_sort_by(|a, b| a.key.cmp(b.key)));
-        let node_of = |src: Src| &tables[src.lane as usize].nodes[src.node as usize];
-        let arena = reconstruct(&elems, |run| {
-            let head = node_of(run[0].src);
+        let tables = self.tables(labels, window, FlameWeight::Duration);
+        let lanes = &tables.lanes;
+        let elems = sorted_nodes(lanes, &selected);
+        let (arena, _) = reconstruct(&elems, |run| {
             let mut total_us = 0i64;
             let mut count = 0u32;
             for e in run {
-                let n = node_of(e.src);
+                let n = e.src.of(lanes);
                 total_us += n.total_us;
                 count += n.count;
             }
-            ArenaNode {
-                name: head.label,
-                rank: head.rank,
-                role: head.role,
-                detail: head.detail,
-                total_us,
-                count,
-            }
+            (run[0].src.of(lanes).arena_node(total_us, count), ())
         });
         drop(elems);
         let kids = csr_from_parents(&arena.parents);
         seal_arena(&self.flamer.profile, arena, kids)
     }
+
+    /// [`build`](Self::build)'s graph weighed by wall share, merged from the
+    /// same held reduction.
+    pub(crate) fn build_wall_share(
+        &self,
+        labels: FlameLabels,
+        window: &TimeSelection,
+        selected: impl Fn(usize) -> bool + Sync,
+    ) -> WallShareFlame {
+        let tables = self.tables(labels, window, FlameWeight::WallShare);
+        let lanes = &tables.lanes;
+        let wall_us = self.wall_us(&tables);
+        let elems = sorted_nodes(lanes, &selected);
+        let (arena, duration_us) = reconstruct(&elems, |run| {
+            let mut total_us = 0i64;
+            let mut duration_us = 0i64;
+            let mut count = 0u32;
+            for e in run {
+                let n = e.src.of(lanes);
+                total_us += wall_us[e.src.lane as usize][e.src.node as usize];
+                duration_us += n.total_us;
+                count += n.count;
+            }
+            (
+                run[0].src.of(lanes).arena_node(total_us, count),
+                duration_us,
+            )
+        });
+        drop(elems);
+        let kids = csr_from_parents(&arena.parents);
+        WallShareFlame {
+            flame: seal_arena(&self.flamer.profile, arena, kids),
+            duration_us,
+        }
+    }
+}
+
+/// A flame graph weighed by [`FlameWeight::WallShare`], with the durations a
+/// duration-weighed graph of the same spans would total.
+pub(crate) struct WallShareFlame {
+    pub(crate) flame: FlameGraph,
+    /// Each node's summed span duration, index-parallel to the graph's nodes.
+    pub(crate) duration_us: Vec<i64>,
+}
+
+/// The nodes of the lanes `selected` admits, sorted by path key.
+fn sorted_nodes<'t>(
+    lanes: &'t [LaneTable],
+    selected: &(impl Fn(usize) -> bool + Sync),
+) -> Vec<KeyRef<'t>> {
+    let union_len: usize = lanes
+        .iter()
+        .enumerate()
+        .filter(|&(i, _)| selected(i))
+        .map(|(_, t)| t.nodes.len())
+        .sum();
+    let mut elems: Vec<KeyRef> = Vec::with_capacity(union_len);
+    for (i, table) in lanes.iter().enumerate() {
+        if !selected(i) {
+            continue;
+        }
+        for (node_idx, node) in table.nodes.iter().enumerate() {
+            elems.push(KeyRef {
+                key: &table.key_pool[node.key.range()],
+                src: Src {
+                    lane: i as u32,
+                    node: node_idx as u32,
+                },
+            });
+        }
+    }
+    workers().install(|| elems.par_sort_by(|a, b| a.key.cmp(b.key)));
+    elems
 }
 
 /// One lane's path-reduced node table: every distinct aggregation path in the
@@ -792,6 +914,31 @@ impl TrackFlamer {
 struct LaneTable {
     key_pool: Vec<u8>,
     nodes: Vec<LaneNode>,
+}
+
+impl LaneTable {
+    /// Each node's summed weight over the `rows` on its path. `rows` ascend by
+    /// key, as the nodes do.
+    fn weights_of(&self, rows: &[Row<i64>]) -> Vec<i64> {
+        use std::cmp::Ordering::{Equal, Greater, Less};
+        let mut rows = rows.iter().peekable();
+        self.nodes
+            .iter()
+            .map(|node| {
+                let key = &self.key_pool[node.key.range()];
+                let mut weight = 0i64;
+                while let Some(row) = rows.peek() {
+                    match row.key.as_slice().cmp(key) {
+                        Less => {}
+                        Equal => weight += row.weight,
+                        Greater => break,
+                    }
+                    rows.next();
+                }
+                weight
+            })
+            .collect()
+    }
 }
 
 /// One reduced node of a [`LaneTable`]: the frame a lane's spans on one
@@ -808,54 +955,163 @@ struct LaneNode {
     count: u32,
 }
 
-/// Build every lane's [`LaneTable`], one per [`Profile::threads`] entry, sharded
-/// across `workers`. A lane never selected (a critical-path lane) still gets a
-/// table so the vector indexes by thread index directly.
-fn build_lane_tables(
+impl LaneNode {
+    /// The arena node merging this node with the others on its path, which
+    /// share everything but what they sum to.
+    fn arena_node(&self, total_us: i64, count: u32) -> ArenaNode {
+        ArenaNode {
+            name: self.label,
+            rank: self.rank,
+            role: self.role,
+            detail: self.detail,
+            total_us,
+            count,
+        }
+    }
+}
+
+/// A weight summed per node beside the one the node carries: none, or a second
+/// time in microseconds.
+trait Weight: Copy + Default + Send {
+    fn add(&mut self, more: Self);
+
+    /// What is left of a span's weight with its nested spans' taken out,
+    /// floored at zero as its self time is.
+    fn less(self, nested: Self) -> Self;
+}
+
+impl Weight for () {
+    fn add(&mut self, (): ()) {}
+
+    fn less(self, (): ()) {}
+}
+
+impl Weight for i64 {
+    fn add(&mut self, more: i64) {
+        *self += more;
+    }
+
+    fn less(self, nested: i64) -> i64 {
+        (self - nested).max(0)
+    }
+}
+
+/// What a lane's reduction weighs each slice by beside its duration.
+trait Weigher {
+    type Weight: Weight;
+
+    /// The weight of what `window` holds of `slice`.
+    fn weigh(&mut self, window: &TimeSelection, slice: &Slice) -> Self::Weight;
+}
+
+/// Weighs nothing, for a reduction summing durations alone.
+struct DurationOnly;
+
+impl Weigher for DurationOnly {
+    type Weight = ();
+
+    fn weigh(&mut self, _: &TimeSelection, _: &Slice) {}
+}
+
+/// Weighs a slice by its lane's share of each stretch of it the window holds,
+/// clipped in time before it is weighed.
+impl Weigher for LaneShare<'_> {
+    type Weight = i64;
+
+    fn weigh(&mut self, window: &TimeSelection, slice: &Slice) -> i64 {
+        if window.is_empty() {
+            return self.between(slice.start_us, slice.end_us());
+        }
+        window
+            .clipped(slice.start_us, slice.end_us())
+            .map(|held| self.between(held.start_us, held.end_us))
+            .sum()
+    }
+}
+
+/// `of(i)` for each lane index `i`, in lane order, computed across `workers`.
+fn per_lane<T: Send>(flamer: &Flamer, workers: usize, of: impl Fn(usize) -> T + Sync) -> Vec<T> {
+    let n = flamer.profile.threads().len();
+    let shards = run_sharded(workers, n, |out: &mut Vec<(usize, T)>, i| {
+        out.push((i, of(i)));
+    });
+    let mut built: Vec<(usize, T)> = Vec::with_capacity(n);
+    built.extend(shards.into_iter().flatten());
+    built.sort_unstable_by_key(|&(i, _)| i);
+    built.into_iter().map(|(_, lane)| lane).collect()
+}
+
+/// Build every lane's [`LaneTable`], each beside its nodes' summed second
+/// weights, index-parallel to them. `weigher_of` gives the lane at an index its
+/// weigher.
+fn build_lane_tables<W: Weigher>(
     flamer: &Flamer,
     labels: FlameLabels,
     window: &TimeSelection,
     workers: usize,
-) -> Vec<LaneTable> {
-    let n = flamer.profile.threads().len();
-    let shards = run_sharded(workers, n, |out: &mut Vec<(usize, LaneTable)>, i| {
-        out.push((i, build_lane_table(flamer, labels, window, i)));
-    });
-    let mut tables: Vec<Option<LaneTable>> = (0..n).map(|_| None).collect();
-    for shard in shards {
-        for (i, table) in shard {
-            tables[i] = Some(table);
-        }
-    }
-    tables
-        .into_iter()
-        .map(|t| t.expect("every lane built"))
-        .collect()
+    weigher_of: impl Fn(usize) -> W + Sync,
+) -> (Vec<LaneTable>, Vec<Vec<W::Weight>>) {
+    per_lane(flamer, workers, |i| {
+        build_lane_table(flamer, labels, window, i, weigher_of(i))
+    })
+    .into_iter()
+    .unzip()
 }
 
-/// Reduce lane `lane_index` to its [`LaneTable`]: emit one keyed row per span,
-/// sort by key, segment-reduce equal keys into nodes, and pack each distinct key
-/// into the shared `key_pool`.
-fn build_lane_table(
+/// The wall column of `tables`: each lane's rows weighed by `share` and summed
+/// onto the lane's held nodes.
+fn wall_columns(
+    flamer: &Flamer,
+    tables: &LaneTables,
+    share: &WallShare,
+    workers: usize,
+) -> Vec<Vec<i64>> {
+    per_lane(flamer, workers, |i| {
+        let rows = sorted_lane_rows(flamer, tables.labels, &tables.window, i, share.lane(i));
+        tables.lanes[i].weights_of(&rows)
+    })
+}
+
+/// Lane `lane_index`'s rows (see [`emit_lane_rows`]), ascending by key.
+fn sorted_lane_rows<W: Weigher>(
     flamer: &Flamer,
     labels: FlameLabels,
     window: &TimeSelection,
     lane_index: usize,
-) -> LaneTable {
+    mut weigher: W,
+) -> Vec<Row<W::Weight>> {
     let thread = &flamer.profile.threads()[lane_index];
-    let mut rows: Vec<Row> = Vec::new();
-    emit_lane_rows(flamer, labels, thread, window, &mut rows);
+    let mut rows = Vec::new();
+    emit_lane_rows(flamer, labels, thread, window, &mut weigher, &mut rows);
     rows.sort_unstable_by(|a, b| a.key.cmp(&b.key));
+    rows
+}
+
+/// Reduce lane `lane_index` to its [`LaneTable`]: emit one keyed row per span,
+/// sort by key, segment-reduce equal keys into nodes, and pack each distinct key
+/// into the shared `key_pool`. The second weights the rows carry reduce beside
+/// the nodes, index-parallel to them.
+fn build_lane_table<W: Weigher>(
+    flamer: &Flamer,
+    labels: FlameLabels,
+    window: &TimeSelection,
+    lane_index: usize,
+    weigher: W,
+) -> (LaneTable, Vec<W::Weight>) {
+    let rows = sorted_lane_rows(flamer, labels, window, lane_index, weigher);
 
     let mut key_pool: Vec<u8> = Vec::new();
     let mut nodes: Vec<LaneNode> = Vec::with_capacity(rows.len());
+    let mut weights: Vec<W::Weight> = Vec::with_capacity(rows.len());
     let mut i = 0;
     while i < rows.len() {
         let mut total = rows[i].dur;
+        let mut weight = rows[i].weight;
         let mut count = 1u32;
         let mut j = i + 1;
         while j < rows.len() && rows[j].key == rows[i].key {
             total += rows[j].dur;
+            weight.add(rows[j].weight);
             count += 1;
             j += 1;
         }
@@ -870,9 +1126,10 @@ fn build_lane_table(
             total_us: total,
             count,
         });
+        weights.push(weight);
         i = j;
     }
-    LaneTable { key_pool, nodes }
+    (LaneTable { key_pool, nodes }, weights)
 }
 
 /// Bytes encoding one aggregation-path segment in a [`Row`] key: the label's
@@ -893,9 +1150,9 @@ fn segment_flags(role: SpanRole, detail: bool) -> u8 {
 
 /// One emitted frame contribution in the path-sort aggregation: its full
 /// aggregation-path key (5 bytes per segment, root-to-frame), the frame it
-/// merges into, and the duration it brings. Rows sharing a key merge into one
-/// node.
-struct Row {
+/// merges into, and the duration and second weight it brings. Rows sharing a
+/// key merge into one node.
+struct Row<X> {
     key: Vec<u8>,
     label: Str,
     rank: u32,
@@ -904,6 +1161,7 @@ struct Row {
     /// action it belongs to — rather than a span of its own.
     detail: bool,
     dur: i64,
+    weight: X,
 }
 
 /// One node's field values as [`Arena::push`] takes them, decomposed into the
@@ -1083,13 +1341,16 @@ fn windowed_dur_us(window: &TimeSelection, slice: &Slice) -> Option<i64> {
 ///
 /// Durations are what `window` holds of them (see [`windowed_dur_us`]), and a
 /// slice it holds none of emits no row at all, so a frame's total, self time and
-/// span count all read as of the window.
-fn emit_lane_rows(
+/// span count all read as of the window. Which rows there are goes by duration
+/// alone, whatever `weigher` weighs them by beside it, so every reduction of a
+/// lane under one labelling and window emits the same keys.
+fn emit_lane_rows<W: Weigher>(
     flamer: &Flamer,
     labels: FlameLabels,
     thread: &ThreadTrack,
     window: &TimeSelection,
-    out: &mut Vec<Row>,
+    weigher: &mut W,
+    out: &mut Vec<Row<W::Weight>>,
 ) {
     // Regions spread far apart bracket to nearly the whole lane; only a narrow
     // selection shrinks the walk.
@@ -1104,21 +1365,23 @@ fn emit_lane_rows(
     // What each slice brings, `None` for one left out. A slice whose containment
     // parent is left out is left out with it, so whatever a slice keys onto is
     // itself keyed; one forward pass carries that down the chain.
-    let mut dur_us: Vec<Option<i64>> = Vec::with_capacity(slices.len());
+    let mut brought: Vec<Option<(i64, W::Weight)>> = Vec::with_capacity(slices.len());
     for i in 0..slices.len() {
-        dur_us.push(match parents[i] {
-            Some(p) if dur_us[p].is_none() => None,
+        let dur_us = match parents[i] {
+            Some(p) if brought[p].is_none() => None,
             _ => windowed_dur_us(window, &slices[i]),
-        });
+        };
+        brought.push(dur_us.map(|dur| (dur, weigher.weigh(window, &slices[i]))));
     }
     // Each slice's direct containment children's summed duration; its own
     // duration less this is its self time. Each child is clipped before it is
     // summed, so the window's figure is built from the same terms as the whole
     // timeline's.
-    let mut nested_us = vec![0i64; slices.len()];
+    let mut nested: Vec<(i64, W::Weight)> = vec![Default::default(); slices.len()];
     for i in 0..slices.len() {
-        if let (Some(p), Some(dur)) = (parents[i], dur_us[i]) {
-            nested_us[p] += dur;
+        if let (Some(p), Some((dur, weight))) = (parents[i], brought[i]) {
+            nested[p].0 += dur;
+            nested[p].1.add(weight);
         }
     }
     // At most one detail row per slice.
@@ -1126,7 +1389,7 @@ fn emit_lane_rows(
     let mut keys: Vec<Vec<u8>> = Vec::with_capacity(slices.len());
     let mut actions: Vec<Option<Str>> = Vec::with_capacity(slices.len());
     for i in 0..slices.len() {
-        let Some(dur) = dur_us[i] else {
+        let Some((dur, weight)) = brought[i] else {
             // Placeholders, so both vectors stay indexed by slice.
             keys.push(Vec::new());
             actions.push(None);
@@ -1150,10 +1413,11 @@ fn emit_lane_rows(
             role: seg.role,
             detail: false,
             dur,
+            weight,
         });
 
         let action = span.action.or_else(|| parents[i].and_then(|p| actions[p]));
-        let self_us = (dur - nested_us[i]).max(0);
+        let self_us = (dur - nested[i].0).max(0);
         if let Some(action) = action.filter(|_| self_us > 0) {
             let rank = flamer.ranks.rank_of(action);
             let mut detail_key = Vec::with_capacity(key.len() + SEGMENT_BYTES);
@@ -1167,6 +1431,7 @@ fn emit_lane_rows(
                 role: seg.role,
                 detail: true,
                 dur: self_us,
+                weight: weight.less(nested[i].1),
             });
         }
         keys.push(key);
@@ -1343,12 +1608,23 @@ struct Src {
     node: u32,
 }
 
+impl Src {
+    fn of(self, lanes: &[LaneTable]) -> &LaneNode {
+        &lanes[self.lane as usize].nodes[self.node as usize]
+    }
+}
+
 /// Rebuild the aggregation tree from key-sorted elements, returning the arena
 /// for [`seal_arena`]. Ascending key order lists every parent before its
 /// descendants, so a stack indexed by depth locates each node's parent; each
-/// maximal run of equal keys is one node, built by `node_of` from the run. The
-/// root's total is the summed total of the depth-1 nodes.
-fn reconstruct(elems: &[KeyRef], node_of: impl Fn(&[KeyRef]) -> ArenaNode) -> Arena {
+/// maximal run of equal keys is one node, built by `node_of` from the run
+/// together with a second weight for it. Those come back index-parallel to the
+/// arena's nodes. The root's total, and its second weight, is the sum over the
+/// depth-1 nodes.
+fn reconstruct<X: Weight>(
+    elems: &[KeyRef],
+    node_of: impl Fn(&[KeyRef]) -> (ArenaNode, X),
+) -> (Arena, Vec<X>) {
     let run_breaks = workers().install(|| {
         elems
             .par_windows(2)
@@ -1358,6 +1634,8 @@ fn reconstruct(elems: &[KeyRef], node_of: impl Fn(&[KeyRef]) -> ArenaNode) -> Ar
     // One node per maximal run of equal keys, and the root.
     let nodes = 1 + usize::from(!elems.is_empty()) + run_breaks;
     let mut arena = Arena::with_capacity(nodes);
+    let mut weights: Vec<X> = Vec::with_capacity(nodes);
+    weights.push(X::default());
     // `stack[d]` holds the arena index of the current path's depth-`d` node; the
     // root seeds depth 0. A node at depth `d` finds its parent at `stack[d - 1]`,
     // still in place from when that parent was reduced.
@@ -1369,19 +1647,21 @@ fn reconstruct(elems: &[KeyRef], node_of: impl Fn(&[KeyRef]) -> ArenaNode) -> Ar
         while j < elems.len() && elems[j].key == elems[i].key {
             j += 1;
         }
-        let node = node_of(&elems[i..j]);
+        let (node, weight) = node_of(&elems[i..j]);
         let depth = elems[i].key.len() / SEGMENT_BYTES;
         if depth == 1 {
             root_total += node.total_us;
+            weights[0].add(weight);
         }
         let idx = arena.push(node, stack[depth - 1] as u32);
+        weights.push(weight);
         stack.truncate(depth);
         stack.push(idx);
         i = j;
     }
     arena.total_us[0] = root_total;
     debug_assert_eq!(arena.len(), nodes, "the run count must be exact");
-    arena
+    (arena, weights)
 }
 
 /// The CSR child edges of an arena described by its parent array. `off[p]`
@@ -2606,6 +2886,41 @@ mod tests {
         assert_eq!(scan.reductions(), 2, "a revisited labelling is a memo hit");
         assert_eq!(resolved(&mnemonic), resolved(&mnemonic_again));
         assert_eq!(resolved(&name), resolved(&name_again));
+    }
+
+    #[test]
+    fn a_window_reduces_once_for_durations_and_once_more_for_its_wall_column() {
+        let p = clipping_profile();
+        let win = window(&[(0, 90)]);
+        let scan = TrackFlamer::new(&p);
+        scan.build(FlameLabels::Name, &win, |_| true);
+        assert_eq!(scan.reductions(), 1);
+        let filled = scan.build_wall_share(FlameLabels::Name, &win, |_| true);
+        assert_eq!(scan.reductions(), 2, "the held lanes gain a wall column");
+        scan.build_wall_share(FlameLabels::Name, &win, |i| i == 0);
+        scan.build(FlameLabels::Name, &win, |_| true);
+        assert_eq!(
+            scan.reductions(),
+            2,
+            "either weight then merges what is held"
+        );
+
+        // Asked for wall share first, one reduction serves both weights, and
+        // reads as the two reductions do.
+        let fresh = TrackFlamer::new(&p);
+        let at_once = fresh.build_wall_share(FlameLabels::Name, &win, |_| true);
+        let by_duration = fresh.build(FlameLabels::Name, &win, |_| true);
+        assert_eq!(fresh.reductions(), 1);
+        assert_eq!(resolved(&at_once.flame), resolved(&filled.flame));
+        assert_eq!(at_once.duration_us, filled.duration_us);
+        let totals: Vec<i64> = (0..by_duration.len())
+            .map(|i| by_duration.total_us(i))
+            .collect();
+        assert_eq!(at_once.duration_us, totals);
+        // Carrying a wall column leaves the duration graph as a scan that
+        // never weighed by wall share builds it.
+        let untouched = TrackFlamer::new(&p).build(FlameLabels::Name, &win, |_| true);
+        assert_eq!(by_duration.nodes(), untouched.nodes());
     }
 
     #[test]

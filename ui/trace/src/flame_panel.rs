@@ -921,7 +921,7 @@ fn flame_paint(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bviz_trace_layout::{FlameDirection, FlameLabels, FlameMode, TimeSelection};
+    use bviz_trace_layout::{FlameDirection, FlameLabels, FlameMode, FlameWeight, TimeSelection};
     use bviz_trace_profile::Profile;
 
     /// Width of the content column the fixture layouts are placed for, wide
@@ -952,6 +952,7 @@ mod tests {
             FlameMode {
                 direction: FlameDirection::TopDown,
                 labels: FlameLabels::Name,
+                weight: FlameWeight::Duration,
             },
             &TimeSelection::default(),
             |_| true,
