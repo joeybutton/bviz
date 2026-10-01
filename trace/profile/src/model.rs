@@ -471,6 +471,19 @@ fn general_information_role(name: &str) -> (Workload, bool) {
     }
 }
 
+/// Whether a span of this Bazel `cat` holds its thread parked: for its own time
+/// — what the spans nested in it leave over — the thread is blocked on work that
+/// other threads carry out and record on their own lanes, so that time is theirs
+/// seen a second time.
+///
+/// `ProfilerTask.SKYFRAME_EVAL` is such a span whatever its name: its single
+/// emitter wraps `ParallelEvaluator.doMutatingEvaluation`, which hands the
+/// requested keys to the evaluator pools and waits for them to finish:
+/// <https://github.com/bazelbuild/bazel/blob/9.1.0/src/main/java/com/google/devtools/build/skyframe/ParallelEvaluator.java#L670-L672>
+pub fn parks_thread(category: &str) -> bool {
+    category == "skyframe evaluator"
+}
+
 /// A counter graph. The parser splits every counter into one lane per numeric
 /// series.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
