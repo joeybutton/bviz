@@ -1,0 +1,16 @@
+name: BuildBuddy
+description: >-
+  Build and test on BuildBuddy remote execution when the job's environment
+  carries BUILDBUDDY_API_KEY; without it, Bazel builds locally.
+
+runs:
+  using: composite
+  steps:
+    - if: env.BUILDBUDDY_API_KEY != ''
+      shell: bash
+      run: |
+        cat >> user.bazelrc <<'RC'
+        common --credential_helper=yume.buildbuddy.io=%workspace%/.github/actions/buildbuddy/credential-helper
+        build --config=remote
+        build --build_metadata=ROLE=CI
+        RC

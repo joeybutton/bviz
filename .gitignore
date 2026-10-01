@@ -11,3 +11,7 @@ rust-project.json
 
 # cargo's build tree, created when repinning Cargo.lock; Bazel never produces it
 /target/
+
+# Remote build diagnostic logs, written to whichever directory bazel runs in
+bazel-remote-grpc.log
+execution_log.binpb.zst

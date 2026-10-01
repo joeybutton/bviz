@@ -1,0 +1,115 @@
+Fetch a git crate from an archive of its locked commit
+
+A git crate's repository is cloned with its submodules, which can dwarf the
+crates themselves. A crate annotation may instead name an archive of the
+locked commit, pinned by its SHA-256, to download in place of the clone.
+
+diff --git a/rs/extensions.bzl b/rs/extensions.bzl
+--- a/rs/extensions.bzl
++++ b/rs/extensions.bzl
+@@ -849,6 +849,7 @@ def _crate_impl(mctx):
+                         "build_files": {},
+                         "gen_binaries": {},
+                         "commit": commit,
++                        "git_archive": None,
+                         "hub_name": cfg.name,
+                         "patch_args": [],
+                         "patch_tool": "",
+@@ -875,6 +876,18 @@ def _crate_impl(mctx):
+                 if annotation.gen_binaries:
+                     git_repo["gen_binaries"][build_file_path] = annotation.gen_binaries
+ 
++                if annotation.git_archive_url:
++                    if not annotation.git_archive_sha256:
++                        fail("Crate %s sets git_archive_url without git_archive_sha256" % package["name"])
++                    git_archive = struct(
++                        sha256 = annotation.git_archive_sha256,
++                        strip_prefix = annotation.git_archive_strip_prefix.replace("{commit}", commit),
++                        url = annotation.git_archive_url.replace("{commit}", commit),
++                    )
++                    if git_repo["git_archive"] and git_repo["git_archive"] != git_archive:
++                        fail("Git crates from %s name different archives" % source)
++                    git_repo["git_archive"] = git_archive
++
+                 if annotation.patches:
+                     patch_args = annotation.patch_args
+                     patch_tool = annotation.patch_tool or ""
+@@ -890,6 +903,10 @@ def _crate_impl(mctx):
+         kwargs = {}
+         if git_repo["gen_binaries"]:
+             kwargs["gen_binaries"] = git_repo["gen_binaries"]
++        if git_repo["git_archive"]:
++            kwargs["archive_sha256"] = git_repo["git_archive"].sha256
++            kwargs["archive_strip_prefix"] = git_repo["git_archive"].strip_prefix
++            kwargs["archive_url"] = git_repo["git_archive"].url
+ 
+         git_cargo_workspace_repository(
+             name = repo_name,
+@@ -1074,6 +1091,15 @@ _annotation = tag_class(
+         "gen_binaries": attr.string_list(
+             doc = "As a list, the subset of the crate's bins that should get `rust_binary` targets produced.",
+         ),
++        "git_archive_sha256": attr.string(
++            doc = "The SHA-256 of `git_archive_url`.",
++        ),
++        "git_archive_strip_prefix": attr.string(
++            doc = "A directory prefix to strip from the files in `git_archive_url`. `{commit}` stands for the locked commit.",
++        ),
++        "git_archive_url": attr.string(
++            doc = "For crates from git, an archive of the locked commit to download in place of cloning the repository, so that none of its submodules are fetched. It applies to every crate sourced from the same repository and commit. `{commit}` stands for the locked commit, so a change of commit surfaces as a mismatch against `git_archive_sha256`.",
++        ),
+         "gen_build_script": attr.string(
+             doc = "An authoritative flag to determine whether or not to produce `cargo_build_script` targets for the current crate. Supported values are 'on', 'off', and 'auto'.",
+             values = ["auto", "on", "off"],
+diff --git a/rs/private/annotations.bzl b/rs/private/annotations.bzl
+--- a/rs/private/annotations.bzl
++++ b/rs/private/annotations.bzl
+@@ -22,6 +22,9 @@ def _crate_annotation(
+         crate_features_select = {},
+         gen_binaries = [],
+         extra_aliased_targets = {},
++        git_archive_sha256 = "",
++        git_archive_strip_prefix = "",
++        git_archive_url = "",
+         rustc_env = {},
+         rustc_flags = [],
+         rustc_flags_select = {},
+@@ -52,6 +55,9 @@ def _crate_annotation(
+         crate_features_select = crate_features_select,
+         gen_binaries = gen_binaries,
+         extra_aliased_targets = extra_aliased_targets,
++        git_archive_sha256 = git_archive_sha256,
++        git_archive_strip_prefix = git_archive_strip_prefix,
++        git_archive_url = git_archive_url,
+         rustc_env = rustc_env,
+         rustc_flags = rustc_flags,
+         rustc_flags_select = rustc_flags_select,
+diff --git a/rs/private/git_cargo_workspace_repository.bzl b/rs/private/git_cargo_workspace_repository.bzl
+--- a/rs/private/git_cargo_workspace_repository.bzl
++++ b/rs/private/git_cargo_workspace_repository.bzl
+@@ -61,7 +61,14 @@ crate(
+     ))
+ 
+ def _git_cargo_workspace_repository_impl(rctx):
+-    git_repo(rctx, rctx.path("."))
++    if rctx.attr.archive_url:
++        rctx.download_and_extract(
++            rctx.attr.archive_url,
++            sha256 = rctx.attr.archive_sha256,
++            stripPrefix = rctx.attr.archive_strip_prefix,
++        )
++    else:
++        git_repo(rctx, rctx.path("."))
+ 
+     patch(rctx)
+     rctx.delete(rctx.path(".git"))
+@@ -77,6 +84,9 @@ git_cargo_workspace_repository = repository_rule(
+     attrs = {
+         "remote": attr.string(mandatory = True),
+         "commit": attr.string(mandatory = True),
++        "archive_url": attr.string(),
++        "archive_sha256": attr.string(),
++        "archive_strip_prefix": attr.string(),
+         "hub_name": attr.string(mandatory = True),
+         "shallow_since": attr.string(),
+         "init_submodules": attr.bool(default = True),

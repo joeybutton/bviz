@@ -17,20 +17,28 @@ jobs:
   check:
     runs-on: ubuntu-latest
     timeout-minutes: 90
+    env:
+      BUILDBUDDY_API_KEY: ${{ secrets.BUILDBUDDY_API_KEY }}
     steps:
       - uses: actions/checkout@v7
-      - uses: ./.github/actions/free-disk-space
       - uses: bazel-contrib/setup-bazel@0.19.0
         with:
-          bazelrc: build --platforms=//platforms:linux_x86_64
+          bazelrc: |
+            common --config=ci
+            build --platforms=//platforms:linux_x86_64
           bazelisk-cache: true
-          disk-cache: ${{ github.workflow }}
-          repository-cache: true
+      - uses: ./.github/actions/buildbuddy
 
-      # Report every check's verdict, not only the first failure's.
-      - run: bazel test --config=check --keep_going --test_output=errors //... //dist:bviz-linux-x86_64
-      - name: Report disk usage
-        run: |
-          df -h /
-          du -sh ~/.cache/bazel-disk ~/.cache/bazel-repo ~/.cache/bazelisk ~/.bazel || true
-        if: ${{ !cancelled() }}
+      # Report every check's verdict, not only the first failure's. The check
+      # needs none of the outputs on the runner, so none are downloaded.
+      - run: bazel test --config=check --remote_download_minimal --keep_going --test_output=errors //... //dist:bviz-linux-x86_64
+
+      - uses: actions/upload-artifact@v7
+        if: failure()
+        with:
+          name: remote-build-logs
+          path: |
+            bazel-remote-grpc.log
+            execution_log.binpb.zst
+          retention-days: 7
+          if-no-files-found: ignore

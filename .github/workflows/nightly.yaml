@@ -17,17 +17,28 @@ jobs:
   build:
     runs-on: ubuntu-latest
     timeout-minutes: 180
+    env:
+      BUILDBUDDY_API_KEY: ${{ secrets.BUILDBUDDY_API_KEY }}
     steps:
       - uses: actions/checkout@v7
-      - uses: ./.github/actions/free-disk-space
       - uses: bazel-contrib/setup-bazel@0.19.0
         with:
+          bazelrc: common --config=ci
           bazelisk-cache: true
-          disk-cache: ${{ github.workflow }}
-          repository-cache: true
+      - uses: ./.github/actions/buildbuddy
 
       # --keep_going so one platform's failure still yields the others' tarballs.
       - run: bazel build -c opt --keep_going //dist
+
+      - uses: actions/upload-artifact@v7
+        if: failure()
+        with:
+          name: remote-build-logs
+          path: |
+            bazel-remote-grpc.log
+            execution_log.binpb.zst
+          retention-days: 7
+          if-no-files-found: ignore
 
       # GitHub implies success() on an `if:` that names no status function, so
       # without !cancelled() a failed build would skip the uploads that report
@@ -55,12 +66,6 @@ jobs:
           archive: false
           retention-days: 14
           if-no-files-found: error
-
-      - name: Report disk usage
-        run: |
-          df -h /
-          du -sh ~/.cache/bazel-disk ~/.cache/bazel-repo ~/.cache/bazelisk ~/.bazel || true
-        if: ${{ !cancelled() }}
 
   # One pre-release under a fixed tag, replaced on every run, so its download
   # links stay stable and always point at the latest build of main. It is

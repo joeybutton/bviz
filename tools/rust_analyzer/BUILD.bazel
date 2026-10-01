@@ -5,5 +5,6 @@ sh_binary(
     srcs = ["gen_rust_project.sh"],
     args = ["$(rlocationpath @rules_rs//tools/rust_analyzer:gen_rust_project)"],
     data = ["@rules_rs//tools/rust_analyzer:gen_rust_project"],
+    tags = ["manual"],
     use_bash_launcher = True,
 )
