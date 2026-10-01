@@ -47,8 +47,45 @@ use_repo(rs_toolchains, "default_rust_toolchains")
 
 register_toolchains("@default_rust_toolchains//...")
 
-# Link Rust binaries with llvm/lld rather than the autodetected system cc.
-register_toolchains("@llvm//toolchain:all")
+# Link Rust binaries with llvm/lld rather than the autodetected system cc. Each
+# supported development host executes the toolchain and targets itself, which
+# also covers every platform the release archives target.
+llvm_toolchain = use_extension("@llvm//extensions:toolchain.bzl", "toolchain")
+llvm_toolchain.exec(
+    arch = "aarch64",
+    os = "linux",
+)
+llvm_toolchain.exec(
+    arch = "x86_64",
+    os = "linux",
+)
+llvm_toolchain.exec(
+    arch = "aarch64",
+    os = "macos",
+)
+llvm_toolchain.exec(
+    arch = "x86_64",
+    os = "macos",
+)
+llvm_toolchain.target(
+    arch = "aarch64",
+    os = "linux",
+)
+llvm_toolchain.target(
+    arch = "x86_64",
+    os = "linux",
+)
+llvm_toolchain.target(
+    arch = "aarch64",
+    os = "macos",
+)
+llvm_toolchain.target(
+    arch = "x86_64",
+    os = "macos",
+)
+use_repo(llvm_toolchain, "llvm_toolchains")
+
+register_toolchains("@llvm_toolchains//:all")
 
 # The macOS sysroot the llvm module fetches carries a small default set of
 # frameworks, which this tag replaces wholesale; the defaults are therefore
