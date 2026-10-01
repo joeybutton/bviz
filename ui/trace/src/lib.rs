@@ -31,6 +31,7 @@ use timeline::{HoveredSlice, Timeline};
 use track_label::{pool_member_label, track_label};
 use tracks_menu::TracksMenu;
 
+use bviz_invocation::InvocationId;
 use bviz_trace_layout::{LaneLayout, LaneMetrics, TimeSelection, TimeView};
 use bviz_trace_profile::{Profile, Slice, TimeSpan};
 use bviz_ui_components::{
@@ -1526,6 +1527,12 @@ pub struct Load {
     title: SharedString,
 }
 
+/// The invocation the profile at `source` names itself as written by, read from
+/// the head of the file alone.
+pub fn invocation_id(source: &TraceSource) -> Option<InvocationId> {
+    bviz_trace_profile::probe_invocation_id(&source.path)
+}
+
 impl From<TraceSource> for Load {
     fn from(source: TraceSource) -> Self {
         let title = document_label(&source.path);
@@ -1596,6 +1603,26 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_source_names_the_invocation_its_profile_was_written_by() {
+        let dir = std::env::var("TEST_TMPDIR").unwrap_or_else(|_| "/tmp".into());
+        let source = |name: &str, json: Option<&str>| {
+            let path = std::path::Path::new(&dir).join(name);
+            if let Some(json) = json {
+                std::fs::write(&path, json).unwrap();
+            }
+            TraceSource { path }
+        };
+        let named = source(
+            "named.json",
+            Some(r#"{"otherData":{"build_id":"a5f7f3e6-4fda"},"traceEvents":[]}"#),
+        );
+        assert_eq!(invocation_id(&named), InvocationId::new("a5f7f3e6-4fda"));
+        let unnamed = source("unnamed.json", Some(r#"{"traceEvents":[]}"#));
+        assert_eq!(invocation_id(&unnamed), None);
+        assert_eq!(invocation_id(&source("missing.json", None)), None);
+    }
 
     /// A window tall enough that the strip stands at the height it is opened to,
     /// split for a profile with `n` counters and lanes short enough that the
