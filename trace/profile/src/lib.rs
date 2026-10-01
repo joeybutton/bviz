@@ -7,4 +7,4 @@ pub use model::{
     Slice, SliceDetail, Span32, SpanRole, Str, TIME_RESOLUTION_US, ThreadTrack, TimeSpan, Workload,
     encloses, lane_class, occupied_span, span_role, track_family,
 };
-pub use parse::{LoadError, gzip_isize, pipeline_chunk_bytes};
+pub use parse::{LoadError, gzip_isize, pipeline_chunk_bytes, probe_invocation_id};

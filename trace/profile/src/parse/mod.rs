@@ -1,7 +1,9 @@
 use std::fmt;
-use std::io::{BufReader, Seek, SeekFrom};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::Path;
 
+use bviz_invocation::InvocationId;
+use flate2::bufread::MultiGzDecoder;
 use serde::de::DeserializeSeed;
 use serde_json::{Map, Value};
 
@@ -15,10 +17,10 @@ mod scanner;
 mod serde_events;
 
 use build::{Builder, Merge, seal};
-use decode::{decode, gzip_isize_from_file};
+use decode::{decode, gzip_isize_from_file, latin1_cow};
 use pipeline::{
-    TraceEventsArray, find_trace_events_array, parse_gz_pipelined, parse_gz_pipelined_reader,
-    parse_parallel,
+    TraceEventsArray, find_trace_events_array, find_trace_events_key, parse_gz_pipelined,
+    parse_gz_pipelined_reader, parse_parallel,
 };
 use scanner::object_end;
 use serde_events::{ArgEntry, ProfileVisitor, RawEventSeed};
@@ -259,6 +261,49 @@ fn recover_other_data(prefix: &str) -> Option<Map<String, Value>> {
     let obj_start = prefix[key..].find('{').map(|i| key + i)?;
     let end = object_end(prefix.as_bytes(), obj_start)?;
     serde_json::from_str(&prefix[obj_start..=end]).ok()
+}
+
+/// The `otherData` key holding the id of the invocation that wrote the
+/// profile: Bazel's command id, despite the key's name.
+pub(crate) const BUILD_ID_KEY: &str = "build_id";
+
+/// Decoded bytes [`probe_invocation_id`] reads from the head of a profile,
+/// many times the `otherData` object Bazel opens a profile with.
+const PROBE_HEAD_BYTES: u64 = 64 << 10;
+
+/// The invocation that wrote the profile at `path`, from the `otherData` ahead
+/// of its events, reading and inflating no more than a bounded head of the
+/// file. `None` when that head holds no such id, the file cannot be read, or
+/// `path` is not a regular file: reading a pipe could block, and would take
+/// from it bytes it yields only once.
+pub fn probe_invocation_id(path: &Path) -> Option<InvocationId> {
+    if !std::fs::metadata(path).ok()?.is_file() {
+        return None;
+    }
+    let file = std::fs::File::open(path).ok()?;
+    invocation_id_at_head(BufReader::new(file), PROBE_HEAD_BYTES)
+}
+
+/// [`probe_invocation_id`] over the first `head_bytes` decoded bytes of a
+/// profile.
+fn invocation_id_at_head(mut profile: impl BufRead, head_bytes: u64) -> Option<InvocationId> {
+    let gzipped = profile.fill_buf().ok()?.starts_with(&GZIP_MAGIC);
+    let mut head = Vec::new();
+    // A stream that fails mid-way, as a truncated profile does, has still
+    // yielded the bytes ahead of the failure.
+    let _ = match gzipped {
+        true => MultiGzDecoder::new(profile)
+            .take(head_bytes)
+            .read_to_end(&mut head),
+        false => profile.take(head_bytes).read_to_end(&mut head),
+    };
+    let head = latin1_cow(&head);
+    let before_events = match find_trace_events_key(head.as_bytes()) {
+        Some(key_at) => &head[..key_at],
+        None => &head,
+    };
+    let other_data = recover_other_data(before_events)?;
+    InvocationId::new(other_data.get(BUILD_ID_KEY)?.as_str()?)
 }
 
 /// Combines two `otherData` objects into the metadata of a profile that
@@ -781,6 +826,63 @@ mod tests {
         enc.write_all(json.as_bytes()).unwrap();
         let gz = enc.finish().unwrap();
         check(&parse_gz_stream(&gz, 2, 64).expect("pipelined"));
+    }
+
+    #[test]
+    fn probe_reads_the_id_at_the_head() {
+        let id = "a5f7f3e6-4fda-4675-bc16-8ede5420b210";
+        let leading = format!(
+            "{{\"otherData\":{{\"bazel_version\":\"9.0.0\",\"build_id\":\"{id}\"}},\"traceEvents\":[\n"
+        ) + "{\"cat\":\"c\",\"name\":\"a\",\"ph\":\"X\",\"ts\":0,\"dur\":1,\"tid\":1}\n]}";
+        let gzipped = |json: &str| {
+            let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+            enc.write_all(json.as_bytes()).unwrap();
+            enc.finish().unwrap()
+        };
+        let probe = |bytes: &[u8], head_bytes| invocation_id_at_head(bytes, head_bytes);
+        let whole = leading.len() as u64;
+        assert_eq!(probe(leading.as_bytes(), whole), InvocationId::new(id));
+        assert_eq!(probe(&gzipped(&leading), whole), InvocationId::new(id));
+        // A profile cut off inside its events still opens with its id, plain
+        // or as a gzip stream missing its tail.
+        let cut = leading.len() - 20;
+        assert_eq!(
+            probe(&leading.as_bytes()[..cut], whole),
+            InvocationId::new(id)
+        );
+        let gz = gzipped(&leading);
+        assert_eq!(probe(&gz[..gz.len() - 12], whole), InvocationId::new(id));
+
+        // A head that ends inside the object holds no id.
+        let inside_other_data = leading.find(id).unwrap() as u64;
+        assert_eq!(probe(leading.as_bytes(), inside_other_data), None);
+        assert_eq!(probe(&gzipped(&leading), inside_other_data), None);
+
+        // Nor does an object that trails the events or their key, an empty id, or no
+        // profile at all.
+        let trailing = "{\"traceEvents\":[\n".to_string()
+            + "{\"cat\":\"c\",\"name\":\"a\",\"ph\":\"X\",\"ts\":0,\"dur\":1,\"tid\":1}\n"
+            + &format!("],\"otherData\":{{\"build_id\":\"{id}\"}}}}");
+        assert_eq!(probe(trailing.as_bytes(), trailing.len() as u64), None);
+        let cut_at_key = &trailing[..trailing.find('[').unwrap()];
+        let after_key = format!("{cut_at_key},\"otherData\":{{\"build_id\":\"{id}\"}}}}");
+        assert_eq!(probe(after_key.as_bytes(), after_key.len() as u64), None);
+        let unnamed = r#"{"otherData":{"build_id":""},"traceEvents":[]}"#;
+        assert_eq!(probe(unnamed.as_bytes(), unnamed.len() as u64), None);
+        assert_eq!(probe(b"", PROBE_HEAD_BYTES), None);
+    }
+
+    #[test]
+    fn probe_reads_a_gzipped_profile_from_disk() {
+        let json = r#"{"otherData":{"build_id":"abc"},"traceEvents":[]}"#;
+        let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        enc.write_all(json.as_bytes()).unwrap();
+        let dir = std::env::var("TEST_TMPDIR").unwrap_or_else(|_| "/tmp".into());
+        let path = std::path::Path::new(&dir).join("probe.profile.gz");
+        std::fs::write(&path, enc.finish().unwrap()).unwrap();
+        assert_eq!(probe_invocation_id(&path), InvocationId::new("abc"));
+        assert_eq!(probe_invocation_id(&path.with_extension("missing")), None);
+        assert_eq!(probe_invocation_id(std::path::Path::new(&dir)), None);
     }
 
     #[test]

@@ -3,6 +3,7 @@
 //! return must be comparable to be joined.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 const MICROS_PER_MILLI: i64 = 1_000;
 const MICROS_PER_SECOND: f64 = 1e6;
@@ -27,6 +28,24 @@ impl EpochMicros {
 
     pub const fn micros(self) -> i64 {
         self.0
+    }
+}
+
+/// Bazel's id for one run of a command (its command id), which outputs of that
+/// run name alike. Distinct from the build request id, which several
+/// invocations can share.
+#[derive(Debug, Clone, PartialEq)]
+pub struct InvocationId(Arc<str>);
+
+impl InvocationId {
+    /// `None` for the empty string, which an output holds in place of an id it
+    /// does not know.
+    pub fn new(id: &str) -> Option<InvocationId> {
+        (!id.is_empty()).then(|| InvocationId(id.into()))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
     }
 }
 
@@ -89,6 +108,13 @@ mod tests {
         assert_eq!(EpochMicros::from_secs_f64(-0.000_001_6).micros(), -2);
         assert_eq!(EpochMicros::from_secs_f64(f64::INFINITY).micros(), i64::MAX);
         assert_eq!(EpochMicros::from_secs_f64(f64::NAN).micros(), 0);
+    }
+
+    #[test]
+    fn an_invocation_id_is_never_empty() {
+        assert_eq!(InvocationId::new(""), None);
+        let id = InvocationId::new("a5f7f3e6").expect("non-empty");
+        assert_eq!(id.as_str(), "a5f7f3e6");
     }
 
     #[test]

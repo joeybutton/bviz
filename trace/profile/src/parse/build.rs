@@ -13,7 +13,7 @@ use crate::model::{
 };
 
 use super::serde_events::{ArgEntry, ArgVal, RawEvent, arg_i64, arg_str};
-use super::timed;
+use super::{BUILD_ID_KEY, timed};
 
 const MAX_SORT_INDEX: i64 = 1_000_000;
 const PHASE_MARKER_CATEGORY: &str = "build phase marker";
@@ -825,7 +825,7 @@ fn build_metadata(interner: &mut Writer, other: Option<&Map<String, Value>>) -> 
     };
     Metadata {
         bazel_version: get("bazel_version"),
-        build_id: get("build_id"),
+        build_id: get(BUILD_ID_KEY),
         output_base: get("output_base"),
         date: get("date"),
         epoch_origin: value("profile_start_ts")
