@@ -11,7 +11,7 @@ use bviz_graph_layout::metrics::Unit;
 use bviz_ui_assets::shape_line;
 use bviz_ui_components::{LabelBoxStyle, paint_labeled_box};
 use bviz_ui_theme::{label_on, mix};
-use gpui::{App, Bounds, Pixels, Rgba, Window, px, size};
+use gpui::{App, BorderStyle, Bounds, Hsla, Pixels, Rgba, Window, px, quad, size};
 use std::sync::Arc;
 
 /// Inset of a cell's name from its edges, above and below as at either side.
@@ -92,6 +92,20 @@ pub(crate) fn drawn_rect(cell: &Cell) -> Bounds<Pixels> {
         rect.origin,
         size(rect.size.width, rect.size.height - ROW_GAP),
     )
+}
+
+const RING_WIDTH: Pixels = px(2.);
+
+/// Rings the box of `cell`.
+pub(crate) fn paint_ring(cell: &Cell, palette: &Palette, window: &mut Window) {
+    window.paint_quad(quad(
+        drawn_rect(cell),
+        px(0.),
+        Hsla::transparent_black(),
+        RING_WIDTH,
+        palette.label,
+        BorderStyle::Solid,
+    ));
 }
 
 fn fill(scene: &Scene, holds: Holds) -> Rgba {
