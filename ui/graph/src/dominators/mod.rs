@@ -6,10 +6,12 @@ mod icicle;
 mod paint;
 
 use crate::Palette;
+use crate::drag::DOUBLE_CLICK;
 use crate::model::{DominatorsLanded, GraphModel, Shared, SourceReplaced};
 use crate::point::{identify, unit_names};
 use crate::toolbar::{busy, group};
 use crate::unit_picker::UnitPicker;
+use bviz_graph_layout::Id;
 use bviz_graph_layout::dominators::Dominators;
 use bviz_graph_layout::metrics::Scope;
 use bviz_ui_components::{
@@ -146,13 +148,22 @@ impl DominatorsPanel {
     /// Draws the icicle from `node`, or from the whole build where there is
     /// none, and describes the cell that brings under the pointer.
     fn focus_on(&mut self, node: Option<u32>, cx: &mut Context<Self>) {
+        let Some(drawn) = &self.drawn else {
+            return;
+        };
+        if drawn.focus_node() != node {
+            let focus = node.map(|node| Focus::on(&drawn.tree, node));
+            self.refocus(focus, cx);
+        }
+    }
+
+    /// Draws the icicle from `focus`, or from the whole build where there is
+    /// none, and describes the cell that brings under the pointer.
+    fn refocus(&mut self, focus: Option<Focus>, cx: &mut Context<Self>) {
         let Some(drawn) = &mut self.drawn else {
             return;
         };
-        if drawn.focus_node() == node {
-            return;
-        }
-        drawn.focus = node.map(|node| Focus::on(&drawn.tree, node));
+        drawn.focus = focus;
         let at = drawn.hover.take().map(|hover| hover.at);
         self.invalidate_canvas(cx);
         if let Some(at) = at {
@@ -202,8 +213,10 @@ impl DominatorsPanel {
     }
 
     /// Acts on a press: the first of a click on a cell focuses as
-    /// [`Self::click_cell`] does, and the second of a double click whose first
-    /// landed clear of every cell returns to the whole build.
+    /// [`Self::click_cell`] does, and the second of a double click on the cell
+    /// of a point puts back the focus the first replaced and shows the graph's
+    /// drawing of the point, or returns to the whole build where the first
+    /// landed clear of every cell.
     fn on_mouse_down(&mut self, e: &MouseDownEvent, cx: &mut Context<Self>) {
         let cell = self.cell_at(e.position);
         let Some(drawn) = &mut self.drawn else {
@@ -211,16 +224,26 @@ impl DominatorsPanel {
         };
         match e.click_count {
             1 => {
-                drawn.press = Some(cell.map_or(Press::Clear, |_| Press::Cell));
+                drawn.press = match cell.map(|cell| cell.holds) {
+                    None => Some(Press::Clear),
+                    Some(Holds::Node(node)) => Some(Press::Point {
+                        id: drawn.tree.id(node),
+                        replaced: drawn.focus.clone(),
+                    }),
+                    Some(Holds::Build | Holds::Rest { .. }) => None,
+                };
                 if let Some(cell) = cell {
                     self.click_cell(cell.holds, cx);
                 }
             }
-            DOUBLE_CLICK => {
-                if let Some(Press::Clear) = drawn.press.take() {
-                    self.focus_on(None, cx);
+            DOUBLE_CLICK => match drawn.press.take() {
+                Some(Press::Clear) => self.focus_on(None, cx),
+                Some(Press::Point { id, replaced }) => {
+                    self.refocus(replaced, cx);
+                    self.model.update(cx, |model, cx| model.reveal(id, cx));
                 }
-            }
+                None => {}
+            },
             _ => {}
         }
     }
@@ -274,9 +297,6 @@ fn unit_picker(
     UnitPicker::new("dominators-unit", inputs, DominatorsPanel::choose, cx)
 }
 
-/// The `click_count` of the press completing a double click.
-const DOUBLE_CLICK: usize = 2;
-
 /// A tree drawn, and how the reader has it drawn, which lasts only as long as
 /// the tree is drawn.
 struct Drawn {
@@ -297,6 +317,7 @@ impl Drawn {
 
 /// Where the icicle is drawn from, with the path above it that the breadcrumb
 /// names taken once as the focus is set.
+#[derive(Clone)]
 struct Focus {
     node: u32,
     /// Top first, those nearest `node` at most [`CRUMBS`] of them.
@@ -324,11 +345,16 @@ impl Focus {
     }
 }
 
-/// Where a press landed.
-#[derive(Clone, Copy)]
+/// Where the first press of a click landed, as far as a second press
+/// completing a double click acts on it.
 enum Press {
     Clear,
-    Cell,
+    /// On the cell of the point `id`, while the icicle was drawn from
+    /// `replaced`.
+    Point {
+        id: Id,
+        replaced: Option<Focus>,
+    },
 }
 
 /// The cell the pointer rests on, described once as the pointer reaches it,
@@ -351,8 +377,8 @@ struct Frame {
 const TOOLTIP_LINES: usize = 9;
 
 /// What the tooltip over the cell holding `holds` of `tree` drawn from `focus`
-/// reads: what it stands for, how much of the build exists only because of
-/// it, and what a click on it does.
+/// reads: what it stands for, and how much of the build exists only because
+/// of it.
 fn describe(tree: &Dominators, holds: Holds, focus: Option<u32>, shared: &Shared) -> Vec<String> {
     let unit = tree.scope().unit();
     let names = unit_names(unit);
@@ -391,10 +417,6 @@ fn describe(tree: &Dominators, holds: Holds, focus: Option<u32>, shared: &Shared
                 None => WHOLE_BUILD.to_owned(),
             };
             lines.push(format!("immediately dominated by {dominator}"));
-            lines.push(match is_focus {
-                true => FOCUS_UP.to_owned(),
-                false => FOCUS.to_owned(),
-            });
         }
         Holds::Rest { count, weight, .. } => {
             lines.push(format!("{} too narrow to draw apart", points(count)));
@@ -405,12 +427,27 @@ fn describe(tree: &Dominators, holds: Holds, focus: Option<u32>, shared: &Shared
     lines
 }
 
+/// What a click on the cell holding `holds` drawn from `focus` does, and a
+/// double click where a graph panel `reveals` the point; absent where a click
+/// does nothing.
+fn gesture(holds: Holds, focus: Option<u32>, reveals: bool) -> Option<String> {
+    let Holds::Node(node) = holds else {
+        return None;
+    };
+    let click = if focus == Some(node) { FOCUS_UP } else { FOCUS };
+    Some(match reveals {
+        true => format!("{click} · {REVEAL}"),
+        false => click.to_owned(),
+    })
+}
+
 /// How a cell names the whole build.
 const WHOLE_BUILD: &str = "the whole build";
 
 /// What a click on a cell does, there and on the cell of the focus.
 const FOCUS: &str = "click to focus";
 const FOCUS_UP: &str = "click or Backspace to go up a level";
+const REVEAL: &str = "double-click to show in the graph";
 
 /// What share of `whole` `part` is, as a percentage.
 fn share(part: u32, whole: u32) -> String {
@@ -615,15 +652,20 @@ fn hover_layer(view: Entity<DominatorsPanel>, palette: Palette) -> impl IntoElem
         }
     };
     let paint = move |bounds: Bounds<Pixels>, (), window: &mut Window, cx: &mut App| {
-        let Some(Hover { cell, at, lines }) = view
-            .read(cx)
+        let panel = view.read(cx);
+        let Some((drawn, Hover { cell, at, lines })) = panel
             .drawn
             .as_ref()
-            .and_then(|drawn| drawn.hover.as_ref())
+            .and_then(|drawn| Some((drawn, drawn.hover.as_ref()?)))
         else {
             return;
         };
-        let (cell, at, lines) = (*cell, *at, lines.clone());
+        // Read as it is painted, since a graph panel opening or closing
+        // repaints the tooltip without the pointer moving.
+        let reveals = panel.model.read(cx).reveals();
+        let gesture = gesture(cell.holds, drawn.focus_node(), reveals);
+        let lines: Vec<String> = lines.iter().cloned().chain(gesture).collect();
+        let (cell, at) = (*cell, *at);
         paint::paint_ring(&cell, &palette, window);
         let tooltip = TooltipColors::from_colors(&palette.colors);
         paint_tooltip_box(&lines, at, bounds, tooltip, window, cx);

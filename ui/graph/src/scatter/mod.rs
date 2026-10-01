@@ -11,7 +11,7 @@ mod plot;
 
 use crate::Palette;
 use crate::colour;
-use crate::drag::CLICK_SLOP;
+use crate::drag::{CLICK_SLOP, DOUBLE_CLICK};
 use crate::model::{FilterChanged, GraphModel, Loaded, MetricsLanded, SourceReplaced};
 use crate::paint::UNMARKED_FADE;
 use crate::point::{configuration, identify, mnemonic, point_label, primary_output, unit_names};
@@ -778,9 +778,6 @@ fn input_name(input: Input) -> &'static str {
         Input::Aquery => "aquery",
     }
 }
-
-/// The `click_count` of the press completing a double click.
-const DOUBLE_CLICK: usize = 2;
 
 /// The measured points as drawn, and what among them the pointer is on.
 struct Plot {
