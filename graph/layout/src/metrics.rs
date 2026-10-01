@@ -159,11 +159,10 @@ pub fn measure(
     provenance: &Provenance,
     scope: Scope,
 ) -> Measurement {
-    let keys = SampleKeys { names, facets };
     let points = match scope.unit {
-        Unit::Action => actions(graph, provenance, scope, keys),
-        Unit::ConfiguredTarget => configured_targets(graph, provenance, scope, keys),
-        Unit::Target => targets(graph, facets, provenance, scope, keys),
+        Unit::Action => actions(graph, provenance, scope, names),
+        Unit::ConfiguredTarget => configured_targets(graph, provenance, scope, names),
+        Unit::Target => targets(graph, facets, provenance, scope, names),
     };
     // Decided by the graph alone, whatever inputs the scope reads, so the
     // sizes of one unit compare across scopes.
@@ -176,23 +175,6 @@ pub fn measure(
         scope,
         points,
         sizing,
-    }
-}
-
-/// What an estimate samples each node by, alike in every run of the queries
-/// read: an action's primary output, and any other node's name.
-#[derive(Clone, Copy)]
-struct SampleKeys<'a> {
-    names: &'a Names,
-    facets: &'a Facets,
-}
-
-impl SampleKeys<'_> {
-    fn of(self, id: Id) -> u64 {
-        match self.facets.primary_output_key(id) {
-            Some(key) => key.get(),
-            None => stable_hash(self.names.resolve(id)),
-        }
     }
 }
 
@@ -256,12 +238,7 @@ impl Points {
     /// The measure of these points with `pairs` between them, which run from a
     /// dependency to its dependent by index, and with the actions `actions`
     /// gives by point.
-    fn measure(
-        self,
-        mut pairs: Vec<(u32, u32)>,
-        actions: Vec<u32>,
-        keys: SampleKeys,
-    ) -> Vec<Metrics> {
+    fn measure(self, mut pairs: Vec<(u32, u32)>, actions: Vec<u32>, names: &Names) -> Vec<Metrics> {
         pairs.retain(|(from, to)| from != to);
         bviz_parallel::workers().install(|| pairs.par_sort_unstable());
         pairs.dedup();
@@ -269,7 +246,7 @@ impl Points {
         let (dependents, dependencies) = adjacency(points.len(), &pairs);
         drop(pairs);
         let counted = |p: usize| points[p].counted;
-        let key = |p: usize| keys.of(points[p].id);
+        let key = |p: usize| stable_hash(names.resolve(points[p].id));
         let blast_radius = reach_counts(&dependents, counted, key);
         let closure = reach_counts(&dependencies, counted, key);
         let counted_among = |of: &[u32]| of.iter().filter(|&&p| counted(p as usize)).count() as u32;
@@ -296,7 +273,7 @@ fn targets(
     facets: &Facets,
     provenance: &Provenance,
     scope: Scope,
-    keys: SampleKeys,
+    names: &Names,
 ) -> Vec<Metrics> {
     let points = Points::new(
         graph
@@ -317,7 +294,7 @@ fn targets(
             .filter_map(|edge| Some((target_of(edge.from)?, target_of(edge.to)?))),
     );
     let actions = points.owned_actions(graph, target_of);
-    points.measure(pairs, actions, keys)
+    points.measure(pairs, actions, names)
 }
 
 /// Every configured target, each edge between two nodes standing for one
@@ -326,7 +303,7 @@ fn configured_targets(
     graph: &Graph,
     provenance: &Provenance,
     scope: Scope,
-    keys: SampleKeys,
+    names: &Names,
 ) -> Vec<Metrics> {
     let node_of = first_by_id(graph);
     let is_configured =
@@ -355,12 +332,12 @@ fn configured_targets(
             .filter_map(|edge| Some((configured_of(edge.from)?, configured_of(edge.to)?))),
     );
     let actions = points.owned_actions(graph, configured_of);
-    points.measure(pairs, actions, keys)
+    points.measure(pairs, actions, names)
 }
 
 /// Every action, and every source file an action reads, each artifact standing
 /// for the actions producing it.
-fn actions(graph: &Graph, provenance: &Provenance, scope: Scope, keys: SampleKeys) -> Vec<Metrics> {
+fn actions(graph: &Graph, provenance: &Provenance, scope: Scope, names: &Names) -> Vec<Metrics> {
     let node_of = first_by_id(graph);
     let is_action = |id: Id| node_of[id.0 as usize].is_some_and(|node| node.kind == Kind::Action);
     let mut read: Vec<&Edge> = Vec::with_capacity(graph.edges.len());
@@ -415,7 +392,7 @@ fn actions(graph: &Graph, provenance: &Provenance, scope: Scope, keys: SampleKey
         }
     }
     let actions = points.owned_actions(graph, |id| points.of(id));
-    points.measure(pairs, actions, keys)
+    points.measure(pairs, actions, names)
 }
 
 /// By id, the first node of `graph` holding it.
