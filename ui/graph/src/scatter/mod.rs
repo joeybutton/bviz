@@ -12,6 +12,7 @@ mod plot;
 use crate::Palette;
 use crate::colour;
 use crate::drag::{CLICK_SLOP, DOUBLE_CLICK};
+use crate::hue::{Hue, Swatch, legend_strip};
 use crate::model::{FilterChanged, GraphModel, Loaded, MetricsLanded, SourceReplaced};
 use crate::paint::UNMARKED_FADE;
 use crate::point::{configuration, identify, mnemonic, point_label, primary_output, unit_names};
@@ -37,7 +38,7 @@ use gpui::{
     Render, Rgba, ScrollDelta, ScrollStrategy, ScrollWheelEvent, SharedString, Size, Stateful,
     Subscription, Task, WeakEntity, Window, canvas, div, prelude::*, px, rems, uniform_list,
 };
-use hue::{ColourBy, Colouring, Hue};
+use hue::{ColourBy, Colouring};
 use menu_chrome::{ROW_INSET, SHEET_BORDER};
 use pick::{Extents, PickList, PickRow};
 use placed::Placed;
@@ -1606,79 +1607,20 @@ fn sizing_name(sizing: Sizing) -> &'static str {
 }
 
 /// The strip naming what each colour a mark is drawn in stands for, what a
-/// mark's size stands for, and how to leave a zoom. The names wrap onto as many
-/// rows as they take, and one too long for a row is cut short; the hints wrap
-/// beneath the names where both do not fit.
+/// mark's size stands for, and how to leave a zoom.
 fn legend(plot: &Plot, zoom: Zoom, palette: &Palette) -> Div {
-    let entry = |(name, hue): &(SharedString, Hue)| {
-        let color = Rgba {
-            a: SWATCH_ALPHA,
-            ..hue.color(palette)
-        };
-        div()
-            .flex()
-            .items_center()
-            .gap_1()
-            .min_w_0()
-            .child(
-                div()
-                    .flex_none()
-                    .size(px(SWATCH_DIAMETER))
-                    .rounded_full()
-                    .bg(color),
-            )
-            .child(
-                div()
-                    .min_w_0()
-                    .max_w(px(LEGEND_NAME_WIDTH))
-                    .overflow_hidden()
-                    .whitespace_nowrap()
-                    .text_ellipsis()
-                    .child(name.clone()),
-            )
+    let swatch = Swatch {
+        alpha: SWATCH_ALPHA,
+        diameter: px(SWATCH_DIAMETER),
     };
-    div()
-        .flex()
-        .flex_row()
-        .flex_wrap()
-        .items_start()
-        .gap_x_4()
-        .px_3()
-        .py_1()
-        .text_sm()
-        .text_color(palette.label)
-        .border_b_1()
-        .border_color(palette.border)
-        .child(
-            div()
-                .flex()
-                .flex_wrap()
-                .gap_x_4()
-                .flex_1()
-                .min_w(px(LEGEND_NAMES_MIN_WIDTH))
-                .children(plot.legend.iter().map(entry)),
-        )
-        .child(
-            div()
-                .ml_auto()
-                .flex()
-                .flex_wrap()
-                .justify_end()
-                .gap_x_4()
-                .text_color(palette.colors.text_muted)
-                .when(zoom != Zoom::WHOLE, |hints| hints.child(ZOOMED))
-                .children(unplaced(plot))
-                .child(sizing_name(plot.plotted.sizing)),
-        )
+    let zoomed = (zoom != Zoom::WHOLE).then_some(ZOOMED);
+    let hints = zoomed
+        .into_iter()
+        .map(SharedString::from)
+        .chain(unplaced(plot).map(SharedString::from))
+        .chain([sizing_name(plot.plotted.sizing).into()]);
+    legend_strip(&plot.legend, swatch, hints, palette)
 }
-
-/// The widest a legend entry's name is drawn before it is cut short, which a
-/// mnemonic or kind is well within.
-const LEGEND_NAME_WIDTH: f32 = 220.0;
-
-/// The narrowest the legend's names are squeezed to beside its hints, which
-/// move to a row of their own where the two do not fit side by side.
-const LEGEND_NAMES_MIN_WIDTH: f32 = 160.0;
 
 /// The layer the points are drawn in, cached across frames that leave the
 /// plot and zoom unchanged.

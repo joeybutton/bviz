@@ -36,6 +36,7 @@ mod drag;
 mod duration;
 mod emphasis;
 mod framing;
+mod hue;
 mod legend;
 mod missing;
 mod mode;

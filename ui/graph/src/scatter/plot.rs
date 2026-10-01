@@ -2,7 +2,7 @@
 //! axes, and a mark's size by the count its measurement sizes points by.
 
 use super::axis::{Axes, Axis};
-use super::hue::Hue;
+use crate::hue::Hue;
 use bviz_graph_layout::Id;
 use bviz_graph_layout::metrics::{Measurement, Metrics, Sizing};
 use bviz_graph_layout::select::Verdict;
