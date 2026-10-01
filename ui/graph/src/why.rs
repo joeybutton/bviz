@@ -567,7 +567,7 @@ fn chain<'a>(
                         .into_any_element()
                     }))
                     .children((position > 0 && link.crossing.is_none()).then(|| {
-                        bviz_ui_assets::icon("caret-down")
+                        bviz_ui_assets::icon("arrow-down")
                             .size(LINK_MARK)
                             .text_color(palette.colors.text_muted)
                             .into_any_element()

@@ -18,6 +18,7 @@ license(
 filegroup(
     name = "icons",
     srcs = [
+        "assets/regular/arrow-down.svg",
         "assets/regular/arrows-in.svg",
         "assets/regular/caret-double-down.svg",
         "assets/regular/caret-double-up.svg",
