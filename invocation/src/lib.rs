@@ -2,6 +2,8 @@
 //! each output states the same facts in its own encoding, and what the readers
 //! return must be comparable to be joined.
 
+use std::collections::HashMap;
+
 const MICROS_PER_MILLI: i64 = 1_000;
 const MICROS_PER_SECOND: f64 = 1e6;
 
@@ -28,6 +30,44 @@ impl EpochMicros {
     }
 }
 
+/// Leading characters of a configuration checksum that [`Configurations::name`]
+/// tells apart configurations sharing a mnemonic by.
+const CHECKSUM_SHOWN: usize = 6;
+
+/// The mnemonic of each configuration known of an invocation, keyed by the
+/// checksum Bazel's outputs name a configuration by.
+#[derive(Default)]
+pub struct Configurations(HashMap<String, String>);
+
+impl Configurations {
+    /// Describes the configuration `checksum` names by its `mnemonic`. A
+    /// checksum names the same configuration in every output, so one already
+    /// described keeps the description it has.
+    pub fn insert(&mut self, checksum: String, mnemonic: String) {
+        self.0.entry(checksum).or_insert(mnemonic);
+    }
+
+    /// How to spell the configuration `checksum` names for a reader: its
+    /// mnemonic, followed by the start of the checksum when another known
+    /// configuration shares the mnemonic, so a name gains that suffix when a
+    /// second configuration of its mnemonic becomes known. `None` for an
+    /// unknown checksum.
+    pub fn name(&self, checksum: &str) -> Option<String> {
+        let mnemonic = self.0.get(checksum)?;
+        let shared = self
+            .0
+            .iter()
+            .any(|(other, described)| other != checksum && described == mnemonic);
+        Some(match shared {
+            true => {
+                let short: String = checksum.chars().take(CHECKSUM_SHOWN).collect();
+                format!("{mnemonic} {short}")
+            }
+            false => mnemonic.clone(),
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -49,5 +89,28 @@ mod tests {
         assert_eq!(EpochMicros::from_secs_f64(-0.000_001_6).micros(), -2);
         assert_eq!(EpochMicros::from_secs_f64(f64::INFINITY).micros(), i64::MAX);
         assert_eq!(EpochMicros::from_secs_f64(f64::NAN).micros(), 0);
+    }
+
+    #[test]
+    fn a_name_carries_the_checksum_only_to_tell_a_shared_mnemonic_apart() {
+        let mut known = Configurations::default();
+        known.insert("55817e2200e2".into(), "k8-fastbuild".into());
+        assert_eq!(known.name("55817e2200e2").as_deref(), Some("k8-fastbuild"));
+
+        known.insert("91e24984663c".into(), "k8-fastbuild".into());
+        known.insert("0c3d9a7714be".into(), "k8-opt-exec".into());
+        let name = |checksum| known.name(checksum);
+        assert_eq!(name("55817e2200e2").as_deref(), Some("k8-fastbuild 55817e"));
+        assert_eq!(name("91e24984663c").as_deref(), Some("k8-fastbuild 91e249"));
+        assert_eq!(name("0c3d9a7714be").as_deref(), Some("k8-opt-exec"));
+        assert_eq!(name("ffffffffffff"), None);
+    }
+
+    #[test]
+    fn a_checksum_described_again_keeps_its_first_description() {
+        let mut known = Configurations::default();
+        known.insert("55817e2200e2".into(), "k8-fastbuild".into());
+        known.insert("55817e2200e2".into(), "k8-opt".into());
+        assert_eq!(known.name("55817e2200e2").as_deref(), Some("k8-fastbuild"));
     }
 }

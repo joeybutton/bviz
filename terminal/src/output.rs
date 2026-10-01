@@ -1,18 +1,18 @@
 //! Reader for `--build_event_binary_file` streams.
 //!
-//! The file is a sequence of length-delimited `BuildEvent` messages. This pulls
-//! out the console output and the terminal width Bazel rendered it for, which is
-//! everything needed to replay the build into a terminal emulator.
+//! The file is a sequence of length-delimited `BuildEvent` messages.
 
+use bviz_invocation::Configurations;
 use prost::Message;
 
-use crate::bep::build_event_stream::{BuildEvent, build_event::Payload};
+use crate::bep::build_event_stream::{BuildEvent, build_event::Payload, build_event_id::Id};
 use crate::bep::command_line::{CommandLine, command_line_section::SectionType};
 use crate::bep::timestamp_proto::google::protobuf::Timestamp;
 
-/// Console output captured from a build, with the terminal width Bazel used and
-/// the structure needed to replay it over time.
+/// What a build event stream tells of the build that wrote it.
 pub struct BuildOutput {
+    /// The configurations the stream describes (its `Configuration` events).
+    pub configurations: Configurations,
     /// Terminal width in columns Bazel rendered for (`--terminal_columns`).
     pub columns: u16,
     /// stdout and stderr concatenated in stream order. `bazel build` writes
@@ -53,6 +53,7 @@ impl BuildOutput {
     /// test overrides.
     pub(crate) fn from_bytes(columns: u16, bytes: Vec<u8>) -> BuildOutput {
         BuildOutput {
+            configurations: Configurations::default(),
             columns,
             frames: vec![bytes.len()],
             bytes,
@@ -62,15 +63,20 @@ impl BuildOutput {
     }
 }
 
+/// The `ConfigurationId` of the null configuration, which unconfigurable
+/// targets such as source files carry.
+const NULL_CONFIGURATION: &str = "none";
+
 /// Width Bazel falls back to when no terminal is detected; see `--terminal_columns`.
 const DEFAULT_COLUMNS: u16 = 80;
 
-/// Parse the console output, terminal width, frame boundaries, and timestamp
-/// anchors from a build event binary stream.
+/// Read a whole build event binary stream. An event that does not decode fails
+/// the read.
 pub fn parse(mut stream: &[u8]) -> Result<BuildOutput, prost::DecodeError> {
     let mut bytes = Vec::new();
     let mut frames = Vec::new();
     let mut anchors = Vec::new();
+    let mut configurations = Configurations::default();
     let mut columns = None;
     let mut show_timestamps = false;
     while !stream.is_empty() {
@@ -90,6 +96,14 @@ pub fn parse(mut stream: &[u8]) -> Result<BuildOutput, prost::DecodeError> {
             Some(Payload::TestSummary(s)) => {
                 record(&mut anchors, frame, epoch_opt(s.last_stop_time))
             }
+            Some(Payload::Configuration(c)) => {
+                if let Some(Id::Configuration(id)) = event.id.and_then(|id| id.id)
+                    && !id.id.is_empty()
+                    && id.id != NULL_CONFIGURATION
+                {
+                    configurations.insert(id.id, c.mnemonic);
+                }
+            }
             Some(Payload::StructuredCommandLine(command_line)) => {
                 columns = columns.or_else(|| terminal_columns(&command_line));
                 show_timestamps |= show_timestamps_set(&command_line);
@@ -98,6 +112,7 @@ pub fn parse(mut stream: &[u8]) -> Result<BuildOutput, prost::DecodeError> {
         }
     }
     Ok(BuildOutput {
+        configurations,
         columns: columns.unwrap_or(DEFAULT_COLUMNS),
         bytes,
         frames,
@@ -151,6 +166,7 @@ fn show_timestamps_set(command_line: &CommandLine) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bep::build_event_stream::{self as bes, BuildEventId, build_event_id};
 
     // A real `--build_event_binary_file` from `bazel build … --terminal_columns=100`.
     const SAMPLE: &[u8] = include_bytes!("../testdata/sample.bep");
@@ -164,6 +180,48 @@ mod tests {
             output.bytes.contains(&0x1b),
             "expected ANSI escapes in output"
         );
+    }
+
+    /// A length-delimited `Configuration` event introducing `id`.
+    fn configuration_event(id: &str, mnemonic: &str) -> Vec<u8> {
+        BuildEvent {
+            id: Some(BuildEventId {
+                id: Some(Id::Configuration(build_event_id::ConfigurationId {
+                    id: id.into(),
+                })),
+            }),
+            payload: Some(Payload::Configuration(bes::Configuration {
+                mnemonic: mnemonic.into(),
+                ..Default::default()
+            })),
+            ..Default::default()
+        }
+        .encode_length_delimited_to_vec()
+    }
+
+    #[test]
+    fn reads_configurations_by_checksum() {
+        let output = parse(SAMPLE).expect("parse sample stream");
+        // The sample's two configurations share a mnemonic.
+        let target = "55817e2200e2f24b506d68c96928ed7b9fa185d1fb462c4f511796269d8d06d4";
+        let other = "91e24984663c795f7d9f904758d4b84ba1954389b2ab756f70a6f32db2a79020";
+        let known = &output.configurations;
+        assert_eq!(known.name(target).as_deref(), Some("k8-fastbuild 55817e"));
+        assert_eq!(known.name(other).as_deref(), Some("k8-fastbuild 91e249"));
+    }
+
+    #[test]
+    fn skips_a_configuration_event_that_names_no_configuration() {
+        let stream = [
+            configuration_event(NULL_CONFIGURATION, "null"),
+            configuration_event("", "unnamed"),
+            configuration_event("0c3d9a77", "k8-opt-exec"),
+        ]
+        .concat();
+        let known = parse(&stream).expect("parse stream").configurations;
+        assert_eq!(known.name(NULL_CONFIGURATION), None);
+        assert_eq!(known.name(""), None);
+        assert_eq!(known.name("0c3d9a77").as_deref(), Some("k8-opt-exec"));
     }
 
     #[test]

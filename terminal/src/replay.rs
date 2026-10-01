@@ -41,6 +41,7 @@ impl Replay {
             frames,
             anchors,
             show_timestamps,
+            ..
         } = output;
         // A build with no progress events still plays as a single frame holding
         // whatever output there is.
