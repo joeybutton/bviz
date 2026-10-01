@@ -17,6 +17,7 @@ use bviz_ui_graph_args::GraphSource;
 use gpui::{App, Context, Entity, EntityId, EventEmitter, Subscription, Task};
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
+use std::marker::PhantomData;
 use std::sync::{Arc, OnceLock};
 
 /// The graph a document holds, as it was read: whole, unfiltered, and shared by
@@ -97,9 +98,7 @@ pub(crate) struct Opening {
 pub(crate) struct Loaded {
     pub(crate) shared: Shared,
     pub(crate) opening: Opening,
-    /// Goes with the graph it measures, so a measuring still in flight when the
-    /// graph is replaced never lands.
-    measures: HashMap<Scope, Measure>,
+    measures: Passes<Measurement>,
     /// What the build of the graph's invocation reports of its nodes.
     statuses: Statuses,
     /// What the build of the graph's invocation reported, as the card over
@@ -123,7 +122,7 @@ impl Loaded {
         Self {
             shared,
             opening,
-            measures: HashMap::new(),
+            measures: Passes::default(),
             statuses: Statuses::default(),
             reported: Report::default(),
             taken_up: Revision::default(),
@@ -324,24 +323,52 @@ struct Deferred {
     _released: Subscription,
 }
 
-/// The loaded graph's metrics in `scope` have landed.
-pub(crate) struct MetricsLanded {
+/// The loaded graph's pass yielding a `T` in `scope` has landed.
+pub(crate) struct Landed<T> {
     pub(crate) scope: Scope,
+    _pass: PhantomData<fn() -> T>,
 }
+
+pub(crate) type MetricsLanded = Landed<Measurement>;
 
 /// The graph's other views may have another [`GraphModel::filter`] to draw
 /// through.
 pub(crate) struct FilterChanged;
 
-/// A graph's metrics in one scope, a pass over the whole graph that is only
-/// taken once a view drawing them asks for it.
-enum Measure {
-    Measuring {
-        /// Dropping it gives the measuring up: a pass not yet started never
-        /// runs, and one running lands nothing.
+/// A pass over the whole of a graph in one scope, which is only taken once a
+/// view drawing what it yields asks for it.
+enum Pass<T> {
+    Running {
+        /// Dropping it gives the pass up: one not yet started never runs, and
+        /// one running lands nothing.
         _work: Task<()>,
     },
-    Measured(Arc<Measurement>),
+    Done(Arc<T>),
+}
+
+/// A graph's passes of one kind, by scope. Goes with the graph they pass over,
+/// so a pass still running when the graph is replaced never lands.
+struct Passes<T>(HashMap<Scope, Pass<T>>);
+
+impl<T> Default for Passes<T> {
+    fn default() -> Self {
+        Self(HashMap::new())
+    }
+}
+
+impl<T> Passes<T> {
+    fn done(&self, scope: Scope) -> Option<&Arc<T>> {
+        match self.0.get(&scope)? {
+            Pass::Done(done) => Some(done),
+            Pass::Running { .. } => None,
+        }
+    }
+
+    /// Drops each pass running in a scope `wanted` leaves out.
+    fn forget_unwanted(&mut self, wanted: &[Scope]) {
+        self.0
+            .retain(|scope, pass| matches!(pass, Pass::Done(_)) || wanted.contains(scope));
+    }
 }
 
 /// A graph read for viewing, held apart from the panels drawing it so a view of
@@ -372,7 +399,7 @@ struct Joined {
 impl EventEmitter<SourceReplaced> for GraphModel {}
 impl EventEmitter<MapPlaced> for GraphModel {}
 impl EventEmitter<RevealRequested> for GraphModel {}
-impl EventEmitter<MetricsLanded> for GraphModel {}
+impl<T: 'static> EventEmitter<Landed<T>> for GraphModel {}
 impl EventEmitter<FilterChanged> for GraphModel {}
 
 impl GraphModel {
@@ -525,43 +552,57 @@ impl GraphModel {
     }
 
     /// Has the loaded graph measured off the UI thread in each scope of
-    /// `wanted` not yet asked for, emitting [`MetricsLanded`] as each lands, and
-    /// gives up measuring any other scope, whose pass would only hold the
-    /// workers from those wanted. Metrics already measured are kept. Does
-    /// nothing while the graph is still being read.
+    /// `wanted`, as [`Self::want`] does.
     pub(crate) fn want_metrics(&mut self, wanted: &[Scope], cx: &mut Context<Self>) {
-        let Source::Loaded(loaded) = &mut self.source else {
-            return;
-        };
-        forget_unwanted(&mut loaded.measures, wanted);
-        for &scope in wanted {
-            let Entry::Vacant(unasked) = loaded.measures.entry(scope) else {
-                continue;
-            };
-            let shared = loaded.shared.clone();
-            let work = load_in_background(
-                cx,
-                move || {
-                    let (base, facets) = (&shared.base, &shared.facets);
-                    let names = &shared.names;
-                    Arc::new(measure(base, names, facets, &shared.provenance, scope))
-                },
-                move |model, metrics, cx| {
-                    if let Source::Loaded(loaded) = &mut model.source {
-                        loaded.measures.insert(scope, Measure::Measured(metrics));
-                        cx.emit(MetricsLanded { scope });
-                    }
-                },
-            );
-            unasked.insert(Measure::Measuring { _work: work });
-        }
+        self.want(wanted, |loaded| &mut loaded.measures, measure, cx);
     }
 
     /// The loaded graph's metrics in `scope`, once measured.
     pub(crate) fn metrics(&self, scope: Scope) -> Option<&Arc<Measurement>> {
-        match self.loaded()?.measures.get(&scope)? {
-            Measure::Measured(metrics) => Some(metrics),
-            Measure::Measuring { .. } => None,
+        self.loaded()?.measures.done(scope)
+    }
+
+    /// Runs `pass` over the loaded graph off the UI thread in each scope of
+    /// `wanted` not yet asked for, keeping what it yields among the passes
+    /// `passes` picks out and emitting [`Landed`] as each lands, and gives up
+    /// any other scope's pass still running, which would only hold the workers
+    /// from those wanted. What a pass already yielded is kept. Does nothing
+    /// while the graph is still being read.
+    fn want<T: Send + Sync + 'static>(
+        &mut self,
+        wanted: &[Scope],
+        passes: fn(&mut Loaded) -> &mut Passes<T>,
+        pass: fn(&Graph, &Names, &Facets, &Provenance, Scope) -> T,
+        cx: &mut Context<Self>,
+    ) {
+        let Source::Loaded(loaded) = &mut self.source else {
+            return;
+        };
+        let shared = loaded.shared.clone();
+        let passes_of = passes(loaded);
+        passes_of.forget_unwanted(wanted);
+        for &scope in wanted {
+            let Entry::Vacant(unasked) = passes_of.0.entry(scope) else {
+                continue;
+            };
+            let shared = shared.clone();
+            let work = load_in_background(
+                cx,
+                move || {
+                    let (base, names, facets) = (&shared.base, &shared.names, &shared.facets);
+                    Arc::new(pass(base, names, facets, &shared.provenance, scope))
+                },
+                move |model, done, cx| {
+                    if let Source::Loaded(loaded) = &mut model.source {
+                        passes(loaded).0.insert(scope, Pass::Done(done));
+                        cx.emit(Landed::<T> {
+                            scope,
+                            _pass: PhantomData,
+                        });
+                    }
+                },
+            );
+            unasked.insert(Pass::Running { _work: work });
         }
     }
 
@@ -593,12 +634,6 @@ impl GraphModel {
             _ => None,
         }
     }
-}
-
-/// Drops each measuring of `measures` whose scope `wanted` leaves out.
-fn forget_unwanted(measures: &mut HashMap<Scope, Measure>, wanted: &[Scope]) {
-    measures
-        .retain(|scope, measure| matches!(measure, Measure::Measured(_)) || wanted.contains(scope));
 }
 
 #[cfg(test)]
@@ -753,37 +788,34 @@ mod tests {
         assert!(placement.placed().is_none());
     }
 
-    /// A scope no longer wanted stops being measured, but what was measured of
-    /// it stays for when it is wanted again.
+    /// A scope no longer wanted stops being passed over, but what a pass
+    /// yielded in it stays for when it is wanted again.
     #[test]
-    fn an_unwanted_measuring_is_dropped_and_a_landed_measure_kept() {
+    fn an_unwanted_pass_is_dropped_and_a_landed_one_kept() {
         let scope = |input: Input| Scope::new(Unit::Target, input.into()).unwrap();
         let (landed, dropped, kept) = (
             scope(Input::Query),
             scope(Input::Cquery),
             scope(Input::Aquery),
         );
-        let measuring = || Measure::Measuring {
+        let running = || Pass::Running {
             _work: Task::ready(()),
         };
-        let measured = Measure::Measured(Arc::new(Measurement {
+        let measured = Pass::Done(Arc::new(Measurement {
             scope: landed,
             points: Vec::new(),
             sizing: Sizing::FanIn,
         }));
-        let mut measures = HashMap::from([
+        let mut passes = Passes(HashMap::from([
             (landed, measured),
-            (dropped, measuring()),
-            (kept, measuring()),
-        ]);
+            (dropped, running()),
+            (kept, running()),
+        ]));
 
-        forget_unwanted(&mut measures, &[kept]);
+        passes.forget_unwanted(&[kept]);
 
-        assert!(matches!(measures.get(&landed), Some(Measure::Measured(_))));
-        assert!(!measures.contains_key(&dropped));
-        assert!(matches!(
-            measures.get(&kept),
-            Some(Measure::Measuring { .. })
-        ));
+        assert!(passes.done(landed).is_some());
+        assert!(!passes.0.contains_key(&dropped));
+        assert!(matches!(passes.0.get(&kept), Some(Pass::Running { .. })));
     }
 }
