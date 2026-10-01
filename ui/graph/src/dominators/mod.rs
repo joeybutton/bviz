@@ -7,6 +7,7 @@ mod paint;
 
 use crate::Palette;
 use crate::drag::DOUBLE_CLICK;
+use crate::hue::{Colouring, Hue, Swatch, legend_strip};
 use crate::model::{DominatorsLanded, FilterChanged, GraphModel, Shared, SourceReplaced};
 use crate::point::{identify, unit_names};
 use crate::toolbar::{busy, group};
@@ -27,6 +28,7 @@ use gpui::{
 };
 use icicle::{Cell, Holds};
 use paint::{MIN_CELL_WIDTH, Scene, point_name};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 /// The key context scoping the dominators panel's own bindings, so a key
@@ -63,6 +65,10 @@ pub struct DominatorsPanel {
     /// Evaluates the filter, absent while none is being evaluated, so that one
     /// evaluation runs at a time.
     fading: Option<Task<()>>,
+    /// The trees of the graph read coloured so far, by scope.
+    coloured: HashMap<Scope, Arc<Coloured>>,
+    /// Colours a tree landed, absent while none is being coloured.
+    drawing: Option<Task<()>>,
     /// Redraws as the graph is read.
     _changed: Subscription,
     _source_replaced: Subscription,
@@ -77,6 +83,8 @@ impl DominatorsPanel {
             view.drawn = None;
             view.fade = None;
             view.fading = None;
+            view.coloured.clear();
+            view.drawing = None;
             view.picker = unit_picker(&view.model, cx);
             view.compute(cx);
         });
@@ -97,6 +105,8 @@ impl DominatorsPanel {
             frame: None,
             fade: None,
             fading: None,
+            coloured: HashMap::new(),
+            drawing: None,
             _changed: changed,
             _source_replaced: source_replaced,
             _dominators_landed: dominators_landed,
@@ -167,38 +177,74 @@ impl DominatorsPanel {
         cx.notify();
     }
 
-    /// Draws the tree of the chosen scope from the whole build, where it has
-    /// landed and is not the one drawn. The tree drawn stays until then.
+    /// Draws the tree of the chosen scope from the whole build once it has
+    /// landed and been coloured, where it is not the one drawn. Colouring is a
+    /// pass over the whole tree, so it runs off the UI thread, one at a time,
+    /// and a colouring running draws again once it lands. The tree drawn stays
+    /// until then.
     fn redraw(&mut self, cx: &mut Context<Self>) {
         let Some(scope) = self.scope(cx) else {
-            return;
-        };
-        let model = self.model.read(cx);
-        let (Some(tree), Some(loaded)) = (model.dominators(scope), model.loaded()) else {
             return;
         };
         if self
             .drawn
             .as_ref()
-            .is_some_and(|drawn| Arc::ptr_eq(&drawn.tree, tree))
+            .is_some_and(|drawn| drawn.coloured.tree.scope() == scope)
         {
             return;
         }
-        self.drawn = Some(Drawn {
-            tree: Arc::clone(tree),
-            shared: loaded.shared.clone(),
-            focus: None,
-            hover: None,
-            press: None,
-        });
-        self.invalidate_canvas(cx);
+        if let Some(coloured) = self.coloured.get(&scope) {
+            self.drawn = Some(Drawn {
+                coloured: Arc::clone(coloured),
+                focus: None,
+                hover: None,
+                press: None,
+            });
+            self.invalidate_canvas(cx);
+            return;
+        }
+        if self.drawing.is_some() {
+            return;
+        }
+        let model = self.model.read(cx);
+        let (Some(tree), Some(loaded)) = (model.dominators(scope), model.loaded()) else {
+            return;
+        };
+        let (tree, shared) = (Arc::clone(tree), loaded.shared.clone());
+        self.drawing = Some(load_in_background(
+            cx,
+            move || {
+                let unit = tree.scope().unit();
+                let points = || (0..tree.total()).map(|node| (tree.id(node), tree.kind(node)));
+                let colouring = Colouring::of(unit, points().map(|(id, _)| id), &shared.facets);
+                let legend = colouring.legend(points(), &shared.facets);
+                Coloured {
+                    tree,
+                    shared,
+                    colouring: Arc::new(colouring),
+                    legend,
+                }
+            },
+            |view, coloured, cx| {
+                view.drawing = None;
+                let scope = coloured.tree.scope();
+                view.coloured.insert(scope, Arc::new(coloured));
+                view.redraw(cx);
+            },
+        ));
     }
 
     /// The cell a pointer at `at` is over, where the cells are drawn.
     fn cell_at(&self, at: Point<Pixels>) -> Option<Cell> {
         let (drawn, frame) = (self.drawn.as_ref()?, self.frame?);
         let focus = drawn.focus_node();
-        let cells = icicle::lay_out(&*drawn.tree, focus, frame.bounds, frame.row, MIN_CELL_WIDTH);
+        let cells = icicle::lay_out(
+            &*drawn.coloured.tree,
+            focus,
+            frame.bounds,
+            frame.row,
+            MIN_CELL_WIDTH,
+        );
         cells.into_iter().find(|cell| cell.rect.contains(&at))
     }
 
@@ -209,7 +255,7 @@ impl DominatorsPanel {
             return;
         };
         if drawn.focus_node() != node {
-            let focus = node.map(|node| Focus::on(&drawn.tree, node));
+            let focus = node.map(|node| Focus::on(&drawn.coloured.tree, node));
             self.refocus(focus, cx);
         }
     }
@@ -234,7 +280,7 @@ impl DominatorsPanel {
         if self
             .drawn
             .as_ref()
-            .is_some_and(|drawn| Arc::ptr_eq(&drawn.tree, tree))
+            .is_some_and(|drawn| Arc::ptr_eq(&drawn.coloured.tree, tree))
         {
             self.focus_on(node, cx);
         }
@@ -246,7 +292,7 @@ impl DominatorsPanel {
             return;
         };
         if let Some(focus) = drawn.focus_node() {
-            let up = drawn.tree.parent(focus);
+            let up = drawn.coloured.tree.parent(focus);
             self.focus_on(up, cx);
         }
     }
@@ -263,7 +309,7 @@ impl DominatorsPanel {
             Holds::Node(node) if drawn.focus_node() == Some(node) => self.focus_up(cx),
             Holds::Node(node) => self.focus_on(Some(node), cx),
             Holds::Rest { first, .. } => {
-                let dominator = drawn.tree.parent(first);
+                let dominator = drawn.coloured.tree.parent(first);
                 self.focus_on(dominator, cx);
             }
         }
@@ -284,7 +330,7 @@ impl DominatorsPanel {
                 drawn.press = match cell.map(|cell| cell.holds) {
                     None => Some(Press::Clear),
                     Some(Holds::Node(node)) => Some(Press::Point {
-                        id: drawn.tree.id(node),
+                        id: drawn.coloured.tree.id(node),
                         replaced: drawn.focus.clone(),
                     }),
                     Some(Holds::Build | Holds::Rest { .. }) => None,
@@ -320,7 +366,12 @@ impl DominatorsPanel {
                 *hover = cell.map(|cell| Hover {
                     cell,
                     at,
-                    lines: describe(&drawn.tree, cell.holds, focus, &drawn.shared),
+                    lines: describe(
+                        &drawn.coloured.tree,
+                        cell.holds,
+                        focus,
+                        &drawn.coloured.shared,
+                    ),
                 });
             }
         }
@@ -361,12 +412,20 @@ struct Fade {
     verdicts: Arc<Verdicts>,
 }
 
-/// A tree drawn, and how the reader has it drawn, which lasts only as long as
-/// the tree is drawn.
-struct Drawn {
+/// A tree landed, coloured: the hue of each of its points, and the legend
+/// naming the hues, which hold for as long as the graph read does.
+struct Coloured {
     tree: Arc<Dominators>,
     /// The graph whose points `tree` holds.
     shared: Shared,
+    colouring: Arc<Colouring>,
+    legend: Vec<(SharedString, Hue)>,
+}
+
+/// A tree drawn, and how the reader has it drawn, which lasts only as long as
+/// the tree is drawn.
+struct Drawn {
+    coloured: Arc<Coloured>,
     focus: Option<Focus>,
     hover: Option<Hover>,
     /// Where the first press of the last click landed.
@@ -546,8 +605,8 @@ impl Panel for DominatorsPanel {
         let status = model.source().status("No graph", |_| match &self.drawn {
             None => COMPUTING.into(),
             Some(drawn) => {
-                let many = unit_names(drawn.tree.scope().unit()).many;
-                format!("{} {many}", drawn.tree.total())
+                let many = unit_names(drawn.coloured.tree.scope().unit()).many;
+                format!("{} {many}", drawn.coloured.tree.total())
             }
         });
         Some(status.into())
@@ -581,19 +640,27 @@ impl Render for DominatorsPanel {
         }
         let drawn = self.drawn.as_ref();
         let root = root.children(self.picker.as_ref().map(|picker| {
-            let computing = drawn.is_some_and(|drawn| drawn.tree.scope() != picker.chosen(cx));
+            let computing =
+                drawn.is_some_and(|drawn| drawn.coloured.tree.scope() != picker.chosen(cx));
             let crumbs = drawn.and_then(|drawn| breadcrumb(drawn, &palette, cx));
             strip(picker, crumbs, computing, &palette)
         }));
         let Some(drawn) = drawn else {
             return root.child(centered_spinner(COMPUTING, &palette.colors));
         };
-        if drawn.tree.total() == 0 {
-            let many = unit_names(drawn.tree.scope().unit()).many;
+        if drawn.coloured.tree.total() == 0 {
+            let many = unit_names(drawn.coloured.tree.scope().unit()).many;
             let empty = format!("The graph holds no {many}.");
             return root.child(centered_notice(empty, &palette.colors));
         }
-        root.child(
+        let swatch = Swatch {
+            alpha: 1.0,
+            diameter: LEGEND_SWATCH,
+        };
+        // A legend of one hue names nothing the unit picked does not.
+        let legend = drawn.coloured.legend.len() > 1;
+        let legend = legend.then(|| legend_strip(&drawn.coloured.legend, swatch, [], &palette));
+        root.children(legend).child(
             div()
                 .id("dominators-icicle")
                 .relative()
@@ -630,14 +697,17 @@ fn strip(picker: &UnitPicker, crumbs: Option<Div>, computing: bool, palette: &Pa
         })
 }
 
+/// How wide a legend swatch is drawn.
+const LEGEND_SWATCH: Pixels = px(8.);
+
 /// The path from the whole build down to the focus of `drawn`, each step but
 /// the focus a click away; absent at the whole build. Where the path outgrows
 /// its room the dominators above the focus give way first, and the focus is
 /// cut short only once they are gone.
 fn breadcrumb(drawn: &Drawn, palette: &Palette, cx: &Context<DominatorsPanel>) -> Option<Div> {
     let focus = drawn.focus.as_ref()?;
-    let unit = drawn.tree.scope().unit();
-    let name = |node: u32| point_name(drawn.tree.id(node), unit, &drawn.shared);
+    let unit = drawn.coloured.tree.scope().unit();
+    let name = |node: u32| point_name(drawn.coloured.tree.id(node), unit, &drawn.coloured.shared);
     // A row whose steps shrink to fit it.
     let row = || div().flex().items_center().min_w_0().overflow_hidden();
     let crumb = |name: String| {
@@ -651,7 +721,7 @@ fn breadcrumb(drawn: &Drawn, palette: &Palette, cx: &Context<DominatorsPanel>) -
     let after = |step: AnyElement| row().gap_1().pl_1().child(separator()).child(step);
     let link = |index: usize, name: String, to: Option<u32>| {
         // A click landing once another tree is drawn names none of its nodes.
-        let tree = Arc::clone(&drawn.tree);
+        let tree = Arc::clone(&drawn.coloured.tree);
         crumb(name)
             .id(("dominators-crumb", index))
             .cursor_pointer()
@@ -751,10 +821,11 @@ impl Render for IcicleCanvas {
             let panel = parent.read(cx);
             let drawn = panel.drawn.as_ref()?;
             Some(Scene {
+                colouring: Arc::clone(&drawn.coloured.colouring),
                 verdicts: panel.fade.as_ref().map(|fade| Arc::clone(&fade.verdicts)),
-                tree: Arc::clone(&drawn.tree),
+                tree: Arc::clone(&drawn.coloured.tree),
                 focus: drawn.focus_node(),
-                shared: drawn.shared.clone(),
+                shared: drawn.coloured.shared.clone(),
                 palette,
             })
         });

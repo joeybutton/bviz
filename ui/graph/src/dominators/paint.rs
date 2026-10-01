@@ -3,6 +3,7 @@
 
 use super::icicle::{self, Cell, Holds};
 use crate::Palette;
+use crate::hue::Colouring;
 use crate::model::Shared;
 use crate::paint::UNMARKED_FADE;
 use crate::point::{mnemonic, point_label, unit_names};
@@ -48,6 +49,7 @@ pub(crate) fn row_height(window: &Window) -> Pixels {
 /// borrow of the panel.
 pub(crate) struct Scene {
     pub(crate) tree: Arc<Dominators>,
+    pub(crate) colouring: Arc<Colouring>,
     pub(crate) focus: Option<u32>,
     pub(crate) shared: Shared,
     /// The verdict of the filter the cells are faded by on each node, absent
@@ -146,7 +148,11 @@ fn fill(scene: &Scene, holds: Holds) -> Rgba {
     let palette = &scene.palette;
     match holds {
         Holds::Build => palette.package,
-        Holds::Node(node) => palette.kind_accent(scene.tree.kind(node)),
+        Holds::Node(node) => {
+            let (tree, facets) = (&scene.tree, &scene.shared.facets);
+            let hue = scene.colouring.hue(tree.id(node), tree.kind(node), facets);
+            hue.color(palette)
+        }
         Holds::Rest { .. } => mix(palette.data.neutral, palette.background, REST_RECEDE),
     }
 }
