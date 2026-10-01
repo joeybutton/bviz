@@ -1,6 +1,6 @@
 //! The command line of the window that shows every kind of Bazel build
 //! document: the three viewers' flag fragments joined into one parser, and the
-//! documents an invocation resolves to. It names no window and draws nothing,
+//! documents a command line resolves to. It names no window and draws nothing,
 //! so a parse can be exercised without a display.
 
 use bviz_ui_console_args::{ConsoleArgs, ConsoleSource};
@@ -25,14 +25,15 @@ pub struct Cli {
     pub console: ConsoleArgs,
 }
 
-/// The flags of [`Cli`] that name a document, for the invocation that gives none.
+/// The flags of [`Cli`] that name a document, for the command line that gives
+/// none.
 const SOURCE_FLAGS: &str = "--aquery, --cquery, --query, --profile or --bep";
 
 impl Cli {
-    /// The documents this invocation names, graph first and each repeatable
+    /// The documents this command line names, graph first and each repeatable
     /// flag's in the order given.
     ///
-    /// The rejection of an invocation naming none is written out here rather
+    /// The rejection of a command line naming none is written out here rather
     /// than left to a clap argument group, because these fragments are shared
     /// with the per-viewer binaries, where a different flag is the required one.
     pub fn sources(self) -> Result<Sources, clap::Error> {
@@ -63,7 +64,7 @@ pub enum Source {
     Console(ConsoleSource),
 }
 
-/// The documents an invocation names, in the order a window shows them: the
+/// The documents a command line names, in the order a window shows them: the
 /// one graph its graph flags describe, where it gives any, then each repeatable
 /// flag's in the order given. Either way it names at least one: a window with
 /// no document to show is a usage mistake, refused before any window opens.
@@ -118,7 +119,7 @@ mod tests {
     /// missing required argument — which is what fixes the exit code the shell
     /// sees.
     #[test]
-    fn an_invocation_naming_no_document_is_a_usage_error() {
+    fn a_command_line_naming_no_document_is_a_usage_error() {
         let err = sources(&[]).expect_err("no document was named");
         assert_eq!(err.kind(), ErrorKind::MissingRequiredArgument);
         assert!(
