@@ -13,7 +13,7 @@ bazel_dep(name = "rules_rs", version = "0.0.112")
 bazel_dep(name = "tar.bzl", version = "0.10.4")
 
 # System libraries for gpui's Wayland backend, provided via the BCR.
-bazel_dep(name = "libffi", version = "3.4.7.bcr.3")
+bazel_dep(name = "libffi", version = "3.4.7.bcr.5")
 bazel_dep(name = "wayland", version = "1.24.0.bcr.1")
 bazel_dep(name = "xkbcommon", version = "1.9.2.bcr.beta.1")
 
