@@ -7,21 +7,23 @@ mod paint;
 
 use crate::Palette;
 use crate::drag::DOUBLE_CLICK;
-use crate::model::{DominatorsLanded, GraphModel, Shared, SourceReplaced};
+use crate::model::{DominatorsLanded, FilterChanged, GraphModel, Shared, SourceReplaced};
 use crate::point::{identify, unit_names};
 use crate::toolbar::{busy, group};
 use crate::unit_picker::UnitPicker;
 use bviz_graph_layout::Id;
 use bviz_graph_layout::dominators::Dominators;
 use bviz_graph_layout::metrics::Scope;
+use bviz_graph_layout::select::{Filter, Verdicts};
 use bviz_ui_components::{
-    Toolbar, TooltipColors, cached_layer, centered_notice, centered_spinner, paint_tooltip_box,
+    Toolbar, TooltipColors, cached_layer, centered_notice, centered_spinner, load_in_background,
+    paint_tooltip_box,
 };
 use bviz_ui_workspace::{Panel, PanelEvent, PanelKind, ViewKind};
 use gpui::{
     AnyElement, App, Bounds, ClickEvent, Context, Div, Entity, EventEmitter, FocusHandle,
     Focusable, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, Pixels, Point, Render,
-    SharedString, Subscription, WeakEntity, Window, canvas, div, prelude::*, px, relative,
+    SharedString, Subscription, Task, WeakEntity, Window, canvas, div, prelude::*, px, relative,
 };
 use icicle::{Cell, Holds};
 use paint::{MIN_CELL_WIDTH, Scene, point_name};
@@ -54,10 +56,18 @@ pub struct DominatorsPanel {
     /// Where the cells were last laid out, which a pointer is resolved
     /// against.
     frame: Option<Frame>,
+    /// How the filter the graph's other views draw through takes the nodes of
+    /// the graph read, from the time it is evaluated; absent while no filter
+    /// is drawn through.
+    fade: Option<Fade>,
+    /// Evaluates the filter, absent while none is being evaluated, so that one
+    /// evaluation runs at a time.
+    fading: Option<Task<()>>,
     /// Redraws as the graph is read.
     _changed: Subscription,
     _source_replaced: Subscription,
     _dominators_landed: Subscription,
+    _filter_changed: Subscription,
 }
 
 impl DominatorsPanel {
@@ -65,6 +75,8 @@ impl DominatorsPanel {
         let changed = cx.observe(&model, |_, _, cx| cx.notify());
         let source_replaced = cx.subscribe(&model, |view, _, _: &SourceReplaced, cx| {
             view.drawn = None;
+            view.fade = None;
+            view.fading = None;
             view.picker = unit_picker(&view.model, cx);
             view.compute(cx);
         });
@@ -73,6 +85,7 @@ impl DominatorsPanel {
                 view.redraw(cx);
             }
         });
+        let filter_changed = cx.subscribe(&model, |view, _, _: &FilterChanged, cx| view.refade(cx));
         let parent = cx.entity().downgrade();
         Self {
             focus_handle: cx.focus_handle(),
@@ -82,9 +95,12 @@ impl DominatorsPanel {
             drawn: None,
             canvas: cx.new(|_| IcicleCanvas { parent }),
             frame: None,
+            fade: None,
+            fading: None,
             _changed: changed,
             _source_replaced: source_replaced,
             _dominators_landed: dominators_landed,
+            _filter_changed: filter_changed,
         }
     }
 
@@ -102,6 +118,47 @@ impl DominatorsPanel {
         self.model
             .update(cx, |model, cx| model.want_dominators(&[scope], cx));
         self.redraw(cx);
+        self.refade(cx);
+    }
+
+    /// Evaluates the filter the graph's other views draw through, where the
+    /// panel is shown and that is not the filter the cells are faded by. The
+    /// filter is evaluated over every node of the graph, so this runs off the
+    /// UI thread, and an evaluation running evaluates again once it lands.
+    fn refade(&mut self, cx: &mut Context<Self>) {
+        if !self.shown || self.fading.is_some() {
+            return;
+        }
+        let model = self.model.read(cx);
+        let Some(loaded) = model.loaded() else {
+            return;
+        };
+        let wanted = model.filter().cloned();
+        if self.fade.as_ref().map(|fade| &fade.filter) == wanted.as_ref() {
+            return;
+        }
+        let shared = loaded.shared.clone();
+        let Some(filter) = wanted else {
+            self.fade = None;
+            self.invalidate_canvas(cx);
+            return;
+        };
+        self.fading = Some(load_in_background(
+            cx,
+            move || {
+                let verdicts = filter.evaluate(&shared.base, &shared.names, &shared.facets);
+                Fade {
+                    filter,
+                    verdicts: Arc::new(verdicts),
+                }
+            },
+            |view, fade, cx| {
+                view.fading = None;
+                view.fade = Some(fade);
+                view.invalidate_canvas(cx);
+                view.refade(cx);
+            },
+        ));
     }
 
     /// Draws the unit chosen.
@@ -295,6 +352,13 @@ fn unit_picker(
 ) -> Option<UnitPicker> {
     let inputs = model.read(cx).loaded()?.shared.inputs;
     UnitPicker::new("dominators-unit", inputs, DominatorsPanel::choose, cx)
+}
+
+/// How the cells are faded, kept with the filter it was evaluated from so a
+/// filter that changes is told apart from the one the cells are faded by.
+struct Fade {
+    filter: Filter,
+    verdicts: Arc<Verdicts>,
 }
 
 /// A tree drawn, and how the reader has it drawn, which lasts only as long as
@@ -684,8 +748,10 @@ impl Render for IcicleCanvas {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let palette = Palette::from_theme(&bviz_ui_theme::theme(window, cx));
         let scene = self.parent.upgrade().and_then(|parent| {
-            let drawn = parent.read(cx).drawn.as_ref()?;
+            let panel = parent.read(cx);
+            let drawn = panel.drawn.as_ref()?;
             Some(Scene {
+                verdicts: panel.fade.as_ref().map(|fade| Arc::clone(&fade.verdicts)),
                 tree: Arc::clone(&drawn.tree),
                 focus: drawn.focus_node(),
                 shared: drawn.shared.clone(),

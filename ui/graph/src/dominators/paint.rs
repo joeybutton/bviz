@@ -4,10 +4,12 @@
 use super::icicle::{self, Cell, Holds};
 use crate::Palette;
 use crate::model::Shared;
+use crate::paint::UNMARKED_FADE;
 use crate::point::{mnemonic, point_label, unit_names};
 use bviz_graph_layout::Id;
 use bviz_graph_layout::dominators::Dominators;
 use bviz_graph_layout::metrics::Unit;
+use bviz_graph_layout::select::{Verdict, Verdicts};
 use bviz_ui_assets::shape_line;
 use bviz_ui_components::{LabelBoxStyle, paint_labeled_box};
 use bviz_ui_theme::{label_on, mix};
@@ -48,6 +50,9 @@ pub(crate) struct Scene {
     pub(crate) tree: Arc<Dominators>,
     pub(crate) focus: Option<u32>,
     pub(crate) shared: Shared,
+    /// The verdict of the filter the cells are faded by on each node, absent
+    /// where none fades them.
+    pub(crate) verdicts: Option<Arc<Verdicts>>,
     pub(crate) palette: Palette,
 }
 
@@ -82,7 +87,26 @@ pub(crate) fn paint_icicle(
             }
             holds => cell_name(&scene.tree, &scene.shared, holds),
         };
-        paint_labeled_box(rect, fill.into(), &name, label, style, window, cx);
+        let strength = match cell.holds {
+            Holds::Node(node) if faded(scene, scene.tree.id(node)) => UNMARKED_FADE,
+            _ => 1.0,
+        };
+        paint_labeled_box(
+            rect,
+            Rgba {
+                a: fill.a * strength,
+                ..fill
+            }
+            .into(),
+            &name,
+            Hsla {
+                a: label.a * strength,
+                ..label
+            },
+            style,
+            window,
+            cx,
+        );
     }
 }
 
@@ -107,6 +131,15 @@ pub(crate) fn paint_ring(cell: &Cell, palette: &Palette, window: &mut Window) {
         palette.label,
         BorderStyle::Solid,
     ));
+}
+
+/// Whether the filter fading the cells of `scene` draws the node `id` as no
+/// part of what it selects.
+fn faded(scene: &Scene, id: Id) -> bool {
+    scene
+        .verdicts
+        .as_ref()
+        .is_some_and(|verdicts| matches!(verdicts.get(id), Verdict::Hidden | Verdict::Faded))
 }
 
 fn fill(scene: &Scene, holds: Holds) -> Rgba {
