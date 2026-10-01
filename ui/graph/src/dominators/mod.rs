@@ -26,8 +26,8 @@ use gpui::{
     Focusable, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, Pixels, Point, Render,
     SharedString, Subscription, Task, WeakEntity, Window, canvas, div, prelude::*, px, relative,
 };
-use icicle::{Cell, Holds};
-use paint::{MIN_CELL_WIDTH, Scene, point_name};
+use icicle::{Cell, Holds, Run};
+use paint::{MIN_CELL_WIDTH, Scene, cell_name, point_name, run_name};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -237,10 +237,9 @@ impl DominatorsPanel {
     /// The cell a pointer at `at` is over, where the cells are drawn.
     fn cell_at(&self, at: Point<Pixels>) -> Option<Cell> {
         let (drawn, frame) = (self.drawn.as_ref()?, self.frame?);
-        let focus = drawn.focus_node();
         let cells = icicle::lay_out(
             &*drawn.coloured.tree,
-            focus,
+            drawn.top(),
             frame.bounds,
             frame.row,
             MIN_CELL_WIDTH,
@@ -248,14 +247,14 @@ impl DominatorsPanel {
         cells.into_iter().find(|cell| cell.rect.contains(&at))
     }
 
-    /// Draws the icicle from `node`, or from the whole build where there is
+    /// Draws the icicle from `on`, or from the whole build where there is
     /// none, and describes the cell that brings under the pointer.
-    fn focus_on(&mut self, node: Option<u32>, cx: &mut Context<Self>) {
+    fn focus_on(&mut self, on: Option<Focused>, cx: &mut Context<Self>) {
         let Some(drawn) = &self.drawn else {
             return;
         };
-        if drawn.focus_node() != node {
-            let focus = node.map(|node| Focus::on(&drawn.coloured.tree, node));
+        if drawn.focused() != on {
+            let focus = on.map(|on| Focus::on(&drawn.coloured.tree, on));
             self.refocus(focus, cx);
         }
     }
@@ -282,36 +281,31 @@ impl DominatorsPanel {
             .as_ref()
             .is_some_and(|drawn| Arc::ptr_eq(&drawn.coloured.tree, tree))
         {
-            self.focus_on(node, cx);
+            self.focus_on(node.map(Focused::Node), cx);
         }
     }
 
-    /// Draws the icicle from the dominator of the focus.
+    /// Draws the icicle from the dominator the focus stands under.
     fn focus_up(&mut self, cx: &mut Context<Self>) {
         let Some(drawn) = &self.drawn else {
             return;
         };
-        if let Some(focus) = drawn.focus_node() {
-            let up = drawn.coloured.tree.parent(focus);
-            self.focus_on(up, cx);
+        if let Some(on) = drawn.focused() {
+            let up = on.parent(&drawn.coloured.tree);
+            self.focus_on(up.map(Focused::Node), cx);
         }
     }
 
-    /// Focuses what a click on the cell holding `holds` asks for: the point it
-    /// holds, the dominator of the focus where it holds the focus, and the
-    /// dominator of the siblings it gathers.
+    /// Focuses what a click on the cell holding `holds` asks for: what it
+    /// holds, or the dominator above where it is the cell on top.
     fn click_cell(&mut self, holds: Holds, cx: &mut Context<Self>) {
         let Some(drawn) = &self.drawn else {
             return;
         };
-        match holds {
-            Holds::Build => {}
-            Holds::Node(node) if drawn.focus_node() == Some(node) => self.focus_up(cx),
-            Holds::Node(node) => self.focus_on(Some(node), cx),
-            Holds::Rest { first, .. } => {
-                let dominator = drawn.coloured.tree.parent(first);
-                self.focus_on(dominator, cx);
-            }
+        if holds == drawn.top() {
+            self.focus_up(cx);
+        } else {
+            self.focus_on(Focused::of(holds), cx);
         }
     }
 
@@ -333,7 +327,7 @@ impl DominatorsPanel {
                         id: drawn.coloured.tree.id(node),
                         replaced: drawn.focus.clone(),
                     }),
-                    Some(Holds::Build | Holds::Rest { .. }) => None,
+                    Some(Holds::Build | Holds::Rest(_)) => None,
                 };
                 if let Some(cell) = cell {
                     self.click_cell(cell.holds, cx);
@@ -358,7 +352,7 @@ impl DominatorsPanel {
         let Some(drawn) = &mut self.drawn else {
             return;
         };
-        let focus = drawn.focus_node();
+        let focus = drawn.focused();
         match (&mut drawn.hover, cell) {
             (Some(hover), Some(cell)) if hover.cell == cell => hover.at = at,
             (None, None) => return,
@@ -433,8 +427,64 @@ struct Drawn {
 }
 
 impl Drawn {
-    fn focus_node(&self) -> Option<u32> {
-        self.focus.as_ref().map(|focus| focus.node)
+    fn focused(&self) -> Option<Focused> {
+        self.focus.as_ref().map(|focus| focus.on)
+    }
+
+    /// What the cell on top holds.
+    fn top(&self) -> Holds {
+        self.focused().map_or(Holds::Build, Focused::holds)
+    }
+}
+
+/// What the icicle is drawn from short of the whole build.
+#[derive(Clone, Copy, PartialEq)]
+enum Focused {
+    Node(u32),
+    Run(Run),
+}
+
+impl Focused {
+    /// What focusing the cell holding `holds` draws from; none for the whole
+    /// build.
+    fn of(holds: Holds) -> Option<Self> {
+        match holds {
+            Holds::Build => None,
+            Holds::Node(node) => Some(Self::Node(node)),
+            Holds::Rest(run) => Some(Self::Run(run)),
+        }
+    }
+
+    fn holds(self) -> Holds {
+        match self {
+            Self::Node(node) => Holds::Node(node),
+            Self::Run(run) => Holds::Rest(run),
+        }
+    }
+
+    /// The dominator this stands under in `tree`, or none under the whole
+    /// build.
+    fn parent(self, tree: &Dominators) -> Option<u32> {
+        match self {
+            Self::Node(node) => tree.parent(node),
+            Self::Run(run) => run.parent(),
+        }
+    }
+
+    /// The points of `tree` this stands over.
+    fn weight(self, tree: &Dominators) -> u32 {
+        match self {
+            Self::Node(node) => tree.weight(node),
+            Self::Run(run) => run.weight(),
+        }
+    }
+
+    /// How a tooltip or the breadcrumb names this in `tree`.
+    fn name(self, tree: &Dominators, shared: &Shared) -> String {
+        match self {
+            Self::Node(node) => point_name(tree.id(node), tree.scope().unit(), shared),
+            Self::Run(run) => run_name(tree, shared, run),
+        }
     }
 }
 
@@ -442,8 +492,8 @@ impl Drawn {
 /// names taken once as the focus is set.
 #[derive(Clone)]
 struct Focus {
-    node: u32,
-    /// Top first, those nearest `node` at most [`CRUMBS`] of them.
+    on: Focused,
+    /// Top first, those nearest `on` at most [`CRUMBS`] of them.
     above: Vec<u32>,
     /// Whether more dominators stand above those of `above`.
     elided: bool,
@@ -453,18 +503,14 @@ struct Focus {
 const CRUMBS: usize = 4;
 
 impl Focus {
-    fn on(tree: &Dominators, node: u32) -> Self {
+    fn on(tree: &Dominators, on: Focused) -> Self {
         let mut above: Vec<u32> = Vec::with_capacity(CRUMBS + 1);
-        let up = std::iter::successors(tree.parent(node), |&above| tree.parent(above));
+        let up = std::iter::successors(on.parent(tree), |&above| tree.parent(above));
         above.extend(up.take(CRUMBS + 1));
         let elided = above.len() > CRUMBS;
         above.truncate(CRUMBS);
         above.reverse();
-        Self {
-            node,
-            above,
-            elided,
-        }
+        Self { on, above, elided }
     }
 }
 
@@ -502,7 +548,12 @@ const TOOLTIP_LINES: usize = 9;
 /// What the tooltip over the cell holding `holds` of `tree` drawn from `focus`
 /// reads: what it stands for, and how much of the build exists only because
 /// of it.
-fn describe(tree: &Dominators, holds: Holds, focus: Option<u32>, shared: &Shared) -> Vec<String> {
+fn describe(
+    tree: &Dominators,
+    holds: Holds,
+    focus: Option<Focused>,
+    shared: &Shared,
+) -> Vec<String> {
     let unit = tree.scope().unit();
     let names = unit_names(unit);
     let points = |count: u32| match count {
@@ -513,19 +564,20 @@ fn describe(tree: &Dominators, holds: Holds, focus: Option<u32>, shared: &Shared
         let exist = if weight == 1 { "exists" } else { "exist" };
         format!("{} {exist} only because of {on}", points(weight))
     };
-    let shares = |weight: u32, within: Option<u32>| {
+    let shares = |weight: u32, within: Option<Focused>| {
         let of_build = format!("{} of the build", share(weight, tree.total()));
         match within {
             Some(within) => {
-                let name = point_name(tree.id(within), unit, shared);
+                let name = within.name(tree, shared);
                 format!(
                     "{of_build} · {} of {name}",
-                    share(weight, tree.weight(within))
+                    share(weight, within.weight(tree))
                 )
             }
             None => of_build,
         }
     };
+    let on_top = Focused::of(holds) == focus;
     let mut lines = Vec::with_capacity(TOOLTIP_LINES);
     match holds {
         Holds::Build => lines.extend([WHOLE_BUILD.to_owned(), points(tree.total())]),
@@ -533,42 +585,48 @@ fn describe(tree: &Dominators, holds: Holds, focus: Option<u32>, shared: &Shared
             identify(tree.id(node), tree.kind(node), unit, shared, &mut lines);
             let weight = tree.weight(node);
             lines.push(stand_on(weight, "this"));
-            let is_focus = focus == Some(node);
-            lines.push(shares(weight, focus.filter(|_| !is_focus)));
+            lines.push(shares(weight, focus.filter(|_| !on_top)));
             let dominator = match tree.parent(node) {
                 Some(parent) => point_name(tree.id(parent), unit, shared),
                 None => WHOLE_BUILD.to_owned(),
             };
             lines.push(format!("immediately dominated by {dominator}"));
         }
-        Holds::Rest { count, weight, .. } => {
-            lines.push(format!("{} too narrow to draw apart", points(count)));
+        Holds::Rest(run) => {
+            let (count, weight) = (run.count(), run.weight());
+            lines.push(match on_top {
+                true => run_name(tree, shared, run),
+                false => format!("{} too narrow to draw apart", points(count)),
+            });
             lines.push(stand_on(weight, if count == 1 { "it" } else { "them" }));
-            lines.push(shares(weight, focus));
+            lines.push(shares(weight, focus.filter(|_| !on_top)));
         }
     }
     lines
 }
 
-/// What a click on the cell holding `holds` drawn from `focus` does, and a
-/// double click where a graph panel `reveals` the point; absent where a click
-/// does nothing.
-fn gesture(holds: Holds, focus: Option<u32>, reveals: bool) -> Option<String> {
-    let Holds::Node(node) = holds else {
-        return None;
+/// What a click on the cell holding `holds` under `top` does, and a double
+/// click where it holds a point and a graph panel `reveals` it; absent where a
+/// click does nothing.
+fn gesture(holds: Holds, top: Holds, reveals: bool) -> Option<String> {
+    let click = match holds {
+        Holds::Build => return None,
+        _ if holds == top => FOCUS_UP,
+        Holds::Node(_) => FOCUS,
+        Holds::Rest(_) => OPEN,
     };
-    let click = if focus == Some(node) { FOCUS_UP } else { FOCUS };
-    Some(match reveals {
-        true => format!("{click} · {REVEAL}"),
-        false => click.to_owned(),
+    Some(match (holds, reveals) {
+        (Holds::Node(_), true) => format!("{click} · {REVEAL}"),
+        _ => click.to_owned(),
     })
 }
 
 /// How a cell names the whole build.
 const WHOLE_BUILD: &str = "the whole build";
 
-/// What a click on a cell does, there and on the cell of the focus.
+/// What a click on a cell does: on a point, on a run, and on the cell on top.
 const FOCUS: &str = "click to focus";
+const OPEN: &str = "click to open";
 const FOCUS_UP: &str = "click or Backspace to go up a level";
 const REVEAL: &str = "double-click to show in the graph";
 
@@ -740,7 +798,12 @@ fn breadcrumb(drawn: &Drawn, palette: &Palette, cx: &Context<DominatorsPanel>) -
             link(index + 1, name(node), Some(node)).into_any_element(),
         ));
     }
-    let last = after(crumb(name(focus.node)).into_any_element())
+    let focused = cell_name(
+        &drawn.coloured.tree,
+        &drawn.coloured.shared,
+        focus.on.holds(),
+    );
+    let last = after(crumb(focused).into_any_element())
         .flex_shrink_0()
         .max_w(relative(1.));
     Some(
@@ -797,7 +860,7 @@ fn hover_layer(view: Entity<DominatorsPanel>, palette: Palette) -> impl IntoElem
         // Read as it is painted, since a graph panel opening or closing
         // repaints the tooltip without the pointer moving.
         let reveals = panel.model.read(cx).reveals();
-        let gesture = gesture(cell.holds, drawn.focus_node(), reveals);
+        let gesture = gesture(cell.holds, drawn.top(), reveals);
         let lines: Vec<String> = lines.iter().cloned().chain(gesture).collect();
         let (cell, at) = (*cell, *at);
         paint::paint_ring(&cell, &palette, window);
@@ -824,7 +887,7 @@ impl Render for IcicleCanvas {
                 colouring: Arc::clone(&drawn.coloured.colouring),
                 verdicts: panel.fade.as_ref().map(|fade| Arc::clone(&fade.verdicts)),
                 tree: Arc::clone(&drawn.coloured.tree),
-                focus: drawn.focus_node(),
+                top: drawn.top(),
                 shared: drawn.coloured.shared.clone(),
                 palette,
             })

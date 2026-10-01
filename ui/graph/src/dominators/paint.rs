@@ -1,7 +1,7 @@
 //! Painting the icicle: each cell a box filled for what it holds and named
 //! where it is wide enough to read.
 
-use super::icicle::{self, Cell, Holds};
+use super::icicle::{self, Cell, Holds, Run};
 use crate::Palette;
 use crate::hue::Colouring;
 use crate::model::Shared;
@@ -50,7 +50,8 @@ pub(crate) fn row_height(window: &Window) -> Pixels {
 pub(crate) struct Scene {
     pub(crate) tree: Arc<Dominators>,
     pub(crate) colouring: Arc<Colouring>,
-    pub(crate) focus: Option<u32>,
+    /// What the cell spanning the top row holds.
+    pub(crate) top: Holds,
     pub(crate) shared: Shared,
     /// The verdict of the filter the cells are faded by on each node, absent
     /// where none fades them.
@@ -73,21 +74,22 @@ pub(crate) fn paint_icicle(
         text_pad: TEXT_PAD,
     };
     let row = row_height(window);
-    let cells = icicle::lay_out(&*scene.tree, scene.focus, bounds, row, MIN_CELL_WIDTH);
-    for cell in cells {
+    let cells = icicle::lay_out(&*scene.tree, scene.top, bounds, row, MIN_CELL_WIDTH);
+    for (index, cell) in cells.into_iter().enumerate() {
         let fill = fill(scene, cell.holds);
         let (rect, label) = (drawn_rect(&cell), label_on(fill));
-        let name = match cell.holds {
+        let name = match (index, cell.holds) {
             _ if cell.rect.size.width < LABEL_MIN_WIDTH => String::new(),
-            Holds::Rest { count, .. } => {
+            (0, Holds::Rest(run)) => run_name(&scene.tree, &scene.shared, run),
+            (_, Holds::Rest(run)) => {
                 let (room, font_size) = style.label_room(rect);
                 let font = bviz_ui_assets::text_metrics(window).font;
-                rest_name(count, room, |text| {
+                rest_name(run.count(), room, |text| {
                     let line = shape_line(window, text.to_owned(), font.clone(), font_size, label);
                     f32::from(line.width())
                 })
             }
-            holds => cell_name(&scene.tree, &scene.shared, holds),
+            (_, holds) => cell_name(&scene.tree, &scene.shared, holds),
         };
         let strength = match cell.holds {
             Holds::Node(node) if faded(scene, scene.tree.id(node)) => UNMARKED_FADE,
@@ -153,7 +155,7 @@ fn fill(scene: &Scene, holds: Holds) -> Rgba {
             let hue = scene.colouring.hue(tree.id(node), tree.kind(node), facets);
             hue.color(palette)
         }
-        Holds::Rest { .. } => mix(palette.data.neutral, palette.background, REST_RECEDE),
+        Holds::Rest(_) => mix(palette.data.neutral, palette.background, REST_RECEDE),
     }
 }
 
@@ -163,7 +165,20 @@ pub(crate) fn cell_name(tree: &Dominators, shared: &Shared, holds: Holds) -> Str
     match holds {
         Holds::Build => format!("whole build · {} {many}", tree.total()),
         Holds::Node(node) => point_name(tree.id(node), tree.scope().unit(), shared),
-        Holds::Rest { count, .. } => format!("{count} more"),
+        Holds::Rest(run) => format!("{} more", run.count()),
+    }
+}
+
+/// What a run of `tree` drawn on top reads, naming the dominator its siblings
+/// stand under.
+pub(crate) fn run_name(tree: &Dominators, shared: &Shared, run: Run) -> String {
+    let count = run.count();
+    match run.parent() {
+        Some(parent) => {
+            let parent = point_name(tree.id(parent), tree.scope().unit(), shared);
+            format!("{count} more under {parent}")
+        }
+        None => format!("{count} more tops"),
     }
 }
 
