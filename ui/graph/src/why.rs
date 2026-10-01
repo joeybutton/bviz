@@ -567,7 +567,7 @@ fn chain<'a>(
                         .into_any_element()
                     }))
                     .children((position > 0 && link.crossing.is_none()).then(|| {
-                        bviz_ui_assets::icon("caret-down")
+                        bviz_ui_assets::icon("arrow-down")
                             .size(LINK_MARK)
                             .text_color(palette.colors.text_muted)
                             .into_any_element()
@@ -664,6 +664,10 @@ pub(crate) fn card(
             .child(line(status))
             .children(unmarked.map(|unmarked| div().min_w_0().child(unmarked)))
             .children(map_note.map(|note| div().min_w_0().child(note)))
+            .children(
+                (!links.is_empty())
+                    .then(|| line("shortest:").text_color(palette.colors.text_muted)),
+            )
             .children(chain(&links, &spelling, palette)),
     )
 }
