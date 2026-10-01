@@ -169,10 +169,6 @@ const COUNTERS_COLLAPSED_HEIGHT: f32 = 14.0;
 /// unsteady hand.
 const COUNTERS_SNAP_SLOP: f32 = 16.0;
 
-/// Height of a panel's toolbar band, giving its chips and controls a line to sit
-/// on with room around them.
-const PANEL_TOOLBAR_HEIGHT: f32 = 28.0;
-
 /// Width of the open tracks visibility menu and the tallest its track list grows
 /// before it scrolls.
 const TRACKS_MENU_WIDTH: f32 = 280.0;
@@ -470,7 +466,6 @@ pub(crate) fn time_window_chip(
             .flex_row()
             .items_center()
             .gap_1()
-            .my_1()
             .pl_2()
             .flex_shrink_0()
             .rounded_md()
@@ -491,22 +486,6 @@ pub(crate) fn time_window_chip(
                 .icon("x"),
             ),
     )
-}
-
-/// The bar a panel of the trace document carries its chips and controls on.
-pub(crate) fn panel_toolbar(palette: Palette) -> Div {
-    div()
-        .flex()
-        .flex_row()
-        .items_center()
-        .flex_shrink_0()
-        .gap_4()
-        .px_2()
-        .h(px(PANEL_TOOLBAR_HEIGHT))
-        .overflow_hidden()
-        .bg(palette.header_band)
-        .border_b_1()
-        .border_color(palette.divider)
 }
 
 /// What the window chrome says about the loaded document, the same from whichever

@@ -3,15 +3,16 @@ use crate::model::{AggregateBuildStarted, SourceReplaced, TraceModel};
 use crate::theme::{self, Palette};
 use crate::{
     LINE_SCROLL_PX, METRICS, MIN_SLICE_PX, STATS_TEXT_SIZE, ZOOM_PER_NOTCH, drawn_scroll,
-    panel_toolbar, profile_status, scroll_request, thumb_offset, time_window_chip,
+    profile_status, scroll_request, thumb_offset, time_window_chip,
 };
 use bviz_trace_layout::{
     FlameBox, FlameDirection, FlameLabels, FlameMetrics, FlameMode, FlamePlacement, FlameView,
     ScopeAggregate, flame_height, lay_out_flame,
 };
 use bviz_ui_components::{
-    Axis, Button, DEFAULT_MIN_THUMB, DragEnd, SCROLLBAR_THICKNESS, Scrollbar, cached_layer,
-    centered_spinner, overlay_canvas, paint_labeled_box, paint_tooltip_box, spinner, track_drag,
+    Axis, Button, DEFAULT_MIN_THUMB, DragEnd, SCROLLBAR_THICKNESS, Scrollbar, Toolbar,
+    cached_layer, centered_spinner, overlay_canvas, paint_labeled_box, paint_tooltip_box, spinner,
+    track_drag,
 };
 use bviz_ui_workspace::{Panel, PanelEvent, PanelKind, ViewKind};
 use gpui::{
@@ -26,6 +27,10 @@ use std::sync::Arc;
 /// The key context scoping the flame graph's own bindings, so a key pressed here
 /// reaches this panel and no other.
 const FLAME_KEY_CONTEXT: &str = "TraceFlameGraph";
+
+/// Narrowest the toolbar's legend is squeezed beside the controls; with less
+/// than this left on their row it starts the next one.
+const LEGEND_MIN_WIDTH: f32 = 144.0;
 
 /// The flame graph's laid-out boxes together with the inputs that determine
 /// them, so a paint reuses them unless one changed. The retained
@@ -366,17 +371,20 @@ impl FlamePanel {
     /// The panel's toolbar: the window the graph covers, then the controls that
     /// choose which graph is aggregated and the legend for the colours it is
     /// drawn in.
-    fn toolbar(&self, palette: Palette, cx: &mut Context<Self>) -> Div {
-        panel_toolbar(palette)
-            .children(time_window_chip(&self.model, palette, cx))
-            .child(div().flex_1())
-            .child(self.mode_controls(cx))
-            .child(theme::role_legend(&palette, STATS_TEXT_SIZE))
+    fn toolbar(&self, palette: Palette, cx: &mut Context<Self>) -> Toolbar {
+        let legend = theme::role_legend(&palette, STATS_TEXT_SIZE)
+            .flex_1()
+            .min_w(px(LEGEND_MIN_WIDTH));
+        time_window_chip(&self.model, palette, cx)
+            .into_iter()
+            .chain(self.mode_controls(cx))
+            .fold(Toolbar::new(), Toolbar::child)
+            .child(legend)
     }
 
-    /// The graph's mode controls: the two directions as an exclusive pair, and
-    /// the labelling as a toggle that holds across both.
-    fn mode_controls(&self, cx: &mut Context<Self>) -> Div {
+    /// The graph's mode controls, one group for each choice they offer, so that
+    /// a toolbar wrapping them keeps the buttons of one choice on one row.
+    fn mode_controls(&self, cx: &mut Context<Self>) -> [Div; 2] {
         let mode = self.model.read(cx).flame_mode();
         let mnemonics = mode.labels == FlameLabels::Mnemonic;
         let button = |id: &'static str, label: &'static str, on: bool, to: FlameMode| {
@@ -389,32 +397,35 @@ impl FlamePanel {
             .selected(on)
             .label(label)
         };
-        div()
-            .flex()
-            .flex_row()
-            .items_center()
-            .flex_shrink_0()
-            .gap_1()
-            .text_size(px(STATS_TEXT_SIZE))
-            .child(button(
-                "flame-top-down",
-                "Top-down",
-                mode.direction == FlameDirection::TopDown,
-                FlameMode {
-                    direction: FlameDirection::TopDown,
-                    ..mode
-                },
-            ))
-            .child(button(
-                "flame-bottom-up",
-                "Bottom-up",
-                mode.direction == FlameDirection::BottomUp,
-                FlameMode {
-                    direction: FlameDirection::BottomUp,
-                    ..mode
-                },
-            ))
-            .child(button(
+        let group = || {
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_1()
+                .text_size(px(STATS_TEXT_SIZE))
+        };
+        [
+            group()
+                .child(button(
+                    "flame-top-down",
+                    "Top-down",
+                    mode.direction == FlameDirection::TopDown,
+                    FlameMode {
+                        direction: FlameDirection::TopDown,
+                        ..mode
+                    },
+                ))
+                .child(button(
+                    "flame-bottom-up",
+                    "Bottom-up",
+                    mode.direction == FlameDirection::BottomUp,
+                    FlameMode {
+                        direction: FlameDirection::BottomUp,
+                        ..mode
+                    },
+                )),
+            group().child(button(
                 "flame-mnemonics",
                 "Mnemonics",
                 mnemonics,
@@ -426,7 +437,8 @@ impl FlamePanel {
                     },
                     ..mode
                 },
-            ))
+            )),
+        ]
     }
 
     /// Applies a mode chosen on the toolbar, leaving the view alone for a click

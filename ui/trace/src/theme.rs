@@ -4,7 +4,7 @@
 use bviz_trace_layout::{SpanRole, Workload};
 use bviz_ui_components::{LabelBoxStyle, ScrollbarColors, TooltipColors};
 use bviz_ui_theme::{DataColors, Theme, ThemeColors, hue_of, mix, over};
-use gpui::{Hsla, IntoElement, Rgba, div, hsla, prelude::*, px};
+use gpui::{Div, Hsla, Rgba, div, hsla, prelude::*, px};
 
 /// Saturation of a counter series' translucent fill.
 const CATEGORY_SATURATION: f32 = 0.5;
@@ -108,7 +108,7 @@ const LEGEND_ROLES: [(SpanRole, &str); 8] = [
 /// from the same fills the flame boxes take. Squeezed, it sheds whole entries off
 /// its right end, so every swatch it shows keeps the size that keys it to the
 /// fill.
-pub(crate) fn role_legend(palette: &Palette, text_size: f32) -> impl IntoElement {
+pub(crate) fn role_legend(palette: &Palette, text_size: f32) -> Div {
     let row = px(text_size * LEGEND_LEADING);
     div()
         .flex()
