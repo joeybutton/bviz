@@ -38,8 +38,11 @@ Download the latest build of `main` for arm64 or x86_64 Linux or macOS from the
 | --- | --- | --- |
 | Architecture | arm64, x86_64 | arm64, x86_64 |
 | Operating system | glibc 2.28 or newer | macOS 14 or newer |
-| Display | a Wayland session; X11 is not supported | |
+| Display | a Wayland session | |
 | Graphics | a Vulkan driver | Metal |
+
+On an X11 session, run bviz inside a nested Wayland compositor such as
+[cage](https://github.com/cage-kiosk/cage): `cage -- bviz --profile build.profile.gz`.
 
 The arm64 Linux and the macOS binaries are cross-compiled on x86_64 Linux and are
 not tested in CI. The macOS binaries are not signed, and macOS blocks an unsigned
