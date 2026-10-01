@@ -100,6 +100,16 @@ pub fn register_keys(cx: &mut App) {
         // is the card the typed pattern put up over the drawing.
         KeyBinding::new("escape", search::DismissResults, Some(search::KEY_CONTEXT)),
         KeyBinding::new("0", scatter::ShowWholePlot, Some(scatter::KEY_CONTEXT)),
+        KeyBinding::new(
+            "0",
+            dominators::ShowWholeBuild,
+            Some(dominators::KEY_CONTEXT),
+        ),
+        KeyBinding::new(
+            "backspace",
+            dominators::FocusUp,
+            Some(dominators::KEY_CONTEXT),
+        ),
         KeyBinding::new("up", scatter::AimUp, picking),
         KeyBinding::new("down", scatter::AimDown, picking),
         KeyBinding::new("enter", scatter::RevealAimed, picking),

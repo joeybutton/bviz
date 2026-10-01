@@ -38,9 +38,10 @@ pub(crate) enum Holds {
     /// The whole build, over every top of the tree.
     Build,
     Node(u32),
-    /// The last `count` of a run of siblings, each too narrow to draw apart,
+    /// The `count` siblings from `first` on, each too narrow to draw apart,
     /// and the points they weigh together.
     Rest {
+        first: u32,
         count: u32,
         weight: u32,
     },
@@ -55,9 +56,10 @@ pub(crate) struct Cell {
 /// The narrowest a run of siblings too narrow to draw apart is drawn at all.
 const VISIBLE_WIDTH: Pixels = px(1.);
 
-/// The cells of the icicle drawing `tree` in `bounds`, a row `row` tall each.
+/// The cells of the icicle drawing `tree` from `focus`, or the whole build
+/// where there is none, in `bounds`, a row `row` tall each.
 ///
-/// The first row is the whole build at full width, and each row beneath
+/// The first row is the focus at full width, and each row beneath
 /// holds the children of each cell above it, laid from its left edge at widths
 /// in proportion to their weights, so what a cell leaves of its own width
 /// beyond its children's is its own point. Only the rows `bounds` holds whole
@@ -67,6 +69,7 @@ const VISIBLE_WIDTH: Pixels = px(1.);
 /// out are thus bounded by how many fit, whatever the size of the tree.
 pub(crate) fn lay_out(
     tree: &impl Tree,
+    focus: Option<u32>,
     bounds: Bounds<Pixels>,
     row: Pixels,
     min_width: Pixels,
@@ -77,9 +80,13 @@ pub(crate) fn lay_out(
     }
     let per_row = (bounds.size.width / min_width).floor() as usize;
     let mut cells: Vec<Cell> = Vec::with_capacity(per_row + 1);
+    let top = match focus {
+        None => Holds::Build,
+        Some(node) => Holds::Node(node),
+    };
     cells.push(Cell {
         rect: Bounds::new(bounds.origin, size(bounds.size.width, row)),
-        holds: Holds::Build,
+        holds: top,
     });
     let mut above = 0..cells.len();
     for depth in 1..rows {
@@ -104,7 +111,11 @@ pub(crate) fn lay_out(
                         let count = children.end - child;
                         cells.push(Cell {
                             rect: Bounds::new(point(x, y), size(width, row)),
-                            holds: Holds::Rest { count, weight },
+                            holds: Holds::Rest {
+                                first: child,
+                                count,
+                                weight,
+                            },
                         });
                     }
                     break;
@@ -204,7 +215,7 @@ mod tests {
     fn the_whole_build_spans_the_top_row_and_its_tops_share_the_next_by_weight() {
         // Tops 0 and 1 weigh 6 and 2; 0 holds 2 and 3, of 3 and 2.
         let tree = Laid::of(&[Spec(6, vec![leaf(3), leaf(2)]), leaf(2)]);
-        let cells = lay_out(&tree, area(80., 3.), ROW, px(1.));
+        let cells = lay_out(&tree, None, area(80., 3.), ROW, px(1.));
         assert_eq!(
             drawn(&cells),
             [
@@ -219,10 +230,20 @@ mod tests {
     }
 
     #[test]
+    fn a_focus_spans_the_top_row_and_leaves_its_own_point_to_the_right() {
+        let tree = Laid::of(&[Spec(4, vec![leaf(3)]), leaf(1)]);
+        let cells = lay_out(&tree, Some(0), area(40., 2.), ROW, px(1.));
+        assert_eq!(
+            drawn(&cells),
+            [(Holds::Node(0), 0., 40.), (Holds::Node(2), 0., 30.)]
+        );
+    }
+
+    #[test]
     fn rows_past_the_bottom_are_not_laid_out() {
         let chain = Spec(3, vec![Spec(2, vec![leaf(1)])]);
         let tree = Laid::of(&[chain]);
-        let cells = lay_out(&tree, area(30., 2.5), ROW, px(1.));
+        let cells = lay_out(&tree, None, area(30., 2.5), ROW, px(1.));
         assert_eq!(cells.len(), 2);
     }
 
@@ -231,8 +252,9 @@ mod tests {
         // Under a top of 10: children of 5, 2, 1 and 1, the top itself the last.
         let top = Spec(10, vec![leaf(5), Spec(2, vec![leaf(1)]), leaf(1), leaf(1)]);
         let tree = Laid::of(&[top]);
-        let cells = lay_out(&tree, area(100., 3.), ROW, px(25.));
+        let cells = lay_out(&tree, None, area(100., 3.), ROW, px(25.));
         let rest = Holds::Rest {
+            first: 2,
             count: 3,
             weight: 4,
         };
@@ -251,7 +273,7 @@ mod tests {
     fn a_rest_too_narrow_to_see_is_left_out() {
         let top = Spec(1001, vec![leaf(1000)]);
         let tree = Laid::of(&[top, leaf(1)]);
-        let cells = lay_out(&tree, area(100., 2.), ROW, px(5.));
+        let cells = lay_out(&tree, None, area(100., 2.), ROW, px(5.));
         let holds: Vec<Holds> = cells.iter().map(|cell| cell.holds).collect();
         assert_eq!(holds, [Holds::Build, Holds::Node(0)]);
     }
@@ -262,11 +284,12 @@ mod tests {
     fn a_wide_tree_lays_out_only_what_is_visible() {
         const LEAVES: u32 = 100_000;
         let tree = Laid::of(&[Spec(LEAVES + 1, vec![leaf(1); LEAVES as usize])]);
-        let cells = lay_out(&tree, area(200., 4.), ROW, px(4.));
+        let cells = lay_out(&tree, None, area(200., 4.), ROW, px(4.));
         assert_eq!(cells.len(), 3);
         assert_eq!(
             cells[2].holds,
             Holds::Rest {
+                first: 1,
                 count: LEAVES,
                 weight: LEAVES,
             }
@@ -275,8 +298,8 @@ mod tests {
 
     #[test]
     fn an_empty_tree_or_a_canvas_too_short_for_a_row_lays_out_nothing() {
-        assert!(lay_out(&Laid::of(&[]), area(100., 3.), ROW, px(1.)).is_empty());
+        assert!(lay_out(&Laid::of(&[]), None, area(100., 3.), ROW, px(1.)).is_empty());
         let tree = Laid::of(&[leaf(1)]);
-        assert!(lay_out(&tree, area(100., 0.5), ROW, px(1.)).is_empty());
+        assert!(lay_out(&tree, None, area(100., 0.5), ROW, px(1.)).is_empty());
     }
 }

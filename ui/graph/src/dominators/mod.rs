@@ -17,9 +17,9 @@ use bviz_ui_components::{
 };
 use bviz_ui_workspace::{Panel, PanelEvent, PanelKind, ViewKind};
 use gpui::{
-    App, Bounds, Context, Entity, EventEmitter, FocusHandle, Focusable, IntoElement,
-    MouseMoveEvent, Pixels, Point, Render, SharedString, Subscription, WeakEntity, Window, canvas,
-    div, prelude::*, px,
+    AnyElement, App, Bounds, ClickEvent, Context, Div, Entity, EventEmitter, FocusHandle,
+    Focusable, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, Pixels, Point, Render,
+    SharedString, Subscription, WeakEntity, Window, canvas, div, prelude::*, px, relative,
 };
 use icicle::{Cell, Holds};
 use paint::{MIN_CELL_WIDTH, Scene, point_name};
@@ -28,6 +28,8 @@ use std::sync::Arc;
 /// The key context scoping the dominators panel's own bindings, so a key
 /// pressed here reaches this panel and no other.
 pub(crate) const KEY_CONTEXT: &str = "GraphDominators";
+
+gpui::actions!(bviz_graph, [ShowWholeBuild, FocusUp]);
 
 /// What the panel reads while the tree is being computed.
 const COMPUTING: &str = "Computing dominators…";
@@ -106,41 +108,131 @@ impl DominatorsPanel {
         cx.notify();
     }
 
-    /// Draws the tree of the chosen scope where it has landed and is not the
-    /// one drawn. The tree drawn stays until then.
+    /// Draws the tree of the chosen scope from the whole build, where it has
+    /// landed and is not the one drawn. The tree drawn stays until then.
     fn redraw(&mut self, cx: &mut Context<Self>) {
         let Some(scope) = self.scope(cx) else {
             return;
         };
-        let Some(tree) = self.model.read(cx).dominators(scope).cloned() else {
+        let model = self.model.read(cx);
+        let (Some(tree), Some(loaded)) = (model.dominators(scope), model.loaded()) else {
             return;
         };
         if self
             .drawn
             .as_ref()
-            .is_some_and(|drawn| Arc::ptr_eq(&drawn.tree, &tree))
+            .is_some_and(|drawn| Arc::ptr_eq(&drawn.tree, tree))
         {
             return;
         }
-        self.drawn = Some(Drawn { tree, hover: None });
+        self.drawn = Some(Drawn {
+            tree: Arc::clone(tree),
+            shared: loaded.shared.clone(),
+            focus: None,
+            hover: None,
+            press: None,
+        });
         self.invalidate_canvas(cx);
     }
 
     /// The cell a pointer at `at` is over, where the cells are drawn.
     fn cell_at(&self, at: Point<Pixels>) -> Option<Cell> {
         let (drawn, frame) = (self.drawn.as_ref()?, self.frame?);
-        let cells = icicle::lay_out(&*drawn.tree, frame.bounds, frame.row, MIN_CELL_WIDTH);
+        let focus = drawn.focus_node();
+        let cells = icicle::lay_out(&*drawn.tree, focus, frame.bounds, frame.row, MIN_CELL_WIDTH);
         cells.into_iter().find(|cell| cell.rect.contains(&at))
+    }
+
+    /// Draws the icicle from `node`, or from the whole build where there is
+    /// none, and describes the cell that brings under the pointer.
+    fn focus_on(&mut self, node: Option<u32>, cx: &mut Context<Self>) {
+        let Some(drawn) = &mut self.drawn else {
+            return;
+        };
+        if drawn.focus_node() == node {
+            return;
+        }
+        drawn.focus = node.map(|node| Focus::on(&drawn.tree, node));
+        let at = drawn.hover.take().map(|hover| hover.at);
+        self.invalidate_canvas(cx);
+        if let Some(at) = at {
+            self.hover_at(at, cx);
+        }
+    }
+
+    /// Focuses `node` of `tree` as [`Self::focus_on`] does, where `tree` is
+    /// still the tree drawn.
+    fn focus_on_in(&mut self, tree: &Arc<Dominators>, node: Option<u32>, cx: &mut Context<Self>) {
+        if self
+            .drawn
+            .as_ref()
+            .is_some_and(|drawn| Arc::ptr_eq(&drawn.tree, tree))
+        {
+            self.focus_on(node, cx);
+        }
+    }
+
+    /// Draws the icicle from the dominator of the focus.
+    fn focus_up(&mut self, cx: &mut Context<Self>) {
+        let Some(drawn) = &self.drawn else {
+            return;
+        };
+        if let Some(focus) = drawn.focus_node() {
+            let up = drawn.tree.parent(focus);
+            self.focus_on(up, cx);
+        }
+    }
+
+    /// Focuses what a click on the cell holding `holds` asks for: the point it
+    /// holds, the dominator of the focus where it holds the focus, and the
+    /// dominator of the siblings it gathers.
+    fn click_cell(&mut self, holds: Holds, cx: &mut Context<Self>) {
+        let Some(drawn) = &self.drawn else {
+            return;
+        };
+        match holds {
+            Holds::Build => {}
+            Holds::Node(node) if drawn.focus_node() == Some(node) => self.focus_up(cx),
+            Holds::Node(node) => self.focus_on(Some(node), cx),
+            Holds::Rest { first, .. } => {
+                let dominator = drawn.tree.parent(first);
+                self.focus_on(dominator, cx);
+            }
+        }
+    }
+
+    /// Acts on a press: the first of a click on a cell focuses as
+    /// [`Self::click_cell`] does, and the second of a double click whose first
+    /// landed clear of every cell returns to the whole build.
+    fn on_mouse_down(&mut self, e: &MouseDownEvent, cx: &mut Context<Self>) {
+        let cell = self.cell_at(e.position);
+        let Some(drawn) = &mut self.drawn else {
+            return;
+        };
+        match e.click_count {
+            1 => {
+                drawn.press = Some(cell.map_or(Press::Clear, |_| Press::Cell));
+                if let Some(cell) = cell {
+                    self.click_cell(cell.holds, cx);
+                }
+            }
+            DOUBLE_CLICK => {
+                if let Some(Press::Clear) = drawn.press.take() {
+                    self.focus_on(None, cx);
+                }
+            }
+            _ => {}
+        }
     }
 
     /// Follows the pointer to the cell it is over, describing the cell afresh
     /// only where the pointer has moved onto another.
     fn hover_at(&mut self, at: Point<Pixels>, cx: &mut Context<Self>) {
         let cell = self.cell_at(at);
-        let model = self.model.read(cx);
-        let (Some(drawn), Some(loaded)) = (&mut self.drawn, model.loaded()) else {
+        let Some(drawn) = &mut self.drawn else {
             return;
         };
+        let focus = drawn.focus_node();
         match (&mut drawn.hover, cell) {
             (Some(hover), Some(cell)) if hover.cell == cell => hover.at = at,
             (None, None) => return,
@@ -148,7 +240,7 @@ impl DominatorsPanel {
                 *hover = cell.map(|cell| Hover {
                     cell,
                     at,
-                    lines: describe(&drawn.tree, cell.holds, &loaded.shared),
+                    lines: describe(&drawn.tree, cell.holds, focus, &drawn.shared),
                 });
             }
         }
@@ -182,10 +274,61 @@ fn unit_picker(
     UnitPicker::new("dominators-unit", inputs, DominatorsPanel::choose, cx)
 }
 
-/// The tree drawn, and the cell of it the pointer is over.
+/// The `click_count` of the press completing a double click.
+const DOUBLE_CLICK: usize = 2;
+
+/// A tree drawn, and how the reader has it drawn, which lasts only as long as
+/// the tree is drawn.
 struct Drawn {
     tree: Arc<Dominators>,
+    /// The graph whose points `tree` holds.
+    shared: Shared,
+    focus: Option<Focus>,
     hover: Option<Hover>,
+    /// Where the first press of the last click landed.
+    press: Option<Press>,
+}
+
+impl Drawn {
+    fn focus_node(&self) -> Option<u32> {
+        self.focus.as_ref().map(|focus| focus.node)
+    }
+}
+
+/// Where the icicle is drawn from, with the path above it that the breadcrumb
+/// names taken once as the focus is set.
+struct Focus {
+    node: u32,
+    /// Top first, those nearest `node` at most [`CRUMBS`] of them.
+    above: Vec<u32>,
+    /// Whether more dominators stand above those of `above`.
+    elided: bool,
+}
+
+/// The most dominators above the focus the breadcrumb names.
+const CRUMBS: usize = 4;
+
+impl Focus {
+    fn on(tree: &Dominators, node: u32) -> Self {
+        let mut above: Vec<u32> = Vec::with_capacity(CRUMBS + 1);
+        let up = std::iter::successors(tree.parent(node), |&above| tree.parent(above));
+        above.extend(up.take(CRUMBS + 1));
+        let elided = above.len() > CRUMBS;
+        above.truncate(CRUMBS);
+        above.reverse();
+        Self {
+            node,
+            above,
+            elided,
+        }
+    }
+}
+
+/// Where a press landed.
+#[derive(Clone, Copy)]
+enum Press {
+    Clear,
+    Cell,
 }
 
 /// The cell the pointer rests on, described once as the pointer reaches it,
@@ -205,11 +348,12 @@ struct Frame {
 }
 
 /// The most lines a tooltip reads.
-const TOOLTIP_LINES: usize = 8;
+const TOOLTIP_LINES: usize = 9;
 
-/// What the tooltip over the cell holding `holds` of `tree` reads: what it
-/// stands for, and how much of the build exists only because of it.
-fn describe(tree: &Dominators, holds: Holds, shared: &Shared) -> Vec<String> {
+/// What the tooltip over the cell holding `holds` of `tree` drawn from `focus`
+/// reads: what it stands for, how much of the build exists only because of
+/// it, and what a click on it does.
+fn describe(tree: &Dominators, holds: Holds, focus: Option<u32>, shared: &Shared) -> Vec<String> {
     let unit = tree.scope().unit();
     let names = unit_names(unit);
     let points = |count: u32| match count {
@@ -220,7 +364,19 @@ fn describe(tree: &Dominators, holds: Holds, shared: &Shared) -> Vec<String> {
         let exist = if weight == 1 { "exists" } else { "exist" };
         format!("{} {exist} only because of {on}", points(weight))
     };
-    let of_build = |weight: u32| format!("{} of the build", share(weight, tree.total()));
+    let shares = |weight: u32, within: Option<u32>| {
+        let of_build = format!("{} of the build", share(weight, tree.total()));
+        match within {
+            Some(within) => {
+                let name = point_name(tree.id(within), unit, shared);
+                format!(
+                    "{of_build} · {} of {name}",
+                    share(weight, tree.weight(within))
+                )
+            }
+            None => of_build,
+        }
+    };
     let mut lines = Vec::with_capacity(TOOLTIP_LINES);
     match holds {
         Holds::Build => lines.extend([WHOLE_BUILD.to_owned(), points(tree.total())]),
@@ -228,17 +384,22 @@ fn describe(tree: &Dominators, holds: Holds, shared: &Shared) -> Vec<String> {
             identify(tree.id(node), tree.kind(node), unit, shared, &mut lines);
             let weight = tree.weight(node);
             lines.push(stand_on(weight, "this"));
-            lines.push(of_build(weight));
+            let is_focus = focus == Some(node);
+            lines.push(shares(weight, focus.filter(|_| !is_focus)));
             let dominator = match tree.parent(node) {
                 Some(parent) => point_name(tree.id(parent), unit, shared),
                 None => WHOLE_BUILD.to_owned(),
             };
             lines.push(format!("immediately dominated by {dominator}"));
+            lines.push(match is_focus {
+                true => FOCUS_UP.to_owned(),
+                false => FOCUS.to_owned(),
+            });
         }
         Holds::Rest { count, weight, .. } => {
             lines.push(format!("{} too narrow to draw apart", points(count)));
             lines.push(stand_on(weight, if count == 1 { "it" } else { "them" }));
-            lines.push(of_build(weight));
+            lines.push(shares(weight, focus));
         }
     }
     lines
@@ -246,6 +407,10 @@ fn describe(tree: &Dominators, holds: Holds, shared: &Shared) -> Vec<String> {
 
 /// How a cell names the whole build.
 const WHOLE_BUILD: &str = "the whole build";
+
+/// What a click on a cell does, there and on the cell of the focus.
+const FOCUS: &str = "click to focus";
+const FOCUS_UP: &str = "click or Backspace to go up a level";
 
 /// What share of `whole` `part` is, as a percentage.
 fn share(part: u32, whole: u32) -> String {
@@ -301,6 +466,8 @@ impl Render for DominatorsPanel {
         let palette = Palette::from_theme(&bviz_ui_theme::theme(window, cx));
         let root = div()
             .key_context(KEY_CONTEXT)
+            .on_action(cx.listener(|view, _: &ShowWholeBuild, _, cx| view.focus_on(None, cx)))
+            .on_action(cx.listener(|view, _: &FocusUp, _, cx| view.focus_up(cx)))
             .track_focus(&self.focus_handle)
             .flex_1()
             .flex()
@@ -311,12 +478,13 @@ impl Render for DominatorsPanel {
         if let Some(placeholder) = model.source().placeholder(&palette.colors) {
             return root.child(placeholder);
         }
-        let drawn_scope = self.drawn.as_ref().map(|drawn| drawn.tree.scope());
+        let drawn = self.drawn.as_ref();
         let root = root.children(self.picker.as_ref().map(|picker| {
-            let computing = drawn_scope.is_some_and(|drawn| drawn != picker.chosen(cx));
-            strip(picker, computing, &palette)
+            let computing = drawn.is_some_and(|drawn| drawn.tree.scope() != picker.chosen(cx));
+            let crumbs = drawn.and_then(|drawn| breadcrumb(drawn, &palette, cx));
+            strip(picker, crumbs, computing, &palette)
         }));
-        let Some(drawn) = &self.drawn else {
+        let Some(drawn) = drawn else {
             return root.child(centered_spinner(COMPUTING, &palette.colors));
         };
         if drawn.tree.total() == 0 {
@@ -332,6 +500,11 @@ impl Render for DominatorsPanel {
                 .min_h(px(0.))
                 .child(cached_layer(self.canvas.clone()))
                 .child(hover_layer(cx.entity(), palette))
+                .when(drawn.hover.is_some(), |icicle| icicle.cursor_pointer())
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|view, e: &MouseDownEvent, _, cx| view.on_mouse_down(e, cx)),
+                )
                 .on_mouse_move(cx.listener(|view, e: &MouseMoveEvent, _, cx| {
                     view.hover_at(e.position, cx);
                 }))
@@ -344,14 +517,79 @@ impl Render for DominatorsPanel {
     }
 }
 
-/// The strip choosing the unit drawn, which reads `computing` while the tree of
-/// a new choice is computed over the one drawn for the last.
-fn strip(picker: &UnitPicker, computing: bool, palette: &Palette) -> Toolbar {
+/// The strip choosing the unit drawn, followed by `crumbs`, which reads
+/// `computing` while the tree of a new choice is computed over the one drawn
+/// for the last.
+fn strip(picker: &UnitPicker, crumbs: Option<Div>, computing: bool, palette: &Palette) -> Toolbar {
     Toolbar::new()
         .child(group("points", palette).child(picker.dropdown()))
+        .when_some(crumbs, |bar, crumbs| bar.child(crumbs))
         .when(computing, |bar| {
             bar.trailing(busy("dominators-computing", "computing…", palette))
         })
+}
+
+/// The path from the whole build down to the focus of `drawn`, each step but
+/// the focus a click away; absent at the whole build. Where the path outgrows
+/// its room the dominators above the focus give way first, and the focus is
+/// cut short only once they are gone.
+fn breadcrumb(drawn: &Drawn, palette: &Palette, cx: &Context<DominatorsPanel>) -> Option<Div> {
+    let focus = drawn.focus.as_ref()?;
+    let unit = drawn.tree.scope().unit();
+    let name = |node: u32| point_name(drawn.tree.id(node), unit, &drawn.shared);
+    // A row whose steps shrink to fit it.
+    let row = || div().flex().items_center().min_w_0().overflow_hidden();
+    let crumb = |name: String| {
+        div()
+            .min_w_0()
+            .overflow_hidden()
+            .whitespace_nowrap()
+            .text_ellipsis()
+            .child(name)
+    };
+    let after = |step: AnyElement| row().gap_1().pl_1().child(separator()).child(step);
+    let link = |index: usize, name: String, to: Option<u32>| {
+        // A click landing once another tree is drawn names none of its nodes.
+        let tree = Arc::clone(&drawn.tree);
+        crumb(name)
+            .id(("dominators-crumb", index))
+            .cursor_pointer()
+            .text_color(palette.colors.text_muted)
+            .hover(|style| style.text_color(palette.label))
+            .on_click(cx.listener(move |view, _: &ClickEvent, _, cx| {
+                view.focus_on_in(&tree, to, cx);
+            }))
+    };
+    let mut above: Vec<Div> = Vec::with_capacity(CRUMBS + 1);
+    if focus.elided {
+        above.push(after(ELIDED.into_any_element()));
+    }
+    for (index, &node) in focus.above.iter().enumerate() {
+        above.push(after(
+            link(index + 1, name(node), Some(node)).into_any_element(),
+        ));
+    }
+    let last = after(crumb(name(focus.node)).into_any_element())
+        .flex_shrink_0()
+        .max_w(relative(1.));
+    Some(
+        row()
+            .flex_1()
+            .text_sm()
+            .text_color(palette.label)
+            .child(link(0, WHOLE_BUILD_CRUMB.to_owned(), None).flex_shrink_0())
+            .child(row().child(row().children(above)).child(last)),
+    )
+}
+
+/// What the breadcrumb names the whole build.
+const WHOLE_BUILD_CRUMB: &str = "Whole build";
+
+/// Stands in the breadcrumb for the dominators it leaves out.
+const ELIDED: &str = "…";
+
+fn separator() -> AnyElement {
+    "›".into_any_element()
 }
 
 /// The layer over the cells that rings and describes the one under the
@@ -404,12 +642,11 @@ impl Render for IcicleCanvas {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let palette = Palette::from_theme(&bviz_ui_theme::theme(window, cx));
         let scene = self.parent.upgrade().and_then(|parent| {
-            let panel = parent.read(cx);
-            let tree = Arc::clone(&panel.drawn.as_ref()?.tree);
-            let shared = panel.model.read(cx).loaded()?.shared.clone();
+            let drawn = parent.read(cx).drawn.as_ref()?;
             Some(Scene {
-                tree,
-                shared,
+                tree: Arc::clone(&drawn.tree),
+                focus: drawn.focus_node(),
+                shared: drawn.shared.clone(),
                 palette,
             })
         });

@@ -46,6 +46,7 @@ pub(crate) fn row_height(window: &Window) -> Pixels {
 /// borrow of the panel.
 pub(crate) struct Scene {
     pub(crate) tree: Arc<Dominators>,
+    pub(crate) focus: Option<u32>,
     pub(crate) shared: Shared,
     pub(crate) palette: Palette,
 }
@@ -65,7 +66,7 @@ pub(crate) fn paint_icicle(
         text_pad: TEXT_PAD,
     };
     let row = row_height(window);
-    let cells = icicle::lay_out(&*scene.tree, bounds, row, MIN_CELL_WIDTH);
+    let cells = icicle::lay_out(&*scene.tree, scene.focus, bounds, row, MIN_CELL_WIDTH);
     for cell in cells {
         let fill = fill(scene, cell.holds);
         let (rect, label) = (drawn_rect(&cell), label_on(fill));
