@@ -31,19 +31,20 @@ bviz can open several files at once.
 
 ## Install
 
-Download the latest build of `main` for x86_64 Linux, or arm64 or x86_64 macOS,
-from the [nightly release](../../releases/tag/nightly).
+Download the latest build of `main` for arm64 or x86_64 Linux or macOS from the
+[nightly release](../../releases/tag/nightly).
 
 | | Linux | macOS |
 | --- | --- | --- |
-| Architecture | x86_64 | arm64, x86_64 |
+| Architecture | arm64, x86_64 | arm64, x86_64 |
 | Operating system | glibc 2.28 or newer | macOS 14 or newer |
 | Display | a Wayland session; X11 is not supported | |
 | Graphics | a Vulkan driver | Metal |
 
-The macOS binaries are cross-compiled on Linux, are not signed, and are not
-tested in CI. macOS blocks an unsigned download until you clear its quarantine
-flag: `xattr -d com.apple.quarantine bviz`.
+The arm64 Linux and the macOS binaries are cross-compiled on x86_64 Linux and are
+not tested in CI. The macOS binaries are not signed, and macOS blocks an unsigned
+download until you clear its quarantine flag:
+`xattr -d com.apple.quarantine bviz`.
 
 To build from source, see [CONTRIBUTING.md](CONTRIBUTING.md).
 

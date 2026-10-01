@@ -46,6 +46,14 @@ jobs:
       - uses: actions/upload-artifact@v7
         if: ${{ !cancelled() }}
         with:
+          path: bazel-bin/dist/bviz-linux-arm64.tar.gz
+          archive: false
+          retention-days: 14
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@v7
+        if: ${{ !cancelled() }}
+        with:
           path: bazel-bin/dist/bviz-linux-x86_64.tar.gz
           archive: false
           retention-days: 14
@@ -92,8 +100,8 @@ jobs:
           cat > notes.md <<'EOF'
           Built from ${{ github.sha }}. Each nightly build replaces this release.
 
-          To install, set `platform` to `linux-x86_64`, `macos-arm64` or
-          `macos-x86_64`, and make sure `~/.local/bin` is on your `PATH`:
+          To install, set `platform` to `linux-arm64`, `linux-x86_64`,
+          `macos-arm64` or `macos-x86_64`, and make sure `~/.local/bin` is on your `PATH`:
 
           ```sh
           platform=linux-x86_64
