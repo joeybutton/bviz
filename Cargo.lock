@@ -862,6 +862,7 @@ version = "0.1.0"
 dependencies = [
  "bviz_alloc",
  "bviz_cli",
+ "bviz_invocation",
  "bviz_ui_console",
  "bviz_ui_graph",
  "bviz_ui_trace",
