@@ -20,6 +20,7 @@ rust_library(
     crate_name = "bviz_terminal",
     visibility = ["//ui/console:__pkg__"],
     deps = [
+        "//invocation",
         "@bazel_build_event_proto//:bazel_build_event_rust_proto",
         "@crates//:alacritty_terminal",
         "@crates//:prost",

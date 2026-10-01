@@ -5,7 +5,10 @@ rust_library(
     name = "invocation",
     srcs = glob(["src/**/*.rs"]),
     crate_name = "bviz_invocation",
-    visibility = ["//trace/profile:__pkg__"],
+    visibility = [
+        "//terminal:__pkg__",
+        "//trace/profile:__pkg__",
+    ],
 )
 
 rust_test(

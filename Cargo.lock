@@ -939,6 +939,7 @@ name = "bviz_terminal"
 version = "0.1.0"
 dependencies = [
  "alacritty_terminal",
+ "bviz_invocation",
  "prost",
  "prost-types",
  "protoc-gen-prost",

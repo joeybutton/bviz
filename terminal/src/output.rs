@@ -49,8 +49,8 @@ pub(crate) struct Anchor {
 
 #[cfg(test)]
 impl BuildOutput {
-    /// A single-frame output with no timing anchors, for tests that exercise only
-    /// rendering and not playback.
+    /// A single-frame output that carries no clock: the base whose fields a
+    /// test overrides.
     pub(crate) fn from_bytes(columns: u16, bytes: Vec<u8>) -> BuildOutput {
         BuildOutput {
             columns,
