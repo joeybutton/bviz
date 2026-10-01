@@ -1,6 +1,6 @@
 //! The bviz window: one panel per document named on the command line.
 
-use bviz_cli::{Cli, Source};
+use bviz_cli::{Cli, Source, Sources};
 use bviz_ui_workspace::Document;
 use clap::Parser;
 use gpui::{App, Pixels, Size, Window, px};
@@ -25,9 +25,18 @@ enum Load {
 impl Load {
     fn start(source: Source) -> Self {
         match source {
-            Source::Graph(source) => Self::Graph(source.into()),
             Source::Trace(source) => Self::Trace(source.into()),
             Source::Console(source) => Self::Console(source.into()),
+        }
+    }
+
+    /// Starts reading everything `sources` names: the document the window
+    /// shows at the top, and those stacked below it.
+    fn start_all(sources: Sources) -> (Self, Vec<Self>) {
+        let start_each = |files: Vec<Source>| files.into_iter().map(Self::start).collect();
+        match sources {
+            Sources::Graph { graph, files } => (Self::Graph(graph.into()), start_each(files)),
+            Sources::Files { first, rest } => (Self::start(first), start_each(rest)),
         }
     }
 
@@ -43,9 +52,7 @@ impl Load {
 fn main() {
     bviz_alloc::retain_freed_memory_across_load();
     let sources = Cli::parse().sources().unwrap_or_else(|e| e.exit());
-    let (first, rest) = sources.into_parts();
-    let first = Load::start(first);
-    let rest: Vec<Load> = rest.into_iter().map(Load::start).collect();
+    let (first, rest) = Load::start_all(sources);
     bviz_ui_workspace::run_panels(
         "bviz",
         WINDOW_SIZE,
