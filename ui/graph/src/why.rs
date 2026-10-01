@@ -664,6 +664,10 @@ pub(crate) fn card(
             .child(line(status))
             .children(unmarked.map(|unmarked| div().min_w_0().child(unmarked)))
             .children(map_note.map(|note| div().min_w_0().child(note)))
+            .children(
+                (!links.is_empty())
+                    .then(|| line("shortest:").text_color(palette.colors.text_muted)),
+            )
             .children(chain(&links, &spelling, palette)),
     )
 }
