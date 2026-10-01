@@ -56,6 +56,7 @@ mod status;
 mod timecard;
 mod timing;
 mod toolbar;
+mod unit_picker;
 mod why;
 
 use camera::{Camera, Rect, from_screen, recenter_rect, zoom_step};

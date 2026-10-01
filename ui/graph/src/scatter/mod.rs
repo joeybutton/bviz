@@ -16,6 +16,7 @@ use crate::model::{FilterChanged, GraphModel, Loaded, MetricsLanded, SourceRepla
 use crate::paint::UNMARKED_FADE;
 use crate::point::{configuration, identify, mnemonic, point_label, primary_output, unit_names};
 use crate::timing::{NodeTimes, Untimed};
+use crate::unit_picker::UnitPicker;
 use crate::{PIXELS_PER_NOTCH, ZOOM_PER_NOTCH};
 use axis::{Axes, Axis, Clocks};
 use bviz_graph_layout::capability::TRANSITIONS_FLAG;
@@ -115,7 +116,7 @@ impl ScatterPanel {
             }
         });
         let metrics_landed = cx.subscribe(&model, |view, _, landed: &MetricsLanded, cx| {
-            let (scope, reference) = view.scopes().unzip();
+            let (scope, reference) = view.scopes(cx).unzip();
             if [scope, reference].contains(&Some(landed.scope)) {
                 view.replot(cx);
             }
@@ -148,31 +149,27 @@ impl ScatterPanel {
 
     /// The scope the plot measures in, and the scope of its unit over every
     /// input loaded that it is scaled to, once the graph is read.
-    fn scopes(&self) -> Option<(Scope, Scope)> {
-        self.choice
-            .as_ref()
-            .map(|choice| (choice.scope, choice.reference()))
+    fn scopes(&self, cx: &App) -> Option<(Scope, Scope)> {
+        self.choice.as_ref().map(|choice| choice.scopes(cx))
     }
 
     /// Has the graph measured in the chosen scope and the one it is scaled to,
     /// and brings the plot up to date where it already is.
     fn measure(&mut self, cx: &mut Context<Self>) {
         self.close_pick(cx);
-        if let Some((scope, reference)) = self.scopes() {
+        if let Some((scope, reference)) = self.scopes(cx) {
             self.model
                 .update(cx, |model, cx| model.want_metrics(&[scope, reference], cx));
         }
         self.replot(cx);
     }
 
-    /// Measures the graph's points in `unit` over the inputs last enabled for
-    /// it.
-    fn choose_unit(&mut self, unit: Unit, cx: &mut Context<Self>) {
-        let Some(choice) = &mut self.choice else {
-            return;
-        };
-        choice.choose(unit);
-        choice.name_colourings(cx);
+    /// Measures the graph's points in the unit chosen, over the inputs last
+    /// enabled for it.
+    fn choose_unit(&mut self, cx: &mut Context<Self>) {
+        if let Some(choice) = &self.choice {
+            choice.name_colourings(cx);
+        }
         self.measure(cx);
         cx.notify();
     }
@@ -225,15 +222,14 @@ impl ScatterPanel {
         let Some(choice) = &mut self.choice else {
             return;
         };
-        let inputs = choice.scope.inputs();
+        let inputs = choice.picker.chosen(cx).inputs();
         let inputs = match inputs.contains(input) {
             true => inputs.without(input),
             false => Some(inputs.with(input)),
         };
-        let Some(scope) = inputs.and_then(|inputs| Scope::new(choice.scope.unit(), inputs)) else {
+        if !inputs.is_some_and(|inputs| choice.picker.draw_over(inputs, cx)) {
             return;
-        };
-        choice.scope = scope;
+        }
         self.measure(cx);
         cx.notify();
     }
@@ -250,7 +246,7 @@ impl ScatterPanel {
         if !self.shown || self.plotting.is_some() {
             return;
         }
-        let Some((_, reference)) = self.scopes() else {
+        let Some((_, reference)) = self.scopes(cx) else {
             return;
         };
         let model = self.model.read(cx);
@@ -261,7 +257,7 @@ impl ScatterPanel {
         if let Some(timed) = timed {
             self.offer_times(timed, cx);
         }
-        let Some(((scope, reference), choice)) = self.scopes().zip(self.choice.as_ref()) else {
+        let Some(((scope, reference), choice)) = self.scopes(cx).zip(self.choice.as_ref()) else {
             return;
         };
         let (axes, colour) = (choice.axes, choice.colour);
@@ -613,19 +609,11 @@ impl ScatterPanel {
     }
 }
 
-/// What the plot measures, and the picker choosing its unit among those the
-/// graph's inputs describe. Each unit keeps the inputs enabled for it while
-/// another is plotted.
+/// The choice of what the plot measures, which the strip offers.
 struct Choice {
-    scope: Scope,
-    /// The scope of each unit offered but the one plotted.
-    others: Vec<Scope>,
     /// The inputs the graph was read from.
     loaded: InputSet,
-    /// Finest first, in the picker's order.
-    units: Vec<Unit>,
-    picker: Entity<Dropdown>,
-    _picked: Subscription,
+    picker: UnitPicker,
     axes: Axes,
     /// Whether any point of the unit plotted has an action time, which the
     /// choices reading it are offered by.
@@ -648,27 +636,7 @@ impl Choice {
         // Until the unit is measured, whether any of its points is timed is
         // taken from whether any node of the graph is.
         let timed = loaded.times().is_ok();
-        let mut scopes = Unit::ALL
-            .into_iter()
-            .filter_map(|unit| Scope::new(unit, inputs));
-        let scope = scopes.next()?;
-        let others: Vec<Scope> = scopes.collect();
-        let units: Vec<Unit> = std::iter::once(scope)
-            .chain(others.iter().copied())
-            .map(Scope::unit)
-            .collect();
-        let names = units.iter().map(|&unit| unit_names(unit).many);
-        let picker = cx.new(|cx| Dropdown::new("scatter-unit", names, 0, cx));
-        let picked = cx.subscribe(&picker, |view, _, event, cx| {
-            let DropdownEvent::Changed(index) = event;
-            let unit = view
-                .choice
-                .as_ref()
-                .and_then(|c| c.units.get(*index).copied());
-            if let Some(unit) = unit {
-                view.choose_unit(unit, cx);
-            }
-        });
+        let picker = UnitPicker::new("scatter-unit", inputs, ScatterPanel::choose_unit, cx)?;
         let axes = Axes::OPENING;
         let names = Axis::ALL.map(Axis::name);
         let across_picker =
@@ -686,7 +654,8 @@ impl Choice {
                 view.choose_axes(|axes| axes.up(axis), cx);
             }
         });
-        let names = ColourBy::ALL.map(|by| by.label(scope.unit()));
+        let unit = picker.chosen(cx).unit();
+        let names = ColourBy::ALL.map(|by| by.label(unit));
         let colour_picker = cx.new(|cx| Dropdown::new("scatter-colour", names, 0, cx));
         let colour_picked = cx.subscribe(&colour_picker, |view, _, event, cx| {
             let DropdownEvent::Changed(index) = event;
@@ -695,12 +664,8 @@ impl Choice {
             }
         });
         let mut choice = Self {
-            scope,
-            others,
             loaded: inputs,
-            units,
             picker,
-            _picked: picked,
             axes,
             across_picker,
             _across_picked: across_picked,
@@ -718,7 +683,7 @@ impl Choice {
     /// Names each colouring the picker offers as it reads for the unit
     /// plotted.
     fn name_colourings(&self, cx: &mut Context<ScatterPanel>) {
-        let unit = self.scope.unit();
+        let unit = self.picker.chosen(cx).unit();
         self.colour_picker.update(cx, |picker, cx| {
             for by in ColourBy::ALL {
                 picker.set_label(by.index(), by.label(unit), cx);
@@ -768,32 +733,11 @@ impl Choice {
         axes_fall || colour_falls
     }
 
-    /// The scope's unit over every loaded input describing it, whose measure
-    /// the plot is scaled to.
-    fn reference(&self) -> Scope {
-        self.scope.widened(self.loaded)
-    }
-
-    /// Plots `unit`, one of those offered, in the scope it was left in.
-    fn choose(&mut self, unit: Unit) {
-        if let Some(other) = self.others.iter_mut().find(|other| other.unit() == unit) {
-            std::mem::swap(&mut self.scope, other);
-        }
-    }
-
-    /// How the toggle for the loaded input `input` stands.
-    fn toggle(&self, input: Input) -> Toggle {
-        let unit = self.scope.unit();
-        let inputs = self.scope.inputs();
-        if !unit.inputs().contains(input) {
-            Toggle::Ignored
-        } else if !inputs.contains(input) {
-            Toggle::Off
-        } else if inputs.without(input).is_none() {
-            Toggle::Lone
-        } else {
-            Toggle::On
-        }
+    /// The scope the plot measures in, and that scope's unit over every loaded
+    /// input describing it, whose measure the plot is scaled to.
+    fn scopes(&self, cx: &App) -> (Scope, Scope) {
+        let scope = self.picker.chosen(cx);
+        (scope, scope.widened(self.loaded))
     }
 }
 
@@ -806,6 +750,24 @@ enum Toggle {
     Lone,
     /// The input describes nothing of the unit plotted.
     Ignored,
+}
+
+impl Toggle {
+    /// How the toggle for the loaded input `input` stands against a plot
+    /// measuring in `scope`.
+    fn of(scope: Scope, input: Input) -> Self {
+        let unit = scope.unit();
+        let inputs = scope.inputs();
+        if !unit.inputs().contains(input) {
+            Toggle::Ignored
+        } else if !inputs.contains(input) {
+            Toggle::Off
+        } else if inputs.without(input).is_none() {
+            Toggle::Lone
+        } else {
+            Toggle::On
+        }
+    }
 }
 
 fn input_name(input: Input) -> &'static str {
@@ -1027,20 +989,20 @@ impl Render for ScatterPanel {
         if let Some(placeholder) = model.source().placeholder(&palette.colors) {
             return root.child(placeholder);
         }
-        let root = root.children(self.choice.as_ref().map(|choice| {
+        let scope = self.choice.as_ref().map(|choice| choice.picker.chosen(cx));
+        let root = root.children(self.choice.as_ref().zip(scope).map(|(choice, scope)| {
             let measuring = self
                 .plot
                 .as_ref()
-                .is_some_and(|plot| plot.scope != choice.scope || plot.plotted.axes != choice.axes);
+                .is_some_and(|plot| plot.scope != scope || plot.plotted.axes != choice.axes);
             let times = model
                 .loaded()
                 .map_or(Err(Untimed::NoProfile), Loaded::times);
-            strip(choice, times, measuring, &palette, cx)
+            strip(choice, scope, times, measuring, &palette, cx)
         }));
         let capabilities = model.loaded().map(|loaded| &loaded.shared.capabilities);
-        let dropped = self.choice.as_ref().zip(capabilities);
-        let dropped =
-            dropped.and_then(|(choice, capabilities)| dropped_edges(choice, capabilities));
+        let dropped = scope.zip(capabilities);
+        let dropped = dropped.and_then(|(scope, capabilities)| dropped_edges(scope, capabilities));
         let root = root.children(dropped.map(|dropped| notice(dropped, &palette)));
         let reveals = model.reveals();
         let row = menu_chrome::row_height(window);
@@ -1473,10 +1435,11 @@ const SWATCH_DIAMETER: f32 = 4.0 * MIN_RADIUS;
 /// What the legend reads while the plot shows part of an axis.
 const ZOOMED: &str = "double-click empty space or press 0 to show all";
 
-/// The strip choosing what the plot measures, which reads `measuring` while a
-/// new choice is measured over the plot drawn for the last.
+/// The strip choosing what the plot measures, now `scope`, which reads
+/// `measuring` while a new choice is measured over the plot drawn for the last.
 fn strip(
     choice: &Choice,
+    scope: Scope,
     times: Result<&NodeTimes, Untimed>,
     measuring: bool,
     palette: &Palette,
@@ -1491,10 +1454,10 @@ fn strip(
             .text_color(palette.label)
             .child(name)
     };
-    let unit = group("points").child(choice.picker.clone());
+    let unit = group("points").child(choice.picker.dropdown());
     let tip = TooltipColors::from_colors(&palette.colors);
     let timed_picker = |id: &'static str, picker: &Entity<Dropdown>, read: &str| {
-        let note = times_note(times, choice.timed, choice.scope.unit(), read);
+        let note = times_note(times, choice.timed, scope.unit(), read);
         div()
             .id(id)
             .tooltip(TextTooltip::builder(note, tip))
@@ -1515,7 +1478,7 @@ fn strip(
     let toggles: Vec<_> = choice
         .loaded
         .inputs()
-        .map(|input| input_toggle(input, choice, palette, cx))
+        .map(|input| input_toggle(input, scope, palette, cx))
         .collect();
     let inputs = group("inputs").children(toggles);
     Toolbar::new()
@@ -1553,12 +1516,11 @@ fn notice(text: String, palette: &Palette) -> Div {
         .child(text)
 }
 
-/// What a measure of configured targets over cquery says of the cquery edges
-/// it leaves out: those a cquery run without the configuration of each
-/// dependency links only to the dependency's target, which no configured
-/// target holds.
-fn dropped_edges(choice: &Choice, capabilities: &Capabilities) -> Option<String> {
-    let scope = choice.scope;
+/// What a measure in `scope` of configured targets over cquery says of the
+/// cquery edges it leaves out: those a cquery run without the configuration
+/// of each dependency links only to the dependency's target, which no
+/// configured target holds.
+fn dropped_edges(scope: Scope, capabilities: &Capabilities) -> Option<String> {
     if scope.unit() != Unit::ConfiguredTarget || !scope.inputs().contains(Input::Cquery) {
         return None;
     }
@@ -1572,17 +1534,17 @@ fn dropped_edges(choice: &Choice, capabilities: &Capabilities) -> Option<String>
     ))
 }
 
-/// Turns the loaded `input`'s share in the measure on and off, and says why
-/// where it cannot.
+/// Turns the loaded `input`'s share in the measure in `scope` on and off, and
+/// says why where it cannot.
 fn input_toggle(
     input: Input,
-    choice: &Choice,
+    scope: Scope,
     palette: &Palette,
     cx: &Context<ScatterPanel>,
 ) -> Stateful<Div> {
     let name = input_name(input);
-    let toggle = choice.toggle(input);
-    let many = unit_names(choice.scope.unit()).many;
+    let toggle = Toggle::of(scope, input);
+    let many = unit_names(scope.unit()).many;
     let why = match toggle {
         Toggle::On | Toggle::Off => None,
         Toggle::Lone => Some(format!(
