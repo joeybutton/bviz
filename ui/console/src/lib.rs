@@ -15,6 +15,7 @@ mod model;
 pub use console::{ConsolePanel, register_keys};
 use model::ConsoleModel;
 
+use bviz_invocation::InvocationId;
 use bviz_terminal::Replay;
 use bviz_ui_components::Pending;
 use bviz_ui_console_args::{ConsoleArgs, ConsoleSource};
@@ -28,6 +29,12 @@ use std::path::PathBuf;
 pub struct Load {
     replay: Pending<Replay>,
     title: SharedString,
+}
+
+/// The invocation that wrote the build event stream at `source`, read from the
+/// head of the file alone.
+pub fn invocation_id(source: &ConsoleSource) -> Option<InvocationId> {
+    bviz_terminal::probe_invocation_id(&source.path)
 }
 
 impl From<ConsoleSource> for Load {
@@ -97,4 +104,36 @@ pub fn run() {
         |load, window, cx| open(load, window, cx).into(),
         &[console::register_keys],
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bviz_terminal::bep::build_event_stream::{BuildEvent, BuildStarted, build_event::Payload};
+    use prost::Message;
+
+    #[test]
+    fn a_source_names_the_invocation_its_stream_was_written_by() {
+        let dir = std::env::var("TEST_TMPDIR").unwrap_or_else(|_| "/tmp".into());
+        let source = |name: &str, stream: Option<&[u8]>| {
+            let path = std::path::Path::new(&dir).join(name);
+            if let Some(stream) = stream {
+                std::fs::write(&path, stream).unwrap();
+            }
+            ConsoleSource { path }
+        };
+        let started = BuildEvent {
+            payload: Some(Payload::Started(BuildStarted {
+                uuid: "a5f7f3e6-4fda".into(),
+                ..Default::default()
+            })),
+            ..Default::default()
+        }
+        .encode_length_delimited_to_vec();
+        let named = source("named.bep", Some(&started));
+        assert_eq!(invocation_id(&named), InvocationId::new("a5f7f3e6-4fda"));
+        let unnamed = source("unnamed.bep", Some(&[]));
+        assert_eq!(invocation_id(&unnamed), None);
+        assert_eq!(invocation_id(&source("missing.bep", None)), None);
+    }
 }

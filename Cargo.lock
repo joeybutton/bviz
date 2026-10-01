@@ -990,6 +990,7 @@ dependencies = [
 name = "bviz_ui_console"
 version = "0.1.0"
 dependencies = [
+ "bviz_invocation",
  "bviz_terminal",
  "bviz_ui_assets",
  "bviz_ui_components",
@@ -998,6 +999,7 @@ dependencies = [
  "bviz_ui_workspace",
  "clap",
  "gpui",
+ "prost",
 ]
 
 [[package]]
