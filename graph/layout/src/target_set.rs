@@ -13,8 +13,10 @@
 
 use std::fmt;
 
+mod copies;
 mod resolve;
 
+pub use copies::TopLevel;
 pub use resolve::{Resolved, TargetIndex};
 
 /// The patterns of a target set, in the order they were written.

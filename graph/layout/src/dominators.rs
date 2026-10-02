@@ -20,7 +20,7 @@ use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
 use crate::facets::Facets;
 use crate::graph::{Graph, Kind};
 use crate::intern::{Id, Names, stable_hash};
-use crate::metrics::{Count, Scope, UnitGraph, unit_graph};
+use crate::metrics::{Count, Scope, Unit, UnitGraph, unit_graph};
 use crate::provenance::Provenance;
 use crate::reduce::{DenseIds, components, reach_counts};
 
@@ -430,6 +430,16 @@ impl ScopeGraph {
         }
     }
 
+    /// This graph where its points are the configured targets.
+    pub fn configured_targets(&self) -> Option<ConfiguredTargets<'_>> {
+        (self.scope.unit() == Unit::ConfiguredTarget).then_some(ConfiguredTargets(self))
+    }
+
+    /// This graph where its points are the actions.
+    pub fn actions(&self) -> Option<Actions<'_>> {
+        (self.scope.unit() == Unit::Action).then_some(Actions(self))
+    }
+
     /// The dominator tree from `roots`, of which those that are no counted
     /// point of the scope are passed over.
     pub fn dominators(&self, names: &Names, roots: &Roots) -> Dominators {
@@ -574,6 +584,43 @@ impl ScopeGraph {
                 }
             }
         }
+    }
+}
+
+/// A [`ScopeGraph`] whose points are the configured targets.
+#[derive(Clone, Copy)]
+pub struct ConfiguredTargets<'a>(&'a ScopeGraph);
+
+impl<'a> ConfiguredTargets<'a> {
+    /// Whether the configured target `id` is top-level: one nothing depends
+    /// on but the other members of a cycle it belongs to.
+    pub fn is_top_level(self, id: Id) -> bool {
+        let ScopeGraph { index, tops, .. } = self.0;
+        index
+            .get(id)
+            .is_some_and(|p| tops.binary_search(&p).is_ok())
+    }
+
+    /// The configured targets `id` depends on directly.
+    pub(crate) fn dependencies(self, id: Id) -> impl Iterator<Item = Id> + 'a {
+        let ScopeGraph { unit, index, .. } = self.0;
+        let point = index.get(id);
+        let of = point.map_or(&[][..], |p| &unit.dependencies[p as usize]);
+        of.iter().map(|&p| unit.points[p as usize].id)
+    }
+}
+
+/// A [`ScopeGraph`] whose points are the actions.
+#[derive(Clone, Copy)]
+pub struct Actions<'a>(&'a ScopeGraph);
+
+impl<'a> Actions<'a> {
+    /// The actions reading what the action `id` writes.
+    pub(crate) fn readers(self, id: Id) -> impl Iterator<Item = Id> + 'a {
+        let ScopeGraph { unit, index, .. } = self.0;
+        let point = index.get(id);
+        let of = point.map_or(&[][..], |p| &unit.dependents[p as usize]);
+        of.iter().map(|&p| unit.points[p as usize].id)
     }
 }
 
@@ -776,7 +823,6 @@ impl Forest {
 mod tests {
     use super::*;
     use crate::graph::{EdgeKind, Node};
-    use crate::metrics::Unit;
     use crate::provenance::InputSet;
 
     /// Configured targets `deps` names, each pair running from a dependency to
