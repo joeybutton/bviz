@@ -59,7 +59,7 @@ impl Status {
 
     /// A test the build could not build failed through something it depends
     /// on, which its build outcome traces back.
-    fn of_test(status: TestStatus) -> Status {
+    pub(crate) fn of_test(status: TestStatus) -> Status {
         match status {
             TestStatus::Passed => Status::Succeeded,
             TestStatus::Flaky => Status::Flaky,

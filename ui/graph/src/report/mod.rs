@@ -2,7 +2,9 @@
 
 use crate::status::{Landing, Nodes, Status};
 use bviz_graph_layout::Id;
-use bviz_invocation::{BuildOutcome, Cause, ConfiguredTarget, FailedAction};
+use bviz_invocation::{
+    BuildOutcome, Cause, ConfiguredTarget, FailedAction, TestOutcome, TestStatus,
+};
 use rustc_hash::FxHashMap;
 use std::num::NonZeroI32;
 use std::ops::Range;
@@ -151,6 +153,11 @@ enum Listed {
         error: String,
         failing: usize,
     },
+    /// A test that did not pass on its first attempt.
+    Test {
+        target: ConfiguredTarget,
+        test: TestOutcome,
+    },
 }
 
 /// What a row names the thing it lists by, its configuration apart.
@@ -174,13 +181,16 @@ impl Listed {
     fn status(&self) -> Status {
         match self {
             Listed::Action { .. } | Listed::Target { .. } => Status::RootCause,
+            Listed::Test { test, .. } => Status::of_test(test.status),
         }
     }
 
     fn name(&self) -> Name<'_> {
         match self {
             Listed::Action { action, .. } => action.name(),
-            Listed::Target { target, .. } => Name::Label(target.borrowed().label()),
+            Listed::Target { target, .. } | Listed::Test { target, .. } => {
+                Name::Label(target.borrowed().label())
+            }
         }
     }
 
@@ -188,7 +198,7 @@ impl Listed {
     fn configuration(&self) -> Option<&str> {
         let configured = match self {
             Listed::Action { action, .. } => action.owner.as_ref()?,
-            Listed::Target { target, .. } => target,
+            Listed::Target { target, .. } | Listed::Test { target, .. } => target,
         };
         configured.borrowed().configuration()
     }
@@ -234,18 +244,21 @@ struct Row {
     shown: Shown,
 }
 
-/// Marks each of `rows` that another names its thing alike.
-fn tell_apart(rows: &mut [Row]) {
+/// Marks each row of `root_causes` and of `troubled` that another of either
+/// names its thing alike.
+fn tell_apart(root_causes: &mut [Row], troubled: &mut [Row]) {
+    let rows = root_causes.len() + troubled.len();
     let mut named: FxHashMap<Name, usize> =
-        FxHashMap::with_capacity_and_hasher(rows.len(), Default::default());
-    for row in rows.iter() {
+        FxHashMap::with_capacity_and_hasher(rows, Default::default());
+    for row in root_causes.iter().chain(troubled.iter()) {
         *named.entry(row.listed.name()).or_default() += 1;
     }
-    let alike: Vec<bool> = rows
+    let alike: Vec<bool> = root_causes
         .iter()
+        .chain(troubled.iter())
         .map(|row| named[&row.listed.name()] > 1)
         .collect();
-    for (row, alike) in rows.iter_mut().zip(alike) {
+    for (row, alike) in root_causes.iter_mut().chain(troubled).zip(alike) {
         row.alike = alike;
     }
 }
@@ -368,14 +381,112 @@ fn root_causes(nodes: &Nodes, failed: usize) -> Vec<Row> {
         .collect()
 }
 
+/// Whether every result of `test` came from a cache.
+fn wholly_cached(test: &TestOutcome) -> bool {
+    test.actions > 0 && test.cached_actions == test.actions
+}
+
+/// How running ended for the tests a build reports on.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct TestTally {
+    passed: usize,
+    /// Those of `passed` that came wholly from a cache.
+    cached: usize,
+    flaky: usize,
+    failed: usize,
+    timed_out: usize,
+    failed_remotely: usize,
+    incomplete: usize,
+    not_run: usize,
+    not_built: usize,
+}
+
+impl TestTally {
+    fn count(&mut self, test: &TestOutcome) {
+        let counted = match test.status {
+            TestStatus::Passed => {
+                self.cached += usize::from(wholly_cached(test));
+                &mut self.passed
+            }
+            TestStatus::Flaky => &mut self.flaky,
+            TestStatus::Failed => &mut self.failed,
+            TestStatus::Timeout => &mut self.timed_out,
+            TestStatus::RemoteFailure => &mut self.failed_remotely,
+            TestStatus::Incomplete => &mut self.incomplete,
+            TestStatus::NoStatus | TestStatus::ToolHaltedBeforeTesting => &mut self.not_run,
+            TestStatus::FailedToBuild => &mut self.not_built,
+        };
+        *counted += 1;
+    }
+
+    /// The tests that did not pass on their first attempt.
+    fn troubled(&self) -> usize {
+        self.total() - self.passed
+    }
+
+    fn total(&self) -> usize {
+        self.passed
+            + self.flaky
+            + self.failed
+            + self.timed_out
+            + self.failed_remotely
+            + self.incomplete
+            + self.not_run
+            + self.not_built
+    }
+}
+
+/// Where a test stands among those listed, the worst first. `None` for a
+/// test that passed, which is counted and not listed, and for one that could
+/// not be built, whose failure the root causes account for.
+fn listed_at(status: TestStatus) -> Option<u8> {
+    match status {
+        TestStatus::Failed => Some(0),
+        TestStatus::Timeout => Some(1),
+        TestStatus::RemoteFailure => Some(2),
+        TestStatus::Flaky => Some(3),
+        TestStatus::Incomplete => Some(4),
+        TestStatus::NoStatus => Some(5),
+        TestStatus::ToolHaltedBeforeTesting => Some(6),
+        TestStatus::Passed | TestStatus::FailedToBuild => None,
+    }
+}
+
+/// The rows of the tests `nodes` lands that did not pass on their first
+/// attempt, of which there are `troubled`, the worst first.
+fn troubled_tests(nodes: &Nodes, troubled: usize) -> Vec<Row> {
+    let mut listed = Vec::with_capacity(troubled);
+    listed.extend(
+        nodes
+            .outcomes()
+            .tests()
+            .filter_map(|(target, test)| Some((listed_at(test.status)?, target, test))),
+    );
+    listed.sort_by_key(|(at, target, _)| (*at, target.label(), target.configuration()));
+    listed
+        .into_iter()
+        .map(|(_, target, test)| Row {
+            listed: Listed::Test {
+                target: target.owned(),
+                test: test.clone(),
+            },
+            alike: false,
+            shown: Shown::of(nodes.of_target(target), || None),
+        })
+        .collect()
+}
+
 /// What a build reported, as the card lists it.
 #[derive(Debug, Default, PartialEq)]
 pub(crate) struct Report {
     builds: BuildTally,
+    tests: TestTally,
     mismatches: Mismatches,
     /// The root causes of the build's failures, the one blamed for the most
     /// targets first.
     root_causes: Vec<Row>,
+    /// The tests that did not pass on their first attempt, the worst first.
+    troubled: Vec<Row>,
 }
 
 impl Report {
@@ -385,34 +496,43 @@ impl Report {
         for (_, outcome) in nodes.outcomes().builds() {
             builds.count(outcome);
         }
+        let mut tests = TestTally::default();
+        for (_, test) in nodes.outcomes().tests() {
+            tests.count(test);
+        }
         let mut root_causes = root_causes(nodes, builds.failed);
-        tell_apart(&mut root_causes);
+        let mut troubled = troubled_tests(nodes, tests.troubled());
+        tell_apart(&mut root_causes, &mut troubled);
         Self {
             builds,
+            tests,
             mismatches: Mismatches::of(nodes),
             root_causes,
+            troubled,
         }
     }
 
     /// How many rows the card lists.
     fn rows(&self) -> usize {
-        self.root_causes.len()
+        self.root_causes.len() + self.troubled.len()
     }
 
-    /// The rows the card lists at `range`, as many of them as there are.
+    /// The rows the card lists at `range`, as many of them as there are: the
+    /// root causes, and after them the tests.
     fn listed(&self, range: Range<usize>) -> impl Iterator<Item = &Row> {
-        self.root_causes.iter().skip(range.start).take(range.len())
+        let rows = self.root_causes.iter().chain(&self.troubled);
+        rows.skip(range.start).take(range.len())
     }
 
     /// Whether the build reported nothing the card could read.
     pub(crate) fn is_empty(&self) -> bool {
-        self.builds.total() == 0 && self.rows() == 0
+        self.builds.total() == 0 && self.tests.total() == 0 && self.rows() == 0
     }
 
     /// Whether the build left something for the reader to look into, which
     /// the card opens for unasked.
     fn troubled(&self) -> bool {
-        self.builds.failed + self.builds.not_built > 0 || self.rows() > 0
+        self.builds.failed + self.builds.not_built + self.tests.troubled() > 0 || self.rows() > 0
     }
 }
 
@@ -422,7 +542,8 @@ mod tests {
     use bviz_graph_layout::graph::Node;
     use bviz_graph_layout::{Graph, Kind, Names};
     use bviz_invocation::{Configurations, Outcomes};
-    use std::num::NonZeroI32;
+    use std::num::{NonZeroI32, NonZeroU32};
+    use std::time::Duration;
 
     const CONFIG: &str = "a7a71f";
     const EXEC_CONFIG: &str = "960ec4";
@@ -456,6 +577,19 @@ mod tests {
             mnemonic: "Genrule".into(),
             exit_code: NonZeroI32::new(exit_code),
             message: message.into(),
+        }
+    }
+
+    /// A test that ran once, in one piece, for 0.3 seconds.
+    pub(super) fn test(status: TestStatus) -> TestOutcome {
+        TestOutcome {
+            status,
+            attempts: 1,
+            runs: 1,
+            shards: None,
+            actions: 1,
+            cached_actions: 0,
+            run_duration: Duration::from_millis(319),
         }
     }
 
@@ -871,6 +1005,135 @@ mod tests {
             rows(&uncaused),
             [read("//lib:broken", "could not be analysed", true)]
         );
+    }
+
+    #[test]
+    fn the_tests_are_tallied_by_how_running_them_ended_leaving_out_what_none_did() {
+        let mut outcomes = Outcomes::default();
+        let line = |outcomes: &Outcomes| report(outcomes).tests.line();
+        outcomes.report_build(target("//app:bin"), BuildOutcome::Built);
+        assert_eq!(line(&outcomes), None);
+
+        outcomes.report_test(target("//app:check"), test(TestStatus::Passed));
+        assert_eq!(line(&outcomes).as_deref(), Some("1 test: 1 passed"));
+
+        let cached = |actions| TestOutcome {
+            actions,
+            cached_actions: 2,
+            shards: NonZeroU32::new(2),
+            ..test(TestStatus::Passed)
+        };
+        outcomes.report_test(target("//app:cached"), cached(2));
+        outcomes.report_test(target("//app:half_cached"), cached(3));
+        assert_eq!(
+            line(&outcomes).as_deref(),
+            Some("3 tests: 3 passed (1 cached)")
+        );
+
+        for (label, status) in [
+            ("//app:flaky", TestStatus::Flaky),
+            ("//app:failing", TestStatus::Failed),
+            ("//app:slow", TestStatus::Timeout),
+            ("//app:slower", TestStatus::Timeout),
+            ("//app:remote", TestStatus::RemoteFailure),
+            ("//app:partial", TestStatus::Incomplete),
+            ("//app:unrun", TestStatus::NoStatus),
+            ("//app:halted", TestStatus::ToolHaltedBeforeTesting),
+            ("//app:unbuilt", TestStatus::FailedToBuild),
+        ] {
+            outcomes.report_test(target(label), test(status));
+        }
+        assert_eq!(
+            line(&outcomes).as_deref(),
+            Some(
+                "12 tests: 3 passed (1 cached), 1 flaky, 1 failed, 2 timed out, \
+                 1 failed remotely, 1 incomplete, 2 not run, 1 not built"
+            )
+        );
+    }
+
+    #[test]
+    fn the_tests_that_did_not_pass_are_listed_worst_first_under_the_root_causes() {
+        let mut outcomes = Outcomes::default();
+        outcomes.report_failed_action(GEN_OUTPUT.into(), failed_action(target("//gen:gen"), 1, ""));
+        for (label, status) in [
+            ("//app:unrun", TestStatus::NoStatus),
+            ("//app:flaky", TestStatus::Flaky),
+            ("//app:passing", TestStatus::Passed),
+            ("//app:slow", TestStatus::Timeout),
+            ("//app:unbuilt", TestStatus::FailedToBuild),
+            ("//app:check", TestStatus::Failed),
+            ("//app:broken", TestStatus::Failed),
+        ] {
+            outcomes.report_test(target(label), test(status));
+        }
+
+        let report = report(&outcomes);
+
+        assert_eq!(
+            rows(&outcomes),
+            [
+                read("Genrule //gen:gen", "exited 1", true),
+                read("//app:broken", "failed in 0.3s · not in this graph", false),
+                read("//app:check", "failed in 0.3s", true),
+                read(
+                    "//app:slow",
+                    "timed out after 0.3s · not in this graph",
+                    false
+                ),
+                read(
+                    "//app:flaky",
+                    "flaky: passed on attempt 1 in 0.3s · not in this graph",
+                    false
+                ),
+                read(
+                    "//app:unrun",
+                    "no status: the test did not run · not in this graph",
+                    false
+                ),
+            ]
+        );
+        let listed = report.listed(0..report.rows());
+        let badges: Vec<Status> = listed.map(|row| row.listed.status()).collect();
+        assert_eq!(
+            badges,
+            [
+                Status::RootCause,
+                Status::TestFailed,
+                Status::TestFailed,
+                Status::TestFailed,
+                Status::Flaky,
+                Status::Unfinished,
+            ]
+        );
+    }
+
+    #[test]
+    fn a_test_listed_under_two_configurations_names_each() {
+        let mut outcomes = Outcomes::default();
+        outcomes.report_test(target("//app:check"), test(TestStatus::Failed));
+        outcomes.report_test(exec_target("//app:check"), test(TestStatus::Timeout));
+        outcomes.report_test(target("//app:other"), test(TestStatus::Failed));
+        let named: Vec<String> = rows(&outcomes).into_iter().map(|(name, ..)| name).collect();
+        assert_eq!(
+            named,
+            [
+                "//app:check (k8-fastbuild)",
+                "//app:other",
+                "//app:check (k8-opt-exec)",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_build_whose_tests_did_not_all_pass_is_one_to_look_into() {
+        let mut outcomes = Outcomes::default();
+        outcomes.report_test(target("//app:check"), test(TestStatus::Passed));
+        let passed = report(&outcomes);
+        assert!(!passed.is_empty() && !passed.troubled());
+
+        outcomes.report_test(target("//app:flaky"), test(TestStatus::Flaky));
+        assert!(report(&outcomes).troubled());
     }
 
     /// The report of a build that only built, and of one that failed.

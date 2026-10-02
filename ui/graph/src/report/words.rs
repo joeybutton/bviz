@@ -1,7 +1,11 @@
 //! The words the card reads what a build reported in.
 
-use super::{Action, BuildTally, Listed, Mismatches, Name, Row, Share, Shown, Unbuilt};
-use bviz_invocation::Configurations;
+use super::{
+    Action, BuildTally, Listed, Mismatches, Name, Row, Share, Shown, TestTally, Unbuilt,
+    wholly_cached,
+};
+use bviz_invocation::{Configurations, TestOutcome, TestStatus};
+use std::time::Duration;
 
 /// `count` of a thing named `one`, or `many` where there is not one of it.
 fn counted(count: usize, one: &str, many: &str) -> String {
@@ -36,6 +40,90 @@ impl BuildTally {
                 (self.skipped, "skipped"),
             ],
         )
+    }
+}
+
+impl TestTally {
+    /// `None` for a build that ran no test.
+    pub(super) fn line(&self) -> Option<String> {
+        let passed = match self.cached {
+            0 => "passed".to_owned(),
+            cached => format!("passed ({cached} cached)"),
+        };
+        (self.total() > 0).then(|| {
+            tallied(
+                counted(self.total(), "test", "tests"),
+                &[
+                    (self.passed, &passed),
+                    (self.flaky, "flaky"),
+                    (self.failed, "failed"),
+                    (self.timed_out, "timed out"),
+                    (self.failed_remotely, "failed remotely"),
+                    (self.incomplete, "incomplete"),
+                    (self.not_run, "not run"),
+                    (self.not_built, "not built"),
+                ],
+            )
+        })
+    }
+}
+
+/// How long a test ran, to the precision a reader compares runs at.
+fn lasted(run: Duration) -> String {
+    const TENTHS: u64 = 10;
+    const MINUTE: u64 = 60;
+    const HOUR: u64 = 60 * MINUTE;
+    let tenths = (run.as_secs_f64() * TENTHS as f64).round() as u64;
+    let seconds = run.as_secs_f64().round() as u64;
+    if tenths == 0 {
+        "under 0.1s".to_owned()
+    } else if tenths < MINUTE * TENTHS {
+        format!("{}.{}s", tenths / TENTHS, tenths % TENTHS)
+    } else if seconds < HOUR {
+        format!("{}m {:02}s", seconds / MINUTE, seconds % MINUTE)
+    } else {
+        format!("{}h {:02}m", seconds / HOUR, seconds % HOUR / MINUTE)
+    }
+}
+
+/// What `test`'s runs and shards add to the account of it, which counts
+/// attempts within one shard of one run and times all of them together.
+/// Empty for a test run once and in one piece.
+fn spread(test: &TestOutcome) -> String {
+    let runs = counted(test.runs as usize, "run", "runs");
+    let shards = test
+        .shards
+        .map(|shards| counted(shards.get() as usize, "shard", "shards"));
+    match (test.runs > 1, shards) {
+        (false, None) => String::new(),
+        (false, Some(shards)) => format!(" over {shards}"),
+        (true, None) => format!(" over {runs}"),
+        (true, Some(shards)) => format!(" over {runs} of {shards}"),
+    }
+}
+
+/// How running `test` ended, in words.
+fn ran(test: &TestOutcome) -> String {
+    let attempts = test.attempts;
+    let every_attempt = match attempts {
+        0 | 1 => String::new(),
+        attempts => format!(" on each of {attempts} attempts"),
+    };
+    let took = lasted(test.run_duration);
+    let spread = spread(test);
+    match test.status {
+        TestStatus::Passed => match wholly_cached(test) {
+            true => format!("passed (cached){spread}"),
+            false => format!("passed in {took}{spread}"),
+        },
+        TestStatus::Flaky => format!("flaky: passed on attempt {attempts} in {took}{spread}"),
+        TestStatus::Failed => format!("failed{every_attempt} in {took}{spread}"),
+        TestStatus::Timeout => format!("timed out{every_attempt} after {took}{spread}"),
+        TestStatus::RemoteFailure => format!("failed remotely{every_attempt}{spread}"),
+        TestStatus::Incomplete => format!("incomplete: not every run ended{spread}"),
+        TestStatus::NoStatus => "no status: the test did not run".to_owned(),
+        TestStatus::ToolHaltedBeforeTesting => "not run: the build ended before testing".to_owned(),
+        TestStatus::FailedToBuild => "not run: the test could not be built".to_owned(),
     }
 }
 
@@ -198,6 +286,7 @@ impl Listed {
                 };
                 blamed(what, *failing)
             }
+            Listed::Test { test, .. } => ran(test),
         }
     }
 
@@ -206,6 +295,7 @@ impl Listed {
         match self {
             Listed::Action { message, .. } => message,
             Listed::Target { error, .. } => error,
+            Listed::Test { .. } => "",
         }
     }
 }
@@ -260,7 +350,9 @@ impl Row {
 
 #[cfg(test)]
 mod tests {
+    use super::super::tests::test;
     use super::*;
+    use std::num::NonZeroU32;
 
     #[test]
     fn a_long_line_of_what_the_build_said_is_broken_at_a_space() {
@@ -298,5 +390,63 @@ mod tests {
         assert_eq!(beyond.lines().count(), 3 + HOVER_LINES + 1);
         assert!(beyond.ends_with("\n… and 2 more lines"), "{beyond}");
         assert_eq!(hover("name", "detail", " \n"), "name\ndetail");
+    }
+
+    /// A run is timed as it rounds, so one rounding up to a minute reads as
+    /// the minute, and one rounding to no tenth of a second as under one.
+    #[test]
+    fn a_run_is_timed_to_the_precision_it_is_compared_at() {
+        let lasted = |millis| lasted(Duration::from_millis(millis));
+        assert_eq!(lasted(0), "under 0.1s");
+        assert_eq!(lasted(49), "under 0.1s");
+        assert_eq!(lasted(50), "0.1s");
+        assert_eq!(lasted(3_038), "3.0s");
+        assert_eq!(lasted(59_949), "59.9s");
+        assert_eq!(lasted(59_950), "1m 00s");
+        assert_eq!(lasted(59_999), "1m 00s");
+        assert_eq!(lasted(125_400), "2m 05s");
+        assert_eq!(lasted(3_599_600), "1h 00m");
+        assert_eq!(lasted((3 * 3600 + 7 * 60 + 59) * 1000), "3h 07m");
+    }
+
+    #[test]
+    fn a_test_is_said_to_have_ended_as_its_attempts_runs_and_shards_explain() {
+        let flaky = TestOutcome {
+            attempts: 2,
+            actions: 2,
+            run_duration: Duration::from_millis(80),
+            ..test(TestStatus::Flaky)
+        };
+        assert_eq!(ran(&flaky), "flaky: passed on attempt 2 in 0.1s");
+        let retried = TestOutcome {
+            attempts: 3,
+            ..test(TestStatus::Failed)
+        };
+        assert_eq!(ran(&retried), "failed on each of 3 attempts in 0.3s");
+        let cached = TestOutcome {
+            cached_actions: 1,
+            ..test(TestStatus::Passed)
+        };
+        assert_eq!(ran(&cached), "passed (cached)");
+        assert_eq!(ran(&test(TestStatus::Passed)), "passed in 0.3s");
+
+        let sharded = |runs, status| TestOutcome {
+            runs,
+            shards: NonZeroU32::new(4),
+            ..test(status)
+        };
+        assert_eq!(
+            ran(&sharded(1, TestStatus::Failed)),
+            "failed in 0.3s over 4 shards"
+        );
+        assert_eq!(
+            ran(&sharded(3, TestStatus::Timeout)),
+            "timed out after 0.3s over 3 runs of 4 shards"
+        );
+        let rerun = TestOutcome {
+            runs: 3,
+            ..test(TestStatus::Failed)
+        };
+        assert_eq!(ran(&rerun), "failed in 0.3s over 3 runs");
     }
 }

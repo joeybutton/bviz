@@ -225,6 +225,7 @@ pub(crate) fn card(
                     .compact(),
                 ),
         )
+        .children(report.tests.line().map(line))
         .children(
             report
                 .mismatches
