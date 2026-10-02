@@ -4,6 +4,7 @@
 
 mod icicle;
 mod paint;
+mod roots;
 
 use crate::Palette;
 use crate::drag::DOUBLE_CLICK;
@@ -13,12 +14,13 @@ use crate::point::{KindNames, identify, unit_names};
 use crate::toolbar::{busy, group};
 use crate::unit_picker::UnitPicker;
 use bviz_graph_layout::Id;
-use bviz_graph_layout::dominators::{Dominators, Roots, Standing, Targets};
+use bviz_graph_layout::dominators::{Chosen, Dominators, Roots, Standing, Targets};
 use bviz_graph_layout::metrics::{ByUnit, Scope, Unit};
 use bviz_graph_layout::select::{Filter, Verdicts};
+use bviz_graph_layout::target_set::PatternError;
 use bviz_ui_components::{
-    Toolbar, TooltipColors, cached_layer, centered_notice, centered_spinner, load_in_background,
-    paint_tooltip_box,
+    QueryField, QueryFieldEvent, Toolbar, TooltipColors, cached_layer, centered_notice,
+    centered_spinner, load_in_background, paint_tooltip_box,
 };
 use bviz_ui_workspace::{Panel, PanelEvent, PanelKind, ViewKind};
 use gpui::{
@@ -31,6 +33,7 @@ use paint::{
     HINT_SEPARATOR, MIN_CELL_WIDTH, Scene, cell_name, hints_among, point_name, run_name,
     shared_name,
 };
+use roots::{Found, Within};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -38,7 +41,9 @@ use std::sync::Arc;
 /// pressed here reaches this panel and no other.
 pub(crate) const KEY_CONTEXT: &str = "GraphDominators";
 
-gpui::actions!(bviz_graph, [ShowWholeBuild, FocusUp]);
+pub(crate) use roots::KEY_CONTEXT as ROOTS_KEY_CONTEXT;
+
+gpui::actions!(bviz_graph, [ShowWholeBuild, FocusUp, LeaveRoots]);
 
 /// What the panel reads while the tree is being computed.
 const COMPUTING: &str = "Computing dominators…";
@@ -68,6 +73,16 @@ pub struct DominatorsPanel {
     /// Evaluates the filter, absent while none is being evaluated, so that one
     /// evaluation runs at a time.
     fading: Option<Task<()>>,
+    /// The roots chosen last, from the time the first are chosen.
+    rooting: Option<Rooting>,
+    /// Chooses the roots afresh, absent while none are being chosen; replaced
+    /// by a later choice, which it would only hold up.
+    choosing: Option<Choosing>,
+    /// The field naming the roots as a target set.
+    roots_field: Entity<QueryField>,
+    /// The target set that last failed, which is not resolved again while
+    /// the field holds it.
+    failed: Option<Failed>,
     /// The trees of the graph read coloured so far that the graph still
     /// keeps.
     coloured: HashMap<TreeKey, Arc<Coloured>>,
@@ -78,6 +93,7 @@ pub struct DominatorsPanel {
     _source_replaced: Subscription,
     _dominators_landed: Subscription,
     _filter_changed: Subscription,
+    _roots_typed: Subscription,
 }
 
 impl DominatorsPanel {
@@ -87,6 +103,9 @@ impl DominatorsPanel {
             view.drawn = None;
             view.fade = None;
             view.fading = None;
+            view.rooting = None;
+            view.choosing = None;
+            view.failed = None;
             view.coloured.clear();
             view.drawing = None;
             view.picker = unit_picker(&view.model, cx);
@@ -100,6 +119,18 @@ impl DominatorsPanel {
             }
         });
         let filter_changed = cx.subscribe(&model, |view, _, _: &FilterChanged, cx| view.refade(cx));
+        let roots_field = cx.new(|cx| {
+            QueryField::new(
+                "dominators-roots",
+                roots::PLACEHOLDER,
+                roots::FIELD_WIDTH,
+                cx,
+            )
+        });
+        let roots_typed = cx.subscribe(&roots_field, |view, _, event, cx| match event {
+            QueryFieldEvent::Edited => {}
+            QueryFieldEvent::Settled => view.reroot(cx),
+        });
         let parent = cx.entity().downgrade();
         Self {
             focus_handle: cx.focus_handle(),
@@ -111,12 +142,17 @@ impl DominatorsPanel {
             frame: None,
             fade: None,
             fading: None,
+            rooting: None,
+            choosing: None,
+            roots_field,
+            failed: None,
             coloured: HashMap::new(),
             drawing: None,
             _changed: changed,
             _source_replaced: source_replaced,
             _dominators_landed: dominators_landed,
             _filter_changed: filter_changed,
+            _roots_typed: roots_typed,
         }
     }
 
@@ -125,38 +161,151 @@ impl DominatorsPanel {
         self.picker.as_ref().map(|picker| picker.chosen(cx))
     }
 
-    /// The tree drawn for the scope chosen, once the graph is read.
+    /// The tree drawn for the scope chosen, once its roots are chosen.
     fn key(&self, cx: &App) -> Option<TreeKey> {
+        self.rooting(cx).map(Rooting::key)
+    }
+
+    /// The roots chosen last, where they were chosen in the scope chosen.
+    fn rooting(&self, cx: &App) -> Option<&Rooting> {
         let scope = self.scope(cx)?;
-        Some(TreeKey {
-            scope,
-            roots: Roots::Tops,
-        })
+        (self.rooting.as_ref()).filter(|rooting| rooting.scope() == scope)
     }
 
-    /// The tree of targets a tooltip places the configured targets drawn in,
-    /// read from the inputs the tree drawn reads and rooted at the top-level
-    /// targets; absent where the tree drawn is of another unit.
+    /// The tree of targets a tooltip places the configured targets drawn in;
+    /// absent where the tree drawn is of another unit.
     fn target_key(&self) -> Option<TreeKey> {
-        let drawn = self.drawn.as_ref()?.coloured.tree.scope();
-        let ByUnit::ConfiguredTarget { targets: scope } = drawn.by_unit() else {
-            return None;
-        };
-        Some(TreeKey {
-            scope,
-            roots: Roots::Tops,
-        })
+        self.drawn.as_ref()?.as_targets.clone()
     }
 
-    /// Has the tree of the chosen scope computed, where the panel is shown,
-    /// and draws it where it already is.
+    /// Chooses the roots in the chosen scope and has the tree from them
+    /// computed, where the panel is shown, drawing it where it already is.
     fn compute(&mut self, cx: &mut Context<Self>) {
-        let Some(key) = self.key(cx).filter(|_| self.shown) else {
+        if !self.shown {
+            return;
+        }
+        self.reroot(cx);
+        self.grow(cx);
+        self.refade(cx);
+    }
+
+    /// Has the tree of the chosen scope from the roots chosen in it computed,
+    /// and draws it where it already is.
+    fn grow(&mut self, cx: &mut Context<Self>) {
+        let Some(key) = self.key(cx) else {
             return;
         };
         self.want(key, cx);
         self.redraw(cx);
-        self.refade(cx);
+    }
+
+    /// The target set the roots field holds; none where it is empty.
+    fn target_set(&self, cx: &App) -> Option<SharedString> {
+        let text = self.roots_field.read(cx).text(cx);
+        (!text.trim().is_empty()).then_some(text)
+    }
+
+    /// How the target set the roots field holds failed in the scope chosen,
+    /// where it is the set that last failed.
+    fn failure(&self, cx: &App) -> Option<&Failed> {
+        let (scope, text) = (self.scope(cx)?, self.target_set(cx)?);
+        (self.failed.as_ref()).filter(|failed| failed.scope == scope && failed.text == text)
+    }
+
+    /// Chooses the roots of the chosen scope by the target set the roots
+    /// field holds, or as the top-level points with the field empty, where
+    /// neither the roots in place nor those being chosen are chosen so. A
+    /// target set that failed gives up the choice under way and leaves in
+    /// place the roots an earlier set named in the scope, and otherwise
+    /// stands for the top-level points.
+    fn reroot(&mut self, cx: &mut Context<Self>) {
+        let Some(scope) = self.scope(cx) else {
+            return;
+        };
+        let failed = self.failure(cx).is_some();
+        let set = self.target_set(cx).filter(|_| !failed);
+        let stands = self.rooting(cx).is_some_and(|rooting| match rooting {
+            Rooting::Targets { .. } if failed => true,
+            rooting => rooting.set() == set.as_ref(),
+        });
+        if stands {
+            self.choosing = None;
+            return;
+        }
+        match set {
+            None => {
+                self.choosing = None;
+                self.root(Rooting::Tops { scope }, cx);
+            }
+            Some(text) => {
+                let choosing = self.choosing.as_ref();
+                if !choosing.is_some_and(|choosing| choosing.is(scope, &text)) {
+                    self.root_by_targets(scope, text, cx);
+                }
+            }
+        }
+    }
+
+    /// Chooses the roots of `scope` the target set `text` names.
+    fn root_by_targets(&mut self, scope: Scope, text: SharedString, cx: &mut Context<Self>) {
+        let prepared = self.model.update(cx, |model, _| {
+            Some((model.targets()?, Within::of(scope, model)?))
+        });
+        let Some((targets, within)) = prepared else {
+            return;
+        };
+        let (set, landing) = (text.clone(), text.clone());
+        let work = load_in_background(
+            cx,
+            move || roots::find(&set, &targets, &within),
+            move |view, found, cx| view.found(scope, landing, found, cx),
+        );
+        self.choosing = Some(Choosing {
+            scope,
+            text,
+            _work: work,
+        });
+    }
+
+    /// Roots the tree of `scope` at what the target set `text` came to. A
+    /// set that fails is kept as the one that failed, and the roots are
+    /// chosen as [`Self::reroot`] chooses them under a failed set.
+    fn found(
+        &mut self,
+        scope: Scope,
+        text: SharedString,
+        found: Result<Found, PatternError>,
+        cx: &mut Context<Self>,
+    ) {
+        self.choosing = None;
+        match found {
+            Ok(Found {
+                roots,
+                named,
+                notices,
+            }) => {
+                let rooting = Rooting::Targets {
+                    scope,
+                    text,
+                    roots,
+                    named,
+                    notices,
+                };
+                self.root(rooting, cx);
+            }
+            Err(error) => {
+                self.failed = Some(Failed { scope, text, error });
+                self.reroot(cx);
+            }
+        }
+    }
+
+    /// Takes `rooting` for the roots chosen and has the tree from them
+    /// computed.
+    fn root(&mut self, rooting: Rooting, cx: &mut Context<Self>) {
+        self.rooting = Some(rooting);
+        self.grow(cx);
+        cx.notify();
     }
 
     /// Has the tree of `key`, the one chosen, computed, and once that is the
@@ -219,20 +368,26 @@ impl DominatorsPanel {
         cx.notify();
     }
 
-    /// Draws the tree of the chosen scope from the whole build once it has
-    /// landed and been coloured, where it is not the one drawn. Colouring is a
+    /// Draws the tree of the chosen scope from the roots chosen in it once it
+    /// has landed and been coloured, where it is not the one drawn. Colouring is a
     /// pass over the whole tree, so it runs off the UI thread, one at a time,
     /// and a colouring running draws again once it lands. The tree drawn stays
     /// until then.
     fn redraw(&mut self, cx: &mut Context<Self>) {
-        let Some(key) = self.key(cx) else {
+        let (Some(key), Some(rooting)) = (self.key(cx), self.rooting(cx)) else {
             return;
         };
-        if self
-            .drawn
-            .as_ref()
-            .is_some_and(|drawn| drawn.coloured.key == key)
+        let as_targets = rooting.as_targets();
+        if let Some(drawn) = &mut self.drawn
+            && drawn.coloured.key == key
         {
+            // Two target sets can name the roots of one tree and different
+            // targets.
+            if drawn.as_targets != as_targets {
+                drawn.as_targets = as_targets;
+                self.want(key, cx);
+                self.rehover(cx);
+            }
             return;
         }
         let model = self.model.read(cx);
@@ -241,6 +396,7 @@ impl DominatorsPanel {
         if let Some(coloured) = self.coloured.get(&key) {
             self.drawn = Some(Drawn {
                 coloured: Arc::clone(coloured),
+                as_targets,
                 focus: None,
                 hover: None,
                 press: None,
@@ -464,6 +620,115 @@ fn unit_picker(
     )
 }
 
+/// The roots a tree of one scope is drawn from, with what chose them.
+enum Rooting {
+    /// Every top-level point of the scope.
+    Tops { scope: Scope },
+    /// The points of the scope a target set names.
+    Targets {
+        scope: Scope,
+        /// The set, as typed.
+        text: SharedString,
+        roots: Chosen,
+        /// The targets the set names.
+        named: Chosen,
+        /// What the roots leave unsaid of the set.
+        notices: Vec<String>,
+    },
+}
+
+impl Rooting {
+    fn scope(&self) -> Scope {
+        match *self {
+            Rooting::Tops { scope } | Rooting::Targets { scope, .. } => scope,
+        }
+    }
+
+    /// The target set that chose the roots; none where they are the
+    /// top-level points.
+    fn set(&self) -> Option<&SharedString> {
+        match self {
+            Rooting::Tops { .. } => None,
+            Rooting::Targets { text, .. } => Some(text),
+        }
+    }
+
+    fn roots(&self) -> Roots {
+        match self {
+            Rooting::Tops { .. } => Roots::Tops,
+            Rooting::Targets { roots, .. } => Roots::Chosen(roots.clone()),
+        }
+    }
+
+    /// The tree drawn from the roots.
+    fn key(&self) -> TreeKey {
+        TreeKey {
+            scope: self.scope(),
+            roots: self.roots(),
+        }
+    }
+
+    /// The tree of targets a tooltip places the scope's points in, rooted as
+    /// what chose the roots roots a tree of targets; absent where the points
+    /// are no configured targets.
+    fn as_targets(&self) -> Option<TreeKey> {
+        let ByUnit::ConfiguredTarget { targets: scope } = self.scope().by_unit() else {
+            return None;
+        };
+        let roots = match self {
+            Rooting::Tops { .. } => Roots::Tops,
+            Rooting::Targets { named, .. } => Roots::Chosen(named.clone()),
+        };
+        Some(TreeKey { scope, roots })
+    }
+
+    fn notices(&self) -> &[String] {
+        match self {
+            Rooting::Tops { .. } => &[],
+            Rooting::Targets { notices, .. } => notices,
+        }
+    }
+}
+
+/// A choice of the roots of `scope` by the target set `text`, under way.
+struct Choosing {
+    scope: Scope,
+    text: SharedString,
+    /// Dropping it gives the choice up.
+    _work: Task<()>,
+}
+
+impl Choosing {
+    fn is(&self, scope: Scope, text: &SharedString) -> bool {
+        self.scope == scope && self.text == *text
+    }
+}
+
+/// The target set `text`, which names no roots in `scope`.
+struct Failed {
+    scope: Scope,
+    text: SharedString,
+    error: PatternError,
+}
+
+/// How the roots of a tree were chosen.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum RootedBy {
+    /// As every top-level point.
+    Tops,
+    /// As the points a target set names.
+    Targets,
+}
+
+impl RootedBy {
+    fn of(roots: &Roots) -> Self {
+        match roots {
+            Roots::Tops => RootedBy::Tops,
+            Roots::Chosen(_) => RootedBy::Targets,
+        }
+    }
+}
+
 /// How the cells are faded, kept with the filter it was evaluated from so a
 /// filter that changes is told apart from the one the cells are faded by.
 struct Fade {
@@ -485,10 +750,18 @@ struct Coloured {
     targets: Option<Targets>,
 }
 
+impl Coloured {
+    fn by(&self) -> RootedBy {
+        RootedBy::of(&self.key.roots)
+    }
+}
+
 /// A tree drawn, and how the reader has it drawn, which lasts only as long as
 /// the tree is drawn.
 struct Drawn {
     coloured: Arc<Coloured>,
+    /// The [`Rooting::as_targets`] of the roots the tree is drawn from.
+    as_targets: Option<TreeKey>,
     focus: Option<Focus>,
     hover: Option<Hover>,
     /// Where the first press of the last click landed.
@@ -883,6 +1156,20 @@ fn share(part: u32, whole: u32) -> String {
 
 const PERCENT: f64 = 100.0;
 
+/// What the status says of a tree of `total` points of `unit` from `roots`
+/// roots, leaving out the `outside` points of its scope none of them reaches.
+fn tally(unit: Unit, total: u32, roots: u32, outside: u32) -> String {
+    let held = unit_names(unit).counted(total);
+    let rooted = format!(
+        "{held} · {roots} {}",
+        if roots == 1 { "root" } else { "roots" }
+    );
+    match outside {
+        0 => rooted,
+        _ => format!("{rooted} · {outside} outside"),
+    }
+}
+
 impl EventEmitter<PanelEvent> for DominatorsPanel {}
 
 impl Focusable for DominatorsPanel {
@@ -909,8 +1196,13 @@ impl Panel for DominatorsPanel {
         let status = model.source().status("No graph", |_| match &self.drawn {
             None => COMPUTING.into(),
             Some(drawn) => {
-                let many = unit_names(drawn.coloured.tree.scope().unit()).many;
-                format!("{} {many}", drawn.coloured.tree.total())
+                let tree = &drawn.coloured.tree;
+                tally(
+                    tree.scope().unit(),
+                    tree.total(),
+                    tree.roots().len() as u32,
+                    tree.outside(),
+                )
             }
         });
         Some(status.into())
@@ -945,16 +1237,34 @@ impl Render for DominatorsPanel {
         let drawn = self.drawn.as_ref();
         let key = self.key(cx);
         let root = root.children(self.picker.as_ref().map(|picker| {
-            let computing = drawn.is_some_and(|drawn| Some(&drawn.coloured.key) != key.as_ref());
+            let computing = self.choosing.is_some()
+                || drawn.is_some_and(|drawn| Some(&drawn.coloured.key) != key.as_ref());
+            let field = roots::field(&self.roots_field, &palette, cx);
             let crumbs = drawn.and_then(|drawn| breadcrumb(drawn, &palette, cx));
-            strip(picker, crumbs, computing, &palette)
+            strip(picker, field, crumbs, computing, &palette)
         }));
+        let rooting = self.rooting(cx);
+        let report = match self.failure(cx) {
+            Some(failed) => {
+                let by = rooting.map(|rooting| RootedBy::of(&rooting.roots()));
+                Some(roots::failure_line(&failed.error, by, &palette))
+            }
+            None => rooting
+                .map(Rooting::notices)
+                .filter(|notices| !notices.is_empty())
+                .map(|notices| roots::notices_line(notices, &palette)),
+        };
+        let root = root.children(report);
         let Some(drawn) = drawn else {
             return root.child(centered_spinner(COMPUTING, &palette.colors));
         };
-        if drawn.coloured.tree.total() == 0 {
-            let many = unit_names(drawn.coloured.tree.scope().unit()).many;
-            let empty = format!("The graph holds no {many}.");
+        let tree = &drawn.coloured.tree;
+        if tree.total() == 0 {
+            let many = unit_names(tree.scope().unit()).many;
+            let empty = match drawn.coloured.by() {
+                RootedBy::Tops => format!("The graph holds no {many}."),
+                RootedBy::Targets => format!("The target set names no {many} of the graph."),
+            };
             return root.child(centered_notice(empty, &palette.colors));
         }
         let swatch = Swatch {
@@ -989,12 +1299,19 @@ impl Render for DominatorsPanel {
     }
 }
 
-/// The strip choosing the unit drawn, followed by `crumbs`, which reads
-/// `computing` while the tree of a new choice is computed over the one drawn
-/// for the last.
-fn strip(picker: &UnitPicker, crumbs: Option<Div>, computing: bool, palette: &Palette) -> Toolbar {
+/// The strip choosing the unit drawn and the roots `field`, followed by
+/// `crumbs`, which reads `computing` while the roots of a new choice are
+/// chosen and its tree is computed over the one drawn for the last.
+fn strip(
+    picker: &UnitPicker,
+    field: impl IntoElement,
+    crumbs: Option<Div>,
+    computing: bool,
+    palette: &Palette,
+) -> Toolbar {
     Toolbar::new()
         .child(group("points", palette).child(picker.dropdown()))
+        .child(field)
         .when_some(crumbs, |bar, crumbs| bar.child(crumbs))
         .when(computing, |bar| {
             bar.trailing(busy("dominators-computing", "computing…", palette))
@@ -1067,12 +1384,17 @@ fn breadcrumb(drawn: &Drawn, palette: &Palette, cx: &Context<DominatorsPanel>) -
     Some(
         row()
             .flex_1()
+            .min_w(CRUMBS_MIN_WIDTH)
             .text_sm()
             .text_color(palette.label)
             .child(link(0, WHOLE_BUILD_CRUMB.to_owned(), None, None).flex_shrink_0())
             .child(row().child(row().children(above)).child(last)),
     )
 }
+
+/// The least width the breadcrumb is laid out at: with less left beside the
+/// strip's controls, it takes a row of the strip to itself.
+const CRUMBS_MIN_WIDTH: Pixels = px(320.);
 
 /// What the breadcrumb names the whole build.
 const WHOLE_BUILD_CRUMB: &str = "Whole build";
@@ -1169,6 +1491,14 @@ impl Render for IcicleCanvas {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_status_counts_the_points_outside_only_where_there_are_any() {
+        let unit = Unit::ConfiguredTarget;
+        assert_eq!(tally(unit, 9, 1, 0), "9 configured targets · 1 root");
+        let outside = "1 configured target · 2 roots · 7 outside";
+        assert_eq!(tally(unit, 1, 2, 7), outside);
+    }
 
     #[test]
     fn the_targets_a_subtree_holds_read_by_where_else_they_are_configured() {

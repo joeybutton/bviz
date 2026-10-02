@@ -12,6 +12,7 @@ use bviz_graph_layout::lod::{DEFAULT_MAX_EDGES, DEFAULT_MAX_NODES, Overflow};
 use bviz_graph_layout::metrics::{Measurement, Scope, measure};
 use bviz_graph_layout::select::Filter;
 use bviz_graph_layout::select::labels::LabelIndex;
+use bviz_graph_layout::target_set::TargetIndex;
 use bviz_graph_layout::{Capabilities, Facets, Id, InputSet, Joint, MapLayout, Names, Provenance};
 use bviz_invocation::{Configurations, Revision, Session};
 use bviz_ui_components::{Pending, load_in_background};
@@ -121,11 +122,18 @@ pub(crate) struct Loaded {
     timed: Revision,
     dominators: Passes<TreeKey, Dominators>,
     scope_graphs: HashMap<Scope, Prepared<ScopeGraph>>,
+    /// The graph's targets by repository, package and name.
+    targets: Prepared<TargetIndex>,
 }
 
 impl Loaded {
     pub(crate) fn new(shared: Shared, opening: Opening) -> Self {
+        let targets = Prepared::new(&shared, |shared| {
+            let labels = Arc::clone(&shared.labels);
+            TargetIndex::of(labels, &shared.base, &shared.facets, &shared.capabilities)
+        });
         Self {
+            targets,
             shared,
             opening,
             measures: Passes::keeping_all(),
@@ -699,6 +707,22 @@ impl GraphModel {
     /// The loaded graph's dominator tree for `key`, once computed.
     pub(crate) fn dominators(&self, key: &TreeKey) -> Option<&Arc<Dominators>> {
         self.loaded()?.dominators.done(key)
+    }
+
+    /// The points of `scope` of the loaded graph and the dependencies between
+    /// them, which the graph's dominator trees in `scope` share; absent while
+    /// the graph is still being read.
+    pub(crate) fn scope_graph(&mut self, scope: Scope) -> Option<Prepared<ScopeGraph>> {
+        match &mut self.source {
+            Source::Loaded(loaded) => Some(loaded.scope_graph(scope)),
+            _ => None,
+        }
+    }
+
+    /// The targets of the loaded graph, indexed for resolving a target set;
+    /// absent while the graph is still being read.
+    pub(crate) fn targets(&self) -> Option<Prepared<TargetIndex>> {
+        Some(self.loaded()?.targets.clone())
     }
 
     /// Runs the work `pass` makes of the loaded graph off the UI thread for

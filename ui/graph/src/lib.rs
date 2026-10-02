@@ -94,6 +94,12 @@ pub fn register_keys(cx: &mut App) {
     let outside_search = Some(predicate.as_str());
     let picking = format!("{} && {}", scatter::KEY_CONTEXT, scatter::PICKING);
     let picking = Some(picking.as_str());
+    let dominators = format!(
+        "{} && !{}",
+        dominators::KEY_CONTEXT,
+        dominators::ROOTS_KEY_CONTEXT
+    );
+    let outside_roots = Some(dominators.as_str());
     cx.bind_keys([
         KeyBinding::new("h", ToggleNeighborhood, outside_search),
         KeyBinding::new("r", ToggleReduce, outside_search),
@@ -102,15 +108,12 @@ pub fn register_keys(cx: &mut App) {
         // is the card the typed pattern put up over the drawing.
         KeyBinding::new("escape", search::DismissResults, Some(search::KEY_CONTEXT)),
         KeyBinding::new("0", scatter::ShowWholePlot, Some(scatter::KEY_CONTEXT)),
+        KeyBinding::new("0", dominators::ShowWholeBuild, outside_roots),
+        KeyBinding::new("backspace", dominators::FocusUp, outside_roots),
         KeyBinding::new(
-            "0",
-            dominators::ShowWholeBuild,
-            Some(dominators::KEY_CONTEXT),
-        ),
-        KeyBinding::new(
-            "backspace",
-            dominators::FocusUp,
-            Some(dominators::KEY_CONTEXT),
+            "escape",
+            dominators::LeaveRoots,
+            Some(dominators::ROOTS_KEY_CONTEXT),
         ),
         KeyBinding::new("up", scatter::AimUp, picking),
         KeyBinding::new("down", scatter::AimDown, picking),
