@@ -3,12 +3,14 @@ use rayon::slice::ParallelSliceMut;
 
 use bviz_trace_profile::{SpanRole, Str};
 
-use crate::flame::FlameGraph;
+use crate::flame::{FlameGraph, SpanSelf};
 
 /// One aggregated group of frames, summed across the flame graph. The rows
 /// partition the root's total, so a group's share `self_us / Σ(all groups'
 /// self_us)` sums to 100% without double-counting nested time. `max_us` is the
-/// peak single-frame self time, `count` the number of merged span occurrences.
+/// most self time one instance spent in one of the group's frames, a frame of
+/// spans that belong to no instance counting as one; `count` is the number of
+/// merged span occurrences.
 /// `key` is a [`Str`] handle into the profile held by the [`FlameGraph`] the row
 /// was derived from; resolve it with that graph's [`str`](FlameGraph::str).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -44,7 +46,7 @@ impl StatRow {
 /// A detail frame carries part of its parent's own self time under another
 /// label, so a row of its own would double-count that time and split it away
 /// from the label it belongs to. Each is skipped, and its parent contributes
-/// [`FlameGraph::span_self_us_by`] instead.
+/// its [`SpanSelf`] instead.
 pub fn stats_from_flame(graph: &FlameGraph) -> Vec<StatRow> {
     stats_by(graph, |i| graph.total_us(i))
 }
@@ -70,12 +72,12 @@ fn stats_by(graph: &FlameGraph, total_us: impl Fn(usize) -> i64) -> Vec<StatRow>
             continue;
         }
         let rank = graph.rank(i);
-        let self_us = graph.span_self_us_by(i, &total_us);
+        let SpanSelf { self_us, peak_us } = graph.span_self_by(i, &total_us);
         match &mut rows[rank as usize] {
             Some(row) => {
                 row.count += graph.count(i);
                 row.self_us += self_us;
-                row.max_us = row.max_us.max(self_us);
+                row.max_us = row.max_us.max(peak_us);
             }
             None => {
                 rows[rank as usize] = Some(StatRow {
@@ -84,7 +86,7 @@ fn stats_by(graph: &FlameGraph, total_us: impl Fn(usize) -> i64) -> Vec<StatRow>
                     role: graph.role(i),
                     count: graph.count(i),
                     self_us,
-                    max_us: self_us,
+                    max_us: peak_us,
                 });
             }
         }
@@ -163,7 +165,7 @@ mod tests {
         let c = row(&g, &rows, "CppCompile");
         assert_eq!(c.count, 2);
         assert_eq!(c.self_us, 150);
-        // One merged frame; its peak self time is the merged total.
+        // Both actions bear one name, so they are one instance.
         assert_eq!(c.max_us, 150);
         assert_eq!(
             c.role,
@@ -248,12 +250,51 @@ mod tests {
             let r = row(&g, &rows, key);
             (r.count, r.self_us, r.max_us)
         };
-        assert_eq!(figures("Fetching repository"), (2, 60, 60));
+        assert_eq!(figures("Fetching repository"), (2, 60, 30));
         assert_eq!(figures("download"), (1, 20, 20));
         // The two downloads sit at different places in the tree, so they are
         // two frames of one row.
         assert_eq!(figures("fetching"), (2, 60, 50));
         assert_eq!(self_sum(&rows), 140);
+    }
+
+    #[test]
+    fn the_max_of_a_row_is_the_most_one_instance_spent_in_one_of_its_frames() {
+        // Three fetches of two repositories, the second holding a step of its
+        // own under which the same two repositories are fetched again.
+        let fetch = |repository, start, dur| slice(repository, "Fetching repository", start, dur);
+        let p = profile(vec![track(
+            1,
+            LaneClass::Analysis,
+            vec![
+                fetch("@@a", 0, 100),
+                fetch("@@b", 100, 300),
+                slice("resolve", "generic", 100, 250),
+                fetch("@@a", 100, 90),
+                fetch("@@b", 200, 20),
+                fetch("@@a", 400, 60),
+            ],
+        )]);
+        let g = flame(&p);
+        let rows = stats_from_flame(&g);
+        let figures = |key| {
+            let r = row(&g, &rows, key);
+            (r.count, r.self_us, r.max_us)
+        };
+        // At the top the repository fetched twice spent 160 between its two
+        // fetches, more than the 50 the other did, and more than either spent
+        // under the step.
+        assert_eq!(figures("Fetching repository"), (5, 320, 160));
+        // The step's spans are no instance of their own: the fetch around
+        // them details them, as one instance.
+        assert_eq!(figures("resolve"), (1, 140, 140));
+        let named =
+            TrackFlamer::new(&p).build(FlameLabels::Name, &TimeSelection::default(), |_| true);
+        let rows = stats_from_flame(&named);
+        // Labelled by name a frame's spans belong to no instance, and the
+        // frame counts as one.
+        assert_eq!(row(&named, &rows, "@@a").max_us, 160);
+        assert_eq!(row(&named, &rows, "@@b").max_us, 50);
     }
 
     #[test]
@@ -304,14 +345,23 @@ mod tests {
             rows.sort();
             rows
         };
-        assert_eq!(resolved(&gd), resolved(&gp));
         // The overrun clamps the Rustc frame's self time to nothing, leaving c1
         // holding the whole 210.
+        assert_eq!(
+            resolved(&gp),
+            [
+                ("Rustc".to_owned(), 2, 0, 0),
+                ("c1".to_owned(), 3, 210, 210),
+            ]
+        );
+        // Broken out by target, the most one target spent in c1 is //b:b's
+        // 160, and a target's share of the Rustc frame's self time is bounded
+        // by that self time.
         assert_eq!(
             resolved(&gd),
             [
                 ("Rustc".to_owned(), 2, 0, 0),
-                ("c1".to_owned(), 3, 210, 210),
+                ("c1".to_owned(), 3, 210, 160),
             ]
         );
     }

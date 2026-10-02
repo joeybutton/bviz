@@ -838,7 +838,7 @@ mod tests {
             assert_eq!(instances(&agg), (1, 200, whole.to_vec()), "{direction:?}");
             assert_eq!(
                 resolved_rows(&agg.flame, &agg.stats),
-                [("Fetching repository".to_owned(), 3, 300, 300)],
+                [("Fetching repository".to_owned(), 3, 300, 100)],
                 "{direction:?}"
             );
             let clipped = built(direction, &[(60, 120)]);
@@ -857,7 +857,7 @@ mod tests {
             );
             assert_eq!(
                 resolved_rows(&clipped.flame, &clipped.stats),
-                [("Fetching repository".to_owned(), 3, 100, 100)],
+                [("Fetching repository".to_owned(), 3, 100, 40)],
                 "{direction:?}"
             );
         }

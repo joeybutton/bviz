@@ -457,24 +457,31 @@ impl FlameGraph {
         self.self_us[i]
     }
 
-    /// The time the spans node `i` stands for spent in themselves, `total_us`
-    /// giving each node's total: the node's own less its span children's,
-    /// floored at zero because a node's children can sum past it. The detail
-    /// frames beneath the node are that time broken out by instance, so it
-    /// counts them in where [`self_us`](Self::self_us) leaves them out.
-    pub(crate) fn span_self_us_by(&self, i: usize, total_us: &impl Fn(usize) -> i64) -> i64 {
-        let spanned: i64 = (0..self.child_count(i))
-            .map(|k| self.child_id(i, k))
-            .filter(|&c| !self.is_detail(c))
-            .map(total_us)
-            .sum();
-        (total_us(i) - spanned).max(0)
+    /// The [`SpanSelf`] of node `i`, `total_us` giving each node's total.
+    pub(crate) fn span_self_by(&self, i: usize, total_us: &impl Fn(usize) -> i64) -> SpanSelf {
+        let mut spanned = 0i64;
+        let mut largest_detail_us = None;
+        for k in 0..self.child_count(i) {
+            let child = self.child_id(i, k);
+            let child_us = total_us(child);
+            if self.is_detail(child) {
+                largest_detail_us = largest_detail_us.max(Some(child_us));
+            } else {
+                spanned += child_us;
+            }
+        }
+        let self_us = (total_us(i) - spanned).max(0);
+        SpanSelf {
+            self_us,
+            peak_us: largest_detail_us.map_or(self_us, |peak| peak.min(self_us)),
+        }
     }
 
-    /// [`span_self_us_by`](Self::span_self_us_by) the graph's own weight, for
-    /// the frame `node`.
+    /// The [`SpanSelf::self_us`] of the frame `node`, in the graph's own
+    /// weight.
     pub fn span_self_us(&self, node: FlameNodeId) -> i64 {
-        self.span_self_us_by(node.0 as usize, &|i| self.total_us[i])
+        self.span_self_by(node.0 as usize, &|i| self.total_us[i])
+            .self_us
     }
 
     pub(crate) fn width_us(&self, i: usize) -> i64 {
@@ -516,6 +523,21 @@ impl FlameGraph {
         }
         self.profile.str(s)
     }
+}
+
+/// The time the spans a node stands for spent in themselves.
+pub(crate) struct SpanSelf {
+    /// The node's total less its span children's, floored at zero because a
+    /// node's children can sum past it. The detail frames beneath the node are
+    /// this time broken out by instance, so it counts them in where
+    /// [`FlameNode::self_us`] leaves them out.
+    pub(crate) self_us: i64,
+    /// The most of `self_us` that one instance accounts for: the node's
+    /// largest detail frame, and all of `self_us` for a node with none, whose
+    /// spans tell no instance from another. A span floors its own self time
+    /// at zero as the node does its spans' together, so a detail frame can
+    /// exceed `self_us`, which bounds this.
+    pub(crate) peak_us: i64,
 }
 
 /// Vertical sizing of the flame graph, in pixels.
