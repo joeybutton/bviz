@@ -5,25 +5,27 @@
 //! The mode the panel was in is the reader's own, so putting the question away
 //! returns to it along with the filter.
 
+use crate::column::Folding;
 use crate::mode::LayoutMode;
 use crate::paint::paint_diamond;
-use crate::{CARD_MAX_SHARE, GraphPanel, Palette, derive};
+use crate::{GraphPanel, Palette, derive};
 use bviz_graph_layout::capability::TRANSITIONS_FLAG;
 use bviz_graph_layout::facets::{ConfigRef, Sym};
 use bviz_graph_layout::paths::{self, Paths};
 use bviz_graph_layout::select::labels::carried_label;
 use bviz_graph_layout::transition::{Difference, Transition, Transitions};
 use bviz_graph_layout::{Axis, Capabilities, Facets, Id, Kind, Names, Support};
-use bviz_ui_components::{Button, TextTooltip, TooltipColors, load_in_background, overlay_canvas};
+use bviz_ui_components::{
+    Button, ListScroll, SCROLLBAR_THICKNESS, TextTooltip, TooltipColors, list_scrollbar,
+    load_in_background, overlay_canvas,
+};
 use gpui::{
-    ClickEvent, Context, Div, Pixels, SharedString, Stateful, Task, div, prelude::*, px, relative,
+    ClickEvent, Context, Div, MouseButton, MouseDownEvent, Pixels, SharedString, Stateful, Task,
+    div, prelude::*, px,
 };
 use std::collections::HashMap;
 use std::fmt::Write;
 use std::sync::Arc;
-
-/// Width the card is drawn at, wide enough for a package path and a target.
-const CARD_WIDTH: Pixels = px(360.);
 
 /// Side of the mark leading each link of the shortest chain after its first.
 const LINK_MARK: Pixels = px(10.);
@@ -36,11 +38,16 @@ const CHECKSUM_SHOWN: usize = 6;
 /// The question a panel is answering, if any.
 pub(crate) struct Why {
     asked: Option<Asked>,
+    /// How far the card's chain has scrolled.
+    scroll: ListScroll,
 }
 
 impl Why {
     pub(crate) fn new() -> Self {
-        Why { asked: None }
+        Why {
+            asked: None,
+            scroll: ListScroll::new(),
+        }
     }
 
     /// The dependency asked about.
@@ -573,17 +580,58 @@ fn chain<'a>(
                             .into_any_element()
                     })),
             )
-            .child(line(spelling.name(link.named)))
+            .child(line(spelling.name(link.named)).flex_1())
     })
 }
 
-/// The question asked and what answers it, floating over the drawing; `None`
-/// while none is asked.
+/// The links of the chain, scrollable within whatever height the card is
+/// left, with a scroll bar over their right edge that the links keep clear of.
+fn listed(
+    view: &GraphPanel,
+    links: impl Iterator<Item = Stateful<Div>>,
+    palette: &Palette,
+    cx: &mut Context<GraphPanel>,
+) -> Div {
+    let rows = div()
+        .id("why-chain")
+        .flex()
+        .flex_col()
+        .gap_1()
+        .w_full()
+        .pr(px(SCROLLBAR_THICKNESS))
+        .overflow_y_scroll()
+        .track_scroll(view.why.scroll.handle())
+        .children(links);
+    div()
+        .relative()
+        .flex()
+        .flex_1()
+        .min_h_0()
+        .text_xs()
+        .text_color(palette.label)
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(|view, e: &MouseDownEvent, _, cx| {
+                view.why.scroll.press(e.position);
+                cx.notify();
+            }),
+        )
+        .child(rows)
+        .child(list_scrollbar(
+            cx.entity(),
+            |view: &GraphPanel| &view.why.scroll,
+            |view: &mut GraphPanel| &mut view.why.scroll,
+            palette.scroll,
+        ))
+}
+
+/// The question asked and what answers it, for the caller to place over the
+/// drawing; `None` while none is asked.
 pub(crate) fn card(
     view: &GraphPanel,
     palette: &Palette,
     cx: &mut Context<GraphPanel>,
-) -> Option<Div> {
+) -> Option<Folding> {
     let Asked { question, answer } = view.why.asked.as_ref()?;
     let (status, shortest): (SharedString, &[Named]) = match answer {
         Answering::Pending { .. } => ("finding paths…".into(), &[]),
@@ -621,55 +669,45 @@ pub(crate) fn card(
         Some(dependent) => endpoint("why-from", "from ", dependent, &spelling, palette),
         None => div().id("why-from").child(line("from every dependent")),
     };
-    Some(
-        div()
-            .absolute()
-            .right_2()
-            .bottom_2()
-            .w(CARD_WIDTH)
-            .max_w(relative(CARD_MAX_SHARE))
-            .occlude()
-            .flex()
-            .flex_col()
-            .gap_1()
-            .p_2()
-            .rounded_md()
-            .bg(palette.container)
-            .text_xs()
-            .text_color(palette.label)
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .gap_2()
-                    .child(line("why is this built").text_color(palette.colors.text_muted))
-                    .child(
-                        Button::new(
-                            "why-clear",
-                            cx.listener(|view, _: &ClickEvent, _, cx| clear(view, cx)),
-                        )
-                        .label("clear")
-                        .compact(),
-                    ),
-            )
-            .child(endpoint(
-                "why-dependency",
-                "",
-                &question.dependency,
-                &spelling,
-                palette,
-            ))
-            .child(from)
-            .child(line(status))
-            .children(unmarked.map(|unmarked| div().min_w_0().child(unmarked)))
-            .children(map_note.map(|note| div().min_w_0().child(note)))
-            .children(
-                (!links.is_empty())
-                    .then(|| line("shortest:").text_color(palette.colors.text_muted)),
-            )
-            .children(chain(&links, &spelling, palette)),
-    )
+    let head = div()
+        .flex()
+        .flex_col()
+        .gap_1()
+        .text_xs()
+        .text_color(palette.label)
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .justify_between()
+                .gap_2()
+                .child(line("why is this built").text_color(palette.colors.text_muted))
+                .child(
+                    Button::new(
+                        "why-clear",
+                        cx.listener(|view, _: &ClickEvent, _, cx| clear(view, cx)),
+                    )
+                    .label("clear")
+                    .compact(),
+                ),
+        )
+        .child(endpoint(
+            "why-dependency",
+            "",
+            &question.dependency,
+            &spelling,
+            palette,
+        ))
+        .child(from)
+        .child(line(status))
+        .children(unmarked.map(|unmarked| div().min_w_0().child(unmarked)))
+        .children(map_note.map(|note| div().min_w_0().child(note)))
+        .children(
+            (!links.is_empty()).then(|| line("shortest:").text_color(palette.colors.text_muted)),
+        );
+    let chain =
+        (!links.is_empty()).then(|| listed(view, chain(&links, &spelling, palette), palette, cx));
+    Some(Folding::new(head, chain, palette))
 }
 
 #[cfg(test)]

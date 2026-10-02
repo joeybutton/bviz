@@ -28,6 +28,7 @@ use std::time::{Duration, Instant};
 mod build;
 mod camera;
 mod checklist;
+mod column;
 mod derive;
 mod drag;
 mod emphasis;
@@ -483,9 +484,12 @@ impl GraphPanel {
                     .children(missing::card(self, &palette, cx))
                     .children(legend),
             )
+            .child(
+                column::Column::new()
+                    .held(pins::panel(self, &palette, cx))
+                    .foot(why::card(self, &palette, cx)),
+            )
             .children(search::card(self, &palette, cx))
-            .children(pins::panel(self, &palette, cx))
-            .children(why::card(self, &palette, cx))
             // A replayed scene installs the handlers recorded with it, which a
             // press's own frame has yet to make; the panel's own paint is what
             // installs them for the gesture that press begins.
