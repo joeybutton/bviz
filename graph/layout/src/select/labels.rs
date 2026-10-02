@@ -7,6 +7,7 @@ use crate::intern::{Id, Names};
 use crate::label::target_node_label;
 use crate::select::pattern::Pattern;
 use std::borrow::Cow;
+use std::ops::Range;
 
 /// The canonical label of the target the node `id` belongs to, which for a
 /// target is its own; `None` for a node belonging to none.
@@ -61,6 +62,31 @@ impl LabelIndex {
     /// The names the graph's repositories are written by.
     pub fn repos(&self) -> &WrittenRepos {
         &self.repos
+    }
+
+    /// The targets, each with the canonical label it carries, ordered by that
+    /// label.
+    pub(crate) fn entries(&self) -> &[(Id, String)] {
+        &self.entries
+    }
+
+    /// Where the targets whose labels start with `prefix` lie among
+    /// [`Self::entries`].
+    pub(crate) fn starting(&self, prefix: &str) -> Range<usize> {
+        fn label(entry: &(Id, String)) -> &str {
+            &entry.1
+        }
+        let start = self.entries.partition_point(|entry| label(entry) < prefix);
+        let run = &self.entries[start..];
+        start..start + run.partition_point(|entry| label(entry).starts_with(prefix))
+    }
+
+    /// Where the target carrying `label` lies among [`Self::entries`].
+    pub(crate) fn position(&self, label: &str) -> Option<usize> {
+        let found = self
+            .entries
+            .binary_search_by(|(_, held)| held.as_str().cmp(label));
+        found.ok()
     }
 
     /// The targets `pattern` names, by label.

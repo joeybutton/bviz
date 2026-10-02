@@ -13,6 +13,10 @@
 
 use std::fmt;
 
+mod resolve;
+
+pub use resolve::{Resolved, TargetIndex};
+
 /// The patterns of a target set, in the order they were written.
 #[derive(Clone, PartialEq, Eq, Debug, Default)]
 pub struct TargetSet {
