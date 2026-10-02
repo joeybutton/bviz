@@ -249,9 +249,11 @@ fn flame_boxes(
         .clone()
 }
 
-/// The tooltip's lines for `hovered`: the frame's name over its figures,
-/// labelled with the weight of the aggregate the box belongs to.
-fn flame_tooltip_lines(hovered: &HoveredBox) -> [String; 2] {
+/// The tooltip's lines for `hovered`: the frame's name, what the name leaves
+/// open about its spans (see [`FlameGraph::kind_or_category`]) where that is
+/// not the name itself, and its figures, labelled with the weight of the
+/// aggregate the box belongs to.
+fn flame_tooltip_lines(hovered: &HoveredBox) -> Vec<String> {
     let HoveredBox { aggregates, boxed } = hovered;
     let root_total_us = aggregates.flame.root_total_us();
     let pct = if root_total_us > 0 {
@@ -271,7 +273,18 @@ fn flame_tooltip_lines(hovered: &HoveredBox) -> [String; 2] {
         if boxed.count == 1 { "" } else { "s" },
         pct,
     );
-    [aggregates.flame.str(boxed.name).to_string(), detail]
+    let flame = &aggregates.flame;
+    let context = flame
+        .kind_or_category(boxed.node)
+        .filter(|&c| c != boxed.name);
+    [
+        Some(flame.str(boxed.name).to_string()),
+        context.map(|c| flame.str(c).to_string()),
+        Some(detail),
+    ]
+    .into_iter()
+    .flatten()
+    .collect()
 }
 
 /// Paints `hovered`'s tooltip near `at`.
@@ -1097,6 +1110,7 @@ mod tests {
             lines(FlameWeight::Duration),
             [
                 "compile",
+                "general information",
                 "summed time: total 1.00ms, self 1.00ms, 1 span, 66.7% of view"
             ]
         );
@@ -1104,9 +1118,146 @@ mod tests {
             lines(FlameWeight::WallShare),
             [
                 "compile",
+                "general information",
                 "share of wall time: total 750µs, self 750µs, 1 span, 75.0% of view"
             ]
         );
+    }
+
+    /// A profile of two lanes: a repository fetch holding a download that
+    /// names what it fetches, and a wait recorded under another category than
+    /// the wait beside the fetch.
+    fn kinds_fixture() -> Arc<Profile> {
+        let mut events = Vec::new();
+        for (tid, spans) in [
+            (
+                1,
+                &[
+                    ("Fetching repository", "@@a", 0, 1000),
+                    ("general information", "download", 0, 400),
+                    ("general information", "fetching: archive a", 0, 100),
+                    ("Remote execution setup", "acquiring semaphore", 1000, 500),
+                ][..],
+            ),
+            (
+                2,
+                &[(
+                    "Remote execution upload time",
+                    "acquiring semaphore",
+                    0,
+                    500,
+                )][..],
+            ),
+        ] {
+            events.push(format!(
+                r#"{{"name":"thread_name","ph":"M","tid":{tid},"args":{{"name":"skyframe-evaluator-{tid}"}}}}"#,
+            ));
+            for (cat, name, ts, dur) in spans {
+                events.push(format!(
+                    r#"{{"cat":"{cat}","name":"{name}","ph":"X","ts":{ts},"dur":{dur},"tid":{tid}}}"#,
+                ));
+            }
+        }
+        let json = format!(r#"{{"traceEvents":[{}]}}"#, events.join(","));
+        Arc::new(Profile::from_bytes(json.as_bytes()).expect("parse test profile"))
+    }
+
+    /// The tooltip lines ahead of the figures for the box of `profile`'s
+    /// top-down graph under `labels` that is named `name` at `depth`.
+    fn heading(profile: &Arc<Profile>, labels: FlameLabels, name: &str, depth: u32) -> Vec<String> {
+        let aggregates = Arc::new(ScopeAggregate::build_for_tracks(
+            profile,
+            FlameMode {
+                labels,
+                ..FlameMode::default()
+            },
+            &TimeSelection::default(),
+            |_| true,
+        ));
+        let (cache, fl) = laid_out(&aggregates);
+        let boxed = cache
+            .boxes
+            .iter()
+            .find(|b| b.depth == depth && aggregates.flame.str(b.name) == name)
+            .unwrap_or_else(|| panic!("no {name} box at depth {depth}"));
+        let hovered = cache
+            .hit(&aggregates, fl, 0.0, center_of(fl, boxed))
+            .expect("the box at its own center");
+        let mut lines = flame_tooltip_lines(&hovered);
+        lines.pop().expect("the figures");
+        lines
+    }
+
+    #[test]
+    fn the_tooltip_of_a_frame_labelled_by_its_category_does_not_repeat_it() {
+        let profile = kinds_fixture();
+        assert_eq!(
+            heading(&profile, FlameLabels::Kind, "Fetching repository", 1),
+            ["Fetching repository"]
+        );
+    }
+
+    #[test]
+    fn the_tooltip_of_a_detail_frame_names_the_kind_of_its_instance() {
+        let profile = kinds_fixture();
+        // The repository's own time, and the time of the download nested in it.
+        for depth in [2, 3] {
+            assert_eq!(
+                heading(&profile, FlameLabels::Kind, "@@a", depth),
+                ["@@a", "Fetching repository"],
+                "depth {depth}"
+            );
+        }
+        // A kind the instance's name leads with is not its category.
+        assert_eq!(
+            heading(&profile, FlameLabels::Kind, "fetching: archive a", 4),
+            ["fetching: archive a", "fetching"]
+        );
+    }
+
+    #[test]
+    fn the_tooltip_of_an_actions_detail_frame_names_its_category() {
+        // A mnemonic is told by neither the name nor the category of the
+        // action it labels.
+        let json = r#"{"traceEvents":[
+            {"name":"thread_name","ph":"M","tid":1,"args":{"name":"skyframe-evaluator-1"}},
+            {"cat":"action processing","name":"Compiling a","ph":"X","ts":0,"dur":1000,"tid":1,
+             "args":{"mnemonic":"Rustc"}}
+        ]}"#;
+        let profile = Arc::new(Profile::from_bytes(json.as_bytes()).expect("parse test profile"));
+        assert_eq!(
+            heading(&profile, FlameLabels::Kind, "Compiling a", 2),
+            ["Compiling a", "action processing"]
+        );
+        assert_eq!(
+            heading(&profile, FlameLabels::Kind, "Rustc", 1),
+            ["Rustc", "action processing"]
+        );
+    }
+
+    #[test]
+    fn the_tooltip_of_a_frame_labelled_by_name_names_its_category() {
+        let profile = kinds_fixture();
+        assert_eq!(
+            heading(&profile, FlameLabels::Kind, "download", 2),
+            ["download", "general information"]
+        );
+        assert_eq!(
+            heading(&profile, FlameLabels::Name, "@@a", 1),
+            ["@@a", "Fetching repository"]
+        );
+    }
+
+    #[test]
+    fn the_tooltip_of_a_frame_merging_two_categories_names_neither() {
+        let profile = kinds_fixture();
+        for labels in [FlameLabels::Kind, FlameLabels::Name] {
+            assert_eq!(
+                heading(&profile, labels, "acquiring semaphore", 1),
+                ["acquiring semaphore"],
+                "{labels:?}"
+            );
+        }
     }
 
     #[test]

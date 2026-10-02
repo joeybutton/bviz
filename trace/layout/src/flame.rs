@@ -3,8 +3,8 @@ use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 
 use bviz_parallel::{worker_count, workers};
 use bviz_trace_profile::{
-    Profile, Slice, SliceDetail, Span32, SpanRole, Str, ThreadTrack, TimeSpan, Workload, encloses,
-    occupied_span,
+    CategoryId, OptStr, Profile, Slice, SliceDetail, Span32, SpanRole, Str, ThreadTrack, TimeSpan,
+    Workload, encloses, occupied_span,
 };
 use rayon::iter::{IntoParallelRefIterator, IntoParallelRefMutIterator, ParallelIterator};
 use rayon::slice::{ParallelSlice, ParallelSliceMut};
@@ -21,6 +21,13 @@ use crate::wall_share::{LaneShare, WallShare};
 struct Segment {
     label: Str,
     role: SpanRole,
+}
+
+/// The one category that spans recorded under `a` share with spans recorded
+/// under `b`, each `None` where its own spans share none that an id reaches.
+#[inline]
+fn shared_category(a: Option<CategoryId>, b: Option<CategoryId>) -> Option<CategoryId> {
+    a.filter(|_| a == b)
 }
 
 /// How a span aggregates under a labelling.
@@ -291,6 +298,10 @@ pub struct FlameNode {
     pub self_us: i64,
     pub width_us: i64,
     pub role: SpanRole,
+    /// The category the spans this frame stands for were recorded under — for
+    /// a detail frame, the spans of the instance it names — and absent where
+    /// they share none that an id reaches (see [`Slice::category`]).
+    pub category: OptStr,
     pub count: u32,
     pub depth: u32,
     /// The deepest node depth in this node's subtree (itself included), which
@@ -325,6 +336,7 @@ pub struct FlameGraph {
     self_us: Vec<i64>,
     width_us: Vec<i64>,
     role: Vec<SpanRole>,
+    category: Vec<Option<CategoryId>>,
     detail: Vec<bool>,
     count: Vec<u32>,
     subtree_max_depth: Vec<u32>,
@@ -354,6 +366,7 @@ impl FlameGraph {
             self_us: self.self_us[id],
             width_us: self.width_us[id],
             role: self.role[id],
+            category: self.category(id).into(),
             count: self.count[id],
             depth,
             subtree_max_depth: self.subtree_max_depth[id],
@@ -415,6 +428,25 @@ impl FlameGraph {
 
     pub(crate) fn role(&self, i: usize) -> SpanRole {
         self.role[i]
+    }
+
+    /// Node `i`'s category (see [`FlameNode::category`]).
+    fn category(&self, i: usize) -> Option<Str> {
+        self.category[i].map(|id| self.profile.category(id))
+    }
+
+    /// What the name of the frame `node` leaves open about its spans: the
+    /// category they were recorded under, or for a detail frame the kind its
+    /// instance is one of, wherever the instance's name and category tell that
+    /// kind — as they do of every kind but a mnemonic. `None` where the spans
+    /// share no category that an id reaches.
+    pub fn kind_or_category(&self, node: FlameNodeId) -> Option<Str> {
+        let i = node.0 as usize;
+        let category = self.category[i]?;
+        let kind = self.detail[i]
+            .then(|| self.profile.kind_named(category, self.name[i]))
+            .flatten();
+        Some(kind.unwrap_or_else(|| self.profile.category(category)))
     }
 
     pub(crate) fn total_us(&self, i: usize) -> i64 {
@@ -482,12 +514,18 @@ pub struct FlameBox {
     pub w: f32,
     pub h: f32,
     pub depth: u32,
+    pub node: FlameNodeId,
     pub name: Str,
     pub total_us: i64,
     pub self_us: i64,
     pub role: SpanRole,
     pub count: u32,
 }
+
+/// A node of the [`FlameGraph`] a layout was made from, which alone resolves
+/// it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FlameNodeId(u32);
 
 /// The inner of an `action '…'` name, `None` for any other shape. A
 /// critical-path component is named `action '<desc>'` where `<desc>` is the
@@ -829,14 +867,17 @@ impl TrackFlamer {
         let lanes = &tables.lanes;
         let elems = sorted_nodes(lanes, &selected);
         let (arena, _) = reconstruct(&elems, |run| {
+            let first = run[0].src.of(lanes);
             let mut total_us = 0i64;
             let mut count = 0u32;
+            let mut category = first.category;
             for e in run {
                 let n = e.src.of(lanes);
                 total_us += n.total_us;
                 count += n.count;
+                category = shared_category(category, n.category);
             }
-            (run[0].src.of(lanes).arena_node(total_us, count), ())
+            (first.arena_node(total_us, count, category), ())
         });
         drop(elems);
         let kids = csr_from_parents(&arena.parents);
@@ -856,19 +897,19 @@ impl TrackFlamer {
         let wall_us = self.wall_us(&tables);
         let elems = sorted_nodes(lanes, &selected);
         let (arena, duration_us) = reconstruct(&elems, |run| {
+            let first = run[0].src.of(lanes);
             let mut total_us = 0i64;
             let mut duration_us = 0i64;
             let mut count = 0u32;
+            let mut category = first.category;
             for e in run {
                 let n = e.src.of(lanes);
                 total_us += wall_us[e.src.lane as usize][e.src.node as usize];
                 duration_us += n.total_us;
                 count += n.count;
+                category = shared_category(category, n.category);
             }
-            (
-                run[0].src.of(lanes).arena_node(total_us, count),
-                duration_us,
-            )
+            (first.arena_node(total_us, count, category), duration_us)
         });
         drop(elems);
         let kids = csr_from_parents(&arena.parents);
@@ -960,6 +1001,7 @@ struct LaneNode {
     label: Str,
     rank: u32,
     role: SpanRole,
+    category: Option<CategoryId>,
     detail: bool,
     total_us: i64,
     count: u32,
@@ -967,12 +1009,14 @@ struct LaneNode {
 
 impl LaneNode {
     /// The arena node merging this node with the others on its path, which
-    /// share everything but what they sum to.
-    fn arena_node(&self, total_us: i64, count: u32) -> ArenaNode {
+    /// share everything but what they sum to and the category they were
+    /// recorded under.
+    fn arena_node(&self, total_us: i64, count: u32, category: Option<CategoryId>) -> ArenaNode {
         ArenaNode {
             name: self.label,
             rank: self.rank,
             role: self.role,
+            category,
             detail: self.detail,
             total_us,
             count,
@@ -1118,11 +1162,13 @@ fn build_lane_table<W: Weigher>(
         let mut total = rows[i].dur;
         let mut weight = rows[i].weight;
         let mut count = 1u32;
+        let mut category = rows[i].category;
         let mut j = i + 1;
         while j < rows.len() && rows[j].key == rows[i].key {
             total += rows[j].dur;
             weight.add(rows[j].weight);
             count += 1;
+            category = shared_category(category, rows[j].category);
             j += 1;
         }
         let off = key_pool.len() as u32;
@@ -1132,7 +1178,8 @@ fn build_lane_table<W: Weigher>(
             label: rows[i].label,
             rank: rows[i].rank,
             role: rows[i].role,
-            detail: rows[i].detail,
+            category,
+            detail: ends_at_detail(&rows[i].key),
             total_us: total,
             count,
         });
@@ -1154,25 +1201,37 @@ const SEGMENT_BYTES: usize = 5;
 /// and `detail` in bit 7 — so a detail frame never merges with a same-named real
 /// child of the same role. Equal segments encode equally.
 fn segment_flags(role: SpanRole, detail: bool) -> u8 {
-    const DETAIL_BIT: u32 = 7;
     ((detail as u8) << DETAIL_BIT) | ((role.workload as u8) << 1) | (role.payload as u8)
+}
+
+/// The bit of [`segment_flags`] that marks a detail frame.
+const DETAIL_BIT: u32 = 7;
+
+/// Whether the frame an aggregation-path key ends at is a detail frame.
+fn ends_at_detail(key: &[u8]) -> bool {
+    key.last().is_some_and(|flags| flags >> DETAIL_BIT != 0)
 }
 
 /// One emitted frame contribution in the path-sort aggregation: its full
 /// aggregation-path key (5 bytes per segment, root-to-frame), the frame it
 /// merges into, and the duration and second weight it brings. Rows sharing a
-/// key merge into one node.
+/// key merge into one node. A row whose key [`ends_at_detail`] is a detail row
+/// — a span's self time broken out under the instance it belongs to — rather
+/// than a span of its own.
 struct Row<X> {
     key: Vec<u8>,
     label: Str,
     rank: u32,
     role: SpanRole,
-    /// Whether this is a detail row — a span's self time broken out under the
-    /// instance it belongs to — rather than a span of its own.
-    detail: bool,
+    /// The category of the span the row is for, and in a detail row that of
+    /// the span whose name it carries.
+    category: Option<CategoryId>,
     dur: i64,
     weight: X,
 }
+
+// A lane's rows are sorted by value, so a row's size is what the sort moves.
+const _: () = assert!(std::mem::size_of::<Row<()>>() == 48);
 
 /// One node's field values as [`Arena::push`] takes them, decomposed into the
 /// arena's parallel vectors on the way in.
@@ -1180,6 +1239,7 @@ struct ArenaNode {
     name: Str,
     rank: u32,
     role: SpanRole,
+    category: Option<CategoryId>,
     detail: bool,
     total_us: i64,
     count: u32,
@@ -1195,6 +1255,7 @@ struct Arena {
     name: Vec<Str>,
     rank: Vec<u32>,
     role: Vec<SpanRole>,
+    category: Vec<Option<CategoryId>>,
     detail: Vec<bool>,
     total_us: Vec<i64>,
     count: Vec<u32>,
@@ -1207,6 +1268,7 @@ impl Arena {
             name: Vec::with_capacity(n),
             rank: Vec::with_capacity(n),
             role: Vec::with_capacity(n),
+            category: Vec::with_capacity(n),
             detail: Vec::with_capacity(n),
             total_us: Vec::with_capacity(n),
             count: Vec::with_capacity(n),
@@ -1220,6 +1282,7 @@ impl Arena {
                     workload: Workload::Other,
                     payload: false,
                 },
+                category: None,
                 detail: false,
                 total_us: 0,
                 count: 0,
@@ -1234,11 +1297,16 @@ impl Arena {
     }
 
     /// Places `node` under `parent`, returning its index.
+    // A reconstruction loop pushes once per node of the graph, and inlined
+    // there each field goes from its source to its vector without the node
+    // being assembled on the stack for a call.
+    #[inline(always)]
     fn push(&mut self, node: ArenaNode, parent: u32) -> usize {
         let idx = self.len();
         self.name.push(node.name);
         self.rank.push(node.rank);
         self.role.push(node.role);
+        self.category.push(node.category);
         self.detail.push(node.detail);
         self.total_us.push(node.total_us);
         self.count.push(node.count);
@@ -1401,7 +1469,8 @@ fn emit_lane_rows<W: Weigher>(
     // At most one detail row per slice.
     out.reserve(2 * slices.len());
     let mut keys: Vec<Vec<u8>> = Vec::with_capacity(slices.len());
-    let mut instances: Vec<Option<Str>> = Vec::with_capacity(slices.len());
+    // Each slice's instance, with the category it was recorded under.
+    let mut instances: Vec<Option<(Str, Option<CategoryId>)>> = Vec::with_capacity(slices.len());
     for i in 0..slices.len() {
         let Some((dur, weight)) = brought[i] else {
             // Placeholders, so both vectors stay indexed by slice.
@@ -1425,16 +1494,17 @@ fn emit_lane_rows<W: Weigher>(
             label: seg.label,
             rank,
             role: seg.role,
-            detail: false,
+            category: slices[i].category,
             dur,
             weight,
         });
 
         let instance = span
             .instance
+            .map(|name| (name, slices[i].category))
             .or_else(|| parents[i].and_then(|p| instances[p]));
         let self_us = (dur - nested[i].0).max(0);
-        if let Some(instance) = instance.filter(|_| self_us > 0) {
+        if let Some((instance, category)) = instance.filter(|_| self_us > 0) {
             let rank = flamer.ranks.rank_of(instance);
             let mut detail_key = Vec::with_capacity(key.len() + SEGMENT_BYTES);
             detail_key.extend_from_slice(&key);
@@ -1445,7 +1515,7 @@ fn emit_lane_rows<W: Weigher>(
                 label: instance,
                 rank,
                 role: seg.role,
-                detail: true,
+                category,
                 dur: self_us,
                 weight: weight.less(nested[i].1),
             });
@@ -1556,6 +1626,7 @@ fn seal_arena(profile: &Arc<Profile>, arena: Arena, mut kids: ArenaChildren) -> 
         name,
         rank,
         role,
+        category,
         detail,
         total_us,
         count,
@@ -1596,6 +1667,7 @@ fn seal_arena(profile: &Arc<Profile>, arena: Arena, mut kids: ArenaChildren) -> 
         self_us,
         width_us,
         role,
+        category,
         detail,
         count,
         subtree_max_depth,
@@ -1840,12 +1912,20 @@ fn reconstruct_chains(
         counted.truncate(shared + 1);
         let base = chain.at[src] as usize;
         let end = chain.at[src + 1] as usize - base;
+        // A node shared with the chain before stands for this chain's frame at
+        // that step too, which equal key segments leave free to be of another
+        // category.
+        for (&node, &owner) in stack[1..=shared].iter().zip(&chain.owner[base..]) {
+            let held = &mut arena.category[node];
+            *held = shared_category(*held, graph.category[owner as usize]);
+        }
         for d in shared + 1..=end {
             let owner = chain.owner[base + d - 1] as usize;
             let node = ArenaNode {
                 name: graph.name(owner),
                 rank: graph.rank(owner),
                 role: graph.role(owner),
+                category: graph.category[owner],
                 detail: graph.is_detail(owner),
                 total_us: 0,
                 count: 0,
@@ -2164,6 +2244,7 @@ fn box_of(
         w,
         h: metrics.row_height,
         depth,
+        node: FlameNodeId(idx as u32),
         name: graph.name(idx),
         total_us: graph.total_us(idx),
         self_us: graph.self_us(idx),
@@ -2894,6 +2975,158 @@ mod tests {
         );
     }
 
+    /// The category of the one node named `name` at `depth`, as text.
+    fn category_at(g: &FlameGraph, name: &str, depth: u32) -> Option<String> {
+        let nodes = g.nodes();
+        let mut found = nodes
+            .iter()
+            .filter(|n| n.depth == depth && g.str(n.name) == name);
+        let node = found
+            .next()
+            .unwrap_or_else(|| panic!("no {name} at depth {depth}"));
+        assert!(found.next().is_none(), "several {name} at depth {depth}");
+        node.category.get().map(|c| g.str(c).to_owned())
+    }
+
+    #[test]
+    fn a_frame_carries_the_category_its_spans_were_recorded_under() {
+        let p = profile(vec![track(
+            1,
+            LaneClass::Analysis,
+            vec![
+                fetch("@@a", 0, 100),
+                slice("download", "generic", 10, 60),
+                slice("/tmp/a.tar", "VFS write", 20, 10),
+                action_named("Compiling //x:y", "Rustc", 200, 50),
+            ],
+        )]);
+        let general = Some("generic".to_owned());
+        let fetching = Some("Fetching repository".to_owned());
+        let writing = Some("VFS write".to_owned());
+        let g = flame(&p);
+        assert_eq!(g.root().category.get(), None);
+        assert_eq!(category_at(&g, "Fetching repository", 1), fetching);
+        assert_eq!(category_at(&g, "download", 2), general);
+        assert_eq!(category_at(&g, "VFS write", 3), writing);
+        assert_eq!(
+            category_at(&g, "Rustc", 1),
+            Some("action processing".to_owned())
+        );
+        // A detail frame carries the category of the instance it names, which
+        // is not that of the frame it hangs under where the instance was
+        // inherited.
+        assert_eq!(category_at(&g, "@@a", 2), fetching);
+        assert_eq!(category_at(&g, "@@a", 3), fetching);
+        assert_eq!(category_at(&g, "/tmp/a.tar", 4), writing);
+        assert_eq!(
+            category_at(&g, "Compiling //x:y", 2),
+            Some("action processing".to_owned())
+        );
+        let named = flame_as(&p, FlameLabels::Name);
+        assert_eq!(category_at(&named, "@@a", 1), fetching);
+        assert_eq!(category_at(&named, "download", 2), general);
+        // Bottom-up, a frame roots its path and its callers and instance follow.
+        let inverted = inverted_as(&p, FlameLabels::Kind);
+        assert_eq!(category_at(&inverted, "download", 1), general);
+        assert_eq!(category_at(&inverted, "Fetching repository", 2), fetching);
+        assert_eq!(category_at(&inverted, "@@a", 3), fetching);
+        assert_eq!(category_at(&inverted, "VFS write", 1), writing);
+        assert_eq!(category_at(&inverted, "/tmp/a.tar", 4), writing);
+    }
+
+    #[test]
+    fn a_frame_merging_spans_of_two_categories_carries_neither() {
+        // The two lanes' waits merge into one top-level frame, while each
+        // nested one stays under a parent of its own.
+        let wait = |category, start, dur| slice("acquiring semaphore", category, start, dur);
+        let p = profile(vec![
+            track(
+                1,
+                LaneClass::Execution,
+                vec![
+                    wait("Remote execution setup", 0, 10),
+                    slice("upload", "generic", 20, 30),
+                    wait("Remote execution upload time", 20, 10),
+                ],
+            ),
+            track(
+                2,
+                LaneClass::Execution,
+                vec![
+                    wait("Remote execution upload time", 0, 10),
+                    slice("setup", "generic", 20, 30),
+                    wait("Remote execution setup", 20, 10),
+                ],
+            ),
+        ]);
+        for labels in [FlameLabels::Kind, FlameLabels::Name] {
+            let g = flame_as(&p, labels);
+            assert_eq!(
+                category_at(&g, "acquiring semaphore", 1),
+                None,
+                "{labels:?}"
+            );
+            let nested = |parent| {
+                let parent = child(&g, &g.root(), parent);
+                let wait = child(&g, &parent, "acquiring semaphore");
+                wait.category.get().map(|c| g.str(c).to_owned())
+            };
+            assert_eq!(
+                nested("upload"),
+                Some("Remote execution upload time".to_owned()),
+                "{labels:?}"
+            );
+            assert_eq!(
+                nested("setup"),
+                Some("Remote execution setup".to_owned()),
+                "{labels:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_caller_reached_from_spans_of_two_categories_carries_neither_bottom_up() {
+        // "step" is recorded under one category on the first lane and another
+        // on the second, where it has a caller of its own. Bottom-up both
+        // chains from "leaf" run through one "step" node.
+        let lane = |category, start| {
+            vec![
+                slice("step", category, start, 100),
+                slice("leaf", "generic", start, 60),
+            ]
+        };
+        let mut second = vec![slice("outer", "generic", 0, 200)];
+        second.extend(lane("second", 0));
+        let p = profile(vec![
+            track(1, LaneClass::Execution, lane("first", 0)),
+            track(2, LaneClass::Execution, second),
+        ]);
+        let top_down = flame_as(&p, FlameLabels::Name);
+        assert_eq!(category_at(&top_down, "step", 1), Some("first".to_owned()));
+        assert_eq!(category_at(&top_down, "step", 2), Some("second".to_owned()));
+        let g = inverted_as(&p, FlameLabels::Name);
+        assert_eq!(category_at(&g, "leaf", 1), Some("generic".to_owned()));
+        assert_eq!(category_at(&g, "step", 1), None);
+        assert_eq!(category_at(&g, "step", 2), None);
+        assert_eq!(category_at(&g, "outer", 3), Some("generic".to_owned()));
+    }
+
+    #[test]
+    fn a_category_past_the_last_an_id_reaches_is_carried_by_no_frame() {
+        // Categories are numbered in text order, so each filler takes an id
+        // ahead of the one sorting after them all.
+        let fillers = i64::from(u16::MAX);
+        let mut slices: Vec<TestSlice> = (0..fillers)
+            .map(|i| slice(&format!("s{i:05}"), &format!("c{i:05}"), i * 10, 5))
+            .collect();
+        slices.push(slice("last", "d", fillers * 10, 5));
+        let p = profile(vec![track(1, LaneClass::Analysis, slices)]);
+        let g = flame(&p);
+        assert_eq!(category_at(&g, "s00000", 1), Some("c00000".to_owned()));
+        assert_eq!(category_at(&g, "s65534", 1), Some("c65534".to_owned()));
+        assert_eq!(category_at(&g, "last", 1), None);
+    }
+
     #[test]
     fn selection_draws_only_the_chosen_lane_class() {
         let p = profile(vec![
@@ -3533,6 +3766,7 @@ mod tests {
                 workload: Workload::Other,
                 payload: false,
             },
+            category: None,
             detail: false,
             total_us,
             count: 0,

@@ -886,9 +886,15 @@ impl Profile {
     /// named after what it does. A slice whose category has no id reads as the
     /// latter.
     pub fn kind_of(&self, slice: &Slice) -> Option<Str> {
-        let category = &self.categories[slice.category?.position()];
+        self.kind_named(slice.category?, slice.name)
+    }
+
+    /// The kind a span of `category` named `name` is an instance of (see
+    /// [`kind_of`](Self::kind_of)).
+    pub fn kind_named(&self, category: CategoryId, name: Str) -> Option<Str> {
+        let category = &self.categories[category.position()];
         let kinds = category.kinds.as_ref()?;
-        Some(match kinds.naming.kind_of(self.str(slice.name))? {
+        Some(match kinds.naming.kind_of(self.str(name))? {
             SpanKind::Category => category.name,
             SpanKind::Named(i) => kinds.named[i],
         })
