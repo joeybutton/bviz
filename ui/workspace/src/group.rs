@@ -2,8 +2,8 @@ use crate::{AnyPanel, Layout};
 use gpui::Axis;
 use std::num::NonZeroU16;
 
-/// The share of a window a document asks for beside the documents it is stacked
-/// with: a group of twice another's weight is laid out at twice its height.
+/// The share of a window a file asks for beside the files it is stacked with: a
+/// group of twice another's weight is laid out at twice its height.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Weight(NonZeroU16);
 
@@ -17,8 +17,8 @@ impl Weight {
     /// worth stacking at twice a view of text.
     pub const CHART: Self = Self::new(2);
 
-    /// `shares` of the height, at least one: a document laid out at no share of
-    /// the window would be laid out at no height at all.
+    /// `shares` of the height, at least one: a file laid out at no share of the
+    /// window would be laid out at no height at all.
     pub const fn new(shares: u16) -> Self {
         Self(match NonZeroU16::new(shares) {
             Some(shares) => shares,
@@ -41,8 +41,8 @@ impl Default for Weight {
     }
 }
 
-/// What a viewer asks for when it opens a document: how the panels showing it
-/// are arranged, and what the document is worth where a window holds several. A
+/// What a viewer asks for when it opens a file: how the panels showing it are
+/// arranged, and what the file is worth where a window holds several. A
 /// workspace translates the arrangement into the [`Layout`] of panes it frames.
 ///
 /// The leaf type is a parameter so the translation can be exercised on plain

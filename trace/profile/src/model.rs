@@ -1,3 +1,5 @@
+use bviz_invocation::EpochMicros;
+
 /// An interned-string handle: a byte slice into a text pool. `Copy` and
 /// lifetime-free; resolve to `&str` with [`Profile::str`] or by indexing the
 /// owning pool with [`Str::range`]. Equality is by `(off, len)` and so is only
@@ -117,6 +119,11 @@ pub struct Metadata {
     pub build_id: OptStr,
     pub output_base: OptStr,
     pub date: OptStr,
+    /// When Bazel started writing the profile (`otherData.profile_start_ts`).
+    /// The profile's clock counts from the command's execution start, taken
+    /// before the writer starts, so this is an upper bound on the wall-clock
+    /// instant of time zero: later than it by the profiler's startup.
+    pub epoch_origin: Option<EpochMicros>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

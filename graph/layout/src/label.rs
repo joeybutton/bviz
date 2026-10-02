@@ -179,6 +179,31 @@ pub(crate) fn ct_node_id(label: &str, config_key: &str) -> String {
     format!("ct:{label}#{config_key}")
 }
 
+/// The node id of the action whose primary output lies at exec path
+/// `primary_output`. That path is what Bazel's other outputs can name the
+/// action by: a build event stream gives it as
+/// `ActionCompletedId.primary_output`, a profile as the action's `out` under
+/// `--experimental_profile_include_primary_output`, and an execution log lists
+/// it, unmarked, among a spawn's outputs.
+pub(crate) fn action_node_id(primary_output: &str) -> String {
+    format!("{ACTION_PREFIX}{primary_output}")
+}
+
+/// The exec path the action node id `node_id` is formed from, or `None` where
+/// it is formed from the action's place.
+pub(crate) fn action_primary_output(node_id: &str) -> Option<&str> {
+    node_id.strip_prefix(ACTION_PREFIX)
+}
+
+const ACTION_PREFIX: &str = "action:";
+
+/// The node id of an action naming no primary output, the `place`-th the query
+/// lists. A digit follows `action` here and a colon in [`action_node_id`], so
+/// no id has both forms.
+pub(crate) fn unnamed_action_node_id(place: usize) -> String {
+    format!("action{place}")
+}
+
 /// The label and node kind a target carries, by its populated variant, or `None`
 /// when the variant message is absent.
 pub(crate) fn label_and_kind(target: &Target) -> Option<(&str, Kind)> {
@@ -467,6 +492,21 @@ mod tests {
             .iter()
             .find(|n| names.resolve(n.id) == id)
             .unwrap()
+    }
+
+    #[test]
+    fn an_action_id_holds_its_primary_output_whatever_the_path_starts_with() {
+        for path in ["0", "9/out.o", "#1:out.o", ":out.o", "bazel-out/k8/bin/a.o"] {
+            let id = action_node_id(path);
+            assert_eq!(id, format!("action:{path}"));
+            assert_eq!(action_primary_output(&id), Some(path));
+            for place in [0, 1, 9] {
+                assert_ne!(id, unnamed_action_node_id(place), "{path}");
+            }
+        }
+        assert_ne!(action_node_id("pkg/a.o"), action_node_id("pkg/b.o"));
+        assert_eq!(unnamed_action_node_id(7), "action7");
+        assert_eq!(action_primary_output("action7"), None);
     }
 
     #[test]

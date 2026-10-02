@@ -101,7 +101,7 @@ Bazel does not timestamp its progress output, so without `--show_timestamps` the
 replay interpolates its timing between the events that do carry a clock.
 
 `--profile` and `--bep` can be repeated, and combined with the graph flags, to
-open several documents side by side.
+open several files grouped by Bazel invocation.
 
 ## Getting help
 

@@ -862,6 +862,7 @@ version = "0.1.0"
 dependencies = [
  "bviz_alloc",
  "bviz_cli",
+ "bviz_invocation",
  "bviz_ui_console",
  "bviz_ui_graph",
  "bviz_ui_trace",
@@ -904,6 +905,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "bviz_invocation"
+version = "0.1.0"
+
+[[package]]
 name = "bviz_notices"
 version = "0.1.0"
 dependencies = [
@@ -935,6 +940,7 @@ name = "bviz_terminal"
 version = "0.1.0"
 dependencies = [
  "alacritty_terminal",
+ "bviz_invocation",
  "prost",
  "prost-types",
  "protoc-gen-prost",
@@ -954,6 +960,7 @@ dependencies = [
 name = "bviz_trace_profile"
 version = "0.1.0"
 dependencies = [
+ "bviz_invocation",
  "bviz_parallel",
  "crossbeam-channel",
  "crossbeam-utils",
@@ -984,6 +991,7 @@ dependencies = [
 name = "bviz_ui_console"
 version = "0.1.0"
 dependencies = [
+ "bviz_invocation",
  "bviz_terminal",
  "bviz_ui_assets",
  "bviz_ui_components",
@@ -992,6 +1000,7 @@ dependencies = [
  "bviz_ui_workspace",
  "clap",
  "gpui",
+ "prost",
 ]
 
 [[package]]
@@ -1006,6 +1015,7 @@ name = "bviz_ui_graph"
 version = "0.1.0"
 dependencies = [
  "bviz_graph_layout",
+ "bviz_invocation",
  "bviz_ui_assets",
  "bviz_ui_components",
  "bviz_ui_graph_args",
@@ -1048,6 +1058,7 @@ name = "bviz_ui_trace"
 version = "0.1.0"
 dependencies = [
  "bviz_alloc",
+ "bviz_invocation",
  "bviz_trace_layout",
  "bviz_trace_profile",
  "bviz_ui_assets",

@@ -32,14 +32,20 @@ pub(crate) enum TraceEventsArray {
     },
 }
 
+const TRACE_EVENTS_KEY: &[u8] = b"\"traceEvents\"";
+
+/// Byte index of the `"traceEvents"` key's opening quote.
+pub(crate) fn find_trace_events_key(bytes: &[u8]) -> Option<usize> {
+    find_bytes(bytes, TRACE_EVENTS_KEY)
+}
+
 /// Locates the `traceEvents` array: the `"traceEvents"` key, then the first `[`
 /// after it.
 pub(crate) fn find_trace_events_array(bytes: &[u8]) -> TraceEventsArray {
-    const KEY: &[u8] = b"\"traceEvents\"";
-    let Some(key_at) = find_bytes(bytes, KEY) else {
+    let Some(key_at) = find_trace_events_key(bytes) else {
         return TraceEventsArray::NoKey;
     };
-    let after_key = key_at + KEY.len();
+    let after_key = key_at + TRACE_EVENTS_KEY.len();
     match bytes[after_key..].iter().position(|&b| b == b'[') {
         Some(bracket) => TraceEventsArray::Found {
             key_at,

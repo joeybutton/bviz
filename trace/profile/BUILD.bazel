@@ -11,6 +11,7 @@ rust_library(
         "//ui/trace:__pkg__",
     ],
     deps = [
+        "//invocation",
         "//util/parallel",
         "@crates//:crossbeam-channel",
         "@crates//:crossbeam-utils",

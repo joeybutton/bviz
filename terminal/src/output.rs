@@ -1,18 +1,21 @@
 //! Reader for `--build_event_binary_file` streams.
 //!
-//! The file is a sequence of length-delimited `BuildEvent` messages. This pulls
-//! out the console output and the terminal width Bazel rendered it for, which is
-//! everything needed to replay the build into a terminal emulator.
+//! The file is a sequence of length-delimited `BuildEvent` messages.
 
+use std::io::{BufReader, Read};
+use std::path::Path;
+
+use bviz_invocation::{Configurations, InvocationId};
 use prost::Message;
 
-use crate::bep::build_event_stream::{BuildEvent, build_event::Payload};
+use crate::bep::build_event_stream::{BuildEvent, build_event::Payload, build_event_id::Id};
 use crate::bep::command_line::{CommandLine, command_line_section::SectionType};
 use crate::bep::timestamp_proto::google::protobuf::Timestamp;
 
-/// Console output captured from a build, with the terminal width Bazel used and
-/// the structure needed to replay it over time.
+/// What a build event stream tells of the build that wrote it.
 pub struct BuildOutput {
+    /// The configurations the stream describes (its `Configuration` events).
+    pub configurations: Configurations,
     /// Terminal width in columns Bazel rendered for (`--terminal_columns`).
     pub columns: u16,
     /// stdout and stderr concatenated in stream order. `bazel build` writes
@@ -49,10 +52,11 @@ pub(crate) struct Anchor {
 
 #[cfg(test)]
 impl BuildOutput {
-    /// A single-frame output with no timing anchors, for tests that exercise only
-    /// rendering and not playback.
+    /// A single-frame output that carries no clock: the base whose fields a
+    /// test overrides.
     pub(crate) fn from_bytes(columns: u16, bytes: Vec<u8>) -> BuildOutput {
         BuildOutput {
+            configurations: Configurations::default(),
             columns,
             frames: vec![bytes.len()],
             bytes,
@@ -62,15 +66,20 @@ impl BuildOutput {
     }
 }
 
+/// The `ConfigurationId` of the null configuration, which unconfigurable
+/// targets such as source files carry.
+const NULL_CONFIGURATION: &str = "none";
+
 /// Width Bazel falls back to when no terminal is detected; see `--terminal_columns`.
 const DEFAULT_COLUMNS: u16 = 80;
 
-/// Parse the console output, terminal width, frame boundaries, and timestamp
-/// anchors from a build event binary stream.
+/// Read a whole build event binary stream. An event that does not decode fails
+/// the read.
 pub fn parse(mut stream: &[u8]) -> Result<BuildOutput, prost::DecodeError> {
     let mut bytes = Vec::new();
     let mut frames = Vec::new();
     let mut anchors = Vec::new();
+    let mut configurations = Configurations::default();
     let mut columns = None;
     let mut show_timestamps = false;
     while !stream.is_empty() {
@@ -90,6 +99,14 @@ pub fn parse(mut stream: &[u8]) -> Result<BuildOutput, prost::DecodeError> {
             Some(Payload::TestSummary(s)) => {
                 record(&mut anchors, frame, epoch_opt(s.last_stop_time))
             }
+            Some(Payload::Configuration(c)) => {
+                if let Some(Id::Configuration(id)) = event.id.and_then(|id| id.id)
+                    && !id.id.is_empty()
+                    && id.id != NULL_CONFIGURATION
+                {
+                    configurations.insert(id.id, c.mnemonic);
+                }
+            }
             Some(Payload::StructuredCommandLine(command_line)) => {
                 columns = columns.or_else(|| terminal_columns(&command_line));
                 show_timestamps |= show_timestamps_set(&command_line);
@@ -98,12 +115,69 @@ pub fn parse(mut stream: &[u8]) -> Result<BuildOutput, prost::DecodeError> {
         }
     }
     Ok(BuildOutput {
+        configurations,
         columns: columns.unwrap_or(DEFAULT_COLUMNS),
         bytes,
         frames,
         anchors,
         show_timestamps,
     })
+}
+
+/// Bytes [`probe_invocation_id`] reads from the head of a stream, many times
+/// the `BuildStarted` event a stream opens with.
+const PROBE_PREFIX_BYTES: u64 = 256 << 10;
+
+/// The invocation that wrote the build event binary stream at `path`: the first
+/// `BuildStarted.uuid` that is not empty, reading the file event by event up
+/// to the one that names it, and no more than a bounded prefix. `None` when
+/// that prefix holds no such event whole, the file cannot be read, or `path`
+/// is not a regular file: reading a pipe could block, and would take from it
+/// bytes it yields only once.
+pub fn probe_invocation_id(path: &Path) -> Option<InvocationId> {
+    if !std::fs::metadata(path).ok()?.is_file() {
+        return None;
+    }
+    let file = std::fs::File::open(path).ok()?;
+    invocation_id_in_prefix(BufReader::new(file), PROBE_PREFIX_BYTES)
+}
+
+/// [`probe_invocation_id`] over the first `prefix_bytes` bytes of a stream.
+fn invocation_id_in_prefix(stream: impl Read, prefix_bytes: u64) -> Option<InvocationId> {
+    let mut prefix = stream.take(prefix_bytes);
+    let mut event = Vec::new();
+    loop {
+        let length = read_length_delimiter(&mut prefix)?;
+        if length as u64 > prefix.limit() {
+            return None;
+        }
+        event.resize(length, 0);
+        prefix.read_exact(&mut event).ok()?;
+        if let Some(Payload::Started(started)) = BuildEvent::decode(event.as_slice()).ok()?.payload
+            && let Some(id) = InvocationId::new(&started.uuid)
+        {
+            return Some(id);
+        }
+    }
+}
+
+/// The longest encoding of a length delimiter, a 64-bit varint.
+const MAX_DELIMITER_BYTES: usize = 10;
+
+/// Set on every byte of a varint but its last.
+const VARINT_CONTINUES: u8 = 0x80;
+
+/// The length of the next length-delimited message in `stream`, consuming its
+/// delimiter. `None` when the stream ends first.
+fn read_length_delimiter(stream: &mut impl Read) -> Option<usize> {
+    let mut delimiter = [0u8; MAX_DELIMITER_BYTES];
+    for end in 1..=MAX_DELIMITER_BYTES {
+        stream.read_exact(&mut delimiter[end - 1..end]).ok()?;
+        if delimiter[end - 1] & VARINT_CONTINUES == 0 {
+            return prost::decode_length_delimiter(&delimiter[..end]).ok();
+        }
+    }
+    None
 }
 
 /// Record a wall-clock anchor at a frame boundary, skipping events whose
@@ -151,6 +225,7 @@ fn show_timestamps_set(command_line: &CommandLine) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bep::build_event_stream::{self as bes, BuildEventId, BuildStarted, build_event_id};
 
     // A real `--build_event_binary_file` from `bazel build … --terminal_columns=100`.
     const SAMPLE: &[u8] = include_bytes!("../testdata/sample.bep");
@@ -164,6 +239,116 @@ mod tests {
             output.bytes.contains(&0x1b),
             "expected ANSI escapes in output"
         );
+    }
+
+    /// A length-delimited `Configuration` event introducing `id`.
+    fn configuration_event(id: &str, mnemonic: &str) -> Vec<u8> {
+        BuildEvent {
+            id: Some(BuildEventId {
+                id: Some(Id::Configuration(build_event_id::ConfigurationId {
+                    id: id.into(),
+                })),
+            }),
+            payload: Some(Payload::Configuration(bes::Configuration {
+                mnemonic: mnemonic.into(),
+                ..Default::default()
+            })),
+            ..Default::default()
+        }
+        .encode_length_delimited_to_vec()
+    }
+
+    #[test]
+    fn reads_configurations_by_checksum() {
+        let output = parse(SAMPLE).expect("parse sample stream");
+        // The sample's two configurations share a mnemonic.
+        let target = "55817e2200e2f24b506d68c96928ed7b9fa185d1fb462c4f511796269d8d06d4";
+        let other = "91e24984663c795f7d9f904758d4b84ba1954389b2ab756f70a6f32db2a79020";
+        let known = &output.configurations;
+        assert_eq!(known.name(target).as_deref(), Some("k8-fastbuild 55817e"));
+        assert_eq!(known.name(other).as_deref(), Some("k8-fastbuild 91e249"));
+    }
+
+    #[test]
+    fn skips_a_configuration_event_that_names_no_configuration() {
+        let stream = [
+            configuration_event(NULL_CONFIGURATION, "null"),
+            configuration_event("", "unnamed"),
+            configuration_event("0c3d9a77", "k8-opt-exec"),
+        ]
+        .concat();
+        let known = parse(&stream).expect("parse stream").configurations;
+        assert_eq!(known.name(NULL_CONFIGURATION), None);
+        assert_eq!(known.name(""), None);
+        assert_eq!(known.name("0c3d9a77").as_deref(), Some("k8-opt-exec"));
+    }
+
+    #[test]
+    fn probe_reads_the_id_within_its_prefix() {
+        let id = InvocationId::new("a5f7f3e6-4fda-4675-bc16-8ede5420b210");
+        let whole = SAMPLE.len() as u64;
+        assert_eq!(invocation_id_in_prefix(SAMPLE, whole), id);
+
+        // `BuildStarted` is the sample's first event; a prefix ending inside
+        // it holds no id, and one ending right after it does.
+        let mut rest = SAMPLE;
+        BuildEvent::decode_length_delimited(&mut rest).expect("first event");
+        let first_event = (SAMPLE.len() - rest.len()) as u64;
+        assert_eq!(invocation_id_in_prefix(SAMPLE, first_event - 1), None);
+        assert_eq!(invocation_id_in_prefix(SAMPLE, first_event), id);
+
+        // Events ahead of `BuildStarted` are passed over.
+        let mut late = configuration_event("0c3d9a77", "k8-opt-exec");
+        let events_ahead = late.len() as u64;
+        late.extend(SAMPLE);
+        assert_eq!(invocation_id_in_prefix(late.as_slice(), whole), id);
+        assert_eq!(invocation_id_in_prefix(late.as_slice(), events_ahead), None);
+        assert_eq!(invocation_id_in_prefix(&[][..], PROBE_PREFIX_BYTES), None);
+    }
+
+    /// A length-delimited `BuildStarted` event of the invocation `uuid`.
+    fn started_event(uuid: &str) -> Vec<u8> {
+        BuildEvent {
+            payload: Some(Payload::Started(BuildStarted {
+                uuid: uuid.into(),
+                ..Default::default()
+            })),
+            ..Default::default()
+        }
+        .encode_length_delimited_to_vec()
+    }
+
+    #[test]
+    fn probe_reads_the_first_id_that_is_not_empty() {
+        let stream = ["", "first", "second"].map(started_event).concat();
+        assert_eq!(
+            invocation_id_in_prefix(stream.as_slice(), stream.len() as u64),
+            InvocationId::new("first")
+        );
+    }
+
+    #[test]
+    fn probe_stops_at_an_event_longer_than_its_prefix() {
+        let mut stream = Vec::new();
+        prost::encode_length_delimiter(usize::MAX, &mut stream).expect("delimiter");
+        stream.extend(started_event("late"));
+        assert_eq!(
+            invocation_id_in_prefix(stream.as_slice(), PROBE_PREFIX_BYTES),
+            None
+        );
+    }
+
+    #[test]
+    fn probe_reads_a_stream_from_disk() {
+        let dir = std::env::var("TEST_TMPDIR").unwrap_or_else(|_| "/tmp".into());
+        let path = Path::new(&dir).join("probe.bep");
+        std::fs::write(&path, SAMPLE).unwrap();
+        assert_eq!(
+            probe_invocation_id(&path),
+            InvocationId::new("a5f7f3e6-4fda-4675-bc16-8ede5420b210")
+        );
+        assert_eq!(probe_invocation_id(&path.with_extension("missing")), None);
+        assert_eq!(probe_invocation_id(Path::new(&dir)), None);
     }
 
     #[test]

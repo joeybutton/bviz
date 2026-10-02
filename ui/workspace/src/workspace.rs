@@ -319,9 +319,9 @@ impl Workspace {
         workspace
     }
 
-    /// Builds a workspace framing a region of the window per document: `first`
-    /// across the top and each of `others` under it in the order given, every
-    /// region laid out as its document's group describes.
+    /// Builds a workspace framing a region of the window per file: those of
+    /// `first` across the top and those of each of `others` under them in the
+    /// order given, every region laid out as its file's group describes.
     pub(crate) fn with_documents(
         app_name: impl Into<SharedString>,
         first: Document,
@@ -380,11 +380,11 @@ impl Workspace {
         self.arrangement.rearrange()
     }
 
-    /// Lays the window out as the documents it holds described when they
-    /// opened: each of them as its own group arranges the panels showing its
-    /// views, the documents stacked in the order they opened and at the weights
-    /// they asked for. A view whose panel is closed, and one whose panel
-    /// another window holds, take no place in the arrangement.
+    /// Lays the window out as the files it holds described when they opened:
+    /// each of them as its own group arranges the panels showing its views, the
+    /// files stacked in the order they opened and at the weights they asked
+    /// for. A view whose panel is closed, and one whose panel another window
+    /// holds, take no place in the arrangement.
     ///
     /// The panels themselves are laid out again — each keeps what it has
     /// scrolled to, zoomed in on and selected, and goes on being the panel the

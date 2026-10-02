@@ -1,7 +1,7 @@
 //! The command line of the window that shows every kind of Bazel build
-//! document: the three viewers' flag fragments joined into one parser, and the
-//! documents an invocation resolves to. It names no window and draws nothing,
-//! so a parse can be exercised without a display.
+//! document: the three viewers' flag fragments joined into one parser, and what
+//! a command line names for each viewer to read. It names no window and draws
+//! nothing, so a parse can be exercised without a display.
 
 use bviz_ui_console_args::{ConsoleArgs, ConsoleSource};
 use bviz_ui_graph_args::{GraphArgs, GraphSource};
@@ -12,8 +12,21 @@ use clap::{CommandFactory, Parser};
 /// Opens Bazel build documents: the dependency graph, the action timeline, the
 /// console replay.
 ///
-/// Every document named on the command line takes a region of the one window,
-/// the regions stacked one above another.
+/// The graph and each profile and build event stream named on the command line
+/// take a region of the one window each, the regions stacked one above another.
+///
+/// Files written by one Bazel invocation open as one document, which stands
+/// where the first of them does. A profile and a build event stream each carry
+/// the id of the invocation that wrote them, and one profile and one build
+/// event stream carrying the same id are that invocation's document. A further
+/// profile or stream of the invocation is a document of its own, and so is a
+/// file carrying no id.
+///
+/// The query, cquery and aquery files carry no id, so bviz cannot check which
+/// build a graph describes. It takes the graph for the invocation's when every
+/// id the profiles and build event streams carry is the same one, be that a
+/// single file's, and opens the graph as a document of its own when they carry
+/// several ids or none.
 #[derive(Parser, Debug)]
 #[command(name = "bviz", bin_name = "bviz", version, about)]
 pub struct Cli {
@@ -25,57 +38,57 @@ pub struct Cli {
     pub console: ConsoleArgs,
 }
 
-/// The flags of [`Cli`] that name a document, for the invocation that gives none.
+/// The flags of [`Cli`] that name a file, for the command line that gives none.
 const SOURCE_FLAGS: &str = "--aquery, --cquery, --query, --profile or --bep";
 
 impl Cli {
-    /// The documents this invocation names, graph first and each repeatable
-    /// flag's in the order given.
+    /// What this command line names to open.
     ///
-    /// The rejection of an invocation naming none is written out here rather
+    /// The rejection of a command line naming nothing is written out here rather
     /// than left to a clap argument group, because these fragments are shared
     /// with the per-viewer binaries, where a different flag is the required one.
     pub fn sources(self) -> Result<Sources, clap::Error> {
-        let mut named = Vec::with_capacity(1 + self.trace.profile.len() + self.console.bep.len());
-        named.extend(self.graph.source().map(Source::Graph));
-        named.extend(self.trace.sources().map(Source::Trace));
-        named.extend(self.console.sources().map(Source::Console));
-        let mut named = named.into_iter();
-        let Some(first) = named.next() else {
+        let mut files = Vec::with_capacity(self.trace.profile.len() + self.console.bep.len());
+        files.extend(self.trace.sources().map(Source::Trace));
+        files.extend(self.console.sources().map(Source::Console));
+        if let Some(graph) = self.graph.source() {
+            return Ok(Sources::Graph { graph, files });
+        }
+        let mut files = files.into_iter();
+        let Some(first) = files.next() else {
             return Err(Self::command().error(
                 ErrorKind::MissingRequiredArgument,
                 format!("one of {SOURCE_FLAGS} is required"),
             ));
         };
-        Ok(Sources {
+        Ok(Sources::Files {
             first,
-            rest: named.collect(),
+            rest: files.collect(),
         })
     }
 }
 
-/// A document to open, whichever viewer shows it.
+/// A file a viewer reads on its own: a profile or a build event stream.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Source {
-    Graph(GraphSource),
     Trace(TraceSource),
     Console(ConsoleSource),
 }
 
-/// The documents an invocation names, in the order a window shows them. Holding
-/// the first apart from the rest is what makes it at least one: a window with no
-/// document to show is a usage mistake, refused before any window opens.
-#[derive(Clone, Debug)]
-pub struct Sources {
-    first: Source,
-    rest: Vec<Source>,
-}
-
-impl Sources {
-    /// The document the window shows at the top, and those stacked below it.
-    pub fn into_parts(self) -> (Source, Vec<Source>) {
-        (self.first, self.rest)
-    }
+/// What a command line names to open: the one graph its graph flags describe,
+/// where it gives any, and each repeatable flag's files in the order given.
+/// Either way it names at least one thing: a window with nothing to show is a
+/// usage mistake, refused before any window opens.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Sources {
+    Graph {
+        graph: GraphSource,
+        files: Vec<Source>,
+    },
+    Files {
+        first: Source,
+        rest: Vec<Source>,
+    },
 }
 
 #[cfg(test)]
@@ -83,13 +96,11 @@ mod tests {
     use super::*;
     use bviz_ui_graph_args::{Input, InputKind};
 
-    fn sources(args: &[&str]) -> Result<Vec<Source>, clap::Error> {
-        let cli = Cli::try_parse_from(std::iter::once("bviz").chain(args.iter().copied()))?;
-        let (first, rest) = cli.sources()?.into_parts();
-        Ok(std::iter::once(first).chain(rest).collect())
+    fn sources(args: &[&str]) -> Result<Sources, clap::Error> {
+        Cli::try_parse_from(std::iter::once("bviz").chain(args.iter().copied()))?.sources()
     }
 
-    fn graph(inputs: &[(InputKind, &str)]) -> Source {
+    fn graph(inputs: &[(InputKind, &str)], files: Vec<Source>) -> Sources {
         let inputs = inputs
             .iter()
             .map(|&(kind, path)| Input {
@@ -97,7 +108,14 @@ mod tests {
                 path: path.into(),
             })
             .collect();
-        Source::Graph(GraphSource::new(inputs).expect("the inputs name a graph"))
+        Sources::Graph {
+            graph: GraphSource::new(inputs).expect("the inputs name a graph"),
+            files,
+        }
+    }
+
+    fn files(first: Source, rest: Vec<Source>) -> Sources {
+        Sources::Files { first, rest }
     }
 
     fn trace(path: &str) -> Source {
@@ -112,8 +130,8 @@ mod tests {
     /// missing required argument — which is what fixes the exit code the shell
     /// sees.
     #[test]
-    fn an_invocation_naming_no_document_is_a_usage_error() {
-        let err = sources(&[]).expect_err("no document was named");
+    fn a_command_line_naming_no_file_is_a_usage_error() {
+        let err = sources(&[]).expect_err("no file was named");
         assert_eq!(err.kind(), ErrorKind::MissingRequiredArgument);
         assert!(
             err.to_string().contains(SOURCE_FLAGS),
@@ -122,38 +140,44 @@ mod tests {
     }
 
     #[test]
-    fn each_flag_names_a_document_of_its_own_kind() {
+    fn each_flag_names_a_source_of_its_own_kind() {
         assert_eq!(
             sources(&["--aquery", "a.pb"]).unwrap(),
-            [graph(&[(InputKind::Aquery, "a.pb")])]
+            graph(&[(InputKind::Aquery, "a.pb")], Vec::new())
         );
         assert_eq!(
             sources(&["--cquery", "c.pb"]).unwrap(),
-            [graph(&[(InputKind::Cquery, "c.pb")])]
+            graph(&[(InputKind::Cquery, "c.pb")], Vec::new())
         );
         assert_eq!(
             sources(&["--query", "q.pb"]).unwrap(),
-            [graph(&[(InputKind::Query, "q.pb")])]
+            graph(&[(InputKind::Query, "q.pb")], Vec::new())
         );
-        assert_eq!(sources(&["--profile", "p.gz"]).unwrap(), [trace("p.gz")]);
-        assert_eq!(sources(&["--bep", "b.bep"]).unwrap(), [console("b.bep")]);
+        assert_eq!(
+            sources(&["--profile", "p.gz"]).unwrap(),
+            files(trace("p.gz"), Vec::new())
+        );
+        assert_eq!(
+            sources(&["--bep", "b.bep"]).unwrap(),
+            files(console("b.bep"), Vec::new())
+        );
         assert_eq!(
             sources(&["--profile", "one.gz", "--profile", "two.gz"]).unwrap(),
-            [trace("one.gz"), trace("two.gz")]
+            files(trace("one.gz"), vec![trace("two.gz")])
         );
     }
 
-    /// Documents of every kind open together.
+    /// Files of every kind open together, the graph ahead of the rest wherever
+    /// its flags stand.
     #[test]
-    fn a_graph_a_profile_and_a_bep_are_three_documents() {
+    fn a_graph_a_profile_and_a_bep_are_three_sources() {
         let named = sources(&["--profile", "p.gz", "--bep", "b.bep", "--aquery", "a.pb"]).unwrap();
         assert_eq!(
             named,
-            [
-                graph(&[(InputKind::Aquery, "a.pb")]),
-                trace("p.gz"),
-                console("b.bep"),
-            ]
+            graph(
+                &[(InputKind::Aquery, "a.pb")],
+                vec![trace("p.gz"), console("b.bep")]
+            )
         );
     }
 

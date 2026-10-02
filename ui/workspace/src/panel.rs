@@ -1,10 +1,12 @@
+#[cfg(test)]
+use crate::OpenDocument;
+use crate::documents::{Held, Registration};
 use crate::{Documents, Pane, PanelGroup, ViewSpec};
 use gpui::{
     AnyView, App, Context, Entity, EntityId, EventEmitter, FocusHandle, Focusable, Render,
     SharedString, Subscription, Window,
 };
 use std::collections::HashMap;
-use std::collections::hash_map::Entry;
 use std::iter;
 use std::num::NonZeroUsize;
 use std::path::Path;
@@ -108,7 +110,7 @@ impl AnyPanel {
         self.panel.title(cx)
     }
 
-    /// The number following the plain title, if the panel's document has one.
+    /// The number following the plain title, if the file the panel shows has one.
     pub fn title_suffix(&self) -> Option<SharedString> {
         self.ordinal.map(ordinal_suffix)
     }
@@ -161,65 +163,182 @@ impl AnyPanel {
     }
 }
 
-/// A document as a viewer opens it into a window. Its label tells it apart from
-/// the other documents the window opens with: every panel of a document whose
-/// label another shares is numbered, counting in the order the window stacks the
-/// documents.
-pub struct Document {
+/// The views one file brings to a window, arranged and weighed as its viewer
+/// asks. Its label tells it apart from the other files the window opens with,
+/// whichever documents hold them: every panel of a file whose label another
+/// shares is numbered, counting in the order the window stacks the files.
+pub struct Member {
     label: SharedString,
     views: PanelGroup<ViewSpec>,
 }
 
-impl Document {
+impl Member {
     pub fn new(label: SharedString, views: PanelGroup<ViewSpec>) -> Self {
         Self { label, views }
     }
+}
 
-    /// The panels of `first` and `others`, each document numbered and registered
-    /// with the session's [`Documents`], stacked as [`PanelGroup::stack`] stacks
-    /// them.
+/// What a window opens, and lists as one entry of its Documents menu.
+pub struct Document(Members);
+
+enum Members {
+    /// One file opened by itself, which the document goes by the label of.
+    Alone(Member),
+    /// Several files under a label of the document's own.
+    Joined {
+        label: SharedString,
+        first: Member,
+        second: Member,
+        rest: Vec<Member>,
+    },
+}
+
+impl From<Member> for Document {
+    fn from(member: Member) -> Self {
+        Self(Members::Alone(member))
+    }
+}
+
+impl Document {
+    /// `first`, `second` and each of `rest` as one document, which the Documents
+    /// menu lists under `label`. A window stacks, weighs and numbers each file
+    /// as it does one opened by itself.
+    pub fn join(label: SharedString, first: Member, second: Member, rest: Vec<Member>) -> Self {
+        Self(Members::Joined {
+            label,
+            first,
+            second,
+            rest,
+        })
+    }
+
+    fn members(&self) -> impl Iterator<Item = &Member> {
+        let (first, second, rest) = match &self.0 {
+            Members::Alone(member) => (member, None, &[][..]),
+            Members::Joined {
+                first,
+                second,
+                rest,
+                ..
+            } => (first, Some(second), &rest[..]),
+        };
+        iter::once(first).chain(second).chain(rest)
+    }
+
+    fn joined_label(&self) -> Option<&SharedString> {
+        match &self.0 {
+            Members::Alone(_) => None,
+            Members::Joined { label, .. } => Some(label),
+        }
+    }
+
+    /// `first` and `others` as the registry takes them. Files whose labels
+    /// collide are numbered, and so are the joined documents whose own labels
+    /// do. A file opened by itself is listed under its numbered label, which is
+    /// what its panels read.
+    fn registrations(first: Self, others: Vec<Self>) -> (Registration, Vec<Registration>) {
+        let documents = || iter::once(&first).chain(&others);
+        let mut files = Ordinals::of(
+            documents()
+                .flat_map(Self::members)
+                .map(|member| &member.label),
+        );
+        let mut joined = Ordinals::of(documents().filter_map(Self::joined_label));
+        let mut held = |member: Member| {
+            let ordinal = files.take(&member.label);
+            (member.label, ordinal, member.views)
+        };
+        let mut registration = |document: Self| match document.0 {
+            Members::Alone(member) => {
+                let (label, ordinal, views) = held(member);
+                Registration {
+                    name: numbered(label, ordinal),
+                    first: Held { ordinal, views },
+                    rest: Vec::new(),
+                }
+            }
+            Members::Joined {
+                label,
+                first,
+                second,
+                rest,
+            } => {
+                let ordinal = joined.take(&label);
+                let mut held = |member| {
+                    let (_, ordinal, views) = held(member);
+                    Held { ordinal, views }
+                };
+                Registration {
+                    name: numbered(label, ordinal),
+                    first: held(first),
+                    rest: iter::once(second).chain(rest).map(held).collect(),
+                }
+            }
+        };
+        let first = registration(first);
+        (first, others.into_iter().map(registration).collect())
+    }
+
+    /// What a window opening with `first` and `others` lists before any panel
+    /// shows a view.
+    #[cfg(test)]
+    pub(crate) fn unshown(first: Self, others: Vec<Self>) -> Vec<OpenDocument> {
+        let (first, others) = Self::registrations(first, others);
+        iter::once(first)
+            .chain(others)
+            .map(OpenDocument::unshown)
+            .collect()
+    }
+
+    /// The panels of `first` and `others`, each document registered with the
+    /// session's [`Documents`], every file's group stacked as
+    /// [`PanelGroup::stack`] stacks them.
     pub(crate) fn stack(first: Self, others: Vec<Self>, cx: &mut App) -> PanelGroup {
-        let labels: Vec<SharedString> = iter::once(&first)
-            .chain(&others)
-            .map(|document| document.label.clone())
-            .collect();
-        let ordinals = shared_label_ordinals(&labels);
+        let following = others.iter().flat_map(Self::members).count();
+        let (first, others) = Self::registrations(first, others);
         Documents::global(cx).update(cx, |documents, cx| {
-            let mut open = |document: Self, ordinal| {
-                documents.open(document.label, ordinal, document.views, cx)
-            };
-            let first = open(first, ordinals[0]);
-            let others = others
-                .into_iter()
-                .zip(&ordinals[1..])
-                .map(|(document, &ordinal)| open(document, ordinal))
-                .collect();
-            PanelGroup::stack(first, others)
+            let (lead, mut stacked) = documents.open(first, cx);
+            stacked.reserve(following);
+            for document in others {
+                let (first, rest) = documents.open(document, cx);
+                stacked.push(first);
+                stacked.extend(rest);
+            }
+            PanelGroup::stack(lead, stacked)
         })
     }
 }
 
-/// The ordinal of each of `labels` within the labels equal to it, or `None` for
-/// a label no other one equals.
-fn shared_label_ordinals(labels: &[SharedString]) -> Vec<Option<NonZeroUsize>> {
-    let mut ordinals = vec![None; labels.len()];
-    // Each label's first index, and how many of it have been seen.
-    let mut groups: HashMap<&SharedString, (usize, NonZeroUsize)> =
-        HashMap::with_capacity(labels.len());
-    for (index, label) in labels.iter().enumerate() {
-        match groups.entry(label) {
-            Entry::Vacant(group) => {
-                group.insert((index, NonZeroUsize::MIN));
-            }
-            Entry::Occupied(mut group) => {
-                let (first, seen) = group.get_mut();
-                ordinals[*first] = Some(NonZeroUsize::MIN);
-                *seen = seen.saturating_add(1);
-                ordinals[index] = Some(*seen);
-            }
+/// The number that tells each of several equal labels apart, counted in the
+/// order the labels are taken.
+struct Ordinals {
+    /// By label more than one bears, the number its next bearer takes.
+    next: HashMap<SharedString, NonZeroUsize>,
+}
+
+impl Ordinals {
+    fn of<'a>(labels: impl Iterator<Item = &'a SharedString>) -> Self {
+        let mut bearers: HashMap<&SharedString, usize> =
+            HashMap::with_capacity(labels.size_hint().0);
+        for label in labels {
+            *bearers.entry(label).or_default() += 1;
         }
+        let next = bearers
+            .into_iter()
+            .filter(|(_, bearers)| *bearers > 1)
+            .map(|(label, _)| (label.clone(), NonZeroUsize::MIN))
+            .collect();
+        Self { next }
     }
-    ordinals
+
+    /// The number of the next bearer of `label`, or `None` for a label no other
+    /// one equals.
+    fn take(&mut self, label: &SharedString) -> Option<NonZeroUsize> {
+        let next = self.next.get_mut(label)?;
+        let taken = *next;
+        *next = next.saturating_add(1);
+        Some(taken)
+    }
 }
 
 fn ordinal_suffix(ordinal: NonZeroUsize) -> SharedString {
@@ -227,7 +346,7 @@ fn ordinal_suffix(ordinal: NonZeroUsize) -> SharedString {
 }
 
 /// `name` followed by the suffix `ordinal` reads as, if there is one.
-pub(crate) fn numbered(name: SharedString, ordinal: Option<NonZeroUsize>) -> SharedString {
+fn numbered(name: SharedString, ordinal: Option<NonZeroUsize>) -> SharedString {
     match ordinal {
         Some(ordinal) => format!("{name}{}", ordinal_suffix(ordinal)).into(),
         None => name,
@@ -296,6 +415,7 @@ impl<T: Panel> PanelOps for Entity<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Weight;
 
     #[test]
     fn a_document_is_labelled_by_its_file_name() {
@@ -313,11 +433,206 @@ mod tests {
         assert_eq!(document_label(Path::new("/")), "/");
     }
 
+    const TIMELINE: ViewKind = ViewKind::new("timeline");
+    const FLAME: ViewKind = ViewKind::new("flame");
+    const CONSOLE: ViewKind = ViewKind::new("console");
+    const GRAPH: ViewKind = ViewKind::new("graph");
+
+    fn profile(label: &'static str) -> Member {
+        Member::new(
+            label.into(),
+            PanelGroup::tabs(
+                ViewSpec::for_test(TIMELINE),
+                vec![ViewSpec::for_test(FLAME)],
+            )
+            .with_weight(Weight::CHART),
+        )
+    }
+
+    fn one_view(label: &'static str, kind: ViewKind, weight: Weight) -> Member {
+        Member::new(
+            label.into(),
+            PanelGroup::one(ViewSpec::for_test(kind)).with_weight(weight),
+        )
+    }
+
+    fn session(label: &'static str, profile_label: &'static str) -> Document {
+        Document::join(
+            label.into(),
+            profile(profile_label),
+            one_view("build.bep", CONSOLE, Weight::LOG),
+            Vec::new(),
+        )
+    }
+
+    /// A file as its panels are numbered, the kinds of the views it shows and
+    /// the weight it asks for.
+    type File = (String, Vec<ViewKind>, Weight);
+
+    /// Each document a window opening with `first` and `others` holds: what it
+    /// is listed under, and its files.
+    fn opened(first: Document, others: Vec<Document>) -> Vec<(String, Vec<File>)> {
+        let labels: Vec<Vec<SharedString>> = iter::once(&first)
+            .chain(&others)
+            .map(|document| {
+                let labels = document.members().map(|member| member.label.clone());
+                labels.collect()
+            })
+            .collect();
+        let (first, others) = Document::registrations(first, others);
+        iter::once(first)
+            .chain(others)
+            .zip(labels)
+            .map(|(registration, labels)| {
+                let files = iter::once(&registration.first)
+                    .chain(&registration.rest)
+                    .zip(labels)
+                    .map(|(held, label)| {
+                        (
+                            numbered(label, held.ordinal).to_string(),
+                            held.views.panels().map(|view| view.kind()).collect(),
+                            held.views.weight(),
+                        )
+                    })
+                    .collect();
+                (registration.name.to_string(), files)
+            })
+            .collect()
+    }
+
+    /// The same, without what each file shows.
+    fn named(first: Document, others: Vec<Document>) -> Vec<(String, Vec<String>)> {
+        opened(first, others)
+            .into_iter()
+            .map(|(name, files)| (name, files.into_iter().map(|file| file.0).collect()))
+            .collect()
+    }
+
+    fn names(document: &str, files: &[&str]) -> (String, Vec<String>) {
+        let files = files.iter().map(|file| file.to_string()).collect();
+        (document.to_string(), files)
+    }
+
+    #[test]
+    fn a_file_opened_by_itself_is_a_document_going_by_its_label() {
+        assert_eq!(
+            opened(profile("build.profile.gz").into(), Vec::new()),
+            [(
+                "build.profile.gz".to_string(),
+                vec![(
+                    "build.profile.gz".to_string(),
+                    vec![TIMELINE, FLAME],
+                    Weight::CHART
+                )],
+            )]
+        );
+    }
+
+    /// A joined document holds each file as the file's viewer opened it: under
+    /// its own label, arranged and weighed as asked.
+    #[test]
+    fn a_joined_document_holds_every_file_as_it_was_opened() {
+        let joined = Document::join(
+            "Invocation a5f7f3e6".into(),
+            profile("build.profile.gz"),
+            one_view("build.bep", CONSOLE, Weight::LOG),
+            vec![one_view("aquery.pb", GRAPH, Weight::CHART)],
+        );
+        assert_eq!(
+            opened(joined, Vec::new()),
+            [(
+                "Invocation a5f7f3e6".to_string(),
+                vec![
+                    (
+                        "build.profile.gz".to_string(),
+                        vec![TIMELINE, FLAME],
+                        Weight::CHART
+                    ),
+                    ("build.bep".to_string(), vec![CONSOLE], Weight::LOG),
+                    ("aquery.pb".to_string(), vec![GRAPH], Weight::CHART),
+                ],
+            )]
+        );
+    }
+
+    /// A panel is titled by its file, so files of one name are told apart by
+    /// number in whichever documents they are held.
+    #[test]
+    fn files_sharing_a_label_are_numbered_across_joined_documents() {
+        assert_eq!(
+            named(
+                session("Invocation a5f7f3e6", "build.profile.gz"),
+                vec![session("Invocation 0b437916", "build.profile.gz")],
+            ),
+            [
+                names(
+                    "Invocation a5f7f3e6",
+                    &["build.profile.gz (1)", "build.bep (1)"]
+                ),
+                names(
+                    "Invocation 0b437916",
+                    &["build.profile.gz (2)", "build.bep (2)"]
+                ),
+            ]
+        );
+    }
+
+    /// A file opened by itself is listed under the number its panels carry.
+    #[test]
+    fn a_joined_file_and_one_opened_by_itself_are_numbered_together() {
+        assert_eq!(
+            named(
+                session("Invocation a5f7f3e6", "build.profile.gz"),
+                vec![
+                    profile("build.profile.gz").into(),
+                    one_view("aquery.pb", GRAPH, Weight::CHART).into()
+                ],
+            ),
+            [
+                names(
+                    "Invocation a5f7f3e6",
+                    &["build.profile.gz (1)", "build.bep"]
+                ),
+                names("build.profile.gz (2)", &["build.profile.gz (2)"]),
+                names("aquery.pb", &["aquery.pb"]),
+            ]
+        );
+    }
+
+    /// The labels joined documents are listed under are numbered among
+    /// themselves: a file's label equal to one names something else.
+    #[test]
+    fn joined_documents_sharing_a_label_are_numbered_among_themselves() {
+        assert_eq!(
+            named(
+                session("Invocation a5f7f3e6", "a.profile.gz"),
+                vec![
+                    one_view("Invocation a5f7f3e6", GRAPH, Weight::CHART).into(),
+                    session("Invocation a5f7f3e6", "b.profile.gz"),
+                    session("Invocation 0b437916", "c.profile.gz"),
+                ],
+            ),
+            [
+                names(
+                    "Invocation a5f7f3e6 (1)",
+                    &["a.profile.gz", "build.bep (1)"]
+                ),
+                names("Invocation a5f7f3e6", &["Invocation a5f7f3e6"]),
+                names(
+                    "Invocation a5f7f3e6 (2)",
+                    &["b.profile.gz", "build.bep (2)"]
+                ),
+                names("Invocation 0b437916", &["c.profile.gz", "build.bep (3)"]),
+            ]
+        );
+    }
+
     fn ordinals(labels: &[&'static str]) -> Vec<Option<usize>> {
         let labels: Vec<SharedString> = labels.iter().copied().map(SharedString::from).collect();
-        shared_label_ordinals(&labels)
-            .into_iter()
-            .map(|ordinal| ordinal.map(NonZeroUsize::get))
+        let mut ordinals = Ordinals::of(labels.iter());
+        labels
+            .iter()
+            .map(|label| ordinals.take(label).map(NonZeroUsize::get))
             .collect()
     }
 

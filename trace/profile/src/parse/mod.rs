@@ -1,7 +1,9 @@
 use std::fmt;
-use std::io::{BufReader, Seek, SeekFrom};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::Path;
 
+use bviz_invocation::InvocationId;
+use flate2::bufread::MultiGzDecoder;
 use serde::de::DeserializeSeed;
 use serde_json::{Map, Value};
 
@@ -15,10 +17,10 @@ mod scanner;
 mod serde_events;
 
 use build::{Builder, Merge, seal};
-use decode::{decode, gzip_isize_from_file};
+use decode::{decode, gzip_isize_from_file, latin1_cow};
 use pipeline::{
-    TraceEventsArray, find_trace_events_array, parse_gz_pipelined, parse_gz_pipelined_reader,
-    parse_parallel,
+    TraceEventsArray, find_trace_events_array, find_trace_events_key, parse_gz_pipelined,
+    parse_gz_pipelined_reader, parse_parallel,
 };
 use scanner::object_end;
 use serde_events::{ArgEntry, ProfileVisitor, RawEventSeed};
@@ -261,6 +263,49 @@ fn recover_other_data(prefix: &str) -> Option<Map<String, Value>> {
     serde_json::from_str(&prefix[obj_start..=end]).ok()
 }
 
+/// The `otherData` key holding the id of the invocation that wrote the
+/// profile: Bazel's command id, despite the key's name.
+pub(crate) const BUILD_ID_KEY: &str = "build_id";
+
+/// Decoded bytes [`probe_invocation_id`] reads from the head of a profile,
+/// many times the `otherData` object Bazel opens a profile with.
+const PROBE_HEAD_BYTES: u64 = 64 << 10;
+
+/// The invocation that wrote the profile at `path`, from the `otherData` ahead
+/// of its events, reading and inflating no more than a bounded head of the
+/// file. `None` when that head holds no such id, the file cannot be read, or
+/// `path` is not a regular file: reading a pipe could block, and would take
+/// from it bytes it yields only once.
+pub fn probe_invocation_id(path: &Path) -> Option<InvocationId> {
+    if !std::fs::metadata(path).ok()?.is_file() {
+        return None;
+    }
+    let file = std::fs::File::open(path).ok()?;
+    invocation_id_at_head(BufReader::new(file), PROBE_HEAD_BYTES)
+}
+
+/// [`probe_invocation_id`] over the first `head_bytes` decoded bytes of a
+/// profile.
+fn invocation_id_at_head(mut profile: impl BufRead, head_bytes: u64) -> Option<InvocationId> {
+    let gzipped = profile.fill_buf().ok()?.starts_with(&GZIP_MAGIC);
+    let mut head = Vec::new();
+    // A stream that fails mid-way, as a truncated profile does, has still
+    // yielded the bytes ahead of the failure.
+    let _ = match gzipped {
+        true => MultiGzDecoder::new(profile)
+            .take(head_bytes)
+            .read_to_end(&mut head),
+        false => profile.take(head_bytes).read_to_end(&mut head),
+    };
+    let head = latin1_cow(&head);
+    let before_events = match find_trace_events_key(head.as_bytes()) {
+        Some(key_at) => &head[..key_at],
+        None => &head,
+    };
+    let other_data = recover_other_data(before_events)?;
+    InvocationId::new(other_data.get(BUILD_ID_KEY)?.as_str()?)
+}
+
 /// Combines two `otherData` objects into the metadata of a profile that
 /// carries the key on both sides of its `traceEvents` array, splitting its
 /// keys across them. `head` is the object appearing earlier in the stream, and
@@ -317,6 +362,7 @@ mod tests {
     use super::scanner::{find_special, scan_event};
     use super::serde_events::{arg_i64, arg_str};
     use super::*;
+    use bviz_invocation::EpochMicros;
     use std::io::Write;
 
     fn parse(json: &str) -> Profile {
@@ -388,11 +434,12 @@ mod tests {
         let m = p.metadata();
         writeln!(
             out,
-            "meta {:?} {:?} {:?} {:?}",
+            "meta {:?} {:?} {:?} {:?} {:?}",
             p.opt_str(m.bazel_version),
             p.opt_str(m.build_id),
             p.opt_str(m.output_base),
-            p.opt_str(m.date)
+            p.opt_str(m.date),
+            m.epoch_origin
         )
         .unwrap();
         writeln!(out, "span {} {}", p.span().start_us, p.span().end_us).unwrap();
@@ -445,7 +492,7 @@ mod tests {
     /// a counter sampled at two times — so chunking at newlines splits a
     /// thread's slices and a counter's points across chunks, exercising merge.
     fn chunkable_profile_json() -> String {
-        "{\"otherData\":{\"bazel_version\":\"9.0.0\"},\"traceEvents\":[\n".to_string()
+        "{\"otherData\":{\"bazel_version\":\"9.0.0\",\"profile_start_ts\":1781439245231},\"traceEvents\":[\n".to_string()
             + "{\"name\":\"thread_name\",\"ph\":\"M\",\"tid\":1,\"args\":{\"name\":\"Lane A\"}},\n"
             + "{\"name\":\"thread_sort_index\",\"ph\":\"M\",\"tid\":1,\"args\":{\"sort_index\":10}},\n"
             + "{\"cat\":\"skyframe evaluator\",\"name\":\"parent\",\"ph\":\"X\",\"ts\":0,\"dur\":100,\"tid\":1,\"args\":{\"mnemonic\":\"CppCompile\",\"target\":\"//a:b\"}},\n"
@@ -764,10 +811,14 @@ mod tests {
         let json = "{\"otherData\":{\"bazel_version\":\"9.0.0\"},\"traceEvents\":[\n".to_string()
             + "{\"name\":\"thread_name\",\"ph\":\"M\",\"tid\":1,\"args\":{\"name\":\"L\"}},\n"
             + "{\"cat\":\"c\",\"name\":\"a\",\"ph\":\"X\",\"ts\":0,\"dur\":1,\"tid\":1}\n"
-            + "],\"otherData\":{\"build_id\":\"abc\",\"bazel_version\":\"0.0.0\"}}";
+            + "],\"otherData\":{\"build_id\":\"abc\",\"bazel_version\":\"0.0.0\",\"profile_start_ts\":1781439245231}}";
         let check = |p: &Profile| {
             assert_eq!(p.opt_str(p.metadata().bazel_version), Some("9.0.0"));
             assert_eq!(p.opt_str(p.metadata().build_id), Some("abc"));
+            assert_eq!(
+                p.metadata().epoch_origin,
+                Some(EpochMicros::from_millis(1_781_439_245_231))
+            );
         };
         check(&parse_streaming(&json).expect("serial"));
         check(&parse_chunks(&json, 4, 0).expect("parallel"));
@@ -778,9 +829,66 @@ mod tests {
     }
 
     #[test]
+    fn probe_reads_the_id_at_the_head() {
+        let id = "a5f7f3e6-4fda-4675-bc16-8ede5420b210";
+        let leading = format!(
+            "{{\"otherData\":{{\"bazel_version\":\"9.0.0\",\"build_id\":\"{id}\"}},\"traceEvents\":[\n"
+        ) + "{\"cat\":\"c\",\"name\":\"a\",\"ph\":\"X\",\"ts\":0,\"dur\":1,\"tid\":1}\n]}";
+        let gzipped = |json: &str| {
+            let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+            enc.write_all(json.as_bytes()).unwrap();
+            enc.finish().unwrap()
+        };
+        let probe = |bytes: &[u8], head_bytes| invocation_id_at_head(bytes, head_bytes);
+        let whole = leading.len() as u64;
+        assert_eq!(probe(leading.as_bytes(), whole), InvocationId::new(id));
+        assert_eq!(probe(&gzipped(&leading), whole), InvocationId::new(id));
+        // A profile cut off inside its events still opens with its id, plain
+        // or as a gzip stream missing its tail.
+        let cut = leading.len() - 20;
+        assert_eq!(
+            probe(&leading.as_bytes()[..cut], whole),
+            InvocationId::new(id)
+        );
+        let gz = gzipped(&leading);
+        assert_eq!(probe(&gz[..gz.len() - 12], whole), InvocationId::new(id));
+
+        // A head that ends inside the object holds no id.
+        let inside_other_data = leading.find(id).unwrap() as u64;
+        assert_eq!(probe(leading.as_bytes(), inside_other_data), None);
+        assert_eq!(probe(&gzipped(&leading), inside_other_data), None);
+
+        // Nor does an object that trails the events or their key, an empty id, or no
+        // profile at all.
+        let trailing = "{\"traceEvents\":[\n".to_string()
+            + "{\"cat\":\"c\",\"name\":\"a\",\"ph\":\"X\",\"ts\":0,\"dur\":1,\"tid\":1}\n"
+            + &format!("],\"otherData\":{{\"build_id\":\"{id}\"}}}}");
+        assert_eq!(probe(trailing.as_bytes(), trailing.len() as u64), None);
+        let cut_at_key = &trailing[..trailing.find('[').unwrap()];
+        let after_key = format!("{cut_at_key},\"otherData\":{{\"build_id\":\"{id}\"}}}}");
+        assert_eq!(probe(after_key.as_bytes(), after_key.len() as u64), None);
+        let unnamed = r#"{"otherData":{"build_id":""},"traceEvents":[]}"#;
+        assert_eq!(probe(unnamed.as_bytes(), unnamed.len() as u64), None);
+        assert_eq!(probe(b"", PROBE_HEAD_BYTES), None);
+    }
+
+    #[test]
+    fn probe_reads_a_gzipped_profile_from_disk() {
+        let json = r#"{"otherData":{"build_id":"abc"},"traceEvents":[]}"#;
+        let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        enc.write_all(json.as_bytes()).unwrap();
+        let dir = std::env::var("TEST_TMPDIR").unwrap_or_else(|_| "/tmp".into());
+        let path = std::path::Path::new(&dir).join("probe.profile.gz");
+        std::fs::write(&path, enc.finish().unwrap()).unwrap();
+        assert_eq!(probe_invocation_id(&path), InvocationId::new("abc"));
+        assert_eq!(probe_invocation_id(&path.with_extension("missing")), None);
+        assert_eq!(probe_invocation_id(std::path::Path::new(&dir)), None);
+    }
+
+    #[test]
     fn metadata_and_thread_order() {
         let json = r#"{
-            "otherData": {"bazel_version":"7.0.0","build_id":"abc","output_base":"/ob","date":"today"},
+            "otherData": {"bazel_version":"7.0.0","build_id":"abc","output_base":"/ob","date":"today","profile_start_ts":1781439245231},
             "traceEvents": [
                 {"name":"thread_name","ph":"M","tid":5,"args":{"name":"Lane B"}},
                 {"name":"thread_sort_index","ph":"M","tid":5,"args":{"sort_index":20}},
@@ -795,8 +903,24 @@ mod tests {
         assert_eq!(p.opt_str(p.metadata().build_id), Some("abc"));
         assert_eq!(p.opt_str(p.metadata().output_base), Some("/ob"));
         assert_eq!(p.opt_str(p.metadata().date), Some("today"));
+        assert_eq!(
+            p.metadata().epoch_origin,
+            Some(EpochMicros::from_millis(1_781_439_245_231))
+        );
         let names: Vec<_> = p.threads().iter().map(|t| p.str(t.name)).collect();
         assert_eq!(names, vec!["Lane A", "Lane B"]);
+    }
+
+    #[test]
+    fn an_epoch_origin_that_is_not_an_integer_is_absent() {
+        for origin in ["1781439245231.5", "\"1781439245231\"", "null"] {
+            let json = format!(
+                r#"{{"otherData":{{"build_id":"abc","profile_start_ts":{origin}}},"traceEvents":[]}}"#
+            );
+            let p = parse(&json);
+            assert_eq!(p.opt_str(p.metadata().build_id), Some("abc"));
+            assert_eq!(p.metadata().epoch_origin, None, "{origin}");
+        }
     }
 
     #[test]

@@ -9,7 +9,7 @@ use crate::{
     GROUP_BAND_HEIGHT, GROUP_ICON, LINE_SCROLL_PX, MAX_PX_PER_US, METRICS, MIN_DRAG_PX,
     MIN_SLICE_PX, SLICE_TEXT_PAD, SelectAllTracks, Source, TIMELINE_KEY_CONTEXT, TimelineBars,
     TracePanel, ZOOM_PER_NOTCH, drawn_scroll, paint_gridlines, paint_gutter, paint_markers,
-    paint_ruler, paint_slice, paint_tooltip, ruler_ticks, scroll_request, scrollbar_geom,
+    paint_ruler, paint_slice, ruler_ticks, scroll_request, scrollbar_geom, slice_tooltip,
     thumb_offset,
 };
 use bviz_trace_layout::{
@@ -17,7 +17,7 @@ use bviz_trace_layout::{
     visible_slices,
 };
 use bviz_trace_profile::{Profile, Slice, SliceDetail, TimeSpan};
-use bviz_ui_components::{DragEnd, cached_layer, overlay_canvas, track_drag};
+use bviz_ui_components::{DragEnd, cached_layer, overlay_canvas, paint_tooltip_box, track_drag};
 use gpui::{
     App, Bounds, ContentMask, Context, Div, Entity, FocusHandle, Focusable, IntoElement,
     MouseButton, MouseDownEvent, MouseMoveEvent, Pixels, Point, Render, Rgba, ScrollWheelEvent,
@@ -372,6 +372,9 @@ pub(crate) struct Timeline {
     /// the overlay draws from the model's selection state that the timeline does
     /// not itself move, so the slice scene replays rather than rebuilding.
     _model_observer: Subscription,
+    /// Repaints the overlay when the session learns something of the
+    /// invocation, which the hover tooltip names a slice's configuration by.
+    _session_observer: Option<Subscription>,
 }
 
 impl Timeline {
@@ -384,6 +387,8 @@ impl Timeline {
         let parent = cx.entity().downgrade();
         let canvas = cx.new(|_| SliceCanvas { parent });
         let model_observer = cx.observe(&model, |_, _, cx| cx.notify());
+        let session = model.read(cx).session().cloned();
+        let session_observer = session.map(|session| cx.observe(&session, |_, _, cx| cx.notify()));
         Self {
             content_focus,
             model,
@@ -403,6 +408,7 @@ impl Timeline {
             last_mouse: Point::default(),
             canvas,
             _model_observer: model_observer,
+            _session_observer: session_observer,
         }
     }
 
@@ -1525,12 +1531,12 @@ fn overlay_paint(
             let tv = timeline.view;
             let counter_scroll = timeline.counter_scroll(cx);
             let (counters, gutter_width) = timeline.shell_layout(cx);
-            let hovered = timeline
-                .hover
-                .and_then(|at| Some((at, timeline.slice_at(at, cx)?)));
-            let selection = timeline
-                .drag
-                .preview(timeline.model.read(cx).time_selection());
+            let model = timeline.model.read(cx);
+            let hovered = timeline.hover.and_then(|at| {
+                let session = model.session().map(|session| session.read(cx));
+                Some((at, slice_tooltip(&timeline.slice_at(at, cx)?, session)))
+            });
+            let selection = timeline.drag.preview(model.time_selection());
             (
                 tv,
                 counters,
@@ -1561,8 +1567,8 @@ fn overlay_paint(
                 cx,
             );
         }
-        if let Some((at, drawn)) = hovered {
-            paint_tooltip(&drawn, at, bounds, &palette, window, cx);
+        if let Some((at, lines)) = hovered {
+            paint_tooltip_box(&lines, at, bounds, palette.tooltip, window, cx);
         }
         if dragging {
             track_drag(window, &parent, timeline_on_drag, timeline_end_drag);
@@ -1573,6 +1579,7 @@ fn overlay_paint(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bviz_invocation::Session;
     use bviz_trace_layout::lay_out_lanes;
 
     const TEST_TIDS: [i64; 2] = [1, 2];
@@ -1672,6 +1679,55 @@ mod tests {
                 .hit(first.x + first.w / 2.0, below_every_box)
                 .is_none()
         );
+    }
+
+    const CONFIGURATION: &str = "55817e2200e2f24b506d68c96928ed7b9fa185d1fb462c4f511796269d8d06d4";
+
+    /// The tooltip of the one slice of a profile recording an action that ran
+    /// in [`CONFIGURATION`], hovered in `session`.
+    fn action_tooltip(session: Option<&Session>) -> Vec<String> {
+        let tid = TEST_TIDS[0];
+        let profile = profile_of_events(vec![
+            format!(
+                r#"{{"name":"thread_name","ph":"M","tid":{tid},"args":{{"name":"skyframe-evaluator-execution-{tid}"}}}}"#,
+            ),
+            format!(
+                r#"{{"cat":"action processing","name":"Compiling a.cc","ph":"X","ts":0,"dur":1000,"tid":{tid},"args":{{"mnemonic":"CppCompile","configuration":"{CONFIGURATION}"}}}}"#,
+            ),
+        ]);
+        let cache = draw_cache(&profile);
+        let [drawn] = cache.slices[..] else {
+            panic!("expected the fixture's one box");
+        };
+        let hovered = cache
+            .hit(drawn.x + drawn.w / 2.0, drawn.y + drawn.h / 2.0)
+            .expect("the slice at its own center");
+        slice_tooltip(&hovered, session)
+    }
+
+    #[test]
+    fn a_tooltip_names_the_configuration_the_session_knows() {
+        let session = crate::tests::session_knowing(&[(CONFIGURATION, "k8-fastbuild")]);
+        assert_eq!(
+            action_tooltip(Some(&session)),
+            [
+                "Compiling a.cc",
+                "action processing · 1.00ms",
+                "mnemonic: CppCompile",
+                "configuration: k8-fastbuild",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_tooltip_shows_the_checksum_of_a_configuration_no_session_names() {
+        let by_checksum = format!("configuration: {CONFIGURATION}");
+        let unread = Session::default();
+        let elsewhere = crate::tests::session_knowing(&[("0c3d9a7714be", "k8-opt-exec")]);
+        for session in [None, Some(&unread), Some(&elsewhere)] {
+            let lines = action_tooltip(session);
+            assert_eq!(lines.last(), Some(&by_checksum));
+        }
     }
 
     #[test]

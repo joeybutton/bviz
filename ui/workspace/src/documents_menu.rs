@@ -1,4 +1,4 @@
-use crate::{DocumentId, Documents, OpenDocument, ViewKind, ViewState, Workspace};
+use crate::{DocumentId, Documents, OpenDocument, ViewId, ViewState, Workspace};
 use bviz_ui_components::Button;
 use bviz_ui_theme::{ThemeColors, over};
 use gpui::{
@@ -70,7 +70,7 @@ fn hovered(fill: Hsla, colors: &ThemeColors) -> Hsla {
 /// A view a click shows, and how its row reads.
 struct ViewRow {
     document: DocumentId,
-    kind: ViewKind,
+    view: ViewId,
     label: SharedString,
     state: ViewState,
 }
@@ -95,7 +95,7 @@ fn listings(documents: Vec<OpenDocument>) -> Vec<Listing> {
             .into_iter()
             .map(|view| ViewRow {
                 document: id,
-                kind: view.kind,
+                view: view.id,
                 label: view.label.into(),
                 state: view.state,
             })
@@ -183,8 +183,8 @@ impl DocumentsMenu {
         }
     }
 
-    /// Lays this menu's own window out as the documents it holds described when
-    /// they opened, closing the menu over it.
+    /// Lays this menu's own window out as the files it holds described when they
+    /// opened, closing the menu over it.
     fn reset_arrangement(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.close(cx);
         let Some(workspace) = self.workspace.upgrade() else {
@@ -200,7 +200,7 @@ impl DocumentsMenu {
     fn show(
         &mut self,
         document: DocumentId,
-        view: ViewKind,
+        view: ViewId,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -277,7 +277,7 @@ impl DocumentsMenu {
         rows
     }
 
-    /// The row that lays the window out as its documents described themselves.
+    /// The row that lays the window out as its files described themselves.
     /// It acts on the window rather than on any one view, so it carries no mark
     /// and is ruled off from the rows naming views.
     fn reset_row(&self, colors: &ThemeColors, cx: &mut Context<Self>) -> impl IntoElement + use<> {
@@ -315,7 +315,7 @@ impl DocumentsMenu {
     ) -> impl IntoElement + use<> {
         let style = row_style(view.state, colors);
         let hovered = hovered(style.fill, colors);
-        let (document, kind) = (view.document, view.kind);
+        let (document, shown) = (view.document, view.view);
         div()
             .id(ElementId::NamedInteger(
                 "documents-menu-row".into(),
@@ -332,7 +332,7 @@ impl DocumentsMenu {
             .bg(style.fill)
             .hover(move |s| s.bg(hovered))
             .on_click(cx.listener(move |this, _, window, cx| {
-                this.show(document, kind, window, cx);
+                this.show(document, shown, window, cx);
             }))
             .child(
                 bviz_ui_assets::icon(style.mark)
@@ -371,6 +371,7 @@ impl Render for DocumentsMenu {
 mod tests {
     use super::*;
     use crate::documents::OpenView;
+    use crate::{Document, Member, PanelGroup, ViewKind, ViewSpec};
     use bviz_ui_theme::{
         MIN_SECONDARY_CONTRAST, MIN_TEXT_CONTRAST, MIN_VISIBLE_STEP, built_in_themes,
         contrast_ratio, level_step,
@@ -379,6 +380,7 @@ mod tests {
     const TIMELINE: ViewKind = ViewKind::new("timeline");
     const FLAME: ViewKind = ViewKind::new("flame");
     const GRAPH: ViewKind = ViewKind::new("graph");
+    const CONSOLE: ViewKind = ViewKind::new("console");
 
     const STATES: [ViewState; 3] = [ViewState::Closed, ViewState::Open, ViewState::Visible];
 
@@ -390,8 +392,13 @@ mod tests {
         }
     }
 
+    /// A view of `kind` of the first file of its document.
     fn view(kind: ViewKind, label: &'static str, state: ViewState) -> OpenView {
-        OpenView { kind, label, state }
+        OpenView {
+            id: ViewId::for_test(0, kind),
+            label,
+            state,
+        }
     }
 
     /// A document showing several views is a heading over a row per view, each
@@ -415,6 +422,113 @@ mod tests {
         assert_eq!(views[1].state, ViewState::Closed);
     }
 
+    fn file(label: &'static str, first: ViewKind, rest: Vec<ViewKind>) -> Member {
+        Member::new(
+            label.into(),
+            PanelGroup::tabs(
+                ViewSpec::for_test(first),
+                rest.into_iter().map(ViewSpec::for_test).collect(),
+            ),
+        )
+    }
+
+    /// What a window opening with `first` and `others` lists before any panel
+    /// shows a view.
+    fn opening_listings(first: Document, others: Vec<Document>) -> Vec<Listing> {
+        listings(Document::unshown(first, others))
+    }
+
+    /// A joined document heads a row for every view of every file, in the order
+    /// the files were joined, under the label it was joined under.
+    #[test]
+    fn a_joined_document_heads_a_row_for_every_view_of_its_files() {
+        let joined = Document::join(
+            "Invocation a5f7f3e6".into(),
+            file("build.profile.gz", TIMELINE, vec![FLAME]),
+            file("build.bep", CONSOLE, Vec::new()),
+            vec![file("aquery.pb", GRAPH, Vec::new())],
+        );
+        let listed = opening_listings(joined, Vec::new());
+        let [Listing::Under { label, views }] = &listed[..] else {
+            panic!("a joined document is listed under a heading");
+        };
+        assert_eq!(label, "Invocation a5f7f3e6");
+        let rows: Vec<(ViewId, &str)> = views
+            .iter()
+            .map(|row| (row.view, row.label.as_ref()))
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                (ViewId::for_test(0, TIMELINE), "timeline"),
+                (ViewId::for_test(0, FLAME), "flame"),
+                (ViewId::for_test(1, CONSOLE), "console"),
+                (ViewId::for_test(2, GRAPH), "graph"),
+            ]
+        );
+    }
+
+    /// The name each document is listed under: a heading, or the one row of a
+    /// document showing one view.
+    fn listed_names(listed: &[Listing]) -> Vec<&str> {
+        listed
+            .iter()
+            .map(|listing| match listing {
+                Listing::Alone(row) => row.label.as_ref(),
+                Listing::Under { label, .. } => label.as_ref(),
+            })
+            .collect()
+    }
+
+    /// A file opened by itself is listed under the number its tabs carry, which
+    /// counts the files of its name in every document; a joined document is
+    /// listed under its own label, whatever its files are numbered.
+    #[test]
+    fn a_file_is_listed_under_the_number_it_has_among_the_files_of_every_document() {
+        let session = || {
+            Document::join(
+                "Invocation a5f7f3e6".into(),
+                file("build.profile.gz", TIMELINE, vec![FLAME]),
+                file("aquery.pb", GRAPH, Vec::new()),
+                Vec::new(),
+            )
+        };
+        let listed = opening_listings(
+            session(),
+            vec![
+                file("aquery.pb", GRAPH, Vec::new()).into(),
+                file("build.profile.gz", TIMELINE, vec![FLAME]).into(),
+                file("build.bep", CONSOLE, Vec::new()).into(),
+            ],
+        );
+        assert_eq!(
+            listed_names(&listed),
+            [
+                "Invocation a5f7f3e6",
+                "aquery.pb (2)",
+                "build.profile.gz (2)",
+                "build.bep",
+            ]
+        );
+    }
+
+    #[test]
+    fn joined_documents_sharing_a_label_are_listed_by_number() {
+        let session = |profile| {
+            Document::join(
+                "Invocation a5f7f3e6".into(),
+                file(profile, TIMELINE, vec![FLAME]),
+                file("build.bep", CONSOLE, Vec::new()),
+                Vec::new(),
+            )
+        };
+        let listed = opening_listings(session("a.profile.gz"), vec![session("b.profile.gz")]);
+        assert_eq!(
+            listed_names(&listed),
+            ["Invocation a5f7f3e6 (1)", "Invocation a5f7f3e6 (2)"]
+        );
+    }
+
     /// One view is the whole of what its document can show, so the row naming it
     /// names the document: a heading over a single row would only say the same
     /// thing twice.
@@ -429,7 +543,7 @@ mod tests {
             panic!("a document of one view is listed as one row");
         };
         assert_eq!(row.label, "aquery.pb");
-        assert_eq!(row.kind, GRAPH);
+        assert_eq!(row.view, ViewId::for_test(0, GRAPH));
     }
 
     /// A row is what a click is dispatched from, so it has to name the document
@@ -455,21 +569,22 @@ mod tests {
                 ],
             ),
         ]);
-        let named: Vec<(DocumentId, ViewKind)> = listed
+        let named: Vec<(DocumentId, ViewId)> = listed
             .iter()
             .flat_map(|listing| match listing {
                 Listing::Alone(row) => std::slice::from_ref(row),
                 Listing::Under { views, .. } => &views[..],
             })
-            .map(|row| (row.document, row.kind))
+            .map(|row| (row.document, row.view))
             .collect();
+        let view = |kind| ViewId::for_test(0, kind);
         assert_eq!(
             named,
             [
-                (DocumentId::for_test(0), TIMELINE),
-                (DocumentId::for_test(0), FLAME),
-                (DocumentId::for_test(1), TIMELINE),
-                (DocumentId::for_test(1), FLAME),
+                (DocumentId::for_test(0), view(TIMELINE)),
+                (DocumentId::for_test(0), view(FLAME)),
+                (DocumentId::for_test(1), view(TIMELINE)),
+                (DocumentId::for_test(1), view(FLAME)),
             ]
         );
     }

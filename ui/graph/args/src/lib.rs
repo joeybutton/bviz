@@ -7,7 +7,7 @@ use std::path::PathBuf;
 
 /// The files a joint build graph is read from.
 #[derive(Args, Debug)]
-#[command(next_help_heading = "Graph (one per invocation; each file given at most once)")]
+#[command(next_help_heading = "Graph (one per command line; each file given at most once)")]
 pub struct GraphArgs {
     /// `bazel aquery --output=streamed_proto` file.
     #[arg(long, value_name = "FILE")]
@@ -121,14 +121,14 @@ mod tests {
         );
     }
 
-    /// One graph is drawn per invocation, so a second `--aquery` would replace
-    /// the first rather than open a second graph. The help says so, since
-    /// nothing in the parse can.
+    /// One graph is drawn per command line, so a second `--aquery` would
+    /// replace the first rather than open a second graph. The help says so,
+    /// since nothing in the parse can.
     #[test]
-    fn the_help_says_a_graph_is_built_once_per_invocation() {
+    fn the_help_says_a_graph_is_built_once_per_command_line() {
         let help = Cli::command().render_long_help().to_string();
         assert!(
-            help.contains("one per invocation; each file given at most once"),
+            help.contains("one per command line; each file given at most once"),
             "the help leaves the graph's arity unsaid: {help}"
         );
     }

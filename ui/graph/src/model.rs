@@ -7,6 +7,7 @@ use bviz_graph_layout::metrics::{Measurement, Scope, measure};
 use bviz_graph_layout::select::Filter;
 use bviz_graph_layout::select::labels::LabelIndex;
 use bviz_graph_layout::{Capabilities, Facets, Id, InputSet, Joint, MapLayout, Names, Provenance};
+use bviz_invocation::{Configurations, Session};
 use bviz_ui_components::{Pending, load_in_background};
 use bviz_ui_graph_args::GraphSource;
 use gpui::{Context, Entity, EntityId, EventEmitter, Subscription, Task};
@@ -105,6 +106,23 @@ impl Loaded {
             measures: HashMap::new(),
         }
     }
+}
+
+/// The mnemonic `facets` gives each configuration, by its checksum. A
+/// configuration the graph's inputs state no mnemonic for is left out.
+fn configurations(facets: &Facets) -> Configurations {
+    let strings = facets.strings();
+    let configs = facets.configs();
+    let mut described = Configurations::with_capacity(configs.size_hint().0);
+    for (config, entry) in configs {
+        if let Some(mnemonic) = entry.mnemonic {
+            described.insert(
+                strings.resolve(config.sym()).to_owned(),
+                strings.resolve(mnemonic).to_owned(),
+            );
+        }
+    }
+    described
 }
 
 /// Whether a graph's layered view starts out drawing the transitive reduction of
@@ -247,13 +265,27 @@ impl EventEmitter<FilterChanged> for GraphModel {}
 impl GraphModel {
     /// The graph `load` is reading, viewable once the read finishes and failed
     /// where it does not.
-    pub(crate) fn reading(load: Pending<Read>, cx: &mut Context<Self>) -> Self {
+    pub(crate) fn reading(
+        load: Pending<Read>,
+        session: Option<Entity<Session>>,
+        cx: &mut Context<Self>,
+    ) -> Self {
         Self::new(load_in_background(
             cx,
-            move || load.join(),
-            |model, result, cx| {
+            move || {
+                let read = load.join()?;
+                let described = configurations(&read.loaded.shared.facets);
+                Ok((read, described))
+            },
+            move |model, result: Result<(Read, Configurations), String>, cx| {
                 model.source = match result {
-                    Ok(read) => {
+                    Ok((read, described)) => {
+                        if let Some(session) = session {
+                            session.update(cx, |session, cx| {
+                                session.add_configurations(described);
+                                cx.notify();
+                            });
+                        }
                         model._placing = Self::placing(read.placing, read.landing, cx);
                         Source::Loaded(read.loaded)
                     }
@@ -431,7 +463,22 @@ fn forget_unwanted(measures: &mut HashMap<Scope, Measure>, wanted: &[Scope]) {
 mod tests {
     use super::*;
     use bviz_graph_layout::Input;
+    use bviz_graph_layout::facets::Tri;
     use bviz_graph_layout::metrics::{Sizing, Unit};
+
+    #[test]
+    fn a_graph_describes_its_configurations_by_checksum() {
+        let mut facets = Facets::default();
+        facets.intern_config("55817e2200e2", Some("k8-fastbuild"), Tri::No);
+        facets.intern_config("0c3d9a7714be", Some("k8-opt-exec"), Tri::Yes);
+        facets.intern_config("91e24984663c", None, Tri::No);
+
+        let described = configurations(&facets);
+        let name = |checksum| described.name(checksum);
+        assert_eq!(name("55817e2200e2").as_deref(), Some("k8-fastbuild"));
+        assert_eq!(name("0c3d9a7714be").as_deref(), Some("k8-opt-exec"));
+        assert_eq!(name("91e24984663c"), None);
+    }
 
     /// Placing runs apart from the read it belongs to, so a panic there fails
     /// the read all the same, and lands no map.

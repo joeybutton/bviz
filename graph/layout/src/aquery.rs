@@ -20,8 +20,9 @@
 //! `member -> consumer` edge.
 
 use std::borrow::Cow;
+use std::collections::hash_map::Entry;
 use std::collections::{BTreeSet, HashSet};
-use std::num::{NonZeroU32, NonZeroU64, NonZeroUsize};
+use std::num::{NonZeroU32, NonZeroUsize};
 
 use rustc_hash::{FxHashMap, FxHashSet};
 
@@ -35,7 +36,7 @@ use crate::capability::Axis;
 use crate::facets::Facets;
 use crate::facets::{ConfigRef, FacetsBuilder};
 use crate::graph::{EdgeKind, Graph, Kind, Node};
-use crate::intern::{Id, Names, stable_hash};
+use crate::intern::{Id, Names};
 use crate::label::{self, PackageHierarchy, RepoMapping};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -104,7 +105,7 @@ pub(crate) fn build_with_packages(
     names: &mut Names,
     facets: &mut FacetsBuilder,
 ) -> Graph {
-    let index = Index::build(containers);
+    let index = Index::build(containers, names);
 
     let mut graph = Graph::new();
     let hierarchy = PackageHierarchy::build(packages, &mut graph, names, facets);
@@ -144,20 +145,29 @@ fn build_action_boxes(
     names: &mut Names,
     facets: &mut FacetsBuilder,
 ) -> FxHashMap<ArtifactId, Id> {
-    let mut producer_node_id: FxHashMap<ArtifactId, Id> = FxHashMap::default();
+    let outputs = index
+        .actions
+        .iter()
+        .map(|node| node.action.output_ids.len())
+        .sum();
+    let mut producer_node_id: FxHashMap<ArtifactId, Id> =
+        FxHashMap::with_capacity_and_hasher(outputs, Default::default());
+    let tables = &index.tables;
     let mut boxes = Boxes {
         graph,
         names,
         facets,
         hierarchy,
-        index,
+        tables,
         labeled_outputs,
         targets: FxHashSet::default(),
         configured: FxHashSet::default(),
     };
-    for (i, action) in index.actions.iter().enumerate() {
+    let mut output_nodes: Vec<Id> = Vec::new();
+    for node in &index.actions {
+        let ActionNode { id, action, .. } = *node;
         let config_id = ConfigId(action.configuration_id);
-        let target = index.target_by_id.get(&action.target_id).copied();
+        let target = tables.target_by_id.get(&action.target_id).copied();
         let written = target.map_or_else(
             || Cow::Owned(format!("target {}", action.target_id)),
             |t| Cow::Borrowed(t.label.as_str()),
@@ -167,28 +177,33 @@ fn build_action_boxes(
             &TargetBox {
                 canonical: &canonical,
                 kind: Kind::Target,
-                rule_class: target.and_then(|t| index.rule_class(t)),
+                rule_class: target.and_then(|t| tables.rule_class(t)),
             },
             config_id,
         );
-        let action_id = boxes.names.intern(&format!("action{i}"));
         boxes.graph.add_node(Node::new(
-            action_id,
+            id,
             action.mnemonic.clone(),
             Kind::Action,
             Some(ct_id),
         ));
-        boxes.describe_action(action_id, ct_id, action);
+        boxes.describe_action(id, ct_id, action);
+        output_nodes.clear();
+        output_nodes.reserve(action.output_ids.len());
         for &out in &action.output_ids {
-            let art_id = boxes.output_artifact(ArtifactId(out), ct_id, config_id);
+            let art_id = boxes.output_artifact(ArtifactId(out), node, ct_id, config_id);
             producer_node_id.insert(ArtifactId(out), art_id);
-            boxes.graph.add_edge(action_id, art_id, EdgeKind::Aquery);
+            boxes.graph.add_edge(id, art_id, EdgeKind::Aquery);
             if out == action.primary_output_id {
-                let key =
-                    NonZeroU64::new(stable_hash(&boxes.index.paths.full_path(ArtifactId(out))));
-                let facets = boxes.facets.facets();
-                facets.set_primary_output(action_id, art_id);
-                facets.set_primary_output_key(action_id, key);
+                boxes.facets.facets().set_primary_output(id, art_id);
+            }
+            output_nodes.push(art_id);
+        }
+        for aliases in &node.sharer_outputs {
+            for (&alias, &art_id) in aliases.iter().zip(&output_nodes) {
+                // An id some node lists as its own output names that node's
+                // artifact, whichever sharer also lists it.
+                producer_node_id.entry(ArtifactId(alias)).or_insert(art_id);
             }
         }
     }
@@ -208,9 +223,7 @@ fn wire_action_inputs(
 ) {
     let Index {
         actions,
-        paths,
-        depsets,
-        ..
+        tables: Tables { paths, depsets, .. },
     } = index;
     let mut wiring = Wiring {
         source_nodes: FxHashSet::default(),
@@ -225,14 +238,13 @@ fn wire_action_inputs(
         pending: Vec::new(),
         depsets,
     };
-    for (i, action) in actions.iter().enumerate() {
-        let action_id = names.intern(&format!("action{i}"));
+    for (i, node) in actions.iter().enumerate() {
         let walk = Walk {
-            consumer: action_id,
+            consumer: node.id,
             stamp: NonZeroU32::try_from(NonZeroUsize::MIN.saturating_add(i))
                 .expect("an aquery holds fewer than u32::MAX actions"),
         };
-        wiring.wire(&action.input_dep_set_ids, walk, graph, names);
+        wiring.wire(&node.action.input_dep_set_ids, walk, graph, names);
     }
 }
 
@@ -243,10 +255,62 @@ struct Paths<'a> {
     fragment_by_id: FxHashMap<u32, &'a PathFragment>,
 }
 
-/// The actions to walk plus the by-id lookups box creation and input wiring
-/// resolve against, gathered across every container.
+/// An action that becomes a node.
+struct ActionNode<'a> {
+    id: Id,
+    action: &'a Action,
+    /// The output ids of each other action the query lists for this one's
+    /// primary output. None of those actions has a node; an artifact id one
+    /// lists stands for the file `action` lists at the same place.
+    sharer_outputs: Vec<&'a [u32]>,
+}
+
+impl ActionNode<'_> {
+    /// The exec path of the artifact `out`, read off the node's name where
+    /// that is formed from it.
+    fn output_path<'n>(&self, out: ArtifactId, paths: &Paths, names: &'n Names) -> Cow<'n, str> {
+        label::action_primary_output(names.resolve(self.id))
+            .filter(|_| out.0 == self.action.primary_output_id)
+            .map_or_else(|| Cow::Owned(paths.full_path(out)), Cow::Borrowed)
+    }
+}
+
+/// The configured target and aspects an action is registered by, which order
+/// the actions sharing a primary output. A label and an aspect name read alike
+/// in every aquery of one build, and so does the key of a configuration the
+/// query describes; the key of one it does not is formed from the query's own
+/// id for it.
+struct Owner<'a> {
+    /// `None` for a target the query does not describe.
+    label: Option<&'a str>,
+    config_key: String,
+    aspects: Vec<&'a str>,
+}
+
+impl Owner<'_> {
+    /// What owners sort by: the label first, one the query describes ahead of
+    /// one it does not, then the configuration key, then the aspect names.
+    /// Owners that compare equal need not be one owner, since aspects that
+    /// differ only in their parameters share a name.
+    fn precedence(&self) -> (bool, Option<&str>, &str, &[&str]) {
+        (
+            self.label.is_none(),
+            self.label,
+            &self.config_key,
+            &self.aspects,
+        )
+    }
+}
+
+/// The actions that become nodes, with the lookups they were told apart by.
 struct Index<'a> {
-    actions: Vec<&'a Action>,
+    actions: Vec<ActionNode<'a>>,
+    tables: Tables<'a>,
+}
+
+/// The by-id lookups box creation and input wiring resolve against, gathered
+/// across every container.
+struct Tables<'a> {
     paths: Paths<'a>,
     target_by_id: FxHashMap<u32, &'a Target>,
     config_by_id: FxHashMap<ConfigId, &'a Configuration>,
@@ -256,7 +320,7 @@ struct Index<'a> {
 }
 
 impl<'a> Index<'a> {
-    fn build(containers: &'a [ActionGraphContainer]) -> Index<'a> {
+    fn build(containers: &'a [ActionGraphContainer], names: &mut Names) -> Index<'a> {
         let mut artifacts: Vec<&Artifact> = Vec::new();
         let mut actions: Vec<&Action> = Vec::new();
         let mut targets: Vec<&Target> = Vec::new();
@@ -275,7 +339,7 @@ impl<'a> Index<'a> {
             rule_classes.extend(c.rule_classes.iter());
             aspects.extend(c.aspect_descriptors.iter());
         }
-        Index {
+        let tables = Tables {
             paths: Paths {
                 artifact_by_id: artifacts.iter().map(|a| (ArtifactId(a.id), *a)).collect(),
                 fragment_by_id: path_fragments.iter().map(|p| (p.id, *p)).collect(),
@@ -288,7 +352,80 @@ impl<'a> Index<'a> {
             depsets: DepSets::new(&dep_sets),
             rule_class_by_id: rule_classes.iter().map(|r| (r.id, *r)).collect(),
             aspect_by_id: aspects.iter().map(|a| (a.id, *a)).collect(),
-            actions,
+        };
+        Index {
+            actions: tables.action_nodes(&actions, names),
+            tables,
+        }
+    }
+}
+
+impl<'a> Tables<'a> {
+    /// The node of each of `actions`, which the query lists in that order: one
+    /// per primary output, and one per action naming none.
+    ///
+    /// Bazel lets several actions write one file only where they are a single
+    /// action registered more than once, alike in mnemonic, key, inputs and
+    /// outputs (`Actions.canBeShared`); any other two fail analysis as an
+    /// action conflict. So the actions naming one primary output make one node,
+    /// that of the action whose [`Owner`] sorts first, the earliest listed among
+    /// those whose owners compare equal.
+    fn action_nodes(&self, actions: &[&'a Action], names: &mut Names) -> Vec<ActionNode<'a>> {
+        let mut nodes: Vec<ActionNode> = Vec::with_capacity(actions.len());
+        let mut node_of: FxHashMap<Id, usize> =
+            FxHashMap::with_capacity_and_hasher(actions.len(), Default::default());
+        for (place, &action) in actions.iter().enumerate() {
+            let primary_output = self.paths.full_path(ArtifactId(action.primary_output_id));
+            if primary_output.is_empty() {
+                nodes.push(ActionNode {
+                    id: names.intern(&label::unnamed_action_node_id(place)),
+                    action,
+                    sharer_outputs: Vec::new(),
+                });
+                continue;
+            }
+            let id = names.intern(&label::action_node_id(&primary_output));
+            match node_of.entry(id) {
+                Entry::Vacant(first) => {
+                    first.insert(nodes.len());
+                    nodes.push(ActionNode {
+                        id,
+                        action,
+                        sharer_outputs: Vec::new(),
+                    });
+                }
+                Entry::Occupied(at) => {
+                    let node = &mut nodes[*at.get()];
+                    let first =
+                        self.owner(action).precedence() < self.owner(node.action).precedence();
+                    let sharer = match first {
+                        true => std::mem::replace(&mut node.action, action),
+                        false => action,
+                    };
+                    node.sharer_outputs.push(&sharer.output_ids);
+                }
+            }
+        }
+        nodes
+    }
+
+    fn config_key(&self, config_id: ConfigId) -> String {
+        label::config_key(
+            config_id.0,
+            self.config_by_id
+                .get(&config_id)
+                .map(|c| c.checksum.as_str()),
+        )
+    }
+
+    fn owner(&self, action: &Action) -> Owner<'a> {
+        Owner {
+            label: self
+                .target_by_id
+                .get(&action.target_id)
+                .map(|target| target.label.as_str()),
+            config_key: self.config_key(ConfigId(action.configuration_id)),
+            aspects: self.aspect_names(action).collect(),
         }
     }
 
@@ -404,7 +541,7 @@ struct Boxes<'a> {
     names: &'a mut Names,
     facets: &'a mut FacetsBuilder,
     hierarchy: &'a PackageHierarchy,
-    index: &'a Index<'a>,
+    tables: &'a Tables<'a>,
     labeled_outputs: &'a HashSet<String>,
     targets: FxHashSet<Id>,
     configured: FxHashSet<Id>,
@@ -421,18 +558,8 @@ struct TargetBox<'a> {
 }
 
 impl Boxes<'_> {
-    fn config_key(&self, config_id: ConfigId) -> String {
-        label::config_key(
-            config_id.0,
-            self.index
-                .config_by_id
-                .get(&config_id)
-                .map(|c| c.checksum.as_str()),
-        )
-    }
-
     fn intern_config(&mut self, config_id: ConfigId) -> Option<ConfigRef> {
-        let config = *self.index.config_by_id.get(&config_id)?;
+        let config = *self.tables.config_by_id.get(&config_id)?;
         self.facets.facets().intern_configuration(config)
     }
 
@@ -448,7 +575,7 @@ impl Boxes<'_> {
         // An action lists the aspects that produced it whether or not any did,
         // so every action carries the field the aspect axis reads.
         self.facets.observe(Axis::Aspect, true);
-        let aspects: Vec<&str> = self.index.aspect_names(action).collect();
+        let aspects: Vec<&str> = self.tables.aspect_names(action).collect();
         self.facets.set_aspects(node, aspects);
         let files = !action.output_ids.is_empty() || !action.input_dep_set_ids.is_empty();
         self.facets.observe(Axis::Artifacts, files);
@@ -458,11 +585,17 @@ impl Boxes<'_> {
     /// The leaf node for one output artifact `out` of an action whose box is
     /// `producing_ct`. A labeled generated output nests under its own target's
     /// per-config box; an unlabeled one sits directly under the producing rule's box.
-    fn output_artifact(&mut self, out: ArtifactId, producing_ct: Id, config_id: ConfigId) -> Id {
-        let path = self.index.paths.full_path(out);
-        match generated_label(self.hierarchy, &path)
-            .filter(|label| self.labeled_outputs.contains(label))
-        {
+    fn output_artifact(
+        &mut self,
+        out: ArtifactId,
+        producer: &ActionNode,
+        producing_ct: Id,
+        config_id: ConfigId,
+    ) -> Id {
+        let path = producer.output_path(out, &self.tables.paths, self.names);
+        let label = generated_label(self.hierarchy, &path)
+            .filter(|label| self.labeled_outputs.contains(label));
+        match label {
             Some(out_label) => {
                 let out_ct = self.target_ct(
                     &TargetBox {
@@ -472,13 +605,13 @@ impl Boxes<'_> {
                     },
                     config_id,
                 );
-                let config_key = self.config_key(config_id);
+                let config_key = self.tables.config_key(config_id);
                 let id = self
                     .names
                     .intern(&format!("artifact:{out_label}#{config_key}"));
                 self.graph.add_node(Node::new(
                     id,
-                    self.index.paths.basename(out),
+                    self.tables.paths.basename(out),
                     Kind::Artifact,
                     Some(out_ct),
                 ));
@@ -489,7 +622,7 @@ impl Boxes<'_> {
                 let id = self.names.intern(&format!("artifact{}", out.0));
                 self.graph.add_node(Node::new(
                     id,
-                    self.index.paths.basename(out),
+                    self.tables.paths.basename(out),
                     Kind::Artifact,
                     Some(producing_ct),
                 ));
@@ -505,7 +638,7 @@ impl Boxes<'_> {
     /// holding actions) and for a labeled generated output (an `artifact` box
     /// holding the concrete file).
     fn target_ct(&mut self, target: &TargetBox, config_id: ConfigId) -> Id {
-        let config_key = self.config_key(config_id);
+        let config_key = self.tables.config_key(config_id);
         let ct_node_id = self
             .names
             .intern(&label::ct_node_id(target.canonical, &config_key));
@@ -540,7 +673,7 @@ impl Boxes<'_> {
 
         let mnemonic = label::config_mnemonic(
             config_id.0,
-            self.index
+            self.tables
                 .config_by_id
                 .get(&config_id)
                 .map(|c| c.mnemonic.as_str()),
@@ -1463,42 +1596,496 @@ mod tests {
 
         let (_, names, facets) = build(&[container], false);
 
-        let primary = facets.primary_output(names.get("action0").unwrap());
+        let action = names.get("action:bazel-out/k8-fastbuild/bin/pkg/gen.c");
+        let primary = facets.primary_output(action.unwrap());
         assert_eq!(primary.map(|id| names.resolve(id)), Some("artifact2"));
     }
 
-    /// An action keeps its key whichever place the query lists it at, and
-    /// actions writing different files have different keys.
+    /// An action of `target_id` whose one output, and so its primary one, is
+    /// artifact `out`.
+    fn writing(target_id: u32, out: u32) -> Action {
+        Action {
+            output_ids: vec![out],
+            primary_output_id: out,
+            ..action(target_id, "Genrule", &[])
+        }
+    }
+
+    const GEN_H: &str = "action:bazel-out/k8-fastbuild/bin/pkg/gen.h";
+    const GEN_C: &str = "action:bazel-out/k8-fastbuild/bin/pkg/gen.c";
+
+    /// The names of the action nodes of `graph`, sorted.
+    fn action_names<'a>(graph: &Graph, names: &'a Names) -> Vec<&'a str> {
+        let mut actions: Vec<&str> = graph
+            .nodes
+            .iter()
+            .filter(|node| node.kind == Kind::Action)
+            .map(|node| names.resolve(node.id))
+            .collect();
+        actions.sort_unstable();
+        actions
+    }
+
+    /// The names of the artifact nodes of `graph`, sorted.
+    fn artifact_names<'a>(graph: &Graph, names: &'a Names) -> Vec<&'a str> {
+        let mut artifacts: Vec<&str> = graph
+            .nodes
+            .iter()
+            .filter(|node| node.kind == Kind::Artifact)
+            .map(|node| names.resolve(node.id))
+            .collect();
+        artifacts.sort_unstable();
+        artifacts
+    }
+
+    /// Every edge of `graph`, one entry per edge, sorted.
+    fn edge_list<'a>(graph: &Graph, names: &'a Names) -> Vec<(&'a str, &'a str)> {
+        let mut edges: Vec<(&str, &str)> = graph
+            .edges
+            .iter()
+            .map(|edge| (names.resolve(edge.from), names.resolve(edge.to)))
+            .collect();
+        edges.sort_unstable();
+        edges
+    }
+
     #[test]
-    fn an_action_is_keyed_by_its_primary_output_not_its_place() {
+    fn an_action_is_named_by_its_primary_output_not_its_place() {
         let (header, mut frags) = generated_artifact(1, 100, "pkg/gen.h");
         let (source, more) = generated_artifact(2, 200, "pkg/gen.c");
         frags.extend(more);
-        let writing = |out: u32| Action {
-            output_ids: vec![out],
-            primary_output_id: out,
-            ..action(9, "Genrule", &[])
+        let writers = |actions: Vec<Action>| {
+            let container = ActionGraphContainer {
+                artifacts: vec![header, source],
+                path_fragments: frags.clone(),
+                targets: vec![target(9, "//pkg:gen")],
+                actions,
+                ..Default::default()
+            };
+            let (graph, names, _) = build(&[container], false);
+            edge_list(&graph, &names)
+                .into_iter()
+                .map(|(from, to)| (from.to_string(), to.to_string()))
+                .collect::<Vec<_>>()
         };
-        let container = |actions: Vec<Action>| ActionGraphContainer {
-            artifacts: vec![header, source],
-            path_fragments: frags.clone(),
-            targets: vec![target(9, "//pkg:gen")],
-            actions,
+
+        let header_first = writers(vec![writing(9, 1), writing(9, 2)]);
+        let header_second = writers(vec![writing(9, 2), writing(9, 1)]);
+
+        assert_eq!(
+            header_first,
+            [
+                (GEN_C.to_string(), "artifact2".to_string()),
+                (GEN_H.to_string(), "artifact1".to_string()),
+            ]
+        );
+        assert_eq!(header_first, header_second);
+    }
+
+    #[test]
+    fn actions_sharing_a_primary_output_are_one_node_under_the_owner_sorting_first() {
+        let (shared, frags) = generated_artifact(1, 100, "pkg/gen.h");
+        for actions in [
+            vec![writing(8, 1), writing(9, 1)],
+            vec![writing(9, 1), writing(8, 1)],
+        ] {
+            let container = ActionGraphContainer {
+                artifacts: vec![shared],
+                path_fragments: frags.clone(),
+                targets: vec![target(8, "//pkg:a"), target(9, "//pkg:b")],
+                actions,
+                ..Default::default()
+            };
+
+            let (graph, names, _) = build(&[container], false);
+
+            assert_eq!(action_names(&graph, &names), [GEN_H]);
+            assert_eq!(parent_of(&graph, &names, GEN_H), Some("ct://pkg:a#cfg1"));
+            let artifacts: Vec<&Node> = graph
+                .nodes
+                .iter()
+                .filter(|node| node.kind == Kind::Artifact)
+                .collect();
+            assert_eq!(artifacts.len(), 1);
+            assert_eq!(names.resolve(artifacts[0].id), "artifact1");
+            assert_eq!(
+                parent_of(&graph, &names, "artifact1"),
+                Some("ct://pkg:a#cfg1")
+            );
+            assert_eq!(edge_list(&graph, &names), [(GEN_H, "artifact1")]);
+        }
+    }
+
+    #[test]
+    fn three_actions_sharing_a_primary_output_are_one_node() {
+        let (shared, frags) = generated_artifact(1, 100, "pkg/gen.h");
+        for order in [
+            [7, 8, 9],
+            [7, 9, 8],
+            [8, 7, 9],
+            [8, 9, 7],
+            [9, 7, 8],
+            [9, 8, 7],
+        ] {
+            let container = ActionGraphContainer {
+                artifacts: vec![shared],
+                path_fragments: frags.clone(),
+                targets: vec![
+                    target(7, "//pkg:a"),
+                    target(8, "//pkg:b"),
+                    target(9, "//pkg:c"),
+                ],
+                actions: order.map(|owner| writing(owner, 1)).to_vec(),
+                ..Default::default()
+            };
+
+            let (graph, names, _) = build(&[container], false);
+
+            assert_eq!(action_names(&graph, &names), [GEN_H], "{order:?}");
+            assert_eq!(
+                parent_of(&graph, &names, GEN_H),
+                Some("ct://pkg:a#cfg1"),
+                "{order:?}"
+            );
+            assert_eq!(
+                edge_list(&graph, &names),
+                [(GEN_H, "artifact1")],
+                "{order:?}"
+            );
+        }
+    }
+
+    /// One target built in two configurations registers, in each, the action
+    /// writing a file whose path names neither. Here each configured target
+    /// lists the file under an artifact id of its own, which its dependents
+    /// read.
+    #[test]
+    fn a_file_two_configurations_share_is_one_artifact_every_reader_reads() {
+        let (in_one, mut frags) = generated_artifact(1, 100, "pkg/gen.h");
+        let (in_other, more) = generated_artifact(2, 200, "pkg/gen.h");
+        frags.extend(more);
+        let configuration = |id: u32, checksum: &str| Configuration {
+            id,
+            mnemonic: "k8".into(),
+            checksum: checksum.into(),
             ..Default::default()
         };
-        let key_of_first = |actions: Vec<Action>| {
-            let (_, names, facets) = build(&[container(actions)], false);
-            facets.primary_output_key(names.get("action0").unwrap())
+        let in_configuration = |configuration_id: u32, out: u32| Action {
+            configuration_id,
+            ..writing(9, out)
+        };
+        for writers in [
+            [in_configuration(1, 1), in_configuration(2, 2)],
+            [in_configuration(2, 2), in_configuration(1, 1)],
+        ] {
+            let mut actions = writers.to_vec();
+            actions.extend([action(7, "Compile", &[10]), action(7, "Link", &[11])]);
+            let container = ActionGraphContainer {
+                artifacts: vec![in_one, in_other],
+                path_fragments: frags.clone(),
+                targets: vec![target(7, "//app:main"), target(9, "//pkg:gen")],
+                configuration: vec![configuration(1, "ck-late"), configuration(2, "ck-early")],
+                dep_set_of_files: vec![dep_set(10, &[1], &[]), dep_set(11, &[2], &[])],
+                actions,
+                ..Default::default()
+            };
+
+            let (graph, names, _) = build(&[container], false);
+
+            assert_eq!(action_names(&graph, &names), ["action2", "action3", GEN_H]);
+            assert_eq!(
+                parent_of(&graph, &names, GEN_H),
+                Some("ct://pkg:gen#ck-early")
+            );
+            assert_eq!(
+                parent_of(&graph, &names, "artifact2"),
+                Some("ct://pkg:gen#ck-early")
+            );
+            assert!(names.get("artifact1").is_none());
+            assert_eq!(
+                edge_list(&graph, &names),
+                [
+                    (GEN_H, "artifact2"),
+                    ("artifact2", "action2"),
+                    ("artifact2", "action3"),
+                ]
+            );
+        }
+    }
+
+    /// The shape aquery dumps show a shared primary output in: one configured
+    /// target lists the same action twice, with the same artifact ids.
+    #[test]
+    fn an_action_a_target_lists_twice_is_one_node() {
+        let (shared, frags) = generated_artifact(1, 100, "pkg/gen.h");
+        let (input, fragment) = source_artifact(2, "in.c");
+        let listed = || Action {
+            input_dep_set_ids: vec![10],
+            ..writing(9, 1)
+        };
+        let mut path_fragments = frags;
+        path_fragments.push(fragment);
+        let container = ActionGraphContainer {
+            artifacts: vec![shared, input],
+            path_fragments,
+            targets: vec![target(9, "//pkg:gen")],
+            dep_set_of_files: vec![dep_set(10, &[2], &[])],
+            actions: vec![listed(), listed()],
+            ..Default::default()
         };
 
-        let header_first = key_of_first(vec![writing(1), writing(2)]);
-        let source_first = key_of_first(vec![writing(2), writing(1)]);
-        let (_, names, facets) = build(&[container(vec![writing(2), writing(1)])], false);
-        let header_second = facets.primary_output_key(names.get("action1").unwrap());
+        let (graph, names, _) = build(&[container], false);
 
-        assert!(header_first.is_some());
-        assert_eq!(header_first, header_second);
-        assert_ne!(header_first, source_first);
+        assert_eq!(action_names(&graph, &names), [GEN_H]);
+        assert_eq!(artifact_names(&graph, &names), ["artifact1"]);
+        assert_eq!(
+            edge_list(&graph, &names),
+            [(GEN_H, "artifact1"), ("source2", GEN_H)]
+        );
+    }
+
+    #[test]
+    fn sharers_owned_alike_are_the_node_of_the_earliest_listed() {
+        let (first, mut frags) = generated_artifact(1, 100, "pkg/gen.h");
+        let (second, more) = generated_artifact(2, 200, "pkg/gen.h");
+        frags.extend(more);
+        for (order, kept) in [([1, 2], "artifact1"), ([2, 1], "artifact2")] {
+            let container = ActionGraphContainer {
+                artifacts: vec![first, second],
+                path_fragments: frags.clone(),
+                targets: vec![target(9, "//pkg:gen")],
+                actions: order.map(|out| writing(9, out)).to_vec(),
+                ..Default::default()
+            };
+
+            let (graph, names, _) = build(&[container], false);
+
+            assert_eq!(action_names(&graph, &names), [GEN_H]);
+            assert_eq!(artifact_names(&graph, &names), [kept]);
+        }
+    }
+
+    #[test]
+    fn a_sharer_of_a_known_target_stands_ahead_of_one_of_an_unknown_target() {
+        let (shared, frags) = generated_artifact(1, 100, "pkg/gen.h");
+        for order in [[5, 9], [9, 5]] {
+            let container = ActionGraphContainer {
+                artifacts: vec![shared],
+                path_fragments: frags.clone(),
+                targets: vec![target(9, "//pkg:gen")],
+                actions: order.map(|owner| writing(owner, 1)).to_vec(),
+                ..Default::default()
+            };
+
+            let (graph, names, _) = build(&[container], false);
+
+            assert_eq!(
+                parent_of(&graph, &names, GEN_H),
+                Some("ct://pkg:gen#cfg1"),
+                "{order:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_sharers_label_decides_ahead_of_its_configuration() {
+        let (shared, frags) = generated_artifact(1, 100, "pkg/gen.h");
+        let in_configuration = |target_id: u32, configuration_id: u32| Action {
+            configuration_id,
+            ..writing(target_id, 1)
+        };
+        for actions in [
+            vec![in_configuration(8, 2), in_configuration(9, 1)],
+            vec![in_configuration(9, 1), in_configuration(8, 2)],
+        ] {
+            let container = ActionGraphContainer {
+                artifacts: vec![shared],
+                path_fragments: frags.clone(),
+                targets: vec![target(8, "//pkg:a"), target(9, "//pkg:b")],
+                actions,
+                ..Default::default()
+            };
+
+            let (graph, names, _) = build(&[container], false);
+
+            assert_eq!(parent_of(&graph, &names, GEN_H), Some("ct://pkg:a#cfg2"));
+        }
+    }
+
+    /// Two actions write the same two files, each listing them under artifact
+    /// ids of its own; a reader names the second file by the id of the action
+    /// that has no node.
+    #[test]
+    fn a_sharers_secondary_output_resolves_to_the_artifact_of_the_action_chosen() {
+        let outputs = ["pkg/gen.h", "pkg/gen.c", "pkg/gen.h", "pkg/gen.c"];
+        let mut artifacts = Vec::with_capacity(outputs.len());
+        let mut path_fragments = Vec::new();
+        for (id, name) in (1..).zip(outputs) {
+            let (artifact, frags) = generated_artifact(id, id * 100, name);
+            artifacts.push(artifact);
+            path_fragments.extend(frags);
+        }
+        let writing_both = |target_id: u32, header: u32, source: u32| Action {
+            output_ids: vec![header, source],
+            primary_output_id: header,
+            ..action(target_id, "Genrule", &[])
+        };
+        for writers in [
+            [writing_both(8, 1, 2), writing_both(9, 3, 4)],
+            [writing_both(9, 3, 4), writing_both(8, 1, 2)],
+        ] {
+            let mut actions = writers.to_vec();
+            actions.push(action(7, "Compile", &[10]));
+            let container = ActionGraphContainer {
+                artifacts: artifacts.clone(),
+                path_fragments: path_fragments.clone(),
+                targets: vec![
+                    target(7, "//app:main"),
+                    target(8, "//pkg:a"),
+                    target(9, "//pkg:b"),
+                ],
+                dep_set_of_files: vec![dep_set(10, &[4], &[])],
+                actions,
+                ..Default::default()
+            };
+
+            let (graph, names, _) = build(&[container], false);
+
+            assert_eq!(artifact_names(&graph, &names), ["artifact1", "artifact2"]);
+            assert_eq!(
+                edge_list(&graph, &names),
+                [
+                    (GEN_H, "artifact1"),
+                    (GEN_H, "artifact2"),
+                    ("artifact2", "action2"),
+                ]
+            );
+        }
+    }
+
+    /// An artifact id a sharer lists out of place is also an output a node of
+    /// its own writes; a reader of it reads that node's artifact.
+    #[test]
+    fn an_id_a_sharer_lists_never_stands_in_for_an_artifact_with_a_producer() {
+        let (header, mut path_fragments) = generated_artifact(1, 100, "pkg/gen.h");
+        let (source, more) = generated_artifact(2, 200, "pkg/gen.c");
+        path_fragments.extend(more);
+        let sharer = Action {
+            output_ids: vec![2, 1],
+            primary_output_id: 1,
+            ..action(9, "Genrule", &[])
+        };
+        for actions in [
+            vec![writing(8, 1), sharer.clone(), writing(8, 2)],
+            vec![writing(8, 2), sharer.clone(), writing(8, 1)],
+        ] {
+            let mut actions = actions;
+            actions.push(action(7, "Compile", &[10]));
+            let container = ActionGraphContainer {
+                artifacts: vec![header, source],
+                path_fragments: path_fragments.clone(),
+                targets: vec![
+                    target(7, "//app:main"),
+                    target(8, "//pkg:a"),
+                    target(9, "//pkg:b"),
+                ],
+                dep_set_of_files: vec![dep_set(10, &[2], &[])],
+                actions,
+                ..Default::default()
+            };
+
+            let (graph, names, _) = build(&[container], false);
+
+            assert_eq!(
+                edge_list(&graph, &names),
+                [
+                    (GEN_C, "artifact2"),
+                    (GEN_H, "artifact1"),
+                    ("artifact2", "action3"),
+                ]
+            );
+        }
+    }
+
+    #[test]
+    fn an_action_a_target_shares_with_an_aspect_on_it_is_the_targets_own() {
+        let (shared, frags) = generated_artifact(1, 100, "pkg/gen.h");
+        let own = || writing(9, 1);
+        let of_aspect = || Action {
+            aspect_descriptor_ids: vec![1],
+            ..writing(9, 1)
+        };
+        for actions in [vec![own(), of_aspect()], vec![of_aspect(), own()]] {
+            let container = ActionGraphContainer {
+                artifacts: vec![shared],
+                path_fragments: frags.clone(),
+                targets: vec![target(9, "//pkg:gen")],
+                aspect_descriptors: vec![aspect(1, "//aspects:a.bzl%tag_aspect")],
+                actions,
+                ..Default::default()
+            };
+
+            let (graph, names, facets) = build(&[container], false);
+
+            assert_eq!(action_names(&graph, &names), [GEN_H]);
+            assert!(aspects_of(&facets, names.get(GEN_H).unwrap()).is_empty());
+            assert_eq!(edge_list(&graph, &names), [(GEN_H, "artifact1")]);
+        }
+    }
+
+    #[test]
+    fn a_sole_writer_beside_sharers_keeps_a_node_of_its_own() {
+        let (header, mut frags) = generated_artifact(1, 100, "pkg/gen.h");
+        let (source, more) = generated_artifact(2, 200, "pkg/gen.c");
+        frags.extend(more);
+        let container = ActionGraphContainer {
+            artifacts: vec![header, source],
+            path_fragments: frags,
+            targets: vec![target(8, "//pkg:a"), target(9, "//pkg:b")],
+            actions: vec![writing(9, 1), writing(9, 2), writing(8, 1)],
+            ..Default::default()
+        };
+
+        let (graph, names, _) = build(&[container], false);
+
+        assert_eq!(action_names(&graph, &names), [GEN_C, GEN_H]);
+        assert_eq!(parent_of(&graph, &names, GEN_H), Some("ct://pkg:a#cfg1"));
+        assert_eq!(parent_of(&graph, &names, GEN_C), Some("ct://pkg:b#cfg1"));
+        assert_eq!(
+            parent_of(&graph, &names, "artifact1"),
+            Some("ct://pkg:a#cfg1")
+        );
+        assert_eq!(
+            parent_of(&graph, &names, "artifact2"),
+            Some("ct://pkg:b#cfg1")
+        );
+        assert_eq!(
+            edge_list(&graph, &names),
+            [(GEN_C, "artifact2"), (GEN_H, "artifact1")]
+        );
+    }
+
+    #[test]
+    fn an_action_naming_no_primary_output_is_named_by_its_place_in_the_query() {
+        let (header, mut frags) = generated_artifact(1, 100, "pkg/gen.h");
+        let (source, more) = generated_artifact(2, 200, "pkg/gen.c");
+        frags.extend(more);
+        let container = ActionGraphContainer {
+            artifacts: vec![header, source],
+            path_fragments: frags,
+            targets: vec![target(8, "//pkg:a"), target(9, "//pkg:b")],
+            actions: vec![
+                writing(8, 1),
+                writing(9, 1),
+                action(9, "Compile", &[]),
+                writing(9, 2),
+            ],
+            ..Default::default()
+        };
+
+        let (graph, names, _) = build(&[container], false);
+
+        assert_eq!(action_names(&graph, &names), ["action2", GEN_C, GEN_H]);
     }
 
     /// The graph of a genrule `@@somerepo+//pkg:gen` whose one output, labelled

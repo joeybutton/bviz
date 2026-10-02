@@ -1,0 +1,10 @@
+[package]
+name = "bviz_invocation"
+version = "0.1.0"
+edition = "2024"
+license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "bviz_invocation"
+path = "src/lib.rs"

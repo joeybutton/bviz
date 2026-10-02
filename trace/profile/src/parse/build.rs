@@ -1,6 +1,7 @@
 use std::cmp::{Ordering, Reverse};
 use std::collections::{BTreeMap, BinaryHeap, HashMap};
 
+use bviz_invocation::EpochMicros;
 use bviz_parallel::worker_count;
 use serde_json::{Map, Value};
 
@@ -12,7 +13,7 @@ use crate::model::{
 };
 
 use super::serde_events::{ArgEntry, ArgVal, RawEvent, arg_i64, arg_str};
-use super::timed;
+use super::{BUILD_ID_KEY, timed};
 
 const MAX_SORT_INDEX: i64 = 1_000_000;
 const PHASE_MARKER_CATEGORY: &str = "build phase marker";
@@ -817,15 +818,19 @@ fn build_counter_lanes(
 }
 
 fn build_metadata(interner: &mut Writer, other: Option<&Map<String, Value>>) -> Metadata {
+    let value = |k: &str| other.and_then(|m| m.get(k));
     let mut get = |k: &str| -> OptStr {
-        let v = other.and_then(|m| m.get(k)).and_then(Value::as_str);
+        let v = value(k).and_then(Value::as_str);
         v.map(|v| interner.intern(v)).into()
     };
     Metadata {
         bazel_version: get("bazel_version"),
-        build_id: get("build_id"),
+        build_id: get(BUILD_ID_KEY),
         output_base: get("output_base"),
         date: get("date"),
+        epoch_origin: value("profile_start_ts")
+            .and_then(Value::as_i64)
+            .map(EpochMicros::from_millis),
     }
 }
 

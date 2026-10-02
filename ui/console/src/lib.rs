@@ -15,48 +15,58 @@ mod model;
 pub use console::{ConsolePanel, register_keys};
 use model::ConsoleModel;
 
-use bviz_terminal::Replay;
+use bviz_invocation::{InvocationId, Session};
 use bviz_ui_components::Pending;
 use bviz_ui_console_args::{ConsoleArgs, ConsoleSource};
-use bviz_ui_workspace::{Document, PanelGroup, ViewSpec, Weight, document_label};
+use bviz_ui_workspace::{Member, PanelGroup, ViewSpec, Weight, document_label};
 use clap::error::ErrorKind;
 use clap::{CommandFactory, Parser};
-use gpui::{App, SharedString, Window, prelude::*, px, size};
+use gpui::{App, Entity, SharedString, Window, prelude::*, px, size};
 use std::path::PathBuf;
 
 /// A build's console output being read and reconstructed.
 pub struct Load {
-    replay: Pending<Replay>,
+    stream: Pending<model::Stream>,
     title: SharedString,
+}
+
+/// The invocation that wrote the build event stream at `source`, read from the
+/// head of the file alone.
+pub fn invocation_id(source: &ConsoleSource) -> Option<InvocationId> {
+    bviz_terminal::probe_invocation_id(&source.path)
 }
 
 impl From<ConsoleSource> for Load {
     fn from(source: ConsoleSource) -> Self {
         let title = document_label(&source.path);
         Self {
-            replay: Pending::start(move || {
+            stream: Pending::start(move || {
                 let path = source.path.display();
                 let bytes =
                     std::fs::read(&source.path).map_err(|e| format!("cannot read {path}: {e}"))?;
-                let output = bviz_terminal::parse(&bytes)
-                    .map_err(|e| format!("cannot parse build event stream: {e}"))?;
-                Ok(Replay::from_output(output))
+                model::Stream::parse(&bytes)
             }),
             title,
         }
     }
 }
 
-/// The document replaying the build `load` reads.
-pub fn open(load: impl Into<Load>, _window: &mut Window, cx: &mut App) -> Document {
+/// The views replaying the build `load` reads, which tells `session` what its
+/// stream knows of the invocation where it is opened as part of one.
+pub fn open(
+    load: impl Into<Load>,
+    session: Option<Entity<Session>>,
+    _window: &mut Window,
+    cx: &mut App,
+) -> Member {
     let load = load.into();
     let label = load.title;
-    let model = cx.new(|cx| ConsoleModel::reading(load.replay, cx));
+    let model = cx.new(|cx| ConsoleModel::reading(load.stream, session, cx));
     let console = ViewSpec::new({
         let label = label.clone();
         move |cx| cx.new(|cx| ConsolePanel::new(label.clone(), model.clone(), cx))
     });
-    Document::new(label, PanelGroup::one(console).with_weight(Weight::LOG))
+    Member::new(label, PanelGroup::one(console).with_weight(Weight::LOG))
 }
 
 /// Replays the console output of a Bazel build. Each file given opens a replay
@@ -94,7 +104,39 @@ pub fn run() {
         size(px(1100.), px(720.)),
         first,
         loads.collect(),
-        open,
+        |load, window, cx| open(load, None, window, cx).into(),
         &[console::register_keys],
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bviz_terminal::bep::build_event_stream::{BuildEvent, BuildStarted, build_event::Payload};
+    use prost::Message;
+
+    #[test]
+    fn a_source_names_the_invocation_its_stream_was_written_by() {
+        let dir = std::env::var("TEST_TMPDIR").unwrap_or_else(|_| "/tmp".into());
+        let source = |name: &str, stream: Option<&[u8]>| {
+            let path = std::path::Path::new(&dir).join(name);
+            if let Some(stream) = stream {
+                std::fs::write(&path, stream).unwrap();
+            }
+            ConsoleSource { path }
+        };
+        let started = BuildEvent {
+            payload: Some(Payload::Started(BuildStarted {
+                uuid: "a5f7f3e6-4fda".into(),
+                ..Default::default()
+            })),
+            ..Default::default()
+        }
+        .encode_length_delimited_to_vec();
+        let named = source("named.bep", Some(&started));
+        assert_eq!(invocation_id(&named), InvocationId::new("a5f7f3e6-4fda"));
+        let unnamed = source("unnamed.bep", Some(&[]));
+        assert_eq!(invocation_id(&unnamed), None);
+        assert_eq!(invocation_id(&source("missing.bep", None)), None);
+    }
 }

@@ -9,7 +9,7 @@
 
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
-use std::num::{NonZeroU32, NonZeroU64};
+use std::num::NonZeroU32;
 
 use bazel_query_proto::analysis::Configuration;
 
@@ -439,7 +439,6 @@ pub struct Facets {
     package: Vec<Option<NodeRef>>,
     label: Vec<Option<NodeRef>>,
     primary_output: Vec<Option<NodeRef>>,
-    primary_output_key: Vec<Option<NonZeroU64>>,
     tags: SparseFacet,
     aspects: SparseFacet,
     repos: Vec<RepoEntry>,
@@ -523,13 +522,6 @@ impl Facets {
 
     pub fn set_primary_output(&mut self, id: Id, output: Id) {
         put(&mut self.primary_output, id, Some(NodeRef::of(output)));
-    }
-
-    dense_facet! {
-        /// A hash of the exec path of the action's primary output, which no
-        /// other action writes, so it tells the action apart alike in every
-        /// aquery of one build, whatever order the query lists actions in.
-        primary_output_key, set_primary_output_key: Option<NonZeroU64>
     }
 
     /// Copies into `child` the facets of the `owner` it is part of: what the
@@ -784,7 +776,6 @@ impl Facets {
         self.package = permuted_nodes(&self.package, remap);
         self.label = permuted_nodes(&self.label, remap);
         self.primary_output = permuted_nodes(&self.primary_output, remap);
-        self.primary_output_key = permuted(&self.primary_output_key, remap);
         self.tags.renumber(remap);
         self.aspects.renumber(remap);
     }

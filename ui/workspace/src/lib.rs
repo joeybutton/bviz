@@ -20,12 +20,16 @@ mod workspace;
 
 pub(crate) use arrangement::{Arrangement, Maximize};
 pub use documents::ViewSpec;
-pub(crate) use documents::{DocumentId, Documents, OpenDocument, ViewState, WindowsChanged};
+pub(crate) use documents::{
+    DocumentId, Documents, OpenDocument, ViewId, ViewState, WindowsChanged,
+};
 pub use group::{PanelGroup, Weight};
 pub use layout::{AtEdge, DividerId, Layout, Panes, Removal, Side, Split, SplitSide};
 pub(crate) use pane::Framing;
 pub use pane::{Pane, PaneEvent};
-pub use panel::{AnyPanel, Document, Panel, PanelEvent, PanelKind, ViewKind, document_label};
+pub use panel::{
+    AnyPanel, Document, Member, Panel, PanelEvent, PanelKind, ViewKind, document_label,
+};
 pub use workspace::Workspace;
 
 use workspace::register_keys;

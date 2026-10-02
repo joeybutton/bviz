@@ -5,12 +5,13 @@ use crate::rebuild::Rebuild;
 use crate::track_label::shared_names;
 use crate::track_order::TrackSort;
 use crate::{METRICS, Source};
+use bviz_invocation::Session;
 use bviz_trace_layout::{
     FlameMode, LaneLayout, ScopeAggregate, TimeSelection, TrackFlamer, lay_out_lanes,
 };
 use bviz_trace_profile::{LaneClass, Profile};
 use bviz_ui_components::{Pending, load_in_background};
-use gpui::{Context, EventEmitter, Task};
+use gpui::{Context, Entity, EventEmitter, Task};
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -36,6 +37,10 @@ pub(crate) struct SourceReplaced;
 /// state stays on its panel.
 pub(crate) struct TraceModel {
     source: Source,
+    /// What the other outputs of the profile's invocation tell of it, read to
+    /// name what the profile holds only an id of. `None` for a profile opened
+    /// apart from any.
+    session: Option<Entity<Session>>,
     /// The full thread/counter lane layout for the loaded profile, built on first
     /// use. It depends only on the immutable profile, so it is cleared only when a
     /// new profile loads.
@@ -107,23 +112,31 @@ impl EventEmitter<SourceReplaced> for TraceModel {}
 impl TraceModel {
     /// The document `profile` is being read into, loaded once the read finishes
     /// and failed where it does not.
-    pub(crate) fn reading(profile: Pending<Profile>, cx: &mut Context<Self>) -> Self {
-        Self::new(load_in_background(
-            cx,
-            move || profile.join(),
-            |model, result, cx| {
-                let source = match result {
-                    Ok(profile) => Source::Loaded(Arc::new(profile)),
-                    Err(err) => Source::Failed(err),
-                };
-                model.set_source(source, cx);
-            },
-        ))
+    pub(crate) fn reading(
+        profile: Pending<Profile>,
+        session: Option<Entity<Session>>,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        Self::new(
+            session,
+            load_in_background(
+                cx,
+                move || profile.join(),
+                |model, result, cx| {
+                    let source = match result {
+                        Ok(profile) => Source::Loaded(Arc::new(profile)),
+                        Err(err) => Source::Failed(err),
+                    };
+                    model.set_source(source, cx);
+                },
+            ),
+        )
     }
 
-    fn new(load: Task<()>) -> Self {
+    fn new(session: Option<Entity<Session>>, load: Task<()>) -> Self {
         Self {
             source: Source::Loading,
+            session,
             lanes: RefCell::new(None),
             visible_tracks: Vec::new(),
             shared_track_names: Vec::new(),
@@ -146,6 +159,10 @@ impl TraceModel {
 
     pub(crate) fn source(&self) -> &Source {
         &self.source
+    }
+
+    pub(crate) fn session(&self) -> Option<&Entity<Session>> {
+        self.session.as_ref()
     }
 
     pub(crate) fn visible_tracks(&self) -> &[bool] {
@@ -594,7 +611,7 @@ mod tests {
     /// A document whose read has not finished, for exercising the state a panel
     /// drives it through.
     fn model() -> TraceModel {
-        TraceModel::new(Task::ready(()))
+        TraceModel::new(None, Task::ready(()))
     }
 
     #[test]
