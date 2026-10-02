@@ -38,6 +38,7 @@ pub use facets::Facets;
 pub use graph::{EdgeKind, Graph, Kind};
 pub use intern::{Id, Names};
 pub use joint::{Joint, build_joint};
+pub use label::Resolver;
 pub use layout::{Anchor, Box, Connector, LaidOut, layout, layout_pinned};
 pub use map::{MapLayout, map_layout};
 pub use provenance::{Input, InputSet, Provenance};

@@ -212,6 +212,14 @@ pub struct Outcomes {
 }
 
 impl Outcomes {
+    /// Whether the build reported nothing at all.
+    pub fn is_empty(&self) -> bool {
+        self.builds.0.is_empty()
+            && self.tests.0.is_empty()
+            && self.failed_actions.is_empty()
+            && self.target_errors.0.is_empty()
+    }
+
     /// A target whose analysis failed before it was configured is reported
     /// under no configuration.
     pub fn build(&self, target: ConfiguredTarget<&str>) -> Option<&BuildOutcome> {
@@ -339,6 +347,25 @@ mod tests {
 
         outcomes.report_build(owned("//app", Some("a7a71f")), BuildOutcome::Built);
         assert_eq!(outcomes.build(target("//lib", Some("a7a71f"))), None);
+    }
+
+    #[test]
+    fn any_one_report_leaves_the_outcomes_non_empty() {
+        assert!(Outcomes::default().is_empty());
+        let app = || owned("//app", Some("a7a71f"));
+        let reports: [fn(&mut Outcomes, ConfiguredTarget); 4] = [
+            |outcomes, app| outcomes.report_build(app, BuildOutcome::Built),
+            |outcomes, app| outcomes.report_test(app, test_outcome(TestStatus::Passed)),
+            |outcomes, _| {
+                outcomes.report_failed_action("bazel-out/bin/gen.out".into(), failed_action(""))
+            },
+            |outcomes, app| outcomes.report_target_error(app, "not visible".into()),
+        ];
+        for (nth, report) in reports.into_iter().enumerate() {
+            let mut outcomes = Outcomes::default();
+            report(&mut outcomes, app());
+            assert!(!outcomes.is_empty(), "report {nth}");
+        }
     }
 
     #[test]

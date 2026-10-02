@@ -47,6 +47,7 @@ mod scatter;
 mod scroll;
 mod search;
 mod selection;
+mod status;
 mod toolbar;
 mod why;
 

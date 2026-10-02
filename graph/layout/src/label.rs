@@ -204,6 +204,53 @@ pub(crate) fn unnamed_action_node_id(place: usize) -> String {
     format!("action{place}")
 }
 
+/// Finds the nodes of one graph by what Bazel's other outputs name them by.
+///
+/// A label is taken as Bazel prints it: `//pkg:name` or `@@//pkg:name` for
+/// the main repository, `@@repo//pkg:name` for another, and `@repo//pkg:name`
+/// where it prints a repository's apparent name.
+pub struct Resolver<'a> {
+    names: &'a Names,
+}
+
+impl<'a> Resolver<'a> {
+    pub fn new(names: &'a Names) -> Self {
+        Self { names }
+    }
+
+    /// The target `label` names.
+    pub fn target(&self, label: &str) -> Option<Id> {
+        self.labeled(label, target_node_id)
+    }
+
+    /// The target `label` names as configured under the configuration whose
+    /// checksum is `checksum`.
+    pub fn configured_target(&self, label: &str, checksum: &str) -> Option<Id> {
+        self.labeled(label, |label| ct_node_id(label, checksum))
+    }
+
+    /// The action whose primary output lies at exec path `primary_output`.
+    pub fn action(&self, primary_output: &str) -> Option<Id> {
+        self.names.get(&action_node_id(primary_output))
+    }
+
+    /// The node `node_id` forms from `label`, under whichever spelling of the
+    /// label [`RepoMapping::canonicalize_label`] gave the graph: an apparent
+    /// repository name stands in the graph either as written or canonical,
+    /// never both.
+    fn labeled(&self, label: &str, node_id: impl Fn(&str) -> String) -> Option<Id> {
+        let node = |label: &str| self.names.get(&node_id(label));
+        let Some(repo) = label.strip_prefix('@') else {
+            return node(label);
+        };
+        match repo.strip_prefix('@') {
+            Some(canonical) if canonical.starts_with("//") => node(canonical),
+            Some(_) => node(label),
+            None => node(label).or_else(|| node(&format!("@{label}"))),
+        }
+    }
+}
+
 /// The label and node kind a target carries, by its populated variant, or `None`
 /// when the variant message is absent.
 pub(crate) fn label_and_kind(target: &Target) -> Option<(&str, Kind)> {
