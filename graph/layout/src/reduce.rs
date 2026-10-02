@@ -809,20 +809,44 @@ impl Condensation {
         }
         let of = components(succ, &pred);
         let count = of.iter().copied().max().map_or(0, |c| c as usize + 1);
-        let mut seen: FxHashSet<(u32, u32)> = FxHashSet::with_capacity_and_hasher(
-            succ.iter().map(Vec::len).sum(),
-            Default::default(),
-        );
+        // The indices grouped by component, in ascending order within each,
+        // and by component where its group ends.
+        let mut end = vec![0usize; count];
+        for &c in &of {
+            end[c as usize] += 1;
+        }
+        let mut filled = 0;
+        for group in &mut end {
+            filled += std::mem::replace(group, filled);
+        }
+        let mut members = vec![0u32; of.len()];
+        for (u, &c) in of.iter().enumerate() {
+            members[end[c as usize]] = u as u32;
+            end[c as usize] += 1;
+        }
+
+        /// Stands for a component no edge has been found into.
+        const UNENTERED: u32 = u32::MAX;
+
+        // By component, the last component an edge into it was found from: all
+        // the edges out of one component are read together, so a second edge
+        // between two components finds the first one's mark still standing.
+        let mut entered_from = vec![UNENTERED; count];
         let mut condensed: Vec<Vec<u32>> = vec![Vec::new(); count];
         let mut indeg: Vec<u32> = vec![0; count];
-        for (u, forward) in succ.iter().enumerate() {
-            for &v in forward {
-                let (a, b) = (of[u], of[v as usize]);
-                if a != b && seen.insert((a, b)) {
-                    condensed[a as usize].push(b);
-                    indeg[b as usize] += 1;
+        let mut start = 0;
+        for (a, &end) in end.iter().enumerate() {
+            let a = a as u32;
+            for &u in &members[start..end] {
+                for &v in &succ[u as usize] {
+                    let b = of[v as usize];
+                    if a != b && std::mem::replace(&mut entered_from[b as usize], a) != a {
+                        condensed[a as usize].push(b);
+                        indeg[b as usize] += 1;
+                    }
                 }
             }
+            start = end;
         }
         let order = topo_order(&condensed, indeg).expect("a condensation holds no cycle");
         Self {
