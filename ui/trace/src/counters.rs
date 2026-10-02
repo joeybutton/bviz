@@ -10,8 +10,8 @@ use crate::{
 use bviz_trace_layout::TimeView;
 use bviz_trace_profile::Profile;
 use gpui::{
-    App, BorderStyle, Bounds, ContentMask, Hsla, PathBuilder, Pixels, Point, TextAlign, Window,
-    fill, point, px, quad, size,
+    App, BorderStyle, Bounds, ContentMask, Hsla, Path, Pixels, Point, TextAlign, Window, fill,
+    point, px, quad, size,
 };
 
 /// How far a counter plot's drawn edge may be displaced, in device pixels, in
@@ -50,7 +50,7 @@ impl CounterYScale {
 /// lane crossing either edge is cut off there. Work per lane is bounded by the
 /// viewport: the visible points are found by binary search, and dense runs are
 /// collapsed to per-pixel-column extremes and then thinned to the edge slack
-/// before tessellation, so a chart costs vertices in proportion to the detail it
+/// before they are filled, so a chart costs vertices in proportion to the detail it
 /// can show rather than to the samples behind it.
 pub(crate) fn paint_graph(
     profile: &Profile,
@@ -118,19 +118,38 @@ pub(crate) fn paint_graph(
             if top.len() < 2 {
                 continue;
             }
-            let mut area = PathBuilder::fill();
-            area.move_to(point(px(top[0].0), px(top[0].1)));
-            for &(x, y) in &top[1..] {
-                area.line_to(point(px(x), px(y)));
-            }
-            // The area sits on the chart floor, so the base is two corners.
-            area.line_to(point(px(top[top.len() - 1].0), px(chart_bottom)));
-            area.line_to(point(px(top[0].0), px(chart_bottom)));
-            if let Ok(path) = area.build() {
-                window.paint_path(path, theme::counter_color(profile.str(series.name)));
-            }
+            let color = theme::counter_color(profile.str(series.name));
+            paint_area(&top, chart_bottom, color, window);
         }
     });
+}
+
+/// The texture coordinates of a path triangle that has no curved edge.
+const STRAIGHT_EDGED: (Point<f32>, Point<f32>, Point<f32>) = {
+    let solid = Point { x: 0., y: 1. };
+    (solid, solid, solid)
+};
+
+/// Fills the area between `top`, whose x never decreases, and the chart floor
+/// at `floor_y`, as a trapezoid under each of its segments: a cost in
+/// proportion to its vertices however jagged it is.
+fn paint_area(top: &[(f32, f32)], floor_y: f32, color: Hsla, window: &mut Window) {
+    let at = |(x, y): (f32, f32)| point(px(x), px(y));
+    let mut area = Path::new(at(top[0]));
+    let mut filled = false;
+    for segment in top.windows(2) {
+        let (from, to) = (segment[0], segment[1]);
+        if to.0 <= from.0 {
+            continue;
+        }
+        let (from_floor, to_floor) = (at((from.0, floor_y)), at((to.0, floor_y)));
+        area.push_triangle((at(from), at(to), to_floor), STRAIGHT_EDGED);
+        area.push_triangle((at(from), to_floor, from_floor), STRAIGHT_EDGED);
+        filled = true;
+    }
+    if filled {
+        window.paint_path(area, color);
+    }
 }
 
 /// Paints the hover crosshair: a vertical line at the cursor x spanning both
