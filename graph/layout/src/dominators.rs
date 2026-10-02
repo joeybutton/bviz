@@ -3,16 +3,19 @@
 //!
 //! A point dominates another when every path from the top of the build to the
 //! other passes through it, so a build without the point leaves out every
-//! point it dominates. The top of the build stands above every point no
-//! other depends on, and above each cycle no point outside it depends on, so
-//! every counted point of the scope sits in the tree.
+//! point it dominates. The top of the build stands above its roots: by default
+//! every point no other depends on, and each cycle no point outside it depends
+//! on, so that every counted point of the scope sits in the tree; or a chosen
+//! set of points, leaving out of the tree every point none of them reaches.
 
 use std::cmp::Reverse;
 use std::collections::VecDeque;
+use std::hash::{BuildHasher, Hash, Hasher};
 use std::ops::Range;
+use std::sync::Arc;
 
 use rayon::prelude::*;
-use rustc_hash::{FxHashMap, FxHashSet};
+use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
 
 use crate::facets::Facets;
 use crate::graph::{Graph, Kind};
@@ -21,15 +24,15 @@ use crate::metrics::{Count, Scope, UnitGraph, unit_graph};
 use crate::provenance::Provenance;
 use crate::reduce::{DenseIds, components, reach_counts};
 
-/// The dominator tree of the counted points of a scope. A point not counted
-/// towards others is no product of the build and takes no part.
+/// The dominator tree of the counted points of a scope the roots reach. A
+/// point not counted towards others is no product of the build and takes no
+/// part.
 ///
 /// The children of each node take consecutive node indices, heaviest first
 /// and among equal weights by a hash of their points' names, an order every
 /// run of the queries gives alike, then by name where two hashes collide. So
-/// do the tops of the tree, in two runs each ordered so: the top-level points,
-/// which are all tops, then the shared tops, each a dependency several
-/// top-level points share.
+/// do the tops of the tree, in two runs each ordered so: the roots, which are
+/// all tops, then the shared tops, each a dependency several roots share.
 pub struct Dominators {
     scope: Scope,
     nodes: Vec<Dominated>,
@@ -39,10 +42,14 @@ pub struct Dominators {
     bounds: Vec<u32>,
     index: DenseIds,
     dependents: Dependents,
-    /// How many of the tops are top-level points.
-    top_level: u32,
+    /// How many of the tops are roots.
+    roots: u32,
+    outside: u32,
     /// How many points the other tops dominate between them.
     shared_weight: u32,
+    /// By top, the strongly connected component of the scope's points its
+    /// point belongs to.
+    cycle: Vec<u32>,
 }
 
 struct Dominated {
@@ -52,15 +59,72 @@ struct Dominated {
     standing: Standing,
 }
 
-/// Where a point stands towards the top-level points of its scope: those
-/// nothing depends on but the other members of a cycle they belong to.
+/// Where a point stands towards the roots of its tree.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Standing {
-    /// Depended on only by the other members of its cycle where `in_cycle`,
-    /// and otherwise by nothing.
-    TopLevel { in_cycle: bool },
-    /// Depended on, directly or transitively, by this many top-level points.
+    /// A root no point outside its own cycle reaches: where `in_cycle`, the
+    /// other members of its cycle reach it, and otherwise nothing does.
+    Root { in_cycle: bool },
+    /// A root this many other roots reach, none of them in its own cycle.
+    ReachedRoot(Count),
+    /// No root, reached, directly or transitively, from this many roots.
     Below(Count),
+}
+
+impl Standing {
+    pub fn is_root(self) -> bool {
+        !matches!(self, Standing::Below(_))
+    }
+}
+
+/// The points a dominator tree is rooted at.
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+pub enum Roots {
+    /// The top-level points of the scope: those nothing depends on but the
+    /// other members of a cycle they belong to.
+    Tops,
+    Chosen(Chosen),
+}
+
+/// A set of points, each named once, in id order.
+#[derive(Clone, Debug)]
+pub struct Chosen {
+    ids: Arc<[Id]>,
+    /// A hash of `ids`, taken once so that hashing the set takes no pass over
+    /// its points.
+    fingerprint: u64,
+}
+
+impl Chosen {
+    pub fn new(ids: impl IntoIterator<Item = Id>) -> Self {
+        let mut ids: Vec<Id> = ids.into_iter().collect();
+        ids.sort_unstable();
+        ids.dedup();
+        let fingerprint = FxBuildHasher.hash_one(&ids);
+        Chosen {
+            ids: ids.into(),
+            fingerprint,
+        }
+    }
+
+    pub fn ids(&self) -> &[Id] {
+        &self.ids
+    }
+}
+
+impl PartialEq for Chosen {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.ids, &other.ids)
+            || (self.fingerprint == other.fingerprint && self.ids == other.ids)
+    }
+}
+
+impl Eq for Chosen {}
+
+impl Hash for Chosen {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        state.write_u64(self.fingerprint);
+    }
 }
 
 /// By node, the nodes depending on it directly, in node order.
@@ -77,9 +141,9 @@ impl Dependents {
     }
 }
 
-/// The most points [`Dominators::top_level_above`] reaches on its walk up
-/// from a node, however large the graph; each point it walks through has
-/// every one of its dependents scanned.
+/// The most points [`Dominators::roots_above`] reaches on its walk up from a
+/// node, however large the graph; each point it walks through has every one
+/// of its dependents scanned.
 const ABOVE_WALK: usize = 1 << 12;
 
 impl Dominators {
@@ -92,14 +156,20 @@ impl Dominators {
         self.nodes.len() as u32
     }
 
-    /// The tops that are top-level points.
-    pub fn top_level(&self) -> Range<u32> {
-        0..self.top_level
+    /// The tops that are roots.
+    pub fn roots(&self) -> Range<u32> {
+        0..self.roots
     }
 
-    /// The tops that are no top-level points.
+    /// How many counted points of the scope no root reaches, which the tree
+    /// leaves out.
+    pub fn outside(&self) -> u32 {
+        self.outside
+    }
+
+    /// The tops that are no roots.
     pub fn shared_tops(&self) -> Range<u32> {
-        self.top_level..self.bounds[0]
+        self.roots..self.bounds[0]
     }
 
     /// How many points the [shared tops](Self::shared_tops) dominate between
@@ -140,10 +210,17 @@ impl Dominators {
         self.nodes[node as usize].standing
     }
 
-    /// Up to `limit` top-level points depending on `node`, the nearest first.
-    /// The walk up from `node` reaches at most [`ABOVE_WALK`] points, so where
-    /// the top-level points lie past those, fewer are named than depend on it.
-    pub fn top_level_above(&self, node: u32, limit: usize) -> Vec<u32> {
+    /// Up to `limit` roots depending on `node`, the nearest first, short of
+    /// any beyond a root found. Where `node` is a root itself, the roots of
+    /// its own cycle are walked through and not named, as its
+    /// [standing](Standing::ReachedRoot) counts none of them. The walk up
+    /// from `node` reaches at most [`ABOVE_WALK`] points, so where the roots
+    /// lie past those, fewer are named than depend on it.
+    pub fn roots_above(&self, node: u32, limit: usize) -> Vec<u32> {
+        // A root is a top, which `cycle` is by.
+        let cycle_of = |root: u32| self.cycle[root as usize];
+        let own_cycle = self.standing(node).is_root().then(|| cycle_of(node));
+        let named = |at: u32| self.standing(at).is_root() && Some(cycle_of(at)) != own_cycle;
         let mut found: Vec<u32> = Vec::with_capacity(limit);
         let mut seen: FxHashSet<u32> =
             FxHashSet::with_capacity_and_hasher(ABOVE_WALK, Default::default());
@@ -158,9 +235,9 @@ impl Dominators {
                 if !seen.insert(dependent) {
                     continue;
                 }
-                match self.standing(dependent) {
-                    Standing::TopLevel { .. } => found.push(dependent),
-                    Standing::Below(_) => walk.push_back(dependent),
+                match named(dependent) {
+                    true => found.push(dependent),
+                    false => walk.push_back(dependent),
                 }
             }
         }
@@ -280,7 +357,8 @@ impl Gathered {
     }
 }
 
-/// The dominator tree of the points of `graph` in `scope`.
+/// The dominator tree of the points of `graph` in `scope`, rooted at its
+/// top-level points.
 pub fn dominators(
     graph: &Graph,
     names: &Names,
@@ -288,95 +366,219 @@ pub fn dominators(
     provenance: &Provenance,
     scope: Scope,
 ) -> Dominators {
-    let unit = unit_graph(graph, facets, provenance, scope);
-    let flowgraph = Flowgraph::new(&unit);
-    let tree = flowgraph.dominator_tree();
-    let mut weight = vec![1u32; tree.idom.len()];
-    for w in (1..tree.idom.len()).rev() {
-        weight[tree.idom[w] as usize] += weight[w];
-    }
+    ScopeGraph::new(graph, names, facets, provenance, scope).dominators(names, &Roots::Tops)
+}
 
-    let point = |w: u32| &unit.points[tree.point(w) as usize];
-    let mut top_level = vec![false; unit.points.len()];
-    for &p in &flowgraph.tops {
-        top_level[p as usize] = true;
-    }
-    let below = reach_counts(
-        &unit.dependents,
-        |p| top_level[p],
-        |p| stable_hash(names.resolve(unit.points[p].id)),
-    );
-    let mut by_parent: Vec<u32> = (1..tree.idom.len() as u32).collect();
-    bviz_parallel::workers().install(|| {
-        by_parent.par_sort_unstable_by_key(|&w| {
-            let id = point(w).id;
-            let name = names.resolve(id);
-            let key = stable_hash(name);
-            let idom = tree.idom[w as usize];
-            (
-                idom,
-                idom == TOP && !top_level[tree.point(w) as usize],
-                Reverse(weight[w as usize]),
-                key,
-                name,
-            )
-        })
-    });
-    // By preorder number, where its children start in `by_parent`.
-    let mut first_child = vec![0u32; tree.idom.len() + 1];
-    for &w in &by_parent {
-        first_child[tree.idom[w as usize] as usize + 1] += 1;
-    }
-    for v in 1..first_child.len() {
-        first_child[v] += first_child[v - 1];
-    }
-    let children =
-        |v: u32| &by_parent[first_child[v as usize] as usize..first_child[v as usize + 1] as usize];
+/// The points of one scope and the dependencies between them, with what a
+/// dominator tree reads of them whatever its roots, so that trees of one
+/// scope from different roots share it.
+pub struct ScopeGraph {
+    scope: Scope,
+    unit: UnitGraph,
+    /// By id, the point.
+    index: DenseIds,
+    /// By point, the hash of its name.
+    keys: Vec<u64>,
+    /// By point, the strongly connected component it belongs to.
+    component: Vec<u32>,
+    components: usize,
+    /// The top-level points, in ascending order.
+    tops: Vec<u32>,
+    counted: u32,
+}
 
-    let mut order: Vec<u32> = Vec::with_capacity(by_parent.len());
-    let mut bounds: Vec<u32> = Vec::with_capacity(by_parent.len() + 1);
-    order.extend_from_slice(children(TOP));
-    for at in 0..by_parent.len() {
-        bounds.push(order.len() as u32);
-        order.extend_from_slice(children(order[at]));
-    }
-    bounds.push(order.len() as u32);
-
-    let nodes: Vec<Dominated> = order
-        .iter()
-        .map(|&w| {
-            let p = tree.point(w) as usize;
-            let point = &unit.points[p];
-            Dominated {
-                id: point.id,
-                kind: point.kind,
-                weight: weight[w as usize],
-                standing: match top_level[p] {
-                    true => Standing::TopLevel {
-                        in_cycle: !unit.dependents[p].is_empty(),
-                    },
-                    false => Standing::Below(below[p]),
-                },
+impl ScopeGraph {
+    pub fn new(
+        graph: &Graph,
+        names: &Names,
+        facets: &Facets,
+        provenance: &Provenance,
+        scope: Scope,
+    ) -> Self {
+        let unit = unit_graph(graph, facets, provenance, scope);
+        let (index, _) = DenseIds::new(unit.points.iter().map(|point| point.id));
+        let keys = unit
+            .points
+            .iter()
+            .map(|point| stable_hash(names.resolve(point.id)))
+            .collect();
+        let component = components(&unit.dependencies, &unit.dependents);
+        let components = component.iter().max().map_or(0, |&c| c as usize + 1);
+        let mut depended_on = vec![false; components];
+        for (dependent, dependencies) in unit.dependencies.iter().enumerate() {
+            for &dependency in dependencies {
+                let c = component[dependency as usize];
+                if c != component[dependent] {
+                    depended_on[c as usize] = true;
+                }
             }
-        })
-        .collect();
-    let (index, _) = DenseIds::new(nodes.iter().map(|node| node.id));
-    let dependents = dependents(&unit, &tree, &order);
-    let shared_tops = &nodes[flowgraph.tops.len()..bounds[0] as usize];
-    let shared_weight = shared_tops.iter().map(|node| node.weight).sum();
-    Dominators {
-        scope,
-        nodes,
-        bounds,
-        index,
-        dependents,
-        top_level: flowgraph.tops.len() as u32,
-        shared_weight,
+        }
+        let tops = (unit.points.iter().zip(&component).enumerate())
+            .filter(|(_, (point, c))| point.counted && !depended_on[**c as usize])
+            .map(|(p, _)| p as u32)
+            .collect();
+        let counted = unit.points.iter().filter(|point| point.counted).count() as u32;
+        Self {
+            scope,
+            unit,
+            index,
+            keys,
+            component,
+            components,
+            tops,
+            counted,
+        }
+    }
+
+    /// The dominator tree from `roots`, of which those that are no counted
+    /// point of the scope are passed over.
+    pub fn dominators(&self, names: &Names, roots: &Roots) -> Dominators {
+        let unit = &self.unit;
+        let roots: Vec<u32> = match roots {
+            Roots::Tops => self.tops.clone(),
+            Roots::Chosen(chosen) => {
+                let mut points: Vec<u32> = Vec::with_capacity(chosen.ids().len());
+                points.extend(
+                    (chosen.ids().iter())
+                        .filter_map(|&id| self.index.get(id))
+                        .filter(|&p| unit.points[p as usize].counted),
+                );
+                points.sort_unstable();
+                points
+            }
+        };
+        let tree = Flowgraph {
+            unit,
+            roots: &roots,
+        }
+        .dominator_tree();
+        let mut weight = vec![1u32; tree.idom.len()];
+        for w in (1..tree.idom.len()).rev() {
+            weight[tree.idom[w] as usize] += weight[w];
+        }
+        let standing = self.standing(&roots, &tree);
+
+        let mut by_parent: Vec<u32> = (1..tree.idom.len() as u32).collect();
+        bviz_parallel::workers().install(|| {
+            by_parent.par_sort_unstable_by_key(|&w| {
+                let p = tree.point(w);
+                let idom = tree.idom[w as usize];
+                let (key, name) = (
+                    self.keys[p as usize],
+                    names.resolve(unit.points[p as usize].id),
+                );
+                (
+                    idom,
+                    idom == TOP && roots.binary_search(&p).is_err(),
+                    Reverse(weight[w as usize]),
+                    key,
+                    name,
+                )
+            })
+        });
+        // By preorder number, where its children start in `by_parent`.
+        let mut first_child = vec![0u32; tree.idom.len() + 1];
+        for &w in &by_parent {
+            first_child[tree.idom[w as usize] as usize + 1] += 1;
+        }
+        for v in 1..first_child.len() {
+            first_child[v] += first_child[v - 1];
+        }
+        let children = |v: u32| {
+            &by_parent[first_child[v as usize] as usize..first_child[v as usize + 1] as usize]
+        };
+
+        let mut order: Vec<u32> = Vec::with_capacity(by_parent.len());
+        let mut bounds: Vec<u32> = Vec::with_capacity(by_parent.len() + 1);
+        order.extend_from_slice(children(TOP));
+        for at in 0..by_parent.len() {
+            bounds.push(order.len() as u32);
+            order.extend_from_slice(children(order[at]));
+        }
+        bounds.push(order.len() as u32);
+
+        let nodes: Vec<Dominated> = order
+            .iter()
+            .map(|&w| {
+                let p = tree.point(w) as usize;
+                let point = &unit.points[p];
+                Dominated {
+                    id: point.id,
+                    kind: point.kind,
+                    weight: weight[w as usize],
+                    standing: standing(p),
+                }
+            })
+            .collect();
+        let (index, _) = DenseIds::new(nodes.iter().map(|node| node.id));
+        let dependents = dependents(unit, &tree, &order);
+        let tops = order[..bounds[0] as usize].iter();
+        let cycle = tops
+            .map(|&w| self.component[tree.point(w) as usize])
+            .collect();
+        let shared_tops = &nodes[roots.len()..bounds[0] as usize];
+        let shared_weight = shared_tops.iter().map(|node| node.weight).sum();
+        Dominators {
+            scope: self.scope,
+            nodes,
+            bounds,
+            index,
+            dependents,
+            roots: roots.len() as u32,
+            outside: self.counted - tree.points.len() as u32,
+            shared_weight,
+            cycle,
+        }
+    }
+
+    /// By point `tree` reaches, where it stands towards `roots`, which are in
+    /// ascending order.
+    fn standing<'a>(
+        &'a self,
+        roots: &[u32],
+        tree: &'a DominatorTree,
+    ) -> impl Fn(usize) -> Standing + 'a {
+        let unit = &self.unit;
+        let mut is_root = vec![false; unit.points.len()];
+        let mut roots_in = vec![0u32; self.components];
+        for &p in roots {
+            is_root[p as usize] = true;
+            roots_in[self.component[p as usize] as usize] += 1;
+        }
+        let below = reach_counts(&unit.dependents, |p| is_root[p], |p| self.keys[p]);
+        // By component, whether a point the tree reaches outside it depends
+        // on a member, which only a point some root outside it reaches does.
+        let mut entered = vec![false; self.components];
+        for &q in &tree.points {
+            let c = self.component[q as usize];
+            for &d in &unit.dependencies[q as usize] {
+                let entering = self.component[d as usize];
+                entered[entering as usize] |= entering != c;
+            }
+        }
+        move |p: usize| {
+            let c = self.component[p] as usize;
+            match (is_root[p], entered[c]) {
+                (false, _) => Standing::Below(below[p]),
+                (true, false) => Standing::Root {
+                    in_cycle: (unit.dependents[p].iter()).any(|&q| tree.reached(q)),
+                },
+                (true, true) => {
+                    let others = below[p].less(roots_in[c] - 1);
+                    // An estimate can fall short of the root it knows of.
+                    let others = match others.value() {
+                        0 => Count::Estimated(1),
+                        _ => others,
+                    };
+                    Standing::ReachedRoot(others)
+                }
+            }
+        }
     }
 }
 
-/// The dependents of each point of `unit`, numbered as the nodes `order` puts
-/// the preorder numbers of `tree` in.
+/// The dependents of each point of `unit` that `tree` reaches, numbered as
+/// the nodes `order` puts the preorder numbers of `tree` in.
 fn dependents(unit: &UnitGraph, tree: &DominatorTree, order: &[u32]) -> Dependents {
     let mut node_of = vec![UNNUMBERED; unit.points.len()];
     for (node, &w) in order.iter().enumerate() {
@@ -389,7 +591,11 @@ fn dependents(unit: &UnitGraph, tree: &DominatorTree, order: &[u32]) -> Dependen
     for &w in order {
         let from = of.len();
         start.push(from as u32);
-        of.extend(point_dependents(w).iter().map(|&q| node_of[q as usize]));
+        let reached = point_dependents(w)
+            .iter()
+            .map(|&q| node_of[q as usize])
+            .filter(|&node| node != UNNUMBERED);
+        of.extend(reached);
         of[from..].sort_unstable();
     }
     start.push(of.len() as u32);
@@ -410,12 +616,15 @@ const NO_MORE: u32 = u32::MAX;
 struct Flowgraph<'a> {
     unit: &'a UnitGraph,
     /// The points the top of the build has an edge to, in ascending order.
-    tops: Vec<u32>,
+    roots: &'a [u32],
 }
 
 /// Each vertex's immediate dominator, by preorder number of a walk from the
 /// top of the build.
 struct DominatorTree {
+    /// By point, its preorder number, [`UNNUMBERED`] for a point the walk
+    /// does not reach.
+    number: Vec<u32>,
     /// By preorder number, the point it numbers; the top of the build is none.
     points: Vec<u32>,
     /// By preorder number, the preorder number of its immediate dominator,
@@ -427,35 +636,20 @@ impl DominatorTree {
     fn point(&self, w: u32) -> u32 {
         self.points[w as usize - 1]
     }
+
+    fn reached(&self, p: u32) -> bool {
+        self.number[p as usize] != UNNUMBERED
+    }
 }
 
-impl<'a> Flowgraph<'a> {
-    fn new(unit: &'a UnitGraph) -> Self {
-        let of = components(&unit.dependencies, &unit.dependents);
-        let count = of.iter().max().map_or(0, |&c| c as usize + 1);
-        let mut depended_on = vec![false; count];
-        for (dependent, dependencies) in unit.dependencies.iter().enumerate() {
-            for &dependency in dependencies {
-                let c = of[dependency as usize];
-                if c != of[dependent] {
-                    depended_on[c as usize] = true;
-                }
-            }
-        }
-        let tops = (unit.points.iter().zip(&of).enumerate())
-            .filter(|(_, (point, c))| point.counted && !depended_on[**c as usize])
-            .map(|(p, _)| p as u32)
-            .collect();
-        Self { unit, tops }
-    }
-
-    fn is_top(&self, p: u32) -> bool {
-        self.tops.binary_search(&p).is_ok()
+impl Flowgraph<'_> {
+    fn is_root(&self, p: u32) -> bool {
+        self.roots.binary_search(&p).is_ok()
     }
 
     fn successors(&self, points: &[u32], v: u32) -> &[u32] {
         match v {
-            TOP => &self.tops,
+            TOP => self.roots,
             _ => &self.unit.dependencies[points[v as usize - 1] as usize],
         }
     }
@@ -465,15 +659,15 @@ impl<'a> Flowgraph<'a> {
     /// Finding Dominators in a Flowgraph", ACM TOPLAS 1(1), 1979.
     fn dominator_tree(&self) -> DominatorTree {
         let counted = |p: u32| self.unit.points[p as usize].counted;
-        let n = 1 + self.unit.points.iter().filter(|p| p.counted).count();
+        let most = 1 + self.unit.points.len();
 
         // Preorder numbers by an iterative walk: a dependency chain can run
         // deeper than a thread's stack.
         let mut number = vec![UNNUMBERED; self.unit.points.len()];
-        let mut points: Vec<u32> = Vec::with_capacity(n - 1);
-        let mut parent: Vec<u32> = Vec::with_capacity(n);
+        let mut points: Vec<u32> = Vec::with_capacity(most - 1);
+        let mut parent: Vec<u32> = Vec::with_capacity(most);
         parent.push(TOP);
-        let mut walk: Vec<(u32, usize)> = Vec::with_capacity(n);
+        let mut walk: Vec<(u32, usize)> = Vec::with_capacity(most);
         walk.push((TOP, 0));
         while let Some((v, next)) = walk.last_mut() {
             let v = *v;
@@ -490,6 +684,7 @@ impl<'a> Flowgraph<'a> {
                 walk.push((w, 0));
             }
         }
+        let n = parent.len();
 
         let mut forest = Forest {
             semi: (0..n as u32).collect(),
@@ -503,8 +698,11 @@ impl<'a> Flowgraph<'a> {
         for w in (1..n as u32).rev() {
             let p = points[w as usize - 1];
             let dependents = self.unit.dependents[p as usize].iter();
-            let from_top = self.is_top(p).then_some(TOP);
-            for v in dependents.map(|&q| number[q as usize]).chain(from_top) {
+            let reached = dependents
+                .map(|&q| number[q as usize])
+                .filter(|&v| v != UNNUMBERED);
+            let from_top = self.is_root(p).then_some(TOP);
+            for v in reached.chain(from_top) {
                 let u = forest.eval(v);
                 let semi = forest.semi[u as usize];
                 if semi < forest.semi[w as usize] {
@@ -532,7 +730,11 @@ impl<'a> Flowgraph<'a> {
                 idom[w] = idom[idom[w] as usize];
             }
         }
-        DominatorTree { points, idom }
+        DominatorTree {
+            number,
+            points,
+            idom,
+        }
     }
 }
 
@@ -605,20 +807,19 @@ mod tests {
 
     /// Asserts that the tops of `tree` come in the two runs its type states.
     fn assert_tops_in_two_runs(tree: &Dominators) {
-        let top_level = |node: u32| matches!(tree.standing(node), Standing::TopLevel { .. });
-        let standing_so = (0..tree.total()).filter(|&node| top_level(node));
+        let standing_so = (0..tree.total()).filter(|&node| tree.standing(node).is_root());
         assert_eq!(
             standing_so.collect::<Vec<_>>(),
-            Vec::from_iter(tree.top_level())
+            Vec::from_iter(tree.roots())
         );
-        assert_eq!(tree.top_level().end, tree.shared_tops().start);
+        assert_eq!(tree.roots().end, tree.shared_tops().start);
         assert_eq!(tree.shared_tops().end, tops(tree).end);
         let weight = |node: u32| tree.weight(node);
         assert_eq!(
             tree.shared_weight(),
             tree.shared_tops().map(weight).sum::<u32>()
         );
-        for run in [tree.top_level(), tree.shared_tops()] {
+        for run in [tree.roots(), tree.shared_tops()] {
             let weights: Vec<u32> = run.map(weight).collect();
             assert!(weights.is_sorted_by(|a, b| a >= b), "{weights:?}");
         }
@@ -628,6 +829,16 @@ mod tests {
         let everything = Provenance::new(vec![InputSet::ALL; names.len()]);
         let scope = Scope::new(unit, InputSet::ALL).unwrap();
         dominators(graph, names, facets, &everything, scope)
+    }
+
+    /// The tree of configured targets from the points `roots` names.
+    fn tree_from(graph: &Graph, names: &Names, roots: &[&str]) -> Dominators {
+        let everything = Provenance::new(vec![InputSet::ALL; names.len()]);
+        let scope = Scope::new(Unit::ConfiguredTarget, InputSet::ALL).unwrap();
+        let facets = Facets::default();
+        let prepared = ScopeGraph::new(graph, names, &facets, &everything, scope);
+        let roots = Chosen::new(roots.iter().map(|&root| names.get(root).unwrap()));
+        prepared.dominators(names, &Roots::Chosen(roots))
     }
 
     /// Leaves of weight one named `names`, drawn in the order of their names'
@@ -701,10 +912,9 @@ mod tests {
         );
     }
 
-    /// The top-level points come ahead of the shared tops, however much
-    /// either holds.
+    /// The roots come ahead of the shared tops, however much either holds.
     #[test]
-    fn the_tops_are_the_top_level_points_and_then_those_they_share() {
+    fn the_tops_are_the_roots_and_then_those_they_share() {
         let (graph, names) = configured(&[
             ("base", "a"),
             ("base", "b"),
@@ -717,7 +927,7 @@ mod tests {
             drawn(&tree, &names),
             format!("{} base 2 {{ under base 1 }} other 1", leaves(&["a", "b"]))
         );
-        assert_eq!((tree.top_level(), tree.shared_tops()), (0..2, 2..4));
+        assert_eq!((tree.roots(), tree.shared_tops()), (0..2, 2..4));
         assert_eq!(tree.shared_weight(), 3);
         let (graph, names) = configured(&[("lib", "bin")]);
         let tree = tree_of(&graph, &names, Unit::ConfiguredTarget);
@@ -756,7 +966,7 @@ mod tests {
         let (graph, names) = configured(&[("base", "a"), ("base", "b"), ("only a", "a")]);
         let tree = tree_of(&graph, &names, Unit::ConfiguredTarget);
         let standing = |name| tree.standing(node(&tree, &names, name));
-        let alone = Standing::TopLevel { in_cycle: false };
+        let alone = Standing::Root { in_cycle: false };
         assert_eq!(standing("a"), alone);
         assert_eq!(standing("b"), alone);
         assert_eq!(standing("base"), Standing::Below(Count::Exact(2)));
@@ -771,7 +981,7 @@ mod tests {
         let tree = tree_of(&graph, &names, Unit::ConfiguredTarget);
         for name in ["a", "b"] {
             let standing = tree.standing(node(&tree, &names, name));
-            assert_eq!(standing, Standing::TopLevel { in_cycle: true }, "{name}");
+            assert_eq!(standing, Standing::Root { in_cycle: true }, "{name}");
         }
         let lib = tree.standing(node(&tree, &names, "lib"));
         assert_eq!(lib, Standing::Below(Count::Exact(2)));
@@ -790,7 +1000,7 @@ mod tests {
         ]);
         let tree = tree_of(&graph, &names, Unit::ConfiguredTarget);
         let above = |limit| {
-            let found = tree.top_level_above(node(&tree, &names, "base"), limit);
+            let found = tree.roots_above(node(&tree, &names, "base"), limit);
             let named = found.into_iter().map(|n| names.resolve(tree.id(n)));
             named.collect::<Vec<_>>()
         };
@@ -798,7 +1008,7 @@ mod tests {
         assert_eq!(above(1), ["near"]);
         assert_eq!(above(0), Vec::<&str>::new());
         let near = node(&tree, &names, "near");
-        assert!(tree.top_level_above(near, 5).is_empty());
+        assert!(tree.roots_above(near, 5).is_empty());
     }
 
     /// However many points lie between a node and the top-level points
@@ -814,7 +1024,7 @@ mod tests {
         deps.push(("0", "near"));
         let (graph, names) = configured(&deps);
         let tree = tree_of(&graph, &names, Unit::ConfiguredTarget);
-        let found = tree.top_level_above(node(&tree, &names, "0"), 5);
+        let found = tree.roots_above(node(&tree, &names, "0"), 5);
         let named: Vec<&str> = found.iter().map(|&n| names.resolve(tree.id(n))).collect();
         assert_eq!(named, ["near"]);
         let base = tree.standing(node(&tree, &names, "0"));
@@ -914,6 +1124,100 @@ mod tests {
         let targets = Targets::of(&tree, &Facets::default());
         let app = node(&tree, &names, "app");
         assert_eq!((targets.held(app).targets(), targets.copies(app)), (0, 0));
+    }
+
+    /// A tree from chosen roots holds what they reach, and counts the rest of
+    /// the scope as outside it.
+    #[test]
+    fn a_tree_from_chosen_roots_holds_what_they_reach() {
+        let (graph, names) = configured(&[
+            ("lib", "bin"),
+            ("bin", "test"),
+            ("tool", "test"),
+            ("other", "x"),
+        ]);
+        let tree = tree_from(&graph, &names, &["bin"]);
+        assert_eq!(drawn(&tree, &names), "bin 2 { lib 1 }");
+        assert_eq!((tree.roots(), tree.outside()), (0..1, 4));
+        assert_eq!(tree.index_of(names.get("test").unwrap()), None);
+        let bin = node(&tree, &names, "bin");
+        assert!(tree.roots_above(node(&tree, &names, "lib"), 5) == [bin]);
+    }
+
+    /// A root another root reaches is a top all the same, since it was asked
+    /// for, and is known to be reached; a dependency the two share is
+    /// counted as theirs.
+    #[test]
+    fn a_root_another_root_reaches_stays_a_top() {
+        let (graph, names) = configured(&[("lib", "app"), ("app", "test"), ("base", "lib")]);
+        let tree = tree_from(&graph, &names, &["test", "app"]);
+        assert_eq!(drawn(&tree, &names), "app 3 { lib 2 { base 1 } } test 1");
+        assert_eq!((tree.roots(), tree.shared_tops()), (0..2, 2..2));
+        let standing = |name| tree.standing(node(&tree, &names, name));
+        assert_eq!(standing("app"), Standing::ReachedRoot(Count::Exact(1)));
+        assert_eq!(standing("test"), Standing::Root { in_cycle: false });
+        assert_eq!(standing("lib"), Standing::Below(Count::Exact(2)));
+        let app = node(&tree, &names, "app");
+        let test = node(&tree, &names, "test");
+        assert_eq!(tree.roots_above(app, 5), [test]);
+        assert_eq!(tree.roots_above(node(&tree, &names, "base"), 5), [app]);
+    }
+
+    /// Roots in one cycle reach each other, which makes neither reached from
+    /// beyond it; a root outside the cycle reaching it does, and is the one
+    /// named above each.
+    #[test]
+    fn roots_in_one_cycle_are_reached_only_from_beyond_it() {
+        let (graph, names) = configured(&[("a", "b"), ("b", "a"), ("a", "c")]);
+        let tree = tree_from(&graph, &names, &["a", "b"]);
+        for name in ["a", "b"] {
+            let standing = tree.standing(node(&tree, &names, name));
+            assert_eq!(standing, Standing::Root { in_cycle: true }, "{name}");
+        }
+        let tree = tree_from(&graph, &names, &["a", "b", "c"]);
+        for name in ["a", "b"] {
+            let standing = tree.standing(node(&tree, &names, name));
+            assert_eq!(standing, Standing::ReachedRoot(Count::Exact(1)), "{name}");
+            let above = tree.roots_above(node(&tree, &names, name), 5);
+            assert_eq!(above, [node(&tree, &names, "c")], "{name}");
+        }
+    }
+
+    /// The top-level points as chosen roots give the tree the top-level
+    /// points do.
+    #[test]
+    fn the_top_level_points_chosen_give_the_tree_from_the_tops() {
+        let (graph, names) = configured(&[("base", "a"), ("base", "b"), ("only a", "a")]);
+        let chosen = tree_from(&graph, &names, &["a", "b"]);
+        let tops = tree_of(&graph, &names, Unit::ConfiguredTarget);
+        assert_eq!(drawn(&chosen, &names), drawn(&tops, &names));
+        assert_eq!((chosen.roots(), chosen.outside()), (0..2, 0));
+        let standing = |tree: &Dominators| {
+            (0..tree.total())
+                .map(|node| tree.standing(node))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(standing(&chosen), standing(&tops));
+    }
+
+    /// Sets naming the same points are one key, however each was gathered.
+    #[test]
+    fn chosen_points_named_alike_are_equal_and_hash_alike() {
+        let hash = |chosen: &Chosen| FxBuildHasher.hash_one(chosen);
+        let (one, other) = (Chosen::new([Id(3), Id(1)]), Chosen::new([1, 3, 3].map(Id)));
+        assert_eq!(one, other);
+        assert_eq!(hash(&one), hash(&other));
+        assert_eq!(one, one.clone());
+        assert_ne!(one, Chosen::new([Id(1)]));
+    }
+
+    #[test]
+    fn a_root_that_is_no_point_of_the_scope_is_passed_over() {
+        let (mut graph, mut names) = configured(&[("lib", "app")]);
+        let target = names.intern("target");
+        graph.add_node(Node::new(target, "target", Kind::Target, None));
+        let tree = tree_from(&graph, &names, &["target"]);
+        assert_eq!((tree.total(), tree.roots(), tree.outside()), (0, 0..0, 2));
     }
 
     #[test]
@@ -1100,10 +1404,22 @@ mod tests {
         let tops: Vec<usize> = (0..n)
             .filter(|&p| (0..n).all(|q| !reaches[q][p] || reaches[p][q]))
             .collect();
+        naive_idoms_from(succ, &tops)
+    }
+
+    /// By point of the graph `succ` runs from dependents into dependencies,
+    /// its immediate dominator by the definition below a top of the build
+    /// standing above `roots`, absent beneath that top alone and where
+    /// `roots` do not reach it.
+    fn naive_idoms_from(succ: &[Vec<usize>], roots: &[usize]) -> Vec<Option<usize>> {
+        let n = succ.len();
+        let reached_at_all = reached(succ, roots, None);
         let dominated: Vec<Vec<bool>> = (0..n)
             .map(|d| {
-                let left = reached(succ, &tops, Some(d));
-                (0..n).map(|v| v != d && !left[v]).collect()
+                let left = reached(succ, roots, Some(d));
+                (0..n)
+                    .map(|v| reached_at_all[v] && v != d && !left[v])
+                    .collect()
             })
             .collect();
         (0..n)
@@ -1216,6 +1532,94 @@ mod tests {
                         );
                         let below: u32 = children.map(|child| tree.weight(child)).sum();
                         assert_eq!(tree.weight(node), below + 1);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Random graphs from random roots give each point they reach the
+    /// immediate dominator the definition does below a top standing above
+    /// those roots, and leave out the rest; each root stands towards the
+    /// others as the roots reaching it say, and the tops come ordered as the
+    /// tree's type states.
+    #[test]
+    fn random_root_sets_dominate_as_the_definition_does() {
+        const SOURCES: usize = 5;
+        const MOST_ROOTS: usize = 4;
+        let mut next = random_indices();
+        for unit in [Unit::ConfiguredTarget, Unit::Action] {
+            for (nodes, edges) in [(8, 10), (30, 45), (120, 160), (120, 300)] {
+                for _ in 0..10 {
+                    let mut succ: Vec<Vec<usize>> = vec![Vec::new(); nodes];
+                    let mut deps: Vec<(usize, usize)> = Vec::with_capacity(edges);
+                    for _ in 0..edges {
+                        let (a, b) = (next(nodes), next(nodes));
+                        let (dependent, dependency) = match next(8) {
+                            0 => (a.max(b), a.min(b)),
+                            _ => (a.min(b), a.max(b)),
+                        };
+                        succ[dependent].push(dependency);
+                        deps.push((dependency, dependent));
+                    }
+                    let (graph, names) = random_build(unit, nodes, &deps, SOURCES, &mut next);
+                    let roots: Vec<usize> =
+                        (0..1 + next(MOST_ROOTS)).map(|_| next(nodes)).collect();
+                    let everything = Provenance::new(vec![InputSet::ALL; names.len()]);
+                    let scope = Scope::new(unit, InputSet::ALL).unwrap();
+                    let facets = Facets::default();
+                    let prepared = ScopeGraph::new(&graph, &names, &facets, &everything, scope);
+                    let chosen = Chosen::new(roots.iter().map(|&p| Id(p as u32)));
+                    let tree = prepared.dominators(&names, &Roots::Chosen(chosen));
+                    let point =
+                        |node: u32| names.resolve(tree.id(node))[1..].parse::<usize>().unwrap();
+
+                    let reached = reached(&succ, &roots, None);
+                    let found: Vec<Option<usize>> = (0..nodes)
+                        .map(|p| {
+                            let node = tree.index_of(Id(p as u32));
+                            assert_eq!(node.is_some(), reached[p], "{p} in the tree");
+                            tree.parent(node?).map(point)
+                        })
+                        .collect();
+                    let idoms = naive_idoms_from(&succ, &roots);
+                    let case = format!("{unit:?}: {nodes} nodes, {edges} edges, roots {roots:?}");
+                    assert_eq!(found, idoms, "{case}");
+
+                    let inside = reached.iter().filter(|&&r| r).count() as u32;
+                    assert_eq!(tree.total(), inside, "{case}");
+                    assert_eq!(tree.outside(), nodes as u32 - inside, "{case}");
+                    let weighed = tops(&tree).map(|top| tree.weight(top)).sum::<u32>();
+                    assert_eq!(weighed, inside, "{case}");
+                    assert_tops_in_two_runs(&tree);
+                    for node in 0..tree.total() {
+                        let below: u32 = tree.children(node).map(|c| tree.weight(c)).sum();
+                        assert_eq!(tree.weight(node), below + 1, "{case}");
+                    }
+
+                    let reaches: Vec<Vec<bool>> = (0..nodes)
+                        .map(|p| self::reached(&succ, &[p], None))
+                        .collect();
+                    let mut distinct = roots.clone();
+                    distinct.sort_unstable();
+                    distinct.dedup();
+                    for node in 0..tree.total() {
+                        let p = point(node);
+                        let reaching = |cycle_too: bool| {
+                            let others = distinct.iter().filter(|&&q| q != p && reaches[q][p]);
+                            others.filter(|&&q| cycle_too || !reaches[p][q]).count() as u32
+                        };
+                        let expected = match distinct.binary_search(&p).is_ok() {
+                            false => Standing::Below(Count::Exact(reaching(true))),
+                            true => match reaching(false) {
+                                0 => Standing::Root {
+                                    in_cycle: (0..nodes)
+                                        .any(|q| q != p && reached[q] && succ[q].contains(&p)),
+                                },
+                                others => Standing::ReachedRoot(Count::Exact(others)),
+                            },
+                        };
+                        assert_eq!(tree.standing(node), expected, "{case}: n{p}");
                     }
                 }
             }

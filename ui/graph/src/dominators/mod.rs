@@ -750,7 +750,7 @@ fn as_target(targets: &Dominators, id: Id, shared: &Shared) -> Option<String> {
     let names = unit_names(Unit::Target);
     let place = match (targets.parent(node), targets.standing(node)) {
         (Some(parent), _) => dominated_by(targets, parent, shared),
-        (None, Standing::TopLevel { .. }) => TOP_LEVEL.to_owned(),
+        (None, Standing::Root { .. } | Standing::ReachedRoot(_)) => TOP_LEVEL.to_owned(),
         (None, Standing::Below(count)) => shared_by(count, names.of(count.value())),
     };
     let held = exist_only_because(targets.weight(node), &names, "it");
@@ -777,16 +777,16 @@ fn dominated_by(tree: &Dominators, parent: u32, shared: &Shared) -> String {
 fn standing(tree: &Dominators, node: u32, shared: &Shared, lines: &mut Vec<String>) {
     let unit = tree.scope().unit();
     let count = match tree.standing(node) {
-        Standing::TopLevel { in_cycle } => {
+        Standing::Root { in_cycle } => {
             let depended_on = match in_cycle {
                 false => "nothing depends on it",
                 true => "nothing outside its cycle depends on it",
             };
             return lines.push(format!("{TOP_LEVEL}: {depended_on}"));
         }
-        Standing::Below(count) => count,
+        Standing::ReachedRoot(count) | Standing::Below(count) => count,
     };
-    let named = tree.top_level_above(node, NAMED_TOP_LEVEL);
+    let named = tree.roots_above(node, NAMED_TOP_LEVEL);
     let colon = if named.is_empty() { "" } else { ":" };
     let named_as = unit_names(unit).of(count.value());
     lines.push(format!("{}{colon}", shared_by(count, named_as)));
