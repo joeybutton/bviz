@@ -5,6 +5,12 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+mod outcomes;
+
+pub use outcomes::{
+    BuildOutcome, Cause, ConfiguredTarget, FailedAction, Outcomes, TestOutcome, TestStatus,
+};
+
 const MICROS_PER_MILLI: i64 = 1_000;
 const MICROS_PER_SECOND: f64 = 1e6;
 

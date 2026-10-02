@@ -5,17 +5,19 @@
 use std::io::{BufReader, Read};
 use std::path::Path;
 
-use bviz_invocation::{Configurations, InvocationId};
+use bviz_invocation::{Configurations, InvocationId, Outcomes};
 use prost::Message;
 
 use crate::bep::build_event_stream::{BuildEvent, build_event::Payload, build_event_id::Id};
 use crate::bep::command_line::{CommandLine, command_line_section::SectionType};
 use crate::bep::timestamp_proto::google::protobuf::Timestamp;
+use crate::outcomes::{self, checksum};
 
 /// What a build event stream tells of the build that wrote it.
 pub struct BuildOutput {
     /// The configurations the stream describes (its `Configuration` events).
     pub configurations: Configurations,
+    pub outcomes: Outcomes,
     /// Terminal width in columns Bazel rendered for (`--terminal_columns`).
     pub columns: u16,
     /// stdout and stderr concatenated in stream order. `bazel build` writes
@@ -57,6 +59,7 @@ impl BuildOutput {
     pub(crate) fn from_bytes(columns: u16, bytes: Vec<u8>) -> BuildOutput {
         BuildOutput {
             configurations: Configurations::default(),
+            outcomes: Outcomes::default(),
             columns,
             frames: vec![bytes.len()],
             bytes,
@@ -65,10 +68,6 @@ impl BuildOutput {
         }
     }
 }
-
-/// The `ConfigurationId` of the null configuration, which unconfigurable
-/// targets such as source files carry.
-const NULL_CONFIGURATION: &str = "none";
 
 /// Width Bazel falls back to when no terminal is detected; see `--terminal_columns`.
 const DEFAULT_COLUMNS: u16 = 80;
@@ -80,14 +79,21 @@ pub fn parse(mut stream: &[u8]) -> Result<BuildOutput, prost::DecodeError> {
     let mut frames = Vec::new();
     let mut anchors = Vec::new();
     let mut configurations = Configurations::default();
+    let mut outcomes = Outcomes::default();
     let mut columns = None;
     let mut show_timestamps = false;
     while !stream.is_empty() {
-        let event = BuildEvent::decode_length_delimited(&mut stream)?;
+        let BuildEvent {
+            id,
+            children,
+            payload,
+            ..
+        } = BuildEvent::decode_length_delimited(&mut stream)?;
+        let id = id.and_then(|id| id.id);
         // An anchoring event ties its time to the frame boundary it falls on: the
         // number of progress frames already emitted.
         let frame = frames.len();
-        match event.payload {
+        match payload {
             Some(Payload::Progress(progress)) => {
                 bytes.extend_from_slice(progress.stderr.as_bytes());
                 bytes.extend_from_slice(progress.stdout.as_bytes());
@@ -95,16 +101,23 @@ pub fn parse(mut stream: &[u8]) -> Result<BuildOutput, prost::DecodeError> {
             }
             Some(Payload::Started(s)) => record(&mut anchors, frame, epoch_opt(s.start_time)),
             Some(Payload::Finished(f)) => record(&mut anchors, frame, epoch_opt(f.finish_time)),
-            Some(Payload::Action(a)) => record(&mut anchors, frame, epoch_opt(a.end_time)),
-            Some(Payload::TestSummary(s)) => {
-                record(&mut anchors, frame, epoch_opt(s.last_stop_time))
+            Some(Payload::Action(a)) => {
+                record(&mut anchors, frame, epoch_opt(a.end_time));
+                outcomes::action(&mut outcomes, id, a);
             }
+            Some(Payload::TestSummary(s)) => {
+                record(&mut anchors, frame, epoch_opt(s.last_stop_time));
+                outcomes::test_summary(&mut outcomes, id, s);
+            }
+            Some(Payload::Completed(c)) => {
+                outcomes::completed(&mut outcomes, id, children, c.success)
+            }
+            Some(Payload::Aborted(a)) => outcomes::aborted(&mut outcomes, id, children, a),
             Some(Payload::Configuration(c)) => {
-                if let Some(Id::Configuration(id)) = event.id.and_then(|id| id.id)
-                    && !id.id.is_empty()
-                    && id.id != NULL_CONFIGURATION
+                if let Some(Id::Configuration(id)) = id
+                    && let Some(checksum) = checksum(Some(id))
                 {
-                    configurations.insert(id.id, c.mnemonic);
+                    configurations.insert(checksum, c.mnemonic);
                 }
             }
             Some(Payload::StructuredCommandLine(command_line)) => {
@@ -116,6 +129,7 @@ pub fn parse(mut stream: &[u8]) -> Result<BuildOutput, prost::DecodeError> {
     }
     Ok(BuildOutput {
         configurations,
+        outcomes,
         columns: columns.unwrap_or(DEFAULT_COLUMNS),
         bytes,
         frames,
@@ -226,6 +240,7 @@ fn show_timestamps_set(command_line: &CommandLine) -> bool {
 mod tests {
     use super::*;
     use crate::bep::build_event_stream::{self as bes, BuildEventId, BuildStarted, build_event_id};
+    use crate::outcomes::NULL_CONFIGURATION;
 
     // A real `--build_event_binary_file` from `bazel build … --terminal_columns=100`.
     const SAMPLE: &[u8] = include_bytes!("../testdata/sample.bep");
