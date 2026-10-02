@@ -1,7 +1,8 @@
 //! Painting the icicle: each cell a box filled for what it holds and named
 //! where it is wide enough to read.
 
-use super::icicle::{self, Cell, Holds, Run};
+use super::icicle::{self, Cell, Holds, Parent, Run};
+use super::{SEVERAL, WHOLE_BUILD, what_is_shared};
 use crate::Palette;
 use crate::hue::Colouring;
 use crate::model::Shared;
@@ -83,11 +84,15 @@ pub(crate) fn paint_icicle(
             (0, Holds::Rest(run)) => run_name(&scene.tree, &scene.shared, run),
             (_, Holds::Rest(run)) => {
                 let (room, font_size) = style.label_room(rect);
-                let font = bviz_ui_assets::text_metrics(window).font;
-                rest_name(run.count(), room, |text| {
-                    let line = shape_line(window, text.to_owned(), font.clone(), font_size, label);
-                    f32::from(line.width())
-                })
+                let width = text_width(window, font_size, label);
+                rest_name(run.count(), room, width)
+            }
+            (_, Holds::Shared) => {
+                let (room, font_size) = style.label_room(rect);
+                let whole = cell_name(&scene.tree, &scene.shared, Holds::Shared);
+                let count = scene.tree.shared_tops().len();
+                let width = text_width(window, font_size, label);
+                shared_cell_name(whole, count, room, width)
             }
             (_, holds) => cell_name(&scene.tree, &scene.shared, holds),
         };
@@ -149,14 +154,35 @@ fn faded(scene: &Scene, id: Id) -> bool {
 fn fill(scene: &Scene, holds: Holds) -> Rgba {
     let palette = &scene.palette;
     match holds {
-        Holds::Build => palette.package,
+        Holds::Build => build_fill(palette),
+        Holds::Shared => shared_fill(palette),
         Holds::Node(node) => {
             let (tree, facets) = (&scene.tree, &scene.shared.facets);
             let hue = scene.colouring.hue(tree.id(node), tree.kind(node), facets);
             hue.color(palette)
         }
-        Holds::Rest(_) => mix(palette.data.neutral, palette.background, REST_RECEDE),
+        Holds::Rest(_) => rest_fill(palette),
     }
+}
+
+fn build_fill(palette: &Palette) -> Rgba {
+    palette.package
+}
+
+/// The fill of the cell of the shared tops, which is no point and stands for
+/// more than a rest cell does: the neutral carried towards the ink the panel
+/// sets text in, where a rest cell's is carried towards the canvas.
+fn shared_fill(palette: &Palette) -> Rgba {
+    mix(palette.data.neutral, palette.label, SHARED_STAND_OUT)
+}
+
+/// How far the fill of the cell of the shared tops is mixed from the neutral
+/// towards the text ink: far enough to read apart from a point drawn in the
+/// neutral, and short of where it nears a hue.
+const SHARED_STAND_OUT: f32 = 0.35;
+
+fn rest_fill(palette: &Palette) -> Rgba {
+    mix(palette.data.neutral, palette.background, REST_RECEDE)
 }
 
 /// What the cell holding `holds` of `tree` reads.
@@ -164,32 +190,79 @@ pub(crate) fn cell_name(tree: &Dominators, shared: &Shared, holds: Holds) -> Str
     let many = unit_names(tree.scope().unit()).many;
     match holds {
         Holds::Build => format!("whole build · {} {many}", tree.total()),
+        Holds::Shared => {
+            let (name, count) = (shared_name(tree), tree.shared_tops().len());
+            format!("{name} · {count}")
+        }
         Holds::Node(node) => point_name(tree.id(node), tree.scope().unit(), shared),
         Holds::Rest(run) => format!("{} more", run.count()),
     }
 }
 
-/// What a run of `tree` drawn on top reads, naming the dominator its siblings
-/// stand under.
+/// How a reader names the shared tops of `tree`.
+pub(crate) fn shared_name(tree: &Dominators) -> String {
+    super::shared_by(SEVERAL, unit_names(tree.scope().unit()).many)
+}
+
+/// Measures text as `window` shapes it at `font_size` in `ink`, in the font
+/// the window inherits.
+fn text_width(window: &mut Window, font_size: Pixels, ink: Hsla) -> impl FnMut(&str) -> f32 {
+    let font = bviz_ui_assets::text_metrics(window).font;
+    move |text| {
+        let line = shape_line(window, text.to_owned(), font.clone(), font_size, ink);
+        f32::from(line.width())
+    }
+}
+
+/// What a run of `tree` drawn on top reads, naming what its siblings stand
+/// under.
 pub(crate) fn run_name(tree: &Dominators, shared: &Shared, run: Run) -> String {
     let count = run.count();
     match run.parent() {
-        Some(parent) => {
+        Parent::Node(parent) => {
             let parent = point_name(tree.id(parent), tree.scope().unit(), shared);
             format!("{count} more under {parent}")
         }
-        None => format!("{count} more tops"),
+        Parent::Shared => {
+            let shared = what_is_shared(unit_names(tree.scope().unit()).many);
+            format!("{count} more of {shared}")
+        }
+        Parent::Build => format!("{count} more under {WHOLE_BUILD}"),
     }
 }
 
 /// What a cell gathering `count` siblings reads within `room` as `width`
 /// measures text: a count cut short says nothing, so its name is left whole,
 /// or failing that the bare count, or failing that nothing.
-fn rest_name(count: u32, room: f32, mut width: impl FnMut(&str) -> f32) -> String {
-    [format!("{count} more"), count.to_string()]
-        .into_iter()
-        .find(|name| width(name) <= room)
-        .unwrap_or_default()
+fn rest_name(count: u32, room: f32, width: impl FnMut(&str) -> f32) -> String {
+    first_fitting([format!("{count} more"), count.to_string()], room, width)
+}
+
+/// What the cell gathering `count` shared tops, named `whole`, reads within
+/// `room` as `width` measures text: its name whole, or failing that one word
+/// and the count, the word alone, or nothing.
+fn shared_cell_name(
+    whole: String,
+    count: usize,
+    room: f32,
+    width: impl FnMut(&str) -> f32,
+) -> String {
+    let names = [whole, format!("{SHARED} · {count}"), SHARED.to_owned()];
+    first_fitting(names, room, width)
+}
+
+/// What a cell too narrow to say what shares its tops reads of them.
+const SHARED: &str = "shared";
+
+/// The first of `names` no wider than `room` as `width` measures text, or
+/// nothing where none fits.
+fn first_fitting<const N: usize>(
+    names: [String; N],
+    room: f32,
+    mut width: impl FnMut(&str) -> f32,
+) -> String {
+    let mut names = names.into_iter();
+    names.find(|name| width(name) <= room).unwrap_or_default()
 }
 
 /// How a cell names the point `id` of `unit`.
@@ -216,5 +289,40 @@ mod tests {
         assert_eq!(rest_name(22, 6.0, chars), "22");
         assert_eq!(rest_name(22, 2.0, chars), "22");
         assert_eq!(rest_name(22, 1.0, chars), "");
+    }
+
+    /// The cell of the shared tops reads apart from every hue a point is
+    /// drawn in, from a rest cell and from the whole build.
+    #[test]
+    fn the_cell_of_the_shared_tops_is_filled_unlike_any_other_cell() {
+        use bviz_ui_theme::{MIN_DISTINCT_COLOR, built_in_themes, distance};
+        for theme in built_in_themes().iter() {
+            let palette = Palette::from_theme(theme);
+            let shared = shared_fill(&palette);
+            let hues = palette.data.chromatic().into_iter().map(Rgba::from);
+            let others = hues.chain([
+                palette.data.neutral.into(),
+                rest_fill(&palette),
+                build_fill(&palette),
+            ]);
+            for other in others {
+                let apart = distance(shared, other);
+                assert!(
+                    apart >= MIN_DISTINCT_COLOR,
+                    "{}: {apart} from {other:?}",
+                    theme.name
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_cell_of_the_shared_tops_reads_as_much_of_its_name_as_fits_whole() {
+        let whole = "shared by several top-level targets · 12";
+        let read = |room| shared_cell_name(whole.to_owned(), 12, room, chars);
+        assert_eq!(read(40.0), whole);
+        assert_eq!(read(39.0), "shared · 12");
+        assert_eq!(read(10.0), "shared");
+        assert_eq!(read(5.0), "");
     }
 }

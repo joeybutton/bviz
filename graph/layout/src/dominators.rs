@@ -24,10 +24,12 @@ use crate::reduce::{DenseIds, components, reach_counts};
 /// The dominator tree of the counted points of a scope. A point not counted
 /// towards others is no product of the build and takes no part.
 ///
-/// The children of each node, and the tops of the tree, take consecutive node
-/// indices, heaviest first and among equal weights by a hash of their points'
-/// names, an order every run of the queries gives alike, then by name where two
-/// hashes collide.
+/// The children of each node take consecutive node indices, heaviest first
+/// and among equal weights by a hash of their points' names, an order every
+/// run of the queries gives alike, then by name where two hashes collide. So
+/// do the tops of the tree, in two runs each ordered so: the top-level points,
+/// which are all tops, then the shared tops, each a dependency several
+/// top-level points share.
 pub struct Dominators {
     scope: Scope,
     nodes: Vec<Dominated>,
@@ -37,6 +39,10 @@ pub struct Dominators {
     bounds: Vec<u32>,
     index: DenseIds,
     dependents: Dependents,
+    /// How many of the tops are top-level points.
+    top_level: u32,
+    /// How many points the other tops dominate between them.
+    shared_weight: u32,
 }
 
 struct Dominated {
@@ -47,9 +53,7 @@ struct Dominated {
 }
 
 /// Where a point stands towards the top-level points of its scope: those
-/// nothing depends on but the other members of a cycle they belong to. Every
-/// top-level point is a top of the tree; a top that is not one is a
-/// dependency several top-level points share.
+/// nothing depends on but the other members of a cycle they belong to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Standing {
     /// Depended on only by the other members of its cycle where `in_cycle`,
@@ -88,9 +92,20 @@ impl Dominators {
         self.nodes.len() as u32
     }
 
-    /// The nodes dominated by the top of the build alone.
-    pub fn tops(&self) -> Range<u32> {
-        0..self.bounds[0]
+    /// The tops that are top-level points.
+    pub fn top_level(&self) -> Range<u32> {
+        0..self.top_level
+    }
+
+    /// The tops that are no top-level points.
+    pub fn shared_tops(&self) -> Range<u32> {
+        self.top_level..self.bounds[0]
+    }
+
+    /// How many points the [shared tops](Self::shared_tops) dominate between
+    /// them, themselves among them.
+    pub fn shared_weight(&self) -> u32 {
+        self.shared_weight
     }
 
     pub fn children(&self, node: u32) -> Range<u32> {
@@ -297,8 +312,10 @@ pub fn dominators(
             let id = point(w).id;
             let name = names.resolve(id);
             let key = stable_hash(name);
+            let idom = tree.idom[w as usize];
             (
-                tree.idom[w as usize],
+                idom,
+                idom == TOP && !top_level[tree.point(w) as usize],
                 Reverse(weight[w as usize]),
                 key,
                 name,
@@ -345,12 +362,16 @@ pub fn dominators(
         .collect();
     let (index, _) = DenseIds::new(nodes.iter().map(|node| node.id));
     let dependents = dependents(&unit, &tree, &order);
+    let shared_tops = &nodes[flowgraph.tops.len()..bounds[0] as usize];
+    let shared_weight = shared_tops.iter().map(|node| node.weight).sum();
     Dominators {
         scope,
         nodes,
         bounds,
         index,
         dependents,
+        top_level: flowgraph.tops.len() as u32,
+        shared_weight,
     }
 }
 
@@ -577,6 +598,32 @@ mod tests {
         tree_with(graph, names, &Facets::default(), unit)
     }
 
+    /// The nodes dominated by the top of the build alone.
+    fn tops(tree: &Dominators) -> Range<u32> {
+        0..tree.bounds[0]
+    }
+
+    /// Asserts that the tops of `tree` come in the two runs its type states.
+    fn assert_tops_in_two_runs(tree: &Dominators) {
+        let top_level = |node: u32| matches!(tree.standing(node), Standing::TopLevel { .. });
+        let standing_so = (0..tree.total()).filter(|&node| top_level(node));
+        assert_eq!(
+            standing_so.collect::<Vec<_>>(),
+            Vec::from_iter(tree.top_level())
+        );
+        assert_eq!(tree.top_level().end, tree.shared_tops().start);
+        assert_eq!(tree.shared_tops().end, tops(tree).end);
+        let weight = |node: u32| tree.weight(node);
+        assert_eq!(
+            tree.shared_weight(),
+            tree.shared_tops().map(weight).sum::<u32>()
+        );
+        for run in [tree.top_level(), tree.shared_tops()] {
+            let weights: Vec<u32> = run.map(weight).collect();
+            assert!(weights.is_sorted_by(|a, b| a >= b), "{weights:?}");
+        }
+    }
+
     fn tree_with(graph: &Graph, names: &Names, facets: &Facets, unit: Unit) -> Dominators {
         let everything = Provenance::new(vec![InputSet::ALL; names.len()]);
         let scope = Scope::new(unit, InputSet::ALL).unwrap();
@@ -616,7 +663,7 @@ mod tests {
             }
         }
         let mut out = Vec::new();
-        draw(tree, label, tree.tops(), &mut out);
+        draw(tree, label, tops(tree), &mut out);
         out.join(" ")
     }
 
@@ -650,8 +697,32 @@ mod tests {
     fn a_dependency_two_tops_share_is_a_top_itself() {
         assert_eq!(
             configured_tree(&[("base", "a"), ("base", "b"), ("only a", "a")]),
-            format!("a 2 {{ only a 1 }} {}", leaves(&["b", "base"]))
+            "a 2 { only a 1 } b 1 base 1"
         );
+    }
+
+    /// The top-level points come ahead of the shared tops, however much
+    /// either holds.
+    #[test]
+    fn the_tops_are_the_top_level_points_and_then_those_they_share() {
+        let (graph, names) = configured(&[
+            ("base", "a"),
+            ("base", "b"),
+            ("under base", "base"),
+            ("other", "a"),
+            ("other", "b"),
+        ]);
+        let tree = tree_of(&graph, &names, Unit::ConfiguredTarget);
+        assert_eq!(
+            drawn(&tree, &names),
+            format!("{} base 2 {{ under base 1 }} other 1", leaves(&["a", "b"]))
+        );
+        assert_eq!((tree.top_level(), tree.shared_tops()), (0..2, 2..4));
+        assert_eq!(tree.shared_weight(), 3);
+        let (graph, names) = configured(&[("lib", "bin")]);
+        let tree = tree_of(&graph, &names, Unit::ConfiguredTarget);
+        assert!(tree.shared_tops().is_empty());
+        assert_eq!(tree.shared_weight(), 0);
     }
 
     /// Every member of a cycle at the top is a top: the build reaches each
@@ -971,7 +1042,7 @@ mod tests {
         let bottom = tree.index_of(names.get("0").unwrap()).unwrap();
         assert_eq!(tree.weight(bottom), 1);
         assert_eq!(
-            tree.tops().map(|top| tree.weight(top)).sum::<u32>(),
+            tops(&tree).map(|top| tree.weight(top)).sum::<u32>(),
             LINKS as u32
         );
         let up = std::iter::successors(Some(bottom), |&node| tree.parent(node));
@@ -981,7 +1052,7 @@ mod tests {
     #[test]
     fn an_empty_scope_has_an_empty_tree() {
         let tree = tree_of(&Graph::new(), &Names::default(), Unit::ConfiguredTarget);
-        assert_eq!((tree.total(), tree.tops()), (0, 0..0));
+        assert_eq!((tree.total(), tops(&tree)), (0, 0..0));
     }
 
     /// A xorshift generator of indices below a bound, so a randomized test is
@@ -1097,9 +1168,9 @@ mod tests {
     }
 
     /// Random graphs with cycles among their points, at their top among them,
-    /// give each point the immediate dominator the definition does, and weigh
-    /// each node by what it dominates; among actions, the source files they
-    /// read take no part.
+    /// give each point the immediate dominator the definition does, weigh
+    /// each node by what it dominates, and order their tops as the tree's
+    /// type states; among actions, the source files they read take no part.
     #[test]
     fn random_graphs_dominate_as_the_definition_does() {
         const SOURCES: usize = 5;
@@ -1132,9 +1203,10 @@ mod tests {
                     let idoms = naive_idoms(&succ);
                     assert_eq!(found, idoms, "{unit:?}: {nodes} nodes, {edges} edges");
 
-                    let tops = tree.tops().map(|top| tree.weight(top)).sum::<u32>();
-                    assert_eq!(tops, nodes as u32);
+                    let weighed = tops(&tree).map(|top| tree.weight(top)).sum::<u32>();
+                    assert_eq!(weighed, nodes as u32);
                     assert_eq!(tree.total(), nodes as u32);
+                    assert_tops_in_two_runs(&tree);
                     for node in 0..tree.total() {
                         let children = tree.children(node);
                         assert!(

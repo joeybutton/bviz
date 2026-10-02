@@ -5,11 +5,15 @@ use gpui::{Bounds, Pixels, point, px, size};
 use std::ops::Range;
 
 /// A tree whose nodes are weighed by how many points each stands over, itself
-/// among them, and whose siblings come heaviest first.
+/// among them, and whose siblings come heaviest first. Its tops come in two
+/// runs, each heaviest first: the top-level points, then the shared tops.
 pub(crate) trait Tree {
     /// How many points the tree holds, which its tops' weights sum to.
     fn total(&self) -> u32;
-    fn tops(&self) -> Range<u32>;
+    fn top_level(&self) -> Range<u32>;
+    fn shared_tops(&self) -> Range<u32>;
+    /// What the weights of the shared tops sum to.
+    fn shared_weight(&self) -> u32;
     fn children(&self, node: u32) -> Range<u32>;
     fn weight(&self, node: u32) -> u32;
 }
@@ -19,8 +23,16 @@ impl Tree for Dominators {
         Dominators::total(self)
     }
 
-    fn tops(&self) -> Range<u32> {
-        Dominators::tops(self)
+    fn top_level(&self) -> Range<u32> {
+        Dominators::top_level(self)
+    }
+
+    fn shared_tops(&self) -> Range<u32> {
+        Dominators::shared_tops(self)
+    }
+
+    fn shared_weight(&self) -> u32 {
+        Dominators::shared_weight(self)
     }
 
     fn children(&self, node: u32) -> Range<u32> {
@@ -37,31 +49,47 @@ impl Tree for Dominators {
 pub(crate) enum Holds {
     /// The whole build, over every top of the tree.
     Build,
+    /// Every shared top of the tree.
+    Shared,
     Node(u32),
     /// A run of siblings too narrow to draw apart.
     Rest(Run),
 }
 
-/// The siblings from `first` to the last of `parent`'s children, or of the
-/// tops where there is no `parent`, which a row of the icicle had too little
-/// room to draw apart. Only [`lay_out`] makes one, so `count` and `weight`
-/// are always how many siblings the run holds and the points they weigh
-/// together.
+/// What a row of siblings stands under.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Parent {
+    /// Over the top-level points.
+    Build,
+    /// Over the shared tops.
+    Shared,
+    /// Over its children.
+    Node(u32),
+}
+
+/// The siblings from `first` to the last under `parent`, which a row of the
+/// icicle had too little room to draw apart. Only [`lay_out`] makes one, so
+/// `count` and `weight` are always how many siblings the run holds and the
+/// points they weigh together.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Run {
-    parent: Option<u32>,
+    parent: Parent,
     first: u32,
     count: u32,
     weight: u32,
 }
 
 impl Run {
-    pub(crate) fn parent(&self) -> Option<u32> {
+    pub(crate) fn parent(&self) -> Parent {
         self.parent
     }
 
     pub(crate) fn count(&self) -> u32 {
         self.count
+    }
+
+    pub(crate) fn siblings(&self) -> Range<u32> {
+        self.first..self.first + self.count
     }
 
     pub(crate) fn weight(&self) -> u32 {
@@ -88,11 +116,16 @@ const RUN_REST_SHARE: f32 = 0.2;
 /// The first row is `top` at full width, and each row beneath holds the
 /// children of each cell above it, laid from its left edge at widths in
 /// proportion to their weights, so what a cell leaves of its own width beyond
-/// its children's is its own point. Only the rows `bounds` holds whole are
-/// laid out. A child narrower than `min_width` ends its row of siblings: it
-/// and every lighter sibling share one rest cell spanning the width left,
-/// laid out where that is visible at all, and nothing below it. The cells
-/// laid out are thus bounded by how many fit, whatever the size of the tree.
+/// its children's is its own point. Under the whole build those are the
+/// top-level points, and the width they leave is one cell holding the shared
+/// tops, which are laid out beneath it; [`split`] divides the row between the
+/// two. Only the rows `bounds` holds whole are laid out. A child narrower
+/// than `min_width` ends its row of siblings: it and every lighter sibling
+/// share one rest cell spanning the width left, laid out where that is
+/// visible at all, and nothing below it. The cells laid out are thus bounded
+/// by how many fit, whatever the size of the tree. The rest cell of the
+/// top-level points is laid out all the same, `min_width` wide, with those
+/// drawn apart giving way to it, so that no top-level point is out of reach.
 ///
 /// A run on top holds its siblings in the same way, scaled to their summed
 /// weight. Where even the heaviest of them is too narrow to draw at that
@@ -121,45 +154,79 @@ pub(crate) fn lay_out(
     for depth in 1..rows {
         let y = bounds.origin.y + row * depth as f32;
         let start = cells.len();
-        cells.reserve(per_row + above.len());
+        cells.reserve(per_row + above.len() + 1);
         for parent in above {
             let Cell { rect, holds } = cells[parent];
+            let width = rect.size.width;
+            // `own` is what the cell weighs beyond the siblings laid under it.
             let (parent, laid, weight, own) = match holds {
-                Holds::Build => (None, tree.tops(), tree.total(), 0),
-                Holds::Node(node) => (Some(node), tree.children(node), tree.weight(node), 1),
-                Holds::Rest(run) if depth == 1 => {
-                    let siblings = run.first..run.first + run.count;
-                    (run.parent, siblings, run.weight, 0)
+                Holds::Build => {
+                    let (laid, shared) = (tree.top_level(), tree.shared_weight());
+                    (Parent::Build, laid, tree.total(), shared)
                 }
+                Holds::Shared => {
+                    let (laid, weight) = (tree.shared_tops(), tree.shared_weight());
+                    (Parent::Shared, laid, weight, 0)
+                }
+                Holds::Node(node) => (
+                    Parent::Node(node),
+                    tree.children(node),
+                    tree.weight(node),
+                    1,
+                ),
+                Holds::Rest(run) if depth == 1 => (run.parent, run.siblings(), run.weight, 0),
                 Holds::Rest(_) => continue,
             };
-            // The children drawn apart are those of `laid` wide enough at
-            // `scale`; a rest cell gathers the rest up to `end`.
-            let end = laid.end;
-            let scale = rect.size.width / weight as f32;
-            let (laid, scale) = match holds {
-                Holds::Rest(run) if scale * (tree.weight(run.first) as f32) < min_width => {
-                    let room = rect.size.width * (1. - RUN_REST_SHARE);
-                    heaviest_page(tree, run, room, min_width)
+            // The siblings share `span` by weight, weighing `span_weight`
+            // between them, and the cell keeps `beyond` for what it weighs
+            // itself.
+            let (span, span_weight, beyond) = match holds {
+                Holds::Build => {
+                    let (span, shared) = split(width, own, weight, min_width);
+                    (span, weight - own, shared)
                 }
-                _ => (laid, scale),
+                _ => (width, weight, width / weight as f32 * own as f32),
             };
-            let (mut x, mut drawn) = (rect.origin.x, 0);
-            let mut gathered = laid.end;
-            for child in laid {
-                let width = scale * tree.weight(child) as f32;
-                if width < min_width {
-                    gathered = child;
-                    break;
+            // The children drawn apart are those of `laid` wide enough; a
+            // rest cell gathers the rest up to `end`.
+            let end = laid.end;
+            let share = |sibling: u32, span: Pixels, span_weight: u32| {
+                span * (tree.weight(sibling) as f32 / span_weight as f32)
+            };
+            let (page, span, span_weight) = match holds {
+                Holds::Rest(run) if share(run.first, span, span_weight) < min_width => {
+                    let room = width * (1. - RUN_REST_SHARE);
+                    heaviest_page(tree, laid.clone(), room, min_width)
                 }
-                cells.push(Cell {
-                    rect: Bounds::new(point(x, y), size(width, row)),
-                    holds: Holds::Node(child),
-                });
-                x += width;
-                drawn += tree.weight(child);
+                _ => (laid.clone(), span, span_weight),
+            };
+            let draw_apart = |cells: &mut Vec<Cell>, page: Range<u32>, span, span_weight| {
+                let (mut x, mut drawn) = (rect.origin.x, 0);
+                let mut gathered = page.end;
+                for child in page {
+                    let width = share(child, span, span_weight);
+                    if width < min_width {
+                        gathered = child;
+                        break;
+                    }
+                    cells.push(Cell {
+                        rect: Bounds::new(point(x, y), size(width, row)),
+                        holds: Holds::Node(child),
+                    });
+                    x += width;
+                    drawn += tree.weight(child);
+                }
+                (x, drawn, gathered)
+            };
+            let first_apart = cells.len();
+            let (mut x, mut drawn, mut gathered) = draw_apart(&mut cells, page, span, span_weight);
+            let squeezed = gathered < end && rect.right() - beyond - x < min_width;
+            if parent == Parent::Build && squeezed {
+                cells.truncate(first_apart);
+                let (page, room, summed) = heaviest_page(tree, laid, span - min_width, min_width);
+                (x, drawn, gathered) = draw_apart(&mut cells, page, room, summed);
             }
-            let rest = rect.right() - scale * own as f32 - x;
+            let rest = rect.right() - beyond - x;
             if gathered < end && rest >= VISIBLE_WIDTH {
                 cells.push(Cell {
                     rect: Bounds::new(point(x, y), size(rest, row)),
@@ -171,6 +238,12 @@ pub(crate) fn lay_out(
                     }),
                 });
             }
+            if holds == Holds::Build && beyond >= VISIBLE_WIDTH {
+                cells.push(Cell {
+                    rect: Bounds::new(point(rect.right() - beyond, y), size(beyond, row)),
+                    holds: Holds::Shared,
+                });
+            }
         }
         above = start..cells.len();
         if above.is_empty() {
@@ -180,17 +253,42 @@ pub(crate) fn lay_out(
     cells
 }
 
-/// The heaviest siblings of `run` that each stay `min_width` wide when they
-/// share `room` by their summed weight, and the scale that spreads them so.
-/// Only as many siblings are weighed as are drawn, and one more.
+/// How a row `width` wide under the whole build, which weighs `weight`, is
+/// divided between its top-level points and the cell of the shared tops,
+/// which weigh `shared`, as the width of each: by weight, but with neither
+/// narrower than `min_width`, or than half a row too narrow for two such, so
+/// that neither is left without a cell where the other outweighs it. Either
+/// weighing nothing takes no width.
+fn split(width: Pixels, shared: u32, weight: u32, min_width: Pixels) -> (Pixels, Pixels) {
+    if shared == 0 {
+        return (width, px(0.));
+    }
+    if shared == weight {
+        return (px(0.), width);
+    }
+    let least = min_width.min(width / 2.);
+    let by_weight = width / weight as f32 * shared as f32;
+    if by_weight < least {
+        (width - least, least)
+    } else if width - by_weight < least {
+        (least, width - least)
+    } else {
+        (width - by_weight, by_weight)
+    }
+}
+
+/// The heaviest of `siblings` that each stay `min_width` wide when they
+/// share `room` by their summed weight, with `room` and that weight. Only as
+/// many siblings are weighed as are drawn, and one more.
 fn heaviest_page(
     tree: &impl Tree,
-    run: Run,
+    siblings: Range<u32>,
     room: Pixels,
     min_width: Pixels,
-) -> (Range<u32>, Pixels) {
-    let (mut end, mut summed) = (run.first, 0);
-    for sibling in run.first..run.first + run.count {
+) -> (Range<u32>, Pixels, u32) {
+    let first = siblings.start;
+    let (mut end, mut summed) = (first, 0);
+    for sibling in siblings {
         let weight = tree.weight(sibling);
         let widened = summed + weight;
         if room * (weight as f32 / widened as f32) < min_width {
@@ -198,7 +296,7 @@ fn heaviest_page(
         }
         (end, summed) = (sibling + 1, widened);
     }
-    (run.first..end, room / summed.max(1) as f32)
+    (first..end, room, summed)
 }
 
 #[cfg(test)]
@@ -206,8 +304,10 @@ mod tests {
     use super::*;
 
     /// A tree laid out as [`Dominators`] lays one out: each node's children
-    /// consecutive, heaviest first, and the tops ahead of every other node.
+    /// consecutive, heaviest first, and the tops ahead of every other node,
+    /// the top-level ones first.
     struct Laid {
+        top_level: u32,
         weights: Vec<u32>,
         /// By node, where its children start, and past the last node the node
         /// count.
@@ -219,8 +319,13 @@ mod tests {
     struct Spec(u32, Vec<Spec>);
 
     impl Laid {
-        fn of(tops: &[Spec]) -> Self {
-            let mut order: Vec<&Spec> = tops.iter().collect();
+        /// A tree whose tops are all top-level.
+        fn of(top_level: &[Spec]) -> Self {
+            Self::sharing(top_level, &[])
+        }
+
+        fn sharing(top_level: &[Spec], shared: &[Spec]) -> Self {
+            let mut order: Vec<&Spec> = top_level.iter().chain(shared).collect();
             let mut bounds = Vec::new();
             let mut at = 0;
             while let Some(&spec) = order.get(at) {
@@ -230,6 +335,7 @@ mod tests {
             }
             bounds.push(order.len() as u32);
             Self {
+                top_level: top_level.len() as u32,
                 weights: order.iter().map(|spec| spec.0).collect(),
                 bounds,
             }
@@ -238,11 +344,19 @@ mod tests {
 
     impl Tree for Laid {
         fn total(&self) -> u32 {
-            self.tops().map(|top| self.weights[top as usize]).sum()
+            (0..self.bounds[0]).map(|top| self.weight(top)).sum()
         }
 
-        fn tops(&self) -> Range<u32> {
-            0..self.bounds[0]
+        fn top_level(&self) -> Range<u32> {
+            0..self.top_level
+        }
+
+        fn shared_tops(&self) -> Range<u32> {
+            self.top_level..self.bounds[0]
+        }
+
+        fn shared_weight(&self) -> u32 {
+            self.shared_tops().map(|top| self.weight(top)).sum()
         }
 
         fn children(&self, node: u32) -> Range<u32> {
@@ -319,7 +433,7 @@ mod tests {
         let tree = Laid::of(&[top]);
         let cells = lay_out(&tree, Holds::Build, area(100., 3.), ROW, px(25.));
         let rest = Holds::Rest(Run {
-            parent: Some(0),
+            parent: Parent::Node(0),
             first: 2,
             count: 3,
             weight: 4,
@@ -363,7 +477,7 @@ mod tests {
         let top = Spec(10, vec![leaf(5), Spec(2, vec![leaf(1)]), leaf(1), leaf(1)]);
         let tree = Laid::of(&[top]);
         let run = Holds::Rest(Run {
-            parent: Some(0),
+            parent: Parent::Node(0),
             first: 2,
             count: 3,
             weight: 4,
@@ -371,7 +485,7 @@ mod tests {
         let cells = lay_out(&tree, run, area(100., 3.), ROW, px(30.));
         let rest = |parent, first, count, weight| {
             Holds::Rest(Run {
-                parent: Some(parent),
+                parent: Parent::Node(parent),
                 first,
                 count,
                 weight,
@@ -398,7 +512,7 @@ mod tests {
             panic!("no cells laid out");
         };
         let rest = Holds::Rest(Run {
-            parent: None,
+            parent: Parent::Build,
             first: 0,
             count: 10,
             weight: 10,
@@ -406,7 +520,7 @@ mod tests {
         assert_eq!(run, rest);
         let cells = lay_out(&tree, run, area(100., 2.), ROW, px(20.));
         let rest = Holds::Rest(Run {
-            parent: None,
+            parent: Parent::Build,
             first: 4,
             count: 6,
             weight: 6,
@@ -424,13 +538,200 @@ mod tests {
         );
     }
 
+    /// The top-level points take the row under the whole build, and one cell
+    /// after them the shared tops, which lie beneath it.
+    #[test]
+    fn the_shared_tops_are_laid_out_under_one_cell_after_the_top_level_points() {
+        // Top-level 0 and 1 weigh 3 and 1; shared 2 and 3 weigh 4 and 2.
+        let top_level = [Spec(3, vec![leaf(2)]), leaf(1)];
+        let tree = Laid::sharing(&top_level, &[Spec(4, vec![leaf(3)]), leaf(2)]);
+        let cells = lay_out(&tree, Holds::Build, area(100., 4.), ROW, px(1.));
+        assert_eq!(
+            drawn(&cells),
+            [
+                (Holds::Build, 0., 100.),
+                (Holds::Node(0), 0., 30.),
+                (Holds::Node(1), 30., 10.),
+                (Holds::Shared, 40., 60.),
+                (Holds::Node(4), 0., 20.),
+                (Holds::Node(2), 40., 40.),
+                (Holds::Node(3), 80., 20.),
+                (Holds::Node(5), 40., 30.),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_shared_tops_on_top_spread_by_their_summed_weight() {
+        let tree = Laid::sharing(&[leaf(4)], &[Spec(4, vec![leaf(3)]), leaf(2)]);
+        let cells = lay_out(&tree, Holds::Shared, area(60., 3.), ROW, px(1.));
+        assert_eq!(
+            drawn(&cells),
+            [
+                (Holds::Shared, 0., 60.),
+                (Holds::Node(1), 0., 40.),
+                (Holds::Node(2), 40., 20.),
+                (Holds::Node(3), 0., 30.),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_tree_sharing_no_top_has_no_cell_for_them() {
+        let tree = Laid::of(&[leaf(3), leaf(1)]);
+        let cells = lay_out(&tree, Holds::Build, area(40., 2.), ROW, px(1.));
+        let holds: Vec<Holds> = cells.iter().map(|cell| cell.holds).collect();
+        assert_eq!(holds, [Holds::Build, Holds::Node(0), Holds::Node(1)]);
+    }
+
+    /// The top-level points too narrow to draw apart share a rest cell short
+    /// of the cell of the shared tops, and so do the shared tops beneath it.
+    #[test]
+    fn the_top_level_points_and_the_shared_tops_each_gather_their_own_rest() {
+        let top_level = [leaf(4), leaf(1), leaf(1)];
+        let tree = Laid::sharing(&top_level, &[leaf(2), leaf(1), leaf(1)]);
+        let cells = lay_out(&tree, Holds::Build, area(100., 3.), ROW, px(15.));
+        let rest = |parent, first, count, weight| {
+            Holds::Rest(Run {
+                parent,
+                first,
+                count,
+                weight,
+            })
+        };
+        assert_eq!(
+            drawn(&cells),
+            [
+                (Holds::Build, 0., 100.),
+                (Holds::Node(0), 0., 40.),
+                (rest(Parent::Build, 1, 2, 2), 40., 20.),
+                (Holds::Shared, 60., 40.),
+                (Holds::Node(3), 60., 20.),
+                (rest(Parent::Shared, 4, 2, 2), 80., 20.),
+            ]
+        );
+    }
+
+    /// However little the top-level points weigh beside the shared tops,
+    /// they keep a cell under the whole build.
+    #[test]
+    fn points_the_shared_tops_outweigh_keep_a_cell() {
+        let shared = [Spec(998, vec![leaf(997)])];
+        let tree = Laid::sharing(&[leaf(1), leaf(1)], &shared);
+        let cells = lay_out(&tree, Holds::Build, area(100., 3.), ROW, px(4.));
+        let run = Holds::Rest(Run {
+            parent: Parent::Build,
+            first: 0,
+            count: 2,
+            weight: 2,
+        });
+        assert_eq!(
+            drawn(&cells),
+            [
+                (Holds::Build, 0., 100.),
+                (run, 0., 4.),
+                (Holds::Shared, 4., 96.),
+                (Holds::Node(2), 4., 96.),
+            ]
+        );
+        let tree = Laid::sharing(&[leaf(1)], &shared);
+        let cells = lay_out(&tree, Holds::Build, area(100., 2.), ROW, px(4.));
+        assert_eq!(
+            drawn(&cells),
+            [
+                (Holds::Build, 0., 100.),
+                (Holds::Node(0), 0., 4.),
+                (Holds::Shared, 4., 96.),
+            ]
+        );
+    }
+
+    /// However little the shared tops weigh beside the top-level points,
+    /// their cell is laid out, and they beneath it.
+    #[test]
+    fn shared_tops_outweighed_keep_their_cell() {
+        let tree = Laid::sharing(&[leaf(600), leaf(399)], &[leaf(1)]);
+        let cells = lay_out(&tree, Holds::Build, area(100., 3.), ROW, px(4.));
+        let holds: Vec<Holds> = cells.iter().map(|cell| cell.holds).collect();
+        assert_eq!(
+            holds,
+            [
+                Holds::Build,
+                Holds::Node(0),
+                Holds::Node(1),
+                Holds::Shared,
+                Holds::Node(2),
+            ]
+        );
+        assert_eq!(
+            drawn(&cells)[3..],
+            [(Holds::Shared, 96., 4.), (Holds::Node(2), 96., 4.)]
+        );
+    }
+
+    /// A row too narrow for two cells of the least width is halved between
+    /// the top-level points and the shared tops.
+    #[test]
+    fn a_row_too_narrow_for_two_cells_is_halved() {
+        let tree = Laid::sharing(&[leaf(1)], &[leaf(999)]);
+        let cells = lay_out(&tree, Holds::Build, area(6., 2.), ROW, px(4.));
+        let run = Holds::Rest(Run {
+            parent: Parent::Build,
+            first: 0,
+            count: 1,
+            weight: 1,
+        });
+        assert_eq!(
+            drawn(&cells),
+            [
+                (Holds::Build, 0., 6.),
+                (run, 0., 3.),
+                (Holds::Shared, 3., 3.),
+            ]
+        );
+    }
+
     #[test]
     fn a_rest_too_narrow_to_see_is_left_out() {
-        let top = Spec(1001, vec![leaf(1000)]);
-        let tree = Laid::of(&[top, leaf(1)]);
-        let cells = lay_out(&tree, Holds::Build, area(100., 2.), ROW, px(5.));
+        let top = Spec(1002, vec![leaf(1000), leaf(1)]);
+        let tree = Laid::of(&[top]);
+        let cells = lay_out(&tree, Holds::Build, area(100., 3.), ROW, px(5.));
         let holds: Vec<Holds> = cells.iter().map(|cell| cell.holds).collect();
-        assert_eq!(holds, [Holds::Build, Holds::Node(0)]);
+        assert_eq!(holds, [Holds::Build, Holds::Node(0), Holds::Node(1)]);
+    }
+
+    /// Under the whole build, and in a run of its siblings on top, a point
+    /// far lighter than those drawn apart keeps a rest cell wide enough to
+    /// reach.
+    #[test]
+    fn a_rest_under_the_whole_build_is_never_left_out() {
+        let tree = Laid::of(&[leaf(999), leaf(1)]);
+        let rest = Holds::Rest(Run {
+            parent: Parent::Build,
+            first: 1,
+            count: 1,
+            weight: 1,
+        });
+        let cells = lay_out(&tree, Holds::Build, area(100., 2.), ROW, px(4.));
+        assert_eq!(
+            drawn(&cells),
+            [
+                (Holds::Build, 0., 100.),
+                (Holds::Node(0), 0., 96.),
+                (rest, 96., 4.),
+            ]
+        );
+        let run = Holds::Rest(Run {
+            parent: Parent::Build,
+            first: 0,
+            count: 2,
+            weight: 1000,
+        });
+        let cells = lay_out(&tree, run, area(100., 2.), ROW, px(4.));
+        assert_eq!(
+            drawn(&cells),
+            [(run, 0., 100.), (Holds::Node(0), 0., 96.), (rest, 96., 4.)]
+        );
     }
 
     /// However many points stand beneath a node, no more cells are laid
@@ -444,7 +745,7 @@ mod tests {
         assert_eq!(
             cells[2].holds,
             Holds::Rest(Run {
-                parent: Some(0),
+                parent: Parent::Node(0),
                 first: 1,
                 count: LEAVES,
                 weight: LEAVES,

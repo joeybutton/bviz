@@ -26,8 +26,8 @@ use gpui::{
     Focusable, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, Pixels, Point, Render,
     SharedString, Subscription, Task, WeakEntity, Window, canvas, div, prelude::*, px, relative,
 };
-use icicle::{Cell, Holds, Run};
-use paint::{MIN_CELL_WIDTH, Scene, cell_name, point_name, run_name};
+use icicle::{Cell, Holds, Parent, Run};
+use paint::{MIN_CELL_WIDTH, Scene, cell_name, point_name, run_name, shared_name};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -309,31 +309,31 @@ impl DominatorsPanel {
         }
     }
 
-    /// Focuses `node` of `tree` as [`Self::focus_on`] does, where `tree` is
+    /// Focuses `on` of `tree` as [`Self::focus_on`] does, where `tree` is
     /// still the tree drawn.
-    fn focus_on_in(&mut self, tree: &Arc<Dominators>, node: Option<u32>, cx: &mut Context<Self>) {
+    fn focus_on_in(&mut self, tree: &Arc<Dominators>, on: Option<Focused>, cx: &mut Context<Self>) {
         if self
             .drawn
             .as_ref()
             .is_some_and(|drawn| Arc::ptr_eq(&drawn.coloured.tree, tree))
         {
-            self.focus_on(node.map(Focused::Node), cx);
+            self.focus_on(on, cx);
         }
     }
 
-    /// Draws the icicle from the dominator the focus stands under.
+    /// Draws the icicle from what the focus stands under.
     fn focus_up(&mut self, cx: &mut Context<Self>) {
         let Some(drawn) = &self.drawn else {
             return;
         };
         if let Some(on) = drawn.focused() {
-            let up = on.parent(&drawn.coloured.tree);
-            self.focus_on(up.map(Focused::Node), cx);
+            let up = Crumb::of(on.parent(&drawn.coloured.tree));
+            self.focus_on(up.map(Focused::from), cx);
         }
     }
 
     /// Focuses what a click on the cell holding `holds` asks for: what it
-    /// holds, or the dominator above where it is the cell on top.
+    /// holds, or what that stands under where it is the cell on top.
     fn click_cell(&mut self, holds: Holds, cx: &mut Context<Self>) {
         let Some(drawn) = &self.drawn else {
             return;
@@ -363,7 +363,7 @@ impl DominatorsPanel {
                         id: drawn.coloured.tree.id(node),
                         replaced: drawn.focus.clone(),
                     }),
-                    Some(Holds::Build | Holds::Rest(_)) => None,
+                    Some(Holds::Build | Holds::Shared | Holds::Rest(_)) => None,
                 };
                 if let Some(cell) = cell {
                     self.click_cell(cell.holds, cx);
@@ -487,6 +487,8 @@ impl Drawn {
 /// What the icicle is drawn from short of the whole build.
 #[derive(Clone, Copy, PartialEq)]
 enum Focused {
+    /// The shared tops.
+    Shared,
     Node(u32),
     Run(Run),
 }
@@ -497,6 +499,7 @@ impl Focused {
     fn of(holds: Holds) -> Option<Self> {
         match holds {
             Holds::Build => None,
+            Holds::Shared => Some(Self::Shared),
             Holds::Node(node) => Some(Self::Node(node)),
             Holds::Rest(run) => Some(Self::Run(run)),
         }
@@ -504,16 +507,17 @@ impl Focused {
 
     fn holds(self) -> Holds {
         match self {
+            Self::Shared => Holds::Shared,
             Self::Node(node) => Holds::Node(node),
             Self::Run(run) => Holds::Rest(run),
         }
     }
 
-    /// The dominator this stands under in `tree`, or none under the whole
-    /// build.
-    fn parent(self, tree: &Dominators) -> Option<u32> {
+    /// What this stands under in `tree`.
+    fn parent(self, tree: &Dominators) -> Parent {
         match self {
-            Self::Node(node) => tree.parent(node),
+            Self::Shared => Crumb::Shared.parent(tree),
+            Self::Node(node) => Crumb::Node(node).parent(tree),
             Self::Run(run) => run.parent(),
         }
     }
@@ -521,6 +525,7 @@ impl Focused {
     /// The points of `tree` this stands over.
     fn weight(self, tree: &Dominators) -> u32 {
         match self {
+            Self::Shared => tree.shared_weight(),
             Self::Node(node) => tree.weight(node),
             Self::Run(run) => run.weight(),
         }
@@ -529,8 +534,50 @@ impl Focused {
     /// How a tooltip or the breadcrumb names this in `tree`.
     fn name(self, tree: &Dominators, shared: &Shared) -> String {
         match self {
+            Self::Shared => shared_name(tree),
             Self::Node(node) => point_name(tree.id(node), tree.scope().unit(), shared),
             Self::Run(run) => run_name(tree, shared, run),
+        }
+    }
+}
+
+/// What a focus stands under short of the whole build, which the breadcrumb
+/// names a step for.
+#[derive(Clone, Copy, PartialEq)]
+enum Crumb {
+    /// The shared tops.
+    Shared,
+    Node(u32),
+}
+
+impl Crumb {
+    /// The step for `parent`; none for the whole build.
+    fn of(parent: Parent) -> Option<Self> {
+        match parent {
+            Parent::Build => None,
+            Parent::Shared => Some(Self::Shared),
+            Parent::Node(node) => Some(Self::Node(node)),
+        }
+    }
+
+    /// What this stands under in `tree`.
+    fn parent(self, tree: &Dominators) -> Parent {
+        match self {
+            Self::Shared => Parent::Build,
+            Self::Node(node) => match tree.parent(node) {
+                Some(parent) => Parent::Node(parent),
+                None if tree.shared_tops().contains(&node) => Parent::Shared,
+                None => Parent::Build,
+            },
+        }
+    }
+}
+
+impl From<Crumb> for Focused {
+    fn from(crumb: Crumb) -> Self {
+        match crumb {
+            Crumb::Shared => Self::Shared,
+            Crumb::Node(node) => Self::Node(node),
         }
     }
 }
@@ -541,18 +588,19 @@ impl Focused {
 struct Focus {
     on: Focused,
     /// Top first, those nearest `on` at most [`CRUMBS`] of them.
-    above: Vec<u32>,
-    /// Whether more dominators stand above those of `above`.
+    above: Vec<Crumb>,
+    /// Whether more steps stand above those of `above`.
     elided: bool,
 }
 
-/// The most dominators above the focus the breadcrumb names.
+/// The most steps above the focus the breadcrumb names.
 const CRUMBS: usize = 4;
 
 impl Focus {
     fn on(tree: &Dominators, on: Focused) -> Self {
-        let mut above: Vec<u32> = Vec::with_capacity(CRUMBS + 1);
-        let up = std::iter::successors(on.parent(tree), |&above| tree.parent(above));
+        let mut above: Vec<Crumb> = Vec::with_capacity(CRUMBS + 1);
+        let nearest = Crumb::of(on.parent(tree));
+        let up = std::iter::successors(nearest, |above| Crumb::of(above.parent(tree)));
         above.extend(up.take(CRUMBS + 1));
         let elided = above.len() > CRUMBS;
         above.truncate(CRUMBS);
@@ -607,7 +655,10 @@ fn describe(
         let of_build = format!("{} of the build", share(weight, tree.total()));
         match within {
             Some(within) => {
-                let name = within.name(tree, shared);
+                let name = match within {
+                    Focused::Shared => what_is_shared(names.many),
+                    Focused::Node(_) | Focused::Run(_) => within.name(tree, shared),
+                };
                 format!(
                     "{of_build} · {} of {name}",
                     share(weight, within.weight(tree))
@@ -620,6 +671,13 @@ fn describe(
     let mut lines = Vec::new();
     match holds {
         Holds::Build => lines.extend([WHOLE_BUILD.to_owned(), names.counted(tree.total())]),
+        Holds::Shared => {
+            let (count, weight) = (tree.shared_tops().len() as u32, tree.shared_weight());
+            lines.push(shared_name(tree));
+            lines.push(gathered_as_shared(count, &names));
+            lines.push(stand_on(weight, if count == 1 { "it" } else { "them" }));
+            lines.push(shares(weight, focus.filter(|_| !on_top)));
+        }
         Holds::Node(node) => {
             identify(tree.id(node), tree.kind(node), unit, shared, &mut lines);
             let weight = tree.weight(node);
@@ -744,6 +802,21 @@ fn shared_by(how_many: impl std::fmt::Display, named: &str) -> String {
     format!("shared by {how_many} {TOP_LEVEL} {named}")
 }
 
+/// How a reader counts the top-level points sharing the shared tops.
+const SEVERAL: &str = "several";
+
+/// How a reader names the shared tops as what a share or a run is taken of,
+/// the top-level points being called `named`.
+fn what_is_shared(named: &str) -> String {
+    format!("what {SEVERAL} {TOP_LEVEL} {named} share")
+}
+
+/// What a tooltip says of the `count` shared tops, which `names` names.
+fn gathered_as_shared(count: u32, names: &KindNames) -> String {
+    let (shared, sharing) = (names.counted(count), names.many);
+    format!("{shared} that two or more {TOP_LEVEL} {sharing} depend on")
+}
+
 /// The most top-level points a tooltip names as sharing a top.
 const NAMED_TOP_LEVEL: usize = 3;
 
@@ -755,7 +828,7 @@ fn gesture(holds: Holds, top: Holds, reveals: bool) -> Option<String> {
         Holds::Build => return None,
         _ if holds == top => FOCUS_UP,
         Holds::Node(_) => FOCUS,
-        Holds::Rest(_) => OPEN,
+        Holds::Shared | Holds::Rest(_) => OPEN,
     };
     Some(match (holds, reveals) {
         (Holds::Node(_), true) => format!("{click} · {REVEAL}"),
@@ -766,7 +839,8 @@ fn gesture(holds: Holds, top: Holds, reveals: bool) -> Option<String> {
 /// How a cell names the whole build.
 const WHOLE_BUILD: &str = "the whole build";
 
-/// What a click on a cell does: on a point, on a run, and on the cell on top.
+/// What a click on a cell does: on a point, on a cell gathering several, and
+/// on the cell on top.
 const FOCUS: &str = "click to focus";
 const OPEN: &str = "click to open";
 const FOCUS_UP: &str = "click or Backspace to go up a level";
@@ -906,8 +980,7 @@ const LEGEND_SWATCH: Pixels = px(8.);
 /// cut short only once they are gone.
 fn breadcrumb(drawn: &Drawn, palette: &Palette, cx: &Context<DominatorsPanel>) -> Option<Div> {
     let focus = drawn.focus.as_ref()?;
-    let unit = drawn.coloured.tree.scope().unit();
-    let name = |node: u32| point_name(drawn.coloured.tree.id(node), unit, &drawn.coloured.shared);
+    let (tree, shared) = (&drawn.coloured.tree, &drawn.coloured.shared);
     // A row whose steps shrink to fit it.
     let row = || div().flex().items_center().min_w_0().overflow_hidden();
     let crumb = |name: String| {
@@ -919,7 +992,7 @@ fn breadcrumb(drawn: &Drawn, palette: &Palette, cx: &Context<DominatorsPanel>) -
             .child(name)
     };
     let after = |step: AnyElement| row().gap_1().pl_1().child(separator()).child(step);
-    let link = |index: usize, name: String, to: Option<u32>| {
+    let link = |index: usize, name: String, to: Option<Focused>| {
         // A click landing once another tree is drawn names none of its nodes.
         let tree = Arc::clone(&drawn.coloured.tree);
         crumb(name)
@@ -935,16 +1008,12 @@ fn breadcrumb(drawn: &Drawn, palette: &Palette, cx: &Context<DominatorsPanel>) -
     if focus.elided {
         above.push(after(ELIDED.into_any_element()));
     }
-    for (index, &node) in focus.above.iter().enumerate() {
-        above.push(after(
-            link(index + 1, name(node), Some(node)).into_any_element(),
-        ));
+    for (index, &step) in focus.above.iter().enumerate() {
+        let step = Focused::from(step);
+        let step = link(index + 1, step.name(tree, shared), Some(step));
+        above.push(after(step.into_any_element()));
     }
-    let focused = cell_name(
-        &drawn.coloured.tree,
-        &drawn.coloured.shared,
-        focus.on.holds(),
-    );
+    let focused = cell_name(tree, shared, focus.on.holds());
     let last = after(crumb(focused).into_any_element())
         .flex_shrink_0()
         .max_w(relative(1.));
@@ -1062,5 +1131,18 @@ mod tests {
         assert_eq!(read(3, 3), "covering 3 targets, all configured only here");
         let some_here = "covering 3 targets, 1 of them configured only here";
         assert_eq!(read(3, 1), some_here);
+    }
+
+    #[test]
+    fn the_tops_gathered_as_shared_are_counted_and_said_to_be_depended_on_by_several() {
+        let names = unit_names(Unit::ConfiguredTarget);
+        assert_eq!(
+            gathered_as_shared(1, &names),
+            "1 configured target that two or more top-level configured targets depend on"
+        );
+        assert_eq!(
+            gathered_as_shared(7, &names),
+            "7 configured targets that two or more top-level configured targets depend on"
+        );
     }
 }
