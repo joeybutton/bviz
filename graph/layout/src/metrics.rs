@@ -76,6 +76,22 @@ impl Scope {
         self.unit
     }
 
+    pub fn by_unit(self) -> ByUnit {
+        let coarser = |unit| Scope {
+            unit,
+            inputs: self.inputs,
+        };
+        match self.unit {
+            Unit::Action => ByUnit::Action {
+                configured_targets: coarser(Unit::ConfiguredTarget),
+            },
+            Unit::ConfiguredTarget => ByUnit::ConfiguredTarget {
+                targets: coarser(Unit::Target),
+            },
+            Unit::Target => ByUnit::Target,
+        }
+    }
+
     pub fn inputs(self) -> InputSet {
         self.inputs
     }
@@ -93,6 +109,21 @@ impl Scope {
             .of(id)
             .is_some_and(|built_by| built_by.intersects(self.inputs))
     }
+}
+
+/// A scope by the unit of its points, with the scope of the next coarser
+/// unit reading the same inputs, which describe that unit as well.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ByUnit {
+    Action {
+        /// Of the configured targets holding the actions.
+        configured_targets: Scope,
+    },
+    ConfiguredTarget {
+        /// Of the targets the configured targets are copies of.
+        targets: Scope,
+    },
+    Target,
 }
 
 /// What one point's dependencies come to.
@@ -793,6 +824,25 @@ mod tests {
         assert_eq!(scope.inputs(), Input::Aquery.into());
         let targets = Scope::new(Unit::Target, InputSet::ALL).unwrap();
         assert_eq!(targets.inputs(), InputSet::ALL);
+    }
+
+    /// The scope a scope gives for the next coarser unit is the one that unit
+    /// has over the same inputs.
+    #[test]
+    fn a_scope_reads_the_next_coarser_unit_from_its_own_inputs() {
+        let over = |unit: Unit, inputs: InputSet| Scope::new(unit, inputs).unwrap();
+        let actions = over(Unit::Action, InputSet::ALL);
+        let configured = over(Unit::ConfiguredTarget, actions.inputs());
+        let held = ByUnit::Action {
+            configured_targets: configured,
+        };
+        assert_eq!(actions.by_unit(), held);
+        for inputs in [Input::Cquery.into(), InputSet::ALL] {
+            let configured = over(Unit::ConfiguredTarget, inputs);
+            let targets = over(Unit::Target, configured.inputs());
+            assert_eq!(configured.by_unit(), ByUnit::ConfiguredTarget { targets });
+            assert_eq!(targets.by_unit(), ByUnit::Target);
+        }
     }
 
     /// aquery links `app`'s actions to `lib`'s and to a tool's built for the

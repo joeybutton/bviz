@@ -14,7 +14,7 @@ use crate::toolbar::{busy, group};
 use crate::unit_picker::UnitPicker;
 use bviz_graph_layout::Id;
 use bviz_graph_layout::dominators::{Dominators, Roots, Standing, Targets};
-use bviz_graph_layout::metrics::{Scope, Unit};
+use bviz_graph_layout::metrics::{ByUnit, Scope, Unit};
 use bviz_graph_layout::select::{Filter, Verdicts};
 use bviz_ui_components::{
     Toolbar, TooltipColors, cached_layer, centered_notice, centered_spinner, load_in_background,
@@ -139,9 +139,9 @@ impl DominatorsPanel {
     /// targets; absent where the tree drawn is of another unit.
     fn target_key(&self) -> Option<TreeKey> {
         let drawn = self.drawn.as_ref()?.coloured.tree.scope();
-        let scope = (drawn.unit() == Unit::ConfiguredTarget)
-            .then(|| Scope::new(Unit::Target, drawn.inputs()))
-            .flatten()?;
+        let ByUnit::ConfiguredTarget { targets: scope } = drawn.by_unit() else {
+            return None;
+        };
         Some(TreeKey {
             scope,
             roots: Roots::Tops,
