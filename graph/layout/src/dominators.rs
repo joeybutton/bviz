@@ -8,16 +8,18 @@
 //! every counted point of the scope sits in the tree.
 
 use std::cmp::Reverse;
+use std::collections::VecDeque;
 use std::ops::Range;
 
 use rayon::prelude::*;
+use rustc_hash::FxHashSet;
 
 use crate::facets::Facets;
 use crate::graph::{Graph, Kind};
 use crate::intern::{Id, Names, stable_hash};
-use crate::metrics::{Scope, UnitGraph, unit_graph};
+use crate::metrics::{Count, Scope, UnitGraph, unit_graph};
 use crate::provenance::Provenance;
-use crate::reduce::{DenseIds, components};
+use crate::reduce::{DenseIds, components, reach_counts};
 
 /// The dominator tree of the counted points of a scope. A point not counted
 /// towards others is no product of the build and takes no part.
@@ -34,13 +36,47 @@ pub struct Dominators {
     /// and the tops take every index ahead of the first node's children.
     bounds: Vec<u32>,
     index: DenseIds,
+    dependents: Dependents,
 }
 
 struct Dominated {
     id: Id,
     kind: Kind,
     weight: u32,
+    standing: Standing,
 }
+
+/// Where a point stands towards the top-level points of its scope: those
+/// nothing depends on but the other members of a cycle they belong to. Every
+/// top-level point is a top of the tree; a top that is not one is a
+/// dependency several top-level points share.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Standing {
+    /// Depended on only by the other members of its cycle where `in_cycle`,
+    /// and otherwise by nothing.
+    TopLevel { in_cycle: bool },
+    /// Depended on, directly or transitively, by this many top-level points.
+    Below(Count),
+}
+
+/// By node, the nodes depending on it directly, in node order.
+struct Dependents {
+    /// By node, where its dependents start in `of`, and past the last node the
+    /// length of `of`.
+    start: Vec<u32>,
+    of: Vec<u32>,
+}
+
+impl Dependents {
+    fn of(&self, node: u32) -> &[u32] {
+        &self.of[self.start[node as usize] as usize..self.start[node as usize + 1] as usize]
+    }
+}
+
+/// The most points [`Dominators::top_level_above`] reaches on its walk up
+/// from a node, however large the graph; each point it walks through has
+/// every one of its dependents scanned.
+const ABOVE_WALK: usize = 1 << 12;
 
 impl Dominators {
     pub fn scope(&self) -> Scope {
@@ -84,6 +120,37 @@ impl Dominators {
     pub fn index_of(&self, id: Id) -> Option<u32> {
         self.index.get(id)
     }
+
+    pub fn standing(&self, node: u32) -> Standing {
+        self.nodes[node as usize].standing
+    }
+
+    /// Up to `limit` top-level points depending on `node`, the nearest first.
+    /// The walk up from `node` reaches at most [`ABOVE_WALK`] points, so where
+    /// the top-level points lie past those, fewer are named than depend on it.
+    pub fn top_level_above(&self, node: u32, limit: usize) -> Vec<u32> {
+        let mut found: Vec<u32> = Vec::with_capacity(limit);
+        let mut seen: FxHashSet<u32> =
+            FxHashSet::with_capacity_and_hasher(ABOVE_WALK, Default::default());
+        let mut walk: VecDeque<u32> = VecDeque::with_capacity(ABOVE_WALK);
+        seen.insert(node);
+        walk.push_back(node);
+        while let Some(at) = walk.pop_front() {
+            for &dependent in self.dependents.of(at) {
+                if found.len() == limit || seen.len() == ABOVE_WALK {
+                    return found;
+                }
+                if !seen.insert(dependent) {
+                    continue;
+                }
+                match self.standing(dependent) {
+                    Standing::TopLevel { .. } => found.push(dependent),
+                    Standing::Below(_) => walk.push_back(dependent),
+                }
+            }
+        }
+        found
+    }
 }
 
 /// The dominator tree of the points of `graph` in `scope`.
@@ -95,13 +162,23 @@ pub fn dominators(
     scope: Scope,
 ) -> Dominators {
     let unit = unit_graph(graph, facets, provenance, scope);
-    let tree = Flowgraph::new(&unit).dominator_tree();
+    let flowgraph = Flowgraph::new(&unit);
+    let tree = flowgraph.dominator_tree();
     let mut weight = vec![1u32; tree.idom.len()];
     for w in (1..tree.idom.len()).rev() {
         weight[tree.idom[w] as usize] += weight[w];
     }
 
     let point = |w: u32| &unit.points[tree.point(w) as usize];
+    let mut top_level = vec![false; unit.points.len()];
+    for &p in &flowgraph.tops {
+        top_level[p as usize] = true;
+    }
+    let below = reach_counts(
+        &unit.dependents,
+        |p| top_level[p],
+        |p| stable_hash(names.resolve(unit.points[p].id)),
+    );
     let mut by_parent: Vec<u32> = (1..tree.idom.len() as u32).collect();
     bviz_parallel::workers().install(|| {
         by_parent.par_sort_unstable_by_key(|&w| {
@@ -139,21 +216,51 @@ pub fn dominators(
     let nodes: Vec<Dominated> = order
         .iter()
         .map(|&w| {
-            let point = point(w);
+            let p = tree.point(w) as usize;
+            let point = &unit.points[p];
             Dominated {
                 id: point.id,
                 kind: point.kind,
                 weight: weight[w as usize],
+                standing: match top_level[p] {
+                    true => Standing::TopLevel {
+                        in_cycle: !unit.dependents[p].is_empty(),
+                    },
+                    false => Standing::Below(below[p]),
+                },
             }
         })
         .collect();
     let (index, _) = DenseIds::new(nodes.iter().map(|node| node.id));
+    let dependents = dependents(&unit, &tree, &order);
     Dominators {
         scope,
         nodes,
         bounds,
         index,
+        dependents,
     }
+}
+
+/// The dependents of each point of `unit`, numbered as the nodes `order` puts
+/// the preorder numbers of `tree` in.
+fn dependents(unit: &UnitGraph, tree: &DominatorTree, order: &[u32]) -> Dependents {
+    let mut node_of = vec![UNNUMBERED; unit.points.len()];
+    for (node, &w) in order.iter().enumerate() {
+        node_of[tree.point(w) as usize] = node as u32;
+    }
+    let point_dependents = |w: u32| &unit.dependents[tree.point(w) as usize];
+    let edges = order.iter().map(|&w| point_dependents(w).len()).sum();
+    let mut start: Vec<u32> = Vec::with_capacity(order.len() + 1);
+    let mut of: Vec<u32> = Vec::with_capacity(edges);
+    for &w in order {
+        let from = of.len();
+        start.push(from as u32);
+        of.extend(point_dependents(w).iter().map(|&q| node_of[q as usize]));
+        of[from..].sort_unstable();
+    }
+    start.push(of.len() as u32);
+    Dependents { start, of }
 }
 
 /// The preorder number of the top of the build, ahead of every point's.
@@ -453,6 +560,82 @@ mod tests {
         let up = std::iter::successors(Some(lib), |&node| tree.parent(node));
         let path: Vec<&str> = up.map(|node| names.resolve(tree.id(node))).collect();
         assert_eq!(path, ["lib", "bin", "test"]);
+    }
+
+    fn node(tree: &Dominators, names: &Names, name: &str) -> u32 {
+        tree.index_of(names.get(name).unwrap()).unwrap()
+    }
+
+    /// A dependency two top-level points share stands among the tops as they
+    /// do, but is depended on by both, and one below a top by that one alone.
+    #[test]
+    fn a_top_shared_by_top_level_points_counts_them() {
+        let (graph, names) = configured(&[("base", "a"), ("base", "b"), ("only a", "a")]);
+        let tree = tree_of(&graph, &names, Unit::ConfiguredTarget);
+        let standing = |name| tree.standing(node(&tree, &names, name));
+        let alone = Standing::TopLevel { in_cycle: false };
+        assert_eq!(standing("a"), alone);
+        assert_eq!(standing("b"), alone);
+        assert_eq!(standing("base"), Standing::Below(Count::Exact(2)));
+        assert_eq!(standing("only a"), Standing::Below(Count::Exact(1)));
+    }
+
+    /// Every member of a cycle at the top is top-level, though the others
+    /// depend on it.
+    #[test]
+    fn every_member_of_a_cycle_at_the_top_is_top_level_in_a_cycle() {
+        let (graph, names) = configured(&[("lib", "a"), ("a", "b"), ("b", "a")]);
+        let tree = tree_of(&graph, &names, Unit::ConfiguredTarget);
+        for name in ["a", "b"] {
+            let standing = tree.standing(node(&tree, &names, name));
+            assert_eq!(standing, Standing::TopLevel { in_cycle: true }, "{name}");
+        }
+        let lib = tree.standing(node(&tree, &names, "lib"));
+        assert_eq!(lib, Standing::Below(Count::Exact(2)));
+    }
+
+    /// The top-level points above a node are named nearest first, as many as
+    /// asked for, passing over the points between that are not top-level.
+    #[test]
+    fn the_top_level_points_above_a_node_are_named_nearest_first() {
+        let (graph, names) = configured(&[
+            ("base", "near"),
+            ("base", "mid"),
+            ("mid", "far"),
+            ("base", "x"),
+            ("x", "far"),
+        ]);
+        let tree = tree_of(&graph, &names, Unit::ConfiguredTarget);
+        let above = |limit| {
+            let found = tree.top_level_above(node(&tree, &names, "base"), limit);
+            let named = found.into_iter().map(|n| names.resolve(tree.id(n)));
+            named.collect::<Vec<_>>()
+        };
+        assert_eq!(above(5), ["near", "far"]);
+        assert_eq!(above(1), ["near"]);
+        assert_eq!(above(0), Vec::<&str>::new());
+        let near = node(&tree, &names, "near");
+        assert!(tree.top_level_above(near, 5).is_empty());
+    }
+
+    /// However many points lie between a node and the top-level points
+    /// above it, naming them walks through a bounded number, and names those
+    /// it reaches.
+    #[test]
+    fn naming_the_top_level_points_above_a_node_walks_a_bounded_way() {
+        let chain: Vec<String> = (0..ABOVE_WALK + 1).map(|i| format!("{i}")).collect();
+        let mut deps: Vec<(&str, &str)> = chain
+            .windows(2)
+            .map(|pair| (pair[0].as_str(), pair[1].as_str()))
+            .collect();
+        deps.push(("0", "near"));
+        let (graph, names) = configured(&deps);
+        let tree = tree_of(&graph, &names, Unit::ConfiguredTarget);
+        let found = tree.top_level_above(node(&tree, &names, "0"), 5);
+        let named: Vec<&str> = found.iter().map(|&n| names.resolve(tree.id(n))).collect();
+        assert_eq!(named, ["near"]);
+        let base = tree.standing(node(&tree, &names, "0"));
+        assert_eq!(base, Standing::Below(Count::Exact(2)));
     }
 
     #[test]
