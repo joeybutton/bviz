@@ -4,6 +4,7 @@ use crate::morph::Frame;
 use crate::neighborhood::{Neighborhood, compute_neighborhood};
 use crate::relation::{Direction, Relation};
 use crate::scroll::paint_scrollbars;
+use crate::status::{Status, Statuses};
 use crate::{GraphPanel, Palette};
 use bviz_graph_layout::layout::{CARET_RESERVE, LABEL_BAND};
 use bviz_graph_layout::transition::Transition;
@@ -12,6 +13,8 @@ use gpui::{
     App, BorderStyle, Bounds, Entity, Hsla, PathBuilder, Pixels, Point, Rgba, TextAlign, Window,
     point, px, quad, size,
 };
+use rustc_hash::FxHashMap;
+use std::cmp::Reverse;
 use std::collections::HashSet;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -112,6 +115,46 @@ pub(crate) const BADGE_FLOOR: f32 = 4.0;
 /// parts the badge from the route it sits on.
 const BADGE_RIM: f32 = 1.5;
 
+/// Half the width (pre-zoom px) of the glyph a status badge is drawn as, which
+/// stands it as tall as the capitals of the label it is set before.
+const STATUS_HALF: f32 = 5.0;
+
+/// Screen half-width a status glyph is never drawn below. Its shape is what
+/// tells one status from another, and fewer pixels than this leave every shape
+/// a dot.
+const STATUS_FLOOR: f32 = 4.0;
+
+/// Screen width of the canvas-coloured rim around a status glyph. A status
+/// colour is held to its contrast against the canvas, which no fill a box wears
+/// answers for, so the glyph brings that ground with it.
+const STATUS_RIM: f32 = 1.5;
+
+/// Bare ground (pre-zoom px) between a status badge and what follows it in a
+/// label.
+const STATUS_GAP: f32 = 2.0;
+
+/// The share of a status glyph's half-width a ring's stroke takes, and the
+/// screen width that stroke is never drawn below.
+const RING_STROKE: f32 = 0.45;
+const RING_STROKE_FLOOR: f32 = 1.5;
+
+/// The share of a status glyph's half-width a bar's half-height takes.
+const BAR_HALF_HEIGHT: f32 = 0.4;
+
+/// The share of a status glyph's half-width a square's half-side takes, set
+/// below the whole so the square weighs no more than the disc.
+const SQUARE_HALF_SIDE: f32 = 0.85;
+
+/// The shares of a status glyph's half-width a triangle's apex stands above
+/// its middle and its base lies below it: short of the whole, so the triangle
+/// weighs no more than the disc.
+const TRIANGLE_APEX: f32 = 0.95;
+const TRIANGLE_BASE: f32 = 0.8;
+
+/// The share of a status glyph's half-width a cross's arms are thick to
+/// either side of their middle.
+const CROSS_ARM: f32 = 0.3;
+
 /// Bare ground (pre-zoom px) left between the strokes of two adjacent lanes, so
 /// a bundle of them reads as several lines rather than as one broad one. The
 /// zoom carries it along with the strokes it separates, so what holds at every
@@ -149,8 +192,8 @@ const HIGHLIGHT_WASH: f32 = 0.155;
 /// rest still says where in the graph that part sits.
 pub(crate) const UNMARKED_FADE: f32 = 0.2;
 
-/// Everything the canvas draws from, owned so the `'static` paint closure holds
-/// no borrow of the view.
+/// What a frame of the canvas draws from that is settled as its scene is
+/// built, owned so the `'static` paint closure holds no borrow of the view.
 pub(crate) struct Scene {
     pub(crate) drawn: Drawn,
     pub(crate) expandable: Expandable,
@@ -285,6 +328,10 @@ pub(crate) fn canvas_body(
                 view.selection.marking(g, scene.drawn.view_key(camera.zoom))
             }),
         };
+        let Some(loaded) = entity.read(cx).model.read(cx).loaded() else {
+            return;
+        };
+        let statuses = loaded.statuses();
         let drawn: Vec<(PaintBox, Bounds<Pixels>)> = g
             .boxes
             .iter()
@@ -310,7 +357,7 @@ pub(crate) fn canvas_body(
             )
             .filter(|p| visible.overlaps(&p.rect))
             .map(|p| {
-                let b = PaintBox::of(&p, &scene, &marks);
+                let b = PaintBox::of(&p, &scene, &marks, statuses);
                 let rect = screen_rect(&b, bounds, camera);
                 paint_box(&b, rect, camera.zoom, &scene.palette, window);
                 (b, rect)
@@ -336,8 +383,11 @@ pub(crate) fn canvas_body(
         }
         let mut floated: Vec<Bounds<Pixels>> = Vec::new();
         let mut titles: Vec<TitleTarget> = Vec::new();
+        // Painted once every label is, so that no plate lands on a badge.
+        let mut statuses: Vec<StatusBadge> = Vec::with_capacity(drawn.len());
+        let mut bare: Vec<BareBadge> = Vec::with_capacity(drawn.len());
         for (b, rect) in &drawn {
-            let target = paint_box_label(
+            let label = paint_box_label(
                 b,
                 *rect,
                 camera.zoom,
@@ -346,11 +396,21 @@ pub(crate) fn canvas_body(
                 window,
                 cx,
             );
-            titles.extend(target);
+            match label {
+                Some(label) => {
+                    titles.extend(label.title);
+                    statuses.extend(label.badge);
+                }
+                None => bare.extend(b.bare_badge(*rect, camera.zoom)),
+            }
         }
+        place_bare(bare, &floated, &mut statuses);
         entity.update(cx, |view, _| view.titles = titles);
         for (c, transition, alpha) in badges {
             paint_badge(c, transition, alpha, bounds, camera, &scene.palette, window);
+        }
+        for badge in statuses {
+            badge.paint(&scene.palette, window);
         }
         paint_scrollbars(
             bounds,
@@ -460,6 +520,17 @@ impl Palette {
         }
     }
 
+    /// The ink of a status badge's glyph.
+    fn status_color(&self, status: Status) -> Rgba {
+        match status {
+            Status::Succeeded => self.colors.success,
+            Status::Skipped | Status::Unfinished => self.colors.text_muted,
+            Status::Flaky => self.colors.warning,
+            Status::TestFailed | Status::Failed | Status::RootCause => self.colors.error,
+        }
+        .into()
+    }
+
     /// [`MARK_LIFT`] signed to point away from the canvas: up on a theme dark
     /// enough to take white text, down on one that takes black.
     fn mark_lift(&self) -> f32 {
@@ -539,10 +610,11 @@ struct PaintBox<'a> {
     /// held, and a standing selection holds it down for a box its marking leaves
     /// out.
     alpha: f32,
+    status: Option<Status>,
 }
 
 impl<'a> PaintBox<'a> {
-    fn of(p: &Placed<'a>, scene: &Scene, marks: &Marks) -> Self {
+    fn of(p: &Placed<'a>, scene: &Scene, marks: &Marks, statuses: &Statuses) -> Self {
         let Placed { b, rect, alpha, .. } = *p;
         let marked = marks.marks_box(b.id);
         let alpha = alpha * receded(marks.strength(marked), scene.filter_strength(b.id));
@@ -574,7 +646,35 @@ impl<'a> PaintBox<'a> {
             highlight: accent,
             marked,
             alpha,
+            status: statuses.get(b.id),
         }
+    }
+
+    /// The badge of a box drawn without its label. A container's keeps to
+    /// its title band, the rest being ground the boxes it holds are drawn on,
+    /// and a leaf's other place is the corner a title floated over the leaf
+    /// from the top of its container reaches last.
+    fn bare_badge(&self, rect: Bounds<Pixels>, zoom: f32) -> Option<BareBadge> {
+        let status = self.status?;
+        let half = status_half(zoom);
+        let reach = px(half + STATUS_RIM);
+        let (center, otherwise) = match self.compound {
+            true => (rect.origin + point(reach, reach), None),
+            false => {
+                let corner = point(rect.left() + reach, rect.bottom() - reach);
+                let holds = rect.size.width >= reach * 2. && rect.size.height >= reach * 2.;
+                (rect.center(), holds.then_some(corner))
+            }
+        };
+        Some(BareBadge {
+            badge: StatusBadge {
+                center,
+                half,
+                status,
+                alpha: self.alpha,
+            },
+            otherwise,
+        })
     }
 
     /// The wash a marking lays over this box's fill, transparent where the box
@@ -633,21 +733,343 @@ fn paint_badge(
     paint_diamond(center, half, fill, window);
 }
 
+/// The corners of a square standing on one corner, about its middle, for a
+/// half-diagonal of one.
+const DIAMOND: [(f32, f32); 4] = [(0.0, -1.0), (1.0, 0.0), (0.0, 1.0), (-1.0, 0.0)];
+
 /// Fills the square standing on one corner, centred on `center`, whose corners
 /// lie `half` from it.
 pub(crate) fn paint_diamond(center: Point<Pixels>, half: f32, color: Rgba, window: &mut Window) {
-    let half = px(half);
-    let corners = [
-        point(center.x, center.y - half),
-        point(center.x + half, center.y),
-        point(center.x, center.y + half),
-        point(center.x - half, center.y),
-    ];
+    let corners = DIAMOND.map(|(x, y)| point(center.x + px(x * half), center.y + px(y * half)));
     let mut diamond = PathBuilder::fill();
     diamond.add_polygon(&corners, true);
     if let Ok(path) = diamond.build() {
         window.paint_path(path, color);
     }
+}
+
+/// The shape a status badge is drawn as. Each status takes one no other does,
+/// so a reader who cannot tell their inks apart still tells the statuses
+/// apart. None is the diamond of a transition badge, which a theme may give an
+/// ink a status wears and which is rimmed and floored alike.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Glyph {
+    Disc,
+    Bar,
+    Ring,
+    TriangleUp,
+    Square,
+    TriangleDown,
+    Cross,
+}
+
+impl Glyph {
+    fn of(status: Status) -> Self {
+        match status {
+            Status::Succeeded => Glyph::Disc,
+            Status::Skipped => Glyph::Bar,
+            Status::Unfinished => Glyph::Ring,
+            Status::Flaky => Glyph::TriangleUp,
+            Status::TestFailed => Glyph::Square,
+            Status::Failed => Glyph::TriangleDown,
+            Status::RootCause => Glyph::Cross,
+        }
+    }
+}
+
+/// The corners of a triangle standing on its base, about its middle, for a
+/// glyph of half-width one.
+const TRIANGLE: [(f32, f32); 3] = [
+    (0.0, -TRIANGLE_APEX),
+    (1.0, TRIANGLE_BASE),
+    (-1.0, TRIANGLE_BASE),
+];
+
+/// [`TRIANGLE`] hanging from its base.
+const TRIANGLE_DOWN: [(f32, f32); 3] = [
+    (0.0, TRIANGLE_APEX),
+    (-1.0, -TRIANGLE_BASE),
+    (1.0, -TRIANGLE_BASE),
+];
+
+/// The corners of a cross lying on the diagonals, about its middle, for a
+/// glyph of half-width one: an upright cross of arms reaching one from the
+/// middle, turned an eighth of a turn.
+fn cross() -> [(f32, f32); 12] {
+    let t = CROSS_ARM;
+    [
+        (-t, -1.0),
+        (t, -1.0),
+        (t, -t),
+        (1.0, -t),
+        (1.0, t),
+        (t, t),
+        (t, 1.0),
+        (-t, 1.0),
+        (-t, t),
+        (-1.0, t),
+        (-1.0, -t),
+        (-t, -t),
+    ]
+    .map(|(x, y)| {
+        (
+            (x - y) * std::f32::consts::FRAC_1_SQRT_2,
+            (x + y) * std::f32::consts::FRAC_1_SQRT_2,
+        )
+    })
+}
+
+/// The screen half-width a status glyph is drawn at where the label it goes
+/// with, or the box it stands for, is drawn at `scale` of its layout size.
+fn status_half(scale: f32) -> f32 {
+    (STATUS_HALF * scale).max(STATUS_FLOOR)
+}
+
+/// The screen width held for a status badge left of a label drawn at `scale`
+/// of its layout size: the glyph, its rim to either side, and the gap before
+/// what follows.
+fn status_reserve(scale: f32) -> f32 {
+    2. * (status_half(scale) + STATUS_RIM) + STATUS_GAP * scale
+}
+
+/// A status badge a frame draws, in screen pixels.
+#[derive(Clone, Copy)]
+struct StatusBadge {
+    center: Point<Pixels>,
+    half: f32,
+    status: Status,
+    /// The opacity of the box the badge belongs to, which it fades with.
+    alpha: f32,
+}
+
+impl StatusBadge {
+    /// The square the badge is drawn within, rim and all.
+    fn bounds(&self) -> Bounds<Pixels> {
+        let reach = px(self.half + STATUS_RIM);
+        Bounds::new(
+            point(self.center.x - reach, self.center.y - reach),
+            size(reach * 2., reach * 2.),
+        )
+    }
+
+    fn paint(&self, palette: &Palette, window: &mut Window) {
+        paint_status(
+            self.center,
+            self.half,
+            self.status,
+            self.alpha,
+            palette,
+            window,
+        );
+    }
+}
+
+/// The badge of a box drawn without its label, which stands only where the
+/// ground is free.
+struct BareBadge {
+    /// The badge where it stands by choice.
+    badge: StatusBadge,
+    /// Where it stands with that ground taken, for a box that has such a
+    /// place.
+    otherwise: Option<Point<Pixels>>,
+}
+
+/// Side of the squares [`BadgeGround`] finds badges by: the extent of a badge
+/// held at its floor.
+const BADGE_CELL: f32 = 2.0 * (STATUS_FLOOR + STATUS_RIM);
+
+/// The cells a badge held at its floor reaches at most.
+const CELLS_PER_BADGE: usize = 4;
+
+/// The ground the status badges of one frame have taken.
+struct BadgeGround {
+    /// Each bounds taken, once for every cell it reaches, with the entry
+    /// that cell held before it.
+    taken: Vec<(Bounds<Pixels>, Option<usize>)>,
+    /// The entry of `taken` each cell held last.
+    cells: FxHashMap<(i32, i32), usize>,
+}
+
+impl BadgeGround {
+    /// Ground with room for `badges` of them.
+    fn with_capacity(badges: usize) -> Self {
+        let entries = badges * CELLS_PER_BADGE;
+        Self {
+            taken: Vec::with_capacity(entries),
+            cells: FxHashMap::with_capacity_and_hasher(entries, Default::default()),
+        }
+    }
+
+    fn cells(bounds: Bounds<Pixels>) -> impl Iterator<Item = (i32, i32)> {
+        let cell = |at: Pixels| (f32::from(at) / BADGE_CELL).floor() as i32;
+        let (from, to) = (bounds.origin, bounds.bottom_right());
+        (cell(from.x)..=cell(to.x))
+            .flat_map(move |x| (cell(from.y)..=cell(to.y)).map(move |y| (x, y)))
+    }
+
+    /// Whether `bounds` lands on none of the bounds taken.
+    fn is_free(&self, bounds: Bounds<Pixels>) -> bool {
+        Self::cells(bounds).all(|cell| {
+            let mut entry = self.cells.get(&cell).copied();
+            while let Some((taken, before)) = entry.map(|entry| self.taken[entry]) {
+                if taken.intersects(&bounds) {
+                    return false;
+                }
+                entry = before;
+            }
+            true
+        })
+    }
+
+    fn take(&mut self, bounds: Bounds<Pixels>) {
+        for cell in Self::cells(bounds) {
+            let before = self.cells.insert(cell, self.taken.len());
+            self.taken.push((bounds, before));
+        }
+    }
+}
+
+/// Adds to `placed` each of `bare` that finds free ground. A container stands
+/// at least as severe as any box it holds and is walked before it, so placing
+/// the most severe first leaves its badge standing where the two would meet.
+fn place_bare(mut bare: Vec<BareBadge>, floated: &[Bounds<Pixels>], placed: &mut Vec<StatusBadge>) {
+    let mut ground = BadgeGround::with_capacity(placed.len() + bare.len());
+    for badge in placed.iter() {
+        ground.take(badge.bounds());
+    }
+    bare.sort_by_key(|bare| Reverse(bare.badge.status));
+    for bare in bare {
+        let standing = std::iter::once(bare.badge.center)
+            .chain(bare.otherwise)
+            .map(|center| StatusBadge {
+                center,
+                ..bare.badge
+            })
+            .find(|badge| {
+                let bounds = badge.bounds();
+                ground.is_free(bounds) && !floated.iter().any(|taken| taken.intersects(&bounds))
+            });
+        if let Some(badge) = standing {
+            ground.take(badge.bounds());
+            placed.push(badge);
+        }
+    }
+}
+
+/// Paints the badge of `status` about `center`: its glyph, `half` to either
+/// side, over a rim of the canvas's colour.
+fn paint_status(
+    center: Point<Pixels>,
+    half: f32,
+    status: Status,
+    alpha: f32,
+    palette: &Palette,
+    window: &mut Window,
+) {
+    let rim = faded(palette.background, alpha);
+    let ink = faded(palette.status_color(status), alpha);
+    // A shape of upright sides or of a round one is a quad, whose coverage
+    // is computed rather than sampled; the rest are paths.
+    let mut block = |half_width: f32, half_height: f32, corner: f32| {
+        for (grow, color) in [(STATUS_RIM, rim), (0.0, ink)] {
+            let (w, h) = (half_width + grow, half_height + grow);
+            window.paint_quad(quad(
+                Bounds::new(
+                    point(center.x - px(w), center.y - px(h)),
+                    size(px(2. * w), px(2. * h)),
+                ),
+                px(if corner > 0.0 { corner + grow } else { 0.0 }),
+                color,
+                px(0.),
+                Hsla::transparent_black(),
+                BorderStyle::Solid,
+            ));
+        }
+    };
+    match Glyph::of(status) {
+        Glyph::Disc => block(half, half, half),
+        Glyph::Bar => block(half, half * BAR_HALF_HEIGHT, 0.0),
+        Glyph::Square => block(half * SQUARE_HALF_SIDE, half * SQUARE_HALF_SIDE, 0.0),
+        Glyph::Ring => {
+            let reach = half + STATUS_RIM;
+            window.paint_quad(quad(
+                Bounds::new(
+                    point(center.x - px(reach), center.y - px(reach)),
+                    size(px(2. * reach), px(2. * reach)),
+                ),
+                px(reach),
+                rim,
+                px(0.),
+                Hsla::transparent_black(),
+                BorderStyle::Solid,
+            ));
+            window.paint_quad(quad(
+                Bounds::new(
+                    point(center.x - px(half), center.y - px(half)),
+                    size(px(2. * half), px(2. * half)),
+                ),
+                px(half),
+                Hsla::transparent_black(),
+                px((half * RING_STROKE).max(RING_STROKE_FLOOR)),
+                Hsla::from(ink),
+                BorderStyle::Solid,
+            ));
+        }
+        Glyph::TriangleUp => paint_rimmed(TRIANGLE, center, half, rim, ink, window),
+        Glyph::TriangleDown => paint_rimmed(TRIANGLE_DOWN, center, half, rim, ink, window),
+        Glyph::Cross => paint_rimmed(cross(), center, half, rim, ink, window),
+    }
+}
+
+/// Fills the polygon `unit` gives for a half-width of one, scaled to `half`
+/// about `center`, in `ink` over a `rim` standing [`STATUS_RIM`] out from it.
+fn paint_rimmed<const N: usize>(
+    unit: [(f32, f32); N],
+    center: Point<Pixels>,
+    half: f32,
+    rim: Rgba,
+    ink: Rgba,
+    window: &mut Window,
+) {
+    let scaled = unit.map(|(x, y)| (x * half, y * half));
+    for (outline, color) in [(outset(scaled, STATUS_RIM), rim), (scaled, ink)] {
+        let corners = outline.map(|(x, y)| point(center.x + px(x), center.y + px(y)));
+        let mut shape = PathBuilder::fill();
+        shape.add_polygon(&corners, true);
+        if let Ok(path) = shape.build() {
+            window.paint_path(path, color);
+        }
+    }
+}
+
+/// `polygon` with every side moved `by` outward along its normal, the corners
+/// following to where the moved sides meet. No two consecutive sides of
+/// `polygon` may run in opposite directions.
+fn outset<const N: usize>(polygon: [(f32, f32); N], by: f32) -> [(f32, f32); N] {
+    let n = N;
+    let side = |i: usize| (polygon[i], polygon[(i + 1) % n]);
+    let turning: f32 = (0..n)
+        .map(|i| {
+            let (a, b) = side(i);
+            a.0 * b.1 - b.0 * a.1
+        })
+        .sum();
+    // The normal of the side leaving corner `i`, pointing out of the polygon
+    // whichever way round its corners are listed.
+    let normal = |i: usize| {
+        let (a, b) = side(i);
+        let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+        let length = dx.hypot(dy).max(f32::EPSILON) * turning.signum();
+        (dy / length, -dx / length)
+    };
+    std::array::from_fn(|i| {
+        let (before, after) = (normal((i + n - 1) % n), normal(i));
+        let reach = by / (1.0 + before.0 * after.0 + before.1 * after.1);
+        (
+            polygon[i].0 + (before.0 + after.0) * reach,
+            polygon[i].1 + (before.1 + after.1) * reach,
+        )
+    })
 }
 
 /// The point halfway along the polyline `points` by length; `None` for a route
@@ -752,6 +1174,9 @@ struct LabelPlacement {
     /// carries none. The caret keeps the proportion the layout reserved for it
     /// whatever size the label is drawn at.
     caret: Option<f32>,
+    /// The status whose badge the label holds room for at its left end, ahead
+    /// of the caret.
+    status: Option<Status>,
     /// Width the label text is truncated to.
     avail: f32,
     /// Whether the title is lifted to the top of its box, over ground the boxes
@@ -780,23 +1205,36 @@ impl LabelPlacement {
         let caret = b
             .expandable
             .then(|| size * (CARET_RESERVE / LABEL_SIZE) as f32);
-        let avail = w - 2. * LABEL_PAD - caret.unwrap_or(0.);
-        (avail >= LABEL_MIN_WIDTH).then_some(LabelPlacement {
+        let placement = LabelPlacement {
             size,
             top,
             caret,
-            avail,
+            status: b.status,
+            avail: 0.,
             floats,
-        })
+        };
+        let avail = w - 2. * LABEL_PAD - placement.reserved();
+        (avail >= LABEL_MIN_WIDTH).then_some(LabelPlacement { avail, ..placement })
     }
 
-    /// Width the caret takes out of the plate, zero where the box carries none.
+    /// What the label is drawn at of its layout size.
+    fn scale(&self) -> f32 {
+        self.size / LABEL_SIZE as f32
+    }
+
+    /// Width the badge takes out of the plate, zero where the box carries none.
+    fn badge_reserved(&self) -> f32 {
+        self.status.map_or(0., |_| status_reserve(self.scale()))
+    }
+
+    /// Width the badge and the caret take out of the plate ahead of the text.
     fn reserved(&self) -> f32 {
-        self.caret.unwrap_or(0.)
+        self.badge_reserved() + self.caret.unwrap_or(0.)
     }
 
-    /// The plate a `text`-wide label fills in `rect`: the caret and the text
-    /// centered together as one unit, with the label's clearance around them.
+    /// The plate a `text`-wide label fills in `rect`: the badge, the caret and
+    /// the text centered together as one unit, with the label's clearance
+    /// around them.
     fn plate(&self, rect: Bounds<Pixels>, text: f32) -> Bounds<Pixels> {
         let unit = self.reserved() + text;
         let left = f32::from(rect.origin.x) + (f32::from(rect.size.width) - unit) / 2.;
@@ -813,9 +1251,32 @@ impl LabelPlacement {
     /// center.
     fn caret_at(&self, plate: Bounds<Pixels>) -> Point<Pixels> {
         point(
-            plate.origin.x + px(LABEL_PAD),
+            plate.origin.x + px(LABEL_PAD + self.badge_reserved()),
             plate.origin.y + px(LABEL_PAD + self.size / 2.),
         )
+    }
+
+    /// The badge set at the left end of `plate`, at the label's vertical
+    /// center, to be drawn at `alpha`; `None` for a box the build reports
+    /// nothing of.
+    fn badge(&self, plate: Bounds<Pixels>, alpha: f32) -> Option<StatusBadge> {
+        let status = self.status?;
+        let half = status_half(self.scale());
+        Some(StatusBadge {
+            center: point(
+                plate.origin.x + px(LABEL_PAD + STATUS_RIM + half),
+                plate.origin.y + px(LABEL_PAD + self.size / 2.),
+            ),
+            half,
+            status,
+            alpha,
+        })
+    }
+
+    /// Where the text begins in `plate`: its top left corner, past the badge
+    /// and the caret.
+    fn text_at(&self, plate: Bounds<Pixels>) -> Point<Pixels> {
+        plate.origin + point(px(LABEL_PAD + self.reserved()), px(LABEL_PAD))
     }
 
     /// The handle box `id`'s label is, once drawn on `plate`; `None` for a box
@@ -830,10 +1291,17 @@ pub(crate) fn title_at(titles: &[TitleTarget], pos: Point<Pixels>) -> Option<Id>
     titles.iter().find(|t| t.plate.contains(&pos)).map(|t| t.id)
 }
 
+/// What a painted label leaves for the passes after it.
+struct PaintedLabel {
+    title: Option<TitleTarget>,
+    badge: Option<StatusBadge>,
+}
+
 /// Paints a box's label, truncated to the width there is room for, with a
 /// disclosure caret for an expandable box, and reports the title a click on it
-/// toggles. The font is the window's inherited UI text style so the views stay
-/// visually coherent, and a container's title is bold.
+/// toggles and the status badge the label holds room for; `None` where no
+/// label is painted. The font is the window's inherited UI text style so the
+/// views stay visually coherent, and a container's title is bold.
 ///
 /// `floated` collects what the floating titles have taken, and a label that
 /// would land on any of it is dropped rather than printed over it. Since the
@@ -847,7 +1315,7 @@ fn paint_box_label(
     floated: &mut Vec<Bounds<Pixels>>,
     window: &mut Window,
     cx: &mut App,
-) -> Option<TitleTarget> {
+) -> Option<PaintedLabel> {
     let placement = LabelPlacement::of(b, rect, zoom)?;
     let fs = placement.size;
     let label_color = faded(bviz_ui_theme::label_on(b.fill).into(), b.alpha);
@@ -881,7 +1349,7 @@ fn paint_box_label(
         BorderStyle::Solid,
     ));
     let _ = line.paint(
-        plate.origin + point(px(LABEL_PAD + placement.reserved()), px(LABEL_PAD)),
+        placement.text_at(plate),
         px(fs),
         TextAlign::Left,
         None,
@@ -901,7 +1369,10 @@ fn paint_box_label(
             window,
         );
     }
-    placement.title(plate, b.id)
+    Some(PaintedLabel {
+        title: placement.title(plate, b.id),
+        badge: placement.badge(plate, b.alpha),
+    })
 }
 
 /// Paints a small filled-triangle disclosure caret inside the reserved
@@ -1267,6 +1738,7 @@ mod tests {
             highlight: 0.0,
             marked: false,
             alpha: p.alpha,
+            status: None,
         }
     }
 
@@ -1447,6 +1919,413 @@ mod tests {
         );
     }
 
+    /// A status is read off the shape of its badge by a reader who cannot tell
+    /// the inks apart, the three failures sharing one ink among them.
+    #[test]
+    fn no_two_statuses_share_a_glyph() {
+        for (i, status) in Status::ALL.iter().enumerate() {
+            for other in &Status::ALL[i + 1..] {
+                assert_ne!(
+                    Glyph::of(*status),
+                    Glyph::of(*other),
+                    "{status:?}/{other:?}"
+                );
+            }
+        }
+    }
+
+    /// The box at `rect` as a frame draws it standing at `status`, where what
+    /// the theme and the marked set resolve has no bearing on what is measured.
+    fn badged(
+        b: &bviz_graph_layout::Box,
+        expandable: bool,
+        status: Option<Status>,
+    ) -> PaintBox<'_> {
+        PaintBox {
+            expandable,
+            status,
+            ..paint_box_of(
+                &Placed {
+                    b,
+                    rect: Rect::of(b),
+                    alpha: 1.0,
+                    leaving: false,
+                },
+                &Expandable::Containers(Arc::new(HashSet::new())),
+            )
+        }
+    }
+
+    /// How far two window coordinates may part and still count as one,
+    /// covering the rounding of the f32 arithmetic that places a label.
+    const PLACING_SLACK: Pixels = px(0.01);
+
+    /// How far to either side of its middle, and how far above and below it,
+    /// the badge of `status` is painted at `half`: for a glyph drawn as a path,
+    /// out to the corners the sides of its rim meet at.
+    fn painted_reach(status: Status, half: f32) -> (f32, f32) {
+        fn farthest<const N: usize>(unit: [(f32, f32); N], half: f32) -> (f32, f32) {
+            outset(unit.map(|(x, y)| (x * half, y * half)), STATUS_RIM)
+                .iter()
+                .fold((0.0, 0.0), |(across, along), (x, y)| {
+                    (x.abs().max(across), y.abs().max(along))
+                })
+        }
+        match Glyph::of(status) {
+            Glyph::TriangleUp => farthest(TRIANGLE, half),
+            Glyph::TriangleDown => farthest(TRIANGLE_DOWN, half),
+            Glyph::Cross => farthest(cross(), half),
+            Glyph::Disc | Glyph::Bar | Glyph::Ring | Glyph::Square => {
+                (half + STATUS_RIM, half + STATUS_RIM)
+            }
+        }
+    }
+
+    /// A badge is laid out with the label it goes before: wherever a label is
+    /// drawn, what is painted of the badge lies on the label's plate and ends
+    /// before the caret begins, the caret ends before the name begins, and the
+    /// name ends within the plate.
+    #[test]
+    fn a_badge_the_caret_and_the_name_follow_one_another_on_the_plate() {
+        let boxes = [
+            lbox(0, "container", 0.0, 0.0, 4000.0, 3000.0, true),
+            lbox(1, "leaf", 0.0, 0.0, 400.0, 30.0, false),
+        ];
+        let mut labelled = 0;
+        for zoom in ZOOMS {
+            let camera = Camera {
+                zoom,
+                pan: (0.0, 0.0),
+            };
+            for (b, expandable) in boxes.iter().flat_map(|b| [(b, false), (b, true)]) {
+                for status in Status::ALL {
+                    let pb = badged(b, expandable, Some(status));
+                    let rect = screen_rect(&pb, viewport(), camera);
+                    let Some(placement) = LabelPlacement::of(&pb, rect, zoom) else {
+                        continue;
+                    };
+                    labelled += 1;
+                    let case = format!("zoom {zoom} {:?} {status:?}", b.id);
+                    let plate = placement.plate(rect, placement.avail);
+                    let badge = placement.badge(plate, 1.0).expect("the box has a status");
+                    let (across, along) = painted_reach(status, badge.half);
+                    let follows = |before: Pixels, after: Pixels| {
+                        assert!(before <= after + PLACING_SLACK, "{case}: {before} {after}");
+                    };
+                    follows(plate.left(), badge.center.x - px(across));
+                    follows(plate.top(), badge.center.y - px(along));
+                    follows(badge.center.y + px(along), plate.bottom());
+                    let caret = placement.caret_at(plate).x;
+                    follows(badge.center.x + px(across), caret);
+                    let text = placement.text_at(plate).x;
+                    follows(caret + px(placement.caret.unwrap_or(0.)), text);
+                    follows(text + px(placement.avail), plate.right());
+                    follows(plate.right(), rect.right());
+                }
+            }
+        }
+        assert!(labelled > 0, "no zoom drew a label");
+    }
+
+    #[test]
+    fn a_box_the_build_reports_nothing_of_holds_no_room_for_a_badge() {
+        let b = lbox(0, "leaf", 0.0, 0.0, 400.0, 30.0, false);
+        let camera = Camera {
+            zoom: 1.0,
+            pan: (0.0, 0.0),
+        };
+        let rect = |pb: &PaintBox| screen_rect(pb, viewport(), camera);
+        let unreported = badged(&b, true, None);
+        let placement = LabelPlacement::of(&unreported, rect(&unreported), 1.0).expect("a label");
+        let plate = placement.plate(rect(&unreported), placement.avail);
+        assert!(placement.badge(plate, 1.0).is_none());
+        assert_eq!(placement.caret_at(plate).x, plate.left() + px(LABEL_PAD));
+
+        let reported = badged(&b, true, Some(Status::Succeeded));
+        let badged = LabelPlacement::of(&reported, rect(&reported), 1.0).expect("a label");
+        assert!(badged.avail < placement.avail);
+    }
+
+    /// A box drawn too small for a label still says how the build ended for
+    /// it: a container in the corner its title band starts at, and a leaf at
+    /// its middle or, where it has the room, in the corner its bottom edge
+    /// starts at.
+    #[test]
+    fn a_box_too_small_for_its_label_carries_its_badge_bare() {
+        let zoom = 0.05;
+        let camera = Camera {
+            zoom,
+            pan: (0.0, 0.0),
+        };
+        let bare = |b: &bviz_graph_layout::Box, status| {
+            let pb = badged(b, false, status);
+            let rect = screen_rect(&pb, viewport(), camera);
+            assert!(LabelPlacement::of(&pb, rect, zoom).is_none());
+            (rect, pb.bare_badge(rect, zoom))
+        };
+        let within = |rect: Bounds<Pixels>, bounds: Bounds<Pixels>| {
+            bounds.left() >= rect.left() - PLACING_SLACK
+                && bounds.top() >= rect.top() - PLACING_SLACK
+                && bounds.right() <= rect.right() + PLACING_SLACK
+                && bounds.bottom() <= rect.bottom() + PLACING_SLACK
+        };
+
+        let container = lbox(0, "box", 0.0, 0.0, 400.0, 280.0, true);
+        let (rect, found) = bare(&container, Some(Status::RootCause));
+        let found = found.expect("the box has a status");
+        assert_eq!(found.badge.half, STATUS_FLOOR);
+        let off = found.badge.bounds().origin - rect.origin;
+        assert!(off.x.abs() < PLACING_SLACK && off.y.abs() < PLACING_SLACK);
+        assert!(found.otherwise.is_none());
+
+        let leaf = lbox(0, "box", 0.0, 0.0, 400.0, 280.0, false);
+        let (rect, found) = bare(&leaf, Some(Status::RootCause));
+        let found = found.expect("the box has a status");
+        assert_eq!(found.badge.center, rect.center());
+        let corner = StatusBadge {
+            center: found.otherwise.expect("room for the badge in a corner"),
+            ..found.badge
+        };
+        assert!(within(rect, corner.bounds()));
+        assert!(corner.bounds().left() < rect.left() + PLACING_SLACK);
+        assert!(corner.bounds().bottom() > rect.bottom() - PLACING_SLACK);
+
+        let cramped = lbox(0, "box", 0.0, 0.0, 400.0, 200.0, false);
+        let (rect, found) = bare(&cramped, Some(Status::RootCause));
+        let found = found.expect("the box has a status");
+        assert_eq!(found.badge.center, rect.center());
+        assert!(found.otherwise.is_none());
+
+        assert!(bare(&leaf, None).1.is_none());
+    }
+
+    /// A bounds of the extent a badge held at its floor has, with its top left
+    /// corner at `(x, y)`.
+    fn badge_bounds(x: f32, y: f32) -> Bounds<Pixels> {
+        Bounds::new(point(px(x), px(y)), size(px(BADGE_CELL), px(BADGE_CELL)))
+    }
+
+    /// Whether two badges meet is a matter of their bounds alone, wherever
+    /// the two fall among the cells they are found by.
+    #[test]
+    fn a_badge_meets_another_only_where_their_bounds_do() {
+        const STEPS: u8 = 44;
+        for step in 0..STEPS {
+            let at = 100.0 + 2.0 * BADGE_CELL * f32::from(step) / f32::from(STEPS);
+            let mut ground = BadgeGround::with_capacity(1);
+            ground.take(badge_bounds(at, at));
+            for cells in [1.05, 1.25, 1.5, 1.75, 1.95, 3.0] {
+                let apart = cells * BADGE_CELL;
+                for (x, y) in [(apart, 0.0), (0.0, apart), (-apart, 0.0), (0.0, -apart)] {
+                    assert!(
+                        ground.is_free(badge_bounds(at + x, at + y)),
+                        "at {at}, apart by {x}, {y}"
+                    );
+                }
+            }
+            for cells in [0.0, 0.5, 0.95] {
+                let apart = cells * BADGE_CELL;
+                for (x, y) in [(apart, 0.0), (0.0, apart), (-apart, -apart)] {
+                    assert!(
+                        !ground.is_free(badge_bounds(at + x, at + y)),
+                        "at {at}, apart by {x}, {y}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_badge_meets_any_of_several_reaching_one_cell() {
+        // Three badges clear of one another, each reaching the cell between
+        // them.
+        let standing = [(95.0, 95.0), (107.0, 95.0), (95.0, 107.0)];
+        let mut ground = BadgeGround::with_capacity(standing.len());
+        for (x, y) in standing {
+            assert!(ground.is_free(badge_bounds(x, y)));
+            ground.take(badge_bounds(x, y));
+        }
+        for (x, y) in standing {
+            assert!(!ground.is_free(badge_bounds(x + 0.5, y + 0.5)));
+        }
+        assert!(ground.is_free(badge_bounds(107.0, 107.0)));
+    }
+
+    fn bare_at(x: f32, y: f32, status: Status) -> BareBadge {
+        BareBadge {
+            badge: StatusBadge {
+                center: point(px(x), px(y)),
+                half: STATUS_FLOOR,
+                status,
+                alpha: 1.0,
+            },
+            otherwise: None,
+        }
+    }
+
+    fn placed_at(placed: &[StatusBadge]) -> Vec<(f32, f32, Status)> {
+        placed
+            .iter()
+            .map(|badge| (badge.center.x.into(), badge.center.y.into(), badge.status))
+            .collect()
+    }
+
+    #[test]
+    fn of_bare_badges_on_one_ground_the_most_severe_stands() {
+        let mut placed = Vec::new();
+        place_bare(
+            vec![
+                bare_at(100.0, 100.0, Status::Succeeded),
+                bare_at(105.0, 100.0, Status::RootCause),
+                bare_at(110.0, 100.0, Status::Failed),
+                bare_at(300.0, 100.0, Status::Succeeded),
+            ],
+            &[],
+            &mut placed,
+        );
+        assert_eq!(
+            placed_at(&placed),
+            [
+                (105.0, 100.0, Status::RootCause),
+                (300.0, 100.0, Status::Succeeded)
+            ]
+        );
+    }
+
+    #[test]
+    fn of_bare_badges_as_severe_on_one_ground_the_first_walked_stands() {
+        let mut placed = Vec::new();
+        place_bare(
+            vec![
+                bare_at(100.0, 100.0, Status::Failed),
+                bare_at(105.0, 100.0, Status::Failed),
+            ],
+            &[],
+            &mut placed,
+        );
+        assert_eq!(placed_at(&placed), [(100.0, 100.0, Status::Failed)]);
+    }
+
+    #[test]
+    fn a_bare_badge_gives_way_to_a_badge_on_its_label_and_to_a_floated_title() {
+        let labelled = bare_at(100.0, 100.0, Status::Succeeded).badge;
+        let title = Bounds::new(point(px(190.0), px(90.0)), size(px(40.0), px(17.0)));
+        let mut placed = vec![labelled];
+        place_bare(
+            vec![
+                bare_at(104.0, 104.0, Status::RootCause),
+                bare_at(200.0, 100.0, Status::RootCause),
+                bare_at(300.0, 100.0, Status::RootCause),
+            ],
+            &[title],
+            &mut placed,
+        );
+        assert_eq!(
+            placed_at(&placed),
+            [
+                (100.0, 100.0, Status::Succeeded),
+                (300.0, 100.0, Status::RootCause)
+            ]
+        );
+    }
+
+    #[test]
+    fn a_bare_badge_whose_ground_is_taken_stands_at_its_other_place() {
+        let title = Bounds::new(point(px(90.0), px(90.0)), size(px(40.0), px(17.0)));
+        let elsewhere = |x, y| BareBadge {
+            otherwise: Some(point(px(x), px(y))),
+            ..bare_at(100.0, 100.0, Status::Succeeded)
+        };
+        let mut placed = Vec::new();
+        place_bare(
+            vec![elsewhere(100.0, 120.0), elsewhere(110.0, 100.0)],
+            &[title],
+            &mut placed,
+        );
+        assert_eq!(placed_at(&placed), [(100.0, 120.0, Status::Succeeded)]);
+
+        let mut unhindered = Vec::new();
+        place_bare(vec![elsewhere(100.0, 120.0)], &[], &mut unhindered);
+        assert_eq!(placed_at(&unhindered), [(100.0, 100.0, Status::Succeeded)]);
+    }
+
+    /// The corners of the glyph `status` is drawn as, for a half-width of
+    /// one; `None` for a round one.
+    fn glyph_corners(status: Status) -> Option<Vec<(f32, f32)>> {
+        let block = |w: f32, h: f32| vec![(-w, -h), (w, -h), (w, h), (-w, h)];
+        match Glyph::of(status) {
+            Glyph::Disc | Glyph::Ring => None,
+            Glyph::Bar => Some(block(1.0, BAR_HALF_HEIGHT)),
+            Glyph::Square => Some(block(SQUARE_HALF_SIDE, SQUARE_HALF_SIDE)),
+            Glyph::TriangleUp => Some(TRIANGLE.to_vec()),
+            Glyph::TriangleDown => Some(TRIANGLE_DOWN.to_vec()),
+            Glyph::Cross => Some(cross().to_vec()),
+        }
+    }
+
+    #[test]
+    fn no_status_glyph_is_the_diamond_of_a_transition_badge() {
+        for status in Status::ALL {
+            let Some(corners) = glyph_corners(status) else {
+                continue;
+            };
+            let diamond = corners.len() == DIAMOND.len()
+                && DIAMOND.iter().all(|(x, y)| {
+                    corners.iter().any(|(cx, cy)| {
+                        (cx - x).abs() < OUTLINE_SLACK && (cy - y).abs() < OUTLINE_SLACK
+                    })
+                });
+            assert!(!diamond, "{status:?}");
+        }
+    }
+
+    /// How far two coordinates may part and still count as one, covering the
+    /// rounding of the f32 arithmetic an outline goes through.
+    const OUTLINE_SLACK: f32 = 1e-4;
+
+    fn assert_outline(found: &[(f32, f32)], expected: &[(f32, f32)]) {
+        assert_eq!(found.len(), expected.len());
+        for (found, expected) in found.iter().zip(expected) {
+            assert!(
+                (found.0 - expected.0).abs() < OUTLINE_SLACK
+                    && (found.1 - expected.1).abs() < OUTLINE_SLACK,
+                "{found:?} for {expected:?}"
+            );
+        }
+    }
+
+    /// A rim stands the same width off every side of its glyph, round a corner
+    /// turning either way and whichever way round the corners are listed.
+    #[test]
+    fn an_outline_set_out_keeps_one_distance_from_every_side() {
+        let square = [(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)];
+        let grown = [(-1.5, -1.5), (1.5, -1.5), (1.5, 1.5), (-1.5, 1.5)];
+        assert_outline(&outset(square, 0.5), &grown);
+        let (mut reversed, mut grown_reversed) = (square, grown);
+        reversed.reverse();
+        grown_reversed.reverse();
+        assert_outline(&outset(reversed, 0.5), &grown_reversed);
+
+        // An L, whose one corner turns the other way from the rest.
+        let l = [
+            (0.0, 0.0),
+            (2.0, 0.0),
+            (2.0, 1.0),
+            (1.0, 1.0),
+            (1.0, 2.0),
+            (0.0, 2.0),
+        ];
+        let grown = [
+            (-0.25, -0.25),
+            (2.25, -0.25),
+            (2.25, 1.25),
+            (1.25, 1.25),
+            (1.25, 2.25),
+            (-0.25, 2.25),
+        ];
+        assert_outline(&outset(l, 0.25), &grown);
+    }
+
     #[test]
     fn a_box_on_its_way_out_carries_no_disclosure_caret() {
         let g = covered_container();
@@ -1545,8 +2424,8 @@ mod tests {
 mod colors {
     use super::*;
     use bviz_ui_theme::{
-        MIN_DISTINCT_COLOR, MIN_EDGED_STEP, MIN_TEXT_CONTRAST, built_in_themes, contrast_ratio,
-        distance, label_on, level_step, luminance, oklch, over,
+        MIN_DISTINCT_COLOR, MIN_EDGED_STEP, MIN_SECONDARY_CONTRAST, MIN_TEXT_CONTRAST,
+        built_in_themes, contrast_ratio, distance, label_on, level_step, luminance, oklch, over,
     };
     use gpui::SharedString;
 
@@ -1631,6 +2510,64 @@ mod colors {
                         apart >= MIN_DISTINCT_COLOR,
                         "{theme} {kind:?}/{other:?}: {apart}"
                     );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn every_status_ink_is_seen_on_its_rim() {
+        for (theme, p) in palettes() {
+            for status in Status::ALL {
+                let held = contrast_ratio(p.status_color(status), p.background);
+                assert!(
+                    held >= MIN_SECONDARY_CONTRAST,
+                    "{theme} {status:?}: {held}:1"
+                );
+            }
+        }
+    }
+
+    /// The rim is a few pixels wide, so what lies past it counts too: on every
+    /// fill a badge is set on, bare or under the hover mark's wash, either the
+    /// ink holds its contrast against the fill itself or the rim stands off
+    /// the fill as a line of its own around the glyph.
+    #[test]
+    fn every_status_badge_is_seen_on_the_box_it_marks() {
+        for (theme, p) in palettes() {
+            for fill in box_fills(&p) {
+                for ground in [fill, over(p.highlight_wash(1.0), fill)] {
+                    let rimmed = distance(p.background, ground) >= MIN_DISTINCT_COLOR;
+                    for status in Status::ALL {
+                        let held = contrast_ratio(p.status_color(status), ground);
+                        assert!(
+                            rimmed || held >= MIN_SECONDARY_CONTRAST,
+                            "{theme} {status:?}: {held}:1 on a fill the rim does not show on"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// Statuses drawn in one ink are told apart by their glyphs; the inks
+    /// themselves say which kind of ending a status is, so no two of them may
+    /// be taken for each other.
+    #[test]
+    fn the_status_inks_are_told_apart() {
+        for (theme, p) in palettes() {
+            let mut inks: Vec<Rgba> = Vec::with_capacity(Status::ALL.len());
+            for status in Status::ALL {
+                let ink = p.status_color(status);
+                if !inks.contains(&ink) {
+                    inks.push(ink);
+                }
+            }
+            assert!(inks.len() > 1, "{theme}: every status wears one ink");
+            for (i, ink) in inks.iter().enumerate() {
+                for other in &inks[i + 1..] {
+                    let apart = distance(*ink, *other);
+                    assert!(apart >= MIN_DISTINCT_COLOR, "{theme}: {apart}");
                 }
             }
         }

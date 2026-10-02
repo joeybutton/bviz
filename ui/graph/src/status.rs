@@ -31,6 +31,18 @@ pub(crate) enum Status {
 }
 
 impl Status {
+    /// Every status, in the order of the enum.
+    #[cfg(test)]
+    pub(crate) const ALL: [Status; 7] = [
+        Status::Skipped,
+        Status::Succeeded,
+        Status::Unfinished,
+        Status::Flaky,
+        Status::TestFailed,
+        Status::Failed,
+        Status::RootCause,
+    ];
+
     /// A test the build could not build failed through something it depends
     /// on, which its build outcome traces back.
     fn of_test(status: TestStatus) -> Status {
@@ -93,6 +105,12 @@ impl Statuses {
         Self {
             worst: rolled_up(reported.own, graph),
         }
+    }
+
+    /// The status of the node `id` names. An id past the graph's own, as a
+    /// merge group's is, reads as a node the build reports nothing of.
+    pub(crate) fn get(&self, id: Id) -> Option<Status> {
+        self.worst.get(id.0 as usize).copied().flatten()
     }
 }
 
@@ -248,10 +266,6 @@ mod tests {
         }
     }
 
-    fn status(statuses: &Statuses, node: Id) -> Option<Status> {
-        statuses.worst.get(node.0 as usize).copied().flatten()
-    }
-
     fn target(label: &str, configuration: Option<&str>) -> ConfiguredTarget {
         ConfiguredTarget::new(label.into(), configuration.map(Into::into))
     }
@@ -294,14 +308,28 @@ mod tests {
 
         let unreported = built.resolve(&Outcomes::default());
         assert_eq!(unreported, Statuses::default());
-        assert_eq!(status(&unreported, configured), None);
+        assert_eq!(unreported.get(configured), None);
 
         let mut elsewhere = Outcomes::default();
         elsewhere.report_build(target("//lib:lib", Some(CONFIG)), BuildOutcome::Built);
         elsewhere.report_failed_action("bazel-out/k8/bin/lib/lib.o".into(), failed_action(None));
         let unrelated = built.resolve(&elsewhere);
         assert_eq!(unrelated, Statuses::default());
-        assert_eq!(status(&unrelated, package), None);
+        assert_eq!(unrelated.get(package), None);
+    }
+
+    #[test]
+    fn an_id_past_the_graphs_own_has_no_status() {
+        let mut built = Built::default();
+        let (_, _, bin) = built.target("app", "bin");
+        let mut outcomes = Outcomes::default();
+        outcomes.report_build(target("//app:bin", Some(CONFIG)), BuildOutcome::Built);
+
+        let statuses = built.resolve(&outcomes);
+
+        assert_eq!(statuses.get(bin), Some(Status::Succeeded));
+        let group = Id(built.names.len() as u32);
+        assert_eq!(statuses.get(group), None);
     }
 
     #[test]
@@ -314,8 +342,8 @@ mod tests {
 
         let statuses = built.resolve(&outcomes);
 
-        assert_eq!(status(&statuses, bin), Some(Status::Succeeded));
-        assert_eq!(status(&statuses, lib), None);
+        assert_eq!(statuses.get(bin), Some(Status::Succeeded));
+        assert_eq!(statuses.get(lib), None);
     }
 
     #[test]
@@ -331,9 +359,9 @@ mod tests {
 
         let statuses = built.resolve(&outcomes);
 
-        assert_eq!(status(&statuses, bin), Some(Status::Skipped));
-        assert_eq!(status(&statuses, lib), Some(Status::Unfinished));
-        assert_eq!(status(&statuses, lib_configured), None);
+        assert_eq!(statuses.get(bin), Some(Status::Skipped));
+        assert_eq!(statuses.get(lib), Some(Status::Unfinished));
+        assert_eq!(statuses.get(lib_configured), None);
     }
 
     #[test]
@@ -353,12 +381,12 @@ mod tests {
 
         let statuses = built.resolve(&outcomes);
 
-        assert_eq!(status(&statuses, action), Some(Status::RootCause));
+        assert_eq!(statuses.get(action), Some(Status::RootCause));
         for holding in [gen_configured, gen_target, gen_package] {
-            assert_eq!(status(&statuses, holding), Some(Status::RootCause));
+            assert_eq!(statuses.get(holding), Some(Status::RootCause));
         }
         for dependent in [app, app_target, app_package] {
-            assert_eq!(status(&statuses, dependent), Some(Status::Failed));
+            assert_eq!(statuses.get(dependent), Some(Status::Failed));
         }
     }
 
@@ -379,8 +407,8 @@ mod tests {
 
         let statuses = built.resolve(&outcomes);
 
-        assert_eq!(status(&statuses, generator), Some(Status::RootCause));
-        assert_eq!(status(&statuses, app), Some(Status::Failed));
+        assert_eq!(statuses.get(generator), Some(Status::RootCause));
+        assert_eq!(statuses.get(app), Some(Status::Failed));
     }
 
     #[test]
@@ -397,8 +425,8 @@ mod tests {
 
         let statuses = built.resolve(&outcomes);
 
-        assert_eq!(status(&statuses, uncaused), Some(Status::RootCause));
-        assert_eq!(status(&statuses, untraced), Some(Status::RootCause));
+        assert_eq!(statuses.get(uncaused), Some(Status::RootCause));
+        assert_eq!(statuses.get(untraced), Some(Status::RootCause));
     }
 
     #[test]
@@ -417,9 +445,9 @@ mod tests {
 
         let statuses = built.resolve(&outcomes);
 
-        assert_eq!(status(&statuses, broken), Some(Status::RootCause));
-        assert_eq!(status(&statuses, app), Some(Status::Failed));
-        assert_eq!(status(&statuses, app_configured), None);
+        assert_eq!(statuses.get(broken), Some(Status::RootCause));
+        assert_eq!(statuses.get(app), Some(Status::Failed));
+        assert_eq!(statuses.get(app_configured), None);
     }
 
     #[test]
@@ -443,7 +471,7 @@ mod tests {
 
             let statuses = built.resolve(&outcomes);
 
-            assert_eq!(status(&statuses, check), Some(expected), "{run:?}");
+            assert_eq!(statuses.get(check), Some(expected), "{run:?}");
         }
     }
 
@@ -475,9 +503,9 @@ mod tests {
 
         let statuses = built.resolve(&outcomes);
 
-        assert_eq!(status(&statuses, check), Some(Status::Failed));
-        assert_eq!(status(&statuses, aliased), Some(Status::Failed));
-        assert_eq!(status(&statuses, generator), Some(Status::RootCause));
+        assert_eq!(statuses.get(check), Some(Status::Failed));
+        assert_eq!(statuses.get(aliased), Some(Status::Failed));
+        assert_eq!(statuses.get(generator), Some(Status::RootCause));
     }
 
     #[test]
@@ -494,11 +522,33 @@ mod tests {
 
         let statuses = built.resolve(&outcomes);
 
-        assert_eq!(status(&statuses, bin), Some(Status::Succeeded));
-        assert_eq!(status(&statuses, windows), Some(Status::Skipped));
-        assert_eq!(status(&statuses, windows_target), Some(Status::Skipped));
-        assert_eq!(status(&statuses, app_package), Some(Status::Succeeded));
-        assert_eq!(status(&statuses, tools_package), Some(Status::Skipped));
+        assert_eq!(statuses.get(bin), Some(Status::Succeeded));
+        assert_eq!(statuses.get(windows), Some(Status::Skipped));
+        assert_eq!(statuses.get(windows_target), Some(Status::Skipped));
+        assert_eq!(statuses.get(app_package), Some(Status::Succeeded));
+        assert_eq!(statuses.get(tools_package), Some(Status::Skipped));
+    }
+
+    #[test]
+    fn all_holds_every_status_in_the_order_of_the_enum() {
+        // Exhaustive, so that a status the enum gains has to be placed here.
+        let next = |status| match status {
+            Status::Skipped => Some(Status::Succeeded),
+            Status::Succeeded => Some(Status::Unfinished),
+            Status::Unfinished => Some(Status::Flaky),
+            Status::Flaky => Some(Status::TestFailed),
+            Status::TestFailed => Some(Status::Failed),
+            Status::Failed => Some(Status::RootCause),
+            Status::RootCause => None,
+        };
+        let mut walked = Vec::with_capacity(Status::ALL.len());
+        let mut at = Some(Status::Skipped);
+        while let Some(status) = at {
+            assert_eq!(status as usize, walked.len(), "{status:?}");
+            walked.push(status);
+            at = next(status);
+        }
+        assert_eq!(walked, Status::ALL);
     }
 
     #[test]
@@ -515,7 +565,7 @@ mod tests {
 
         let statuses = built.resolve(&outcomes);
 
-        assert_eq!(status(&statuses, bin), Some(Status::Unfinished));
+        assert_eq!(statuses.get(bin), Some(Status::Unfinished));
     }
 
     #[test]
@@ -540,12 +590,12 @@ mod tests {
 
         let statuses = built.resolve(&outcomes);
 
-        assert_eq!(status(&statuses, bin), Some(Status::Succeeded));
-        assert_eq!(status(&statuses, bin_target), Some(Status::Succeeded));
-        assert_eq!(status(&statuses, lib), Some(Status::Unfinished));
-        assert_eq!(status(&statuses, lib_target), Some(Status::Unfinished));
-        assert_eq!(status(&statuses, app_package), Some(Status::Unfinished));
-        assert_eq!(status(&statuses, tests), Some(Status::Flaky));
-        assert_eq!(status(&statuses, idle), None);
+        assert_eq!(statuses.get(bin), Some(Status::Succeeded));
+        assert_eq!(statuses.get(bin_target), Some(Status::Succeeded));
+        assert_eq!(statuses.get(lib), Some(Status::Unfinished));
+        assert_eq!(statuses.get(lib_target), Some(Status::Unfinished));
+        assert_eq!(statuses.get(app_package), Some(Status::Unfinished));
+        assert_eq!(statuses.get(tests), Some(Status::Flaky));
+        assert_eq!(statuses.get(idle), None);
     }
 }

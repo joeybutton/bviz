@@ -115,6 +115,10 @@ impl Loaded {
         }
     }
 
+    pub(crate) fn statuses(&self) -> &Statuses {
+        &self.statuses
+    }
+
     /// Takes up what the build of `session` reports of the graph's nodes, and
     /// says whether that changed the status of any. Outcomes already taken up
     /// are not read again.
