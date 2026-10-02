@@ -16,12 +16,11 @@ use bviz_graph_layout::Id;
 use bviz_graph_layout::select::labels::LabelIndex;
 use bviz_graph_layout::select::pattern::Pattern;
 use bviz_graph_layout::select::{Base, Filter, Predicate, Rule, Visibility};
-use bviz_ui_components::{Button, TextInput};
+use bviz_ui_components::{Button, QueryField, QueryFieldEvent};
 use gpui::{
     ClickEvent, Context, Div, Entity, Focusable, IntoElement, MouseButton, MouseDownEvent, Pixels,
     SharedString, Stateful, Subscription, Task, Window, actions, div, prelude::*, px, relative,
 };
-use std::time::Duration;
 
 actions!(bviz_graph, [DismissResults]);
 
@@ -29,16 +28,14 @@ actions!(bviz_graph, [DismissResults]);
 /// single-key bindings stand down while a pattern is being typed into it.
 pub(crate) const KEY_CONTEXT: &str = "GraphSearch";
 
-/// How long typing must settle before the pattern is matched, so a pattern part
-/// typed costs one pass over the labels rather than one per character.
-const SETTLE: Duration = Duration::from_millis(150);
-
 /// How many matches the result list names. It is a sample of what the pattern
 /// reaches, so it is short enough to read at a glance.
 const PREVIEW: usize = 20;
 
 /// Width the field is drawn at, wide enough for a package path and a target.
 const FIELD_WIDTH: Pixels = px(240.);
+
+const PLACEHOLDER: &str = "search labels: //foo/…";
 
 /// Width the result list is drawn at, over the drawing it names boxes of.
 const RESULTS_WIDTH: Pixels = px(360.);
@@ -109,8 +106,7 @@ pub(crate) struct Found {
 /// pattern named, and whether it is up.
 #[derive(Default)]
 struct Card {
-    /// What the field held when matching was last started, by which a repaint of
-    /// the field is told from an edit to it.
+    /// The pattern as typed.
     text: SharedString,
     /// What `text` names, absent while the matching for it is still running.
     found: Option<Found>,
@@ -124,7 +120,7 @@ struct Card {
 impl Card {
     /// Takes up `text` as the pattern the card stands for, which brings the card
     /// back over the matches still to be found; `false` where the card already
-    /// stands for that text, which a repaint of the field reports.
+    /// stands for that text.
     fn typed(&mut self, text: SharedString) -> bool {
         if self.text == text {
             return false;
@@ -154,20 +150,20 @@ impl Card {
 /// The label search: the field a pattern is typed into, and the card reading
 /// what matching it last found.
 pub(crate) struct Search {
-    field: Entity<TextInput>,
+    field: Entity<QueryField>,
     card: Card,
     /// Follows the field's focus with the card; installed on the first render,
     /// where the window is in hand.
     watching: Option<[Subscription; 2]>,
-    /// The wait for typing to settle and the matching that follows it, held so
-    /// that the next edit replaces — and so cancels — both.
+    /// The matching of the pattern typed, held so that the next edit replaces —
+    /// and so cancels — it.
     _matching: Task<()>,
 }
 
 impl Search {
     pub(crate) fn new(cx: &mut Context<GraphPanel>) -> Self {
         Search {
-            field: cx.new(|cx| TextInput::new(cx, "search labels: //foo/…", 0)),
+            field: cx.new(|cx| QueryField::new("search", PLACEHOLDER, FIELD_WIDTH, cx)),
             card: Card::default(),
             watching: None,
             _matching: Task::ready(()),
@@ -175,7 +171,7 @@ impl Search {
     }
 
     /// The field, for subscribing to what is typed into it.
-    pub(crate) fn field(&self) -> &Entity<TextInput> {
+    pub(crate) fn field(&self) -> &Entity<QueryField> {
         &self.field
     }
 
@@ -184,35 +180,41 @@ impl Search {
     }
 }
 
-/// Takes up what the field now holds: the pattern is matched once typing
-/// settles, and emptying the field takes the search back off at once.
-pub(crate) fn typed(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
-    let text = view.search.field.read(cx).content();
-    if !view.search.card.typed(text.clone()) {
-        return;
+/// Takes up what the field tells of the text typed into it: an edit brings
+/// the card back over the pattern, which is matched once typing settles, and
+/// emptying the field takes the search back off at once.
+pub(crate) fn typed(
+    view: &mut GraphPanel,
+    field: Entity<QueryField>,
+    event: &QueryFieldEvent,
+    cx: &mut Context<GraphPanel>,
+) {
+    match event {
+        QueryFieldEvent::Edited => {
+            let text = field.read(cx).text(cx);
+            if !view.search.card.typed(text.clone()) {
+                return;
+            }
+            view.search._matching = Task::ready(());
+            if text.is_empty() {
+                let filter = cleared(view.derived.filter());
+                checklist::set_filter(view, filter, cx);
+                return;
+            }
+            cx.notify();
+        }
+        QueryFieldEvent::Settled => match_pattern(view, cx),
     }
-    if text.is_empty() {
-        view.search._matching = Task::ready(());
-        let filter = cleared(view.derived.filter());
-        checklist::set_filter(view, filter, cx);
-        return;
-    }
-    match_pattern(view, cx);
-    cx.notify();
 }
 
 /// Matches the pattern the card stands for over the graph's labels, off the UI
-/// thread and once typing has settled. An empty field names nothing to match.
+/// thread. An empty field names nothing to match.
 fn match_pattern(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
     let text = view.search.card.text.clone();
-    if text.is_empty() {
+    let Some(index) = view.labels(cx).filter(|_| !text.is_empty()) else {
         return;
-    }
+    };
     view.search._matching = cx.spawn(async move |view, cx| {
-        cx.background_executor().timer(SETTLE).await;
-        let Ok(Some(index)) = view.read_with(cx, |view, cx| view.labels(cx)) else {
-            return;
-        };
         let pattern = Pattern::parse(&text);
         let found = cx
             .background_executor()
@@ -325,9 +327,7 @@ pub(crate) fn reset(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
 
 /// Empties the field, which restores the rules the search displaced.
 fn clear(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
-    view.search
-        .field
-        .update(cx, |field, cx| field.set_content("", cx));
+    view.search.field.update(cx, |field, cx| field.clear(cx));
 }
 
 /// `filter` with everything `pattern` names acted on by `act`.
@@ -387,33 +387,16 @@ fn written(rule: &Rule) -> Option<Act> {
     Act::of(rule.visibility)
 }
 
-/// The field a pattern is typed into, with the button that empties it.
+/// The field a pattern is typed into.
 pub(crate) fn field(search: &Search, cx: &mut Context<GraphPanel>) -> impl IntoElement {
-    let typed = !search.card.text.is_empty();
     div()
-        .flex()
-        .items_center()
-        .gap_1()
-        .child(
-            div()
-                .key_context(KEY_CONTEXT)
-                .on_action(cx.listener(|view, _: &DismissResults, _, cx| dismiss(view, cx)))
-                .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(|view, _: &MouseDownEvent, _, cx| pressed(view, cx)),
-                )
-                .w(FIELD_WIDTH)
-                .flex_none()
-                .child(search.field.clone()),
+        .key_context(KEY_CONTEXT)
+        .on_action(cx.listener(|view, _: &DismissResults, _, cx| dismiss(view, cx)))
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(|view, _: &MouseDownEvent, _, cx| pressed(view, cx)),
         )
-        .children(typed.then(|| {
-            Button::new(
-                "search-clear",
-                cx.listener(|view, _: &ClickEvent, _, cx| clear(view, cx)),
-            )
-            .ghost()
-            .icon("x")
-        }))
+        .child(search.field.clone())
 }
 
 /// What the typed pattern reaches, floating over the drawing: how many labels it
@@ -770,9 +753,8 @@ mod tests {
         assert_eq!(card.found, found);
     }
 
-    /// The field notifies on every repaint it makes, so a card put away stays
-    /// away until something is actually typed — at which point it is back over
-    /// the matches for what is being typed.
+    /// A card put away stays away while it is handed the pattern it stands
+    /// for, and is back over the matches for another as that is typed.
     #[test]
     fn a_card_put_away_comes_back_when_the_pattern_is_typed_over() {
         let mut card = listing("//deep/...");

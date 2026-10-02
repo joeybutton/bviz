@@ -401,10 +401,7 @@ impl GraphPanel {
                 checklist::choose_presets(view, event, cx);
             });
         let search = Search::new(cx);
-        // The field notifies on every repaint it makes, so what it holds is
-        // compared with what the search last took up rather than taken for an
-        // edit.
-        let search_typing = cx.observe(search.field(), |view, _, cx| search::typed(view, cx));
+        let search_typing = cx.subscribe(search.field(), search::typed);
         let parent = cx.entity().downgrade();
         let canvas = cx.new(|_| GraphCanvas { parent });
         let changed = cx.observe(&model, |view, _, cx| {

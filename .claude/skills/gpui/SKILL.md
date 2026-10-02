@@ -39,6 +39,8 @@ behaves consistently:
   that boots the shell and opens the first window, the window root view, and the trait
   a view implements to be the thing it frames.
 - `bviz_ui_components::{Button, TextInput}` — a button and a focusable text field.
+- `bviz_ui_components::{QueryField, QueryFieldEvent}` — a text field with a button that
+  empties it, which emits one event per edit and another once typing settles.
 - `bviz_ui_components::track_drag` — a drag that follows the cursor past the window.
 - `bviz_ui_components::load_in_background` — run work off the UI thread, then apply it.
 - `bviz_ui_assets::{text_metrics, shape_line, icon, UI, MONO, load_fonts}` — fonts,

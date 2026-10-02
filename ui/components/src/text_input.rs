@@ -5,10 +5,10 @@
 use crate::track_drag;
 use gpui::{
     App, Bounds, ClipboardItem, Context, CursorStyle, Element, ElementInputHandler, Entity,
-    EntityInputHandler, FocusHandle, Focusable, Font, GlobalElementId, Hsla, InspectorElementId,
-    IntoElement, KeyBinding, LayoutId, MouseButton, MouseDownEvent, PaintQuad, Pixels, Point,
-    Render, ShapedLine, SharedString, Style, TextRun, UTF16Selection, UnderlineStyle, Window, div,
-    fill, point, prelude::*, px, relative, size,
+    EntityInputHandler, EventEmitter, FocusHandle, Focusable, Font, GlobalElementId, Hsla,
+    InspectorElementId, IntoElement, KeyBinding, LayoutId, MouseButton, MouseDownEvent, PaintQuad,
+    Pixels, Point, Render, ShapedLine, SharedString, Style, TextRun, UTF16Selection,
+    UnderlineStyle, Window, div, fill, point, prelude::*, px, relative, size,
 };
 use std::ops::Range;
 
@@ -59,6 +59,11 @@ pub fn bind_keys(cx: &mut App) {
     ]);
 }
 
+/// What a [`TextInput`] holds changed.
+pub struct TextEdited;
+
+impl EventEmitter<TextEdited> for TextInput {}
+
 pub struct TextInput {
     focus_handle: FocusHandle,
     content: SharedString,
@@ -96,7 +101,7 @@ impl TextInput {
 
     /// Replaces what the field holds, leaving the cursor at the end of it.
     pub fn set_content(&mut self, content: impl Into<SharedString>, cx: &mut Context<Self>) {
-        self.content = content.into();
+        self.hold(content.into(), cx);
         let end = self.content.len();
         self.selected_range = end..end;
         self.selection_reversed = false;
@@ -343,10 +348,17 @@ impl TextInput {
             .unwrap_or(self.selected_range.clone())
     }
 
-    fn splice(&mut self, range: &Range<usize>, new_text: &str) {
-        self.content =
-            (self.content[0..range.start].to_owned() + new_text + &self.content[range.end..])
-                .into();
+    fn splice(&mut self, range: &Range<usize>, new_text: &str, cx: &mut Context<Self>) {
+        let spliced =
+            self.content[0..range.start].to_owned() + new_text + &self.content[range.end..];
+        self.hold(spliced.into(), cx);
+    }
+
+    fn hold(&mut self, content: SharedString, cx: &mut Context<Self>) {
+        if content != self.content {
+            self.content = content;
+            cx.emit(TextEdited);
+        }
     }
 }
 
@@ -397,7 +409,7 @@ impl EntityInputHandler for TextInput {
         cx: &mut Context<Self>,
     ) {
         let range = self.replacement_range(range_utf16);
-        self.splice(&range, new_text);
+        self.splice(&range, new_text, cx);
         let cursor = range.start + new_text.len();
         self.selected_range = cursor..cursor;
         self.marked_range = None;
@@ -413,7 +425,7 @@ impl EntityInputHandler for TextInput {
         cx: &mut Context<Self>,
     ) {
         let range = self.replacement_range(range_utf16);
-        self.splice(&range, new_text);
+        self.splice(&range, new_text, cx);
         self.marked_range =
             (!new_text.is_empty()).then(|| range.start..range.start + new_text.len());
         self.selected_range = new_selected_range
