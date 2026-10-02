@@ -15,7 +15,9 @@ use crate::drag::{CLICK_SLOP, DOUBLE_CLICK};
 use crate::hue::{Hue, Swatch, legend_strip};
 use crate::model::{FilterChanged, GraphModel, Loaded, MetricsLanded, SourceReplaced};
 use crate::paint::UNMARKED_FADE;
-use crate::point::{configuration, identify, mnemonic, point_label, primary_output, unit_names};
+use crate::point::{
+    configuration_readings, identify, mnemonic, point_label, primary_output, unit_names,
+};
 use crate::timing::{NodeTimes, Untimed};
 use crate::toolbar::{busy, group};
 use crate::unit_picker::UnitPicker;
@@ -881,9 +883,10 @@ fn describe(
 /// What a row of the list of points under a click reads for `point`, a point
 /// of `unit` — for an action its mnemonic, and the label of its target — and
 /// each reading that could tell it apart from points whose rows read alike,
-/// most compact first: for an action, the name of the file it writes, its
-/// configuration, that file's path in its configuration's output tree, and the
-/// whole path; for a configured target, its configuration.
+/// most compact first: for an action, the name of the file it writes, the
+/// readings of its configuration, that file's path in its configuration's
+/// output tree, and the whole path; for a configured target, the readings of
+/// its configuration.
 fn pick_reading<'a>(
     point: &Metrics,
     unit: Unit,
@@ -891,20 +894,21 @@ fn pick_reading<'a>(
 ) -> (Option<&'a str>, String, Vec<Option<String>>) {
     let shared = &loaded.shared;
     let label = point_label(point.id, shared);
-    let configuration = configuration(point.id, shared);
+    let [short, whole] = configuration_readings(point.id, shared);
     match unit {
         Unit::Action => {
             let output = primary_output(point.id, shared);
             let file = output.map(|output| output.rsplit('/').next().unwrap_or(output));
             let readings = vec![
                 file.map(str::to_owned),
-                configuration,
+                short,
+                whole,
                 output.map(|output| pick::in_output_tree(output).to_owned()),
                 output.map(str::to_owned),
             ];
             (Some(mnemonic(point.id, shared)), label, readings)
         }
-        Unit::ConfiguredTarget => (None, label, vec![configuration]),
+        Unit::ConfiguredTarget => (None, label, vec![short, whole]),
         Unit::Target => (None, label, Vec::new()),
     }
 }

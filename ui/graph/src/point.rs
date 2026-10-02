@@ -1,10 +1,11 @@
 //! How a reader names the points of a measure, and what each one is.
 
 use crate::model::Shared;
-use bviz_graph_layout::facets::Tri;
+use bviz_graph_layout::facets::{ConfigRef, Tri};
 use bviz_graph_layout::metrics::Unit;
 use bviz_graph_layout::select::labels::carried_label;
-use bviz_graph_layout::{Id, Kind};
+use bviz_graph_layout::{Facets, Id, Kind};
+use std::collections::HashMap;
 
 /// How a reader names one thing of a kind, and several.
 pub(crate) struct KindNames {
@@ -110,21 +111,127 @@ pub(crate) fn primary_output(id: Id, shared: &Shared) -> Option<&str> {
     Some(&node.label)
 }
 
-/// The configuration the node `id` is built in, by its mnemonic where it has
-/// one, and marked where it builds a tool the build runs.
+/// The configuration the node `id` is built in, named apart from every other
+/// configuration of the graph.
 pub(crate) fn configuration(id: Id, shared: &Shared) -> Option<String> {
-    let facets = &shared.facets;
-    let config = facets.config(id)?;
-    let entry = facets.config_entry(config);
-    let name = entry
-        .and_then(|entry| entry.mnemonic)
-        .unwrap_or(config.sym());
-    let name = facets.strings().resolve(name);
-    Some(match entry.map(|entry| entry.is_tool) {
-        Some(Tri::Yes) => format!("{name} (exec)"),
-        _ => name.to_owned(),
+    let config = shared.facets.config(id)?;
+    Some(match shared.config_names.get(config) {
+        Some(name) => name.whole.clone(),
+        None => shared.facets.strings().resolve(config.sym()).to_owned(),
     })
+}
+
+/// How the configuration the node `id` is built in reads, most compact
+/// first: by its [`ConfigName::short`] name, then named apart from every
+/// other configuration of the graph.
+pub(crate) fn configuration_readings(id: Id, shared: &Shared) -> [Option<String>; 2] {
+    let config = shared.facets.config(id);
+    let name = config.and_then(|config| shared.config_names.get(config));
+    [
+        name.map(|name| name.short.clone()),
+        configuration(id, shared),
+    ]
+}
+
+/// How each configuration of a graph is named.
+#[derive(Default)]
+pub(crate) struct ConfigNames(HashMap<ConfigRef, ConfigName>);
+
+/// How one configuration of a graph is named.
+pub(crate) struct ConfigName {
+    /// Its mnemonic, or its checksum where it has none, marked where it
+    /// builds a tool the build runs, which several configurations can share.
+    pub(crate) short: String,
+    /// `short`, followed where another configuration shares it by the
+    /// shortest prefix of the checksum telling apart all that do.
+    pub(crate) whole: String,
+}
+
+impl ConfigNames {
+    pub(crate) fn of(facets: &Facets) -> Self {
+        let resolve = |sym| facets.strings().resolve(sym);
+        let mut alike: HashMap<(&str, bool), Vec<ConfigRef>> = HashMap::new();
+        for (config, entry) in facets.configs() {
+            let mnemonic = resolve(entry.mnemonic.unwrap_or(config.sym()));
+            let tool = entry.is_tool == Tri::Yes;
+            alike.entry((mnemonic, tool)).or_default().push(config);
+        }
+        let mut names = HashMap::with_capacity(alike.values().map(Vec::len).sum());
+        for ((mnemonic, tool), configs) in alike {
+            let checksums: Vec<&str> = configs.iter().map(|c| resolve(c.sym())).collect();
+            let prefix = (configs.len() > 1).then(|| distinguishing_prefix(&checksums));
+            for (config, checksum) in configs.into_iter().zip(checksums) {
+                let part = prefix.map(|length| checksum.get(..length).unwrap_or(checksum));
+                let name = |part: Option<&str>| match (tool, part) {
+                    (false, None) => mnemonic.to_owned(),
+                    (true, None) => format!("{mnemonic} (exec)"),
+                    (false, Some(part)) => format!("{mnemonic} ({part})"),
+                    (true, Some(part)) => format!("{mnemonic} (exec, {part})"),
+                };
+                let (short, whole) = (name(None), name(part));
+                names.insert(config, ConfigName { short, whole });
+            }
+        }
+        Self(names)
+    }
+
+    pub(crate) fn get(&self, config: ConfigRef) -> Option<&ConfigName> {
+        self.0.get(&config)
+    }
+}
+
+/// The fewest characters a checksum is cut to, so the part read beside a
+/// mnemonic reads as a checksum rather than as a stray letter or count.
+const MIN_CHECKSUM_PREFIX: usize = 4;
+
+/// The shortest length, at least [`MIN_CHECKSUM_PREFIX`], to which each of
+/// the distinct `checksums` is cut and still differs from every other.
+fn distinguishing_prefix(checksums: &[&str]) -> usize {
+    let mut sorted = checksums.to_vec();
+    sorted.sort_unstable();
+    let shared_prefix =
+        |a: &str, b: &str| a.bytes().zip(b.bytes()).take_while(|(x, y)| x == y).count();
+    let parting = sorted
+        .windows(2)
+        .map(|pair| shared_prefix(pair[0], pair[1]) + 1);
+    parting.max().unwrap_or(0).max(MIN_CHECKSUM_PREFIX)
 }
 
 const MAIN_REPO: &str = "the main repository";
 const UNKNOWN_REPO: &str = "an unnamed repository";
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn checksums_are_cut_to_where_each_parts_from_every_other() {
+        assert_eq!(
+            distinguishing_prefix(&["3f2a01", "9c0b77"]),
+            MIN_CHECKSUM_PREFIX
+        );
+        assert_eq!(distinguishing_prefix(&["abcdef01", "abcdef02", "0"]), 8);
+        assert_eq!(distinguishing_prefix(&["abcde1", "abcdf2"]), 5);
+    }
+
+    /// Two configurations sharing a mnemonic, one of them also the mnemonic
+    /// of a tool's configuration, are named apart by their checksums; each
+    /// other configuration by its mnemonic alone.
+    #[test]
+    fn configurations_sharing_a_mnemonic_are_named_apart_by_checksum() {
+        let mut facets = Facets::default();
+        let fast = facets.intern_config("3f2a01aa", Some("k8-fastbuild"), Tri::No);
+        let trimmed = facets.intern_config("3f2b9900", Some("k8-fastbuild"), Tri::No);
+        let tool = facets.intern_config("77e0", Some("k8-fastbuild"), Tri::Yes);
+        let bare = facets.intern_config("c0ffee", None, Tri::No);
+        let names = ConfigNames::of(&facets);
+        let read = |config| {
+            let name = names.get(config).unwrap();
+            (name.short.as_str(), name.whole.as_str())
+        };
+        assert_eq!(read(fast), ("k8-fastbuild", "k8-fastbuild (3f2a)"));
+        assert_eq!(read(trimmed), ("k8-fastbuild", "k8-fastbuild (3f2b)"));
+        assert_eq!(read(tool), ("k8-fastbuild (exec)", "k8-fastbuild (exec)"));
+        assert_eq!(read(bare), ("c0ffee", "c0ffee"));
+    }
+}

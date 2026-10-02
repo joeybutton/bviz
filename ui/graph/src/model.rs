@@ -1,6 +1,7 @@
 use crate::GraphPanel;
 use crate::build::{build_graph, loaded_inputs};
 use crate::derive::derive_levels;
+use crate::point::ConfigNames;
 use crate::report::Report;
 use crate::status::{Nodes, Statuses};
 use crate::timecard::Timecard;
@@ -54,6 +55,8 @@ pub(crate) struct Shared {
     pub(crate) provenance: Arc<Provenance>,
     /// The inputs the graph was read from.
     pub(crate) inputs: InputSet,
+    /// How the configurations the facets name are named apart.
+    pub(crate) config_names: Arc<ConfigNames>,
 }
 
 /// A graph's map, landing after the rest of the read. Every clone shares the
@@ -277,6 +280,7 @@ pub(crate) fn build(source: GraphSource) -> Result<Read, String> {
     };
     let containers = Arc::new(bviz_graph_layout::lod::expandable_containers(&base));
     let labels = Arc::new(LabelIndex::of(&base, &names, &facets));
+    let config_names = Arc::new(ConfigNames::of(&facets));
     Ok(Read {
         loaded: Loaded::new(
             Shared {
@@ -290,6 +294,7 @@ pub(crate) fn build(source: GraphSource) -> Result<Read, String> {
                 capabilities,
                 provenance: Arc::new(provenance),
                 inputs,
+                config_names,
             },
             Opening {
                 expanded,
@@ -697,12 +702,13 @@ mod tests {
                 reduced_base,
                 map: Placement::pending().0,
                 names: Arc::new(names),
-                facets,
+                facets: Arc::clone(&facets),
                 labels,
                 containers,
                 capabilities: bviz_graph_layout::capability::CapabilitiesBuilder::default().seal(),
                 provenance: Arc::default(),
                 inputs: Input::Query.into(),
+                config_names: Arc::new(ConfigNames::of(&facets)),
             },
             Opening {
                 expanded: HashSet::new(),
