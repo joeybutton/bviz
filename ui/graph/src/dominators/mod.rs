@@ -9,7 +9,7 @@ use crate::Palette;
 use crate::drag::DOUBLE_CLICK;
 use crate::hue::{Colouring, Hue, Swatch, legend_strip};
 use crate::model::{DominatorsLanded, FilterChanged, GraphModel, Shared, SourceReplaced};
-use crate::point::{identify, unit_names};
+use crate::point::{KindNames, identify, unit_names};
 use crate::toolbar::{busy, group};
 use crate::unit_picker::UnitPicker;
 use bviz_graph_layout::Id;
@@ -91,6 +91,8 @@ impl DominatorsPanel {
         let dominators_landed = cx.subscribe(&model, |view, _, landed: &DominatorsLanded, cx| {
             if view.scope(cx) == Some(landed.scope) {
                 view.redraw(cx);
+            } else if view.target_scope() == Some(landed.scope) {
+                view.rehover(cx);
             }
         });
         let filter_changed = cx.subscribe(&model, |view, _, _: &FilterChanged, cx| view.refade(cx));
@@ -119,16 +121,39 @@ impl DominatorsPanel {
         self.picker.as_ref().map(|picker| picker.chosen(cx))
     }
 
-    /// Has the tree of the chosen scope computed, where the panel is shown, and
-    /// draws it where it already is.
+    /// The scope of targets whose tree a tooltip places the configured
+    /// targets drawn in, read from the inputs the tree drawn reads; absent
+    /// where the tree drawn is of another unit.
+    fn target_scope(&self) -> Option<Scope> {
+        let drawn = self.drawn.as_ref()?.coloured.tree.scope();
+        (drawn.unit() == Unit::ConfiguredTarget)
+            .then(|| Scope::new(Unit::Target, drawn.inputs()))
+            .flatten()
+    }
+
+    /// Has the tree of the chosen scope computed, where the panel is shown,
+    /// and draws it where it already is.
     fn compute(&mut self, cx: &mut Context<Self>) {
         let Some(scope) = self.scope(cx).filter(|_| self.shown) else {
             return;
         };
-        self.model
-            .update(cx, |model, cx| model.want_dominators(&[scope], cx));
+        self.want(scope, cx);
         self.redraw(cx);
         self.refade(cx);
+    }
+
+    /// Has the tree of `scope`, the one chosen, computed, and once that is the
+    /// tree drawn, the tree of targets a tooltip places its points in, so
+    /// that the second holds no worker from the first.
+    fn want(&mut self, scope: Scope, cx: &mut Context<Self>) {
+        let landed = self
+            .drawn
+            .as_ref()
+            .is_some_and(|drawn| drawn.coloured.tree.scope() == scope);
+        let as_targets = self.target_scope().filter(|_| landed);
+        let wanted: Vec<Scope> = std::iter::once(scope).chain(as_targets).collect();
+        self.model
+            .update(cx, |model, cx| model.want_dominators(&wanted, cx));
     }
 
     /// Evaluates the filter the graph's other views draw through, where the
@@ -200,6 +225,9 @@ impl DominatorsPanel {
                 hover: None,
                 press: None,
             });
+            if self.shown {
+                self.want(scope, cx);
+            }
             self.invalidate_canvas(cx);
             return;
         }
@@ -269,10 +297,15 @@ impl DominatorsPanel {
             return;
         };
         drawn.focus = focus;
-        let at = drawn.hover.take().map(|hover| hover.at);
         self.invalidate_canvas(cx);
-        if let Some(at) = at {
-            self.hover_at(at, cx);
+        self.rehover(cx);
+    }
+
+    /// Describes the cell under the pointer afresh.
+    fn rehover(&mut self, cx: &mut Context<Self>) {
+        let hover = self.drawn.as_mut().and_then(|drawn| drawn.hover.take());
+        if let Some(hover) = hover {
+            self.hover_at(hover.at, cx);
         }
     }
 
@@ -352,6 +385,9 @@ impl DominatorsPanel {
     /// only where the pointer has moved onto another.
     fn hover_at(&mut self, at: Point<Pixels>, cx: &mut Context<Self>) {
         let cell = self.cell_at(at);
+        let as_targets = self
+            .target_scope()
+            .and_then(|scope| self.model.read(cx).dominators(scope).cloned());
         let Some(drawn) = &mut self.drawn else {
             return;
         };
@@ -363,7 +399,7 @@ impl DominatorsPanel {
                 *hover = cell.map(|cell| Hover {
                     cell,
                     at,
-                    lines: describe(&drawn.coloured, cell.holds, focus),
+                    lines: describe(&drawn.coloured, as_targets.as_deref(), cell.holds, focus),
                 });
             }
         }
@@ -554,16 +590,19 @@ struct Frame {
 }
 
 /// What the tooltip over the cell holding `holds` of the tree of `coloured`
-/// drawn from `focus` reads: what it stands for, and how much of the build
-/// exists only because of it.
-fn describe(coloured: &Coloured, holds: Holds, focus: Option<Focused>) -> Vec<String> {
+/// drawn from `focus` reads: what it stands for, how much of the build exists
+/// only because of it, and where its target stands in `as_targets`, the tree
+/// of the graph's targets.
+fn describe(
+    coloured: &Coloured,
+    as_targets: Option<&Dominators>,
+    holds: Holds,
+    focus: Option<Focused>,
+) -> Vec<String> {
     let (tree, shared) = (&*coloured.tree, &coloured.shared);
     let unit = tree.scope().unit();
     let names = unit_names(unit);
-    let stand_on = |weight: u32, on: &str| {
-        let exist = if weight == 1 { "exists" } else { "exist" };
-        format!("{} {exist} only because of {on}", names.counted(weight))
-    };
+    let stand_on = |weight: u32, on: &str| exist_only_because(weight, &names, on);
     let shares = |weight: u32, within: Option<Focused>| {
         let of_build = format!("{} of the build", share(weight, tree.total()));
         match within {
@@ -600,12 +639,10 @@ fn describe(coloured: &Coloured, holds: Holds, focus: Option<Focused>) -> Vec<St
             }
             lines.push(shares(weight, focus.filter(|_| !on_top)));
             match tree.parent(node) {
-                Some(parent) => {
-                    let dominator = point_name(tree.id(parent), unit, shared);
-                    lines.push(format!("immediately dominated by {dominator}"));
-                }
+                Some(parent) => lines.push(dominated_by(tree, parent, shared)),
                 None => standing(tree, node, shared, &mut lines),
             }
+            lines.extend(as_targets.and_then(|targets| as_target(targets, tree.id(node), shared)));
         }
         Holds::Rest(run) => {
             let (count, weight) = (run.count(), run.weight());
@@ -634,6 +671,35 @@ fn targets_held(targets: u32, only_here: u32) -> Option<String> {
     };
     let covered = unit_names(Unit::Target).counted(targets);
     Some(format!("covering {covered}, {elsewhere}"))
+}
+
+/// Where the target of the configured target `id` stands in `targets`, the
+/// tree of the graph's targets, and how many targets exist only because of
+/// it; absent where it names no target of the tree.
+fn as_target(targets: &Dominators, id: Id, shared: &Shared) -> Option<String> {
+    let node = targets.index_of(shared.facets.label(id)?)?;
+    let names = unit_names(Unit::Target);
+    let place = match (targets.parent(node), targets.standing(node)) {
+        (Some(parent), _) => dominated_by(targets, parent, shared),
+        (None, Standing::TopLevel { .. }) => TOP_LEVEL.to_owned(),
+        (None, Standing::Below(count)) => shared_by(count, names.of(count.value())),
+    };
+    let held = exist_only_because(targets.weight(node), &names, "it");
+    Some(format!("as a target: {place}; {held}"))
+}
+
+/// How a tooltip says that `weight` points, which `names` names, exist only
+/// because of `on`.
+fn exist_only_because(weight: u32, names: &KindNames, on: &str) -> String {
+    let exist = if weight == 1 { "exists" } else { "exist" };
+    format!("{} {exist} only because of {on}", names.counted(weight))
+}
+
+/// How a tooltip names `parent` of `tree` as the immediate dominator of the
+/// point it describes.
+fn dominated_by(tree: &Dominators, parent: u32, shared: &Shared) -> String {
+    let dominator = point_name(tree.id(parent), tree.scope().unit(), shared);
+    format!("immediately dominated by {dominator}")
 }
 
 /// Pushes onto `lines` what a tooltip says of `node`, a top of `tree`: that
