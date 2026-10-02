@@ -255,7 +255,8 @@ fn flame_boxes(
 /// aggregate the box belongs to.
 fn flame_tooltip_lines(hovered: &HoveredBox) -> Vec<String> {
     let HoveredBox { aggregates, boxed } = hovered;
-    let root_total_us = aggregates.flame.root_total_us();
+    let flame = &aggregates.flame;
+    let root_total_us = flame.root_total_us();
     let pct = if root_total_us > 0 {
         100.0 * boxed.total_us as f64 / root_total_us as f64
     } else {
@@ -268,12 +269,11 @@ fn flame_tooltip_lines(hovered: &HoveredBox) -> Vec<String> {
     let detail = format!(
         "{measure}: total {}, self {}, {} span{}, {:.1}% of view",
         format_duration(boxed.total_us),
-        format_duration(boxed.self_us),
+        format_duration(flame.span_self_us(boxed.node)),
         boxed.count,
         if boxed.count == 1 { "" } else { "s" },
         pct,
     );
-    let flame = &aggregates.flame;
     let context = flame
         .kind_or_category(boxed.node)
         .filter(|&c| c != boxed.name);
@@ -1186,6 +1186,59 @@ mod tests {
         let mut lines = flame_tooltip_lines(&hovered);
         lines.pop().expect("the figures");
         lines
+    }
+
+    #[test]
+    fn the_tooltip_gives_a_frame_the_self_time_its_detail_frames_break_out() {
+        // The fetch's own time hangs beneath its frame under the repository's
+        // name, and is still the frame's self time, as its Stats row has it.
+        let profile = kinds_fixture();
+        let figures = |weight| {
+            let aggregates = Arc::new(ScopeAggregate::build_for_tracks(
+                &profile,
+                FlameMode {
+                    weight,
+                    ..FlameMode::default()
+                },
+                &TimeSelection::default(),
+                |_| true,
+            ));
+            let (cache, fl) = laid_out(&aggregates);
+            let flame = &aggregates.flame;
+            let fetching = cache
+                .boxes
+                .iter()
+                .find(|b| flame.str(b.name) == "Fetching repository")
+                .expect("the fetch's frame");
+            let hovered = cache
+                .hit(&aggregates, fl, 0.0, center_of(fl, fetching))
+                .expect("the box at its own center");
+            let row = aggregates
+                .stats
+                .iter()
+                .find(|row| flame.str(row.key) == "Fetching repository")
+                .expect("the fetch's row");
+            (flame_tooltip_lines(&hovered).pop(), row.self_us)
+        };
+        assert_eq!(
+            figures(FlameWeight::Duration),
+            (
+                Some("summed time: total 1.00ms, self 600µs, 1 span, 50.0% of view".to_string()),
+                600
+            )
+        );
+        // The first half of the fetch shares the elapsed time with the wait
+        // on the other lane.
+        assert_eq!(
+            figures(FlameWeight::WallShare),
+            (
+                Some(
+                    "share of wall time: total 750µs, self 550µs, 1 span, 50.0% of view"
+                        .to_string()
+                ),
+                600
+            )
+        );
     }
 
     #[test]

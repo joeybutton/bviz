@@ -457,6 +457,26 @@ impl FlameGraph {
         self.self_us[i]
     }
 
+    /// The time the spans node `i` stands for spent in themselves, `total_us`
+    /// giving each node's total: the node's own less its span children's,
+    /// floored at zero because a node's children can sum past it. The detail
+    /// frames beneath the node are that time broken out by instance, so it
+    /// counts them in where [`self_us`](Self::self_us) leaves them out.
+    pub(crate) fn span_self_us_by(&self, i: usize, total_us: &impl Fn(usize) -> i64) -> i64 {
+        let spanned: i64 = (0..self.child_count(i))
+            .map(|k| self.child_id(i, k))
+            .filter(|&c| !self.is_detail(c))
+            .map(total_us)
+            .sum();
+        (total_us(i) - spanned).max(0)
+    }
+
+    /// [`span_self_us_by`](Self::span_self_us_by) the graph's own weight, for
+    /// the frame `node`.
+    pub fn span_self_us(&self, node: FlameNodeId) -> i64 {
+        self.span_self_us_by(node.0 as usize, &|i| self.total_us[i])
+    }
+
     pub(crate) fn width_us(&self, i: usize) -> i64 {
         self.width_us[i]
     }
@@ -517,7 +537,6 @@ pub struct FlameBox {
     pub node: FlameNodeId,
     pub name: Str,
     pub total_us: i64,
-    pub self_us: i64,
     pub role: SpanRole,
     pub count: u32,
 }
@@ -2247,7 +2266,6 @@ fn box_of(
         node: FlameNodeId(idx as u32),
         name: graph.name(idx),
         total_us: graph.total_us(idx),
-        self_us: graph.self_us(idx),
         role: graph.role(idx),
         count: graph.count(idx),
     }

@@ -44,7 +44,7 @@ impl StatRow {
 /// A detail frame carries part of its parent's own self time under another
 /// label, so a row of its own would double-count that time and split it away
 /// from the label it belongs to. Each is skipped, and its parent contributes
-/// [`self_us_without_details`] instead.
+/// [`FlameGraph::span_self_us_by`] instead.
 pub fn stats_from_flame(graph: &FlameGraph) -> Vec<StatRow> {
     stats_by(graph, |i| graph.total_us(i))
 }
@@ -70,7 +70,7 @@ fn stats_by(graph: &FlameGraph, total_us: impl Fn(usize) -> i64) -> Vec<StatRow>
             continue;
         }
         let rank = graph.rank(i);
-        let self_us = self_us_without_details(graph, i, &total_us);
+        let self_us = graph.span_self_us_by(i, &total_us);
         match &mut rows[rank as usize] {
             Some(row) => {
                 row.count += graph.count(i);
@@ -90,18 +90,6 @@ fn stats_by(graph: &FlameGraph, total_us: impl Fn(usize) -> i64) -> Vec<StatRow>
         }
     }
     rows.into_iter().flatten().collect()
-}
-
-/// The self time node `i` would carry with no detail frames beneath it: its
-/// total less its span children's totals, floored at zero because a node's
-/// children can sum past it.
-fn self_us_without_details(graph: &FlameGraph, i: usize, total_us: &impl Fn(usize) -> i64) -> i64 {
-    let spanned: i64 = (0..graph.child_count(i))
-        .map(|k| graph.child_id(i, k))
-        .filter(|&c| !graph.is_detail(c))
-        .map(total_us)
-        .sum();
-    (total_us(i) - spanned).max(0)
 }
 
 /// Indices into `stats` in the default display order: `self_us` descending,
