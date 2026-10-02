@@ -15,7 +15,7 @@ use crate::toolbar::{busy, group};
 use crate::unit_picker::UnitPicker;
 use bviz_graph_layout::Id;
 use bviz_graph_layout::dominators::{Chosen, Dominators, Roots, Standing, Targets};
-use bviz_graph_layout::metrics::{ByUnit, Scope, Unit};
+use bviz_graph_layout::metrics::{ByUnit, Count, Scope, Unit};
 use bviz_graph_layout::select::{Filter, Verdicts};
 use bviz_graph_layout::target_set::PatternError;
 use bviz_ui_components::{
@@ -834,12 +834,13 @@ impl Focused {
         }
     }
 
-    /// How a tooltip or the breadcrumb names this in `tree`.
-    fn name(self, tree: &Dominators, shared: &Shared) -> String {
+    /// How a tooltip or the breadcrumb names this in `tree`, whose roots
+    /// were chosen `by`.
+    fn name(self, tree: &Dominators, shared: &Shared, by: RootedBy) -> String {
         match self {
-            Self::Shared => shared_name(tree),
+            Self::Shared => shared_name(tree, by),
             Self::Node(node) => point_name(tree.id(node), tree.scope().unit(), shared),
-            Self::Run(run) => run_name(tree, shared, run),
+            Self::Run(run) => run_name(tree, shared, by, run),
         }
     }
 }
@@ -943,14 +944,14 @@ struct Frame {
 /// What the tooltip over the cell holding `holds` of the tree of `coloured`
 /// drawn from `focus` reads: what it stands for, how much of the build exists
 /// only because of it, and where its target stands in `as_targets`, the tree
-/// of the graph's targets.
+/// of targets rooted by the choice that rooted the tree drawn.
 fn describe(
     coloured: &Coloured,
     as_targets: Option<&Dominators>,
     holds: Holds,
     focus: Option<Focused>,
 ) -> Vec<String> {
-    let (tree, shared) = (&*coloured.tree, &coloured.shared);
+    let (tree, shared, by) = (&*coloured.tree, &coloured.shared, coloured.by());
     let unit = tree.scope().unit();
     let names = unit_names(unit);
     let stand_on = |weight: u32, on: &str| exist_only_because(weight, &names, on);
@@ -959,8 +960,8 @@ fn describe(
         match within {
             Some(within) => {
                 let name = match within {
-                    Focused::Shared => what_is_shared(names.many),
-                    Focused::Node(_) | Focused::Run(_) => within.name(tree, shared),
+                    Focused::Shared => what_is_shared(by.word(), names.many),
+                    Focused::Node(_) | Focused::Run(_) => within.name(tree, shared, by),
                 };
                 format!(
                     "{of_build} · {} of {name}",
@@ -976,8 +977,8 @@ fn describe(
         Holds::Build => lines.extend([WHOLE_BUILD.to_owned(), names.counted(tree.total())]),
         Holds::Shared => {
             let (count, weight) = (tree.shared_tops().len() as u32, tree.shared_weight());
-            lines.push(shared_name(tree));
-            lines.push(gathered_as_shared(count, &names));
+            lines.push(shared_name(tree, by));
+            lines.push(gathered_as_shared(count, by.word(), &names));
             lines.push(stand_on(weight, if count == 1 { "it" } else { "them" }));
             lines.push(shares(weight, focus.filter(|_| !on_top)));
         }
@@ -1001,14 +1002,15 @@ fn describe(
             lines.push(shares(weight, focus.filter(|_| !on_top)));
             match tree.parent(node) {
                 Some(parent) => lines.push(dominated_by(tree, parent, shared)),
-                None => standing(tree, node, shared, &mut lines),
+                None => standing(tree, node, by, shared, &mut lines),
             }
-            lines.extend(as_targets.and_then(|targets| as_target(targets, tree.id(node), shared)));
+            let id = tree.id(node);
+            lines.extend(as_targets.and_then(|targets| as_target(targets, id, by, shared)));
         }
         Holds::Rest(run) => {
             let (count, weight) = (run.count(), run.weight());
             lines.push(match on_top {
-                true => run_name(tree, shared, run),
+                true => run_name(tree, shared, by, run),
                 false => format!("{} too narrow to draw apart", names.counted(count)),
             });
             lines.push(stand_on(weight, if count == 1 { "it" } else { "them" }));
@@ -1035,15 +1037,16 @@ fn targets_held(targets: u32, only_here: u32) -> Option<String> {
 }
 
 /// Where the target of the configured target `id` stands in `targets`, the
-/// tree of the graph's targets, and how many targets exist only because of
-/// it; absent where it names no target of the tree.
-fn as_target(targets: &Dominators, id: Id, shared: &Shared) -> Option<String> {
+/// tree of targets whose roots were chosen `by`, and how many targets exist
+/// only because of it; absent where it names no target of the tree.
+fn as_target(targets: &Dominators, id: Id, by: RootedBy, shared: &Shared) -> Option<String> {
     let node = targets.index_of(shared.facets.label(id)?)?;
     let names = unit_names(Unit::Target);
+    let word = by.word();
     let place = match (targets.parent(node), targets.standing(node)) {
         (Some(parent), _) => dominated_by(targets, parent, shared),
-        (None, Standing::Root { .. } | Standing::ReachedRoot(_)) => TOP_LEVEL.to_owned(),
-        (None, Standing::Below(count)) => shared_by(count, names.of(count.value())),
+        (None, Standing::Root { .. } | Standing::ReachedRoot(_)) => word.to_owned(),
+        (None, Standing::Below(count)) => shared_by(count, word, names.of(count.value())),
     };
     let held = exist_only_because(targets.weight(node), &names, "it");
     Some(format!("as a target: {place}; {held}"))
@@ -1063,25 +1066,23 @@ fn dominated_by(tree: &Dominators, parent: u32, shared: &Shared) -> String {
     format!("immediately dominated by {dominator}")
 }
 
-/// Pushes onto `lines` what a tooltip says of `node`, a top of `tree`: that
-/// it is top-level, or how many top-level points share it, listing the
-/// first few.
-fn standing(tree: &Dominators, node: u32, shared: &Shared, lines: &mut Vec<String>) {
+/// Pushes onto `lines` what a tooltip says of `node`, a top of `tree` whose
+/// roots were chosen `by`: that it is a root, and how many roots reach it or
+/// share it, listing the first few.
+fn standing(tree: &Dominators, node: u32, by: RootedBy, shared: &Shared, lines: &mut Vec<String>) {
     let unit = tree.scope().unit();
-    let count = match tree.standing(node) {
+    let word = by.word();
+    let (count, said): (_, fn(Count, &str, &str) -> String) = match tree.standing(node) {
         Standing::Root { in_cycle } => {
-            let depended_on = match in_cycle {
-                false => "nothing depends on it",
-                true => "nothing outside its cycle depends on it",
-            };
-            return lines.push(format!("{TOP_LEVEL}: {depended_on}"));
+            return lines.push(format!("{word}: {}", by.why(in_cycle)));
         }
-        Standing::ReachedRoot(count) | Standing::Below(count) => count,
+        Standing::ReachedRoot(count) => (count, reached_from),
+        Standing::Below(count) => (count, shared_by),
     };
-    let named = tree.roots_above(node, NAMED_TOP_LEVEL);
+    let named = tree.roots_above(node, NAMED_ROOTS);
     let colon = if named.is_empty() { "" } else { ":" };
     let named_as = unit_names(unit).of(count.value());
-    lines.push(format!("{}{colon}", shared_by(count, named_as)));
+    lines.push(format!("{}{colon}", said(count, word, named_as)));
     let listed = named
         .iter()
         .map(|&above| point_name(tree.id(above), unit, shared));
@@ -1099,29 +1100,59 @@ const LISTED: &str = "  · ";
 /// a cycle it belongs to.
 const TOP_LEVEL: &str = "top-level";
 
-/// How a reader says that `how_many` top-level points, called `named`, share
-/// a point.
-fn shared_by(how_many: impl std::fmt::Display, named: &str) -> String {
-    format!("shared by {how_many} {TOP_LEVEL} {named}")
+/// What a reader calls a point a target set names.
+const REQUESTED: &str = "requested";
+
+impl RootedBy {
+    /// What a reader calls the roots so chosen.
+    fn word(self) -> &'static str {
+        match self {
+            RootedBy::Tops => TOP_LEVEL,
+            RootedBy::Targets => REQUESTED,
+        }
+    }
+
+    /// Why a root so chosen is one, where nothing reaches it from outside its
+    /// cycle, which it is `in_cycle` with.
+    fn why(self, in_cycle: bool) -> &'static str {
+        match (self, in_cycle) {
+            (RootedBy::Tops, false) => "nothing depends on it",
+            (RootedBy::Tops, true) => "nothing outside its cycle depends on it",
+            (RootedBy::Targets, _) => "named by the target set",
+        }
+    }
 }
 
-/// How a reader counts the top-level points sharing the shared tops.
+/// How a reader says that `how_many` roots, called `word` `named`, share a
+/// point.
+fn shared_by(how_many: impl std::fmt::Display, word: &str, named: &str) -> String {
+    format!("shared by {how_many} {word} {named}")
+}
+
+/// How a reader counts the roots sharing the shared tops.
 const SEVERAL: &str = "several";
 
 /// How a reader names the shared tops as what a share or a run is taken of,
-/// the top-level points being called `named`.
-fn what_is_shared(named: &str) -> String {
-    format!("what {SEVERAL} {TOP_LEVEL} {named} share")
+/// the roots being called `word` `named`.
+fn what_is_shared(word: &str, named: &str) -> String {
+    format!("what {SEVERAL} {word} {named} share")
 }
 
-/// What a tooltip says of the `count` shared tops, which `names` names.
-fn gathered_as_shared(count: u32, names: &KindNames) -> String {
+/// What a tooltip says of the `count` shared tops, which `names` names, the
+/// roots being called `word`.
+fn gathered_as_shared(count: u32, word: &str, names: &KindNames) -> String {
     let (shared, sharing) = (names.counted(count), names.many);
-    format!("{shared} that two or more {TOP_LEVEL} {sharing} depend on")
+    format!("{shared} that two or more {word} {sharing} depend on")
 }
 
-/// The most top-level points a tooltip names as sharing a top.
-const NAMED_TOP_LEVEL: usize = 3;
+/// How a reader says that `how_many` roots besides a root, called `word`
+/// `named`, reach it.
+fn reached_from(how_many: impl std::fmt::Display, word: &str, named: &str) -> String {
+    format!("{word}, and reached from {how_many} other {word} {named}")
+}
+
+/// The most roots a tooltip names as reaching a top.
+const NAMED_ROOTS: usize = 3;
 
 /// What a click on the cell holding `holds` under `top` does, and a double
 /// click where it holds a point and a graph panel `reveals` it; absent where a
@@ -1329,6 +1360,7 @@ const LEGEND_SWATCH: Pixels = px(8.);
 fn breadcrumb(drawn: &Drawn, palette: &Palette, cx: &Context<DominatorsPanel>) -> Option<Div> {
     let focus = drawn.focus.as_ref()?;
     let (tree, shared) = (&drawn.coloured.tree, &drawn.coloured.shared);
+    let by = drawn.coloured.by();
     // A row whose steps shrink to fit it.
     let row = || div().flex().items_center().min_w_0().overflow_hidden();
     // A name and the hint telling it apart give way in proportion to their
@@ -1374,10 +1406,15 @@ fn breadcrumb(drawn: &Drawn, palette: &Palette, cx: &Context<DominatorsPanel>) -
     let hint = |step: Focused| step.node().and_then(|node| hints.get(&node).cloned());
     for (index, &step) in focus.above.iter().enumerate() {
         let step = Focused::from(step);
-        let step = link(index + 1, step.name(tree, shared), hint(step), Some(step));
+        let step = link(
+            index + 1,
+            step.name(tree, shared, by),
+            hint(step),
+            Some(step),
+        );
         above.push(after(step.into_any_element()));
     }
-    let focused = cell_name(tree, shared, focus.on.holds());
+    let focused = cell_name(tree, shared, by, focus.on.holds());
     let last = after(crumb(focused, hint(focus.on)).into_any_element())
         .flex_shrink_0()
         .max_w(relative(1.));
@@ -1467,6 +1504,7 @@ impl Render for IcicleCanvas {
                 colouring: Arc::clone(&drawn.coloured.colouring),
                 verdicts: panel.fade.as_ref().map(|fade| Arc::clone(&fade.verdicts)),
                 tree: Arc::clone(&drawn.coloured.tree),
+                by: drawn.coloured.by(),
                 top: drawn.top(),
                 above: drawn.focus.as_ref().map_or_else(Vec::new, |focus| {
                     let above = focus.above.iter().map(|&above| Focused::from(above));
@@ -1501,6 +1539,26 @@ mod tests {
     }
 
     #[test]
+    fn roots_read_requested_where_a_target_set_chose_them() {
+        let (tops, targets) = (RootedBy::Tops, RootedBy::Targets);
+        let many = "configured targets";
+        assert_eq!(
+            shared_by(2, tops.word(), many),
+            "shared by 2 top-level configured targets"
+        );
+        assert_eq!(
+            shared_by(2, targets.word(), many),
+            "shared by 2 requested configured targets"
+        );
+        assert_eq!(
+            reached_from(3, targets.word(), many),
+            "requested, and reached from 3 other requested configured targets"
+        );
+        assert_eq!(targets.why(true), "named by the target set");
+        assert_eq!(tops.why(false), "nothing depends on it");
+    }
+
+    #[test]
     fn the_targets_a_subtree_holds_read_by_where_else_they_are_configured() {
         let read = |targets, only_here| targets_held(targets, only_here);
         assert_eq!(read(0, 0), None);
@@ -1518,12 +1576,12 @@ mod tests {
     fn the_tops_gathered_as_shared_are_counted_and_said_to_be_depended_on_by_several() {
         let names = unit_names(Unit::ConfiguredTarget);
         assert_eq!(
-            gathered_as_shared(1, &names),
+            gathered_as_shared(1, TOP_LEVEL, &names),
             "1 configured target that two or more top-level configured targets depend on"
         );
         assert_eq!(
-            gathered_as_shared(7, &names),
-            "7 configured targets that two or more top-level configured targets depend on"
+            gathered_as_shared(7, REQUESTED, &names),
+            "7 configured targets that two or more requested configured targets depend on"
         );
     }
 }

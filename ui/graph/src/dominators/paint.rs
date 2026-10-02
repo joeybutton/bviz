@@ -2,7 +2,7 @@
 //! where it is wide enough to read.
 
 use super::icicle::{self, Cell, Holds, Parent, Run};
-use super::{SEVERAL, WHOLE_BUILD, what_is_shared};
+use super::{RootedBy, SEVERAL, WHOLE_BUILD, what_is_shared};
 use crate::Palette;
 use crate::hints::hints_where_alike;
 use crate::hue::Colouring;
@@ -52,6 +52,8 @@ pub(crate) fn row_height(window: &Window) -> Pixels {
 /// borrow of the panel.
 pub(crate) struct Scene {
     pub(crate) tree: Arc<Dominators>,
+    /// How the roots of `tree` were chosen.
+    pub(crate) by: RootedBy,
     pub(crate) colouring: Arc<Colouring>,
     /// What the cell spanning the top row holds.
     pub(crate) top: Holds,
@@ -87,7 +89,7 @@ pub(crate) fn paint_icicle(
         let (rect, label) = (drawn_rect(&cell), label_on(fill));
         let name = match (index, cell.holds) {
             _ if cell.rect.size.width < LABEL_MIN_WIDTH => String::new(),
-            (0, Holds::Rest(run)) => run_name(&scene.tree, &scene.shared, run),
+            (0, Holds::Rest(run)) => run_name(&scene.tree, &scene.shared, scene.by, run),
             (_, Holds::Rest(run)) => {
                 let (room, font_size) = style.label_room(rect);
                 let width = text_width(window, font_size, label);
@@ -95,13 +97,13 @@ pub(crate) fn paint_icicle(
             }
             (_, Holds::Shared) => {
                 let (room, font_size) = style.label_room(rect);
-                let whole = cell_name(&scene.tree, &scene.shared, Holds::Shared);
+                let whole = cell_name(&scene.tree, &scene.shared, scene.by, Holds::Shared);
                 let count = scene.tree.shared_tops().len();
                 let width = text_width(window, font_size, label);
                 shared_cell_name(whole, count, room, width)
             }
             (_, holds) => {
-                let name = cell_name(&scene.tree, &scene.shared, holds);
+                let name = cell_name(&scene.tree, &scene.shared, scene.by, holds);
                 let hint = match holds {
                     Holds::Node(node) => hints.get(&node),
                     Holds::Build | Holds::Shared | Holds::Rest(_) => None,
@@ -204,13 +206,14 @@ fn rest_fill(palette: &Palette) -> Rgba {
     mix(palette.data.neutral, palette.background, REST_RECEDE)
 }
 
-/// What the cell holding `holds` of `tree` reads.
-pub(crate) fn cell_name(tree: &Dominators, shared: &Shared, holds: Holds) -> String {
+/// What the cell holding `holds` of `tree`, whose roots were chosen `by`,
+/// reads.
+pub(crate) fn cell_name(tree: &Dominators, shared: &Shared, by: RootedBy, holds: Holds) -> String {
     let many = unit_names(tree.scope().unit()).many;
     match holds {
         Holds::Build => format!("whole build · {} {many}", tree.total()),
         Holds::Shared => {
-            let (name, count) = (shared_name(tree), tree.shared_tops().len());
+            let (name, count) = (shared_name(tree, by), tree.shared_tops().len());
             format!("{name} · {count}")
         }
         Holds::Node(node) => point_name(tree.id(node), tree.scope().unit(), shared),
@@ -218,9 +221,10 @@ pub(crate) fn cell_name(tree: &Dominators, shared: &Shared, holds: Holds) -> Str
     }
 }
 
-/// How a reader names the shared tops of `tree`.
-pub(crate) fn shared_name(tree: &Dominators) -> String {
-    super::shared_by(SEVERAL, unit_names(tree.scope().unit()).many)
+/// How a reader names the shared tops of `tree`, its roots being chosen
+/// `by`.
+pub(crate) fn shared_name(tree: &Dominators, by: RootedBy) -> String {
+    super::shared_by(SEVERAL, by.word(), unit_names(tree.scope().unit()).many)
 }
 
 /// Measures text as `window` shapes it at `font_size` in `ink`, in the font
@@ -308,9 +312,9 @@ const NAME_SHARE: f32 = 0.5;
 /// Ends a name cut short.
 const ELLIPSIS: char = '…';
 
-/// What a run of `tree` drawn on top reads, naming what its siblings stand
-/// under.
-pub(crate) fn run_name(tree: &Dominators, shared: &Shared, run: Run) -> String {
+/// What a run of `tree`, whose roots were chosen `by`, reads drawn on top,
+/// naming what its siblings stand under.
+pub(crate) fn run_name(tree: &Dominators, shared: &Shared, by: RootedBy, run: Run) -> String {
     let count = run.count();
     match run.parent() {
         Parent::Node(parent) => {
@@ -318,7 +322,7 @@ pub(crate) fn run_name(tree: &Dominators, shared: &Shared, run: Run) -> String {
             format!("{count} more under {parent}")
         }
         Parent::Shared => {
-            let shared = what_is_shared(unit_names(tree.scope().unit()).many);
+            let shared = what_is_shared(by.word(), unit_names(tree.scope().unit()).many);
             format!("{count} more of {shared}")
         }
         Parent::Build => format!("{count} more under {WHOLE_BUILD}"),
