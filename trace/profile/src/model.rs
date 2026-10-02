@@ -545,6 +545,77 @@ pub fn parks_thread(category: &str) -> bool {
     category == "skyframe evaluator"
 }
 
+/// A repository, identified by its canonical name: two spans name the same
+/// repository only where the names they give it are equal in full.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Repository<'a>(&'a str);
+
+/// What leads a canonical repository name where a span writes the repository
+/// as a label would: `RepositoryName.getNameWithAt`,
+/// <https://github.com/bazelbuild/bazel/blob/9.1.0/src/main/java/com/google/devtools/build/lib/cmdline/RepositoryName.java#L270-L276>
+const CANONICAL_REPOSITORY_SIGIL: &str = "@@";
+
+/// The side of a repository fetch the spans of one Bazel `cat` record. Bazel
+/// fetches a repository on two threads, each with a span of its own open for
+/// as long as it is at it:
+/// <https://github.com/bazelbuild/bazel/blob/9.1.0/src/main/java/com/google/devtools/build/lib/bazel/repository/RepositoryFetchFunction.java#L155-L187>
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FetchSide {
+    /// `ProfilerTask.REPOSITORY_FETCH`, on the Skyframe thread asked for the
+    /// repository. That thread hands the fetch to a worker thread and blocks
+    /// until the worker finishes or needs a Skyframe restart, which ends the
+    /// span; another begins when the thread takes the fetch up again:
+    /// <https://github.com/bazelbuild/bazel/blob/9.1.0/src/main/java/com/google/devtools/build/skyframe/WorkerSkyKeyComputeState.java#L116-L128>
+    /// So while the worker's span is open the host's time is the worker's
+    /// seen a second time, and where the worker runs under no span the host's
+    /// is the only record of the fetch.
+    Host,
+    /// `ProfilerTask.STARLARK_REPOSITORY_FN` around the call of the repository
+    /// rule's implementation function on the worker thread, open across the
+    /// host's restarts:
+    /// <https://github.com/bazelbuild/bazel/blob/9.1.0/src/main/java/com/google/devtools/build/lib/bazel/repository/RepositoryFetchFunction.java#L668-L672>
+    Worker,
+}
+
+const FETCH_HOST_CATEGORY: &str = "Fetching repository";
+const FETCH_WORKER_CATEGORY: &str = "Starlark repository function call";
+
+/// The side of a repository fetch the spans of this Bazel `cat` record, if
+/// any.
+pub fn fetch_side(category: &str) -> Option<FetchSide> {
+    match category {
+        FETCH_HOST_CATEGORY => Some(FetchSide::Host),
+        FETCH_WORKER_CATEGORY => Some(FetchSide::Worker),
+        _ => None,
+    }
+}
+
+impl FetchSide {
+    /// The repository a span of this side named `name` fetches. A host is
+    /// named by the repository as a label writes it. A worker is named by the
+    /// bare canonical name from Bazel 9.0.0 on:
+    /// <https://github.com/bazelbuild/bazel/blob/9.0.0/src/main/java/com/google/devtools/build/lib/bazel/repository/RepositoryFetchFunction.java#L644-L646>
+    /// An earlier Bazel names it by the label of the repository rule's target,
+    /// which no host's repository equals, so no host of such a profile has a
+    /// worker:
+    /// <https://github.com/bazelbuild/bazel/blob/8.8.1/src/main/java/com/google/devtools/build/lib/bazel/repository/starlark/StarlarkRepositoryFunction.java#L309-L311>
+    /// A worker shares its category with the commands the rule runs, which
+    /// are no repository's fetch as a whole and lead with a kind (see
+    /// [`kind_naming`]).
+    pub fn repository(self, name: &str) -> Option<Repository<'_>> {
+        match self {
+            FetchSide::Host => name
+                .strip_prefix(CANONICAL_REPOSITORY_SIGIL)
+                .map(Repository),
+            FetchSide::Worker => {
+                let command = kind_naming(FETCH_WORKER_CATEGORY)
+                    .is_some_and(|naming| matches!(naming.kind_of(name), Some(SpanKind::Named(_))));
+                (!command).then_some(Repository(name))
+            }
+        }
+    }
+}
+
 /// The Bazel `cat`s whose spans, but for those leading with one of the
 /// category's [`NAMED_KINDS`], are named after the one thing each works on — a
 /// repository, a package, a label, a path. Every emitter Bazel 9.1.0 has of
@@ -1533,6 +1604,49 @@ mod tests {
                 ("package creation", Some("an initializer")),
             ]
         );
+    }
+
+    #[test]
+    fn the_two_sides_of_a_fetch_name_one_repository() {
+        let host = fetch_side("Fetching repository").expect("the host's category");
+        let worker = fetch_side("Starlark repository function call").expect("the worker's");
+        assert_eq!((host, worker), (FetchSide::Host, FetchSide::Worker));
+        let repository = "rules_java++toolchains+remote_jdk8_linux";
+        assert_eq!(
+            host.repository(&format!("@@{repository}")),
+            worker.repository(repository)
+        );
+        assert_eq!(worker.repository(repository), Some(Repository(repository)));
+        // A name that only begins as another does is another repository.
+        assert_ne!(
+            host.repository("@@rules_cc+"),
+            worker.repository("rules_cc++cc_configure_extension+local_config_cc")
+        );
+        assert_ne!(
+            host.repository("@@rules_cc+"),
+            worker.repository("rules_cc")
+        );
+    }
+
+    #[test]
+    fn a_span_that_fetches_no_repository_as_a_whole_is_on_neither_side() {
+        for category in [
+            "general information",
+            "Starlark thread context",
+            "Vendoring repository",
+            "bazel module processing",
+            "skyframe evaluator",
+            "",
+        ] {
+            assert_eq!(fetch_side(category), None, "{category}");
+        }
+        // A host names its repository as a label does.
+        assert_eq!(FetchSide::Host.repository("rules_cc+"), None);
+        assert_eq!(FetchSide::Host.repository("@rules_cc+"), None);
+        // The commands a repository rule runs share the worker's category.
+        for name in ["local: /usr/bin/uname -m", "remote: /usr/bin/uname -m"] {
+            assert_eq!(FetchSide::Worker.repository(name), None, "{name}");
+        }
     }
 
     fn timed_slice(start_us: i64, dur_us: i64) -> Slice {
