@@ -890,6 +890,7 @@ mod tests {
     use super::*;
     use crate::graph::{EdgeKind, Kind, Node};
     use crate::intern::Names;
+    use fastrand::Rng;
     use std::collections::{HashMap, HashSet};
 
     fn build(edges: &[(&str, &str)]) -> (Graph, Names) {
@@ -1194,17 +1195,9 @@ mod tests {
         g.edges.iter().map(|e| (e.from, e.to)).collect()
     }
 
-    /// A xorshift generator of indices below a bound, so a randomized test is
-    /// the same on every run.
-    fn random_indices() -> impl FnMut(usize) -> usize {
-        let mut state: u64 = 0x9e37_79b9_7f4a_7c15;
-        move |bound: usize| {
-            state ^= state << 13;
-            state ^= state >> 7;
-            state ^= state << 17;
-            (state % bound as u64) as usize
-        }
-    }
+    /// Seeds a randomized test's generator, so the test draws the same graphs
+    /// on every run.
+    const SEED: u64 = 0x9E37_79B9_7F4A_7C15;
 
     /// A graph of `nodes` nodes and `absent` further ids that name no node, the
     /// ids of both in that order.
@@ -1230,19 +1223,19 @@ mod tests {
     #[test]
     fn random_dags_reduce_as_the_definition_does() {
         const ABSENT: usize = 5;
-        let mut next = random_indices();
+        let mut rng = Rng::with_seed(SEED);
         let mut split = false;
         for (nodes, edges) in [(40, 120), (700, 4_000), (2_000, 6_000), (2_000, 30_000)] {
             let (mut g, _, ids) = with_absent_ids(nodes, ABSENT);
             for _ in 0..edges {
-                let (a, b) = (next(nodes), next(nodes));
+                let (a, b) = (rng.usize(..nodes), rng.usize(..nodes));
                 // Edges point from lower to higher index, so the graph is acyclic.
                 g.add_edge(ids[a.min(b)], ids[a.max(b)], EdgeKind::Aquery);
             }
             for _ in 0..ABSENT {
-                let absent = ids[nodes + next(ABSENT)];
-                g.add_edge(ids[next(nodes)], absent, EdgeKind::Aquery);
-                g.add_edge(absent, ids[next(nodes)], EdgeKind::Aquery);
+                let absent = ids[nodes + rng.usize(..ABSENT)];
+                g.add_edge(ids[rng.usize(..nodes)], absent, EdgeKind::Aquery);
+                g.add_edge(absent, ids[rng.usize(..nodes)], EdgeKind::Aquery);
             }
             let r = dag_reduction(g.clone())
                 .ok()
@@ -1275,18 +1268,22 @@ mod tests {
     #[test]
     fn random_graphs_reduce_through_the_fallback_minimally() {
         const ABSENT: usize = 3;
-        let mut next = random_indices();
+        let mut rng = Rng::with_seed(SEED);
         for round in 0..200 {
-            let nodes = 2 + next(40);
-            let edges = next(4 * nodes);
+            let nodes = 2 + rng.usize(..40);
+            let edges = rng.usize(..4 * nodes);
             let (mut g, n, ids) = with_absent_ids(nodes, ABSENT);
             for _ in 0..edges {
-                g.add_edge(ids[next(nodes)], ids[next(nodes)], EdgeKind::Aquery);
-            }
-            for _ in 0..next(ABSENT) {
                 g.add_edge(
-                    ids[next(nodes)],
-                    ids[nodes + next(ABSENT)],
+                    ids[rng.usize(..nodes)],
+                    ids[rng.usize(..nodes)],
+                    EdgeKind::Aquery,
+                );
+            }
+            for _ in 0..rng.usize(..ABSENT) {
+                g.add_edge(
+                    ids[rng.usize(..nodes)],
+                    ids[nodes + rng.usize(..ABSENT)],
                     EdgeKind::Aquery,
                 );
             }
@@ -1382,10 +1379,10 @@ mod tests {
     /// what a walk from each node finds.
     #[test]
     fn random_graphs_count_what_a_walk_reaches() {
-        let mut next = random_indices();
+        let mut rng = Rng::with_seed(SEED);
         for (nodes, edges) in [(40, 60), (2_000, 3_000), (2_000, 6_000)] {
-            let succ = random_graph(&mut next, nodes, edges);
-            let counted: Vec<bool> = (0..nodes).map(|_| next(4) != 0).collect();
+            let succ = random_graph(&mut rng, nodes, edges);
+            let counted: Vec<bool> = (0..nodes).map(|_| rng.usize(..4) != 0).collect();
             assert_eq!(
                 exact(&succ, &counted),
                 walked(&succ, &counted),
@@ -1396,15 +1393,11 @@ mod tests {
 
     /// A graph of `nodes` nodes and `edges` random edges between them, mostly
     /// ascending so that its cycles stay small.
-    fn random_graph(
-        next: &mut impl FnMut(usize) -> usize,
-        nodes: usize,
-        edges: usize,
-    ) -> Vec<Vec<u32>> {
+    fn random_graph(rng: &mut Rng, nodes: usize, edges: usize) -> Vec<Vec<u32>> {
         let mut succ: Vec<Vec<u32>> = vec![Vec::new(); nodes];
         for _ in 0..edges {
-            let (a, b) = (next(nodes), next(nodes));
-            let (from, to) = match next(50) {
+            let (a, b) = (rng.usize(..nodes), rng.usize(..nodes));
+            let (from, to) = match rng.usize(..50) {
                 0 => (a.max(b), a.min(b)),
                 _ => (a.min(b), a.max(b)),
             };
@@ -1425,10 +1418,10 @@ mod tests {
         /// sampling nested sets.
         const MEAN_ERROR: f64 = 0.2;
 
-        let mut next = random_indices();
+        let mut rng = Rng::with_seed(SEED);
         for (nodes, edges) in [(3_000, 4_500), (3_000, 12_000)] {
-            let succ = random_graph(&mut next, nodes, edges);
-            let counted: Vec<bool> = (0..nodes).map(|_| next(4) != 0).collect();
+            let succ = random_graph(&mut rng, nodes, edges);
+            let counted: Vec<bool> = (0..nodes).map(|_| rng.usize(..4) != 0).collect();
             let counts = counts_within(&succ, |i| counted[i], |i| i as u64, 0);
             let mut errors: Vec<f64> = Vec::new();
             for (count, truth) in counts.into_iter().zip(walked(&succ, &counted)) {
