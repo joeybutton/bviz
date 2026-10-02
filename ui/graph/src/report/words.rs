@@ -1,10 +1,11 @@
 //! The words the card reads what a build reported in.
 
 use super::{
-    Action, BuildTally, Listed, Mismatches, Name, Row, Share, Shown, TestTally, Unbuilt,
-    wholly_cached,
+    Action, Badged, BuildTally, Causes, Ended, Fate, Listed, Mismatches, Name, Row, Said, Saying,
+    Share, Shown, TestTally, Traced, Unbuilt, wholly_cached,
 };
-use bviz_invocation::{Configurations, TestOutcome, TestStatus};
+use crate::status::Status;
+use bviz_invocation::{Configurations, ConfiguredTarget, TestOutcome, TestStatus};
 use std::time::Duration;
 
 /// `count` of a thing named `one`, or `many` where there is not one of it.
@@ -290,6 +291,17 @@ impl Listed {
         }
     }
 
+    /// What the card says of the node of the thing listed, in the words of
+    /// its row. What the build said of the thing is left to the row, whose
+    /// hover has the room for it.
+    fn sentence(&self) -> String {
+        let (name, account) = (self.name(), self.account());
+        match name.lead() {
+            Some(lead) => format!("{lead} {} {account}", name.subject()),
+            None => format!("{} {account}", name.subject()),
+        }
+    }
+
     /// What the build said of the thing listed.
     fn message(&self) -> &str {
         match self {
@@ -348,10 +360,91 @@ impl Row {
     }
 }
 
+impl Traced {
+    /// What the cause says of the failure of `failed`.
+    fn words(&self, failed: ConfiguredTarget<&str>) -> String {
+        match self {
+            Traced::Action(action) => {
+                let (kind, exited) = (kind(&action.mnemonic), exited(action));
+                match action.owner.as_ref().map(ConfiguredTarget::borrowed) {
+                    Some(owner) if owner == failed => format!("its {kind} action {exited}"),
+                    Some(owner) => format!("{} ({kind}) {exited}", owner.label()),
+                    None => format!("the {kind} writing {} {exited}", action.primary_output),
+                }
+            }
+            Traced::Target { label, error } => match error.trim().lines().next() {
+                Some(error) if label == failed.label() => error.to_owned(),
+                Some(error) => format!("{label} could not be loaded or analysed: {error}"),
+                None => format!("{label} could not be loaded or analysed"),
+            },
+        }
+    }
+}
+
+impl Fate {
+    fn words(&self) -> String {
+        let target = self.target.borrowed();
+        let label = target.label();
+        let failed = |how: &str, causes: &Option<Causes>| match causes {
+            Some(Causes { named, more: 0 }) => format!("{label} {how}: {}", named.words(target)),
+            Some(Causes { named, more }) => format!(
+                "{label} {how}: {}, and {}",
+                named.words(target),
+                counted(*more, "more cause", "more causes")
+            ),
+            None => format!("{label} {how}, and the build names no cause"),
+        };
+        match &self.ended {
+            Ended::Built => format!("{label} built"),
+            Ended::Skipped => format!("{label} skipped: incompatible with the target platform"),
+            Ended::NotBuilt => format!("{label} not built: the build ended first"),
+            Ended::Tested(test) => format!("{label} {}", ran(test)),
+            Ended::Failed(causes) => failed("failed", causes),
+            Ended::Unanalysed(causes) => failed("could not be analysed", causes),
+        }
+    }
+}
+
+impl Said<'_> {
+    pub(super) fn words(&self) -> String {
+        match self.saying {
+            Saying::RootCause(row) => row.listed.sentence(),
+            Saying::Target(fate) => fate.words(),
+        }
+    }
+}
+
+/// What the card says of a box that stands at `status` for something it
+/// holds.
+fn holds(status: Status) -> &'static str {
+    match status {
+        Status::Skipped => "everything the build reports in this box was skipped",
+        Status::Succeeded => "nothing the build reports in this box went wrong",
+        Status::Unfinished => "this box holds a target the build did not finish",
+        Status::Flaky => "this box holds a flaky test",
+        Status::TestFailed => "this box holds a test that did not pass",
+        Status::Failed => "this box holds a target that failed through something it depends on",
+        Status::RootCause => "this box holds the root cause of a failure",
+    }
+}
+
+impl Badged<'_> {
+    /// What the card says of a box badged `status` for this.
+    pub(super) fn words(&self, status: Status) -> String {
+        let held = holds(status);
+        match self {
+            Badged::Reported(said) => said.words(),
+            Badged::ReportedAndHeld(said) => format!("{}; {held}", said.words()),
+            Badged::Held => held.to_owned(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::tests::test;
     use super::*;
+    use bviz_graph_layout::Id;
     use std::num::NonZeroU32;
 
     #[test]
@@ -448,5 +541,32 @@ mod tests {
             ..test(TestStatus::Failed)
         };
         assert_eq!(ran(&rerun), "failed in 0.3s over 3 runs");
+    }
+
+    /// The badge is the worst of what a box holds, so a sentence saying less
+    /// of the box itself goes on to say what the box holds.
+    #[test]
+    fn a_box_badged_for_what_it_holds_is_said_to_hold_it_after_what_is_reported_of_it() {
+        let fate = Fate {
+            target: ConfiguredTarget::new("//gen:gen".to_owned(), None),
+            ended: Ended::Built,
+        };
+        let said = Said {
+            saying: Saying::Target(&fate),
+            cause: None,
+            of: Id(0),
+        };
+        assert_eq!(
+            Badged::Reported(said).words(Status::Succeeded),
+            "//gen:gen built"
+        );
+        assert_eq!(
+            Badged::ReportedAndHeld(said).words(Status::RootCause),
+            "//gen:gen built; this box holds the root cause of a failure"
+        );
+        assert_eq!(
+            Badged::Held.words(Status::Flaky),
+            "this box holds a flaky test"
+        );
     }
 }

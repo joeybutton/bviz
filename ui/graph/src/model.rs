@@ -151,7 +151,7 @@ impl Loaded {
             false => {
                 let base = &self.shared.base;
                 let nodes = Nodes::new(base, &self.shared.names, outcomes);
-                (Statuses::resolve(&nodes, base), Report::of(&nodes))
+                (Statuses::resolve(&nodes, base), Report::of(&nodes, base))
             }
         };
         let changed = self.statuses != statuses || self.reported != reported;

@@ -1,8 +1,10 @@
-use super::{Report, Row};
+use super::{Badged, Report, Row};
 use crate::column::{Folding, line};
 use crate::legend::status_swatch;
 use crate::model::Loaded;
-use crate::{GraphPanel, Palette, reveal};
+use crate::status::{Status, Statuses};
+use crate::{GraphPanel, Palette, reveal, why};
+use bviz_graph_layout::Id;
 use bviz_invocation::Configurations;
 use bviz_ui_components::{
     Button, ListScroll, SCROLLBAR_THICKNESS, TextTooltip, TooltipColors, list_scrollbar,
@@ -141,6 +143,73 @@ fn row(
     }
 }
 
+/// What the card says of the selected box.
+struct Selected<'a> {
+    node: Id,
+    /// The status the box is badged with.
+    status: Status,
+    badged: Badged<'a>,
+}
+
+impl<'a> Selected<'a> {
+    /// `None` for a node the build reports nothing of or in.
+    fn of(node: Id, report: &'a Report, statuses: &Statuses) -> Option<Self> {
+        let (status, badged) = report.badged(node, statuses)?;
+        Some(Selected {
+            node,
+            status,
+            badged,
+        })
+    }
+
+    /// The root cause the card names, which the paths to the box can be
+    /// asked for from.
+    fn cause(&self) -> Option<Id> {
+        match self.badged {
+            Badged::Reported(said) | Badged::ReportedAndHeld(said) => said.cause,
+            Badged::Held => None,
+        }
+    }
+}
+
+/// What the build reports of the selected box, over the control asking for
+/// the dependency paths its root cause reaches it by, which is offered until
+/// those are what is asked.
+fn selected(
+    selected: Selected,
+    view: &GraphPanel,
+    palette: &Palette,
+    cx: &Context<GraphPanel>,
+) -> Div {
+    let node = selected.node;
+    let cause = selected
+        .cause()
+        .filter(|&cause| !why::asking_between(view, cause, node));
+    let words = selected.badged.words(selected.status);
+    let said = div()
+        .flex()
+        .items_center()
+        .gap_1()
+        .child(status_swatch(selected.status, palette).flex_none())
+        .child(div().flex_1().min_w_0().child(words));
+    div()
+        .flex()
+        .flex_col()
+        .items_end()
+        .gap_1()
+        .child(said.w_full())
+        .children(cause.map(|cause| {
+            Button::new(
+                "report-why",
+                cx.listener(move |view, _: &ClickEvent, _, cx| {
+                    why::ask_between(view, cause, node, cx)
+                }),
+            )
+            .label("paths from its root cause")
+            .compact()
+        }))
+}
+
 /// The `rows` rows of the card, as tall as they stand until the card runs
 /// out of room for them, and from there scrolling under a bar the rows keep
 /// clear of.
@@ -198,10 +267,16 @@ pub(crate) fn card(
     palette: &Palette,
     cx: &Context<GraphPanel>,
 ) -> Option<Folding> {
-    let report = Reported::of(view, cx)?.report();
+    let reported = Reported::of(view, cx)?;
+    let report = reported.report();
     if !view.report.is_up(report) {
         return None;
     }
+    let statuses = reported.loaded.statuses();
+    let chosen = view
+        .selection
+        .node()
+        .and_then(|node| Selected::of(node, report, statuses));
     let colors = &palette.colors;
     let head = div()
         .flex()
@@ -231,7 +306,8 @@ pub(crate) fn card(
                 .mismatches
                 .lines()
                 .map(|mismatch| div().min_w_0().text_color(colors.warning).child(mismatch)),
-        );
+        )
+        .children(chosen.map(|chosen| selected(chosen, view, palette, cx)));
     let rows = report.rows();
     let rows = (rows > 0).then(|| listed(view, rows, palette, cx));
     Some(Folding::new(head, rows, palette))
@@ -240,6 +316,125 @@ pub(crate) fn card(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use super::super::tests::{node, resolved};
+    use bviz_invocation::{BuildOutcome, Cause, ConfiguredTarget, FailedAction, Outcomes};
+
+    const CONFIG: &str = "a7a71f";
+    const EXEC_CONFIG: &str = "960ec4";
+    const GEN_OUTPUT: &str = "bazel-out/k8/bin/gen/gen.out";
+
+    fn target(label: &str, configuration: &str) -> ConfiguredTarget {
+        ConfiguredTarget::new(label.into(), Some(configuration.into()))
+    }
+
+    /// A build in which the action of `//gen:gen` writing [`GEN_OUTPUT`]
+    /// failed, and with it `//app:bin`, the build's one target.
+    fn failed_through_a_generator() -> Outcomes {
+        let mut outcomes = Outcomes::default();
+        outcomes.report_failed_action(
+            GEN_OUTPUT.into(),
+            FailedAction {
+                owner: Some(target("//gen:gen", CONFIG)),
+                mnemonic: "Genrule".into(),
+                exit_code: None,
+                message: String::new(),
+            },
+        );
+        let causes = vec![Cause::Action {
+            primary_output: GEN_OUTPUT.into(),
+        }];
+        outcomes.report_build(target("//app:bin", CONFIG), BuildOutcome::Failed { causes });
+        outcomes
+    }
+
+    fn selected(outcomes: &Outcomes, name: &str) -> Option<(Status, String, Option<Id>)> {
+        let (report, statuses) = resolved(outcomes);
+        let selected = Selected::of(node(name), &report, &statuses)?;
+        let words = selected.badged.words(selected.status);
+        Some((selected.status, words, selected.cause()))
+    }
+
+    #[test]
+    fn a_box_is_said_to_have_ended_as_the_build_reports_of_it() {
+        let outcomes = failed_through_a_generator();
+        let action = node(&format!("action:{GEN_OUTPUT}"));
+        assert_eq!(
+            selected(&outcomes, &format!("ct://app:bin#{CONFIG}")),
+            Some((
+                Status::Failed,
+                "//app:bin failed: //gen:gen (Genrule) failed".into(),
+                Some(action)
+            ))
+        );
+        assert_eq!(
+            selected(&outcomes, &format!("action:{GEN_OUTPUT}")),
+            Some((
+                Status::RootCause,
+                "Genrule //gen:gen failed, failing 1 target".into(),
+                None
+            ))
+        );
+        assert_eq!(selected(&outcomes, "target://lib:broken"), None);
+    }
+
+    #[test]
+    fn a_box_the_build_reports_nothing_of_is_said_to_hold_what_it_stands_at() {
+        let outcomes = failed_through_a_generator();
+        for (name, held) in [
+            ("pkg:gen", "this box holds the root cause of a failure"),
+            (
+                "pkg:app",
+                "this box holds a target that failed through something it depends on",
+            ),
+        ] {
+            let (_, text, cause) = selected(&outcomes, name).expect("a badged box");
+            assert_eq!((text.as_str(), cause), (held, None), "{name}");
+        }
+        // The build reports nothing of the target owning the failed action.
+        let (status, text, _) =
+            selected(&outcomes, &format!("ct://gen:gen#{CONFIG}")).expect("a badged box");
+        assert_eq!(status, Status::RootCause);
+        assert_eq!(text, "this box holds the root cause of a failure");
+    }
+
+    /// The badge is the worst of what a box holds, so a sentence saying less
+    /// of the box itself says so.
+    #[test]
+    fn a_box_standing_worse_for_what_it_holds_is_said_to_hold_it() {
+        let mut outcomes = failed_through_a_generator();
+        outcomes.report_build(target("//gen:gen", CONFIG), BuildOutcome::Built);
+        assert_eq!(
+            selected(&outcomes, &format!("ct://gen:gen#{CONFIG}")),
+            Some((
+                Status::RootCause,
+                "//gen:gen built; this box holds the root cause of a failure".into(),
+                None
+            ))
+        );
+        assert_eq!(
+            selected(&outcomes, "target://gen:gen"),
+            Some((
+                Status::RootCause,
+                "//gen:gen built; this box holds the root cause of a failure".into(),
+                None
+            ))
+        );
+
+        // A target the graph holds under another configuration than the one
+        // reported is the box the report lands on.
+        let mut reconfigured = Outcomes::default();
+        reconfigured.report_build(target("//app:bin", CONFIG), BuildOutcome::Built);
+        reconfigured.report_build(target("//app:bin", EXEC_CONFIG), BuildOutcome::NotBuilt);
+        assert_eq!(
+            selected(&reconfigured, "target://app:bin"),
+            Some((
+                Status::Unfinished,
+                "//app:bin not built: the build ended first".into(),
+                None
+            ))
+        );
+    }
 
     #[test]
     fn the_card_is_up_for_a_troubled_build_until_the_reader_puts_it_elsewhere() {

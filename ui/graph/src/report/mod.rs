@@ -1,11 +1,13 @@
 //! What a build reported, as the card over the graph lists it.
 
-use crate::status::{Landing, Nodes, Status};
-use bviz_graph_layout::Id;
+use crate::status::{Landing, Nodes, Status, Statuses};
+use bviz_graph_layout::graph::Containment;
+use bviz_graph_layout::{Graph, Id, Kind};
 use bviz_invocation::{
     BuildOutcome, Cause, ConfiguredTarget, FailedAction, TestOutcome, TestStatus,
 };
 use rustc_hash::FxHashMap;
+use std::cmp::Reverse;
 use std::num::NonZeroI32;
 use std::ops::Range;
 
@@ -476,6 +478,281 @@ fn troubled_tests(nodes: &Nodes, troubled: usize) -> Vec<Row> {
         .collect()
 }
 
+/// What a failure is said to trace back to.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Traced {
+    Action(Action),
+    /// A target that could not be loaded or analysed.
+    Target {
+        label: String,
+        /// What the build said of the target, empty where it said nothing.
+        error: String,
+    },
+}
+
+impl Traced {
+    fn of(cause: &Cause, nodes: &Nodes) -> Self {
+        let outcomes = nodes.outcomes();
+        match cause {
+            Cause::Action { primary_output } => Traced::Action(Action::of(
+                primary_output,
+                outcomes.failed_action(primary_output),
+            )),
+            Cause::Target(target) => {
+                let target = target.borrowed();
+                Traced::Target {
+                    label: target.label().to_owned(),
+                    error: outcomes.target_error(target).unwrap_or_default().to_owned(),
+                }
+            }
+        }
+    }
+}
+
+/// The causes the build names for one failure, of which it names at least
+/// one.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Causes {
+    /// The one the card names.
+    named: Traced,
+    /// How many the build names besides.
+    more: usize,
+}
+
+/// How the build ended for a target.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Ended {
+    Built,
+    /// Left out of the build as incompatible with the target platform.
+    Skipped,
+    /// The build ended before the target was built.
+    NotBuilt,
+    /// Built, and run as a test.
+    Tested(TestOutcome),
+    Failed(Option<Causes>),
+    Unanalysed(Option<Causes>),
+}
+
+/// How the build ended for one target, as the card says it of the target's
+/// node.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Fate {
+    target: ConfiguredTarget,
+    ended: Ended,
+}
+
+/// What the report keeps as said of a node.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Standing {
+    /// That the node is the root cause listed at this place among
+    /// [`Report::root_causes`].
+    RootCause(usize),
+    Target(Fate),
+}
+
+/// Where a saying stands among those of one rank said of one node: a root
+/// cause ahead of a target, the root causes as they are listed and the targets
+/// by label and configuration. The build reports once on a configured target,
+/// so no two sayings stand at one place.
+#[derive(PartialEq, Eq, PartialOrd, Ord)]
+enum Place<'a> {
+    RootCause(usize),
+    Target(&'a str, Option<&'a str>),
+}
+
+impl Standing {
+    fn place(&self) -> Place<'_> {
+        match self {
+            Standing::RootCause(listed) => Place::RootCause(*listed),
+            Standing::Target(fate) => {
+                let target = fate.target.borrowed();
+                Place::Target(target.label(), target.configuration())
+            }
+        }
+    }
+}
+
+/// What stands said of a node, as the report keeps it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Kept {
+    standing: Standing,
+    /// The root cause the saying names, where the graph holds it apart from
+    /// the node: neither the node itself nor in one containment line with it.
+    cause: Option<Id>,
+    /// The node the build reports this of: the node itself, or for a target
+    /// drawn around its configurations the one of them it is reported of.
+    of: Id,
+}
+
+/// What the card says of a node the build reports on.
+#[derive(Clone, Copy)]
+enum Saying<'a> {
+    /// That it is the root cause this row lists.
+    RootCause(&'a Row),
+    Target(&'a Fate),
+}
+
+/// What the build reports of a node.
+#[derive(Clone, Copy)]
+struct Said<'a> {
+    saying: Saying<'a>,
+    /// The root cause the saying names, which the paths to the node can be
+    /// asked for from.
+    cause: Option<Id>,
+    /// The node the build reports this of.
+    of: Id,
+}
+
+/// What a box is badged for.
+enum Badged<'a> {
+    /// What the build reports of the box.
+    Reported(Said<'a>),
+    /// Something the box holds, which is worse than what the build reports
+    /// of the box.
+    ReportedAndHeld(Said<'a>),
+    /// Something the box holds, the build reporting nothing of the box.
+    Held,
+}
+
+/// What the card says of each node the build reports on, as it is gathered.
+struct Sayings<'n, 'a> {
+    /// By node, what is said of it and the status that ranks it among
+    /// whatever else the build reports of the node.
+    said: FxHashMap<Id, (Status, Kept)>,
+    containment: Containment,
+    nodes: &'n Nodes<'a>,
+}
+
+impl<'a> Sayings<'_, 'a> {
+    /// Whether the graph holds `cause` apart from `node`.
+    fn apart(&self, node: Id, cause: Id) -> bool {
+        self.containment.sibling_pair(node, cause).is_some()
+    }
+
+    /// Whether what is said of `node` stands against a saying of `status`
+    /// at `place`: the higher status does, and of two of one status the one
+    /// at the earlier [`Place`], so that the same one stands however the
+    /// reports are walked.
+    fn stands(&self, node: Id, status: Status, place: Place) -> bool {
+        self.said.get(&node).is_some_and(|(ranked, kept)| {
+            (Reverse(*ranked), kept.standing.place()) <= (Reverse(status), place)
+        })
+    }
+
+    /// Says `standing` of `node`, as the build reports it of `of`, unless
+    /// what is already said of the node [stands](Self::stands) against it.
+    fn say(&mut self, node: Id, of: Id, status: Status, standing: Standing, cause: Option<Id>) {
+        if !self.stands(node, status, standing.place()) {
+            let kept = Kept {
+                standing,
+                cause: cause.filter(|&cause| self.apart(node, cause)),
+                of,
+            };
+            self.said.insert(node, (status, kept));
+        }
+    }
+
+    /// Says of `node`, which `target` lands on, how its build and its test
+    /// ended. The root cause a failure is said to trace back to is the one
+    /// the paths to the node can be asked for from, where there is one.
+    fn say_of_target(
+        &mut self,
+        target: ConfiguredTarget<&'a str>,
+        node: Id,
+        build: &'a BuildOutcome,
+        test: Option<&TestOutcome>,
+    ) {
+        let (status, ended, cause) = match build {
+            BuildOutcome::Built => match test {
+                Some(test) => {
+                    let status = Status::of_test(test.status);
+                    (status, Ended::Tested(test.clone()), None)
+                }
+                None => (Status::Succeeded, Ended::Built, None),
+            },
+            BuildOutcome::Skipped => (Status::Skipped, Ended::Skipped, None),
+            BuildOutcome::NotBuilt => (Status::Unfinished, Ended::NotBuilt, None),
+            BuildOutcome::Failed { causes } | BuildOutcome::AnalysisFailed { causes } => {
+                let held = |cause| self.nodes.of_cause(cause);
+                let traced = causes.iter().any(|cause| held(cause).is_some());
+                let apart = causes.iter().find_map(|cause| {
+                    let at = held(cause).filter(|&at| self.apart(node, at))?;
+                    Some((cause, at))
+                });
+                let named = apart.map(|(cause, _)| cause).or(causes.first());
+                let causes = named.map(|named| Causes {
+                    named: Traced::of(named, self.nodes),
+                    more: causes.len() - 1,
+                });
+                let ended = match build {
+                    BuildOutcome::AnalysisFailed { .. } => Ended::Unanalysed(causes),
+                    _ => Ended::Failed(causes),
+                };
+                let status = Status::of_build(build, traced);
+                (status, ended, apart.map(|(_, at)| at))
+            }
+        };
+        let fate = Fate {
+            target: target.owned(),
+            ended,
+        };
+        self.say(node, node, status, Standing::Target(fate), cause);
+    }
+}
+
+/// What the card says of each node of `graph` the outcomes `nodes` lands
+/// report on, `root_causes` being the rows of their root causes. A target the
+/// graph draws around its configurations is one box to a reader, so what is
+/// said of a configured target is said of its target too.
+fn sayings(nodes: &Nodes, graph: &Graph, root_causes: &[Row]) -> FxHashMap<Id, Kept> {
+    let outcomes = nodes.outcomes();
+    let reported = root_causes.len() + outcomes.builds().count() + outcomes.tests().count();
+    let mut sayings = Sayings {
+        said: FxHashMap::with_capacity_and_hasher(reported, Default::default()),
+        containment: Containment::new(graph),
+        nodes,
+    };
+    for (listed, root_cause) in root_causes.iter().enumerate() {
+        if let Shown::Itself(node) = root_cause.shown {
+            let status = root_cause.listed.status();
+            sayings.say(node, node, status, Standing::RootCause(listed), None);
+        }
+    }
+    for (target, build) in outcomes.builds() {
+        if let Some(node) = nodes.of_target(target) {
+            sayings.say_of_target(target, node, build, outcomes.test(target));
+        }
+    }
+    for (target, test) in outcomes.tests() {
+        // The test of an alias, which [`Outcomes::test`] explains.
+        if outcomes.build(target).is_none()
+            && let Some(node) = nodes.of_target(target)
+        {
+            let fate = Fate {
+                target: target.owned(),
+                ended: Ended::Tested(test.clone()),
+            };
+            let status = Status::of_test(test.status);
+            sayings.say(node, node, status, Standing::Target(fate), None);
+        }
+    }
+    for configured in &graph.nodes {
+        if configured.kind == Kind::ConfiguredTarget
+            && let Some(target) = configured.parent
+            && let Some((status, kept)) = sayings.said.get(&configured.id)
+            && !sayings.stands(target, *status, kept.standing.place())
+        {
+            let (status, kept) = (*status, kept.clone());
+            sayings.say(target, kept.of, status, kept.standing, kept.cause);
+        }
+    }
+    sayings
+        .said
+        .into_iter()
+        .map(|(node, (_, kept))| (node, kept))
+        .collect()
+}
+
 /// What a build reported, as the card lists it.
 #[derive(Debug, Default, PartialEq)]
 pub(crate) struct Report {
@@ -487,11 +764,12 @@ pub(crate) struct Report {
     root_causes: Vec<Row>,
     /// The tests that did not pass on their first attempt, the worst first.
     troubled: Vec<Row>,
+    said: FxHashMap<Id, Kept>,
 }
 
 impl Report {
-    /// What the outcomes `nodes` lands report.
-    pub(crate) fn of(nodes: &Nodes) -> Self {
+    /// What the outcomes `nodes` lands report of the nodes of `graph`.
+    pub(crate) fn of(nodes: &Nodes, graph: &Graph) -> Self {
         let mut builds = BuildTally::default();
         for (_, outcome) in nodes.outcomes().builds() {
             builds.count(outcome);
@@ -501,6 +779,7 @@ impl Report {
             tests.count(test);
         }
         let mut root_causes = root_causes(nodes, builds.failed);
+        let said = sayings(nodes, graph, &root_causes);
         let mut troubled = troubled_tests(nodes, tests.troubled());
         tell_apart(&mut root_causes, &mut troubled);
         Self {
@@ -509,7 +788,36 @@ impl Report {
             mismatches: Mismatches::of(nodes),
             root_causes,
             troubled,
+            said,
         }
+    }
+
+    /// What the build reports of the node `id`.
+    fn said(&self, id: Id) -> Option<Said<'_>> {
+        let kept = self.said.get(&id)?;
+        let saying = match &kept.standing {
+            Standing::RootCause(listed) => Saying::RootCause(&self.root_causes[*listed]),
+            Standing::Target(fate) => Saying::Target(fate),
+        };
+        Some(Said {
+            saying,
+            cause: kept.cause,
+            of: kept.of,
+        })
+    }
+
+    /// What the box of the node `id` is badged for, `statuses` being those
+    /// the report's outcomes give the graph's nodes: the status the box stands
+    /// at, and what of the box or in it puts it there. `None` for a node the
+    /// build reports nothing of or in.
+    fn badged(&self, id: Id, statuses: &Statuses) -> Option<(Status, Badged<'_>)> {
+        let status = statuses.get(id)?;
+        let badged = match self.said(id) {
+            Some(said) if statuses.own(said.of) < Some(status) => Badged::ReportedAndHeld(said),
+            Some(said) => Badged::Reported(said),
+            None => Badged::Held,
+        };
+        Some((status, badged))
     }
 
     /// How many rows the card lists.
@@ -539,8 +847,8 @@ impl Report {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bviz_graph_layout::Names;
     use bviz_graph_layout::graph::Node;
-    use bviz_graph_layout::{Graph, Kind, Names};
     use bviz_invocation::{Configurations, Outcomes};
     use std::num::{NonZeroI32, NonZeroU32};
     use std::time::Duration;
@@ -550,6 +858,7 @@ mod tests {
     const GEN_OUTPUT: &str = "bazel-out/k8/bin/gen/gen.out";
     const EXEC_GEN_OUTPUT: &str = "bazel-out/k8-exec/bin/gen/gen.out";
     const DOCS_OUTPUT: &str = "bazel-out/k8/bin/docs/site.out";
+    const BIN_OUTPUT: &str = "bazel-out/k8/bin/app/bin";
 
     fn target(label: &str) -> ConfiguredTarget {
         ConfiguredTarget::new(label.into(), Some(CONFIG.into()))
@@ -594,9 +903,9 @@ mod tests {
     }
 
     /// A graph of the packages `//gen`, `//app` and `//lib`: `//gen:gen` with
-    /// the action writing [`GEN_OUTPUT`], `//app:bin` and `//app:check`, each
-    /// configured under [`CONFIG`], and `//lib:broken`, which is not
-    /// configured.
+    /// the action writing [`GEN_OUTPUT`], `//app:bin` with the one writing
+    /// [`BIN_OUTPUT`] and `//app:check`, each configured under [`CONFIG`],
+    /// and `//lib:broken`, which is not configured.
     struct Built {
         graph: Graph,
         names: Names,
@@ -610,9 +919,13 @@ mod tests {
             };
             for (package, target) in [("gen", "gen"), ("app", "bin"), ("app", "check")] {
                 let configured = built.target(package, target, true);
-                if package == "gen" {
-                    let action = format!("action:{GEN_OUTPUT}");
-                    built.node(&action, Kind::Action, Some(configured));
+                let output = match target {
+                    "gen" => Some(GEN_OUTPUT),
+                    "bin" => Some(BIN_OUTPUT),
+                    _ => None,
+                };
+                if let Some(output) = output {
+                    built.node(&format!("action:{output}"), Kind::Action, Some(configured));
                 }
             }
             built.target("lib", "broken", false);
@@ -659,9 +972,21 @@ mod tests {
     }
 
     fn report(outcomes: &Outcomes) -> Report {
+        resolved(outcomes).0
+    }
+
+    /// What `outcomes` reports of the fixture's graph, as the card lists it
+    /// and as the graph's boxes are badged.
+    pub(super) fn resolved(outcomes: &Outcomes) -> (Report, Statuses) {
         let built = Built::new();
         let nodes = Nodes::new(&built.graph, &built.names, outcomes);
-        Report::of(&nodes)
+        let report = Report::of(&nodes, &built.graph);
+        (report, Statuses::resolve(&nodes, &built.graph))
+    }
+
+    /// The node `name` names in the fixture's graph.
+    pub(super) fn node(name: &str) -> Id {
+        Built::new().id(name)
     }
 
     /// Each row `outcomes` lists as it reads: its first line, its second,
@@ -1134,6 +1459,250 @@ mod tests {
 
         outcomes.report_test(target("//app:flaky"), test(TestStatus::Flaky));
         assert!(report(&outcomes).troubled());
+    }
+
+    /// What the report says of the node `name` names, and the node it names
+    /// as the root cause.
+    fn said_of(report: &Report, name: &str) -> Option<(String, Option<Id>)> {
+        let said = report.said(node(name))?;
+        Some((said.words(), said.cause))
+    }
+
+    #[test]
+    fn a_failed_target_is_said_to_have_failed_through_its_root_cause() {
+        let mut outcomes = Outcomes::default();
+        outcomes.report_failed_action(
+            GEN_OUTPUT.into(),
+            failed_action(target("//gen:gen"), 1, "bash"),
+        );
+        for label in ["//gen:gen", "//app:bin"] {
+            outcomes.report_build(target(label), failed(&[action(GEN_OUTPUT)]));
+        }
+        let report = report(&outcomes);
+        let cause = node(&format!("action:{GEN_OUTPUT}"));
+
+        for name in [format!("ct://app:bin#{CONFIG}"), "target://app:bin".into()] {
+            assert_eq!(
+                said_of(&report, &name),
+                Some((
+                    "//app:bin failed: //gen:gen (Genrule) exited 1".into(),
+                    Some(cause)
+                )),
+                "{name}"
+            );
+        }
+        // The action is inside the target it fails, which no path leads to
+        // from itself.
+        for name in [format!("ct://gen:gen#{CONFIG}"), "target://gen:gen".into()] {
+            assert_eq!(
+                said_of(&report, &name),
+                Some(("//gen:gen failed: its Genrule action exited 1".into(), None)),
+                "{name}"
+            );
+        }
+        assert_eq!(said_of(&report, "pkg:app"), None);
+        assert_eq!(said_of(&report, "target://lib:broken"), None);
+    }
+
+    /// The sentence and the paths asked for from it are of one root cause:
+    /// the first the graph holds apart from the node.
+    #[test]
+    fn a_failure_is_traced_to_the_first_root_cause_the_graph_holds_apart() {
+        let said = |causes: &[Cause]| {
+            let mut outcomes = Outcomes::default();
+            outcomes
+                .report_failed_action(GEN_OUTPUT.into(), failed_action(target("//gen:gen"), 1, ""));
+            outcomes
+                .report_failed_action(BIN_OUTPUT.into(), failed_action(target("//app:bin"), 1, ""));
+            outcomes.report_build(target("//app:bin"), failed(causes));
+            said_of(&report(&outcomes), &format!("ct://app:bin#{CONFIG}")).expect("a saying")
+        };
+        let generator = node(&format!("action:{GEN_OUTPUT}"));
+
+        // Past a root cause the graph does not hold.
+        assert_eq!(
+            said(&[action(DOCS_OUTPUT), action(GEN_OUTPUT)]),
+            (
+                "//app:bin failed: //gen:gen (Genrule) exited 1, and 1 more cause".into(),
+                Some(generator)
+            )
+        );
+        // Past one inside the node itself.
+        assert_eq!(
+            said(&[action(BIN_OUTPUT), action(GEN_OUTPUT)]),
+            (
+                "//app:bin failed: //gen:gen (Genrule) exited 1, and 1 more cause".into(),
+                Some(generator)
+            )
+        );
+        // With none held apart, the first of all, and no paths to ask for.
+        assert_eq!(
+            said(&[action(DOCS_OUTPUT), action(BIN_OUTPUT)]),
+            (
+                "//app:bin failed: the action writing bazel-out/k8/bin/docs/site.out failed, \
+                 and 1 more cause"
+                    .into(),
+                None
+            )
+        );
+    }
+
+    /// A node the build names only as what a failure traces back to is said
+    /// to be that, in the words of its row.
+    #[test]
+    fn a_root_cause_is_said_to_be_one_whether_or_not_the_build_reports_on_it() {
+        let mut outcomes = Outcomes::default();
+        outcomes.report_build(
+            ConfiguredTarget::new("//app:bin".to_owned(), None),
+            BuildOutcome::AnalysisFailed {
+                causes: vec![Cause::Target(target("//lib:broken"))],
+            },
+        );
+        outcomes.report_target_error(target("//lib:broken"), "no such attribute 'dep'".into());
+        outcomes.report_build(target("//app:check"), failed(&[action(GEN_OUTPUT)]));
+        outcomes.report_failed_action(BIN_OUTPUT.into(), failed_action(target("//app:bin"), 2, ""));
+        let report = report(&outcomes);
+
+        assert_eq!(
+            said_of(&report, "target://lib:broken"),
+            Some((
+                "//lib:broken could not be loaded or analysed, failing 1 target".into(),
+                None
+            ))
+        );
+        assert_eq!(
+            said_of(&report, &format!("action:{GEN_OUTPUT}")),
+            Some((
+                "action writing bazel-out/k8/bin/gen/gen.out failed, failing 1 target".into(),
+                None
+            ))
+        );
+        assert_eq!(
+            said_of(&report, &format!("action:{BIN_OUTPUT}")),
+            Some(("Genrule //app:bin exited 2".into(), None))
+        );
+    }
+
+    #[test]
+    fn a_target_is_said_to_have_ended_as_its_build_and_its_test_did() {
+        let said = |build: BuildOutcome, test: Option<TestOutcome>| {
+            let mut outcomes = Outcomes::default();
+            outcomes.report_build(target("//app:check"), build);
+            if let Some(test) = test {
+                outcomes.report_test(target("//app:check"), test);
+            }
+            let (text, cause) = said_of(&report(&outcomes), &format!("ct://app:check#{CONFIG}"))
+                .expect("a reported node");
+            assert_eq!(cause, None);
+            text
+        };
+        assert_eq!(said(BuildOutcome::Built, None), "//app:check built");
+        assert_eq!(
+            said(BuildOutcome::Skipped, None),
+            "//app:check skipped: incompatible with the target platform"
+        );
+        assert_eq!(
+            said(BuildOutcome::NotBuilt, None),
+            "//app:check not built: the build ended first"
+        );
+        assert_eq!(
+            said(failed(&[]), Some(test(TestStatus::FailedToBuild))),
+            "//app:check failed, and the build names no cause"
+        );
+        assert_eq!(
+            said(BuildOutcome::AnalysisFailed { causes: Vec::new() }, None),
+            "//app:check could not be analysed"
+        );
+        assert_eq!(
+            said(BuildOutcome::Built, Some(test(TestStatus::Passed))),
+            "//app:check passed in 0.3s"
+        );
+        let flaky = TestOutcome {
+            attempts: 2,
+            ..test(TestStatus::Flaky)
+        };
+        assert_eq!(
+            said(BuildOutcome::Built, Some(flaky)),
+            "//app:check flaky: passed on attempt 2 in 0.3s"
+        );
+    }
+
+    #[test]
+    fn a_target_that_could_not_be_analysed_is_said_to_trace_back_to_what_its_root_cause_says() {
+        let said = |cause: &str, error: Option<&str>| {
+            let mut outcomes = Outcomes::default();
+            outcomes.report_build(
+                ConfiguredTarget::new("//app:check".to_owned(), None),
+                BuildOutcome::AnalysisFailed {
+                    causes: vec![Cause::Target(target(cause))],
+                },
+            );
+            if let Some(error) = error {
+                outcomes.report_target_error(target(cause), error.into());
+            }
+            let (text, _) =
+                said_of(&report(&outcomes), "target://app:check").expect("a reported node");
+            text
+        };
+        assert_eq!(
+            said("//lib:missing", Some("no such attribute 'dep'\nin rule")),
+            "//app:check could not be analysed: //lib:missing could not be loaded or analysed: \
+             no such attribute 'dep'"
+        );
+        assert_eq!(
+            said("//lib:missing", None),
+            "//app:check could not be analysed: //lib:missing could not be loaded or analysed"
+        );
+    }
+
+    #[test]
+    fn a_test_the_build_reports_no_build_of_is_said_to_have_ended_as_it_ran() {
+        let mut outcomes = Outcomes::default();
+        outcomes.report_test(target("//app:check"), test(TestStatus::Timeout));
+        assert_eq!(
+            said_of(&report(&outcomes), "target://app:check"),
+            Some(("//app:check timed out after 0.3s".into(), None))
+        );
+    }
+
+    #[test]
+    fn of_several_reports_landing_on_one_node_the_most_severe_is_said() {
+        let mut outcomes = Outcomes::default();
+        outcomes.report_build(exec_target("//lib:broken"), BuildOutcome::NotBuilt);
+        outcomes.report_build(target("//lib:broken"), BuildOutcome::Built);
+        assert_eq!(
+            said_of(&report(&outcomes), "target://lib:broken"),
+            Some(("//lib:broken not built: the build ended first".into(), None))
+        );
+    }
+
+    /// Two reports of one rank land on one node, and which of them stands is
+    /// theirs to say, whichever the build reports first.
+    #[test]
+    fn of_two_reports_of_one_rank_the_same_one_stands_whichever_is_walked_first() {
+        let reports = [
+            (target("//lib:broken"), GEN_OUTPUT),
+            (exec_target("//lib:broken"), BIN_OUTPUT),
+        ];
+        let said = |reports: &[(ConfiguredTarget, &str)]| {
+            let mut outcomes = Outcomes::default();
+            // Both failures read alike, and trace back to different nodes.
+            for output in [GEN_OUTPUT, BIN_OUTPUT] {
+                outcomes
+                    .report_failed_action(output.into(), failed_action(target("//gen:gen"), 1, ""));
+            }
+            for (broken, output) in reports {
+                outcomes.report_build(broken.clone(), failed(&[action(output)]));
+            }
+            said_of(&report(&outcomes), "target://lib:broken").expect("a saying")
+        };
+        let stands = (
+            "//lib:broken failed: //gen:gen (Genrule) exited 1".to_owned(),
+            Some(node(&format!("action:{BIN_OUTPUT}"))),
+        );
+        assert_eq!(said(&reports), stands);
+        let [first, second] = reports;
+        assert_eq!(said(&[second, first]), stands);
     }
 
     /// The report of a build that only built, and of one that failed.

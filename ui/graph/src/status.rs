@@ -57,6 +57,21 @@ impl Status {
         }
     }
 
+    /// The status of a target whose build ended as `outcome`. One that failed
+    /// is `traced` where the graph holds a node its failure traces back to,
+    /// and is the root cause itself where it holds none.
+    pub(crate) fn of_build(outcome: &BuildOutcome, traced: bool) -> Status {
+        match outcome {
+            BuildOutcome::Built => Status::Succeeded,
+            BuildOutcome::Skipped => Status::Skipped,
+            BuildOutcome::NotBuilt => Status::Unfinished,
+            BuildOutcome::Failed { .. } | BuildOutcome::AnalysisFailed { .. } => match traced {
+                true => Status::Failed,
+                false => Status::RootCause,
+            },
+        }
+    }
+
     /// A test the build could not build failed through something it depends
     /// on, which its build outcome traces back.
     pub(crate) fn of_test(status: TestStatus) -> Status {
@@ -76,11 +91,14 @@ impl Status {
 
 /// The [`Status`] of every node of one graph a build reports on. A build
 /// reports on the targets it was asked for, so most nodes of a graph have
-/// none.
+/// none, and both tables are empty where it reports on no node of the graph.
 #[derive(Debug, Default, PartialEq)]
 pub(crate) struct Statuses {
+    /// By node id, the most severe status the build reports of the node
+    /// itself.
+    own: Vec<Option<Status>>,
     /// By node id, the most severe status of the node and of every node it
-    /// contains. Empty where the build reports on no node of the graph.
+    /// contains.
     worst: Vec<Option<Status>>,
 }
 
@@ -112,12 +130,20 @@ impl Statuses {
             return Self::default();
         }
         Self {
-            worst: rolled_up(reported.own, graph),
+            worst: rolled_up(reported.own.clone(), graph),
+            own: reported.own,
         }
     }
 
-    /// The status of the node `id` names. An id past the graph's own, as a
-    /// merge group's is, reads as a node the build reports nothing of.
+    /// The status the build reports of the node `id` names itself, whatever
+    /// it holds.
+    pub(crate) fn own(&self, id: Id) -> Option<Status> {
+        self.own.get(id.0 as usize).copied().flatten()
+    }
+
+    /// The status the node `id` names stands at, for itself and for what it
+    /// holds. An id past the graph's own, as a merge group's is, reads as a
+    /// node the build reports nothing of.
     pub(crate) fn get(&self, id: Id) -> Option<Status> {
         self.worst.get(id.0 as usize).copied().flatten()
     }
@@ -230,7 +256,7 @@ impl<'a> Nodes<'a> {
         node
     }
 
-    fn of_cause(&self, cause: &'a Cause) -> Option<Id> {
+    pub(crate) fn of_cause(&self, cause: &'a Cause) -> Option<Id> {
         match cause {
             Cause::Action { primary_output } => self.of_action(primary_output),
             Cause::Target(target) => self.of_target(target.borrowed()),
@@ -253,24 +279,16 @@ impl<'a> Reported<'_, 'a> {
     /// The status `outcome` gives the target it is reported of, each node a
     /// failure traces back to being reported as that.
     fn build_status(&mut self, outcome: &'a BuildOutcome) -> Status {
-        match outcome {
-            BuildOutcome::Built => Status::Succeeded,
-            BuildOutcome::Skipped => Status::Skipped,
-            BuildOutcome::NotBuilt => Status::Unfinished,
-            BuildOutcome::Failed { causes } | BuildOutcome::AnalysisFailed { causes, .. } => {
-                let mut traced = false;
-                for cause in causes {
-                    if let Some(node) = self.nodes.of_cause(cause) {
-                        self.report(node, Status::RootCause);
-                        traced = true;
-                    }
-                }
-                match traced {
-                    true => Status::Failed,
-                    false => Status::RootCause,
+        let mut traced = false;
+        if let BuildOutcome::Failed { causes } | BuildOutcome::AnalysisFailed { causes } = outcome {
+            for cause in causes {
+                if let Some(node) = self.nodes.of_cause(cause) {
+                    self.report(node, Status::RootCause);
+                    traced = true;
                 }
             }
         }
+        Status::of_build(outcome, traced)
     }
 }
 
@@ -709,5 +727,10 @@ mod tests {
         assert_eq!(statuses.get(app_package), Some(Status::Unfinished));
         assert_eq!(statuses.get(tests), Some(Status::Flaky));
         assert_eq!(statuses.get(idle), None);
+
+        assert_eq!(statuses.own(lib), Some(Status::Unfinished));
+        for holding in [bin_target, lib_target, app_package, tests, idle] {
+            assert_eq!(statuses.own(holding), None);
+        }
     }
 }

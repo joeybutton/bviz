@@ -333,6 +333,25 @@ pub(crate) fn ask_from(view: &mut GraphPanel, dependent: Id, cx: &mut Context<Gr
     }
 }
 
+/// Asks for the dependency paths from `dependent` down to `dependency`.
+pub(crate) fn ask_between(
+    view: &mut GraphPanel,
+    dependency: Id,
+    dependent: Id,
+    cx: &mut Context<GraphPanel>,
+) {
+    ask(view, dependency, Some(dependent), cx);
+}
+
+/// Whether the question open is the one [`ask_between`] asks of these two.
+pub(crate) fn asking_between(view: &GraphPanel, dependency: Id, dependent: Id) -> bool {
+    view.why.asked.as_ref().is_some_and(|asked| {
+        let question = &asked.question;
+        let from = question.dependent.as_ref().map(|dependent| dependent.id);
+        question.dependency.id == dependency && from == Some(dependent)
+    })
+}
+
 fn ask(view: &mut GraphPanel, dependency: Id, dependent: Option<Id>, cx: &mut Context<GraphPanel>) {
     let Some(shared) = view.model.read(cx).loaded().map(|l| &l.shared) else {
         return;
