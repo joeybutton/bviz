@@ -3,7 +3,7 @@
 
 use bviz_trace_layout::{SpanRole, Workload};
 use bviz_ui_components::{LabelBoxStyle, ScrollbarColors, TooltipColors};
-use bviz_ui_theme::{DataColors, Theme, ThemeColors, hue_of, mix, over};
+use bviz_ui_theme::{DataColors, Theme, ThemeColors, hue_of, label_on, mix, over};
 use gpui::{Div, Hsla, Rgba, div, hsla, prelude::*, px};
 
 /// Saturation of a counter series' translucent fill.
@@ -25,6 +25,15 @@ pub(crate) fn counter_color(series: &str) -> Hsla {
         CATEGORY_LIGHTNESS,
         COUNTER_AREA_ALPHA,
     )
+}
+
+/// What a counter series' value under the crosshair is written on: a tag of
+/// the series' own fill, so the label reads the same over the filled area and
+/// over the bare chart beside it.
+pub(crate) struct ReadoutTag {
+    /// The series' fill as it stands on the canvas.
+    pub(crate) fill: Hsla,
+    pub(crate) label: Hsla,
 }
 
 /// How far an overhead fill is pulled toward the canvas, so Bazel's own machinery
@@ -205,6 +214,15 @@ impl Palette {
         }
     }
 
+    /// The tag of a counter series whose fill is `series`.
+    pub(crate) fn readout_tag(&self, series: Hsla) -> ReadoutTag {
+        let fill = over(series, self.background);
+        ReadoutTag {
+            fill: fill.into(),
+            label: label_on(fill),
+        }
+    }
+
     /// The fill under the cursor on a picked row of the background canvas, so
     /// that pointing at a picked row leaves it marked.
     pub(crate) fn picked_hover(&self) -> Rgba {
@@ -248,7 +266,8 @@ impl Palette {
 mod tests {
     use super::*;
     use bviz_ui_theme::{
-        MIN_DISTINCT_COLOR, MIN_EDGED_STEP, MIN_VISIBLE_STEP, built_in_themes, distance, level_step,
+        MIN_DISTINCT_COLOR, MIN_EDGED_STEP, MIN_TEXT_CONTRAST, MIN_VISIBLE_STEP, built_in_themes,
+        contrast_ratio, distance, level_step,
     };
 
     /// The most a hover fill may clear the surface under it, as a multiple of
@@ -302,6 +321,27 @@ mod tests {
     /// How far a fill stands off the canvas it is painted on.
     fn stand_off(palette: &Palette, role: SpanRole) -> f32 {
         distance(palette.role_fill(role), palette.background)
+    }
+
+    /// How many hues, evenly spaced round the wheel, stand for every counter
+    /// series.
+    const SERIES_HUES: u16 = 360;
+
+    #[test]
+    fn a_counter_readout_holds_text_contrast_on_its_tag_whatever_the_series() {
+        for palette in palettes() {
+            for hue in 0..SERIES_HUES {
+                let series = hsla(
+                    f32::from(hue) / f32::from(SERIES_HUES),
+                    CATEGORY_SATURATION,
+                    CATEGORY_LIGHTNESS,
+                    COUNTER_AREA_ALPHA,
+                );
+                let tag = palette.readout_tag(series);
+                let contrast = contrast_ratio(tag.label, tag.fill);
+                assert!(contrast >= MIN_TEXT_CONTRAST, "hue {hue}: {contrast}");
+            }
+        }
     }
 
     /// A hover marks the row the cursor is on and hands it back on the way out.

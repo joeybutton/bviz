@@ -19,6 +19,9 @@ use gpui::{
 /// raster cannot resolve.
 const COUNTER_EDGE_SLACK_PX: f32 = 0.5;
 
+/// Space between a crosshair value label and each side edge of its tag.
+const READOUT_TAG_PAD: f32 = 2.0;
+
 /// Maps a counter lane's values to y-positions in its chart area, so the plotted
 /// line and the crosshair readout share one transform. The floor (value 0) sits
 /// at `chart_bottom`; `max_value` reaches `chart_top`.
@@ -213,8 +216,9 @@ pub(crate) fn paint_crosshair(
 }
 
 /// For each counter lane whose series covers time `t` (microseconds), paints a
-/// dot where the crosshair at `cx_px` meets the lane's line plus a value label,
-/// with the strip scrolled up by `scroll` pixels. Scaling matches [`paint_graph`].
+/// dot where the crosshair at `cx_px` meets the lane's line plus a value label
+/// on a [`ReadoutTag`](theme::ReadoutTag), with the strip scrolled up by `scroll`
+/// pixels. Scaling matches [`paint_graph`].
 #[allow(clippy::too_many_arguments)]
 fn paint_counter_readouts(
     profile: &Profile,
@@ -270,17 +274,25 @@ fn paint_counter_readouts(
             let max_label_y = (chart_bottom - CROSSHAIR_VALUE_SIZE).max(chart_top);
             let label_y = dot_y.clamp(chart_top, max_label_y);
             let unit = unit_for(profile.str(counter.name));
+            let tag = palette.readout_tag(color);
             let value_line = bviz_ui_assets::shape_line(
                 window,
                 format_counter(value, unit),
                 font.clone(),
                 px(CROSSHAIR_VALUE_SIZE),
-                bviz_ui_theme::opaque(color),
+                tag.label,
             );
-            let value_w = f32::from(value_line.width());
-            let value_x = crate::label_x(cx_px, value_w, CROSSHAIR_LABEL_GAP, regions.time_right);
+            let tag_w = f32::from(value_line.width()) + 2.0 * READOUT_TAG_PAD;
+            let tag_x = crate::label_x(cx_px, tag_w, CROSSHAIR_LABEL_GAP, regions.time_right);
+            window.paint_quad(fill(
+                Bounds::new(
+                    point(px(tag_x), px(label_y)),
+                    size(px(tag_w), px(CROSSHAIR_VALUE_SIZE)),
+                ),
+                tag.fill,
+            ));
             let _ = value_line.paint(
-                point(px(value_x), px(label_y)),
+                point(px(tag_x + READOUT_TAG_PAD), px(label_y)),
                 px(CROSSHAIR_VALUE_SIZE),
                 TextAlign::Left,
                 None,

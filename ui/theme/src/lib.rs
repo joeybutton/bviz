@@ -235,11 +235,6 @@ pub const MIN_TEXT_CONTRAST: f32 = 4.5;
 /// Contrast.
 pub const MIN_SECONDARY_CONTRAST: f32 = 3.0;
 
-/// `color` at full opacity, for legible text tinted like its translucent dot.
-pub fn opaque(color: Hsla) -> Hsla {
-    Hsla { a: 1.0, ..color }
-}
-
 /// Black or white, whichever holds the greater [`contrast_ratio`] against
 /// `fill`.
 pub fn label_on(fill: impl Into<Rgba>) -> Hsla {
