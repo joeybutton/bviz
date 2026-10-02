@@ -352,6 +352,7 @@ pub(crate) fn build_for_test(
         phase_markers,
         span,
         distinct_strings,
+        categories: Vec::new(),
     })
 }
 
@@ -443,6 +444,8 @@ mod tests {
         )
         .unwrap();
         writeln!(out, "span {} {}", p.span().start_us, p.span().end_us).unwrap();
+        let categories: Vec<&str> = p.categories().map(|c| p.str(c)).collect();
+        writeln!(out, "categories {categories:?}").unwrap();
         for t in p.threads() {
             writeln!(
                 out,
@@ -504,6 +507,48 @@ mod tests {
             + "{\"name\":\"Usage\",\"ph\":\"C\",\"ts\":20,\"tid\":1,\"args\":{\"cpu\":2.0}},\n"
             + "{\"cat\":\"local action execution\",\"name\":\"more\",\"ph\":\"X\",\"ts\":30,\"dur\":10,\"tid\":2}\n"
             + "]}"
+    }
+
+    #[test]
+    fn a_slice_carries_the_position_of_its_category_in_text_order() {
+        let json = chunkable_profile_json();
+        for p in [
+            parse_streaming(&json).expect("serial"),
+            parse_chunks(&json, 4, 0).expect("parallel"),
+        ] {
+            let categories: Vec<&str> = p.categories().map(|c| p.str(c)).collect();
+            assert_eq!(
+                categories,
+                [
+                    "local action execution",
+                    "remote action execution",
+                    "skyframe evaluator"
+                ]
+            );
+            for t in p.threads() {
+                for (s, d) in p.slices(t).iter().zip(p.details(t)) {
+                    let id = s.category.expect("a category within reach of an id");
+                    assert_eq!(p.category(id), d.category);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_category_past_the_last_an_id_reaches_leaves_its_slices_unnumbered() {
+        // Zero-padded so that text order is numeric order.
+        let categories = usize::from(u16::MAX) + 2;
+        let events: Vec<String> = (0..categories)
+            .map(|i| format!(r#"{{"cat":"c{i:05}","name":"s","ph":"X","ts":{i},"dur":1,"tid":1}}"#))
+            .collect();
+        let p = parse(&format!(r#"{{"traceEvents":[{}]}}"#, events.join(",")));
+        assert_eq!(p.categories().len(), categories);
+        let thread = &p.threads()[0];
+        let reached = usize::from(u16::MAX);
+        for (i, (s, d)) in p.slices(thread).iter().zip(p.details(thread)).enumerate() {
+            let category = s.category.map(|id| p.category(id));
+            assert_eq!(category, (i < reached).then_some(d.category), "slice {i}");
+        }
     }
 
     #[test]

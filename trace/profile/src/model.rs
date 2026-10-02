@@ -54,6 +54,24 @@ impl From<OptStr> for Option<Str> {
     }
 }
 
+/// A Bazel `cat` of a profile, as its position among [`Profile::categories`];
+/// resolve to the category with [`Profile::category`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct CategoryId(std::num::NonZeroU16);
+
+impl CategoryId {
+    /// The id of the category at `position`, and `None` past the last position
+    /// an id reaches.
+    pub(crate) fn at(position: usize) -> Option<CategoryId> {
+        let ordinal = u16::try_from(position).ok()?.checked_add(1)?;
+        std::num::NonZeroU16::new(ordinal).map(CategoryId)
+    }
+
+    fn position(self) -> usize {
+        usize::from(self.0.get()) - 1
+    }
+}
+
 /// A half-open `[off, off + len)` index range into a flat pool. Which pool it
 /// indexes depends on the field that holds it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -111,6 +129,7 @@ pub struct Profile {
     phase_markers: Vec<PhaseMarker>,
     span: TimeSpan,
     distinct_strings: usize,
+    categories: Vec<Str>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -158,6 +177,9 @@ pub struct Slice {
     pub dur_us: i64,
     pub depth: u32,
     pub role: SpanRole,
+    /// The slice's Bazel `cat`, which its [`SliceDetail::category`] gives as
+    /// text; `None` for one of a category past the last an id reaches.
+    pub category: Option<CategoryId>,
 }
 
 const _: () = assert!(std::mem::size_of::<Slice>() == 32);
@@ -694,6 +716,16 @@ impl Profile {
         self.distinct_strings
     }
 
+    /// Every distinct Bazel `cat` of the profile's slices, in the order of
+    /// their text.
+    pub fn categories(&self) -> impl ExactSizeIterator<Item = Str> + '_ {
+        self.categories.iter().copied()
+    }
+
+    pub fn category(&self, id: CategoryId) -> Str {
+        self.categories[id.position()]
+    }
+
     /// Resolves an interned handle to its text.
     pub fn str(&self, s: Str) -> &str {
         &self.text[s.range()]
@@ -788,6 +820,7 @@ impl Profile {
             mut phase_markers,
             span,
             distinct_strings,
+            categories,
         } = parts;
         phase_markers.sort_by_key(|m| m.start_us);
         Profile {
@@ -804,6 +837,7 @@ impl Profile {
             phase_markers,
             span,
             distinct_strings,
+            categories,
         }
     }
 }
@@ -823,6 +857,7 @@ pub(crate) struct ProfileParts {
     pub phase_markers: Vec<PhaseMarker>,
     pub span: TimeSpan,
     pub distinct_strings: usize,
+    pub categories: Vec<Str>,
 }
 
 #[cfg(test)]
@@ -1060,6 +1095,7 @@ mod tests {
             dur_us,
             depth: 0,
             role: span_role("", ""),
+            category: None,
         }
     }
 
