@@ -1,10 +1,20 @@
 //! The cards standing down the canvas's right edge.
 
 use crate::{CARD_MAX_SHARE, Palette};
-use gpui::{Div, Pixels, div, prelude::*, px, relative};
+use gpui::{Div, Pixels, SharedString, div, prelude::*, px, relative};
 
 /// Width of the column, wide enough for a package path and a target.
 const WIDTH: Pixels = px(360.);
+
+/// One line of a card, cut short at its end where it runs past the card.
+pub(crate) fn line(text: impl Into<SharedString>) -> Div {
+    div()
+        .min_w_0()
+        .overflow_hidden()
+        .whitespace_nowrap()
+        .text_ellipsis()
+        .child(text.into())
+}
 
 /// A card that gives way where the column runs short of height: its head
 /// stands whole, and what it lists under that scrolls in the height the
@@ -99,7 +109,7 @@ impl Column {
         next
     }
 
-    fn folding(self, card: Option<Folding>, at_foot: bool) -> Self {
+    fn stand(self, card: Option<Folding>, at_foot: bool) -> Self {
         let Some(card) = card else {
             return self;
         };
@@ -108,8 +118,13 @@ impl Column {
         next
     }
 
+    /// Stands `card` next.
+    pub(crate) fn folding(self, card: Option<Folding>) -> Self {
+        self.stand(card, false)
+    }
+
     /// Stands `card` at the column's foot, under every card stood before it.
     pub(crate) fn foot(self, card: Option<Folding>) -> Div {
-        self.folding(card, true).column
+        self.stand(card, true).column
     }
 }

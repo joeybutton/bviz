@@ -43,6 +43,13 @@ impl<'a> ConfiguredTarget<&'a str> {
     pub fn configuration(self) -> Option<&'a str> {
         self.configuration
     }
+
+    pub fn owned(self) -> ConfiguredTarget {
+        ConfiguredTarget {
+            label: self.label.to_owned(),
+            configuration: self.configuration.map(str::to_owned),
+        }
+    }
 }
 
 /// What the failure of a target traces back to.

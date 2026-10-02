@@ -43,6 +43,7 @@ mod paint;
 mod pins;
 mod preset;
 mod relation;
+mod report;
 mod rules;
 mod scatter;
 mod scroll;
@@ -245,6 +246,7 @@ pub struct GraphPanel {
     missing_open: bool,
     /// How the card listing the overrides in force is scrolled.
     pins: pins::Pins,
+    report: report::Card,
     /// The dependency paths asked for, which the panel draws in place of its
     /// filter.
     why: why::Why,
@@ -408,6 +410,7 @@ impl GraphPanel {
             neighborhood_enabled: true,
             missing_open: false,
             pins: pins::Pins::new(),
+            report: report::Card::new(),
             why: why::Why::new(),
             titles: Vec::new(),
             canvas,
@@ -487,6 +490,7 @@ impl GraphPanel {
             .child(
                 column::Column::new()
                     .held(pins::panel(self, &palette, cx))
+                    .folding(report::card(self, &palette, cx))
                     .foot(why::card(self, &palette, cx)),
             )
             .children(search::card(self, &palette, cx))
@@ -723,6 +727,7 @@ impl Render for GraphPanel {
                     relation_picker: self.selection.node().map(|_| self.relation_picker.clone()),
                     pin_control: pins::control(self, cx).map(IntoElement::into_any_element),
                     why_controls: why::controls(self, cx).map(IntoElement::into_any_element),
+                    report_control: report::control(self, cx).map(IntoElement::into_any_element),
                     neighborhood_enabled: self.neighborhood_enabled,
                     reduced: self.derived.reduced(),
                     relaying: self.derived.deriving(),
@@ -801,6 +806,9 @@ struct Controls {
     pin_control: Option<AnyElement>,
     /// The questions asked of the selected box, which stand beside the pin.
     why_controls: Option<AnyElement>,
+    /// Puts the card reading what the build reported up and away, offered
+    /// where the build reported anything.
+    report_control: Option<AnyElement>,
     neighborhood_enabled: bool,
     /// `None` where the drawing offers no choice of edge set.
     reduced: Option<bool>,

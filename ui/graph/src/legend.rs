@@ -50,7 +50,7 @@ fn transition_swatch(transition: Transition, palette: &Palette) -> Div {
 }
 
 /// The badge of `status`, as a box wears it at its smallest.
-fn status_swatch(status: Status, palette: &Palette) -> Div {
+pub(crate) fn status_swatch(status: Status, palette: &Palette) -> Div {
     let palette = *palette;
     div()
         .relative()
@@ -193,6 +193,7 @@ fn card(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::status::Nodes;
     use bviz_graph_layout::graph::Node;
     use bviz_graph_layout::reduce::transitive_reduction;
     use bviz_graph_layout::{Connector, Graph, Id, Kind, Names, map_layout};
@@ -255,7 +256,8 @@ mod tests {
                 outcomes.report_build(target, outcome);
             }
         }
-        Statuses::resolve(&outcomes, &graph, &names)
+        let nodes = Nodes::new(&graph, &names, &outcomes);
+        Statuses::resolve(&nodes, &graph)
     }
 
     fn standing_in(legend: &mut Legend, drawn: &Drawn, statuses: &Statuses) -> Vec<Status> {

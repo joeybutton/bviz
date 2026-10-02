@@ -1,7 +1,9 @@
 //! What a build reports of the nodes of its graph.
 
-use bviz_graph_layout::{Graph, Id, Names, Resolver};
+use bviz_graph_layout::{Graph, Id, Kind, Names, Resolver};
 use bviz_invocation::{BuildOutcome, Cause, ConfiguredTarget, Outcomes, TestStatus};
+use rustc_hash::FxHashMap;
+use std::cell::RefCell;
 
 /// How the build ended for a node, from the least severe to the most. Of
 /// several a node comes to — its build and its test, two configurations
@@ -83,31 +85,26 @@ pub(crate) struct Statuses {
 }
 
 impl Statuses {
-    /// What `outcomes` reports of the nodes of `graph`, which `names` names.
-    pub(crate) fn resolve(outcomes: &Outcomes, graph: &Graph, names: &Names) -> Self {
-        if outcomes.is_empty() {
-            return Self::default();
-        }
+    /// What the outcomes `nodes` lands report of the nodes of `graph`.
+    pub(crate) fn resolve<'a>(nodes: &Nodes<'a>, graph: &Graph) -> Self {
+        let outcomes = nodes.outcomes;
         let mut reported = Reported {
-            nodes: Nodes {
-                resolver: Resolver::new(names),
-                outcomes,
-            },
-            own: vec![None; names.len()],
+            nodes,
+            own: vec![None; nodes.configured.len()],
         };
         for (primary_output, _) in outcomes.failed_actions() {
-            if let Some(action) = reported.nodes.of_action(primary_output) {
+            if let Some(action) = nodes.of_action(primary_output) {
                 reported.report(action, Status::RootCause);
             }
         }
         for (target, outcome) in outcomes.builds() {
             let status = reported.build_status(outcome);
-            if let Some(node) = reported.nodes.of_target(target) {
+            if let Some(node) = nodes.of_target(target) {
                 reported.report(node, status);
             }
         }
         for (target, test) in outcomes.tests() {
-            if let Some(node) = reported.nodes.of_target(target) {
+            if let Some(node) = nodes.of_target(target) {
                 reported.report(node, Status::of_test(test.status));
             }
         }
@@ -126,33 +123,114 @@ impl Statuses {
     }
 }
 
-/// The nodes of a graph a build's outcomes name.
-struct Nodes<'a> {
-    resolver: Resolver<'a>,
-    outcomes: &'a Outcomes,
+/// Where a report on a configured target lands in a graph.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Landing {
+    /// On the configured target, or on the target where the report names no
+    /// configuration or the graph holds the target under none.
+    On(Id),
+    /// On the target, which the graph holds under configurations that are
+    /// all other than the one reported.
+    Reconfigured(Id),
+    Off,
 }
 
-impl Nodes<'_> {
-    /// The node a report on `target` lands on: the configured target, or the
-    /// target where the report names no configuration or the graph holds the
-    /// target under no such configuration.
-    fn of_target(&self, target: ConfiguredTarget<&str>) -> Option<Id> {
-        target
+impl Landing {
+    pub(crate) fn node(self) -> Option<Id> {
+        match self {
+            Landing::On(node) | Landing::Reconfigured(node) => Some(node),
+            Landing::Off => None,
+        }
+    }
+}
+
+/// The nodes of a graph a build's outcomes name. Each is found once, however
+/// many readers ask for it.
+pub(crate) struct Nodes<'a> {
+    resolver: Resolver<'a>,
+    outcomes: &'a Outcomes,
+    /// By node id, whether the node holds a configured target.
+    configured: Vec<bool>,
+    targets: RefCell<FxHashMap<ConfiguredTarget<&'a str>, Landing>>,
+    /// By primary output, the node the failure of the action writing it
+    /// lands on.
+    actions: RefCell<FxHashMap<&'a str, Option<Id>>>,
+}
+
+impl<'a> Nodes<'a> {
+    /// The nodes `outcomes` names among those of `graph`, which `names`
+    /// names.
+    pub(crate) fn new(graph: &Graph, names: &'a Names, outcomes: &'a Outcomes) -> Self {
+        let mut configured = vec![false; names.len()];
+        for node in &graph.nodes {
+            if let (Kind::ConfiguredTarget, Some(target)) = (node.kind, node.parent) {
+                configured[target.0 as usize] = true;
+            }
+        }
+        let targets = outcomes.builds().count() + outcomes.tests().count();
+        let actions = outcomes.failed_actions().count();
+        Self {
+            resolver: Resolver::new(names),
+            outcomes,
+            configured,
+            targets: RefCell::new(FxHashMap::with_capacity_and_hasher(
+                targets,
+                Default::default(),
+            )),
+            actions: RefCell::new(FxHashMap::with_capacity_and_hasher(
+                actions,
+                Default::default(),
+            )),
+        }
+    }
+
+    pub(crate) fn outcomes(&self) -> &'a Outcomes {
+        self.outcomes
+    }
+
+    pub(crate) fn landing(&self, target: ConfiguredTarget<&'a str>) -> Landing {
+        if let Some(landing) = self.targets.borrow().get(&target) {
+            return *landing;
+        }
+        let label = target.label();
+        let configured = target
             .configuration()
-            .and_then(|checksum| self.resolver.configured_target(target.label(), checksum))
-            .or_else(|| self.resolver.target(target.label()))
+            .and_then(|checksum| self.resolver.configured_target(label, checksum));
+        let landing = match (configured, self.resolver.target(label)) {
+            (Some(configured), _) => Landing::On(configured),
+            (None, Some(node)) => {
+                let elsewhere =
+                    target.configuration().is_some() && self.configured[node.0 as usize];
+                match elsewhere {
+                    true => Landing::Reconfigured(node),
+                    false => Landing::On(node),
+                }
+            }
+            (None, None) => Landing::Off,
+        };
+        self.targets.borrow_mut().insert(target, landing);
+        landing
+    }
+
+    pub(crate) fn of_target(&self, target: ConfiguredTarget<&'a str>) -> Option<Id> {
+        self.landing(target).node()
     }
 
     /// The node the failure of the action writing `primary_output` lands on:
     /// the action, or the target owning it where the graph holds no actions.
-    fn of_action(&self, primary_output: &str) -> Option<Id> {
-        self.resolver.action(primary_output).or_else(|| {
+    pub(crate) fn of_action(&self, primary_output: &'a str) -> Option<Id> {
+        if let Some(node) = self.actions.borrow().get(primary_output) {
+            return *node;
+        }
+        let node = self.resolver.action(primary_output).or_else(|| {
             let failed = self.outcomes.failed_action(primary_output)?;
             self.of_target(failed.owner.as_ref()?.borrowed())
-        })
+        });
+        self.actions.borrow_mut().insert(primary_output, node);
+        node
     }
 
-    fn of_cause(&self, cause: &Cause) -> Option<Id> {
+    fn of_cause(&self, cause: &'a Cause) -> Option<Id> {
         match cause {
             Cause::Action { primary_output } => self.of_action(primary_output),
             Cause::Target(target) => self.of_target(target.borrowed()),
@@ -161,12 +239,12 @@ impl Nodes<'_> {
 }
 
 /// What a build reports of each node itself, by node id.
-struct Reported<'a> {
-    nodes: Nodes<'a>,
+struct Reported<'n, 'a> {
+    nodes: &'n Nodes<'a>,
     own: Vec<Option<Status>>,
 }
 
-impl Reported<'_> {
+impl<'a> Reported<'_, 'a> {
     fn report(&mut self, node: Id, status: Status) {
         let own = &mut self.own[node.0 as usize];
         *own = (*own).max(Some(status));
@@ -174,7 +252,7 @@ impl Reported<'_> {
 
     /// The status `outcome` gives the target it is reported of, each node a
     /// failure traces back to being reported as that.
-    fn build_status(&mut self, outcome: &BuildOutcome) -> Status {
+    fn build_status(&mut self, outcome: &'a BuildOutcome) -> Status {
         match outcome {
             BuildOutcome::Built => Status::Succeeded,
             BuildOutcome::Skipped => Status::Skipped,
@@ -274,7 +352,8 @@ mod tests {
         }
 
         fn resolve(&self, outcomes: &Outcomes) -> Statuses {
-            Statuses::resolve(outcomes, &self.graph, &self.names)
+            let nodes = Nodes::new(&self.graph, &self.names, outcomes);
+            Statuses::resolve(&nodes, &self.graph)
         }
     }
 
@@ -326,8 +405,29 @@ mod tests {
         elsewhere.report_build(target("//lib:lib", Some(CONFIG)), BuildOutcome::Built);
         elsewhere.report_failed_action("bazel-out/k8/bin/lib/lib.o".into(), failed_action(None));
         let unrelated = built.resolve(&elsewhere);
-        assert_eq!(unrelated, Statuses::default());
         assert_eq!(unrelated.get(package), None);
+        assert_eq!(unrelated.get(configured), None);
+    }
+
+    #[test]
+    fn a_report_lands_on_a_target_reconfigured_only_where_the_graph_configures_it_otherwise() {
+        let mut built = Built::default();
+        let (_, bin, configured) = built.target("app", "bin");
+        let package = built.node("pkg:lib", Kind::Package, None);
+        let lib = built.node("target://lib:lib", Kind::Target, Some(package));
+        let outcomes = Outcomes::default();
+        let nodes = Nodes::new(&built.graph, &built.names, &outcomes);
+        let landing =
+            |label, configuration| nodes.landing(ConfiguredTarget::new(label, configuration));
+
+        assert_eq!(landing("//app:bin", Some(CONFIG)), Landing::On(configured));
+        assert_eq!(
+            landing("//app:bin", Some(OTHER_CONFIG)),
+            Landing::Reconfigured(bin)
+        );
+        assert_eq!(landing("//app:bin", None), Landing::On(bin));
+        assert_eq!(landing("//lib:lib", Some(CONFIG)), Landing::On(lib));
+        assert_eq!(landing("//lib:other", Some(CONFIG)), Landing::Off);
     }
 
     #[test]

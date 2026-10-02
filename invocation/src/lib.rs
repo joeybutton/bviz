@@ -55,8 +55,8 @@ impl InvocationId {
     }
 }
 
-/// Leading characters of a configuration checksum that [`Configurations::name`]
-/// tells apart configurations sharing a mnemonic by.
+/// Leading characters of a configuration checksum a reader is shown: what
+/// [`Configurations::name`] tells apart configurations sharing a mnemonic by.
 const CHECKSUM_SHOWN: usize = 6;
 
 /// The mnemonic of each configuration known of an invocation, keyed by the
@@ -96,13 +96,19 @@ impl Configurations {
             .iter()
             .any(|(other, described)| other != checksum && described == mnemonic);
         Some(match shared {
-            true => {
-                let short: String = checksum.chars().take(CHECKSUM_SHOWN).collect();
-                format!("{mnemonic} {short}")
-            }
+            true => format!("{mnemonic} {}", short(checksum)),
             false => mnemonic.clone(),
         })
     }
+
+    /// [`name`](Self::name), and for an unknown checksum its start.
+    pub fn name_or_checksum(&self, checksum: &str) -> String {
+        self.name(checksum).unwrap_or_else(|| short(checksum))
+    }
+}
+
+fn short(checksum: &str) -> String {
+    checksum.chars().take(CHECKSUM_SHOWN).collect()
 }
 
 /// Which of the reports of outcomes a [`Session`] has taken its outcomes are
@@ -193,6 +199,8 @@ mod tests {
         assert_eq!(name("91e24984663c").as_deref(), Some("k8-fastbuild 91e249"));
         assert_eq!(name("0c3d9a7714be").as_deref(), Some("k8-opt-exec"));
         assert_eq!(name("ffffffffffff"), None);
+        assert_eq!(known.name_or_checksum("0c3d9a7714be"), "k8-opt-exec");
+        assert_eq!(known.name_or_checksum("ffffffffffff"), "ffffff");
     }
 
     fn configurations(described: &[(&str, &str)]) -> Configurations {

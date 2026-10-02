@@ -38,6 +38,9 @@ pub(crate) fn toolbar(
             .selected(reduced),
         );
     }
+    if let Some(report) = controls.report_control {
+        bar = bar.child(report);
+    }
     // Last, past the controls that are always up, so the strip's standing shape
     // holds still as a selection comes and goes.
     if let Some(picker) = controls.relation_picker {

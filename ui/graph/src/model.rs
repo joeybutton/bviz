@@ -1,7 +1,8 @@
 use crate::GraphPanel;
 use crate::build::{build_graph, loaded_inputs};
 use crate::derive::derive_levels;
-use crate::status::Statuses;
+use crate::report::Report;
+use crate::status::{Nodes, Statuses};
 use bviz_graph_layout::graph::Graph;
 use bviz_graph_layout::lod::{DEFAULT_MAX_EDGES, DEFAULT_MAX_NODES, Overflow};
 use bviz_graph_layout::metrics::{Measurement, Scope, measure};
@@ -11,7 +12,7 @@ use bviz_graph_layout::{Capabilities, Facets, Id, InputSet, Joint, MapLayout, Na
 use bviz_invocation::{Configurations, Revision, Session};
 use bviz_ui_components::{Pending, load_in_background};
 use bviz_ui_graph_args::GraphSource;
-use gpui::{Context, Entity, EntityId, EventEmitter, Subscription, Task};
+use gpui::{App, Context, Entity, EntityId, EventEmitter, Subscription, Task};
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, OnceLock};
@@ -99,8 +100,12 @@ pub(crate) struct Loaded {
     measures: HashMap<Scope, Measure>,
     /// What the build of the graph's invocation reports of its nodes.
     statuses: Statuses,
-    /// Which of its session's outcomes `statuses` says that of: those of a
-    /// session no build has reported to, until a report is taken up.
+    /// What the build of the graph's invocation reported, as the card over
+    /// the graph lists it.
+    reported: Report,
+    /// Which of its session's outcomes `statuses` and `reported` are read
+    /// from: those of a session no build has reported to, until a report is
+    /// taken up.
     taken_up: Revision,
 }
 
@@ -111,12 +116,17 @@ impl Loaded {
             opening,
             measures: HashMap::new(),
             statuses: Statuses::default(),
+            reported: Report::default(),
             taken_up: Revision::default(),
         }
     }
 
     pub(crate) fn statuses(&self) -> &Statuses {
         &self.statuses
+    }
+
+    pub(crate) fn reported(&self) -> &Report {
+        &self.reported
     }
 
     /// Which of its session's outcomes the [statuses](Self::statuses) say
@@ -127,18 +137,26 @@ impl Loaded {
     }
 
     /// Takes up what the build of `session` reports of the graph's nodes, and
-    /// says whether that changed the status of any. Outcomes already taken up
-    /// are not read again.
+    /// says whether that changed anything a view of the graph shows. Outcomes
+    /// already taken up are not read again.
     fn report(&mut self, session: &Session) -> bool {
         let revision = session.outcomes_revision();
         if self.taken_up == revision {
             return false;
         }
         self.taken_up = revision;
-        let (base, names) = (&self.shared.base, &self.shared.names);
-        let statuses = Statuses::resolve(session.outcomes(), base, names);
-        let changed = self.statuses != statuses;
+        let outcomes = session.outcomes();
+        let (statuses, reported) = match outcomes.is_empty() {
+            true => Default::default(),
+            false => {
+                let base = &self.shared.base;
+                let nodes = Nodes::new(base, &self.shared.names, outcomes);
+                (Statuses::resolve(&nodes, base), Report::of(&nodes))
+            }
+        };
+        let changed = self.statuses != statuses || self.reported != reported;
         self.statuses = statuses;
+        self.reported = reported;
         changed
     }
 }
@@ -510,6 +528,13 @@ impl GraphModel {
 
     pub(crate) fn source(&self) -> &Source {
         &self.source
+    }
+
+    /// The configurations known of the invocation the graph is opened as part
+    /// of; `None` for a graph opened as part of none.
+    pub(crate) fn configurations<'a>(&self, cx: &'a App) -> Option<&'a Configurations> {
+        let joined = self.joined.as_ref()?;
+        Some(joined.session.read(cx).configurations())
     }
 
     pub(crate) fn loaded(&self) -> Option<&Loaded> {

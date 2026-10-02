@@ -5,7 +5,7 @@
 //! The mode the panel was in is the reader's own, so putting the question away
 //! returns to it along with the filter.
 
-use crate::column::Folding;
+use crate::column::{Folding, line};
 use crate::mode::LayoutMode;
 use crate::paint::paint_diamond;
 use crate::{GraphPanel, Palette, derive};
@@ -473,16 +473,6 @@ pub(crate) fn controls(view: &GraphPanel, cx: &mut Context<GraphPanel>) -> Optio
                 .label("from here")
             })),
     )
-}
-
-/// One line of the card, cut short at its end where it runs past the card.
-fn line(text: impl Into<SharedString>) -> Div {
-    div()
-        .min_w_0()
-        .overflow_hidden()
-        .whitespace_nowrap()
-        .text_ellipsis()
-        .child(text.into())
 }
 
 /// An endpoint of the question: its name after `lead`, over the package holding
