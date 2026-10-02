@@ -8,12 +8,12 @@ mod paint;
 use crate::Palette;
 use crate::drag::DOUBLE_CLICK;
 use crate::hue::{Colouring, Hue, Swatch, legend_strip};
-use crate::model::{DominatorsLanded, FilterChanged, GraphModel, Shared, SourceReplaced};
+use crate::model::{DominatorsLanded, FilterChanged, GraphModel, Shared, SourceReplaced, TreeKey};
 use crate::point::{KindNames, identify, unit_names};
 use crate::toolbar::{busy, group};
 use crate::unit_picker::UnitPicker;
 use bviz_graph_layout::Id;
-use bviz_graph_layout::dominators::{Dominators, Standing, Targets};
+use bviz_graph_layout::dominators::{Dominators, Roots, Standing, Targets};
 use bviz_graph_layout::metrics::{Scope, Unit};
 use bviz_graph_layout::select::{Filter, Verdicts};
 use bviz_ui_components::{
@@ -68,8 +68,8 @@ pub struct DominatorsPanel {
     /// Evaluates the filter, absent while none is being evaluated, so that one
     /// evaluation runs at a time.
     fading: Option<Task<()>>,
-    /// The trees of the graph read coloured so far, by scope.
-    coloured: HashMap<Scope, Arc<Coloured>>,
+    /// The trees of the graph read coloured so far.
+    coloured: HashMap<TreeKey, Arc<Coloured>>,
     /// Colours a tree landed, absent while none is being coloured.
     drawing: Option<Task<()>>,
     /// Redraws as the graph is read.
@@ -92,9 +92,9 @@ impl DominatorsPanel {
             view.compute(cx);
         });
         let dominators_landed = cx.subscribe(&model, |view, _, landed: &DominatorsLanded, cx| {
-            if view.scope(cx) == Some(landed.scope) {
+            if view.key(cx).as_ref() == Some(&landed.key) {
                 view.redraw(cx);
-            } else if view.target_scope() == Some(landed.scope) {
+            } else if view.target_key().as_ref() == Some(&landed.key) {
                 view.rehover(cx);
             }
         });
@@ -124,37 +124,50 @@ impl DominatorsPanel {
         self.picker.as_ref().map(|picker| picker.chosen(cx))
     }
 
-    /// The scope of targets whose tree a tooltip places the configured
-    /// targets drawn in, read from the inputs the tree drawn reads; absent
-    /// where the tree drawn is of another unit.
-    fn target_scope(&self) -> Option<Scope> {
+    /// The tree drawn for the scope chosen, once the graph is read.
+    fn key(&self, cx: &App) -> Option<TreeKey> {
+        let scope = self.scope(cx)?;
+        Some(TreeKey {
+            scope,
+            roots: Roots::Tops,
+        })
+    }
+
+    /// The tree of targets a tooltip places the configured targets drawn in,
+    /// read from the inputs the tree drawn reads and rooted at the top-level
+    /// targets; absent where the tree drawn is of another unit.
+    fn target_key(&self) -> Option<TreeKey> {
         let drawn = self.drawn.as_ref()?.coloured.tree.scope();
-        (drawn.unit() == Unit::ConfiguredTarget)
+        let scope = (drawn.unit() == Unit::ConfiguredTarget)
             .then(|| Scope::new(Unit::Target, drawn.inputs()))
-            .flatten()
+            .flatten()?;
+        Some(TreeKey {
+            scope,
+            roots: Roots::Tops,
+        })
     }
 
     /// Has the tree of the chosen scope computed, where the panel is shown,
     /// and draws it where it already is.
     fn compute(&mut self, cx: &mut Context<Self>) {
-        let Some(scope) = self.scope(cx).filter(|_| self.shown) else {
+        let Some(key) = self.key(cx).filter(|_| self.shown) else {
             return;
         };
-        self.want(scope, cx);
+        self.want(key, cx);
         self.redraw(cx);
         self.refade(cx);
     }
 
-    /// Has the tree of `scope`, the one chosen, computed, and once that is the
+    /// Has the tree of `key`, the one chosen, computed, and once that is the
     /// tree drawn, the tree of targets a tooltip places its points in, so
     /// that the second holds no worker from the first.
-    fn want(&mut self, scope: Scope, cx: &mut Context<Self>) {
+    fn want(&mut self, key: TreeKey, cx: &mut Context<Self>) {
         let landed = self
             .drawn
             .as_ref()
-            .is_some_and(|drawn| drawn.coloured.tree.scope() == scope);
-        let as_targets = self.target_scope().filter(|_| landed);
-        let wanted: Vec<Scope> = std::iter::once(scope).chain(as_targets).collect();
+            .is_some_and(|drawn| drawn.coloured.key == key);
+        let as_targets = self.target_key().filter(|_| landed);
+        let wanted: Vec<TreeKey> = std::iter::once(key).chain(as_targets).collect();
         self.model
             .update(cx, |model, cx| model.want_dominators(&wanted, cx));
     }
@@ -211,17 +224,17 @@ impl DominatorsPanel {
     /// and a colouring running draws again once it lands. The tree drawn stays
     /// until then.
     fn redraw(&mut self, cx: &mut Context<Self>) {
-        let Some(scope) = self.scope(cx) else {
+        let Some(key) = self.key(cx) else {
             return;
         };
         if self
             .drawn
             .as_ref()
-            .is_some_and(|drawn| drawn.coloured.tree.scope() == scope)
+            .is_some_and(|drawn| drawn.coloured.key == key)
         {
             return;
         }
-        if let Some(coloured) = self.coloured.get(&scope) {
+        if let Some(coloured) = self.coloured.get(&key) {
             self.drawn = Some(Drawn {
                 coloured: Arc::clone(coloured),
                 focus: None,
@@ -229,7 +242,7 @@ impl DominatorsPanel {
                 press: None,
             });
             if self.shown {
-                self.want(scope, cx);
+                self.want(key, cx);
             }
             self.invalidate_canvas(cx);
             return;
@@ -238,7 +251,7 @@ impl DominatorsPanel {
             return;
         }
         let model = self.model.read(cx);
-        let (Some(tree), Some(loaded)) = (model.dominators(scope), model.loaded()) else {
+        let (Some(tree), Some(loaded)) = (model.dominators(&key), model.loaded()) else {
             return;
         };
         let (tree, shared) = (Arc::clone(tree), loaded.shared.clone());
@@ -252,6 +265,7 @@ impl DominatorsPanel {
                 let targets =
                     (unit == Unit::ConfiguredTarget).then(|| Targets::of(&tree, &shared.facets));
                 Coloured {
+                    key,
                     tree,
                     shared,
                     colouring: Arc::new(colouring),
@@ -261,8 +275,8 @@ impl DominatorsPanel {
             },
             |view, coloured, cx| {
                 view.drawing = None;
-                let scope = coloured.tree.scope();
-                view.coloured.insert(scope, Arc::new(coloured));
+                view.coloured
+                    .insert(coloured.key.clone(), Arc::new(coloured));
                 view.redraw(cx);
             },
         ));
@@ -389,8 +403,8 @@ impl DominatorsPanel {
     fn hover_at(&mut self, at: Point<Pixels>, cx: &mut Context<Self>) {
         let cell = self.cell_at(at);
         let as_targets = self
-            .target_scope()
-            .and_then(|scope| self.model.read(cx).dominators(scope).cloned());
+            .target_key()
+            .and_then(|key| self.model.read(cx).dominators(&key).cloned());
         let Some(drawn) = &mut self.drawn else {
             return;
         };
@@ -456,6 +470,7 @@ struct Fade {
 /// A tree landed, coloured: the hue of each of its points, and the legend
 /// naming the hues, which hold for as long as the graph read does.
 struct Coloured {
+    key: TreeKey,
     tree: Arc<Dominators>,
     /// The graph whose points `tree` holds.
     shared: Shared,
@@ -924,9 +939,9 @@ impl Render for DominatorsPanel {
             return root.child(placeholder);
         }
         let drawn = self.drawn.as_ref();
+        let key = self.key(cx);
         let root = root.children(self.picker.as_ref().map(|picker| {
-            let computing =
-                drawn.is_some_and(|drawn| drawn.coloured.tree.scope() != picker.chosen(cx));
+            let computing = drawn.is_some_and(|drawn| Some(&drawn.coloured.key) != key.as_ref());
             let crumbs = drawn.and_then(|drawn| breadcrumb(drawn, &palette, cx));
             strip(picker, crumbs, computing, &palette)
         }));

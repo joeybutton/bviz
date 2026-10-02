@@ -6,7 +6,7 @@ use crate::report::Report;
 use crate::status::{Nodes, Statuses};
 use crate::timecard::Timecard;
 use crate::timing::{NodeTimes, Untimed, landings};
-use bviz_graph_layout::dominators::{Dominators, dominators};
+use bviz_graph_layout::dominators::{Dominators, Roots, ScopeGraph};
 use bviz_graph_layout::graph::Graph;
 use bviz_graph_layout::lod::{DEFAULT_MAX_EDGES, DEFAULT_MAX_NODES, Overflow};
 use bviz_graph_layout::metrics::{Measurement, Scope, measure};
@@ -17,10 +17,10 @@ use bviz_invocation::{Configurations, Revision, Session};
 use bviz_ui_components::{Pending, load_in_background};
 use bviz_ui_graph_args::GraphSource;
 use gpui::{App, Context, Entity, EntityId, EventEmitter, Subscription, Task};
-use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
+use std::hash::Hash;
 use std::marker::PhantomData;
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, LazyLock, OnceLock};
 
 /// The graph a document holds, as it was read: whole, unfiltered, and shared by
 /// every panel drawing it. Cheap to clone into a panel's background derivation,
@@ -102,7 +102,7 @@ pub(crate) struct Opening {
 pub(crate) struct Loaded {
     pub(crate) shared: Shared,
     pub(crate) opening: Opening,
-    measures: Passes<Measurement>,
+    measures: Passes<Scope, Measurement>,
     /// What the build of the graph's invocation reports of its nodes.
     statuses: Statuses,
     /// What the build of the graph's invocation reported, as the card over
@@ -119,7 +119,8 @@ pub(crate) struct Loaded {
     /// as the card over the graph lists it.
     timecard: Timecard,
     timed: Revision,
-    dominators: Passes<Dominators>,
+    dominators: Passes<TreeKey, Dominators>,
+    scope_graphs: HashMap<Scope, Prepared<ScopeGraph>>,
 }
 
 impl Loaded {
@@ -135,6 +136,7 @@ impl Loaded {
             timecard: Timecard::default(),
             timed: Revision::default(),
             dominators: Passes::default(),
+            scope_graphs: HashMap::new(),
         }
     }
 
@@ -214,6 +216,17 @@ impl Loaded {
         self.reported = reported;
         changed
     }
+
+    /// The points of `scope` and the dependencies between them.
+    fn scope_graph(&mut self, scope: Scope) -> Prepared<ScopeGraph> {
+        let prepare = move |shared: &Shared| {
+            let (base, names, facets) = (&shared.base, &shared.names, &shared.facets);
+            ScopeGraph::new(base, names, facets, &shared.provenance, scope)
+        };
+        (self.scope_graphs.entry(scope))
+            .or_insert_with(|| Prepared::new(&self.shared, prepare))
+            .clone()
+    }
 }
 
 /// The mnemonic `facets` gives each configuration, by its checksum. A
@@ -231,6 +244,52 @@ fn configurations(facets: &Facets) -> Configurations {
         }
     }
     described
+}
+
+/// What a reader takes from a loaded graph, prepared the first time it is
+/// read and shared by every reader after.
+pub(crate) struct Prepared<T>(Arc<Preparing<T>>);
+
+struct Preparing<T> {
+    shared: Shared,
+    prepared: LazyLock<T, Box<dyn FnOnce() -> T + Send>>,
+}
+
+impl<T> Prepared<T> {
+    /// What `prepare` takes from `shared`.
+    fn new(shared: &Shared, prepare: impl FnOnce(&Shared) -> T + Send + 'static) -> Self {
+        let from = shared.clone();
+        Self(Arc::new(Preparing {
+            shared: shared.clone(),
+            prepared: LazyLock::new(Box::new(move || prepare(&from))),
+        }))
+    }
+
+    /// What was prepared, prepared here where no reader has prepared it yet,
+    /// and waited for where another is preparing it; so read only off the UI
+    /// thread.
+    pub(crate) fn get(&self) -> &T {
+        &self.0.prepared
+    }
+
+    /// The graph it was taken from.
+    pub(crate) fn shared(&self) -> &Shared {
+        &self.0.shared
+    }
+}
+
+impl<T> Clone for Prepared<T> {
+    fn clone(&self) -> Self {
+        Self(Arc::clone(&self.0))
+    }
+}
+
+/// What a graph keeps each of its dominator trees by: all that a tree is a
+/// function of.
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+pub(crate) struct TreeKey {
+    pub(crate) scope: Scope,
+    pub(crate) roots: Roots,
 }
 
 /// Whether a graph's layered view starts out drawing the transitive reduction of
@@ -331,21 +390,21 @@ struct Deferred {
     _released: Subscription,
 }
 
-/// The loaded graph's pass yielding a `T` in `scope` has landed.
-pub(crate) struct Landed<T> {
-    pub(crate) scope: Scope,
+/// The loaded graph's pass yielding a `T` for `key` has landed.
+pub(crate) struct Landed<K, T> {
+    pub(crate) key: K,
     _pass: PhantomData<fn() -> T>,
 }
 
-pub(crate) type MetricsLanded = Landed<Measurement>;
-pub(crate) type DominatorsLanded = Landed<Dominators>;
+pub(crate) type MetricsLanded = Landed<Scope, Measurement>;
+pub(crate) type DominatorsLanded = Landed<TreeKey, Dominators>;
 
 /// The graph's other views may have another [`GraphModel::filter`] to draw
 /// through.
 pub(crate) struct FilterChanged;
 
-/// A pass over the whole of a graph in one scope, which is only taken once a
-/// view drawing what it yields asks for it.
+/// A pass over the whole of a graph, which is only taken once a view drawing
+/// what it yields asks for it.
 enum Pass<T> {
     Running {
         /// Dropping it gives the pass up: one not yet started never runs, and
@@ -355,28 +414,37 @@ enum Pass<T> {
     Done(Arc<T>),
 }
 
-/// A graph's passes of one kind, by scope. Goes with the graph they pass over,
-/// so a pass still running when the graph is replaced never lands.
-struct Passes<T>(HashMap<Scope, Pass<T>>);
+/// A graph's passes of one kind, by what each passes over. Goes with the
+/// graph they pass over, so a pass still running when the graph is replaced
+/// never lands.
+struct Passes<K, T> {
+    by_key: HashMap<K, Pass<T>>,
+}
 
-impl<T> Default for Passes<T> {
+impl<K, T> Default for Passes<K, T> {
     fn default() -> Self {
-        Self(HashMap::new())
+        Self {
+            by_key: HashMap::new(),
+        }
     }
 }
 
-impl<T> Passes<T> {
-    fn done(&self, scope: Scope) -> Option<&Arc<T>> {
-        match self.0.get(&scope)? {
-            Pass::Done(done) => Some(done),
+impl<K: Eq + Hash, T> Passes<K, T> {
+    fn done(&self, key: &K) -> Option<&Arc<T>> {
+        match self.by_key.get(key)? {
+            Pass::Done(yielded) => Some(yielded),
             Pass::Running { .. } => None,
         }
     }
 
-    /// Drops each pass running in a scope `wanted` leaves out.
-    fn forget_unwanted(&mut self, wanted: &[Scope]) {
-        self.0
-            .retain(|scope, pass| matches!(pass, Pass::Done(_)) || wanted.contains(scope));
+    fn land(&mut self, key: K, yielded: Arc<T>) {
+        self.by_key.insert(key, Pass::Done(yielded));
+    }
+
+    /// Drops each pass running for a key `wanted` leaves out.
+    fn forget_unwanted(&mut self, wanted: &[K]) {
+        self.by_key
+            .retain(|key, pass| matches!(pass, Pass::Done(_)) || wanted.contains(key));
     }
 }
 
@@ -408,7 +476,7 @@ struct Joined {
 impl EventEmitter<SourceReplaced> for GraphModel {}
 impl EventEmitter<MapPlaced> for GraphModel {}
 impl EventEmitter<RevealRequested> for GraphModel {}
-impl<T: 'static> EventEmitter<Landed<T>> for GraphModel {}
+impl<K: 'static, T: 'static> EventEmitter<Landed<K, T>> for GraphModel {}
 impl EventEmitter<FilterChanged> for GraphModel {}
 
 impl GraphModel {
@@ -563,66 +631,75 @@ impl GraphModel {
     /// Has the loaded graph measured off the UI thread in each scope of
     /// `wanted`, as [`Self::want`] does.
     pub(crate) fn want_metrics(&mut self, wanted: &[Scope], cx: &mut Context<Self>) {
-        self.want(wanted, |loaded| &mut loaded.measures, measure, cx);
+        let pass = |loaded: &mut Loaded, &scope: &Scope| {
+            let shared = loaded.shared.clone();
+            move || {
+                let (base, names, facets) = (&shared.base, &shared.names, &shared.facets);
+                measure(base, names, facets, &shared.provenance, scope)
+            }
+        };
+        self.want(wanted, |loaded| &mut loaded.measures, pass, cx);
     }
 
     /// The loaded graph's metrics in `scope`, once measured.
     pub(crate) fn metrics(&self, scope: Scope) -> Option<&Arc<Measurement>> {
-        self.loaded()?.measures.done(scope)
+        self.loaded()?.measures.done(&scope)
     }
 
-    /// Has the loaded graph's dominator tree computed off the UI thread in
-    /// each scope of `wanted`, as [`Self::want`] does.
-    pub(crate) fn want_dominators(&mut self, wanted: &[Scope], cx: &mut Context<Self>) {
-        self.want(wanted, |loaded| &mut loaded.dominators, dominators, cx);
+    /// Has the loaded graph's dominator tree computed off the UI thread for
+    /// each key of `wanted`, as [`Self::want`] does.
+    pub(crate) fn want_dominators(&mut self, wanted: &[TreeKey], cx: &mut Context<Self>) {
+        let pass = |loaded: &mut Loaded, key: &TreeKey| {
+            let (prepared, roots) = (loaded.scope_graph(key.scope), key.roots.clone());
+            move || {
+                let shared = prepared.shared();
+                (prepared.get()).dominators(&shared.names, &shared.facets, &roots)
+            }
+        };
+        self.want(wanted, |loaded| &mut loaded.dominators, pass, cx);
     }
 
-    /// The loaded graph's dominator tree in `scope`, once computed.
-    pub(crate) fn dominators(&self, scope: Scope) -> Option<&Arc<Dominators>> {
-        self.loaded()?.dominators.done(scope)
+    /// The loaded graph's dominator tree for `key`, once computed.
+    pub(crate) fn dominators(&self, key: &TreeKey) -> Option<&Arc<Dominators>> {
+        self.loaded()?.dominators.done(key)
     }
 
-    /// Runs `pass` over the loaded graph off the UI thread in each scope of
-    /// `wanted` not yet asked for, keeping what it yields among the passes
-    /// `passes` picks out and emitting [`Landed`] as each lands, and gives up
-    /// any other scope's pass still running, which would only hold the workers
-    /// from those wanted. What a pass already yielded is kept. Does nothing
-    /// while the graph is still being read.
-    fn want<T: Send + Sync + 'static>(
+    /// Runs the work `pass` makes of the loaded graph off the UI thread for
+    /// each key of `wanted` not yet asked for, keeping what it yields among
+    /// the passes `passes` picks out and emitting [`Landed`] as each lands,
+    /// and gives up any other key's pass still running, which would only hold
+    /// the workers from those wanted. What a pass already yielded is kept.
+    /// Does nothing while the graph is still being read.
+    fn want<K, T, W>(
         &mut self,
-        wanted: &[Scope],
-        passes: fn(&mut Loaded) -> &mut Passes<T>,
-        pass: fn(&Graph, &Names, &Facets, &Provenance, Scope) -> T,
+        wanted: &[K],
+        passes: fn(&mut Loaded) -> &mut Passes<K, T>,
+        pass: impl Fn(&mut Loaded, &K) -> W,
         cx: &mut Context<Self>,
-    ) {
+    ) where
+        K: Clone + Eq + Hash + 'static,
+        T: Send + Sync + 'static,
+        W: FnOnce() -> T + Send + 'static,
+    {
         let Source::Loaded(loaded) = &mut self.source else {
             return;
         };
-        let shared = loaded.shared.clone();
-        let passes_of = passes(loaded);
-        passes_of.forget_unwanted(wanted);
-        for &scope in wanted {
-            let Entry::Vacant(unasked) = passes_of.0.entry(scope) else {
+        passes(loaded).forget_unwanted(wanted);
+        for key in wanted {
+            if passes(loaded).by_key.contains_key(key) {
                 continue;
-            };
-            let shared = shared.clone();
-            let work = load_in_background(
-                cx,
-                move || {
-                    let (base, names, facets) = (&shared.base, &shared.names, &shared.facets);
-                    Arc::new(pass(base, names, facets, &shared.provenance, scope))
-                },
-                move |model, done, cx| {
-                    if let Source::Loaded(loaded) = &mut model.source {
-                        passes(loaded).0.insert(scope, Pass::Done(done));
-                        cx.emit(Landed::<T> {
-                            scope,
-                            _pass: PhantomData,
-                        });
-                    }
-                },
-            );
-            unasked.insert(Pass::Running { _work: work });
+            }
+            let landing = key.clone();
+            let work = load_in_background(cx, pass(loaded, key), move |model, done, cx| {
+                if let Source::Loaded(loaded) = &mut model.source {
+                    passes(loaded).land(landing.clone(), Arc::new(done));
+                    cx.emit(Landed::<K, T> {
+                        key: landing,
+                        _pass: PhantomData,
+                    });
+                }
+            });
+            (passes(loaded).by_key).insert(key.clone(), Pass::Running { _work: work });
         }
     }
 
@@ -809,6 +886,20 @@ mod tests {
         assert!(placement.placed().is_none());
     }
 
+    fn running() -> Pass<Measurement> {
+        Pass::Running {
+            _work: Task::ready(()),
+        }
+    }
+
+    fn measured(scope: Scope) -> Arc<Measurement> {
+        Arc::new(Measurement {
+            scope,
+            points: Vec::new(),
+            sizing: Sizing::FanIn,
+        })
+    }
+
     /// A scope no longer wanted stops being passed over, but what a pass
     /// yielded in it stays for when it is wanted again.
     #[test]
@@ -819,24 +910,18 @@ mod tests {
             scope(Input::Cquery),
             scope(Input::Aquery),
         );
-        let running = || Pass::Running {
-            _work: Task::ready(()),
-        };
-        let measured = Pass::Done(Arc::new(Measurement {
-            scope: landed,
-            points: Vec::new(),
-            sizing: Sizing::FanIn,
-        }));
-        let mut passes = Passes(HashMap::from([
-            (landed, measured),
-            (dropped, running()),
-            (kept, running()),
-        ]));
+        let mut passes = Passes::default();
+        passes.land(landed, measured(landed));
+        passes.by_key.insert(dropped, running());
+        passes.by_key.insert(kept, running());
 
         passes.forget_unwanted(&[kept]);
 
-        assert!(passes.done(landed).is_some());
-        assert!(!passes.0.contains_key(&dropped));
-        assert!(matches!(passes.0.get(&kept), Some(Pass::Running { .. })));
+        assert!(passes.done(&landed).is_some());
+        assert!(!passes.by_key.contains_key(&dropped));
+        assert!(matches!(
+            passes.by_key.get(&kept),
+            Some(Pass::Running { .. })
+        ));
     }
 }

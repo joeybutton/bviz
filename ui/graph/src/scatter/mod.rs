@@ -121,7 +121,7 @@ impl ScatterPanel {
         });
         let metrics_landed = cx.subscribe(&model, |view, _, landed: &MetricsLanded, cx| {
             let (scope, reference) = view.scopes(cx).unzip();
-            if [scope, reference].contains(&Some(landed.scope)) {
+            if [scope, reference].contains(&Some(landed.key)) {
                 view.replot(cx);
             }
         });

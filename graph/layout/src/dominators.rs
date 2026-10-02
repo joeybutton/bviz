@@ -381,18 +381,6 @@ impl Gathered {
     }
 }
 
-/// The dominator tree of the points of `graph` in `scope`, rooted at its
-/// top-level points.
-pub fn dominators(
-    graph: &Graph,
-    names: &Names,
-    facets: &Facets,
-    provenance: &Provenance,
-    scope: Scope,
-) -> Dominators {
-    ScopeGraph::new(graph, names, facets, provenance, scope).dominators(names, facets, &Roots::Tops)
-}
-
 /// The points of one scope and the dependencies between them, with what a
 /// dominator tree reads of them whatever its roots, so that trees of one
 /// scope from different roots share it.
@@ -1026,7 +1014,8 @@ mod tests {
     fn tree_with(graph: &Graph, names: &Names, facets: &Facets, unit: Unit) -> Dominators {
         let everything = Provenance::new(vec![InputSet::ALL; names.len()]);
         let scope = Scope::new(unit, InputSet::ALL).unwrap();
-        dominators(graph, names, facets, &everything, scope)
+        let prepared = ScopeGraph::new(graph, names, facets, &everything, scope);
+        prepared.dominators(names, facets, &Roots::Tops)
     }
 
     /// The tree of configured targets from the points `roots` names.
