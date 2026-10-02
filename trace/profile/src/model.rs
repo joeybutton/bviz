@@ -71,7 +71,8 @@ impl CategoryId {
         std::num::NonZeroU16::new(ordinal).map(CategoryId)
     }
 
-    fn position(self) -> usize {
+    /// The category's place in [`Profile::categories`].
+    pub fn position(self) -> usize {
         usize::from(self.0.get()) - 1
     }
 }

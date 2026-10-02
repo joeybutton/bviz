@@ -1,7 +1,9 @@
 use std::ops::Range;
 
 use bviz_parallel::workers;
-use bviz_trace_profile::{LaneClass, Profile, Slice, parks_thread};
+use bviz_trace_profile::{
+    FetchSide, LaneClass, Profile, Repository, Slice, fetch_side, parks_thread,
+};
 use rayon::iter::{IntoParallelIterator, ParallelIterator};
 use rayon::slice::ParallelSliceMut;
 
@@ -17,9 +19,9 @@ enum Tier {
     Pause,
     /// The lane's innermost open span is work of its own.
     Working,
-    /// The lane's innermost open span holds it parked (see [`parks_thread`]):
-    /// what it waits on is other lanes' work, so it is given only the time none
-    /// of them works.
+    /// The lane's innermost open span holds it parked (see [`parks_thread`]
+    /// and [`Standing::Hosting`]): what it waits on is other lanes' work, so it
+    /// is given only the time none of them works.
     Parked,
 }
 
@@ -174,27 +176,155 @@ struct OpenRun {
     tier: Tier,
 }
 
+/// What a span puts its lane in while it is the lane's innermost open one.
+#[derive(Clone, Copy)]
+enum Standing<'p> {
+    In(Tier),
+    /// The host of this repository's fetch (see [`FetchSide::Host`]):
+    /// [`Tier::Parked`] while a [`WorkerSpan`] of the repository is open on
+    /// another lane, and [`Tier::Working`] for the rest of it.
+    Hosting(Repository<'p>),
+}
+
+/// What a span of one Bazel `cat` puts its lane in, as far as the category
+/// says.
+#[derive(Clone, Copy)]
+enum CategoryStanding {
+    Parks,
+    Works,
+    /// Left to the span's name: see [`FetchSide::repository`].
+    Fetches(FetchSide),
+}
+
+impl CategoryStanding {
+    fn of(category: &str) -> CategoryStanding {
+        if parks_thread(category) {
+            return CategoryStanding::Parks;
+        }
+        match fetch_side(category) {
+            Some(side) => CategoryStanding::Fetches(side),
+            None => CategoryStanding::Works,
+        }
+    }
+
+    /// The standing of each category `profile` numbers, in the order of
+    /// [`Profile::categories`].
+    fn numbered(profile: &Profile) -> Vec<CategoryStanding> {
+        profile
+            .categories()
+            .map(|category| CategoryStanding::of(profile.str(category)))
+            .collect()
+    }
+}
+
+/// A span open on `lane` as the worker of `repository`'s fetch (see
+/// [`FetchSide::Worker`]).
+#[derive(Clone, Copy)]
+struct WorkerSpan<'p> {
+    repository: Repository<'p>,
+    start_us: i64,
+    end_us: i64,
+    /// The lane's place in [`Profile::threads`].
+    lane: usize,
+}
+
+/// A profile's [`WorkerSpan`]s, ordered by repository and then by start.
+struct FetchWorkers<'p>(Vec<WorkerSpan<'p>>);
+
+impl<'p> FetchWorkers<'p> {
+    fn new(mut spans: Vec<WorkerSpan<'p>>) -> FetchWorkers<'p> {
+        spans.sort_unstable_by_key(|span| (span.repository, span.start_us));
+        FetchWorkers(spans)
+    }
+
+    /// The worker spans every one of `shards` read.
+    fn gathered(shards: &[RunShard<'p>]) -> FetchWorkers<'p> {
+        let span_count = shards.iter().map(|shard| shard.workers.len()).sum();
+        let mut spans = Vec::with_capacity(span_count);
+        for shard in shards {
+            spans.extend_from_slice(&shard.workers);
+        }
+        FetchWorkers::new(spans)
+    }
+
+    /// Where the spans of `repository` are.
+    fn of(&self, repository: Repository<'p>) -> Range<usize> {
+        let from = self.0.partition_point(|span| span.repository < repository);
+        let len = self.0[from..].partition_point(|span| span.repository == repository);
+        from..from + len
+    }
+
+    /// Reports, in order, the abutting stretches that make up `run`, which a
+    /// host has open on `host_lane` waiting on the spans at `workers`, each
+    /// in the tier the host is in over it.
+    fn split(
+        &self,
+        host_lane: usize,
+        workers: Range<usize>,
+        run: OpenRun,
+        mut stretch: impl FnMut(OpenRun),
+    ) {
+        let mut stretch = |start_us, end_us, tier| {
+            stretch(OpenRun {
+                start_us,
+                end_us,
+                tier,
+            })
+        };
+        let mut at_us = run.start_us;
+        for worker in &self.0[workers] {
+            if at_us >= run.end_us || worker.start_us >= run.end_us {
+                break;
+            }
+            if worker.lane == host_lane || worker.end_us <= at_us {
+                continue;
+            }
+            let parked_from_us = worker.start_us.max(at_us);
+            if parked_from_us > at_us {
+                stretch(at_us, parked_from_us, Tier::Working);
+            }
+            at_us = worker.end_us.min(run.end_us);
+            stretch(parked_from_us, at_us, Tier::Parked);
+        }
+        if at_us < run.end_us {
+            stretch(at_us, run.end_us, Tier::Working);
+        }
+    }
+}
+
+/// A run a host has open, known by `H`: the [`Repository`] it fetches as
+/// swept, and where that repository's spans are in the profile's
+/// [`FetchWorkers`] once those are gathered, so that each host's are sought
+/// once.
+struct HostRun<H> {
+    /// Its place in [`SweptRuns::swept`].
+    run: usize,
+    waits_on: H,
+}
+
 /// A lane's [`OpenRun`]s under construction.
-struct RunSweep<'a> {
-    /// The end and tier of each span open at `now_us`, in the order they began.
-    open: &'a mut Vec<(i64, Tier)>,
+struct RunSweep<'a, 'p> {
+    /// The end and standing of each span open at `now_us`, in the order they
+    /// began.
+    open: &'a mut Vec<(i64, Standing<'p>)>,
     out: &'a mut Vec<OpenRun>,
+    hosts: &'a mut Vec<HostRun<Repository<'p>>>,
     /// Where this lane's runs begin in `out`, which holds other lanes' ahead
     /// of them.
     first: usize,
     now_us: i64,
 }
 
-impl RunSweep<'_> {
+impl<'p> RunSweep<'_, 'p> {
     /// Emits the lane's runs from `now_us` up to `until_us`, dropping the spans
     /// that end by then. The innermost open span is the latest-begun one still
     /// open, which also orders spans that overlap without nesting.
     fn advance(&mut self, until_us: i64) {
-        while let Some(&(end_us, tier)) = self.open.last() {
+        while let Some(&(end_us, standing)) = self.open.last() {
             if end_us > self.now_us {
                 let upto_us = end_us.min(until_us);
                 if upto_us > self.now_us {
-                    self.emit(upto_us, tier);
+                    self.emit(upto_us, standing);
                 }
                 if end_us > until_us {
                     break;
@@ -204,33 +334,59 @@ impl RunSweep<'_> {
         }
     }
 
-    fn emit(&mut self, end_us: i64, tier: Tier) {
+    fn emit(&mut self, end_us: i64, standing: Standing<'p>) {
+        let (tier, hosted) = match standing {
+            Standing::In(tier) => (tier, None),
+            Standing::Hosting(repository) => (Tier::Working, Some(repository)),
+        };
+        let follows_host = self
+            .hosts
+            .last()
+            .is_some_and(|host| host.run + 1 == self.out.len());
         match self.out[self.first..].last_mut() {
-            Some(last) if last.end_us == self.now_us && last.tier == tier => last.end_us = end_us,
-            _ => self.out.push(OpenRun {
-                start_us: self.now_us,
-                end_us,
-                tier,
-            }),
+            Some(last)
+                if hosted.is_none()
+                    && !follows_host
+                    && last.end_us == self.now_us
+                    && last.tier == tier =>
+            {
+                last.end_us = end_us
+            }
+            _ => {
+                if let Some(repository) = hosted {
+                    self.hosts.push(HostRun {
+                        run: self.out.len(),
+                        waits_on: repository,
+                    });
+                }
+                self.out.push(OpenRun {
+                    start_us: self.now_us,
+                    end_us,
+                    tier,
+                });
+            }
         }
         self.now_us = end_us;
     }
 }
 
 /// Appends to `out` the [`OpenRun`]s of the lane holding `slices`, ascending
-/// and with a run that continues the last in its tier merged into it. `tier_of`
-/// gives the tier of the slice at an index; `open` is scratch.
-fn open_runs(
+/// and with a run that continues the last in its tier merged into it unless
+/// either is a host's, and to `hosts` those a host has open. `standing_of`
+/// gives the standing of the slice at an index; `open` is scratch.
+fn open_runs<'p>(
     slices: &[Slice],
-    tier_of: impl Fn(usize) -> Tier,
-    open: &mut Vec<(i64, Tier)>,
+    mut standing_of: impl FnMut(usize) -> Standing<'p>,
+    open: &mut Vec<(i64, Standing<'p>)>,
     out: &mut Vec<OpenRun>,
+    hosts: &mut Vec<HostRun<Repository<'p>>>,
 ) {
     open.clear();
     let first = out.len();
     let mut sweep = RunSweep {
         open,
         out,
+        hosts,
         first,
         now_us: i64::MIN,
     };
@@ -239,43 +395,189 @@ fn open_runs(
         sweep.now_us = slice.start_us;
         // A slice of zero duration is open at no instant.
         if slice.dur_us > 0 {
-            sweep.open.push((slice.end_us(), tier_of(i)));
+            sweep.open.push((slice.end_us(), standing_of(i)));
         }
     }
     sweep.advance(i64::MAX);
 }
 
-/// The [`OpenRun`]s of the lanes one worker read.
-#[derive(Default)]
-struct RunShard {
-    runs: Vec<OpenRun>,
-    /// Each lane read, with the range of `runs` that is its own.
+/// The runs of some lanes as swept, a host's standing as working throughout:
+/// [`for_each_run`](Self::for_each_run) gives a lane's with its hosts parked.
+struct SweptRuns<H> {
+    swept: Vec<OpenRun>,
+    /// Each lane read, with the range of `swept` that is its own.
     lanes: Vec<(usize, Range<usize>)>,
-    /// [`open_runs`]' scratch, kept from lane to lane.
-    open: Vec<(i64, Tier)>,
+    /// Ascending by run.
+    hosts: Vec<HostRun<H>>,
 }
 
-impl RunShard {
-    /// Reads the lane at `lane` in [`Profile::threads`].
-    fn sweep(&mut self, profile: &Profile, lane: usize) {
+impl<H> Default for SweptRuns<H> {
+    fn default() -> Self {
+        SweptRuns {
+            swept: Vec::new(),
+            lanes: Vec::new(),
+            hosts: Vec::new(),
+        }
+    }
+}
+
+impl<'p> SweptRuns<Repository<'p>> {
+    fn waiting_on(self, workers: &FetchWorkers<'p>) -> SweptRuns<Range<usize>> {
+        let hosts = self.hosts.into_iter().map(|host| HostRun {
+            run: host.run,
+            waits_on: workers.of(host.waits_on),
+        });
+        SweptRuns {
+            swept: self.swept,
+            lanes: self.lanes,
+            hosts: hosts.collect(),
+        }
+    }
+}
+
+impl SweptRuns<Range<usize>> {
+    fn hosts_in(&self, runs: &Range<usize>) -> &[HostRun<Range<usize>>] {
+        let from = self.hosts.partition_point(|host| host.run < runs.start);
+        let len = self.hosts[from..].partition_point(|host| host.run < runs.end);
+        &self.hosts[from..from + len]
+    }
+
+    /// Reports the runs of the lane at `at` in `lanes`, ascending, each
+    /// host's split where `workers` park it.
+    fn for_each_run(&self, at: usize, workers: &FetchWorkers, mut run: impl FnMut(OpenRun)) {
+        let (lane, range) = &self.lanes[at];
+        let mut from = range.start;
+        for host in self.hosts_in(range) {
+            self.swept[from..host.run]
+                .iter()
+                .copied()
+                .for_each(&mut run);
+            let waits_on = host.waits_on.clone();
+            workers.split(*lane, waits_on, self.swept[host.run], &mut run);
+            from = host.run + 1;
+        }
+        self.swept[from..range.end].iter().copied().for_each(run);
+    }
+
+    /// How many runs [`for_each_run`](Self::for_each_run) reports of the lane
+    /// at `at`.
+    fn run_count(&self, at: usize, workers: &FetchWorkers) -> usize {
+        let (lane, range) = &self.lanes[at];
+        let hosts = self.hosts_in(range);
+        let mut stretches = 0;
+        for host in hosts {
+            let waits_on = host.waits_on.clone();
+            workers.split(*lane, waits_on, self.swept[host.run], |_| stretches += 1);
+        }
+        range.len() - hosts.len() + stretches
+    }
+}
+
+/// What one worker read of its lanes.
+#[derive(Default)]
+struct RunShard<'p> {
+    runs: SweptRuns<Repository<'p>>,
+    workers: Vec<WorkerSpan<'p>>,
+    /// [`open_runs`]' scratch, kept from lane to lane.
+    open: Vec<(i64, Standing<'p>)>,
+}
+
+impl<'p> RunShard<'p> {
+    /// Reads the lane at `lane` in [`Profile::threads`], `standing_by_category`
+    /// being the profile's [`CategoryStanding::numbered`].
+    fn sweep(
+        &mut self,
+        profile: &'p Profile,
+        standing_by_category: &[CategoryStanding],
+        lane: usize,
+    ) {
         let thread = &profile.threads()[lane];
+        let slices = profile.slices(thread);
         let details = profile.details(thread);
-        let from = self.runs.len();
-        let tier_of = |slice: usize| match thread.lane_class {
-            LaneClass::Gc => Tier::Pause,
-            _ if parks_thread(profile.str(details[slice].category)) => Tier::Parked,
-            _ => Tier::Working,
+        let from = self.runs.swept.len();
+        let fetch_workers = &mut self.workers;
+        let standing_of = |at: usize| {
+            if thread.lane_class == LaneClass::Gc {
+                return Standing::In(Tier::Pause);
+            }
+            let slice = &slices[at];
+            let by_category = match slice.category {
+                Some(id) => standing_by_category[id.position()],
+                None => CategoryStanding::of(profile.str(details[at].category)),
+            };
+            match by_category {
+                CategoryStanding::Parks => Standing::In(Tier::Parked),
+                CategoryStanding::Works => Standing::In(Tier::Working),
+                CategoryStanding::Fetches(side) => {
+                    fetch_standing(side, profile.str(slice.name), slice, lane, fetch_workers)
+                }
+            }
         };
         if thread.lane_class != LaneClass::CriticalPath {
             open_runs(
-                profile.slices(thread),
-                tier_of,
+                slices,
+                standing_of,
                 &mut self.open,
-                &mut self.runs,
+                &mut self.runs.swept,
+                &mut self.runs.hosts,
             );
         }
-        self.lanes.push((lane, from..self.runs.len()));
+        self.runs.lanes.push((lane, from..self.runs.swept.len()));
     }
+}
+
+/// The standing of `slice`, a span of `side` of a fetch named `name` and open
+/// on `lane`, which joins `workers` where it is a repository's worker.
+fn fetch_standing<'p>(
+    side: FetchSide,
+    name: &'p str,
+    slice: &Slice,
+    lane: usize,
+    workers: &mut Vec<WorkerSpan<'p>>,
+) -> Standing<'p> {
+    match (side, side.repository(name)) {
+        (FetchSide::Host, Some(repository)) => Standing::Hosting(repository),
+        (FetchSide::Worker, Some(repository)) => {
+            workers.push(WorkerSpan {
+                repository,
+                start_us: slice.start_us,
+                end_us: slice.end_us(),
+                lane,
+            });
+            Standing::In(Tier::Working)
+        }
+        (_, None) => Standing::In(Tier::Working),
+    }
+}
+
+/// Where a lane's runs are among the shards' [`SweptRuns`].
+#[derive(Clone, Copy, Default)]
+struct LaneHome {
+    shard: usize,
+    /// The lane's place in the shard's `lanes`.
+    at: usize,
+    /// How many runs [`SweptRuns::for_each_run`] reports of the lane.
+    run_count: usize,
+}
+
+/// Each lane's home, in the order of [`Profile::threads`], which holds
+/// `lane_count` lanes.
+fn lane_homes(
+    shards: &[SweptRuns<Range<usize>>],
+    fetch_workers: &FetchWorkers,
+    lane_count: usize,
+) -> Vec<LaneHome> {
+    let mut homes = vec![LaneHome::default(); lane_count];
+    for (s, shard) in shards.iter().enumerate() {
+        for (at, (lane, _)) in shard.lanes.iter().enumerate() {
+            homes[*lane] = LaneHome {
+                shard: s,
+                at,
+                run_count: shard.run_count(at, fetch_workers),
+            };
+        }
+    }
+    homes
 }
 
 /// A lane entering or leaving a tier.
@@ -321,21 +623,29 @@ fn for_each_change(edges: &[Edge], mut change: impl FnMut(Tier, i64, u32)) {
     }
 }
 
-/// The [`Edge`]s of every run in `shards`, ascending by time.
-fn edges_by_time(shards: &[RunShard]) -> Vec<Edge> {
-    let run_count: usize = shards.iter().map(|s| s.runs.len()).sum();
+/// The [`Edge`]s of every run of the lanes at `homes`, ascending by time.
+fn edges_by_time(
+    shards: &[SweptRuns<Range<usize>>],
+    fetch_workers: &FetchWorkers,
+    homes: &[LaneHome],
+) -> Vec<Edge> {
+    let run_count: usize = homes.iter().map(|home| home.run_count).sum();
     let mut edges: Vec<Edge> = Vec::with_capacity(2 * run_count);
-    for run in shards.iter().flat_map(|s| &s.runs) {
-        edges.push(Edge {
-            at_us: run.start_us,
-            tier: run.tier,
-            enters: true,
-        });
-        edges.push(Edge {
-            at_us: run.end_us,
-            tier: run.tier,
-            enters: false,
-        });
+    for shard in shards {
+        for at in 0..shard.lanes.len() {
+            shard.for_each_run(at, fetch_workers, |run| {
+                edges.push(Edge {
+                    at_us: run.start_us,
+                    tier: run.tier,
+                    enters: true,
+                });
+                edges.push(Edge {
+                    at_us: run.end_us,
+                    tier: run.tier,
+                    enters: false,
+                });
+            });
+        }
     }
     workers().install(|| edges.par_sort_unstable_by_key(|e| e.at_us));
     edges
@@ -375,12 +685,18 @@ struct Hints {
 }
 
 impl LaneRuns {
-    fn new(open_runs: &[OpenRun], clocks: &ByTier<ShareClock>) -> LaneRuns {
-        let mut start_us = Vec::with_capacity(open_runs.len());
-        let mut runs = Vec::with_capacity(open_runs.len());
+    /// The clock of a lane over the `run_count` runs `for_each_run` reports,
+    /// which are ascending.
+    fn new(
+        run_count: usize,
+        clocks: &ByTier<ShareClock>,
+        for_each_run: impl FnOnce(&mut dyn FnMut(OpenRun)),
+    ) -> LaneRuns {
+        let mut start_us = Vec::with_capacity(run_count);
+        let mut runs = Vec::with_capacity(run_count);
         let mut hints = ByTier::<usize>::default();
         let mut given: Fixed = 0;
-        for open in open_runs {
+        for_each_run(&mut |open| {
             let clock = clocks.of(open.tier);
             let hint = hints.of_mut(open.tier);
             let at_start = clock.reading_at(open.start_us, hint);
@@ -392,7 +708,7 @@ impl LaneRuns {
                 origin: given - at_start,
             });
             given = given.saturating_add(at_end - at_start);
-        }
+        });
         LaneRuns { start_us, runs }
     }
 
@@ -419,20 +735,26 @@ enum Lane {
 
 /// Each lane's clock over the runs `shards` hold of it, in the order of
 /// [`Profile::threads`].
-fn lane_clocks(profile: &Profile, shards: &[RunShard], clocks: &ByTier<ShareClock>) -> Vec<Lane> {
+fn lane_clocks(
+    profile: &Profile,
+    shards: &[SweptRuns<Range<usize>>],
+    fetch_workers: &FetchWorkers,
+    homes: &[LaneHome],
+    clocks: &ByTier<ShareClock>,
+) -> Vec<Lane> {
     let threads = profile.threads();
-    let mut runs_of: Vec<&[OpenRun]> = vec![&[]; threads.len()];
-    for shard in shards {
-        for (lane, range) in &shard.lanes {
-            runs_of[*lane] = &shard.runs[range.clone()];
-        }
-    }
     workers().install(|| {
         (0..threads.len())
             .into_par_iter()
             .map(|i| match threads[i].lane_class {
                 LaneClass::CriticalPath => Lane::Replay,
-                _ => Lane::Sharing(LaneRuns::new(runs_of[i], clocks)),
+                _ => {
+                    let home = homes[i];
+                    let shard = &shards[home.shard];
+                    Lane::Sharing(LaneRuns::new(home.run_count, clocks, |run| {
+                        shard.for_each_run(home.at, fetch_workers, run)
+                    }))
+                }
             })
             .collect()
     })
@@ -461,11 +783,18 @@ impl WallShare {
     /// Builds the profile's shares, reading its lanes across `fan_out` workers.
     pub(crate) fn new(profile: &Profile, fan_out: usize) -> WallShare {
         let lane_count = profile.threads().len();
+        let standing_by_category = &CategoryStanding::numbered(profile);
         let shards = run_sharded(fan_out, lane_count, |shard: &mut RunShard, lane| {
-            shard.sweep(profile, lane)
+            shard.sweep(profile, standing_by_category, lane)
         });
-        let clocks = tier_clocks(&edges_by_time(&shards));
-        let lanes = lane_clocks(profile, &shards, &clocks);
+        let fetch_workers = &FetchWorkers::gathered(&shards);
+        let shards: Vec<SweptRuns<Range<usize>>> = shards
+            .into_iter()
+            .map(|shard| shard.runs.waiting_on(fetch_workers))
+            .collect();
+        let homes = lane_homes(&shards, fetch_workers, lane_count);
+        let clocks = tier_clocks(&edges_by_time(&shards, fetch_workers, &homes));
+        let lanes = lane_clocks(profile, &shards, fetch_workers, &homes, &clocks);
         WallShare { clocks, lanes }
     }
 
@@ -514,7 +843,9 @@ mod tests {
     use fastrand::Rng;
 
     use super::*;
-    use crate::test_profile::{TestSlice, profile, random_profile, slice, track, wait};
+    use crate::test_profile::{
+        TestSlice, fetch_host, fetch_worker, profile, random_profile, slice, track, wait,
+    };
 
     /// A slice of work of its lane's own.
     fn work(start_us: i64, dur_us: i64) -> TestSlice {
@@ -736,6 +1067,207 @@ mod tests {
     }
 
     #[test]
+    fn a_fetch_host_is_given_nothing_while_its_worker_works() {
+        let p = profile(vec![
+            track(1, LaneClass::Analysis, vec![fetch_host("r", 0, 100)]),
+            track(2, LaneClass::RepoFetch, vec![fetch_worker("r", 0, 100)]),
+        ]);
+        assert_eq!(shares(&p, 0, 100), [0, 100]);
+    }
+
+    #[test]
+    fn a_fetch_host_works_wherever_its_worker_has_no_span_open() {
+        let p = profile(vec![
+            track(1, LaneClass::Analysis, vec![fetch_host("r", 0, 100)]),
+            track(2, LaneClass::RepoFetch, vec![fetch_worker("r", 40, 30)]),
+            track(3, LaneClass::Execution, vec![work(0, 100)]),
+        ]);
+        // The host halves with the third lane up to 40 and from 70 on, the
+        // worker in between.
+        assert_eq!(shares(&p, 0, 100), [35, 15, 50]);
+        assert_eq!(shares(&p, 0, 40), [20, 0, 20]);
+        assert_eq!(shares(&p, 40, 70), [0, 15, 15]);
+        // A stretch reaching across the worker's ends weighs each side's part.
+        assert_eq!(shares(&p, 30, 50), [5, 5, 10]);
+        assert_eq!(shares(&p, 60, 90), [10, 5, 15]);
+    }
+
+    #[test]
+    fn a_fetch_host_with_no_worker_works_throughout() {
+        let p = profile(vec![
+            track(1, LaneClass::Analysis, vec![fetch_host("r", 0, 100)]),
+            track(2, LaneClass::Execution, vec![work(0, 100)]),
+        ]);
+        assert_eq!(shares(&p, 0, 100), [50, 50]);
+    }
+
+    #[test]
+    fn workers_running_together_split_the_time_their_hosts_wait() {
+        let p = profile(vec![
+            track(1, LaneClass::Analysis, vec![fetch_host("r", 0, 100)]),
+            track(2, LaneClass::Analysis, vec![fetch_host("s", 0, 100)]),
+            track(3, LaneClass::RepoFetch, vec![fetch_worker("r", 0, 100)]),
+            track(4, LaneClass::RepoFetch, vec![fetch_worker("s", 0, 100)]),
+        ]);
+        assert_eq!(shares(&p, 0, 100), [0, 0, 50, 50]);
+    }
+
+    #[test]
+    fn another_repositorys_worker_leaves_a_fetch_host_working() {
+        let p = profile(vec![
+            track(1, LaneClass::Analysis, vec![fetch_host("r", 0, 100)]),
+            track(2, LaneClass::RepoFetch, vec![fetch_worker("s", 0, 100)]),
+        ]);
+        assert_eq!(shares(&p, 0, 100), [50, 50]);
+    }
+
+    #[test]
+    fn a_repository_named_by_the_head_of_anothers_name_is_not_that_one() {
+        let hosts = || {
+            vec![
+                track(1, LaneClass::Analysis, vec![fetch_host("foo", 0, 100)]),
+                track(2, LaneClass::Analysis, vec![fetch_host("foo-1.0", 0, 100)]),
+            ]
+        };
+        let with_worker_of = |repository: &str| {
+            let mut tracks = hosts();
+            tracks.push(track(
+                3,
+                LaneClass::RepoFetch,
+                vec![fetch_worker(repository, 0, 100)],
+            ));
+            profile(tracks)
+        };
+        assert_eq!(shares(&with_worker_of("foo"), 0, 100), [0, 50, 50]);
+        assert_eq!(shares(&with_worker_of("foo-1.0"), 0, 100), [50, 0, 50]);
+        assert_eq!(shares(&with_worker_of("fo"), 0, 100), [33, 33, 33]);
+    }
+
+    #[test]
+    fn every_host_span_of_a_restarted_fetch_waits_on_its_one_worker() {
+        let p = profile(vec![
+            track(
+                1,
+                LaneClass::Analysis,
+                vec![
+                    fetch_host("r", 0, 30),
+                    fetch_host("r", 40, 20),
+                    fetch_host("r", 70, 30),
+                ],
+            ),
+            track(2, LaneClass::RepoFetch, vec![fetch_worker("r", 10, 80)]),
+        ]);
+        // The host is alone up to 10 and from 90 on.
+        assert_eq!(shares(&p, 0, 100), [20, 80]);
+        assert_eq!(shares(&p, 10, 90), [0, 80]);
+    }
+
+    #[test]
+    fn a_fetch_host_waiting_while_no_lane_works_shares_with_the_parked() {
+        // The worker's lane is itself parked from 20 to 50.
+        let p = profile(vec![
+            track(1, LaneClass::Analysis, vec![fetch_host("r", 0, 100)]),
+            track(
+                2,
+                LaneClass::RepoFetch,
+                vec![fetch_worker("r", 0, 100), wait(20, 30)],
+            ),
+        ]);
+        assert_eq!(shares(&p, 0, 100), [15, 85]);
+        assert_eq!(shares(&p, 20, 50), [15, 15]);
+    }
+
+    #[test]
+    fn a_collector_pause_takes_its_time_from_a_fetch_and_its_host() {
+        let p = profile(vec![
+            track(1, LaneClass::Gc, vec![pause(40, 20)]),
+            track(2, LaneClass::Analysis, vec![fetch_host("r", 0, 100)]),
+            track(3, LaneClass::RepoFetch, vec![fetch_worker("r", 0, 100)]),
+        ]);
+        assert_eq!(shares(&p, 0, 100), [20, 0, 80]);
+    }
+
+    #[test]
+    fn work_nested_in_a_fetch_hosts_span_shares_with_the_worker() {
+        let p = profile(vec![
+            track(
+                1,
+                LaneClass::Analysis,
+                vec![fetch_host("r", 0, 100), work(20, 30)],
+            ),
+            track(2, LaneClass::RepoFetch, vec![fetch_worker("r", 0, 100)]),
+        ]);
+        assert_eq!(shares(&p, 0, 100), [15, 85]);
+    }
+
+    #[test]
+    fn a_worker_span_on_the_hosts_own_lane_does_not_park_it() {
+        // The host span is the innermost on its lane from 10 to 60, inside a
+        // worker span of its repository.
+        let p = profile(vec![
+            track(
+                1,
+                LaneClass::Analysis,
+                vec![fetch_worker("r", 0, 100), fetch_host("r", 10, 50)],
+            ),
+            track(2, LaneClass::Execution, vec![work(0, 100)]),
+        ]);
+        assert_eq!(shares(&p, 0, 100), [50, 50]);
+    }
+
+    #[test]
+    fn a_command_a_repository_rule_runs_parks_no_host() {
+        let command = slice("local: r", "Starlark repository function call", 0, 100);
+        let p = profile(vec![
+            track(1, LaneClass::Analysis, vec![fetch_host("r", 0, 100)]),
+            track(2, LaneClass::RepoFetch, vec![command]),
+        ]);
+        assert_eq!(shares(&p, 0, 100), [50, 50]);
+    }
+
+    #[test]
+    fn workers_of_one_repository_overlapping_park_its_host_once() {
+        let p = profile(vec![
+            track(1, LaneClass::Analysis, vec![fetch_host("r", 0, 100)]),
+            track(2, LaneClass::RepoFetch, vec![fetch_worker("r", 10, 50)]),
+            track(3, LaneClass::RepoFetch, vec![fetch_worker("r", 30, 20)]),
+            track(4, LaneClass::RepoFetch, vec![fetch_worker("r", 40, 40)]),
+        ]);
+        // Parked from 10 to 80: one worker to 30, three to 50, two to 60, one
+        // to 80.
+        assert_eq!(shares(&p, 0, 100), [30, 33, 8, 28]);
+        assert_eq!(shares(&p, 10, 80), [0, 33, 8, 28]);
+    }
+
+    #[test]
+    fn a_fetch_hosts_stretches_weigh_what_the_span_they_make_up_does() {
+        let p = profile(vec![
+            track(
+                1,
+                LaneClass::Analysis,
+                vec![work(0, 20), fetch_host("r", 20, 60), work(80, 20)],
+            ),
+            track(2, LaneClass::RepoFetch, vec![fetch_worker("r", 40, 15)]),
+            track(3, LaneClass::Execution, vec![work(0, 100)]),
+            track(4, LaneClass::Execution, vec![work(0, 100)]),
+        ]);
+        let share = WallShare::new(&p, 2);
+        for l in 0..4 {
+            let mut lane = share.lane(l);
+            let whole = lane.between(0, 100);
+            for cut in 0..=100 {
+                assert_eq!(
+                    lane.between(0, cut) + lane.between(cut, 100),
+                    whole,
+                    "lane {l} cut at {cut}"
+                );
+            }
+        }
+        // Thirds everywhere: the host or its worker beside the two others.
+        assert_eq!(shares(&p, 0, 100), [28, 5, 33, 33]);
+    }
+
+    #[test]
     fn a_share_longer_than_a_reading_holds_reads_as_the_longest_it_does() {
         let p = profile(vec![track(
             1,
@@ -746,11 +1278,40 @@ mod tests {
         assert_eq!(shares(&p, 0, 1000), [1000]);
     }
 
+    /// The repository a slice of a lane that shares fetches as `side`.
+    fn fetched<'p>(
+        p: &'p Profile,
+        thread: &bviz_trace_profile::ThreadTrack,
+        slice: usize,
+        side: FetchSide,
+    ) -> Option<Repository<'p>> {
+        if matches!(thread.lane_class, LaneClass::Gc | LaneClass::CriticalPath) {
+            return None;
+        }
+        let category = p.str(p.details(thread)[slice].category);
+        if fetch_side(category) != Some(side) {
+            return None;
+        }
+        side.repository(p.str(p.slices(thread)[slice].name))
+    }
+
     /// Each sharing lane's exact share of `[0, t)` for every `t` up to
     /// `until_us`, found by giving out one microsecond at a time; `None` for
     /// the critical-path lane.
     fn shares_by_microsecond(p: &Profile, until_us: i64) -> Vec<Option<Vec<f64>>> {
         let threads = p.threads();
+        let open_at = |s: &Slice, t: i64| s.dur_us > 0 && s.start_us <= t && t < s.end_us();
+        // Whether a lane other than `host_lane` has a worker of `repository`
+        // open at `t`, at any depth.
+        let worked_elsewhere = |host_lane: usize, repository: Repository, t: i64| {
+            threads.iter().enumerate().any(|(lane, thread)| {
+                lane != host_lane
+                    && p.slices(thread).iter().enumerate().any(|(i, s)| {
+                        open_at(s, t)
+                            && fetched(p, thread, i, FetchSide::Worker) == Some(repository)
+                    })
+            })
+        };
         let mut given: Vec<Option<Vec<f64>>> = threads
             .iter()
             .map(|thread| (thread.lane_class != LaneClass::CriticalPath).then(|| Vec::from([0.0])))
@@ -758,18 +1319,19 @@ mod tests {
         for t in 0..until_us {
             let tiers: Vec<Option<Tier>> = threads
                 .iter()
-                .map(|thread| {
+                .enumerate()
+                .map(|(lane, thread)| {
                     if thread.lane_class == LaneClass::CriticalPath {
                         return None;
                     }
                     let details = p.details(thread);
-                    let innermost = p
-                        .slices(thread)
-                        .iter()
-                        .rposition(|s| s.dur_us > 0 && s.start_us <= t && t < s.end_us())?;
+                    let innermost = p.slices(thread).iter().rposition(|s| open_at(s, t))?;
+                    let hosted = fetched(p, thread, innermost, FetchSide::Host);
                     Some(if thread.lane_class == LaneClass::Gc {
                         Tier::Pause
-                    } else if parks_thread(p.str(details[innermost].category)) {
+                    } else if parks_thread(p.str(details[innermost].category))
+                        || hosted.is_some_and(|repository| worked_elsewhere(lane, repository, t))
+                    {
                         Tier::Parked
                     } else {
                         Tier::Working

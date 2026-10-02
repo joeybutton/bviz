@@ -94,7 +94,8 @@ mod tests {
     use crate::flame::{FlameLabels, FlameNode};
     use crate::selection::span_between;
     use crate::test_profile::{
-        TestSlice, action, action_named, profile, random_profile, slice, track, wait,
+        TestSlice, action, action_named, fetch_host, fetch_worker, profile, random_profile, slice,
+        track, wait,
     };
     use bviz_trace_profile::LaneClass;
     use fastrand::Rng;
@@ -244,6 +245,82 @@ mod tests {
         ])
     }
 
+    /// A fetch restarted once, its worker's span open from inside the first
+    /// host span to inside the second, beside a lane working throughout and a
+    /// host with no worker.
+    fn fetching_profile() -> Arc<Profile> {
+        profile(vec![
+            track(
+                1,
+                LaneClass::Analysis,
+                vec![fetch_host("r", 0, 60), fetch_host("r", 70, 80)],
+            ),
+            track(
+                2,
+                LaneClass::RepoFetch,
+                vec![
+                    fetch_worker("r", 20, 100),
+                    slice("download", "generic", 30, 40),
+                ],
+            ),
+            track(3, LaneClass::Analysis, vec![fetch_host("r+s", 0, 150)]),
+            track(
+                4,
+                LaneClass::Gc,
+                vec![slice("minor GC", "gc notification", 40, 10)],
+            ),
+        ])
+    }
+
+    /// The profiles whose wall shares are checked to add up, each with the
+    /// names of its frames.
+    fn additive_profiles() -> [(Arc<Profile>, &'static [&'static str]); 2] {
+        [
+            (
+                sharing_profile(),
+                &[
+                    "Parallel Evaluator evaluation",
+                    "glue",
+                    "a",
+                    "a1",
+                    "b",
+                    "minor GC",
+                ],
+            ),
+            (
+                fetching_profile(),
+                &["@@r", "r", "download", "@@r+s", "minor GC"],
+            ),
+        ]
+    }
+
+    #[test]
+    fn a_fetch_host_frame_is_credited_only_what_its_worker_leaves_it() {
+        let g = wall_share_of(&fetching_profile()).flame;
+        // The restarted host halves with the other host from 0 to 20 and from
+        // 120 to 150; its worker does from 20 to 120, less the pause.
+        assert_eq!(frame_total(&g, "@@r"), 25);
+        assert_eq!(frame_total(&g, "r"), 45);
+        assert_eq!(frame_total(&g, "download"), 15);
+        assert_eq!(frame_total(&g, "@@r+s"), 70);
+        assert_eq!(frame_total(&g, "minor GC"), 10);
+        assert_eq!(g.root().total_us, 150);
+        // Weighed by duration, every span counts in full.
+        let by_duration = FlameMode {
+            weight: FlameWeight::Duration,
+            ..wall_share()
+        };
+        let g = ScopeAggregate::build_for_tracks(
+            &fetching_profile(),
+            by_duration,
+            &TimeSelection::default(),
+            |_| true,
+        )
+        .flame;
+        assert_eq!(frame_total(&g, "@@r"), 140);
+        assert_eq!(frame_total(&g, "r"), 100);
+    }
+
     #[test]
     fn wall_share_splits_the_time_two_lanes_overlap_and_totals_the_time_covered() {
         let p = profile(vec![
@@ -365,87 +442,77 @@ mod tests {
 
     #[test]
     fn wall_share_of_abutting_windows_sums_to_that_of_the_window_they_make_up() {
-        let p = sharing_profile();
-        let scan = TrackFlamer::new(&p);
-        let within = |regions: &[(i64, i64)]| {
-            ScopeAggregate::build_for_tracks_reusing(&scan, wall_share(), &window(regions), |_| {
-                true
-            })
-            .flame
-        };
-        let whole = wall_share_of(&p).flame;
-        // The profile ends at 150, so this window holds all of it.
-        assert_eq!(resolved(&within(&[(0, 150)])), resolved(&whole));
-        let names = [
-            "Parallel Evaluator evaluation",
-            "glue",
-            "a",
-            "a1",
-            "b",
-            "minor GC",
-        ];
-        for cut in [1, 37, 45, 60, 85, 149] {
-            let (before, after) = (within(&[(0, cut)]), within(&[(cut, 150)]));
-            for name in names {
+        for (p, names) in additive_profiles() {
+            let scan = TrackFlamer::new(&p);
+            let within = |regions: &[(i64, i64)]| {
+                ScopeAggregate::build_for_tracks_reusing(
+                    &scan,
+                    wall_share(),
+                    &window(regions),
+                    |_| true,
+                )
+                .flame
+            };
+            let whole = wall_share_of(&p).flame;
+            // Each profile ends at 150, so this window holds all of it.
+            assert_eq!(resolved(&within(&[(0, 150)])), resolved(&whole));
+            for cut in [1, 37, 45, 60, 85, 149] {
+                let (before, after) = (within(&[(0, cut)]), within(&[(cut, 150)]));
+                for name in names {
+                    assert_eq!(
+                        frame_total(&before, name) + frame_total(&after, name),
+                        frame_total(&whole, name),
+                        "{name} cut at {cut}"
+                    );
+                }
                 assert_eq!(
-                    frame_total(&before, name) + frame_total(&after, name),
-                    frame_total(&whole, name),
-                    "{name} cut at {cut}"
+                    before.root().total_us + after.root().total_us,
+                    whole.root().total_us
                 );
             }
-            assert_eq!(
-                before.root().total_us + after.root().total_us,
-                whole.root().total_us
-            );
-        }
-        // Regions apart from each other weigh what each weighs alone.
-        let (early, late) = (within(&[(10, 45)]), within(&[(70, 120)]));
-        let both = within(&[(10, 45), (70, 120)]);
-        for name in names {
-            assert_eq!(
-                frame_total(&both, name),
-                frame_total(&early, name) + frame_total(&late, name),
-                "{name}"
-            );
+            // Regions apart from each other weigh what each weighs alone.
+            let (early, late) = (within(&[(10, 45)]), within(&[(70, 120)]));
+            let both = within(&[(10, 45), (70, 120)]);
+            for name in names {
+                assert_eq!(
+                    frame_total(&both, name),
+                    frame_total(&early, name) + frame_total(&late, name),
+                    "{name}"
+                );
+            }
         }
     }
 
     #[test]
     fn wall_shares_of_disjoint_lane_sets_sum_to_their_unions() {
-        let p = sharing_profile();
-        let scan = TrackFlamer::new(&p);
-        let of = |lanes: &[usize]| {
-            ScopeAggregate::build_for_tracks_reusing(
-                &scan,
-                wall_share(),
-                &TimeSelection::default(),
-                |i| lanes.contains(&i),
-            )
-            .flame
-        };
-        let (some, rest, all) = (of(&[0, 2]), of(&[1, 3]), of(&[0, 1, 2, 3]));
-        // A lane's share does not depend on which lanes are shown beside it.
-        for name in [
-            "Parallel Evaluator evaluation",
-            "glue",
-            "a",
-            "a1",
-            "b",
-            "minor GC",
-        ] {
+        for (p, names) in additive_profiles() {
+            let scan = TrackFlamer::new(&p);
+            let of = |lanes: &[usize]| {
+                ScopeAggregate::build_for_tracks_reusing(
+                    &scan,
+                    wall_share(),
+                    &TimeSelection::default(),
+                    |i| lanes.contains(&i),
+                )
+                .flame
+            };
+            let (some, rest, all) = (of(&[0, 2]), of(&[1, 3]), of(&[0, 1, 2, 3]));
+            // A lane's share does not depend on which lanes are shown beside it.
+            for name in names {
+                assert_eq!(
+                    frame_total(&some, name) + frame_total(&rest, name),
+                    frame_total(&all, name),
+                    "{name}"
+                );
+            }
             assert_eq!(
-                frame_total(&some, name) + frame_total(&rest, name),
-                frame_total(&all, name),
-                "{name}"
+                some.root().total_us + rest.root().total_us,
+                all.root().total_us
             );
+            // Some lane is open from 0 to 150 throughout, and every change of
+            // who shares falls where the shares are whole.
+            assert_eq!(all.root().total_us, 150);
         }
-        assert_eq!(
-            some.root().total_us + rest.root().total_us,
-            all.root().total_us
-        );
-        // Some lane is open from 0 to 150 throughout, and every change of who
-        // shares falls where the shares are whole.
-        assert_eq!(all.root().total_us, 150);
     }
 
     #[test]
@@ -554,7 +621,7 @@ mod tests {
 
     #[test]
     fn stats_read_the_same_whatever_the_flame_is_weighed_by() {
-        for p in [full_profile(), sharing_profile()] {
+        for p in [full_profile(), sharing_profile(), fetching_profile()] {
             let t = p.threads();
             let scan = TrackFlamer::new(&p);
             for labels in [FlameLabels::Kind, FlameLabels::Name] {

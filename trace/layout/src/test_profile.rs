@@ -61,6 +61,28 @@ pub fn wait(start_us: i64, dur_us: i64) -> TestSlice {
     )
 }
 
+/// The span a thread hosting `repository`'s fetch has open (see
+/// [`FetchSide::Host`](bviz_trace_profile::FetchSide::Host)).
+pub fn fetch_host(repository: &str, start_us: i64, dur_us: i64) -> TestSlice {
+    slice(
+        &format!("@@{repository}"),
+        "Fetching repository",
+        start_us,
+        dur_us,
+    )
+}
+
+/// The span a thread working `repository`'s fetch has open (see
+/// [`FetchSide::Worker`](bviz_trace_profile::FetchSide::Worker)).
+pub fn fetch_worker(repository: &str, start_us: i64, dur_us: i64) -> TestSlice {
+    slice(
+        repository,
+        "Starlark repository function call",
+        start_us,
+        dur_us,
+    )
+}
+
 /// A thread track carrying the slices of one lane. The lane class is requested
 /// directly; [`profile`] gives the thread a name the parser's `lane_class`
 /// derivation maps back to that class.
@@ -161,16 +183,19 @@ pub fn profile_with_counters(tracks: Vec<TestTrack>, counters: &[TestCounter]) -
 /// A small random profile: lanes of any class with at most one critical path,
 /// each holding a few spans that begin before `horizon_us`, run for up to half
 /// of it, and nest or overlap as they fall. Zero-length spans, parking waits,
-/// actions, spans named per instance and plain work are all among them.
+/// actions, spans named per instance, the hosts and workers of a few
+/// repositories' fetches and plain work are all among them.
 pub fn random_profile(rng: &mut Rng, horizon_us: i64) -> Arc<Profile> {
     const MAX_LANES: i64 = 6;
     const MAX_SLICES: usize = 8;
     const NAMES: [&str; 4] = ["a", "b", "c", "d"];
+    // One name leads another, and few enough that hosts meet their workers.
+    const REPOSITORIES: [&str; 2] = ["a", "a+b"];
     // Equally likely outcomes of each draw; a `match` on one gives those it
     // does not name to its last arm.
     const LANE_CLASS_DRAWS: u32 = 8;
     const DURATION_DRAWS: u32 = 5;
-    const SPAN_KIND_DRAWS: u32 = 5;
+    const SPAN_KIND_DRAWS: u32 = 8;
     let lanes = rng.i64(1..=MAX_LANES);
     let mut tracks = Vec::with_capacity(lanes as usize);
     let mut has_critical_path = false;
@@ -196,11 +221,14 @@ pub fn random_profile(rng: &mut Rng, horizon_us: i64) -> Arc<Profile> {
                     _ => rng.i64(0..horizon_us / 2),
                 };
                 let name = NAMES[rng.usize(..NAMES.len())];
+                let repository = REPOSITORIES[rng.usize(..REPOSITORIES.len())];
                 match rng.u32(..SPAN_KIND_DRAWS) {
                     0 => wait(start_us, dur_us),
                     1 => action_named(&format!("Compiling {name}"), "Rustc", start_us, dur_us),
                     2 => action(name, start_us, dur_us),
                     3 => slice(name, "package creation", start_us, dur_us),
+                    4 | 5 => fetch_host(repository, start_us, dur_us),
+                    6 => fetch_worker(repository, start_us, dur_us),
                     _ => slice(name, "generic", start_us, dur_us),
                 }
             })
