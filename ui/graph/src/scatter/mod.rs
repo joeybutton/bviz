@@ -518,7 +518,7 @@ impl ScatterPanel {
             .iter()
             .map(|(_, mnemonic, label)| (*mnemonic, label.as_str()))
             .collect();
-        let hints = pick::hints(&keys, readings);
+        let hints = crate::hints::hints(&keys, readings);
         let mut rows: Vec<PickRow> = named
             .iter()
             .zip(hints)
