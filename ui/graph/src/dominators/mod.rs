@@ -68,7 +68,8 @@ pub struct DominatorsPanel {
     /// Evaluates the filter, absent while none is being evaluated, so that one
     /// evaluation runs at a time.
     fading: Option<Task<()>>,
-    /// The trees of the graph read coloured so far.
+    /// The trees of the graph read coloured so far that the graph still
+    /// keeps.
     coloured: HashMap<TreeKey, Arc<Coloured>>,
     /// Colours a tree landed, absent while none is being coloured.
     drawing: Option<Task<()>>,
@@ -234,6 +235,9 @@ impl DominatorsPanel {
         {
             return;
         }
+        let model = self.model.read(cx);
+        self.coloured
+            .retain(|key, _| model.dominators(key).is_some());
         if let Some(coloured) = self.coloured.get(&key) {
             self.drawn = Some(Drawn {
                 coloured: Arc::clone(coloured),

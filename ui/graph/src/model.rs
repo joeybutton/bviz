@@ -128,14 +128,14 @@ impl Loaded {
         Self {
             shared,
             opening,
-            measures: Passes::default(),
+            measures: Passes::keeping_all(),
             statuses: Statuses::default(),
             reported: Report::default(),
             taken_up: Revision::default(),
             times: Err(Untimed::NoProfile),
             timecard: Timecard::default(),
             timed: Revision::default(),
-            dominators: Passes::default(),
+            dominators: Passes::keeping_recent(RECENT_TREES),
             scope_graphs: HashMap::new(),
         }
     }
@@ -245,6 +245,10 @@ fn configurations(facets: &Facets) -> Configurations {
     }
     described
 }
+
+/// How many dominator trees no view wants are kept for a view coming back to
+/// them, beside those wanted.
+const RECENT_TREES: usize = 4;
 
 /// What a reader takes from a loaded graph, prepared the first time it is
 /// read and shared by every reader after.
@@ -411,7 +415,11 @@ enum Pass<T> {
         /// one running lands nothing.
         _work: Task<()>,
     },
-    Done(Arc<T>),
+    Done {
+        yielded: Arc<T>,
+        /// When it was last wanted or landed, on its [`Passes`]' clock.
+        used: u64,
+    },
 }
 
 /// A graph's passes of one kind, by what each passes over. Goes with the
@@ -419,32 +427,61 @@ enum Pass<T> {
 /// never lands.
 struct Passes<K, T> {
     by_key: HashMap<K, Pass<T>>,
+    /// How many passes done that are no longer wanted are kept, those used
+    /// last.
+    kept: usize,
+    /// Counts each time the passes are wanted or one lands.
+    clock: u64,
 }
 
-impl<K, T> Default for Passes<K, T> {
-    fn default() -> Self {
+impl<K: Clone + Eq + Hash, T> Passes<K, T> {
+    fn keeping_all() -> Self {
+        Self::keeping_recent(usize::MAX)
+    }
+
+    fn keeping_recent(kept: usize) -> Self {
         Self {
             by_key: HashMap::new(),
+            kept,
+            clock: 0,
         }
     }
-}
 
-impl<K: Eq + Hash, T> Passes<K, T> {
     fn done(&self, key: &K) -> Option<&Arc<T>> {
         match self.by_key.get(key)? {
-            Pass::Done(yielded) => Some(yielded),
+            Pass::Done { yielded, .. } => Some(yielded),
             Pass::Running { .. } => None,
         }
     }
 
     fn land(&mut self, key: K, yielded: Arc<T>) {
-        self.by_key.insert(key, Pass::Done(yielded));
+        self.clock += 1;
+        let used = self.clock;
+        self.by_key.insert(key, Pass::Done { yielded, used });
     }
 
-    /// Drops each pass running for a key `wanted` leaves out.
+    /// Drops each pass running for a key `wanted` leaves out, and of those
+    /// done for such a key, all but the [`Self::kept`] used last.
     fn forget_unwanted(&mut self, wanted: &[K]) {
-        self.by_key
-            .retain(|key, pass| matches!(pass, Pass::Done(_)) || wanted.contains(key));
+        self.clock += 1;
+        for key in wanted {
+            if let Some(Pass::Done { used, .. }) = self.by_key.get_mut(key) {
+                *used = self.clock;
+            }
+        }
+        let mut idle: Vec<(u64, K)> = Vec::with_capacity(self.by_key.len());
+        self.by_key.retain(|key, pass| match pass {
+            _ if wanted.contains(key) => true,
+            Pass::Running { .. } => false,
+            Pass::Done { used, .. } => {
+                idle.push((*used, key.clone()));
+                true
+            }
+        });
+        idle.sort_unstable_by_key(|&(used, _)| std::cmp::Reverse(used));
+        for (_, key) in idle.into_iter().skip(self.kept) {
+            self.by_key.remove(&key);
+        }
     }
 }
 
@@ -668,8 +705,9 @@ impl GraphModel {
     /// each key of `wanted` not yet asked for, keeping what it yields among
     /// the passes `passes` picks out and emitting [`Landed`] as each lands,
     /// and gives up any other key's pass still running, which would only hold
-    /// the workers from those wanted. What a pass already yielded is kept.
-    /// Does nothing while the graph is still being read.
+    /// the workers from those wanted; of what other keys' passes yielded, the
+    /// passes keep as many as they keep. Does nothing while the graph is still
+    /// being read.
     fn want<K, T, W>(
         &mut self,
         wanted: &[K],
@@ -910,7 +948,7 @@ mod tests {
             scope(Input::Cquery),
             scope(Input::Aquery),
         );
-        let mut passes = Passes::default();
+        let mut passes = Passes::keeping_all();
         passes.land(landed, measured(landed));
         passes.by_key.insert(dropped, running());
         passes.by_key.insert(kept, running());
@@ -923,5 +961,22 @@ mod tests {
             passes.by_key.get(&kept),
             Some(Pass::Running { .. })
         ));
+    }
+
+    /// Of the passes done that are no longer wanted, those wanted or landed
+    /// last are kept, as many as the passes keep, and the rest dropped.
+    #[test]
+    fn of_the_passes_no_longer_wanted_only_the_last_used_are_kept() {
+        let mut passes: Passes<u32, Measurement> = Passes::keeping_recent(2);
+        let scope = Scope::new(Unit::Target, Input::Query.into()).unwrap();
+        for key in 0..4 {
+            passes.land(key, measured(scope));
+        }
+        passes.forget_unwanted(&[0]);
+        passes.forget_unwanted(&[3]);
+
+        let mut kept: Vec<u32> = passes.by_key.keys().copied().collect();
+        kept.sort_unstable();
+        assert_eq!(kept, [0, 2, 3]);
     }
 }
