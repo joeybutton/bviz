@@ -11,7 +11,7 @@ package(
 package_metadata(
     name = "package_metadata",
     attributes = [":license"],
-    purl = "pkg:github/bazelbuild/bazel@43f23b4349195333b97bef77cc62c2ea4ffd8e91",
+    purl = "pkg:github/bazelbuild/bazel@9.2.0",
     visibility = ["//visibility:private"],
 )
 
