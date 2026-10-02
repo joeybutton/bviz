@@ -39,6 +39,29 @@ pub(crate) fn hints<K: Eq + Hash>(
         .collect()
 }
 
+/// For each row, the hint [`hints`] picks for it among the rows whose keys
+/// are alike, with `readings` asked only of those rows; none for a row whose
+/// key no other shares.
+pub(crate) fn hints_where_alike<K: Eq + Hash>(
+    keys: &[K],
+    mut readings: impl FnMut(usize) -> Vec<Option<String>>,
+) -> Vec<Option<String>> {
+    let mut count: HashMap<&K, u32> = HashMap::with_capacity(keys.len());
+    for key in keys {
+        *count.entry(key).or_default() += 1;
+    }
+    let alike: Vec<usize> = (0..keys.len())
+        .filter(|&row| count[&keys[row]] > 1)
+        .collect();
+    let alike_keys: Vec<&K> = alike.iter().map(|&row| &keys[row]).collect();
+    let alike_readings = alike.iter().map(|&row| readings(row)).collect();
+    let mut chosen = vec![None; keys.len()];
+    for (row, hint) in alike.into_iter().zip(hints(&alike_keys, alike_readings)) {
+        chosen[row] = hint;
+    }
+    chosen
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -92,6 +115,31 @@ mod tests {
             ]),
         );
         assert_eq!(chosen[2].as_deref(), Some("arm/a/m.h"));
+    }
+
+    /// A row whose key no other shares shows nothing and is read nothing of;
+    /// the rows alike show the first reading that parts them.
+    #[test]
+    fn only_rows_alike_are_read_and_show_a_hint() {
+        let mut read = Vec::new();
+        let chosen = hints_where_alike(&["a", "b", "a", "c", "c"], |row| {
+            read.push(row);
+            let config = ["k8", "", "arm", "k8", "k8"][row];
+            let whole = ["", "", "", "k8 (1)", "k8 (2)"][row];
+            vec![Some(config.to_owned()), Some(whole.to_owned())]
+        });
+        assert_eq!(read, [0, 2, 3, 4]);
+        let shown: Vec<Option<&str>> = chosen.iter().map(Option::as_deref).collect();
+        assert_eq!(
+            shown,
+            [
+                Some("k8"),
+                None,
+                Some("arm"),
+                Some("k8 (1)"),
+                Some("k8 (2)")
+            ]
+        );
     }
 
     #[test]

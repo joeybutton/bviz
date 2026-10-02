@@ -4,10 +4,11 @@
 use super::icicle::{self, Cell, Holds, Parent, Run};
 use super::{SEVERAL, WHOLE_BUILD, what_is_shared};
 use crate::Palette;
+use crate::hints::hints_where_alike;
 use crate::hue::Colouring;
 use crate::model::Shared;
 use crate::paint::UNMARKED_FADE;
-use crate::point::{mnemonic, point_label, unit_names};
+use crate::point::{configuration_readings, mnemonic, point_label, primary_output, unit_names};
 use bviz_graph_layout::Id;
 use bviz_graph_layout::dominators::Dominators;
 use bviz_graph_layout::metrics::Unit;
@@ -16,6 +17,7 @@ use bviz_ui_assets::shape_line;
 use bviz_ui_components::{LabelBoxStyle, paint_labeled_box};
 use bviz_ui_theme::{label_on, mix};
 use gpui::{App, BorderStyle, Bounds, Hsla, Pixels, Rgba, Window, px, quad, size};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 /// Inset of a cell's name from its edges, above and below as at either side.
@@ -54,6 +56,9 @@ pub(crate) struct Scene {
     /// What the cell spanning the top row holds.
     pub(crate) top: Holds,
     pub(crate) shared: Shared,
+    /// The dominators the breadcrumb names above the cell on top, whose names
+    /// the cells' are told apart from.
+    pub(crate) above: Vec<u32>,
     /// The verdict of the filter the cells are faded by on each node, absent
     /// where none fades them.
     pub(crate) verdicts: Option<Arc<Verdicts>>,
@@ -76,6 +81,7 @@ pub(crate) fn paint_icicle(
     };
     let row = row_height(window);
     let cells = icicle::lay_out(&*scene.tree, scene.top, bounds, row, MIN_CELL_WIDTH);
+    let hints = hints_among(&scene.tree, &scene.shared, &scene.above, &cells);
     for (index, cell) in cells.into_iter().enumerate() {
         let fill = fill(scene, cell.holds);
         let (rect, label) = (drawn_rect(&cell), label_on(fill));
@@ -94,7 +100,20 @@ pub(crate) fn paint_icicle(
                 let width = text_width(window, font_size, label);
                 shared_cell_name(whole, count, room, width)
             }
-            (_, holds) => cell_name(&scene.tree, &scene.shared, holds),
+            (_, holds) => {
+                let name = cell_name(&scene.tree, &scene.shared, holds);
+                let hint = match holds {
+                    Holds::Node(node) => hints.get(&node),
+                    Holds::Build | Holds::Shared | Holds::Rest(_) => None,
+                };
+                match hint {
+                    Some(hint) => {
+                        let (room, font_size) = style.label_room(rect);
+                        fit_apart(&name, hint, room, text_width(window, font_size, label))
+                    }
+                    None => name,
+                }
+            }
         };
         let strength = match cell.holds {
             Holds::Node(node) if faded(scene, scene.tree.id(node)) => UNMARKED_FADE,
@@ -214,6 +233,81 @@ fn text_width(window: &mut Window, font_size: Pixels, ink: Hsla) -> impl FnMut(&
     }
 }
 
+/// What tells apart, by node, the names that read alike among the crumbs
+/// naming `crumbs` and the cells `cells` of `tree` wide enough to name. Each
+/// such name is told apart by its configuration, as
+/// [`configuration_readings`] reads it, and an action's also by the file it
+/// writes first. A node whose name no other reads alike has none.
+pub(crate) fn hints_among(
+    tree: &Dominators,
+    shared: &Shared,
+    crumbs: &[u32],
+    cells: &[Cell],
+) -> HashMap<u32, String> {
+    let unit = tree.scope().unit();
+    let named = cells.iter().filter_map(|cell| match cell.holds {
+        Holds::Node(node) if cell.rect.size.width >= LABEL_MIN_WIDTH => Some(node),
+        _ => None,
+    });
+    let nodes: Vec<u32> = crumbs.iter().copied().chain(named).collect();
+    let names: Vec<String> = nodes
+        .iter()
+        .map(|&node| point_name(tree.id(node), unit, shared))
+        .collect();
+    let hints = hints_where_alike(&names, |row| {
+        let id = tree.id(nodes[row]);
+        let [short, whole] = configuration_readings(id, shared);
+        match unit {
+            Unit::Action => {
+                let output = primary_output(id, shared).map(str::to_owned);
+                vec![short, whole, output]
+            }
+            Unit::ConfiguredTarget | Unit::Target => vec![short, whole],
+        }
+    });
+    let told = nodes.into_iter().zip(hints);
+    told.filter_map(|(node, hint)| Some((node, hint?)))
+        .collect()
+}
+
+/// Between a name and what tells it apart from others reading alike.
+pub(crate) const HINT_SEPARATOR: &str = " · ";
+
+/// `name` followed by `hint` within `room` as `width` measures text: whole
+/// where it fits, else with `name` cut short so the hint still reads beside
+/// it, and where that leaves the name less than [`NAME_SHARE`] of the room,
+/// `name` alone.
+fn fit_apart(name: &str, hint: &str, room: f32, mut width: impl FnMut(&str) -> f32) -> String {
+    let whole = format!("{name}{HINT_SEPARATOR}{hint}");
+    if width(&whole) <= room {
+        return whole;
+    }
+    let tail = format!("{ELLIPSIS}{HINT_SEPARATOR}{hint}");
+    let name_room = room - width(&tail);
+    if name_room < room * NAME_SHARE {
+        return name.to_owned();
+    }
+    let chars: Vec<char> = name.chars().collect();
+    // Bisects for the most characters of `name` fitting `name_room`.
+    let (mut fits, mut over) = (0, chars.len());
+    while over - fits > 1 {
+        let mid = (fits + over) / 2;
+        match width(&chars[..mid].iter().collect::<String>()) <= name_room {
+            true => fits = mid,
+            false => over = mid,
+        }
+    }
+    let kept: String = chars[..fits].iter().collect();
+    format!("{kept}{tail}")
+}
+
+/// The least of a cell's room a name keeps beside the hint telling it apart,
+/// so a long hint never reads in place of the name.
+const NAME_SHARE: f32 = 0.5;
+
+/// Ends a name cut short.
+const ELLIPSIS: char = '…';
+
 /// What a run of `tree` drawn on top reads, naming what its siblings stand
 /// under.
 pub(crate) fn run_name(tree: &Dominators, shared: &Shared, run: Run) -> String {
@@ -281,6 +375,17 @@ mod tests {
     /// Text as wide as it has characters.
     fn chars(text: &str) -> f32 {
         text.chars().count() as f32
+    }
+
+    #[test]
+    fn a_name_cut_short_keeps_the_hint_while_it_keeps_the_larger_part() {
+        let label = "@llvm//toolchain:linux_x86_64_cc_toolchain";
+        let fit = |room| fit_apart(label, "k8", room, chars);
+        assert_eq!(fit(100.0), format!("{label} · k8"));
+        assert_eq!(fit(40.0), "@llvm//toolchain:linux_x86_64_cc_t… · k8");
+        assert_eq!(fit(20.0), "@llvm//toolcha… · k8");
+        let long = "a-long-configuration-name (exec, 3f2a)";
+        assert_eq!(fit_apart(label, long, 60.0, chars), label);
     }
 
     #[test]

@@ -27,7 +27,10 @@ use gpui::{
     SharedString, Subscription, Task, WeakEntity, Window, canvas, div, prelude::*, px, relative,
 };
 use icicle::{Cell, Holds, Parent, Run};
-use paint::{MIN_CELL_WIDTH, Scene, cell_name, point_name, run_name, shared_name};
+use paint::{
+    HINT_SEPARATOR, MIN_CELL_WIDTH, Scene, cell_name, hints_among, point_name, run_name,
+    shared_name,
+};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -513,6 +516,14 @@ impl Focused {
         }
     }
 
+    /// The node this is, where it is one.
+    fn node(self) -> Option<u32> {
+        match self {
+            Self::Node(node) => Some(node),
+            Self::Shared | Self::Run(_) => None,
+        }
+    }
+
     /// What this stands under in `tree`.
     fn parent(self, tree: &Dominators) -> Parent {
         match self {
@@ -977,25 +988,37 @@ const LEGEND_SWATCH: Pixels = px(8.);
 /// The path from the whole build down to the focus of `drawn`, each step but
 /// the focus a click away; absent at the whole build. Where the path outgrows
 /// its room the dominators above the focus give way first, and the focus is
-/// cut short only once they are gone.
+/// cut short only once they are gone. A name reading alike with another
+/// crumb's is followed by what tells it apart.
 fn breadcrumb(drawn: &Drawn, palette: &Palette, cx: &Context<DominatorsPanel>) -> Option<Div> {
     let focus = drawn.focus.as_ref()?;
     let (tree, shared) = (&drawn.coloured.tree, &drawn.coloured.shared);
     // A row whose steps shrink to fit it.
     let row = || div().flex().items_center().min_w_0().overflow_hidden();
-    let crumb = |name: String| {
+    // A name and the hint telling it apart give way in proportion to their
+    // lengths, so neither is cut away before the other.
+    let part = |text: String| {
         div()
             .min_w_0()
             .overflow_hidden()
-            .whitespace_nowrap()
             .text_ellipsis()
-            .child(name)
+            .child(text)
+    };
+    let crumb = |name: String, hint: Option<String>| {
+        let hint = hint.map(|hint| part(format!("{HINT_SEPARATOR}{hint}")));
+        div()
+            .flex()
+            .min_w_0()
+            .overflow_hidden()
+            .whitespace_nowrap()
+            .child(part(name))
+            .children(hint)
     };
     let after = |step: AnyElement| row().gap_1().pl_1().child(separator()).child(step);
-    let link = |index: usize, name: String, to: Option<Focused>| {
+    let link = |index: usize, name: String, hint: Option<String>, to: Option<Focused>| {
         // A click landing once another tree is drawn names none of its nodes.
         let tree = Arc::clone(&drawn.coloured.tree);
-        crumb(name)
+        crumb(name, hint)
             .id(("dominators-crumb", index))
             .cursor_pointer()
             .text_color(palette.colors.text_muted)
@@ -1008,13 +1031,18 @@ fn breadcrumb(drawn: &Drawn, palette: &Palette, cx: &Context<DominatorsPanel>) -
     if focus.elided {
         above.push(after(ELIDED.into_any_element()));
     }
+    let above_focus = focus.above.iter().map(|&above| Focused::from(above));
+    let steps = above_focus.chain([focus.on]);
+    let crumbs: Vec<u32> = steps.filter_map(Focused::node).collect();
+    let hints = hints_among(tree, shared, &crumbs, &[]);
+    let hint = |step: Focused| step.node().and_then(|node| hints.get(&node).cloned());
     for (index, &step) in focus.above.iter().enumerate() {
         let step = Focused::from(step);
-        let step = link(index + 1, step.name(tree, shared), Some(step));
+        let step = link(index + 1, step.name(tree, shared), hint(step), Some(step));
         above.push(after(step.into_any_element()));
     }
     let focused = cell_name(tree, shared, focus.on.holds());
-    let last = after(crumb(focused).into_any_element())
+    let last = after(crumb(focused, hint(focus.on)).into_any_element())
         .flex_shrink_0()
         .max_w(relative(1.));
     Some(
@@ -1022,7 +1050,7 @@ fn breadcrumb(drawn: &Drawn, palette: &Palette, cx: &Context<DominatorsPanel>) -
             .flex_1()
             .text_sm()
             .text_color(palette.label)
-            .child(link(0, WHOLE_BUILD_CRUMB.to_owned(), None).flex_shrink_0())
+            .child(link(0, WHOLE_BUILD_CRUMB.to_owned(), None, None).flex_shrink_0())
             .child(row().child(row().children(above)).child(last)),
     )
 }
@@ -1099,6 +1127,10 @@ impl Render for IcicleCanvas {
                 verdicts: panel.fade.as_ref().map(|fade| Arc::clone(&fade.verdicts)),
                 tree: Arc::clone(&drawn.coloured.tree),
                 top: drawn.top(),
+                above: drawn.focus.as_ref().map_or_else(Vec::new, |focus| {
+                    let above = focus.above.iter().map(|&above| Focused::from(above));
+                    above.filter_map(Focused::node).collect()
+                }),
                 shared: drawn.coloured.shared.clone(),
                 palette,
             })
