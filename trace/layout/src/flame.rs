@@ -505,7 +505,7 @@ pub enum FlameLabels {
     /// of a span named after what it works on ("Fetching repository"), and the
     /// kind a name leads with ("fetching"). Every span of one kind merges into
     /// one frame.
-    Mnemonic,
+    Kind,
     /// Every span's own name, so an action frame names its target ("Compiling
     /// //x/y:z") and the tree is the profile's own nesting.
     Name,
@@ -550,7 +550,7 @@ impl Default for FlameMode {
     fn default() -> Self {
         FlameMode {
             direction: FlameDirection::TopDown,
-            labels: FlameLabels::Mnemonic,
+            labels: FlameLabels::Kind,
             weight: FlameWeight::Duration,
         }
     }
@@ -601,7 +601,7 @@ impl Flamer {
     /// only decides which spans at the same place merge into one frame.
     fn span_labels(&self, labels: FlameLabels, slice: &Slice, detail: &SliceDetail) -> SpanLabels {
         let kind = match labels {
-            FlameLabels::Mnemonic => self
+            FlameLabels::Kind => self
                 .mnemonic_of(slice, detail)
                 .or_else(|| self.profile.kind_of(slice)),
             FlameLabels::Name => None,
@@ -702,14 +702,14 @@ impl WindowMemo {
 /// cannot be added without one.
 #[derive(Default)]
 struct ByLabels<T> {
-    mnemonic: T,
+    kind: T,
     name: T,
 }
 
 impl<T> ByLabels<T> {
     fn of(&self, labels: FlameLabels) -> &T {
         match labels {
-            FlameLabels::Mnemonic => &self.mnemonic,
+            FlameLabels::Kind => &self.kind,
             FlameLabels::Name => &self.name,
         }
     }
@@ -2208,7 +2208,7 @@ mod tests {
     }
 
     fn flame(p: &Arc<Profile>) -> FlameGraph {
-        flame_as(p, FlameLabels::Mnemonic)
+        flame_as(p, FlameLabels::Kind)
     }
 
     /// A selection of the given regions, each inserted in turn.
@@ -2384,7 +2384,7 @@ mod tests {
     #[test]
     fn name_labels_keep_one_mnemonics_targets_apart() {
         // Two actions of the same mnemonic on different targets: under `Name`
-        // each keeps its own frame reading its action name, under `Mnemonic`
+        // each keeps its own frame reading its action name, under `Kind`
         // the two merge into one.
         let p = profile(vec![track(
             1,
@@ -2401,7 +2401,7 @@ mod tests {
             100
         );
         assert_eq!(child(&named, &named.root(), "Compiling //b:b").total_us, 40);
-        let merged = flame_as(&p, FlameLabels::Mnemonic);
+        let merged = flame_as(&p, FlameLabels::Kind);
         assert_eq!(merged.children(&merged.root()).len(), 1);
         let rustc = child(&merged, &merged.root(), "Rustc");
         assert_eq!(rustc.total_us, 140);
@@ -2621,7 +2621,7 @@ mod tests {
             ]
         );
         // Bottom-up the commands are one root and the rules another.
-        let inverted = inverted_as(&p, FlameLabels::Mnemonic);
+        let inverted = inverted_as(&p, FlameLabels::Kind);
         assert_eq!(
             child_totals(&inverted, &inverted.root()),
             [
@@ -2661,7 +2661,7 @@ mod tests {
         let analysis = |i: usize| t[i].lane_class == LaneClass::Analysis;
         let scoped = Flamer::scoped(&p, 1, analysis);
         assert!(p.kinds().all(|kind| scoped.ranks.rank.contains_key(&kind)));
-        let g = TrackFlamer::new(&p).build(FlameLabels::Mnemonic, &TimeSelection::default(), |i| {
+        let g = TrackFlamer::new(&p).build(FlameLabels::Kind, &TimeSelection::default(), |i| {
             !analysis(i)
         });
         assert_eq!(child_totals(&g, &g.root()), [("fetching".to_owned(), 10)]);
@@ -2843,7 +2843,7 @@ mod tests {
             track(1, LaneClass::Analysis, lane("@@a", 0)),
             track(2, LaneClass::Analysis, lane("@@b", 0)),
         ]);
-        let g = inverted_as(&p, FlameLabels::Mnemonic);
+        let g = inverted_as(&p, FlameLabels::Kind);
         assert_eq!(
             child_totals(&g, &g.root()),
             [
@@ -2885,7 +2885,7 @@ mod tests {
                 fetch("@@c", 200, 100),
             ],
         )]);
-        let g = flame_within(&p, FlameLabels::Mnemonic, &window(&[(50, 130)]));
+        let g = flame_within(&p, FlameLabels::Kind, &window(&[(50, 130)]));
         let fetching = child(&g, &g.root(), "Fetching repository");
         assert_eq!((fetching.total_us, fetching.count), (80, 2));
         assert_eq!(
@@ -2903,7 +2903,7 @@ mod tests {
         ]);
         let t = p.threads();
         let class = |c: LaneClass| {
-            TrackFlamer::new(&p).build(FlameLabels::Mnemonic, &TimeSelection::default(), move |i| {
+            TrackFlamer::new(&p).build(FlameLabels::Kind, &TimeSelection::default(), move |i| {
                 t[i].lane_class == c
             })
         };
@@ -2948,7 +2948,7 @@ mod tests {
     #[test]
     fn a_window_spanning_the_profile_matches_the_unrestricted_graph() {
         let p = clipping_profile();
-        for labels in [FlameLabels::Mnemonic, FlameLabels::Name] {
+        for labels in [FlameLabels::Kind, FlameLabels::Name] {
             let whole = flame_within(&p, labels, &window(&[(0, 250)]));
             assert_eq!(
                 resolved(&whole),
@@ -2971,7 +2971,7 @@ mod tests {
             ],
         )]);
         let span = p.span();
-        for labels in [FlameLabels::Mnemonic, FlameLabels::Name] {
+        for labels in [FlameLabels::Kind, FlameLabels::Name] {
             let whole = flame_within(&p, labels, &window(&[(span.start_us, span.end_us)]));
             assert_eq!(
                 resolved(&whole),
@@ -3099,7 +3099,7 @@ mod tests {
                 slice("checkOutputs", "check outputs", 85, 5),
             ],
         )]);
-        for labels in [FlameLabels::Mnemonic, FlameLabels::Name] {
+        for labels in [FlameLabels::Kind, FlameLabels::Name] {
             let tail = flame_within(&p, labels, &window(&[(80, 100)]));
             let reaching_back = flame_within(&p, labels, &window(&[(0, 5), (80, 100)]));
             assert_eq!(resolved(&tail), resolved(&reaching_back), "{labels:?}");
@@ -3248,7 +3248,7 @@ mod tests {
             track(1, LaneClass::Execution, vec![action("Rustc", 0, 50)]),
             track(2, LaneClass::Execution, vec![action("Javac", 200, 50)]),
         ]);
-        let g = flame_within(&p, FlameLabels::Mnemonic, &window(&[(200, 250)]));
+        let g = flame_within(&p, FlameLabels::Kind, &window(&[(200, 250)]));
         assert_eq!(child_totals(&g, &g.root()), [("Javac".to_owned(), 50)]);
     }
 
@@ -3259,7 +3259,7 @@ mod tests {
             LaneClass::Execution,
             vec![action("Rustc", 0, 10), action("Javac", 990, 10)],
         )]);
-        let g = flame_within(&p, FlameLabels::Mnemonic, &window(&[(0, 10), (990, 1000)]));
+        let g = flame_within(&p, FlameLabels::Kind, &window(&[(0, 10), (990, 1000)]));
         assert_eq!(
             child_totals(&g, &g.root()),
             [("Javac".to_owned(), 10), ("Rustc".to_owned(), 10)]
@@ -3278,7 +3278,7 @@ mod tests {
                 slice("subprocess.run", "subprocess run", 60, 20),
             ],
         )]);
-        let g = flame_within(&p, FlameLabels::Mnemonic, &window(&[(50, 100)]));
+        let g = flame_within(&p, FlameLabels::Kind, &window(&[(50, 100)]));
         let rustc = child(&g, &g.root(), "Rustc");
         assert_eq!(rustc.total_us, 50);
         let sub = child(&g, &rustc, "subprocess.run");
@@ -3311,7 +3311,7 @@ mod tests {
         let narrower = window(&[(0, 40)]);
         scan.build(FlameLabels::Name, &narrower, |_| true);
         assert_eq!(scan.reductions(), 2);
-        scan.build(FlameLabels::Mnemonic, &narrower, |_| true);
+        scan.build(FlameLabels::Kind, &narrower, |_| true);
         assert_eq!(scan.reductions(), 3);
     }
 
@@ -3320,10 +3320,10 @@ mod tests {
         let p = clipping_profile();
         let win = window(&[(0, 90)]);
         let scan = TrackFlamer::new(&p);
-        let mnemonic = scan.build(FlameLabels::Mnemonic, &win, |_| true);
+        let mnemonic = scan.build(FlameLabels::Kind, &win, |_| true);
         let name = scan.build(FlameLabels::Name, &win, |_| true);
         assert_eq!(scan.reductions(), 2, "one reduction per labelling");
-        let mnemonic_again = scan.build(FlameLabels::Mnemonic, &win, |_| true);
+        let mnemonic_again = scan.build(FlameLabels::Kind, &win, |_| true);
         let name_again = scan.build(FlameLabels::Name, &win, |_| true);
         assert_eq!(scan.reductions(), 2, "a revisited labelling is a memo hit");
         assert_eq!(resolved(&mnemonic), resolved(&mnemonic_again));
@@ -4022,7 +4022,7 @@ mod tests {
                 ],
             ),
         ]);
-        for labels in [FlameLabels::Mnemonic, FlameLabels::Name] {
+        for labels in [FlameLabels::Kind, FlameLabels::Name] {
             let top_down = flame_as(&p, labels);
             let root_total = top_down.root().total_us;
             let self_sum: i64 = top_down.nodes().iter().map(|n| n.self_us).sum();
@@ -4043,8 +4043,8 @@ mod tests {
 
     #[test]
     fn inverted_target_details_end_the_path_rather_than_starting_it() {
-        // A Rustc action on //x:y containing subprocess.run: under mnemonic
-        // labelling both frames break their self time out under the target.
+        // A Rustc action on //x:y containing subprocess.run: labelled by kind,
+        // both frames break their self time out under the target.
         let p = profile(vec![track(
             1,
             LaneClass::Execution,
@@ -4053,7 +4053,7 @@ mod tests {
                 slice("subprocess.run", "subprocess run", 0, 80),
             ],
         )]);
-        let g = inverted_as(&p, FlameLabels::Mnemonic);
+        let g = inverted_as(&p, FlameLabels::Kind);
         assert_eq!(
             child_totals(&g, &g.root()),
             [("Rustc".to_owned(), 20), ("subprocess.run".to_owned(), 80)]
@@ -4101,7 +4101,7 @@ mod tests {
                 ],
             ),
         ]);
-        let g = flame_as(&p, FlameLabels::Mnemonic);
+        let g = flame_as(&p, FlameLabels::Kind);
         assert!(
             (0..g.len()).filter(|&i| g.is_detail(i)).count() >= 2,
             "the profile must produce detail frames for the claim to bite"

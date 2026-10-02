@@ -76,7 +76,7 @@ const STATS_COLUMNS: [StatsColumnSpec; 6] = [
 fn column_header(column: StatsColumn, labels: FlameLabels) -> &'static str {
     match column {
         StatsColumn::Key => match labels {
-            FlameLabels::Mnemonic => "Mnemonic",
+            FlameLabels::Kind => "Kind",
             FlameLabels::Name => "Name",
         },
         StatsColumn::Count => "Count",

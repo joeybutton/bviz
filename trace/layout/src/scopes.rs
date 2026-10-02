@@ -557,7 +557,7 @@ mod tests {
         for p in [full_profile(), sharing_profile()] {
             let t = p.threads();
             let scan = TrackFlamer::new(&p);
-            for labels in [FlameLabels::Mnemonic, FlameLabels::Name] {
+            for labels in [FlameLabels::Kind, FlameLabels::Name] {
                 for direction in [FlameDirection::TopDown, FlameDirection::BottomUp] {
                     for regions in [&[][..], &[(5, 60)], &[(0, 20), (40, 90)]] {
                         for critical_path in [false, true] {
@@ -889,7 +889,7 @@ mod tests {
                 window(&[(from, to)]),
                 window(&[(from, to), (to + 5, to + 30)]),
             ];
-            for labels in [FlameLabels::Mnemonic, FlameLabels::Name] {
+            for labels in [FlameLabels::Kind, FlameLabels::Name] {
                 for win in &windows {
                     let built = |scan: &TrackFlamer, weight| {
                         let mode = FlameMode {

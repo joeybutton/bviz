@@ -407,7 +407,7 @@ impl FlamePanel {
     /// a toolbar wrapping them keeps the buttons of one choice on one row.
     fn mode_controls(&self, palette: Palette, cx: &mut Context<Self>) -> [Div; 3] {
         let mode = self.model.read(cx).flame_mode();
-        let mnemonics = mode.labels == FlameLabels::Mnemonic;
+        let kinds = mode.labels == FlameLabels::Kind;
         let button = |id: &'static str, label: &'static str, on: bool, to: FlameMode| {
             let view = cx.entity();
             Button::new(id, move |_, _, cx| {
@@ -459,14 +459,14 @@ impl FlamePanel {
                 button(id, label, chosen, to)
             })),
             group().child(button(
-                "flame-mnemonics",
-                "Mnemonics",
-                mnemonics,
+                "flame-kinds",
+                "Kinds",
+                kinds,
                 FlameMode {
-                    labels: if mnemonics {
+                    labels: if kinds {
                         FlameLabels::Name
                     } else {
-                        FlameLabels::Mnemonic
+                        FlameLabels::Kind
                     },
                     ..mode
                 },

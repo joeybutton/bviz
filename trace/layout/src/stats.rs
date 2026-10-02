@@ -140,7 +140,7 @@ mod tests {
     /// The all-lanes flame graph, whose stats every all-scope test aggregates.
     fn flame(p: &Arc<Profile>) -> FlameGraph {
         let t = p.threads();
-        TrackFlamer::new(p).build(FlameLabels::Mnemonic, &TimeSelection::default(), |i| {
+        TrackFlamer::new(p).build(FlameLabels::Kind, &TimeSelection::default(), |i| {
             t[i].lane_class != LaneClass::CriticalPath
         })
     }
@@ -335,7 +335,7 @@ mod tests {
             track(8, LaneClass::Execution, vec![action("Rustc", 0, 50)]),
         ]);
         let t = p.threads();
-        let g = TrackFlamer::new(&p).build(FlameLabels::Mnemonic, &TimeSelection::default(), |i| {
+        let g = TrackFlamer::new(&p).build(FlameLabels::Kind, &TimeSelection::default(), |i| {
             t[i].lane_class == LaneClass::Execution
         });
         let rows = stats_from_flame(&g);
