@@ -237,6 +237,32 @@ mod tests {
     }
 
     #[test]
+    fn a_per_instance_category_is_one_row_and_its_instances_none() {
+        // Two repository fetches, one holding a span named for what it does:
+        // the category is one row summing both fetches' own time, the nested
+        // span keeps a row of its own, and no repository has one.
+        let p = profile(vec![track(
+            1,
+            LaneClass::Analysis,
+            vec![
+                slice("@@a", "Fetching repository", 0, 100),
+                slice("download", "generic", 0, 70),
+                slice("@@b", "Fetching repository", 100, 40),
+            ],
+        )]);
+        let g = flame(&p);
+        let rows = stats_from_flame(&g);
+        assert_eq!(rows.len(), 2);
+        let fetching = row(&g, &rows, "Fetching repository");
+        assert_eq!(
+            (fetching.count, fetching.self_us, fetching.max_us),
+            (2, 70, 70)
+        );
+        assert_eq!(row(&g, &rows, "download").self_us, 70);
+        assert_eq!(self_sum(&rows), 140);
+    }
+
+    #[test]
     fn overlapping_enclosed_siblings_fold_back_to_the_undetailed_rows() {
         // Under //b:b two c1 spans overlap each other, so the c1 frame they
         // merge into (210) overruns the Rustc frame the two actions merge into

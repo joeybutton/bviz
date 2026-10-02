@@ -19,6 +19,10 @@ impl Str {
     pub fn range(self) -> std::ops::Range<usize> {
         self.off as usize..(self.off + self.len) as usize
     }
+
+    pub fn is_empty(self) -> bool {
+        self.len == 0
+    }
 }
 
 /// An optional interned-string handle in the size of a bare [`Str`]: offset 0
@@ -129,7 +133,17 @@ pub struct Profile {
     phase_markers: Vec<PhaseMarker>,
     span: TimeSpan,
     distinct_strings: usize,
-    categories: Vec<Str>,
+    categories: Vec<Category>,
+}
+
+/// One Bazel `cat` of a profile.
+#[derive(Debug, PartialEq)]
+struct Category {
+    name: Str,
+    /// See [`names_instances`].
+    names_instances: bool,
+    /// See [`fixed_name`].
+    fixed_name: Option<&'static str>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -506,6 +520,57 @@ pub fn parks_thread(category: &str) -> bool {
     category == "skyframe evaluator"
 }
 
+/// The Bazel `cat`s whose spans are named after the one thing each works on — a
+/// repository, a package, a label, a path. Every emitter Bazel 9.1.0 has of
+/// these `ProfilerTask`s passes such an identifier for the description:
+/// <https://github.com/bazelbuild/bazel/blob/9.1.0/src/main/java/com/google/devtools/build/lib/profiler/ProfilerTask.java>
+///
+/// The identifier is not always one instance's own (see [`FIXED_NAMES`]), and
+/// the root package of the main repository is written as the empty string:
+/// <https://github.com/bazelbuild/bazel/blob/9.1.0/src/main/java/com/google/devtools/build/lib/cmdline/PackageIdentifier.java#L266-L272>
+const PER_INSTANCE_CATEGORIES: [&str; 17] = [
+    "Fetching repository",
+    "Vendoring repository",
+    "package creation",
+    "Starlark thread context",
+    "Starlark Parser",
+    "VFS stat",
+    "VFS readdir",
+    "VFS readlink",
+    "VFS md5",
+    "VFS xattr",
+    "VFS delete",
+    "VFS open",
+    "VFS read",
+    "VFS write",
+    "globbing",
+    "filesystem traversal",
+    "include scanner",
+];
+
+/// Whether the category of a span of this Bazel `cat` says what kind of work
+/// the span is, and its name which instance of it (see
+/// [`PER_INSTANCE_CATEGORIES`]).
+fn names_instances(category: &str) -> bool {
+    PER_INSTANCE_CATEGORIES.contains(&category)
+}
+
+/// The name that spans of a Bazel `cat` among the [`PER_INSTANCE_CATEGORIES`]
+/// carry where an emitter passes a fixed phrase for the description, which
+/// says nothing of what the span works on. A thread's context is whatever its
+/// creator set, a label or a repository for most and this for a rule
+/// initializer's:
+/// <https://github.com/bazelbuild/bazel/blob/9.1.0/src/main/java/com/google/devtools/build/lib/analysis/starlark/StarlarkRuleClassFunctions.java#L1781>
+const FIXED_NAMES: [(&str, &str); 1] = [("Starlark thread context", "an initializer")];
+
+/// The name of this Bazel `cat` among the [`FIXED_NAMES`], if it has one.
+fn fixed_name(category: &str) -> Option<&'static str> {
+    FIXED_NAMES
+        .iter()
+        .find(|(of, _)| *of == category)
+        .map(|&(_, name)| name)
+}
+
 /// A counter graph. The parser splits every counter into one lane per numeric
 /// series.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -719,11 +784,39 @@ impl Profile {
     /// Every distinct Bazel `cat` of the profile's slices, in the order of
     /// their text.
     pub fn categories(&self) -> impl ExactSizeIterator<Item = Str> + '_ {
-        self.categories.iter().copied()
+        self.categories.iter().map(|category| category.name)
     }
 
     pub fn category(&self, id: CategoryId) -> Str {
-        self.categories[id.position()]
+        self.categories[id.position()].name
+    }
+
+    /// The kind `slice` is an instance of, as the label that names the kind —
+    /// its category, where that names its spans per instance — and `None` for
+    /// a slice named after what it does. A slice whose category has no id
+    /// reads as the latter.
+    pub fn kind_of(&self, slice: &Slice) -> Option<Str> {
+        let category = &self.categories[slice.category?.position()];
+        category.names_instances.then_some(category.name)
+    }
+
+    /// The name of `slice` where it says which instance of its kind the slice
+    /// works on, and `None` where it says none: the empty name, and the fixed
+    /// one of its category (see [`FIXED_NAMES`]).
+    pub fn instance_of(&self, slice: &Slice) -> Option<Str> {
+        let fixed = slice
+            .category
+            .and_then(|id| self.categories[id.position()].fixed_name);
+        let name = slice.name;
+        (!name.is_empty() && fixed != Some(self.str(name))).then_some(name)
+    }
+
+    /// Every label [`kind_of`](Self::kind_of) can give.
+    pub fn kinds(&self) -> impl Iterator<Item = Str> + '_ {
+        self.categories
+            .iter()
+            .filter(|category| category.names_instances)
+            .map(|category| category.name)
     }
 
     /// Resolves an interned handle to its text.
@@ -823,6 +916,17 @@ impl Profile {
             categories,
         } = parts;
         phase_markers.sort_by_key(|m| m.start_us);
+        let categories = categories
+            .into_iter()
+            .map(|name| {
+                let category = &text[name.range()];
+                Category {
+                    name,
+                    names_instances: names_instances(category),
+                    fixed_name: fixed_name(category),
+                }
+            })
+            .collect();
         Profile {
             text,
             slice_pool,
@@ -1086,6 +1190,110 @@ mod tests {
         );
         // An unknown category is Other overhead.
         assert_eq!(role("some future task", ""), overhead(Workload::Other));
+    }
+
+    #[test]
+    fn a_category_naming_its_spans_after_what_they_work_on_names_instances() {
+        for category in [
+            "Fetching repository",
+            "package creation",
+            "Starlark thread context",
+            "VFS stat",
+            "globbing",
+            "include scanner",
+        ] {
+            assert!(names_instances(category), "{category}");
+        }
+    }
+
+    #[test]
+    fn a_profile_gives_the_kind_of_each_of_its_slices() {
+        let events = [
+            ("Fetching repository", "@@rules_cc+"),
+            ("general information", "buildTargets"),
+            ("package creation", ""),
+        ]
+        .map(|(category, name)| {
+            format!(r#"{{"cat":"{category}","name":"{name}","ph":"X","ts":0,"dur":1,"tid":1}}"#)
+        });
+        let json = format!(r#"{{"traceEvents":[{}]}}"#, events.join(","));
+        let p = Profile::from_bytes(json.as_bytes()).expect("parse");
+        let kind = |name| {
+            let slices = p.slices(&p.threads()[0]);
+            let slice = slices.iter().find(|s| p.str(s.name) == name).expect(name);
+            p.kind_of(slice).map(|kind| p.str(kind))
+        };
+        assert_eq!(kind("@@rules_cc+"), Some("Fetching repository"));
+        assert_eq!(kind("buildTargets"), None);
+        assert_eq!(kind(""), Some("package creation"));
+        let kinds: Vec<&str> = p.kinds().map(|kind| p.str(kind)).collect();
+        assert_eq!(kinds, ["Fetching repository", "package creation"]);
+    }
+
+    #[test]
+    fn a_name_that_is_empty_or_fixed_for_its_category_tells_of_no_instance() {
+        let events = [
+            ("Starlark thread context", "//pkg:target"),
+            ("Starlark thread context", "an initializer"),
+            ("package creation", ""),
+            // The phrase is fixed under the one category alone.
+            ("package creation", "an initializer"),
+        ]
+        .map(|(category, name)| {
+            format!(r#"{{"cat":"{category}","name":"{name}","ph":"X","ts":0,"dur":1,"tid":1}}"#)
+        });
+        let json = format!(r#"{{"traceEvents":[{}]}}"#, events.join(","));
+        let p = Profile::from_bytes(json.as_bytes()).expect("parse");
+        let instances: Vec<(&str, Option<&str>)> = p
+            .slices(&p.threads()[0])
+            .iter()
+            .map(|s| {
+                let category = s.category.expect("an id reaches every category here");
+                (p.str(p.category(category)), p.opt_str(p.instance_of(s)))
+            })
+            .collect();
+        assert_eq!(
+            instances,
+            [
+                ("Starlark thread context", Some("//pkg:target")),
+                ("Starlark thread context", None),
+                ("package creation", None),
+                ("package creation", Some("an initializer")),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_spans_of_a_per_instance_category_share_one_role() {
+        // A category labels one frame for all its spans, which a role differing
+        // by name would split in two.
+        for category in PER_INSTANCE_CATEGORIES {
+            assert_eq!(
+                span_role(category, "@@rules_cc+"),
+                span_role(category, "local: /work/cc/defs.bzl"),
+                "{category}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_category_naming_its_spans_after_what_they_do_names_no_instances() {
+        for category in [
+            // A catch-all of unrelated activities.
+            "general information",
+            // Function names, shared by every call.
+            "Starlark user function call",
+            "skyfunction",
+            // Named by the action, which its mnemonic already groups.
+            "action processing",
+            // Fixed step names beside per-instance ones.
+            "bazel module processing",
+            "Starlark repository function call",
+            "some future task",
+            "",
+        ] {
+            assert!(!names_instances(category), "{category}");
+        }
     }
 
     fn timed_slice(start_us: i64, dur_us: i64) -> Slice {

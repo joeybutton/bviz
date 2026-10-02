@@ -161,7 +161,7 @@ pub fn profile_with_counters(tracks: Vec<TestTrack>, counters: &[TestCounter]) -
 /// A small random profile: lanes of any class with at most one critical path,
 /// each holding a few spans that begin before `horizon_us`, run for up to half
 /// of it, and nest or overlap as they fall. Zero-length spans, parking waits,
-/// actions and plain work are all among them.
+/// actions, spans named per instance and plain work are all among them.
 pub fn random_profile(rng: &mut Rng, horizon_us: i64) -> Arc<Profile> {
     const MAX_LANES: i64 = 6;
     const MAX_SLICES: usize = 8;
@@ -170,7 +170,7 @@ pub fn random_profile(rng: &mut Rng, horizon_us: i64) -> Arc<Profile> {
     // does not name to its last arm.
     const LANE_CLASS_DRAWS: u32 = 8;
     const DURATION_DRAWS: u32 = 5;
-    const SPAN_KIND_DRAWS: u32 = 4;
+    const SPAN_KIND_DRAWS: u32 = 5;
     let lanes = rng.i64(1..=MAX_LANES);
     let mut tracks = Vec::with_capacity(lanes as usize);
     let mut has_critical_path = false;
@@ -200,6 +200,7 @@ pub fn random_profile(rng: &mut Rng, horizon_us: i64) -> Arc<Profile> {
                     0 => wait(start_us, dur_us),
                     1 => action_named(&format!("Compiling {name}"), "Rustc", start_us, dur_us),
                     2 => action(name, start_us, dur_us),
+                    3 => slice(name, "package creation", start_us, dur_us),
                     _ => slice(name, "generic", start_us, dur_us),
                 }
             })

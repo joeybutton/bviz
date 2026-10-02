@@ -26,11 +26,12 @@ struct Segment {
 /// How a span aggregates under a labelling.
 struct SpanLabels {
     segment: Segment,
-    /// The name of the action this span itself resolves, which labels the detail
-    /// frame breaking its self time out by target (see [`emit_lane_rows`]);
-    /// `None` for a span resolving none, which inherits its containment
-    /// parent's.
-    action: Option<Str>,
+    /// The span's own name where its label is the kind it is an instance of,
+    /// which labels the detail frame breaking its self time out by instance
+    /// (see [`emit_lane_rows`]); `None` for a span labelled by its name, or
+    /// whose name says no instance ([`Profile::instance_of`]), which inherits
+    /// its containment parent's.
+    instance: Option<Str>,
 }
 
 /// Lexicographic rank of each distinct scanned label handle: dense `u32`s
@@ -99,7 +100,8 @@ impl<'p> ScanShard<'p> {
 /// and the mnemonic index cover every lane regardless — hashing only the
 /// mnemonic-bearing slices, a small fraction of the profile — because a
 /// mnemonic-less slice's label can resolve to a mnemonic carried on a lane
-/// outside the scan, and that label needs a rank like any other.
+/// outside the scan, and that label needs a rank like any other. So does every
+/// kind of the profile ([`Profile::kinds`]), which labels a span of any lane.
 fn scan(
     profile: &Profile,
     workers: usize,
@@ -142,7 +144,10 @@ fn scan(
         }
     });
 
-    let (by_text, mnemonics) = merge_shards(shards);
+    let (mut by_text, mnemonics) = merge_shards(shards);
+    for kind in profile.kinds() {
+        by_text.insert(profile.str(kind), kind);
+    }
     (build_ranks(&by_text), build_index(&by_text, &mnemonics))
 }
 
@@ -429,10 +434,10 @@ impl FlameGraph {
     }
 
     /// Whether node `i` is a detail frame — part of its parent's self time
-    /// re-labelled with the action's own name (see [`emit_lane_rows`]) — rather
-    /// than a frame of merged spans. A detail frame is always a leaf:
-    /// [`emit_lane_rows`] extends no key that carries one, so no aggregation
-    /// path runs past a detail frame.
+    /// re-labelled with the name of the instance it went to (see
+    /// [`emit_lane_rows`]) — rather than a frame of merged spans. A detail
+    /// frame is always a leaf: [`emit_lane_rows`] extends no key that carries
+    /// one, so no aggregation path runs past a detail frame.
     pub(crate) fn is_detail(&self, i: usize) -> bool {
         self.detail[i]
     }
@@ -495,8 +500,10 @@ fn action_inner(name: &str) -> Option<&str> {
 /// Which text labels a flame frame, and so which spans merge into one frame.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum FlameLabels {
-    /// A span's action mnemonic where one resolves, so every span of the same
-    /// action kind merges into one frame ("Rustc").
+    /// The kind of thing a span is an instance of, where its name says which
+    /// instance: an action's mnemonic where one resolves ("Rustc"), and the
+    /// category of a span named after what it works on ("Fetching
+    /// repository"). Every span of one kind merges into one frame.
     Mnemonic,
     /// Every span's own name, so an action frame names its target ("Compiling
     /// //x/y:z") and the tree is the profile's own nesting.
@@ -585,23 +592,25 @@ impl Flamer {
     }
 
     /// How a span aggregates under `labels`. A span whose mnemonic resolves is
-    /// labelled by it, so all Rustc collapse together; any other span — and
+    /// labelled by it, so all Rustc collapse together, and one of a category
+    /// naming its spans per instance by that category; any other span — and
     /// every span under [`FlameLabels::Name`] — is labelled by its own name (the
-    /// informative label for non-action slices: "checkOutputs",
-    /// "subprocess.run", a repo target, …). The tree shape comes from
-    /// time-containment, not from these labels; a label only decides which spans
-    /// at the same place merge into one frame.
+    /// informative label for the rest: "checkOutputs", "subprocess.run", …). The
+    /// tree shape comes from time-containment, not from these labels; a label
+    /// only decides which spans at the same place merge into one frame.
     fn span_labels(&self, labels: FlameLabels, slice: &Slice, detail: &SliceDetail) -> SpanLabels {
-        let mnemonic = match labels {
-            FlameLabels::Mnemonic => self.mnemonic_of(slice, detail),
+        let kind = match labels {
+            FlameLabels::Mnemonic => self
+                .mnemonic_of(slice, detail)
+                .or_else(|| self.profile.kind_of(slice)),
             FlameLabels::Name => None,
         };
         SpanLabels {
             segment: Segment {
-                label: mnemonic.unwrap_or(slice.name),
+                label: kind.unwrap_or(slice.name),
                 role: slice.role,
             },
-            action: mnemonic.is_some().then_some(slice.name),
+            instance: kind.and_then(|_| self.profile.instance_of(slice)),
         }
     }
 
@@ -1158,7 +1167,7 @@ struct Row<X> {
     rank: u32,
     role: SpanRole,
     /// Whether this is a detail row — a span's self time broken out under the
-    /// action it belongs to — rather than a span of its own.
+    /// instance it belongs to — rather than a span of its own.
     detail: bool,
     dur: i64,
     weight: X,
@@ -1237,10 +1246,13 @@ impl Arena {
     }
 
     /// Adds a finished node's aggregates to its parent's, so a parent totals its
-    /// whole subtree.
+    /// whole subtree. A detail frame's spans are its parent's own, which the
+    /// parent counts itself.
     fn fold_up(&mut self, node: usize, parent: usize) {
         self.total_us[parent] += self.total_us[node];
-        self.count[parent] += self.count[node];
+        if !self.detail[node] {
+            self.count[parent] += self.count[node];
+        }
     }
 }
 
@@ -1333,11 +1345,12 @@ fn windowed_dur_us(window: &TimeSelection, slice: &Slice) -> Option<i64> {
 /// path. Slices are in lane order, so a slice's containment parent precedes it
 /// and its key is the parent's key extended by this slice's segment.
 ///
-/// A slice that belongs to a resolved action — its own or the nearest enclosing
-/// one — also emits a detail row: an extra child frame labelled with that
-/// action's name and carrying the slice's self time, so mnemonic grouping still
-/// shows which target the time went to. Under [`FlameLabels::Name`] no action
-/// resolves and no detail row is emitted.
+/// A slice that belongs to an instance of a kind — itself, where its label is
+/// its kind, or else the nearest enclosing such slice — also emits a detail
+/// row: an extra child frame labelled with that instance's name and carrying
+/// the slice's self time, so grouping by kind still shows which target,
+/// repository or path the time went to. Under [`FlameLabels::Name`] no slice is
+/// labelled by a kind and no detail row is emitted.
 ///
 /// Durations are what `window` holds of them (see [`windowed_dur_us`]), and a
 /// slice it holds none of emits no row at all, so a frame's total, self time and
@@ -1387,12 +1400,12 @@ fn emit_lane_rows<W: Weigher>(
     // At most one detail row per slice.
     out.reserve(2 * slices.len());
     let mut keys: Vec<Vec<u8>> = Vec::with_capacity(slices.len());
-    let mut actions: Vec<Option<Str>> = Vec::with_capacity(slices.len());
+    let mut instances: Vec<Option<Str>> = Vec::with_capacity(slices.len());
     for i in 0..slices.len() {
         let Some((dur, weight)) = brought[i] else {
             // Placeholders, so both vectors stay indexed by slice.
             keys.push(Vec::new());
-            actions.push(None);
+            instances.push(None);
             continue;
         };
         let span = flamer.span_labels(labels, &slices[i], &details[i]);
@@ -1416,17 +1429,19 @@ fn emit_lane_rows<W: Weigher>(
             weight,
         });
 
-        let action = span.action.or_else(|| parents[i].and_then(|p| actions[p]));
+        let instance = span
+            .instance
+            .or_else(|| parents[i].and_then(|p| instances[p]));
         let self_us = (dur - nested[i].0).max(0);
-        if let Some(action) = action.filter(|_| self_us > 0) {
-            let rank = flamer.ranks.rank_of(action);
+        if let Some(instance) = instance.filter(|_| self_us > 0) {
+            let rank = flamer.ranks.rank_of(instance);
             let mut detail_key = Vec::with_capacity(key.len() + SEGMENT_BYTES);
             detail_key.extend_from_slice(&key);
             detail_key.extend_from_slice(&rank.to_be_bytes());
             detail_key.push(segment_flags(seg.role, true));
             out.push(Row {
                 key: detail_key,
-                label: action,
+                label: instance,
                 rank,
                 role: seg.role,
                 detail: true,
@@ -1435,7 +1450,7 @@ fn emit_lane_rows<W: Weigher>(
             });
         }
         keys.push(key);
-        actions.push(action);
+        instances.push(instance);
     }
 }
 
@@ -1796,8 +1811,10 @@ fn common_segments(a: &[u8], b: &[u8]) -> usize {
 /// before it past the `lcp[k]` segments they share: the nodes deeper than that
 /// are complete and fold into their parents, and the chain's remaining segments
 /// open fresh nodes labelled from the graph node each was encoded from. The
-/// frame then charges its self time and span count to the node its chain ends
-/// at, which every ancestor picks up as it is folded. `nodes` sizes the arena.
+/// frame then charges its self time to the node its chain ends at, which every
+/// ancestor picks up as it is folded. Span counts fold the same way, each
+/// frame's charged once to the node its own chain ends at, by the first chain to
+/// end there or on a detail frame beneath. `nodes` sizes the arena.
 fn reconstruct_chains(
     graph: &FlameGraph,
     chain: &ChainSegments,
@@ -1807,6 +1824,9 @@ fn reconstruct_chains(
 ) -> Arena {
     let mut arena = Arena::with_capacity(nodes);
     let mut stack: Vec<usize> = vec![0];
+    // Parallel to `stack`: whether the frame whose chain ends at that node has
+    // charged its span count there. No frame's chain ends at the root.
+    let mut counted: Vec<bool> = vec![true];
     let mut depth = 0usize;
     for (k, &src) in srcs.iter().enumerate() {
         let src = src as usize;
@@ -1816,6 +1836,7 @@ fn reconstruct_chains(
             depth -= 1;
         }
         stack.truncate(shared + 1);
+        counted.truncate(shared + 1);
         let base = chain.at[src] as usize;
         let end = chain.at[src + 1] as usize - base;
         for d in shared + 1..=end {
@@ -1830,11 +1851,23 @@ fn reconstruct_chains(
             };
             let idx = arena.push(node, stack[d - 1] as u32);
             stack.push(idx);
+            counted.push(false);
         }
         depth = end;
         let leaf = stack[depth];
         arena.total_us[leaf] += graph.self_us(src);
-        arena.count[leaf] += graph.count(src);
+        // The frame a detail frame breaks out leads the detail's chain, and its
+        // node is the step before the detail's.
+        let (frame, at) = if graph.is_detail(src) {
+            arena.count[leaf] = graph.count(src);
+            (chain.owner[base] as usize, depth - 1)
+        } else {
+            (src, depth)
+        };
+        if !counted[at] {
+            counted[at] = true;
+            arena.count[stack[at]] += graph.count(frame);
+        }
     }
     while depth > 0 {
         arena.fold_up(stack[depth], stack[depth - 1]);
@@ -1855,9 +1888,9 @@ fn reconstruct_chains(
 /// it passes, so a node's total is the summed self time of the frames whose
 /// caller chain runs through it.
 ///
-/// Under mnemonic labelling a frame's per-target detail sits at the deep end of
-/// the path it hangs on, so the graph reads from a frame outward through its
-/// callers to the target that spent the time.
+/// A frame's per-instance detail sits at the deep end of the path it hangs on,
+/// so the graph reads from a frame outward through its callers to the instance
+/// that spent the time.
 ///
 /// The root's total is that whole summed self time, which meets the top-down
 /// root's total only where no frame's children overrun it: enclosed spans may
@@ -2147,7 +2180,7 @@ pub fn flame_height(graph: &FlameGraph, metrics: &FlameMetrics) -> f32 {
 mod tests {
     use super::*;
     use crate::selection::span_between;
-    use crate::test_profile::{action, action_named, profile, slice, track};
+    use crate::test_profile::{TestSlice, action, action_named, profile, slice, track};
     use crate::tests::assert_gapless;
     use bviz_trace_profile::LaneClass;
 
@@ -2450,6 +2483,283 @@ mod tests {
         let g = flame(&p);
         assert_eq!(child(&g, &g.root(), "CppCompile").total_us, 100);
         assert_eq!(child(&g, &g.root(), "checkOutputs").total_us, 30);
+    }
+
+    /// A repository fetch: a span named after the repository alone.
+    fn fetch(repository: &str, start_us: i64, dur_us: i64) -> TestSlice {
+        slice(repository, "Fetching repository", start_us, dur_us)
+    }
+
+    #[test]
+    fn a_span_named_per_instance_is_labelled_by_its_category_and_detailed_by_its_name() {
+        let p = profile(vec![track(
+            1,
+            LaneClass::Analysis,
+            vec![
+                fetch("@@a", 0, 100),
+                fetch("@@b", 100, 40),
+                slice("buildTargets", "general information", 200, 30),
+            ],
+        )]);
+        let g = flame(&p);
+        assert_eq!(
+            child_totals(&g, &g.root()),
+            [
+                ("Fetching repository".to_owned(), 140),
+                ("buildTargets".to_owned(), 30)
+            ]
+        );
+        let fetching = child(&g, &g.root(), "Fetching repository");
+        assert_eq!(fetching.count, 2);
+        assert_eq!(
+            child_totals(&g, &fetching),
+            [("@@a".to_owned(), 100), ("@@b".to_owned(), 40)]
+        );
+        assert_eq!(
+            (1..g.len()).filter(|&i| g.is_detail(i)).count(),
+            2,
+            "each repository is a detail frame, and the span named for what it does has none"
+        );
+        // Labelled by name, each span is a frame of its own with nothing broken
+        // out beneath it.
+        let named = flame_as(&p, FlameLabels::Name);
+        assert_eq!(
+            resolved(&named),
+            [
+                ("All".to_owned(), 170, 0, 170, 0, 0),
+                ("@@a".to_owned(), 100, 100, 100, 1, 1),
+                ("@@b".to_owned(), 40, 40, 40, 1, 1),
+                ("buildTargets".to_owned(), 30, 30, 30, 1, 1),
+            ]
+        );
+        assert!((0..named.len()).all(|i| !named.is_detail(i)));
+    }
+
+    #[test]
+    fn a_mnemonic_labels_a_span_ahead_of_its_category() {
+        let p = profile(vec![track(
+            1,
+            LaneClass::Analysis,
+            vec![TestSlice {
+                mnemonic: Some("Fetch".to_owned()),
+                ..fetch("@@a", 0, 100)
+            }],
+        )]);
+        let g = flame(&p);
+        assert_eq!(child_totals(&g, &g.root()), [("Fetch".to_owned(), 100)]);
+        let labelled = child(&g, &g.root(), "Fetch");
+        assert_eq!(child_totals(&g, &labelled), [("@@a".to_owned(), 100)]);
+    }
+
+    #[test]
+    fn a_span_inherits_the_nearest_enclosing_instance() {
+        // The fetch holds a span named for what it does, which holds a span that
+        // is an instance of its own: the first is detailed by the repository
+        // around it, the second by itself.
+        let p = profile(vec![track(
+            1,
+            LaneClass::Analysis,
+            vec![
+                fetch("@@a", 0, 100),
+                slice("download", "generic", 10, 60),
+                slice("/tmp/a.tar", "VFS write", 20, 10),
+            ],
+        )]);
+        let g = flame(&p);
+        let fetching = child(&g, &g.root(), "Fetching repository");
+        let download = child(&g, &fetching, "download");
+        let write = child(&g, &download, "VFS write");
+        assert_eq!(child(&g, &fetching, "@@a").total_us, 40);
+        assert_eq!(child(&g, &download, "@@a").total_us, 50);
+        assert_eq!(child_totals(&g, &write), [("/tmp/a.tar".to_owned(), 10)]);
+        assert_eq!(g.root().total_us, 100);
+        assert_eq!(g.nodes().iter().map(|n| n.self_us).sum::<i64>(), 100);
+    }
+
+    #[test]
+    fn an_instance_nested_in_an_action_is_detailed_by_its_own_name() {
+        // The read is an instance of its own, so the action's target details
+        // the action's time and the step between them, and stops at the read.
+        let p = profile(vec![track(
+            1,
+            LaneClass::Execution,
+            vec![
+                action_named("Compiling //x:y", "Rustc", 0, 100),
+                slice("stage inputs", "generic", 10, 60),
+                slice("/work/x.rs", "VFS read", 20, 10),
+            ],
+        )]);
+        let g = flame(&p);
+        let rustc = child(&g, &g.root(), "Rustc");
+        let stage = child(&g, &rustc, "stage inputs");
+        let read = child(&g, &stage, "VFS read");
+        assert_eq!(child(&g, &rustc, "Compiling //x:y").total_us, 40);
+        assert_eq!(child(&g, &stage, "Compiling //x:y").total_us, 50);
+        assert_eq!(child_totals(&g, &read), [("/work/x.rs".to_owned(), 10)]);
+        assert_eq!(g.nodes().iter().map(|n| n.self_us).sum::<i64>(), 100);
+    }
+
+    #[test]
+    fn an_action_nested_in_an_instance_is_detailed_by_its_own_name() {
+        // The action is an instance of its own, so the repository details the
+        // fetch's time and stops at the action, whose target details it and the
+        // step nested in it.
+        let p = profile(vec![track(
+            1,
+            LaneClass::Analysis,
+            vec![
+                fetch("@@a", 0, 100),
+                action_named("Unpacking //x:y", "Untar", 10, 60),
+                slice("write outputs", "generic", 20, 10),
+            ],
+        )]);
+        let g = flame(&p);
+        let fetching = child(&g, &g.root(), "Fetching repository");
+        let untar = child(&g, &fetching, "Untar");
+        let write = child(&g, &untar, "write outputs");
+        assert_eq!(
+            child_totals(&g, &fetching),
+            [("@@a".to_owned(), 40), ("Untar".to_owned(), 60)]
+        );
+        assert_eq!(child(&g, &untar, "Unpacking //x:y").total_us, 50);
+        assert_eq!(
+            child_totals(&g, &write),
+            [("Unpacking //x:y".to_owned(), 10)]
+        );
+        assert_eq!(g.nodes().iter().map(|n| n.self_us).sum::<i64>(), 100);
+    }
+
+    #[test]
+    fn a_span_of_a_kind_that_has_no_name_takes_the_instance_around_it() {
+        // The main repository's root package is written as the empty string:
+        // its own time stays on the kind's frame where nothing around it is an
+        // instance, and goes to the instance that is.
+        let creation = |name, start, dur| slice(name, "package creation", start, dur);
+        let p = profile(vec![track(
+            1,
+            LaneClass::Analysis,
+            vec![
+                creation("", 0, 100),
+                slice("load", "generic", 10, 60),
+                fetch("@@a", 200, 100),
+                creation("", 210, 30),
+            ],
+        )]);
+        let g = flame(&p);
+        let top = child(&g, &g.root(), "package creation");
+        assert_eq!((top.total_us, top.self_us), (100, 40));
+        let load = child(&g, &top, "load");
+        assert_eq!(child_totals(&g, &top), [("load".to_owned(), 60)]);
+        assert!(g.children(&load).is_empty());
+        let fetching = child(&g, &g.root(), "Fetching repository");
+        let nested = child(&g, &fetching, "package creation");
+        assert_eq!(child_totals(&g, &nested), [("@@a".to_owned(), 30)]);
+        assert!(g.nodes().iter().all(|n| !g.str(n.name).is_empty()));
+    }
+
+    #[test]
+    fn a_span_named_by_its_categorys_fixed_name_takes_the_instance_around_it() {
+        // A rule initializer's thread says nothing of the package it runs for:
+        // its time and the calls it makes go to the package loading around it,
+        // and its own time stays on the kind's frame where nothing is.
+        let context = |start, dur| slice("an initializer", "Starlark thread context", start, dur);
+        let call = |start| slice("rust_crate", "Starlark user function call", start, 30);
+        let creation = |package, start| slice(package, "package creation", start, 100);
+        let p = profile(vec![track(
+            1,
+            LaneClass::Analysis,
+            vec![
+                creation("a", 0),
+                context(10, 50),
+                call(20),
+                creation("b", 100),
+                context(110, 50),
+                call(120),
+                context(300, 10),
+            ],
+        )]);
+        let g = flame(&p);
+        let loading = child(&g, &g.root(), "package creation");
+        let nested = child(&g, &loading, "Starlark thread context");
+        assert_eq!(
+            child_totals(&g, &nested),
+            [
+                ("a".to_owned(), 20),
+                ("b".to_owned(), 20),
+                ("rust_crate".to_owned(), 60)
+            ]
+        );
+        assert_eq!(
+            child_totals(&g, &child(&g, &nested, "rust_crate")),
+            [("a".to_owned(), 30), ("b".to_owned(), 30)]
+        );
+        let alone = child(&g, &g.root(), "Starlark thread context");
+        assert_eq!((alone.total_us, alone.self_us), (10, 10));
+        assert!(g.children(&alone).is_empty());
+        assert!(g.nodes().iter().all(|n| g.str(n.name) != "an initializer"));
+    }
+
+    #[test]
+    fn a_kind_is_one_bottom_up_root_whose_paths_end_on_its_instances() {
+        let lane = |repository, start| {
+            vec![
+                fetch(repository, start, 100),
+                slice("download", "generic", start, 70),
+            ]
+        };
+        let p = profile(vec![
+            track(1, LaneClass::Analysis, lane("@@a", 0)),
+            track(2, LaneClass::Analysis, lane("@@b", 0)),
+        ]);
+        let g = inverted_as(&p, FlameLabels::Mnemonic);
+        assert_eq!(
+            child_totals(&g, &g.root()),
+            [
+                ("Fetching repository".to_owned(), 60),
+                ("download".to_owned(), 140)
+            ]
+        );
+        let fetching = child(&g, &g.root(), "Fetching repository");
+        assert_eq!(
+            child_totals(&g, &fetching),
+            [("@@a".to_owned(), 30), ("@@b".to_owned(), 30)]
+        );
+        let download = child(&g, &g.root(), "download");
+        let caller = child(&g, &download, "Fetching repository");
+        assert_eq!(
+            child_totals(&g, &caller),
+            [("@@a".to_owned(), 70), ("@@b".to_owned(), 70)]
+        );
+        // Labelled by name each repository roots a path of its own.
+        let named = inverted_as(&p, FlameLabels::Name);
+        assert_eq!(
+            child_totals(&named, &named.root()),
+            [
+                ("@@a".to_owned(), 30),
+                ("@@b".to_owned(), 30),
+                ("download".to_owned(), 140)
+            ]
+        );
+    }
+
+    #[test]
+    fn a_window_clips_a_kind_frame_and_each_instance_beneath_it() {
+        let p = profile(vec![track(
+            1,
+            LaneClass::Analysis,
+            vec![
+                fetch("@@a", 0, 100),
+                fetch("@@b", 100, 100),
+                fetch("@@c", 200, 100),
+            ],
+        )]);
+        let g = flame_within(&p, FlameLabels::Mnemonic, &window(&[(50, 130)]));
+        let fetching = child(&g, &g.root(), "Fetching repository");
+        assert_eq!((fetching.total_us, fetching.count), (80, 2));
+        assert_eq!(
+            child_totals(&g, &fetching),
+            [("@@a".to_owned(), 50), ("@@b".to_owned(), 30)]
+        );
     }
 
     #[test]

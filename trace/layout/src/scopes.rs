@@ -704,6 +704,165 @@ mod tests {
         assert_eq!(within(&[(0, 10), (50, 90)]), (25, 20, 5, 20));
     }
 
+    /// Asserts each `(label, spans)` of `expected` to be the spans the frames
+    /// labelled so merge top-down, the count of the label's bottom-up root, and
+    /// the count of its stats row, under either weight.
+    fn assert_span_counts(p: &Arc<Profile>, expected: &[(&str, u32)]) {
+        let scan = TrackFlamer::new(p);
+        for weight in [FlameWeight::Duration, FlameWeight::WallShare] {
+            let built = |direction| {
+                let mode = FlameMode {
+                    direction,
+                    weight,
+                    ..FlameMode::default()
+                };
+                ScopeAggregate::build_for_tracks_reusing(
+                    &scan,
+                    mode,
+                    &TimeSelection::default(),
+                    |_| true,
+                )
+            };
+            let top_down = built(FlameDirection::TopDown);
+            let bottom_up = built(FlameDirection::BottomUp);
+            for &(label, spans) in expected {
+                let g = &top_down.flame;
+                let merged: u32 = span_frames(g)
+                    .filter(|&i| g.str(g.name(i)) == label)
+                    .map(|i| g.count(i))
+                    .sum();
+                assert_eq!(merged, spans, "{label} top-down, {weight:?}");
+                let inverted = &bottom_up.flame;
+                assert_eq!(
+                    child(inverted, &inverted.root(), label).count,
+                    spans,
+                    "{label} bottom-up, {weight:?}"
+                );
+                for agg in [&top_down, &bottom_up] {
+                    let row = agg
+                        .stats
+                        .iter()
+                        .find(|row| agg.flame.str(row.key) == label)
+                        .unwrap_or_else(|| panic!("no row {label}"));
+                    assert_eq!(row.count, spans, "{label} stats, {weight:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_kind_frame_counts_each_of_its_spans_once_bottom_up() {
+        // The nameless package's time stays on the kind's frame beside the
+        // detail frames of the named ones, and package `c` is all nested time,
+        // so no detail frame stands for it.
+        let creation = |package, start, dur| slice(package, "package creation", start, dur);
+        let p = profile(vec![track(
+            1,
+            LaneClass::Analysis,
+            vec![
+                creation("", 0, 100),
+                creation("a", 100, 50),
+                creation("b", 150, 50),
+                creation("c", 200, 60),
+                slice("load", "generic", 200, 60),
+                slice("@@r", "Fetching repository", 300, 100),
+                creation("", 310, 30),
+            ],
+        )]);
+        assert_span_counts(
+            &p,
+            &[
+                ("package creation", 5),
+                ("load", 1),
+                ("Fetching repository", 1),
+            ],
+        );
+    }
+
+    #[test]
+    fn an_action_frame_counts_each_of_its_spans_once_bottom_up() {
+        // The nameless action's time stays on the mnemonic's frame beside the
+        // detail frame of the named one.
+        let p = profile(vec![track(
+            1,
+            LaneClass::Execution,
+            vec![
+                action_named("", "Rustc", 0, 40),
+                action_named("Compiling //x:y", "Rustc", 50, 100),
+                slice("subprocess.run", "subprocess run", 60, 80),
+            ],
+        )]);
+        assert_span_counts(&p, &[("Rustc", 2), ("subprocess.run", 1)]);
+    }
+
+    #[test]
+    fn a_kind_frame_weighs_its_instances_by_wall_share_and_counts_them_by_duration() {
+        // Two repositories fetched side by side, each lane with half of every
+        // microsecond, and a third fetched alone afterwards.
+        let fetch = |repository, start| slice(repository, "Fetching repository", start, 100);
+        let p = profile(vec![
+            track(
+                1,
+                LaneClass::Analysis,
+                vec![fetch("@@a", 0), fetch("@@c", 100)],
+            ),
+            track(2, LaneClass::Analysis, vec![fetch("@@b", 0)]),
+        ]);
+        let scan = TrackFlamer::new(&p);
+        let built = |direction, regions: &[(i64, i64)]| {
+            let mode = FlameMode {
+                direction,
+                weight: FlameWeight::WallShare,
+                ..FlameMode::default()
+            };
+            ScopeAggregate::build_for_tracks_reusing(&scan, mode, &window(regions), |_| true)
+        };
+        let instances = |agg: &ScopeAggregate| {
+            let g = &agg.flame;
+            let fetching = child(g, &g.root(), "Fetching repository");
+            let mut kids: Vec<(String, i64)> = g
+                .children(&fetching)
+                .iter()
+                .map(|c| (g.str(c.name).to_owned(), c.total_us))
+                .collect();
+            kids.sort();
+            (g.children(&g.root()).len(), fetching.total_us, kids)
+        };
+        let whole = [
+            ("@@a".to_owned(), 50),
+            ("@@b".to_owned(), 50),
+            ("@@c".to_owned(), 100),
+        ];
+        for direction in [FlameDirection::TopDown, FlameDirection::BottomUp] {
+            let agg = built(direction, &[]);
+            assert_eq!(instances(&agg), (1, 200, whole.to_vec()), "{direction:?}");
+            assert_eq!(
+                resolved_rows(&agg.flame, &agg.stats),
+                [("Fetching repository".to_owned(), 3, 300, 300)],
+                "{direction:?}"
+            );
+            let clipped = built(direction, &[(60, 120)]);
+            assert_eq!(
+                instances(&clipped),
+                (
+                    1,
+                    60,
+                    vec![
+                        ("@@a".to_owned(), 20),
+                        ("@@b".to_owned(), 20),
+                        ("@@c".to_owned(), 20)
+                    ]
+                ),
+                "{direction:?}"
+            );
+            assert_eq!(
+                resolved_rows(&clipped.flame, &clipped.stats),
+                [("Fetching repository".to_owned(), 3, 100, 100)],
+                "{direction:?}"
+            );
+        }
+    }
+
     #[test]
     fn a_scan_builds_the_same_wall_share_graph_whichever_weight_it_built_first() {
         /// How many random profiles are built beside the fixed ones.
