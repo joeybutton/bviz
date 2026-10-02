@@ -122,12 +122,12 @@ const STATUS_HALF: f32 = 5.0;
 /// Screen half-width a status glyph is never drawn below. Its shape is what
 /// tells one status from another, and fewer pixels than this leave every shape
 /// a dot.
-const STATUS_FLOOR: f32 = 4.0;
+pub(crate) const STATUS_FLOOR: f32 = 4.0;
 
 /// Screen width of the canvas-coloured rim around a status glyph. A status
 /// colour is held to its contrast against the canvas, which no fill a box wears
 /// answers for, so the glyph brings that ground with it.
-const STATUS_RIM: f32 = 1.5;
+pub(crate) const STATUS_RIM: f32 = 1.5;
 
 /// Bare ground (pre-zoom px) between a status badge and what follows it in a
 /// label.
@@ -958,7 +958,7 @@ fn place_bare(mut bare: Vec<BareBadge>, floated: &[Bounds<Pixels>], placed: &mut
 
 /// Paints the badge of `status` about `center`: its glyph, `half` to either
 /// side, over a rim of the canvas's colour.
-fn paint_status(
+pub(crate) fn paint_status(
     center: Point<Pixels>,
     half: f32,
     status: Status,

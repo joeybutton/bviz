@@ -253,7 +253,7 @@ pub struct GraphPanel {
     /// The layer drawing the graph; notified through
     /// [`GraphPanel::invalidate_canvas`].
     canvas: Entity<GraphCanvas>,
-    edge_legend: Legend,
+    legend: Legend,
 }
 
 impl GraphPanel {
@@ -410,7 +410,7 @@ impl GraphPanel {
             why: why::Why::new(),
             titles: Vec::new(),
             canvas,
-            edge_legend: Legend::default(),
+            legend: Legend::default(),
         }
     }
 
@@ -456,7 +456,11 @@ impl GraphPanel {
         };
         let zoom = self.view_zoom(&drawn);
         let underived = zoom.is_some_and(|zoom| drawn.view(zoom).is_none());
-        let edge_legend = zoom.and_then(|zoom| self.edge_legend.card(&drawn, zoom, &palette));
+        let loaded = self.model.read(cx).loaded();
+        let legend = zoom.zip(loaded).and_then(|(zoom, loaded)| {
+            let (statuses, resolved) = (loaded.statuses(), loaded.taken_up());
+            self.legend.card(&drawn, zoom, statuses, resolved, &palette)
+        });
         let entity = cx.entity();
         div()
             .id("graph-viewport")
@@ -477,7 +481,7 @@ impl GraphPanel {
                     .items_start()
                     .gap_2()
                     .children(missing::card(self, &palette, cx))
-                    .children(edge_legend),
+                    .children(legend),
             )
             .children(search::card(self, &palette, cx))
             .children(pins::panel(self, &palette, cx))

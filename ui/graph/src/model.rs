@@ -119,6 +119,13 @@ impl Loaded {
         &self.statuses
     }
 
+    /// Which of its session's outcomes the [statuses](Self::statuses) say
+    /// that of, so that a reader keeping it can tell whether they are still
+    /// those it read.
+    pub(crate) fn taken_up(&self) -> Revision {
+        self.taken_up
+    }
+
     /// Takes up what the build of `session` reports of the graph's nodes, and
     /// says whether that changed the status of any. Outcomes already taken up
     /// are not read again.

@@ -32,7 +32,6 @@ pub(crate) enum Status {
 
 impl Status {
     /// Every status, in the order of the enum.
-    #[cfg(test)]
     pub(crate) const ALL: [Status; 7] = [
         Status::Skipped,
         Status::Succeeded,
@@ -42,6 +41,19 @@ impl Status {
         Status::Failed,
         Status::RootCause,
     ];
+
+    /// The name a reader is shown the status by.
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Status::Skipped => "skipped",
+            Status::Succeeded => "succeeded",
+            Status::Unfinished => "not finished",
+            Status::Flaky => "flaky",
+            Status::TestFailed => "test failed",
+            Status::Failed => "dependency failed",
+            Status::RootCause => "root cause",
+        }
+    }
 
     /// A test the build could not build failed through something it depends
     /// on, which its build outcome traces back.
